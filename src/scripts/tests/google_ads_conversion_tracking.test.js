@@ -165,10 +165,13 @@ function baseUploadInput(overrides = {}) {
 }
 
 async function testScopedRuntime() {
-  let resolverInput = null;
   let accountQuery = null;
+  let loadedConnectionId = null;
   const connection = { id: 23, scopes: 'https://www.googleapis.com/auth/adwords' };
   const account = {
+    googleConnectionId: 23,
+    grupoClinicaId: 5,
+    assignmentScope: 'group',
     loginCustomerId: '286-322-4233',
     managerCustomerId: null
   };
@@ -178,19 +181,16 @@ async function testScopedRuntime() {
     groupId: 5,
     assignmentScope: 'group',
     customerId: '599-235-6722',
-    resolver: async (input) => {
-      resolverInput = input;
-      return {
-        connection,
-        assignment: { id: 4 },
-        source: 'scope_assignment_group',
-        scope: { clinicId: null, groupId: 5, assignmentScope: 'group' }
-      };
-    },
     accountModel: {
-      async findOne(query) {
+      async findAll(query) {
         accountQuery = query;
-        return account;
+        return [account];
+      }
+    },
+    connectionModel: {
+      async findByPk(id) {
+        loadedConnectionId = id;
+        return connection;
       }
     },
     ensureAccessToken: async (resolvedConnection) => {
@@ -199,12 +199,34 @@ async function testScopedRuntime() {
     }
   });
 
-  assert.equal(resolverInput.allowLegacyUserFallback, false);
-  assert.equal(accountQuery.where.googleConnectionId, 23);
+  assert.equal(loadedConnectionId, 23);
   assert.equal(accountQuery.where.customerId, '5992356722');
   assert.equal(runtime.accessToken, 'scoped-access-token');
   assert.equal(runtime.loginCustomerId, '2863224233');
-  assert.equal(runtime.connectionSource, 'scope_assignment_group');
+  assert.equal(runtime.connectionSource, 'mapping_group');
+
+  let connectionLoadedForAmbiguousMapping = false;
+  await assert.rejects(() => resolveScopedGoogleAdsRuntime({
+    clinicId: 58,
+    groupId: 5,
+    assignmentScope: 'clinic',
+    customerId: '599-235-6722',
+    accountModel: {
+      async findAll() {
+        return [
+          { googleConnectionId: 23, clinicaId: 58 },
+          { googleConnectionId: 24, clinicaId: 58 }
+        ];
+      }
+    },
+    connectionModel: {
+      async findByPk() {
+        connectionLoadedForAmbiguousMapping = true;
+        return connection;
+      }
+    }
+  }), (error) => error.code === 'GOOGLE_ADS_ACCOUNT_MAPPING_AMBIGUOUS');
+  assert.equal(connectionLoadedForAmbiguousMapping, false, 'Ambiguous mappings must not load either grant');
 }
 
 async function testConcurrentAuditClaimIsFailClosed() {

@@ -1,9 +1,16 @@
-# Auto-generated Meta env for clinica 19
-export PAGE_ID='1268743159969545'
-export IG_ID='17841402810165989'
-export IG_ID_ALT='17841471435861700'
-export PAGE_TOKEN='EAAZAsOZAwCgukBPSYidNkcsknCKdyx0OrFLksen68pLiZAGdiFGYsG4auFSKIZCKkZC8xxOTCHr1ICZCXb9bVIIlPX7e9aXlimtRrbRZB4nez3V0k1tipUZAnPTudNZBjqE3U9lHSKpQkM56O8rSZCy48mtuDPXTbkyTr9v0ZAZAQ5iC9ZB9yJaRUxKseDGwSoem9zYRlPVJZCOcfI'
-export IG_USER_TOKEN='EAAZAsOZAwCgukBPeyfnyaoXdT8nxQzj20IiqFH6dZArp9JmslASb1ekTXWypqI7bxJNN3vrKqoKiTNPLUsZBZBkoUDhkqU01bZBqdJbzjV8pXUWyq5LzwxOOMPbY5tESui828D9CRMKQIdZAZC9aR685JKsLsrOrDajiaJvv7zudTqhf6FJ6GnbC9UFPg3Li'
-export SINCE='2025-09-05'
-export UNTIL='2025-09-06'
-echo "Env loaded: PAGE_ID=1268743159969545 IG_ID=17841402810165989 (alt: 17841471435861700)"
+#!/usr/bin/env bash
+
+# Plantilla local de diagnóstico Meta para la clínica 19.
+# Nunca guardar tokens reales en Git. Defínelos en el entorno o en un gestor
+# de secretos antes de cargar este archivo.
+export PAGE_ID="${PAGE_ID:-1268743159969545}"
+export IG_ID="${IG_ID:-17841402810165989}"
+export IG_ID_ALT="${IG_ID_ALT:-17841471435861700}"
+: "${PAGE_TOKEN:?Define PAGE_TOKEN fuera del repositorio}"
+: "${IG_USER_TOKEN:?Define IG_USER_TOKEN fuera del repositorio}"
+export PAGE_TOKEN
+export IG_USER_TOKEN
+export SINCE="${SINCE:-2025-09-05}"
+export UNTIL="${UNTIL:-2025-09-06}"
+
+echo "Entorno Meta cargado para PAGE_ID=${PAGE_ID} e IG_ID=${IG_ID}"

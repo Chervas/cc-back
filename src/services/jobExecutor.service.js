@@ -393,6 +393,7 @@ const JOB_HANDLERS = {
   web_backfill_for_sites: async (payload = {}) => metaSyncJobs.executeWebBackfillForSites(payload.siteMappings || payload.mappings || []),
   analytics_backfill_properties: async (payload = {}) => metaSyncJobs.executeAnalyticsBackfillForProperties(payload.mappings || []),
   business_profile_backfill_locations: async (payload = {}) => metaSyncJobs.executeBusinessProfileBackfillForLocations(payload.mappings || []),
+  marketing_competition_heatmap_refresh: async (payload = {}) => metaSyncJobs.executeCompetitionHeatmapRefresh(payload),
   business_profile_review_match: async (payload = {}) => googleReviewMatchService.runBusinessProfileReviewMatchJob(payload),
   whatsapp_coexistence_sync_contacts: async (payload = {}) => whatsappCoexistenceService.runContactsSyncJob(payload),
   whatsapp_coexistence_sync_history: async (payload = {}) => whatsappCoexistenceService.runHistorySyncJob(payload),

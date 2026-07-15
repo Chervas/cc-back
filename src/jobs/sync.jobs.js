@@ -77,6 +77,7 @@ const GOOGLE_BUSINESS_LOCATION_READ_MASK = [
   'phoneNumbers',
   'categories',
   'storefrontAddress',
+  'latlng',
   'websiteUri',
   'metadata',
   'openInfo',
@@ -84,6 +85,7 @@ const GOOGLE_BUSINESS_LOCATION_READ_MASK = [
   'specialHours',
   'moreHours',
   'serviceArea',
+  'serviceItems',
   'labels'
 ].join(',');
 const GOOGLE_BUSINESS_DAILY_METRICS = [
@@ -128,7 +130,8 @@ const {
   FlowExecutionV2,
   FlowExecutionLogV2,
   AutomationFlowTemplateV2,
-  JobRequest
+  JobRequest,
+  sequelize
 } = require('../../models');
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -183,6 +186,104 @@ function parseDateInput(value, label) {
   }
   date.setHours(0, 0, 0, 0);
   return date;
+}
+
+const cleanGoogleAccessToken = (value) => String(value || '').trim();
+
+async function ensureGoogleConnectionAccessToken(connection, options = {}) {
+  if (!connection) throw new Error('GoogleConnection no encontrada');
+
+  const nowMs = Number(options.nowMs ?? Date.now());
+  const httpClient = options.httpClient || syncHttp;
+  const env = options.env || process.env;
+  let accessToken = cleanGoogleAccessToken(connection.accessToken);
+  const expiresAtMs = connection.expiresAt
+    ? new Date(connection.expiresAt).getTime()
+    : Number.NaN;
+  const hasUsableExpiry = Number.isFinite(expiresAtMs) && expiresAtMs > 0;
+  const mustRefresh = !accessToken
+    || !hasUsableExpiry
+    || expiresAtMs < nowMs + 60000;
+
+  if (mustRefresh) {
+    const refreshToken = cleanGoogleAccessToken(connection.refreshToken);
+    if (!refreshToken) {
+      throw new Error('La conexión de Google necesita renovarse pero no tiene refreshToken');
+    }
+    const clientId = cleanGoogleAccessToken(env.GOOGLE_CLIENT_ID);
+    const clientSecret = cleanGoogleAccessToken(env.GOOGLE_CLIENT_SECRET);
+    if (!clientId || !clientSecret) {
+      throw new Error('Faltan GOOGLE_CLIENT_ID o GOOGLE_CLIENT_SECRET para renovar la conexión de Google');
+    }
+
+    const params = new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken
+    });
+    const response = await httpClient.post(
+      'https://oauth2.googleapis.com/token',
+      params.toString(),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
+    accessToken = cleanGoogleAccessToken(response.data?.access_token);
+    if (!accessToken) {
+      throw new Error('Google OAuth no devolvió un access_token válido al renovar la conexión');
+    }
+    const parsedExpiresIn = Number(response.data?.expires_in);
+    const expiresIn = Number.isFinite(parsedExpiresIn) && parsedExpiresIn > 0
+      ? parsedExpiresIn
+      : 3600;
+    await connection.update({
+      accessToken,
+      expiresAt: new Date(nowMs + expiresIn * 1000)
+    });
+  }
+
+  accessToken = cleanGoogleAccessToken(accessToken);
+  if (!accessToken) {
+    throw new Error('La conexión de Google no dispone de un access_token válido');
+  }
+  return accessToken;
+}
+
+function countBusinessProfileFailedLocations(report = {}) {
+  const locationKeys = new Set();
+  let jobLevelFailures = 0;
+  for (const [index, entry] of (Array.isArray(report.errors) ? report.errors : []).entries()) {
+    const locationId = String(entry?.locationId || '').trim();
+    const clinicId = String(entry?.clinicaId || '').trim();
+    if (locationId || clinicId) {
+      locationKeys.add(`${clinicId}:${locationId}`);
+    } else {
+      jobLevelFailures += 1;
+      locationKeys.add(`job:${index}`);
+    }
+  }
+  return {
+    failedLocations: locationKeys.size,
+    jobLevelFailures
+  };
+}
+
+function buildBusinessProfileRetryResult({ label, report, syncLogId, fallbackMessage = null }) {
+  const { failedLocations, jobLevelFailures } = countBusinessProfileFailedLocations(report);
+  report.failedLocations = failedLocations;
+  const totalLocations = Number(report.locations || 0);
+  const errorMessage = fallbackMessage || (
+    jobLevelFailures > 0 && failedLocations === jobLevelFailures
+      ? `${label}: fallo técnico antes de completar la sincronización`
+      : `${label}: ${failedLocations} de ${totalLocations} ubicaciones terminaron con errores`
+  );
+  return {
+    status: 'failed',
+    retryable: true,
+    error_message: errorMessage,
+    processed: Number(report.processed || 0),
+    report,
+    syncLogId: syncLogId || null
+  };
 }
 
 function ensureAscending(start, end) {
@@ -266,7 +367,7 @@ class MetaSyncJobs {
       businessProfileSync: 'Sincroniza Perfil de Empresa Google: rendimiento local, reseñas y publicaciones.',
       businessProfileReviewsSync: 'Refresca solo reseñas recientes de Perfil de Empresa Google y lanza conciliación con campañas.',
       businessProfileBackfill: 'Backfill de Perfil de Empresa Google para nuevas fichas o reprocesos.',
-      competitionSync: 'Actualiza semanalmente benchmark local: competidores, ficha publica Google Places y anuncios activos desde Meta Ads Library oficial.',
+      competitionSync: 'Actualiza semanalmente los competidores introducidos manualmente y sus anuncios públicos; el descubrimiento y ranking local solo se ejecutan si existe un proveedor con licencia y los gates contractuales están activos.',
       webEventsAggregate: 'Agrega WebEvents propios en tablas diarias para informes sin recalcular desde el front.',
       whatsappTemplatesSync: 'Sincroniza estados de plantillas WhatsApp para todos los WABA activos.',
       whatsappPhonesSync: 'Sincroniza números WhatsApp (existencia/estado) para evitar datos desactualizados.',
@@ -1250,46 +1351,102 @@ class MetaSyncJobs {
       const start = new Date(end); start.setDate(start.getDate() - (this.config.web.recentDays-1));
       let processed = 0;
       const fmt = (d)=>d.toISOString().slice(0,10);
+      const tokenByConnectionId = new Map();
+      const accessTokenForMapping = async (asset) => {
+        const connectionId = Number(asset?.googleConnectionId);
+        if (!Number.isInteger(connectionId) || connectionId <= 0) {
+          throw new Error(`Mapping Search Console ${asset?.id || 'unknown'} sin googleConnectionId válido`);
+        }
+        if (tokenByConnectionId.has(connectionId)) {
+          return tokenByConnectionId.get(connectionId);
+        }
+        const tokenPromise = (async () => {
+          const connection = await GoogleConnection.findByPk(connectionId);
+          if (!connection) {
+            throw new Error(`Conexión Google ${connectionId} no encontrada`);
+          }
+          let accessToken = connection.accessToken;
+          const expiresAt = connection.expiresAt ? new Date(connection.expiresAt).getTime() : 0;
+          const needsRefresh = !expiresAt || expiresAt < Date.now() + 60000;
+          if (needsRefresh) {
+            if (!connection.refreshToken) {
+              throw new Error(`Conexión Google ${connectionId} sin expiración verificable ni refresh token`);
+            }
+            const tr = await syncHttp.post('https://oauth2.googleapis.com/token', new URLSearchParams({
+              client_id: process.env.GOOGLE_CLIENT_ID,
+              client_secret: process.env.GOOGLE_CLIENT_SECRET,
+              grant_type: 'refresh_token',
+              refresh_token: connection.refreshToken
+            }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+            accessToken = tr.data?.access_token || null;
+            if (!accessToken) {
+              throw new Error(`Google no devolvió access token para la conexión ${connectionId}`);
+            }
+            const expiresIn = tr.data?.expires_in || 3600;
+            await connection.update({
+              accessToken,
+              expiresAt: new Date(Date.now() + expiresIn * 1000)
+            });
+          }
+          if (!accessToken) throw new Error(`Conexión Google ${connectionId} sin access token`);
+          return accessToken;
+        })();
+        tokenByConnectionId.set(connectionId, tokenPromise);
+        try {
+          return await tokenPromise;
+        } catch (error) {
+          tokenByConnectionId.delete(connectionId);
+          throw error;
+        }
+      };
       for (const [clinicaId, arr] of byClinic.entries()) {
         try {
-          // Conexión Google del primer asset
-          const conn = await GoogleConnection.findByPk(arr[0].googleConnectionId);
-          if (!conn) continue;
-          let accessToken = conn.accessToken;
-          // Refresh si expira pronto
-          try {
-            const expiresAt = conn.expiresAt ? new Date(conn.expiresAt).getTime() : 0;
-            if (expiresAt && expiresAt < Date.now() + 60000 && conn.refreshToken) {
-              const tr = await syncHttp.post('https://oauth2.googleapis.com/token', new URLSearchParams({
-                client_id: process.env.GOOGLE_CLIENT_ID,
-                client_secret: process.env.GOOGLE_CLIENT_SECRET,
-                grant_type: 'refresh_token',
-                refresh_token: conn.refreshToken
-              }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-              accessToken = tr.data?.access_token || accessToken;
-              const expiresIn = tr.data?.expires_in || 3600;
-              await conn.update({ accessToken, expiresAt: new Date(Date.now() + expiresIn*1000) });
+          const authorizedMappings = [];
+          let clinicSucceeded = false;
+          for (const asset of arr) {
+            try {
+              authorizedMappings.push({
+                asset,
+                accessToken: await accessTokenForMapping(asset)
+              });
+            } catch (error) {
+              report.errors.push({
+                clinicaId,
+                siteUrl: asset.siteUrl,
+                phase: 'authorization',
+                message: error.message
+              });
             }
-          } catch {}
+          }
 
           // Timeseries por siteUrl (guardar por clínica+site+fecha)
-          for (const a of arr) {
-            const url = `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(a.siteUrl)}/searchAnalytics/query`;
-            const resp = await syncHttp.post(url, { startDate: fmt(start), endDate: fmt(end), dimensions: ['date'], rowLimit: 25000 }, { headers: { Authorization: `Bearer ${accessToken}` } });
-            const rows = resp.data?.rows || [];
-            for (const r of rows) {
-              const date = r.keys?.[0]; if (!date) continue;
-              const payload = {
-                clinica_id: clinicaId,
-                site_url: a.siteUrl,
-                date,
-                clicks: r.clicks||0,
-                impressions: r.impressions||0,
-                ctr: r.ctr||0,
-                position: r.position||null
-              };
-              const [rec, created] = await WebScDaily.findOrCreate({ where: { clinica_id: clinicaId, site_url: a.siteUrl, date }, defaults: payload });
-              if (!created) await rec.update(payload);
+          for (const { asset: a, accessToken } of authorizedMappings) {
+            try {
+              const url = `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(a.siteUrl)}/searchAnalytics/query`;
+              const resp = await syncHttp.post(url, { startDate: fmt(start), endDate: fmt(end), dimensions: ['date'], rowLimit: 25000 }, { headers: { Authorization: `Bearer ${accessToken}` } });
+              clinicSucceeded = true;
+              const rows = resp.data?.rows || [];
+              for (const r of rows) {
+                const date = r.keys?.[0]; if (!date) continue;
+                const payload = {
+                  clinica_id: clinicaId,
+                  site_url: a.siteUrl,
+                  date,
+                  clicks: r.clicks||0,
+                  impressions: r.impressions||0,
+                  ctr: r.ctr||0,
+                  position: r.position||null
+                };
+                const [rec, created] = await WebScDaily.findOrCreate({ where: { clinica_id: clinicaId, site_url: a.siteUrl, date }, defaults: payload });
+                if (!created) await rec.update(payload);
+              }
+            } catch (error) {
+              report.errors.push({
+                clinicaId,
+                siteUrl: a.siteUrl,
+                phase: 'timeseries',
+                message: error.message
+              });
             }
           }
 
@@ -1311,13 +1468,15 @@ class MetaSyncJobs {
           }
           const daysWindow = Math.round((end - start) / 86400000) + 1;
           const useChunks = daysWindow > 62;
-          for (const a of arr) {
-            const urlQ = `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(a.siteUrl)}/searchAnalytics/query`;
-            const ranges = useChunks ? Array.from(monthChunks(start, end)) : [{ s: fmt(start), e: fmt(end) }];
-            for (const rg of ranges) {
-              const respQ = await syncHttp.post(urlQ, { startDate: rg.s, endDate: rg.e, dimensions: ['date','query','page'], rowLimit: 25000 }, { headers: { Authorization: `Bearer ${accessToken}` } });
-              const rowsQ = respQ.data?.rows || [];
-              for (const r of rowsQ) {
+          for (const { asset: a, accessToken } of authorizedMappings) {
+            try {
+              const urlQ = `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(a.siteUrl)}/searchAnalytics/query`;
+              const ranges = useChunks ? Array.from(monthChunks(start, end)) : [{ s: fmt(start), e: fmt(end) }];
+              for (const rg of ranges) {
+                const respQ = await syncHttp.post(urlQ, { startDate: rg.s, endDate: rg.e, dimensions: ['date','query','page'], rowLimit: 25000 }, { headers: { Authorization: `Bearer ${accessToken}` } });
+                clinicSucceeded = true;
+                const rowsQ = respQ.data?.rows || [];
+                for (const r of rowsQ) {
                 const date = r.keys?.[0];
                 const query = r.keys?.[1];
                 const pageUrl = r.keys?.[2] || null;
@@ -1355,7 +1514,15 @@ class MetaSyncJobs {
                 agg.impressions += impressions;
                 agg.positionWeighted += position * (impressions || 1);
                 agg.lastPosition = position;
+                }
               }
+            } catch (error) {
+              report.errors.push({
+                clinicaId,
+                siteUrl: a.siteUrl,
+                phase: 'queries',
+                message: error.message
+              });
             }
           }
 
@@ -1404,7 +1571,10 @@ class MetaSyncJobs {
               const now = Date.now();
               const tooSoon = last && (now - new Date(last.fetched_at).getTime()) < (minH*3600*1000);
               if (!tooSoon) {
-                const siteUrl = arr.find(s=>s.siteUrl.startsWith('http'))?.siteUrl || ('https://' + arr[0].siteUrl.replace('sc-domain:',''));
+                const psiAsset = arr.find(s=>s.siteUrl.startsWith('http')) || arr[0];
+                const siteUrl = psiAsset.siteUrl.startsWith('http')
+                  ? psiAsset.siteUrl
+                  : ('https://' + psiAsset.siteUrl.replace('sc-domain:',''));
                 const params = { url: siteUrl, strategy: 'mobile', category: ['performance','accessibility'], key: process.env.GOOGLE_PSI_API_KEY };
                 const psi = await syncHttp.get('https://www.googleapis.com/pagespeedonline/v5/runPagespeed', { params });
                 const lr = psi.data?.lighthouseResult || {};
@@ -1425,8 +1595,9 @@ class MetaSyncJobs {
                 // Index status (1 URL via URL Inspection API)
                 let indexed_ok = null;
                 try {
-                  const siteProperty = arr[0].siteUrl;
+                  const siteProperty = psiAsset.siteUrl;
                   const inspectUrl = siteUrl;
+                  const accessToken = await accessTokenForMapping(psiAsset);
                   const inspectEndpoint = 'https://searchconsole.googleapis.com/v1/urlInspection/index:inspect';
                   const respI = await syncHttp.post(inspectEndpoint, { inspectionUrl: inspectUrl, siteUrl: siteProperty }, { headers: { Authorization: `Bearer ${accessToken}` } });
                   const verdict = respI.data?.inspectionResult?.indexStatusResult?.verdict || '';
@@ -1451,7 +1622,7 @@ class MetaSyncJobs {
 
           // (Cobertura eliminada)
 
-          processed++;
+          if (clinicSucceeded) processed++;
           report.processed = processed;
           await syncLog.update({ records_processed: processed });
           if (this.config.web.betweenClinicsSleepMs>0) await new Promise(r=>setTimeout(r,this.config.web.betweenClinicsSleepMs));
@@ -1460,14 +1631,21 @@ class MetaSyncJobs {
           report.errors.push({ clinicaId, message: err.message });
         }
       }
+      const totalFailure = assets.length > 0 && processed === 0 && report.errors.length > 0;
       await syncLog.update({
-        status:'completed',
+        status: totalFailure ? 'failed' : 'completed',
         end_time:new Date(),
         records_processed: processed,
+        error_message: totalFailure ? 'Fallaron todos los mappings web elegibles' : null,
         status_report: report
       });
       console.log('✅ webSync completado:', processed);
-      return { status:'completed', processed, report };
+      return {
+        status: totalFailure ? 'failed' : 'completed',
+        retryable: totalFailure ? true : undefined,
+        processed,
+        report
+      };
     } catch (e) {
       await syncLog.update({ status:'failed', end_time:new Date(), error_message: e.message });
       console.error('❌ Error en webSync:', e);
@@ -1673,6 +1851,35 @@ class MetaSyncJobs {
     }
   }
 
+  async _mergeBusinessProfileLocation(location, rawPatch = {}, columnPatch = {}) {
+    const mappingId = Number(location?.id);
+    if (!Number.isInteger(mappingId) || mappingId <= 0) {
+      throw new Error('Ubicación Google Business Profile sin mapping persistente');
+    }
+    await sequelize.transaction(async (transaction) => {
+      const locked = await ClinicBusinessLocation.findByPk(mappingId, {
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+      if (!locked) throw new Error('Ubicación Google Business Profile no encontrada');
+      let currentRaw = locked.raw_payload;
+      if (typeof currentRaw === 'string') {
+        try {
+          currentRaw = JSON.parse(currentRaw);
+        } catch (_) {
+          currentRaw = {};
+        }
+      }
+      if (!currentRaw || typeof currentRaw !== 'object' || Array.isArray(currentRaw)) currentRaw = {};
+      await locked.update({
+        ...columnPatch,
+        raw_payload: { ...currentRaw, ...(rawPatch || {}) },
+      }, { transaction });
+    });
+    await location.reload();
+    return location;
+  }
+
   async executeBusinessProfileSync(options = {}) {
     const {
       clinicId = null,
@@ -1682,7 +1889,7 @@ class MetaSyncJobs {
     } = options;
     const jobType = this._localBackfillMode ? 'business_profile_backfill' : 'business_profile_sync';
     const syncLog = await SyncLog.create({ job_type: jobType, status: 'running', start_time: new Date(), records_processed: 0 });
-    const report = { locations: 0, processed: 0, metricRows: 0, reviews: 0, posts: 0, errors: [] };
+    const report = { locations: 0, processed: 0, metricRows: 0, reviews: 0, posts: 0, media: 0, errors: [] };
 
     try {
       const where = { is_active: true };
@@ -1695,11 +1902,12 @@ class MetaSyncJobs {
 
       const locations = await ClinicBusinessLocation.findAll({ where });
       report.locations = locations.length;
+      const tokenByConnection = new Map();
 
       if (!locations.length) {
         await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: 0, status_report: report });
         console.log('ℹ️ businessProfileSync sin ubicaciones activas', { clinicId, locationIds });
-        return { status: 'completed', processed: 0, report };
+        return { status: 'completed', processed: 0, report, syncLogId: syncLog.id };
       }
 
       const defaultEnd = new Date();
@@ -1717,17 +1925,52 @@ class MetaSyncJobs {
 
       for (const location of locations) {
         try {
-          const { accessToken } = await this._ensureGoogleAccessToken(location.google_connection_id);
-          await this._syncBusinessProfileLocationDetails(location, accessToken);
+          let accessToken = tokenByConnection.get(Number(location.google_connection_id));
+          if (!accessToken) {
+            ({ accessToken } = await this._ensureGoogleAccessToken(location.google_connection_id));
+            tokenByConnection.set(Number(location.google_connection_id), accessToken);
+          }
+          const sectionErrors = [];
+          let details = null;
+          try {
+            details = await this._syncBusinessProfileLocationDetails(location, accessToken);
+          } catch (sectionError) {
+            sectionErrors.push({ section: 'details', message: sectionError.response?.data?.error?.message || sectionError.message });
+          }
           const metricRows = await this._syncBusinessProfileMetrics(location, accessToken, start, end);
           const reviews = await this._syncBusinessProfileReviews(location, accessToken);
           const posts = await this._syncBusinessProfilePosts(location, accessToken);
+          let media = null;
+          try {
+            media = await this._syncBusinessProfileMedia(location, accessToken);
+          } catch (sectionError) {
+            sectionErrors.push({ section: 'media', message: sectionError.response?.data?.error?.message || sectionError.message });
+          }
 
           report.processed += 1;
           report.metricRows += metricRows;
           report.reviews += reviews;
           report.posts += posts;
-          await location.update({ last_synced_at: new Date(), sync_status: 'completed' });
+          report.media += Number(media || 0);
+          for (const sectionError of sectionErrors) {
+            report.errors.push({
+              locationId: location.location_id,
+              clinicaId: location.clinica_id,
+              ...sectionError,
+            });
+            console.warn('⚠️ businessProfileSync sección parcial:', location.location_id, sectionError.section, sectionError.message);
+          }
+          const completedAt = new Date();
+          await this._mergeBusinessProfileLocation(location, {
+            ...(details ? { clinicaclick_details_synced_at: completedAt.toISOString() } : {}),
+            clinicaclick_metrics_synced_at: completedAt.toISOString(),
+            clinicaclick_reviews_synced_at: completedAt.toISOString(),
+            clinicaclick_posts_synced_at: completedAt.toISOString(),
+            ...(media !== null ? { clinicaclick_content_synced_at: completedAt.toISOString() } : {})
+          }, {
+            last_synced_at: completedAt,
+            sync_status: sectionErrors.length ? 'partial' : 'completed'
+          });
           await syncLog.update({ records_processed: report.processed, status_report: report });
 
           if (this.config.local.betweenLocationsSleepMs > 0) {
@@ -1738,18 +1981,49 @@ class MetaSyncJobs {
           report.errors.push({ locationId: location.location_id, clinicaId: location.clinica_id, message });
           console.error('❌ businessProfileSync location error:', location.location_id, message);
           try {
-            await location.update({ sync_status: 'error', last_synced_at: new Date() });
+            await location.update({ sync_status: 'error' });
           } catch (_) {}
         }
       }
 
+      if (report.errors.length) {
+        const failure = buildBusinessProfileRetryResult({
+          label: 'businessProfileSync',
+          report,
+          syncLogId: syncLog.id
+        });
+        await syncLog.update({
+          status: 'failed',
+          end_time: new Date(),
+          records_processed: report.processed,
+          error_message: failure.error_message,
+          status_report: report
+        });
+        console.error('❌ businessProfileSync finalizó con ubicaciones incompletas', report);
+        return failure;
+      }
+
       await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: report.processed, status_report: report });
       console.log('✅ businessProfileSync completado', report);
-      return { status: 'completed', processed: report.processed, report };
+      return { status: 'completed', processed: report.processed, report, syncLogId: syncLog.id };
     } catch (error) {
-      await syncLog.update({ status: 'failed', end_time: new Date(), error_message: error.message, status_report: report });
+      const message = error.response?.data?.error?.message || error.message;
+      report.errors.push({ scope: 'job', message });
+      const failure = buildBusinessProfileRetryResult({
+        label: 'businessProfileSync',
+        report,
+        syncLogId: syncLog.id,
+        fallbackMessage: `businessProfileSync: ${message}`
+      });
+      await syncLog.update({
+        status: 'failed',
+        end_time: new Date(),
+        records_processed: report.processed,
+        error_message: failure.error_message,
+        status_report: report
+      });
       console.error('❌ Error en businessProfileSync:', error);
-      throw error;
+      return failure;
     }
   }
 
@@ -1773,16 +2047,21 @@ class MetaSyncJobs {
 
       const locations = await ClinicBusinessLocation.findAll({ where });
       report.locations = locations.length;
+      const tokenByConnection = new Map();
 
       if (!locations.length) {
         await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: 0, status_report: report });
         console.log('ℹ️ businessProfileReviewsSync sin ubicaciones activas', { clinicId, locationIds });
-        return { status: 'completed', processed: 0, report };
+        return { status: 'completed', processed: 0, report, syncLogId: syncLog.id };
       }
 
       for (const location of locations) {
         try {
-          const { accessToken } = await this._ensureGoogleAccessToken(location.google_connection_id);
+          let accessToken = tokenByConnection.get(Number(location.google_connection_id));
+          if (!accessToken) {
+            ({ accessToken } = await this._ensureGoogleAccessToken(location.google_connection_id));
+            tokenByConnection.set(Number(location.google_connection_id), accessToken);
+          }
           const reviews = await this._syncBusinessProfileReviews(location, accessToken, {
             maxPages: report.maxPages,
             enqueueOnlyNewReviews: true
@@ -1790,7 +2069,11 @@ class MetaSyncJobs {
 
           report.processed += 1;
           report.reviews += reviews;
-          await location.update({ last_synced_at: new Date(), sync_status: 'completed' });
+          await this._mergeBusinessProfileLocation(location, {
+            clinicaclick_reviews_synced_at: new Date().toISOString(),
+            clinicaclick_reviews_sync_status: 'completed',
+            clinicaclick_reviews_sync_error: null
+          });
           await syncLog.update({ records_processed: report.processed, status_report: report });
 
           if (this.config.local.betweenLocationsSleepMs > 0) {
@@ -1801,18 +2084,53 @@ class MetaSyncJobs {
           report.errors.push({ locationId: location.location_id, clinicaId: location.clinica_id, message });
           console.error('❌ businessProfileReviewsSync location error:', location.location_id, message);
           try {
-            await location.update({ sync_status: 'error', last_synced_at: new Date() });
+            await this._mergeBusinessProfileLocation(location, {
+              clinicaclick_reviews_sync_status: 'error',
+              clinicaclick_reviews_sync_error: message,
+              clinicaclick_reviews_sync_failed_at: new Date().toISOString()
+            });
           } catch (_) {}
         }
       }
 
+      if (report.errors.length) {
+        const failure = buildBusinessProfileRetryResult({
+          label: 'businessProfileReviewsSync',
+          report,
+          syncLogId: syncLog.id
+        });
+        await syncLog.update({
+          status: 'failed',
+          end_time: new Date(),
+          records_processed: report.processed,
+          error_message: failure.error_message,
+          status_report: report
+        });
+        console.error('❌ businessProfileReviewsSync finalizó con ubicaciones incompletas', report);
+        return failure;
+      }
+
       await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: report.processed, status_report: report });
       console.log('✅ businessProfileReviewsSync completado', report);
-      return { status: 'completed', processed: report.processed, report };
+      return { status: 'completed', processed: report.processed, report, syncLogId: syncLog.id };
     } catch (error) {
-      await syncLog.update({ status: 'failed', end_time: new Date(), error_message: error.message, status_report: report });
+      const message = error.response?.data?.error?.message || error.message;
+      report.errors.push({ scope: 'job', message });
+      const failure = buildBusinessProfileRetryResult({
+        label: 'businessProfileReviewsSync',
+        report,
+        syncLogId: syncLog.id,
+        fallbackMessage: `businessProfileReviewsSync: ${message}`
+      });
+      await syncLog.update({
+        status: 'failed',
+        end_time: new Date(),
+        records_processed: report.processed,
+        error_message: failure.error_message,
+        status_report: report
+      });
       console.error('❌ Error en businessProfileReviewsSync:', error);
-      throw error;
+      return failure;
     }
   }
 
@@ -1845,21 +2163,83 @@ class MetaSyncJobs {
     const aggregate = {
       status: 'completed',
       processed: 0,
-      report: { locations: 0, processed: 0, metricRows: 0, reviews: 0, posts: 0, errors: [] }
+      report: {
+        locations: 0,
+        processed: 0,
+        metricRows: 0,
+        reviews: 0,
+        posts: 0,
+        media: 0,
+        errors: [],
+        failedMappings: [],
+        syncLogIds: [],
+        failedSyncLogIds: []
+      }
     };
+    const failedMappings = new Map();
+    let mustRetry = false;
     for (const [clinicId, locationIds] of mappingsByClinic.entries()) {
-      const result = await this.executeBusinessProfileBackfill({
-        clinicId,
-        locationIds: [...locationIds]
-      });
+      const requestedLocationIds = [...locationIds];
+      let result;
+      try {
+        result = await this.executeBusinessProfileBackfill({
+          clinicId,
+          locationIds: requestedLocationIds
+        });
+      } catch (error) {
+        result = {
+          status: 'failed',
+          retryable: true,
+          error_message: error.message,
+          report: {
+            locations: requestedLocationIds.length,
+            processed: 0,
+            errors: [{ clinicaId: clinicId, message: error.message }]
+          }
+        };
+      }
       const report = result?.report || {};
+      const resultErrors = Array.isArray(report.errors) ? report.errors : [];
       aggregate.processed += Number(result?.processed || report.processed || 0);
       aggregate.report.locations += Number(report.locations || 0);
       aggregate.report.processed += Number(report.processed || result?.processed || 0);
       aggregate.report.metricRows += Number(report.metricRows || 0);
       aggregate.report.reviews += Number(report.reviews || 0);
       aggregate.report.posts += Number(report.posts || 0);
-      aggregate.report.errors.push(...(Array.isArray(report.errors) ? report.errors : []));
+      aggregate.report.media += Number(report.media || 0);
+      aggregate.report.errors.push(...resultErrors);
+      if (result?.syncLogId) aggregate.report.syncLogIds.push(result.syncLogId);
+
+      const groupFailed = result?.status === 'failed'
+        || result?.retryable === true
+        || resultErrors.length > 0;
+      if (!groupFailed) continue;
+      mustRetry = true;
+      if (result?.syncLogId) aggregate.report.failedSyncLogIds.push(result.syncLogId);
+
+      const explicitFailedIds = new Set(resultErrors
+        .map((entry) => String(entry?.locationId || '').trim())
+        .filter(Boolean));
+      const idsToReport = explicitFailedIds.size
+        ? [...explicitFailedIds]
+        : requestedLocationIds;
+      for (const locationId of idsToReport) {
+        const key = `${clinicId}:${locationId}`;
+        failedMappings.set(key, {
+          clinicId: Number(clinicId),
+          locationId
+        });
+      }
+    }
+
+    aggregate.report.failedMappings = [...failedMappings.values()];
+    if (mustRetry) {
+      aggregate.status = 'failed';
+      aggregate.retryable = true;
+      aggregate.error_message = `businessProfileBackfillForLocations: ${aggregate.report.failedMappings.length} mappings terminaron con errores`;
+      aggregate.syncLogId = aggregate.report.failedSyncLogIds[0]
+        || aggregate.report.syncLogIds[0]
+        || null;
     }
     return aggregate;
   }
@@ -1873,12 +2253,26 @@ class MetaSyncJobs {
     });
 
     try {
+      const explicitClinicIds = Array.from(new Set([
+        ...(Array.isArray(options.clinicIds) ? options.clinicIds : []),
+        ...(Array.isArray(options.clinic_ids) ? options.clinic_ids : []),
+        options.clinicId,
+        options.clinicaId,
+      ]
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value > 0)))
+        .sort((left, right) => left - right);
+      const groupId = Number(options.groupId || options.group_id || 0) || null;
       const scope = {
-        isAll: !options.clinicId && !options.clinicaId && !options.groupId,
-        scope: options.groupId ? 'group' : (options.clinicId || options.clinicaId ? 'clinic' : 'all'),
-        clinicIds: options.clinicId || options.clinicaId ? [Number(options.clinicId || options.clinicaId)] : [],
-        groupId: options.groupId ? Number(options.groupId) : null,
-        original: options.groupId ? `group:${options.groupId}` : (options.clinicId || options.clinicaId || 'all')
+        isAll: !groupId && explicitClinicIds.length === 0,
+        scope: groupId
+          ? 'group'
+          : (explicitClinicIds.length > 1 ? 'multi' : (explicitClinicIds.length === 1 ? 'clinic' : 'all')),
+        clinicIds: explicitClinicIds,
+        groupId,
+        original: groupId
+          ? `group:${groupId}`
+          : (explicitClinicIds.length ? explicitClinicIds.join(',') : 'all')
       };
 
       const result = await marketingCompetitionService.refreshCompetition(scope, {
@@ -2134,11 +2528,15 @@ class MetaSyncJobs {
       throw new Error('Ubicación Google Business Profile sin accountName para sincronizar reseñas');
     }
 
+    await this._expireOldBusinessProfileReviews(location);
+
     const maxPages = Math.max(1, Number(options.maxPages || 0) || Number.MAX_SAFE_INTEGER);
     const enqueueOnlyNewReviews = options.enqueueOnlyNewReviews === true;
     let nextPageToken = null;
     let processed = 0;
     let page = 0;
+    const seenReviewNames = new Set();
+    let expectedReviewCount = null;
     do {
       page += 1;
       const response = await syncHttp.get(`${GOOGLE_MY_BUSINESS_API}/${resourceBase}/reviews`, {
@@ -2146,6 +2544,21 @@ class MetaSyncJobs {
         headers: { Authorization: `Bearer ${accessToken}` }
       });
       const reviews = response.data?.reviews || [];
+      if (page === 1) {
+        const providerTotal = Number(response.data?.totalReviewCount);
+        if (Number.isInteger(providerTotal) && providerTotal >= 0) expectedReviewCount = providerTotal;
+      }
+      const reviewNames = reviews
+        .map((review) => review.name || review.reviewId || null)
+        .filter(Boolean);
+      reviewNames.forEach((name) => seenReviewNames.add(String(name)));
+      const existingRows = reviewNames.length
+        ? await BusinessProfileReview.findAll({ where: { review_name: { [Op.in]: reviewNames } } })
+        : [];
+      const existingByName = new Map(existingRows.map((row) => [String(row.review_name), row]));
+      const payloads = [];
+      const newReviewNames = [];
+      let pageHasChanges = false;
       for (const review of reviews) {
         const reviewName = review.name || review.reviewId || null;
         if (!reviewName) {
@@ -2171,26 +2584,119 @@ class MetaSyncJobs {
           has_reply: Boolean(reply?.comment),
           raw_payload: review
         };
-        const existing = await BusinessProfileReview.findOne({ where: { review_name: reviewName } });
-        const reviewRow = existing
-          ? await existing.update(payload)
-          : await BusinessProfileReview.create(payload);
-        if (!enqueueOnlyNewReviews || !existing) {
-          try {
-            await googleReviewMatchService.enqueueBusinessProfileReviewMatch(reviewRow.id, {
-              origin: enqueueOnlyNewReviews ? 'business_profile_reviews_sync' : 'business_profile_sync',
-              priority: 'low'
-            });
-          } catch (error) {
-            console.warn('⚠️ No se pudo encolar matching de reseña Google:', error.message);
+        const existing = existingByName.get(String(reviewName));
+        let shouldUpsert = false;
+        if (!existing) {
+          newReviewNames.push(reviewName);
+          pageHasChanges = true;
+          shouldUpsert = true;
+        } else {
+          const existingUpdatedAt = existing.update_time ? new Date(existing.update_time).getTime() : 0;
+          const incomingUpdatedAt = payload.update_time ? new Date(payload.update_time).getTime() : 0;
+          const existingReplyAt = existing.reply_update_time ? new Date(existing.reply_update_time).getTime() : 0;
+          const incomingReplyAt = payload.reply_update_time ? new Date(payload.reply_update_time).getTime() : 0;
+          // MySQL DATETIME in this schema drops provider milliseconds. A
+          // sub-second difference must not make every 15-minute sync walk the
+          // complete review history again.
+          const timestampToleranceMs = 1000;
+          if (
+            incomingUpdatedAt > existingUpdatedAt + timestampToleranceMs
+            || incomingReplyAt > existingReplyAt + timestampToleranceMs
+            || Boolean(existing.has_reply) !== payload.has_reply
+            || Number(existing.star_rating || 0) !== payload.star_rating
+          ) {
+            pageHasChanges = true;
+            shouldUpsert = true;
           }
         }
-        processed += 1;
+        if (shouldUpsert) payloads.push(payload);
+      }
+
+      if (payloads.length) {
+        await BusinessProfileReview.bulkCreate(payloads, {
+          updateOnDuplicate: [
+            'clinica_id',
+            'business_location_id',
+            'reviewer_name',
+            'reviewer_profile_photo_url',
+            'star_rating',
+            'comment',
+            'create_time',
+            'update_time',
+            'review_state',
+            'is_new',
+            'is_negative',
+            'reply_comment',
+            'reply_update_time',
+            'has_reply',
+            'raw_payload',
+            'updated_at'
+          ]
+        });
+        processed += payloads.length;
+      }
+
+      const namesToEnqueue = enqueueOnlyNewReviews
+        ? newReviewNames
+        : payloads.map((item) => item.review_name).filter(Boolean);
+      const rowsToEnqueue = namesToEnqueue.length
+        ? await BusinessProfileReview.findAll({ where: { review_name: { [Op.in]: namesToEnqueue } } })
+        : [];
+      for (const reviewRow of rowsToEnqueue) {
+        try {
+          await googleReviewMatchService.enqueueBusinessProfileReviewMatch(reviewRow.id, {
+            origin: enqueueOnlyNewReviews ? 'business_profile_reviews_sync' : 'business_profile_sync',
+            priority: 'low'
+          });
+        } catch (error) {
+          console.warn('⚠️ No se pudo encolar matching de reseña Google:', error.message);
+        }
       }
       nextPageToken = response.data?.nextPageToken || null;
+      if (enqueueOnlyNewReviews && !pageHasChanges) {
+        nextPageToken = null;
+      }
     } while (nextPageToken && page < maxPages);
 
+    // El barrido completo es autoritativo: elimina reseñas que Google ya no
+    // devuelve. El job incremental de 15 minutos corta pronto y nunca borra.
+    if (
+      !enqueueOnlyNewReviews
+      && !nextPageToken
+      && expectedReviewCount !== null
+      && seenReviewNames.size >= expectedReviewCount
+    ) {
+      const storedRows = await BusinessProfileReview.findAll({
+        where: { business_location_id: location.id },
+        attributes: ['id', 'review_name'],
+        raw: true,
+      });
+      const staleIds = storedRows
+        .filter((row) => !seenReviewNames.has(String(row.review_name)))
+        .map((row) => Number(row.id))
+        .filter(Number.isFinite);
+      for (let index = 0; index < staleIds.length; index += 500) {
+        await BusinessProfileReview.destroy({
+          where: { id: { [Op.in]: staleIds.slice(index, index + 500) } },
+        });
+      }
+    }
+
     return processed;
+  }
+
+  async _expireOldBusinessProfileReviews(location, now = new Date()) {
+    const businessLocationId = Number(location?.id);
+    if (!Number.isInteger(businessLocationId) || businessLocationId <= 0) return 0;
+    const cutoff = new Date(new Date(now).getTime() - 30 * MS_PER_DAY);
+    const [affectedRows] = await BusinessProfileReview.update({ is_new: false }, {
+      where: {
+        business_location_id: businessLocationId,
+        is_new: true,
+        create_time: { [Op.lt]: cutoff }
+      }
+    });
+    return Number(affectedRows || 0);
   }
 
   async _syncBusinessProfilePosts(location, accessToken) {
@@ -2243,57 +2749,78 @@ class MetaSyncJobs {
     return processed;
   }
 
+  async _syncBusinessProfileMedia(location, accessToken) {
+    const resourceBase = this._buildBusinessProfileV4LocationPath(location);
+    if (!resourceBase) {
+      throw new Error('Ubicación Google Business Profile sin accountName para sincronizar fotos');
+    }
+
+    const mediaItems = [];
+    let nextPageToken = null;
+    do {
+      const response = await syncHttp.get(`${GOOGLE_MY_BUSINESS_API}/${resourceBase}/media`, {
+        params: { pageSize: 100, pageToken: nextPageToken || undefined },
+        headers: { Authorization: `Bearer ${accessToken}` }
+      });
+      mediaItems.push(...(Array.isArray(response.data?.mediaItems) ? response.data.mediaItems : []));
+      nextPageToken = response.data?.nextPageToken || null;
+    } while (nextPageToken);
+
+    await this._mergeBusinessProfileLocation(location, {
+      clinicaclick_media_items: mediaItems,
+      clinicaclick_content_synced_at: new Date().toISOString()
+    });
+    return mediaItems.length;
+  }
+
   async _syncBusinessProfileLocationDetails(location, accessToken) {
-    const rawPayload = location.raw_payload && typeof location.raw_payload === 'object'
-      ? location.raw_payload
-      : {};
+    let rawPayload = location.raw_payload;
+    if (typeof rawPayload === 'string') {
+      try {
+        rawPayload = JSON.parse(rawPayload);
+      } catch (_) {
+        rawPayload = {};
+      }
+    }
+    if (!rawPayload || typeof rawPayload !== 'object' || Array.isArray(rawPayload)) rawPayload = {};
     const accountName = rawPayload.accountName || rawPayload.account_name || null;
     const locationName = this._normalizeBusinessProfilePerformanceLocation(location.location_id);
     const locationId = locationName ? locationName.split('/').pop() : null;
     if (!accountName || !locationId) {
-      return null;
+      throw new Error('Ubicación Google Business Profile sin accountName para sincronizar detalles');
     }
 
-    try {
-      const response = await syncHttp.get(`${GOOGLE_BUSINESS_INFORMATION_API}/locations/${locationId}`, {
-        params: { readMask: GOOGLE_BUSINESS_LOCATION_READ_MASK },
-        headers: { Authorization: `Bearer ${accessToken}` }
-      });
-      const details = response.data || {};
-      const primaryCategory = details.primaryCategory?.displayName
-        || details.categories?.primaryCategory?.displayName
-        || details.primaryCategory?.name
-        || details.categories?.primaryCategory?.name
-        || location.primary_category
-        || null;
+    const response = await syncHttp.get(`${GOOGLE_BUSINESS_INFORMATION_API}/locations/${locationId}`, {
+      params: { readMask: GOOGLE_BUSINESS_LOCATION_READ_MASK },
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    const details = response.data || {};
+    const primaryCategory = details.primaryCategory?.displayName
+      || details.categories?.primaryCategory?.displayName
+      || details.primaryCategory?.name
+      || details.categories?.primaryCategory?.name
+      || location.primary_category
+      || null;
 
-      await location.update({
-        location_name: details.title || details.locationName || location.location_name || null,
-        store_code: details.storeCode || location.store_code || null,
-        primary_category: primaryCategory,
-        is_verified: details.metadata?.verificationState
+    await this._mergeBusinessProfileLocation(location, {
+      ...details,
+      accountName,
+      accountDisplayName: rawPayload.accountDisplayName || rawPayload.account_display_name || null
+    }, {
+      location_name: details.title || details.locationName || location.location_name || null,
+      store_code: details.storeCode || location.store_code || null,
+      primary_category: primaryCategory,
+      is_verified: typeof details.metadata?.hasVoiceOfMerchant === 'boolean'
+        ? details.metadata.hasVoiceOfMerchant
+        : (details.metadata?.verificationState
           ? String(details.metadata.verificationState).toUpperCase() === 'VERIFIED'
-          : location.is_verified,
-        is_suspended: Array.isArray(details.metadata?.suspensionReasons)
-          ? details.metadata.suspensionReasons.length > 0
-          : location.is_suspended,
-        raw_payload: {
-          ...rawPayload,
-          ...details,
-          accountName,
-          accountDisplayName: rawPayload.accountDisplayName || rawPayload.account_display_name || null
-        }
-      });
+          : location.is_verified),
+      is_suspended: Array.isArray(details.metadata?.suspensionReasons)
+        ? details.metadata.suspensionReasons.length > 0
+        : location.is_suspended
+    });
 
-      return details;
-    } catch (error) {
-      console.warn('⚠️ No se pudo refrescar detalles de Google Business Profile', {
-        locationId: location.location_id,
-        status: error.response?.status,
-        message: error.response?.data?.error?.message || error.message
-      });
-      return null;
-    }
+    return details;
   }
 
   _buildBusinessProfileMetricParams(start, end) {
@@ -2314,18 +2841,10 @@ class MetaSyncJobs {
   }
 
   async _upsertBusinessProfileDailyMetric(payload) {
-    const where = {
-      business_location_id: payload.business_location_id,
-      metric_type: payload.metric_type,
-      metric_subtype: payload.metric_subtype,
-      date: payload.date
-    };
-    const existing = await BusinessProfileDailyMetric.findOne({ where });
-    if (existing) {
-      await existing.update(payload);
-    } else {
-      await BusinessProfileDailyMetric.create(payload);
-    }
+    await BusinessProfileDailyMetric.upsert({
+      ...payload,
+      metric_subtype: payload.metric_subtype || ''
+    });
   }
 
   _normalizeBusinessProfilePerformanceLocation(value) {
@@ -2371,7 +2890,7 @@ class MetaSyncJobs {
 
   _stringifyMetricSubtype(value) {
     if (!value) {
-      return null;
+      return '';
     }
     if (typeof value === 'string') {
       return value;
@@ -2379,7 +2898,7 @@ class MetaSyncJobs {
     try {
       return JSON.stringify(value);
     } catch (_) {
-      return null;
+      return '';
     }
   }
 
@@ -2403,20 +2922,7 @@ class MetaSyncJobs {
     if (!connectionId) { throw new Error('Sin googleConnectionId en propiedad Analytics'); }
     const conn = await GoogleConnection.findByPk(connectionId);
     if (!conn) { throw new Error('GoogleConnection no encontrada'); }
-    let accessToken = conn.accessToken;
-    const expiresAt = conn.expiresAt ? new Date(conn.expiresAt).getTime() : 0;
-    if (expiresAt && expiresAt < Date.now() + 60000 && conn.refreshToken) {
-      const params = new URLSearchParams({
-        client_id: process.env.GOOGLE_CLIENT_ID,
-        client_secret: process.env.GOOGLE_CLIENT_SECRET,
-        grant_type: 'refresh_token',
-        refresh_token: conn.refreshToken
-      });
-      const resp = await syncHttp.post('https://oauth2.googleapis.com/token', params.toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-      accessToken = resp.data?.access_token || accessToken;
-      const expiresIn = resp.data?.expires_in || 3600;
-      await conn.update({ accessToken, expiresAt: new Date(Date.now() + expiresIn * 1000) });
-    }
+    const accessToken = await ensureGoogleConnectionAccessToken(conn);
     return { accessToken, connection: conn };
   }
 
@@ -2933,6 +3439,11 @@ async syncFacebookPageMetrics(asset) {
       const socialStatsDeleted = await this.cleanupOldSocialStats();
       totalDeleted += socialStatsDeleted;
 
+      // Elimina únicamente snapshots locales ya caducados. Las filas frescas
+      // (7 días) y stale válidas (hasta 14 días) permanecen reutilizables.
+      const competitionHeatmapsDeleted = await marketingCompetitionService.cleanupLocalHeatmapCache();
+      totalDeleted += competitionHeatmapsDeleted;
+
       // Actualizar log
       await syncLog.update({
         status: 'completed',
@@ -2948,7 +3459,8 @@ async syncFacebookPageMetrics(asset) {
         breakdown: {
           syncLogs: syncLogsDeleted,
           tokenValidations: tokenValidationsDeleted,
-          socialStats: socialStatsDeleted
+          socialStats: socialStatsDeleted,
+          competitionHeatmaps: competitionHeatmapsDeleted
         }
       };
 
@@ -3023,6 +3535,10 @@ async syncFacebookPageMetrics(asset) {
         SEARCH_CONSOLE_LOOKBACK_DAYS: 7,
       },
     });
+  }
+
+  async executeCompetitionHeatmapRefresh(payload = {}) {
+    return marketingCompetitionService.executeLocalRankingHeatmapRefresh(payload);
   }
 
   /**
@@ -3452,20 +3968,38 @@ async executeHealthCheck() {
     // Verificar disponibilidad de Meta API (prueba simple)
     // ✅ CORRECTO (usar token real):
     try {
-      const connection = await MetaConnection.findOne({
+      const connections = await MetaConnection.findAll({
         where: {
           accessToken: { [Op.ne]: null },
           expiresAt: { [Op.gt]: new Date() }
-        }
+        },
+        order: [['updatedAt', 'DESC'], ['id', 'DESC']]
       });
 
-      if (connection && connection.accessToken) {
-        const testResponse = await syncHttp.get(`${META_API_BASE_URL}/me`, {
-          params: { access_token: connection.accessToken },
-          timeout: 5000
-        });
-        healthStatus.metaApi = testResponse.status === 200;
-        console.log('✅ Meta API: Disponible');
+      if (connections.length) {
+        let lastProviderError = null;
+        for (const connection of connections) {
+          try {
+            const testResponse = await syncHttp.get(`${META_API_BASE_URL}/me`, {
+              params: { access_token: connection.accessToken },
+              timeout: 5000
+            });
+            if (testResponse.status === 200) {
+              healthStatus.metaApi = true;
+              break;
+            }
+          } catch (providerError) {
+            lastProviderError = providerError;
+          }
+        }
+        if (healthStatus.metaApi) {
+          console.log('✅ Meta API: Disponible');
+        } else {
+          console.log('❌ Meta API: Ninguna conexión activa respondió correctamente');
+          if (lastProviderError) {
+            console.warn('⚠️ Último error Meta health:', lastProviderError.message);
+          }
+        }
       } else {
         healthStatus.metaApi = false;
         console.log('❌ Meta API: Sin tokens válidos');
@@ -4641,5 +5175,9 @@ const metaSyncJobs = new MetaSyncJobs();
 module.exports = {
   metaSyncJobs,
   MetaSyncJobs,
-  __test: { reviewedCampaignAssignmentDirective }
+  __test: {
+    reviewedCampaignAssignmentDirective,
+    ensureGoogleConnectionAccessToken,
+    buildBusinessProfileRetryResult
+  }
 };

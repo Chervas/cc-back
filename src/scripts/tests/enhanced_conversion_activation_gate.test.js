@@ -86,6 +86,9 @@ function scopedAccounts() {
 function enrichedAccounts(overrides = {}) {
   return scopedAccounts().map((account) => ({
     ...account,
+    google_connection_healthy: true,
+    google_ads_scope_granted: true,
+    data_manager_scope_granted: true,
     conversion_tracking_settings_available: true,
     accepted_customer_data_terms: true,
     enhanced_conversions_for_leads_enabled: true,

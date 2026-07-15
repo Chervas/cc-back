@@ -1,10 +1,80 @@
 'use strict';
 
 const axios = require('axios');
-const { MetaConnection, ClinicMetaAsset } = require('../../models');
+const { MetaConnection, ClinicMetaAsset, Clinica } = require('../../models');
+const {
+  authorizeRequestedMarketingConnectionScope,
+  marketingScopeInputFromRequest,
+} = require('../lib/oauthMarketingScopeAccess');
+const { hasMarketingClinicScopeAccess } = require('../lib/marketingScopeAccess');
+const { resolveMetaConnectionForScope } = require('../services/scopeConnectionResolver.service');
 
 // Constantes
 const META_API_BASE_URL = 'https://graph.facebook.com/v23.0';
+
+async function resolveDiagnosticMetaConnection(req, userId) {
+  const scopeInput = marketingScopeInputFromRequest(req);
+  if (!scopeInput.clinicIdRaw && !scopeInput.groupIdRaw) {
+    const error = new Error('Indica clinic_id o group_id para ejecutar el diagnóstico');
+    error.code = 'marketing_connection_scope_required';
+    error.httpStatus = 400;
+    throw error;
+  }
+  await authorizeRequestedMarketingConnectionScope({
+    userId,
+    ...scopeInput,
+    access: 'write',
+    findClinicGroupId: async (clinicId) => {
+      const clinic = await Clinica.findByPk(clinicId, {
+        attributes: ['grupoClinicaId'],
+        raw: true,
+      });
+      return clinic?.grupoClinicaId || null;
+    },
+    findGroupClinicIds: async (groupId) => {
+      const clinics = await Clinica.findAll({
+        where: { grupoClinicaId: groupId },
+        attributes: ['id_clinica'],
+        raw: true,
+      });
+      return clinics.map((clinic) => clinic.id_clinica);
+    },
+    authorizeClinicIds: hasMarketingClinicScopeAccess,
+  });
+  return resolveMetaConnectionForScope({
+    userId,
+    ...scopeInput,
+    allowLegacyUserFallback: true,
+  });
+}
+
+async function authorizeDiagnosticAssetAccess(req, asset) {
+  const userId = req.userData?.userId || req.user?.id;
+  const clinicIds = asset.assignmentScope === 'group' && asset.grupoClinicaId
+    ? (await Clinica.findAll({
+      where: { grupoClinicaId: asset.grupoClinicaId },
+      attributes: ['id_clinica'],
+      raw: true,
+    })).map((clinic) => clinic.id_clinica)
+    : [asset.clinicaId].filter(Boolean);
+  const allowed = clinicIds.length && await hasMarketingClinicScopeAccess({
+    userId,
+    clinicIds,
+    access: 'write',
+  });
+  if (!allowed) {
+    const error = new Error('No tienes permisos para diagnosticar este activo');
+    error.code = 'asset_scope_forbidden';
+    error.httpStatus = 403;
+    throw error;
+  }
+}
+
+function withoutAccessToken(params) {
+  const sanitized = { ...(params || {}) };
+  delete sanitized.access_token;
+  return sanitized;
+}
 
 /**
  * Controlador de diagnóstico para verificar la comunicación con la API de Meta
@@ -20,13 +90,13 @@ exports.testUserConnection = async (req, res) => {
     const userId = req.userData.userId;
     
     // Obtener conexión de Meta
-    const connection = await MetaConnection.findOne({
-      where: { userId }
-    });
+    const { connection, source } = await resolveDiagnosticMetaConnection(req, userId);
     
     if (!connection || !connection.accessToken) {
       return res.status(400).json({
-        message: 'No se encontró conexión de Meta para este usuario o el token es nulo',
+        message: source === 'legacy_user_ambiguous'
+          ? 'Hay varias conexiones Meta; indica clinic_id o group_id para el diagnóstico'
+          : 'No se encontró conexión de Meta para este usuario o el token es nulo',
         hasConnection: false,
         connectionDetails: {
           exists: !!connection,
@@ -36,7 +106,7 @@ exports.testUserConnection = async (req, res) => {
       });
     }
     
-    console.log(`🔍 Probando conexión para usuario ${userId} con token: ${connection.accessToken.substring(0, 10)}...`);
+    console.log(`🔍 Probando conexión Meta para usuario ${userId}`);
     
     // Probar conexión con Meta
     const response = await axios.get(`${META_API_BASE_URL}/me`, {
@@ -50,11 +120,17 @@ exports.testUserConnection = async (req, res) => {
       hasConnection: true,
       userData: response.data,
       tokenInfo: {
-        tokenPrefix: connection.accessToken.substring(0, 10) + '...',
-        tokenLength: connection.accessToken.length
+        present: true
       }
     });
   } catch (error) {
+    if (error?.httpStatus) {
+      return res.status(error.httpStatus).json({
+        success: false,
+        error: error.code,
+        message: error.message,
+      });
+    }
     console.error('❌ Error al probar conexión con Meta:', error.response?.data || error.message);
     
     return res.status(500).json({
@@ -66,7 +142,7 @@ exports.testUserConnection = async (req, res) => {
         config: {
           url: error.config?.url,
           method: error.config?.method,
-          params: error.config?.params
+          params: withoutAccessToken(error.config?.params)
         }
       }
     });
@@ -91,6 +167,8 @@ exports.testAssetConnection = async (req, res) => {
         success: false
       });
     }
+
+    await authorizeDiagnosticAssetAccess(req, asset);
     
     // Obtener token de acceso (primero intentar pageAccessToken, luego el token de usuario)
     const accessToken = asset.pageAccessToken || asset.metaConnection?.accessToken;
@@ -109,7 +187,7 @@ exports.testAssetConnection = async (req, res) => {
       });
     }
     
-    console.log(`🔍 Probando conexión para activo ${assetId} (${asset.assetType}) con token: ${accessToken.substring(0, 10)}...`);
+    console.log(`🔍 Probando conexión para activo ${assetId} (${asset.assetType})`);
     
     // Construir URL según tipo de activo
     let apiUrl;
@@ -146,11 +224,18 @@ exports.testAssetConnection = async (req, res) => {
       assetData: response.data,
       requestDetails: {
         url: apiUrl,
-        params: params,
+        fields: params.fields || null,
         tokenType: asset.pageAccessToken ? 'pageAccessToken' : 'userAccessToken'
       }
     });
   } catch (error) {
+    if (error?.httpStatus) {
+      return res.status(error.httpStatus).json({
+        success: false,
+        error: error.code,
+        message: error.message,
+      });
+    }
     console.error(`❌ Error al probar conexión con activo:`, error.response?.data || error.message);
     
     return res.status(500).json({
@@ -163,7 +248,7 @@ exports.testAssetConnection = async (req, res) => {
         config: {
           url: error.config?.url,
           method: error.config?.method,
-          params: error.config?.params
+          params: withoutAccessToken(error.config?.params)
         }
       }
     });
@@ -175,16 +260,16 @@ exports.testAssetConnection = async (req, res) => {
  */
 exports.checkPermissions = async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = req.userData?.userId || req.user?.id;
     
     // Obtener conexión de Meta
-    const connection = await MetaConnection.findOne({
-      where: { userId }
-    });
+    const { connection, source } = await resolveDiagnosticMetaConnection(req, userId);
     
     if (!connection || !connection.accessToken) {
       return res.status(400).json({
-        message: 'No se encontró conexión de Meta para este usuario o el token es nulo',
+        message: source === 'legacy_user_ambiguous'
+          ? 'Hay varias conexiones Meta; indica clinic_id o group_id para el diagnóstico'
+          : 'No se encontró conexión de Meta para este usuario o el token es nulo',
         success: false
       });
     }
@@ -226,6 +311,13 @@ exports.checkPermissions = async (req, res) => {
       rawResponse: response.data
     });
   } catch (error) {
+    if (error?.httpStatus) {
+      return res.status(error.httpStatus).json({
+        success: false,
+        error: error.code,
+        message: error.message,
+      });
+    }
     console.error('❌ Error al verificar permisos:', error.response?.data || error.message);
     
     return res.status(500).json({
@@ -259,6 +351,7 @@ exports.getSampleData = async (req, res) => {
         success: false
       });
     }
+    await authorizeDiagnosticAssetAccess(req, asset);
     
     // Obtener token de acceso
     const accessToken = asset.pageAccessToken || asset.metaConnection?.accessToken;
@@ -322,11 +415,18 @@ exports.getSampleData = async (req, res) => {
       success: true,
       requestDetails: {
         url: apiUrl,
-        params: params
+        params: withoutAccessToken(params)
       },
       sampleData: response.data
     });
   } catch (error) {
+    if (error?.httpStatus) {
+      return res.status(error.httpStatus).json({
+        success: false,
+        error: error.code,
+        message: error.message,
+      });
+    }
     console.error(`❌ Error al obtener datos de ejemplo:`, error.response?.data || error.message);
     
     return res.status(500).json({
@@ -339,7 +439,7 @@ exports.getSampleData = async (req, res) => {
         config: {
           url: error.config?.url,
           method: error.config?.method,
-          params: error.config?.params
+          params: withoutAccessToken(error.config?.params)
         }
       }
     });
@@ -364,6 +464,7 @@ exports.getAssetDetails = async (req, res) => {
         success: false
       });
     }
+    await authorizeDiagnosticAssetAccess(req, asset);
     
     return res.json({
       message: `Detalles del activo ${asset.metaAssetName} (${asset.assetType})`,
@@ -371,19 +472,23 @@ exports.getAssetDetails = async (req, res) => {
       assetDetails: {
         id: asset.id,
         clinicaId: asset.clinicaId,
-        metaConnectionId: asset.metaConnectionId,
         metaAssetId: asset.metaAssetId,
         metaAssetName: asset.metaAssetName,
         assetType: asset.assetType,
         hasPageToken: !!asset.pageAccessToken,
         hasUserToken: !!(asset.metaConnection && asset.metaConnection.accessToken),
-        pageTokenLength: asset.pageAccessToken?.length,
-        userTokenLength: asset.metaConnection?.accessToken?.length,
         createdAt: asset.createdAt,
         updatedAt: asset.updatedAt
       }
     });
   } catch (error) {
+    if (error?.httpStatus) {
+      return res.status(error.httpStatus).json({
+        success: false,
+        error: error.code,
+        message: error.message,
+      });
+    }
     console.error(`❌ Error al obtener detalles del activo:`, error);
     
     return res.status(500).json({

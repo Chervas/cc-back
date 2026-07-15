@@ -7,7 +7,6 @@ module.exports = (sequelize, DataTypes) => {
     userId: {
       type: DataTypes.INTEGER,
       allowNull: true,
-      unique: true,
       field: 'userId', // la columna existe en camelCase por migración
       references: { model: 'Usuarios', key: 'id_usuario' },
       onUpdate: 'CASCADE',
@@ -25,7 +24,16 @@ module.exports = (sequelize, DataTypes) => {
     timestamps: true,
     underscored: true,
     createdAt: 'created_at',
-    updatedAt: 'updated_at'
+    updatedAt: 'updated_at',
+    indexes: [
+      { name: 'idx_google_connections_user_id', fields: ['userId'] },
+      { name: 'google_connections_google_user_id', fields: ['googleUserId'] },
+      {
+        name: 'uniq_google_connections_user_provider',
+        unique: true,
+        fields: ['userId', 'googleUserId']
+      }
+    ]
   });
 
   GoogleConnection.associate = function(models) {

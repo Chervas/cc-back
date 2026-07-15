@@ -122,6 +122,7 @@ const TARGETED_INTEGRATION_JOB_TYPES = Object.freeze([
   'web_backfill_for_sites',
   'analytics_backfill_properties',
   'business_profile_backfill_locations',
+  'marketing_competition_heatmap_refresh',
   'whatsapp_template_sync_delayed',
 ]);
 

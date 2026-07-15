@@ -4,7 +4,6 @@ const axios = require('axios');
 const { Op } = require('sequelize');
 const db = require('../../models');
 const { normalizeCustomerId } = require('../lib/googleAdsClient');
-const { resolveGoogleConnectionForScope } = require('./scopeConnectionResolver.service');
 
 const GOOGLE_ADS_SCOPE = 'https://www.googleapis.com/auth/adwords';
 const GOOGLE_DATA_MANAGER_SCOPE = 'https://www.googleapis.com/auth/datamanager';
@@ -143,54 +142,65 @@ async function resolveScopedGoogleAdsRuntime({
   groupId = null,
   assignmentScope = null,
   customerId,
-  resolver = resolveGoogleConnectionForScope,
   accountModel = db.ClinicGoogleAdsAccount,
+  connectionModel = db.GoogleConnection,
   ensureAccessToken = ensureGoogleConnectionAccessToken,
   requiredScopes = [GOOGLE_ADS_SCOPE]
 }) {
   const cleanCustomerId = normalizeCustomerId(customerId);
   if (!cleanCustomerId) throw runtimeError('CUSTOMER_ID_REQUIRED', 'customer_id es obligatorio', 400);
-
-  const resolved = await resolver({
-    userId,
-    clinicIdRaw: clinicId,
-    groupIdRaw: groupId,
-    assignmentScopeRaw: assignmentScope,
-    allowLegacyUserFallback: false
-  });
-  const connection = resolved?.connection || null;
-  if (!connection) {
-    throw runtimeError('NO_SCOPED_CONNECTION', 'No existe conexión Google asignada a esta clínica o grupo', 404);
-  }
-
-  const scope = resolved.scope || {
+  const scope = {
     clinicId: parseInteger(clinicId),
     groupId: parseInteger(groupId),
     assignmentScope: String(assignmentScope || '').trim().toLowerCase() === 'group' ? 'group' : 'clinic'
   };
-  const account = await accountModel.findOne({
+  const mappedAccounts = await accountModel.findAll({
     where: {
-      googleConnectionId: connection.id,
       customerId: cleanCustomerId,
       isActive: true,
       ...buildScopedGoogleAccountWhere(scope)
     },
     order: [['updated_at', 'DESC']]
   });
-  if (!account) {
+  const directClinicAccounts = scope.assignmentScope === 'clinic' && scope.clinicId
+    ? mappedAccounts.filter((account) => Number(account?.clinicaId) === scope.clinicId)
+    : [];
+  const candidates = directClinicAccounts.length ? directClinicAccounts : mappedAccounts;
+  const connectionIds = Array.from(new Set(candidates
+    .map((account) => parseInteger(account?.googleConnectionId))
+    .filter(Boolean)));
+  if (!candidates.length || connectionIds.length === 0) {
     throw runtimeError(
       'CUSTOMER_NOT_ASSIGNED_TO_SCOPE',
-      'La cuenta de Google Ads no está asignada a esta clínica o grupo con la conexión efectiva',
+      'La cuenta de Google Ads no está asignada a esta clínica o grupo',
       403
     );
   }
+  if (connectionIds.length > 1) {
+    throw runtimeError(
+      'GOOGLE_ADS_ACCOUNT_MAPPING_AMBIGUOUS',
+      'La cuenta de Google Ads está asignada al mismo scope mediante varios grants',
+      409
+    );
+  }
+  const connection = await connectionModel.findByPk(connectionIds[0]);
+  if (!connection || Number(connection.id) !== connectionIds[0]) {
+    throw runtimeError(
+      'NO_SCOPED_CONNECTION',
+      'El grant Google asociado a la cuenta ya no existe',
+      404
+    );
+  }
+  const account = candidates.find((candidate) => (
+    parseInteger(candidate?.googleConnectionId) === connectionIds[0]
+  ));
 
   const token = await ensureAccessToken(connection, { requiredScopes });
   return {
     accessToken: token.accessToken,
     connection,
-    assignment: resolved.assignment || null,
-    connectionSource: resolved.source || null,
+    assignment: null,
+    connectionSource: directClinicAccounts.length ? 'mapping_clinic' : 'mapping_group',
     scope,
     account,
     customerId: cleanCustomerId,

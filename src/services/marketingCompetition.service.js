@@ -3,6 +3,18 @@
 const axios = require('axios');
 const db = require('../../models');
 const { metaGet } = require('../lib/metaClient');
+const { publicHttpUrl, resolveSafeHttpTarget } = require('../lib/safeHttpTarget');
+const jobRequestsService = require('./jobRequests.service');
+const {
+  resolveEffectiveMarketingAssetInventory,
+} = require('./effectiveMarketingAssets.service');
+const {
+  buildHeatmapCacheIdentity,
+  createHeatmapCacheCoordinator,
+  heatmapCacheStatus,
+  HEATMAP_REFRESH_LEASE_MS,
+  withHeatmapCacheMetadata,
+} = require('./marketingCompetitionHeatmapCache.service');
 
 const {
   MarketingCompetitor,
@@ -12,6 +24,7 @@ const {
   ClinicMetaAsset,
   MetaConnection,
   ClinicBusinessLocation,
+  MarketingCompetitionHeatmapCache,
 } = db;
 
 const { Op } = db.Sequelize;
@@ -40,6 +53,24 @@ const META_BROWSER_MEDIA_MIN_MISSING = Math.max(1, Math.min(DEFAULT_AD_LIMIT, pa
 const LOCAL_HEATMAP_GRID_SIZE = Math.max(3, Math.min(5, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_GRID_SIZE || '5', 10)));
 const LOCAL_HEATMAP_MAX_POINTS = Math.max(1, Math.min(25, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_MAX_POINTS || '25', 10)));
 const LOCAL_HEATMAP_RESULT_LIMIT = Math.max(3, Math.min(20, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_RESULT_LIMIT || '20', 10)));
+const LOCAL_HEATMAP_BIAS_RADIUS_METERS = Math.max(500, Math.min(5000, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_BIAS_RADIUS_METERS || '1500', 10)));
+const LOCAL_HEATMAP_ALGORITHM_VERSION = process.env.COMPETITION_LOCAL_HEATMAP_ALGORITHM_VERSION || 'local-relevance-bias-v1';
+const LOCAL_HEATMAP_REFRESH_JOB_TYPE = 'marketing_competition_heatmap_refresh';
+const LOCAL_HEATMAP_TERM_MAX_LENGTH = Math.max(40, Math.min(240, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_TERM_MAX_LENGTH || '160', 10)));
+const LOCAL_HEATMAP_NEW_CACHE_ROWS_PER_HOUR = Math.max(1, Math.min(50, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_NEW_CACHE_ROWS_PER_HOUR || '12', 10)));
+const LOCAL_HEATMAP_MAX_CACHE_ROWS_PER_CLINIC = Math.max(12, Math.min(500, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_MAX_CACHE_ROWS_PER_CLINIC || '60', 10)));
+const LOCAL_HEATMAP_MIN_VALID_POINTS = Math.max(1, Math.min(LOCAL_HEATMAP_MAX_POINTS, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_MIN_VALID_POINTS || '20', 10)));
+const LOCAL_HEATMAP_FAILURE_FRESH_TTL_MS = 15 * 60 * 1000;
+const LOCAL_HEATMAP_FAILURE_EXPIRES_TTL_MS = 60 * 60 * 1000;
+const LOCAL_HEATMAP_EFFECTIVE_GRID_SIZE = LOCAL_HEATMAP_GRID_SIZE % 2 === 0
+  ? LOCAL_HEATMAP_GRID_SIZE - 1
+  : LOCAL_HEATMAP_GRID_SIZE;
+const LOCAL_HEATMAP_CACHE_ALGORITHM_VERSION = [
+  LOCAL_HEATMAP_ALGORITHM_VERSION,
+  `points-${LOCAL_HEATMAP_MAX_POINTS}`,
+  `results-${LOCAL_HEATMAP_RESULT_LIMIT}`,
+  `bias-${LOCAL_HEATMAP_BIAS_RADIUS_METERS}`
+].join(':');
 const SOCIAL_DISCOVERY_TIMEOUT_MS = Math.max(1000, Math.min(15000, parseInt(process.env.COMPETITION_SOCIAL_DISCOVERY_TIMEOUT_MS || '8000', 10)));
 const SOCIAL_DISCOVERY_PAGE_LIMIT = Math.max(1, Math.min(6, parseInt(process.env.COMPETITION_SOCIAL_DISCOVERY_PAGE_LIMIT || '4', 10)));
 const META_PAGE_MATCH_THRESHOLD = Math.max(20, Math.min(100, parseInt(process.env.COMPETITION_META_PAGE_MATCH_THRESHOLD || '45', 10)));
@@ -51,13 +82,71 @@ const COMPETITION_PROVIDER_CACHE_TTL_MS = Math.max(0, Math.min(300000, parseInt(
 const COMPETITION_PLACES_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_PLACES_CACHE_TTL_MS || '21600000', 10)));
 const COMPETITION_PLACE_DETAILS_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_PLACE_DETAILS_CACHE_TTL_MS || '43200000', 10)));
 const COMPETITION_PLACE_PHOTO_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_PLACE_PHOTO_CACHE_TTL_MS || '43200000', 10)));
-const COMPETITION_HEATMAP_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_HEATMAP_CACHE_TTL_MS || '21600000', 10)));
-const COMPETITION_STATIC_MAP_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_STATIC_MAP_CACHE_TTL_MS || '21600000', 10)));
 const COMPETITION_GOOGLE_CONCURRENCY = Math.max(1, Math.min(5, parseInt(process.env.COMPETITION_GOOGLE_CONCURRENCY || '3', 10)));
 const COMPETITION_CACHE_VERSION = process.env.COMPETITION_CACHE_VERSION || 'competition-v7-podology-relevance';
+// El proyecto opera principalmente en el EEE. Desde julio de 2025 Places API
+// limita sus usos permitidos y no permite este caso de inteligencia
+// competitiva ni almacenar rankings. Solo se habilita si existe un acuerdo
+// contractual específico que cubra ambos usos.
+const COMPETITION_GOOGLE_PLACES_COMPETITOR_USE_ALLOWED = envFlagEnabled(
+  process.env.COMPETITION_GOOGLE_PLACES_COMPETITOR_USE_ALLOWED,
+  false
+);
+const COMPETITION_GOOGLE_PLACES_COMPETITOR_STORAGE_ALLOWED = envFlagEnabled(
+  process.env.COMPETITION_GOOGLE_PLACES_COMPETITOR_STORAGE_ALLOWED,
+  false
+);
+const COMPETITION_LOCAL_RANKING_STORAGE_ALLOWED = envFlagEnabled(
+  process.env.COMPETITION_LOCAL_RANKING_STORAGE_ALLOWED,
+  false
+);
+const competitionPlacesFeatureEnabled = () => (
+  COMPETITION_GOOGLE_PLACES_COMPETITOR_USE_ALLOWED
+  && COMPETITION_GOOGLE_PLACES_COMPETITOR_STORAGE_ALLOWED
+);
+const payloadIncludesGooglePlacesContent = (payload = {}) => (
+  cleanString(payload.source) === 'google_places'
+  || !!cleanString(payload.google_place_id)
+  || (payload.raw_place_payload !== undefined && payload.raw_place_payload !== null)
+);
 
 const competitionRuntimeCache = new Map();
 const competitionInFlight = new Map();
+const persistentHeatmapCache = createHeatmapCacheCoordinator({
+  model: MarketingCompetitionHeatmapCache,
+  scheduleRefresh: async ({ identity, token, payload }) => {
+    const result = await jobRequestsService.enqueueUniqueJobRequest({
+      type: LOCAL_HEATMAP_REFRESH_JOB_TYPE,
+      priority: 'low',
+      origin: 'marketing_reports_cache',
+      dedupeScope: `heatmap:${identity.cache_key}`,
+      payload: {
+        ...(payload || {}),
+        cacheKey: identity.cache_key,
+        refreshToken: token,
+      },
+      maxAttempts: 4,
+    });
+
+    // Si un job anterior seguía activo cuando caducó su lease, devuelve el
+    // token a ese job para que pueda terminar o reintentarse, en vez de dejar
+    // dos trabajos durables compitiendo por la misma fila.
+    if (result?.created === false) {
+      const existingPayload = result.job?.payload || result.job?.get?.('payload') || {};
+      const existingToken = cleanString(existingPayload.refreshToken);
+      if (existingToken && existingToken !== token) {
+        await MarketingCompetitionHeatmapCache.update({
+          refresh_lock_token: existingToken,
+          refresh_locked_until: new Date(Date.now() + HEATMAP_REFRESH_LEASE_MS),
+          refresh_state: 'refreshing',
+        }, {
+          where: { cache_key: identity.cache_key, refresh_lock_token: token },
+        });
+      }
+    }
+    return result;
+  },
+});
 
 const GOOGLE_COUNTRY_GEO_CRITERIA_IDS = {
   AD: 2020,
@@ -158,6 +247,25 @@ const PLACE_DETAILS_FIELD_MASK = [
   'photos'
 ].join(',');
 
+const LOCAL_HEATMAP_PLACE_FIELD_MASK = [
+  'places.id',
+  'places.displayName'
+].join(',');
+
+const LOCAL_HEATMAP_ANCHOR_SEARCH_FIELD_MASK = [
+  'places.id',
+  'places.displayName',
+  'places.location',
+  'places.googleMapsUri'
+].join(',');
+
+const LOCAL_HEATMAP_ANCHOR_DETAILS_FIELD_MASK = [
+  'id',
+  'displayName',
+  'location',
+  'googleMapsUri'
+].join(',');
+
 const META_AD_FIELDS = [
   'id',
   'page_id',
@@ -185,6 +293,7 @@ function toInt(value) {
 }
 
 function toNumber(value) {
+  if (value === undefined || value === null || value === '') return null;
   const num = Number(value);
   return Number.isFinite(num) ? num : null;
 }
@@ -898,6 +1007,82 @@ function metaTermsFromCompetitor(competitor, socialProfiles = null) {
   return [...new Set(terms.map(cleanString).filter(Boolean))].slice(0, 8);
 }
 
+async function fetchPublicHtmlPage(rawUrl, dependencies = {}) {
+  const httpClient = dependencies.httpClient || axios;
+  const safeTargetResolver = dependencies.resolveSafeHttpTarget || resolveSafeHttpTarget;
+  const maxRedirects = Math.max(0, Math.min(5, Number(dependencies.maxRedirects ?? 3) || 0));
+  let currentUrl = publicHttpUrl(rawUrl);
+  if (!currentUrl) {
+    const error = new Error('social_discovery_target_invalid');
+    error.code = 'INVALID_TARGET_URL';
+    throw error;
+  }
+
+  for (let redirect = 0; redirect <= maxRedirects; redirect += 1) {
+    const safeTarget = await safeTargetResolver(currentUrl);
+    let response;
+    try {
+      response = await httpClient.get(safeTarget.url, {
+        timeout: SOCIAL_DISCOVERY_TIMEOUT_MS,
+        maxContentLength: 1024 * 1024,
+        maxBodyLength: 1024 * 1024,
+        maxRedirects: 0,
+        proxy: false,
+        responseType: 'text',
+        transformResponse: [(value) => value],
+        validateStatus: (status) => status >= 200 && status < 400,
+        httpAgent: safeTarget.httpAgent,
+        httpsAgent: safeTarget.httpsAgent,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; ClinicaClickBot/1.0; +https://clinicaclick.com)',
+          'Accept': 'text/html,application/xhtml+xml'
+        }
+      });
+    } finally {
+      safeTarget.httpAgent?.destroy?.();
+      safeTarget.httpsAgent?.destroy?.();
+    }
+
+    const status = Number(response?.status || 0);
+    if (status >= 300 && status < 400) {
+      const location = cleanString(response?.headers?.location);
+      if (!location || redirect >= maxRedirects) {
+        const error = new Error(location ? 'social_discovery_too_many_redirects' : 'social_discovery_redirect_without_location');
+        error.code = location ? 'TOO_MANY_REDIRECTS' : 'INVALID_REDIRECT';
+        throw error;
+      }
+      let redirected;
+      try {
+        redirected = new URL(location, safeTarget.url).toString();
+      } catch (_) {
+        redirected = null;
+      }
+      currentUrl = publicHttpUrl(redirected);
+      if (!currentUrl) {
+        const error = new Error('social_discovery_redirect_target_invalid');
+        error.code = 'UNSAFE_REDIRECT_TARGET';
+        throw error;
+      }
+      continue;
+    }
+
+    const contentType = cleanString(response?.headers?.['content-type']);
+    if (contentType && !/text\/html|application\/xhtml\+xml/i.test(contentType)) {
+      const error = new Error('social_discovery_response_not_html');
+      error.code = 'UNSUPPORTED_CONTENT_TYPE';
+      throw error;
+    }
+    return {
+      data: typeof response?.data === 'string' ? response.data : String(response?.data || ''),
+      url: safeTarget.url,
+      status,
+      headers: response?.headers || {},
+    };
+  }
+
+  throw new Error('social_discovery_too_many_redirects');
+}
+
 async function discoverSocialProfiles(competitor, candidate = {}) {
   const existing = socialProfilesFromPayload(competitor?.raw_place_payload);
   const manual = buildSocialProfilesFromPayload(candidate);
@@ -908,7 +1093,9 @@ async function discoverSocialProfiles(competitor, candidate = {}) {
   let profiles = mergeSocialProfiles(mergeSocialProfiles(existing, manual), rawProfiles);
   if (profiles?.instagram_url && profiles?.facebook_url) return profiles;
 
-  const websiteUrl = normalizeUrl(candidate.website_url) || normalizeUrl(competitor?.website_url);
+  const websiteUrl = publicHttpUrl(
+    normalizeUrl(candidate.website_url) || normalizeUrl(competitor?.website_url)
+  );
   if (!websiteUrl) return profiles;
 
   const pagesToCheck = [websiteUrl];
@@ -917,15 +1104,8 @@ async function discoverSocialProfiles(competitor, candidate = {}) {
     for (let index = 0; index < pagesToCheck.length && index < SOCIAL_DISCOVERY_PAGE_LIMIT; index += 1) {
       const pageUrl = pagesToCheck[index];
       try {
-        const response = await axios.get(pageUrl, {
-          timeout: SOCIAL_DISCOVERY_TIMEOUT_MS,
-          maxContentLength: 1024 * 1024,
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (compatible; ClinicaClickBot/1.0; +https://clinicaclick.com)',
-            'Accept': 'text/html,application/xhtml+xml'
-          }
-        });
-        const discovered = extractSocialProfilesFromHtml(response.data, pageUrl);
+        const response = await fetchPublicHtmlPage(pageUrl);
+        const discovered = extractSocialProfilesFromHtml(response.data, response.url);
         profiles = mergeSocialProfiles(profiles, {
           ...discovered,
           source: Object.keys(discovered).length ? (index === 0 ? 'website_homepage' : 'website_internal_page') : null,
@@ -933,7 +1113,7 @@ async function discoverSocialProfiles(competitor, candidate = {}) {
         });
         if (profiles?.instagram_url && profiles?.facebook_url) return profiles;
         if (index === 0) {
-          for (const link of extractCandidateInternalLinks(response.data, pageUrl)) {
+          for (const link of extractCandidateInternalLinks(response.data, response.url)) {
             if (!pagesToCheck.includes(link)) pagesToCheck.push(link);
             if (pagesToCheck.length >= SOCIAL_DISCOVERY_PAGE_LIMIT) break;
           }
@@ -1007,11 +1187,14 @@ function providerStatus({ googleError = null, metaError = null, metaTokenSource 
   return {
     google_places: {
       provider: 'google_places',
-      available: !!googleKey && !googleError,
-      configured: !!googleKey,
+      available: competitionPlacesFeatureEnabled() && !!googleKey && !googleError,
+      configured: competitionPlacesFeatureEnabled() && !!googleKey,
       error: googleError ? normalizeExternalError(googleError) : null,
       required_env: 'GOOGLE_PLACES_API_KEY',
-      fallback_env: ['GOOGLE_MAPS_API_KEY', 'GOOGLE_API_KEY']
+      fallback_env: ['GOOGLE_MAPS_API_KEY', 'GOOGLE_API_KEY'],
+      note: competitionPlacesFeatureEnabled()
+        ? 'Uso habilitado por configuración contractual específica.'
+        : 'Deshabilitado: el caso de inteligencia competitiva no figura entre los usos permitidos de Places API para clientes del EEE.'
     },
     meta_ads_library: {
       provider: META_ADS_LIBRARY_PROVIDER,
@@ -1056,67 +1239,6 @@ async function providerStatusForScope(scope, options = {}) {
 
 function getGooglePlacesApiKey() {
   return process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY || null;
-}
-
-function staticMapZoomForRadius(radiusKm) {
-  const radius = Number(radiusKm) || 3;
-  if (radius <= 1) return 15;
-  if (radius <= 3) return 14;
-  return 13;
-}
-
-async function buildLocalHeatmapStaticMap(center, points = [], radiusKm = 3) {
-  const apiKey = getGooglePlacesApiKey();
-  if (!apiKey || !center?.latitude || !center?.longitude) {
-    return { dataUrl: null, error: { code: 'STATIC_MAP_NOT_CONFIGURED', message: 'Maps Static API no está configurada para este entorno.' } };
-  }
-  return cachedCompetitionValue(cacheKey(['static-map-background', center.latitude, center.longitude, radiusKm]), COMPETITION_STATIC_MAP_CACHE_TTL_MS, async () => {
-    try {
-      const params = new URLSearchParams({
-        center: `${center.latitude},${center.longitude}`,
-        zoom: String(staticMapZoomForRadius(radiusKm)),
-        size: '640x420',
-        scale: '2',
-        maptype: 'roadmap',
-        language: DEFAULT_LANGUAGE,
-        region: DEFAULT_REGION,
-        key: apiKey
-      });
-      const response = await axios.get(`https://maps.googleapis.com/maps/api/staticmap?${params.toString()}`, {
-        responseType: 'arraybuffer',
-        timeout: 12000,
-        maxContentLength: 1024 * 1024,
-        validateStatus: () => true
-      });
-      const contentType = response.headers?.['content-type'] || 'image/png';
-      if (response.status >= 400 || !String(contentType).startsWith('image/')) {
-        return {
-          dataUrl: null,
-          error: {
-            code: `STATIC_MAP_HTTP_${response.status}`,
-            message: 'Google Static Maps no ha devuelto una imagen válida.',
-            status: response.status
-          }
-        };
-      }
-      return {
-        dataUrl: `data:${contentType};base64,${Buffer.from(response.data).toString('base64')}`,
-        error: null
-      };
-    } catch (error) {
-      const normalized = normalizeExternalError(error);
-      return {
-        dataUrl: null,
-        error: {
-          code: normalized.code || 'STATIC_MAP_ERROR',
-          message: normalized.message || 'No se pudo generar el mapa estático.',
-          status: normalized.status || null
-        }
-      };
-    }
-  }, {
-    cachePredicate: (value) => !!value?.dataUrl
-  });
 }
 
 function getMetaAdLibraryTokenFromEnv() {
@@ -1240,13 +1362,44 @@ async function resolvePrimaryClinic(scope) {
   });
   if (!clinic || !ClinicBusinessLocation) return clinic;
 
-  const businessLocation = await ClinicBusinessLocation.findOne({
-    where: { clinica_id: clinicId, is_active: true },
-    attributes: ['location_name', 'location_id', 'primary_category', 'sync_status', 'raw_payload'],
-    order: [['last_synced_at', 'DESC'], ['updated_at', 'DESC']],
-    raw: true
+  const inventory = await resolveEffectiveMarketingAssetInventory({
+    clinicIdRaw: clinicId,
+    groupIdRaw: null,
+    assignmentScopeRaw: 'clinic',
   });
-  const businessAddress = businessLocation?.raw_payload?.storefrontAddress || {};
+  const availableProfiles = Array.isArray(inventory?.google?.available_assets?.business_profile)
+    ? inventory.google.available_assets.business_profile
+    : [];
+  const effectiveProfile = inventory?.google?.effective_assets?.business_profile
+    || availableProfiles[0]
+    || null;
+  const effectiveMappingId = toInt(effectiveProfile?.mapping_id);
+  let businessLocation = effectiveMappingId
+    ? await ClinicBusinessLocation.findOne({
+      where: { id: effectiveMappingId, is_active: true },
+      attributes: ['id', 'location_name', 'location_id', 'primary_category', 'sync_status', 'raw_payload'],
+      raw: true,
+    })
+    : null;
+  if (!businessLocation) {
+    businessLocation = await ClinicBusinessLocation.findOne({
+      where: { clinica_id: clinicId, is_active: true },
+      attributes: ['id', 'location_name', 'location_id', 'primary_category', 'sync_status', 'raw_payload'],
+      order: [['last_synced_at', 'DESC'], ['updated_at', 'DESC']],
+      raw: true,
+    });
+  }
+  let businessRaw = businessLocation?.raw_payload;
+  if (typeof businessRaw === 'string') {
+    try {
+      businessRaw = JSON.parse(businessRaw);
+    } catch (_) {
+      businessRaw = {};
+    }
+  }
+  if (!businessRaw || typeof businessRaw !== 'object' || Array.isArray(businessRaw)) businessRaw = {};
+  const businessAddress = businessRaw.storefrontAddress || {};
+  const businessLatLng = businessRaw.latlng || businessRaw.latLng || businessRaw.location || {};
 
   return {
     ...clinic,
@@ -1260,12 +1413,20 @@ async function resolvePrimaryClinic(scope) {
     business_address_lines: Array.isArray(businessAddress.addressLines)
       ? businessAddress.addressLines.map(cleanString).filter(Boolean)
       : [],
-    business_labels: Array.isArray(businessLocation?.raw_payload?.labels)
-      ? businessLocation.raw_payload.labels.map(cleanString).filter(Boolean)
+    business_labels: Array.isArray(businessRaw.labels)
+      ? businessRaw.labels.map(cleanString).filter(Boolean)
       : [],
-    business_place_id: normalizePlaceId(businessLocation?.raw_payload?.metadata?.placeId)
-      || normalizePlaceId(businessLocation?.raw_payload?.placeId)
-      || null
+    business_place_id: normalizePlaceId(businessRaw.metadata?.placeId)
+      || normalizePlaceId(businessRaw.placeId)
+      || null,
+    business_maps_url: normalizeUrl(businessRaw.metadata?.mapsUri || businessRaw.googleMapsUri),
+    business_latitude: Number.isFinite(Number(businessLatLng.latitude))
+      ? Number(businessLatLng.latitude)
+      : null,
+    business_longitude: Number.isFinite(Number(businessLatLng.longitude))
+      ? Number(businessLatLng.longitude)
+      : null,
+    business_assignment_origin: cleanString(effectiveProfile?.assignment_origin),
   };
 }
 
@@ -1287,6 +1448,20 @@ function clinicLocationLabel(clinic) {
     .map(cleanString)
     .filter(Boolean);
   return parts.length ? parts.join(', ') : (cleanString(clinic?.direccion) || cleanString(clinic?.business_address_lines?.[0]));
+}
+
+function placeMatchesClinicAnchor(place, clinic) {
+  const ownName = cleanString(clinic?.business_location_name) || cleanString(clinic?.nombre_clinica);
+  if (!ownName || !businessNamesMatch(place?.name, ownName)) return false;
+  const placeAddress = normalizeBusinessName(place?.address);
+  if (!placeAddress) return false;
+  const locationHints = [
+    clinic?.ciudad,
+    clinic?.business_locality,
+    clinic?.codigo_postal,
+    clinic?.business_postal_code,
+  ].map(normalizeBusinessName).filter((value) => value && value.length >= 3);
+  return locationHints.length > 0 && locationHints.some((hint) => placeAddress.includes(hint));
 }
 
 function rankingTermsForClinic(clinic, limit = DEFAULT_RANKING_LIMIT) {
@@ -1454,8 +1629,7 @@ async function resolveOwnClinicProfile(clinic) {
   try {
     const places = await searchGooglePlaces({ query, maxResultCount: 5 });
     const normalized = places.map(normalizePlace);
-    const ownName = cleanString(clinic.business_location_name) || cleanString(clinic.nombre_clinica);
-    const match = normalized.find((place) => businessNamesMatch(place.name, ownName)) || normalized[0] || null;
+    const match = normalized.find((place) => placeMatchesClinicAnchor(place, clinic)) || null;
     return match ? attachPlacePhotoUrl(match, { maxWidthPx: 640 }) : null;
   } catch (_) {
     return null;
@@ -1560,35 +1734,6 @@ function heatmapSearchTermForClinic(term, clinic) {
   return cleanString(stripped) || raw;
 }
 
-function heatmapRestrictionHalfSizeMeters() {
-  // Each tile simulates a search from that point. The zoom changes where the
-  // points are placed, but not the local search window itself.
-  return 650;
-}
-
-function rectangleAroundPoint(point, halfSizeMeters) {
-  const latitude = Number(point?.latitude);
-  const longitude = Number(point?.longitude);
-  const meters = Number(halfSizeMeters);
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || !Number.isFinite(meters)) return null;
-
-  const km = meters / 1000;
-  const latDelta = km / 111.32;
-  const lngDelta = km / (111.32 * Math.cos(latitude * Math.PI / 180));
-  return {
-    rectangle: {
-      low: {
-        latitude: Math.round((latitude - latDelta) * 1000000) / 1000000,
-        longitude: Math.round((longitude - lngDelta) * 1000000) / 1000000
-      },
-      high: {
-        latitude: Math.round((latitude + latDelta) * 1000000) / 1000000,
-        longitude: Math.round((longitude + lngDelta) * 1000000) / 1000000
-      }
-    }
-  };
-}
-
 function offsetLatLng(center, xKm, yKm) {
   const latitude = Number(center?.latitude);
   const longitude = Number(center?.longitude);
@@ -1608,138 +1753,500 @@ function heatmapScore(position) {
   return 20;
 }
 
+function buildLocalHeatmapSearchBody({ query, point }) {
+  return {
+    textQuery: query,
+    languageCode: DEFAULT_LANGUAGE,
+    regionCode: DEFAULT_REGION,
+    maxResultCount: LOCAL_HEATMAP_RESULT_LIMIT,
+    locationBias: {
+      circle: {
+        center: point,
+        radius: LOCAL_HEATMAP_BIAS_RADIUS_METERS
+      }
+    },
+    rankPreference: 'RELEVANCE'
+  };
+}
+
+async function searchGooglePlacesForHeatmap({ query, point }) {
+  const response = await axios.post(
+    `${GOOGLE_PLACES_API_BASE}/places:searchText`,
+    buildLocalHeatmapSearchBody({ query, point }),
+    {
+      headers: buildPlaceHeaders(LOCAL_HEATMAP_PLACE_FIELD_MASK),
+      timeout: 15000
+    }
+  );
+  return Array.isArray(response.data?.places) ? response.data.places : [];
+}
+
+function trackProviderRequest(tracker, type) {
+  if (!tracker || !type) return;
+  tracker[type] = (Number(tracker[type]) || 0) + 1;
+}
+
+function totalProviderRequests(tracker) {
+  return Object.values(tracker || {}).reduce((total, value) => total + (Number(value) || 0), 0);
+}
+
+async function resolveOwnClinicHeatmapProfile(clinic, tracker) {
+  if (!clinic) return null;
+  const ownPlaceId = normalizePlaceId(clinic.business_place_id);
+  const persistedLatitude = Number(clinic.business_latitude);
+  const persistedLongitude = Number(clinic.business_longitude);
+  if (Number.isFinite(persistedLatitude) && Number.isFinite(persistedLongitude)) {
+    return {
+      name: cleanString(clinic.business_location_name) || cleanString(clinic.nombre_clinica),
+      google_place_id: ownPlaceId,
+      google_maps_url: normalizeUrl(clinic.business_maps_url) || normalizeUrl(clinic.url_ficha_local),
+      latitude: persistedLatitude,
+      longitude: persistedLongitude,
+    };
+  }
+  if (ownPlaceId) {
+    trackProviderRequest(tracker, 'places_anchor_details');
+    try {
+      const response = await axios.get(`${GOOGLE_PLACES_API_BASE}/places/${encodeURIComponent(ownPlaceId)}`, {
+        headers: buildPlaceHeaders(LOCAL_HEATMAP_ANCHOR_DETAILS_FIELD_MASK),
+        timeout: 15000
+      });
+      return normalizePlace(response.data || {});
+    } catch (_) {
+      return null;
+    }
+  }
+
+  const query = [clinic.nombre_clinica, clinicLocationLabel(clinic)].map(cleanString).filter(Boolean).join(' ');
+  if (!query) return null;
+  trackProviderRequest(tracker, 'places_anchor_search');
+  try {
+    const response = await axios.post(`${GOOGLE_PLACES_API_BASE}/places:searchText`, {
+      textQuery: query,
+      languageCode: DEFAULT_LANGUAGE,
+      regionCode: DEFAULT_REGION,
+      maxResultCount: 5,
+      rankPreference: 'RELEVANCE'
+    }, {
+      headers: buildPlaceHeaders(LOCAL_HEATMAP_ANCHOR_SEARCH_FIELD_MASK),
+      timeout: 15000
+    });
+    const places = Array.isArray(response.data?.places) ? response.data.places.map(normalizePlace) : [];
+    return places.find((place) => placeMatchesClinicAnchor(place, clinic)) || {
+      setup_code: 'LOCAL_PROFILE_AMBIGUOUS',
+      setup_message: 'No hemos podido identificar de forma inequívoca la ficha de esta clínica. Selecciona su Perfil de Empresa antes de calcular posiciones.',
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+function localHeatmapPlaceKey(clinic) {
+  const placeId = normalizePlaceId(clinic?.business_place_id);
+  if (placeId) return `google-place:${placeId}`;
+  const locationId = cleanString(clinic?.business_location_id);
+  if (locationId) return `business-location:${locationId}`;
+  const localProfileUrl = normalizeUrl(clinic?.url_ficha_local);
+  if (localProfileUrl) return `local-profile:${localProfileUrl}`;
+  return `clinic:${toInt(clinic?.id_clinica) || 'unknown'}`;
+}
+
+async function collectLocalHeatmapPoints({
+  center,
+  radiusKm,
+  query,
+  ownPlaceId,
+  ownName,
+  tracker,
+  search = searchGooglePlacesForHeatmap,
+  measuredAt = () => new Date().toISOString()
+}) {
+  return mapWithConcurrency(
+    rankingHeatmapOffsets(radiusKm),
+    COMPETITION_GOOGLE_CONCURRENCY,
+    async (offset) => {
+      const point = offsetLatLng(center, offset.xKm, offset.yKm);
+      if (!point) return null;
+      try {
+        // Una única Text Search por punto. No se ejecuta un fallback cuando
+        // Google no devuelve resultados: ausencia y error quedan diferenciados.
+        trackProviderRequest(tracker, 'places_text_search_points');
+        const places = await search({ query, point });
+        const normalized = places.map(normalizePlace).filter((place) => place.name);
+        const ownIndex = normalized.findIndex((place) => {
+          const placeId = normalizePlaceId(place.google_place_id);
+          return (ownPlaceId && placeId === ownPlaceId) || businessNamesMatch(place.name, ownName);
+        });
+        const myPosition = ownIndex >= 0 ? ownIndex + 1 : null;
+        return {
+          latitude: point.latitude,
+          longitude: point.longitude,
+          x_km: offset.xKm,
+          y_km: offset.yKm,
+          my_position: myPosition,
+          score: heatmapScore(myPosition),
+          measured_at: measuredAt()
+        };
+      } catch (error) {
+        return {
+          latitude: point.latitude,
+          longitude: point.longitude,
+          x_km: offset.xKm,
+          y_km: offset.yKm,
+          my_position: null,
+          score: 0,
+          error: normalizeExternalError(error),
+          measured_at: measuredAt()
+        };
+      }
+    }
+  ).then((items) => items.filter(Boolean));
+}
+
+async function generateLocalRankingHeatmapSnapshot({
+  clinic,
+  terms,
+  selectedTerm,
+  heatmapQuery,
+  radiusKm,
+  dependencies = {},
+}) {
+  const tracker = {
+    places_anchor_details: 0,
+    places_anchor_search: 0,
+    places_text_search_points: 0
+  };
+  const ownProfile = await (dependencies.resolveOwnClinicHeatmapProfile || resolveOwnClinicHeatmapProfile)(clinic, tracker);
+  const center = {
+    latitude: Number(ownProfile?.latitude),
+    longitude: Number(ownProfile?.longitude)
+  };
+  if (!Number.isFinite(center.latitude) || !Number.isFinite(center.longitude)) {
+    return {
+      cacheable: false,
+      providerRequests: totalProviderRequests(tracker),
+      googlePlaceId: normalizePlaceId(ownProfile?.google_place_id || clinic?.business_place_id),
+      payload: {
+        success: false,
+        setup_required: true,
+        setup_code: ownProfile?.setup_code || 'LOCAL_COORDINATES_REQUIRED',
+        message: ownProfile?.setup_message || 'No tenemos coordenadas fiables de la ficha local de esta clínica para simular búsquedas por zona.',
+        points: []
+      }
+    };
+  }
+
+  const ownPlaceId = normalizePlaceId(ownProfile?.google_place_id || clinic?.business_place_id);
+  const ownName = cleanString(ownProfile?.name)
+    || cleanString(clinic?.business_location_name)
+    || cleanString(clinic?.nombre_clinica);
+  const points = await (dependencies.collectLocalHeatmapPoints || collectLocalHeatmapPoints)({
+    center,
+    radiusKm,
+    query: heatmapQuery,
+    ownPlaceId,
+    ownName,
+    tracker
+  });
+  const validPoints = points.filter((point) => !point.error).length;
+  const requiredValidPoints = Math.min(
+    points.length,
+    Math.max(Math.ceil(points.length * 0.8), Math.min(LOCAL_HEATMAP_MIN_VALID_POINTS, points.length))
+  );
+  if (validPoints < requiredValidPoints) {
+    const requestBreakdown = { ...tracker };
+    return {
+      cacheable: true,
+      freshTtlMs: LOCAL_HEATMAP_FAILURE_FRESH_TTL_MS,
+      expiresTtlMs: LOCAL_HEATMAP_FAILURE_EXPIRES_TTL_MS,
+      providerRequests: totalProviderRequests(requestBreakdown),
+      googlePlaceId: ownPlaceId,
+      payload: {
+        success: false,
+        provider_unavailable: true,
+        partial: validPoints > 0,
+        message: 'Google no ha devuelto suficientes mediciones fiables para dibujar el mapa. Volveremos a intentarlo automáticamente.',
+        term: selectedTerm,
+        effective_term: heatmapQuery,
+        available_terms: terms,
+        zoom_km: radiusKm,
+        grid_size: LOCAL_HEATMAP_EFFECTIVE_GRID_SIZE,
+        result_limit: LOCAL_HEATMAP_RESULT_LIMIT,
+        center,
+        map_provider: null,
+        map_attribution: 'Google Maps',
+        ranking_attribution: 'Google Maps',
+        ranking_method: 'google_places_relevance_location_bias_estimate',
+        ranking_is_estimate: true,
+        valid_points: validPoints,
+        required_valid_points: requiredValidPoints,
+        provider_request_breakdown: requestBreakdown,
+        own_profile: ownProfile ? {
+          name: ownProfile.name,
+          google_place_id: ownPlaceId,
+          google_maps_url: ownProfile.google_maps_url
+        } : null,
+        points
+      }
+    };
+  }
+  const requestBreakdown = { ...tracker };
+
+  return {
+    cacheable: true,
+    providerRequests: totalProviderRequests(requestBreakdown),
+    googlePlaceId: ownPlaceId,
+    payload: {
+      success: true,
+      term: selectedTerm,
+      effective_term: heatmapQuery,
+      available_terms: terms,
+      zoom_km: radiusKm,
+      grid_size: LOCAL_HEATMAP_EFFECTIVE_GRID_SIZE,
+      result_limit: LOCAL_HEATMAP_RESULT_LIMIT,
+      center,
+      // No almacenamos ni servimos una copia de Google Maps Static. El grid es
+      // abstracto y la atribución identifica el origen del ranking.
+      map_provider: null,
+      map_attribution: 'Google Maps',
+      ranking_attribution: 'Google Maps',
+      partial: validPoints < points.length,
+      valid_points: validPoints,
+      required_valid_points: requiredValidPoints,
+      ranking_method: 'google_places_relevance_location_bias_estimate',
+      ranking_is_estimate: true,
+      provider_request_breakdown: requestBreakdown,
+      own_profile: ownProfile ? {
+        name: ownProfile.name,
+        google_place_id: ownPlaceId,
+        google_maps_url: ownProfile.google_maps_url
+      } : null,
+      points
+    }
+  };
+}
+
+function normalizeLocalHeatmapTerm(value) {
+  const normalized = cleanString(value);
+  if (normalized && normalized.length > LOCAL_HEATMAP_TERM_MAX_LENGTH) {
+    const error = new Error(`La búsqueda local no puede superar ${LOCAL_HEATMAP_TERM_MAX_LENGTH} caracteres`);
+    error.status = 400;
+    error.code = 'LOCAL_HEATMAP_TERM_TOO_LONG';
+    throw error;
+  }
+  return normalized;
+}
+
+async function assertLocalHeatmapGenerationBudget(identity) {
+  if (await persistentHeatmapCache.find(identity)) return;
+  await db.sequelize.transaction({
+    isolationLevel: db.Sequelize.Transaction.ISOLATION_LEVELS.READ_COMMITTED,
+  }, async (transaction) => {
+    // La fila de clínica es el mutex persistente del presupuesto. Dos términos
+    // nuevos para la misma clínica no pueden superar el count simultáneamente.
+    const clinicLock = await Clinica.findByPk(identity.primary_clinic_id, {
+      attributes: ['id_clinica'],
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!clinicLock) {
+      const error = new Error('La clínica del mapa local ya no está disponible');
+      error.status = 404;
+      throw error;
+    }
+    if (await persistentHeatmapCache.find(identity, { transaction })) return;
+
+    const now = new Date();
+    const oneHourAgo = new Date(now.getTime() - (60 * 60 * 1000));
+    const [recentRows, activeRows] = await Promise.all([
+      MarketingCompetitionHeatmapCache.count({
+        where: {
+          primary_clinic_id: identity.primary_clinic_id,
+          created_at: { [Op.gte]: oneHourAgo },
+        },
+        transaction,
+      }),
+      MarketingCompetitionHeatmapCache.count({
+        where: {
+          primary_clinic_id: identity.primary_clinic_id,
+          [Op.or]: [
+            { expires_at: { [Op.gt]: now } },
+            { expires_at: null },
+          ],
+        },
+        transaction,
+      }),
+    ]);
+    if (recentRows >= LOCAL_HEATMAP_NEW_CACHE_ROWS_PER_HOUR || activeRows >= LOCAL_HEATMAP_MAX_CACHE_ROWS_PER_CLINIC) {
+      const error = new Error('Se han solicitado demasiadas combinaciones nuevas para esta clínica. Reutiliza una búsqueda anterior o inténtalo más tarde.');
+      error.status = 429;
+      error.code = 'LOCAL_HEATMAP_GENERATION_BUDGET_EXCEEDED';
+      throw error;
+    }
+    await persistentHeatmapCache.ensure(identity, { transaction });
+  });
+}
+
 async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
-  const normalizedTerm = cleanString(term) || null;
+  const normalizedTerm = normalizeLocalHeatmapTerm(term) || null;
   const normalizedZoomKm = clampHeatmapZoom(zoomKm);
-  return cachedCompetitionValue(
-    cacheKey(['local-heatmap', scopeCacheKey(scope), normalizedTerm || '__auto__', normalizedZoomKm]),
-    COMPETITION_HEATMAP_CACHE_TTL_MS,
-    async () => {
   const clinic = await resolvePrimaryClinic(scope);
+  if (
+    !competitionPlacesFeatureEnabled()
+    || !COMPETITION_LOCAL_RANKING_STORAGE_ALLOWED
+  ) {
+    return withHeatmapCacheMetadata({
+      success: false,
+      setup_required: true,
+      setup_code: 'LOCAL_RANKING_PROVIDER_REQUIRED',
+      message: 'El mapa de posicionamiento está pausado hasta conectar un proveedor de ranking local cuya licencia permita este uso y guardar resultados.',
+      points: [],
+      map_provider: null,
+      map_attribution: null,
+    }, null, {
+      status: 'miss',
+      refreshPending: false,
+      algorithmVersion: LOCAL_HEATMAP_CACHE_ALGORITHM_VERSION,
+    });
+  }
   const setupBlocker = competitionSetupBlocker(clinic, normalizedTerm);
   if (setupBlocker) {
-    return {
+    return withHeatmapCacheMetadata({
       success: false,
       setup_required: true,
       setup_code: setupBlocker.code,
       message: setupBlocker.message,
       points: []
-    };
-  }
-
-  const ownProfile = await resolveOwnClinicProfile(clinic);
-  const center = {
-    latitude: Number(ownProfile?.latitude ?? clinic?.latitud ?? clinic?.latitude),
-    longitude: Number(ownProfile?.longitude ?? clinic?.longitud ?? clinic?.longitude)
-  };
-  if (!Number.isFinite(center.latitude) || !Number.isFinite(center.longitude)) {
-    return {
-      success: false,
-      setup_required: true,
-      setup_code: 'LOCAL_COORDINATES_REQUIRED',
-      message: 'No tenemos coordenadas fiables de la ficha local de esta clínica para simular búsquedas por zona.',
-      points: []
-    };
+    }, null, {
+      status: 'miss',
+      refreshPending: false,
+      algorithmVersion: LOCAL_HEATMAP_CACHE_ALGORITHM_VERSION
+    });
   }
 
   const terms = rankingTermsForClinic(clinic);
   const selectedTerm = normalizedTerm || terms[0];
   if (!selectedTerm) {
-    return {
+    return withHeatmapCacheMetadata({
       success: false,
       setup_required: true,
       setup_code: 'LOCAL_TERM_REQUIRED',
       message: 'Falta una búsqueda relevante para calcular el mapa de posición local.',
       points: []
+    }, null, {
+      status: 'miss',
+      refreshPending: false,
+      algorithmVersion: LOCAL_HEATMAP_CACHE_ALGORITHM_VERSION
+    });
+  }
+
+  const heatmapQuery = heatmapSearchTermForClinic(selectedTerm, clinic) || selectedTerm;
+  const storedPlaceId = normalizePlaceId(clinic.business_place_id);
+  const identity = buildHeatmapCacheIdentity({
+    scope,
+    clinicId: clinic.id_clinica,
+    placeKey: localHeatmapPlaceKey(clinic),
+    googlePlaceId: storedPlaceId,
+    term: heatmapQuery,
+    zoomKm: normalizedZoomKm,
+    gridSize: LOCAL_HEATMAP_EFFECTIVE_GRID_SIZE,
+    algorithmVersion: LOCAL_HEATMAP_CACHE_ALGORITHM_VERSION
+  });
+  await assertLocalHeatmapGenerationBudget(identity);
+
+  return persistentHeatmapCache.resolve({
+    identity,
+    refreshPayload: {
+      scope: {
+        scope: scope?.scope || 'clinic',
+        isAll: !!scope?.isAll,
+        groupId: toInt(scope?.groupId),
+        clinicIds: Array.isArray(scope?.clinicIds) ? scope.clinicIds.map(toInt).filter(Boolean) : [],
+      },
+      selectedTerm,
+      zoomKm: normalizedZoomKm,
+    },
+  });
+}
+
+async function executeLocalRankingHeatmapRefresh(payload = {}) {
+  const cacheKey = cleanString(payload.cacheKey);
+  const refreshToken = cleanString(payload.refreshToken);
+  const selectedTerm = normalizeLocalHeatmapTerm(payload.selectedTerm);
+  const scope = payload.scope && typeof payload.scope === 'object' ? payload.scope : {};
+  if (!cacheKey || !refreshToken || !selectedTerm || !Array.isArray(scope.clinicIds)) {
+    return { status: 'failed', retryable: false, error_message: 'marketing_competition_heatmap_refresh payload inválido' };
+  }
+
+  const clinic = await resolvePrimaryClinic(scope);
+  if (!clinic) {
+    return { status: 'failed', retryable: false, error_message: 'La clínica del mapa local ya no está disponible' };
+  }
+  const terms = rankingTermsForClinic(clinic);
+  const heatmapQuery = heatmapSearchTermForClinic(selectedTerm, clinic) || selectedTerm;
+  const normalizedZoomKm = clampHeatmapZoom(payload.zoomKm);
+  const identity = buildHeatmapCacheIdentity({
+    scope,
+    clinicId: clinic.id_clinica,
+    placeKey: localHeatmapPlaceKey(clinic),
+    googlePlaceId: normalizePlaceId(clinic.business_place_id),
+    term: heatmapQuery,
+    zoomKm: normalizedZoomKm,
+    gridSize: LOCAL_HEATMAP_EFFECTIVE_GRID_SIZE,
+    algorithmVersion: LOCAL_HEATMAP_CACHE_ALGORITHM_VERSION,
+  });
+  if (identity.cache_key !== cacheKey) {
+    await persistentHeatmapCache.release({ cache_key: cacheKey }, refreshToken, new Error('La identidad del mapa local ha cambiado')).catch(() => {});
+    return { status: 'failed', retryable: false, error_message: 'La identidad del mapa local ha cambiado' };
+  }
+
+  const current = await persistentHeatmapCache.find(identity);
+  const currentToken = cleanString(current?.refresh_lock_token || current?.get?.('refresh_lock_token'));
+  if (current && currentToken !== refreshToken && heatmapCacheStatus(current) === 'fresh') {
+    return { status: 'completed', cacheKey, cacheStatus: 'fresh', providerRequests: 0, alreadyRefreshed: true };
+  }
+  const claim = await persistentHeatmapCache.claimForRefresh(identity, refreshToken);
+  if (!claim.acquired || !claim.token) {
+    return {
+      status: 'waiting',
+      backoffMs: 60 * 1000,
+      error: new Error('Otro worker está refrescando este mapa local'),
     };
   }
 
-  const radiusKm = normalizedZoomKm;
-  const heatmapQuery = heatmapSearchTermForClinic(selectedTerm, clinic) || selectedTerm;
-  const restrictionHalfSizeMeters = heatmapRestrictionHalfSizeMeters(radiusKm);
-  const ownPlaceId = normalizePlaceId(ownProfile?.google_place_id || clinic?.business_place_id);
-  const ownName = cleanString(ownProfile?.name) || cleanString(clinic?.business_location_name) || cleanString(clinic?.nombre_clinica);
-  const points = await mapWithConcurrency(rankingHeatmapOffsets(radiusKm), COMPETITION_GOOGLE_CONCURRENCY, async (offset) => {
-    const point = offsetLatLng(center, offset.xKm, offset.yKm);
-    if (!point) return null;
-    try {
-      const locationRestriction = rectangleAroundPoint(point, restrictionHalfSizeMeters);
-      const places = await searchGooglePlaces({
-        query: heatmapQuery,
-        maxResultCount: LOCAL_HEATMAP_RESULT_LIMIT,
-        locationRestriction,
-        rankPreference: 'DISTANCE'
-      });
-      let normalized = places.map(normalizePlace).filter((place) => place.name);
-
-      if (!normalized.length) {
-        const fallbackPlaces = await searchGooglePlaces({
-          query: heatmapQuery,
-          maxResultCount: LOCAL_HEATMAP_RESULT_LIMIT,
-          locationBias: {
-            circle: {
-              center: point,
-              radius: Math.max(500, Math.round((radiusKm * 1000) / 3))
-            }
-          },
-          rankPreference: 'DISTANCE'
-        });
-        normalized = fallbackPlaces.map(normalizePlace).filter((place) => place.name);
-      }
-      const ownIndex = normalized.findIndex((place) => {
-        const placeId = normalizePlaceId(place.google_place_id);
-        return (ownPlaceId && placeId === ownPlaceId) || businessNamesMatch(place.name, ownName);
-      });
-      const myPosition = ownIndex >= 0 ? ownIndex + 1 : null;
-      return {
-        latitude: point.latitude,
-        longitude: point.longitude,
-        x_km: offset.xKm,
-        y_km: offset.yKm,
-        my_position: myPosition,
-        score: heatmapScore(myPosition),
-        top_results: normalized.slice(0, 5).map((place) => place.name),
-        measured_at: new Date().toISOString()
-      };
-    } catch (error) {
-      return {
-        latitude: point.latitude,
-        longitude: point.longitude,
-        x_km: offset.xKm,
-        y_km: offset.yKm,
-        my_position: null,
-        score: 0,
-        top_results: [],
-        error: normalizeExternalError(error),
-        measured_at: new Date().toISOString()
-      };
-    }
-  }).then((items) => items.filter(Boolean));
-
-  const staticMap = await buildLocalHeatmapStaticMap(center, points, radiusKm);
-
+  const result = await persistentHeatmapCache.generateAndPersist(identity, claim.token, () => (
+    generateLocalRankingHeatmapSnapshot({
+      clinic,
+      terms,
+      selectedTerm,
+      heatmapQuery,
+      radiusKm: normalizedZoomKm,
+    })
+  ));
   return {
-    success: true,
-    term: selectedTerm,
-    effective_term: heatmapQuery,
-    available_terms: terms,
-    zoom_km: radiusKm,
-    grid_size: LOCAL_HEATMAP_GRID_SIZE % 2 === 0 ? LOCAL_HEATMAP_GRID_SIZE - 1 : LOCAL_HEATMAP_GRID_SIZE,
-    result_limit: LOCAL_HEATMAP_RESULT_LIMIT,
-    center,
-    map_image_data_url: staticMap.dataUrl,
-    map_provider: staticMap.dataUrl ? 'google_static_maps' : null,
-    map_error: staticMap.error,
-    own_profile: ownProfile ? {
-      name: ownProfile.name,
-      google_place_id: normalizePlaceId(ownProfile.google_place_id),
-      google_maps_url: ownProfile.google_maps_url
-    } : null,
-    points
+    status: 'completed',
+    cacheKey,
+    cacheStatus: result?.cache?.status || null,
+    providerRequests: result?.cache?.provider_requests || 0,
   };
+}
+
+async function cleanupLocalHeatmapCache({ retentionDays = 30 } = {}) {
+  const safeRetentionDays = Math.max(15, Math.min(180, Number(retentionDays) || 30));
+  const now = new Date();
+  const retentionCutoff = new Date(now.getTime() - (safeRetentionDays * 24 * 60 * 60 * 1000));
+  return MarketingCompetitionHeatmapCache.destroy({
+    where: {
+      [Op.or]: [
+        { expires_at: { [Op.lt]: retentionCutoff } },
+        {
+          algorithm_version: { [Op.ne]: LOCAL_HEATMAP_CACHE_ALGORITHM_VERSION },
+          expires_at: { [Op.lt]: now },
+        },
+        { payload: null, created_at: { [Op.lt]: retentionCutoff } },
+      ],
     },
-    { cachePredicate: (value) => !value?.success || !!value?.map_image_data_url }
-  );
+  });
 }
 
 function buildPlaceHeaders(fieldMask) {
@@ -2995,8 +3502,28 @@ function adSnapshotPayload(snapshot) {
 }
 
 function mapCompetitorRow(row, latestSnapshot = null, latestAdSnapshot = null, latestGoogleAdSnapshot = null) {
-  const plain = typeof row.toJSON === 'function' ? row.toJSON() : row;
-  const snapshot = latestSnapshot && typeof latestSnapshot.toJSON === 'function' ? latestSnapshot.toJSON() : latestSnapshot;
+  const stored = typeof row.toJSON === 'function' ? row.toJSON() : row;
+  const placesContentRestricted = stored?.source === 'google_places'
+    && !competitionPlacesFeatureEnabled();
+  const plain = placesContentRestricted ? {
+    ...stored,
+    name: 'Competidor de Google pendiente de reconfirmar',
+    google_maps_url: null,
+    website_url: null,
+    phone: null,
+    address: null,
+    city: null,
+    latitude: null,
+    longitude: null,
+    primary_category: null,
+    rating: null,
+    review_count: null,
+    business_status: null,
+    raw_place_payload: null,
+    last_places_synced_at: null,
+  } : stored;
+  const rawSnapshot = latestSnapshot && typeof latestSnapshot.toJSON === 'function' ? latestSnapshot.toJSON() : latestSnapshot;
+  const snapshot = placesContentRestricted ? null : rawSnapshot;
   const ads = adSnapshotPayload(latestAdSnapshot);
   const googleAds = adSnapshotPayload(latestGoogleAdSnapshot);
   return {
@@ -3009,7 +3536,7 @@ function mapCompetitorRow(row, latestSnapshot = null, latestAdSnapshot = null, l
     },
     google: {
       place_id: plain.google_place_id,
-      maps_url: plain.google_maps_url || buildGoogleMapsUrl(plain.google_place_id, plain.name),
+      maps_url: placesContentRestricted ? null : (plain.google_maps_url || buildGoogleMapsUrl(plain.google_place_id, plain.name)),
       rating: plain.rating != null ? Number(plain.rating) : null,
       review_count: plain.review_count != null ? Number(plain.review_count) : null,
       primary_category: plain.primary_category,
@@ -3050,7 +3577,7 @@ function mapCompetitorRow(row, latestSnapshot = null, latestAdSnapshot = null, l
       last_synced_at: googleAds.last_synced_at
     },
     social_profiles: socialProfilesFromPayload(plain.raw_place_payload),
-    photo_name: extractPhotoNames(plain.raw_place_payload || [])[0] || null,
+    photo_name: placesContentRestricted ? null : (extractPhotoNames(plain.raw_place_payload || [])[0] || null),
     latest_snapshot: snapshot ? {
       date: snapshot.snapshot_date,
       rating: snapshot.rating != null ? Number(snapshot.rating) : null,
@@ -3058,8 +3585,10 @@ function mapCompetitorRow(row, latestSnapshot = null, latestAdSnapshot = null, l
       primary_category: snapshot.primary_category,
       business_status: snapshot.business_status
     } : null,
-    last_sync_status: plain.last_sync_status,
-    last_sync_error: plain.last_sync_error,
+    last_sync_status: placesContentRestricted ? 'provider_restricted' : plain.last_sync_status,
+    last_sync_error: placesContentRestricted
+      ? 'Reconfirma este competidor manualmente o conecta un proveedor con licencia para inteligencia competitiva.'
+      : plain.last_sync_error,
     is_active: !!plain.is_active,
     created_at: plain.created_at,
     updated_at: plain.updated_at
@@ -3184,8 +3713,23 @@ async function listCompetition(scope, { includeInactive = false } = {}) {
       relevance: competitorRelevanceForClinic(competitor, clinic)
     }));
   const setupBlocker = competitionSetupBlocker(clinic, null);
-  const ownProfile = setupBlocker ? null : await resolveOwnClinicProfile(clinic);
-  const localRanking = setupBlocker
+  const ownProfile = setupBlocker
+    ? null
+    : (competitionPlacesFeatureEnabled()
+      ? await resolveOwnClinicProfile(clinic)
+      : {
+        name: cleanString(clinic?.business_location_name) || cleanString(clinic?.nombre_clinica),
+        google_place_id: normalizePlaceId(clinic?.business_place_id),
+        google_maps_url: normalizeUrl(clinic?.business_maps_url) || normalizeUrl(clinic?.url_ficha_local),
+        primary_category: cleanString(clinic?.business_primary_category),
+        address: cleanString(clinic?.business_address_lines?.[0]) || cleanString(clinic?.direccion),
+        latitude: toNumber(clinic?.business_latitude),
+        longitude: toNumber(clinic?.business_longitude),
+        rating: null,
+        review_count: null,
+        photo_url: null,
+      });
+  const localRanking = setupBlocker || !competitionPlacesFeatureEnabled()
     ? { terms: rankingTermsForClinic(clinic), entries: [] }
     : await buildLocalRanking(clinic, ownProfile);
   return {
@@ -3194,7 +3738,9 @@ async function listCompetition(scope, { includeInactive = false } = {}) {
     setup: {
       has_competitors: competitors.some((item) => item.is_active),
       refresh_frequency: 'weekly',
-      first_setup_requires_google_places: true,
+      first_setup_requires_google_places: false,
+      manual_competitor_supported: true,
+      automatic_discovery_available: competitionPlacesFeatureEnabled(),
       ads_provider: META_ADS_LIBRARY_PROVIDER
     },
     provider_status: providerStatusWithObservedErrors(await providerStatusForScope(scope), competitors),
@@ -3221,6 +3767,23 @@ async function listCompetition(scope, { includeInactive = false } = {}) {
 async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT } = {}) {
   const normalizedLimit = Math.max(1, Math.min(20, Number(limit) || DEFAULT_LIMIT));
   const normalizedQuery = cleanString(query) || null;
+  if (!competitionPlacesFeatureEnabled()) {
+    const clinic = await resolvePrimaryClinic(scope);
+    return {
+      success: false,
+      query: normalizedQuery,
+      clinic: clinic ? { id: clinic.id_clinica, name: clinic.nombre_clinica } : null,
+      provider_status: await providerStatusForScope(scope),
+      suggestions: [],
+      setup_required: true,
+      setup_code: 'COMPETITION_DISCOVERY_PROVIDER_REQUIRED',
+      setup_action: 'add_competitor_manually',
+      error: {
+        code: 'COMPETITION_DISCOVERY_PROVIDER_REQUIRED',
+        message: 'La búsqueda automática está pausada hasta conectar un proveedor con licencia para inteligencia competitiva. Puedes añadir competidores manualmente.'
+      }
+    };
+  }
   return cachedCompetitionValue(
     cacheKey(['competition-suggestions', scopeCacheKey(scope), normalizedQuery || '__auto__', normalizedLimit]),
     COMPETITION_SUGGESTIONS_CACHE_TTL_MS,
@@ -3339,6 +3902,13 @@ function scopeDefaults(scope) {
 }
 
 async function createCompetitor(scope, payload = {}) {
+  const requestsGoogleProviderContent = payloadIncludesGooglePlacesContent(payload);
+  if (requestsGoogleProviderContent && !competitionPlacesFeatureEnabled()) {
+    const error = new Error('La importación desde Google Places está deshabilitada. Añade este competidor manualmente sin copiar el payload del proveedor.');
+    error.status = 409;
+    error.code = 'COMPETITION_DISCOVERY_PROVIDER_REQUIRED';
+    throw error;
+  }
   const socialProfiles = buildSocialProfilesFromPayload(payload);
   const metaSearchTerms = [...new Set([
     ...splitSearchTerms(payload.meta_ads_search_terms ?? payload.meta_search_terms),
@@ -3410,7 +3980,7 @@ async function createCompetitor(scope, payload = {}) {
     await competitor.update({ ...values, is_active: true, last_sync_status: 'updated' });
   }
 
-  if (competitor.google_place_id || competitor.raw_place_payload) {
+  if (competitionPlacesFeatureEnabled() && competitor.google_place_id) {
     await upsertPlaceSnapshot(competitor, competitor.raw_place_payload);
   }
 
@@ -3426,6 +3996,16 @@ async function updateCompetitor(scope, competitorId, payload = {}) {
     const err = new Error('Competidor no encontrado');
     err.status = 404;
     throw err;
+  }
+
+  if (
+    !competitionPlacesFeatureEnabled()
+    && payloadIncludesGooglePlacesContent(payload)
+  ) {
+    const error = new Error('No se puede guardar contenido de Google Places en este entorno.');
+    error.status = 409;
+    error.code = 'COMPETITION_DISCOVERY_PROVIDER_REQUIRED';
+    throw error;
   }
 
   const patch = {};
@@ -3489,7 +4069,7 @@ async function refreshOneCompetitor(competitor, scope) {
   };
   const patch = { last_sync_status: 'completed', last_sync_error: null };
 
-  if (competitor.google_place_id) {
+  if (competitor.google_place_id && competitionPlacesFeatureEnabled()) {
     try {
       const place = await getGooglePlaceDetails(competitor.google_place_id, { bypassCache: true });
       const normalized = normalizePlace(place);
@@ -3527,12 +4107,24 @@ async function refreshOneCompetitor(competitor, scope) {
       patch.last_sync_error = normalizedError.message;
     }
   } else {
+    if (competitor.google_place_id && !competitionPlacesFeatureEnabled()) {
+      report.places = {
+        status: 'unavailable',
+        error: {
+          code: 'COMPETITION_DISCOVERY_PROVIDER_REQUIRED',
+          message: 'Places API no está habilitada para inteligencia competitiva en este entorno.'
+        }
+      };
+    }
     const socialProfiles = await discoverSocialProfiles(competitor, {
-      website_url: competitor.website_url,
+      website_url: competitor.source === 'google_places' ? null : competitor.website_url,
       facebook_url: competitor.meta_page_url
     });
     if (socialProfiles) {
-      patch.raw_place_payload = withSocialProfilesInRawPayload(competitor.raw_place_payload, socialProfiles);
+      patch.raw_place_payload = withSocialProfilesInRawPayload(
+        competitor.source === 'google_places' ? null : competitor.raw_place_payload,
+        socialProfiles
+      );
       patch.meta_ads_search_terms = metaTermsFromCompetitor({ ...competitor.toJSON(), ...patch }, socialProfiles);
       if (!patch.meta_page_url && socialProfiles.facebook_url) patch.meta_page_url = socialProfiles.facebook_url;
       if (!patch.meta_page_id && patch.meta_page_url) patch.meta_page_id = extractMetaPageIdFromUrl(patch.meta_page_url);
@@ -3622,7 +4214,11 @@ async function refreshCompetition(scope, { competitorIds = null } = {}) {
   const competitors = await MarketingCompetitor.findAll({ where, order: [['id', 'ASC']] });
   const report = {
     provider: {
-      google_places: { configured: !!getGooglePlacesApiKey() },
+      google_places: {
+        configured: competitionPlacesFeatureEnabled() && !!getGooglePlacesApiKey(),
+        use_allowed: COMPETITION_GOOGLE_PLACES_COMPETITOR_USE_ALLOWED,
+        storage_allowed: COMPETITION_GOOGLE_PLACES_COMPETITOR_STORAGE_ALLOWED,
+      },
       meta_ads_library: { configured: !!getMetaAdLibraryTokenFromEnv() },
       google_ads_transparency: { configured: isGoogleAdsTransparencyEnabled() },
       meta_browser_media: cloneMetaBrowserMetrics()
@@ -3666,5 +4262,25 @@ module.exports = {
   deactivateCompetitor,
   refreshCompetition,
   getLocalRankingHeatmap,
+  executeLocalRankingHeatmapRefresh,
+  cleanupLocalHeatmapCache,
   providerStatus,
+  __testing: {
+    LOCAL_HEATMAP_ALGORITHM_VERSION,
+    LOCAL_HEATMAP_CACHE_ALGORITHM_VERSION,
+    LOCAL_HEATMAP_EFFECTIVE_GRID_SIZE,
+    LOCAL_HEATMAP_PLACE_FIELD_MASK,
+    LOCAL_HEATMAP_REFRESH_JOB_TYPE,
+    buildLocalHeatmapSearchBody,
+    collectLocalHeatmapPoints,
+    fetchPublicHtmlPage,
+    generateLocalRankingHeatmapSnapshot,
+    localHeatmapPlaceKey,
+    normalizeLocalHeatmapTerm,
+    rankingHeatmapOffsets,
+    resolveOwnClinicHeatmapProfile,
+    totalProviderRequests,
+    payloadIncludesGooglePlacesContent,
+    toNumber,
+  },
 };

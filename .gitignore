@@ -8,6 +8,11 @@ node_modules
 node_modules/
 dist/
 
+# Runtime secrets belong to the host or secret manager, never Git.
+.env
+.env.*
+!.env.example
+
 # Compiled Java class files
 *.class
 
