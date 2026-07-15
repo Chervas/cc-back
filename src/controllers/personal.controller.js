@@ -498,6 +498,11 @@ async function canManagePersonalInClinic(actorId, clinicaId) {
     return canManageTeamInClinic(actorId, clinicaId);
 }
 
+async function canManageOwnerMembershipInClinic(actorId, clinicaId) {
+    if (isAdmin(actorId)) return true;
+    return isOwnerPivot(actorId, clinicaId);
+}
+
 function invitationStateRank(value) {
     const estado = normalizeEstadoInvitacion(value, 'aceptada');
     if (estado === 'aceptada') return 4;
@@ -1343,6 +1348,17 @@ async function removeClinicCollaborationInternal({ actorId, targetUserId, clinic
         if (!pivot) {
             await transaction.rollback();
             return { status: 404, body: { message: 'Collaboration not found' } };
+        }
+
+        if (pivot.rol_clinica === 'propietario' && !(await canManageOwnerMembershipInClinic(actorId, clinicaId))) {
+            await transaction.rollback();
+            return {
+                status: 403,
+                body: {
+                    message: 'No puedes eliminar a un propietario de la clínica.',
+                    code: 'owner_unlink_forbidden',
+                },
+            };
         }
 
         const doctorClinicaRows = await DoctorClinica.findAll({
@@ -4565,6 +4581,14 @@ exports.invitarPersonal = async (req, res) => {
             return res.status(400).json({ message: `rol_clinica debe ser uno de: ${INVITABLE_ROLES.join(', ')}` });
         }
 
+        const canManageOwnerMembership = await canManageOwnerMembershipInClinic(actorId, clinicaId);
+        if (rol_clinica === 'propietario' && !canManageOwnerMembership) {
+            return res.status(403).json({
+                message: 'No puedes asignar propietarios de clínica.',
+                code: 'owner_membership_manage_forbidden',
+            });
+        }
+
         const hasRecibeCitasInput = Object.prototype.hasOwnProperty.call(req.body || {}, 'recibe_citas');
         const requestedRecibeCitas = hasRecibeCitasInput ? parseRecibeCitasInput(recibe_citas) : null;
         if (hasRecibeCitasInput && requestedRecibeCitas == null) {
@@ -4591,6 +4615,13 @@ exports.invitarPersonal = async (req, res) => {
             });
             if (existingPivot) {
                 const existingEstado = normalizeEstadoInvitacion(existingPivot.estado_invitacion, 'aceptada') || 'aceptada';
+                const touchesOwnerMembership = existingPivot.rol_clinica === 'propietario' || rol_clinica === 'propietario';
+                if (touchesOwnerMembership && !canManageOwnerMembership) {
+                    return res.status(403).json({
+                        message: 'No puedes modificar propietarios de clínica.',
+                        code: 'owner_membership_manage_forbidden',
+                    });
+                }
 
                 // Si está pendiente/rechazada, se permite reenviar la invitación.
                 if (existingEstado === 'pendiente' || existingEstado === 'rechazada') {
