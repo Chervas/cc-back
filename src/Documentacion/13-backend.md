@@ -463,7 +463,8 @@ Estado de sincronización:
 - `connected`, `sync` y presencia de datos son señales distintas. Un job pendiente/error modifica `sync`; cero filas en el rango modifica la presentación de datos; ninguna de las dos situaciones debe devolver `connected=false` si el mapping efectivo sigue activo.
 - Vincular una campaña externa a una estrategia (`ExternalCampaignAssignments`) no conecta la cuenta publicitaria. A la inversa, una campaña todavía sin estrategia no hace que `ClinicGoogleAdsAccount` deje de estar conectado. Campañas puede mostrarla como pendiente de asignación mientras Informes mantiene la fuente conectada.
 - Regresión de referencia 2026-07-15: una clínica Propdental heredera recuperaba inversión/campañas Google Ads, pero el estado de fuente quedaba `Pendiente` al contar solo `ClinicGoogleAdsAccount.clinicaId=<clinica>`. El contrato es resolver el mismo activo de grupo que usa Campañas y exponer su origen (`group`) sin duplicar mapping.
-- Estado de implementación 2026-07-15: `marketingReports.controller.js` consume `resolveEffectiveMarketingAssetInventory`, inventario común de solo lectura, para Google Ads, Meta Ads, Facebook, Instagram, Search Console, GA4 y Perfil Google, incluidos `GroupAssetClinicAssignments`. Está cubierto con tests y smoke real para clínica, grupo y multiclínica. Ads mantiene su atribución histórica por scope; las fuentes owner-centric usan un mapping canónico por identidad remota en agregados de grupo/multiclínica para evitar duplicados. Esta garantía corresponde a Informes; jobs y otros lectores de cada vertical conservan su auditoría específica.
+- Estado de implementación 2026-07-15: `marketingReports.controller.js` consume `resolveEffectiveMarketingAssetInventory`, inventario común de solo lectura, para Google Ads, Meta Ads, Facebook, Instagram, Search Console, GA4 y Perfil Google, incluidos `GroupAssetClinicAssignments`. Está cubierto con tests y smoke real para clínica, grupo y multiclínica. Ads mantiene su atribución histórica por scope; las fuentes owner-centric usan un mapping canónico por identidad remota en agregados de grupo/multiclínica para evitar duplicados. Esta garantía corresponde a Informes; jobs y otros lectores de cada vertical conservan su auditoría específica. Código efectivo actual: backend dev `dd08dff`, backend staging/gateway `7f4062e`.
+- La UI que necesita mostrar las conexiones efectivas de Google usa `GET /oauth/google/effective-mappings` con scope explícito y permiso de lectura. El endpoint es DB-only: resuelve una sola vez el inventario común y devuelve `scope`, `descriptors` y `effective_mappings` con `search_console`, `analytics`, `business_profile` y `google_ads`. Cada fila incorpora `assignment_origin`, `inherited`, `read_only=true`, `target_clinic_id`, `owner_clinic_id` y `source_scope`; no consulta Google, no crea asignaciones y no reemplaza los cuatro endpoints físicos `/mappings`, que siguen siendo los editables. En scope clínica, un activo de grupo figura heredado; en scope grupo es nativo, mientras que un activo `shared` permanece heredado y de solo lectura. La UI separa el bloque compartido/read-only de los checkboxes propios y no hace POST sin un diff físico. Regresión canónica: `node src/scripts/tests/oauth_effective_google_mappings.test.js`.
 - `sync.active=true` cuando una fuente conectada tiene `JobRequest` pendiente/en ejecución, registros locales pendientes (`ClinicBusinessLocations.sync_status=pending`) o error.
 - El endpoint considera terminada una sincronización cuando el último `JobRequest` relevante para la clínica está `completed`, aunque la API externa no haya devuelto filas nuevas. Los jobs globales sin `clinicId` no deben contaminar el estado de una clínica concreta.
 - Cuando la clínica consume un activo compartido cuyo mapping físico pertenece a otra sede, el cruce de `JobRequest` amplía el scope con `asset.clinic_id`; así el backfill/error del activo sigue visible para todas sus consumidoras sin considerar globales los jobs sin clínica.
@@ -1707,12 +1708,15 @@ Esto evita duplicidades de gasto o conversiones en otros endpoints.
 
 ## 2026-03-18 - Diseño objetivo de conexiones OAuth por scope
 
-> **Estado a 2026-07-15:** runtime multi-conexión publicado en backend dev
-> (`a7da8b6`) y en staging/gateway (`11530e5`); migración `1515` aplicada. Los
-> endpoints OAuth `connect` y `callback` permanecen temporalmente cerrados con
-> HTTP `503`. Falta rotar `META_APP_SECRET`, ejecutar el smoke final y reabrir
-> de forma controlada. El frontend de staging ya fue promovido y publicado
-> (build `f372b53b7419004b`).
+> **Estado a 2026-07-15:** runtime multi-conexión e inventario efectivo UI
+> publicados en backend dev (`dd08dff`) y staging/gateway (`7f4062e`);
+> migración `1515` aplicada. Los
+> endpoints Google `connect` y `callback` ya están reabiertos tras smoke interno
+> y público del `state` opaco/de un solo uso. Solo Meta permanece temporalmente
+> cerrado con HTTP `503`: falta rotar `META_APP_SECRET`, ejecutar su smoke final
+> y reabrirlo de forma controlada. El frontend de staging ya fue promovido y
+> publicado (build Webpack `fce1a1eeaeee86db`, bundle público
+> `main.b69d5061ffc08600.js`, frontend staging `a7c19129`).
 
 ### Limitación que originó la migración (contexto histórico)
 
@@ -2165,12 +2169,13 @@ Cuando dual-read y dual-write estén estables:
 
 ### Estado implementado y desplegado a 2026-07-15
 
-El contrato nuevo está implementado en `wt/back-dev` (`a7da8b6`) y promovido a
-`wt/back-staging` y `/home/ubuntu/wt/gateway` (`11530e5`). La migración de
+El contrato nuevo está implementado en `wt/back-dev` (`dd08dff`) y promovido a
+`wt/back-staging` y `/home/ubuntu/wt/gateway` (`7f4062e`). La migración de
 multi-conexión `1515` está aplicada. El corte sigue en ventana de mantenimiento:
-Nginx responde `503` tanto en `connect` como en `callback` de Google y Meta, de
-modo que no puede iniciarse ni completarse un grant mientras se rota el secreto
-Meta y se ejecuta el smoke final.
+Nginx ya enruta `connect` y `callback` de Google al runtime nuevo, mientras
+`connect` y `callback` de Meta responden `503`. Los grants Google existentes y
+nuevos quedan operativos; no puede iniciarse ni completarse un grant Meta hasta
+rotar su secreto y ejecutar el smoke final.
 
 Piezas canónicas:
 
@@ -2263,12 +2268,16 @@ proveedor y dos sitios Search Console que conservan su token exacto.
 
 > **Estado operativo del corte (2026-07-15):** completados publicación de
 > writers nuevos, reinicios controlados y migraciones `1500`, `1510` y `1515`.
-> Backend dev está en `a7da8b6`; backend staging y gateway están en `11530e5`.
-> Los gates Nginx de `connect`/`callback` siguen devolviendo `503`. Quedan
-> pendientes la rotación de `META_APP_SECRET`, el smoke OAuth posterior y la
-> reapertura ordenada. El frontend de staging ya está publicado con el build
-> `f372b53b7419004b`. La migración `1520` queda fuera de este cutover y exige
-> aprobación explícita independiente.
+> Backend dev está en `dd08dff`; backend staging y gateway están en `7f4062e`.
+> Los gates Google se retiraron después de validar por las rutas públicas la
+> emisión y consumo único de `state`; los gates Meta de `connect`/`callback`
+> siguen devolviendo `503`. Quedan pendientes la rotación de
+> `META_APP_SECRET`, el smoke Meta posterior y su reapertura ordenada. El
+> frontend de staging ya está publicado en `a7c19129` con el build
+> `fce1a1eeaeee86db` (`main.b69d5061ffc08600.js`; SHA-256 del `index.html`
+> público `64f209fdbd33a54ff7a9632e2c1dc3306864d6baf08a7bdcd8f4c1bbe64da485`). La
+> migración `1520` queda fuera de este cutover y exige aprobación explícita
+> independiente.
 
 No ejecutar un `db:migrate` general: después de `1515` existe la migración
 irreversible `20260715152000-purge-google-places-competition-content.js`, que
@@ -2318,8 +2327,8 @@ aplicar `1515` mientras un proceso legacy siga en memoria.
 El gateway activo ya ejecuta el runtime OAuth nuevo y lee el secreto Meta
 exclusivamente del entorno. Sin embargo, el valor anterior estuvo versionado y
 se considera comprometido: debe rotarse en Meta, actualizarse en el entorno y
-validarse antes de retirar los `503`. Nunca copiar el valor a logs, commits o
-documentación.
+validarse antes de retirar los `503` de Meta. Nunca copiar el valor a logs,
+commits o documentación.
 
 ### Riesgos y mitigaciones
 
