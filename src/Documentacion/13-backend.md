@@ -1,5 +1,5 @@
 > **Módulo:** Arquitectura del Backend
-> **Última actualización:** 2026-07-14
+> **Última actualización:** 2026-07-15
 > **Relacionado con:** `cc-front/src/Documentacion/20.1-motor-flujos-v2.md` | documento operativo `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`
 > **Fuente canónica:** este archivo del repositorio backend. `cc-front/src/Documentacion/13-backend.md` es un espejo completo para conservar los enlaces internos del manual frontend; cualquier cambio se hace aquí primero y después se sincroniza el espejo.
 
@@ -238,6 +238,10 @@ Antes de activar coexistencia sobre un numero real:
 - un número `unassigned` puede permanecer `isActive=true` si se ha desasignado para poder reasignarlo desde Ajustes. La sync remota no debe tratarlo como operativo ni encolar plantillas hasta que vuelva a tener `assignmentScope=clinic|group`;
 - la sync remota de teléfonos no puede reactivar un número desconectado/desactivado solo porque Meta lo siga devolviendo. Si se desactivó con la acción destructiva de desconexión, debe permanecer `isActive=false` y `assignmentScope=unassigned`;
 - `whatsapp_templates_sync` (cada 20 minutos) solo sincroniza estados remotos existentes. Si Meta sigue devolviendo `PENDING`, ClinicaClick debe mantener `PENDING`; no se marca como aprobada por tener el numero operativo;
+- tras sincronizar, una plantilla global de catalogo que lleve mas de 60 minutos en `PENDING`/`IN_REVIEW` puede consumir un unico reenvio automatico. Debe conservar el contrato vigente, identidad remota y WABA operativo, no ser override de clinica ni tener una hermana aprobada. `REJECTED`, `PENDING_LOCAL`, custom, inactivas, supersedidas y filas cuyo intento ya se consumio no se recrean;
+- el reenvio se reclama por compare-and-set y persiste en una sola transaccion el placeholder sustituto y un `JobRequest whatsapp_template_create` con `mode=resubmit_stale_pending`. El executor usa un nombre determinista, busca primero esa version en Meta y, ante reintentos tecnicos, completa siempre la misma solicitud. La sustituta nace con `auto_resubmit_attempt_count=1`, por lo que una caida despues del alta remota no puede iniciar un bucle;
+- antes de retirar la revision antigua se relee Meta. Si la original paso a `APPROVED` durante la carrera, se reactiva y la sustituta se retira. Mientras ninguna variante este aprobada, el runtime de Automatizaciones V2 conserva el fallback aprobado configurado en el nodo; la recreacion no bloquea el recordatorio habitual;
+- la migracion `20260715064500-add-whatsapp-template-auto-resubmit-state.js` añade `pending_since_at`, contadores/fechas/error, enlaces de origen/supersesion y el indice `idx_whatsapp_templates_pending_auto_resubmit`. `WHATSAPP_TEMPLATE_AUTO_RESUBMIT_ENABLED` es el kill switch y `WHATSAPP_TEMPLATE_AUTO_RESUBMIT_PENDING_MINUTES` controla el umbral, 60 por defecto;
 - `whatsapp_templates_sync` debe respetar `assignmentScope`: si un WABA esta asignado a `clinic`, solo actualiza los overrides locales de esa clinica aunque el activo conserve `grupoClinicaId` por pertenecer a un grupo; si esta asignado a `group`, entonces si expande a todas las clinicas del grupo. Esto evita que una excepcion como Glories contamine plantillas locales de otras sedes Propdental;
 - el webhook inbound debe resolver `metadata.phone_number_id` priorizando activos `whatsapp_phone_number` sobre filas legacy `whatsapp_business_account`. En WABA compartido de grupo, el activo `whatsapp_phone_number + assignmentScope=group` es el origen canonico; desde ahi se busca la conversacion existente por contacto dentro del grupo. Si se deja que una fila legacy de una clinica gane el lookup, las respuestas entran en la clinica propietaria historica del WABA, no en la clinica que envio la cita, y los `wait_response` no se reanudan. Una vez existe el `whatsapp_phone_number` operativo con `wabaId`, token y `businessId`, las filas duplicadas `whatsapp_business_account` del mismo WABA deben retirarse para no reintroducir ambiguedad; los jobs de plantillas enumeran WABAs desde ambos tipos y priorizan el phone asset;
 - `GET /api/whatsapp/phones` expone `connection_mode`, `is_on_biz_app`, `coexistence_status`, `coexistence_can_send_api` y estados de importacion inicial para que Ajustes pueda mostrar el modo real;
@@ -1359,6 +1363,8 @@ Defaults actuales de interés:
 - `JOBS_WHATSAPP_TEMPLATES_SCHEDULE`: `*/20 * * * *`
 - `JOBS_AUTOMATION_HEALTH_CHECK_SCHEDULE`: `0 10,16 * * *`
 - `WHATSAPP_PROPAGATE_RESYNC_DELAY_MINUTES`: `12`
+- `WHATSAPP_TEMPLATE_AUTO_RESUBMIT_ENABLED`: `true`
+- `WHATSAPP_TEMPLATE_AUTO_RESUBMIT_PENDING_MINUTES`: `60`
 
 Ventanas y límites asociados:
 
