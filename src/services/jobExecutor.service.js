@@ -164,6 +164,18 @@ async function runWhatsappTemplateCreateJob(payload = {}) {
     throw new Error('whatsapp_template_create requires payload.wabaId');
   }
 
+  if (String(payload.mode || '').trim() === 'resubmit_stale_pending') {
+    const result = await whatsappTemplatesService.runStalePendingTemplateResubmission(payload);
+    return {
+      status: 'completed',
+      result: {
+        wabaId,
+        mode: 'resubmit_stale_pending',
+        ...result,
+      },
+    };
+  }
+
   const clinicId = payload.clinicId ?? payload.clinic_id ?? null;
   const groupId = payload.groupId ?? payload.group_id ?? null;
   const assignmentScope = payload.assignmentScope || payload.assignment_scope || 'unassigned';

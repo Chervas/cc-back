@@ -76,6 +76,31 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         defaultValue: true,
       },
+      pending_since_at: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
+      auto_resubmit_attempt_count: {
+        type: DataTypes.INTEGER.UNSIGNED,
+        allowNull: false,
+        defaultValue: 0,
+      },
+      auto_resubmit_attempted_at: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
+      resubmitted_from_template_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
+      superseded_by_template_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
+      auto_resubmit_error: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+      },
       last_synced_at: {
         type: DataTypes.DATE,
         allowNull: true,

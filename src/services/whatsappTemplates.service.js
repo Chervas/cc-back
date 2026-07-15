@@ -10,11 +10,21 @@ const {
   haveSameTemplateComponents,
   stringifyComparableTemplateComponents,
 } = require('../lib/whatsapp-template-components');
+const {
+  resolveEffectiveWabaForClinic,
+} = require('../lib/whatsapp-template-catalog-coverage');
+const {
+  DEFAULT_PENDING_THRESHOLD_MS,
+  evaluatePendingTemplateAutoResubmit,
+  buildPendingTemplateResubmitDedupeScope,
+  shouldKeepRemoteTemplateActive,
+} = require('../lib/whatsapp-template-pending-resubmission');
 
 const {
   ClinicMetaAsset,
   Clinica,
   MarketingPatientList,
+  MetaConnection,
   WhatsappTemplate,
   WhatsappTemplateCatalog,
   WhatsappTemplateCatalogDiscipline,
@@ -37,6 +47,13 @@ const WHATSAPP_TEMPLATE_STATUS = {
 };
 const WHATSAPP_TEMPLATE_BODY_MAX_LENGTH = 1024;
 const WHATSAPP_TEMPLATE_IMAGE_HEADER_MAX_BYTES = 5 * 1024 * 1024;
+const AUTO_RESUBMIT_PENDING_THRESHOLD_MS = Math.max(
+  1,
+  Number(process.env.WHATSAPP_TEMPLATE_AUTO_RESUBMIT_PENDING_MINUTES || 60) || 60,
+) * 60 * 1000;
+const AUTO_RESUBMIT_ENABLED = !['0', 'false', 'no', 'off'].includes(
+  String(process.env.WHATSAPP_TEMPLATE_AUTO_RESUBMIT_ENABLED ?? 'true').trim().toLowerCase(),
+);
 
 function resolveGraphBase() {
   const base = META_GRAPH_BASE.replace(/\/+$/, '');
@@ -911,6 +928,9 @@ async function upsertClinicOverrideTemplateForClinic({
     catalog_template_id: template.id,
     origin: 'catalog',
     is_active: !!template.is_active,
+    pending_since_at: [WHATSAPP_TEMPLATE_STATUS.PENDING, 'IN_REVIEW'].includes(
+      cleanString(status).toUpperCase(),
+    ) ? (existing?.pending_since_at || new Date()) : null,
   };
 
   if (metaTemplateId !== undefined) {
@@ -972,6 +992,10 @@ async function upsertConnectedTemplateForWaba({
     },
     order: [['updatedAt', 'DESC']],
   });
+
+  payload.pending_since_at = [WHATSAPP_TEMPLATE_STATUS.PENDING, 'IN_REVIEW'].includes(
+    cleanString(status).toUpperCase(),
+  ) ? (existing?.pending_since_at || payload.last_synced_at) : null;
 
   if (existing) {
     await existing.update(payload);
@@ -1059,6 +1083,12 @@ async function resolveWabaAssetById(wabaId) {
         ],
       },
     },
+    include: MetaConnection ? [{
+      model: MetaConnection,
+      as: 'metaConnection',
+      attributes: ['id', 'accessToken'],
+      required: false,
+    }] : [],
     order: [['updatedAt', 'DESC']],
   });
 }
@@ -1078,6 +1108,923 @@ async function createTemplateInMeta({ wabaId, accessToken, template, language })
     { params: { access_token: accessToken } }
   );
   return response.data;
+}
+
+async function fetchTemplatesFromMeta({ wabaId, accessToken }) {
+  const items = [];
+  const seenCursors = new Set();
+  let after = null;
+
+  // Meta pagina incluso con limit=200. Usar el cursor (en vez de paging.next,
+  // que contiene el token en la URL) evita perder versiones técnicas antiguas
+  // y evita propagar credenciales a logs de errores HTTP.
+  for (let page = 0; page < 50; page += 1) {
+    const response = await axios.get(graphUrl(`${wabaId}/message_templates`), {
+      params: {
+        access_token: accessToken,
+        limit: 200,
+        ...(after ? { after } : {}),
+      },
+    });
+    const pageItems = Array.isArray(response.data?.data) ? response.data.data : [];
+    items.push(...pageItems);
+
+    const nextUrl = cleanString(response.data?.paging?.next);
+    const nextCursor = cleanString(response.data?.paging?.cursors?.after);
+    if (!nextUrl || !nextCursor || seenCursors.has(nextCursor)) break;
+    seenCursors.add(nextCursor);
+    after = nextCursor;
+  }
+  return items;
+}
+
+function findRemoteTemplate(items, { name, metaTemplateId } = {}) {
+  const safeName = cleanString(name).toLowerCase();
+  const safeMetaTemplateId = cleanString(metaTemplateId);
+  const rows = Array.isArray(items) ? items : [];
+  if (safeMetaTemplateId) {
+    const byId = rows.find((item) => cleanString(item?.id) === safeMetaTemplateId);
+    if (byId) return byId;
+  }
+  if (!safeName) return null;
+  return rows.find((item) => cleanString(item?.name).toLowerCase() === safeName) || null;
+}
+
+async function deleteTemplateInMeta({ wabaId, accessToken, name, metaTemplateId }) {
+  if (!wabaId || !accessToken || !name || !metaTemplateId) {
+    throw new Error('missing_meta_template_delete_identity');
+  }
+  const response = await axios.delete(graphUrl(`${wabaId}/message_templates`), {
+    params: {
+      access_token: accessToken,
+      name,
+      hsm_id: metaTemplateId,
+    },
+  });
+  return response.data;
+}
+
+async function deleteTemplateInMetaWithAssetCredentials({ asset, wabaId, name, metaTemplateId }) {
+  const tokens = Array.from(new Set([
+    cleanString(asset?.metaConnection?.accessToken),
+    cleanString(asset?.waAccessToken),
+  ].filter(Boolean)));
+  if (!tokens.length) throw new Error('missing_meta_template_delete_credentials');
+
+  let lastError = null;
+  for (const accessToken of tokens) {
+    try {
+      return await deleteTemplateInMeta({ wabaId, accessToken, name, metaTemplateId });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error('meta_template_delete_failed');
+}
+
+function compactMetaError(error) {
+  const parsed = parseMetaError(error);
+  const message = [
+    parsed?.code ? `Meta ${parsed.code}` : null,
+    parsed?.userTitle,
+    parsed?.userMessage,
+    parsed?.message,
+    error?.message,
+  ].map((value) => cleanString(value)).filter(Boolean).join(' - ');
+  return (message || 'whatsapp_template_auto_resubmit_failed').slice(0, 4000);
+}
+
+async function recordAutoResubmitError(templateId, error) {
+  const safeTemplateId = Number(templateId || 0);
+  if (!Number.isInteger(safeTemplateId) || safeTemplateId <= 0) return;
+  await WhatsappTemplate.update({
+    auto_resubmit_error: compactMetaError(error),
+  }, {
+    where: { id: safeTemplateId },
+  }).catch(() => null);
+}
+
+function isApprovedCurrentCatalogSibling(row, catalog, sourceId = null) {
+  if (!row || Number(row.id) === Number(sourceId)) return false;
+  return !!(
+    row.is_active
+    && cleanString(row.status).toUpperCase() === WHATSAPP_TEMPLATE_STATUS.APPROVED
+    && cleanString(row.meta_template_id)
+    && isTechnicalTemplateFamilyName(catalog?.name, row.name)
+    && hasSameMetaFacingContent(catalog, row)
+  );
+}
+
+async function loadWabaCatalogFamily({ wabaId, catalog, language = DEFAULT_LANGUAGE }) {
+  if (!wabaId || !catalog) return [];
+  return WhatsappTemplate.findAll({
+    where: {
+      waba_id: String(wabaId),
+      clinic_id: null,
+      language: cleanString(language) || DEFAULT_LANGUAGE,
+      [Op.or]: [
+        { catalog_template_id: Number(catalog.id) },
+        { name: { [Op.like]: `${catalog.name}%` } },
+      ],
+    },
+    order: [['id', 'ASC']],
+  });
+}
+
+async function resolveClinicOverrideIdsForWaba({ source, catalog }) {
+  const overrides = await WhatsappTemplate.findAll({
+    where: {
+      waba_id: null,
+      clinic_id: { [Op.ne]: null },
+      catalog_template_id: Number(catalog.id),
+      is_active: true,
+      [Op.or]: [
+        { meta_template_id: source.meta_template_id },
+        { name: source.name },
+      ],
+    },
+    attributes: ['id', 'clinic_id'],
+    raw: true,
+  });
+  const clinicIds = Array.from(new Set(
+    overrides.map((row) => Number(row.clinic_id)).filter((id) => Number.isInteger(id) && id > 0),
+  ));
+  if (!clinicIds.length) return [];
+
+  const [clinics, assets] = await Promise.all([
+    Clinica.findAll({
+      where: { id_clinica: { [Op.in]: clinicIds } },
+      attributes: ['id_clinica', 'grupoClinicaId'],
+      raw: true,
+    }),
+    ClinicMetaAsset.findAll({
+      where: {
+        isActive: true,
+        assetType: { [Op.in]: ['whatsapp_phone_number', 'whatsapp_business_account'] },
+        wabaId: { [Op.ne]: null },
+      },
+      attributes: [
+        'id',
+        'assetType',
+        'assignmentScope',
+        'clinicaId',
+        'grupoClinicaId',
+        'wabaId',
+        'phoneNumberId',
+        'waAccessToken',
+        'isActive',
+        'updatedAt',
+      ],
+      raw: true,
+    }),
+  ]);
+  const clinicById = new Map(clinics.map((clinic) => [Number(clinic.id_clinica), clinic]));
+
+  return overrides
+    .filter((override) => {
+      const clinic = clinicById.get(Number(override.clinic_id));
+      return clinic && String(resolveEffectiveWabaForClinic({ clinic, assets }) || '') === String(source.waba_id);
+    })
+    .map((override) => Number(override.id));
+}
+
+async function enqueueStalePendingTemplateResubmissions({ wabaId, now = new Date(), logger = console }) {
+  if (!AUTO_RESUBMIT_ENABLED || !wabaId) return { queued: 0, candidates: 0 };
+
+  const rows = await WhatsappTemplate.findAll({
+    where: {
+      waba_id: String(wabaId),
+      clinic_id: null,
+      is_active: true,
+      status: { [Op.in]: [WHATSAPP_TEMPLATE_STATUS.PENDING, 'IN_REVIEW'] },
+      catalog_template_id: { [Op.ne]: null },
+    },
+    include: [{
+      model: WhatsappTemplateCatalog,
+      as: 'catalog',
+      required: true,
+    }],
+    order: [['id', 'ASC']],
+  });
+
+  let queued = 0;
+  let candidates = 0;
+  for (const row of rows) {
+    const catalog = row.catalog;
+    const familyRows = await loadWabaCatalogFamily({ wabaId, catalog, language: row.language });
+    const approvedSiblingExists = familyRows.some((sibling) => (
+      isApprovedCurrentCatalogSibling(sibling, catalog, row.id)
+    ));
+    const decision = evaluatePendingTemplateAutoResubmit({
+      row,
+      catalog,
+      now,
+      approvedSiblingExists,
+      pendingThresholdMs: AUTO_RESUBMIT_PENDING_THRESHOLD_MS || DEFAULT_PENDING_THRESHOLD_MS,
+      featureEnabled: AUTO_RESUBMIT_ENABLED,
+    });
+    if (!decision.eligible) continue;
+    candidates += 1;
+
+    const replacementName = resolveNextTechnicalTemplateName(catalog.name, familyRows);
+    const dedupeScope = buildPendingTemplateResubmitDedupeScope(row);
+    if (!replacementName || !dedupeScope) continue;
+
+    const job = await db.sequelize.transaction(async (transaction) => {
+      const cutoff = new Date(now.getTime() - AUTO_RESUBMIT_PENDING_THRESHOLD_MS);
+      const [claimed] = await WhatsappTemplate.update({
+        auto_resubmit_attempt_count: 1,
+        auto_resubmit_attempted_at: now,
+        auto_resubmit_error: null,
+      }, {
+        where: {
+          id: row.id,
+          waba_id: String(wabaId),
+          is_active: true,
+          status: { [Op.in]: [WHATSAPP_TEMPLATE_STATUS.PENDING, 'IN_REVIEW'] },
+          auto_resubmit_attempt_count: 0,
+          superseded_by_template_id: null,
+          pending_since_at: { [Op.lt]: cutoff },
+        },
+        transaction,
+      });
+      if (!claimed) return null;
+
+      let plannedReplacement = await WhatsappTemplate.findOne({
+        where: {
+          waba_id: String(wabaId),
+          name: replacementName,
+          language: row.language || DEFAULT_LANGUAGE,
+        },
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+      const plannedPayload = {
+        waba_id: String(wabaId),
+        clinic_id: null,
+        name: replacementName,
+        language: row.language || DEFAULT_LANGUAGE,
+        category: catalog.category,
+        status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING,
+        components: normalizeTemplateComponentsForMeta(catalog.components),
+        variables: parseMaybeJson(catalog.variables) || [],
+        meta_template_id: null,
+        catalog_template_id: catalog.id,
+        origin: 'catalog',
+        rejection_reason: 'Reenvío automático preparado; pendiente de apertura en Meta.',
+        is_active: false,
+        pending_since_at: null,
+        auto_resubmit_attempt_count: 1,
+        auto_resubmit_attempted_at: now,
+        resubmitted_from_template_id: row.id,
+        superseded_by_template_id: null,
+        auto_resubmit_error: null,
+      };
+      if (plannedReplacement) {
+        if (!hasSameMetaFacingContent(catalog, plannedReplacement)) {
+          throw new Error('stale_pending_replacement_name_contract_conflict');
+        }
+        await plannedReplacement.update({
+          catalog_template_id: catalog.id,
+          auto_resubmit_attempt_count: 1,
+          auto_resubmit_attempted_at: now,
+          resubmitted_from_template_id: row.id,
+          superseded_by_template_id: null,
+          auto_resubmit_error: null,
+        }, { transaction });
+      } else {
+        plannedReplacement = await WhatsappTemplate.create(plannedPayload, { transaction });
+      }
+
+      return jobRequestsService.enqueueJobRequest({
+        type: 'whatsapp_template_create',
+        priority: 'high',
+        origin: 'whatsapp_template_auto_resubmit',
+        maxAttempts: 3,
+        payload: {
+          mode: 'resubmit_stale_pending',
+          source_template_id: row.id,
+          replacement_template_id: plannedReplacement.id,
+          wabaId: String(wabaId),
+          replacement_name: replacementName,
+          __dedupe_scope: dedupeScope,
+        },
+      }, { transaction });
+    });
+
+    if (job) {
+      queued += 1;
+      logger.info?.('[whatsapp-templates] Reenvío automático encolado para plantilla pendiente', {
+        source_template_id: row.id,
+        waba_id: String(wabaId),
+        replacement_name: replacementName,
+        pending_since_at: row.pending_since_at,
+        job_request_id: job.id,
+      });
+    }
+  }
+
+  return { queued, candidates };
+}
+
+async function recoverSourceApprovedDuringCleanup({ source, replacement, remoteSource }) {
+  const catalog = await WhatsappTemplateCatalog.findByPk(source.catalog_template_id);
+  if (!catalog || !replacement) {
+    throw new Error('approved_source_recovery_missing_catalog_or_replacement');
+  }
+  const overrideIds = await resolveClinicOverrideIdsForWaba({ source: replacement, catalog });
+  const now = new Date();
+
+  await db.sequelize.transaction(async (transaction) => {
+    const lockedSource = await WhatsappTemplate.findByPk(source.id, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    const lockedReplacement = await WhatsappTemplate.findByPk(replacement.id, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!lockedSource || !lockedReplacement) {
+      throw new Error('approved_source_recovery_rows_missing');
+    }
+    await lockedSource.update({
+      status: WHATSAPP_TEMPLATE_STATUS.APPROVED,
+      category: remoteSource.category || catalog.category,
+      components: remoteSource.components || catalog.components,
+      meta_template_id: remoteSource.id || source.meta_template_id,
+      rejection_reason: null,
+      is_active: true,
+      pending_since_at: null,
+      superseded_by_template_id: null,
+      auto_resubmit_error: null,
+      last_synced_at: now,
+    }, { transaction });
+    await lockedReplacement.update({
+      is_active: false,
+      superseded_by_template_id: source.id,
+      auto_resubmit_error: null,
+      rejection_reason: 'Reenvío automático retirado: Meta aprobó la plantilla original antes de eliminarla.',
+      last_synced_at: now,
+    }, { transaction });
+    if (overrideIds.length) {
+      await WhatsappTemplate.update({
+        name: source.name,
+        language: source.language || DEFAULT_LANGUAGE,
+        category: remoteSource.category || catalog.category,
+        status: WHATSAPP_TEMPLATE_STATUS.APPROVED,
+        components: normalizeTemplateComponentsForMeta(catalog.components),
+        variables: parseMaybeJson(catalog.variables) || [],
+        meta_template_id: remoteSource.id || source.meta_template_id,
+        rejection_reason: null,
+        pending_since_at: null,
+        resubmitted_from_template_id: null,
+        superseded_by_template_id: null,
+        auto_resubmit_error: null,
+        last_synced_at: now,
+      }, {
+        where: { id: { [Op.in]: overrideIds }, is_active: true },
+        transaction,
+      });
+    }
+  });
+
+  return {
+    source_reactivated_after_approval_race: true,
+    recovered_override_count: overrideIds.length,
+  };
+}
+
+async function cleanupSupersededRemoteTemplate({ source, replacement, asset }) {
+  const remoteItems = await fetchTemplatesFromMeta({
+    wabaId: source.waba_id,
+    accessToken: asset.waAccessToken,
+  });
+  const remoteSource = findRemoteTemplate(remoteItems, {
+    name: source.name,
+    metaTemplateId: source.meta_template_id,
+  });
+  if (!remoteSource) {
+    await source.update({ auto_resubmit_error: null });
+    return { deleted_old_remote: false, old_remote_already_absent: true };
+  }
+
+  if (cleanString(remoteSource.status).toUpperCase() === WHATSAPP_TEMPLATE_STATUS.APPROVED) {
+    const recovery = await recoverSourceApprovedDuringCleanup({
+      source,
+      replacement,
+      remoteSource,
+    });
+    const cancelledReplacement = await cancelPlannedReplacement({
+      source,
+      replacementTemplateId: replacement?.id,
+      replacementName: replacement?.name,
+      asset,
+      reason: 'source_approved_during_cleanup',
+    });
+    return {
+      deleted_old_remote: false,
+      old_remote_already_absent: false,
+      old_remote_became_approved: true,
+      ...recovery,
+      ...cancelledReplacement,
+    };
+  }
+
+  try {
+    await deleteTemplateInMetaWithAssetCredentials({
+      asset,
+      wabaId: source.waba_id,
+      name: source.name,
+      metaTemplateId: source.meta_template_id,
+    });
+    await source.update({ auto_resubmit_error: null });
+    return { deleted_old_remote: true, old_remote_already_absent: false };
+  } catch (error) {
+    await recordAutoResubmitError(source.id, error);
+    error.autoResubmitCleanupOnly = true;
+    error.replacementTemplateId = replacement?.id || source.superseded_by_template_id || null;
+    throw error;
+  }
+}
+
+async function findPlannedReplacement({ source, replacementTemplateId, replacementName }) {
+  const safeReplacementTemplateId = Number(replacementTemplateId || 0);
+  if (Number.isInteger(safeReplacementTemplateId) && safeReplacementTemplateId > 0) {
+    const byId = await WhatsappTemplate.findByPk(safeReplacementTemplateId);
+    if (
+      byId
+      && String(byId.waba_id || '') === String(source.waba_id || '')
+      && Number(byId.resubmitted_from_template_id || 0) === Number(source.id)
+    ) {
+      return byId;
+    }
+  }
+  return WhatsappTemplate.findOne({
+    where: {
+      waba_id: String(source.waba_id),
+      name: replacementName,
+      resubmitted_from_template_id: source.id,
+      auto_resubmit_attempt_count: { [Op.gte]: 1 },
+    },
+    order: [['id', 'DESC']],
+  });
+}
+
+async function cancelPlannedReplacement({
+  source,
+  replacementTemplateId,
+  replacementName,
+  asset,
+  reason,
+}) {
+  const planned = await findPlannedReplacement({
+    source,
+    replacementTemplateId,
+    replacementName,
+  });
+  if (!planned) return { cancelled_replacement: false, replacement_not_found: true };
+
+  const cancellationReason = cleanString(reason) || 'source_no_longer_requires_resubmit';
+  const markCancelled = async (error = null) => planned.update({
+    is_active: false,
+    superseded_by_template_id: source.id,
+    auto_resubmit_error: error ? compactMetaError(error) : null,
+    rejection_reason: `Reenvío automático cancelado: ${cancellationReason}.`,
+  });
+
+  const remoteItems = await fetchTemplatesFromMeta({
+    wabaId: source.waba_id,
+    accessToken: asset.waAccessToken,
+  });
+  const remotePlanned = findRemoteTemplate(remoteItems, {
+    name: planned.name,
+    metaTemplateId: planned.meta_template_id,
+  });
+  if (!remotePlanned) {
+    await markCancelled();
+    return {
+      cancelled_replacement: true,
+      replacement_template_id: planned.id,
+      replacement_remote_deleted: false,
+      replacement_remote_already_absent: true,
+    };
+  }
+
+  try {
+    await deleteTemplateInMetaWithAssetCredentials({
+      asset,
+      wabaId: source.waba_id,
+      name: remotePlanned.name || planned.name,
+      metaTemplateId: remotePlanned.id || planned.meta_template_id,
+    });
+    await markCancelled();
+    return {
+      cancelled_replacement: true,
+      replacement_template_id: planned.id,
+      replacement_remote_deleted: true,
+      replacement_remote_already_absent: false,
+    };
+  } catch (error) {
+    await markCancelled(error).catch(() => null);
+    await recordAutoResubmitError(source.id, error);
+    error.autoResubmitCleanupOnly = true;
+    error.replacementTemplateId = planned.id;
+    throw error;
+  }
+}
+
+async function runStalePendingTemplateResubmission(payload = {}) {
+  const sourceTemplateId = Number(payload.source_template_id || payload.sourceTemplateId || 0);
+  const plannedReplacementTemplateId = Number(
+    payload.replacement_template_id || payload.replacementTemplateId || 0,
+  ) || null;
+  const expectedWabaId = cleanString(payload.wabaId || payload.waba_id);
+  const replacementName = cleanString(payload.replacement_name || payload.replacementName);
+  if (!Number.isInteger(sourceTemplateId) || sourceTemplateId <= 0 || !expectedWabaId || !replacementName) {
+    throw new Error('invalid_stale_pending_resubmit_payload');
+  }
+
+  let source = await WhatsappTemplate.findByPk(sourceTemplateId);
+  if (!source || String(source.waba_id || '') !== expectedWabaId) {
+    return { skipped: true, reason: 'source_template_not_found', source_template_id: sourceTemplateId };
+  }
+  const asset = await resolveWabaAssetById(expectedWabaId);
+  if (!AUTO_RESUBMIT_ENABLED) {
+    let cancellation = {};
+    let canReleaseClaim = false;
+    if (asset?.waAccessToken) {
+      cancellation = await cancelPlannedReplacement({
+        source,
+        replacementTemplateId: plannedReplacementTemplateId,
+        replacementName,
+        asset,
+        reason: 'feature_disabled',
+      });
+      canReleaseClaim = true;
+    } else {
+      const planned = await findPlannedReplacement({
+        source,
+        replacementTemplateId: plannedReplacementTemplateId,
+        replacementName,
+      });
+      if (planned) {
+        await planned.update({
+          is_active: false,
+          superseded_by_template_id: source.id,
+          rejection_reason: 'Reenvío automático cancelado: feature_disabled.',
+        });
+      }
+    }
+    if (canReleaseClaim) {
+      await WhatsappTemplate.update({
+        auto_resubmit_attempt_count: 0,
+        auto_resubmit_attempted_at: null,
+        auto_resubmit_error: null,
+      }, {
+        where: {
+          id: source.id,
+          superseded_by_template_id: null,
+          status: { [Op.in]: [WHATSAPP_TEMPLATE_STATUS.PENDING, 'IN_REVIEW'] },
+        },
+      });
+    }
+    return {
+      skipped: true,
+      reason: 'feature_disabled',
+      source_template_id: sourceTemplateId,
+      claim_released: canReleaseClaim,
+      ...cancellation,
+    };
+  }
+
+  if (!asset?.waAccessToken) {
+    throw new Error('stale_pending_resubmit_missing_active_waba_credentials');
+  }
+
+  if (source.superseded_by_template_id) {
+    const replacement = await WhatsappTemplate.findByPk(source.superseded_by_template_id);
+    const cleanup = await cleanupSupersededRemoteTemplate({ source, replacement, asset });
+    return {
+      source_template_id: source.id,
+      replacement_template_id: replacement?.id || source.superseded_by_template_id,
+      resumed_cleanup_only: true,
+      ...cleanup,
+    };
+  }
+
+  // Releer Meta antes de crear evita sustituir una plantilla que haya sido
+  // aprobada mientras el JobRequest esperaba turno.
+  await syncTemplatesForWaba({ wabaId: expectedWabaId, accessToken: asset.waAccessToken });
+  source = await WhatsappTemplate.findByPk(sourceTemplateId);
+  if (!source) {
+    return { skipped: true, reason: 'source_template_not_found_after_sync', source_template_id: sourceTemplateId };
+  }
+  if (source.superseded_by_template_id) {
+    const replacement = await WhatsappTemplate.findByPk(source.superseded_by_template_id);
+    const cleanup = await cleanupSupersededRemoteTemplate({ source, replacement, asset });
+    return {
+      source_template_id: source.id,
+      replacement_template_id: replacement?.id || source.superseded_by_template_id,
+      resumed_cleanup_only: true,
+      ...cleanup,
+    };
+  }
+
+  const sourceStatus = cleanString(source.status).toUpperCase();
+  if (![WHATSAPP_TEMPLATE_STATUS.PENDING, 'IN_REVIEW'].includes(sourceStatus) || !source.is_active) {
+    const reason = sourceStatus === WHATSAPP_TEMPLATE_STATUS.APPROVED
+      ? 'source_approved_before_resubmit'
+      : 'source_no_longer_pending';
+    const cancellation = await cancelPlannedReplacement({
+      source,
+      replacementTemplateId: plannedReplacementTemplateId,
+      replacementName,
+      asset,
+      reason,
+    });
+    return {
+      skipped: true,
+      reason,
+      source_template_id: source.id,
+      source_status: sourceStatus,
+      ...cancellation,
+    };
+  }
+
+  const catalog = await WhatsappTemplateCatalog.findByPk(source.catalog_template_id);
+  if (!catalog || !catalog.is_active || !hasSameMetaFacingContent(catalog, source)) {
+    const cancellation = await cancelPlannedReplacement({
+      source,
+      replacementTemplateId: plannedReplacementTemplateId,
+      replacementName,
+      asset,
+      reason: 'catalog_contract_no_longer_current',
+    });
+    return {
+      skipped: true,
+      reason: 'catalog_contract_no_longer_current',
+      source_template_id: source.id,
+      ...cancellation,
+    };
+  }
+  const familyRows = await loadWabaCatalogFamily({
+    wabaId: expectedWabaId,
+    catalog,
+    language: source.language,
+  });
+  if (familyRows.some((sibling) => isApprovedCurrentCatalogSibling(sibling, catalog, source.id))) {
+    const cancellation = await cancelPlannedReplacement({
+      source,
+      replacementTemplateId: plannedReplacementTemplateId,
+      replacementName,
+      asset,
+      reason: 'approved_sibling_exists',
+    });
+    return {
+      skipped: true,
+      reason: 'approved_sibling_exists',
+      source_template_id: source.id,
+      ...cancellation,
+    };
+  }
+  if (!isTechnicalTemplateFamilyName(catalog.name, replacementName) || replacementName === source.name) {
+    throw new Error('invalid_stale_pending_replacement_name');
+  }
+
+  let remoteItems = await fetchTemplatesFromMeta({
+    wabaId: expectedWabaId,
+    accessToken: asset.waAccessToken,
+  });
+  let remoteReplacement = findRemoteTemplate(remoteItems, { name: replacementName });
+  const remoteApprovedSibling = remoteItems.find((item) => (
+    cleanString(item?.status).toUpperCase() === WHATSAPP_TEMPLATE_STATUS.APPROVED
+    && isTechnicalTemplateFamilyName(catalog.name, item?.name)
+    && hasSameMetaFacingContent(catalog, item)
+    && cleanString(item?.id) !== cleanString(remoteReplacement?.id)
+  ));
+  if (remoteApprovedSibling) {
+    await syncTemplatesForWaba({ wabaId: expectedWabaId, accessToken: asset.waAccessToken });
+    source = await WhatsappTemplate.findByPk(source.id);
+    const cancellation = await cancelPlannedReplacement({
+      source,
+      replacementTemplateId: plannedReplacementTemplateId,
+      replacementName,
+      asset,
+      reason: cleanString(remoteApprovedSibling.id) === cleanString(source.meta_template_id)
+        ? 'source_approved_before_resubmit'
+        : 'approved_sibling_exists',
+    });
+    return {
+      skipped: true,
+      reason: cleanString(remoteApprovedSibling.id) === cleanString(source.meta_template_id)
+        ? 'source_approved_before_resubmit'
+        : 'approved_sibling_exists',
+      source_template_id: source.id,
+      approved_meta_template_id: remoteApprovedSibling.id || null,
+      ...cancellation,
+    };
+  }
+  let preparedTemplate = null;
+  if (remoteReplacement && !hasSameMetaFacingContent(catalog, remoteReplacement)) {
+    const error = new Error('stale_pending_replacement_name_contract_conflict');
+    await recordAutoResubmitError(source.id, error);
+    throw error;
+  }
+  if (!remoteReplacement) {
+    preparedTemplate = await prepareTemplateImageHeaderForMeta({
+      template: buildTemplateForTechnicalName(catalog, replacementName),
+      accessToken: asset.waAccessToken,
+      logger: console,
+    });
+    const imageIssue = preparedTemplate.issue || getImageHeaderSampleIssue(preparedTemplate.template);
+    if (imageIssue) {
+      const error = new Error(`stale_pending_resubmit_${imageIssue}`);
+      await recordAutoResubmitError(source.id, error);
+      throw error;
+    }
+    try {
+      const metaResponse = await createTemplateInMeta({
+        wabaId: expectedWabaId,
+        accessToken: asset.waAccessToken,
+        template: preparedTemplate.template,
+        language: source.language || DEFAULT_LANGUAGE,
+      });
+      remoteReplacement = {
+        id: metaResponse?.id || null,
+        name: replacementName,
+        language: source.language || DEFAULT_LANGUAGE,
+        category: catalog.category,
+        status: metaResponse?.status || WHATSAPP_TEMPLATE_STATUS.PENDING,
+        components: preparedTemplate.template.components,
+      };
+    } catch (error) {
+      await recordAutoResubmitError(source.id, error);
+      throw error;
+    }
+  }
+  if (!cleanString(remoteReplacement?.id)) {
+    const error = new Error('stale_pending_resubmit_missing_meta_template_id');
+    await recordAutoResubmitError(source.id, error);
+    throw error;
+  }
+
+  // Cierra la carrera entre la preparación/creación de la cabecera y la
+  // aprobación del source. Nunca degradar una cobertura que Meta acaba de
+  // aprobar sustituyéndola por otra versión todavía pendiente.
+  const latestRemoteItems = await fetchTemplatesFromMeta({
+    wabaId: expectedWabaId,
+    accessToken: asset.waAccessToken,
+  });
+  const latestRemoteReplacement = findRemoteTemplate(latestRemoteItems, {
+    name: replacementName,
+    metaTemplateId: remoteReplacement.id,
+  });
+  if (latestRemoteReplacement) {
+    remoteReplacement = latestRemoteReplacement;
+  }
+  const lateApprovedSibling = latestRemoteItems.find((item) => (
+    cleanString(item?.status).toUpperCase() === WHATSAPP_TEMPLATE_STATUS.APPROVED
+    && isTechnicalTemplateFamilyName(catalog.name, item?.name)
+    && hasSameMetaFacingContent(catalog, item)
+    && cleanString(item?.id) !== cleanString(remoteReplacement.id)
+  ));
+  if (lateApprovedSibling) {
+    await syncTemplatesForWaba({ wabaId: expectedWabaId, accessToken: asset.waAccessToken });
+    source = await WhatsappTemplate.findByPk(source.id);
+    const reason = cleanString(lateApprovedSibling.id) === cleanString(source.meta_template_id)
+      ? 'source_approved_during_resubmit'
+      : 'approved_sibling_during_resubmit';
+    const cancellation = await cancelPlannedReplacement({
+      source,
+      replacementTemplateId: plannedReplacementTemplateId,
+      replacementName,
+      asset,
+      reason,
+    });
+    return {
+      skipped: true,
+      reason,
+      source_template_id: source.id,
+      approved_meta_template_id: lateApprovedSibling.id || null,
+      ...cancellation,
+    };
+  }
+
+  const now = new Date();
+  const replacementStatus = mapRemoteStatusToLocalStatus(remoteReplacement.status);
+  const overrideIds = await resolveClinicOverrideIdsForWaba({ source, catalog });
+  const replacement = await db.sequelize.transaction(async (transaction) => {
+    const lockedSource = await WhatsappTemplate.findByPk(source.id, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (lockedSource.superseded_by_template_id) {
+      return WhatsappTemplate.findByPk(lockedSource.superseded_by_template_id, { transaction });
+    }
+    const lockedStatus = cleanString(lockedSource.status).toUpperCase();
+    if (![WHATSAPP_TEMPLATE_STATUS.PENDING, 'IN_REVIEW'].includes(lockedStatus) || !lockedSource.is_active) {
+      return null;
+    }
+
+    let next = await WhatsappTemplate.findOne({
+      where: {
+        waba_id: expectedWabaId,
+        name: replacementName,
+        language: remoteReplacement.language || source.language || DEFAULT_LANGUAGE,
+      },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    const replacementPayload = {
+      waba_id: expectedWabaId,
+      clinic_id: null,
+      name: replacementName,
+      language: remoteReplacement.language || source.language || DEFAULT_LANGUAGE,
+      category: remoteReplacement.category || catalog.category,
+      status: replacementStatus,
+      components: remoteReplacement.components || preparedTemplate?.template?.components || catalog.components,
+      variables: parseMaybeJson(catalog.variables) || [],
+      meta_template_id: remoteReplacement.id,
+      catalog_template_id: catalog.id,
+      origin: 'catalog',
+      rejection_reason: remoteReplacement.rejected_reason || remoteReplacement.rejection_reason || null,
+      is_active: true,
+      pending_since_at: [WHATSAPP_TEMPLATE_STATUS.PENDING, 'IN_REVIEW'].includes(replacementStatus) ? now : null,
+      auto_resubmit_attempt_count: 1,
+      auto_resubmit_attempted_at: lockedSource.auto_resubmit_attempted_at || now,
+      resubmitted_from_template_id: lockedSource.id,
+      superseded_by_template_id: null,
+      auto_resubmit_error: null,
+      last_synced_at: now,
+    };
+    if (next) {
+      await next.update(replacementPayload, { transaction });
+    } else {
+      next = await WhatsappTemplate.create(replacementPayload, { transaction });
+    }
+
+    await lockedSource.update({
+      is_active: false,
+      superseded_by_template_id: next.id,
+      auto_resubmit_error: null,
+    }, { transaction });
+
+    if (overrideIds.length) {
+      await WhatsappTemplate.update({
+        name: replacementName,
+        language: replacementPayload.language,
+        category: replacementPayload.category,
+        status: replacementStatus,
+        components: normalizeTemplateComponentsForMeta(catalog.components),
+        variables: parseMaybeJson(catalog.variables) || [],
+        meta_template_id: remoteReplacement.id,
+        rejection_reason: replacementPayload.rejection_reason,
+        pending_since_at: replacementPayload.pending_since_at,
+        auto_resubmit_attempt_count: 1,
+        auto_resubmit_attempted_at: replacementPayload.auto_resubmit_attempted_at,
+        resubmitted_from_template_id: lockedSource.id,
+        auto_resubmit_error: null,
+        last_synced_at: now,
+      }, {
+        where: {
+          id: { [Op.in]: overrideIds },
+          is_active: true,
+          status: { [Op.in]: [WHATSAPP_TEMPLATE_STATUS.PENDING, 'IN_REVIEW'] },
+        },
+        transaction,
+      });
+    }
+    return next;
+  });
+
+  if (!replacement) {
+    source = await WhatsappTemplate.findByPk(source.id);
+    const cancellation = await cancelPlannedReplacement({
+      source,
+      replacementTemplateId: plannedReplacementTemplateId,
+      replacementName,
+      asset,
+      reason: 'source_changed_during_resubmit',
+    });
+    return {
+      skipped: true,
+      reason: 'source_changed_during_resubmit',
+      source_template_id: source.id,
+      ...cancellation,
+    };
+  }
+
+  source = await WhatsappTemplate.findByPk(source.id);
+  const cleanup = await cleanupSupersededRemoteTemplate({ source, replacement, asset });
+  return {
+    source_template_id: source.id,
+    replacement_template_id: replacement.id,
+    replacement_meta_template_id: replacement.meta_template_id,
+    replacement_name: replacement.name,
+    replacement_status: replacement.status,
+    overrides_updated: overrideIds.length,
+    ...cleanup,
+  };
 }
 
 function extractTemplateBodyText(components) {
@@ -1752,10 +2699,7 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
     throw new Error('missing_waba_or_token');
   }
 
-  const response = await axios.get(graphUrl(`${wabaId}/message_templates`), {
-    params: { access_token: accessToken, limit: 200 },
-  });
-  const items = response.data?.data || [];
+  const items = await fetchTemplatesFromMeta({ wabaId, accessToken });
   const now = new Date();
   const catalogs = await WhatsappTemplateCatalog.findAll({
     attributes: ['id', 'name', 'display_name', 'body_text', 'is_active'],
@@ -1787,13 +2731,22 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
       meta_template_id: tpl.id || null,
       catalog_template_id: catalog?.id || null,
       origin: 'external',
-      is_active: catalogIsActive && !isStaleReviewTemplate,
       last_synced_at: now,
     };
 
     const existing = await WhatsappTemplate.findOne({
       where: { waba_id: wabaId, name: payload.name, language: payload.language },
     });
+    const remoteStatus = cleanString(tpl.status).toUpperCase();
+    const remoteIsPending = [WHATSAPP_TEMPLATE_STATUS.PENDING, 'IN_REVIEW'].includes(remoteStatus);
+    payload.is_active = shouldKeepRemoteTemplateActive({
+      existing,
+      catalogIsActive,
+      isStaleReviewTemplate,
+    });
+    payload.pending_since_at = remoteIsPending
+      ? (existing?.pending_since_at || now)
+      : null;
     let syncedRow = null;
     if (existing) {
       await existing.update(payload);
@@ -1852,7 +2805,10 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
   }
 
   const clinicIdList = Array.from(clinicIds).filter(Number.isFinite);
-  if (!clinicIdList.length) return;
+  if (!clinicIdList.length) {
+    await enqueueStalePendingTemplateResubmissions({ wabaId, now });
+    return;
+  }
 
   const overrides = await WhatsappTemplate.findAll({
     where: {
@@ -1919,6 +2875,9 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
       status: nextStatus,
       meta_template_id: nextMetaTemplateId,
       rejection_reason: nextRejectionReason,
+      pending_since_at: [WHATSAPP_TEMPLATE_STATUS.PENDING, 'IN_REVIEW'].includes(
+        cleanString(nextStatus).toUpperCase(),
+      ) ? (override.pending_since_at || now) : null,
       last_synced_at: now,
     });
 
@@ -1927,6 +2886,8 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
       await notifyReviewPhotoTemplateApproved(override, catalog);
     }
   }
+
+  await enqueueStalePendingTemplateResubmissions({ wabaId, now });
 }
 
 async function enqueueCreateTemplatesJob(data) {
@@ -2088,6 +3049,8 @@ module.exports = {
   createPlaceholderTemplatesForClinic,
   propagateCatalogTemplateToAllClinics,
   syncTemplatesForWaba,
+  enqueueStalePendingTemplateResubmissions,
+  runStalePendingTemplateResubmission,
   enqueueCreateTemplatesJob,
   enqueuePropagateCatalogTemplateJob,
   enqueueSyncTemplatesJob,
