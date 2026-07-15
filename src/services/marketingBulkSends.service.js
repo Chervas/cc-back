@@ -1874,7 +1874,16 @@ function parseReviewExclusionRules(source = {}) {
     no_phone: raw.no_phone === true || String(raw.no_phone || '').toLowerCase() === 'true',
     no_treatment: raw.no_treatment === true || String(raw.no_treatment || '').toLowerCase() === 'true',
     no_visit_date: raw.no_visit_date === true || String(raw.no_visit_date || '').toLowerCase() === 'true',
+    phone_prefixes: parseReviewExcludedPhonePrefixes(raw.phone_prefixes ?? raw.phonePrefixes ?? raw.review_excluded_phone_prefixes ?? raw.reviewExcludedPhonePrefixes),
   };
+}
+
+function parseReviewExcludedPhonePrefixes(raw) {
+  const values = Array.isArray(raw) ? raw : String(raw || '').split(',');
+  return [...new Set(values
+    .map((value) => String(value || '').replace(/\D/g, ''))
+    .map((value) => value.startsWith('00') ? value.slice(2) : value)
+    .filter((value) => value.length >= 1 && value.length <= 4))];
 }
 
 function applyReviewClinicFilter(scope, source = {}) {
@@ -2750,6 +2759,14 @@ function getReviewRuleExclusionReason(item, rules = {}) {
   if (rules.no_phone && !normalizeText(item?.phone)) {
     return 'Sin teléfono móvil';
   }
+  const phoneDigits = normalizePhoneDigits(item?.phone || '');
+  const phonePrefixes = Array.isArray(rules.phone_prefixes) ? rules.phone_prefixes : [];
+  const matchedPhonePrefix = phoneDigits
+    ? phonePrefixes.find((prefix) => phoneDigits.startsWith(prefix))
+    : null;
+  if (matchedPhonePrefix) {
+    return `Prefijo telefónico +${matchedPhonePrefix}`;
+  }
   const treatment = normalizeText(item?.treatment || '').toLowerCase();
   if (
     rules.no_treatment
@@ -2766,7 +2783,7 @@ function getReviewRuleExclusionReason(item, rules = {}) {
 function applyReviewRequestExclusions(items = [], source = {}) {
   const excludedPatientIds = new Set(parseReviewExcludedPatientIds(source));
   const rules = parseReviewExclusionRules(source);
-  if (!excludedPatientIds.size && !rules.no_phone && !rules.no_treatment && !rules.no_visit_date) {
+  if (!excludedPatientIds.size && !rules.no_phone && !rules.no_treatment && !rules.no_visit_date && !rules.phone_prefixes?.length) {
     return items;
   }
   return (items || []).map((item) => {
@@ -2783,7 +2800,9 @@ function applyReviewRequestExclusions(items = [], source = {}) {
       ...item,
       status: 'excluded_manual',
       reason: manualExcluded ? 'Excluido manualmente de esta solicitud de reseña.' : ruleReason,
-      exclusion_reason: 'manual',
+      exclusion_reason: manualExcluded
+        ? 'manual'
+        : (String(ruleReason || '').toLowerCase().startsWith('prefijo telefónico') ? 'phone_prefix' : 'manual'),
       selected: false,
     };
   });
