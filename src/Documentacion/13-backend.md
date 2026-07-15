@@ -2152,6 +2152,17 @@ Mitigación:
     - Resuelve actor con `created_by` / `updated_by -> Usuarios`.
     - Esto evita que lead, agenda y ficha de paciente muestren cronologías distintas del mismo hecho operativo.
 
+## 2026-07-15 - ACL de Marketing Leads y selector "todas las clínicas"
+
+- `Marketing > Leads` usa `GET /api/intake/leads/search`, `GET /api/intake/leads`, `GET /api/intake/leads/stats` y rutas de detalle/actividad sobre `/api/intake/leads/:id`.
+- El backend no debe interpretar `clinicId=all` como consulta global salvo para admin global (`isGlobalAdmin`). Para usuarios de clínica, `all` significa "todas las clínicas asignadas a este usuario" según `UsuarioClinica`.
+- Las consultas por clínica o grupo se intersectan siempre con las clínicas accesibles del usuario. Si se pide una clínica fuera de scope, listados y métricas devuelven cero resultados; detalle, actividad y acciones sobre el lead devuelven `403 lead_scope_forbidden`.
+- Los leads con `clinica_id = NULL` y `grupo_clinica_id` solo son visibles si el usuario tiene acceso a alguna clínica de ese grupo. Esto permite trabajar leads de assets de grupo sin exponer leads de otros grupos.
+- Endpoints protegidos por este contrato:
+  - listado/búsqueda/estadísticas;
+  - detalle y actividad;
+  - cambio de estado, registro de contacto, búsqueda de citas candidatas, resultado de llamada y borrado.
+
 ## 2026-03-16 - Trigger explícito en flujos V2
 
 - **Trigger V2 sin activador por defecto operativo**

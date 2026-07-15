@@ -58,6 +58,7 @@ const {
   getAccessibleMarketingClinicIds,
   hasMarketingClinicScopeAccess,
 } = require('../lib/marketingScopeAccess');
+const { isGlobalAdmin } = require('../lib/role-helpers');
 const { resolveSafeHttpTarget } = require('../lib/safeHttpTarget');
 const {
   configuredLocationsWithinAllowedScope,
@@ -253,6 +254,146 @@ const parseIntegerList = (value) => {
   return unique.length ? unique : null;
 };
 const coalesce = (...values) => values.find(v => v !== undefined && v !== null);
+
+const buildIdWhere = (field, ids) => {
+  const normalizedIds = Array.from(new Set((Array.isArray(ids) ? ids : [ids])
+    .map((value) => parseInteger(value))
+    .filter((value) => value !== null)));
+  if (!normalizedIds.length) return null;
+  return {
+    [field]: normalizedIds.length === 1 ? normalizedIds[0] : { [Op.in]: normalizedIds },
+  };
+};
+
+const appendAndWhere = (where, condition) => {
+  if (!condition) return;
+  where[Op.and] = [...(where[Op.and] || []), condition];
+};
+
+const findClinicIdsByGroup = async (groupId) => {
+  const parsedGroupId = parseInteger(groupId);
+  if (parsedGroupId === null) return [];
+  const rows = await Clinica.findAll({
+    where: { grupoClinicaId: parsedGroupId },
+    attributes: ['id_clinica'],
+    raw: true,
+  });
+  return rows.map((row) => parseInteger(row.id_clinica)).filter((value) => value !== null);
+};
+
+const findAllClinicIds = async () => {
+  const rows = await Clinica.findAll({
+    attributes: ['id_clinica'],
+    raw: true,
+  });
+  return rows.map((row) => parseInteger(row.id_clinica)).filter((value) => value !== null);
+};
+
+const findGroupIdsForClinics = async (clinicIds) => {
+  const normalizedClinicIds = Array.from(new Set((Array.isArray(clinicIds) ? clinicIds : [clinicIds])
+    .map((value) => parseInteger(value))
+    .filter((value) => value !== null)));
+  if (!normalizedClinicIds.length) return [];
+  const rows = await Clinica.findAll({
+    where: { id_clinica: { [Op.in]: normalizedClinicIds } },
+    attributes: ['grupoClinicaId'],
+    raw: true,
+  });
+  return Array.from(new Set(rows
+    .map((row) => parseInteger(row.grupoClinicaId))
+    .filter((value) => value !== null)));
+};
+
+const resolveLeadScopeFilter = async (query = {}, userId = null) => {
+  const normalizedUserId = parseInteger(userId);
+  const clinicIdRaw = coalesce(query.clinicId, query.clinica_id);
+  const groupIdRaw = coalesce(query.groupId, query.grupo_clinica_id);
+  const clinicIdsParsed = parseIntegerList(clinicIdRaw);
+  const groupIdParsed = String(groupIdRaw || '').trim().toLowerCase() === 'all'
+    ? null
+    : parseInteger(groupIdRaw);
+
+  let requestedClinicIds = clinicIdsParsed;
+  if (requestedClinicIds === null && groupIdParsed !== null) {
+    requestedClinicIds = await findClinicIdsByGroup(groupIdParsed);
+  }
+
+  const includeGroupLevel = clinicIdsParsed === null;
+  if (isGlobalAdmin(normalizedUserId)) {
+    if (requestedClinicIds !== null) {
+      return {
+        clinicIds: requestedClinicIds,
+        groupIds: groupIdParsed !== null && includeGroupLevel ? [groupIdParsed] : [],
+      };
+    }
+    return null;
+  }
+
+  const targetClinicIds = requestedClinicIds !== null ? requestedClinicIds : await findAllClinicIds();
+  const clinicIds = await getAccessibleMarketingClinicIds({
+    userId: normalizedUserId,
+    clinicIds: targetClinicIds,
+    access: 'read',
+  });
+  const groupIds = includeGroupLevel
+    ? (groupIdParsed !== null && clinicIds.length ? [groupIdParsed] : await findGroupIdsForClinics(clinicIds))
+    : [];
+
+  return { clinicIds, groupIds };
+};
+
+const applyLeadScopeWhere = async (where, query = {}, userId = null) => {
+  const scope = await resolveLeadScopeFilter(query, userId);
+  if (scope === null) return;
+
+  const scopeConditions = [];
+  const clinicWhere = buildIdWhere('clinica_id', scope.clinicIds);
+  if (clinicWhere) scopeConditions.push(clinicWhere);
+
+  const groupWhere = buildIdWhere('grupo_clinica_id', scope.groupIds);
+  if (groupWhere) {
+    scopeConditions.push({
+      clinica_id: null,
+      ...groupWhere,
+    });
+  }
+
+  if (!scopeConditions.length) {
+    appendAndWhere(where, { clinica_id: 0 });
+    return;
+  }
+
+  appendAndWhere(where, scopeConditions.length === 1 ? scopeConditions[0] : { [Op.or]: scopeConditions });
+};
+
+const ensureLeadScopeAccess = async (req, res, lead) => {
+  const normalizedUserId = parseInteger(req.userData?.userId);
+  if (isGlobalAdmin(normalizedUserId)) return true;
+
+  const clinicId = parseInteger(lead?.clinica_id);
+  if (clinicId !== null) {
+    const allowedClinicIds = await getAccessibleMarketingClinicIds({
+      userId: normalizedUserId,
+      clinicIds: [clinicId],
+      access: 'read',
+    });
+    if (allowedClinicIds.length) return true;
+  }
+
+  const groupId = parseInteger(lead?.grupo_clinica_id);
+  if (clinicId === null && groupId !== null) {
+    const groupClinicIds = await findClinicIdsByGroup(groupId);
+    const allowedClinicIds = await getAccessibleMarketingClinicIds({
+      userId: normalizedUserId,
+      clinicIds: groupClinicIds,
+      access: 'read',
+    });
+    if (allowedClinicIds.length) return true;
+  }
+
+  res.status(403).json({ success: false, error: 'lead_scope_forbidden' });
+  return false;
+};
 
 const toPlain = (row) => (row && typeof row.get === 'function' ? row.get({ plain: true }) : row);
 
@@ -4642,7 +4783,7 @@ exports.receiveMetaWebhook = asyncHandler(async (req, res) => {
 
 const LEAD_LIST_SORT_FIELDS = new Set(['created_at', 'channel', 'source', 'status_lead', 'campana_id']);
 
-const buildLeadListPayload = async (query = {}) => {
+const buildLeadListPayload = async (query = {}, context = {}) => {
   const {
     clinicId,
     groupId,
@@ -4666,14 +4807,9 @@ const buildLeadListPayload = async (query = {}) => {
   if (!includeArchived) where.archived_at = null;
   const clinicIdRaw = clinicId || query.clinica_id;
   const groupIdRaw = groupId || query.grupo_clinica_id;
-  const clinicIdsParsed = parseIntegerList(clinicIdRaw);
-  const groupIdParsed = groupIdRaw === 'all' ? null : parseInteger(groupIdRaw);
   const campanaIdParsed = parseInteger(campanaId || query.campana_id);
 
-  if (clinicIdsParsed !== null) {
-    where.clinica_id = clinicIdsParsed.length === 1 ? clinicIdsParsed[0] : { [Op.in]: clinicIdsParsed };
-  }
-  if (groupIdParsed !== null) where.grupo_clinica_id = groupIdParsed;
+  await applyLeadScopeWhere(where, { ...query, clinicId: clinicIdRaw, groupId: groupIdRaw }, context.userId);
   if (campanaIdParsed !== null) where.campana_id = campanaIdParsed;
   if (channel && CHANNELS.has(channel)) where.channel = channel;
   if (source && SOURCES.has(source)) {
@@ -4744,12 +4880,12 @@ const buildLeadListPayload = async (query = {}) => {
 };
 
 exports.listLeads = asyncHandler(async (req, res) => {
-  const payload = await buildLeadListPayload(req.query);
+  const payload = await buildLeadListPayload(req.query, { userId: req.userData?.userId });
   res.status(200).json(payload);
 });
 
 exports.searchLeads = asyncHandler(async (req, res) => {
-  const payload = await buildLeadListPayload(req.query);
+  const payload = await buildLeadListPayload(req.query, { userId: req.userData?.userId });
   res.status(200).json(payload);
 });
 
@@ -4777,6 +4913,7 @@ exports.getLeadById = asyncHandler(async (req, res) => {
   if (!lead) {
     return res.status(404).json({ message: 'Lead no encontrado' });
   }
+  if (!(await ensureLeadScopeAccess(req, res, lead))) return;
 
   const out = lead.toJSON();
   const latestFormSubmission = Array.isArray(out.formSubmissionEvents) && out.formSubmissionEvents.length
@@ -4826,6 +4963,7 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
   if (!lead) {
     return res.status(404).json({ message: 'Lead no encontrado' });
   }
+  if (!(await ensureLeadScopeAccess(req, res, lead))) return;
 
   if (lead.telefono && lead.clinica_id) {
     await findCanonicalWhatsappConversation({
@@ -5115,14 +5253,9 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
   if (!includeArchived) where.archived_at = null;
   const clinicIdRaw = clinicId || req.query.clinica_id;
   const groupIdRaw = groupId || req.query.grupo_clinica_id;
-  const clinicIdsParsed = parseIntegerList(clinicIdRaw);
-  const groupIdParsed = groupIdRaw === 'all' ? null : parseInteger(groupIdRaw);
   const campanaIdParsed = parseInteger(campanaId || req.query.campana_id);
 
-  if (clinicIdsParsed !== null) {
-    where.clinica_id = clinicIdsParsed.length === 1 ? clinicIdsParsed[0] : { [Op.in]: clinicIdsParsed };
-  }
-  if (groupIdParsed !== null) where.grupo_clinica_id = groupIdParsed;
+  await applyLeadScopeWhere(where, { ...req.query, clinicId: clinicIdRaw, groupId: groupIdRaw }, req.userData?.userId);
   if (campanaIdParsed !== null) where.campana_id = campanaIdParsed;
   if (channel && CHANNELS.has(channel)) where.channel = channel;
   if (source && SOURCES.has(source)) {
@@ -5182,6 +5315,7 @@ exports.updateLeadStatus = asyncHandler(async (req, res) => {
   if (!lead) {
     return res.status(404).json({ message: 'Lead no encontrado' });
   }
+  if (!(await ensureLeadScopeAccess(req, res, lead))) return;
 
   if (status_lead && !STATUSES.has(status_lead)) {
     return res.status(400).json({ message: 'status_lead inválido' });
@@ -5248,6 +5382,7 @@ exports.registrarContacto = asyncHandler(async (req, res) => {
   if (!lead) {
     return res.status(404).json({ message: 'Lead no encontrado' });
   }
+  if (!(await ensureLeadScopeAccess(req, res, lead))) return;
 
   let reminderAt = null;
   if (hasReminderField && reminderAtRaw) {
@@ -5362,6 +5497,7 @@ exports.getCandidateAppointments = asyncHandler(async (req, res) => {
   if (!lead) {
     return res.status(404).json({ message: 'Lead no encontrado' });
   }
+  if (!(await ensureLeadScopeAccess(req, res, lead))) return;
 
   const clinicId = parseInteger(lead.clinica_id);
   const normalizedPhone = normalizePhone(lead.telefono);
@@ -5434,6 +5570,7 @@ exports.saveCallOutcome = asyncHandler(async (req, res) => {
   if (!lead) {
     return res.status(404).json({ message: 'Lead no encontrado' });
   }
+  if (!(await ensureLeadScopeAccess(req, res, lead))) return;
 
   let linkedAppointment = null;
   if (appointmentId !== null) {
@@ -5558,6 +5695,7 @@ exports.deleteLead = asyncHandler(async (req, res) => {
   if (!lead) {
     return res.status(404).json({ message: 'Lead no encontrado' });
   }
+  if (!(await ensureLeadScopeAccess(req, res, lead))) return;
 
   // Registrar auditoría antes de eliminar
   try {
