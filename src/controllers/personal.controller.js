@@ -30,6 +30,7 @@ const {
     isAdminRole,
     canManagePersonal: canManagePersonalHelper,
 } = require('../lib/role-helpers');
+const { canUserAccessFeature } = require('../lib/access-policy');
 const {
     normalizeDateOnly,
     addDays,
@@ -494,7 +495,7 @@ function normalizeBloqueoTipo(value) {
 
 async function canManagePersonalInClinic(actorId, clinicaId) {
     if (isAdmin(actorId)) return true;
-    return hasAdminScopePivot(actorId, clinicaId);
+    return canManageTeamInClinic(actorId, clinicaId);
 }
 
 function invitationStateRank(value) {
@@ -2154,6 +2155,16 @@ async function hasAdminScopePivot(userId, clinicId) {
     return !!row;
 }
 
+async function canManageTeamInClinic(userId, clinicId) {
+    if (!Number.isFinite(Number(userId)) || !Number.isFinite(Number(clinicId))) return false;
+    if (await hasAdminScopePivot(userId, clinicId)) return true;
+    return canUserAccessFeature({
+        actorId: Number(userId),
+        featureKey: 'team.manage',
+        clinicId: Number(clinicId),
+    });
+}
+
 async function canEditHorarios(actorId, targetUserId, clinicId) {
     if (isAdmin(actorId)) return true;
     if (!Number.isFinite(Number(clinicId))) return false;
@@ -2163,9 +2174,9 @@ async function canEditHorarios(actorId, targetUserId, clinicId) {
         return hasStaffPivot(actorId, clinicId);
     }
 
-    // Editar horarios de otros: propietario/agencia con alcance sobre la clínica.
-    const actorHasAdminScope = await hasAdminScopePivot(actorId, clinicId);
-    if (!actorHasAdminScope) return false;
+    // Editar horarios de otros: propietario/agencia o permiso explicito team.manage.
+    const actorCanManageTeam = await canManageTeamInClinic(actorId, clinicId);
+    if (!actorCanManageTeam) return false;
 
     // Evitar generar schedules "huérfanos" en clínicas donde el usuario no pertenece
     return hasStaffPivot(targetUserId, clinicId);
@@ -4428,9 +4439,9 @@ exports.buscarPersonal = async (req, res) => {
             return res.status(400).json({ message: 'clinica_id es obligatorio' });
         }
 
-        // Invitar/buscar personal es una acción de gestión: solo admin global
-        // o roles de administración en la clínica (propietario/agencia).
-        const canManageClinicPersonal = isAdmin(actorId) || await hasAdminScopePivot(actorId, clinicaId);
+        // Invitar/buscar personal es una acción de gestión: admin global,
+        // roles de administración o permiso explicito team.manage en la clínica.
+        const canManageClinicPersonal = isAdmin(actorId) || await canManageTeamInClinic(actorId, clinicaId);
         if (!canManageClinicPersonal) {
             return res.status(403).json({ message: 'Forbidden' });
         }
@@ -4535,9 +4546,9 @@ exports.invitarPersonal = async (req, res) => {
             return res.status(400).json({ message: 'clinica_id es obligatorio' });
         }
 
-        // Invitar personal es una acción de gestión: solo admin global
-        // o roles de administración en la clínica (propietario/agencia).
-        const canManageClinicPersonal = isAdmin(actorId) || await hasAdminScopePivot(actorId, clinicaId);
+        // Invitar personal es una acción de gestión: admin global,
+        // roles de administración o permiso explicito team.manage en la clínica.
+        const canManageClinicPersonal = isAdmin(actorId) || await canManageTeamInClinic(actorId, clinicaId);
         if (!canManageClinicPersonal) {
             return res.status(403).json({ message: 'Forbidden' });
         }
@@ -4749,7 +4760,7 @@ exports.getInvitaciones = async (req, res) => {
             return res.status(400).json({ message: 'clinica_id es obligatorio' });
         }
 
-        const canManageClinicPersonal = isAdmin(actorId) || await hasAdminScopePivot(actorId, clinicaId);
+        const canManageClinicPersonal = isAdmin(actorId) || await canManageTeamInClinic(actorId, clinicaId);
         if (!canManageClinicPersonal) {
             return res.status(403).json({ message: 'Forbidden' });
         }
