@@ -82,6 +82,12 @@ La lectura pasiva de Competencia devuelve únicamente datos persistidos y nunca 
 
 El refresco manual de competidores sigue el mismo principio: `POST /api/marketing/reports/competition/refresh` no llama a Meta/Google ni ejecuta navegador dentro de la petición. Encola/deduplica un `JobRequest.type=competition_refresh` con el scope y los competidores seleccionados, dispara al worker del namespace y responde `202`; el job semanal y el disparo manual comparten handler, auditoría, reintentos y recuperación.
 
+El alta desde descubrimiento también debe hidratarse por esa misma ruta durable. `POST /api/marketing/reports/competition/competitors` persiste primero la identidad/payload ligero de Text Search y después encola un `competition_refresh` de prioridad `low` para ese `competitor_id`; nunca consulta detalles, Meta ni Ads Transparency dentro de la petición HTTP. La deduplicación usa `competition:competitor:<id>` para que una tanda no pierda ids al reutilizar el primer job y la lane background procesa los trabajos secuencialmente. La respuesta `201` incluye `hydration.status`, `hydration.queued`, `hydration.alreadyQueued` y `hydration.jobRequestId`; la fila refleja `last_sync_status=queued`. Si falla el alta del JobRequest, el competidor se conserva con `last_sync_status=queue_error`, el error queda visible y un reintento no fabrica una segunda identidad. El catálogo marca `attachJobRequestId=true` y `executeCompetitionSync` enlaza `JobRequests.sync_log_id` al iniciar, por lo que estado, intentos, error y reporte de proveedores quedan navegables desde el mismo trabajo. El worker actualiza ficha/snapshots/ads y `SyncLogs` con el mismo ejecutor del refresco manual y semanal: no existe cron, promesa huérfana ni proveedor paralelo.
+
+Diagnóstico real previo al arreglo en Badalona (`clinica_id=58`, 2026-07-15): nueve competidores `50..58` tenían solo el payload Pro de sugerencias (dirección/categoría, sin teléfono, web, rating ni reseñas), nueve snapshots ligeros, cero `MarketingCompetitorAdSnapshots`, `last_sync_status=created` y ningún `JobRequest competition_refresh` de ese scope. Esto demuestra que el proveedor no había fallado: nunca se había solicitado la fase de enriquecimiento.
+
+La recuperación controlada se hizo sin borrar ni recrear competidores: `JobRequest #29542` procesó los nueve al primer intento en la lane `dev`; `SyncLog #66072` cerró `processed=9`, `completed=9`, `partial=0`, y quedaron rating/reseñas/teléfono enriquecidos más 18 snapshots publicitarios (Meta + Google) para los ids `50..58`.
+
 Para controlar coste/abuso:
 
 - término normalizado, con máximo de 160 caracteres por defecto;
@@ -110,7 +116,33 @@ Preflight repetido el 2026-07-15: competencia conserva `49` filas totales, `48` 
 
 Referencias normativas: [Places API policies](https://developers.google.com/maps/documentation/places/web-service/policies), [Google Maps Platform EEA Terms](https://cloud.google.com/terms/maps-platform/eea), [EEA Places permitted uses](https://cloud.google.com/terms/maps-platform/eea-places-api-permitted-uses) y [Static Maps caching FAQ](https://developers.google.com/maps/faq#can-i-generate-a-map-image-using-the-maps-static-api-which-i-store-and-serve-from-my-website).
 
-Regresiones mínimas: `business_profile_local.test.js`, `marketing_competition_heatmap_cache.test.js`, `marketing_competition_suggestions_efficiency.test.js`, `marketing_report_lead_attribution.test.js`, `marketing_report_effective_assets.test.js`, `scheduled_jobs_orchestration.test.js` y `access_policy.test.js`.
+Regresiones mínimas: `business_profile_local.test.js`, `marketing_competition_heatmap_cache.test.js`, `marketing_competition_suggestions_efficiency.test.js`, `marketing_competitor_hydration_queue.test.js`, `marketing_report_lead_attribution.test.js`, `marketing_report_effective_assets.test.js`, `scheduled_jobs_orchestration.test.js` y `access_policy.test.js`.
+
+### Visibilidad en IA (contrato futuro, no implementado)
+
+La primera versión aprobada será OpenAI Responses API con `web_search`, solo
+para consultas locales de catálogo y datos públicos de la clínica. No se envían
+leads, pacientes, citas, conversaciones ni datos clínicos. `GET
+/competition/ai-visibility` será DB-only; `POST
+/competition/ai-visibility/runs` aceptará únicamente `clinicId`, claves de
+consulta y proveedores habilitados, encolará un `JobRequest` y responderá `202`.
+La apertura de Informes nunca ejecutará una consulta pagada.
+
+La orquestación propuesta añade un sweep semanal y un refresh durable por
+clínica, deduplicado por clínica+semana, con cooldown manual de 24 horas y
+límites de coste por clínica/global. Configuración, runs y resultados vivirán
+en tablas separadas; modelo/prompt quedan versionados, `store:false`, fuentes
+visibles y posición solo si el output contiene una lista explícitamente
+ordenada. Retención objetivo: resultado fresco siete días, respuesta/citas 90
+días y agregados mensuales 24 meses.
+
+Gemini Grounding permanece desactivado aunque exista adapter futuro: los
+términos actuales restringen almacenar, cachear y analizar Grounded Results y
+exigen mostrarlos con Search Suggestions al usuario que lanzó el prompt. Un
+monitor automático con histórico no se habilita sin autorización escrita o
+contrato específico de Google. Estado 2026-07-15: no existen claves OpenAI ni
+Gemini configuradas, tablas/endpoints ni feature flag; no se publica una UI
+vacía hasta validar una muestra real y su coste.
 
 ## 2026-07-14 - Corte desplegado: jobs unificados, outbox de intake, Consent v5 y `Conecta y mejora`
 
@@ -487,6 +519,9 @@ Estado de sincronización:
 - El embudo termina en `Realiza tratamiento`. En V1 se calcula desde `LeadIntake.status_lead='convertido'`; cuando exista una señal clínica canónica de tratamiento realizado, debe reemplazar esta aproximación.
 - `webSummary.webConvertedPatients` suma convertidos de canales web propios (`web`, `direct`, `call_click`, `whatsapp`). Los leads con `utm_source` social se asignan a `social_organic`, aunque técnicamente hayan entrado por una URL web, para respetar el primer contacto y evitar doble atribución.
 - Los canales de adquisición de Informes no agrupan solo por `LeadIntake.source`: `source=web` puede describir que el contacto entró por chat, formulario o modal telefónico aunque sea publicidad. El agregador prioriza `google_ads_customer_id`, `google_ads_campaign_id`, `gclid`, `gbraid` o `wbraid` como Google Ads y `fbclid` como Meta Ads antes de la fuente explícita y las UTM. La regresión canónica es `node src/scripts/tests/marketing_report_lead_attribution.test.js`.
+- El fallback canónico `web` se presenta como **Web propia (sin campaña)**. Incluye formularios, chat y modal telefónico sin señales Ads/SEO/sociales; no equivale solo a formularios ni al canal técnico `direct`.
+- Inversión, campañas y serie de gasto usan una ventana publicitaria comparable: `resolvePaidAttributionCoverage` toma el primer `LeadIntake` atribuible a Google Ads o Meta Ads del scope y no suma backfill de gasto anterior. Web, SEO y el resto de datos legítimos conservan el rango solicitado. Desde ese hito se cuentan también los días con gasto y cero leads. La respuesta expone `dataQuality.paidAttributionCoverage` y el frontend avisa si el inicio efectivo ha recortado el rango. El KPI CPL divide esa inversión por leads canónicos de Ads, no por leads web/orgánicos. Sin un hito atribuible no se inventa una fecha. Regresión: `node src/scripts/tests/marketing_report_lead_attribution.test.js`.
+- Las filas Google Ads se deduplican por la identidad remota `clinica/grupo + customer + campaign + date + adGroup + network + device`, excluyendo deliberadamente `clinicGoogleAdsAccountId` de esa clave. Un mismo customer puede tener dos mappings locales durante una reasignación o herencia; eso no debe duplicar gasto, clicks ni conversiones. El scope remoto/histórico se conserva, de modo que deduplicar no equivale a ocultar cuentas antiguas legítimas.
 - `WhatsApp desde la web (Clicks)` exige un `WhatsAppWebOrigin` creado por el widget/snippet instrumentado (o el fallback legacy documentado); un enlace arbitrario no cuenta por sí solo. `Confirmados` exige que el inbound conserve `[cc_ref:...]` y marque `used_at`/conversación/mensaje: abrir WhatsApp sin enviar no confirma.
 
 Search Console:
@@ -1720,14 +1755,13 @@ Esto evita duplicidades de gasto o conversiones en otros endpoints.
 ## 2026-03-18 - Diseño objetivo de conexiones OAuth por scope
 
 > **Estado a 2026-07-15:** runtime multi-conexión e inventario efectivo UI
-> publicados en backend dev (`dd08dff`) y staging/gateway (`7f4062e`);
-> migración `1515` aplicada. Los
-> endpoints Google `connect` y `callback` ya están reabiertos tras smoke interno
-> y público del `state` opaco/de un solo uso. Solo Meta permanece temporalmente
-> cerrado con HTTP `503`: falta rotar `META_APP_SECRET`, ejecutar su smoke final
-> y reabrirlo de forma controlada. El frontend de staging ya fue promovido y
-> publicado (build Webpack `fce1a1eeaeee86db`, bundle público
-> `main.b69d5061ffc08600.js`, frontend staging `a7c19129`).
+> publicados; migración `1515` aplicada. Google y Meta tienen `connect` y
+> `callback` públicos abiertos. El secreto Meta se rotó de forma coordinada en
+> dev, staging y gateway sin copiar su valor a Git, logs ni documentación. El
+> smoke posterior validó Graph `debug_token`, coincidencia de App ID, firma HMAC
+> válida e inválida, grant efectivo de Badalona y emisión pública de un nuevo
+> `state`. El token existente continuó válido, por lo que no fue necesaria una
+> reconexión OAuth.
 
 ### Limitación que originó la migración (contexto histórico)
 
@@ -2183,13 +2217,15 @@ Cuando dual-read y dual-write estén estables:
 
 ### Estado implementado y desplegado a 2026-07-15
 
-El contrato nuevo está implementado en `wt/back-dev` (`dd08dff`) y promovido a
-`wt/back-staging` y `/home/ubuntu/wt/gateway` (`7f4062e`). La migración de
-multi-conexión `1515` está aplicada. El corte sigue en ventana de mantenimiento:
-Nginx ya enruta `connect` y `callback` de Google al runtime nuevo, mientras
-`connect` y `callback` de Meta responden `503`. Los grants Google existentes y
-nuevos quedan operativos; no puede iniciarse ni completarse un grant Meta hasta
-rotar su secreto y ejecutar el smoke final.
+El contrato nuevo está implementado y la migración de multi-conexión `1515`
+está aplicada. La ventana de mantenimiento terminó el 2026-07-15: Nginx enruta
+`connect` y `callback` de Google y Meta al runtime nuevo. El secreto Meta se
+rotó simultáneamente en los tres runtimes y el smoke final confirmó que el
+grant existente seguía válido, que el App ID coincidía, que las firmas HMAC se
+aceptaban/rechazaban correctamente y que el inicio público de OAuth emitía una
+URL válida. La rotación del App Secret no invalida por sí sola los tokens de
+usuario, así que no se fuerza una reconexión si `debug_token` y permisos siguen
+correctos.
 
 Piezas canónicas:
 
@@ -2281,16 +2317,10 @@ proveedor y dos sitios Search Console que conservan su token exacto.
 ### Cutover obligatorio de multi-conexión
 
 > **Estado operativo del corte (2026-07-15):** completados publicación de
-> writers nuevos, reinicios controlados y migraciones `1500`, `1510` y `1515`.
-> Backend dev está en `dd08dff`; backend staging y gateway están en `7f4062e`.
-> Los gates Google se retiraron después de validar por las rutas públicas la
-> emisión y consumo único de `state`; los gates Meta de `connect`/`callback`
-> siguen devolviendo `503`. Quedan pendientes la rotación de
-> `META_APP_SECRET`, el smoke Meta posterior y su reapertura ordenada. El
-> frontend de staging ya está publicado en `a7c19129` con el build
-> `fce1a1eeaeee86db` (`main.b69d5061ffc08600.js`; SHA-256 del `index.html`
-> público `64f209fdbd33a54ff7a9632e2c1dc3306864d6baf08a7bdcd8f4c1bbe64da485`). La
-> migración `1520` queda fuera de este cutover y permanece suspendida: además
+> writers nuevos, reinicios controlados, migraciones `1500`, `1510` y `1515`,
+> rotación coordinada del App Secret Meta, smoke del grant/webhook y reapertura
+> de `connect`/`callback` para ambos proveedores. La migración `1520` queda
+> fuera de este cutover y permanece suspendida: además
 > de aprobación explícita independiente, requiere resolver antes la base
 > contractual/retención porque contradice el descubrimiento ahora activo.
 
@@ -2333,7 +2363,8 @@ Orden seguro:
 5. validar índices, resolución por scope, callback Google/Meta, status y
    disconnect sin reiniciar de nuevo por inercia;
 6. rotar el secreto Meta coordinadamente y validar el nuevo entorno;
-7. reabrir callbacks.
+7. reabrir callbacks. **Completado el 2026-07-15** tras validar grant, App ID,
+   HMAC y entrada pública de OAuth.
 
 Alternativa con parada: bloquear por completo `/oauth`, detener todos los
 writers legacy, aplicar `1515` y arrancar únicamente los runtimes nuevos. Nunca
@@ -2346,15 +2377,14 @@ validarse antes de retirar los `503` de Meta. Nunca copiar el valor a logs,
 commits o documentación.
 
 Estado comprobado el 2026-07-15: `/oauth/meta/connect` y
-`/oauth/meta/callback` continúan cerrados con `503`, mientras mappings, lecturas
-y webhooks permanecen abiertos. Rotar el App Secret no obliga por sí solo a
-reconectar OAuth: se conserva el grant/token existente y, tras desplegar el
-nuevo secreto coordinadamente en dev/staging/gateway, se valida primero ese
-grant. Solo se reautoriza si Meta lo rechaza, está revocado/caducado o faltan
-permisos. La entrada canónica, una vez reabierto el flujo, es `Ajustes > Cuentas
-conectadas > Meta`. La rotación debe validar también firmas HMAC de lead/webhook
-y Embedded Signup; no se puede cambiar un runtime y dejar los otros con el
-secreto anterior.
+`/oauth/meta/callback` están abiertos y el grant efectivo de Badalona continúa
+válido, sin scopes ausentes ni solicitud de reautorización. Rotar el App Secret
+no obliga por sí solo a reconectar OAuth: se conserva el grant/token existente
+y se reautoriza únicamente si Meta lo rechaza, está revocado/caducado o faltan
+permisos. La entrada canónica para una conexión nueva o una reautorización es
+`Ajustes > Cuentas conectadas > Meta`. El smoke cubrió también la aceptación de
+una firma HMAC correcta y el rechazo de una inválida; los tres runtimes quedaron
+con la misma versión del secreto antes de retirar los `503`.
 
 El contrato multi-cuenta Meta es parcial. `MetaConnections` soporta varias
 identidades por usuario y `ClinicMetaAssets` varias cuentas publicitarias por

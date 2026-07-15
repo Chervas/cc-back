@@ -59,7 +59,12 @@ const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
     priority: 'low',
     executorMethod: 'executeBusinessProfileBackfill',
   }),
-  competitionSync: Object.freeze({ type: 'competition_refresh', priority: 'low', executorMethod: 'executeCompetitionSync' }),
+  competitionSync: Object.freeze({
+    type: 'competition_refresh',
+    priority: 'low',
+    executorMethod: 'executeCompetitionSync',
+    attachJobRequestId: true,
+  }),
   webEventsAggregate: Object.freeze({ type: 'web_events_aggregate', priority: 'normal', executorMethod: 'executeWebEventsAggregate' }),
   whatsappTemplatesSync: Object.freeze({
     type: 'whatsapp_templates_sync',

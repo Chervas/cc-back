@@ -46,6 +46,11 @@ function testCatalogCoversEveryCronAndExecutor() {
       `${jobName} must preserve the historical host-cron timezone`
     );
   }
+  assert.equal(
+    SCHEDULED_JOB_DEFINITIONS.competitionSync.attachJobRequestId,
+    true,
+    'competition refresh jobs must link their SyncLog for observability'
+  );
 
   for (const [jobName, definition] of definitions) {
     assert.equal(typeof metaSyncJobs[definition.executorMethod], 'function', `${jobName} executor missing`);
@@ -79,13 +84,30 @@ function testCatalogCoversEveryCronAndExecutor() {
     path.resolve(__dirname, '../../controllers/marketingCompetition.controller.js'),
     'utf8'
   );
+  const competitionQueueStart = competitionControllerSource.indexOf('async function enqueueCompetitionRefresh');
+  const competitionGetStart = competitionControllerSource.indexOf('exports.getCompetition', competitionQueueStart);
+  const competitionQueueBody = competitionControllerSource.slice(competitionQueueStart, competitionGetStart);
+  assert.match(competitionQueueBody, /enqueueUniqueJobRequest/);
+  assert.match(competitionQueueBody, /type: 'competition_refresh'/);
+  assert.match(competitionQueueBody, /dedupeScope: `competition:competitor:/);
+  assert.match(competitionQueueBody, /triggerImmediate/);
   const competitionRefreshStart = competitionControllerSource.indexOf('exports.refreshCompetition');
   const competitionHeatmapStart = competitionControllerSource.indexOf('exports.getLocalHeatmap', competitionRefreshStart);
   const competitionRefreshBody = competitionControllerSource.slice(competitionRefreshStart, competitionHeatmapStart);
-  assert.match(competitionRefreshBody, /enqueueUniqueJobRequest/);
-  assert.match(competitionRefreshBody, /type: 'competition_refresh'/);
-  assert.match(competitionRefreshBody, /clinicIds: scopeClinicIds/);
+  assert.match(competitionRefreshBody, /enqueueCompetitionRefresh/);
   assert.doesNotMatch(competitionRefreshBody, /competitionService\.refreshCompetition/);
+  const competitionCreateStart = competitionControllerSource.indexOf('exports.createCompetitor');
+  const competitionUpdateStart = competitionControllerSource.indexOf('exports.updateCompetitor', competitionCreateStart);
+  const competitionCreateBody = competitionControllerSource.slice(competitionCreateStart, competitionUpdateStart);
+  assert.match(competitionCreateBody, /enqueueCompetitionRefresh/);
+  assert.match(competitionCreateBody, /origin: 'marketing_reports:competition_create'/);
+  assert.match(competitionCreateBody, /jobRequestId/);
+
+  const competitionExecutorStart = syncJobsSource.indexOf('async executeCompetitionSync');
+  const diagnosticsExecutorStart = syncJobsSource.indexOf('async executeGoogleDataManagerDiagnostics', competitionExecutorStart);
+  const competitionExecutorBody = syncJobsSource.slice(competitionExecutorStart, diagnosticsExecutorStart);
+  assert.match(competitionExecutorBody, /options\.jobRequestId/);
+  assert.match(competitionExecutorBody, /jobRequestsService\.setSyncLog/);
 
   const targetedWebStart = controllerSource.indexOf('exports.runTargetedWebBackfill');
   const targetedAnalyticsStart = controllerSource.indexOf('exports.runTargetedAnalyticsBackfill');

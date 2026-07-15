@@ -46,6 +46,16 @@ const QueryTypes = db.Sequelize.QueryTypes;
 const sequelize = db.sequelize;
 
 const DAY_MS = 86400000;
+const GOOGLE_ADS_REMOTE_FACT_GROUP = [
+  'clinicaId',
+  'grupoClinicaId',
+  'customerId',
+  'campaignId',
+  'date',
+  'adGroupId',
+  'network',
+  'device',
+];
 const CITED_LEAD_STATUSES = new Set(['citado', 'acudio_cita', 'convertido']);
 const ATTENDED_LEAD_STATUSES = new Set(['acudio_cita', 'convertido']);
 const CONVERTED_LEAD_STATUSES = new Set(['convertido']);
@@ -150,6 +160,17 @@ function money(value) {
   return round(value, 2);
 }
 
+function googleAdsRemoteFactAttributes() {
+  return [
+    ...GOOGLE_ADS_REMOTE_FACT_GROUP,
+    [fn('MAX', col('campaignName')), 'campaignName'],
+    [fn('MAX', col('impressions')), 'impressions'],
+    [fn('MAX', col('clicks')), 'clicks'],
+    [fn('MAX', col('costMicros')), 'costMicros'],
+    [fn('MAX', col('conversions')), 'conversions'],
+  ];
+}
+
 function dateLabel(start, end) {
   return `${start} - ${end}`;
 }
@@ -174,6 +195,38 @@ function buildDateOnlyWhere(field, range) {
   return {
     [field]: {
       [Op.between]: [range.startLabel, range.endLabel],
+    },
+  };
+}
+
+function normalizeDateOnly(value) {
+  if (!value) return null;
+  const direct = String(value).trim().slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(direct)) return direct;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString().slice(0, 10) : null;
+}
+
+function humanDateEs(value) {
+  const normalized = normalizeDateOnly(value);
+  if (!normalized) return null;
+  const [year, month, day] = normalized.split('-').map(Number);
+  const months = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+  return `${day} ${months[month - 1]} ${year}`;
+}
+
+function comparablePaidRangeStart(range, coverageStart) {
+  const normalizedCoverageStart = normalizeDateOnly(coverageStart);
+  if (!normalizedCoverageStart) return range.startLabel;
+  return normalizedCoverageStart > range.startLabel
+    ? normalizedCoverageStart
+    : range.startLabel;
+}
+
+function buildComparablePaidDateWhere(field, range, coverageStart) {
+  return {
+    [field]: {
+      [Op.between]: [comparablePaidRangeStart(range, coverageStart), range.endLabel],
     },
   };
 }
@@ -299,6 +352,61 @@ const LEAD_ACQUISITION_CHANNEL_SQL = `CASE
   ELSE 'web'
 END`;
 
+async function resolvePaidAttributionCoverage(scope, dependencies = {}) {
+  const LeadModel = dependencies.LeadIntake || LeadIntake;
+  if (!LeadModel) {
+    return {
+      start: null,
+      googleAdsStart: null,
+      metaAdsStart: null,
+    };
+  }
+
+  const rows = await LeadModel.findAll({
+    attributes: [
+      [fn('MIN', literal(`CASE WHEN (${LEAD_ACQUISITION_CHANNEL_SQL}) = 'google_ads' THEN created_at END`)), 'googleAdsStart'],
+      [fn('MIN', literal(`CASE WHEN (${LEAD_ACQUISITION_CHANNEL_SQL}) = 'meta_ads' THEN created_at END`)), 'metaAdsStart'],
+    ],
+    where: {
+      archived_at: null,
+      ...scopedWhere('clinica_id', scope),
+    },
+    raw: true,
+  });
+
+  const googleAdsStart = normalizeDateOnly(rows?.[0]?.googleAdsStart);
+  const metaAdsStart = normalizeDateOnly(rows?.[0]?.metaAdsStart);
+  const starts = [googleAdsStart, metaAdsStart].filter(Boolean).sort();
+
+  return {
+    start: starts[0] || null,
+    googleAdsStart,
+    metaAdsStart,
+  };
+}
+
+function buildPaidAttributionCoverageSummary(range, coverage) {
+  const commonStart = normalizeDateOnly(coverage?.start);
+  const effectiveStart = commonStart
+    ? comparablePaidRangeStart(range, commonStart)
+    : range.startLabel;
+  const truncated = Boolean(commonStart && commonStart > range.startLabel);
+  const hasComparableData = !commonStart || effectiveStart <= range.endLabel;
+
+  return {
+    start: commonStart,
+    effectiveStart,
+    truncated,
+    hasComparableData,
+    basis: commonStart ? 'first_attributable_paid_lead' : 'selected_period',
+    note: truncated
+      ? (hasComparableData
+        ? `La inversión y los costes publicitarios se calculan desde el ${humanDateEs(commonStart)}, primer día con un lead atribuible a publicidad en ClinicaClick. El resto del informe conserva el periodo seleccionado.`
+        : `En este periodo ClinicaClick todavía no podía atribuir leads publicitarios. Por eso no mezclamos el gasto histórico con leads posteriores; la medición comparable empieza el ${humanDateEs(commonStart)}.`)
+      : null,
+  };
+}
+
 function emptyChannelStats() {
   return { leads: 0, citas: 0, acudieron: 0, convertidos: 0 };
 }
@@ -312,7 +420,12 @@ function channelLabel(key) {
     google_ads: { name: 'Google Ads', icon: 'brand:google-ads', source: 'Google Ads' },
     meta_ads: { name: 'Meta Ads (Facebook / Instagram)', icon: 'brand:meta', source: 'Meta Ads' },
     seo: { name: 'SEO (búsqueda orgánica)', icon: 'brand:google', source: 'Search Console' },
-    web: { name: 'Web directa', icon: 'heroicons_outline:globe-alt', source: 'ClinicaClick' },
+    web: {
+      name: 'Web propia (sin campaña)',
+      icon: 'heroicons_outline:globe-alt',
+      source: 'ClinicaClick',
+      helpText: 'Formularios, chat o teléfono de la web sin una señal que permita atribuir el contacto a Ads, SEO o redes sociales.',
+    },
     direct: { name: 'Directo', icon: 'heroicons_outline:globe-alt', source: 'ClinicaClick' },
     whatsapp: { name: 'WhatsApp', icon: 'heroicons_outline:chat-bubble-left-right', source: 'ClinicaClick' },
     social_organic: { name: 'Redes sociales orgánico', icon: 'heroicons_outline:share', source: 'Redes sociales' },
@@ -694,11 +807,12 @@ async function aggregateLeads(scope, range) {
 }
 
 async function aggregateLeadSeries(scope, range) {
-  if (!LeadIntake) return { leads: [], citas: [], acudieron: [], convertidos: [] };
+  if (!LeadIntake) return { leads: [], paidLeads: [], citas: [], acudieron: [], convertidos: [] };
   const labels = enumerateDateLabels(range);
   const empty = labels.map(() => 0);
   const byDate = new Map(labels.map((label) => [label, {
     leads: 0,
+    paidLeads: 0,
     citas: 0,
     acudieron: 0,
     convertidos: 0,
@@ -707,6 +821,7 @@ async function aggregateLeadSeries(scope, range) {
   const rows = await LeadIntake.findAll({
     attributes: [
       [fn('DATE', col('created_at')), 'date'],
+      [literal(LEAD_ACQUISITION_CHANNEL_SQL), 'channel_key'],
       'status_lead',
       [fn('COUNT', col('id')), 'count'],
     ],
@@ -715,7 +830,7 @@ async function aggregateLeadSeries(scope, range) {
       ...scopedWhere('clinica_id', scope),
       ...buildSequelizeDateWhere('created_at', range),
     },
-    group: [literal('DATE(created_at)'), 'status_lead'],
+    group: [literal('DATE(created_at)'), literal(LEAD_ACQUISITION_CHANNEL_SQL), 'status_lead'],
     raw: true,
   });
 
@@ -725,15 +840,18 @@ async function aggregateLeadSeries(scope, range) {
     if (!bucket) continue;
     const count = toNumber(row.count);
     const status = String(row.status_lead || '').toLowerCase();
+    const channelKey = String(row.channel_key || deriveChannelKey(row));
     bucket.leads += count;
+    if (channelKey === 'google_ads' || channelKey === 'meta_ads') bucket.paidLeads += count;
     if (CITED_LEAD_STATUSES.has(status)) bucket.citas += count;
     if (ATTENDED_LEAD_STATUSES.has(status)) bucket.acudieron += count;
     if (CONVERTED_LEAD_STATUSES.has(status)) bucket.convertidos += count;
   }
 
-  if (!labels.length) return { leads: empty, citas: empty, acudieron: empty, convertidos: empty };
+  if (!labels.length) return { leads: empty, paidLeads: empty, citas: empty, acudieron: empty, convertidos: empty };
   return {
     leads: labels.map((label) => byDate.get(label)?.leads || 0),
+    paidLeads: labels.map((label) => byDate.get(label)?.paidLeads || 0),
     citas: labels.map((label) => byDate.get(label)?.citas || 0),
     acudieron: labels.map((label) => byDate.get(label)?.acudieron || 0),
     convertidos: labels.map((label) => byDate.get(label)?.convertidos || 0),
@@ -790,21 +908,18 @@ async function aggregateAppointmentSeries(scope, range) {
   };
 }
 
-async function aggregateSpendSeries(scope, range, marketingState = null) {
+async function aggregateSpendSeries(scope, range, marketingState = null, paidCoverageStart = null) {
   const labels = enumerateDateLabels(range);
   const byDate = new Map(labels.map((label) => [label, 0]));
 
   if (GoogleAdsInsightsDaily) {
     const rows = await GoogleAdsInsightsDaily.findAll({
-      attributes: [
-        'date',
-        [fn('SUM', col('costMicros')), 'costMicros'],
-      ],
+      attributes: googleAdsRemoteFactAttributes(),
       where: {
         ...buildGoogleAdsDataWhere(scope, marketingState),
-        ...buildDateOnlyWhere('date', range),
+        ...buildComparablePaidDateWhere('date', range, paidCoverageStart),
       },
-      group: ['date'],
+      group: GOOGLE_ADS_REMOTE_FACT_GROUP,
       raw: true,
     });
     for (const row of rows) {
@@ -823,7 +938,7 @@ async function aggregateSpendSeries(scope, range, marketingState = null) {
       ],
       where: {
         ...buildMetaAdsDataWhere(scope, marketingState),
-        ...buildDateOnlyWhere('date', range),
+        ...buildComparablePaidDateWhere('date', range, paidCoverageStart),
         level: 'campaign',
       },
       group: ['date'],
@@ -887,42 +1002,56 @@ async function getIntakeConfigCount(scope) {
   return IntakeConfig.count({ where: { [Op.or]: clauses } });
 }
 
-async function aggregateGoogleAds(scope, range, marketingState = null) {
+async function aggregateGoogleAds(scope, range, marketingState = null, paidCoverageStart = null) {
   if (!GoogleAdsInsightsDaily) {
     return { totals: { spend: 0, clicks: 0, impressions: 0, conversions: 0 }, campaigns: [], connected: false, lastSync: null };
   }
 
   const where = {
     ...buildGoogleAdsDataWhere(scope, marketingState),
-    ...buildDateOnlyWhere('date', range),
+    ...buildComparablePaidDateWhere('date', range, paidCoverageStart),
   };
 
-  const [totalRow] = await GoogleAdsInsightsDaily.findAll({
-    attributes: [
-      [fn('SUM', col('impressions')), 'impressions'],
-      [fn('SUM', col('clicks')), 'clicks'],
-      [fn('SUM', col('costMicros')), 'costMicros'],
-      [fn('SUM', col('conversions')), 'conversions'],
-      [fn('MAX', col('date')), 'lastDate'],
-    ],
+  const factRows = await GoogleAdsInsightsDaily.findAll({
+    attributes: googleAdsRemoteFactAttributes(),
     where,
+    group: GOOGLE_ADS_REMOTE_FACT_GROUP,
     raw: true,
   });
 
-  const campaignRows = await GoogleAdsInsightsDaily.findAll({
-    attributes: [
-      'campaignId',
-      'campaignName',
-      [fn('SUM', col('costMicros')), 'costMicros'],
-      [fn('SUM', col('conversions')), 'conversions'],
-      [fn('SUM', col('clicks')), 'clicks'],
-    ],
-    where,
-    group: ['campaignId', 'campaignName'],
-    order: [[literal('SUM(costMicros)'), 'DESC']],
-    limit: 5,
-    raw: true,
-  });
+  const totalRow = {
+    impressions: 0,
+    clicks: 0,
+    costMicros: 0,
+    conversions: 0,
+    lastDate: null,
+  };
+  const campaignMap = new Map();
+  for (const row of factRows) {
+    totalRow.impressions += toNumber(row.impressions);
+    totalRow.clicks += toNumber(row.clicks);
+    totalRow.costMicros += toNumber(row.costMicros);
+    totalRow.conversions += toNumber(row.conversions);
+    const date = normalizeDateOnly(row.date);
+    if (date && (!totalRow.lastDate || date > totalRow.lastDate)) totalRow.lastDate = date;
+
+    const campaignKey = `${String(row.customerId || '')}:${String(row.campaignId || '')}`;
+    const campaign = campaignMap.get(campaignKey) || {
+      campaignId: row.campaignId,
+      campaignName: row.campaignName,
+      costMicros: 0,
+      conversions: 0,
+      clicks: 0,
+    };
+    campaign.campaignName = campaign.campaignName || row.campaignName;
+    campaign.costMicros += toNumber(row.costMicros);
+    campaign.conversions += toNumber(row.conversions);
+    campaign.clicks += toNumber(row.clicks);
+    campaignMap.set(campaignKey, campaign);
+  }
+  const campaignRows = Array.from(campaignMap.values())
+    .sort((left, right) => right.costMicros - left.costMicros)
+    .slice(0, 5);
 
   const scopedAccounts = effectiveGoogleAccounts(marketingState);
   const accountWhere = buildAssetScopeWhere(scope);
@@ -970,7 +1099,7 @@ async function aggregateGoogleAds(scope, range, marketingState = null) {
   };
 }
 
-async function aggregateMetaAds(scope, range, marketingState = null) {
+async function aggregateMetaAds(scope, range, marketingState = null, paidCoverageStart = null) {
   if (!SocialAdsInsightsDaily) {
     return { totals: { spend: 0, clicks: 0, impressions: 0, conversions: 0 }, campaigns: [], connected: false, lastSync: null };
   }
@@ -978,7 +1107,7 @@ async function aggregateMetaAds(scope, range, marketingState = null) {
   const scopeWhere = buildMetaAdsDataWhere(scope, marketingState);
   const baseWhere = {
     ...scopeWhere,
-    ...buildDateOnlyWhere('date', range),
+    ...buildComparablePaidDateWhere('date', range, paidCoverageStart),
   };
 
   const fetchInsightRows = async (level) => {
@@ -1060,7 +1189,7 @@ async function aggregateMetaAds(scope, range, marketingState = null) {
           ...scopeWhere,
           level: selectedLevel,
           entity_id: { [Op.in]: ids },
-          ...buildDateOnlyWhere('date', range),
+          ...buildComparablePaidDateWhere('date', range, paidCoverageStart),
         },
         group: ['entity_id'],
         raw: true,
@@ -1078,7 +1207,7 @@ async function aggregateMetaAds(scope, range, marketingState = null) {
     usedAdsetFallback = true;
     const fallbackWhere = {
       ...scopeWhere,
-      ...buildDateOnlyWhere('date', range),
+      ...buildComparablePaidDateWhere('date', range, paidCoverageStart),
     };
     const [fallbackTotal] = await SocialAdsAdsetDailyAgg.findAll({
       attributes: [
@@ -1661,6 +1790,7 @@ function buildChannels(leadChannels, spendByKey) {
       cpl: stats.leads ? money(spend / stats.leads) : 0,
       cpaCita: stats.citas ? money(spend / stats.citas) : 0,
       source: label.source,
+      helpText: label.helpText || null,
     };
   });
 }
@@ -2090,17 +2220,20 @@ async function buildSyncStatus(scope, { seo, googleAds, metaAds, ga, businessPro
 
 function buildKpis(current, previous, series = {}) {
   const { leads, citas, acudieron, convertidos, spend } = current;
-  const cpl = leads ? spend / leads : 0;
+  const paidLeads = toNumber(current.paidLeads);
+  const previousPaidLeads = toNumber(previous.paidLeads);
+  const cpl = paidLeads ? spend / paidLeads : 0;
   const cpaCita = citas ? spend / citas : 0;
   const cpaAcudio = acudieron ? spend / acudieron : 0;
   const cpaConvertido = convertidos ? spend / convertidos : 0;
   const leadSeries = Array.isArray(series.leads) ? series.leads : [];
+  const paidLeadSeries = Array.isArray(series.paidLeads) ? series.paidLeads : [];
   const citaSeries = Array.isArray(series.citas) ? series.citas : [];
   const acudioSeries = Array.isArray(series.acudieron) ? series.acudieron : [];
   const convertidoSeries = Array.isArray(series.convertidos) ? series.convertidos : [];
   const spendSeries = Array.isArray(series.spend) ? series.spend : [];
   const ratioSeries = leadSeries.map((value, index) => ratioPct(citaSeries[index] || 0, value, 1));
-  const cplSeries = leadSeries.map((value, index) => value ? money((spendSeries[index] || 0) / value) : 0);
+  const cplSeries = paidLeadSeries.map((value, index) => value ? money((spendSeries[index] || 0) / value) : 0);
   const cpaCitaSeries = citaSeries.map((value, index) => value ? money((spendSeries[index] || 0) / value) : 0);
   const cpaAcudioSeries = acudioSeries.map((value, index) => value ? money((spendSeries[index] || 0) / value) : 0);
   const cpaConvertidoSeries = convertidoSeries.map((value, index) => value ? money((spendSeries[index] || 0) / value) : 0);
@@ -2174,8 +2307,8 @@ function buildKpis(current, previous, series = {}) {
       value: money(cpl),
       prefix: '€',
       sparkline: compactNumericSeries(cplSeries),
-      helpText: 'Cuánto cuesta conseguir cada lead real registrado en ClinicaClick.',
-      trend: pct(cpl, previous.leads ? previous.spend / previous.leads : 0),
+      helpText: 'Inversión publicitaria dividida entre los leads atribuidos a Google Ads o Meta Ads dentro de la misma ventana comparable.',
+      trend: pct(cpl, previousPaidLeads ? previous.spend / previousPaidLeads : 0),
       trendLabel: 'vs. periodo anterior',
       source: 'ClinicaClick',
     },
@@ -2298,6 +2431,8 @@ exports.getOverview = async (req, res) => {
     }
     const range = buildRange(req.query.startDate, req.query.endDate, 30);
     const marketingState = await resolveReportMarketingState(scope);
+    const paidAttributionCoverage = await resolvePaidAttributionCoverage(scope);
+    const paidCoverageSummary = buildPaidAttributionCoverageSummary(range, paidAttributionCoverage);
 
     const [
       leads,
@@ -2326,14 +2461,14 @@ exports.getOverview = async (req, res) => {
       countAppointments(scope, range),
       countAppointments(scope, range.previous),
       aggregateAppointmentSeries(scope, range),
-      aggregateSpendSeries(scope, range, marketingState),
+      aggregateSpendSeries(scope, range, marketingState, paidAttributionCoverage.start),
       aggregateForms(scope, range),
       aggregateWhatsappWebOrigins(scope, range),
       getIntakeConfigCount(scope),
-      aggregateGoogleAds(scope, range, marketingState),
-      aggregateGoogleAds(scope, range.previous, marketingState),
-      aggregateMetaAds(scope, range, marketingState),
-      aggregateMetaAds(scope, range.previous, marketingState),
+      aggregateGoogleAds(scope, range, marketingState, paidAttributionCoverage.start),
+      aggregateGoogleAds(scope, range.previous, marketingState, paidAttributionCoverage.start),
+      aggregateMetaAds(scope, range, marketingState, paidAttributionCoverage.start),
+      aggregateMetaAds(scope, range.previous, marketingState, paidAttributionCoverage.start),
       aggregateGa(scope, range, marketingState),
       aggregateSeo(scope, range, marketingState),
       aggregateSocialOrganic(scope, range, marketingState),
@@ -2352,6 +2487,8 @@ exports.getOverview = async (req, res) => {
     const previousCitas = Math.max(previousLeads.totals.citas, previousAppointments.creadas);
     const previousAcudieron = Math.max(previousLeads.totals.acudieron, previousAppointments.completadas);
     const previousConvertidos = previousLeads.totals.convertidos;
+    const paidLeads = sumChannelStats(leads.channels, ['google_ads', 'meta_ads'], 'leads');
+    const previousPaidLeads = sumChannelStats(previousLeads.channels, ['google_ads', 'meta_ads'], 'leads');
 
     const channels = buildChannels(leads.channels, {
       google_ads: googleAds.totals.spend,
@@ -2374,10 +2511,11 @@ exports.getOverview = async (req, res) => {
     );
 
     const kpis = buildKpis(
-      { leads: leads.totals.leads, citas, acudieron, convertidos, spend: currentSpend },
-      { leads: previousLeads.totals.leads, citas: previousCitas, acudieron: previousAcudieron, convertidos: previousConvertidos, spend: previousSpend },
+      { leads: leads.totals.leads, paidLeads, citas, acudieron, convertidos, spend: currentSpend },
+      { leads: previousLeads.totals.leads, paidLeads: previousPaidLeads, citas: previousCitas, acudieron: previousAcudieron, convertidos: previousConvertidos, spend: previousSpend },
       {
         leads: leadSeries.leads,
+        paidLeads: leadSeries.paidLeads,
         citas: leadSeries.citas.map((value, index) => Math.max(value, appointmentSeries.citas[index] || 0)),
         acudieron: leadSeries.acudieron.map((value, index) => Math.max(value, appointmentSeries.acudieron[index] || 0)),
         convertidos: leadSeries.convertidos,
@@ -2479,6 +2617,7 @@ exports.getOverview = async (req, res) => {
       recommendations,
       dataQuality: {
         firstPartyPageviews: firstParty.connected,
+        paidAttributionCoverage: paidCoverageSummary,
         note: firstParty.connected
           ? 'V1 usa WebEvents propios agregados en backend, además de leads, formularios, citas y fuentes externas.'
           : 'V1 usa leads, formularios, citas y agregados externos existentes. Pageviews propios aparecerán cuando WebEvents tenga datos agregados.',
@@ -2499,7 +2638,19 @@ exports.getOverview = async (req, res) => {
 exports.__testing = {
   deriveChannelKey,
   leadAcquisitionChannelSql: LEAD_ACQUISITION_CHANNEL_SQL,
+  normalizeDateOnly,
+  buildRange,
+  comparablePaidRangeStart,
+  buildComparablePaidDateWhere,
+  resolvePaidAttributionCoverage,
+  buildPaidAttributionCoverageSummary,
+  googleAdsRemoteFactGroup: GOOGLE_ADS_REMOTE_FACT_GROUP,
   aggregateLeads,
+  aggregateGoogleAds,
+  aggregateSpendSeries,
+  channelLabel,
+  buildChannels,
+  buildKpis,
   buildEffectiveMarketingStateInput,
   resolveReportMarketingState,
   mergeEffectiveMarketingStates,

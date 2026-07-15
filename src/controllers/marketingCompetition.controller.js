@@ -61,6 +61,91 @@ function sendError(res, error, fallbackMessage) {
   });
 }
 
+function normalizeCompetitorIds(competitorIds = []) {
+  return Array.from(new Set((Array.isArray(competitorIds) ? competitorIds : [])
+    .map((value) => Number(value))
+    .filter((value) => Number.isInteger(value) && value > 0)))
+    .sort((left, right) => left - right);
+}
+
+function buildCompetitionRefreshPayload(scope, competitorIds = []) {
+  const normalizedCompetitorIds = normalizeCompetitorIds(competitorIds);
+  const scopeClinicIds = Array.from(new Set((scope?.clinicIds || [])
+    .map((value) => Number(value))
+    .filter((value) => Number.isInteger(value) && value > 0)))
+    .sort((left, right) => left - right);
+
+  return {
+    ...(scope?.scope === 'group' && scope.groupId ? { groupId: Number(scope.groupId) } : {}),
+    ...(scope?.scope !== 'group' && scopeClinicIds.length === 1
+      ? { clinicId: scopeClinicIds[0] }
+      : {}),
+    ...(scope?.scope !== 'group' && scopeClinicIds.length > 1
+      ? { clinicIds: scopeClinicIds }
+      : {}),
+    ...(normalizedCompetitorIds.length ? { competitorIds: normalizedCompetitorIds } : {}),
+  };
+}
+
+async function enqueueCompetitionRefresh({
+  scope,
+  competitorIds = [],
+  origin,
+  requestedBy = null,
+  requestedByRole = null,
+  requestedByName = null,
+  markCompetitorQueued = false,
+}, dependencies = {}) {
+  const jobs = dependencies.jobRequestsService || jobRequestsService;
+  const scheduler = dependencies.jobScheduler || jobScheduler;
+  const service = dependencies.competitionService || competitionService;
+  const normalizedCompetitorIds = normalizeCompetitorIds(competitorIds);
+  const payload = buildCompetitionRefreshPayload(scope, normalizedCompetitorIds);
+  const singleCompetitorId = normalizedCompetitorIds.length === 1
+    ? normalizedCompetitorIds[0]
+    : null;
+  const enqueueResult = await jobs.enqueueUniqueJobRequest({
+    type: 'competition_refresh',
+    payload,
+    priority: 'low',
+    origin,
+    requestedBy,
+    requestedByRole,
+    requestedByName,
+    maxAttempts: 4,
+    // El alta puede ocurrir en una tanda. Un scope por competidor impide que
+    // el primer JobRequest absorba silenciosamente los siguientes ids sin
+    // incorporarlos a su payload. La lane background los procesa en serie.
+    ...(singleCompetitorId ? { dedupeScope: `competition:competitor:${singleCompetitorId}` } : {}),
+  });
+  const job = enqueueResult.job;
+
+  if (markCompetitorQueued && singleCompetitorId && enqueueResult.created !== false) {
+    try {
+      await service.updateCompetitor(scope, singleCompetitorId, {
+        last_sync_status: 'queued',
+        last_sync_error: null,
+      });
+    } catch (error) {
+      // El JobRequest ya es durable. Un fallo secundario al reflejar el estado
+      // no debe impedir que el worker hidrate el competidor.
+      console.error('❌ No se pudo reflejar competition_refresh en el competidor:', error.message);
+    }
+  }
+
+  scheduler.triggerImmediate(job.id).catch((error) => {
+    // Aunque el wake-up inmediato falle, el JobRequest pendiente permanece
+    // visible y la lane background lo reclamará en su siguiente tick.
+    console.error('❌ Error disparando competition_refresh desde cola:', error.message);
+  });
+
+  return {
+    job,
+    created: enqueueResult.created !== false,
+    payload,
+  };
+}
+
 exports.getCompetition = async (req, res) => {
   try {
     const scope = await resolveScope(req);
@@ -108,7 +193,46 @@ exports.createCompetitor = async (req, res) => {
     const scope = await resolveScope(req, { allowAll: false });
     await assertScopeAccess(req, scope, 'write');
     const competitor = await competitionService.createCompetitor(scope, req.body || {});
-    return res.status(201).json({ success: true, competitor });
+    let hydration;
+    try {
+      const enqueueResult = await enqueueCompetitionRefresh({
+        scope,
+        competitorIds: [competitor.id],
+        origin: 'marketing_reports:competition_create',
+        requestedBy: req.userData?.userId || null,
+        requestedByRole: req.userData?.role || null,
+        requestedByName: req.userData?.name || null,
+        markCompetitorQueued: true,
+      });
+      competitor.last_sync_status = 'queued';
+      competitor.last_sync_error = null;
+      hydration = {
+        status: 'queued',
+        queued: true,
+        alreadyQueued: enqueueResult.created === false,
+        jobRequestId: enqueueResult.job.id,
+      };
+    } catch (queueError) {
+      const queueMessage = queueError.message || 'No se pudo encolar la actualización';
+      try {
+        await competitionService.updateCompetitor(scope, competitor.id, {
+          last_sync_status: 'queue_error',
+          last_sync_error: queueMessage,
+        });
+      } catch (statusError) {
+        console.error('❌ No se pudo guardar el error de hidratación del competidor:', statusError.message);
+      }
+      competitor.last_sync_status = 'queue_error';
+      competitor.last_sync_error = queueMessage;
+      hydration = {
+        status: 'queue_error',
+        queued: false,
+        alreadyQueued: false,
+        jobRequestId: null,
+        error: queueMessage,
+      };
+    }
+    return res.status(201).json({ success: true, competitor, hydration });
   } catch (error) {
     return sendError(res, error, 'Error creando competidor');
   }
@@ -143,38 +267,15 @@ exports.refreshCompetition = async (req, res) => {
     const competitorIds = Array.isArray(req.body?.competitor_ids)
       ? req.body.competitor_ids
       : (Array.isArray(req.body?.competitorIds) ? req.body.competitorIds : null);
-    const normalizedCompetitorIds = Array.from(new Set((competitorIds || [])
-      .map((value) => Number(value))
-      .filter((value) => Number.isInteger(value) && value > 0)))
-      .sort((left, right) => left - right);
-    const scopeClinicIds = Array.from(new Set((scope?.clinicIds || [])
-      .map((value) => Number(value))
-      .filter((value) => Number.isInteger(value) && value > 0)))
-      .sort((left, right) => left - right);
-    const payload = {
-      ...(scope?.scope === 'group' && scope.groupId ? { groupId: Number(scope.groupId) } : {}),
-      ...(scope?.scope !== 'group' && scopeClinicIds.length === 1
-        ? { clinicId: scopeClinicIds[0] }
-        : {}),
-      ...(scope?.scope !== 'group' && scopeClinicIds.length > 1
-        ? { clinicIds: scopeClinicIds }
-        : {}),
-      ...(normalizedCompetitorIds.length ? { competitorIds: normalizedCompetitorIds } : {}),
-    };
-    const enqueueResult = await jobRequestsService.enqueueUniqueJobRequest({
-      type: 'competition_refresh',
-      payload,
-      priority: 'low',
+    const enqueueResult = await enqueueCompetitionRefresh({
+      scope,
+      competitorIds,
       origin: 'marketing_reports:competition_refresh',
       requestedBy: req.userData?.userId || null,
       requestedByRole: req.userData?.role || null,
       requestedByName: req.userData?.name || null,
-      maxAttempts: 4,
     });
     const job = enqueueResult.job;
-    jobScheduler.triggerImmediate(job.id).catch((error) => {
-      console.error('❌ Error disparando competition_refresh desde cola:', error.message);
-    });
     return res.status(202).json({
       success: true,
       queued: true,
@@ -187,6 +288,12 @@ exports.refreshCompetition = async (req, res) => {
   } catch (error) {
     return sendError(res, error, 'Error refrescando competencia');
   }
+};
+
+exports.__testing = {
+  buildCompetitionRefreshPayload,
+  enqueueCompetitionRefresh,
+  normalizeCompetitorIds,
 };
 
 exports.getLocalHeatmap = async (req, res) => {
