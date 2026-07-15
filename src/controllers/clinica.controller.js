@@ -262,17 +262,11 @@ async function canReadClinicSchedule(userId, clinicId) {
 async function canWriteClinicSchedule(userId, clinicId) {
     if (!Number.isFinite(Number(userId)) || !Number.isFinite(Number(clinicId))) return false;
     if (isGlobalAdmin(userId)) return true;
-    const row = await UsuarioClinica.findOne({
-        where: {
-            id_usuario: Number(userId),
-            id_clinica: Number(clinicId),
-            rol_clinica: { [Op.in]: ADMIN_ROLES },
-            ...ACTIVE_STAFF_INVITATION_WHERE,
-        },
-        attributes: ['id_usuario'],
-        raw: true,
+    return canUserAccessFeature({
+        actorId: Number(userId),
+        featureKey: CLINIC_EDIT_FEATURE,
+        clinicId: Number(clinicId),
     });
-    return !!row;
 }
 
 function normalizeHorariosPayload(clinicaId, body) {
