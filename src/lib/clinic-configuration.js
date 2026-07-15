@@ -111,7 +111,7 @@ function validateAccessGuidancePatch(value) {
   if (value.enabled !== undefined && typeof value.enabled !== 'boolean') {
     throw createValidationError('clinic_access_guidance_enabled_must_be_boolean');
   }
-  if (value.directions !== undefined && typeof value.directions !== 'string') {
+  if (value.directions !== undefined && value.directions !== null && typeof value.directions !== 'string') {
     throw createValidationError('clinic_access_guidance_directions_must_be_string');
   }
   if (
@@ -183,7 +183,9 @@ function mergeClinicConfiguration(currentValue, patchValue) {
     };
 
     if (Object.prototype.hasOwnProperty.call(patchValue.access_guidance, 'directions')) {
-      patch.access_guidance.directions = patchValue.access_guidance.directions.trim();
+      patch.access_guidance.directions = typeof patchValue.access_guidance.directions === 'string'
+        ? patchValue.access_guidance.directions.trim()
+        : '';
     }
     if (Object.prototype.hasOwnProperty.call(patchValue.access_guidance, 'image_asset_id')) {
       patch.access_guidance.image_asset_id = normalizePositiveInteger(
