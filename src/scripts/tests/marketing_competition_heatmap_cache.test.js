@@ -3,10 +3,14 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const axios = require('axios');
 const { Op } = require('sequelize');
 
 process.env.JOBS_AUTO_START = 'false';
 process.env.RUNTIME_ROLE = 'gateway';
+process.env.COMPETITION_GOOGLE_PLACES_COMPETITOR_USE_ALLOWED = 'true';
+process.env.COMPETITION_GOOGLE_PLACES_COMPETITOR_STORAGE_ALLOWED = 'true';
+process.env.COMPETITION_LOCAL_RANKING_STORAGE_ALLOWED = 'true';
 
 const {
   DAY_MS,
@@ -127,6 +131,78 @@ function testMissingManualCoordinatesRemainUnknown() {
   assert.equal(__testing.toNumber('not-a-coordinate'), null);
   assert.equal(__testing.toNumber(0), 0);
   assert.equal(__testing.toNumber('41.3874'), 41.3874);
+}
+
+function testBlockedHeatmapCannotOfferRefresh() {
+  const result = __testing.withBlockedLocalHeatmapMetadata({
+    success: false,
+    setup_required: true,
+    setup_code: 'LOCAL_RANKING_PROVIDER_REQUIRED',
+    message: 'Proveedor no disponible',
+    points: [],
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.setup_required, true);
+  assert.equal(result.cache.status, 'miss');
+  assert.equal(result.cache.refresh_available, false);
+  assert.equal(result.cache.refresh_in_progress, false);
+}
+
+async function testPassiveCompetitionListNeverCallsPlacesWhenGatesAreEnabled() {
+  assert.equal(__testing.competitionPlacesFeatureEnabled(), true, 'the regression must exercise enabled Places gates');
+  const originalGet = axios.get;
+  const originalPost = axios.post;
+  let providerCalls = 0;
+  axios.get = async () => {
+    providerCalls += 1;
+    throw new Error('passive list must not call a provider');
+  };
+  axios.post = async () => {
+    providerCalls += 1;
+    throw new Error('passive list must not call a provider');
+  };
+
+  try {
+    const result = await __testing.listCompetitionWithDependencies(
+      { scope: 'clinic', clinicIds: [910066], isAll: false },
+      {},
+      {
+        resolvePrimaryClinic: async () => ({
+          id_clinica: 910066,
+          nombre_clinica: 'Clínica persistida',
+          direccion: 'Carrer de la Salut, 1',
+          ciudad: 'Barcelona',
+          servicios: 'odontología',
+          configuracion: { disciplinas: ['odontologia'] },
+          url_ficha_local: 'https://maps.google.com/?cid=123',
+          business_location_name: 'Ficha local persistida',
+          business_place_id: 'ChIJ-persisted',
+          business_maps_url: 'https://maps.google.com/?cid=123',
+          business_primary_category: 'Dentist',
+          business_address_lines: ['Carrer de la Salut, 1'],
+          business_latitude: 41.4,
+          business_longitude: 2.17,
+        }),
+        loadCompetitorRows: async () => [],
+        hydrateCompetitors: async (rows) => rows,
+        providerStatusForScope: async () => ({}),
+      }
+    );
+
+    assert.equal(providerCalls, 0);
+    assert.equal(result.setup.automatic_discovery_available, true);
+    assert.equal(result.own_profile.name, 'Ficha local persistida');
+    assert.equal(result.own_profile.google_place_id, 'ChIJ-persisted');
+    assert.equal(result.own_profile.google_maps_url, 'https://maps.google.com/?cid=123');
+    assert.equal(result.own_profile.category, 'Dentist');
+    assert.equal(result.own_profile.address, 'Carrer de la Salut, 1');
+    assert.deepEqual(result.local_ranking, []);
+    assert.ok(result.ranking_terms.length > 0);
+  } finally {
+    axios.get = originalGet;
+    axios.post = originalPost;
+  }
 }
 
 function testFreshStaleAndExpiredBoundaries() {
@@ -458,6 +534,8 @@ async function run() {
   testIdentityIncludesEveryRankingDimension();
   testRestrictedProviderPayloadCannotMasqueradeAsManual();
   testMissingManualCoordinatesRemainUnknown();
+  testBlockedHeatmapCannotOfferRefresh();
+  await testPassiveCompetitionListNeverCallsPlacesWhenGatesAreEnabled();
   testFreshStaleAndExpiredBoundaries();
   await testStaleResponseIsImmediateAndRefreshIsDeduplicated();
   await testExpiredSnapshotRefreshesOnceBeforeReturningFreshData();

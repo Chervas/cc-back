@@ -143,6 +143,7 @@ function withHeatmapCacheMetadata(payload, row, {
   status = heatmapCacheStatus(row, now),
   providerRequests = null,
   refreshPending = null,
+  refreshAvailable = null,
   algorithmVersion = null
 } = {}) {
   const source = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
@@ -160,7 +161,9 @@ function withHeatmapCacheMetadata(payload, row, {
       fresh_until: isoDate(rowValue(row, 'fresh_until')),
       expires_at: isoDate(rowValue(row, 'expires_at')),
       provider_requests: Math.max(0, Math.round(requests)),
-      refresh_available: status !== 'fresh' && !inProgress,
+      refresh_available: refreshAvailable === null
+        ? status !== 'fresh' && !inProgress
+        : !!refreshAvailable,
       refresh_in_progress: inProgress,
       algorithm_version: cleanString(rowValue(row, 'algorithm_version')) || cleanString(algorithmVersion)
     }
