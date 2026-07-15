@@ -363,8 +363,14 @@ Estado de sincronización:
 
 - La respuesta incluye `sync.active`, `sync.sources[]` y `sync.allSources[]`.
 - El estado `connected` de Search Console, GA4, Perfil Google, Google Ads, Meta Ads, Facebook e Instagram debe salir de los mapeos activos (`ClinicWebAssets`, `ClinicAnalyticsProperties`, `ClinicBusinessLocations`, `ClinicGoogleAdsAccounts`, `ClinicMetaAssets`), no de que existan métricas agregadas en el rango consultado. Una fuente puede estar conectada aunque el periodo seleccionado aún no tenga datos.
+- El mapping se resuelve como **activo efectivo del scope**, no como una fila local aislada del módulo. Para una clínica se incluyen sus mappings propios y los activos `assignmentScope=group` de `Clinicas.grupoClinicaId`; cuando la vertical usa `GroupAssetClinicAssignments`, también se respetan sus asignaciones explícitas. Informes, onboarding de Campañas y jobs deben compartir el mismo criterio de resolución.
+- `connected`, `sync` y presencia de datos son señales distintas. Un job pendiente/error modifica `sync`; cero filas en el rango modifica la presentación de datos; ninguna de las dos situaciones debe devolver `connected=false` si el mapping efectivo sigue activo.
+- Vincular una campaña externa a una estrategia (`ExternalCampaignAssignments`) no conecta la cuenta publicitaria. A la inversa, una campaña todavía sin estrategia no hace que `ClinicGoogleAdsAccount` deje de estar conectado. Campañas puede mostrarla como pendiente de asignación mientras Informes mantiene la fuente conectada.
+- Regresión de referencia 2026-07-15: una clínica Propdental heredera recuperaba inversión/campañas Google Ads, pero el estado de fuente quedaba `Pendiente` al contar solo `ClinicGoogleAdsAccount.clinicaId=<clinica>`. El contrato es resolver el mismo activo de grupo que usa Campañas y exponer su origen (`group`) sin duplicar mapping.
+- Estado de implementación 2026-07-15: `marketingReports.controller.js` consume `resolveEffectiveMarketingAssetInventory`, inventario común de solo lectura, para Google Ads, Meta Ads, Facebook, Instagram, Search Console, GA4 y Perfil Google, incluidos `GroupAssetClinicAssignments`. Está cubierto con tests y smoke real para clínica, grupo y multiclínica. Ads mantiene su atribución histórica por scope; las fuentes owner-centric usan un mapping canónico por identidad remota en agregados de grupo/multiclínica para evitar duplicados. Esta garantía corresponde a Informes; jobs y otros lectores de cada vertical conservan su auditoría específica.
 - `sync.active=true` cuando una fuente conectada tiene `JobRequest` pendiente/en ejecución, registros locales pendientes (`ClinicBusinessLocations.sync_status=pending`) o error.
 - El endpoint considera terminada una sincronización cuando el último `JobRequest` relevante para la clínica está `completed`, aunque la API externa no haya devuelto filas nuevas. Los jobs globales sin `clinicId` no deben contaminar el estado de una clínica concreta.
+- Cuando la clínica consume un activo compartido cuyo mapping físico pertenece a otra sede, el cruce de `JobRequest` amplía el scope con `asset.clinic_id`; así el backfill/error del activo sigue visible para todas sus consumidoras sin considerar globales los jobs sin clínica.
 - Si una fuente queda en `state=error`, `sync.message` debe mostrar el mensaje de error de esa fuente, no el texto genérico de "recabando datos".
 - En Perfil de Empresa Google, si el último `JobRequest.result_summary.report.errors[]` indica que `mybusiness.googleapis.com` está deshabilitada, el informe debe indicar que Google está rechazando ese servicio exacto como no habilitado en el proyecto afectado y pedir revisar Google Cloud antes de relanzar el resync.
 - El frontend usa ese estado para mostrar una barra informativa y refrescar cada 60 segundos mientras haya trabajo pendiente.
@@ -486,8 +492,8 @@ La parte de ClinicaClick ya está operativa para soportar conexiones propias e h
   - fallback global de Meta Pixel/CAPI cuando aplica;
 - `Marketing > Campañas` y `Ajustes > Cuentas conectadas` ya exponen:
   - conexión heredada de grupo;
-  - conexión propia de clínica;
-  - CTA para conectar otra cuenta para la clínica;
+  - conexión propia solo cuando la clínica no pertenece a grupo;
+  - CTA contextual para conectar desde la clínica; en clínicas agrupadas, el resolver la asigna/promueve al scope compartido de grupo aunque el copy histórico del CTA pudiera sugerir una conexión privada;
   - selección de activos efectivos para esa clínica.
 
 ### Bloqueo actual
@@ -682,8 +688,9 @@ Se introduce `src/services/effectiveMarketingAssets.service.js` como fuente úni
 Para una clínica concreta:
 
 1. selección/configuración explícita de clínica;
-2. asset/configuración heredada del grupo;
-3. fallback global de entorno solo para:
+2. activo compartido asignado explícitamente a la clínica mediante `GroupAssetClinicAssignments`;
+3. asset/configuración heredada del grupo;
+4. fallback global de entorno solo para:
    - `META_PIXEL_ID`
    - `META_CAPI_TOKEN`
 
@@ -1603,15 +1610,15 @@ Esto evita duplicidades de gasto o conversiones en otros endpoints.
 
 > **Estado:** implementado y alineado entre runtime OAuth, `Ajustes` y `back-integracion`.
 
-### Limitación del modelo actual
+### Limitación que originó la migración (contexto histórico)
 
-El backend actual sigue siendo principalmente **owner-centric**:
+Antes del resolver por scope, el backend era principalmente **owner-centric**:
 
 - `MetaConnection` y `GoogleConnection` se resuelven por `userId`;
 - gran parte de los endpoints de estado, conexión y desconexión usan `findOne({ where: { userId } })`;
 - los mappings clínicos (`ClinicMetaAsset`, `ClinicGoogleAdsAccount`, etc.) cuelgan de esas conexiones técnicas.
 
-Eso permite operar hoy, pero no resuelve correctamente el caso de negocio:
+Ese modelo permitía operar, pero no resolvía correctamente el caso de negocio:
 
 - un usuario autoriza la app;
 - luego deja de ser admin interno o abandona la empresa;
@@ -1680,16 +1687,20 @@ Si esto no se cambia, la capa de assignments no bastará: al borrar el usuario, 
 
 ### Resolución canónica
 
-Debe existir un resolver unificado por proveedor:
+El resolver unificado por proveedor es:
 
-- `resolveEffectiveMetaConnection(scope)`
-- `resolveEffectiveGoogleConnection(scope)`
+- `resolveMetaConnectionForScope(scope)`
+- `resolveGoogleConnectionForScope(scope)`
 
-Precedencia:
+Precedencia del **grant OAuth** vigente:
 
-1. conexión propia de clínica
-2. si no existe, conexión heredada del grupo
-3. si no existe ninguna, scope sin conexión
+1. si la clínica pertenece a un grupo, assignment activa del grupo;
+2. si no hay assignment de grupo pero existe una assignment clínica compatible, se promueve al scope de grupo;
+3. si la clínica no pertenece a grupo, assignment propia de clínica;
+4. fallbacks legacy controlados durante migración;
+5. si no existe ninguna, scope sin conexión.
+
+Esta precedencia es distinta de la selección de **activo**, donde el resolver efectivo prioriza mapping propio, asignación compartida explícita y mapping heredado de grupo. No documentar `clinic > group` como regla del grant OAuth.
 
 ### Regla operativa aplicada
 
@@ -1703,7 +1714,7 @@ En la implementación activa para Meta y Google:
 Esto fija una separación explícita:
 
 - **OAuth connection**: compartida por grupo por defecto;
-- **asset mapping**: independiente por clínica.
+- **asset mapping**: define qué activo consume cada clínica y puede ser propio, heredado/compartido de grupo o asignado explícitamente a varias clínicas sin duplicar el activo remoto.
 
 Este resolver debe usarse en:
 
@@ -1713,6 +1724,8 @@ Este resolver debe usarse en:
 - Google Ads / Search Console / Analytics / Business Profile
 - jobs de sync
 - reporting y métricas
+
+La superficie que inició la conexión no forma parte de la identidad. Un mapping creado desde `/clinicas`, `Ajustes`, Campañas o Informes pertenece al scope y todos esos consumidores deben obtener el mismo activo efectivo. Un controlador no puede introducir una conexión privada del módulo ni simplificar la lectura a `clinicaId=<seleccionada>` si el modelo admite `assignmentScope=group`.
 
 ### Mappings
 
@@ -1730,6 +1743,8 @@ La fuente de verdad pasa a ser:
 - existe una conexión efectiva válida para ese scope;
 - el mapping está asignado a ese scope;
 - el usuario actual tiene permisos internos para operar en ese scope.
+
+`GroupAssetClinicAssignments` complementa los campos legacy para expresar que un único activo de grupo se asigna a varias clínicas concretas. `clinicaId` puede conservar una clínica primaria por compatibilidad, pero no debe usarse como prueba de exclusividad. La selección efectiva de Google Ads/Meta se centraliza en `effectiveMarketingAssets.service.js`; la conexión en `scopeConnectionResolver.service.js`; la normalización de scope en `clinicScope.js`. Las verticales con resolver propio, como Perfil Google, deben mantener la misma separación entre conexión, mapping y estado de sync.
 
 ### Desconexión segura
 
@@ -1773,9 +1788,9 @@ Debe depender de los permisos internos del usuario sobre la clínica o el grupo.
 
 Regla aprobada:
 
-1. una clínica puede heredar la conexión del grupo;
-2. una clínica puede sobrescribir con conexión propia;
-3. si ambas existen, manda la de clínica.
+1. una clínica del grupo consume la conexión compartida del grupo;
+2. una assignment clínica legacy compatible puede promoverse al grupo;
+3. la elección de un activo propio de clínica sí puede prevalecer sobre un activo compartido, pero eso ocurre en la capa de mapping, no creando un grant OAuth privado que gane al grupo.
 
 ### Estrategia de migración
 
@@ -4153,7 +4168,7 @@ Actualización 2026-05-06:
 - QuickChat no debe mostrar como burbuja independiente los fallos tecnicos `automation_send_whatsapp_preflight`: el mensaje real fallido conserva la admiracion roja, el detalle tecnico vive en el tooltip y el listado de conversaciones ignora esas filas como preview si existe un mensaje real anterior.
 - `GET /api/marketing/review-requests/summary` devuelve el resumen operativo del objetivo de reseñas para el `review_source` solicitado: pacientes posibles, preview de candidatos con tratamiento, peticiones enviadas, valoraciones internas `1-4` y `5`, reseñas publicas conciliadas en Google (`google_reviews_matched`), `treatment_options` con contador de pacientes elegibles por tratamiento, estado de automatización, disponibilidad de plantillas WABA aprobadas de solicitud y recordatorio, disponibilidad de WhatsApp y disponibilidad de `url_dejar_resena`. La preview acepta `preview_limit` y devuelve `candidates_preview_total`/`candidates_preview_limit` para que el front pueda enseñar más candidatos sin confundirlo con el total. Las métricas `requests_sent`, `ratings_1_to_4`, `ratings_5`, `google_reviews_matched` y `low_rating_reasons` solo cuentan items/eventos de reseñas con solicitud real enviada, en cola o ya respondida; se excluyen envíos de prueba `mass_campaign_test` y valoraciones sueltas sin solicitud real para no inflar conversión. `google_reviews_matched` se calcula con `BusinessProfileReviews.matched_contact_event_id`, por lo que mide reseñas Google vinculadas, no pacientes que solo respondieron `5/5` en privado. Si la automatización está activa, `automation_template` incluye también `review_gift_enabled`, `review_gift_description`, `review_display_clinic_name` y `review_sender_name` para que la UI explique si opera con premio/sin premio, nombre visible, remitente y audiencia. Acepta `review_treatment_ids` como lista separada por comas para filtrar varios tratamientos; `review_treatment_id` sigue soportado como compatibilidad. En este endpoint, si llegan `scope=group:<id>` y `clinic_id` juntos, el backend debe priorizar `scope` para que el front pueda conservar una sede activa sin perder el desglose de grupo. En scope de grupo añade `clinic_statuses`, `group_total_clinics`, `group_ready_clinics` y `group_blocked_clinics`: cada sede se evalua por candidatos posibles, `url_dejar_resena` disponible, WhatsApp conectado, plantillas WABA aprobadas de solicitud/recordatorio y automatización individual de clínica. Cada `clinic_status` expone labels/hints listos para UI (`google_status_label`, `whatsapp_status_label`, `template_status_label`, `status_label`, `status_hint`, `automation_label`, `automation_hint`) para que el front no deduzca estados complejos. Si una automatización está activa pero la sede no está lista, se etiqueta como `Configurada, sin enviar`. La UI no muestra switches por sede: usa un interruptor general de grupo como operación masiva y un desglose por clínica para explicar qué sedes están listas y cuántos pacientes posibles aporta cada una. Las sedes no listas quedan fuera del envío hasta resolver el motivo; las listas usan el enlace de reseña de la sede de cada item, no un enlace global del grupo.
 - El resumen de reseñas y cada `clinic_status` exponen `approved_photo_template_available`/`approved_photo_template_id` para que la UI bloquee foto de equipo solo cuando realmente falta la variante WABA con cabecera `HEADER/IMAGE`.
-- Alias de ficha local para reseñas: una ficha de Google Business Profile sigue siendo única en `ClinicBusinessLocations.location_id` y no debe duplicarse entre clínicas. Si una sede debe pedir reseñas usando la ficha de otra sede, se configura en `Clinicas.configuracion.reviews.google_business_profile_alias_clinic_id` y/o `google_business_profile_alias_location_id`. Esto solo afecta a `url_dejar_resena` y al estado de reseñas (`GET /api/local/clinica/:id/status?purpose=reviews`); la configuración general de clínica y `Marketing > Perfil Google` siguen mostrando únicamente la ficha realmente asignada a esa clínica.
+- Alias de ficha local para reseñas: por defecto, Reseñas consume la misma ficha efectiva conectada/mapeada para la clínica; no mantiene una conexión propia. Una ficha de Google Business Profile sigue siendo única en `ClinicBusinessLocations.location_id` y no debe duplicarse entre clínicas. Si una sede debe pedir reseñas usando la ficha de otra sede, se configura en `Clinicas.configuracion.reviews.google_business_profile_alias_clinic_id` y/o `google_business_profile_alias_location_id`. Esto solo afecta a `url_dejar_resena`, metadatos `review_profile_alias_*` y al estado de reseñas (`GET /api/local/clinica/:id/status?purpose=reviews`); la configuración general de clínica, Informes, datos de ubicación y `Marketing > Perfil Google` siguen mostrando únicamente la ficha realmente asignada a esa clínica. El alias no duplica OAuth, no transfiere propiedad administrativa y no debe convertirse en fallback general de Perfil Google.
 - En vista de grupo, el interruptor de reseñas no representa una plantilla operativa de grupo. Al activarlo se crean/actualizan las automatizaciones individuales de las clínicas del grupo; al pausarlo se desactivan las automatizaciones existentes de esas clínicas. Esto evita herencias/overrides difíciles de explicar al usuario.
 - `PATCH /api/marketing/review-requests/automation` activa/desactiva una plantilla `AutomationFlowTemplatesV2` por clínica con `trigger_type=appointment_completed`. Para activarla exige Perfil Google con `url_dejar_resena`, WhatsApp conectado, remitente de reseñas (`review_sender_name`) y plantillas WABA aprobadas de solicitud y recordatorio; si falta algo devuelve `409 review_automation_requirements_missing` con `warnings` (`template_not_approved`, `reminder_template_not_approved`, `sender_name_missing`, etc.). Si recibe `scope=group:<id>`, ejecuta la misma operación clínica para cada sede del grupo y devuelve `group_result` con sedes actualizadas/activas/fallidas; no crea `review_request_after_completed__group_*`. La plantilla actual es V2 y encadena `delay/fixed` de 24h tras `appointment_completed` -> `action/request_review` con `review_source=completed_treatment` -> `delay/wait_response` de 24h. Si hay respuesta entra en `condition/field_check`, que comprueba `last_response_context.response_rating >= 5`; si es verdadero continúa por `action/review_followup` con `followup_kind=google_review`, y si es falso continúa por `action/review_followup` con `followup_kind=private_feedback`. Si no responde en 24h, ejecuta `action/request_review_reminder` con la plantilla `clinicaclick_recordatorio_resena_sin_respuesta`, espera otras 24h y cierra con `action/review_no_response` si sigue sin contestar. La acción `request_review` conserva en su configuración `review_gift_enabled`, `review_gift_description`, `review_display_clinic_name`, `review_sender_name` y `review_team_photo_url`; el runtime los traslada a la lista generada automáticamente.
 - Las solicitudes de reseñas se materializan como `mass_sends` con `criteria.review_request = true` y `template_usage = solicitud_resena`. Si `list_source=current_patients`, el backend crea candidatos desde `CitasPacientes` completadas o desde pacientes actuales en selección manual. La selección manual considera tanto `Pacientes.clinica_id` como vínculos en `PacienteClinicas`, para que un paciente cuya clínica principal sea otra sede del grupo pueda usarse como ejemplo o receptor si está vinculado a la clínica activa. Cuando se filtra por tratamientos, guarda `criteria.review_treatment_ids` y conserva `criteria.review_treatment_id` con el primer valor para consumidores legacy.

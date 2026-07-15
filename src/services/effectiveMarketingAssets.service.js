@@ -14,12 +14,72 @@ const Clinica = db.Clinica;
 const GrupoClinica = db.GrupoClinica;
 const ClinicMetaAsset = db.ClinicMetaAsset;
 const ClinicGoogleAdsAccount = db.ClinicGoogleAdsAccount;
+const ClinicWebAsset = db.ClinicWebAsset;
+const ClinicAnalyticsProperty = db.ClinicAnalyticsProperty;
+const ClinicBusinessLocation = db.ClinicBusinessLocation;
+const GroupAssetClinicAssignment = db.GroupAssetClinicAssignment;
 const MetaConnection = db.MetaConnection;
+
+const GROUP_ASSET_TYPES = Object.freeze({
+  META_AD_ACCOUNT: 'meta.ad_account',
+  META_FACEBOOK_PAGE: 'meta.facebook_page',
+  META_INSTAGRAM_BUSINESS: 'meta.instagram_business',
+  GOOGLE_ADS_ACCOUNT: 'google.ads_account',
+  GOOGLE_SEARCH_CONSOLE: 'google.search_console',
+  GOOGLE_ANALYTICS: 'google.analytics',
+  GOOGLE_BUSINESS_PROFILE: 'google.business_profile'
+});
+
+const META_GROUP_ASSET_TYPE_BY_ASSET_TYPE = Object.freeze({
+  ad_account: GROUP_ASSET_TYPES.META_AD_ACCOUNT,
+  facebook_page: GROUP_ASSET_TYPES.META_FACEBOOK_PAGE,
+  instagram_business: GROUP_ASSET_TYPES.META_INSTAGRAM_BUSINESS
+});
+
+const GOOGLE_PROPERTY_ASSET_CONFIG = Object.freeze({
+  search_console: Object.freeze({
+    assetType: GROUP_ASSET_TYPES.GOOGLE_SEARCH_CONSOLE,
+    model: ClinicWebAsset,
+    clinicField: 'clinicaId',
+    activeField: 'isActive',
+    modeField: 'search_console_assignment_mode',
+    primaryField: 'search_console_primary_asset_id',
+    identityField: 'siteUrl'
+  }),
+  analytics: Object.freeze({
+    assetType: GROUP_ASSET_TYPES.GOOGLE_ANALYTICS,
+    model: ClinicAnalyticsProperty,
+    clinicField: 'clinicaId',
+    activeField: 'isActive',
+    modeField: 'analytics_assignment_mode',
+    primaryField: 'analytics_primary_property_id',
+    identityField: 'propertyName'
+  }),
+  business_profile: Object.freeze({
+    assetType: GROUP_ASSET_TYPES.GOOGLE_BUSINESS_PROFILE,
+    model: ClinicBusinessLocation,
+    clinicField: 'clinica_id',
+    activeField: 'is_active',
+    modeField: 'business_profile_assignment_mode',
+    primaryField: 'business_profile_primary_location_id',
+    identityField: 'location_id'
+  })
+});
 
 function parseInteger(raw) {
   if (raw === undefined || raw === null || raw === '') return null;
   const parsed = Number.parseInt(raw, 10);
   return Number.isInteger(parsed) ? parsed : null;
+}
+
+function parseBoolean(raw, fallback = false) {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  if (typeof raw === 'boolean') return raw;
+  if (typeof raw === 'number') return raw !== 0;
+  const normalized = String(raw).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
 }
 
 function cleanString(raw) {
@@ -540,7 +600,7 @@ function getScopeClinicIds(scope) {
     .filter((value) => Number.isInteger(value) && value > 0);
 }
 
-function buildScopedAssetWhere(scope) {
+function buildScopedAssetWhere(scope, explicitAssetIds = []) {
   const assignmentScope = getScopeAssignmentScope(scope);
   const clinicId = getScopeClinicId(scope);
   const groupId = getScopeGroupId(scope);
@@ -564,19 +624,37 @@ function buildScopedAssetWhere(scope) {
   if (groupId) {
     or.push({ grupoClinicaId: groupId, assignmentScope: 'group' });
   }
+  const normalizedExplicitAssetIds = explicitAssetIds
+    .map((value) => parseInteger(value))
+    .filter((value) => Number.isInteger(value) && value > 0);
+  if (normalizedExplicitAssetIds.length > 0) {
+    or.push({ id: { [Op.in]: normalizedExplicitAssetIds } });
+  }
   return or.length > 0 ? { [Op.or]: or } : {};
 }
 
 function resolveAssetOrigin(row, scope) {
+  if (row?.effectiveAssignmentOrigin) return row.effectiveAssignmentOrigin;
   const clinicId = getScopeClinicId(scope);
   const groupId = getScopeGroupId(scope);
-  if (clinicId && parseInteger(row?.clinicaId) === clinicId) return 'clinic';
-  if (groupId && parseInteger(row?.grupoClinicaId) === groupId) return 'group';
+  const rowClinicId = parseInteger(row?.clinicaId ?? row?.clinica_id);
+  const rowGroupId = parseInteger(row?.grupoClinicaId ?? row?.grupo_clinica_id);
+  if (
+    String(row?.assignmentScope || row?.assignment_scope || '').trim().toLowerCase() === 'group'
+    && groupId
+    && rowGroupId === groupId
+  ) {
+    return 'group';
+  }
+  if (clinicId && rowClinicId === clinicId) return 'clinic';
+  if (groupId && rowGroupId === groupId) return 'group';
   return String(row?.assignmentScope || '').trim().toLowerCase() === 'group' ? 'group' : 'clinic';
 }
 
 function getOriginPriority(origin) {
-  return origin === 'clinic' ? 0 : 1;
+  if (origin === 'clinic') return 0;
+  if (origin === 'shared') return 1;
+  return 2;
 }
 
 function sortRowsForSelection(scope, rows) {
@@ -706,16 +784,257 @@ function resolveEffectiveTrackingConfig(scope, records = {}) {
   };
 }
 
-async function listScopedMetaAssets(scope) {
-  const rows = await ClinicMetaAsset.findAll({
+async function loadExplicitAssetAssignments(scope, assetTypes, dependencies = {}) {
+  const assignmentModel = dependencies.assignmentModel || GroupAssetClinicAssignment;
+  const clinicId = getScopeClinicId(scope);
+  const groupId = getScopeGroupId(scope);
+  if (!assignmentModel || !clinicId || getScopeAssignmentScope(scope) === 'group') {
+    return [];
+  }
+
+  const normalizedTypes = (Array.isArray(assetTypes) ? assetTypes : [assetTypes])
+    .map((value) => cleanString(value))
+    .filter(Boolean);
+  if (!normalizedTypes.length) return [];
+
+  const where = {
+    clinicaId: clinicId,
+    assetType: normalizedTypes.length === 1
+      ? normalizedTypes[0]
+      : { [Op.in]: normalizedTypes }
+  };
+  if (groupId) where.grupoClinicaId = groupId;
+
+  return assignmentModel.findAll({ where, raw: true });
+}
+
+async function loadGooglePropertyGroupPolicy(scope, dependencies = {}) {
+  const groupId = getScopeGroupId(scope);
+  const groupModel = dependencies.groupModel || GrupoClinica;
+  if (!groupId || !groupModel) return null;
+
+  return groupModel.findByPk(groupId, {
+    attributes: [
+      'id_grupo',
+      'search_console_assignment_mode',
+      'search_console_primary_asset_id',
+      'analytics_assignment_mode',
+      'analytics_primary_property_id',
+      'business_profile_assignment_mode',
+      'business_profile_primary_location_id'
+    ],
+    raw: true
+  });
+}
+
+async function loadGooglePropertyAssignments(scope, dependencies = {}) {
+  const assignmentModel = dependencies.assignmentModel || GroupAssetClinicAssignment;
+  const groupId = getScopeGroupId(scope);
+  if (!assignmentModel || !groupId) return [];
+
+  const where = {
+    grupoClinicaId: groupId,
+    assetType: {
+      [Op.in]: Object.values(GOOGLE_PROPERTY_ASSET_CONFIG).map((config) => config.assetType)
+    }
+  };
+  const clinicId = getScopeClinicId(scope);
+  if (getScopeAssignmentScope(scope) !== 'group' && clinicId) {
+    where.clinicaId = clinicId;
+  }
+  return assignmentModel.findAll({ where, raw: true });
+}
+
+function buildGooglePropertyAssetWhere(scope, config, candidateAssetIds = []) {
+  const clinicId = getScopeClinicId(scope);
+  const clinicIds = getScopeClinicIds(scope);
+  const or = [];
+
+  if (getScopeAssignmentScope(scope) === 'group') {
+    if (clinicIds.length) {
+      or.push({ [config.clinicField]: { [Op.in]: clinicIds } });
+    }
+  } else if (clinicId) {
+    or.push({ [config.clinicField]: clinicId });
+  }
+
+  const ids = Array.from(new Set(candidateAssetIds
+    .map((value) => parseInteger(value))
+    .filter((value) => Number.isInteger(value) && value > 0)));
+  if (ids.length) or.push({ id: { [Op.in]: ids } });
+  if (!or.length) return null;
+
+  return {
+    [config.activeField]: true,
+    [Op.or]: or
+  };
+}
+
+function annotateGooglePropertyRows(scope, config, rows, assignmentRows, groupPolicy) {
+  const clinicId = getScopeClinicId(scope);
+  const groupMode = cleanString(groupPolicy?.[config.modeField]) || 'clinic';
+  const primaryId = groupMode === 'group'
+    ? parseInteger(groupPolicy?.[config.primaryField])
+    : null;
+  const explicitlyAssignedIds = new Set((assignmentRows || [])
+    .filter((assignment) => assignment.assetType === config.assetType)
+    .map((assignment) => parseInteger(assignment.assetId))
+    .filter(Boolean));
+
+  return (rows || []).map((row) => {
+    const rowId = parseInteger(row?.id);
+    let origin = null;
+    if (primaryId && rowId === primaryId) {
+      origin = 'group';
+    } else if (clinicId && parseInteger(row?.[config.clinicField]) === clinicId) {
+      origin = 'clinic';
+    } else if (explicitlyAssignedIds.has(rowId)) {
+      origin = 'shared';
+    } else if (getScopeAssignmentScope(scope) === 'group') {
+      origin = 'clinic';
+    }
+    return origin ? { ...row, effectiveAssignmentOrigin: origin } : row;
+  });
+}
+
+function googlePropertyIdentity(config, row) {
+  const value = cleanString(row?.[config.identityField]);
+  if (value) return value.toLowerCase().replace(/\/$/, '');
+  const id = parseInteger(row?.id);
+  return id ? `mapping:${id}` : null;
+}
+
+function serializeGoogleProperty(section, row, scope) {
+  const common = {
+    mapping_id: parseInteger(row.id),
+    mapped_to_scope: true,
+    assignment_origin: resolveAssetOrigin(row, scope),
+    clinic_id: parseInteger(row.clinicaId ?? row.clinica_id),
+    connection_id: parseInteger(row.googleConnectionId ?? row.google_connection_id)
+  };
+
+  if (section === 'search_console') {
+    return {
+      ...common,
+      site_url: cleanString(row.siteUrl),
+      property_type: cleanString(row.propertyType),
+      permission_level: cleanString(row.permissionLevel),
+      verified: parseBoolean(row.verified, true)
+    };
+  }
+  if (section === 'analytics') {
+    return {
+      ...common,
+      property_name: cleanString(row.propertyName),
+      display_name: cleanString(row.propertyDisplayName),
+      measurement_id: cleanString(row.measurementId)
+    };
+  }
+  return {
+    ...common,
+    location_id: cleanString(row.location_id),
+    name: cleanString(row.location_name),
+    sync_status: cleanString(row.sync_status),
+    verified: parseBoolean(row.is_verified, false),
+    suspended: parseBoolean(row.is_suspended, false),
+    last_synced_at: row.last_synced_at || null
+  };
+}
+
+async function listScopedGoogleProperties(scope, dependencies = {}) {
+  const [groupPolicy, assignmentRows] = await Promise.all([
+    loadGooglePropertyGroupPolicy(scope, dependencies),
+    loadGooglePropertyAssignments(scope, dependencies)
+  ]);
+  const propertyModels = dependencies.propertyModels || {};
+  const result = {};
+
+  for (const [section, config] of Object.entries(GOOGLE_PROPERTY_ASSET_CONFIG)) {
+    const model = propertyModels[section] || config.model;
+    if (!model) {
+      result[section] = [];
+      continue;
+    }
+    const relevantAssignments = groupPolicy?.[config.modeField] === 'group'
+      ? []
+      : assignmentRows.filter((assignment) => assignment.assetType === config.assetType);
+    const primaryId = groupPolicy?.[config.modeField] === 'group'
+      ? parseInteger(groupPolicy?.[config.primaryField])
+      : null;
+    const candidateIds = [
+      ...relevantAssignments.map((assignment) => assignment.assetId),
+      primaryId
+    ].filter(Boolean);
+    const where = buildGooglePropertyAssetWhere(scope, config, candidateIds);
+    if (!where) {
+      result[section] = [];
+      continue;
+    }
+
+    const rawRows = await model.findAll({ where, raw: true });
+    const rows = annotateGooglePropertyRows(
+      scope,
+      config,
+      rawRows,
+      relevantAssignments,
+      groupPolicy
+    );
+    result[section] = dedupePreferred(
+      scope,
+      rows,
+      (row) => googlePropertyIdentity(config, row)
+    ).map((row) => serializeGoogleProperty(section, row, scope));
+  }
+
+  return result;
+}
+
+function markExplicitlyAssignedRows(scope, rows, assignmentRows, assetTypeForRow) {
+  const clinicId = getScopeClinicId(scope);
+  if (!clinicId || !Array.isArray(assignmentRows) || !assignmentRows.length) return rows;
+
+  const assignmentKeys = new Set(assignmentRows.map((row) => (
+    `${cleanString(row.assetType)}:${parseInteger(row.assetId)}`
+  )));
+  return rows.map((row) => {
+    if (parseInteger(row?.clinicaId) === clinicId) return row;
+    if (
+      String(row?.assignmentScope || '').trim().toLowerCase() === 'group'
+      && parseInteger(row?.grupoClinicaId) === getScopeGroupId(scope)
+    ) {
+      return row;
+    }
+    const assetType = assetTypeForRow(row);
+    const key = `${cleanString(assetType)}:${parseInteger(row?.id)}`;
+    return assignmentKeys.has(key)
+      ? { ...row, effectiveAssignmentOrigin: 'shared' }
+      : row;
+  });
+}
+
+async function listScopedMetaAssets(scope, dependencies = {}) {
+  const assetModel = dependencies.assetModel || ClinicMetaAsset;
+  const assignmentRows = await loadExplicitAssetAssignments(
+    scope,
+    Object.values(META_GROUP_ASSET_TYPE_BY_ASSET_TYPE),
+    dependencies
+  );
+  const explicitAssetIds = assignmentRows.map((row) => row.assetId);
+  const rawRows = await assetModel.findAll({
     where: {
       isActive: true,
       assetType: { [Op.in]: ['facebook_page', 'instagram_business', 'ad_account'] },
-      ...buildScopedAssetWhere(scope)
+      ...buildScopedAssetWhere(scope, explicitAssetIds)
     },
     order: [['updatedAt', 'DESC']],
     raw: true
   });
+  const rows = markExplicitlyAssignedRows(
+    scope,
+    rawRows,
+    assignmentRows,
+    (row) => META_GROUP_ASSET_TYPE_BY_ASSET_TYPE[row.assetType]
+  );
 
   const adAccounts = dedupePreferred(scope, rows.filter((row) => row.assetType === 'ad_account'), (row) => normalizeMetaAdAccountId(row.metaAssetId));
   const facebookPages = dedupePreferred(scope, rows.filter((row) => row.assetType === 'facebook_page'), (row) => cleanString(row.metaAssetId));
@@ -729,7 +1048,8 @@ async function listScopedMetaAssets(scope) {
       assignment_origin: resolveAssetOrigin(row, scope),
       connection_id: parseInteger(row.metaConnectionId),
       clinic_id: parseInteger(row.clinicaId),
-      group_id: parseInteger(row.grupoClinicaId)
+      group_id: parseInteger(row.grupoClinicaId),
+      mapping_id: parseInteger(row.id)
     })),
     facebook_pages: facebookPages.map((row) => ({
       page_id: cleanString(row.metaAssetId),
@@ -738,7 +1058,8 @@ async function listScopedMetaAssets(scope) {
       assignment_origin: resolveAssetOrigin(row, scope),
       connection_id: parseInteger(row.metaConnectionId),
       clinic_id: parseInteger(row.clinicaId),
-      group_id: parseInteger(row.grupoClinicaId)
+      group_id: parseInteger(row.grupoClinicaId),
+      mapping_id: parseInteger(row.id)
     })),
     instagram_business: instagramAccounts.map((row) => ({
       instagram_business_id: cleanString(row.metaAssetId),
@@ -747,7 +1068,8 @@ async function listScopedMetaAssets(scope) {
       assignment_origin: resolveAssetOrigin(row, scope),
       connection_id: parseInteger(row.metaConnectionId),
       clinic_id: parseInteger(row.clinicaId),
-      group_id: parseInteger(row.grupoClinicaId)
+      group_id: parseInteger(row.grupoClinicaId),
+      mapping_id: parseInteger(row.id)
     }))
   };
 }
@@ -772,15 +1094,28 @@ function pickEffectiveMetaAsset(metaAssets, metaConfig) {
   };
 }
 
-async function listScopedGoogleAccounts(scope) {
-  const rows = await ClinicGoogleAdsAccount.findAll({
+async function listScopedGoogleAccounts(scope, dependencies = {}) {
+  const accountModel = dependencies.accountModel || ClinicGoogleAdsAccount;
+  const assignmentRows = await loadExplicitAssetAssignments(
+    scope,
+    GROUP_ASSET_TYPES.GOOGLE_ADS_ACCOUNT,
+    dependencies
+  );
+  const explicitAssetIds = assignmentRows.map((row) => row.assetId);
+  const rawRows = await accountModel.findAll({
     where: {
       isActive: true,
-      ...buildScopedAssetWhere(scope)
+      ...buildScopedAssetWhere(scope, explicitAssetIds)
     },
     order: [['updated_at', 'DESC']],
     raw: true
   });
+  const rows = markExplicitlyAssignedRows(
+    scope,
+    rawRows,
+    assignmentRows,
+    () => GROUP_ASSET_TYPES.GOOGLE_ADS_ACCOUNT
+  );
 
   const deduped = dedupePreferred(scope, rows, (row) => cleanGoogleCustomerId(row.customerId));
   return deduped.map((row) => {
@@ -800,7 +1135,9 @@ async function listScopedGoogleAccounts(scope) {
       assignment_origin: resolveAssetOrigin(row, scope),
       connection_id: parseInteger(row.googleConnectionId),
       clinic_id: parseInteger(row.clinicaId),
-      group_id: parseInteger(row.grupoClinicaId)
+      group_id: parseInteger(row.grupoClinicaId),
+      mapping_id: parseInteger(row.id),
+      last_synced_at: row.lastSyncedAt || row.last_synced_at || null
     };
   });
 }
@@ -859,14 +1196,19 @@ async function listMetaPixelsForScopeAdAccount({ scope, adAccountId, connectionI
   }));
 }
 
-async function resolveEffectiveMarketingState({ clinicIdRaw = null, groupIdRaw = null, assignmentScopeRaw = null }) {
-  const normalizedScope = await normalizeScope({ clinicIdRaw, groupIdRaw, assignmentScopeRaw });
+async function resolveEffectiveMarketingAssetInventory(
+  { clinicIdRaw = null, groupIdRaw = null, assignmentScopeRaw = null },
+  dependencies = {}
+) {
+  const normalizeScopeFn = dependencies.normalizeScope || normalizeScope;
+  const clinicModel = dependencies.clinicModel || Clinica;
+  const normalizedScope = await normalizeScopeFn({ clinicIdRaw, groupIdRaw, assignmentScopeRaw });
   const scope = {
     assignment_scope: normalizedScope.assignmentScope,
     clinic_id: normalizedScope.clinicId,
     group_id: normalizedScope.groupId,
     clinic_ids: normalizedScope.groupId
-      ? ((await Clinica.findAll({
+      ? ((await clinicModel.findAll({
         where: { grupoClinicaId: normalizedScope.groupId },
         attributes: ['id_clinica'],
         raw: true
@@ -874,23 +1216,17 @@ async function resolveEffectiveMarketingState({ clinicIdRaw = null, groupIdRaw =
       : (normalizedScope.clinicId ? [normalizedScope.clinicId] : [])
   };
 
-  const [descriptors, records, metaConnectionResolution, googleConnectionResolution, metaAssets, googleAccounts] = await Promise.all([
-    loadScopeDescriptors(scope),
-    loadScopeIntakeRecords(scope),
-    resolveMetaConnectionForScope({
-      clinicIdRaw: scope.clinic_id,
-      groupIdRaw: scope.group_id,
-      assignmentScopeRaw: scope.assignment_scope,
-      allowLegacyUserFallback: true
-    }),
-    resolveGoogleConnectionForScope({
-      clinicIdRaw: scope.clinic_id,
-      groupIdRaw: scope.group_id,
-      assignmentScopeRaw: scope.assignment_scope,
-      allowLegacyUserFallback: true
-    }),
-    listScopedMetaAssets(scope),
-    listScopedGoogleAccounts(scope)
+  const descriptorLoader = dependencies.loadScopeDescriptors || loadScopeDescriptors;
+  const intakeLoader = dependencies.loadScopeIntakeRecords || loadScopeIntakeRecords;
+  const metaAssetLoader = dependencies.listScopedMetaAssets || listScopedMetaAssets;
+  const googleAccountLoader = dependencies.listScopedGoogleAccounts || listScopedGoogleAccounts;
+  const googlePropertyLoader = dependencies.listScopedGoogleProperties || listScopedGoogleProperties;
+  const [descriptors, records, metaAssets, googleAccounts, googleProperties] = await Promise.all([
+    descriptorLoader(scope),
+    intakeLoader(scope),
+    metaAssetLoader(scope, dependencies),
+    googleAccountLoader(scope, dependencies),
+    googlePropertyLoader(scope, dependencies)
   ]);
 
   const tracking = resolveEffectiveTrackingConfig(scope, records);
@@ -903,16 +1239,61 @@ async function resolveEffectiveMarketingState({ clinicIdRaw = null, groupIdRaw =
     records,
     tracking,
     meta: {
-      connection: metaConnectionResolution?.connection || null,
-      connection_source: metaConnectionResolution?.source || null,
       available_assets: metaAssets,
       effective_assets: effectiveMeta
     },
     google: {
-      connection: googleConnectionResolution?.connection || null,
-      connection_source: googleConnectionResolution?.source || null,
       available_accounts: googleAccounts,
-      effective_assets: effectiveGoogle
+      available_assets: googleProperties,
+      effective_assets: {
+        ...effectiveGoogle,
+        search_console: googleProperties.search_console?.[0] || null,
+        analytics: googleProperties.analytics?.[0] || null,
+        business_profile: googleProperties.business_profile?.[0] || null
+      }
+    }
+  };
+}
+
+async function resolveEffectiveMarketingState(
+  { clinicIdRaw = null, groupIdRaw = null, assignmentScopeRaw = null },
+  dependencies = {}
+) {
+  const params = { clinicIdRaw, groupIdRaw, assignmentScopeRaw };
+  const inventoryResolver = dependencies.resolveEffectiveMarketingAssetInventory
+    || resolveEffectiveMarketingAssetInventory;
+  const inventory = await inventoryResolver(params, dependencies);
+  const scope = inventory.scope;
+  const metaConnectionResolver = dependencies.resolveMetaConnectionForScope
+    || resolveMetaConnectionForScope;
+  const googleConnectionResolver = dependencies.resolveGoogleConnectionForScope
+    || resolveGoogleConnectionForScope;
+  const [metaConnectionResolution, googleConnectionResolution] = await Promise.all([
+    metaConnectionResolver({
+      clinicIdRaw: scope.clinic_id,
+      groupIdRaw: scope.group_id,
+      assignmentScopeRaw: scope.assignment_scope,
+      allowLegacyUserFallback: true
+    }),
+    googleConnectionResolver({
+      clinicIdRaw: scope.clinic_id,
+      groupIdRaw: scope.group_id,
+      assignmentScopeRaw: scope.assignment_scope,
+      allowLegacyUserFallback: true
+    })
+  ]);
+
+  return {
+    ...inventory,
+    meta: {
+      ...inventory.meta,
+      connection: metaConnectionResolution?.connection || null,
+      connection_source: metaConnectionResolution?.source || null
+    },
+    google: {
+      ...inventory.google,
+      connection: googleConnectionResolution?.connection || null,
+      connection_source: googleConnectionResolution?.source || null
     }
   };
 }
@@ -929,8 +1310,11 @@ module.exports = {
   resolveEffectiveTrackingConfig,
   listScopedMetaAssets,
   listScopedGoogleAccounts,
+  listScopedGoogleProperties,
+  loadExplicitAssetAssignments,
   pickEffectiveMetaAsset,
   pickEffectiveGoogleAccount,
   listMetaPixelsForScopeAdAccount,
+  resolveEffectiveMarketingAssetInventory,
   resolveEffectiveMarketingState
 };

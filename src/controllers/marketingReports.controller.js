@@ -4,6 +4,9 @@ const { Op, fn, col, literal } = require('sequelize');
 const db = require('../../models');
 const { resolveClinicScope, buildAssetScopeWhere } = require('../lib/clinicScope');
 const webEventsService = require('../services/webEvents.service');
+const {
+  resolveEffectiveMarketingAssetInventory,
+} = require('../services/effectiveMarketingAssets.service');
 
 const {
   LeadIntake,
@@ -203,6 +206,32 @@ function scopedRawSql(field, scope, replacements, key) {
   return ` AND ${field} IN (:${key})`;
 }
 
+function scopedRawOrEffectiveSql(
+  scopeField,
+  scope,
+  replacements,
+  scopeKey,
+  effectiveField,
+  effectiveIds,
+  effectiveKey
+) {
+  if (
+    !scope?.isAll
+    && effectiveIds.length
+    && (scope?.scope === 'group' || scope?.scope === 'multi')
+  ) {
+    replacements[effectiveKey] = effectiveIds;
+    return ` AND ${effectiveField} IN (:${effectiveKey})`;
+  }
+  const historicalSql = scopedRawSql(scopeField, scope, replacements, scopeKey);
+  if (!effectiveIds.length || scope?.isAll) return historicalSql;
+  replacements[effectiveKey] = effectiveIds;
+  const historicalCondition = historicalSql.startsWith(' AND ')
+    ? historicalSql.slice(5)
+    : '1 = 1';
+  return ` AND (${historicalCondition} OR ${effectiveField} IN (:${effectiveKey}))`;
+}
+
 function buildAdsScopeWhere(scope, clinicField, groupField) {
   if (scope.isAll) return {};
   const clinicIds = Array.isArray(scope.clinicIds) ? scope.clinicIds : [];
@@ -285,6 +314,299 @@ async function resolveReportScope(req) {
     throw err;
   }
   return scope;
+}
+
+function buildEffectiveMarketingStateInput(scope) {
+  if (scope?.scope === 'clinic' && scope.clinicIds?.length === 1) {
+    return {
+      clinicIdRaw: scope.clinicIds[0],
+      groupIdRaw: null,
+      assignmentScopeRaw: 'clinic',
+    };
+  }
+  if (scope?.scope === 'group' && scope.groupId) {
+    return {
+      clinicIdRaw: null,
+      groupIdRaw: scope.groupId,
+      assignmentScopeRaw: 'group',
+    };
+  }
+  return null;
+}
+
+async function resolveReportMarketingState(scope, dependencies = {}) {
+  const resolver = dependencies.resolveEffectiveMarketingAssetInventory
+    || resolveEffectiveMarketingAssetInventory;
+  const input = buildEffectiveMarketingStateInput(scope);
+  if (input) return resolver(input);
+  if (scope?.scope !== 'multi' || !Array.isArray(scope.clinicIds) || !scope.clinicIds.length) {
+    return null;
+  }
+
+  const states = await Promise.all(scope.clinicIds.map((clinicId) => resolver({
+    clinicIdRaw: clinicId,
+    groupIdRaw: null,
+    assignmentScopeRaw: 'clinic',
+  })));
+  return mergeEffectiveMarketingStates(states, scope);
+}
+
+function effectiveGoogleAccounts(marketingState) {
+  return Array.isArray(marketingState?.google?.available_accounts)
+    ? marketingState.google.available_accounts
+    : [];
+}
+
+function effectiveMetaAssets(marketingState) {
+  const assets = marketingState?.meta?.available_assets;
+  return {
+    adAccounts: Array.isArray(assets?.ad_accounts) ? assets.ad_accounts : [],
+    facebookPages: Array.isArray(assets?.facebook_pages) ? assets.facebook_pages : [],
+    instagramAccounts: Array.isArray(assets?.instagram_business) ? assets.instagram_business : [],
+  };
+}
+
+function effectiveGoogleProperties(marketingState) {
+  const assets = marketingState?.google?.available_assets;
+  return {
+    searchConsole: Array.isArray(assets?.search_console) ? assets.search_console : [],
+    analytics: Array.isArray(assets?.analytics) ? assets.analytics : [],
+    businessProfiles: Array.isArray(assets?.business_profile) ? assets.business_profile : [],
+  };
+}
+
+function normalizedUniqueStrings(values) {
+  return Array.from(new Set((values || [])
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)));
+}
+
+function normalizedUniqueIntegers(values) {
+  return Array.from(new Set((values || [])
+    .map((value) => Number.parseInt(value, 10))
+    .filter((value) => Number.isInteger(value) && value > 0)));
+}
+
+function dedupeRows(rows, keyBuilder) {
+  const seen = new Set();
+  return (rows || []).filter((row) => {
+    const key = keyBuilder(row);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function mergeEffectiveMarketingStates(states, scope) {
+  const validStates = (states || []).filter(Boolean);
+  const googleAccounts = dedupeRows(
+    validStates.flatMap((state) => effectiveGoogleAccounts(state)),
+    (row) => String(row.customer_id || '').replace(/\D+/g, '')
+  );
+  const metaAssets = validStates.map((state) => effectiveMetaAssets(state));
+  const googleProperties = validStates.map((state) => effectiveGoogleProperties(state));
+  const adAccounts = dedupeRows(
+    metaAssets.flatMap((assets) => assets.adAccounts),
+    (row) => String(row.ad_account_id || '').replace(/^act_/, '')
+  );
+  const facebookPages = dedupeRows(
+    metaAssets.flatMap((assets) => assets.facebookPages),
+    (row) => String(row.page_id || row.mapping_id || '')
+  );
+  const instagramAccounts = dedupeRows(
+    metaAssets.flatMap((assets) => assets.instagramAccounts),
+    (row) => String(row.instagram_business_id || row.mapping_id || '')
+  );
+  const searchConsole = dedupeRows(
+    googleProperties.flatMap((assets) => assets.searchConsole),
+    (row) => String(row.site_url || row.mapping_id || '').trim().toLowerCase().replace(/\/$/, '')
+  );
+  const analytics = dedupeRows(
+    googleProperties.flatMap((assets) => assets.analytics),
+    (row) => String(row.property_name || row.mapping_id || '').trim().toLowerCase()
+  );
+  const businessProfiles = dedupeRows(
+    googleProperties.flatMap((assets) => assets.businessProfiles),
+    (row) => String(row.location_id || row.mapping_id || '').trim().toLowerCase()
+  );
+
+  return {
+    scope: {
+      assignment_scope: 'multi',
+      clinic_id: null,
+      group_id: null,
+      clinic_ids: [...scope.clinicIds],
+    },
+    descriptors: {},
+    records: {},
+    tracking: validStates[0]?.tracking || {},
+    google: {
+      available_accounts: googleAccounts,
+      available_assets: {
+        search_console: searchConsole,
+        analytics,
+        business_profile: businessProfiles,
+      },
+      effective_assets: {
+        account: googleAccounts[0] || null,
+        tag_id: null,
+        search_console: searchConsole[0] || null,
+        analytics: analytics[0] || null,
+        business_profile: businessProfiles[0] || null,
+      },
+    },
+    meta: {
+      available_assets: {
+        ad_accounts: adAccounts,
+        facebook_pages: facebookPages,
+        instagram_business: instagramAccounts,
+      },
+      effective_assets: {
+        ad_account: adAccounts[0] || null,
+        facebook_page: facebookPages[0] || null,
+        instagram_business: instagramAccounts[0] || null,
+      },
+    },
+  };
+}
+
+function effectiveGoogleCustomerIds(marketingState) {
+  return normalizedUniqueStrings(effectiveGoogleAccounts(marketingState).map((account) => account.customer_id));
+}
+
+function effectiveMetaAdAccountIds(marketingState) {
+  return normalizedUniqueStrings(effectiveMetaAssets(marketingState).adAccounts.map((account) => account.ad_account_id));
+}
+
+function effectiveSocialMappingIds(marketingState) {
+  const assets = effectiveMetaAssets(marketingState);
+  return normalizedUniqueIntegers([
+    ...assets.facebookPages.map((asset) => asset.mapping_id),
+    ...assets.instagramAccounts.map((asset) => asset.mapping_id),
+  ]);
+}
+
+function effectiveSearchConsoleSiteUrls(marketingState) {
+  return normalizedUniqueStrings(
+    effectiveGoogleProperties(marketingState).searchConsole.map((asset) => asset.site_url)
+  );
+}
+
+function effectiveSearchConsoleMetricPairs(marketingState, scope) {
+  const aggregateScope = scope?.scope === 'group' || scope?.scope === 'multi';
+  const historicalClinicIds = new Set((scope?.clinicIds || [])
+    .map((value) => Number.parseInt(value, 10))
+    .filter((value) => Number.isInteger(value) && value > 0));
+  return dedupeRows(
+    effectiveGoogleProperties(marketingState).searchConsole
+      .map((asset) => ({
+        clinica_id: Number.parseInt(asset.clinic_id, 10),
+        site_url: String(asset.site_url || '').trim(),
+      }))
+      .filter((asset) => (
+        Number.isInteger(asset.clinica_id)
+        && asset.clinica_id > 0
+        && asset.site_url
+        && (aggregateScope || !historicalClinicIds.has(asset.clinica_id))
+      )),
+    (asset) => `${asset.clinica_id}:${asset.site_url.toLowerCase().replace(/\/$/, '')}`
+  );
+}
+
+function effectiveAnalyticsMappingIds(marketingState) {
+  return normalizedUniqueIntegers(
+    effectiveGoogleProperties(marketingState).analytics.map((asset) => asset.mapping_id)
+  );
+}
+
+function effectiveBusinessLocationIds(marketingState) {
+  return normalizedUniqueIntegers(
+    effectiveGoogleProperties(marketingState).businessProfiles.map((asset) => asset.mapping_id)
+  );
+}
+
+function scopeWithEffectiveAssetOwners(scope, assets) {
+  if (!scope || scope.isAll) return scope;
+  const clinicIds = normalizedUniqueIntegers([
+    ...(Array.isArray(scope.clinicIds) ? scope.clinicIds : []),
+    ...(Array.isArray(assets) ? assets.map((asset) => asset?.clinic_id) : []),
+  ]);
+  if (
+    clinicIds.length === (scope.clinicIds || []).length
+    && clinicIds.every((clinicId, index) => clinicId === scope.clinicIds[index])
+  ) {
+    return scope;
+  }
+  return { ...scope, clinicIds };
+}
+
+function applyEffectiveAssetIdFilter(where, field, ids) {
+  if (!ids.length) return where;
+  return {
+    ...where,
+    [field]: ids.length === 1 ? ids[0] : { [Op.in]: ids },
+  };
+}
+
+function buildHistoricalOrEffectiveWhere(scope, scopeField, effectiveField, ids) {
+  const historicalScope = scopedWhere(scopeField, scope);
+  if (!ids.length || scope?.isAll) return historicalScope;
+  const effectiveScope = applyEffectiveAssetIdFilter({}, effectiveField, ids);
+  if (scope?.scope === 'group' || scope?.scope === 'multi') return effectiveScope;
+  return { [Op.or]: [historicalScope, effectiveScope] };
+}
+
+function buildSearchConsoleDataWhere(scope, marketingState) {
+  const historicalScope = scopedWhere('clinica_id', scope);
+  if (scope?.isAll) return historicalScope;
+  const pairs = effectiveSearchConsoleMetricPairs(marketingState, scope);
+  if (!pairs.length) return historicalScope;
+  return scope?.scope === 'group' || scope?.scope === 'multi'
+    ? { [Op.or]: pairs }
+    : { [Op.or]: [historicalScope, ...pairs] };
+}
+
+function searchConsoleRawScopeSql(scope, marketingState, replacements, keyPrefix) {
+  const historicalSql = scopedRawSql(
+    'clinica_id',
+    scope,
+    replacements,
+    `${keyPrefix}ClinicIds`
+  );
+  if (scope?.isAll) return historicalSql;
+  const pairs = effectiveSearchConsoleMetricPairs(marketingState, scope);
+  if (!pairs.length) return historicalSql;
+  const historicalCondition = historicalSql.startsWith(' AND ')
+    ? historicalSql.slice(5)
+    : '1 = 1';
+  const pairConditions = pairs.map((pair, index) => {
+    const ownerKey = `${keyPrefix}Owner${index}`;
+    const siteKey = `${keyPrefix}Site${index}`;
+    replacements[ownerKey] = pair.clinica_id;
+    replacements[siteKey] = pair.site_url;
+    return `(clinica_id = :${ownerKey} AND site_url = :${siteKey})`;
+  });
+  if (scope?.scope === 'group' || scope?.scope === 'multi') {
+    return ` AND (${pairConditions.join(' OR ')})`;
+  }
+  return ` AND (${historicalCondition} OR ${pairConditions.join(' OR ')})`;
+}
+
+function buildGoogleAdsDataWhere(scope, marketingState) {
+  void marketingState;
+  return buildAdsScopeWhere(scope, 'clinicaId', 'grupoClinicaId');
+}
+
+function buildMetaAdsDataWhere(scope, marketingState) {
+  void marketingState;
+  return buildAdsScopeWhere(scope, 'clinica_id', 'grupo_clinica_id');
+}
+
+function latestEffectiveGoogleSync(marketingState) {
+  return effectiveGoogleAccounts(marketingState)
+    .map((account) => account.last_synced_at)
+    .filter(Boolean)
+    .sort((left, right) => new Date(right).getTime() - new Date(left).getTime())[0] || null;
 }
 
 async function aggregateLeads(scope, range) {
@@ -431,7 +753,7 @@ async function aggregateAppointmentSeries(scope, range) {
   };
 }
 
-async function aggregateSpendSeries(scope, range) {
+async function aggregateSpendSeries(scope, range, marketingState = null) {
   const labels = enumerateDateLabels(range);
   const byDate = new Map(labels.map((label) => [label, 0]));
 
@@ -442,7 +764,7 @@ async function aggregateSpendSeries(scope, range) {
         [fn('SUM', col('costMicros')), 'costMicros'],
       ],
       where: {
-        ...buildAdsScopeWhere(scope, 'clinicaId', 'grupoClinicaId'),
+        ...buildGoogleAdsDataWhere(scope, marketingState),
         ...buildDateOnlyWhere('date', range),
       },
       group: ['date'],
@@ -463,7 +785,7 @@ async function aggregateSpendSeries(scope, range) {
         [fn('SUM', col('spend')), 'spend'],
       ],
       where: {
-        ...buildAdsScopeWhere(scope, 'clinica_id', 'grupo_clinica_id'),
+        ...buildMetaAdsDataWhere(scope, marketingState),
         ...buildDateOnlyWhere('date', range),
         level: 'campaign',
       },
@@ -528,13 +850,13 @@ async function getIntakeConfigCount(scope) {
   return IntakeConfig.count({ where: { [Op.or]: clauses } });
 }
 
-async function aggregateGoogleAds(scope, range) {
+async function aggregateGoogleAds(scope, range, marketingState = null) {
   if (!GoogleAdsInsightsDaily) {
     return { totals: { spend: 0, clicks: 0, impressions: 0, conversions: 0 }, campaigns: [], connected: false, lastSync: null };
   }
 
   const where = {
-    ...buildAdsScopeWhere(scope, 'clinicaId', 'grupoClinicaId'),
+    ...buildGoogleAdsDataWhere(scope, marketingState),
     ...buildDateOnlyWhere('date', range),
   };
 
@@ -565,13 +887,16 @@ async function aggregateGoogleAds(scope, range) {
     raw: true,
   });
 
+  const scopedAccounts = effectiveGoogleAccounts(marketingState);
   const accountWhere = buildAssetScopeWhere(scope);
-  const activeAccounts = ClinicGoogleAdsAccount
-    ? await ClinicGoogleAdsAccount.count({ where: accountWhere })
-    : 0;
-  const latestAccount = ClinicGoogleAdsAccount
-    ? await ClinicGoogleAdsAccount.findOne({ where: accountWhere, order: [['lastSyncedAt', 'DESC']], raw: true })
-    : null;
+  const activeAccounts = marketingState
+    ? scopedAccounts.length
+    : (ClinicGoogleAdsAccount ? await ClinicGoogleAdsAccount.count({ where: accountWhere }) : 0);
+  const latestAccount = marketingState
+    ? null
+    : (ClinicGoogleAdsAccount
+      ? await ClinicGoogleAdsAccount.findOne({ where: accountWhere, order: [['lastSyncedAt', 'DESC']], raw: true })
+      : null);
 
   const spend = money(toNumber(totalRow?.costMicros) / 1_000_000);
   const totals = {
@@ -603,17 +928,17 @@ async function aggregateGoogleAds(scope, range) {
   return {
     totals,
     campaigns,
-    connected: activeAccounts > 0 || totals.spend > 0 || totals.clicks > 0,
-    lastSync: latestAccount?.lastSyncedAt || totalRow?.lastDate || null,
+    connected: activeAccounts > 0,
+    lastSync: latestEffectiveGoogleSync(marketingState) || latestAccount?.lastSyncedAt || totalRow?.lastDate || null,
   };
 }
 
-async function aggregateMetaAds(scope, range) {
+async function aggregateMetaAds(scope, range, marketingState = null) {
   if (!SocialAdsInsightsDaily) {
     return { totals: { spend: 0, clicks: 0, impressions: 0, conversions: 0 }, campaigns: [], connected: false, lastSync: null };
   }
 
-  const scopeWhere = buildAdsScopeWhere(scope, 'clinica_id', 'grupo_clinica_id');
+  const scopeWhere = buildMetaAdsDataWhere(scope, marketingState);
   const baseWhere = {
     ...scopeWhere,
     ...buildDateOnlyWhere('date', range),
@@ -751,11 +1076,12 @@ async function aggregateMetaAds(scope, range) {
     selectedLevel = 'adset';
   }
 
+  const effectiveAccounts = effectiveMetaAssets(marketingState).adAccounts;
   const assetWhere = buildAssetScopeWhere(scope);
   assetWhere.assetType = 'ad_account';
-  const activeAccounts = ClinicMetaAsset
-    ? await ClinicMetaAsset.count({ where: assetWhere })
-    : 0;
+  const activeAccounts = marketingState
+    ? effectiveAccounts.length
+    : (ClinicMetaAsset ? await ClinicMetaAsset.count({ where: assetWhere }) : 0);
 
   const totals = {
     spend: money(totalRow?.spend),
@@ -793,15 +1119,21 @@ async function aggregateMetaAds(scope, range) {
   return {
     totals,
     campaigns,
-    connected: activeAccounts > 0 || totals.spend > 0 || totals.clicks > 0,
+    connected: activeAccounts > 0,
     lastSync: totalRow?.lastDate || null,
   };
 }
 
-async function aggregateGa(scope, range) {
+async function aggregateGa(scope, range, marketingState = null) {
   if (!WebGaDaily) return { sessions: 0, activeUsers: 0, newUsers: 0, connected: false, lastSync: null };
+  const dataScope = buildHistoricalOrEffectiveWhere(
+    scope,
+    'clinica_id',
+    'property_id',
+    effectiveAnalyticsMappingIds(marketingState)
+  );
   const where = {
-    ...scopedWhere('clinica_id', scope),
+    ...dataScope,
     ...buildDateOnlyWhere('date', range),
   };
   const [row] = await WebGaDaily.findAll({
@@ -823,7 +1155,7 @@ async function aggregateGa(scope, range) {
   };
 }
 
-async function aggregateSeo(scope, range) {
+async function aggregateSeo(scope, range, marketingState = null) {
   const empty = {
     summary: { clicks: 0, impressions: 0, ctr: 0, avgPosition: 0 },
     queries: [],
@@ -834,7 +1166,7 @@ async function aggregateSeo(scope, range) {
   if (!WebScDaily || !WebScQueryDaily) return empty;
 
   const where = {
-    ...scopedWhere('clinica_id', scope),
+    ...buildSearchConsoleDataWhere(scope, marketingState),
     ...buildDateOnlyWhere('date', range),
   };
 
@@ -850,14 +1182,14 @@ async function aggregateSeo(scope, range) {
   });
 
   const replacements = { start: range.startLabel, end: range.endLabel, limit: 8 };
-  const clinicSql = scopedRawSql('clinica_id', scope, replacements, 'seoClinicIds');
+  const seoScopeSql = searchConsoleRawScopeSql(scope, marketingState, replacements, 'seo');
   const queryRows = await sequelize.query(
     `SELECT query,
             SUM(clicks) AS clicks,
             SUM(impressions) AS impressions,
             CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions) / SUM(impressions) ELSE AVG(position) END AS position
        FROM WebScQueryDaily
-      WHERE date BETWEEN :start AND :end ${clinicSql}
+      WHERE date BETWEEN :start AND :end ${seoScopeSql}
       GROUP BY query
       ORDER BY SUM(clicks) DESC
       LIMIT :limit`,
@@ -870,7 +1202,7 @@ async function aggregateSeo(scope, range) {
             SUM(impressions) AS impressions,
             CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions) / SUM(impressions) ELSE AVG(position) END AS position
        FROM WebScQueryDaily
-      WHERE date BETWEEN :start AND :end ${clinicSql}
+      WHERE date BETWEEN :start AND :end ${seoScopeSql}
       GROUP BY COALESCE(NULLIF(page_url, ''), 'Sin página')
       ORDER BY SUM(clicks) DESC
       LIMIT 5`,
@@ -908,7 +1240,7 @@ async function aggregateSeo(scope, range) {
   };
 }
 
-async function aggregateSocialOrganic(scope, range) {
+async function aggregateSocialOrganic(scope, range, marketingState = null) {
   const empty = {
     summary: {
       reach: 0,
@@ -928,11 +1260,21 @@ async function aggregateSocialOrganic(scope, range) {
   };
   if (!SocialStatsDaily || !SocialPosts || !ClinicMetaAsset) return empty;
 
+  const effectiveAssets = effectiveMetaAssets(marketingState);
   const assetWhere = buildAssetScopeWhere(scope);
-  const [facebookMappings, instagramMappings] = await Promise.all([
-    ClinicMetaAsset.count({ where: { ...assetWhere, assetType: 'facebook_page' } }),
-    ClinicMetaAsset.count({ where: { ...assetWhere, assetType: 'instagram_business' } }),
-  ]);
+  const [facebookMappings, instagramMappings] = marketingState
+    ? [effectiveAssets.facebookPages.length, effectiveAssets.instagramAccounts.length]
+    : await Promise.all([
+      ClinicMetaAsset.count({ where: { ...assetWhere, assetType: 'facebook_page' } }),
+      ClinicMetaAsset.count({ where: { ...assetWhere, assetType: 'instagram_business' } }),
+    ]);
+  const effectiveSocialAssetIds = effectiveSocialMappingIds(marketingState);
+  const socialDataScope = buildHistoricalOrEffectiveWhere(
+    scope,
+    'clinica_id',
+    'asset_id',
+    effectiveSocialAssetIds
+  );
 
   const statRows = await SocialStatsDaily.findAll({
     attributes: [
@@ -947,7 +1289,7 @@ async function aggregateSocialOrganic(scope, range) {
       [fn('MAX', col('date')), 'lastDate'],
     ],
     where: {
-      ...scopedWhere('clinica_id', scope),
+      ...socialDataScope,
       asset_type: { [Op.in]: ['facebook_page', 'instagram_business'] },
       ...buildDateOnlyWhere('date', range),
     },
@@ -961,7 +1303,7 @@ async function aggregateSocialOrganic(scope, range) {
       [fn('COUNT', col('id')), 'posts'],
     ],
     where: {
-      ...scopedWhere('clinica_id', scope),
+      ...socialDataScope,
       asset_type: { [Op.in]: ['facebook_page', 'instagram_business'] },
       ...buildSequelizeDateWhere('published_at', range),
     },
@@ -997,7 +1339,15 @@ async function aggregateSocialOrganic(scope, range) {
     endTs: range.endExclusiveSql,
     limit: 5,
   };
-  const postClinicSql = scopedRawSql('p.clinica_id', scope, replacements, 'socialPostClinicIds');
+  const postScopeSql = scopedRawOrEffectiveSql(
+    'p.clinica_id',
+    scope,
+    replacements,
+    'socialPostClinicIds',
+    'p.asset_id',
+    effectiveSocialAssetIds,
+    'socialAssetIds'
+  );
   const topPosts = await sequelize.query(
     `SELECT p.id,
             p.asset_type AS assetType,
@@ -1016,7 +1366,7 @@ async function aggregateSocialOrganic(scope, range) {
       WHERE p.asset_type IN ('facebook_page', 'instagram_business')
         AND p.published_at >= :startTs
         AND p.published_at < :endTs
-        ${postClinicSql}
+        ${postScopeSql}
       GROUP BY p.id, p.asset_type, p.title, p.content, p.permalink_url, p.media_url, p.published_at
       ORDER BY COALESCE(SUM(s.reach), 0) DESC, p.published_at DESC
       LIMIT :limit`,
@@ -1157,7 +1507,7 @@ async function aggregateWebPages(scope, range, seoPages = []) {
   });
 }
 
-async function aggregateBusinessProfile(scope, range) {
+async function aggregateBusinessProfile(scope, range, marketingState = null) {
   const empty = {
     metrics: { views: 0, calls: 0, directions: 0, websiteClicks: 0, newReviews: 0, averageRating: 0, totalReviews: 0 },
     connected: false,
@@ -1166,15 +1516,21 @@ async function aggregateBusinessProfile(scope, range) {
   };
   if (!ClinicBusinessLocation || !BusinessProfileDailyMetric || !BusinessProfileReview) return empty;
 
+  const effectiveLocationIds = effectiveBusinessLocationIds(marketingState);
   const locationWhere = {
-    ...scopedWhere('clinica_id', scope),
+    ...buildHistoricalOrEffectiveWhere(scope, 'clinica_id', 'id', effectiveLocationIds),
     is_active: true,
   };
   const latestLocation = await ClinicBusinessLocation.findOne({ where: locationWhere, order: [['last_synced_at', 'DESC']], raw: true });
   const locations = await ClinicBusinessLocation.count({ where: locationWhere });
 
   const metricWhere = {
-    ...scopedWhere('clinica_id', scope),
+    ...buildHistoricalOrEffectiveWhere(
+      scope,
+      'clinica_id',
+      'business_location_id',
+      effectiveLocationIds
+    ),
     ...buildDateOnlyWhere('date', range),
   };
   const rows = await BusinessProfileDailyMetric.findAll({ where: metricWhere, raw: true });
@@ -1185,7 +1541,12 @@ async function aggregateBusinessProfile(scope, range) {
       .reduce((acc, row) => acc + toNumber(row.value), 0);
   };
 
-  const reviewWhere = scopedWhere('clinica_id', scope);
+  const reviewWhere = buildHistoricalOrEffectiveWhere(
+    scope,
+    'clinica_id',
+    'business_location_id',
+    effectiveLocationIds
+  );
   const reviews = await BusinessProfileReview.findAll({ where: reviewWhere, raw: true });
   const totalReviews = reviews.length;
   const averageRating = totalReviews
@@ -1568,7 +1929,15 @@ function buildSourceSyncState({ config, mapped, lastSync, jobs = [], pendingReco
   };
 }
 
-async function buildSyncStatus(scope, { seo, googleAds, metaAds, ga, businessProfile }) {
+async function buildSyncStatus(scope, { seo, googleAds, metaAds, ga, businessProfile }, marketingState = null) {
+  const scopedGoogleAccounts = effectiveGoogleAccounts(marketingState);
+  const scopedGoogleProperties = effectiveGoogleProperties(marketingState);
+  const scopedMetaAssets = effectiveMetaAssets(marketingState);
+  const searchConsoleJobScope = scopeWithEffectiveAssetOwners(scope, scopedGoogleProperties.searchConsole);
+  const analyticsJobScope = scopeWithEffectiveAssetOwners(scope, scopedGoogleProperties.analytics);
+  const businessProfileJobScope = scopeWithEffectiveAssetOwners(scope, scopedGoogleProperties.businessProfiles);
+  const googleAdsJobScope = scopeWithEffectiveAssetOwners(scope, scopedGoogleAccounts);
+  const metaAdsJobScope = scopeWithEffectiveAssetOwners(scope, scopedMetaAssets.adAccounts);
   const [
     searchConsoleMappings,
     analyticsMappings,
@@ -1583,18 +1952,32 @@ async function buildSyncStatus(scope, { seo, googleAds, metaAds, ga, businessPro
     googleAdsJobs,
     metaAdsJobs,
   ] = await Promise.all([
-    ClinicWebAsset ? ClinicWebAsset.count({ where: { ...scopedWhere('clinicaId', scope), isActive: true } }) : 0,
-    ClinicAnalyticsProperty ? ClinicAnalyticsProperty.count({ where: { ...scopedWhere('clinicaId', scope), isActive: true } }) : 0,
-    ClinicBusinessLocation ? ClinicBusinessLocation.findAll({ where: { ...scopedWhere('clinica_id', scope), is_active: true }, raw: true }) : [],
-    ClinicGoogleAdsAccount ? ClinicGoogleAdsAccount.count({ where: { ...buildAdsScopeWhere(scope, 'clinicaId', 'grupoClinicaId'), isActive: true } }) : 0,
-    ClinicMetaAsset ? ClinicMetaAsset.count({ where: { ...buildAssetScopeWhere(scope), assetType: 'ad_account' } }) : 0,
-    ClinicMetaAsset ? ClinicMetaAsset.count({ where: { ...buildAssetScopeWhere(scope), assetType: 'facebook_page' } }) : 0,
-    ClinicMetaAsset ? ClinicMetaAsset.count({ where: { ...buildAssetScopeWhere(scope), assetType: 'instagram_business' } }) : 0,
-    recentJobsForSource(SOURCE_SYNC_CONFIG.search_console, scope),
-    recentJobsForSource(SOURCE_SYNC_CONFIG.analytics, scope),
-    recentJobsForSource(SOURCE_SYNC_CONFIG.business_profile, scope),
-    recentJobsForSource(SOURCE_SYNC_CONFIG.google_ads, scope),
-    recentJobsForSource(SOURCE_SYNC_CONFIG.meta_ads, scope),
+    marketingState
+      ? scopedGoogleProperties.searchConsole.length
+      : (ClinicWebAsset ? ClinicWebAsset.count({ where: { ...scopedWhere('clinicaId', scope), isActive: true } }) : 0),
+    marketingState
+      ? scopedGoogleProperties.analytics.length
+      : (ClinicAnalyticsProperty ? ClinicAnalyticsProperty.count({ where: { ...scopedWhere('clinicaId', scope), isActive: true } }) : 0),
+    marketingState
+      ? scopedGoogleProperties.businessProfiles
+      : (ClinicBusinessLocation ? ClinicBusinessLocation.findAll({ where: { ...scopedWhere('clinica_id', scope), is_active: true }, raw: true }) : []),
+    marketingState
+      ? scopedGoogleAccounts.length
+      : (ClinicGoogleAdsAccount ? ClinicGoogleAdsAccount.count({ where: { ...buildAdsScopeWhere(scope, 'clinicaId', 'grupoClinicaId'), isActive: true } }) : 0),
+    marketingState
+      ? scopedMetaAssets.adAccounts.length
+      : (ClinicMetaAsset ? ClinicMetaAsset.count({ where: { ...buildAssetScopeWhere(scope), assetType: 'ad_account' } }) : 0),
+    marketingState
+      ? scopedMetaAssets.facebookPages.length
+      : (ClinicMetaAsset ? ClinicMetaAsset.count({ where: { ...buildAssetScopeWhere(scope), assetType: 'facebook_page' } }) : 0),
+    marketingState
+      ? scopedMetaAssets.instagramAccounts.length
+      : (ClinicMetaAsset ? ClinicMetaAsset.count({ where: { ...buildAssetScopeWhere(scope), assetType: 'instagram_business' } }) : 0),
+    recentJobsForSource(SOURCE_SYNC_CONFIG.search_console, searchConsoleJobScope),
+    recentJobsForSource(SOURCE_SYNC_CONFIG.analytics, analyticsJobScope),
+    recentJobsForSource(SOURCE_SYNC_CONFIG.business_profile, businessProfileJobScope),
+    recentJobsForSource(SOURCE_SYNC_CONFIG.google_ads, googleAdsJobScope),
+    recentJobsForSource(SOURCE_SYNC_CONFIG.meta_ads, metaAdsJobScope),
   ]);
 
   const businessPending = businessLocations.filter((row) => row.sync_status === 'pending' || !row.last_synced_at).length;
@@ -1855,6 +2238,7 @@ exports.getOverview = async (req, res) => {
   try {
     const scope = await resolveReportScope(req);
     const range = buildRange(req.query.startDate, req.query.endDate, 30);
+    const marketingState = await resolveReportMarketingState(scope);
 
     const [
       leads,
@@ -1883,18 +2267,18 @@ exports.getOverview = async (req, res) => {
       countAppointments(scope, range),
       countAppointments(scope, range.previous),
       aggregateAppointmentSeries(scope, range),
-      aggregateSpendSeries(scope, range),
+      aggregateSpendSeries(scope, range, marketingState),
       aggregateForms(scope, range),
       aggregateWhatsappWebOrigins(scope, range),
       getIntakeConfigCount(scope),
-      aggregateGoogleAds(scope, range),
-      aggregateGoogleAds(scope, range.previous),
-      aggregateMetaAds(scope, range),
-      aggregateMetaAds(scope, range.previous),
-      aggregateGa(scope, range),
-      aggregateSeo(scope, range),
-      aggregateSocialOrganic(scope, range),
-      aggregateBusinessProfile(scope, range),
+      aggregateGoogleAds(scope, range, marketingState),
+      aggregateGoogleAds(scope, range.previous, marketingState),
+      aggregateMetaAds(scope, range, marketingState),
+      aggregateMetaAds(scope, range.previous, marketingState),
+      aggregateGa(scope, range, marketingState),
+      aggregateSeo(scope, range, marketingState),
+      aggregateSocialOrganic(scope, range, marketingState),
+      aggregateBusinessProfile(scope, range, marketingState),
       webEventsService.getFirstPartySummary(scope, range),
     ]);
 
@@ -1982,7 +2366,7 @@ exports.getOverview = async (req, res) => {
       metaAds,
       ga,
       businessProfile,
-    });
+    }, marketingState);
 
     const syncBySource = new Map((sync.allSources || []).map((item) => [item.source, item]));
     const sources = buildSources({
@@ -2051,4 +2435,24 @@ exports.getOverview = async (req, res) => {
       error: error.message || 'Error generando informe de marketing',
     });
   }
+};
+
+exports.__testing = {
+  buildEffectiveMarketingStateInput,
+  resolveReportMarketingState,
+  mergeEffectiveMarketingStates,
+  effectiveGoogleCustomerIds,
+  effectiveMetaAdAccountIds,
+  effectiveSocialMappingIds,
+  effectiveSearchConsoleSiteUrls,
+  effectiveSearchConsoleMetricPairs,
+  effectiveAnalyticsMappingIds,
+  effectiveBusinessLocationIds,
+  scopeWithEffectiveAssetOwners,
+  buildHistoricalOrEffectiveWhere,
+  scopedRawOrEffectiveSql,
+  buildSearchConsoleDataWhere,
+  buildGoogleAdsDataWhere,
+  buildMetaAdsDataWhere,
+  latestEffectiveGoogleSync,
 };
