@@ -59,6 +59,9 @@ const {
   hasMarketingClinicScopeAccess,
 } = require('../lib/marketingScopeAccess');
 const { isGlobalAdmin } = require('../lib/role-helpers');
+const {
+  canUserAccessFeature,
+} = require('../lib/access-policy');
 const { resolveSafeHttpTarget } = require('../lib/safeHttpTarget');
 const {
   configuredLocationsWithinAllowedScope,
@@ -304,6 +307,21 @@ const findGroupIdsForClinics = async (clinicIds) => {
     .filter((value) => value !== null)));
 };
 
+const hasFullGroupMarketingAccess = async (userId, groupId, knownClinicIds = null) => {
+  const normalizedUserId = parseInteger(userId);
+  const normalizedGroupId = parseInteger(groupId);
+  if (normalizedUserId === null || normalizedGroupId === null) return false;
+  const groupClinicIds = Array.isArray(knownClinicIds)
+    ? Array.from(new Set(knownClinicIds.map((value) => parseInteger(value)).filter((value) => value !== null)))
+    : await findClinicIdsByGroup(normalizedGroupId);
+  if (!groupClinicIds.length) return false;
+  return hasMarketingClinicScopeAccess({
+    userId: normalizedUserId,
+    clinicIds: groupClinicIds,
+    access: 'read',
+  });
+};
+
 const resolveLeadScopeFilter = async (query = {}, userId = null) => {
   const normalizedUserId = parseInteger(userId);
   const clinicIdRaw = coalesce(query.clinicId, query.clinica_id);
@@ -335,9 +353,16 @@ const resolveLeadScopeFilter = async (query = {}, userId = null) => {
     clinicIds: targetClinicIds,
     access: 'read',
   });
-  const groupIds = includeGroupLevel
-    ? (groupIdParsed !== null && clinicIds.length ? [groupIdParsed] : await findGroupIdsForClinics(clinicIds))
+  const candidateGroupIds = includeGroupLevel
+    ? (groupIdParsed !== null ? [groupIdParsed] : await findGroupIdsForClinics(clinicIds))
     : [];
+  const groupIds = [];
+  for (const candidateGroupId of candidateGroupIds) {
+    const knownGroupClinicIds = groupIdParsed === candidateGroupId ? targetClinicIds : null;
+    if (await hasFullGroupMarketingAccess(normalizedUserId, candidateGroupId, knownGroupClinicIds)) {
+      groupIds.push(candidateGroupId);
+    }
+  }
 
   return { clinicIds, groupIds };
 };
@@ -383,16 +408,222 @@ const ensureLeadScopeAccess = async (req, res, lead) => {
   const groupId = parseInteger(lead?.grupo_clinica_id);
   if (clinicId === null && groupId !== null) {
     const groupClinicIds = await findClinicIdsByGroup(groupId);
-    const allowedClinicIds = await getAccessibleMarketingClinicIds({
-      userId: normalizedUserId,
-      clinicIds: groupClinicIds,
-      access: 'read',
-    });
-    if (allowedClinicIds.length) return true;
+    if (await hasFullGroupMarketingAccess(normalizedUserId, groupId, groupClinicIds)) return true;
   }
 
   res.status(403).json({ success: false, error: 'lead_scope_forbidden' });
   return false;
+};
+
+const leadClinicIds = async (lead) => {
+  const clinicId = parseInteger(lead?.clinica_id);
+  if (clinicId !== null) return [clinicId];
+  const groupId = parseInteger(lead?.grupo_clinica_id);
+  return groupId !== null ? findClinicIdsByGroup(groupId) : [];
+};
+
+const canAccessLeadFeature = async (req, lead, featureKey) => {
+  const actorId = parseInteger(req.userData?.userId);
+  if (isGlobalAdmin(actorId)) return true;
+  if (actorId === null) return false;
+  const clinicIds = await leadClinicIds(lead);
+  if (!clinicIds.length) return false;
+  const decisions = await Promise.all(clinicIds.map((clinicId) => canUserAccessFeature({
+    actorId,
+    featureKey,
+    clinicId,
+  }).catch(() => false)));
+  return parseInteger(lead?.clinica_id) === null
+    ? decisions.every(Boolean)
+    : decisions.some(Boolean);
+};
+
+const ensureLeadFeatureAccess = async (req, res, lead, featureKey) => {
+  if (!(await ensureLeadScopeAccess(req, res, lead))) return false;
+  const allowed = await canAccessLeadFeature(req, lead, featureKey);
+  const canSeeSensitiveData = featureKey !== 'leads.manage'
+    || await canAccessLeadFeature(req, lead, 'leads.sensitive.view');
+  if (allowed && canSeeSensitiveData) return true;
+  res.status(403).json({
+    success: false,
+    error: featureKey === 'leads.manage' ? 'lead_manage_forbidden' : 'lead_sensitive_forbidden',
+  });
+  return false;
+};
+
+const leadPrivacySuffix = (lead) => crypto
+  .createHash('sha256')
+  .update(`lead:${lead?.id || 'unknown'}`)
+  .digest('hex')
+  .slice(0, 6)
+  .toUpperCase();
+
+const compactPrivacyObject = (value) => Object.fromEntries(
+  Object.entries(value).filter(([, fieldValue]) => fieldValue !== undefined),
+);
+
+const sanitizeLeadClinic = (clinic) => {
+  if (!clinic || typeof clinic !== 'object') return null;
+  return compactPrivacyObject({
+    id_clinica: parseInteger(clinic.id_clinica),
+    nombre_clinica: clinic.nombre_clinica || null,
+  });
+};
+
+const sanitizeLeadGroup = (group) => {
+  if (!group || typeof group !== 'object') return null;
+  return compactPrivacyObject({
+    id_grupo: parseInteger(group.id_grupo),
+    nombre_grupo: group.nombre_grupo || null,
+  });
+};
+
+const sanitizeLeadCampaign = (campaign) => {
+  if (!campaign || typeof campaign !== 'object') return null;
+  return compactPrivacyObject({
+    id: parseInteger(campaign.id),
+    nombre: campaign.nombre || null,
+    campaign_id: campaign.campaign_id || null,
+  });
+};
+
+const sanitizeLeadMarketingCampaign = (campaign) => {
+  if (!campaign || typeof campaign !== 'object') return null;
+  return compactPrivacyObject({
+    provider: campaign.provider || null,
+    customer_id: campaign.customer_id || null,
+    external_id: campaign.external_id || null,
+    name: campaign.name || null,
+    resolution: campaign.resolution || null,
+  });
+};
+
+const sanitizeLeadSourceTrace = (trace) => {
+  if (!trace || typeof trace !== 'object' || Array.isArray(trace)) return null;
+  const utm = trace.utm && typeof trace.utm === 'object' && !Array.isArray(trace.utm)
+    ? compactPrivacyObject({
+        source: trace.utm.source || null,
+        medium: trace.utm.medium || null,
+        campaign: trace.utm.campaign || null,
+      })
+    : null;
+  return compactPrivacyObject({
+    source: trace.source || null,
+    channel: trace.channel || null,
+    utm,
+  });
+};
+
+const redactLeadForPrivacy = (lead) => {
+  const plain = toPlain(lead) || {};
+  return compactPrivacyObject({
+    id: parseInteger(plain.id),
+    clinica_id: parseInteger(plain.clinica_id),
+    grupo_clinica_id: parseInteger(plain.grupo_clinica_id),
+    campana_id: parseInteger(plain.campana_id),
+    clinica: sanitizeLeadClinic(plain.clinica),
+    grupoClinica: sanitizeLeadGroup(plain.grupoClinica),
+    campana: sanitizeLeadCampaign(plain.campana),
+    channel: CHANNELS.has(plain.channel) ? plain.channel : null,
+    source: SOURCES.has(plain.source) ? plain.source : null,
+    contact_method: plain.contact_method || null,
+    marketing_origin: plain.marketing_origin || null,
+    marketing_campaign: sanitizeLeadMarketingCampaign(plain.marketing_campaign),
+    clinic_match_source: plain.clinic_match_source || null,
+    utm_source: plain.utm_source || null,
+    utm_medium: plain.utm_medium || null,
+    utm_campaign: plain.utm_campaign || null,
+    google_ads_customer_id: plain.google_ads_customer_id || null,
+    google_ads_campaign_id: plain.google_ads_campaign_id || null,
+    status_lead: STATUSES.has(plain.status_lead) ? plain.status_lead : null,
+    created_at: plain.created_at || null,
+    updated_at: plain.updated_at || null,
+    archived_at: plain.archived_at || null,
+    nombre: 'Lead',
+    apellidos: `#${leadPrivacySuffix(plain)}`,
+    privacy_redacted: true,
+    privacy_access: 'attribution_only',
+    source_trace: sanitizeLeadSourceTrace(plain.source_trace),
+    patient_match: null,
+    es_paciente: false,
+    linked_appointment: null,
+    recent_appointment: null,
+    formSubmissionEvents: [],
+    historial_contactos: [],
+    conversation_id: null,
+  });
+};
+
+const protectLeadRowsForRequest = async (req, rows = []) => Promise.all(rows.map(async (lead) => (
+  await canAccessLeadFeature(req, lead, 'leads.sensitive.view')
+    ? toPlain(lead)
+    : redactLeadForPrivacy(lead)
+)));
+
+const canSearchSensitiveLeadFields = async (query, userId) => {
+  const actorId = parseInteger(userId);
+  if (isGlobalAdmin(actorId)) return true;
+  if (actorId === null) return false;
+  const scope = await resolveLeadScopeFilter(query, actorId);
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds : [];
+  if (!clinicIds.length) return false;
+  const decisions = await Promise.all(clinicIds.map((clinicId) => canUserAccessFeature({
+    actorId,
+    featureKey: 'leads.sensitive.view',
+    clinicId,
+  }).catch(() => false)));
+  return decisions.every(Boolean);
+};
+
+const buildLeadSearchConditions = (search, {
+  canSearchSensitive = false,
+  includeCampaignRelation = false,
+} = {}) => {
+  const rawTerm = String(search || '').trim();
+  if (!rawTerm) return [];
+  const term = `%${rawTerm}%`;
+  const conditions = [];
+
+  if (canSearchSensitive) {
+    conditions.push(
+      { nombre: { [Op.like]: term } },
+      { email: { [Op.like]: term } },
+      { telefono: { [Op.like]: term } },
+      { source_detail: { [Op.like]: term } },
+      { page_url: { [Op.like]: term } },
+      { landing_url: { [Op.like]: term } },
+    );
+  }
+
+  conditions.push({ utm_campaign: { [Op.like]: term } });
+  if (includeCampaignRelation) {
+    conditions.push({ '$campana.nombre$': { [Op.like]: term } });
+  }
+
+  const normalizedSource = rawTerm.toLowerCase();
+  if (SOURCES.has(normalizedSource)) {
+    conditions.push({ source: normalizedSource });
+  }
+
+  return conditions;
+};
+
+const requireLeadManageForImport = async (req, res) => {
+  const clinicId = parseInteger(req.body?.config?.clinic_id ?? req.body?.config?.clinica_id);
+  const actorId = parseInteger(req.userData?.userId);
+  if (clinicId === null) {
+    res.status(400).json({ success: false, error: 'clinic_id_required' });
+    return false;
+  }
+  const allowed = isGlobalAdmin(actorId) || (actorId !== null && (
+    await canUserAccessFeature({ actorId, featureKey: 'leads.manage', clinicId }).catch(() => false)
+    && await canUserAccessFeature({ actorId, featureKey: 'leads.sensitive.view', clinicId }).catch(() => false)
+  ));
+  if (!allowed) {
+    res.status(403).json({ success: false, error: 'lead_manage_forbidden' });
+    return false;
+  }
+  return true;
 };
 
 const toPlain = (row) => (row && typeof row.get === 'function' ? row.get({ plain: true }) : row);
@@ -782,10 +1013,6 @@ const buildLeadCreatedSocketPayload = (lead) => {
     source_detail: plain.source_detail || null,
     channel: plain.channel || null,
     status_lead: plain.status_lead || 'nuevo',
-    nombre: plain.nombre || null,
-    email: plain.email || null,
-    telefono: plain.telefono || null,
-    page_url: plain.page_url || null,
     created_at: plain.created_at instanceof Date ? plain.created_at.toISOString() : String(plain.created_at || ''),
     emitted_at: new Date().toISOString(),
   };
@@ -805,8 +1032,6 @@ const buildLeadCallInitiatedSocketPayload = ({ lead, clinicId, groupId, clickedT
     emitted_at: new Date().toISOString(),
     call_initiated: true,
     call_initiated_at: callInitiatedAt,
-    clicked_tel: clickedTel || null,
-    page_url: pageUrl || plain.page_url || null,
     source: source || plain.source || 'web',
     source_detail: sourceDetail || 'tel_modal_call',
     linked_by: linkedBy,
@@ -825,7 +1050,6 @@ const buildLeadCallOutcomeSocketPayload = ({ lead, clinicId, groupId }) => {
     call_initiated_at: plain.call_initiated_at instanceof Date ? plain.call_initiated_at.toISOString() : String(plain.call_initiated_at || ''),
     call_outcome: plain.call_outcome || null,
     call_outcome_at: plain.call_outcome_at instanceof Date ? plain.call_outcome_at.toISOString() : String(plain.call_outcome_at || ''),
-    call_outcome_notes: plain.call_outcome_notes || null,
     call_outcome_appointment_id: plain.call_outcome_appointment_id || null,
   };
 };
@@ -2221,11 +2445,13 @@ exports.ingestLead = asyncHandler(async (req, res) => {
 });
 
 exports.previewLeadImport = asyncHandler(async (req, res) => {
+  if (!(await requireLeadManageForImport(req, res))) return;
   const preview = await previewLeadImport(req.body || {});
   return res.json(preview);
 });
 
 exports.executeLeadImport = asyncHandler(async (req, res) => {
+  if (!(await requireLeadManageForImport(req, res))) return;
   const result = await executeLeadImport(req.body || {});
   return res.status(201).json(result);
 });
@@ -4825,16 +5051,12 @@ const buildLeadListPayload = async (query = {}, context = {}) => {
   }
 
   if (search) {
-    const term = `%${String(search).trim()}%`;
-    where[Op.or] = [
-      { nombre: { [Op.like]: term } },
-      { email: { [Op.like]: term } },
-      { telefono: { [Op.like]: term } },
-      { source_detail: { [Op.like]: term } },
-      { page_url: { [Op.like]: term } },
-      { landing_url: { [Op.like]: term } },
-      { '$campana.nombre$': { [Op.like]: term } }
-    ];
+    const canSearchSensitive = await canSearchSensitiveLeadFields(query, context.userId);
+    const searchConditions = buildLeadSearchConditions(search, {
+      canSearchSensitive,
+      includeCampaignRelation: true,
+    });
+    if (searchConditions.length) where[Op.or] = searchConditions;
   }
 
   const pageSizeParsed = Math.max(parseInteger(pageSize) || Math.min(Math.max(Number(limit) || 50, 1), 200), 1);
@@ -4866,7 +5088,9 @@ const buildLeadListPayload = async (query = {}, context = {}) => {
   const pageNumber = pageParsed > 0 ? pageParsed : Math.floor(parsedOffset / parsedLimit) + 1;
   const totalPages = parsedLimit > 0 ? Math.ceil(leads.count / parsedLimit) : 0;
 
-  const items = await enrichLeadsForUi(leads.rows);
+  const enrichedItems = await enrichLeadsForUi(leads.rows);
+  const requestLike = { userData: { userId: context.userId } };
+  const items = await protectLeadRowsForRequest(requestLike, enrichedItems);
 
   return {
     total: leads.count,
@@ -4938,8 +5162,9 @@ exports.getLeadById = asyncHandler(async (req, res) => {
   }
 
   const [enrichedLead] = await enrichLeadsForUi([out]);
+  const [protectedLead] = await protectLeadRowsForRequest(req, [enrichedLead || out]);
 
-  res.status(200).json(enrichedLead || out);
+  res.status(200).json(protectedLead || redactLeadForPrivacy(out));
 });
 
 exports.getLeadActivity = asyncHandler(async (req, res) => {
@@ -4963,7 +5188,7 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
   if (!lead) {
     return res.status(404).json({ message: 'Lead no encontrado' });
   }
-  if (!(await ensureLeadScopeAccess(req, res, lead))) return;
+  if (!(await ensureLeadFeatureAccess(req, res, lead, 'leads.sensitive.view'))) return;
 
   if (lead.telefono && lead.clinica_id) {
     await findCanonicalWhatsappConversation({
@@ -5270,12 +5495,12 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
   }
 
   if (search) {
-    const term = `%${search}%`;
-    where[Op.or] = [
-      { nombre: { [Op.like]: term } },
-      { email: { [Op.like]: term } },
-      { telefono: { [Op.like]: term } }
-    ];
+    const canSearchSensitive = await canSearchSensitiveLeadFields(
+      { ...req.query, clinicId: clinicIdRaw, groupId: groupIdRaw },
+      req.userData?.userId,
+    );
+    const searchConditions = buildLeadSearchConditions(search, { canSearchSensitive });
+    if (searchConditions.length) where[Op.or] = searchConditions;
   }
 
   // Obtener conteos por estado
@@ -5315,7 +5540,7 @@ exports.updateLeadStatus = asyncHandler(async (req, res) => {
   if (!lead) {
     return res.status(404).json({ message: 'Lead no encontrado' });
   }
-  if (!(await ensureLeadScopeAccess(req, res, lead))) return;
+  if (!(await ensureLeadFeatureAccess(req, res, lead, 'leads.manage'))) return;
 
   if (status_lead && !STATUSES.has(status_lead)) {
     return res.status(400).json({ message: 'status_lead inválido' });
@@ -5382,7 +5607,7 @@ exports.registrarContacto = asyncHandler(async (req, res) => {
   if (!lead) {
     return res.status(404).json({ message: 'Lead no encontrado' });
   }
-  if (!(await ensureLeadScopeAccess(req, res, lead))) return;
+  if (!(await ensureLeadFeatureAccess(req, res, lead, 'leads.manage'))) return;
 
   let reminderAt = null;
   if (hasReminderField && reminderAtRaw) {
@@ -5497,7 +5722,7 @@ exports.getCandidateAppointments = asyncHandler(async (req, res) => {
   if (!lead) {
     return res.status(404).json({ message: 'Lead no encontrado' });
   }
-  if (!(await ensureLeadScopeAccess(req, res, lead))) return;
+  if (!(await ensureLeadFeatureAccess(req, res, lead, 'leads.manage'))) return;
 
   const clinicId = parseInteger(lead.clinica_id);
   const normalizedPhone = normalizePhone(lead.telefono);
@@ -5570,7 +5795,7 @@ exports.saveCallOutcome = asyncHandler(async (req, res) => {
   if (!lead) {
     return res.status(404).json({ message: 'Lead no encontrado' });
   }
-  if (!(await ensureLeadScopeAccess(req, res, lead))) return;
+  if (!(await ensureLeadFeatureAccess(req, res, lead, 'leads.manage'))) return;
 
   let linkedAppointment = null;
   if (appointmentId !== null) {
@@ -5695,7 +5920,7 @@ exports.deleteLead = asyncHandler(async (req, res) => {
   if (!lead) {
     return res.status(404).json({ message: 'Lead no encontrado' });
   }
-  if (!(await ensureLeadScopeAccess(req, res, lead))) return;
+  if (!(await ensureLeadFeatureAccess(req, res, lead, 'leads.manage'))) return;
 
   // Registrar auditoría antes de eliminar
   try {
@@ -5711,4 +5936,13 @@ exports.deleteLead = asyncHandler(async (req, res) => {
   await lead.destroy();
 
   res.status(200).json({ message: 'Lead eliminado correctamente', id: parseInt(id) });
+});
+
+// Utilidades puras para contratos de privacidad. No se exponen como ruta HTTP.
+exports.__leadPrivacyContract = Object.freeze({
+  buildLeadSearchConditions,
+  ensureLeadScopeAccess,
+  hasFullGroupMarketingAccess,
+  redactLeadForPrivacy,
+  resolveLeadScopeFilter,
 });

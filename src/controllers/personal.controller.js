@@ -30,7 +30,10 @@ const {
     isAdminRole,
     canManagePersonal: canManagePersonalHelper,
 } = require('../lib/role-helpers');
-const { canUserAccessFeature } = require('../lib/access-policy');
+const {
+    canUserAccessFeature,
+    getAccessibleClinicIdsForFeature,
+} = require('../lib/access-policy');
 const {
     normalizeDateOnly,
     addDays,
@@ -102,31 +105,10 @@ function isMissingClinicaHorarioTableError(error) {
 }
 
 async function getAccessibleClinicIdsForUser(userId) {
-    // Admin: puede acceder a todas las clinicas (pero seguimos filtrando por query para evitar dumps enormes)
-    if (isAdmin(userId)) {
-        const all = await Clinica.findAll({
-            attributes: ['id_clinica'],
-            raw: true,
-        });
-        return all
-            .map((c) => Number(c.id_clinica))
-            .filter((id) => Number.isFinite(id));
-    }
-
-    const invitationWhere = await getStaffInvitationWhereForUser(userId);
-    const rows = await UsuarioClinica.findAll({
-        where: {
-            id_usuario: userId,
-            rol_clinica: { [Op.in]: STAFF_ROLES },
-            ...invitationWhere,
-        },
-        attributes: ['id_clinica'],
-        raw: true,
+    return getAccessibleClinicIdsForFeature({
+        actorId: userId,
+        featureKey: 'team.view',
     });
-
-    return rows
-        .map((r) => Number(r.id_clinica))
-        .filter((id) => Number.isFinite(id));
 }
 
 function parseBool(value) {
@@ -517,7 +499,10 @@ function pickBetterInvitationState(a, b) {
 }
 
 function roleRank(value) {
-    if (value === 'propietario') return 3;
+    // Una fusión global nunca puede degradar un pivot de propietario a agencia.
+    // Mantener rangos distintos también hace el resultado independiente del
+    // orden principal/secundario elegido por el operador.
+    if (value === 'propietario') return 4;
     if (value === 'agencia') return 3;
     if (value === 'personaldeclinica') return 2;
     if (value === 'paciente') return 1;
@@ -619,7 +604,14 @@ async function canAccessTargetPersonal(actorId, targetUserId, clinicId) {
     }
 
     if (Number(actorId) === Number(targetUserId)) {
-        return true;
+        if (clinicId !== null && clinicId !== undefined && Number.isFinite(Number(clinicId))) {
+            return canUserAccessFeature({
+                actorId: Number(actorId),
+                featureKey: 'team.view',
+                clinicId: Number(clinicId),
+            });
+        }
+        return (await getAccessibleClinicIdsForUser(actorId)).length > 0;
     }
 
     const actorClinicIds = await getAccessibleClinicIdsForUser(actorId);
@@ -1619,9 +1611,13 @@ exports.getPersonalBloqueosPermissions = async (req, res) => {
         if (isAdmin(actorId) || Number(actorId) === Number(targetUserId)) {
             allowedClinicIds = targetClinicIds;
         } else {
-            const adminScopedClinicIds = await getAdminScopedClinicIdsForUser(actorId);
-            const adminScopedSet = new Set(adminScopedClinicIds);
-            allowedClinicIds = targetClinicIds.filter((id) => adminScopedSet.has(id));
+            const decisions = await Promise.all(targetClinicIds.map(async (clinicId) => ({
+                clinicId,
+                allowed: await canEditBloqueos(actorId, targetUserId, clinicId),
+            })));
+            allowedClinicIds = decisions
+                .filter((decision) => decision.allowed)
+                .map((decision) => decision.clinicId);
         }
 
         return res.json({
@@ -1832,8 +1828,12 @@ exports.updatePersonalBloqueo = async (req, res) => {
             clinicaId = bloqueo.clinica_id ?? null;
         }
 
-        const canEdit = await canEditBloqueos(actorId, targetUserId, clinicaId);
-        if (!canEdit) {
+        const currentClinicaId = bloqueo.clinica_id ?? null;
+        const [canEditCurrent, canEditDestination] = await Promise.all([
+            canEditBloqueos(actorId, targetUserId, currentClinicaId),
+            canEditBloqueos(actorId, targetUserId, clinicaId),
+        ]);
+        if (!canEditCurrent || !canEditDestination) {
             return res.status(403).json({ message: 'Forbidden' });
         }
 
@@ -2181,21 +2181,39 @@ async function canManageTeamInClinic(userId, clinicId) {
     });
 }
 
-async function canEditHorarios(actorId, targetUserId, clinicId) {
-    if (isAdmin(actorId)) return true;
+async function canManageOwnScheduleInClinic(userId, clinicId, dependencies = {}) {
+    const staffPivotCheck = dependencies.staffPivotCheck || hasStaffPivot;
+    const featureCheck = dependencies.featureCheck || canUserAccessFeature;
+    if (!Number.isFinite(Number(userId)) || !Number.isFinite(Number(clinicId))) return false;
+    if (!await staffPivotCheck(Number(userId), Number(clinicId))) return false;
+    return featureCheck({
+        actorId: Number(userId),
+        featureKey: 'team.schedule.self.manage',
+        clinicId: Number(clinicId),
+    });
+}
+
+async function canEditHorarios(actorId, targetUserId, clinicId, dependencies = {}) {
+    const globalAdminCheck = dependencies.globalAdminCheck || isAdmin;
+    const selfScheduleCheck = dependencies.selfScheduleCheck || canManageOwnScheduleInClinic;
+    const teamManageCheck = dependencies.teamManageCheck || canManageTeamInClinic;
+    const staffPivotCheck = dependencies.staffPivotCheck || hasStaffPivot;
+    if (globalAdminCheck(actorId)) return true;
     if (!Number.isFinite(Number(clinicId))) return false;
 
-    // Un usuario puede editar sus propios horarios en clínicas donde trabaja
+    // La edición del horario propio es una capacidad explícita. Ser miembro de
+    // staff no basta: una agencia de Marketing también tiene pivot, pero no
+    // pertenece al equipo operativo ni puede usar las rutas /personal/me.
     if (Number(actorId) === Number(targetUserId)) {
-        return hasStaffPivot(actorId, clinicId);
+        return selfScheduleCheck(actorId, clinicId);
     }
 
-    // Editar horarios de otros: propietario/agencia o permiso explicito team.manage.
-    const actorCanManageTeam = await canManageTeamInClinic(actorId, clinicId);
+    // Editar horarios de terceros requiere team.manage en esa clínica.
+    const actorCanManageTeam = await teamManageCheck(actorId, clinicId);
     if (!actorCanManageTeam) return false;
 
     // Evitar generar schedules "huérfanos" en clínicas donde el usuario no pertenece
-    return hasStaffPivot(targetUserId, clinicId);
+    return staffPivotCheck(targetUserId, clinicId);
 }
 
 async function getOwnerClinicIdsForUser(userId) {
@@ -2246,24 +2264,39 @@ async function getAdminScopedClinicIdsForUser(userId) {
         .filter((id) => Number.isFinite(id));
 }
 
-async function canEditBloqueos(actorId, targetUserId, clinicaId) {
-    if (isAdmin(actorId)) return true;
+async function canEditBloqueos(actorId, targetUserId, clinicaId, dependencies = {}) {
+    const globalAdminCheck = dependencies.globalAdminCheck || isAdmin;
+    const staffPivotCheck = dependencies.staffPivotCheck || hasStaffPivot;
+    const ownerPivotCheck = dependencies.ownerPivotCheck || isOwnerPivot;
+    const teamManageCheck = dependencies.teamManageCheck || canManageTeamInClinic;
+    const selfScheduleCheck = dependencies.selfScheduleCheck || canManageOwnScheduleInClinic;
+    const adminClinicIdsLoader = dependencies.adminClinicIdsLoader || getAdminScopedClinicIdsForUser;
+    const targetClinicIdsLoader = dependencies.targetClinicIdsLoader || getAccessibleClinicIdsForUser;
 
-    // Self: puede gestionar sus bloqueos. Si clinica_id es específico, debe pertenecer a esa clínica.
+    if (globalAdminCheck(actorId)) return true;
+
+    // Self: requiere la capacidad explícita de gestión operativa propia. Esto
+    // conserva el acceso de doctores/recepción/administrativos y excluye a la
+    // agencia aunque tenga una membresía válida para Marketing.
     if (Number(actorId) === Number(targetUserId)) {
         if (clinicaId != null && Number.isFinite(Number(clinicaId))) {
-            return hasStaffPivot(actorId, Number(clinicaId));
+            return selfScheduleCheck(actorId, Number(clinicaId));
         }
-        return true;
+        const targetClinicIds = await targetClinicIdsLoader(targetUserId);
+        if (!targetClinicIds.length) return false;
+        const decisions = await Promise.all(targetClinicIds.map((clinicId) =>
+            selfScheduleCheck(actorId, clinicId)
+        ));
+        return decisions.every(Boolean);
     }
 
-    const adminScopedClinicIds = await getAdminScopedClinicIdsForUser(actorId);
-    if (!adminScopedClinicIds.length) return false;
-
-    // Bloqueo global (clinica_id=null): permitir solo si el actor (propietario/agencia)
-    // tiene alcance en *todas* las clínicas donde trabaja el objetivo.
+    // Los bloqueos globales siguen reservados a propietarios con cobertura en
+    // todas las clínicas del objetivo. Conceder team.manage en una clínica no
+    // debe convertir ese permiso local en autoridad global.
     if (clinicaId == null) {
-        const targetClinicIds = await getAccessibleClinicIdsForUser(targetUserId);
+        const adminScopedClinicIds = await adminClinicIdsLoader(actorId);
+        if (!adminScopedClinicIds.length) return false;
+        const targetClinicIds = await targetClinicIdsLoader(targetUserId);
         if (!targetClinicIds.length) return false;
         const adminScopedSet = new Set(adminScopedClinicIds);
         return targetClinicIds.every((id) => adminScopedSet.has(id));
@@ -2271,10 +2304,18 @@ async function canEditBloqueos(actorId, targetUserId, clinicaId) {
 
     const cid = Number(clinicaId);
     if (!Number.isFinite(cid)) return false;
-    if (!adminScopedClinicIds.includes(cid)) return false;
+
+    // Ausencias de terceros: team.manage habilita la operativa exclusivamente
+    // dentro de la clínica concedida. Los propietarios permanecen protegidos
+    // frente a administración/recepción; solo otro propietario (o admin global)
+    // puede gestionar su ausencia.
+    if (!await teamManageCheck(actorId, cid)) return false;
+    if (await ownerPivotCheck(targetUserId, cid) && !await ownerPivotCheck(actorId, cid)) {
+        return false;
+    }
 
     // Evitar bloqueos huérfanos: el usuario objetivo debe pertenecer a la clínica.
-    return hasStaffPivot(targetUserId, cid);
+    return staffPivotCheck(targetUserId, cid);
 }
 
 
@@ -2866,6 +2907,9 @@ exports.getScheduleForCurrent = async (req, res) => {
         const actorId = Number(req.userData?.userId);
         if (!Number.isFinite(actorId)) {
             return res.status(401).json({ message: 'Auth failed!' });
+        }
+        if (!await canAccessTargetPersonal(actorId, actorId, null)) {
+            return res.status(403).json({ message: 'Forbidden' });
         }
 
         const schedule = await buildScheduleResponse(actorId, actorId, req.query || {});
@@ -4977,4 +5021,13 @@ exports.reclamarCuenta = async (req, res) => {
         console.error('[personal.reclamarCuenta] Error:', error);
         return res.status(500).json({ message: 'Error al reclamar cuenta', error: error.message });
     }
+};
+
+// Contrato puro para regresiones de seguridad. No se monta como endpoint.
+exports.__personalSecurityContract = {
+    pickBetterRole,
+    canAccessTargetPersonal,
+    canEditHorarios,
+    canEditBloqueos,
+    canManageOwnScheduleInClinic,
 };

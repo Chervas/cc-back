@@ -43,6 +43,42 @@ async function pickPatientMembership() {
 }
 
 async function run() {
+  const agencySections = __testing.roleSections('agencia', 'unknown');
+  assert.equal(agencySections.ownerLike, false);
+  assert.equal(agencySections.operations, false);
+  assert.equal(agencySections.shared, true);
+  assert.equal(__testing.roleSections('agencia', 'admin_staff').operations, false,
+    'an agency cannot inherit clinic operations from a stray subrole label');
+
+  const guardedAgencyDashboard = __testing.applyDashboardAccessGuard({
+    todayAppointments: [{ patientName: 'Paciente Secreto', patientAvatar: 'secret-photo.jpg' }],
+    inactiveTodayAppointments: [{ patientName: 'Paciente Inactivo' }],
+    nextAppointments: [{ patientName: 'Paciente Futuro' }],
+    pastAttendancePending: [{ patientName: 'Paciente Pasado' }],
+    doctorAppointmentsToday: [{ patientName: 'Paciente Doctor' }],
+    pendingPatientConsents: [{ patientName: 'Consentimiento Secreto' }],
+    doctorPendingConsents: [{ patientName: 'Consentimiento Doctor' }],
+    unansweredReviews: [{ matchedPatientName: 'Paciente Reseña', reviewerAvatar: 'review-photo.jpg' }],
+    tasks: { items: [{ label: 'Pacientes sin confirmar' }], total: 1 },
+    growthOpportunities: [{ id: 'marketing-safe', campaignId: 123 }],
+  }, {
+    appointments: false,
+    consents: false,
+    reviews: false,
+    tasks: false,
+  });
+  assert.deepEqual(guardedAgencyDashboard.todayAppointments, []);
+  assert.deepEqual(guardedAgencyDashboard.inactiveTodayAppointments, []);
+  assert.deepEqual(guardedAgencyDashboard.nextAppointments, []);
+  assert.deepEqual(guardedAgencyDashboard.pastAttendancePending, []);
+  assert.deepEqual(guardedAgencyDashboard.doctorAppointmentsToday, []);
+  assert.deepEqual(guardedAgencyDashboard.pendingPatientConsents, []);
+  assert.deepEqual(guardedAgencyDashboard.doctorPendingConsents, []);
+  assert.deepEqual(guardedAgencyDashboard.unansweredReviews, []);
+  assert.deepEqual(guardedAgencyDashboard.tasks, { items: [], total: 0 });
+  assert.deepEqual(guardedAgencyDashboard.growthOpportunities, [{ id: 'marketing-safe', campaignId: 123 }]);
+  assert.doesNotMatch(JSON.stringify(guardedAgencyDashboard), /Paciente Secreto|secret-photo|Consentimiento Secreto|Paciente Reseña/);
+
   assert.equal(__testing.statusUi('no_asistio').label, 'No asistió');
   assert.equal(
     __testing.isExpectedTodayAppointment({ rawStatus: 'pendiente', attendanceDue: true }),

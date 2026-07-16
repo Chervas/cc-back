@@ -92,17 +92,38 @@ async function run() {
 
   assert.equal(accessPolicy.defaultForFeature('appointments.view', 'unknown'), true);
   assert.equal(accessPolicy.defaultForFeature('appointments.manage', 'unknown'), false);
+  assert.equal(accessPolicy.defaultForFeature('appointments.view', 'agencia'), false);
+  assert.equal(accessPolicy.defaultForFeature('appointments.manage', 'agencia'), false);
+
+  assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has('patients.sensitive.view'), true);
+  assert.equal(features.get('patients.sensitive.view')?.kind, 'read');
+  assert.equal(features.get('patients.sensitive.view')?.enforcement_status, 'backend');
+  assert.equal(accessPolicy.defaultForFeature('patients.view', 'agencia'), true);
+  assert.equal(accessPolicy.defaultForFeature('patients.sensitive.view', 'agencia'), false);
+  assert.equal(accessPolicy.defaultForFeature('patients.edit', 'agencia'), false);
+  assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has('leads.sensitive.view'), true);
+  assert.equal(features.get('leads.sensitive.view')?.enforcement_status, 'backend');
+  assert.equal(accessPolicy.defaultForFeature('leads.sensitive.view', 'agencia'), false);
+  assert.equal(accessPolicy.defaultForFeature('leads.sensitive.view', 'reception'), true);
+  assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has('leads.manage'), true);
+  assert.equal(features.get('leads.manage')?.enforcement_status, 'backend');
+  assert.equal(accessPolicy.defaultForFeature('leads.manage', 'agencia'), false);
+  assert.equal(accessPolicy.defaultForFeature('leads.manage', 'admin_staff'), true);
+  assert.equal(accessPolicy.defaultForFeature('consents.view', 'agencia'), false);
+  assert.equal(accessPolicy.defaultForFeature('quickchat.read_patients', 'agencia'), false);
+  assert.equal(accessPolicy.defaultForFeature('quickchat.read_team', 'agencia'), false);
 
   assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has('clinic.settings.view'), true);
   assert.equal(features.get('clinic.settings.view')?.kind, 'view');
   assert.equal(features.get('clinic.settings.view')?.enforcement_status, 'backend');
-  for (const roleCode of ['propietario', 'agencia', 'doctor', 'assistant', 'reception', 'admin_staff']) {
+  for (const roleCode of ['propietario', 'doctor', 'assistant', 'reception', 'admin_staff']) {
     assert.equal(
       accessPolicy.defaultForFeature('clinic.settings.view', roleCode),
       true,
       `${roleCode} must be able to view its assigned clinic by default`,
     );
   }
+  assert.equal(accessPolicy.defaultForFeature('clinic.settings.view', 'agencia'), false);
   // Compatibilidad: asignaciones antiguas cuyo rol aún no normaliza deben poder
   // leer los ajustes, pero nunca editarlos.
   assert.equal(accessPolicy.defaultForFeature('clinic.settings.view', 'unknown'), true);
@@ -136,6 +157,7 @@ async function run() {
   assert.equal(features.get('team.view')?.enforcement_status, 'route');
   assert.equal(accessPolicy.defaultForFeature('team.view', 'reception'), true);
   assert.equal(accessPolicy.defaultForFeature('team.view', 'doctor'), true);
+  assert.equal(accessPolicy.defaultForFeature('team.view', 'agencia'), false);
   assert.equal(accessPolicy.defaultForFeature('team.view', 'unknown'), false);
 
   assert.equal(features.get('team.manage')?.kind, 'action');
@@ -143,12 +165,26 @@ async function run() {
   assert.equal(accessPolicy.defaultForFeature('team.manage', 'reception'), true);
   assert.equal(accessPolicy.defaultForFeature('team.manage', 'admin_staff'), true);
 
+  assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has('team.schedule.self.manage'), true);
+  assert.equal(features.get('team.schedule.self.manage')?.kind, 'action');
+  assert.equal(features.get('team.schedule.self.manage')?.enforcement_status, 'backend');
+  assert.equal(accessPolicy.defaultForFeature('team.schedule.self.manage', 'agencia'), false);
+  assert.equal(accessPolicy.defaultForFeature('team.schedule.self.manage', 'unknown'), false);
+  for (const roleCode of ['propietario', 'doctor', 'assistant', 'reception', 'admin_staff']) {
+    assert.equal(
+      accessPolicy.defaultForFeature('team.schedule.self.manage', roleCode),
+      true,
+      `${roleCode} must retain explicit control over its own schedule`,
+    );
+  }
+
   assert.equal(features.get('quickchat.read_patients')?.kind, 'read');
   assert.equal(features.get('quickchat.read_patients')?.enforcement_status, 'backend');
   assert.equal(features.get('quickchat.read_team')?.kind, 'read');
   assert.equal(features.get('quickchat.read_team')?.enforcement_status, 'backend');
   assert.equal(features.get('quickchat.read_leads')?.kind, 'read');
   assert.equal(features.get('quickchat.read_leads')?.enforcement_status, 'backend');
+  assert.equal(accessPolicy.defaultForFeature('quickchat.read_leads', 'agencia'), false);
 
   const citasController = fs.readFileSync(
     path.resolve(__dirname, '../../controllers/citas.controller.js'),

@@ -4,7 +4,7 @@ const { Op } = require('sequelize');
 const db = require('../../models');
 const {
   STAFF_ROLES,
-  ADMIN_ROLES,
+  MARKETING_WRITE_ROLES,
   isGlobalAdmin,
 } = require('./role-helpers');
 
@@ -62,7 +62,7 @@ async function getAccessibleMarketingClinicIds({
     return normalizedClinicIds;
   }
 
-  const allowedRoles = access === 'write' ? ADMIN_ROLES : STAFF_ROLES;
+  const allowedRoles = access === 'write' ? MARKETING_WRITE_ROLES : STAFF_ROLES;
   const memberships = await membershipModel.findAll({
     where: {
       id_usuario: normalizedUserId,

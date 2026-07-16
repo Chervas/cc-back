@@ -27,7 +27,7 @@ const PURPOSE_CONFIG = {
   },
   clinical_attachment: {
     category: 'otros',
-    featureKey: 'patients.view',
+    featureKey: 'patients.sensitive.view',
     title: 'Adjunto clinico',
     icon: 'heroicons_outline:paper-clip',
   },

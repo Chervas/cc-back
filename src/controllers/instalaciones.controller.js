@@ -1,6 +1,10 @@
 const asyncHandler = require('express-async-handler');
 const db = require('../../models');
 const { Op } = db.Sequelize;
+const {
+  assertUserCanAccessFeature,
+  getAccessibleClinicIdsForFeature,
+} = require('../lib/access-policy');
 const ACTIVE_APPOINTMENT_WHERE = { estado: { [Op.ne]: 'cancelada' } };
 
 const parseBool = (v) => v === true || v === 'true' || v === '1';
@@ -22,6 +26,80 @@ const normalizeInstallationType = (value, fallback = 'box') => {
   const raw = String(value ?? fallback).trim();
   return INSTALLATION_TYPES.has(raw) ? raw : null;
 };
+
+async function assertClinicFeature(req, featureKey, clinicId) {
+  const actorId = Number(req.userData?.userId);
+  const normalizedClinicId = Number(clinicId);
+  if (!Number.isFinite(actorId)) {
+    const error = new Error('auth_failed');
+    error.status = 401;
+    throw error;
+  }
+  if (!Number.isFinite(normalizedClinicId)) {
+    const error = new Error('clinic_id_required');
+    error.status = 400;
+    throw error;
+  }
+  await assertUserCanAccessFeature({ actorId, featureKey, clinicId: normalizedClinicId });
+}
+
+async function accessibleClinicScope(req, featureKey, requestedClinicIds = null) {
+  const actorId = Number(req.userData?.userId);
+  if (!Number.isFinite(actorId)) {
+    const error = new Error('auth_failed');
+    error.status = 401;
+    throw error;
+  }
+  const requested = requestedClinicIds === null
+    ? null
+    : Array.from(new Set((Array.isArray(requestedClinicIds) ? requestedClinicIds : [requestedClinicIds])
+      .map((value) => Number.parseInt(String(value), 10))
+      .filter((value) => Number.isInteger(value) && value > 0)));
+  const allowed = await getAccessibleClinicIdsForFeature({
+    actorId,
+    featureKey,
+    clinicIds: requested,
+  });
+  if ((requested && allowed.length !== requested.length) || !allowed.length) {
+    const error = new Error('access_policy_forbidden');
+    error.status = 403;
+    error.details = { feature_key: featureKey, clinic_ids: requested || [] };
+    throw error;
+  }
+  return allowed;
+}
+
+function sendInstallationAccessError(error, res) {
+  if (error.status === 401 || error.message === 'auth_failed') {
+    return res.status(401).json({ message: 'Auth failed!' });
+  }
+  if (error.status === 403 || error.message === 'access_policy_forbidden') {
+    return res.status(403).json({
+      message: 'No tienes permiso para gestionar instalaciones en esta clínica',
+      details: error.details || null,
+    });
+  }
+  if (error.status === 400 && error.message === 'clinic_id_required') {
+    return res.status(400).json({ message: 'clinica_id requerido' });
+  }
+  return null;
+}
+
+async function installationOr404(req, res, id, featureKey) {
+  const item = await db.Instalacion.findByPk(id);
+  if (!item) {
+    res.status(404).json({ message: 'Instalación no encontrada' });
+    return null;
+  }
+  try {
+    await assertClinicFeature(req, featureKey, item.clinica_id);
+    return item;
+  } catch (error) {
+    const handled = sendInstallationAccessError(error, res);
+    if (handled) return null;
+    throw error;
+  }
+}
 
 const buildHorarioRowsFromBody = (instalacionId, body) => {
   if (!body) return [];
@@ -55,10 +133,26 @@ const buildHorarioRowsFromBody = (instalacionId, body) => {
 
 exports.list = asyncHandler(async (req, res) => {
   const { clinica_id, group_id, all, activa } = req.query;
-  const where = {};
-  if (!parseBool(all)) {
-    if (clinica_id) where.clinica_id = clinica_id;
+  let requestedClinicIds = clinica_id ? [clinica_id] : null;
+  if (!requestedClinicIds && group_id) {
+    const groupClinics = await db.Clinica.findAll({
+      where: { grupoClinicaId: group_id },
+      attributes: ['id_clinica'],
+      raw: true,
+    });
+    requestedClinicIds = groupClinics.map((clinic) => clinic.id_clinica);
   }
+  let allowedClinicIds;
+  try {
+    allowedClinicIds = await accessibleClinicScope(req, 'clinic.settings.view', requestedClinicIds);
+  } catch (error) {
+    const handled = sendInstallationAccessError(error, res);
+    if (handled) return;
+    throw error;
+  }
+  const where = {
+    clinica_id: allowedClinicIds.length === 1 ? allowedClinicIds[0] : { [Op.in]: allowedClinicIds },
+  };
   if (activa !== undefined) where.activo = parseBool(activa);
   const include = [];
   if (group_id) {
@@ -77,6 +171,7 @@ exports.list = asyncHandler(async (req, res) => {
 exports.getById = asyncHandler(async (req, res) => {
   const id = toInt(req.params.id);
   if (!id) return res.status(400).json({ message: 'id inválido' });
+  if (!await installationOr404(req, res, id, 'clinic.settings.view')) return;
   const item = await db.Instalacion.findByPk(id, {
     include: [
       { model: db.Clinica, as: 'clinica', attributes: ['id_clinica','nombre_clinica','grupoClinicaId'] },
@@ -95,6 +190,13 @@ exports.create = asyncHandler(async (req, res) => {
   if (!body.nombre) return res.status(400).json({ message: 'nombre requerido' });
   const tipo = normalizeInstallationType(body.tipo);
   if (!tipo) return res.status(400).json({ message: 'tipo de instalación inválido' });
+  try {
+    await assertClinicFeature(req, 'clinic.settings.edit', clinicaId);
+  } catch (error) {
+    const handled = sendInstallationAccessError(error, res);
+    if (handled) return;
+    throw error;
+  }
 
   const t = await db.sequelize.transaction();
   try {
@@ -144,8 +246,8 @@ exports.update = asyncHandler(async (req, res) => {
   if (!id) return res.status(400).json({ message: 'id inválido' });
   const body = req.body || {};
 
-  const item = await db.Instalacion.findByPk(id);
-  if (!item) return res.status(404).json({ message: 'Instalación no encontrada' });
+  const item = await installationOr404(req, res, id, 'clinic.settings.edit');
+  if (!item) return;
   const tipo = body.tipo !== undefined ? normalizeInstallationType(body.tipo) : item.tipo;
   if (!tipo) return res.status(400).json({ message: 'tipo de instalación inválido' });
 
@@ -198,8 +300,8 @@ exports.update = asyncHandler(async (req, res) => {
 exports.remove = asyncHandler(async (req, res) => {
   const id = toInt(req.params.id);
   if (!id) return res.status(400).json({ message: 'id inválido' });
-  const item = await db.Instalacion.findByPk(id);
-  if (!item) return res.status(404).json({ message: 'Instalación no encontrada' });
+  const item = await installationOr404(req, res, id, 'clinic.settings.edit');
+  if (!item) return;
   await item.update({ activo: false });
   res.status(204).send();
 });
@@ -207,6 +309,7 @@ exports.remove = asyncHandler(async (req, res) => {
 exports.getHorarios = asyncHandler(async (req, res) => {
   const id = toInt(req.params.id);
   if (!id) return res.status(400).json({ message: 'id inválido' });
+  if (!await installationOr404(req, res, id, 'clinic.settings.view')) return;
   const items = await db.InstalacionHorario.findAll({
     where: { instalacion_id: id },
     order: [['dia_semana','ASC']],
@@ -217,6 +320,7 @@ exports.getHorarios = asyncHandler(async (req, res) => {
 exports.putHorarios = asyncHandler(async (req, res) => {
   const id = toInt(req.params.id);
   if (!id) return res.status(400).json({ message: 'id inválido' });
+  if (!await installationOr404(req, res, id, 'clinic.settings.edit')) return;
   const horarios = Array.isArray(req.body) ? req.body : [];
   const t = await db.sequelize.transaction();
   try {
@@ -244,6 +348,7 @@ exports.putHorarios = asyncHandler(async (req, res) => {
 exports.getBloqueos = asyncHandler(async (req, res) => {
   const id = toInt(req.params.id);
   if (!id) return res.status(400).json({ message: 'id inválido' });
+  if (!await installationOr404(req, res, id, 'clinic.settings.view')) return;
   const items = await db.InstalacionBloqueo.findAll({
     where: { instalacion_id: id },
     order: [['fecha_inicio','ASC']],
@@ -255,6 +360,7 @@ exports.createBloqueo = asyncHandler(async (req, res) => {
   const body = req.body || {};
   const instalacionId = toInt(body.instalacion_id);
   if (!instalacionId) return res.status(400).json({ message: 'instalacion_id requerido' });
+  if (!await installationOr404(req, res, instalacionId, 'clinic.settings.edit')) return;
   if (!body.fecha_inicio || !body.fecha_fin) return res.status(400).json({ message: 'fecha_inicio y fecha_fin requeridos' });
 
   const created = await db.InstalacionBloqueo.create({
@@ -273,6 +379,7 @@ exports.deleteBloqueo = asyncHandler(async (req, res) => {
   if (!id) return res.status(400).json({ message: 'id inválido' });
   const item = await db.InstalacionBloqueo.findByPk(id);
   if (!item) return res.status(404).json({ message: 'Bloqueo no encontrado' });
+  if (!await installationOr404(req, res, item.instalacion_id, 'clinic.settings.edit')) return;
   await item.destroy();
   res.status(204).send();
 });
@@ -303,6 +410,16 @@ const timeStrToDate = (fecha, hhmm) => new Date(`${fecha}T${hhmm}:00Z`);
 
 exports.disponibilidad = asyncHandler(async (req, res) => {
   const { clinica_id, group_id, fecha, inicio, fin, instalacion_id, doctor_id, duracion_min, force, slots } = req.query;
+  let accessClinicId = toInt(clinica_id);
+  if (accessClinicId) {
+    try {
+      await assertClinicFeature(req, 'appointments.view', accessClinicId);
+    } catch (error) {
+      const handled = sendInstallationAccessError(error, res);
+      if (handled) return;
+      throw error;
+    }
+  }
   const wantsSlots = parseBool(slots) || (!inicio && !fin && fecha);
   if (!fecha && !(inicio && fin)) {
     return res.status(400).json({ message: 'fecha o inicio/fin requeridos' });
@@ -321,14 +438,37 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
   if (instalacion_id) {
     instData = await db.Instalacion.findByPk(instalacion_id, { include: [{ model: db.InstalacionHorario, as: 'horarios' }, { model: db.InstalacionBloqueo, as: 'bloqueos' }, { model: db.Clinica, as: 'clinica', attributes: ['id_clinica','nombre_clinica','grupoClinicaId'] }] });
     if (!instData || !instData.activo) return res.status(404).json({ message: 'Instalación no encontrada' });
-    if (clinica_id && instData.clinica_id !== parseInt(clinica_id,10)) conflicts.push({ type: 'not_in_clinic', message: 'Instalación fuera de la clínica' });
+    const installationClinicId = Number(instData.clinica_id);
+    try {
+      // El clinica_id de la query no puede actuar como sustituto del scope real
+      // del recurso: una instalación ajena debe comprobarse siempre contra su
+      // propia clínica antes de consultar horarios, bloqueos o citas.
+      await assertClinicFeature(req, 'appointments.view', installationClinicId);
+    } catch (error) {
+      const handled = sendInstallationAccessError(error, res);
+      if (handled) return;
+      throw error;
+    }
+    if (accessClinicId && installationClinicId !== accessClinicId) {
+      return res.status(409).json({
+        available: false,
+        conflicts: [{ type: 'not_in_clinic', message: 'Instalación fuera de la clínica' }],
+      });
+    }
+    accessClinicId = installationClinicId;
     if (group_id && instData.clinica?.grupoClinicaId && instData.clinica.grupoClinicaId !== parseInt(group_id,10)) conflicts.push({ type: 'not_in_group', message: 'Instalación fuera del grupo' });
     if (!durMinParam && instData.default_duracion_minutos) durMinParam = instData.default_duracion_minutos;
   }
 
   // Doctor checks
   if (doctor_id) {
-    docData = await db.DoctorClinica.findOne({ where: clinica_id ? { doctor_id, clinica_id } : { doctor_id }, include: [{ model: db.DoctorHorario, as: 'horarios' }] });
+    if (!accessClinicId) {
+      return res.status(400).json({ message: 'clinica_id requerido para consultar la disponibilidad del profesional' });
+    }
+    docData = await db.DoctorClinica.findOne({
+      where: { doctor_id, clinica_id: accessClinicId },
+      include: [{ model: db.DoctorHorario, as: 'horarios' }],
+    });
     if (!docData || !docData.activo) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor no asignado a la clínica' });
   }
 

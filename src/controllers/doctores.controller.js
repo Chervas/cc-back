@@ -31,12 +31,17 @@ const subtractIntervals = (windows, blocks) => {
 };
 
 exports.list = asyncHandler(async (req, res) => {
-  const { clinica_id, group_id, all, agenda_context } = req.query;
+  const { agenda_context } = req.query;
   const agendaContext = parseBool(agenda_context);
+  const authorizedClinicIds = Array.from(new Set((req.authorizedDoctorClinicIds || [])
+    .map((value) => Number.parseInt(String(value), 10))
+    .filter((value) => Number.isInteger(value) && value > 0)));
+  if (!authorizedClinicIds.length) return res.json([]);
 
   // Filtrado por clinica_id directamente sobre DoctorClinica (evita depender de atributos inexistentes en Clinica)
   const whereDoctorClinica = {
-    activo: true
+    activo: true,
+    clinica_id: { [Op.in]: authorizedClinicIds },
   };
   if (!agendaContext) {
     whereDoctorClinica.recibe_citas = true;
@@ -73,10 +78,6 @@ exports.list = asyncHandler(async (req, res) => {
     );
   }
   whereDoctorClinica[Op.and] = andConditions;
-  if (!parseBool(all) && clinica_id) {
-    whereDoctorClinica.clinica_id = clinica_id;
-  }
-
   const includeClinica = {
     model: db.Clinica,
     as: 'clinica',
@@ -93,10 +94,6 @@ exports.list = asyncHandler(async (req, res) => {
       }
     ];
   }
-  if (!parseBool(all) && group_id) {
-    includeClinica.where = { grupoClinicaId: group_id };
-  }
-
   const doctorClinicas = await db.DoctorClinica.findAll({
     where: whereDoctorClinica,
     include: [
@@ -161,13 +158,22 @@ exports.updateHorarios = asyncHandler(async (req, res) => {
 });
 
 exports.listBloqueos = asyncHandler(async (req, res) => {
-  const { doctorId } = req.params;
-  const items = await db.DoctorBloqueo.findAll({ where: { doctor_id: doctorId } });
+  const doctorId = req.authorizedDoctorId || req.params.doctorId;
+  const clinicIds = req.authorizedDoctorClinicIds || [];
+  const items = await db.DoctorBloqueo.findAll({
+    where: {
+      doctor_id: doctorId,
+      [Op.or]: [
+        { clinica_id: { [Op.in]: clinicIds } },
+        { clinica_id: null },
+      ],
+    },
+  });
   res.json(items);
 });
 
 exports.createBloqueo = asyncHandler(async (req, res) => {
-  const doctorId = req.params.doctorId || req.userData?.userId;
+  const doctorId = req.authorizedDoctorId || req.params.doctorId || req.userData?.userId;
   const bloqueo = await db.DoctorBloqueo.create({
     doctor_id: doctorId,
     clinica_id: req.body.clinica_id ?? null,
@@ -191,20 +197,35 @@ exports.updateBloqueo = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const bloqueo = await db.DoctorBloqueo.findByPk(id);
   if (!bloqueo) return res.status(404).json({ message: 'Bloqueo no encontrado' });
-  await bloqueo.update(req.body || {});
+  const payload = { ...(req.body || {}) };
+  delete payload.id;
+  delete payload.doctor_id;
+  delete payload.creado_por;
+  await bloqueo.update(payload);
   res.json(bloqueo);
 });
 
-async function buildSchedule(doctorId) {
+async function buildSchedule(doctorId, authorizedClinicIds = []) {
+  const clinicIds = Array.from(new Set((authorizedClinicIds || [])
+    .map((value) => Number.parseInt(String(value), 10))
+    .filter((value) => Number.isInteger(value) && value > 0)));
   const doctor = await db.Usuario.findByPk(doctorId, { attributes: ['id_usuario','nombre','apellidos','email_usuario'] });
   const clinicas = await db.DoctorClinica.findAll({
-    where: { doctor_id: doctorId, activo: true },
+    where: { doctor_id: doctorId, activo: true, clinica_id: { [Op.in]: clinicIds } },
     include: [
       { model: db.Clinica, as: 'clinica', attributes: ['id_clinica','nombre_clinica','url_avatar'] },
       { model: db.DoctorHorario, as: 'horarios' }
     ]
   });
-  const bloqueos = await db.DoctorBloqueo.findAll({ where: { doctor_id: doctorId } });
+  const bloqueos = await db.DoctorBloqueo.findAll({
+    where: {
+      doctor_id: doctorId,
+      [Op.or]: [
+        { clinica_id: { [Op.in]: clinicIds } },
+        { clinica_id: null },
+      ],
+    },
+  });
   return {
     doctor_id: String(doctorId),
     doctor_nombre: doctor ? `${doctor.nombre || ''} ${doctor.apellidos || ''}`.trim() : '',
@@ -220,20 +241,21 @@ async function buildSchedule(doctorId) {
 }
 
 exports.getScheduleForDoctor = asyncHandler(async (req, res) => {
-  const { doctorId } = req.params;
-  const schedule = await buildSchedule(doctorId);
+  const doctorId = req.authorizedDoctorId || req.params.doctorId;
+  const schedule = await buildSchedule(doctorId, req.authorizedDoctorClinicIds);
   res.json(schedule);
 });
 
 exports.getScheduleForCurrent = asyncHandler(async (req, res) => {
-  const doctorId = req.userData?.userId;
+  const doctorId = req.authorizedDoctorId || req.userData?.userId;
   if (!doctorId) return res.status(401).json({ message: 'no_user' });
-  const schedule = await buildSchedule(doctorId);
+  const schedule = await buildSchedule(doctorId, req.authorizedDoctorClinicIds);
   res.json(schedule);
 });
 
 exports.updateHorariosClinica = asyncHandler(async (req, res) => {
-  const { doctorId, clinicaId } = req.params;
+  const { clinicaId } = req.params;
+  const doctorId = req.authorizedDoctorId || req.params.doctorId || req.userData?.userId;
   const horarios = Array.isArray(req.body?.horarios) ? req.body.horarios : [];
   let dc = await db.DoctorClinica.findOne({ where: { doctor_id: doctorId, clinica_id: clinicaId } });
   if (!dc) {

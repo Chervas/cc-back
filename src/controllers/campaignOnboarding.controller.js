@@ -47,6 +47,9 @@ const {
   provisionManagedCampaignsFromStrategy
 } = require('../services/managedCampaignProvisioning.service');
 const {
+  auditConnectOnlyCampaignQuality,
+} = require('../services/googleAdsConnectOnlyQualityAudit.service');
+const {
   canonicalExternalCampaignIdentity,
   externalCampaignIdentityKey,
 } = require('../services/externalCampaignAssignmentTargets.service');
@@ -3012,6 +3015,7 @@ function assessConsentMeasurementReadiness(marketingState) {
     hmacKey: record?.hmac_key,
   });
   const issues = [];
+  const renewalIssues = [];
   const add = (reason, extra = {}) => issues.push({ reason, ...extra });
 
   if (features.consent_mode_enabled !== true) add('consent_mode_disabled');
@@ -3051,10 +3055,22 @@ function assessConsentMeasurementReadiness(marketingState) {
       configHash,
     });
     if (!attestation.valid) {
-      add('consent_attestation_invalid', { domain, details: attestation.reason });
-      continue;
+      if (attestation.reason === 'attestation_operational_expired' && attestation.claims) {
+        const renewalIssue = {
+          reason: 'consent_attestation_renewal_required',
+          domain,
+          details: attestation.reason
+        };
+        issues.push(renewalIssue);
+        renewalIssues.push(renewalIssue);
+      } else {
+        add('consent_attestation_invalid', { domain, details: attestation.reason });
+        continue;
+      }
     }
-    validAttestationExpirations.push(Number(attestation.operationalExpiresAt));
+    if (Number.isSafeInteger(Number(attestation.operationalExpiresAt))) {
+      validAttestationExpirations.push(Number(attestation.operationalExpiresAt));
+    }
     const signals = attestation.claims?.signals || {};
     if (signals.installed !== true) add('consent_domain_unverified', { domain });
     if (signals.runtime_compatible !== true) add('consent_runtime_incompatible', { domain });
@@ -3084,6 +3100,8 @@ function assessConsentMeasurementReadiness(marketingState) {
   const minimumExpiration = validAttestationExpirations
     .filter((value) => Number.isSafeInteger(value) && value > 0)
     .reduce((minimum, value) => minimum === null || value < minimum ? value : minimum, null);
+  const renewalIssueSet = new Set(renewalIssues);
+  const blockingIssues = issues.filter((issue) => !renewalIssueSet.has(issue));
   return {
     ready: issues.length === 0,
     validated: issues.length === 0,
@@ -3093,6 +3111,14 @@ function assessConsentMeasurementReadiness(marketingState) {
     provider: ['clinicaclick', 'external_cmp'].includes(provider) ? provider : null,
     domains,
     expires_at: minimumExpiration ? new Date(minimumExpiration * 1000).toISOString() : null,
+    verification_current: renewalIssues.length === 0 && issues.length === 0,
+    renewal_required: renewalIssues.length > 0,
+    renewal_issues: renewalIssues,
+    // A stale observation never grants consent. It only means that the signed,
+    // scope-bound configuration is still internally coherent while a new
+    // public verification is required. The uploader must continue requiring
+    // the visitor's live Consent Mode signal for every conversion.
+    runtime_configuration_ready: blockingIssues.length === 0,
   };
 }
 
@@ -3987,6 +4013,48 @@ async function reconcileEnhancedConversionsInternalActivation(options = {}) {
     now
   });
   if (!plan.ready) {
+    const nonRenewalIssues = plan.issues.filter((issue) => (
+      issue?.reason !== 'consent_readiness_pending'
+    ));
+    const activationAlreadyApplied = isEnhancedConversionActivationApplied(
+      intakeRecord?.config,
+      plan.summary?.reconciliation_key || null
+    );
+    if (
+      activationAlreadyApplied
+      && consentReadiness?.renewal_required === true
+      && consentReadiness?.runtime_configuration_ready === true
+      && nonRenewalIssues.length === 0
+    ) {
+      return {
+        status: 'already_active',
+        updated: false,
+        idempotent: true,
+        ready: true,
+        reconciliation_key: plan.summary.reconciliation_key,
+        customer_ids: plan.targets.customer_ids,
+        event_names: plan.targets.event_names,
+        consent_verification: {
+          current: false,
+          renewal_required: true,
+          expires_at: consentReadiness.expires_at || null,
+          runtime_configuration_ready: true,
+          // The persisted activation does not grant consent. Upload remains
+          // gated by ad_user_data/ad_personalization from the current visitor.
+          runtime_continues_with_per_event_visitor_consent: true
+        },
+        ad_personalization_capability: {
+          status: 'already_active',
+          updated: false,
+          idempotent: true,
+          enabled: true,
+          consent_source: 'visitor_choice',
+          grants_consent: false
+        },
+        external_mutation_performed: false,
+        google_ads_mutated: false
+      };
+    }
     const capability = await persistVisitorChoicePersonalizationCapability({
       intakeRecord,
       now,
@@ -4029,6 +4097,13 @@ async function reconcileEnhancedConversionsInternalActivation(options = {}) {
       enabled: persisted.status === 'activated' || persisted.status === 'already_active',
       consent_source: 'visitor_choice',
       grants_consent: false
+    },
+    consent_verification: {
+      current: consentReadiness?.verification_current !== false,
+      renewal_required: consentReadiness?.renewal_required === true,
+      expires_at: consentReadiness?.expires_at || null,
+      runtime_configuration_ready: consentReadiness?.runtime_configuration_ready !== false,
+      runtime_continues_with_per_event_visitor_consent: true
     },
     external_mutation_performed: false,
     google_ads_mutated: false
@@ -4184,6 +4259,17 @@ function assessConversionOnboardingReadiness({
         destination_key: target.destination_key
       });
       continue;
+    }
+    const configuredActionId = String(target.configured_action_id || '').trim() || null;
+    if (configuredActionId && configuredActionId !== actionId) {
+      issues.push({
+        reason: 'conversion_destination_action_drift',
+        customer_id: target.customer_id,
+        event: target.event,
+        destination_key: target.destination_key,
+        configured_conversion_action_id: configuredActionId,
+        canonical_conversion_action_id: actionId
+      });
     }
     const action = (actionsByCustomer[target.customer_id] || [])
       .find((candidate) => String(candidate?.id || '') === actionId);
@@ -6405,7 +6491,8 @@ async function evaluateGoogleConversionOnboardingReadiness({
   fallbackCustomerId,
   currency = 'EUR',
   createMissing = false,
-  consentReadiness = null
+  consentReadiness = null,
+  runtimeCache = null
 }) {
   const plan = buildRequiredConversionPlan(rawGoogleAdsConfig, fallbackCustomerId);
   const mappingsByCustomer = {};
@@ -6423,14 +6510,18 @@ async function evaluateGoogleConversionOnboardingReadiness({
   for (const customerId of plan.customer_ids) {
     let runtime;
     try {
-      runtime = await resolveScopedGoogleAdsRuntime({
-        userId,
-        clinicId: scope.clinic_id,
-        groupId: scope.group_id,
-        assignmentScope: scope.assignment_scope,
-        customerId,
-        requiredScopes: [GOOGLE_ADS_SCOPE]
-      });
+      runtime = runtimeCache instanceof Map ? runtimeCache.get(customerId) : null;
+      if (!runtime) {
+        runtime = await resolveScopedGoogleAdsRuntime({
+          userId,
+          clinicId: scope.clinic_id,
+          groupId: scope.group_id,
+          assignmentScope: scope.assignment_scope,
+          customerId,
+          requiredScopes: [GOOGLE_ADS_SCOPE]
+        });
+        if (runtimeCache instanceof Map) runtimeCache.set(customerId, runtime);
+      }
     } catch (error) {
       capabilitiesByCustomer[customerId] = {
         data_manager_scope_granted: false,
@@ -6587,6 +6678,211 @@ async function evaluateGoogleConversionOnboardingReadiness({
     canonical_google_ads_config: readiness.ready
       ? applyCanonicalMappingsToGoogleAdsConfig(rawGoogleAdsConfig, fallbackCustomerId, mappingsByCustomer)
       : null
+  };
+}
+
+function isConsentVerificationRenewalIssue(issue) {
+  return issue?.reason === 'consent_attestation_renewal_required'
+    || issue?.details === 'attestation_operational_expired';
+}
+
+/**
+ * Read-only audit used by the durable Google Ads job for Conecta y mejora.
+ * It checks the configured destinations against the canonical actions read
+ * from Google, executes Data Manager validateOnly and reports consent drift.
+ * It never creates actions or changes campaigns, goals, bids or IntakeConfig.
+ */
+async function auditConnectOnlyMeasurementTarget({
+  scope,
+  intakeRecord,
+  strategyCampaigns,
+  dependencies = {},
+  now = new Date()
+} = {}) {
+  const record = intakeRecord || null;
+  const rawConfig = asPlainObject(record?.config);
+  const rawGoogleAdsConfig = asPlainObject(rawConfig.google_ads);
+  const auditScope = {
+    assignment_scope: String(scope?.assignment_scope || record?.assignment_scope || '').toLowerCase() === 'group'
+      ? 'group'
+      : 'clinic',
+    clinic_id: parseInteger(scope?.clinic_id || record?.clinic_id),
+    group_id: parseInteger(scope?.group_id || record?.group_id)
+  };
+  const marketingState = {
+    scope: auditScope,
+    records: auditScope.assignment_scope === 'group'
+      ? { clinicRecord: null, groupRecord: record }
+      : { clinicRecord: record, groupRecord: null }
+  };
+  const assessConsent = dependencies.assessConsentMeasurementReadiness
+    || assessConsentMeasurementReadiness;
+  const evaluateReadiness = dependencies.evaluateGoogleConversionOnboardingReadiness
+    || evaluateGoogleConversionOnboardingReadiness;
+  const auditCampaignQuality = dependencies.auditConnectOnlyCampaignQuality
+    || auditConnectOnlyCampaignQuality;
+  const runtimeCache = dependencies.googleAdsRuntimeCache instanceof Map
+    ? dependencies.googleAdsRuntimeCache
+    : new Map();
+  const consentReadiness = assessConsent(marketingState);
+  const fallbackCustomerId = normalizeCustomerId(rawGoogleAdsConfig.customer_id || '') || null;
+  const conversionReadiness = await evaluateReadiness({
+    userId: null,
+    scope: auditScope,
+    rawGoogleAdsConfig,
+    fallbackCustomerId,
+    currency: normalizeCurrency(rawGoogleAdsConfig.currency || 'EUR'),
+    createMissing: false,
+    consentReadiness,
+    runtimeCache
+  });
+
+  const enhanced = asPlainObject(rawGoogleAdsConfig.enhanced_conversions);
+  const activationAudit = asPlainObject(enhanced.activation_audit);
+  const activationApplied = isEnhancedConversionActivationApplied(
+    rawConfig,
+    activationAudit.reconciliation_key || null
+  );
+  const allowlistIssues = validateEnhancedConversionActivationAllowlist(enhanced, now);
+  const collectedIssues = [];
+  const issueKey = (issue) => JSON.stringify([
+    issue?.code || null,
+    issue?.reason || null,
+    issue?.details || null,
+    issue?.customer_id || null,
+    issue?.campaign_id || null,
+    issue?.event || null,
+    issue?.destination_key || null,
+    issue?.conversion_action_id || null
+  ]);
+  const seenIssues = new Set();
+  const addIssue = (rawIssue, forcedSeverity = null) => {
+    const issue = asPlainObject(rawIssue);
+    const key = issueKey(issue);
+    if (seenIssues.has(key)) return;
+    seenIssues.add(key);
+    collectedIssues.push({
+      ...issue,
+      severity: forcedSeverity
+        || issue.severity
+        || (isConsentVerificationRenewalIssue(issue) ? 'warning' : 'critical')
+    });
+  };
+  for (const issue of conversionReadiness?.issues || []) addIssue(issue);
+  for (const issue of allowlistIssues) addIssue(issue);
+  if (enhanced.enabled !== true) {
+    addIssue({ reason: 'enhanced_conversions_runtime_disabled' });
+  } else if (!activationApplied) {
+    addIssue({ reason: 'enhanced_conversion_activation_drift' });
+  }
+
+  const targets = (conversionReadiness?.targets || []).map((target) => ({
+    event: target.event || null,
+    destination_key: target.destination_key || null,
+    customer_id: target.customer_id || null,
+    configured_conversion_action_id: target.configured_action_id || null,
+    canonical_conversion_action_id: target.conversion_action_id || null,
+    campaign_ids: listToUniqueArray(
+      (Array.isArray(target.campaign_ids) ? target.campaign_ids : [])
+        .map((campaignId) => String(campaignId || '').trim())
+        .filter((campaignId) => /^\d+$/.test(campaignId))
+    ),
+    campaign_count: Array.isArray(target.campaign_ids) ? target.campaign_ids.length : 0,
+    validated: target.validated === true,
+    validate_only: true
+  }));
+  let campaignQuality = {
+    schema_version: 'clinicaclick-google-ads-connect-only-campaign-quality/v1',
+    mode: 'not_requested',
+    audited_at: (now instanceof Date ? now : new Date(now)).toISOString(),
+    autorepair: false,
+    external_mutation_count: 0,
+    google_ads_mutated: false,
+    healthy: true,
+    summary: {
+      account_count: 0,
+      configured_campaign_count: 0,
+      observed_campaign_count: 0,
+      issue_count: 0,
+      critical_count: 0,
+      recommendation_count: 0
+    },
+    accounts: [],
+    issues: [],
+    recommendations: []
+  };
+  if (Array.isArray(strategyCampaigns)) {
+    try {
+      campaignQuality = await auditCampaignQuality({
+        scope: auditScope,
+        campaigns: strategyCampaigns,
+        canonicalTargets: targets,
+        runtimeCache,
+        dependencies,
+        now
+      });
+    } catch (error) {
+      addIssue({
+        code: error.code || 'CONNECT_ONLY_CAMPAIGN_QUALITY_AUDIT_FAILED',
+        message: String(error.message || 'No se pudo auditar la calidad de las campañas').slice(0, 500)
+      }, 'warning');
+      campaignQuality = {
+        ...campaignQuality,
+        mode: 'connect_only_campaign_quality_read_only',
+        healthy: false,
+        summary: { ...campaignQuality.summary, issue_count: 1, critical_count: 1 },
+        issues: [collectedIssues[collectedIssues.length - 1]],
+      };
+    }
+  }
+  const criticalCount = collectedIssues.filter((issue) => issue.severity === 'critical').length;
+  const warningCount = collectedIssues.filter((issue) => issue.severity === 'warning').length;
+  return {
+    schema_version: 'clinicaclick-google-ads-connect-only-measurement-audit/v1',
+    mode: 'connect_only_measurement_audit_read_only',
+    audited_at: (now instanceof Date ? now : new Date(now)).toISOString(),
+    healthy: criticalCount === 0,
+    runtime_ready: criticalCount === 0 && activationApplied,
+    autorepair: false,
+    validate_only: true,
+    external_mutation_count: 0,
+    google_ads_mutated: false,
+    intake_config_id: parseInteger(record?.id),
+    scope: auditScope,
+    summary: {
+      target_count: targets.length,
+      account_count: Array.isArray(conversionReadiness?.customer_ids)
+        ? conversionReadiness.customer_ids.length
+        : 0,
+      validated_target_count: targets.filter((target) => target.validated).length,
+      critical_count: criticalCount,
+      warning_count: warningCount,
+      issue_count: collectedIssues.length
+    },
+    consent: {
+      provider: consentReadiness?.provider || null,
+      domains: consentReadiness?.domains || [],
+      verification_current: consentReadiness?.verification_current !== false
+        && consentReadiness?.ready === true,
+      renewal_required: consentReadiness?.renewal_required === true,
+      expires_at: consentReadiness?.expires_at || null,
+      runtime_configuration_ready: consentReadiness?.runtime_configuration_ready === true,
+      runtime_consent_source: 'visitor_choice',
+      grants_consent: false
+    },
+    enhanced_conversions: {
+      enabled: enhanced.enabled === true,
+      activation_applied: activationApplied,
+      allowlist_entry_count: Array.isArray(enhanced.allowlist) ? enhanced.allowlist.length : 0,
+      account_gate_checked_at: activationAudit.account_gate?.checked_at || null,
+      account_gate_all_enabled: activationAudit.account_gate?.all_enabled === true,
+      canonical_actions_are_secondary: true,
+      reporting_metric: 'all_conversions'
+    },
+    targets,
+    capabilities_by_customer: conversionReadiness?.capabilities_by_customer || {},
+    campaign_quality: campaignQuality,
+    issues: collectedIssues
   };
 }
 
@@ -9810,6 +10106,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
 
 exports.__test = {
   applyCanonicalMappingsToGoogleAdsConfig,
+  auditConnectOnlyMeasurementTarget,
   assessConsentMeasurementReadiness,
   assessConversionOnboardingReadiness,
   buildCampaignAnalysisMetricContract,
@@ -9850,6 +10147,7 @@ exports.__test = {
   validateEnhancedConversionActivationAllowlist
 };
 
+exports.auditConnectOnlyMeasurementTarget = auditConnectOnlyMeasurementTarget;
 exports.reconcileEnhancedConversionsInternalActivation = reconcileEnhancedConversionsInternalActivation;
 exports.reconcileVisitorChoicePersonalizationCapabilities =
   reconcileVisitorChoicePersonalizationCapabilities;

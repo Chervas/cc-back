@@ -1,5 +1,6 @@
 'use strict';
 
+const assert = require('node:assert/strict');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '..', '..', '.env') });
 
@@ -19,8 +20,9 @@ const createdJobIds = [];
 async function run() {
   await db.sequelize.authenticate();
 
-  // Arrancar scheduler (idempotente)
-  await jobScheduler.start();
+  // Este contrato prueba el disparo inmediato. No arrancamos timers/drains en
+  // paralelo: start() ya tiene cobertura propia y aquí podía competir con el
+  // mismo triggerImmediate por el JobRequest recién creado.
 
   // ---- Caso completado ----
   metaSyncJobs.executeAdsSync = async () => ({ status: 'completed' });
@@ -33,6 +35,7 @@ async function run() {
   createdJobIds.push(completedJob.id);
   await jobScheduler.triggerImmediate(completedJob.id);
   const completed = await jobRequestsService.findJobById(completedJob.id);
+  assert.equal(completed?.status, 'completed');
   console.log('[Completed] id=%s status=%s', completed?.id, completed?.status);
 
   // ---- Caso waiting ----
@@ -49,6 +52,7 @@ async function run() {
   createdJobIds.push(waitingJob.id);
   await jobScheduler.triggerImmediate(waitingJob.id);
   const waiting = await jobRequestsService.findJobById(waitingJob.id);
+  assert.equal(waiting?.status, 'waiting');
   console.log('[Waiting] id=%s status=%s next_run_at=%s', waiting?.id, waiting?.status, waiting?.next_run_at);
 
   // ---- Caso failed ----
@@ -65,6 +69,7 @@ async function run() {
   createdJobIds.push(failedJob.id);
   await jobScheduler.triggerImmediate(failedJob.id);
   const failed = await jobRequestsService.findJobById(failedJob.id);
+  assert.equal(failed?.status, 'failed');
   console.log('[Failed] id=%s status=%s error=%s', failed?.id, failed?.status, failed?.error_message);
 
   jobScheduler.stop();
