@@ -30,7 +30,10 @@ const { normalizePhoneDigits, getPhoneLookupCandidates } = require('../lib/phone
 const { normalizeHumanName } = require('../lib/name');
 const consentimientosService = require('../services/consentimientos.service');
 const appointmentNotificationCleanup = require('../services/appointmentNotificationCleanup.service');
-const { processAppointmentLeadMilestones } = require('../services/appointmentLeadMilestone.service');
+const {
+    processAppointmentLeadMilestones,
+    syncLeadStatusFromAppointments,
+} = require('../services/appointmentLeadMilestone.service');
 const {
     ensureQualifiedLeadConversion,
     uploadScheduleForLinkedAppointment,
