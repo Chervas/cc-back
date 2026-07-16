@@ -94,6 +94,45 @@ function extractGoogleCampaignReferences(payload) {
   ));
 }
 
+function mergeConnectOnlyQualityCampaignReferences(campaigns, canonicalTargets) {
+  const output = new Map();
+  const upsert = ({ customerId, campaignId, campaignName = null }) => {
+    const cleanCustomer = cleanCustomerId(customerId);
+    const cleanCampaign = cleanPositiveId(campaignId);
+    if (!cleanCustomer || !cleanCampaign) return;
+    const key = `${cleanCustomer}:${cleanCampaign}`;
+    const current = output.get(key);
+    output.set(key, {
+      customer_id: cleanCustomer,
+      campaign_id: cleanCampaign,
+      campaign_name: current?.campaign_name || cleanString(campaignName),
+    });
+  };
+
+  for (const campaign of Array.isArray(campaigns) ? campaigns : []) {
+    upsert({
+      customerId: campaign?.customer_id,
+      campaignId: campaign?.campaign_id,
+      campaignName: campaign?.campaign_name,
+    });
+  }
+
+  // canonicalTargets is produced by the scoped, read-only measurement gate.
+  // Adding its campaign ids closes gaps between conversion routing and the
+  // strategy snapshot; the runtime resolver still enforces the same clinic,
+  // group and account assignments before any Google read.
+  for (const target of Array.isArray(canonicalTargets) ? canonicalTargets : []) {
+    for (const campaignId of Array.isArray(target?.campaign_ids) ? target.campaign_ids : []) {
+      upsert({ customerId: target?.customer_id, campaignId });
+    }
+  }
+
+  return [...output.values()].sort((left, right) => (
+    left.customer_id.localeCompare(right.customer_id)
+      || left.campaign_id.localeCompare(right.campaign_id, 'en', { numeric: true })
+  ));
+}
+
 function buildCampaignQualityGaql(campaignIds, { includeOptimizationScore = true } = {}) {
   const ids = uniqueStrings(campaignIds.map(cleanPositiveId)).filter(Boolean);
   if (!ids.length || ids.length > MAX_CAMPAIGNS_PER_ACCOUNT) {
@@ -572,15 +611,8 @@ async function auditConnectOnlyCampaignQuality({
   now = new Date(),
 } = {}) {
   const refs = new Map();
-  for (const raw of Array.isArray(campaigns) ? campaigns : []) {
-    const customerId = cleanCustomerId(raw?.customer_id);
-    const campaignId = cleanPositiveId(raw?.campaign_id);
-    if (!customerId || !campaignId) continue;
-    refs.set(`${customerId}:${campaignId}`, {
-      customer_id: customerId,
-      campaign_id: campaignId,
-      campaign_name: cleanString(raw?.campaign_name),
-    });
+  for (const ref of mergeConnectOnlyQualityCampaignReferences(campaigns, canonicalTargets)) {
+    refs.set(`${ref.customer_id}:${ref.campaign_id}`, ref);
   }
   const grouped = new Map();
   for (const ref of refs.values()) {
@@ -838,5 +870,6 @@ module.exports = {
   campaignIssuesAndRecommendations,
   campaignQualityFromRow,
   extractGoogleCampaignReferences,
+  mergeConnectOnlyQualityCampaignReferences,
   sanitizeCampaignQualityReport,
 };

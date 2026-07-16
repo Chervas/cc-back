@@ -13,6 +13,7 @@ const {
   campaignIssuesAndRecommendations,
   campaignQualityFromRow,
   extractGoogleCampaignReferences,
+  mergeConnectOnlyQualityCampaignReferences,
   sanitizeCampaignQualityReport,
 } = require('../../services/googleAdsConnectOnlyQualityAudit.service');
 const {
@@ -21,6 +22,7 @@ const {
 } = require('../../services/googleAdsClinicaclickGoalPolicy.service');
 
 const CUSTOMER = '1851215478';
+const CUSTOMER_599 = '5992356722';
 
 function strategyPayload() {
   return {
@@ -286,6 +288,161 @@ async function testReadOnlyAuditChunksLargeAccountsWithoutFalseMissing() {
   assert.doesNotMatch(JSON.stringify(report), /not-persisted/);
 }
 
+async function testQualityScopeUnionsMeasurementAndStrategyCampaignsByAccount() {
+  const strategyCampaigns = [{
+    customer_id: CUSTOMER,
+    campaign_id: '101',
+    campaign_name: '185 strategy only',
+  }, {
+    customer_id: CUSTOMER,
+    campaign_id: '102',
+    campaign_name: '185 shared',
+  }, {
+    customer_id: CUSTOMER,
+    campaign_id: '102',
+    campaign_name: '185 duplicate must collapse',
+  }, {
+    customer_id: CUSTOMER_599,
+    campaign_id: '201',
+    campaign_name: '599 strategy only',
+  }, {
+    customer_id: CUSTOMER_599,
+    campaign_id: '203',
+    campaign_name: '599 shared',
+  }];
+  const canonicalTargets = [{
+    customer_id: CUSTOMER,
+    event: 'lead',
+    canonical_conversion_action_id: '1',
+    campaign_ids: ['102', '103', '103'],
+  }, {
+    customer_id: CUSTOMER_599,
+    event: 'lead',
+    canonical_conversion_action_id: '2',
+    campaign_ids: ['202', '203'],
+  }, {
+    customer_id: CUSTOMER_599,
+    event: 'qualified_lead',
+    canonical_conversion_action_id: '3',
+    campaign_ids: ['202', '203'],
+  }];
+
+  const merged = mergeConnectOnlyQualityCampaignReferences(strategyCampaigns, canonicalTargets);
+  assert.deepEqual(merged.map((item) => `${item.customer_id}:${item.campaign_id}`), [
+    `${CUSTOMER}:101`,
+    `${CUSTOMER}:102`,
+    `${CUSTOMER}:103`,
+    `${CUSTOMER_599}:201`,
+    `${CUSTOMER_599}:202`,
+    `${CUSTOMER_599}:203`,
+  ]);
+  assert.equal(
+    merged.find((item) => item.customer_id === CUSTOMER && item.campaign_id === '102').campaign_name,
+    '185 shared',
+    'the strategy label wins while duplicate measurement targets collapse',
+  );
+
+  const calls = [];
+  const runtimeCustomers = [];
+  const report = await auditConnectOnlyCampaignQuality({
+    scope: { assignment_scope: 'group', group_id: 5 },
+    campaigns: strategyCampaigns,
+    canonicalTargets,
+    dependencies: {
+      resolveRuntime: async ({ customerId }) => {
+        runtimeCustomers.push(customerId);
+        return {
+          customerId,
+          loginCustomerId: '2863224233',
+          accessToken: `read-only-${customerId}`,
+        };
+      },
+      request: async (method, requestPath, options) => {
+        calls.push({ method, requestPath, query: options.data.query });
+        const customerId = requestPath.match(/customers\/(\d+)/)?.[1];
+        const ids = options.data.query.match(/campaign\.id IN \(([^)]+)\)/)?.[1]
+          ?.split(',').map((value) => value.trim()).filter(Boolean) || [];
+        if (options.data.query.includes('FROM campaign\n')) {
+          return {
+            results: ids.map((id) => ({
+              customer: { currencyCode: 'EUR' },
+              campaign: {
+                id,
+                name: `${customerId} campaign ${id}`,
+                status: 'ENABLED',
+                primaryStatus: 'ELIGIBLE',
+                advertisingChannelType: 'SEARCH',
+                biddingStrategyType: 'MAXIMIZE_CONVERSIONS',
+              },
+              campaignBudget: {},
+              metrics: { impressions: 1 },
+            })),
+          };
+        }
+        return {
+          results: ids.map((id) => ({
+            conversionGoalCampaignConfig: {
+              campaign: `customers/${customerId}/campaigns/${id}`,
+              goalConfigLevel: 'CUSTOMER',
+            },
+            campaign: { id, name: `${customerId} campaign ${id}` },
+            customConversionGoal: {},
+          })),
+        };
+      },
+    },
+  });
+
+  assert.deepEqual(runtimeCustomers, [CUSTOMER, CUSTOMER_599]);
+  assert.equal(calls.length, 4, 'each authorized account uses one quality SELECT and one goal SELECT');
+  assert.ok(calls.every((call) => (
+    call.method === 'POST'
+      && call.requestPath.endsWith('/googleAds:search')
+      && !/mutate|upload/i.test(call.requestPath)
+  )));
+  assert.equal(report.summary.configured_campaign_count, 6);
+  assert.equal(report.summary.observed_campaign_count, 6);
+  const byCustomer = new Map(report.accounts.map((account) => [account.customer_id, account]));
+  assert.deepEqual(byCustomer.get(CUSTOMER).campaigns.map((item) => item.campaign_id), ['101', '102', '103']);
+  assert.deepEqual(byCustomer.get(CUSTOMER_599).campaigns.map((item) => item.campaign_id), ['201', '202', '203']);
+  assert.equal(report.external_mutation_count, 0);
+  assert.equal(report.google_ads_mutated, false);
+  assert.doesNotMatch(JSON.stringify(report), /read-only-185|read-only-599/);
+}
+
+async function testMeasurementUnionCannotBypassScopedRuntime() {
+  let requestCount = 0;
+  const report = await auditConnectOnlyCampaignQuality({
+    scope: { assignment_scope: 'clinic', clinic_id: 56 },
+    campaigns: [],
+    canonicalTargets: [{
+      customer_id: CUSTOMER_599,
+      event: 'lead',
+      canonical_conversion_action_id: '2',
+      campaign_ids: ['202'],
+    }],
+    dependencies: {
+      resolveRuntime: async () => {
+        const error = new Error('customer_not_assigned_to_scope');
+        error.code = 'CUSTOMER_NOT_ASSIGNED_TO_SCOPE';
+        throw error;
+      },
+      request: async () => {
+        requestCount += 1;
+        throw new Error('Google must not be called without a scoped runtime');
+      },
+    },
+  });
+
+  assert.equal(requestCount, 0);
+  assert.equal(report.summary.configured_campaign_count, 1);
+  assert.equal(report.summary.observed_campaign_count, 0);
+  assert.equal(report.accounts[0].customer_id, CUSTOMER_599);
+  assert.equal(report.accounts[0].campaigns[0].read_status, 'unavailable');
+  assert.equal(report.external_mutation_count, 0);
+  assert.equal(report.google_ads_mutated, false);
+}
+
 async function testDiscoveryIncludesConnectOnlyWhenGoalPolicyDisabled() {
   const result = await discoverGoalPolicyAuditTargets({
     intakeModel: {
@@ -391,6 +548,8 @@ async function main() {
   testGaqlAndMapping();
   await testReadOnlyAuditBatchesRequests();
   await testReadOnlyAuditChunksLargeAccountsWithoutFalseMissing();
+  await testQualityScopeUnionsMeasurementAndStrategyCampaignsByAccount();
+  await testMeasurementUnionCannotBypassScopedRuntime();
   await testDiscoveryIncludesConnectOnlyWhenGoalPolicyDisabled();
   await testPersistedStatusReportIsAllowlisted();
   console.log('google_ads_connect_only_quality_audit.test.js OK');
