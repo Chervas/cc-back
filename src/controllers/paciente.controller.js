@@ -4,7 +4,11 @@ const { Op, literal, QueryTypes } = require('sequelize');
 const crypto = require('crypto');
 const { normalizePhoneDigits } = require('../lib/phone');
 const { normalizeHumanName } = require('../lib/name');
-const { assertUserCanAccessFeature, canUserAccessFeature } = require('../lib/access-policy');
+const {
+  assertUserCanAccessFeature,
+  canUserAccessFeature,
+  getAccessibleClinicIdsForFeature,
+} = require('../lib/access-policy');
 
 const normalizePhone = (phone) => {
   return normalizePhoneDigits(phone);
@@ -70,8 +74,11 @@ function sendAccessPolicyError(error, res) {
     return res.status(401).json({ message: 'Auth failed!' });
   }
   if (error.status === 403 || error.message === 'access_policy_forbidden') {
+    const featureKey = error.details?.feature_key;
     return res.status(403).json({
-      message: 'No tienes permiso para editar pacientes',
+      message: featureKey === 'patients.edit'
+        ? 'No tienes permiso para editar pacientes'
+        : 'No tienes permiso para ver pacientes en esta clínica',
       details: error.details || null,
     });
   }
@@ -79,6 +86,107 @@ function sendAccessPolicyError(error, res) {
     return res.status(400).json({ message: 'clinica_id es obligatorio' });
   }
   return null;
+}
+
+const normalizeClinicIds = (values) => Array.from(new Set(
+  (Array.isArray(values) ? values : [values])
+    .map((value) => Number.parseInt(String(value), 10))
+    .filter((value) => Number.isInteger(value) && value > 0)
+));
+
+const patientClinicIds = (paciente) => normalizeClinicIds([
+  paciente?.clinica_id,
+  ...((paciente?.clinicasVinculadas || []).map((link) => link?.clinica_id)),
+]);
+
+async function accessibleClinicIds(req, featureKey, clinicIds, { requireAll = false } = {}) {
+  const actorId = Number(req.userData?.userId);
+  const requested = normalizeClinicIds(clinicIds);
+  if (!Number.isFinite(actorId)) {
+    const error = new Error('auth_failed');
+    error.status = 401;
+    throw error;
+  }
+  if (!requested.length) {
+    const error = new Error('clinic_id_required');
+    error.status = 400;
+    throw error;
+  }
+
+  const allowed = await getAccessibleClinicIdsForFeature({
+    actorId,
+    featureKey,
+    clinicIds: requested,
+  });
+  if (!allowed.length || (requireAll && allowed.length !== requested.length)) {
+    const error = new Error('access_policy_forbidden');
+    error.status = 403;
+    error.details = { feature_key: featureKey, clinic_ids: requested };
+    throw error;
+  }
+  return allowed;
+}
+
+async function allClinicsAccessibleToActor(req, featureKey) {
+  const actorId = Number(req.userData?.userId);
+  if (!Number.isFinite(actorId)) {
+    const error = new Error('auth_failed');
+    error.status = 401;
+    throw error;
+  }
+  return getAccessibleClinicIdsForFeature({ actorId, featureKey });
+}
+
+async function canViewSensitivePatientData(req, clinicIds) {
+  const actorId = Number(req.userData?.userId);
+  const ids = normalizeClinicIds(clinicIds);
+  if (!Number.isFinite(actorId) || !ids.length) return false;
+  const decisions = await Promise.all(ids.map((clinicId) => canUserAccessFeature({
+    actorId,
+    featureKey: 'patients.sensitive.view',
+    clinicId,
+  }).catch(() => false)));
+  return decisions.every(Boolean);
+}
+
+const patientPseudonym = (paciente) => crypto
+  .createHash('sha256')
+  .update(`patient:${paciente?.public_id || paciente?.id_paciente || 'unknown'}`)
+  .digest('hex')
+  .slice(0, 6)
+  .toUpperCase();
+
+function redactEmbeddedPatient(paciente) {
+  if (!paciente) return paciente;
+  const plain = typeof paciente.toJSON === 'function' ? paciente.toJSON() : { ...paciente };
+  const suffix = patientPseudonym(plain);
+  const sensitiveFields = [
+    'dni', 'telefono_movil', 'email', 'telefono_secundario', 'foto',
+    'fecha_nacimiento', 'edad', 'estatura', 'peso', 'sexo', 'profesion',
+    'alergias', 'antecedentes', 'medicacion',
+  ];
+  const redacted = {
+    ...plain,
+    nombre: 'Paciente',
+    apellidos: `#${suffix}`,
+    privacy_redacted: true,
+  };
+  sensitiveFields.forEach((field) => { redacted[field] = null; });
+  delete redacted.proxima_cita;
+  delete redacted.ultima_cita;
+  if (Array.isArray(redacted.relaciones)) {
+    redacted.relaciones = redacted.relaciones.map((relation) => ({
+      ...relation,
+      relacionado: redactEmbeddedPatient(relation?.relacionado),
+    }));
+  }
+  if (Array.isArray(redacted.tutorDe)) {
+    redacted.tutorDe = redacted.tutorDe.map((relation) => ({
+      ...relation,
+      paciente: redactEmbeddedPatient(relation?.paciente),
+    }));
+  }
+  return redacted;
 }
 
 const generateUniquePacientePublicId = async () => {
@@ -222,10 +330,12 @@ const serializePacienteAppointmentSummary = (cita) => {
   };
 };
 
-const getPacienteAppointmentBounds = async (pacienteId) => {
+const getPacienteAppointmentBounds = async (pacienteId, clinicIds) => {
   const now = new Date();
+  const readableClinicIds = normalizeClinicIds(clinicIds);
   const baseWhere = {
     paciente_id: pacienteId,
+    clinica_id: { [Op.in]: readableClinicIds },
     estado: { [Op.notIn]: ACTIVE_APPOINTMENT_EXCLUDED_STATES },
   };
   const include = buildPacienteAppointmentInclude();
@@ -353,6 +463,66 @@ const collectPacienteClinics = (paciente) => {
   return Array.from(clinics.values());
 };
 
+const restrictEmbeddedPatientClinicScope = (patientLike, readableClinicIds) => {
+  if (!patientLike) return patientLike;
+  const plain = typeof patientLike.toJSON === 'function' ? patientLike.toJSON() : { ...patientLike };
+  const allowed = new Set(normalizeClinicIds(readableClinicIds));
+  const scoped = { ...plain };
+  const primaryClinicId = Number.parseInt(String(plain.clinica_id ?? plain.clinica?.id_clinica ?? ''), 10);
+  if (primaryClinicId && !allowed.has(primaryClinicId)) {
+    scoped.clinica_id = null;
+    scoped.clinica = null;
+    // Las relaciones y tutorías pueden apuntar a una ficha de otra sede. El
+    // include no trae todos sus vínculos, así que no se puede inferir de forma
+    // segura que el actor la vea por otra clínica: se conserva la relación,
+    // pero nunca sus datos identificativos o clínicos.
+    return redactEmbeddedPatient(scoped);
+  }
+  if (Array.isArray(plain.clinicasVinculadas)) {
+    scoped.clinicasVinculadas = plain.clinicasVinculadas.filter((link) => (
+      allowed.has(Number.parseInt(String(link?.clinica_id ?? ''), 10))
+    ));
+  }
+  return scoped;
+};
+
+const restrictPacientePayloadToClinics = (paciente, readableClinicIds) => {
+  const plain = typeof paciente?.toJSON === 'function' ? paciente.toJSON() : { ...(paciente || {}) };
+  const allowed = new Set(normalizeClinicIds(readableClinicIds));
+  const originalClinicIds = patientClinicIds(plain);
+  const scopedLinks = Array.isArray(plain.clinicasVinculadas)
+    ? plain.clinicasVinculadas.filter((link) => (
+        allowed.has(Number.parseInt(String(link?.clinica_id ?? ''), 10))
+      ))
+    : [];
+  const primaryClinicId = Number.parseInt(String(plain.clinica_id ?? ''), 10);
+  const primaryVisible = allowed.has(primaryClinicId);
+  const fallbackLink = scopedLinks[0] || null;
+  const scoped = {
+    ...plain,
+    clinica_id: primaryVisible
+      ? primaryClinicId
+      : (Number.parseInt(String(fallbackLink?.clinica_id ?? ''), 10) || null),
+    clinica: primaryVisible ? (plain.clinica || null) : (fallbackLink?.clinica || null),
+    clinicasVinculadas: scopedLinks,
+    scope_limited: originalClinicIds.some((clinicId) => !allowed.has(clinicId)),
+  };
+
+  if (Array.isArray(plain.relaciones)) {
+    scoped.relaciones = plain.relaciones.map((relation) => ({
+      ...relation,
+      relacionado: restrictEmbeddedPatientClinicScope(relation?.relacionado, readableClinicIds),
+    }));
+  }
+  if (Array.isArray(plain.tutorDe)) {
+    scoped.tutorDe = plain.tutorDe.map((relation) => ({
+      ...relation,
+      paciente: restrictEmbeddedPatientClinicScope(relation?.paciente, readableClinicIds),
+    }));
+  }
+  return scoped;
+};
+
 const isPacienteLinkedToClinic = (paciente, clinicaId) => {
   const targetClinicaId = parseInt(clinicaId, 10);
   if (!targetClinicaId) return false;
@@ -463,6 +633,41 @@ const buildPacienteDuplicadoPayload = ({ paciente, clinicaId, normPhone, normEma
   };
 };
 
+const buildPacienteDuplicadoPayloadForRequest = async (req, args) => {
+  const { paciente, clinicaId, normPhone, normEmail } = args;
+  const base = buildPacienteDuplicadoPayload(args);
+  const actorId = Number(req.userData?.userId);
+  const linkedClinicIds = patientClinicIds(paciente);
+  const allowedClinicIds = Number.isFinite(actorId) && linkedClinicIds.length
+    ? await getAccessibleClinicIdsForFeature({
+        actorId,
+        featureKey: 'patients.sensitive.view',
+        clinicIds: linkedClinicIds,
+      }).catch(() => [])
+    : [];
+
+  if (!allowedClinicIds.length) {
+    return {
+      ...base,
+      message: `Ya existe un paciente con este ${resolveDuplicateContactLabel({ normPhone, normEmail })} en otra clínica del grupo`,
+      paciente: null,
+      clinicaNombre: null,
+      reuseCandidate: false,
+      vinculos: [],
+      privacy_redacted: true,
+    };
+  }
+
+  const scopedPatient = restrictPacientePayloadToClinics(paciente, allowedClinicIds);
+  return {
+    ...base,
+    paciente: scopedPatient,
+    clinicaNombre: base.sameClinic ? null : resolvePacienteClinicLabel(scopedPatient, clinicaId),
+    vinculos: collectPacienteClinics(scopedPatient),
+    privacy_redacted: false,
+  };
+};
+
 const getClinicaIdsForScope = async (clinicaId, scope) => {
   if (!clinicaId) return [];
   if (scope !== 'grupo') return [parseInt(clinicaId, 10)];
@@ -480,9 +685,24 @@ const getClinicaIdsForScope = async (clinicaId, scope) => {
 
 exports.getAllPacientes = async (req, res) => {
   try {
-    let whereClause = {};
+    const requestedClinicIds = req.query.clinica_id
+      ? normalizeClinicIds(String(req.query.clinica_id).split(','))
+      : null;
+    const readableClinicIds = requestedClinicIds
+      ? await accessibleClinicIds(req, 'patients.view', requestedClinicIds, { requireAll: true })
+      : await allClinicsAccessibleToActor(req, 'patients.view');
+    if (!readableClinicIds.length) {
+      return res.json([]);
+    }
+
     const include = [
       { model: Clinica, as: 'clinica' },
+      {
+        model: PacienteClinica,
+        as: 'clinicasVinculadas',
+        required: false,
+        include: [{ model: Clinica, as: 'clinica' }]
+      },
       {
         model: PacienteRelacion,
         as: 'relaciones',
@@ -500,30 +720,14 @@ exports.getAllPacientes = async (req, res) => {
         ]
       }
     ];
-
-    if (req.query.clinica_id) {
-      const clinicaParam = req.query.clinica_id;
-      const clinicaList = typeof clinicaParam === 'string' && clinicaParam.indexOf(',') !== -1
-        ? clinicaParam.split(',').map(id => parseInt(id, 10))
-        : [parseInt(clinicaParam, 10)];
-
-      include.push({
-        model: PacienteClinica,
-        as: 'clinicasVinculadas',
-        required: false,
-        include: [{ model: Clinica, as: 'clinica' }]
-      });
-
-      const clinicFilter = clinicaList.length === 1 ? clinicaList[0] : { [Op.in]: clinicaList };
-      const clinicExists = literal(`EXISTS (SELECT 1 FROM PacienteClinicas pc WHERE pc.paciente_id = Paciente.id_paciente AND pc.clinica_id IN (${clinicaList.join(',')}))`);
-
-      whereClause = {
-        [Op.or]: [
-          { clinica_id: clinicFilter },
-          clinicExists
-        ]
-      };
-    }
+    const clinicFilter = readableClinicIds.length === 1 ? readableClinicIds[0] : { [Op.in]: readableClinicIds };
+    const clinicExists = literal(`EXISTS (SELECT 1 FROM PacienteClinicas pc WHERE pc.paciente_id = Paciente.id_paciente AND pc.clinica_id IN (${readableClinicIds.join(',')}))`);
+    const whereClause = {
+      [Op.or]: [
+        { clinica_id: clinicFilter },
+        clinicExists
+      ]
+    };
     const pacientes = await Paciente.findAll({
       where: whereClause,
       include,
@@ -531,8 +735,14 @@ exports.getAllPacientes = async (req, res) => {
       order: [['nombre', 'ASC']]
     });
     await Promise.all(pacientes.map((paciente) => ensurePacientePublicId(paciente)));
-    res.json(pacientes);
+    const mayViewSensitive = await canViewSensitivePatientData(req, readableClinicIds);
+    const scopedPatients = pacientes.map((paciente) => (
+      restrictPacientePayloadToClinics(paciente, readableClinicIds)
+    ));
+    res.json(mayViewSensitive ? scopedPatients : scopedPatients.map(redactEmbeddedPatient));
   } catch (error) {
+    const handled = sendAccessPolicyError(error, res);
+    if (handled) return handled;
     res.status(500).json({ message: 'Error retrieving pacientes', error: error.message });
   }
 };
@@ -623,7 +833,13 @@ exports.searchPacientes = async (req, res) => {
     }
 
     const clinicaIds = await getClinicaIdsForScope(clinicaId, scope);
-    const clinicIdsList = clinicaIds.map(id => parseInt(id, 10)).filter(id => !isNaN(id));
+    const clinicIdsList = await accessibleClinicIds(req, 'patients.view', clinicaIds);
+    if (!await canViewSensitivePatientData(req, clinicIdsList)) {
+      return res.status(403).json({
+        message: 'La búsqueda identificativa de pacientes no está disponible para este rol',
+        error: 'patient_sensitive_data_forbidden',
+      });
+    }
     const clinicFilter = clinicIdsList.length === 1 ? clinicIdsList[0] : { [Op.in]: clinicIdsList };
     const clinicExists = clinicIdsList.length > 0
       ? literal(`EXISTS (SELECT 1 FROM PacienteClinicas pc WHERE pc.paciente_id = Paciente.id_paciente AND pc.clinica_id IN (${clinicIdsList.join(',')}))`)
@@ -657,8 +873,12 @@ exports.searchPacientes = async (req, res) => {
       distinct: true
     });
     await Promise.all(pacientes.map((paciente) => ensurePacientePublicId(paciente)));
-    res.json(pacientes);
+    res.json(pacientes.map((paciente) => (
+      restrictPacientePayloadToClinics(paciente, clinicIdsList)
+    )));
   } catch (error) {
+    const handled = sendAccessPolicyError(error, res);
+    if (handled) return handled;
     res.status(500).json({ message: 'Error al buscar pacientes', error: error.message });
   }
 };
@@ -674,6 +894,7 @@ exports.checkDuplicates = async (req, res) => {
     if (!clinica_id) {
       return res.status(400).json({ message: 'clinica_id es obligatorio' });
     }
+    await assertPatientEditAccess(req, clinica_id);
 
     const pacienteExistente = await findDuplicatePaciente({
       telefono,
@@ -686,23 +907,16 @@ exports.checkDuplicates = async (req, res) => {
       return res.json({ exists: false });
     }
 
-    const targetClinicaId = parseInt(clinica_id, 10);
-    const hasLink = isPacienteLinkedToClinic(pacienteExistente, targetClinicaId);
-    const clinicaNombre = hasLink ? null : resolvePacienteClinicLabel(pacienteExistente, targetClinicaId);
-
-    return res.json({
-      exists: true,
+    const duplicatePayload = await buildPacienteDuplicadoPayloadForRequest(req, {
       paciente: pacienteExistente,
-      sameClinic: hasLink,
-      clinicaNombre,
-      reuseCandidate: !hasLink,
-      vinculos: (pacienteExistente.clinicasVinculadas || []).map(vc => ({
-        clinica_id: vc.clinica_id,
-        clinicaNombre: vc.clinica?.nombre_clinica || null,
-        es_principal: vc.es_principal
-      }))
+      clinicaId: parseInt(clinica_id, 10),
+      normPhone,
+      normEmail,
     });
+    return res.json({ exists: true, ...duplicatePayload });
   } catch (error) {
+    const handled = sendAccessPolicyError(error, res);
+    if (handled) return handled;
     res.status(500).json({ message: 'Error al verificar duplicados', error: error.message });
   }
 };
@@ -710,10 +924,16 @@ exports.checkDuplicates = async (req, res) => {
 exports.getConsents = async (req, res) => {
   try {
     const pacienteId = req.params.id;
-    const paciente = await findPacienteByIdentifier(pacienteId);
+    const paciente = await findPacienteByIdentifier(pacienteId, {
+      include: [{ model: PacienteClinica, as: 'clinicasVinculadas', required: false }],
+    });
     if (!paciente) {
       return res.status(404).json({ message: 'Paciente no encontrado' });
     }
+    // La tabla legacy no identifica la clínica que originó cada documento.
+    // Si el paciente pertenece también a una clínica no visible, no es posible
+    // filtrar el contenido sin arriesgar una fuga entre sedes.
+    await accessibleClinicIds(req, 'consents.view', patientClinicIds(paciente), { requireAll: true });
 
     const consents = await PacienteConsentimiento.findAll({
       where: { paciente_id: paciente.id_paciente },
@@ -722,6 +942,8 @@ exports.getConsents = async (req, res) => {
 
     return res.status(200).json(consents);
   } catch (error) {
+    const handled = sendAccessPolicyError(error, res);
+    if (handled) return handled;
     return res.status(500).json({ message: 'Error obteniendo consentimientos', error: error.message });
   }
 };
@@ -748,26 +970,49 @@ exports.getPacienteById = async (req, res) => {
       return res.status(404).json({ message: 'Paciente not found' });
     }
     await ensurePacientePublicId(paciente);
-    const appointmentSummary = await getPacienteAppointmentBounds(paciente.id_paciente);
-    res.json({
-      ...(typeof paciente.toJSON === 'function' ? paciente.toJSON() : paciente),
-      ...appointmentSummary,
-    });
+    const readableClinicIds = await accessibleClinicIds(req, 'patients.view', patientClinicIds(paciente));
+    const mayViewSensitive = await canViewSensitivePatientData(req, readableClinicIds);
+    if (!mayViewSensitive) {
+      return res.status(403).json({
+        message: 'El detalle del paciente no está disponible para este rol',
+        error: 'patient_detail_forbidden',
+      });
+    }
+    const payload = {
+      ...restrictPacientePayloadToClinics(paciente, readableClinicIds),
+      ...await getPacienteAppointmentBounds(paciente.id_paciente, readableClinicIds),
+    };
+    res.json(payload);
   } catch (error) {
+    const handled = sendAccessPolicyError(error, res);
+    if (handled) return handled;
     res.status(500).json({ message: 'Error retrieving paciente', error: error.message });
   }
 };
 
 exports.getPacienteActivity = async (req, res) => {
   try {
-    const paciente = await findPacienteByIdentifier(req.params.id, { attributes: ['id_paciente', 'public_id', 'clinica_id'] });
+    const paciente = await findPacienteByIdentifier(req.params.id, {
+      attributes: ['id_paciente', 'public_id', 'clinica_id'],
+      include: [{ model: PacienteClinica, as: 'clinicasVinculadas', required: false, attributes: ['clinica_id'] }],
+    });
     if (!paciente) {
       return res.status(400).json({ message: 'Paciente inválido' });
+    }
+    const readableClinicIds = await accessibleClinicIds(req, 'patients.view', patientClinicIds(paciente));
+    if (!await canViewSensitivePatientData(req, readableClinicIds)) {
+      return res.status(403).json({
+        message: 'El registro clínico del paciente no está disponible para este rol',
+        error: 'patient_sensitive_data_forbidden',
+      });
     }
     const pacienteId = Number(paciente.id_paciente);
 
     const citas = await CitaPaciente.findAll({
-      where: { paciente_id: pacienteId },
+      where: {
+        paciente_id: pacienteId,
+        clinica_id: { [Op.in]: readableClinicIds },
+      },
       attributes: [
         'id_cita',
         'paciente_id',
@@ -926,6 +1171,7 @@ exports.getPacienteActivity = async (req, res) => {
       LEFT JOIN MarketingPatientListItems i ON i.id = e.item_id
       LEFT JOIN Clinicas cl ON cl.id_clinica = COALESCE(i.clinica_id, l.clinica_id)
       WHERE COALESCE(e.paciente_id, i.paciente_id) = :pacienteId
+        AND COALESCE(i.clinica_id, l.clinica_id) IN (:readableClinicIds)
         AND e.event_type IN (
           'review_rating_received',
           'review_rating_followup_sent',
@@ -946,7 +1192,7 @@ exports.getPacienteActivity = async (req, res) => {
       ORDER BY e.occurred_at DESC
       LIMIT 60
       `,
-      { replacements: { pacienteId }, type: QueryTypes.SELECT }
+      { replacements: { pacienteId, readableClinicIds }, type: QueryTypes.SELECT }
     );
 
     const reviewEventConfig = {
@@ -1015,19 +1261,20 @@ exports.getPacienteActivity = async (req, res) => {
       });
     }
 
-    const canViewNutritionActivity = PatientNutritionReport && PatientNutritionMeasurement
-      ? await canUserAccessFeature({
+    const nutritionClinicIds = PatientNutritionReport && PatientNutritionMeasurement
+      ? await getAccessibleClinicIdsForFeature({
           actorId: Number(req.userData?.userId),
           featureKey: 'nutrition.workspace.view',
-          clinicId: Number(paciente.clinica_id),
-        }).catch(() => false)
-      : false;
+          clinicIds: readableClinicIds,
+        }).catch(() => [])
+      : [];
 
-    if (canViewNutritionActivity) {
+    if (nutritionClinicIds.length) {
       try {
         const nutritionReports = await PatientNutritionReport.findAll({
           where: {
             patient_id: pacienteId,
+            clinic_id: { [Op.in]: nutritionClinicIds },
             status: 'final',
           },
           attributes: [
@@ -1119,6 +1366,8 @@ exports.getPacienteActivity = async (req, res) => {
 
     return res.json(items.sort((a, b) => new Date(b.fecha).getTime() - new Date(a.fecha).getTime()));
   } catch (error) {
+    const handled = sendAccessPolicyError(error, res);
+    if (handled) return handled;
     return res.status(500).json({ message: 'Error retrieving paciente activity', error: error.message });
   }
 };
@@ -1142,6 +1391,25 @@ exports.createPaciente = async (req, res) => {
     }
     await assertPatientEditAccess(req, clinica_id);
 
+    let tutorPaciente = null;
+    if (tutor?.id_paciente_relacionado) {
+      tutorPaciente = await findPacienteByIdentifier(tutor.id_paciente_relacionado, {
+        include: [{ model: PacienteClinica, as: 'clinicasVinculadas', required: false }],
+      });
+      const actorId = Number(req.userData?.userId);
+      const tutorClinicIds = patientClinicIds(tutorPaciente);
+      const visibleTutorClinics = tutorPaciente && Number.isFinite(actorId)
+        ? await getAccessibleClinicIdsForFeature({
+            actorId,
+            featureKey: 'patients.sensitive.view',
+            clinicIds: tutorClinicIds,
+          }).catch(() => [])
+        : [];
+      if (!tutorPaciente || !visibleTutorClinics.length) {
+        return res.status(404).json({ message: 'Tutor no encontrado' });
+      }
+    }
+
     if (normPhone || normEmail) {
       const existente = await findDuplicatePaciente({
         telefono: telefono_movil,
@@ -1151,7 +1419,7 @@ exports.createPaciente = async (req, res) => {
       });
       if (existente) {
         return res.status(409).json(
-          buildPacienteDuplicadoPayload({
+          await buildPacienteDuplicadoPayloadForRequest(req, {
             paciente: existente,
             clinicaId: clinica_id,
             normPhone,
@@ -1188,10 +1456,10 @@ exports.createPaciente = async (req, res) => {
     });
 
     // Crear relación con tutor si aplica
-    if (tutor?.id_paciente_relacionado) {
+    if (tutorPaciente) {
       await PacienteRelacion.create({
         id_paciente: newPaciente.id_paciente,
-        id_paciente_relacionado: tutor.id_paciente_relacionado,
+        id_paciente_relacionado: tutorPaciente.id_paciente,
         tipo_relacion: tutor.tipo_relacion || 'tutor_legal',
         es_contacto_principal: tutor.es_contacto_principal === false ? false : true,
         fecha_inicio: tutor.fecha_inicio || new Date()
@@ -1298,7 +1566,7 @@ exports.updatePaciente = async (req, res) => {
 
       if (duplicado) {
         return res.status(409).json(
-          buildPacienteDuplicadoPayload({
+          await buildPacienteDuplicadoPayloadForRequest(req, {
             paciente: duplicado,
             clinicaId: nextClinicaId,
             normPhone,
@@ -1367,7 +1635,7 @@ exports.transferirContacto = async (req, res) => {
       });
       if (duplicado) {
         return res.status(409).json(
-          buildPacienteDuplicadoPayload({
+          await buildPacienteDuplicadoPayloadForRequest(req, {
             paciente: duplicado,
             clinicaId: paciente.clinica_id,
             normPhone,
@@ -1416,3 +1684,7 @@ exports.deletePaciente = async (req, res) => {
     res.status(500).json({ message: 'Error deleting paciente', error: error.message });
   }
 };
+
+exports.__patientClinicScopeContract = Object.freeze({
+  restrictPacientePayloadToClinics,
+});

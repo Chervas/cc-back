@@ -359,7 +359,7 @@ class MetaSyncJobs {
       googleAdsSync: 'Sincroniza campañas y métricas diarias de Google Ads para cuentas vinculadas.',
       googleAdsBackfill: 'Backfill de Google Ads para nuevas cuentas o rangos extendidos.',
       googleDataManagerDiagnostics: 'Concilia Data Manager, la capacidad visitor_choice de todas las webs y el gate interno de Conversiones mejoradas.',
-      googleConversionGoalPolicyAudit: 'Audita sin autoreparar acciones canónicas, custom goal y campañas opt-in de ClinicaClick.',
+      googleConversionGoalPolicyAudit: 'Audita sin autoreparar la medición de Mide y mejora y la policy de goals/campañas opt-in de ClinicaClick.',
       campaignOptimizationEvaluation: 'Evalúa diariamente políticas persistidas de optimización sin cambiar objetivos ni mutar Google Ads.',
       webSync: 'Sincroniza Search Console (serie diaria) y PSI reciente para clínicas mapeadas.',
       webBackfill: 'Backfill histórico de Search Console (12–16 meses) para cache y rapidez.',

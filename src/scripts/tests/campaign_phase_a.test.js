@@ -17,7 +17,7 @@ const {
   prepareCampaignLevelFallbackRows,
   shouldMarkGoogleAdsAccountSynced,
 } = require('../../lib/googleAdsSyncHelpers');
-const { ADMIN_ROLES, STAFF_ROLES } = require('../../lib/role-helpers');
+const { MARKETING_WRITE_ROLES, STAFF_ROLES } = require('../../lib/role-helpers');
 const {
   createPinnedLookup,
   isUnsafeIpAddress,
@@ -98,7 +98,7 @@ async function testScopeAuthorization() {
     membershipModel: fullMembershipModel,
     globalAdminCheck: () => false,
   });
-  assert.deepEqual(captured.where.rol_clinica[Op.in], ADMIN_ROLES);
+  assert.deepEqual(captured.where.rol_clinica[Op.in], MARKETING_WRITE_ROLES);
 
   let queried = false;
   assert.equal(await hasMarketingClinicScopeAccess({

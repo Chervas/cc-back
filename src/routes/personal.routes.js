@@ -3,6 +3,7 @@ const router = express.Router();
 
 const authMiddleware = require('./auth.middleware');
 const personalController = require('../controllers/personal.controller');
+const { requirePersonalMergeAccess } = require('../lib/personalMergeAccess');
 
 // Reclamación de cuenta provisional (flujo onboarding por email)
 router.post('/reclamar', personalController.claimProvisionalAccount);
@@ -23,7 +24,7 @@ router.post('/:id/invitacion/responder', personalController.responderInvitacion)
 // Compat legacy / transición
 router.post('/search', personalController.searchPersonal);
 router.post('/invite', personalController.invitePersonal);
-router.post('/fusionar', personalController.mergePersonalAccounts);
+router.post('/fusionar', requirePersonalMergeAccess, personalController.mergePersonalAccounts);
 router.get('/me/invitaciones', personalController.getMyInvitations);
 router.post('/me/invitaciones/:clinicaId/aceptar', personalController.acceptMyInvitation);
 router.post('/me/invitaciones/:clinicaId/rechazar', personalController.rejectMyInvitation);

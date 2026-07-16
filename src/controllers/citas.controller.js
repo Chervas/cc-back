@@ -35,7 +35,11 @@ const {
     ensureQualifiedLeadConversion,
     uploadScheduleForLinkedAppointment,
 } = require('../services/leadQualificationMilestone.service');
-const { assertUserCanAccessFeature } = require('../lib/access-policy');
+const {
+    assertUserCanAccessFeature,
+    canUserAccessFeature,
+    getAccessibleClinicIdsForFeature,
+} = require('../lib/access-policy');
 
 const CITA_ESTADOS_VALIDOS = new Set(CITA_STATUS_VALUES);
 const ACTIVE_APPOINTMENT_WHERE = { estado: { [Op.ne]: 'cancelada' } };
@@ -49,6 +53,105 @@ const CITA_ESTADOS_RESUELVEN_NOTIFICACIONES = new Set([
     'no_asistio'
 ]);
 const generatePacientePublicId = () => `pac_${crypto.randomBytes(10).toString('hex')}`;
+
+function appointmentPatientPseudonym(patientLike) {
+    const plain = patientLike?.toJSON ? patientLike.toJSON() : (patientLike || {});
+    return crypto
+        .createHash('sha256')
+        .update(`appointment-patient:${plain.public_id || plain.id_paciente || 'unknown'}`)
+        .digest('hex')
+        .slice(0, 6)
+        .toUpperCase();
+}
+
+function redactAppointmentPatient(patientLike) {
+    if (!patientLike) return null;
+    const plain = patientLike?.toJSON ? patientLike.toJSON() : { ...patientLike };
+    return {
+        id_paciente: plain.id_paciente || null,
+        public_id: plain.public_id || null,
+        nombre: 'Paciente',
+        apellidos: `#${appointmentPatientPseudonym(plain)}`,
+        privacy_redacted: true,
+    };
+}
+
+function redactAppointmentLead(leadLike) {
+    if (!leadLike) return null;
+    const plain = leadLike?.toJSON ? leadLike.toJSON() : { ...leadLike };
+    return {
+        id: plain.id || null,
+        clinica_id: plain.clinica_id || null,
+        grupo_clinica_id: plain.grupo_clinica_id || null,
+        campana_id: plain.campana_id || null,
+        channel: plain.channel || null,
+        source: plain.source || null,
+        source_detail: plain.source_detail || null,
+        utm_source: plain.utm_source || null,
+        utm_medium: plain.utm_medium || null,
+        utm_campaign: plain.utm_campaign || null,
+        status_lead: plain.status_lead || null,
+        created_at: plain.created_at || null,
+        privacy_redacted: true,
+        privacy_access: 'attribution_only',
+    };
+}
+
+async function appointmentPrivacyCapabilities(req, clinicIds) {
+    const actorId = Number(req.userData?.userId);
+    const ids = Array.from(new Set((clinicIds || [])
+        .map((id) => Number(id))
+        .filter((id) => Number.isInteger(id) && id > 0)));
+    const entries = await Promise.all(ids.map(async (clinicId) => {
+        const [patientSensitive, leadSensitive, consentView] = await Promise.all([
+            canUserAccessFeature({ actorId, featureKey: 'patients.sensitive.view', clinicId }).catch(() => false),
+            canUserAccessFeature({ actorId, featureKey: 'leads.sensitive.view', clinicId }).catch(() => false),
+            canUserAccessFeature({ actorId, featureKey: 'consents.view', clinicId }).catch(() => false),
+        ]);
+        return [clinicId, { patientSensitive, leadSensitive, consentView }];
+    }));
+    return new Map(entries);
+}
+
+function protectAppointmentPayload(citaLike, capabilities = {}) {
+    if (!citaLike) return citaLike;
+    const plain = citaLike?.toJSON ? citaLike.toJSON() : { ...citaLike };
+    const protectedPayload = { ...plain };
+    if (!capabilities.patientSensitive) {
+        protectedPayload.paciente = redactAppointmentPatient(plain.paciente);
+        protectedPayload.titulo = null;
+        protectedPayload.nota = null;
+        protectedPayload.motivo = null;
+        protectedPayload.tratamiento_id = null;
+        protectedPayload.tratamiento = null;
+        protectedPayload.conversation_id = null;
+        protectedPayload.unread_count = 0;
+        protectedPayload.appointment_flow = null;
+        protectedPayload.nutrition_latest_measurement = null;
+        protectedPayload.consent_summary = null;
+        protectedPayload.privacy_redacted = true;
+    }
+    if (!capabilities.leadSensitive) {
+        protectedPayload.lead = redactAppointmentLead(plain.lead);
+    }
+    if (!capabilities.consentView) {
+        protectedPayload.consent_summary = null;
+    }
+    return protectedPayload;
+}
+
+async function protectAppointmentsForRequest(req, citas) {
+    const list = Array.isArray(citas) ? citas : (citas ? [citas] : []);
+    const capabilities = await appointmentPrivacyCapabilities(
+        req,
+        list.map((cita) => cita?.clinica_id ?? cita?.clinic_id),
+    );
+    const protectedList = list.map((cita) => protectAppointmentPayload(
+        cita,
+        capabilities.get(Number(cita?.clinica_id ?? cita?.clinic_id)) || {},
+    ));
+    return Array.isArray(citas) ? protectedList : (protectedList[0] || null);
+}
 
 async function assertAppointmentManageAccess(req, clinicId) {
     const actorId = Number(req.userData?.userId);
@@ -73,13 +176,64 @@ async function assertAppointmentManageAccess(req, clinicId) {
     });
 }
 
+async function assertAppointmentViewAccess(req, clinicId) {
+    const actorId = Number(req.userData?.userId);
+    const normalizedClinicId = Number(clinicId);
+    if (!Number.isFinite(actorId)) {
+        const error = new Error('auth_failed');
+        error.status = 401;
+        throw error;
+    }
+    if (!Number.isFinite(normalizedClinicId)) {
+        const error = new Error('clinic_id_required');
+        error.status = 400;
+        throw error;
+    }
+    await assertUserCanAccessFeature({
+        actorId,
+        featureKey: 'appointments.view',
+        clinicId: normalizedClinicId,
+    });
+}
+
+function parseClinicIds(value) {
+    return Array.from(new Set(String(value || '')
+        .split(',')
+        .map((item) => Number.parseInt(item, 10))
+        .filter((item) => Number.isInteger(item) && item > 0)));
+}
+
+async function resolveAppointmentReadClinicIds(req, value) {
+    const actorId = Number(req.userData?.userId);
+    if (!Number.isFinite(actorId)) {
+        const error = new Error('auth_failed');
+        error.status = 401;
+        throw error;
+    }
+    const requested = parseClinicIds(value);
+    const allowed = await getAccessibleClinicIdsForFeature({
+        actorId,
+        featureKey: 'appointments.view',
+        clinicIds: requested.length ? requested : null,
+    });
+    if ((requested.length && allowed.length !== requested.length) || !allowed.length) {
+        const error = new Error('access_policy_forbidden');
+        error.status = 403;
+        error.details = { feature_key: 'appointments.view', clinic_ids: requested };
+        throw error;
+    }
+    return allowed;
+}
+
 function sendAppointmentAccessPolicyError(error, res) {
     if (error.status === 401 || error.message === 'auth_failed') {
         return res.status(401).json({ message: 'Auth failed!' });
     }
     if (error.status === 403 || error.message === 'access_policy_forbidden') {
         return res.status(403).json({
-            message: 'No tienes permiso para gestionar la agenda',
+            message: error.details?.feature_key === 'appointments.view'
+                ? 'No tienes permiso para ver esta agenda'
+                : 'No tienes permiso para gestionar la agenda',
             details: error.details || null,
         });
     }
@@ -96,6 +250,27 @@ async function denyAppointmentManageAccessIfNeeded(req, res, clinicId) {
     } catch (error) {
         const handled = sendAppointmentAccessPolicyError(error, res);
         if (handled) return true;
+        throw error;
+    }
+}
+
+async function denyAppointmentViewAccessIfNeeded(req, res, clinicId) {
+    try {
+        await assertAppointmentViewAccess(req, clinicId);
+        return false;
+    } catch (error) {
+        const handled = sendAppointmentAccessPolicyError(error, res);
+        if (handled) return true;
+        throw error;
+    }
+}
+
+async function resolveAppointmentReadClinicIdsOrRespond(req, res, value) {
+    try {
+        return await resolveAppointmentReadClinicIds(req, value);
+    } catch (error) {
+        const handled = sendAppointmentAccessPolicyError(error, res);
+        if (handled) return null;
         throw error;
     }
 }
@@ -194,6 +369,31 @@ async function findPacienteByIdentifier(id) {
         where: { public_id: { [Op.in]: publicIds } },
         include: [{ model: db.PacienteClinica, as: 'clinicasVinculadas', required: false }]
     });
+}
+
+function patientClinicIds(paciente) {
+    return Array.from(new Set([
+        Number(paciente?.clinica_id),
+        ...(paciente?.clinicasVinculadas || []).map((link) => Number(link?.clinica_id)),
+    ].filter((id) => Number.isInteger(id) && id > 0)));
+}
+
+function patientBelongsToClinic(paciente, clinicId) {
+    const normalizedClinicId = Number(clinicId);
+    return Number.isInteger(normalizedClinicId)
+        && patientClinicIds(paciente).includes(normalizedClinicId);
+}
+
+async function actorCanReadPatientSensitive(req, paciente) {
+    const actorId = Number(req.userData?.userId);
+    const clinicIds = patientClinicIds(paciente);
+    if (!Number.isFinite(actorId) || !clinicIds.length) return false;
+    const allowed = await getAccessibleClinicIdsForFeature({
+        actorId,
+        featureKey: 'patients.sensitive.view',
+        clinicIds,
+    });
+    return allowed.length > 0;
 }
 
 async function ensureConsentPackageAndAutomation(cita, req, triggerSource = 'appointment') {
@@ -463,18 +663,30 @@ exports.getManualAttributionPreview = asyncHandler(async (req, res) => {
     if (!clinicaId) {
         return res.status(400).json({ success: false, message: 'clinica_id inválida' });
     }
+    if (await denyAppointmentManageAccessIfNeeded(req, res, clinicaId)) return;
+    const canReadLead = await canUserAccessFeature({
+        actorId: Number(req.userData?.userId),
+        featureKey: 'leads.sensitive.view',
+        clinicId: clinicaId,
+    }).catch(() => false);
+    if (!canReadLead) {
+        return res.status(403).json({ success: false, error: 'lead_sensitive_forbidden' });
+    }
 
     let telefono = String(req.query?.telefono || '').trim();
     let email = String(req.query?.email || '').trim();
 
     if (patientId) {
-        const patient = await Paciente.findByPk(patientId, {
-            attributes: ['id_paciente', 'telefono_movil', 'email'],
-        });
-        if (patient) {
-            telefono = telefono || String(patient.telefono_movil || '').trim();
-            email = email || String(patient.email || '').trim();
+        const patient = await findPacienteByIdentifier(patientId);
+        const visibleInClinic = patient && patientBelongsToClinic(patient, clinicaId);
+        const canReadSensitive = visibleInClinic
+            ? await actorCanReadPatientSensitive(req, patient)
+            : false;
+        if (!canReadSensitive) {
+            return res.status(404).json({ success: false, message: 'Paciente no encontrado' });
         }
+        telefono = telefono || String(patient.telefono_movil || '').trim();
+        email = email || String(patient.email || '').trim();
     }
 
     if (tipoCita === 'continuacion') {
@@ -861,43 +1073,59 @@ async function attachNutritionLatestMeasurementsToCitas(citas) {
 
     const nutritionCitas = list
         .map((cita) => ({ cita, plain: plainCita(cita) }))
-        .filter(({ plain }) => plain?.paciente_id && isNutritionMeasurementEnabled(plain));
+        .filter(({ plain }) => plain?.paciente_id && plain?.clinica_id && isNutritionMeasurementEnabled(plain));
 
     if (!nutritionCitas.length) {
         list.forEach((cita) => setCitaDataValue(cita, 'nutrition_latest_measurement', null));
         return citas;
     }
 
-    const patientIds = Array.from(new Set(
+    const patientClinicPairs = Array.from(new Map(
         nutritionCitas
-            .map(({ plain }) => Number(plain.paciente_id))
-            .filter((id) => Number.isInteger(id) && id > 0)
-    ));
+            .map(({ plain }) => ({
+                patientId: Number(plain.paciente_id),
+                clinicId: Number(plain.clinica_id),
+            }))
+            .filter(({ patientId, clinicId }) => (
+                Number.isInteger(patientId) && patientId > 0
+                && Number.isInteger(clinicId) && clinicId > 0
+            ))
+            .map((pair) => [`${pair.patientId}:${pair.clinicId}`, pair])
+    ).values());
 
-    if (!patientIds.length) return citas;
+    if (!patientClinicPairs.length) return citas;
 
     const rows = await PatientNutritionMeasurement.findAll({
-        where: { patient_id: { [Op.in]: patientIds } },
-        attributes: ['id', 'patient_id', 'appointment_id', 'profile_code', 'measured_at', 'formula_version'],
-        order: [['patient_id', 'ASC'], ['measured_at', 'DESC'], ['id', 'DESC']],
-        limit: Math.max(100, patientIds.length * 20),
+        where: {
+            [Op.or]: patientClinicPairs.map(({ patientId, clinicId }) => ({
+                patient_id: patientId,
+                clinic_id: clinicId,
+            })),
+        },
+        attributes: ['id', 'patient_id', 'clinic_id', 'appointment_id', 'profile_code', 'measured_at', 'formula_version'],
+        order: [['patient_id', 'ASC'], ['clinic_id', 'ASC'], ['measured_at', 'DESC'], ['id', 'DESC']],
+        limit: Math.max(100, patientClinicPairs.length * 20),
     });
 
-    const measurementsByPatient = new Map();
+    const measurementsByPatientClinic = new Map();
     rows.forEach((row) => {
         const plain = plainCita(row);
         const patientId = Number(plain?.patient_id);
-        if (!Number.isInteger(patientId) || patientId <= 0) return;
-        const bucket = measurementsByPatient.get(patientId) || [];
+        const clinicId = Number(plain?.clinic_id);
+        if (!Number.isInteger(patientId) || patientId <= 0
+            || !Number.isInteger(clinicId) || clinicId <= 0) return;
+        const key = `${patientId}:${clinicId}`;
+        const bucket = measurementsByPatientClinic.get(key) || [];
         bucket.push(row);
-        measurementsByPatient.set(patientId, bucket);
+        measurementsByPatientClinic.set(key, bucket);
     });
 
     nutritionCitas.forEach(({ cita, plain }) => {
         const patientId = Number(plain.paciente_id);
+        const clinicId = Number(plain.clinica_id);
         const appointmentId = Number(plain.id_cita || plain.id || 0) || null;
         const referenceTs = plain.inicio ? new Date(plain.inicio).getTime() : NaN;
-        const candidates = measurementsByPatient.get(patientId) || [];
+        const candidates = measurementsByPatientClinic.get(`${patientId}:${clinicId}`) || [];
         const previous = candidates.find((row) => {
             const measurement = plainCita(row);
             if (appointmentId && Number(measurement.appointment_id || 0) === appointmentId) return false;
@@ -1587,17 +1815,9 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
                 clinica_id: clinicaId,
                 code: 'STAFF_OVERLAP',
                 can_force: false,
-                details: {
-                    cita_ids: citasDocOtherClinics.map((c) => c.id_cita),
-                    clinica_ids: Array.from(
-                        new Set(
-                            citasDocOtherClinics
-                                .map((c) => Number(c.clinica_id))
-                                .filter((id) => Number.isFinite(id))
-                        )
-                    ),
-                    message: 'Doctor ocupado en otra clínica'
-                }
+                // La colisión global debe bloquear la doble reserva, pero no
+                // revelar IDs de citas ni de clínicas fuera del scope actual.
+                details: { message: 'Doctor ocupado en otra clínica' }
             });
         }
 
@@ -1668,9 +1888,49 @@ exports.createCita = asyncHandler(async (req, res) => {
         const explicitLeadIntakeId = parsePositiveInt(lead_intake_id);
         let resolvedLeadIntakeId = explicitLeadIntakeId;
         if (explicitLeadIntakeId) {
+            const [canManageLead, canReadLead] = await Promise.all([
+                canUserAccessFeature({
+                    actorId: Number(req.userData?.userId),
+                    featureKey: 'leads.manage',
+                    clinicId: Number(clinica_id),
+                }).catch(() => false),
+                canUserAccessFeature({
+                    actorId: Number(req.userData?.userId),
+                    featureKey: 'leads.sensitive.view',
+                    clinicId: Number(clinica_id),
+                }).catch(() => false),
+            ]);
+            if (!canManageLead || !canReadLead) {
+                return res.status(403).json({ message: 'No tienes permiso para vincular este lead' });
+            }
             lead = await LeadIntake.findByPk(explicitLeadIntakeId);
             if (!lead) {
                 return res.status(404).json({ message: 'Lead no encontrado' });
+            }
+            const leadClinicId = parsePositiveInt(lead.clinica_id);
+            const leadGroupId = parsePositiveInt(lead.grupo_clinica_id);
+            const clinicGroupId = parsePositiveInt(clinica.grupoClinicaId);
+            const leadBelongsToClinic = leadClinicId === Number(clinica_id);
+            const unassignedLeadBelongsToGroup = !leadClinicId
+                && !!leadGroupId
+                && leadGroupId === clinicGroupId;
+            if (!leadBelongsToClinic && !unassignedLeadBelongsToGroup) {
+                // Respuesta indistinguible de un ID inexistente para no filtrar
+                // la existencia de leads de otra clínica o grupo.
+                return res.status(404).json({ message: 'Lead no encontrado' });
+            }
+        }
+
+        const explicitPatientIdentifier = datosPaciente.id_paciente || datosPaciente.id;
+        if (explicitPatientIdentifier) {
+            const explicitPatient = await findPacienteByIdentifier(explicitPatientIdentifier);
+            const canReadPatient = explicitPatient
+                ? await actorCanReadPatientSensitive(req, explicitPatient)
+                : false;
+            if (!canReadPatient) {
+                // No se distingue entre un paciente inexistente y uno que solo
+                // está vinculado a clínicas fuera del scope del actor.
+                return res.status(404).json({ message: 'Paciente no encontrado' });
             }
         }
 
@@ -1859,7 +2119,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         attachResolvedAppointmentPricesToCitas(citaCreada);
         emitAppointmentSocketEvent('appointment:created', citaCreada?.toJSON ? citaCreada.toJSON() : citaCreada);
 
-        return res.status(201).json(citaCreada);
+        return res.status(201).json(await protectAppointmentsForRequest(req, citaCreada));
     } catch (err) {
         const handled = sendAppointmentAccessPolicyError(err, res);
         if (handled) return handled;
@@ -1877,10 +2137,13 @@ exports.createCita = asyncHandler(async (req, res) => {
 exports.getCitas = asyncHandler(async (req, res) => {
     const { clinica_id, startDate, endDate, paciente_id, patient_id } = req.query;
 
-    const where = {};
-    if (clinica_id) {
-        where.clinica_id = clinica_id;
-    }
+    const readableClinicIds = await resolveAppointmentReadClinicIdsOrRespond(req, res, clinica_id);
+    if (!readableClinicIds) return;
+    const where = {
+        clinica_id: readableClinicIds.length === 1
+            ? readableClinicIds[0]
+            : { [Op.in]: readableClinicIds },
+    };
     const pacienteIdRaw = paciente_id || patient_id;
     if (pacienteIdRaw) {
         let pacienteId = Number(pacienteIdRaw);
@@ -1921,7 +2184,7 @@ exports.getCitas = asyncHandler(async (req, res) => {
     await attachUnreadCountsToCitas(citas, req.userData?.userId || null);
     await consentimientosService.attachConsentSummaryToCitas(citas);
     attachResolvedAppointmentPricesToCitas(citas);
-    res.json(citas);
+    res.json(await protectAppointmentsForRequest(req, citas));
 });
 
 /**
@@ -1931,10 +2194,13 @@ exports.getCitas = asyncHandler(async (req, res) => {
 exports.getCitasCalendar = asyncHandler(async (req, res) => {
     const { clinica_id, startDate, endDate, paciente_id, patient_id } = req.query;
 
-    const where = {};
-    if (clinica_id) {
-        where.clinica_id = clinica_id;
-    }
+    const readableClinicIds = await resolveAppointmentReadClinicIdsOrRespond(req, res, clinica_id);
+    if (!readableClinicIds) return;
+    const where = {
+        clinica_id: readableClinicIds.length === 1
+            ? readableClinicIds[0]
+            : { [Op.in]: readableClinicIds },
+    };
 
     const pacienteIdRaw = paciente_id || patient_id;
     if (pacienteIdRaw) {
@@ -2011,7 +2277,8 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
     await attachNutritionLatestMeasurementsToCitas(citas);
 
     res.set('X-Agenda-Endpoint', 'calendar-lite');
-    res.json(citas.map(mapCalendarCitaRow).filter(Boolean));
+    const calendarRows = citas.map(mapCalendarCitaRow).filter(Boolean);
+    res.json(await protectAppointmentsForRequest(req, calendarRows));
 });
 
 exports.getCitaById = asyncHandler(async (req, res) => {
@@ -2037,6 +2304,7 @@ exports.getCitaById = asyncHandler(async (req, res) => {
     if (!cita) {
         return res.status(404).json({ message: 'cita_not_found' });
     }
+    if (await denyAppointmentViewAccessIfNeeded(req, res, cita.clinica_id)) return;
 
     await attachFlowSummaryToCitas(cita);
     await attachUnreadCountsToCitas(cita, req.userData?.userId || null);
@@ -2060,10 +2328,10 @@ exports.getCitaById = asyncHandler(async (req, res) => {
         conversation_id = null;
     }
 
-    return res.json({
+    return res.json(await protectAppointmentsForRequest(req, {
         ...cita.toJSON(),
         conversation_id,
-    });
+    }));
 });
 
 exports.updateCitaNota = asyncHandler(async (req, res) => {
@@ -2099,7 +2367,7 @@ exports.updateCitaNota = asyncHandler(async (req, res) => {
     await attachUnreadCountsToCitas(citaActualizada, req.userData?.userId || null);
     await consentimientosService.attachConsentSummaryToCitas(citaActualizada);
     emitAppointmentSocketEvent('appointment:updated', citaActualizada?.toJSON ? citaActualizada.toJSON() : citaActualizada);
-    return res.json(citaActualizada);
+    return res.json(await protectAppointmentsForRequest(req, citaActualizada));
 });
 
 /**
@@ -2113,6 +2381,7 @@ exports.getNextCita = asyncHandler(async (req, res) => {
     if (!clinica_id || !paciente_id || Number.isNaN(clinicaId) || Number.isNaN(pacienteId)) {
         return res.status(400).json({ message: 'clinica_id y paciente_id son obligatorios' });
     }
+    if (await denyAppointmentViewAccessIfNeeded(req, res, clinicaId)) return;
 
     const now = new Date();
     const where = {
@@ -2135,7 +2404,7 @@ exports.getNextCita = asyncHandler(async (req, res) => {
     });
 
     await attachFlowSummaryToCitas(cita);
-    return res.json(cita || null);
+    return res.json(await protectAppointmentsForRequest(req, cita || null));
 });
 
 /**
@@ -2214,7 +2483,7 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
     await attachUnreadCountsToCitas(citaActualizada, req.userData?.userId || null);
     await consentimientosService.attachConsentSummaryToCitas(citaActualizada);
     emitAppointmentSocketEvent('appointment:updated', citaActualizada?.toJSON ? citaActualizada.toJSON() : citaActualizada);
-    return res.json(citaActualizada);
+    return res.json(await protectAppointmentsForRequest(req, citaActualizada));
 });
 
 /**
@@ -2347,5 +2616,5 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     await attachUnreadCountsToCitas(citaActualizada, req.userData?.userId || null);
     await consentimientosService.attachConsentSummaryToCitas(citaActualizada);
     emitAppointmentSocketEvent('appointment:updated', citaActualizada?.toJSON ? citaActualizada.toJSON() : citaActualizada);
-    return res.json(citaActualizada);
+    return res.json(await protectAppointmentsForRequest(req, citaActualizada));
 });

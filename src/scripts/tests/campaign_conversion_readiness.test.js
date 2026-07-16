@@ -194,6 +194,10 @@ function testConsentReadinessIsAHardGate() {
   }));
   assert.equal(operationallyExpired.ready, false);
   assert.ok(operationallyExpired.issues.some((issue) => issue.details === 'attestation_operational_expired'));
+  assert.equal(operationallyExpired.renewal_required, true);
+  assert.equal(operationallyExpired.verification_current, false);
+  assert.equal(operationallyExpired.runtime_configuration_ready, true,
+    'Expiry requires a fresh public check but does not turn stale evidence into visitor consent');
 
   const changedConfigState = readyConsentState();
   changedConfigState.records.groupRecord.config.texts.cookies_url = '/otra-politica/';
@@ -313,13 +317,14 @@ function testMultiAccountRequiresAttributionSelector() {
   const configured = JSON.parse(JSON.stringify(withoutSelectors));
   configured.events.lead.destinations[0].campaign_ids = ['111111111'];
   configured.events.lead.destinations[1].campaign_ids = ['222222222'];
-  const plan = buildRequiredConversionPlan(configured, '1851215478');
-  assert.equal(plan.issues.length, 0);
-
   const mappings = {
     1851215478: { lead: '7680195320' },
     5992356722: { lead: '7540337982' }
   };
+  configured.events.lead.destinations[0].conversion_action_id = mappings[1851215478].lead;
+  configured.events.lead.destinations[1].conversion_action_id = mappings[5992356722].lead;
+  const plan = buildRequiredConversionPlan(configured, '1851215478');
+  assert.equal(plan.issues.length, 0);
   const actions = {
     1851215478: [enabledAction('7680195320', 'Lead - ClinicaClick')],
     5992356722: [enabledAction('7540337982', 'Lead - ClinicaClick')]
@@ -343,6 +348,44 @@ function testMultiAccountRequiresAttributionSelector() {
   assert.equal(canonical.events.lead.destinations[1].conversion_action_id, '7540337982');
   assert.deepEqual(canonical.events.lead.destinations[0].campaign_ids, ['111111111']);
   assert.deepEqual(canonical.events.lead.destinations[1].campaign_ids, ['222222222']);
+}
+
+function testConfiguredDestinationActionDriftIsBlocked() {
+  const config = {
+    customer_id: '5992356722',
+    events: {
+      lead: {
+        enabled: true,
+        customer_id: '5992356722',
+        conversion_action_id: '9999'
+      },
+      contact: { enabled: false },
+      schedule: { enabled: false }
+    }
+  };
+  const plan = buildRequiredConversionPlan(config, '5992356722');
+  const mappings = { 5992356722: { lead: '1001' } };
+  const readiness = assessConversionOnboardingReadiness({
+    plan,
+    mappingsByCustomer: mappings,
+    actionsByCustomer: { 5992356722: [enabledAction('1001', 'Lead - ClinicaClick')] },
+    capabilitiesByCustomer: {
+      5992356722: { data_manager_scope_granted: true, data_manager_quota_project_configured: true }
+    },
+    validationsByTarget: validatedTargets(plan, mappings)
+  });
+  assert.equal(readiness.ready, false);
+  assert.deepEqual(
+    readiness.issues.find((issue) => issue.reason === 'conversion_destination_action_drift'),
+    {
+      reason: 'conversion_destination_action_drift',
+      customer_id: '5992356722',
+      event: 'lead',
+      destination_key: 'legacy_lead',
+      configured_conversion_action_id: '9999',
+      canonical_conversion_action_id: '1001'
+    }
+  );
 }
 
 function testBraidIncompatibleCountingTypeIsBlocked() {
@@ -457,6 +500,7 @@ async function run() {
   testEnabledEventsAndNullMapping();
   testMissingScopeAndQuotaAreHardGates();
   testMultiAccountRequiresAttributionSelector();
+  testConfiguredDestinationActionDriftIsBlocked();
   testBraidIncompatibleCountingTypeIsBlocked();
   testExplicitCanonicalNormalizationDoesNotTouchClientActions();
   testPrimaryCanonicalActionIsNotReadyForBiddingSafety();

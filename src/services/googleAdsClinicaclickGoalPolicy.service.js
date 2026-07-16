@@ -11,10 +11,17 @@ const db = require('../../models');
 const { googleAdsRequest, normalizeCustomerId } = require('../lib/googleAdsClient');
 const notificationsService = require('./notifications.service');
 const {
+  auditConnectOnlyMeasurementTarget,
+} = require('../controllers/campaignOnboarding.controller');
+const {
   GOOGLE_ADS_SCOPE,
   resolveScopedGoogleAdsRuntime,
   runtimeError,
 } = require('./googleAdsScopedRuntime.service');
+const {
+  extractGoogleCampaignReferences,
+  sanitizeCampaignQualityReport,
+} = require('./googleAdsConnectOnlyQualityAudit.service');
 
 const SCHEMA_VERSION = 'clinicaclick-google-ads-conversion-goal-policy/v4';
 // Nombre reservado por la policy v3. Se conserva exclusivamente para detectar
@@ -1834,11 +1841,182 @@ function intakeScope(row) {
   };
 }
 
-async function discoverGoalPolicyAuditTargets({ intakeModel = db.IntakeConfig } = {}) {
+function hasConnectOnlyMeasurementConfig(config) {
+  const googleAds = objectValue(objectValue(config).google_ads);
+  if (googleAds.enabled !== true) return false;
+  const events = objectValue(googleAds.events);
+  return Object.values(events).some((rawEvent) => {
+    const event = objectValue(rawEvent);
+    if (event.enabled === false) return false;
+    if (Object.prototype.hasOwnProperty.call(event, 'destinations')) {
+      return Array.isArray(event.destinations)
+        && event.destinations.some((destination) => destination?.enabled !== false);
+    }
+    return Boolean(
+      cleanCustomerId(event.customer_id || googleAds.customer_id)
+      && cleanPositiveId(event.conversion_action_id || googleAds.conversion_action_id)
+    );
+  });
+}
+
+function readCampaignRequestPayload(row) {
+  const raw = row?.solicitud ?? row?.get?.('solicitud') ?? null;
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw;
+  if (typeof raw === 'string' && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch (_error) {
+      return {};
+    }
+  }
+  return {};
+}
+
+function strategyPayloadUsesGoogle(payload) {
+  const channels = Array.isArray(payload?.channels) ? payload.channels : [];
+  if (channels.some((channel) => (
+    String(channel?.channel || '').trim().toLowerCase() === 'google_ads'
+      && channel?.enabled !== false
+  ))) return true;
+  const externalTargets = Array.isArray(payload?.external_targets) ? payload.external_targets : [];
+  return externalTargets.some((target) => (
+    (Array.isArray(target?.campaigns) ? target.campaigns : []).some((campaign) => (
+      String(campaign?.provider || '').trim().toLowerCase() === 'google_ads'
+    ))
+  ));
+}
+
+function activeConnectOnlyGoogleClinicIds(rows) {
+  const ids = new Set();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const payload = readCampaignRequestPayload(row);
+    if (String(payload.mode_snapshot || payload.mode || '').trim().toLowerCase() !== 'connect_only') continue;
+    if (String(payload.objective_id || '').trim().toLowerCase() !== STRATEGY_KEY) continue;
+    if (!strategyPayloadUsesGoogle(payload)) continue;
+    const scope = objectValue(payload.scope);
+    const candidates = [
+      row?.clinica_id,
+      scope.clinic_id,
+      ...(Array.isArray(scope.clinic_ids) ? scope.clinic_ids : []),
+    ];
+    for (const candidate of candidates) {
+      const clinicId = Number(candidate);
+      if (Number.isSafeInteger(clinicId) && clinicId > 0) ids.add(clinicId);
+    }
+  }
+  return ids;
+}
+
+function connectOnlyGoogleCampaignsByClinicId(rows) {
+  const output = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const payload = readCampaignRequestPayload(row);
+    if (String(payload.mode_snapshot || payload.mode || '').trim().toLowerCase() !== 'connect_only') continue;
+    if (String(payload.objective_id || '').trim().toLowerCase() !== STRATEGY_KEY) continue;
+    if (!strategyPayloadUsesGoogle(payload)) continue;
+    const scope = objectValue(payload.scope);
+    const clinicIds = [...new Set([
+      row?.clinica_id,
+      scope.clinic_id,
+      ...(Array.isArray(scope.clinic_ids) ? scope.clinic_ids : []),
+    ].map(Number).filter((clinicId) => Number.isSafeInteger(clinicId) && clinicId > 0))];
+    const campaigns = extractGoogleCampaignReferences(payload);
+    for (const clinicId of clinicIds) {
+      const current = output.get(clinicId) || new Map();
+      for (const campaign of campaigns) {
+        current.set(`${campaign.customer_id}:${campaign.campaign_id}`, campaign);
+      }
+      output.set(clinicId, current);
+    }
+  }
+  return output;
+}
+
+function campaignsForClinicIds(campaignsByClinicId, clinicIds) {
+  const output = new Map();
+  for (const clinicId of Array.isArray(clinicIds) ? clinicIds : []) {
+    for (const campaign of campaignsByClinicId.get(Number(clinicId))?.values?.() || []) {
+      output.set(`${campaign.customer_id}:${campaign.campaign_id}`, campaign);
+    }
+  }
+  return [...output.values()].sort((left, right) => (
+    left.customer_id.localeCompare(right.customer_id)
+      || left.campaign_id.localeCompare(right.campaign_id, 'en', { numeric: true })
+  ));
+}
+
+async function discoverGoalPolicyAuditTargets({
+  intakeModel = db.IntakeConfig,
+  campaignRequestModel = db.CampaignRequest,
+} = {}) {
   const rows = await intakeModel.findAll({ raw: true });
+  const activeStrategyRows = await campaignRequestModel.findAll({
+    where: { estado: 'activa' },
+    attributes: ['id', 'clinica_id', 'estado', 'solicitud'],
+    raw: true,
+  });
+  const activeMeasurementClinicIds = activeConnectOnlyGoogleClinicIds(activeStrategyRows);
+  const activeCampaignsByClinicId = connectOnlyGoogleCampaignsByClinicId(activeStrategyRows);
   const targets = [];
+  const measurementTargets = [];
   const issues = [];
   const seen = new Set();
+  // Una configuración rota o deshabilitada también debe auditarse: filtrar
+  // aquí por google_ads.enabled ocultaría precisamente el drift que buscamos.
+  // Si hay filas legacy duplicadas, preferimos primero la que aún conserva
+  // destinos de medición válidos y después el id más antiguo.
+  const orderedRows = [...rows].sort((left, right) => (
+    Number(hasConnectOnlyMeasurementConfig(objectValue(right.config)))
+      - Number(hasConnectOnlyMeasurementConfig(objectValue(left.config)))
+      || (Number(left.id) || 0) - (Number(right.id) || 0)
+  ));
+  const groupMeasurementRows = orderedRows.filter((row) => intakeScope(row).assignment_scope === 'group');
+  const coveredClinicIds = new Set();
+  for (const row of groupMeasurementRows) {
+    const locations = Array.isArray(objectValue(row.config).locations)
+      ? objectValue(row.config).locations
+      : [];
+    const scopedClinicIds = locations
+      .map((location) => Number(location?.id || location?.clinic_id))
+      .filter((clinicId) => (
+        activeMeasurementClinicIds.has(clinicId) && !coveredClinicIds.has(clinicId)
+      ));
+    if (scopedClinicIds.length === 0) continue;
+    scopedClinicIds.forEach((clinicId) => coveredClinicIds.add(clinicId));
+    measurementTargets.push({
+      intake_config_id: Number(row.id) || null,
+      scope: intakeScope(row),
+      intake_record: row,
+      strategy_clinic_ids: scopedClinicIds.sort((left, right) => left - right),
+      strategy_campaigns: campaignsForClinicIds(activeCampaignsByClinicId, scopedClinicIds),
+    });
+  }
+  for (const row of orderedRows) {
+    const scope = intakeScope(row);
+    if (scope.assignment_scope === 'group') continue;
+    if (!scope.clinic_id || !activeMeasurementClinicIds.has(scope.clinic_id)) continue;
+    if (coveredClinicIds.has(scope.clinic_id)) continue;
+    measurementTargets.push({
+      intake_config_id: Number(row.id) || null,
+      scope,
+      intake_record: row,
+      strategy_clinic_ids: [scope.clinic_id],
+      strategy_campaigns: campaignsForClinicIds(activeCampaignsByClinicId, [scope.clinic_id]),
+    });
+    coveredClinicIds.add(scope.clinic_id);
+  }
+  for (const clinicId of activeMeasurementClinicIds) {
+    if (coveredClinicIds.has(clinicId)) continue;
+    issues.push({
+      severity: 'critical',
+      code: 'CONNECT_ONLY_MEASUREMENT_INTAKE_CONFIG_MISSING',
+      reason: 'connect_only_measurement_intake_config_missing',
+      message: `La clínica ${clinicId} tiene Mide y mejora activo, pero no existe una configuración de medición vinculada para auditar.`,
+      clinic_id: clinicId,
+    });
+  }
+
   for (const row of rows) {
     const config = objectValue(row.config);
     const googleAds = objectValue(config.google_ads);
@@ -1878,7 +2056,7 @@ async function discoverGoalPolicyAuditTargets({ intakeModel = db.IntakeConfig } 
       }
     }
   }
-  return { targets, issues };
+  return { targets, measurement_targets: measurementTargets, issues };
 }
 
 async function executePersistedGoalPolicyAudit({ dependencies = {} } = {}) {
@@ -1886,6 +2064,7 @@ async function executePersistedGoalPolicyAudit({ dependencies = {} } = {}) {
   const notify = dependencies.notifications || notificationsService;
   const discover = dependencies.discoverTargets || discoverGoalPolicyAuditTargets;
   const audit = dependencies.audit || auditClinicaclickGoalPolicy;
+  const auditMeasurement = dependencies.auditMeasurement || auditConnectOnlyMeasurementTarget;
   const now = dependencies.now || (() => new Date());
   const syncLog = await syncLogModel.create({
     job_type: 'google_conversion_goal_policy_audit',
@@ -1894,8 +2073,12 @@ async function executePersistedGoalPolicyAudit({ dependencies = {} } = {}) {
     records_processed: 0,
   });
   try {
-    const discovered = await discover({ intakeModel: dependencies.intakeModel || db.IntakeConfig });
+    const discovered = await discover({
+      intakeModel: dependencies.intakeModel || db.IntakeConfig,
+      campaignRequestModel: dependencies.campaignRequestModel || db.CampaignRequest,
+    });
     const reports = [];
+    const measurementReports = [];
     const issues = [...(discovered.issues || [])];
     for (const target of discovered.targets || []) {
       const report = await audit({
@@ -1910,13 +2093,53 @@ async function executePersistedGoalPolicyAudit({ dependencies = {} } = {}) {
         }
       }
     }
+    for (const target of discovered.measurement_targets || []) {
+      try {
+        const report = await auditMeasurement({
+          scope: target.scope,
+          intakeRecord: target.intake_record,
+          strategyCampaigns: target.strategy_campaigns,
+          now: now(),
+          dependencies,
+        });
+        const safeReport = {
+          ...report,
+          campaign_quality: sanitizeCampaignQualityReport(report.campaign_quality),
+        };
+        measurementReports.push({
+          intake_config_id: target.intake_config_id,
+          scope: target.scope,
+          report: safeReport,
+        });
+        for (const issue of safeReport.issues || []) {
+          issues.push({
+            ...issue,
+            intake_config_id: target.intake_config_id,
+            audit_mode: 'connect_only_measurement',
+          });
+        }
+      } catch (error) {
+        issues.push({
+          severity: 'critical',
+          code: error.code || 'CONNECT_ONLY_MEASUREMENT_AUDIT_FAILED',
+          message: String(error.message || 'No se pudo auditar Mide y mejora').slice(0, 500),
+          intake_config_id: target.intake_config_id,
+          audit_mode: 'connect_only_measurement',
+        });
+      }
+    }
+    const goalPolicyTargetCount = (discovered.targets || []).length;
+    const measurementTargetCount = (discovered.measurement_targets || []).length;
+    const totalTargetCount = goalPolicyTargetCount + measurementTargetCount;
     const criticalCount = issues.filter((item) => item.severity === 'critical').length;
     const statusReport = {
       schema_version: SCHEMA_VERSION,
       audited_at: now().toISOString(),
       autorepair: false,
       external_mutation_count: 0,
-      target_count: (discovered.targets || []).length,
+      target_count: totalTargetCount,
+      goal_policy_target_count: goalPolicyTargetCount,
+      connect_only_measurement_target_count: measurementTargetCount,
       issue_count: issues.length,
       critical_count: criticalCount,
       issues: issues.slice(0, 100),
@@ -1927,19 +2150,31 @@ async function executePersistedGoalPolicyAudit({ dependencies = {} } = {}) {
         preview_digest: item.report.preview_digest,
         accounts: item.report.accounts,
       })),
+      connect_only_measurement_targets: measurementReports.map((item) => ({
+        intake_config_id: item.intake_config_id,
+        scope: item.scope,
+        healthy: item.report.healthy,
+        runtime_ready: item.report.runtime_ready,
+        summary: item.report.summary,
+        consent: item.report.consent,
+        enhanced_conversions: item.report.enhanced_conversions,
+        targets: item.report.targets,
+        campaign_quality: item.report.campaign_quality,
+        issues: item.report.issues,
+      })),
     };
     await syncLog.update({
       status: criticalCount ? 'failed' : 'completed',
       end_time: now(),
-      records_processed: (discovered.targets || []).length,
-      error_message: criticalCount ? `Se detectaron ${criticalCount} desviaciones críticas en objetivos Google Ads.` : null,
+      records_processed: totalTargetCount,
+      error_message: criticalCount ? `Se detectaron ${criticalCount} desviaciones críticas en medición u objetivos Google Ads.` : null,
       status_report: statusReport,
     });
     if (criticalCount && typeof notify?.dispatchEvent === 'function') {
       await notify.dispatchEvent({
         event: 'jobs.failed',
         data: {
-          jobName: 'Auditoría de objetivos de conversión Google Ads',
+          jobName: 'Auditoría de medición y objetivos de conversión Google Ads',
           error: `Se detectaron ${criticalCount} desviaciones críticas.`,
         },
       });

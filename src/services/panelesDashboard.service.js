@@ -10,6 +10,7 @@ const {
   normalizeDateOnly,
 } = require('../lib/personal-schedule-recurring');
 const { isGlobalAdmin } = require('../lib/role-helpers');
+const { getAccessibleClinicIdsForFeature } = require('../lib/access-policy');
 
 const {
   CitaPaciente,
@@ -50,6 +51,18 @@ function toInt(value) {
 
 function uniqueInts(values) {
   return [...new Set((values || []).map(toInt).filter(Boolean))];
+}
+
+function intersectClinicIds(...collections) {
+  if (!collections.length) return [];
+  const normalized = collections.map((values) => uniqueInts(values));
+  return normalized[0].filter((clinicId) => (
+    normalized.slice(1).every((values) => values.includes(clinicId))
+  ));
+}
+
+function unionClinicIds(...collections) {
+  return uniqueInts(collections.flat());
 }
 
 function scopedWhere(field, ids) {
@@ -1060,13 +1073,91 @@ async function loadOpportunities({ clinicIds }) {
 
 function roleSections(role, subrolCode) {
   const normalizedRole = String(role || '').toLowerCase();
-  const ownerLike = ['administrador', 'propietario', 'agencia'].includes(normalizedRole);
+  // Una asignación de agencia concede Marketing, no operativa clínica ni
+  // acceso implícito a pacientes. Las excepciones se resuelven por AccessPolicy.
+  const ownerLike = ['administrador', 'propietario'].includes(normalizedRole);
   const operations =
     ownerLike ||
-    ['assistant', 'reception', 'admin_staff'].includes(subrolCode);
+    (normalizedRole === 'personaldeclinica' && ['assistant', 'reception', 'admin_staff'].includes(subrolCode));
   const doctor = normalizedRole === 'personaldeclinica' && subrolCode === 'doctor';
   const shared = !['paciente', 'laboratorio'].includes(normalizedRole);
   return { ownerLike, operations, doctor, shared };
+}
+
+async function resolveDashboardAccess({ userId, clinicIds }) {
+  const requestedClinicIds = uniqueInts(clinicIds);
+  const featureClinicIds = async (featureKey) => getAccessibleClinicIdsForFeature({
+    actorId: userId,
+    featureKey,
+    clinicIds: requestedClinicIds,
+  });
+
+  const [
+    appointmentClinicIds,
+    patientSensitiveClinicIds,
+    consentClinicIds,
+    leadSensitiveClinicIds,
+  ] = await Promise.all([
+    featureClinicIds('appointments.view'),
+    featureClinicIds('patients.sensitive.view'),
+    featureClinicIds('consents.view'),
+    featureClinicIds('leads.sensitive.view'),
+  ]);
+
+  // Todas estas tarjetas contienen o enlazan identidad de paciente. No basta
+  // con poder leer el recurso base: también se exige el permiso sensible.
+  const patientAppointmentClinicIds = intersectClinicIds(
+    appointmentClinicIds,
+    patientSensitiveClinicIds,
+  );
+  const patientConsentClinicIds = intersectClinicIds(
+    consentClinicIds,
+    patientSensitiveClinicIds,
+  );
+  const patientReviewClinicIds = patientSensitiveClinicIds;
+
+  // El bloque de tareas combina leads, citas y consentimientos. Solo se carga
+  // donde el actor puede abrir de forma segura cada destino de ese resumen.
+  const taskClinicIds = intersectClinicIds(
+    patientAppointmentClinicIds,
+    patientConsentClinicIds,
+    leadSensitiveClinicIds,
+  );
+
+  return {
+    appointmentClinicIds: patientAppointmentClinicIds,
+    consentClinicIds: patientConsentClinicIds,
+    reviewClinicIds: patientReviewClinicIds,
+    taskClinicIds,
+    operationalClinicIds: unionClinicIds(
+      patientAppointmentClinicIds,
+      patientConsentClinicIds,
+      patientReviewClinicIds,
+      taskClinicIds,
+    ),
+  };
+}
+
+function applyDashboardAccessGuard(dashboard, access = {}) {
+  const guarded = { ...dashboard };
+  if (!access.appointments) {
+    guarded.todayAppointments = [];
+    guarded.inactiveTodayAppointments = [];
+    guarded.nextAppointments = [];
+    guarded.pastAttendancePending = [];
+    guarded.doctorAppointmentsToday = [];
+  }
+  if (!access.consents) {
+    guarded.pendingPatientConsents = [];
+    guarded.doctorPendingConsents = [];
+  }
+  if (!access.reviews) {
+    guarded.unansweredReviews = [];
+  }
+  if (!access.tasks) {
+    guarded.tasks = { items: [], total: 0 };
+  }
+  return guarded;
 }
 
 function rolePresentation(role, subrolCode, sections) {
@@ -1142,10 +1233,15 @@ async function getMainDashboard({ userId, query = {} }) {
     allowAllClinics: context.globalAdmin,
   });
   const sections = roleSections(context.role, context.subrolCode);
+  const dashboardAccess = await resolveDashboardAccess({
+    userId,
+    clinicIds: scope.clinicIds,
+  });
+  sections.operations = sections.operations && dashboardAccess.operationalClinicIds.length > 0;
   const presentation = rolePresentation(context.role, context.subrolCode, sections);
   const doctorId = sections.doctor ? userId : null;
   const appointments = await loadAppointments({
-    clinicIds: scope.clinicIds,
+    clinicIds: dashboardAccess.appointmentClinicIds,
     clinicMap: scope.clinicMap,
     todayStart: today.start,
     todayEnd: today.end,
@@ -1158,7 +1254,7 @@ async function getMainDashboard({ userId, query = {} }) {
   });
   const counts = sections.operations
     ? await countTasks({
-        clinicIds: scope.clinicIds,
+        clinicIds: dashboardAccess.taskClinicIds,
         todayStart: today.start,
         todayEnd: today.end,
       })
@@ -1172,17 +1268,17 @@ async function getMainDashboard({ userId, query = {} }) {
     whatsappStatus,
     opportunities,
   ] = await Promise.all([
-    sections.operations ? loadPendingConsentCards({ clinicIds: scope.clinicIds, limit: 6 }) : [],
-    sections.operations ? loadUnansweredReviewCards({ clinicIds: scope.clinicIds, clinicMap: scope.clinicMap, limit: 4 }) : [],
-    doctorId ? loadPendingConsentCards({ clinicIds: scope.clinicIds, doctorId, limit: 6 }) : [],
-    doctorId ? loadWeeklySchedule({ clinicIds: scope.clinicIds, clinicMap: scope.clinicMap, userId: doctorId, todayIso: today.date }) : [],
+    sections.operations ? loadPendingConsentCards({ clinicIds: dashboardAccess.consentClinicIds, limit: 6 }) : [],
+    sections.operations ? loadUnansweredReviewCards({ clinicIds: dashboardAccess.reviewClinicIds, clinicMap: scope.clinicMap, limit: 4 }) : [],
+    doctorId ? loadPendingConsentCards({ clinicIds: dashboardAccess.consentClinicIds, doctorId, limit: 6 }) : [],
+    doctorId ? loadWeeklySchedule({ clinicIds: dashboardAccess.appointmentClinicIds, clinicMap: scope.clinicMap, userId: doctorId, todayIso: today.date }) : [],
     sections.shared ? loadWhatsappStatus({ clinicIds: scope.clinicIds, groupIds: scope.groupIds }) : { connected: null, paymentReady: null, paymentMissing: false },
     sections.shared ? loadOpportunities({ clinicIds: scope.clinicIds }) : [],
   ]);
 
   const setup = sections.operations
     ? await loadSetupStatus({
-        clinicIds: scope.clinicIds,
+        clinicIds: dashboardAccess.operationalClinicIds,
         groupIds: scope.groupIds,
         clinics: scope.clinics,
         whatsappStatus,
@@ -1214,9 +1310,14 @@ async function getMainDashboard({ userId, query = {} }) {
     });
   }
 
-  const dashboardTasks = taskItems(counts, today.date, scope.clinicIds, appointments.pastAttendance.length);
+  const dashboardTasks = taskItems(
+    counts,
+    today.date,
+    dashboardAccess.taskClinicIds,
+    appointments.pastAttendance.length,
+  );
 
-  return {
+  const dashboard = {
     user: context.user,
     role: {
       code: context.role || null,
@@ -1262,6 +1363,13 @@ async function getMainDashboard({ userId, query = {} }) {
       source: 'backend',
     },
   };
+
+  return applyDashboardAccessGuard(dashboard, {
+    appointments: dashboardAccess.appointmentClinicIds.length > 0,
+    consents: dashboardAccess.consentClinicIds.length > 0,
+    reviews: sections.operations && dashboardAccess.reviewClinicIds.length > 0,
+    tasks: sections.operations && dashboardAccess.taskClinicIds.length > 0,
+  });
 }
 
 module.exports = {
@@ -1271,5 +1379,8 @@ module.exports = {
     isInactiveTodayAppointment,
     loadAppointments,
     statusUi,
+    roleSections,
+    applyDashboardAccessGuard,
+    intersectClinicIds,
   },
 };

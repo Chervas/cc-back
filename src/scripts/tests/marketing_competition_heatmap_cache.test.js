@@ -11,6 +11,7 @@ process.env.RUNTIME_ROLE = 'gateway';
 process.env.COMPETITION_GOOGLE_PLACES_COMPETITOR_USE_ALLOWED = 'true';
 process.env.COMPETITION_GOOGLE_PLACES_COMPETITOR_STORAGE_ALLOWED = 'true';
 process.env.COMPETITION_LOCAL_RANKING_STORAGE_ALLOWED = 'true';
+process.env.GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY || 'test-key';
 
 const {
   DAY_MS,
@@ -84,7 +85,7 @@ function identity(overrides = {}) {
     term: 'clínica dental',
     zoomKm: 3,
     gridSize: 5,
-    algorithmVersion: 'local-relevance-bias-v1',
+    algorithmVersion: 'local-relevance-bias-v2',
     ...overrides,
   });
 }
@@ -177,13 +178,16 @@ async function testPassiveCompetitionListNeverCallsPlacesWhenGatesAreEnabled() {
           configuracion: { disciplinas: ['odontologia'] },
           url_ficha_local: 'https://maps.google.com/?cid=123',
           business_location_name: 'Ficha local persistida',
+          business_location_mapping_id: 123,
           business_place_id: 'ChIJ-persisted',
           business_maps_url: 'https://maps.google.com/?cid=123',
           business_primary_category: 'Dentist',
           business_address_lines: ['Carrer de la Salut, 1'],
           business_latitude: 41.4,
           business_longitude: 2.17,
+          business_photo_url: 'https://example.org/profile.webp',
         }),
+        loadOwnProfileReviewSummary: async () => ({ rating: 4.86, review_count: 174 }),
         loadCompetitorRows: async () => [],
         hydrateCompetitors: async (rows) => rows,
         providerStatusForScope: async () => ({}),
@@ -197,6 +201,9 @@ async function testPassiveCompetitionListNeverCallsPlacesWhenGatesAreEnabled() {
     assert.equal(result.own_profile.google_maps_url, 'https://maps.google.com/?cid=123');
     assert.equal(result.own_profile.category, 'Dentist');
     assert.equal(result.own_profile.address, 'Carrer de la Salut, 1');
+    assert.equal(result.own_profile.rating, 4.86);
+    assert.equal(result.own_profile.reviews_count, 174);
+    assert.equal(result.own_profile.photo_url, 'https://example.org/profile.webp');
     assert.deepEqual(result.local_ranking, []);
     assert.ok(result.ranking_terms.length > 0);
   } finally {
@@ -432,10 +439,96 @@ async function testOneRelevantTextSearchPerGridPointWithoutFallback() {
 
   const body = __testing.buildLocalHeatmapSearchBody(calls[0]);
   assert.equal(body.rankPreference, 'RELEVANCE');
+  assert.equal(body.pageSize, 20);
+  assert.equal(Object.hasOwn(body, 'maxResultCount'), false);
   assert.equal(body.locationBias.circle.radius, 1500);
   assert.equal(Object.hasOwn(body, 'locationRestriction'), false);
-  assert.equal(__testing.LOCAL_HEATMAP_PLACE_FIELD_MASK, 'places.id,places.displayName');
+  assert.equal(__testing.LOCAL_HEATMAP_PLACE_FIELD_MASK, 'places.id');
   assert.doesNotMatch(__testing.collectLocalHeatmapPoints.toString(), /fallbackPlaces|second search/i);
+  assert.doesNotMatch(__testing.collectLocalHeatmapPoints.toString(), /businessNamesMatch|ownName/,
+    'ID-only tiles must never fall back to matching the clinic name');
+}
+
+async function testMissingOwnPlaceIdStopsBeforeGridQueries() {
+  let gridCalls = 0;
+  await assert.rejects(
+    () => __testing.collectLocalHeatmapPoints({
+      center: { latitude: 41.4, longitude: 2.17 },
+      radiusKm: 3,
+      query: 'clínica dental',
+      ownPlaceId: null,
+      tracker: {},
+      search: async () => {
+        gridCalls += 1;
+        return [];
+      },
+    }),
+    (error) => error?.code === 'LOCAL_PROFILE_PLACE_ID_REQUIRED',
+  );
+  assert.equal(gridCalls, 0, 'the 25 grid searches must not start without the canonical Place ID');
+
+  let collectorCalled = false;
+  const generated = await __testing.generateLocalRankingHeatmapSnapshot({
+    clinic: {
+      id_clinica: 66,
+      nombre_clinica: 'Clínica sin ficha resuelta',
+      business_place_id: null,
+      business_latitude: 41.4,
+      business_longitude: 2.17,
+    },
+    terms: ['clínica dental'],
+    selectedTerm: 'clínica dental',
+    heatmapQuery: 'clínica dental',
+    radiusKm: 3,
+    dependencies: {
+      resolveOwnClinicHeatmapProfile: async () => ({ latitude: 41.4, longitude: 2.17 }),
+      collectLocalHeatmapPoints: async () => {
+        collectorCalled = true;
+        return [];
+      },
+    },
+  });
+  assert.equal(collectorCalled, false);
+  assert.equal(generated.payload.success, false);
+  assert.equal(generated.payload.setup_required, true);
+  assert.equal(generated.payload.setup_code, 'LOCAL_PROFILE_PLACE_ID_REQUIRED');
+  assert.equal(generated.payload.points.length, 0);
+}
+
+async function testMissingStoredPlaceIdUsesOneAnchorResolutionBeforeGrid() {
+  const originalPost = axios.post;
+  const calls = [];
+  axios.post = async (url, body, config) => {
+    calls.push({ url, body, config });
+    return {
+      data: {
+        places: [{
+          id: 'resolved-own-place',
+          displayName: { text: 'Clínica Anchor Única 910066' },
+          formattedAddress: 'Carrer Test 910066, Barcelona',
+          location: { latitude: 41.4, longitude: 2.17 },
+        }],
+      },
+    };
+  };
+  try {
+    const tracker = {};
+    const profile = await __testing.resolveOwnClinicHeatmapProfile({
+      id_clinica: 910066,
+      nombre_clinica: 'Clínica Anchor Única 910066',
+      direccion: 'Carrer Test 910066',
+      ciudad: 'Barcelona',
+      business_place_id: null,
+      business_latitude: 41.4,
+      business_longitude: 2.17,
+    }, tracker);
+    assert.equal(calls.length, 1, 'only one anchor lookup may run before the grid');
+    assert.equal(profile.google_place_id, 'resolved-own-place');
+    assert.equal(calls[0].config.headers['X-Goog-FieldMask'], __testing.LOCAL_HEATMAP_ANCHOR_SEARCH_FIELD_MASK);
+    assert.deepEqual(tracker, { places_anchor_search: 1 });
+  } finally {
+    axios.post = originalPost;
+  }
 }
 
 async function testProviderOutageDoesNotClaimSuccess() {
@@ -521,6 +614,75 @@ async function testPersistedBusinessCoordinatesAvoidAnchorApiCall() {
   assert.deepEqual(tracker, {});
 }
 
+async function testMissingBusinessCoordinatesUseCheapPlaceDetailsAnchor() {
+  const originalGet = axios.get;
+  const calls = [];
+  axios.get = async (url, config) => {
+    calls.push({ url, config });
+    return {
+      data: {
+        id: 'own-place',
+        location: { latitude: 41.4424052, longitude: 2.2239243 },
+      },
+    };
+  };
+  try {
+    const tracker = {};
+    const clinic = {
+      nombre_clinica: 'Propdental Badalona',
+      business_location_name: 'PROPDENTAL | Clínica Dental en Badalona',
+      business_place_id: 'own-place',
+      business_maps_url: 'https://maps.google.com/?cid=123',
+      business_latitude: null,
+      business_longitude: null,
+    };
+    const profile = await __testing.resolveOwnClinicHeatmapProfile(clinic, tracker);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].url, /\/places\/own-place$/);
+    assert.equal(calls[0].config.headers['X-Goog-FieldMask'], 'id,location');
+    assert.equal(profile.name, 'PROPDENTAL | Clínica Dental en Badalona');
+    assert.equal(profile.latitude, 41.4424052);
+    assert.equal(profile.longitude, 2.2239243);
+    assert.deepEqual(tracker, { places_anchor_details: 1 });
+    const cachedTracker = {};
+    const cachedProfile = await __testing.resolveOwnClinicHeatmapProfile(clinic, cachedTracker);
+    assert.equal(calls.length, 1, 'the same place anchor must be reused from runtime cache');
+    assert.deepEqual(cachedTracker, {});
+    assert.deepEqual(cachedProfile, profile);
+  } finally {
+    axios.get = originalGet;
+  }
+}
+
+async function testIdOnlyHeatmapResultFindsOwnPlace() {
+  let call = 0;
+  const points = await __testing.collectLocalHeatmapPoints({
+    center: { latitude: 41.4424052, longitude: 2.2239243 },
+    radiusKm: 1,
+    query: 'clínica dental',
+    ownPlaceId: 'own-place',
+    ownName: 'Propdental Badalona',
+    tracker: {},
+    search: async () => {
+      call += 1;
+      return call === 1 ? [{ id: 'other-place' }, { id: 'own-place' }] : [];
+    },
+  });
+  assert.equal(points[0].my_position, 2);
+  assert.equal(points[0].score, 100);
+}
+
+function testStrictGeoPointRejectsMissingAndZeroAnchor() {
+  assert.equal(__testing.strictGeoPoint(null, null), null);
+  assert.equal(__testing.strictGeoPoint('', ''), null);
+  assert.equal(__testing.strictGeoPoint(0, 0), null);
+  assert.deepEqual(__testing.strictGeoPoint('41.4424052', '2.2239243'), {
+    latitude: 41.4424052,
+    longitude: 2.2239243,
+  });
+  assert.match(__testing.LOCAL_HEATMAP_ALGORITHM_VERSION, /v2$/);
+}
+
 function testCompliancePurgeRemovesProviderIdentifiers() {
   const source = fs.readFileSync(
     path.resolve(__dirname, '../../../migrations/20260715152000-purge-google-places-competition-content.js'),
@@ -543,9 +705,14 @@ async function run() {
   await testDurableRetryReclaimsLeaseAfterProviderError();
   await testSocialDiscoveryFetchPinsEveryRedirectTarget();
   await testOneRelevantTextSearchPerGridPointWithoutFallback();
+  await testMissingOwnPlaceIdStopsBeforeGridQueries();
+  await testMissingStoredPlaceIdUsesOneAnchorResolutionBeforeGrid();
   await testProviderOutageDoesNotClaimSuccess();
   await testSuccessfulSnapshotPersistsOnlyRankingData();
   await testPersistedBusinessCoordinatesAvoidAnchorApiCall();
+  await testMissingBusinessCoordinatesUseCheapPlaceDetailsAnchor();
+  await testIdOnlyHeatmapResultFindsOwnPlace();
+  testStrictGeoPointRejectsMissingAndZeroAnchor();
   testCompliancePurgeRemovesProviderIdentifiers();
   console.log('marketing_competition_heatmap_cache.test.js OK');
 }

@@ -59,6 +59,7 @@ const intakeController = require('./controllers/intake.controller');
 const { setIO, onBusEvent } = require('./services/socket.service');
 const { isGlobalAdmin } = require('./lib/role-helpers');
 const { buildQuickChatContextFromMemberships } = require('./lib/quickchat-helpers');
+const { canUserAccessFeature } = require('./lib/access-policy');
 require('./workers/queue.workers');
 
 const RUNTIME_ROLE = String(process.env.RUNTIME_ROLE || '').trim().toLowerCase();
@@ -348,10 +349,25 @@ io.on('connection', async (socket) => {
         isGlobalAdmin: userIsGlobalAdmin,
         allClinicIds,
     });
-    const allowedClinicIds = quickChatContext.clinicIds.filter((clinicId) => {
-        const permissions = quickChatContext.permissionsByClinic.get(clinicId);
-        return !!permissions && (permissions.readTeam || permissions.readPatients);
-    });
+    // Los rooms de clínica transportan eventos con contenido de conversaciones.
+    // Un perfil que solo pueda leer chats internos no debe entrar en ellos: el
+    // mismo room también recibe mensajes de pacientes y leads. Esos perfiles
+    // conservan REST/polling para su ámbito no sensible.
+    const realtimeClinicDecisions = await Promise.all(quickChatContext.clinicIds.map(async (clinicId) => {
+        const [readPatients, readLeads, patientSensitive, leadSensitive] = await Promise.all([
+            canUserAccessFeature({ actorId: userId, featureKey: 'quickchat.read_patients', clinicId }),
+            canUserAccessFeature({ actorId: userId, featureKey: 'quickchat.read_leads', clinicId }),
+            canUserAccessFeature({ actorId: userId, featureKey: 'patients.sensitive.view', clinicId }),
+            canUserAccessFeature({ actorId: userId, featureKey: 'leads.sensitive.view', clinicId }),
+        ]);
+        return {
+            clinicId,
+            allowed: (readPatients && patientSensitive) || (readLeads && leadSensitive),
+        };
+    }));
+    const allowedClinicIds = realtimeClinicDecisions
+        .filter((decision) => decision.allowed)
+        .map((decision) => decision.clinicId);
     const canUseAllClinics = quickChatContext.canUseAllClinics;
 
     socket.data.allowedClinicIds = allowedClinicIds;

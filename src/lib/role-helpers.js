@@ -16,8 +16,17 @@ const ROLES_CLINICA = ['paciente', 'personaldeclinica', 'propietario', 'agencia'
 /** Roles que representan "staff" (personal que trabaja en la clínica) */
 const STAFF_ROLES = ['propietario', 'personaldeclinica', 'agencia'];
 
-/** Roles con permisos de gestión (admin-level) en su scope de clínicas */
-const ADMIN_ROLES = ['propietario', 'agencia'];
+/**
+ * Roles con permisos administrativos sobre la clínica y su equipo.
+ *
+ * Una agencia puede operar Marketing en las clínicas que tiene asignadas, pero
+ * esa asignación no la convierte en administradora de personal, agenda, grupos
+ * o configuración clínica.
+ */
+const ADMIN_ROLES = ['propietario'];
+
+/** Roles que pueden escribir configuración de Marketing dentro de su scope. */
+const MARKETING_WRITE_ROLES = ['propietario', 'agencia'];
 
 /** Roles que pueden ser invitados al onboarding */
 const INVITABLE_ROLES = ['personaldeclinica', 'propietario', 'agencia'];
@@ -51,7 +60,7 @@ const isGlobalAdmin = (userId) => ADMIN_USER_IDS.includes(Number(userId));
 const isStaffRole = (rolClinica) => STAFF_ROLES.includes(rolClinica);
 
 /**
- * ¿Tiene rol de admin (scoped) en una clínica? (propietario o agencia)
+ * ¿Tiene rol de admin (scoped) en una clínica? (solo propietario)
  */
 const isAdminRole = (rolClinica) => ADMIN_ROLES.includes(rolClinica);
 
@@ -59,7 +68,6 @@ const isAdminRole = (rolClinica) => ADMIN_ROLES.includes(rolClinica);
  * ¿Puede gestionar personal en una clínica?
  * - Admin global: siempre.
  * - Propietario de la clínica: sí.
- * - Agencia con la clínica asignada: sí.
  * - Otros: no.
  */
 const canManagePersonal = (userId, rolClinica) =>
@@ -69,6 +77,7 @@ module.exports = {
     ROLES_CLINICA,
     STAFF_ROLES,
     ADMIN_ROLES,
+    MARKETING_WRITE_ROLES,
     INVITABLE_ROLES,
     SUBROLES_CLINICA,
     ESTADO_CUENTA,

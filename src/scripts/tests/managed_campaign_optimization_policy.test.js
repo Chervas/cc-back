@@ -128,6 +128,7 @@ async function testSameAccountSupportsDisjointCohorts() {
 
   const discovered = await discoverGoalPolicyAuditTargets({
     intakeModel: { findAll: async () => [{ ...intake, config: disjoint.next_intake_config }] },
+    campaignRequestModel: { findAll: async () => [] },
   });
   assert.equal(discovered.issues.length, 0);
   assert.equal(discovered.targets.length, 2);

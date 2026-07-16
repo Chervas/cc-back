@@ -4,6 +4,7 @@ const asyncHandler = require('express-async-handler');
 const db = require('../../models');
 const consentimientosService = require('../services/consentimientos.service');
 const { assertUserCanAccessFeature, canUserAccessFeature } = require('../lib/access-policy');
+const { isGlobalAdmin } = require('../lib/role-helpers');
 
 const { Op } = db.Sequelize;
 
@@ -47,6 +48,13 @@ async function requireConsentFeature(req, featureKey, clinicIdRaw) {
     if (!clinicId) throw buildError('clinic_id_required', 400);
     await assertUserCanAccessFeature({ actorId, featureKey, clinicId });
     return clinicId;
+}
+
+function requireAdminConsentCatalog(req) {
+    const actorId = toIntOrNull(getUserId(req));
+    if (!actorId) throw buildError('auth_failed', 401);
+    if (!isGlobalAdmin(actorId)) throw buildError('admin_consent_catalog_forbidden', 403);
+    return actorId;
 }
 
 async function resolvePatientClinicId(identifier, fallbackClinicId = null) {
@@ -121,6 +129,7 @@ async function filterDocumentsByConsentFeature(req, items = [], featureKey = 'co
 
 exports.listAdminTemplates = asyncHandler(async (req, res) => {
     try {
+        requireAdminConsentCatalog(req);
         const items = await consentimientosService.listAdminTemplates(req.query || {});
         return res.json(items);
     } catch (error) {
@@ -130,6 +139,7 @@ exports.listAdminTemplates = asyncHandler(async (req, res) => {
 
 exports.createAdminTemplate = asyncHandler(async (req, res) => {
     try {
+        requireAdminConsentCatalog(req);
         const item = await consentimientosService.createAdminTemplate(req.body || {}, getUserId(req));
         return res.status(201).json(item);
     } catch (error) {
@@ -139,6 +149,7 @@ exports.createAdminTemplate = asyncHandler(async (req, res) => {
 
 exports.updateAdminTemplate = asyncHandler(async (req, res) => {
     try {
+        requireAdminConsentCatalog(req);
         const item = await consentimientosService.updateAdminTemplate(req.params.id, req.body || {}, getUserId(req));
         return res.json(item);
     } catch (error) {
@@ -148,6 +159,7 @@ exports.updateAdminTemplate = asyncHandler(async (req, res) => {
 
 exports.propagateAdminTemplate = asyncHandler(async (req, res) => {
     try {
+        requireAdminConsentCatalog(req);
         const result = await consentimientosService.propagateAdminTemplateToClinics(req.params.id, {
             ...(req.body || {}),
             userId: getUserId(req),
@@ -208,12 +220,12 @@ exports.syncClinicTemplates = asyncHandler(async (req, res) => {
 
 exports.getTreatmentRequirements = asyncHandler(async (req, res) => {
     try {
-        if (req.query?.clinic_id || req.query?.clinica_id) {
-            await requireConsentFeature(req, 'consents.view', req.query?.clinic_id ?? req.query?.clinica_id);
-        }
+        const clinicId = req.query?.clinic_id ?? req.query?.clinica_id;
+        if (clinicId) await requireConsentFeature(req, 'consents.view', clinicId);
+        else requireAdminConsentCatalog(req);
         const items = await consentimientosService.getTreatmentRequirements({
             tratamientoId: req.params.id,
-            clinicaId: req.query?.clinic_id ?? req.query?.clinica_id,
+            clinicaId: clinicId,
         });
         return res.json(items);
     } catch (error) {

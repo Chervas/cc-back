@@ -6,6 +6,7 @@ const path = require('path');
 const {
   __test: {
     buildEnhancedConversionActivationPlan,
+    auditConnectOnlyMeasurementTarget,
     collectEnhancedConversionActivationTargets,
     persistEnhancedConversionActivationPlan,
     reconcileEnhancedConversionsInternalActivation,
@@ -859,18 +860,22 @@ async function testAutomaticReconciliationActivatesOnceAfterReadiness() {
       return this;
     }
   };
+  let consentReadiness = {
+    ready: true,
+    validated: true,
+    reasons: [],
+    expires_at: '2026-07-14T12:00:00.000Z',
+    verification_current: true,
+    renewal_required: false,
+    runtime_configuration_ready: true
+  };
   const dependencies = {
     resolveScopeFromInput: async () => ({ assignment_scope: 'group', group_id: 5 }),
     resolveEffectiveMarketingState: async () => ({
       records: { groupRecord: record },
       google: { available_accounts: scopedAccounts() }
     }),
-    assessConsentMeasurementReadiness: () => ({
-      ready: true,
-      validated: true,
-      reasons: [],
-      expires_at: '2026-07-14T12:00:00.000Z'
-    }),
+    assessConsentMeasurementReadiness: () => consentReadiness,
     resolveGoogleConnectionForScope: async () => ({
       connection: {
         id: 23,
@@ -915,6 +920,33 @@ async function testAutomaticReconciliationActivatesOnceAfterReadiness() {
     });
     assert.equal(second.status, 'already_active');
     assert.equal(second.idempotent, true);
+    consentReadiness = {
+      ready: false,
+      validated: false,
+      reason: 'consent_attestation_renewal_required',
+      reasons: ['consent_attestation_renewal_required'],
+      issues: [{
+        reason: 'consent_attestation_renewal_required',
+        domain: 'propdental.es',
+        details: 'attestation_operational_expired'
+      }],
+      expires_at: '2026-07-14T12:00:00.000Z',
+      verification_current: false,
+      renewal_required: true,
+      runtime_configuration_ready: true
+    };
+    const renewal = await reconcileEnhancedConversionsInternalActivation({
+      now: new Date('2026-07-15T12:30:00.000Z'),
+      dependencies
+    });
+    assert.equal(renewal.status, 'already_active');
+    assert.equal(renewal.ready, true,
+      'An expired observation must request renewal without contradicting the active uploader allowlist');
+    assert.equal(renewal.consent_verification.renewal_required, true);
+    assert.equal(
+      renewal.consent_verification.runtime_continues_with_per_event_visitor_consent,
+      true
+    );
     assert.equal(updates, 1);
     assert.equal(transactions, 1);
     assert.equal(googleWrites, 0);
@@ -1000,6 +1032,68 @@ async function testPersonalizationCapabilityDoesNotWaitForEnhancedGate() {
   }
 }
 
+async function testConnectOnlyAuditTreatsExpiredObservationAsRenewalWarning() {
+  const record = intakeRecord();
+  const activationPlan = buildPlan({ intakeRecord: record });
+  record.config = activationPlan.nextConfig;
+  const staleConsent = {
+    ready: false,
+    validated: false,
+    provider: 'clinicaclick',
+    domains: ['propdental.es'],
+    expires_at: '2026-07-12T11:59:59.000Z',
+    verification_current: false,
+    renewal_required: true,
+    runtime_configuration_ready: true,
+    issues: [{
+      reason: 'consent_attestation_renewal_required',
+      domain: 'propdental.es',
+      details: 'attestation_operational_expired'
+    }]
+  };
+  const report = await auditConnectOnlyMeasurementTarget({
+    scope: { assignment_scope: 'group', group_id: 5 },
+    intakeRecord: record,
+    now: NOW,
+    dependencies: {
+      assessConsentMeasurementReadiness: () => staleConsent,
+      evaluateGoogleConversionOnboardingReadiness: async (options) => {
+        assert.equal(options.createMissing, false);
+        return {
+          ready: false,
+          validated: false,
+          customer_ids: ['1851215478', '5992356722'],
+          targets: [{
+            event: 'lead',
+            destination_key: 'parallel',
+            customer_id: '1851215478',
+            configured_action_id: '1',
+            conversion_action_id: '1',
+            campaign_ids: ['123'],
+            validated: true
+          }],
+          capabilities_by_customer: {
+            1851215478: {
+              data_manager_scope_granted: true,
+              data_manager_quota_project_configured: true
+            }
+          },
+          issues: staleConsent.issues
+        };
+      }
+    }
+  });
+  assert.equal(report.healthy, true);
+  assert.equal(report.runtime_ready, true);
+  assert.equal(report.summary.critical_count, 0);
+  assert.equal(report.summary.warning_count, 1);
+  assert.equal(report.consent.renewal_required, true);
+  assert.equal(report.consent.grants_consent, false);
+  assert.equal(report.enhanced_conversions.canonical_actions_are_secondary, true);
+  assert.equal(report.enhanced_conversions.reporting_metric, 'all_conversions');
+  assert.equal(report.external_mutation_count, 0);
+}
+
 async function run() {
   testTargetCollectionExcludesPurchase();
   testReadyPlanIsRestrictedAndAuditable();
@@ -1019,6 +1113,7 @@ async function run() {
   await testStrategyReadinessReconciliationRejectsDisallowedGateScope();
   await testAutomaticReconciliationActivatesOnceAfterReadiness();
   await testPersonalizationCapabilityDoesNotWaitForEnhancedGate();
+  await testConnectOnlyAuditTreatsExpiredObservationAsRenewalWarning();
   console.log('enhanced_conversion_activation_gate.test.js: OK');
 }
 

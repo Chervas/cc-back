@@ -1098,6 +1098,7 @@ async function testDiscoveryOnlyReadsExplicitOptIns() {
           group_id: 5,
           assignment_scope: 'group',
           config: {
+            locations: [{ id: 35 }],
             google_ads: {
               goal_policy: {
                 enabled: true,
@@ -1106,17 +1107,136 @@ async function testDiscoveryOnlyReadsExplicitOptIns() {
             },
           },
         },
+        {
+          id: 3,
+          group_id: 5,
+          assignment_scope: 'group',
+          config: {
+            locations: [{ id: 35 }],
+            google_ads: {
+              enabled: true,
+              events: {
+                lead: {
+                  enabled: true,
+                  destinations: [{
+                    key: 'main',
+                    enabled: true,
+                    customer_id: CUSTOMER,
+                    conversion_action_id: ACTION_IDS.lead,
+                    campaign_ids: CAMPAIGN_IDS,
+                  }],
+                },
+              },
+            },
+          },
+        },
+        {
+          id: 4,
+          clinic_id: 36,
+          assignment_scope: 'clinic',
+          config: {
+            google_ads: { enabled: false, events: {} },
+          },
+        },
       ];
     },
     async update() { writeCalls += 1; },
     async create() { writeCalls += 1; },
   };
-  const discovered = await discoverGoalPolicyAuditTargets({ intakeModel: model });
+  let strategyReads = 0;
+  const discovered = await discoverGoalPolicyAuditTargets({
+    intakeModel: model,
+    campaignRequestModel: {
+      async findAll(options) {
+        strategyReads += 1;
+        assert.deepEqual(options.where, { estado: 'activa' });
+        return [35, 36, 37].map((clinicId) => ({
+          id: 10 + clinicId,
+          clinica_id: clinicId,
+          estado: 'activa',
+          solicitud: {
+            objective_id: 'new_patients',
+            mode_snapshot: 'connect_only',
+            scope: { clinic_id: clinicId, clinic_ids: [clinicId] },
+            channels: [{ channel: 'google_ads', enabled: true }],
+          },
+        }));
+      },
+    },
+  });
   assert.equal(readCalls, 1);
+  assert.equal(strategyReads, 1);
   assert.equal(writeCalls, 0);
   assert.equal(discovered.targets.length, 1);
+  assert.equal(discovered.measurement_targets.length, 2,
+    'Mide y mejora must be discovered even when its Google config has drifted');
+  assert.equal(discovered.measurement_targets[0].intake_config_id, 3);
+  assert.equal(discovered.measurement_targets[1].intake_config_id, 4);
+  assert.equal(discovered.issues.length, 1);
+  assert.equal(discovered.issues[0].code, 'CONNECT_ONLY_MEASUREMENT_INTAKE_CONFIG_MISSING');
+  assert.equal(discovered.issues[0].clinic_id, 37);
   assert.equal(discovered.targets[0].configured_accounts[0].customer_id, CUSTOMER);
   assert.deepEqual(discovered.targets[0].scope, { assignment_scope: 'group', clinic_id: null, group_id: 5 });
+}
+
+async function testPersistedAuditIncludesConnectOnlyMeasurementTargets() {
+  const updates = [];
+  const notifications = [];
+  const intakeRecord = {
+    id: 24,
+    group_id: 5,
+    assignment_scope: 'group',
+    config: { google_ads: { enabled: true } },
+  };
+  const result = await executePersistedGoalPolicyAudit({
+    dependencies: {
+      now: deterministicClock(),
+      syncLogModel: {
+        async create(values) {
+          assert.equal(values.job_type, 'google_conversion_goal_policy_audit');
+          return { async update(next) { updates.push(next); } };
+        },
+      },
+      discoverTargets: async () => ({
+        targets: [],
+        measurement_targets: [{
+          intake_config_id: 24,
+          scope: { assignment_scope: 'group', group_id: 5, clinic_id: null },
+          intake_record: intakeRecord,
+        }],
+        issues: [],
+      }),
+      auditMeasurement: async ({ scope, intakeRecord: received }) => {
+        assert.equal(received, intakeRecord);
+        assert.equal(scope.group_id, 5);
+        return {
+          healthy: true,
+          runtime_ready: true,
+          summary: { target_count: 8, critical_count: 0, warning_count: 1 },
+          consent: { renewal_required: true, grants_consent: false },
+          enhanced_conversions: {
+            enabled: true,
+            activation_applied: true,
+            canonical_actions_are_secondary: true,
+            reporting_metric: 'all_conversions',
+          },
+          targets: [],
+          issues: [{
+            severity: 'warning',
+            reason: 'consent_attestation_renewal_required',
+          }],
+        };
+      },
+      notifications: { async dispatchEvent(payload) { notifications.push(payload); } },
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(result.target_count, 1);
+  assert.equal(result.goal_policy_target_count, 0);
+  assert.equal(result.connect_only_measurement_target_count, 1);
+  assert.equal(result.connect_only_measurement_targets[0].runtime_ready, true);
+  assert.equal(updates[0].records_processed, 1);
+  assert.equal(notifications.length, 0, 'Renewal warnings must not masquerade as uploader failure');
 }
 
 async function testPersistedAuditUsesSyncLogAndExistingAlertFlow() {
@@ -1195,6 +1315,7 @@ async function main() {
   await testAuditIncludesAndAlertsUnsafeSupplementalAction();
   await testDiagnosticsReaderNeverUpdatesAttempts();
   await testDiscoveryOnlyReadsExplicitOptIns();
+  await testPersistedAuditIncludesConnectOnlyMeasurementTargets();
   await testPersistedAuditUsesSyncLogAndExistingAlertFlow();
   testDailyStableSchedulerIsWiredWithoutMigration();
   console.log('google_ads_clinicaclick_goal_policy.test.js OK');

@@ -5,9 +5,84 @@ const { Op } = require('sequelize');
 const { SocialStatsDaily, ClinicMetaAsset } = require('../../models');
 const authMiddleware = require('./auth.middleware');
 const panelesDashboardService = require('../services/panelesDashboard.service');
+const { getAccessibleClinicIdsForFeature } = require('../lib/access-policy');
+
+function positiveId(value) {
+    const parsed = Number.parseInt(String(value ?? ''), 10);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parseClinicScope(value, { allowAll = false } = {}) {
+    if (allowAll && String(value || '').trim().toLowerCase() === 'all') return null;
+    const rawValues = String(value ?? '').split(',').map((item) => item.trim()).filter(Boolean);
+    if (!rawValues.length) return [];
+    const ids = rawValues.map(positiveId);
+    if (ids.some((id) => !id)) return [];
+    return Array.from(new Set(ids));
+}
+
+function requirePanelScope({ featureKey, clinicIdFromRequest, allowMany = false, allowAll = false }) {
+    return async (req, res, next) => {
+        try {
+            const userId = positiveId(req.userData?.userId);
+            if (!userId) {
+                return res.status(401).json({ error: 'unauthenticated', message: 'Usuario no autenticado.' });
+            }
+            const rawClinicScope = clinicIdFromRequest(req);
+            if (rawClinicScope === undefined || rawClinicScope === null || rawClinicScope === '') {
+                return res.status(400).json({ error: 'clinic_scope_required', message: 'Debes indicar una clínica.' });
+            }
+            const requestedClinicIds = parseClinicScope(rawClinicScope, { allowAll });
+            const isAll = allowAll && String(rawClinicScope).trim().toLowerCase() === 'all';
+            if ((!isAll && !requestedClinicIds.length) || (!allowMany && requestedClinicIds?.length !== 1)) {
+                return res.status(400).json({ error: 'clinic_scope_invalid', message: 'El scope de clínica no es válido.' });
+            }
+
+            const allowedClinicIds = await getAccessibleClinicIdsForFeature({
+                actorId: userId,
+                featureKey,
+                clinicIds: isAll ? null : requestedClinicIds,
+            });
+            if (!allowedClinicIds.length || (!isAll && allowedClinicIds.length !== requestedClinicIds.length)) {
+                return res.status(403).json({ error: 'access_policy_forbidden', message: 'No tienes permisos para consultar estas clínicas.' });
+            }
+            req.authorizedPanelClinicIds = allowedClinicIds;
+            return next();
+        } catch (error) {
+            console.error('[paneles.scope] Error:', error);
+            return res.status(500).json({ error: 'panel_scope_check_failed', message: 'No se pudo validar el acceso al panel.' });
+        }
+    };
+}
+
+const requireOperationalParamClinic = requirePanelScope({
+    featureKey: 'clinic.settings.view',
+    clinicIdFromRequest: (req) => req.params?.idClinica,
+});
+const requireOperationalQueryClinic = requirePanelScope({
+    featureKey: 'clinic.settings.view',
+    clinicIdFromRequest: (req) => req.query?.idClinica ?? req.query?.clinica_id ?? req.query?.clinic_id,
+});
+const requireMarketingMetricClinic = requirePanelScope({
+    featureKey: 'marketing',
+    clinicIdFromRequest: (req) => req.query?.idClinica,
+});
+const requireMarketingBodyClinic = requirePanelScope({
+    featureKey: 'marketing',
+    clinicIdFromRequest: (req) => req.body?.idClinica ?? req.body?.clinica_id ?? req.body?.clinic_id,
+});
+const requireMarketingClinicSet = requirePanelScope({
+    featureKey: 'marketing',
+    clinicIdFromRequest: (req) => req.query?.clinicaId,
+    allowMany: true,
+    allowAll: true,
+});
+
+// Todos los paneles, incluidos los endpoints legacy, requieren una sesión real.
+router.use(authMiddleware);
 
 // GET /api/paneles/main
-router.get('/main', authMiddleware, async (req, res) => {
+router.get('/main', async (req, res) => {
     try {
         const dashboard = await panelesDashboardService.getMainDashboard({
             userId: Number(req.userData?.userId || 0) || null,
@@ -29,7 +104,7 @@ router.get('/main', authMiddleware, async (req, res) => {
 });
 
 // GET /api/paneles/dashboard/:idClinica
-router.get('/dashboard/:idClinica', async (req, res) => {
+router.get('/dashboard/:idClinica', requireOperationalParamClinic, async (req, res) => {
     try {
         const { idClinica } = req.params;
         const { periodo = 'ultimo_mes' } = req.query;
@@ -160,7 +235,7 @@ router.get('/dashboard/:idClinica', async (req, res) => {
 });
 
 // GET /api/paneles/usuario-info
-router.get('/usuario-info', async (req, res) => {
+router.get('/usuario-info', requireOperationalQueryClinic, async (req, res) => {
     try {
         // Obtener información del usuario desde el token/sesión
         // Por ahora devolvemos datos de prueba
@@ -186,7 +261,7 @@ router.get('/usuario-info', async (req, res) => {
 });
 
 // GET /api/paneles/notificaciones-tareas
-router.get('/notificaciones-tareas', async (req, res) => {
+router.get('/notificaciones-tareas', requireOperationalQueryClinic, async (req, res) => {
     try {
         const notificacionesTareas = {
             notificaciones: 2,
@@ -238,10 +313,11 @@ router.get('/notificaciones-tareas', async (req, res) => {
 });
 
 // GET /api/paneles/metricas/:tipo
-router.get('/metricas/:tipo', async (req, res) => {
+router.get('/metricas/:tipo', requireMarketingMetricClinic, async (req, res) => {
     try {
         const { tipo } = req.params;
-        const { idClinica, periodo = 'ultimo_mes', assetType } = req.query;
+        const idClinica = req.authorizedPanelClinicIds[0];
+        const { periodo = 'ultimo_mes', assetType } = req.query;
         
         console.log(`Obteniendo métricas de ${tipo} para clínica ${idClinica}, período: ${periodo}`);
         
@@ -362,9 +438,9 @@ router.get('/metricas/:tipo', async (req, res) => {
 });
 
 // POST /api/paneles/refresh
-router.post('/refresh', async (req, res) => {
+router.post('/refresh', requireMarketingBodyClinic, async (req, res) => {
     try {
-        const { idClinica } = req.body;
+        const idClinica = req.authorizedPanelClinicIds[0];
         
         console.log(`Refrescando datos para clínica ${idClinica}`);
         
@@ -390,9 +466,9 @@ module.exports = router;
 // =============================
 // SERIES: Seguidores por día (IG/FB)
 // GET /api/paneles/series/seguidores?clinicaId=<id|csv|all>&period=<this-year|last-year|all-time>
-router.get('/series/seguidores', async (req, res) => {
+router.get('/series/seguidores', requireMarketingClinicSet, async (req, res) => {
     try {
-        let { clinicaId, period = 'this-year', startDate, endDate } = req.query;
+        const { period = 'this-year', startDate, endDate } = req.query;
 
         // Rango de fechas
         let start, end;
@@ -417,14 +493,9 @@ router.get('/series/seguidores', async (req, res) => {
         }
 
         // Construir filtro por clínicas
-        const whereClinica = {};
-        if (clinicaId && clinicaId !== 'all') {
-            if (String(clinicaId).includes(',')) {
-                whereClinica.clinica_id = { [Op.in]: String(clinicaId).split(',').map(x => parseInt(x)).filter(n => !isNaN(n)) };
-            } else {
-                whereClinica.clinica_id = parseInt(clinicaId);
-            }
-        }
+        const whereClinica = {
+            clinica_id: { [Op.in]: req.authorizedPanelClinicIds },
+        };
 
         // Obtener filas IG/FB en rango
         const fmt = (d) => {
@@ -475,17 +546,12 @@ router.get('/series/seguidores', async (req, res) => {
 // =============================
 // Vinculaciones por clínica(s)
 // GET /api/paneles/vinculaciones?clinicaId=<id|csv|all>
-router.get('/vinculaciones', async (req, res) => {
+router.get('/vinculaciones', requireMarketingClinicSet, async (req, res) => {
     try {
-        let { clinicaId } = req.query;
-        const where = { isActive: true };
-        if (clinicaId && clinicaId !== 'all') {
-            if (String(clinicaId).includes(',')) {
-                where.clinicaId = { [Op.in]: String(clinicaId).split(',').map(x => parseInt(x)).filter(n => !isNaN(n)) };
-            } else {
-                where.clinicaId = parseInt(clinicaId);
-            }
-        }
+        const where = {
+            isActive: true,
+            clinicaId: { [Op.in]: req.authorizedPanelClinicIds },
+        };
         const assets = await ClinicMetaAsset.findAll({ where, raw: true });
         const anyIG = assets.some(a => a.assetType === 'instagram_business');
         const anyFB = assets.some(a => a.assetType === 'facebook_page');
@@ -495,3 +561,10 @@ router.get('/vinculaciones', async (req, res) => {
         res.status(500).json({ error: 'Error interno', message: error.message });
     }
 });
+
+router.__agencyAccessContract = {
+    parseClinicScope,
+    requireMarketingClinicSet,
+    requireMarketingMetricClinic,
+    requireOperationalQueryClinic,
+};
