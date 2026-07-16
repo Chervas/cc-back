@@ -572,22 +572,30 @@ const conflictsForSlot = ({
       });
     }
 
-    const dc = firstOverlap(docCitas, start, end);
-    if (dc) {
-      const citaClinicId = Number(dc.clinica_id);
-      const sameClinic = Number.isFinite(citaClinicId) && citaClinicId === Number(clinicaId);
-      conflicts.push({
-        resource_type: 'staff',
-        resource_role: 'doctor',
-        resource_id: doctorId,
-        clinica_id: clinicaId,
-        code: 'STAFF_OVERLAP',
-        can_force: sameClinic,
-        details: {
-          message: sameClinic ? 'Doctor ocupado' : 'Doctor ocupado en otra clínica',
-          clinica_id: Number.isFinite(citaClinicId) ? citaClinicId : null
-        }
-      });
+    const staffOutOfHours = conflicts.some((conflict) =>
+      conflict.resource_type === 'staff'
+      && conflict.resource_id === doctorId
+      && conflict.code === 'STAFF_OUT_OF_HOURS'
+    );
+
+    if (!staffOutOfHours) {
+      const dc = firstOverlap(docCitas, start, end);
+      if (dc) {
+        const citaClinicId = Number(dc.clinica_id);
+        const sameClinic = Number.isFinite(citaClinicId) && citaClinicId === Number(clinicaId);
+        conflicts.push({
+          resource_type: 'staff',
+          resource_role: 'doctor',
+          resource_id: doctorId,
+          clinica_id: clinicaId,
+          code: 'STAFF_OVERLAP',
+          can_force: sameClinic,
+          details: {
+            message: sameClinic ? 'Doctor ocupado' : 'Doctor ocupado en otra clínica',
+            clinica_id: Number.isFinite(citaClinicId) ? citaClinicId : null
+          }
+        });
+      }
     }
   }
 

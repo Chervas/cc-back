@@ -4501,6 +4501,7 @@ Reglas de solape forzable usadas por `/api/citas/:id/reagendar` y `/api/disponib
 - `INSTALLATION_OVERLAP` es forzable: permite agendar y solapar junto a otra cita existente en la misma instalación.
 - `STAFF_OVERLAP` es forzable solo cuando el choque es del mismo profesional dentro de la misma clínica.
 - Bloqueos, fuera de horario y choques del profesional en otra clínica no son forzables.
+- En `GET /api/disponibilidad/slots` y `GET /api/disponibilidad/grid`, los intervalos visuales de `include_unavailable` priorizan `STAFF_OUT_OF_HOURS`: si el profesional no tiene horario efectivo en esa clínica, no se añade además `STAFF_OVERLAP` por una cita activa en otra clínica para ese mismo tramo. La validación puntual conserva el bloqueo duro al intentar guardar.
 
 ## Marketing: Envíos Masivos WhatsApp
 
