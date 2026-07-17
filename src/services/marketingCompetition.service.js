@@ -1381,6 +1381,21 @@ function metaPageIdentityFromPayload(payload = {}) {
   };
 }
 
+function applyDiscoveredMetaIdentityPatch(competitor, patch, socialProfiles = null) {
+  const target = patch && typeof patch === 'object' ? patch : {};
+  const storedPageId = cleanString(target.meta_page_id) || cleanString(competitor?.meta_page_id);
+  const storedPageUrl = facebookIdentityUrl(target.meta_page_url)
+    || facebookIdentityUrl(competitor?.meta_page_url);
+  const discoveredPageUrl = facebookIdentityUrl(socialProfiles?.facebook_url);
+  const discoveredPageId = extractMetaPageIdFromUrl(discoveredPageUrl);
+
+  if (!storedPageUrl && discoveredPageUrl) target.meta_page_url = discoveredPageUrl;
+  // Una URL vanity de Facebook no contiene Page ID. Nunca debe convertir una
+  // identidad explícita ya confirmada en null durante el refresco de Places.
+  if (!storedPageId && discoveredPageId) target.meta_page_id = discoveredPageId;
+  return target;
+}
+
 function normalizeExternalError(error) {
   const data = error?.response?.data || null;
   const meta = data?.error || null;
@@ -4857,8 +4872,7 @@ async function refreshOneCompetitor(competitor, scope) {
       });
       if (socialProfiles) {
         patch.meta_ads_search_terms = metaTermsFromCompetitor({ ...competitor.toJSON(), ...patch }, socialProfiles);
-        if (!patch.meta_page_url && socialProfiles.facebook_url) patch.meta_page_url = socialProfiles.facebook_url;
-        if (!patch.meta_page_id && patch.meta_page_url) patch.meta_page_id = extractMetaPageIdFromUrl(patch.meta_page_url);
+        applyDiscoveredMetaIdentityPatch(competitor, patch, socialProfiles);
       }
       await competitor.update(patch);
       await upsertPlaceSnapshot(competitor, place);
@@ -4889,8 +4903,7 @@ async function refreshOneCompetitor(competitor, scope) {
         socialProfiles
       );
       patch.meta_ads_search_terms = metaTermsFromCompetitor({ ...competitor.toJSON(), ...patch }, socialProfiles);
-      if (!patch.meta_page_url && socialProfiles.facebook_url) patch.meta_page_url = socialProfiles.facebook_url;
-      if (!patch.meta_page_id && patch.meta_page_url) patch.meta_page_id = extractMetaPageIdFromUrl(patch.meta_page_url);
+      applyDiscoveredMetaIdentityPatch(competitor, patch, socialProfiles);
       await competitor.update(patch);
     }
   }
@@ -5057,6 +5070,7 @@ module.exports = {
     buildLocalHeatmapSearchBody,
     buildMetaIdentitySearchParams,
     adSnapshotPayload,
+    applyDiscoveredMetaIdentityPatch,
     collectLocalHeatmapPoints,
     hydrateLocalHeatmapPointIdentities,
     fetchPublicHtmlPage,
