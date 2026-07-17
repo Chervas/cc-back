@@ -18,9 +18,18 @@ const QUERY_MAX_LENGTH = 500;
 const RUN_RETENTION_DAYS = clampInt(process.env.AI_VISIBILITY_RETENTION_DAYS, 1, 180, 30);
 const CACHE_HOURS = clampInt(process.env.AI_VISIBILITY_CACHE_HOURS, 1, 168, 24);
 const MAX_RUNS_PER_CLINIC_24H = clampInt(process.env.AI_VISIBILITY_MAX_RUNS_PER_CLINIC_24H, 1, 30, 3);
+const MAX_ATTEMPTS_PER_QUERY_24H = clampInt(process.env.AI_VISIBILITY_MAX_ATTEMPTS_PER_QUERY_24H, 1, 6, 2);
+const ACTIVE_RUN_REUSE_MINUTES = clampInt(process.env.AI_VISIBILITY_ACTIVE_RUN_REUSE_MINUTES, 5, 180, 15);
+const PARTIAL_RUN_RETRY_MINUTES = clampInt(process.env.AI_VISIBILITY_PARTIAL_RUN_RETRY_MINUTES, 5, 1440, 60);
 const PROVIDER_TIMEOUT_MS = clampInt(process.env.AI_VISIBILITY_PROVIDER_TIMEOUT_MS, 10000, 180000, 90000);
 const OPENAI_MODEL = cleanString(process.env.OPENAI_AI_VISIBILITY_MODEL) || 'gpt-5.6';
 const GEMINI_MODEL = cleanString(process.env.GEMINI_AI_VISIBILITY_MODEL) || 'gemini-3.5-flash';
+
+const TYPICAL_QUERY_DEFINITIONS = Object.freeze([
+  Object.freeze({ key: 'best_local', label: 'Mejor clínica de la zona' }),
+  Object.freeze({ key: 'recommended_local', label: 'Clínica recomendada' }),
+  Object.freeze({ key: 'trusted_reviews', label: 'Clínica con buenas reseñas' }),
+]);
 
 function clampInt(value, min, max, fallback) {
   const parsed = Number.parseInt(value, 10);
@@ -233,6 +242,28 @@ function publicProviderError(provider, error) {
   };
 }
 
+function asObject(value) {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value !== 'string') return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function countryNameFromRegionCode(regionCode, fallback = null) {
+  const code = cleanString(regionCode)?.toUpperCase();
+  if (code === 'ES') return 'España';
+  if (code === 'FR') return 'Francia';
+  if (code === 'PT') return 'Portugal';
+  if (code === 'IT') return 'Italia';
+  if (code === 'AD') return 'Andorra';
+  return cleanString(fallback) || 'España';
+}
+
 async function resolveClinicContext(clinicId) {
   const clinic = await Clinica.findByPk(clinicId, {
     attributes: [
@@ -262,19 +293,40 @@ async function resolveClinicContext(clinicId) {
       raw: true,
     })
     : null;
+  const locationPayload = asObject(location?.raw_payload);
+  const storefrontAddress = asObject(locationPayload.storefrontAddress || locationPayload.storefront_address);
+  const addressLines = Array.isArray(storefrontAddress.addressLines)
+    ? storefrontAddress.addressLines
+    : (Array.isArray(storefrontAddress.address_lines) ? storefrontAddress.address_lines : []);
+  const city = cleanString(clinic.ciudad)
+    || cleanString(storefrontAddress.locality)
+    || cleanString(storefrontAddress.sublocality);
+  const province = cleanString(clinic.provincia)
+    || cleanString(storefrontAddress.administrativeArea)
+    || cleanString(storefrontAddress.administrative_area);
+  const country = countryNameFromRegionCode(
+    storefrontAddress.regionCode || storefrontAddress.region_code,
+    clinic.pais,
+  );
   return {
     id: Number(clinic.id_clinica),
     name: cleanString(location?.location_name) || cleanString(clinic.nombre_clinica) || `Clínica ${clinicId}`,
     category: cleanString(location?.primary_category) || 'clínica',
     website: safeUrl(clinic.url_web),
     local_profile_url: safeUrl(clinic.url_ficha_local),
-    address: [clinic.direccion, clinic.codigo_postal, clinic.ciudad, clinic.provincia, clinic.pais]
+    address: [
+      cleanString(clinic.direccion) || addressLines.map((value) => cleanString(value)).filter(Boolean).join(', '),
+      cleanString(clinic.codigo_postal) || cleanString(storefrontAddress.postalCode || storefrontAddress.postal_code),
+      city,
+      province,
+      country,
+    ]
       .map((value) => cleanString(value))
       .filter(Boolean)
       .join(', '),
-    city: cleanString(clinic.ciudad),
-    province: cleanString(clinic.provincia),
-    country: cleanString(clinic.pais) || 'España',
+    city,
+    province,
+    country,
   };
 }
 
@@ -286,10 +338,11 @@ function buildProviderPrompt(query, clinic) {
     clinic.website ? `web oficial: ${clinic.website}` : null,
   ].filter(Boolean).join('; ');
   return [
-    'Actúa como un asistente de búsqueda local neutral y usa búsqueda web actual para responder a la consulta del usuario.',
-    `Consulta exacta: «${query}».`,
-    `Clínica cuya visibilidad estamos comprobando (${identity}).`,
-    'No des por hecho que esa clínica es la mejor ni inventes una posición. Indica claramente si aparece o no en las fuentes consultadas y qué otras clínicas se mencionan.',
+    'Actúa como un asistente de búsqueda local neutral y usa búsqueda web actual.',
+    `Responde exactamente a esta consulta local generada por el sistema: «${query}».`,
+    `Después comprueba la presencia de esta clínica auditada (${identity}).`,
+    'La identidad auditada es solo una referencia de comparación: no la introduzcas en la respuesta ni la favorezcas si no aparece de forma natural en las fuentes consultadas.',
+    'No inventes posiciones. Indica claramente si aparece o no y qué otras clínicas se mencionan de forma verificable.',
     'No infieras ni incluyas datos de pacientes, tratamientos de personas concretas ni información clínica sensible.',
     'Responde en español y de forma concisa con: respuesta a la búsqueda, presencia de la clínica analizada, competidores mencionados y señales que explican la respuesta.',
     'Toda afirmación verificable debe conservar sus citas web.',
@@ -409,37 +462,100 @@ async function runGeminiSearch({ query, clinic }, dependencies = {}) {
 }
 
 function providerConfiguration() {
+  const openAiConfigured = !!cleanString(process.env.OPENAI_API_KEY);
+  const geminiConfigured = !!cleanString(process.env.GEMINI_API_KEY);
   return {
     openai: {
-      configured: !!cleanString(process.env.OPENAI_API_KEY),
+      configured: openAiConfigured,
+      status: openAiConfigured ? 'ready' : 'not_configured',
       model: OPENAI_MODEL,
       storage: 'disabled',
+      message: openAiConfigured
+        ? 'ChatGPT está listo para las comprobaciones automáticas.'
+        : 'ChatGPT está pendiente de configuración segura en el servidor.',
     },
     gemini: {
-      configured: !!cleanString(process.env.GEMINI_API_KEY),
+      configured: geminiConfigured,
+      status: geminiConfigured ? 'ready' : 'not_configured',
       model: GEMINI_MODEL,
       storage: 'disabled',
+      message: geminiConfigured
+        ? 'Gemini está listo para las comprobaciones automáticas.'
+        : 'Gemini está pendiente de configuración segura en el servidor.',
     },
   };
 }
 
-function buildSuggestedQueries(clinic) {
+function buildTypicalQueries(clinic) {
   const category = cleanString(clinic?.category)?.toLocaleLowerCase('es-ES') || 'clínica';
   const place = cleanString(clinic?.city) || cleanString(clinic?.province) || 'mi zona';
-  return uniqueStrings([
+  const queries = [
     `¿Cuál es la mejor ${category} en ${place}?`,
-    `${category} recomendada en ${place}`,
-    `${category} con buenas reseñas en ${place}`,
-  ], 3);
+    `¿Qué ${category} recomiendan en ${place}?`,
+    `¿Qué ${category} tiene buenas reseñas en ${place}?`,
+  ];
+  return TYPICAL_QUERY_DEFINITIONS.map((definition, index) => ({
+    ...definition,
+    query: queries[index],
+  }));
 }
 
-function serializeRun(run) {
+function buildSuggestedQueries(clinic) {
+  return buildTypicalQueries(clinic).map((item) => item.query);
+}
+
+function findTypicalQuery(clinic, { queryKey = null, legacyQuery = null } = {}) {
+  const typicalQueries = buildTypicalQueries(clinic);
+  const normalizedKey = cleanString(queryKey, 64)?.toLocaleLowerCase('es-ES');
+  if (normalizedKey) {
+    const byKey = typicalQueries.find((item) => item.key === normalizedKey);
+    if (byKey) return byKey;
+  }
+  const normalizedLegacy = cleanString(legacyQuery)?.toLocaleLowerCase('es-ES');
+  if (normalizedLegacy) {
+    const byExactText = typicalQueries.find(
+      (item) => item.query.toLocaleLowerCase('es-ES') === normalizedLegacy,
+    );
+    if (byExactText) return byExactText;
+  }
+  return typicalQueries[0];
+}
+
+function partialRunIsReusable(run, now = new Date()) {
+  if (run?.status !== 'completed_with_errors') return false;
+  const currentProviders = providerConfiguration();
+  const storedProviders = asObject(run.provider_status);
+  const sameConfiguration = ['openai', 'gemini'].every((provider) => (
+    Boolean(storedProviders?.[provider]?.configured) === Boolean(currentProviders?.[provider]?.configured)
+  ));
+  if (!sameConfiguration) return false;
+
+  const statuses = Object.values(storedProviders)
+    .map((provider) => cleanString(provider?.status))
+    .filter(Boolean);
+  const onlyWaitingForConfiguration = statuses.length > 0
+    && statuses.every((status) => ['completed', 'not_configured'].includes(status));
+  const retryMinutes = onlyWaitingForConfiguration
+    ? CACHE_HOURS * 60
+    : PARTIAL_RUN_RETRY_MINUTES;
+  const createdAt = new Date(run.created_at || 0);
+  return Number.isFinite(createdAt.getTime())
+    && createdAt.getTime() >= now.getTime() - retryMinutes * 60 * 1000;
+}
+
+function serializeRun(run, typicalQueries = []) {
   const value = run?.get ? run.get({ plain: true }) : run;
   if (!value) return null;
+  const normalizedQuery = cleanString(value.query)?.toLocaleLowerCase('es-ES');
+  const typicalQuery = (typicalQueries || []).find(
+    (item) => cleanString(item?.query)?.toLocaleLowerCase('es-ES') === normalizedQuery,
+  );
   return {
     id: Number(value.id),
     clinic_id: Number(value.clinica_id),
     query: value.query,
+    query_key: typicalQuery?.key || null,
+    query_source: typicalQuery ? 'system' : 'legacy',
     status: value.status,
     provider_status: value.provider_status || {},
     provider_results: value.provider_results || {},
@@ -453,18 +569,87 @@ function serializeRun(run) {
   };
 }
 
-async function getOverview(clinicId, { limit = 5 } = {}) {
-  const clinic = await resolveClinicContext(clinicId);
-  const rows = await MarketingAiVisibilityRun.findAll({
+function overviewState({ providers, automatic, runs }) {
+  const configuredProviders = Object.values(providers).filter((provider) => provider.configured).length;
+  if (!configuredProviders) {
+    return {
+      status: 'configuration_required',
+      message: 'Las consultas están preparadas y comenzarán automáticamente cuando se configure al menos un proveedor.',
+    };
+  }
+  if (runs.some((run) => ['queued', 'running'].includes(run.status))) {
+    return {
+      status: 'collecting',
+      message: 'ClinicaClick está consultando automáticamente las búsquedas locales habituales.',
+    };
+  }
+  if (automatic.status === 'temporarily_unavailable') {
+    return {
+      status: 'temporarily_unavailable',
+      message: 'No se han podido preparar las consultas automáticas. Se volverá a intentar al cargar el informe.',
+    };
+  }
+  const completedRuns = runs.filter((run) => ['completed', 'completed_with_errors'].includes(run.status));
+  if (completedRuns.length) {
+    const hasPartialResults = configuredProviders < 2
+      || completedRuns.some((run) => run.status === 'completed_with_errors');
+    return {
+      status: hasPartialResults ? 'partial' : 'ready',
+      message: hasPartialResults
+        ? 'Hay resultados disponibles y algún proveedor todavía requiere atención.'
+        : 'Las consultas locales habituales están actualizadas.',
+    };
+  }
+  return {
+    status: automatic.status === 'partial' ? 'partial' : 'collecting',
+    message: automatic.message,
+  };
+}
+
+async function getOverview(clinicId, {
+  limit = 10,
+  autoStart = true,
+  requestedBy = null,
+  requestedByName = null,
+  requestedByRole = null,
+} = {}, dependencies = {}) {
+  const RunModel = dependencies.RunModel || MarketingAiVisibilityRun;
+  const resolver = dependencies.resolveClinicContext || resolveClinicContext;
+  const clinic = await resolver(clinicId);
+  const providers = providerConfiguration();
+  const typicalQueries = buildTypicalQueries(clinic);
+  let automatic = {
+    enabled: true,
+    status: 'disabled_for_request',
+    triggered: false,
+    queued: 0,
+    reused: 0,
+    errors: [],
+    message: 'La ejecución automática está deshabilitada para esta lectura técnica.',
+  };
+  if (autoStart) {
+    automatic = await ensureTypicalRuns({
+      clinicId,
+      clinic,
+      typicalQueries,
+      requestedBy,
+      requestedByName,
+      requestedByRole,
+    }, dependencies);
+  }
+  const rows = await RunModel.findAll({
     where: {
       clinica_id: clinicId,
       expires_at: { [Op.gt]: new Date() },
     },
     order: [['created_at', 'DESC']],
-    limit: Math.max(1, Math.min(10, Number(limit) || 5)),
+    limit: Math.max(3, Math.min(20, Number(limit) || 10)),
   });
+  const serializedRuns = rows.map((row) => serializeRun(row, typicalQueries));
+  const state = overviewState({ providers, automatic, runs: serializedRuns });
   return {
     success: true,
+    ...state,
     clinic: {
       id: clinic.id,
       name: clinic.name,
@@ -472,16 +657,23 @@ async function getOverview(clinicId, { limit = 5 } = {}) {
       city: clinic.city,
       province: clinic.province,
     },
-    providers: providerConfiguration(),
-    suggested_queries: buildSuggestedQueries(clinic),
+    providers,
+    automatic,
+    typical_queries: typicalQueries,
+    // Compatibilidad de una versión con el frontend anterior. Nunca se usan
+    // para aceptar texto libre en el backend.
+    suggested_queries: typicalQueries.map((item) => item.query),
     cache_hours: CACHE_HOURS,
     max_runs_per_clinic_24h: MAX_RUNS_PER_CLINIC_24H,
-    runs: rows.map(serializeRun),
+    max_attempts_per_query_24h: MAX_ATTEMPTS_PER_QUERY_24H,
+    runs: serializedRuns,
   };
 }
 
-async function getRun(runId, clinicId) {
-  const row = await MarketingAiVisibilityRun.findOne({
+async function getRun(runId, clinicId, dependencies = {}) {
+  const RunModel = dependencies.RunModel || MarketingAiVisibilityRun;
+  const resolver = dependencies.resolveClinicContext || resolveClinicContext;
+  const row = await RunModel.findOne({
     where: { id: runId, clinica_id: clinicId },
   });
   if (!row) {
@@ -490,10 +682,19 @@ async function getRun(runId, clinicId) {
     error.status = 404;
     throw error;
   }
-  return serializeRun(row);
+  const clinic = await resolver(clinicId);
+  return serializeRun(row, buildTypicalQueries(clinic));
 }
 
-async function enqueueRun({ clinicId, query, requestedBy = null, requestedByName = null, requestedByRole = null }, dependencies = {}) {
+async function enqueueRun({
+  clinicId,
+  query,
+  clinic = null,
+  typicalQueries = null,
+  requestedBy = null,
+  requestedByName = null,
+  requestedByRole = null,
+}, dependencies = {}) {
   const RunModel = dependencies.RunModel || MarketingAiVisibilityRun;
   const jobs = dependencies.jobRequestsService || jobRequestsService;
   // Carga diferida: jobScheduler -> jobExecutor también registra este
@@ -501,29 +702,61 @@ async function enqueueRun({ clinicId, query, requestedBy = null, requestedByName
   // durante el arranque del worker.
   const scheduler = dependencies.jobScheduler || require('./jobScheduler.service');
   const normalizedQuery = normalizeQuery(query);
-  await resolveClinicContext(clinicId);
+  const resolvedClinic = clinic || await (dependencies.resolveClinicContext || resolveClinicContext)(clinicId);
+  const resolvedTypicalQueries = typicalQueries || buildTypicalQueries(resolvedClinic);
   const hash = queryHash(normalizedQuery);
   const now = new Date();
   const cacheCutoff = new Date(now.getTime() - CACHE_HOURS * 60 * 60 * 1000);
-  const cached = await RunModel.findOne({
+  const activeCutoff = new Date(now.getTime() - ACTIVE_RUN_REUSE_MINUTES * 60 * 1000);
+  let reusable = await RunModel.findOne({
     where: {
       clinica_id: clinicId,
       query_hash: hash,
-      status: { [Op.in]: ['completed', 'completed_with_errors'] },
-      created_at: { [Op.gte]: cacheCutoff },
       expires_at: { [Op.gt]: now },
+      [Op.or]: [
+        {
+          status: { [Op.in]: ['completed', 'completed_with_errors'] },
+          created_at: { [Op.gte]: cacheCutoff },
+        },
+        {
+          status: { [Op.in]: ['queued', 'running'] },
+          created_at: { [Op.gte]: activeCutoff },
+        },
+      ],
     },
     order: [['created_at', 'DESC']],
   });
-  if (cached) {
-    return { run: serializeRun(cached), reused: true, queued: false };
+  if (reusable?.status === 'completed_with_errors' && !partialRunIsReusable(reusable, now)) {
+    reusable = null;
+  }
+  if (reusable) {
+    return {
+      run: serializeRun(reusable, resolvedTypicalQueries),
+      reused: true,
+      queued: ['queued', 'running'].includes(reusable.status),
+    };
   }
 
   const windowStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-  const recentCount = await RunModel.count({
-    where: { clinica_id: clinicId, created_at: { [Op.gte]: windowStart } },
+  const recentAttemptsForQuery = await RunModel.count({
+    where: {
+      clinica_id: clinicId,
+      query_hash: hash,
+      created_at: { [Op.gte]: windowStart },
+    },
   });
-  if (recentCount >= MAX_RUNS_PER_CLINIC_24H) {
+  if (recentAttemptsForQuery >= MAX_ATTEMPTS_PER_QUERY_24H) {
+    const error = new Error('Esta consulta ya ha agotado sus reintentos de las últimas 24 horas.');
+    error.code = 'AI_VISIBILITY_QUERY_ATTEMPT_LIMIT';
+    error.status = 429;
+    throw error;
+  }
+  const recentDistinctQueries = await RunModel.count({
+    where: { clinica_id: clinicId, created_at: { [Op.gte]: windowStart } },
+    distinct: true,
+    col: 'query_hash',
+  });
+  if (!recentAttemptsForQuery && recentDistinctQueries >= MAX_RUNS_PER_CLINIC_24H) {
     const error = new Error(`Esta clínica ya ha usado sus ${MAX_RUNS_PER_CLINIC_24H} comprobaciones de las últimas 24 horas.`);
     error.code = 'AI_VISIBILITY_RATE_LIMIT';
     error.status = 429;
@@ -542,29 +775,150 @@ async function enqueueRun({ clinicId, query, requestedBy = null, requestedByName
   });
 
   try {
-    const job = await jobs.enqueueJobRequest({
+    const jobInput = {
       type: JOB_TYPE,
       payload: { runId: Number(row.id), clinicId: Number(clinicId) },
       priority: 'low',
-      origin: 'marketing_reports:ai_visibility',
+      origin: 'marketing_reports:ai_visibility_automatic',
       requestedBy,
       requestedByName,
       requestedByRole,
       maxAttempts: 2,
-    });
+      dedupeScope: `ai_visibility:${Number(clinicId)}:${hash}`,
+    };
+    let job;
+    let jobCreated = true;
+    if (typeof jobs.enqueueUniqueJobRequest === 'function') {
+      const unique = await jobs.enqueueUniqueJobRequest(jobInput);
+      job = unique.job;
+      jobCreated = unique.created;
+    } else {
+      job = await jobs.enqueueJobRequest(jobInput);
+    }
+    if (!jobCreated) {
+      const existingPayload = asObject(job?.payload);
+      const existingRunId = Number(existingPayload.runId || existingPayload.run_id || 0);
+      const existingRun = existingRunId > 0 ? await RunModel.findByPk(existingRunId) : null;
+      if (existingRun) {
+        if (typeof row.destroy === 'function') await row.destroy();
+        return {
+          run: serializeRun(existingRun, resolvedTypicalQueries),
+          reused: true,
+          queued: ['queued', 'running'].includes(existingRun.status),
+        };
+      }
+      const error = new Error('No se pudo recuperar la comprobación automática ya encolada.');
+      error.code = 'AI_VISIBILITY_DEDUPE_RUN_NOT_FOUND';
+      throw error;
+    }
     await row.update({ job_request_id: job.id });
     scheduler.triggerImmediate(job.id).catch((error) => {
       console.error('❌ Error despertando job de visibilidad IA:', error.message);
     });
-    return { run: serializeRun(row), reused: false, queued: true };
+    return { run: serializeRun(row, resolvedTypicalQueries), reused: false, queued: true };
   } catch (error) {
-    await row.update({
-      status: 'failed',
-      completed_at: new Date(),
-      error_summary: [{ code: 'AI_VISIBILITY_QUEUE_ERROR', message: 'No se pudo encolar la comprobación.' }],
-    });
+    if (typeof row.update === 'function') {
+      await row.update({
+        status: 'failed',
+        completed_at: new Date(),
+        error_summary: [{ code: 'AI_VISIBILITY_QUEUE_ERROR', message: 'No se pudo encolar la comprobación.' }],
+      });
+    }
     throw error;
   }
+}
+
+async function ensureTypicalRuns({
+  clinicId,
+  clinic = null,
+  typicalQueries = null,
+  requestedBy = null,
+  requestedByName = null,
+  requestedByRole = null,
+}, dependencies = {}) {
+  const providers = providerConfiguration();
+  const configuredProviders = Object.values(providers).filter((provider) => provider.configured).length;
+  const resolvedClinic = clinic || await (dependencies.resolveClinicContext || resolveClinicContext)(clinicId);
+  const queries = typicalQueries || buildTypicalQueries(resolvedClinic);
+  if (!configuredProviders) {
+    return {
+      enabled: true,
+      status: 'waiting_configuration',
+      triggered: false,
+      queued: 0,
+      reused: 0,
+      errors: [],
+      message: 'Las tres consultas habituales están preparadas y se ejecutarán automáticamente al configurar ChatGPT o Gemini.',
+    };
+  }
+
+  const results = [];
+  const errors = [];
+  for (const typicalQuery of queries) {
+    try {
+      const result = await enqueueRun({
+        clinicId,
+        clinic: resolvedClinic,
+        typicalQueries: queries,
+        query: typicalQuery.query,
+        requestedBy,
+        requestedByName,
+        requestedByRole,
+      }, dependencies);
+      results.push({ query_key: typicalQuery.key, ...result });
+    } catch (error) {
+      errors.push({
+        query_key: typicalQuery.key,
+        code: cleanString(error?.code, 80) || 'AI_VISIBILITY_AUTOMATIC_ERROR',
+        message: ['AI_VISIBILITY_RATE_LIMIT', 'AI_VISIBILITY_QUERY_ATTEMPT_LIMIT'].includes(error?.code)
+          ? 'La consulta se actualizará cuando se libere el límite diario.'
+          : 'No se pudo preparar esta consulta automática.',
+      });
+    }
+  }
+  const created = results.filter((result) => !result.reused).length;
+  const reused = results.filter((result) => result.reused).length;
+  const pending = results.filter((result) => result.queued).length;
+  const status = errors.length
+    ? (results.length ? 'partial' : 'temporarily_unavailable')
+    : (created || pending ? 'queued' : 'up_to_date');
+  return {
+    enabled: true,
+    status,
+    triggered: created > 0,
+    queued: pending,
+    reused,
+    errors,
+    message: status === 'up_to_date'
+      ? 'Las tres consultas habituales ya están actualizadas.'
+      : (status === 'queued'
+        ? 'ClinicaClick está actualizando automáticamente las tres consultas habituales.'
+        : (status === 'partial'
+          ? 'Algunas consultas están disponibles y otras se actualizarán más adelante.'
+          : 'No se han podido preparar las consultas automáticas.')),
+  };
+}
+
+async function enqueueTypicalRun({
+  clinicId,
+  queryKey = null,
+  legacyQuery = null,
+  requestedBy = null,
+  requestedByName = null,
+  requestedByRole = null,
+}, dependencies = {}) {
+  const clinic = await (dependencies.resolveClinicContext || resolveClinicContext)(clinicId);
+  const typicalQueries = buildTypicalQueries(clinic);
+  const typicalQuery = findTypicalQuery(clinic, { queryKey, legacyQuery });
+  return enqueueRun({
+    clinicId,
+    clinic,
+    typicalQueries,
+    query: typicalQuery.query,
+    requestedBy,
+    requestedByName,
+    requestedByRole,
+  }, dependencies);
 }
 
 async function executeRun(payload = {}, dependencies = {}) {
@@ -631,19 +985,25 @@ module.exports = {
   getOverview,
   getRun,
   enqueueRun,
+  enqueueTypicalRun,
+  ensureTypicalRuns,
   executeRun,
   cleanupExpiredRuns,
   providerConfiguration,
   __testing: {
     buildProviderPrompt,
     buildSuggestedQueries,
+    buildTypicalQueries,
+    findTypicalQuery,
     normalizeCitation,
     normalizeQuery,
     parseGeminiResponse,
     parseOpenAiResponse,
     openAiCountryCode,
+    partialRunIsReusable,
     publicProviderError,
     queryHash,
+    resolveClinicContext,
     runGeminiSearch,
     runOpenAiSearch,
     serializeRun,

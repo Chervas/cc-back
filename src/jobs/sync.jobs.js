@@ -41,6 +41,9 @@ const {
   prepareCampaignLevelFallbackRows,
   shouldMarkGoogleAdsAccountSynced,
 } = require('../lib/googleAdsSyncHelpers');
+const {
+  buildGoogleDestinationDetections,
+} = require('../lib/googleAdsCampaignMeasurementDiagnosis');
 const notificationService = require('../services/notifications.service');
 const { enqueueSyncForAllWabas } = require('../services/whatsappTemplates.service');
 const { enqueueSyncPhonesForAllWabas } = require('../services/whatsappPhones.service');
@@ -4474,6 +4477,16 @@ try {
           { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'] }
         ]
       });
+      if (Array.isArray(options.customerIds) && options.customerIds.length) {
+        const allowedCustomerIds = new Set(options.customerIds
+          .map((id) => normalizeCustomerId(id))
+          .filter(Boolean));
+        if (allowedCustomerIds.size) {
+          accounts = accounts.filter((account) => (
+            allowedCustomerIds.has(normalizeCustomerId(account.customerId))
+          ));
+        }
+      }
       if (Array.isArray(options.clinicIds) && options.clinicIds.length) {
         const allowedIds = options.clinicIds.map((id) => Number(id)).filter(Number.isFinite);
         if (allowedIds.length) {
@@ -4643,6 +4656,8 @@ try {
           'metrics.cost_micros',
           'metrics.conversions',
           'metrics.conversions_value',
+          'metrics.all_conversions',
+          'metrics.all_conversions_value',
           'metrics.ctr',
           'metrics.average_cpc',
           'metrics.average_cpm',
@@ -4842,7 +4857,9 @@ try {
       '  campaign.serving_status,',
       '  campaign.primary_status,',
       '  campaign.primary_status_reasons,',
-      '  campaign.advertising_channel_type',
+      '  campaign.advertising_channel_type,',
+      '  campaign.final_url_suffix,',
+      '  campaign.url_expansion_opt_out',
       'FROM campaign',
       "WHERE campaign.status != 'REMOVED'"
     ].join('\n');
@@ -4850,6 +4867,7 @@ try {
     let pageToken = null;
     let selectedIssue = null;
     let persistedInventoryRows = 0;
+    const campaignRows = [];
     do {
       const resp = await googleAdsRequest('POST', `customers/${customerId}/googleAds:search`, {
         accessToken,
@@ -4857,6 +4875,7 @@ try {
         data: { query, pageToken }
       });
       const results = resp?.results || [];
+      campaignRows.push(...results);
       for (const row of results) {
         const campaign = row?.campaign || {};
         if (ExternalCampaignInventory && campaign.id) {
@@ -4888,6 +4907,20 @@ try {
       pageToken = resp?.nextPageToken || resp?.next_page_token || null;
     } while (pageToken);
 
+    try {
+      await this._syncGoogleAdsCampaignDestinations(account, {
+        accessToken,
+        effectiveLoginCustomerId,
+        campaignRows,
+      });
+    } catch (destinationError) {
+      // Destination evidence enriches reporting but must never block the
+      // normal metrics sync. A later daily run will retry the read-only query.
+      report?.notes?.push?.(
+        `Google Ads destination audit ${formatCustomerId(customerId)}: ${destinationError.message || destinationError}`
+      );
+    }
+
     await account.update({
       publishingStatus: selectedIssue?.status || null,
       publishingReason: selectedIssue?.reason || null,
@@ -4902,6 +4935,75 @@ try {
     }
 
     return persistedInventoryRows;
+  }
+
+  async _syncGoogleAdsCampaignDestinations(account, {
+    accessToken,
+    effectiveLoginCustomerId,
+    campaignRows = [],
+  }) {
+    if (!ExternalCampaignInventory || !campaignRows.length) return 0;
+    const customerId = normalizeCustomerId(account.customerId);
+    const end = new Date();
+    const start = new Date(end.getTime() - (29 * MS_PER_DAY));
+    const query = [
+      'SELECT',
+      '  campaign.id,',
+      '  campaign.name,',
+      '  landing_page_view.unexpanded_final_url,',
+      '  metrics.clicks',
+      'FROM landing_page_view',
+      `WHERE segments.date BETWEEN '${start.toISOString().slice(0, 10)}' AND '${end.toISOString().slice(0, 10)}'`,
+    ].join('\n');
+
+    const landingRows = [];
+    let pageToken = null;
+    do {
+      const response = await googleAdsRequest('POST', `customers/${customerId}/googleAds:search`, {
+        accessToken,
+        loginCustomerId: effectiveLoginCustomerId,
+        data: { query, pageToken },
+      });
+      landingRows.push(...(response?.results || []));
+      pageToken = response?.nextPageToken || response?.next_page_token || null;
+    } while (pageToken);
+
+    const detections = buildGoogleDestinationDetections({
+      campaignRows,
+      landingRows,
+      checkedAt: new Date(),
+    });
+    let updated = 0;
+    for (const [campaignId, detection] of detections.entries()) {
+      const inventory = await ExternalCampaignInventory.findOne({
+        where: {
+          provider: 'google_ads',
+          customer_id: customerId,
+          campaign_id: campaignId,
+        },
+      });
+      if (!inventory) continue;
+      const current = inventory.destination_detection && typeof inventory.destination_detection === 'object'
+        ? inventory.destination_detection
+        : {};
+      const hasFreshObservedUrls = Array.isArray(detection.urls) && detection.urls.length > 0;
+      await inventory.update({
+        destination_detection: {
+          ...current,
+          ...detection,
+          ...(!hasFreshObservedUrls && Array.isArray(current.urls) && current.urls.length ? {
+            status: 'observed_stale',
+            urls: current.urls,
+            domains: current.domains || [],
+            primary_url: current.primary_url || current.urls[0],
+            observed_destination_count: current.observed_destination_count || current.urls.length,
+            expanded_beyond_primary: detection.url_expansion_enabled === true && current.urls.length > 1,
+          } : {}),
+        },
+      });
+      updated += 1;
+    }
+    return updated;
   }
 
   async _fetchCampaignLevelMetrics({
@@ -5238,6 +5340,8 @@ try {
           costMicros: Number(metrics.costMicros || metrics.cost_micros || 0),
           conversions: Number(metrics.conversions || 0),
           conversionsValue: Number(metrics.conversionsValue || metrics.conversions_value || 0),
+          allConversions: Number(metrics.allConversions || metrics.all_conversions || 0),
+          allConversionsValue: Number(metrics.allConversionsValue || metrics.all_conversions_value || 0),
           ctr: Number(metrics.ctr || 0),
           averageCpcMicros: decimalToMicros(metrics.averageCpc || metrics.average_cpc),
           averageCpmMicros: decimalToMicros(metrics.averageCpm || metrics.average_cpm),

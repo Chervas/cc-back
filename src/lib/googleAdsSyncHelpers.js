@@ -17,7 +17,9 @@ function buildCampaignLevelMetricsQuery(startDate, endDate) {
     '  metrics.clicks,',
     '  metrics.cost_micros,',
     '  metrics.conversions,',
-    '  metrics.conversions_value',
+    '  metrics.conversions_value,',
+    '  metrics.all_conversions,',
+    '  metrics.all_conversions_value',
     'FROM campaign',
     `WHERE segments.date BETWEEN '${startDate}' AND '${endDate}'`,
   ].join('\n');

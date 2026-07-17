@@ -693,6 +693,59 @@ async function testIdOnlyHeatmapResultFindsOwnPlace() {
   assert.equal(Object.hasOwn(points[0], 'ranked_place_ids'), false, 'unknown provider identities must not leak into the payload');
 }
 
+async function testExactIdentityFallbackNamesThePlacesAheadOfOwnClinic() {
+  let call = 0;
+  const tracker = {};
+  const points = await __testing.collectLocalHeatmapPoints({
+    center: { latitude: 41.3661, longitude: 2.1162 },
+    radiusKm: 1,
+    query: 'clínica dental',
+    ownPlaceId: 'hospitalet-own-place',
+    knownCompetitors: [],
+    tracker,
+    search: async () => {
+      call += 1;
+      return call === 1
+        ? [{ id: 'first-place' }, { id: 'second-place' }, { id: 'hospitalet-own-place' }]
+        : [{ id: 'hospitalet-own-place' }];
+    },
+  });
+  assert.equal(points[0].my_position, 3);
+  assert.deepEqual(points[0].ranked_competitors, []);
+
+  const detailCalls = [];
+  const hydrated = await __testing.hydrateLocalHeatmapPointIdentities({
+    points,
+    ownPlaceId: 'hospitalet-own-place',
+    knownCompetitors: [],
+    tracker,
+    resolveIdentity: async (placeId, requestTracker) => {
+      detailCalls.push(placeId);
+      requestTracker.places_identity_details = (requestTracker.places_identity_details || 0) + 1;
+      return {
+        id: null,
+        name: placeId === 'first-place' ? 'Primera clínica' : 'Segunda clínica',
+        google_place_id: placeId,
+        monitored: false,
+      };
+    },
+  });
+  assert.deepEqual(detailCalls.sort(), ['first-place', 'second-place']);
+  assert.deepEqual(hydrated[0].ranked_competitors, [{
+    competitor_id: null,
+    name: 'Primera clínica',
+    position: 1,
+    monitored: false,
+  }, {
+    competitor_id: null,
+    name: 'Segunda clínica',
+    position: 2,
+    monitored: false,
+  }]);
+  assert.doesNotMatch(JSON.stringify(hydrated), /first-place|second-place|hospitalet-own-place/,
+    'Place IDs used for exact hydration must never leak into the persisted heatmap payload');
+}
+
 function testStrictGeoPointRejectsMissingAndZeroAnchor() {
   assert.equal(__testing.strictGeoPoint(null, null), null);
   assert.equal(__testing.strictGeoPoint('', ''), null);
@@ -701,7 +754,7 @@ function testStrictGeoPointRejectsMissingAndZeroAnchor() {
     latitude: 41.4424052,
     longitude: 2.2239243,
   });
-  assert.match(__testing.LOCAL_HEATMAP_ALGORITHM_VERSION, /v4$/);
+  assert.match(__testing.LOCAL_HEATMAP_ALGORITHM_VERSION, /v5$/);
 }
 
 async function testHeatmapUsesOneCachedIdentitySearchForNames() {
@@ -767,6 +820,7 @@ async function run() {
   await testPersistedBusinessCoordinatesAvoidAnchorApiCall();
   await testMissingBusinessCoordinatesUseCheapPlaceDetailsAnchor();
   await testIdOnlyHeatmapResultFindsOwnPlace();
+  await testExactIdentityFallbackNamesThePlacesAheadOfOwnClinic();
   await testHeatmapUsesOneCachedIdentitySearchForNames();
   testStrictGeoPointRejectsMissingAndZeroAnchor();
   testCancelledCompliancePurgeCannotRemoveProviderContent();

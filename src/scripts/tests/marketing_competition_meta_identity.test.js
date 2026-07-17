@@ -7,6 +7,64 @@ process.env.RUNTIME_ROLE = 'gateway';
 
 const { __testing } = require('../../services/marketingCompetition.service');
 
+function testAdsLibraryUrlProvidesCanonicalPageIdentity() {
+  const url = 'https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=ES&is_targeted_country=false&media_type=all&search_type=page&sort_data%5Bdirection%5D=desc&view_all_page_id=1438321663093742';
+  assert.equal(__testing.extractMetaPageIdFromUrl(url), '1438321663093742');
+  assert.deepEqual(__testing.metaPageIdentityFromPayload({ facebook_url: url }), {
+    page_id: '1438321663093742',
+    page_url: 'https://www.facebook.com/1438321663093742',
+    source: 'ads_library_url',
+  });
+}
+
+function testCanonicalBrandFragmentsAreSearchedBeforeTheLongListingName() {
+  const dentalStudio = __testing.metaIdentitySearchCandidates({
+    name: 'Dental Studio Dra. Lorena Herrero - Clínica Dental',
+  });
+  assert.equal(dentalStudio[0], 'Dental Studio Dra. Lorena Herrero');
+
+  const drBlade = __testing.metaIdentitySearchCandidates({
+    name: 'Clínica Dental Hospitalet Llobregat | Grup Dr. Bladé',
+  });
+  assert.equal(drBlade[0], 'Grup Dr. Bladé');
+  assert.ok(drBlade.indexOf('Grup Dr. Bladé') < 4);
+}
+
+function testPublicFacebookMetadataSuppliesTheExactBrandTerm() {
+  const metadata = __testing.extractFacebookPublicProfileMetadata(`
+    <html><head>
+      <meta content="Dental Studio Dra. Lorena Herrero | L&#039;Hospitalet de Llobregat" property="og:title">
+      <link href="https://www.facebook.com/dentalstudioes" rel="canonical">
+    </head></html>
+  `, 'https://www.facebook.com/dentalstudioes');
+  assert.deepEqual(metadata, {
+    page_id: null,
+    page_name: 'Dental Studio Dra. Lorena Herrero',
+    page_url: 'https://www.facebook.com/dentalstudioes',
+    source: 'facebook_public_profile',
+  });
+}
+
+async function testBrandFragmentResolvesTheCanonicalAdsLibraryPage() {
+  const calls = [];
+  const resolved = await __testing.resolveMetaPageFromAdsArchive({
+    name: 'Dental Studio Dra. Lorena Herrero - Clínica Dental',
+  }, 'test-token', async (params) => {
+    calls.push(params.search_terms);
+    if (params.search_terms !== 'Dental Studio Dra. Lorena Herrero') return { raw: {}, ads: [] };
+    return {
+      raw: {},
+      ads: [{
+        id: 'active-ad',
+        page_id: '1673128226297489',
+        page_name: 'Dental Studio Dra. Lorena Herrero',
+      }],
+    };
+  });
+  assert.deepEqual(calls, ['Dental Studio Dra. Lorena Herrero']);
+  assert.equal(resolved.page_id, '1673128226297489');
+}
+
 async function testHistoricalAdsResolvePageBeforeActiveLookup() {
   const calls = [];
   const resolved = await __testing.resolveMetaPageFromAdsArchive({
@@ -60,6 +118,33 @@ function testResolvedPageWithNoActiveAdsIsAValidZero() {
   assert.equal(outcome.error_code, undefined);
 }
 
+function testResolvedPageWithNoApiRowsKeepsItsCanonicalIdentity() {
+  const libraryUrl = 'https://www.facebook.com/ads/library/?active_status=all&ad_type=all&country=ES&search_type=page&view_all_page_id=1438321663093742';
+  const payload = __testing.adSnapshotPayload({
+    status: 'completed',
+    ads_count: 0,
+    active_ads: [],
+    raw_payload: {
+      clinicaclick_resolution: {
+        page: {
+          page_id: '1438321663093742',
+          source: 'ads_library_url',
+        },
+        page_library_url: libraryUrl,
+        api_result_status: 'no_ads_returned',
+        fallback_filtered: false,
+      },
+    },
+  });
+
+  assert.equal(payload.ads_status, 'completed');
+  assert.equal(payload.identity_status, 'resolved');
+  assert.equal(payload.identity_source, 'ads_library_url');
+  assert.equal(payload.api_result_status, 'no_ads_returned');
+  assert.equal(payload.library_url, libraryUrl);
+  assert.equal(payload.error_code, null);
+}
+
 function testLegacyCompletedZeroWithoutPageIsReadAsUnresolved() {
   const payload = __testing.adSnapshotPayload({
     status: 'completed',
@@ -99,9 +184,14 @@ function testOptionalProviderFailuresStayPartialWhenPlacesSucceeded() {
 }
 
 async function run() {
+  testAdsLibraryUrlProvidesCanonicalPageIdentity();
+  testCanonicalBrandFragmentsAreSearchedBeforeTheLongListingName();
+  testPublicFacebookMetadataSuppliesTheExactBrandTerm();
+  await testBrandFragmentResolvesTheCanonicalAdsLibraryPage();
   await testHistoricalAdsResolvePageBeforeActiveLookup();
   testUnresolvedIdentityIsNotReportedAsZeroActiveAds();
   testResolvedPageWithNoActiveAdsIsAValidZero();
+  testResolvedPageWithNoApiRowsKeepsItsCanonicalIdentity();
   testLegacyCompletedZeroWithoutPageIsReadAsUnresolved();
   testOptionalProviderFailuresStayPartialWhenPlacesSucceeded();
   console.log('marketing_competition_meta_identity.test.js OK');

@@ -29,6 +29,8 @@ module.exports = (sequelize, DataTypes) => {
     costMicros: { type: DataTypes.BIGINT, allowNull: false, defaultValue: 0, field: 'costMicros' },
     conversions: { type: DataTypes.DECIMAL(18,6), allowNull: false, defaultValue: 0, field: 'conversions' },
     conversionsValue: { type: DataTypes.DECIMAL(18,6), allowNull: false, defaultValue: 0, field: 'conversionsValue' },
+    allConversions: { type: DataTypes.DECIMAL(18,6), allowNull: false, defaultValue: 0, field: 'allConversions' },
+    allConversionsValue: { type: DataTypes.DECIMAL(18,6), allowNull: false, defaultValue: 0, field: 'allConversionsValue' },
     ctr: { type: DataTypes.DECIMAL(10,6), allowNull: false, defaultValue: 0, field: 'ctr' },
     averageCpcMicros: { type: DataTypes.BIGINT, allowNull: false, defaultValue: 0, field: 'averageCpcMicros' },
     averageCpmMicros: { type: DataTypes.BIGINT, allowNull: false, defaultValue: 0, field: 'averageCpmMicros' },
