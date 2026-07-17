@@ -252,9 +252,17 @@ async function main() {
       findOne: async () => null,
       count: async (options = {}) => {
         const queryHash = options?.where?.query_hash;
-        if (queryHash) return createdRows.filter((row) => row.query_hash === queryHash).length;
+        if (typeof queryHash === 'string') {
+          return createdRows.filter((row) => row.query_hash === queryHash).length;
+        }
         if (options.distinct && options.col === 'query_hash') {
-          return new Set(createdRows.map((row) => row.query_hash)).size;
+          const allowedHashes = queryHash && typeof queryHash === 'object'
+            ? Reflect.ownKeys(queryHash).map((key) => queryHash[key]).find(Array.isArray)
+            : null;
+          const scopedRows = Array.isArray(allowedHashes)
+            ? createdRows.filter((row) => allowedHashes.includes(row.query_hash))
+            : createdRows;
+          return new Set(scopedRows.map((row) => row.query_hash)).size;
         }
         return createdRows.length;
       },
@@ -267,6 +275,10 @@ async function main() {
           update: async (changes) => {
             Object.assign(row, changes, { updated_at: new Date() });
             return row;
+          },
+          destroy: async () => {
+            const index = createdRows.indexOf(row);
+            if (index >= 0) createdRows.splice(index, 1);
           },
         };
         createdRows.push(row);
@@ -305,6 +317,39 @@ async function main() {
     assert.equal(queuedJobs.length, 4);
     assert(queuedJobs.every((job) => job.origin === 'marketing_reports:ai_visibility_automatic'));
     assert(queuedJobs.every((job) => /^ai_visibility:59:/.test(job.dedupeScope)));
+
+    const changedContextQueries = buildTypicalQueries({
+      category: 'Centro odontológico',
+      city: 'Badalona',
+    });
+    const changedContext = await service.ensureTypicalRuns({
+      clinicId: 59,
+      clinic: {
+        id: 59,
+        name: 'Propdental Hospitalet',
+        category: 'Centro odontológico',
+        city: 'Badalona',
+        province: 'Barcelona',
+      },
+      typicalQueries: changedContextQueries,
+      requestedBy: 7,
+    }, {
+      RunModel,
+      jobRequestsService: {
+        enqueueUniqueJobRequest: async (input) => {
+          queuedJobs.push(input);
+          return {
+            created: true,
+            job: { id: ++nextJobId, payload: input.payload },
+          };
+        },
+      },
+      jobScheduler: { triggerImmediate: async () => undefined },
+    });
+    assert.equal(changedContext.status, 'queued');
+    assert.equal(changedContext.queued, 4);
+    assert.equal(createdRows.length, 8, 'los cuatro hashes del contexto nuevo no deben quedar bloqueados por el catálogo anterior');
+    assert.equal(queuedJobs.length, 8);
 
     let unexpectedCreate = false;
     let unexpectedJob = false;
@@ -411,6 +456,7 @@ async function main() {
           id: 101,
           query: typicalQueries[1].query,
           status: 'failed',
+          job_request_id: 901,
           error_summary: [{ code: 'PROVIDER_ERROR', message: 'Fallo semanal' }],
         }),
       },
@@ -450,6 +496,69 @@ async function main() {
       (error) => error?.code === 'AI_VISIBILITY_QUERY_ATTEMPT_LIMIT'
         && /últimos siete días/.test(error.message),
     );
+
+    let queueRunId = 0;
+    let queueJobId = 700;
+    const queueRows = [];
+    const QueueRunModel = {
+      findOne: async () => null,
+      count: async () => 0,
+      create: async (values) => {
+        const row = {
+          id: ++queueRunId,
+          ...values,
+          created_at: new Date(),
+          updated_at: new Date(),
+          update: async (changes) => {
+            Object.assign(row, changes, { updated_at: new Date() });
+            return row;
+          },
+          destroy: async () => {
+            const index = queueRows.indexOf(row);
+            if (index >= 0) queueRows.splice(index, 1);
+          },
+        };
+        queueRows.push(row);
+        return row;
+      },
+      findByPk: async (id) => queueRows.find((row) => row.id === Number(id)) || null,
+    };
+    let queueAttempts = 0;
+    const queueDependencies = {
+      RunModel: QueueRunModel,
+      jobRequestsService: {
+        enqueueUniqueJobRequest: async (input) => {
+          queueAttempts += 1;
+          if (queueAttempts === 1) throw new Error('cola temporalmente no disponible');
+          return {
+            created: true,
+            job: { id: ++queueJobId, payload: input.payload },
+          };
+        },
+      },
+      jobScheduler: { triggerImmediate: async () => undefined },
+    };
+    const queueInput = {
+      clinicId: 59,
+      clinic: {
+        id: 59,
+        name: 'Propdental Hospitalet',
+        category: 'Clínica dental',
+        city: 'Hospitalet',
+      },
+      typicalQueries,
+      query: typicalQueries[3].query,
+    };
+    await assert.rejects(
+      service.enqueueRun(queueInput, queueDependencies),
+      /cola temporalmente no disponible/,
+    );
+    assert.equal(queueRows.length, 0, 'un fallo pre-job debe eliminar el run y no consumir cuota');
+    const retryAfterQueueFailure = await service.enqueueRun(queueInput, queueDependencies);
+    assert.equal(retryAfterQueueFailure.reused, false);
+    assert.equal(retryAfterQueueFailure.queued, true);
+    assert.equal(queueRows.length, 1);
+    assert.equal(queueAttempts, 2);
   } finally {
     if (previousOpenAiKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = previousOpenAiKey;

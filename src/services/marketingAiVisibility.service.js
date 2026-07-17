@@ -641,6 +641,11 @@ async function getOverview(clinicId, {
     where: {
       clinica_id: clinicId,
       expires_at: { [Op.gt]: new Date() },
+      [Op.or]: [
+        { status: { [Op.ne]: 'failed' } },
+        { job_request_id: { [Op.ne]: null } },
+        { started_at: { [Op.ne]: null } },
+      ],
     },
     order: [['created_at', 'DESC']],
     limit: Math.max(4, Math.min(20, Number(limit) || 10)),
@@ -704,7 +709,11 @@ async function enqueueRun({
   const scheduler = dependencies.jobScheduler || require('./jobScheduler.service');
   const normalizedQuery = normalizeQuery(query);
   const resolvedClinic = clinic || await (dependencies.resolveClinicContext || resolveClinicContext)(clinicId);
-  const resolvedTypicalQueries = typicalQueries || buildTypicalQueries(resolvedClinic);
+  const currentTypicalQueries = buildTypicalQueries(resolvedClinic);
+  const resolvedTypicalQueries = typicalQueries || currentTypicalQueries;
+  const currentCanonicalHashes = Array.from(new Set(
+    currentTypicalQueries.map((item) => queryHash(normalizeQuery(item.query))),
+  ));
   const hash = queryHash(normalizedQuery);
   const now = new Date();
   const cacheCutoff = new Date(now.getTime() - CACHE_HOURS * 60 * 60 * 1000);
@@ -716,8 +725,16 @@ async function enqueueRun({
       expires_at: { [Op.gt]: now },
       [Op.or]: [
         {
-          status: { [Op.in]: ['completed', 'completed_with_errors', 'failed'] },
+          status: { [Op.in]: ['completed', 'completed_with_errors'] },
           created_at: { [Op.gte]: cacheCutoff },
+        },
+        {
+          status: 'failed',
+          created_at: { [Op.gte]: cacheCutoff },
+          [Op.or]: [
+            { job_request_id: { [Op.ne]: null } },
+            { started_at: { [Op.ne]: null } },
+          ],
         },
         {
           status: { [Op.in]: ['queued', 'running'] },
@@ -744,6 +761,11 @@ async function enqueueRun({
       clinica_id: clinicId,
       query_hash: hash,
       created_at: { [Op.gte]: windowStart },
+      [Op.or]: [
+        { status: { [Op.ne]: 'failed' } },
+        { job_request_id: { [Op.ne]: null } },
+        { started_at: { [Op.ne]: null } },
+      ],
     },
   });
   if (recentAttemptsForQuery >= MAX_ATTEMPTS_PER_QUERY_7D) {
@@ -753,7 +775,16 @@ async function enqueueRun({
     throw error;
   }
   const recentDistinctQueries = await RunModel.count({
-    where: { clinica_id: clinicId, created_at: { [Op.gte]: windowStart } },
+    where: {
+      clinica_id: clinicId,
+      query_hash: { [Op.in]: currentCanonicalHashes },
+      created_at: { [Op.gte]: windowStart },
+      [Op.or]: [
+        { status: { [Op.ne]: 'failed' } },
+        { job_request_id: { [Op.ne]: null } },
+        { started_at: { [Op.ne]: null } },
+      ],
+    },
     distinct: true,
     col: 'query_hash',
   });
@@ -775,6 +806,7 @@ async function enqueueRun({
     expires_at: expiresAt,
   });
 
+  let jobCreatedForRun = false;
   try {
     const jobInput = {
       type: JOB_TYPE,
@@ -793,8 +825,10 @@ async function enqueueRun({
       const unique = await jobs.enqueueUniqueJobRequest(jobInput);
       job = unique.job;
       jobCreated = unique.created;
+      jobCreatedForRun = unique.created === true;
     } else {
       job = await jobs.enqueueJobRequest(jobInput);
+      jobCreatedForRun = true;
     }
     if (!jobCreated) {
       const existingPayload = asObject(job?.payload);
@@ -818,12 +852,25 @@ async function enqueueRun({
     });
     return { run: serializeRun(row, resolvedTypicalQueries), reused: false, queued: true };
   } catch (error) {
-    if (typeof row.update === 'function') {
-      await row.update({
-        status: 'failed',
-        completed_at: new Date(),
-        error_summary: [{ code: 'AI_VISIBILITY_QUEUE_ERROR', message: 'No se pudo encolar la comprobación.' }],
-      });
+    // Si nunca se creó un JobRequest, tampoco hubo una ejecución ni una
+    // llamada a proveedores: la fila no debe consumir la cuota semanal.
+    if (!jobCreatedForRun) {
+      try {
+        if (typeof row.destroy === 'function') {
+          await row.destroy();
+        } else if (typeof row.update === 'function') {
+          await row.update({
+            status: 'failed',
+            completed_at: new Date(),
+            error_summary: [{ code: 'AI_VISIBILITY_QUEUE_ERROR', message: 'No se pudo encolar la comprobación.' }],
+          });
+        }
+      } catch (cleanupError) {
+        console.error('❌ Error limpiando run IA sin job:', {
+          run_id: Number(row.id || 0) || null,
+          message: cleanupError.message,
+        });
+      }
     }
     throw error;
   }

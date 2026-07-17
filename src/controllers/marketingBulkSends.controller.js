@@ -129,6 +129,26 @@ exports.getReviewRequestSummary = async (req, res) => {
   }
 };
 
+exports.getReviewRequestAutomationStatus = async (req, res) => {
+  try {
+    // Mismo resolver y permisos que el summary, pero el servicio solo lee la
+    // plantilla de automatización: no construye candidatos ni métricas.
+    const scope = await resolveReviewRequestSummaryScope(req, { allowAll: false });
+    const result = await marketingBulkSendsService.getReviewRequestAutomationStatus(scope);
+    return res.json({
+      ...result,
+      scope: {
+        type: scope.scope,
+        clinicIds: scope.clinicIds || [],
+        groupId: scope.groupId || null,
+        original: scope.original || null,
+      },
+    });
+  } catch (error) {
+    return sendError(res, error, 'Error consultando automatización de reseñas');
+  }
+};
+
 exports.setReviewRequestAutomation = async (req, res) => {
   try {
     const scope = await resolveScopeFromRequest(req, { allowAll: false });

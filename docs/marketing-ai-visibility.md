@@ -62,10 +62,19 @@ texto cae en `best_local`. No existe una ruta backend de prompt libre.
 - La cola usa `enqueueUniqueJobRequest` con scope
   `ai_visibility:<clinicId>:<queryHash>` como segunda barrera distribuida.
 - El máximo predeterminado es de cuatro consultas distintas por clínica en una
-  ventana móvil de siete días: exactamente el catálogo canónico. El máximo es
-  una ejecución por `clinicId + queryHash` en esa misma ventana.
+  ventana móvil de siete días: exactamente el catálogo canónico **actual**. El
+  recuento global solo considera los cuatro hashes construidos con la categoría
+  y localidad vigentes; si se corrige la ciudad/categoría, los hashes antiguos
+  no bloquean las cuatro consultas nuevas. Sigue existiendo un máximo estricto
+  de una ejecución por `clinicId + queryHash` en esa misma ventana.
 - El GET solo crea `JobRequest`; las llamadas externas se ejecutan en
   `marketing_ai_visibility_run` fuera del request Express.
+- Si falla la creación del `JobRequest`, la fila de run se elimina: no hubo
+  proveedor ni ejecución y no debe consumir cuota siete días. Como defensa
+  para filas legacy, un `failed` sin `job_request_id` ni `started_at` tampoco se
+  reutiliza, se muestra ni entra en los recuentos semanales. Un fallo que sí
+  llegó al worker conserva `job_request_id` o `started_at`, auditoría y bloqueo
+  semanal.
 - Los resultados, fuentes y citas se sirven desde `provider_results` sin volver
   a llamar al proveedor durante siete días. Vencen físicamente según la
   retención configurada, 30 días por defecto y nunca inferior al intervalo de
@@ -85,6 +94,37 @@ Las antiguas `AI_VISIBILITY_CACHE_HOURS`,
 `AI_VISIBILITY_MAX_RUNS_PER_CLINIC_24H` y
 `AI_VISIBILITY_MAX_ATTEMPTS_PER_QUERY_24H` ya no gobiernan esta funcionalidad:
 permitirían una cadencia diaria incompatible con el contrato semanal.
+
+## Integración con Conseguir reseñas
+
+La tarjeta canónica `trusted_reviews` puede ofrecer el enlace a la campaña
+**Conseguir reseñas** solo cuando aún no está activa. Para decidirlo no debe
+llamar al resumen pesado de candidatos y métricas. Usa:
+
+`GET /api/marketing/review-requests/automation-status?clinicId=<id>`
+
+La ruta hereda el `authMiddleware`, el mismo resolvedor de scope y los mismos
+permisos que `GET /review-requests/summary`, exige una clínica concreta y lee
+únicamente `getReviewAutomationTemplate(scope, { includeInactive: true })`.
+Devuelve:
+
+```json
+{
+  "success": true,
+  "clinic_id": 66,
+  "automation_enabled": true,
+  "scope": {
+    "type": "clinic",
+    "clinicIds": [66],
+    "groupId": null,
+    "original": "66"
+  }
+}
+```
+
+No construye candidatos, tratamientos, disponibilidad de WhatsApp, métricas ni
+estado de Perfil Google. Un scope `group:*`, `all`, vacío o multiclínica devuelve
+`400 REVIEW_AUTOMATION_SINGLE_CLINIC_REQUIRED`.
 
 ## Proveedores
 
@@ -122,6 +162,7 @@ pendiente.
 node -c src/services/marketingAiVisibility.service.js
 node -c src/controllers/marketingAiVisibility.controller.js
 node src/scripts/tests/marketing_ai_visibility.test.js
+node src/scripts/tests/marketing_review_automation_status.test.js
 ```
 
 La prueba cubre parsers y citas, `store=false`, herramientas de búsqueda, las
@@ -129,3 +170,5 @@ cuatro consultas canónicas, rechazo de texto libre, GET sin secretos, default
 sin autoarranque, encolado desde Informes, reutilización de texto/fuentes/citas
 durante seis días, reutilización de parciales y fallos, y bloqueo de un segundo
 intento antes de siete días.
+`marketing_review_automation_status.test.js` cubre activo/inactivo/ausente,
+rechazo de scope ambiguo, reutilización del scope del summary y registro GET.
