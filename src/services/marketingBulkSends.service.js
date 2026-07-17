@@ -3258,6 +3258,26 @@ async function getReviewAutomationTemplate(scope, { includeInactive = false } = 
   return rows.find(templateHasReviewRequestAction) || null;
 }
 
+async function getReviewRequestAutomationStatus(scope, dependencies = {}) {
+  const clinicIds = Array.isArray(scope?.clinicIds)
+    ? scope.clinicIds.map(Number).filter(Number.isInteger)
+    : [];
+  if (scope?.scope !== 'clinic' || clinicIds.length !== 1) {
+    const error = new Error('Selecciona una clínica concreta para consultar la campaña de reseñas.');
+    error.code = 'REVIEW_AUTOMATION_SINGLE_CLINIC_REQUIRED';
+    error.status = 400;
+    throw error;
+  }
+
+  const loadTemplate = dependencies.getReviewAutomationTemplate || getReviewAutomationTemplate;
+  const template = await loadTemplate(scope, { includeInactive: true });
+  return {
+    success: true,
+    clinic_id: clinicIds[0],
+    automation_enabled: template?.is_active === true,
+  };
+}
+
 function isReviewWhatsappTemplateCandidate(template) {
   const plain = template?.get ? template.get({ plain: true }) : (template || {});
   const text = normalizeKey([
@@ -8271,6 +8291,7 @@ module.exports = {
   createCampaign,
   getCampaign,
   updateCampaign,
+  getReviewRequestAutomationStatus,
   getReviewRequestSummary,
   setReviewRequestAutomation,
   createAndStartReviewRequestForAppointment,
