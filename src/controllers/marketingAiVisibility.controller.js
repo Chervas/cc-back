@@ -63,6 +63,8 @@ exports.getOverview = async (req, res) => {
   try {
     const { clinicId } = await resolveSingleClinicScope(req);
     await assertAccess(req, clinicId, 'read');
+    // Único disparador automático: la entrada del usuario en Informes. El
+    // servicio aplica la reutilización semanal antes de crear cualquier job.
     const result = await aiVisibilityService.getOverview(clinicId, {
       limit: req.query?.limit,
       autoStart: true,
@@ -84,7 +86,7 @@ exports.createRun = async (req, res) => {
       clinicId,
       queryKey: req.body?.query_key || req.body?.queryKey || null,
       // Compatibilidad temporal: solo se acepta si coincide exactamente con
-      // una de las tres consultas generadas por el sistema. Cualquier otro
+      // una de las cuatro consultas generadas por el sistema. Cualquier otro
       // texto cae en la consulta canónica principal.
       legacyQuery: req.body?.query || null,
       requestedBy: req.userData?.userId || null,

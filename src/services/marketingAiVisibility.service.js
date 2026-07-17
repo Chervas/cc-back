@@ -15,18 +15,21 @@ const { Op } = db.Sequelize;
 const JOB_TYPE = 'marketing_ai_visibility_run';
 const QUERY_MIN_LENGTH = 8;
 const QUERY_MAX_LENGTH = 500;
-const RUN_RETENTION_DAYS = clampInt(process.env.AI_VISIBILITY_RETENTION_DAYS, 1, 180, 30);
-const CACHE_HOURS = clampInt(process.env.AI_VISIBILITY_CACHE_HOURS, 1, 168, 24);
-const MAX_RUNS_PER_CLINIC_24H = clampInt(process.env.AI_VISIBILITY_MAX_RUNS_PER_CLINIC_24H, 1, 30, 3);
-const MAX_ATTEMPTS_PER_QUERY_24H = clampInt(process.env.AI_VISIBILITY_MAX_ATTEMPTS_PER_QUERY_24H, 1, 6, 2);
+const REFRESH_INTERVAL_DAYS = clampInt(process.env.AI_VISIBILITY_REFRESH_INTERVAL_DAYS, 7, 30, 7);
+const CACHE_HOURS = REFRESH_INTERVAL_DAYS * 24;
+const RUN_RETENTION_DAYS = clampInt(process.env.AI_VISIBILITY_RETENTION_DAYS, REFRESH_INTERVAL_DAYS, 180, 30);
+const MAX_RUNS_PER_CLINIC_7D = clampInt(process.env.AI_VISIBILITY_MAX_RUNS_PER_CLINIC_7D, 4, 30, 4);
+// Contrato de producto: una consulta no vuelve a llamar a proveedores antes
+// de siete días, aunque el resultado anterior fuese parcial o fallase.
+const MAX_ATTEMPTS_PER_QUERY_7D = 1;
 const ACTIVE_RUN_REUSE_MINUTES = clampInt(process.env.AI_VISIBILITY_ACTIVE_RUN_REUSE_MINUTES, 5, 180, 15);
-const PARTIAL_RUN_RETRY_MINUTES = clampInt(process.env.AI_VISIBILITY_PARTIAL_RUN_RETRY_MINUTES, 5, 1440, 60);
 const PROVIDER_TIMEOUT_MS = clampInt(process.env.AI_VISIBILITY_PROVIDER_TIMEOUT_MS, 10000, 180000, 90000);
 const OPENAI_MODEL = cleanString(process.env.OPENAI_AI_VISIBILITY_MODEL) || 'gpt-5.6';
 const GEMINI_MODEL = cleanString(process.env.GEMINI_AI_VISIBILITY_MODEL) || 'gemini-3.5-flash';
 
 const TYPICAL_QUERY_DEFINITIONS = Object.freeze([
   Object.freeze({ key: 'best_local', label: 'Mejor clínica de la zona' }),
+  Object.freeze({ key: 'best_dentist', label: 'Mejor dentista de la zona' }),
   Object.freeze({ key: 'recommended_local', label: 'Clínica recomendada' }),
   Object.freeze({ key: 'trusted_reviews', label: 'Clínica con buenas reseñas' }),
 ]);
@@ -491,6 +494,7 @@ function buildTypicalQueries(clinic) {
   const place = cleanString(clinic?.city) || cleanString(clinic?.province) || 'mi zona';
   const queries = [
     `¿Cuál es la mejor ${category} en ${place}?`,
+    `¿Cuál es el mejor dentista en ${place}?`,
     `¿Qué ${category} recomiendan en ${place}?`,
     `¿Qué ${category} tiene buenas reseñas en ${place}?`,
   ];
@@ -523,24 +527,9 @@ function findTypicalQuery(clinic, { queryKey = null, legacyQuery = null } = {}) 
 
 function partialRunIsReusable(run, now = new Date()) {
   if (run?.status !== 'completed_with_errors') return false;
-  const currentProviders = providerConfiguration();
-  const storedProviders = asObject(run.provider_status);
-  const sameConfiguration = ['openai', 'gemini'].every((provider) => (
-    Boolean(storedProviders?.[provider]?.configured) === Boolean(currentProviders?.[provider]?.configured)
-  ));
-  if (!sameConfiguration) return false;
-
-  const statuses = Object.values(storedProviders)
-    .map((provider) => cleanString(provider?.status))
-    .filter(Boolean);
-  const onlyWaitingForConfiguration = statuses.length > 0
-    && statuses.every((status) => ['completed', 'not_configured'].includes(status));
-  const retryMinutes = onlyWaitingForConfiguration
-    ? CACHE_HOURS * 60
-    : PARTIAL_RUN_RETRY_MINUTES;
   const createdAt = new Date(run.created_at || 0);
   return Number.isFinite(createdAt.getTime())
-    && createdAt.getTime() >= now.getTime() - retryMinutes * 60 * 1000;
+    && createdAt.getTime() >= now.getTime() - CACHE_HOURS * 60 * 60 * 1000;
 }
 
 function serializeRun(run, typicalQueries = []) {
@@ -571,6 +560,7 @@ function serializeRun(run, typicalQueries = []) {
 
 function overviewState({ providers, automatic, runs }) {
   const configuredProviders = Object.values(providers).filter((provider) => provider.configured).length;
+  const failedRuns = runs.filter((run) => run.status === 'failed');
   if (!configuredProviders) {
     return {
       status: 'configuration_required',
@@ -591,13 +581,20 @@ function overviewState({ providers, automatic, runs }) {
   }
   const completedRuns = runs.filter((run) => ['completed', 'completed_with_errors'].includes(run.status));
   if (completedRuns.length) {
-    const hasPartialResults = configuredProviders < 2
+    const hasPartialResults = failedRuns.length > 0
+      || configuredProviders < 2
       || completedRuns.some((run) => run.status === 'completed_with_errors');
     return {
       status: hasPartialResults ? 'partial' : 'ready',
       message: hasPartialResults
         ? 'Hay resultados disponibles y algún proveedor todavía requiere atención.'
         : 'Las consultas locales habituales están actualizadas.',
+    };
+  }
+  if (failedRuns.length) {
+    return {
+      status: 'temporarily_unavailable',
+      message: 'La comprobación semanal no pudo completarse. Se volverá a intentar al abrir Informes cuando corresponda la siguiente actualización.',
     };
   }
   return {
@@ -608,7 +605,10 @@ function overviewState({ providers, automatic, runs }) {
 
 async function getOverview(clinicId, {
   limit = 10,
-  autoStart = true,
+  // Solo el GET de entrada a Informes pasa autoStart=true. Mantener el
+  // default cerrado evita que una lectura técnica o un polling de run
+  // adquiera por accidente semántica de disparador automático.
+  autoStart = false,
   requestedBy = null,
   requestedByName = null,
   requestedByRole = null,
@@ -643,7 +643,7 @@ async function getOverview(clinicId, {
       expires_at: { [Op.gt]: new Date() },
     },
     order: [['created_at', 'DESC']],
-    limit: Math.max(3, Math.min(20, Number(limit) || 10)),
+    limit: Math.max(4, Math.min(20, Number(limit) || 10)),
   });
   const serializedRuns = rows.map((row) => serializeRun(row, typicalQueries));
   const state = overviewState({ providers, automatic, runs: serializedRuns });
@@ -664,8 +664,9 @@ async function getOverview(clinicId, {
     // para aceptar texto libre en el backend.
     suggested_queries: typicalQueries.map((item) => item.query),
     cache_hours: CACHE_HOURS,
-    max_runs_per_clinic_24h: MAX_RUNS_PER_CLINIC_24H,
-    max_attempts_per_query_24h: MAX_ATTEMPTS_PER_QUERY_24H,
+    refresh_interval_days: REFRESH_INTERVAL_DAYS,
+    max_runs_per_clinic_7d: MAX_RUNS_PER_CLINIC_7D,
+    max_attempts_per_query_7d: MAX_ATTEMPTS_PER_QUERY_7D,
     runs: serializedRuns,
   };
 }
@@ -715,7 +716,7 @@ async function enqueueRun({
       expires_at: { [Op.gt]: now },
       [Op.or]: [
         {
-          status: { [Op.in]: ['completed', 'completed_with_errors'] },
+          status: { [Op.in]: ['completed', 'completed_with_errors', 'failed'] },
           created_at: { [Op.gte]: cacheCutoff },
         },
         {
@@ -737,7 +738,7 @@ async function enqueueRun({
     };
   }
 
-  const windowStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const windowStart = new Date(now.getTime() - REFRESH_INTERVAL_DAYS * 24 * 60 * 60 * 1000);
   const recentAttemptsForQuery = await RunModel.count({
     where: {
       clinica_id: clinicId,
@@ -745,8 +746,8 @@ async function enqueueRun({
       created_at: { [Op.gte]: windowStart },
     },
   });
-  if (recentAttemptsForQuery >= MAX_ATTEMPTS_PER_QUERY_24H) {
-    const error = new Error('Esta consulta ya ha agotado sus reintentos de las últimas 24 horas.');
+  if (recentAttemptsForQuery >= MAX_ATTEMPTS_PER_QUERY_7D) {
+    const error = new Error('Esta consulta ya se comprobó durante los últimos siete días.');
     error.code = 'AI_VISIBILITY_QUERY_ATTEMPT_LIMIT';
     error.status = 429;
     throw error;
@@ -756,8 +757,8 @@ async function enqueueRun({
     distinct: true,
     col: 'query_hash',
   });
-  if (!recentAttemptsForQuery && recentDistinctQueries >= MAX_RUNS_PER_CLINIC_24H) {
-    const error = new Error(`Esta clínica ya ha usado sus ${MAX_RUNS_PER_CLINIC_24H} comprobaciones de las últimas 24 horas.`);
+  if (!recentAttemptsForQuery && recentDistinctQueries >= MAX_RUNS_PER_CLINIC_7D) {
+    const error = new Error(`Esta clínica ya ha usado sus ${MAX_RUNS_PER_CLINIC_7D} comprobaciones de los últimos siete días.`);
     error.code = 'AI_VISIBILITY_RATE_LIMIT';
     error.status = 429;
     throw error;
@@ -848,7 +849,7 @@ async function ensureTypicalRuns({
       queued: 0,
       reused: 0,
       errors: [],
-      message: 'Las tres consultas habituales están preparadas y se ejecutarán automáticamente al configurar ChatGPT o Gemini.',
+      message: 'Las cuatro consultas habituales están preparadas y se ejecutarán al abrir Informes cuando ChatGPT o Gemini esté configurado.',
     };
   }
 
@@ -871,7 +872,7 @@ async function ensureTypicalRuns({
         query_key: typicalQuery.key,
         code: cleanString(error?.code, 80) || 'AI_VISIBILITY_AUTOMATIC_ERROR',
         message: ['AI_VISIBILITY_RATE_LIMIT', 'AI_VISIBILITY_QUERY_ATTEMPT_LIMIT'].includes(error?.code)
-          ? 'La consulta se actualizará cuando se libere el límite diario.'
+          ? 'La consulta se actualizará al volver a Informes cuando se cumplan siete días desde la comprobación anterior.'
           : 'No se pudo preparar esta consulta automática.',
       });
     }
@@ -890,9 +891,9 @@ async function ensureTypicalRuns({
     reused,
     errors,
     message: status === 'up_to_date'
-      ? 'Las tres consultas habituales ya están actualizadas.'
+      ? 'Las cuatro consultas habituales ya están actualizadas para esta semana.'
       : (status === 'queued'
-        ? 'ClinicaClick está actualizando automáticamente las tres consultas habituales.'
+        ? 'ClinicaClick está actualizando las cuatro consultas habituales.'
         : (status === 'partial'
           ? 'Algunas consultas están disponibles y otras se actualizarán más adelante.'
           : 'No se han podido preparar las consultas automáticas.')),
