@@ -492,8 +492,11 @@ function providerConfiguration() {
 function buildTypicalQueries(clinic) {
   const category = cleanString(clinic?.category)?.toLocaleLowerCase('es-ES') || 'clínica';
   const place = cleanString(clinic?.city) || cleanString(clinic?.province) || 'mi zona';
+  const bestLocalQuery = /^cl[ií]nica\b/u.test(category)
+    ? `¿Cuál es la mejor ${category} en ${place}?`
+    : `¿Qué ${category} es la mejor opción en ${place}?`;
   const queries = [
-    `¿Cuál es la mejor ${category} en ${place}?`,
+    bestLocalQuery,
     `¿Cuál es el mejor dentista en ${place}?`,
     `¿Qué ${category} recomiendan en ${place}?`,
     `¿Qué ${category} tiene buenas reseñas en ${place}?`,

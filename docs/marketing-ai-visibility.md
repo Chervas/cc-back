@@ -8,7 +8,9 @@ un botón. Al entrar en Informes, ese GET es el **único disparador automático*
 no hay cron diario ni semanal de proveedores. El backend construye y garantiza
 de forma idempotente estas cuatro consultas locales:
 
-1. `¿Cuál es la mejor <categoría> en <localidad>?`
+1. `¿Cuál es la mejor <categoría> en <localidad>?` para categorías que empiezan
+   por «clínica»; el resto usa `¿Qué <categoría> es la mejor opción en
+   <localidad>?` para no asumir un género gramatical incorrecto.
 2. `¿Cuál es el mejor dentista en <localidad>?`
 3. `¿Qué <categoría> recomiendan en <localidad>?`
 4. `¿Qué <categoría> tiene buenas reseñas en <localidad>?`
