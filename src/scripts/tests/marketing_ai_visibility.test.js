@@ -115,6 +115,10 @@ async function main() {
     '¿Qué clínica dental tiene buenas reseñas en Hospitalet?',
   ]);
   assert.equal(
+    buildTypicalQueries({ category: 'Podólogo', city: 'Bilbao' })[0].query,
+    '¿Qué podólogo es la mejor opción en Bilbao?',
+  );
+  assert.equal(
     findTypicalQuery({ category: 'Clínica dental', city: 'Hospitalet' }, { queryKey: 'recommended_local' }).key,
     'recommended_local',
   );
