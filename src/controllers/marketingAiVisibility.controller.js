@@ -63,7 +63,13 @@ exports.getOverview = async (req, res) => {
   try {
     const { clinicId } = await resolveSingleClinicScope(req);
     await assertAccess(req, clinicId, 'read');
-    const result = await aiVisibilityService.getOverview(clinicId, { limit: req.query?.limit });
+    const result = await aiVisibilityService.getOverview(clinicId, {
+      limit: req.query?.limit,
+      autoStart: true,
+      requestedBy: req.userData?.userId || null,
+      requestedByName: req.userData?.name || null,
+      requestedByRole: req.userData?.role || null,
+    });
     return res.json(result);
   } catch (error) {
     return sendError(res, error, 'Error obteniendo visibilidad en asistentes de IA');
@@ -74,9 +80,13 @@ exports.createRun = async (req, res) => {
   try {
     const { clinicId } = await resolveSingleClinicScope(req);
     await assertAccess(req, clinicId, 'write');
-    const result = await aiVisibilityService.enqueueRun({
+    const result = await aiVisibilityService.enqueueTypicalRun({
       clinicId,
-      query: req.body?.query,
+      queryKey: req.body?.query_key || req.body?.queryKey || null,
+      // Compatibilidad temporal: solo se acepta si coincide exactamente con
+      // una de las tres consultas generadas por el sistema. Cualquier otro
+      // texto cae en la consulta canónica principal.
+      legacyQuery: req.body?.query || null,
       requestedBy: req.userData?.userId || null,
       requestedByName: req.userData?.name || null,
       requestedByRole: req.userData?.role || null,

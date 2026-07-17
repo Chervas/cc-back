@@ -14,9 +14,13 @@ const {
   collapseMetricRows: collapseBusinessProfileMetricRows,
   metricValueByDate: businessProfileMetricValueByDate,
 } = require('../services/businessProfileLocal.service');
+const {
+  diagnoseGoogleCampaignMeasurement,
+} = require('../lib/googleAdsCampaignMeasurementDiagnosis');
 
 const {
   LeadIntake,
+  Clinica,
   FormSubmissionEvent,
   CitaPaciente,
   IntakeConfig,
@@ -24,6 +28,7 @@ const {
   ClinicAnalyticsProperty,
   GoogleAdsInsightsDaily,
   ClinicGoogleAdsAccount,
+  ExternalCampaignInventory,
   SocialAdsInsightsDaily,
   SocialAdsActionsDaily,
   SocialAdsAdsetDailyAgg,
@@ -169,6 +174,8 @@ function googleAdsRemoteFactAttributes() {
     [fn('MAX', col('clicks')), 'clicks'],
     [fn('MAX', col('costMicros')), 'costMicros'],
     [fn('MAX', col('conversions')), 'conversions'],
+    [fn('MAX', col('allConversions')), 'allConversions'],
+    [fn('MAX', col('allConversionsValue')), 'allConversionsValue'],
   ];
 }
 
@@ -1003,6 +1010,198 @@ async function getIntakeConfigCount(scope) {
   return IntakeConfig.count({ where: { [Op.or]: clauses } });
 }
 
+function jsonObject(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value !== 'string') return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_error) {
+    return {};
+  }
+}
+
+function jsonArray(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string') return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_error) {
+    return [];
+  }
+}
+
+function normalizeMeasurementDomain(value) {
+  const candidate = String(value || '').trim().toLowerCase();
+  if (!candidate) return null;
+  try {
+    const parsed = new URL(candidate.includes('://') ? candidate : `https://${candidate}`);
+    return parsed.hostname.toLowerCase().replace(/^www\./, '');
+  } catch (_error) {
+    return null;
+  }
+}
+
+function verifiedMeasurementDomains(intakeConfigs) {
+  const domains = new Set();
+  for (const record of Array.isArray(intakeConfigs) ? intakeConfigs : []) {
+    const config = jsonObject(record.config);
+    const verification = jsonObject(config.snippet_verification);
+    if (verification.verified !== true || verification.runtime_compatible !== true) continue;
+    const verifiedDomains = jsonArray(verification.runtime_compatible_domains);
+    const candidates = verifiedDomains.length ? verifiedDomains : jsonArray(record.domains);
+    for (const candidate of candidates) {
+      const domain = normalizeMeasurementDomain(candidate);
+      if (domain) domains.add(domain);
+    }
+  }
+  return Array.from(domains);
+}
+
+function googleCampaignKey(customerId, campaignId) {
+  return `${String(customerId || '').replace(/\D/g, '')}:${String(campaignId || '').trim()}`;
+}
+
+async function resolveGoogleCampaignMeasurementContext(scope, campaignRows, range, paidCoverageStart = null) {
+  const rows = Array.isArray(campaignRows) ? campaignRows : [];
+  const campaignIds = Array.from(new Set(rows.map((row) => String(row.campaignId || '')).filter(Boolean)));
+  const customerIds = Array.from(new Set(rows.map((row) => String(row.customerId || '').replace(/\D/g, '')).filter(Boolean)));
+  const empty = {
+    destinations: new Map(),
+    measuredDomains: [],
+    scopedCrmLeads: new Map(),
+    otherClinicCrmLeads: new Map(),
+  };
+  if (!campaignIds.length) return empty;
+
+  const selectedClinicIds = Array.isArray(scope?.clinicIds)
+    ? scope.clinicIds.map((value) => Number(value)).filter(Number.isInteger)
+    : [];
+  const clinicRows = Clinica && selectedClinicIds.length
+    ? await Clinica.findAll({
+        where: { id_clinica: { [Op.in]: selectedClinicIds } },
+        attributes: ['id_clinica', 'grupoClinicaId'],
+        raw: true,
+      })
+    : [];
+  const groupIds = Array.from(new Set([
+    scope?.groupId,
+    ...clinicRows.map((clinic) => clinic.grupoClinicaId),
+  ].map((value) => Number(value)).filter(Number.isInteger)));
+  const relatedClinicRows = Clinica && groupIds.length && !scope?.isAll
+    ? await Clinica.findAll({
+        where: { grupoClinicaId: { [Op.in]: groupIds } },
+        attributes: ['id_clinica'],
+        raw: true,
+      })
+    : [];
+  const relatedClinicIds = Array.from(new Set([
+    ...selectedClinicIds,
+    ...relatedClinicRows.map((clinic) => Number(clinic.id_clinica)),
+  ].filter(Number.isInteger)));
+
+  const configClauses = [];
+  if (selectedClinicIds.length) {
+    configClauses.push({
+      assignment_scope: 'clinic',
+      clinic_id: { [Op.in]: selectedClinicIds },
+    });
+  }
+  if (groupIds.length) {
+    configClauses.push({
+      assignment_scope: 'group',
+      group_id: { [Op.in]: groupIds },
+    });
+  }
+  const intakeConfigs = IntakeConfig && configClauses.length
+    ? await IntakeConfig.findAll({
+        where: { [Op.or]: configClauses },
+        attributes: ['domains', 'config'],
+        raw: true,
+      })
+    : [];
+
+  const inventoryRows = ExternalCampaignInventory
+    ? await ExternalCampaignInventory.findAll({
+        where: {
+          provider: 'google_ads',
+          customer_id: customerIds.length === 1 ? customerIds[0] : { [Op.in]: customerIds },
+          campaign_id: campaignIds.length === 1 ? campaignIds[0] : { [Op.in]: campaignIds },
+        },
+        attributes: ['customer_id', 'campaign_id', 'destination_detection'],
+        raw: true,
+      })
+    : [];
+  const destinations = new Map(inventoryRows.map((row) => [
+    googleCampaignKey(row.customer_id, row.campaign_id),
+    jsonObject(row.destination_detection),
+  ]));
+
+  const leadScopeClauses = [];
+  // Read the whole related group so a campaign assigned to one clinic cannot
+  // silently generate leads in another. selectedClinicIds is still used below
+  // to split own-scope and cross-clinic counts.
+  if (relatedClinicIds.length) leadScopeClauses.push({ clinica_id: { [Op.in]: relatedClinicIds } });
+  if (groupIds.length) leadScopeClauses.push({ grupo_clinica_id: { [Op.in]: groupIds } });
+  const leadRows = LeadIntake && (scope?.isAll || leadScopeClauses.length)
+    ? await LeadIntake.findAll({
+        attributes: [
+          'google_ads_customer_id',
+          'google_ads_campaign_id',
+          'clinica_id',
+          [fn('COUNT', col('id')), 'count'],
+        ],
+        where: {
+          archived_at: null,
+          google_ads_campaign_id: campaignIds.length === 1 ? campaignIds[0] : { [Op.in]: campaignIds },
+          ...(customerIds.length ? {
+            [Op.and]: [
+              scope?.isAll ? {} : { [Op.or]: leadScopeClauses },
+              {
+                [Op.or]: [
+                  { google_ads_customer_id: customerIds.length === 1 ? customerIds[0] : { [Op.in]: customerIds } },
+                  { google_ads_customer_id: { [Op.is]: null } },
+                ],
+              },
+            ],
+          } : (scope?.isAll ? {} : { [Op.or]: leadScopeClauses })),
+          created_at: {
+            [Op.gte]: new Date(`${comparablePaidRangeStart(range, paidCoverageStart)}T00:00:00.000Z`),
+            [Op.lt]: range.endExclusive,
+          },
+        },
+        group: ['google_ads_customer_id', 'google_ads_campaign_id', 'clinica_id'],
+        raw: true,
+      })
+    : [];
+
+  const selectedClinicSet = new Set(selectedClinicIds);
+  const scopedCrmLeads = new Map();
+  const otherClinicCrmLeads = new Map();
+  for (const lead of leadRows) {
+    const matchingRows = rows.filter((campaign) => (
+      String(campaign.campaignId) === String(lead.google_ads_campaign_id)
+      && (!lead.google_ads_customer_id
+        || String(campaign.customerId).replace(/\D/g, '') === String(lead.google_ads_customer_id).replace(/\D/g, ''))
+    ));
+    for (const campaign of matchingRows) {
+      const key = googleCampaignKey(campaign.customerId, campaign.campaignId);
+      const count = toNumber(lead.count);
+      const belongsToSelectedScope = scope?.isAll || selectedClinicSet.has(Number(lead.clinica_id));
+      const target = belongsToSelectedScope ? scopedCrmLeads : otherClinicCrmLeads;
+      target.set(key, (target.get(key) || 0) + count);
+    }
+  }
+
+  return {
+    destinations,
+    measuredDomains: verifiedMeasurementDomains(intakeConfigs),
+    scopedCrmLeads,
+    otherClinicCrmLeads,
+  };
+}
+
 async function aggregateGoogleAds(scope, range, marketingState = null, paidCoverageStart = null) {
   if (!GoogleAdsInsightsDaily) {
     return { totals: { spend: 0, clicks: 0, impressions: 0, conversions: 0 }, campaigns: [], connected: false, lastSync: null };
@@ -1025,6 +1224,8 @@ async function aggregateGoogleAds(scope, range, marketingState = null, paidCover
     clicks: 0,
     costMicros: 0,
     conversions: 0,
+    allConversions: 0,
+    allConversionsValue: 0,
     lastDate: null,
   };
   const campaignMap = new Map();
@@ -1033,26 +1234,39 @@ async function aggregateGoogleAds(scope, range, marketingState = null, paidCover
     totalRow.clicks += toNumber(row.clicks);
     totalRow.costMicros += toNumber(row.costMicros);
     totalRow.conversions += toNumber(row.conversions);
+    totalRow.allConversions += toNumber(row.allConversions);
+    totalRow.allConversionsValue += toNumber(row.allConversionsValue);
     const date = normalizeDateOnly(row.date);
     if (date && (!totalRow.lastDate || date > totalRow.lastDate)) totalRow.lastDate = date;
 
     const campaignKey = `${String(row.customerId || '')}:${String(row.campaignId || '')}`;
     const campaign = campaignMap.get(campaignKey) || {
+      customerId: row.customerId,
       campaignId: row.campaignId,
       campaignName: row.campaignName,
       costMicros: 0,
       conversions: 0,
+      allConversions: 0,
+      allConversionsValue: 0,
       clicks: 0,
     };
     campaign.campaignName = campaign.campaignName || row.campaignName;
     campaign.costMicros += toNumber(row.costMicros);
     campaign.conversions += toNumber(row.conversions);
+    campaign.allConversions += toNumber(row.allConversions);
+    campaign.allConversionsValue += toNumber(row.allConversionsValue);
     campaign.clicks += toNumber(row.clicks);
     campaignMap.set(campaignKey, campaign);
   }
   const campaignRows = Array.from(campaignMap.values())
     .sort((left, right) => right.costMicros - left.costMicros)
     .slice(0, 5);
+  const measurementContext = await resolveGoogleCampaignMeasurementContext(
+    scope,
+    campaignRows,
+    range,
+    paidCoverageStart
+  );
 
   const scopedAccounts = effectiveGoogleAccounts(marketingState);
   const accountWhere = buildAssetScopeWhere(scope);
@@ -1071,24 +1285,45 @@ async function aggregateGoogleAds(scope, range, marketingState = null, paidCover
     clicks: toNumber(totalRow?.clicks),
     impressions: toNumber(totalRow?.impressions),
     conversions: toNumber(totalRow?.conversions),
+    allConversions: toNumber(totalRow?.allConversions),
+    allConversionsValue: money(totalRow?.allConversionsValue),
   };
 
   const campaigns = campaignRows.map((row) => {
     const inversion = money(toNumber(row.costMicros) / 1_000_000);
     const leads = Math.round(toNumber(row.conversions));
+    const campaignKey = googleCampaignKey(row.customerId, row.campaignId);
+    const crmLeads = measurementContext.scopedCrmLeads.get(campaignKey) || 0;
+    const otherClinicCrmLeads = measurementContext.otherClinicCrmLeads.get(campaignKey) || 0;
+    const measurement = diagnoseGoogleCampaignMeasurement({
+      spend: inversion,
+      providerConversions: row.conversions,
+      providerAllConversions: row.allConversions,
+      scopedCrmLeads: crmLeads,
+      otherClinicCrmLeads,
+      destinationDetection: measurementContext.destinations.get(campaignKey) || null,
+      measuredDomains: measurementContext.measuredDomains,
+    });
     return {
+      id: row.campaignId,
+      customerId: row.customerId,
       name: row.campaignName || 'Campaña sin nombre',
       platform: 'Google Ads',
       inversion,
+      providerConversions: round(row.conversions, 2),
       leads,
+      crmLeads,
+      otherClinicCrmLeads,
+      allConversions: round(row.allConversions, 2),
+      allConversionsValue: money(row.allConversionsValue),
       citas: 0,
       convertidos: 0,
       cpl: leads ? money(inversion / leads) : 0,
+      crmCpl: crmLeads ? money(inversion / crmLeads) : 0,
       cpaCita: 0,
       cpaConvertido: 0,
-      alert: inversion >= 25 && leads === 0
-        ? 'Esta campaña está gastando sin registrar conversiones en Google Ads. Revisa su destino y medición.'
-        : undefined,
+      measurement,
+      alert: measurement.alert,
     };
   });
 

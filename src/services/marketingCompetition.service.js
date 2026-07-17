@@ -55,12 +55,14 @@ const LOCAL_HEATMAP_GRID_SIZE = Math.max(3, Math.min(5, parseInt(process.env.COM
 const LOCAL_HEATMAP_MAX_POINTS = Math.max(1, Math.min(25, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_MAX_POINTS || '25', 10)));
 const LOCAL_HEATMAP_RESULT_LIMIT = Math.max(3, Math.min(20, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_RESULT_LIMIT || '20', 10)));
 const LOCAL_HEATMAP_BIAS_RADIUS_METERS = Math.max(500, Math.min(5000, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_BIAS_RADIUS_METERS || '1500', 10)));
-const LOCAL_HEATMAP_ALGORITHM_VERSION = process.env.COMPETITION_LOCAL_HEATMAP_ALGORITHM_VERSION || 'local-relevance-bias-v4';
+const LOCAL_HEATMAP_ALGORITHM_VERSION = process.env.COMPETITION_LOCAL_HEATMAP_ALGORITHM_VERSION || 'local-relevance-bias-v5';
 const LOCAL_HEATMAP_REFRESH_JOB_TYPE = 'marketing_competition_heatmap_refresh';
 const LOCAL_HEATMAP_TERM_MAX_LENGTH = Math.max(40, Math.min(240, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_TERM_MAX_LENGTH || '160', 10)));
 const LOCAL_HEATMAP_NEW_CACHE_ROWS_PER_HOUR = Math.max(1, Math.min(50, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_NEW_CACHE_ROWS_PER_HOUR || '12', 10)));
 const LOCAL_HEATMAP_MAX_CACHE_ROWS_PER_CLINIC = Math.max(12, Math.min(500, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_MAX_CACHE_ROWS_PER_CLINIC || '60', 10)));
 const LOCAL_HEATMAP_MIN_VALID_POINTS = Math.max(1, Math.min(LOCAL_HEATMAP_MAX_POINTS, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_MIN_VALID_POINTS || '20', 10)));
+const LOCAL_HEATMAP_IDENTITY_DETAILS_MAX = Math.max(1, Math.min(50, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_IDENTITY_DETAILS_MAX || '25', 10)));
+const LOCAL_HEATMAP_VISIBLE_COMPETITOR_LIMIT = 3;
 const LOCAL_HEATMAP_FAILURE_FRESH_TTL_MS = 15 * 60 * 1000;
 const LOCAL_HEATMAP_FAILURE_EXPIRES_TTL_MS = 60 * 60 * 1000;
 const COMPETITION_SUGGESTION_RADIUS_METERS = Math.max(
@@ -79,6 +81,7 @@ const LOCAL_HEATMAP_CACHE_ALGORITHM_VERSION = [
 const SOCIAL_DISCOVERY_TIMEOUT_MS = Math.max(1000, Math.min(15000, parseInt(process.env.COMPETITION_SOCIAL_DISCOVERY_TIMEOUT_MS || '8000', 10)));
 const SOCIAL_DISCOVERY_PAGE_LIMIT = Math.max(1, Math.min(6, parseInt(process.env.COMPETITION_SOCIAL_DISCOVERY_PAGE_LIMIT || '4', 10)));
 const META_PAGE_MATCH_THRESHOLD = Math.max(20, Math.min(100, parseInt(process.env.COMPETITION_META_PAGE_MATCH_THRESHOLD || '45', 10)));
+const META_IDENTITY_UNRESOLVED_MESSAGE = 'Meta todavía no ha vinculado este competidor con una página publicitaria concreta. Añade el enlace «Ver todos los anuncios» de la Biblioteca de anuncios; ClinicaClick extraerá su Page ID y comprobará solo esa marca.';
 const GOOGLE_ADVERTISER_MATCH_THRESHOLD = Math.max(20, Math.min(100, parseInt(process.env.COMPETITION_GOOGLE_ADS_ADVERTISER_MATCH_THRESHOLD || '45', 10)));
 const COMPETITION_CACHE_MAX_ENTRIES = Math.max(50, Math.min(2000, parseInt(process.env.COMPETITION_CACHE_MAX_ENTRIES || '600', 10)));
 const COMPETITION_REPORT_CACHE_TTL_MS = Math.max(0, Math.min(3600000, parseInt(process.env.COMPETITION_REPORT_CACHE_TTL_MS || '180000', 10)));
@@ -117,6 +120,9 @@ const payloadIncludesGooglePlacesContent = (payload = {}) => (
 
 const competitionRuntimeCache = new Map();
 const competitionInFlight = new Map();
+// Los Place IDs de cada celda solo viven durante el cálculo. Un Symbol evita
+// que puedan serializarse o persistirse por accidente en la respuesta/caché.
+const HEATMAP_POINT_PLACE_IDS = Symbol('heatmap-point-place-ids');
 const persistentHeatmapCache = createHeatmapCacheCoordinator({
   model: MarketingCompetitionHeatmapCache,
   scheduleRefresh: async ({ identity, token, payload }) => {
@@ -192,6 +198,10 @@ const GENERIC_BUSINESS_TOKENS = new Set([
   'clinica',
   'clinic',
   'clinical',
+  'dental',
+  'dentales',
+  'dentista',
+  'dentistas',
   'centro',
   'center',
   'medical',
@@ -273,6 +283,7 @@ const PLACE_DETAILS_FIELD_MASK = [
 // la posición; places.id mantiene la misma profundidad y usa IDs Only.
 const LOCAL_HEATMAP_PLACE_FIELD_MASK = 'places.id';
 const LOCAL_HEATMAP_IDENTITY_FIELD_MASK = 'places.id,places.displayName';
+const LOCAL_HEATMAP_IDENTITY_DETAILS_FIELD_MASK = 'id,displayName';
 
 const LOCAL_HEATMAP_ANCHOR_SEARCH_FIELD_MASK = [
   'places.id',
@@ -469,6 +480,15 @@ function sharedBusinessTokens(left, right) {
   return [...leftTokens].filter((token) => rightTokens.has(token));
 }
 
+function sharedBusinessTokenStems(left, right) {
+  const stems = (value) => new Set(businessNameTokens(value)
+    .filter((token) => token.length >= 7)
+    .map((token) => token.slice(0, 7)));
+  const leftStems = stems(left);
+  const rightStems = stems(right);
+  return [...leftStems].filter((stem) => rightStems.has(stem));
+}
+
 function normalizePlaceId(value) {
   const text = cleanString(value);
   if (!text) return null;
@@ -549,6 +569,18 @@ function decodeHtmlEntities(value) {
     .replace(/&amp;/g, '&')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
+    .replace(/&#(\d+);/g, (_match, decimal) => {
+      const codePoint = Number.parseInt(decimal, 10);
+      return Number.isFinite(codePoint) && codePoint > 0 && codePoint <= 0x10FFFF
+        ? String.fromCodePoint(codePoint)
+        : _match;
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_match, hexadecimal) => {
+      const codePoint = Number.parseInt(hexadecimal, 16);
+      return Number.isFinite(codePoint) && codePoint > 0 && codePoint <= 0x10FFFF
+        ? String.fromCodePoint(codePoint)
+        : _match;
+    })
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>');
 }
@@ -1053,6 +1085,8 @@ async function fetchPublicHtmlPage(rawUrl, dependencies = {}) {
   const httpClient = dependencies.httpClient || axios;
   const safeTargetResolver = dependencies.resolveSafeHttpTarget || resolveSafeHttpTarget;
   const maxRedirects = Math.max(0, Math.min(5, Number(dependencies.maxRedirects ?? 3) || 0));
+  const userAgent = cleanString(dependencies.userAgent)
+    || 'Mozilla/5.0 (compatible; ClinicaClickBot/1.0; +https://clinicaclick.com)';
   let currentUrl = publicHttpUrl(rawUrl);
   if (!currentUrl) {
     const error = new Error('social_discovery_target_invalid');
@@ -1076,7 +1110,7 @@ async function fetchPublicHtmlPage(rawUrl, dependencies = {}) {
         httpAgent: safeTarget.httpAgent,
         httpsAgent: safeTarget.httpsAgent,
         headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; ClinicaClickBot/1.0; +https://clinicaclick.com)',
+          'User-Agent': userAgent,
           'Accept': 'text/html,application/xhtml+xml'
         }
       });
@@ -1306,6 +1340,45 @@ function extractMetaPageIdFromUrl(value) {
   } catch (_) {
     return null;
   }
+}
+
+function facebookIdentityUrl(value) {
+  const url = normalizeUrl(value);
+  if (!url) return null;
+  try {
+    const host = new URL(url).hostname.replace(/^www\./i, '').toLowerCase();
+    return ['facebook.com', 'fb.com'].includes(host) ? url : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function metaPageIdentityFromPayload(payload = {}) {
+  const rawSocial = socialProfilesFromPayload(payload.raw_place_payload) || {};
+  const nestedSocial = payload.social_profiles && typeof payload.social_profiles === 'object'
+    ? payload.social_profiles
+    : {};
+  const candidates = [
+    payload.meta_page_url,
+    payload.meta_ads_library_url,
+    payload.ads_library_url,
+    payload.facebook_url,
+    nestedSocial.facebook_url,
+    rawSocial.facebook_url,
+  ].map(facebookIdentityUrl).filter(Boolean);
+  const explicitPageId = cleanString(payload.meta_page_id);
+  const extracted = candidates.map(extractMetaPageIdFromUrl).find(Boolean) || null;
+  const pageId = explicitPageId || extracted;
+  const suppliedUrl = candidates[0] || null;
+  return {
+    page_id: pageId,
+    page_url: extracted
+      ? `https://www.facebook.com/${encodeURIComponent(extracted)}`
+      : (suppliedUrl || (pageId ? `https://www.facebook.com/${encodeURIComponent(pageId)}` : null)),
+    source: explicitPageId
+      ? 'explicit_page_id'
+      : (extracted ? 'ads_library_url' : (suppliedUrl ? 'facebook_url' : null)),
+  };
 }
 
 function normalizeExternalError(error) {
@@ -1904,6 +1977,118 @@ function mergeHeatmapCompetitorIdentities(discovered = [], monitored = []) {
   return [...byPlaceId.values()];
 }
 
+async function resolveHeatmapPlaceIdentity(placeId, tracker) {
+  const normalizedPlaceId = normalizePlaceId(placeId);
+  if (!normalizedPlaceId) return null;
+  return cachedCompetitionValue(
+    cacheKey(['heatmap-place-identity', LOCAL_HEATMAP_IDENTITY_DETAILS_FIELD_MASK, normalizedPlaceId]),
+    COMPETITION_PLACE_DETAILS_CACHE_TTL_MS,
+    async () => {
+      trackProviderRequest(tracker, 'places_identity_details');
+      const response = await axios.get(`${GOOGLE_PLACES_API_BASE}/places/${encodeURIComponent(normalizedPlaceId)}`, {
+        headers: buildPlaceHeaders(LOCAL_HEATMAP_IDENTITY_DETAILS_FIELD_MASK),
+        timeout: 15000,
+      });
+      const normalized = normalizePlace(response.data || {});
+      const name = cleanString(normalized.name);
+      return name ? {
+        id: null,
+        name,
+        google_place_id: normalizePlaceId(normalized.google_place_id) || normalizedPlaceId,
+        monitored: false,
+      } : null;
+    },
+    { cachePredicate: (value) => !!value?.name },
+  );
+}
+
+async function hydrateLocalHeatmapPointIdentities({
+  points = [],
+  ownPlaceId,
+  knownCompetitors = [],
+  tracker,
+  resolveIdentity = resolveHeatmapPlaceIdentity,
+}) {
+  const normalizedOwnPlaceId = normalizePlaceId(ownPlaceId);
+  const identitiesByPlaceId = new Map((Array.isArray(knownCompetitors) ? knownCompetitors : [])
+    .map((competitor) => {
+      const placeId = normalizePlaceId(competitor?.google_place_id);
+      const name = cleanString(competitor?.name);
+      if (!placeId || !name || placeId === normalizedOwnPlaceId) return null;
+      return [placeId, {
+        id: toInt(competitor?.id) || null,
+        name,
+        monitored: !!toInt(competitor?.id),
+      }];
+    })
+    .filter(Boolean));
+
+  // La búsqueda central de identidades es barata y suele cubrir casi todos
+  // los resultados. Para los huecos reales, resolvemos solo los Place IDs que
+  // aparecen en el top 3 de alguna celda, priorizando los más repetidos.
+  const candidates = new Map();
+  let order = 0;
+  for (const point of points) {
+    const placeIds = Array.isArray(point?.[HEATMAP_POINT_PLACE_IDS])
+      ? point[HEATMAP_POINT_PLACE_IDS]
+      : [];
+    for (const placeId of placeIds.slice(0, LOCAL_HEATMAP_VISIBLE_COMPETITOR_LIMIT)) {
+      const normalized = normalizePlaceId(placeId);
+      if (!normalized || normalized === normalizedOwnPlaceId || identitiesByPlaceId.has(normalized)) continue;
+      const current = candidates.get(normalized) || { placeId: normalized, count: 0, order: order++ };
+      current.count += 1;
+      candidates.set(normalized, current);
+    }
+  }
+
+  const selectedCandidates = [...candidates.values()]
+    .sort((left, right) => (right.count - left.count) || (left.order - right.order))
+    .slice(0, LOCAL_HEATMAP_IDENTITY_DETAILS_MAX);
+  const resolved = await mapWithConcurrency(
+    selectedCandidates,
+    COMPETITION_GOOGLE_CONCURRENCY,
+    async ({ placeId }) => {
+      try {
+        return await resolveIdentity(placeId, tracker);
+      } catch (_) {
+        return null;
+      }
+    },
+  );
+  for (const identity of resolved.filter(Boolean)) {
+    const placeId = normalizePlaceId(identity.google_place_id);
+    const name = cleanString(identity.name);
+    if (!placeId || !name || placeId === normalizedOwnPlaceId) continue;
+    identitiesByPlaceId.set(placeId, {
+      id: toInt(identity.id) || null,
+      name,
+      monitored: !!toInt(identity.id),
+    });
+  }
+
+  for (const point of points) {
+    const placeIds = Array.isArray(point?.[HEATMAP_POINT_PLACE_IDS])
+      ? point[HEATMAP_POINT_PLACE_IDS]
+      : [];
+    point.ranked_competitors = placeIds
+      .map((placeId, index) => {
+        const normalized = normalizePlaceId(placeId);
+        if (!normalized || normalized === normalizedOwnPlaceId) return null;
+        const identity = identitiesByPlaceId.get(normalized);
+        if (!identity?.name) return null;
+        return {
+          competitor_id: identity.id,
+          name: identity.name,
+          position: index + 1,
+          monitored: !!identity.monitored,
+        };
+      })
+      .filter(Boolean);
+    delete point[HEATMAP_POINT_PLACE_IDS];
+  }
+  return points;
+}
+
 function trackProviderRequest(tracker, type) {
   if (!tracker || !type) return;
   tracker[type] = (Number(tracker[type]) || 0) + 1;
@@ -2081,6 +2266,7 @@ async function collectLocalHeatmapPoints({
         // y con los competidores monitorizados. Nunca inferimos por nombre.
         const rankedCompetitors = normalized
           .map((placeId, index) => {
+            if (placeId === normalizedOwnPlaceId) return null;
             const competitor = competitorsByPlaceId.get(placeId);
             if (!competitor?.name) return null;
             return {
@@ -2091,7 +2277,7 @@ async function collectLocalHeatmapPoints({
             };
           })
           .filter(Boolean);
-        return {
+        const output = {
           latitude: point.latitude,
           longitude: point.longitude,
           x_km: offset.xKm,
@@ -2101,6 +2287,12 @@ async function collectLocalHeatmapPoints({
           score: heatmapScore(myPosition),
           measured_at: measuredAt()
         };
+        Object.defineProperty(output, HEATMAP_POINT_PLACE_IDS, {
+          value: normalized,
+          enumerable: false,
+          configurable: true,
+        });
+        return output;
       } catch (error) {
         return {
           latitude: point.latitude,
@@ -2130,6 +2322,7 @@ async function generateLocalRankingHeatmapSnapshot({
     places_anchor_details: 0,
     places_anchor_search: 0,
     places_identity_search: 0,
+    places_identity_details: 0,
     places_text_search_points: 0
   };
   const ownProfile = await (dependencies.resolveOwnClinicHeatmapProfile || resolveOwnClinicHeatmapProfile)(clinic, tracker);
@@ -2177,7 +2370,7 @@ async function generateLocalRankingHeatmapSnapshot({
     // invalida las posiciones calculadas mediante IDs Only.
   }
 
-  const points = await (dependencies.collectLocalHeatmapPoints || collectLocalHeatmapPoints)({
+  let points = await (dependencies.collectLocalHeatmapPoints || collectLocalHeatmapPoints)({
     center,
     radiusKm,
     query: heatmapQuery,
@@ -2185,6 +2378,20 @@ async function generateLocalRankingHeatmapSnapshot({
     knownCompetitors: heatmapCompetitors,
     tracker
   });
+  try {
+    points = await (
+      dependencies.hydrateLocalHeatmapPointIdentities || hydrateLocalHeatmapPointIdentities
+    )({
+      points,
+      ownPlaceId,
+      knownCompetitors: heatmapCompetitors,
+      tracker,
+    });
+  } catch (_) {
+    // Los nombres son best-effort y nunca invalidan las posiciones. También
+    // retiramos el estado efímero aunque el proveedor de detalles falle.
+    for (const point of points) delete point[HEATMAP_POINT_PLACE_IDS];
+  }
   const validPoints = points.filter((point) => !point.error).length;
   const requiredValidPoints = Math.min(
     points.length,
@@ -2631,6 +2838,46 @@ function competitorMetaIdentityValues(competitor = {}) {
   ].map(cleanString).filter(Boolean);
 }
 
+function metaIdentityTermFragments(value) {
+  const text = cleanString(value);
+  if (!text || /^https?:\/\//i.test(text)) return [];
+  const withoutAt = text.replace(/^@/, '');
+  const chunks = withoutAt
+    .split(/\s+(?:\||·|•|-|–|—)\s+|\|/g)
+    .map(cleanString)
+    .filter((item) => normalizeBusinessName(item)?.length >= 3);
+  // En nombres como "Clínica Dental Hospitalet | Grup Dr. Bladé", la marca
+  // suele estar al final. Recorremos los fragmentos de derecha a izquierda y
+  // conservamos también el nombre completo como último intento.
+  const brandChunks = chunks.length > 1
+    ? chunks.filter((item) => !/^(?:cl[ií]nica|centro)\s+(?:dental\s+)?/i.test(item))
+    : chunks;
+  return [...(brandChunks.length ? brandChunks : chunks).reverse(), withoutAt];
+}
+
+function metaIdentitySearchCandidates(competitor = {}, additionalTerms = []) {
+  const socialProfiles = socialProfilesFromPayload(competitor.raw_place_payload);
+  const sourceValues = [
+    ...additionalTerms,
+    competitor.meta_page_name,
+    competitor.name,
+    ...(Array.isArray(competitor.meta_ads_search_terms) ? competitor.meta_ads_search_terms : []),
+    socialProfiles?.facebook_username,
+    socialProfiles?.instagram_username,
+  ];
+  const candidates = [];
+  const seen = new Set();
+  for (const source of sourceValues) {
+    for (const term of metaIdentityTermFragments(source)) {
+      const key = normalizeBusinessName(term)?.replace(/\s+/g, '') || null;
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      candidates.push(term);
+    }
+  }
+  return candidates;
+}
+
 function scoreMetaPageMatch(competitor = {}, page = {}) {
   const pageName = cleanString(page.page_name || page.name);
   const pageId = cleanString(page.page_id || page.id);
@@ -2639,7 +2886,9 @@ function scoreMetaPageMatch(competitor = {}, page = {}) {
 
   let score = businessNamesMatch(pageName, competitor.name) ? 80 : 0;
   const tokens = sharedBusinessTokens(competitor.name, pageName);
+  const tokenStems = sharedBusinessTokenStems(competitor.name, pageName);
   if (tokens.length >= 2) score = Math.max(score, 70);
+  if (tokenStems.length >= 2) score = Math.max(score, 70);
   if (tokens.some((token) => token.length >= 6)) score = Math.max(score, 45);
 
   for (const value of competitorMetaIdentityValues(competitor)) {
@@ -2655,7 +2904,9 @@ function scoreMetaPageMatch(competitor = {}, page = {}) {
       score = Math.max(score, 70);
     }
     const valueTokens = sharedBusinessTokens(value, pageName);
+    const valueTokenStems = sharedBusinessTokenStems(value, pageName);
     if (valueTokens.length >= 2) score = Math.max(score, 60);
+    if (valueTokenStems.length >= 2) score = Math.max(score, 60);
     if (valueTokens.some((token) => token.length >= 6)) score = Math.max(score, 45);
   }
 
@@ -2756,6 +3007,63 @@ async function resolveFacebookPageFromUrlOrUsername(value, accessToken) {
   }
 }
 
+function htmlTagAttribute(tag, attribute) {
+  const match = String(tag || '').match(new RegExp(`\\b${attribute}\\s*=\\s*(["'])(.*?)\\1`, 'i'));
+  return match ? cleanString(decodeHtmlEntities(match[2])) : null;
+}
+
+function extractFacebookPublicProfileMetadata(html, fallbackUrl = null) {
+  const text = String(html || '');
+  const tags = text.match(/<(?:meta|link)\b[^>]*>/gi) || [];
+  let pageName = null;
+  let canonicalUrl = null;
+  for (const tag of tags) {
+    const property = htmlTagAttribute(tag, 'property');
+    const rel = htmlTagAttribute(tag, 'rel');
+    if (!pageName && property?.toLowerCase() === 'og:title') {
+      const rawTitle = htmlTagAttribute(tag, 'content');
+      pageName = cleanString(rawTitle?.split(/\s+\|\s+/)[0]) || rawTitle;
+    }
+    if (!canonicalUrl && rel?.toLowerCase().split(/\s+/).includes('canonical')) {
+      canonicalUrl = normalizeSocialProfileUrl(htmlTagAttribute(tag, 'href'));
+    }
+    if (pageName && canonicalUrl) break;
+  }
+  const pageUrl = canonicalUrl || normalizeSocialProfileUrl(fallbackUrl);
+  if (!pageName || !pageUrl) return null;
+  return {
+    page_id: null,
+    page_name: pageName,
+    page_url: pageUrl,
+    source: 'facebook_public_profile',
+  };
+}
+
+async function resolveMetaPublicIdentityFromKnownProfiles(competitor, fetchPage = fetchPublicHtmlPage) {
+  const socialProfiles = socialProfilesFromPayload(competitor.raw_place_payload);
+  const candidates = [
+    competitor.meta_page_url,
+    socialProfiles?.facebook_url,
+    socialProfiles?.facebook_username ? socialUrlFromUsername(socialProfiles.facebook_username, 'facebook') : null,
+  ].map((value) => normalizeSocialProfileUrl(value)).filter(Boolean);
+
+  for (const candidate of [...new Set(candidates)]) {
+    try {
+      const response = await fetchPage(candidate, {
+        userAgent: 'ClinicaClickCompetition/1.0 (+https://clinicaclick.com)',
+      });
+      const metadata = extractFacebookPublicProfileMetadata(response?.data, response?.url || candidate);
+      if (!metadata?.page_name) continue;
+      const score = scoreMetaPageMatch(competitor, metadata);
+      if (score >= META_PAGE_MATCH_THRESHOLD) return { ...metadata, match_score: score };
+    } catch (_) {
+      // La ficha pública es una mejora best-effort. La resolución por Ads
+      // Library continúa aunque Facebook bloquee esta lectura.
+    }
+  }
+  return null;
+}
+
 async function resolveMetaPageFromKnownProfiles(competitor, accessToken) {
   const socialProfiles = socialProfilesFromPayload(competitor.raw_place_payload);
   const candidates = [
@@ -2797,10 +3105,8 @@ function buildMetaIdentitySearchParams(term) {
   };
 }
 
-async function resolveMetaPageFromAdsArchive(competitor, accessToken, search = searchMetaAdsArchive) {
-  const candidateTerms = competitorMetaIdentityValues(competitor)
-    .filter((value) => !/^https?:\/\//i.test(value))
-    .filter((value) => normalizeBusinessName(value)?.length >= 3);
+async function resolveMetaPageFromAdsArchive(competitor, accessToken, search = searchMetaAdsArchive, options = {}) {
+  const candidateTerms = metaIdentitySearchCandidates(competitor, options.additionalTerms || []);
 
   for (const term of [...new Set(candidateTerms)].slice(0, 4)) {
     const result = await search(buildMetaIdentitySearchParams(term), accessToken);
@@ -3282,10 +3588,19 @@ async function fetchMetaAdsForCompetitor(competitor, scope) {
     throw err;
   }
 
-  const resolvedPage = competitor.meta_page_id
+  let candidateProfile = null;
+  let resolvedPage = competitor.meta_page_id
     ? { page_id: String(competitor.meta_page_id), page_name: cleanString(competitor.meta_page_name), page_url: normalizeUrl(competitor.meta_page_url), source: 'stored' }
-    : (await resolveMetaPageFromKnownProfiles(competitor, accessToken)
-      || await resolveMetaPageFromAdsArchive(competitor, accessToken));
+    : await resolveMetaPageFromKnownProfiles(competitor, accessToken);
+  if (!resolvedPage?.page_id) {
+    candidateProfile = await resolveMetaPublicIdentityFromKnownProfiles(competitor);
+    resolvedPage = await resolveMetaPageFromAdsArchive(competitor, accessToken, searchMetaAdsArchive, {
+      additionalTerms: candidateProfile?.page_name ? [candidateProfile.page_name] : [],
+    });
+    if (resolvedPage?.page_id && candidateProfile?.page_url) {
+      resolvedPage.page_url = candidateProfile.page_url;
+    }
+  }
 
   const baseParams = {
     fields: META_AD_FIELDS,
@@ -3334,6 +3649,11 @@ async function fetchMetaAdsForCompetitor(competitor, scope) {
       ...result.raw,
       clinicaclick_resolution: {
         page: resolvedPage || null,
+        candidate_profile: candidateProfile || null,
+        page_library_url: resolvedPage?.page_id ? metaAdsLibraryPageUrl(resolvedPage.page_id) : null,
+        api_result_status: resolvedPage?.page_id
+          ? (result.ads.length ? 'ads_returned' : 'no_ads_returned')
+          : 'not_queried',
         fallback_filtered: !resolvedPage?.page_id
       }
     },
@@ -3343,11 +3663,14 @@ async function fetchMetaAdsForCompetitor(competitor, scope) {
 
 function metaSnapshotOutcome(metaResult = {}) {
   if (!metaResult.identityResolved && !metaResult.resolvedPage?.page_id) {
+    const candidate = metaResult.raw?.clinicaclick_resolution?.candidate_profile;
     return {
       status: 'identity_unresolved',
       ads: [],
       error_code: 'META_PAGE_IDENTITY_UNRESOLVED',
-      error_message: 'No hemos podido identificar de forma inequívoca la página de Meta de este competidor. Añade su URL de Facebook para comprobar sus anuncios.',
+      error_message: candidate?.page_name
+        ? `Hemos localizado su Facebook (${candidate.page_name}), pero Meta no ha devuelto el Page ID que usa la Biblioteca de anuncios. Añade el enlace «Ver todos los anuncios» y lo extraeremos automáticamente.`
+        : META_IDENTITY_UNRESOLVED_MESSAGE,
       raw: metaResult.raw || null,
     };
   }
@@ -3836,6 +4159,8 @@ function adSnapshotPayload(snapshot) {
   const ads = snapshot && typeof snapshot.toJSON === 'function' ? snapshot.toJSON() : snapshot;
   const activeAds = Array.isArray(ads?.active_ads) ? ads.active_ads : [];
   const resolution = ads?.raw_payload?.clinicaclick_resolution;
+  const resolvedPage = resolution?.page || null;
+  const candidateProfile = resolution?.candidate_profile || null;
   const unresolvedLegacyIdentity = ads?.status === 'completed'
     && Number(ads?.ads_count || 0) === 0
     && resolution?.fallback_filtered === true
@@ -3850,8 +4175,19 @@ function adSnapshotPayload(snapshot) {
       ? 'META_PAGE_IDENTITY_UNRESOLVED'
       : (ads?.error_code || null),
     error_message: unresolvedLegacyIdentity
-      ? 'No hemos podido identificar de forma inequívoca la página de Meta de este competidor. Añade su URL de Facebook para comprobar sus anuncios.'
+      ? (candidateProfile?.page_name
+        ? `Hemos localizado su Facebook (${candidateProfile.page_name}), pero Meta no ha devuelto el Page ID que usa la Biblioteca de anuncios. Añade el enlace «Ver todos los anuncios» y lo extraeremos automáticamente.`
+        : META_IDENTITY_UNRESOLVED_MESSAGE)
       : (ads?.error_message || null),
+    identity_status: cleanString(resolvedPage?.page_id)
+      ? 'resolved'
+      : (candidateProfile?.page_name ? 'facebook_profile_found' : 'unresolved'),
+    identity_source: cleanString(resolvedPage?.source) || cleanString(candidateProfile?.source),
+    candidate_page_name: cleanString(candidateProfile?.page_name),
+    candidate_page_url: normalizeUrl(candidateProfile?.page_url),
+    api_result_status: cleanString(resolution?.api_result_status),
+    library_url: normalizeUrl(resolution?.page_library_url)
+      || (cleanString(resolvedPage?.page_id) ? metaAdsLibraryPageUrl(resolvedPage.page_id) : null),
     last_synced_at: ads?.updated_at || null
   };
 }
@@ -3910,6 +4246,12 @@ function mapCompetitorRow(row, latestSnapshot = null, latestAdSnapshot = null, l
       page_id: plain.meta_page_id,
       page_name: plain.meta_page_name,
       page_url: plain.meta_page_url,
+      library_url: ads.library_url || (plain.meta_page_id ? metaAdsLibraryPageUrl(plain.meta_page_id) : null),
+      identity_status: plain.meta_page_id ? 'resolved' : ads.identity_status,
+      identity_source: plain.meta_page_id ? (ads.identity_source || 'stored') : ads.identity_source,
+      candidate_page_name: ads.candidate_page_name,
+      candidate_page_url: ads.candidate_page_url,
+      api_result_status: ads.api_result_status,
       search_terms: plain.meta_ads_search_terms || [],
       ads_status: ads.ads_status,
       active_ads_count: ads.active_ads_count,
@@ -4326,8 +4668,9 @@ async function createCompetitor(scope, payload = {}) {
     ...(socialProfiles.instagram_username ? [`@${socialProfiles.instagram_username}`, socialProfiles.instagram_username] : []),
     ...(socialProfiles.facebook_username ? [socialProfiles.facebook_username] : [])
   ].map(cleanString).filter(Boolean))];
-  const metaPageUrl = normalizeUrl(payload.meta_page_url) || normalizeUrl(payload.facebook_url) || normalizeUrl(payload.instagram_url);
-  const metaPageId = cleanString(payload.meta_page_id) || extractMetaPageIdFromUrl(metaPageUrl);
+  const submittedMetaIdentity = metaPageIdentityFromPayload(payload);
+  const metaPageUrl = submittedMetaIdentity.page_url;
+  const metaPageId = submittedMetaIdentity.page_id;
   const manualPayload = {
     facebook_url: normalizeUrl(payload.facebook_url),
     instagram_url: normalizeUrl(payload.instagram_url),
@@ -4419,15 +4762,19 @@ async function updateCompetitor(scope, competitorId, payload = {}) {
     throw error;
   }
 
+  const submittedMetaIdentity = metaPageIdentityFromPayload(payload);
   const patch = {};
   for (const field of ['name', 'source', 'google_place_id', 'google_maps_url', 'website_url', 'phone', 'address', 'city', 'primary_category', 'business_status', 'meta_page_id', 'meta_page_name', 'meta_page_url', 'last_sync_status', 'last_sync_error']) {
     if (payload[field] !== undefined) patch[field] = cleanString(payload[field]);
   }
-  for (const field of ['google_maps_url', 'website_url', 'meta_page_url']) {
+  for (const field of ['google_maps_url', 'website_url']) {
     if (payload[field] !== undefined) patch[field] = normalizeUrl(payload[field]);
   }
-  if (payload.meta_page_url === undefined && (payload.facebook_url !== undefined || payload.instagram_url !== undefined)) {
-    patch.meta_page_url = normalizeUrl(payload.facebook_url) || normalizeUrl(payload.instagram_url);
+  if (payload.meta_page_url !== undefined) {
+    patch.meta_page_url = facebookIdentityUrl(payload.meta_page_url);
+  }
+  if (payload.meta_page_url === undefined && payload.facebook_url !== undefined) {
+    patch.meta_page_url = facebookIdentityUrl(payload.facebook_url);
   }
   if (payload.latitude !== undefined) patch.latitude = toNumber(payload.latitude);
   if (payload.longitude !== undefined) patch.longitude = toNumber(payload.longitude);
@@ -4446,8 +4793,13 @@ async function updateCompetitor(scope, competitorId, payload = {}) {
     ].map(cleanString).filter(Boolean))];
     if (!patch.meta_page_url && socialProfiles.facebook_url) patch.meta_page_url = socialProfiles.facebook_url;
   }
-  if (!patch.meta_page_id && (payload.meta_page_url !== undefined || payload.facebook_url !== undefined || payload.instagram_url !== undefined)) {
-    patch.meta_page_id = extractMetaPageIdFromUrl(patch.meta_page_url || payload.facebook_url || payload.instagram_url);
+  if (submittedMetaIdentity.page_url) patch.meta_page_url = submittedMetaIdentity.page_url;
+  if (submittedMetaIdentity.page_id) patch.meta_page_id = submittedMetaIdentity.page_id;
+  if (
+    !patch.meta_page_id
+    && (payload.meta_page_url !== undefined || payload.facebook_url !== undefined)
+  ) {
+    patch.meta_page_id = extractMetaPageIdFromUrl(patch.meta_page_url || payload.facebook_url);
   }
   if (payload.is_active !== undefined) patch.is_active = !!payload.is_active;
 
@@ -4696,6 +5048,7 @@ module.exports = {
     LOCAL_HEATMAP_EFFECTIVE_GRID_SIZE,
     LOCAL_HEATMAP_PLACE_FIELD_MASK,
     LOCAL_HEATMAP_IDENTITY_FIELD_MASK,
+    LOCAL_HEATMAP_IDENTITY_DETAILS_FIELD_MASK,
     LOCAL_HEATMAP_ANCHOR_SEARCH_FIELD_MASK,
     LOCAL_HEATMAP_ANCHOR_DETAILS_FIELD_MASK,
     META_AD_IDENTITY_FIELDS,
@@ -4705,6 +5058,7 @@ module.exports = {
     buildMetaIdentitySearchParams,
     adSnapshotPayload,
     collectLocalHeatmapPoints,
+    hydrateLocalHeatmapPointIdentities,
     fetchPublicHtmlPage,
     generateLocalRankingHeatmapSnapshot,
     inferCompetitionQuery,
@@ -4713,6 +5067,10 @@ module.exports = {
     localHeatmapPlaceKey,
     loadOwnProfileReviewSummary,
     metaSnapshotOutcome,
+    extractMetaPageIdFromUrl,
+    metaPageIdentityFromPayload,
+    metaIdentitySearchCandidates,
+    extractFacebookPublicProfileMetadata,
     normalizeLocalHeatmapTerm,
     persistedOwnClinicProfile,
     rankingHeatmapOffsets,
@@ -4725,6 +5083,7 @@ module.exports = {
     resolveHeatmapCompetitorIdentities,
     mergeHeatmapCompetitorIdentities,
     resolveMetaPageFromAdsArchive,
+    resolveMetaPublicIdentityFromKnownProfiles,
     summarizeCompetitorRefreshOutcome,
     strictGeoPoint,
     totalProviderRequests,
