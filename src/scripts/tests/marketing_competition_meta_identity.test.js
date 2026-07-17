@@ -17,6 +17,26 @@ function testAdsLibraryUrlProvidesCanonicalPageIdentity() {
   });
 }
 
+function testVanityDiscoveryNeverErasesAnExplicitPageId() {
+  const patch = {};
+  __testing.applyDiscoveredMetaIdentityPatch({
+    meta_page_id: '1438321663093742',
+    meta_page_url: 'https://www.facebook.com/1438321663093742',
+  }, patch, {
+    facebook_url: 'https://www.facebook.com/NaturalDentHospitalet',
+  });
+
+  assert.equal(Object.hasOwn(patch, 'meta_page_id'), false);
+  assert.equal(Object.hasOwn(patch, 'meta_page_url'), false);
+
+  const unresolvedPatch = {};
+  __testing.applyDiscoveredMetaIdentityPatch({}, unresolvedPatch, {
+    facebook_url: 'https://www.facebook.com/NaturalDentHospitalet',
+  });
+  assert.equal(unresolvedPatch.meta_page_url, 'https://www.facebook.com/NaturalDentHospitalet');
+  assert.equal(Object.hasOwn(unresolvedPatch, 'meta_page_id'), false);
+}
+
 function testCanonicalBrandFragmentsAreSearchedBeforeTheLongListingName() {
   const dentalStudio = __testing.metaIdentitySearchCandidates({
     name: 'Dental Studio Dra. Lorena Herrero - Clínica Dental',
@@ -185,6 +205,7 @@ function testOptionalProviderFailuresStayPartialWhenPlacesSucceeded() {
 
 async function run() {
   testAdsLibraryUrlProvidesCanonicalPageIdentity();
+  testVanityDiscoveryNeverErasesAnExplicitPageId();
   testCanonicalBrandFragmentsAreSearchedBeforeTheLongListingName();
   testPublicFacebookMetadataSuppliesTheExactBrandTerm();
   await testBrandFragmentResolvesTheCanonicalAdsLibraryPage();
