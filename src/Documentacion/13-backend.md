@@ -152,6 +152,17 @@ El fix de `effectiveMarketingAssets` preserva `user_data_enabled`, `enhanced_con
 
 `team.view` protege ruta, menú y lecturas de `/personal`; `team.manage` protege mutaciones de terceros; `team.schedule.self.manage` protege exclusivamente el horario y las ausencias propias. Los roles normalizados propietario/doctor/assistant/reception/admin_staff heredan lectura y la capacidad propia; `agencia` y `unknown` no. Por defecto `reception` y `admin_staff` heredan también `clinic.settings.edit` y `team.manage`, por lo que pueden gestionar configuración operativa de clínica, instalaciones, tratamientos, personal y horarios dentro de su ámbito. El backend de horarios y personal consulta la capacidad efectiva, no una allowlist `propietario/agencia`; seleccionar una clínica nunca eleva a agencia.
 
+#### Clínicas operativas del profesional frente a clínicas autorizadas del actor
+
+Los endpoints de horarios separan dos conjuntos que no son intercambiables:
+
+- **Clínicas objetivo del profesional:** se resuelven desde sus membresías operativas. Incluyen membresías aceptadas y también `estado_invitacion='pendiente'` cuando `Usuarios.es_provisional=true`, porque un provisional creado por la clínica debe poder recibir horarios y citas antes de reclamar su cuenta. Una invitación pendiente de un usuario existente no entra en este conjunto.
+- **Clínicas autorizadas del actor:** se resuelven con las capacidades y membresías aceptadas del usuario que realiza la petición. Un actor no administrador solo puede consultar o modificar la intersección entre sus clínicas autorizadas y las clínicas operativas del profesional objetivo; el administrador global puede operar sobre todas las clínicas objetivo.
+
+No se debe reutilizar la consulta de acceso del actor para descubrir las clínicas del profesional objetivo: esa consulta excluye correctamente invitaciones pendientes y volvería a ocultar a los provisionales del Gantt. La creación provisional de un perfil con capacidad de agenda debe dejar además su `DoctorClinica` activo. `estado_invitacion='pendiente'` controla la reclamación y el acceso propio, no la disponibilidad operativa de la cuenta provisional para la clínica.
+
+Implementación de referencia: `getOperationalStaffClinicIdsForUser()` obtiene las clínicas objetivo y `getAllowedClinicIdsForActorTarget()` aplica la autorización del actor. Regresión mínima: `node --test src/scripts/tests/personal_provisional_schedule_access.test.js`.
+
 ### Contrato comercial
 
 `connect_only` se muestra como **Conecta y mejora**: conecta cuentas, importa/unifica leads, atribuye el ciclo, envía conversiones consentidas mejoradas/offline y genera diagnósticos/recomendaciones. No modifica campañas, custom goals, pujas, presupuesto o estados. Piloto automático es una orden `managed_service` separada y aprobada.

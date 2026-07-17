@@ -2658,13 +2658,46 @@ async function validateHorarioExceptionCandidate({ targetUserId, clinicaId, hora
     return null;
 }
 
-async function getAllowedClinicIdsForActorTarget(actorId, targetUserId) {
-    const targetClinicIds = await getAccessibleClinicIdsForUser(targetUserId);
-    if (isAdmin(actorId) || Number(actorId) === Number(targetUserId)) {
+async function getOperationalStaffClinicIdsForUser(userId, dependencies = {}) {
+    const normalizedUserId = Number(userId);
+    if (!Number.isFinite(normalizedUserId)) return [];
+
+    const invitationWhereLoader = dependencies.invitationWhereLoader || getStaffInvitationWhereForUser;
+    const staffPivotFindAll = dependencies.staffPivotFindAll
+        || ((options) => UsuarioClinica.findAll(options));
+    const invitationWhere = await invitationWhereLoader(normalizedUserId);
+    const rows = await staffPivotFindAll({
+        where: {
+            id_usuario: normalizedUserId,
+            rol_clinica: { [Op.in]: STAFF_ROLES },
+            ...invitationWhere,
+        },
+        attributes: ['id_clinica'],
+        raw: true,
+    });
+
+    return Array.from(new Set(
+        rows
+            .map((row) => Number(row.id_clinica))
+            .filter((clinicId) => Number.isFinite(clinicId)),
+    ));
+}
+
+async function getAllowedClinicIdsForActorTarget(actorId, targetUserId, dependencies = {}) {
+    const targetClinicIdsLoader = dependencies.targetClinicIdsLoader
+        || ((userId) => getOperationalStaffClinicIdsForUser(userId, dependencies.operationalStaffDependencies));
+    const actorClinicIdsLoader = dependencies.actorClinicIdsLoader || getAccessibleClinicIdsForUser;
+    const adminCheck = dependencies.adminCheck || isAdmin;
+
+    // La agenda de un provisional es operativa desde que se crea la invitación.
+    // Su estado pendiente no concede acceso al actor: ese acceso se sigue
+    // comprobando con las clínicas aceptadas y permisos de quien gestiona.
+    const targetClinicIds = await targetClinicIdsLoader(targetUserId);
+    if (adminCheck(actorId) || Number(actorId) === Number(targetUserId)) {
         return targetClinicIds;
     }
 
-    const actorClinicIds = await getAccessibleClinicIdsForUser(actorId);
+    const actorClinicIds = await actorClinicIdsLoader(actorId);
     const actorSet = new Set(actorClinicIds);
     return targetClinicIds.filter((id) => actorSet.has(id));
 }
@@ -5030,4 +5063,6 @@ exports.__personalSecurityContract = {
     canEditHorarios,
     canEditBloqueos,
     canManageOwnScheduleInClinic,
+    getAllowedClinicIdsForActorTarget,
+    getOperationalStaffClinicIdsForUser,
 };
