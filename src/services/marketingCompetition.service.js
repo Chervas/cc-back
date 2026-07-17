@@ -55,7 +55,7 @@ const LOCAL_HEATMAP_GRID_SIZE = Math.max(3, Math.min(5, parseInt(process.env.COM
 const LOCAL_HEATMAP_MAX_POINTS = Math.max(1, Math.min(25, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_MAX_POINTS || '25', 10)));
 const LOCAL_HEATMAP_RESULT_LIMIT = Math.max(3, Math.min(20, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_RESULT_LIMIT || '20', 10)));
 const LOCAL_HEATMAP_BIAS_RADIUS_METERS = Math.max(500, Math.min(5000, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_BIAS_RADIUS_METERS || '1500', 10)));
-const LOCAL_HEATMAP_ALGORITHM_VERSION = process.env.COMPETITION_LOCAL_HEATMAP_ALGORITHM_VERSION || 'local-relevance-bias-v3';
+const LOCAL_HEATMAP_ALGORITHM_VERSION = process.env.COMPETITION_LOCAL_HEATMAP_ALGORITHM_VERSION || 'local-relevance-bias-v4';
 const LOCAL_HEATMAP_REFRESH_JOB_TYPE = 'marketing_competition_heatmap_refresh';
 const LOCAL_HEATMAP_TERM_MAX_LENGTH = Math.max(40, Math.min(240, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_TERM_MAX_LENGTH || '160', 10)));
 const LOCAL_HEATMAP_NEW_CACHE_ROWS_PER_HOUR = Math.max(1, Math.min(50, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_NEW_CACHE_ROWS_PER_HOUR || '12', 10)));
@@ -272,6 +272,7 @@ const PLACE_DETAILS_FIELD_MASK = [
 // displayName eleva las 25 llamadas al SKU Text Search Pro sin aportar nada a
 // la posición; places.id mantiene la misma profundidad y usa IDs Only.
 const LOCAL_HEATMAP_PLACE_FIELD_MASK = 'places.id';
+const LOCAL_HEATMAP_IDENTITY_FIELD_MASK = 'places.id,places.displayName';
 
 const LOCAL_HEATMAP_ANCHOR_SEARCH_FIELD_MASK = [
   'places.id',
@@ -1847,6 +1848,62 @@ async function searchGooglePlacesForHeatmap({ query, point }) {
   return Array.isArray(response.data?.places) ? response.data.places : [];
 }
 
+async function resolveHeatmapCompetitorIdentities({ query, center, tracker }) {
+  const point = strictGeoPoint(center?.latitude, center?.longitude);
+  const textQuery = cleanString(query);
+  if (!point || !textQuery) return [];
+  const body = {
+    textQuery,
+    languageCode: DEFAULT_LANGUAGE,
+    regionCode: DEFAULT_REGION,
+    pageSize: LOCAL_HEATMAP_RESULT_LIMIT,
+    locationRestriction: localRestrictionRectangle(point, COMPETITION_SUGGESTION_RADIUS_METERS),
+  };
+  return cachedCompetitionValue(
+    cacheKey(['heatmap-competitor-identities', LOCAL_HEATMAP_IDENTITY_FIELD_MASK, body]),
+    COMPETITION_PLACES_CACHE_TTL_MS,
+    async () => {
+      // Una única consulta Pro cacheada aporta los nombres. Las 25 celdas se
+      // mantienen en IDs Only, evitando multiplicar por 25 el SKU de nombres.
+      trackProviderRequest(tracker, 'places_identity_search');
+      const response = await axios.post(`${GOOGLE_PLACES_API_BASE}/places:searchText`, body, {
+        headers: buildPlaceHeaders(LOCAL_HEATMAP_IDENTITY_FIELD_MASK),
+        timeout: 15000,
+      });
+      return (Array.isArray(response.data?.places) ? response.data.places : [])
+        .map((place) => {
+          const normalized = normalizePlace(place);
+          const placeId = normalizePlaceId(normalized.google_place_id);
+          const name = cleanString(normalized.name);
+          return placeId && name ? {
+            id: null,
+            name,
+            google_place_id: placeId,
+            monitored: false,
+          } : null;
+        })
+        .filter(Boolean);
+    },
+  );
+}
+
+function mergeHeatmapCompetitorIdentities(discovered = [], monitored = []) {
+  const byPlaceId = new Map();
+  for (const competitor of [...discovered, ...monitored]) {
+    const placeId = normalizePlaceId(competitor?.google_place_id);
+    const name = cleanString(competitor?.name);
+    if (!placeId || !name) continue;
+    const id = toInt(competitor?.id);
+    byPlaceId.set(placeId, {
+      id: id || null,
+      name,
+      google_place_id: placeId,
+      monitored: !!id,
+    });
+  }
+  return [...byPlaceId.values()];
+}
+
 function trackProviderRequest(tracker, type) {
   if (!tracker || !type) return;
   tracker[type] = (Number(tracker[type]) || 0) + 1;
@@ -1997,8 +2054,9 @@ async function collectLocalHeatmapPoints({
     .map((competitor) => {
       const placeId = normalizePlaceId(competitor?.google_place_id);
       return placeId ? [placeId, {
-        id: toInt(competitor?.id),
+        id: toInt(competitor?.id) || null,
         name: cleanString(competitor?.name),
+        monitored: !!toInt(competitor?.id),
       }] : null;
     })
     .filter(Boolean));
@@ -2019,17 +2077,17 @@ async function collectLocalHeatmapPoints({
           .filter(Boolean);
         const ownIndex = normalized.findIndex((placeId) => placeId === normalizedOwnPlaceId);
         const myPosition = ownIndex >= 0 ? ownIndex + 1 : null;
-        // Conservamos solo coincidencias contra competidores que el usuario ya
-        // monitoriza. Los IDs proceden de la misma consulta IDs Only, de modo
-        // que no inventamos identidades ni necesitamos pedir nombres a Google.
+        // Los IDs de cada celda se cruzan con la consulta única de identidades
+        // y con los competidores monitorizados. Nunca inferimos por nombre.
         const rankedCompetitors = normalized
           .map((placeId, index) => {
             const competitor = competitorsByPlaceId.get(placeId);
-            if (!competitor?.id || !competitor?.name) return null;
+            if (!competitor?.name) return null;
             return {
               competitor_id: competitor.id,
               name: competitor.name,
               position: index + 1,
+              monitored: !!competitor.monitored,
             };
           })
           .filter(Boolean);
@@ -2071,6 +2129,7 @@ async function generateLocalRankingHeatmapSnapshot({
   const tracker = {
     places_anchor_details: 0,
     places_anchor_search: 0,
+    places_identity_search: 0,
     places_text_search_points: 0
   };
   const ownProfile = await (dependencies.resolveOwnClinicHeatmapProfile || resolveOwnClinicHeatmapProfile)(clinic, tracker);
@@ -2107,12 +2166,23 @@ async function generateLocalRankingHeatmapSnapshot({
     };
   }
 
+  let heatmapCompetitors = knownCompetitors;
+  try {
+    const discoveredCompetitors = await (
+      dependencies.resolveHeatmapCompetitorIdentities || resolveHeatmapCompetitorIdentities
+    )({ query: heatmapQuery, center, tracker });
+    heatmapCompetitors = mergeHeatmapCompetitorIdentities(discoveredCompetitors, knownCompetitors);
+  } catch (_) {
+    // La identidad visual es best-effort: una caída de esta única consulta no
+    // invalida las posiciones calculadas mediante IDs Only.
+  }
+
   const points = await (dependencies.collectLocalHeatmapPoints || collectLocalHeatmapPoints)({
     center,
     radiusKm,
     query: heatmapQuery,
     ownPlaceId,
-    knownCompetitors,
+    knownCompetitors: heatmapCompetitors,
     tracker
   });
   const validPoints = points.filter((point) => !point.error).length;
@@ -4625,6 +4695,7 @@ module.exports = {
     LOCAL_HEATMAP_CACHE_ALGORITHM_VERSION,
     LOCAL_HEATMAP_EFFECTIVE_GRID_SIZE,
     LOCAL_HEATMAP_PLACE_FIELD_MASK,
+    LOCAL_HEATMAP_IDENTITY_FIELD_MASK,
     LOCAL_HEATMAP_ANCHOR_SEARCH_FIELD_MASK,
     LOCAL_HEATMAP_ANCHOR_DETAILS_FIELD_MASK,
     META_AD_IDENTITY_FIELDS,
@@ -4651,6 +4722,8 @@ module.exports = {
     distanceMetersBetween,
     resolveOwnClinicHeatmapProfile,
     resolveCompetitionSuggestionCenter,
+    resolveHeatmapCompetitorIdentities,
+    mergeHeatmapCompetitorIdentities,
     resolveMetaPageFromAdsArchive,
     summarizeCompetitorRefreshOutcome,
     strictGeoPoint,

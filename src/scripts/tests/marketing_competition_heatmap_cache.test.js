@@ -482,6 +482,7 @@ async function testMissingOwnPlaceIdStopsBeforeGridQueries() {
     radiusKm: 3,
     dependencies: {
       resolveOwnClinicHeatmapProfile: async () => ({ latitude: 41.4, longitude: 2.17 }),
+      resolveHeatmapCompetitorIdentities: async () => [],
       collectLocalHeatmapPoints: async () => {
         collectorCalled = true;
         return [];
@@ -555,6 +556,7 @@ async function testProviderOutageDoesNotClaimSuccess() {
     heatmapQuery: 'clínica dental Barcelona',
     radiusKm: 3,
     dependencies: {
+      resolveHeatmapCompetitorIdentities: async () => [],
       collectLocalHeatmapPoints: async () => points,
     },
   });
@@ -589,7 +591,10 @@ async function testSuccessfulSnapshotPersistsOnlyRankingData() {
     selectedTerm: 'clínica dental',
     heatmapQuery: 'clínica dental Barcelona',
     radiusKm: 3,
-    dependencies: { collectLocalHeatmapPoints: async () => points },
+    dependencies: {
+      resolveHeatmapCompetitorIdentities: async () => [],
+      collectLocalHeatmapPoints: async () => points,
+    },
   });
   assert.equal(generated.payload.success, true);
   assert.equal(generated.payload.map_provider, null);
@@ -662,19 +667,28 @@ async function testIdOnlyHeatmapResultFindsOwnPlace() {
     query: 'clínica dental',
     ownPlaceId: 'own-place',
     ownName: 'Propdental Badalona',
-    knownCompetitors: [{ id: 91, name: 'Clínica rival conocida', google_place_id: 'other-place' }],
+    knownCompetitors: [
+      { id: 91, name: 'Clínica rival conocida', google_place_id: 'other-place', monitored: true },
+      { id: null, name: 'Clínica rival sugerida', google_place_id: 'suggested-place', monitored: false },
+    ],
     tracker: {},
     search: async () => {
       call += 1;
-      return call === 1 ? [{ id: 'other-place' }, { id: 'own-place' }] : [];
+      return call === 1 ? [{ id: 'other-place' }, { id: 'suggested-place' }, { id: 'own-place' }] : [];
     },
   });
-  assert.equal(points[0].my_position, 2);
+  assert.equal(points[0].my_position, 3);
   assert.equal(points[0].score, 100);
   assert.deepEqual(points[0].ranked_competitors, [{
     competitor_id: 91,
     name: 'Clínica rival conocida',
     position: 1,
+    monitored: true,
+  }, {
+    competitor_id: null,
+    name: 'Clínica rival sugerida',
+    position: 2,
+    monitored: false,
   }]);
   assert.equal(Object.hasOwn(points[0], 'ranked_place_ids'), false, 'unknown provider identities must not leak into the payload');
 }
@@ -687,7 +701,40 @@ function testStrictGeoPointRejectsMissingAndZeroAnchor() {
     latitude: 41.4424052,
     longitude: 2.2239243,
   });
-  assert.match(__testing.LOCAL_HEATMAP_ALGORITHM_VERSION, /v3$/);
+  assert.match(__testing.LOCAL_HEATMAP_ALGORITHM_VERSION, /v4$/);
+}
+
+async function testHeatmapUsesOneCachedIdentitySearchForNames() {
+  const originalPost = axios.post;
+  const calls = [];
+  axios.post = async (url, body, config) => {
+    calls.push({ url, body, config });
+    return {
+      data: {
+        places: [{ id: 'rival-place', displayName: { text: 'Clínica rival' } }],
+      },
+    };
+  };
+  const tracker = {};
+  try {
+    const identities = await __testing.resolveHeatmapCompetitorIdentities({
+      query: 'clínica dental en Hospitalet prueba identidad',
+      center: { latitude: 41.3661, longitude: 2.1162 },
+      tracker,
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].config.headers['X-Goog-FieldMask'], 'places.id,places.displayName');
+    assert.ok(calls[0].body.locationRestriction?.rectangle);
+    assert.deepEqual(identities, [{
+      id: null,
+      name: 'Clínica rival',
+      google_place_id: 'rival-place',
+      monitored: false,
+    }]);
+    assert.deepEqual(tracker, { places_identity_search: 1 });
+  } finally {
+    axios.post = originalPost;
+  }
 }
 
 function testCancelledCompliancePurgeCannotRemoveProviderContent() {
@@ -720,6 +767,7 @@ async function run() {
   await testPersistedBusinessCoordinatesAvoidAnchorApiCall();
   await testMissingBusinessCoordinatesUseCheapPlaceDetailsAnchor();
   await testIdOnlyHeatmapResultFindsOwnPlace();
+  await testHeatmapUsesOneCachedIdentitySearchForNames();
   testStrictGeoPointRejectsMissingAndZeroAnchor();
   testCancelledCompliancePurgeCannotRemoveProviderContent();
   console.log('marketing_competition_heatmap_cache.test.js OK');
