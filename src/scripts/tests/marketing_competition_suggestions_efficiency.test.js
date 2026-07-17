@@ -43,7 +43,13 @@ async function testSuggestionSearchUsesLightweightSingleRequest() {
     location: { latitude: 41.4 + index / 100, longitude: 2.1 + index / 100 },
     primaryType: 'dentist',
     photos: [{ name: `places/place-${index + 1}/photos/photo-${index + 1}` }],
-  }));
+  })).concat([{
+    id: 'place-far',
+    displayName: { text: 'Competidor lejano' },
+    formattedAddress: 'Oviedo',
+    location: { latitude: 43.36, longitude: -5.85 },
+    primaryType: 'dentist',
+  }]);
 
   axios.post = async (url, body, config) => {
     postCalls.push({ url, body, config });
@@ -57,10 +63,11 @@ async function testSuggestionSearchUsesLightweightSingleRequest() {
   try {
     const result = await __testing.searchCompetitionSuggestions(
       'clínica dental en Barcelona',
-      7
+      7,
+      { latitude: 41.4, longitude: 2.1 }
     );
 
-    assert.deepEqual(result, providerPlaces);
+    assert.deepEqual(result, providerPlaces.slice(0, 4));
     assert.equal(postCalls.length, 1, 'discovery must use one Places text search');
     assert.equal(getCalls.length, 0, 'discovery must not resolve one photo per result');
 
@@ -68,6 +75,17 @@ async function testSuggestionSearchUsesLightweightSingleRequest() {
     assert.match(request.url, /\/places:searchText$/);
     assert.equal(request.body.textQuery, 'clínica dental en Barcelona');
     assert.equal(request.body.pageSize, 7, 'the requested limit must be sent as pageSize');
+    assert.ok(request.body.locationRestriction?.rectangle, 'suggestions must use a strict Text Search viewport');
+    const rectangle = request.body.locationRestriction.rectangle;
+    assert.ok(rectangle.low.latitude < 41.4 && rectangle.high.latitude > 41.4);
+    assert.ok(rectangle.low.longitude < 2.1 && rectangle.high.longitude > 2.1);
+    assert.ok(
+      __testing.distanceMetersBetween(
+        { latitude: 41.4, longitude: 2.1 },
+        { latitude: 41.8, longitude: 2.1 }
+      ) > 25000,
+      'distance filter must reject a far result even if the provider returned it'
+    );
 
     const fieldMask = request.config?.headers?.['X-Goog-FieldMask'];
     assert.equal(fieldMask, __testing.COMPETITION_SUGGESTION_FIELD_MASK);

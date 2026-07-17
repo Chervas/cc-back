@@ -28,6 +28,7 @@ const {
     mergeClinicConfiguration,
     normalizeClinicConfigurationForRead,
 } = require('../lib/clinic-configuration');
+const { buildClinicWhatsappContactProjection } = require('../lib/clinic-whatsapp-contact');
 
 const CLINIC_VIEW_FEATURE = 'clinic.settings.view';
 const CLINIC_EDIT_FEATURE = 'clinic.settings.edit';
@@ -207,12 +208,18 @@ async function resolveConnectedWhatsappForClinic(clinicaData) {
             isActive: true,
             assetType: 'whatsapp_phone_number',
         },
-        attributes: ['metaAssetName', 'additionalData', 'updatedAt'],
+        attributes: ['metaAssetName', 'waVerifiedName', 'quality_rating', 'additionalData', 'updatedAt'],
         order: [['updatedAt', 'DESC']],
         raw: true,
     });
     const clinicWhatsapp = extractWhatsappNumber(clinicAsset);
-    if (clinicWhatsapp) return clinicWhatsapp;
+    if (clinicWhatsapp) {
+        return {
+            phone: clinicWhatsapp,
+            scope: 'clinic',
+            asset: clinicAsset,
+        };
+    }
 
     const groupId = clinicaData?.grupoClinicaId || clinicaData?.grupoClinica?.id_grupo || null;
     if (!groupId) return null;
@@ -224,22 +231,31 @@ async function resolveConnectedWhatsappForClinic(clinicaData) {
             isActive: true,
             assetType: 'whatsapp_phone_number',
         },
-        attributes: ['metaAssetName', 'additionalData', 'updatedAt'],
+        attributes: ['metaAssetName', 'waVerifiedName', 'quality_rating', 'additionalData', 'updatedAt'],
         order: [['updatedAt', 'DESC']],
         raw: true,
     });
 
-    return extractWhatsappNumber(groupAsset);
+    const groupWhatsapp = extractWhatsappNumber(groupAsset);
+    return groupWhatsapp
+        ? {
+            phone: groupWhatsapp,
+            scope: 'group',
+            asset: groupAsset,
+        }
+        : null;
 }
 
 async function enrichClinicContactFields(clinicaData) {
     if (!clinicaData) return clinicaData;
-    const connectedWhatsapp = await resolveConnectedWhatsappForClinic(clinicaData);
-    clinicaData.telefono_whatsapp_conectado = connectedWhatsapp;
-    clinicaData.whatsapp_connected = !!connectedWhatsapp;
-    if (!clinicaData.telefono_whatsapp && connectedWhatsapp) {
-        clinicaData.telefono_whatsapp = connectedWhatsapp;
-    }
+    const connected = await resolveConnectedWhatsappForClinic(clinicaData);
+    // Keep `telefono_whatsapp` as the persisted clinic-level public override.
+    // A group sender is operational infrastructure, not clinic-owned contact
+    // data, and must never be copied back into the manual field.
+    Object.assign(clinicaData, buildClinicWhatsappContactProjection({
+        manualPhone: clinicaData.telefono_whatsapp,
+        connected,
+    }));
     return clinicaData;
 }
 

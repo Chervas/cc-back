@@ -5,6 +5,7 @@ const chatFlowTemplatesController = require('../controllers/chatFlowTemplates.co
 const campaignOnboardingController = require('../controllers/campaignOnboarding.controller');
 const marketingReportsController = require('../controllers/marketingReports.controller');
 const marketingCompetitionController = require('../controllers/marketingCompetition.controller');
+const marketingAiVisibilityController = require('../controllers/marketingAiVisibility.controller');
 const marketingReactivationController = require('../controllers/marketingReactivation.controller');
 const marketingBulkSendsController = require('../controllers/marketingBulkSends.controller');
 const managedCampaignsController = require('../controllers/managedCampaigns.controller');
@@ -21,6 +22,9 @@ router.post('/reports/competition/competitors', marketingCompetitionController.c
 router.patch('/reports/competition/competitors/:competitorId', marketingCompetitionController.updateCompetitor);
 router.delete('/reports/competition/competitors/:competitorId', marketingCompetitionController.deleteCompetitor);
 router.post('/reports/competition/refresh', marketingCompetitionController.refreshCompetition);
+router.get('/reports/competition/ai-visibility', marketingAiVisibilityController.getOverview);
+router.post('/reports/competition/ai-visibility', marketingAiVisibilityController.createRun);
+router.get('/reports/competition/ai-visibility/:runId', marketingAiVisibilityController.getRun);
 
 // Reactivación de pacientes
 router.get('/reactivation/suggestions', marketingReactivationController.getSuggestions);

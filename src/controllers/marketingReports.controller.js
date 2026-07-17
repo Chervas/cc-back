@@ -11,6 +11,7 @@ const { hasMarketingClinicScopeAccess } = require('../lib/marketingScopeAccess')
 const { isGlobalAdmin } = require('../lib/role-helpers');
 const {
   METRIC_DEFINITIONS: BUSINESS_PROFILE_LOCAL_METRIC_DEFINITIONS,
+  collapseMetricRows: collapseBusinessProfileMetricRows,
   metricValueByDate: businessProfileMetricValueByDate,
 } = require('../services/businessProfileLocal.service');
 
@@ -1675,7 +1676,17 @@ async function aggregateWebPages(scope, range, seoPages = []) {
 
 async function aggregateBusinessProfile(scope, range, marketingState = null) {
   const empty = {
-    metrics: { views: 0, calls: 0, directions: 0, websiteClicks: 0, newReviews: 0, averageRating: 0, totalReviews: 0 },
+    metrics: {
+      views: 0,
+      calls: 0,
+      directions: 0,
+      websiteClicks: 0,
+      newReviews: 0,
+      averageRating: 0,
+      totalReviews: 0,
+      performanceStatus: 'empty',
+      latestPerformanceDate: null,
+    },
     connected: false,
     lastSync: null,
     unansweredReviews: 0,
@@ -1700,6 +1711,14 @@ async function aggregateBusinessProfile(scope, range, marketingState = null) {
     ...buildDateOnlyWhere('date', range),
   };
   const rows = await BusinessProfileDailyMetric.findAll({ where: metricWhere, raw: true });
+  const reportableMetricRows = collapseBusinessProfileMetricRows(rows);
+  const rawMetricDates = new Set(rows.map((row) => String(row.date || '')).filter(Boolean));
+  const reportableMetricDates = new Set(reportableMetricRows.map((row) => String(row.date || '')).filter(Boolean));
+  const hasProvisionalMetricDates = [...rawMetricDates].some((date) => !reportableMetricDates.has(date));
+  const latestPerformanceDate = [...reportableMetricDates].sort().at(-1) || null;
+  const performanceStatus = reportableMetricRows.length
+    ? (hasProvisionalMetricDates ? 'partial' : 'available')
+    : (hasProvisionalMetricDates ? 'pending' : 'empty');
   const sumDefinition = (definition) => businessProfileMetricValueByDate(rows, definition)
     .reduce((sum, point) => sum + toNumber(point.value), 0);
 
@@ -1738,6 +1757,8 @@ async function aggregateBusinessProfile(scope, range, marketingState = null) {
     newReviews,
     averageRating,
     totalReviews,
+    performanceStatus,
+    latestPerformanceDate,
   };
 
   return {

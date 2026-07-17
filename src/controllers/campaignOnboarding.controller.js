@@ -38,6 +38,9 @@ const {
   normalizeCanonicalGoogleAdsConversions
 } = require('../services/googleAdsCanonicalConversionNormalization.service');
 const {
+  enqueueGoogleDataManagerControlPlaneReconciliation,
+} = require('../services/googleDataManagerDiagnosticsEnqueue.service');
+const {
   clinicIdsFromStrategyRows,
   hasMarketingClinicScopeAccess,
   normalizeClinicIds,
@@ -116,7 +119,10 @@ const VALID_MODES = new Set(['connect_only', 'managed_self', 'managed_service'])
 const CREATABLE_MODES = new Set(['connect_only', 'managed_service']);
 const VALID_PROVIDERS = new Set(['google_ads', 'meta_ads']);
 const VALID_EVENTS = ['lead', 'contact', 'qualified_lead', 'schedule', 'purchase'];
-const DEFAULT_ENABLED_CONVERSION_EVENTS = ['lead', 'contact', 'schedule'];
+// Raw lead/contact measure acquisition. Qualified Lead and Schedule are the
+// offline CRM milestones that make Mide y mejora useful for optimisation, so a
+// fresh onboarding must provision both instead of waiting for a manual patch.
+const DEFAULT_ENABLED_CONVERSION_EVENTS = ['lead', 'contact', 'qualified_lead', 'schedule'];
 const VALID_STRATEGY_OBJECTIVES = new Set(['new_patients']);
 const VALID_STRATEGY_CHANNELS = new Set(['meta_ads', 'google_ads', 'whatsapp', 'email', 'remarketing', 'landing', 'youtube', 'phone']);
 const VALID_STRATEGY_STATUSES = new Set(['draft', 'pending_approval', 'active', 'paused', 'completed']);
@@ -329,6 +335,25 @@ function normalizeCurrency(raw) {
 function getUserId(req) {
   const parsed = parseInteger(req?.userData?.userId);
   return parsed;
+}
+
+async function enqueueMeasurementControlPlaneAfterWrite(req, origin) {
+  try {
+    return await enqueueGoogleDataManagerControlPlaneReconciliation({
+      origin,
+      requestedBy: getUserId(req),
+      requestedByName: req?.userData?.name
+        || req?.userData?.nombre
+        || req?.userData?.email
+        || null,
+      requestedByRole: req?.userData?.role || req?.userData?.rol || null,
+    });
+  } catch (error) {
+    // The configuration write is already durable. The six-hour safety pass
+    // will recover if this immediate enqueue is temporarily unavailable.
+    console.warn('No se pudo encolar la reconciliación inmediata de medición:', error.message || error);
+    return null;
+  }
 }
 
 function hasScopeText(scopesText, scope) {
@@ -8795,6 +8820,10 @@ exports.ensureGoogleAdsConversionActions = asyncHandler(async (req, res) => {
       customerId,
       eventKeys: listToUniqueArray(events.filter((eventKey) => VALID_EVENTS.includes(eventKey)))
     });
+    await enqueueMeasurementControlPlaneAfterWrite(
+      req,
+      'marketing:canonical_conversion_actions_ready'
+    );
   }
 
   return res.json({
@@ -8843,7 +8872,11 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
     groupIdRaw: scope.group_id,
     assignmentScopeRaw: scope.assignment_scope
   });
-  const consentReadiness = assessConsentMeasurementReadiness(marketingState);
+  // Use the same effective web row exposed by bootstrap. A clinic covered by
+  // the shared group website must not turn green in the stepper and then fail
+  // activation because this endpoint inspected a different consent record.
+  const webMeasurementState = resolveWebMeasurementMarketingState(scope, marketingState);
+  const consentReadiness = assessConsentMeasurementReadiness(webMeasurementState.marketingState);
   if (!consentReadiness.ready || !consentReadiness.validated) {
     return res.status(409).json({
       success: false,
@@ -9109,6 +9142,10 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
       last_onboarding_id: request.id,
       last_onboarding_at: new Date().toISOString()
     });
+    await enqueueMeasurementControlPlaneAfterWrite(
+      req,
+      'marketing:campaign_onboarding_completed'
+    );
 
     return res.status(201).json({
       success: true,

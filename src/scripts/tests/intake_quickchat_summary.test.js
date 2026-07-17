@@ -376,6 +376,8 @@ function testPublicLocationAlias() {
       id: 56,
       label: 'Etiqueta antigua',
       public_label: '  <strong>Barcelona - Sant Martí</strong>  ',
+      phone: 'OLD-PHONE',
+      whatsapp: 'OLD-WHATSAPP',
     }],
     [{
       id: 56,
@@ -391,6 +393,7 @@ function testPublicLocationAlias() {
   assert.equal(normalized[0].public_label, 'Barcelona - Sant Martí');
   assert.equal(normalized[0].label, 'Barcelona - Sant Martí');
   assert.equal(normalized[0].phone, '934000000');
+  assert.equal(normalized[0].whatsapp, '34600000000');
 
   const fallback = normalizeConfiguredLocations(
     [{ id: 56, public_label: { unsafe: true } }],

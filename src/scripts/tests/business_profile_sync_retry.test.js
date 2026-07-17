@@ -33,6 +33,14 @@ function buildConnection(overrides = {}) {
   return { connection, updates };
 }
 
+function testBusinessProfileMetricMissingValueIsNotZero() {
+  assert.equal(__test.googleBusinessMetricPointValue({ value: { value: '0' } }), 0);
+  assert.equal(__test.googleBusinessMetricPointValue({ value: { value: '12' } }), 12);
+  assert.equal(__test.googleBusinessMetricPointValue({ value: {} }), null);
+  assert.equal(__test.googleBusinessMetricPointValue({}), null);
+  assert.equal(__test.googleBusinessMetricPointValue({ value: 'invalid' }), null);
+}
+
 async function testAccessTokenRefreshContract() {
   {
     const { connection, updates } = buildConnection();
@@ -369,6 +377,7 @@ async function testTargetedBackfillPropagatesEveryInternalFailure() {
 }
 
 async function run() {
+  testBusinessProfileMetricMissingValueIsNotZero();
   await testAccessTokenRefreshContract();
   await testBusinessProfileSyncRetriesWhenOneLocationFails();
   await testBusinessProfileSyncRetriesOnPartialLocation();

@@ -662,6 +662,7 @@ async function testIdOnlyHeatmapResultFindsOwnPlace() {
     query: 'clínica dental',
     ownPlaceId: 'own-place',
     ownName: 'Propdental Badalona',
+    knownCompetitors: [{ id: 91, name: 'Clínica rival conocida', google_place_id: 'other-place' }],
     tracker: {},
     search: async () => {
       call += 1;
@@ -670,6 +671,12 @@ async function testIdOnlyHeatmapResultFindsOwnPlace() {
   });
   assert.equal(points[0].my_position, 2);
   assert.equal(points[0].score, 100);
+  assert.deepEqual(points[0].ranked_competitors, [{
+    competitor_id: 91,
+    name: 'Clínica rival conocida',
+    position: 1,
+  }]);
+  assert.equal(Object.hasOwn(points[0], 'ranked_place_ids'), false, 'unknown provider identities must not leak into the payload');
 }
 
 function testStrictGeoPointRejectsMissingAndZeroAnchor() {
@@ -680,7 +687,7 @@ function testStrictGeoPointRejectsMissingAndZeroAnchor() {
     latitude: 41.4424052,
     longitude: 2.2239243,
   });
-  assert.match(__testing.LOCAL_HEATMAP_ALGORITHM_VERSION, /v2$/);
+  assert.match(__testing.LOCAL_HEATMAP_ALGORITHM_VERSION, /v3$/);
 }
 
 function testCancelledCompliancePurgeCannotRemoveProviderContent() {

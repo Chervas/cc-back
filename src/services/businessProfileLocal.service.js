@@ -75,6 +75,23 @@ const METRIC_DEFINITIONS = Object.freeze({
 
 const ALL_METRIC_TYPES = Array.from(new Set(Object.values(METRIC_DEFINITIONS)
   .flatMap((definition) => [...definition.preferred, ...definition.fallback])));
+const RAW_REPORTING_COMPLETENESS_METRICS = Object.freeze([
+  'BUSINESS_IMPRESSIONS_DESKTOP_MAPS',
+  'BUSINESS_IMPRESSIONS_DESKTOP_SEARCH',
+  'BUSINESS_IMPRESSIONS_MOBILE_MAPS',
+  'BUSINESS_IMPRESSIONS_MOBILE_SEARCH',
+  'BUSINESS_DIRECTION_REQUESTS',
+  'CALL_CLICKS',
+  'WEBSITE_CLICKS',
+]);
+const LEGACY_NULL_COERCION_METRICS = Object.freeze([
+  ...RAW_REPORTING_COMPLETENESS_METRICS,
+  'BUSINESS_BOOKINGS',
+  'BUSINESS_CONVERSATIONS',
+]);
+const BUSINESS_PROFILE_PROVISIONAL_WINDOW_DAYS = 2;
+const LEGACY_NULL_COERCION_WRITTEN_FROM = Date.parse('2026-07-15T00:00:00.000Z');
+const LEGACY_NULL_COERCION_WRITTEN_BEFORE = Date.parse('2026-07-18T00:00:00.000Z');
 
 function toInt(value) {
   const parsed = Number.parseInt(String(value ?? ''), 10);
@@ -410,7 +427,47 @@ function collapseMetricRows(rows) {
       : -1;
     if (!current || rowUpdated >= currentUpdated) latest.set(key, row);
   }
-  return Array.from(latest.values());
+  const collapsed = Array.from(latest.values());
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+  const provisionalStart = new Date(today.getTime() - (BUSINESS_PROFILE_PROVISIONAL_WINDOW_DAYS * DAY_MS));
+  const grouped = new Map();
+  for (const row of collapsed) {
+    const locationId = row.business_location_id ?? row.businessLocationId ?? '';
+    const date = String(row.date || '');
+    const key = `${locationId}|${date}`;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(row);
+  }
+  const provisionalKeys = new Set();
+  for (const [key, dateRows] of grouped.entries()) {
+    const date = new Date(`${String(dateRows[0]?.date || '')}T00:00:00.000Z`);
+    const types = new Set(dateRows.map((row) => row.metric_type));
+    const hasCompleteRawShape = RAW_REPORTING_COMPLETENESS_METRICS.every((metric) => types.has(metric));
+    const allZero = dateRows.every((row) => toNumber(row.value) === 0);
+    const isRecentProviderTail = Number.isFinite(date.getTime())
+      && date >= provisionalStart
+      && date <= today;
+    // The old parser converted an absent protobuf value into 0. The affected
+    // cohort is bounded by its write window and exact nine-series batch shape,
+    // so those already-persisted rows stay hidden after the rolling two-day
+    // provisional window expires. A real explicit zero written by the fixed
+    // parser outside that cohort remains reportable.
+    const hasLegacyNullCoercionShape = LEGACY_NULL_COERCION_METRICS.every((metric) => types.has(metric));
+    const isKnownLegacyNullCoercionBatch = hasLegacyNullCoercionShape && dateRows.every((row) => {
+      const writtenAt = new Date(row.created_at || row.createdAt || row.updated_at || row.updatedAt || 0).getTime();
+      return Number.isFinite(writtenAt)
+        && writtenAt >= LEGACY_NULL_COERCION_WRITTEN_FROM
+        && writtenAt < LEGACY_NULL_COERCION_WRITTEN_BEFORE;
+    });
+    if (allZero && ((hasCompleteRawShape && isRecentProviderTail) || isKnownLegacyNullCoercionBatch)) {
+      provisionalKeys.add(key);
+    }
+  }
+  return collapsed.filter((row) => {
+    const locationId = row.business_location_id ?? row.businessLocationId ?? '';
+    return !provisionalKeys.has(`${locationId}|${String(row.date || '')}`);
+  });
 }
 
 function metricValueByDate(rows, definition) {
@@ -527,7 +584,6 @@ async function buildTimeseries(resolved, metric, startDate, endDate) {
   const range = resolveDateRange(startDate, endDate, 90);
   const definition = METRIC_DEFINITIONS[metric] || METRIC_DEFINITIONS.profile_views;
   const locationIds = resolved.locations.map((location) => Number(location.id));
-  const metricTypes = [...definition.preferred, ...definition.fallback];
   if (!locationIds.length) {
     return { success: true, metric, period: { start: range.start, end: range.end }, comparison: range.previous, current: [], previous: [] };
   }
@@ -535,7 +591,7 @@ async function buildTimeseries(resolved, metric, startDate, endDate) {
     BusinessProfileDailyMetric.findAll({
       where: {
         business_location_id: { [Op.in]: locationIds },
-        metric_type: { [Op.in]: metricTypes },
+        metric_type: { [Op.in]: ALL_METRIC_TYPES },
         date: { [Op.between]: [range.start, range.end] },
       },
       raw: true,
@@ -543,7 +599,7 @@ async function buildTimeseries(resolved, metric, startDate, endDate) {
     BusinessProfileDailyMetric.findAll({
       where: {
         business_location_id: { [Op.in]: locationIds },
-        metric_type: { [Op.in]: metricTypes },
+        metric_type: { [Op.in]: ALL_METRIC_TYPES },
         date: { [Op.between]: [range.previous.start, range.previous.end] },
       },
       raw: true,

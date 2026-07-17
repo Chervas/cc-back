@@ -7,6 +7,16 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
 
 ---
 
+## 2026-07-17 - Visibilidad local en asistentes de IA
+
+- Endpoints autenticados: `GET|POST /api/marketing/reports/competition/ai-visibility` y `GET /api/marketing/reports/competition/ai-visibility/:runId`. Exigen una única clínica y revalidan `marketingScopeAccess`; iniciar una consulta requiere write.
+- `MarketingAiVisibilityRuns` guarda consulta, estado, resultados normalizados, fuentes/citas y expiración. La migración es `20260717133000-create-marketing-ai-visibility-runs.js`.
+- `POST` no llama proveedores dentro de Express: crea `JobRequest type=marketing_ai_visibility_run`, prioridad baja, máximo dos intentos y namespace del runtime. `scheduledJobCatalog` lo clasifica como integración dirigida y `jobExecutor` ejecuta `marketingAiVisibilityService.executeRun()`.
+- OpenAI usa `POST /v1/responses`, modelo configurable (por defecto `gpt-5.6`), herramienta `web_search`, `tool_choice=required`, fuentes completas e `store=false`. Gemini usa `POST /v1beta/interactions`, modelo configurable (por defecto `gemini-3.5-flash`), herramienta `google_search` y `store=false`.
+- Los parsers conservan texto, consultas, `url_citation`, fuentes y el `search_suggestions` de Gemini. Solo se envía contexto público de la clínica; la validación rechaza emails y teléfonos en la consulta. No se imprimen claves, prompts ni respuestas completas en logs.
+- Control de coste y retención: caché exacta 24 h, tres consultas nuevas por clínica/24 h, retención local 30 días y timeout por proveedor 90 s, todos configurables. `system_data_cleanup` elimina filas vencidas. Los proveedores se ejecutan en paralelo y degradan por separado.
+- Secretos únicamente en entorno backend: `OPENAI_API_KEY` y `GEMINI_API_KEY`. También se admiten `OPENAI_PROJECT_ID`, `OPENAI_ORGANIZATION_ID`, `GOOGLE_CLOUD_PROJECT` y `GOOGLE_CLOUD_PROJECT_NUMBER`. Ninguno se expone al frontend ni se versiona.
+
 ## 2026-07-15 - Informes sin mock, Perfil Google agregado y heatmap local gobernado
 
 Este corte endurece `Marketing > Informes`, completa el lector operativo de Google Business Profile y deja preparada una medición local durable/coste-controlada detrás de un gate contractual. El contrato de producto ampliado está en `cc-front/src/Documentacion/20.7-marketing-fase7-informes.md`; el contrato transversal de ownership está en `20.13`.
@@ -529,7 +539,7 @@ Estado de sincronización:
 - El fallback canónico `web` se presenta como **Web propia (sin campaña)**. Incluye formularios, chat y modal telefónico sin señales Ads/SEO/sociales; no equivale solo a formularios ni al canal técnico `direct`.
 - Inversión, campañas y serie de gasto usan una ventana publicitaria comparable: `resolvePaidAttributionCoverage` toma el primer `LeadIntake` atribuible a Google Ads o Meta Ads del scope y no suma backfill de gasto anterior. Web, SEO y el resto de datos legítimos conservan el rango solicitado. Desde ese hito se cuentan también los días con gasto y cero leads. La respuesta expone `dataQuality.paidAttributionCoverage` y el frontend avisa si el inicio efectivo ha recortado el rango. El KPI CPL divide esa inversión por leads canónicos de Ads, no por leads web/orgánicos. Sin un hito atribuible no se inventa una fecha. Regresión: `node src/scripts/tests/marketing_report_lead_attribution.test.js`.
 - Las filas Google Ads se deduplican por la identidad remota `clinica/grupo + customer + campaign + date + adGroup + network + device`, excluyendo deliberadamente `clinicGoogleAdsAccountId` de esa clave. Un mismo customer puede tener dos mappings locales durante una reasignación o herencia; eso no debe duplicar gasto, clicks ni conversiones. El scope remoto/histórico se conserva, de modo que deduplicar no equivale a ocultar cuentas antiguas legítimas.
-- `WhatsApp desde la web (Clicks)` exige un `WhatsAppWebOrigin` creado por el widget/snippet instrumentado (o el fallback legacy documentado); un enlace arbitrario no cuenta por sí solo. `Confirmados` exige que el inbound conserve `[cc_ref:...]` y marque `used_at`/conversación/mensaje: abrir WhatsApp sin enviar no confirma.
+- `WhatsApp desde la web (Clicks)` exige un `WhatsAppWebOrigin` creado por el snippet instrumentado. El runtime cubre tanto el widget propio como enlaces existentes `wa.me`, `api.whatsapp.com`, `web.whatsapp.com` y `whatsapp://`: conserva el texto original, añade `[cc_ref:...]` y envía el click con `keepalive` antes de abrir la aplicación. `Confirmados` exige que el usuario envíe el mensaje, que el número destino esté conectado a Clinicaclick mediante Meta y que el inbound conserve la referencia para marcar `used_at`/conversación/mensaje; abrir WhatsApp sin enviar no confirma y un número meramente manual no permite recibir el webhook.
 
 Search Console:
 
@@ -3648,14 +3658,22 @@ El scheduler no envía recordatorios de consentimiento por su cuenta. Los record
   - `telefono_whatsapp`
 - `GET /api/clinicas/:id` enriquece la respuesta con:
   - `telefono_whatsapp_conectado`
+  - `telefono_whatsapp_efectivo`
   - `whatsapp_connected`
-- `telefono_whatsapp_conectado` se deriva de `ClinicMetaAsset` (`assetType='whatsapp_phone_number'`) priorizando asignación de clínica y usando grupo como fallback. No debe editarse manualmente.
+  - `whatsapp_connection_scope` (`clinic | group`)
+  - `whatsapp_public_source` (`clinic_meta | clinic_manual | group_meta`)
+- `telefono_whatsapp` conserva exclusivamente el override público/manual persistido de la sede. `telefono_whatsapp_conectado` se deriva de `ClinicMetaAsset` (`assetType='whatsapp_phone_number'`) priorizando asignación de clínica y usando grupo como fallback; nunca se copia de vuelta al campo manual.
+- `telefono_whatsapp_efectivo` es el contacto público: activo Meta propio, después override manual de sede y por último activo Meta de grupo. El remitente para automatizaciones sigue resolviéndose por `whatsappService.getClinicConfig()` y solo puede ser un activo Meta propio/heredado con credenciales; un número público manual no se presenta como remitente API.
 - `GET /api/intake/config` construye `available_locations[].whatsapp` con prioridad:
   1. WhatsApp Business conectado a la clínica.
   2. `Clinicas.telefono_whatsapp`.
   3. WhatsApp Business conectado al grupo.
   4. móvil/fijo normalizado como fallback.
 - `GET /api/intake/config` añade `available_locations[].opening_hours_text` para variables de chat. Se calcula desde `ClinicaHorarios` activos y agrupa días consecutivos con el mismo horario, por ejemplo `L-J de 9 a 20h y V de 10 a 14h`.
+- `normalizeConfiguredLocations()` prioriza siempre los teléfonos efectivos actuales sobre snapshots antiguos guardados en `IntakeConfig.config.locations`; el alias público de nombre sí continúa siendo una personalización del editor. Así, cambiar un número de clínica no deja el widget ni la atribución apuntando al número retirado.
+- En `CallInitiated` de scope de grupo, la sede se resuelve contra `telefono`, fijo, móvil, WhatsApp manual, aliases explícitos de location y activos Meta asignados a la clínica. Un activo de grupo no identifica una sede. Si el mismo número coincide en más de una clínica, no se elige la primera: se conserva el scope de grupo hasta tener URL/selección inequívoca.
+- El runtime `assets/intake.js` aplica el mismo criterio antes de crear el lead: compara `phone`, fijo, móvil, WhatsApp y aliases; si el número es compartido intenta la URL pública más específica. Los botones automáticos de llamada/WhatsApp solo usan sede elegida, URL inequívoca, única sede o un único número común; queda prohibido usar la primera sede de un grupo como fallback porque produciría atribución y conversiones falsas.
+- Los enlaces WhatsApp que ya existan en la web también quedan instrumentados: el click se mide con navegación segura mediante `keepalive` y se añade el `cc_ref` al mensaje sin borrar el texto previo. Esto permite confirmar el inbound cuando el destino es un activo Meta conectado; con un WhatsApp público manual solo puede medirse el click, no leer la conversación ni completar su ciclo offline automáticamente.
 - Migración:
   - `20260413101000-add-clinic-contact-phone-fields.js`
   - copia inicialmente `Clinicas.telefono` a `Clinicas.telefono_fijo` si el nuevo campo está vacío.
