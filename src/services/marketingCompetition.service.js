@@ -1668,11 +1668,11 @@ function inferCompetitionQuery(clinic, explicitQuery = null) {
   if (query) return query;
 
   const serviceHint = competitionServiceHint(clinic);
-  const locationParts = [clinic?.ciudad, clinic?.provincia, clinic?.codigo_postal]
-    .map(cleanString)
-    .filter(Boolean);
-  const address = locationParts.length ? locationParts.join(', ') : cleanString(clinic?.direccion);
-  if (address) return `${serviceHint} en ${address}`;
+  // La ficha local suele estar más completa que la tabla Clinicas. Usar la
+  // misma etiqueta canónica evita que una sede con ciudad vacía lance una
+  // búsqueda genérica nacional aunque Google conozca su localidad y CP.
+  const location = clinicLocationLabel(clinic);
+  if (location) return `${serviceHint} en ${location}`;
   return serviceHint;
 }
 
@@ -1952,6 +1952,19 @@ async function resolveOwnClinicHeatmapProfile(clinic, tracker) {
       setup_message: 'No hemos podido resolver el identificador de la ficha local. Revisa la conexión con Perfil de Empresa antes de calcular posiciones.',
     };
   }
+}
+
+async function resolveCompetitionSuggestionCenter(clinic) {
+  const persistedPoint = strictGeoPoint(clinic?.business_latitude, clinic?.business_longitude);
+  if (persistedPoint) return persistedPoint;
+
+  // Algunos perfiles sincronizados conservan el place_id y el resto de la
+  // ficha, pero no lat/lng en raw_payload. En ese caso una búsqueda de
+  // sugerencias sin centro volvería a ser nacional. Reutilizamos la resolución
+  // canónica del ancla del mapa (cacheada) para obtener la ubicación oficial
+  // de la propia ficha antes de consultar competidores.
+  const resolvedProfile = await resolveOwnClinicHeatmapProfile(clinic);
+  return strictGeoPoint(resolvedProfile?.latitude, resolvedProfile?.longitude);
 }
 
 function localHeatmapPlaceKey(clinic) {
@@ -4123,9 +4136,10 @@ async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT }
   const ownPlaceIds = await resolveOwnBusinessPlaceIds(scope);
 
   try {
+    const suggestionCenter = await resolveCompetitionSuggestionCenter(clinic);
     const places = await searchCompetitionSuggestions(textQuery, normalizedLimit, {
-      latitude: clinic?.business_latitude,
-      longitude: clinic?.business_longitude,
+      latitude: suggestionCenter?.latitude,
+      longitude: suggestionCenter?.longitude,
     });
     const suggestions = places.map((place, providerIndex) => {
       const normalized = normalizePlace(place);
@@ -4622,6 +4636,7 @@ module.exports = {
     collectLocalHeatmapPoints,
     fetchPublicHtmlPage,
     generateLocalRankingHeatmapSnapshot,
+    inferCompetitionQuery,
     competitionPlacesFeatureEnabled,
     listCompetitionWithDependencies,
     localHeatmapPlaceKey,
@@ -4635,6 +4650,7 @@ module.exports = {
     localRestrictionRectangle,
     distanceMetersBetween,
     resolveOwnClinicHeatmapProfile,
+    resolveCompetitionSuggestionCenter,
     resolveMetaPageFromAdsArchive,
     summarizeCompetitorRefreshOutcome,
     strictGeoPoint,
