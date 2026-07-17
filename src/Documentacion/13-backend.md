@@ -63,7 +63,7 @@ Esta migración debía ejecutarse **antes de reiniciar código nuevo**: el model
 
 El producto opera en el EEE. El caso de uso de inteligencia competitiva/ranking local no figura de forma expresa entre los usos permitidos publicados para Places API en el EEE. Por eso el código conserva a `false` los defaults de `COMPETITION_GOOGLE_PLACES_COMPETITOR_USE_ALLOWED`, `COMPETITION_GOOGLE_PLACES_COMPETITOR_STORAGE_ALLOWED` y `COMPETITION_LOCAL_RANKING_STORAGE_ALLOWED`; una API key por sí sola nunca habilita el proveedor. Para esta instalación de ClinicaClick los tres gates están activados en runtime desde el 2026-07-15 por autorización operativa expresa del titular tras revisión con su DPO. Esta decisión de privacidad no sustituye la revisión contractual/licencia de Google, que queda registrada como control separado.
 
-Con los gates apagados, `suggestions` devuelve `COMPETITION_DISCOVERY_PROVIDER_REQUIRED`, el usuario puede dar de alta competidores manuales y `local-heatmap` devuelve `LOCAL_RANKING_PROVIDER_REQUIRED`. No se aceptan `source=google_places`, `google_place_id` ni `raw_place_payload` disfrazados de alta manual. Con los gates activos, la primera entrada a Competencia para una clínica concreta carga en paralelo sugerencias y la matriz del primer término a `1 km`. El frontend lo hace una sola vez por clínica durante la vida del componente; el backend reutiliza sugerencias seis horas y el heatmap por su identidad persistente. Cambiar término/radio no consulta por sí solo: requiere `Aplicar cambios` o `Actualizar matriz`.
+Con los gates apagados, `suggestions` devuelve `COMPETITION_DISCOVERY_PROVIDER_REQUIRED`, el usuario puede dar de alta competidores manuales y `local-heatmap` devuelve `LOCAL_RANKING_PROVIDER_REQUIRED`. No se aceptan `source=google_places`, `google_place_id` ni `raw_place_payload` disfrazados de alta manual. Con los gates activos, la primera entrada a Competencia para una clínica concreta carga en paralelo sugerencias y la matriz del primer término a `1 km`. El frontend lo hace una sola vez por clínica durante la vida del componente; el backend reutiliza sugerencias seis horas y el heatmap por su identidad persistente. Término y radio son controles de navegación: cada cambio solicita inmediatamente la matriz correspondiente, sin botón intermedio de aplicación.
 
 `GET /api/marketing/reports/competition/local-heatmap` puede, por tanto, invocarse durante ese bootstrap inicial o por una acción posterior del usuario. Cada punto usa Places Text Search con `X-Goog-FieldMask: places.id`, `pageSize=20`, `rankPreference=RELEVANCE` y `locationBias` centrado en el punto. Backend no descarga, persiste, reenvía ni sirve Google Static Maps ni teselas. Devuelve las coordenadas de muestreo y la posición derivada; el frontend puede proyectarlas sobre teselas OSM solicitadas directamente por el navegador, con atribuciones separadas `OpenStreetMap` y `Posición estimada: Google Maps`. No se presentan nombres, fichas ni contenido de Places sobre OSM; se usa la excepción EEE de latitud/longitud de la cláusula 15.1 de los términos específicos.
 
@@ -107,12 +107,13 @@ Migraciones de este corte, con autorización separada (no ejecutar
 3. `20260715151500-enable-multiple-oauth-connections.js`: **aplicada** después
    de publicar el runtime multi-conexión en backend y gateway y pausar
    `connect`/`callback`;
-4. `20260715152000-purge-google-places-competition-content.js`: **pendiente y
-   suspendida**. Es irreversible, contradice el modelo de descubrimiento ahora
-   activado y no debe aplicarse hasta decidir la base contractual/retención del
-   proveedor, además de una autorización operativa explícita.
+4. `20260715152000-purge-google-places-competition-content.js`: **cancelada y
+   convertida en no-op** el 2026-07-17. La propuesta original era irreversible
+   y contradecía el modelo de descubrimiento autorizado. Se conserva el nombre
+   para que Sequelize pueda registrarla como aplicada sin borrar datos ni
+   bloquear migraciones posteriores.
 
-Preflight repetido el 2026-07-15: competencia conserva `49` filas totales, `48` afectadas, y `69` snapshots totales, `68` afectados; solo `raw_place_payload` ocupa `433.290 bytes` en competidores y `raw_payload` otros `615.780 bytes` en snapshots. Tras `1510`, GBP quedó en `22.077` filas, cero subtipos `NULL` y cero grupos duplicados. Los conteos de competencia deben repetirse inmediatamente antes de cualquier decisión futura. La `1520` anonimiza/desactiva las filas afectadas, elimina sus snapshots y vacía todo el caché de heatmap de forma irreversible; no se aplica por inercia con el resto ni con un `db:migrate` general.
+Preflight histórico del 2026-07-15: competencia conservaba `49` filas totales, `48` que habría afectado la purga, y `69` snapshots totales, `68` afectados; solo `raw_place_payload` ocupaba `433.290 bytes` en competidores y `raw_payload` otros `615.780 bytes` en snapshots. Tras `1510`, GBP quedó en `22.077` filas, cero subtipos `NULL` y cero grupos duplicados. Esos conteos explican el riesgo que se evitó; ya no describen una operación pendiente. La `1520` no contiene SQL destructivo y un `db:migrate` general solo la registra como no-op.
 
 Referencias normativas: [Places API policies](https://developers.google.com/maps/documentation/places/web-service/policies), [Google Maps Platform EEA Terms](https://cloud.google.com/terms/maps-platform/eea), [EEA Places permitted uses](https://cloud.google.com/terms/maps-platform/eea-places-api-permitted-uses) y [Static Maps caching FAQ](https://developers.google.com/maps/faq#can-i-generate-a-map-image-using-the-maps-static-api-which-i-store-and-serve-from-my-website).
 
@@ -562,8 +563,8 @@ Principios:
 - Cuando hay ficha local conectada, la categoría/nombre de Google Business Profile tiene prioridad sobre disciplinas mixtas de la clínica para inferir la búsqueda inicial. Ejemplo: si una clínica tiene varias áreas pero su ficha local es `Podólogo`, la competencia se busca como podología, no como otra disciplina secundaria.
 - Las sugerencias excluyen la propia ficha local por `place_id` y por nombre normalizado. La propia clínica no debe aparecer como competidor sugerido aunque Google la devuelva en los primeros resultados.
 - `GET /competition` devuelve `own_profile`, términos y datos manuales/snapshots autorizados. No consulta Meta/Google Ads en vivo. La identidad propia sale del `ClinicBusinessLocation` efectivo; rating/recuento se agregan desde `BusinessProfileReviews` ya sincronizadas y la foto se toma del contenido GBP persistido (prioridad `PROFILE`, `COVER`, `EXTERIOR`, `INTERIOR`, `ADDITIONAL`). El ranking Places queda vacío mientras el gate contractual esté cerrado.
-- `GET /competition/local-heatmap` devuelve `LOCAL_RANKING_PROVIDER_REQUIRED` con los gates apagados. Con proveedor autorizado, el frontend solicita automáticamente la matriz del primer término a `1 km` en la primera entrada de cada clínica y permite recalcular después radios de `1`, `3` o `5` km mediante `Aplicar cambios`/`Actualizar matriz`; cambiar los controles por sí solo no consulta. No existe `map_image_data_url`: el frontend dibuja un grid abstracto y solo muestra `Google Maps` como atribución cuando el resultado procede realmente de Google.
-- Caché preparada: `MarketingCompetitionHeatmapCaches` solo se lee/escribe con los gates de uso+almacenamiento activos. La clave cubre scope/ficha/término/radio/cuadrícula/algoritmo; dura 7 días `fresh` y hasta 14 `stale`. Un stale encola `marketing_competition_heatmap_refresh` con lease de 30 minutos/dedupe por clave y hasta 4 intentos. `system_data_cleanup` retira filas antiguas/versiones caducadas. La migración irreversible `1520` de purga permanece pendiente y suspendida; el contenido histórico del proveedor sigue conservado hasta una decisión contractual y autorización operativa explícitas.
+- `GET /competition/local-heatmap` devuelve `LOCAL_RANKING_PROVIDER_REQUIRED` con los gates apagados. Con proveedor autorizado, el frontend solicita automáticamente la matriz del primer término a `1 km` en la primera entrada de cada clínica; después, seleccionar otro término o un radio de `1`, `3` o `5` km solicita inmediatamente esa matriz, sin un segundo botón. No existe `map_image_data_url`: el frontend dibuja un grid abstracto y solo muestra `Google Maps` como atribución cuando el resultado procede realmente de Google.
+- Caché preparada: `MarketingCompetitionHeatmapCaches` solo se lee/escribe con los gates de uso+almacenamiento activos. La clave cubre scope/ficha/término/radio/cuadrícula/algoritmo; dura 7 días `fresh` y hasta 14 `stale`. Un stale encola `marketing_competition_heatmap_refresh` con lease de 30 minutos/dedupe por clave y hasta 4 intentos. `system_data_cleanup` retira filas antiguas/versiones caducadas. La antigua migración `1520` de purga está cancelada y es un no-op; no elimina contenido histórico ni cachés.
 - Concurrencia: si el gate contractual se habilita, ranking y heatmap limitan las llamadas (`COMPETITION_GOOGLE_CONCURRENCY`, default 3); apagado, realizan cero llamadas Places.
 - Si la ficha propia no aparece en una búsqueda simulada, `aboveMe` y `belowMe` deben ir vacíos y se devuelve `visibleResults` con los resultados encontrados. No tiene sentido hablar de "por encima" o "por debajo" cuando la clínica no aparece.
 - Guardar solo competidores confirmados por el usuario.
@@ -614,8 +615,8 @@ Tablas:
 
 | Tabla | Uso |
 |:---|:---|
-| `MarketingCompetitors` | Competidores activos por clínica/grupo, manuales o confirmados desde sugerencias, con configuración opcional de página Meta. Conserva todavía las filas históricas de Places: la `1520` no está aplicada. |
-| `MarketingCompetitorSnapshots` | Snapshot histórico. El contenido Places anterior se conserva mientras la migración irreversible `1520` siga suspendida. |
+| `MarketingCompetitors` | Competidores activos por clínica/grupo, manuales o confirmados desde sugerencias, con configuración opcional de página Meta. Las filas históricas de Places se conservan; la `1520` destructiva fue cancelada. |
+| `MarketingCompetitorSnapshots` | Snapshot histórico. El contenido Places anterior se conserva; la `1520` actual es un no-op. |
 | `MarketingCompetitorAdSnapshots` | Snapshot de anuncios activos por provider (`meta_ads_library`, `google_ads_transparency`) o error explícito de disponibilidad. |
 | `MarketingCompetitionHeatmapCaches` | Payload y lifecycle 7/14 días por identidad de medición, con coste del proveedor, lease y error de último refresco. |
 
@@ -625,7 +626,7 @@ Endpoints:
 |:---|:---|:---|
 | `GET /api/marketing/reports/competition` | Operativo backend V1 | Lista competidores, último snapshot, anuncios activos y estado de proveedores. |
 | `GET /api/marketing/reports/competition/suggestions` | Operativo con gate | Con proveedor autorizado alimenta el bootstrap automático y el refresco manual; reutiliza seis horas. Sin gate devuelve proveedor requerido y mantiene el alta manual. |
-| `GET /api/marketing/reports/competition/local-heatmap` | Operativo con gate | Alimenta la matriz inicial de 1 km o una aplicación explícita de término/radio; sin gate devuelve proveedor requerido. |
+| `GET /api/marketing/reports/competition/local-heatmap` | Operativo con gate | Alimenta la matriz inicial de 1 km y cada cambio explícito de término/radio; sin gate devuelve proveedor requerido. |
 | `POST /api/marketing/reports/competition/competitors` | Operativo backend V1 | Añade un competidor confirmado por el usuario. |
 | `PATCH /api/marketing/reports/competition/competitors/:competitorId` | Operativo backend V1 | Edita datos, `meta_page_id`, términos de búsqueda o estado. |
 | `DELETE /api/marketing/reports/competition/competitors/:competitorId` | Operativo backend V1 | Desactiva sin borrar histórico. |
@@ -2334,15 +2335,13 @@ proveedor y dos sitios Search Console que conservan su token exacto.
 > **Estado operativo del corte (2026-07-15):** completados publicación de
 > writers nuevos, reinicios controlados, migraciones `1500`, `1510` y `1515`,
 > rotación coordinada del App Secret Meta, smoke del grant/webhook y reapertura
-> de `connect`/`callback` para ambos proveedores. La migración `1520` queda
-> fuera de este cutover y permanece suspendida: además
-> de aprobación explícita independiente, requiere resolver antes la base
-> contractual/retención porque contradice el descubrimiento ahora activo.
+> de `connect`/`callback` para ambos proveedores. La propuesta destructiva
+> `1520` fue cancelada el 2026-07-17 y sustituida por un no-op.
 
-No ejecutar un `db:migrate` general: después de `1515` existe la migración
-irreversible `20260715152000-purge-google-places-competition-content.js`, que
-no debe ejecutarse mientras siga suspendida. El objetivo de este bloque se aplica de forma
-aislada hasta `20260715151500-enable-multiple-oauth-connections.js`.
+La migración `20260715152000-purge-google-places-competition-content.js` ya no
+es una razón para evitar `db:migrate`: su `up` y `down` son no-op y no contienen
+SQL ni operaciones destructivas. Los demás preflights del entorno siguen siendo
+obligatorios antes de aplicar migraciones en bloque.
 
 Como referencia para otros entornos: si `1500`, `1510` y `1515` siguen
 pendientes, `--to 1515` ejecuta también las dos anteriores. El corte debe
