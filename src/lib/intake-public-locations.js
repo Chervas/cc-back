@@ -34,9 +34,19 @@ function normalizeConfiguredLocations(locations, availableLocations) {
       ...location,
       public_label: publicLabel,
       label: publicLabel || fresh?.label || configuredLabel || null,
-      phone: location.phone || fresh?.phone || null,
-      whatsapp: location.whatsapp || fresh?.whatsapp || null,
-      address: location.address || fresh?.address || null,
+      // Contact data belongs to the clinic record/assets and can change after
+      // the intake scope was saved. Prefer the fresh effective values so an
+      // old location snapshot cannot keep publishing or attributing a retired
+      // phone number. Only the explicit public label remains an editor-owned
+      // override.
+      phone: fresh?.phone || location.phone || null,
+      fixed_phone: fresh?.fixed_phone || location.fixed_phone || null,
+      mobile_phone: fresh?.mobile_phone || location.mobile_phone || null,
+      whatsapp: fresh?.whatsapp || location.whatsapp || null,
+      phone_source: fresh?.phone_source || location.phone_source || null,
+      whatsapp_source: fresh?.whatsapp_source || location.whatsapp_source || null,
+      address: fresh?.address || location.address || null,
+      url_web: fresh?.url_web || location.url_web || null,
     };
   });
 }

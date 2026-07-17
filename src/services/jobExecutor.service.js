@@ -7,6 +7,7 @@ const whatsappTemplatesService = require('./whatsappTemplates.service');
 const marketingBulkSendsService = require('./marketingBulkSends.service');
 const googleReviewMatchService = require('./googleReviewMatch.service');
 const intakeQuickChatOutboxService = require('./intakeQuickChatOutbox.service');
+const marketingAiVisibilityService = require('./marketingAiVisibility.service');
 const { buildNotificationContent } = require('./notifications.service');
 const { emitNotificationCreated } = require('./notificationsRealtime.service');
 const {
@@ -394,6 +395,7 @@ const JOB_HANDLERS = {
   analytics_backfill_properties: async (payload = {}) => metaSyncJobs.executeAnalyticsBackfillForProperties(payload.mappings || []),
   business_profile_backfill_locations: async (payload = {}) => metaSyncJobs.executeBusinessProfileBackfillForLocations(payload.mappings || []),
   marketing_competition_heatmap_refresh: async (payload = {}) => metaSyncJobs.executeCompetitionHeatmapRefresh(payload),
+  marketing_ai_visibility_run: async (payload = {}) => marketingAiVisibilityService.executeRun(payload),
   business_profile_review_match: async (payload = {}) => googleReviewMatchService.runBusinessProfileReviewMatchJob(payload),
   whatsapp_coexistence_sync_contacts: async (payload = {}) => whatsappCoexistenceService.runContactsSyncJob(payload),
   whatsapp_coexistence_sync_history: async (payload = {}) => whatsappCoexistenceService.runHistorySyncJob(payload),

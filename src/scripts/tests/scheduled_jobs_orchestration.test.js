@@ -120,7 +120,9 @@ function testCatalogCoversEveryCronAndExecutor() {
   assert.equal(typeof jobExecutor.JOB_HANDLERS.web_backfill_for_sites, 'function');
   assert.equal(typeof jobExecutor.JOB_HANDLERS.analytics_backfill_properties, 'function');
   assert.equal(typeof jobExecutor.JOB_HANDLERS.marketing_competition_heatmap_refresh, 'function');
-  assert.ok(BACKGROUND_INTEGRATION_JOB_TYPES.includes('marketing_competition_heatmap_refresh'));
+    assert.ok(BACKGROUND_INTEGRATION_JOB_TYPES.includes('marketing_competition_heatmap_refresh'));
+    assert.equal(typeof jobExecutor.JOB_HANDLERS.marketing_ai_visibility_run, 'function');
+    assert.ok(BACKGROUND_INTEGRATION_JOB_TYPES.includes('marketing_ai_visibility_run'));
 
   const oauthSource = fs.readFileSync(path.resolve(__dirname, '../../routes/oauth.routes.js'), 'utf8');
   const analyticsMappingStart = oauthSource.indexOf("router.post('/google/analytics/map-properties'");

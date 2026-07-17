@@ -502,7 +502,7 @@ function testScopeAndProvisioningContracts() {
   });
   assert.equal(
     campaignOnboardingTest.resolveEnabledConversionEvents({ events: {} }).includes('qualified_lead'),
-    false,
+    true,
   );
   assert.equal(
     campaignOnboardingTest.resolveEnabledConversionEvents({

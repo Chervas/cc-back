@@ -45,6 +45,7 @@ const notificationService = require('../services/notifications.service');
 const { enqueueSyncForAllWabas } = require('../services/whatsappTemplates.service');
 const { enqueueSyncPhonesForAllWabas } = require('../services/whatsappPhones.service');
 const marketingCompetitionService = require('../services/marketingCompetition.service');
+const marketingAiVisibilityService = require('../services/marketingAiVisibility.service');
 const webEventsService = require('../services/webEvents.service');
 const googleReviewMatchService = require('../services/googleReviewMatch.service');
 const jobRequestsService = require('../services/jobRequests.service');
@@ -53,6 +54,9 @@ const {
   getScheduledJobDefinition,
 } = require('../config/scheduledJobCatalog');
 const { reconcileGoogleDataManagerDiagnostics } = require('../services/googleDataManagerDiagnostics.service');
+const {
+  resolveGoogleDataManagerDiagnosticsCadence,
+} = require('../services/googleDataManagerDiagnosticsCadence.service');
 const {
   reconcileEnhancedConversionsInternalActivation,
   reconcileVisitorChoicePersonalizationCapabilities,
@@ -100,6 +104,15 @@ const GOOGLE_BUSINESS_DAILY_METRICS = [
   'BUSINESS_CONVERSATIONS',
   'BUSINESS_BOOKINGS'
 ];
+
+function googleBusinessMetricPointValue(point = {}) {
+  const raw = point?.value && typeof point.value === 'object'
+    ? point.value.value
+    : point?.value;
+  if (raw === null || raw === undefined || raw === '') return null;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
 
 // Importar modelos
 const {
@@ -2320,46 +2333,69 @@ class MetaSyncJobs {
       if (Number.isInteger(jobRequestId) && jobRequestId > 0) {
         await jobRequestsService.setSyncLog(jobRequestId, syncLog.id);
       }
-      let visitorChoicePersonalization;
-      try {
-        visitorChoicePersonalization = await reconcileVisitorChoicePersonalizationCapabilities({
-          now: options.now || new Date()
-        });
-      } catch (error) {
-        visitorChoicePersonalization = {
-          status: 'error',
-          scanned: 0,
-          activated: 0,
-          already_active: 0,
-          errors: [{ reason: error.code || 'PERSONALIZATION_CAPABILITY_RECONCILIATION_ERROR' }],
-          idempotent: false,
-          grants_consent: false,
-          external_mutation_performed: false,
-          google_ads_mutated: false
-        };
-      }
-      let internalActivation;
-      try {
-        internalActivation = await reconcileEnhancedConversionsInternalActivation({
-          now: options.now || new Date()
-        });
-      } catch (error) {
-        internalActivation = {
-          status: 'error',
-          updated: false,
-          idempotent: false,
-          ready: false,
-          error: {
-            code: error.code || 'INTERNAL_ACTIVATION_RECONCILIATION_ERROR',
-            message: 'Falló la reconciliación interna de Conversiones mejoradas'
-          },
-          external_mutation_performed: false,
-          google_ads_mutated: false
-        };
+      const now = options.now instanceof Date ? options.now : new Date(options.now || Date.now());
+      const cadence = await resolveGoogleDataManagerDiagnosticsCadence({
+        syncLogId: syncLog.id,
+        SyncLogModel: SyncLog,
+        now,
+        forceControlPlane: options.force_control_plane === true || options.forceControlPlane === true,
+        controlPlaneRequestedAt: options.control_plane_requested_at || options.controlPlaneRequestedAt || null,
+      });
+      const skippedControlPlanePhase = () => ({
+        status: 'skipped',
+        reason: 'adaptive_cadence_not_due',
+        next_due_at: cadence.next_control_plane_at,
+        updated: false,
+        idempotent: true,
+        errors: [],
+        external_mutation_performed: false,
+        google_ads_mutated: false,
+      });
+
+      let visitorChoicePersonalization = skippedControlPlanePhase();
+      let internalActivation = {
+        ...skippedControlPlanePhase(),
+        ready: false,
+      };
+      if (cadence.control_plane_executed) {
+        try {
+          visitorChoicePersonalization = await reconcileVisitorChoicePersonalizationCapabilities({ now });
+        } catch (error) {
+          visitorChoicePersonalization = {
+            status: 'error',
+            scanned: 0,
+            activated: 0,
+            already_active: 0,
+            errors: [{ reason: error.code || 'PERSONALIZATION_CAPABILITY_RECONCILIATION_ERROR' }],
+            idempotent: false,
+            grants_consent: false,
+            external_mutation_performed: false,
+            google_ads_mutated: false
+          };
+        }
+        try {
+          internalActivation = await reconcileEnhancedConversionsInternalActivation({ now });
+        } catch (error) {
+          internalActivation = {
+            status: 'error',
+            updated: false,
+            idempotent: false,
+            ready: false,
+            error: {
+              code: error.code || 'INTERNAL_ACTIVATION_RECONCILIATION_ERROR',
+              message: 'Falló la reconciliación interna de Conversiones mejoradas'
+            },
+            external_mutation_performed: false,
+            google_ads_mutated: false
+          };
+        }
       }
       let strategyReadinessReconciliation = {
         status: 'skipped',
-        reason: 'enhanced_activation_not_ready',
+        reason: cadence.control_plane_executed
+          ? 'enhanced_activation_not_ready'
+          : 'adaptive_cadence_not_due',
+        next_due_at: cadence.next_control_plane_at,
         updated: false,
         idempotent: true,
         reconciled: 0,
@@ -2368,11 +2404,15 @@ class MetaSyncJobs {
         google_ads_mutated: false
       };
       let strategyReadinessError = null;
-      if (['activated', 'already_active'].includes(internalActivation.status) && internalActivation.ready === true) {
+      if (
+        cadence.control_plane_executed
+        && ['activated', 'already_active'].includes(internalActivation.status)
+        && internalActivation.ready === true
+      ) {
         try {
           strategyReadinessReconciliation = await reconcileVerifiedConnectOnlyStrategyActivationReadiness({
             enhancedActivation: internalActivation,
-            now: options.now || new Date()
+            now
           });
         } catch (error) {
           strategyReadinessError = error;
@@ -2394,6 +2434,7 @@ class MetaSyncJobs {
       const diagnostics = await reconcileGoogleDataManagerDiagnostics(options);
       const report = {
         ...diagnostics,
+        cadence,
         visitor_choice_personalization_reconciliation: visitorChoicePersonalization,
         internal_enhanced_conversion_activation: internalActivation,
         connect_only_strategy_readiness_reconciliation: strategyReadinessReconciliation
@@ -2515,7 +2556,13 @@ class MetaSyncJobs {
           if (!date) {
             continue;
           }
-          const value = Number(point.value?.value ?? point.value ?? 0) || 0;
+          // Performance API incluye a veces la fecha mas reciente sin un valor
+          // consolidado. Ausencia no significa cero: guardarla como 0 dibujaba
+          // una caida falsa en todas las fichas durante la ventana de reporte.
+          const value = googleBusinessMetricPointValue(point);
+          if (value === null) {
+            continue;
+          }
           await this._upsertBusinessProfileDailyMetric({
             clinica_id: location.clinica_id,
             business_location_id: location.id,
@@ -3481,6 +3528,13 @@ async syncFacebookPageMetrics(asset) {
       const competitionHeatmapsDeleted = await marketingCompetitionService.cleanupLocalHeatmapCache();
       totalDeleted += competitionHeatmapsDeleted;
 
+      // Las consultas de visibilidad IA solo conservan el resultado local
+      // durante su ventana declarada (30 dias por defecto). El proveedor se
+      // invoca siempre con store=false; esta limpieza evita un histórico
+      // indefinido también dentro de ClinicaClick.
+      const aiVisibilityRunsDeleted = await marketingAiVisibilityService.cleanupExpiredRuns();
+      totalDeleted += aiVisibilityRunsDeleted;
+
       // Actualizar log
       await syncLog.update({
         status: 'completed',
@@ -3497,7 +3551,8 @@ async syncFacebookPageMetrics(asset) {
           syncLogs: syncLogsDeleted,
           tokenValidations: tokenValidationsDeleted,
           socialStats: socialStatsDeleted,
-          competitionHeatmaps: competitionHeatmapsDeleted
+          competitionHeatmaps: competitionHeatmapsDeleted,
+          aiVisibilityRuns: aiVisibilityRunsDeleted
         }
       };
 
@@ -5215,6 +5270,7 @@ module.exports = {
   __test: {
     reviewedCampaignAssignmentDirective,
     ensureGoogleConnectionAccessToken,
-    buildBusinessProfileRetryResult
+    buildBusinessProfileRetryResult,
+    googleBusinessMetricPointValue,
   }
 };

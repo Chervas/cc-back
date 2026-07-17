@@ -102,6 +102,7 @@ async function testScheduleUsesGroupConfigAndConsent() {
               assignment_scope: 'group',
               group_id: 5,
               config: {
+                locations: [{ id: 56 }],
                 features: { consent_mode_enabled: true },
                 google_ads: {
                   enabled: true,
@@ -135,6 +136,7 @@ async function testConfiguredLifecycleWeightsReachUploader() {
     assignment_scope: 'group',
     group_id: 5,
     config: {
+      locations: [{ id: 56 }],
       features: { consent_mode_enabled: true },
       google_ads: {
         enabled: true,
@@ -211,6 +213,7 @@ async function testDeniedMarketingFailsClosed() {
             assignment_scope: 'group',
             group_id: 5,
             config: {
+              locations: [{ id: 56 }],
               features: { consent_mode_enabled: true },
               google_ads: { enabled: true },
             },
@@ -240,6 +243,7 @@ async function captureLifecycleUpload({ consent, consentModeEnabled }) {
             assignment_scope: 'group',
             group_id: 5,
             config: {
+              locations: [{ id: 56 }],
               features: { consent_mode_enabled: consentModeEnabled },
               google_ads: { enabled: true },
             },
@@ -292,6 +296,48 @@ async function testLifecycleConsentPurposeAndModeGuards() {
   assert.equal(legacyModeOff.consentModeEnabled, false);
 }
 
+async function testLifecycleNeverLeaksToUnlistedGroupWebsite() {
+  let uploadInput = null;
+  const groupConfig = {
+    id: 24,
+    assignment_scope: 'group',
+    group_id: 5,
+    config: {
+      locations: [{ id: 19 }, { id: 35 }, { id: 56 }],
+      google_ads: { customer_id: '5992356722' },
+    },
+  };
+  const clinicConfig = {
+    id: 36,
+    assignment_scope: 'clinic',
+    clinic_id: 36,
+    config: {
+      google_ads: { customer_id: '1112223334' },
+    },
+  };
+  await maybeUploadLeadLifecycleConversion({
+    lead: leadFixture({ clinica_id: 36, grupo_clinica_id: 5 }),
+    eventName: 'qualified_lead',
+    eventId: 'lead-36-qualified',
+    dependencies: {
+      IntakeConfig: {
+        async findOne({ where }) {
+          if (where.group_id === 5) return groupConfig;
+          if (where.clinic_id === 36) return clinicConfig;
+          return null;
+        },
+      },
+      maybeUploadGoogleConversion: async (input) => {
+        uploadInput = input;
+        return { sent: true };
+      },
+    },
+  });
+  assert.equal(uploadInput.assignmentScope, 'clinic');
+  assert.equal(uploadInput.cfgRecord.id, 36);
+  assert.equal(uploadInput.googleAdsConfig.customer_id, '1112223334');
+}
+
 async function run() {
   testPayloadKeepsRichAttribution();
   testPayloadOmitsMissingValueAndPreservesRealPurchaseValue();
@@ -299,6 +345,7 @@ async function run() {
   await testConfiguredLifecycleWeightsReachUploader();
   await testDeniedMarketingFailsClosed();
   await testLifecycleConsentPurposeAndModeGuards();
+  await testLifecycleNeverLeaksToUnlistedGroupWebsite();
   console.log('google_lead_lifecycle_conversion.test.js OK');
 }
 

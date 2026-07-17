@@ -34,6 +34,9 @@ const {
 const webEventsService = require('../services/webEvents.service');
 const { getIO } = require('../services/socket.service');
 const jobRequestsService = require('../services/jobRequests.service');
+const {
+  enqueueGoogleDataManagerControlPlaneReconciliation,
+} = require('../services/googleDataManagerDiagnosticsEnqueue.service');
 const { previewLeadImport, executeLeadImport } = require('../services/leadImport.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { normalizePhoneDigits } = require('../lib/phone');
@@ -83,6 +86,7 @@ const {
   configuredClinicIds,
   matchClinicByPageUrl,
 } = require('../lib/intake-page-clinic');
+const { matchClinicByContactPhone } = require('../lib/intake-clinic-phone-routing');
 const {
   resolveGoogleAdsCampaignId,
   resolveGoogleLeadRoute,
@@ -1054,7 +1058,7 @@ const buildLeadCallOutcomeSocketPayload = ({ lead, clinicId, groupId }) => {
   };
 };
 
-const resolveClinicByPhoneWithinGroup = async (groupId, phone) => {
+const resolveClinicByPhoneWithinGroup = async (groupId, phone, configRecord = null) => {
   const parsedGroupId = parseInteger(groupId);
   const normalizedPhone = normalizePhone(phone);
   if (parsedGroupId === null || !normalizedPhone) {
@@ -1063,16 +1067,31 @@ const resolveClinicByPhoneWithinGroup = async (groupId, phone) => {
 
   const clinics = await Clinica.findAll({
     where: { grupoClinicaId: parsedGroupId },
-    attributes: ['id_clinica', 'grupoClinicaId', 'telefono', 'telefono_fijo', 'telefono_movil', 'telefono_whatsapp'],
+    attributes: ['id_clinica', 'grupoClinicaId', 'estado_clinica', 'telefono', 'telefono_fijo', 'telefono_movil', 'telefono_whatsapp'],
     raw: true,
   });
 
-  return clinics.find((clinic) => [
-    clinic.telefono,
-    clinic.telefono_fijo,
-    clinic.telefono_movil,
-    clinic.telefono_whatsapp,
-  ].some((value) => normalizePhone(value) === normalizedPhone)) || null;
+  const clinicIds = clinics.map((clinic) => clinic.id_clinica).filter(Boolean);
+  const clinicPhoneAssets = clinicIds.length
+    ? await ClinicMetaAsset.findAll({
+        where: {
+          clinicaId: { [Op.in]: clinicIds },
+          assignmentScope: 'clinic',
+          isActive: true,
+          assetType: 'whatsapp_phone_number',
+        },
+        attributes: ['clinicaId', 'assignmentScope', 'metaAssetName', 'additionalData'],
+        raw: true,
+      })
+    : [];
+
+  return matchClinicByContactPhone({
+    phone: normalizedPhone,
+    clinics,
+    clinicPhoneAssets,
+    configRecord,
+    allowedClinicIds: configuredClinicIds(configRecord),
+  });
 };
 
 const resolveClinicByPageUrlWithinGroup = async (groupId, pageUrl, configRecord = null) => {
@@ -3218,7 +3237,7 @@ const getIntakeConfig = async (
 
       const clinics = await Clinica.findAll({
         where: { grupoClinicaId: resolvedGroupId },
-        attributes: ['id_clinica', 'nombre_clinica', 'telefono', 'telefono_fijo', 'telefono_movil', 'telefono_whatsapp', 'direccion', 'url_avatar'],
+        attributes: ['id_clinica', 'nombre_clinica', 'telefono', 'telefono_fijo', 'telefono_movil', 'telefono_whatsapp', 'direccion', 'url_web', 'url_avatar'],
         order: [['nombre_clinica', 'ASC']],
         raw: true
       });
@@ -3254,15 +3273,23 @@ const getIntakeConfig = async (
         const phone = fixedPhone || mobilePhone || null;
         const connectedWhatsapp = whatsappByClinicId.get(c.id_clinica) || null;
         const whatsapp = connectedWhatsapp || manualWhatsapp || groupWhatsApp || normalizePhone(mobilePhone || fixedPhone) || null;
+        const whatsappSource = connectedWhatsapp
+          ? 'clinic_meta'
+          : (manualWhatsapp
+            ? 'clinic_manual'
+            : (groupWhatsApp ? 'group_meta' : (whatsapp ? 'contact_fallback' : null)));
         return {
           id: c.id_clinica,
           label: c.nombre_clinica,
           phone,
           fixed_phone: fixedPhone,
           mobile_phone: mobilePhone,
+          phone_source: fixedPhone ? 'clinic_fixed' : (mobilePhone ? 'clinic_mobile' : null),
           whatsapp,
           whatsapp_connected: !!connectedWhatsapp,
+          whatsapp_source: whatsappSource,
           address: c.direccion || null,
+          url_web: c.url_web || null,
           opening_hours_text: openingHoursByClinicId.get(c.id_clinica) || null,
           url_avatar: c.url_avatar || null
         };
@@ -3271,7 +3298,7 @@ const getIntakeConfig = async (
       if (!clinicRow) {
         clinicRow = await Clinica.findOne({
           where: { id_clinica: payload.clinic_id },
-          attributes: ['id_clinica', 'nombre_clinica', 'telefono', 'telefono_fijo', 'telefono_movil', 'telefono_whatsapp', 'direccion', 'url_avatar'],
+          attributes: ['id_clinica', 'nombre_clinica', 'telefono', 'telefono_fijo', 'telefono_movil', 'telefono_whatsapp', 'direccion', 'url_web', 'url_avatar'],
           raw: true
         });
       }
@@ -3296,6 +3323,7 @@ const getIntakeConfig = async (
         const mobilePhone = clinicRow.telefono_movil || null;
         const manualWhatsapp = normalizePhone(clinicRow.telefono_whatsapp);
         const connectedWhatsapp = whatsapp || null;
+        const effectiveWhatsapp = connectedWhatsapp || manualWhatsapp || normalizePhone(mobilePhone || fixedPhone) || null;
         const openingHoursByClinicId = await buildOpeningHoursTextByClinicId([clinicRow.id_clinica]);
         payload.available_locations = [{
           id: clinicRow.id_clinica,
@@ -3303,9 +3331,14 @@ const getIntakeConfig = async (
           phone: fixedPhone || mobilePhone || null,
           fixed_phone: fixedPhone,
           mobile_phone: mobilePhone,
-          whatsapp: connectedWhatsapp || manualWhatsapp || normalizePhone(mobilePhone || fixedPhone) || null,
+          phone_source: fixedPhone ? 'clinic_fixed' : (mobilePhone ? 'clinic_mobile' : null),
+          whatsapp: effectiveWhatsapp,
           whatsapp_connected: !!connectedWhatsapp,
+          whatsapp_source: connectedWhatsapp
+            ? 'clinic_meta'
+            : (manualWhatsapp ? 'clinic_manual' : (effectiveWhatsapp ? 'contact_fallback' : null)),
           address: clinicRow.direccion || null,
+          url_web: clinicRow.url_web || null,
           opening_hours_text: openingHoursByClinicId.get(clinicRow.id_clinica) || null,
           url_avatar: clinicRow.url_avatar || null
         }];
@@ -3765,6 +3798,26 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
 
   if (persistence.error) {
     return res.status(persistence.error.status).json(persistence.error.body);
+  }
+  try {
+    await enqueueGoogleDataManagerControlPlaneReconciliation({
+      origin: verificationOnlyMutation
+        ? 'marketing:web_measurement_verified'
+        : domainAddMutation
+          ? 'marketing:web_measurement_domain_added'
+          : 'marketing:web_measurement_configured',
+      requestedBy: req.userData?.userId || null,
+      requestedByName: req.userData?.name
+        || req.userData?.nombre
+        || req.userData?.email
+        || null,
+      requestedByRole: req.userData?.role || req.userData?.rol || null,
+    });
+  } catch (error) {
+    // Saving the web configuration is the source of truth. The periodic
+    // diagnostics pass remains the fallback if the immediate durable enqueue
+    // is temporarily unavailable.
+    console.warn('No se pudo encolar la reconciliación de medición web:', error.message || error);
   }
   return res.json({
     success: true,
@@ -4665,7 +4718,11 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
       eventDataFromBody.clicked_tel,
       eventDataFromBody.clickedTel,
     ));
-    const phoneClinic = await resolveClinicByPhoneWithinGroup(groupIdParsed, clickedTel);
+    const phoneClinic = await resolveClinicByPhoneWithinGroup(
+      groupIdParsed,
+      clickedTel,
+      [cfg, groupCfg, domainCfg].find((record) => record?.assignment_scope === 'group') || null,
+    );
     clinicIdParsed = parseInteger(phoneClinic?.id_clinica);
   }
 
@@ -4793,7 +4850,11 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
     }
 
     if (!resolvedClinicId && resolvedGroupId !== null && clickedTel) {
-      const matchedClinic = await resolveClinicByPhoneWithinGroup(resolvedGroupId, clickedTel);
+      const matchedClinic = await resolveClinicByPhoneWithinGroup(
+        resolvedGroupId,
+        clickedTel,
+        finalGroupCfg || groupCfg || cfg || null,
+      );
       if (matchedClinic) {
         resolvedClinicId = parseInteger(matchedClinic.id_clinica);
         resolvedGroupId = parseInteger(matchedClinic.grupoClinicaId) || resolvedGroupId;

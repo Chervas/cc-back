@@ -225,7 +225,7 @@ function validatedTargets(plan, mappingsByCustomer) {
 }
 
 function testEnabledEventsAndNullMapping() {
-  assert.deepEqual(resolveEnabledConversionEvents({}), ['lead', 'contact', 'schedule']);
+  assert.deepEqual(resolveEnabledConversionEvents({}), ['lead', 'contact', 'qualified_lead', 'schedule']);
   assert.deepEqual(resolveEnabledConversionEvents({
     events: {
       lead: { enabled: true },
@@ -233,12 +233,20 @@ function testEnabledEventsAndNullMapping() {
       schedule: { enabled: true },
       purchase: { enabled: true }
     }
-  }), ['lead', 'schedule', 'purchase']);
+  }), ['lead', 'qualified_lead', 'schedule', 'purchase']);
 
   const plan = buildRequiredConversionPlan({}, '599-235-6722');
   const readiness = assessConversionOnboardingReadiness({
     plan,
-    mappingsByCustomer: { 5992356722: { lead: null, contact: null, schedule: null, purchase: null } },
+    mappingsByCustomer: {
+      5992356722: {
+        lead: null,
+        contact: null,
+        qualified_lead: null,
+        schedule: null,
+        purchase: null,
+      },
+    },
     capabilitiesByCustomer: {
       5992356722: {
         data_manager_scope_granted: true,
@@ -307,6 +315,7 @@ function testMultiAccountRequiresAttributionSelector() {
         ]
       },
       contact: { enabled: false },
+      qualified_lead: { enabled: false },
       schedule: { enabled: false }
     }
   };

@@ -55,7 +55,7 @@ const LOCAL_HEATMAP_GRID_SIZE = Math.max(3, Math.min(5, parseInt(process.env.COM
 const LOCAL_HEATMAP_MAX_POINTS = Math.max(1, Math.min(25, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_MAX_POINTS || '25', 10)));
 const LOCAL_HEATMAP_RESULT_LIMIT = Math.max(3, Math.min(20, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_RESULT_LIMIT || '20', 10)));
 const LOCAL_HEATMAP_BIAS_RADIUS_METERS = Math.max(500, Math.min(5000, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_BIAS_RADIUS_METERS || '1500', 10)));
-const LOCAL_HEATMAP_ALGORITHM_VERSION = process.env.COMPETITION_LOCAL_HEATMAP_ALGORITHM_VERSION || 'local-relevance-bias-v2';
+const LOCAL_HEATMAP_ALGORITHM_VERSION = process.env.COMPETITION_LOCAL_HEATMAP_ALGORITHM_VERSION || 'local-relevance-bias-v3';
 const LOCAL_HEATMAP_REFRESH_JOB_TYPE = 'marketing_competition_heatmap_refresh';
 const LOCAL_HEATMAP_TERM_MAX_LENGTH = Math.max(40, Math.min(240, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_TERM_MAX_LENGTH || '160', 10)));
 const LOCAL_HEATMAP_NEW_CACHE_ROWS_PER_HOUR = Math.max(1, Math.min(50, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_NEW_CACHE_ROWS_PER_HOUR || '12', 10)));
@@ -63,6 +63,10 @@ const LOCAL_HEATMAP_MAX_CACHE_ROWS_PER_CLINIC = Math.max(12, Math.min(500, parse
 const LOCAL_HEATMAP_MIN_VALID_POINTS = Math.max(1, Math.min(LOCAL_HEATMAP_MAX_POINTS, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_MIN_VALID_POINTS || '20', 10)));
 const LOCAL_HEATMAP_FAILURE_FRESH_TTL_MS = 15 * 60 * 1000;
 const LOCAL_HEATMAP_FAILURE_EXPIRES_TTL_MS = 60 * 60 * 1000;
+const COMPETITION_SUGGESTION_RADIUS_METERS = Math.max(
+  1000,
+  Math.min(50000, parseInt(process.env.COMPETITION_SUGGESTION_RADIUS_METERS || '25000', 10))
+);
 const LOCAL_HEATMAP_EFFECTIVE_GRID_SIZE = LOCAL_HEATMAP_GRID_SIZE % 2 === 0
   ? LOCAL_HEATMAP_GRID_SIZE - 1
   : LOCAL_HEATMAP_GRID_SIZE;
@@ -1965,6 +1969,7 @@ async function collectLocalHeatmapPoints({
   radiusKm,
   query,
   ownPlaceId,
+  knownCompetitors = [],
   tracker,
   search = searchGooglePlacesForHeatmap,
   measuredAt = () => new Date().toISOString()
@@ -1975,6 +1980,16 @@ async function collectLocalHeatmapPoints({
     error.code = 'LOCAL_PROFILE_PLACE_ID_REQUIRED';
     throw error;
   }
+  const competitorsByPlaceId = new Map((Array.isArray(knownCompetitors) ? knownCompetitors : [])
+    .map((competitor) => {
+      const placeId = normalizePlaceId(competitor?.google_place_id);
+      return placeId ? [placeId, {
+        id: toInt(competitor?.id),
+        name: cleanString(competitor?.name),
+      }] : null;
+    })
+    .filter(Boolean));
+
   return mapWithConcurrency(
     rankingHeatmapOffsets(radiusKm),
     COMPETITION_GOOGLE_CONCURRENCY,
@@ -1991,12 +2006,27 @@ async function collectLocalHeatmapPoints({
           .filter(Boolean);
         const ownIndex = normalized.findIndex((placeId) => placeId === normalizedOwnPlaceId);
         const myPosition = ownIndex >= 0 ? ownIndex + 1 : null;
+        // Conservamos solo coincidencias contra competidores que el usuario ya
+        // monitoriza. Los IDs proceden de la misma consulta IDs Only, de modo
+        // que no inventamos identidades ni necesitamos pedir nombres a Google.
+        const rankedCompetitors = normalized
+          .map((placeId, index) => {
+            const competitor = competitorsByPlaceId.get(placeId);
+            if (!competitor?.id || !competitor?.name) return null;
+            return {
+              competitor_id: competitor.id,
+              name: competitor.name,
+              position: index + 1,
+            };
+          })
+          .filter(Boolean);
         return {
           latitude: point.latitude,
           longitude: point.longitude,
           x_km: offset.xKm,
           y_km: offset.yKm,
           my_position: myPosition,
+          ranked_competitors: rankedCompetitors,
           score: heatmapScore(myPosition),
           measured_at: measuredAt()
         };
@@ -2022,6 +2052,7 @@ async function generateLocalRankingHeatmapSnapshot({
   selectedTerm,
   heatmapQuery,
   radiusKm,
+  knownCompetitors = [],
   dependencies = {},
 }) {
   const tracker = {
@@ -2068,6 +2099,7 @@ async function generateLocalRankingHeatmapSnapshot({
     radiusKm,
     query: heatmapQuery,
     ownPlaceId,
+    knownCompetitors,
     tracker
   });
   const validPoints = points.filter((point) => !point.error).length;
@@ -2302,6 +2334,11 @@ async function executeLocalRankingHeatmapRefresh(payload = {}) {
     return { status: 'failed', retryable: false, error_message: 'La clínica del mapa local ya no está disponible' };
   }
   const terms = rankingTermsForClinic(clinic);
+  const knownCompetitors = await MarketingCompetitor.findAll({
+    where: buildCompetitorWhere(scope),
+    attributes: ['id', 'name', 'google_place_id'],
+    raw: true,
+  });
   const heatmapQuery = heatmapSearchTermForClinic(selectedTerm, clinic) || selectedTerm;
   const normalizedZoomKm = clampHeatmapZoom(payload.zoomKm);
   const identity = buildHeatmapCacheIdentity({
@@ -2340,6 +2377,7 @@ async function executeLocalRankingHeatmapRefresh(payload = {}) {
       selectedTerm,
       heatmapQuery,
       radiusKm: normalizedZoomKm,
+      knownCompetitors,
     })
   ));
   return {
@@ -2408,11 +2446,59 @@ async function searchGooglePlaces({
   });
 }
 
-async function searchCompetitionSuggestions(query, limit = DEFAULT_LIMIT) {
-  return searchGooglePlaces({
+function localRestrictionRectangle(center, radiusMeters) {
+  const point = strictGeoPoint(center?.latitude, center?.longitude);
+  const radius = Math.max(1, Number(radiusMeters) || 1);
+  if (!point) return null;
+  const latitudeDelta = radius / 111320;
+  const longitudeScale = Math.max(0.01, Math.abs(Math.cos(point.latitude * Math.PI / 180)));
+  const longitudeDelta = radius / (111320 * longitudeScale);
+  return {
+    rectangle: {
+      low: {
+        latitude: Math.max(-90, point.latitude - latitudeDelta),
+        longitude: Math.max(-180, point.longitude - longitudeDelta),
+      },
+      high: {
+        latitude: Math.min(90, point.latitude + latitudeDelta),
+        longitude: Math.min(180, point.longitude + longitudeDelta),
+      },
+    },
+  };
+}
+
+function distanceMetersBetween(left, right) {
+  const a = strictGeoPoint(left?.latitude, left?.longitude);
+  const b = strictGeoPoint(right?.latitude, right?.longitude);
+  if (!a || !b) return null;
+  const radians = (value) => value * Math.PI / 180;
+  const latitudeDelta = radians(b.latitude - a.latitude);
+  const longitudeDelta = radians(b.longitude - a.longitude);
+  const sinLatitude = Math.sin(latitudeDelta / 2);
+  const sinLongitude = Math.sin(longitudeDelta / 2);
+  const haversine = (sinLatitude * sinLatitude)
+    + Math.cos(radians(a.latitude)) * Math.cos(radians(b.latitude)) * (sinLongitude * sinLongitude);
+  return 2 * 6371000 * Math.asin(Math.min(1, Math.sqrt(haversine)));
+}
+
+async function searchCompetitionSuggestions(query, limit = DEFAULT_LIMIT, center = null) {
+  const point = strictGeoPoint(center?.latitude, center?.longitude);
+  const places = await searchGooglePlaces({
     query,
     maxResultCount: limit,
+    // El texto por si solo puede devolver marcas con mucha autoridad a cientos
+    // de kilometros. Competencia es una lectura local: cuando la ficha aporta
+    // coordenadas, Google debe limitar las sugerencias al entorno de la sede.
+    // Text Search admite restriction estricta como viewport rectangular. El
+    // filtro Haversine posterior recorta las esquinas del bounding box para
+    // que ninguna sugerencia quede realmente a mas del radio declarado.
+    locationRestriction: localRestrictionRectangle(point, COMPETITION_SUGGESTION_RADIUS_METERS),
     fieldMask: COMPETITION_SUGGESTION_FIELD_MASK
+  });
+  if (!point) return places;
+  return places.filter((place) => {
+    const distance = distanceMetersBetween(point, place?.location);
+    return distance !== null && distance <= COMPETITION_SUGGESTION_RADIUS_METERS;
   });
 }
 
@@ -4037,7 +4123,10 @@ async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT }
   const ownPlaceIds = await resolveOwnBusinessPlaceIds(scope);
 
   try {
-    const places = await searchCompetitionSuggestions(textQuery, normalizedLimit);
+    const places = await searchCompetitionSuggestions(textQuery, normalizedLimit, {
+      latitude: clinic?.business_latitude,
+      longitude: clinic?.business_longitude,
+    });
     const suggestions = places.map((place, providerIndex) => {
       const normalized = normalizePlace(place);
       const relevance = competitorRelevanceForClinic({
@@ -4543,6 +4632,8 @@ module.exports = {
     rankingHeatmapOffsets,
     searchCompetitionSuggestions,
     searchGooglePlaces,
+    localRestrictionRectangle,
+    distanceMetersBetween,
     resolveOwnClinicHeatmapProfile,
     resolveMetaPageFromAdsArchive,
     summarizeCompetitorRefreshOutcome,

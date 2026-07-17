@@ -17,6 +17,17 @@ function clean(value) {
   return normalized || null;
 }
 
+function groupConfigCoversClinic(configRecord, clinicId) {
+  const normalizedClinicId = positiveInt(clinicId);
+  if (!normalizedClinicId) return false;
+  const locations = Array.isArray(configRecord?.config?.locations)
+    ? configRecord.config.locations
+    : [];
+  return locations.some((location) => (
+    positiveInt(location?.id ?? location?.clinic_id) === normalizedClinicId
+  ));
+}
+
 async function resolveLeadIntakeConfig({ lead, clinicId, dependencies = {} }) {
   const IntakeConfig = dependencies.IntakeConfig || db.IntakeConfig;
   const Clinica = dependencies.Clinica || db.Clinica;
@@ -32,19 +43,28 @@ async function resolveLeadIntakeConfig({ lead, clinicId, dependencies = {} }) {
     groupId = positiveInt(clinic?.grupoClinicaId);
   }
 
-  let config = null;
+  let groupConfig = null;
   if (groupId) {
-    config = await IntakeConfig.findOne({
+    groupConfig = await IntakeConfig.findOne({
       where: { group_id: groupId, assignment_scope: 'group' },
       raw: true,
     });
   }
-  if (!config && normalizedClinicId) {
-    config = await IntakeConfig.findOne({
-      where: { clinic_id: normalizedClinicId },
+  let clinicConfig = null;
+  if (normalizedClinicId) {
+    clinicConfig = await IntakeConfig.findOne({
+      where: { clinic_id: normalizedClinicId, assignment_scope: 'clinic' },
       raw: true,
     });
   }
+
+  // Group web measurement is shared only with the clinics explicitly listed
+  // in config.locations. Falling back to the group merely because the clinic
+  // belongs to it can route a French/independent clinic's offline milestone to
+  // another advertiser account.
+  const config = groupConfigCoversClinic(groupConfig, normalizedClinicId)
+    ? groupConfig
+    : clinicConfig;
 
   return { config, clinicId: normalizedClinicId, groupId };
 }
@@ -127,6 +147,7 @@ async function maybeUploadLeadLifecycleConversion({
 
 module.exports = {
   buildLifecycleConversionPayload,
+  groupConfigCoversClinic,
   maybeUploadLeadLifecycleConversion,
   resolveLeadIntakeConfig,
 };

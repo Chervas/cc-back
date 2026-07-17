@@ -57,6 +57,74 @@ function testMetricTotalsAcrossLocations() {
   );
 }
 
+function testProvisionalEmptyTailIsNotPresentedAsARealDrop() {
+  const today = new Date().toISOString().slice(0, 10);
+  const rawTypes = [
+    'BUSINESS_IMPRESSIONS_DESKTOP_MAPS',
+    'BUSINESS_IMPRESSIONS_DESKTOP_SEARCH',
+    'BUSINESS_IMPRESSIONS_MOBILE_MAPS',
+    'BUSINESS_IMPRESSIONS_MOBILE_SEARCH',
+    'BUSINESS_DIRECTION_REQUESTS',
+    'CALL_CLICKS',
+    'WEBSITE_CLICKS',
+  ];
+  const provisional = rawTypes.map((metric_type, index) => ({
+    id: 100 + index,
+    business_location_id: 10,
+    date: today,
+    metric_type,
+    metric_subtype: '',
+    value: 0,
+  }));
+  assert.deepEqual(
+    collapseMetricRows(provisional),
+    [],
+    'a complete but empty provider tail is pending, not a measured zero day'
+  );
+
+  provisional[0].value = 3;
+  assert.equal(
+    collapseMetricRows(provisional).length,
+    provisional.length,
+    'a recent day with any measured activity must remain visible'
+  );
+}
+
+function testPersistedLegacyNullCoercionDoesNotReappearAfterTailWindow() {
+  const legacyTypes = [
+    'BUSINESS_IMPRESSIONS_DESKTOP_MAPS',
+    'BUSINESS_IMPRESSIONS_DESKTOP_SEARCH',
+    'BUSINESS_IMPRESSIONS_MOBILE_MAPS',
+    'BUSINESS_IMPRESSIONS_MOBILE_SEARCH',
+    'BUSINESS_DIRECTION_REQUESTS',
+    'CALL_CLICKS',
+    'WEBSITE_CLICKS',
+    'BUSINESS_BOOKINGS',
+    'BUSINESS_CONVERSATIONS',
+  ];
+  const rows = legacyTypes.map((metric_type, index) => ({
+    id: 200 + index,
+    business_location_id: 10,
+    date: '2026-07-14',
+    metric_type,
+    metric_subtype: '',
+    value: 0,
+    created_at: '2026-07-15T03:10:00.000Z',
+  }));
+  assert.deepEqual(
+    collapseMetricRows(rows),
+    [],
+    'the bounded null-coercion cohort must not reappear when it is older than the provisional tail'
+  );
+
+  for (const row of rows) row.created_at = '2026-07-18T03:10:00.000Z';
+  assert.equal(
+    collapseMetricRows(rows).length,
+    rows.length,
+    'an explicit historical zero outside the faulty write window remains valid'
+  );
+}
+
 function testContentNormalization() {
   const service = normalizeServiceItem({
     freeFormServiceItem: {
@@ -301,6 +369,8 @@ async function testPhotoMutationIncludesEverySharedConsumer() {
 async function run() {
   testMetricDeduplicationAndTotals();
   testMetricTotalsAcrossLocations();
+  testProvisionalEmptyTailIsNotPresentedAsARealDrop();
+  testPersistedLegacyNullCoercionDoesNotReappearAfterTailWindow();
   testContentNormalization();
   testVerificationStateUsesProviderSignalWithoutGuessing();
   testRatingTargets();

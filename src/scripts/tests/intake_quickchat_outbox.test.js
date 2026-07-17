@@ -746,7 +746,7 @@ async function testPostCommitFastPathReadsSafeResult() {
 }
 
 function testRegistrationInventoryAndNoProviderPath() {
-  assert.equal(Object.keys(jobExecutor.JOB_HANDLERS).length, 47);
+  assert.equal(Object.keys(jobExecutor.JOB_HANDLERS).length, 49);
   assert.equal(
     typeof jobExecutor.JOB_HANDLERS[outboxService.INTAKE_QUICKCHAT_SUMMARY_JOB_TYPE],
     'function',
