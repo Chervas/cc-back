@@ -683,13 +683,14 @@ function testStrictGeoPointRejectsMissingAndZeroAnchor() {
   assert.match(__testing.LOCAL_HEATMAP_ALGORITHM_VERSION, /v2$/);
 }
 
-function testCompliancePurgeRemovesProviderIdentifiers() {
+function testCancelledCompliancePurgeCannotRemoveProviderContent() {
   const source = fs.readFileSync(
     path.resolve(__dirname, '../../../migrations/20260715152000-purge-google-places-competition-content.js'),
     'utf8'
   );
-  assert.match(source, /google_place_id\s*=\s*NULL/, 'the compliance purge must remove stored Places identifiers');
-  assert.doesNotMatch(source, /RIGHT\(google_place_id/, 'an anonymized name must not retain a Places identifier fragment');
+  assert.match(source, /CANCELLED MIGRATION/, 'the obsolete destructive migration must remain explicitly cancelled');
+  assert.match(source, /async up\(\) \{\}/, 'a normal migration run must safely record the cancelled migration');
+  assert.doesNotMatch(source, /DELETE\s+snapshots|bulkDelete|google_place_id\s*=\s*NULL/, 'the cancelled migration must contain no destructive operation');
 }
 
 async function run() {
@@ -713,7 +714,7 @@ async function run() {
   await testMissingBusinessCoordinatesUseCheapPlaceDetailsAnchor();
   await testIdOnlyHeatmapResultFindsOwnPlace();
   testStrictGeoPointRejectsMissingAndZeroAnchor();
-  testCompliancePurgeRemovesProviderIdentifiers();
+  testCancelledCompliancePurgeCannotRemoveProviderContent();
   console.log('marketing_competition_heatmap_cache.test.js OK');
 }
 
