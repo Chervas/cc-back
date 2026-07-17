@@ -105,11 +105,24 @@ async function main() {
   console.log('marketing_review_automation_status.test.js: OK');
 }
 
-main()
-  .catch((error) => {
+(async () => {
+  let exitCode = 0;
+  try {
+    await main();
+  } catch (error) {
     console.error(error);
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await db.sequelize.close().catch(() => undefined);
-  });
+    exitCode = 1;
+  }
+
+  try {
+    await db.sequelize.close();
+  } catch (error) {
+    console.error('No se pudo cerrar Sequelize tras la prueba:', error);
+    exitCode = 1;
+  }
+
+  // Importar marketing.routes carga servicios con timers propios. La prueba
+  // ya ha esperado todas sus aserciones y el cierre de DB; salir aquí evita
+  // que esos handles mantengan vivo el proceso y conserva el código de fallo.
+  process.exit(exitCode);
+})();
