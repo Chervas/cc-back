@@ -109,9 +109,57 @@ async function testSuggestionSearchUsesLightweightSingleRequest() {
   }
 }
 
+async function testSuggestionCenterFallsBackToOwnPlaceDetails() {
+  const originalGet = axios.get;
+  const getCalls = [];
+  axios.get = async (url, config) => {
+    getCalls.push({ url, config });
+    return {
+      data: {
+        id: 'own-hospitalet-place',
+        displayName: { text: 'Propdental Hospitalet' },
+        location: { latitude: 41.3661, longitude: 2.1162 },
+      },
+    };
+  };
+
+  try {
+    const center = await __testing.resolveCompetitionSuggestionCenter({
+      nombre_clinica: 'Propdental Hospitalet',
+      business_place_id: 'own-hospitalet-place',
+      business_latitude: null,
+      business_longitude: null,
+    });
+
+    assert.deepEqual(center, { latitude: 41.3661, longitude: 2.1162 });
+    assert.equal(getCalls.length, 1);
+    assert.match(getCalls[0].url, /\/places\/own-hospitalet-place$/);
+  } finally {
+    axios.get = originalGet;
+  }
+}
+
+function testAutomaticQueryUsesBusinessProfileLocality() {
+  assert.equal(
+    __testing.inferCompetitionQuery({
+      configuracion: { disciplinas: ['dental'] },
+      ciudad: '',
+      provincia: '',
+      codigo_postal: '',
+      direccion: '',
+      business_locality: "L'Hospitalet de Llobregat",
+      business_administrative_area: 'Catalunya',
+      business_postal_code: '08901',
+    }),
+    "clínica dental en L'Hospitalet de Llobregat, Catalunya, 08901",
+  );
+}
+
 async function run() {
   try {
     await testSuggestionSearchUsesLightweightSingleRequest();
+    await testSuggestionCenterFallsBackToOwnPlaceDetails();
+    testAutomaticQueryUsesBusinessProfileLocality();
     console.log('marketing_competition_suggestions_efficiency.test.js OK');
   } finally {
     await db.sequelize.close();
