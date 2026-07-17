@@ -4,12 +4,14 @@
 
 `GET /api/marketing/reports/competition/ai-visibility?clinicId=<id>` es el
 punto de entrada de Informes. El usuario no redacta prompts ni tiene que pulsar
-un botón. En cada lectura, el backend construye y garantiza de forma
-idempotente estas tres consultas locales:
+un botón. Al entrar en Informes, ese GET es el **único disparador automático**:
+no hay cron diario ni semanal de proveedores. El backend construye y garantiza
+de forma idempotente estas cuatro consultas locales:
 
 1. `¿Cuál es la mejor <categoría> en <localidad>?`
-2. `¿Qué <categoría> recomiendan en <localidad>?`
-3. `¿Qué <categoría> tiene buenas reseñas en <localidad>?`
+2. `¿Cuál es el mejor dentista en <localidad>?`
+3. `¿Qué <categoría> recomiendan en <localidad>?`
+4. `¿Qué <categoría> tiene buenas reseñas en <localidad>?`
 
 Categoría, localidad y provincia proceden de la clínica y, si esos campos
 están vacíos, de `ClinicBusinessLocations.raw_payload.storefrontAddress`. Así
@@ -21,7 +23,9 @@ La respuesta incluye:
 - `status` y `message`: estado global utilizable por la UI;
 - `providers.*`: `configured`, `status`, `message`, modelo y almacenamiento;
 - `automatic`: si se encolaron, reutilizaron o aplazaron consultas;
-- `typical_queries`: clave, etiqueta y texto de las tres consultas canónicas;
+- `typical_queries`: clave, etiqueta y texto de las cuatro consultas canónicas;
+- `refresh_interval_days=7`: próxima antigüedad mínima para volver a consultar
+  proveedores;
 - `runs`: resultados recientes; cada uno expone `query_key` y
   `query_source=system|legacy`.
 
@@ -30,28 +34,57 @@ Si faltan ambos secretos, el GET responde `200`,
 `automatic.status=waiting_configuration`. No crea filas ni jobs y nunca debe
 convertirse en el mensaje genérico «No se pudo cargar». Ese mensaje queda para
 un fallo HTTP, de autorización, clínica o almacenamiento real. Si hay al menos
-un proveedor configurado, el GET encola automáticamente lo que falte.
+un proveedor configurado, el GET de entrada encola solo las consultas que no
+tengan una ejecución de los últimos siete días. Abrir otra pestaña, recargar o
+volver durante esa semana devuelve los mismos textos, fuentes y citas.
+
+`getOverview()` tiene `autoStart=false` por defecto. El controlador del GET de
+Informes es el único que lo invoca explícitamente con `autoStart=true`. El
+polling de `GET /:runId`, las tareas de limpieza y las lecturas técnicas no
+crean ejecuciones. `marketing_ai_visibility_run` está catalogado como job de
+integración dirigida porque ejecuta una solicitud ya creada, no como tarea
+periódica; no aparece en `SCHEDULED_JOB_DEFINITIONS`.
 
 `POST` se conserva durante la transición del frontend, pero solo selecciona
 una consulta canónica mediante `query_key`. Un `query` legacy únicamente se
-respeta si coincide exactamente con una de las tres consultas generadas; otro
+respeta si coincide exactamente con una de las cuatro consultas generadas; otro
 texto cae en `best_local`. No existe una ruta backend de prompt libre.
 
 ## Idempotencia, coste y ejecución
 
-- Una consulta terminal se reutiliza durante 24 horas.
+- Una consulta terminal se reutiliza durante siete días desde su creación.
+  Esto incluye `completed`, `completed_with_errors` y `failed`: corregir saldo,
+  credenciales o configuración no provoca una llamada anticipada; la siguiente
+  visita a Informes la renovará cuando se cumpla la semana.
 - Una consulta `queued|running` se reutiliza durante 15 minutos para que varias
-  pestañas no creen trabajo duplicado.
+  pestañas no creen trabajo duplicado. Si sigue activa después, el rate limit
+  semanal de la fila existente continúa impidiendo otra ejecución.
 - La cola usa `enqueueUniqueJobRequest` con scope
   `ai_visibility:<clinicId>:<queryHash>` como segunda barrera distribuida.
-- El máximo predeterminado es de tres consultas distintas por clínica cada 24
-  horas: exactamente el catálogo típico. Una consulta parcial puede repetir
-  una vez tras 60 minutos; el máximo predeterminado son dos intentos por
-  consulta/24 h. Esto permite recuperarse al corregir saldo o credenciales sin
-  abrir un bucle de llamadas.
+- El máximo predeterminado es de cuatro consultas distintas por clínica en una
+  ventana móvil de siete días: exactamente el catálogo canónico. El máximo es
+  una ejecución por `clinicId + queryHash` en esa misma ventana.
 - El GET solo crea `JobRequest`; las llamadas externas se ejecutan en
   `marketing_ai_visibility_run` fuera del request Express.
-- Los resultados vencen según la retención configurada, 30 días por defecto.
+- Los resultados, fuentes y citas se sirven desde `provider_results` sin volver
+  a llamar al proveedor durante siete días. Vencen físicamente según la
+  retención configurada, 30 días por defecto y nunca inferior al intervalo de
+  actualización.
+
+Variables de coste:
+
+- `AI_VISIBILITY_REFRESH_INTERVAL_DAYS=7`: admite 7-30, nunca menos de una
+  semana;
+- `AI_VISIBILITY_MAX_RUNS_PER_CLINIC_7D=4`: guardarraíl de consultas distintas;
+- `AI_VISIBILITY_RETENTION_DAYS=30`: conservación local, mínimo igual al
+  intervalo de refresco;
+- `AI_VISIBILITY_PROVIDER_TIMEOUT_MS=90000`: timeout independiente por
+  proveedor.
+
+Las antiguas `AI_VISIBILITY_CACHE_HOURS`,
+`AI_VISIBILITY_MAX_RUNS_PER_CLINIC_24H` y
+`AI_VISIBILITY_MAX_ATTEMPTS_PER_QUERY_24H` ya no gobiernan esta funcionalidad:
+permitirían una cadencia diaria incompatible con el contrato semanal.
 
 ## Proveedores
 
@@ -91,6 +124,8 @@ node -c src/controllers/marketingAiVisibility.controller.js
 node src/scripts/tests/marketing_ai_visibility.test.js
 ```
 
-La prueba cubre parsers y citas, `store=false`, herramientas de búsqueda,
-consulta local canónica, rechazo de texto libre, GET sin secretos y encolado
-automático de las tres consultas con deduplicación.
+La prueba cubre parsers y citas, `store=false`, herramientas de búsqueda, las
+cuatro consultas canónicas, rechazo de texto libre, GET sin secretos, default
+sin autoarranque, encolado desde Informes, reutilización de texto/fuentes/citas
+durante seis días, reutilización de parciales y fallos, y bloqueo de un segundo
+intento antes de siete días.
