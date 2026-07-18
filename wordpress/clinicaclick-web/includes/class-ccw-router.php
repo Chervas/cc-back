@@ -89,6 +89,15 @@ final class CCW_Router
 
     public function measurement_tag()
     {
+        // During migration the legacy measurement plugin remains the single
+        // owner of global tracking. The new publisher can still serve and
+        // measure its signed /cita/ artifact, which embeds its own loader,
+        // without bootstrapping a second loader on the existing WordPress
+        // pages. Deactivating the legacy plugin hands ownership to this
+        // plugin automatically on the next request.
+        if ($this->legacy_measurement_plugin_active()) {
+            return;
+        }
         $runtime = CCW_Config::runtime_configuration();
         $measurement = is_array($runtime['measurement'] ?? null) ? $runtime['measurement'] : array();
         if (empty($measurement['enabled']) || !CCW_Config::is_configured()) {
@@ -124,6 +133,22 @@ final class CCW_Router
             echo $this->consent_bootstrap($provider) . "\n";
         }
         echo '<script ' . implode(' ', $rendered) . ' async></script>' . "\n";
+    }
+
+    public function legacy_measurement_plugin_active()
+    {
+        $active = (array) get_option('active_plugins', array());
+        if (function_exists('get_site_option')) {
+            $network = (array) get_site_option('active_sitewide_plugins', array());
+            $active = array_merge($active, array_keys($network));
+        }
+        foreach ($active as $plugin) {
+            $normalized = strtolower(str_replace('\\', '/', trim((string) $plugin)));
+            if ($normalized === 'clinicaclick/clinicaclick.php') {
+                return true;
+            }
+        }
+        return false;
     }
 
     private function consent_bootstrap($provider)
