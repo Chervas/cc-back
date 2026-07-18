@@ -154,7 +154,16 @@ function dependencies(state, overrides = {}) {
     restoreHostedRoutePointer: async () => ({ restored: true, reason: 'previous_artifact_restored' }),
     verifyHostedPointer: async () => true,
     verifyPublicArtifact: async () => true,
-    storeArtifactBundle: async () => ({ manifest_url: 'https://artifacts.example/manifest.json' }),
+    storeArtifactBundle: async ({ artifact }) => ({
+      provider: 's3_immutable',
+      artifact_hash: artifact.artifact_hash,
+      manifest_url: 'https://artifacts.example/manifest.json',
+      signature_url: 'https://artifacts.example/manifest.sig.json',
+      files: Object.fromEntries(Object.keys(artifact.files || {}).map((path) => [
+        path,
+        `https://artifacts.example/files/${encodeURIComponent(path)}`,
+      ])),
+    }),
     ...overrides,
   };
 }
@@ -486,6 +495,115 @@ test('un retry recupera idempotentemente un deployment running cuyo artefacto qu
   assert.equal(state.deployment.status, 'verified');
   assert.equal(state.publication.status, 'published');
   assert.equal(compileCalls, 1, 'el segundo intento reutiliza el artefacto ya enlazado');
+});
+
+test('un retry con runtime rotado sustituye el storage del artefacto anterior y luego lo reutiliza', async () => {
+  const state = fixture('wordpress');
+  const previousHash = 'd'.repeat(64);
+  const nextHash = 'e'.repeat(64);
+  const nextArtifact = new Row({
+    ...state.artifact.get(),
+    id: 'd297cacf-29ea-45ab-b4b8-e345463a060b',
+    artifactHash: nextHash,
+    manifest: {
+      ...state.artifact.manifest,
+      artifact_hash: nextHash,
+      artifact_input_hash: 'f'.repeat(64),
+    },
+  });
+  state.artifact.artifactHash = previousHash;
+  state.artifact.manifest = {
+    ...state.artifact.manifest,
+    artifact_hash: previousHash,
+  };
+  state.artifact.runtimeConfigHash = '0'.repeat(64);
+  state.deployment.status = 'running';
+  state.deployment.artifactId = state.artifact.id;
+  state.deployment.storage = {
+    provider: 's3_immutable',
+    artifact_hash: previousHash,
+    manifest_url: `https://artifacts.example/${previousHash}/manifest.json`,
+    signature_url: `https://artifacts.example/${previousHash}/manifest.sig.json`,
+    files: {},
+  };
+  state.publication.status = 'publishing';
+  state.models.WebArtifact.findByPk = async (id) => {
+    if (String(id) === nextArtifact.id) return nextArtifact;
+    if (String(id) === state.artifact.id) return state.artifact;
+    return null;
+  };
+  let compileCalls = 0;
+  let storeCalls = 0;
+  const deps = dependencies(state, {
+    compileRevision: async () => {
+      compileCalls += 1;
+      return {
+        id: nextArtifact.id,
+        artifact_hash: nextArtifact.artifactHash,
+        manifest: nextArtifact.manifest,
+        files: nextArtifact.files,
+      };
+    },
+    storeArtifactBundle: async ({ artifact }) => {
+      storeCalls += 1;
+      return {
+        provider: 's3_immutable',
+        artifact_hash: artifact.artifact_hash,
+        manifest_url: `https://artifacts.example/${artifact.artifact_hash}/manifest.json`,
+        signature_url: `https://artifacts.example/${artifact.artifact_hash}/manifest.sig.json`,
+        files: {},
+      };
+    },
+  });
+
+  const waiting = await runPublicationDeploymentJob({
+    publication_id: state.publication.id,
+    deployment_id: state.deployment.id,
+  }, { id: 77, attempts: 3, max_attempts: 180 }, deps);
+  assert.equal(waiting.status, 'waiting');
+  assert.equal(waiting.result.reason, 'wordpress_waiting_for_pull');
+  assert.equal(state.deployment.artifactId, nextArtifact.id);
+  assert.equal(state.deployment.storage.artifact_hash, nextHash);
+  assert.match(state.deployment.storage.manifest_url, new RegExp(nextHash));
+  assert.equal(compileCalls, 1);
+  assert.equal(storeCalls, 1, 'el descriptor stale se sustituye una sola vez');
+
+  const repeated = await runPublicationDeploymentJob({
+    publication_id: state.publication.id,
+    deployment_id: state.deployment.id,
+  }, { id: 77, attempts: 4, max_attempts: 180 }, deps);
+  assert.equal(repeated.status, 'waiting');
+  assert.equal(compileCalls, 1, 'el runtime ya vigente no vuelve a compilar');
+  assert.equal(storeCalls, 1, 'el storage del bundle vigente se reutiliza idempotentemente');
+});
+
+test('no persiste un descriptor de storage cuyo hash no corresponde al bundle compilado', async () => {
+  const state = fixture('wordpress');
+  const staleStorage = {
+    provider: 's3_immutable',
+    artifact_hash: 'd'.repeat(64),
+    manifest_url: 'https://artifacts.example/stale/manifest.json',
+    signature_url: 'https://artifacts.example/stale/manifest.sig.json',
+    files: {},
+  };
+  state.deployment.storage = staleStorage;
+  let storeCalls = 0;
+  const result = await runPublicationDeploymentJob({
+    publication_id: state.publication.id,
+    deployment_id: state.deployment.id,
+  }, { id: 77, attempts: 1, max_attempts: 180 }, dependencies(state, {
+    storeArtifactBundle: async () => {
+      storeCalls += 1;
+      return { ...staleStorage };
+    },
+  }));
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.retryable, true);
+  assert.equal(result.error.code, 'web_artifact_storage_contract_invalid');
+  assert.equal(storeCalls, 1);
+  assert.deepEqual(state.deployment.storage, staleStorage, 'el descriptor ajeno no alcanza la persistencia');
+  assert.equal(state.deployment.artifactId, null, 'tampoco enlaza el artefacto con storage inválido');
 });
 
 test('WordPress no confirma publicado si el permalink público no sirve el marcador esperado', async () => {
