@@ -3,7 +3,7 @@
  * Plugin Name: ClinicaClick Web Publisher
  * Plugin URI: https://clinicaclick.com/
  * Description: Medición de ClinicaClick y publicación segura de landings cacheadas.
- * Version: 2.0.0-alpha.4
+ * Version: 2.0.0-alpha.5
  * Requires at least: 5.8
  * Requires PHP: 7.4
  * Author: ClinicaClick
@@ -15,7 +15,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('CCW_VERSION', '2.0.0-alpha.4');
+define('CCW_VERSION', '2.0.0-alpha.5');
 define('CCW_PLUGIN_FILE', __FILE__);
 define('CCW_PLUGIN_DIR', plugin_dir_path(__FILE__));
 

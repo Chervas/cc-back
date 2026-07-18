@@ -40,7 +40,7 @@
     }
   },
   "headers": {
-    "content-security-policy": "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' https://media.clinicaclick.com; style-src 'self'; script-src 'sha256-EXAMPLE' https://crm.clinicaclick.com; connect-src 'self' https://crm.clinicaclick.com; font-src 'self'",
+    "content-security-policy": "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' https://media.clinicaclick.com https://crm.clinicaclick.com data:; style-src 'self' 'unsafe-inline'; script-src 'sha256-EXAMPLE' https://crm.clinicaclick.com; connect-src 'self' https://crm.clinicaclick.com; font-src 'self'",
     "cross-origin-opener-policy": "same-origin",
     "cross-origin-resource-policy": "same-site",
     "permissions-policy": "camera=(), microphone=(), geolocation=()",

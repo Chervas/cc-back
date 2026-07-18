@@ -138,7 +138,7 @@ function ccw_test_artifact($marker)
     $page_id = '33333333-3333-4333-8333-333333333333';
     $info_page_id = '33333333-3333-4333-8333-333333333334';
     $form_id = 'form-' . $marker;
-    $csp = "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; script-src 'sha256-example' https://api.example.test; connect-src 'self' https://api.example.test";
+    $csp = "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' https://media.clinicaclick.com https://api.example.test data:; style-src 'self' 'unsafe-inline'; script-src 'sha256-example' https://api.example.test; connect-src 'self' https://api.example.test";
     $loader = static function ($page) use ($project_id, $revision_id) {
         return '<script src="https://api.example.test/assets/loader.js" async data-api-url="https://api.example.test" data-event-bridge-url="/_clinicaclick/events" data-web-project-id="' . $project_id . '" data-web-revision-id="' . $revision_id . '" data-web-page-id="' . $page . '" data-clinic-id="56" data-consent-mode-enabled="true" data-consent-provider="external_cmp"></script>';
     };
@@ -884,6 +884,36 @@ $tests['artifact inspector accepts only the exact signed external loader and mat
             ), $runtime, $pointer['manifest']);
         });
         unlink($tmp);
+    }
+    foreach (array(
+        str_replace('style-src &apos;self&apos; &apos;unsafe-inline&apos;', 'style-src &apos;self&apos;', $html),
+        str_replace('https://api.example.test data:', 'data:', $html),
+    ) as $candidate) {
+        $tmp = tempnam(sys_get_temp_dir(), 'ccw-loader-csp-');
+        file_put_contents($tmp, $candidate);
+        ccw_test_throws('ccw_artifact_loader_csp_missing', static function () use ($tmp, $candidate, $runtime, $pointer) {
+            CCW_Manifest::inspect_file('index.html', $tmp, array(
+                'size_bytes' => strlen($candidate),
+                'sha256' => hash('sha256', $candidate),
+            ), $runtime, $pointer['manifest']);
+        });
+        unlink($tmp);
+    }
+};
+
+$tests['artifact CSP limits dynamic runtime allowances to styles and images'] = static function () {
+    $artifact = ccw_test_artifact('csp-sources');
+    $runtime = (new CCW_Cache())->pointer()['runtime_configuration'] ?? array();
+    $headers = $artifact['manifest']['headers'];
+    CCW_Manifest::safe_headers($headers, $runtime);
+    foreach (array(
+        str_replace("script-src 'sha256-example'", "script-src 'unsafe-inline' 'sha256-example'", $headers['content-security-policy']),
+        str_replace("connect-src 'self'", "connect-src data: 'self'", $headers['content-security-policy']),
+        str_replace("style-src 'self' 'unsafe-inline'", "style-src 'self' 'unsafe-inline' blob:", $headers['content-security-policy']),
+    ) as $unsafe) {
+        ccw_test_throws('ccw_artifact_security_headers_incomplete', static function () use ($headers, $runtime, $unsafe) {
+            CCW_Manifest::safe_headers(array_merge($headers, array('content-security-policy' => $unsafe)), $runtime);
+        });
     }
 };
 

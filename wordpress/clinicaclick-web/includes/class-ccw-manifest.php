@@ -360,11 +360,32 @@ final class CCW_Manifest
             throw new CCW_Error('ccw_artifact_security_headers_incomplete', 'El artefacto debe activar nosniff.');
         }
         $csp = (string) ($result['content-security-policy'] ?? '');
+        $measurement_enabled = self::runtime_measurement_enabled($runtime_configuration);
+        $source_policy_valid = true;
+        foreach (explode(';', $csp) as $raw_directive) {
+            $parts = preg_split('/\s+/', trim((string) $raw_directive));
+            $directive = strtolower((string) array_shift($parts));
+            if ($directive === '') {
+                continue;
+            }
+            foreach ($parts as $token) {
+                $token = strtolower((string) $token);
+                if ($token === "'unsafe-eval'" || $token === 'blob:') {
+                    $source_policy_valid = false;
+                }
+                if ($token === "'unsafe-inline'" && (!$measurement_enabled || $directive !== 'style-src')) {
+                    $source_policy_valid = false;
+                }
+                if ($token === 'data:' && (!$measurement_enabled || $directive !== 'img-src')) {
+                    $source_policy_valid = false;
+                }
+            }
+        }
         if (
             !preg_match('/(?:^|;)\s*default-src\s+\'none\'(?:\s*;|$)/i', $csp)
             || !preg_match('/(?:^|;)\s*base-uri\s+\'none\'(?:\s*;|$)/i', $csp)
             || !preg_match('/(?:^|;)\s*frame-ancestors\s+\'none\'(?:\s*;|$)/i', $csp)
-            || preg_match('/\'unsafe-(?:inline|eval)\'|\b(?:data|blob):/i', $csp)
+            || !$source_policy_valid
             || ($result['x-frame-options'] ?? '') !== 'DENY'
         ) {
             throw new CCW_Error('ccw_artifact_security_headers_incomplete', 'La política de seguridad del artefacto no es suficientemente estricta.');
@@ -739,6 +760,8 @@ final class CCW_Manifest
         $origin = CCW_Config::api_base();
         $script = $directives['script-src'] ?? array();
         $connect = $directives['connect-src'] ?? array();
+        $style = $directives['style-src'] ?? array();
+        $images = $directives['img-src'] ?? array();
         if (isset($directives['script-src-elem']) || isset($directives['script-src-attr'])) {
             throw new CCW_Error('ccw_artifact_loader_csp_external_forbidden', 'La política CSP no puede redefinir por separado la ejecución de scripts.');
         }
@@ -753,6 +776,26 @@ final class CCW_Manifest
         foreach ($connect as $token) {
             if ($token !== $origin && $token !== "'self'") {
                 throw new CCW_Error('ccw_artifact_loader_csp_external_forbidden', 'La política CSP permite conexiones externas no autorizadas.');
+            }
+        }
+        foreach (array("'self'", "'unsafe-inline'") as $required) {
+            if (!in_array($required, $style, true)) {
+                throw new CCW_Error('ccw_artifact_loader_csp_missing', 'La política CSP bloquearía los estilos del runtime.');
+            }
+        }
+        foreach ($style as $token) {
+            if ($token !== "'self'" && $token !== "'unsafe-inline'") {
+                throw new CCW_Error('ccw_artifact_loader_csp_external_forbidden', 'La política CSP permite estilos externos no autorizados.');
+            }
+        }
+        foreach (array("'self'", 'https://media.clinicaclick.com', $origin, 'data:') as $required) {
+            if (!in_array($required, $images, true)) {
+                throw new CCW_Error('ccw_artifact_loader_csp_missing', 'La política CSP bloquearía las imágenes del runtime.');
+            }
+        }
+        foreach ($images as $token) {
+            if (!in_array($token, array("'self'", 'https://media.clinicaclick.com', $origin, 'data:'), true)) {
+                throw new CCW_Error('ccw_artifact_loader_csp_external_forbidden', 'La política CSP permite imágenes externas no autorizadas.');
             }
         }
     }
