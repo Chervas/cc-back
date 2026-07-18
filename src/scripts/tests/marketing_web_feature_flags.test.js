@@ -8,6 +8,7 @@ const {
   enabledScopeKeys,
   publishingScopeKeys,
   webEditorEnabled,
+  webPublishingAvailability,
   webPublishingEnabled,
 } = require('../../lib/marketingWebFeatureFlags');
 
@@ -52,6 +53,14 @@ try {
   process.env.MARKETING_WEB_PUBLISHING_ENABLED = 'true';
   process.env.MARKETING_WEB_PUBLISHING_SCOPES = 'group:4';
   assert.deepEqual([...publishingScopeKeys()], ['group:4']);
+  assert.deepEqual(webPublishingAvailability({ type: 'group', id: 4 }), {
+    available: true,
+    reason: null,
+  });
+  assert.deepEqual(webPublishingAvailability({ type: 'clinic', id: 66 }), {
+    available: false,
+    reason: 'scope_not_enabled',
+  });
   assert.equal(assertWebPublishingEnabled({ type: 'group', id: 4 }), true);
   assert.throws(
     () => assertWebPublishingEnabled({ type: 'clinic', id: 66 }),

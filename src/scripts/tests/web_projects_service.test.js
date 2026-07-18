@@ -1,6 +1,8 @@
 'use strict';
 
 process.env.MARKETING_WEB_EDITOR_ENABLED = 'true';
+process.env.MARKETING_WEB_PUBLISHING_ENABLED = 'true';
+delete process.env.MARKETING_WEB_PUBLISHING_SCOPES;
 
 const assert = require('node:assert/strict');
 const {
@@ -9,6 +11,7 @@ const {
   collectExternalDocumentReferences,
   createBlankWebDocument,
   createProject,
+  getProject,
   applyWebProjectSiteDefaults,
   intakeConfigForWebScope,
   instantiateWebDocument,
@@ -226,10 +229,54 @@ async function testListContract() {
     models,
   });
   assert.deepEqual(result.scope, { type: 'clinic', id: 66 });
+  assert.deepEqual(result.capabilities, {
+    publishing_available: true,
+    publishing_unavailable_reason: null,
+  });
   assert.equal(result.items.length, 1);
+  assert.deepEqual(result.items[0].capabilities, result.capabilities);
   assert.equal(result.items[0].draft.lock_version, 2);
   assert.equal(result.items[0].page_count, 1);
   assert.deepEqual(result.pagination, { page: 1, limit: 12, total: 1, total_pages: 1 });
+}
+
+async function testProjectDetailExposesDisabledScopeCapability() {
+  const project = row({
+    id: '43be301b-5eb8-4b99-9c52-3ae6ad8b22b1',
+    scopeType: 'clinic',
+    clinicaId: 66,
+    grupoClinicaId: null,
+    name: 'Landing Hospitalet',
+    purpose: 'landing',
+    locale: 'es-ES',
+    status: 'draft',
+    version: 1,
+    pages: [],
+    draft: null,
+    campaignContext: null,
+    created_at: new Date('2026-07-17T11:00:00Z'),
+    updated_at: new Date('2026-07-17T12:00:00Z'),
+  });
+  const models = {
+    Clinica: { findByPk: async () => ({ id_clinica: 66 }) },
+    GrupoClinica: {},
+    WebProject: { findByPk: async () => project },
+    WebPage: {},
+    WebDraft: {},
+    WebRevision: { findOne: async () => null },
+  };
+  const previousScopes = process.env.MARKETING_WEB_PUBLISHING_SCOPES;
+  process.env.MARKETING_WEB_PUBLISHING_SCOPES = 'group:4';
+  try {
+    const detail = await getProject({ actorId: 1, projectId: project.id, models });
+    assert.deepEqual(detail.capabilities, {
+      publishing_available: false,
+      publishing_unavailable_reason: 'scope_not_enabled',
+    });
+  } finally {
+    if (previousScopes === undefined) delete process.env.MARKETING_WEB_PUBLISHING_SCOPES;
+    else process.env.MARKETING_WEB_PUBLISHING_SCOPES = previousScopes;
+  }
 }
 
 async function testTemplateCatalogUsesBoundedDatabasePagination() {
@@ -514,6 +561,7 @@ async function main() {
   testRevisionPermissionContract();
   testApprovalGateFailsClosedUntilExternalReferencesAreScoped();
   await testListContract();
+  await testProjectDetailExposesDisabledScopeCapability();
   await testTemplateCatalogUsesBoundedDatabasePagination();
   await testCreateContract();
   await testSaveConflict();
