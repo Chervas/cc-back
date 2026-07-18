@@ -7,8 +7,10 @@ const {
   authenticateInstallation,
   getAuthenticatedArtifactResource,
   getDesiredState,
+  matchReportedSite,
   measurementFromIntake,
   normalizeReport,
+  recordReport,
   safeImmutableStorage,
   tokenHash,
 } = require('../../services/webWordpressInstallations.service');
@@ -102,6 +104,117 @@ test('el contrato de reporte rechaza campos desconocidos o sensibles', () => {
     () => normalizeReport({ ...base, result: 'patient_email' }),
     (error) => error.code === 'web_installation_report_sensitive_data_forbidden'
   );
+});
+
+test('el primer handshake canonicaliza de forma auditada el alias www del mismo WordPress', async () => {
+  const token = `ccw_${crypto.randomBytes(32).toString('base64url')}`;
+  const installation = row({
+    id: '9f2b6f84-0180-4dfa-a993-3652a87ae23c',
+    scopeType: 'clinic',
+    clinicaId: 59,
+    grupoClinicaId: null,
+    siteUrl: 'https://propdental.example',
+    siteUrlHash: crypto.createHash('sha256').update('https://propdental.example').digest('hex'),
+    tokenHash: tokenHash(token),
+    tokenPrefix: token.slice(0, 12),
+    status: 'pending',
+    pluginVersion: null,
+    lastSeenAt: null,
+    version: 1,
+  });
+  const audits = [];
+  const models = {
+    WebWordpressInstallation: {
+      async findOne() { return installation; },
+      async findByPk() { return installation; },
+    },
+    WebPublication: {
+      async findAll() { return []; },
+      async count() { return 0; },
+    },
+    WebAuditEvent: { async create(value) { audits.push(value); } },
+  };
+  const sequelize = {
+    async transaction(callback) { return callback({ LOCK: { UPDATE: 'UPDATE' } }); },
+  };
+  const pluginVersion = '2.0.0-alpha.4';
+  const result = await recordReport({
+    installationId: installation.id,
+    headers: { authorization: `Bearer ${token}`, pluginVersion },
+    body: {
+      schema_version: 1,
+      event: 'heartbeat',
+      plugin_version: pluginVersion,
+      wordpress_version: '6.8.3',
+      php_version: '8.0.30',
+      site_hash: crypto.createHash('sha256').update('https://www.propdental.example/').digest('hex'),
+      status: 'empty',
+      result: 'activation_handshake',
+      duration_ms: 0,
+      reported_at: new Date().toISOString(),
+    },
+    requestId: 'req-first-www-handshake',
+    models,
+    sequelize,
+  });
+  assert.equal(result.accepted, true);
+  assert.equal(installation.status, 'connected');
+  assert.equal(installation.siteUrl, 'https://www.propdental.example');
+  assert.equal(
+    installation.siteUrlHash,
+    crypto.createHash('sha256').update(installation.siteUrl).digest('hex')
+  );
+  assert.equal(installation.version, 2);
+  assert.deepEqual(
+    audits.map((audit) => audit.eventType),
+    ['web.wordpress_installation.site_canonicalized', 'web.wordpress_installation.heartbeat']
+  );
+  assert.equal(audits[0].metadata.reason, 'first_handshake_www_alias');
+  assert.equal(Object.values(audits[0].metadata).includes(installation.siteUrl), false);
+});
+
+test('el alias www no relaja la identidad de una instalación conectada o rotada', async () => {
+  const reportHash = crypto.createHash('sha256').update('https://www.cliente.example/').digest('hex');
+  assert.equal(matchReportedSite('https://cliente.example', reportHash), null);
+  assert.equal(
+    matchReportedSite('https://cliente.example', reportHash, { includeWwwAlias: true }).site_url,
+    'https://www.cliente.example'
+  );
+
+  for (const state of [
+    { status: 'connected', pluginVersion: '2.0.0-alpha.4', lastSeenAt: new Date() },
+    { status: 'pending', pluginVersion: '2.0.0-alpha.4', lastSeenAt: new Date() },
+  ]) {
+    const token = `ccw_${crypto.randomBytes(32).toString('base64url')}`;
+    const installation = row({
+      id: crypto.randomUUID(),
+      scopeType: 'clinic',
+      clinicaId: 59,
+      grupoClinicaId: null,
+      siteUrl: 'https://cliente.example',
+      tokenHash: tokenHash(token),
+      ...state,
+    });
+    const models = {
+      WebWordpressInstallation: { async findOne() { return installation; } },
+    };
+    await assert.rejects(
+      () => recordReport({
+        installationId: installation.id,
+        headers: { authorization: `Bearer ${token}`, pluginVersion: '2.0.0-alpha.4' },
+        body: {
+          schema_version: 1,
+          event: 'heartbeat',
+          plugin_version: '2.0.0-alpha.4',
+          site_hash: reportHash,
+          status: 'empty',
+          reported_at: new Date().toISOString(),
+        },
+        models,
+      }),
+      (error) => error.code === 'web_installation_site_mismatch' && error.status === 409
+    );
+  }
 });
 
 test('el estado deseado es firmado, estable y avanza secuencia solo al cambiar', async () => {

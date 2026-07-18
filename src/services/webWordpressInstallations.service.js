@@ -45,6 +45,34 @@ function secureEqual(left, right) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+function canCanonicalizePendingSite(installation) {
+  const value = plain(installation);
+  return value?.status === 'pending' && !value.pluginVersion && !value.lastSeenAt;
+}
+
+function wordpressSiteCandidates(siteUrl, { includeWwwAlias = false } = {}) {
+  const canonical = normalizeSiteUrl(siteUrl).url;
+  const candidates = [canonical];
+  if (!includeWwwAlias) return candidates;
+  const host = new URL(canonical).hostname;
+  const aliasHost = host.startsWith('www.') ? host.slice(4) : `www.${host}`;
+  if (aliasHost && aliasHost !== host) {
+    candidates.push(normalizeSiteUrl(`https://${aliasHost}`).url);
+  }
+  return candidates;
+}
+
+function matchReportedSite(siteUrl, reportHash, { includeWwwAlias = false } = {}) {
+  const canonical = normalizeSiteUrl(siteUrl).url;
+  for (const candidate of wordpressSiteCandidates(canonical, { includeWwwAlias })) {
+    const hashes = [sha256(candidate), sha256(`${candidate}/`)];
+    if (hashes.some((expected) => secureEqual(expected, reportHash))) {
+      return { site_url: candidate, canonicalized: candidate !== canonical };
+    }
+  }
+  return null;
+}
+
 function scopeFromInstallation(row) {
   const value = plain(row);
   return value.scopeType === 'clinic'
@@ -841,8 +869,10 @@ async function recordReport({
       422
     );
   }
-  const expectedSiteHashes = [sha256(installation.siteUrl), sha256(`${installation.siteUrl}/`)];
-  if (!expectedSiteHashes.some((expected) => secureEqual(expected, report.site_hash))) {
+  const reportedSite = matchReportedSite(installation.siteUrl, report.site_hash, {
+    includeWwwAlias: canCanonicalizePendingSite(installation),
+  });
+  if (!reportedSite) {
     throw new WebPublicationServiceError(
       'web_installation_site_mismatch',
       'El reporte procede de un WordPress distinto al registrado.',
@@ -868,55 +898,113 @@ async function recordReport({
   const confirmsRetired = reportsRetired && desired?.status === 'retired';
   const confirmsDesired = Boolean(confirmsPublished || confirmsRetired);
   const scope = scopeFromInstallation(installation);
-  const updated = await sequelize.transaction(async (transaction) => {
-    const locked = await models.WebWordpressInstallation.findByPk(installation.id, {
-      transaction, lock: transaction.LOCK.UPDATE,
-    });
-    if (!locked || locked.status === 'revoked') {
-      throw new WebPublicationServiceError('web_installation_unauthorized', 'Credenciales no válidas.', 401);
-    }
-    const reportedState = {
-      event: report.event,
-      request_id: report.request_id,
-      status: report.status,
-      active_artifact_hash: report.active_artifact_hash,
-      desired_artifact_hash: report.desired_artifact_hash,
-      result: report.result,
-      error_code: report.error_code,
-      duration_ms: report.duration_ms,
-      reported_at: report.reported_at,
-      wordpress_version: report.wordpress_version,
-      php_version: report.php_version,
-    };
-    await locked.update({
-      status: locked.status === 'outdated' && !confirmsDesired ? 'outdated' : 'connected',
-      pluginVersion: report.plugin_version,
-      reportedState,
-      lastSeenAt: new Date(),
-      ...(confirmsPublished
-        ? { lastArtifactHash: report.active_artifact_hash }
-        : reportsRetired
-          ? { lastArtifactHash: null }
-          : {}),
-    }, { transaction });
-    await models.WebAuditEvent.create({
-      projectId: desired?.publication?.projectId || null,
-      ...scopeColumns(scope),
-      actorUserId: null,
-      eventType: `web.wordpress_installation.${report.event}`,
-      entityType: 'web_wordpress_installation',
-      entityId: locked.id,
-      requestId: requestId || report.request_id,
-      metadata: {
+  let updated;
+  try {
+    updated = await sequelize.transaction(async (transaction) => {
+      const locked = await models.WebWordpressInstallation.findByPk(installation.id, {
+        transaction, lock: transaction.LOCK.UPDATE,
+      });
+      if (!locked || locked.status === 'revoked') {
+        throw new WebPublicationServiceError('web_installation_unauthorized', 'Credenciales no válidas.', 401);
+      }
+      const lockedSite = matchReportedSite(locked.siteUrl, report.site_hash, {
+        includeWwwAlias: canCanonicalizePendingSite(locked),
+      });
+      if (!lockedSite) {
+        throw new WebPublicationServiceError(
+          'web_installation_site_mismatch',
+          'El reporte procede de un WordPress distinto al registrado.',
+          409
+        );
+      }
+      const repairsSite = lockedSite.canonicalized;
+      if (repairsSite) {
+        const publications = await models.WebPublication.count({
+          where: { wordpressInstallationId: locked.id },
+          transaction,
+        });
+        if (publications > 0) {
+          throw new WebPublicationServiceError(
+            'web_installation_site_mismatch',
+            'El reporte procede de un WordPress distinto al registrado.',
+            409
+          );
+        }
+      }
+      const reportedState = {
+        event: report.event,
+        request_id: report.request_id,
         status: report.status,
+        active_artifact_hash: report.active_artifact_hash,
+        desired_artifact_hash: report.desired_artifact_hash,
         result: report.result,
         error_code: report.error_code,
-        confirms_desired: Boolean(confirmsDesired),
-        plugin_version: report.plugin_version,
-      },
-    }, { transaction });
-    return locked;
-  });
+        duration_ms: report.duration_ms,
+        reported_at: report.reported_at,
+        wordpress_version: report.wordpress_version,
+        php_version: report.php_version,
+      };
+      const previousSiteHash = locked.siteUrlHash;
+      await locked.update({
+        ...(repairsSite ? {
+          siteUrl: lockedSite.site_url,
+          siteUrlHash: sha256(lockedSite.site_url),
+          version: Number(locked.version) + 1,
+        } : {}),
+        status: locked.status === 'outdated' && !confirmsDesired ? 'outdated' : 'connected',
+        pluginVersion: report.plugin_version,
+        reportedState,
+        lastSeenAt: new Date(),
+        ...(confirmsPublished
+          ? { lastArtifactHash: report.active_artifact_hash }
+          : reportsRetired
+            ? { lastArtifactHash: null }
+            : {}),
+      }, { transaction });
+      if (repairsSite) {
+        await models.WebAuditEvent.create({
+          projectId: null,
+          ...scopeColumns(scope),
+          actorUserId: null,
+          eventType: 'web.wordpress_installation.site_canonicalized',
+          entityType: 'web_wordpress_installation',
+          entityId: locked.id,
+          requestId: requestId || report.request_id,
+          metadata: {
+            previous_site_url_hash: previousSiteHash,
+            site_url_hash: locked.siteUrlHash,
+            reason: 'first_handshake_www_alias',
+          },
+        }, { transaction });
+      }
+      await models.WebAuditEvent.create({
+        projectId: desired?.publication?.projectId || null,
+        ...scopeColumns(scope),
+        actorUserId: null,
+        eventType: `web.wordpress_installation.${report.event}`,
+        entityType: 'web_wordpress_installation',
+        entityId: locked.id,
+        requestId: requestId || report.request_id,
+        metadata: {
+          status: report.status,
+          result: report.result,
+          error_code: report.error_code,
+          confirms_desired: Boolean(confirmsDesired),
+          plugin_version: report.plugin_version,
+        },
+      }, { transaction });
+      return locked;
+    });
+  } catch (error) {
+    if (error?.name === 'SequelizeUniqueConstraintError') {
+      throw new WebPublicationServiceError(
+        'web_wordpress_site_already_registered',
+        'Ese WordPress ya está conectado a ClinicaClick.',
+        409
+      );
+    }
+    throw error;
+  }
   return { accepted: true, confirms_desired: Boolean(confirmsDesired), installation: serializeInstallation(updated) };
 }
 
@@ -935,6 +1023,7 @@ module.exports = {
   installationApiBase,
   listInstallations,
   measurementFromIntake,
+  matchReportedSite,
   normalizeReport,
   pluginKeyDescriptor,
   publicationDesiredState,
