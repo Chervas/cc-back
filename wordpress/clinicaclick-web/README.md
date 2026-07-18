@@ -3,13 +3,15 @@
 > Estado 2026-07-18: la fuente y el ZIP determinista corresponden a
 > `2.0.0-alpha.7`; esta versión añade el contrato de formularios globales por
 > página requerido por renderer `1.3.0`. El WordPress público de Propdental
-> sigue acreditado con `2.0.0-alpha.6`, instalado y activo junto al plugin de
-> medición `clinicaclick` `1.1.7`. La instalación está `connected` en
-> `https://www.propdental.es` y `/cita/` sirve un artefacto verificado. Quedan
+> ejecuta `2.0.0-alpha.7`, instalado y activo junto al plugin de medición
+> `clinicaclick` `1.1.7`; WP-CLI y la fila DB están alineados. La instalación
+> está `connected` en `https://www.propdental.es` y `/cita/` conserva el
+> artefacto verificado renderer `1.2.1`. Quedan
 > fuera del rollout hosted/custom y multi-route; relay atribuible, limpieza,
-> rollback y monitor del piloto WordPress ya están cerrados. `alpha.7` no debe
-> llamarse live hasta que se instale, reporte por heartbeat y supere readback;
-> `alpha.5` queda únicamente como rollback local.
+> rollback y monitor del piloto WordPress ya están cerrados. No se ha publicado
+> aún una revisión `1.3.0` con formulario global: actualizar el binario no cambia
+> contenido. `alpha.6` queda como rollback operativo real y `alpha.5` solo como
+> recuperación histórica.
 
 Este paquete añade el publicador web mantenido junto al plugin de medición
 `clinicaclick` `1.1.7`. Usa el slug independiente `clinicaclick-web/`: instalarlo
@@ -461,9 +463,10 @@ El endpoint responde `200`, `202` o `204`; un fallo de reporte nunca desmonta la
     duplicado, honeypot, 202 y rate-limit
     adversariales.
 11. La suite fuente vigente verifica **26/26** contratos PHP y **3/3** de
-    interoperabilidad. En Propdental ya se verificaron con `alpha.6` instalación, cron,
-    handshake, loader único, publicación/readback, relay atribuible con
-    limpieza, rollback y monitor de `/cita/`.
+    interoperabilidad. En Propdental `alpha.7` acredita instalación, cron,
+    handshake y loader único; el artefacto estable `1.2.1` conserva
+    publicación/readback, relay atribuible con limpieza, rollback y monitor de
+    `/cita/` ya probados antes del upgrade.
 
 ### Actualización segura a `alpha.7`
 
@@ -487,10 +490,12 @@ El endpoint responde `200`, `202` o `204`; un fallo de reporte nunca desmonta la
 7. solo entonces publicar una revisión `1.3.0` con formulario global y validar **cada**
    permalink, `data-cc-global`, formulario por página, atribución y rollback.
 
-Si la DB sigue reportando `alpha.5` o `alpha.6`, la publicación con formulario global se
-pospone. El preflight de Propdental encontró precisamente runtime live
-`alpha.6` y fila DB `alpha.5` por esa cadencia, así que no basta inspeccionar
-solo uno de los dos lados. No se
+Los pasos 1-6 se completaron en Propdental el 2026-07-18. WP-CLI y DB reportan
+`2.0.0-alpha.7`, la instalación continúa `connected` y `/cita/` responde `200`
+sin cambiar el artefacto activo. El paso 7 sigue pendiente hasta disponer de
+una revisión aprobada que deba publicarse; no se crea contenido sintético solo
+para cerrar la comprobación. Si otra instalación sigue reportando `alpha.5` o
+`alpha.6`, la publicación con formulario global se pospone. No se
 fuerza ese manifest sobre el plugin anterior y no se usa esta actualización
 para abrir multi-route, hosted o custom domain.
 
@@ -504,18 +509,27 @@ con versiones actual/requerida y no encola una publicación parcial.
 ### Evidencia del piloto Propdental
 
 - ZIP provisionado instalado con slug `clinicaclick-web` y versión
-  `2.0.0-alpha.6`;
-- paquete/runtime inspeccionado en `2.0.0-alpha.6`; la versión persistida por
-  el último heartbeat sigue temporalmente en `2.0.0-alpha.5`, por lo que no se
-  presenta como alineada hasta forzar/confirmar el siguiente activation report;
+  `2.0.0-alpha.7`;
+- WP-CLI y la instalación
+  `524c2f73-6b69-42f2-8cb0-c8d171575d94` reportan
+  `2.0.0-alpha.7`; backend conserva `connected` y
+  `last_seen=2026-07-18T15:09:14Z`;
+- ZIP genérico fuente SHA-256
+  `427ceab2fc97f58ad99912bb26fa5c1d1adafbe3a21f3cdb4a4fae15f6d36930`;
+  el ZIP provisionado root-only tiene SHA-256
+  `e03629fade0abbd2c3757ad707507efa64b467ca5477efcf4fdc41b83390a391`;
+- rollback operativo real `alpha.6` en
+  `/furanet/sites/propdental.es/web/.clinicaclick-web-rollbacks/clinicaclick-web-alpha6-20260718T150905Z`,
+  con `config/installation.php`; el provisionado de 17 ficheros se conserva
+  root-only fuera del docroot en
+  `/furanet/sites/propdental.es/web/.clinicaclick-web-rollbacks/clinicaclick-web-alpha7-20260718T150905Z-provisioned.zip`;
 - PHP lint verde y `ccw_sync_event` programado cada 15 minutos;
 - plugin legado `clinicaclick` `1.1.7` permanece activo;
 - home y landing pública: exactamente un `/assets/loader.js`; el legado no se
   desactiva y el publicador no duplica el bootstrap;
-- instalación `524c2f73-6b69-42f2-8cb0-c8d171575d94`, conectada sobre la URL
-  canónica `https://www.propdental.es`; el runtime inspeccionado es
-  `2.0.0-alpha.6`, mientras el último heartbeat persistido aún figura como
-  `2.0.0-alpha.5` por su cadencia de hasta 24 horas;
+- instalación conectada sobre la URL canónica
+  `https://www.propdental.es`; runtime y heartbeat están alineados en
+  `2.0.0-alpha.7`;
 - proyecto `edd77d09-6ac5-4944-98e3-084d5285594c`, revisión
   `ead78c6d-f28f-478d-9058-bc189c846421` y publicación
   `5d55b1ef-c6fa-4e73-8aa8-2fd9ff41a526`;
@@ -557,13 +571,15 @@ se eliminaron temporales y v2 descargó el runtime nuevo. La página pública se
 revisó después y no contiene ese secreto. No imprimir nunca el runtime completo
 como técnica de diagnóstico.
 
-Un paquete genérico sobrescribió temporalmente la configuración del piloto. Se
+Un paquete genérico sobrescribió temporalmente la configuración del piloto en
+una recuperación histórica. Se
 rotó el token, se reprovisionó el ZIP `alpha.5` y el handshake volvió a quedar
 `connected`; no se conservó ni documentó el token sustituido. El defecto CSP
 detectado durante esta recuperación se corrigió elevando el renderer a `1.2.1`
 y limitando las allowances del validador a las emitidas por ese renderer. Ese
 fue el paso de recuperación histórico; después se actualizó de forma
-incremental a `alpha.6` y `alpha.5` quedó como rollback.
+incremental a `alpha.6` y finalmente al provisionado `alpha.7`. `alpha.6` es el
+rollback operativo actual; `alpha.5` queda como recuperación histórica.
 
 ## Desinstalación
 

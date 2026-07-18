@@ -46,7 +46,8 @@ signature, exact file set, hashes, sizes and pointer containment before serving
 content. Ancestor/descendant routes on the same host are rejected. The hourly
 health monitor only observes bundle + public marker and records
 unhealthy/recovered transitions; it never republishes or rolls back. This
-hardening is integrated in backend `dev` `1466452` and staging `807b967`; a
+hardening is integrated in backend `dev` `4e4b555` and staging/live
+`5e57431`; a
 controlled monitor run checked one WordPress publication as healthy. It does
 not make the hosted origin available: DNS still terminates at DonDominio/
 Cloudflare 521 and hosted/custom remain disabled pending their own public E2E.
@@ -59,8 +60,8 @@ upgrade rule —keep a real `alpha.6` rollback including
 `config/installation.php`, install the provisioned `alpha.7` ZIP, run
 `CCW_Plugin::activate(false)` as the site owner and require DB=`alpha.7` before
 publishing a global form; legacy documents and header/footer-only globals are
-not blocked by that minimum— must not be misread as authorization to enable
-hosted/custom. Those
+not blocked by that minimum— is already satisfied for the Propdental plugin,
+but must not be misread as authorization to enable hosted/custom. Those
 channels still require their own DNS/TLS/origin, relay/intake and rollback E2E.
 
 The separate CRM edge route used by the live WordPress pilot is exact-match

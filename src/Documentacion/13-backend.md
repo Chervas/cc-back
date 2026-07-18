@@ -4872,8 +4872,15 @@ plantillas ni filas que puedan estar referenciadas por ejecuciones.
 
 ## Marketing Web: control plane, editor y compilador W0-W2 (2026-07-18)
 
-**Corte integrado vigente:** la serie backend `acebe05..1466452` está en `dev`
-y staging integra hasta `807b967`. Incluye hardening del handoff WordPress,
+**Corte integrado vigente:** backend `dev` llega a `4e4b555` y staging a
+`5e57431`; `pm2-back-staging` ya ejecuta ese último corte y el smoke público de
+autenticación devuelve el `401` esperado sin errores de arranque. El corte
+funcional frontend llega a `305d4eae` en `dev` y `5f8f8858` en staging; los
+commits documentales posteriores no cambian el runtime. Su artefacto de
+producción limpio se construyó con hash `5a08e6a108414a76` y quedó desplegado
+atómicamente: index/source SHA-256
+`c54b4f254b803a1cd7419660f76be4cb8e0cb5df2912f014e709b9d0822bafc7`, 481/481
+ficheros y assets principales/readback en `200`. Incluye hardening del handoff WordPress,
 rollout por scope, canonicalización segura `apex/www`, persistencia/recuperación
 del artefacto preparado, CSP del artefacto público, disponibilidad efectiva por
 canal y previews de plantilla verificadas. Las migraciones
@@ -4881,12 +4888,23 @@ canal y previews de plantilla verificadas. Las migraciones
 sin crear policies o bindings reales. La suite local vigente del código integrado
 pasó **223/223** contratos Node, **26/26** contratos PHP/WordPress y **3/3**
 pruebas de interoperabilidad. El frontend Marketing Web local pasó
-**153/153** y el build de producción terminó verde con hash
-`da0d27c8f1d2f80a`; conserva el warning preexistente del bundle de **4,15 MB**.
-Esta evidencia aún no está desplegada: el corte live anterior sigue acreditado
-por **78/78** frontend y build `e775a9d1935d0a68`. Las integraciones MySQL destructivas se omiten de forma
+**153/153** y el build staging de producción terminó verde con hash
+`5a08e6a108414a76`. Chromium final de solo lectura cubrió onboarding, editor,
+CTA, Medios, SEO/Social/Schema, revisiones y CMS en `1440`/`360`: 13 capturas,
+cero errores, mutaciones Marketing Web u overflow. El fix `305d4eae` conserva
+la identidad referencial de las opciones CTA por documento/página/nodo y usa
+`trackByOptionId`, cerrando el bucle de CPU/`TargetClose` reproducido por
+Chromium. Backend, frontend y plugin WordPress están desplegados;
+Nginx quedó activo y el smoke público de auth devuelve el `401` esperado. Las
+integraciones MySQL destructivas se omiten de forma
 explícita cuando `WEB_EDITOR_TEST_MYSQL_URL` no está definido. Esta integración
 no autoriza una campaña.
+
+El runner canónico neutraliza explícitamente
+`MARKETING_WEB_ENABLED_SCOPES`, `MARKETING_WEB_DISABLED_SCOPES` y
+`MARKETING_WEB_PUBLISHING_SCOPES` para sus fixtures. Así la allowlist real de
+staging no altera la suite y los contratos prueban su propio scope de forma
+hermética; no se relaja ningún gate del proceso desplegado.
 
 W0 establece la frontera de seguridad y despliegue. El editor y la publicación
 son gates distintos y ambos nacen apagados:
@@ -5135,34 +5153,35 @@ licencias o consentimiento.
 
 ## Marketing Web: publicación WordPress y puente de campañas W4/W5 (2026-07-18)
 
-Estado público acreditado: `clinicaclick-web` `2.0.0-alpha.6` sigue instalado y
+Estado público acreditado: `clinicaclick-web` `2.0.0-alpha.7` está instalado y
 activo en Propdental. El legado `clinicaclick` `1.1.7` sigue activo; v2 evita
 su loader global duplicado sin desactivarlo y tanto la home como la landing
 conservan un único loader. `ccw_sync_event` está programado cada 15 minutos y,
 si se ejecuta manualmente, debe correr como el usuario del sitio para no crear
 caché propiedad de `root`.
 
-Estado del paquete siguiente: el código fuente y el ZIP determinista se elevan
-a `clinicaclick-web` `2.0.0-alpha.7` para consumir el manifest de formularios
+Estado del paquete: el código fuente y el ZIP determinista corresponden a
+`clinicaclick-web` `2.0.0-alpha.7` y consumen el manifest de formularios
 globales por página emitido por renderer `1.3.0`. `alpha.7` valida que todo
 formulario global cubra las rutas/páginas firmadas que lo usan y que sus campos
 coincidan entre contratos; no relaja firma, hash, scope, host, ruta ni
-allowlists. Esta versión no debe describirse como live hasta que el heartbeat
-del WordPress real la reporte y el readback público la acredite.
+allowlists. El rollout se realizó con paquete provisionado, activación como
+usuario del sitio, PHP lint y sincronización; la DB y WP-CLI reportan ya la
+misma versión.
 
 El primer `activation_handshake` normalizó de forma auditable el alta inicial
 `https://propdental.es` a la URL canónica declarada por WordPress
 `https://www.propdental.es`. Esa excepción solo se permite cuando la
 instalación sigue realmente virgen (`pending`, sin `last_seen`, versión ni
 publicaciones); después se exige coincidencia estricta. La instalación
-`524c2f73-6b69-42f2-8cb0-c8d171575d94` está `connected`. El preflight más
-reciente confirmó el runtime WordPress `2.0.0-alpha.6`, pero la versión
-persistida en DB todavía figura como `2.0.0-alpha.5`: el heartbeat ordinario de
-versión puede tardar hasta 24 horas. Por tanto, ni el fichero live por sí solo
-ni esa fila atrasada acreditan el rollout siguiente. Después de que un paquete
-genérico sobrescribiera temporalmente la configuración se rotó el token, se
-reprovisionó y se verificó de nuevo el handshake sin conservar el token
-anterior.
+`524c2f73-6b69-42f2-8cb0-c8d171575d94` está `connected`, reporta
+`plugin_version=2.0.0-alpha.7` y `last_seen=2026-07-18T15:09:14Z`. Se conservó
+un rollback real de `alpha.6` con `config/installation.php` y un ZIP
+provisionado `alpha.7` root-only; el paquete genérico de transporte no se usó
+como instalación gestionada. Después de que un paquete genérico
+sobrescribiera temporalmente la configuración en una recuperación histórica se
+rotó el token, se reprovisionó y se verificó de nuevo el handshake sin
+conservar el token anterior.
 
 El piloto público queda identificado y reproducible así:
 
@@ -5307,8 +5326,12 @@ orden operativo obligatorio es:
    página, un envío controlado, atribución, ausencia de duplicados y rollback
    antes de ampliar scopes.
 
-Si la DB no reporta `alpha.7` —incluidos los estados atrasados `alpha.5` o
-`alpha.6`—, la publicación de un formulario global debe quedar
+Los pasos 1-4 quedaron acreditados en Propdental el 2026-07-18: WP-CLI y DB
+reportan `alpha.7`, `/cita/` sigue en `200` y el artefacto activo no cambió.
+Los pasos 5-6 continúan deliberadamente pendientes: no se publicó una revisión
+nueva solo para demostrar el gate. Si otra instalación no reporta `alpha.7`
+—incluidos los estados atrasados `alpha.5` o `alpha.6`—, la publicación de un
+formulario global debe quedar
 bloqueada o pospuesta de forma observable; nunca se fuerza el manifest nuevo ni
 se sacrifica el last-known-good. Este orden no habilita hosted/custom ni
 multi-route: conservan sus gates y E2E independientes.
@@ -5392,8 +5415,8 @@ chat/teléfono/WhatsApp, readback y rollback antes de abrir un scope real.
 
 ### Hardening Web por canal integrado y desplegado (2026-07-18)
 
-Este bloque describe el contrato vigente en `dev` `1466452`, staging
-`807b967` y el piloto WordPress live `2.0.0-alpha.6`. El despliegue no abre por
+Este bloque describe el contrato vigente en `dev` `4e4b555`, staging/backend
+live `5e57431` y el piloto WordPress live `2.0.0-alpha.7`. El despliegue no abre por
 sí mismo hosted/custom: esos canales continúan apagados y fallan cerrado hasta
 que su infraestructura externa complete DNS/TLS/origen/proveedor y E2E.
 
@@ -5441,7 +5464,7 @@ no hace rollback, no republica y no consulta/muta plataformas publicitarias.
 La observación controlada del `2026-07-18T13:01:04.689Z` comprobó una
 publicación y obtuvo `1 healthy`, `0 degraded`.
 
-El WordPress live `2.0.0-alpha.6` usa presencia, no truthiness, para
+El WordPress live `2.0.0-alpha.7` usa presencia, no truthiness, para
 clasificar identidad Web: ausencia total mantiene una página ordinaria; IDs
 presentes vacíos/incompletos devuelven `422`. Una landing completa reenvía sus
 eventos por `/_clinicaclick/events`, donde backend reconstruye
@@ -5454,8 +5477,11 @@ rotar IDs/ruta tampoco elimina el límite global.
 Estado de aceptación de esta tanda:
 
 1. suite Marketing Web, PHP e interoperabilidad: cerradas;
-2. backend/frontend promovidos y build frontend desplegado;
-3. `alpha.6` instalado preservando la configuración y con rollback `alpha.5`;
+2. backend promovido/reiniciado con smoke verde; frontend build
+   limpio `5a08e6a108414a76` desplegado con 481/481 ficheros, readback de assets en
+   `200`, auth pública `401` esperada y Nginx activo;
+3. `alpha.7` instalado preservando la configuración, con rollback real
+   `alpha.6` y DB/heartbeat alineados;
 4. E2E público del relay/intake atribuido y datos sintéticos limpiados;
 5. observación real del monitor: saludable;
 6. hosted/custom permanecen deliberadamente apagados hasta
