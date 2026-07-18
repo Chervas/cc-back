@@ -66,8 +66,17 @@ Estado de implementación actual, separado de la evidencia del artefacto live:
 
 - renderer `clinicaclick-web-renderer/1.3.0` compila cabecera y pie globales en
   cada página y manifiesta el formulario global mediante contratos por página;
-- el paquete `clinicaclick-web` `2.0.0-alpha.7` live valida esos contratos y su
-  cobertura de rutas. Rollback real `alpha.6`, ZIP provisionado, activación
+- el corte posterior `clinicaclick-web-renderer/1.4.0`, todavía solo en la rama
+  de integración (`4345683`) y no desplegado, conserva esos globales de `1.3.0`
+  y añade las primitivas cerradas `divider` y `spacer`. El catálogo canónico
+  pasa de siete a nueve tipos: `divider` emite un `<hr>` semántico con
+  `line_style=solid|dashed|dotted` y `tone=muted|brand|accent`; `spacer` emite un
+  elemento presentacional `aria-hidden` con `size=xs|sm|md|lg|xl|2xl`. Ambos
+  exigen `children=[]`, carecen de bindings y solo producen clases/CSS
+  allowlisted por el compilador;
+- el paquete `clinicaclick-web` `2.0.0-alpha.7` live valida los contratos de
+  rutas y formulario global; esto no convierte el renderer `1.4.0` en un
+  artefacto publicado. Rollback real `alpha.6`, ZIP provisionado, activación
   como usuario del sitio y DB=`2.0.0-alpha.7` ya están acreditados. La API
   bloquea fail-closed un deployment WordPress con formulario global si el
   plugin es anterior (`409 web_wordpress_global_intake_plugin_outdated`);
@@ -122,7 +131,7 @@ consola/página/request/HTTP, mutaciones Marketing Web u overflow. El fix
 reproducido en Chromium. Backend y
 plugin también están live. El readback, relay/atribución, limpieza, rollback y
 monitor acreditan el artefacto público renderer `1.2.1`; no convierten
-automáticamente renderer `1.3.0` en artefacto live.
+automáticamente los cortes `1.3.0` o `1.4.0` en artefactos live.
 
 ## Orden de verificación
 

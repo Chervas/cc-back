@@ -5007,6 +5007,24 @@ alcanzabilidad SEO. No se duplican como nodos locales ni se recompilan desde
 contenido vivo. La previsualización Angular y el artefacto público consumen la
 misma referencia global congelada.
 
+`clinicaclick-web-renderer/1.4.0` es un incremento posterior y compatible que
+no reemplaza ni reescribe la historia de globales de `1.3.0`. El corte
+`4345683`, presente en la rama de integración y todavía no desplegado, amplía
+el JSON Schema cerrado de siete a nueve tipos con dos hojas de estructura:
+
+- `divider` exige `children=[]`, no admite bindings y limita sus propiedades a
+  `line_style=solid|dashed|dotted` y `tone=muted|brand|accent`. Se compila como
+  `<hr>` semántico y sus variantes solo seleccionan clases CSS allowlisted;
+- `spacer` exige `children=[]`, no admite bindings y limita `size` a
+  `xs|sm|md|lg|xl|2xl`. Se compila como un elemento sin contenido,
+  `aria-hidden=true` y `role=presentation`, con altura determinada por tokens.
+
+El contrato rechaza propiedades adicionales, hijos, bindings o valores fuera
+de esos enums. La identidad del artefacto sigue incluyendo la versión del
+renderer, por lo que compilar la misma revisión con `1.4.0` genera un corte
+explícito, determinista y auditable; nunca modifica un artefacto `1.2.1` o
+`1.3.0` ya congelado.
+
 El formulario global también se materializa por ruta. El manifest no lo trata
 como un único formulario sin contexto, sino como un contrato `scope=global`
 con `page_contracts[page_id]`. Cada contrato conserva los campos y la identidad
