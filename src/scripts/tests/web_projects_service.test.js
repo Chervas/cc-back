@@ -39,7 +39,7 @@ const {
   siteDefaultsFromIntake,
   syncProjectPages,
 } = require('../../services/webProjects.service');
-const { validateWebDocument } = require('../../lib/webDocument');
+const { assertValidWebDocument, validateWebDocument } = require('../../lib/webDocument');
 
 function row(values) {
   return {
@@ -362,12 +362,101 @@ async function testTemplateCatalogUsesBoundedDatabasePagination() {
     offset: 499950,
   });
   assert.equal(result.items[0].compatibility.schema, 'web-document@1');
+  assert.equal(Object.hasOwn(result.items[0], 'preview_document'), false);
+  assert.doesNotMatch(queries[0].sql, /(?:,|SELECT\s+)\s*document(?:\s|,|$)/i);
+  assert.doesNotMatch(queries[1].sql, /(?:,|SELECT\s+)\s*document(?:\s|,|$)/i);
   assert.deepEqual(result.pagination, {
     page: 10000,
     limit: 50,
     total: 123,
     total_pages: 3,
   });
+}
+
+async function testTemplateCatalogPreviewIsExplicitValidatedAndCanonical() {
+  const document = createBlankWebDocument({ name: 'Vista previa segura' });
+  const documentIntegrity = assertValidWebDocument(document);
+  const queries = [];
+  const models = {
+    Clinica: {
+      findByPk: async () => ({ id_clinica: 66, grupoClinicaId: 7 }),
+    },
+    GrupoClinica: {},
+    sequelize: {
+      query: async (sql, options) => {
+        queries.push({ sql, options });
+        if (/COUNT\(\*\) AS total/.test(sql)) return [{ total: '1' }];
+        if (/SELECT id, document, document_hash/.test(sql)) return [{
+          id: '50d92487-9077-47a1-b6cc-b231d3d00658',
+          document: JSON.stringify(document),
+          document_hash: documentIntegrity.hash,
+        }];
+        return [{
+          id: '50d92487-9077-47a1-b6cc-b231d3d00658',
+          catalog_key: 'qualification-form-v1',
+          name: 'Formulario de cualificación',
+          description: 'Preview',
+          category: 'qualification',
+          version: 1,
+          preview_asset_id: null,
+          compatibility: '{}',
+        }];
+      },
+    },
+  };
+  const result = await listTemplates({
+    actorId: 1,
+    query: { scope_type: 'clinic', scope_id: 66, include_preview: 'true' },
+    models,
+  });
+  assert.equal(queries.length, 3);
+  assert.doesNotMatch(queries[0].sql, /compatibility, document/);
+  assert.doesNotMatch(queries[1].sql, /compatibility, document/);
+  assert.match(queries[2].sql, /SELECT id, document, document_hash/);
+  assert.deepEqual(queries[2].options.replacements.previewTemplateIds, [
+    '50d92487-9077-47a1-b6cc-b231d3d00658',
+  ]);
+  assert.deepEqual(result.items[0].preview_document, JSON.parse(documentIntegrity.canonical));
+  assert.deepEqual(Object.keys(result.items[0]).sort(), [
+    'catalog_key',
+    'category',
+    'compatibility',
+    'description',
+    'id',
+    'name',
+    'preview_asset_id',
+    'preview_document',
+    'version',
+  ]);
+
+  models.sequelize.query = async (sql) => {
+    if (/COUNT\(\*\) AS total/.test(sql)) return [{ total: '1' }];
+    if (/SELECT id, document, document_hash/.test(sql)) return [{
+      id: '50d92487-9077-47a1-b6cc-b231d3d00658',
+      document: '{"schema_version":1,"nodes":{"unsafe":{"html":"<script>alert(1)</script>"}}}',
+      document_hash: 'f'.repeat(64),
+    }];
+    return [{
+      id: '50d92487-9077-47a1-b6cc-b231d3d00658',
+      catalog_key: 'qualification-form-v1',
+      name: 'Formulario de cualificación',
+      description: null,
+      category: 'qualification',
+      version: 1,
+      preview_asset_id: null,
+      compatibility: '{}',
+    }];
+  };
+  await assert.rejects(
+    () => listTemplates({
+      actorId: 1,
+      query: { scope_type: 'clinic', scope_id: 66, include_preview: true },
+      models,
+    }),
+    (error) => error instanceof WebProjectServiceError
+      && error.code === 'template_preview_invalid'
+      && error.status === 503
+  );
 }
 
 async function testCreateContract() {
@@ -592,6 +681,7 @@ async function main() {
   await testListContract();
   await testProjectDetailExposesDisabledScopeCapability();
   await testTemplateCatalogUsesBoundedDatabasePagination();
+  await testTemplateCatalogPreviewIsExplicitValidatedAndCanonical();
   await testCreateContract();
   await testSaveConflict();
   await testSaveLetsSequelizeOwnTheVersionIncrement();

@@ -9,6 +9,10 @@ test('el catálogo inicial contiene las cinco plantillas acordadas y todas valid
   assert.equal(BUILTIN_WEB_TEMPLATES_V1.length, 5);
   assert.equal(new Set(BUILTIN_WEB_TEMPLATES_V1.map((item) => item.id)).size, 5);
   assert.equal(new Set(BUILTIN_WEB_TEMPLATES_V1.map((item) => item.catalog_key)).size, 5);
+  assert.equal(
+    BUILTIN_WEB_TEMPLATES_V1.find((item) => item.catalog_key === 'qualification-form-v1')?.category,
+    'qualification'
+  );
   for (const template of BUILTIN_WEB_TEMPLATES_V1) {
     const result = assertValidWebDocument(template.document);
     assert.match(result.hash, /^[a-f0-9]{64}$/);

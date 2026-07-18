@@ -361,7 +361,7 @@ const DEFINITIONS = Object.freeze([
     catalog_key: 'qualification-form-v1',
     name: 'Formulario de cualificación',
     description: 'Recoge los datos mínimos para preparar mejor el primer contacto.',
-    category: 'form',
+    category: 'qualification',
     document: qualificationForm(),
   },
 ]);

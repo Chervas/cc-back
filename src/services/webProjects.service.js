@@ -51,6 +51,37 @@ function boundedInteger(value, fallback, maximum) {
   return Math.min(parsed || fallback, maximum);
 }
 
+function booleanQueryFlag(value, fieldName) {
+  if (value === undefined) return false;
+  if (value === true || value === 'true') return true;
+  if (value === false || value === 'false') return false;
+  throw new WebProjectServiceError(
+    `invalid_${fieldName}`,
+    `${fieldName} debe ser true o false.`
+  );
+}
+
+function validatedPreviewDocument(value, templateId, expectedHash) {
+  try {
+    const document = typeof value === 'string' ? JSON.parse(value) : value;
+    const integrity = assertValidWebDocument(document);
+    if (!/^[a-f0-9]{64}$/.test(String(expectedHash || '')) || integrity.hash !== expectedHash) {
+      throw new Error('template_document_hash_mismatch');
+    }
+    // Reparse the canonical representation so the response only contains plain,
+    // normalized JSON that passed the complete WebDocument v1 contract.
+    return JSON.parse(integrity.canonical);
+  } catch (error) {
+    if (error instanceof WebProjectServiceError) throw error;
+    throw new WebProjectServiceError(
+      'template_preview_invalid',
+      'La vista previa de esta plantilla no está disponible.',
+      503,
+      { template_id: String(templateId || '') }
+    );
+  }
+}
+
 function normalizeCampaignContext(input) {
   if (input === undefined || input === null || input === '') return null;
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
@@ -1311,6 +1342,7 @@ async function transitionRevision({ actorId, revisionId, action, requestId = nul
 async function listTemplates({ actorId, query = {}, models = db } = {}) {
   const scope = normalizeScope(query);
   await assertScopeAccess(actorId, scope, 'marketing.web.view', { models });
+  const includePreview = booleanQueryFlag(query.include_preview, 'include_preview');
   const category = String(query.category || '').trim().toLowerCase();
   if (category && !/^[a-z0-9][a-z0-9_-]{1,63}$/.test(category)) {
     throw new WebProjectServiceError('invalid_template_category', 'La categoría de plantilla no es válida.');
@@ -1378,18 +1410,41 @@ async function listTemplates({ actorId, query = {}, models = db } = {}) {
     WITH ranked_templates AS (${rankedSql})
     SELECT COUNT(*) AS total FROM ranked_templates WHERE scope_rank = 1
   `, { replacements, type: QueryTypes.SELECT });
-  const items = rows.map((template) => ({
-    id: template.id,
-    catalog_key: template.catalog_key,
-    name: template.name,
-    description: template.description || null,
-    category: template.category,
-    version: Number(template.version),
-    preview_asset_id: template.preview_asset_id || null,
-    compatibility: typeof template.compatibility === 'string'
-      ? JSON.parse(template.compatibility || '{}')
-      : (template.compatibility || {}),
-  }));
+  const previewById = new Map();
+  if (includePreview && rows.length > 0) {
+    const previewRows = await sequelize.query(`
+      SELECT id, document, document_hash
+      FROM WebTemplates
+      WHERE id IN (:previewTemplateIds)
+        AND status = 'active'
+        AND deleted_at IS NULL
+        AND ${scopePredicate}
+        ${category ? 'AND category = :category' : ''}
+    `, {
+      replacements: { ...replacements, previewTemplateIds: rows.map((row) => row.id) },
+      type: QueryTypes.SELECT,
+    });
+    for (const preview of previewRows) previewById.set(String(preview.id), preview);
+  }
+  const items = rows.map((template) => {
+    const item = {
+      id: template.id,
+      catalog_key: template.catalog_key,
+      name: template.name,
+      description: template.description || null,
+      category: template.category,
+      version: Number(template.version),
+      preview_asset_id: template.preview_asset_id || null,
+      compatibility: typeof template.compatibility === 'string'
+        ? JSON.parse(template.compatibility || '{}')
+        : (template.compatibility || {}),
+    };
+    if (includePreview) {
+      const preview = previewById.get(String(template.id));
+      item.preview_document = validatedPreviewDocument(preview?.document, template.id, preview?.document_hash);
+    }
+    return item;
+  });
   const total = Number(countRows[0]?.total || 0);
   return {
     items,
