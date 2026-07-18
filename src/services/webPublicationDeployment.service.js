@@ -298,6 +298,58 @@ function shouldStorePublicBundle(publication, env) {
   return ['1', 'true', 'on', 'yes'].includes(String(env.MARKETING_WEB_ARTIFACT_STORE_ENABLED || '').toLowerCase());
 }
 
+function artifactStorageContract(storage, artifact) {
+  const value = storage && typeof storage === 'object' && !Array.isArray(storage) ? storage : {};
+  const artifactHash = String(artifact?.artifact_hash || '').trim();
+  const manifestHash = String(artifact?.manifest?.artifact_hash || '').trim();
+  const providerSupported = value.provider === 's3_immutable' || value.provider === 'authenticated_db';
+  const storedHash = String(value.artifact_hash || '').trim();
+  const expectedPaths = Object.keys(artifact?.files || {}).sort();
+  const storedFiles = value.files && typeof value.files === 'object' && !Array.isArray(value.files)
+    ? value.files
+    : null;
+  const storedPaths = storedFiles ? Object.keys(storedFiles).sort() : [];
+  const pathsMatch = storedFiles !== null
+    && expectedPaths.length === storedPaths.length
+    && expectedPaths.every((path, index) => path === storedPaths[index]);
+  const urls = [value.manifest_url, value.signature_url]
+    .concat(storedFiles ? Object.values(storedFiles) : []);
+  let origin = null;
+  const urlsSafe = urls.length >= 2 && urls.every((input) => {
+    try {
+      const url = new URL(String(input || ''));
+      if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) return false;
+      const currentOrigin = url.origin.toLowerCase();
+      if (origin && origin !== currentOrigin) return false;
+      origin = currentOrigin;
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  const artifactValid = /^[a-f0-9]{64}$/.test(artifactHash) && artifactHash === manifestHash;
+  return {
+    ready: artifactValid
+      && providerSupported
+      && storedHash === artifactHash
+      && pathsMatch
+      && urlsSafe,
+    artifact_hash: artifactHash,
+  };
+}
+
+function assertArtifactStorageContract(storage, artifact) {
+  const contract = artifactStorageContract(storage, artifact);
+  if (!contract.ready) {
+    throw new WebPublicationServiceError(
+      'web_artifact_storage_contract_invalid',
+      'El almacenamiento no corresponde al artefacto compilado.',
+      503
+    );
+  }
+  return storage;
+}
+
 async function verifyPublicArtifact({
   publicUrl,
   inputHash,
@@ -734,12 +786,19 @@ async function runPublicationDeploymentJob(payload = {}, jobRequest = null, depe
       env,
     });
     let storage = deployment.storage || {};
-    if (shouldStorePublicBundle(publication, env) && !storage.manifest_url) {
-      storage = await (dependencies.storeArtifactBundle || storeArtifactBundle)({
-        artifact: bundle.serialized,
-        installationId: publication.wordpressInstallationId || null,
-        env,
-      });
+    if (shouldStorePublicBundle(publication, env)) {
+      // El runtime de medición forma parte del hash del artefacto. Un retry
+      // puede recompilar tras rotar HMAC/runtime aunque el deployment conserve
+      // el descriptor inmutable anterior; una URL existente no demuestra que
+      // ese descriptor pertenezca al bundle recién compilado.
+      if (!artifactStorageContract(storage, bundle.serialized).ready) {
+        storage = await (dependencies.storeArtifactBundle || storeArtifactBundle)({
+          artifact: bundle.serialized,
+          installationId: publication.wordpressInstallationId || null,
+          env,
+        });
+      }
+      assertArtifactStorageContract(storage, bundle.serialized);
     }
     const persisted = await persistArtifactPreparation({
       deploymentId,
@@ -817,6 +876,8 @@ async function runPublicationDeploymentJob(payload = {}, jobRequest = null, depe
 
 module.exports = {
   LANDING_PUBLISHED_EVENT,
+  artifactStorageContract,
+  assertArtifactStorageContract,
   campaignDestinationUrl,
   channelDeploy,
   compensateHostedDeployment,
