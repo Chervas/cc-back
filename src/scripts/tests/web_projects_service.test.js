@@ -343,6 +343,13 @@ async function testTemplateCatalogUsesBoundedDatabasePagination() {
           version: 3,
           preview_asset_id: null,
           compatibility: '{"schema":"web-document@1"}',
+          scope_type: 'clinic',
+          clinica_id: 66,
+          grupo_clinica_id: null,
+          is_public: 0,
+          status: 'active',
+          created_at: '2026-07-18T09:00:00.000Z',
+          updated_at: '2026-07-18T10:00:00.000Z',
         }];
       },
     },
@@ -372,6 +379,10 @@ async function testTemplateCatalogUsesBoundedDatabasePagination() {
     offset: 499950,
   });
   assert.equal(result.items[0].compatibility.schema, 'web-document@1');
+  assert.equal(result.items[0].source_scope, 'clinic');
+  assert.equal(result.items[0].source_scope_id, 66);
+  assert.equal(result.items[0].managed_by_scope, true);
+  assert.equal(result.items[0].is_public, false);
   assert.equal(Object.hasOwn(result.items[0], 'preview_document'), false);
   assert.doesNotMatch(queries[0].sql, /(?:,|SELECT\s+)\s*document(?:\s|,|$)/i);
   assert.doesNotMatch(queries[1].sql, /(?:,|SELECT\s+)\s*document(?:\s|,|$)/i);
@@ -410,6 +421,13 @@ async function testTemplateCatalogPreviewIsExplicitValidatedAndCanonical() {
           version: 1,
           preview_asset_id: null,
           compatibility: '{}',
+          scope_type: 'global',
+          clinica_id: null,
+          grupo_clinica_id: null,
+          is_public: 1,
+          status: 'active',
+          created_at: '2026-07-18T09:00:00.000Z',
+          updated_at: '2026-07-18T10:00:00.000Z',
         }];
       },
     },
@@ -431,11 +449,18 @@ async function testTemplateCatalogPreviewIsExplicitValidatedAndCanonical() {
     'catalog_key',
     'category',
     'compatibility',
+    'created_at',
     'description',
     'id',
+    'is_public',
+    'managed_by_scope',
     'name',
     'preview_asset_id',
     'preview_document',
+    'source_scope',
+    'source_scope_id',
+    'status',
+    'updated_at',
     'version',
   ]);
 
@@ -455,6 +480,13 @@ async function testTemplateCatalogPreviewIsExplicitValidatedAndCanonical() {
       version: 1,
       preview_asset_id: null,
       compatibility: '{}',
+      scope_type: 'global',
+      clinica_id: null,
+      grupo_clinica_id: null,
+      is_public: 1,
+      status: 'active',
+      created_at: '2026-07-18T09:00:00.000Z',
+      updated_at: '2026-07-18T10:00:00.000Z',
     }];
   };
   await assert.rejects(
