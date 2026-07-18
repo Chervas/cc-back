@@ -87,6 +87,41 @@ test('escapa todo texto editorial y nunca lo convierte en markup', () => {
   assert.match(artifact.files['index.html'], /Tratamiento seguro &amp; claro/);
 });
 
+test('renderiza divider y spacer como primitivas semánticas, cerradas y deterministas', () => {
+  const input = fixture();
+  const section = Object.values(input.document.nodes).find((node) => node.type === 'section');
+  input.document.nodes.divider_layout = {
+    id: 'divider_layout',
+    type: 'divider',
+    version: 1,
+    props: { line_style: 'dashed', tone: 'brand' },
+    children: [],
+  };
+  input.document.nodes.spacer_layout = {
+    id: 'spacer_layout',
+    type: 'spacer',
+    version: 1,
+    props: { size: '2xl' },
+    children: [],
+  };
+  section.children.splice(1, 0, 'divider_layout', 'spacer_layout');
+
+  const first = compileWebArtifact(input);
+  const second = compileWebArtifact(input);
+  const cssPath = Object.keys(first.files).find((path) => path.endsWith('.css'));
+  const html = first.files['index.html'];
+  const css = first.files[cssPath];
+
+  assert.equal(first.artifact_hash, second.artifact_hash);
+  assert.deepEqual(first.files, second.files);
+  assert.match(html, /<hr id="cc-divider_layout" class="cc-node cc-divider cc-divider-dashed cc-divider-tone-brand [^"]+">/);
+  assert.match(html, /<div id="cc-spacer_layout" class="cc-node cc-spacer cc-spacer-2xl [^"]+" aria-hidden="true" role="presentation"><\/div>/);
+  assert.doesNotMatch(html, /<hr[^>]*(?:aria-hidden|role="presentation")/);
+  assert.match(css, /\.cc-divider-dashed\{border-top-style:dashed\}/);
+  assert.match(css, /\.cc-divider-tone-brand\{border-top-color:var\(--cc-primary\)\}/);
+  assert.match(css, /\.cc-spacer-2xl\{height:var\(--cc-2xl\)\}/);
+});
+
 test('rechaza base URL y endpoint con parámetros o credenciales', () => {
   assert.throws(
     () => compileWebArtifact(fixture({ baseUrl: 'https://user:secret@example.test/?token=x' })),
@@ -493,7 +528,7 @@ test('renderiza globals una vez y los incluye en SEO, Schema e intake de cada p�
   assert.match(secondaryHtml, /name="web_page_id" value="page_global_secondary"/);
 });
 
-test('renderer 1.3 honra tokens, responsive, fuentes e imagen focal en CSS de producción', () => {
+test('renderer 1.4 honra tokens, responsive, fuentes e imagen focal en CSS de producción', () => {
   const input = fixture();
   const section = Object.values(input.document.nodes).find((node) => node.type === 'section');
   section.props.layout = 'grid';
@@ -547,7 +582,7 @@ test('renderer 1.3 honra tokens, responsive, fuentes e imagen focal en CSS de pr
   const cssPath = Object.keys(artifact.files).find((path) => path.endsWith('.css'));
   const css = artifact.files[cssPath];
   const html = artifact.files['index.html'];
-  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.3.0');
+  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.4.0');
   assert.match(html, /cc-layout-grid cc-cols-4[^"\n]*cc-bg-brand[^"\n]*cc-width-wide[^"\n]*cc-pt-2xl[^"\n]*cc-radius-full[^"\n]*cc-shadow-lg[^"\n]*cc-mobile-cols-1/);
   assert.match(html, /cc-fit-contain cc-aspect-21-9 cc-focal-37-62/);
   assert.match(html, /<div class="cc-image-frame"><img[^>]*width="2100" height="900">/);

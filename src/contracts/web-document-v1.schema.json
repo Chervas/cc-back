@@ -62,6 +62,8 @@
           { "$ref": "#/definitions/sectionNode" },
           { "$ref": "#/definitions/headingNode" },
           { "$ref": "#/definitions/textNode" },
+          { "$ref": "#/definitions/dividerNode" },
+          { "$ref": "#/definitions/spacerNode" },
           { "$ref": "#/definitions/faqNode" },
           { "$ref": "#/definitions/imageNode" },
           { "$ref": "#/definitions/buttonNode" },
@@ -472,6 +474,57 @@
             "tone": {
               "enum": ["default", "muted", "inverse", "brand", "accent"]
             }
+          }
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "style_tokens": { "$ref": "#/definitions/styleTokens" },
+        "responsive": { "$ref": "#/definitions/responsive" },
+        "binding_ids": { "$ref": "#/definitions/bindingIds" }
+      }
+    },
+    "dividerNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "version", "props", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "type": { "const": "divider" },
+        "version": { "const": 1 },
+        "props": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["line_style", "tone"],
+          "properties": {
+            "line_style": { "enum": ["solid", "dashed", "dotted"] },
+            "tone": { "enum": ["muted", "brand", "accent"] }
+          }
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "style_tokens": { "$ref": "#/definitions/styleTokens" },
+        "responsive": { "$ref": "#/definitions/responsive" },
+        "binding_ids": { "$ref": "#/definitions/bindingIds" }
+      }
+    },
+    "spacerNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "version", "props", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "type": { "const": "spacer" },
+        "version": { "const": 1 },
+        "props": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["size"],
+          "properties": {
+            "size": { "enum": ["xs", "sm", "md", "lg", "xl", "2xl"] }
           }
         },
         "children": {
