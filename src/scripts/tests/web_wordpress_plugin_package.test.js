@@ -84,7 +84,7 @@ test('genera un ZIP provisionado mantenido, acotado y sin fuentes de test', asyn
   const first = await buildProvisionedPluginPackage({ credentials: credentials() });
   const second = await buildProvisionedPluginPackage({ credentials: credentials() });
   assert.equal(first.filename, 'clinicaclick-web.zip');
-  assert.equal(first.plugin_version, '2.0.0-alpha.3');
+  assert.equal(first.plugin_version, '2.0.0-alpha.4');
   assert.equal(first.sha256, second.sha256);
   assert.deepEqual(first.buffer, second.buffer);
   assert.equal(first.buffer.readUInt32LE(0), 0x04034b50);

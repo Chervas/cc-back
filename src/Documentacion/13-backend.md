@@ -5085,7 +5085,7 @@ determinista y las rutas declaradas en el manifest. Un hash anterior o ajeno,
 un token de otra instalación o un `pathToken` no canónico fallan cerrado. Las
 respuestas son `private, no-store` y nunca exponen bucket, key ni credenciales.
 
-El plugin `2.0.0-alpha.3` decide las cabeceras por origen: añade bearer y
+El plugin `2.0.0-alpha.4` decide las cabeceras por origen: añade bearer y
 versión únicamente cuando el origen completo de la descarga coincide con
 `api_base`; nunca los reenvía a S3/CDN. En ambos modos conserva la segunda
 barrera: verifica firma, hash, tamaño, allowlist y contenido antes del cambio

@@ -53,6 +53,8 @@ test('compila el mismo input de forma determinista y preview siempre es noindex'
   assert.match(first.files['index.html'], /http-equiv="Content-Security-Policy"/);
   assert.match(first.files['index.html'], /href="https:\/\/implantes\.sites\.clinicaclick\.com\/assets\/styles\./);
   assert.doesNotMatch(first.files['index.html'], /on(?:click|load|error)=/i);
+  const stylesheet = Object.entries(first.files).find(([name]) => name.startsWith('assets/styles.'))?.[1];
+  assert.match(stylesheet, /\.cc-section\.cc-bg-brand \.cc-button-primary\{background:var\(--cc-surface\);color:var\(--cc-primary\)\}/);
 });
 
 test('producción indexa únicamente las páginas expresamente indexables', () => {

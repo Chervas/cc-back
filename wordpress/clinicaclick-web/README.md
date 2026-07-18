@@ -293,7 +293,7 @@ Accept: application/json
 X-CC-Signature: <HMAC-SHA256 hexadecimal del body exacto>
 X-CC-Event-Id: ccw_<64 hex>
 X-Clinicaclick-Web-Artifact: <hash activo>
-X-Clinicaclick-Plugin-Version: 2.0.0-alpha.3
+X-Clinicaclick-Plugin-Version: 2.0.0-alpha.4
 ```
 
 No envía el bearer de instalación. El payload fija server-side
@@ -323,7 +323,7 @@ Solo los endpoints de control de la instalación reciben:
 
 ```http
 Authorization: Bearer <installation token>
-X-Clinicaclick-Plugin-Version: 2.0.0-alpha.3
+X-Clinicaclick-Plugin-Version: 2.0.0-alpha.4
 Accept: application/json
 ```
 
@@ -447,7 +447,7 @@ explícita `ccw_purge_on_uninstall=true`.
 ```bash
 ./tests/run.sh
 ./tools/build-zip.sh
-sha256sum dist/clinicaclick-web-2.0.0-alpha.3.zip
+sha256sum dist/clinicaclick-web-2.0.0-alpha.4.zip
 ```
 
 El builder copia una allowlist, ordena entradas, fija un timestamp DOS y

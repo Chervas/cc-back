@@ -528,6 +528,23 @@ $tests['public landing loader never exposes the server-side intake HMAC'] = stat
     ccw_test_assert(strpos(json_encode($setup['artifact']), $setup['secret']) === false, 'artifact bundle or manifest contains IntakeConfig HMAC material');
 };
 
+$tests['legacy plugin remains the only global measurement owner during migration'] = static function () {
+    ccw_test_setup_intake('legacy-coexistence');
+    update_option('active_plugins', array('clinicaclick/clinicaclick.php', 'clinicaclick-web/clinicaclick.php'));
+    $router = new CCW_Router(new CCW_Cache());
+
+    ob_start();
+    $router->measurement_tag();
+    $suppressed = (string) ob_get_clean();
+    ccw_test_assert($suppressed === '', 'new global loader was rendered while the legacy plugin was active');
+
+    update_option('active_plugins', array('clinicaclick-web/clinicaclick.php'));
+    ob_start();
+    $router->measurement_tag();
+    $active = (string) ob_get_clean();
+    ccw_test_assert(strpos($active, 'assets/loader.js') !== false, 'new global loader did not take ownership after the legacy plugin was disabled');
+};
+
 $tests['Clinicaclick consent ownership is temporary and fails open for the CMP UI'] = static function () {
     $setup = ccw_test_setup_intake('clinicaclick-consent-owner');
     $runtime = CCW_Config::runtime_configuration();
