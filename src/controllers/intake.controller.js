@@ -1640,8 +1640,14 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   // dos valores, exigimos que coincidan antes de confiar en ellos.
   const chatGroupConfigRecord = [cfg, groupCfg, domainCfg]
     .find((record) => record?.assignment_scope === 'group') || null;
-  const mustValidateGroupChatLocation = clinicaIdParsed === null
-    || cfg?.assignment_scope === 'group';
+  // A published Web landing has already resolved and validated its clinic in
+  // the server-side publication bridge. Reinterpreting that canonical clinic
+  // as a browser-submitted chat location would lose the authoritative
+  // `clinicaclick_web_publication` attribution (and needlessly validate the
+  // same group membership twice).
+  const mustValidateGroupChatLocation = !webLandingAttribution && (
+    clinicaIdParsed === null || cfg?.assignment_scope === 'group'
+  );
   if (mustValidateGroupChatLocation) {
     const chatClinicSelection = await resolveChatStateClinicSelection({
       body,
