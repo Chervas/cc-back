@@ -366,6 +366,14 @@ const STRATEGY_REQUEST_STATE_MAP = {
   paused: 'pausada',
   completed: 'finalizada'
 };
+const LEGACY_STRATEGY_STATUS_MAP = Object.freeze({
+  borrador: 'draft',
+  pendiente_aceptacion: 'pending_approval',
+  activa: 'active',
+  pausada: 'paused',
+  finalizada: 'completed'
+});
+const STRATEGY_MODE_FALLBACK_STATUSES = new Set(['active', 'paused']);
 
 const EVENT_CATALOG = {
   lead: {
@@ -684,14 +692,35 @@ function normalizeStrategyStatus(rawStatus) {
   if (VALID_STRATEGY_STATUSES.has(status)) {
     return status;
   }
-  const legacyMap = {
-    borrador: 'draft',
-    pendiente_aceptacion: 'pending_approval',
-    activa: 'active',
-    pausada: 'paused',
-    finalizada: 'completed'
-  };
-  return legacyMap[status] || 'draft';
+  return LEGACY_STRATEGY_STATUS_MAP[status] || 'draft';
+}
+
+function normalizeStoredStrategyStatus(rawStatus) {
+  const status = String(rawStatus || '').trim().toLowerCase();
+  if (!VALID_STRATEGY_STATUSES.has(status) && !LEGACY_STRATEGY_STATUS_MAP[status]) {
+    return null;
+  }
+  return normalizeStrategyStatus(status);
+}
+
+function strategyCanProvideModeFallback(payload, row, mode) {
+  const payloadStatus = normalizeStoredStrategyStatus(payload?.status || row?.estado);
+  const persistedStatus = normalizeStoredStrategyStatus(row?.estado);
+  if (
+    !STRATEGY_MODE_FALLBACK_STATUSES.has(payloadStatus)
+    || !STRATEGY_MODE_FALLBACK_STATUSES.has(persistedStatus)
+  ) {
+    return false;
+  }
+
+  if (!usesExistingAdvertiserCampaigns(mode)) return true;
+  const readiness = payload?.activation_readiness && typeof payload.activation_readiness === 'object'
+    && !Array.isArray(payload.activation_readiness)
+    ? payload.activation_readiness
+    : {};
+  return readiness.ready === true
+    && readiness.validated === true
+    && readiness.validate_only === true;
 }
 
 function mapStrategyStatusToRequestState(status) {
@@ -2692,11 +2721,12 @@ function rollupMetaAdRowsToCampaignRows(adRows, campaignEntitiesById) {
   });
 }
 
-async function loadIntakeRecordForScope(scope) {
+async function loadIntakeRecordForScope(scope, dependencies = {}) {
   const where = scope.assignment_scope === 'group'
     ? { group_id: scope.group_id, assignment_scope: 'group' }
     : { clinic_id: scope.clinic_id };
-  const record = await IntakeConfig.findOne({ where, raw: true });
+  const IntakeConfigModel = dependencies.IntakeConfig || IntakeConfig;
+  const record = await IntakeConfigModel.findOne({ where, raw: true });
   return record || null;
 }
 
@@ -2740,9 +2770,10 @@ async function upsertCampaignSettingsForScope(scope, campaignPatch) {
   });
 }
 
-async function listClinicIdsForGroup(groupId) {
+async function listClinicIdsForGroup(groupId, dependencies = {}) {
   if (!groupId) return [];
-  const clinics = await Clinica.findAll({
+  const ClinicaModel = dependencies.Clinica || Clinica;
+  const clinics = await ClinicaModel.findAll({
     where: { grupoClinicaId: groupId },
     attributes: ['id_clinica'],
     raw: true
@@ -2752,83 +2783,174 @@ async function listClinicIdsForGroup(groupId) {
     .filter((value) => Number.isInteger(value) && value > 0);
 }
 
-async function findLatestCampaignMode(where, matcher) {
-  const rows = await CampaignRequest.findAll({
-    where,
-    attributes: ['id', 'clinica_id', 'solicitud', 'created_at'],
-    order: [['created_at', 'DESC']],
-    limit: 50,
-    raw: true
-  });
-
-  for (const row of rows) {
-    const payload = row?.solicitud && typeof row.solicitud === 'object' ? row.solicitud : {};
-    if (payload.kind !== 'campaign_onboarding' || payload.status !== 'completed') {
-      continue;
-    }
-
-    const mode = String(payload.mode || '').trim().toLowerCase();
-    if (!VALID_MODES.has(mode)) {
-      continue;
-    }
-
-    if (matcher(payload)) {
-      return mode;
-    }
-  }
-
-  return null;
+function normalizeResolvedCampaignMode(modeValue, rawModeContract = null) {
+  const mode = String(modeValue || '').trim().toLowerCase();
+  if (!VALID_MODES.has(mode)) return null;
+  const modeContract = rawModeContract && typeof rawModeContract === 'object'
+    && !Array.isArray(rawModeContract)
+    ? rawModeContract
+    : null;
+  return {
+    mode,
+    mode_contract: buildCampaignModeContract(mode, modeContract?.authorization || null)
+  };
 }
 
-async function resolveActiveModeForScope(scope) {
+async function findLatestCampaignOnboardingMode(where, matcher, dependencies = {}) {
+  const CampaignRequestModel = dependencies.CampaignRequest || CampaignRequest;
+  const pageSize = 50;
+
+  // Keep onboarding ahead of the strategy fallback even for scopes with a
+  // long CampaignRequest history. A fixed first page could otherwise hide the
+  // completed onboarding that established the scope's mode.
+  for (let offset = 0; ; offset += pageSize) {
+    const rows = await CampaignRequestModel.findAll({
+      where,
+      attributes: ['id', 'clinica_id', 'solicitud', 'created_at'],
+      order: [['created_at', 'DESC'], ['id', 'DESC']],
+      limit: pageSize,
+      offset,
+      raw: true
+    });
+
+    for (const row of rows) {
+      const payload = row?.solicitud && typeof row.solicitud === 'object' ? row.solicitud : {};
+      if (payload.kind !== 'campaign_onboarding' || payload.status !== 'completed') {
+        continue;
+      }
+
+      if (matcher(payload)) {
+        const resolved = normalizeResolvedCampaignMode(payload.mode, payload.mode_contract);
+        if (resolved) return resolved;
+      }
+    }
+
+    if (rows.length < pageSize) return null;
+  }
+}
+
+async function findLatestMarketingStrategyMode(where, matcher, dependencies = {}) {
+  const CampaignRequestModel = dependencies.CampaignRequest || CampaignRequest;
+  const pageSize = 50;
+
+  // CampaignRequests stores both onboarding commands and strategies. Paginate
+  // through the scoped rows so a long history of completed requests cannot hide
+  // the newest still-open strategy behind an arbitrary fixed limit.
+  for (let offset = 0; ; offset += pageSize) {
+    const rows = await CampaignRequestModel.findAll({
+      where,
+      attributes: ['id', 'clinica_id', 'solicitud', 'estado', 'created_at', 'updated_at'],
+      order: [['updated_at', 'DESC'], ['created_at', 'DESC'], ['id', 'DESC']],
+      limit: pageSize,
+      offset,
+      raw: true
+    });
+
+    for (const row of rows) {
+      const payload = row?.solicitud && typeof row.solicitud === 'object' ? row.solicitud : {};
+      if (payload.kind !== 'marketing_strategy') continue;
+      if (!matcher(payload, row)) continue;
+
+      const resolved = normalizeResolvedCampaignMode(
+        payload.mode_snapshot || payload.mode,
+        payload.mode_contract
+      );
+      if (!resolved || !strategyCanProvideModeFallback(payload, row, resolved.mode)) continue;
+
+      // The readiness evidence only authorizes the snapshot as a source for the
+      // tier. Existing consent and provider gates still decide whether the
+      // strategy can run; this resolver never promotes or activates it.
+      return resolved;
+    }
+
+    if (rows.length < pageSize) return null;
+  }
+}
+
+async function resolveModeStateForScope(scope, dependencies = {}) {
   if (!scope || typeof scope !== 'object') return null;
 
   if (scope.assignment_scope === 'clinic' && scope.clinic_id) {
     const clinicRecord = await loadIntakeRecordForScope({
       assignment_scope: 'clinic',
       clinic_id: scope.clinic_id
-    });
+    }, dependencies);
     const clinicConfig = normalizeCampaignConfig(clinicRecord?.config?.campaigns || {});
     if (clinicConfig.active_mode) {
-      return clinicConfig.active_mode;
+      return {
+        mode: clinicConfig.active_mode,
+        mode_contract: clinicConfig.mode_contract
+      };
     }
 
     if (scope.group_id) {
       const groupRecord = await loadIntakeRecordForScope({
         assignment_scope: 'group',
         group_id: scope.group_id
-      });
+      }, dependencies);
       const groupConfig = normalizeCampaignConfig(groupRecord?.config?.campaigns || {});
       if (groupConfig.active_mode) {
-        return groupConfig.active_mode;
+        return {
+          mode: groupConfig.active_mode,
+          mode_contract: groupConfig.mode_contract
+        };
       }
     }
 
-    const clinicMode = await findLatestCampaignMode(
+    const clinicMode = await findLatestCampaignOnboardingMode(
       { clinica_id: scope.clinic_id },
       (payload) => {
         const payloadScope = payload.scope && typeof payload.scope === 'object' ? payload.scope : {};
         return payloadScope.assignment_scope === 'clinic'
           && parseInteger(payloadScope.clinic_id) === scope.clinic_id;
-      }
+      },
+      dependencies
     );
 
     if (clinicMode) {
       return clinicMode;
     }
 
+    let groupClinicIds = [];
     if (scope.group_id) {
-      const groupClinicIds = await listClinicIdsForGroup(scope.group_id);
+      groupClinicIds = await listClinicIdsForGroup(scope.group_id, dependencies);
       if (groupClinicIds.length > 0) {
-        return findLatestCampaignMode(
-          { clinica_id: { [Op.in]: groupClinicIds } },
+        const operators = dependencies.operators || Op;
+        const groupMode = await findLatestCampaignOnboardingMode(
+          { clinica_id: { [operators.in]: groupClinicIds } },
           (payload) => {
             const payloadScope = payload.scope && typeof payload.scope === 'object' ? payload.scope : {};
             return payloadScope.assignment_scope === 'group'
               && parseInteger(payloadScope.group_id) === scope.group_id;
-          }
+          },
+          dependencies
         );
+        if (groupMode) return groupMode;
       }
+    }
+
+    const clinicStrategyMode = await findLatestMarketingStrategyMode(
+      { clinica_id: scope.clinic_id },
+      (payload) => {
+        const payloadScope = payload.scope && typeof payload.scope === 'object' ? payload.scope : {};
+        return payloadScope.assignment_scope === 'clinic'
+          && parseInteger(payloadScope.clinic_id) === scope.clinic_id;
+      },
+      dependencies
+    );
+    if (clinicStrategyMode) return clinicStrategyMode;
+
+    if (scope.group_id && groupClinicIds.length > 0) {
+      const operators = dependencies.operators || Op;
+      return findLatestMarketingStrategyMode(
+        { clinica_id: { [operators.in]: groupClinicIds } },
+        (payload) => {
+          const payloadScope = payload.scope && typeof payload.scope === 'object' ? payload.scope : {};
+          return payloadScope.assignment_scope === 'group'
+            && parseInteger(payloadScope.group_id) === scope.group_id;
+        },
+        dependencies
+      );
     }
 
     return null;
@@ -2838,65 +2960,57 @@ async function resolveActiveModeForScope(scope) {
     const groupRecord = await loadIntakeRecordForScope({
       assignment_scope: 'group',
       group_id: scope.group_id
-    });
+    }, dependencies);
     const groupConfig = normalizeCampaignConfig(groupRecord?.config?.campaigns || {});
     if (groupConfig.active_mode) {
-      return groupConfig.active_mode;
+      return {
+        mode: groupConfig.active_mode,
+        mode_contract: groupConfig.mode_contract
+      };
     }
 
     const groupClinicIds = Array.isArray(scope.clinic_ids) && scope.clinic_ids.length > 0
       ? scope.clinic_ids
-      : await listClinicIdsForGroup(scope.group_id);
+      : await listClinicIdsForGroup(scope.group_id, dependencies);
 
     if (groupClinicIds.length === 0) {
       return null;
     }
 
-    return findLatestCampaignMode(
-      { clinica_id: { [Op.in]: groupClinicIds } },
+    const operators = dependencies.operators || Op;
+    const onboardingMode = await findLatestCampaignOnboardingMode(
+      { clinica_id: { [operators.in]: groupClinicIds } },
       (payload) => {
         const payloadScope = payload.scope && typeof payload.scope === 'object' ? payload.scope : {};
         return payloadScope.assignment_scope === 'group'
           && parseInteger(payloadScope.group_id) === scope.group_id;
-      }
+      },
+      dependencies
+    );
+    if (onboardingMode) return onboardingMode;
+
+    return findLatestMarketingStrategyMode(
+      { clinica_id: { [operators.in]: groupClinicIds } },
+      (payload) => {
+        const payloadScope = payload.scope && typeof payload.scope === 'object' ? payload.scope : {};
+        return payloadScope.assignment_scope === 'group'
+          && parseInteger(payloadScope.group_id) === scope.group_id;
+      },
+      dependencies
     );
   }
 
   return null;
 }
 
-async function resolveModeContractForScope(scope) {
-  if (!scope || typeof scope !== 'object') return null;
+async function resolveActiveModeForScope(scope, dependencies = {}) {
+  const resolved = await resolveModeStateForScope(scope, dependencies);
+  return resolved?.mode || null;
+}
 
-  if (scope.assignment_scope === 'clinic' && scope.clinic_id) {
-    const clinicRecord = await loadIntakeRecordForScope({
-      assignment_scope: 'clinic',
-      clinic_id: scope.clinic_id
-    });
-    const clinicConfig = normalizeCampaignConfig(clinicRecord?.config?.campaigns || {});
-    if (clinicConfig.active_mode) return clinicConfig.mode_contract;
-
-    if (scope.group_id) {
-      const groupRecord = await loadIntakeRecordForScope({
-        assignment_scope: 'group',
-        group_id: scope.group_id
-      });
-      const groupConfig = normalizeCampaignConfig(groupRecord?.config?.campaigns || {});
-      if (groupConfig.active_mode) return groupConfig.mode_contract;
-    }
-    return null;
-  }
-
-  if (scope.assignment_scope === 'group' && scope.group_id) {
-    const groupRecord = await loadIntakeRecordForScope({
-      assignment_scope: 'group',
-      group_id: scope.group_id
-    });
-    const groupConfig = normalizeCampaignConfig(groupRecord?.config?.campaigns || {});
-    return groupConfig.active_mode ? groupConfig.mode_contract : null;
-  }
-
-  return null;
+async function resolveModeContractForScope(scope, dependencies = {}) {
+  const resolved = await resolveModeStateForScope(scope, dependencies);
+  return resolved?.mode_contract || null;
 }
 
 function normalizeModeTransitionConfirmation(rawValue) {
@@ -10432,8 +10546,12 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
   }
 
   const requestedMode = String(req.body?.mode || '').trim().toLowerCase();
-  const scopeMode = await resolveActiveModeForScope(scope);
-  const storedModeContract = await resolveModeContractForScope(scope);
+  // Resolve mode and contract from one snapshot of the precedence chain. This
+  // prevents a concurrent IntakeConfig/onboarding write from mixing a mode from
+  // one source with a contract from another.
+  const resolvedScopeMode = await resolveModeStateForScope(scope);
+  const scopeMode = resolvedScopeMode?.mode || null;
+  const storedModeContract = resolvedScopeMode?.mode_contract || null;
   const effectiveMode = uniqueClinicModes[0]
     || (VALID_MODES.has(scopeMode) ? scopeMode : null)
     || (VALID_MODES.has(requestedMode) ? requestedMode : null);
@@ -10773,6 +10891,8 @@ exports.__test = {
   resolveMetaCampaignMappingAccess,
   resolveAnalysisDateRange,
   resolveLeadProvider,
+  resolveActiveModeForScope,
+  resolveModeContractForScope,
   resolveWebMeasurementMarketingState,
   resolveEnabledConversionEvents,
   strategyPayloadUsesGoogleAds,
