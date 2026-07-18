@@ -25,15 +25,19 @@ Operación WordPress: `wordpress/clinicaclick-web/README.md`. Origen alojado:
 
 Estado 2026-07-18:
 
-- backend integrado en `dev` hasta `1466452` y staging hasta `807b967`;
+- backend integrado en `dev` hasta `4e4b555` y staging/live hasta `5e57431`;
+- corte funcional frontend `dev` `305d4eae`/staging `5f8f8858`: 153/153,
+  build limpio `5a08e6a108414a76`, index/source SHA-256
+  `c54b4f254b803a1cd7419660f76be4cb8e0cb5df2912f014e709b9d0822bafc7`,
+  481/481 ficheros y readback exacto de assets críticos en 200; los commits
+  documentales posteriores no cambian el runtime;
 - migraciones `19000..25000` aplicadas tras backup; 17 tablas y cinco
   plantillas; cero policies/bindings reales creados;
 - gates de staging: editor para scopes Propdental y publicación solo
   `group:5` mediante `MARKETING_WEB_PUBLISHING_SCOPES`;
-- plugin WordPress `2.0.0-alpha.6` instalado/activo en Propdental junto al
-  legado `1.1.7`, con un único loader/bootstrap. El preflight inspeccionó ese
-  runtime, pero la DB aún conserva `2.0.0-alpha.5` por la cadencia de heartbeat
-  de hasta 24 horas; no confundir versión live con versión reportada atrasada;
+- plugin WordPress `2.0.0-alpha.7` instalado/activo en Propdental junto al
+  legado `1.1.7`, con un único loader/bootstrap. WP-CLI y DB están alineados;
+  la instalación permanece `connected` y conserva rollback real `alpha.6`;
 - instalación `524c2f73-6b69-42f2-8cb0-c8d171575d94` conectada en el origen
   canónico `https://www.propdental.es`; el alta `apex` se normalizó solo durante
   el primer handshake virgen y las comprobaciones posteriores son estrictas;
@@ -58,16 +62,13 @@ Estado 2026-07-18:
 - un WordPress compartido por varias clínicas exige multi-route antes de
   ampliar el piloto, y la rotación Ed25519 operativa sigue siendo gate de GA.
 
-Estado de implementación posterior, todavía separado de la evidencia live:
+Estado de implementación actual, separado de la evidencia del artefacto live:
 
 - renderer `clinicaclick-web-renderer/1.3.0` compila cabecera y pie globales en
   cada página y manifiesta el formulario global mediante contratos por página;
-- el paquete fuente `clinicaclick-web` `2.0.0-alpha.7` valida esos contratos y
-  su cobertura de rutas. Antes de publicar globales debe guardarse el rollback
-  real `alpha.6` con `config/installation.php`, instalar el ZIP provisionado
-  `alpha.7` sin perder identidad, ejecutar `CCW_Plugin::activate(false)` como
-  usuario `propdental.es` y comprobar **en DB** `2.0.0-alpha.7`; no basta
-  esperar el heartbeat ordinario ni inspeccionar solo los ficheros. La API
+- el paquete `clinicaclick-web` `2.0.0-alpha.7` live valida esos contratos y su
+  cobertura de rutas. Rollback real `alpha.6`, ZIP provisionado, activación
+  como usuario del sitio y DB=`2.0.0-alpha.7` ya están acreditados. La API
   bloquea fail-closed un deployment WordPress con formulario global si el
   plugin es anterior (`409 web_wordpress_global_intake_plugin_outdated`);
   documentos legacy y header/footer globales sin formulario no quedan
@@ -83,11 +84,10 @@ Estado de implementación posterior, todavía separado de la evidencia live:
   de crear un proyecto desde campaña; el filtro frontend nunca basta para
   autorizar una combinación.
 
-Tanda posterior ya promovida y desplegada:
+Tanda promovida y desplegada:
 
-- `clinicaclick-web` `2.0.0-alpha.6` endurece identidad Web y enruta eventos de
-  landing por el relay atribuible; es la versión live y `alpha.5` queda como
-  rollback local;
+- `clinicaclick-web` `2.0.0-alpha.7` conserva identidad Web/relay atribuible y
+  añade contratos globales por página; `alpha.6` queda como rollback operativo;
 - la API separa rollout de disponibilidad real y proyecta capabilities
   fail-closed para WordPress, hosted y custom domain;
 - hosted valida pareja Ed25519, firma, bundle exacto, hashes, symlinks, punteros
@@ -112,13 +112,17 @@ existen en la implementación. Sigue pendiente la aceptación visual completa
 contra Figma, drag/drop avanzado y el E2E público de esta tanda. Se reutiliza
 la UX, no el runtime ModSuite. Véase `20.14`/`20.15` en frontend.
 
-Evidencia local vigente: 223/223 contratos Node, 26/26 PHP/WordPress, 3/3 de
-interoperabilidad y frontend Marketing Web 153/153. El build de producción local
-terminó verde con hash `da0d27c8f1d2f80a`; mantiene el warning preexistente de
-bundle de 4,15 MB. Sigue pendiente de despliegue. El corte live anterior se
-acredita por 78/78 frontend, build `e775a9d1935d0a68`, readback,
-relay/atribución, limpieza, rollback y monitor de `alpha.6`; esos E2E no
-convierten automáticamente `alpha.7`/renderer `1.3.0` en live.
+Evidencia vigente: 223/223 contratos Node, 26/26 PHP/WordPress, 3/3 de
+interoperabilidad y frontend Marketing Web 153/153. El build staging
+limpio `5a08e6a108414a76` está desplegado. Chromium final de solo lectura
+cubrió onboarding, editor, CTA, Medios, SEO/Social/Schema, revisiones y CMS en
+`1440`/`360`: 13 capturas, todas las aserciones verdes y cero errores de
+consola/página/request/HTTP, mutaciones Marketing Web u overflow. El fix
+`305d4eae` estabiliza por identidad las opciones CTA y cierra el bucle de CPU
+reproducido en Chromium. Backend y
+plugin también están live. El readback, relay/atribución, limpieza, rollback y
+monitor acreditan el artefacto público renderer `1.2.1`; no convierten
+automáticamente renderer `1.3.0` en artefacto live.
 
 ## Orden de verificación
 
@@ -150,8 +154,8 @@ ACL operativa: agencia es marketing-only y solo recibe atribución/pacientes/lea
 
 Release funcional histórica previa a Web: backend staging `9b82958`, frontend
 `3c4593ae`, build `8ca8e450c563e9ee`. El corte Web actual está documentado
-arriba (`807b967` backend; frontend staging `56da07f8`, build
-`e775a9d1935d0a68`). Consent v5 sigue vigente. Propdental continúa en
+arriba (backend staging `5e57431`; corte funcional frontend staging `5f8f8858`,
+build limpio `5a08e6a108414a76`). Consent v5 sigue vigente. Propdental continúa en
 `connect_only`; no se activa Mejora/Piloto ni se cambian goals, URLs, pujas o
 presupuesto. Meta Francia no tiene todavía cuenta publicitaria/píxel
 configurados. `Conseguir más reseñas` está cerrado/listo.
