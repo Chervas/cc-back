@@ -619,6 +619,11 @@ function testControllerStopsBeforeExternalTracking() {
     /cfg\?\.assignment_scope === 'group'[\s\S]*submittedClinicId: explicitClinicIdRaw/
   );
   assert.match(
+    ingest.slice(chatLocationResolution - 900, chatLocationResolution),
+    /const mustValidateGroupChatLocation = !webLandingAttribution/,
+    'a server-validated Web publication must preserve its authoritative clinic match source'
+  );
+  assert.match(
     ingest.slice(chatLocationResolution, groupFallback),
     /chatClinicSelection\.hasCandidate[\s\S]*return res\.status\(422\)/
   );
