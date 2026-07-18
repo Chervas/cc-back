@@ -6,6 +6,7 @@ const SCHEMA_VERSION = 'clinicaclick-campaign-optimization-lifecycle/v1';
 
 const MODES = Object.freeze({
   CONNECT_ONLY: 'connect_only',
+  GUIDED_IMPROVEMENT: 'guided_improvement',
   MANAGED_SERVICE: 'managed_service',
 });
 
@@ -160,7 +161,7 @@ function normalizeThresholds(overrides = {}) {
 
 function normalizeMode(mode) {
   if (!Object.values(MODES).includes(mode)) {
-    throw new TypeError(`mode debe ser ${MODES.CONNECT_ONLY} o ${MODES.MANAGED_SERVICE}`);
+    throw new TypeError(`mode debe ser ${Object.values(MODES).join(', ')}`);
   }
   return mode;
 }
@@ -169,8 +170,8 @@ function approvalPolicyForMode(mode) {
   const normalized = normalizeMode(mode);
   return {
     required: true,
-    role: normalized === MODES.CONNECT_ONLY ? APPROVAL_ROLES.CLIENT : APPROVAL_ROLES.OPERATOR,
-    automatic_provider_mutation: false,
+    role: normalized === MODES.MANAGED_SERVICE ? APPROVAL_ROLES.OPERATOR : APPROVAL_ROLES.CLIENT,
+    automatic_provider_mutation: normalized === MODES.GUIDED_IMPROVEMENT,
   };
 }
 

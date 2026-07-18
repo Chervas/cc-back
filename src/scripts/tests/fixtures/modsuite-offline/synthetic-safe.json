@@ -1,0 +1,97 @@
+{
+  "config": {
+    "max_id": 18
+  },
+  "pages": [
+    {
+      "ID": 10,
+      "name": "Página demostración",
+      "type": "Pagina",
+      "class": "legacy-page",
+      "content": [
+        {
+          "ID": 11,
+          "type": "container",
+          "class": "legacy-container",
+          "stylesLaptop": {
+            "background-color": "#ffffff"
+          },
+          "content": [
+            {
+              "ID": 12,
+              "type": "row",
+              "content": [
+                {
+                  "ID": 13,
+                  "type": "col",
+                  "content": [
+                    {
+                      "ID": 14,
+                      "type": "text",
+                      "content": "Atención cercana"
+                    },
+                    {
+                      "ID": 15,
+                      "type": "text",
+                      "content": "<h2>Una explicación sencilla</h2>"
+                    },
+                    {
+                      "ID": 16,
+                      "type": "image",
+                      "content": "https://media.example.org/clinic-demo.jpg",
+                      "alt_image": "Recepción luminosa"
+                    },
+                    {
+                      "ID": 17,
+                      "type": "button",
+                      "content": "button",
+                      "text_button": "Ver disponibilidad",
+                      "url_button": "https://clinic.example/reservar?utm_source=legacy"
+                    },
+                    {
+                      "ID": 18,
+                      "type": "contacto",
+                      "content": {
+                        "title": "Solicita información",
+                        "params": [
+                          { "name": "Nombre" },
+                          { "name": "Correo electrónico" },
+                          { "name": "Teléfono móvil" },
+                          { "name": "Mensaje" }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "header": {
+    "ID": 20,
+    "name": "Header",
+    "type": "Pagina",
+    "content": [
+      {
+        "ID": 21,
+        "type": "text",
+        "content": "Clínica de demostración"
+      }
+    ]
+  },
+  "footer": {
+    "ID": 30,
+    "name": "Footer",
+    "type": "Pagina",
+    "content": [
+      {
+        "ID": 31,
+        "type": "text",
+        "content": "Información general"
+      }
+    ]
+  }
+}

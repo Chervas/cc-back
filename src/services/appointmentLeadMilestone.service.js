@@ -165,6 +165,10 @@ async function maybeUploadCompletedTreatmentConversion({
     eventId: `appointment-${appointmentId}-treatment-completed`,
     clinicId: positiveInt(plain.clinica_id ?? lead.clinica_id),
     value,
+    // Tratamientos.precio_base is a useful fallback weight, not proof of an
+    // amount accepted, invoiced or paid by the patient.
+    valueProvenance: 'treatment_base_price',
+    valueIsFallback: true,
     currency: 'EUR',
     occurredAt: plain.updated_at || plain.created_at || new Date(),
   });

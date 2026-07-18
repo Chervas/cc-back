@@ -3,7 +3,10 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"No tests configured; skipping\"",
+    "test": "npm run test:marketing",
+    "test:marketing": "npm run test:marketing-web && npm run test:marketing-campaigns",
+    "test:marketing-web": "node src/scripts/tests/run_marketing_web_tests.js",
+    "test:marketing-campaigns": "node src/scripts/tests/run_marketing_campaign_tests.js",
     "start": "node src/app.js"
   },
   "keywords": [],
@@ -13,6 +16,7 @@
     "@aws-sdk/client-cloudfront": "3.600.0",
     "@aws-sdk/client-s3": "3.600.0",
     "@aws-sdk/client-sts": "3.600.0",
+    "ajv": "8.20.0",
     "axios": "^1.6.0",
     "bcrypt": "^5.1.1",
     "bcryptjs": "^2.4.3",

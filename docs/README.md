@@ -13,6 +13,7 @@ Este índice separa la arquitectura general de los procedimientos que deben usar
 | [E2E controlado de intake y limpieza](./intake-e2e-cleanup.md) | Formulario/chat/teléfono, routing estricto, datos sintéticos y limpieza segura. |
 | [Activos compartidos de grupo y asignaciones clínicas](./group-asset-mapping.md) | Contrato de conexión única por scope, activo efectivo propio/heredado/asignado, consumo común entre módulos y excepción de alias de ficha solo para reseñas. |
 | [Visibilidad local en ChatGPT y Gemini](./marketing-ai-visibility.md) | Consultas locales canónicas, autoejecución desde Informes, caché/deduplicación, estados sin secretos y contrato server-side de OpenAI/Gemini. |
+| [Adaptador offline ModSuite](./modsuite-offline-adapter.md) | Migración allowlisted de exports legacy a WebDocument v1, informe de revisión, límites y ejecución local sin runtime legacy. |
 
 ## Orden de verificación
 

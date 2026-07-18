@@ -44,6 +44,20 @@ const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
     priority: 'low',
     executorMethod: 'executeCampaignOptimizationEvaluation',
   }),
+  webDomainReconciliation: Object.freeze({
+    type: 'marketing_web_domain_reconciliation',
+    priority: 'low',
+    executorMethod: 'executeWebDomainReconciliation',
+    attachJobRequestId: true,
+  }),
+  campaignDestinationDriftAudit: Object.freeze({
+    type: 'marketing_campaign.destination_drift_audit.v1',
+    priority: 'low',
+    executorMethod: 'executeCampaignDestinationDriftAudit',
+    // Detectar un cambio externo es resultado de negocio, no un fallo que deba
+    // provocar reintentos agresivos ni autoreparaciones silenciosas.
+    reportedFailureRetryable: false,
+  }),
   webSync: Object.freeze({ type: 'web_recent', priority: 'normal', executorMethod: 'executeWebSync' }),
   webBackfill: Object.freeze({ type: 'web_backfill', priority: 'low', executorMethod: 'executeWebBackfill' }),
   analyticsSync: Object.freeze({ type: 'analytics_recent', priority: 'normal', executorMethod: 'executeAnalyticsSync' }),
@@ -129,6 +143,13 @@ const TARGETED_INTEGRATION_JOB_TYPES = Object.freeze([
   'business_profile_backfill_locations',
   'marketing_competition_heatmap_refresh',
   'marketing_ai_visibility_run',
+  // Mutates Google conversion goals. It must share the serialized provider
+  // lane and distributed lease with sync/backfill jobs.
+  'guided_campaign_goal_policy_apply',
+  // Provider destination mutations and their compensating rollback must use
+  // the same distributed integration lease as Google Ads sync/mutations.
+  'marketing_campaign.destination_apply.v1',
+  'marketing_campaign.destination_rollback.v1',
   'whatsapp_template_sync_delayed',
 ]);
 

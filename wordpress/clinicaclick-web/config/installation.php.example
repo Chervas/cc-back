@@ -1,0 +1,36 @@
+<?php http_response_code(404); exit; __halt_compiler(); ?>
+{
+  "installation_id": "REEMPLAZAR_UUID_V4",
+  "api_base": "https://crm.clinicaclick.com",
+  "token": "REEMPLAZAR_TOKEN_OPACO",
+  "trust_descriptor": {
+    "schema_version": 1,
+    "algorithm": "Ed25519",
+    "key_id": "ed25519-0000000000000000",
+    "public_key_base64": "REEMPLAZAR_CLAVE_PUBLICA"
+  },
+  "bootstrap_runtime_configuration": {
+    "schema_version": 1,
+    "installation_id": "MISMO_UUID_V4",
+    "sequence": 1,
+    "status": "active",
+    "route_prefix": "/cita",
+    "desired_artifact_hash": "REEMPLAZAR_SHA256_64_HEX",
+    "measurement": {
+      "enabled": true,
+      "scope_type": "clinic",
+      "scope_id": 56,
+      "loader_path": "/assets/loader.js",
+      "hmac_key": "REEMPLAZAR_HMAC_DEL_INTAKE_CONFIG",
+      "consent_mode_enabled": true,
+      "consent_provider": "clinicaclick"
+    }
+  },
+  "bootstrap_runtime_envelope": {
+    "signature_version": 1,
+    "algorithm": "Ed25519",
+    "key_id": "MISMO_KEY_ID",
+    "manifest_sha256": "REEMPLAZAR_SHA256_RUNTIME_CANONICO",
+    "signature": "REEMPLAZAR_FIRMA_ED25519_BASE64"
+  }
+}

@@ -15,6 +15,11 @@ module.exports = (sequelize, DataTypes) => {
       if (models.FormSubmissionEvent) {
         LeadIntake.hasMany(models.FormSubmissionEvent, { foreignKey: 'lead_intake_id', as: 'formSubmissionEvents' });
       }
+      if (models.WebProject) LeadIntake.belongsTo(models.WebProject, { foreignKey: 'web_project_id', as: 'webProject' });
+      if (models.WebRevision) LeadIntake.belongsTo(models.WebRevision, { foreignKey: 'web_revision_id', as: 'webRevision' });
+      if (models.WebPage) LeadIntake.belongsTo(models.WebPage, { foreignKey: 'web_page_id', as: 'webPage' });
+      if (models.WebPublication) LeadIntake.belongsTo(models.WebPublication, { foreignKey: 'web_publication_id', as: 'webPublication' });
+      if (models.WebArtifact) LeadIntake.belongsTo(models.WebArtifact, { foreignKey: 'web_artifact_id', as: 'webArtifact' });
     }
   }
 
@@ -99,6 +104,12 @@ module.exports = (sequelize, DataTypes) => {
     consent_version: { type: DataTypes.STRING(64), allowNull: true },
     external_source: { type: DataTypes.STRING(64), allowNull: true },
     external_id: { type: DataTypes.STRING(128), allowNull: true },
+    web_project_id: { type: DataTypes.STRING(36), allowNull: true },
+    web_revision_id: { type: DataTypes.STRING(36), allowNull: true },
+    web_page_id: { type: DataTypes.STRING(36), allowNull: true },
+    web_publication_id: { type: DataTypes.STRING(36), allowNull: true },
+    web_artifact_id: { type: DataTypes.STRING(36), allowNull: true },
+    web_form_id: { type: DataTypes.STRING(64), allowNull: true },
     intake_payload_hash: { type: DataTypes.STRING(64), allowNull: true },
     archived_at: { type: DataTypes.DATE, allowNull: true },
     archive_reason: { type: DataTypes.STRING(64), allowNull: true }

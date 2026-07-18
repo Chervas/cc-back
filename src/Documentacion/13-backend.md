@@ -4040,9 +4040,11 @@ Formato de configuración multi-cuenta por evento:
 
 Se repite el mismo esquema en `contact`, `qualified_lead`, `schedule` y `purchase`, usando en cada uno el ID de su acción. `qualified_lead` exige destinos explícitos y nunca hereda el mapping legacy de Lead. `key` es una etiqueta estable de auditoría y no la aporta el navegador. Si la propiedad `destinations` no existe, continúa vigente el formato histórico de un único `customer_id`/`conversion_action_id` por evento. Un `destinations: []` explícito no hace fallback: deja el evento sin destinos y, por tanto, sin subida. En modo multi-destino, cualquier `customer_id`, `conversion_action`, `conversion_action_id` o `send_to` recibido desde el navegador invalida la selección completa y audita todos los destinos como `request_target_override_not_allowed`.
 
-#### `new_patients` y Piloto automático: runtime dev real (2026-07-11)
+#### `new_patients`: Mide, Mejora y Piloto automático (2026-07-17)
 
-La respuesta de bootstrap ofrece solo `connect_only` y `managed_service`; `managed_self` permanece en `legacy_modes` para lectura histórica. Guardar una estrategia `managed_service` provisiona una spec `ManagedCampaign` por canal de pago, en `draft + observe`, junto con su cuenta `unfunded`. No llama a Google/Meta.
+La respuesta de bootstrap ofrece `connect_only`, `guided_improvement` y `managed_service`; `managed_self` permanece en `legacy_modes` para lectura histórica. `connect_only` mide, atribuye y sube conversiones consentidas sin mutar campañas. `guided_improvement` trabaja sobre campañas existentes y puede gestionar el objetivo de conversión y publicar una landing para campañas Google Search/PMax vinculadas, después de guardar la autorización cliente v1 con los scopes exactos `conversion_goal`, `landing_publish` y `campaign_destination`; nunca puede tocar pujas, presupuesto, segmentación ni activar/pausar campañas. Con esa autorización válida, `mode_contract.publish_landings=true`, `change_destinations=true`, el hook `marketing_web.landing_published.v1` queda `available` y el destino queda `available_after_landing_published`. Publicar no cambia Google automáticamente: materializa un binding auditable y el usuario debe confirmar una segunda operación acotada al digest exacto del destino, las cuentas seleccionadas y `readback_required=true`. El worker serializado aplica URL final en anuncios Search o en asset groups PMax, persiste la decisión explícita sobre expansión de URL, relee Google y solo marca éxito si todo coincide. Un fallo parcial encola rollback compensatorio al estado anterior; la auditoría diaria `marketing_campaign.destination_drift_audit.v1` detecta cambios posteriores sin autorepararlos. Los destinos web solo admiten URL HTTPS públicas y estables, sin credenciales, fragmento, host privado ni parámetros efímeros de atribución/firma/caducidad. `managed_service` usa el mismo puente únicamente dentro de una `ManagedCampaign` aprobada y de sus constraints; guardar la estrategia solo provisiona una spec por canal en `draft + observe`, junto con su cuenta `unfunded`, y no llama a Google/Meta.
+
+Cambiar entre niveles es una operación explícita: el cliente debe confirmar exactamente `from_mode` y `to_mode`; el backend bloquea el cambio si queda otra estrategia no completada o una policy activa/pausada en el alcance. Esto incluye la salida desde el histórico `managed_self`. No se sobrescriben ni eliminan policies para aparentar una migración. Mejora no admite una estrategia Meta-only: debe existir al menos una campaña Google vinculada. En campañas externas `channels[].percentage` no expresa reparto gestionado y se conserva en cero en vez de inventar un 100/0.
 
 Rutas cliente actuales:
 
@@ -4065,9 +4067,11 @@ Rutas internas actuales bajo `/api/admin/managed-campaigns`:
 - `POST /:id/goal-policy/preview` y `POST /:id/goal-policy/apply` para el executor gestionado de objetivos Google, con aprobación admin, digest, lease, `validateOnly`, control de drift y readback;
 - movimientos bancarios manuales, propuestas y confirmación de conciliación parcial.
 
-El executor de goal policy es una excepción estrecha al carácter dry-run de la publicación. Al entrar una `ManagedCampaign` Google Search/PMax aprobada en `launching/active`, puede provisionar idempotentemente una `CampaignOptimizationPolicy` de Qualified Lead y aplicar el custom goal inmutable de una sola cuenta/cohorte. Las acciones canónicas siguen globalmente secundarias y no se modifican las acciones del cliente. `connect_only`, `operation_mode=observe` y Smart nunca llegan a este executor.
+El executor de goal policy es una excepción estrecha al carácter dry-run de la publicación. Al entrar una `ManagedCampaign` Google Search/PMax aprobada en `launching/active`, puede provisionar idempotentemente una `CampaignOptimizationPolicy` de Qualified Lead y aplicar el custom goal inmutable de una sola cuenta/cohorte. En `guided_improvement`, activar la estrategia provisiona una policy separada por `strategy_id` —protegida también por el índice único `uniq_campaign_optimization_policy_strategy`, cuya migración aborta si el preflight detecta duplicados—, verifica que toda la cohorte proceda del inventario y sea Search/PMax, y delega el preview/apply/readback a un `JobRequest` duradero y deduplicado. El alta de la policy y su `JobRequest` comparten la transacción de activación: el servicio de enqueue único acepta una transacción llamadora y no publica un job que pueda observar un aggregate posteriormente revertido. Cada cuenta se aplica y persiste por separado para respetar el radio de impacto unitario de Google y conservar qué cuentas quedaron `applied` o `failed` ante un fallo parcial. Editar una estrategia con policy no puede cambiar silenciosamente su cohorte Google; pausar o completar sincroniza la policy y detiene nuevas evaluaciones, salvo que exista un lease de ejecución vivo. Las acciones canónicas siguen globalmente secundarias y no se modifican las acciones del cliente. `connect_only`, `operation_mode=observe` y Smart nunca llegan a este executor.
 
-La transición posterior `qualified_lead → schedule` no está integrada end-to-end. El evaluador devuelve `SCHEDULE_WEEKLY_HISTORY_UNAVAILABLE` porque aún no existe una serie semanal por fecha real de cita y `attempted_at` no la sustituye. Además, aunque `applyApprovedLifecycleTransition` existe como helper puro y el executor puede validar un `approved_transition` ya persistido, ninguna ruta actual escribe esa aprobación ni invoca el helper. Cumplir umbrales no promociona objetivos por sí solo.
+Las transiciones automáticas de Mejora `qualified_lead → schedule → purchase` consumen exclusivamente una evaluación diaria append-only que esté `ready`, sin blockers y con digest válido. La evaluación conserva una decisión de lifecycle verificable; después de su CAS local, el job se deduplica por `evaluation_id`, adquiere un lease de la policy y reutiliza como aprobación cliente la autorización inicial persistida. El job diario ejecuta además un reconciliador: escanea la última evaluación de cada policy Mejora activa y vuelve a encolar cualquier `ready` no aplicado, cerrando una caída del proceso entre commit de evaluación y creación del `JobRequest`. La etapa local solo avanza después de `validateOnly`, apply y readback saludable de todas las cuentas. Si falta la acción canónica de la etapa, la evaluación fue sustituida, cambió el scope, falla el digest o Google no confirma el readback, no hay transición; la policy conserva la etapa anterior y sigue activa para medición.
+
+Schedule construye 12 semanas completas con la fecha efectiva `CitasPacientes.inicio`, obteniendo el `id_cita` del `event_id`; si una carga no se puede resolver, añade `SCHEDULE_EFFECTIVE_DATE_COVERAGE_INCOMPLETE` y no promociona. Purchase lee la procedencia no sensible guardada en `GoogleAdsConversionUploadAttempts.request_metadata`: importes de factura/pago/ingreso/margen/tratamiento aceptado cuentan como reales; `Tratamientos.precio_base` queda marcado explícitamente como fallback. Una procedencia desconocida añade `PURCHASE_VALUE_PROVENANCE_INCOMPLETE`. Así la automatización usa hechos del negocio y no `attempted_at`, un precio de catálogo ni una aceptación inventada.
 
 La asociación asistida no acepta IDs de cuenta escritos a ciegas como autoridad. `GET /matching/options` construye, solo desde base de datos, un catálogo de grupos con clínicas activas y cuentas Google/Meta mapeadas. La respuesta usa una lista blanca (`group_id`, nombre, número de clínicas elegibles y, por cuenta, proveedor, ID externo de presentación, nombre, origen, estado de autorización y `selectable`); nunca serializa conexiones, tokens, correos, `login_customer_id`, `additionalData` ni errores internos de OAuth. Una autorización `reauthorization_required` puede mostrarse, pero no permite consultar ni confirmar inventario.
 
@@ -4084,7 +4088,7 @@ La revisión de target se opera sin inferencias por nombre:
 | DELETE | `/matching/assignments/:id/target` | Limpia el target con CAS y motivo obligatorio. |
 | GET | `/matching/assignments/:id/audits` | Historial append-only de clínica, reactivación, archivo y cambios de target. |
 
-Un target válido apunta a un `CampaignRequest` de la misma clínica cuya estrategia está `active`, tiene `objective_id=new_patients` y `mode_snapshot=connect_only`; la campaña asociada debe estar activa y no gestionada. `generic` solo es válido para una estrategia genérica. Un target `treatment` debe figurar en los tratamientos de esa estrategia y seguir activo, visible y dentro del scope de la clínica. PATCH/DELETE bloquean grupo, autorización, asociación, requests y catálogo dentro de la transacción, aplican CAS por `version` y sincronizan `CampaignRequest.solicitud.external_targets` sin borrar targets que queden con `campaigns: []`. La identidad canónica evita duplicarla en dos targets. Una asociación con target no se puede mover de clínica hasta limpiarlo explícitamente.
+Un target válido apunta a un `CampaignRequest` de la misma clínica cuya estrategia está `active`, tiene `objective_id=new_patients` y `mode_snapshot=connect_only|guided_improvement`; la campaña asociada debe estar activa y no gestionada. `generic` solo es válido para una estrategia genérica. Un target `treatment` debe figurar en los tratamientos de esa estrategia y seguir activo, visible y dentro del scope de la clínica. PATCH/DELETE bloquean grupo, autorización, asociación, requests y catálogo dentro de la transacción, aplican CAS por `version` y sincronizan `CampaignRequest.solicitud.external_targets` sin borrar targets que queden con `campaigns: []`. La identidad canónica evita duplicarla en dos targets. Una asociación con target no se puede mover de clínica hasta limpiarlo explícitamente.
 
 `ExternalCampaignAssignmentAudits` no admite update/destroy. Registra `clinic_assigned`, `reactivated`, `archived`, `target_assigned`, `target_changed` y `target_cleared`, con actor, versiones y cambios. La migración crea además un punto inicial `clinic_assigned_backfill`/`archived_backfill` para cada decisión preexistente; si no existe usuario histórico, declara actor `system` en vez de inventarlo. El backfill no asigna targets. Reactivar limpia el tombstone de la fila actual, pero conserva los eventos históricos.
 
@@ -4858,3 +4862,276 @@ publica `MAX(version)+1`, desactiva solo la version activa anterior y nunca
 reescribe historicos. Un segundo `up` reutiliza la version marcada; `down`
 reactiva la predecesora y deja catalogo/version nueva inactivos, sin borrar
 plantillas ni filas que puedan estar referenciadas por ejecuciones.
+
+## Marketing Web: control plane, editor y compilador W0-W2 (2026-07-18)
+
+W0 establece la frontera de seguridad y despliegue. El editor y la publicación
+son gates distintos y ambos nacen apagados:
+`MARKETING_WEB_EDITOR_ENABLED=false` y
+`MARKETING_WEB_PUBLISHING_ENABLED=false`. El segundo nunca evita el primero y
+`MARKETING_WEB_ENABLED_SCOPES=clinic:66,group:4` permite acotar opcionalmente el
+rollout: ausente o vacío conserva el comportamiento global del gate, pero, si
+contiene valores, solo esos scopes pueden usar editor y publicación. La lista
+es explícita y no consulta la base de datos ni infiere herencia; para un grupo
+y sus clínicas se enumeran tanto `group:id` como cada `clinic:id` autorizado.
+`MARKETING_WEB_DISABLED_SCOPES=clinic:66,group:4` actúa como kill switch y
+siempre tiene precedencia. Ambas listas fallan cerrado ante sintaxis inválida.
+El parser de rutas editoriales admite como máximo 1 MiB de JSON, el
+`WebDocument` canónico como máximo 512 KiB, y las escrituras tienen rate limits
+por actor. Las rutas públicas del plugin tienen límites distribuidos por
+instalación/IP con Redis y degradación local explícita; no comparten el JWT de
+la UI.
+
+La matriz se aplica en backend, no es solo metadata de frontend:
+
+- `marketing.web.view`: propietario, agencia, assistant, reception y
+  admin_staff;
+- `marketing.web.edit`: propietario, agencia, reception y admin_staff;
+- `marketing.web.advanced_edit`: preparado para propietario, agencia y
+  admin_staff, pero aún sin superficie avanzada publicada;
+- `marketing.web.review`: propietario, agencia y admin_staff;
+- `marketing.web.publish` y `marketing.web.domains.manage`: propietario y
+  admin_staff;
+- `marketing.web.templates.manage`: todos los roles de clínica quedan
+  denegados por defecto; solo lo obtiene un administrador global o una
+  delegación explícita y auditable en `AccessPolicyOverride`.
+
+W1 persiste el editor como datos tipados en `WebProjects`, `WebPages`,
+`WebDrafts`, `WebRevisions`, `WebTemplates` y `WebAuditEvents`. No se guarda
+HTML/CSS arbitrario. `WebDocument v1` usa un JSON Schema cerrado, IDs UUID,
+límites de profundidad/nodos/páginas/bindings y canonicalización Unicode
+determinista. Rechaza propiedades de código/estilo, markup ejecutable, objetos
+no JSON, getters, ciclos y claves peligrosas. El borrador se guarda mediante
+CAS (`lock_version`); crear, enviar y aprobar revisiones adquiere locks en orden
+`WebProject -> WebRevision`. Las revisiones aprobadas son inmutables. Las
+plantillas builtin se siembran versionadas y las instancias regeneran todos los
+IDs estructurales para no compartir referencias entre proyectos.
+
+W2 compila una revisión aprobada a un `WebArtifact` determinista e inmutable.
+La clave de identidad cubre revisión, renderer, entorno, URL base y runtime
+confiable; manifest, ficheros, hashes y QA se persisten juntos. El compilador
+escapa texto, genera HTML semántico, CSS, sitemap/robots, JSON-LD y formularios
+nativos. Producción obliga a `/_clinicaclick/intake` y emite el relay
+`/_clinicaclick/events`; ambos son same-origin. La clínica y el
+`content_snapshot` quedan congelados antes de compilar, por lo que una
+publicación no consulta contenido vivo a mitad de despliegue. Ed25519 firma el
+manifest y tanto WordPress como el origen alojado verifican hash, tamaño,
+allowlist y firma antes de activar. `status` es el único campo mutable de un
+artefacto; las actualizaciones masivas están sujetas al mismo hook.
+
+El rollout operativo es deliberado:
+
+1. aplicar las migraciones W1-W5 en un MySQL 8 aislado y repetir
+   `up -> up -> down -> down -> up` antes de cada primera implantación;
+2. configurar gates, claves Ed25519, bootstrap AES, almacenamiento y secretos
+   de intake fuera de Git;
+3. habilitar editor en un scope de prueba, compilar preview y revisar QA;
+4. instalar el plugin u origen Nginx, comprobar handshake y lectura firmada;
+5. habilitar publicación solo en ese scope, publicar un disposable, probar
+   formulario + eventos y ejecutar rollback;
+6. ampliar scopes gradualmente. Desactivar publicación bloquea nuevas
+   mutaciones, pero no borra artefactos ni rompe la página activa.
+
+La suite canónica es `npm test`: encadena los contratos Web y los contratos de
+campañas, además de los 20 contratos PHP, compatibilidad Ed25519 Node/PHP,
+compilador real y ZIP provisionado. Si `WEB_EDITOR_TEST_MYSQL_URL` está
+definida también ejecuta las
+integraciones destructivas sobre esa base **aislada**; nunca se apunta a dev,
+staging ni producción.
+
+## Marketing Web: CMS y biblioteca de medios W3 (2026-07-17)
+
+El CMS Web persiste intención editorial tipada, nunca HTML, CSS, scripts,
+iframes ni payloads libres. `WebContentEntries` mantiene la versión actual con
+CAS; `WebContentEntryVersions` conserva una fila inmutable por versión. Los
+tipos admitidos son `value_proposition`, `benefit`, `faq`, `treatment_copy`,
+`professional_bio`, `testimonial`, `legal_copy`, `article` y `category`, cada
+uno con un contrato JSON cerrado. Estados: `draft -> review -> published` y
+`archived`; editar una entrada publicada crea una nueva versión en `review`.
+Publicar o archivar exige `marketing.web.review`; leer y editar usan
+`marketing.web.view|edit` dentro del scope explícito.
+
+La biblioteca `WebMediaAssets` no guarda binarios ni credenciales. Envuelve un
+`PublicMediaAsset` marcado como no clínico; la
+API solo devuelve URL pública, MIME, tamaño, variantes saneadas, alt, foco,
+derechos y metadatos técnicos mínimos. Nunca proyecta bucket, región, object
+key, ETag, provider, HMAC ni metadata cruda. La subida sigue siendo
+`POST /api/public-media/upload` en JSON/base64 con
+`purpose=web_editor_media`; ese purpose exige que el feature flag esté activo,
+`marketing.web.edit`, un máximo de 30 subidas por actor/hora y las cuotas por
+scope configuradas en `MARKETING_WEB_MEDIA_MAX_ASSETS_PER_SCOPE` y
+`MARKETING_WEB_MEDIA_MAX_BYTES_PER_SCOPE`. Genera una key opaca bajo
+`marketing/web-editor`, pero la respuesta no devuelve URL ni object key.
+
+La subida se decodifica y recodifica a WebP con Sharp antes de almacenarla. Ese
+desarme de contenido elimina EXIF, GPS, XMP y bytes anexos. **No existe todavía
+un antivirus externo**: se registra honestamente `malware_scan_status=not_available`
+y el contrato queda fail-closed a imágenes raster que Sharp pueda decodificar;
+vídeo, SVG y binarios generales no están soportados en W3. El activo queda con
+`status=quarantine`, `sensitivity=internal` y caducidad. Después se registra el
+`asset.id` en el CMS; creación de wrapper y activación del activo ocurren en la
+misma transacción. Si falla la fila inicial se elimina el objeto opaco. La
+función interna `cleanupExpiredQuarantinedMedia` reclama cada cuarentena
+caducada bajo lock con estado `cleanup_pending` y lease antes de tocar S3. El
+registro concurrente queda así bloqueado: o activa primero el medio y el
+cleanup lo omite, o encuentra el claim y lo rechaza. El borrado S3 es
+idempotente; un fallo devuelve el activo a cuarentena y una caída después del
+borrado deja el claim recuperable al vencer el lease. Solo admite keys con
+prefijo `marketing/web-editor/(clinic|group)-<id>/`. `system_data_cleanup` la
+invoca desde el orquestador común de `JobRequest`; no existe un cron paralelo.
+
+El POST W3 no acepta multipart ni binario.
+
+APIs autenticadas y paginadas:
+
+- `GET/POST /api/marketing/web-content`;
+- `PATCH /api/marketing/web-content/:contentId` con `version` obligatorio;
+- `GET /api/marketing/web-content/:contentId/versions`;
+- `GET/POST /api/marketing/web-media`;
+- `PATCH /api/marketing/web-media/:mediaId` con `version` obligatorio.
+
+Scope se declara como `scope_type=clinic|group` y `scope_id`. Las listas usan
+`page`, `limit` (máximo 100), `status`, `search` y filtros de tipo/locale/kind.
+Una clínica solo ve activos del grupo cuando pide explícitamente
+`include_inherited_group=true`; cada resultado heredado devuelve
+`scope.inherited=true` y `read_only=true`. Un grupo nunca puede leer recursos
+de una clínica concreta. Contenido y medios solo los modifica su autor; un
+usuario distinto necesita `marketing.web.review`. Los endpoints por UUID
+devuelven 404 uniforme si el scope no es accesible. Las escrituras de contenido
+están limitadas a 120 por actor/10 minutos y las de medios a 60 por actor/hora,
+además del parser JSON W0 de 1 MiB. Errores, conflictos CAS y rate limit conservan el contrato
+`error.code`, `error.message`, `details` y `request_id`.
+
+Al aprobar una `WebRevision`, el backend adquiere locks siempre en orden
+`WebProject -> WebRevision`, resuelve los UUID externos y congela un
+`content_snapshot` tipado e inmutable. Medios deben estar `ready`, sus derechos
+no pueden haber caducado y el `PublicMediaAsset` debe seguir autorizado;
+contenido debe estar `published` y exponer el campo solicitado. Una referencia
+UUID grupal elegida por un proyecto de clínica cuenta como herencia explícita.
+Los bindings vivos de clínica se congelan como descriptores
+`clinic_public_v1` con un allowlist de campos públicos; un proyecto de grupo
+siempre requiere clínica explícita. `treatment`, `professional` e
+`intake_config` siguen devolviendo
+`resolver_not_implemented` hasta que exista su contrato propio; no se
+improvisan consultas. Si queda alguna referencia, la aprobación responde 422
+`web_revision_not_ready` con las rutas no resueltas y no cambia estado. La
+snapshot solo contiene campos publicables y rechaza nombres sensibles como
+`token`, `secret`, `hmac_key`, `bucket` u `object_key`. Las URLs de fuentes no
+admiten query ni fragmento, y la snapshot omite referencias internas de
+licencias o consentimiento.
+
+## Marketing Web: publicación WordPress y puente de campañas W4/W5 (2026-07-18)
+
+Una landing de campaña puede congelar en `WebProjects.campaign_context` el
+vínculo opcional `{strategy_id, target_kind, treatment_id}`. El objeto solo se
+admite en proyectos `purpose=landing`, tiene contrato cerrado y es inmutable
+después de crear el proyecto. La publicación copia ese contexto desde el
+proyecto; nunca confía en un valor recibido en el body. Cuando un deployment
+queda verificado y su puntero activo se confirma, la misma transacción inserta
+el `JobRequest` idempotente `marketing_web.landing_published.v1`, con id estable
+`webpub:<publication_id>:<artifact_id>`. De este modo el consumidor de campañas
+recibe URL pública canónica, scope, estrategia, target y hash sin una ventana
+entre publicación y outbox.
+
+El schema integrado se instala en orden: `19000` (proyectos/editor), `20000`
+(contenido/media), `21000` (modo Mejora), `21100` (unicidad de policy por
+estrategia), `21500` (plantillas builtin), `22000` (artefactos), `23000`
+(dominios/publicaciones/deployments), `24000` (atribución de intake), `24500`
+(contexto de campaña) y `25000` (bindings, cuentas y eventos de destino). Los
+`up` validan el contrato completo de cualquier tabla
+preexistente y fallan cerrado ante drift; solo pueden reparar la variante
+legacy exacta de `ON UPDATE CASCADE` en las FKs de scope cuando destino,
+columna referenciada, `ON DELETE` y datos permiten la sustitución segura. Los
+`down` se ejecutan en orden inverso y son repetibles.
+
+`WebPublicationDeployments` es un log append-only con secuencia monotónica. La
+petición crea deployment + `JobRequest` en una transacción; el worker bloquea
+deployment y publicación, verifica versión esperada y pasa por
+`queued -> running -> verified|failed|superseded`. Solo campos operativos de
+estado/resultado pueden cambiar, también en bulk. Activar un artefacto cambia
+el puntero de publicación únicamente después del readback público. Rollback no
+recompila contenido vivo: exige un artefacto de producción previamente
+`verified`, lo vuelve a verificar y crea otra secuencia auditable.
+
+Los dominios propios separan ownership, routing y TLS. El job durable
+`marketing_web_domain_reconciliation` corre por defecto a los minutos
+`7,22,37,52`; revalida pendientes y reduce las comprobaciones de dominios
+estables a una vez al día. El proveedor Cloudflare se usa solo server-side y
+el modo manual conserva DNS/TLS explícitos. Ninguna publicación custom-domain
+se activa hasta que ownership, ruta y certificado estén listos en la misma
+reconciliación.
+
+Los artefactos WordPress admiten dos proveedores mediante
+`MARKETING_WEB_ARTIFACT_STORE_MODE=authenticated_db|s3`:
+
+- `authenticated_db` reutiliza el manifest y los ficheros inmutables ya
+  guardados en `WebArtifacts`; no duplica bytes. Es el fallback automático si
+  no hay configuración S3 y genera URLs HTTPS bajo el mismo API.
+- `s3` conserva el almacén público inmutable existente y exige bucket, base
+  HTTPS y credenciales del servidor. Si no se declara modo, solo se selecciona
+  S3 cuando están configurados bucket y base URL.
+
+En `authenticated_db`, las rutas públicas respecto a JWT de UI son:
+
+- `GET /api/marketing/web-installations/:installationId/artifacts/:artifactHash/manifest`;
+- `GET /api/marketing/web-installations/:installationId/artifacts/:artifactHash/envelope`;
+- `GET /api/marketing/web-installations/:installationId/artifacts/:artifactHash/files/:pathToken`.
+
+No son anónimas. Exigen `Authorization: Bearer <token de instalación>` y
+`X-Clinicaclick-Plugin-Version`, aplican rate limit por instalación/IP y vuelven
+a resolver el único artefacto deseado. Solo sirven el hash exacto de esa
+instalación, el manifest canónico, su envelope Ed25519 regenerado de forma
+determinista y las rutas declaradas en el manifest. Un hash anterior o ajeno,
+un token de otra instalación o un `pathToken` no canónico fallan cerrado. Las
+respuestas son `private, no-store` y nunca exponen bucket, key ni credenciales.
+
+El plugin `2.0.0-alpha.3` decide las cabeceras por origen: añade bearer y
+versión únicamente cuando el origen completo de la descarga coincide con
+`api_base`; nunca los reenvía a S3/CDN. En ambos modos conserva la segunda
+barrera: verifica firma, hash, tamaño, allowlist y contenido antes del cambio
+atómico de `active.json`.
+
+El onboarding ya no tiene dependencia circular. La secuencia válida es:
+
+1. backend crea `WebWordpressInstallation(status=pending)` y un ticket opaco
+   AES-256-GCM ligado a actor, instalación, token y caducidad;
+2. el usuario autenticado descarga el ZIP provisionado aunque todavía no haya
+   publicación; contiene solo identidad, token y ancla pública Ed25519;
+3. al activar, WordPress guarda la configuración y envía un heartbeat
+   autenticado `activation_handshake`; el backend pasa la instalación a
+   `connected` aun sin desired state;
+4. se puede preparar una publicación mientras está `pending`, pero el backend
+   rechaza su activación hasta que la instalación esté `connected`;
+5. tras publicar, `desired-state` entrega runtime firmado y artefacto; los
+   siguientes reportes confirman el hash activo.
+
+No se ha relajado ninguna firma ni autenticación. El token sigue persistido
+solo como hash en backend y como opción `autoload=false` en WordPress; el ZIP
+es `private, no-store`, el ticket dura 15 minutos y un token/descriptor que no
+coincida falla antes de generar el paquete.
+
+Los receptores públicos `POST /api/intake/leads`,
+`POST /api/intake/events` y `POST /api/intake/whatsapp-origin` también son
+fail-closed. Aceptan el HMAC del
+`IntakeConfig` aplicable o, solo cuando ese scope no tiene secreto, el HMAC
+server-to-server configurado en `INTAKE_WEB_SECRET`. Un secreto global nunca
+puede sustituir ni saltarse el secreto más estrecho de clínica o grupo. El
+relay de landings sigue este mismo contrato: valida publicación, revisión,
+artefacto, host y ruta, reconstruye un body canónico y lo firma server-side;
+ninguna cabecera aportada por el navegador actúa como autenticación.
+
+Para el canal alojado, Nginx expone exactamente dos rutas de escritura:
+`POST /_clinicaclick/intake` y `POST /_clinicaclick/events`; cualquier otro
+POST queda denegado. La segunda permite 80 KiB para alojar el payload canónico
+validado de hasta 64 KiB y su wrapper. El runbook versionado está en
+`ops/nginx/README-marketing-web.md` y exige `nginx -t`, CSP, formulario,
+chat/teléfono/WhatsApp, readback y rollback antes de abrir un scope real.
+
+El webhook de Meta conserva el GET de verificación, pero cada POST exige
+`META_APP_SECRET`, el cuerpo crudo y una cabecera
+`X-Hub-Signature-256: sha256=<hex>` válida. La ausencia de secreto o firma se
+rechaza; no existe bypass implícito por entorno. Las pruebas solo pueden crear
+el validador con una dependencia explícita `allowUnsignedForTests: true`.
+`META_APP_SECRET` se captura al cargar el módulo: rotarlo exige actualizar el
+secreto en todos los procesos y reiniciarlos de forma controlada; un worker con
+el valor anterior rechazará firmas nuevas.

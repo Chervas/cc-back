@@ -2,9 +2,14 @@ const express = require('express');
 const router = express.Router();
 const intakeController = require('../controllers/intake.controller');
 const protect = require('./auth.middleware');
+const { landingIntakeHandlers } = require('./webLandingIntake.handlers');
 
-// Ingesta pública (protegida por firma HMAC si se configura)
+// Ingesta pública: siempre exige HMAC del scope o autenticación server-to-server.
 router.post('/leads', intakeController.ingestLead);
+router.post(
+  '/landing-leads',
+  ...landingIntakeHandlers
+);
 router.get('/leads/webhook', intakeController.verifyMetaWebhook);
 router.post('/leads/webhook', intakeController.receiveMetaWebhook);
 router.get('/config', intakeController.getIntakeConfig);

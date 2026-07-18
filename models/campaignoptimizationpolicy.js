@@ -7,7 +7,7 @@ module.exports = (sequelize, DataTypes) => {
     scopeId: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false, field: 'scope_id' },
     clinicaId: { type: DataTypes.INTEGER, allowNull: true, field: 'clinica_id' },
     grupoClinicaId: { type: DataTypes.INTEGER, allowNull: true, field: 'grupo_clinica_id' },
-    mode: { type: DataTypes.ENUM('connect_only', 'managed_service'), allowNull: false },
+    mode: { type: DataTypes.ENUM('connect_only', 'guided_improvement', 'managed_service'), allowNull: false },
     strategyId: { type: DataTypes.INTEGER, allowNull: true, field: 'strategy_id' },
     managedCampaignId: { type: DataTypes.STRING(36), allowNull: true, field: 'managed_campaign_id' },
     customerIds: { type: DataTypes.JSON, allowNull: false, field: 'customer_ids', defaultValue: [] },
@@ -31,7 +31,7 @@ module.exports = (sequelize, DataTypes) => {
       { fields: ['status', 'next_evaluation_at'] },
       { fields: ['scope_type', 'scope_id', 'status'] },
       { fields: ['managed_campaign_id'], unique: true, name: 'uniq_campaign_optimization_policy_managed_campaign' },
-      { fields: ['strategy_id'] }
+      { fields: ['strategy_id'], unique: true, name: 'uniq_campaign_optimization_policy_strategy' }
     ],
     validate: {
       coherentScope() {

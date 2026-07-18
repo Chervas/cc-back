@@ -69,7 +69,16 @@ async function resolveLeadIntakeConfig({ lead, clinicId, dependencies = {} }) {
   return { config, clinicId: normalizedClinicId, groupId };
 }
 
-function buildLifecycleConversionPayload({ lead, eventName, eventId, value, currency = 'EUR', occurredAt = new Date() }) {
+function buildLifecycleConversionPayload({
+  lead,
+  eventName,
+  eventId,
+  value,
+  valueProvenance = null,
+  valueIsFallback = null,
+  currency = 'EUR',
+  occurredAt = new Date(),
+}) {
   const consent = lead?.consentimiento_canal && typeof lead.consentimiento_canal === 'object'
     ? lead.consentimiento_canal
     : null;
@@ -84,6 +93,8 @@ function buildLifecycleConversionPayload({ lead, eventName, eventId, value, curr
       customer_id: clean(lead?.google_ads_customer_id),
       campaign_id: clean(lead?.google_ads_campaign_id),
       ...(value !== undefined && value !== null ? { value } : {}),
+      ...(valueProvenance ? { value_provenance: clean(valueProvenance) } : {}),
+      ...(typeof valueIsFallback === 'boolean' ? { value_is_fallback: valueIsFallback } : {}),
       currency,
       conversion_time: occurredAt,
       consent,
@@ -103,6 +114,8 @@ async function maybeUploadLeadLifecycleConversion({
   eventId,
   clinicId = null,
   value,
+  valueProvenance = null,
+  valueIsFallback = null,
   currency = 'EUR',
   occurredAt = new Date(),
   dependencies = {},
@@ -125,6 +138,8 @@ async function maybeUploadLeadLifecycleConversion({
     eventName,
     eventId,
     value,
+    valueProvenance,
+    valueIsFallback,
     currency,
     occurredAt,
   });

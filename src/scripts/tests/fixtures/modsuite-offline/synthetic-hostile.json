@@ -1,0 +1,70 @@
+{
+  "name": "Página con entradas no fiables",
+  "type": "Pagina",
+  "customschemas": "<script>do-not-keep()</script>",
+  "content": [
+    {
+      "ID": 100,
+      "type": "container",
+      "containerClass": ["do-not-copy"],
+      "stylesAll": {
+        "background-image": "url(javascript:do-not-keep)"
+      },
+      "content": [
+        {
+          "ID": 101,
+          "type": "row",
+          "content": [
+            {
+              "ID": 102,
+              "type": "col",
+              "content": [
+                {
+                  "ID": 103,
+                  "type": "text",
+                  "content": "<p>Texto visible</p><script>do-not-keep()</script><style>.do-not-keep{}</style>"
+                },
+                {
+                  "ID": 104,
+                  "type": "image",
+                  "content": "javascript:do-not-keep()",
+                  "alt": "No conservar"
+                },
+                {
+                  "ID": 105,
+                  "type": "image",
+                  "content": "https://localhost/private.png",
+                  "alt": "No conservar"
+                },
+                {
+                  "ID": 106,
+                  "type": "button",
+                  "text_button": "Acción no segura",
+                  "url_button": "javascript:do-not-keep()"
+                },
+                {
+                  "ID": 107,
+                  "type": "reviews",
+                  "api_key": "synthetic-secret-must-not-leak",
+                  "content": "dynamic"
+                },
+                {
+                  "ID": 108,
+                  "type": "legacy_custom_widget",
+                  "class": "do-not-copy",
+                  "content": [
+                    {
+                      "ID": 109,
+                      "type": "text",
+                      "content": "Contenido hijo seguro"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

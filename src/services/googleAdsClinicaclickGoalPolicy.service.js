@@ -1891,7 +1891,9 @@ function activeConnectOnlyGoogleClinicIds(rows) {
   const ids = new Set();
   for (const row of Array.isArray(rows) ? rows : []) {
     const payload = readCampaignRequestPayload(row);
-    if (String(payload.mode_snapshot || payload.mode || '').trim().toLowerCase() !== 'connect_only') continue;
+    if (!['connect_only', 'guided_improvement'].includes(
+      String(payload.mode_snapshot || payload.mode || '').trim().toLowerCase()
+    )) continue;
     if (String(payload.objective_id || '').trim().toLowerCase() !== STRATEGY_KEY) continue;
     if (!strategyPayloadUsesGoogle(payload)) continue;
     const scope = objectValue(payload.scope);
@@ -1912,7 +1914,9 @@ function connectOnlyGoogleCampaignsByClinicId(rows) {
   const output = new Map();
   for (const row of Array.isArray(rows) ? rows : []) {
     const payload = readCampaignRequestPayload(row);
-    if (String(payload.mode_snapshot || payload.mode || '').trim().toLowerCase() !== 'connect_only') continue;
+    if (!['connect_only', 'guided_improvement'].includes(
+      String(payload.mode_snapshot || payload.mode || '').trim().toLowerCase()
+    )) continue;
     if (String(payload.objective_id || '').trim().toLowerCase() !== STRATEGY_KEY) continue;
     if (!strategyPayloadUsesGoogle(payload)) continue;
     const scope = objectValue(payload.scope);

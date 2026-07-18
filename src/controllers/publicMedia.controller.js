@@ -1,8 +1,9 @@
 'use strict';
 
-const { fn, col } = require('sequelize');
+const { fn, col, Op } = require('sequelize');
 const { Clinica, GrupoClinica, PublicMediaAsset } = require('../../models');
 const publicMediaStorage = require('../services/publicMediaStorage.service');
+const { assertWebScopeEnabled } = require('../lib/marketingWebFeatureFlags');
 const {
   assertUserCanAccessFeature,
   getAccessibleClinicIdsForFeature,
@@ -11,12 +12,81 @@ const {
 const CLINIC_VIEW_FEATURE = 'clinic.settings.view';
 const CLINIC_EDIT_FEATURE = 'clinic.settings.edit';
 const MARKETING_FEATURE = 'marketing';
+const MARKETING_WEB_EDIT_FEATURE = 'marketing.web.edit';
+const DEFAULT_WEB_EDITOR_MEDIA_MAX_ASSETS = 500;
+const DEFAULT_WEB_EDITOR_MEDIA_MAX_BYTES = 2 * 1024 * 1024 * 1024;
+const DEFAULT_WEB_EDITOR_MEDIA_QUARANTINE_HOURS = 24;
+
+function positiveEnvInteger(name, fallback) {
+  const raw = String(process.env[name] ?? '').trim();
+  if (!raw) return fallback;
+  if (!/^[1-9][0-9]*$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+    const error = new Error(`invalid_${name.toLowerCase()}`);
+    error.status = 503;
+    throw error;
+  }
+  return Number(raw);
+}
+
+function webScope(scope) {
+  return scope.scopeType === 'clinic'
+    ? { type: 'clinic', id: Number(scope.clinicId) }
+    : { type: 'group', id: Number(scope.groupId) };
+}
+
+async function assertWebEditorMediaQuota(scope, incomingBytes, options = {}) {
+  const MediaModel = options.PublicMediaAssetModel || PublicMediaAsset;
+  if (!MediaModel) {
+    const error = new Error('web_editor_media_registry_unavailable');
+    error.status = 503;
+    throw error;
+  }
+  const maxAssets = positiveEnvInteger(
+    'MARKETING_WEB_MEDIA_MAX_ASSETS_PER_SCOPE',
+    DEFAULT_WEB_EDITOR_MEDIA_MAX_ASSETS
+  );
+  const maxBytes = positiveEnvInteger(
+    'MARKETING_WEB_MEDIA_MAX_BYTES_PER_SCOPE',
+    DEFAULT_WEB_EDITOR_MEDIA_MAX_BYTES
+  );
+  const where = {
+    purpose: 'web_editor_media',
+    status: { [Op.in]: ['quarantine', 'active'] },
+    ...(scope.scopeType === 'clinic'
+      ? { scope_type: 'clinic', clinica_id: scope.clinicId }
+      : { scope_type: 'group', grupo_clinica_id: scope.groupId }),
+  };
+  const row = await MediaModel.findOne({
+    attributes: [
+      [fn('COUNT', col('id')), 'asset_count'],
+      [fn('COALESCE', fn('SUM', col('size_bytes')), 0), 'size_bytes'],
+    ],
+    where,
+    raw: true,
+  });
+  const currentAssets = Number(row?.asset_count || 0);
+  const currentBytes = Number(row?.size_bytes || 0);
+  if (currentAssets + 1 > maxAssets || currentBytes + Number(incomingBytes || 0) > maxBytes) {
+    const error = new Error('web_editor_media_quota_exceeded');
+    error.status = 413;
+    error.details = {
+      max_assets: maxAssets,
+      max_bytes: maxBytes,
+      current_assets: currentAssets,
+      current_bytes: currentBytes,
+    };
+    throw error;
+  }
+  return true;
+}
 
 function uploadFeatureForPurpose(purpose) {
   // La imagen de acceso forma parte de la configuracion de la clinica. Los
   // assets de campanas conservan su permiso de marketing (incluido el flujo
   // de foto de resenas que puede gestionar una agencia).
-  return purpose === 'clinic_access_image' ? CLINIC_EDIT_FEATURE : MARKETING_FEATURE;
+  if (purpose === 'clinic_access_image') return CLINIC_EDIT_FEATURE;
+  if (purpose === 'web_editor_media') return MARKETING_WEB_EDIT_FEATURE;
+  return MARKETING_FEATURE;
 }
 
 function toInt(value) {
@@ -173,6 +243,7 @@ exports.upload = async (req, res) => {
   try {
     const scope = resolveScope(req);
     const purpose = String(req.body?.purpose || 'public_asset').trim().toLowerCase();
+    if (purpose === 'web_editor_media') assertWebScopeEnabled(webScope(scope));
     await assertScopeAccess({
       actorId: req.userData?.userId,
       scope,
@@ -196,7 +267,7 @@ exports.upload = async (req, res) => {
       ? String(scope.clinicId)
       : (String(req.body?.owner_id || req.body?.ownerId || '').trim() || null);
 
-    const upload = await publicMediaStorage.uploadPublicMedia({
+    const uploadInput = {
       purpose,
       clinicId: scope.clinicId,
       groupId: scope.groupId,
@@ -209,48 +280,85 @@ exports.upload = async (req, res) => {
       // genera un objeto versionado y opaco; las sobrescrituras quedan solo
       // para servicios internos controlados.
       versioned: true,
-    });
+    };
+    if (purpose === 'web_editor_media') {
+      const preparedPayload = await publicMediaStorage.preparePublicMediaPayload(uploadInput);
+      await assertWebEditorMediaQuota(scope, preparedPayload.buffer.length);
+      uploadInput.preparedPayload = preparedPayload;
+    }
+    const upload = await publicMediaStorage.uploadPublicMedia(uploadInput);
 
     let asset = null;
     if (PublicMediaAsset) {
-      asset = await PublicMediaAsset.create({
-        scope_type: scope.scopeType,
-        clinica_id: scope.scopeType === 'clinic' ? scope.clinicId : null,
-        grupo_clinica_id: scope.scopeType === 'group' ? scope.groupId : null,
-        owner_type: ownerType,
-        owner_id: ownerId,
-        purpose,
-        provider: 's3_cloudfront',
-        bucket: upload.bucket,
-        region: upload.region,
-        object_key: upload.key,
-        public_url: upload.url,
-        content_type: upload.contentType,
-        size_bytes: upload.sizeBytes,
-        sha256: upload.sha256,
-        etag: upload.etag,
-        cache_control: upload.cacheControl,
-        sensitivity: 'public',
-        status: 'active',
-        metadata: {
-          source: 'public_media_upload',
-          original_filename: purpose === 'clinic_access_image'
-            ? null
-            : (req.body?.file_name || req.body?.fileName || null),
-          non_clinical_asserted: true,
-          image: upload.imageMetadata || null,
-          replacement_policy: purpose === 'clinic_access_image'
-            ? 'versioned_reference_update_no_physical_delete'
-            : null,
-        },
-        created_by: req.userData?.userId || null
-      });
+      const quarantined = purpose === 'web_editor_media';
+      const quarantineHours = positiveEnvInteger(
+        'MARKETING_WEB_MEDIA_QUARANTINE_HOURS',
+        DEFAULT_WEB_EDITOR_MEDIA_QUARANTINE_HOURS
+      );
+      const quarantineExpiresAt = quarantined
+        ? new Date(Date.now() + quarantineHours * 60 * 60 * 1000).toISOString()
+        : null;
+      try {
+        asset = await PublicMediaAsset.create({
+          scope_type: scope.scopeType,
+          clinica_id: scope.scopeType === 'clinic' ? scope.clinicId : null,
+          grupo_clinica_id: scope.scopeType === 'group' ? scope.groupId : null,
+          owner_type: ownerType,
+          owner_id: ownerId,
+          purpose,
+          provider: 's3_cloudfront',
+          bucket: upload.bucket,
+          region: upload.region,
+          object_key: upload.key,
+          public_url: upload.url,
+          content_type: upload.contentType,
+          size_bytes: upload.sizeBytes,
+          sha256: upload.sha256,
+          etag: upload.etag,
+          cache_control: upload.cacheControl,
+          sensitivity: quarantined ? 'internal' : 'public',
+          status: quarantined ? 'quarantine' : 'active',
+          metadata: {
+            source: 'public_media_upload',
+            original_filename: purpose === 'clinic_access_image'
+              ? null
+              : (req.body?.file_name || req.body?.fileName || null),
+            non_clinical_asserted: true,
+            image: upload.imageMetadata || null,
+            quarantine_expires_at: quarantineExpiresAt,
+            content_disarm: upload.imageMetadata?.content_disarm || null,
+            malware_scan_status: upload.imageMetadata?.malware_scan_status || null,
+            replacement_policy: purpose === 'clinic_access_image'
+              ? 'versioned_reference_update_no_physical_delete'
+              : null,
+          },
+          created_by: req.userData?.userId || null,
+        });
+      } catch (error) {
+        if (quarantined) {
+          await publicMediaStorage.deleteWebEditorMediaObject(upload.key).catch((cleanupError) => {
+            console.error('[public-media] orphan cleanup failed', {
+              code: cleanupError?.message || cleanupError?.name || 'unknown',
+            });
+          });
+        }
+        throw error;
+      }
     }
 
     const usage = await buildUsage(scope);
     return res.status(201).json({
       success: true,
-      asset: {
+      asset: purpose === 'web_editor_media' ? {
+        id: asset?.id || null,
+        status: 'quarantine',
+        content_type: upload.contentType,
+        size_bytes: upload.sizeBytes,
+        scope_type: scope.scopeType,
+        clinic_id: scope.clinicId,
+        group_id: scope.groupId,
+        purpose,
+      } : {
         id: asset?.id || null,
         url: upload.url,
         key: upload.key,
@@ -278,6 +386,7 @@ exports.upload = async (req, res) => {
 };
 
 exports._private = {
+  assertWebEditorMediaQuota,
   assertScopeAccess,
   resolveScope,
   uploadFeatureForPurpose,

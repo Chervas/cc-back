@@ -114,13 +114,223 @@ const ENHANCED_CONVERSION_REPORTING_VALUES_EUR = Object.freeze({
 });
 
 // `managed_self` is retained only to read historical configurations. New
-// onboarding/strategy writes must use one of the two current product modes.
-const VALID_MODES = new Set(['connect_only', 'managed_self', 'managed_service']);
-const CREATABLE_MODES = new Set(['connect_only', 'managed_service']);
+// onboarding/strategy writes must use one of the three current product modes.
+const CAMPAIGN_MODES = Object.freeze({
+  MEASURE: 'connect_only',
+  IMPROVE: 'guided_improvement',
+  LEGACY_SELF_MANAGED: 'managed_self',
+  AUTOPILOT: 'managed_service'
+});
+const VALID_MODES = new Set(Object.values(CAMPAIGN_MODES));
+const CREATABLE_MODES = new Set([
+  CAMPAIGN_MODES.MEASURE,
+  CAMPAIGN_MODES.IMPROVE,
+  CAMPAIGN_MODES.AUTOPILOT
+]);
+const IMPROVEMENT_AUTHORIZATION_VERSION = 1;
+const IMPROVEMENT_AUTHORIZATION_SCOPES = Object.freeze([
+  'landing_publish',
+  'campaign_destination',
+  'conversion_goal'
+]);
+const IMPROVEMENT_WEB_INTEGRATION_HOOK_VERSION = 1;
+const IMPROVEMENT_WEB_INTEGRATION_HOOKS = Object.freeze({
+  landing_publish: 'marketing_web.landing_published.v1',
+  campaign_destination: 'marketing_web.destination_ready.v1'
+});
+
+function usesExistingAdvertiserCampaigns(mode) {
+  return mode === CAMPAIGN_MODES.MEASURE || mode === CAMPAIGN_MODES.IMPROVE;
+}
+
+function ownsCampaignOperations(mode) {
+  return mode === CAMPAIGN_MODES.AUTOPILOT;
+}
+
+function buildCampaignModeContract(mode, improvementAuthorization = null) {
+  const normalizedMode = VALID_MODES.has(mode) ? mode : CAMPAIGN_MODES.MEASURE;
+  const base = {
+    version: 1,
+    mode: normalizedMode,
+    measurement: true,
+    attribution: true,
+    consented_conversion_uploads: true,
+    recommendations: true,
+    mutate_campaigns: false,
+    mutate_bids: false,
+    mutate_budget: false,
+    mutate_campaign_status: false,
+    publish_landings: false,
+    change_destinations: false,
+    manage_conversion_goals: false,
+    requires_prepayment: false
+  };
+
+  if (normalizedMode === CAMPAIGN_MODES.IMPROVE) {
+    const authorization = improvementAuthorization && typeof improvementAuthorization === 'object'
+      ? improvementAuthorization
+      : {};
+    const requestedScopes = Array.isArray(authorization.scopes)
+      ? authorization.scopes.map((value) => String(value || '').trim().toLowerCase())
+      : [];
+    const allowedScopes = requestedScopes.filter((scope) => IMPROVEMENT_AUTHORIZATION_SCOPES.includes(scope));
+    const acceptedAt = authorization.accepted_at
+      && Number.isFinite(new Date(authorization.accepted_at).getTime())
+      ? new Date(authorization.accepted_at).toISOString()
+      : null;
+    const acceptedByUserId = parseInteger(authorization.accepted_by_user_id);
+    const authorized = authorization.accepted === true
+      && Number(authorization.version) === IMPROVEMENT_AUTHORIZATION_VERSION
+      && !!acceptedAt
+      && !!acceptedByUserId;
+    const landingPublishAuthorized = authorized && allowedScopes.includes('landing_publish');
+    const campaignDestinationAuthorized = authorized && allowedScopes.includes('campaign_destination');
+    const conversionGoalAuthorized = authorized && allowedScopes.includes('conversion_goal');
+    return {
+      ...base,
+      // Mejora only enables the three explicitly authorised capabilities. It
+      // still cannot change bids, budgets or campaign status. Landing and
+      // destination writes are executed through the versioned, read-backed
+      // Marketing Web hooks below.
+      mutate_campaigns: campaignDestinationAuthorized || conversionGoalAuthorized,
+      publish_landings: landingPublishAuthorized,
+      change_destinations: campaignDestinationAuthorized,
+      manage_conversion_goals: conversionGoalAuthorized,
+      integration_hooks: {
+        version: IMPROVEMENT_WEB_INTEGRATION_HOOK_VERSION,
+        landing_publish: {
+          scope_authorized: landingPublishAuthorized,
+          status: landingPublishAuthorized ? 'available' : 'not_authorized',
+          event: IMPROVEMENT_WEB_INTEGRATION_HOOKS.landing_publish,
+          requires_https_destination: true
+        },
+        campaign_destination: {
+          scope_authorized: campaignDestinationAuthorized,
+          status: campaignDestinationAuthorized ? 'available_after_landing_published' : 'not_authorized',
+          event: IMPROVEMENT_WEB_INTEGRATION_HOOKS.campaign_destination,
+          requires_https_destination: true
+        },
+        conversion_goal: {
+          scope_authorized: conversionGoalAuthorized,
+          status: conversionGoalAuthorized ? 'available' : 'not_authorized'
+        }
+      },
+      authorization: {
+        version: IMPROVEMENT_AUTHORIZATION_VERSION,
+        accepted: authorized,
+        // Never manufacture acceptance evidence while normalising a stored
+        // contract. Only the onboarding command is allowed to stamp it.
+        accepted_at: authorized ? acceptedAt : null,
+        accepted_by_user_id: authorized ? acceptedByUserId : null,
+        scopes: allowedScopes
+      }
+    };
+  }
+
+  if (normalizedMode === CAMPAIGN_MODES.AUTOPILOT) {
+    return {
+      ...base,
+      mutate_campaigns: true,
+      mutate_bids: true,
+      mutate_budget: true,
+      mutate_campaign_status: true,
+      publish_landings: true,
+      change_destinations: true,
+      manage_conversion_goals: true,
+      requires_prepayment: true
+    };
+  }
+
+  return base;
+}
+
+function normalizeImprovementAuthorization(input) {
+  const source = input && typeof input === 'object' ? input : {};
+  const version = Number(source.version);
+  const scopes = Array.isArray(source.scopes)
+    ? Array.from(new Set(source.scopes
+      .map((value) => String(value || '').trim().toLowerCase())
+      .filter((value) => IMPROVEMENT_AUTHORIZATION_SCOPES.includes(value))))
+    : [];
+  return {
+    version: Number.isInteger(version) ? version : null,
+    accepted: source.accepted === true,
+    // Normalisation is read-only: only the onboarding command below may stamp
+    // server-side acceptance evidence.
+    accepted_at: source.accepted === true && source.accepted_at
+      ? String(source.accepted_at)
+      : null,
+    accepted_by_user_id: source.accepted === true
+      ? parseInteger(source.accepted_by_user_id) || null
+      : null,
+    scopes
+  };
+}
+
+function validateImprovementAuthorization(mode, input) {
+  if (mode !== CAMPAIGN_MODES.IMPROVE) return null;
+  const authorization = normalizeImprovementAuthorization(input);
+  if (
+    authorization.accepted !== true
+    || authorization.version !== IMPROVEMENT_AUTHORIZATION_VERSION
+    || authorization.scopes.length !== IMPROVEMENT_AUTHORIZATION_SCOPES.length
+  ) {
+    const error = new Error('Para usar Mejora debes registrar la autorización inicial de sus tres capacidades limitadas: publicar la landing, cambiar el destino y gestionar el objetivo de conversión. Nunca incluye pujas, presupuesto ni estados de campaña.');
+    error.code = 'IMPROVEMENT_AUTHORIZATION_REQUIRED';
+    error.httpStatus = 400;
+    throw error;
+  }
+  return authorization;
+}
+
+function externalTargetsHaveProvider(targets, provider) {
+  const normalizedProvider = String(provider || '').trim().toLowerCase();
+  return (Array.isArray(targets) ? targets : []).some((target) => (
+    (Array.isArray(target?.campaigns) ? target.campaigns : []).some((campaign) => (
+      String(campaign?.provider || '').trim().toLowerCase() === normalizedProvider
+    ))
+  ));
+}
+
+function stableHttpsDestination(rawValue) {
+  const raw = String(rawValue || '').trim();
+  if (!raw) return { valid: false, reason: 'missing' };
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch (_error) {
+    return { valid: false, reason: 'invalid_url' };
+  }
+  // WHATWG keeps brackets around IPv6 hostnames in Node. Strip them before
+  // classifying loopback/link-local/ULA addresses so `[::1]` cannot pass as a
+  // public campaign destination.
+  const hostname = String(parsed.hostname || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  const privateIpv4 = /^(?:10\.|127\.|169\.254\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/;
+  const privateIpv6 = hostname === '::1' || hostname.startsWith('fc') || hostname.startsWith('fd') || hostname.startsWith('fe80:');
+  if (
+    parsed.protocol !== 'https:'
+    || !hostname
+    || parsed.username
+    || parsed.password
+    || parsed.hash
+    || hostname === 'localhost'
+    || hostname.endsWith('.localhost')
+    || hostname.endsWith('.local')
+    || privateIpv4.test(hostname)
+    || privateIpv6
+  ) {
+    return { valid: false, reason: 'stable_https_required' };
+  }
+  const ephemeralKeys = new Set(['gclid', 'gbraid', 'wbraid', 'fbclid', 'token', 'signature', 'expires']);
+  if (Array.from(parsed.searchParams.keys()).some((key) => ephemeralKeys.has(String(key).toLowerCase()))) {
+    return { valid: false, reason: 'ephemeral_query_not_allowed' };
+  }
+  return { valid: true, url: parsed.toString() };
+}
 const VALID_PROVIDERS = new Set(['google_ads', 'meta_ads']);
 const VALID_EVENTS = ['lead', 'contact', 'qualified_lead', 'schedule', 'purchase'];
 // Raw lead/contact measure acquisition. Qualified Lead and Schedule are the
-// offline CRM milestones that make Mide y mejora useful for optimisation, so a
+// offline CRM milestones that make Mide y entiende useful for diagnosis, so a
 // fresh onboarding must provision both instead of waiting for a manual patch.
 const DEFAULT_ENABLED_CONVERSION_EVENTS = ['lead', 'contact', 'qualified_lead', 'schedule'];
 const VALID_STRATEGY_OBJECTIVES = new Set(['new_patients']);
@@ -430,14 +640,24 @@ function normalizeCampaignConfig(rawConfig) {
   if (!rawConfig || typeof rawConfig !== 'object' || Array.isArray(rawConfig)) {
     return {
       active_mode: null,
+      mode_contract: null,
       last_onboarding_id: null,
       last_onboarding_at: null
     };
   }
 
   const activeMode = String(rawConfig.active_mode || rawConfig.activeMode || '').trim().toLowerCase();
+  const normalizedActiveMode = VALID_MODES.has(activeMode) ? activeMode : null;
+  const rawModeContract = rawConfig.mode_contract && typeof rawConfig.mode_contract === 'object'
+    ? rawConfig.mode_contract
+    : rawConfig.modeContract && typeof rawConfig.modeContract === 'object'
+      ? rawConfig.modeContract
+      : null;
   return {
-    active_mode: VALID_MODES.has(activeMode) ? activeMode : null,
+    active_mode: normalizedActiveMode,
+    mode_contract: normalizedActiveMode
+      ? buildCampaignModeContract(normalizedActiveMode, rawModeContract?.authorization)
+      : null,
     last_onboarding_id: parseInteger(rawConfig.last_onboarding_id || rawConfig.lastOnboardingId) || null,
     last_onboarding_at: rawConfig.last_onboarding_at || rawConfig.lastOnboardingAt || null
   };
@@ -2627,6 +2847,133 @@ async function resolveActiveModeForScope(scope) {
   }
 
   return null;
+}
+
+async function resolveModeContractForScope(scope) {
+  if (!scope || typeof scope !== 'object') return null;
+
+  if (scope.assignment_scope === 'clinic' && scope.clinic_id) {
+    const clinicRecord = await loadIntakeRecordForScope({
+      assignment_scope: 'clinic',
+      clinic_id: scope.clinic_id
+    });
+    const clinicConfig = normalizeCampaignConfig(clinicRecord?.config?.campaigns || {});
+    if (clinicConfig.active_mode) return clinicConfig.mode_contract;
+
+    if (scope.group_id) {
+      const groupRecord = await loadIntakeRecordForScope({
+        assignment_scope: 'group',
+        group_id: scope.group_id
+      });
+      const groupConfig = normalizeCampaignConfig(groupRecord?.config?.campaigns || {});
+      if (groupConfig.active_mode) return groupConfig.mode_contract;
+    }
+    return null;
+  }
+
+  if (scope.assignment_scope === 'group' && scope.group_id) {
+    const groupRecord = await loadIntakeRecordForScope({
+      assignment_scope: 'group',
+      group_id: scope.group_id
+    });
+    const groupConfig = normalizeCampaignConfig(groupRecord?.config?.campaigns || {});
+    return groupConfig.active_mode ? groupConfig.mode_contract : null;
+  }
+
+  return null;
+}
+
+function normalizeModeTransitionConfirmation(rawValue) {
+  const source = rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue)
+    ? rawValue
+    : {};
+  return {
+    confirmed: source.confirmed === true,
+    from_mode: String(source.from_mode || source.fromMode || '').trim().toLowerCase() || null,
+    to_mode: String(source.to_mode || source.toMode || '').trim().toLowerCase() || null,
+  };
+}
+
+async function assertCampaignModeTransitionSafe({
+  scope,
+  currentMode,
+  nextMode,
+  confirmation,
+  dependencies = {},
+}) {
+  if (!currentMode || currentMode === nextMode) return null;
+  const normalized = normalizeModeTransitionConfirmation(confirmation);
+  if (
+    normalized.confirmed !== true
+    || normalized.from_mode !== currentMode
+    || normalized.to_mode !== nextMode
+  ) {
+    const error = new Error('Confirma expresamente el cambio de nivel antes de guardar la nueva configuración.');
+    error.code = 'CAMPAIGN_MODE_TRANSITION_CONFIRMATION_REQUIRED';
+    error.httpStatus = 409;
+    error.details = { from_mode: currentMode, to_mode: nextMode };
+    throw error;
+  }
+
+  const clinicIds = scope.assignment_scope === 'clinic'
+    ? [scope.clinic_id].filter(Boolean)
+    : (scope.clinic_ids || []);
+  const CampaignRequestModel = dependencies.CampaignRequest || CampaignRequest;
+  const PolicyModel = dependencies.Policy || db.CampaignOptimizationPolicy;
+  const operators = dependencies.operators || Op;
+  const rows = clinicIds.length
+    ? await CampaignRequestModel.findAll({
+        where: { clinica_id: { [operators.in]: clinicIds } },
+        attributes: ['id', 'campaign_id', 'solicitud'],
+        order: [['updated_at', 'DESC'], ['id', 'DESC']],
+        raw: true,
+      })
+    : [];
+  const blockingStrategies = [];
+  const seen = new Set();
+  for (const row of rows) {
+    const payload = row?.solicitud && typeof row.solicitud === 'object' ? row.solicitud : {};
+    if (payload.kind !== 'marketing_strategy') continue;
+    const status = normalizeStrategyStatus(payload.status || row.estado);
+    const mode = String(payload.mode_snapshot || payload.mode || '').trim().toLowerCase();
+    const identity = String(row.campaign_id || row.id);
+    if (status !== 'completed' && mode !== nextMode && !seen.has(identity)) {
+      seen.add(identity);
+      blockingStrategies.push({ strategy_id: row.campaign_id || row.id, mode: mode || null, status });
+    }
+  }
+  if (blockingStrategies.length) {
+    const error = new Error('Completa o conserva en su nivel actual las estrategias en curso antes de cambiar de nivel.');
+    error.code = 'CAMPAIGN_MODE_TRANSITION_ACTIVE_STRATEGIES';
+    error.httpStatus = 409;
+    error.details = { strategies: blockingStrategies.slice(0, 20) };
+    throw error;
+  }
+
+  const policyScope = scope.assignment_scope === 'group'
+    ? { scopeType: 'group', scopeId: scope.group_id }
+    : { scopeType: 'clinic', scopeId: scope.clinic_id };
+  const nonTerminalPolicies = await PolicyModel.findAll({
+    where: {
+      ...policyScope,
+      status: { [operators.in]: ['active', 'paused'] },
+    },
+    attributes: ['id', 'strategyId', 'mode', 'status'],
+    raw: true,
+  });
+  if (nonTerminalPolicies.length) {
+    const error = new Error('Hay una política de optimización en curso. Pausa y completa primero su estrategia para evitar perder el control de objetivos.');
+    error.code = 'CAMPAIGN_MODE_TRANSITION_ACTIVE_POLICY';
+    error.httpStatus = 409;
+    error.details = { policies: nonTerminalPolicies.slice(0, 20) };
+    throw error;
+  }
+
+  return {
+    from_mode: currentMode,
+    to_mode: nextMode,
+    confirmed: true,
+  };
 }
 
 async function upsertIntakeGoogleAdsForScope(scope, googleAdsPatch, provisioningOptions = null) {
@@ -6034,6 +6381,9 @@ function buildStrategyItemFromRows(rows, campaignsById, inventoryIndex = null) {
     area_medica_id: payload.area_medica_id ?? payload.summary?.area_medica_id ?? null,
     area_medica_nombre: payload.area_medica_nombre ?? payload.summary?.area_medica_nombre ?? null,
     mode,
+    mode_contract: payload.mode_contract && typeof payload.mode_contract === 'object'
+      ? payload.mode_contract
+      : (mode ? buildCampaignModeContract(mode, null) : null),
     status,
     activation_readiness: payload.activation_readiness && typeof payload.activation_readiness === 'object'
       ? payload.activation_readiness
@@ -6712,7 +7062,7 @@ function isConsentVerificationRenewalIssue(issue) {
 }
 
 /**
- * Read-only audit used by the durable Google Ads job for Conecta y mejora.
+ * Read-only audit used by the durable Google Ads job for Mide y entiende.
  * It checks the configured destinations against the canonical actions read
  * from Google, executes Data Manager validateOnly and reports consent drift.
  * It never creates actions or changes campaigns, goals, bids or IntakeConfig.
@@ -7010,7 +7360,9 @@ function isPropdentalConnectOnlyGoogleReadinessCandidate(row) {
   return String(row?.estado || '').trim().toLowerCase() === STRATEGY_REQUEST_STATE_MAP.active
     && payload.kind === 'marketing_strategy'
     && payload.objective_id === 'new_patients'
-    && String(payload.mode_snapshot || payload.mode || '').trim().toLowerCase() === 'connect_only'
+    && usesExistingAdvertiserCampaigns(
+      String(payload.mode_snapshot || payload.mode || '').trim().toLowerCase()
+    )
     && String(payload.status || '').trim().toLowerCase() === 'active'
     && parseInteger(scope.group_id) === ENHANCED_CONVERSION_PROPDENTAL_GROUP_ID
     && strategyPayloadUsesGoogleAds(payload);
@@ -7788,7 +8140,7 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
         ? webMeasurementState.group_id
         : null
     },
-    modes: ['connect_only', 'managed_service'],
+    modes: [CAMPAIGN_MODES.MEASURE, CAMPAIGN_MODES.IMPROVE, CAMPAIGN_MODES.AUTOPILOT],
     legacy_modes: ['managed_self'],
     active_mode: activeMode,
     consent_readiness: consentReadiness,
@@ -8850,6 +9202,27 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
   if (!CREATABLE_MODES.has(mode)) {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'mode inválido' });
   }
+  let improvementAuthorization = null;
+  try {
+    improvementAuthorization = validateImprovementAuthorization(
+      mode,
+      req.body?.improvement_authorization
+    );
+    if (improvementAuthorization) {
+      improvementAuthorization = {
+        ...improvementAuthorization,
+        accepted_at: new Date().toISOString(),
+        accepted_by_user_id: userId
+      };
+    }
+  } catch (error) {
+    return res.status(error.httpStatus || 400).json({
+      success: false,
+      error: String(error.code || 'improvement_authorization_required').toLowerCase(),
+      message: error.message
+    });
+  }
+  const modeContract = buildCampaignModeContract(mode, improvementAuthorization);
 
   const providers = listToUniqueArray(
     (Array.isArray(req.body?.providers) ? req.body.providers : ['google_ads'])
@@ -8860,6 +9233,13 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
   if (!providers.length) {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'providers requerido' });
   }
+  if (mode === CAMPAIGN_MODES.IMPROVE && !providers.includes('google_ads')) {
+    return res.status(409).json({
+      success: false,
+      error: 'guided_google_ads_required',
+      message: 'Mejora necesita al menos una cuenta de Google Ads: por ahora su automatización segura actúa sobre objetivos de conversión de Google. Meta puede seguir conectado para medir, pero no activa este nivel por sí solo.'
+    });
+  }
 
   const scope = await resolveScopeFromInput({
     clinicIdRaw: req.body?.clinic_id,
@@ -8867,6 +9247,23 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
     assignmentScopeRaw: req.body?.assignment_scope
   });
   if (!(await requireMarketingClinicScope(req, res, scope.clinic_ids, 'write'))) return;
+  const previousMode = await resolveActiveModeForScope(scope);
+  let modeTransition = null;
+  try {
+    modeTransition = await assertCampaignModeTransitionSafe({
+      scope,
+      currentMode: previousMode,
+      nextMode: mode,
+      confirmation: req.body?.mode_transition,
+    });
+  } catch (error) {
+    return res.status(error.httpStatus || 409).json({
+      success: false,
+      error: String(error.code || 'campaign_mode_transition_blocked').toLowerCase(),
+      message: error.message,
+      ...(error.details ? { details: error.details } : {}),
+    });
+  }
   const marketingState = await resolveEffectiveMarketingState({
     clinicIdRaw: scope.clinic_id,
     groupIdRaw: scope.group_id,
@@ -8906,7 +9303,7 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
     return res.status(409).json({ success: false, error: 'onboarding_already_running' });
   }
 
-  const steps = mode === 'managed_service'
+  const steps = ownsCampaignOperations(mode)
     ? [{ key: 'pilot_request', status: 'pending' }]
     : initSteps(providers);
   const initialPayload = {
@@ -8914,6 +9311,14 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
     status: 'in_progress',
     current_step: steps[0]?.key || null,
     mode,
+    mode_contract: modeContract,
+    mode_transition: modeTransition
+      ? {
+          ...modeTransition,
+          confirmed_at: new Date().toISOString(),
+          confirmed_by_user_id: userId,
+        }
+      : null,
     providers,
     scope: {
       assignment_scope: scope.assignment_scope,
@@ -8939,7 +9344,7 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
   try {
     const result = {};
 
-    if (mode === 'managed_service') {
+    if (ownsCampaignOperations(mode)) {
       markStep(steps, 'pilot_request', 'done');
       result.pilot = {
         operation_mode: 'observe',
@@ -8950,7 +9355,7 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
       };
     }
 
-    if (mode === 'connect_only' && providers.includes('google_ads')) {
+    if (usesExistingAdvertiserCampaigns(mode) && providers.includes('google_ads')) {
       const scopeAccounts = marketingState.google.available_accounts || [];
       const requestedCustomer = normalizeCustomerId(req.body?.google_ads?.customer_id || '');
       if (requestedCustomer && !scopeAccounts.some((account) => (
@@ -9069,7 +9474,7 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
       };
     }
 
-    if (mode === 'connect_only' && providers.includes('meta_ads')) {
+    if (usesExistingAdvertiserCampaigns(mode) && providers.includes('meta_ads')) {
       const assets = marketingState.meta.available_assets || { ad_accounts: [] };
       const requestedMetaAccountId = normalizeMetaAdAccountId(req.body?.meta_ads?.ad_account_id);
       const selectedMetaAccount = (requestedMetaAccountId
@@ -9139,6 +9544,7 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
     });
     await upsertCampaignSettingsForScope(scope, {
       active_mode: mode,
+      mode_contract: modeContract,
       last_onboarding_id: request.id,
       last_onboarding_at: new Date().toISOString()
     });
@@ -9451,17 +9857,17 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
   const currentPayload = representative?.solicitud && typeof representative.solicitud === 'object' ? representative.solicitud : {};
   const currentScope = extractStrategyScopeFromPayload(currentPayload, rows);
   const currentMode = String(currentPayload.mode_snapshot || currentPayload.mode || '').trim().toLowerCase();
-  const effectiveMode = VALID_MODES.has(currentMode) ? currentMode : 'connect_only';
+  const effectiveMode = VALID_MODES.has(currentMode) ? currentMode : CAMPAIGN_MODES.MEASURE;
   const objectiveId = String(currentPayload.objective_id || '').trim().toLowerCase();
   const promotionType = String(req.body?.promotion_type || currentPayload.promotion_type || '').trim().toLowerCase() === 'generic'
     ? 'generic'
     : 'treatment';
 
   const treatments = normalizeStrategyTreatments(req.body?.treatments ?? currentPayload.treatments);
-  const externalTargets = effectiveMode === 'connect_only'
+  const externalTargets = usesExistingAdvertiserCampaigns(effectiveMode)
     ? normalizeExternalTargets(req.body?.external_targets ?? currentPayload.external_targets)
     : [];
-  const targetDestinations = effectiveMode === 'connect_only'
+  const targetDestinations = usesExistingAdvertiserCampaigns(effectiveMode)
     ? normalizeTargetDestinations(req.body?.target_destinations ?? currentPayload.target_destinations)
     : [];
   const areaMedicaIdRaw = req.body?.area_medica_id ?? currentPayload.area_medica_id ?? currentPayload.summary?.area_medica_id;
@@ -9473,7 +9879,7 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
     : null;
   const rawBudgetMonthly = req.body?.budget_monthly ?? currentPayload.summary?.budget_monthly ?? 0;
   const parsedBudgetMonthly = Number(rawBudgetMonthly ?? 0);
-  const budgetMonthly = effectiveMode === 'connect_only'
+  const budgetMonthly = !ownsCampaignOperations(effectiveMode)
     ? (Number.isFinite(parsedBudgetMonthly) && parsedBudgetMonthly > 0 ? parsedBudgetMonthly : null)
     : parsedBudgetMonthly;
   const channels = normalizeStrategyChannels(req.body?.channels ?? currentPayload.channels);
@@ -9489,7 +9895,7 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
   const geo = req.body?.geo && typeof req.body.geo === 'object'
     ? req.body.geo
     : (currentPayload.geo && typeof currentPayload.geo === 'object' ? currentPayload.geo : {});
-  const addonCalls = effectiveMode === 'managed_service'
+  const addonCalls = ownsCampaignOperations(effectiveMode)
     ? req.body?.addon_calls === true
     : false;
   const targetClinicIds = clinicIdsFromStrategyRows(rows);
@@ -9497,17 +9903,17 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
   if (promotionType !== 'generic' && !treatments.length) {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'Selecciona al menos un tratamiento' });
   }
-  if (effectiveMode !== 'connect_only' && (!Number.isFinite(budgetMonthly) || budgetMonthly <= 0)) {
+  if (ownsCampaignOperations(effectiveMode) && (!Number.isFinite(budgetMonthly) || budgetMonthly <= 0)) {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'budget_monthly debe ser mayor que 0' });
   }
-  if (!channels.length && effectiveMode !== 'connect_only') {
+  if (!channels.length && ownsCampaignOperations(effectiveMode)) {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'Selecciona al menos un canal' });
   }
-  if (effectiveMode === 'managed_service' && !channels.some((item) => ['google_ads', 'meta_ads'].includes(item.channel) && item.enabled !== false)) {
+  if (ownsCampaignOperations(effectiveMode) && !channels.some((item) => ['google_ads', 'meta_ads'].includes(item.channel) && item.enabled !== false)) {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'Piloto automático requiere Google Ads o Meta Ads' });
   }
 
-  if (effectiveMode === 'connect_only') {
+  if (usesExistingAdvertiserCampaigns(effectiveMode)) {
     const treatmentIds = new Set(treatments.map((item) => item.id));
     const targetKeys = new Set();
     const assignedCampaignKeys = new Set();
@@ -9517,7 +9923,17 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
       return res.status(400).json({
         success: false,
         error: 'validation_error',
-        message: 'Vincula al menos una campaña externa para continuar con Conecta y mejora.'
+        message: `Vincula al menos una campaña externa para continuar con ${effectiveMode === CAMPAIGN_MODES.IMPROVE ? 'Mejora' : 'Mide y entiende'}.`
+      });
+    }
+    if (
+      effectiveMode === CAMPAIGN_MODES.IMPROVE
+      && !externalTargetsHaveProvider(externalTargets, 'google_ads')
+    ) {
+      return res.status(409).json({
+        success: false,
+        error: 'guided_google_ads_required',
+        message: 'Mejora necesita al menos una campaña Google Search o Performance Max vinculada. Una estrategia solo Meta puede usar Mide y entiende.'
       });
     }
 
@@ -9557,6 +9973,18 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
       if (destinationItem.uses_web === true && !destinationItem.confirmed_url) {
         return res.status(400).json({ success: false, error: 'validation_error', message: 'Confirma la URL de cada target que lleve tráfico a web.' });
       }
+      if (destinationItem.uses_web === true) {
+        const validatedDestination = stableHttpsDestination(destinationItem.confirmed_url);
+        if (!validatedDestination.valid) {
+          return res.status(400).json({
+            success: false,
+            error: 'unstable_campaign_destination',
+            message: 'El destino web debe ser una URL HTTPS pública y estable, sin credenciales, fragmentos ni parámetros temporales.',
+            reason: validatedDestination.reason
+          });
+        }
+        destinationItem.confirmed_url = validatedDestination.url;
+      }
     }
 
     const externalCampaignConflicts = await findExternalCampaignAssignmentConflicts(targetClinicIds, externalTargets, {
@@ -9572,8 +10000,21 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
     }
   }
 
+  if (effectiveMode === CAMPAIGN_MODES.IMPROVE && representative.campaign_id) {
+    const existingPolicy = await db.CampaignOptimizationPolicy.findOne({
+      where: { strategyId: representative.campaign_id }
+    });
+    if (existingPolicy) {
+      const { assertGuidedPolicyPayloadCompatible } = require('../services/guidedCampaignOptimizationPolicy.service');
+      assertGuidedPolicyPayloadCompatible(existingPolicy, {
+        ...currentPayload,
+        external_targets: externalTargets,
+      });
+    }
+  }
+
   // Editing strategy details must never be an activation shortcut. In
-  // particular, a connect_only draft stays a draft until the explicit status
+  // particular, an external-campaign draft stays a draft until the explicit status
   // transition runs the Google/Data Manager readiness gate.
   const currentStatus = normalizeStrategyStatus(currentPayload.status || representative.estado);
   const campaignName = buildStrategyName({
@@ -9583,55 +10024,68 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
   });
   const dominantType = channels.length > 0 ? pickLegacyCampaignTypeFromChannels(channels) : 'web_snippet';
 
-  if (representative.campaign_id) {
-    await Campaign.update({
-      nombre: campaignName,
-      tipo: dominantType,
-      presupuesto: budgetMonthly,
-      gestionada: effectiveMode !== 'connect_only',
-      activa: currentStatus === 'active'
-    }, {
-      where: { id: representative.campaign_id }
-    });
-  }
+  await db.sequelize.transaction(async (transaction) => {
+    if (representative.campaign_id) {
+      await Campaign.update({
+        nombre: campaignName,
+        tipo: dominantType,
+        presupuesto: budgetMonthly,
+        gestionada: ownsCampaignOperations(effectiveMode),
+        activa: currentStatus === 'active'
+      }, {
+        where: { id: representative.campaign_id },
+        transaction,
+      });
+    }
 
-  for (const row of rows) {
-    const rowPayload = row?.solicitud && typeof row.solicitud === 'object' ? row.solicitud : {};
-    const nextPayload = {
-      ...rowPayload,
-      status: currentStatus,
-      objective_id: objectiveId,
-      promotion_type: promotionType,
-      summary: {
-        ...(rowPayload.summary && typeof rowPayload.summary === 'object' ? rowPayload.summary : {}),
-        name: campaignName,
-        budget_monthly: budgetMonthly,
+    for (const row of rows) {
+      const rowPayload = row?.solicitud && typeof row.solicitud === 'object' ? row.solicitud : {};
+      const nextPayload = {
+        ...rowPayload,
+        status: currentStatus,
+        objective_id: objectiveId,
+        mode_contract: buildCampaignModeContract(effectiveMode, currentPayload.mode_contract?.authorization),
+        promotion_type: promotionType,
+        summary: {
+          ...(rowPayload.summary && typeof rowPayload.summary === 'object' ? rowPayload.summary : {}),
+          name: campaignName,
+          budget_monthly: budgetMonthly,
+          area_medica_id: areaMedicaId,
+          area_medica_nombre: areaMedicaNombre
+        },
         area_medica_id: areaMedicaId,
-        area_medica_nombre: areaMedicaNombre
-      },
-      area_medica_id: areaMedicaId,
-      area_medica_nombre: areaMedicaNombre,
-      treatments,
-      external_targets: externalTargets,
-      target_destinations: targetDestinations,
-      destination,
-      measurement,
-      geo,
-      channels,
-      automation,
-      addons: {
-        ...(rowPayload.addons && typeof rowPayload.addons === 'object' ? rowPayload.addons : {}),
-        call_leads: addonCalls
-      }
-    };
+        area_medica_nombre: areaMedicaNombre,
+        treatments,
+        external_targets: externalTargets,
+        target_destinations: targetDestinations,
+        destination,
+        measurement,
+        geo,
+        channels,
+        automation,
+        addons: {
+          ...(rowPayload.addons && typeof rowPayload.addons === 'object' ? rowPayload.addons : {}),
+          call_leads: addonCalls
+        }
+      };
 
-    await CampaignRequest.update({
-      solicitud: nextPayload,
-      estado: mapStrategyStatusToRequestState(currentStatus)
-    }, {
-      where: { id: row.id }
-    });
-  }
+      await CampaignRequest.update({
+        solicitud: nextPayload,
+        estado: mapStrategyStatusToRequestState(currentStatus)
+      }, {
+        where: { id: row.id },
+        transaction,
+      });
+    }
+    if (effectiveMode === CAMPAIGN_MODES.IMPROVE && representative.campaign_id) {
+      const { syncGuidedPolicyStrategyStatus } = require('../services/guidedCampaignOptimizationPolicy.service');
+      await syncGuidedPolicyStrategyStatus({
+        strategyId: representative.campaign_id,
+        strategyStatus: currentStatus,
+        transaction,
+      });
+    }
+  });
 
   const refreshedRows = await loadStrategyRowsByIdentifier(req.params.id);
   const campaignsById = await loadCampaignsByIds(refreshedRows.map((row) => row.campaign_id));
@@ -9681,7 +10135,21 @@ exports.transitionMarketingStrategyStatus = asyncHandler(async (req, res) => {
   const campaignsById = await loadCampaignsByIds(rows.map((row) => row.campaign_id));
   const strategy = buildStrategyItemFromRows(rows, campaignsById);
   const currentStatus = normalizeStrategyStatus(strategy?.status);
-  if (strategy?.mode === 'managed_service' && nextStatus === 'active') {
+  const strategyPayloadForTransition = rows[0]?.solicitud && typeof rows[0].solicitud === 'object'
+    ? rows[0].solicitud
+    : {};
+  if (
+    strategy?.mode === CAMPAIGN_MODES.IMPROVE
+    && nextStatus === 'active'
+    && !strategyPayloadUsesGoogleAds(strategyPayloadForTransition)
+  ) {
+    return res.status(409).json({
+      success: false,
+      error: 'guided_google_ads_required',
+      message: 'Mejora no puede activarse con una estrategia solo Meta. Añade una campaña Google compatible o usa Mide y entiende.'
+    });
+  }
+  if (ownsCampaignOperations(strategy?.mode) && nextStatus === 'active') {
     return res.status(409).json({
       success: false,
       error: 'managed_launch_requires_admin_gate',
@@ -9690,7 +10158,7 @@ exports.transitionMarketingStrategyStatus = asyncHandler(async (req, res) => {
   }
 
   let activationReadiness = null;
-  if (strategy?.mode === 'connect_only' && nextStatus === 'active') {
+  if (usesExistingAdvertiserCampaigns(strategy?.mode) && nextStatus === 'active') {
     const strategyPayload = rows[0]?.solicitud && typeof rows[0].solicitud === 'object'
       ? rows[0].solicitud
       : {};
@@ -9756,11 +10224,11 @@ exports.transitionMarketingStrategyStatus = asyncHandler(async (req, res) => {
     }
   }
 
-  const directVerifiedConnectOnlyActivation = strategy?.mode === 'connect_only'
+  const directVerifiedExternalCampaignActivation = usesExistingAdvertiserCampaigns(strategy?.mode)
     && currentStatus === 'draft'
     && nextStatus === 'active'
     && activationReadiness?.validated === true;
-  if (!canTransitionStrategy(currentStatus, nextStatus) && !directVerifiedConnectOnlyActivation) {
+  if (!canTransitionStrategy(currentStatus, nextStatus) && !directVerifiedExternalCampaignActivation) {
     return res.status(409).json({
       success: false,
       error: 'invalid_transition',
@@ -9787,43 +10255,94 @@ exports.transitionMarketingStrategyStatus = asyncHandler(async (req, res) => {
   const now = new Date();
   const nowIso = now.toISOString();
   const requestState = mapStrategyStatusToRequestState(nextStatus);
-
-  for (const row of rows) {
-    const payload = row?.solicitud && typeof row.solicitud === 'object' ? row.solicitud : {};
-    const history = Array.isArray(payload.status_history) ? [...payload.status_history] : [];
-    history.push({
-      from: currentStatus,
-      to: nextStatus,
-      changed_at: nowIso,
-      user_id: userId
-    });
-
-    await CampaignRequest.update({
-      estado: requestState,
-      solicitud: {
+  let guidedOptimizationJob = null;
+  let guidedOptimizationPolicyId = null;
+  await db.sequelize.transaction(async (transaction) => {
+    let guidedPayload = null;
+    for (const row of rows) {
+      const payload = row?.solicitud && typeof row.solicitud === 'object' ? row.solicitud : {};
+      const history = Array.isArray(payload.status_history) ? [...payload.status_history] : [];
+      history.push({
+        from: currentStatus,
+        to: nextStatus,
+        changed_at: nowIso,
+        user_id: userId
+      });
+      const nextPayload = {
         ...payload,
         status: nextStatus,
         ...(activationReadiness ? { activation_readiness: activationReadiness } : {}),
         status_history: history,
         updated_at: nowIso
-      },
-      updated_at: now
-    }, {
-      where: { id: row.id }
-    });
-  }
+      };
+      if (!guidedPayload) guidedPayload = nextPayload;
 
-  if (strategy.campaign_id) {
-    await Campaign.update({
-      activa: nextStatus === 'active',
-      fecha_inicio: nextStatus === 'active'
-        ? (campaignsById.get(strategy.campaign_id)?.fecha_inicio || now)
-        : campaignsById.get(strategy.campaign_id)?.fecha_inicio || null,
-      fecha_fin: nextStatus === 'completed' ? now : null
-    }, {
-      where: { id: strategy.campaign_id }
-    });
+      await CampaignRequest.update({
+        estado: requestState,
+        solicitud: nextPayload,
+        updated_at: now
+      }, {
+        where: { id: row.id },
+        transaction
+      });
+    }
 
+    if (strategy.campaign_id) {
+      await Campaign.update({
+        activa: nextStatus === 'active',
+        fecha_inicio: nextStatus === 'active'
+          ? (campaignsById.get(strategy.campaign_id)?.fecha_inicio || now)
+          : campaignsById.get(strategy.campaign_id)?.fecha_inicio || null,
+        fecha_fin: nextStatus === 'completed' ? now : null
+      }, {
+        where: { id: strategy.campaign_id },
+        transaction
+      });
+    }
+
+    if (
+      strategy.mode === CAMPAIGN_MODES.IMPROVE
+      && strategy.campaign_id
+      && (nextStatus === 'paused' || nextStatus === 'completed')
+    ) {
+      const { syncGuidedPolicyStrategyStatus } = require('../services/guidedCampaignOptimizationPolicy.service');
+      await syncGuidedPolicyStrategyStatus({
+        strategyId: strategy.campaign_id,
+        strategyStatus: nextStatus,
+        transaction,
+      });
+    }
+
+    if (
+      strategy.mode === CAMPAIGN_MODES.IMPROVE
+      && nextStatus === 'active'
+      && strategy.campaign_id
+      && strategyPayloadUsesGoogleAds(guidedPayload)
+    ) {
+      // Lazy imports break the existing Google goal-policy -> onboarding audit
+      // dependency without starting a controller/service circular dependency.
+      const { provisionGuidedCampaignOptimization } = require('../services/guidedCampaignOptimizationPolicy.service');
+      const { enqueueGuidedGoalPolicyApply } = require('../services/guidedCampaignOptimizationJobs.service');
+      const provisioning = await provisionGuidedCampaignOptimization({
+        campaign: campaignsById.get(strategy.campaign_id),
+        payload: guidedPayload,
+        now,
+        transaction
+      });
+      guidedOptimizationPolicyId = provisioning.policy.id;
+      guidedOptimizationJob = await enqueueGuidedGoalPolicyApply({
+        strategyId: strategy.campaign_id,
+        requestedBy: userId,
+        requestedByName: req.userData?.name || null,
+        requestedByRole: req.userData?.role || null,
+        transaction,
+        triggerImmediately: false
+      });
+    }
+  });
+  if (guidedOptimizationJob?.id) {
+    const { triggerGuidedGoalPolicyJob } = require('../services/guidedCampaignOptimizationJobs.service');
+    triggerGuidedGoalPolicyJob(guidedOptimizationJob.id);
   }
 
   return res.json({
@@ -9832,7 +10351,15 @@ exports.transitionMarketingStrategyStatus = asyncHandler(async (req, res) => {
       id: strategy.id,
       status: nextStatus,
       updated_at: nowIso
-    }
+    },
+    ...(guidedOptimizationJob ? {
+      guided_optimization: {
+        policy_id: guidedOptimizationPolicyId,
+        job_request_id: guidedOptimizationJob.id,
+        status: 'queued',
+        message: 'La medición está activa. Aplicaremos Lead válido como objetivo y verificaremos el resultado en segundo plano.'
+      }
+    } : {})
   });
 });
 
@@ -9886,6 +10413,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
 
   const requestedMode = String(req.body?.mode || '').trim().toLowerCase();
   const scopeMode = await resolveActiveModeForScope(scope);
+  const storedModeContract = await resolveModeContractForScope(scope);
   const effectiveMode = uniqueClinicModes[0]
     || (VALID_MODES.has(scopeMode) ? scopeMode : null)
     || (VALID_MODES.has(requestedMode) ? requestedMode : null);
@@ -9901,15 +10429,28 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
     return res.status(409).json({
       success: false,
       error: 'legacy_mode_read_only',
-      message: 'La configuración antigua de gestión propia es solo de lectura. Selecciona Conecta y mejora o Piloto automático antes de crear una estrategia.'
+      message: 'La configuración antigua de gestión propia es solo de lectura. Selecciona Mide y entiende, Mejora o Piloto automático antes de crear una estrategia.'
     });
   }
-
+  const modeContract = buildCampaignModeContract(
+    effectiveMode,
+    storedModeContract?.authorization || null
+  );
+  if (
+    effectiveMode === CAMPAIGN_MODES.IMPROVE
+    && modeContract.authorization?.accepted !== true
+  ) {
+    return res.status(409).json({
+      success: false,
+      error: 'improvement_authorization_required',
+      message: 'Vuelve a completar la configuración de Mejora para autorizar sus acciones limitadas.'
+    });
+  }
   const treatments = normalizeStrategyTreatments(req.body?.treatments);
-  const externalTargets = effectiveMode === 'connect_only'
+  const externalTargets = usesExistingAdvertiserCampaigns(effectiveMode)
     ? normalizeExternalTargets(req.body?.external_targets)
     : [];
-  const targetDestinations = effectiveMode === 'connect_only'
+  const targetDestinations = usesExistingAdvertiserCampaigns(effectiveMode)
     ? normalizeTargetDestinations(req.body?.target_destinations)
     : [];
   const areaMedicaIdRaw = req.body?.area_medica_id;
@@ -9925,22 +10466,22 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
 
   const rawBudgetMonthly = req.body?.budget_monthly;
   const parsedBudgetMonthly = Number(rawBudgetMonthly ?? 0);
-  const budgetMonthly = effectiveMode === 'connect_only'
+  const budgetMonthly = !ownsCampaignOperations(effectiveMode)
     ? (Number.isFinite(parsedBudgetMonthly) && parsedBudgetMonthly > 0 ? parsedBudgetMonthly : null)
     : parsedBudgetMonthly;
-  if (effectiveMode !== 'connect_only' && (!Number.isFinite(budgetMonthly) || budgetMonthly <= 0)) {
+  if (ownsCampaignOperations(effectiveMode) && (!Number.isFinite(budgetMonthly) || budgetMonthly <= 0)) {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'budget_monthly debe ser mayor que 0' });
   }
 
   const channels = normalizeStrategyChannels(req.body?.channels);
-  if (!channels.length && effectiveMode !== 'connect_only') {
+  if (!channels.length && ownsCampaignOperations(effectiveMode)) {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'Selecciona al menos un canal' });
   }
-  if (effectiveMode === 'managed_service' && !channels.some((item) => ['google_ads', 'meta_ads'].includes(item.channel) && item.enabled !== false)) {
+  if (ownsCampaignOperations(effectiveMode) && !channels.some((item) => ['google_ads', 'meta_ads'].includes(item.channel) && item.enabled !== false)) {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'Piloto automático requiere Google Ads o Meta Ads' });
   }
 
-  if (effectiveMode === 'connect_only') {
+  if (usesExistingAdvertiserCampaigns(effectiveMode)) {
     const treatmentIds = new Set(treatments.map((item) => item.id));
     const targetKeys = new Set();
     const assignedCampaignKeys = new Set();
@@ -9950,7 +10491,17 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
       return res.status(400).json({
         success: false,
         error: 'validation_error',
-        message: 'Vincula al menos una campaña externa para continuar con Conecta y mejora.'
+        message: `Vincula al menos una campaña externa para continuar con ${effectiveMode === CAMPAIGN_MODES.IMPROVE ? 'Mejora' : 'Mide y entiende'}.`
+      });
+    }
+    if (
+      effectiveMode === CAMPAIGN_MODES.IMPROVE
+      && !externalTargetsHaveProvider(externalTargets, 'google_ads')
+    ) {
+      return res.status(409).json({
+        success: false,
+        error: 'guided_google_ads_required',
+        message: 'Mejora necesita al menos una campaña Google Search o Performance Max vinculada. Una estrategia solo Meta puede usar Mide y entiende.'
       });
     }
 
@@ -9991,6 +10542,18 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
       if (destinationItem.uses_web === true && !destinationItem.confirmed_url) {
         return res.status(400).json({ success: false, error: 'validation_error', message: 'Confirma la URL de cada target que lleve tráfico a web.' });
       }
+      if (destinationItem.uses_web === true) {
+        const validatedDestination = stableHttpsDestination(destinationItem.confirmed_url);
+        if (!validatedDestination.valid) {
+          return res.status(400).json({
+            success: false,
+            error: 'unstable_campaign_destination',
+            message: 'El destino web debe ser una URL HTTPS pública y estable, sin credenciales, fragmentos ni parámetros temporales.',
+            reason: validatedDestination.reason
+          });
+        }
+        destinationItem.confirmed_url = validatedDestination.url;
+      }
     }
 
     const externalCampaignConflicts = await findExternalCampaignAssignmentConflicts(targetClinicIds, externalTargets);
@@ -10023,7 +10586,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
     clinicCount: targetClinicIds.length
   });
 
-  // Crear la estrategia no equivale a lanzarla. Incluso en connect_only debe
+  // Crear la estrategia no equivale a lanzarla. Incluso con campañas externas debe
   // permanecer en borrador hasta que el gate de medición valide Data Manager.
   const initialStatus = 'draft';
 
@@ -10031,7 +10594,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
   const destination = req.body?.destination && typeof req.body.destination === 'object' ? req.body.destination : null;
   const measurement = req.body?.measurement && typeof req.body.measurement === 'object' ? req.body.measurement : null;
   const automation = req.body?.automation && typeof req.body.automation === 'object' ? req.body.automation : null;
-  const addonCalls = effectiveMode === 'managed_service' ? req.body?.addon_calls === true : false;
+  const addonCalls = ownsCampaignOperations(effectiveMode) ? req.body?.addon_calls === true : false;
 
   let campaign;
   const createdRequests = [];
@@ -10043,7 +10606,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
       clinica_id: scope.assignment_scope === 'clinic' ? scope.clinic_id : null,
       grupo_clinica_id: scope.group_id || null,
       campaign_id_externo: null,
-      gestionada: effectiveMode !== 'connect_only',
+      gestionada: ownsCampaignOperations(effectiveMode),
       activa: false,
       fecha_inicio: null,
       fecha_fin: null,
@@ -10056,6 +10619,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
         status: initialStatus,
         objective_id: objectiveId,
         mode_snapshot: effectiveMode,
+        mode_contract: modeContract,
         scope: {
           assignment_scope: scope.assignment_scope,
           clinic_id: scope.assignment_scope === 'clinic' ? clinicId : null,
@@ -10092,7 +10656,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
       createdRequests.push({ id: request.id, clinica_id: clinicId });
     }
 
-    if (effectiveMode === 'managed_service') {
+    if (ownsCampaignOperations(effectiveMode)) {
       managedCampaignIds = await provisionManagedCampaignsFromStrategy({
         strategyCampaign: campaign,
         campaignRequest: createdRequests[0] || null,
@@ -10142,10 +10706,15 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
 });
 
 exports.__test = {
+  CAMPAIGN_MODES,
+  IMPROVEMENT_AUTHORIZATION_SCOPES,
+  IMPROVEMENT_AUTHORIZATION_VERSION,
+  IMPROVEMENT_WEB_INTEGRATION_HOOKS,
   applyCanonicalMappingsToGoogleAdsConfig,
   auditConnectOnlyMeasurementTarget,
   assessConsentMeasurementReadiness,
   assessConversionOnboardingReadiness,
+  assertCampaignModeTransitionSafe,
   buildCampaignAnalysisMetricContract,
   buildCurrentExternalCampaignInventoryIndex,
   buildMetaAccountConnectionMap,
@@ -10160,6 +10729,7 @@ exports.__test = {
   collectEnhancedConversionActivationTargets,
   adPersonalizationCapabilityReconciliationKey,
   buildVisitorChoicePersonalizationConfig,
+  buildCampaignModeContract,
   enhancedConversionActivationReconciliationKey,
   internalAdvertiserAuthorizationRequest,
   isEnhancedConversionActivationApplied,
@@ -10168,9 +10738,13 @@ exports.__test = {
   overlayExternalTargetsWithInventory,
   persistEnhancedConversionActivationPlan,
   persistVisitorChoicePersonalizationCapability,
+  normalizeImprovementAuthorization,
+  normalizeModeTransitionConfirmation,
   readGoogleConversionTrackingSettings,
   reconcileEnhancedConversionsInternalActivation,
   reconcileVisitorChoicePersonalizationCapabilities,
+  usesExistingAdvertiserCampaigns,
+  validateImprovementAuthorization,
   reconcileVerifiedConnectOnlyStrategyActivationReadiness,
   enrichMetaCampaignsWithMappedConnections,
   metaConnectionUsability,
@@ -10181,6 +10755,7 @@ exports.__test = {
   resolveWebMeasurementMarketingState,
   resolveEnabledConversionEvents,
   strategyPayloadUsesGoogleAds,
+  stableHttpsDestination,
   validateEnhancedConversionActivationAllowlist
 };
 

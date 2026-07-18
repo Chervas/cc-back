@@ -154,6 +154,8 @@ async function testPurchasePayloadAndValue() {
   assert.equal(uploadInput.eventId, 'appointment-301-treatment-completed');
   assert.equal(uploadInput.clinicId, 56);
   assert.equal(uploadInput.value, 1250.5);
+  assert.equal(uploadInput.valueProvenance, 'treatment_base_price');
+  assert.equal(uploadInput.valueIsFallback, true);
   assert.equal(uploadInput.currency, 'EUR');
   assert.equal(uploadInput.occurredAt.toISOString(), '2026-07-12T12:00:00.000Z');
   assert.equal(Object.hasOwn(uploadInput, 'customData'), false);
@@ -284,7 +286,10 @@ function testControllerUsesCommonHelperForEveryCompletionWritePath() {
     path.resolve(__dirname, '../../controllers/citas.controller.js'),
     'utf8'
   );
-  assert.match(controller, /const \{ processAppointmentLeadMilestones \} = require\('\.\.\/services\/appointmentLeadMilestone\.service'\);/);
+  assert.match(
+    controller,
+    /const\s*\{[^}]*processAppointmentLeadMilestones[^}]*\}\s*=\s*require\('\.\.\/services\/appointmentLeadMilestone\.service'\);/
+  );
   assert.match(controller, /if \(estadoRaw === 'completada'\) \{\s*await processAppointmentLeadMilestones\(\{\s*cita,\s*previousStatus: null,/s);
   assert.match(controller, /if \(!\['convertido', 'descartado', 'acudio_cita'\]\.includes\(currentLeadStatus\)\) \{\s*const leadUpdatePayload = \{\s*status_lead: 'citado'/s);
 

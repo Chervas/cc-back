@@ -396,6 +396,22 @@ const JOB_HANDLERS = {
   business_profile_backfill_locations: async (payload = {}) => metaSyncJobs.executeBusinessProfileBackfillForLocations(payload.mappings || []),
   marketing_competition_heatmap_refresh: async (payload = {}) => metaSyncJobs.executeCompetitionHeatmapRefresh(payload),
   marketing_ai_visibility_run: async (payload = {}) => marketingAiVisibilityService.executeRun(payload),
+  'marketing_web.landing_published.v1': async (payload = {}) => {
+    const result = await require('./campaignDestinationBindings.service').consumeLandingPublishedEvent(payload);
+    return { status: 'completed', result };
+  },
+  'marketing_web.destination_ready.v1': async (payload = {}) => (
+    require('./campaignDestinationBindings.service').runDestinationReadyEventJob(payload)
+  ),
+  'marketing_campaign.destination_apply.v1': async (payload = {}) => (
+    require('./campaignDestinationBindings.service').runDestinationApplyJob(payload)
+  ),
+  'marketing_campaign.destination_rollback.v1': async (payload = {}) => (
+    require('./campaignDestinationBindings.service').runDestinationRollbackJob(payload)
+  ),
+  guided_campaign_goal_policy_apply: async (payload = {}) => (
+    require('./guidedCampaignOptimizationJobs.service').runGuidedCampaignOptimizationJob(payload)
+  ),
   business_profile_review_match: async (payload = {}) => googleReviewMatchService.runBusinessProfileReviewMatchJob(payload),
   whatsapp_coexistence_sync_contacts: async (payload = {}) => whatsappCoexistenceService.runContactsSyncJob(payload),
   whatsapp_coexistence_sync_history: async (payload = {}) => whatsappCoexistenceService.runHistorySyncJob(payload),
@@ -410,6 +426,11 @@ const JOB_HANDLERS = {
   lead_callback_reminder_notify: async (payload = {}, jobRequest) => runLeadCallbackReminderJob(payload, jobRequest),
   intake_quickchat_summary_materialize: async (payload = {}) => (
     intakeQuickChatOutboxService.runIntakeQuickChatSummaryMaterializeJob(payload)
+  ),
+  // Carga diferida: publicación importa compilador/modelos Web y no debe
+  // introducir un ciclo durante el arranque del worker global.
+  web_publication_deploy: async (payload = {}, jobRequest = null) => (
+    require('./webPublicationDeployment.service').runPublicationDeploymentJob(payload, jobRequest)
   ),
 };
 

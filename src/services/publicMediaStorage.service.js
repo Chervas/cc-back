@@ -3,7 +3,7 @@
 const crypto = require('crypto');
 const sharp = require('sharp');
 const { CloudFrontClient, CreateInvalidationCommand } = require('@aws-sdk/client-cloudfront');
-const { PutObjectCommand, S3Client } = require('@aws-sdk/client-s3');
+const { DeleteObjectCommand, PutObjectCommand, S3Client } = require('@aws-sdk/client-s3');
 const { AssumeRoleCommand, STSClient } = require('@aws-sdk/client-sts');
 
 const DEFAULT_REGION = 'eu-west-3';
@@ -60,6 +60,7 @@ function assertAllowedPurpose(purpose) {
     'clinic_access_image',
     'clinic_logo',
     'marketing_image',
+    'web_editor_media',
     'frontend_asset',
     'test_health',
     'public_asset'
@@ -221,6 +222,21 @@ async function normalizeClinicAccessImageToJpeg(buffer) {
     .toBuffer();
 }
 
+async function normalizeWebEditorImageToWebp(buffer) {
+  // Content disarm, no antivirus: decodificamos y volvemos a codificar únicamente
+  // los píxeles. Sharp no copia EXIF, GPS, XMP, perfiles incrustados ni bytes
+  // adicionales si no se invoca withMetadata(). Los binarios que Sharp no pueda
+  // interpretar se rechazan de forma fail-closed.
+  return sharp(buffer, {
+    failOn: 'error',
+    animated: false,
+    limitInputPixels: MAX_IMAGE_PIXELS,
+  })
+    .rotate()
+    .webp({ quality: 88, effort: 4, smartSubsample: true })
+    .toBuffer();
+}
+
 async function preparePublicMediaPayload(input = {}) {
   const purpose = assertAllowedPurpose(input.purpose);
   let contentType = inferContentType(input);
@@ -243,6 +259,10 @@ async function preparePublicMediaPayload(input = {}) {
   } else if (shouldNormalizeWhatsappImage({ purpose, contentType })) {
     buffer = await normalizeWhatsappImageToJpeg(buffer);
     contentType = 'image/jpeg';
+    transformed = true;
+  } else if (purpose === 'web_editor_media') {
+    buffer = await normalizeWebEditorImageToWebp(buffer);
+    contentType = 'image/webp';
     transformed = true;
   }
 
@@ -270,7 +290,9 @@ async function preparePublicMediaPayload(input = {}) {
       output_width: outputImage?.width || null,
       output_height: outputImage?.height || null,
       transformed,
-      metadata_stripped: purpose === 'clinic_access_image',
+      metadata_stripped: ['clinic_access_image', 'web_editor_media'].includes(purpose),
+      content_disarm: purpose === 'web_editor_media' ? 'sharp_reencode_v1' : null,
+      malware_scan_status: purpose === 'web_editor_media' ? 'not_available' : null,
       whatsapp_compatible: purpose === 'clinic_access_image'
         ? buffer.length <= MAX_WHATSAPP_IMAGE_BYTES
         : null,
@@ -295,6 +317,8 @@ function prefixForPurpose(purpose) {
       return 'logos/clinicas';
     case 'marketing_image':
       return 'marketing';
+    case 'web_editor_media':
+      return 'marketing/web-editor';
     case 'frontend_asset':
       return 'frontend';
     case 'test_health':
@@ -395,7 +419,16 @@ function cloudFrontClient() {
 }
 
 async function uploadPublicMedia(input = {}) {
-  const prepared = await preparePublicMediaPayload(input);
+  const prepared = input.preparedPayload || await preparePublicMediaPayload(input);
+  if (
+    !prepared
+    || prepared.purpose !== assertAllowedPurpose(input.purpose)
+    || !Buffer.isBuffer(prepared.buffer)
+  ) {
+    const err = new Error('public_media_invalid_prepared_payload');
+    err.status = 400;
+    throw err;
+  }
   const {
     purpose,
     contentType,
@@ -452,6 +485,18 @@ async function uploadPublicMedia(input = {}) {
     cacheControl,
     imageMetadata,
   };
+}
+
+async function deleteWebEditorMediaObject(objectKey) {
+  const key = cleanText(objectKey).replace(/^\/+/, '');
+  if (!/^marketing\/web-editor\/(?:clinic|group)-[1-9][0-9]*\//.test(key) || key.includes('..')) {
+    const err = new Error('web_editor_media_delete_key_not_allowed');
+    err.status = 400;
+    throw err;
+  }
+  const { bucket } = getConfig();
+  await s3Client().send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+  return true;
 }
 
 async function invalidatePublicMediaKey(key) {
@@ -512,6 +557,7 @@ module.exports = {
   getConfig,
   getPublicMediaStatus,
   uploadPublicMedia,
+  deleteWebEditorMediaObject,
   invalidatePublicMediaKey,
   preparePublicMediaPayload,
   publicUrlForKey,

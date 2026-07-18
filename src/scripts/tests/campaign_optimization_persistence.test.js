@@ -75,23 +75,71 @@ function testAggregationIsHonestAboutMissingDimensions() {
   assert.equal(Object.hasOwn(metric, 'weekly_conversions'), false);
 }
 
-function testScheduleAndPurchaseDoNotInventEvidence() {
+function testScheduleAndPurchaseFailClosedWhenEvidenceCannotBeResolved() {
   const schedule = buildLifecycleMetrics({
     policy: policy({ lifecycleState: { stage: 'qualified_lead' } }),
-    attempts: [attempt({ eventName: 'schedule', eventId: 'schedule-1' })],
+    attempts: [attempt({ eventName: 'schedule', eventId: 'schedule-without-appointment-id' })],
     now: NOW,
   });
-  assert.equal(Object.hasOwn(schedule.metrics.schedule, 'weekly_conversions'), false);
-  assert.ok(schedule.qualityBlockers.some((item) => item.code === 'SCHEDULE_WEEKLY_HISTORY_UNAVAILABLE'));
+  assert.equal(schedule.metrics.schedule.weekly_conversions.length, 12);
+  assert.equal(schedule.metrics.schedule.effective_date_source, 'CitasPacientes.inicio');
+  assert.ok(schedule.qualityBlockers.some((item) => item.code === 'SCHEDULE_EFFECTIVE_DATE_COVERAGE_INCOMPLETE'));
 
   const purchase = buildLifecycleMetrics({
     policy: policy({ lifecycleState: { stage: 'schedule' } }),
     attempts: [attempt({ eventName: 'purchase', eventId: 'purchase-1', requestMetadata: { has_value: true } })],
     now: NOW,
   });
-  assert.equal(Object.hasOwn(purchase.metrics.purchase, 'real_value_rate'), false);
-  assert.equal(Object.hasOwn(purchase.metrics.purchase, 'fallback_value_rate'), false);
-  assert.ok(purchase.qualityBlockers.some((item) => item.code === 'PURCHASE_VALUE_PROVENANCE_UNAVAILABLE'));
+  assert.equal(purchase.metrics.purchase.real_value_rate, 0);
+  assert.equal(purchase.metrics.purchase.fallback_value_rate, 0);
+  assert.ok(purchase.qualityBlockers.some((item) => item.code === 'PURCHASE_VALUE_PROVENANCE_INCOMPLETE'));
+}
+
+function testScheduleAndPurchaseUseEffectiveBusinessEvidence() {
+  const schedule = buildLifecycleMetrics({
+    policy: policy({ lifecycleState: { stage: 'qualified_lead' } }),
+    attempts: [attempt({
+      eventName: 'schedule',
+      eventId: 'appointment-101',
+      // La cita se pidió semanas antes, pero debe entrar por su fecha efectiva.
+      attemptedAt: new Date('2026-05-15T10:00:00.000Z'),
+    })],
+    appointments: [{ id_cita: 101, inicio: new Date('2026-07-10T09:00:00.000Z') }],
+    now: NOW,
+  });
+  assert.equal(schedule.metrics.schedule.conversions_30d, 1);
+  assert.equal(schedule.metrics.schedule.weekly_conversions.length, 12);
+  assert.equal(schedule.qualityBlockers.some((item) => item.code === 'SCHEDULE_EFFECTIVE_DATE_COVERAGE_INCOMPLETE'), false);
+
+  const purchase = buildLifecycleMetrics({
+    policy: policy({ lifecycleState: { stage: 'schedule' } }),
+    attempts: [
+      attempt({
+        eventName: 'purchase',
+        eventId: 'appointment-201-treatment-completed',
+        requestMetadata: {
+          value_amount: 1200,
+          value_provenance: 'payment',
+          value_is_fallback: false,
+        },
+      }),
+      attempt({
+        eventName: 'purchase',
+        eventId: 'appointment-202-treatment-completed',
+        requestMetadata: {
+          value_amount: 950,
+          value_provenance: 'treatment_base_price',
+          value_is_fallback: true,
+        },
+      }),
+    ],
+    now: NOW,
+  });
+  assert.equal(purchase.metrics.purchase.real_value_events, 1);
+  assert.equal(purchase.metrics.purchase.fallback_value_events, 1);
+  assert.equal(purchase.metrics.purchase.real_value_rate, 0.5);
+  assert.equal(purchase.metrics.purchase.fallback_value_rate, 0.5);
+  assert.equal(purchase.qualityBlockers.some((item) => item.code === 'PURCHASE_VALUE_PROVENANCE_INCOMPLETE'), false);
 }
 
 async function testDailyEvaluationPersistsWithCasAndIsIdempotent() {
@@ -229,7 +277,8 @@ function testSourceContractsAreReadOnlyAndMonitored() {
 
 async function run() {
   testAggregationIsHonestAboutMissingDimensions();
-  testScheduleAndPurchaseDoNotInventEvidence();
+  testScheduleAndPurchaseFailClosedWhenEvidenceCannotBeResolved();
+  testScheduleAndPurchaseUseEffectiveBusinessEvidence();
   await testDailyEvaluationPersistsWithCasAndIsIdempotent();
   await testCasConflictIsExplicit();
   await testActiveGoalPolicyLeaseSkipsEvaluationWithoutWriting();
