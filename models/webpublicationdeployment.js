@@ -7,6 +7,11 @@ function appendOnlyError() {
 }
 
 const MUTABLE_FIELDS = new Set([
+  // A publish deployment is created before its production artifact exists.
+  // The worker persists that artifact pointer after the deterministic compile
+  // (and may replace it when the trusted runtime changed between retries).
+  // It is operational state, not part of the immutable deployment identity.
+  'artifactId',
   'status', 'storage', 'result', 'errorCode', 'errorDetails', 'jobRequestId', 'startedAt', 'completedAt',
 ]);
 
@@ -15,11 +20,18 @@ function rejectImmutableFields(changed) {
 }
 
 function rejectImmutableInstance(instance) {
-  rejectImmutableFields(typeof instance.changed === 'function' ? instance.changed() : []);
+  const reported = typeof instance.changed === 'function' ? instance.changed() : [];
+  const changed = Array.isArray(reported) ? reported : [];
+  rejectImmutableFields(changed);
+  if (changed.includes('artifactId') && String(instance.status || '') !== 'running') appendOnlyError();
 }
 
 function rejectImmutableBulk(options = {}) {
-  rejectImmutableFields(options.fields || Object.keys(options.attributes || {}));
+  const changed = options.fields || Object.keys(options.attributes || {});
+  rejectImmutableFields(changed);
+  // Bulk updates cannot prove that every affected deployment owns the running
+  // lease, so artifact pointers are only persisted through a locked instance.
+  if (changed.includes('artifactId')) appendOnlyError();
 }
 
 module.exports = (sequelize, DataTypes) => {
