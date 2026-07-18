@@ -80,6 +80,20 @@ function webPublishingEnabled() {
   return envBoolean('MARKETING_WEB_PUBLISHING_ENABLED', false);
 }
 
+function webPublishingAvailability(scope) {
+  assertWebScopeEnabled(scope);
+  const normalized = normalizedScopeKey(scope);
+  const enabled = publishingScopeKeys();
+  const rolloutReason = enabled && !enabled.has(normalized.key)
+    ? 'scope_not_enabled'
+    : null;
+  const available = webPublishingEnabled() && !rolloutReason;
+  return {
+    available,
+    reason: available ? null : (rolloutReason || 'publishing_disabled'),
+  };
+}
+
 function assertWebScopeEnabled(scope) {
   const normalized = normalizedScopeKey(scope);
   const disabled = disabledScopeKeys();
@@ -103,13 +117,9 @@ function assertWebScopeEnabled(scope) {
 }
 
 function assertWebPublishingEnabled(scope) {
-  assertWebScopeEnabled(scope);
   const normalized = normalizedScopeKey(scope);
-  const enabled = publishingScopeKeys();
-  const rolloutReason = enabled && !enabled.has(normalized.key)
-    ? 'scope_not_enabled'
-    : null;
-  if (webPublishingEnabled() && !rolloutReason) return true;
+  const availability = webPublishingAvailability(scope);
+  if (availability.available) return true;
   const error = new Error('La publicación web todavía no está habilitada.');
   error.name = 'MarketingWebFeatureDisabledError';
   error.code = 'web_publishing_disabled';
@@ -117,7 +127,7 @@ function assertWebPublishingEnabled(scope) {
   error.details = {
     scope_type: normalized.type,
     scope_id: normalized.id,
-    rollout_reason: rolloutReason || 'publishing_disabled',
+    rollout_reason: availability.reason,
   };
   throw error;
 }
@@ -132,5 +142,6 @@ module.exports = {
   publishingScopeKeys,
   scopeKeysFromEnv,
   webEditorEnabled,
+  webPublishingAvailability,
   webPublishingEnabled,
 };

@@ -6,7 +6,10 @@ const db = require('../../models');
 const { assertUserCanAccessFeature } = require('../lib/access-policy');
 const { isGlobalAdmin } = require('../lib/role-helpers');
 const { assertValidWebDocument } = require('../lib/webDocument');
-const { assertWebScopeEnabled } = require('../lib/marketingWebFeatureFlags');
+const {
+  assertWebScopeEnabled,
+  webPublishingAvailability,
+} = require('../lib/marketingWebFeatureFlags');
 const {
   collectWebResourceReferences,
   resolveWebDocumentResources,
@@ -579,6 +582,12 @@ function serializeProject(row, options = {}) {
     page_count: Number(options.pageCount ?? pages.length ?? 0),
     draft: serializeDraft(options.draft ?? project.draft),
     latest_revision: serializeRevision(options.latestRevision),
+    ...(options.publishingAvailability ? {
+      capabilities: {
+        publishing_available: options.publishingAvailability.available === true,
+        publishing_unavailable_reason: options.publishingAvailability.reason || null,
+      },
+    } : {}),
     created_at: project.created_at,
     updated_at: project.updated_at,
   };
@@ -619,6 +628,7 @@ async function assertProjectAccess(actorId, project, featureKey, options = {}) {
 async function listProjects({ actorId, query = {}, models = db } = {}) {
   const scope = normalizeScope(query);
   await assertScopeAccess(actorId, scope, 'marketing.web.view', { models });
+  const publishingAvailability = webPublishingAvailability(scope);
   const page = boundedInteger(query.page, 1, MAX_PAGE_NUMBER);
   const limit = boundedInteger(query.limit, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
   const status = String(query.status || '').trim().toLowerCase();
@@ -673,8 +683,13 @@ async function listProjects({ actorId, query = {}, models = db } = {}) {
   const total = Number(result.count || 0);
   return {
     scope: { type: scope.type, id: scope.id },
+    capabilities: {
+      publishing_available: publishingAvailability.available === true,
+      publishing_unavailable_reason: publishingAvailability.reason || null,
+    },
     items: rows.map((project) => serializeProject(project, {
       latestRevision: latestRevisionByProject.get(String(project.id)) || null,
+      publishingAvailability,
     })),
     pagination: {
       page,
@@ -875,12 +890,13 @@ async function getProject({ actorId, projectId, models = db } = {}) {
     ],
   });
   const scope = await assertProjectAccess(actorId, project, 'marketing.web.view', { models });
+  const publishingAvailability = webPublishingAvailability(scope);
   const latestRevision = await models.WebRevision.findOne({
     where: { projectId: project.id },
     order: [['revisionNumber', 'DESC']],
   });
   return {
-    ...serializeProject(project, { latestRevision }),
+    ...serializeProject(project, { latestRevision, publishingAvailability }),
     scope: { type: scope.type, id: scope.id },
     pages: (plain(project).pages || []).map((page) => ({
       id: page.id,
