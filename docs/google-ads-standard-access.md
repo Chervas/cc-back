@@ -1,23 +1,25 @@
 # ClinicaClick – Google Ads API Standard Access design
 
+> **Runtime clarification — 2026-07-18:** `guided_improvement` starts at Qualified Lead when the authorized strategy is activated and can promote to Schedule automatically by reusing the initial client mandate. `managed_service` retains operator approval for later promotions.
+
 **Company:** Mod Marketing / ClinicaClick
 
 **MCC (manager) ID:** 286-322-4233
 
 **Contact:** google-ads-api@modmarketing.net / carlos.hervas@modmarketing.net
 
-**Use case:** Healthcare marketing platform for clinics. ClinicaClick links customer accounts, reads campaign/reporting data, provisions its own canonical conversion actions, measures consented first-party lead milestones and applies a narrowly scoped goal policy only to explicitly approved managed cohorts.
+**Use case:** Healthcare marketing platform for clinics. ClinicaClick links customer accounts, reads campaign/reporting data, provisions its own canonical conversion actions, measures consented first-party lead milestones and applies a narrowly scoped goal policy only to cohorts covered by an explicit client mandate (`guided_improvement`) or an approved managed campaign (`managed_service`).
 
 This document describes the current contract. Detailed event transport lives in
 [`google-data-manager-conversions.md`](./google-data-manager-conversions.md) and
-the managed goal contract in
+the scoped goal contract in
 [`google-ads-goal-policy-v4.md`](./google-ads-goal-policy-v4.md).
 
 ## 1. Architecture and provider boundaries
 
 - **Frontend (Angular):** account connection, campaign onboarding, web/consent configuration, reporting and managed-campaign administration.
 - **Backend (Node.js/Express + MySQL):** resolves tenant scope, OAuth connection, manager/customer account mapping, canonical conversion destinations, attribution, deduplication and audit.
-- **Google Ads API:** account/campaign/reporting reads, canonical `ConversionAction` provisioning and the explicit managed custom-goal executor. Campaign publishing remains dry-run; there is no general executor that creates, pauses or changes budgets/creatives.
+- **Google Ads API:** account/campaign/reporting reads, canonical `ConversionAction` provisioning and the explicit custom-goal executor for `guided_improvement` and `managed_service`. Campaign publishing remains dry-run; there is no general executor that creates, pauses or changes budgets/creatives.
 - **Google Data Manager API:** current transport for click-derived server-side conversion events. It replaces `ConversionUploadService` for this event path and processes accepted requests asynchronously through Diagnostics.
 - **Intake/CRM:** forms, calls, chat and appointment lifecycle produce Lead, Contact, Qualified Lead, Schedule and Purchase milestones. Meta CAPI is an independent destination; Google events are not a blind mirror of Meta events.
 
@@ -42,7 +44,7 @@ ClinicaClick uses these exact canonical actions per customer account:
 
 New actions are `UPLOAD_CLICKS`, `MANY_PER_CLICK`, `ENABLED` and globally secondary (`primary_for_goal=false`). Provisioning is read-only by default and only creates a missing canonical action when both `create_missing=true` and `confirm_external_mutation=true` are supplied. It never deletes, disables or silently rewrites customer actions.
 
-Data Manager transports events but does not create conversion actions. The Google Ads API remains responsible for provisioning and, under the managed policy described below, custom goals.
+Data Manager transports events but does not create conversion actions. The Google Ads API remains responsible for provisioning and, under the scoped policies described below, custom goals.
 
 ## 4. Values and optimization semantics
 
@@ -56,7 +58,7 @@ The versioned default policy uses:
 | Schedule | 40 EUR | Relative optimization/reporting weight for an appointment scheduled and linked to the lead; not necessarily confirmed or attended |
 | Purchase | Disabled in Propdental | Current code can derive catalog `precio_base`/`0`; this is not accepted/paid revenue and cannot be a bidding value |
 
-The `10/40` values are not revenue, price, margin or ROAS and do not authorize `Maximize Conversion Value`. Qualified Lead is the initial managed bidding signal; Schedule requires later lifecycle evidence. Purchase must remain disabled until CRM persists an authoritative accepted/paid amount or margin with sufficient coverage; the treatment catalog price does not satisfy that contract.
+The `10/40` values are not revenue, price, margin or ROAS and do not authorize `Maximize Conversion Value`. Qualified Lead is the initial bidding signal for both scoped optimization modes; Schedule requires later lifecycle evidence. Purchase must remain disabled until CRM persists an authoritative accepted/paid amount or margin with sufficient coverage; the treatment catalog price does not satisfy that contract.
 
 ## 5. Consent, Enhanced conversions and healthcare restrictions
 
@@ -71,15 +73,17 @@ The standard offline path can upload a permitted click identifier without PII. E
 
 On 2026-07-13 a direct Google read confirmed accepted data terms and `enhanced_conversions_for_leads_enabled=true` for both Propdental accounts, and Data Manager accepted `validateOnly` for each account. After the live Web verification at `09:38:42 UTC`, the internal reconciler returned `already_active`, `ready=true`, was idempotent and reported `google_ads_mutated=false`. The reconciler only updates the scoped `IntakeConfig`; it does not mutate the Google switch and does not depend on Play.
 
-## 6. Managed goal policy
+## 6. Scoped goal policy
 
-Canonical actions stay globally secondary. For an approved Google Search/PMax `ManagedCampaign`, the v4 executor may create and assign an immutable custom goal for exactly one account, cohort and lifecycle stage:
+Canonical actions stay globally secondary. For an authorized Google Search/PMax cohort, the v4 executor may create and assign an immutable custom goal for exactly one account, cohort and lifecycle stage:
 
 `qualified_lead → schedule → purchase`
 
-The initial Qualified Lead apply requires persisted admin approval, a current preview digest, `validateOnly`, a drift check, apply and healthy readback. `connect_only`, observe-mode campaigns and Smart campaigns never reach this executor.
+In **Mejora** (`guided_improvement`), activating an eligible strategy after the client has accepted the versioned three-scope mandate creates the policy directly in `qualified_lead` and enqueues a durable apply. Measurement and conversion readiness are activation gates; there is no persisted `measurement → qualified_lead` promotion for this mode. The executor uses a current preview digest, `validateOnly`, a drift check, apply and healthy readback. Once active, the daily evaluator can promote `qualified_lead → schedule` after the configured thresholds and two passing evaluations separated by at least 24 hours. The provider job reuses the initial client authorization, records `initial_authorization_reused=true` and does not require a second client action or an operator approval.
 
-Schedule is not yet an end-to-end operational transition. The evaluator lacks a real weekly series by appointment date (`SCHEDULE_WEEKLY_HISTORY_UNAVAILABLE`), and no route currently persists operator approval and invokes `applyApprovedLifecycleTransition`. The planner/executor can validate an already materialized transition, but it must not be described as an automatic promotion.
+In **Piloto automático** (`managed_service`), the initial Qualified Lead apply continues to require persisted admin approval. Later lifecycle promotions remain operator-controlled: a ready evaluation does not by itself authorize the managed provider mutation.
+
+The shared evaluator now builds the Schedule weekly series from the effective appointment date in `CitasPacientes.inicio`; unresolved appointment evidence fails closed. `connect_only`, observe-mode managed campaigns and Smart campaigns never reach the executor.
 
 ## 7. Current rollout scope
 
@@ -107,4 +111,4 @@ Schedule is not yet an end-to-end operational transition. The evaluator lacks a 
 - Search and Performance Max have a deterministic publishing dry-run adapter, not a general execution adapter.
 - Display/Meta publishing is not claimed as operational.
 - Standard Access does not authorize cross-tenant account discovery or mutation.
-- Conversion readiness does not authorize changing campaign bidding goals; only the managed goal-policy gate has that narrow authority.
+- Conversion readiness alone does not authorize changing campaign bidding goals. The narrow authority comes from the accepted `guided_improvement` mandate or the approved `managed_service` goal-policy gate.

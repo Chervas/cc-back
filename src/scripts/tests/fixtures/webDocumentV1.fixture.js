@@ -47,7 +47,15 @@ function buildValidWebDocument() {
           columns: 1,
           semantic_tag: 'main',
         },
-        children: ['heading_main', 'text_intro', 'image_hero', 'button_primary', 'form_lead'],
+        children: [
+          'heading_main',
+          'text_intro',
+          'divider_primary',
+          'spacer_primary',
+          'image_hero',
+          'button_primary',
+          'form_lead',
+        ],
         style_tokens: {
           background: 'surface',
           content_width: 'standard',
@@ -83,6 +91,25 @@ function buildValidWebDocument() {
           size: 'lg',
           align: 'left',
           tone: 'muted',
+        },
+        children: [],
+      },
+      divider_primary: {
+        id: 'divider_primary',
+        type: 'divider',
+        version: 1,
+        props: {
+          line_style: 'solid',
+          tone: 'muted',
+        },
+        children: [],
+      },
+      spacer_primary: {
+        id: 'spacer_primary',
+        type: 'spacer',
+        version: 1,
+        props: {
+          size: 'lg',
         },
         children: [],
       },

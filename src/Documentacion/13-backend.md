@@ -4051,6 +4051,8 @@ Se repite el mismo esquema en `contact`, `qualified_lead`, `schedule` y `purchas
 
 La respuesta de bootstrap ofrece `connect_only`, `guided_improvement` y `managed_service`; `managed_self` permanece en `legacy_modes` para lectura histórica. `connect_only` mide, atribuye y sube conversiones consentidas sin mutar campañas. `guided_improvement` trabaja sobre campañas existentes y puede gestionar el objetivo de conversión y publicar una landing para campañas Google Search/PMax vinculadas, después de guardar la autorización cliente v1 con los scopes exactos `conversion_goal`, `landing_publish` y `campaign_destination`; nunca puede tocar pujas, presupuesto, segmentación ni activar/pausar campañas. Con esa autorización válida, `mode_contract.publish_landings=true`, `change_destinations=true`, el hook `marketing_web.landing_published.v1` queda `available` y el destino queda `available_after_landing_published`. Publicar no cambia Google automáticamente: materializa un binding auditable y el usuario debe confirmar una segunda operación acotada al digest exacto del destino, las cuentas seleccionadas y `readback_required=true`. El worker serializado aplica URL final en anuncios Search o en asset groups PMax, persiste la decisión explícita sobre expansión de URL, relee Google y solo marca éxito si todo coincide. Un fallo parcial encola rollback compensatorio al estado anterior; la auditoría diaria `marketing_campaign.destination_drift_audit.v1` detecta cambios posteriores sin autorepararlos. Los destinos web solo admiten URL HTTPS públicas y estables, sin credenciales, fragmento, host privado ni parámetros efímeros de atribución/firma/caducidad. `managed_service` usa el mismo puente únicamente dentro de una `ManagedCampaign` aprobada y de sus constraints; guardar la estrategia solo provisiona una spec por canal en `draft + observe`, junto con su cuenta `unfunded`, y no llama a Google/Meta.
 
+`POST /api/marketing/campaign-onboarding/start` configura exclusivamente `connect_only` o `guided_improvement`. Aunque `managed_service` continúa expuesto en bootstrap y legible en configuraciones históricas, intentar seleccionarlo o transicionar hacia él por este endpoint devuelve `409 managed_service_request_required`, `next_action=request_managed_campaign` y la ruta canónica `/api/marketing/managed-campaigns/request`. La guarda se evalúa antes de resolver el scope, comprobar transiciones o crear un `CampaignRequest`; por tanto no deja onboardings parciales. El alta de Piloto automático debe entrar siempre por la solicitud gestionada y sus gates de presupuesto, financiación, propuesta y aprobación.
+
 Cambiar entre niveles es una operación explícita: el cliente debe confirmar exactamente `from_mode` y `to_mode`; el backend bloquea el cambio si queda otra estrategia no completada o una policy activa/pausada en el alcance. Esto incluye la salida desde el histórico `managed_self`. No se sobrescriben ni eliminan policies para aparentar una migración. Mejora no admite una estrategia Meta-only: debe existir al menos una campaña Google vinculada. En campañas externas `channels[].percentage` no expresa reparto gestionado y se conserva en cero en vez de inventar un 100/0.
 
 Rutas cliente actuales:
@@ -5004,6 +5006,24 @@ semánticos, marcados con `data-cc-global`, y los incluye en el cálculo de
 alcanzabilidad SEO. No se duplican como nodos locales ni se recompilan desde
 contenido vivo. La previsualización Angular y el artefacto público consumen la
 misma referencia global congelada.
+
+`clinicaclick-web-renderer/1.4.0` es un incremento posterior y compatible que
+no reemplaza ni reescribe la historia de globales de `1.3.0`. El corte
+`4345683`, presente en la rama de integración y todavía no desplegado, amplía
+el JSON Schema cerrado de siete a nueve tipos con dos hojas de estructura:
+
+- `divider` exige `children=[]`, no admite bindings y limita sus propiedades a
+  `line_style=solid|dashed|dotted` y `tone=muted|brand|accent`. Se compila como
+  `<hr>` semántico y sus variantes solo seleccionan clases CSS allowlisted;
+- `spacer` exige `children=[]`, no admite bindings y limita `size` a
+  `xs|sm|md|lg|xl|2xl`. Se compila como un elemento sin contenido,
+  `aria-hidden=true` y `role=presentation`, con altura determinada por tokens.
+
+El contrato rechaza propiedades adicionales, hijos, bindings o valores fuera
+de esos enums. La identidad del artefacto sigue incluyendo la versión del
+renderer, por lo que compilar la misma revisión con `1.4.0` genera un corte
+explícito, determinista y auditable; nunca modifica un artefacto `1.2.1` o
+`1.3.0` ya congelado.
 
 El formulario global también se materializa por ruta. El manifest no lo trata
 como un único formulario sin contexto, sino como un contrato `scope=global`

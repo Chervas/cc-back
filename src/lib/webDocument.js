@@ -56,6 +56,8 @@ const BINDABLE_PROPS = Object.freeze({
   button: new Set(['label', 'target']),
   intake_form: new Set(['title', 'description']),
   section: new Set(),
+  divider: new Set(),
+  spacer: new Set(),
 });
 
 const FIELD_TYPES = Object.freeze({

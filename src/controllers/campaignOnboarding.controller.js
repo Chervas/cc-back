@@ -127,6 +127,7 @@ const CREATABLE_MODES = new Set([
   CAMPAIGN_MODES.IMPROVE,
   CAMPAIGN_MODES.AUTOPILOT
 ]);
+const MANAGED_CAMPAIGN_REQUEST_ENDPOINT = '/api/marketing/managed-campaigns/request';
 const IMPROVEMENT_AUTHORIZATION_VERSION = 1;
 const IMPROVEMENT_AUTHORIZATION_SCOPES = Object.freeze([
   'landing_publish',
@@ -145,6 +146,21 @@ function usesExistingAdvertiserCampaigns(mode) {
 
 function ownsCampaignOperations(mode) {
   return mode === CAMPAIGN_MODES.AUTOPILOT;
+}
+
+function guardCampaignOnboardingStartMode(mode) {
+  if (mode !== CAMPAIGN_MODES.AUTOPILOT) return null;
+  return {
+    http_status: 409,
+    body: {
+      success: false,
+      error: 'managed_service_request_required',
+      message: 'Piloto automático se solicita desde su flujo específico para poder revisar presupuesto, financiación y aprobación antes de operar campañas.',
+      next_action: 'request_managed_campaign',
+      request_endpoint: MANAGED_CAMPAIGN_REQUEST_ENDPOINT,
+      allowed_modes: [CAMPAIGN_MODES.MEASURE, CAMPAIGN_MODES.IMPROVE]
+    }
+  };
 }
 
 function buildCampaignModeContract(mode, improvementAuthorization = null) {
@@ -9202,6 +9218,10 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
   if (!CREATABLE_MODES.has(mode)) {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'mode inválido' });
   }
+  const modeGuard = guardCampaignOnboardingStartMode(mode);
+  if (modeGuard) {
+    return res.status(modeGuard.http_status).json(modeGuard.body);
+  }
   let improvementAuthorization = null;
   try {
     improvementAuthorization = validateImprovementAuthorization(
@@ -10730,6 +10750,7 @@ exports.__test = {
   adPersonalizationCapabilityReconciliationKey,
   buildVisitorChoicePersonalizationConfig,
   buildCampaignModeContract,
+  guardCampaignOnboardingStartMode,
   enhancedConversionActivationReconciliationKey,
   internalAdvertiserAuthorizationRequest,
   isEnhancedConversionActivationApplied,

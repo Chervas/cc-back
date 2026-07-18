@@ -66,17 +66,19 @@ function testValidContractCoversInitialBlocks() {
   const document = buildValidWebDocument();
   const result = assertValidWebDocument(document);
   assert.equal(result.valid, true);
-  assert.equal(result.stats.nodeCount, 6);
+  assert.equal(result.stats.nodeCount, 8);
   assert.deepEqual(new Set(Object.values(document.nodes).map((node) => node.type)), new Set([
     'section',
     'heading',
     'text',
+    'divider',
+    'spacer',
     'image',
     'button',
     'intake_form',
   ]));
   assert.match(result.hash, /^[a-f0-9]{64}$/);
-  assert.equal(result.hash, 'c370fa2dad56edad3e21d1147d0fa1210122d8e950ee0a98c3531a190598b6e1');
+  assert.equal(result.hash, 'b93aaab13f9ab60ea69b106522a53028b167c789179c76c3e18597c8daf452b9');
 }
 
 function testNoArbitraryCodeMarkupStylesOrClasses() {
@@ -171,6 +173,73 @@ function testSemanticImageFormButtonAndBindingRules() {
   const binding = buildValidWebDocument();
   binding.bindings.binding_clinic_name.target_prop = 'asset_id';
   assertInvalid(binding, 'bindingTarget');
+
+  const dividerBinding = buildValidWebDocument();
+  dividerBinding.bindings.binding_divider = {
+    target_node_id: 'divider_primary',
+    target_prop: 'text',
+    source: 'clinic',
+    source_id: null,
+    field: 'name',
+  };
+  dividerBinding.nodes.divider_primary.binding_ids = ['binding_divider'];
+  assertInvalid(dividerBinding, 'bindingTarget');
+
+  const spacerBinding = buildValidWebDocument();
+  spacerBinding.bindings.binding_spacer = {
+    target_node_id: 'spacer_primary',
+    target_prop: 'text',
+    source: 'clinic',
+    source_id: null,
+    field: 'name',
+  };
+  spacerBinding.nodes.spacer_primary.binding_ids = ['binding_spacer'];
+  assertInvalid(spacerBinding, 'bindingTarget');
+}
+
+function testTypedDividerAndSpacerAreClosedLeafNodes() {
+  const valid = buildValidWebDocument();
+  assert.equal(assertValidWebDocument(valid).valid, true);
+
+  for (const style of ['solid', 'dashed', 'dotted']) {
+    const variant = clone(valid);
+    variant.nodes.divider_primary.props.line_style = style;
+    assert.equal(validateWebDocument(variant).valid, true);
+  }
+  for (const tone of ['muted', 'brand', 'accent']) {
+    const variant = clone(valid);
+    variant.nodes.divider_primary.props.tone = tone;
+    assert.equal(validateWebDocument(variant).valid, true);
+  }
+  for (const size of ['xs', 'sm', 'md', 'lg', 'xl', '2xl']) {
+    const variant = clone(valid);
+    variant.nodes.spacer_primary.props.size = size;
+    assert.equal(validateWebDocument(variant).valid, true);
+  }
+
+  const arbitraryDividerStyle = clone(valid);
+  arbitraryDividerStyle.nodes.divider_primary.props.line_style = 'double';
+  assertInvalid(arbitraryDividerStyle, 'enum');
+
+  const arbitraryCss = clone(valid);
+  arbitraryCss.nodes.divider_primary.props.css = 'border-color:red';
+  assertInvalid(arbitraryCss, 'forbiddenProperty');
+
+  const arbitraryStyle = clone(valid);
+  arbitraryStyle.nodes.divider_primary.props.style = 'solid';
+  assertInvalid(arbitraryStyle, 'forbiddenProperty');
+
+  const invalidSpacerSize = clone(valid);
+  invalidSpacerSize.nodes.spacer_primary.props.size = '100vh';
+  assertInvalid(invalidSpacerSize, 'enum');
+
+  const dividerChild = clone(valid);
+  dividerChild.nodes.divider_primary.children = ['text_intro'];
+  assertInvalid(dividerChild, 'maxItems');
+
+  const spacerChild = clone(valid);
+  spacerChild.nodes.spacer_primary.children = ['text_intro'];
+  assertInvalid(spacerChild, 'maxItems');
 }
 
 function testIntakeButtonTargetsStayInsideTheirEffectiveScope() {
@@ -229,7 +298,7 @@ function testTypedFaqIsPlainTextAndLeafOnly() {
   valid.nodes.section_hero.children.push('faq_implantes');
   const result = assertValidWebDocument(valid);
   assert.equal(result.valid, true);
-  assert.equal(result.stats.nodeCount, 7);
+  assert.equal(result.stats.nodeCount, 9);
 
   const markup = clone(valid);
   markup.nodes.faq_implantes.props.answer = '<img src=x onerror=alert(1)>Respuesta';
@@ -332,6 +401,7 @@ function run() {
   testNoArbitraryCodeMarkupStylesOrClasses();
   testGraphReferencesCyclesDepthAndOrphans();
   testSemanticImageFormButtonAndBindingRules();
+  testTypedDividerAndSpacerAreClosedLeafNodes();
   testIntakeButtonTargetsStayInsideTheirEffectiveScope();
   testTypedFaqIsPlainTextAndLeafOnly();
   testStructuralAndByteLimits();
