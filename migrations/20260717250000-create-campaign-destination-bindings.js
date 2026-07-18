@@ -76,9 +76,148 @@ async function assertForeignKeys(queryInterface, table, expectedReferences) {
 
 async function ensureIndex(queryInterface, table, fields, options) {
   const indexes = await queryInterface.showIndex(table);
-  if (indexes.some((index) => index.name === options.name)) return;
+  const existing = indexes.find((index) => index.name === options.name);
+  if (existing) {
+    const actualFields = (existing.fields || [])
+      .map((field) => field.attribute || field.name || field)
+      .join(',');
+    if (actualFields !== fields.join(',') || Boolean(existing.unique) !== Boolean(options.unique)) {
+      const error = new Error(`${table}.${options.name} existe con un contrato incompatible`);
+      error.code = 'campaign_destination_migration_incompatible_index';
+      error.details = { table, index: options.name, expected_fields: fields };
+      throw error;
+    }
+    return;
+  }
   await queryInterface.addIndex(table, fields, options);
 }
+
+function normalizeCheckClause(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/\\'/g, "'")
+    .replace(/_[a-z0-9]+(?=')/g, '')
+    .replace(/[`\s()]/g, '');
+}
+
+async function getCheckConstraints(queryInterface, tableName) {
+  if (typeof queryInterface.getCheckConstraints === 'function') {
+    return queryInterface.getCheckConstraints(tableName);
+  }
+  if (queryInterface.sequelize?.query) {
+    const [rows] = await queryInterface.sequelize.query(
+      `SELECT tc.CONSTRAINT_NAME AS constraint_name,
+              tc.CONSTRAINT_TYPE AS constraint_type,
+              cc.CHECK_CLAUSE AS check_clause
+         FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+    LEFT JOIN INFORMATION_SCHEMA.CHECK_CONSTRAINTS cc
+           ON cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA
+          AND cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+        WHERE tc.CONSTRAINT_SCHEMA = DATABASE()
+          AND tc.TABLE_NAME = :tableName`,
+      { replacements: { tableName } }
+    );
+    return rows || [];
+  }
+  throw new Error(`No se pueden verificar las restricciones CHECK de ${tableName}`);
+}
+
+async function countCheckViolations(queryInterface, tableName, expression) {
+  if (typeof queryInterface.countCheckViolations === 'function') {
+    return Number(await queryInterface.countCheckViolations(tableName, expression));
+  }
+  if (queryInterface.sequelize?.query) {
+    const [rows] = await queryInterface.sequelize.query(
+      `SELECT COUNT(*) AS violation_count FROM \`${tableName}\` WHERE NOT (${expression})`
+    );
+    return Number(rows?.[0]?.violation_count || 0);
+  }
+  throw new Error(`No se pueden validar los datos existentes de ${tableName}`);
+}
+
+async function ensureCheckConstraint(queryInterface, Sequelize, tableName, definition) {
+  const constraints = await getCheckConstraints(queryInterface, tableName);
+  const existing = constraints.find((constraint) => (
+    String(constraint.constraint_name || constraint.constraintName || '').toLowerCase()
+      === definition.name.toLowerCase()
+  ));
+  if (existing) {
+    const type = String(existing.constraint_type || existing.constraintType || 'CHECK').toUpperCase();
+    const clause = existing.check_clause || existing.checkClause;
+    if (type !== 'CHECK' || normalizeCheckClause(clause) !== normalizeCheckClause(definition.expression)) {
+      const error = new Error(`${tableName}.${definition.name} existe con un contrato incompatible`);
+      error.code = 'campaign_destination_migration_incompatible_constraint';
+      error.details = { table: tableName, constraint: definition.name };
+      throw error;
+    }
+    return;
+  }
+  const violationCount = await countCheckViolations(queryInterface, tableName, definition.expression);
+  if (violationCount > 0) {
+    const error = new Error(`${tableName} contiene ${violationCount} fila(s) que incumplen ${definition.name}`);
+    error.code = 'campaign_destination_migration_constraint_data_violation';
+    error.details = { table: tableName, constraint: definition.name, violation_count: violationCount };
+    throw error;
+  }
+  await queryInterface.addConstraint(tableName, {
+    fields: definition.fields,
+    type: 'check',
+    name: definition.name,
+    where: Sequelize.literal(definition.expression),
+  });
+}
+
+async function getForeignKeyActions(queryInterface, tableName) {
+  if (typeof queryInterface.getForeignKeyActions === 'function') {
+    return queryInterface.getForeignKeyActions(tableName);
+  }
+  if (queryInterface.sequelize?.query) {
+    const [rows] = await queryInterface.sequelize.query(
+      `SELECT kcu.COLUMN_NAME AS column_name,
+              rc.UPDATE_RULE AS update_rule,
+              rc.DELETE_RULE AS delete_rule
+         FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+         JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc
+           ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+          AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+          AND rc.TABLE_NAME = kcu.TABLE_NAME
+        WHERE kcu.CONSTRAINT_SCHEMA = DATABASE()
+          AND kcu.TABLE_NAME = :tableName
+          AND kcu.REFERENCED_TABLE_NAME IS NOT NULL`,
+      { replacements: { tableName } }
+    );
+    return rows || [];
+  }
+  throw new Error(`No se pueden verificar las acciones de las claves foraneas de ${tableName}`);
+}
+
+async function assertCheckCompatibleForeignKeys(queryInterface, tableName, columns) {
+  const foreignKeys = await getForeignKeyActions(queryInterface, tableName);
+  for (const column of columns) {
+    const foreignKey = foreignKeys.find((item) => (
+      String(item.column_name || item.columnName || '').toLowerCase() === column.toLowerCase()
+    ));
+    const updateRule = String(foreignKey?.update_rule || foreignKey?.updateRule || '').toUpperCase();
+    if (!foreignKey || !['RESTRICT', 'NO ACTION'].includes(updateRule)) {
+      const error = new Error(
+        `${tableName}.${column} debe usar ON UPDATE RESTRICT/NO ACTION para ser compatible con CHECK`
+      );
+      error.code = 'campaign_destination_migration_incompatible_foreign_key_action';
+      error.details = { table: tableName, column, update_rule: updateRule || null };
+      throw error;
+    }
+  }
+}
+
+const SCOPE_CHECK = Object.freeze({
+  fields: ['scope_type', 'clinica_id', 'grupo_clinica_id'],
+  expression: "(scope_type = 'clinic' AND clinica_id IS NOT NULL AND grupo_clinica_id IS NULL) OR (scope_type = 'group' AND clinica_id IS NULL AND grupo_clinica_id IS NOT NULL)",
+});
+
+const TARGET_CHECK = Object.freeze({
+  fields: ['target_kind', 'treatment_id', 'treatment_identity'],
+  expression: "(target_kind = 'general' AND treatment_id IS NULL AND treatment_identity = 0) OR (target_kind = 'treatment' AND treatment_id IS NOT NULL AND treatment_identity = treatment_id AND treatment_identity > 0)",
+});
 
 /**
  * Durable bridge between a marketing strategy target and a verified Web
@@ -113,7 +252,8 @@ module.exports = {
         type: Sequelize.INTEGER,
         allowNull: true,
         references: { model: 'Tratamientos', key: 'id_tratamiento' },
-        onUpdate: 'CASCADE',
+        // Los IDs no se renumeran; RESTRICT evita el error MySQL 3823 al aplicar el CHECK de target.
+        onUpdate: 'RESTRICT',
         onDelete: 'RESTRICT',
       },
       treatment_identity: {
@@ -131,14 +271,14 @@ module.exports = {
         type: Sequelize.INTEGER,
         allowNull: true,
         references: { model: 'Clinicas', key: 'id_clinica' },
-        onUpdate: 'CASCADE',
+        onUpdate: 'RESTRICT',
         onDelete: 'RESTRICT',
       },
       grupo_clinica_id: {
         type: Sequelize.INTEGER,
         allowNull: true,
         references: { model: 'GruposClinicas', key: 'id_grupo' },
-        onUpdate: 'CASCADE',
+        onUpdate: 'RESTRICT',
         onDelete: 'RESTRICT',
       },
       project_id: {
@@ -192,7 +332,7 @@ module.exports = {
 
     await assertTableComplete(queryInterface, 'CampaignDestinationBindings', [
       'id', 'strategy_id', 'target_kind', 'treatment_id', 'treatment_identity', 'mode',
-      'scope_type', 'project_id', 'publication_id', 'revision_id', 'artifact_id',
+      'scope_type', 'clinica_id', 'grupo_clinica_id', 'project_id', 'publication_id', 'revision_id', 'artifact_id',
       'destination_url', 'destination_digest', 'landing_event_id', 'publication_status',
       'destination_status', 'capability_status', 'authorization', 'version',
     ], {
@@ -200,6 +340,10 @@ module.exports = {
       strategy_id: { type: /INT/, allowNull: false },
       target_kind: { type: /ENUM/, allowNull: false },
       treatment_id: { type: /INT/, allowNull: true },
+      treatment_identity: { type: /INT/, allowNull: false },
+      scope_type: { type: /ENUM/, allowNull: false },
+      clinica_id: { type: /INT/, allowNull: true },
+      grupo_clinica_id: { type: /INT/, allowNull: true },
       project_id: { type: /CHAR|VARCHAR|STRING/, allowNull: false },
       publication_id: { type: /CHAR|VARCHAR|STRING/, allowNull: false },
       revision_id: { type: /CHAR|VARCHAR|STRING/, allowNull: false },
@@ -215,6 +359,19 @@ module.exports = {
       { column: 'revision_id', table: 'WebRevisions', referencedColumn: 'id' },
       { column: 'artifact_id', table: 'WebArtifacts', referencedColumn: 'id' },
     ]);
+    await assertCheckCompatibleForeignKeys(
+      queryInterface,
+      'CampaignDestinationBindings',
+      ['treatment_id', 'clinica_id', 'grupo_clinica_id']
+    );
+    await ensureCheckConstraint(queryInterface, Sequelize, 'CampaignDestinationBindings', {
+      ...SCOPE_CHECK,
+      name: 'chk_campaign_destination_bindings_scope',
+    });
+    await ensureCheckConstraint(queryInterface, Sequelize, 'CampaignDestinationBindings', {
+      ...TARGET_CHECK,
+      name: 'chk_campaign_destination_bindings_target',
+    });
     await ensureIndex(queryInterface, 'CampaignDestinationBindings', ['strategy_id', 'target_kind', 'treatment_identity'], {
       name: 'uniq_campaign_destination_binding_target_nullsafe',
       unique: true,
