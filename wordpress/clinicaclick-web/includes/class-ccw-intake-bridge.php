@@ -987,7 +987,35 @@ final class CCW_Intake_Bridge
                 $this->fail('ccw_event_bridge_origin_invalid', 403);
             }
         }
-        $this->assert_event_artifact_identity($wrapper, $manifest, (string) ($referer['path'] ?? ''));
+        $has_landing_identity = $this->assert_event_artifact_identity(
+            $wrapper,
+            $manifest,
+            (string) ($referer['path'] ?? '')
+        );
+
+        $ip = $this->client_ip($server);
+        $this->consume_event_rate_limit($ip, $secret, $now);
+        $event_id = trim((string) ($payload['event_id'] ?? ''));
+        if (!preg_match('/^[A-Za-z0-9._:-]{8,128}$/', $event_id)) {
+            $event_id = 'ccw_evt_' . hash_hmac('sha256', $artifact_hash . '|' . $endpoint . '|' . $ip . '|' . (int) floor($now / 60), $secret);
+            $payload['event_id'] = $event_id;
+        }
+
+        // A signed landing must reach the public control-plane bridge with its
+        // complete identity. That service resolves the active publication,
+        // canonicalizes scope/URLs and attaches webLandingEventAttribution
+        // before signing the internal intake request. The browser never sees
+        // or supplies the installation HMAC.
+        if ($has_landing_identity) {
+            $wrapper['payload'] = $payload;
+            return $this->forward_landing_event(
+                $wrapper,
+                $event_id,
+                $artifact_hash,
+                $referer_value,
+                trim((string) ($server['HTTP_ORIGIN'] ?? ''))
+            );
+        }
 
         $submitted_clinic = isset($payload['clinic_id']) && preg_match('/^[1-9][0-9]*$/', (string) $payload['clinic_id'])
             ? (int) $payload['clinic_id']
@@ -1017,29 +1045,30 @@ final class CCW_Intake_Bridge
         if ($endpoint === 'events') {
             $payload['event_source_url'] = $page_url;
         }
-
-        $ip = $this->client_ip($server);
-        $this->consume_event_rate_limit($ip, $secret, $now);
-        $event_id = trim((string) ($payload['event_id'] ?? ''));
-        if (!preg_match('/^[A-Za-z0-9._:-]{8,128}$/', $event_id)) {
-            $event_id = 'ccw_evt_' . hash_hmac('sha256', $artifact_hash . '|' . $endpoint . '|' . $ip . '|' . (int) floor($now / 60), $secret);
-            $payload['event_id'] = $event_id;
-        }
         return $this->forward_event($endpoint, $payload, $event_id, $secret, $artifact_hash);
     }
 
-    /** @param array<string,mixed> $wrapper @param array<string,mixed> $manifest */
+    /**
+     * @param array<string,mixed> $wrapper
+     * @param array<string,mixed> $manifest
+     * @return bool True only for a complete, locally verified landing identity.
+     */
     private function assert_event_artifact_identity(array $wrapper, array $manifest, $referer_path)
     {
         $identity_keys = array('web_project_id', 'web_revision_id', 'web_page_id');
         $present = array_values(array_filter($identity_keys, static function ($key) use ($wrapper) {
-            return isset($wrapper[$key]) && trim((string) $wrapper[$key]) !== '';
+            return array_key_exists($key, $wrapper);
         }));
         if ($present === array()) {
-            return; // Measurement on ordinary WordPress pages, outside /cita.
+            return false; // Measurement on ordinary WordPress pages, outside /cita.
         }
         if (count($present) !== count($identity_keys)) {
             $this->fail('ccw_event_bridge_identity_incomplete', 422);
+        }
+        foreach ($identity_keys as $identity_key) {
+            if (trim((string) $wrapper[$identity_key]) === '') {
+                $this->fail('ccw_event_bridge_identity_incomplete', 422);
+            }
         }
         $project_id = $this->uuid($wrapper['web_project_id'], 'ccw_event_bridge_project_invalid');
         $revision_id = $this->uuid($wrapper['web_revision_id'], 'ccw_event_bridge_revision_invalid');
@@ -1054,6 +1083,7 @@ final class CCW_Intake_Bridge
         ) {
             $this->fail('ccw_event_bridge_identity_mismatch', 409);
         }
+        return true;
     }
 
     private function unparse_url(array $parts)
@@ -1123,6 +1153,48 @@ final class CCW_Intake_Bridge
                 'X-Clinicaclick-Web-Artifact' => $artifact_hash,
                 'X-Clinicaclick-Plugin-Version' => CCW_VERSION,
             ),
+            'body' => $body,
+            'timeout' => 10,
+            'redirection' => 0,
+            'blocking' => true,
+            'data_format' => 'body',
+            'limit_response_size' => 16384,
+            'user-agent' => 'ClinicaClick-Web/' . CCW_VERSION . '; WordPress/' . get_bloginfo('version'),
+        ));
+        if (is_wp_error($response)) {
+            $this->fail('ccw_event_bridge_upstream_unavailable', 503);
+        }
+        $status = (int) wp_remote_retrieve_response_code($response);
+        if (!in_array($status, array(200, 201, 409), true)) {
+            $this->fail('ccw_event_bridge_upstream_rejected', 503);
+        }
+        $decoded = json_decode((string) wp_remote_retrieve_body($response), true);
+        if (!is_array($decoded)) {
+            $decoded = array('success' => true);
+        }
+        return array('status' => $status === 409 ? 200 : $status, 'body' => $decoded, 'event_id' => $event_id);
+    }
+
+    /** @param array<string,mixed> $wrapper */
+    private function forward_landing_event(array $wrapper, $event_id, $artifact_hash, $referer, $origin)
+    {
+        $body = wp_json_encode($wrapper, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if (!is_string($body) || strlen($body) > 65536) {
+            $this->fail('ccw_event_bridge_payload_invalid', 413);
+        }
+        $headers = array(
+            'Accept' => 'application/json',
+            'Content-Type' => 'application/json',
+            'Referer' => (string) $referer,
+            'X-CC-Event-Id' => $event_id,
+            'X-Clinicaclick-Web-Artifact' => $artifact_hash,
+            'X-Clinicaclick-Plugin-Version' => CCW_VERSION,
+        );
+        if ((string) $origin !== '') {
+            $headers['Origin'] = (string) $origin;
+        }
+        $response = wp_safe_remote_post(CCW_Config::api_base() . self::EVENT_ENDPOINT_PATH, array(
+            'headers' => $headers,
             'body' => $body,
             'timeout' => 10,
             'redirection' => 0,

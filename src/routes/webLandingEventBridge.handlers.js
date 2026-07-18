@@ -2,24 +2,23 @@
 
 const controller = require('../controllers/webLandingEventBridge.controller');
 const { createPublicMarketingWebRateLimiter } = require('../lib/marketingWebRequestGuards');
+const { landingEventBridgeRateLimitOptions } = require('../lib/webLandingEventRateLimit');
 
-const publicWebRateLimit = createPublicMarketingWebRateLimiter();
+function createLandingEventBridgeHandlers({
+  publicWebRateLimit = createPublicMarketingWebRateLimiter(),
+} = {}) {
+  const limits = landingEventBridgeRateLimitOptions();
+  return [
+    publicWebRateLimit(limits.preliminary),
+    controller.prepare,
+    publicWebRateLimit(limits.canonical),
+    controller.dispatch,
+  ];
+}
 
-const landingEventBridgeHandlers = [
-  publicWebRateLimit({
-    operation: 'landing_event_bridge_prepare',
-    limit: 300,
-    windowMs: 10 * 60 * 1000,
-    identity: () => '00000000-0000-4000-8000-000000000000',
-  }),
-  controller.prepare,
-  publicWebRateLimit({
-    operation: 'landing_event_bridge',
-    limit: 1000,
-    windowMs: 10 * 60 * 1000,
-    identity: (req) => req.webLandingRateLimitIdentity,
-  }),
-  controller.dispatch,
-];
+const landingEventBridgeHandlers = createLandingEventBridgeHandlers();
 
-module.exports = { landingEventBridgeHandlers };
+module.exports = {
+  createLandingEventBridgeHandlers,
+  landingEventBridgeHandlers,
+};

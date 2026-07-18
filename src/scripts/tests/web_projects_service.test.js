@@ -1,8 +1,23 @@
 'use strict';
 
+const crypto = require('node:crypto');
+
 process.env.MARKETING_WEB_EDITOR_ENABLED = 'true';
 process.env.MARKETING_WEB_PUBLISHING_ENABLED = 'true';
 delete process.env.MARKETING_WEB_PUBLISHING_SCOPES;
+process.env.MARKETING_WEB_API_BASE_URL = 'https://crm.clinicaclick.com';
+process.env.MARKETING_WEB_PLUGIN_BOOTSTRAP_KEY = 'b'.repeat(32);
+const webProjectSigningKeys = crypto.generateKeyPairSync('ed25519');
+process.env.MARKETING_WEB_SIGNING_PRIVATE_KEY_PEM = webProjectSigningKeys.privateKey.export({
+  type: 'pkcs8', format: 'pem',
+});
+process.env.MARKETING_WEB_SIGNING_PUBLIC_KEY_PEM = webProjectSigningKeys.publicKey.export({
+  type: 'spki', format: 'pem',
+});
+process.env.MARKETING_WEB_ARTIFACT_STORE_MODE = 'authenticated_db';
+delete process.env.MARKETING_WEB_WORDPRESS_CHANNEL_ENABLED;
+delete process.env.MARKETING_WEB_HOSTED_CHANNEL_ENABLED;
+delete process.env.MARKETING_WEB_CUSTOM_DOMAIN_CHANNEL_ENABLED;
 
 const assert = require('node:assert/strict');
 const {
@@ -232,6 +247,13 @@ async function testListContract() {
   assert.deepEqual(result.capabilities, {
     publishing_available: true,
     publishing_unavailable_reason: null,
+    publishing_rollout_available: true,
+    publishing_rollout_unavailable_reason: null,
+    publishing_channels: {
+      clinicaclick_hosted: { available: false, unavailable_reason: 'channel_not_enabled' },
+      wordpress: { available: true, unavailable_reason: null },
+      custom_domain: { available: false, unavailable_reason: 'channel_not_enabled' },
+    },
   });
   assert.equal(result.items.length, 1);
   assert.deepEqual(result.items[0].capabilities, result.capabilities);
@@ -272,6 +294,13 @@ async function testProjectDetailExposesDisabledScopeCapability() {
     assert.deepEqual(detail.capabilities, {
       publishing_available: false,
       publishing_unavailable_reason: 'scope_not_enabled',
+      publishing_rollout_available: false,
+      publishing_rollout_unavailable_reason: 'scope_not_enabled',
+      publishing_channels: {
+        clinicaclick_hosted: { available: false, unavailable_reason: 'scope_not_enabled' },
+        wordpress: { available: false, unavailable_reason: 'scope_not_enabled' },
+        custom_domain: { available: false, unavailable_reason: 'scope_not_enabled' },
+      },
     });
   } finally {
     if (previousScopes === undefined) delete process.env.MARKETING_WEB_PUBLISHING_SCOPES;

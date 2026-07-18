@@ -3,11 +3,13 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const { verifyWebArtifactManifest } = require('../lib/webArtifactSignature');
 const { normalizeHost, resolveRoot } = require('./webHostedPublisher.service');
 const { safeFilePath } = require('./webArtifactStorage.service');
 
 const MAX_PATH_BYTES = 2048;
 const MAX_MANIFEST_BYTES = 1024 * 1024;
+const MAX_SIGNATURE_BYTES = 16 * 1024;
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 const SAFE_HEADERS = new Set([
   'content-security-policy',
@@ -63,45 +65,113 @@ function safeRequestPath(value) {
   return { raw, segments, trailingSlash };
 }
 
-async function directoryExists(value) {
-  try { return (await fs.stat(value)).isDirectory(); } catch (error) {
-    if (error?.code === 'ENOENT') return false;
+async function lstatOrNull(value) {
+  try { return await fs.lstat(value); } catch (error) {
+    if (error?.code === 'ENOENT') return null;
     throw error;
   }
 }
 
-async function selectRoute({ root, host, segments }) {
-  const hostRoot = path.join(root, 'routes', host);
-  if (!await directoryExists(hostRoot)) return null;
-  const artifactsRoot = path.join(root, 'artifacts');
-  for (let length = segments.length; length >= 0; length -= 1) {
-    const candidate = length === 0
-      ? path.join(hostRoot, '__root__')
-      : path.join(hostRoot, ...segments.slice(0, length));
-    try {
-      const stat = await fs.lstat(candidate);
-      if (!stat.isSymbolicLink()) continue;
-      const target = await fs.realpath(candidate);
-      const relative = path.relative(artifactsRoot, target);
-      if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || !/^[a-f0-9]{64}$/.test(path.basename(target))) {
-        throw new WebHostedOriginError('web_hosted_pointer_invalid', 'Página temporalmente no disponible.', 503);
-      }
-      return { target, consumed: length };
-    } catch (error) {
-      if (error?.code === 'ENOENT') continue;
-      throw error;
-    }
+async function resolveRoutePointer({ artifactsRoot, linkPath }) {
+  const stat = await lstatOrNull(linkPath);
+  if (!stat) return null;
+  if (!stat.isSymbolicLink()) {
+    throw new WebHostedOriginError('web_hosted_pointer_invalid', 'Página temporalmente no disponible.', 503);
   }
-  return { target: null, consumed: 0 };
+  let target;
+  try {
+    target = await fs.realpath(linkPath);
+  } catch {
+    throw new WebHostedOriginError('web_hosted_pointer_invalid', 'Página temporalmente no disponible.', 503);
+  }
+  if (
+    path.dirname(target) !== artifactsRoot
+    || !/^[a-f0-9]{64}$/.test(path.basename(target))
+  ) {
+    throw new WebHostedOriginError('web_hosted_pointer_invalid', 'Página temporalmente no disponible.', 503);
+  }
+  return target;
 }
 
-async function readManifest(target) {
+async function selectRoute({ root, host, segments }) {
+  const hostRoot = path.join(root, 'routes', host);
+  const hostStat = await lstatOrNull(hostRoot);
+  if (!hostStat) return null;
+  if (hostStat.isSymbolicLink() || !hostStat.isDirectory()) {
+    throw new WebHostedOriginError('web_hosted_pointer_invalid', 'Página temporalmente no disponible.', 503);
+  }
+  const artifactsRoot = path.join(root, 'artifacts');
+  let selectedTarget = await resolveRoutePointer({
+    artifactsRoot,
+    linkPath: path.join(hostRoot, '__root__'),
+  });
+  let consumed = 0;
+  let cursor = hostRoot;
+  for (let index = 0; index < segments.length; index += 1) {
+    const candidate = path.join(cursor, segments[index]);
+    const stat = await lstatOrNull(candidate);
+    if (!stat) break;
+    if (stat.isSymbolicLink()) {
+      selectedTarget = await resolveRoutePointer({ artifactsRoot, linkPath: candidate });
+      consumed = index + 1;
+      break;
+    }
+    if (!stat.isDirectory()) {
+      throw new WebHostedOriginError('web_hosted_pointer_invalid', 'Página temporalmente no disponible.', 503);
+    }
+    cursor = candidate;
+  }
+  return { target: selectedTarget, consumed };
+}
+
+function invalidSignature() {
+  return new WebHostedOriginError(
+    'web_hosted_signature_invalid',
+    'Página temporalmente no disponible.',
+    503
+  );
+}
+
+async function readManifest(target, { publicKey = null, publicKeyPem } = {}) {
   const manifestPath = path.join(target, 'manifest.json');
-  const stat = await fs.stat(manifestPath);
-  if (!stat.isFile() || stat.size < 2 || stat.size > MAX_MANIFEST_BYTES) {
+  const signaturePath = path.join(target, 'manifest.sig.json');
+  let manifestStat;
+  let signatureStat;
+  try {
+    [manifestStat, signatureStat] = await Promise.all([
+      fs.lstat(manifestPath),
+      fs.lstat(signaturePath),
+    ]);
+  } catch (error) {
+    if (error?.code === 'ENOENT' && String(error?.path || '').endsWith('manifest.sig.json')) {
+      throw invalidSignature();
+    }
     throw new WebHostedOriginError('web_hosted_manifest_invalid', 'Página temporalmente no disponible.', 503);
   }
-  const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+  if (
+    manifestStat.isSymbolicLink()
+    || !manifestStat.isFile()
+    || manifestStat.size < 2
+    || manifestStat.size > MAX_MANIFEST_BYTES
+  ) {
+    throw new WebHostedOriginError('web_hosted_manifest_invalid', 'Página temporalmente no disponible.', 503);
+  }
+  if (
+    signatureStat.isSymbolicLink()
+    || !signatureStat.isFile()
+    || signatureStat.size < 2
+    || signatureStat.size > MAX_SIGNATURE_BYTES
+  ) throw invalidSignature();
+  let manifest;
+  let signature;
+  try {
+    [manifest, signature] = await Promise.all([
+      fs.readFile(manifestPath, 'utf8').then(JSON.parse),
+      fs.readFile(signaturePath, 'utf8').then(JSON.parse),
+    ]);
+  } catch {
+    throw invalidSignature();
+  }
   if (
     manifest?.environment !== 'production'
     || !/^[a-f0-9]{64}$/.test(String(manifest.artifact_hash || ''))
@@ -110,6 +180,16 @@ async function readManifest(target) {
     || typeof manifest.files !== 'object'
     || Array.isArray(manifest.files)
   ) throw new WebHostedOriginError('web_hosted_manifest_invalid', 'Página temporalmente no disponible.', 503);
+  let verified = false;
+  try {
+    verified = verifyWebArtifactManifest(manifest, signature, {
+      ...(publicKey ? { publicKey } : {}),
+      ...(publicKeyPem !== undefined ? { publicKeyPem } : {}),
+    });
+  } catch {
+    throw invalidSignature();
+  }
+  if (!verified) throw invalidSignature();
   return manifest;
 }
 
@@ -132,7 +212,13 @@ function responseHeaders(manifest, filePath, metadata) {
   return headers;
 }
 
-async function resolveHostedResponse({ host, pathname, hostingRoot = null } = {}) {
+async function resolveHostedResponse({
+  host,
+  pathname,
+  hostingRoot = null,
+  publicKey = null,
+  publicKeyPem,
+} = {}) {
   const normalizedHost = requestHost(host);
   if (!normalizedHost) return null;
   const requestPath = safeRequestPath(pathname);
@@ -140,7 +226,7 @@ async function resolveHostedResponse({ host, pathname, hostingRoot = null } = {}
   const route = await selectRoute({ root, host: normalizedHost, segments: requestPath.segments });
   if (route === null) return null;
   if (!route.target) return { status: 404, headers: { 'cache-control': 'no-store' }, body: Buffer.from('Página no encontrada.') };
-  const manifest = await readManifest(route.target);
+  const manifest = await readManifest(route.target, { publicKey, publicKeyPem });
   const remainder = requestPath.segments.slice(route.consumed);
   let filePath = remainder.join('/');
   if (!filePath || requestPath.trailingSlash) filePath = filePath ? `${filePath}/index.html` : 'index.html';
@@ -177,10 +263,12 @@ async function resolveHostedResponse({ host, pathname, hostingRoot = null } = {}
 }
 
 module.exports = {
+  MAX_SIGNATURE_BYTES,
   MAX_RESPONSE_BYTES,
   SAFE_HEADERS,
   WebHostedOriginError,
   requestHost,
+  readManifest,
   resolveHostedResponse,
   safeRequestPath,
   selectRoute,

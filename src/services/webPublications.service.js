@@ -3,7 +3,7 @@
 const crypto = require('node:crypto');
 const { Op } = require('sequelize');
 const db = require('../../models');
-const { assertWebPublishingEnabled } = require('../lib/marketingWebFeatureFlags');
+const { assertWebPublishingChannelEnabled } = require('../lib/marketingWebFeatureFlags');
 const {
   assertProjectAccess,
   positiveInteger,
@@ -241,7 +241,7 @@ async function createPublication({
   sequelize = db.sequelize,
   env = process.env,
   assertAccess = assertProjectAccess,
-  assertPublishing = assertWebPublishingEnabled,
+  assertPublishing = assertWebPublishingChannelEnabled,
 } = {}) {
   const projectId = String(body.project_id || '').trim();
   return sequelize.transaction(async (transaction) => {
@@ -249,11 +249,33 @@ async function createPublication({
     if (!project) throw new WebPublicationServiceError('web_project_not_found', 'El proyecto no existe.', 404);
     await assertAccess(actorId, project, 'marketing.web.publish', { models, transaction });
     const scope = scopeFromProject(plain(project));
-    assertPublishing(scope);
+    const channel = String(body.channel || '').trim().toLowerCase();
+    if (!PUBLICATION_CHANNELS.has(channel)) {
+      throw new WebPublicationServiceError('web_publication_channel_invalid', 'El canal de publicación no es válido.', 422);
+    }
+    assertPublishing(scope, channel, env);
     if (project.status === 'archived') {
       throw new WebPublicationServiceError('web_project_archived', 'Un proyecto archivado no se puede publicar.', 409);
     }
     const target = await resolveTarget({ project, body, models, transaction, env });
+    const existingTargets = await models.WebPublication.findAll({
+      where: {
+        host: target.host,
+      },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    const overlap = existingTargets
+      .map(plain)
+      .find((candidate) => publicationPathsOverlap(candidate.path, target.path));
+    if (overlap) {
+      throw new WebPublicationServiceError(
+        'web_publication_route_overlap',
+        'Esa ruta se solapa con otra publicación del mismo dominio.',
+        409,
+        { path: target.path, conflicting_path: overlap.path }
+      );
+    }
     const clinicId = await selectedClinicForProject(project, body.clinic_id, { models, transaction });
     const campaignContext = campaignContextSnapshot(project);
     try {
@@ -304,6 +326,14 @@ async function createPublication({
       throw error;
     }
   });
+}
+
+function publicationPathsOverlap(left, right) {
+  const a = String(left || '').trim();
+  const b = String(right || '').trim();
+  if (!a.startsWith('/') || !b.startsWith('/')) return true;
+  if (a === '/' || b === '/') return true;
+  return a === b || a.startsWith(b) || b.startsWith(a);
 }
 
 async function getPublicationForActor({
@@ -387,7 +417,8 @@ async function enqueueDeployment({
   models = db,
   sequelize = db.sequelize,
   assertAccess = assertProjectAccess,
-  assertPublishing = assertWebPublishingEnabled,
+  assertPublishing = assertWebPublishingChannelEnabled,
+  env = process.env,
   enqueueJob = jobRequestsService.enqueueJobRequest,
 } = {}) {
   return sequelize.transaction(async (transaction) => {
@@ -399,11 +430,11 @@ async function enqueueDeployment({
     if (!project) throw new WebPublicationServiceError('web_publication_not_found', 'La publicación no existe.', 404);
     await assertAccess(actorId, project, 'marketing.web.publish', { models, transaction });
     const scope = scopeFromProject(plain(project));
-    assertPublishing(scope);
     const publication = await models.WebPublication.findByPk(pointer.id, { transaction, lock: transaction.LOCK.UPDATE });
     if (!publication || publication.projectId !== project.id) {
       throw new WebPublicationServiceError('web_publication_not_found', 'La publicación no existe.', 404);
     }
+    assertPublishing(scope, publication.channel, env);
     if (BUSY_PUBLICATION_STATUSES.has(publication.status)) {
       throw new WebPublicationServiceError(
         'web_publication_busy',
@@ -552,6 +583,7 @@ module.exports = {
   listProjectPublications,
   normalizeSiteUrl,
   publicationBaseUrl,
+  publicationPathsOverlap,
   scopeMatches,
   serializeDeployment,
   serializePublication,

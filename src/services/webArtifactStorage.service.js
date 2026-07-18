@@ -102,14 +102,32 @@ function sha256(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
 }
 
+function artifactHashForManifest(manifest) {
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return null;
+  try {
+    const manifestCore = { ...manifest };
+    delete manifestCore.artifact_hash;
+    return sha256(canonicalSerialize(manifestCore));
+  } catch {
+    return null;
+  }
+}
+
 function assertArtifactBundle(artifact) {
   const manifest = artifact?.manifest;
   const files = artifact?.files;
+  const declaredHash = String(manifest?.artifact_hash || '');
+  const suppliedRowHashes = [artifact?.artifact_hash, artifact?.artifactHash]
+    .filter((value) => value !== undefined && value !== null && String(value) !== '')
+    .map(String);
+  const rowHash = suppliedRowHashes[0] || declaredHash;
   if (
     !manifest
     || typeof manifest !== 'object'
     || Array.isArray(manifest)
-    || !/^[a-f0-9]{64}$/.test(String(manifest.artifact_hash || artifact?.artifact_hash || ''))
+    || !/^[a-f0-9]{64}$/.test(declaredHash)
+    || !/^[a-f0-9]{64}$/.test(rowHash)
+    || suppliedRowHashes.some((value) => !/^[a-f0-9]{64}$/.test(value))
     || !files
     || typeof files !== 'object'
     || Array.isArray(files)
@@ -117,6 +135,14 @@ function assertArtifactBundle(artifact) {
     throw new WebArtifactStorageError(
       'web_artifact_bundle_invalid',
       'El artefacto compilado no tiene un manifest publicable.',
+      422
+    );
+  }
+  const canonicalHash = artifactHashForManifest(manifest);
+  if (suppliedRowHashes.some((value) => value !== declaredHash) || canonicalHash !== declaredHash) {
+    throw new WebArtifactStorageError(
+      'web_artifact_bundle_hash_invalid',
+      'El hash del artefacto no coincide con su manifest canónico.',
       422
     );
   }
@@ -302,6 +328,7 @@ module.exports = {
   IMMUTABLE_CACHE_CONTROL,
   WebArtifactStorageError,
   artifactApiBase,
+  artifactHashForManifest,
   assertArtifactBundle,
   authenticatedDbStorageDescriptor,
   decodePathToken,

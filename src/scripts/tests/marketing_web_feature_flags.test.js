@@ -1,7 +1,9 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const {
+  assertWebPublishingChannelEnabled,
   assertWebPublishingEnabled,
   assertWebScopeEnabled,
   disabledScopeKeys,
@@ -9,6 +11,8 @@ const {
   publishingScopeKeys,
   webEditorEnabled,
   webPublishingAvailability,
+  webPublishingCapabilities,
+  webPublishingChannelAvailability,
   webPublishingEnabled,
 } = require('../../lib/marketingWebFeatureFlags');
 
@@ -18,6 +22,19 @@ const original = {
   disabledScopes: process.env.MARKETING_WEB_DISABLED_SCOPES,
   enabledScopes: process.env.MARKETING_WEB_ENABLED_SCOPES,
   publishingScopes: process.env.MARKETING_WEB_PUBLISHING_SCOPES,
+  wordpressChannel: process.env.MARKETING_WEB_WORDPRESS_CHANNEL_ENABLED,
+  hostedChannel: process.env.MARKETING_WEB_HOSTED_CHANNEL_ENABLED,
+  customDomainChannel: process.env.MARKETING_WEB_CUSTOM_DOMAIN_CHANNEL_ENABLED,
+  apiBase: process.env.MARKETING_WEB_API_BASE_URL,
+  bootstrapKey: process.env.MARKETING_WEB_PLUGIN_BOOTSTRAP_KEY,
+  signingPrivate: process.env.MARKETING_WEB_SIGNING_PRIVATE_KEY_PEM,
+  signingPublic: process.env.MARKETING_WEB_SIGNING_PUBLIC_KEY_PEM,
+  artifactMode: process.env.MARKETING_WEB_ARTIFACT_STORE_MODE,
+  hostedDomain: process.env.MARKETING_WEB_HOSTED_DOMAIN,
+  hostedMode: process.env.MARKETING_WEB_HOSTED_MODE,
+  hostingRoot: process.env.MARKETING_WEB_HOSTING_ROOT,
+  customProvider: process.env.MARKETING_WEB_CUSTOM_HOSTNAME_PROVIDER,
+  customTarget: process.env.MARKETING_WEB_CUSTOM_DOMAIN_TARGET,
 };
 
 try {
@@ -26,6 +43,19 @@ try {
   delete process.env.MARKETING_WEB_DISABLED_SCOPES;
   delete process.env.MARKETING_WEB_ENABLED_SCOPES;
   delete process.env.MARKETING_WEB_PUBLISHING_SCOPES;
+  delete process.env.MARKETING_WEB_WORDPRESS_CHANNEL_ENABLED;
+  delete process.env.MARKETING_WEB_HOSTED_CHANNEL_ENABLED;
+  delete process.env.MARKETING_WEB_CUSTOM_DOMAIN_CHANNEL_ENABLED;
+  delete process.env.MARKETING_WEB_API_BASE_URL;
+  delete process.env.MARKETING_WEB_PLUGIN_BOOTSTRAP_KEY;
+  delete process.env.MARKETING_WEB_SIGNING_PRIVATE_KEY_PEM;
+  delete process.env.MARKETING_WEB_SIGNING_PUBLIC_KEY_PEM;
+  delete process.env.MARKETING_WEB_ARTIFACT_STORE_MODE;
+  delete process.env.MARKETING_WEB_HOSTED_DOMAIN;
+  delete process.env.MARKETING_WEB_HOSTED_MODE;
+  delete process.env.MARKETING_WEB_HOSTING_ROOT;
+  delete process.env.MARKETING_WEB_CUSTOM_HOSTNAME_PROVIDER;
+  delete process.env.MARKETING_WEB_CUSTOM_DOMAIN_TARGET;
   assert.equal(webEditorEnabled(), false);
   assert.equal(webPublishingEnabled(), false);
   assert.throws(
@@ -62,6 +92,100 @@ try {
     reason: 'scope_not_enabled',
   });
   assert.equal(assertWebPublishingEnabled({ type: 'group', id: 4 }), true);
+  assert.deepEqual(webPublishingCapabilities({ type: 'group', id: 4 }), {
+    publishing_available: false,
+    publishing_unavailable_reason: 'no_operational_channels',
+    publishing_rollout_available: true,
+    publishing_rollout_unavailable_reason: null,
+    publishing_channels: {
+      clinicaclick_hosted: { available: false, unavailable_reason: 'channel_not_enabled' },
+      wordpress: { available: false, unavailable_reason: 'channel_not_configured' },
+      custom_domain: { available: false, unavailable_reason: 'channel_not_enabled' },
+    },
+  });
+  assert.throws(
+    () => assertWebPublishingChannelEnabled({ type: 'group', id: 4 }, 'clinicaclick_hosted'),
+    (error) => error.code === 'web_publishing_channel_disabled'
+      && error.details.channel === 'clinicaclick_hosted'
+      && error.details.rollout_reason === 'channel_not_enabled'
+  );
+
+  process.env.MARKETING_WEB_API_BASE_URL = 'https://crm.clinicaclick.com';
+  process.env.MARKETING_WEB_PLUGIN_BOOTSTRAP_KEY = 'b'.repeat(32);
+  const signingKeys = crypto.generateKeyPairSync('ed25519');
+  process.env.MARKETING_WEB_SIGNING_PRIVATE_KEY_PEM = signingKeys.privateKey.export({
+    type: 'pkcs8',
+    format: 'pem',
+  });
+  process.env.MARKETING_WEB_SIGNING_PUBLIC_KEY_PEM = signingKeys.publicKey.export({
+    type: 'spki',
+    format: 'pem',
+  });
+  process.env.MARKETING_WEB_ARTIFACT_STORE_MODE = 'authenticated_db';
+  assert.deepEqual(webPublishingChannelAvailability({ type: 'group', id: 4 }, 'wordpress'), {
+    available: true,
+    reason: null,
+  });
+  process.env.MARKETING_WEB_SIGNING_PRIVATE_KEY_PEM = process.env.MARKETING_WEB_SIGNING_PRIVATE_KEY_PEM.replace(/\n/g, '\\n');
+  process.env.MARKETING_WEB_SIGNING_PUBLIC_KEY_PEM = process.env.MARKETING_WEB_SIGNING_PUBLIC_KEY_PEM.replace(/\n/g, '\\n');
+  assert.deepEqual(webPublishingChannelAvailability({ type: 'group', id: 4 }, 'wordpress'), {
+    available: true,
+    reason: null,
+  });
+  process.env.MARKETING_WEB_SIGNING_PRIVATE_KEY_PEM = signingKeys.privateKey.export({
+    type: 'pkcs8',
+    format: 'pem',
+  });
+  process.env.MARKETING_WEB_SIGNING_PUBLIC_KEY_PEM = signingKeys.publicKey.export({
+    type: 'spki',
+    format: 'pem',
+  });
+  assert.equal(assertWebPublishingChannelEnabled({ type: 'group', id: 4 }, 'wordpress'), true);
+  assert.deepEqual(webPublishingCapabilities({ type: 'group', id: 4 }), {
+    publishing_available: true,
+    publishing_unavailable_reason: null,
+    publishing_rollout_available: true,
+    publishing_rollout_unavailable_reason: null,
+    publishing_channels: {
+      clinicaclick_hosted: { available: false, unavailable_reason: 'channel_not_enabled' },
+      wordpress: { available: true, unavailable_reason: null },
+      custom_domain: { available: false, unavailable_reason: 'channel_not_enabled' },
+    },
+  });
+  process.env.MARKETING_WEB_SIGNING_PUBLIC_KEY_PEM = crypto.generateKeyPairSync('ed25519').publicKey.export({
+    type: 'spki',
+    format: 'pem',
+  });
+  assert.deepEqual(webPublishingChannelAvailability({ type: 'group', id: 4 }, 'wordpress'), {
+    available: false,
+    reason: 'channel_not_configured',
+  });
+  process.env.MARKETING_WEB_SIGNING_PUBLIC_KEY_PEM = signingKeys.publicKey.export({
+    type: 'spki',
+    format: 'pem',
+  });
+  process.env.MARKETING_WEB_WORDPRESS_CHANNEL_ENABLED = 'false';
+  assert.deepEqual(webPublishingChannelAvailability({ type: 'group', id: 4 }, 'wordpress'), {
+    available: false,
+    reason: 'channel_not_enabled',
+  });
+  delete process.env.MARKETING_WEB_WORDPRESS_CHANNEL_ENABLED;
+
+  process.env.MARKETING_WEB_HOSTED_DOMAIN = 'sites.clinicaclick.com';
+  process.env.MARKETING_WEB_HOSTED_MODE = 'path';
+  process.env.MARKETING_WEB_HOSTING_ROOT = '/var/lib/clinicaclick-web-hosting';
+  process.env.MARKETING_WEB_HOSTED_CHANNEL_ENABLED = 'true';
+  assert.deepEqual(webPublishingChannelAvailability({ type: 'group', id: 4 }, 'clinicaclick_hosted'), {
+    available: true,
+    reason: null,
+  });
+  process.env.MARKETING_WEB_CUSTOM_HOSTNAME_PROVIDER = 'manual';
+  process.env.MARKETING_WEB_CUSTOM_DOMAIN_TARGET = 'sites.clinicaclick.com';
+  process.env.MARKETING_WEB_CUSTOM_DOMAIN_CHANNEL_ENABLED = 'true';
+  assert.deepEqual(webPublishingChannelAvailability({ type: 'group', id: 4 }, 'custom_domain'), {
+    available: true,
+    reason: null,
+  });
   assert.throws(
     () => assertWebPublishingEnabled({ type: 'clinic', id: 66 }),
     (error) => error.code === 'web_publishing_disabled'
@@ -129,4 +253,22 @@ try {
   else process.env.MARKETING_WEB_ENABLED_SCOPES = original.enabledScopes;
   if (original.publishingScopes === undefined) delete process.env.MARKETING_WEB_PUBLISHING_SCOPES;
   else process.env.MARKETING_WEB_PUBLISHING_SCOPES = original.publishingScopes;
+  for (const [key, name] of [
+    ['wordpressChannel', 'MARKETING_WEB_WORDPRESS_CHANNEL_ENABLED'],
+    ['hostedChannel', 'MARKETING_WEB_HOSTED_CHANNEL_ENABLED'],
+    ['customDomainChannel', 'MARKETING_WEB_CUSTOM_DOMAIN_CHANNEL_ENABLED'],
+    ['apiBase', 'MARKETING_WEB_API_BASE_URL'],
+    ['bootstrapKey', 'MARKETING_WEB_PLUGIN_BOOTSTRAP_KEY'],
+    ['signingPrivate', 'MARKETING_WEB_SIGNING_PRIVATE_KEY_PEM'],
+    ['signingPublic', 'MARKETING_WEB_SIGNING_PUBLIC_KEY_PEM'],
+    ['artifactMode', 'MARKETING_WEB_ARTIFACT_STORE_MODE'],
+    ['hostedDomain', 'MARKETING_WEB_HOSTED_DOMAIN'],
+    ['hostedMode', 'MARKETING_WEB_HOSTED_MODE'],
+    ['hostingRoot', 'MARKETING_WEB_HOSTING_ROOT'],
+    ['customProvider', 'MARKETING_WEB_CUSTOM_HOSTNAME_PROVIDER'],
+    ['customTarget', 'MARKETING_WEB_CUSTOM_DOMAIN_TARGET'],
+  ]) {
+    if (original[key] === undefined) delete process.env[name];
+    else process.env[name] = original[key];
+  }
 }

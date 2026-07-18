@@ -154,6 +154,7 @@ function dependencies(state, overrides = {}) {
     restoreHostedRoutePointer: async () => ({ restored: true, reason: 'previous_artifact_restored' }),
     verifyHostedPointer: async () => true,
     verifyPublicArtifact: async () => true,
+    assertWebPublishingChannelEnabled: () => true,
     storeArtifactBundle: async ({ artifact }) => ({
       provider: 's3_immutable',
       artifact_hash: artifact.artifact_hash,
@@ -183,6 +184,48 @@ test('despliegue hosted compila, verifica y conmuta estado solo tras readback', 
   assert.equal(state.project.status, 'active');
   assert.equal(state.project.version, 2);
   assert.equal(state.audits[0].eventType, 'web.publication.published');
+});
+
+test('un gate de canal cerrado detiene un job ya encolado antes de compilar o mutar', async () => {
+  const state = fixture();
+  let compileCalls = 0;
+  let publishCalls = 0;
+  let gateCalls = 0;
+  const result = await runPublicationDeploymentJob({
+    publication_id: state.publication.id,
+    deployment_id: state.deployment.id,
+  }, { id: 77, attempts: 5, max_attempts: 5 }, dependencies(state, {
+    assertWebPublishingChannelEnabled: (scope, channel, env) => {
+      gateCalls += 1;
+      assert.deepEqual(scope, { type: 'clinic', id: 66 });
+      assert.equal(channel, 'clinicaclick_hosted');
+      assert.equal(env.MARKETING_WEB_HOSTING_ROOT, '/tmp/not-used-in-fake');
+      const error = new Error('channel disabled for test');
+      error.code = 'web_publishing_channel_disabled';
+      error.status = 503;
+      error.details = { channel, rollout_reason: 'channel_not_enabled' };
+      throw error;
+    },
+    compileRevision: async () => {
+      compileCalls += 1;
+      throw new Error('compile must not run');
+    },
+    publishHostedArtifact: async () => {
+      publishCalls += 1;
+      throw new Error('publish must not run');
+    },
+  }));
+  assert.equal(result.status, 'waiting');
+  assert.equal(result.result.reason, 'web_publishing_gate_closed');
+  assert.equal(result.result.channel, 'clinicaclick_hosted');
+  assert.equal(result.result.rollout_reason, 'channel_not_enabled');
+  assert.ok(result.nextAllowedAt instanceof Date);
+  assert.equal(gateCalls, 1);
+  assert.equal(compileCalls, 0);
+  assert.equal(publishCalls, 0);
+  assert.equal(state.deployment.status, 'queued');
+  assert.equal(state.deployment.startedAt, null);
+  assert.equal(state.publication.status, 'pending');
 });
 
 test('rollback recompila R1 superseded con el runtime vigente y conserva el LKG verificado', async () => {
