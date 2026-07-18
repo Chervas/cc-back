@@ -6,6 +6,7 @@ const {
   assertWebScopeEnabled,
   disabledScopeKeys,
   enabledScopeKeys,
+  publishingScopeKeys,
   webEditorEnabled,
   webPublishingEnabled,
 } = require('../../lib/marketingWebFeatureFlags');
@@ -15,6 +16,7 @@ const original = {
   publishing: process.env.MARKETING_WEB_PUBLISHING_ENABLED,
   disabledScopes: process.env.MARKETING_WEB_DISABLED_SCOPES,
   enabledScopes: process.env.MARKETING_WEB_ENABLED_SCOPES,
+  publishingScopes: process.env.MARKETING_WEB_PUBLISHING_SCOPES,
 };
 
 try {
@@ -22,6 +24,7 @@ try {
   delete process.env.MARKETING_WEB_PUBLISHING_ENABLED;
   delete process.env.MARKETING_WEB_DISABLED_SCOPES;
   delete process.env.MARKETING_WEB_ENABLED_SCOPES;
+  delete process.env.MARKETING_WEB_PUBLISHING_SCOPES;
   assert.equal(webEditorEnabled(), false);
   assert.equal(webPublishingEnabled(), false);
   assert.throws(
@@ -45,6 +48,23 @@ try {
     (error) => error.code === 'web_editor_disabled'
       && error.details.rollout_reason === 'scope_not_enabled'
   );
+
+  process.env.MARKETING_WEB_PUBLISHING_ENABLED = 'true';
+  process.env.MARKETING_WEB_PUBLISHING_SCOPES = 'group:4';
+  assert.deepEqual([...publishingScopeKeys()], ['group:4']);
+  assert.equal(assertWebPublishingEnabled({ type: 'group', id: 4 }), true);
+  assert.throws(
+    () => assertWebPublishingEnabled({ type: 'clinic', id: 66 }),
+    (error) => error.code === 'web_publishing_disabled'
+      && error.details.rollout_reason === 'scope_not_enabled'
+  );
+  process.env.MARKETING_WEB_PUBLISHING_SCOPES = 'group:4,';
+  assert.throws(
+    () => assertWebPublishingEnabled({ type: 'group', id: 4 }),
+    (error) => error.code === 'marketing_web_invalid_publishing_scopes'
+  );
+  delete process.env.MARKETING_WEB_PUBLISHING_SCOPES;
+  process.env.MARKETING_WEB_PUBLISHING_ENABLED = 'false';
 
   process.env.MARKETING_WEB_DISABLED_SCOPES = 'clinic:66, group:9';
   assert.deepEqual([...disabledScopeKeys()].sort(), ['clinic:66', 'group:9']);
@@ -98,4 +118,6 @@ try {
   else process.env.MARKETING_WEB_DISABLED_SCOPES = original.disabledScopes;
   if (original.enabledScopes === undefined) delete process.env.MARKETING_WEB_ENABLED_SCOPES;
   else process.env.MARKETING_WEB_ENABLED_SCOPES = original.enabledScopes;
+  if (original.publishingScopes === undefined) delete process.env.MARKETING_WEB_PUBLISHING_SCOPES;
+  else process.env.MARKETING_WEB_PUBLISHING_SCOPES = original.publishingScopes;
 }

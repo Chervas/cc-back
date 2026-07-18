@@ -30,7 +30,9 @@ function scopeKeysFromEnv(name, { optional = false, strictCsv = false } = {}) {
     error.name = 'MarketingWebConfigurationError';
     error.code = name === 'MARKETING_WEB_ENABLED_SCOPES'
       ? 'marketing_web_invalid_enabled_scopes'
-      : 'marketing_web_invalid_disabled_scopes';
+      : name === 'MARKETING_WEB_PUBLISHING_SCOPES'
+        ? 'marketing_web_invalid_publishing_scopes'
+        : 'marketing_web_invalid_disabled_scopes';
     error.status = 500;
     error.details = { invalid_entries: printableInvalid };
     throw error;
@@ -47,6 +49,13 @@ function enabledScopeKeys() {
 
 function disabledScopeKeys() {
   return scopeKeysFromEnv('MARKETING_WEB_DISABLED_SCOPES');
+}
+
+function publishingScopeKeys() {
+  return scopeKeysFromEnv('MARKETING_WEB_PUBLISHING_SCOPES', {
+    optional: true,
+    strictCsv: true,
+  });
 }
 
 function normalizedScopeKey(scope) {
@@ -95,12 +104,21 @@ function assertWebScopeEnabled(scope) {
 
 function assertWebPublishingEnabled(scope) {
   assertWebScopeEnabled(scope);
-  if (webPublishingEnabled()) return true;
+  const normalized = normalizedScopeKey(scope);
+  const enabled = publishingScopeKeys();
+  const rolloutReason = enabled && !enabled.has(normalized.key)
+    ? 'scope_not_enabled'
+    : null;
+  if (webPublishingEnabled() && !rolloutReason) return true;
   const error = new Error('La publicación web todavía no está habilitada.');
   error.name = 'MarketingWebFeatureDisabledError';
   error.code = 'web_publishing_disabled';
   error.status = 503;
-  error.details = { scope_type: scope?.type || null, scope_id: Number(scope?.id) || null };
+  error.details = {
+    scope_type: normalized.type,
+    scope_id: normalized.id,
+    rollout_reason: rolloutReason || 'publishing_disabled',
+  };
   throw error;
 }
 
@@ -111,6 +129,7 @@ module.exports = {
   enabledScopeKeys,
   envBoolean,
   normalizedScopeKey,
+  publishingScopeKeys,
   scopeKeysFromEnv,
   webEditorEnabled,
   webPublishingEnabled,
