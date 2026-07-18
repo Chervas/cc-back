@@ -26,7 +26,27 @@ function main() {
   });
   assert.match(faq.hash, /^[a-f0-9]{64}$/);
   assert.equal(faq.content.answer.includes('<'), false);
-  assert.equal(contentFieldValues({ title: faq.title, content: faq.content }).description, faq.content.answer);
+  const faqFields = contentFieldValues({ title: 'Nombre interno FAQ', content: faq.content });
+  assert.equal(faqFields.title, 'Nombre interno FAQ');
+  assert.equal(faqFields.question, faq.content.question);
+  assert.equal(faqFields.answer, faq.content.answer);
+  assert.equal(faqFields.description, faq.content.answer);
+
+  const propositionFields = contentFieldValues({
+    title: 'Nombre interno de propuesta',
+    content: { headline: 'Titular visible', summary: 'Resumen visible' },
+  });
+  assert.equal(propositionFields.title, 'Nombre interno de propuesta');
+  assert.equal(propositionFields.headline, 'Titular visible');
+  assert.equal(propositionFields.summary, 'Resumen visible');
+
+  const benefitFields = contentFieldValues({
+    title: 'Nombre interno de beneficio',
+    content: { title: 'Beneficio visible', description: 'Descripción visible' },
+  });
+  assert.equal(benefitFields.title, 'Nombre interno de beneficio');
+  assert.equal(benefitFields.content_title, 'Beneficio visible');
+  assert.equal(benefitFields.description, 'Descripción visible');
 
   assert.throws(
     () => validateWebContentEntry({

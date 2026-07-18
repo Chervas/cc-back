@@ -744,7 +744,7 @@
       "properties": {
         "target_node_id": { "$ref": "#/definitions/safeId" },
         "target_prop": {
-          "enum": ["text", "label", "title", "description", "asset_id", "alt", "target"]
+          "enum": ["text", "label", "title", "description", "question", "answer", "asset_id", "alt", "target"]
         },
         "source": {
           "enum": ["clinic", "treatment", "professional", "content_entry"]
@@ -763,8 +763,21 @@
           "enum": [
             "name",
             "title",
+            "content_title",
             "description",
             "short_description",
+            "headline",
+            "summary",
+            "question",
+            "answer",
+            "display_name",
+            "role",
+            "biography",
+            "quote",
+            "attribution",
+            "text",
+            "version_label",
+            "excerpt",
             "address",
             "phone",
             "email",

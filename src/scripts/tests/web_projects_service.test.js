@@ -22,6 +22,7 @@ delete process.env.MARKETING_WEB_CUSTOM_DOMAIN_CHANNEL_ENABLED;
 const assert = require('node:assert/strict');
 const {
   WebProjectServiceError,
+  assertCampaignContextResources,
   assertRevisionReadyForApproval,
   collectExternalDocumentReferences,
   createBlankWebDocument,
@@ -61,6 +62,8 @@ async function testBlankDocument() {
   assert.equal(section.children.some((id) => document.nodes[id]?.type === 'intake_form'), true);
   assert.equal(document.seo.indexing, 'noindex');
   assert.equal(document.consent.preview_mode, true);
+  assert.equal(document.design_system.tokens.font_heading, 'system');
+  assert.equal(document.design_system.tokens.font_body, 'system');
 }
 
 function testIntakeDefaultsMakeAConfiguredDraftApprovable() {
@@ -119,6 +122,8 @@ async function testInheritedIntakeRequiresExplicitLocation() {
 
 function testTemplateInstantiationDoesNotReuseStructuralIds() {
   const source = createBlankWebDocument({ name: 'Plantilla maestra' });
+  source.design_system.tokens.font_heading = 'manrope';
+  source.design_system.tokens.font_body = 'inter';
   const first = instantiateWebDocument(source);
   const second = instantiateWebDocument(source);
   assert.equal(validateWebDocument(first).valid, true);
@@ -132,6 +137,9 @@ function testTemplateInstantiationDoesNotReuseStructuralIds() {
   );
   const firstButton = Object.values(first.nodes).find((node) => node.type === 'button');
   assert.equal(first.nodes[firstButton.props.target]?.type, 'intake_form');
+  assert.equal(first.design_system.tokens.font_heading, 'system');
+  assert.equal(first.design_system.tokens.font_body, 'system');
+  assert.equal(source.design_system.tokens.font_heading, 'manrope', 'la plantilla histórica no se muta');
 }
 
 function testScopeValidation() {
@@ -463,8 +471,31 @@ async function testCreateContract() {
   const writes = { pages: null, audit: null, draft: null };
   const fakeTransaction = { LOCK: { UPDATE: 'UPDATE' } };
   const sequelize = { transaction: async (callback) => callback(fakeTransaction) };
+  const template = row({
+    id: '61e5a73e-bcd5-47f0-a145-a0ddcbd76001',
+    status: 'active',
+    scopeType: 'global',
+    clinicaId: null,
+    grupoClinicaId: null,
+    isPublic: true,
+    category: 'treatment',
+    compatibility: { purposes: ['landing'] },
+    document: createBlankWebDocument({ name: 'Plantilla de tratamiento' }),
+  });
+  const strategyRequest = {
+    id: 501,
+    clinica_id: 66,
+    campaign_id: 41,
+    estado: 'activa',
+    solicitud: {
+      kind: 'marketing_strategy',
+      promotion_type: 'treatment',
+      scope: { assignment_scope: 'clinic', clinic_id: 66, clinic_ids: [66] },
+      treatments: [{ id: 88, nombre: 'Implantes' }],
+    },
+  };
   const models = {
-    Clinica: { findByPk: async () => ({ id_clinica: 66 }) },
+    Clinica: { findByPk: async () => ({ id_clinica: 66, grupoClinicaId: 5 }) },
     GrupoClinica: {},
     IntakeConfig: {
       findOne: async ({ where }) => where.assignment_scope === 'clinic' ? {
@@ -478,7 +509,24 @@ async function testCreateContract() {
         },
       } : null,
     },
-    WebTemplate: { findByPk: async () => null },
+    WebTemplate: { findByPk: async (id) => String(id) === template.id ? template : null },
+    CampaignRequest: {
+      findAll: async ({ where }) => Number(where.campaign_id) === 41 ? [strategyRequest] : [],
+      findByPk: async () => null,
+    },
+    Campaign: { findByPk: async (id) => Number(id) === 41 ? {
+      id: 41,
+      clinica_id: 66,
+      grupo_clinica_id: 5,
+    } : null },
+    Tratamiento: { findByPk: async (id) => Number(id) === 88 ? {
+      id_tratamiento: 88,
+      activo: true,
+      origen: 'clinica',
+      clinica_id: 66,
+      grupo_clinica_id: null,
+      eliminado_por_clinica: [],
+    } : null },
     WebProject: {
       create: async (values) => row({
         ...values,
@@ -506,6 +554,7 @@ async function testCreateContract() {
       name: 'Implantes Hospitalet',
       purpose: 'landing',
       locale: 'es-ES',
+      template_id: template.id,
       campaign_context: { strategy_id: 41, target_kind: 'treatment', treatment_id: 88 },
     },
     requestId: 'test-request',
@@ -519,6 +568,7 @@ async function testCreateContract() {
     strategy_id: 41, target_kind: 'treatment', treatment_id: 88,
   });
   assert.equal(writes.pages.length, 1);
+  assert.equal(writes.pages[0].templateId, template.id);
   assert.match(writes.pages[0].id, /^[0-9a-f-]{36}$/i);
   assert.match(writes.pages[0].pageKey, /^[0-9a-f-]{36}$/i);
   assert.notEqual(writes.pages[0].pageKey, writes.pages[0].id);
@@ -527,6 +577,152 @@ async function testCreateContract() {
   assert.deepEqual(writes.audit.metadata.campaign_context, project.campaign_context);
   assert.equal(writes.draft.document.integrations.intake_config_id, '24');
   assert.equal(writes.draft.document.consent.preview_mode, false);
+}
+
+function campaignValidationFixture() {
+  const state = {
+    strategyClinicId: 66,
+    campaignClinicId: 66,
+    campaignGroupId: 5,
+    promotionType: 'treatment',
+    strategyTreatmentIds: [88],
+    treatment: {
+      id_tratamiento: 88,
+      activo: true,
+      origen: 'clinica',
+      clinica_id: 66,
+      grupo_clinica_id: null,
+      eliminado_por_clinica: [],
+    },
+  };
+  const template = row({
+    id: '61e5a73e-bcd5-47f0-a145-a0ddcbd76001',
+    category: 'treatment',
+    compatibility: { purposes: ['landing'] },
+  });
+  const models = {
+    Clinica: {
+      findByPk: async (id) => Number(id) === 66
+        ? { id_clinica: 66, grupoClinicaId: 5 }
+        : { id_clinica: Number(id), grupoClinicaId: 9 },
+    },
+    GrupoClinica: {},
+    CampaignRequest: {
+      findAll: async ({ where }) => Number(where.campaign_id) === 41 ? [{
+        id: 501,
+        clinica_id: state.strategyClinicId,
+        campaign_id: 41,
+        solicitud: {
+          kind: 'marketing_strategy',
+          promotion_type: state.promotionType,
+          scope: {
+            assignment_scope: 'clinic',
+            clinic_id: state.strategyClinicId,
+            clinic_ids: [state.strategyClinicId],
+          },
+          treatments: state.strategyTreatmentIds.map((id) => ({ id })),
+        },
+      }] : [],
+      findByPk: async () => null,
+    },
+    Campaign: { findByPk: async () => ({
+      id: 41,
+      clinica_id: state.campaignClinicId,
+      grupo_clinica_id: state.campaignGroupId,
+    }) },
+    Tratamiento: { findByPk: async () => state.treatment },
+  };
+  return { state, template, models };
+}
+
+async function testCampaignResourcesFailClosed() {
+  const context = { strategy_id: 41, target_kind: 'treatment', treatment_id: 88 };
+  const scope = { type: 'clinic', id: 66 };
+  const transaction = { LOCK: { UPDATE: 'UPDATE' } };
+  const fixture = campaignValidationFixture();
+  await assertCampaignContextResources({
+    campaignContext: context,
+    scope,
+    template: fixture.template,
+    models: fixture.models,
+    transaction,
+  });
+
+  await assert.rejects(
+    () => assertCampaignContextResources({
+      campaignContext: context, scope, template: null, models: fixture.models, transaction,
+    }),
+    (error) => error.code === 'campaign_template_required'
+  );
+
+  fixture.template.category = 'clinic';
+  await assert.rejects(
+    () => assertCampaignContextResources({
+      campaignContext: context, scope, template: fixture.template, models: fixture.models, transaction,
+    }),
+    (error) => error.code === 'campaign_template_incompatible'
+  );
+  fixture.template.category = 'treatment';
+
+  fixture.state.strategyClinicId = 67;
+  await assert.rejects(
+    () => assertCampaignContextResources({
+      campaignContext: context, scope, template: fixture.template, models: fixture.models, transaction,
+    }),
+    (error) => error.code === 'campaign_strategy_scope_mismatch'
+  );
+  fixture.state.strategyClinicId = 66;
+
+  fixture.state.campaignClinicId = 67;
+  await assert.rejects(
+    () => assertCampaignContextResources({
+      campaignContext: context, scope, template: fixture.template, models: fixture.models, transaction,
+    }),
+    (error) => error.code === 'campaign_strategy_campaign_scope_mismatch'
+  );
+  fixture.state.campaignClinicId = 66;
+
+  fixture.state.strategyTreatmentIds = [89];
+  await assert.rejects(
+    () => assertCampaignContextResources({
+      campaignContext: context, scope, template: fixture.template, models: fixture.models, transaction,
+    }),
+    (error) => error.code === 'campaign_target_incompatible'
+  );
+  fixture.state.strategyTreatmentIds = [88];
+
+  fixture.state.treatment = { ...fixture.state.treatment, clinica_id: 67 };
+  await assert.rejects(
+    () => assertCampaignContextResources({
+      campaignContext: context, scope, template: fixture.template, models: fixture.models, transaction,
+    }),
+    (error) => error.code === 'campaign_treatment_unavailable'
+  );
+
+  const requestIdContext = { ...context, strategy_id: 501 };
+  await assert.rejects(
+    () => assertCampaignContextResources({
+      campaignContext: requestIdContext,
+      scope,
+      template: fixture.template,
+      models: fixture.models,
+      transaction,
+    }),
+    (error) => error.code === 'campaign_strategy_not_found'
+  );
+}
+
+async function testGeneralCampaignRequiresGeneralTemplateAndStrategy() {
+  const fixture = campaignValidationFixture();
+  fixture.state.promotionType = 'generic';
+  fixture.template.category = 'qualification';
+  await assertCampaignContextResources({
+    campaignContext: { strategy_id: 41, target_kind: 'general', treatment_id: null },
+    scope: { type: 'clinic', id: 66 },
+    template: fixture.template,
+    models: fixture.models,
+    transaction: { LOCK: { UPDATE: 'UPDATE' } },
+  });
 }
 
 async function testSaveConflict() {
@@ -683,6 +879,8 @@ async function main() {
   await testTemplateCatalogUsesBoundedDatabasePagination();
   await testTemplateCatalogPreviewIsExplicitValidatedAndCanonical();
   await testCreateContract();
+  await testCampaignResourcesFailClosed();
+  await testGeneralCampaignRequiresGeneralTemplateAndStrategy();
   await testSaveConflict();
   await testSaveLetsSequelizeOwnTheVersionIncrement();
   await testPageProjectionSupportsSlugSwapsAndReusingDeletedRoutes();

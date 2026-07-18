@@ -186,6 +186,82 @@ test('despliegue hosted compila, verifica y conmuta estado solo tras readback', 
   assert.equal(state.audits[0].eventType, 'web.publication.published');
 });
 
+test('deployment WordPress revalida alpha.7 antes de entregar intake global', async () => {
+  const state = fixture('wordpress');
+  state.installation.pluginVersion = '2.0.0-alpha.6';
+  state.installation.lastArtifactHash = state.artifact.artifactHash;
+  state.artifact.manifest.intake_forms = {
+    global_form: {
+      scope: 'global',
+      fields: ['first_name', 'phone', 'privacy_consent'],
+      page_contracts: {
+        'page-one': { page_id: 'page-one', page_path: '/', fields: [] },
+      },
+    },
+  };
+  const artifact = {
+    artifact_hash: state.artifact.artifactHash,
+    manifest: state.artifact.manifest,
+    files: state.artifact.files,
+  };
+  await assert.rejects(
+    () => channelDeploy({
+      publication: state.publication,
+      deployment: state.deployment,
+      artifact,
+      storage: {},
+      env: {},
+      publishHosted: async () => { throw new Error('not hosted'); },
+      verifyHosted: async () => false,
+      verifyPublic: async () => true,
+      models: state.models,
+    }),
+    (error) => error.code === 'web_wordpress_global_intake_plugin_outdated'
+      && error.details?.actual_plugin_version === '2.0.0-alpha.6'
+  );
+
+  state.installation.pluginVersion = '2.0.0-alpha.7';
+  const compatible = await channelDeploy({
+    publication: state.publication,
+    deployment: state.deployment,
+    artifact,
+    storage: {},
+    env: {},
+    publishHosted: async () => { throw new Error('not hosted'); },
+    verifyHosted: async () => false,
+    verifyPublic: async () => true,
+    models: state.models,
+  });
+  assert.equal(compatible.waiting, false);
+  assert.equal(compatible.result.plugin_version, '2.0.0-alpha.7');
+});
+
+test('deployment WordPress alpha.6 no bloquea contratos intake locales legacy', async () => {
+  const state = fixture('wordpress');
+  state.installation.pluginVersion = '2.0.0-alpha.6';
+  state.installation.lastArtifactHash = state.artifact.artifactHash;
+  state.artifact.manifest.intake_forms = {
+    local_form: { page_id: 'page-one', page_path: '/', fields: [] },
+  };
+  const result = await channelDeploy({
+    publication: state.publication,
+    deployment: state.deployment,
+    artifact: {
+      artifact_hash: state.artifact.artifactHash,
+      manifest: state.artifact.manifest,
+      files: state.artifact.files,
+    },
+    storage: {},
+    env: {},
+    publishHosted: async () => { throw new Error('not hosted'); },
+    verifyHosted: async () => false,
+    verifyPublic: async () => true,
+    models: state.models,
+  });
+  assert.equal(result.waiting, false);
+  assert.equal(result.result.plugin_version, '2.0.0-alpha.6');
+});
+
 test('un gate de canal cerrado detiene un job ya encolado antes de compilar o mutar', async () => {
   const state = fixture();
   let compileCalls = 0;

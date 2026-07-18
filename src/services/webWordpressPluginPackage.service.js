@@ -10,7 +10,7 @@ const { scopeColumns } = require('./webProjects.service');
 const wordpress = require('./webWordpressInstallations.service');
 const { WebPublicationServiceError } = require('./webPublications.service');
 
-const PLUGIN_VERSION = '2.0.0-alpha.6';
+const PLUGIN_VERSION = '2.0.0-alpha.7';
 const PLUGIN_ARCHIVE_ROOT = 'clinicaclick-web';
 const DEFAULT_PLUGIN_ROOT = path.resolve(__dirname, '../../wordpress/clinicaclick-web');
 const MAX_SOURCE_FILE_BYTES = 512 * 1024;

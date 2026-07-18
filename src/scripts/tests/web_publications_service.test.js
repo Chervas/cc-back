@@ -10,6 +10,12 @@ const {
   normalizeSiteUrl,
   publicationBaseUrl,
 } = require('../../services/webPublications.service');
+const {
+  MIN_GLOBAL_INTAKE_PLUGIN_VERSION,
+  compareSemver,
+  documentHasGlobalIntakeForm,
+  semverAtLeast,
+} = require('../../lib/webWordpressCompatibility');
 
 class Row {
   constructor(value) { Object.assign(this, value); }
@@ -59,6 +65,35 @@ test('WordPress exige origen HTTPS exacto', () => {
   });
   assert.throws(() => normalizeSiteUrl('http://cliente.example.com'));
   assert.throws(() => normalizeSiteUrl('https://cliente.example.com/wp?token=x'));
+});
+
+test('el mínimo WordPress para intake global compara SemVer y prereleases sin atajos por major', () => {
+  assert.equal(MIN_GLOBAL_INTAKE_PLUGIN_VERSION, '2.0.0-alpha.7');
+  assert.equal(compareSemver('2.0.0-alpha.6', '2.0.0-alpha.7'), -1);
+  assert.equal(compareSemver('2.0.0-alpha.10', '2.0.0-alpha.7'), 1);
+  assert.equal(compareSemver('2.0.0-beta.1', '2.0.0-alpha.7'), 1);
+  assert.equal(compareSemver('2.0.0', '2.0.0-alpha.7'), 1);
+  assert.equal(semverAtLeast('2.0.0-alpha.7+build.3', MIN_GLOBAL_INTAKE_PLUGIN_VERSION), true);
+  assert.equal(semverAtLeast('2.0.0-alpha.6', MIN_GLOBAL_INTAKE_PLUGIN_VERSION), false);
+  assert.equal(semverAtLeast('2.0', MIN_GLOBAL_INTAKE_PLUGIN_VERSION), false);
+  assert.equal(semverAtLeast('2.0.0-alpha.07', MIN_GLOBAL_INTAKE_PLUGIN_VERSION), false);
+  assert.equal(semverAtLeast(null, MIN_GLOBAL_INTAKE_PLUGIN_VERSION), false);
+});
+
+test('solo detecta intake alcanzable desde header o footer, no formularios locales', () => {
+  const document = {
+    globals: { header_node_id: 'header', footer_node_id: 'footer' },
+    nodes: {
+      header: { type: 'section', children: ['copy'] },
+      footer: { type: 'section', children: [] },
+      copy: { type: 'text', children: [] },
+      local_form: { type: 'intake_form', children: [] },
+    },
+  };
+  assert.equal(documentHasGlobalIntakeForm(document), false);
+  document.nodes.header.children.push('global_form');
+  document.nodes.global_form = { type: 'intake_form', children: [] };
+  assert.equal(documentHasGlobalIntakeForm(document), true);
 });
 
 test('crea una publicación hosted con scope y destino inyectados por servidor', async () => {
@@ -297,4 +332,92 @@ test('WordPress permite configurar pending pero solo activa al quedar connected'
   });
   assert.equal(result.job.status, 'pending');
   assert.equal(fixture.publication.status, 'pending');
+});
+
+test('WordPress alpha.6 no encola una revisión con formulario global y alpha.7 sí', async () => {
+  const fixture = deploymentModels();
+  fixture.publication.channel = 'wordpress';
+  fixture.publication.wordpressInstallationId = 'b77c9c88-740f-474c-8160-9178afed7e70';
+  const installation = new Row({
+    id: fixture.publication.wordpressInstallationId,
+    status: 'connected',
+    pluginVersion: '2.0.0-alpha.6',
+  });
+  const revision = new Row({
+    id: '6cf410dc-cc39-4405-b7e5-9fb56ccbc8f4',
+    projectId: project().id,
+    status: 'approved',
+    documentHash: 'a'.repeat(64),
+    document: {
+      globals: { header_node_id: 'global_header', footer_node_id: null },
+      nodes: {
+        global_header: { type: 'section', children: ['global_form'] },
+        global_form: { type: 'intake_form', children: [] },
+      },
+    },
+  });
+  fixture.models.WebWordpressInstallation = { findByPk: async () => installation };
+  fixture.models.WebRevision = { findByPk: async () => revision };
+  let jobs = 0;
+  const enqueue = () => enqueueDeployment({
+    actorId: 9,
+    publicationId: fixture.publication.id,
+    revisionId: revision.id,
+    action: 'publish',
+    models: fixture.models,
+    sequelize: sequelize(),
+    assertAccess: async () => true,
+    assertPublishing: () => true,
+    enqueueJob: async () => {
+      jobs += 1;
+      return new Row({ id: 314, status: 'pending' });
+    },
+  });
+
+  await assert.rejects(enqueue, (error) => (
+    error.code === 'web_wordpress_global_intake_plugin_outdated'
+      && error.details?.actual_plugin_version === '2.0.0-alpha.6'
+      && error.details?.required_plugin_version === '2.0.0-alpha.7'
+  ));
+  assert.equal(jobs, 0);
+  assert.equal(fixture.created.length, 0);
+  assert.equal(fixture.publication.status, 'draft');
+
+  installation.pluginVersion = '2.0.0-alpha.7';
+  const result = await enqueue();
+  assert.equal(result.job.status, 'pending');
+  assert.equal(jobs, 1);
+});
+
+test('WordPress alpha.6 conserva compatibilidad con header global sin formulario', async () => {
+  const fixture = deploymentModels();
+  fixture.publication.channel = 'wordpress';
+  fixture.publication.wordpressInstallationId = 'b77c9c88-740f-474c-8160-9178afed7e70';
+  fixture.models.WebWordpressInstallation = { findByPk: async () => new Row({
+    id: fixture.publication.wordpressInstallationId,
+    status: 'connected',
+    pluginVersion: '2.0.0-alpha.6',
+  }) };
+  fixture.models.WebRevision = { findByPk: async () => new Row({
+    id: '6cf410dc-cc39-4405-b7e5-9fb56ccbc8f4',
+    projectId: project().id,
+    status: 'approved',
+    documentHash: 'a'.repeat(64),
+    document: {
+      globals: { header_node_id: 'global_header', footer_node_id: null },
+      nodes: { global_header: { type: 'section', children: ['brand'] }, brand: { type: 'text', children: [] } },
+    },
+  }) };
+  const result = await enqueueDeployment({
+    actorId: 9,
+    publicationId: fixture.publication.id,
+    revisionId: '6cf410dc-cc39-4405-b7e5-9fb56ccbc8f4',
+    action: 'publish',
+    models: fixture.models,
+    sequelize: sequelize(),
+    assertAccess: async () => true,
+    assertPublishing: () => true,
+    enqueueJob: async () => new Row({ id: 314, status: 'pending' }),
+  });
+  assert.equal(result.job.status, 'pending');
 });

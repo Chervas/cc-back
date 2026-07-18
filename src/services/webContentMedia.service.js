@@ -26,7 +26,9 @@ const {
 
 const DEFAULT_PAGE_SIZE = 24;
 const MAX_PAGE_SIZE = 100;
+const MAX_MEDIA_ID_FILTER = 100;
 const ALLOWED_MEDIA_MIME = /^image\/(?:jpeg|png|webp)$/i;
+const WEB_MEDIA_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_PAGE_NUMBER = 10000;
 const QUARANTINE_CLEANUP_LEASE_MS = 15 * 60 * 1000;
 
@@ -87,6 +89,38 @@ function booleanQuery(value) {
   return value === true || String(value || '').trim().toLowerCase() === 'true';
 }
 
+function normalizeMediaIdFilter(value) {
+  if (value === undefined || value === null) return null;
+  const rawValues = Array.isArray(value) ? value : [value];
+  const serializedLength = rawValues.reduce((total, item) => total + String(item ?? '').length, 0);
+  if (serializedLength > MAX_MEDIA_ID_FILTER * 65) {
+    throw new WebContentMediaServiceError(
+      'media_ids_filter_too_large',
+      `Se pueden consultar hasta ${MAX_MEDIA_ID_FILTER} medios a la vez.`
+    );
+  }
+  const ids = rawValues
+    .flatMap((item) => String(item ?? '').split(','))
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+  if (!ids.length) {
+    throw new WebContentMediaServiceError('media_ids_filter_empty', 'El filtro ids no puede estar vacío.');
+  }
+  if (ids.length > MAX_MEDIA_ID_FILTER) {
+    throw new WebContentMediaServiceError(
+      'media_ids_filter_too_large',
+      `Se pueden consultar hasta ${MAX_MEDIA_ID_FILTER} medios a la vez.`
+    );
+  }
+  if (ids.some((id) => !WEB_MEDIA_ID_PATTERN.test(id))) {
+    throw new WebContentMediaServiceError(
+      'media_ids_filter_invalid',
+      'El filtro ids contiene un identificador de medio no válido.'
+    );
+  }
+  return [...new Set(ids)];
+}
+
 function hashValue(value) {
   return crypto.createHash('sha256').update(canonicalSerialize(value), 'utf8').digest('hex');
 }
@@ -119,10 +153,16 @@ function serializeScope(row, requestedScope = null) {
 function serializeContentEntry(row, options = {}) {
   const value = plain(row);
   const scope = serializeScope(value, options.requestedScope);
+  const canEdit = !scope.inherited && (
+    options.canEdit === undefined
+      ? true
+      : Boolean(options.canEdit)
+  );
   return {
     id: value.id,
     scope,
-    read_only: scope.inherited,
+    can_edit: canEdit,
+    read_only: !canEdit,
     owner_user_id: value.ownerUserId || null,
     type: value.type,
     locale: value.locale,
@@ -174,10 +214,16 @@ function serializeMediaAsset(row, options = {}) {
   const value = plain(row);
   const publicAsset = value.publicMediaAsset || value.public_media_asset || options.publicMediaAsset || null;
   const scope = serializeScope(value, options.requestedScope);
+  const canEdit = !scope.inherited && (
+    options.canEdit === undefined
+      ? true
+      : Boolean(options.canEdit)
+  );
   return {
     id: value.id,
     scope,
-    read_only: scope.inherited,
+    can_edit: canEdit,
+    read_only: !canEdit,
     owner_user_id: value.ownerUserId || null,
     public_media: publicMediaProjection(publicAsset, value),
     title: value.title,
@@ -212,6 +258,36 @@ async function readScopeWhere(scope, includeInheritedGroup, models, transaction 
   };
 }
 
+async function canAccessScopeFeature(actorId, scope, featureKey, options = {}) {
+  try {
+    await assertScopeAccess(actorId, scope, featureKey, options);
+    return true;
+  } catch (error) {
+    if (Number(error?.status) === 403) return false;
+    throw error;
+  }
+}
+
+async function resolveLibraryCapabilities(actorId, scope, options = {}) {
+  const [canEdit, canReview] = await Promise.all([
+    canAccessScopeFeature(actorId, scope, 'marketing.web.edit', options),
+    canAccessScopeFeature(actorId, scope, 'marketing.web.review', options),
+  ]);
+  return {
+    can_create: canEdit,
+    can_edit_own: canEdit,
+    can_review: canEdit && canReview,
+  };
+}
+
+function canEditLibraryResource(row, actorId, capabilities, requestedScope) {
+  const value = plain(row);
+  const scope = serializeScope(value, requestedScope);
+  if (scope.inherited || !capabilities.can_edit_own) return false;
+  return positiveInteger(value.ownerUserId) === positiveInteger(actorId)
+    || capabilities.can_review;
+}
+
 async function audit({ models, transaction, scope, actorId, requestId, eventType, entityType, entityId, previousHash, nextHash, metadata }) {
   await models.WebAuditEvent.create({
     projectId: null,
@@ -244,9 +320,10 @@ async function persistContentVersion({ entry, actorId, models, transaction }) {
   }, { transaction });
 }
 
-async function listContent({ actorId, query = {}, models = db } = {}) {
+async function listContent({ actorId, query = {}, models = db, assertFeatureAccess } = {}) {
   const scope = normalizeScope(query);
-  await assertScopeAccess(actorId, scope, 'marketing.web.view', { models });
+  await assertScopeAccess(actorId, scope, 'marketing.web.view', { models, assertFeatureAccess });
+  const capabilities = await resolveLibraryCapabilities(actorId, scope, { models, assertFeatureAccess });
   const page = boundedInteger(query.page, 1, MAX_PAGE_NUMBER);
   const limit = boundedInteger(query.limit, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
   const includeInheritedGroup = booleanQuery(query.include_inherited_group);
@@ -281,7 +358,11 @@ async function listContent({ actorId, query = {}, models = db } = {}) {
   const total = Number(result.count || 0);
   return {
     scope: { type: scope.type, id: scope.id },
-    items: (result.rows || []).map((row) => serializeContentEntry(row, { requestedScope: scope })),
+    capabilities,
+    items: (result.rows || []).map((row) => serializeContentEntry(row, {
+      requestedScope: scope,
+      canEdit: canEditLibraryResource(row, actorId, capabilities, scope),
+    })),
     pagination: { page, limit, total, total_pages: Math.ceil(total / limit) },
   };
 }
@@ -663,11 +744,13 @@ async function registerMedia({ actorId, body = {}, requestId = null, models = db
   });
 }
 
-async function listMedia({ actorId, query = {}, models = db } = {}) {
+async function listMedia({ actorId, query = {}, models = db, assertFeatureAccess } = {}) {
   const scope = normalizeScope(query);
-  await assertScopeAccess(actorId, scope, 'marketing.web.view', { models });
+  await assertScopeAccess(actorId, scope, 'marketing.web.view', { models, assertFeatureAccess });
+  const capabilities = await resolveLibraryCapabilities(actorId, scope, { models, assertFeatureAccess });
+  const mediaIds = normalizeMediaIdFilter(query.ids ?? query['ids[]']);
   const page = boundedInteger(query.page, 1, MAX_PAGE_NUMBER);
-  const limit = boundedInteger(query.limit, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
+  const limit = boundedInteger(query.limit, mediaIds?.length || DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
   const includeInheritedGroup = booleanQuery(query.include_inherited_group);
   const status = String(query.status || '').trim().toLowerCase();
   const kind = String(query.kind || '').trim().toLowerCase();
@@ -681,6 +764,7 @@ async function listMedia({ actorId, query = {}, models = db } = {}) {
   const scopeWhere = await readScopeWhere(scope, includeInheritedGroup, models);
   const where = {
     ...scopeWhere,
+    ...(mediaIds ? { id: { [Op.in]: mediaIds } } : {}),
     ...(status ? { status } : {}),
     ...(kind ? { kind } : {}),
     ...(search ? { title: { [Op.like]: `%${search}%` } } : {}),
@@ -712,7 +796,11 @@ async function listMedia({ actorId, query = {}, models = db } = {}) {
   const total = Number(result.count || 0);
   return {
     scope: { type: scope.type, id: scope.id },
-    items: (result.rows || []).map((row) => serializeMediaAsset(row, { requestedScope: scope })),
+    capabilities,
+    items: (result.rows || []).map((row) => serializeMediaAsset(row, {
+      requestedScope: scope,
+      canEdit: canEditLibraryResource(row, actorId, capabilities, scope),
+    })),
     pagination: { page, limit, total, total_pages: Math.ceil(total / limit) },
   };
 }
@@ -940,6 +1028,7 @@ async function cleanupExpiredQuarantinedMedia({
 
 module.exports = {
   DEFAULT_PAGE_SIZE,
+  MAX_MEDIA_ID_FILTER,
   MAX_PAGE_SIZE,
   QUARANTINE_CLEANUP_LEASE_MS,
   WebContentMediaServiceError,
@@ -952,7 +1041,9 @@ module.exports = {
   listContent,
   listContentVersions,
   listMedia,
+  normalizeMediaIdFilter,
   publicMediaProjection,
+  resolveLibraryCapabilities,
   registerMedia,
   sanitizeMediaMetadata,
   sanitizeVariants,

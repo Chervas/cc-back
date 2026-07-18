@@ -136,6 +136,13 @@ Regresiones mínimas: `business_profile_local.test.js`, `marketing_competition_h
 
 Release funcional staging: backend `9b82958`, promovido desde dev `ac994a0`; frontend `3c4593ae`, promovido desde dev `667c6a73` —cambio funcional `f9266f0a`—, build `8ca8e450c563e9ee`. Propdental continúa en `connect_only`; Piloto automático no está activo.
 
+> **Nota de inventario vigente 2026-07-18:** los conteos `30/6/48` de esta
+> sección se conservan como evidencia del cutover del 14 de julio. El runtime
+> actual registra **33 tareas periódicas**, **10 integraciones
+> dirigidas/background** y **58 handlers**, incluido
+> `marketing_web_publication_health_monitor`; todos siguen materializados en
+> `JobRequest`, sin cron de negocio lateral.
+
 ### Orquestación periódica única
 
 `SCHEDULED_JOB_DEFINITIONS` contiene 30 tareas periódicas. Las seis nuevas son `system_pm2_log_retention` y cinco bridges OPS (`ops_global_discovery`, `ops_summary`, `ops_google_business_profile_daily`, `ops_search_console_daily`, `ops_google_business_profile_requested`). `node-cron` solo crea `JobRequest`; el worker durable ejecuta, reintenta, recupera y audita. Los bridges conservan `UTC`. `OPS_INTERNAL_API_TOKEN` es obligatorio y nunca se registra.
@@ -4865,13 +4872,21 @@ plantillas ni filas que puedan estar referenciadas por ejecuciones.
 
 ## Marketing Web: control plane, editor y compilador W0-W2 (2026-07-18)
 
-**Corte integrado:** la serie backend `acebe05..6533357` está en `dev` y
-staging integra hasta `0d42abb`. Incluye hardening del handoff WordPress,
+**Corte integrado vigente:** la serie backend `acebe05..1466452` está en `dev`
+y staging integra hasta `807b967`. Incluye hardening del handoff WordPress,
 rollout por scope, canonicalización segura `apex/www`, persistencia/recuperación
-del artefacto preparado, CSP del artefacto público y proyección de disponibilidad de publicación. Las migraciones
+del artefacto preparado, CSP del artefacto público, disponibilidad efectiva por
+canal y previews de plantilla verificadas. Las migraciones
 `19000..25000` están aplicadas tras backup y crearon 17 tablas/cinco plantillas
-sin crear policies o bindings reales. La suite Web pasó 188/188 y los
-contratos PHP/WordPress 22/22. Esta integración no autoriza una campaña.
+sin crear policies o bindings reales. La suite local vigente del código integrado
+pasó **223/223** contratos Node, **26/26** contratos PHP/WordPress y **3/3**
+pruebas de interoperabilidad. El frontend Marketing Web local pasó
+**153/153** y el build de producción terminó verde con hash
+`da0d27c8f1d2f80a`; conserva el warning preexistente del bundle de **4,15 MB**.
+Esta evidencia aún no está desplegada: el corte live anterior sigue acreditado
+por **78/78** frontend y build `e775a9d1935d0a68`. Las integraciones MySQL destructivas se omiten de forma
+explícita cuando `WEB_EDITOR_TEST_MYSQL_URL` no está definido. Esta integración
+no autoriza una campaña.
 
 W0 establece la frontera de seguridad y despliegue. El editor y la publicación
 son gates distintos y ambos nacen apagados:
@@ -4916,6 +4931,42 @@ CAS (`lock_version`); crear, enviar y aprobar revisiones adquiere locks en orden
 plantillas builtin se siembran versionadas y las instancias regeneran todos los
 IDs estructurales para no compartir referencias entre proyectos.
 
+El catálogo autenticado admite
+`GET /api/marketing/web-templates?include_preview=true`. El servicio pagina y
+aplica ACL/scope antes de cargar documentos, por lo que solo consulta los IDs
+ya visibles de esa página. Cada `preview_document` se valida como
+`WebDocument v1`, se canonicaliza y se contrasta con su hash almacenado; un
+documento corrupto o cuyo hash no coincide falla cerrado con `503` y nunca se
+envía al navegador. Sin el flag no se carga ni proyecta el documento. La
+migración idempotente
+`20260718103000-normalize-web-qualification-template-category.js` normaliza la
+categoría builtin histórica `form` a `qualification`; el selector frontend no
+debe reintroducir aliases ni elegir una primera plantilla arbitraria.
+
+La creación desde campaña repite esa política en la API y falla cerrado. El
+backend vuelve a validar el `campaign_context`, que la plantilla solicitada
+existe, es visible para el scope efectivo y es compatible con propósito,
+target/categoría y tratamiento cuando corresponda. El filtro o el estado del
+diálogo nunca autorizan por sí solos la creación; una combinación obsoleta,
+cruzada entre tenants o incompatible no crea proyecto ni vínculo parcial.
+`strategy_id` identifica exclusivamente `Campaign.id`; un
+`CampaignRequest.id` no se acepta como alias porque el consumidor de destinos
+también resuelve la estrategia por la campaña canónica.
+
+Errores observables de ese preflight transaccional:
+
+- `422 campaign_template_required|campaign_template_incompatible` para ausencia
+  o categoría/propósito de plantilla no compatible;
+- `503 campaign_context_validation_unavailable` si no puede validarse de forma
+  autoritativa; no degrada a confianza en el cliente;
+- `404 campaign_strategy_not_found` cuando desapareció la estrategia;
+- `409 campaign_strategy_scope_mismatch`,
+  `campaign_strategy_campaign_invalid`,
+  `campaign_strategy_campaign_not_found` o
+  `campaign_strategy_campaign_scope_mismatch` para ownership/campaña canónica;
+- `422 campaign_target_incompatible` y `409 campaign_treatment_unavailable`
+  para target/tratamiento incoherente, inactivo o fuera de scope.
+
 W2 compila una revisión aprobada a un `WebArtifact` determinista e inmutable.
 La clave de identidad cubre revisión, renderer, entorno, URL base y runtime
 confiable; manifest, ficheros, hashes y QA se persisten juntos. El compilador
@@ -4927,6 +4978,23 @@ publicación no consulta contenido vivo a mitad de despliegue. Ed25519 firma el
 manifest y tanto WordPress como el origen alojado verifican hash, tamaño,
 allowlist y firma antes de activar. `status` es el único campo mutable de un
 artefacto; las actualizaciones masivas están sujetas al mismo hook.
+
+Desde `clinicaclick-web-renderer/1.3.0`, `document.globals.header_node_id` y
+`document.globals.footer_node_id` dejan de ser una ayuda exclusiva del editor:
+el compilador los inserta en **cada** página como `<header>` y `<footer>`
+semánticos, marcados con `data-cc-global`, y los incluye en el cálculo de
+alcanzabilidad SEO. No se duplican como nodos locales ni se recompilan desde
+contenido vivo. La previsualización Angular y el artefacto público consumen la
+misma referencia global congelada.
+
+El formulario global también se materializa por ruta. El manifest no lo trata
+como un único formulario sin contexto, sino como un contrato `scope=global`
+con `page_contracts[page_id]`. Cada contrato conserva los campos y la identidad
+canónica de la página desde la que se envía. El relay y la atribución resuelven
+el contrato de esa página antes de aceptar el intake; una ruta firmada sin su
+contrato global, una página ajena o campos distintos fallan cerrado. Esto
+permite reutilizar visualmente el mismo formulario en todas las páginas sin
+perder `WebPage`, publicación, revisión o atribución.
 
 El rollout operativo es deliberado:
 
@@ -4943,11 +5011,12 @@ El rollout operativo es deliberado:
 
 Estado de staging del piloto: editor/publicación globales activos, editor
 allowlisted para `group:5` y clínicas `19/35/36/56/57/58/59`, y publicación
-solo para `group:5`. Hospitalet ya acredita handshake y una publicación real;
-no ampliar esa lista hasta cerrar el lead E2E y el rollback indicados en W5/W6.
+solo para `group:5`. Hospitalet acredita handshake, publicación, E2E público,
+limpieza, rollback y monitor saludable. No ampliar esa lista hasta cerrar
+multi-route y los gates operativos indicados en W5/W6.
 
 La suite canónica es `npm test`: encadena los contratos Web y los contratos de
-campañas, además de los 22 contratos PHP, compatibilidad Ed25519 Node/PHP,
+campañas, además de los 26 contratos PHP, compatibilidad Ed25519 Node/PHP,
 compilador real y ZIP provisionado. Si `WEB_EDITOR_TEST_MYSQL_URL` está
 definida también ejecuta las
 integraciones destructivas sobre esa base **aislada**; nunca se apunta a dev,
@@ -4964,6 +5033,30 @@ uno con un contrato JSON cerrado. Estados: `draft -> review -> published` y
 `archived`; editar una entrada publicada crea una nueva versión en `review`.
 Publicar o archivar exige `marketing.web.review`; leer y editar usan
 `marketing.web.view|edit` dentro del scope explícito.
+
+La API proyecta autorización efectiva, no obliga al frontend a inferirla:
+`capabilities.can_create`, `can_edit_own` y `can_review` describen al actor, y
+cada fila devuelve `can_edit` y `read_only`. El autor puede modificar su propio
+recurso cuando mantiene `marketing.web.edit`; otro actor solo puede hacerlo si
+posee `marketing.web.review`. Los recursos heredados de grupo son siempre
+`read_only` en un scope de clínica. Estas comprobaciones se repiten en cada
+mutación backend: ocultar un botón no constituye control de acceso.
+
+El flujo editorial expuesto es literal: un borrador se edita con CAS, **Enviar
+a revisión** lo mueve de `draft` a `review`, y solo un revisor puede pasarlo a
+`published`. Editar una entrada publicada no altera la versión visible: crea
+la siguiente versión en `review`.
+`GET /api/marketing/web-content/:contentId/versions` conserva el historial
+inmutable y se puede consultar incluso cuando la entrada efectiva sea heredada
+o de solo lectura.
+
+Los contratos tipados exponen campos editoriales semánticos —entre otros
+`headline`, `summary`, `question`, `answer`, `display_name`, `role`,
+`biography`, `quote`, `attribution`, `text`, `version_label` y `excerpt`—. Los
+bindings apuntan al campo de negocio exacto, nunca al título interno de la
+entrada CMS. En particular, un bloque FAQ enlaza `question -> question` y
+`answer -> answer`; el snapshot y el renderer solo generan `FAQPage` cuando
+ambos valores están completos y visibles.
 
 La biblioteca `WebMediaAssets` no guarda binarios ni credenciales. Envuelve un
 `PublicMediaAsset` marcado como no clínico; la
@@ -5004,6 +5097,12 @@ APIs autenticadas y paginadas:
 - `GET/POST /api/marketing/web-media`;
 - `PATCH /api/marketing/web-media/:mediaId` con `version` obligatorio.
 
+La lectura de medios añade el filtro estricto `ids`/`ids[]`: solo acepta UUID
+v4, deduplica y limita el lote a 100. El editor lo usa para hidratar en una
+petición las imágenes referenciadas por nodos y por los assets sociales/globales
+de página; no convierte una URL del documento en autoridad ni expone metadata
+de almacenamiento.
+
 Scope se declara como `scope_type=clinic|group` y `scope_id`. Las listas usan
 `page`, `limit` (máximo 100), `status`, `search` y filtros de tipo/locale/kind.
 Una clínica solo ve activos del grupo cuando pide explícitamente
@@ -5036,23 +5135,34 @@ licencias o consentimiento.
 
 ## Marketing Web: publicación WordPress y puente de campañas W4/W5 (2026-07-18)
 
-Estado integrado/piloto: `clinicaclick-web` `2.0.0-alpha.5` está instalado y
+Estado público acreditado: `clinicaclick-web` `2.0.0-alpha.6` sigue instalado y
 activo en Propdental. El legado `clinicaclick` `1.1.7` sigue activo; v2 evita
 su loader global duplicado sin desactivarlo y tanto la home como la landing
 conservan un único loader. `ccw_sync_event` está programado cada 15 minutos y,
 si se ejecuta manualmente, debe correr como el usuario del sitio para no crear
 caché propiedad de `root`.
 
+Estado del paquete siguiente: el código fuente y el ZIP determinista se elevan
+a `clinicaclick-web` `2.0.0-alpha.7` para consumir el manifest de formularios
+globales por página emitido por renderer `1.3.0`. `alpha.7` valida que todo
+formulario global cubra las rutas/páginas firmadas que lo usan y que sus campos
+coincidan entre contratos; no relaja firma, hash, scope, host, ruta ni
+allowlists. Esta versión no debe describirse como live hasta que el heartbeat
+del WordPress real la reporte y el readback público la acredite.
+
 El primer `activation_handshake` normalizó de forma auditable el alta inicial
 `https://propdental.es` a la URL canónica declarada por WordPress
 `https://www.propdental.es`. Esa excepción solo se permite cuando la
 instalación sigue realmente virgen (`pending`, sin `last_seen`, versión ni
 publicaciones); después se exige coincidencia estricta. La instalación
-`524c2f73-6b69-42f2-8cb0-c8d171575d94` está `connected` y reporta
-`2.0.0-alpha.5`. El paquete provisionado y la versión reportada quedan
-alineados; después de que un paquete genérico sobrescribiera temporalmente la
-configuración se rotó el token, se reprovisionó y se verificó de nuevo el
-handshake sin conservar el token anterior.
+`524c2f73-6b69-42f2-8cb0-c8d171575d94` está `connected`. El preflight más
+reciente confirmó el runtime WordPress `2.0.0-alpha.6`, pero la versión
+persistida en DB todavía figura como `2.0.0-alpha.5`: el heartbeat ordinario de
+versión puede tardar hasta 24 horas. Por tanto, ni el fichero live por sí solo
+ni esa fila atrasada acreditan el rollout siguiente. Después de que un paquete
+genérico sobrescribiera temporalmente la configuración se rotó el token, se
+reprovisionó y se verificó de nuevo el handshake sin conservar el token
+anterior.
 
 El piloto público queda identificado y reproducible así:
 
@@ -5142,7 +5252,7 @@ determinista y las rutas declaradas en el manifest. Un hash anterior o ajeno,
 un token de otra instalación o un `pathToken` no canónico fallan cerrado. Las
 respuestas son `private, no-store` y nunca exponen bucket, key ni credenciales.
 
-El plugin `2.0.0-alpha.5` decide las cabeceras por origen: añade bearer y
+El plugin `2.0.0-alpha.7` decide las cabeceras por origen: añade bearer y
 versión únicamente cuando el origen completo de la descarga coincide con
 `api_base`; nunca los reenvía a S3/CDN. En ambos modos conserva la segunda
 barrera: verifica firma, hash, tamaño, allowlist y contenido antes del cambio
@@ -5166,6 +5276,47 @@ No se ha relajado ninguna firma ni autenticación. El token sigue persistido
 solo como hash en backend y como opción `autoload=false` en WordPress; el ZIP
 es `private, no-store`, el ticket dura 15 minutos y un token/descriptor que no
 coincida falla antes de generar el paquete.
+
+### Orden seguro para renderer 1.3.0 y globales
+
+La compatibilidad es deliberadamente asimétrica: una revisión legacy o una que
+solo use cabecera/pie globales no requiere el nuevo contrato de intake, pero
+**no se debe publicar en WordPress una revisión con formulario global usando
+un plugin anterior a `2.0.0-alpha.7`**. La API/worker aplica ese mínimo de
+versión de forma fail-closed; no depende del frontend. Responde `409`
+`web_wordpress_global_intake_plugin_outdated` con
+`actual_plugin_version`/`required_plugin_version`, sin encolar ni alterar el
+deployment. El
+orden operativo obligatorio es:
+
+1. construir y verificar el ZIP `2.0.0-alpha.7` con los **26/26** contratos PHP
+   y las **3/3** pruebas de interoperabilidad;
+2. guardar un rollback **real** de `alpha.6`, incluido su
+   `config/installation.php`, y actualizar con el ZIP **provisionado** de
+   `alpha.7`; no usar el ZIP genérico ni perder identidad/token/descriptor,
+   runtime o caché/LKG;
+3. invocar `CCW_Plugin::activate(false)` como el usuario propietario del sitio
+   `propdental.es`, nunca como `root`, para forzar el heartbeat inmediato en
+   vez de depender de la cadencia ordinaria de hasta 24 horas;
+4. comprobar que la instalación sigue `connected`, que la DB ya reporta
+   exactamente `2.0.0-alpha.7`, y verificar sincronización, página existente y
+   rollback sin cambiar el artefacto activo;
+5. solo entonces aprobar/publicar una revisión compilada por
+   `clinicaclick-web-renderer/1.3.0` que contenga formulario global;
+6. verificar cada permalink, `data-cc-global`, el contrato de formulario de su
+   página, un envío controlado, atribución, ausencia de duplicados y rollback
+   antes de ampliar scopes.
+
+Si la DB no reporta `alpha.7` —incluidos los estados atrasados `alpha.5` o
+`alpha.6`—, la publicación de un formulario global debe quedar
+bloqueada o pospuesta de forma observable; nunca se fuerza el manifest nuevo ni
+se sacrifica el last-known-good. Este orden no habilita hosted/custom ni
+multi-route: conservan sus gates y E2E independientes.
+
+El gate de versión no degrada ni retira publicaciones legacy y no bloquea una
+revisión que solo tenga header/footer globales. Aun así, para el rollout real
+se recomienda promover `alpha.7` antes de estrenar cualquier artefacto `1.3.0`,
+de modo que plugin y renderer se observen como una sola tanda reversible.
 
 Durante un diagnóstico controlado se mostró accidentalmente un HMAC de intake
 en la salida privada de la herramienta. Se rotó inmediatamente: `IntakeConfig`
@@ -5204,6 +5355,19 @@ El cierre E2E WordPress quedó verificado:
   `a944709d…` (secuencia 4, job `31696`) activó el artefacto CSP-fixed sin
   alterar campañas.
 
+El cierre posterior de `alpha.6` verificó además el relay público de la landing
+y la atribución canónica `clinicaclick_web_publication`: backend reconstruye
+proyecto, revisión, página, publicación y artefacto a partir de la identidad
+firmada y no degrada esos eventos a una fuente web genérica. En el borde de
+`crm.clinicaclick.com`, la ruta exacta `POST /_clinicaclick/events` admite hasta
+80 KiB y sustituye `X-Forwarded-For` por `$remote_addr` antes de proxificar a
+`127.0.0.1:3001`; no existe un catch-all de escritura equivalente. El E2E
+público terminó sin duplicados ni intentos de subida a Google y se eliminaron
+todos los leads, eventos y filas WhatsApp sintéticos usados por la prueba.
+La copia previa del plugin `alpha.5` queda únicamente como rollback operativo
+en `/home/propdentalssh/ccw-alpha6-20260718T1254Z/alpha5-backup/`; no es la
+versión live.
+
 El defecto CSP descubierto por el piloto quedó corregido en el renderer
 `clinicaclick-web-renderer/1.2.1` y en las validaciones allowlisted del plugin.
 Chromium desktop/móvil confirmó cero bloqueos CSP, consentimiento y chat con
@@ -5225,6 +5389,83 @@ POST queda denegado. La segunda permite 80 KiB para alojar el payload canónico
 validado de hasta 64 KiB y su wrapper. El runbook versionado está en
 `ops/nginx/README-marketing-web.md` y exige `nginx -t`, CSP, formulario,
 chat/teléfono/WhatsApp, readback y rollback antes de abrir un scope real.
+
+### Hardening Web por canal integrado y desplegado (2026-07-18)
+
+Este bloque describe el contrato vigente en `dev` `1466452`, staging
+`807b967` y el piloto WordPress live `2.0.0-alpha.6`. El despliegue no abre por
+sí mismo hosted/custom: esos canales continúan apagados y fallan cerrado hasta
+que su infraestructura externa complete DNS/TLS/origen/proveedor y E2E.
+
+La disponibilidad deja de ser un booleano ambiguo:
+
+- `publishing_rollout_available` refleja gate global + allowlist del scope;
+- `publishing_available` exige además al menos un canal operativo;
+- `publishing_channels` proyecta `wordpress`, `clinicaclick_hosted` y
+  `custom_domain`, cada uno con `available` y `unavailable_reason`;
+- WordPress se autodetecta si su override queda vacío y exige API HTTPS sin
+  path, bootstrap de al menos 32 caracteres, almacén válido y pareja Ed25519;
+- hosted/custom son opt-in (`false` por defecto) y exigen root absoluto seguro,
+  host/modo o proveedor/target/credenciales completos;
+- `assertWebPublishingChannelEnabled` protege creación, dominio, instalación y
+  ejecución. El worker relee el gate dentro de su lock, antes de compilar o
+  mutar; si se cerró, deja el deployment en espera observable sin publicación
+  parcial. Reconciliar dominios con custom apagado se omite sin proveedor.
+
+La pareja de firma no se valida por longitud: Node parsea privada/pública,
+exige `ed25519`, deriva la pública desde la privada y compara ambas en tiempo
+constante. El hosting root rechaza `/`, rutas relativas, NUL y valores
+demasiado cortos.
+
+El publisher/origin hosted endurecido:
+
+- materializa artefactos inmutables y, también al reutilizarlos, compara el
+  conjunto exacto de ficheros y contenido de manifest, envelope y assets;
+- rechaza ficheros extra, alteración, symlinks y punteros fuera de
+  `artifacts/<sha256>`;
+- el origin verifica `manifest.json` + `manifest.sig.json`, firma Ed25519,
+  hashes y tamaños antes de responder; cualquier incoherencia falla `503`;
+- una publicación no puede solapar otra del mismo host por relación
+  antecesor/descendiente. El precheck transaccional y el host lock del
+  filesystem aplican la misma regla; un fallo elimina solo directorios vacíos
+  creados por ese intento;
+- el health de hosted/custom verifica primero el bundle/puntero local completo
+  y después el marker público.
+
+El job durable `marketing_web_publication_health_monitor` está programado por
+defecto a `11 * * * *`, lote 25 (máximo 100). Selecciona publicaciones
+`published` con artefacto activo, hace un único GET público por fila y persiste
+solo si el puntero no cambió. Audita transiciones `unhealthy`/`recovered`. Un
+readback fallido es resultado funcional: no reintenta agresivamente el lote,
+no hace rollback, no republica y no consulta/muta plataformas publicitarias.
+La observación controlada del `2026-07-18T13:01:04.689Z` comprobó una
+publicación y obtuvo `1 healthy`, `0 degraded`.
+
+El WordPress live `2.0.0-alpha.6` usa presencia, no truthiness, para
+clasificar identidad Web: ausencia total mantiene una página ordinaria; IDs
+presentes vacíos/incompletos devuelven `422`. Una landing completa reenvía sus
+eventos por `/_clinicaclick/events`, donde backend reconstruye
+proyecto/revisión/página/publicación/artefacto y firma server-side. La barrera
+pre-DB usa identidad derivada de IDs + origin/path + IP, con un techo global por
+IP; después de resolver la publicación aplica el bucket canónico. Así varias
+rutas legítimas de un WordPress compartido no colapsan en un único bucket, pero
+rotar IDs/ruta tampoco elimina el límite global.
+
+Estado de aceptación de esta tanda:
+
+1. suite Marketing Web, PHP e interoperabilidad: cerradas;
+2. backend/frontend promovidos y build frontend desplegado;
+3. `alpha.6` instalado preservando la configuración y con rollback `alpha.5`;
+4. E2E público del relay/intake atribuido y datos sintéticos limpiados;
+5. observación real del monitor: saludable;
+6. hosted/custom permanecen deliberadamente apagados hasta
+   DNS/TLS/vhost/proveedor y E2E; WordPress multi-route, rotación Ed25519
+   operativa, Lighthouse y validadores externos siguen fuera de este cierre.
+
+La auditoría Figma afecta al frontend, no a este runtime: se reutiliza la UX de
+editor/biblioteca/plantillas/inspector/onboarding/CMS, pero nunca el backend,
+renderer o plugin ModSuite. Tailwind pertenece al shell Angular; el backend
+persiste `WebDocument` tipado y el compilador produce el CSS público.
 
 El webhook de Meta conserva el GET de verificación, pero cada POST exige
 `META_APP_SECRET`, el cuerpo crudo y una cabecera

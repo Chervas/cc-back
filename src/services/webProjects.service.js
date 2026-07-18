@@ -22,6 +22,10 @@ const DEFAULT_PAGE_SIZE = 12;
 const MAX_PAGE_SIZE = 50;
 const MAX_PAGE_NUMBER = 10000;
 const CAMPAIGN_TARGET_KINDS = new Set(['general', 'treatment']);
+const CAMPAIGN_TEMPLATE_CATEGORIES = Object.freeze({
+  general: new Set(['clinic', 'local', 'qualification']),
+  treatment: new Set(['treatment']),
+});
 const TEMPLATE_CATEGORIES = new Set(['treatment', 'clinic', 'local', 'qualification', 'custom']);
 const CAMPAIGN_CONTEXT_KEYS = new Set([
   'strategy_id', 'strategyId', 'target_kind', 'targetKind', 'treatment_id', 'treatmentId',
@@ -362,8 +366,8 @@ function createBlankWebDocument({ name, locale = 'es-ES' } = {}) {
         color_accent: '#22C3A6',
         color_surface: '#FFFFFF',
         color_text: '#181D35',
-        font_heading: 'manrope',
-        font_body: 'inter',
+        font_heading: 'system',
+        font_body: 'system',
         radius: 'lg',
         spacing_density: 'comfortable',
       },
@@ -485,6 +489,12 @@ function createBlankWebDocument({ name, locale = 'es-ES' } = {}) {
 function instantiateWebDocument(sourceDocument) {
   assertValidWebDocument(sourceDocument);
   const document = JSON.parse(JSON.stringify(sourceDocument));
+  // Los artefactos no empaquetan fuentes web. Los tokens históricos siguen
+  // siendo válidos para abrir documentos existentes, pero cualquier proyecto
+  // nuevo se instancia con la pila del sistema para que el resultado sea
+  // estable y no dependa de una fuente instalada localmente.
+  document.design_system.tokens.font_heading = 'system';
+  document.design_system.tokens.font_body = 'system';
   const pageIds = new Map(document.pages.map((page) => [page.id, crypto.randomUUID()]));
   const nodeIds = new Map(Object.keys(document.nodes).map((id) => [id, crypto.randomUUID()]));
   const bindingIds = new Map(Object.keys(document.bindings).map((id) => [id, crypto.randomUUID()]));
@@ -744,6 +754,250 @@ async function resolveTemplate(templateId, scope, actorId, transaction, models =
   return template;
 }
 
+function strategyPayload(row) {
+  const value = plain(row)?.solicitud;
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function campaignTemplateCompatibility(template, campaignContext) {
+  const value = plain(template) || {};
+  const category = String(value.category || '').trim().toLowerCase();
+  const allowedCategories = CAMPAIGN_TEMPLATE_CATEGORIES[campaignContext.target_kind];
+  let compatibility = value.compatibility;
+  let compatibilityValid = true;
+  if (typeof compatibility === 'string') {
+    try {
+      compatibility = JSON.parse(compatibility);
+    } catch {
+      compatibility = null;
+      compatibilityValid = false;
+    }
+  }
+  if (!compatibility || typeof compatibility !== 'object' || Array.isArray(compatibility)) {
+    compatibility = {};
+    compatibilityValid = false;
+  }
+  const purposes = compatibility.purposes;
+  return {
+    compatible: compatibilityValid
+      && Boolean(allowedCategories?.has(category))
+      && (!Array.isArray(purposes) || purposes.includes('landing')),
+    category,
+    declared_purposes: Array.isArray(purposes) ? purposes : null,
+  };
+}
+
+function assertCampaignTemplateCompatible(template, campaignContext) {
+  if (!campaignContext) return true;
+  if (!template) {
+    throw new WebProjectServiceError(
+      'campaign_template_required',
+      'Una landing vinculada a campaña necesita una plantilla compatible.',
+      422
+    );
+  }
+  const contract = campaignTemplateCompatibility(template, campaignContext);
+  if (contract.compatible) return true;
+  throw new WebProjectServiceError(
+    'campaign_template_incompatible',
+    'La plantilla no es compatible con el objetivo de esta campaña.',
+    422,
+    {
+      template_id: String(plain(template)?.id || ''),
+      template_category: contract.category || null,
+      target_kind: campaignContext.target_kind,
+      declared_purposes: contract.declared_purposes,
+    }
+  );
+}
+
+function clinicIdsDeclaredByStrategy(rows) {
+  const ids = [];
+  for (const row of rows) {
+    const value = plain(row) || {};
+    ids.push(value.clinica_id);
+    const scope = strategyPayload(value).scope;
+    if (!scope || typeof scope !== 'object' || Array.isArray(scope)) continue;
+    ids.push(scope.clinic_id);
+    if (Array.isArray(scope.clinic_ids)) ids.push(...scope.clinic_ids);
+  }
+  return [...new Set(ids.map(positiveInteger).filter(Boolean))];
+}
+
+function strategyMatchesScope(rows, scope, scopeClinicIds) {
+  const declaredClinicIds = clinicIdsDeclaredByStrategy(rows);
+  if (scope.type === 'clinic') {
+    if (declaredClinicIds.length !== 1 || declaredClinicIds[0] !== scope.id) return false;
+    return rows.every((row) => {
+      const payloadScope = strategyPayload(row).scope;
+      if (!payloadScope || typeof payloadScope !== 'object' || Array.isArray(payloadScope)) {
+        return Number(plain(row)?.clinica_id) === scope.id;
+      }
+      const assignment = String(payloadScope.assignment_scope || 'clinic').trim().toLowerCase();
+      return assignment === 'clinic'
+        && Number(payloadScope.clinic_id || plain(row)?.clinica_id) === scope.id;
+    });
+  }
+  const allowed = new Set(scopeClinicIds);
+  if (declaredClinicIds.length === 0 || declaredClinicIds.some((id) => !allowed.has(id))) return false;
+  return rows.every((row) => {
+    const payloadScope = strategyPayload(row).scope;
+    return payloadScope
+      && typeof payloadScope === 'object'
+      && !Array.isArray(payloadScope)
+      && String(payloadScope.assignment_scope || '').trim().toLowerCase() === 'group'
+      && Number(payloadScope.group_id) === scope.id;
+  });
+}
+
+function campaignMatchesScope(campaign, scope, inheritedGroupId) {
+  const value = plain(campaign) || {};
+  const clinicId = positiveInteger(value.clinica_id ?? value.clinicaId);
+  const groupId = positiveInteger(value.grupo_clinica_id ?? value.grupoClinicaId);
+  if (scope.type === 'clinic') {
+    return clinicId === scope.id && (!groupId || groupId === inheritedGroupId);
+  }
+  return !clinicId && groupId === scope.id;
+}
+
+function treatmentMatchesScope(treatment, scope, inheritedGroupId) {
+  const value = plain(treatment) || {};
+  if (![true, 1, '1'].includes(value.activo)) return false;
+  const clinicId = positiveInteger(value.clinica_id ?? value.clinicaId);
+  const groupId = positiveInteger(value.grupo_clinica_id ?? value.grupoClinicaId);
+  if (scope.type === 'clinic') {
+    const hiddenFor = Array.isArray(value.eliminado_por_clinica)
+      ? value.eliminado_por_clinica.map(positiveInteger).filter(Boolean)
+      : [];
+    if (hiddenFor.includes(scope.id)) return false;
+    if (clinicId) return clinicId === scope.id;
+    if (groupId) return Boolean(inheritedGroupId) && groupId === inheritedGroupId;
+    return value.origen === 'sistema';
+  }
+  if (clinicId) return false;
+  if (groupId) return groupId === scope.id;
+  return value.origen === 'sistema';
+}
+
+async function campaignStrategyRows(strategyId, { models, transaction }) {
+  if (!models.CampaignRequest?.findAll) {
+    throw new WebProjectServiceError(
+      'campaign_context_validation_unavailable',
+      'No se puede validar ahora la estrategia de campaña.',
+      503
+    );
+  }
+  const lock = transaction?.LOCK?.UPDATE;
+  const queryOptions = {
+    attributes: ['id', 'clinica_id', 'campaign_id', 'estado', 'solicitud'],
+    raw: true,
+    transaction,
+    ...(lock ? { lock } : {}),
+  };
+  let rows = await models.CampaignRequest.findAll({
+    ...queryOptions,
+    where: { campaign_id: strategyId },
+  });
+  rows = rows.filter((row) => strategyPayload(row).kind === 'marketing_strategy');
+  return rows;
+}
+
+async function assertCampaignContextResources({ campaignContext, scope, template, models, transaction }) {
+  if (!campaignContext) return true;
+  assertCampaignTemplateCompatible(template, campaignContext);
+  if (!models.Campaign?.findByPk || !models.Tratamiento?.findByPk) {
+    throw new WebProjectServiceError(
+      'campaign_context_validation_unavailable',
+      'No se puede validar ahora la campaña y su tratamiento.',
+      503
+    );
+  }
+  const rows = await campaignStrategyRows(campaignContext.strategy_id, { models, transaction });
+  if (rows.length === 0) {
+    throw new WebProjectServiceError(
+      'campaign_strategy_not_found',
+      'La estrategia de campaña ya no existe.',
+      404
+    );
+  }
+  const scopeClinicIds = await clinicIdsForScope(scope, { models, transaction });
+  if (!strategyMatchesScope(rows, scope, scopeClinicIds)) {
+    throw new WebProjectServiceError(
+      'campaign_strategy_scope_mismatch',
+      'La estrategia no pertenece al alcance seleccionado.',
+      409
+    );
+  }
+  const campaignIds = [...new Set(rows.map((row) => positiveInteger(plain(row)?.campaign_id)).filter(Boolean))];
+  if (campaignIds.length !== 1) {
+    throw new WebProjectServiceError(
+      'campaign_strategy_campaign_invalid',
+      'La estrategia no conserva una campaña canónica.',
+      409
+    );
+  }
+  const lock = transaction?.LOCK?.UPDATE;
+  const campaign = await models.Campaign.findByPk(campaignIds[0], {
+    transaction,
+    ...(lock ? { lock } : {}),
+  });
+  const inheritedGroupId = scope.type === 'clinic'
+    ? await groupIdForClinic(scope.id, { models, transaction })
+    : null;
+  if (!campaign) {
+    throw new WebProjectServiceError(
+      'campaign_strategy_campaign_not_found',
+      'La campaña asociada a la estrategia ya no existe.',
+      409
+    );
+  }
+  if (!campaignMatchesScope(campaign, scope, inheritedGroupId)) {
+    throw new WebProjectServiceError(
+      'campaign_strategy_campaign_scope_mismatch',
+      'La campaña asociada no pertenece al alcance seleccionado.',
+      409
+    );
+  }
+
+  const payloads = rows.map(strategyPayload);
+  if (campaignContext.target_kind === 'general') {
+    if (!payloads.every((payload) => String(payload.promotion_type || '').trim().toLowerCase() === 'generic')) {
+      throw new WebProjectServiceError(
+        'campaign_target_incompatible',
+        'La estrategia no tiene un objetivo general.',
+        422
+      );
+    }
+    return true;
+  }
+
+  const treatmentId = campaignContext.treatment_id;
+  const treatmentBelongsToEveryPayload = payloads.every((payload) => (
+    String(payload.promotion_type || '').trim().toLowerCase() !== 'generic'
+    && Array.isArray(payload.treatments)
+    && payload.treatments.some((item) => positiveInteger(item?.id ?? item?.id_tratamiento) === treatmentId)
+  ));
+  if (!treatmentBelongsToEveryPayload) {
+    throw new WebProjectServiceError(
+      'campaign_target_incompatible',
+      'El tratamiento no pertenece a la estrategia seleccionada.',
+      422
+    );
+  }
+  const treatment = await models.Tratamiento.findByPk(treatmentId, {
+    transaction,
+    ...(lock ? { lock } : {}),
+  });
+  if (!treatment || !treatmentMatchesScope(treatment, scope, inheritedGroupId)) {
+    throw new WebProjectServiceError(
+      'campaign_treatment_unavailable',
+      'El tratamiento ya no está activo o no pertenece al alcance seleccionado.',
+      409
+    );
+  }
+  return true;
+}
+
 async function syncProjectPages({ project, document, actorId, transaction, models = db, templateId = undefined }) {
   const existingPages = await models.WebPage.findAll({
     where: { projectId: project.id },
@@ -832,6 +1086,13 @@ async function createProject({ actorId, body = {}, requestId = null, models = db
 
   return sequelize.transaction(async (transaction) => {
     const template = await resolveTemplate(body.template_id, scope, actorId, transaction, models);
+    await assertCampaignContextResources({
+      campaignContext,
+      scope,
+      template,
+      models,
+      transaction,
+    });
     const instantiatedDocument = template
       ? instantiateWebDocument(plain(template).document)
       : createBlankWebDocument({ name, locale });
@@ -1638,6 +1899,9 @@ module.exports = {
   resolveWebProjectSiteDefaults,
   siteDefaultsFromIntake,
   applyWebProjectSiteDefaults,
+  assertCampaignContextResources,
+  assertCampaignTemplateCompatible,
+  campaignTemplateCompatibility,
   revisionFeatureForAction,
   saveDraft,
   scopeColumns,

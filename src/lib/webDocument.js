@@ -51,7 +51,7 @@ const FORBIDDEN_STRING_PATTERNS = [
 const BINDABLE_PROPS = Object.freeze({
   heading: new Set(['text']),
   text: new Set(['text']),
-  faq: new Set(),
+  faq: new Set(['question', 'answer']),
   image: new Set(['asset_id', 'alt']),
   button: new Set(['label', 'target']),
   intake_form: new Set(['title', 'description']),
@@ -336,14 +336,17 @@ function validateGraph(document) {
   const pageIds = new Set();
   const pageSlugs = new Set();
   const entryReferences = new Map();
+  const entryScopes = new Map();
   const parents = new Map();
   const bindingReferences = new Map();
+  const intakeButtonReferences = [];
   let totalTextCharacters = 0;
 
-  const addEntryReference = (nodeId, path) => {
+  const addEntryReference = (nodeId, path, scope) => {
     const references = entryReferences.get(nodeId) || [];
     references.push(path);
     entryReferences.set(nodeId, references);
+    if (!entryScopes.has(nodeId)) entryScopes.set(nodeId, scope);
   };
 
   for (let index = 0; index < document.pages.length; index += 1) {
@@ -366,7 +369,7 @@ function validateGraph(document) {
         if (nodes[rootId].type !== 'section') {
           errors.push(validationError('rootNodeType', rootPath, 'la raíz de página debe ser una sección'));
         }
-        addEntryReference(rootId, rootPath);
+        addEntryReference(rootId, rootPath, { kind: 'page', pageId: page.id });
       }
     }
     if (page.seo?.canonical_url) {
@@ -384,7 +387,7 @@ function validateGraph(document) {
       if (nodes[nodeId].type !== 'section') {
         errors.push(validationError('rootNodeType', globalPath, 'un global debe apuntar a una sección'));
       }
-      addEntryReference(nodeId, globalPath);
+      addEntryReference(nodeId, globalPath, { kind: 'global' });
     }
   }
 
@@ -443,6 +446,8 @@ function validateGraph(document) {
       } else if (action === 'intake_form_anchor') {
         if (!nodeIds.has(target) || nodes[target].type !== 'intake_form') {
           errors.push(validationError('formReference', `${nodePath}/props/target`, 'debe apuntar a un intake_form existente'));
+        } else {
+          intakeButtonReferences.push({ nodeId: nodeKey, targetId: target, path: `${nodePath}/props/target` });
         }
       }
     }
@@ -516,7 +521,8 @@ function validateGraph(document) {
 
   const state = new Map();
   const reachable = new Set();
-  const visit = (nodeId, depth, path) => {
+  const nodeScopes = new Map();
+  const visit = (nodeId, depth, path, scope) => {
     if (!nodeIds.has(nodeId)) return;
     if (depth > WEB_DOCUMENT_LIMITS.maxTreeDepth) {
       errors.push(validationError(
@@ -533,14 +539,36 @@ function validateGraph(document) {
     if (state.get(nodeId) === 'visited') return;
     state.set(nodeId, 'visiting');
     reachable.add(nodeId);
+    if (!nodeScopes.has(nodeId)) nodeScopes.set(nodeId, scope);
     const node = nodes[nodeId];
     for (let index = 0; index < node.children.length; index += 1) {
-      visit(node.children[index], depth + 1, `/nodes/${nodeId}/children/${index}`);
+      visit(node.children[index], depth + 1, `/nodes/${nodeId}/children/${index}`, scope);
     }
     state.set(nodeId, 'visited');
   };
 
-  for (const [nodeId] of entryReferences.entries()) visit(nodeId, 1, `/nodes/${nodeId}`);
+  for (const [nodeId] of entryReferences.entries()) {
+    visit(nodeId, 1, `/nodes/${nodeId}`, entryScopes.get(nodeId));
+  }
+
+  for (const reference of intakeButtonReferences) {
+    const buttonScope = nodeScopes.get(reference.nodeId);
+    const formScope = nodeScopes.get(reference.targetId);
+    if (!buttonScope || !formScope) continue;
+    const isAllowed = buttonScope.kind === 'global'
+      ? formScope.kind === 'global'
+      : formScope.kind === 'global'
+        || (formScope.kind === 'page' && formScope.pageId === buttonScope.pageId);
+    if (!isAllowed) {
+      errors.push(validationError(
+        'formScopeReference',
+        reference.path,
+        buttonScope.kind === 'global'
+          ? 'un botón global solo puede apuntar a un formulario global'
+          : 'un botón de página solo puede apuntar a un formulario global o de esa misma página'
+      ));
+    }
+  }
 
   for (const nodeId of nodeIds) {
     if (!reachable.has(nodeId)) {

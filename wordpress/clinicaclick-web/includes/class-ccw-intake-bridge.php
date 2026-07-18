@@ -256,6 +256,10 @@ final class CCW_Intake_Bridge
             $this->fail('ccw_intake_signed_form_mismatch', 409);
         }
         $form = $manifest['intake_forms'][$form_id];
+        if (($form['scope'] ?? '') === 'global') {
+            $page_contracts = is_array($form['page_contracts'] ?? null) ? $form['page_contracts'] : array();
+            $form = is_array($page_contracts[$page_id] ?? null) ? $page_contracts[$page_id] : array();
+        }
         if (!hash_equals(strtolower((string) ($form['page_id'] ?? '')), $page_id)) {
             $this->fail('ccw_intake_signed_form_mismatch', 409);
         }
