@@ -585,16 +585,15 @@ $tests['consent bootstrap requires both measurement and Consent Mode enabled'] =
     ccw_test_assert($disabled === '', 'measurement or consent markup rendered while measurement was disabled');
 };
 
-$tests['same-origin event relay signs chat telephone WhatsApp and generic channels server-side'] = static function () {
+$tests['signed landing event relay preserves identity for the control plane without forwarding HMAC'] = static function () {
     $setup = ccw_test_setup_intake('event-relay');
     $captured = array();
-    foreach (array('leads', 'events', 'whatsapp-origin') as $endpoint) {
-        $url = 'https://api.example.test/api/intake/' . $endpoint;
-        $GLOBALS['ccw_test_http'][$url] = static function ($requested_url, $args) use (&$captured, $endpoint) {
-            $captured[$endpoint] = array('url' => $requested_url, 'args' => $args);
-            return array('code' => 200, 'body' => '{"success":true,"id":601}');
-        };
-    }
+    $control_plane = 'https://api.example.test/_clinicaclick/events';
+    $GLOBALS['ccw_test_http'][$control_plane] = static function ($requested_url, $args) use (&$captured) {
+        $decoded = json_decode((string) ($args['body'] ?? ''), true);
+        $captured[(string) ($decoded['endpoint'] ?? '')] = array('url' => $requested_url, 'args' => $args);
+        return array('code' => 200, 'body' => '{"success":true,"id":601}');
+    };
     $identity = array(
         'web_project_id' => $setup['fields']['web_project_id'],
         'web_revision_id' => $setup['fields']['web_revision_id'],
@@ -631,14 +630,64 @@ $tests['same-origin event relay signs chat telephone WhatsApp and generic channe
         $body = (string) $forwarded['args']['body'];
         $headers = $forwarded['args']['headers'];
         $decoded = json_decode($body, true);
-        ccw_test_assert(($decoded['clinic_id'] ?? null) === 56 && !isset($decoded['group_id']), 'browser overrode the signed clinic scope');
-        ccw_test_assert(($decoded['domain'] ?? '') === 'cliente.example.test', 'browser overrode the canonical domain');
-        ccw_test_assert(strpos((string) ($decoded['page_url'] ?? ''), 'https://cliente.example.test/cita/') === 0, 'canonical page URL missing');
-        ccw_test_assert(hash_equals(hash_hmac('sha256', $body, $setup['secret']), $headers['X-CC-Signature']), 'event relay HMAC mismatch');
-        ccw_test_assert(strpos($body, $setup['secret']) === false, 'server-side HMAC leaked into the forwarded JSON');
+        ccw_test_assert($forwarded['url'] === $control_plane, 'landing event bypassed the control-plane bridge');
+        ccw_test_assert(($decoded['schema_version'] ?? null) === 1 && ($decoded['endpoint'] ?? '') === $endpoint, 'wrapper contract was not preserved');
+        ccw_test_assert(($decoded['web_project_id'] ?? '') === $identity['web_project_id'], 'project identity was removed before control-plane validation');
+        ccw_test_assert(($decoded['web_revision_id'] ?? '') === $identity['web_revision_id'], 'revision identity was removed before control-plane validation');
+        ccw_test_assert(($decoded['web_page_id'] ?? '') === $identity['web_page_id'], 'page identity was removed before control-plane validation');
+        ccw_test_assert(($decoded['payload']['clinic_id'] ?? null) === 999, 'WordPress unexpectedly replaced control-plane canonicalization');
+        ccw_test_assert(preg_match('/^ccw_evt_[a-f0-9]{64}$/', (string) ($decoded['payload']['event_id'] ?? '')) === 1, 'server event id was not added to the wrapper');
+        ccw_test_assert(($headers['Origin'] ?? '') === $server['HTTP_ORIGIN'], 'original Origin was not relayed');
+        ccw_test_assert(($headers['Referer'] ?? '') === $server['HTTP_REFERER'], 'original Referer was not relayed');
+        ccw_test_assert(!isset($headers['X-CC-Signature']), 'landing relay sent a browser-facing HMAC signature');
+        ccw_test_assert(!isset($headers['Authorization']), 'installation bearer leaked into landing event forwarding');
+        ccw_test_assert(strpos($body, $setup['secret']) === false, 'server-side HMAC leaked into the wrapper');
     }
+};
 
-    $forged = array_merge(array(
+$tests['ordinary WordPress event relay keeps the direct server-side HMAC contract'] = static function () {
+    $setup = ccw_test_setup_intake('ordinary-event-relay');
+    $captured = array();
+    foreach (array('leads', 'events', 'whatsapp-origin') as $endpoint) {
+        $url = 'https://api.example.test/api/intake/' . $endpoint;
+        $GLOBALS['ccw_test_http'][$url] = static function ($requested_url, $args) use (&$captured, $endpoint) {
+            $captured[$endpoint] = array('url' => $requested_url, 'args' => $args);
+            return array('code' => 200, 'body' => '{"success":true,"id":602}');
+        };
+    }
+    $cases = array(
+        'leads' => array('clinic_id' => 999, 'group_id' => 888, 'lead_data' => array('telefono' => '+34612345678')),
+        'events' => array('clinic_id' => 999, 'event_name' => 'CallInitiated'),
+        'whatsapp-origin' => array('clinic_id' => 999, 'ref' => 'abcdef1234567890'),
+    );
+    foreach ($cases as $endpoint => $payload) {
+        $wrapper = array('schema_version' => 1, 'endpoint' => $endpoint, 'payload' => $payload);
+        $server = $setup['server'];
+        $server['CONTENT_TYPE'] = 'application/json';
+        $server['HTTP_REFERER'] = 'https://cliente.example.test/contacto/?utm_source=google';
+        $result = ccw_test_event_process($setup['bridge'], $server, $wrapper, 1784281200 + count($captured));
+        ccw_test_assert(($result['body']['success'] ?? false) === true, 'ordinary WordPress relay was rejected');
+        $forwarded = $captured[$endpoint];
+        $body = (string) $forwarded['args']['body'];
+        $headers = $forwarded['args']['headers'];
+        $decoded = json_decode($body, true);
+        ccw_test_assert($forwarded['url'] === 'https://api.example.test/api/intake/' . $endpoint, 'ordinary page did not use the direct intake endpoint');
+        ccw_test_assert(($decoded['clinic_id'] ?? null) === 56 && !isset($decoded['group_id']), 'ordinary relay did not enforce its signed clinic scope');
+        ccw_test_assert(($decoded['domain'] ?? '') === 'cliente.example.test', 'ordinary relay did not canonicalize its domain');
+        ccw_test_assert(($decoded['page_url'] ?? '') === $server['HTTP_REFERER'], 'ordinary relay did not canonicalize its page URL');
+        ccw_test_assert(hash_equals(hash_hmac('sha256', $body, $setup['secret']), $headers['X-CC-Signature']), 'ordinary event relay HMAC mismatch');
+        ccw_test_assert(strpos($body, $setup['secret']) === false, 'server-side HMAC leaked into the ordinary payload');
+    }
+};
+
+$tests['landing event relay rejects cross-origin incomplete forged and browser-signed wrappers locally'] = static function () {
+    $setup = ccw_test_setup_intake('event-relay-adversarial');
+    $identity = array(
+        'web_project_id' => $setup['fields']['web_project_id'],
+        'web_revision_id' => $setup['fields']['web_revision_id'],
+        'web_page_id' => $setup['fields']['web_page_id'],
+    );
+    $wrapper = array_merge(array(
         'schema_version' => 1,
         'endpoint' => 'events',
         'payload' => array('event_name' => 'ViewContent'),
@@ -646,9 +695,45 @@ $tests['same-origin event relay signs chat telephone WhatsApp and generic channe
     $bad_server = $setup['server'];
     $bad_server['CONTENT_TYPE'] = 'application/json';
     $bad_server['HTTP_ORIGIN'] = 'https://evil.example.test';
-    ccw_test_throws('ccw_event_bridge_origin_invalid', static function () use ($setup, $bad_server, $forged) {
-        ccw_test_event_process($setup['bridge'], $bad_server, $forged, 1784281100);
+    ccw_test_throws('ccw_event_bridge_origin_invalid', static function () use ($setup, $bad_server, $wrapper) {
+        ccw_test_event_process($setup['bridge'], $bad_server, $wrapper, 1784281300);
     });
+
+    $incomplete = $wrapper;
+    unset($incomplete['web_page_id']);
+    $server = $setup['server'];
+    $server['CONTENT_TYPE'] = 'application/json';
+    ccw_test_throws('ccw_event_bridge_identity_incomplete', static function () use ($setup, $server, $incomplete) {
+        ccw_test_event_process($setup['bridge'], $server, $incomplete, 1784281301);
+    });
+
+    foreach (array('', '   ', null) as $empty_value) {
+        $empty = $wrapper;
+        $empty['web_page_id'] = $empty_value;
+        ccw_test_throws('ccw_event_bridge_identity_incomplete', static function () use ($setup, $server, $empty) {
+            ccw_test_event_process($setup['bridge'], $server, $empty, 1784281301);
+        });
+    }
+    $all_empty = $wrapper;
+    $all_empty['web_project_id'] = '';
+    $all_empty['web_revision_id'] = '';
+    $all_empty['web_page_id'] = '';
+    ccw_test_throws('ccw_event_bridge_identity_incomplete', static function () use ($setup, $server, $all_empty) {
+        ccw_test_event_process($setup['bridge'], $server, $all_empty, 1784281301);
+    });
+
+    $forged = $wrapper;
+    $forged['web_project_id'] = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    ccw_test_throws('ccw_event_bridge_identity_mismatch', static function () use ($setup, $server, $forged) {
+        ccw_test_event_process($setup['bridge'], $server, $forged, 1784281302);
+    });
+
+    $browser_signed = $wrapper;
+    $browser_signed['signature'] = str_repeat('a', 64);
+    ccw_test_throws('ccw_event_bridge_contract_invalid', static function () use ($setup, $server, $browser_signed) {
+        ccw_test_event_process($setup['bridge'], $server, $browser_signed, 1784281303);
+    });
+    ccw_test_assert($GLOBALS['ccw_test_posts'] === array(), 'a locally rejected landing event reached the control plane');
 };
 
 $tests['signed landing bridge forwards a minimal HMAC request and redirects without PII'] = static function () {

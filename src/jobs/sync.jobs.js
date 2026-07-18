@@ -52,6 +52,7 @@ const marketingAiVisibilityService = require('../services/marketingAiVisibility.
 const webEventsService = require('../services/webEvents.service');
 const webContentMediaService = require('../services/webContentMedia.service');
 const webDomainsService = require('../services/webDomains.service');
+const webPublicationHealthMonitorService = require('../services/webPublicationHealthMonitor.service');
 const googleReviewMatchService = require('../services/googleReviewMatch.service');
 const jobRequestsService = require('../services/jobRequests.service');
 const {
@@ -380,6 +381,7 @@ class MetaSyncJobs {
       googleConversionGoalPolicyAudit: 'Audita sin autoreparar la medición de Mide y mejora y la policy de goals/campañas opt-in de ClinicaClick.',
       campaignOptimizationEvaluation: 'Evalúa diariamente políticas persistidas de optimización sin cambiar objetivos ni mutar Google Ads.',
       webDomainReconciliation: 'Revalida DNS, alta SaaS y TLS de dominios web pendientes; los dominios listos se revisan a diario.',
+      webPublicationHealthMonitor: 'Comprueba por lotes que cada publicación activa sigue sirviendo por HTTPS el marcador exacto de su artefacto, sin autoreparar.',
       campaignDestinationDriftAudit: 'Relee diariamente los destinos activos aprobados y avisa si Google Ads ya no apunta a la landing esperada, sin autoreparar.',
       webSync: 'Sincroniza Search Console (serie diaria) y PSI reciente para clínicas mapeadas.',
       webBackfill: 'Backfill histórico de Search Console (12–16 meses) para cache y rapidez.',
@@ -421,6 +423,7 @@ class MetaSyncJobs {
         googleConversionGoalPolicyAudit: process.env.JOBS_GOOGLE_CONVERSION_GOAL_POLICY_AUDIT_SCHEDULE || '17 2 * * *',
         campaignOptimizationEvaluation: process.env.JOBS_CAMPAIGN_OPTIMIZATION_EVALUATION_SCHEDULE || '35 2 * * *',
         webDomainReconciliation: process.env.JOBS_MARKETING_WEB_DOMAIN_RECONCILIATION_SCHEDULE || '7,22,37,52 * * * *',
+        webPublicationHealthMonitor: process.env.JOBS_MARKETING_WEB_PUBLICATION_HEALTH_SCHEDULE || '11 * * * *',
         campaignDestinationDriftAudit: process.env.JOBS_CAMPAIGN_DESTINATION_DRIFT_AUDIT_SCHEDULE || '5 3 * * *',
         webSync: process.env.JOBS_WEB_SCHEDULE || '15 4 * * *',
         webBackfill: process.env.JOBS_WEB_BACKFILL_SCHEDULE || '30 4 * * 0',
@@ -2512,6 +2515,13 @@ class MetaSyncJobs {
 
   async executeWebDomainReconciliation(options = {}) {
     return webDomainsService.reconcileDomains({
+      jobRequestId: options.jobRequestId || null,
+    });
+  }
+
+  async executeWebPublicationHealthMonitor(options = {}) {
+    return webPublicationHealthMonitorService.runWebPublicationHealthMonitor({
+      batchSize: options.batch_size || options.batchSize,
       jobRequestId: options.jobRequestId || null,
     });
   }

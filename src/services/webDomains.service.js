@@ -5,7 +5,7 @@ const dns = require('node:dns').promises;
 const tls = require('node:tls');
 const { Op } = require('sequelize');
 const db = require('../../models');
-const { assertWebPublishingEnabled } = require('../lib/marketingWebFeatureFlags');
+const { assertWebPublishingChannelEnabled } = require('../lib/marketingWebFeatureFlags');
 const {
   assertScopeAccess,
   normalizeScope,
@@ -26,6 +26,11 @@ const DOMAIN_RECHECK_MS = Object.freeze({
   failed: 6 * 60 * 60 * 1000,
   ready: 24 * 60 * 60 * 1000,
 });
+const PUBLISHING_GATE_CLOSED_CODES = new Set([
+  'web_publishing_channel_disabled',
+  'web_publishing_disabled',
+  'web_editor_disabled',
+]);
 
 function plain(row) {
   return row?.get ? row.get({ plain: true }) : row;
@@ -121,11 +126,11 @@ async function createDomain({
   sequelize = db.sequelize,
   env = process.env,
   assertAccess = assertScopeAccess,
-  assertPublishing = assertWebPublishingEnabled,
+  assertPublishing = assertWebPublishingChannelEnabled,
 } = {}) {
   const scope = normalizeScope(body);
   await assertAccess(actorId, scope, 'marketing.web.domains.manage', { models });
-  assertPublishing(scope);
+  assertPublishing(scope, 'custom_domain', env);
   const host = normalizeCustomHost(body.host, env);
   const token = verificationToken();
   const expectedDns = expectedDnsFor(host, env);
@@ -329,8 +334,10 @@ async function verifyDomain({
   tlsInspector = inspectTls,
   hostnameProvider = ensureCustomHostname,
   env = process.env,
+  assertPublishing = assertWebPublishingChannelEnabled,
 } = {}) {
   const { domain, scope } = await getDomainForActor({ actorId, domainId, models, assertAccess });
+  assertPublishing(scope, 'custom_domain', env);
   if (domain.status === 'retired') {
     throw new WebPublicationServiceError('web_domain_retired', 'El dominio está retirado.', 409);
   }
@@ -430,6 +437,7 @@ async function reconcileDomains({
   tlsInspector = inspectTls,
   hostnameProvider = ensureCustomHostname,
   verify = verifyDomain,
+  assertPublishing = assertWebPublishingChannelEnabled,
   now = new Date(),
   limit = DEFAULT_RECONCILIATION_LIMIT,
 } = {}) {
@@ -448,25 +456,43 @@ async function reconcileDomains({
     .slice(0, boundedLimit);
   const outcomes = [];
   const errors = [];
+  const skips = [];
   for (const row of due) {
     const value = plain(row);
     try {
+      const scope = normalizeScope({
+        scope_type: value.scopeType,
+        scope_id: value.scopeType === 'clinic' ? value.clinicaId : value.grupoClinicaId,
+      });
+      // Comprobar el gate antes de tocar DNS/TLS o al proveedor. El cron puede
+      // seguir despertando de forma durable, pero un canal cerrado es un skip
+      // esperado y no un error técnico que deba generar retries agresivos.
+      assertPublishing(scope, 'custom_domain', env);
       const domain = await verify({
         actorId: null,
         domainId: value.id,
         requestId: jobRequestId ? `job:${jobRequestId}:domain:${value.id}` : null,
         models,
         sequelize,
-        // Bypass exclusivamente interno. La ruta pública conserva el permiso
-        // marketing.web.domains.manage y el ocultamiento 404 por scope.
+        // Bypass exclusivamente interno del acceso humano. El gate de canal se
+        // acaba de comprobar para el scope exacto y no se omite.
         assertAccess: async () => true,
         resolver,
         tlsInspector,
         hostnameProvider,
         env,
+        assertPublishing,
       });
       outcomes.push({ domain_id: value.id, previous_status: value.status, status: domain.status });
     } catch (error) {
+      if (PUBLISHING_GATE_CLOSED_CODES.has(String(error?.code || ''))) {
+        skips.push({
+          domain_id: value.id,
+          code: String(error.code).slice(0, 96),
+          reason: String(error?.details?.rollout_reason || 'publishing_gate_closed').slice(0, 96),
+        });
+        continue;
+      }
       errors.push({
         domain_id: value.id,
         code: String(error?.code || 'web_domain_reconciliation_failed').slice(0, 96),
@@ -481,6 +507,8 @@ async function reconcileDomains({
     considered: candidates.length,
     due: due.length,
     processed: outcomes.length,
+    skipped: skips.length,
+    skips,
     errors,
     outcomes,
   };
@@ -493,8 +521,11 @@ async function rotateDomainToken({
   models = db,
   sequelize = db.sequelize,
   assertAccess = assertScopeAccess,
+  assertPublishing = assertWebPublishingChannelEnabled,
+  env = process.env,
 } = {}) {
   const { domain, scope } = await getDomainForActor({ actorId, domainId, models, assertAccess });
+  assertPublishing(scope, 'custom_domain', env);
   const token = verificationToken();
   const updated = await sequelize.transaction(async (transaction) => {
     const locked = await models.WebDomain.findByPk(domain.id, { transaction, lock: transaction.LOCK.UPDATE });

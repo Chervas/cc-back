@@ -53,6 +53,27 @@ test('valida rutas y exige configuración exclusiva', () => {
   );
 });
 
+test('rechaza un artifact_hash que no deriva del manifest canónico o no coincide con la fila', () => {
+  const canonical = fixture();
+  const forgedManifest = {
+    ...canonical,
+    artifact_hash: 'f'.repeat(64),
+    manifest: { ...canonical.manifest, artifact_hash: 'f'.repeat(64) },
+  };
+  assert.throws(
+    () => assertArtifactBundle(forgedManifest),
+    (error) => error.code === 'web_artifact_bundle_hash_invalid'
+  );
+  assert.throws(
+    () => assertArtifactBundle({ ...canonical, artifact_hash: 'e'.repeat(64) }),
+    (error) => error.code === 'web_artifact_bundle_hash_invalid'
+  );
+  assert.throws(
+    () => assertArtifactBundle({ ...canonical, artifactHash: 'e'.repeat(64) }),
+    (error) => error.code === 'web_artifact_bundle_hash_invalid'
+  );
+});
+
 test('fallback DB genera URLs opacas mismo origen y no duplica el artefacto', async () => {
   const artifact = fixture();
   const installationId = 'd6d6d9bb-093e-4a40-8465-5ebf9edcde44';

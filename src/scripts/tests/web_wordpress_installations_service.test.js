@@ -16,6 +16,7 @@ const {
 } = require('../../services/webWordpressInstallations.service');
 const { authenticatedDbStorageDescriptor, pathToken } = require('../../services/webArtifactStorage.service');
 const { verifyWebArtifactManifest } = require('../../lib/webArtifactSignature');
+const { canonicalSerialize } = require('../../lib/webDocument');
 
 function row(value) {
   return {
@@ -379,24 +380,24 @@ test('fallback autenticado sirve solo el artefacto deseado de esa instalación',
   const token = `ccw_${crypto.randomBytes(32).toString('base64url')}`;
   const body = '<!doctype html><title>Landing</title>';
   const fileHash = crypto.createHash('sha256').update(body).digest('hex');
-  const artifactHash = 'd'.repeat(64);
+  const manifestCore = {
+    schema_version: 1,
+    environment: 'production',
+    files: {
+      'index.html': {
+        sha256: fileHash,
+        size_bytes: Buffer.byteLength(body),
+        content_type: 'text/html; charset=utf-8',
+      },
+    },
+  };
+  const artifactHash = crypto.createHash('sha256').update(canonicalSerialize(manifestCore)).digest('hex');
   const artifact = row({
     id: 'artifact-db-1',
     projectId: 'project-db-1',
     environment: 'production',
     artifactHash,
-    manifest: {
-      schema_version: 1,
-      environment: 'production',
-      artifact_hash: artifactHash,
-      files: {
-        'index.html': {
-          sha256: fileHash,
-          size_bytes: Buffer.byteLength(body),
-          content_type: 'text/html; charset=utf-8',
-        },
-      },
-    },
+    manifest: { ...manifestCore, artifact_hash: artifactHash },
     files: { 'index.html': body },
   });
   const installation = row({

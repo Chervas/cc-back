@@ -66,6 +66,7 @@ test('crea una publicación hosted con scope y destino inyectados por servidor',
   const models = {
     WebProject: { findByPk: async () => project() },
     WebPublication: {
+      findAll: async () => [],
       create: async (value) => { saved.push(value); return new Row({ ...value, created_at: new Date(), updated_at: new Date() }); },
     },
     WebAuditEvent: { create: async (value) => saved.push({ audit: value }) },
@@ -93,6 +94,7 @@ test('copia campaign_context desde el proyecto y nunca confia en el body', async
   const models = {
     WebProject: { findByPk: async () => source },
     WebPublication: {
+      findAll: async () => [],
       create: async (value) => {
         saved.push(value);
         return new Row({ ...value, created_at: new Date(), updated_at: new Date() });
@@ -116,6 +118,41 @@ test('copia campaign_context desde el proyecto y nunca confia en el body', async
   });
   assert.deepEqual(saved[0].configuration.campaign_context, source.campaignContext);
   assert.deepEqual(saved[1].audit.metadata.campaign_context, source.campaignContext);
+});
+
+test('reserva incluso rutas retiradas y rechaza solapes antes de crear el job de publicación', async () => {
+  let created = 0;
+  const models = {
+    WebProject: { findByPk: async () => project() },
+    WebPublication: {
+      findAll: async () => [new Row({
+        id: 'existing',
+        host: 'sites.clinicaclick.com',
+        path: '/implantes/barcelona/',
+        status: 'retired',
+      })],
+      create: async () => { created += 1; },
+    },
+    WebAuditEvent: { create: async () => true },
+  };
+  await assert.rejects(
+    createPublication({
+      actorId: 9,
+      body: {
+        project_id: project().id,
+        channel: 'clinicaclick_hosted',
+        slug: 'implantes',
+      },
+      models,
+      sequelize: sequelize(),
+      env: { MARKETING_WEB_HOSTED_DOMAIN: 'sites.clinicaclick.com', MARKETING_WEB_HOSTED_MODE: 'path' },
+      assertAccess: async () => true,
+      assertPublishing: () => true,
+    }),
+    (error) => error.code === 'web_publication_route_overlap'
+      && error.details?.conflicting_path === '/implantes/barcelona/'
+  );
+  assert.equal(created, 0);
 });
 
 function deploymentModels({ publicationStatus = 'draft', revisionStatus = 'approved' } = {}) {

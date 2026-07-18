@@ -14,7 +14,7 @@ const {
   publicVerificationKeyDescriptor,
   signWebArtifactManifest,
 } = require('../lib/webArtifactSignature');
-const { assertWebPublishingEnabled } = require('../lib/marketingWebFeatureFlags');
+const { assertWebPublishingChannelEnabled } = require('../lib/marketingWebFeatureFlags');
 const {
   assertScopeAccess,
   normalizeScope,
@@ -168,13 +168,13 @@ async function createInstallation({
   models = db,
   sequelize = db.sequelize,
   assertAccess = assertScopeAccess,
-  assertPublishing = assertWebPublishingEnabled,
+  assertPublishing = assertWebPublishingChannelEnabled,
   signingOptions = {},
   env = process.env,
 } = {}) {
   const scope = normalizeScope(body);
   await assertAccess(actorId, scope, 'marketing.web.domains.manage', { models });
-  assertPublishing(scope);
+  assertPublishing(scope, 'wordpress', env);
   const site = normalizeSiteUrl(body.site_url);
   const token = issueInstallationToken();
   const installationId = crypto.randomUUID();
@@ -282,9 +282,11 @@ async function rotateInstallationToken({
   models = db,
   sequelize = db.sequelize,
   assertAccess = assertScopeAccess,
+  assertPublishing = assertWebPublishingChannelEnabled,
   env = process.env,
 } = {}) {
   const { installation, scope } = await getInstallationForActor({ actorId, installationId, models, assertAccess });
+  assertPublishing(scope, 'wordpress', env);
   const token = issueInstallationToken();
   const pluginPackage = issueBootstrapTicket({
     installationId: installation.id,

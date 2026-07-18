@@ -130,6 +130,7 @@ module.exports = {
   SIGNATURE_ALGORITHM,
   SIGNATURE_VERSION,
   WebArtifactSignatureError,
+  cleanPem,
   keyIdFromPublicKey,
   loadPrivateKey,
   loadPublicKey,

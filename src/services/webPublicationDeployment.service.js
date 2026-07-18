@@ -29,6 +29,7 @@ const {
   installationApiBase,
   measurementFromIntake,
 } = require('./webWordpressInstallations.service');
+const { assertWebPublishingChannelEnabled } = require('../lib/marketingWebFeatureFlags');
 const { inspectDns, inspectTls } = require('./webDomains.service');
 
 function plain(row) {
@@ -152,16 +153,28 @@ async function lockDeploymentGraph({ deploymentId, publicationId, models, transa
   return { project, publication, deployment };
 }
 
-async function claimDeployment({ deploymentId, publicationId, jobRequest, models, sequelize }) {
+async function claimDeployment({
+  deploymentId,
+  publicationId,
+  jobRequest,
+  models,
+  sequelize,
+  env = process.env,
+  assertPublishingChannel = assertWebPublishingChannelEnabled,
+}) {
   return sequelize.transaction(async (transaction) => {
     const graph = await lockDeploymentGraph({ deploymentId, publicationId, models, transaction });
-    const { publication, deployment } = graph;
+    const { project, publication, deployment } = graph;
     if (deployment.jobRequestId && jobRequest?.id && Number(deployment.jobRequestId) !== Number(jobRequest.id)) {
       return { terminal: true, skipped: 'stale_job', ...graph };
     }
     if (['verified', 'failed', 'superseded'].includes(deployment.status)) {
       return { terminal: true, skipped: `already_${deployment.status}`, ...graph };
     }
+    // El gate se revalida dentro del mismo lock y antes de cualquier cambio de
+    // estado. Así, apagar un canal también detiene jobs ya encolados y retries;
+    // no basta con haber pasado la comprobación cuando se creó el JobRequest.
+    assertPublishingChannel(scopeFromProject(plain(project)), publication.channel, env);
     if (Number(publication.version) !== Number(deployment.expectedPublicationVersion)) {
       await deployment.update({
         status: 'superseded',
@@ -556,6 +569,7 @@ async function channelDeploy({
   try {
     const localVerified = hosted.verified && await verifyHosted({
       artifactHash: artifact.artifact_hash,
+      artifact,
       host: publication.host,
       routePath: publication.path,
       hostingRoot: env.MARKETING_WEB_HOSTING_ROOT,
@@ -772,7 +786,16 @@ async function runPublicationDeploymentJob(payload = {}, jobRequest = null, depe
   const sequelize = dependencies.sequelize || db.sequelize;
   const env = dependencies.env || process.env;
   try {
-    const claimed = await claimDeployment({ deploymentId, publicationId, jobRequest, models, sequelize });
+    const claimed = await claimDeployment({
+      deploymentId,
+      publicationId,
+      jobRequest,
+      models,
+      sequelize,
+      env,
+      assertPublishingChannel: dependencies.assertWebPublishingChannelEnabled
+        || assertWebPublishingChannelEnabled,
+    });
     if (claimed.terminal) {
       return { status: 'completed', result: { skipped: true, reason: claimed.skipped } };
     }
@@ -864,6 +887,18 @@ async function runPublicationDeploymentJob(payload = {}, jobRequest = null, depe
     }
     return { status: 'completed', result: finished };
   } catch (error) {
+    if (['web_publishing_channel_disabled', 'web_publishing_disabled', 'web_editor_disabled'].includes(error?.code)) {
+      return {
+        status: 'waiting',
+        nextAllowedAt: new Date(Date.now() + 15 * 60 * 1000),
+        result: {
+          reason: 'web_publishing_gate_closed',
+          code: String(error.code),
+          channel: error?.details?.channel || null,
+          rollout_reason: error?.details?.rollout_reason || null,
+        },
+      };
+    }
     const retryable = Number(error?.status || 500) >= 500;
     const attempts = Number(jobRequest?.attempts || 0);
     const maxAttempts = Number(jobRequest?.max_attempts || jobRequest?.maxAttempts || 5);

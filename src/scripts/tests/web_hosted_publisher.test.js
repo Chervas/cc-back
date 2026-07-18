@@ -45,6 +45,28 @@ test('normaliza host/ruta y rechaza traversal, IP y puertos', () => {
   assert.throws(() => normalizeRoutePath('/../secret'));
 });
 
+test('rechaza artifacts symlink antes de escribir fuera del hosting root', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-web-hosting-'));
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-web-outside-'));
+  t.after(() => Promise.all([
+    fs.rm(root, { recursive: true, force: true }),
+    fs.rm(outside, { recursive: true, force: true }),
+  ]));
+  await fs.symlink(outside, path.join(root, 'artifacts'));
+  const item = artifact('symlink-parent');
+  await assert.rejects(
+    () => publishHostedArtifact({
+      artifact: item,
+      host: 'sites.example.com',
+      routePath: '/demo/',
+      hostingRoot: root,
+      signer,
+    }),
+    (error) => error.code === 'web_hosted_route_tree_invalid'
+  );
+  await assert.rejects(() => fs.access(path.join(outside, item.artifact_hash)), { code: 'ENOENT' });
+});
+
 test('materializa una vez y conmuta el puntero atómicamente con rollback disponible', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-web-hosting-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -99,6 +121,36 @@ test('una segunda publicación del mismo hash reutiliza artefacto inmutable', as
   assert.equal(first.artifact_created, true);
   assert.equal(second.artifact_created, false);
   assert.equal(second.previous_artifact_hash, item.artifact_hash);
+});
+
+test('rechaza reutilizar un artefacto alterado o con symlinks aunque conserve el mismo hash', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-web-hosting-integrity-'));
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-web-hosting-integrity-outside-'));
+  t.after(() => Promise.all([
+    fs.rm(root, { recursive: true, force: true }),
+    fs.rm(outside, { recursive: true, force: true }),
+  ]));
+  const item = artifact('immutable');
+  await publishHostedArtifact({ artifact: item, host: 'sites.example.com', routePath: '/immutable/', hostingRoot: root, signer });
+  const directory = path.join(root, 'artifacts', item.artifact_hash);
+  await fs.writeFile(path.join(directory, 'assets', 'site.css'), 'body{color:red}');
+  await assert.rejects(
+    publishHostedArtifact({ artifact: item, host: 'sites.example.com', routePath: '/immutable/', hostingRoot: root, signer }),
+    (error) => error.code === 'web_hosted_artifact_integrity_failed'
+      && error.details?.path === 'assets/site.css'
+  );
+
+  await fs.writeFile(path.join(outside, 'site.css'), 'body{}');
+  await fs.rm(path.join(directory, 'assets', 'site.css'));
+  await fs.symlink(path.join(outside, 'site.css'), path.join(directory, 'assets', 'site.css'));
+  assert.equal(await verifyHostedPointer({
+    artifactHash: item.artifact_hash,
+    artifact: item,
+    host: 'sites.example.com',
+    routePath: '/immutable/',
+    hostingRoot: root,
+    signer,
+  }), false);
 });
 
 test('restaura la última versión válida si falla la verificación local y retira una primera publicación fallida', async (t) => {
@@ -164,6 +216,35 @@ test('restaura la última versión válida si falla la verificación local y ret
   );
 });
 
+test('una primera publicación anidada fallida limpia directorios vacíos y no bloquea a su ruta padre', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-web-hosting-empty-route-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const failed = artifact('nested-failed');
+  await assert.rejects(
+    publishHostedArtifact({
+      artifact: failed,
+      host: 'sites.example.com',
+      routePath: '/campanas/google/implantes/',
+      hostingRoot: root,
+      signer,
+      verifyPointer: async () => false,
+    }),
+    (error) => error.code === 'web_hosted_pointer_verification_failed'
+  );
+  await assert.rejects(
+    fs.lstat(path.join(root, 'routes', 'sites.example.com', 'campanas')),
+    (error) => error.code === 'ENOENT'
+  );
+  const parent = await publishHostedArtifact({
+    artifact: artifact('parent-after-failure'),
+    host: 'sites.example.com',
+    routePath: '/campanas/',
+    hostingRoot: root,
+    signer,
+  });
+  assert.equal(parent.verified, true);
+});
+
 test('la compensación no pisa una publicación concurrente más nueva', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-web-hosting-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -188,4 +269,174 @@ test('la compensación no pisa una publicación concurrente más nueva', async (
     concurrent.artifact_hash
   );
   assert.equal((await fs.readdir(path.join(root, 'artifacts'))).filter((name) => !name.startsWith('.')).length, 3);
+});
+
+test('rechaza rutas ancestro/descendiente solapadas sin escribir dentro del artefacto', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-web-hosting-overlap-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const parent = artifact('parent');
+  const child = artifact('child');
+  await publishHostedArtifact({
+    artifact: parent,
+    host: 'sites.example.com',
+    routePath: '/tratamientos/',
+    hostingRoot: root,
+    signer,
+  });
+  await assert.rejects(
+    publishHostedArtifact({
+      artifact: child,
+      host: 'sites.example.com',
+      routePath: '/tratamientos/implantes/',
+      hostingRoot: root,
+      signer,
+    }),
+    (error) => error.code === 'web_hosted_route_overlap'
+      && error.details?.conflicting_path === '/tratamientos/'
+  );
+  const parentDirectory = await fs.realpath(routeLinkPath(root, 'sites.example.com', '/tratamientos/'));
+  await assert.rejects(
+    fs.lstat(path.join(parentDirectory, 'implantes')),
+    (error) => error.code === 'ENOENT'
+  );
+
+  await publishHostedArtifact({
+    artifact: child,
+    host: 'other.example.com',
+    routePath: '/tratamientos/implantes/',
+    hostingRoot: root,
+    signer,
+  });
+  await assert.rejects(
+    publishHostedArtifact({
+      artifact: parent,
+      host: 'other.example.com',
+      routePath: '/tratamientos/',
+      hostingRoot: root,
+      signer,
+    }),
+    (error) => error.code === 'web_hosted_route_overlap'
+      && error.details?.conflicting_path === '/tratamientos/implantes/'
+  );
+});
+
+test('considera la raíz solapada con cualquier ruta del mismo host', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-web-hosting-root-overlap-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const rootArtifact = artifact('root');
+  const child = artifact('child');
+  await publishHostedArtifact({
+    artifact: rootArtifact,
+    host: 'root-first.example.com',
+    routePath: '/',
+    hostingRoot: root,
+    signer,
+  });
+  await assert.rejects(
+    publishHostedArtifact({
+      artifact: child,
+      host: 'root-first.example.com',
+      routePath: '/cita/',
+      hostingRoot: root,
+      signer,
+    }),
+    (error) => error.code === 'web_hosted_route_overlap'
+      && error.details?.conflicting_path === '/'
+  );
+
+  await publishHostedArtifact({
+    artifact: child,
+    host: 'child-first.example.com',
+    routePath: '/cita/',
+    hostingRoot: root,
+    signer,
+  });
+  await assert.rejects(
+    publishHostedArtifact({
+      artifact: rootArtifact,
+      host: 'child-first.example.com',
+      routePath: '/',
+      hostingRoot: root,
+      signer,
+    }),
+    (error) => error.code === 'web_hosted_route_overlap'
+      && error.details?.conflicting_path === '/cita/'
+  );
+});
+
+test('no sigue symlinks manipulados al crear host, ancestros o descendientes', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-web-hosting-symlink-'));
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-web-hosting-outside-'));
+  t.after(() => Promise.all([
+    fs.rm(root, { recursive: true, force: true }),
+    fs.rm(outside, { recursive: true, force: true }),
+  ]));
+  const bundle = artifact('symlink-attack');
+  await fs.mkdir(path.join(root, 'routes'), { recursive: true });
+  await fs.symlink(outside, path.join(root, 'routes', 'host-link.example.com'), 'dir');
+  await assert.rejects(
+    publishHostedArtifact({
+      artifact: bundle,
+      host: 'host-link.example.com',
+      routePath: '/cita/',
+      hostingRoot: root,
+      signer,
+    }),
+    (error) => error.code === 'web_hosted_route_tree_invalid'
+  );
+  assert.deepEqual(await fs.readdir(outside), []);
+
+  const nestedHost = path.join(root, 'routes', 'nested-link.example.com');
+  await fs.mkdir(nestedHost, { recursive: true });
+  await fs.symlink(outside, path.join(nestedHost, 'campanas'), 'dir');
+  await assert.rejects(
+    publishHostedArtifact({
+      artifact: bundle,
+      host: 'nested-link.example.com',
+      routePath: '/campanas/google/',
+      hostingRoot: root,
+      signer,
+    }),
+    (error) => error.code === 'web_hosted_route_tree_invalid'
+  );
+  assert.deepEqual(await fs.readdir(outside), []);
+
+  const descendantHost = path.join(root, 'routes', 'descendant-link.example.com');
+  await fs.mkdir(path.join(descendantHost, 'campanas'), { recursive: true });
+  await fs.symlink(outside, path.join(descendantHost, 'campanas', 'google'), 'dir');
+  await assert.rejects(
+    publishHostedArtifact({
+      artifact: bundle,
+      host: 'descendant-link.example.com',
+      routePath: '/campanas/',
+      hostingRoot: root,
+      signer,
+    }),
+    (error) => error.code === 'web_hosted_route_tree_invalid'
+  );
+  assert.deepEqual(await fs.readdir(outside), []);
+});
+
+test('serializa publicaciones solapadas concurrentes y solo admite una', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-web-hosting-overlap-race-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const results = await Promise.allSettled([
+    publishHostedArtifact({
+      artifact: artifact('race-parent'),
+      host: 'sites.example.com',
+      routePath: '/campanas/',
+      hostingRoot: root,
+      signer,
+    }),
+    publishHostedArtifact({
+      artifact: artifact('race-child'),
+      host: 'sites.example.com',
+      routePath: '/campanas/google/',
+      hostingRoot: root,
+      signer,
+    }),
+  ]);
+  assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+  const rejected = results.find((result) => result.status === 'rejected');
+  assert.equal(rejected?.reason?.code, 'web_hosted_route_overlap');
 });

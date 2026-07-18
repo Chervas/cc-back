@@ -15,6 +15,7 @@ const jobRequestsService = require('../../services/jobRequests.service');
 const jobExecutor = require('../../services/jobExecutor.service');
 const jobScheduler = require('../../services/jobScheduler.service');
 const { metaSyncJobs, MetaSyncJobs } = require('../../jobs/sync.jobs');
+const webPublicationHealthMonitorService = require('../../services/webPublicationHealthMonitor.service');
 const { queues } = require('../../services/queue.service');
 const realAcquireBackgroundIntegrationLease = jobRequestsService.acquireBackgroundIntegrationLease;
 const testBackgroundLease = async () => ({
@@ -30,7 +31,7 @@ function testCatalogCoversEveryCronAndExecutor() {
   const catalogNames = definitions.map(([name]) => name).sort();
   const types = definitions.map(([, definition]) => definition.type);
 
-  assert.equal(definitions.length, 32, 'the canonical scheduler must retain web and campaign periodic jobs');
+  assert.equal(definitions.length, 33, 'the canonical scheduler must retain web and campaign periodic jobs');
   assert.deepEqual(catalogNames, configuredNames);
   assert.equal(new Set(types).size, types.length, 'scheduled job types must be unique');
   for (const jobName of [
@@ -55,6 +56,20 @@ function testCatalogCoversEveryCronAndExecutor() {
     SCHEDULED_JOB_DEFINITIONS.webDomainReconciliation.attachJobRequestId,
     true,
     'domain reconciliation jobs must keep their durable JobRequest trace'
+  );
+  assert.equal(
+    SCHEDULED_JOB_DEFINITIONS.webPublicationHealthMonitor.attachJobRequestId,
+    true,
+    'publication health checks must retain their durable JobRequest trace'
+  );
+  assert.equal(
+    SCHEDULED_JOB_DEFINITIONS.webPublicationHealthMonitor.reportedFailureRetryable,
+    false,
+    'health findings must wait for the next schedule rather than retrying the batch'
+  );
+  assert.equal(
+    metaSyncJobs.config.schedules.webPublicationHealthMonitor,
+    process.env.JOBS_MARKETING_WEB_PUBLICATION_HEALTH_SCHEDULE || '11 * * * *'
   );
 
   for (const [jobName, definition] of definitions) {
@@ -214,6 +229,29 @@ async function testTargetedHandlersKeepTheirExactMappings() {
     );
   } finally {
     Object.assign(metaSyncJobs, original);
+  }
+}
+
+async function testPublicationHealthMonitorUsesDurableScheduledHandler() {
+  const original = webPublicationHealthMonitorService.runWebPublicationHealthMonitor;
+  let received = null;
+  webPublicationHealthMonitorService.runWebPublicationHealthMonitor = async (options) => {
+    received = options;
+    return {
+      status: 'completed',
+      result: { selected: 2, checked: 2, unhealthy: 1, failures: 0 },
+    };
+  };
+  try {
+    const result = await jobExecutor.JOB_HANDLERS.marketing_web_publication_health_monitor(
+      { batch_size: 12 },
+      { id: 7801 }
+    );
+    assert.deepEqual(received, { batchSize: 12, jobRequestId: 7801 });
+    assert.equal(result.status, 'completed');
+    assert.equal(result.result.unhealthy, 1);
+  } finally {
+    webPublicationHealthMonitorService.runWebPublicationHealthMonitor = original;
   }
 }
 
@@ -1154,6 +1192,7 @@ async function testNormalSettlementUsesCompareAndSetAndResolvesConflicts() {
 async function run() {
   testCatalogCoversEveryCronAndExecutor();
   await testTargetedHandlersKeepTheirExactMappings();
+  await testPublicationHealthMonitorUsesDurableScheduledHandler();
   await testQueuedStatusAndSchedulerIndexContract();
   await testCronMonitorReportsEnqueueNotBusinessCompletion();
   await testScheduledEnqueueMergesCatalogPayloadDefaults();

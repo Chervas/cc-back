@@ -50,6 +50,15 @@ const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
     executorMethod: 'executeWebDomainReconciliation',
     attachJobRequestId: true,
   }),
+  webPublicationHealthMonitor: Object.freeze({
+    type: 'marketing_web_publication_health_monitor',
+    priority: 'low',
+    executorMethod: 'executeWebPublicationHealthMonitor',
+    attachJobRequestId: true,
+    // Una URL caída es el resultado del monitor. El siguiente ciclo periódico
+    // volverá a comprobarla; no se reintenta agresivamente el lote completo.
+    reportedFailureRetryable: false,
+  }),
   campaignDestinationDriftAudit: Object.freeze({
     type: 'marketing_campaign.destination_drift_audit.v1',
     priority: 'low',
