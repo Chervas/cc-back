@@ -25,13 +25,17 @@ Operación WordPress: `wordpress/clinicaclick-web/README.md`. Origen alojado:
 
 Estado 2026-07-18:
 
-- backend integrado en `dev` hasta `4e4b555` y staging/live hasta `5e57431`;
+- el baseline backend integrado llegó a `4e4b555`/staging `5e57431`; el corte
+  vigente de renderer/galería y drift está en `c9fe9dc`/`68360ed`, promovido a
+  staging por `4bbc299`. `d5ce548` añade ownership explícito al catálogo de
+  plantillas en feature;
 - corte funcional frontend `dev` `305d4eae`/staging `5f8f8858`: 153/153,
   build limpio `5a08e6a108414a76`, index/source SHA-256
   `c54b4f254b803a1cd7419660f76be4cb8e0cb5df2912f014e709b9d0822bafc7`,
   481/481 ficheros y readback exacto de assets críticos en 200; los commits
   documentales posteriores no cambian el runtime;
-- migraciones `19000..25000` aplicadas tras backup; 17 tablas y cinco
+- migraciones `19000..25000` aplicadas tras backup, más la aditiva
+  `20260718225000-add-campaign-destination-drift-event.js`; 17 tablas y cinco
   plantillas; cero policies/bindings reales creados;
 - gates de staging: editor para scopes Propdental y publicación solo
   `group:5` mediante `MARKETING_WEB_PUBLISHING_SCOPES`;
@@ -58,24 +62,36 @@ Estado 2026-07-18:
   cero leads/eventos/filas WhatsApp sintéticos y cero intentos Google;
 - el monitor horario se ejecutó de forma controlada sobre una publicación:
   `1 healthy`, `0 degraded` a `2026-07-18T13:01:04.689Z`;
+- `drift_detected` queda persistido por `CampaignDestinationBindingEvent`; la
+  auditoría de destino usa el orquestador común una vez al día (`5 3 * * *`),
+  sin autoreparación. La suite de Campañas pasa 34 contratos/46 pruebas;
 - hosted/custom domain no están disponibles;
 - un WordPress compartido por varias clínicas exige multi-route antes de
   ampliar el piloto, y la rotación Ed25519 operativa sigue siendo gate de GA.
 
+La migración `20260715152000-purge-google-places-competition-content.js` está
+cancelada y sus `up`/`down` son no-op. No es una migración pendiente ni debe
+reactivarse.
+
 Estado de implementación actual, separado de la evidencia del artefacto live:
 
-- renderer `clinicaclick-web-renderer/1.3.0` compila cabecera y pie globales en
-  cada página y manifiesta el formulario global mediante contratos por página;
-- el corte posterior `clinicaclick-web-renderer/1.4.0`, todavía solo en la rama
-  de integración (`4345683`) y no desplegado, conserva esos globales de `1.3.0`
-  y añade las primitivas cerradas `divider` y `spacer`. El catálogo canónico
-  pasa de siete a nueve tipos: `divider` emite un `<hr>` semántico con
+- renderer `clinicaclick-web-renderer/1.3.0` introdujo cabecera y pie globales
+  por página y formulario global con contrato por página;
+- `1.4.0` añadió las primitivas cerradas `divider` y `spacer`; `divider` emite un `<hr>` semántico con
   `line_style=solid|dashed|dotted` y `tone=muted|brand|accent`; `spacer` emite un
   elemento presentacional `aria-hidden` con `size=xs|sm|md|lg|xl|2xl`. Ambos
   exigen `children=[]`, carecen de bindings y solo producen clases/CSS
   allowlisted por el compilador;
+- el renderer staging vigente `clinicaclick-web-renderer/1.5.0` añade
+  `gallery` como décimo nodo seguro: 2–12 assets únicos, columnas 2/3/4,
+  `cover|contain`, ratios allowlisted, alt/decorativa, foco y pie por item. El
+  resolver congela cada recurso exacto y el compilador genera
+  `figure/img/figcaption`, lazy loading y layout responsive;
+- una única canonical efectiva alimenta `rel=canonical`, `og:url` y las
+  URL/`@id` de WebPage/FAQ; el sitemap solo incluye canónicas indexables del
+  mismo origen y excluye canónicas externas;
 - el paquete `clinicaclick-web` `2.0.0-alpha.7` live valida los contratos de
-  rutas y formulario global; esto no convierte el renderer `1.4.0` en un
+  rutas y formulario global; esto no convierte el renderer `1.5.0` en un
   artefacto publicado. Rollback real `alpha.6`, ZIP provisionado, activación
   como usuario del sitio y DB=`2.0.0-alpha.7` ya están acreditados. La API
   bloquea fail-closed un deployment WordPress con formulario global si el
@@ -92,6 +108,13 @@ Estado de implementación actual, separado de la evidencia del artefacto live:
 - la API revalida `campaign_context`, plantilla, scope y compatibilidad antes
   de crear un proyecto desde campaña; el filtro frontend nunca basta para
   autorizar una combinación.
+- el catálogo `GET /marketing/web-templates` pagina en base de datos y expone
+  `source_scope`, `source_scope_id`, `managed_by_scope`, visibilidad, estado y
+  timestamps sin devolver el documento salvo preview explícita. Solo el scope
+  propietario puede editar/archivar; globales/heredadas son de lectura;
+- los resolvers `treatment`, `professional` e `intake_config` están
+  implementados con allowlists seguras. `intake_config` conserva solo
+  `id/scope/inherited`; nunca configuración privada ni HMAC.
 
 Tanda promovida y desplegada:
 
@@ -100,7 +123,10 @@ Tanda promovida y desplegada:
 - la API separa rollout de disponibilidad real y proyecta capabilities
   fail-closed para WordPress, hosted y custom domain;
 - hosted valida pareja Ed25519, firma, bundle exacto, hashes, symlinks, punteros
-  y solapamiento de rutas, pero sigue bloqueado por DNS/TLS/origen;
+  y solapamiento de rutas. El preflight ya tiene directorio de hosting y
+  challenge ACME, y los rangos Cloudflare coinciden con el snippet, pero sigue
+  bloqueado: no hay control DNS/vhost/certificado/flag y HTTP/HTTPS continúan
+  `302` DonDominio/`521`;
 - `marketing_web_publication_health_monitor` opera cada hora, lote 25,
   sin autoreparación ni APIs publicitarias;
 - la suite completa, promoción y E2E público con limpieza están cerrados.
@@ -117,11 +143,14 @@ formulario totalmente editables/eliminables; en contexto de campaña, la
 ausencia de una plantilla compatible bloquea el alta en vez de fabricar una
 landing vacía. SEO, Social y Schema, el inspector de CTA, el panel de diseño,
 el flujo editorial/historial, los globales y la hidratación de medios ya
-existen en la implementación. Sigue pendiente la aceptación visual completa
+existen en la implementación. La galería semántica está en staging; la autoría
+Página/Cabecera/Pie, archivo/restauración de proyectos y la ruta frontend real
+`/marketing/web/plantillas` están integrados en feature. Un archivado no puede
+publicarse y restaurar siempre vuelve a borrador. Sigue pendiente la aceptación visual completa
 contra Figma, drag/drop avanzado y el E2E público de esta tanda. Se reutiliza
 la UX, no el runtime ModSuite. Véase `20.14`/`20.15` en frontend.
 
-Evidencia vigente: 223/223 contratos Node, 26/26 PHP/WordPress, 3/3 de
+Evidencia base: 223/223 contratos Node, 26/26 PHP/WordPress, 3/3 de
 interoperabilidad y frontend Marketing Web 153/153. El build staging
 limpio `5a08e6a108414a76` está desplegado. Chromium final de solo lectura
 cubrió onboarding, editor, CTA, Medios, SEO/Social/Schema, revisiones y CMS en
@@ -131,7 +160,11 @@ consola/página/request/HTTP, mutaciones Marketing Web u overflow. El fix
 reproducido en Chromium. Backend y
 plugin también están live. El readback, relay/atribución, limpieza, rollback y
 monitor acreditan el artefacto público renderer `1.2.1`; no convierten
-automáticamente los cortes `1.3.0` o `1.4.0` en artefactos live.
+automáticamente el código/staging `1.5.0` en artefacto WordPress live.
+Evidencia incremental: galería backend 3/3, migración drift 3/3, Campañas 34
+contratos/46 pruebas, autoría global frontend 92/92 antes de su unión y QA
+staging Galería `1440`/`390` con index SHA
+`4451d0ba00320451acb788b48ed939d4de30e649fa259e2d383caf3e441cca6c`.
 
 ## Orden de verificación
 

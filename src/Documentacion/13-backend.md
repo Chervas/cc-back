@@ -4051,6 +4051,12 @@ Se repite el mismo esquema en `contact`, `qualified_lead`, `schedule` y `purchas
 
 La respuesta de bootstrap ofrece `connect_only`, `guided_improvement` y `managed_service`; `managed_self` permanece en `legacy_modes` para lectura histórica. `connect_only` mide, atribuye y sube conversiones consentidas sin mutar campañas. `guided_improvement` trabaja sobre campañas existentes y puede gestionar el objetivo de conversión y publicar una landing para campañas Google Search/PMax vinculadas, después de guardar la autorización cliente v1 con los scopes exactos `conversion_goal`, `landing_publish` y `campaign_destination`; nunca puede tocar pujas, presupuesto, segmentación ni activar/pausar campañas. Con esa autorización válida, `mode_contract.publish_landings=true`, `change_destinations=true`, el hook `marketing_web.landing_published.v1` queda `available` y el destino queda `available_after_landing_published`. Publicar no cambia Google automáticamente: materializa un binding auditable y el usuario debe confirmar una segunda operación acotada al digest exacto del destino, las cuentas seleccionadas y `readback_required=true`. El worker serializado aplica URL final en anuncios Search o en asset groups PMax, persiste la decisión explícita sobre expansión de URL, relee Google y solo marca éxito si todo coincide. Un fallo parcial encola rollback compensatorio al estado anterior; la auditoría diaria `marketing_campaign.destination_drift_audit.v1` detecta cambios posteriores sin autorepararlos. Los destinos web solo admiten URL HTTPS públicas y estables, sin credenciales, fragmento, host privado ni parámetros efímeros de atribución/firma/caducidad. `managed_service` usa el mismo puente únicamente dentro de una `ManagedCampaign` aprobada y de sus constraints; guardar la estrategia solo provisiona una spec por canal en `draft + observe`, junto con su cuenta `unfunded`, y no llama a Google/Meta.
 
+El resultado de esa auditoría se persiste como
+`CampaignDestinationBindingEvent.event_type=drift_detected`, no como texto de
+log efímero. La migración aditiva `20260718225000` incorpora el valor al ENUM;
+el job está registrado en `scheduledJobCatalog`/`sync.jobs` con horario diario
+`5 3 * * *`. No se reduce a 30 minutos ni existe un cron paralelo.
+
 `POST /api/marketing/campaign-onboarding/start` configura exclusivamente `connect_only` o `guided_improvement`. Aunque `managed_service` continúa expuesto en bootstrap y legible en configuraciones históricas, intentar seleccionarlo o transicionar hacia él por este endpoint devuelve `409 managed_service_request_required`, `next_action=request_managed_campaign` y la ruta canónica `/api/marketing/managed-campaigns/request`. La guarda se evalúa antes de resolver el scope, comprobar transiciones o crear un `CampaignRequest`; por tanto no deja onboardings parciales. El alta de Piloto automático debe entrar siempre por la solicitud gestionada y sus gates de presupuesto, financiación, propuesta y aprobación.
 
 Cambiar entre niveles es una operación explícita: el cliente debe confirmar exactamente `from_mode` y `to_mode`; el backend bloquea el cambio si queda otra estrategia no completada o una policy activa/pausada en el alcance. Esto incluye la salida desde el histórico `managed_self`. No se sobrescriben ni eliminan policies para aparentar una migración. Mejora no admite una estrategia Meta-only: debe existir al menos una campaña Google vinculada. En campañas externas `channels[].percentage` no expresa reparto gestionado y se conserva en cero en vez de inventar un 100/0.
@@ -4874,7 +4880,30 @@ plantillas ni filas que puedan estar referenciadas por ejecuciones.
 
 ## Marketing Web: control plane, editor y compilador W0-W2 (2026-07-18)
 
-**Corte integrado vigente:** backend `dev` llega a `4e4b555` y staging a
+**Corte posterior vigente:** backend `c9fe9dc`/`68360ed`, promovido a staging
+mediante `4bbc299`, eleva el compilador a
+`clinicaclick-web-renderer/1.5.0` y hace durable `drift_detected`.
+Frontend `a2580f4d`, promovido mediante `dccaa992`, incorpora la galería
+semántica; el runtime staging usa `main.5d23dcd3057ad1f6.js` y su `index.html`
+tiene SHA-256
+`4451d0ba00320451acb788b48ed939d4de30e649fa259e2d383caf3e441cca6c`.
+Chromium a `1440` y `390` confirmó bloque/sección Galería sin errores. La tanda
+feature posterior añade autoría Página/Cabecera/Pie (`5ed9f5fd`, 92/92 antes
+de la unión), archivo/restauración y gestión de plantillas
+(`/marketing/web/plantillas`, frontend `f7e50367`; ownership backend
+`d5ce548`); todavía requiere promoción/QA. El artefacto público WordPress no se
+actualizó: `/cita/` sigue single-route y renderer `1.2.1`. Hosted/custom y
+multi-route permanecen cerrados.
+
+La migración aditiva
+`20260718225000-add-campaign-destination-drift-event.js` valida tabla/columna y
+ENUM, añade `drift_detected` de forma idempotente, falla cerrada ante un schema
+incompatible y rehúsa `down` si existen eventos. Su suite pasa 3/3. La
+auditoría diaria `campaign_destination_drift_audit` usa el orquestador común
+(`5 3 * * *`), no autorepara ni muta campañas. La suite canónica de Campañas
+recorre 34 contratos y pasa 46/46.
+
+**Corte integrado base (histórico):** backend `dev` llega a `4e4b555` y staging a
 `5e57431`; `pm2-back-staging` ya ejecuta ese último corte y el smoke público de
 autenticación devuelve el `401` esperado sin errores de arranque. El corte
 funcional frontend llega a `305d4eae` en `dev` y `5f8f8858` en staging; los
@@ -4901,6 +4930,12 @@ Nginx quedó activo y el smoke público de auth devuelve el `401` esperado. Las
 integraciones MySQL destructivas se omiten de forma
 explícita cuando `WEB_EDITOR_TEST_MYSQL_URL` no está definido. Esta integración
 no autoriza una campaña.
+
+Esos totales pertenecen al baseline promovido. Evidencia incremental del corte
+actual: galería backend 3/3, migración drift 3/3, Campañas 34 contratos/46
+pruebas, autoría Página/Cabecera/Pie frontend 92/92 antes de su unión y QA
+staging Galería `1440`/`390`. No se publica un total Node global nuevo sin
+ejecutar de nuevo el runner canónico completo.
 
 El runner canónico neutraliza explícitamente
 `MARKETING_WEB_ENABLED_SCOPES`, `MARKETING_WEB_DISABLED_SCOPES` y
@@ -4951,6 +4986,13 @@ CAS (`lock_version`); crear, enviar y aprobar revisiones adquiere locks en orden
 plantillas builtin se siembran versionadas y las instancias regeneran todos los
 IDs estructurales para no compartir referencias entre proyectos.
 
+`PATCH /api/marketing/web-projects/:projectId` exige `version` y solo admite
+que el usuario lleve el proyecto a `draft` o `archived`; `active` pertenece al
+flujo de publicación. El cambio bloquea la fila, aplica CAS, incrementa versión
+y audita `web.project.updated`. La UI interpreta restaurar como
+`archived -> draft`: nunca activa una publicación ni reutiliza un deployment.
+Mientras el proyecto está archivado, editor/publicación permanecen en lectura.
+
 El catálogo autenticado admite
 `GET /api/marketing/web-templates?include_preview=true`. El servicio pagina y
 aplica ACL/scope antes de cargar documentos, por lo que solo consulta los IDs
@@ -4958,6 +5000,16 @@ ya visibles de esa página. Cada `preview_document` se valida como
 `WebDocument v1`, se canonicaliza y se contrasta con su hash almacenado; un
 documento corrupto o cuyo hash no coincide falla cerrado con `503` y nunca se
 envía al navegador. Sin el flag no se carga ni proyecta el documento. La
+muestra paginada se calcula en base de datos, deduplicando por
+`catalog_key/version` según prioridad del scope; proyecta `source_scope`,
+`source_scope_id`, `managed_by_scope`, `is_public`, `status`, `created_at` y
+`updated_at`. Solo `managed_by_scope=true` autoriza edición/archivo; una
+plantilla global o heredada permanece visible en lectura y el frontend no
+puede convertir su badge en autorización. La ruta visual correspondiente es
+`/marketing/web/plantillas`; no existe una publicación independiente en esa
+URL.
+
+La
 migración idempotente
 `20260718103000-normalize-web-qualification-template-category.js` normaliza la
 categoría builtin histórica `form` a `qualification`; el selector frontend no
@@ -5009,7 +5061,7 @@ misma referencia global congelada.
 
 `clinicaclick-web-renderer/1.4.0` es un incremento posterior y compatible que
 no reemplaza ni reescribe la historia de globales de `1.3.0`. El corte
-`4345683`, presente en la rama de integración y todavía no desplegado, amplía
+`4345683`, posteriormente promovido a staging, amplió
 el JSON Schema cerrado de siete a nueve tipos con dos hojas de estructura:
 
 - `divider` exige `children=[]`, no admite bindings y limita sus propiedades a
@@ -5024,6 +5076,23 @@ de esos enums. La identidad del artefacto sigue incluyendo la versión del
 renderer, por lo que compilar la misma revisión con `1.4.0` genera un corte
 explícito, determinista y auditable; nunca modifica un artefacto `1.2.1` o
 `1.3.0` ya congelado.
+
+`clinicaclick-web-renderer/1.5.0` añade `gallery` como décimo tipo cerrado. Es
+una hoja sin hijos ni bindings con entre 2 y 12 items y assets únicos. Limita
+columnas a `2|3|4`, `fit` a `cover|contain`, proporción a
+`1:1|4:3|3:2|16:9` y exige por item un asset válido, foco X/Y acotado y texto
+alternativo o marca decorativa; el pie es opcional. `webResourceResolver`
+congela el recurso por la ruta exacta del item. El compilador genera
+`figure/img/figcaption`, dimensiones y lazy loading, usa las columnas
+configuradas en escritorio, dos en tablet y una en móvil. No admite HTML/CSS,
+clases ni placeholders aportados por el usuario.
+
+El compilador resuelve además una única canonical efectiva por página. Esa URL
+alimenta `<link rel="canonical">`, `og:url` y las URL/`@id` de `WebPage` y
+`FAQPage`. `sitemap.xml` solo incorpora canónicas indexables cuyo origen
+coincida con el de publicación; una canonical externa se conserva en HTML y se
+excluye del sitemap del host. El test de compilador cubre expresamente esta
+coherencia.
 
 El formulario global también se materializa por ruta. El manifest no lo trata
 como un único formulario sin contexto, sino como un contrato `scope=global`
@@ -5141,6 +5210,12 @@ petición las imágenes referenciadas por nodos y por los assets sociales/global
 de página; no convierte una URL del documento en autoridad ni expone metadata
 de almacenamiento.
 
+En una galería `1.5.0`, cada item conserva su `asset_id` y metadata editorial
+propia. La aprobación resuelve/congela el asset por la ruta exacta del item;
+reordenar o reemplazar no permite que otra posición herede silenciosamente el
+recurso. La selección UI puede paginar, pero la snapshot final exige entre 2 y
+12 recursos reales, únicos y autorizados.
+
 Scope se declara como `scope_type=clinic|group` y `scope_id`. Las listas usan
 `page`, `limit` (máximo 100), `status`, `search` y filtros de tipo/locale/kind.
 Una clínica solo ve activos del grupo cuando pide explícitamente
@@ -5161,10 +5236,16 @@ contenido debe estar `published` y exponer el campo solicitado. Una referencia
 UUID grupal elegida por un proyecto de clínica cuenta como herencia explícita.
 Los bindings vivos de clínica se congelan como descriptores
 `clinic_public_v1` con un allowlist de campos públicos; un proyecto de grupo
-siempre requiere clínica explícita. `treatment`, `professional` e
-`intake_config` siguen devolviendo
-`resolver_not_implemented` hasta que exista su contrato propio; no se
-improvisan consultas. Si queda alguna referencia, la aprobación responde 422
+siempre requiere clínica explícita. Los resolvers tipados ya implementados son:
+
+- `treatment`: `name`, `title`, `description`, `short_description` y
+  `price_from`;
+- `professional`: `name`, `title` y `alt_text`;
+- `intake_config`: solo identidad y procedencia (`id`, `scope`, `inherited`).
+  Nunca congela configuración privada, secretos, HMAC ni credenciales.
+
+Cada resolver comprueba scope y existencia antes de congelar; no improvisa
+campos fuera de su allowlist. Si queda alguna referencia, la aprobación responde 422
 `web_revision_not_ready` con las rutas no resueltas y no cambia estado. La
 snapshot solo contiene campos publicables y rechaza nombres sensibles como
 `token`, `secret`, `hmac_key`, `bucket` u `object_key`. Las URLs de fuentes no
@@ -5235,12 +5316,20 @@ El schema integrado se instala en orden: `19000` (proyectos/editor), `20000`
 (contenido/media), `21000` (modo Mejora), `21100` (unicidad de policy por
 estrategia), `21500` (plantillas builtin), `22000` (artefactos), `23000`
 (dominios/publicaciones/deployments), `24000` (atribución de intake), `24500`
-(contexto de campaña) y `25000` (bindings, cuentas y eventos de destino). Los
+(contexto de campaña), `25000` (bindings, cuentas y eventos de destino) y
+`20260718225000` (valor `drift_detected` en el ENUM de eventos). Los
 `up` validan el contrato completo de cualquier tabla
 preexistente y fallan cerrado ante drift; solo pueden reparar la variante
 legacy exacta de `ON UPDATE CASCADE` en las FKs de scope cuando destino,
 columna referenciada, `ON DELETE` y datos permiten la sustitución segura. Los
 `down` se ejecutan en orden inverso y son repetibles.
+
+La migración `20260718225000` es aditiva e idempotente: falla cerrada si falta
+la tabla/columna o el ENUM no tiene el contrato esperado; no reconstruye una
+tabla desconocida y su `down` rechaza eliminar el valor mientras haya filas
+`drift_detected`. La migración destructiva
+`20260715152000-purge-google-places-competition-content.js` está cancelada y
+sus `up`/`down` son no-op; no pertenece a este rollout ni queda pendiente.
 
 `WebPublicationDeployments` es un log append-only con secuencia monotónica. La
 petición crea deployment + `JobRequest` en una transacción; el worker bloquea
@@ -5316,7 +5405,7 @@ solo como hash en backend y como opción `autoload=false` en WordPress; el ZIP
 es `private, no-store`, el ticket dura 15 minutos y un token/descriptor que no
 coincida falla antes de generar el paquete.
 
-### Orden seguro para renderer 1.3.0 y globales
+### Orden seguro para renderer 1.5.0, globales y galería
 
 La compatibilidad es deliberadamente asimétrica: una revisión legacy o una que
 solo use cabecera/pie globales no requiere el nuevo contrato de intake, pero
@@ -5341,10 +5430,11 @@ orden operativo obligatorio es:
    exactamente `2.0.0-alpha.7`, y verificar sincronización, página existente y
    rollback sin cambiar el artefacto activo;
 5. solo entonces aprobar/publicar una revisión compilada por
-   `clinicaclick-web-renderer/1.3.0` que contenga formulario global;
-6. verificar cada permalink, `data-cc-global`, el contrato de formulario de su
-   página, un envío controlado, atribución, ausencia de duplicados y rollback
-   antes de ampliar scopes.
+   `clinicaclick-web-renderer/1.5.0` que contenga formulario global y, para
+   acreditar el corte vigente, una galería real;
+6. verificar cada permalink, `data-cc-global`, canonical/OG/JSON-LD/sitemap,
+   recursos de galería, contrato de formulario por página, un envío controlado,
+   atribución, ausencia de duplicados y rollback antes de ampliar scopes.
 
 Los pasos 1-4 quedaron acreditados en Propdental el 2026-07-18: WP-CLI y DB
 reportan `alpha.7`, `/cita/` sigue en `200` y el artefacto activo no cambió.
@@ -5358,7 +5448,7 @@ multi-route: conservan sus gates y E2E independientes.
 
 El gate de versión no degrada ni retira publicaciones legacy y no bloquea una
 revisión que solo tenga header/footer globales. Aun así, para el rollout real
-se recomienda promover `alpha.7` antes de estrenar cualquier artefacto `1.3.0`,
+se recomienda promover `alpha.7` antes de estrenar cualquier artefacto `1.5.0`,
 de modo que plugin y renderer se observen como una sola tanda reversible.
 
 Durante un diagnóstico controlado se mostró accidentalmente un HMAC de intake
@@ -5475,6 +5565,13 @@ El publisher/origin hosted endurecido:
 - el health de hosted/custom verifica primero el bundle/puntero local completo
   y después el marker público.
 
+Preflight de infraestructura 2026-07-18: existen
+`/var/lib/clinicaclick-web-hosting` (`ubuntu:ubuntu`, `0755`) y
+`/var/www/letsencrypt/.well-known/acme-challenge`; las listas Cloudflare
+oficiales se revalidaron y coinciden exactamente con el snippet. Esto no abre
+el canal: faltan control DNS, vhost, certificado y flag. El host continúa con
+HTTP `302` de DonDominio y HTTPS `521`; no hay E2E hosted.
+
 El job durable `marketing_web_publication_health_monitor` está programado por
 defecto a `11 * * * *`, lote 25 (máximo 100). Selecciona publicaciones
 `published` con artefacto activo, hace un único GET público por fila y persiste
@@ -5505,7 +5602,8 @@ Estado de aceptación de esta tanda:
 4. E2E público del relay/intake atribuido y datos sintéticos limpiados;
 5. observación real del monitor: saludable;
 6. hosted/custom permanecen deliberadamente apagados hasta
-   DNS/TLS/vhost/proveedor y E2E; WordPress multi-route, rotación Ed25519
+   DNS/TLS/vhost/flag/proveedor y E2E; el preflight de directorios/Cloudflare no
+   sustituye esos gates. WordPress multi-route, rotación Ed25519
    operativa, Lighthouse y validadores externos siguen fuera de este cierre.
 
 La auditoría Figma afecta al frontend, no a este runtime: se reutiliza la UX de
