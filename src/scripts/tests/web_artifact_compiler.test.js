@@ -504,9 +504,15 @@ test('producción incrusta exactamente el runtime de medición confiable y previ
   assert.match(html, /data-consent-mode-enabled="true"/);
   assert.match(production.manifest.headers['content-security-policy'], /script-src[^;]*https:\/\/crm\.clinicaclick\.com/);
   assert.match(production.manifest.headers['content-security-policy'], /connect-src[^;]*https:\/\/crm\.clinicaclick\.com/);
+  assert.match(production.manifest.headers['content-security-policy'], /img-src[^;]*https:\/\/crm\.clinicaclick\.com[^;]*data:/);
+  assert.match(production.manifest.headers['content-security-policy'], /style-src 'self' 'unsafe-inline'/);
+  assert.match(html, /https:\/\/media\.clinicaclick\.com https:\/\/crm\.clinicaclick\.com data:/);
+  assert.match(html, /style-src &#39;self&#39; &#39;unsafe-inline&#39;/);
   assert.doesNotMatch(JSON.stringify(production), /0123456789abcdef0123456789abcdef/);
 
   const preview = compileWebArtifact(fixture({ trustedRuntime: measurement }));
   assert.doesNotMatch(preview.files['index.html'], /assets\/loader\.js/);
+  assert.doesNotMatch(preview.manifest.headers['content-security-policy'], /unsafe-inline/);
+  assert.doesNotMatch(preview.manifest.headers['content-security-policy'], /img-src[^;]*crm\.clinicaclick\.com/);
   assert.notEqual(preview.artifact_hash, production.artifact_hash);
 });
