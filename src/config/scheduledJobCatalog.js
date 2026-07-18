@@ -44,6 +44,12 @@ const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
     priority: 'low',
     executorMethod: 'executeCampaignOptimizationEvaluation',
   }),
+  webDomainReconciliation: Object.freeze({
+    type: 'marketing_web_domain_reconciliation',
+    priority: 'low',
+    executorMethod: 'executeWebDomainReconciliation',
+    attachJobRequestId: true,
+  }),
   webSync: Object.freeze({ type: 'web_recent', priority: 'normal', executorMethod: 'executeWebSync' }),
   webBackfill: Object.freeze({ type: 'web_backfill', priority: 'low', executorMethod: 'executeWebBackfill' }),
   analyticsSync: Object.freeze({ type: 'analytics_recent', priority: 'normal', executorMethod: 'executeAnalyticsSync' }),

@@ -30,7 +30,7 @@ function testCatalogCoversEveryCronAndExecutor() {
   const catalogNames = definitions.map(([name]) => name).sort();
   const types = definitions.map(([, definition]) => definition.type);
 
-  assert.equal(definitions.length, 30);
+  assert.equal(definitions.length, 31);
   assert.deepEqual(catalogNames, configuredNames);
   assert.equal(new Set(types).size, types.length, 'scheduled job types must be unique');
   for (const jobName of [
@@ -50,6 +50,11 @@ function testCatalogCoversEveryCronAndExecutor() {
     SCHEDULED_JOB_DEFINITIONS.competitionSync.attachJobRequestId,
     true,
     'competition refresh jobs must link their SyncLog for observability'
+  );
+  assert.equal(
+    SCHEDULED_JOB_DEFINITIONS.webDomainReconciliation.attachJobRequestId,
+    true,
+    'domain reconciliation jobs must keep their durable JobRequest trace'
   );
 
   for (const [jobName, definition] of definitions) {

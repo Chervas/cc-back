@@ -411,6 +411,11 @@ const JOB_HANDLERS = {
   intake_quickchat_summary_materialize: async (payload = {}) => (
     intakeQuickChatOutboxService.runIntakeQuickChatSummaryMaterializeJob(payload)
   ),
+  // Carga diferida: publicación importa compilador/modelos Web y no debe
+  // introducir un ciclo durante el arranque del worker global.
+  web_publication_deploy: async (payload = {}, jobRequest = null) => (
+    require('./webPublicationDeployment.service').runPublicationDeploymentJob(payload, jobRequest)
+  ),
 };
 
 function normalizeJobType(value) {

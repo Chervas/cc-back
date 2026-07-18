@@ -111,6 +111,12 @@ const {
   maybeUploadQualifiedLeadStatusTransition,
   uploadScheduleForLinkedAppointment,
 } = require('../services/leadQualificationMilestone.service');
+const { resolveWebLandingAttribution } = require('../services/webLandingAttribution.service');
+const {
+  authenticatePublicIntakeRequest,
+  createMetaSignatureValidator,
+  pickMatchingIntakeConfig,
+} = require('../lib/intakePublicAuthentication');
 
 const CHANNELS = new Set(['paid', 'organic', 'unknown']);
 const SOURCES = new Set(['meta_ads', 'google_ads', 'web', 'whatsapp', 'call_click', 'tiktok_ads', 'seo', 'direct', 'local_services']);
@@ -1108,20 +1114,6 @@ const resolveClinicByPageUrlWithinGroup = async (groupId, pageUrl, configRecord 
 
 const CALL_OUTCOMES = new Set(['citado', 'informacion', 'no_contactado']);
 
-const pickMatchingIntakeConfig = ({ req, providedSignature, clinicCfg, groupCfg, domainCfg }) => {
-  const candidates = [clinicCfg, groupCfg, domainCfg].filter(Boolean);
-  if (!candidates.length) return null;
-
-  if (providedSignature) {
-    const matched = candidates.find((cfg) => cfg.hmac_key && validateHmac(req, cfg.hmac_key, providedSignature));
-    if (matched) {
-      return matched;
-    }
-  }
-
-  return clinicCfg || groupCfg || domainCfg || null;
-};
-
 const buildTrackingScopeFromRecords = ({ clinicId, groupId, selectedRecord }) => {
   const selectedClinicId = parseInteger(selectedRecord?.clinic_id);
   const selectedGroupId = parseInteger(selectedRecord?.group_id);
@@ -1395,45 +1387,12 @@ const isConsentModeEnabledForRecord = (record) => {
   return cfg.features?.consent_mode_enabled === true;
 };
 
-const validateSignature = (req) => {
-  const secret = process.env.INTAKE_WEB_SECRET;
-  if (!secret) return true; // Sin secreto configurado, no validamos la firma
-
-  const provided = req.headers[SIGNATURE_HEADER] || req.headers[SIGNATURE_HEADER_SHA];
-  if (!provided) {
-    return false;
-  }
-
-  const payload = req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(req.body || {});
-  const expected = crypto.createHmac('sha256', secret).update(payload).digest('hex');
-  const expectedBuf = Buffer.from(expected);
-  const providedBuf = Buffer.from(provided);
-  if (expectedBuf.length !== providedBuf.length) {
-    return false;
-  }
-  return crypto.timingSafeEqual(expectedBuf, providedBuf);
-};
-
 const META_VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN || process.env.META_VERIFY_TOKEN;
-const META_APP_SECRET = process.env.META_APP_SECRET;
 const META_GRAPH_TOKEN = process.env.META_GRAPH_TOKEN || process.env.META_PAGE_ACCESS_TOKEN;
 const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || 'v24.0';
-
-const validateMetaSignature = (req) => {
-  // Permitir pruebas sin firma cuando no viene header
-  if (!req.headers['x-hub-signature-256'] && !req.headers['x-hub-signature']) {
-    return true;
-  }
-  if (!META_APP_SECRET) return true;
-  const signature = req.headers['x-hub-signature-256'];
-  if (!signature || typeof signature !== 'string') return false;
-  const payloadBuffer = req.rawBody ? (Buffer.isBuffer(req.rawBody) ? req.rawBody : Buffer.from(req.rawBody)) : Buffer.from(JSON.stringify(req.body || {}));
-  const expected = 'sha256=' + crypto.createHmac('sha256', META_APP_SECRET).update(payloadBuffer).digest('hex');
-  const expectedBuf = Buffer.from(expected);
-  const providedBuf = Buffer.from(signature);
-  if (expectedBuf.length !== providedBuf.length) return false;
-  return crypto.timingSafeEqual(expectedBuf, providedBuf);
-};
+const validateMetaSignature = createMetaSignatureValidator({
+  appSecret: process.env.META_APP_SECRET,
+});
 
 async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionSteps = {}, options = {}) {
   const normalizedEmail = normalizeEmail(leadPayload.email);
@@ -1578,6 +1537,15 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const explicitGroupId = parseInteger(coalesce(grupo_clinica_id, group_id, body.grupoClinicaId, body.groupId));
   let clinicaIdParsed = explicitClinicId;
   let grupoClinicaIdParsed = explicitGroupId;
+  const webLandingAttribution = req.webLandingEventAttribution
+    && typeof req.webLandingEventAttribution === 'object'
+    && !Array.isArray(req.webLandingEventAttribution)
+    ? req.webLandingEventAttribution
+    : await resolveWebLandingAttribution({ body, models: db });
+  if (webLandingAttribution) {
+    clinicaIdParsed = webLandingAttribution.clinic_id;
+    grupoClinicaIdParsed = webLandingAttribution.group_id;
+  }
   const normalizedSourceForRouting = SOURCES.has(source) ? source : null;
   let canResolveGroupClinicHint = explicitClinicId === null && explicitGroupId !== null;
   const campanaIdParsed = parseInteger(campana_id);
@@ -1603,6 +1571,10 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   // Resolución automática de clínica por activo publicitario (Meta / Google Ads)
   let clinicMatchSource = clinic_match_source || null;
   let clinicMatchValue = clinic_match_value || null;
+  if (webLandingAttribution) {
+    clinicMatchSource = 'clinicaclick_web_publication';
+    clinicMatchValue = webLandingAttribution.publication_id;
+  }
 
   let clinicCfg = null;
   let groupCfg = null;
@@ -1642,15 +1614,18 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     }
   }
 
-  if (cfg && cfg.hmac_key) {
-    if (!providedSignature || !validateHmac(req, cfg.hmac_key, providedSignature)) {
-      return res.status(401).json({ message: 'Firma HMAC inválida o ausente' });
-    }
-  } else if (!cfg && process.env.INTAKE_WEB_SECRET) {
-    if (!providedSignature || !validateHmac(req, process.env.INTAKE_WEB_SECRET, providedSignature)) {
-      return res.status(401).json({ message: 'Firma HMAC inválida o ausente' });
-    }
+  const intakeAuthentication = authenticatePublicIntakeRequest({
+    req,
+    config: cfg,
+    fallbackSecret: process.env.INTAKE_WEB_SECRET,
+  });
+  if (!intakeAuthentication.ok) {
+    return res.status(intakeAuthentication.status).json({
+      message: intakeAuthentication.message,
+      code: intakeAuthentication.code,
+    });
   }
+  req.publicIntakeAuthentication = intakeAuthentication.source;
 
   // Si el widget llega a nivel grupo y además recibimos nombre de clínica, ese dato
   // debe tener prioridad sobre el fallback por dominio o por clínica por defecto.
@@ -1816,35 +1791,42 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const gaClientIdValue = coalesce(attribution.ga_client_id, attribution.client_id, ga_client_id, body.gaClientId, body.client_id);
   const pageUrlValue = coalesce(attribution.page_url, page_url, body.pageUrl);
   const landingUrlValue = coalesce(attribution.landing_url, landing_url, body.landingUrl);
-  const googleAdsCustomerIdValue = coalesce(
-    attribution.ccGadsCustomerId,
-    attribution.google_ads_customer_id,
-    attribution.googleAdsCustomerId,
-    attribution.cc_gads_customer_id,
-    google_ads_customer_id,
-    body.googleAdsCustomerId,
-    body.cc_gads_customer_id,
-    body.ccGadsCustomerId,
-    body.customer_id,
-    body.google_customer_id
-  );
-  const googleAdsCampaignIdValue = resolveGoogleAdsCampaignId({
-    ccCandidates: [
-      attribution.cc_gads_campaign_id,
-      body.cc_gads_campaign_id,
-    ],
-    canonicalCandidates: [
-      attribution.google_ads_campaign_id,
-      google_ads_campaign_id,
-      body.google_campaign_id,
-    ],
-    gadCandidates: [
-      attribution.gad_campaignid,
-      body.gad_campaignid,
-      body.gadCampaignId,
-    ],
-    urls: [pageUrlValue, landingUrlValue],
-  });
+  // Una landing publicada nunca puede persistir IDs de Google elegidos por el
+  // navegador. El resolver ya los ha contrastado contra la cuenta y la
+  // asignación de campaña autorizadas para la clínica canónica.
+  const googleAdsCustomerIdValue = webLandingAttribution
+    ? (webLandingAttribution.google_ads_customer_id || null)
+    : coalesce(
+        attribution.ccGadsCustomerId,
+        attribution.google_ads_customer_id,
+        attribution.googleAdsCustomerId,
+        attribution.cc_gads_customer_id,
+        google_ads_customer_id,
+        body.googleAdsCustomerId,
+        body.cc_gads_customer_id,
+        body.ccGadsCustomerId,
+        body.customer_id,
+        body.google_customer_id
+      );
+  const googleAdsCampaignIdValue = webLandingAttribution
+    ? (webLandingAttribution.google_ads_campaign_id || null)
+    : resolveGoogleAdsCampaignId({
+        ccCandidates: [
+          attribution.cc_gads_campaign_id,
+          body.cc_gads_campaign_id,
+        ],
+        canonicalCandidates: [
+          attribution.google_ads_campaign_id,
+          google_ads_campaign_id,
+          body.google_campaign_id,
+        ],
+        gadCandidates: [
+          attribution.gad_campaignid,
+          body.gad_campaignid,
+          body.gadCampaignId,
+        ],
+        urls: [pageUrlValue, landingUrlValue],
+      });
   const fbclidValue = coalesce(attribution.fbclid, fbclid);
   const ttclidValue = coalesce(attribution.ttclid, ttclid);
   const referrerValue = coalesce(attribution.referrer, referrer);
@@ -2011,6 +1993,12 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     consent_version: consent_version || derivedConsentMetadata.version || null,
     external_source: externalSource,
     external_id: externalId,
+    web_project_id: webLandingAttribution?.project_id || null,
+    web_revision_id: webLandingAttribution?.revision_id || null,
+    web_page_id: webLandingAttribution?.page_id || null,
+    web_publication_id: webLandingAttribution?.publication_id || null,
+    web_artifact_id: webLandingAttribution?.artifact_id || null,
+    web_form_id: webLandingAttribution?.form_id || null,
     intake_payload_hash: payloadHash
   };
 
@@ -4271,7 +4259,9 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     };
 
     // Si existe HMAC en backend, aceptar cualquier tag del scope que tenga la clave vigente.
-    // Esto evita falsos negativos cuando queda un plugin/snippet antiguo activo además del nuevo.
+    // El plugin/editor actuales no publican esa clave: exponen un relay
+    // same-origin fijo y firman server-side. El HMAC en el tag se conserva solo
+    // como compatibilidad durante la migración de snippets manuales antiguos.
     if (record.hmac_key) {
       const expectedHmac = String(record.hmac_key).trim();
       const hmacKeys = tagsForScope.map((tag) => {
@@ -4283,12 +4273,27 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
         return { installed: true, checked_url: checkedUrl, ...detectedRuntime, ...externalCookieNoticeInfo, consent_mode_detected: consentModeDetected };
       }
 
+      const sameOriginBridgeDetected = tagsForScope.some((tag) => {
+        const value = tag.match(/data-event-bridge-url\s*=\s*['"]([^'"]+)['"]/i)?.[1];
+        return String(value || '').trim() === '/_clinicaclick/events';
+      });
+      if (sameOriginBridgeDetected) {
+        return {
+          installed: true,
+          checked_url: checkedUrl,
+          security_transport: 'same_origin_server_bridge',
+          ...detectedRuntime,
+          ...externalCookieNoticeInfo,
+          consent_mode_detected: consentModeDetected,
+        };
+      }
+
       if (hmacKeys.every((key) => !key)) {
         return {
           installed: false,
-          reason: 'missing_hmac',
+          reason: 'missing_secure_transport',
           checked_url: checkedUrl,
-          details: 'Se encontró el fragmento de código de medición, pero le falta la clave de seguridad (HMAC).',
+          details: 'Se encontró el fragmento de medición, pero no su canal seguro de envío. Actualiza el plugin o vuelve a copiar el fragmento.',
           ...externalCookieNoticeInfo,
         };
       }
@@ -4345,6 +4350,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
       runtime_version: primaryEvaluation.runtime_version || null,
       runtime_declared_version: primaryEvaluation.runtime_declared_version || null,
       runtime_compatible: !!primaryEvaluation.runtime_compatible,
+      security_transport: primaryEvaluation.security_transport || (record.hmac_key ? 'legacy_browser_hmac' : null),
       cookie_notice_detected: !!primaryEvaluation.cookie_notice_detected,
       cookie_notice_provider: primaryEvaluation.cookie_notice_provider || null,
       google_consent_mode_detected: !!primaryEvaluation.google_consent_mode_detected,
@@ -4378,7 +4384,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
         legacy_chat_detected: !!bypassEvaluation.legacy_chat_detected,
         legacy_chat_provider: bypassEvaluation.legacy_chat_provider || null,
         ...legalPageVerification,
-        details: 'La web devuelve el snippet correcto al saltar caché, pero la página normal sigue sirviendo una versión antigua o sin HMAC. Purga la caché de WordPress, del hosting o de la CDN y vuelve a verificar.'
+        details: 'La web devuelve el fragmento seguro al saltar caché, pero la página normal sigue sirviendo una versión antigua. Purga la caché de WordPress, del hosting o de la CDN y vuelve a verificar.'
       });
     }
   }
@@ -4390,15 +4396,6 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
 // Eventos genéricos (ViewContent, Contact, Schedule, Purchase)
 // ===========================
 
-const normalizeSignature = (provided) => {
-  if (!provided) return null;
-  if (typeof provided !== 'string') return null;
-  const trimmed = provided.trim();
-  if (!trimmed) return null;
-  // Accept "sha256=<hex>" just in case some clients send it like Meta.
-  return trimmed.toLowerCase().startsWith('sha256=') ? trimmed.slice(7).trim() : trimmed.toLowerCase();
-};
-
 const getHostnameFromUrl = (value) => {
   if (!value || typeof value !== 'string') return null;
   try {
@@ -4406,25 +4403,6 @@ const getHostnameFromUrl = (value) => {
   } catch {
     return null;
   }
-};
-
-// Validación HMAC sobre el payload "raw" (mejor: evita discrepancias por orden de keys).
-const validateHmac = (req, secret, provided) => {
-  if (!secret) return true;
-  const signature = normalizeSignature(provided);
-  if (!signature) return false;
-
-  const rawPayload = req.rawBody
-    ? (Buffer.isBuffer(req.rawBody) ? req.rawBody : Buffer.from(req.rawBody))
-    : Buffer.from(stableStringify(req.body || {}));
-
-  const expected = crypto.createHmac('sha256', secret).update(rawPayload).digest('hex');
-  const expectedBuf = Buffer.from(expected);
-  const providedBuf = Buffer.from(signature);
-  if (expectedBuf.length !== providedBuf.length) {
-    return false;
-  }
-  return crypto.timingSafeEqual(expectedBuf, providedBuf);
 };
 
 exports.registerWhatsappOrigin = asyncHandler(async (req, res) => {
@@ -4492,11 +4470,19 @@ exports.registerWhatsappOrigin = asyncHandler(async (req, res) => {
     }
   }
 
-  if (cfg?.hmac_key) {
-    if (!provided || !validateHmac(req, cfg.hmac_key, provided)) {
-      return res.status(401).json({ success: false, message: 'Invalid signature' });
-    }
+  const intakeAuthentication = authenticatePublicIntakeRequest({
+    req,
+    config: cfg,
+    fallbackSecret: process.env.INTAKE_WEB_SECRET,
+  });
+  if (!intakeAuthentication.ok) {
+    return res.status(intakeAuthentication.status).json({
+      success: false,
+      message: intakeAuthentication.message,
+      code: intakeAuthentication.code,
+    });
   }
+  req.publicIntakeAuthentication = intakeAuthentication.source;
 
   const domainClinicId = parseInteger(domainCfg?.clinic_id);
   const domainGroupId = parseInteger(domainCfg?.group_id);
@@ -4695,6 +4681,19 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
     }
   }
 
+  const intakeAuthentication = authenticatePublicIntakeRequest({
+    req,
+    config: cfg,
+    fallbackSecret: process.env.INTAKE_WEB_SECRET,
+  });
+  if (!intakeAuthentication.ok) {
+    return res.status(intakeAuthentication.status).json({
+      message: intakeAuthentication.message,
+      code: intakeAuthentication.code,
+    });
+  }
+  req.publicIntakeAuthentication = intakeAuthentication.source;
+
   const domainClinicId = parseInteger(domainCfg?.clinic_id);
   const domainGroupId = parseInteger(domainCfg?.group_id);
   if (clinicIdParsed === null && domainClinicId !== null) {
@@ -4724,16 +4723,6 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
       [cfg, groupCfg, domainCfg].find((record) => record?.assignment_scope === 'group') || null,
     );
     clinicIdParsed = parseInteger(phoneClinic?.id_clinica);
-  }
-
-  if (cfg && cfg.hmac_key) {
-    // ViewContent puede enviarse via sendBeacon (sin headers), así que toleramos firma ausente solo en ese evento.
-    if (!provided && String(eventName).toLowerCase() !== 'viewcontent') {
-      return res.status(401).json({ message: 'Invalid signature' });
-    }
-    if (provided && !validateHmac(req, cfg.hmac_key, provided)) {
-      return res.status(401).json({ message: 'Invalid signature' });
-    }
   }
 
   const finalClinicCfg = clinicIdParsed !== null

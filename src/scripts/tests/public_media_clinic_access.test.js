@@ -73,6 +73,26 @@ async function testSourceSizeIsRejectedBeforeImageDecode() {
   );
 }
 
+async function testWebEditorPurposeIsAllowedAndKeepsImageContract() {
+  const source = await makePng();
+  const sourceMetadata = await sharp(source).metadata();
+  const prepared = await publicMediaStorage.preparePublicMediaPayload({
+    purpose: 'web_editor_media',
+    contentType: 'image/png',
+    buffer: source,
+  });
+  const outputMetadata = await sharp(prepared.buffer).metadata();
+  assert.ok(sourceMetadata.exif, 'la muestra debe contener EXIF antes del desarme');
+  assert.equal(prepared.purpose, 'web_editor_media');
+  assert.equal(prepared.contentType, 'image/webp');
+  assert.equal(outputMetadata.format, 'webp');
+  assert.equal(outputMetadata.exif, undefined);
+  assert.equal(outputMetadata.orientation, undefined);
+  assert.equal(prepared.imageMetadata.metadata_stripped, true);
+  assert.equal(prepared.imageMetadata.content_disarm, 'sharp_reencode_v1');
+  assert.equal(prepared.imageMetadata.malware_scan_status, 'not_available');
+}
+
 function testControllerRequiresAssertionScopeAndEditCapability() {
   const controllerSource = fs.readFileSync(
     path.resolve(__dirname, '../../controllers/publicMedia.controller.js'),
@@ -98,7 +118,37 @@ function testControllerRequiresAssertionScopeAndEditCapability() {
   assert.match(controllerSource, /url:\s*upload\.url/);
   assert.match(storageSource, /case 'clinic_access_image':/);
   assert.match(storageSource, /whatsapp\/clinic-access/);
+  assert.match(storageSource, /case 'web_editor_media':/);
+  assert.match(storageSource, /marketing\/web-editor/);
+  assert.match(controllerSource, /assertWebScopeEnabled\(webScope\(scope\)\)/);
+  assert.match(routeSource, /limitOnlyWebEditorUploads/);
   assert.doesNotMatch(routeSource, /router\.(?:delete|patch)\(/i);
+}
+
+async function testWebEditorQuotaFailsClosed() {
+  const oldAssets = process.env.MARKETING_WEB_MEDIA_MAX_ASSETS_PER_SCOPE;
+  const oldBytes = process.env.MARKETING_WEB_MEDIA_MAX_BYTES_PER_SCOPE;
+  process.env.MARKETING_WEB_MEDIA_MAX_ASSETS_PER_SCOPE = '2';
+  process.env.MARKETING_WEB_MEDIA_MAX_BYTES_PER_SCOPE = '1000';
+  try {
+    await assert.rejects(
+      () => publicMediaController._private.assertWebEditorMediaQuota(
+        { scopeType: 'clinic', clinicId: 66, groupId: null },
+        200,
+        {
+          PublicMediaAssetModel: {
+            findOne: async () => ({ asset_count: 2, size_bytes: 900 }),
+          },
+        }
+      ),
+      (error) => error?.message === 'web_editor_media_quota_exceeded' && error?.status === 413
+    );
+  } finally {
+    if (oldAssets === undefined) delete process.env.MARKETING_WEB_MEDIA_MAX_ASSETS_PER_SCOPE;
+    else process.env.MARKETING_WEB_MEDIA_MAX_ASSETS_PER_SCOPE = oldAssets;
+    if (oldBytes === undefined) delete process.env.MARKETING_WEB_MEDIA_MAX_BYTES_PER_SCOPE;
+    else process.env.MARKETING_WEB_MEDIA_MAX_BYTES_PER_SCOPE = oldBytes;
+  }
 }
 
 function testReviewPhotoKeepsMarketingCapability() {
@@ -109,6 +159,10 @@ function testReviewPhotoKeepsMarketingCapability() {
   assert.equal(
     publicMediaController._private.uploadFeatureForPurpose('review_team_photo'),
     'marketing',
+  );
+  assert.equal(
+    publicMediaController._private.uploadFeatureForPurpose('web_editor_media'),
+    'marketing.web.edit',
   );
   assert.equal(
     publicMediaController._private.uploadFeatureForPurpose('whatsapp_image'),
@@ -139,6 +193,8 @@ async function run() {
   await testClinicAccessImageIsNormalizedForWhatsapp();
   await testMagicBytesMustMatchDeclaredMime();
   await testSourceSizeIsRejectedBeforeImageDecode();
+  await testWebEditorPurposeIsAllowedAndKeepsImageContract();
+  await testWebEditorQuotaFailsClosed();
   testControllerRequiresAssertionScopeAndEditCapability();
   testReviewPhotoKeepsMarketingCapability();
   console.log('public_media_clinic_access.test.js: OK');

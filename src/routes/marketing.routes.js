@@ -10,8 +10,103 @@ const marketingReactivationController = require('../controllers/marketingReactiv
 const marketingBulkSendsController = require('../controllers/marketingBulkSends.controller');
 const managedCampaignsController = require('../controllers/managedCampaigns.controller');
 const campaignOptimizationController = require('../controllers/campaignOptimization.controller');
+const webProjectsController = require('../controllers/webProjects.controller');
+const webContentMediaController = require('../controllers/webContentMedia.controller');
+const webArtifactsController = require('../controllers/webArtifacts.controller');
+const webPublicationsController = require('../controllers/webPublications.controller');
+const webDomainsController = require('../controllers/webDomains.controller');
+const webWordpressInstallationsController = require('../controllers/webWordpressInstallations.controller');
+const {
+  createMarketingWebRateLimiter,
+  createPublicMarketingWebRateLimiter,
+} = require('../lib/marketingWebRequestGuards');
+
+// Control plane del plugin: autenticación por token de instalación. Debe
+// declararse antes del middleware de sesión porque WordPress no usa JWT de UI.
+const publicWebRateLimit = createPublicMarketingWebRateLimiter();
+router.get(
+  '/web-installations/:installationId/desired-state',
+  publicWebRateLimit({ operation: 'web_installation_state', limit: 120, windowMs: 60 * 60 * 1000 }),
+  webWordpressInstallationsController.getDesiredState
+);
+router.post(
+  '/web-installations/:installationId/reports',
+  publicWebRateLimit({ operation: 'web_installation_report', limit: 120, windowMs: 60 * 60 * 1000 }),
+  webWordpressInstallationsController.reportInstallation
+);
+const publicWebArtifactRateLimit = publicWebRateLimit({
+  operation: 'web_installation_artifact', limit: 600, windowMs: 60 * 60 * 1000,
+});
+router.get(
+  '/web-installations/:installationId/artifacts/:artifactHash/manifest',
+  publicWebArtifactRateLimit,
+  webWordpressInstallationsController.downloadArtifactManifest
+);
+router.get(
+  '/web-installations/:installationId/artifacts/:artifactHash/envelope',
+  publicWebArtifactRateLimit,
+  webWordpressInstallationsController.downloadArtifactEnvelope
+);
+router.get(
+  '/web-installations/:installationId/artifacts/:artifactHash/files/:pathToken',
+  publicWebArtifactRateLimit,
+  webWordpressInstallationsController.downloadArtifactFile
+);
 
 router.use(authMiddleware);
+const webRateLimit = createMarketingWebRateLimiter();
+const limitWebSaves = webRateLimit({ operation: 'web_draft_save', limit: 90, windowMs: 60 * 1000 });
+const limitWebRevisions = webRateLimit({ operation: 'web_revision_create', limit: 12, windowMs: 10 * 60 * 1000 });
+const limitWebProjects = webRateLimit({ operation: 'web_project_create', limit: 20, windowMs: 60 * 60 * 1000 });
+const limitWebTemplates = webRateLimit({ operation: 'web_template_write', limit: 30, windowMs: 60 * 60 * 1000 });
+const limitWebContentWrites = webRateLimit({ operation: 'web_content_write', limit: 120, windowMs: 10 * 60 * 1000 });
+const limitWebMediaWrites = webRateLimit({ operation: 'web_media_write', limit: 60, windowMs: 60 * 60 * 1000 });
+const limitWebCompiles = webRateLimit({ operation: 'web_artifact_compile', limit: 20, windowMs: 60 * 60 * 1000 });
+const limitWebPublicationWrites = webRateLimit({ operation: 'web_publication_write', limit: 20, windowMs: 60 * 60 * 1000 });
+
+// Web/CMS. `/api/web` conserva su contrato histórico de analítica y PSI;
+// el dominio editorial vive bajo Marketing para evitar mezclar responsabilidades.
+router.get('/web-projects', webProjectsController.listProjects);
+router.post('/web-projects', limitWebProjects, webProjectsController.createProject);
+router.get('/web-projects/:projectId', webProjectsController.getProject);
+router.patch('/web-projects/:projectId', webProjectsController.updateProject);
+router.get('/web-projects/:projectId/draft', webProjectsController.getDraft);
+router.put('/web-projects/:projectId/draft', limitWebSaves, webProjectsController.saveDraft);
+router.get('/web-projects/:projectId/revisions', webProjectsController.listRevisions);
+router.get('/web-projects/:projectId/content-drift', webProjectsController.getContentDrift);
+router.post('/web-projects/:projectId/revisions', limitWebRevisions, webProjectsController.createRevision);
+router.post('/web-projects/:projectId/templates', limitWebTemplates, webProjectsController.createTemplateFromProject);
+router.post('/web-revisions/:revisionId/submit', webProjectsController.submitRevision);
+router.post('/web-revisions/:revisionId/approve', webProjectsController.approveRevision);
+router.post('/web-revisions/:revisionId/compile', limitWebCompiles, webArtifactsController.compileRevision);
+router.get('/web-artifacts/:artifactId', webArtifactsController.getArtifact);
+router.get('/web-projects/:projectId/artifacts', webArtifactsController.listProjectArtifacts);
+router.get('/web-projects/:projectId/publications', webPublicationsController.listProjectPublications);
+router.post('/web-publications', limitWebPublicationWrites, webPublicationsController.createPublication);
+router.get('/web-publications/verification-key', webPublicationsController.getVerificationKey);
+router.get('/web-publications/:publicationId', webPublicationsController.getPublication);
+router.get('/web-publications/:publicationId/deployments', webPublicationsController.listDeployments);
+router.post('/web-publications/:publicationId/publish', limitWebPublicationWrites, webPublicationsController.requestPublish);
+router.post('/web-publications/:publicationId/rollback', limitWebPublicationWrites, webPublicationsController.requestRollback);
+router.get('/web-domains', webDomainsController.listDomains);
+router.post('/web-domains', limitWebPublicationWrites, webDomainsController.createDomain);
+router.post('/web-domains/:domainId/verify', limitWebPublicationWrites, webDomainsController.verifyDomain);
+router.post('/web-domains/:domainId/rotate-verification', limitWebPublicationWrites, webDomainsController.rotateDomainToken);
+router.get('/web-installations', webWordpressInstallationsController.listInstallations);
+router.post('/web-installations', limitWebPublicationWrites, webWordpressInstallationsController.createInstallation);
+router.post('/web-installations/:installationId/plugin-package', limitWebPublicationWrites, webWordpressInstallationsController.downloadPluginPackage);
+router.post('/web-installations/:installationId/rotate-token', limitWebPublicationWrites, webWordpressInstallationsController.rotateToken);
+router.post('/web-installations/:installationId/revoke', limitWebPublicationWrites, webWordpressInstallationsController.revokeInstallation);
+router.get('/web-templates', webProjectsController.listTemplates);
+router.patch('/web-templates/:templateId', limitWebTemplates, webProjectsController.updateTemplate);
+router.delete('/web-templates/:templateId', limitWebTemplates, webProjectsController.archiveTemplate);
+router.get('/web-content', webContentMediaController.listContent);
+router.post('/web-content', limitWebContentWrites, webContentMediaController.createContent);
+router.patch('/web-content/:contentId', limitWebContentWrites, webContentMediaController.updateContent);
+router.get('/web-content/:contentId/versions', webContentMediaController.listContentVersions);
+router.get('/web-media', webContentMediaController.listMedia);
+router.post('/web-media', limitWebMediaWrites, webContentMediaController.registerMedia);
+router.patch('/web-media/:mediaId', limitWebMediaWrites, webContentMediaController.updateMedia);
 
 // Informes de marketing agregados (front no orquesta fuentes externas una a una)
 router.get('/reports/overview', marketingReportsController.getOverview);

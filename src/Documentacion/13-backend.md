@@ -4858,3 +4858,267 @@ publica `MAX(version)+1`, desactiva solo la version activa anterior y nunca
 reescribe historicos. Un segundo `up` reutiliza la version marcada; `down`
 reactiva la predecesora y deja catalogo/version nueva inactivos, sin borrar
 plantillas ni filas que puedan estar referenciadas por ejecuciones.
+
+## Marketing Web: control plane, editor y compilador W0-W2 (2026-07-18)
+
+W0 establece la frontera de seguridad y despliegue. El editor y la publicación
+son gates distintos y ambos nacen apagados:
+`MARKETING_WEB_EDITOR_ENABLED=false` y
+`MARKETING_WEB_PUBLISHING_ENABLED=false`. El segundo nunca evita el primero y
+`MARKETING_WEB_DISABLED_SCOPES=clinic:66,group:4` actúa como kill switch por
+scope. El parser de rutas editoriales admite como máximo 1 MiB de JSON, el
+`WebDocument` canónico como máximo 512 KiB, y las escrituras tienen rate limits
+por actor. Las rutas públicas del plugin tienen límites distribuidos por
+instalación/IP con Redis y degradación local explícita; no comparten el JWT de
+la UI.
+
+La matriz se aplica en backend, no es solo metadata de frontend:
+
+- `marketing.web.view`: propietario, agencia, assistant, reception y
+  admin_staff;
+- `marketing.web.edit`: propietario, agencia, reception y admin_staff;
+- `marketing.web.advanced_edit`: preparado para propietario, agencia y
+  admin_staff, pero aún sin superficie avanzada publicada;
+- `marketing.web.review`: propietario, agencia y admin_staff;
+- `marketing.web.publish` y `marketing.web.domains.manage`: propietario y
+  admin_staff;
+- `marketing.web.templates.manage`: todos los roles de clínica quedan
+  denegados por defecto; solo lo obtiene un administrador global o una
+  delegación explícita y auditable en `AccessPolicyOverride`.
+
+W1 persiste el editor como datos tipados en `WebProjects`, `WebPages`,
+`WebDrafts`, `WebRevisions`, `WebTemplates` y `WebAuditEvents`. No se guarda
+HTML/CSS arbitrario. `WebDocument v1` usa un JSON Schema cerrado, IDs UUID,
+límites de profundidad/nodos/páginas/bindings y canonicalización Unicode
+determinista. Rechaza propiedades de código/estilo, markup ejecutable, objetos
+no JSON, getters, ciclos y claves peligrosas. El borrador se guarda mediante
+CAS (`lock_version`); crear, enviar y aprobar revisiones adquiere locks en orden
+`WebProject -> WebRevision`. Las revisiones aprobadas son inmutables. Las
+plantillas builtin se siembran versionadas y las instancias regeneran todos los
+IDs estructurales para no compartir referencias entre proyectos.
+
+W2 compila una revisión aprobada a un `WebArtifact` determinista e inmutable.
+La clave de identidad cubre revisión, renderer, entorno, URL base y runtime
+confiable; manifest, ficheros, hashes y QA se persisten juntos. El compilador
+escapa texto, genera HTML semántico, CSS, sitemap/robots, JSON-LD y formularios
+nativos. Producción obliga a `/_clinicaclick/intake` y emite el relay
+`/_clinicaclick/events`; ambos son same-origin. La clínica y el
+`content_snapshot` quedan congelados antes de compilar, por lo que una
+publicación no consulta contenido vivo a mitad de despliegue. Ed25519 firma el
+manifest y tanto WordPress como el origen alojado verifican hash, tamaño,
+allowlist y firma antes de activar. `status` es el único campo mutable de un
+artefacto; las actualizaciones masivas están sujetas al mismo hook.
+
+El rollout operativo es deliberado:
+
+1. aplicar las migraciones W1-W5 en un MySQL 8 aislado y repetir
+   `up -> up -> down -> down -> up` antes de cada primera implantación;
+2. configurar gates, claves Ed25519, bootstrap AES, almacenamiento y secretos
+   de intake fuera de Git;
+3. habilitar editor en un scope de prueba, compilar preview y revisar QA;
+4. instalar el plugin u origen Nginx, comprobar handshake y lectura firmada;
+5. habilitar publicación solo en ese scope, publicar un disposable, probar
+   formulario + eventos y ejecutar rollback;
+6. ampliar scopes gradualmente. Desactivar publicación bloquea nuevas
+   mutaciones, pero no borra artefactos ni rompe la página activa.
+
+La suite canónica es `npm test`: ejecuta contratos Node del alcance y después
+los 20 contratos PHP, compatibilidad Ed25519 Node/PHP, compilador real y ZIP
+provisionado. Si `WEB_EDITOR_TEST_MYSQL_URL` está definida también ejecuta las
+integraciones destructivas sobre esa base **aislada**; nunca se apunta a dev,
+staging ni producción.
+
+## Marketing Web: CMS y biblioteca de medios W3 (2026-07-17)
+
+El CMS Web persiste intención editorial tipada, nunca HTML, CSS, scripts,
+iframes ni payloads libres. `WebContentEntries` mantiene la versión actual con
+CAS; `WebContentEntryVersions` conserva una fila inmutable por versión. Los
+tipos admitidos son `value_proposition`, `benefit`, `faq`, `treatment_copy`,
+`professional_bio`, `testimonial`, `legal_copy`, `article` y `category`, cada
+uno con un contrato JSON cerrado. Estados: `draft -> review -> published` y
+`archived`; editar una entrada publicada crea una nueva versión en `review`.
+Publicar o archivar exige `marketing.web.review`; leer y editar usan
+`marketing.web.view|edit` dentro del scope explícito.
+
+La biblioteca `WebMediaAssets` no guarda binarios ni credenciales. Envuelve un
+`PublicMediaAsset` marcado como no clínico; la
+API solo devuelve URL pública, MIME, tamaño, variantes saneadas, alt, foco,
+derechos y metadatos técnicos mínimos. Nunca proyecta bucket, región, object
+key, ETag, provider, HMAC ni metadata cruda. La subida sigue siendo
+`POST /api/public-media/upload` en JSON/base64 con
+`purpose=web_editor_media`; ese purpose exige que el feature flag esté activo,
+`marketing.web.edit`, un máximo de 30 subidas por actor/hora y las cuotas por
+scope configuradas en `MARKETING_WEB_MEDIA_MAX_ASSETS_PER_SCOPE` y
+`MARKETING_WEB_MEDIA_MAX_BYTES_PER_SCOPE`. Genera una key opaca bajo
+`marketing/web-editor`, pero la respuesta no devuelve URL ni object key.
+
+La subida se decodifica y recodifica a WebP con Sharp antes de almacenarla. Ese
+desarme de contenido elimina EXIF, GPS, XMP y bytes anexos. **No existe todavía
+un antivirus externo**: se registra honestamente `malware_scan_status=not_available`
+y el contrato queda fail-closed a imágenes raster que Sharp pueda decodificar;
+vídeo, SVG y binarios generales no están soportados en W3. El activo queda con
+`status=quarantine`, `sensitivity=internal` y caducidad. Después se registra el
+`asset.id` en el CMS; creación de wrapper y activación del activo ocurren en la
+misma transacción. Si falla la fila inicial se elimina el objeto opaco. La
+función interna `cleanupExpiredQuarantinedMedia` reclama cada cuarentena
+caducada bajo lock con estado `cleanup_pending` y lease antes de tocar S3. El
+registro concurrente queda así bloqueado: o activa primero el medio y el
+cleanup lo omite, o encuentra el claim y lo rechaza. El borrado S3 es
+idempotente; un fallo devuelve el activo a cuarentena y una caída después del
+borrado deja el claim recuperable al vencer el lease. Solo admite keys con
+prefijo `marketing/web-editor/(clinic|group)-<id>/`. `system_data_cleanup` la
+invoca desde el orquestador común de `JobRequest`; no existe un cron paralelo.
+
+El POST W3 no acepta multipart ni binario.
+
+APIs autenticadas y paginadas:
+
+- `GET/POST /api/marketing/web-content`;
+- `PATCH /api/marketing/web-content/:contentId` con `version` obligatorio;
+- `GET /api/marketing/web-content/:contentId/versions`;
+- `GET/POST /api/marketing/web-media`;
+- `PATCH /api/marketing/web-media/:mediaId` con `version` obligatorio.
+
+Scope se declara como `scope_type=clinic|group` y `scope_id`. Las listas usan
+`page`, `limit` (máximo 100), `status`, `search` y filtros de tipo/locale/kind.
+Una clínica solo ve activos del grupo cuando pide explícitamente
+`include_inherited_group=true`; cada resultado heredado devuelve
+`scope.inherited=true` y `read_only=true`. Un grupo nunca puede leer recursos
+de una clínica concreta. Contenido y medios solo los modifica su autor; un
+usuario distinto necesita `marketing.web.review`. Los endpoints por UUID
+devuelven 404 uniforme si el scope no es accesible. Las escrituras de contenido
+están limitadas a 120 por actor/10 minutos y las de medios a 60 por actor/hora,
+además del parser JSON W0 de 1 MiB. Errores, conflictos CAS y rate limit conservan el contrato
+`error.code`, `error.message`, `details` y `request_id`.
+
+Al aprobar una `WebRevision`, el backend adquiere locks siempre en orden
+`WebProject -> WebRevision`, resuelve los UUID externos y congela un
+`content_snapshot` tipado e inmutable. Medios deben estar `ready`, sus derechos
+no pueden haber caducado y el `PublicMediaAsset` debe seguir autorizado;
+contenido debe estar `published` y exponer el campo solicitado. Una referencia
+UUID grupal elegida por un proyecto de clínica cuenta como herencia explícita.
+Los bindings vivos de clínica se congelan como descriptores
+`clinic_public_v1` con un allowlist de campos públicos; un proyecto de grupo
+siempre requiere clínica explícita. `treatment`, `professional` e
+`intake_config` siguen devolviendo
+`resolver_not_implemented` hasta que exista su contrato propio; no se
+improvisan consultas. Si queda alguna referencia, la aprobación responde 422
+`web_revision_not_ready` con las rutas no resueltas y no cambia estado. La
+snapshot solo contiene campos publicables y rechaza nombres sensibles como
+`token`, `secret`, `hmac_key`, `bucket` u `object_key`. Las URLs de fuentes no
+admiten query ni fragmento, y la snapshot omite referencias internas de
+licencias o consentimiento.
+
+## Marketing Web: publicación WordPress y puente de campañas W4/W5 (2026-07-18)
+
+Una landing de campaña puede congelar en `WebProjects.campaign_context` el
+vínculo opcional `{strategy_id, target_kind, treatment_id}`. El objeto solo se
+admite en proyectos `purpose=landing`, tiene contrato cerrado y es inmutable
+después de crear el proyecto. La publicación copia ese contexto desde el
+proyecto; nunca confía en un valor recibido en el body. Cuando un deployment
+queda verificado y su puntero activo se confirma, la misma transacción inserta
+el `JobRequest` idempotente `marketing_web.landing_published.v1`, con id estable
+`webpub:<publication_id>:<artifact_id>`. De este modo el consumidor de campañas
+recibe URL pública canónica, scope, estrategia, target y hash sin una ventana
+entre publicación y outbox.
+
+El schema se instala en orden: `19000` (proyectos/editor), `20000`
+(contenido/media), `21500` (plantillas builtin), `22000` (artefactos), `23000`
+(dominios/publicaciones/deployments), `24000` (atribución de intake) y `24500`
+(contexto de campaña). Los `up` validan el contrato completo de cualquier tabla
+preexistente y fallan cerrado ante drift; solo pueden reparar la variante
+legacy exacta de `ON UPDATE CASCADE` en las FKs de scope cuando destino,
+columna referenciada, `ON DELETE` y datos permiten la sustitución segura. Los
+`down` se ejecutan en orden inverso y son repetibles.
+
+`WebPublicationDeployments` es un log append-only con secuencia monotónica. La
+petición crea deployment + `JobRequest` en una transacción; el worker bloquea
+deployment y publicación, verifica versión esperada y pasa por
+`queued -> running -> verified|failed|superseded`. Solo campos operativos de
+estado/resultado pueden cambiar, también en bulk. Activar un artefacto cambia
+el puntero de publicación únicamente después del readback público. Rollback no
+recompila contenido vivo: exige un artefacto de producción previamente
+`verified`, lo vuelve a verificar y crea otra secuencia auditable.
+
+Los dominios propios separan ownership, routing y TLS. El job durable
+`marketing_web_domain_reconciliation` corre por defecto a los minutos
+`7,22,37,52`; revalida pendientes y reduce las comprobaciones de dominios
+estables a una vez al día. El proveedor Cloudflare se usa solo server-side y
+el modo manual conserva DNS/TLS explícitos. Ninguna publicación custom-domain
+se activa hasta que ownership, ruta y certificado estén listos en la misma
+reconciliación.
+
+Los artefactos WordPress admiten dos proveedores mediante
+`MARKETING_WEB_ARTIFACT_STORE_MODE=authenticated_db|s3`:
+
+- `authenticated_db` reutiliza el manifest y los ficheros inmutables ya
+  guardados en `WebArtifacts`; no duplica bytes. Es el fallback automático si
+  no hay configuración S3 y genera URLs HTTPS bajo el mismo API.
+- `s3` conserva el almacén público inmutable existente y exige bucket, base
+  HTTPS y credenciales del servidor. Si no se declara modo, solo se selecciona
+  S3 cuando están configurados bucket y base URL.
+
+En `authenticated_db`, las rutas públicas respecto a JWT de UI son:
+
+- `GET /api/marketing/web-installations/:installationId/artifacts/:artifactHash/manifest`;
+- `GET /api/marketing/web-installations/:installationId/artifacts/:artifactHash/envelope`;
+- `GET /api/marketing/web-installations/:installationId/artifacts/:artifactHash/files/:pathToken`.
+
+No son anónimas. Exigen `Authorization: Bearer <token de instalación>` y
+`X-Clinicaclick-Plugin-Version`, aplican rate limit por instalación/IP y vuelven
+a resolver el único artefacto deseado. Solo sirven el hash exacto de esa
+instalación, el manifest canónico, su envelope Ed25519 regenerado de forma
+determinista y las rutas declaradas en el manifest. Un hash anterior o ajeno,
+un token de otra instalación o un `pathToken` no canónico fallan cerrado. Las
+respuestas son `private, no-store` y nunca exponen bucket, key ni credenciales.
+
+El plugin `2.0.0-alpha.3` decide las cabeceras por origen: añade bearer y
+versión únicamente cuando el origen completo de la descarga coincide con
+`api_base`; nunca los reenvía a S3/CDN. En ambos modos conserva la segunda
+barrera: verifica firma, hash, tamaño, allowlist y contenido antes del cambio
+atómico de `active.json`.
+
+El onboarding ya no tiene dependencia circular. La secuencia válida es:
+
+1. backend crea `WebWordpressInstallation(status=pending)` y un ticket opaco
+   AES-256-GCM ligado a actor, instalación, token y caducidad;
+2. el usuario autenticado descarga el ZIP provisionado aunque todavía no haya
+   publicación; contiene solo identidad, token y ancla pública Ed25519;
+3. al activar, WordPress guarda la configuración y envía un heartbeat
+   autenticado `activation_handshake`; el backend pasa la instalación a
+   `connected` aun sin desired state;
+4. se puede preparar una publicación mientras está `pending`, pero el backend
+   rechaza su activación hasta que la instalación esté `connected`;
+5. tras publicar, `desired-state` entrega runtime firmado y artefacto; los
+   siguientes reportes confirman el hash activo.
+
+No se ha relajado ninguna firma ni autenticación. El token sigue persistido
+solo como hash en backend y como opción `autoload=false` en WordPress; el ZIP
+es `private, no-store`, el ticket dura 15 minutos y un token/descriptor que no
+coincida falla antes de generar el paquete.
+
+Los receptores públicos `POST /api/intake/leads`,
+`POST /api/intake/events` y `POST /api/intake/whatsapp-origin` también son
+fail-closed. Aceptan el HMAC del
+`IntakeConfig` aplicable o, solo cuando ese scope no tiene secreto, el HMAC
+server-to-server configurado en `INTAKE_WEB_SECRET`. Un secreto global nunca
+puede sustituir ni saltarse el secreto más estrecho de clínica o grupo. El
+relay de landings sigue este mismo contrato: valida publicación, revisión,
+artefacto, host y ruta, reconstruye un body canónico y lo firma server-side;
+ninguna cabecera aportada por el navegador actúa como autenticación.
+
+Para el canal alojado, Nginx expone exactamente dos rutas de escritura:
+`POST /_clinicaclick/intake` y `POST /_clinicaclick/events`; cualquier otro
+POST queda denegado. La segunda permite 80 KiB para alojar el payload canónico
+validado de hasta 64 KiB y su wrapper. El runbook versionado está en
+`ops/nginx/README-marketing-web.md` y exige `nginx -t`, CSP, formulario,
+chat/teléfono/WhatsApp, readback y rollback antes de abrir un scope real.
+
+El webhook de Meta conserva el GET de verificación, pero cada POST exige
+`META_APP_SECRET`, el cuerpo crudo y una cabecera
+`X-Hub-Signature-256: sha256=<hex>` válida. La ausencia de secreto o firma se
+rechaza; no existe bypass implícito por entorno. Las pruebas solo pueden crear
+el validador con una dependencia explícita `allowUnsignedForTests: true`.
+`META_APP_SECRET` se captura al cargar el módulo: rotarlo exige actualizar el
+secreto en todos los procesos y reiniciarlos de forma controlada; un worker con
+el valor anterior rechazará firmas nuevas.

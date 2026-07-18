@@ -69,6 +69,24 @@ async function testClinicSettingsAuthorizationMatrix() {
       featureKey: 'clinic.settings.view',
       clinicId: 66,
     }), false);
+
+    membership = { rol_clinica: 'propietario', subrol_clinica: null };
+    assert.equal(await accessPolicy.canUserAccessFeature({
+      actorId: 9001,
+      featureKey: 'marketing.web.templates.manage',
+      clinicId: 66,
+    }), false, 'template management must be closed by default');
+    overrides = [{ scope_type: 'group', scope_id: 29, effect: 'allow' }];
+    assert.equal(await accessPolicy.canUserAccessFeature({
+      actorId: 9001,
+      featureKey: 'marketing.web.templates.manage',
+      clinicId: 66,
+    }), true, 'template management may be delegated with an explicit override');
+    assert.equal(await accessPolicy.canUserAccessFeature({
+      actorId: 1,
+      featureKey: 'marketing.web.templates.manage',
+      clinicId: 66,
+    }), true, 'global admins retain the explicit bypass');
   } finally {
     db.UsuarioClinica.findOne = originals.membershipFindOne;
     db.Clinica.findByPk = originals.clinicFindByPk;
@@ -79,6 +97,38 @@ async function testClinicSettingsAuthorizationMatrix() {
 async function run() {
   const catalog = accessPolicy.getAccessPolicyCatalog();
   const features = new Map(catalog.features.map((feature) => [feature.key, feature]));
+  const allowedFeatureKeys = [...accessPolicy.ALLOWED_FEATURE_KEYS].sort();
+  const catalogFeatureKeys = catalog.features.map((feature) => feature.key).sort();
+  const defaultFeatureKeys = Object.keys(catalog.defaults).sort();
+
+  assert.deepEqual(
+    catalogFeatureKeys,
+    allowedFeatureKeys,
+    'every allowlisted feature must have exactly one catalog entry',
+  );
+  assert.deepEqual(
+    defaultFeatureKeys,
+    allowedFeatureKeys,
+    'every allowlisted feature must have an explicit default matrix',
+  );
+  assert.equal(
+    new Set(catalog.features.map((feature) => feature.key)).size,
+    catalog.features.length,
+    'feature catalog keys must be unique',
+  );
+  for (const featureKey of allowedFeatureKeys) {
+    assert.deepEqual(
+      Object.keys(catalog.defaults[featureKey]).sort(),
+      [...accessPolicy.ALLOWED_ROLE_CODES].sort(),
+      `${featureKey} must define a default for every role code`,
+    );
+  }
+
+  assert.equal(
+    accessPolicy.defaultForFeature('allowlisted.feature.without.defaults', 'propietario'),
+    false,
+    'a missing default matrix must fail closed',
+  );
 
   assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has('appointments.view'), true);
   assert.equal(features.get('appointments.view')?.kind, 'view');
@@ -138,6 +188,83 @@ async function run() {
   // PUBLIC_MEDIA reutiliza este permiso para review_team_photo: una agencia
   // asignada al scope debe seguir pudiendo gestionar la foto de resenas.
   assert.equal(accessPolicy.defaultForFeature('marketing', 'agencia'), true);
+
+  const webPermissionMatrix = {
+    'marketing.web.view': {
+      propietario: true,
+      agencia: true,
+      doctor: false,
+      assistant: true,
+      reception: true,
+      admin_staff: true,
+      unknown: false,
+    },
+    'marketing.web.edit': {
+      propietario: true,
+      agencia: true,
+      doctor: false,
+      assistant: false,
+      reception: true,
+      admin_staff: true,
+      unknown: false,
+    },
+    'marketing.web.advanced_edit': {
+      propietario: true,
+      agencia: true,
+      doctor: false,
+      assistant: false,
+      reception: false,
+      admin_staff: true,
+      unknown: false,
+    },
+    'marketing.web.review': {
+      propietario: true,
+      agencia: true,
+      doctor: false,
+      assistant: false,
+      reception: false,
+      admin_staff: true,
+      unknown: false,
+    },
+    'marketing.web.publish': {
+      propietario: true,
+      agencia: false,
+      doctor: false,
+      assistant: false,
+      reception: false,
+      admin_staff: true,
+      unknown: false,
+    },
+    'marketing.web.domains.manage': {
+      propietario: true,
+      agencia: false,
+      doctor: false,
+      assistant: false,
+      reception: false,
+      admin_staff: true,
+      unknown: false,
+    },
+    'marketing.web.templates.manage': {
+      propietario: false,
+      agencia: false,
+      doctor: false,
+      assistant: false,
+      reception: false,
+      admin_staff: false,
+      unknown: false,
+    },
+  };
+  for (const [featureKey, roleDefaults] of Object.entries(webPermissionMatrix)) {
+    assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has(featureKey), true);
+    assert.ok(features.has(featureKey), `${featureKey} must be present in the catalog`);
+    assert.deepEqual(catalog.defaults[featureKey], roleDefaults);
+  }
+  assert.equal(features.get('marketing.web.view')?.enforcement_status, 'backend');
+  assert.equal(features.get('marketing.web.edit')?.enforcement_status, 'backend');
+  assert.equal(features.get('marketing.web.review')?.enforcement_status, 'backend');
+  assert.equal(features.get('marketing.web.publish')?.enforcement_status, 'backend');
+  assert.equal(features.get('marketing.web.domains.manage')?.enforcement_status, 'backend');
+  assert.equal(features.get('marketing.web.templates.manage')?.enforcement_status, 'backend');
 
   assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has('consents.view'), true);
   assert.equal(features.get('consents.view')?.kind, 'view');

@@ -401,51 +401,57 @@ async function enqueueUniqueJobRequest({
     ? Math.max(1, Number(options.transactionRetries))
     : Math.max(1, UNIQUE_ENQUEUE_TRANSACTION_RETRIES);
 
+  const findOrCreate = async (transaction) => {
+    const existing = await JobRequestModel.findOne({
+      where: {
+        type,
+        status: { [Op.in]: activeStatuses },
+        [Op.and]: [
+          buildRuntimeScopeWhere({
+            sequelizeInstance,
+            namespaces: [targetRuntimeNamespace],
+            includeUnscoped: targetRuntimeNamespace === CURRENT_RUNTIME_NAMESPACE
+              ? CLAIM_UNSCOPED_JOBS
+              : false,
+          }),
+          buildDedupeScopeWhere(resolvedDedupeScope, sequelizeInstance),
+        ],
+      },
+      order: [['created_at', 'ASC']],
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+
+    if (existing) return { job: existing, created: false };
+
+    const job = await JobRequestModel.create({
+      type,
+      priority: normalizePriority(priority),
+      status: normalizeStatus(status),
+      origin,
+      payload: scopedPayload,
+      requested_by: requestedBy,
+      requested_by_name: requestedByName,
+      requested_by_role: requestedByRole,
+      max_attempts: maxAttempts,
+      next_run_at: nextRunAt,
+      result_summary: resultSummary,
+    }, { transaction });
+
+    return { job, created: true };
+  };
+
+  // Domain writes that enqueue their integration event can supply the same
+  // transaction. This is the outbox boundary: either state and JobRequest are
+  // both committed, or neither is. Callers without one retain SERIALIZABLE
+  // retry semantics below.
+  if (options.transaction) return findOrCreate(options.transaction);
+
   for (let attempt = 1; attempt <= transactionRetries; attempt += 1) {
     try {
       return await sequelizeInstance.transaction(
         { isolationLevel: Sequelize.Transaction.ISOLATION_LEVELS.SERIALIZABLE },
-        async (transaction) => {
-          const existing = await JobRequestModel.findOne({
-            where: {
-              type,
-              status: { [Op.in]: activeStatuses },
-              [Op.and]: [
-                buildRuntimeScopeWhere({
-                  sequelizeInstance,
-                  namespaces: [targetRuntimeNamespace],
-                  includeUnscoped: targetRuntimeNamespace === CURRENT_RUNTIME_NAMESPACE
-                    ? CLAIM_UNSCOPED_JOBS
-                    : false,
-                }),
-                buildDedupeScopeWhere(resolvedDedupeScope, sequelizeInstance),
-              ],
-            },
-            order: [['created_at', 'ASC']],
-            transaction,
-            lock: transaction.LOCK.UPDATE,
-          });
-
-          if (existing) {
-            return { job: existing, created: false };
-          }
-
-          const job = await JobRequestModel.create({
-            type,
-            priority: normalizePriority(priority),
-            status: normalizeStatus(status),
-            origin,
-            payload: scopedPayload,
-            requested_by: requestedBy,
-            requested_by_name: requestedByName,
-            requested_by_role: requestedByRole,
-            max_attempts: maxAttempts,
-            next_run_at: nextRunAt,
-            result_summary: resultSummary,
-          }, { transaction });
-
-          return { job, created: true };
-        }
+        findOrCreate
       );
     } catch (error) {
       const retryableTransactionError = [1205, 1213].includes(Number(error?.errno))

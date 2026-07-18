@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "request_id": "req_example_01",
+  "installation_id": "d6d6d9bb-093e-4a40-8465-5ebf9edcde44",
+  "desired_state": {
+    "status": "published",
+    "artifact_hash": "__ARTIFACT_SHA256__",
+    "manifest_url": "https://artifacts.example.test/web-artifacts/v1/__ARTIFACT_SHA256__/manifest.json",
+    "envelope_url": "https://artifacts.example.test/web-artifacts/v1/__ARTIFACT_SHA256__/manifest.sig.json",
+    "files": {
+      "assets/styles.example.css": "https://artifacts.example.test/web-artifacts/v1/__ARTIFACT_SHA256__/assets/styles.example.css",
+      "index.html": "https://artifacts.example.test/web-artifacts/v1/__ARTIFACT_SHA256__/index.html",
+      "robots.txt": "https://artifacts.example.test/web-artifacts/v1/__ARTIFACT_SHA256__/robots.txt",
+      "sitemap.xml": "https://artifacts.example.test/web-artifacts/v1/__ARTIFACT_SHA256__/sitemap.xml"
+    },
+    "signing_key_descriptor": {
+      "schema_version": 1,
+      "algorithm": "Ed25519",
+      "key_id": "__KEY_ID__",
+      "public_key_base64": "__PUBLIC_KEY_BASE64__"
+    },
+    "signing_key_descriptor_envelope": {},
+    "runtime_configuration": {
+      "schema_version": 1,
+      "installation_id": "d6d6d9bb-093e-4a40-8465-5ebf9edcde44",
+      "sequence": 17,
+      "status": "active",
+      "route_prefix": "/cita",
+      "desired_artifact_hash": "__ARTIFACT_SHA256__",
+      "measurement": {
+        "enabled": true,
+        "scope_type": "clinic",
+        "scope_id": 56,
+        "loader_path": "/assets/loader.js",
+        "hmac_key": "__SERVER_SIDE_INTAKE_HMAC_VALUE__",
+        "consent_mode_enabled": true,
+        "consent_provider": "external_cmp"
+      }
+    },
+    "runtime_configuration_envelope": {
+      "signature_version": 1,
+      "algorithm": "Ed25519",
+      "key_id": "__KEY_ID__",
+      "manifest_sha256": "__RUNTIME_SHA256__",
+      "signature": "__RUNTIME_SIGNATURE_BASE64__"
+    }
+  }
+}

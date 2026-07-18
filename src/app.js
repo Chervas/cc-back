@@ -4,6 +4,7 @@ if (!process.env.GROQ_API_KEY) {
 }
 const cors = require('cors');
 const express = require('express');
+const crypto = require('node:crypto');
 const http = require('http');
 const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
@@ -31,6 +32,9 @@ const localRoutes = require('./routes/local.routes');
 const googleAdsRoutes = require('./routes/googleads.routes');
 const jobRequestsRoutes = require('./routes/jobrequests.routes');
 const intakeRoutes = require('./routes/intake.routes');
+const { landingIntakeHandlers } = require('./routes/webLandingIntake.handlers');
+const { landingEventBridgeHandlers } = require('./routes/webLandingEventBridge.handlers');
+const webHostedOrigin = require('./middleware/webHostedOrigin.middleware');
 const campaignRoutes = require('./routes/campaign.routes');
 const campaignRequestRoutes = require('./routes/campaign-request.routes');
 const templatesRoutes = require('./routes/templates.routes');
@@ -70,6 +74,9 @@ const RESUME_AUTOMATIONS_FROM_SOCKET_BUS =
 // Importar db desde models/index.js que contiene sequelize y todos los modelos
 const db = require('../models'); // <-- Importa el objeto db de models/index.js
 const app = express();
+// Nginx corre en el mismo host. Solo sus redes locales pueden aportar XFF;
+// un cliente directo no puede suplantar la IP usada en intake/rate limits.
+app.set('trust proxy', process.env.HTTP_TRUST_PROXY || 'loopback');
 const server = http.createServer(app);
 // CORS:
 // - UI (app/crm/local) queda en allowlist.
@@ -83,6 +90,23 @@ const STATIC_CORS_ORIGINS = new Set([
     'http://localhost:4203'
 ]);
 const HTTP_JSON_BODY_LIMIT = process.env.HTTP_JSON_BODY_LIMIT || '25mb';
+const {
+    MARKETING_WEB_JSON_LIMIT_BYTES,
+    invalidMarketingWebJsonResponse,
+    isMarketingWebJsonPath,
+} = require('./lib/marketingWebRequestGuards');
+
+function isJsonContentType(req) {
+    const contentType = String(req.headers?.['content-type'] || '').split(';')[0].trim().toLowerCase();
+    return contentType === 'application/json' || /^application\/[a-z0-9.+-]+\+json$/.test(contentType);
+}
+
+function requestIdForWebGuard(req) {
+    const supplied = String(req.get('X-Request-Id') || '').trim();
+    return /^[A-Za-z0-9][A-Za-z0-9._:-]{7,79}$/.test(supplied)
+        ? supplied
+        : crypto.randomUUID();
+}
 
 function isPublicIntakePath(pathname = '') {
     if (typeof pathname !== 'string') return false;
@@ -90,6 +114,7 @@ function isPublicIntakePath(pathname = '') {
     return new Set([
         '/api/intake/config',
         '/api/intake/leads',
+        '/api/intake/landing-leads',
         '/api/intake/leads/webhook',
         '/api/intake/events',
         '/api/intake/whatsapp-origin'
@@ -110,7 +135,7 @@ const corsOptionsDelegate = (req, callback) => {
     }
 
     // Allow external origins for the intake snippet endpoints. Security is enforced inside the controllers
-    // (domain allowlist + optional HMAC).
+    // (domain allowlist + mandatory scoped or server-to-server HMAC).
     if (isPublicIntakePath(pathname)) {
         return callback(null, { origin: true, credentials: false });
     }
@@ -119,13 +144,69 @@ const corsOptionsDelegate = (req, callback) => {
 };
 
 app.use(cors(corsOptionsDelegate));
+const marketingWebJsonParser = express.json({
+    limit: MARKETING_WEB_JSON_LIMIT_BYTES,
+    type: isJsonContentType,
+    verify: (req, res, buf) => { req.rawBody = buf; },
+});
+app.use((req, res, next) => {
+    if (!isMarketingWebJsonPath(req.originalUrl || req.url || req.path)) return next();
+    const method = String(req.method || 'GET').toUpperCase();
+    if (['POST', 'PUT', 'PATCH'].includes(method) && !isJsonContentType(req)) {
+        const requestId = requestIdForWebGuard(req);
+        res.set('X-Request-Id', requestId);
+        res.set('Cache-Control', 'no-store');
+        return res.status(415).json({
+            success: false,
+            error: {
+                code: 'marketing_web_unsupported_media_type',
+                message: 'Estas operaciones requieren Content-Type: application/json.',
+            },
+            request_id: requestId,
+        });
+    }
+    return marketingWebJsonParser(req, res, next);
+});
 app.use(express.json({
     limit: HTTP_JSON_BODY_LIMIT,
+    // Las rutas del editor ya han pasado por su parser estricto de 1 MB.
+    type: (req) => !isMarketingWebJsonPath(req.originalUrl || req.url || req.path) && isJsonContentType(req),
     verify: (req, res, buf) => {
         // Guardar el cuerpo crudo para validar firmas HMAC de intake
         req.rawBody = buf;
     }
 }));
+const landingIntakeParser = express.urlencoded({
+    extended: false,
+    limit: 16 * 1024,
+    parameterLimit: 20,
+    type: 'application/x-www-form-urlencoded',
+    verify: (req, res, buf) => { req.rawBody = buf; },
+});
+app.use(['/api/intake/landing-leads', '/_clinicaclick/intake'], (req, res, next) => {
+    if (String(req.method || '').toUpperCase() !== 'POST') return next();
+    const contentType = String(req.headers?.['content-type'] || '').split(';')[0].trim().toLowerCase();
+    if (contentType !== 'application/x-www-form-urlencoded') {
+        return res.status(415).json({
+            success: false,
+            error: { code: 'web_landing_unsupported_media_type', message: 'El formulario no tiene un formato válido.' },
+        });
+    }
+    return landingIntakeParser(req, res, (error) => {
+        if (!error) return next();
+        const tooLarge = error?.type === 'entity.too.large';
+        return res.status(tooLarge ? 413 : 400).json({
+            success: false,
+            error: {
+                code: tooLarge ? 'web_landing_payload_too_large' : 'web_landing_body_invalid',
+                message: 'El formulario no tiene un formato válido.',
+            },
+        });
+    });
+});
+app.post('/_clinicaclick/intake', ...landingIntakeHandlers);
+app.post('/_clinicaclick/events', ...landingEventBridgeHandlers);
+app.use(webHostedOrigin);
 app.use(express.urlencoded({ extended: true, limit: HTTP_JSON_BODY_LIMIT }));
 app.use(cookieParser());
 app.use('/', marketingTrackingRoutes);
@@ -232,6 +313,34 @@ console.log('Ruta /api/conversations configurada');
 app.use('/api/whatsapp', require('./routes/whatsapp-embedded.routes'));
 console.log('Ruta /api/whatsapp embedded configurada');
 console.log('Routes registered successfully');
+app.use((error, req, res, next) => {
+    const requestPath = String(req.originalUrl || req.url || req.path || '').split('?')[0];
+    const invalidJsonPayload = invalidMarketingWebJsonResponse(error, requestPath);
+    if (invalidJsonPayload) {
+        const requestId = requestIdForWebGuard(req);
+        res.set('X-Request-Id', requestId);
+        res.set('Cache-Control', 'no-store');
+        return res.status(400).json({
+            ...invalidJsonPayload,
+            request_id: requestId,
+        });
+    }
+    const webPayloadTooLarge = isMarketingWebJsonPath(req.originalUrl || req.url || req.path)
+        && (error?.code === 'marketing_web_payload_too_large' || error?.type === 'entity.too.large');
+    if (!webPayloadTooLarge) return next(error);
+    const requestId = requestIdForWebGuard(req);
+    res.set('X-Request-Id', requestId);
+    res.set('Cache-Control', 'no-store');
+    return res.status(413).json({
+        success: false,
+        error: {
+            code: 'marketing_web_payload_too_large',
+            message: 'El documento supera el límite de 1 MB permitido por el editor web.',
+            details: { limit_bytes: MARKETING_WEB_JSON_LIMIT_BYTES },
+        },
+        request_id: requestId,
+    });
+});
 // Puerto del servidor
 const PORT = process.env.PORT || 3000;
 // Socket.io

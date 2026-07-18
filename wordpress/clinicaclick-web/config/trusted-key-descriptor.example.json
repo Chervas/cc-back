@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "algorithm": "Ed25519",
+  "key_id": "ed25519-0000000000000000",
+  "public_key_base64": "REEMPLAZAR_POR_CLAVE_PUBLICA_BASE64"
+}

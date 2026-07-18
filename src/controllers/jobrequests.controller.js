@@ -63,6 +63,7 @@ const VIEW_STATUS_MAP = {
 
 exports.list = async (req, res) => {
   try {
+    if (!assertGlobalAdmin(req, res)) return;
     const { view = 'queue' } = req.query;
     const limit = parseIntSafe(req.query.limit, 50);
     const offset = parseIntSafe(req.query.offset, 0);
@@ -91,8 +92,9 @@ exports.list = async (req, res) => {
   }
 };
 
-exports.summary = async (_req, res) => {
+exports.summary = async (req, res) => {
   try {
+    if (!assertGlobalAdmin(req, res)) return;
     const statusSummary = await JobRequest.findAll({
       attributes: [
         'status',
@@ -218,8 +220,9 @@ exports.trigger = async (req, res) => {
   }
 };
 
-exports.workerStatus = async (_req, res) => {
+exports.workerStatus = async (req, res) => {
   try {
+    if (!assertGlobalAdmin(req, res)) return;
     const status = await jobScheduler.getStatus();
     res.json(status);
   } catch (error) {

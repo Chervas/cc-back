@@ -746,15 +746,27 @@ async function testPostCommitFastPathReadsSafeResult() {
 }
 
 function testRegistrationInventoryAndNoProviderPath() {
-  assert.equal(Object.keys(jobExecutor.JOB_HANDLERS).length, 49);
-  assert.equal(
-    typeof jobExecutor.JOB_HANDLERS[outboxService.INTAKE_QUICKCHAT_SUMMARY_JOB_TYPE],
-    'function',
-  );
+  for (const type of [
+    outboxService.INTAKE_QUICKCHAT_SUMMARY_JOB_TYPE,
+    'marketing_web_domain_reconciliation',
+    'web_publication_deploy',
+  ]) {
+    assert.equal(typeof jobExecutor.JOB_HANDLERS[type], 'function', `${type} handler missing`);
+  }
   assert.equal(
     BACKGROUND_INTEGRATION_JOB_TYPES.includes(outboxService.INTAKE_QUICKCHAT_SUMMARY_JOB_TYPE),
     false,
     'the outbox must use the standard high-priority lane, not the provider integration lane',
+  );
+  assert.equal(
+    BACKGROUND_INTEGRATION_JOB_TYPES.includes('marketing_web_domain_reconciliation'),
+    true,
+    'periodic domain reconciliation must use the background integration lane',
+  );
+  assert.equal(
+    BACKGROUND_INTEGRATION_JOB_TYPES.includes('web_publication_deploy'),
+    false,
+    'publication deployment must remain a targeted durable job',
   );
 
   const source = fs.readFileSync(

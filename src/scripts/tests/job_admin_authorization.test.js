@@ -1,9 +1,11 @@
 'use strict';
 
 const assert = require('assert/strict');
+const db = require('../../../models');
 const metaJobsController = require('../../controllers/metasync.jobs.controller');
 const jobRequestsController = require('../../controllers/jobrequests.controller');
 const jobRequestsService = require('../../services/jobRequests.service');
+const jobScheduler = require('../../services/jobScheduler.service');
 const { queues } = require('../../services/queue.service');
 
 function responseHarness() {
@@ -44,6 +46,9 @@ async function testNormalUserCannotManageOrRunJobs() {
   await assertForbidden(jobRequestsController.create, {
     body: { type: 'system_pm2_log_retention', payload: { directory: '/home/ubuntu' } },
   });
+  await assertForbidden(jobRequestsController.list, { query: {} });
+  await assertForbidden(jobRequestsController.summary);
+  await assertForbidden(jobRequestsController.workerStatus);
   await assertForbidden(jobRequestsController.cancel, { params: { id: '1' } });
   await assertForbidden(jobRequestsController.retry, { params: { id: '1' } });
   await assertForbidden(jobRequestsController.trigger, { params: { id: '1' } });
@@ -121,6 +126,75 @@ async function testPm2HttpPayloadIsRestrictedToDryRun() {
   }
 }
 
+async function testGlobalAdminCanReadGenericJobMonitor() {
+  const originalList = jobRequestsService.listJobRequests;
+  const originalFindAll = db.JobRequest.findAll;
+  const originalGetStatus = jobScheduler.getStatus;
+  const calls = [];
+
+  try {
+    jobRequestsService.listJobRequests = async (args) => {
+      calls.push(['list', args]);
+      return {
+        rows: [{
+          id: 321,
+          type: 'health_check',
+          priority: 'normal',
+          status: 'pending',
+          origin: 'manual',
+          payload: { safe: true },
+          requested_by: 1,
+          requested_by_name: 'Admin',
+          requested_by_role: 'admin',
+          attempts: 0,
+          max_attempts: 3,
+          created_at: new Date('2026-07-17T10:00:00Z'),
+          updated_at: new Date('2026-07-17T10:00:00Z'),
+        }],
+        count: 1,
+      };
+    };
+    let summaryCall = 0;
+    db.JobRequest.findAll = async () => {
+      summaryCall += 1;
+      const key = summaryCall === 1 ? 'pending' : 'normal';
+      return [{
+        get(field) {
+          if (field === 'total') return '1';
+          return key;
+        },
+      }];
+    };
+    jobScheduler.getStatus = async () => ({ running: true });
+
+    const listResponse = responseHarness();
+    await jobRequestsController.list({
+      query: { view: 'queue', limit: '10' },
+      userData: { userId: 1 },
+    }, listResponse);
+    assert.equal(listResponse.statusCode, 200);
+    assert.equal(listResponse.body.data[0].id, 321);
+    assert.equal(calls[0][0], 'list');
+
+    const summaryResponse = responseHarness();
+    await jobRequestsController.summary({ userData: { userId: 44 } }, summaryResponse);
+    assert.equal(summaryResponse.statusCode, 200);
+    assert.deepEqual(summaryResponse.body, {
+      status: [{ status: 'pending', total: 1 }],
+      priority: [{ priority: 'normal', total: 1 }],
+    });
+
+    const workerResponse = responseHarness();
+    await jobRequestsController.workerStatus({ userData: { userId: 1 } }, workerResponse);
+    assert.equal(workerResponse.statusCode, 200);
+    assert.deepEqual(workerResponse.body, { running: true });
+  } finally {
+    jobRequestsService.listJobRequests = originalList;
+    db.JobRequest.findAll = originalFindAll;
+    jobScheduler.getStatus = originalGetStatus;
+  }
+}
+
 async function testManualRunMergesCatalogPayloadDefaults() {
   const originalUniqueEnqueue = jobRequestsService.enqueueUniqueJobRequest;
   const calls = [];
@@ -175,6 +249,7 @@ async function testManualRunMergesCatalogPayloadDefaults() {
 
 async function run() {
   await testNormalUserCannotManageOrRunJobs();
+  await testGlobalAdminCanReadGenericJobMonitor();
   await testPm2HttpPayloadIsRestrictedToDryRun();
   await testManualRunMergesCatalogPayloadDefaults();
   console.log('job_admin_authorization.test.js: OK');

@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "renderer_version": "clinicaclick-web-renderer/1.0.0",
+  "project_id": "11111111-1111-4111-8111-111111111111",
+  "revision_id": "22222222-2222-4222-8222-222222222222",
+  "environment": "production",
+  "base_url": "https://cliente.example.test/cita",
+  "runtime_config_hash": "__RUNTIME_CONFIG_SHA256__",
+  "document_hash": "__DOCUMENT_SHA256__",
+  "content_snapshot_hash": "__CONTENT_SHA256__",
+  "artifact_input_hash": "__INPUT_SHA256__",
+  "intake_forms": {
+    "contact-main": {
+      "page_path": "/",
+      "page_id": "33333333-3333-4333-8333-333333333333",
+      "success_anchor": "cc-contact-main-success",
+      "error_anchor": "cc-contact-main-error"
+    }
+  },
+  "files": {
+    "assets/styles.example.css": {
+      "sha256": "__CSS_SHA256__",
+      "content_type": "text/css; charset=utf-8",
+      "size_bytes": 0
+    },
+    "index.html": {
+      "sha256": "__HTML_SHA256__",
+      "content_type": "text/html; charset=utf-8",
+      "size_bytes": 0
+    },
+    "robots.txt": {
+      "sha256": "__ROBOTS_SHA256__",
+      "content_type": "text/plain; charset=utf-8",
+      "size_bytes": 0
+    },
+    "sitemap.xml": {
+      "sha256": "__SITEMAP_SHA256__",
+      "content_type": "application/xml; charset=utf-8",
+      "size_bytes": 0
+    }
+  },
+  "headers": {
+    "content-security-policy": "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' https://media.clinicaclick.com; style-src 'self'; script-src 'sha256-EXAMPLE' https://crm.clinicaclick.com; connect-src 'self' https://crm.clinicaclick.com; font-src 'self'",
+    "cross-origin-opener-policy": "same-origin",
+    "cross-origin-resource-policy": "same-site",
+    "permissions-policy": "camera=(), microphone=(), geolocation=()",
+    "referrer-policy": "strict-origin-when-cross-origin",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "artifact_hash": "__ARTIFACT_SHA256__"
+}
