@@ -31,6 +31,11 @@ const {
 } = require('./webWordpressInstallations.service');
 const { assertWebPublishingChannelEnabled } = require('../lib/marketingWebFeatureFlags');
 const { inspectDns, inspectTls } = require('./webDomains.service');
+const {
+  MIN_GLOBAL_INTAKE_PLUGIN_VERSION,
+  manifestHasGlobalIntakeContract,
+  semverAtLeast,
+} = require('../lib/webWordpressCompatibility');
 
 function plain(row) {
   return row?.get ? row.get({ plain: true }) : row;
@@ -518,6 +523,20 @@ async function channelDeploy({
     // running; an old lastArtifactHash must never complete that publication.
     if (!installation || installation.status !== 'connected') {
       throw new WebPublicationServiceError('web_wordpress_not_connected', 'El plugin de WordPress no está conectado.', 409);
+    }
+    if (manifestHasGlobalIntakeContract(artifact.manifest)) {
+      const actualVersion = String(installation.pluginVersion || '').trim() || null;
+      if (!semverAtLeast(actualVersion, MIN_GLOBAL_INTAKE_PLUGIN_VERSION)) {
+        throw new WebPublicationServiceError(
+          'web_wordpress_global_intake_plugin_outdated',
+          'Actualiza el plugin de WordPress antes de desplegar un formulario global.',
+          409,
+          {
+            actual_plugin_version: actualVersion,
+            required_plugin_version: MIN_GLOBAL_INTAKE_PLUGIN_VERSION,
+          }
+        );
+      }
     }
     if (String(installation.lastArtifactHash || '') !== String(artifact.artifact_hash)) {
       return {

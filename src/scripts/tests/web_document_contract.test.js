@@ -15,6 +15,40 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function addGlobalForm(document) {
+  const section = clone(document.nodes.section_hero);
+  section.id = 'section_global_header';
+  section.props.semantic_tag = 'header';
+  section.children = ['form_global'];
+  const form = clone(document.nodes.form_lead);
+  form.id = 'form_global';
+  form.props.form_key = 'global_contact';
+  form.props.fields = form.props.fields.map((field) => ({ ...field, id: `global_${field.id}` }));
+  document.nodes.section_global_header = section;
+  document.nodes.form_global = form;
+  document.globals.header_node_id = section.id;
+}
+
+function addSecondPageForm(document) {
+  const section = clone(document.nodes.section_hero);
+  section.id = 'section_other_page';
+  section.children = ['form_other_page'];
+  const form = clone(document.nodes.form_lead);
+  form.id = 'form_other_page';
+  form.props.form_key = 'other_page_contact';
+  form.props.fields = form.props.fields.map((field) => ({ ...field, id: `other_${field.id}` }));
+  document.nodes.section_other_page = section;
+  document.nodes.form_other_page = form;
+  document.pages.push({
+    ...clone(document.pages[0]),
+    id: 'page_other',
+    title: 'Otra página',
+    slug: 'otra-pagina',
+    root_node_ids: [section.id],
+    seo: { ...clone(document.pages[0].seo), canonical_url: null },
+  });
+}
+
 function assertInvalid(document, keyword) {
   const result = validateWebDocument(document);
   assert.equal(result.valid, false, `se esperaba documento inválido para ${keyword}`);
@@ -139,6 +173,31 @@ function testSemanticImageFormButtonAndBindingRules() {
   assertInvalid(binding, 'bindingTarget');
 }
 
+function testIntakeButtonTargetsStayInsideTheirEffectiveScope() {
+  const localToGlobal = buildValidWebDocument();
+  addGlobalForm(localToGlobal);
+  localToGlobal.nodes.button_primary.props.target = 'form_global';
+  assert.equal(validateWebDocument(localToGlobal).valid, true);
+
+  const localToOtherPage = buildValidWebDocument();
+  addSecondPageForm(localToOtherPage);
+  localToOtherPage.nodes.button_primary.props.target = 'form_other_page';
+  assertInvalid(localToOtherPage, 'formScopeReference');
+
+  const globalToGlobal = buildValidWebDocument();
+  addGlobalForm(globalToGlobal);
+  const globalButton = clone(globalToGlobal.nodes.button_primary);
+  globalButton.id = 'button_global';
+  globalButton.props.target = 'form_global';
+  globalToGlobal.nodes.button_global = globalButton;
+  globalToGlobal.nodes.section_global_header.children.unshift(globalButton.id);
+  assert.equal(validateWebDocument(globalToGlobal).valid, true);
+
+  const globalToLocal = clone(globalToGlobal);
+  globalToLocal.nodes.button_global.props.target = 'form_lead';
+  assertInvalid(globalToLocal, 'formScopeReference');
+}
+
 function testTypedFaqIsPlainTextAndLeafOnly() {
   const valid = buildValidWebDocument();
   valid.nodes.faq_implantes = {
@@ -151,6 +210,21 @@ function testTypedFaqIsPlainTextAndLeafOnly() {
     },
     children: [],
     style_tokens: { background: 'surface', radius: 'lg', spacing_top: 'sm', spacing_bottom: 'sm' },
+    binding_ids: ['faq_question_binding', 'faq_answer_binding'],
+  };
+  valid.bindings.faq_question_binding = {
+    target_node_id: 'faq_implantes',
+    target_prop: 'question',
+    source: 'content_entry',
+    source_id: 'faq_content_entry',
+    field: 'question',
+  };
+  valid.bindings.faq_answer_binding = {
+    target_node_id: 'faq_implantes',
+    target_prop: 'answer',
+    source: 'content_entry',
+    source_id: 'faq_content_entry',
+    field: 'answer',
   };
   valid.nodes.section_hero.children.push('faq_implantes');
   const result = assertValidWebDocument(valid);
@@ -164,6 +238,10 @@ function testTypedFaqIsPlainTextAndLeafOnly() {
   const withChild = clone(valid);
   withChild.nodes.faq_implantes.children = ['text_intro'];
   assertInvalid(withChild, 'maxItems');
+
+  const wrongFaqTarget = clone(valid);
+  wrongFaqTarget.bindings.faq_question_binding.target_prop = 'text';
+  assertInvalid(wrongFaqTarget, 'bindingTarget');
 }
 
 function testStructuralAndByteLimits() {
@@ -254,6 +332,7 @@ function run() {
   testNoArbitraryCodeMarkupStylesOrClasses();
   testGraphReferencesCyclesDepthAndOrphans();
   testSemanticImageFormButtonAndBindingRules();
+  testIntakeButtonTargetsStayInsideTheirEffectiveScope();
   testTypedFaqIsPlainTextAndLeafOnly();
   testStructuralAndByteLimits();
   testCanonicalSerializationAndHash();

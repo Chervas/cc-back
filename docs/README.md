@@ -25,13 +25,15 @@ Operación WordPress: `wordpress/clinicaclick-web/README.md`. Origen alojado:
 
 Estado 2026-07-18:
 
-- backend integrado en `dev` hasta `6533357` y staging hasta `0d42abb`;
+- backend integrado en `dev` hasta `1466452` y staging hasta `807b967`;
 - migraciones `19000..25000` aplicadas tras backup; 17 tablas y cinco
   plantillas; cero policies/bindings reales creados;
 - gates de staging: editor para scopes Propdental y publicación solo
   `group:5` mediante `MARKETING_WEB_PUBLISHING_SCOPES`;
-- plugin WordPress `2.0.0-alpha.5` instalado/activo en Propdental junto al
-  legado `1.1.7`, con un único loader/bootstrap;
+- plugin WordPress `2.0.0-alpha.6` instalado/activo en Propdental junto al
+  legado `1.1.7`, con un único loader/bootstrap. El preflight inspeccionó ese
+  runtime, pero la DB aún conserva `2.0.0-alpha.5` por la cadencia de heartbeat
+  de hasta 24 horas; no confundir versión live con versión reportada atrasada;
 - instalación `524c2f73-6b69-42f2-8cb0-c8d171575d94` conectada en el origen
   canónico `https://www.propdental.es`; el alta `apex` se normalizó solo durante
   el primer handshake virgen y las comprobaciones posteriores son estrictas;
@@ -47,12 +49,76 @@ Estado 2026-07-18:
 - intake E2E pasó dos veces y `LeadIntake #7261` terminó atribuido a clínica
   `59`/grupo `5` antes de su limpieza completa; rollback real publicó la
   revisión temporal 3 y volvió por secuencia 6/job `31699` a revisión 2/LKG;
+- el E2E posterior de `alpha.6` confirmó atribución
+  `clinicaclick_web_publication` a través del relay first-party y terminó con
+  cero leads/eventos/filas WhatsApp sintéticos y cero intentos Google;
+- el monitor horario se ejecutó de forma controlada sobre una publicación:
+  `1 healthy`, `0 degraded` a `2026-07-18T13:01:04.689Z`;
 - hosted/custom domain no están disponibles;
 - un WordPress compartido por varias clínicas exige multi-route antes de
   ampliar el piloto, y la rotación Ed25519 operativa sigue siendo gate de GA.
 
-Evidencia: suite backend Web 188/188; contratos WordPress 22/22 y artefacto/
-plugin 22/22, además de readback, lead/limpieza y rollback públicos descritos.
+Estado de implementación posterior, todavía separado de la evidencia live:
+
+- renderer `clinicaclick-web-renderer/1.3.0` compila cabecera y pie globales en
+  cada página y manifiesta el formulario global mediante contratos por página;
+- el paquete fuente `clinicaclick-web` `2.0.0-alpha.7` valida esos contratos y
+  su cobertura de rutas. Antes de publicar globales debe guardarse el rollback
+  real `alpha.6` con `config/installation.php`, instalar el ZIP provisionado
+  `alpha.7` sin perder identidad, ejecutar `CCW_Plugin::activate(false)` como
+  usuario `propdental.es` y comprobar **en DB** `2.0.0-alpha.7`; no basta
+  esperar el heartbeat ordinario ni inspeccionar solo los ficheros. La API
+  bloquea fail-closed un deployment WordPress con formulario global si el
+  plugin es anterior (`409 web_wordpress_global_intake_plugin_outdated`);
+  documentos legacy y header/footer globales sin formulario no quedan
+  bloqueados por ese mínimo;
+- CMS y medios proyectan capabilities del actor y de cada fila, herencia de
+  solo lectura, autoría/revisión, flujo `draft -> review -> published` e
+  historial inmutable. Los bindings semánticos, incluida FAQ
+  `question/answer`, no reutilizan el nombre interno de la entrada;
+- la hidratación de medios acepta lotes explícitos de hasta 100 UUID. El
+  editor consume esa API para recuperar imágenes de nodos y assets sociales o
+  globales sin persistir URLs como autoridad.
+- la API revalida `campaign_context`, plantilla, scope y compatibilidad antes
+  de crear un proyecto desde campaña; el filtro frontend nunca basta para
+  autorizar una combinación.
+
+Tanda posterior ya promovida y desplegada:
+
+- `clinicaclick-web` `2.0.0-alpha.6` endurece identidad Web y enruta eventos de
+  landing por el relay atribuible; es la versión live y `alpha.5` queda como
+  rollback local;
+- la API separa rollout de disponibilidad real y proyecta capabilities
+  fail-closed para WordPress, hosted y custom domain;
+- hosted valida pareja Ed25519, firma, bundle exacto, hashes, symlinks, punteros
+  y solapamiento de rutas, pero sigue bloqueado por DNS/TLS/origen;
+- `marketing_web_publication_health_monitor` opera cada hora, lote 25,
+  sin autoreparación ni APIs publicitarias;
+- la suite completa, promoción y E2E público con limpieza están cerrados.
+  WordPress multi-route y rotación Ed25519 operativa siguen siendo gates; los
+  canales hosted/custom continúan bloqueados por DNS/TLS/origen/proveedor.
+
+La auditoría Figma se materializó en un onboarding de tres pasos y un selector
+de plantillas compatible con la campaña, sin fallback arbitrario. El frontend
+recorre todas las páginas del catálogo, deduplica y permite buscar localmente;
+el backend solo entrega `preview_document` después de ACL/paginación,
+validación canónica y comprobación de hash. La opción libre se llama
+**Estructura inicial editable** y explica que crea título, texto, botón y
+formulario totalmente editables/eliminables; en contexto de campaña, la
+ausencia de una plantilla compatible bloquea el alta en vez de fabricar una
+landing vacía. SEO, Social y Schema, el inspector de CTA, el panel de diseño,
+el flujo editorial/historial, los globales y la hidratación de medios ya
+existen en la implementación. Sigue pendiente la aceptación visual completa
+contra Figma, drag/drop avanzado y el E2E público de esta tanda. Se reutiliza
+la UX, no el runtime ModSuite. Véase `20.14`/`20.15` en frontend.
+
+Evidencia local vigente: 223/223 contratos Node, 26/26 PHP/WordPress, 3/3 de
+interoperabilidad y frontend Marketing Web 153/153. El build de producción local
+terminó verde con hash `da0d27c8f1d2f80a`; mantiene el warning preexistente de
+bundle de 4,15 MB. Sigue pendiente de despliegue. El corte live anterior se
+acredita por 78/78 frontend, build `e775a9d1935d0a68`, readback,
+relay/atribución, limpieza, rollback y monitor de `alpha.6`; esos E2E no
+convierten automáticamente `alpha.7`/renderer `1.3.0` en live.
 
 ## Orden de verificación
 
@@ -70,7 +136,11 @@ diagnósticos/recomendaciones. No cambia campañas, custom goals, URLs, pujas,
 presupuesto ni estados. Las referencias posteriores a **Conecta y mejora** son
 el nombre visible del corte histórico de julio previo a esta integración.
 
-Estado de arquitectura del corte anterior (2026-07-16): el catálogo tenía 30 tareas periódicas y 48 handlers. Tras integrar Web/Campañas el arranque de staging registra 32 tareas; la publicación y los destinos continúan dentro del mismo `JobRequest`, nunca en un cron paralelo. El detalle histórico siguiente sobre outbox/retención se conserva: también son durables `marketing_competition_heatmap_refresh`, `automation_whatsapp_quiet_send`, `whatsapp_template_sync_delayed` e `intake_quickchat_summary_materialize`. Este último es un outbox de prioridad alta compartido por `source_detail=chatbot` y `chatbot_quickchat`: cada payload aceptado conserva en una transacción su audit exacto y job, tanto para un lead nuevo como para uno deduplicado. El JobRequest solo guarda `lead_id + audit_id` más el namespace técnico añadido por la cola; la sede validada queda en `audit.attribution_steps.resolved_clinic_id`. El handler exige esa sede y un mismatch con el lead termina `409` sin Message/socket; solo audits legacy sin marcador caen de forma segura en la clínica del lead. `Messages.metadata.intake_audit_id` impone orden durable: bajo lock del lead, el audit mayor gana y cualquier job antiguo completa como `skipped/stale` sin cambiar contenido, socket ni `last_message_at`; el watermark avanza aunque hash/contenido sean idénticos y un mensaje legacy idéntico adopta el primer marcador. El fast path admite el `result_summary` envuelto por `JobExecutor` y el formato directo compatible de callers/tests, devuelve `saved=true` solo si terminó, `202 + queued` si queda reintentable y preserva `4xx` seguros como el `409` de sede. Si falla el disparo, relee `JobRequest`; si tampoco puede releerlo responde `202 unknown_durable`, no inventa `pending`. Un `chatbot` deduplicado termina con ese outcome antes de Meta/Google para no duplicar conversiones, mientras los demás dedupes conservan `409`. Teléfonos fuera de 9–15 dígitos y emails presentes inválidos devuelven `422` antes de confirmar el lead. `pm2-back-staging` opera con cron leader + worker; las cinco líneas OPS se retiraron del crontab. `#23664-#23670` validaron los bridges y `payloadDefaults`; `#23672` completó la retención real. `SyncLogs` (auditoría funcional BD) y ficheros PM2 (stdout/stderr, 60 días) son retenciones independientes.
+Estado de arquitectura vigente (2026-07-18): staging registra **33 tareas
+periódicas**, **10 integraciones dirigidas/background** y **58 handlers**. La
+publicación, los destinos y el monitor Web continúan dentro del mismo
+`JobRequest`, nunca en un cron paralelo. El detalle histórico siguiente sobre
+outbox/retención se conserva: también son durables `marketing_competition_heatmap_refresh`, `automation_whatsapp_quiet_send`, `whatsapp_template_sync_delayed` e `intake_quickchat_summary_materialize`. Este último es un outbox de prioridad alta compartido por `source_detail=chatbot` y `chatbot_quickchat`: cada payload aceptado conserva en una transacción su audit exacto y job, tanto para un lead nuevo como para uno deduplicado. El JobRequest solo guarda `lead_id + audit_id` más el namespace técnico añadido por la cola; la sede validada queda en `audit.attribution_steps.resolved_clinic_id`. El handler exige esa sede y un mismatch con el lead termina `409` sin Message/socket; solo audits legacy sin marcador caen de forma segura en la clínica del lead. `Messages.metadata.intake_audit_id` impone orden durable: bajo lock del lead, el audit mayor gana y cualquier job antiguo completa como `skipped/stale` sin cambiar contenido, socket ni `last_message_at`; el watermark avanza aunque hash/contenido sean idénticos y un mensaje legacy idéntico adopta el primer marcador. El fast path admite el `result_summary` envuelto por `JobExecutor` y el formato directo compatible de callers/tests, devuelve `saved=true` solo si terminó, `202 + queued` si queda reintentable y preserva `4xx` seguros como el `409` de sede. Si falla el disparo, relee `JobRequest`; si tampoco puede releerlo responde `202 unknown_durable`, no inventa `pending`. Un `chatbot` deduplicado termina con ese outcome antes de Meta/Google para no duplicar conversiones, mientras los demás dedupes conservan `409`. Teléfonos fuera de 9–15 dígitos y emails presentes inválidos devuelven `422` antes de confirmar el lead. `pm2-back-staging` opera con cron leader + worker; las cinco líneas OPS se retiraron del crontab. `#23664-#23670` validaron los bridges y `payloadDefaults`; `#23672` completó la retención real. `SyncLogs` (auditoría funcional BD) y ficheros PM2 (stdout/stderr, 60 días) son retenciones independientes.
 
 Fix Enhanced verificado: el normalize/merge conserva flags y autorización en top/event/destino. La prueba controlada `#22` acreditó formato/transporte; después, siete intentos naturales `#25/#26/#27/#28/#30/#32/#33` de `1851215478` terminaron `succeeded/SUCCESS` con consentimiento, `user_data_sent=true` y `[email, phone]`. `5992356722` mantiene acciones/readiness y `validateOnly` verdes, pero todavía no un terminal natural posterior a la migración. Las ocho acciones canónicas siguen secundarias, fuera de `Conversions` y con default Google `0`: Mide y entiende enriquece atribución, pero no gobierna la puja.
 
@@ -80,8 +150,8 @@ ACL operativa: agencia es marketing-only y solo recibe atribución/pacientes/lea
 
 Release funcional histórica previa a Web: backend staging `9b82958`, frontend
 `3c4593ae`, build `8ca8e450c563e9ee`. El corte Web actual está documentado
-arriba (`0d42abb` backend; frontend staging `ca2e5e8a`, build
-`d7dabcf5fb4f8963`). Consent v5 sigue vigente. Propdental continúa en
+arriba (`807b967` backend; frontend staging `56da07f8`, build
+`e775a9d1935d0a68`). Consent v5 sigue vigente. Propdental continúa en
 `connect_only`; no se activa Mejora/Piloto ni se cambian goals, URLs, pujas o
 presupuesto. Meta Francia no tiene todavía cuenta publicitaria/píxel
 configurados. `Conseguir más reseñas` está cerrado/listo.

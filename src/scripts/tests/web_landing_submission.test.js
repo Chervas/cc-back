@@ -155,6 +155,58 @@ test('convierte el formulario firmado en un lead atribuido sin inventar consenti
   assert.deepEqual(JSON.parse(result.raw_body.toString('utf8')), result.payload);
 });
 
+test('acepta un formulario global solo mediante el contrato firmado de la página actual', async () => {
+  const state = fixture();
+  const revision = await state.models.WebRevision.findByPk(IDS.revision);
+  revision.document.globals = { header_node_id: IDS.form, footer_node_id: null };
+  revision.document.pages[0].root_node_ids = [IDS.landingText];
+  const flatContract = state.artifact.manifest.intake_forms[IDS.form];
+  state.artifact.manifest.intake_forms[IDS.form] = {
+    scope: 'global',
+    page_contracts: {
+      [IDS.page]: flatContract,
+      [IDS.landingPage]: {
+        ...flatContract,
+        page_path: '/informacion/',
+        page_id: IDS.landingPage,
+      },
+    },
+  };
+  state.body.web_page_id = IDS.landingPage;
+  state.headers.referer = 'https://landing.example.test/implantes/informacion/?gclid=global-click';
+  state.models.WebPage.findOne = async () => ({
+    id: IDS.pageRecord,
+    projectId: IDS.project,
+    pageKey: IDS.landingPage,
+    slug: 'informacion',
+  });
+
+  const result = await prepareWebLandingSubmission({
+    body: state.body,
+    headers: state.headers,
+    models: state.models,
+  });
+
+  assert.equal(result.attribution.document_page_id, IDS.landingPage);
+  assert.equal(result.attribution.form_id, IDS.form);
+  assert.equal(
+    result.success_url,
+    `https://landing.example.test/implantes/informacion/?gclid=global-click#cc-${IDS.form}-success`
+  );
+
+  const missing = fixture();
+  const missingRevision = await missing.models.WebRevision.findByPk(IDS.revision);
+  missingRevision.document.globals = { header_node_id: IDS.form, footer_node_id: null };
+  missing.artifact.manifest.intake_forms[IDS.form] = {
+    scope: 'global',
+    page_contracts: {},
+  };
+  await assert.rejects(
+    () => prepareWebLandingSubmission({ body: missing.body, headers: missing.headers, models: missing.models }),
+    (error) => error.code === 'web_landing_form_contract_invalid'
+  );
+});
+
 test('rechaza campos extra, origen cruzado y ruta que no coincide con el manifest', async () => {
   const unknown = fixture();
   await assert.rejects(

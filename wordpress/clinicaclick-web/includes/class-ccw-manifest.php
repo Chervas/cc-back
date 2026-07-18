@@ -208,40 +208,80 @@ final class CCW_Manifest
             }
             $keys = array_keys($metadata);
             sort($keys, SORT_STRING);
-            if ($keys !== array('error_anchor', 'fields', 'page_id', 'page_path', 'success_anchor')) {
-                throw new CCW_Error('ccw_manifest_intake_form_invalid', 'El contrato de un formulario contiene campos no permitidos.');
+            if ($keys === array('page_contracts', 'scope')) {
+                if ((string) ($metadata['scope'] ?? '') !== 'global' || !is_array($metadata['page_contracts'] ?? null)) {
+                    throw new CCW_Error('ccw_manifest_intake_form_invalid', 'El contrato global de un formulario no es válido.');
+                }
+                $contracts = $metadata['page_contracts'];
+                $route_ids = array_keys((array) ($manifest['page_routes'] ?? array()));
+                $contract_ids = array_keys($contracts);
+                sort($route_ids, SORT_STRING);
+                sort($contract_ids, SORT_STRING);
+                if ($contracts === array() || count($contracts) > 50 || $contract_ids !== $route_ids) {
+                    throw new CCW_Error('ccw_manifest_intake_page_route_mismatch', 'El formulario global debe estar firmado para todas las páginas.');
+                }
+                $normalized_contracts = array();
+                $first_fields = null;
+                foreach ($contract_ids as $page_id) {
+                    if (!is_array($contracts[$page_id] ?? null)) {
+                        throw new CCW_Error('ccw_manifest_intake_form_invalid', 'El contrato global contiene una página no válida.');
+                    }
+                    $contract = self::safe_intake_page_contract($form_id, $contracts[$page_id], $manifest, $files, $uuid);
+                    if (!hash_equals(strtolower((string) $page_id), (string) $contract['page_id'])) {
+                        throw new CCW_Error('ccw_manifest_intake_page_invalid', 'La clave de página del formulario global no coincide.');
+                    }
+                    $serialized_fields = CCW_JSON::canonical($contract['fields']);
+                    if ($first_fields !== null && !hash_equals($first_fields, $serialized_fields)) {
+                        throw new CCW_Error('ccw_manifest_intake_fields_invalid', 'Un formulario global debe conservar los mismos campos en todas las páginas.');
+                    }
+                    $first_fields = $serialized_fields;
+                    $normalized_contracts[$contract['page_id']] = $contract;
+                }
+                $normalized[$form_id] = array('scope' => 'global', 'page_contracts' => $normalized_contracts);
+                continue;
             }
-            $fields = self::safe_intake_fields($metadata['fields'] ?? null);
-            $page_path = (string) $metadata['page_path'];
-            if ($page_path !== '/' && !preg_match('#^/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/$#', $page_path)) {
-                throw new CCW_Error('ccw_manifest_intake_page_path_invalid', 'La ruta firmada de un formulario no es válida.');
-            }
-            $page_id = strtolower((string) $metadata['page_id']);
-            if (!preg_match($uuid, $page_id)) {
-                throw new CCW_Error('ccw_manifest_intake_page_invalid', 'La página firmada de un formulario no es válida.');
-            }
-            $route = $manifest['page_routes'][$page_id] ?? null;
-            if (!is_array($route) || !hash_equals((string) ($route['page_path'] ?? ''), $page_path)) {
-                throw new CCW_Error('ccw_manifest_intake_page_route_mismatch', 'El formulario no coincide con la ruta firmada de su página.');
-            }
-            $success = (string) $metadata['success_anchor'];
-            $error = (string) $metadata['error_anchor'];
-            if ($success !== 'cc-' . $form_id . '-success' || $error !== 'cc-' . $form_id . '-error') {
-                throw new CCW_Error('ccw_manifest_intake_anchor_invalid', 'Los destinos firmados del formulario no son válidos.');
-            }
-            $html_path = $page_path === '/' ? 'index.html' : substr($page_path, 1) . 'index.html';
-            if (!isset($files[$html_path])) {
-                throw new CCW_Error('ccw_manifest_intake_page_missing', 'El formulario apunta a una página que no forma parte del artefacto.');
-            }
-            $normalized[$form_id] = array(
-                'page_path' => $page_path,
-                'page_id' => $page_id,
-                'success_anchor' => $success,
-                'error_anchor' => $error,
-                'fields' => $fields,
-            );
+            $normalized[$form_id] = self::safe_intake_page_contract($form_id, $metadata, $manifest, $files, $uuid);
         }
         return $normalized;
+    }
+
+    /** @return array<string,mixed> */
+    private static function safe_intake_page_contract($form_id, array $metadata, array $manifest, array $files, $uuid)
+    {
+        $keys = array_keys($metadata);
+        sort($keys, SORT_STRING);
+        if ($keys !== array('error_anchor', 'fields', 'page_id', 'page_path', 'success_anchor')) {
+            throw new CCW_Error('ccw_manifest_intake_form_invalid', 'El contrato de un formulario contiene campos no permitidos.');
+        }
+        $fields = self::safe_intake_fields($metadata['fields'] ?? null);
+        $page_path = (string) $metadata['page_path'];
+        if ($page_path !== '/' && !preg_match('#^/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/$#', $page_path)) {
+            throw new CCW_Error('ccw_manifest_intake_page_path_invalid', 'La ruta firmada de un formulario no es válida.');
+        }
+        $page_id = strtolower((string) $metadata['page_id']);
+        if (!preg_match($uuid, $page_id)) {
+            throw new CCW_Error('ccw_manifest_intake_page_invalid', 'La página firmada de un formulario no es válida.');
+        }
+        $route = $manifest['page_routes'][$page_id] ?? null;
+        if (!is_array($route) || !hash_equals((string) ($route['page_path'] ?? ''), $page_path)) {
+            throw new CCW_Error('ccw_manifest_intake_page_route_mismatch', 'El formulario no coincide con la ruta firmada de su página.');
+        }
+        $success = (string) $metadata['success_anchor'];
+        $error = (string) $metadata['error_anchor'];
+        if ($success !== 'cc-' . $form_id . '-success' || $error !== 'cc-' . $form_id . '-error') {
+            throw new CCW_Error('ccw_manifest_intake_anchor_invalid', 'Los destinos firmados del formulario no son válidos.');
+        }
+        $html_path = $page_path === '/' ? 'index.html' : substr($page_path, 1) . 'index.html';
+        if (!isset($files[$html_path])) {
+            throw new CCW_Error('ccw_manifest_intake_page_missing', 'El formulario apunta a una página que no forma parte del artefacto.');
+        }
+        return array(
+            'page_path' => $page_path,
+            'page_id' => $page_id,
+            'success_anchor' => $success,
+            'error_anchor' => $error,
+            'fields' => $fields,
+        );
     }
 
     /** @return array<int,array{name:string,type:string,required:bool}> */
@@ -491,6 +531,19 @@ final class CCW_Manifest
         $result = array();
         foreach ($manifest['intake_forms'] as $form_id => $metadata) {
             if (!is_array($metadata)) {
+                continue;
+            }
+            if (($metadata['scope'] ?? '') === 'global' && is_array($metadata['page_contracts'] ?? null)) {
+                foreach ($metadata['page_contracts'] as $contract) {
+                    if (!is_array($contract)) {
+                        continue;
+                    }
+                    $page_path = (string) ($contract['page_path'] ?? '');
+                    $expected_path = $page_path === '/' ? 'index.html' : substr($page_path, 1) . 'index.html';
+                    if (hash_equals((string) $html_path, $expected_path)) {
+                        $result[(string) $form_id] = $contract;
+                    }
+                }
                 continue;
             }
             $page_path = (string) ($metadata['page_path'] ?? '');

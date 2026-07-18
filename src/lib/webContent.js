@@ -441,10 +441,28 @@ function contentFieldValues(entry) {
     || content.excerpt
     || null;
   return {
+    // Aliases retained for documents created before typed CMS fields were
+    // bindable. `title` deliberately remains the editorial/internal title;
+    // new documents use the exact typed field below instead.
     title: row?.title || null,
     name: content.name || content.display_name || row?.title || null,
     description,
     short_description: content.short_description || content.excerpt || content.summary || description,
+    // Exact public fields. Keeping these separate prevents an internal CMS
+    // label from replacing the headline/question that an editor selected.
+    content_title: content.title || null,
+    headline: content.headline || null,
+    summary: content.summary || null,
+    question: content.question || null,
+    answer: content.answer || null,
+    display_name: content.display_name || null,
+    role: content.role || null,
+    biography: content.biography || null,
+    quote: content.quote || null,
+    attribution: content.attribution || null,
+    text: content.text || null,
+    version_label: content.version_label || null,
+    excerpt: content.excerpt || null,
   };
 }
 

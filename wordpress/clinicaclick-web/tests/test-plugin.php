@@ -229,6 +229,94 @@ function ccw_test_artifact($marker)
     );
 }
 
+/** @return array<string,mixed> */
+function ccw_test_global_form_artifact($marker)
+{
+    $artifact = ccw_test_artifact($marker);
+    $identity = $artifact['identity'];
+    $form_id = $identity['form_id'];
+    $page_id = $identity['page_id'];
+    $info_page_id = $identity['info_page_id'];
+    $flat = $artifact['manifest']['intake_forms'][$form_id];
+    $artifact['manifest']['intake_forms'][$form_id] = array(
+        'scope' => 'global',
+        'page_contracts' => array(
+            $page_id => $flat,
+            $info_page_id => array_merge($flat, array(
+                'page_path' => '/informacion/',
+                'page_id' => $info_page_id,
+            )),
+        ),
+    );
+    $matches = array();
+    if (!preg_match('/<form\b[^>]*>.*?<\/form\s*>/is', $artifact['files']['index.html'], $matches)) {
+        throw new RuntimeException('Global form fixture could not find the canonical form.');
+    }
+    $info_form = str_replace(
+        'name="web_page_id" value="' . $page_id . '"',
+        'name="web_page_id" value="' . $info_page_id . '"',
+        $matches[0]
+    );
+    $artifact['files']['informacion/index.html'] = str_replace(
+        '</body>',
+        $info_form . '</body>',
+        $artifact['files']['informacion/index.html']
+    );
+    $artifact['manifest']['files']['informacion/index.html']['sha256'] = hash(
+        'sha256',
+        $artifact['files']['informacion/index.html']
+    );
+    $artifact['manifest']['files']['informacion/index.html']['size_bytes'] = strlen(
+        $artifact['files']['informacion/index.html']
+    );
+    return $artifact;
+}
+
+$tests['manifest global firma el mismo formulario para cada ruta y conserva el contrato plano'] = static function () {
+    update_option(CCW_Config::OPTION_API_BASE, 'https://api.example.test');
+    $runtime = array(
+        'schema_version' => 1,
+        'measurement' => array(
+            'enabled' => true,
+            'scope_type' => 'clinic',
+            'scope_id' => 56,
+            'api_url' => 'https://api.example.test',
+            'loader_url' => 'https://api.example.test/assets/loader.js',
+            'hmac_key' => str_repeat('h', 40),
+            'consent_mode_enabled' => true,
+            'consent_provider' => 'external_cmp',
+            'chat_enabled' => false,
+            'whatsapp_enabled' => false,
+            'phone_enabled' => false,
+        ),
+    );
+    $flat = ccw_test_artifact('flat-form');
+    $validated_flat = CCW_Manifest::validate($flat['manifest'], $flat['hash'], $runtime);
+    $flat_id = $flat['identity']['form_id'];
+    ccw_test_assert(isset($validated_flat['intake_forms'][$flat_id]['page_id']), 'flat form compatibility was lost');
+
+    $global = ccw_test_global_form_artifact('global-form');
+    $validated = CCW_Manifest::validate($global['manifest'], $global['hash'], $runtime);
+    $form_id = $global['identity']['form_id'];
+    ccw_test_assert(($validated['intake_forms'][$form_id]['scope'] ?? '') === 'global', 'global form scope was not accepted');
+    ccw_test_assert(
+        count($validated['intake_forms'][$form_id]['page_contracts'] ?? array()) === 2,
+        'global form page contracts were not preserved'
+    );
+    foreach (array('index.html', 'informacion/index.html') as $path) {
+        $temporary = tempnam(sys_get_temp_dir(), 'ccw-global-form-');
+        file_put_contents($temporary, $global['files'][$path]);
+        CCW_Manifest::inspect_file($path, $temporary, $validated['files'][$path], $runtime, $validated);
+        unlink($temporary);
+    }
+
+    $missing = ccw_test_global_form_artifact('global-form-missing');
+    unset($missing['manifest']['intake_forms'][$missing['identity']['form_id']]['page_contracts'][$missing['identity']['info_page_id']]);
+    ccw_test_throws('ccw_manifest_intake_page_route_mismatch', static function () use ($missing, $runtime) {
+        CCW_Manifest::validate($missing['manifest'], $missing['hash'], $runtime);
+    });
+};
+
 $tests['manifest requires an exact signed route for every HTML page and form'] = static function () {
     $missing = ccw_test_artifact('route-missing');
     unset($missing['manifest']['page_routes'][$missing['identity']['info_page_id']]);
@@ -302,7 +390,7 @@ function ccw_test_install_remote(array $artifact, array $key, $sequence, $etag =
 }
 
 /** @return array<string,mixed> */
-function ccw_test_setup_intake($marker = 'intake')
+function ccw_test_setup_intake($marker = 'intake', $global_form = false)
 {
     ccw_test_remove_tree(__DIR__ . '/tmp');
     $GLOBALS['ccw_test_options'] = array();
@@ -314,7 +402,7 @@ function ccw_test_setup_intake($marker = 'intake')
     update_option(CCW_Config::OPTION_TOKEN, str_repeat('t', 48));
     $key = ccw_test_keypair();
     CCW_Trust_Store::import_configured_descriptor($key['descriptor']);
-    $artifact = ccw_test_artifact($marker);
+    $artifact = $global_form ? ccw_test_global_form_artifact($marker) : ccw_test_artifact($marker);
     ccw_test_install_remote($artifact, $key, 1, '"intake"');
     (new CCW_Sync())->run(true);
     $GLOBALS['ccw_test_posts'] = array();
@@ -774,6 +862,31 @@ $tests['signed landing bridge forwards a minimal HMAC request and redirects with
     $second_payload = json_decode((string) $captured['args']['body'], true);
     ccw_test_assert(!array_key_exists('ad_user_data', $second_payload['consent']), 'missing ad_user_data was invented');
     ccw_test_assert(!array_key_exists('ad_personalization', $second_payload['consent']), 'missing ad_personalization was invented');
+};
+
+$tests['global intake bridge selects the signed contract of the current page'] = static function () {
+    $setup = ccw_test_setup_intake('global-bridge', true);
+    $captured = null;
+    $GLOBALS['ccw_test_http'][$setup['upstream']] = static function ($url, $args) use (&$captured) {
+        $captured = json_decode((string) ($args['body'] ?? ''), true);
+        return array('code' => 201, 'body' => '{"id":327}');
+    };
+    $fields = $setup['fields'];
+    $fields['web_page_id'] = $setup['artifact']['identity']['info_page_id'];
+    $server = $setup['server'];
+    $server['HTTP_REFERER'] = 'https://cliente.example.test/cita/informacion/?gclid=global_click';
+
+    $result = ccw_test_bridge_process($setup['bridge'], $server, $fields);
+
+    ccw_test_assert(is_array($captured), 'global form submission was not forwarded');
+    ccw_test_assert(
+        ($captured['web_page_id'] ?? '') === $setup['artifact']['identity']['info_page_id'],
+        'global form did not preserve its current signed page'
+    );
+    ccw_test_assert(
+        $result['location'] === 'https://cliente.example.test/cita/informacion/?gclid=global_click#cc-form-global-bridge-success',
+        'global form redirect did not use the current page contract'
+    );
 };
 
 $tests['landing bridge preserves strict first-page attribution across signed routes'] = static function () {

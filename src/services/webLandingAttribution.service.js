@@ -95,7 +95,11 @@ function pageContainsNode(document, pageId, nodeId) {
     ? document.pages.find((candidate) => String(candidate?.id) === String(pageId))
     : null;
   if (!page || !document?.nodes || typeof document.nodes !== 'object') return false;
-  const pending = [...(Array.isArray(page.root_node_ids) ? page.root_node_ids : [])];
+  const pending = [
+    document.globals?.header_node_id || null,
+    ...(Array.isArray(page.root_node_ids) ? page.root_node_ids : []),
+    document.globals?.footer_node_id || null,
+  ].filter(Boolean);
   const visited = new Set();
   while (pending.length) {
     const current = pending.pop();
@@ -107,6 +111,18 @@ function pageContainsNode(document, pageId, nodeId) {
     if (visited.size > 1000) return false;
   }
   return false;
+}
+
+function intakeFormContractForPage(manifest, formId, pageId) {
+  const contract = manifest?.intake_forms?.[formId];
+  if (!contract || typeof contract !== 'object' || Array.isArray(contract)) return null;
+  if (contract.scope !== 'global') return contract;
+  const pageContracts = contract.page_contracts;
+  if (!pageContracts || typeof pageContracts !== 'object' || Array.isArray(pageContracts)) return null;
+  const pageContract = pageContracts[pageId];
+  return pageContract && typeof pageContract === 'object' && !Array.isArray(pageContract)
+    ? pageContract
+    : null;
 }
 
 function intakeFieldContract(form) {
@@ -378,7 +394,7 @@ async function resolveWebLandingAttribution({ body = {}, models = db } = {}) {
     throw new WebLandingAttributionError('web_landing_artifact_not_active', 'La landing publicada no tiene un artefacto activo.', 409);
   }
   const manifest = artifact.manifest && typeof artifact.manifest === 'object' ? artifact.manifest : {};
-  const formContract = manifest.intake_forms?.[formId];
+  const formContract = intakeFormContractForPage(manifest, formId, pageId);
   const expectedFields = intakeFieldContract(form);
   const activePagePaths = publishedPagePaths(manifest, publication.path, revision.document);
   if (
@@ -466,6 +482,7 @@ module.exports = {
   WebLandingAttributionError,
   pageContainsNode,
   exactIntakeFieldContract,
+  intakeFormContractForPage,
   intakeFieldContract,
   pathMatchesPublication,
   publishedPagePath,

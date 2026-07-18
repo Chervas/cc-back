@@ -292,8 +292,30 @@ test('FAQ se renderiza como disclosure seguro y su schema solo alcanza la págin
     id: 'faq_primary',
     type: 'faq',
     version: 1,
-    props: { question: '¿Qué incluye la primera visita?', answer: 'Valoración y un plan claro & personalizado.' },
+    props: { question: 'Pregunta provisional', answer: 'Respuesta provisional' },
     children: [],
+    binding_ids: ['faq_question_binding', 'faq_answer_binding'],
+  };
+  input.document.bindings.faq_question_binding = {
+    target_node_id: 'faq_primary',
+    target_prop: 'question',
+    source: 'content_entry',
+    source_id: 'faq_content_entry',
+    field: 'question',
+  };
+  input.document.bindings.faq_answer_binding = {
+    target_node_id: 'faq_primary',
+    target_prop: 'answer',
+    source: 'content_entry',
+    source_id: 'faq_content_entry',
+    field: 'answer',
+  };
+  input.contentSnapshot.content_entries.faq_content_entry = {
+    id: 'faq_content_entry',
+    fields: {
+      question: '¿Qué incluye la primera visita?',
+      answer: 'Valoración y un plan claro & personalizado.',
+    },
   };
   primarySection.children.push('faq_primary');
   input.document.pages.push({
@@ -325,7 +347,153 @@ test('FAQ se renderiza como disclosure seguro y su schema solo alcanza la págin
   assert.deepEqual(secondaryFaq.mainEntity.map((entry) => entry.name), ['¿Pregunta de otra página?']);
 });
 
-test('renderer 1.2 honra tokens, responsive, fuentes e imagen focal en CSS de producción', () => {
+test('renderiza globals una vez y los incluye en SEO, Schema e intake de cada página efectiva', () => {
+  const input = fixture();
+  const pageForm = Object.values(input.document.nodes).find((node) => node.type === 'intake_form');
+  input.document.pages.push({
+    id: 'page_global_secondary',
+    title: 'Segunda página',
+    slug: 'segunda',
+    root_node_ids: ['section_global_secondary'],
+    seo: { title: 'Segunda página', description: 'Contenido de la segunda página.', index: false, follow: true },
+  });
+  input.document.nodes.section_global_secondary = {
+    id: 'section_global_secondary',
+    type: 'section',
+    version: 1,
+    props: { layout: 'stack', columns: 1, semantic_tag: 'main' },
+    children: ['heading_global_secondary'],
+  };
+  input.document.nodes.heading_global_secondary = {
+    id: 'heading_global_secondary',
+    type: 'heading',
+    version: 1,
+    props: { text: 'Contenido secundario', level: 1 },
+    children: [],
+  };
+  input.document.globals = {
+    header_node_id: 'global_header',
+    footer_node_id: 'global_footer',
+  };
+  input.document.nodes.global_header = {
+    id: 'global_header',
+    type: 'section',
+    version: 1,
+    props: { layout: 'row', columns: 2, semantic_tag: 'main' },
+    children: ['global_brand', 'global_image'],
+  };
+  input.document.nodes.global_brand = {
+    id: 'global_brand',
+    type: 'heading',
+    version: 1,
+    props: { text: 'Nombre provisional', level: 1 },
+    children: [],
+    binding_ids: ['global_brand_binding'],
+  };
+  input.document.bindings.global_brand_binding = {
+    target_node_id: 'global_brand',
+    target_prop: 'text',
+    source: 'clinic',
+    source_id: '66',
+    field: 'name',
+  };
+  input.contentSnapshot.live_bindings = [{
+    source: 'clinic',
+    source_id: '66',
+    field: 'name',
+    resolver: 'clinic_public_v1',
+    implicit_scope: false,
+  }];
+  input.document.nodes.global_image = {
+    id: 'global_image',
+    type: 'image',
+    version: 1,
+    props: {
+      asset_id: 'global_logo_asset',
+      alt: 'Logotipo de la clínica',
+      decorative: false,
+      loading: 'eager',
+      fit: 'contain',
+      aspect_ratio: 'auto',
+    },
+    children: [],
+  };
+  input.contentSnapshot.media_assets.global_logo_asset = {
+    variants: [{
+      key: 'original',
+      url: 'https://media.clinicaclick.com/web/global-logo.webp',
+      width: 320,
+      height: 120,
+    }],
+  };
+  input.document.nodes.global_footer = {
+    id: 'global_footer',
+    type: 'section',
+    version: 1,
+    props: { layout: 'stack', columns: 1, semantic_tag: 'header' },
+    children: ['global_footer_text', 'global_faq', 'global_form'],
+  };
+  input.document.nodes.global_footer_text = {
+    id: 'global_footer_text',
+    type: 'text',
+    version: 1,
+    props: { text: 'Aviso legal y contacto' },
+    children: [],
+  };
+  input.document.nodes.global_faq = {
+    id: 'global_faq',
+    type: 'faq',
+    version: 1,
+    props: { question: '¿Cómo contacto con la clínica?', answer: 'Puedes utilizar el formulario de esta página.' },
+    children: [],
+  };
+  input.document.nodes.global_form = {
+    ...structuredClone(pageForm),
+    id: 'global_form',
+  };
+
+  const artifact = compileWebArtifact(input);
+  const html = artifact.files['index.html'];
+  const secondaryHtml = artifact.files['segunda/index.html'];
+  const headerStart = html.indexOf('<header id="cc-global_header"');
+  const pageStart = html.indexOf(`id="cc-${input.document.pages[0].root_node_ids[0]}"`);
+  const footerStart = html.indexOf('<footer id="cc-global_footer"');
+
+  assert.ok(headerStart >= 0 && headerStart < pageStart && pageStart < footerStart);
+  assert.equal((html.match(/id="cc-global_header"/g) || []).length, 1);
+  assert.equal((html.match(/id="cc-global_footer"/g) || []).length, 1);
+  assert.equal((secondaryHtml.match(/id="cc-global_header"/g) || []).length, 1);
+  assert.equal((secondaryHtml.match(/id="cc-global_footer"/g) || []).length, 1);
+  assert.match(html, /<header id="cc-global_header" data-cc-global="header" class="cc-node cc-section cc-site-header/);
+  assert.match(html, /<footer id="cc-global_footer" data-cc-global="footer" class="cc-node cc-section cc-site-footer/);
+  assert.doesNotMatch(html, /<main id="cc-global_header"/);
+  assert.doesNotMatch(html, /<header id="cc-global_footer"/);
+  assert.match(html, /Clínica Dental Centro/);
+  assert.match(html, /src="https:\/\/media\.clinicaclick\.com\/web\/global-logo\.webp"/);
+  assert.equal((html.match(/<h1\b/g) || []).length, 2);
+  assert.equal((secondaryHtml.match(/<h1\b/g) || []).length, 2);
+  assert.equal(artifact.pages[0].seo_audit.h1_count, 2);
+  assert.equal(artifact.pages[1].seo_audit.h1_count, 2);
+  for (const page of artifact.pages) {
+    assert.ok(page.seo_audit.warnings.some((warning) => (
+      warning.code === 'seo_h1_count' && warning.value === 2
+    )));
+  }
+  for (const page of artifact.pages) {
+    const faq = page.json_ld['@graph'].find((entry) => entry['@type'] === 'FAQPage');
+    assert.deepEqual(faq.mainEntity.map((entry) => entry.name), ['¿Cómo contacto con la clínica?']);
+  }
+  assert.ok(Object.hasOwn(artifact.manifest.intake_forms, pageForm.id));
+  assert.equal(artifact.manifest.intake_forms.global_form.scope, 'global');
+  assert.deepEqual(
+    Object.keys(artifact.manifest.intake_forms.global_form.page_contracts).sort(),
+    input.document.pages.map((page) => page.id).sort()
+  );
+  assert.match(html, new RegExp(`name="web_page_id" value="${input.document.pages[0].id}"`));
+  assert.match(secondaryHtml, /name="web_page_id" value="page_global_secondary"/);
+});
+
+test('renderer 1.3 honra tokens, responsive, fuentes e imagen focal en CSS de producción', () => {
   const input = fixture();
   const section = Object.values(input.document.nodes).find((node) => node.type === 'section');
   section.props.layout = 'grid';
@@ -379,12 +547,13 @@ test('renderer 1.2 honra tokens, responsive, fuentes e imagen focal en CSS de pr
   const cssPath = Object.keys(artifact.files).find((path) => path.endsWith('.css'));
   const css = artifact.files[cssPath];
   const html = artifact.files['index.html'];
-  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.2.1');
+  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.3.0');
   assert.match(html, /cc-layout-grid cc-cols-4[^"\n]*cc-bg-brand[^"\n]*cc-width-wide[^"\n]*cc-pt-2xl[^"\n]*cc-radius-full[^"\n]*cc-shadow-lg[^"\n]*cc-mobile-cols-1/);
   assert.match(html, /cc-fit-contain cc-aspect-21-9 cc-focal-37-62/);
   assert.match(html, /<div class="cc-image-frame"><img[^>]*width="2100" height="900">/);
-  assert.match(css, /--cc-font-heading:"Source Sans 3",Inter/);
-  assert.match(css, /--cc-font-body:Manrope,Inter/);
+  assert.match(css, /--cc-font-heading:ui-sans-serif,system-ui/);
+  assert.match(css, /--cc-font-body:ui-sans-serif,system-ui/);
+  assert.doesNotMatch(css, /(?:Manrope|Source Sans|Inter),/);
   assert.match(css, /\.cc-node\.cc-bg-brand\{background:var\(--cc-primary\)\}/);
   assert.match(css, /\.cc-node\.cc-radius-full\{border-radius:9999px\}/);
   assert.match(css, /\.cc-node\.cc-tablet-pt-lg\{padding-top:var\(--cc-lg\)\}/);

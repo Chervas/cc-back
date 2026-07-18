@@ -3,13 +3,18 @@
 process.env.MARKETING_WEB_EDITOR_ENABLED = 'true';
 
 const assert = require('node:assert/strict');
+const { Op } = require('sequelize');
 const {
+  MAX_MEDIA_ID_FILTER,
   WebContentMediaServiceError,
   assertPublicMediaUsable,
   assertOwnerOrReviewer,
   assertResourceScopeAccess,
   cleanupExpiredQuarantinedMedia,
   createContent,
+  listContent,
+  listMedia,
+  normalizeMediaIdFilter,
   registerMedia,
   serializeMediaAsset,
   updateContent,
@@ -535,6 +540,195 @@ async function testNonAdminOwnershipAndUniformNotFound() {
   );
 }
 
+function contentRow({ id, ownerUserId, scopeType = 'clinic', scopeId = 66 }) {
+  return row({
+    id,
+    scopeType,
+    clinicaId: scopeType === 'clinic' ? scopeId : null,
+    grupoClinicaId: scopeType === 'group' ? scopeId : null,
+    ownerUserId,
+    type: 'faq',
+    locale: 'es-ES',
+    title: `FAQ ${id}`,
+    content: { question: 'Pregunta', answer: 'Respuesta' },
+    sources: [],
+    contentHash: 'a'.repeat(64),
+    status: 'draft',
+    version: 1,
+    created_at: new Date('2026-07-18T00:00:00.000Z'),
+    updated_at: new Date('2026-07-18T00:00:00.000Z'),
+  });
+}
+
+async function testListContentProjectsActorAwareCapabilitiesWithoutPerRowChecks() {
+  const permissionCalls = [];
+  const rows = [
+    contentRow({ id: 'own', ownerUserId: 77 }),
+    contentRow({ id: 'other', ownerUserId: 88 }),
+    contentRow({ id: 'inherited', ownerUserId: 77, scopeType: 'group', scopeId: 4 }),
+  ];
+  const models = {
+    ...baseModels(),
+    WebContentEntry: { findAndCountAll: async () => ({ count: rows.length, rows }) },
+  };
+  const assertFeatureAccess = async ({ featureKey }) => {
+    permissionCalls.push(featureKey);
+    if (featureKey !== 'marketing.web.review') return true;
+    const error = new Error('forbidden');
+    error.status = 403;
+    throw error;
+  };
+
+  const result = await listContent({
+    actorId: 77,
+    query: { scope_type: 'clinic', scope_id: 66, include_inherited_group: true },
+    models,
+    assertFeatureAccess,
+  });
+
+  assert.deepEqual(result.capabilities, {
+    can_create: true,
+    can_edit_own: true,
+    can_review: false,
+  });
+  assert.deepEqual(result.items.map((item) => [item.id, item.can_edit, item.read_only]), [
+    ['own', true, false],
+    ['other', false, true],
+    ['inherited', false, true],
+  ]);
+  assert.deepEqual(permissionCalls.sort(), [
+    'marketing.web.edit',
+    'marketing.web.review',
+    'marketing.web.view',
+  ]);
+}
+
+async function testListContentMakesEvenOwnedRowsReadOnlyWithoutEditPermission() {
+  const owned = contentRow({ id: 'owned-view-only', ownerUserId: 77 });
+  const models = {
+    ...baseModels(),
+    WebContentEntry: { findAndCountAll: async () => ({ count: 1, rows: [owned] }) },
+  };
+  const assertFeatureAccess = async ({ featureKey }) => {
+    if (featureKey === 'marketing.web.view') return true;
+    const error = new Error('forbidden');
+    error.status = 403;
+    throw error;
+  };
+
+  const result = await listContent({
+    actorId: 77,
+    query: { scope_type: 'clinic', scope_id: 66 },
+    models,
+    assertFeatureAccess,
+  });
+
+  assert.deepEqual(result.capabilities, {
+    can_create: false,
+    can_edit_own: false,
+    can_review: false,
+  });
+  assert.equal(result.items[0].can_edit, false);
+  assert.equal(result.items[0].read_only, true);
+}
+
+async function testListMediaLetsReviewerEditNativeResourcesButNeverInheritedOnes() {
+  const permissionCalls = [];
+  const ownScope = mediaRow({ id: 'other', scopeType: 'clinic', scopeId: 66 });
+  ownScope.ownerUserId = 88;
+  const inherited = mediaRow({ id: 'inherited', scopeType: 'group', scopeId: 4 });
+  inherited.ownerUserId = 88;
+  const models = {
+    ...baseModels(),
+    WebMediaAsset: { findAndCountAll: async () => ({ count: 2, rows: [ownScope, inherited] }) },
+    PublicMediaAsset: {},
+  };
+  const assertFeatureAccess = async ({ featureKey }) => {
+    permissionCalls.push(featureKey);
+    return true;
+  };
+
+  const result = await listMedia({
+    actorId: 77,
+    query: { scope_type: 'clinic', scope_id: 66, include_inherited_group: true },
+    models,
+    assertFeatureAccess,
+  });
+
+  assert.deepEqual(result.capabilities, {
+    can_create: true,
+    can_edit_own: true,
+    can_review: true,
+  });
+  assert.deepEqual(result.items.map((item) => [item.id, item.can_edit, item.read_only]), [
+    ['other', true, false],
+    ['inherited', false, true],
+  ]);
+  assert.deepEqual(permissionCalls.sort(), [
+    'marketing.web.edit',
+    'marketing.web.review',
+    'marketing.web.view',
+  ]);
+}
+
+async function testListMediaFiltersReferencedIdsInOneScopedQuery() {
+  const requestedIds = [
+    '11111111-1111-4111-8111-111111111111',
+    '22222222-2222-4222-8222-222222222222',
+  ];
+  const rows = requestedIds.map((id, index) => mediaRow({
+    id,
+    scopeType: index === 0 ? 'clinic' : 'group',
+    scopeId: index === 0 ? 66 : 4,
+  }));
+  let queryCount = 0;
+  let queryOptions;
+  const models = {
+    ...baseModels(),
+    WebMediaAsset: {
+      findAndCountAll: async (options) => {
+        queryCount += 1;
+        queryOptions = options;
+        return { count: rows.length, rows };
+      },
+    },
+    PublicMediaAsset: {},
+  };
+
+  const result = await listMedia({
+    actorId: 77,
+    query: {
+      scope_type: 'clinic',
+      scope_id: 66,
+      include_inherited_group: true,
+      ids: `${requestedIds[0]},${requestedIds[1]},${requestedIds[0]}`,
+    },
+    models,
+    assertFeatureAccess: async () => true,
+  });
+
+  assert.equal(queryCount, 1);
+  assert.deepEqual(queryOptions.where.id[Op.in], requestedIds);
+  assert.equal(queryOptions.limit, requestedIds.length);
+  assert.deepEqual(result.items.map((item) => item.id), requestedIds);
+}
+
+async function testMediaIdFilterRejectsMalformedAndOversizedBatches() {
+  assert.throws(
+    () => normalizeMediaIdFilter('asset_placeholder'),
+    (error) => error instanceof WebContentMediaServiceError
+      && error.code === 'media_ids_filter_invalid'
+  );
+  const tooManyIds = Array.from({ length: MAX_MEDIA_ID_FILTER + 1 }, (_, index) => (
+    `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`
+  ));
+  assert.throws(
+    () => normalizeMediaIdFilter(tooManyIds),
+    (error) => error instanceof WebContentMediaServiceError
+      && error.code === 'media_ids_filter_too_large'
+  );
+}
+
 async function testQuarantineOwnershipAndCleanup() {
   const future = new Date(Date.now() + 60_000).toISOString();
   const candidate = {
@@ -707,6 +901,11 @@ async function main() {
   await testResolverAllowsExplicitClinicToGroupInheritanceButNeverReverse();
   await testResolverFreezesCanonicalTreatmentProfessionalAndIntake();
   await testNonAdminOwnershipAndUniformNotFound();
+  await testListContentProjectsActorAwareCapabilitiesWithoutPerRowChecks();
+  await testListContentMakesEvenOwnedRowsReadOnlyWithoutEditPermission();
+  await testListMediaLetsReviewerEditNativeResourcesButNeverInheritedOnes();
+  await testListMediaFiltersReferencedIdsInOneScopedQuery();
+  await testMediaIdFilterRejectsMalformedAndOversizedBatches();
   await testQuarantineOwnershipAndCleanup();
   await testCleanupRevalidatesAfterConcurrentRegistration();
   await testCleanupRestoresQuarantineWhenObjectDeleteFails();

@@ -3,7 +3,7 @@
 define('CCW_TESTING', true);
 define('ABSPATH', __DIR__ . '/wp/');
 define('WP_CONTENT_DIR', __DIR__ . '/tmp/wp-content');
-define('CCW_VERSION', '2.0.0-alpha.6');
+define('CCW_VERSION', '2.0.0-alpha.7');
 define('DAY_IN_SECONDS', 86400);
 define('MINUTE_IN_SECONDS', 60);
 

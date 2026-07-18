@@ -9,7 +9,7 @@ const { assertWebContentSnapshot, isSafePublicAssetUrl } = require('./webContent
 const { trustedRuntime } = require('./webMeasurementRuntime');
 const { publicHttpUrl } = require('./safeHttpTarget');
 
-const RENDERER_VERSION = 'clinicaclick-web-renderer/1.2.1';
+const RENDERER_VERSION = 'clinicaclick-web-renderer/1.3.0';
 const SAFE_EXTERNAL_REL = /^(?:\/[A-Za-z0-9_][A-Za-z0-9/_-]*|https:\/\/[^\s]+)$/;
 const PRODUCTION_INTAKE_ENDPOINT = '/_clinicaclick/intake';
 const CLINIC_BINDING_FIELDS = new Set([
@@ -480,15 +480,20 @@ function renderIntakeForm(node, context) {
   return `<form id="cc-${escapeHtml(node.id)}" class="cc-node cc-form ${styleClassList(node)}" action="${escapeHtml(context.intakeEndpoint)}" method="post" enctype="application/x-www-form-urlencoded" accept-charset="UTF-8" data-cc-native-intake="true"><h2>${escapeHtml(node.props.title)}</h2>${node.props.description ? `<p>${escapeHtml(node.props.description)}</p>` : ''}<input type="hidden" name="web_project_id" value="${escapeHtml(context.projectId)}"><input type="hidden" name="web_revision_id" value="${escapeHtml(context.revisionId)}"><input type="hidden" name="web_page_id" value="${escapeHtml(context.page.id)}"><input type="hidden" name="web_form_id" value="${escapeHtml(node.id)}"><input class="cc-honeypot" type="text" name="_cc_company" value="" tabindex="-1" autocomplete="off" aria-hidden="true">${fields}<button type="submit" class="cc-button cc-button-primary">${escapeHtml(node.props.submit_label)}</button><p id="${escapeHtml(successId)}" class="cc-form-status cc-form-success" role="status">${escapeHtml(node.props.success_message)}</p><p id="${escapeHtml(errorId)}" class="cc-form-status cc-form-error" role="alert">No hemos podido enviar el formulario. Inténtalo de nuevo en unos minutos.</p></form>`;
 }
 
-function renderNode(nodeId, document, snapshot, context, ancestors = new Set()) {
+function renderNode(nodeId, document, snapshot, context, ancestors = new Set(), rootSemanticTag = null) {
   const node = document.nodes[nodeId];
   if (!node) fail('web_artifact_node_missing', 'La revisión contiene una referencia de bloque rota.', { node_id: nodeId });
   if (ancestors.has(nodeId)) fail('web_artifact_node_cycle', 'La revisión contiene un ciclo de bloques.', { node_id: nodeId });
   const nextAncestors = new Set(ancestors).add(nodeId);
   if (node.type === 'section') {
-    const tag = node.props.semantic_tag || 'section';
+    const globalSlot = rootSemanticTag === 'header' || rootSemanticTag === 'footer'
+      ? rootSemanticTag
+      : null;
+    const tag = globalSlot || node.props.semantic_tag || 'section';
     const children = node.children.map((childId) => renderNode(childId, document, snapshot, context, nextAncestors)).join('');
-    return `<${tag} id="cc-${escapeHtml(node.id)}" class="cc-node cc-section cc-layout-${escapeHtml(node.props.layout)} cc-cols-${Number(node.props.columns)} ${styleClassList(node)}"><div class="cc-container">${children}</div></${tag}>`;
+    const globalAttribute = globalSlot ? ` data-cc-global="${globalSlot}"` : '';
+    const globalClass = globalSlot ? ` cc-site-${globalSlot}` : '';
+    return `<${tag} id="cc-${escapeHtml(node.id)}"${globalAttribute} class="cc-node cc-section${globalClass} cc-layout-${escapeHtml(node.props.layout)} cc-cols-${Number(node.props.columns)} ${styleClassList(node)}"><div class="cc-container">${children}</div></${tag}>`;
   }
   if (node.type === 'heading') {
     const level = Math.min(6, Math.max(1, Number(node.props.level) || 2));
@@ -513,13 +518,11 @@ function renderNode(nodeId, document, snapshot, context, ancestors = new Set()) 
   });
 }
 
-function fontStackCss(token) {
-  return {
-    system: 'ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
-    inter: 'Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
-    manrope: 'Manrope,Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
-    source_sans_3: '"Source Sans 3",Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
-  }[token] || 'ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
+function fontStackCss(_token) {
+  // No se publican binarios de fuentes en el artefacto. Los tokens antiguos se
+  // aceptan para compatibilidad documental, pero se renderizan de forma
+  // determinista con la pila disponible en el sistema.
+  return 'ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
 }
 
 function stylesheet(tokens, document = { nodes: {} }) {
@@ -607,9 +610,19 @@ function clinicAddress(clinic) {
   return null;
 }
 
+function effectiveRootNodeIds(page, document) {
+  return [
+    document.globals?.header_node_id || null,
+    ...(page.root_node_ids || []),
+    document.globals?.footer_node_id || null,
+  ].filter((nodeId, index, values) => nodeId && values.indexOf(nodeId) === index);
+}
+
 function reachableNodeIds(page, document) {
   const reachable = new Set();
-  const pending = [...(page.root_node_ids || [])];
+  // SEO and Schema must describe the effective DOM. Header and footer are
+  // visible on every route, so their headings/FAQ cannot be ignored here.
+  const pending = [...effectiveRootNodeIds(page, document)];
   while (pending.length) {
     const nodeId = pending.pop();
     if (reachable.has(nodeId)) continue;
@@ -684,7 +697,9 @@ function pageSeoAudit(page, document) {
 }
 
 function intakeFormsForPage(page, document) {
-  const pending = [...page.root_node_ids];
+  // A global intake form is a real form on every rendered route. Include it in
+  // each page contract; the manifest groups those contracts by page below.
+  const pending = [...effectiveRootNodeIds(page, document)];
   const visited = new Set();
   const forms = [];
   while (pending.length) {
@@ -711,7 +726,16 @@ function measurementLoaderTag(measurement, identity = {}) {
 }
 
 function renderPage({ page, document, snapshot, context, project, baseUrl, clinic, cssFile, artifactMarker }) {
-  const body = page.root_node_ids.map((nodeId) => renderNode(nodeId, document, snapshot, { ...context, page })).join('');
+  const pageContext = { ...context, page };
+  const headerId = document.globals?.header_node_id || null;
+  const footerId = document.globals?.footer_node_id || null;
+  const header = headerId
+    ? renderNode(headerId, document, snapshot, pageContext, new Set(), 'header')
+    : '';
+  const body = page.root_node_ids.map((nodeId) => renderNode(nodeId, document, snapshot, pageContext)).join('');
+  const footer = footerId
+    ? renderNode(footerId, document, snapshot, pageContext, new Set(), 'footer')
+    : '';
   const titleSuffix = document.seo.title_suffix ? ` ${document.seo.title_suffix}` : '';
   const title = `${page.seo?.title || page.title}${titleSuffix}`.slice(0, 150);
   const description = page.seo?.description || '';
@@ -739,7 +763,7 @@ function renderPage({ page, document, snapshot, context, project, baseUrl, clini
   const social = socialId ? snapshot.media_assets?.[socialId] : null;
   const socialUrl = social?.variants?.[0]?.url || social?.public_media?.url || null;
   const publicationBasePath = new URL(`${baseUrl}/`).pathname;
-  const html = `<!doctype html><html lang="${escapeHtml(project.locale)}"><head><meta charset="utf-8"><meta name="clinicaclick-artifact-input" content="${escapeHtml(artifactMarker)}"><meta http-equiv="Content-Security-Policy" content="${escapeHtml(pageCsp)}"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><meta name="description" content="${escapeHtml(description)}"><meta name="robots" content="${robots}"><link rel="canonical" href="${escapeHtml(canonical)}"><meta property="og:type" content="website"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${escapeHtml(description)}"><meta property="og:url" content="${escapeHtml(pageUrl)}">${socialUrl && isSafePublicAssetUrl(socialUrl) ? `<meta property="og:image" content="${escapeHtml(socialUrl)}">` : ''}<link rel="stylesheet" href="${escapeHtml(`${baseUrl}/${cssFile}`)}"><script type="application/ld+json">${jsonLdText}</script>${measurementLoaderTag(context.measurement, { projectId: project.id, revisionId: context.revisionId, pageId: page.id })}</head><body data-cc-web-project-id="${escapeHtml(project.id)}" data-cc-web-revision-id="${escapeHtml(context.revisionId)}" data-cc-web-base-path="${escapeHtml(publicationBasePath)}">${body}</body></html>`;
+  const html = `<!doctype html><html lang="${escapeHtml(project.locale)}"><head><meta charset="utf-8"><meta name="clinicaclick-artifact-input" content="${escapeHtml(artifactMarker)}"><meta http-equiv="Content-Security-Policy" content="${escapeHtml(pageCsp)}"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><meta name="description" content="${escapeHtml(description)}"><meta name="robots" content="${robots}"><link rel="canonical" href="${escapeHtml(canonical)}"><meta property="og:type" content="website"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${escapeHtml(description)}"><meta property="og:url" content="${escapeHtml(pageUrl)}">${socialUrl && isSafePublicAssetUrl(socialUrl) ? `<meta property="og:image" content="${escapeHtml(socialUrl)}">` : ''}<link rel="stylesheet" href="${escapeHtml(`${baseUrl}/${cssFile}`)}"><script type="application/ld+json">${jsonLdText}</script>${measurementLoaderTag(context.measurement, { projectId: project.id, revisionId: context.revisionId, pageId: page.id })}</head><body data-cc-web-project-id="${escapeHtml(project.id)}" data-cc-web-revision-id="${escapeHtml(context.revisionId)}" data-cc-web-base-path="${escapeHtml(publicationBasePath)}">${header}${body}${footer}</body></html>`;
   return {
     path: page.slug === 'inicio' ? '/' : `/${page.slug}/`,
     html,
@@ -842,20 +866,39 @@ function compileWebArtifact(input = {}) {
     ? `User-agent: *\nAllow: /\nSitemap: ${baseUrl}/sitemap.xml\n`
     : 'User-agent: *\nDisallow: /\n';
   const sitemap = sitemapXml(baseUrl, pages);
-  const intakeForms = Object.fromEntries(document.pages.flatMap((page) => {
+  const intakeFormOccurrences = new Map();
+  for (const page of document.pages) {
     const pagePath = page.slug === 'inicio' ? '/' : `/${page.slug}/`;
-    return intakeFormsForPage(page, document).map((form) => [form.id, {
-      page_path: pagePath,
-      page_id: page.id,
-      success_anchor: `cc-${form.id}-success`,
-      error_anchor: `cc-${form.id}-error`,
-      fields: form.props.fields.map((field) => ({
-        name: field.name,
-        type: field.type,
-        required: field.required === true,
-      })),
-    }]);
-  }));
+    for (const form of intakeFormsForPage(page, document)) {
+      const contract = {
+        page_path: pagePath,
+        page_id: page.id,
+        success_anchor: `cc-${form.id}-success`,
+        error_anchor: `cc-${form.id}-error`,
+        fields: form.props.fields.map((field) => ({
+          name: field.name,
+          type: field.type,
+          required: field.required === true,
+        })),
+      };
+      intakeFormOccurrences.set(form.id, [
+        ...(intakeFormOccurrences.get(form.id) || []),
+        contract,
+      ]);
+    }
+  }
+  const intakeForms = Object.fromEntries([...intakeFormOccurrences.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([formId, contracts]) => (
+      contracts.length === 1
+        ? [formId, contracts[0]]
+        : [formId, {
+            scope: 'global',
+            page_contracts: Object.fromEntries(contracts
+              .sort((left, right) => left.page_id.localeCompare(right.page_id))
+              .map((contract) => [contract.page_id, contract])),
+          }]
+    )));
   const manifestCore = {
     schema_version: 1,
     renderer_version: input.rendererVersion || RENDERER_VERSION,

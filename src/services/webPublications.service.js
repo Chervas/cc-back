@@ -13,6 +13,11 @@ const {
 } = require('./webProjects.service');
 const { normalizeHost, normalizeRoutePath } = require('./webHostedPublisher.service');
 const jobRequestsService = require('./jobRequests.service');
+const {
+  MIN_GLOBAL_INTAKE_PLUGIN_VERSION,
+  documentHasGlobalIntakeForm,
+  semverAtLeast,
+} = require('../lib/webWordpressCompatibility');
 
 const PUBLICATION_CHANNELS = new Set(['clinicaclick_hosted', 'wordpress', 'custom_domain']);
 const BUSY_PUBLICATION_STATUSES = new Set(['pending', 'publishing', 'rolling_back']);
@@ -404,7 +409,26 @@ async function assertChannelReady(publication, { models, transaction }) {
         409
       );
     }
+    return { installation };
   }
+  return {};
+}
+
+function assertWordpressRevisionCompatibility(publication, installation, revision) {
+  if (plain(publication)?.channel !== 'wordpress' || !documentHasGlobalIntakeForm(plain(revision)?.document)) {
+    return true;
+  }
+  const actualVersion = String(plain(installation)?.pluginVersion || '').trim() || null;
+  if (semverAtLeast(actualVersion, MIN_GLOBAL_INTAKE_PLUGIN_VERSION)) return true;
+  throw new WebPublicationServiceError(
+    'web_wordpress_global_intake_plugin_outdated',
+    'Actualiza el plugin de WordPress antes de publicar un formulario global.',
+    409,
+    {
+      actual_plugin_version: actualVersion,
+      required_plugin_version: MIN_GLOBAL_INTAKE_PLUGIN_VERSION,
+    }
+  );
 }
 
 async function enqueueDeployment({
@@ -443,7 +467,7 @@ async function enqueueDeployment({
         { job_request_id: publication.jobRequestId || null }
       );
     }
-    await assertChannelReady(publication, { models, transaction });
+    const channelState = await assertChannelReady(publication, { models, transaction });
 
     let revision = null;
     let artifact = null;
@@ -462,6 +486,7 @@ async function enqueueDeployment({
           409
         );
       }
+      assertWordpressRevisionCompatibility(publication, channelState.installation, revision);
     } else if (action === 'rollback') {
       artifact = await models.WebArtifact.findByPk(String(artifactId || ''), { transaction });
       if (!artifact || artifact.projectId !== project.id || artifact.environment !== 'production') {
@@ -574,6 +599,7 @@ module.exports = {
   PUBLICATION_CHANNELS,
   TERMINAL_DEPLOYMENT_STATUSES,
   WebPublicationServiceError,
+  assertWordpressRevisionCompatibility,
   campaignContextSnapshot,
   createPublication,
   enqueueDeployment,

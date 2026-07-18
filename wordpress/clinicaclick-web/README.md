@@ -1,11 +1,15 @@
 # ClinicaClick WordPress plugin v2
 
-> Estado 2026-07-18: `2.0.0-alpha.5` está integrado y desplegado con gate. El
-> ZIP provisionado está instalado y activo en Propdental junto al plugin de
+> Estado 2026-07-18: la fuente y el ZIP determinista corresponden a
+> `2.0.0-alpha.7`; esta versión añade el contrato de formularios globales por
+> página requerido por renderer `1.3.0`. El WordPress público de Propdental
+> sigue acreditado con `2.0.0-alpha.6`, instalado y activo junto al plugin de
 > medición `clinicaclick` `1.1.7`. La instalación está `connected` en
 > `https://www.propdental.es` y `/cita/` sirve un artefacto verificado. Quedan
-> fuera del rollout hosted/custom y multi-route; el lead E2E y rollback del
-> piloto WordPress ya están cerrados.
+> fuera del rollout hosted/custom y multi-route; relay atribuible, limpieza,
+> rollback y monitor del piloto WordPress ya están cerrados. `alpha.7` no debe
+> llamarse live hasta que se instale, reporte por heartbeat y supere readback;
+> `alpha.5` queda únicamente como rollback local.
 
 Este paquete añade el publicador web mantenido junto al plugin de medición
 `clinicaclick` `1.1.7`. Usa el slug independiente `clinicaclick-web/`: instalarlo
@@ -44,6 +48,11 @@ retira esa marca si el loader no llega a cargar.
   único loader externo que coincida con el runtime firmado.
 - Solo artefactos `environment=production`.
 - El renderer actual genera HTML/CSS/robots/sitemap y encaja en esta allowlist.
+- Desde renderer `1.3.0`, cabecera y pie globales se renderizan en cada página.
+  Un formulario global se firma como `scope=global` y aporta
+  `page_contracts[page_id]`; `alpha.7` exige cobertura de cada ruta firmada y
+  campos equivalentes antes de aceptar el release. No reduce el aislamiento
+  por página ni permite que el navegador elija scope o contrato.
 - No incluye updater binario propio. Actualizar el plugin y actualizar el
   contenido siguen siendo operaciones distintas.
 
@@ -287,12 +296,15 @@ duplicado o array falla cerrado:
 
 Debe existir `email` o `phone`. Límites: body 16 KiB, nombre/apellidos 100
 caracteres, email 254, mensaje 2.000 y teléfono normalizado a 7-15 dígitos. El
-manifest firmado contiene `intake_forms[form_id]` con `page_path`, `page_id`,
-`success_anchor=cc-<formId>-success` y `error_anchor=cc-<formId>-error`. El
-inspector contrasta además el form nativo, sus identidades ocultas y anclas. El
-plugin compara las cuatro identidades y el path del `Referer` HTTPS same-origin
-con el manifest; nunca confía en scope, API, page URL o redirect recibidos del
-visitante.
+manifest firmado contiene `intake_forms[form_id]`. Un formulario local lleva
+`page_path`, `page_id`, `success_anchor=cc-<formId>-success` y
+`error_anchor=cc-<formId>-error`; uno global lleva `scope=global` y un
+`page_contracts[page_id]` equivalente por cada página firmada que lo muestra.
+El inspector selecciona primero el contrato de la ruta actual y contrasta el
+form nativo, sus identidades ocultas, campos y anclas. El plugin compara las
+cuatro identidades y el path del `Referer` HTTPS same-origin con el manifest;
+nunca confía en scope, API, page URL, formulario global o redirect recibidos
+del visitante.
 
 Solo se conservan de la query del `Referer`: `gclid`, `gbraid`, `wbraid`,
 `fbclid`, `ttclid` y `utm_source|medium|campaign|content|term`. Esos valores se
@@ -309,7 +321,7 @@ Accept: application/json
 X-CC-Signature: <HMAC-SHA256 hexadecimal del body exacto>
 X-CC-Event-Id: ccw_<64 hex>
 X-Clinicaclick-Web-Artifact: <hash activo>
-X-Clinicaclick-Plugin-Version: 2.0.0-alpha.5
+X-Clinicaclick-Plugin-Version: 2.0.0-alpha.7
 ```
 
 No envía el bearer de instalación. El payload fija server-side
@@ -339,7 +351,7 @@ Solo los endpoints de control de la instalación reciben:
 
 ```http
 Authorization: Bearer <installation token>
-X-Clinicaclick-Plugin-Version: 2.0.0-alpha.5
+X-Clinicaclick-Plugin-Version: 2.0.0-alpha.7
 Accept: application/json
 ```
 
@@ -448,21 +460,62 @@ El endpoint responde `200`, `202` o `204`; un fallo de reporte nunca desmonta la
     Referer, IDs manipulados, firma server-side inválida, campo extra,
     duplicado, honeypot, 202 y rate-limit
     adversariales.
-11. En Propdental ya se verificaron instalación, 22/22 contratos PHP, cron,
-    handshake, loader único, publicación/readback, lead con limpieza y rollback
-    de `/cita/`.
+11. La suite fuente vigente verifica **26/26** contratos PHP y **3/3** de
+    interoperabilidad. En Propdental ya se verificaron con `alpha.6` instalación, cron,
+    handshake, loader único, publicación/readback, relay atribuible con
+    limpieza, rollback y monitor de `/cita/`.
+
+### Actualización segura a `alpha.7`
+
+`alpha.7` debe llegar al WordPress **antes** que cualquier artefacto renderer
+`1.3.0` que use un formulario global:
+
+1. ejecutar `./tests/run.sh` y auditar el ZIP provisionado `alpha.7`;
+2. guardar un rollback real de `alpha.6`, incluido
+   `clinicaclick-web/config/installation.php`, y conservar configuración,
+   descriptor de confianza, runtime y caché/LKG; no instalar un ZIP genérico
+   sobre una instalación gestionada;
+3. instalar el ZIP provisionado `alpha.7` sin perder la identidad de la
+   instalación;
+4. ejecutar `CCW_Plugin::activate(false)` como el usuario propietario del sitio
+   `propdental.es`, no como `root`, para emitir heartbeat inmediato; el ciclo
+   ordinario puede dejar la versión en DB atrasada hasta 24 horas;
+5. exigir que backend mantenga `connected` y que la DB reporte exactamente
+   `2.0.0-alpha.7`; sincronizar sin cambiar todavía el artefacto activo;
+6. comprobar `/cita/`, loader único y que el rollback real `alpha.6` conserva
+   su `config/installation.php`;
+7. solo entonces publicar una revisión `1.3.0` con formulario global y validar **cada**
+   permalink, `data-cc-global`, formulario por página, atribución y rollback.
+
+Si la DB sigue reportando `alpha.5` o `alpha.6`, la publicación con formulario global se
+pospone. El preflight de Propdental encontró precisamente runtime live
+`alpha.6` y fila DB `alpha.5` por esa cadencia, así que no basta inspeccionar
+solo uno de los dos lados. No se
+fuerza ese manifest sobre el plugin anterior y no se usa esta actualización
+para abrir multi-route, hosted o custom domain.
+
+El mínimo no bloquea ni altera publicaciones legacy ni una revisión que solo
+use cabecera/pie globales. El rollout operativo sigue promoviendo `alpha.7`
+antes de estrenar cualquier artefacto `1.3.0` para mantener una única tanda
+reversible, pero la barrera fail-closed se limita al formulario global. El
+backend expresa el bloqueo como `409 web_wordpress_global_intake_plugin_outdated`
+con versiones actual/requerida y no encola una publicación parcial.
 
 ### Evidencia del piloto Propdental
 
 - ZIP provisionado instalado con slug `clinicaclick-web` y versión
-  `2.0.0-alpha.5`;
-- paquete provisionado y versión reportada alineados en `2.0.0-alpha.5`;
+  `2.0.0-alpha.6`;
+- paquete/runtime inspeccionado en `2.0.0-alpha.6`; la versión persistida por
+  el último heartbeat sigue temporalmente en `2.0.0-alpha.5`, por lo que no se
+  presenta como alineada hasta forzar/confirmar el siguiente activation report;
 - PHP lint verde y `ccw_sync_event` programado cada 15 minutos;
 - plugin legado `clinicaclick` `1.1.7` permanece activo;
 - home y landing pública: exactamente un `/assets/loader.js`; el legado no se
   desactiva y el publicador no duplica el bootstrap;
-- instalación `524c2f73-6b69-42f2-8cb0-c8d171575d94`, conectada y reportando
-  `2.0.0-alpha.5` sobre la URL canónica `https://www.propdental.es`;
+- instalación `524c2f73-6b69-42f2-8cb0-c8d171575d94`, conectada sobre la URL
+  canónica `https://www.propdental.es`; el runtime inspeccionado es
+  `2.0.0-alpha.6`, mientras el último heartbeat persistido aún figura como
+  `2.0.0-alpha.5` por su cadencia de hasta 24 horas;
 - proyecto `edd77d09-6ac5-4944-98e3-084d5285594c`, revisión
   `ead78c6d-f28f-478d-9058-bc189c846421` y publicación
   `5d55b1ef-c6fa-4e73-8aa8-2fd9ff41a526`;
@@ -480,6 +533,11 @@ El endpoint responde `200`, `202` o `204`; un fallo de reporte nunca desmonta la
   `48df4e4e…` (secuencia 6, job `31699`) a revisión 2/LKG `a43e7c4a…`;
 - la reprovisión temporal dejó el fallo explícito `583dc38f…` (secuencia 3) y
   la recuperación limpia `a944709d…` (secuencia 4, job `31696`);
+- el E2E posterior de `alpha.6` confirmó
+  `source_detail=clinicaclick_web_publication`, eliminó leads/eventos/filas
+  WhatsApp sintéticos y dejó cero intentos Google;
+- el monitor controlado comprobó una publicación y terminó `1 healthy`,
+  `0 degraded` a `2026-07-18T13:01:04.689Z`;
 - el paquete de evidencia está fuera de Git y no se documentan token, ticket,
   HMAC ni claves privadas.
 
@@ -503,7 +561,9 @@ Un paquete genérico sobrescribió temporalmente la configuración del piloto. S
 rotó el token, se reprovisionó el ZIP `alpha.5` y el handshake volvió a quedar
 `connected`; no se conservó ni documentó el token sustituido. El defecto CSP
 detectado durante esta recuperación se corrigió elevando el renderer a `1.2.1`
-y limitando las allowances del validador a las emitidas por ese renderer.
+y limitando las allowances del validador a las emitidas por ese renderer. Ese
+fue el paso de recuperación histórico; después se actualizó de forma
+incremental a `alpha.6` y `alpha.5` quedó como rollback.
 
 ## Desinstalación
 
@@ -517,7 +577,7 @@ explícita `ccw_purge_on_uninstall=true`.
 ```bash
 ./tests/run.sh
 ./tools/build-zip.sh
-sha256sum dist/clinicaclick-web-2.0.0-alpha.5.zip
+sha256sum dist/clinicaclick-web-2.0.0-alpha.7.zip
 ```
 
 El builder copia una allowlist, ordena entradas, fija un timestamp DOS y
