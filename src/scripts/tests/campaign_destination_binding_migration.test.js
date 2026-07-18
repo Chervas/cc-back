@@ -80,6 +80,7 @@ test('migration creates null-safe target uniqueness and per-account/event durabi
   assert.ok(indexes.some((item) => item.name === 'uniq_campaign_destination_binding_account' && item.unique));
   assert.ok(indexes.some((item) => item.name === 'uniq_campaign_destination_binding_event_id' && item.unique));
   assert.ok(indexes.some((item) => item.name === 'idx_campaign_destination_binding_account_state'));
+  assert.match(String(tables[2].columns.event_type.type), /drift_detected/);
 
   const indexCount = indexes.length;
   await migration.up(queryInterface, sequelizeTypes);
