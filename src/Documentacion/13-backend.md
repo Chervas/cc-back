@@ -4865,15 +4865,24 @@ plantillas ni filas que puedan estar referenciadas por ejecuciones.
 
 ## Marketing Web: control plane, editor y compilador W0-W2 (2026-07-18)
 
+**Corte integrado:** la serie backend `acebe05..6533357` está en `dev` y
+staging integra hasta `0d42abb`. Incluye hardening del handoff WordPress,
+rollout por scope, canonicalización segura `apex/www`, persistencia/recuperación
+del artefacto preparado, CSP del artefacto público y proyección de disponibilidad de publicación. Las migraciones
+`19000..25000` están aplicadas tras backup y crearon 17 tablas/cinco plantillas
+sin crear policies o bindings reales. La suite Web pasó 188/188 y los
+contratos PHP/WordPress 22/22. Esta integración no autoriza una campaña.
+
 W0 establece la frontera de seguridad y despliegue. El editor y la publicación
 son gates distintos y ambos nacen apagados:
 `MARKETING_WEB_EDITOR_ENABLED=false` y
-`MARKETING_WEB_PUBLISHING_ENABLED=false`. El segundo nunca evita el primero y
-`MARKETING_WEB_ENABLED_SCOPES=clinic:66,group:4` permite acotar opcionalmente el
-rollout: ausente o vacío conserva el comportamiento global del gate, pero, si
-contiene valores, solo esos scopes pueden usar editor y publicación. La lista
-es explícita y no consulta la base de datos ni infiere herencia; para un grupo
-y sus clínicas se enumeran tanto `group:id` como cada `clinic:id` autorizado.
+`MARKETING_WEB_PUBLISHING_ENABLED=false`. El segundo nunca evita el primero.
+`MARKETING_WEB_ENABLED_SCOPES=clinic:66,group:4` permite acotar el editor;
+`MARKETING_WEB_PUBLISHING_SCOPES=group:4` restringe de forma independiente qué
+scopes pueden mutar publicaciones aunque el editor esté permitido. Ausente o
+vacío conserva el comportamiento global del gate correspondiente; con valores
+solo esos scopes pasan. Las listas son explícitas, no consultan la base de
+datos ni infieren herencia.
 `MARKETING_WEB_DISABLED_SCOPES=clinic:66,group:4` actúa como kill switch y
 siempre tiene precedencia. Ambas listas fallan cerrado ante sintaxis inválida.
 El parser de rutas editoriales admite como máximo 1 MiB de JSON, el
@@ -4932,8 +4941,13 @@ El rollout operativo es deliberado:
 6. ampliar scopes gradualmente. Desactivar publicación bloquea nuevas
    mutaciones, pero no borra artefactos ni rompe la página activa.
 
+Estado de staging del piloto: editor/publicación globales activos, editor
+allowlisted para `group:5` y clínicas `19/35/36/56/57/58/59`, y publicación
+solo para `group:5`. Hospitalet ya acredita handshake y una publicación real;
+no ampliar esa lista hasta cerrar el lead E2E y el rollback indicados en W5/W6.
+
 La suite canónica es `npm test`: encadena los contratos Web y los contratos de
-campañas, además de los 20 contratos PHP, compatibilidad Ed25519 Node/PHP,
+campañas, además de los 22 contratos PHP, compatibilidad Ed25519 Node/PHP,
 compilador real y ZIP provisionado. Si `WEB_EDITOR_TEST_MYSQL_URL` está
 definida también ejecuta las
 integraciones destructivas sobre esa base **aislada**; nunca se apunta a dev,
@@ -5022,6 +5036,41 @@ licencias o consentimiento.
 
 ## Marketing Web: publicación WordPress y puente de campañas W4/W5 (2026-07-18)
 
+Estado integrado/piloto: `clinicaclick-web` `2.0.0-alpha.5` está instalado y
+activo en Propdental. El legado `clinicaclick` `1.1.7` sigue activo; v2 evita
+su loader global duplicado sin desactivarlo y tanto la home como la landing
+conservan un único loader. `ccw_sync_event` está programado cada 15 minutos y,
+si se ejecuta manualmente, debe correr como el usuario del sitio para no crear
+caché propiedad de `root`.
+
+El primer `activation_handshake` normalizó de forma auditable el alta inicial
+`https://propdental.es` a la URL canónica declarada por WordPress
+`https://www.propdental.es`. Esa excepción solo se permite cuando la
+instalación sigue realmente virgen (`pending`, sin `last_seen`, versión ni
+publicaciones); después se exige coincidencia estricta. La instalación
+`524c2f73-6b69-42f2-8cb0-c8d171575d94` está `connected` y reporta
+`2.0.0-alpha.5`. El paquete provisionado y la versión reportada quedan
+alineados; después de que un paquete genérico sobrescribiera temporalmente la
+configuración se rotó el token, se reprovisionó y se verificó de nuevo el
+handshake sin conservar el token anterior.
+
+El piloto público queda identificado y reproducible así:
+
+- proyecto `edd77d09-6ac5-4944-98e3-084d5285594c`, revisión aprobada activa
+  `ead78c6d-f28f-478d-9058-bc189c846421` y clínica `59`;
+- publicación `5d55b1ef-c6fa-4e73-8aa8-2fd9ff41a526` en `/cita/`;
+- renderer activo `clinicaclick-web-renderer/1.2.1` y revisión 2
+  `ead78c6d-f28f-478d-9058-bc189c846421`;
+- artefacto activo/last-known-good `a43e7c4a-9ef3-4aef-aad3-70f12f927c31`,
+  con hash público abreviado `be4d5f3c…`;
+- `https://www.propdental.es/cita/` responde `200`, sirve el título
+  `Dentista en Hospitalet | Propdental`, marker de artefacto y formulario
+  nativo firmado; contiene exactamente un `/assets/loader.js` y no expone
+  HMAC, token de instalación ni clave privada.
+
+No se cambió URL, goal, puja, presupuesto o estado de ninguna campaña para
+obtener esta evidencia. La publicación sigue acotada a `group:5`.
+
 Una landing de campaña puede congelar en `WebProjects.campaign_context` el
 vínculo opcional `{strategy_id, target_kind, treatment_id}`. El objeto solo se
 admite en proyectos `purpose=landing`, tiene contrato cerrado y es inmutable
@@ -5052,6 +5101,14 @@ estado/resultado pueden cambiar, también en bulk. Activar un artefacto cambia
 el puntero de publicación únicamente después del readback público. Rollback no
 recompila contenido vivo: exige un artefacto de producción previamente
 `verified`, lo vuelve a verificar y crea otra secuencia auditable.
+
+El hardening del piloto impide inyectar un `artifact_id` arbitrario: solo el
+worker que posee el deployment `running` y bloqueado puede persistir el
+artefacto preparado; escrituras bulk, queued o terminales fallan cerradas.
+Si rota el HMAC/runtime entre preparación y entrega, el publisher invalida el
+descriptor de almacenamiento anterior, regenera manifest/ficheros y exige
+provider, hash, HTTPS same-origin y conjunto exacto de ficheros antes de
+continuar.
 
 Los dominios propios separan ownership, routing y TLS. El job durable
 `marketing_web_domain_reconciliation` corre por defecto a los minutos
@@ -5085,7 +5142,7 @@ determinista y las rutas declaradas en el manifest. Un hash anterior o ajeno,
 un token de otra instalación o un `pathToken` no canónico fallan cerrado. Las
 respuestas son `private, no-store` y nunca exponen bucket, key ni credenciales.
 
-El plugin `2.0.0-alpha.4` decide las cabeceras por origen: añade bearer y
+El plugin `2.0.0-alpha.5` decide las cabeceras por origen: añade bearer y
 versión únicamente cuando el origen completo de la descarga coincide con
 `api_base`; nunca los reenvía a S3/CDN. En ambos modos conserva la segunda
 barrera: verifica firma, hash, tamaño, allowlist y contenido antes del cambio
@@ -5109,6 +5166,48 @@ No se ha relajado ninguna firma ni autenticación. El token sigue persistido
 solo como hash en backend y como opción `autoload=false` en WordPress; el ZIP
 es `private, no-store`, el ticket dura 15 minutos y un token/descriptor que no
 coincida falla antes de generar el paquete.
+
+Durante un diagnóstico controlado se mostró accidentalmente un HMAC de intake
+en la salida privada de la herramienta. Se rotó inmediatamente: `IntakeConfig`
+del grupo y el plugin legado quedaron sincronizados, se registró
+`web.measurement_hmac.rotated` solo con hashes, se eliminaron scripts/backups
+temporales y el plugin v2 recuperó el runtime nuevo. La comprobación pública
+posterior confirmó que HTML/JS no contienen el HMAC. Nunca se debe imprimir la
+configuración runtime completa para diagnosticar este canal.
+
+El modelo actual es single-route para el piloto: una instalación no debe
+recibir varias publicaciones clínicas independientes. Antes de usar un mismo
+WordPress para Sants, Nou Barris, Sant Martí, Badalona y Hospitalet se requiere
+un desired state v2 por path, router/caché/intake/report/rollback por ruta y
+aislamiento de HMAC/scope. La interoperabilidad Ed25519 está probada, pero la
+rotación real de control plane —adopción, revocación y recuperación— sigue
+siendo gate de GA.
+
+El cierre E2E WordPress quedó verificado:
+
+- el formulario público se probó dos veces. El terminal final fue
+  `LeadIntake #7261`, resuelto a clínica `59`/grupo `5`, con consentimiento y
+  atribución Web exacta de proyecto/revisión/página/publicación/artefacto/form.
+  Antes de limpiar existían su `FormSubmissionEvent` y
+  `LeadAttributionAudit`; no tenía click IDs, no generó conversiones externas y
+  la simulación + limpieza retiró el lead y artefactos sintéticos. El marker de
+  postcheck quedó en `0`;
+- para rollback se publicó la revisión temporal 3
+  `c01c20ec…` mediante deployment `9c53ec42…` (secuencia 5, job `31698`,
+  artefacto `545c1672…`), verificada en público. Después el deployment de
+  rollback `48df4e4e…` (secuencia 6, job `31699`) reactivó y verificó la
+  revisión 2 CSP-fixed y el LKG
+  `a43e7c4a-9ef3-4aef-aad3-70f12f927c31`. El borrador se restauró a su hash
+  original;
+- durante la reprovisión temporal, el deployment `583dc38f…` (secuencia 3)
+  falló de forma explícita. La recuperación limpia
+  `a944709d…` (secuencia 4, job `31696`) activó el artefacto CSP-fixed sin
+  alterar campañas.
+
+El defecto CSP descubierto por el piloto quedó corregido en el renderer
+`clinicaclick-web-renderer/1.2.1` y en las validaciones allowlisted del plugin.
+Chromium desktop/móvil confirmó cero bloqueos CSP, consentimiento y chat con
+estilos, exactamente un loader y ningún HMAC en el documento público.
 
 Los receptores públicos `POST /api/intake/leads`,
 `POST /api/intake/events` y `POST /api/intake/whatsapp-origin` también son
