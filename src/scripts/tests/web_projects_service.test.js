@@ -4,7 +4,9 @@ const crypto = require('node:crypto');
 
 process.env.MARKETING_WEB_EDITOR_ENABLED = 'true';
 process.env.MARKETING_WEB_PUBLISHING_ENABLED = 'true';
-delete process.env.MARKETING_WEB_PUBLISHING_SCOPES;
+process.env.MARKETING_WEB_ENABLED_SCOPES = '';
+process.env.MARKETING_WEB_DISABLED_SCOPES = '';
+process.env.MARKETING_WEB_PUBLISHING_SCOPES = '';
 process.env.MARKETING_WEB_API_BASE_URL = 'https://crm.clinicaclick.com';
 process.env.MARKETING_WEB_PLUGIN_BOOTSTRAP_KEY = 'b'.repeat(32);
 const webProjectSigningKeys = crypto.generateKeyPairSync('ed25519');
