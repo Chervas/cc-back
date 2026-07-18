@@ -68,6 +68,25 @@ test('producción indexa únicamente las páginas expresamente indexables', () =
   assert.match(artifact.files['robots.txt'], /Sitemap: https:\/\/implantes\.sites\.clinicaclick\.com\/sitemap\.xml/);
 });
 
+test('canonical, Open Graph, Schema y sitemap conservan una única URL autoritativa', () => {
+  const input = fixture({ environment: 'production', intakeEndpoint: '/_clinicaclick/intake' });
+  const canonical = 'https://www.clinic.example/implantes/';
+  input.document.seo.indexing = 'index';
+  input.document.pages[0].seo.index = true;
+  input.document.pages[0].seo.canonical_url = canonical;
+
+  const artifact = compileWebArtifact(input);
+  const html = artifact.files['index.html'];
+  const webPage = artifact.pages[0].json_ld['@graph'].find((entry) => entry['@type'] === 'WebPage');
+
+  assert.match(html, new RegExp(`<link rel="canonical" href="${canonical}">`));
+  assert.match(html, new RegExp(`<meta property="og:url" content="${canonical}">`));
+  assert.equal(webPage.url, canonical);
+  assert.equal(webPage['@id'], `${canonical}#webpage`);
+  assert.doesNotMatch(artifact.files['sitemap.xml'], /clinic\.example/);
+  assert.doesNotMatch(artifact.files['sitemap.xml'], /implantes\.sites\.clinicaclick\.com/);
+});
+
 test('producción fija el envío de formularios al puente same-origin', () => {
   const input = fixture({ environment: 'production', intakeEndpoint: '/_clinicaclick/intake' });
   const artifact = compileWebArtifact(input);
@@ -528,7 +547,7 @@ test('renderiza globals una vez y los incluye en SEO, Schema e intake de cada p�
   assert.match(secondaryHtml, /name="web_page_id" value="page_global_secondary"/);
 });
 
-test('renderer 1.4 honra tokens, responsive, fuentes e imagen focal en CSS de producción', () => {
+test('renderer 1.5 honra tokens, responsive, fuentes e imagen focal en CSS de producción', () => {
   const input = fixture();
   const section = Object.values(input.document.nodes).find((node) => node.type === 'section');
   section.props.layout = 'grid';
@@ -582,7 +601,7 @@ test('renderer 1.4 honra tokens, responsive, fuentes e imagen focal en CSS de pr
   const cssPath = Object.keys(artifact.files).find((path) => path.endsWith('.css'));
   const css = artifact.files[cssPath];
   const html = artifact.files['index.html'];
-  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.4.0');
+  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.5.0');
   assert.match(html, /cc-layout-grid cc-cols-4[^"\n]*cc-bg-brand[^"\n]*cc-width-wide[^"\n]*cc-pt-2xl[^"\n]*cc-radius-full[^"\n]*cc-shadow-lg[^"\n]*cc-mobile-cols-1/);
   assert.match(html, /cc-fit-contain cc-aspect-21-9 cc-focal-37-62/);
   assert.match(html, /<div class="cc-image-frame"><img[^>]*width="2100" height="900">/);

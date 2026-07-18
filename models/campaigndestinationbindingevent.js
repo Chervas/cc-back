@@ -23,7 +23,7 @@ module.exports = (sequelize, DataTypes) => {
     bindingId: { type: DataTypes.STRING(36), allowNull: false, field: 'binding_id' },
     accountId: { type: DataTypes.STRING(36), allowNull: true, field: 'account_id' },
     eventType: {
-      type: DataTypes.ENUM('landing_published', 'destination_ready', 'apply_requested', 'apply_started', 'readback_verified', 'readback_failed', 'rollback_requested', 'rollback_started', 'rollback_verified', 'rollback_failed'),
+      type: DataTypes.ENUM('landing_published', 'destination_ready', 'apply_requested', 'apply_started', 'readback_verified', 'readback_failed', 'rollback_requested', 'rollback_started', 'rollback_verified', 'rollback_failed', 'drift_detected'),
       allowNull: false,
       field: 'event_type',
     },

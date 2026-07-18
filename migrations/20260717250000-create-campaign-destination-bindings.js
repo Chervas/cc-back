@@ -501,7 +501,7 @@ module.exports = {
         type: Sequelize.ENUM(
           'landing_published', 'destination_ready', 'apply_requested', 'apply_started',
           'readback_verified', 'readback_failed', 'rollback_requested', 'rollback_started',
-          'rollback_verified', 'rollback_failed'
+          'rollback_verified', 'rollback_failed', 'drift_detected'
         ),
         allowNull: false,
       },

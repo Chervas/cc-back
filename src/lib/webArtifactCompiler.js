@@ -9,7 +9,7 @@ const { assertWebContentSnapshot, isSafePublicAssetUrl } = require('./webContent
 const { trustedRuntime } = require('./webMeasurementRuntime');
 const { publicHttpUrl } = require('./safeHttpTarget');
 
-const RENDERER_VERSION = 'clinicaclick-web-renderer/1.4.0';
+const RENDERER_VERSION = 'clinicaclick-web-renderer/1.5.0';
 const SAFE_EXTERNAL_REL = /^(?:\/[A-Za-z0-9_][A-Za-z0-9/_-]*|https:\/\/[^\s]+)$/;
 const PRODUCTION_INTAKE_ENDPOINT = '/_clinicaclick/intake';
 const CLINIC_BINDING_FIELDS = new Set([
@@ -411,23 +411,33 @@ function imageClassList(node) {
   return `cc-fit-${fit} cc-aspect-${aspect} cc-focal-${focalX}-${focalY}`;
 }
 
-function renderImage(node, snapshot) {
-  const media = snapshot.media_assets?.[node.props.asset_id];
+function resolvedMediaImage(snapshot, assetId, details = {}) {
+  const media = snapshot.media_assets?.[assetId];
   if (!media) fail('web_artifact_media_unresolved', 'La revisión referencia una imagen no congelada.', {
-    node_id: node.id,
-    media_id: node.props.asset_id,
+    ...details,
+    media_id: assetId,
   });
   const variants = Array.isArray(media.variants) ? media.variants : [];
   const original = variants.find((item) => item.key === 'original') || variants[0];
   const source = original?.url || media.public_media?.url;
   if (!isSafePublicAssetUrl(source)) {
-    fail('web_artifact_media_url_invalid', 'La imagen no tiene una URL pública estable.', { node_id: node.id });
+    fail('web_artifact_media_url_invalid', 'La imagen no tiene una URL pública estable.', {
+      ...details,
+      media_id: assetId,
+    });
   }
   const width = Number(original?.width || media.metadata?.width || 0);
   const height = Number(original?.height || media.metadata?.height || 0);
-  const dimensions = width > 0 && height > 0
+  return {
+    source,
+    dimensions: width > 0 && height > 0
     ? ` width="${width}" height="${height}"`
-    : '';
+      : '',
+  };
+}
+
+function renderImage(node, snapshot) {
+  const { source, dimensions } = resolvedMediaImage(snapshot, node.props.asset_id, { node_id: node.id });
   const loading = node.props.loading === 'eager' ? 'eager' : 'lazy';
   const fetchPriority = loading === 'eager' ? ' fetchpriority="high"' : '';
   const alt = node.props.decorative ? '' : node.props.alt;
@@ -435,6 +445,29 @@ function renderImage(node, snapshot) {
     ? `<figcaption>${escapeHtml(node.props.caption)}</figcaption>`
     : '';
   return `<figure id="cc-${escapeHtml(node.id)}" class="cc-node cc-image ${imageClassList(node)} ${styleClassList(node)}"><div class="cc-image-frame"><img src="${escapeHtml(source)}" alt="${escapeHtml(alt)}" loading="${loading}" decoding="async"${fetchPriority}${dimensions}></div>${caption}</figure>`;
+}
+
+function renderGallery(node, snapshot) {
+  const figures = node.props.items.map((item, index) => {
+    const { source, dimensions } = resolvedMediaImage(snapshot, item.asset_id, {
+      node_id: node.id,
+      item_index: index,
+    });
+    const classes = imageClassList({
+      props: {
+        fit: node.props.fit,
+        aspect_ratio: node.props.aspect_ratio,
+        focal_x: item.focal_x,
+        focal_y: item.focal_y,
+      },
+    });
+    const alt = item.decorative ? '' : item.alt;
+    const caption = item.caption
+      ? `<figcaption>${escapeHtml(item.caption)}</figcaption>`
+      : '';
+    return `<figure class="cc-gallery-item ${classes}"><div class="cc-image-frame"><img src="${escapeHtml(source)}" alt="${escapeHtml(alt)}" loading="lazy" decoding="async"${dimensions}></div>${caption}</figure>`;
+  }).join('');
+  return `<div id="cc-${escapeHtml(node.id)}" class="cc-node cc-gallery cc-gallery-cols-${Number(node.props.columns)} ${styleClassList(node)}">${figures}</div>`;
 }
 
 function buttonHref(node, context) {
@@ -512,6 +545,7 @@ function renderNode(nodeId, document, snapshot, context, ancestors = new Set(), 
     return `<details id="cc-${escapeHtml(node.id)}" class="cc-node cc-faq ${styleClassList(node)}"><summary>${escapeHtml(node.props.question)}</summary><p>${escapeHtml(node.props.answer)}</p></details>`;
   }
   if (node.type === 'image') return renderImage(node, snapshot);
+  if (node.type === 'gallery') return renderGallery(node, snapshot);
   if (node.type === 'button') {
     const href = buttonHref(node, context);
     const external = node.props.action === 'external_url' && node.props.open_in_new_tab === true;
@@ -569,8 +603,12 @@ function stylesheet(tokens, document = { nodes: {} }) {
     + columnRules(`${breakpoint}-`)
   );
   const focalRules = [...new Set(Object.values(document.nodes || {})
-    .filter((node) => node?.type === 'image')
-    .map((node) => `${Number.isInteger(node.props?.focal_x) ? node.props.focal_x : 50}-${Number.isInteger(node.props?.focal_y) ? node.props.focal_y : 50}`))]
+    .flatMap((node) => {
+      if (node?.type === 'image') return [node.props];
+      if (node?.type === 'gallery') return node.props?.items || [];
+      return [];
+    })
+    .map((item) => `${Number.isInteger(item?.focal_x) ? item.focal_x : 50}-${Number.isInteger(item?.focal_y) ? item.focal_y : 50}`))]
     .sort((left, right) => left.localeCompare(right))
     .map((pair) => {
       const [x, y] = pair.split('-');
@@ -590,11 +628,11 @@ function stylesheet(tokens, document = { nodes: {} }) {
     '.cc-divider{width:100%;height:0;margin:0;border:0;border-top-width:1px;border-top-style:solid}.cc-divider-solid{border-top-style:solid}.cc-divider-dashed{border-top-style:dashed}.cc-divider-dotted{border-top-style:dotted}.cc-divider-tone-muted{border-top-color:#dfe3ec}.cc-divider-tone-brand{border-top-color:var(--cc-primary)}.cc-divider-tone-accent{border-top-color:var(--cc-accent)}.cc-spacer{display:block;width:100%;flex:none}.cc-spacer-xs{height:.25rem}.cc-spacer-sm{height:var(--cc-sm)}.cc-spacer-md{height:var(--cc-md)}.cc-spacer-lg{height:var(--cc-lg)}.cc-spacer-xl{height:var(--cc-xl)}.cc-spacer-2xl{height:var(--cc-2xl)}',
     '.cc-button{display:inline-flex;width:fit-content;align-items:center;justify-content:center;min-height:44px;padding:.75rem 1.15rem;border-radius:var(--cc-radius);font-weight:700;text-decoration:none;border:1px solid transparent;cursor:pointer}.cc-button-primary{background:var(--cc-primary);color:#fff}.cc-section.cc-bg-brand .cc-button-primary{background:var(--cc-surface);color:var(--cc-primary)}.cc-button-secondary{background:var(--cc-secondary);color:#fff}.cc-button-outline{border-color:currentColor;color:var(--cc-primary);background:transparent}.cc-button-link{padding-inline:0;color:var(--cc-primary)}',
     '.cc-form{display:grid;gap:var(--cc-md);padding:var(--cc-xl);border:1px solid #dfe3ec;border-radius:var(--cc-radius);background:#fff}.cc-field{display:grid;gap:.35rem}.cc-field input:not([type=checkbox]),.cc-field textarea,.cc-field select{width:100%;min-height:44px;border:1px solid #aab1c2;border-radius:.5rem;padding:.7rem;font:inherit}.cc-checkbox{grid-template-columns:auto 1fr;align-items:start}.cc-honeypot{position:absolute!important;left:-10000px!important;width:1px!important;height:1px!important;overflow:hidden!important}.cc-form-status{display:none;padding:.75rem;border-radius:.5rem}.cc-form-success{background:#e9f8f1;color:#145c3d}.cc-form-error{background:#fff1f1;color:#8b1f1f}.cc-form-status:target{display:block}',
-    '.cc-image{margin:0}.cc-image-frame{overflow:hidden;border-radius:inherit;background:#eef1f6}.cc-image img{width:100%;height:100%;object-fit:cover}.cc-fit-contain img{object-fit:contain}.cc-aspect-auto .cc-image-frame img{height:auto}.cc-aspect-1-1 .cc-image-frame{aspect-ratio:1/1}.cc-aspect-4-3 .cc-image-frame{aspect-ratio:4/3}.cc-aspect-3-2 .cc-image-frame{aspect-ratio:3/2}.cc-aspect-16-9 .cc-image-frame{aspect-ratio:16/9}.cc-aspect-21-9 .cc-image-frame{aspect-ratio:21/9}.cc-image figcaption{padding-top:.5rem;color:#64748b;font-size:.8125rem}',
+    '.cc-image{margin:0}.cc-gallery{display:grid}.cc-gallery-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}.cc-gallery-cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}.cc-gallery-cols-4{grid-template-columns:repeat(4,minmax(0,1fr))}.cc-gallery-item{min-width:0;margin:0;border-radius:inherit}.cc-image-frame{overflow:hidden;border-radius:inherit;background:#eef1f6}.cc-image img,.cc-gallery-item img{width:100%;height:100%;object-fit:cover}.cc-fit-contain img{object-fit:contain}.cc-aspect-auto .cc-image-frame img{height:auto}.cc-aspect-1-1 .cc-image-frame{aspect-ratio:1/1}.cc-aspect-4-3 .cc-image-frame{aspect-ratio:4/3}.cc-aspect-3-2 .cc-image-frame{aspect-ratio:3/2}.cc-aspect-16-9 .cc-image-frame{aspect-ratio:16/9}.cc-aspect-21-9 .cc-image-frame{aspect-ratio:21/9}.cc-image figcaption,.cc-gallery-item figcaption{padding-top:.5rem;color:#64748b;font-size:.8125rem}',
     focalRules,
     '.cc-faq{border:1px solid #dfe3ec;background:#fff;padding:var(--cc-md);border-radius:var(--cc-radius)}.cc-faq summary{cursor:pointer;font-family:var(--cc-font-heading);font-weight:700}.cc-faq p{margin:var(--cc-sm) 0 0;white-space:pre-wrap}',
-    `@media(max-width:767px){.cc-layout-row>.cc-container{flex-direction:column}.cc-layout-grid>.cc-container{grid-template-columns:1fr}.cc-form{padding:var(--cc-lg)}.cc-button{width:100%}${responsiveRules('mobile')}}`,
-    `@media(min-width:768px) and (max-width:1023px){${responsiveRules('tablet')}}`,
+    `@media(max-width:767px){.cc-layout-row>.cc-container{flex-direction:column}.cc-layout-grid>.cc-container,.cc-gallery{grid-template-columns:1fr}.cc-form{padding:var(--cc-lg)}.cc-button{width:100%}${responsiveRules('mobile')}}`,
+    `@media(min-width:768px) and (max-width:1023px){.cc-gallery{grid-template-columns:repeat(2,minmax(0,1fr))}${responsiveRules('tablet')}}`,
     `@media(min-width:1024px){${responsiveRules('desktop')}}`,
   ].join('');
 }
@@ -639,9 +677,8 @@ function reachableNodeIds(page, document) {
   return reachable;
 }
 
-function buildStructuredData({ project, page, baseUrl, clinic, document }) {
+function buildStructuredData({ project, page, pageUrl, baseUrl, clinic, document }) {
   const root = `${baseUrl}/#website`;
-  const pageUrl = page.slug === 'inicio' ? `${baseUrl}/` : `${baseUrl}/${page.slug}/`;
   const organizationId = `${baseUrl}/#organization`;
   const graph = [{
     '@type': 'WebSite',
@@ -754,7 +791,7 @@ function renderPage({ page, document, snapshot, context, project, baseUrl, clini
   const canonical = context.environment === 'production'
     ? (page.seo?.canonical_url || pageUrl)
     : pageUrl;
-  const jsonLd = buildStructuredData({ project, page, baseUrl, clinic, document });
+  const jsonLd = buildStructuredData({ project, page, pageUrl: canonical, baseUrl, clinic, document });
   const jsonLdText = stableJson(jsonLd);
   const jsonLdCspHash = sha256(jsonLdText, 'base64');
   const measurementOrigin = context.measurement.enabled ? context.measurement.api_url : null;
@@ -770,7 +807,7 @@ function renderPage({ page, document, snapshot, context, project, baseUrl, clini
   const social = socialId ? snapshot.media_assets?.[socialId] : null;
   const socialUrl = social?.variants?.[0]?.url || social?.public_media?.url || null;
   const publicationBasePath = new URL(`${baseUrl}/`).pathname;
-  const html = `<!doctype html><html lang="${escapeHtml(project.locale)}"><head><meta charset="utf-8"><meta name="clinicaclick-artifact-input" content="${escapeHtml(artifactMarker)}"><meta http-equiv="Content-Security-Policy" content="${escapeHtml(pageCsp)}"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><meta name="description" content="${escapeHtml(description)}"><meta name="robots" content="${robots}"><link rel="canonical" href="${escapeHtml(canonical)}"><meta property="og:type" content="website"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${escapeHtml(description)}"><meta property="og:url" content="${escapeHtml(pageUrl)}">${socialUrl && isSafePublicAssetUrl(socialUrl) ? `<meta property="og:image" content="${escapeHtml(socialUrl)}">` : ''}<link rel="stylesheet" href="${escapeHtml(`${baseUrl}/${cssFile}`)}"><script type="application/ld+json">${jsonLdText}</script>${measurementLoaderTag(context.measurement, { projectId: project.id, revisionId: context.revisionId, pageId: page.id })}</head><body data-cc-web-project-id="${escapeHtml(project.id)}" data-cc-web-revision-id="${escapeHtml(context.revisionId)}" data-cc-web-base-path="${escapeHtml(publicationBasePath)}">${header}${body}${footer}</body></html>`;
+  const html = `<!doctype html><html lang="${escapeHtml(project.locale)}"><head><meta charset="utf-8"><meta name="clinicaclick-artifact-input" content="${escapeHtml(artifactMarker)}"><meta http-equiv="Content-Security-Policy" content="${escapeHtml(pageCsp)}"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><meta name="description" content="${escapeHtml(description)}"><meta name="robots" content="${robots}"><link rel="canonical" href="${escapeHtml(canonical)}"><meta property="og:type" content="website"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${escapeHtml(description)}"><meta property="og:url" content="${escapeHtml(canonical)}">${socialUrl && isSafePublicAssetUrl(socialUrl) ? `<meta property="og:image" content="${escapeHtml(socialUrl)}">` : ''}<link rel="stylesheet" href="${escapeHtml(`${baseUrl}/${cssFile}`)}"><script type="application/ld+json">${jsonLdText}</script>${measurementLoaderTag(context.measurement, { projectId: project.id, revisionId: context.revisionId, pageId: page.id })}</head><body data-cc-web-project-id="${escapeHtml(project.id)}" data-cc-web-revision-id="${escapeHtml(context.revisionId)}" data-cc-web-base-path="${escapeHtml(publicationBasePath)}">${header}${body}${footer}</body></html>`;
   return {
     path: page.slug === 'inicio' ? '/' : `/${page.slug}/`,
     html,
@@ -784,8 +821,9 @@ function renderPage({ page, document, snapshot, context, project, baseUrl, clini
 }
 
 function sitemapXml(baseUrl, pages) {
+  const publicationOrigin = new URL(`${baseUrl}/`).origin;
   const urls = pages
-    .filter((page) => page.robots.startsWith('index'))
+    .filter((page) => page.robots.startsWith('index') && new URL(page.canonical).origin === publicationOrigin)
     .map((page) => `<url><loc>${escapeXml(page.canonical)}</loc></url>`)
     .join('');
   return `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls}</urlset>`;
