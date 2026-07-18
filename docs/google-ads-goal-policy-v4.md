@@ -1,5 +1,7 @@
 # Contrato Google Ads: objetivo por etapa y cohorte (v4)
 
+> **Actualización 2026-07-18:** el mismo executor seguro sirve a Mejora y Piloto, pero no comparten aprobación: Mejora aplica QL al activar y reutiliza el mandato cliente para QL→Schedule; Piloto conserva aprobación de operador.
+
 `googleAdsClinicaclickGoalPolicy.service.js` aplica una regla deliberadamente
 estrecha: cada policy de una cohorte de campañas puede pujar por **una sola** de
 estas señales canónicas:
@@ -66,11 +68,39 @@ cambiar su configuración de objetivos.
 - el plan conserva los datos anteriores necesarios para rollback manual;
 - la auditoría diaria detecta drift, pero no autorepara.
 
-`config.google_ads.goal_policy` pertenece exclusivamente al runtime de campañas gestionadas. Marketing > Web, la verificación del snippet y el provisioning de acciones deben conservarlo byte a byte junto con cualquier campo futuro no reconocido. Los writers de `IntakeConfig` leen la fila más reciente bajo lock y superponen únicamente su patch; un normalizador de lectura nunca reemplaza el objeto persistido. La regresión `intake_config_write_merge.test.js` cubre explícitamente `google_ads.goal_policy`, Enhanced, valores y campos desconocidos.
+`config.google_ads.goal_policy` pertenece exclusivamente al runtime de optimización de `guided_improvement` y `managed_service`; `connect_only` no lo provisiona ni lo aplica. Marketing > Web, la verificación del snippet y el provisioning de acciones deben conservarlo byte a byte junto con cualquier campo futuro no reconocido. Los writers de `IntakeConfig` leen la fila más reciente bajo lock y superponen únicamente su patch; un normalizador de lectura nunca reemplaza el objeto persistido. La regresión `intake_config_write_merge.test.js` cubre explícitamente `google_ads.goal_policy`, Enhanced, valores y campos desconocidos.
 
 El servicio no decide cuándo avanzar de `qualified_lead` a `schedule` o
 `purchase`: recibe la etapa ya aprobada por el ciclo de optimización y limita
 la mutación al goal exclusivo de esa etapa/cohorte.
+
+## Mejora: activación y transición automática
+
+`guidedCampaignOptimizationPolicy.service.js` conecta este contrato con una
+estrategia `guided_improvement` activa sin conceder operación integral:
+
+- el cliente debe haber aceptado la autorización v1 con los scopes exactos
+  `landing_publish`, `campaign_destination` y `conversion_goal`;
+- activar una estrategia Google Search/PMax que supera los gates de medición y
+  conversiones crea la policy directamente en `qualified_lead`; la medición es
+  un gate previo, no una etapa persistida que deba promocionarse después;
+- la policy y el `JobRequest` de aplicación nacen en la misma transacción. El
+  worker aplica cada cuenta por separado mediante preview, digest,
+  `validateOnly`, comprobación de drift y readback saludable;
+- el job diario evalúa las policies activas. Cuando `qualified_lead → schedule`
+  supera dos evaluaciones separadas al menos 24 horas y todos los umbrales,
+  encola una transición deduplicada por `evaluation_id` y reutiliza como
+  aprobación cliente el mandato inicial persistido. No requiere otro clic ni
+  aprobación de operador;
+- la etapa local solo cambia después de que todas las cuentas confirmen el
+  readback. Un fallo libera el lease, conserva la etapa anterior y deja la
+  policy activa para poder reintentar de forma durable.
+
+Schedule usa 12 semanas completas calculadas con la fecha efectiva
+`CitasPacientes.inicio`. Si algún evento no resuelve una cita o su fecha, se
+añade `SCHEDULE_EFFECTIVE_DATE_COVERAGE_INCOMPLETE` y la promoción queda
+bloqueada. Las acciones globales continúan secundarias y cada custom goal
+conserva una sola señal de puja.
 
 ## Piloto automático: provisioning y ejecución
 
@@ -117,21 +147,18 @@ persistido del Piloto automático (`approved_by_user_id`, `approved_at` y
 `/:id/goal-policy/preview` y `/:id/goal-policy/apply` permiten revisar/reintentar;
 el segundo exige el digest obtenido por preview.
 
-La promoción `qualified_lead → schedule` permanece fail-closed. Además del
-contrato existente de dos evaluaciones consecutivas y sus umbrales, el
-executor exige evidencia persistida de ambas evaluaciones y aprobación de
-operador. Hoy faltan dos piezas para completar el recorrido end-to-end:
+La promoción posterior se distingue por modo:
 
-- el agregador no dispone de la serie semanal por fecha real de cita
-  (`SCHEDULE_WEEKLY_HISTORY_UNAVAILABLE`), por lo que no se inventa un reparto
-  desde `attempted_at`;
-- existe `applyApprovedLifecycleTransition` como helper puro y el executor sabe
-  validar un `approved_transition` ya persistido, pero ninguna ruta actual
-  materializa esa aprobación ni invoca el helper para escribir el cambio de
-  etapa.
+- en `guided_improvement`, el writer/orquestador ya existe y aplica
+  automáticamente una evaluación `ready`, sin blockers y con digest vigente,
+  reutilizando el mandato inicial del cliente;
+- en `managed_service`, las dos evaluaciones y la serie semanal ya pueden
+  producir evidencia suficiente, pero la mutación del proveedor continúa
+  exigiendo aprobación operativa persistida. El reconciliador automático no
+  encola transiciones de Piloto.
 
-Por tanto, el soporte del planner/executor para Schedule no equivale todavía a
-una transición operativa automática. Cuando se integren el agregador y el
-writer/orquestador de aprobación, la nueva etapa eliminará el ownership de QL
-y creará/asignará el goal inmutable específico de Schedule; nunca reescribirá
-el goal de QL.
+En ambos modos el evaluador puro devuelve `provider_mutation=null`. La
+mutación vive en un executor separado y fail-closed. Al cambiar de etapa se
+crea/asigna el goal inmutable específico de Schedule; nunca se convierte la
+acción en primaria global ni se reescribe el goal anterior como si fuera otra
+señal.
