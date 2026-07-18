@@ -30,7 +30,15 @@ function selectedTest(fileName) {
 function run(command, args) {
   const result = spawnSync(command, args, {
     cwd: repositoryRoot,
-    env: process.env,
+    // La suite valida por separado las allowlists de rollout. El runner
+    // general no debe heredar las allowlists reales de dev/staging, porque
+    // convertiría fixtures de otras clínicas en falsos negativos.
+    env: {
+      ...process.env,
+      MARKETING_WEB_ENABLED_SCOPES: '',
+      MARKETING_WEB_DISABLED_SCOPES: '',
+      MARKETING_WEB_PUBLISHING_SCOPES: '',
+    },
     stdio: 'inherit',
   });
   if (result.error) throw result.error;
