@@ -727,7 +727,14 @@ function renderPage({ page, document, snapshot, context, project, baseUrl, clini
   const jsonLdText = stableJson(jsonLd);
   const jsonLdCspHash = sha256(jsonLdText, 'base64');
   const measurementOrigin = context.measurement.enabled ? context.measurement.api_url : null;
-  const pageCsp = `default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' https://media.clinicaclick.com; style-src 'self'; script-src 'sha256-${jsonLdCspHash}'${measurementOrigin ? ` ${measurementOrigin}` : ''}; connect-src 'self'${measurementOrigin ? ` ${measurementOrigin}` : ''}; font-src 'self'; manifest-src 'self'; upgrade-insecure-requests`;
+  // The public measurement runtime builds the consent/chat UI at runtime. It
+  // injects scoped CSS and may use a public brand image served by the trusted
+  // measurement origin. Keep the stricter static-site policy when measurement
+  // is disabled, and open only those two directives when the trusted runtime
+  // is embedded.
+  const runtimeImageSources = measurementOrigin ? ` ${measurementOrigin} data:` : '';
+  const runtimeStyleSources = measurementOrigin ? " 'unsafe-inline'" : '';
+  const pageCsp = `default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' https://media.clinicaclick.com${runtimeImageSources}; style-src 'self'${runtimeStyleSources}; script-src 'sha256-${jsonLdCspHash}'${measurementOrigin ? ` ${measurementOrigin}` : ''}; connect-src 'self'${measurementOrigin ? ` ${measurementOrigin}` : ''}; font-src 'self'; manifest-src 'self'; upgrade-insecure-requests`;
   const socialId = page.seo?.social_asset_id || document.seo.default_social_asset_id;
   const social = socialId ? snapshot.media_assets?.[socialId] : null;
   const socialUrl = social?.variants?.[0]?.url || social?.public_media?.url || null;
@@ -820,8 +827,10 @@ function compileWebArtifact(input = {}) {
   }));
   const scriptHashes = [...new Set(pages.map((page) => `'sha256-${page.json_ld_csp_hash}'`))].sort();
   const measurementOrigin = runtime.measurement.enabled ? runtime.measurement.api_url : null;
+  const runtimeImageSources = measurementOrigin ? ` ${measurementOrigin} data:` : '';
+  const runtimeStyleSources = measurementOrigin ? " 'unsafe-inline'" : '';
   const headers = {
-    'content-security-policy': `default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' https://media.clinicaclick.com; style-src 'self'; script-src ${scriptHashes.join(' ')}${measurementOrigin ? ` ${measurementOrigin}` : ''}; connect-src 'self'${measurementOrigin ? ` ${measurementOrigin}` : ''}; font-src 'self'; manifest-src 'self'; upgrade-insecure-requests`,
+    'content-security-policy': `default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' https://media.clinicaclick.com${runtimeImageSources}; style-src 'self'${runtimeStyleSources}; script-src ${scriptHashes.join(' ')}${measurementOrigin ? ` ${measurementOrigin}` : ''}; connect-src 'self'${measurementOrigin ? ` ${measurementOrigin}` : ''}; font-src 'self'; manifest-src 'self'; upgrade-insecure-requests`,
     'cross-origin-opener-policy': 'same-origin',
     'cross-origin-resource-policy': 'same-site',
     'permissions-policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
