@@ -9,7 +9,7 @@ const { assertWebContentSnapshot, isSafePublicAssetUrl } = require('./webContent
 const { trustedRuntime } = require('./webMeasurementRuntime');
 const { publicHttpUrl } = require('./safeHttpTarget');
 
-const RENDERER_VERSION = 'clinicaclick-web-renderer/1.2.0';
+const RENDERER_VERSION = 'clinicaclick-web-renderer/1.2.1';
 const SAFE_EXTERNAL_REL = /^(?:\/[A-Za-z0-9_][A-Za-z0-9/_-]*|https:\/\/[^\s]+)$/;
 const PRODUCTION_INTAKE_ENDPOINT = '/_clinicaclick/intake';
 const CLINIC_BINDING_FIELDS = new Set([
