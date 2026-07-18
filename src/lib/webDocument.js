@@ -53,6 +53,7 @@ const BINDABLE_PROPS = Object.freeze({
   text: new Set(['text']),
   faq: new Set(['question', 'answer']),
   image: new Set(['asset_id', 'alt']),
+  gallery: new Set(),
   button: new Set(['label', 'target']),
   intake_form: new Set(['title', 'description']),
   section: new Set(),
@@ -401,6 +402,11 @@ function validateGraph(document) {
 
     const stringValues = Object.values(node.props).filter((value) => typeof value === 'string');
     totalTextCharacters += stringValues.reduce((sum, value) => sum + value.length, 0);
+    if (node.type === 'gallery') {
+      totalTextCharacters += node.props.items.reduce((sum, item) => (
+        sum + item.alt.length + (item.caption?.length || 0)
+      ), 0);
+    }
 
     for (let index = 0; index < node.children.length; index += 1) {
       const childId = node.children[index];
@@ -436,6 +442,36 @@ function validateGraph(document) {
       }
       if (!node.props.decorative && node.props.alt.trim() === '') {
         errors.push(validationError('imageAlt', `${nodePath}/props/alt`, 'una imagen informativa necesita texto alternativo'));
+      }
+    }
+
+    if (node.type === 'gallery') {
+      const assetIds = new Set();
+      for (let index = 0; index < node.props.items.length; index += 1) {
+        const item = node.props.items[index];
+        const itemPath = `${nodePath}/props/items/${index}`;
+        if (assetIds.has(item.asset_id)) {
+          errors.push(validationError(
+            'uniqueGalleryAsset',
+            `${itemPath}/asset_id`,
+            'una galería no puede repetir la misma imagen'
+          ));
+        }
+        assetIds.add(item.asset_id);
+        if (item.decorative && item.alt !== '') {
+          errors.push(validationError(
+            'galleryAlt',
+            `${itemPath}/alt`,
+            'una imagen decorativa debe tener alt vacío'
+          ));
+        }
+        if (!item.decorative && item.alt.trim() === '') {
+          errors.push(validationError(
+            'galleryAlt',
+            `${itemPath}/alt`,
+            'una imagen informativa necesita texto alternativo'
+          ));
+        }
       }
     }
 

@@ -48,6 +48,16 @@ function collectWebResourceReferences(document, scope = null) {
     if (node?.type === 'image') {
       addReference(references, 'media', node.props?.asset_id, `/nodes/${nodeId}/props/asset_id`);
     }
+    if (node?.type === 'gallery') {
+      for (let index = 0; index < (node.props?.items || []).length; index += 1) {
+        addReference(
+          references,
+          'media',
+          node.props.items[index]?.asset_id,
+          `/nodes/${nodeId}/props/items/${index}/asset_id`
+        );
+      }
+    }
   }
   for (const [bindingId, binding] of Object.entries(document?.bindings || {})) {
     const path = `/bindings/${bindingId}/source_id`;

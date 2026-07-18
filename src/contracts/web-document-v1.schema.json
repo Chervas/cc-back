@@ -66,6 +66,7 @@
           { "$ref": "#/definitions/spacerNode" },
           { "$ref": "#/definitions/faqNode" },
           { "$ref": "#/definitions/imageNode" },
+          { "$ref": "#/definitions/galleryNode" },
           { "$ref": "#/definitions/buttonNode" },
           { "$ref": "#/definitions/intakeFormNode" }
         ]
@@ -623,6 +624,70 @@
         "style_tokens": { "$ref": "#/definitions/styleTokens" },
         "responsive": { "$ref": "#/definitions/responsive" },
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
+      }
+    },
+    "galleryNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "version", "props", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "type": { "const": "gallery" },
+        "version": { "const": 1 },
+        "props": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["items", "columns", "fit", "aspect_ratio"],
+          "properties": {
+            "items": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 12,
+              "items": { "$ref": "#/definitions/galleryItem" }
+            },
+            "columns": { "enum": [2, 3, 4] },
+            "fit": { "enum": ["cover", "contain"] },
+            "aspect_ratio": { "enum": ["1:1", "4:3", "3:2", "16:9"] }
+          }
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "style_tokens": { "$ref": "#/definitions/styleTokens" },
+        "responsive": { "$ref": "#/definitions/responsive" },
+        "binding_ids": { "$ref": "#/definitions/bindingIds" }
+      }
+    },
+    "galleryItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["asset_id", "alt", "decorative"],
+      "properties": {
+        "asset_id": { "$ref": "#/definitions/safeId" },
+        "alt": {
+          "allOf": [
+            { "$ref": "#/definitions/plainText" },
+            { "maxLength": 500 }
+          ]
+        },
+        "decorative": { "type": "boolean" },
+        "focal_x": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "focal_y": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "caption": {
+          "allOf": [
+            { "$ref": "#/definitions/plainText" },
+            { "maxLength": 500 }
+          ]
+        }
       }
     },
     "buttonNode": {
