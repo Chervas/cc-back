@@ -380,6 +380,7 @@ class MetaSyncJobs {
       googleConversionGoalPolicyAudit: 'Audita sin autoreparar la medición de Mide y mejora y la policy de goals/campañas opt-in de ClinicaClick.',
       campaignOptimizationEvaluation: 'Evalúa diariamente políticas persistidas de optimización sin cambiar objetivos ni mutar Google Ads.',
       webDomainReconciliation: 'Revalida DNS, alta SaaS y TLS de dominios web pendientes; los dominios listos se revisan a diario.',
+      campaignDestinationDriftAudit: 'Relee diariamente los destinos activos aprobados y avisa si Google Ads ya no apunta a la landing esperada, sin autoreparar.',
       webSync: 'Sincroniza Search Console (serie diaria) y PSI reciente para clínicas mapeadas.',
       webBackfill: 'Backfill histórico de Search Console (12–16 meses) para cache y rapidez.',
       analyticsSync: 'Sincroniza métricas de Google Analytics 4 (sesiones, usuarios, fuentes, audiencias).',
@@ -420,6 +421,7 @@ class MetaSyncJobs {
         googleConversionGoalPolicyAudit: process.env.JOBS_GOOGLE_CONVERSION_GOAL_POLICY_AUDIT_SCHEDULE || '17 2 * * *',
         campaignOptimizationEvaluation: process.env.JOBS_CAMPAIGN_OPTIMIZATION_EVALUATION_SCHEDULE || '35 2 * * *',
         webDomainReconciliation: process.env.JOBS_MARKETING_WEB_DOMAIN_RECONCILIATION_SCHEDULE || '7,22,37,52 * * * *',
+        campaignDestinationDriftAudit: process.env.JOBS_CAMPAIGN_DESTINATION_DRIFT_AUDIT_SCHEDULE || '5 3 * * *',
         webSync: process.env.JOBS_WEB_SCHEDULE || '15 4 * * *',
         webBackfill: process.env.JOBS_WEB_BACKFILL_SCHEDULE || '30 4 * * 0',
         analyticsSync: process.env.JOBS_ANALYTICS_SCHEDULE || '45 4 * * *',
@@ -2489,12 +2491,21 @@ class MetaSyncJobs {
     const report = await evaluateDueCampaignOptimizationPolicies({
       now: options.now || new Date(),
     });
+    const transitionQueue = await require('../services/guidedCampaignOptimizationJobs.service')
+      .reconcileReadyGuidedLifecycleTransitions({
+        candidates: report.ready_guided_transitions || [],
+      });
     return {
-      status: report.failed > 0 && report.evaluated === 0 && report.idempotent === 0
+      status: (
+        (report.failed > 0 && report.evaluated === 0 && report.idempotent === 0)
+        || transitionQueue.failed > 0
+      )
         ? 'failed'
         : 'completed',
       processed: report.evaluated,
-      report,
+      report: { ...report, guided_transition_queue: transitionQueue },
+      // La evaluación no muta Google. Las decisiones listas se delegan a
+      // JobRequest duradero y cada worker exige preview+readback saludable.
       provider_mutation: null,
     };
   }
@@ -2503,6 +2514,10 @@ class MetaSyncJobs {
     return webDomainsService.reconcileDomains({
       jobRequestId: options.jobRequestId || null,
     });
+  }
+
+  async executeCampaignDestinationDriftAudit(options = {}) {
+    return require('../services/campaignDestinationBindings.service').auditActiveDestinations(options);
   }
 
   async executeWebEventsAggregate(options = {}) {

@@ -401,7 +401,7 @@ async function enqueueUniqueJobRequest({
     ? Math.max(1, Number(options.transactionRetries))
     : Math.max(1, UNIQUE_ENQUEUE_TRANSACTION_RETRIES);
 
-  const findOrCreate = async (transaction) => {
+  const enqueueWithinTransaction = async (transaction) => {
     const existing = await JobRequestModel.findOne({
       where: {
         type,
@@ -419,7 +419,7 @@ async function enqueueUniqueJobRequest({
       },
       order: [['created_at', 'ASC']],
       transaction,
-      lock: transaction.LOCK.UPDATE,
+      ...(transaction?.LOCK?.UPDATE ? { lock: transaction.LOCK.UPDATE } : {}),
     });
 
     if (existing) return { job: existing, created: false };
@@ -441,17 +441,19 @@ async function enqueueUniqueJobRequest({
     return { job, created: true };
   };
 
-  // Domain writes that enqueue their integration event can supply the same
-  // transaction. This is the outbox boundary: either state and JobRequest are
-  // both committed, or neither is. Callers without one retain SERIALIZABLE
-  // retry semantics below.
-  if (options.transaction) return findOrCreate(options.transaction);
+  // Domain and command handlers can persist their deduplicated JobRequest in
+  // the same transaction as the aggregate mutation. This is the outbox
+  // boundary: state and event commit together, or neither becomes visible.
+  // Callers without a transaction retain the SERIALIZABLE retries below.
+  if (options.transaction) {
+    return enqueueWithinTransaction(options.transaction);
+  }
 
   for (let attempt = 1; attempt <= transactionRetries; attempt += 1) {
     try {
       return await sequelizeInstance.transaction(
         { isolationLevel: Sequelize.Transaction.ISOLATION_LEVELS.SERIALIZABLE },
-        findOrCreate
+        enqueueWithinTransaction
       );
     } catch (error) {
       const retryableTransactionError = [1205, 1213].includes(Number(error?.errno))

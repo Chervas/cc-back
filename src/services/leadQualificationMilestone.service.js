@@ -15,6 +15,8 @@ async function nonBlockingLifecycleUpload({
   eventId,
   clinicId,
   value,
+  valueProvenance = null,
+  valueIsFallback = null,
   currency = 'EUR',
   occurredAt = new Date(),
   dependencies = {},
@@ -29,6 +31,8 @@ async function nonBlockingLifecycleUpload({
       eventId,
       clinicId,
       ...(value !== undefined && value !== null ? { value } : {}),
+      ...(valueProvenance ? { valueProvenance } : {}),
+      ...(typeof valueIsFallback === 'boolean' ? { valueIsFallback } : {}),
       currency,
       occurredAt,
       ...(dependencies.lifecycleDependencies
@@ -110,6 +114,9 @@ async function uploadScheduleForLinkedAppointment({
     eventId: `appointment-${appointmentId}`,
     clinicId: positiveInt(plainAppointment.clinica_id ?? plainRecord(lead)?.clinica_id),
     currency: 'EUR',
+    // Schedule happens when the appointment is booked/linked. Never send a
+    // future appointment start as Google conversion_time; the optimisation
+    // evaluator groups the same event by CitasPacientes.inicio separately.
     occurredAt: plainAppointment.created_at || plainAppointment.updated_at || new Date(),
     dependencies,
     logger,

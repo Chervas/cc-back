@@ -226,7 +226,9 @@ function isActiveConnectOnlyNewPatientsStrategy(request, campaign) {
   const campaignRow = plain(campaign);
   return strategy.kind === 'marketing_strategy'
     && String(strategy.objective_id || '').trim().toLowerCase() === 'new_patients'
-    && String(strategy.mode_snapshot || '').trim().toLowerCase() === 'connect_only'
+    && ['connect_only', 'guided_improvement'].includes(
+      String(strategy.mode_snapshot || '').trim().toLowerCase()
+    )
     && String(strategy.status || '').trim().toLowerCase() === 'active'
     && positiveInt(item.campaign_id) === positiveInt(campaignRow.id)
     && [true, 1, '1'].includes(campaignRow.activa)
@@ -305,7 +307,9 @@ async function listValidStrategyTargetsForClinic({
     const payload = safeObject(request.solicitud);
     return payload.kind === 'marketing_strategy'
       && String(payload.objective_id || '').trim().toLowerCase() === 'new_patients'
-      && String(payload.mode_snapshot || '').trim().toLowerCase() === 'connect_only'
+      && ['connect_only', 'guided_improvement'].includes(
+        String(payload.mode_snapshot || '').trim().toLowerCase()
+      )
       && String(payload.status || '').trim().toLowerCase() === 'active';
   });
   const campaignIds = Array.from(new Set(candidateRequests.map((row) => positiveInt(row.campaign_id)).filter(Boolean)));

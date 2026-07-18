@@ -130,6 +130,23 @@ function testStrictTargetPayloads() {
   }), (error) => error.code === 'matching_target_clear_reason_required');
 }
 
+function testGuidedImprovementCanUseExistingCampaignAssignments() {
+  const request = {
+    id: 200,
+    campaign_id: 20,
+    solicitud: {
+      kind: 'marketing_strategy',
+      objective_id: 'new_patients',
+      mode_snapshot: 'guided_improvement',
+      status: 'active',
+    },
+  };
+  assert.equal(targets.isActiveConnectOnlyNewPatientsStrategy(
+    request,
+    { id: 20, activa: true, gestionada: false }
+  ), true);
+}
+
 async function testSafeStrategyCatalogAndIssues() {
   const calls = [];
   const clinic = {
@@ -485,6 +502,7 @@ async function testMigrationModelRoutesAndCanonicalStrategySource() {
 async function run() {
   testCanonicalIdentityAndPayloadSync();
   testStrictTargetPayloads();
+  testGuidedImprovementCanUseExistingCampaignAssignments();
   await testSafeStrategyCatalogAndIssues();
   await testTargetMoveClearAndCas();
   await testMigrationModelRoutesAndCanonicalStrategySource();

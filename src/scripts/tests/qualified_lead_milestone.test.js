@@ -100,6 +100,7 @@ async function testDirectAppointmentUsesSameQualifiedIdBeforeSchedule() {
     clinica_id: 56,
     lead_intake_id: lead.id,
     created_at: new Date('2026-07-12T12:30:00Z'),
+    inicio: new Date('2026-08-20T09:00:00Z'),
   };
 
   await ensureQualifiedLeadConversion({ lead, dependencies });
@@ -111,6 +112,7 @@ async function testDirectAppointmentUsesSameQualifiedIdBeforeSchedule() {
   assert.deepEqual(uploads.map((item) => item.eventName), ['qualified_lead', 'schedule']);
   assert.equal(Object.hasOwn(uploads[0], 'value'), false);
   assert.equal(Object.hasOwn(uploads[1], 'value'), false);
+  assert.equal(uploads[1].occurredAt.toISOString(), '2026-07-12T12:30:00.000Z');
 
   const wrongLink = await uploadScheduleForLinkedAppointment({
     lead,

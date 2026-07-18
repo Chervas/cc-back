@@ -923,6 +923,11 @@ async function uploadGoogleConversionDestination({
     clickIdHash: clickId?.hash || null,
     userIdentifierHash
   });
+  const rawAuditValue = coalesce(customData.value, eventConfig.value);
+  const numericAuditValue = Number(rawAuditValue);
+  const rawOccurredAt = customData.conversion_time || customData.conversionDateTime || null;
+  const parsedOccurredAt = rawOccurredAt ? new Date(rawOccurredAt) : null;
+  const valueProvenance = truncate(customData.value_provenance || customData.valueProvenance, 64);
   const auditBase = {
     dedupeKey,
     clinicaId: scope.clinicId,
@@ -940,7 +945,15 @@ async function uploadGoogleConversionDestination({
     requestMetadata: {
       transport: 'google_data_manager',
       currency: String(coalesce(customData.currency, eventConfig.currency, 'EUR')).toUpperCase(),
-      has_value: coalesce(customData.value, eventConfig.value) !== undefined,
+      has_value: rawAuditValue !== undefined,
+      value_amount: Number.isFinite(numericAuditValue) ? numericAuditValue : null,
+      value_provenance: valueProvenance,
+      value_is_fallback: typeof customData.value_is_fallback === 'boolean'
+        ? customData.value_is_fallback
+        : (typeof customData.valueIsFallback === 'boolean' ? customData.valueIsFallback : null),
+      conversion_occurred_at: parsedOccurredAt && Number.isFinite(parsedOccurredAt.getTime())
+        ? parsedOccurredAt.toISOString()
+        : null,
       has_email: Boolean(userData?.email),
       has_phone: Boolean(userData?.phone || userData?.telefono),
       has_address: false,

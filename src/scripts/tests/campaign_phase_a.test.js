@@ -187,7 +187,7 @@ function testCampaignScopeAndWritableModesRegression() {
   assert.match(create, /requireMarketingClinicScope\(req, res, targetClinicIds, 'write'\)/,
     'Creating a strategy must require write access to every target clinic');
 
-  assert.match(source, /const CREATABLE_MODES = new Set\(\['connect_only', 'managed_service'\]\)/);
+  assert.match(source, /const CREATABLE_MODES = new Set\(\[[\s\S]*CAMPAIGN_MODES\.MEASURE,[\s\S]*CAMPAIGN_MODES\.IMPROVE,[\s\S]*CAMPAIGN_MODES\.AUTOPILOT[\s\S]*\]\)/);
   assert.match(start, /if \(!CREATABLE_MODES\.has\(mode\)\)/,
     'Historical managed_self must not be accepted by new onboarding writes');
   assert.match(start, /error:\s*'consent_readiness_pending'/,

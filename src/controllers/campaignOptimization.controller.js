@@ -76,8 +76,12 @@ async function requireReadAccess(req, scope) {
   }
 }
 
-function serializePolicy(row) {
+function serializePolicy(row, modeContract = null) {
   const policy = row?.get ? row.get({ plain: true }) : row;
+  const lifecycleState = policy.lifecycleState || {};
+  const authorization = lifecycleState.authorization && typeof lifecycleState.authorization === 'object'
+    ? lifecycleState.authorization
+    : modeContract?.authorization || null;
   return {
     id: policy.id,
     scope_type: policy.scopeType,
@@ -87,7 +91,15 @@ function serializePolicy(row) {
     managed_campaign_id: policy.managedCampaignId,
     customer_ids: policy.customerIds || [],
     campaign_ids: policy.campaignIds || [],
-    lifecycle_state: policy.lifecycleState || {},
+    lifecycle_state: lifecycleState,
+    mode_contract: modeContract,
+    authorization: authorization ? {
+      version: Number(authorization.version) || null,
+      accepted: authorization.accepted === true,
+      accepted_at: authorization.accepted_at || null,
+      accepted_by_user_id: positiveInteger(authorization.accepted_by_user_id),
+      scopes: Array.isArray(authorization.scopes) ? authorization.scopes : [],
+    } : null,
     thresholds: policy.thresholds || {},
     status: policy.status,
     version: policy.version,
@@ -126,6 +138,29 @@ const getOptimizationStatus = asyncHandler(async (req, res) => {
     order: [['created_at', 'DESC'], ['id', 'DESC']],
   });
   const policyIds = policies.map((row) => row.id);
+  const strategyIds = policies.map((row) => positiveInteger(row.strategyId)).filter(Boolean);
+  const strategyRows = strategyIds.length
+    ? await db.CampaignRequest.findAll({
+        where: { campaign_id: { [Op.in]: strategyIds } },
+        attributes: ['campaign_id', 'solicitud', 'updated_at', 'id'],
+        order: [['updated_at', 'DESC'], ['id', 'DESC']],
+        raw: true,
+      })
+    : [];
+  const modeContractByStrategy = new Map();
+  strategyRows.forEach((row) => {
+    const payload = row?.solicitud && typeof row.solicitud === 'object' ? row.solicitud : {};
+    const strategyId = positiveInteger(row.campaign_id);
+    if (
+      strategyId
+      && !modeContractByStrategy.has(strategyId)
+      && payload.kind === 'marketing_strategy'
+      && payload.mode_contract
+      && typeof payload.mode_contract === 'object'
+    ) {
+      modeContractByStrategy.set(strategyId, payload.mode_contract);
+    }
+  });
   const evaluations = policyIds.length
     ? await db.CampaignOptimizationEvaluation.findAll({
         where: { policyId: { [Op.in]: policyIds } },
@@ -147,7 +182,8 @@ const getOptimizationStatus = asyncHandler(async (req, res) => {
     read_only: true,
     scope: { type: scope.scopeType, id: scope.scopeId },
     policies: policies.map((row) => {
-      const policy = serializePolicy(row);
+      const raw = row?.get ? row.get({ plain: true }) : row;
+      const policy = serializePolicy(row, modeContractByStrategy.get(positiveInteger(raw.strategyId)) || null);
       return { ...policy, latest_evaluation: latestByPolicy.get(String(policy.id)) || null };
     }),
     evaluations: serializedEvaluations,

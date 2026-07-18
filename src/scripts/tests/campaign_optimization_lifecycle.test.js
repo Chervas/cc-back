@@ -124,6 +124,11 @@ function testApprovalPolicyIsExplicitAndModeBound() {
     role: APPROVAL_ROLES.OPERATOR,
     automatic_provider_mutation: false,
   });
+  assert.deepEqual(approvalPolicyForMode(MODES.GUIDED_IMPROVEMENT), {
+    required: true,
+    role: APPROVAL_ROLES.CLIENT,
+    automatic_provider_mutation: true,
+  });
   assert.throws(() => approvalPolicyForMode('automatic'), /mode debe ser/);
 }
 

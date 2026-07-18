@@ -16,6 +16,7 @@ const webArtifactsController = require('../controllers/webArtifacts.controller')
 const webPublicationsController = require('../controllers/webPublications.controller');
 const webDomainsController = require('../controllers/webDomains.controller');
 const webWordpressInstallationsController = require('../controllers/webWordpressInstallations.controller');
+const campaignDestinationBindingsController = require('../controllers/campaignDestinationBindings.controller');
 const {
   createMarketingWebRateLimiter,
   createPublicMarketingWebRateLimiter,
@@ -177,6 +178,10 @@ router.get('/strategies/:id', campaignOnboardingController.getMarketingStrategyD
 router.get('/strategies/:id/analysis/campaign', campaignOnboardingController.getMarketingStrategyAnalysisCampaign);
 router.patch('/strategies/:id/status', campaignOnboardingController.transitionMarketingStrategyStatus);
 router.get('/strategies/:id/metrics', campaignOnboardingController.getMarketingStrategyMetrics);
+router.get('/strategies/:id/destination-bindings', campaignDestinationBindingsController.listForStrategy);
+router.get('/destination-bindings/:bindingId', campaignDestinationBindingsController.getBinding);
+router.post('/destination-bindings/:bindingId/apply', campaignDestinationBindingsController.applyDestination);
+router.post('/destination-bindings/:bindingId/rollback', campaignDestinationBindingsController.rollbackDestination);
 
 // Estado auditable del lifecycle de optimización. Es deliberadamente GET-only:
 // evaluar una política no muta Google Ads ni aprueba transiciones.
