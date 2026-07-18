@@ -4042,7 +4042,7 @@ Se repite el mismo esquema en `contact`, `qualified_lead`, `schedule` y `purchas
 
 #### `new_patients`: Mide, Mejora y Piloto automático (2026-07-17)
 
-La respuesta de bootstrap ofrece `connect_only`, `guided_improvement` y `managed_service`; `managed_self` permanece en `legacy_modes` para lectura histórica. `connect_only` mide, atribuye y sube conversiones consentidas sin mutar campañas. `guided_improvement` trabaja sobre campañas existentes y hoy solo ejecuta el cambio de objetivo de conversión de campañas Google Search/PMax vinculadas, después de guardar la autorización cliente v1 con sus scopes exactos; nunca puede tocar pujas, presupuesto, segmentación ni activar/pausar campañas. `mode_contract.publish_landings=false` y `change_destinations=false` son deliberados: el contrato publica los hooks versionados `marketing_web.landing_published.v1` y `marketing_web.destination_ready.v1`, pero mantiene ambas capacidades como `prepared_not_available`/`blocked_until_landing_published` hasta que exista executor y readback del módulo Web. Los destinos web se guardan solo si son URL HTTPS públicas y estables, sin credenciales, fragmento, host privado ni parámetros efímeros de atribución/firma/caducidad. Guardar una estrategia `managed_service` provisiona una spec `ManagedCampaign` por canal de pago, en `draft + observe`, junto con su cuenta `unfunded`. No llama a Google/Meta.
+La respuesta de bootstrap ofrece `connect_only`, `guided_improvement` y `managed_service`; `managed_self` permanece en `legacy_modes` para lectura histórica. `connect_only` mide, atribuye y sube conversiones consentidas sin mutar campañas. `guided_improvement` trabaja sobre campañas existentes y puede gestionar el objetivo de conversión y publicar una landing para campañas Google Search/PMax vinculadas, después de guardar la autorización cliente v1 con los scopes exactos `conversion_goal`, `landing_publish` y `campaign_destination`; nunca puede tocar pujas, presupuesto, segmentación ni activar/pausar campañas. Con esa autorización válida, `mode_contract.publish_landings=true`, `change_destinations=true`, el hook `marketing_web.landing_published.v1` queda `available` y el destino queda `available_after_landing_published`. Publicar no cambia Google automáticamente: materializa un binding auditable y el usuario debe confirmar una segunda operación acotada al digest exacto del destino, las cuentas seleccionadas y `readback_required=true`. El worker serializado aplica URL final en anuncios Search o en asset groups PMax, persiste la decisión explícita sobre expansión de URL, relee Google y solo marca éxito si todo coincide. Un fallo parcial encola rollback compensatorio al estado anterior; la auditoría diaria `marketing_campaign.destination_drift_audit.v1` detecta cambios posteriores sin autorepararlos. Los destinos web solo admiten URL HTTPS públicas y estables, sin credenciales, fragmento, host privado ni parámetros efímeros de atribución/firma/caducidad. `managed_service` usa el mismo puente únicamente dentro de una `ManagedCampaign` aprobada y de sus constraints; guardar la estrategia solo provisiona una spec por canal en `draft + observe`, junto con su cuenta `unfunded`, y no llama a Google/Meta.
 
 Cambiar entre niveles es una operación explícita: el cliente debe confirmar exactamente `from_mode` y `to_mode`; el backend bloquea el cambio si queda otra estrategia no completada o una policy activa/pausada en el alcance. Esto incluye la salida desde el histórico `managed_self`. No se sobrescriben ni eliminan policies para aparentar una migración. Mejora no admite una estrategia Meta-only: debe existir al menos una campaña Google vinculada. En campañas externas `channels[].percentage` no expresa reparto gestionado y se conserva en cero en vez de inventar un 100/0.
 
@@ -4869,8 +4869,14 @@ W0 establece la frontera de seguridad y despliegue. El editor y la publicación
 son gates distintos y ambos nacen apagados:
 `MARKETING_WEB_EDITOR_ENABLED=false` y
 `MARKETING_WEB_PUBLISHING_ENABLED=false`. El segundo nunca evita el primero y
-`MARKETING_WEB_DISABLED_SCOPES=clinic:66,group:4` actúa como kill switch por
-scope. El parser de rutas editoriales admite como máximo 1 MiB de JSON, el
+`MARKETING_WEB_ENABLED_SCOPES=clinic:66,group:4` permite acotar opcionalmente el
+rollout: ausente o vacío conserva el comportamiento global del gate, pero, si
+contiene valores, solo esos scopes pueden usar editor y publicación. La lista
+es explícita y no consulta la base de datos ni infiere herencia; para un grupo
+y sus clínicas se enumeran tanto `group:id` como cada `clinic:id` autorizado.
+`MARKETING_WEB_DISABLED_SCOPES=clinic:66,group:4` actúa como kill switch y
+siempre tiene precedencia. Ambas listas fallan cerrado ante sintaxis inválida.
+El parser de rutas editoriales admite como máximo 1 MiB de JSON, el
 `WebDocument` canónico como máximo 512 KiB, y las escrituras tienen rate limits
 por actor. Las rutas públicas del plugin tienen límites distribuidos por
 instalación/IP con Redis y degradación local explícita; no comparten el JWT de
@@ -4926,9 +4932,10 @@ El rollout operativo es deliberado:
 6. ampliar scopes gradualmente. Desactivar publicación bloquea nuevas
    mutaciones, pero no borra artefactos ni rompe la página activa.
 
-La suite canónica es `npm test`: ejecuta contratos Node del alcance y después
-los 20 contratos PHP, compatibilidad Ed25519 Node/PHP, compilador real y ZIP
-provisionado. Si `WEB_EDITOR_TEST_MYSQL_URL` está definida también ejecuta las
+La suite canónica es `npm test`: encadena los contratos Web y los contratos de
+campañas, además de los 20 contratos PHP, compatibilidad Ed25519 Node/PHP,
+compilador real y ZIP provisionado. Si `WEB_EDITOR_TEST_MYSQL_URL` está
+definida también ejecuta las
 integraciones destructivas sobre esa base **aislada**; nunca se apunta a dev,
 staging ni producción.
 
@@ -5026,10 +5033,12 @@ el `JobRequest` idempotente `marketing_web.landing_published.v1`, con id estable
 recibe URL pública canónica, scope, estrategia, target y hash sin una ventana
 entre publicación y outbox.
 
-El schema se instala en orden: `19000` (proyectos/editor), `20000`
-(contenido/media), `21500` (plantillas builtin), `22000` (artefactos), `23000`
-(dominios/publicaciones/deployments), `24000` (atribución de intake) y `24500`
-(contexto de campaña). Los `up` validan el contrato completo de cualquier tabla
+El schema integrado se instala en orden: `19000` (proyectos/editor), `20000`
+(contenido/media), `21000` (modo Mejora), `21100` (unicidad de policy por
+estrategia), `21500` (plantillas builtin), `22000` (artefactos), `23000`
+(dominios/publicaciones/deployments), `24000` (atribución de intake), `24500`
+(contexto de campaña) y `25000` (bindings, cuentas y eventos de destino). Los
+`up` validan el contrato completo de cualquier tabla
 preexistente y fallan cerrado ante drift; solo pueden reparar la variante
 legacy exacta de `ON UPDATE CASCADE` en las FKs de scope cuando destino,
 columna referenciada, `ON DELETE` y datos permiten la sustitución segura. Los

@@ -9,6 +9,7 @@ const {
   invalidMarketingWebJsonResponse,
   isMarketingWebJsonPath,
 } = require('../../lib/marketingWebRequestGuards');
+const { assertWebScopeEnabled } = require('../../lib/marketingWebFeatureFlags');
 
 function responseDouble() {
   return {
@@ -22,6 +23,35 @@ function responseDouble() {
 }
 
 async function main() {
+
+const rolloutEnv = {
+  editor: process.env.MARKETING_WEB_EDITOR_ENABLED,
+  enabled: process.env.MARKETING_WEB_ENABLED_SCOPES,
+  disabled: process.env.MARKETING_WEB_DISABLED_SCOPES,
+};
+try {
+  process.env.MARKETING_WEB_EDITOR_ENABLED = 'true';
+  process.env.MARKETING_WEB_ENABLED_SCOPES = 'clinic:66,group:4';
+  process.env.MARKETING_WEB_DISABLED_SCOPES = 'clinic:67';
+  assert.equal(assertWebScopeEnabled({ type: 'clinic', id: 66 }), true);
+  assert.throws(
+    () => assertWebScopeEnabled({ type: 'clinic', id: 68 }),
+    (error) => error.code === 'web_editor_disabled'
+      && error.details.rollout_reason === 'scope_not_enabled'
+  );
+  process.env.MARKETING_WEB_ENABLED_SCOPES = 'clinic:66,broken';
+  assert.throws(
+    () => assertWebScopeEnabled({ type: 'clinic', id: 66 }),
+    (error) => error.code === 'marketing_web_invalid_enabled_scopes'
+  );
+} finally {
+  if (rolloutEnv.editor === undefined) delete process.env.MARKETING_WEB_EDITOR_ENABLED;
+  else process.env.MARKETING_WEB_EDITOR_ENABLED = rolloutEnv.editor;
+  if (rolloutEnv.enabled === undefined) delete process.env.MARKETING_WEB_ENABLED_SCOPES;
+  else process.env.MARKETING_WEB_ENABLED_SCOPES = rolloutEnv.enabled;
+  if (rolloutEnv.disabled === undefined) delete process.env.MARKETING_WEB_DISABLED_SCOPES;
+  else process.env.MARKETING_WEB_DISABLED_SCOPES = rolloutEnv.disabled;
+}
 
 assert.equal(isMarketingWebJsonPath('/api/marketing/web-projects/abc/draft'), true);
 assert.equal(isMarketingWebJsonPath('/api/marketing/web-content/abc'), true);
