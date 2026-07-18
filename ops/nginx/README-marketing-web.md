@@ -24,7 +24,10 @@ Preflight before enabling it:
 4. `/var/lib/clinicaclick-web-hosting` must be owned by the backend service
    user and must not be under a public document root.
 5. `MARKETING_WEB_PUBLISHING_ENABLED`, signing keys, immutable artifact
-   storage and `MARKETING_WEB_PLUGIN_BOOTSTRAP_KEY` must be configured.
+   storage and `MARKETING_WEB_PLUGIN_BOOTSTRAP_KEY` must be configured. A
+   hosted pilot also needs its scope in `MARKETING_WEB_PUBLISHING_SCOPES`;
+   staging currently limits publishing to `group:5`, but that permission does
+   not make the hosted hostname operational.
 6. Re-download the official Cloudflare IPv4/IPv6 lists and compare them with
    the real-IP snippet before every rollout. `CF-Connecting-IP` is trusted only
    from those direct peers; direct requests cannot select their own patient IP.

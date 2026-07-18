@@ -1,8 +1,11 @@
 # ClinicaClick WordPress plugin v2
 
-> Estado: implementación aislada de W5, **no instalada ni desplegada**. El
-> contrato debe validarse de extremo a extremo en un WordPress desechable antes
-> de cualquier instalación real.
+> Estado 2026-07-18: `2.0.0-alpha.5` está integrado y desplegado con gate. El
+> ZIP provisionado está instalado y activo en Propdental junto al plugin de
+> medición `clinicaclick` `1.1.7`. La instalación está `connected` en
+> `https://www.propdental.es` y `/cita/` sirve un artefacto verificado. Quedan
+> fuera del rollout hosted/custom y multi-route; el lead E2E y rollback del
+> piloto WordPress ya están cerrados.
 
 Este paquete añade el publicador web mantenido junto al plugin de medición
 `clinicaclick` `1.1.7`. Usa el slug independiente `clinicaclick-web/`: instalarlo
@@ -32,6 +35,9 @@ retira esa marca si el loader no llega a cargar.
 - WordPress 5.8 o posterior; PHP 7.4 o posterior; extensión Sodium obligatoria.
 - Activación por sitio. La activación de red multisite falla cerrada en esta
   primera versión.
+- Esta versión piloto admite una publicación/clínica efectiva por instalación.
+  Varias sedes bajo el mismo WordPress necesitan desired state, router,
+  intake/HMAC, reportes y rollback por ruta antes de abrir el rollout.
 - Artefactos v1: HTML sin código arbitrario, CSS, TXT/XML, imágenes raster y
   fuentes WOFF/WOFF2. `.php`, ficheros `.js`, SVG, iframes y event handlers se
   rechazan aunque estén firmados. En cada HTML solo se permiten JSON-LD y un
@@ -143,7 +149,10 @@ Variables del backend/control plane necesarias fuera de Git:
   recomendado o secretos AWS;
 - `MARKETING_WEB_API_BASE_URL=https://crm.clinicaclick.com` (config pública);
 - `MARKETING_WEB_EDITOR_ENABLED` y `MARKETING_WEB_PUBLISHING_ENABLED` solo al
-  abrir su gate operativo.
+  abrir su gate operativo;
+- `MARKETING_WEB_ENABLED_SCOPES` limita el editor y
+  `MARKETING_WEB_PUBLISHING_SCOPES` limita de forma independiente la
+  publicación. En el piloto staging, publicación solo incluye `group:5`.
 
 El HMAC de intake vive en el `IntakeConfig` del scope y se copia al runtime
 firmado **solo para uso server-side del plugin**. No forma parte del HTML, del
@@ -219,6 +228,13 @@ IIS.
 
 ## Compatibilidad con la medición 1.1.7
 
+Si `clinicaclick/clinicaclick.php` continúa activo, v2 retira únicamente el
+callback global de loader registrado por el legado durante ese request. No
+desactiva, sobrescribe ni borra el plugin anterior y no interfiere con su ruta
+específica `/cita/`. Así la home no recibe dos loaders/bootstrap. Si el legado
+se desactiva, v2 vuelve a ser propietario del loader global en el siguiente
+request.
+
 El publicador conserva la carga de `/assets/loader.js`, pero deja de aceptar un
 snippet HTML generado. El backend entrega `measurement` dentro de
 `runtime_configuration`, que está firmado. El plugin conserva el HMAC dentro
@@ -293,7 +309,7 @@ Accept: application/json
 X-CC-Signature: <HMAC-SHA256 hexadecimal del body exacto>
 X-CC-Event-Id: ccw_<64 hex>
 X-Clinicaclick-Web-Artifact: <hash activo>
-X-Clinicaclick-Plugin-Version: 2.0.0-alpha.4
+X-Clinicaclick-Plugin-Version: 2.0.0-alpha.5
 ```
 
 No envía el bearer de instalación. El payload fija server-side
@@ -323,7 +339,7 @@ Solo los endpoints de control de la instalación reciben:
 
 ```http
 Authorization: Bearer <installation token>
-X-Clinicaclick-Plugin-Version: 2.0.0-alpha.4
+X-Clinicaclick-Plugin-Version: 2.0.0-alpha.5
 Accept: application/json
 ```
 
@@ -432,8 +448,62 @@ El endpoint responde `200`, `202` o `204`; un fallo de reporte nunca desmonta la
     Referer, IDs manipulados, firma server-side inválida, campo extra,
     duplicado, honeypot, 202 y rate-limit
     adversariales.
-11. No instalar en Propdental hasta que los endpoints, jobs y gate W5 estén
-    desplegados y las pruebas anteriores tengan evidencia.
+11. En Propdental ya se verificaron instalación, 22/22 contratos PHP, cron,
+    handshake, loader único, publicación/readback, lead con limpieza y rollback
+    de `/cita/`.
+
+### Evidencia del piloto Propdental
+
+- ZIP provisionado instalado con slug `clinicaclick-web` y versión
+  `2.0.0-alpha.5`;
+- paquete provisionado y versión reportada alineados en `2.0.0-alpha.5`;
+- PHP lint verde y `ccw_sync_event` programado cada 15 minutos;
+- plugin legado `clinicaclick` `1.1.7` permanece activo;
+- home y landing pública: exactamente un `/assets/loader.js`; el legado no se
+  desactiva y el publicador no duplica el bootstrap;
+- instalación `524c2f73-6b69-42f2-8cb0-c8d171575d94`, conectada y reportando
+  `2.0.0-alpha.5` sobre la URL canónica `https://www.propdental.es`;
+- proyecto `edd77d09-6ac5-4944-98e3-084d5285594c`, revisión
+  `ead78c6d-f28f-478d-9058-bc189c846421` y publicación
+  `5d55b1ef-c6fa-4e73-8aa8-2fd9ff41a526`;
+- renderer `clinicaclick-web-renderer/1.2.1` y artefacto activo/LKG
+  `a43e7c4a-9ef3-4aef-aad3-70f12f927c31` (hash público `be4d5f3c…`);
+- `https://www.propdental.es/cita/` responde 200 con marker, formulario nativo
+  firmado e indexación; Chromium desktop/móvil confirmó cero bloqueos CSP,
+  consentimiento/chat con estilos, un loader y ningún HMAC/token en HTML/JS;
+- lead E2E ejecutado dos veces; el final `#7261` quedó atribuido a clínica
+  `59`/grupo `5`, con consentimiento, `FormSubmissionEvent` y
+  `LeadAttributionAudit`, sin click IDs ni conversiones externas, y después fue
+  eliminado por simulación + cleanup con marker final `0`;
+- revisión temporal 3 `c01c20ec…` publicada por deployment `9c53ec42…`
+  (secuencia 5, job `31698`, artefacto `545c1672…`) y rollback verificado por
+  `48df4e4e…` (secuencia 6, job `31699`) a revisión 2/LKG `a43e7c4a…`;
+- la reprovisión temporal dejó el fallo explícito `583dc38f…` (secuencia 3) y
+  la recuperación limpia `a944709d…` (secuencia 4, job `31696`);
+- el paquete de evidencia está fuera de Git y no se documentan token, ticket,
+  HMAC ni claves privadas.
+
+Al ejecutar `ccw_sync_event` manualmente se debe usar el usuario del sitio
+WordPress, no `root`; el piloto corrigió ownership de la caché después de una
+ejecución administrativa. El cron normal de WordPress conserva el usuario
+correcto.
+
+El primer handshake puede canonicalizar `apex <-> www` únicamente si la
+instalación está verdaderamente virgen: `pending`, sin `last_seen`, versión ni
+publicaciones. Después la identidad vuelve a ser estricta; no es una regla de
+equivalencia general entre hosts.
+
+Durante una diagnosis privada se imprimió accidentalmente el HMAC de intake.
+Se rotó inmediatamente en backend y plugin legado, se auditó solo con hashes,
+se eliminaron temporales y v2 descargó el runtime nuevo. La página pública se
+revisó después y no contiene ese secreto. No imprimir nunca el runtime completo
+como técnica de diagnóstico.
+
+Un paquete genérico sobrescribió temporalmente la configuración del piloto. Se
+rotó el token, se reprovisionó el ZIP `alpha.5` y el handshake volvió a quedar
+`connected`; no se conservó ni documentó el token sustituido. El defecto CSP
+detectado durante esta recuperación se corrigió elevando el renderer a `1.2.1`
+y limitando las allowances del validador a las emitidas por ese renderer.
 
 ## Desinstalación
 
@@ -447,7 +517,7 @@ explícita `ccw_purge_on_uninstall=true`.
 ```bash
 ./tests/run.sh
 ./tools/build-zip.sh
-sha256sum dist/clinicaclick-web-2.0.0-alpha.4.zip
+sha256sum dist/clinicaclick-web-2.0.0-alpha.5.zip
 ```
 
 El builder copia una allowlist, ordena entradas, fija un timestamp DOS y
