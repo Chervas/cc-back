@@ -63,13 +63,37 @@ test('deployment no permite mutar identidad o secuencia', () => {
   const deployment = build(modelFactories.WebPublicationDeployment).capture;
   const instance = { changed: () => ['sequence'] };
   assert.throws(() => deployment.options.hooks.beforeUpdate(instance), /append-only/);
-  assert.doesNotThrow(() => deployment.options.hooks.beforeUpdate({ changed: () => ['status', 'completedAt'] }));
+  assert.doesNotThrow(() => deployment.options.hooks.beforeUpdate({
+    status: 'running',
+    changed: () => ['artifactId', 'storage', 'status', 'completedAt'],
+  }));
+  assert.doesNotThrow(() => deployment.options.hooks.beforeUpdate({
+    status: 'running',
+    artifactId: 'new-artifact-after-runtime-change',
+    changed: () => ['artifactId'],
+  }), 'un retry puede reemplazar el artefacto mientras conserva el lease running');
+  assert.throws(
+    () => deployment.options.hooks.beforeUpdate({ status: 'queued', changed: () => ['artifactId'] }),
+    /append-only/
+  );
+  assert.throws(
+    () => deployment.options.hooks.beforeUpdate({ status: 'verified', changed: () => ['artifactId'] }),
+    /append-only/
+  );
+  assert.throws(
+    () => deployment.options.hooks.beforeUpdate({ changed: () => ['revisionId'] }),
+    /append-only/
+  );
   assert.throws(
     () => deployment.options.hooks.beforeBulkUpdate({ fields: ['sequence'] }),
     /append-only/
   );
   assert.doesNotThrow(
-    () => deployment.options.hooks.beforeBulkUpdate({ fields: ['status', 'completedAt'] })
+    () => deployment.options.hooks.beforeBulkUpdate({ fields: ['storage', 'status', 'completedAt'] })
+  );
+  assert.throws(
+    () => deployment.options.hooks.beforeBulkUpdate({ fields: ['artifactId'] }),
+    /append-only/
   );
   assert.throws(() => deployment.options.hooks.beforeBulkDestroy({}), /append-only/);
 });

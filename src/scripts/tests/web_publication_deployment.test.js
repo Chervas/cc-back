@@ -446,6 +446,48 @@ test('WordPress espera al pull y luego termina idempotentemente con heartbeat', 
   assert.equal(completed.result.deployment.result.public_verified, true);
 });
 
+test('un retry recupera idempotentemente un deployment running cuyo artefacto quedó ready sin puntero', async () => {
+  const state = fixture('wordpress');
+  state.deployment.status = 'running';
+  state.deployment.startedAt = new Date('2026-07-18T10:51:03.000Z');
+  state.deployment.artifactId = null;
+  state.publication.status = 'publishing';
+  let compileCalls = 0;
+  const deps = dependencies(state, {
+    compileRevision: async () => {
+      compileCalls += 1;
+      return {
+        id: state.artifact.id,
+        artifact_hash: state.artifact.artifactHash,
+        manifest: state.artifact.manifest,
+        files: state.artifact.files,
+      };
+    },
+    verifyPublicArtifact: async () => true,
+  });
+
+  const recovered = await runPublicationDeploymentJob({
+    publication_id: state.publication.id,
+    deployment_id: state.deployment.id,
+  }, { id: 77, attempts: 3, max_attempts: 180 }, deps);
+  assert.equal(recovered.status, 'waiting');
+  assert.equal(recovered.result.reason, 'wordpress_waiting_for_pull');
+  assert.equal(state.deployment.artifactId, state.artifact.id);
+  assert.equal(state.deployment.status, 'running');
+  assert.equal(state.publication.status, 'publishing');
+  assert.equal(compileCalls, 1);
+
+  state.installation.lastArtifactHash = state.artifact.artifactHash;
+  const completed = await runPublicationDeploymentJob({
+    publication_id: state.publication.id,
+    deployment_id: state.deployment.id,
+  }, { id: 77, attempts: 4, max_attempts: 180 }, deps);
+  assert.equal(completed.status, 'completed');
+  assert.equal(state.deployment.status, 'verified');
+  assert.equal(state.publication.status, 'published');
+  assert.equal(compileCalls, 1, 'el segundo intento reutiliza el artefacto ya enlazado');
+});
+
 test('WordPress no confirma publicado si el permalink público no sirve el marcador esperado', async () => {
   const state = fixture('wordpress');
   state.installation.lastArtifactHash = state.artifact.artifactHash;
