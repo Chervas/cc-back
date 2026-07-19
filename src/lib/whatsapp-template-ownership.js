@@ -29,9 +29,20 @@ function isWhatsappTemplateOwnedByUser(template, userId) {
   return actorId !== null && creatorId !== null && actorId === creatorId;
 }
 
+function isLegacyUnassignedWhatsappTemplate(template) {
+  if (!template || typeof template !== 'object') return false;
+  return !isSystemWhatsappTemplate(template)
+    && positiveInteger(template.created_by_user_id) === null;
+}
+
 function canUserSelectWhatsappTemplate(template, userId) {
   return isSystemWhatsappTemplate(template)
-    || isWhatsappTemplateOwnedByUser(template, userId);
+    || isWhatsappTemplateOwnedByUser(template, userId)
+    // Las plantillas anteriores a la captura de autoría siguen disponibles
+    // dentro del scope de clínica/WABA que ya valida el controller. No se
+    // presentan como "mías" y permanecen de solo lectura hasta una asignación
+    // administrativa respaldada por evidencia.
+    || isLegacyUnassignedWhatsappTemplate(template);
 }
 
 function filterWhatsappTemplatesForUser(templates, userId) {
@@ -74,6 +85,7 @@ module.exports = {
   canUserAccessWhatsappTemplateAsset,
   canUserSelectWhatsappTemplate,
   filterWhatsappTemplatesForUser,
+  isLegacyUnassignedWhatsappTemplate,
   isSystemWhatsappTemplate,
   isWhatsappTemplateOwnedByUser,
   positiveInteger,

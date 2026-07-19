@@ -14,6 +14,7 @@ const {
 const {
   canUserAccessWhatsappTemplateAsset,
   canUserSelectWhatsappTemplate,
+  isLegacyUnassignedWhatsappTemplate,
   isSystemWhatsappTemplate,
   isWhatsappTemplateOwnedByUser,
 } = require('../lib/whatsapp-template-ownership');
@@ -1425,13 +1426,21 @@ exports.listTemplatesForClinic = async (req, res) => {
           const json = item.toJSON ? item.toJSON() : item;
           const { created_by_user_id: _createdByUserId, ...publicJson } = json;
           const usage = usageMap.get(Number(json.id)) || { flows: [], treatments: [] };
+          const isSystem = isSystemWhatsappTemplate(json);
+          const isOwnedByCurrentUser = isWhatsappTemplateOwnedByUser(json, userId);
+          const isLegacyUnassigned = isLegacyUnassignedWhatsappTemplate(json);
           return {
             ...publicJson,
             variables: buildWhatsappTemplateVariableContract(json),
             usage,
-            is_system: isSystemWhatsappTemplate(json),
-            is_owned_by_current_user: isWhatsappTemplateOwnedByUser(json, userId),
-            can_manage_by_current_user: isWhatsappTemplateOwnedByUser(json, userId),
+            is_system: isSystem,
+            is_owned_by_current_user: isOwnedByCurrentUser,
+            is_legacy_unassigned: isLegacyUnassigned,
+            ownership_scope: isSystem
+              ? 'system'
+              : (isOwnedByCurrentUser ? 'personal' : (isLegacyUnassigned ? 'legacy_unassigned' : 'other_user')),
+            can_send_by_current_user: canUserSelectWhatsappTemplate(json, userId),
+            can_manage_by_current_user: isOwnedByCurrentUser,
           };
         })
         .filter((item) => {
@@ -1645,6 +1654,9 @@ exports.createCustomTemplate = async (req, res) => {
         variables: buildWhatsappTemplateVariableContract(json),
         is_system: false,
         is_owned_by_current_user: true,
+        is_legacy_unassigned: false,
+        ownership_scope: 'personal',
+        can_send_by_current_user: true,
         can_manage_by_current_user: true,
       },
       message: result.submitted
