@@ -1,6 +1,5 @@
 const express = require('express');
 const router = express.Router();
-const whatsappService = require('../services/whatsapp.service');
 const authMiddleware = require('./auth.middleware');
 const whatsappController = require('../controllers/whatsapp.controller');
 
@@ -8,94 +7,7 @@ const whatsappController = require('../controllers/whatsapp.controller');
  * POST /api/whatsapp/messages
  * Enviar un mensaje de WhatsApp usando la API de Meta
  */
-router.post('/messages', authMiddleware, async (req, res) => {
-    try {
-        const {
-            to,
-            message,
-            previewUrl = false,
-            clinic_id,
-            metadata = {},
-            useTemplate,
-            templateName,
-            templateLanguage,
-            templateParams,
-            templateComponents,
-        } = req.body;
-
-        if (!to) {
-            return res.status(400).json({
-                success: false,
-                error: 'El campo "to" es obligatorio.',
-            });
-        }
-
-        if (!message && !useTemplate) {
-            return res.status(400).json({
-                success: false,
-                error: 'Debes proporcionar un "message" o habilitar "useTemplate".',
-            });
-        }
-
-        const clinicId = Number(clinic_id);
-        if (!clinicId) {
-            return res.status(400).json({
-                success: false,
-                error: 'El campo "clinic_id" es obligatorio.',
-            });
-        }
-
-        const normalized = whatsappService.normalizePhoneNumber(to);
-        if (!normalized) {
-            return res.status(400).json({
-                success: false,
-                error: 'No se pudo normalizar el número de destino.',
-            });
-        }
-
-        const clinicConfig = await whatsappService.getClinicConfig(clinicId);
-        if (!clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
-            return res.status(409).json({
-                success: false,
-                error: 'whatsapp_config_missing_for_scope',
-            });
-        }
-
-        const response = await whatsappService.sendMessage({
-            to: normalized,
-            body: message,
-            previewUrl,
-            useTemplate,
-            templateName,
-            templateLanguage,
-            templateParams,
-            templateComponents,
-            clinicConfig,
-        });
-
-        res.status(200).json({
-            success: true,
-            messageId: response.messages?.[0]?.id || null,
-            to: normalized,
-            metadata: {
-                ...metadata,
-                clinic_id: clinicId,
-                phoneNumberId: clinicConfig.phoneNumberId || null,
-                wabaId: clinicConfig.wabaId || null,
-            },
-        });
-    } catch (error) {
-        const statusCode = error.response?.status || 500;
-        const errorBody = error.response?.data || {
-            message: error.message || 'Error desconocido enviando WhatsApp',
-        };
-
-        res.status(statusCode).json({
-            success: false,
-            error: errorBody,
-        });
-    }
-});
+router.post('/messages', authMiddleware, whatsappController.sendMessage);
 
 // Plantillas del WABA según clinic_id o phone_number_id
 router.get('/templates', authMiddleware, whatsappController.listTemplatesForClinic);

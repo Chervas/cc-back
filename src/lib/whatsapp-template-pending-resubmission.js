@@ -88,6 +88,7 @@ function shouldKeepRemoteTemplateActive({
   return !!(
     catalogIsActive
     && !isStaleReviewTemplate
+    && !existing?.retired_at
     && !toPositiveInt(existing?.superseded_by_template_id)
   );
 }
