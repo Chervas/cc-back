@@ -37,6 +37,7 @@ const {
   listTemplates,
   normalizeCampaignContext,
   normalizeScope,
+  resolveWebProjectSiteDefaults,
   revisionFeatureForAction,
   saveDraft,
   siteDefaultsFromIntake,
@@ -164,6 +165,94 @@ async function testMaterializedProjectDefaultsFollowCurrentGroupRuntime() {
   assert.equal(effective.config.texts.privacy_url, '/privacidad-clinica/');
   const defaults = siteDefaultsFromIntake(effective);
   assert.equal(defaults.consent_ready, true);
+  assert.equal(defaults.integrations.chat_enabled, true);
+}
+
+async function testSparseClinicDefaultsInheritOnlyExplicitGroupConsent() {
+  const direct = {
+    id: 41,
+    assignment_scope: 'clinic',
+    clinic_id: 66,
+    hmac_key: 'clinic-only-secret',
+    updated_at: '2026-07-19T08:00:00.000Z',
+    config: {
+      snippet_verification: { verified: true },
+      features: {
+        chat_enabled: true,
+        tel_modal_enabled: true,
+      },
+    },
+  };
+  const group = {
+    id: 9,
+    assignment_scope: 'group',
+    group_id: 7,
+    updated_at: '2026-07-18T07:00:00.000Z',
+    config: {
+      locations: [{ id: 66 }],
+      features: {
+        consent_mode_enabled: true,
+        consent_provider: 'clinicaclick',
+        chat_enabled: false,
+        tel_modal_enabled: false,
+      },
+      texts: {
+        privacy_url: '/privacidad-grupo/',
+        consent_text: 'Acepto la política de privacidad del grupo.',
+      },
+    },
+  };
+  const models = {
+    Clinica: { findByPk: async () => ({ grupoClinicaId: 7 }) },
+    IntakeConfig: {
+      findOne: async ({ where }) => (where.assignment_scope === 'clinic' ? direct : group),
+    },
+  };
+  const defaults = await resolveWebProjectSiteDefaults({ type: 'clinic', id: 66 }, { models });
+  assert.equal(defaults.configured, true);
+  assert.equal(defaults.source_scope, 'clinic');
+  assert.equal(defaults.source_scope_id, 66);
+  assert.equal(defaults.integrations.intake_config_id, '41');
+  assert.equal(defaults.integrations.chat_enabled, true);
+  assert.equal(defaults.integrations.phone_enabled, true);
+  assert.equal(defaults.consent_ready, true);
+  assert.equal(defaults.consent.provider, 'clinicaclick');
+  assert.equal(defaults.consent.privacy_policy_url, '/privacidad-grupo/');
+  assert.equal(defaults.consent.privacy_policy_version, 'intake-9-2026-07-18');
+  assert.equal(defaults.consent_source_scope, 'group');
+  assert.equal(defaults.consent_source_scope_id, 7);
+  assert.equal(defaults.consent_source_intake_config_id, 9);
+}
+
+async function testSparseClinicDefaultsDoNotInheritUnassignedGroupConsent() {
+  const direct = {
+    id: 41,
+    assignment_scope: 'clinic',
+    clinic_id: 66,
+    hmac_key: 'clinic-only-secret',
+    config: { features: { chat_enabled: true } },
+  };
+  const group = {
+    id: 9,
+    assignment_scope: 'group',
+    group_id: 7,
+    config: {
+      locations: [{ id: 65 }],
+      features: { consent_mode_enabled: true, consent_provider: 'clinicaclick' },
+      texts: { privacy_url: '/privacidad-grupo/' },
+    },
+  };
+  const models = {
+    Clinica: { findByPk: async () => ({ grupoClinicaId: 7 }) },
+    IntakeConfig: {
+      findOne: async ({ where }) => (where.assignment_scope === 'clinic' ? direct : group),
+    },
+  };
+  const defaults = await resolveWebProjectSiteDefaults({ type: 'clinic', id: 66 }, { models });
+  assert.equal(defaults.consent_ready, false);
+  assert.equal(defaults.consent_source_scope, 'clinic');
+  assert.equal(defaults.consent_source_scope_id, 66);
+  assert.equal(defaults.integrations.intake_config_id, '41');
   assert.equal(defaults.integrations.chat_enabled, true);
 }
 
@@ -949,6 +1038,8 @@ async function main() {
   testIntakeDefaultsMakeAConfiguredDraftApprovable();
   await testInheritedIntakeRequiresExplicitLocation();
   await testMaterializedProjectDefaultsFollowCurrentGroupRuntime();
+  await testSparseClinicDefaultsInheritOnlyExplicitGroupConsent();
+  await testSparseClinicDefaultsDoNotInheritUnassignedGroupConsent();
   testTemplateInstantiationDoesNotReuseStructuralIds();
   testScopeValidation();
   testCampaignContextContract();
