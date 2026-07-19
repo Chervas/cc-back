@@ -6,8 +6,19 @@ const { getIO } = require('../services/socket.service');
 const whatsappService = require('../services/whatsapp.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { canUserAccessFeature } = require('../lib/access-policy');
+const { canUserSelectWhatsappTemplate } = require('../lib/whatsapp-template-ownership');
 
-const { Conversation, Message, UsuarioClinica, Paciente, LeadIntake, ConversationRead, Clinica, MarketingPatientListItem } = db;
+const {
+  Conversation,
+  Message,
+  UsuarioClinica,
+  Paciente,
+  LeadIntake,
+  ConversationRead,
+  Clinica,
+  MarketingPatientListItem,
+  WhatsappTemplate,
+} = db;
 
 const ROLE_AGGREGATE = ['propietario', 'admin'];
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1,44')
@@ -1266,6 +1277,7 @@ exports.postMessage = async (req, res) => {
       message,
       message_type = 'text',
       useTemplate = false,
+      templateId,
       templateName,
       templateLanguage,
       templateParams,
@@ -1321,6 +1333,9 @@ exports.postMessage = async (req, res) => {
     let clinicConfig = null;
     let limitStatus = null;
     let to = null;
+    let resolvedTemplate = null;
+    let canonicalTemplateName = null;
+    let canonicalTemplateLanguage = null;
     if (conversation.channel === 'whatsapp') {
       let preferredPhone = null;
       if (conversation.patient_id) {
@@ -1353,6 +1368,46 @@ exports.postMessage = async (req, res) => {
         await transaction.rollback();
         return res.status(500).json({ error: 'whatsapp_config_missing' });
       }
+      if (isTemplate) {
+        const safeTemplateId = Number(templateId || 0);
+        const safeTemplateName = String(templateName || '').trim();
+        const safeTemplateLanguage = String(templateLanguage || '').trim();
+        if (!safeTemplateName && !(Number.isInteger(safeTemplateId) && safeTemplateId > 0)) {
+          await transaction.rollback();
+          return res.status(400).json({ error: 'whatsapp_template_reference_required' });
+        }
+
+        const effectiveWabaId = String(clinicConfig.wabaId || '').trim();
+        const templateScopes = [
+          { waba_id: null, clinic_id: conversation.clinic_id },
+          ...(effectiveWabaId ? [{ waba_id: effectiveWabaId }] : []),
+        ];
+        const hasTemplateId = Number.isInteger(safeTemplateId) && safeTemplateId > 0;
+        const templateWhere = {
+          is_active: true,
+          status: 'APPROVED',
+          [Op.or]: templateScopes,
+          ...(hasTemplateId ? { id: safeTemplateId } : { name: safeTemplateName }),
+          ...(!hasTemplateId && safeTemplateLanguage ? { language: safeTemplateLanguage } : {}),
+        };
+        resolvedTemplate = await WhatsappTemplate.findOne({ where: templateWhere, transaction });
+        if (!resolvedTemplate) {
+          await transaction.rollback();
+          return res.status(404).json({ error: 'whatsapp_template_not_available' });
+        }
+        const templateJson = resolvedTemplate.get
+          ? resolvedTemplate.get({ plain: true })
+          : resolvedTemplate;
+        if (!canUserSelectWhatsappTemplate(templateJson, userId)) {
+          await transaction.rollback();
+          return res.status(403).json({
+            error: 'whatsapp_template_owner_forbidden',
+            message: 'Esta plantilla pertenece a otro usuario.',
+          });
+        }
+        canonicalTemplateName = String(templateJson.name || '').trim();
+        canonicalTemplateLanguage = String(templateJson.language || '').trim() || 'es';
+      }
       limitStatus = await whatsappService.checkOutboundLimit({
         clinicConfig,
         conversation,
@@ -1363,6 +1418,9 @@ exports.postMessage = async (req, res) => {
       ...(metadata || {}),
       ...(templateParams ? { templateParams } : {}),
       ...(templateComponents ? { templateComponents } : {}),
+      ...(resolvedTemplate?.id ? { template_id: Number(resolvedTemplate.id) } : {}),
+      ...(canonicalTemplateName ? { template_name: canonicalTemplateName } : {}),
+      ...(canonicalTemplateLanguage ? { template_language: canonicalTemplateLanguage } : {}),
       ...(clinicConfig?.phoneNumberId
         ? { phoneNumberId: clinicConfig.phoneNumberId }
         : {}),
@@ -1485,8 +1543,8 @@ exports.postMessage = async (req, res) => {
         body: message,
         previewUrl,
         useTemplate: isTemplate,
-        templateName,
-        templateLanguage,
+        templateName: canonicalTemplateName || templateName,
+        templateLanguage: canonicalTemplateLanguage || templateLanguage,
         templateParams,
         templateComponents,
         clinicConfig,
