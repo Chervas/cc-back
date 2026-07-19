@@ -13,7 +13,7 @@ const {
   webArtifactBundleFootprintBytes,
 } = require('./webArtifactBudget');
 
-const RENDERER_VERSION = 'clinicaclick-web-renderer/1.6.0';
+const RENDERER_VERSION = 'clinicaclick-web-renderer/1.7.0';
 const SAFE_EXTERNAL_REL = /^(?:\/[A-Za-z0-9_][A-Za-z0-9/_-]*|https:\/\/[^\s]+)$/;
 const PRODUCTION_INTAKE_ENDPOINT = '/_clinicaclick/intake';
 const CLINIC_BINDING_FIELDS = new Set([
@@ -34,6 +34,18 @@ const POSTAL_ADDRESS_FIELDS = Object.freeze({
   postal_code: ['postal_code', 'postalCode', 'zip', 'codigo_postal'],
   country: ['country', 'addressCountry', 'country_code', 'pais'],
 });
+const GOOGLE_WEEKDAYS = Object.freeze([
+  ['MONDAY', 'Monday'],
+  ['TUESDAY', 'Tuesday'],
+  ['WEDNESDAY', 'Wednesday'],
+  ['THURSDAY', 'Thursday'],
+  ['FRIDAY', 'Friday'],
+  ['SATURDAY', 'Saturday'],
+  ['SUNDAY', 'Sunday'],
+]);
+const GOOGLE_WEEKDAY_INDEX = new Map(GOOGLE_WEEKDAYS.map(([google, schema], index) => (
+  [google, { index, schema }]
+)));
 
 class WebArtifactCompilationError extends Error {
   constructor(code, message, details = undefined, status = 422) {
@@ -129,6 +141,115 @@ function safeIntakeEndpoint(value, environment = 'preview') {
   return normalized;
 }
 
+function googleHoursObject(value) {
+  if (!value) return {};
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch (_error) {
+      return {};
+    }
+  }
+  return typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function schemaTime(value) {
+  if (typeof value === 'string') {
+    const normalized = value.trim();
+    const match = normalized.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    if (!match) return null;
+    const hours = Number(match[1]);
+    const minutes = Number(match[2]);
+    const seconds = Number(match[3] || 0);
+    if (hours > 23 || minutes > 59 || seconds > 59) return null;
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}${seconds ? `:${String(seconds).padStart(2, '0')}` : ''}`;
+  }
+  const source = googleHoursObject(value);
+  if (!['hours', 'hour', 'minutes', 'minute', 'seconds', 'second', 'nanos']
+    .some((field) => Object.prototype.hasOwnProperty.call(source, field))) return null;
+  const hours = Number(source.hours ?? source.hour ?? 0);
+  const minutes = Number(source.minutes ?? source.minute ?? 0);
+  const seconds = Number(source.seconds ?? source.second ?? 0);
+  const nanos = Number(source.nanos ?? 0);
+  if (
+    !Number.isInteger(hours) || hours < 0 || hours > 23
+    || !Number.isInteger(minutes) || minutes < 0 || minutes > 59
+    || !Number.isInteger(seconds) || seconds < 0 || seconds > 59
+    || !Number.isInteger(nanos) || nanos !== 0
+  ) return null;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}${seconds ? `:${String(seconds).padStart(2, '0')}` : ''}`;
+}
+
+function normalizeGoogleOpeningHours(value) {
+  if (Array.isArray(value)) {
+    const schemaDayIndex = new Map(GOOGLE_WEEKDAYS.map(([_google, schema], index) => (
+      [`https://schema.org/${schema}`, { index, schema }]
+    )));
+    const existing = value.flatMap((specification) => {
+      if (!specification || typeof specification !== 'object' || Array.isArray(specification)) return [];
+      const day = schemaDayIndex.get(String(specification.dayOfWeek || ''));
+      const opens = schemaTime(specification.opens);
+      const closes = schemaTime(specification.closes);
+      if (!day || !opens || !closes) return [];
+      return [{
+        '@type': 'OpeningHoursSpecification',
+        dayOfWeek: `https://schema.org/${day.schema}`,
+        opens,
+        closes,
+        _dayIndex: day.index,
+      }];
+    });
+    existing.sort((left, right) => (
+      left._dayIndex - right._dayIndex
+      || left.opens.localeCompare(right.opens)
+      || left.closes.localeCompare(right.closes)
+    ));
+    const seen = new Set();
+    return existing.flatMap(({ _dayIndex, ...specification }) => {
+      const key = `${specification.dayOfWeek}|${specification.opens}|${specification.closes}`;
+      if (seen.has(key)) return [];
+      seen.add(key);
+      return [specification];
+    });
+  }
+  const source = googleHoursObject(value);
+  const periods = Array.isArray(source.periods) ? source.periods : [];
+  const normalized = periods.flatMap((period) => {
+    if (!period || typeof period !== 'object' || Array.isArray(period)) return [];
+    const openDay = GOOGLE_WEEKDAY_INDEX.get(String(period.openDay || period.open_day || '').toUpperCase());
+    const closeDay = GOOGLE_WEEKDAY_INDEX.get(String(period.closeDay || period.close_day || '').toUpperCase());
+    const opens = schemaTime(period.openTime ?? period.open_time);
+    const closes = schemaTime(period.closeTime ?? period.close_time);
+    if (!openDay || !closeDay || !opens || !closes) return [];
+    const sameDay = openDay.index === closeDay.index;
+    const nextDay = closeDay.index === ((openDay.index + 1) % GOOGLE_WEEKDAYS.length);
+    // Google expresses overnight ranges with closeDay on the following day.
+    // Other multi-day shapes and inverted same-day ranges are ambiguous, so
+    // they are omitted instead of manufacturing a schedule.
+    if ((!sameDay && !nextDay) || (sameDay && closes <= opens)) return [];
+    return [{
+      '@type': 'OpeningHoursSpecification',
+      dayOfWeek: `https://schema.org/${openDay.schema}`,
+      opens,
+      closes,
+      _dayIndex: openDay.index,
+    }];
+  });
+  normalized.sort((left, right) => (
+    left._dayIndex - right._dayIndex
+    || left.opens.localeCompare(right.opens)
+    || left.closes.localeCompare(right.closes)
+  ));
+  const seen = new Set();
+  return normalized.flatMap(({ _dayIndex, ...specification }) => {
+    const key = `${specification.dayOfWeek}|${specification.opens}|${specification.closes}`;
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [specification];
+  });
+}
+
 function normalizeClinicSnapshot(value = {}) {
   const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   const clinicId = Number(source.clinic_id || source.id || 0);
@@ -175,6 +296,8 @@ function normalizeClinicSnapshot(value = {}) {
     }
     result[field] = text.slice(0, 2048);
   }
+  const openingHours = normalizeGoogleOpeningHours(source.opening_hours ?? source.hours);
+  if (openingHours.length) result.opening_hours = openingHours;
   return result;
 }
 
@@ -718,6 +841,9 @@ function buildStructuredData({ project, page, pageUrl, baseUrl, clinic, document
     ...(clinic.phone ? { telephone: clinic.phone } : {}),
     ...(clinic.email ? { email: clinic.email } : {}),
     ...(clinicAddress(clinic) ? { address: clinicAddress(clinic) } : {}),
+    ...(Array.isArray(clinic.opening_hours) && clinic.opening_hours.length
+      ? { openingHoursSpecification: clinic.opening_hours }
+      : {}),
     ...(socialImageUrl && isSafePublicAssetUrl(socialImageUrl) ? { image: socialImageUrl } : {}),
     ...(clinic.schema_type === 'Dentist' ? { medicalSpecialty: 'Dentistry' } : {}),
   }, {
@@ -843,7 +969,10 @@ function renderPage({ page, document, snapshot, context, project, baseUrl, clini
   // is embedded.
   const runtimeImageSources = `${measurementOrigin ? ` ${measurementOrigin}` : ''} data:`;
   const runtimeStyleSources = measurementOrigin ? " 'unsafe-inline'" : '';
-  const pageCsp = `default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' https://media.clinicaclick.com${runtimeImageSources}; style-src 'self'${runtimeStyleSources}; script-src 'sha256-${jsonLdCspHash}'${measurementOrigin ? ` ${measurementOrigin}` : ''}; connect-src 'self'${measurementOrigin ? ` ${measurementOrigin}` : ''}; font-src 'self'; manifest-src 'self'; upgrade-insecure-requests`;
+  // `frame-ancestors` is ignored in a meta CSP and causes a browser warning.
+  // It remains enforced in the response-header contract below together with
+  // X-Frame-Options, while the meta policy preserves the useful early guards.
+  const pageCsp = `default-src 'none'; base-uri 'none'; form-action 'self'; img-src 'self' https://media.clinicaclick.com${runtimeImageSources}; style-src 'self'${runtimeStyleSources}; script-src 'sha256-${jsonLdCspHash}'${measurementOrigin ? ` ${measurementOrigin}` : ''}; connect-src 'self'${measurementOrigin ? ` ${measurementOrigin}` : ''}; font-src 'self'; manifest-src 'self'; upgrade-insecure-requests`;
   const publicationBasePath = new URL(`${baseUrl}/`).pathname;
   const favicon = faviconDataUrl(clinic.name || project.name);
   const socialImageTags = safeSocialUrl
@@ -892,6 +1021,7 @@ function compileWebArtifact(input = {}) {
   const baseUrl = safeAbsoluteBaseUrl(input.baseUrl);
   const runtime = trustedRuntime(input.trustedRuntime, { environment });
   const clinic = normalizeClinicSnapshot(input.clinicSnapshot);
+  const clinicSnapshotHash = sha256(canonicalSerialize(clinic));
   assertClinicBindingsFrozen(input.document, snapshot, clinic);
   assertIntakeConfigFrozen(input.document, snapshot);
   const document = validateBoundDocument(applyBindings(input.document, snapshot, clinic));
@@ -924,6 +1054,7 @@ function compileWebArtifact(input = {}) {
     runtime_config_hash: runtime.runtime_config_hash,
     document_hash: documentValidation.hash,
     content_snapshot_hash: sha256(canonicalSerialize(snapshot)),
+    clinic_snapshot_hash: clinicSnapshotHash,
   }));
   const pages = document.pages.map((page) => renderPage({
     page,
@@ -996,6 +1127,7 @@ function compileWebArtifact(input = {}) {
     runtime_config_hash: runtime.runtime_config_hash,
     document_hash: documentValidation.hash,
     content_snapshot_hash: sha256(canonicalSerialize(snapshot)),
+    clinic_snapshot_hash: clinicSnapshotHash,
     artifact_input_hash: artifactMarker,
     page_routes: Object.fromEntries(document.pages.map((page) => [page.id, {
       page_path: page.slug === 'inicio' ? '/' : `/${page.slug}/`,
@@ -1068,6 +1200,7 @@ module.exports = {
   escapeHtml,
   faviconDataUrl,
   normalizeClinicSnapshot,
+  normalizeGoogleOpeningHours,
   pageSeoAudit,
   safeAbsoluteBaseUrl,
   safePublicButtonUrl,

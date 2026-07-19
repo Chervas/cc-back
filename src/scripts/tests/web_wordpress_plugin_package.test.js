@@ -301,10 +301,14 @@ test('una instalación pending completa el handshake y una retirada confirmada i
   handshakeModels.WebPublication.findAll = async () => [{
     id: 'failed-publication-1',
     projectId: 'failed-project-1',
+    scopeType: 'clinic',
+    clinicaId: 66,
+    grupoClinicaId: null,
     wordpressInstallationId: installation.id,
     status: 'failed',
     activeArtifactId: null,
     lastGoodArtifactId: null,
+    configuration: { clinic_id: 66 },
   }];
   const retired = await recordReport({
     installationId: installation.id,

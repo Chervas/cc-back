@@ -160,6 +160,155 @@ test('WordPress conserva /cita/ para el piloto y asigna una ruta hija solo con c
   assert.equal(saved.length, 2);
 });
 
+test('una landing de clínica puede publicar en el WordPress compartido de su grupo sin ampliar el scope', async () => {
+  const source = project();
+  const installation = new Row({
+    id: 'b77c9c88-740f-474c-8160-9178afed7e70',
+    scopeType: 'group',
+    clinicaId: null,
+    grupoClinicaId: 5,
+    siteUrl: 'https://cliente.example.com',
+    status: 'connected',
+    pluginVersion: '2.0.0-alpha.8',
+    capabilities: { multi_publication_v2: true },
+  });
+  let created = null;
+  const models = {
+    WebProject: { findByPk: async () => source },
+    Clinica: {
+      findByPk: async (id) => Number(id) === 66
+        ? { id_clinica: 66, grupoClinicaId: 5, estado_clinica: true }
+        : null,
+    },
+    WebWordpressInstallation: { findByPk: async () => installation },
+    WebPublication: {
+      findAll: async () => [],
+      create: async (value) => { created = value; return new Row(value); },
+    },
+    WebPublicationDeployment: { findOne: async () => null },
+    WebArtifact: { findByPk: async () => null },
+    WebAuditEvent: { create: async () => true },
+  };
+
+  const publication = await createPublication({
+    actorId: 9,
+    body: {
+      project_id: source.id,
+      channel: 'wordpress',
+      wordpress_installation_id: installation.id,
+    },
+    models,
+    sequelize: sequelize(),
+    assertAccess: async () => true,
+    assertPublishing: () => true,
+  });
+
+  assert.equal(publication.scope.type, 'clinic');
+  assert.equal(publication.scope.id, 66);
+  assert.equal(created.scopeType, 'clinic');
+  assert.equal(created.clinicaId, 66);
+  assert.deepEqual(created.configuration.wordpress_installation_scope, { type: 'group', id: 5 });
+  assert.equal(created.configuration.wordpress_inherited_from_group, true);
+
+  installation.grupoClinicaId = 6;
+  await assert.rejects(
+    () => createPublication({
+      actorId: 9,
+      body: {
+        project_id: source.id,
+        channel: 'wordpress',
+        wordpress_installation_id: installation.id,
+      },
+      models,
+      sequelize: sequelize(),
+      assertAccess: async () => true,
+      assertPublishing: () => true,
+    }),
+    (error) => error.code === 'web_wordpress_installation_not_found'
+  );
+});
+
+test('un proyecto de grupo bloquea y revalida la clínica materializada antes de crear la publicación WordPress', async () => {
+  const source = new Row({
+    ...project().get(),
+    scopeType: 'group',
+    clinicaId: null,
+    grupoClinicaId: 5,
+  });
+  const installation = new Row({
+    id: 'b77c9c88-740f-474c-8160-9178afed7e70',
+    scopeType: 'group',
+    clinicaId: null,
+    grupoClinicaId: 5,
+    siteUrl: 'https://cliente.example.com',
+    status: 'connected',
+    pluginVersion: '2.0.0-alpha.8',
+    capabilities: { multi_publication_v2: true },
+  });
+  const clinic = new Row({ id_clinica: 66, grupoClinicaId: 5, estado_clinica: true });
+  let clinicRead = null;
+  let created = null;
+  const models = {
+    WebProject: { findByPk: async () => source },
+    Clinica: {
+      findByPk: async (_id, options) => {
+        clinicRead = options;
+        return clinic;
+      },
+    },
+    WebWordpressInstallation: { findByPk: async () => installation },
+    WebPublication: {
+      findAll: async () => [],
+      create: async (value) => { created = value; return new Row(value); },
+    },
+    WebPublicationDeployment: { findOne: async () => null },
+    WebArtifact: { findByPk: async () => null },
+    WebAuditEvent: { create: async () => true },
+  };
+
+  const publication = await createPublication({
+    actorId: 9,
+    body: {
+      project_id: source.id,
+      clinic_id: 66,
+      channel: 'wordpress',
+      wordpress_installation_id: installation.id,
+      slug: 'primera-visita-hospitalet',
+    },
+    models,
+    sequelize: sequelize(),
+    assertAccess: async () => true,
+    assertPublishing: () => true,
+  });
+
+  assert.equal(clinicRead.raw, undefined);
+  assert.equal(clinicRead.lock, 'UPDATE');
+  assert.ok(clinicRead.transaction);
+  assert.deepEqual(clinicRead.attributes, ['id_clinica', 'grupoClinicaId', 'estado_clinica']);
+  assert.equal(created.scopeType, 'group');
+  assert.equal(created.configuration.clinic_id, 66);
+  assert.equal(publication.configuration.clinic_id, 66);
+
+  clinic.estado_clinica = false;
+  await assert.rejects(
+    () => createPublication({
+      actorId: 9,
+      body: {
+        project_id: source.id,
+        clinic_id: 66,
+        channel: 'wordpress',
+        wordpress_installation_id: installation.id,
+        slug: 'otra-landing',
+      },
+      models,
+      sequelize: sequelize(),
+      assertAccess: async () => true,
+      assertPublishing: () => true,
+    }),
+    (error) => error.code === 'web_publication_clinic_not_found'
+  );
+});
+
 test('un tombstone retirado y confirmado libera un slot pero conserva su ruta, con historial total acotado', async () => {
   const source = project();
   source.name = 'Nueva landing';
@@ -276,6 +425,9 @@ test('retirar WordPress crea el tombstone auditable sin esperar un job ni reutil
   const source = project();
   const installation = new Row({
     id: 'b77c9c88-740f-474c-8160-9178afed7e70',
+    scopeType: 'clinic',
+    clinicaId: 66,
+    grupoClinicaId: null,
     status: 'connected',
   });
   const publication = new Row({
@@ -335,7 +487,12 @@ test('retirar WordPress crea el tombstone auditable sin esperar un job ni reutil
 
 test('retirar WordPress falla cerrado mientras hay un despliegue en curso', async () => {
   const source = project();
-  const installation = new Row({ id: 'b77c9c88-740f-474c-8160-9178afed7e70' });
+  const installation = new Row({
+    id: 'b77c9c88-740f-474c-8160-9178afed7e70',
+    scopeType: 'clinic',
+    clinicaId: 66,
+    grupoClinicaId: null,
+  });
   const publication = new Row({
     id: '11111111-1111-4111-8111-111111111111',
     projectId: source.id,
@@ -623,6 +780,9 @@ test('WordPress permite configurar pending pero solo activa al quedar connected'
   fixture.publication.wordpressInstallationId = 'b77c9c88-740f-474c-8160-9178afed7e70';
   const installation = new Row({
     id: fixture.publication.wordpressInstallationId,
+    scopeType: 'clinic',
+    clinicaId: 66,
+    grupoClinicaId: null,
     status: 'pending',
   });
   fixture.models.WebWordpressInstallation = { findByPk: async () => installation };
@@ -662,6 +822,9 @@ test('WordPress alpha.6 no encola una revisión con formulario global y alpha.7 
   fixture.publication.wordpressInstallationId = 'b77c9c88-740f-474c-8160-9178afed7e70';
   const installation = new Row({
     id: fixture.publication.wordpressInstallationId,
+    scopeType: 'clinic',
+    clinicaId: 66,
+    grupoClinicaId: null,
     status: 'connected',
     pluginVersion: '2.0.0-alpha.6',
   });
@@ -717,6 +880,9 @@ test('WordPress alpha.6 conserva compatibilidad con header global sin formulario
   fixture.publication.wordpressInstallationId = 'b77c9c88-740f-474c-8160-9178afed7e70';
   fixture.models.WebWordpressInstallation = { findByPk: async () => new Row({
     id: fixture.publication.wordpressInstallationId,
+    scopeType: 'clinic',
+    clinicaId: 66,
+    grupoClinicaId: null,
     status: 'connected',
     pluginVersion: '2.0.0-alpha.6',
   }) };

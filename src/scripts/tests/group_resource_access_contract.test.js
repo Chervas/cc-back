@@ -31,6 +31,7 @@ async function main() {
     groupFindByPk: db.GrupoClinica.findByPk,
     getGroupConfig: groupAssetsService.getGroupConfig,
     updateGroupConfig: groupAssetsService.updateGroupConfig,
+    deleteGroupSafely: groupAssetsService.deleteGroupSafely,
   };
 
   let configReads = 0;
@@ -79,6 +80,10 @@ async function main() {
   groupAssetsService.updateGroupConfig = async () => {
     configWrites += 1;
     return { id: 5 };
+  };
+  groupAssetsService.deleteGroupSafely = async () => {
+    groupDestroyed = true;
+    return { deleted: true, group_id: 5 };
   };
 
   try {
@@ -159,6 +164,7 @@ async function main() {
     db.GrupoClinica.findByPk = originals.groupFindByPk;
     groupAssetsService.getGroupConfig = originals.getGroupConfig;
     groupAssetsService.updateGroupConfig = originals.updateGroupConfig;
+    groupAssetsService.deleteGroupSafely = originals.deleteGroupSafely;
   }
 }
 

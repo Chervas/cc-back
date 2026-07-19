@@ -52,7 +52,10 @@ test('compila el mismo input de forma determinista y preview siempre es noindex'
   assert.match(first.files['index.html'], /name="robots" content="noindex,nofollow"/);
   assert.match(first.files['robots.txt'], /Disallow: \/$/m);
   assert.match(first.manifest.headers['content-security-policy'], /default-src 'none'/);
+  assert.match(first.manifest.headers['content-security-policy'], /frame-ancestors 'none'/);
   assert.match(first.files['index.html'], /http-equiv="Content-Security-Policy"/);
+  const metaCsp = first.files['index.html'].match(/http-equiv="Content-Security-Policy" content="([^"]+)"/)?.[1] || '';
+  assert.doesNotMatch(metaCsp, /frame-ancestors/);
   assert.match(first.files['index.html'], /<link rel="icon" type="image\/svg\+xml" href="data:image\/svg\+xml,/);
   assert.match(first.manifest.headers['content-security-policy'], /img-src[^;]+data:/);
   assert.match(first.files['index.html'], /href="https:\/\/implantes\.sites\.clinicaclick\.com\/assets\/styles\./);
@@ -496,6 +499,65 @@ test('JSON-LD publica Dentist/MedicalClinic con PostalAddress estructurada', () 
   assert.doesNotMatch(JSON.stringify(clinic), /AggregateRating|Review|priceRange/);
 });
 
+test('JSON-LD convierte periodos válidos de Google en openingHoursSpecification determinista', () => {
+  const input = fixture({
+    clinicSnapshot: {
+      ...fixture().clinicSnapshot,
+      hours: {
+        periods: [
+          {
+            openDay: 'TUESDAY',
+            openTime: { hours: 22 },
+            closeDay: 'WEDNESDAY',
+            closeTime: { hours: 6 },
+          },
+          {
+            openDay: 'MONDAY',
+            openTime: { hours: 9, minutes: 30 },
+            closeDay: 'MONDAY',
+            closeTime: { hours: 18 },
+          },
+          {
+            openDay: 'MONDAY',
+            openTime: { hours: 9, minutes: 30 },
+            closeDay: 'MONDAY',
+            closeTime: { hours: 18 },
+          },
+          {
+            openDay: 'THURSDAY',
+            openTime: { hours: 19 },
+            closeDay: 'THURSDAY',
+            closeTime: { hours: 8 },
+          },
+          {
+            openDay: 'FRIDAY',
+            openTime: {},
+            closeDay: 'FRIDAY',
+            closeTime: { hours: 13 },
+          },
+        ],
+      },
+    },
+  });
+
+  const first = compileWebArtifact(input);
+  const second = compileWebArtifact(input);
+  const clinic = first.pages[0].json_ld['@graph'].find((entry) => entry['@type'] === 'Dentist');
+  assert.deepEqual(clinic.openingHoursSpecification, [{
+    '@type': 'OpeningHoursSpecification',
+    dayOfWeek: 'https://schema.org/Monday',
+    opens: '09:30',
+    closes: '18:00',
+  }, {
+    '@type': 'OpeningHoursSpecification',
+    dayOfWeek: 'https://schema.org/Tuesday',
+    opens: '22:00',
+    closes: '06:00',
+  }]);
+  assert.equal(first.artifact_hash, second.artifact_hash);
+  assert.doesNotMatch(JSON.stringify(clinic), /Thursday|Friday/);
+});
+
 test('FAQ se renderiza como disclosure seguro y su schema solo alcanza la página visible', () => {
   const input = fixture();
   const primarySection = Object.values(input.document.nodes).find((node) => node.type === 'section');
@@ -704,7 +766,7 @@ test('renderiza globals una vez y los incluye en SEO, Schema e intake de cada p�
   assert.match(secondaryHtml, /name="web_page_id" value="page_global_secondary"/);
 });
 
-test('renderer 1.6 honra tokens, responsive, fuentes e imagen focal en CSS de producción', () => {
+test('renderer 1.7 honra tokens, responsive, fuentes e imagen focal en CSS de producción', () => {
   const input = fixture();
   const section = Object.values(input.document.nodes).find((node) => node.type === 'section');
   section.props.layout = 'grid';
@@ -758,7 +820,7 @@ test('renderer 1.6 honra tokens, responsive, fuentes e imagen focal en CSS de pr
   const cssPath = Object.keys(artifact.files).find((path) => path.endsWith('.css'));
   const css = artifact.files[cssPath];
   const html = artifact.files['index.html'];
-  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.6.0');
+  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.7.0');
   assert.match(html, /cc-layout-grid cc-cols-4[^"\n]*cc-bg-brand[^"\n]*cc-width-wide[^"\n]*cc-pt-2xl[^"\n]*cc-radius-full[^"\n]*cc-shadow-lg[^"\n]*cc-mobile-cols-1/);
   assert.match(html, /cc-fit-contain cc-aspect-21-9 cc-focal-37-62/);
   assert.match(html, /<div class="cc-image-frame"><img[^>]*width="2100" height="900">/);

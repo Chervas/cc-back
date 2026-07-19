@@ -20,6 +20,9 @@ const {
   semverAtLeast,
   supportsMultiPublication,
 } = require('../lib/webWordpressCompatibility');
+const {
+  wordpressInstallationScopeAuthorization,
+} = require('./webWordpressScope.service');
 
 const PUBLICATION_CHANNELS = new Set(['clinicaclick_hosted', 'wordpress', 'custom_domain']);
 const BUSY_PUBLICATION_STATUSES = new Set(['pending', 'publishing', 'rolling_back']);
@@ -193,6 +196,27 @@ function scopeMatches(resource, scope) {
     : Number(value.grupoClinicaId) === Number(scope.id);
 }
 
+async function assertWordpressInstallationScope(
+  installation,
+  scope,
+  { models, transaction = null, lockClinic = false } = {}
+) {
+  const authorization = await wordpressInstallationScopeAuthorization(installation, scope, {
+    models,
+    transaction,
+    lockClinic,
+  });
+  if (!authorization.allowed) {
+    throw new WebPublicationServiceError(
+      'web_wordpress_installation_scope_revoked',
+      'La conexión de WordPress ya no pertenece a esta clínica o grupo.',
+      409,
+      { reason: authorization.reason }
+    );
+  }
+  return authorization;
+}
+
 function serializePublication(row) {
   const value = plain(row);
   return {
@@ -268,6 +292,12 @@ async function retireWordpressPublication({
     if (!installation) {
       throw new WebPublicationServiceError('web_wordpress_installation_not_found', 'La instalación no existe.', 404);
     }
+    const scope = scopeFromProject(plain(project));
+    await assertWordpressInstallationScope(installation, scope, {
+      models,
+      transaction,
+      lockClinic: true,
+    });
     const siblings = await models.WebPublication.findAll({
       where: { wordpressInstallationId: pointer.wordpressInstallationId },
       order: [['path', 'ASC'], ['id', 'ASC']],
@@ -318,7 +348,6 @@ async function retireWordpressPublication({
       lastErrorCode: null,
       lastErrorMessage: null,
     }, { transaction });
-    const scope = scopeFromProject(plain(project));
     await models.WebAuditEvent.create({
       projectId: project.id,
       ...scopeColumns(scope),
@@ -377,11 +406,16 @@ async function selectedClinicForProject(project, requestedClinicId, { models, tr
     );
   }
   const clinic = await models.Clinica.findByPk(clinicId, {
-    attributes: ['id_clinica', 'grupoClinicaId'],
-    raw: true,
+    attributes: ['id_clinica', 'grupoClinicaId', 'estado_clinica'],
     transaction,
+    lock: transaction.LOCK.UPDATE,
   });
-  if (!clinic || Number(clinic.grupoClinicaId) !== Number(scope.id)) {
+  const clinicValue = plain(clinic);
+  if (
+    !clinicValue
+    || clinicValue.estado_clinica !== true
+    || Number(clinicValue.grupoClinicaId) !== Number(scope.id)
+  ) {
     throw new WebPublicationServiceError('web_publication_clinic_not_found', 'La clínica no existe.', 404);
   }
   return clinicId;
@@ -415,7 +449,17 @@ async function resolveTarget({ project, body, models, transaction, env }) {
     String(body.wordpress_installation_id || ''),
     { transaction, lock: transaction?.LOCK?.UPDATE }
   );
-  if (!installation || installation.status === 'revoked' || !scopeMatches(installation, scope)) {
+  const installationScope = installation
+    ? await wordpressInstallationScopeAuthorization(installation, scope, {
+        models,
+        transaction,
+        lockClinic: true,
+      })
+    : { allowed: false, inheritedFromGroup: false, sourceScope: null };
+  // Selection is existence-hiding: an actor cannot distinguish an unknown,
+  // revoked or foreign installation ID. A 409 is reserved for a publication
+  // that was already bound and later lost its delegation.
+  if (!installation || installation.status === 'revoked' || !installationScope.allowed) {
     throw new WebPublicationServiceError('web_wordpress_installation_not_found', 'La instalación no existe.', 404);
   }
   const installationPublications = await models.WebPublication.findAll({
@@ -485,6 +529,8 @@ async function resolveTarget({ project, body, models, transaction, env }) {
     path: requestedPath,
     domainId: null,
     wordpressInstallationId: installation.id,
+    wordpressSourceScope: installationScope.sourceScope,
+    wordpressInheritedFromGroup: installationScope.inheritedFromGroup,
     wordpress_status: installation.status,
     wordpress_publications: installationPublications.map(plain),
   };
@@ -556,6 +602,10 @@ async function createPublication({
         configuration: {
           clinic_id: clinicId,
           ...(campaignContext ? { campaign_context: campaignContext } : {}),
+          ...(target.wordpressSourceScope ? {
+            wordpress_installation_scope: target.wordpressSourceScope,
+            wordpress_inherited_from_group: target.wordpressInheritedFromGroup === true,
+          } : {}),
           ...(target.slug ? { slug: target.slug, hosted_mode: target.hosted_mode } : {}),
         },
         health: {},
@@ -576,6 +626,8 @@ async function createPublication({
           host_hash: sha256(target.host),
           path: target.path,
           campaign_context: campaignContext,
+          wordpress_installation_scope: target.wordpressSourceScope || null,
+          wordpress_inherited_from_group: target.wordpressInheritedFromGroup === true,
         },
       }, { transaction });
       return serializePublication(publication);
@@ -720,6 +772,14 @@ async function enqueueDeployment({
         pointer.wordpressInstallationId,
         { transaction, lock: transaction.LOCK.UPDATE }
       );
+      if (!lockedWordpressInstallation) {
+        throw new WebPublicationServiceError('web_wordpress_installation_not_found', 'La instalación no existe.', 404);
+      }
+      await assertWordpressInstallationScope(lockedWordpressInstallation, scope, {
+        models,
+        transaction,
+        lockClinic: true,
+      });
       wordpressPublications = await models.WebPublication.findAll({
         where: { wordpressInstallationId: pointer.wordpressInstallationId },
         order: [['path', 'ASC'], ['id', 'ASC']],
@@ -885,9 +945,12 @@ async function listDeployments({
 
 module.exports = {
   BUSY_PUBLICATION_STATUSES,
+  MAX_WORDPRESS_PUBLICATIONS,
+  MAX_WORDPRESS_PUBLICATION_HISTORY,
   PUBLICATION_CHANNELS,
   TERMINAL_DEPLOYMENT_STATUSES,
   WebPublicationServiceError,
+  assertWordpressInstallationScope,
   assertWordpressPilotManifestCompatible,
   assertWordpressRevisionCompatibility,
   campaignContextSnapshot,

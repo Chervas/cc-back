@@ -1,10 +1,12 @@
 'use strict';
 
 const db = require('../../models');
+const { Op } = require('sequelize');
 const {
   parseRuntimeInheritance,
   recordDeclaresRuntime,
 } = require('../lib/webRuntimeInheritance');
+const { isReleasedWordpressPublication } = require('../lib/webWordpressCompatibility');
 
 class ClinicWebRuntimeMembershipError extends Error {
   constructor(code, message, details = undefined) {
@@ -126,8 +128,94 @@ async function assertClinicWebRuntimeGroupChangeSafe({
   );
 }
 
+/**
+ * A clinic-owned publication may consume the WordPress installation of its
+ * current group, but that delegation must end through the normal retirement
+ * handshake. Moving or disabling the clinic first would either leave the old
+ * route alive or make the alpha.8 plugin reject an unsigned disappearance.
+ *
+ * The clinic row is already locked by the controller. These reads deliberately
+ * do not lock installation/publication rows: publication creation locks the
+ * installation before the clinic and will revalidate after this transaction,
+ * avoiding an inverse-lock deadlock while remaining fail-closed.
+ */
+async function assertClinicWordpressMembershipChangeSafe({
+  clinicId,
+  previousGroupId,
+  requestedGroupId,
+  previousActive = true,
+  requestedActive = true,
+  models = db,
+  transaction = null,
+} = {}) {
+  const resolvedClinicId = positiveInteger(clinicId);
+  const sourceGroupId = positiveInteger(previousGroupId);
+  const targetGroupId = positiveInteger(requestedGroupId);
+  const groupChanges = sourceGroupId !== targetGroupId;
+  const deactivates = previousActive === true && requestedActive !== true;
+  if (!resolvedClinicId || !sourceGroupId || (!groupChanges && !deactivates)) {
+    return { blocked: false };
+  }
+  if (!models.WebWordpressInstallation?.findAll || !models.WebPublication?.findAll) {
+    return { blocked: false };
+  }
+  const installations = await models.WebWordpressInstallation.findAll({
+    where: {
+      scopeType: 'group',
+      grupoClinicaId: sourceGroupId,
+    },
+    attributes: ['id', 'status', 'reportedState'],
+    transaction,
+  });
+  const installationIds = installations
+    .map((row) => String(plain(row)?.id || '').trim())
+    .filter(Boolean);
+  if (!installationIds.length) return { blocked: false };
+  const publications = await models.WebPublication.findAll({
+    where: {
+      wordpressInstallationId: { [Op.in]: installationIds },
+    },
+    attributes: [
+      'id', 'status', 'path', 'wordpressInstallationId',
+      'scopeType', 'clinicaId', 'grupoClinicaId', 'configuration',
+    ],
+    order: [['created_at', 'ASC'], ['id', 'ASC']],
+    transaction,
+  });
+  const installationById = new Map(installations.map((row) => [String(plain(row).id), plain(row)]));
+  const relevant = publications.filter((row) => {
+    const publication = plain(row) || {};
+    if (publication.scopeType === 'clinic') {
+      return positiveInteger(publication.clinicaId) === resolvedClinicId;
+    }
+    return publication.scopeType === 'group'
+      && positiveInteger(publication.grupoClinicaId) === sourceGroupId
+      && positiveInteger(publication.configuration?.clinic_id ?? publication.configuration?.clinicId) === resolvedClinicId;
+  });
+  const unreleased = relevant.filter((row) => {
+    const publication = plain(row);
+    const installation = installationById.get(String(publication.wordpressInstallationId));
+    return !installation || !isReleasedWordpressPublication(installation, publication);
+  });
+  if (!unreleased.length) return { blocked: false };
+  throw new ClinicWebRuntimeMembershipError(
+    'clinic_membership_wordpress_publication_retirement_required',
+    'Retira primero las landings que esta clínica publica mediante el WordPress de su grupo.',
+    {
+      error_code: 'clinic_membership_wordpress_publication_retirement_required',
+      clinic_id: resolvedClinicId,
+      previous_group_id: sourceGroupId,
+      requested_group_id: targetGroupId,
+      requested_active: requestedActive === true,
+      publication_ids: unreleased.map((row) => String(plain(row).id)),
+      next_action: 'retire_inherited_wordpress_publications_before_membership_change',
+    }
+  );
+}
+
 module.exports = {
   ClinicWebRuntimeMembershipError,
+  assertClinicWordpressMembershipChangeSafe,
   assertClinicWebRuntimeGroupChangeSafe,
   inheritedRuntimeState,
 };

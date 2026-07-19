@@ -1,6 +1,7 @@
 'use strict';
 
 const { Op } = require('sequelize');
+const db = require('../../models');
 const {
   sequelize,
   GrupoClinica,
@@ -12,7 +13,11 @@ const {
   ClinicBusinessLocation,
   ClinicGoogleAdsAccount,
   GroupAssetClinicAssignment
-} = require('../../models');
+} = db;
+const {
+  assertClinicWordpressMembershipChangeSafe,
+  assertClinicWebRuntimeGroupChangeSafe,
+} = require('./clinicWebRuntimeMembership.service');
 
 const MODE_VALUES = ['group', 'clinic'];
 
@@ -81,6 +86,123 @@ const CONNECTION_STATUSES = {
   connected: 'connected',
   disconnected: 'disconnected'
 };
+
+class GroupClinicMembershipError extends Error {
+  constructor(code, message, status = 409, details = undefined) {
+    super(message);
+    this.name = 'GroupClinicMembershipError';
+    this.code = code;
+    this.status = status;
+    this.details = details;
+  }
+}
+
+function _plain(row) {
+  return row?.get ? row.get({ plain: true }) : row;
+}
+
+function _positiveInteger(value) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function _clinicIsActive(value) {
+  return [true, 1, '1'].includes(value);
+}
+
+/**
+ * Applies one complete group-membership selection while every affected clinic
+ * row is locked in a stable order. This is the only safe route for the group
+ * editor: inherited web runtime and WordPress routes must be reconciled before
+ * a clinic can leave its source group.
+ */
+async function applyClinicMembershipSelection({
+  groupId,
+  targetIds,
+  models = db,
+  transaction,
+} = {}) {
+  const resolvedGroupId = _positiveInteger(groupId);
+  const normalizedTargets = [...new Set((Array.isArray(targetIds) ? targetIds : [])
+    .map(_positiveInteger)
+    .filter(Boolean))].sort((left, right) => left - right);
+  if (!resolvedGroupId || !transaction?.LOCK?.UPDATE) {
+    throw new GroupClinicMembershipError(
+      'group_clinic_membership_transaction_required',
+      'La selección de clínicas requiere una transacción bloqueante.',
+      500
+    );
+  }
+  const where = normalizedTargets.length
+    ? {
+        [Op.or]: [
+          { grupoClinicaId: resolvedGroupId },
+          { id_clinica: { [Op.in]: normalizedTargets } },
+        ],
+      }
+    : { grupoClinicaId: resolvedGroupId };
+  const clinics = await models.Clinica.findAll({
+    where,
+    attributes: ['id_clinica', 'grupoClinicaId', 'estado_clinica'],
+    order: [['id_clinica', 'ASC']],
+    transaction,
+    lock: transaction.LOCK.UPDATE,
+  });
+  const byId = new Map(clinics.map((row) => [_positiveInteger(_plain(row)?.id_clinica), row]));
+  const missing = normalizedTargets.filter((clinicId) => !byId.has(clinicId));
+  if (missing.length) {
+    throw new GroupClinicMembershipError(
+      'group_clinic_membership_clinic_not_found',
+      'Una o más clínicas seleccionadas ya no existen.',
+      404,
+      { clinic_ids: missing }
+    );
+  }
+
+  const targetSet = new Set(normalizedTargets);
+  const transitions = clinics.flatMap((row) => {
+    const value = _plain(row) || {};
+    const clinicId = _positiveInteger(value.id_clinica);
+    const previousGroupId = _positiveInteger(value.grupoClinicaId);
+    const requestedGroupId = targetSet.has(clinicId)
+      ? resolvedGroupId
+      : (previousGroupId === resolvedGroupId ? null : previousGroupId);
+    if (!clinicId || previousGroupId === requestedGroupId) return [];
+    return [{
+      row,
+      clinicId,
+      previousGroupId,
+      requestedGroupId,
+      active: _clinicIsActive(value.estado_clinica),
+    }];
+  }).sort((left, right) => left.clinicId - right.clinicId);
+
+  for (const transition of transitions) {
+    await assertClinicWordpressMembershipChangeSafe({
+      clinicId: transition.clinicId,
+      previousGroupId: transition.previousGroupId,
+      requestedGroupId: transition.requestedGroupId,
+      previousActive: transition.active,
+      requestedActive: transition.active,
+      models,
+      transaction,
+    });
+    await assertClinicWebRuntimeGroupChangeSafe({
+      clinicId: transition.clinicId,
+      previousGroupId: transition.previousGroupId,
+      requestedGroupId: transition.requestedGroupId,
+      models,
+      transaction,
+    });
+  }
+  for (const transition of transitions) {
+    await transition.row.update(
+      { grupoClinicaId: transition.requestedGroupId },
+      { transaction }
+    );
+  }
+  return normalizedTargets;
+}
 
 function _cloneJson(value, fallback) {
   if (value === undefined || value === null) {
@@ -1153,27 +1275,12 @@ async function updateGroupConfig(groupId, payload) {
         )
       );
 
-      const currentSet = new Set(clinicIds);
-      const targetSet = new Set(targetIds);
-
-      const toAssign = targetIds.filter(id => !currentSet.has(id));
-      const toRemove = clinicIds.filter(id => !targetSet.has(id));
-
-      if (toAssign.length) {
-        await Clinica.update(
-          { grupoClinicaId: groupId },
-          { where: { id_clinica: toAssign }, transaction }
-        );
-      }
-
-      if (toRemove.length) {
-        await Clinica.update(
-          { grupoClinicaId: null },
-          { where: { id_clinica: toRemove, grupoClinicaId: groupId }, transaction }
-        );
-      }
-
-      clinicIds = targetIds;
+      clinicIds = await applyClinicMembershipSelection({
+        groupId,
+        targetIds,
+        models: db,
+        transaction,
+      });
     }
 
     if (payload.ads) {
@@ -1420,7 +1527,35 @@ async function updateGroupConfig(groupId, payload) {
   }
 }
 
+async function deleteGroupSafely(groupId, {
+  models = db,
+  sequelizeInstance = sequelize,
+} = {}) {
+  const resolvedGroupId = _positiveInteger(groupId);
+  if (!resolvedGroupId) {
+    throw new GroupClinicMembershipError('group_not_found', 'Group not found', 404);
+  }
+  return sequelizeInstance.transaction(async (transaction) => {
+    const group = await models.GrupoClinica.findByPk(resolvedGroupId, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!group) throw new GroupClinicMembershipError('group_not_found', 'Group not found', 404);
+    await applyClinicMembershipSelection({
+      groupId: resolvedGroupId,
+      targetIds: [],
+      models,
+      transaction,
+    });
+    await group.destroy({ transaction });
+    return { deleted: true, group_id: resolvedGroupId };
+  });
+}
+
 module.exports = {
+  GroupClinicMembershipError,
+  applyClinicMembershipSelection,
+  deleteGroupSafely,
   getGroupConfig,
   updateGroupConfig,
   copyClinicIntakeConfigToGroup

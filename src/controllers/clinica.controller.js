@@ -18,6 +18,7 @@ const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
 const automationDefaultsService = require('../services/automationDefaults.service');
 const {
+    assertClinicWordpressMembershipChangeSafe,
     assertClinicWebRuntimeGroupChangeSafe,
 } = require('../services/clinicWebRuntimeMembership.service');
 const { STAFF_ROLES, ADMIN_ROLES, isGlobalAdmin } = require('../lib/role-helpers');
@@ -754,6 +755,10 @@ exports.updateClinica = async (req, res) => {
                 error.status = 400;
                 throw error;
             }
+            const previousActive = [true, 1, '1'].includes(clinicaExistente.estado_clinica);
+            const requestedActive = estado_clinica === undefined
+                ? previousActive
+                : [true, 1, '1'].includes(estado_clinica);
             if (requestedGroupId !== previousGroupId) {
                 // Una transición altera el scope compartido de Meta/Google de ambos
                 // grupos. Exigimos autoridad sobre el origen incluso al desvincular,
@@ -763,6 +768,21 @@ exports.updateClinica = async (req, res) => {
                     previousGroupId,
                     requestedGroupId
                 );
+            }
+            if (
+                requestedGroupId !== previousGroupId
+                || (previousActive && !requestedActive)
+            ) {
+                await assertClinicWordpressMembershipChangeSafe({
+                    clinicId: id_clinica,
+                    previousGroupId,
+                    requestedGroupId,
+                    previousActive,
+                    requestedActive,
+                    transaction,
+                });
+            }
+            if (requestedGroupId !== previousGroupId) {
                 await assertClinicWebRuntimeGroupChangeSafe({
                     clinicId: id_clinica,
                     previousGroupId,

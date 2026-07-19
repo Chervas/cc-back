@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const {
+  assertClinicWordpressMembershipChangeSafe,
   assertClinicWebRuntimeGroupChangeSafe,
   inheritedRuntimeState,
 } = require('../../services/clinicWebRuntimeMembership.service');
@@ -53,8 +54,13 @@ async function main() {
     'utf8'
   );
   const guardPosition = clinicControllerSource.indexOf('await assertClinicWebRuntimeGroupChangeSafe({');
+  const wordpressGuardPosition = clinicControllerSource.indexOf('await assertClinicWordpressMembershipChangeSafe({');
   const updatePosition = clinicControllerSource.indexOf('await clinicaExistente.update(scalarUpdates');
   assert.ok(guardPosition > 0 && updatePosition > guardPosition, 'el preflight debe preceder al cambio de grupo');
+  assert.ok(
+    wordpressGuardPosition > 0 && updatePosition > wordpressGuardPosition,
+    'las landings heredadas deben retirarse antes de cambiar grupo o desactivar la clínica'
+  );
   assert.match(
     clinicControllerSource.slice(guardPosition, updatePosition),
     /transaction,/u,
@@ -156,6 +162,169 @@ async function main() {
     { inherited: false }
   );
   assert.equal(sameGroupModels.calls.length, 0);
+
+  const wordpressCalls = [];
+  const wordpressModels = {
+    WebWordpressInstallation: {
+      async findAll(options) {
+        wordpressCalls.push({ model: 'installation', options });
+        return [{ id: 'group-wp-7', status: 'connected', reportedState: {} }];
+      },
+    },
+    WebPublication: {
+      async findAll(options) {
+        wordpressCalls.push({ model: 'publication', options });
+        return [{
+          id: 'clinic-route-66',
+          status: 'published',
+          wordpressInstallationId: 'group-wp-7',
+          scopeType: 'clinic',
+          clinicaId: 66,
+          grupoClinicaId: null,
+          configuration: { clinic_id: 66 },
+        }];
+      },
+    },
+  };
+  await assert.rejects(
+    () => assertClinicWordpressMembershipChangeSafe({
+      clinicId: 66,
+      previousGroupId: 7,
+      requestedGroupId: 8,
+      previousActive: true,
+      requestedActive: true,
+      models: wordpressModels,
+      transaction,
+    }),
+    (error) => (
+      error.code === 'clinic_membership_wordpress_publication_retirement_required'
+      && error.details.next_action === 'retire_inherited_wordpress_publications_before_membership_change'
+      && error.details.publication_ids[0] === 'clinic-route-66'
+    )
+  );
+  await assert.rejects(
+    () => assertClinicWordpressMembershipChangeSafe({
+      clinicId: 66,
+      previousGroupId: 7,
+      requestedGroupId: 7,
+      previousActive: true,
+      requestedActive: false,
+      models: wordpressModels,
+      transaction,
+    }),
+    (error) => error.code === 'clinic_membership_wordpress_publication_retirement_required'
+  );
+  assert.ok(wordpressCalls.every(({ options }) => options.transaction === transaction));
+  assert.ok(wordpressCalls.every(({ options }) => options.lock === undefined));
+
+  const groupProjectModels = {
+    ...wordpressModels,
+    WebPublication: {
+      findAll: async () => [{
+        id: 'group-route-for-clinic-66',
+        status: 'published',
+        path: '/cita/clinic-66/',
+        wordpressInstallationId: 'group-wp-7',
+        scopeType: 'group',
+        clinicaId: null,
+        grupoClinicaId: 7,
+        configuration: { clinic_id: 66 },
+      }],
+    },
+  };
+  await assert.rejects(
+    () => assertClinicWordpressMembershipChangeSafe({
+      clinicId: 66,
+      previousGroupId: 7,
+      requestedGroupId: 8,
+      previousActive: true,
+      requestedActive: true,
+      models: groupProjectModels,
+      transaction,
+    }),
+    (error) => (
+      error.code === 'clinic_membership_wordpress_publication_retirement_required'
+      && error.details.publication_ids[0] === 'group-route-for-clinic-66'
+    )
+  );
+
+  const retiredPendingModels = {
+    ...wordpressModels,
+    WebPublication: {
+      findAll: async () => [{
+        id: 'clinic-route-66',
+        status: 'retired',
+        path: '/cita/clinic-66/',
+        wordpressInstallationId: 'group-wp-7',
+        scopeType: 'clinic',
+        clinicaId: 66,
+        grupoClinicaId: null,
+        configuration: { clinic_id: 66 },
+      }],
+    },
+  };
+  await assert.rejects(
+    () => assertClinicWordpressMembershipChangeSafe({
+      clinicId: 66,
+      previousGroupId: 7,
+      requestedGroupId: 8,
+      previousActive: true,
+      requestedActive: true,
+      models: retiredPendingModels,
+      transaction,
+    }),
+    (error) => error.code === 'clinic_membership_wordpress_publication_retirement_required'
+  );
+
+  const retiredModels = {
+    WebWordpressInstallation: {
+      findAll: async () => [{
+        id: 'group-wp-7',
+        status: 'connected',
+        reportedState: {
+          confirmed_routes: {
+            'clinic-route-66': {
+              status: 'retired',
+              route_prefix: '/cita/clinic-66/',
+              artifact_hash: null,
+            },
+          },
+        },
+      }],
+    },
+    WebPublication: retiredPendingModels.WebPublication,
+  };
+  assert.deepEqual(
+    await assertClinicWordpressMembershipChangeSafe({
+      clinicId: 66,
+      previousGroupId: 7,
+      requestedGroupId: 8,
+      previousActive: true,
+      requestedActive: true,
+      models: retiredModels,
+      transaction,
+    }),
+    { blocked: false }
+  );
+
+  const revokedModels = {
+    ...wordpressModels,
+    WebWordpressInstallation: {
+      findAll: async () => [{ id: 'group-wp-7', status: 'revoked', reportedState: {} }],
+    },
+  };
+  await assert.rejects(
+    () => assertClinicWordpressMembershipChangeSafe({
+      clinicId: 66,
+      previousGroupId: 7,
+      requestedGroupId: 8,
+      previousActive: true,
+      requestedActive: true,
+      models: revokedModels,
+      transaction,
+    }),
+    (error) => error.code === 'clinic_membership_wordpress_publication_retirement_required'
+  );
 
   console.log('web clinic group runtime guard: ok');
 }

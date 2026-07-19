@@ -63,6 +63,12 @@ module.exports = (sequelize, DataTypes) => {
       field: 'content_snapshot_hash',
       validate: { is: /^[a-f0-9]{64}$/ },
     },
+    clinicSnapshotHash: {
+      type: DataTypes.STRING(64),
+      allowNull: false,
+      field: 'clinic_snapshot_hash',
+      validate: { is: /^[a-f0-9]{64}$/ },
+    },
     manifest: { type: DataTypes.JSON, allowNull: false },
     files: { type: DataTypes.JSON, allowNull: false },
     qaReport: { type: DataTypes.JSON, allowNull: false, field: 'qa_report' },
@@ -79,7 +85,7 @@ module.exports = (sequelize, DataTypes) => {
     updatedAt: false,
     indexes: [
       { unique: true, fields: ['artifact_hash'] },
-      { unique: true, fields: ['revision_id', 'renderer_version', 'environment', 'base_url_hash', 'runtime_config_hash'] },
+      { unique: true, fields: ['revision_id', 'renderer_version', 'environment', 'base_url_hash', 'runtime_config_hash', 'clinic_snapshot_hash'] },
       { fields: ['project_id', 'created_at'] },
       { fields: ['status', 'created_at'] },
     ],

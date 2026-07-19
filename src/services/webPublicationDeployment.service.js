@@ -21,6 +21,7 @@ const {
 const jobRequestsService = require('./jobRequests.service');
 const {
   WebPublicationServiceError,
+  assertWordpressInstallationScope,
   assertWordpressPilotManifestCompatible,
   publicationBaseUrl,
   serializeDeployment,
@@ -253,7 +254,13 @@ async function enqueueLandingPublishedEvent({ event, models, sequelize, transact
   };
 }
 
-async function lockDeploymentGraph({ deploymentId, publicationId, models, transaction }) {
+async function lockDeploymentGraph({
+  deploymentId,
+  publicationId,
+  models,
+  transaction,
+  requireWordpressAuthorization = true,
+}) {
   const pointer = await models.WebPublicationDeployment.findByPk(String(deploymentId || ''), {
     attributes: ['id', 'publicationId', 'projectId'],
     transaction,
@@ -266,18 +273,57 @@ async function lockDeploymentGraph({ deploymentId, publicationId, models, transa
     lock: transaction.LOCK.UPDATE,
   });
   if (!project) throw new WebPublicationServiceError('web_publication_deployment_not_found', 'El despliegue no existe.', 404);
-  const publication = await models.WebPublication.findByPk(pointer.publicationId, {
+  const locator = await models.WebPublication.findByPk(pointer.publicationId, {
+    attributes: ['id', 'projectId', 'channel', 'wordpressInstallationId'],
     transaction,
-    lock: transaction.LOCK.UPDATE,
   });
+  if (!locator || String(locator.projectId) !== String(project.id)) {
+    throw new WebPublicationServiceError('web_publication_deployment_not_found', 'El despliegue no existe.', 404);
+  }
+  let installation = null;
+  let siblings = null;
+  let publication = null;
+  if (locator.channel === 'wordpress') {
+    installation = await models.WebWordpressInstallation.findByPk(locator.wordpressInstallationId, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!installation) {
+      throw new WebPublicationServiceError('web_wordpress_installation_not_found', 'La instalación no existe.', 404);
+    }
+    if (requireWordpressAuthorization) {
+      await assertWordpressInstallationScope(installation, scopeFromProject(plain(project)), {
+        models,
+        transaction,
+        lockClinic: true,
+      });
+    }
+    siblings = await models.WebPublication.findAll({
+      where: { wordpressInstallationId: locator.wordpressInstallationId },
+      order: [['path', 'ASC'], ['id', 'ASC']],
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    publication = siblings.find((row) => String(row.id) === String(pointer.publicationId)) || null;
+  } else {
+    publication = await models.WebPublication.findByPk(pointer.publicationId, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+  }
   const deployment = await models.WebPublicationDeployment.findByPk(pointer.id, {
     transaction,
     lock: transaction.LOCK.UPDATE,
   });
-  if (!publication || !deployment || publication.projectId !== project.id || deployment.projectId !== project.id) {
+  if (
+    !publication
+    || !deployment
+    || String(publication.projectId) !== String(project.id)
+    || String(deployment.projectId) !== String(project.id)
+  ) {
     throw new WebPublicationServiceError('web_publication_deployment_not_found', 'El despliegue no existe.', 404);
   }
-  return { project, publication, deployment };
+  return { project, publication, deployment, installation, siblings };
 }
 
 async function claimDeployment({
@@ -346,62 +392,13 @@ async function persistArtifactPreparation({
   sequelize,
 }) {
   return sequelize.transaction(async (transaction) => {
-    const pointer = await models.WebPublicationDeployment.findByPk(String(deploymentId || ''), {
-      attributes: ['id', 'publicationId', 'projectId'],
+    const { publication, deployment, siblings } = await lockDeploymentGraph({
+      deploymentId,
+      publicationId,
+      models,
       transaction,
+      requireWordpressAuthorization: true,
     });
-    if (!pointer || (publicationId && String(pointer.publicationId) !== String(publicationId))) {
-      throw new WebPublicationServiceError('web_publication_deployment_not_found', 'El despliegue no existe.', 404);
-    }
-    const locator = await models.WebPublication.findByPk(pointer.publicationId, {
-      attributes: ['id', 'projectId', 'channel', 'wordpressInstallationId'],
-      transaction,
-    });
-    if (!locator || String(locator.projectId) !== String(pointer.projectId)) {
-      throw new WebPublicationServiceError('web_publication_deployment_not_found', 'El despliegue no existe.', 404);
-    }
-    const project = await models.WebProject.findByPk(pointer.projectId, {
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
-    if (!project) {
-      throw new WebPublicationServiceError('web_publication_deployment_not_found', 'El despliegue no existe.', 404);
-    }
-    let siblings = null;
-    let publication = null;
-    if (locator.channel === 'wordpress') {
-      const installation = await models.WebWordpressInstallation.findByPk(locator.wordpressInstallationId, {
-        transaction,
-        lock: transaction.LOCK.UPDATE,
-      });
-      if (!installation) {
-        throw new WebPublicationServiceError('web_wordpress_installation_not_found', 'La instalación no existe.', 404);
-      }
-      siblings = await models.WebPublication.findAll({
-        where: { wordpressInstallationId: locator.wordpressInstallationId },
-        order: [['path', 'ASC'], ['id', 'ASC']],
-        transaction,
-        lock: transaction.LOCK.UPDATE,
-      });
-      publication = siblings.find((row) => String(row.id) === String(pointer.publicationId)) || null;
-    } else {
-      publication = await models.WebPublication.findByPk(pointer.publicationId, {
-        transaction,
-        lock: transaction.LOCK.UPDATE,
-      });
-    }
-    const deployment = await models.WebPublicationDeployment.findByPk(pointer.id, {
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
-    if (
-      !publication
-      || !deployment
-      || String(publication.projectId) !== String(project.id)
-      || String(deployment.projectId) !== String(project.id)
-    ) {
-      throw new WebPublicationServiceError('web_publication_deployment_not_found', 'El despliegue no existe.', 404);
-    }
     if (Number(publication.version) !== Number(deployment.expectedPublicationVersion)) {
       throw new WebPublicationServiceError(
         'web_publication_version_changed',
@@ -1055,7 +1052,7 @@ async function failDeployment({
 }) {
   return sequelize.transaction(async (transaction) => {
     const { project, publication, deployment } = await lockDeploymentGraph({
-      deploymentId, publicationId, models, transaction,
+      deploymentId, publicationId, models, transaction, requireWordpressAuthorization: false,
     });
     if (['verified', 'failed', 'superseded'].includes(deployment.status)) return;
     const markerState = runtimeReconciliationState(deployment);

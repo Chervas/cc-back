@@ -106,6 +106,9 @@ function fixture(channel = 'clinicaclick_hosted', withCampaign = false) {
   });
   const installation = new Row({
     id: publication.wordpressInstallationId,
+    scopeType: 'clinic',
+    clinicaId: 66,
+    grupoClinicaId: null,
     status: 'connected',
     lastArtifactHash: null,
     pluginVersion: '2.0.0',
@@ -136,7 +139,11 @@ function fixture(channel = 'clinicaclick_hosted', withCampaign = false) {
     WebWordpressInstallation: { findByPk: async () => installation },
     WebDomain: { findByPk: async (id) => String(id) === String(domain.id) ? domain : null },
     IntakeConfig: { findOne: async () => null },
-    Clinica: { findByPk: async () => ({ grupoClinicaId: null }) },
+    Clinica: {
+      findByPk: async (id) => Number(id) === 66
+        ? { id_clinica: 66, grupoClinicaId: null, estado_clinica: true }
+        : null,
+    },
     WebAuditEvent: { create: async (value) => { audits.push(value); return value; } },
     JobRequest: {},
   };
@@ -412,6 +419,78 @@ test('un gate de canal cerrado detiene un job ya encolado antes de compilar o mu
   assert.equal(state.deployment.status, 'queued');
   assert.equal(state.deployment.startedAt, null);
   assert.equal(state.publication.status, 'pending');
+});
+
+test('un worker WordPress ya encolado falla antes de tocar canal o artefactos si la clínica pierde el grupo', async () => {
+  const state = fixture('wordpress');
+  Object.assign(state.installation, {
+    scopeType: 'group',
+    clinicaId: null,
+    grupoClinicaId: 5,
+  });
+  state.publication.configuration = {
+    ...state.publication.configuration,
+    wordpress_installation_scope: { type: 'group', id: 5 },
+    wordpress_inherited_from_group: true,
+  };
+  state.models.Clinica.findByPk = async (id) => Number(id) === 66
+    ? { id_clinica: 66, grupoClinicaId: 8, estado_clinica: true }
+    : null;
+
+  let channelGateCalls = 0;
+  let compileCalls = 0;
+  let storeCalls = 0;
+  let publishCalls = 0;
+  let healthChecks = 0;
+  const result = await runPublicationDeploymentJob({
+    publication_id: state.publication.id,
+    deployment_id: state.deployment.id,
+  }, { id: 77, attempts: 1, max_attempts: 5 }, dependencies(state, {
+    assertWebPublishingChannelEnabled: () => {
+      channelGateCalls += 1;
+      throw new Error('el gate de canal no debe ejecutarse');
+    },
+    compileRevision: async () => {
+      compileCalls += 1;
+      throw new Error('compile no debe ejecutarse');
+    },
+    storeArtifactBundle: async () => {
+      storeCalls += 1;
+      throw new Error('storage no debe ejecutarse');
+    },
+    publishHostedArtifact: async () => {
+      publishCalls += 1;
+      throw new Error('publish no debe ejecutarse');
+    },
+    verifyPublicArtifact: async () => {
+      healthChecks += 1;
+      throw new Error('health check no debe ejecutarse');
+    },
+  }));
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.retryable, false);
+  assert.equal(result.error.code, 'web_wordpress_installation_scope_revoked');
+  assert.deepEqual({
+    channelGateCalls,
+    compileCalls,
+    storeCalls,
+    publishCalls,
+    healthChecks,
+  }, {
+    channelGateCalls: 0,
+    compileCalls: 0,
+    storeCalls: 0,
+    publishCalls: 0,
+    healthChecks: 0,
+  });
+  assert.equal(state.deployment.status, 'failed');
+  assert.equal(state.deployment.startedAt, null);
+  assert.equal(state.deployment.artifactId, null);
+  assert.equal(state.installation.lastArtifactHash, null);
+  assert.equal(state.publication.status, 'failed');
+  assert.equal(state.publication.activeArtifactId, null);
+  assert.equal(state.publication.lastGoodArtifactId, null);
 });
 
 test('rollback recompila R1 superseded con el runtime vigente y conserva el LKG verificado', async () => {
@@ -1026,6 +1105,9 @@ test('el bundle piloto conflictivo nunca se hace visible antes de validar rutas 
   const child = new Row({
     id: '77777777-7777-4777-8777-777777777777',
     projectId: 'child-project',
+    scopeType: 'clinic',
+    clinicaId: 66,
+    grupoClinicaId: null,
     channel: 'wordpress',
     wordpressInstallationId: state.installation.id,
     host: state.publication.host,
