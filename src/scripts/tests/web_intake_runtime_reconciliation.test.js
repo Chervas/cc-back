@@ -643,6 +643,124 @@ async function testOneOfNCompilationFailureDoesNotSwitchAnything() {
   assert.equal(switches, 0);
 }
 
+async function testCommitUsesExactLockedPublicationInstanceAfterPlainPlanning() {
+  const source = intake({ hmac: OLD_KEY, chat: false });
+  const target = intake({ hmac: NEW_KEY, chat: true });
+  const sourceRuntime = reconciliation.runtimeForRecord(source);
+  const targetRuntime = reconciliation.runtimeForRecord(target);
+  const sourceArtifact = artifact({
+    id: 'locked-source', revisionId: 'revision-source', runtimeHash: sourceRuntime.runtime_config_hash, marker: 'a',
+  });
+  const targetArtifact = artifact({
+    id: 'locked-target', revisionId: 'revision-target', runtimeHash: targetRuntime.runtime_config_hash, marker: 'c',
+  });
+  const transition = row(sealTestReconciliation({
+    id: '99999999-9999-4999-8999-999999999999',
+    generation: 1,
+    status: 'preparing',
+    scopeType: 'clinic',
+    scopeId: 55,
+    sourceRuntimeHash: sourceRuntime.runtime_config_hash,
+    sourceRuntimeFingerprint: reconciliation.runtimeFingerprintForRecord(source),
+    targetRuntimeHash: targetRuntime.runtime_config_hash,
+    targetRuntimeFingerprint: reconciliation.runtimeFingerprintForRecord(target),
+    sourceConfigPatch: reconciliation.runtimeConfigPatch(source),
+    targetConfigPatch: reconciliation.runtimeConfigPatch(target),
+    sourceHmacKey: OLD_KEY,
+    targetHmacKey: NEW_KEY,
+    expectedDeployments: {},
+  }));
+  const publicationState = {
+    id: 'locked-publication',
+    projectId: 'project-1',
+    activeRevisionId: sourceArtifact.revisionId,
+    activeArtifactId: sourceArtifact.id,
+    status: 'published',
+    version: 3,
+    channel: 'clinicaclick_hosted',
+    host: 'clinic.example',
+    path: '/',
+    configuration: { clinic_id: 55 },
+    scopeType: 'clinic',
+    clinicaId: 55,
+    updatedByUserId: 9,
+  };
+  const publicationUpdates = [];
+  const lockedPublication = {
+    ...publicationState,
+    get() {
+      return Object.freeze({ ...publicationState });
+    },
+    async update(patch) {
+      publicationUpdates.push(patch);
+      Object.assign(publicationState, patch);
+      Object.assign(this, patch);
+      return this;
+    },
+  };
+  let lockedPublicationReads = 0;
+  let createdDeployment = null;
+  const models = {
+    WebIntakeRuntimeReconciliation: { findByPk: async () => transition },
+    IntakeConfig: {
+      findOne: async () => row(source),
+      findAll: async () => [],
+    },
+    WebPublication: {
+      findAll: async (query = {}) => {
+        if (query.lock) lockedPublicationReads += 1;
+        return [lockedPublication];
+      },
+    },
+    WebArtifact: {
+      findAll: async () => [sourceArtifact],
+      findByPk: async (id) => (id === targetArtifact.id ? targetArtifact : null),
+    },
+    WebPublicationDeployment: {
+      findOne: async () => null,
+      create: async (values) => {
+        createdDeployment = row(values);
+        return createdDeployment;
+      },
+    },
+    WebAuditEvent: { create: async () => ({}) },
+    JobRequest: {},
+  };
+  const prepared = [{
+    publication_id: publicationState.id,
+    installation_id: null,
+    project_id: publicationState.projectId,
+    revision_id: targetArtifact.revisionId,
+    previous_artifact_id: sourceArtifact.id,
+    publication_version: publicationState.version,
+    actor_id: 9,
+    artifact_id: targetArtifact.id,
+    artifact_hash: targetArtifact.artifactHash,
+    runtime_config_hash: targetRuntime.runtime_config_hash,
+    storage: {
+      runtime_reconciliation: reconciliation.preparedRuntimeMarker(transition, 1),
+    },
+  }];
+
+  const result = await reconciliation.commitPreparedRuntime({
+    reconciliationId: transition.id,
+    generation: 1,
+    prepared,
+    models,
+    sequelize: sequelizeStub(),
+    enqueueJobRequest: async () => ({ id: 'locked-publication-job' }),
+  });
+
+  assert.equal(result.deployments.length, 1);
+  assert.equal(lockedPublicationReads, 1);
+  assert.equal(publicationUpdates.length, 2);
+  assert.equal(publicationUpdates[0].status, 'pending');
+  assert.equal(publicationUpdates[0].version, 4);
+  assert.equal(publicationUpdates[1].jobRequestId, 'locked-publication-job');
+  assert.equal(createdDeployment.jobRequestId, 'locked-publication-job');
+  assert.equal(transition.status, 'deploying');
+}
+
 async function testPromotionWaitsForEveryVerifiedDeployment() {
   const source = intake();
   const target = intake({ hmac: NEW_KEY, chat: true });
@@ -1280,6 +1398,7 @@ async function run() {
     testGroupAndClinicRuntimeTransitionsCannotOverlap,
     testOutboxIsIdempotentAndContainsNoSecret,
     testOneOfNCompilationFailureDoesNotSwitchAnything,
+    testCommitUsesExactLockedPublicationInstanceAfterPlainPlanning,
     testPromotionWaitsForEveryVerifiedDeployment,
     testArtifactIdentitySelectsSameHmacFeatureRuntime,
     testContentOnlyDeploymentAcceptsOnlyExactHostedOrCustomArtifact,
