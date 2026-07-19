@@ -4,8 +4,8 @@ Este índice separa la arquitectura general de los procedimientos que deben usar
 
 ## Cierre funcional Marketing Web W1-W5 (2026-07-19)
 
-La referencia vigente del candidato es backend `35c277a` (staging
-`24ba96c`) y frontend `379a9570` (staging `a1ae678f`). Cierra el editor
+La referencia vigente del candidato es backend `7bd254e` (staging
+`d99c3a6`) y frontend `379a9570` (staging `a1ae678f`). Cierra el editor
 **Guiado/Avanzado** con ACL y reordenación
 contextual, el listado/editor CMS y los ajustes General/SEO/Social, las cinco
 plantillas builtin `version=1`/`builtin_revision=2`, y el renderer WordPress
@@ -43,7 +43,8 @@ Límites vigentes: `connect_only` = **Mide y entiende**,
 `guided_improvement` = **Mejora**, `managed_service` = **Piloto** y
 `managed_self` queda solo como legado de lectura: la UI no ofrece edición ni
 transiciones y el backend rechaza cualquier actualización con
-`409 legacy_mode_read_only`. Propdental sigue en `connect_only`;
+`409 legacy_mode_read_only` ante edición, creación o transición de estado.
+Propdental sigue en `connect_only`;
 flags hosted/custom y de mutación de proveedor apagados. La migración `1520`
 continúa cancelada/no-op. La protección de propietarios en
 `personal.controller.js` tampoco pertenece a este cambio: personal operativo
