@@ -40,6 +40,9 @@ const {
 const { verifyWebArtifactManifest } = require('../../lib/webArtifactSignature');
 const { canonicalSerialize } = require('../../lib/webDocument');
 const { MAX_WEB_ARTIFACT_BUNDLE_BYTES } = require('../../lib/webArtifactBudget');
+const {
+  filterAuthorizedWordpressPublications,
+} = require('../../services/webWordpressScope.service');
 
 function row(value) {
   const normalized = { ...value };
@@ -142,6 +145,9 @@ test('lista separa capacidad activa del historial de rutas para no reutilizar /c
         return [{
           id: retiredPublicationId,
           wordpressInstallationId: installationId,
+          scopeType: 'clinic',
+          clinicaId: 66,
+          grupoClinicaId: null,
           status: 'retired',
           path: '/cita/',
         }];
@@ -159,6 +165,60 @@ test('lista separa capacidad activa del historial de rutas para no reutilizar /c
   assert.equal(serialized.released_publication_tombstones, 1);
   assert.equal(serialized.route_history_count, 1);
   assert.equal(serialized.requires_additional_route, true);
+});
+
+test('la clínica ve su instalación propia y el WordPress compartido de su grupo con procedencia explícita', async () => {
+  const direct = row({
+    id: crypto.randomUUID(),
+    scopeType: 'clinic',
+    clinicaId: 66,
+    grupoClinicaId: null,
+    siteUrl: 'https://clinic.example',
+    status: 'connected',
+    desiredSequence: 1,
+    version: 1,
+  });
+  const inherited = row({
+    id: crypto.randomUUID(),
+    scopeType: 'group',
+    clinicaId: null,
+    grupoClinicaId: 5,
+    siteUrl: 'https://group.example',
+    status: 'connected',
+    desiredSequence: 2,
+    version: 3,
+  });
+  let capturedWhere = null;
+  const models = {
+    Clinica: {
+      async findByPk(id) {
+        return Number(id) === 66
+          ? { id_clinica: 66, grupoClinicaId: 5, estado_clinica: true }
+          : null;
+      },
+    },
+    WebWordpressInstallation: {
+      async findAll({ where }) {
+        capturedWhere = where;
+        return [direct, inherited];
+      },
+    },
+    WebPublication: { async findAll() { return []; } },
+  };
+
+  const installations = await listInstallations({
+    actorId: 77,
+    query: { scope_type: 'clinic', clinic_id: 66 },
+    models,
+    assertAccess: async () => {},
+  });
+
+  assert.ok(Array.isArray(capturedWhere[Op.or]));
+  assert.equal(installations.length, 2);
+  assert.equal(installations[0].inherited_from_group, false);
+  assert.deepEqual(installations[0].source_scope, { type: 'clinic', id: 66 });
+  assert.equal(installations[1].inherited_from_group, true);
+  assert.deepEqual(installations[1].source_scope, { type: 'group', id: 5 });
 });
 
 test('autenticación liga token, instalación y major compatible', async () => {
@@ -447,6 +507,7 @@ test('reemitir invalida el staged anterior, la expiración falla cerrada y revoc
   });
   const models = {
     WebWordpressInstallation: { async findByPk() { return installation; } },
+    WebPublication: { async findAll() { return []; } },
     WebAuditEvent: { async create() {} },
   };
   const sequelize = { transaction: async (callback) => callback({ LOCK: { UPDATE: 'UPDATE' } }) };
@@ -503,6 +564,131 @@ test('reemitir invalida el staged anterior, la expiración falla cerrada y revoc
     }),
     (error) => error.code === 'web_installation_unauthorized'
   );
+});
+
+test('revocar exige retirar y confirmar cada ruta antes de invalidar las credenciales', async () => {
+  const installation = row({
+    id: crypto.randomUUID(),
+    scopeType: 'group',
+    clinicaId: null,
+    grupoClinicaId: 7,
+    siteUrl: 'https://cliente.example',
+    tokenHash: tokenHash(`ccw_${crypto.randomBytes(32).toString('base64url')}`),
+    tokenPrefix: 'ccw_active',
+    status: 'connected',
+    reportedState: {},
+    version: 1,
+  });
+  const publication = row({
+    id: crypto.randomUUID(),
+    projectId: crypto.randomUUID(),
+    scopeType: 'clinic',
+    clinicaId: 66,
+    grupoClinicaId: null,
+    wordpressInstallationId: installation.id,
+    path: '/cita/hospitalet/',
+    status: 'published',
+  });
+  const models = {
+    WebWordpressInstallation: { async findByPk() { return installation; } },
+    WebPublication: { async findAll() { return [publication]; } },
+    Clinica: {
+      async findByPk(id) {
+        return Number(id) === 66
+          ? { id_clinica: 66, grupoClinicaId: 7, estado_clinica: true }
+          : null;
+      },
+    },
+    WebAuditEvent: { async create() {} },
+  };
+  const sequelize = { transaction: async (callback) => callback({ LOCK: { UPDATE: 'UPDATE' } }) };
+  const revoke = () => revokeInstallation({
+    actorId: 77,
+    installationId: installation.id,
+    models,
+    sequelize,
+    assertAccess: async () => {},
+  });
+
+  await assert.rejects(
+    revoke,
+    (error) => error.code === 'web_wordpress_installation_retirement_required'
+      && error.details.publication_ids[0] === publication.id
+  );
+  assert.equal(installation.status, 'connected');
+
+  publication.status = 'retired';
+  installation.reportedState = {
+    confirmed_routes: {
+      [publication.id]: {
+        status: 'retired',
+        route_prefix: publication.path,
+        artifact_hash: null,
+      },
+    },
+  };
+  await revoke();
+  assert.equal(installation.status, 'revoked');
+});
+
+test('revocar inspecciona todo el historial legítimo aunque supere las veinte rutas activas', async () => {
+  const installation = row({
+    id: crypto.randomUUID(),
+    scopeType: 'group',
+    clinicaId: null,
+    grupoClinicaId: 7,
+    siteUrl: 'https://cliente.example',
+    tokenHash: tokenHash(`ccw_${crypto.randomBytes(32).toString('base64url')}`),
+    tokenPrefix: 'ccw_active',
+    status: 'connected',
+    reportedState: { confirmed_routes: {} },
+    version: 1,
+  });
+  const publications = Array.from({ length: 21 }, (_, index) => row({
+    id: `11111111-1111-4111-8111-${String(index + 1).padStart(12, '0')}`,
+    projectId: `22222222-2222-4222-8222-${String(index + 1).padStart(12, '0')}`,
+    scopeType: 'group',
+    clinicaId: null,
+    grupoClinicaId: 7,
+    wordpressInstallationId: installation.id,
+    path: `/cita/historico-${index + 1}/`,
+    status: 'retired',
+  }));
+  publications.slice(0, -1).forEach((publication) => {
+    installation.reportedState.confirmed_routes[publication.id] = {
+      status: 'retired',
+      route_prefix: publication.path,
+      artifact_hash: null,
+    };
+  });
+  const models = {
+    WebWordpressInstallation: { async findByPk() { return installation; } },
+    WebPublication: { async findAll() { return publications; } },
+    WebAuditEvent: { async create() {} },
+  };
+  const sequelize = { transaction: async (callback) => callback({ LOCK: { UPDATE: 'UPDATE' } }) };
+  const revoke = () => revokeInstallation({
+    actorId: 77,
+    installationId: installation.id,
+    models,
+    sequelize,
+    assertAccess: async () => {},
+  });
+
+  await assert.rejects(
+    revoke,
+    (error) => error.code === 'web_wordpress_installation_retirement_required'
+      && error.details.publication_ids[0] === publications[20].id
+  );
+  assert.equal(installation.status, 'connected');
+
+  installation.reportedState.confirmed_routes[publications[20].id] = {
+    status: 'retired',
+    route_prefix: publications[20].path,
+    artifact_hash: null,
+  };
+  await revoke();
+  assert.equal(installation.status, 'revoked');
 });
 
 test('un direct histórico sin runtime hereda la medición válida del grupo', async () => {
@@ -839,6 +1025,7 @@ test('el estado deseado es firmado, estable y avanza secuencia solo al cambiar',
   installation.publicKeyId = descriptorService.key_id;
   const publication = row({
     id: 'publication-1', projectId: 'project-1', wordpressInstallationId: installation.id,
+    scopeType: 'clinic', clinicaId: 56, grupoClinicaId: null,
     status: 'publishing', activeArtifactId: null,
   });
   const deployment = row({
@@ -927,6 +1114,9 @@ test('rotación Ed25519 sirve old y current en paralelo sin self-bootstrap ni tr
         ? 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
         : 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
       projectId: artifact.projectId,
+      scopeType: 'clinic',
+      clinicaId: 56,
+      grupoClinicaId: null,
       path: '/cita/',
       wordpressInstallationId: id,
       status: 'publishing',
@@ -1074,6 +1264,9 @@ test('ACK v2 promueve publicKeyId bajo lock solo tras rutas y secuencia exactas'
   const publication = row({
     id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
     projectId: artifact.projectId,
+    scopeType: 'clinic',
+    clinicaId: 56,
+    grupoClinicaId: null,
     path: '/cita/',
     wordpressInstallationId: installation.id,
     status: 'publishing',
@@ -1206,6 +1399,9 @@ test('un primer despliegue WordPress fallido termina en retirada firmada y conse
   const publication = row({
     id: 'failed-publication-1',
     projectId: 'project-1',
+    scopeType: 'clinic',
+    clinicaId: 56,
+    grupoClinicaId: null,
     wordpressInstallationId: installation.id,
     status: 'failed',
     activeArtifactId: null,
@@ -1305,6 +1501,7 @@ test('fallback autenticado sirve solo el artefacto deseado de esa instalación',
   const env = { MARKETING_WEB_API_BASE_URL: 'https://crm.clinicaclick.com' };
   const publication = row({
     id: 'publication-db-1', projectId: artifact.projectId,
+    scopeType: 'clinic', clinicaId: 56, grupoClinicaId: null,
     wordpressInstallationId: installation.id, status: 'publishing', activeArtifactId: null,
   });
   const deployment = row({
@@ -1408,6 +1605,9 @@ test('un miss concurrente comparte una única carga y validación del bundle aut
   const publication = row({
     id: 'publication-concurrent-load',
     projectId: artifact.projectId,
+    scopeType: 'clinic',
+    clinicaId: 56,
+    grupoClinicaId: null,
     wordpressInstallationId: installation.id,
     status: 'publishing',
     activeArtifactId: null,
@@ -1495,6 +1695,9 @@ test('la caché autenticada aplica LRU por bytes sin retener filas y bundles dup
   const publications = new Map(artifacts.map((artifact, index) => [artifact.id, row({
     id: `publication-cache-${index}`,
     projectId: artifact.projectId,
+    scopeType: 'clinic',
+    clinicaId: 56,
+    grupoClinicaId: null,
     wordpressInstallationId: installation.id,
     status: 'publishing',
     activeArtifactId: null,
@@ -1628,6 +1831,9 @@ test('autorización de artefacto v2 consulta solo el hash solicitado y revalida 
   const env = { MARKETING_WEB_API_BASE_URL: 'https://crm.clinicaclick.com' };
   const installation = row({
     id: 'd6d6d9bb-093e-4a40-8465-5ebf9edcde44',
+    scopeType: 'clinic',
+    clinicaId: 56,
+    grupoClinicaId: null,
     status: 'connected',
   });
   const artifact = authenticatedArtifactFixture({
@@ -1638,6 +1844,9 @@ test('autorización de artefacto v2 consulta solo el hash solicitado y revalida 
   const publication = row({
     id: 'publication-directed',
     projectId: artifact.projectId,
+    scopeType: 'clinic',
+    clinicaId: 56,
+    grupoClinicaId: null,
     wordpressInstallationId: installation.id,
     status: 'publishing',
     activeArtifactId: null,
@@ -1705,6 +1914,268 @@ test('autorización de artefacto v2 consulta solo el hash solicitado y revalida 
   }), null, 'un artefacto preparado deja de ser descargable cuando otro deployment es el deseado');
 });
 
+test('el registro mixto bloquea clínicas por id efectivo estable y no por tipo de scope', async () => {
+  const installation = row({
+    id: '55555555-5555-4555-8555-555555555555',
+    scopeType: 'group',
+    clinicaId: null,
+    grupoClinicaId: 5,
+  });
+  const publications = [
+    row({ id: 'group-50', scopeType: 'group', grupoClinicaId: 5, configuration: { clinic_id: 50 } }),
+    row({ id: 'clinic-10', scopeType: 'clinic', clinicaId: 10, grupoClinicaId: null }),
+    row({ id: 'clinic-50', scopeType: 'clinic', clinicaId: 50, grupoClinicaId: null }),
+    row({ id: 'group-10', scopeType: 'group', grupoClinicaId: 5, configuration: { clinic_id: 10 } }),
+  ];
+  const clinicReads = [];
+  const transaction = { LOCK: { UPDATE: 'UPDATE' } };
+  const authorized = await filterAuthorizedWordpressPublications(installation, publications, {
+    models: {
+      Clinica: {
+        async findByPk(id, options) {
+          clinicReads.push({ id: Number(id), options });
+          return { id_clinica: Number(id), grupoClinicaId: 5, estado_clinica: true };
+        },
+      },
+    },
+    transaction,
+    lockClinics: true,
+  });
+
+  assert.deepEqual(authorized.map((publication) => publication.id), [
+    'clinic-10', 'group-10', 'clinic-50', 'group-50',
+  ]);
+  assert.deepEqual(clinicReads.map((entry) => entry.id), [10, 10, 50, 50]);
+  assert.ok(clinicReads.every((entry) => (
+    entry.options.transaction === transaction && entry.options.lock === transaction.LOCK.UPDATE
+  )));
+});
+
+test('WordPress de grupo revalida la clínica materializada en publicaciones de clínica y de grupo', async () => {
+  clearAuthenticatedArtifactCache();
+  const keys = signingOptions();
+  const descriptor = pluginKeyDescriptor(keys);
+  const env = { MARKETING_WEB_API_BASE_URL: 'https://crm.clinicaclick.com' };
+  const token = `ccw_${crypto.randomBytes(32).toString('base64url')}`;
+  const siteUrl = 'https://wordpress-grupo.example';
+  const installation = row({
+    id: '55555555-5555-4555-8555-555555555555',
+    scopeType: 'group',
+    clinicaId: null,
+    grupoClinicaId: 5,
+    siteUrl,
+    siteUrlHash: crypto.createHash('sha256').update(siteUrl).digest('hex'),
+    tokenHash: tokenHash(token),
+    tokenPrefix: token.slice(0, 12),
+    status: 'connected',
+    pluginVersion: '2.0.0-alpha.8',
+    capabilities: { multi_publication_v2: true },
+    reportedState: {},
+    desiredSequence: 0,
+    desiredStateHash: null,
+    publicKeyId: descriptor.key_id,
+    version: 1,
+  });
+  const artifact = authenticatedArtifactFixture({
+    id: 'artifact-group-inherited',
+    projectId: 'project-clinic-inherited',
+    body: '<h1>Landing heredada</h1>',
+  });
+  const publication = row({
+    id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+    projectId: artifact.projectId,
+    scopeType: 'clinic',
+    clinicaId: 59,
+    grupoClinicaId: null,
+    path: '/cita/hospitalet/',
+    wordpressInstallationId: installation.id,
+    status: 'publishing',
+    activeArtifactId: null,
+    lastGoodArtifactId: null,
+  });
+  const deployment = row({
+    id: 'deployment-group-inherited',
+    publicationId: publication.id,
+    artifactId: artifact.id,
+    status: 'running',
+    sequence: 1,
+    storage: authenticatedDbStorageDescriptor({ artifact, installationId: installation.id, env }),
+  });
+  const clinic = {
+    id_clinica: 59,
+    grupoClinicaId: 5,
+    estado_clinica: true,
+  };
+  const audits = [];
+  const models = {
+    Clinica: {
+      async findByPk(id) { return Number(id) === clinic.id_clinica ? { ...clinic } : null; },
+    },
+    WebWordpressInstallation: {
+      async findByPk(id) { return String(id) === installation.id ? installation : null; },
+    },
+    WebPublication: {
+      async findAll() { return [publication]; },
+      async count() { assert.fail('alpha.8 no necesita contar rutas heredadas'); },
+    },
+    WebPublicationDeployment: {
+      async findAll() { return [deployment]; },
+      async findOne() { return deployment; },
+    },
+    WebArtifact: {
+      async findByPk(id) { return String(id) === artifact.id ? artifact : null; },
+      async findOne({ where }) {
+        return where.artifactHash === artifact.artifactHash ? artifact : null;
+      },
+    },
+    IntakeConfig: { async findOne() { return null; } },
+    WebAuditEvent: { async create(value) { audits.push(value); } },
+  };
+  const sequelize = {
+    async transaction(callback) { return callback({ LOCK: { UPDATE: 'UPDATE' } }); },
+  };
+  const headers = {
+    authorization: `Bearer ${token}`,
+    pluginVersion: '2.0.0-alpha.8',
+  };
+
+  const desired = await getDesiredState({
+    installationId: installation.id,
+    headers,
+    requestId: 'req-group-inherited-desired',
+    models,
+    sequelize,
+    signingOptions: keys,
+    env,
+  });
+  const registry = desired.response.desired_state.registry_configuration;
+  assert.deepEqual(Object.keys(registry.routes), [publication.id]);
+  assert.equal(registry.routes[publication.id].route_prefix, publication.path);
+  assert.equal(registry.routes[publication.id].desired_artifact_hash, artifact.artifactHash);
+
+  const authorized = await authorizedArtifactForInstallation({
+    installation,
+    requestedHash: artifact.artifactHash,
+    callerSupportsMulti: true,
+    models,
+    env,
+  });
+  assert.equal(authorized.artifact.id, artifact.id);
+  assert.equal(authorized.publication.id, publication.id);
+
+  Object.assign(publication, {
+    scopeType: 'group',
+    clinicaId: null,
+    grupoClinicaId: 5,
+    configuration: { clinic_id: 59 },
+  });
+  const materializedDesired = await getDesiredState({
+    installationId: installation.id,
+    headers,
+    requestId: 'req-group-materialized-desired',
+    models,
+    sequelize,
+    signingOptions: keys,
+    env,
+  });
+  const materializedRegistry = materializedDesired.response.desired_state.registry_configuration;
+  assert.deepEqual(Object.keys(materializedRegistry.routes), [publication.id]);
+  assert.equal((await authorizedArtifactForInstallation({
+    installation,
+    requestedHash: artifact.artifactHash,
+    callerSupportsMulti: true,
+    models,
+    env,
+  })).publication.id, publication.id);
+
+  const route = {
+    publication_id: publication.id,
+    route_prefix: publication.path,
+    status: 'active',
+    active_artifact_hash: artifact.artifactHash,
+    desired_artifact_hash: artifact.artifactHash,
+    result: 'activated',
+    error_code: null,
+  };
+  const report = {
+    schema_version: 2,
+    event: 'sync_result',
+    request_id: 'req-group-inherited-ack',
+    plugin_version: '2.0.0-alpha.8',
+    site_hash: crypto.createHash('sha256').update(`${siteUrl}/`).digest('hex'),
+    status: 'active',
+    capabilities: { multi_publication_v2: true },
+    registry_sequence: materializedRegistry.sequence,
+    routes: { [publication.id]: route },
+    reported_at: new Date().toISOString(),
+  };
+  const accepted = await recordReport({
+    installationId: installation.id,
+    headers,
+    body: report,
+    requestId: 'req-group-inherited-ack',
+    models,
+    sequelize,
+    signingOptions: keys,
+    env,
+  });
+  assert.equal(accepted.confirms_desired, true);
+  assert.deepEqual(accepted.route_confirmations, { [publication.id]: true });
+  assert.equal(audits.length, 1);
+
+  clinic.grupoClinicaId = 8;
+  const revokedDesired = await getDesiredState({
+    installationId: installation.id,
+    headers,
+    requestId: 'req-group-inherited-revoked',
+    models,
+    sequelize,
+    signingOptions: keys,
+    env,
+  });
+  assert.deepEqual(revokedDesired.response.desired_state.registry_configuration.routes, {});
+  assert.equal(await authorizedArtifactForInstallation({
+    installation,
+    requestedHash: artifact.artifactHash,
+    callerSupportsMulti: true,
+    models,
+    env,
+  }), null);
+  await assert.rejects(
+    () => recordReport({
+      installationId: installation.id,
+      headers,
+      body: { ...report, reported_at: new Date().toISOString() },
+      requestId: 'req-group-inherited-stale-ack',
+      models,
+      sequelize,
+      signingOptions: keys,
+      env,
+    }),
+    (error) => error.code === 'web_installation_report_route_set_mismatch'
+  );
+  clinic.grupoClinicaId = 5;
+  clinic.estado_clinica = false;
+  const inactiveDesired = await getDesiredState({
+    installationId: installation.id,
+    headers,
+    requestId: 'req-group-materialized-inactive',
+    models,
+    sequelize,
+    signingOptions: keys,
+    env,
+  });
+  assert.deepEqual(inactiveDesired.response.desired_state.registry_configuration.routes, {});
+  assert.equal(await authorizedArtifactForInstallation({
+    installation,
+    requestedHash: artifact.artifactHash,
+    callerSupportsMulti: true,
+    models,
+    env,
+  }), null);
+  clearAuthenticatedArtifactCache();
+});
+
 test('el registro v2 es determinista y autoriza todos sus artefactos sin relajar la instalación', async () => {
   const keys = signingOptions();
   const env = { MARKETING_WEB_API_BASE_URL: 'https://crm.clinicaclick.com' };
@@ -1736,10 +2207,12 @@ test('el registro v2 es determinista y autoriza todos sus artefactos sin relajar
   const publications = [
     row({
       id: pilotId, projectId: pilotArtifact.projectId, path: '/cita/',
+      scopeType: 'clinic', clinicaId: 56, grupoClinicaId: null,
       wordpressInstallationId: installation.id, status: 'publishing', activeArtifactId: null,
     }),
     row({
       id: childId, projectId: childArtifact.projectId, path: '/cita/implantes/',
+      scopeType: 'clinic', clinicaId: 56, grupoClinicaId: null,
       wordpressInstallationId: installation.id, status: 'publishing', activeArtifactId: null,
     }),
   ];
@@ -1889,6 +2362,9 @@ test('poll v2 de 20 rutas carga solo metadata y nunca los bodies de WebArtifact'
     const publication = row({
       id: `00000000-0000-4000-8000-${suffix}`,
       projectId: artifact.projectId,
+      scopeType: 'clinic',
+      clinicaId: 56,
+      grupoClinicaId: null,
       path: index === 0 ? '/cita/' : `/cita/ruta-${index}/`,
       wordpressInstallationId: installation.id,
       status: 'publishing',
@@ -2143,8 +2619,22 @@ test('un downgrade alpha.7 con varias rutas queda outdated sin fallar por ambig�
       WebPublication: {
         async findAll() {
           return [
-            row({ id: crypto.randomUUID(), path: '/cita/', status: 'published' }),
-            row({ id: crypto.randomUUID(), path: '/cita/implantes/', status: 'published' }),
+            row({
+              id: crypto.randomUUID(),
+              scopeType: 'clinic',
+              clinicaId: 56,
+              grupoClinicaId: null,
+              path: '/cita/',
+              status: 'published',
+            }),
+            row({
+              id: crypto.randomUUID(),
+              scopeType: 'clinic',
+              clinicaId: 56,
+              grupoClinicaId: null,
+              path: '/cita/implantes/',
+              status: 'published',
+            }),
           ];
         },
       },
@@ -2207,6 +2697,9 @@ test('un sync_result v2 antiguo no confirma ni sobrescribe el registro vigente',
   const publication = row({
     id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
     projectId: artifact.projectId,
+    scopeType: 'clinic',
+    clinicaId: 56,
+    grupoClinicaId: null,
     path: '/cita/',
     wordpressInstallationId: installation.id,
     status: 'publishing',

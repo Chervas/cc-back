@@ -7,6 +7,7 @@ const {
   RENDERER_VERSION,
   compileWebArtifact,
   normalizeClinicSnapshot,
+  normalizeGoogleOpeningHours,
   safeAbsoluteBaseUrl,
   sha256,
 } = require('../lib/webArtifactCompiler');
@@ -18,6 +19,7 @@ const {
 } = require('./webProjects.service');
 const { assertWebPublishingEnabled } = require('../lib/marketingWebFeatureFlags');
 const { trustedRuntime: normalizeTrustedRuntime } = require('../lib/webMeasurementRuntime');
+const { isSafePublicAssetUrl } = require('../lib/webContent');
 
 class WebArtifactServiceError extends Error {
   constructor(code, message, status = 400, details = undefined) {
@@ -45,6 +47,7 @@ function serializeArtifact(row, { includeFiles = false } = {}) {
     artifact_hash: value.artifactHash,
     document_hash: value.documentHash,
     content_snapshot_hash: value.contentSnapshotHash,
+    clinic_snapshot_hash: value.clinicSnapshotHash || value.manifest?.clinic_snapshot_hash || null,
     runtime_config_hash: value.runtimeConfigHash,
     manifest: value.manifest,
     qa: value.qaReport,
@@ -55,25 +58,148 @@ function serializeArtifact(row, { includeFiles = false } = {}) {
   };
 }
 
-function clinicProjection(row) {
+function objectPayload(value) {
+  if (!value) return {};
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch (_error) {
+      return {};
+    }
+  }
+  return typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function meaningfulValue(value) {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'object') return Object.keys(value).length > 0;
+  return true;
+}
+
+function likelyTinyAvatar(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return true;
+  let decoded = raw.toLowerCase();
+  try {
+    decoded = decodeURIComponent(decoded);
+  } catch (_error) {
+    // A malformed percent sequence is handled by the URL validator later.
+  }
+  if (/(?:^|[\/_=-])(?:avatar|profile[-_]?photo)(?:[./_=-]|$)/i.test(decoded)) return true;
+  const dimensions = decoded.match(/(?:^|[^0-9])(\d{2,4})x(\d{2,4})(?:[^0-9]|$)/);
+  if (dimensions && Math.min(Number(dimensions[1]), Number(dimensions[2])) < 250) return true;
+  if (/(?:[?&](?:w|h|width|height|sz|size)=|[\/=](?:s|w|h))(\d{2,3})(?:[-&/?#]|$)/i.test(decoded)) {
+    const size = Number(decoded.match(/(?:[?&](?:w|h|width|height|sz|size)=|[\/=](?:s|w|h))(\d{2,3})(?:[-&/?#]|$)/i)?.[1]);
+    return Number.isFinite(size) && size < 250;
+  }
+  return false;
+}
+
+function clinicProjection(row, businessLocation = null) {
   const value = plain(row) || {};
+  const location = plain(businessLocation) || {};
+  const raw = objectPayload(location.raw_payload ?? location.rawPayload);
+  const storefront = objectPayload(raw.storefrontAddress || raw.address);
+  const addressLines = Array.isArray(storefront.addressLines)
+    ? storefront.addressLines.map((line) => String(line || '').trim()).filter(Boolean)
+    : [];
+  const explicitImage = String(value.url_avatar || '').trim();
+  // Provider media can change remotely and may contain people or clinical
+  // context without Clinicaclick's publication attestation. Never republish it
+  // automatically; only use the clinic's canonical, public, non-tiny image.
+  const image = isSafePublicAssetUrl(explicitImage) && !likelyTinyAvatar(explicitImage)
+    ? explicitImage
+    : null;
+  const explicitHours = value.horario_atencion;
+  const googleHours = objectPayload(raw.regularHours);
+  const hours = meaningfulValue(explicitHours) ? explicitHours : googleHours;
+  const explicitOpeningHours = normalizeGoogleOpeningHours(explicitHours);
   return normalizeClinicSnapshot({
     clinic_id: value.id_clinica,
     schema_type: 'Dentist',
     name: value.nombre_clinica,
     address: {
-      street_address: value.direccion,
-      postal_code: value.codigo_postal,
-      locality: value.ciudad,
-      region: value.provincia,
-      country: value.pais,
+      street_address: meaningfulValue(value.direccion) ? value.direccion : addressLines.join(', '),
+      postal_code: meaningfulValue(value.codigo_postal) ? value.codigo_postal : storefront.postalCode,
+      locality: meaningfulValue(value.ciudad) ? value.ciudad : storefront.locality,
+      region: meaningfulValue(value.provincia) ? value.provincia : storefront.administrativeArea,
+      country: meaningfulValue(value.pais) ? value.pais : storefront.regionCode,
     },
     phone: value.telefono_movil || value.telefono_fijo || value.telefono,
     email: value.email,
     website: value.url_web,
-    image: value.url_avatar,
-    hours: value.horario_atencion,
+    image,
+    hours,
+    opening_hours: explicitOpeningHours.length ? explicitOpeningHours : googleHours,
   });
+}
+
+async function resolveBusinessLocationForClinic(clinicRow, { models, transaction } = {}) {
+  if (!models?.ClinicBusinessLocation?.findAll) return null;
+  const clinic = plain(clinicRow) || {};
+  const clinicId = positiveInteger(clinic.id_clinica ?? clinic.id);
+  const groupId = positiveInteger(clinic.grupoClinicaId ?? clinic.grupo_clinica_id);
+  if (!clinicId) return null;
+
+  let selectedIds = [];
+  let groupMode = null;
+  if (groupId && models.GrupoClinica?.findByPk) {
+    const policy = plain(await models.GrupoClinica.findByPk(groupId, {
+      attributes: [
+        'id_grupo',
+        'business_profile_assignment_mode',
+        'business_profile_primary_location_id',
+      ],
+      transaction,
+    }));
+    groupMode = String(policy?.business_profile_assignment_mode || 'clinic').trim().toLowerCase();
+    if (groupMode === 'group') {
+      const primaryId = positiveInteger(policy?.business_profile_primary_location_id);
+      if (!primaryId) return null;
+      selectedIds = [primaryId];
+    } else if (models.GroupAssetClinicAssignment?.findAll) {
+      const assignments = await models.GroupAssetClinicAssignment.findAll({
+        where: {
+          grupoClinicaId: groupId,
+          clinicaId: clinicId,
+          assetType: 'google.business_profile',
+        },
+        attributes: ['assetId'],
+        order: [['assetId', 'ASC']],
+        transaction,
+        raw: true,
+      });
+      selectedIds = [...new Set(assignments
+        .map((row) => positiveInteger(plain(row)?.assetId))
+        .filter(Boolean))];
+      // More than one explicit mapping is not a unique source of truth.
+      if (selectedIds.length > 1) return null;
+    }
+  }
+
+  const where = {
+    is_active: true,
+    is_verified: true,
+    is_suspended: false,
+    ...(selectedIds.length === 1 ? { id: selectedIds[0] } : { clinica_id: clinicId }),
+  };
+  const rows = await models.ClinicBusinessLocation.findAll({
+    where,
+    order: [['id', 'ASC']],
+    limit: 2,
+    transaction,
+  });
+  // Never guess between multiple active fichas. A group primary or an explicit
+  // clinic assignment narrows the query to one mapping; otherwise a unique
+  // direct location is required before GBP may complete address/hours.
+  if (rows.length !== 1) return null;
+  const selected = plain(rows[0]);
+  if (selectedIds.length === 1 && positiveInteger(selected?.id) !== selectedIds[0]) return null;
+  if (groupMode === 'group' && selectedIds.length !== 1) return null;
+  return rows[0];
 }
 
 function isActiveClinic(row) {
@@ -183,6 +309,7 @@ async function auditCompile({ models, transaction, project, actorId, requestId, 
       environment: artifact.environment,
       base_url_hash: artifact.baseUrlHash,
       runtime_config_hash: artifact.runtimeConfigHash,
+      clinic_snapshot_hash: artifact.clinicSnapshotHash,
     },
   }, { transaction });
 }
@@ -301,19 +428,10 @@ async function compileRevision({
       runtimeReconciliation,
       runtimeConfigHash,
     });
-    const existing = await models.WebArtifact.findOne({
-      where: {
-        revisionId: revision.id,
-        rendererVersion,
-        environment,
-        baseUrlHash,
-        runtimeConfigHash,
-      },
+    const businessLocation = await resolveBusinessLocationForClinic(clinic, {
+      models,
       transaction,
-      lock: transaction.LOCK.UPDATE,
     });
-    if (existing) return serializeArtifact(existing, { includeFiles: true });
-
     const compiled = compileWebArtifact({
       document: revision.document,
       contentSnapshot: revision.contentSnapshot,
@@ -321,12 +439,27 @@ async function compileRevision({
       revisionId: revision.id,
       baseUrl,
       environment,
-      clinicSnapshot: clinicProjection(clinic),
+      clinicSnapshot: clinicProjection(clinic, businessLocation),
       intakeEndpoint: body.intake_endpoint
         || (environment === 'production' ? '/_clinicaclick/intake' : '/api/intake/web'),
       rendererVersion,
       trustedRuntime: normalizedRuntime,
     });
+    const clinicSnapshotHash = compiled.manifest.clinic_snapshot_hash;
+    const existing = await models.WebArtifact.findOne({
+      where: {
+        revisionId: revision.id,
+        rendererVersion,
+        environment,
+        baseUrlHash,
+        runtimeConfigHash,
+        clinicSnapshotHash,
+      },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (existing) return serializeArtifact(existing, { includeFiles: true });
+
     const artifact = await models.WebArtifact.create({
       id: crypto.randomUUID(),
       projectId: project.id,
@@ -339,6 +472,7 @@ async function compileRevision({
       artifactHash: compiled.artifact_hash,
       documentHash: revision.documentHash,
       contentSnapshotHash: compiled.manifest.content_snapshot_hash,
+      clinicSnapshotHash,
       manifest: compiled.manifest,
       files: compiled.files,
       qaReport: compiled.qa,
@@ -402,5 +536,6 @@ module.exports = {
   getArtifact,
   listProjectArtifacts,
   resolveClinicForProject,
+  resolveBusinessLocationForClinic,
   serializeArtifact,
 };

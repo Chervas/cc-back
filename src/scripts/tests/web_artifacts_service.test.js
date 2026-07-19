@@ -6,7 +6,7 @@ process.env.MARKETING_WEB_PUBLISHING_ENABLED = 'false';
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { createBlankWebDocument } = require('../../services/webProjects.service');
-const { compileRevision } = require('../../services/webArtifacts.service');
+const { clinicProjection, compileRevision } = require('../../services/webArtifacts.service');
 const { trustedRuntime } = require('../../lib/webMeasurementRuntime');
 
 function row(value) {
@@ -16,7 +16,14 @@ function row(value) {
   };
 }
 
-function fixture({ existing = null, group = false, clinicGroupId = 7, clinicActive = true } = {}) {
+function fixture({
+  existing = null,
+  group = false,
+  clinicGroupId = 7,
+  clinicActive = true,
+  clinicOverrides = {},
+  businessLocation = null,
+} = {}) {
   const events = [];
   const document = createBlankWebDocument({ name: 'Landing de prueba', locale: 'es-ES' });
   const project = row({
@@ -71,7 +78,16 @@ function fixture({ existing = null, group = false, clinicGroupId = 7, clinicActi
           email: 'hola@example.test',
           url_web: 'https://example.test/',
           horario_atencion: 'Lunes a viernes',
+          ...clinicOverrides,
         });
+      },
+    },
+    ClinicBusinessLocation: {
+      findAll: async (options) => {
+        events.push({ event: 'business-location:findAll', options });
+        if (!businessLocation) return [];
+        if (options.where.id && Number(options.where.id) !== Number(businessLocation.id)) return [];
+        return [row(businessLocation)];
       },
     },
     GrupoClinica: {
@@ -94,6 +110,7 @@ function fixture({ existing = null, group = false, clinicGroupId = 7, clinicActi
           && storedArtifact.environment === where.environment
           && storedArtifact.baseUrlHash === where.baseUrlHash
           && storedArtifact.runtimeConfigHash === where.runtimeConfigHash
+          && storedArtifact.clinicSnapshotHash === where.clinicSnapshotHash
         ) ? storedArtifact : null;
       },
       create: async (values) => {
@@ -132,6 +149,269 @@ test('compila preview aprobado, bloquea en orden proyecto->revisión y audita', 
   assert.deepEqual(state.events.slice(-2), ['artifact:create', 'audit:create']);
 });
 
+test('completa SEO/Schema con la ficha verificada única sin pisar datos canónicos', async () => {
+  const state = fixture({
+    clinicOverrides: {
+      direccion: 'Dirección canónica 1',
+      codigo_postal: '',
+      ciudad: null,
+      provincia: '',
+      pais: 'España',
+      horario_atencion: null,
+      url_avatar: 'https://media.clinicaclick.com/avatars/clinic-60x60.webp',
+    },
+    businessLocation: {
+      id: 44,
+      clinica_id: 66,
+      raw_payload: {
+        storefrontAddress: {
+          addressLines: ['Dirección de Google 9'],
+          postalCode: '08022',
+          locality: 'Barcelona',
+          administrativeArea: 'Catalunya',
+          regionCode: 'ES',
+        },
+        regularHours: {
+          periods: [{
+            openDay: 'MONDAY',
+            openTime: { hours: 9 },
+            closeDay: 'MONDAY',
+            closeTime: { hours: 18, minutes: 30 },
+          }],
+        },
+        clinicaclick_media_items: [{
+          mediaFormat: 'VIDEO',
+          googleUrl: 'https://media.clinicaclick.com/google/video-cover.webp',
+          locationAssociation: { category: 'COVER' },
+        }, {
+          mediaFormat: 'PHOTO',
+          googleUrl: 'https://media.clinicaclick.com/google/customer-cover.webp',
+          locationAssociation: { category: 'COVER' },
+          attribution: { profileName: 'Contenido aportado por tercero' },
+        }, {
+          mediaFormat: 'PHOTO',
+          googleUrl: 'https://media.clinicaclick.com/google/tiny-exterior.webp',
+          dimensions: { widthPixels: 60, heightPixels: 60 },
+          locationAssociation: { category: 'EXTERIOR' },
+        }, {
+          mediaFormat: 'PHOTO',
+          googleUrl: 'https://media.clinicaclick.com/google/interior.webp',
+          dimensions: { widthPixels: 1600, heightPixels: 900 },
+          locationAssociation: { category: 'INTERIOR' },
+          createTime: '2026-07-18T10:00:00Z',
+        }, {
+          mediaFormat: 'PHOTO',
+          googleUrl: 'https://media.clinicaclick.com/google/additional.webp',
+          dimensions: { widthPixels: 2400, heightPixels: 1600 },
+          locationAssociation: { category: 'ADDITIONAL' },
+        }],
+      },
+    },
+  });
+
+  const result = await compileRevision({
+    actorId: 1,
+    revisionId: state.revision.id,
+    body: { environment: 'preview', base_url: 'https://preview.sites.clinicaclick.com' },
+    models: state.models,
+    sequelize: state.sequelize,
+  });
+  const html = result.files['index.html'];
+  const structuredData = JSON.parse(html.match(/<script type="application\/ld\+json">([^<]+)<\/script>/)?.[1] || '{}');
+  const schemaClinic = structuredData['@graph']?.find((entry) => entry['@type'] === 'Dentist');
+  const locationLookup = state.events.find((entry) => entry?.event === 'business-location:findAll');
+  assert.deepEqual(locationLookup.options.where, {
+    clinica_id: 66,
+    is_active: true,
+    is_verified: true,
+    is_suspended: false,
+  });
+  assert.deepEqual(locationLookup.options.order, [['id', 'ASC']]);
+  assert.equal(locationLookup.options.limit, 2);
+  assert.deepEqual(schemaClinic.address, {
+    '@type': 'PostalAddress',
+    streetAddress: 'Dirección canónica 1',
+    addressLocality: 'Barcelona',
+    addressRegion: 'Catalunya',
+    postalCode: '08022',
+    addressCountry: 'España',
+  });
+  assert.deepEqual(schemaClinic.openingHoursSpecification, [{
+    '@type': 'OpeningHoursSpecification',
+    dayOfWeek: 'https://schema.org/Monday',
+    opens: '09:00',
+    closes: '18:30',
+  }]);
+  assert.equal(schemaClinic.image, undefined);
+  assert.doesNotMatch(html, /<meta property="og:image"/);
+  assert.doesNotMatch(html, /customer-cover|tiny-exterior|interior\.webp|additional\.webp|video-cover/);
+  assert.equal(result.renderer_version, 'clinicaclick-web-renderer/1.7.0');
+});
+
+test('los campos canónicos explícitos prevalecen y un horario textual solo usa periodos Google verificados para Schema', () => {
+  const projection = clinicProjection({
+    id_clinica: 66,
+    nombre_clinica: 'Clínica canónica',
+    direccion: 'Calle Propia 1',
+    codigo_postal: '28001',
+    ciudad: 'Madrid',
+    provincia: 'Madrid',
+    pais: 'España',
+    url_avatar: 'https://media.clinicaclick.com/clinics/photo-1200.webp',
+    horario_atencion: 'Lunes a viernes de 9:00 a 18:00',
+    estado_clinica: true,
+  }, {
+    raw_payload: {
+      storefrontAddress: {
+        addressLines: ['Calle Google 2'],
+        postalCode: '08001',
+        locality: 'Barcelona',
+        administrativeArea: 'Catalunya',
+        regionCode: 'ES',
+      },
+      regularHours: {
+        periods: [{
+          openDay: 'MONDAY',
+          openTime: { hours: 8 },
+          closeDay: 'MONDAY',
+          closeTime: { hours: 20 },
+        }],
+      },
+      clinicaclick_media_items: [{
+        mediaFormat: 'PHOTO',
+        googleUrl: 'https://media.clinicaclick.com/google/cover.webp',
+        locationAssociation: { category: 'COVER' },
+      }],
+    },
+  });
+
+  assert.deepEqual(projection.address, {
+    street_address: 'Calle Propia 1',
+    locality: 'Madrid',
+    region: 'Madrid',
+    postal_code: '28001',
+    country: 'España',
+  });
+  assert.equal(projection.image, 'https://media.clinicaclick.com/clinics/photo-1200.webp');
+  assert.equal(projection.hours, 'Lunes a viernes de 9:00 a 18:00');
+  assert.deepEqual(projection.opening_hours, [{
+    '@type': 'OpeningHoursSpecification',
+    dayOfWeek: 'https://schema.org/Monday',
+    opens: '08:00',
+    closes: '20:00',
+  }]);
+
+  const structuredProjection = clinicProjection({
+    id_clinica: 66,
+    nombre_clinica: 'Clínica canónica',
+    horario_atencion: {
+      periods: [{
+        openDay: 'TUESDAY',
+        openTime: { hours: 10 },
+        closeDay: 'TUESDAY',
+        closeTime: { hours: 14 },
+      }],
+    },
+  }, {
+    raw_payload: {
+      regularHours: {
+        periods: [{
+          openDay: 'MONDAY',
+          openTime: { hours: 8 },
+          closeDay: 'MONDAY',
+          closeTime: { hours: 20 },
+        }],
+      },
+    },
+  });
+  assert.deepEqual(structuredProjection.opening_hours, [{
+    '@type': 'OpeningHoursSpecification',
+    dayOfWeek: 'https://schema.org/Tuesday',
+    opens: '10:00',
+    closes: '14:00',
+  }]);
+});
+
+test('SEO usa la ficha primaria configurada y no la sincronizada más recientemente', async () => {
+  const state = fixture({
+    clinicOverrides: {
+      direccion: '',
+      codigo_postal: '',
+      ciudad: '',
+      provincia: '',
+      horario_atencion: null,
+    },
+  });
+  const locations = [{
+    id: 44,
+    clinica_id: 66,
+    last_synced_at: '2026-07-19T12:00:00.000Z',
+    raw_payload: {
+      storefrontAddress: { addressLines: ['Ficha reciente incorrecta 44'] },
+    },
+  }, {
+    id: 45,
+    clinica_id: 66,
+    last_synced_at: '2026-07-18T12:00:00.000Z',
+    raw_payload: {
+      storefrontAddress: {
+        addressLines: ['Ficha primaria correcta 45'],
+        postalCode: '08045',
+        locality: 'Barcelona',
+        administrativeArea: 'Catalunya',
+        regionCode: 'ES',
+      },
+    },
+  }];
+  state.models.GrupoClinica.findByPk = async () => ({
+    id_grupo: 7,
+    business_profile_assignment_mode: 'group',
+    business_profile_primary_location_id: 45,
+  });
+  state.models.ClinicBusinessLocation.findAll = async (options) => {
+    assert.equal(options.where.id, 45);
+    return locations.filter((location) => Number(location.id) === Number(options.where.id)).map(row);
+  };
+  const result = await compileRevision({
+    actorId: 1,
+    revisionId: state.revision.id,
+    body: { environment: 'preview', base_url: 'https://preview.sites.clinicaclick.com' },
+    models: state.models,
+    sequelize: state.sequelize,
+  });
+  assert.match(result.files['index.html'], /Ficha primaria correcta 45/);
+  assert.doesNotMatch(result.files['index.html'], /Ficha reciente incorrecta 44/);
+});
+
+test('SEO no adivina entre dos fichas activas sin una selección única', async () => {
+  const state = fixture({
+    clinicOverrides: {
+      direccion: '',
+      codigo_postal: '',
+      ciudad: '',
+      provincia: '',
+      horario_atencion: null,
+    },
+  });
+  state.models.ClinicBusinessLocation.findAll = async () => [row({
+    id: 44,
+    clinica_id: 66,
+    raw_payload: { storefrontAddress: { addressLines: ['Ficha ambigua 44'] } },
+  }), row({
+    id: 45,
+    clinica_id: 66,
+    raw_payload: { storefrontAddress: { addressLines: ['Ficha ambigua 45'] } },
+  })];
+  const result = await compileRevision({
+    actorId: 1,
+    revisionId: state.revision.id,
+    body: { environment: 'preview', base_url: 'https://preview.sites.clinicaclick.com' },
+    models: state.models,
+    sequelize: state.sequelize,
+  });
+  assert.doesNotMatch(result.files['index.html'], /Ficha ambigua 44|Ficha ambigua 45/);
+});
+
 test('una segunda compilación del mismo target es idempotente', async () => {
   const state = fixture();
   const payload = {
@@ -145,6 +425,101 @@ test('una segunda compilación del mismo target es idempotente', async () => {
   const second = await compileRevision(payload);
   assert.equal(second.id, first.id);
   assert.equal(state.events.filter((event) => event === 'artifact:create').length, 1);
+});
+
+test('un proyecto de grupo genera artefactos distintos por clínica y no reutiliza SEO ajeno', async () => {
+  const state = fixture({ group: true });
+  state.revision.document.integrations.intake_config_id = '12';
+  state.revision.contentSnapshot.intake_config = {
+    id: '12',
+    scope: { type: 'group', id: 7, inherited: false },
+  };
+  state.models.IntakeConfig.findByPk = async () => ({
+    id: 12,
+    assignment_scope: 'group',
+    group_id: 7,
+    config: { locations: [{ id: 66 }, { id: 67 }] },
+  });
+  state.models.Clinica.findByPk = async (id) => row({
+    id_clinica: Number(id),
+    grupoClinicaId: 7,
+    estado_clinica: true,
+    nombre_clinica: Number(id) === 66 ? 'Clínica A' : 'Clínica B',
+    direccion: Number(id) === 66 ? 'Calle A 1' : 'Calle B 2',
+    codigo_postal: Number(id) === 66 ? '08001' : '08002',
+    ciudad: 'Barcelona',
+    provincia: 'Barcelona',
+    pais: 'España',
+    telefono: Number(id) === 66 ? '+34930000066' : '+34930000067',
+    url_web: 'https://example.test/',
+  });
+  const base = {
+    actorId: 1,
+    revisionId: state.revision.id,
+    body: {
+      environment: 'preview',
+      base_url: 'https://preview.sites.clinicaclick.com',
+      clinic_id: 66,
+    },
+    models: state.models,
+    sequelize: state.sequelize,
+  };
+  const first = await compileRevision(base);
+  const second = await compileRevision({
+    ...base,
+    body: { ...base.body, clinic_id: 67 },
+  });
+  assert.notEqual(first.id, second.id);
+  assert.notEqual(first.clinic_snapshot_hash, second.clinic_snapshot_hash);
+  assert.notEqual(first.artifact_hash, second.artifact_hash);
+  assert.match(first.files['index.html'], /Calle A 1/);
+  assert.doesNotMatch(first.files['index.html'], /Calle B 2/);
+  assert.match(second.files['index.html'], /Calle B 2/);
+  assert.doesNotMatch(second.files['index.html'], /Calle A 1/);
+  assert.equal(state.events.filter((event) => event === 'artifact:create').length, 2);
+});
+
+test('un cambio efectivo de dirección de la ficha crea un artefacto nuevo', async () => {
+  const state = fixture({
+    clinicOverrides: { direccion: '', codigo_postal: '', ciudad: '', provincia: '' },
+    businessLocation: {
+      clinica_id: 66,
+      raw_payload: {
+        storefrontAddress: {
+          addressLines: ['Calle Google 1'],
+          postalCode: '08001',
+          locality: 'Barcelona',
+          administrativeArea: 'Catalunya',
+          regionCode: 'ES',
+        },
+      },
+    },
+  });
+  const payload = {
+    actorId: 1,
+    revisionId: state.revision.id,
+    body: { environment: 'preview', base_url: 'https://preview.sites.clinicaclick.com' },
+    models: state.models,
+    sequelize: state.sequelize,
+  };
+  const first = await compileRevision(payload);
+  state.models.ClinicBusinessLocation.findAll = async () => [row({
+    clinica_id: 66,
+    raw_payload: {
+      storefrontAddress: {
+        addressLines: ['Calle Google 99'],
+        postalCode: '08099',
+        locality: 'Barcelona',
+        administrativeArea: 'Catalunya',
+        regionCode: 'ES',
+      },
+    },
+  })];
+  const second = await compileRevision(payload);
+  assert.notEqual(first.id, second.id);
+  assert.notEqual(first.clinic_snapshot_hash, second.clinic_snapshot_hash);
+  assert.match(first.files['index.html'], /Calle Google 1/);
+  assert.match(second.files['index.html'], /Calle Google 99/);
 });
 
 test('producción permanece cerrada mientras el gate de publicación está apagado', async () => {

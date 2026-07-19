@@ -24,6 +24,8 @@ const {
   scopeColumns,
 } = require('./webProjects.service');
 const {
+  MAX_WORDPRESS_PUBLICATIONS,
+  MAX_WORDPRESS_PUBLICATION_HISTORY,
   WebPublicationServiceError,
   normalizeSiteUrl,
 } = require('./webPublications.service');
@@ -42,13 +44,16 @@ const {
   webArtifactBundleFootprintBytes,
 } = require('../lib/webArtifactBudget');
 const { verifyWordpressSiteClaim } = require('./webWordpressSiteClaim.service');
+const {
+  clinicMembership,
+  filterAuthorizedWordpressPublications,
+} = require('./webWordpressScope.service');
 
 const INSTALLATION_TOKEN_PREFIX = 'ccw_';
 const DEFAULT_SITE_CLAIM_TTL_SECONDS = 24 * 60 * 60;
 const REPORT_EVENTS = new Set(['sync_result', 'sync_failed', 'heartbeat', 'local_rollback']);
 const REPORT_STATUSES = new Set(['empty', 'active', 'retired']);
 const MAX_REPORT_BYTES = 32 * 1024;
-const MAX_WORDPRESS_PUBLICATIONS = 20;
 const MAX_WORDPRESS_V2_UNIQUE_FILES = 400;
 const MAX_WORDPRESS_V2_DOWNLOAD_REQUESTS = 500;
 const MAX_WORDPRESS_V2_CONTROL_BYTES = 768 * 1024;
@@ -313,6 +318,12 @@ function scopeWhere(scope) {
     : { scopeType: 'group', grupoClinicaId: scope.id };
 }
 
+async function inheritedWordpressGroupId(scope, { models, transaction = null } = {}) {
+  if (scope.type !== 'clinic') return null;
+  const membership = await clinicMembership(scope.id, { models, transaction });
+  return membership?.active ? membership.group_id : null;
+}
+
 function issueInstallationToken() {
   return `${INSTALLATION_TOKEN_PREFIX}${crypto.randomBytes(32).toString('base64url')}`;
 }
@@ -501,6 +512,7 @@ function signingKeyTransitionForInstallation({
 
 function serializeInstallation(row, metadata = {}) {
   const value = plain(row);
+  const inherited = metadata.inherited_from_group === true;
   const stagedTokenExpiresAt = value.nextTokenExpiresAt ? new Date(value.nextTokenExpiresAt) : null;
   const stagedTokenExpired = Boolean(
     value.nextTokenHash
@@ -515,32 +527,39 @@ function serializeInstallation(row, metadata = {}) {
       id: Number(value.scopeType === 'clinic' ? value.clinicaId : value.grupoClinicaId),
     },
     site_url: value.siteUrl,
-    site_claim: {
-      claimed: /^[a-f0-9]{64}$/.test(String(value.claimedSiteHash || '')),
-      challenge_pending: Boolean(value.siteClaimTokenHash && value.siteClaimExpiresAt),
-      challenge_expires_at: value.siteClaimExpiresAt || null,
-      claimed_at: value.siteClaimedAt || null,
-    },
-    token_prefix: value.tokenPrefix,
-    token_rotation: value.nextTokenHash ? {
-      pending: !stagedTokenExpired,
-      expired: stagedTokenExpired,
-      token_prefix: value.nextTokenPrefix || null,
-      issued_at: value.nextTokenIssuedAt || null,
-      expires_at: value.nextTokenExpiresAt || null,
-    } : { pending: false },
     status: value.status,
     plugin_version: value.pluginVersion || null,
     capabilities: value.capabilities || {},
-    reported_state: value.reportedState || {},
-    public_key_id: value.publicKeyId,
     last_seen_at: value.lastSeenAt || null,
-    last_artifact_hash: value.lastArtifactHash || null,
-    desired_sequence: Number(value.desiredSequence || 0),
+    inherited_from_group: inherited,
+    source_scope: {
+      type: value.scopeType,
+      id: Number(value.scopeType === 'clinic' ? value.clinicaId : value.grupoClinicaId),
+    },
     version: Number(value.version),
-    revoked_at: value.revokedAt || null,
     created_at: value.created_at,
     updated_at: value.updated_at,
+    ...(!inherited ? {
+      site_claim: {
+        claimed: /^[a-f0-9]{64}$/.test(String(value.claimedSiteHash || '')),
+        challenge_pending: Boolean(value.siteClaimTokenHash && value.siteClaimExpiresAt),
+        challenge_expires_at: value.siteClaimExpiresAt || null,
+        claimed_at: value.siteClaimedAt || null,
+      },
+      token_prefix: value.tokenPrefix,
+      token_rotation: value.nextTokenHash ? {
+        pending: !stagedTokenExpired,
+        expired: stagedTokenExpired,
+        token_prefix: value.nextTokenPrefix || null,
+        issued_at: value.nextTokenIssuedAt || null,
+        expires_at: value.nextTokenExpiresAt || null,
+      } : { pending: false },
+      reported_state: value.reportedState || {},
+      public_key_id: value.publicKeyId,
+      last_artifact_hash: value.lastArtifactHash || null,
+      desired_sequence: Number(value.desiredSequence || 0),
+      revoked_at: value.revokedAt || null,
+    } : {}),
     ...(Number.isSafeInteger(metadata.publication_count) ? {
       publication_count: metadata.publication_count,
       publication_limit: MAX_WORDPRESS_PUBLICATIONS,
@@ -714,9 +733,18 @@ async function createInstallation({
 async function listInstallations({ actorId, query = {}, models = db, assertAccess = assertScopeAccess } = {}) {
   const scope = normalizeScope(query);
   await assertAccess(actorId, scope, 'marketing.web.view', { models });
+  const inheritedGroupId = await inheritedWordpressGroupId(scope, { models });
+  const visibleScope = inheritedGroupId
+    ? {
+        [Op.or]: [
+          scopeWhere(scope),
+          { scopeType: 'group', grupoClinicaId: inheritedGroupId },
+        ],
+      }
+    : scopeWhere(scope);
   const rows = await models.WebWordpressInstallation.findAll({
     where: {
-      ...scopeWhere(scope),
+      ...visibleScope,
       ...(query.include_revoked === 'true' ? {} : { status: { [Op.ne]: 'revoked' } }),
     },
     order: [['created_at', 'DESC'], ['id', 'ASC']],
@@ -750,6 +778,9 @@ async function listInstallations({ actorId, query = {}, models = db, assertAcces
     publication_count: counts.get(String(plain(row).id)) || 0,
     released_publication_tombstones: tombstones.get(String(plain(row).id)) || 0,
     route_history_count: routeHistory.get(String(plain(row).id)) || 0,
+    inherited_from_group: scope.type === 'clinic'
+      && plain(row).scopeType === 'group'
+      && Number(plain(row).grupoClinicaId) === inheritedGroupId,
   }));
 }
 
@@ -884,6 +915,27 @@ async function revokeInstallation({
     });
     if (!locked) throw new WebPublicationServiceError('web_wordpress_installation_not_found', 'La instalación no existe.', 404);
     if (locked.status !== 'revoked') {
+      const publications = await installationPublications(locked, {
+        models,
+        transaction,
+        lock: true,
+        allowEmpty: true,
+        maxPublications: MAX_WORDPRESS_PUBLICATION_HISTORY,
+      });
+      const unreleased = publications.filter((row) => (
+        !isReleasedWordpressPublication(plain(locked), plain(row))
+      ));
+      if (unreleased.length) {
+        throw new WebPublicationServiceError(
+          'web_wordpress_installation_retirement_required',
+          'Retira y confirma todas las landings antes de desconectar este WordPress.',
+          409,
+          {
+            publication_ids: unreleased.map((row) => String(plain(row).id)),
+            next_action: 'retire_and_confirm_wordpress_publications',
+          }
+        );
+      }
       await locked.update({
         status: 'revoked',
         claimedSiteHash: null,
@@ -1250,6 +1302,7 @@ async function installationPublications(installation, {
   lock = false,
   excludeReleasedRetired = false,
   allowEmpty = false,
+  maxPublications = MAX_WORDPRESS_PUBLICATIONS,
 } = {}) {
   const rows = await models.WebPublication.findAll({
     where: { wordpressInstallationId: installation.id },
@@ -1267,7 +1320,7 @@ async function installationPublications(installation, {
       409
     );
   }
-  if (publications.length > MAX_WORDPRESS_PUBLICATIONS) {
+  if (publications.length > maxPublications) {
     throw new WebPublicationServiceError(
       'web_installation_publication_limit_exceeded',
       'La instalación supera el máximo seguro de publicaciones.',
@@ -1280,7 +1333,19 @@ async function installationPublications(installation, {
 async function publicationDesiredState(installation, {
   models = db, env = process.env, transaction = null, lock = false,
 } = {}) {
-  const publications = await installationPublications(installation, { models, transaction, lock });
+  const rows = await installationPublications(installation, { models, transaction, lock });
+  const publications = await filterAuthorizedWordpressPublications(installation, rows, {
+    models,
+    transaction,
+    lockClinics: lock,
+  });
+  if (publications.length === 0) {
+    throw new WebPublicationServiceError(
+      'web_installation_publication_not_configured',
+      'La instalación todavía no tiene una publicación autorizada configurada.',
+      409
+    );
+  }
   if (publications.length > 1) {
     throw new WebPublicationServiceError(
       'web_installation_publication_ambiguous',
@@ -1294,12 +1359,17 @@ async function publicationDesiredState(installation, {
 async function publicationDesiredStates(installation, {
   models = db, env = process.env, transaction = null, lock = false,
 } = {}) {
-  const publications = await installationPublications(installation, {
+  const rows = await installationPublications(installation, {
     models,
     transaction,
     lock,
     excludeReleasedRetired: true,
     allowEmpty: true,
+  });
+  const publications = await filterAuthorizedWordpressPublications(installation, rows, {
+    models,
+    transaction,
+    lockClinics: lock,
   });
   if (publications.length > 1 && !supportsMultiPublication(installation)) {
     throw new WebPublicationServiceError(
@@ -1578,7 +1648,7 @@ async function authorizedArtifactForInstallation({
   const deploymentRows = deployments.map(plain);
   const publicationIds = [...new Set(deploymentRows.map((deployment) => String(deployment.publicationId)))];
   if (!publicationIds.length) return null;
-  const publications = await models.WebPublication.findAll({
+  const publicationRows = await models.WebPublication.findAll({
     where: {
       id: { [Op.in]: publicationIds },
       wordpressInstallationId: installation.id,
@@ -1586,10 +1656,13 @@ async function authorizedArtifactForInstallation({
     },
     order: [['id', 'ASC']],
   });
+  const publications = await filterAuthorizedWordpressPublications(installation, publicationRows, {
+    models,
+  });
 
   for (const publicationRow of publications) {
     const publication = plain(publicationRow);
-    if (publication.projectId !== artifact.projectId) continue;
+    if (String(publication.projectId) !== String(artifact.projectId)) continue;
     const candidates = deploymentRows.filter((deployment) => (
       String(deployment.publicationId) === String(publication.id)
     ));

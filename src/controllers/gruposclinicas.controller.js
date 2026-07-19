@@ -301,7 +301,14 @@ exports.updateGroup = async (req, res) => {
     return res.json(updated);
   } catch (error) {
     console.error("Error updating group:", error);
-    return res.status(500).json({ message: 'Error updating group', error: error.message });
+    const status = Number.isInteger(Number(error?.status))
+      ? Math.max(400, Math.min(599, Number(error.status)))
+      : 500;
+    return res.status(status).json({
+      message: error?.message || 'Error updating group',
+      error: error?.code || 'GROUP_UPDATE_FAILED',
+      ...(error?.details ? { details: error.details } : {}),
+    });
   }
 };
 
@@ -323,12 +330,19 @@ exports.deleteGroup = async (req, res) => {
     }
     const access = await resolveGroupResourceAccess(userId, groupId);
     if (!access.ownerWrite) return sendGroupScopeForbidden(res);
-    await group.destroy();
+    await groupAssetsService.deleteGroupSafely(groupId);
     console.log("Grupo eliminado");
     res.json({ message: 'Group deleted' });
   } catch (error) {
     console.error("Error deleting group:", error);
-    res.status(500).json({ message: 'Error deleting group', error: error.message });
+    const status = Number.isInteger(Number(error?.status))
+      ? Math.max(400, Math.min(599, Number(error.status)))
+      : 500;
+    res.status(status).json({
+      message: error?.message || 'Error deleting group',
+      error: error?.code || 'GROUP_DELETE_FAILED',
+      ...(error?.details ? { details: error.details } : {}),
+    });
   }
 };
 

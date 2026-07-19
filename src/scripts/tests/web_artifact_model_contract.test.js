@@ -25,6 +25,7 @@ async function main() {
       artifactHash: 'b'.repeat(64),
       documentHash: 'c'.repeat(64),
       contentSnapshotHash: 'd'.repeat(64),
+      clinicSnapshotHash: 'f'.repeat(64),
       manifest: { schema_version: 1 },
       files: { 'index.html': '<!doctype html>' },
       qaReport: { deterministic: true },
