@@ -274,6 +274,11 @@ function siteDefaultsFromIntake(record) {
     source_scope_id: intakeId
       ? positiveInteger(raw.assignment_scope === 'group' ? raw.group_id : raw.clinic_id)
       : null,
+    consent_source_scope: intakeId ? (raw.assignment_scope === 'group' ? 'group' : 'clinic') : null,
+    consent_source_scope_id: intakeId
+      ? positiveInteger(raw.assignment_scope === 'group' ? raw.group_id : raw.clinic_id)
+      : null,
+    consent_source_intake_config_id: intakeId,
     consent_ready: consentReady,
     consent: {
       provider,
@@ -293,7 +298,44 @@ function siteDefaultsFromIntake(record) {
 
 async function resolveWebProjectSiteDefaults(scope, options = {}) {
   const record = await intakeConfigForWebScope(scope, options);
-  return siteDefaultsFromIntake(record);
+  const effectiveDefaults = siteDefaultsFromIntake(record);
+  if (scope.type !== 'clinic' || effectiveDefaults.consent_ready) return effectiveDefaults;
+
+  // Algunas altas técnicas crean una IntakeConfig de clínica únicamente para
+  // HMAC, verificación del snippet o flags del runtime. Ese registro estrecho
+  // debe seguir gobernando intake/chat/teléfono, pero no puede ocultar un
+  // consentimiento de grupo válido para una clínica incluida explícitamente.
+  const models = options.models || db;
+  if (!models.IntakeConfig?.findOne || !models.Clinica?.findByPk) return effectiveDefaults;
+  const groupId = await groupIdForClinic(scope.id, options);
+  if (!groupId) return effectiveDefaults;
+  const groupRecord = await effectiveIntakeConfigForScope({
+    scopeType: 'group',
+    groupId,
+    rejectInvalidInheritance: true,
+    models,
+    transaction: options.transaction,
+  });
+  const rawGroup = plain(groupRecord);
+  const locations = Array.isArray(rawGroup?.config?.locations) ? rawGroup.config.locations : [];
+  const explicitlyIncluded = locations.some((location) => (
+    positiveInteger(location?.id ?? location?.clinic_id) === scope.id
+  ));
+  if (!explicitlyIncluded) return effectiveDefaults;
+
+  const groupDefaults = siteDefaultsFromIntake(groupRecord);
+  if (!groupDefaults.consent_ready) return effectiveDefaults;
+  return {
+    ...effectiveDefaults,
+    consent_ready: true,
+    consent: groupDefaults.consent,
+    // source_scope describe la configuración que sigue recibiendo el lead.
+    // La procedencia legal se separa para no atribuir al grupo integrations
+    // que continúan siendo estrictamente de clínica.
+    consent_source_scope: 'group',
+    consent_source_scope_id: groupId,
+    consent_source_intake_config_id: positiveInteger(rawGroup?.id),
+  };
 }
 
 function applyWebProjectSiteDefaults(document, defaults) {
