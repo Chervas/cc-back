@@ -2022,12 +2022,13 @@ Estado actual en integración:
   activa de staff sobre esa clínica y acceso al activo WhatsApp efectivo; esta
   validación también se aplica al texto libre;
 - si `POST /api/whatsapp/messages` usa plantilla, el backend resuelve una fila
-  activa `APPROVED` del WABA, permite solo catálogo/sistema o una plantilla del
-  propio autor y envía el `name`/`language` canónico persistido, sin confiar en
-  esos valores aportados por el cliente;
+  activa `APPROVED` del WABA, permite solo catálogo/sistema, una plantilla del
+  propio autor o una plantilla histórica no atribuida dentro de su scope, y
+  envía el `name`/`language` canónico persistido, sin confiar en esos valores
+  aportados por el cliente;
 - `POST /api/conversations/:id/messages` aplica asimismo `is_active=true`,
-  `status=APPROVED` y la política catálogo/sistema o autor antes de encolar una
-  plantilla;
+  `status=APPROVED` y la política de sistema, autor o histórico acotado antes de
+  encolar una plantilla;
 - los tokens de entorno de WhatsApp siguen siendo válidos para:
   - embedded signup / bootstrap técnico;
   - scripts de backfill o diagnóstico;
@@ -3112,10 +3113,10 @@ Mitigación:
   (`estado_invitacion=aceptada|NULL`; roles `propietario`,
   `personaldeclinica` o `agencia`). Una membresía pendiente/cancelada,
   `paciente` o ser propietario de otra clínica no amplía el scope.
-- `GET /api/whatsapp/templates` devuelve por defecto catálogo/sistema más las
-  plantillas del usuario autenticado, tanto en la gestión como en los selectores
-  de Leads, QuickChat, Agenda y paciente. `include_all=1` queda reservado a un
-  admin global como inspección técnica y no concede edición.
+- `GET /api/whatsapp/templates` devuelve por defecto catálogo/sistema,
+  plantillas personales del usuario autenticado y las históricas no atribuidas
+  del scope solicitado. `include_all=1` queda reservado a un admin global como
+  inspección técnica y no concede edición.
 - Una WABA de grupo permite que el autor consuma y gestione su plantilla desde
   las sedes accesibles que resuelven esa WABA, pero no revela la plantilla a
   otros usuarios ni da acceso a otra clínica del grupo.
@@ -3124,14 +3125,23 @@ Mitigación:
   `clinicaclick_*` no convierte una plantilla externa en sistema.
 - El filtro visual no constituye autorización. Al enviar,
   `POST /api/conversations/:id/messages` resuelve la fila dentro de la WABA,
-  verifica autoría y encola siempre el nombre e idioma canónicos persistidos;
-  los valores del navegador no sustituyen esos campos.
+  verifica autoría/scope y encola siempre el nombre e idioma canónicos
+  persistidos; los valores del navegador no sustituyen esos campos.
 - Crear, reemplazar y retirar una plantilla personal exige ser su autor. Las de
-  catálogo/sistema son de solo lectura también para la UI normal.
-- Las 16 plantillas activas históricas sin autor verificable no se atribuyen por
-  inferencia. El rollout de esta migración queda retenido hasta asignarlas de
-  forma auditada a una persona o aceptar explícitamente que dejen de aparecer
-  en los selectores personales.
+  catálogo/sistema y las históricas sin autor son de solo lectura en la UI.
+- Las plantillas activas históricas sin autor verificable no se atribuyen por
+  inferencia. El preflight del 19/07/2026 encontró 18 filas no-sistema sin
+  `created_by_user_id`: 6 remotas anteriores a ClinicaClick y 12 creadas o
+  sincronizadas posteriormente sin una identidad persistida. La conexión Meta,
+  el `clinic_id`, el nombre visible y la hora de creación son contexto, no
+  evidencia suficiente para adjudicar autoría.
+- Esas filas se conservan como `legacy_unassigned`: permanecen seleccionables
+  dentro del scope de clínica/WABA ya autorizado, se devuelven con
+  `is_legacy_unassigned=true`, `ownership_scope=legacy_unassigned` y
+  `can_manage_by_current_user=false`, y la UI las separa bajo «Anteriores».
+  Nunca cuentan como «Mis plantillas» y no pueden editarse o retirarse hasta
+  una asignación administrativa explícita respaldada por evidencia. Las
+  plantillas nuevas sí quedan restringidas estrictamente a su autor.
 
 ## 2026-03-16 - Trigger explícito en flujos V2
 

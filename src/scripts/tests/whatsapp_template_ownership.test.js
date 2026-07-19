@@ -12,6 +12,7 @@ const {
   canUserAccessWhatsappTemplateAsset,
   canUserSelectWhatsappTemplate,
   filterWhatsappTemplatesForUser,
+  isLegacyUnassignedWhatsappTemplate,
   isSystemWhatsappTemplate,
   isWhatsappTemplateOwnedByUser,
 } = require('../../lib/whatsapp-template-ownership');
@@ -43,7 +44,9 @@ test('el catálogo de sistema sigue visible para cualquier usuario', () => {
   assert.equal(canUserSelectWhatsappTemplate(catalog, 44), true);
   assert.equal(canUserSelectWhatsappTemplate(catalogByOrigin, 77), true);
   assert.equal(canUserSelectWhatsappTemplate(legacySystem, 77), true);
-  assert.equal(canUserSelectWhatsappTemplate(untrustedPrefix, 77), false);
+  assert.equal(isSystemWhatsappTemplate(untrustedPrefix), false);
+  assert.equal(isLegacyUnassignedWhatsappTemplate(untrustedPrefix), true);
+  assert.equal(canUserSelectWhatsappTemplate(untrustedPrefix, 77), true);
 });
 
 test('una plantilla personal solo pertenece al usuario creador', () => {
@@ -71,7 +74,7 @@ test('la sincronización puede cambiar origin sin perder la propiedad funcional'
   assert.equal(canUserSelectWhatsappTemplate(syncedPersonal, 77), false);
 });
 
-test('las filas históricas sin autor no se atribuyen a la cuenta que conectó Meta', () => {
+test('las filas históricas sin autor se conservan como anteriores, sin atribuirlas a la cuenta Meta', () => {
   const rows = [
     { id: 1, catalog_template_id: 9, origin: 'catalog' },
     { id: 2, catalog_template_id: null, origin: 'custom', created_by_user_id: 76 },
@@ -81,8 +84,11 @@ test('las filas históricas sin autor no se atribuyen a la cuenta que conectó M
 
   assert.deepEqual(
     filterWhatsappTemplatesForUser(rows, 76).map((row) => row.id),
-    [1, 2]
+    [1, 2, 4]
   );
+  assert.equal(isLegacyUnassignedWhatsappTemplate(rows[3]), true);
+  assert.equal(isWhatsappTemplateOwnedByUser(rows[3], 76), false);
+  assert.equal(isLegacyUnassignedWhatsappTemplate(rows[1]), false);
 });
 
 test('ser propietario local no convierte un activo ajeno en acceso global', () => {
@@ -421,6 +427,145 @@ test('el envío directo de plantilla usa nombre e idioma canónicos del WABA', a
     whatsappService.normalizePhoneNumber = originals.normalizePhoneNumber;
     whatsappService.getClinicConfig = originals.getClinicConfig;
     whatsappService.sendMessage = originals.sendMessage;
+  }
+});
+
+test('una plantilla anterior aprobada sigue enviable en su scope sin adjudicar autoría', async () => {
+  const whatsappService = require('../../services/whatsapp.service');
+  const originals = {
+    membershipFindAll: db.UsuarioClinica.findAll,
+    clinicFindOne: db.Clinica.findOne,
+    clinicFindAll: db.Clinica.findAll,
+    assetFindOne: db.ClinicMetaAsset.findOne,
+    templateFindAll: db.WhatsappTemplate.findAll,
+    normalizePhoneNumber: whatsappService.normalizePhoneNumber,
+    getClinicConfig: whatsappService.getClinicConfig,
+    sendMessage: whatsappService.sendMessage,
+  };
+  let sends = 0;
+  db.UsuarioClinica.findAll = async () => [{ id_clinica: 56, rol_clinica: 'personaldeclinica' }];
+  db.Clinica.findOne = async () => ({ grupoClinicaId: 5 });
+  db.Clinica.findAll = async () => [{ grupoClinicaId: 5 }];
+  db.ClinicMetaAsset.findOne = async () => ({
+    assignmentScope: 'group',
+    grupoClinicaId: 5,
+    phoneNumberId: 'phone-56',
+    wabaId: 'waba-5',
+    waAccessToken: 'scoped-token',
+    metaConnection: { userId: 91 },
+  });
+  db.WhatsappTemplate.findAll = async () => [{
+    id: 904,
+    waba_id: 'waba-5',
+    clinic_id: 56,
+    name: 'plantilla_anterior',
+    language: 'es_ES',
+    status: 'APPROVED',
+    is_active: true,
+    origin: 'external',
+    catalog_template_id: null,
+    created_by_user_id: null,
+    get() { return { ...this }; },
+  }];
+  whatsappService.normalizePhoneNumber = () => '34600000000';
+  whatsappService.getClinicConfig = async () => ({
+    phoneNumberId: 'phone-56',
+    accessToken: 'scoped-token',
+    wabaId: 'waba-5',
+  });
+  whatsappService.sendMessage = async (payload) => {
+    sends += 1;
+    assert.equal(payload.templateName, 'plantilla_anterior');
+    assert.equal(payload.templateLanguage, 'es_ES');
+    return { messages: [{ id: 'wamid.legacy' }] };
+  };
+
+  try {
+    const res = responseRecorder();
+    await whatsappController.sendMessage({
+      body: { clinic_id: 56, to: '+34600000000', useTemplate: true, templateId: 904 },
+      userData: { userId: 76 },
+    }, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body?.messageId, 'wamid.legacy');
+    assert.equal(sends, 1);
+  } finally {
+    db.UsuarioClinica.findAll = originals.membershipFindAll;
+    db.Clinica.findOne = originals.clinicFindOne;
+    db.Clinica.findAll = originals.clinicFindAll;
+    db.ClinicMetaAsset.findOne = originals.assetFindOne;
+    db.WhatsappTemplate.findAll = originals.templateFindAll;
+    whatsappService.normalizePhoneNumber = originals.normalizePhoneNumber;
+    whatsappService.getClinicConfig = originals.getClinicConfig;
+    whatsappService.sendMessage = originals.sendMessage;
+  }
+});
+
+test('el listado etiqueta una histórica como Anterior, enviable y de solo lectura', async () => {
+  const originals = {
+    membershipFindAll: db.UsuarioClinica.findAll,
+    clinicFindOne: db.Clinica.findOne,
+    clinicFindAll: db.Clinica.findAll,
+    assetFindOne: db.ClinicMetaAsset.findOne,
+    templateFindAll: db.WhatsappTemplate.findAll,
+    flowFindAll: db.AutomationFlowTemplateV2.findAll,
+    treatmentFindAll: db.Tratamiento.findAll,
+  };
+  let templateQuery = 0;
+  db.UsuarioClinica.findAll = async () => [{ id_clinica: 56, rol_clinica: 'personaldeclinica' }];
+  db.Clinica.findAll = async () => [{ grupoClinicaId: 5 }];
+  db.Clinica.findOne = async () => ({ grupoClinicaId: 5 });
+  db.ClinicMetaAsset.findOne = async () => ({
+    assignmentScope: 'group',
+    grupoClinicaId: 5,
+    phoneNumberId: 'phone-56',
+    wabaId: 'waba-5',
+    waAccessToken: 'scoped-token',
+    metaConnection: { userId: 91 },
+  });
+  db.WhatsappTemplate.findAll = async () => {
+    templateQuery += 1;
+    if (templateQuery === 1) return [];
+    return [{
+      id: 905,
+      waba_id: 'waba-5',
+      clinic_id: 56,
+      name: 'historica_scope',
+      language: 'es',
+      status: 'APPROVED',
+      is_active: true,
+      origin: 'external',
+      catalog_template_id: null,
+      created_by_user_id: null,
+      toJSON() { return { ...this, toJSON: undefined }; },
+    }];
+  };
+  db.AutomationFlowTemplateV2.findAll = async () => [];
+  db.Tratamiento.findAll = async () => [];
+
+  try {
+    const res = responseRecorder();
+    await whatsappController.listTemplatesForClinic({
+      query: { clinic_id: '56', for_sending: '1' },
+      userData: { userId: 76 },
+    }, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.length, 1);
+    assert.equal(res.body[0].is_system, false);
+    assert.equal(res.body[0].is_owned_by_current_user, false);
+    assert.equal(res.body[0].is_legacy_unassigned, true);
+    assert.equal(res.body[0].ownership_scope, 'legacy_unassigned');
+    assert.equal(res.body[0].can_send_by_current_user, true);
+    assert.equal(res.body[0].can_manage_by_current_user, false);
+    assert.equal(Object.hasOwn(res.body[0], 'created_by_user_id'), false);
+  } finally {
+    db.UsuarioClinica.findAll = originals.membershipFindAll;
+    db.Clinica.findOne = originals.clinicFindOne;
+    db.Clinica.findAll = originals.clinicFindAll;
+    db.ClinicMetaAsset.findOne = originals.assetFindOne;
+    db.WhatsappTemplate.findAll = originals.templateFindAll;
+    db.AutomationFlowTemplateV2.findAll = originals.flowFindAll;
+    db.Tratamiento.findAll = originals.treatmentFindAll;
   }
 });
 
