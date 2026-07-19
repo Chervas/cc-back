@@ -1372,6 +1372,33 @@ $tests['router maps only root, one slug and signed assets'] = static function ()
     });
 };
 
+$tests['router accepts raw and WordPress-slashed exact If-None-Match values'] = static function () {
+    $method = new ReflectionMethod('CCW_Router', 'request_etag_matches');
+    $method->setAccessible(true);
+    $etag = '"sha256-' . str_repeat('a', 64) . '"';
+    $had_header = array_key_exists('HTTP_IF_NONE_MATCH', $_SERVER);
+    $previous = $_SERVER['HTTP_IF_NONE_MATCH'] ?? null;
+    try {
+        $_SERVER['HTTP_IF_NONE_MATCH'] = $etag;
+        ccw_test_assert($method->invoke(null, $etag) === true, 'raw exact If-None-Match did not match');
+
+        $_SERVER['HTTP_IF_NONE_MATCH'] = addslashes($etag);
+        ccw_test_assert($method->invoke(null, $etag) === true, 'WordPress-slashed If-None-Match did not match');
+
+        $_SERVER['HTTP_IF_NONE_MATCH'] = '"sha256-' . str_repeat('b', 64) . '"';
+        ccw_test_assert($method->invoke(null, $etag) === false, 'different If-None-Match matched');
+
+        unset($_SERVER['HTTP_IF_NONE_MATCH']);
+        ccw_test_assert($method->invoke(null, $etag) === false, 'missing If-None-Match matched');
+    } finally {
+        if ($had_header) {
+            $_SERVER['HTTP_IF_NONE_MATCH'] = $previous;
+        } else {
+            unset($_SERVER['HTTP_IF_NONE_MATCH']);
+        }
+    }
+};
+
 $tests['public landing loader never exposes the server-side intake HMAC'] = static function () {
     $setup = ccw_test_setup_intake('public-loader');
     ob_start();
