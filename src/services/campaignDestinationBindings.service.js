@@ -16,6 +16,20 @@ const GUIDED_SCOPES = Object.freeze(['landing_publish', 'campaign_destination'])
 const SUPPORTED_MODES = new Set(['connect_only', 'guided_improvement', 'managed_service']);
 const ACTIVE_MANAGED_STATUSES = new Set(['approved_to_launch', 'launching', 'active', 'paused']);
 const GOOGLE_FAMILIES = new Set(['google_search', 'google_pmax']);
+const IN_FLIGHT_ACCOUNT_STATES = new Set(['apply_queued', 'applying', 'readback_pending', 'rollback_queued', 'rolling_back']);
+const APPLY_SUPERSEDED_CODE = 'campaign_destination_apply_superseded';
+const STRATEGY_CONTRACT_ERROR_CODES = new Set([
+  'campaign_destination_strategy_not_active',
+  'campaign_destination_strategy_mode_inconsistent',
+  'campaign_destination_strategy_changed',
+  'campaign_destination_binding_refresh_required',
+  'campaign_destination_account_not_in_strategy',
+  'campaign_destination_guided_scope_not_authorized',
+  'campaign_destination_measure_mode_forbidden',
+  'campaign_destination_autopilot_constraint_missing',
+  'campaign_destination_autopilot_not_approved',
+  'campaign_destination_autopilot_authorization_invalid',
+]);
 
 class CampaignDestinationBindingError extends Error {
   constructor(code, message, httpStatus = 422, details = null) {
@@ -189,6 +203,21 @@ function guidedStrategyAuthorization(payload) {
   };
 }
 
+function normalizedStrategyStatus(value) {
+  const status = String(value || '').trim().toLowerCase();
+  return ({
+    activa: 'active',
+    pausada: 'paused',
+    finalizada: 'completed',
+    pendiente_aceptacion: 'pending_approval',
+    borrador: 'draft',
+  })[status] || status || 'draft';
+}
+
+function enabled(value) {
+  return value === true || value === 1 || value === '1';
+}
+
 async function loadStrategyContext(strategyId, target, dependencies = {}, transaction = null) {
   const models = dependencies.models || db;
   const strategy = await models.Campaign.findByPk(strategyId, { transaction });
@@ -198,15 +227,69 @@ async function loadStrategyContext(strategyId, target, dependencies = {}, transa
     order: [['updated_at', 'DESC'], ['id', 'DESC']],
     transaction,
   });
-  const strategyRow = rows.find((row) => plain(row)?.solicitud?.kind === 'marketing_strategy');
+  const strategyRows = rows.filter((row) => plain(row)?.solicitud?.kind === 'marketing_strategy');
+  const strategyRow = strategyRows[0];
   const payload = plain(strategyRow)?.solicitud;
   if (!payload) throw new CampaignDestinationBindingError('campaign_destination_strategy_payload_missing', 'La estrategia no conserva su configuración.', 409);
-  const mode = String(payload.mode_snapshot || payload.mode || '').trim().toLowerCase();
+  const modes = new Set(strategyRows.map((row) => {
+    const current = plain(row)?.solicitud || {};
+    return String(current.mode_snapshot || current.mode || '').trim().toLowerCase();
+  }));
+  const statuses = new Set(strategyRows.map((row) => {
+    const current = plain(row) || {};
+    return normalizedStrategyStatus(current.solicitud?.status || current.estado);
+  }));
+  if (modes.size !== 1 || statuses.size !== 1) {
+    throw new CampaignDestinationBindingError(
+      'campaign_destination_strategy_mode_inconsistent',
+      'Las sedes de la estrategia no conservan un único modo y estado operativo.',
+      409
+    );
+  }
+  const mode = [...modes][0];
+  const status = [...statuses][0];
   if (!SUPPORTED_MODES.has(mode)) throw new CampaignDestinationBindingError('campaign_destination_mode_invalid', 'El modo de campaña no admite bindings Web.', 409);
   const targetPayload = findStrategyTarget(payload, target);
   const scope = scopeFromStrategy(payload, rows.map(plain));
   const authorization = mode === 'guided_improvement' ? guidedStrategyAuthorization(payload) : null;
-  return { strategy: plain(strategy), rows: rows.map(plain), payload, mode, targetPayload, scope, authorization };
+  return {
+    strategy: plain(strategy),
+    rows: rows.map(plain),
+    payload,
+    mode,
+    status,
+    targetPayload,
+    scope,
+    authorization,
+  };
+}
+
+function assertStrategyPublishable(strategyContext) {
+  const strategy = strategyContext?.strategy || {};
+  if (strategyContext?.status !== 'active' || !enabled(strategy.activa)) {
+    throw new CampaignDestinationBindingError(
+      'campaign_destination_strategy_not_active',
+      'La estrategia debe estar activa antes de publicar o aplicar un destino.',
+      409
+    );
+  }
+  if (strategyContext?.mode === 'managed_service') {
+    if (!enabled(strategy.gestionada)) {
+      throw new CampaignDestinationBindingError(
+        'campaign_destination_strategy_not_active',
+        'Piloto automático ya no conserva una estrategia gestionada vigente para esta landing.',
+        409
+      );
+    }
+    return;
+  }
+  if (enabled(strategy.gestionada)) {
+    throw new CampaignDestinationBindingError(
+      'campaign_destination_strategy_not_active',
+      'La estrategia debe estar activa antes de publicar o aplicar un destino.',
+      409
+    );
+  }
 }
 
 async function verifyPublishedLanding(event, strategyContext, dependencies = {}, transaction = null) {
@@ -320,6 +403,126 @@ async function resolveAccountTargets(strategyContext, target, dependencies = {},
   return Array.from(new Map(targets.map((item) => [`${item.provider}:${item.customerId}:${item.campaignId}`, item])).values());
 }
 
+function strategySnapshotDigest(strategyContext, target, accountTargets) {
+  const cohort = (Array.isArray(accountTargets) ? accountTargets : [])
+    .map((item) => ({
+      provider: String(item.provider || ''),
+      customer_id: String(item.customerId || ''),
+      campaign_id: String(item.campaignId || ''),
+      family: String(item.family || ''),
+      managed_campaign_id: text(item.managedCampaignId, 36),
+    }))
+    .sort((left, right) => canonical(left).localeCompare(canonical(right)));
+  return sha256({
+    strategy_id: positiveInteger(strategyContext?.strategy?.id),
+    mode: strategyContext?.mode,
+    status: strategyContext?.status,
+    campaign_active: enabled(strategyContext?.strategy?.activa),
+    campaign_managed: enabled(strategyContext?.strategy?.gestionada),
+    scope: strategyContext?.scope,
+    target: {
+      kind: target?.targetKind,
+      treatment_id: target?.treatmentId || null,
+      treatment_identity: target?.treatmentIdentity || 0,
+    },
+    authorization: strategyContext?.authorization || null,
+    cohort,
+  });
+}
+
+function bindingSnapshotDigest(binding) {
+  return text(binding?.authorization?.strategy_snapshot_digest, 64);
+}
+
+function assertBindingStrategyCurrent(binding, strategyContext, target, accountTargets) {
+  assertStrategyPublishable(strategyContext);
+  const storedDigest = bindingSnapshotDigest(binding);
+  if (!storedDigest) {
+    throw new CampaignDestinationBindingError(
+      'campaign_destination_binding_refresh_required',
+      'La landing debe volver a validarse contra la estrategia vigente antes de cambiar destinos.',
+      409
+    );
+  }
+  if (binding.mode !== strategyContext.mode) {
+    throw new CampaignDestinationBindingError(
+      'campaign_destination_strategy_changed',
+      'El nivel de gestión cambió después de preparar esta landing.',
+      409
+    );
+  }
+  const currentDigest = strategySnapshotDigest(strategyContext, target, accountTargets);
+  if (storedDigest !== currentDigest) {
+    throw new CampaignDestinationBindingError(
+      'campaign_destination_strategy_changed',
+      'La estrategia o sus campañas cambiaron después de preparar esta landing.',
+      409
+    );
+  }
+  return currentDigest;
+}
+
+function accountTargetKey(value) {
+  return `${String(value?.provider || '')}:${String(value?.customerId ?? value?.customer_id ?? '')}:${String(value?.campaignId ?? value?.campaign_id ?? '')}`;
+}
+
+function assertAccountInStrategy(account, accountTargets) {
+  const allowed = new Set((Array.isArray(accountTargets) ? accountTargets : []).map(accountTargetKey));
+  if (!allowed.has(accountTargetKey(account))) {
+    throw new CampaignDestinationBindingError(
+      'campaign_destination_account_not_in_strategy',
+      'La campaña dejó de pertenecer al objetivo de esta estrategia.',
+      409
+    );
+  }
+}
+
+function isStrategyContractError(error) {
+  return STRATEGY_CONTRACT_ERROR_CODES.has(error?.code);
+}
+
+function applyExecutionIdentity(binding, account) {
+  return sha256({
+    binding: {
+      id: text(binding?.id, 36),
+      strategy_id: positiveInteger(binding?.strategyId),
+      mode: String(binding?.mode || ''),
+      project_id: text(binding?.projectId, 36),
+      publication_id: text(binding?.publicationId, 36),
+      revision_id: text(binding?.revisionId, 36),
+      artifact_id: text(binding?.artifactId, 36),
+      destination_url: text(binding?.destinationUrl, 4_096),
+      destination_digest: text(binding?.destinationDigest, 64),
+    },
+    account: {
+      id: text(account?.id, 36),
+      managed_campaign_id: text(account?.managedCampaignId, 36),
+      provider: String(account?.provider || ''),
+      customer_id: String(account?.customerId || ''),
+      campaign_id: String(account?.campaignId || ''),
+      family: String(account?.family || ''),
+      pmax_url_expansion: String(account?.pmaxUrlExpansion || ''),
+      operation_digest: text(account?.operationDigest, 64),
+      apply_event_id: text(account?.applyEventId, 80),
+      desired_state: account?.desiredState || null,
+    },
+  });
+}
+
+function assertApplyExecutionCurrent(binding, account, expectedIdentity, allowedStates = ['applying']) {
+  if (
+    !allowedStates.includes(String(account?.state || ''))
+    || !expectedIdentity
+    || applyExecutionIdentity(binding, account) !== expectedIdentity
+  ) {
+    throw new CampaignDestinationBindingError(
+      APPLY_SUPERSEDED_CODE,
+      'La landing o la operación cambió mientras se validaba el destino.',
+      409
+    );
+  }
+}
+
 function initialAccountState(mode, family) {
   if (mode === 'connect_only') return 'blocked';
   if (family === 'meta_instant_form' || family === 'meta_reach' || family === 'unsupported') return 'blocked';
@@ -393,6 +596,7 @@ async function consumeLandingPublishedEvent(input = {}, dependencies = {}) {
   return sequelize.transaction(async (transaction) => {
     const target = { targetKind: event.targetKind, treatmentId: event.treatmentId, treatmentIdentity: event.treatmentIdentity };
     const strategyContext = await loadStrategyContext(event.strategy_id, target, dependencies, transaction);
+    assertStrategyPublishable(strategyContext);
     const landing = await verifyPublishedLanding({
       ...input,
       project_id: event.project_id,
@@ -402,11 +606,28 @@ async function consumeLandingPublishedEvent(input = {}, dependencies = {}) {
       destination_url: event.destination_url,
       destination_digest: event.destination_digest,
     }, strategyContext, dependencies, transaction);
+    const accountTargets = await resolveAccountTargets(strategyContext, target, dependencies, transaction);
+    const strategyDigest = strategySnapshotDigest(strategyContext, target, accountTargets);
     let binding = await models.CampaignDestinationBinding.findOne({
       where: { strategyId: event.strategy_id, targetKind: target.targetKind, treatmentIdentity: target.treatmentIdentity },
       transaction,
       lock: transaction.LOCK?.UPDATE,
     });
+    const previousBinding = plain(binding);
+    if (binding) {
+      const existingAccounts = await models.CampaignDestinationBindingAccount.findAll({
+        where: { bindingId: plain(binding).id },
+        transaction,
+        lock: transaction.LOCK?.UPDATE,
+      });
+      if (existingAccounts.some((row) => IN_FLIGHT_ACCOUNT_STATES.has(String(plain(row)?.state || '')))) {
+        throw new CampaignDestinationBindingError(
+          'campaign_destination_operation_in_flight',
+          'Espera a que termine la comprobación del destino antes de republicar la landing.',
+          409
+        );
+      }
+    }
     const blocked = strategyContext.mode === 'connect_only';
     const values = {
       strategyId: event.strategy_id,
@@ -426,6 +647,7 @@ async function consumeLandingPublishedEvent(input = {}, dependencies = {}) {
       authorization: {
         event_contract: LANDING_PUBLISHED_EVENT,
         strategy_authorization: strategyContext.authorization,
+        strategy_snapshot_digest: strategyDigest,
         destination_mutation_allowed: !blocked,
       },
       lastErrorCode: blocked ? 'measure_mode_never_changes_destinations' : null,
@@ -456,7 +678,6 @@ async function consumeLandingPublishedEvent(input = {}, dependencies = {}) {
       transaction,
     });
 
-    const accountTargets = await resolveAccountTargets(strategyContext, target, dependencies, transaction);
     const accounts = [];
     for (const accountTarget of accountTargets) {
       const pmaxPolicy = accountTarget.family === 'google_pmax' ? 'pending' : 'not_applicable';
@@ -496,7 +717,10 @@ async function consumeLandingPublishedEvent(input = {}, dependencies = {}) {
           provider: accountTarget.provider, customerId: accountTarget.customerId, campaignId: accountTarget.campaignId,
           ...accountValues,
         }, { transaction });
-      } else if (plain(account).operationDigest !== operationDigest) {
+      } else if (
+        plain(account).operationDigest !== operationDigest
+        || previousBinding?.mode !== strategyContext.mode
+      ) {
         await account.update(accountValues, { transaction });
       }
       accounts.push(account);
@@ -632,9 +856,12 @@ async function requestDestinationApply({ bindingId, accounts: requestedAccounts,
     if (binding.mode === 'connect_only') {
       throw new CampaignDestinationBindingError('campaign_destination_measure_mode_forbidden', 'Mide y entiende nunca cambia destinos de campaña.', 409);
     }
-    const strategyContext = await loadStrategyContext(binding.strategyId, {
+    const target = {
       targetKind: binding.targetKind, treatmentId: binding.treatmentId, treatmentIdentity: binding.treatmentIdentity,
-    }, dependencies, transaction);
+    };
+    const strategyContext = await loadStrategyContext(binding.strategyId, target, dependencies, transaction);
+    const currentAccountTargets = await resolveAccountTargets(strategyContext, target, dependencies, transaction);
+    assertBindingStrategyCurrent(binding, strategyContext, target, currentAccountTargets);
     await verifyPublishedLanding({
       project_id: binding.projectId, publication_id: binding.publicationId, revision_id: binding.revisionId,
       artifact_id: binding.artifactId, destination_url: binding.destinationUrl, destination_digest: binding.destinationDigest,
@@ -651,6 +878,14 @@ async function requestDestinationApply({ bindingId, accounts: requestedAccounts,
     const jobs = [];
     for (const accountModel of selected) {
       const account = plain(accountModel);
+      assertAccountInStrategy(account, currentAccountTargets);
+      if (IN_FLIGHT_ACCOUNT_STATES.has(String(account.state || ''))) {
+        throw new CampaignDestinationBindingError(
+          'campaign_destination_operation_in_flight',
+          'Esta campaña ya tiene una comprobación de destino en curso.',
+          409
+        );
+      }
       if (!GOOGLE_FAMILIES.has(account.family) || account.provider !== 'google_ads') {
         const code = account.family === 'meta_instant_form'
           ? 'campaign_destination_meta_instant_form_native'
@@ -771,61 +1006,141 @@ async function enqueueRollbackForAccount({ bindingModel, accountModel, reason, a
   return { event_id: rollbackEventId, job_request_id: positiveInteger(job?.id), idempotent: !persisted.created };
 }
 
+async function revalidateApplyStrategyContract(bindingId, accountId, expectedIdentity, dependencies = {}, allowedStates = ['applying']) {
+  const models = dependencies.models || db;
+  const sequelize = dependencies.sequelize || db.sequelize;
+  return sequelize.transaction(async (transaction) => {
+    const bindingModel = await models.CampaignDestinationBinding.findByPk(bindingId, { transaction });
+    const accountModel = await models.CampaignDestinationBindingAccount.findByPk(accountId, { transaction });
+    if (!bindingModel || !accountModel || plain(accountModel).bindingId !== bindingId) {
+      throw new CampaignDestinationBindingError('campaign_destination_apply_event_invalid', 'El binding cambió antes de aplicar el destino.', 409);
+    }
+    const binding = plain(bindingModel);
+    const account = plain(accountModel);
+    if (binding.mode === 'connect_only') {
+      throw new CampaignDestinationBindingError('campaign_destination_measure_mode_forbidden', 'Mide y entiende nunca cambia destinos.', 409);
+    }
+    const target = {
+      targetKind: binding.targetKind,
+      treatmentId: binding.treatmentId,
+      treatmentIdentity: binding.treatmentIdentity,
+    };
+    const strategyContext = await loadStrategyContext(binding.strategyId, target, dependencies, transaction);
+    const currentAccountTargets = await resolveAccountTargets(strategyContext, target, dependencies, transaction);
+    assertBindingStrategyCurrent(binding, strategyContext, target, currentAccountTargets);
+    assertAccountInStrategy(account, currentAccountTargets);
+    if (binding.mode === 'managed_service') await assertAutopilotConstraints(account, models, transaction);
+    assertApplyExecutionCurrent(binding, account, expectedIdentity, allowedStates);
+    return { binding, account };
+  });
+}
+
 async function runDestinationApplyJob(payload = {}, dependencies = {}) {
   const models = dependencies.models || db;
   const sequelize = dependencies.sequelize || db.sequelize;
   const accountId = text(payload.account_id, 36);
   const bindingId = text(payload.binding_id, 36);
   const eventId = stableEventId(payload.event_id);
-  const prepared = await sequelize.transaction(async (transaction) => {
-    const bindingModel = await models.CampaignDestinationBinding.findByPk(bindingId, { transaction, lock: transaction.LOCK?.UPDATE });
-    const accountModel = await models.CampaignDestinationBindingAccount.findByPk(accountId, { transaction, lock: transaction.LOCK?.UPDATE });
-    const event = await models.CampaignDestinationBindingEvent.findOne({ where: { eventId }, transaction });
-    if (!bindingModel || !accountModel || !event || plain(accountModel).bindingId !== bindingId || plain(event).accountId !== accountId) {
-      throw new CampaignDestinationBindingError('campaign_destination_apply_event_invalid', 'El job no pertenece al binding/account.', 409);
-    }
-    const binding = plain(bindingModel);
-    const account = plain(accountModel);
-    if (account.operationDigest !== payload.operation_digest || account.applyEventId !== eventId) {
-      return { superseded: true, binding, account };
-    }
-    if (account.state === 'active' && account.readbackEventId) return { alreadyActive: true, binding, account };
-    if (binding.mode === 'connect_only') throw new CampaignDestinationBindingError('campaign_destination_measure_mode_forbidden', 'Mide y entiende nunca cambia destinos.', 409);
-    const operationAuth = account.authorization?.operation_authorization;
-    if (binding.mode === 'managed_service') {
-      if (
-        operationAuth?.automatic !== true
-        || operationAuth?.authority !== 'approved_managed_campaign_constraints'
-        || operationAuth?.readback_required !== true
-        || operationAuth?.destination_digest !== binding.destinationDigest
-      ) {
-        throw new CampaignDestinationBindingError('campaign_destination_autopilot_authorization_invalid', 'La operación automática no conserva sus límites aprobados.', 409);
+  let prepared;
+  try {
+    prepared = await sequelize.transaction(async (transaction) => {
+      const bindingModel = await models.CampaignDestinationBinding.findByPk(bindingId, { transaction, lock: transaction.LOCK?.UPDATE });
+      const accountModel = await models.CampaignDestinationBindingAccount.findByPk(accountId, { transaction, lock: transaction.LOCK?.UPDATE });
+      const event = await models.CampaignDestinationBindingEvent.findOne({ where: { eventId }, transaction });
+      if (!bindingModel || !accountModel || !event || plain(accountModel).bindingId !== bindingId || plain(event).accountId !== accountId) {
+        throw new CampaignDestinationBindingError('campaign_destination_apply_event_invalid', 'El job no pertenece al binding/account.', 409);
       }
-    } else {
-      validateOperationConfirmation(binding, {
-        ...operationAuth,
-        operation_id: operationAuth?.operation_id,
-        confirm_destination_change: true,
-        accepted: true,
-        scopes: operationAuth?.scopes,
-      }, operationAuth?.accepted_by_user_id);
-    }
-    const strategyContext = await loadStrategyContext(binding.strategyId, {
-      targetKind: binding.targetKind, treatmentId: binding.treatmentId, treatmentIdentity: binding.treatmentIdentity,
-    }, dependencies, transaction);
-    await verifyPublishedLanding({
-      project_id: binding.projectId, publication_id: binding.publicationId, revision_id: binding.revisionId,
-      artifact_id: binding.artifactId, destination_url: binding.destinationUrl, destination_digest: binding.destinationDigest,
-    }, strategyContext, dependencies, transaction);
-    if (binding.mode === 'managed_service') await assertAutopilotConstraints(account, models, transaction);
-    await accountModel.update({ state: 'applying', lastErrorCode: null, lastErrorDetails: null }, { transaction });
-    await bindingModel.update({ destinationStatus: 'applying' }, { transaction });
-    await persistEvent({
-      models, eventId: stableUuid(`apply-started:${eventId}`), bindingId, accountId, eventType: 'apply_started',
-      data: { apply_event_id: eventId, operation_digest: account.operationDigest }, transaction,
+      const binding = plain(bindingModel);
+      const account = plain(accountModel);
+      if (account.operationDigest !== payload.operation_digest || account.applyEventId !== eventId) {
+        return { superseded: true, binding, account };
+      }
+      if (account.state === 'active' && account.readbackEventId) return { alreadyActive: true, binding, account };
+      if (binding.mode === 'connect_only') throw new CampaignDestinationBindingError('campaign_destination_measure_mode_forbidden', 'Mide y entiende nunca cambia destinos.', 409);
+      const operationAuth = account.authorization?.operation_authorization;
+      if (binding.mode === 'managed_service') {
+        if (
+          operationAuth?.automatic !== true
+          || operationAuth?.authority !== 'approved_managed_campaign_constraints'
+          || operationAuth?.readback_required !== true
+          || operationAuth?.destination_digest !== binding.destinationDigest
+        ) {
+          throw new CampaignDestinationBindingError('campaign_destination_autopilot_authorization_invalid', 'La operación automática no conserva sus límites aprobados.', 409);
+        }
+      } else {
+        validateOperationConfirmation(binding, {
+          ...operationAuth,
+          operation_id: operationAuth?.operation_id,
+          confirm_destination_change: true,
+          accepted: true,
+          scopes: operationAuth?.scopes,
+        }, operationAuth?.accepted_by_user_id);
+      }
+      const target = {
+        targetKind: binding.targetKind, treatmentId: binding.treatmentId, treatmentIdentity: binding.treatmentIdentity,
+      };
+      const strategyContext = await loadStrategyContext(binding.strategyId, target, dependencies, transaction);
+      const currentAccountTargets = await resolveAccountTargets(strategyContext, target, dependencies, transaction);
+      assertBindingStrategyCurrent(binding, strategyContext, target, currentAccountTargets);
+      assertAccountInStrategy(account, currentAccountTargets);
+      await verifyPublishedLanding({
+        project_id: binding.projectId, publication_id: binding.publicationId, revision_id: binding.revisionId,
+        artifact_id: binding.artifactId, destination_url: binding.destinationUrl, destination_digest: binding.destinationDigest,
+      }, strategyContext, dependencies, transaction);
+      if (binding.mode === 'managed_service') await assertAutopilotConstraints(account, models, transaction);
+      await accountModel.update({ state: 'applying', lastErrorCode: null, lastErrorDetails: null }, { transaction });
+      await bindingModel.update({ destinationStatus: 'applying' }, { transaction });
+      await persistEvent({
+        models, eventId: stableUuid(`apply-started:${eventId}`), bindingId, accountId, eventType: 'apply_started',
+        data: { apply_event_id: eventId, operation_digest: account.operationDigest }, transaction,
+      });
+      return {
+        bindingModel,
+        accountModel,
+        binding,
+        account,
+        executionIdentity: applyExecutionIdentity(binding, { ...account, state: 'applying' }),
+      };
     });
-    return { bindingModel, accountModel, binding, account };
-  });
+  } catch (error) {
+    if (!isStrategyContractError(error)) throw error;
+    await sequelize.transaction(async (transaction) => {
+      const bindingModel = await models.CampaignDestinationBinding.findByPk(bindingId, { transaction, lock: transaction.LOCK?.UPDATE });
+      const accountModel = await models.CampaignDestinationBindingAccount.findByPk(accountId, { transaction, lock: transaction.LOCK?.UPDATE });
+      if (!bindingModel || !accountModel) return;
+      const safe = {
+        code: error.code,
+        message: String(error.message || 'La estrategia cambió antes de aplicar.').slice(0, 1_000),
+        details: error.details || null,
+      };
+      await accountModel.update({ state: 'blocked', lastErrorCode: safe.code, lastErrorDetails: safe }, { transaction });
+      await bindingModel.update({
+        destinationStatus: 'blocked',
+        capabilityStatus: plain(bindingModel).activeDestinationDigest ? 'active' : 'blocked',
+        lastErrorCode: safe.code,
+        lastErrorDetails: safe,
+      }, { transaction });
+      await persistEvent({
+        models,
+        eventId: stableUuid(`strategy-blocked:${eventId}:${safe.code}`),
+        bindingId,
+        accountId,
+        eventType: 'readback_failed',
+        data: { ...safe, phase: 'strategy_revalidation', provider_mutation: false },
+        transaction,
+      });
+    });
+    return {
+      status: 'completed',
+      result: {
+        binding_id: bindingId,
+        account_id: accountId,
+        blocked: true,
+        provider_mutation: false,
+        error_code: error.code,
+      },
+    };
+  }
   if (prepared.superseded || prepared.alreadyActive) {
     return { status: 'completed', result: { binding_id: bindingId, account_id: accountId, superseded: !!prepared.superseded, idempotent: !!prepared.alreadyActive } };
   }
@@ -834,6 +1149,7 @@ async function runDestinationApplyJob(payload = {}, dependencies = {}) {
   let beforeState = prepared.account.beforeState;
   let mutationStarted = false;
   try {
+    await revalidateApplyStrategyContract(bindingId, accountId, prepared.executionIdentity, dependencies);
     const inspected = await adapter.inspect({ account: prepared.account, binding: prepared.binding }, dependencies.adapterDependencies || {});
     if (!beforeState) {
       beforeState = inspected;
@@ -852,6 +1168,7 @@ async function runDestinationApplyJob(payload = {}, dependencies = {}) {
     if (sha256(beforeState) !== sha256(reread)) {
       throw new CampaignDestinationBindingError('campaign_destination_provider_drift_after_validation', 'El destino cambió durante la validación; no se aplicó.', 409);
     }
+    await revalidateApplyStrategyContract(bindingId, accountId, prepared.executionIdentity, dependencies);
     mutationStarted = true;
     await adapter.mutate({
       account: { ...prepared.account, pmaxUrlExpansion: prepared.account.pmaxUrlExpansion },
@@ -860,6 +1177,7 @@ async function runDestinationApplyJob(payload = {}, dependencies = {}) {
       destinationUrl: prepared.binding.destinationUrl,
       validateOnly: false,
     }, dependencies.adapterDependencies || {});
+    await revalidateApplyStrategyContract(bindingId, accountId, prepared.executionIdentity, dependencies);
     await prepared.accountModel.update({ state: 'readback_pending', appliedAt: new Date() });
     await prepared.bindingModel.update({ destinationStatus: 'readback_pending' });
     const observed = await adapter.inspect({ account: prepared.account, binding: prepared.binding }, dependencies.adapterDependencies || {});
@@ -871,6 +1189,13 @@ async function runDestinationApplyJob(payload = {}, dependencies = {}) {
     if (!verification.verified) {
       throw new CampaignDestinationBindingError('campaign_destination_readback_failed', 'Google no devolvió exactamente el destino solicitado.', 409, verification);
     }
+    await revalidateApplyStrategyContract(
+      bindingId,
+      accountId,
+      prepared.executionIdentity,
+      dependencies,
+      ['readback_pending']
+    );
     await sequelize.transaction(async (transaction) => {
       const accountModel = await models.CampaignDestinationBindingAccount.findByPk(accountId, { transaction, lock: transaction.LOCK?.UPDATE });
       await accountModel.update({
@@ -888,12 +1213,33 @@ async function runDestinationApplyJob(payload = {}, dependencies = {}) {
     });
     return { status: 'completed', result: { binding_id: bindingId, account_id: accountId, readback_verified: true } };
   } catch (error) {
+    const superseded = !mutationStarted && error?.code === APPLY_SUPERSEDED_CODE;
+    if (superseded) {
+      return {
+        status: 'completed',
+        result: {
+          binding_id: bindingId,
+          account_id: accountId,
+          superseded: true,
+          provider_mutation: false,
+          error_code: error.code,
+        },
+      };
+    }
+    const strategyBlocked = !mutationStarted && isStrategyContractError(error);
     await sequelize.transaction(async (transaction) => {
       const bindingModel = await models.CampaignDestinationBinding.findByPk(bindingId, { transaction, lock: transaction.LOCK?.UPDATE });
       const accountModel = await models.CampaignDestinationBindingAccount.findByPk(accountId, { transaction, lock: transaction.LOCK?.UPDATE });
       const safe = { code: error.code || 'campaign_destination_apply_failed', message: String(error.message || 'Error').slice(0, 1_000), details: error.details || null };
-      await accountModel.update({ state: mutationStarted ? 'drifted' : 'failed', lastErrorCode: safe.code, lastErrorDetails: safe }, { transaction });
-      await bindingModel.update({ destinationStatus: mutationStarted ? 'drifted' : 'failed', lastErrorCode: safe.code, lastErrorDetails: safe }, { transaction });
+      await accountModel.update({ state: mutationStarted ? 'drifted' : (strategyBlocked ? 'blocked' : 'failed'), lastErrorCode: safe.code, lastErrorDetails: safe }, { transaction });
+      await bindingModel.update({
+        destinationStatus: mutationStarted ? 'drifted' : (strategyBlocked ? 'blocked' : 'failed'),
+        capabilityStatus: strategyBlocked
+          ? (plain(bindingModel).activeDestinationDigest ? 'active' : 'blocked')
+          : plain(bindingModel).capabilityStatus,
+        lastErrorCode: safe.code,
+        lastErrorDetails: safe,
+      }, { transaction });
       await persistEvent({
         models, eventId: stableUuid(`readback-failed:${eventId}:${prepared.account.operationDigest}`), bindingId, accountId,
         eventType: 'readback_failed', data: safe, transaction,
@@ -903,6 +1249,18 @@ async function runDestinationApplyJob(payload = {}, dependencies = {}) {
         await enqueueRollbackForAccount({ bindingModel, accountModel, reason: safe.code, dependencies, transaction });
       }
     });
+    if (strategyBlocked) {
+      return {
+        status: 'completed',
+        result: {
+          binding_id: bindingId,
+          account_id: accountId,
+          blocked: true,
+          provider_mutation: false,
+          error_code: error.code,
+        },
+      };
+    }
     if (mutationStarted) {
       return {
         status: 'completed',

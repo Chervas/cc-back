@@ -450,7 +450,7 @@ test('autoriza cuenta y campaña antes de conservar una atribución Google Ads i
       status: 'active',
       strategy_campaign_id: 41,
       campaign_request_id: 42,
-      target_kind: 'general',
+      target_kind: 'generic',
       target_treatment_id: null,
     };
   };
@@ -477,6 +477,99 @@ test('autoriza cuenta y campaña antes de conservar una atribución Google Ads i
     clinica_id: 66,
     status: 'active',
   });
+});
+
+test('resuelve una asignación legacy sin target desde la campaña exacta elegida en la estrategia', async () => {
+  const state = fixture();
+  state.headers.referer = 'https://landing.example.test/implantes/?cc_gads_customer_id=1851215478&cc_gads_campaign_id=21316904358';
+  state.models.ClinicGoogleAdsAccount.findAll = async () => [{
+    id: 8,
+    assignmentScope: 'group',
+    grupoClinicaId: 7,
+    customerId: '1851215478',
+    isActive: true,
+  }];
+  state.models.ExternalCampaignAssignment.findOne = async () => ({
+    id: 90,
+    provider: 'google_ads',
+    customer_id: '1851215478',
+    campaign_id: '21316904358',
+    grupo_clinica_id: 7,
+    clinica_id: 66,
+    status: 'active',
+    strategy_campaign_id: null,
+    campaign_request_id: null,
+    target_kind: null,
+    target_treatment_id: null,
+  });
+  state.models.WebProject.findByPk = async () => ({
+    id: IDS.project,
+    campaignContext: { strategy_id: 41, target_kind: 'general', treatment_id: null },
+  });
+  state.models.CampaignRequest = {
+    findAll: async (options) => {
+      assert.deepEqual(options.where, { campaign_id: 41, clinica_id: 66 });
+      return [{
+        id: 42,
+        campaign_id: 41,
+        clinica_id: 66,
+        solicitud: {
+          kind: 'marketing_strategy',
+          objective_id: 'new_patients',
+          external_targets: [{
+            kind: 'generic',
+            treatment_id: null,
+            campaigns: [{
+              provider: 'google_ads',
+              customer_id: '1851215478',
+              campaign_id: '21316904358',
+            }],
+          }],
+        },
+      }];
+    },
+  };
+
+  const result = await prepareWebLandingSubmission({ body: state.body, headers: state.headers, models: state.models });
+  assert.equal(result.attribution.strategy_campaign_id, 41);
+  assert.equal(result.attribution.campaign_request_id, 42);
+  assert.equal(result.attribution.target_kind, 'generic');
+  assert.equal(result.payload.attribution.google_ads_assignment_id, 90);
+});
+
+test('no usa el fallback legacy si la campaña no pertenece al target exacto de la landing', async () => {
+  const state = fixture();
+  state.headers.referer = 'https://landing.example.test/implantes/?cc_gads_customer_id=1851215478&cc_gads_campaign_id=21316904358';
+  state.models.ClinicGoogleAdsAccount.findAll = async () => [{
+    assignmentScope: 'group', grupoClinicaId: 7, customerId: '1851215478', isActive: true,
+  }];
+  state.models.ExternalCampaignAssignment.findOne = async () => ({
+    id: 90, provider: 'google_ads', customer_id: '1851215478', campaign_id: '21316904358',
+    grupo_clinica_id: 7, clinica_id: 66, status: 'active',
+  });
+  state.models.WebProject.findByPk = async () => ({
+    id: IDS.project,
+    campaignContext: { strategy_id: 41, target_kind: 'general', treatment_id: null },
+  });
+  state.models.CampaignRequest = {
+    findAll: async () => [{
+      id: 42,
+      campaign_id: 41,
+      clinica_id: 66,
+      solicitud: {
+        kind: 'marketing_strategy',
+        objective_id: 'new_patients',
+        external_targets: [{
+          kind: 'generic',
+          campaigns: [{ provider: 'google_ads', customer_id: '1851215478', campaign_id: '99999999999' }],
+        }],
+      },
+    }],
+  };
+  await assert.rejects(
+    () => prepareWebLandingSubmission({ body: state.body, headers: state.headers, models: state.models }),
+    (error) => error.code === 'web_landing_google_strategy_mismatch'
+  );
 });
 
 test('rechaza IDs Google incompletos, no canónicos o ajenos a la clínica', async () => {

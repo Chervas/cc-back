@@ -231,6 +231,111 @@ function campaignContextOf(project) {
   };
 }
 
+function canonicalTargetKind(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'general' || normalized === 'generic') return 'generic';
+  return normalized === 'treatment' ? 'treatment' : null;
+}
+
+function canonicalExternalCustomerId(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  return digits || null;
+}
+
+function campaignReferenceMatches(reference, { customerId, campaignId }) {
+  const item = reference && typeof reference === 'object' && !Array.isArray(reference)
+    ? reference
+    : {};
+  return String(item.provider || '').trim().toLowerCase() === 'google_ads'
+    && canonicalExternalCustomerId(item.customer_id ?? item.account_id) === customerId
+    && String(item.campaign_id ?? item.external_campaign_id ?? '').trim() === campaignId;
+}
+
+function strategyRequestMatchesLandingCampaign(row, context, identity) {
+  const item = plain(row) || {};
+  const payload = item.solicitud && typeof item.solicitud === 'object' && !Array.isArray(item.solicitud)
+    ? item.solicitud
+    : {};
+  if (
+    payload.kind !== 'marketing_strategy'
+    || String(payload.objective_id || '').trim().toLowerCase() !== 'new_patients'
+    || positiveInteger(item.campaign_id) !== context.strategyId
+  ) return false;
+  const expectedKind = canonicalTargetKind(context.targetKind);
+  if (!expectedKind) return false;
+  const matches = (Array.isArray(payload.external_targets) ? payload.external_targets : []).filter((target) => {
+    const kind = canonicalTargetKind(target?.kind);
+    if (kind !== expectedKind) return false;
+    if (kind === 'treatment' && positiveInteger(target?.treatment_id) !== context.treatmentId) return false;
+    return (Array.isArray(target?.campaigns) ? target.campaigns : [])
+      .some((campaign) => campaignReferenceMatches(campaign, identity));
+  });
+  return matches.length === 1;
+}
+
+async function resolveLegacyAssignmentStrategy({
+  assignment,
+  context,
+  clinicId,
+  customerId,
+  campaignId,
+  models,
+}) {
+  if (!context?.strategyId || !canonicalTargetKind(context.targetKind)) return null;
+  const assignmentStrategyId = positiveInteger(assignment.strategy_campaign_id);
+  const assignmentRequestId = positiveInteger(assignment.campaign_request_id);
+  const assignmentKind = canonicalTargetKind(assignment.target_kind);
+  const assignmentTreatmentId = positiveInteger(assignment.target_treatment_id);
+  const contextKind = canonicalTargetKind(context.targetKind);
+  if (
+    (assignmentStrategyId && assignmentStrategyId !== context.strategyId)
+    || (assignmentKind && assignmentKind !== contextKind)
+    || (contextKind === 'treatment' && assignmentTreatmentId && assignmentTreatmentId !== context.treatmentId)
+  ) {
+    throw new WebLandingAttributionError(
+      'web_landing_google_strategy_mismatch',
+      'La campaña no coincide con la estrategia de esta landing.',
+      409
+    );
+  }
+  if (!models.CampaignRequest?.findAll) {
+    throw new WebLandingAttributionError(
+      'web_landing_google_attribution_unavailable',
+      'No se puede comprobar la estrategia de Google Ads en este momento.',
+      503
+    );
+  }
+  const rows = await models.CampaignRequest.findAll({
+    where: { campaign_id: context.strategyId, clinica_id: clinicId },
+    order: [['updated_at', 'DESC'], ['id', 'DESC']],
+    raw: true,
+  });
+  const candidates = (Array.isArray(rows) ? rows : []).filter((row) => (
+    strategyRequestMatchesLandingCampaign(row, context, { customerId, campaignId })
+  ));
+  if (candidates.length !== 1) {
+    throw new WebLandingAttributionError(
+      'web_landing_google_strategy_mismatch',
+      'La campaña no coincide de forma inequívoca con la estrategia de esta landing.',
+      409
+    );
+  }
+  const requestId = positiveInteger(plain(candidates[0])?.id);
+  if (assignmentRequestId && assignmentRequestId !== requestId) {
+    throw new WebLandingAttributionError(
+      'web_landing_google_strategy_mismatch',
+      'La campaña no coincide con la configuración vigente de esta landing.',
+      409
+    );
+  }
+  return {
+    strategyCampaignId: context.strategyId,
+    campaignRequestId: requestId,
+    targetKind: contextKind,
+    targetTreatmentId: contextKind === 'treatment' ? context.treatmentId : null,
+  };
+}
+
 async function resolveAuthorizedGoogleAttribution({ body, clinicId, groupId, projectId, models }) {
   const customerId = googleIdentifier(
     body,
@@ -297,17 +402,22 @@ async function resolveAuthorizedGoogleAttribution({ body, clinicId, groupId, pro
     );
   }
 
-  const strategyCampaignId = positiveInteger(assignment.strategy_campaign_id);
-  const campaignRequestId = positiveInteger(assignment.campaign_request_id);
-  const targetTreatmentId = positiveInteger(assignment.target_treatment_id);
-  const targetKind = String(assignment.target_kind || '').trim().toLowerCase() || null;
+  let strategyCampaignId = positiveInteger(assignment.strategy_campaign_id);
+  let campaignRequestId = positiveInteger(assignment.campaign_request_id);
+  let targetTreatmentId = positiveInteger(assignment.target_treatment_id);
+  let targetKind = canonicalTargetKind(assignment.target_kind);
   if (models.WebProject?.findByPk) {
     const project = await models.WebProject.findByPk(projectId, {
       attributes: ['id', 'campaignContext'],
       raw: true,
     });
     const context = campaignContextOf(project);
-    if (context?.strategyId && context.strategyId !== strategyCampaignId) {
+    const contextKind = canonicalTargetKind(context?.targetKind);
+    if (
+      context?.strategyId
+      && strategyCampaignId
+      && context.strategyId !== strategyCampaignId
+    ) {
       throw new WebLandingAttributionError(
         'web_landing_google_strategy_mismatch',
         'La campaña no coincide con la estrategia de esta landing.',
@@ -315,10 +425,11 @@ async function resolveAuthorizedGoogleAttribution({ body, clinicId, groupId, pro
       );
     }
     if (
-      context?.targetKind
+      contextKind
+      && targetKind
       && (
-        context.targetKind !== targetKind
-        || (context.targetKind === 'treatment' && context.treatmentId !== targetTreatmentId)
+        contextKind !== targetKind
+        || (contextKind === 'treatment' && targetTreatmentId && context.treatmentId !== targetTreatmentId)
       )
     ) {
       throw new WebLandingAttributionError(
@@ -326,6 +437,23 @@ async function resolveAuthorizedGoogleAttribution({ body, clinicId, groupId, pro
         'La campaña no coincide con el objetivo de esta landing.',
         409
       );
+    }
+    if (
+      context?.strategyId
+      && (!strategyCampaignId || !campaignRequestId || !targetKind)
+    ) {
+      const resolved = await resolveLegacyAssignmentStrategy({
+        assignment,
+        context,
+        clinicId,
+        customerId,
+        campaignId,
+        models,
+      });
+      strategyCampaignId = resolved.strategyCampaignId;
+      campaignRequestId = resolved.campaignRequestId;
+      targetKind = resolved.targetKind;
+      targetTreatmentId = resolved.targetTreatmentId;
     }
   }
 
