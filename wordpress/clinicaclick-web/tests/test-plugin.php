@@ -1301,9 +1301,15 @@ $tests['capability upgrade resets a corrupt registry without breaking wp-admin']
     ccw_test_assert($reported === true, 'corrupt registry prevented the capability heartbeat');
     ccw_test_assert($cache->route_registry()['routes'] === array(), 'corrupt registry was not reset safely');
     $last_post = end($GLOBALS['ccw_test_posts']);
-    $payload = json_decode((string) ($last_post['args']['body'] ?? ''), true);
+    $raw_payload = (string) ($last_post['args']['body'] ?? '');
+    $payload = json_decode($raw_payload, true);
+    $wire_payload = json_decode($raw_payload);
     ccw_test_assert(($payload['schema_version'] ?? null) === 2, 'capability report lost schema v2');
     ccw_test_assert(($payload['routes'] ?? null) === array(), 'capability report invented routes after recovery');
+    ccw_test_assert(
+        is_object($wire_payload) && is_object($wire_payload->routes ?? null),
+        'empty schema v2 route map was serialized as a JSON list'
+    );
 };
 
 $tests['release GC preserves every active and LKG hash and removes only stale releases'] = static function () {

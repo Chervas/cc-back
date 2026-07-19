@@ -332,7 +332,9 @@ ccw_package_assert(
     ($handshake['args']['headers']['Authorization'] ?? '') === 'Bearer ccw_' . str_repeat('a', 43),
     'Activation handshake omitted the installation bearer'
 );
-$handshake_payload = json_decode((string) $handshake['args']['body'], true);
+$handshake_body = (string) $handshake['args']['body'];
+$handshake_payload = json_decode($handshake_body, true);
+$handshake_wire_payload = json_decode($handshake_body);
 ccw_package_assert(
     is_array($handshake_payload)
         && (int) ($handshake_payload['schema_version'] ?? 0) === 2
@@ -341,6 +343,10 @@ ccw_package_assert(
         && (int) ($handshake_payload['registry_sequence'] ?? -1) === 0
         && ($handshake_payload['routes'] ?? null) === array(),
     'Activation capability heartbeat payload is missing or invalid'
+);
+ccw_package_assert(
+    is_object($handshake_wire_payload) && is_object($handshake_wire_payload->routes ?? null),
+    'Activation capability heartbeat encoded the empty route map as a JSON list'
 );
 
 $claim = CCW_Site_Claim::claim_document();

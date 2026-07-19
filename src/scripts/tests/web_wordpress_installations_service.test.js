@@ -2044,6 +2044,23 @@ test('el reporte v2 aplica allowlist estricta a la secuencia y a cada ruta', () 
   );
 });
 
+test('el reporte v2 normaliza solo la lista PHP vacía como mapa de rutas compatible', () => {
+  const base = {
+    schema_version: 2,
+    event: 'heartbeat',
+    plugin_version: '2.0.0-alpha.8',
+    site_hash: 'a'.repeat(64),
+    capabilities: { multi_publication_v2: true },
+    registry_sequence: 0,
+    reported_at: new Date().toISOString(),
+  };
+  assert.deepEqual(normalizeReport({ ...base, routes: [] }).routes, {});
+  assert.throws(
+    () => normalizeReport({ ...base, routes: [{ publication_id: crypto.randomUUID() }] }),
+    (error) => error.code === 'web_installation_report_invalid'
+  );
+});
+
 test('el heartbeat v2 registra capacidad sin exigir publicaciones ni confirmar un despliegue', async () => {
   const token = `ccw_${crypto.randomBytes(32).toString('base64url')}`;
   const siteUrl = 'https://wordpress-heartbeat.example';
