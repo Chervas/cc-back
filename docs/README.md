@@ -15,6 +15,11 @@ Este índice separa la arquitectura general de los procedimientos que deben usar
 | [Visibilidad local en ChatGPT y Gemini](./marketing-ai-visibility.md) | Consultas locales canónicas, autoejecución desde Informes, caché/deduplicación, estados sin secretos y contrato server-side de OpenAI/Gemini. |
 | [Adaptador offline ModSuite](./modsuite-offline-adapter.md) | Migración allowlisted de exports legacy a WebDocument v1, informe de revisión, límites y ejecución local sin runtime legacy. |
 
+Meta no tiene paridad de entrega con Google Data Manager en este corte. CAPI
+envía eventos web compatibles como best-effort inline cuando el activo/pixel
+está configurado; faltan outbox durable, reintentos, idempotencia, diagnóstico
+de entrega y los hitos CRM offline `qualified_lead`/`schedule` para Meta.
+
 ## Marketing Web: editor y publicación
 
 Fuente canónica de arquitectura: `src/Documentacion/13-backend.md`, secciones
@@ -54,23 +59,35 @@ Estado 2026-07-19:
   El provisionado final contiene 18 entradas y tiene SHA-256
   `86792a2ebf69cd9c36f529f98b1528e2ed5b08c9fe5d33216ea33b348695479f`;
 
-- el baseline backend integrado llegó a `4e4b555`/staging `5e57431`; el corte
-  vigente de renderer/galería y drift está en `c9fe9dc`/`68360ed`, promovido a
-  staging por `4bbc299`. `d5ce548` añade ownership explícito al catálogo de
-  plantillas en feature;
-- corte funcional frontend `dev` `305d4eae`/staging `5f8f8858`: 153/153,
-  build limpio `5a08e6a108414a76`, index/source SHA-256
-  `c54b4f254b803a1cd7419660f76be4cb8e0cb5df2912f014e709b9d0822bafc7`,
-  481/481 ficheros y readback exacto de assets críticos en 200; los commits
-  documentales posteriores no cambian el runtime;
+- corte vigente: backend `3f0c0e0`, staging `a22b773`; incluye el cierre E2E de
+  intake/snapshot sobre el hardening `8c4fdeb`/`55a34d7`, destinos
+  `6fdd153`/`f9c3049` y el fix de consentimiento
+  `88b16c6`/`d8b8938` y parte del corte base renderer/herencia
+  `b17acf4`/`db348ef`. Frontend fuente `dd138101`, rama staging `cf9805cc`,
+  sobre `7435a827`/`522b1fc1`; `front-dev`/ng-serve está actualizado y
+  TypeScript pasa. La compilación ng-serve de desarrollo terminó con hash
+  `fa3f6c6dfda1977c`; no es un build estático publicado. Las referencias
+  anteriores son hitos históricos;
+- último frontend estático acreditado: build `2ad4b1b987a9fde2`, principal
+  `main.5e80d0ee5d4c9ec5.js` y Marketing
+  `3584.9ae0ef3a69fb0819.js`; el copy `dd138101` no tiene aún bundle estático
+  nuevo publicado;
 - migraciones `19000..25000` aplicadas tras backup, más la aditiva
   `20260718225000-add-campaign-destination-drift-event.js`; 17 tablas y cinco
-  plantillas; cero policies/bindings reales creados;
+  plantillas. La migración no sembró policies ni bindings. El E2E posterior sí
+  creó el binding auditable de Hospitalet descrito debajo, sin aplicar ningún
+  cambio al proveedor;
 - las siete migraciones alpha8 —`20260718230000`, `20260718233000`,
   `20260719090000`, `20260719091500`, `20260719093000`, `20260719094500` y
   `20260719100000`— están aplicadas en staging;
-- gates de staging: editor para scopes Propdental y publicación solo
-  `group:5` mediante `MARKETING_WEB_PUBLISHING_SCOPES`;
+- las aditivas `20260719103000` (ejecuciones gestionadas) y `20260719113000`
+  (generaciones de contenido), junto con `20260719170000` (identidad de
+  snapshot clínico), están aplicadas en staging. `clinic_snapshot_hash` es
+  `VARCHAR(64) NOT NULL`, forma parte del índice único y el índice legacy fue
+  retirado. Aplicadas no equivale a habilitar mutaciones: los flags gestionados
+  siguen apagados;
+- gates de staging: editor para scopes Propdental y publicación acotada a
+  `group:5,clinic:59` mediante `MARKETING_WEB_PUBLISHING_SCOPES`;
 - plugin WordPress `2.0.0-alpha.8` instalado/activo en Propdental junto al
   legado `1.1.7`, con un único loader/bootstrap. WP-CLI y DB están alineados;
   la instalación permanece `connected`. El handshake schema 2, el claim de
@@ -81,15 +98,12 @@ Estado 2026-07-19:
 - instalación `524c2f73-6b69-42f2-8cb0-c8d171575d94` conectada en el origen
   canónico `https://www.propdental.es`; el alta `apex` se normalizó solo durante
   el primer handshake virgen y las comprobaciones posteriores son estrictas;
-- `/cita/` está publicada y saludable con renderer
-  `clinicaclick-web-renderer/1.2.1`: proyecto
-  `edd77d09-6ac5-4944-98e3-084d5285594c`, revisión
-  `ead78c6d-f28f-478d-9058-bc189c846421`, publicación
-  `5d55b1ef-c6fa-4e73-8aa8-2fd9ff41a526`, deployment
-  de recuperación `a944709d…`, job `31696` y artefacto/LKG
-  `a43e7c4a-9ef3-4aef-aad3-70f12f927c31` (hash público `be4d5f3c…`);
-- el GET público devuelve 200, marker y formulario nativo firmado, con un único
-  loader, cero bloqueos CSP y sin HMAC/tokens en HTML;
+- `/cita/` está publicada con renderer `clinicaclick-web-renderer/1.7.0`. La
+  republicación inicial fue deployment `18fa50be…`, secuencia `11`, artefacto
+  `aa05cb59-b27f-4d83-b8fb-f6ef0d4d5cb9`, hash `648cf766…` y HTML
+  `153275eb…`; GET `200`, condicional `304`, `warnings=[]`, dirección/horario
+  Schema presentes y ninguna imagen de clínica insegura. 1.6 y sus secuencias
+  8–10 quedan como evidencia histórica;
 - intake E2E pasó dos veces y `LeadIntake #7261` terminó atribuido a clínica
   `59`/grupo `5` antes de su limpieza completa; rollback real publicó la
   revisión temporal 3 y volvió por secuencia 6/job `31699` a revisión 2/LKG;
@@ -121,13 +135,14 @@ Estado 2026-07-19:
   **Aceptar todo** ocupa todo el ancho, desaparece al aceptar y persiste
   `cc_consent_v2`. El formulario conserva 11 campos; no hubo excepciones ni
   fallos de red;
-- el audit live detectó dos gaps editoriales en esa revisión congelada: declara
-  email como contacto preferido sin ofrecer campo email, y sus datos Social y
-  Schema están incompletos. El conteo de campos y la estabilidad del renderer
-  no cierran esos gaps; requieren una revisión nueva y aprobada;
-- backend staging no está en paridad completa con el worktree de integración.
-  Los commits/readbacks live citados aquí sí están acreditados, pero antes de
-  otra promoción se debe reconciliar el diff y repetir suites/readback;
+- el ciclo real `1.6 -> rollback 1.5 -> 1.6` quedó acreditado en secuencias
+  `8`, `9` y `10`; el rollback histórico citado arriba se conserva como
+  evidencia, no como versión live;
+- la generación IA E2E `b2f25c1b-9258-4228-bebc-ec636dcf141f` terminó en
+  `JobRequest #32302`, proveedor `openai`, modelo `gpt-5.6-sol`,
+  `store:false` y Structured Outputs. La propuesta quedó persistida pero no
+  aceptada (`accepted_content_entry_id=null`), por lo que no creó entrada CMS
+  ni publicación;
 - la comprobación **Guardar** de Consent se hizo únicamente en harness: un
   diagnóstico saneado acreditó persistencia del handler, retirada del banner,
   inicialización del runtime y cero `pageerror`. No se presenta como prueba
@@ -137,14 +152,114 @@ Estado 2026-07-19:
 - `drift_detected` queda persistido por `CampaignDestinationBindingEvent`; la
   auditoría de destino usa el orquestador común una vez al día (`5 3 * * *`),
   sin autoreparación. La suite de Campañas pasa 34 contratos/46 pruebas;
-- hosted/custom domain no están disponibles;
-- la rotación HMAC terminó mediante reconciliación
-  `889cc3a4-7d09-4cb0-accb-65acbdbfbb61`, generación 1, estado `completed`.
-  El finalizer `JobRequest #32179` terminó el `2026-07-19T07:24:30Z` tras dos
-  intentos y sin error; source/target envelopes se eliminaron, queda una sola
-  clave aceptada y se restauró la gracia normal a `86400000` ms. El target fue
-  aceptado y el source se comprobó durante la gracia antes de expirar; staging
-  quedó online;
+- hosted/custom domain no están disponibles. La forma hosted canónica
+  planificada es `https://sites.clinicaclick.com/<slug>/`; el modelo por
+  subdominio/wildcard no está validado. Siguen pendientes DNS/TLS/alta E2E y
+  el retiro/deprovisión de ambos canales, incluida la eliminación de Custom
+  Hostname/WebDomain;
+- staging permite que una clínica resuelva la instalación WordPress activa
+  de su propio grupo con `inherited_from_group=true` y `source_scope`. No
+  permite cross-group ni que el grupo herede una instalación propiedad de una
+  clínica. La publicación mantiene scope de clínica y el grupo administra
+  plugin/token/instalación. El E2E Hospitalet acredita campaña -> landing ->
+  intake y cleanup sin escrituras externas. Al crearla desde un proyecto
+  de grupo, la clínica de `configuration.clinic_id` se bloquea con `UPDATE` y
+  se revalida activa y miembro del grupo en la misma transacción; los focos de
+  servicios+guards pasan 26/26. La autorización se revalida
+  contra membresía activa; cambiar grupo o desactivar la clínica exige retirar
+  y confirmar/tombstonear antes sus rutas heredadas —incluidas publicaciones
+  `scope=group` materializadas para ella por `configuration.clinic_id`—, y
+  reconciliar cualquier runtime/HMAC heredado. Los preflights fallan cerrado
+  dentro de la misma
+  transacción del cambio de clínica. El editor bulk de grupos tampoco puede
+  saltarse estos gates: `groupAssets.updateGroupConfig` centraliza
+  `applyClinicMembershipSelection`, bloquea las `Clinica` en orden estable y
+  valida retire+ACK y reconciliación antes de cada transición; el controller
+  devuelve `409` con su código de dominio. Está desplegado y cubierto por
+  `web_group_membership_transition_guard` 4/4 y una focal ampliada 76/76. El
+  registry, ACK y artefacto revalidan las publicaciones `scope=group` por
+  `configuration.clinic_id`; clínica ausente/inactiva/movida excluye la ruta.
+  Los locks clinic/group se ordenan por `effectiveClinicId`. La
+  revocación separa el tope de 20 rutas activas del inventario histórico de
+  hasta 200: revisa todas y exige retiro+tombstone ACK. Con 21 tombstones, un
+  ACK ausente bloquea y los 21 confirmados permiten revocar;
+- Hospitalet `59` descubrió durante el E2E una precedencia inválida: su
+  `IntakeConfig #81`, útil para integraciones locales pero sin consentimiento
+  web completo, ocultaba el consentimiento válido del grupo `#24`. El fix
+  `88b16c6`/staging `d8b8938` conserva intake/chat/teléfono/integraciones de la
+  clínica y solo hereda el consentimiento del grupo si la clínica pertenece
+  realmente al grupo, figura explícitamente en `group.config.locations`, el
+  consentimiento local no está listo y el grupal sí. Expone
+  `consent_source_scope`, `consent_source_scope_id` y
+  `consent_source_intake_config_id`; no existe fallback cross-group. La suite
+  Marketing Web completa pasó tras el cambio;
+- proyecto E2E `4df293bd-98b9-4dd7-a601-3c557048925c`: intake local `81`,
+  consentimiento de grupo `24` listo e instalación WordPress disponible. La
+  publicación `fe4dece6-36a8-47f2-86a0-70235f8e11d6`, deployment
+  `e5156f84-7977-4c4d-b626-42acd33f7bff` y artefacto
+  `dafc020d-03a0-4c6a-9c7f-e4d93fe18376` están verificados para
+  `https://www.propdental.es/cita/primera-visita-hospitalet/`;
+- renderer 1.7 y la migración
+  `20260719170000-add-web-artifact-clinic-snapshot-identity.js` están en
+  staging y el piloto público; su tanda focal pasa 43/43. Añaden
+  `clinic_snapshot_hash` a DB/marker/manifest/caché para impedir reutilización
+  cross-clinic y recompilar al cambiar dirección/horario efectivo. 1.7 puede
+  usar dirección/horario de una ubicación verificada, pero no elige la ficha
+  por fecha: usa la primaria del grupo o una única asignación explícita; sin
+  selección exige una sola ficha directa activa, verificada y no suspendida.
+  Ante dos candidatas no completa datos de Google. Esos casos pasan 21/21
+  focales. Nunca toma fotos GBP/`googleUrl`: OG/Schema solo acepta la imagen
+  canónica pública y no-tiny de Clinicaclick. La primera publicación/readback
+  1.7, el target final post-rotación y campaña->ruta Hospitalet están
+  acreditados. El lead/intake de Hospitalet también quedó verificado y limpio
+  con la evidencia controlada descrita debajo;
+- el corte promovido pasa Marketing Web **354/354** Node, WordPress **40/40**,
+  Campañas **81/81**, reviewer 96/96 con GO sin high/medium, frontend Marketing 302/302,
+  TypeScript app/spec exit `0` y diff-check limpio. Esa validación de código no
+  sustituye por sí sola las evidencias públicas posteriores; el readback
+  post-rotación y el E2E campaña->ruta ya se acreditaron por separado;
+- tras aparecer un HMAC vigente en una salida diagnóstica se rotó sin
+  reproducirlo: reconciliación `889cc3a4-7d09-4cb0-accb-65acbdbfbb61`,
+  generación 2, `completed`; deployment target `ae350f06…`, artefacto
+  `2a2abd9a-9249-44a2-926c-92656084725b`, verificados; accepted keys 2→1 y
+  envelopes source/target eliminados. El readback final `/cita/` acredita hash
+  `cd4119d…`, HTML `a34a993…`, `304`, renderer 1.7, WebSite/Dentist/WebPage,
+  dirección, diez horarios, sin imagen Schema y CSP correcto;
+- `6fdd153`/`f9c3049` exporta explícitamente `stableHttpsDestination` para el
+  bridge. Job `32462` completó tras retry natural 4/8 y creó binding
+  `8a056617-7072-4e2a-9a84-e6438a303175` para estrategia `10` y la landing
+  Hospitalet. Como el modo es `connect_only`, quedó bloqueado con
+  `measure_mode_never_changes_destinations`; siete cuentas bloqueadas, job
+  `32468` completado y cero `marketing_campaign.destination_apply.v1` desde
+  las 18:25: **cero mutaciones de proveedor**;
+- la landing Hospitalet devuelve `200/304`, hash `3a8aff…`, renderer 1.7,
+  formulario, JSON-LD, dirección/horarios, sin warnings/código ejecutable.
+  Chromium `1440/390` confirma overflow 0, campos/consentimiento/chat correctos
+  y cero errores. Evidencia `campaign-landing17-live/` y
+  `campaign-landing17-e2e-evidence.json`;
+- el E2E de intake posterior creó temporalmente `LeadIntake #7272`, clínica
+  `59`/grupo `5`, `google_ads/clinicaclick_web_landing`, publicación
+  `fe4dece6-36a8-47f2-86a0-70235f8e11d6`, binding
+  `8a056617-7072-4e2a-9a84-e6438a303175` con `targetKind=general`, assignment
+  `28`, customer `1851215478`, campaña `21313059516` y resolución Ads a
+  estrategia `10`/request `24`/`target_kind=generic`. Revisión
+  `fc244f6e-b0b5-46cf-af72-05041a70c3a3`, deployment `e5156f84…`, artefacto
+  `dafc020d…` y hash `3a8aff298c…`. El snapshot inmutable `web_landing` schema `1` validó toda la
+  identidad editorial, de scope, Ads y estrategia. La conversión se omitió con
+  `no_permitted_identifiers`, `provider_request_id=null` y cero escrituras
+  externas. La limpieza dejó lead/form/audit/attempt/eventos en cero y eliminó
+  ocho eventos preflight. Evidencia saneada:
+  `campaign-landing17-lead-e2e-evidence.json`;
+- el hardening `8c4fdeb`/`55a34d7` congela modo/estado/scope/mandato/cohorte y
+  destino/operación mediante digests, exige estrategia activa y revalida en
+  request y worker antes/después de mutate y readback. Cambio de estrategia,
+  revocación managed o cuenta fuera del target bloquea antes del proveedor; un
+  binding legacy sin digest exige refresh. Los jobs hermanos no se invalidan
+  por `binding.version`. Tras un downgrade, el único cambio permitido es un
+  rollback automático/manual al `beforeState` capturado por la operación antes
+  autorizada, nunca una URL libre ni un destino nuevo. La atribución legacy
+  recupera `general`/`generic` solo ante una pareja cuenta/campaña única del
+  target exacto. Auditor independiente GO, focales 29/29 y Campañas 81/81;
 - el router live corrige el magic-quotes que WordPress aplica a
   `HTTP_IF_NONE_MATCH`. Cloudflare y origen devuelven `304` con el
   `If-None-Match` exacto. HMAC y ETag quedan cerrados; hosted/custom conservan
@@ -154,7 +269,7 @@ La migración `20260715152000-purge-google-places-competition-content.js` está
 cancelada y sus `up`/`down` son no-op. No es una migración pendiente ni debe
 reactivarse.
 
-Estado de implementación actual, separado de la evidencia del artefacto live:
+Evolución del contrato, incluida aquí como contexto histórico del corte live:
 
 - renderer `clinicaclick-web-renderer/1.3.0` introdujo cabecera y pie globales
   por página y formulario global con contrato por página;
@@ -163,7 +278,7 @@ Estado de implementación actual, separado de la evidencia del artefacto live:
   elemento presentacional `aria-hidden` con `size=xs|sm|md|lg|xl|2xl`. Ambos
   exigen `children=[]`, carecen de bindings y solo producen clases/CSS
   allowlisted por el compilador;
-- el renderer staging vigente `clinicaclick-web-renderer/1.5.0` añade
+- el renderer `clinicaclick-web-renderer/1.5.0` añadió
   `gallery` como décimo nodo seguro: 2–12 assets únicos, columnas 2/3/4,
   `cover|contain`, ratios allowlisted, alt/decorativa, foco y pie por item. El
   resolver congela cada recurso exacto y el compilador genera
@@ -173,7 +288,7 @@ Estado de implementación actual, separado de la evidencia del artefacto live:
   mismo origen y excluye canónicas externas;
 - el paquete live `clinicaclick-web` `2.0.0-alpha.8` conserva los contratos de
   rutas/formulario global de alpha7 y añade el runtime multi-route acreditado;
-  esto no convierte el renderer `1.5.0` en un artefacto publicado. El runbook
+  la versión live posterior es `1.6.0`. El runbook
   histórico alpha7 y su rollback alpha6 están documentados; después de schema
   2 el rollback operativo mantiene alpha8 + LKG. La API
   bloquea fail-closed un deployment WordPress con formulario global si el
@@ -229,9 +344,9 @@ formulario totalmente editables/eliminables; en contexto de campaña, la
 ausencia de una plantilla compatible bloquea el alta en vez de fabricar una
 landing vacía. SEO, Social y Schema, el inspector de CTA, el panel de diseño,
 el flujo editorial/historial, los globales y la hidratación de medios ya
-existen en la implementación. La galería semántica está en staging; la autoría
+existen en la implementación. La galería semántica y la autoría
 Página/Cabecera/Pie, archivo/restauración de proyectos y la ruta frontend real
-`/marketing/web/plantillas` están integrados en feature. Un archivado no puede
+`/marketing/web/plantillas` están promovidos. Un archivado no puede
 publicarse y restaurar siempre vuelve a borrador. Sigue pendiente la aceptación visual completa
 contra Figma, drag/drop avanzado y el E2E público de esta tanda. Se reutiliza
 la UX, no el runtime ModSuite. Véase `20.14`/`20.15` en frontend.
@@ -246,8 +361,17 @@ consola/página/request/HTTP, mutaciones Marketing Web u overflow. El fix
 reproducido en Chromium. Backend y
 plugin también están live. El readback, relay/atribución, limpieza, rollback y
 monitor acreditaron primero el artefacto público renderer `1.2.1`; la misma
-revisión/proyecto se recompiló después y el artefacto WordPress live ya es
-renderer `1.5.0`, hash `d875201…`, body SHA `e851688…` y ETag `304`.
+revisión/proyecto se recompiló después y el artefacto WordPress live actual es
+renderer `1.6.0`; sus identificadores y hashes completos figuran arriba. El QA
+  adicional del diálogo IA y control gestionado en desktop/móvil tiene cero
+  overflow, errores y solapamiento; evidencia SHA-256
+  `c1f4a16feea37dd8c42917642f9f2a95820f4721781259a0696ed8d91d25f35c`.
+  El QA público WordPress separado desktop/móvil confirmó HTTP `200`, mismo
+  artefacto, consentimiento aceptado, banner oculto, widget visible y overflow
+  `0`; evidencia SHA-256
+  `2b7e024f3fb586faf593732a54c40868e5b4d03c87ccda98f7852297ffc0701d`.
+  Solo queda el warning benigno de `frame-ancestors` en meta; el header CSP
+  real sí lo aplica.
 Evidencia incremental: galería backend 3/3, migración drift 3/3, Campañas 34
 contratos/46 pruebas, autoría global frontend 92/92 antes de su unión y QA
 staging Galería `1440`/`390` con index SHA
@@ -269,7 +393,7 @@ diagnósticos/recomendaciones. No cambia campañas, custom goals, URLs, pujas,
 presupuesto ni estados. Las referencias posteriores a **Conecta y mejora** son
 el nombre visible del corte histórico de julio previo a esta integración.
 
-Estado de arquitectura de la candidata de integración (2026-07-19): registra
+Estado de arquitectura del runtime vigente (2026-07-19): registra
 **33 tareas periódicas**, **14 integraciones dirigidas/background**, **47 tipos
 background** en total y **63 handlers**. Los nuevos tipos dirigidos
 `web_content_generation`, `managed_campaign.google_search_create.v1`,
@@ -281,14 +405,14 @@ publicación, los destinos y el monitor Web continúan dentro del mismo
 `JobRequest`, nunca en un cron paralelo. El detalle histórico siguiente sobre
 outbox/retención se conserva: también son durables `marketing_competition_heatmap_refresh`, `automation_whatsapp_quiet_send`, `whatsapp_template_sync_delayed` e `intake_quickchat_summary_materialize`. Este último es un outbox de prioridad alta compartido por `source_detail=chatbot` y `chatbot_quickchat`: cada payload aceptado conserva en una transacción su audit exacto y job, tanto para un lead nuevo como para uno deduplicado. El JobRequest solo guarda `lead_id + audit_id` más el namespace técnico añadido por la cola; la sede validada queda en `audit.attribution_steps.resolved_clinic_id`. El handler exige esa sede y un mismatch con el lead termina `409` sin Message/socket; solo audits legacy sin marcador caen de forma segura en la clínica del lead. `Messages.metadata.intake_audit_id` impone orden durable: bajo lock del lead, el audit mayor gana y cualquier job antiguo completa como `skipped/stale` sin cambiar contenido, socket ni `last_message_at`; el watermark avanza aunque hash/contenido sean idénticos y un mensaje legacy idéntico adopta el primer marcador. El fast path admite el `result_summary` envuelto por `JobExecutor` y el formato directo compatible de callers/tests, devuelve `saved=true` solo si terminó, `202 + queued` si queda reintentable y preserva `4xx` seguros como el `409` de sede. Si falla el disparo, relee `JobRequest`; si tampoco puede releerlo responde `202 unknown_durable`, no inventa `pending`. Un `chatbot` deduplicado termina con ese outcome antes de Meta/Google para no duplicar conversiones, mientras los demás dedupes conservan `409`. Teléfonos fuera de 9–15 dígitos y emails presentes inválidos devuelven `422` antes de confirmar el lead. `pm2-back-staging` opera con cron leader + worker; las cinco líneas OPS se retiraron del crontab. `#23664-#23670` validaron los bridges y `payloadDefaults`; `#23672` completó la retención real. `SyncLogs` (auditoría funcional BD) y ficheros PM2 (stdout/stderr, 60 días) son retenciones independientes.
 
-### Candidata de ejecución gestionada Google Search
+### Ejecución gestionada Google Search desplegada y cerrada por flags
 
-Estado a 2026-07-19: el código permite crear una Google Search nueva en
+Estado a 2026-07-19: el código desplegado permite crear una Google Search nueva en
 `PAUSED`, activar después `PAUSED -> ENABLED` y retirar únicamente los recursos
-propios. **No está habilitado ni acreditado en staging**: la migración
-`20260719103000-create-managed-campaign-provider-executions.js` solo se ha
-validado en MySQL aislado, ambos flags permanecen apagados y no se ha realizado
-una llamada Google real. Propdental sigue en `connect_only`; este candidato no
+propios. La migración
+`20260719103000-create-managed-campaign-provider-executions.js` está aplicada
+en staging, pero ambos flags permanecen apagados y no se ha realizado una
+llamada ni mutación Google real. Propdental sigue en `connect_only`; este corte no
 autoriza convertirlo en Piloto ni tocar sus campañas.
 
 - Registry real único: `google_ads:google_search:create_new`. PMax, Meta,
@@ -326,8 +450,8 @@ autoriza convertirlo en Piloto ni tocar sus campañas.
 
 Runbook de rollout:
 
-1. Promover código y aplicar **solo** `20260719103000` con ambos flags apagados;
-   comprobar esquema, handlers, listado/capability y cero llamadas Google. No
+1. Confirmar código y migración `20260719103000` ya desplegados con ambos flags
+   apagados; comprobar esquema, handlers, listado/capability y cero llamadas Google. No
    ejecutar la migración `20260715152000`: continúa cancelada y no-op.
 2. Para un piloto autorizado, usar una campaña Search controlada con spec
    `autopilot + managed`, `approved_to_launch`, cuenta activa, prepago verificado
@@ -342,7 +466,7 @@ Runbook de rollout:
 
 El contrato completo de rutas, gates, estados, UI y recuperación está en
 `src/Documentacion/13-backend.md`, apartado **Ejecución gestionada Google
-Search: candidata cerrada por flags**.
+Search: desplegada y cerrada por flags**.
 
 Fix Enhanced verificado: el normalize/merge conserva flags y autorización en top/event/destino. La prueba controlada `#22` acreditó formato/transporte; después, siete intentos naturales `#25/#26/#27/#28/#30/#32/#33` de `1851215478` terminaron `succeeded/SUCCESS` con consentimiento, `user_data_sent=true` y `[email, phone]`. `5992356722` mantiene acciones/readiness y `validateOnly` verdes, pero todavía no un terminal natural posterior a la migración. Las ocho acciones canónicas siguen secundarias, fuera de `Conversions` y con default Google `0`: Mide y entiende enriquece atribución, pero no gobierna la puja.
 
@@ -351,9 +475,9 @@ Auditoría Google live 2026-07-16: las campañas heredadas continúan optimizand
 ACL operativa: agencia es marketing-only y solo recibe atribución/pacientes/leads seudonimizados dentro de scopes explícitos. No abre PII, Chat/Registro, QuickChat, Agenda/citas, consentimientos, Personal/equipo, settings, instalaciones, nutrición, dashboard operativo o fusiones. `reception`/`admin_staff` conservan `clinic.settings.edit` + `team.manage` local, pero nunca gestionan owners; backend preserva `owner_membership_manage_forbidden` y `owner_unlink_forbidden`.
 
 Release funcional histórica previa a Web: backend staging `9b82958`, frontend
-`3c4593ae`, build `8ca8e450c563e9ee`. El corte Web actual está documentado
-arriba (backend staging `5e57431`; corte funcional frontend staging `5f8f8858`,
-build limpio `5a08e6a108414a76`). Consent v5 sigue vigente. Propdental continúa en
+`3c4593ae`, build `8ca8e450c563e9ee`. El corte Web de aquel snapshot quedó en
+backend staging `5e57431`, frontend staging `5f8f8858` y build
+`5a08e6a108414a76`; el corte vigente 1.6 está documentado al inicio. Consent v5 sigue vigente. Propdental continúa en
 `connect_only`; no se activa Mejora/Piloto ni se cambian goals, URLs, pujas o
 presupuesto. Meta Francia no tiene todavía cuenta publicitaria/píxel
 configurados. `Conseguir más reseñas` está cerrado/listo.

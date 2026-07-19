@@ -7,6 +7,274 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
 
 ---
 
+## 2026-07-19 - Corte vigente Marketing Web 1.7 y contenido IA durable
+
+El corte backend vigente es `3f0c0e0`, promovido a staging mediante `a22b773`;
+incluye el E2E final de intake/snapshot sobre el hardening de destinos
+`8c4fdeb`/`55a34d7`, el bridge `6fdd153`/`f9c3049`, el
+fix de consentimiento `88b16c6`/`d8b8938` y parte del corte renderer/herencia
+`b17acf4`/`db348ef`. El frontend fuente es `dd138101`, promovido a la rama
+staging mediante `cf9805cc`, sobre la base `7435a827`/`522b1fc1`;
+`front-dev`/ng-serve quedó fast-forward y TypeScript pasa; su compilación de
+desarrollo terminó con hash `fa3f6c6dfda1977c`, pero no se generó ni publicó
+un bundle estático nuevo. Las migraciones aditivas
+`20260719103000-create-managed-campaign-provider-executions.js` y
+`20260719113000-create-web-content-generations.js`, además de
+`20260719170000-add-web-artifact-clinic-snapshot-identity.js`, están aplicadas
+en staging. `clinic_snapshot_hash` es `VARCHAR(64) NOT NULL`; el índice único
+incluye `revision_id`, renderer, entorno, base URL, runtime y snapshot de
+clínica, y el índice legacy ya no existe.
+La migración `20260715152000-purge-google-places-competition-content.js`
+continúa cancelada y es un no-op: no debe reactivarse ni describirse como una
+purga pendiente.
+
+El piloto WordPress de Propdental ya sirve
+`clinicaclick-web-renderer/1.7.0`. La primera republicación creó deployment
+`18fa50be-270f-4d70-96cb-95880ed0c68e`, secuencia `11`, y artefacto
+`aa05cb59-b27f-4d83-b8fb-f6ef0d4d5cb9` (hash `648cf766…`). `/cita/` devolvió
+`200`, HTML SHA-256 `153275eb…`, condicional `304`, `warnings=[]`,
+`PostalAddress`/`OpeningHoursSpecification` presentes y ninguna imagen de
+clínica insegura. La evidencia 1.6, artefacto `0dcd4d80…` y secuencias 8–10
+queda como historial de rollback, no como versión live.
+
+Durante un diagnóstico se mostró accidentalmente un HMAC vigente. No se
+reproduce en esta documentación: se rotó inmediatamente mediante la
+reconciliación durable `889cc3a4-7d09-4cb0-accb-65acbdbfbb61`, generación `2`.
+El target usa deployment `ae350f06-3325-4b88-9a46-3c37f2e627dc` y artefacto
+`2a2abd9a-9249-44a2-926c-92656084725b`, ambos verificados; la reconciliación
+terminó, las claves aceptadas pasaron de 2 a 1 y se eliminaron los envelopes
+source/target. El readback final base `/cita/` acredita hash de artefacto
+`cd4119d…`, SHA-256 HTML `a34a993…`, condicional `304`, renderer `1.7.0` en
+desktop/móvil, `WebSite`/`Dentist`/`WebPage`, `PostalAddress`, diez horarios,
+ausencia deliberada de imagen Schema y CSP correcto. Es una evidencia distinta
+de la landing Hospitalet descrita debajo. Una sincronización manual WordPress debe ejecutarse
+como usuario OS del sitio `propdental.es`, nunca como `root`: el primer intento
+1.7 dejó la caché ilegible, se reparó ownership y se repitió con ese usuario.
+
+El E2E campaña -> landing descubrió un caso real de precedencia de
+`IntakeConfig`: Hospitalet `59` tenía la fila local `81`, válida para sus
+integraciones técnicas pero sin consentimiento web completo, y esa fila
+ocultaba el consentimiento grupal válido `24`. El fix `88b16c6` conserva
+`intake_config_id`, chat, teléfono e integraciones efectivos de la clínica y
+solo hereda el bloque de consentimiento del grupo cuando se cumplen a la vez
+cuatro condiciones: el consentimiento local no está listo, la pertenencia real
+al grupo coincide, `group.config.locations` incluye explícitamente la clínica y
+el consentimiento grupal está completo. No hay fallback cross-group ni ante
+una lista de sedes implícita/vacía. La respuesta separa procedencias mediante
+`consent_source_scope`, `consent_source_scope_id` y
+`consent_source_intake_config_id`; por tanto no atribuye al grupo las
+integraciones locales ni oculta qué fila autorizó el consentimiento.
+
+La suite `npm run test:marketing-web` pasó tras el cambio. Staging amplió de
+forma acotada `MARKETING_WEB_PUBLISHING_SCOPES` a `group:5,clinic:59` y se
+reinició de forma segura. El proyecto E2E
+`4df293bd-98b9-4dd7-a601-3c557048925c` resuelve intake local `81`,
+consentimiento de grupo `24` listo e instalación WordPress disponible. La
+publicación `fe4dece6-36a8-47f2-86a0-70235f8e11d6` está verificada con
+deployment `e5156f84-7977-4c4d-b626-42acd33f7bff` y artefacto
+`dafc020d-03a0-4c6a-9c7f-e4d93fe18376` en
+`https://www.propdental.es/cita/primera-visita-hospitalet/`.
+
+El bridge runtime necesitaba exportar de forma explícita
+`stableHttpsDestination`; el fix `6fdd153`/`f9c3049` lo convierte en contrato
+del hook, sin relajar la validación HTTPS. `marketing_web.landing_published.v1`
+job `32462` completó tras un retry natural (`4/8`), sin error, y creó el binding
+final `8a056617-7072-4e2a-9a84-e6438a303175` para estrategia `10`, clínica `59`,
+proyecto/publicación/artefacto anteriores y la URL exacta. La estrategia está
+en `connect_only`: `destination_status`/capability quedaron `blocked`, con
+`measure_mode_never_changes_destinations`, y las siete cuentas quedaron
+bloqueadas. `destination_ready` job `32468` completó. Desde las `18:25` no se
+creó ningún `marketing_campaign.destination_apply.v1`; por tanto hubo **cero
+mutaciones de proveedor**, que es el resultado correcto de Mide y entiende.
+
+El readback público devolvió `200`, condicional `304`, header/marker exactos,
+hash de artefacto `3a8aff…`, renderer `1.7.0`, salida determinista, cero código
+ejecutable aportado por el usuario y `warnings=[]`; contiene un formulario, un
+grafo JSON-LD, `PostalAddress` y horarios. Chromium a `1440` y `390` confirmó
+HTTP `200`, overflow `0` —salvo el honeypot deliberadamente fuera de
+pantalla—, email, teléfono, consentimiento, contacto preferido, Consent y chat
+correctos, con cero errores de consola o página. Evidencia:
+`/home/ubuntu/qa-evidence/marketing-web-editor/campaign-landing17-live/` y
+`campaign-landing17-e2e-evidence.json`. Este E2E acredita publicación
+heredada, binding auditable y el guard de no mutación de `connect_only`; no
+afirma que se haya cambiado un destino publicitario ni habilita hosted/custom.
+
+El E2E controlado posterior cerró también el intake de esa landing en staging.
+Creó temporalmente `LeadIntake #7272` para clínica `59`/grupo `5`, con
+`source=google_ads` y `source_detail=clinicaclick_web_landing`, publicación
+`fe4dece6-36a8-47f2-86a0-70235f8e11d6`, binding
+`8a056617-7072-4e2a-9a84-e6438a303175`, cuyo `targetKind` persistido es
+`general`; asignación Google Ads `28`, customer `1851215478`, campaña
+`21313059516` y resolución Ads a estrategia `10`, request `24`,
+`target_kind=generic`. El snapshot inmutable `web_landing` schema `1` validó
+la identidad exacta de publicación, proyecto, revisión, página, artefacto,
+formulario, scope, asignación Ads y estrategia antes de aceptar la atribución.
+La revisión exacta fue `fc244f6e-b0b5-46cf-af72-05041a70c3a3`, deployment
+`e5156f84-7977-4c4d-b626-42acd33f7bff`, artefacto
+`dafc020d-03a0-4c6a-9c7f-e4d93fe18376` y hash
+`3a8aff298c3768acbb6564ab4cc2c63ed6009abb614a29a549483422ea762dc4`.
+La conversión terminó `skipped/no_permitted_identifiers`, con
+`provider_request_id=null`; por tanto el E2E produjo **cero escrituras
+externas** y no demuestra una conversión enviada a Google. La limpieza
+confirmó cero restos de lead, formulario, audit, intento y eventos, y retiró
+además ocho eventos de preflight. Evidencia saneada:
+`/home/ubuntu/qa-evidence/marketing-web-editor/campaign-landing17-lead-e2e-evidence.json`.
+
+El hardening final de destinos `8c4fdeb`/staging `55a34d7` cierra el límite
+entre los tres modos. Al crear/revalidar un binding persiste en su autorización
+un snapshot digest de modo, estado activo, scope, mandato y cohorte exacta
+ordenada de cuenta/campaña/familia; la identidad de ejecución congela además el
+destino y la operación concreta. La estrategia debe estar activa y todas sus
+filas deben conservar un único modo/estado. La solicitud y el worker revalidan
+el contrato antes de preparar, antes de mutar, después de mutar y tras el
+readback; los jobs hermanos no se invalidan por un incremento incidental de
+`binding.version`. Piloto automático vuelve a comprobar en cada gate la
+`ManagedCampaign` y sus constraints/aprobación vigentes.
+
+Un binding antiguo sin digest falla cerrado con
+`campaign_destination_binding_refresh_required`; cambiar modo, estado, scope,
+mandato o cohorte devuelve `campaign_destination_strategy_changed`, y una
+cuenta que ya no pertenece al target devuelve
+`campaign_destination_account_not_in_strategy`. Antes de mutar, cualquiera de
+estos casos termina `blocked` con `provider_mutation=false`. Si el contrato
+cambia después de iniciarse una mutación autorizada, el sistema no aplica otro
+destino: encola la compensación. Incluso tras bajar a `connect_only`, un
+rollback automático o manual puede restaurar **exclusivamente** el
+`beforeState` capturado por aquella operación autorizada; no admite URL libre
+ni reaplica el `desiredState`. La atribución legacy sin target solo se recupera
+si la pareja Google cuenta/campaña pertenece de forma única al target exacto de
+la landing; `general` y `generic` se canonicalizan y cualquier ambigüedad falla
+`web_landing_google_strategy_mismatch`. Auditor independiente: **GO**; pruebas
+focales **29/29** y suite Campañas **81/81**. El corte final
+`3f0c0e0`/`a22b773` añade el snapshot inmutable y el cierre controlado anterior;
+la suite completa termina **354/354** contratos Node de Marketing Web,
+**40/40** WordPress y **81/81** Campañas.
+
+La generación IA quedó acreditada extremo a extremo sin aceptación ni
+publicación automática: generación
+`b2f25c1b-9258-4228-bebc-ec636dcf141f`, `JobRequest #32302`, estado
+`completed`, proveedor `openai`, modelo efectivo `gpt-5.6-sol`, Responses API
+server-side, `store:false` y Structured Outputs. La propuesta se persistió,
+pero `accepted_content_entry_id` permanece `null`; por tanto no se creó un
+borrador CMS por aceptación y no se publicó nada. El hotfix backend permite
+persistir transiciones internas parciales del job sin relajar la validación de
+los payloads públicos; el fence one-shot sigue impidiendo repetir una llamada
+de proveedor cuyo resultado sea incierto.
+
+El último frontend estático acreditado tiene build hash `2ad4b1b987a9fde2`, bundle principal
+`main.5e80d0ee5d4c9ec5.js` y chunk Marketing
+`3584.9ae0ef3a69fb0819.js`; el CRM público responde `200`. El build anterior
+`b218a1d8f3575d73` y su QA Chromium desktop `1440x1000`/móvil `390x844`
+quedan como baseline visual histórica: cero overflow, cero solapamiento y cero
+errores de consola, página o HTTP. Su evidencia saneada
+`result.json` tiene SHA-256
+`c1f4a16feea37dd8c42917642f9f2a95820f4721781259a0696ed8d91d25f35c`.
+El QA público WordPress se repitió en contextos Chromium separados desktop y
+móvil: HTTP `200`, mismo artefacto, consentimiento aceptado, banner oculto,
+`visible_chat_candidates=1` y overflow `0` en ambos. Evidencia
+`wordpress-renderer16-live/result.json`, SHA-256
+`2b7e024f3fb586faf593732a54c40868e5b4d03c87ccda98f7852297ffc0701d`.
+Solo persiste el warning benigno de que `frame-ancestors` no se aplica desde
+meta CSP; el header CSP real sí lo incluye.
+
+La ejecución gestionada Google Search está desplegada y migrada, pero sus dos
+flags (`MANAGED_CAMPAIGN_PROVIDER_EXECUTION_ENABLED` y
+`MANAGED_CAMPAIGN_PROVIDER_ACTIVATION_ENABLED`) permanecen apagados. No hubo
+llamadas ni mutaciones reales de Google: crear, activar y rollback continúan
+fail-closed hasta autorización y activación explícitas. WordPress es el único
+canal público acreditado; `clinicaclick_hosted` y `custom_domain` siguen
+bloqueados por DNS/TLS/proveedor/E2E externo y no se consideran operativos. La
+forma hosted canónica planificada es `https://sites.clinicaclick.com/<slug>/`;
+no se ha validado el modelo por subdominio/wildcard. Antes de comercializar
+hosted o custom falta también el flujo de retiro/deprovisión, incluida la
+eliminación del Custom Hostname/WebDomain del proveedor.
+
+Contrato promovido y acreditado en el E2E controlado de publicación/binding
+`connect_only`: una clínica puede consumir la instalación
+WordPress activa propiedad de su propio grupo. La resolución debe exponer
+`inherited_from_group=true` y `source_scope`, sin permitir cross-group ni la
+herencia inversa de una instalación de clínica hacia el grupo. El proyecto y
+la publicación conservan scope propio de clínica; el grupo sigue siendo el
+único administrador del plugin, token e instalación compartida.
+
+Al crear una publicación desde un proyecto de grupo, la clínica que se
+materializará en `configuration.clinic_id` se bloquea con `UPDATE` y se
+revalida como activa y miembro del mismo grupo dentro de la transacción. Así un
+movimiento o una desactivación concurrentes no pueden dejar una publicación
+recién creada fuera de scope. Los focos de servicios+guards pasan **26/26** y
+el E2E Hospitalet acreditó la ruta heredada sin mutar proveedor.
+
+La autorización es row-backed y se revalida contra membresía activa; crear una
+publicación no concede un derecho durable si la clínica abandona el grupo. El
+PATCH que cambia grupo o desactiva la clínica falla cerrado hasta retirar las
+rutas WordPress heredadas y recibir confirmación/tombstone del runtime
+(`clinic_membership_wordpress_publication_retirement_required`). El inventario
+cubre también publicaciones `scope=group` materializadas para la
+clínica mediante `configuration.clinic_id`: no puede sacarse ni desactivarse la
+clínica hasta retirar esas rutas y recibir tombstone ACK. La herencia
+del runtime/HMAC también exige reconciliarse antes de cambiar grupo
+(`clinic_group_change_web_runtime_reconciliation_required`). Este preflight usa
+la misma transacción/locks del cambio de clínica y no debe eludirse desde UI.
+La edición bulk de grupos tampoco es un bypass:
+`groupAssets.updateGroupConfig` centraliza
+`applyClinicMembershipSelection`, toma locks de `Clinica` en orden estable y
+ejecuta por cada transición los mismos gates de retire+ACK WordPress y
+reconciliación de runtime antes de mutar pertenencias. El controller conserva
+el `409` y el código de dominio. La regresión
+`web_group_membership_transition_guard` pasa 4/4 y la focal ampliada 76/76.
+El E2E campaña -> ruta Hospitalet ya acredita la herencia de publicación; la
+transición destructiva de membresía/revocación conserva su E2E operativo
+independiente.
+
+Revocar una instalación no reutiliza el máximo operativo de 20 rutas activas:
+inspecciona hasta `MAX_WORDPRESS_PUBLICATION_HISTORY=200` publicaciones
+históricas y exige retiro más tombstone ACK para todas. La regresión con 21
+tombstones bloquea si falta un ACK y revoca solo cuando están los 21; la focal
+ampliada pasa **76/76**. Está desplegado; el E2E destructivo específico de
+revocación masiva continúa pendiente y no debe confundirse con el E2E
+campaña -> ruta Hospitalet ya cerrado.
+
+El registry, la validación de ACK y la carga de artefacto revalidan también las
+publicaciones `scope=group` mediante su `configuration.clinic_id`. Si la
+clínica falta, está inactiva o ya no pertenece al grupo, la ruta se excluye
+fail-closed. Los locks mixtos de publicaciones clinic/group se ordenan por
+`effectiveClinicId` para evitar deadlocks. El foco tras este parche pasa 76/76;
+la suite integral de aquel corte pasó 351/351 y el cierre final posterior
+amplía Marketing Web a 354/354.
+
+Contrato live del renderer **1.7**: el compilador puede
+completar `PostalAddress` y `OpeningHoursSpecification` desde la ubicación
+efectiva verificada, pero no reutiliza automáticamente fotos de Google Business
+Profile ni sus `googleUrl`. Para OG/Schema solo admite la imagen canónica de
+Clinicaclick cuando es pública y supera el mínimo de tamaño; sin ella omite la
+imagen. La ficha GBP efectiva nunca se elige por `last_synced_at`: en modo de
+grupo se usa exclusivamente `business_profile_primary_location_id`; en modo
+clínica se exige una única asignación explícita y, si no existe, una única
+`ClinicBusinessLocation` directa que esté activa, verificada y no suspendida.
+Dos asignaciones o dos fichas directas candidatas son ambiguas y el compilador
+no completa dirección/horario desde Google. Los contratos primaria frente a
+reciente y doble ficha ambigua pasan **21/21** focales. La identidad inmutable
+añade `clinic_snapshot_hash` a DB, marker,
+manifest y caché. Así un artefacto no puede reutilizarse entre clínicas y un
+cambio de dirección u horario efectivo fuerza un artefacto nuevo. La migración
+aditiva `20260719170000-add-web-artifact-clinic-snapshot-identity.js` está
+aplicada y el renderer pasa su tanda focal **43/43**. La publicación inicial,
+el readback final tras rotación y el E2E campaña -> ruta Hospitalet de 1.7
+están acreditados. El intake controlado de la landing también está acreditado y
+limpio mediante `LeadIntake #7272`; no hubo escrituras externas. El 1.7 retira
+`frame-ancestors` de la meta CSP, donde el navegador lo ignora, y lo conserva
+en el header CSP real.
+
+Evidencia definitiva del código promovido: backend Marketing Web **354/354**
+contratos Node, contratos WordPress **40/40**, Campañas **81/81**, reviewer
+focal **96/96** con GO explícito y sin hallazgos high/medium, frontend
+Marketing **302/302**, TypeScript aplicación/specs exit `0` y `git diff
+--check` limpio. `front-dev`/ng-serve compiló en desarrollo con hash
+`fa3f6c6dfda1977c`; no es un build estático desplegado. Estos resultados no
+sustituyen el readback final, E2E público ni rollback posterior al target.
+
+---
+
 ## 2026-07-19 - Marketing Web `alpha.8` promovido; E2E multi-route cerrado
 
 La rama de integración contiene el corte completo del editor/CMS,
@@ -66,7 +334,7 @@ responden `404`. El E2E público de dos rutas, la rotación HMAC y el readback
 ETag terminaron y se detallan más abajo. Cloudflare y origen devuelven `304`
 con `If-None-Match` exacto después de retirar el magic-quotes de WordPress.
 
-El inventario canónico de la candidata de integración es **33 tareas
+El inventario canónico del runtime vigente es **33 tareas
 periódicas**, **14 integraciones dirigidas/background**, **47 tipos background**
 en total y **63 handlers**. `web_content_generation` y las operaciones
 `managed_campaign.google_search_create.v1`,
@@ -203,13 +471,13 @@ Referencias normativas: [Places API policies](https://developers.google.com/maps
 
 Regresiones mínimas: `business_profile_local.test.js`, `marketing_competition_heatmap_cache.test.js`, `marketing_competition_suggestions_efficiency.test.js`, `marketing_competitor_hydration_queue.test.js`, `marketing_report_lead_attribution.test.js`, `marketing_report_effective_assets.test.js`, `scheduled_jobs_orchestration.test.js` y `access_policy.test.js`.
 
-## 2026-07-14 - Corte desplegado: jobs unificados, outbox de intake, Consent v5 y `Conecta y mejora`
+## 2026-07-14 - Corte desplegado: jobs unificados, outbox de intake, Consent v5 y `connect_only`
 
 Release funcional staging: backend `9b82958`, promovido desde dev `ac994a0`; frontend `3c4593ae`, promovido desde dev `667c6a73` —cambio funcional `f9266f0a`—, build `8ca8e450c563e9ee`. Propdental continúa en `connect_only`; Piloto automático no está activo.
 
 > **Nota de inventario vigente 2026-07-19:** los conteos `30/6/48` de esta
 > sección se conservan como evidencia del cutover del 14 de julio. El runtime
-> de la candidata actual registra **33 tareas periódicas**, **14 integraciones
+> vigente registra **33 tareas periódicas**, **14 integraciones
 > dirigidas/background**, **47 tipos background** y **63 handlers**, incluidos
 > `marketing_web_publication_health_monitor` y
 > `web_intake_runtime_reconcile`; todos siguen materializados en
@@ -219,7 +487,7 @@ Release funcional staging: backend `9b82958`, promovido desde dev `ac994a0`; fro
 
 `SCHEDULED_JOB_DEFINITIONS` contiene 30 tareas periódicas. Las seis nuevas son `system_pm2_log_retention` y cinco bridges OPS (`ops_global_discovery`, `ops_summary`, `ops_google_business_profile_daily`, `ops_search_console_daily`, `ops_google_business_profile_requested`). `node-cron` solo crea `JobRequest`; el worker durable ejecuta, reintenta, recupera y audita. Los bridges conservan `UTC`. `OPS_INTERNAL_API_TOKEN` es obligatorio y nunca se registra.
 
-El inventario de aquel cutover contenía 48 handlers. La candidata actual tiene
+El inventario de aquel cutover contenía 48 handlers. El runtime vigente tiene
 63; la nota superior es la fuente vigente. Las 6 integraciones
 dirigidas/background de aquel corte eran `meta_ads_backfill_for_sites`,
 `web_backfill_for_sites`, `analytics_backfill_properties`,
@@ -267,7 +535,12 @@ Implementación de referencia: `getOperationalStaffClinicIdsForUser()` obtiene l
 
 ### Contrato comercial
 
-`connect_only` se muestra como **Conecta y mejora**: conecta cuentas, importa/unifica leads, atribuye el ciclo, envía conversiones consentidas mejoradas/offline y genera diagnósticos/recomendaciones. No modifica campañas, custom goals, pujas, presupuesto o estados. Piloto automático es una orden `managed_service` separada y aprobada.
+En aquel corte `connect_only` se mostraba como **Conecta y mejora**; su nombre
+canónico actual es **Mide y entiende**. Conecta cuentas, importa/unifica leads,
+atribuye el ciclo, envía conversiones consentidas mejoradas/offline y genera
+diagnósticos/recomendaciones. No modifica campañas, custom goals, pujas,
+presupuesto o estados. Piloto automático es una orden `managed_service`
+separada y aprobada.
 
 Chromium live confirmó Consent v5 móvil, chat esperando seis segundos después del consentimiento, Leads/Campañas/Personal/Agenda y la corrección del `400`: solo se llamó `/api/marketing/bulk-sends/campaigns?scope=group:5&context=mass_sends`, con `200` y sin request sin scope. Meta Francia continúa sin cuenta publicitaria/píxel configurados. `Conseguir más reseñas` está cerrado/listo.
 
@@ -400,7 +673,7 @@ La cita desde un lead combina dos controles, no uno: el lead debe ser legible y 
 
 Los recursos de grupo aplican cobertura total: para leer o mutar un recurso que afecta a varias clínicas, el actor debe estar autorizado en **todas** las clínicas afectadas o ser admin global. Ser propietario/staff de una sola sede no habilita eliminar un grupo, editar asignaciones o aplicar una operación group-wide. El mismo principio se usa en `/api/personal/fusionar`: exige `team.manage` en todas las clínicas de ambas cuentas; si alguna membresía es propietaria, solo admin global.
 
-Las membresías de propietario tienen una barrera independiente del catálogo de capacidades. `src/controllers/personal.controller.js` responde `owner_membership_manage_forbidden` al intentar asignar/cambiar una membresía de propietario sin autoridad y `owner_unlink_forbidden` al intentar desvincularla. Esta protección no se debe rebajar para habilitar a recepción: la vía correcta es conservar `team.manage` para doctores/personal ordinario. El frontend refleja el bloqueo, pero backend sigue siendo la autoridad. Tras añadir los gates legítimos `/personal -> team.view` y `/personal/me -> team.schedule.self.manage`, el SHA-256 esperado del controller es `ea9361df7e6c41ef4dd75e622ac83fdf42aaae1751c89e5abf16d59c069fb927`; el cambio de hash respecto al baseline no es una reversión de los dos errores owner.
+Las membresías de propietario tienen una barrera independiente del catálogo de capacidades. `src/controllers/personal.controller.js` responde `owner_membership_manage_forbidden` al intentar asignar/cambiar una membresía de propietario sin autoridad y `owner_unlink_forbidden` al intentar desvincularla. Esta protección no se debe rebajar para habilitar a recepción: la vía correcta es conservar `team.manage` para doctores/personal ordinario. El frontend refleja el bloqueo, pero backend sigue siendo la autoridad. Tras añadir los gates legítimos `/personal -> team.view` y `/personal/me -> team.schedule.self.manage`, el SHA-256 esperado del controller es `776da1bf46ca128e08c2f215f64c7dd48dd6615859c96cb75a5b4e8a7ba75b30`; el cambio de hash respecto al baseline no es una reversión de los dos errores owner. Los tres bloques de protección de propietario conservan procedencia en `455a9050`.
 
 En privacidad de agencia, los seudónimos son estables por ID local (`Paciente #XXXXXX` / `Lead #XXXXXX`) para poder seguir métricas sin revelar identidad. La redacción elimina contacto, PII clínica, notas, click IDs, URLs/referrer, campos de formulario, coincidencia con paciente, citas enlazadas y conversación. `GET /api/intake/leads/:id/activity` devuelve `403 lead_sensitive_forbidden`; las mutaciones devuelven `403 lead_manage_forbidden`. Los sockets emiten solo IDs, scope, canal, estado y timestamps y la suscripción a rooms sensibles se deniega si faltan capacidades.
 
@@ -1006,6 +1279,15 @@ Estado actual del producto:
 - el pixel se selecciona entre los pixels existentes del ad account resuelto;
 - si la clínica/grupo no tienen pixel configurado, Meta CAPI puede seguir usando el global del entorno si existe;
 - si tampoco existe pixel global, no se envía CAPI y el readiness lo marca como incompleto.
+
+Límite operativo vinculante: Meta CAPI es hoy un envío web **best-effort
+inline** cuando existe pixel/activo efectivo. No tiene todavía un outbox
+durable, reintentos propios, idempotencia y diagnóstico de entrega equivalentes
+al carril Google Data Manager, ni materializa como eventos offline Meta los
+hitos CRM `qualified_lead`/`schedule`. Por tanto la UI y la documentación no
+deben afirmar paridad Google/Meta ni prometer que todo evento compatible llegará
+a Meta. Backlog: outbox durable, retry/backoff, clave idempotente, auditoría y
+diagnóstico por terminal, además de eventos CRM offline consentidos.
 
 ### Google Tag / Google Ads
 
@@ -4057,9 +4339,9 @@ Los `external_targets` guardados dentro de una estrategia son un snapshot editab
 - el audit embebido conserva versión, clave, fuente, scope y resultado de cada fase; `SyncLog.status_report.visitor_choice_personalization_reconciliation` registra el barrido global y `internal_enhanced_conversion_activation` el gate Propdental. Ambos reportes carecen de PII y declaran `google_ads_mutated=false`;
 - una attestation operativa caducada tiene semántica de **renovación de la observación web**, no de retirada retroactiva de la autorización del anunciante. `assessConsentMeasurementReadiness` devuelve `verification_current=false`, `renewal_required=true` y `runtime_configuration_ready=true` solo si firma, scope, dominio, hash de configuración y señales persistidas siguen siendo coherentes. El gate ya aplicado puede responder `already_active + ready=true` con ese aviso, pero no concede consentimiento: cada evento sigue necesitando la elección viva del visitante. Una firma inválida, cambio de configuración, dominio sin cubrir, cuenta apagada, allowlist incoherente o cualquier drift no temporal continúa bloqueando. La renovación se obtiene volviendo a **Comprobar web**; no se amplía el token ni se inventa una verificación desde el scheduler;
 - tras un gate Enhanced sano, `googleDataManagerDiagnostics` llama a `reconcileVerifiedConnectOnlyStrategyActivationReadiness`: relee acciones y ejecuta Data Manager `validateOnly` con `createMissing=false`; solo las clínicas `19/35/56/58/59` declaradas en `groupRecord.config.locations` pueden heredar la configuración web de `propdental.es`, mientras Francia `36` y Eixample `57` quedan bloqueadas hasta tener `IntakeConfig` propio válido. Para cada request Propdental `active + connect_only + new_patients + Google`, revalida snapshots ausentes, caducados o con drift de clave/scope/cuentas, exige evidencia completa por action/target y vuelve a comprobar fingerprints bajo locks antes de corregir únicamente `solicitud.activation_readiness`. Guarda scope validado, snapshot anterior y clave de reconciliación, tolera concurrencia, es idempotente y se audita en `SyncLog.status_report.connect_only_strategy_readiness_reconciliation`. Declara `external_mutation_performed=false`/`google_ads_mutated=false`, no toca `Campaign`, goals, pujas o Google y no activa Piloto automático;
-- la auditoría durable `googleConversionGoalPolicyAudit` (`17 2 * * *`) ya no descubre solo `google_ads.goal_policy.enabled`. Mantiene esa auditoría de Piloto automático y añade como target `connect_only_measurement` la configuración de medición efectiva de cada estrategia activa `connect_only + new_patients + Google`. Una fila de grupo cubre una sola vez sus `locations`; no se vuelven a auditar sus overrides de clínica. Para Conecta y mejora relee acciones canónicas, compara el ID configurado de cada destino con el ID canónico observado, comprueba estado/counting/secundaria, scopes/quota, ejecuta Data Manager `validateOnly`, valida allowlist Enhanced y clasifica consentimiento/renovación. El `SyncLog` separa `goal_policy_target_count` y `connect_only_measurement_target_count`; `target_count` es su suma. No autorepara ni muta campañas, goals, pujas, acciones o configuración Google. Una attestation caducada coherente es warning; el drift real es critical y activa el flujo `jobs.failed`;
+- la auditoría durable `googleConversionGoalPolicyAudit` (`17 2 * * *`) ya no descubre solo `google_ads.goal_policy.enabled`. Mantiene esa auditoría de Piloto automático y añade como target `connect_only_measurement` la configuración de medición efectiva de cada estrategia activa `connect_only + new_patients + Google`. Una fila de grupo cubre una sola vez sus `locations`; no se vuelven a auditar sus overrides de clínica. Para **Mide y entiende** (`connect_only`, antes **Conecta y mejora**) relee acciones canónicas, compara el ID configurado de cada destino con el ID canónico observado, comprueba estado/counting/secundaria, scopes/quota, ejecuta Data Manager `validateOnly`, valida allowlist Enhanced y clasifica consentimiento/renovación. El `SyncLog` separa `goal_policy_target_count` y `connect_only_measurement_target_count`; `target_count` es su suma. No autorepara ni muta campañas, goals, pujas, acciones o configuración Google. Una attestation caducada coherente es warning; el drift real es critical y activa el flujo `jobs.failed`;
 - cada target `connect_only_measurement` añade `campaign_quality`, generado por `googleAdsConnectOnlyQualityAudit.service.js`. Ensambla la unión deduplicada por `customer_id + campaign_id` de las referencias Google declaradas en `external_targets`, `targets` o `measurement.external_targets` de la estrategia y los `campaign_ids` de los destinos canónicos de medición. Estos destinos ya proceden del gate scoped; cada cuenta ha pasado por `resolveScopedGoogleAdsRuntime` y el auditor comprueba que el runtime, nuevo o reutilizado desde la caché del mismo ciclo, corresponde a esa cuenta. Incorporar una campaña usada para enrutar conversiones no amplía clínicas, grupos ni cuentas. La estrategia conserva la etiqueta cuando una referencia aparece en ambos orígenes. Usa exclusivamente `POST customers/{id}/googleAds:search`, troceando el inventario en lotes de hasta 200 IDs por cuenta: una consulta agregada de los últimos 30 días para existencia, estado, canal/subtipo, puja, presupuesto, estado primario/motivos, coste, impresiones, clics, conversiones/valor y `optimization_score`; una lectura de `conversion_goal_campaign_config`/custom goal; y, si la consulta con métricas omite una campaña, un fallback de existencia sin métricas. Si la versión/cuenta rechaza `optimization_score`, repite la lectura sin ese campo y lo declara no disponible. Una prueba de 201 campañas confirmó dos consultas de calidad + dos de goals y 201/201 observadas. Otra regresión con cuentas conceptuales `185...`/`599...` cubre campañas solo de medición, solo de estrategia y duplicadas, sin cruzar cuentas ni emitir mutaciones. El resultado clasifica campañas ausentes, eliminadas/pausadas, limitaciones de entrega, score inferior al 70 %, gasto sin conversiones y alineación con una única señal canónica de puja; genera recomendaciones, nunca las aplica. En una campaña pausada, la ausencia de mapping canónico es warning, no un fallo que bloquee medición;
-- `campaign_quality` persiste en la allowlist de `SyncLog.status_report.connect_only_measurement_targets`: no conserva tokens ni claves arbitrarias del proveedor y fuerza `autorepair=false`, `external_mutation_count=0` y `google_ads_mutated=false`. Sus incidencias permanecen dentro del subreporte de calidad: no alteran `runtime_ready`, no convierten por sí solas el job en fallo y un error técnico de esa lectura se expone como warning exterior. El gate de medición/Enhanced conserva sus propios críticos. Evidencia live del 2026-07-16: se descubrieron 3 targets Conecta y mejora y 0 de goal policy. El grupo Propdental (`IntakeConfig #24`) quedó `measurement_healthy=true`, `runtime_ready=true`, 8/8 destinos `validateOnly`, 0 críticos y un warning renovable de attestation. El primer corte observó 30/30 campañas del snapshot de estrategia. Tras corregir la unión, el segundo corte ejecutado con el código nuevo observó **35/35** referencias únicas —17/17 en `185...` y 18/18 en `599...`—, incluyó las cuatro Smart, incluida `Buenos Dentistas y Personal`, y devolvió 0 críticos y 92 incidencias/recomendaciones consultivas. `ChangeEvent` fue 0 en ambas cuentas, no se creó `SyncLog` y el contrato mantuvo `autorepair=false`, `external_mutation_count=0` y `google_ads_mutated=false`; las campañas activas siguen heredando goals legacy a nivel de cuenta. Francia mostró 4/10 observables porque `599...` no está asignada a esa clínica y Eixample 0/4 porque ninguna cuenta está asignada a su scope. Son gaps explícitos de asignación/remediación, no permiso para ampliar scopes o mutar Google;
+- `campaign_quality` persiste en la allowlist de `SyncLog.status_report.connect_only_measurement_targets`: no conserva tokens ni claves arbitrarias del proveedor y fuerza `autorepair=false`, `external_mutation_count=0` y `google_ads_mutated=false`. Sus incidencias permanecen dentro del subreporte de calidad: no alteran `runtime_ready`, no convierten por sí solas el job en fallo y un error técnico de esa lectura se expone como warning exterior. El gate de medición/Enhanced conserva sus propios críticos. Evidencia live del 2026-07-16: se descubrieron 3 targets **Mide y entiende** y 0 de goal policy. El grupo Propdental (`IntakeConfig #24`) quedó `measurement_healthy=true`, `runtime_ready=true`, 8/8 destinos `validateOnly`, 0 críticos y un warning renovable de attestation. El primer corte observó 30/30 campañas del snapshot de estrategia. Tras corregir la unión, el segundo corte ejecutado con el código nuevo observó **35/35** referencias únicas —17/17 en `185...` y 18/18 en `599...`—, incluyó las cuatro Smart, incluida `Buenos Dentistas y Personal`, y devolvió 0 críticos y 92 incidencias/recomendaciones consultivas. `ChangeEvent` fue 0 en ambas cuentas, no se creó `SyncLog` y el contrato mantuvo `autorepair=false`, `external_mutation_count=0` y `google_ads_mutated=false`; las campañas activas siguen heredando goals legacy a nivel de cuenta. Francia mostró 4/10 observables porque `599...` no está asignada a esa clínica y Eixample 0/4 porque ninguna cuenta está asignada a su scope. Son gaps explícitos de asignación/remediación, no permiso para ampliar scopes o mutar Google;
 - la política de valores v1 usa Lead `0 EUR`, Contact `0 EUR`, Qualified Lead `10 EUR` y Schedule `40 EUR` como pesos de reporting/optimización (`value_is_revenue=false`). Schedule es una cita agendada/vinculada, no necesariamente confirmada o atendida. Purchase no se materializa por este gate: aunque el servicio actual puede construirlo con `Tratamientos.precio_base` o `0`, Propdental lo mantiene deshabilitado porque ese catálogo no demuestra ingreso/margen real. Este flujo no cambia automáticamente la estrategia de puja ni los objetivos de Google;
 - estado live verificado el 2026-07-13 `09:38:42 UTC`, con staging backend `323e4a4` y frontend `a1c875ea`: una lectura directa a Google devolvió términos aceptados y `enhanced_conversions_for_leads_enabled=true` para `1851215478` y `5992356722`; Data Manager aceptó `validateOnly` en ambas. El reconciliador post-Verificar devolvió `already_active`, `ready=true`, fue idempotente y declaró `google_ads_mutated=false`. La activación interna no depende de Play ni muta Google Ads;
 - reconciliación global `visitor_choice`: 18 `IntakeConfig` examinadas, 17 `activated`, 1 `already_active`, 0 errores y `grants_consent=false`. `features.ad_personalization_enabled=true`, user data y Enhanced son capacidades server-side; ninguna concede Marketing por el visitante;
@@ -4071,7 +4353,7 @@ Los `external_targets` guardados dentro de una estrategia son un snapshot editab
 - lectura Google live read-only `21:23-21:24 UTC`: en `1851215478`, Lead `7680195320`, Contact `7680195323`, Qualified Lead `7682299115` y Schedule `7680638785`; en `5992356722`, Lead `7540337982`, Contact `7540337985`, Qualified Lead `7682721076` y Schedule `7540337988`. Las ocho acciones estaban `ENABLED`, `UPLOAD_CLICKS`, `MANY_PER_CLICK`, `primary_for_goal=false`, fuera de `include_in_conversions_metric`, con default `0` y `always_use_default_value=false`. La policy de payload sigue `0/0/10/40` como pesos no económicos. Purchase está deshabilitado y fuera de estas ocho/Enhanced;
 - evidencia natural Enhanced al corte `2026-07-15 15:30 UTC`: los siete intentos reales `#25/#26/#27/#28/#30/#32/#33` terminaron `succeeded/SUCCESS`, todos con `consent_status=GRANTED`, `explicit_ad_user_data=GRANTED`, elección de personalización presente, `user_data_sent=true` y dos identificadores `[email, phone]`. El transporte normaliza y aplica SHA-256 antes de construir `event.userData`; la auditoría solo conserva flags/tipos, nunca email, teléfono ni sus hashes reutilizables. Los siete corresponden todavía a Lead de la cuenta `1851215478`: acreditan el terminal asíncrono enriquecido real, pero no sustituyen terminales naturales de Qualified Lead/Schedule ni prueban la cuenta `5992356722`;
 - dry audit live read-only `2026-07-15 23:42 UTC` sobre `IntakeConfig #24`: `8/8` destinos Lead/Contact/Qualified Lead/Schedule de ambas cuentas coincidieron con la acción canónica y pasaron Data Manager `validateOnly`; `critical_count=0`, allowlist activa y `runtime_ready=true`. Solo quedó el warning renovable de attestation de `propdental.es`. No persistió `SyncLog`, no creó conversiones y declaró cero mutaciones Google;
-- las acciones canónicas permanecen deliberadamente **secundarias globales**. Por eso esos terminales enriquecen atribución y aparecen en **Todas las conversiones / All conversions**, pero no entran por sí solos en la columna `Conversions` ni cambian la puja de campañas existentes. Conecta y mejora nunca las hace primarias. Piloto automático deberá hacer opt-in explícito por cohorte mediante su custom goal de una única etapa aprobada; no se cambia `primary_for_goal` global ni se reescribe la historia de conversiones del cliente;
+- las acciones canónicas permanecen deliberadamente **secundarias globales**. Por eso esos terminales enriquecen atribución y aparecen en **Todas las conversiones / All conversions**, pero no entran por sí solos en la columna `Conversions` ni cambian la puja de campañas existentes. **Mide y entiende** nunca las hace primarias. Piloto automático deberá hacer opt-in explícito por cohorte mediante su custom goal de una única etapa aprobada; no se cambia `primary_for_goal` global ni se reescribe la historia de conversiones del cliente;
 - auditoría de campañas live 2026-07-16: en `185...`, Badalona Search tiene fuerza `POOR`; Hospitalet/Nou Barris/Sant Martí concentran keywords con quality score `<=4`; los ocho asset groups PMax revisados están `AVERAGE` y varios limitados por política/activos, con presión de presupuesto en Nou Barris/Badalona. En `599...`, las cuatro Smart activas (`Dentista en Hospitatet`, `Clinica Dental Badalona`, `Clinica Dental en Badalona`, `Buenos Dentistas y Personal`) mantienen `TARGET_SPEND` y objetivos legacy. Las campañas heredadas todavía optimizan un catálogo amplio de acciones primarias/valores históricos del anunciante, no las etapas ClinicaClick. Son gaps de recomendación; `connect_only` no autoriza su mutación;
 - llamadas: `call_reporting_enabled=false` en las dos cuentas. Se conservan teléfonos, call assets y acciones históricas; no hay Google forwarding numbers ni duración dentro del objetivo nuevo. La presencia de una acción `AD_CALL`/Smart legacy habilitada no contradice este estado y no debe confundirse con reporting activo;
 - prueba negativa de mutación en el mismo corte: cero custom goals ClinicaClick, cero `CampaignOptimizationPolicies`, cero `ChangeEvent` de hoy sobre las 19 campañas/recursos revisados, todas las estrategias Propdental en `connect_only` y el único `ManagedCampaign` en `draft + observe`, no aprobado. `#20` seguía `accepted/provider_processing` por separado. No se cambiaron campañas, goals, pujas, presupuesto o estados.
@@ -4130,7 +4412,7 @@ Se repite el mismo esquema en `contact`, `qualified_lead`, `schedule` y `purchas
 
 #### `new_patients`: Mide, Mejora y Piloto automático (2026-07-17)
 
-La respuesta de bootstrap ofrece `connect_only`, `guided_improvement` y `managed_service`; `managed_self` permanece en `legacy_modes` para lectura histórica. `connect_only` mide, atribuye y sube conversiones consentidas sin mutar campañas. `guided_improvement` trabaja sobre campañas existentes y puede gestionar el objetivo de conversión y publicar una landing para campañas Google Search/PMax vinculadas, después de guardar la autorización cliente v1 con los scopes exactos `conversion_goal`, `landing_publish` y `campaign_destination`; nunca puede tocar pujas, presupuesto, segmentación ni activar/pausar campañas. Con esa autorización válida, `mode_contract.publish_landings=true`, `change_destinations=true`, el hook `marketing_web.landing_published.v1` queda `available` y el destino queda `available_after_landing_published`. Publicar no cambia Google automáticamente: materializa un binding auditable y el usuario debe confirmar una segunda operación acotada al digest exacto del destino, las cuentas seleccionadas y `readback_required=true`. El worker serializado aplica URL final en anuncios Search o en asset groups PMax, persiste la decisión explícita sobre expansión de URL, relee Google y solo marca éxito si todo coincide. Un fallo parcial encola rollback compensatorio al estado anterior; la auditoría diaria `marketing_campaign.destination_drift_audit.v1` detecta cambios posteriores sin autorepararlos. Los destinos web solo admiten URL HTTPS públicas y estables, sin credenciales, fragmento, host privado ni parámetros efímeros de atribución/firma/caducidad. `managed_service` usa el mismo puente únicamente dentro de una `ManagedCampaign` aprobada y de sus constraints; guardar la estrategia solo provisiona una spec por canal en `draft + observe`, junto con su cuenta `unfunded`, y no llama a Google/Meta.
+La respuesta de bootstrap ofrece `connect_only`, `guided_improvement` y `managed_service`; `managed_self` permanece en `legacy_modes` para lectura histórica. `connect_only` mide, atribuye y sube conversiones consentidas sin crear ni aplicar un destino nuevo. La única excepción de mutación es un rollback de seguridad, automático o solicitado manualmente: puede restaurar exclusivamente el `beforeState` capturado por una operación autorizada antes del downgrade a Mide y entiende; nunca acepta una URL arbitraria ni reutiliza el binding para aplicar su `desiredState`. `guided_improvement` trabaja sobre campañas existentes y puede gestionar el objetivo de conversión y publicar una landing para campañas Google Search/PMax vinculadas, después de guardar la autorización cliente v1 con los scopes exactos `conversion_goal`, `landing_publish` y `campaign_destination`; nunca puede tocar pujas, presupuesto, segmentación ni activar/pausar campañas. Con esa autorización válida, `mode_contract.publish_landings=true`, `change_destinations=true`, el hook `marketing_web.landing_published.v1` queda `available` y el destino queda `available_after_landing_published`. Publicar no cambia Google automáticamente: materializa un binding auditable y el usuario debe confirmar una segunda operación acotada al digest exacto del destino, las cuentas seleccionadas y `readback_required=true`. El worker serializado aplica URL final en anuncios Search o en asset groups PMax, persiste la decisión explícita sobre expansión de URL, relee Google y solo marca éxito si todo coincide. Un fallo parcial encola rollback compensatorio al estado anterior; la auditoría diaria `marketing_campaign.destination_drift_audit.v1` detecta cambios posteriores sin autorepararlos. Los destinos web solo admiten URL HTTPS públicas y estables, sin credenciales, fragmento, host privado ni parámetros efímeros de atribución/firma/caducidad. `managed_service` usa el mismo puente únicamente dentro de una `ManagedCampaign` aprobada y de sus constraints; guardar la estrategia solo provisiona una spec por canal en `draft + observe`, junto con su cuenta `unfunded`, y no llama a Google/Meta.
 
 El resultado de esa auditoría se persiste como
 `CampaignDestinationBindingEvent.event_type=drift_detected`, no como texto de
@@ -4165,10 +4447,10 @@ Rutas internas actuales bajo `/api/admin/managed-campaigns`:
 
 El executor de goal policy es una excepción estrecha al carácter dry-run de la publicación. Al entrar una `ManagedCampaign` Google Search/PMax aprobada en `launching/active`, puede provisionar idempotentemente una `CampaignOptimizationPolicy` de Qualified Lead y aplicar el custom goal inmutable de una sola cuenta/cohorte. En `guided_improvement`, activar la estrategia provisiona una policy separada por `strategy_id` —protegida también por el índice único `uniq_campaign_optimization_policy_strategy`, cuya migración aborta si el preflight detecta duplicados—, verifica que toda la cohorte proceda del inventario y sea Search/PMax, y delega el preview/apply/readback a un `JobRequest` duradero y deduplicado. El alta de la policy y su `JobRequest` comparten la transacción de activación: el servicio de enqueue único acepta una transacción llamadora y no publica un job que pueda observar un aggregate posteriormente revertido. Cada cuenta se aplica y persiste por separado para respetar el radio de impacto unitario de Google y conservar qué cuentas quedaron `applied` o `failed` ante un fallo parcial. Editar una estrategia con policy no puede cambiar silenciosamente su cohorte Google; pausar o completar sincroniza la policy y detiene nuevas evaluaciones, salvo que exista un lease de ejecución vivo. Las acciones canónicas siguen globalmente secundarias y no se modifican las acciones del cliente. `connect_only`, `operation_mode=observe` y Smart nunca llegan a este executor.
 
-##### Ejecución gestionada Google Search: candidata cerrada por flags (2026-07-19)
+##### Ejecución gestionada Google Search: desplegada y cerrada por flags (2026-07-19)
 
-La rama de integración incorpora un carril real de proveedor para Piloto, pero
-**no está habilitado ni acreditado en staging**. Los flags
+El runtime incorpora un carril real de proveedor para Piloto, desplegado y
+acreditado estructuralmente en staging, pero **no está habilitado**. Los flags
 `MANAGED_CAMPAIGN_PROVIDER_EXECUTION_ENABLED` y
 `MANAGED_CAMPAIGN_PROVIDER_ACTIVATION_ENABLED` se interpretan de forma
 estricta: solo el texto `true` abre cada capacidad y ambos permanecen apagados
@@ -4176,7 +4458,7 @@ por defecto. No se ha realizado una llamada Google real con este carril. La
 migración aditiva
 `20260719103000-create-managed-campaign-provider-executions.js` pasó `up`,
 segundo `up` idempotente, contrato de columnas/FKs/índices y `down` en una
-instancia MySQL aislada; todavía no debe describirse como aplicada en staging.
+instancia MySQL aislada y está aplicada en staging.
 La migración histórica `20260715152000` continúa cancelada: su `up` y su
 `down` son no-op y este rollout no la reactiva.
 
@@ -4353,11 +4635,11 @@ El PATCH bloquea `completed/cancelled`, pero permite coordinar una campaña `act
 
 Cada cambio real incrementa una sola versión y crea en la misma transacción una fila `coordination_updated` con actor, versión anterior/nueva y únicamente `{before, after}` de los campos modificados. Si falla el audit, también se revierte la campaña. El modelo de auditoría rechaza update/destroy y la API no expone rutas para mutarlo. `POST /` y el `PATCH /:id` genérico rechazan campos de coordinación para que no exista una vía sin CAS, validación de responsable y auditoría. `review_config.client_next_action` sigue siendo exclusivamente la acción visible para el cliente; `next_action` y `operational_blocker` son internos y no aparecen en el DTO cliente.
 
-Tablas reales: `ManagedCampaigns`, `ManagedCampaignFundingAccounts`, `ManagedCampaignLedgerEntries`, `ManagedCampaignSpendSnapshots`, `ManagedCampaignBankTransactions`, `ManagedCampaignReconciliationMatches`, `ManagedCampaignPublishingAudits`, `ManagedCampaignProviderExecutions`, `ManagedCampaignOperationAudits`, `CampaignOptimizationPolicies`, `CampaignOptimizationEvaluations`, `ExternalCampaignInventories`, `ExternalCampaignAssignments` y `ExternalCampaignAssignmentAudits`. `ManagedCampaignProviderExecutions` pertenece a la candidata y no existe en staging hasta aplicar deliberadamente `20260719103000`.
+Tablas reales: `ManagedCampaigns`, `ManagedCampaignFundingAccounts`, `ManagedCampaignLedgerEntries`, `ManagedCampaignSpendSnapshots`, `ManagedCampaignBankTransactions`, `ManagedCampaignReconciliationMatches`, `ManagedCampaignPublishingAudits`, `ManagedCampaignProviderExecutions`, `ManagedCampaignOperationAudits`, `CampaignOptimizationPolicies`, `CampaignOptimizationEvaluations`, `ExternalCampaignInventories`, `ExternalCampaignAssignments` y `ExternalCampaignAssignmentAudits`. `ManagedCampaignProviderExecutions` pertenece al runtime desplegado y existe en staging tras aplicar `20260719103000`; sus flags permanecen apagados.
 
 Límites que no deben ocultarse:
 
-- `active/launching/paused` siguen siendo estados internos. Search/PMax dispone de adaptador **dry-run**; solo Search `create_new` dispone además del adaptador real candidato y siempre entra por su carril create `PAUSED` -> activate `ENABLED`. Meta, PMax y actualización de campañas existentes permanecen sin adaptador real y fallan cerrado;
+- `active/launching/paused` siguen siendo estados internos. Search/PMax dispone de adaptador **dry-run**; solo Search `create_new` dispone además del adaptador real desplegado y gated, y siempre entra por su carril create `PAUSED` -> activate `ENABLED`. Meta, PMax y actualización de campañas existentes permanecen sin adaptador real y fallan cerrado;
 - el importe preparado para Google sale exclusivamente del menor entre neto de medios, saldo neto disponible y asignación neta del presupuesto aprobado; el bruto y la comisión nunca alimentan `amount_micros`. Se valida `bruto cobrado - comisión = neto`, `disponible <= neto`, prepago completo y moneda, y la conversión mensual usa `floor` en micros para no superar el saldo;
 - el dry-run no es ejecución. El carril real reconstruye autoridad desde campaña, funding y audit persistidos bajo lock, verifica hash/versión/registry y no acepta el plan del navegador como fuente. Con flags apagados no existe mutación ni éxito simulado; el selector genérico tampoco permite crear/publicar/activar/pausar, cambiar presupuesto o creatividades fuera del contrato Search nuevo descrito arriba;
 - el dry-run persistido exige `expected_plan_hash`; cambios concurrentes en spec, saldo o gates devuelven `publishing_plan_changed` y no crean una auditoría distinta de la mostrada;
@@ -5168,9 +5450,9 @@ Esos totales pertenecen al baseline promovido. El corte `alpha.8` del 2026-07-19
 volvió a ejecutar el runner canónico completo: Marketing Web **320/320**,
 WordPress **40/40**, interoperabilidad **3/3** y Campañas 34 contratos/46
 pruebas. El frontend integrado pasa 168/168 focales y 252/252 de Marketing,
-además de TypeScript, i18n y build de producción. Son resultados de la rama
-candidata; no sustituyen los hashes ni la evidencia live del baseline hasta el
-cutover documentado.
+además de TypeScript, i18n y build de producción. Esos resultados quedaron
+promovidos; los hashes y la evidencia live vigentes están en el corte de
+apertura de este documento.
 
 El runner canónico neutraliza explícitamente
 `MARKETING_WEB_ENABLED_SCOPES`, `MARKETING_WEB_DISABLED_SCOPES` y
@@ -5322,8 +5604,9 @@ congela el recurso por la ruta exacta del item. El compilador genera
 configuradas en escritorio, dos en tablet y una en móvil. No admite HTML/CSS,
 clases ni placeholders aportados por el usuario.
 
-`clinicaclick-web-renderer/1.6.0` es la candidata posterior y todavía no se
-considera live hasta publicar y verificar un artefacto con esa identidad. Hace
+`clinicaclick-web-renderer/1.6.0` fue la candidata posterior de este corte. Ya
+está live y verificada con los identificadores y hashes completos del corte
+vigente al inicio del documento. Hace
 coherentes formulario, Social y Schema sin reescribir revisiones congeladas:
 
 - un selector `preferred_contact` solo ofrece email cuando el mismo formulario
@@ -5340,9 +5623,9 @@ coherentes formulario, Social y Schema sin reescribir revisiones congeladas:
   mantiene scripts, conexiones, formularios y demás recursos en sus allowlists.
 
 La versión del renderer sigue formando parte del hash de entrada y del
-artefacto. El paso de 1.5 a 1.6 exige revisión nueva/aprobada, preview, publicación
-controlada, readback público y rollback acreditado; nunca modifica en sitio el
-artefacto 1.5 activo.
+artefacto. El paso de 1.5 a 1.6 exigió revisión nueva/aprobada, preview,
+publicación controlada, readback público y rollback acreditado; nunca modificó
+en sitio el artefacto 1.5 histórico.
 
 El compilador resuelve además una única canonical efectiva por página. Esa URL
 alimenta `<link rel="canonical">`, `og:url` y las URL/`@id` de `WebPage` y
@@ -5611,8 +5894,8 @@ Persistencia aditiva:
   FKs e índices únicos para idempotencia, job y contenido aceptado.
 
 La migración pasó en MySQL aislado `up`, segundo `up` idempotente,
-introspección de columnas/checks/índices/seis FKs y `down`; todavía no debe
-describirse como aplicada en staging hasta el cutover. Las regresiones viven en
+introspección de columnas/checks/índices/seis FKs y `down`, y ya está aplicada
+en staging. Las regresiones viven en
 `web_content_generation.test.js` y
 `web_content_generation_migration.test.js`, incluidas concurrencia de cuota,
 scope cruzado, prompt injection, PII, one-shot, CAS, aceptación y limpieza.
@@ -5868,8 +6151,9 @@ orden operativo obligatorio es:
 
 Los pasos 1-4 quedaron acreditados en Propdental el 2026-07-18: WP-CLI y DB
 reportan `alpha.7`, `/cita/` sigue en `200` y el artefacto activo no cambió.
-Los pasos 5-6 continúan deliberadamente pendientes: no se publicó una revisión
-nueva solo para demostrar el gate. Si otra instalación no reporta `alpha.7`
+Los pasos 5-6 estuvieron pendientes en ese corte histórico y quedaron cerrados
+después por la publicación y rollback real del renderer `1.6.0` documentados
+al inicio. Si otra instalación no reporta `alpha.7`
 —incluidos los estados atrasados `alpha.5` o `alpha.6`—, la publicación de un
 formulario global debe quedar
 bloqueada o pospuesta de forma observable; nunca se fuerza el manifest nuevo ni
@@ -5924,7 +6208,8 @@ Después se recompiló deliberadamente el mismo proyecto/revisión piloto desde
 renderer `1.2.1` a `1.5.0`. `document_hash=ba60…` y
 `content_snapshot_hash=5f447…` demuestran el mismo documento; contenido, SEO y
 Schema permanecen iguales. El artefacto añade `web_artifact_input_hash`
-antifraude y el CSS de `divider`/`spacer`/`gallery`. El artefacto público actual
+antifraude y el CSS de `divider`/`spacer`/`gallery`. El artefacto público de
+aquel corte
 tiene hash `d875201…`, body SHA `e851688…` y ETag `304` acreditado tanto por
 Cloudflare como por origen.
 
@@ -5939,24 +6224,26 @@ excepciones ni fallos de red. El router corrige el magic-quotes aplicado por
 WordPress a `HTTP_IF_NONE_MATCH`; el fix `5d11cf8`/staging `e562936` está live
 y Cloudflare/origen responden `304` con el ETag exacto.
 
-El audit live deja abiertos dos defectos editoriales del piloto: la revisión
+El audit de aquel artefacto detectó dos defectos editoriales del piloto: la revisión
 declara email como contacto preferido, pero el formulario no incluye un campo
 email; además, los datos Social y Schema están incompletos. Ni los 11 campos ni
 la recompilación determinista acreditan completitud semántica. Debe crearse una
 revisión nueva y aprobada que añada email o cambie el canal preferido y complete
-Social/Schema; no se reescribe silenciosamente la revisión congelada.
+Social/Schema; no se reescribe silenciosamente la revisión congelada. La
+revisión `1.6.0` posterior ya incorpora email coherente, Social y Schema y está
+publicada con readback y rollback acreditados.
 
-El renderer 1.6 candidato evita que nuevas compilaciones vuelvan a anunciar un
+El renderer 1.6 del corte posterior evitó que nuevas compilaciones volvieran a anunciar un
 canal email inexistente y completa la salida Social/Schema cuando recibe una
-imagen pública válida. Esto no corrige por sí solo la revisión live anterior:
-el defecto queda abierto hasta crear esa revisión nueva, publicarla y completar
-el readback/rollback descrito arriba.
+imagen pública válida. La revisión nueva ya fue creada, publicada y verificada;
+el artefacto 1.5 queda únicamente como historial y punto de rollback probado.
 
-El backend de staging tampoco está en paridad completa con el worktree de
-integración. Los commits live y readbacks nombrados en este corte están
-acreditados, pero no se debe inferir que todo el worktree está desplegado. Antes
-de la siguiente promoción se reconcilia el diff, se ejecutan de nuevo las
-suites y se repite el readback público.
+La promoción posterior reconcilió aquel diff: el hotfix backend `de7b461` llegó
+a staging mediante `8ebf5bc`. Ese hito 1.6 queda como baseline histórica. El
+corte vigente al inicio del documento es `3f0c0e0`/staging `a22b773`, con
+renderer `1.7.0`, migración `20260719170000` aplicada y primera
+publicación/readback acreditada; la advertencia de no paridad queda como riesgo
+ya resuelto de la promoción anterior.
 
 Retirar una publicación WordPress ya es una operación de producto explícita:
 `POST /api/marketing/web-publications/:publicationId/retire` exige
