@@ -30,3 +30,10 @@ test('root publication remains canonical and does not gain a double slash', () =
     publicationUrl({ host: 'landing.example.test', path: '/' }, dependencies)
   );
 });
+
+test('the production bridge resolves the canonical validator without injected test dependencies', () => {
+  assert.equal(
+    publicationUrl({ host: 'www.propdental.es', path: '/cita/primera-visita-hospitalet/' }),
+    'https://www.propdental.es/cita/primera-visita-hospitalet/'
+  );
+});

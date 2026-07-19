@@ -10906,3 +10906,7 @@ exports.reconcileVisitorChoicePersonalizationCapabilities =
   reconcileVisitorChoicePersonalizationCapabilities;
 exports.reconcileVerifiedConnectOnlyStrategyActivationReadiness =
   reconcileVerifiedConnectOnlyStrategyActivationReadiness;
+// Canonical public-HTTPS validator shared with the durable landing-to-campaign
+// bridge. Keeping this as an explicit runtime export prevents the production
+// worker from depending on the test-only `__test` namespace.
+exports.stableHttpsDestination = stableHttpsDestination;
