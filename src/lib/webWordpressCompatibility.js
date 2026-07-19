@@ -1,6 +1,7 @@
 'use strict';
 
 const MIN_GLOBAL_INTAKE_PLUGIN_VERSION = '2.0.0-alpha.7';
+const MIN_MULTI_PUBLICATION_PLUGIN_VERSION = '2.0.0-alpha.8';
 
 function parseSemver(value) {
   const match = String(value || '').trim().match(
@@ -58,6 +59,22 @@ function semverAtLeast(actual, minimum) {
   return comparison !== null && comparison >= 0;
 }
 
+function supportsMultiPublication(installation) {
+  const capabilities = installation?.capabilities && typeof installation.capabilities === 'object'
+    ? installation.capabilities
+    : {};
+  return capabilities.multi_publication_v2 === true
+    && semverAtLeast(installation?.pluginVersion, MIN_MULTI_PUBLICATION_PLUGIN_VERSION);
+}
+
+function isReleasedWordpressPublication(installation, publication) {
+  if (publication?.status !== 'retired') return false;
+  const acknowledgement = installation?.reportedState?.confirmed_routes?.[publication.id];
+  return acknowledgement?.status === 'retired'
+    && acknowledgement?.route_prefix === publication.path
+    && acknowledgement?.artifact_hash == null;
+}
+
 function documentHasGlobalIntakeForm(document) {
   if (!document || typeof document !== 'object' || Array.isArray(document)) return false;
   const nodes = document.nodes && typeof document.nodes === 'object' && !Array.isArray(document.nodes)
@@ -101,9 +118,12 @@ function manifestHasGlobalIntakeContract(manifest) {
 
 module.exports = {
   MIN_GLOBAL_INTAKE_PLUGIN_VERSION,
+  MIN_MULTI_PUBLICATION_PLUGIN_VERSION,
   compareSemver,
   documentHasGlobalIntakeForm,
   manifestHasGlobalIntakeContract,
+  isReleasedWordpressPublication,
   parseSemver,
   semverAtLeast,
+  supportsMultiPublication,
 };

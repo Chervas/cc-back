@@ -12,6 +12,7 @@ final class CCW_Plugin
     public static function boot()
     {
         self::bootstrap_provisioned_runtime();
+        (new CCW_Site_Claim())->register();
         (new CCW_Intake_Bridge())->register();
         (new CCW_Router())->register();
         if (is_admin()) {
@@ -36,28 +37,33 @@ final class CCW_Plugin
             deactivate_plugins(plugin_basename(CCW_PLUGIN_FILE), true, true);
             wp_die('La activación de red todavía no está soportada. Activa ClinicaClick por sitio.');
         }
-        if (CCW_Config::is_configured()) {
-            (new CCW_Cache())->initialize();
-            // The first authenticated heartbeat completes the pending
-            // installation handshake even before a landing exists. Network
-            // failure never makes WordPress activation destructive; cron will
-            // retry through the same authenticated control plane.
-            (new CCW_HTTP())->report(array(
-                'schema_version' => 1,
-                'event' => 'heartbeat',
-                'plugin_version' => CCW_VERSION,
-                'wordpress_version' => get_bloginfo('version'),
-                'php_version' => PHP_VERSION,
-                'site_hash' => hash('sha256', home_url('/')),
-                'status' => 'empty',
-                'result' => 'activation_handshake',
-                'duration_ms' => 0,
-                'reported_at' => gmdate('c'),
-            ));
-        }
+        // The public proof must resolve before the first authenticated report:
+        // the backend performs a real same-origin GET and will not promote a
+        // bearer-only pending installation. Flush all plugin routes first so
+        // activation can complete the claim immediately instead of waiting
+        // for cron.
         (new CCW_Intake_Bridge())->rewrite_rules();
         (new CCW_Router())->rewrite_rules();
+        (new CCW_Site_Claim())->rewrite_rules();
         flush_rewrite_rules(false);
+        if (CCW_Config::is_configured()) {
+            try {
+                CCW_Config::assert_cache_storage_safe();
+                $cache = new CCW_Cache();
+                $cache->initialize();
+                // The first authenticated heartbeat completes the pending
+                // installation handshake even before a landing exists. Network
+                // failure never makes WordPress activation destructive; cron will
+                // retry through the same authenticated control plane.
+                self::report_capabilities($cache);
+            } catch (CCW_Error $error) {
+                if ($error->error_code() === 'ccw_managed_cache_directory_public') {
+                    deactivate_plugins(plugin_basename(CCW_PLUGIN_FILE));
+                    wp_die($error->getMessage());
+                }
+                throw $error;
+            }
+        }
         if (!wp_next_scheduled(self::CRON_HOOK)) {
             wp_schedule_event(time() + 60, 'ccw_fifteen_minutes', self::CRON_HOOK);
         }
@@ -103,8 +109,55 @@ final class CCW_Plugin
         }
         (new CCW_Intake_Bridge())->rewrite_rules();
         (new CCW_Router())->rewrite_rules();
+        (new CCW_Site_Claim())->rewrite_rules();
         flush_rewrite_rules(false);
+        if (CCW_Config::is_configured()) self::report_capabilities(new CCW_Cache());
         update_option(self::OPTION_VERSION, CCW_VERSION, false);
+    }
+
+    public static function report_capabilities(CCW_Cache $cache = null)
+    {
+        if (!CCW_Config::is_configured()) return false;
+        $cache = $cache ?: new CCW_Cache();
+        $lock = null;
+        try {
+            try {
+                $registry = $cache->route_registry();
+            } catch (CCW_Error $error) {
+                if ($error->error_code() !== 'ccw_route_registry_invalid') {
+                    return false;
+                }
+                // An upgrade/activation must never break wp-admin because a
+                // local control file is corrupt. Reset it under the same lock
+                // used by sync; the next signed 200 rebuilds the registry.
+                $lock = $cache->acquire_lock();
+                $cache->reset_route_registry();
+                $registry = $cache->route_registry();
+                $cache->release_lock($lock);
+                $lock = null;
+            }
+            return (new CCW_HTTP())->report(array(
+                'schema_version' => 2,
+                'event' => 'heartbeat',
+                'plugin_version' => CCW_VERSION,
+                'wordpress_version' => get_bloginfo('version'),
+                'php_version' => PHP_VERSION,
+                'site_hash' => hash('sha256', home_url('/')),
+                'capabilities' => array('multi_publication_v2' => true),
+                'registry_sequence' => (int) ($registry['sequence'] ?? 0),
+                'routes' => $cache->route_report(),
+                'duration_ms' => 0,
+                'reported_at' => gmdate('c'),
+            ));
+        } catch (Throwable $error) {
+            // Capability reporting is retried by cron/sync and must not make
+            // plugin activation or admin_init fatal.
+            return false;
+        } finally {
+            if ($lock !== null) {
+                $cache->release_lock($lock);
+            }
+        }
     }
 
     private static function bootstrap_provisioned_runtime()
@@ -118,11 +171,13 @@ final class CCW_Plugin
             return;
         }
         try {
-            CCW_Trust_Store::validate_descriptor($provisioned['trust_descriptor']);
+            CCW_Config::assert_cache_storage_safe();
+            $trusted_descriptor = CCW_Trust_Store::validate_descriptor($provisioned['trust_descriptor']);
             $runtime = CCW_Manifest::verify_runtime_configuration(
                 $provisioned['bootstrap_runtime_configuration'],
                 $provisioned['bootstrap_runtime_envelope'],
-                CCW_Config::installation_id()
+                CCW_Config::installation_id(),
+                $trusted_descriptor['key_id']
             );
             $current = CCW_Config::runtime_configuration();
             if ((int) ($runtime['sequence'] ?? 0) > (int) ($current['sequence'] ?? 0)) {
@@ -145,14 +200,61 @@ final class CCW_Plugin
     public static function site_health()
     {
         $configured = CCW_Config::is_configured();
-        $pointer = $configured ? (new CCW_Cache())->pointer() : array();
-        $healthy = $configured && ($pointer['status'] ?? '') === 'active';
+        $storage = CCW_Config::cache_storage_diagnostic();
+        if (empty($storage['safe'])) {
+            return array(
+                'label' => 'ClinicaClick Web está bloqueado por seguridad',
+                'status' => 'critical',
+                'badge' => array('label' => 'ClinicaClick', 'color' => 'red'),
+                'description' => '<p>' . esc_html((string) $storage['message']) . '</p>',
+                'actions' => '<p><a href="' . esc_url(admin_url('options-general.php?page=clinicaclick-web')) . '">Corregir almacenamiento de ClinicaClick Web</a></p>',
+                'test' => 'clinicaclick_web',
+            );
+        }
+        $cache = $configured ? new CCW_Cache() : null;
+        $pointer = $cache ? $cache->pointer() : array();
+        $active_routes = 0;
+        $attention_routes = 0;
+        $registry_mode = false;
+        if ($cache) {
+            try {
+                $registry = $cache->route_registry();
+                if ((int) ($registry['sequence'] ?? 0) > 0) {
+                    $registry_mode = true;
+                    foreach ($registry['routes'] as $publication_id => $entry) {
+                        $route = $cache->route_pointer($publication_id, (string) ($entry['route_prefix'] ?? ''));
+                        if (($route['status'] ?? '') === 'active' && preg_match('/^[a-f0-9]{64}$/', (string) ($route['active_hash'] ?? ''))) {
+                            $active_routes++;
+                        } elseif (($route['status'] ?? '') !== 'retired') {
+                            $attention_routes++;
+                        }
+                    }
+                }
+            } catch (CCW_Error $error) {
+                $registry_mode = true;
+                $attention_routes++;
+            }
+        }
+        $multi = $registry_mode;
+        $healthy = $configured && ($multi
+            ? $active_routes > 0 && $attention_routes === 0
+            : ($pointer['status'] ?? '') === 'active');
+        $healthy_label = $multi
+            ? sprintf('%d publicación(es) local(es) válida(s)', $active_routes)
+            : 'ClinicaClick sirve una publicación local válida';
+        $configured_description = $multi
+            ? sprintf(
+                'La caché local conserva %d ruta(s) activa(s); %d ruta(s) requieren revisión.',
+                $active_routes,
+                $attention_routes
+            )
+            : 'La última publicación válida se sirve desde la caché local, incluso si la API no responde.';
         return array(
-            'label' => $healthy ? 'ClinicaClick sirve una publicación local válida' : 'ClinicaClick Web requiere atención',
+            'label' => $healthy ? $healthy_label : 'ClinicaClick Web requiere atención',
             'status' => $healthy ? 'good' : 'recommended',
             'badge' => array('label' => 'ClinicaClick', 'color' => 'blue'),
             'description' => '<p>' . esc_html($configured
-                ? 'La última publicación válida se sirve desde la caché local, incluso si la API no responde.'
+                ? $configured_description
                 : 'Configura el identificador, la API, el token y el descriptor público para activar la sincronización.') . '</p>',
             'actions' => '<p><a href="' . esc_url(admin_url('options-general.php?page=clinicaclick-web')) . '">Abrir ClinicaClick Web</a></p>',
             'test' => 'clinicaclick_web',

@@ -133,14 +133,21 @@ test('un registro de clínica sin secreto no oculta un scope de grupo firmado', 
   assert.equal(auth.status, 401);
 });
 
-test('selecciona el candidato cuya firma coincide y conserva la precedencia sin secretos', () => {
+test('el owner estrecho bloquea credenciales de grupo aunque su firma coincida', () => {
   const clinicCfg = { id: 1, hmac_key: SCOPED_SECRET };
   const groupCfg = { id: 2, hmac_key: GROUP_SECRET };
-  assert.equal(pickMatchingIntakeConfig({
+  const selected = pickMatchingIntakeConfig({
     req: request({ signature: hmac(GROUP_SECRET) }),
     clinicCfg,
     groupCfg,
-  }), groupCfg);
+  });
+  assert.equal(selected, clinicCfg);
+  const auth = authenticatePublicIntakeRequest({
+    req: request({ signature: hmac(GROUP_SECRET) }),
+    config: selected,
+  });
+  assert.equal(auth.ok, false);
+  assert.equal(auth.status, 401);
 
   const unsignedClinic = { id: 3, hmac_key: null };
   const unsignedGroup = { id: 4, hmac_key: null };
@@ -157,6 +164,11 @@ test('los tres handlers públicos aplican el gate y el webhook Meta usa el valid
     (source.match(/authenticatePublicIntakeRequest\(\{/g) || []).length,
     3,
     '/leads, /whatsapp-origin y /events deben aplicar el mismo gate público'
+  );
+  assert.equal(
+    (source.match(/resolveEffectivePublicIntakeRecords\(\{/g) || []).length,
+    3,
+    'los tres handlers deben resolver una identidad efectiva única antes de autenticar'
   );
   const handlerBoundaries = [
     ['exports.ingestLead', 'exports.registerWhatsappOrigin'],

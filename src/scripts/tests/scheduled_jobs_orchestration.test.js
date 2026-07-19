@@ -796,6 +796,11 @@ function testScheduledJobsDoNotUseUncancellableTimeout() {
       `${jobType} must wait for its real handler instead of Promise.race`
     );
   }
+  assert.equal(
+    jobExecutor._shouldUseExecutionTimeout('web_intake_runtime_reconcile'),
+    false,
+    'el reconciliador durable no puede quedar huérfano por un Promise.race de 30 minutos'
+  );
   assert.equal(jobExecutor._shouldUseExecutionTimeout('automations_v2_execute'), true);
   const timeout = jobExecutor._buildTimeoutFailureResult();
   assert.equal(timeout.status, 'failed');

@@ -54,9 +54,11 @@ foreach (array(
     'ccw_api_base',
     'ccw_installation_token',
     'ccw_trusted_signing_keys',
+    'ccw_signing_trust_state',
     'ccw_runtime_configuration',
     'ccw_sync_state',
     'ccw_purge_on_uninstall',
+    'ccw_site_claim_ack',
     'ccw_plugin_version',
 ) as $option) {
     delete_option($option);

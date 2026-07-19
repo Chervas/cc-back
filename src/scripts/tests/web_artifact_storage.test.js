@@ -5,6 +5,7 @@ const crypto = require('node:crypto');
 const test = require('node:test');
 
 const { canonicalSerialize } = require('../../lib/webDocument');
+const { MAX_WEB_ARTIFACT_BUNDLE_BYTES } = require('../../lib/webArtifactBudget');
 const {
   WebArtifactStorageError,
   authenticatedDbStorageDescriptor,
@@ -100,6 +101,41 @@ test('rechaza diferencias de hash, tamaño y conjunto de ficheros', () => {
   assert.equal(Object.keys(assertArtifactBundle(good).files).length, 2);
   assert.throws(() => assertArtifactBundle({ ...good, files: { ...good.files, 'extra.txt': 'x' } }), /no coinciden/);
   assert.throws(() => assertArtifactBundle({ ...good, files: { ...good.files, 'index.html': 'alterado' } }), /hash/);
+});
+
+test('rechaza un bundle que supera el contrato común antes de almacenarlo', async () => {
+  const body = Buffer.alloc(MAX_WEB_ARTIFACT_BUNDLE_BYTES, 1);
+  const core = {
+    schema_version: 1,
+    files: {
+      'index.html': {
+        sha256: crypto.createHash('sha256').update(body).digest('hex'),
+        content_type: 'text/html; charset=utf-8',
+        size_bytes: body.length,
+      },
+    },
+  };
+  const artifactHash = crypto.createHash('sha256').update(canonicalSerialize(core)).digest('hex');
+  const artifact = {
+    artifact_hash: artifactHash,
+    manifest: { ...core, artifact_hash: artifactHash },
+    files: { 'index.html': body },
+  };
+  let uploads = 0;
+  await assert.rejects(
+    () => storeArtifactBundle({
+      artifact,
+      client: { async send() { uploads += 1; } },
+      config: {
+        bucket: 'clinicaclick-web-artifacts',
+        region: 'eu-west-3',
+        baseUrl: 'https://artifacts.example.test',
+        prefix: 'web-artifacts/v1',
+      },
+    }),
+    (error) => error.code === 'web_artifact_bundle_too_large'
+  );
+  assert.equal(uploads, 0);
 });
 
 test('sube primero ficheros y después envelope firmado bajo prefijo inmutable', async () => {

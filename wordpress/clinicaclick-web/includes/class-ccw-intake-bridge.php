@@ -18,7 +18,7 @@ final class CCW_Intake_Bridge
     const EVENT_QUERY_VAR = 'ccw_events';
     const EVENT_ENDPOINT_PATH = '/_clinicaclick/events';
     const MAX_BODY_BYTES = 16384;
-    const MAX_FIELDS = 27;
+    const MAX_FIELDS = 28;
     const IP_WINDOW_SECONDS = 600;
     const IP_LIMIT = 8;
     const INSTALLATION_WINDOW_SECONDS = 3600;
@@ -164,6 +164,7 @@ final class CCW_Intake_Bridge
             'web_revision_id',
             'web_page_id',
             'web_form_id',
+            'web_artifact_input_hash',
             '_cc_attr_gclid',
             '_cc_attr_gbraid',
             '_cc_attr_wbraid',
@@ -221,7 +222,9 @@ final class CCW_Intake_Bridge
      */
     private function trusted_context(array $server, array $fields)
     {
-        $pointer = $this->cache->pointer();
+        $route_context = $this->landing_route_context($server);
+        $pointer = $route_context['pointer'];
+        $route_prefix = $route_context['route_prefix'];
         $manifest = is_array($pointer['manifest'] ?? null) ? $pointer['manifest'] : array();
         $artifact_hash = (string) ($pointer['active_hash'] ?? '');
         if (($pointer['status'] ?? '') !== 'active' || !preg_match('/^[a-f0-9]{64}$/', $artifact_hash)) {
@@ -247,13 +250,28 @@ final class CCW_Intake_Bridge
         $revision_id = $this->uuid($fields['web_revision_id'], 'ccw_intake_revision_invalid');
         $page_id = $this->uuid($fields['web_page_id'], 'ccw_intake_page_invalid');
         $form_id = $this->form_id($fields['web_form_id']);
+        $artifact_input_hash = strtolower(trim((string) ($manifest['artifact_input_hash'] ?? '')));
         if (
             !hash_equals(strtolower((string) ($manifest['project_id'] ?? '')), $project_id)
             || !hash_equals(strtolower((string) ($manifest['revision_id'] ?? '')), $revision_id)
+            || !preg_match('/^[a-f0-9]{64}$/', $artifact_input_hash)
             || !is_array($manifest['intake_forms'] ?? null)
             || !is_array($manifest['intake_forms'][$form_id] ?? null)
         ) {
             $this->fail('ccw_intake_signed_form_mismatch', 409);
+        }
+        // Alpha.7/renderer 1.2.1 forms did not contain this hidden marker. The
+        // plugin therefore resolves it from the locally active signed manifest
+        // and injects it server-side. If a newer browser supplies one, it must
+        // match exactly; it is never allowed to select another artifact.
+        if (
+            isset($fields['web_artifact_input_hash'])
+            && (
+                !preg_match('/^[a-f0-9]{64}$/', strtolower(trim((string) $fields['web_artifact_input_hash'])))
+                || !hash_equals($artifact_input_hash, strtolower(trim((string) $fields['web_artifact_input_hash'])))
+            )
+        ) {
+            $this->fail('ccw_intake_artifact_identity_mismatch', 409);
         }
         $form = $manifest['intake_forms'][$form_id];
         if (($form['scope'] ?? '') === 'global') {
@@ -264,14 +282,14 @@ final class CCW_Intake_Bridge
             $this->fail('ccw_intake_signed_form_mismatch', 409);
         }
 
-        $referer = $this->validated_referer($server, (string) ($form['page_path'] ?? ''));
+        $referer = $this->validated_referer($server, (string) ($form['page_path'] ?? ''), $route_prefix);
         $attribution = array_merge(
             $this->attribution_from_fields($fields),
             $this->attribution_from_query((string) ($referer['query'] ?? ''))
         );
-        $page_url = $this->canonical_page_url((string) ($form['page_path'] ?? ''), $attribution);
-        $landing_page_path = $this->validated_landing_page_path($fields, $manifest, (string) ($form['page_path'] ?? ''));
-        $landing_url = $this->canonical_page_url($landing_page_path, $attribution);
+        $page_url = $this->canonical_page_url((string) ($form['page_path'] ?? ''), $attribution, $route_prefix);
+        $landing_page_path = $this->validated_landing_page_path($fields, $manifest, (string) ($form['page_path'] ?? ''), $route_prefix);
+        $landing_url = $this->canonical_page_url($landing_page_path, $attribution, $route_prefix);
         if (isset($server['HTTP_ORIGIN']) && trim((string) $server['HTTP_ORIGIN']) !== '') {
             $origin = parse_url(trim((string) $server['HTTP_ORIGIN']));
             if (
@@ -290,12 +308,14 @@ final class CCW_Intake_Bridge
             'manifest' => $manifest,
             'runtime' => $runtime,
             'artifact_hash' => $artifact_hash,
+            'artifact_input_hash' => $artifact_input_hash,
             'project_id' => $project_id,
             'revision_id' => $revision_id,
             'page_id' => $page_id,
             'form_id' => $form_id,
             'form_contract' => $form,
             'page_path' => (string) $form['page_path'],
+            'route_prefix' => $route_prefix,
             'page_url' => $page_url,
             'landing_url' => $landing_url,
             'attribution' => $attribution,
@@ -305,14 +325,38 @@ final class CCW_Intake_Bridge
     }
 
     /** @param array<string,mixed> $server */
-    private function validated_referer(array $server, $page_path)
+    private function landing_route_context(array $server)
+    {
+        $referer_value = trim((string) ($server['HTTP_REFERER'] ?? ''));
+        $referer = parse_url($referer_value);
+        if (
+            $referer_value === ''
+            || !$this->same_origin($referer_value, home_url('/'))
+            || !is_array($referer)
+        ) {
+            $this->fail('ccw_intake_referer_invalid', 403);
+        }
+        if (!$this->safe_url_path((string) ($referer['path'] ?? ''))) {
+            $this->fail('ccw_intake_referer_path_invalid', 403);
+        }
+        $matched = $this->cache->match_route((string) $referer['path']);
+        if ($matched !== null) return $matched;
+        // Byte-for-byte v1 fallback while an alpha.7 pilot has not adopted a
+        // signed v2 registry yet.
+        if ((string) $referer['path'] === '/cita' || strpos((string) $referer['path'], '/cita/') === 0) {
+            return array('pointer' => $this->cache->pointer(), 'route_prefix' => '/cita/');
+        }
+        $this->fail('ccw_intake_referer_path_invalid', 403);
+    }
+
+    private function validated_referer(array $server, $page_path, $route_prefix = '/cita/')
     {
         $referer_value = trim((string) ($server['HTTP_REFERER'] ?? ''));
         if ($referer_value === '' || !$this->same_origin($referer_value, home_url('/'))) {
             $this->fail('ccw_intake_referer_invalid', 403);
         }
         $referer = parse_url($referer_value);
-        $expected = parse_url(home_url('/cita' . $page_path));
+        $expected = parse_url(home_url(rtrim((string) $route_prefix, '/') . $page_path));
         if (!is_array($referer) || !is_array($expected)) {
             $this->fail('ccw_intake_referer_invalid', 403);
         }
@@ -477,7 +521,7 @@ final class CCW_Intake_Bridge
     }
 
     /** @param array<string,string> $fields @param array<string,mixed> $manifest */
-    private function validated_landing_page_path(array $fields, array $manifest, $fallback_page_path)
+    private function validated_landing_page_path(array $fields, array $manifest, $fallback_page_path, $route_prefix = '/cita/')
     {
         $requested = trim((string) ($fields['_cc_attr_landing_path'] ?? ''));
         if ($requested === '') {
@@ -496,7 +540,7 @@ final class CCW_Intake_Bridge
                 continue;
             }
             $page_path = (string) ($contract['page_path'] ?? '');
-            $expected_url = parse_url($this->canonical_page_url($page_path, array()));
+            $expected_url = parse_url($this->canonical_page_url($page_path, array(), $route_prefix));
             $expected_path = is_array($expected_url) ? (string) ($expected_url['path'] ?? '') : '';
             $expected_path = '/' . trim($expected_path, '/') . '/';
             if ($expected_path === '//') {
@@ -510,9 +554,9 @@ final class CCW_Intake_Bridge
     }
 
     /** @param array<string,string> $attribution */
-    private function canonical_page_url($page_path, array $attribution)
+    private function canonical_page_url($page_path, array $attribution, $route_prefix = '/cita/')
     {
-        $url = home_url('/cita' . $page_path);
+        $url = home_url(rtrim((string) $route_prefix, '/') . $page_path);
         if ($attribution !== array()) {
             $query = array();
             foreach ($attribution as $key => $value) {
@@ -803,6 +847,7 @@ final class CCW_Intake_Bridge
             'web_revision_id' => $context['revision_id'],
             'web_page_id' => $context['page_id'],
             'web_form_id' => $context['form_id'],
+            'web_artifact_input_hash' => $context['artifact_input_hash'],
             'form_submission' => array(
                 'page_url' => $context['page_url'],
                 'form_id' => $context['form_id'],
@@ -929,7 +974,7 @@ final class CCW_Intake_Bridge
         $keys = array_keys($wrapper);
         sort($keys, SORT_STRING);
         $allowed_keys = array('endpoint', 'payload', 'schema_version');
-        foreach (array('web_page_id', 'web_project_id', 'web_revision_id') as $optional_key) {
+        foreach (array('web_artifact_input_hash', 'web_page_id', 'web_project_id', 'web_revision_id') as $optional_key) {
             if (array_key_exists($optional_key, $wrapper)) {
                 $allowed_keys[] = $optional_key;
             }
@@ -947,27 +992,6 @@ final class CCW_Intake_Bridge
             $this->fail('ccw_event_bridge_payload_invalid', 422);
         }
 
-        $pointer = $this->cache->pointer();
-        $manifest = is_array($pointer['manifest'] ?? null) ? $pointer['manifest'] : array();
-        $artifact_hash = (string) ($pointer['active_hash'] ?? '');
-        $runtime = is_array($pointer['runtime_configuration'] ?? null)
-            ? $pointer['runtime_configuration']
-            : CCW_Config::runtime_configuration();
-        $measurement = is_array($runtime['measurement'] ?? null) ? $runtime['measurement'] : array();
-        $secret = (string) ($measurement['hmac_key'] ?? '');
-        if (
-            ($pointer['status'] ?? '') !== 'active'
-            || !preg_match('/^[a-f0-9]{64}$/', $artifact_hash)
-            || (string) ($runtime['status'] ?? '') !== 'active'
-            || !hash_equals($artifact_hash, (string) ($runtime['desired_artifact_hash'] ?? ''))
-            || empty($measurement['enabled'])
-            || !in_array((string) ($measurement['scope_type'] ?? ''), array('clinic', 'group'), true)
-            || (int) ($measurement['scope_id'] ?? 0) < 1
-            || strlen($secret) < 16
-        ) {
-            $this->fail('ccw_event_bridge_runtime_unavailable', 503);
-        }
-
         $referer_value = trim((string) ($server['HTTP_REFERER'] ?? ''));
         $referer = parse_url($referer_value);
         if (
@@ -978,6 +1002,50 @@ final class CCW_Intake_Bridge
         ) {
             $this->fail('ccw_event_bridge_referer_invalid', 403);
         }
+        $matched_route = $this->cache->match_route((string) ($referer['path'] ?? ''));
+        $has_identity_fields = array_key_exists('web_project_id', $wrapper)
+            || array_key_exists('web_revision_id', $wrapper)
+            || array_key_exists('web_page_id', $wrapper)
+            || array_key_exists('web_artifact_input_hash', $wrapper);
+        if (
+            $has_identity_fields
+            && $matched_route === null
+            && ((string) ($referer['path'] ?? '') === '/cita' || strpos((string) ($referer['path'] ?? ''), '/cita/') === 0)
+        ) {
+            $matched_route = array(
+                'publication_id' => 'legacy-pilot',
+                'route_prefix' => '/cita/',
+                'relative_path' => ltrim(substr((string) $referer['path'], strlen('/cita')), '/'),
+                'pointer' => $this->cache->pointer(),
+            );
+        }
+        if ($has_identity_fields && $matched_route === null) {
+            $this->fail('ccw_event_bridge_identity_mismatch', 409);
+        }
+        $pointer = $matched_route !== null ? $matched_route['pointer'] : $this->cache->pointer();
+        $manifest = is_array($pointer['manifest'] ?? null) ? $pointer['manifest'] : array();
+        $artifact_hash = (string) ($pointer['active_hash'] ?? '');
+        $runtime = $matched_route !== null && is_array($pointer['runtime_configuration'] ?? null)
+            ? $pointer['runtime_configuration']
+            : CCW_Config::runtime_configuration();
+        $measurement = is_array($runtime['measurement'] ?? null) ? $runtime['measurement'] : array();
+        $secret = (string) ($measurement['hmac_key'] ?? '');
+        $route_runtime_valid = $matched_route === null || (
+            (string) ($runtime['status'] ?? '') === 'active'
+            && hash_equals($artifact_hash, (string) ($runtime['desired_artifact_hash'] ?? ''))
+        );
+        if (
+            ($pointer['status'] ?? '') !== 'active'
+            || !preg_match('/^[a-f0-9]{64}$/', $artifact_hash)
+            || !$route_runtime_valid
+            || empty($measurement['enabled'])
+            || !in_array((string) ($measurement['scope_type'] ?? ''), array('clinic', 'group'), true)
+            || (int) ($measurement['scope_id'] ?? 0) < 1
+            || strlen($secret) < 16
+        ) {
+            $this->fail('ccw_event_bridge_runtime_unavailable', 503);
+        }
+
         if (isset($server['HTTP_ORIGIN']) && trim((string) $server['HTTP_ORIGIN']) !== '') {
             $origin_value = trim((string) $server['HTTP_ORIGIN']);
             $origin = parse_url($origin_value);
@@ -994,7 +1062,8 @@ final class CCW_Intake_Bridge
         $has_landing_identity = $this->assert_event_artifact_identity(
             $wrapper,
             $manifest,
-            (string) ($referer['path'] ?? '')
+            (string) ($referer['path'] ?? ''),
+            $matched_route !== null ? (string) $matched_route['route_prefix'] : '/cita/'
         );
 
         $ip = $this->client_ip($server);
@@ -1012,6 +1081,11 @@ final class CCW_Intake_Bridge
         // or supplies the installation HMAC.
         if ($has_landing_identity) {
             $wrapper['payload'] = $payload;
+            // Legacy alpha.7 loaders did not send the input marker. Resolve it
+            // from the active signed manifest so the control plane can bind the
+            // event to the exact immutable artifact, alongside the final hash
+            // header added by forward_landing_event().
+            $wrapper['web_artifact_input_hash'] = strtolower((string) ($manifest['artifact_input_hash'] ?? ''));
             return $this->forward_landing_event(
                 $wrapper,
                 $event_id,
@@ -1057,13 +1131,14 @@ final class CCW_Intake_Bridge
      * @param array<string,mixed> $manifest
      * @return bool True only for a complete, locally verified landing identity.
      */
-    private function assert_event_artifact_identity(array $wrapper, array $manifest, $referer_path)
+    private function assert_event_artifact_identity(array $wrapper, array $manifest, $referer_path, $route_prefix = '/cita/')
     {
         $identity_keys = array('web_project_id', 'web_revision_id', 'web_page_id');
         $present = array_values(array_filter($identity_keys, static function ($key) use ($wrapper) {
             return array_key_exists($key, $wrapper);
         }));
-        if ($present === array()) {
+        $has_artifact_marker = array_key_exists('web_artifact_input_hash', $wrapper);
+        if ($present === array() && !$has_artifact_marker) {
             return false; // Measurement on ordinary WordPress pages, outside /cita.
         }
         if (count($present) !== count($identity_keys)) {
@@ -1077,11 +1152,18 @@ final class CCW_Intake_Bridge
         $project_id = $this->uuid($wrapper['web_project_id'], 'ccw_event_bridge_project_invalid');
         $revision_id = $this->uuid($wrapper['web_revision_id'], 'ccw_event_bridge_revision_invalid');
         $page_id = $this->uuid($wrapper['web_page_id'], 'ccw_event_bridge_page_invalid');
+        $artifact_input_hash = strtolower(trim((string) ($manifest['artifact_input_hash'] ?? '')));
+        $supplied_artifact_input_hash = $has_artifact_marker
+            ? strtolower(trim((string) $wrapper['web_artifact_input_hash']))
+            : $artifact_input_hash;
         $route = is_array($manifest['page_routes'][$page_id] ?? null) ? $manifest['page_routes'][$page_id] : array();
-        $expected = parse_url(home_url('/cita' . (string) ($route['page_path'] ?? '')));
+        $expected = parse_url(home_url(rtrim((string) $route_prefix, '/') . (string) ($route['page_path'] ?? '')));
         if (
             !hash_equals(strtolower((string) ($manifest['project_id'] ?? '')), $project_id)
             || !hash_equals(strtolower((string) ($manifest['revision_id'] ?? '')), $revision_id)
+            || !preg_match('/^[a-f0-9]{64}$/', $artifact_input_hash)
+            || !preg_match('/^[a-f0-9]{64}$/', $supplied_artifact_input_hash)
+            || !hash_equals($artifact_input_hash, $supplied_artifact_input_hash)
             || !is_array($expected)
             || !hash_equals((string) ($expected['path'] ?? ''), (string) $referer_path)
         ) {

@@ -122,6 +122,51 @@ async function testInheritedIntakeRequiresExplicitLocation() {
   assert.equal(queries.length, 4);
 }
 
+async function testMaterializedProjectDefaultsFollowCurrentGroupRuntime() {
+  const direct = {
+    id: 12,
+    assignment_scope: 'clinic',
+    clinic_id: 66,
+    hmac_key: 'old-group-hmac',
+    config: {
+      runtime_inheritance: { schema_version: 1, scope_type: 'group', scope_id: 7 },
+      features: { consent_mode_enabled: false, chat_enabled: false },
+      texts: {
+        privacy_url: '/privacidad-clinica/',
+        consent_text: 'Acepto la privacidad de esta clínica.',
+      },
+    },
+  };
+  const group = {
+    id: 9,
+    assignment_scope: 'group',
+    group_id: 7,
+    hmac_key: 'current-group-hmac',
+    config: {
+      locations: [{ id: 66 }],
+      features: {
+        consent_mode_enabled: true,
+        consent_provider: 'clinicaclick',
+        chat_enabled: true,
+        tel_modal_enabled: true,
+      },
+    },
+  };
+  const models = {
+    Clinica: { findByPk: async () => ({ grupoClinicaId: 7 }) },
+    IntakeConfig: {
+      findOne: async ({ where }) => (where.assignment_scope === 'clinic' ? direct : group),
+    },
+  };
+  const effective = await intakeConfigForWebScope({ type: 'clinic', id: 66 }, { models });
+  assert.equal(effective.hmac_key, group.hmac_key);
+  assert.equal(effective.config.features.chat_enabled, true);
+  assert.equal(effective.config.texts.privacy_url, '/privacidad-clinica/');
+  const defaults = siteDefaultsFromIntake(effective);
+  assert.equal(defaults.consent_ready, true);
+  assert.equal(defaults.integrations.chat_enabled, true);
+}
+
 function testTemplateInstantiationDoesNotReuseStructuralIds() {
   const source = createBlankWebDocument({ name: 'Plantilla maestra' });
   source.design_system.tokens.font_heading = 'manrope';
@@ -343,6 +388,13 @@ async function testTemplateCatalogUsesBoundedDatabasePagination() {
           version: 3,
           preview_asset_id: null,
           compatibility: '{"schema":"web-document@1"}',
+          scope_type: 'clinic',
+          clinica_id: 66,
+          grupo_clinica_id: null,
+          is_public: 0,
+          status: 'active',
+          created_at: '2026-07-18T09:00:00.000Z',
+          updated_at: '2026-07-18T10:00:00.000Z',
         }];
       },
     },
@@ -372,6 +424,10 @@ async function testTemplateCatalogUsesBoundedDatabasePagination() {
     offset: 499950,
   });
   assert.equal(result.items[0].compatibility.schema, 'web-document@1');
+  assert.equal(result.items[0].source_scope, 'clinic');
+  assert.equal(result.items[0].source_scope_id, 66);
+  assert.equal(result.items[0].managed_by_scope, true);
+  assert.equal(result.items[0].is_public, false);
   assert.equal(Object.hasOwn(result.items[0], 'preview_document'), false);
   assert.doesNotMatch(queries[0].sql, /(?:,|SELECT\s+)\s*document(?:\s|,|$)/i);
   assert.doesNotMatch(queries[1].sql, /(?:,|SELECT\s+)\s*document(?:\s|,|$)/i);
@@ -410,6 +466,13 @@ async function testTemplateCatalogPreviewIsExplicitValidatedAndCanonical() {
           version: 1,
           preview_asset_id: null,
           compatibility: '{}',
+          scope_type: 'global',
+          clinica_id: null,
+          grupo_clinica_id: null,
+          is_public: 1,
+          status: 'active',
+          created_at: '2026-07-18T09:00:00.000Z',
+          updated_at: '2026-07-18T10:00:00.000Z',
         }];
       },
     },
@@ -431,11 +494,18 @@ async function testTemplateCatalogPreviewIsExplicitValidatedAndCanonical() {
     'catalog_key',
     'category',
     'compatibility',
+    'created_at',
     'description',
     'id',
+    'is_public',
+    'managed_by_scope',
     'name',
     'preview_asset_id',
     'preview_document',
+    'source_scope',
+    'source_scope_id',
+    'status',
+    'updated_at',
     'version',
   ]);
 
@@ -455,6 +525,13 @@ async function testTemplateCatalogPreviewIsExplicitValidatedAndCanonical() {
       version: 1,
       preview_asset_id: null,
       compatibility: '{}',
+      scope_type: 'global',
+      clinica_id: null,
+      grupo_clinica_id: null,
+      is_public: 1,
+      status: 'active',
+      created_at: '2026-07-18T09:00:00.000Z',
+      updated_at: '2026-07-18T10:00:00.000Z',
     }];
   };
   await assert.rejects(
@@ -871,6 +948,7 @@ async function main() {
   await testBlankDocument();
   testIntakeDefaultsMakeAConfiguredDraftApprovable();
   await testInheritedIntakeRequiresExplicitLocation();
+  await testMaterializedProjectDefaultsFollowCurrentGroupRuntime();
   testTemplateInstantiationDoesNotReuseStructuralIds();
   testScopeValidation();
   testCampaignContextContract();

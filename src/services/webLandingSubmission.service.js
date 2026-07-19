@@ -3,11 +3,21 @@
 const crypto = require('node:crypto');
 const db = require('../../models');
 const { resolveWebLandingAttribution } = require('./webLandingAttribution.service');
+const {
+  runtimeCandidateForPublicationArtifact,
+} = require('./webIntakeRuntimeReconciliation.service');
+const {
+  effectiveIntakeConfigForScope,
+} = require('./webEffectiveIntakeConfig.service');
+const {
+  webLandingInternalContext,
+} = require('./webArtifactMetadata.service');
 
 const BROWSER_FIELDS = new Set([
   'first_name', 'last_name', 'email', 'phone', 'message', 'preferred_contact',
   'privacy_consent', '_cc_company', 'web_project_id', 'web_revision_id',
-  'web_page_id', 'web_form_id', '_cc_ad_user_data', '_cc_ad_personalization',
+  'web_page_id', 'web_form_id', 'web_artifact_input_hash',
+  '_cc_ad_user_data', '_cc_ad_personalization',
   '_cc_attr_gclid', '_cc_attr_gbraid', '_cc_attr_wbraid', '_cc_attr_fbclid',
   '_cc_attr_ttclid', '_cc_attr_utm_source', '_cc_attr_utm_medium',
   '_cc_attr_utm_campaign', '_cc_attr_utm_content', '_cc_attr_utm_term',
@@ -211,27 +221,13 @@ function normalizedRedirectUrl(pageUrl, anchor, attribution = attributionFromUrl
 }
 
 async function intakeConfigForAttribution(attribution, { models = db } = {}) {
-  if (attribution.scope_type === 'group') {
-    return models.IntakeConfig.findOne({
-      where: { assignment_scope: 'group', group_id: attribution.group_id },
-      raw: true,
-    });
-  }
-  const direct = await models.IntakeConfig.findOne({
-    where: { assignment_scope: 'clinic', clinic_id: attribution.clinic_id },
-    raw: true,
+  return effectiveIntakeConfigForScope({
+    scopeType: attribution.scope_type,
+    clinicId: attribution.clinic_id,
+    groupId: attribution.group_id,
+    groupIdHint: attribution.group_id,
+    models,
   });
-  if (direct) return direct;
-  const inherited = attribution.group_id
-    ? await models.IntakeConfig.findOne({
-      where: { assignment_scope: 'group', group_id: attribution.group_id },
-      raw: true,
-    })
-    : null;
-  const locations = Array.isArray(inherited?.config?.locations) ? inherited.config.locations : [];
-  return locations.some((location) => Number(location?.id ?? location?.clinic_id) === attribution.clinic_id)
-    ? inherited
-    : null;
 }
 
 function observedIp(headers, remoteAddress) {
@@ -304,6 +300,14 @@ async function prepareWebLandingSubmission({
     ...attributionFromBody(body),
     ...attributionFromUrl(pageUrl),
   };
+  const artifactInputHash = scalar(body, 'web_artifact_input_hash', 64, { required: true }).toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(artifactInputHash)) {
+    throw new WebLandingSubmissionError(
+      'web_landing_artifact_identity_invalid',
+      'La versión publicada del formulario no es válida.',
+      409
+    );
+  }
   const attribution = await resolveWebLandingAttribution({
     body: {
       external_source: 'clinicaclick_web_landing',
@@ -311,6 +315,7 @@ async function prepareWebLandingSubmission({
       web_revision_id: scalar(body, 'web_revision_id', 36, { required: true }),
       web_page_id: scalar(body, 'web_page_id', 36, { required: true }),
       web_form_id: scalar(body, 'web_form_id', 64, { required: true }),
+      web_artifact_input_hash: artifactInputHash,
       page_url: pageUrl.toString(),
       google_ads_customer_id: queryAttribution.google_ads_customer_id,
       google_ads_campaign_id: queryAttribution.google_ads_campaign_id,
@@ -344,7 +349,49 @@ async function prepareWebLandingSubmission({
   const errorUrl = normalizedRedirectUrl(pageUrl, attribution.error_anchor, queryAttribution);
   if (honeypot) return { spam: true, success_url: successUrl, error_url: errorUrl, attribution };
 
-  const intake = await intakeConfigForAttribution(attribution, { models });
+  const committedIntake = await intakeConfigForAttribution(attribution, { models });
+  const internalContext = webLandingInternalContext(attribution);
+  const publication = internalContext?.publication || null;
+  const artifact = internalContext?.artifact || null;
+  if (
+    !publication
+    || !artifact
+    || String(publication.id || '') !== String(attribution.publication_id || '')
+    || String(artifact.id || '') !== String(attribution.artifact_id || '')
+  ) {
+    throw new WebLandingSubmissionError(
+      'web_landing_runtime_identity_mismatch',
+      'La versión del formulario ya no está autorizada para enviar contactos.',
+      409
+    );
+  }
+  const selectedRuntime = await runtimeCandidateForPublicationArtifact({
+    intake: committedIntake,
+    publication,
+    artifact,
+    models,
+  });
+  if (!selectedRuntime) {
+    const committedHmac = String(committedIntake?.hmac_key || '').trim();
+    if (
+      !committedIntake
+      || committedHmac.length < 16
+      || committedHmac.length > 512
+      || /[\x00-\x20\x7f]/.test(committedHmac)
+    ) {
+      throw new WebLandingSubmissionError(
+        'web_landing_intake_not_configured',
+        'La landing todavía no tiene preparada la recepción de contactos.',
+        503
+      );
+    }
+    throw new WebLandingSubmissionError(
+      'web_landing_runtime_identity_mismatch',
+      'La versión del formulario ya no está autorizada para enviar contactos.',
+      409
+    );
+  }
+  const intake = selectedRuntime?.intake || null;
   const hmacKey = String(intake?.hmac_key || '').trim();
   if (hmacKey.length < 16 || hmacKey.length > 512 || /[\x00-\x20\x7f]/.test(hmacKey)) {
     throw new WebLandingSubmissionError(

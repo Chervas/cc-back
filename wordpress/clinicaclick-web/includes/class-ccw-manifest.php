@@ -26,9 +26,15 @@ final class CCW_Manifest
     );
 
     /** @return array<string,mixed> */
-    public static function verify(array $manifest, array $envelope, $expected_hash, array $runtime_configuration = array())
+    public static function verify(
+        array $manifest,
+        array $envelope,
+        $expected_hash,
+        array $runtime_configuration,
+        $expected_signing_key_id
+    )
     {
-        if (!CCW_Trust_Store::verify_signed_payload($manifest, $envelope)) {
+        if (!CCW_Trust_Store::verify_signed_payload_for_key($manifest, $envelope, $expected_signing_key_id)) {
             throw new CCW_Error('ccw_manifest_signature_invalid', 'La firma del artefacto no es válida.');
         }
         return self::validate($manifest, $expected_hash, $runtime_configuration);
@@ -615,6 +621,17 @@ final class CCW_Manifest
                     throw new CCW_Error('ccw_artifact_form_identity_invalid', 'Falta una identidad oculta firmada del formulario.');
                 }
             }
+            if (isset($controls['web_artifact_input_hash'])) {
+                $artifact_input_hash = strtolower((string) ($manifest['artifact_input_hash'] ?? ''));
+                if (
+                    !preg_match('/^[a-f0-9]{64}$/', $artifact_input_hash)
+                    || strtolower((string) ($controls['web_artifact_input_hash']['type'] ?? '')) !== 'hidden'
+                    || !is_string($controls['web_artifact_input_hash']['value'] ?? null)
+                    || !hash_equals($artifact_input_hash, strtolower((string) $controls['web_artifact_input_hash']['value']))
+                ) {
+                    throw new CCW_Error('ccw_artifact_form_identity_invalid', 'La versión del formulario no coincide con el manifest firmado.');
+                }
+            }
             if (
                 !isset($controls['_cc_company'])
                 || strtolower((string) ($controls['_cc_company']['type'] ?? 'text')) !== 'text'
@@ -667,6 +684,7 @@ final class CCW_Manifest
             'first_name', 'last_name', 'email', 'phone', 'message', 'preferred_contact',
             'privacy_consent', '_cc_ad_user_data', '_cc_ad_personalization', '_cc_company',
             'web_project_id', 'web_revision_id', 'web_page_id', 'web_form_id',
+            'web_artifact_input_hash',
         ), true);
         $matches = array();
         preg_match_all('/<(?:input|textarea|select)\b([^>]*)>/i', (string) $body, $matches, PREG_SET_ORDER);
@@ -745,6 +763,7 @@ final class CCW_Manifest
         }
         $project_id = strtolower(trim((string) ($manifest['project_id'] ?? '')));
         $revision_id = strtolower(trim((string) ($manifest['revision_id'] ?? '')));
+        $artifact_input_hash = strtolower(trim((string) ($manifest['artifact_input_hash'] ?? '')));
         $page_id = strtolower(trim((string) ($attributes['data-web-page-id'] ?? '')));
         $uuid = '/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/';
         $page_route = is_array($manifest['page_routes'][$page_id] ?? null)
@@ -754,12 +773,21 @@ final class CCW_Manifest
         $expected_html_path = $page_path === '/'
             ? 'index.html'
             : trim($page_path, '/') . '/index.html';
+        $renderer_version = (string) ($manifest['renderer_version'] ?? '');
+        $renderer_semver = preg_match('#/([0-9]+\.[0-9]+\.[0-9]+)$#', $renderer_version, $renderer_match)
+            ? (string) $renderer_match[1]
+            : '0.0.0';
+        $requires_artifact_marker = version_compare($renderer_semver, '1.5.0', '>=');
+        $has_artifact_marker = array_key_exists('data-web-artifact-input-hash', $attributes);
         if (
             !preg_match($uuid, $project_id)
             || !preg_match($uuid, $revision_id)
             || !preg_match($uuid, $page_id)
             || !hash_equals($project_id, strtolower((string) ($attributes['data-web-project-id'] ?? '')))
             || !hash_equals($revision_id, strtolower((string) ($attributes['data-web-revision-id'] ?? '')))
+            || !preg_match('/^[a-f0-9]{64}$/', $artifact_input_hash)
+            || ($requires_artifact_marker && !$has_artifact_marker)
+            || ($has_artifact_marker && !hash_equals($artifact_input_hash, strtolower((string) $attributes['data-web-artifact-input-hash'])))
             || !preg_match('#^/(?:[a-z0-9][a-z0-9_-]{0,79}/)?$#', $page_path)
             || !hash_equals($expected_html_path, (string) $html_path)
         ) {
@@ -777,6 +805,9 @@ final class CCW_Manifest
             'data-consent-mode-enabled' => !empty($measurement['consent_mode_enabled']) ? 'true' : 'false',
             'data-consent-provider' => (string) ($measurement['consent_provider'] ?? 'external_cmp'),
         );
+        if ($has_artifact_marker) {
+            $expected['data-web-artifact-input-hash'] = $artifact_input_hash;
+        }
         $actual_keys = array_keys($attributes);
         $expected_keys = array_keys($expected);
         sort($actual_keys, SORT_STRING);
@@ -854,9 +885,126 @@ final class CCW_Manifest
     }
 
     /** @return array<string,mixed> */
-    public static function verify_runtime_configuration(array $runtime, array $envelope, $installation_id)
+    public static function verify_registry_configuration(
+        array $registry,
+        array $envelope,
+        $installation_id,
+        $expected_signing_key_id
+    )
     {
-        if (!CCW_Trust_Store::verify_signed_payload($runtime, $envelope)) {
+        if (!CCW_Trust_Store::verify_signed_payload_for_key($registry, $envelope, $expected_signing_key_id)) {
+            throw new CCW_Error('ccw_registry_signature_invalid', 'El registro de publicaciones no tiene una firma válida.');
+        }
+        $keys = array_keys($registry);
+        sort($keys, SORT_STRING);
+        if (
+            $keys !== array('installation_id', 'measurement', 'routes', 'schema_version', 'sequence')
+            || (int) ($registry['schema_version'] ?? 0) !== 2
+            || !hash_equals((string) $installation_id, (string) ($registry['installation_id'] ?? ''))
+            || (int) ($registry['sequence'] ?? 0) < 1
+            || !is_array($registry['routes'] ?? null)
+            || count($registry['routes']) > 20
+        ) {
+            throw new CCW_Error('ccw_registry_contract_invalid', 'El registro firmado no corresponde a esta instalación.');
+        }
+        $measurement = self::normalize_registry_measurement($registry['measurement'] ?? null);
+        $routes = array();
+        $prefixes = array();
+        $uuid = '/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i';
+        foreach ($registry['routes'] as $publication_id => $route) {
+            $route_keys = is_array($route) ? array_keys($route) : array();
+            sort($route_keys, SORT_STRING);
+            $prefix = (string) ($route['route_prefix'] ?? '');
+            $status = (string) ($route['status'] ?? '');
+            $hash = $route['desired_artifact_hash'] ?? null;
+            if (
+                !preg_match($uuid, (string) $publication_id)
+                || $route_keys !== array('desired_artifact_hash', 'publication_id', 'route_prefix', 'status')
+                || !hash_equals((string) $publication_id, (string) ($route['publication_id'] ?? ''))
+                || !preg_match('#^/cita/(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?/)?$#', $prefix)
+                || isset($prefixes[$prefix])
+                || !in_array($status, array('active', 'pending', 'retired'), true)
+                || ($status === 'active' && !preg_match('/^[a-f0-9]{64}$/', (string) $hash))
+                || ($status !== 'active' && $hash !== null)
+            ) {
+                throw new CCW_Error('ccw_registry_route_invalid', 'El registro firmado contiene una ruta no válida.');
+            }
+            $prefixes[$prefix] = true;
+            $routes[$publication_id] = array(
+                'publication_id' => (string) $publication_id,
+                'route_prefix' => $prefix,
+                'status' => $status,
+                'desired_artifact_hash' => $hash,
+            );
+        }
+        ksort($routes, SORT_STRING);
+        return array(
+            'schema_version' => 2,
+            'installation_id' => (string) $registry['installation_id'],
+            'sequence' => (int) $registry['sequence'],
+            'measurement' => $measurement,
+            'routes' => $routes,
+        );
+    }
+
+    public static function route_runtime(array $registry, array $route)
+    {
+        return array(
+            'schema_version' => 1,
+            'installation_id' => (string) $registry['installation_id'],
+            'sequence' => (int) $registry['sequence'],
+            'status' => $route['status'] === 'active' ? 'active' : 'retired',
+            'route_prefix' => '/cita',
+            'publication_id' => (string) $route['publication_id'],
+            'publication_route_prefix' => (string) $route['route_prefix'],
+            'desired_artifact_hash' => $route['status'] === 'active' ? $route['desired_artifact_hash'] : null,
+            'measurement' => $registry['measurement'],
+        );
+    }
+
+    private static function normalize_registry_measurement($measurement)
+    {
+        if (!is_array($measurement) || !is_bool($measurement['enabled'] ?? null)) {
+            throw new CCW_Error('ccw_measurement_contract_invalid', 'La configuración de medición no es válida.');
+        }
+        if (!$measurement['enabled']) return array('enabled' => false);
+        $scope_type = (string) ($measurement['scope_type'] ?? '');
+        $scope_id = (int) ($measurement['scope_id'] ?? 0);
+        $hmac = (string) ($measurement['hmac_key'] ?? '');
+        if (
+            !in_array($scope_type, array('clinic', 'group'), true)
+            || $scope_id < 1
+            || (string) ($measurement['loader_path'] ?? '') !== '/assets/loader.js'
+            || strlen($hmac) < 16
+            || strlen($hmac) > 512
+            || preg_match('/[\x00-\x20\x7f]/', $hmac)
+        ) {
+            throw new CCW_Error('ccw_measurement_contract_invalid', 'La configuración de medición no es válida.');
+        }
+        return array(
+            'enabled' => true,
+            'scope_type' => $scope_type,
+            'scope_id' => $scope_id,
+            'loader_path' => '/assets/loader.js',
+            'hmac_key' => $hmac,
+            'consent_mode_enabled' => !empty($measurement['consent_mode_enabled']),
+            'consent_provider' => in_array((string) ($measurement['consent_provider'] ?? ''), array('clinicaclick', 'external_cmp'), true)
+                ? (string) $measurement['consent_provider'] : 'external_cmp',
+            'chat_enabled' => !empty($measurement['chat_enabled']),
+            'whatsapp_enabled' => !empty($measurement['whatsapp_enabled']),
+            'phone_enabled' => !empty($measurement['phone_enabled']),
+        );
+    }
+
+    /** @return array<string,mixed> */
+    public static function verify_runtime_configuration(
+        array $runtime,
+        array $envelope,
+        $installation_id,
+        $expected_signing_key_id
+    )
+    {
+        if (!CCW_Trust_Store::verify_signed_payload_for_key($runtime, $envelope, $expected_signing_key_id)) {
             throw new CCW_Error('ccw_runtime_signature_invalid', 'La configuración de runtime no tiene una firma válida.');
         }
         if (

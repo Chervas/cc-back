@@ -7,6 +7,9 @@ const {
   WebLandingEventBridgeError,
   prepareWebLandingEventBridge,
 } = require('../services/webLandingEventBridge.service');
+const {
+  webLandingInternalContext,
+} = require('../services/webArtifactMetadata.service');
 
 function noStore(res) {
   res.set('Cache-Control', 'no-store, max-age=0');
@@ -44,6 +47,7 @@ const prepare = asyncHandler(async (req, res, next) => {
   req.webLandingEventEndpoint = prepared.endpoint;
   req.webLandingRateLimitIdentity = prepared.publication_id;
   req.webLandingEventAttribution = prepared.attribution;
+  req.webLandingArtifactMetadata = webLandingInternalContext(prepared.attribution)?.artifact || null;
   return next();
 });
 

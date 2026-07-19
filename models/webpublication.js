@@ -46,7 +46,7 @@ module.exports = (sequelize, DataTypes) => {
       { fields: ['clinica_id', 'status'] },
       { fields: ['grupo_clinica_id', 'status'] },
       { fields: ['job_request_id'] },
-      { unique: true, fields: ['wordpress_installation_id'] },
+      { name: 'idx_web_publications_wordpress_status_path', fields: ['wordpress_installation_id', 'status', 'path'] },
     ],
   });
   WebPublication.associate = function associate(models) {

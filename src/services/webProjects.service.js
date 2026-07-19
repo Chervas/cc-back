@@ -14,6 +14,9 @@ const {
   collectWebResourceReferences,
   resolveWebDocumentResources,
 } = require('./webResourceResolver.service');
+const {
+  effectiveIntakeConfigForScope,
+} = require('./webEffectiveIntakeConfig.service');
 
 const PROJECT_PURPOSES = new Set(['landing', 'microsite', 'website']);
 const PROJECT_STATUSES = new Set(['draft', 'active', 'archived']);
@@ -218,29 +221,22 @@ async function intakeConfigForWebScope(scope, options = {}) {
   const models = options.models || db;
   if (!models.IntakeConfig?.findOne) return null;
   if (scope.type === 'group') {
-    return models.IntakeConfig.findOne({
-      where: { assignment_scope: 'group', group_id: scope.id },
-      raw: true,
+    return effectiveIntakeConfigForScope({
+      scopeType: 'group',
+      groupId: scope.id,
+      rejectInvalidInheritance: true,
+      models,
       transaction: options.transaction,
     });
   }
-  const direct = await models.IntakeConfig.findOne({
-    where: { assignment_scope: 'clinic', clinic_id: scope.id },
-    raw: true,
+  return effectiveIntakeConfigForScope({
+    scopeType: 'clinic',
+    clinicId: scope.id,
+    preserveClinicConfig: true,
+    rejectInvalidInheritance: true,
+    models,
     transaction: options.transaction,
   });
-  if (direct) return direct;
-  const groupId = await groupIdForClinic(scope.id, options);
-  if (!groupId) return null;
-  const inherited = await models.IntakeConfig.findOne({
-    where: { assignment_scope: 'group', group_id: groupId },
-    raw: true,
-    transaction: options.transaction,
-  });
-  const locations = Array.isArray(inherited?.config?.locations) ? inherited.config.locations : [];
-  return locations.some((location) => positiveInteger(location?.id ?? location?.clinic_id) === scope.id)
-    ? inherited
-    : null;
 }
 
 function siteDefaultsFromIntake(record) {
@@ -1648,7 +1644,8 @@ async function listTemplates({ actorId, query = {}, models = db } = {}) {
   const rankedSql = `
     SELECT
       id, catalog_key, name, description, category, version,
-      preview_asset_id, compatibility,
+      preview_asset_id, compatibility, scope_type, clinica_id,
+      grupo_clinica_id, is_public, status, created_at, updated_at,
       ROW_NUMBER() OVER (
         PARTITION BY catalog_key, version
         ORDER BY ${priorityExpression} DESC, id ASC
@@ -1661,7 +1658,9 @@ async function listTemplates({ actorId, query = {}, models = db } = {}) {
   `;
   const rows = await sequelize.query(`
     WITH ranked_templates AS (${rankedSql})
-    SELECT id, catalog_key, name, description, category, version, preview_asset_id, compatibility
+    SELECT id, catalog_key, name, description, category, version,
+           preview_asset_id, compatibility, scope_type, clinica_id,
+           grupo_clinica_id, is_public, status, created_at, updated_at
     FROM ranked_templates
     WHERE scope_rank = 1
     ORDER BY category ASC, name ASC, version DESC, id ASC
@@ -1688,6 +1687,12 @@ async function listTemplates({ actorId, query = {}, models = db } = {}) {
     for (const preview of previewRows) previewById.set(String(preview.id), preview);
   }
   const items = rows.map((template) => {
+    const sourceScope = String(template.scope_type || '').trim().toLowerCase();
+    const sourceScopeId = sourceScope === 'clinic'
+      ? Number(template.clinica_id)
+      : sourceScope === 'group'
+        ? Number(template.grupo_clinica_id)
+        : null;
     const item = {
       id: template.id,
       catalog_key: template.catalog_key,
@@ -1699,6 +1704,13 @@ async function listTemplates({ actorId, query = {}, models = db } = {}) {
       compatibility: typeof template.compatibility === 'string'
         ? JSON.parse(template.compatibility || '{}')
         : (template.compatibility || {}),
+      source_scope: sourceScope,
+      source_scope_id: Number.isSafeInteger(sourceScopeId) && sourceScopeId > 0 ? sourceScopeId : null,
+      is_public: template.is_public === true || Number(template.is_public) === 1,
+      managed_by_scope: sourceScope === scope.type && sourceScopeId === scope.id,
+      status: template.status,
+      created_at: template.created_at,
+      updated_at: template.updated_at,
     };
     if (includePreview) {
       const preview = previewById.get(String(template.id));

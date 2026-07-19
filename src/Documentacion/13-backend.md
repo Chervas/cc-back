@@ -1,9 +1,69 @@
 > **Módulo:** Arquitectura del Backend
-> **Última actualización:** 2026-07-17
+> **Última actualización:** 2026-07-19
 > **Relacionado con:** `cc-front/src/Documentacion/20.1-motor-flujos-v2.md` | documento operativo `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`
 > **Fuente canónica:** este archivo del repositorio backend. `cc-front/src/Documentacion/13-backend.md` es un espejo completo para conservar los enlaces internos del manual frontend; cualquier cambio se hace aquí primero y después se sincroniza el espejo.
 
 Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Data Manager/Conversiones mejoradas, política de goals y E2E/limpieza de intake.
+
+---
+
+## 2026-07-19 - Candidato Marketing Web `alpha.8` (todavía no desplegado)
+
+La rama de integración contiene el corte candidato completo del editor/CMS,
+SEO + Schema, plantillas, landings y los tres niveles comerciales de campañas.
+El diseño de referencia de ModSuite quedó verificado directamente en Figma,
+archivo `gi540QkcCiJYc7xmoWXk8t`, nodo `682:3296`; se reutiliza su arquitectura
+de interacción, no código generado por Figma. El frontend candidato está
+publicado en su rama con commit `c5fcab42`, pero esta evidencia **no equivale a
+un despliegue**.
+
+El paquete fuente WordPress es `clinicaclick-web 2.0.0-alpha.8`; Propdental
+continúa ejecutando `2.0.0-alpha.7` y `/cita/` conserva su artefacto público
+histórico. `alpha.8` añade registro firmado de hasta 20 rutas, token staged,
+reconciliación durable del runtime de intake, sobres AES-256-GCM, recuperación
+administrativa idempotente, lookup dirigido de artefactos, claim de propiedad
+del sitio y enlace exacto de cada runtime/registro/manifest con la clave
+Ed25519 aceptada. Una instalación `pending` no reserva una URL ni puede leer
+desired-state/artefactos: solo pasa a `connected` después de demostrar por
+HTTPS el challenge temporal servido por ese WordPress y ganar el índice único
+de `claimed_site_hash` dentro de la transacción. El heartbeat posterior solo
+confirma/oculta la prueba; no sustituye el claim.
+
+Las siete migraciones candidatas, en orden, son
+`20260718230000`, `20260718233000`, `20260719090000`, `20260719091500`,
+`20260719093000`, `20260719094500` y `20260719100000`. Todavía no se han
+aplicado en dev/staging. La última añade el claim de sitio con backfill y
+preflight fail-closed; su contrato se verificó sobre una tabla desechable en el
+MySQL staging real: rerun idempotente, `pending` sin reserva, único claim
+conectado, duplicado rechazado y `down` bloqueado si existen filas. La tabla de
+prueba se eliminó. La `20260719091500` pasó además su preflight específico en
+MySQL 8.0.42 con credencial de mantenimiento temporal al proceso de test: el
+`LOCK TABLES` esperó a un writer previo, los tres triggers bloquearon
+INSERT/UPDATE/DELETE, un DDL fallido conservó el fence, el rerun cifró/descifró
+correctamente y la conexión liberó explícitamente sus locks. La comprobación
+final dejó cero tablas y cero triggers de scratch. El usuario ordinario no
+recibió privilegios nuevos; en el rollout fresco la tabla `090000` ya nace sin
+columnas plaintext.
+
+Evidencia fuente del candidato: runner Marketing Web **319/319**, contratos
+WordPress **39/39** y tres pruebas end-to-end de interoperabilidad
+Node→PHP/compilador/ZIP provisionado; Campañas recorre 34 contratos y termina
+verde. El frontend pasa **168/168** pruebas focales, **252/252** de Marketing,
+TypeScript, i18n y build de producción. La revisión de seguridad cerró con
+cero P0/P1/HIGH abiertos. El ZIP genérico se reconstruyó dos veces con 17
+entradas y el mismo SHA-256
+`e7d852f2fd2c1bb028840974a9fce31fae829f6378c9e2690d6877f86e011eda`;
+incluye `class-ccw-site-claim.php` y no incluye configuración provisionada.
+Ninguno de esos resultados acredita todavía el
+cutover live: faltan migrar, promover backend/frontend, mover la caché de
+Propdental fuera del document root, instalar el ZIP provisionado `alpha.8`,
+recibir ACK schema 2, ejecutar una segunda ruta desechable con formulario,
+evento, rollback y tombstone, y limpiar toda evidencia sintética.
+
+El inventario canónico actual del orquestador es **33 tareas periódicas**, **10
+integraciones dirigidas/background** y **59 handlers**. El número 59 incluye
+`web_intake_runtime_reconcile`; no existe un cron lateral para reconciliación,
+publicación, monitor o limpieza.
 
 ---
 
@@ -139,15 +199,25 @@ Release funcional staging: backend `9b82958`, promovido desde dev `ac994a0`; fro
 > **Nota de inventario vigente 2026-07-18:** los conteos `30/6/48` de esta
 > sección se conservan como evidencia del cutover del 14 de julio. El runtime
 > actual registra **33 tareas periódicas**, **10 integraciones
-> dirigidas/background** y **58 handlers**, incluido
-> `marketing_web_publication_health_monitor`; todos siguen materializados en
+> dirigidas/background** y **59 handlers**, incluidos
+> `marketing_web_publication_health_monitor` y
+> `web_intake_runtime_reconcile`; todos siguen materializados en
 > `JobRequest`, sin cron de negocio lateral.
 
 ### Orquestación periódica única
 
 `SCHEDULED_JOB_DEFINITIONS` contiene 30 tareas periódicas. Las seis nuevas son `system_pm2_log_retention` y cinco bridges OPS (`ops_global_discovery`, `ops_summary`, `ops_google_business_profile_daily`, `ops_search_console_daily`, `ops_google_business_profile_requested`). `node-cron` solo crea `JobRequest`; el worker durable ejecuta, reintenta, recupera y audita. Los bridges conservan `UTC`. `OPS_INTERNAL_API_TOKEN` es obligatorio y nunca se registra.
 
-El inventario completo contiene 48 handlers. Las 6 integraciones dirigidas/background son `meta_ads_backfill_for_sites`, `web_backfill_for_sites`, `analytics_backfill_properties`, `business_profile_backfill_locations`, `whatsapp_template_sync_delayed` y `marketing_competition_heatmap_refresh`. También `automation_whatsapp_quiet_send` e `intake_quickchat_summary_materialize` usan `JobRequest`. Las esperas persisten `waiting + next_run_at`, deduplican y releen el activo al vencer sin guardar teléfono, texto ni token. BullMQ recibe únicamente transporte inmediato.
+El inventario de aquel cutover contenía 48 handlers. El candidato actual tiene
+59; la nota superior es la fuente vigente. Las 6 integraciones
+dirigidas/background de aquel corte eran `meta_ads_backfill_for_sites`,
+`web_backfill_for_sites`, `analytics_backfill_properties`,
+`business_profile_backfill_locations`, `whatsapp_template_sync_delayed` y
+`marketing_competition_heatmap_refresh`. También
+`automation_whatsapp_quiet_send` e `intake_quickchat_summary_materialize` usan
+`JobRequest`. Las esperas persisten `waiting + next_run_at`, deduplican y releen
+el activo al vencer sin guardar teléfono, texto ni token. BullMQ recibe
+únicamente transporte inmediato.
 
 El runner OPS usa allowlist, cola de salida de 64 KiB, timeout de tres horas y terminación ordenada. El alta programada y la manual fusionan `definition.payloadDefaults` antes del payload explícito. `#23670`, invocado sin payload, persistió `onlyRequested=true`, namespace `staging` y terminó al primer intento: prueba que el default de seguridad no depende del caller.
 
@@ -1672,7 +1742,7 @@ El monitor de `node-cron` muestra `enqueued`/`already_queued`, `lastEnqueuedAt` 
 
 BullMQ sigue siendo la cola especializada de WhatsApp y otros transportes inmediatos. En tareas como `whatsapp_templates_sync`, el flujo completo es `cron -> JobRequest durable -> execute* -> BullMQ por WABA`; no existe una ejecución de negocio lateral desde el callback cron. Los envíos por horario silencioso y las resincronizaciones diferidas de plantillas no usan `delay` de BullMQ: esperan en `JobRequests` y solo despachan el transporte cuando vencen.
 
-Regresión canónica: `node src/scripts/tests/scheduled_jobs_orchestration.test.js`. Comprueba cobertura exacta de los 30 horarios, mappings dirigidos —incluido `marketing_competition_heatmap_refresh`—, alcance de deduplicación, índice/migración, `queued`, separación y exclusión mutua de carriles, advisory lease, monitor de enqueue, clasificación total/parcial, timeouts HTTP, `sync_log_id`, enum de `SyncLogs`, backoff, agotamiento, startup gate/retry/stop y settlements CAS con conflicto. `durable_whatsapp_scheduling.test.js` cubre las dos programaciones puntuales, la ausencia de PII/tokens en sus payloads, el inventario exacto de 48 handlers y el despacho idempotente del transporte. `intake_quickchat_outbox.test.js` añade atomicidad, rollback, idempotencia y reintento del outbox de intake. Los bridges y la retención tienen además `ops_bridge_runner.test.js` y `pm2_log_retention.test.js`.
+Regresión canónica: `node src/scripts/tests/scheduled_jobs_orchestration.test.js`. Comprueba cobertura exacta de los 33 horarios vigentes, mappings dirigidos —incluidos `marketing_competition_heatmap_refresh` y la reconciliación Web—, alcance de deduplicación, índice/migración, `queued`, separación y exclusión mutua de carriles, advisory lease, monitor de enqueue, clasificación total/parcial, timeouts HTTP, `sync_log_id`, enum de `SyncLogs`, backoff, agotamiento, startup gate/retry/stop y settlements CAS con conflicto. `durable_whatsapp_scheduling.test.js` cubre las dos programaciones puntuales, la ausencia de PII/tokens en sus payloads, el inventario exacto de 59 handlers y el despacho idempotente del transporte. `intake_quickchat_outbox.test.js` añade atomicidad, rollback, idempotencia y reintento del outbox de intake. Los bridges y la retención tienen además `ops_bridge_runner.test.js` y `pm2_log_retention.test.js`.
 
 Importante:
 
@@ -2756,7 +2826,7 @@ En `.env` / `.env.example`:
 - El handler registrado en `JOB_HANDLERS` exige el par `audit_id + lead_id`, comprueba que el audit pertenece a ese lead y acepta audits de ambos `source_detail`. Antes de reutilizar `materializeIntakeQuickChatSummary`, normaliza internamente el source a `chatbot_quickchat` y pasa el `audit_id` como orden durable. La materialización bloquea el lead y consulta bajo la misma transacción todos sus resúmenes: `Messages.metadata.intake_audit_id` mayor gana. Si un outbox antiguo corre después, completa `skipped/stale`, no emite socket, no cambia contenido/metadata, no consolida y no toca `Conversations.last_message_at`. El watermark forma parte de `needsUpdate`: un audit posterior avanza el marcador aunque hash y contenido sean idénticos; del mismo modo, un mensaje legacy idéntico adopta el primer marcador. Reejecutar el mismo audit o recibir ambos POST no crea un segundo mensaje.
 - El handler no llama a Meta CAPI, Google Ads/Data Manager, BullMQ ni a un envío real de WhatsApp. Solo persiste el evento interno y emite el socket de interfaz como best effort. Para audits actuales extrae y valida `resolved_clinic_id` y lo pasa al materializador: si el lead pertenece a otra sede, termina sin retry con `409 quickchat_summary_clinic_mismatch`, cero Message/socket. Solo audits legacy sin `resolved_clinic_id` pueden recuperar usando la clínica persistida en el lead; nunca aceptan una sede del payload crudo. Los `4xx` guardan en `result_summary` únicamente `http_status`, `error_code` y un mensaje de allowlist, además de IDs/flags sin contenido/PII, para que el fast path conserve el `409` en vez de degradarlo a `500`. Errores técnicos se reintentan; payload incompleto o mismatch audit/lead quedan terminales no reintentables. Si el lead/audit ya fue limpiado de forma controlada, el job termina como `skipped/audit_not_found`.
 - `scripts/cleanup-intake-e2e-run.js` carga y bloquea los outbox por `payload.lead_id`, exige que cada `payload.audit_id` sea el audit exacto del lead y rechaza jobs `running`. En `simulate/apply` borra el JobRequest antes del lead dentro de la transacción y el postcheck exige `quickchat_outbox_jobs=0`, evitando que un job huérfano reconstruya la conversación tras la limpieza.
-- Regresión: `node src/scripts/tests/intake_quickchat_outbox.test.js` cubre lead nuevo y deduplicado guardando IDs resueltos, rechazo cross-clinic `409` sin materialización/socket, fallback legacy a la clínica del lead, lectura compatible del wrapper de `JobExecutor` y del formato directo de fixtures, commit atómico, rollback si falla el enqueue, `14725`/email inválido con cero lead-audit-job, unión real de `enqueueJobRequest` a la transacción, par audit/lead, fallo transitorio/reintento para ambos contratos, audit stale sin socket, duplicado idempotente, relectura tras error del trigger, outcome `unknown_durable`, fast path `completed/202 queued` sin falsos positivos, ausencia de proveedores y el inventario de 48 handlers. `intake_quickchat_summary.test.js` protege el orden inverso/doble POST, compatibilidad legacy, contenido y `last_message_at` del ganador, el `422` antes de crear, la ausencia de materialización lateral y los retornos `chatbot` deduplicado anteriores a Meta/Google conservando `409` para el resto; `cleanup_intake_e2e_run.test.js` cubre outbox exacto/running.
+- Regresión: `node src/scripts/tests/intake_quickchat_outbox.test.js` cubre lead nuevo y deduplicado guardando IDs resueltos, rechazo cross-clinic `409` sin materialización/socket, fallback legacy a la clínica del lead, lectura compatible del wrapper de `JobExecutor` y del formato directo de fixtures, commit atómico, rollback si falla el enqueue, `14725`/email inválido con cero lead-audit-job, unión real de `enqueueJobRequest` a la transacción, par audit/lead, fallo transitorio/reintento para ambos contratos, audit stale sin socket, duplicado idempotente, relectura tras error del trigger, outcome `unknown_durable`, fast path `completed/202 queued` sin falsos positivos, ausencia de proveedores y el inventario de 59 handlers. `intake_quickchat_summary.test.js` protege el orden inverso/doble POST, compatibilidad legacy, contenido y `last_message_at` del ganador, el `422` antes de crear, la ausencia de materialización lateral y los retornos `chatbot` deduplicado anteriores a Meta/Google conservando `409` para el resto; `cleanup_intake_e2e_run.test.js` cubre outbox exacto/running.
 
 **Evidencia live postdeploy:** el chat móvil controlado `CC-E2E-QUICKCHAT-20260713-0110`, con Marketing rechazado y sin click IDs, eligió Sant Martí `56`. El único lead `#7213` produjo audits `#7400/#7401`, jobs `#23818/#23819` completados al primer intento y una sola conversación/mensaje (`#3574/#43072`) cuyo watermark quedó en `7401`; hubo cero intentos Google. El procedimiento `dry-run -> simulate -> apply` retiró después exclusivamente el marcador y devolvió cero en cada postcheck comprometido. Los chats reales huérfanos `#7185/#7195/#7196` se revalidaron y recuperaron por el mismo orquestador mediante `#23820-#23822`, una conversación/resumen Sants `19` por lead; los intentos de proveedor permanecieron `3 -> 3`.
 
@@ -4051,6 +4121,12 @@ Se repite el mismo esquema en `contact`, `qualified_lead`, `schedule` y `purchas
 
 La respuesta de bootstrap ofrece `connect_only`, `guided_improvement` y `managed_service`; `managed_self` permanece en `legacy_modes` para lectura histórica. `connect_only` mide, atribuye y sube conversiones consentidas sin mutar campañas. `guided_improvement` trabaja sobre campañas existentes y puede gestionar el objetivo de conversión y publicar una landing para campañas Google Search/PMax vinculadas, después de guardar la autorización cliente v1 con los scopes exactos `conversion_goal`, `landing_publish` y `campaign_destination`; nunca puede tocar pujas, presupuesto, segmentación ni activar/pausar campañas. Con esa autorización válida, `mode_contract.publish_landings=true`, `change_destinations=true`, el hook `marketing_web.landing_published.v1` queda `available` y el destino queda `available_after_landing_published`. Publicar no cambia Google automáticamente: materializa un binding auditable y el usuario debe confirmar una segunda operación acotada al digest exacto del destino, las cuentas seleccionadas y `readback_required=true`. El worker serializado aplica URL final en anuncios Search o en asset groups PMax, persiste la decisión explícita sobre expansión de URL, relee Google y solo marca éxito si todo coincide. Un fallo parcial encola rollback compensatorio al estado anterior; la auditoría diaria `marketing_campaign.destination_drift_audit.v1` detecta cambios posteriores sin autorepararlos. Los destinos web solo admiten URL HTTPS públicas y estables, sin credenciales, fragmento, host privado ni parámetros efímeros de atribución/firma/caducidad. `managed_service` usa el mismo puente únicamente dentro de una `ManagedCampaign` aprobada y de sus constraints; guardar la estrategia solo provisiona una spec por canal en `draft + observe`, junto con su cuenta `unfunded`, y no llama a Google/Meta.
 
+El resultado de esa auditoría se persiste como
+`CampaignDestinationBindingEvent.event_type=drift_detected`, no como texto de
+log efímero. La migración aditiva `20260718225000` incorpora el valor al ENUM;
+el job está registrado en `scheduledJobCatalog`/`sync.jobs` con horario diario
+`5 3 * * *`. No se reduce a 30 minutos ni existe un cron paralelo.
+
 `POST /api/marketing/campaign-onboarding/start` configura exclusivamente `connect_only` o `guided_improvement`. Aunque `managed_service` continúa expuesto en bootstrap y legible en configuraciones históricas, intentar seleccionarlo o transicionar hacia él por este endpoint devuelve `409 managed_service_request_required`, `next_action=request_managed_campaign` y la ruta canónica `/api/marketing/managed-campaigns/request`. La guarda se evalúa antes de resolver el scope, comprobar transiciones o crear un `CampaignRequest`; por tanto no deja onboardings parciales. El alta de Piloto automático debe entrar siempre por la solicitud gestionada y sus gates de presupuesto, financiación, propuesta y aprobación.
 
 Cambiar entre niveles es una operación explícita: el cliente debe confirmar exactamente `from_mode` y `to_mode`; el backend bloquea el cambio si queda otra estrategia no completada o una policy activa/pausada en el alcance. Esto incluye la salida desde el histórico `managed_self`. No se sobrescriben ni eliminan policies para aparentar una migración. Mejora no admite una estrategia Meta-only: debe existir al menos una campaña Google vinculada. En campañas externas `channels[].percentage` no expresa reparto gestionado y se conserva en cero en vez de inventar un 100/0.
@@ -4874,7 +4950,30 @@ plantillas ni filas que puedan estar referenciadas por ejecuciones.
 
 ## Marketing Web: control plane, editor y compilador W0-W2 (2026-07-18)
 
-**Corte integrado vigente:** backend `dev` llega a `4e4b555` y staging a
+**Corte posterior vigente:** backend `c9fe9dc`/`68360ed`, promovido a staging
+mediante `4bbc299`, eleva el compilador a
+`clinicaclick-web-renderer/1.5.0` y hace durable `drift_detected`.
+Frontend `a2580f4d`, promovido mediante `dccaa992`, incorpora la galería
+semántica; el runtime staging usa `main.5d23dcd3057ad1f6.js` y su `index.html`
+tiene SHA-256
+`4451d0ba00320451acb788b48ed939d4de30e649fa259e2d383caf3e441cca6c`.
+Chromium a `1440` y `390` confirmó bloque/sección Galería sin errores. La tanda
+feature posterior añade autoría Página/Cabecera/Pie (`5ed9f5fd`, 92/92 antes
+de la unión), archivo/restauración y gestión de plantillas
+(`/marketing/web/plantillas`, frontend `f7e50367`; ownership backend
+`d5ce548`); todavía requiere promoción/QA. El artefacto público WordPress no se
+actualizó: `/cita/` sigue single-route y renderer `1.2.1`. Hosted/custom y
+multi-route permanecen cerrados.
+
+La migración aditiva
+`20260718225000-add-campaign-destination-drift-event.js` valida tabla/columna y
+ENUM, añade `drift_detected` de forma idempotente, falla cerrada ante un schema
+incompatible y rehúsa `down` si existen eventos. Su suite pasa 3/3. La
+auditoría diaria `campaign_destination_drift_audit` usa el orquestador común
+(`5 3 * * *`), no autorepara ni muta campañas. La suite canónica de Campañas
+recorre 34 contratos y pasa 46/46.
+
+**Corte integrado base (histórico):** backend `dev` llega a `4e4b555` y staging a
 `5e57431`; `pm2-back-staging` ya ejecuta ese último corte y el smoke público de
 autenticación devuelve el `401` esperado sin errores de arranque. El corte
 funcional frontend llega a `305d4eae` en `dev` y `5f8f8858` en staging; los
@@ -4901,6 +5000,14 @@ Nginx quedó activo y el smoke público de auth devuelve el `401` esperado. Las
 integraciones MySQL destructivas se omiten de forma
 explícita cuando `WEB_EDITOR_TEST_MYSQL_URL` no está definido. Esta integración
 no autoriza una campaña.
+
+Esos totales pertenecen al baseline promovido. El candidato del 2026-07-19 sí
+volvió a ejecutar el runner canónico completo: Marketing Web **319/319**,
+WordPress **39/39**, interoperabilidad **3/3** y Campañas 34 contratos/46
+pruebas. El frontend integrado pasa 168/168 focales y 252/252 de Marketing,
+además de TypeScript, i18n y build de producción. Son resultados de la rama
+candidata; no sustituyen los hashes ni la evidencia live del baseline hasta el
+cutover documentado.
 
 El runner canónico neutraliza explícitamente
 `MARKETING_WEB_ENABLED_SCOPES`, `MARKETING_WEB_DISABLED_SCOPES` y
@@ -4951,6 +5058,13 @@ CAS (`lock_version`); crear, enviar y aprobar revisiones adquiere locks en orden
 plantillas builtin se siembran versionadas y las instancias regeneran todos los
 IDs estructurales para no compartir referencias entre proyectos.
 
+`PATCH /api/marketing/web-projects/:projectId` exige `version` y solo admite
+que el usuario lleve el proyecto a `draft` o `archived`; `active` pertenece al
+flujo de publicación. El cambio bloquea la fila, aplica CAS, incrementa versión
+y audita `web.project.updated`. La UI interpreta restaurar como
+`archived -> draft`: nunca activa una publicación ni reutiliza un deployment.
+Mientras el proyecto está archivado, editor/publicación permanecen en lectura.
+
 El catálogo autenticado admite
 `GET /api/marketing/web-templates?include_preview=true`. El servicio pagina y
 aplica ACL/scope antes de cargar documentos, por lo que solo consulta los IDs
@@ -4958,6 +5072,16 @@ ya visibles de esa página. Cada `preview_document` se valida como
 `WebDocument v1`, se canonicaliza y se contrasta con su hash almacenado; un
 documento corrupto o cuyo hash no coincide falla cerrado con `503` y nunca se
 envía al navegador. Sin el flag no se carga ni proyecta el documento. La
+muestra paginada se calcula en base de datos, deduplicando por
+`catalog_key/version` según prioridad del scope; proyecta `source_scope`,
+`source_scope_id`, `managed_by_scope`, `is_public`, `status`, `created_at` y
+`updated_at`. Solo `managed_by_scope=true` autoriza edición/archivo; una
+plantilla global o heredada permanece visible en lectura y el frontend no
+puede convertir su badge en autorización. La ruta visual correspondiente es
+`/marketing/web/plantillas`; no existe una publicación independiente en esa
+URL.
+
+La
 migración idempotente
 `20260718103000-normalize-web-qualification-template-category.js` normaliza la
 categoría builtin histórica `form` a `qualification`; el selector frontend no
@@ -5009,7 +5133,7 @@ misma referencia global congelada.
 
 `clinicaclick-web-renderer/1.4.0` es un incremento posterior y compatible que
 no reemplaza ni reescribe la historia de globales de `1.3.0`. El corte
-`4345683`, presente en la rama de integración y todavía no desplegado, amplía
+`4345683`, posteriormente promovido a staging, amplió
 el JSON Schema cerrado de siete a nueve tipos con dos hojas de estructura:
 
 - `divider` exige `children=[]`, no admite bindings y limita sus propiedades a
@@ -5024,6 +5148,23 @@ de esos enums. La identidad del artefacto sigue incluyendo la versión del
 renderer, por lo que compilar la misma revisión con `1.4.0` genera un corte
 explícito, determinista y auditable; nunca modifica un artefacto `1.2.1` o
 `1.3.0` ya congelado.
+
+`clinicaclick-web-renderer/1.5.0` añade `gallery` como décimo tipo cerrado. Es
+una hoja sin hijos ni bindings con entre 2 y 12 items y assets únicos. Limita
+columnas a `2|3|4`, `fit` a `cover|contain`, proporción a
+`1:1|4:3|3:2|16:9` y exige por item un asset válido, foco X/Y acotado y texto
+alternativo o marca decorativa; el pie es opcional. `webResourceResolver`
+congela el recurso por la ruta exacta del item. El compilador genera
+`figure/img/figcaption`, dimensiones y lazy loading, usa las columnas
+configuradas en escritorio, dos en tablet y una en móvil. No admite HTML/CSS,
+clases ni placeholders aportados por el usuario.
+
+El compilador resuelve además una única canonical efectiva por página. Esa URL
+alimenta `<link rel="canonical">`, `og:url` y las URL/`@id` de `WebPage` y
+`FAQPage`. `sitemap.xml` solo incorpora canónicas indexables cuyo origen
+coincida con el de publicación; una canonical externa se conserva en HTML y se
+excluye del sitemap del host. El test de compilador cubre expresamente esta
+coherencia.
 
 El formulario global también se materializa por ruta. El manifest no lo trata
 como un único formulario sin contexto, sino como un contrato `scope=global`
@@ -5141,6 +5282,12 @@ petición las imágenes referenciadas por nodos y por los assets sociales/global
 de página; no convierte una URL del documento en autoridad ni expone metadata
 de almacenamiento.
 
+En una galería `1.5.0`, cada item conserva su `asset_id` y metadata editorial
+propia. La aprobación resuelve/congela el asset por la ruta exacta del item;
+reordenar o reemplazar no permite que otra posición herede silenciosamente el
+recurso. La selección UI puede paginar, pero la snapshot final exige entre 2 y
+12 recursos reales, únicos y autorizados.
+
 Scope se declara como `scope_type=clinic|group` y `scope_id`. Las listas usan
 `page`, `limit` (máximo 100), `status`, `search` y filtros de tipo/locale/kind.
 Una clínica solo ve activos del grupo cuando pide explícitamente
@@ -5161,10 +5308,16 @@ contenido debe estar `published` y exponer el campo solicitado. Una referencia
 UUID grupal elegida por un proyecto de clínica cuenta como herencia explícita.
 Los bindings vivos de clínica se congelan como descriptores
 `clinic_public_v1` con un allowlist de campos públicos; un proyecto de grupo
-siempre requiere clínica explícita. `treatment`, `professional` e
-`intake_config` siguen devolviendo
-`resolver_not_implemented` hasta que exista su contrato propio; no se
-improvisan consultas. Si queda alguna referencia, la aprobación responde 422
+siempre requiere clínica explícita. Los resolvers tipados ya implementados son:
+
+- `treatment`: `name`, `title`, `description`, `short_description` y
+  `price_from`;
+- `professional`: `name`, `title` y `alt_text`;
+- `intake_config`: solo identidad y procedencia (`id`, `scope`, `inherited`).
+  Nunca congela configuración privada, secretos, HMAC ni credenciales.
+
+Cada resolver comprueba scope y existencia antes de congelar; no improvisa
+campos fuera de su allowlist. Si queda alguna referencia, la aprobación responde 422
 `web_revision_not_ready` con las rutas no resueltas y no cambia estado. La
 snapshot solo contiene campos publicables y rechaza nombres sensibles como
 `token`, `secret`, `hmac_key`, `bucket` u `object_key`. Las URLs de fuentes no
@@ -5180,9 +5333,11 @@ conservan un único loader. `ccw_sync_event` está programado cada 15 minutos y,
 si se ejecuta manualmente, debe correr como el usuario del sitio para no crear
 caché propiedad de `root`.
 
-Estado del paquete: el código fuente y el ZIP determinista corresponden a
-`clinicaclick-web` `2.0.0-alpha.7` y consumen el manifest de formularios
-globales por página emitido por renderer `1.3.0`. `alpha.7` valida que todo
+Estado live: Propdental y la fila de control continúan en
+`clinicaclick-web` `2.0.0-alpha.7`. Estado fuente candidato: el código y el ZIP
+determinista corresponden a `2.0.0-alpha.8`; todavía no se han instalado. El
+baseline `alpha.7` consume el manifest de formularios globales por página
+emitido por renderer `1.3.0` y valida que todo
 formulario global cubra las rutas/páginas firmadas que lo usan y que sus campos
 coincidan entre contratos; no relaja firma, hash, scope, host, ruta ni
 allowlists. El rollout se realizó con paquete provisionado, activación como
@@ -5235,12 +5390,27 @@ El schema integrado se instala en orden: `19000` (proyectos/editor), `20000`
 (contenido/media), `21000` (modo Mejora), `21100` (unicidad de policy por
 estrategia), `21500` (plantillas builtin), `22000` (artefactos), `23000`
 (dominios/publicaciones/deployments), `24000` (atribución de intake), `24500`
-(contexto de campaña) y `25000` (bindings, cuentas y eventos de destino). Los
+(contexto de campaña), `25000` (bindings, cuentas y eventos de destino) y
+`20260718225000` (valor `drift_detected` en el ENUM de eventos),
+`20260718230000` (multi-publicación WordPress), `20260718233000` (token staged),
+`20260719090000` (reconciliación de runtime de intake), `20260719091500`
+(cifrado reanudable de secretos legacy) y `20260719093000` (lookup dirigido
+deployment/artefacto), seguido de `20260719094500` (marcador durable de
+idempotencia para recuperación administrativa) y `20260719100000` (claim
+único y demostrable del sitio WordPress). Estas siete migraciones posteriores
+a `20260718225000` son candidatas y no están todavía aplicadas en dev/staging. Los
 `up` validan el contrato completo de cualquier tabla
 preexistente y fallan cerrado ante drift; solo pueden reparar la variante
 legacy exacta de `ON UPDATE CASCADE` en las FKs de scope cuando destino,
 columna referenciada, `ON DELETE` y datos permiten la sustitución segura. Los
 `down` se ejecutan en orden inverso y son repetibles.
+
+La migración `20260718225000` es aditiva e idempotente: falla cerrada si falta
+la tabla/columna o el ENUM no tiene el contrato esperado; no reconstruye una
+tabla desconocida y su `down` rechaza eliminar el valor mientras haya filas
+`drift_detected`. La migración destructiva
+`20260715152000-purge-google-places-competition-content.js` está cancelada y
+sus `up`/`down` son no-op; no pertenece a este rollout ni queda pendiente.
 
 `WebPublicationDeployments` es un log append-only con secuencia monotónica. La
 petición crea deployment + `JobRequest` en una transacción; el worker bloquea
@@ -5290,33 +5460,87 @@ instalación, el manifest canónico, su envelope Ed25519 regenerado de forma
 determinista y las rutas declaradas en el manifest. Un hash anterior o ajeno,
 un token de otra instalación o un `pathToken` no canónico fallan cerrado. Las
 respuestas son `private, no-store` y nunca exponen bucket, key ni credenciales.
+Manifest y envelope públicos respecto al contrato —pero siempre autenticados
+con el token de instalación— se proyectan desde una metadata saneada que
+excluye `files` y `qaReport`. El bundle autenticado admite como máximo 8 MiB; la
+caché de bytes verificados es LRU/TTL acotada a 32 MiB, 8 MiB por entrada, 64
+entradas, dos minutos y cuatro cargas completas concurrentes, con singleflight
+por hash. Cada petición vuelve a comprobar en base de datos que el artefacto
+sigue `ready`; una retirada invalida el servicio aunque queden bytes en RAM.
 
-El plugin `2.0.0-alpha.7` decide las cabeceras por origen: añade bearer y
-versión únicamente cuando el origen completo de la descarga coincide con
-`api_base`; nunca los reenvía a S3/CDN. En ambos modos conserva la segunda
-barrera: verifica firma, hash, tamaño, allowlist y contenido antes del cambio
-atómico de `active.json`.
+Tanto el plugin live `2.0.0-alpha.7` como el candidato `alpha.8` deciden las
+cabeceras por origen: añaden bearer y versión únicamente cuando el origen
+completo de la descarga coincide con `api_base`; nunca los reenvían a S3/CDN.
+En ambos modos conservan la segunda barrera: firma, key id exacto, hash, tamaño,
+allowlist y contenido deben verificarse antes de cualquier cambio atómico.
 
 El onboarding ya no tiene dependencia circular. La secuencia válida es:
 
-1. backend crea `WebWordpressInstallation(status=pending)` y un ticket opaco
-   AES-256-GCM ligado a actor, instalación, token y caducidad;
+1. backend crea `WebWordpressInstallation(status=pending)` sin reservar la URL,
+   genera un challenge independiente de 256 bits y un ticket opaco AES-256-GCM
+   ligado a actor, instalación, token, challenge y caducidad; persiste solo el
+   hash del token y el hash/caducidad del challenge;
 2. el usuario autenticado descarga el ZIP provisionado aunque todavía no haya
-   publicación; contiene solo identidad, token y ancla pública Ed25519;
-3. al activar, WordPress guarda la configuración y envía un heartbeat
-   autenticado `activation_handshake`; el backend pasa la instalación a
-   `connected` aun sin desired state;
-4. se puede preparar una publicación mientras está `pending`, pero el backend
+   publicación; contiene identidad, token, challenge y ancla pública Ed25519;
+3. al activar, WordPress registra/actualiza rewrites y expone temporalmente
+   `/.well-known/clinicaclick-wordpress-claim` con instalación, digest y
+   `home_url` canónico, nunca el challenge raw;
+4. el backend obtiene ese documento por HTTPS/443 con DNS revalidado, socket
+   fijado, sin redirects/proxy/descompresión y con límites estrictos; bajo
+   transacción compara el digest y reclama el `claimed_site_hash` único. Solo
+   entonces pasa a `connected`; un heartbeat sin prueba no reclama el sitio;
+5. el reporte aceptado devuelve `site_claim_acknowledged=true` y el plugin deja
+   de exponer la prueba temporal. Revocar libera el claim, pero reconectar exige
+   un challenge nuevo;
+6. se puede preparar una publicación mientras está `pending`, pero el backend
    rechaza su activación hasta que la instalación esté `connected`;
-5. tras publicar, `desired-state` entrega runtime firmado y artefacto; los
+7. tras publicar, `desired-state` entrega runtime firmado y artefacto; los
    siguientes reportes confirman el hash activo.
 
 No se ha relajado ninguna firma ni autenticación. El token sigue persistido
 solo como hash en backend y como opción `autoload=false` en WordPress; el ZIP
-es `private, no-store`, el ticket dura 15 minutos y un token/descriptor que no
-coincida falla antes de generar el paquete.
+es `private, no-store` y el ticket dura 15 minutos. Un ZIP recién emitido lleva
+siempre el descriptor público vigente, aunque `public_key_id` conserve todavía
+la clave anterior hasta recibir el ACK firmado de WordPress.
 
-### Orden seguro para renderer 1.3.0 y globales
+La rotación Ed25519 operativa usa dos fases y no permite self-bootstrap:
+
+1. la pareja vigente pasa a `MARKETING_WEB_SIGNING_PRIVATE_KEY_PEM` /
+   `MARKETING_WEB_SIGNING_PUBLIC_KEY_PEM`; durante la ventana de transición se
+   declaran además `MARKETING_WEB_SIGNING_ROTATION_FROM_KEY_ID=<old>` y
+   `MARKETING_WEB_SIGNING_PREVIOUS_PRIVATE_KEY_PEM=<old-private>`;
+2. una instalación cuyo `public_key_id` ya es vigente recibe descriptor sin
+   envelope de transición. Una instalación en `<old>` recibe el descriptor
+   nuevo firmado por la privada old, mientras runtime/registro y envelopes
+   autenticados se firman con la nueva;
+3. WordPress persiste esa clave como pendiente, verifica y aplica todo el estado
+   deseado, y solo si todas las rutas terminan `active`/`retired` sin
+   `manual_hold`, pendientes ni fallos la promueve localmente. Conserva el ID
+   anterior como retirado para bloquear downgrade/replay;
+4. `sync_result` reporta `signing_key_id` y `configuration_sequence`. El backend
+   promueve `WebWordpressInstallation.public_key_id` únicamente en schema 2,
+   bajo el lock de instalación, tras revalidar token/site, secuencia y conjunto
+   exacto de rutas/artefactos dentro de la misma transacción. Schema 1,
+   heartbeat, ACK parcial, clave distinta o secuencia vieja no promueven;
+5. `reported_state.signing_key_history` conserva hasta 32 IDs retirados. El
+   desired-state rechaza que una configuración vuelva a seleccionar uno de
+   ellos. Cuando todas las instalaciones activas reportan el ID vigente se
+   retiran las dos variables temporales y se destruye la privada old.
+
+El plugin no usa el conjunto completo de claves históricas para verificar un
+desired-state nuevo. Tras aceptar el descriptor vigente, liga a su `key_id` la
+firma del runtime/registro y de cada manifest descargado. Las claves retiradas
+pueden permanecer para inspección de artefactos inmutables locales, pero una
+firma nueva hecha con ellas falla aunque el response conserve el descriptor
+vigente; esto evita key-confusion después de una rotación.
+
+Si la clave old se pierde o compromete no existe fallback remoto: se congela la
+publicación y se hace reanclaje público fuera de banda por instalación (ZIP/token
+rotados + importación local explícita del descriptor), seguido de reconciliación
+manual y auditada del `public_key_id` del control plane. Nunca se emite una firma
+falsa ni se acepta un header como prueba de confianza.
+
+### Orden seguro para renderer 1.5.0, globales y galería
 
 La compatibilidad es deliberadamente asimétrica: una revisión legacy o una que
 solo use cabecera/pie globales no requiere el nuevo contrato de intake, pero
@@ -5341,10 +5565,11 @@ orden operativo obligatorio es:
    exactamente `2.0.0-alpha.7`, y verificar sincronización, página existente y
    rollback sin cambiar el artefacto activo;
 5. solo entonces aprobar/publicar una revisión compilada por
-   `clinicaclick-web-renderer/1.3.0` que contenga formulario global;
-6. verificar cada permalink, `data-cc-global`, el contrato de formulario de su
-   página, un envío controlado, atribución, ausencia de duplicados y rollback
-   antes de ampliar scopes.
+   `clinicaclick-web-renderer/1.5.0` que contenga formulario global y, para
+   acreditar el corte vigente, una galería real;
+6. verificar cada permalink, `data-cc-global`, canonical/OG/JSON-LD/sitemap,
+   recursos de galería, contrato de formulario por página, un envío controlado,
+   atribución, ausencia de duplicados y rollback antes de ampliar scopes.
 
 Los pasos 1-4 quedaron acreditados en Propdental el 2026-07-18: WP-CLI y DB
 reportan `alpha.7`, `/cita/` sigue en `200` y el artefacto activo no cambió.
@@ -5358,24 +5583,186 @@ multi-route: conservan sus gates y E2E independientes.
 
 El gate de versión no degrada ni retira publicaciones legacy y no bloquea una
 revisión que solo tenga header/footer globales. Aun así, para el rollout real
-se recomienda promover `alpha.7` antes de estrenar cualquier artefacto `1.3.0`,
+se recomienda promover `alpha.7` antes de estrenar cualquier artefacto `1.5.0`,
 de modo que plugin y renderer se observen como una sola tanda reversible.
 
 Durante un diagnóstico controlado se mostró accidentalmente un HMAC de intake
-en la salida privada de la herramienta. Se rotó inmediatamente: `IntakeConfig`
-del grupo y el plugin legado quedaron sincronizados, se registró
-`web.measurement_hmac.rotated` solo con hashes, se eliminaron scripts/backups
-temporales y el plugin v2 recuperó el runtime nuevo. La comprobación pública
-posterior confirmó que HTML/JS no contienen el HMAC. Nunca se debe imprimir la
-configuración runtime completa para diagnosticar este canal.
+en la salida privada de la herramienta y debe tratarse como comprometido. **No
+se ha rotado todavía**: hacerlo antes del cutover `alpha.8` rompería el tráfico
+legacy que sigue dependiendo de esa identidad. La rotación pendiente se hará
+únicamente después de promover y acreditar `alpha.8`, mediante el reconciliador
+two-phase: source y target exactos, ACK estable de todas las rutas, formulario y
+evento reales, ventana de gracia y retirada posterior del source. La auditoría
+documentará la operación y hashes técnicos, nunca el valor del secreto. No hay
+evidencia suficiente para afirmar que se hayan eliminado scripts o backups
+temporales. Nunca se debe imprimir la configuración runtime completa para
+diagnosticar este canal.
 
-El modelo actual es single-route para el piloto: una instalación no debe
-recibir varias publicaciones clínicas independientes. Antes de usar un mismo
-WordPress para Sants, Nou Barris, Sant Martí, Badalona y Hospitalet se requiere
-un desired state v2 por path, router/caché/intake/report/rollback por ruta y
-aislamiento de HMAC/scope. La interoperabilidad Ed25519 está probada, pero la
-rotación real de control plane —adopción, revocación y recuperación— sigue
-siendo gate de GA.
+El runtime público continúa single-route en `alpha.7`, pero el candidato
+`2.0.0-alpha.8` ya cierra el contrato multi-route sin desplegarlo. Una
+instalación conserva el piloto histórico `/cita/` y admite rutas adicionales
+inmutables `/cita/<slug>/`; backend y plugin resuelven por el prefijo más largo.
+El desired state schema 2 firma un registro de hasta 20 rutas y acota cada sync
+a 400 ficheros únicos, 500 descargas y 768 KiB de control. El plugin valida el
+plan completo antes de descargar, comparte releases inmutables por hash —aunque
+esta versión puede repetir descarga/verificación si varias rutas apuntan al
+mismo artefacto—, conmuta punteros por ruta bajo lock, conserva LKG por ruta y reporta ACK estable con
+`registry_sequence + route_prefix + artifact_hash`. Un estado vacío también se
+firma para poder retirar el último tombstone sin resucitar el piloto legacy.
+El rollback local de `/cita/` restaura también el runtime de esa ruta en
+`routes.json`; el resolver comprueba siempre que `desired_artifact_hash`
+coincida con el puntero activo y, durante los dos renames atómicos por fichero,
+usa únicamente el par coherente o falla cerrado. La regresión ejecuta dos
+artefactos/runtimes distintos, rollback y tráfico real de los bridges intake y
+eventos.
+
+Retirar una publicación WordPress ya es una operación de producto explícita:
+`POST /api/marketing/web-publications/:publicationId/retire` exige
+`marketing.web.publish`, bloquea proyecto, instalación y todas sus rutas,
+rechaza deployments activos, marca `retired_at`, incrementa versión y audita.
+La ruta permanece reservada; solo el tombstone confirmado libera uno de los 20
+slots. `publication_count` representa capacidad ocupada, mientras
+`route_history_count`/`requires_additional_route` impiden que la UI vuelva a
+tratar una instalación con historial como virgen. El historial total queda
+acotado a 200 rutas para mantener finito el conjunto bloqueado.
+
+La rotación de token también es staged. En instalaciones conectadas el token
+nuevo caduca por defecto en 24 horas y solo un reporte schema 2 válido de
+`alpha.8` lo promueve bajo lock; el anterior sigue sirviendo hasta ese ACK y
+falla inmediatamente después. Reemitir invalida el candidato previo y revocar
+borra ambos. Una instalación `pending` sí reemplaza su token primario al
+reemitir porque todavía no existe tráfico que preservar. La descarga de
+artefactos ya no recorre todas las rutas: resuelve el hash solicitado por el
+índice `artifact_id,status,publication_id`, vuelve a demostrar publicación y
+deployment deseados y usa una caché LRU corta solo para bytes inmutables.
+Cada request vuelve a consultar que `WebArtifact.status=ready`; un artefacto
+fallido o retirado deja de servirse aunque sus bytes sigan en caché. La
+normalización/verificación criptográfica del bundle se memoriza por hash con
+TTL y LRU acotados, de modo que manifest, envelope y N ficheros no vuelven a
+hashear el bundle completo N veces. `desired-state` conserva ETag/304, pero se
+entrega como `Cache-Control: private, no-store, max-age=0` y `Pragma: no-cache`:
+el bearer, runtime y registro deseado nunca deben persistir en cachés
+intermedias o compartidas.
+
+Los cambios de `IntakeConfig` que alteran HMAC o runtime no conmutan primero la
+configuración y después las landings. Una reconciliación durable prepara los
+artefactos de todas las publicaciones afectadas, conserva source/target durante
+despliegue y gracia, exige readback público —incluido ACK real de ruta en
+WordPress— y solo entonces finaliza el cambio. Los deployments internos llevan
+un marker exacto que suprime el falso evento `landing_published`; providers de
+storage no pueden inventarlo ni borrarlo. Fallo/superseded despiertan el
+finalizador en la misma transacción. Hosted, custom-domain y WordPress usan el
+mismo modelo de identidad de artefacto, sin confiar en un hash aportado solo por
+el navegador.
+
+La identidad exacta se transporta en dos capas: los renderers nuevos incluyen
+`web_artifact_input_hash` en formularios/eventos y WordPress añade
+`X-Clinicaclick-Web-Artifact` desde su manifest firmado. Para el piloto legacy
+renderer `1.2.1`, `alpha.7` completa el marker server-side desde ese manifest;
+un valor enviado por el navegador que no coincida se rechaza. Hosted y custom
+domain mantienen source activo y el target exacto durante un deployment de
+contenido, pero el target solo se admite si es el artefacto del deployment
+publish/rollback más reciente y conserva el hash del runtime comprometido; un
+tercer artefacto falla cerrado.
+
+Las transiciones grupo/clínica que se solapan se serializan bajo el mismo lock
+de grupo. El finalizador respeta el orden global instalación → publicación →
+deployment. Si una de N rutas target falla después de que otra ya haya
+conmutado, no se limpia ni expira el target: se crean rollbacks durables hacia
+cada artefacto source, se espera deployment verificado y ACK/puntero source en
+todas las rutas y solo entonces se desbloquea el scope. Una gracia por identidad
+de artefacto se conserva incluso cuando source y target usan el mismo HMAC.
+`bulkCreate`/`bulkUpdate`/`bulkDestroy` fuerzan hooks por fila, `truncate` se
+rechaza y borrar un `IntakeConfig` con publicaciones servidas falla cerrado.
+
+`failed` no activa ninguna autorreparación silenciosa. Solo un admin global de
+Clinicaclick puede invocar
+`POST /api/admin/web-runtime-reconciliations/:id/recover`, con `confirmed=true`,
+motivo, `Idempotency-Key` (o `X-Request-Id`) aportado por el operador y una acción explícita: `retry_target` o
+`rollback_source`. El servicio vuelve a bloquear `IntakeConfig`,
+reconciliación, instalaciones, publicaciones, deployments y artefactos en el
+orden global; demuestra que current sigue siendo source/target y que cada
+artefacto conserva estado, entorno, runtime hash y linaje exactos. Un retry
+crea siempre otra generación y otro `JobRequest`, resealing los envelopes para
+el AAD nuevo. Conserva además el linaje de rutas ya target+verified: las rutas
+source reciben deployments frescos y las ya conmutadas se fusionan en el set
+esperado, de modo que otro fallo puede restaurarlas todas. Un rollback crea
+deployments source nuevos y no reutiliza rollbacks terminales de la generación
+fallida. La acción queda en `WebAuditEvents`; el modelo guarda request id, hash
+estable de acción+motivo, acción y generación. El lock de reconciliación hace
+esta idempotencia visible aun bajo MySQL `REPEATABLE READ`: mismo key+payload
+es replay y mismo key con payload distinto responde 409. Actor y permisos se
+toman exclusivamente del JWT; un admin de clínica no puede falsear el actor en
+el body.
+
+Los HMAC source/target de una reconciliación no se duplican en plaintext. La
+tabla conserva envelopes AES-256-GCM con IV aleatorio y AAD que liga UUID de
+reconciliación, scope, scope ID, generación y slot source/target. La subclave
+se deriva por HKDF-SHA256 desde `MARKETING_WEB_PLUGIN_BOOTSTRAP_KEY` con salt e
+info exclusivos/versionados para este uso; opcionalmente puede provisionarse
+`MARKETING_WEB_RUNTIME_ENVELOPE_KEY` como clave dedicada de 32 bytes y un
+`MARKETING_WEB_RUNTIME_ENVELOPE_KEY_ID` estable. Clave ausente/malformada,
+envelope alterado o AAD cruzado fallan cerrados. La migración posterior
+`20260719091500-encrypt-web-intake-runtime-secrets.js` recupera de forma
+reanudable una tabla experimental que ya tuviera columnas `*_hmac_key`, valida
+cualquier envelope parcial y elimina el plaintext. Si existen columnas legacy,
+la migración exige explícitamente
+`MARKETING_WEB_RUNTIME_SECRET_MIGRATION_QUIESCED=true`: antes hay que detener
+todos los API/workers que puedan escribir `IntakeConfig` o reconciliaciones,
+comprobar que no queda ningún writer antiguo, ejecutar la migración con ese flag
+solo en su proceso, retirarlo y arrancar exclusivamente el código nuevo. El
+proceso adquiere además, en una conexión dedicada, un fence MySQL verificable
+con `LOCK TABLES` de escritura sobre reconciliaciones y de lectura sobre
+`IntakeConfigs`; espera a writers previos y bloquea writers antiguos o nuevos
+durante el backfill y la revalidación. Como `ALTER TABLE` libera ese lock, las
+escrituras quedan después cercadas por tres triggers temporales fail-closed
+creados en orden `BEFORE DELETE` → `BEFORE INSERT` → `BEFORE UPDATE`, sin
+referencias a columnas legacy, que sobreviven
+al commit implícito. Tras una segunda revalidación, las dos columnas legacy se
+eliminan en un único `ALTER` atómico y solo entonces se retiran los triggers. Un
+rerun detecta y verifica su definición exacta; si el proceso cayó después del
+`DROP`, los limpia aunque ya no queden columnas legacy, y nunca elimina un
+trigger homónimo ajeno. Si revalidación o `ALTER` fallan y aún queda cualquier
+columna plaintext, los triggers permanecen bloqueando DML hasta un rerun
+correcto/manual. Como los tres `CREATE TRIGGER` son secuenciales, se compara
+además un fingerprint canónico exacto de todas las filas antes/después de
+instalarlos; así también un `DELETE` en esa transición aborta. El backfill usa
+compare-and-set por hash/longitud;
+autentica también envelopes
+existentes cuyo plaintext sea NULL/vacío y aborta sin borrar columnas ante
+drift, clave/AAD inválidos, fence no disponible o falta de quiescencia. El flag
+certifica además que no se reiniciarán workers entre DDLs y no debe quedar en el
+entorno permanente. Su `down` es
+deliberadamente no-op porque nunca se vuelve a materializar un secreto.
+
+Bloqueo de promoción: antes de ejecutar `20260719091500` fuera de una base
+desechable hay que pasar un preflight sobre MySQL de la misma versión real. Debe
+acreditar espera efectiva de `LOCK TABLES` frente a un writer concurrente,
+definiciones recuperables desde `information_schema.TRIGGERS`, rechazo DML de
+los tres triggers, supervivencia al commit implícito de `CREATE TRIGGER`, `ALTER`
+atómico, caída simulada antes/después del `DROP` y rerun/cleanup. Los stubs
+unitarios protegen el contrato del código, pero no sustituyen esta prueba de
+dialecto; sin su evidencia no se autoriza migración/deploy.
+
+Ese bloqueo quedó satisfecho para el candidato el 2026-07-19 sobre MySQL
+8.0.42. La primera ejecución detectó que el usuario de aplicación no puede
+crear triggers con binlog y `log_bin_trust_function_creators=0`, sin tocar
+tablas reales. La prueba completa se repitió con la cuenta de mantenimiento
+solo dentro del proceso, sin conceder `SUPER` ni cambiar el global; además
+descubrió y corrigió que el DDL podía devolver una conexión al pool conservando
+el READ lock de `IntakeConfigs`. El helper ejecuta ahora `UNLOCK TABLES`
+explícito incluso si el DDL ya lo hizo. El test exige cleanup y el inventario
+posterior fue cero tablas/triggers de scratch.
+
+La resolución efectiva de runtime es común a intake público, formularios,
+deployments, instalaciones WordPress y defaults de proyectos web. Una fila
+clínica con `runtime_inheritance` conserva sus dominios/campañas/textos locales,
+pero dereferencia siempre el runtime/HMAC actual del grupo y valida pertenencia
+y `locations`. Antes de autenticar, los hints explícitos y los records hallados
+por dominio deben describir una única clínica/grupo; cualquier cruce responde
+409. Se elige un único dueño de credencial por precedencia clínica → grupo →
+dominio y solo se prueban sus candidatos de transición: una firma válida de un
+grupo más amplio nunca rescata un HMAC clínico inválido.
 
 El cierre E2E WordPress quedó verificado:
 
@@ -5433,7 +5820,7 @@ validado de hasta 64 KiB y su wrapper. El runbook versionado está en
 `ops/nginx/README-marketing-web.md` y exige `nginx -t`, CSP, formulario,
 chat/teléfono/WhatsApp, readback y rollback antes de abrir un scope real.
 
-### Hardening Web por canal integrado y desplegado (2026-07-18)
+### Hardening Web live `alpha.7` integrado y desplegado (2026-07-18)
 
 Este bloque describe el contrato vigente en `dev` `4e4b555`, staging/backend
 live `5e57431` y el piloto WordPress live `2.0.0-alpha.7`. El despliegue no abre por
@@ -5460,6 +5847,14 @@ exige `ed25519`, deriva la pública desde la privada y compara ambas en tiempo
 constante. El hosting root rechaza `/`, rutas relativas, NUL y valores
 demasiado cortos.
 
+Desired-state de WordPress consulta `WebArtifact` con metadata allowlisted
+(`id`, proyecto, entorno, estado, hash y manifest), nunca con `files`. El set de
+rutas descargables se valida contra `Object.keys(manifest.files)` y el budget de
+8 MiB antes de construir v1/v2. El contrato de regresión cubre v1 y un poll v2
+al máximo de 20 rutas: 20 lecturas metadata-only, cero bodies y cero ejecución
+del validador completo de bundle; este último queda reservado al endpoint
+autenticado que sirve un recurso concreto.
+
 El publisher/origin hosted endurecido:
 
 - materializa artefactos inmutables y, también al reutilizarlos, compara el
@@ -5474,6 +5869,13 @@ El publisher/origin hosted endurecido:
   creados por ese intento;
 - el health de hosted/custom verifica primero el bundle/puntero local completo
   y después el marker público.
+
+Preflight de infraestructura 2026-07-18: existen
+`/var/lib/clinicaclick-web-hosting` (`ubuntu:ubuntu`, `0755`) y
+`/var/www/letsencrypt/.well-known/acme-challenge`; las listas Cloudflare
+oficiales se revalidaron y coinciden exactamente con el snippet. Esto no abre
+el canal: faltan control DNS, vhost, certificado y flag. El host continúa con
+HTTP `302` de DonDominio y HTTPS `521`; no hay E2E hosted.
 
 El job durable `marketing_web_publication_health_monitor` está programado por
 defecto a `11 * * * *`, lote 25 (máximo 100). Selecciona publicaciones
@@ -5505,8 +5907,12 @@ Estado de aceptación de esta tanda:
 4. E2E público del relay/intake atribuido y datos sintéticos limpiados;
 5. observación real del monitor: saludable;
 6. hosted/custom permanecen deliberadamente apagados hasta
-   DNS/TLS/vhost/proveedor y E2E; WordPress multi-route, rotación Ed25519
-   operativa, Lighthouse y validadores externos siguen fuera de este cierre.
+   DNS/TLS/vhost/flag/proveedor y E2E; el preflight de directorios/Cloudflare no
+   sustituye esos gates. En este cierre histórico `alpha.7`, WordPress
+   multi-route y la rotación Ed25519 operativa aún no existían. El candidato
+   `alpha.8` ya los implementa, pero siguen fuera de lo acreditado hasta su
+   migración, despliegue y E2E públicos; Lighthouse y validadores externos
+   también quedan fuera.
 
 La auditoría Figma afecta al frontend, no a este runtime: se reutiliza la UX de
 editor/biblioteca/plantillas/inspector/onboarding/CMS, pero nunca el backend,

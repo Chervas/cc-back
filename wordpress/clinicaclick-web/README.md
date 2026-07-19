@@ -1,9 +1,10 @@
 # ClinicaClick WordPress plugin v2
 
-> Estado 2026-07-18: la fuente y el ZIP determinista corresponden a
-> `2.0.0-alpha.7`; esta versión añade el contrato de formularios globales por
-> página requerido por renderer `1.3.0`. El WordPress público de Propdental
-> ejecuta `2.0.0-alpha.7`, instalado y activo junto al plugin de medición
+> Estado 2026-07-19: la fuente y el ZIP determinista candidatos corresponden a
+> `2.0.0-alpha.8`. Este corte añade registro firmado multi-route, rotación
+> staged del token y reconciliación del runtime de intake; todavía no se ha
+> desplegado. El WordPress público de Propdental continúa ejecutando
+> `2.0.0-alpha.7`, instalado y activo junto al plugin de medición
 > `clinicaclick` `1.1.7`; WP-CLI y la fila DB están alineados. La instalación
 > está `connected` en `https://www.propdental.es` y `/cita/` conserva el
 > artefacto verificado renderer `1.2.1`. Quedan
@@ -41,9 +42,17 @@ retira esa marca si el loader no llega a cargar.
 - WordPress 5.8 o posterior; PHP 7.4 o posterior; extensión Sodium obligatoria.
 - Activación por sitio. La activación de red multisite falla cerrada en esta
   primera versión.
-- Esta versión piloto admite una publicación/clínica efectiva por instalación.
-  Varias sedes bajo el mismo WordPress necesitan desired state, router,
-  intake/HMAC, reportes y rollback por ruta antes de abrir el rollout.
+- `alpha.8` admite hasta 20 rutas activas por instalación mediante desired
+  state schema 2. El piloto histórico conserva `/cita/`; las adicionales usan
+  `/cita/<slug>/` y el router elige el prefijo firmado más largo. La capacidad
+  y el historial son conceptos distintos: un tombstone confirmado libera un
+  slot, pero la ruta retirada nunca se reasigna. El historial queda acotado a
+  200 filas por instalación. Este contrato está cerrado en código y pruebas,
+  no habilitado todavía en el WordPress público. El rollback local del piloto
+  restaura conjuntamente artefacto, manifest y runtime en `active.json` y
+  `routes.json`; durante los dos renames el resolver solo acepta el runtime
+  cuyo hash corresponde al artefacto activo, por lo que intake y eventos no
+  pueden mezclar releases.
 - Artefactos v1: HTML sin código arbitrario, CSS, TXT/XML, imágenes raster y
   fuentes WOFF/WOFF2. `.php`, ficheros `.js`, SVG, iframes y event handlers se
   rechazan aunque estén firmados. En cada HTML solo se permiten JSON-LD y un
@@ -62,10 +71,14 @@ retira esa marca si el loader no llega a cargar.
 
 El ZIP provisionado debe contener la carpeta `clinicaclick-web/` y mantener
 `clinicaclick-web/clinicaclick.php`. Ya lleva la instalación, el token y el ancla
-pública: se instala y activa sin copiar códigos ni abrir la configuración
-avanzada. La activación envía un heartbeat autenticado que convierte la
-instalación `pending` en `connected`, incluso aunque todavía no exista ninguna
-landing. Solo después se permite activar una publicación para ese WordPress.
+pública, además de un challenge de control del sitio independiente: se instala
+y activa sin copiar códigos ni abrir la configuración avanzada. La activación
+registra la ruta temporal de claim y envía un reporte autenticado, pero el
+heartbeat por sí solo **no** convierte la instalación `pending` en `connected`.
+Antes de promoverla, el backend debe recuperar por HTTPS la prueba temporal del
+propio dominio y verificar que coincide con el challenge provisionado. Solo
+después del claim y su ACK se permite leer el estado deseado o activar una
+publicación para ese WordPress.
 
 El ZIP genérico solo se usa en desarrollo o recuperación manual. Tras
 activarlo:
@@ -73,7 +86,9 @@ activarlo:
 1. abre `Ajustes > ClinicaClick Web`;
 2. indica `installation_id`, token opaco y `API base` HTTPS;
 3. pega el descriptor **público** Ed25519 entregado por un canal autenticado;
-4. pulsa `Sincronizar ahora`.
+4. si es un alta `pending`, define fuera de Git el challenge de claim emitido
+   para esa instalación; una recuperación ya reclamada no debe inventar otro;
+5. pulsa `Sincronizar ahora`.
 
 En instalaciones gestionadas se recomiendan constantes fuera de Git:
 
@@ -82,17 +97,32 @@ define('CLINICACLICK_WEB_INSTALLATION_ID', 'uuid');
 define('CLINICACLICK_WEB_TOKEN', 'token-opaco');
 define('CLINICACLICK_WEB_API_BASE', 'https://crm.clinicaclick.com');
 define('CLINICACLICK_WEB_TRUST_DESCRIPTOR_JSON', '{...descriptor publico...}');
-// Preferible fuera del document root si el hosting lo permite.
+// Solo durante un alta/reclaim manual; secreto independiente del token/HMAC.
+define('CLINICACLICK_WEB_SITE_CLAIM_TOKEN', 'challenge-base64url-de-32-bytes');
+// Obligatorio fuera del document root en toda instalación gestionada.
 define('CLINICACLICK_WEB_CACHE_DIR', '/ruta/privada/clinicaclick-web-cache');
 ```
+
+En toda instalación gestionada o provisionada, el plugin falla cerrado si la
+caché efectiva queda bajo el `document root`, incluso si se definió la
+constante: no sincroniza, no
+sirve landings ni activa el runtime y muestra el diagnóstico
+`ccw_managed_cache_directory_public` en Ajustes y Salud del sitio. La regla se
+aplica también bajo WP-CLI, donde no siempre existe `SERVER_SOFTWARE`; las
+defensas de Apache/IIS no sustituyen el almacenamiento privado portable. El
+plugin no mueve ni copia una caché existente automáticamente; el operador debe
+definir primero la constante fuera del árbol público, sincronizar, bloquear o
+retirar manualmente la antigua caché pública y comprobar que una petición HTTP
+directa a sus `active.json`/`routes.json` devuelve `404` antes de promover el
+runtime.
 
 Para una recuperación o migración ya publicada, el backend puede añadir al ZIP
 provisionado `clinicaclick-web/config/installation.php`, siguiendo
 `config/installation.php.example`. El fichero empieza por `exit` y
 `__halt_compiler`; el plugin lee el JSON posterior como datos y **nunca ejecuta
-el fichero**. Incluye las tres credenciales, el descriptor público y un runtime
-de medición firmado de bootstrap. No se añade al ZIP genérico ni se versiona
-con valores reales.
+el fichero**. Incluye identidad, token, challenge de claim, descriptor público
+y, cuando corresponde, un runtime de medición firmado de bootstrap. No se añade
+al ZIP genérico ni se versiona con valores reales.
 
 Cuando se incluyen los campos opcionales de runtime, el provisionador debe
 copiar **literalmente** el runtime/envelope ya emitidos por el estado deseado de
@@ -106,6 +136,7 @@ publicación. Formato exacto del fichero incluido en el ZIP:
   "installation_id": "<UUID de WebWordpressInstallation>",
   "api_base": "https://crm.clinicaclick.com",
   "token": "<token ccw_ mostrado una sola vez>",
+  "site_claim_token": "<challenge base64url de 32 bytes mostrado una sola vez>",
   "trust_descriptor": {
     "schema_version": 1,
     "algorithm": "Ed25519",
@@ -139,18 +170,30 @@ clinicaclick-web/includes/class-ccw-json.php
 clinicaclick-web/includes/class-ccw-manifest.php
 clinicaclick-web/includes/class-ccw-plugin.php
 clinicaclick-web/includes/class-ccw-router.php
+clinicaclick-web/includes/class-ccw-site-claim.php
 clinicaclick-web/includes/class-ccw-sync.php
 clinicaclick-web/includes/class-ccw-trust-store.php
 clinicaclick-web/config/installation.php
 ```
 
-El ZIP genérico es igual pero no incluye `config/installation.php`. Fixtures,
-tests, tools, claves privadas y `.env` nunca entran en el paquete.
+La allowlist fuente actual de `alpha.8` contiene 17 ficheros en el ZIP genérico
+y 18 en el provisionado; el único fichero adicional es
+`config/installation.php`. Estos recuentos se han contrastado con los 13
+includes presentes y con ambos builders actuales. Fixtures, tests, tools,
+claves privadas y `.env` nunca entran en el paquete. El provisionado histórico
+de `alpha.7` tenía 17 ficheros porque todavía no incluía
+`class-ccw-site-claim.php`; ese recuento histórico no describe el candidato
+`alpha.8`.
 
 Variables del backend/control plane necesarias fuera de Git:
 
 - `MARKETING_WEB_SIGNING_PRIVATE_KEY_PEM` (secreto Ed25519) y
   `MARKETING_WEB_SIGNING_PUBLIC_KEY_PEM` (su pública correspondiente);
+- solo durante una rotación online, `MARKETING_WEB_SIGNING_ROTATION_FROM_KEY_ID`
+  declara de forma explícita el `key_id` anterior y
+  `MARKETING_WEB_SIGNING_PREVIOUS_PRIVATE_KEY_PEM` conserva temporalmente su
+  privada. No se admite una instalación con otra ancla ni una transición hacia
+  una clave registrada como retirada;
 - `MARKETING_WEB_ARTIFACT_STORE_MODE=authenticated_db|s3`; si no se declara,
   usa S3 únicamente cuando bucket y base URL están configurados y, en caso
   contrario, `authenticated_db`;
@@ -159,6 +202,11 @@ Variables del backend/control plane necesarias fuera de Git:
   `MARKETING_WEB_ARTIFACT_PREFIX`, más credenciales mediante role de instancia
   recomendado o secretos AWS;
 - `MARKETING_WEB_API_BASE_URL=https://crm.clinicaclick.com` (config pública);
+- `MARKETING_WEB_PLUGIN_BOOTSTRAP_KEY` (32 bytes, hex o base64url) cifra los
+  tickets de bootstrap y actúa como IKM para una subclave HKDF exclusiva de
+  reconciliaciones; opcionalmente `MARKETING_WEB_RUNTIME_ENVELOPE_KEY` (32
+  bytes) y `MARKETING_WEB_RUNTIME_ENVELOPE_KEY_ID` separan también el material
+  raíz de esos envelopes AES-256-GCM;
 - `MARKETING_WEB_EDITOR_ENABLED` y `MARKETING_WEB_PUBLISHING_ENABLED` solo al
   abrir su gate operativo;
 - `MARKETING_WEB_ENABLED_SCOPES` limita el editor y
@@ -179,16 +227,54 @@ JWT de usuario y `download_ticket` opaco en el body. El ticket AES-256-GCM dura
 `private, no-store`. El token no se devuelve en JSON ni queda almacenado en
 claro en backend.
 
+Una instalación nueva queda `pending` sin reservar globalmente `site_url`.
+El mismo ZIP contiene además un challenge independiente de 256 bits; el
+backend persiste solo su SHA-256 y caducidad. Mientras no exista ACK, el plugin
+expone temporalmente
+`GET /.well-known/clinicaclick-wordpress-claim` con `installation_id`, el
+digest del challenge y el `home_url` canónico, nunca el valor raw. Antes de
+promover a `connected`, el backend hace ese GET por HTTPS/443 con DNS público
+revalidado, socket fijado a las IP validadas, redirects/proxy/descompresión
+bloqueados y límites estrictos. La promoción y el `claimed_site_hash` único se
+escriben bajo transacción; el perdedor de una carrera recibe 409. El ACK del
+reporte oculta el endpoint. `revoked` libera el claim, pero cualquier nueva
+instalación debe publicar su propio challenge. `pending` tampoco puede leer
+desired-state ni artefactos.
+
 La clave privada nunca entra en WordPress. El primer descriptor se ancla por
 configuración local. Una nueva clave solo se admite si su descriptor viene
 firmado por una clave ya confiada. `key_id` es
 `ed25519-` + los 16 primeros hexadecimales de SHA-256 del SPKI DER, igual que
 `webArtifactSignature.js`.
 
+La rotación online es una transición de confianza en dos fases. Mientras la
+instalación conserva la clave anterior, desired-state entrega el descriptor
+actual firmado por la privada anterior, pero firma runtime/registro y los
+envelopes `authenticated_db` con la clave actual. WordPress guarda la nueva
+clave como pendiente, aplica y verifica el estado completo, y solo entonces la
+promueve localmente y emite `sync_result` con `signing_key_id` y
+`configuration_sequence`. El backend vuelve a comprobar bajo lock token, sitio,
+schema 2, secuencia y conjunto exacto de rutas/artefactos antes de cambiar
+`public_key_id`. Una ruta `pending`, `manual_hold`, parcial o fallida no promueve
+la clave. El historial de claves retiradas impide reactivar una clave anterior;
+las copias públicas pueden conservarse únicamente para verificar artefactos
+inmutables históricos. Cada runtime, registro y manifest descargado queda
+ligado además al `key_id` del descriptor aceptado en esa misma respuesta: una
+clave retirada no puede firmar estado nuevo aunque siga presente en el almacén
+para inspeccionar historia local.
+
 El token se guarda como opción `autoload=false`, no se refleja en el formulario
 y solo se envía a los endpoints de control y artefactos cuyo origen HTTPS
 coincide exactamente con el `API base`. Nunca se envía al CDN/S3 externo ni se
 incluye en logs/reportes.
+
+La rotación de una instalación conectada es staged: el ZIP nuevo lleva un
+token candidato con caducidad por defecto de 24 horas, mientras el token activo
+continúa autorizando el servicio. Solo un reporte schema 2 válido de
+`alpha.8` promueve el candidato bajo lock; desde ese instante el token anterior
+falla. Reemitir otro candidato invalida el staged previo. En una instalación
+todavía `pending`, reemitir reemplaza el token primario inmediatamente porque
+no existe tráfico que preservar. Revocar elimina ambos slots.
 
 ## Ciclo de sincronización
 
@@ -202,16 +288,26 @@ incluye en logs/reportes.
 6. Descarga a staging y verifica SHA-256/tamaño/contenido. Solo añade el bearer
    si el origen coincide exactamente con el API; un origen S3 externo nunca lo
    recibe.
-7. Renombra staging a un release inmutable y conmuta `active.json` mediante
+7. En schema 2 valida el registro completo antes de descargar: máximo 20 rutas,
+   400 ficheros únicos, 500 peticiones de descarga en total y 768 KiB para la
+   respuesta de control emitida por backend. Los releases inmutables se
+   comparten por hash;
+   la versión actual puede repetir descarga y verificación cuando varias rutas
+   apuntan al mismo artefacto, antes de conmutar cada puntero bajo lock.
+8. Renombra staging a un release inmutable y conmuta el puntero mediante
    `rename` atómico.
-8. Conserva release, manifest y runtime anterior como `last_known_good` y
-   reporta el resultado.
+9. Conserva release, manifest y runtime anterior como `last_known_good` y
+   reporta secuencia, ruta y hash. Un reporte perdido se reintenta sin volver a
+   promover; un `routes.json` ausente/corrupto se reconstruye de forma cerrada.
 
 Si la API o el CDN fallan, `active.json` no cambia. La landing activa continúa
 sirviéndose. `Rollback local` intercambia activo/LKG y activa `manual_hold` para
 que un cron no deshaga la recuperación; `Reanudar y sincronizar` vuelve a
 aplicar el estado firmado. Un estado `retired` responde 410 pero conserva los
 ficheros para recuperación/retención.
+`POST /api/marketing/web-publications/{id}/retire` marca el tombstone bajo
+autorización y locks; solo el ACK estable de WordPress libera su slot, nunca su
+ruta histórica.
 
 WP-Cron depende de tráfico. En sitios con `DISABLE_WP_CRON`, operación debe
 invocar `wp-cron.php` con el scheduler del hosting; no se añade un cron backend
@@ -232,10 +328,13 @@ el sitemap complementario `/cita/sitemap.xml` al `robots.txt` raíz.
 
 El plugin usa `readfile`; nunca `include`, `require` o `eval` sobre contenido.
 Aplica los headers firmados desde una allowlist, `nosniff`, ETag y caché
-inmutable para assets. En Nginx conviene situar `CLINICACLICK_WEB_CACHE_DIR`
-fuera del document root. Los artefactos son públicos, pero el acceso directo a
-la caché podría omitir headers; el plugin escribe además defensas para Apache e
-IIS.
+inmutable para assets. En cualquier runtime gestionado,
+`CLINICACLICK_WEB_CACHE_DIR` debe estar fuera del document root porque
+`active.json` y `routes.json` incluyen el runtime server-side; el arranque
+operativo falla cerrado si detecta el default público, incluso desde CLI. Los
+artefactos son públicos, pero el acceso directo a la caché podría omitir
+headers; el plugin escribe defensas adicionales para Apache e IIS sin tratarlas
+como frontera principal.
 
 ## Compatibilidad con la medición 1.1.7
 
@@ -293,8 +392,11 @@ duplicado o array falla cerrado:
 - dos hidden opcionales que el loader añade justo antes del POST nativo:
   `_cc_ad_user_data` y `_cc_ad_personalization`, exclusivamente
   `granted|denied`;
-- cuatro identidades ocultas: `web_project_id`, `web_revision_id`,
-  `web_page_id`, `web_form_id`.
+- cinco identidades ocultas en renderers nuevos: `web_project_id`,
+  `web_revision_id`, `web_page_id`, `web_form_id` y
+  `web_artifact_input_hash`. En un artefacto legacy `1.2.1`, `alpha.7` obtiene
+  esta última identidad del manifest firmado y la añade server-side; si el
+  navegador aporta una distinta, el POST se rechaza.
 
 Debe existir `email` o `phone`. Límites: body 16 KiB, nombre/apellidos 100
 caracteres, email 254, mensaje 2.000 y teléfono normalizado a 7-15 dígitos. El
@@ -304,7 +406,7 @@ manifest firmado contiene `intake_forms[form_id]`. Un formulario local lleva
 `page_contracts[page_id]` equivalente por cada página firmada que lo muestra.
 El inspector selecciona primero el contrato de la ruta actual y contrasta el
 form nativo, sus identidades ocultas, campos y anclas. El plugin compara las
-cuatro identidades y el path del `Referer` HTTPS same-origin con el manifest;
+cinco identidades y el path del `Referer` HTTPS same-origin con el manifest;
 nunca confía en scope, API, page URL, formulario global o redirect recibidos
 del visitante.
 
@@ -323,7 +425,7 @@ Accept: application/json
 X-CC-Signature: <HMAC-SHA256 hexadecimal del body exacto>
 X-CC-Event-Id: ccw_<64 hex>
 X-Clinicaclick-Web-Artifact: <hash activo>
-X-Clinicaclick-Plugin-Version: 2.0.0-alpha.7
+X-Clinicaclick-Plugin-Version: 2.0.0-alpha.8
 ```
 
 No envía el bearer de instalación. El payload fija server-side
@@ -353,7 +455,7 @@ Solo los endpoints de control de la instalación reciben:
 
 ```http
 Authorization: Bearer <installation token>
-X-Clinicaclick-Plugin-Version: 2.0.0-alpha.7
+X-Clinicaclick-Plugin-Version: 2.0.0-alpha.8
 Accept: application/json
 ```
 
@@ -380,6 +482,17 @@ estado deseado y solo sirve el hash exacto y el conjunto de ficheros firmado de
 esa instalación; un hash anterior, de otra instalación o una ruta manipulada
 responde 404.
 
+El límite efectivo de cualquier bundle publicable es 8 MiB, incluyendo el
+manifest canónico y los cuerpos declarados; se comprueba antes de publicar y de
+servir desde `authenticated_db`. Para no materializar columnas grandes en cada
+petición, la autorización consulta primero solo metadatos y la carga completa
+usa singleflight con un máximo de cuatro lecturas concurrentes. La caché de
+proceso es LRU, dura como máximo dos minutos y queda acotada a 64 entradas,
+8 MiB por entrada y 32 MiB en total. No es una caché HTTP: manifest, envelope y
+ficheros autenticados siguen respondiendo como contenido privado y no exponen
+las columnas completas `WebArtifact.files` ni `WebArtifact.qaReport` en las
+proyecciones públicas de metadatos.
+
 ### Estado deseado
 
 ```http
@@ -389,8 +502,11 @@ If-None-Match: "desired-version"
 
 Respuestas: `200`, `304`, `401/403`, `404`, `409` o `503`. Un `200` sigue
 `fixtures/desired-state.published.json` o `desired-state.retired.json`.
+Aunque admita ETag/304, el backend responde `private, no-store, max-age=0` y
+`Pragma: no-cache`: el registro deseado, bearer y runtime nunca se almacenan en
+cachés intermedias o compartidas.
 
-Campos obligatorios:
+En schema 1, conservado para el piloto `alpha.7`, los campos obligatorios son:
 
 - raíz: `schema_version=1`, `request_id`, `installation_id`, `desired_state`;
 - `status=published`: `artifact_hash`, `manifest_url`, `envelope_url` y `files`
@@ -430,6 +546,16 @@ server-side,
 secuencia, estado y hash deseado. Una rotación cubre el descriptor normalizado
 de la nueva clave y está firmada por la clave anterior (`envelope.key_id`).
 
+En schema 2, usado por `alpha.8`, la raíz declara `schema_version=2` y
+`desired_state.status=multi`. El estado incluye el descriptor y su envelope,
+un `registry_configuration` firmado y un mapa `artifacts` indexado por hash.
+El registro liga instalación, medición, secuencia monótona y como máximo 20
+rutas con prefijos canónicos `/cita/` o `/cita/<slug>/`; cada ruta activa apunta
+a un hash presente exactamente una vez en `artifacts`. El backend rechaza antes
+de responder si se superan en conjunto 400 ficheros únicos, 500 descargas o
+768 KiB de control. Los reportes schema 2 deben devolver la misma secuencia y
+el conjunto exacto de rutas para poder promover token o clave.
+
 ### Reportes/heartbeat
 
 ```http
@@ -439,34 +565,79 @@ Content-Type: application/json
 
 Eventos: `sync_result`, `sync_failed`, `heartbeat`, `local_rollback`. El payload
 incluye versiones, hash del sitio, artefactos activo/deseado, duración,
-`request_id`, resultado y un código de error estable. No incluye token, body de
+`request_id`, resultado y un código de error estable. Un `sync_result` correcto
+incluye además `signing_key_id` y `configuration_sequence`; en schema 2 esta
+última debe coincidir exactamente con `registry_sequence`. No incluye token, body de
 respuesta, rutas locales, contenido, datos de pacientes ni el HMAC server-side.
-El endpoint responde `200`, `202` o `204`; un fallo de reporte nunca desmonta la
-última publicación válida.
+El endpoint responde `200`, `202` o `204`; cuando el claim ya quedó promovido,
+añade `site_claim_acknowledged=true` para que WordPress deje de exponer la
+prueba temporal. Un fallo de reporte nunca desmonta la última publicación
+válida.
 
-## Runbook
+## Runbook genérico
 
 1. Verificar PHP/Sodium: `php -m | grep sodium`.
 2. Construir y auditar ZIP: `./tools/build-zip.sh`.
-3. Ejecutar harness: `./tests/run.sh`. Incluye los contratos Node/PHP de firma
-   y compilador, y genera un ZIP provisionado real que se extrae, carga y
-   activa desde sus propios PHP empaquetados.
-4. En un WordPress desechable, instalar el ZIP y guardar configuración de test.
-5. Sincronizar y comprobar HTML, asset, ETag/304, HEAD, 404 y 410.
-6. Cortar API/CDN y confirmar que `/cita/` sigue respondiendo.
-7. Probar firma/hash/path malos: el hash activo no debe cambiar.
-8. Publicar una revisión nueva; comprobar activo/LKG y rollback.
-9. Confirmar que el sitio solo tiene el loader de Clinicaclick esperado y que
-   el CMP/otros plugins no han cambiado.
-10. Enviar un formulario válido y comprobar 303/lead; repetir con Origin,
+3. Desde la raíz del backend, ejecutar `npm run test:marketing-web`; ese runner
+   lanza los contratos Node y después `./wordpress/clinicaclick-web/tests/run.sh`.
+   El harness PHP genera además un ZIP provisionado real que se extrae, carga y
+   activa desde sus propios ficheros empaquetados. El corte candidato actual
+   acredita **319/319** contratos Node, **39/39** PHP y **3/3** pruebas de
+   interoperabilidad/compilador/paquete provisionado.
+4. En un WordPress desechable, definir una caché privada fuera del document
+   root, instalar el ZIP provisionado y activar el plugin.
+5. Antes de aceptar el alta, comprobar que el endpoint temporal de claim expone
+   solo el digest esperado. Enviar el reporte y exigir que la prueba HTTPS del
+   backend promueva a `connected`; un heartbeat sin esa prueba debe conservar
+   `pending`. Confirmar después que el ACK oculta el endpoint.
+6. Sincronizar y comprobar HTML, asset, ETag/304, HEAD, 404 y 410.
+7. Cortar API/CDN y confirmar que `/cita/` sigue respondiendo.
+8. Probar firma, clave, hash y path malos: el hash activo no debe cambiar.
+9. Publicar una revisión nueva y comprobar activo/LKG y rollback.
+10. Confirmar que el sitio solo tiene el loader de Clinicaclick esperado y que
+    el CMP/otros plugins no han cambiado.
+11. Enviar un formulario válido y comprobar 303/lead; repetir con Origin,
     Referer, IDs manipulados, firma server-side inválida, campo extra,
-    duplicado, honeypot, 202 y rate-limit
-    adversariales.
-11. La suite fuente vigente verifica **26/26** contratos PHP y **3/3** de
-    interoperabilidad. En Propdental `alpha.7` acredita instalación, cron,
-    handshake y loader único; el artefacto estable `1.2.1` conserva
-    publicación/readback, relay atribuible con limpieza, rollback y monitor de
-    `/cita/` ya probados antes del upgrade.
+    duplicado, honeypot, 202 y rate-limit adversariales.
+
+La validación histórica del corte `alpha.7` quedó cerrada con **34/34**
+contratos PHP y **3/3** de interoperabilidad. En Propdental ese corte acredita
+instalación, cron, handshake y loader único; el artefacto estable `1.2.1`
+conserva publicación/readback, relay atribuible con limpieza, rollback y
+monitor de `/cita/` ya probados antes del upgrade. No se debe reinterpretar esa
+evidencia histórica como despliegue de `alpha.8`.
+
+### Rotación online Ed25519
+
+1. Desplegar primero el plugin/backend que entiende ACK de clave sin cambiar la
+   pareja vigente. Confirmar que todas las instalaciones objetivo reportan
+   schema 2/`alpha.8` y que no hay rutas pendientes ni `manual_hold`.
+2. Generar la nueva pareja fuera de Git. Conservar la pareja actual como
+   anterior, configurar `MARKETING_WEB_SIGNING_ROTATION_FROM_KEY_ID` con su
+   `key_id` y `MARKETING_WEB_SIGNING_PREVIOUS_PRIVATE_KEY_PEM` con su privada;
+   configurar la pareja nueva en las dos variables vigentes. Nunca intercambiar
+   los sentidos de la transición.
+3. Reiniciar de forma escalonada y comprobar dos instalaciones: una ya actual
+   recibe envelope de descriptor vacío; una anterior recibe descriptor nuevo
+   firmado por `ROTATION_FROM_KEY_ID`, y runtime/registro firmados por la nueva.
+4. Esperar los `sync_result` aceptados. Solo cuentan instalaciones cuyo
+   `public_key_id` ya coincide con la clave nueva; heartbeats, schema 1, reportes
+   parciales o secuencias antiguas no cuentan.
+5. Cuando no quede ninguna instalación activa con la clave anterior, retirar
+   inmediatamente las dos variables temporales y destruir la privada anterior
+   según la política de secretos. Los ZIP nuevos siempre contienen el descriptor
+   público vigente, incluso durante la ventana de ACK.
+
+Si la privada anterior se pierde o se sospecha comprometida, no se fabrica una
+cross-signature ni se activa un fallback remoto. Se congela publicación, se rota
+el token, se instala por canal autenticado un ZIP con el descriptor actual y un
+administrador reancla ese descriptor **localmente** (en instalaciones no
+gestionadas, mediante el formulario; en gestionadas, con una intervención
+WP-CLI auditada que invoque `CCW_Trust_Store::import_configured_descriptor()`
+con el descriptor público provisionado). Después un operador debe reconciliar
+de forma explícita y auditada `public_key_id` en el control plane antes de
+reanudar desired-state. Es un procedimiento de incidente por instalación, no un
+env global ni un self-bootstrap automático.
 
 ### Actualización segura a `alpha.7`
 
@@ -566,10 +737,15 @@ publicaciones. Después la identidad vuelve a ser estricta; no es una regla de
 equivalencia general entre hosts.
 
 Durante una diagnosis privada se imprimió accidentalmente el HMAC de intake.
-Se rotó inmediatamente en backend y plugin legado, se auditó solo con hashes,
-se eliminaron temporales y v2 descargó el runtime nuevo. La página pública se
-revisó después y no contiene ese secreto. No imprimir nunca el runtime completo
-como técnica de diagnóstico.
+La rotación **todavía no se ha ejecutado**: queda pendiente hasta que Propdental
+haya adoptado `alpha.8` y pueda completar el cambio en dos fases mediante el
+reconciliador de runtime, sin dejar al plugin vivo con un HMAC incompatible. En
+ese cutover se deberá acreditar el ACK del runtime nuevo y solo entonces retirar
+la clave anterior. Tampoco se da por demostrada la eliminación de temporales
+hasta verificarla expresamente durante el rollout. La revisión del HTML/JS
+público no encontró el secreto, pero eso no sustituye la rotación. No imprimir
+nunca el runtime completo como técnica de diagnóstico ni copiar el valor a esta
+documentación, commits o logs.
 
 Un paquete genérico sobrescribió temporalmente la configuración del piloto en
 una recuperación histórica. Se
@@ -593,7 +769,7 @@ explícita `ccw_purge_on_uninstall=true`.
 ```bash
 ./tests/run.sh
 ./tools/build-zip.sh
-sha256sum dist/clinicaclick-web-2.0.0-alpha.7.zip
+sha256sum dist/clinicaclick-web-2.0.0-alpha.8.zip
 ```
 
 El builder copia una allowlist, ordena entradas, fija un timestamp DOS y

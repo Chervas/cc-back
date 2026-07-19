@@ -45,14 +45,29 @@ final class CCW_Router
         if ($requested === '') {
             return;
         }
+        $matched = null;
         try {
-            $path = $this->route_to_file($requested);
-            $resolved = $this->cache->resolve($path);
+            $uri_path = (string) parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH);
+            $matched = $this->cache->match_route(rawurldecode($uri_path));
+            if ($matched !== null) {
+                $path = $this->route_to_file($matched['relative_path']);
+                $resolved = $this->cache->resolve_pointer($matched['pointer'], $path);
+            } else {
+                $path = $this->route_to_file($requested);
+                $resolved = $this->cache->resolve($path);
+            }
         } catch (CCW_Error $error) {
             $resolved = null;
         }
         if ($resolved === null) {
-            $pointer = $this->cache->pointer();
+            $pointer = $matched !== null ? $matched['pointer'] : array();
+            if ($matched === null) {
+                try {
+                    $pointer = $this->cache->pointer();
+                } catch (CCW_Error $error) {
+                    $pointer = array();
+                }
+            }
             status_header(($pointer['status'] ?? '') === 'retired' ? 410 : 404);
             header('Content-Type: text/plain; charset=utf-8');
             header('X-Content-Type-Options: nosniff');
@@ -89,6 +104,11 @@ final class CCW_Router
 
     public function measurement_tag()
     {
+        try {
+            CCW_Config::assert_cache_storage_safe();
+        } catch (CCW_Error $error) {
+            return;
+        }
         // During migration the legacy measurement plugin remains the single
         // owner of global tracking. The new publisher can still serve and
         // measure its signed /cita/ artifact, which embeds its own loader,
@@ -189,12 +209,24 @@ JS;
 
     public function robots_txt($output, $public)
     {
-        if ($this->cache->resolve('sitemap.xml') === null) {
+        try {
+            $registry = $this->cache->route_registry();
+            if (empty($registry['routes'])) {
+                if ($this->cache->resolve('sitemap.xml') === null) return $output;
+                $registry['routes']['legacy'] = array('publication_id' => 'legacy', 'route_prefix' => '/cita/');
+            }
+            foreach ($registry['routes'] as $publication_id => $entry) {
+                $pointer = $publication_id === 'legacy'
+                    ? $this->cache->pointer()
+                    : $this->cache->route_pointer($publication_id, (string) ($entry['route_prefix'] ?? ''));
+                if ($this->cache->resolve_pointer($pointer, 'sitemap.xml') === null) continue;
+                $line = 'Sitemap: ' . home_url(rtrim((string) $entry['route_prefix'], '/') . '/sitemap.xml');
+                if (strpos((string) $output, $line) === false) {
+                    $output = rtrim((string) $output) . "\n" . $line . "\n";
+                }
+            }
+        } catch (CCW_Error $error) {
             return $output;
-        }
-        $line = 'Sitemap: ' . home_url('/cita/sitemap.xml');
-        if (strpos((string) $output, $line) === false) {
-            $output = rtrim((string) $output) . "\n" . $line . "\n";
         }
         return $output;
     }

@@ -12,13 +12,16 @@ const { buildNotificationContent } = require('./notifications.service');
 const { emitNotificationCreated } = require('./notificationsRealtime.service');
 const {
   SCHEDULED_JOB_DEFINITIONS,
-  BACKGROUND_INTEGRATION_JOB_TYPES,
 } = require('../config/scheduledJobCatalog');
+const {
+  isBackgroundIntegrationJob,
+  normalizeJobType,
+  shouldUseExecutionTimeout,
+} = require('../lib/jobExecutionTimeoutPolicy');
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.JOB_EXECUTOR_MAX_RUNTIME_MS || 30 * 60 * 1000);
 const DEFAULT_WAITING_BACKOFF_MS = Number(process.env.JOB_SCHEDULER_WAITING_BACKOFF_MS || 15 * 60 * 1000);
 const DEFAULT_FLOW_WAITING_BACKOFF_MS = Number(process.env.FLOW_V2_WAITING_BACKOFF_MS || 60 * 1000);
-const BACKGROUND_INTEGRATION_TYPES = new Set(BACKGROUND_INTEGRATION_JOB_TYPES);
 
 const FlowExecutionV2 = db.FlowExecutionV2;
 const LeadIntake = db.LeadIntake;
@@ -432,11 +435,13 @@ const JOB_HANDLERS = {
   web_publication_deploy: async (payload = {}, jobRequest = null) => (
     require('./webPublicationDeployment.service').runPublicationDeploymentJob(payload, jobRequest)
   ),
+  // Outbox durable de rotación del runtime/HMAC de landings WordPress. La
+  // carga diferida evita ciclos IntakeConfig -> modelos -> JobExecutor.
+  web_intake_runtime_reconcile: async (payload = {}, jobRequest = null) => (
+    require('./webIntakeRuntimeReconciliation.service')
+      .runIntakeRuntimeReconciliationJob(payload, jobRequest)
+  ),
 };
-
-function normalizeJobType(value) {
-  return String(value || '').trim().toLowerCase();
-}
 
 const asPromiseWithTimeout = (promise, timeoutMs) => {
   let timeoutId;
@@ -449,8 +454,6 @@ const asPromiseWithTimeout = (promise, timeoutMs) => {
     timeoutPromise
   ]);
 };
-
-const shouldUseExecutionTimeout = (jobType) => !BACKGROUND_INTEGRATION_TYPES.has(normalizeJobType(jobType));
 
 const buildTimeoutFailureResult = () => ({
   status: 'failed',
@@ -569,7 +572,7 @@ async function runJob(jobRequest) {
     const rawResult = shouldUseExecutionTimeout(jobType)
       ? await asPromiseWithTimeout(execution, DEFAULT_TIMEOUT_MS)
       : await execution;
-    const result = BACKGROUND_INTEGRATION_TYPES.has(jobType)
+    const result = isBackgroundIntegrationJob(jobType)
       ? normalizeScheduledExecutionResult(rawResult)
       : rawResult;
 

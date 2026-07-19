@@ -3,7 +3,7 @@
 define('CCW_TESTING', true);
 define('ABSPATH', __DIR__ . '/wp/');
 define('WP_CONTENT_DIR', __DIR__ . '/tmp/wp-content');
-define('CCW_VERSION', '2.0.0-alpha.7');
+define('CCW_VERSION', '2.0.0-alpha.8');
 define('DAY_IN_SECONDS', 86400);
 define('MINUTE_IN_SECONDS', 60);
 
@@ -158,8 +158,10 @@ require_once $base . 'class-ccw-manifest.php';
 require_once $base . 'class-ccw-cache.php';
 require_once $base . 'class-ccw-http.php';
 require_once $base . 'class-ccw-sync.php';
+require_once $base . 'class-ccw-site-claim.php';
 require_once $base . 'class-ccw-intake-bridge.php';
 require_once $base . 'class-ccw-router.php';
+require_once $base . 'class-ccw-plugin.php';
 
 function ccw_test_assert($condition, $message)
 {

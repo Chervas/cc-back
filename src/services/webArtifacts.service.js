@@ -79,7 +79,13 @@ function isActiveClinic(row) {
   return [true, 1, '1'].includes(plain(row)?.estado_clinica);
 }
 
-async function resolveClinicForProject(project, requestedClinicId, { models, transaction, document = null }) {
+async function resolveClinicForProject(project, requestedClinicId, {
+  models,
+  transaction,
+  document = null,
+  runtimeReconciliation = null,
+  runtimeConfigHash = null,
+} = {}) {
   const scope = scopeFromProject(plain(project));
   const clinicId = scope.type === 'clinic' ? scope.id : positiveInteger(requestedClinicId);
   if (!clinicId) {
@@ -113,7 +119,32 @@ async function resolveClinicForProject(project, requestedClinicId, { models, tra
     const intake = intakeConfigId && models.IntakeConfig?.findByPk
       ? plain(await models.IntakeConfig.findByPk(intakeConfigId, { transaction }))
       : null;
-    const locations = Array.isArray(intake?.config?.locations) ? intake.config.locations : [];
+    let locations = Array.isArray(intake?.config?.locations) ? intake.config.locations : [];
+    if (runtimeReconciliation) {
+      const reconciliationId = String(runtimeReconciliation.id || '').trim();
+      const generation = positiveInteger(runtimeReconciliation.generation);
+      const staged = reconciliationId && generation && models.WebIntakeRuntimeReconciliation?.findByPk
+        ? plain(await models.WebIntakeRuntimeReconciliation.findByPk(reconciliationId, { transaction }))
+        : null;
+      const stagedLocations = staged?.targetConfigPatch?.locations;
+      if (
+        !staged
+        || Number(staged.generation) !== generation
+        || !['pending', 'preparing'].includes(String(staged.status || ''))
+        || staged.scopeType !== 'group'
+        || positiveInteger(staged.scopeId) !== scope.id
+        || String(staged.targetRuntimeHash || '') !== String(runtimeConfigHash || '')
+        || stagedLocations?.present !== true
+        || !Array.isArray(stagedLocations.value)
+      ) {
+        throw new WebArtifactServiceError(
+          'web_artifact_runtime_reconciliation_invalid',
+          'La configuración staged de captación ya no es válida para compilar.',
+          409
+        );
+      }
+      locations = stagedLocations.value;
+    }
     const included = locations.some((location) => (
       positiveInteger(location?.id ?? location?.clinic_id) === clinicId
     ));
@@ -197,6 +228,7 @@ async function compileRevision({
   body = {},
   requestId = null,
   trustedRuntime: internalTrustedRuntime = {},
+  runtimeReconciliation = null,
   rollbackSource = null,
   models = db,
   sequelize = db.sequelize,
@@ -259,6 +291,15 @@ async function compileRevision({
         );
       }
     }
+    // La elegibilidad de la clínica (incluido un target staged durable) se
+    // revalida antes de reutilizar un artefacto ya compilado.
+    const clinic = await resolveClinicForProject(project, body.clinic_id, {
+      models,
+      transaction,
+      document: revision.document,
+      runtimeReconciliation,
+      runtimeConfigHash,
+    });
     const existing = await models.WebArtifact.findOne({
       where: {
         revisionId: revision.id,
@@ -272,11 +313,6 @@ async function compileRevision({
     });
     if (existing) return serializeArtifact(existing, { includeFiles: true });
 
-    const clinic = await resolveClinicForProject(project, body.clinic_id, {
-      models,
-      transaction,
-      document: revision.document,
-    });
     const compiled = compileWebArtifact({
       document: revision.document,
       contentSnapshot: revision.contentSnapshot,

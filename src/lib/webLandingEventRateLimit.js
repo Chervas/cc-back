@@ -7,6 +7,7 @@ const INVALID_PREPARE_IDENTITY = '00000000-0000-4000-8000-000000000000';
 const PREPARE_LIMIT = 1200;
 const PREPARE_GLOBAL_IP_LIMIT = 10000;
 const CANONICAL_PUBLICATION_LIMIT = 1000;
+const CANONICAL_GLOBAL_IP_LIMIT = 10000;
 
 function digestAsUuid(value) {
   const digest = crypto.createHash('sha256').update(value).digest('hex');
@@ -55,6 +56,7 @@ function landingEventBridgeRateLimitOptions() {
     canonical: {
       operation: 'landing_event_bridge',
       limit: CANONICAL_PUBLICATION_LIMIT,
+      globalIpLimit: CANONICAL_GLOBAL_IP_LIMIT,
       windowMs: 10 * 60 * 1000,
       identity: canonicalPublicationIdentity,
     },
@@ -62,6 +64,7 @@ function landingEventBridgeRateLimitOptions() {
 }
 
 module.exports = {
+  CANONICAL_GLOBAL_IP_LIMIT,
   CANONICAL_PUBLICATION_LIMIT,
   INVALID_PREPARE_IDENTITY,
   PREPARE_GLOBAL_IP_LIMIT,

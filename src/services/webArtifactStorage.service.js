@@ -4,6 +4,10 @@ const crypto = require('node:crypto');
 const { PutObjectCommand, S3Client } = require('@aws-sdk/client-s3');
 const { canonicalSerialize } = require('../lib/webDocument');
 const { signWebArtifactManifest } = require('../lib/webArtifactSignature');
+const {
+  MAX_WEB_ARTIFACT_BUNDLE_BYTES,
+  webArtifactBundleFootprintBytes,
+} = require('../lib/webArtifactBudget');
 
 const IMMUTABLE_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 const MANIFEST_CACHE_CONTROL = 'public, max-age=31536000, immutable';
@@ -144,6 +148,22 @@ function assertArtifactBundle(artifact) {
       'web_artifact_bundle_hash_invalid',
       'El hash del artefacto no coincide con su manifest canónico.',
       422
+    );
+  }
+  const bundleSizeBytes = webArtifactBundleFootprintBytes(manifest);
+  if (bundleSizeBytes === null) {
+    throw new WebArtifactStorageError(
+      'web_artifact_bundle_invalid',
+      'El artefacto compilado no declara un tamaño publicable.',
+      422
+    );
+  }
+  if (bundleSizeBytes > MAX_WEB_ARTIFACT_BUNDLE_BYTES) {
+    throw new WebArtifactStorageError(
+      'web_artifact_bundle_too_large',
+      'El artefacto compilado supera el tamaño máximo publicable.',
+      422,
+      { size_bytes: bundleSizeBytes, max_size_bytes: MAX_WEB_ARTIFACT_BUNDLE_BYTES }
     );
   }
   const manifestPaths = Object.keys(manifest.files || {}).sort();

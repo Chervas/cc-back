@@ -72,7 +72,11 @@ const downloadPluginPackage = withRequestContext(async (req, res, requestId) => 
 async function getDesiredState(req, res) {
   const requestId = requestIdFor(req);
   res.set('X-Request-Id', requestId);
-  res.set('Cache-Control', 'private, no-cache, max-age=0');
+  // The signed response contains the installation runtime (including its HMAC
+  // key). ETag/304 is an application-level validator, never permission for a
+  // browser or intermediary to retain the response body.
+  res.set('Cache-Control', 'private, no-store, max-age=0');
+  res.set('Pragma', 'no-cache');
   res.set('Vary', 'Authorization, If-None-Match');
   try {
     const result = await service.getDesiredState({
@@ -103,6 +107,7 @@ async function reportInstallation(req, res) {
       success: true,
       accepted: result.accepted,
       confirms_desired: result.confirms_desired,
+      site_claim_acknowledged: result.site_claim_acknowledged === true,
       request_id: requestId,
     });
   } catch (error) {

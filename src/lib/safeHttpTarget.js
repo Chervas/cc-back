@@ -255,6 +255,7 @@ module.exports = {
   createPinnedLookup,
   isUnsafeIpAddress,
   normalizeHostname,
+  normalizeResolvedAddresses,
   publicHttpUrl,
   resolvePublicAddresses,
   resolveSafeHttpTarget,

@@ -1,11 +1,23 @@
 'use strict';
 
+const { Op } = require('sequelize');
 const db = require('../../models');
+const {
+  transitionContextForPublication,
+} = require('./webIntakeRuntimeReconciliation.service');
+const {
+  attachWebLandingInternalContext,
+  findWebArtifactMetadataByPk,
+} = require('./webArtifactMetadata.service');
 
 const UUID_V4 = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const SAFE_FORM_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{2,63}$/;
 const GOOGLE_CUSTOMER_ID = /^\d{10}$/;
 const GOOGLE_CAMPAIGN_ID = /^[1-9]\d{0,31}$/;
+const ARTIFACT_HASH = /^[a-f0-9]{64}$/;
+const SERVED_PUBLICATION_STATUSES = Object.freeze([
+  'pending', 'publishing', 'published', 'failed', 'rolling_back',
+]);
 
 class WebLandingAttributionError extends Error {
   constructor(code, message, status = 422, details = undefined) {
@@ -54,6 +66,17 @@ function pathMatchesPublication(pathname, publicationPath) {
   const normalizedBase = base.endsWith('/') ? base : `${base}/`;
   const normalizedPath = pathname.endsWith('/') ? pathname : `${pathname}/`;
   return normalizedPath === normalizedBase || normalizedPath.startsWith(normalizedBase);
+}
+
+function longestPublicationMatch(publications, pageUrl) {
+  const matches = (publications || []).map(plain).filter((candidate) => (
+    String(candidate?.host || '').toLowerCase() === pageUrl.hostname.toLowerCase()
+    && pathMatchesPublication(pageUrl.pathname, candidate?.path)
+  ));
+  if (matches.length < 1) return null;
+  const longest = Math.max(...matches.map((candidate) => normalizedPath(candidate.path).length));
+  const winners = matches.filter((candidate) => normalizedPath(candidate.path).length === longest);
+  return winners.length === 1 ? winners[0] : null;
 }
 
 function normalizedPath(value) {
@@ -317,7 +340,94 @@ async function resolveAuthorizedGoogleAttribution({ body, clinicId, groupId, pro
   };
 }
 
-async function resolveWebLandingAttribution({ body = {}, models = db } = {}) {
+function requiredArtifactHash(value, field = 'web_artifact_input_hash') {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!ARTIFACT_HASH.test(normalized)) {
+    throw new WebLandingAttributionError(
+      'web_landing_artifact_identity_invalid',
+      'La versión publicada de la landing no es válida.',
+      409,
+      { field }
+    );
+  }
+  return normalized;
+}
+
+function artifactIntegrityMatches(artifact, publication, { projectId, revisionId } = {}) {
+  const value = plain(artifact);
+  const manifest = value?.manifest;
+  return Boolean(
+    value
+    && manifest
+    && typeof manifest === 'object'
+    && !Array.isArray(manifest)
+    && String(value.projectId || value.project_id || '') === String(projectId || publication?.projectId || '')
+    && String(value.projectId || value.project_id || '') === String(publication?.projectId || '')
+    && String(value.revisionId || value.revision_id || '') === String(revisionId || '')
+    && String(value.revisionId || value.revision_id || '') === String(manifest.revision_id || '')
+    && value.environment === 'production'
+    && value.status === 'ready'
+    && String(manifest.environment || 'production') === 'production'
+    && ARTIFACT_HASH.test(String(value.artifactHash || value.artifact_hash || ''))
+    && String(value.artifactHash || value.artifact_hash || '') === String(manifest.artifact_hash || '')
+    && ARTIFACT_HASH.test(String(manifest.artifact_input_hash || ''))
+  );
+}
+
+async function resolvePublicationArtifact({
+  publication,
+  projectId,
+  revisionId,
+  artifactInputHash = null,
+  artifactHash = null,
+  models = db,
+  now = new Date(),
+} = {}) {
+  const currentPublication = plain(publication);
+  if (!currentPublication?.id || !models.WebArtifact?.findByPk) return null;
+  const inputSelector = artifactInputHash === null
+    ? null
+    : requiredArtifactHash(artifactInputHash, 'web_artifact_input_hash');
+  const finalSelector = artifactHash === null
+    ? null
+    : requiredArtifactHash(artifactHash, 'x-clinicaclick-web-artifact');
+  if (!inputSelector && !finalSelector) return null;
+
+  const transition = await transitionContextForPublication({
+    publication: currentPublication,
+    models,
+    now,
+  });
+  const inFlightDeployment = (
+    !transition
+    && ['pending', 'publishing', 'rolling_back'].includes(String(currentPublication.status || ''))
+    && models.WebPublicationDeployment?.findOne
+  ) ? plain(await models.WebPublicationDeployment.findOne({
+      where: {
+        publicationId: currentPublication.id,
+        action: { [Op.in]: ['publish', 'rollback'] },
+        status: { [Op.in]: ['queued', 'running', 'verified'] },
+        artifactId: { [Op.ne]: null },
+      },
+      order: [['sequence', 'DESC']],
+    })) : null;
+  const ids = [...new Set([
+    currentPublication.activeArtifactId,
+    currentPublication.lastGoodArtifactId,
+    inFlightDeployment?.artifactId,
+    ...(transition?.accepted_artifact_ids || []),
+  ].filter(Boolean).map(String))];
+  const candidates = (await Promise.all(ids.map((id) => findWebArtifactMetadataByPk(models, id))))
+    .map(plain)
+    .filter((candidate) => artifactIntegrityMatches(candidate, currentPublication, { projectId, revisionId }))
+    .filter((candidate) => (
+      (!inputSelector || String(candidate.manifest.artifact_input_hash) === inputSelector)
+      && (!finalSelector || String(candidate.artifactHash || candidate.artifact_hash) === finalSelector)
+    ));
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
+async function resolveWebLandingAttribution({ body = {}, models = db, now = new Date() } = {}) {
   const externalSource = String(body.external_source || '').trim().toLowerCase();
   const hasWebIds = ['web_project_id', 'web_revision_id', 'web_page_id', 'web_form_id']
     .some((field) => body[field] !== undefined && body[field] !== null && body[field] !== '');
@@ -338,6 +448,7 @@ async function resolveWebLandingAttribution({ body = {}, models = db } = {}) {
       field: 'web_form_id',
     });
   }
+  const artifactInputHash = requiredArtifactHash(body.web_artifact_input_hash);
   const pageUrl = safePageUrl(body.page_url || body.landing_url);
   const revision = await models.WebRevision.findByPk(revisionId);
   if (!revision || String(revision.projectId) !== projectId) {
@@ -366,31 +477,34 @@ async function resolveWebLandingAttribution({ body = {}, models = db } = {}) {
     );
   }
   const publications = await models.WebPublication.findAll({
-    where: { projectId, activeRevisionId: revisionId, status: 'published' },
+    where: {
+      projectId,
+      [Op.or]: [
+        { activeRevisionId: revisionId },
+        { desiredRevisionId: revisionId },
+      ],
+      status: { [Op.in]: SERVED_PUBLICATION_STATUSES },
+      host: pageUrl.hostname.toLowerCase(),
+    },
     order: [['published_at', 'DESC'], ['id', 'ASC']],
-    limit: 20,
   });
-  const matches = publications.filter((candidate) => (
-    String(candidate.host).toLowerCase() === pageUrl.hostname.toLowerCase()
-    && pathMatchesPublication(pageUrl.pathname, candidate.path)
-  ));
-  if (matches.length !== 1) {
+  const publication = longestPublicationMatch(publications, pageUrl);
+  if (!publication) {
     throw new WebLandingAttributionError(
       'web_landing_publication_not_active',
       'No se ha encontrado una publicación activa única para esta página.',
       409
     );
   }
-  const publication = plain(matches[0]);
-  const artifactRow = await models.WebArtifact.findByPk(publication.activeArtifactId);
-  const artifact = plain(artifactRow);
-  if (
-    !artifact
-    || String(artifact.projectId) !== projectId
-    || String(artifact.revisionId) !== revisionId
-    || artifact.environment !== 'production'
-    || artifact.status !== 'ready'
-  ) {
+  const artifact = await resolvePublicationArtifact({
+    publication,
+    projectId,
+    revisionId,
+    artifactInputHash,
+    models,
+    now,
+  });
+  if (!artifact) {
     throw new WebLandingAttributionError('web_landing_artifact_not_active', 'La landing publicada no tiene un artefacto activo.', 409);
   }
   const manifest = artifact.manifest && typeof artifact.manifest === 'object' ? artifact.manifest : {};
@@ -445,7 +559,7 @@ async function resolveWebLandingAttribution({ body = {}, models = db } = {}) {
     projectId,
     models,
   });
-  return {
+  return attachWebLandingInternalContext({
     project_id: projectId,
     revision_id: revisionId,
     // LeadIntakes.web_page_id is an FK to WebPages.id. The document page id
@@ -474,7 +588,7 @@ async function resolveWebLandingAttribution({ body = {}, models = db } = {}) {
       target_kind: googleAttribution.target_kind,
       target_treatment_id: googleAttribution.target_treatment_id,
     } : {}),
-  };
+  }, { artifact, publication });
 }
 
 module.exports = {
@@ -484,9 +598,12 @@ module.exports = {
   exactIntakeFieldContract,
   intakeFormContractForPage,
   intakeFieldContract,
+  longestPublicationMatch,
   pathMatchesPublication,
   publishedPagePath,
   publishedPagePaths,
+  requiredArtifactHash,
+  resolvePublicationArtifact,
   resolveAuthorizedGoogleAttribution,
   resolveWebLandingAttribution,
   safePageUrl,

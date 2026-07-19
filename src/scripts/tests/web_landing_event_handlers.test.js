@@ -1,9 +1,12 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const test = require('node:test');
 const { createPublicMarketingWebRateLimiter } = require('../../lib/marketingWebRequestGuards');
 const {
+  CANONICAL_GLOBAL_IP_LIMIT,
   CANONICAL_PUBLICATION_LIMIT,
   INVALID_PREPARE_IDENTITY,
   PREPARE_GLOBAL_IP_LIMIT,
@@ -18,6 +21,18 @@ const IDS = {
   pageA: '33333333-3333-4333-8333-333333333333',
   pageB: '44444444-4444-4444-8444-444444444444',
 };
+
+const eventBridgeControllerSource = fs.readFileSync(
+  path.join(__dirname, '../../controllers/webLandingEventBridge.controller.js'),
+  'utf8'
+);
+
+test('event prepare entrega a intake la atribución y artefacto ya validados', () => {
+  assert.match(
+    eventBridgeControllerSource,
+    /req\.webLandingEventAttribution = prepared\.attribution;[\s\S]*req\.webLandingArtifactMetadata = webLandingInternalContext\(prepared\.attribution\)\?\.artifact \|\| null;/
+  );
+});
 
 function request(pageId, pathname = '/cita/') {
   return {
@@ -69,7 +84,7 @@ test('mantiene el bucket canónico por publicación y un backstop global separad
   assert.equal(options.preliminary.identity, landingEventBridgePrepareIdentity);
   assert.equal(options.canonical.operation, 'landing_event_bridge');
   assert.equal(options.canonical.limit, CANONICAL_PUBLICATION_LIMIT);
-  assert.equal(options.canonical.globalIpLimit, undefined);
+  assert.equal(options.canonical.globalIpLimit, CANONICAL_GLOBAL_IP_LIMIT);
   assert.ok(PREPARE_LIMIT > CANONICAL_PUBLICATION_LIMIT);
 });
 

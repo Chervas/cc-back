@@ -10,7 +10,7 @@ const { scopeColumns } = require('./webProjects.service');
 const wordpress = require('./webWordpressInstallations.service');
 const { WebPublicationServiceError } = require('./webPublications.service');
 
-const PLUGIN_VERSION = '2.0.0-alpha.7';
+const PLUGIN_VERSION = '2.0.0-alpha.8';
 const PLUGIN_ARCHIVE_ROOT = 'clinicaclick-web';
 const DEFAULT_PLUGIN_ROOT = path.resolve(__dirname, '../../wordpress/clinicaclick-web');
 const MAX_SOURCE_FILE_BYTES = 512 * 1024;
@@ -197,23 +197,38 @@ async function provisionWordpressPluginPackage({
     packageError('web_wordpress_bootstrap_ticket_invalid', 'La descarga del plugin ha caducado o no es válida.', 410);
   }
   const { installation, scope } = await getInstallation({ actorId: actor, installationId, models });
-  if (installation.status === 'revoked' || !secureTextEqual(
-    wordpress.tokenHash(ticket.token),
-    installation.tokenHash
-  )) {
+  const ticketDigest = wordpress.tokenHash(ticket.token);
+  const claimDigest = ticket.site_claim_token
+    ? wordpress.tokenHash(ticket.site_claim_token)
+    : null;
+  const claimExpiresAt = installation.siteClaimExpiresAt
+    ? new Date(installation.siteClaimExpiresAt)
+    : null;
+  const primaryBootstrap = installation.status === 'pending'
+    && secureTextEqual(ticketDigest, installation.tokenHash)
+    && claimDigest
+    && secureTextEqual(claimDigest, installation.siteClaimTokenHash)
+    && claimExpiresAt
+    && Number.isFinite(claimExpiresAt.getTime())
+    && claimExpiresAt > new Date();
+  const nextExpiresAt = installation.nextTokenExpiresAt ? new Date(installation.nextTokenExpiresAt) : null;
+  const stagedRotation = secureTextEqual(ticketDigest, installation.nextTokenHash)
+    && !ticket.site_claim_token
+    && nextExpiresAt
+    && Number.isFinite(nextExpiresAt.getTime())
+    && nextExpiresAt > new Date();
+  if (installation.status === 'revoked' || (!primaryBootstrap && !stagedRotation)) {
     packageError('web_wordpress_bootstrap_ticket_invalid', 'La descarga del plugin ha caducado o no es válida.', 410);
   }
   // The bootstrap package establishes identity and the out-of-band trust
   // anchor only. It must be installable while the connection is still
   // pending; signed runtime/artifact state arrives later through desired-state.
+  // Every freshly downloaded package receives the current out-of-band trust
+  // anchor. During an online rotation the database may still expose the old
+  // key until WordPress ACKs a successful signed sync; blocking here would
+  // make token rotation/plugin recovery impossible exactly during that grace
+  // window.
   const descriptor = wordpress.pluginKeyDescriptor(signingOptions);
-  if (!secureTextEqual(descriptor.key_id, installation.publicKeyId)) {
-    packageError(
-      'web_installation_signing_key_rotation_required',
-      'La instalación necesita completar la rotación de la clave de publicación.',
-      409
-    );
-  }
   const apiBase = wordpress.installationApiBase(env);
   const result = await buildProvisionedPluginPackage({
     pluginRoot,
@@ -221,6 +236,7 @@ async function provisionWordpressPluginPackage({
       installation_id: installation.id,
       api_base: apiBase,
       token: ticket.token,
+      ...(primaryBootstrap ? { site_claim_token: ticket.site_claim_token } : {}),
       trust_descriptor: descriptor,
     },
   });

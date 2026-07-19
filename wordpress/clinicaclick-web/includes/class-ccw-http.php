@@ -113,7 +113,17 @@ final class CCW_HTTP
             'data_format' => 'body',
             'user-agent' => $this->user_agent(),
         ));
-        return !is_wp_error($response) && in_array((int) wp_remote_retrieve_response_code($response), array(200, 202, 204), true);
+        if (is_wp_error($response) || !in_array((int) wp_remote_retrieve_response_code($response), array(200, 202, 204), true)) {
+            return false;
+        }
+        $response_body = (string) wp_remote_retrieve_body($response);
+        if ($response_body !== '' && strlen($response_body) <= 32768) {
+            $decoded = json_decode($response_body, true);
+            if (is_array($decoded) && ($decoded['site_claim_acknowledged'] ?? false) === true) {
+                CCW_Config::acknowledge_site_claim();
+            }
+        }
+        return true;
     }
 
     public static function safe_download_url($value)

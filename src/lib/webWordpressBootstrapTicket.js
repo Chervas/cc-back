@@ -39,15 +39,27 @@ function parsePart(value) {
   return Buffer.from(value, 'base64url');
 }
 
-function issueBootstrapTicket({ installationId, actorId, token, env = process.env, now = Date.now(), ttlMs = DEFAULT_TTL_MS } = {}) {
+function issueBootstrapTicket({
+  installationId,
+  actorId,
+  token,
+  siteClaimToken = null,
+  env = process.env,
+  now = Date.now(),
+  ttlMs = DEFAULT_TTL_MS,
+} = {}) {
   const installation = String(installationId || '').trim().toLowerCase();
   const actor = Number(actorId);
   const opaqueToken = String(token || '').trim();
+  const claimToken = siteClaimToken === null || siteClaimToken === undefined
+    ? null
+    : String(siteClaimToken).trim();
   if (
     !/^[0-9a-f-]{36}$/.test(installation)
     || !Number.isSafeInteger(actor)
     || actor < 1
     || !/^ccw_[A-Za-z0-9_-]{32,}$/.test(opaqueToken)
+    || (claimToken !== null && !/^[A-Za-z0-9_-]{43}$/.test(claimToken))
     || !Number.isSafeInteger(now)
     || !Number.isSafeInteger(ttlMs)
     || ttlMs < 60_000
@@ -59,10 +71,11 @@ function issueBootstrapTicket({ installationId, actorId, token, env = process.en
     );
   }
   const payload = Buffer.from(JSON.stringify({
-    v: 1,
+    v: claimToken === null ? 1 : 2,
     installation_id: installation,
     actor_id: actor,
     token: opaqueToken,
+    ...(claimToken === null ? {} : { site_claim_token: claimToken }),
     issued_at: now,
     expires_at: now + ttlMs,
   }), 'utf8');
@@ -90,11 +103,13 @@ function openBootstrapTicket(ticket, { env = process.env, now = Date.now() } = {
     decipher.setAuthTag(tag);
     const decoded = JSON.parse(Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8'));
     if (
-      decoded?.v !== 1
+      ![1, 2].includes(decoded?.v)
       || !/^[0-9a-f-]{36}$/.test(String(decoded.installation_id || ''))
       || !Number.isSafeInteger(decoded.actor_id)
       || decoded.actor_id < 1
       || !/^ccw_[A-Za-z0-9_-]{32,}$/.test(String(decoded.token || ''))
+      || (decoded.v === 2 && !/^[A-Za-z0-9_-]{43}$/.test(String(decoded.site_claim_token || '')))
+      || (decoded.v === 1 && decoded.site_claim_token !== undefined)
       || !Number.isSafeInteger(decoded.issued_at)
       || !Number.isSafeInteger(decoded.expires_at)
       || decoded.expires_at <= now

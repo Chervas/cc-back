@@ -16,6 +16,7 @@ const webArtifactsController = require('../controllers/webArtifacts.controller')
 const webPublicationsController = require('../controllers/webPublications.controller');
 const webDomainsController = require('../controllers/webDomains.controller');
 const webWordpressInstallationsController = require('../controllers/webWordpressInstallations.controller');
+const { WORDPRESS_V2_ARTIFACT_RATE_LIMIT } = require('../services/webWordpressInstallations.service');
 const campaignDestinationBindingsController = require('../controllers/campaignDestinationBindings.controller');
 const {
   createMarketingWebRateLimiter,
@@ -27,16 +28,32 @@ const {
 const publicWebRateLimit = createPublicMarketingWebRateLimiter();
 router.get(
   '/web-installations/:installationId/desired-state',
-  publicWebRateLimit({ operation: 'web_installation_state', limit: 120, windowMs: 60 * 60 * 1000 }),
+  publicWebRateLimit({
+    operation: 'web_installation_state',
+    limit: 120,
+    globalIpLimit: 2400,
+    windowMs: 60 * 60 * 1000,
+  }),
   webWordpressInstallationsController.getDesiredState
 );
 router.post(
   '/web-installations/:installationId/reports',
-  publicWebRateLimit({ operation: 'web_installation_report', limit: 120, windowMs: 60 * 60 * 1000 }),
+  publicWebRateLimit({
+    operation: 'web_installation_report',
+    limit: 120,
+    globalIpLimit: 1200,
+    windowMs: 60 * 60 * 1000,
+  }),
   webWordpressInstallationsController.reportInstallation
 );
 const publicWebArtifactRateLimit = publicWebRateLimit({
-  operation: 'web_installation_artifact', limit: 600, windowMs: 60 * 60 * 1000,
+  // A v2 registry is rejected above 500 authenticated artifact requests per
+  // full sync. The extra 20% permits a bounded retry without making this a
+  // general-purpose download endpoint.
+  operation: 'web_installation_artifact',
+  limit: WORDPRESS_V2_ARTIFACT_RATE_LIMIT,
+  globalIpLimit: WORDPRESS_V2_ARTIFACT_RATE_LIMIT * 8,
+  windowMs: 60 * 60 * 1000,
 });
 router.get(
   '/web-installations/:installationId/artifacts/:artifactHash/manifest',
@@ -89,6 +106,7 @@ router.get('/web-publications/:publicationId', webPublicationsController.getPubl
 router.get('/web-publications/:publicationId/deployments', webPublicationsController.listDeployments);
 router.post('/web-publications/:publicationId/publish', limitWebPublicationWrites, webPublicationsController.requestPublish);
 router.post('/web-publications/:publicationId/rollback', limitWebPublicationWrites, webPublicationsController.requestRollback);
+router.post('/web-publications/:publicationId/retire', limitWebPublicationWrites, webPublicationsController.retireWordpressPublication);
 router.get('/web-domains', webDomainsController.listDomains);
 router.post('/web-domains', limitWebPublicationWrites, webDomainsController.createDomain);
 router.post('/web-domains/:domainId/verify', limitWebPublicationWrites, webDomainsController.verifyDomain);

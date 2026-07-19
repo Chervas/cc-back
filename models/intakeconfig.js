@@ -31,7 +31,45 @@ module.exports = (sequelize, DataTypes) => {
     timestamps: true,
     underscored: true,
     createdAt: 'created_at',
-    updatedAt: 'updated_at'
+    updatedAt: 'updated_at',
+    hooks: {
+      beforeSave: async (instance, options) => {
+        if (options?.skipWebRuntimeReconciliation === true) return;
+        // Carga diferida: durante models/index.js todavía no existe el grafo
+        // completo de modelos ni el orquestador de JobRequest.
+        const reconciliation = require('../src/services/webIntakeRuntimeReconciliation.service');
+        await reconciliation.stageIntakeConfigInstanceWrite(instance, options);
+      },
+      beforeUpsert: async (values, options) => {
+        if (options?.skipWebRuntimeReconciliation === true) return;
+        const reconciliation = require('../src/services/webIntakeRuntimeReconciliation.service');
+        await reconciliation.stageIntakeConfigUpsert(values, options);
+      },
+      beforeBulkCreate: (_instances, options) => {
+        if (options?.skipWebRuntimeReconciliation === true) return;
+        // Sequelize omite los hooks de instancia en bulkCreate salvo que se
+        // soliciten expresamente. El gate debe ejecutarse fila por fila.
+        options.individualHooks = true;
+      },
+      beforeBulkUpdate: (options) => {
+        if (options?.skipWebRuntimeReconciliation === true) return;
+        options.individualHooks = true;
+      },
+      beforeDestroy: async (instance, options) => {
+        if (options?.skipWebRuntimeReconciliation === true) return;
+        const reconciliation = require('../src/services/webIntakeRuntimeReconciliation.service');
+        await reconciliation.assertIntakeConfigDestroyAllowed(instance, options);
+      },
+      beforeBulkDestroy: (options) => {
+        if (options?.skipWebRuntimeReconciliation === true) return;
+        if (options?.truncate === true) {
+          const error = new Error('No se puede truncar IntakeConfig saltando la reconciliación web.');
+          error.code = 'web_intake_runtime_bulk_destroy_forbidden';
+          throw error;
+        }
+        options.individualHooks = true;
+      },
+    },
   });
 
   IntakeConfig.associate = function(models) {
