@@ -8,6 +8,7 @@ const { metaSyncJobs } = require('../../jobs/sync.jobs');
 const marketingCompetitionService = require('../../services/marketingCompetition.service');
 const marketingAiVisibilityService = require('../../services/marketingAiVisibility.service');
 const webContentMediaService = require('../../services/webContentMedia.service');
+const webContentGenerationService = require('../../services/webContentGeneration.service');
 const { queues } = require('../../services/queue.service');
 
 async function main() {
@@ -18,6 +19,7 @@ async function main() {
     cleanupOldSocialStats: metaSyncJobs.cleanupOldSocialStats,
     cleanupHeatmaps: marketingCompetitionService.cleanupLocalHeatmapCache,
     cleanupAi: marketingAiVisibilityService.cleanupExpiredRuns,
+    cleanupWebGenerations: webContentGenerationService.cleanupExpiredGenerations,
     cleanupWebMedia: webContentMediaService.cleanupExpiredQuarantinedMedia,
   };
   const updates = [];
@@ -30,6 +32,7 @@ async function main() {
     metaSyncJobs.cleanupOldSocialStats = async () => 3;
     marketingCompetitionService.cleanupLocalHeatmapCache = async () => 4;
     marketingAiVisibilityService.cleanupExpiredRuns = async () => 5;
+    webContentGenerationService.cleanupExpiredGenerations = async () => 6;
     webContentMediaService.cleanupExpiredQuarantinedMedia = async () => ({
       inspected: 2,
       archived: 2,
@@ -38,7 +41,8 @@ async function main() {
 
     const result = await metaSyncJobs.executeDataCleanup();
     assert.equal(result.status, 'completed');
-    assert.equal(result.deleted, 17);
+    assert.equal(result.deleted, 23);
+    assert.equal(result.breakdown.webContentGenerations, 6);
     assert.equal(result.breakdown.webEditorMedia, 2);
     assert.equal(result.breakdown.webEditorMediaFailed, 0);
     assert.equal(updates.at(-1).status, 'completed');
@@ -60,6 +64,7 @@ async function main() {
     metaSyncJobs.cleanupOldSocialStats = originals.cleanupOldSocialStats;
     marketingCompetitionService.cleanupLocalHeatmapCache = originals.cleanupHeatmaps;
     marketingAiVisibilityService.cleanupExpiredRuns = originals.cleanupAi;
+    webContentGenerationService.cleanupExpiredGenerations = originals.cleanupWebGenerations;
     webContentMediaService.cleanupExpiredQuarantinedMedia = originals.cleanupWebMedia;
   }
   console.log('web content/media cleanup orchestration: ok');

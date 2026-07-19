@@ -1,18 +1,25 @@
 # ClinicaClick WordPress plugin v2
 
-> Estado 2026-07-19: la fuente y el ZIP determinista candidatos corresponden a
+> Estado 2026-07-19: la fuente y los ZIP deterministas corresponden a
 > `2.0.0-alpha.8`. Este corte añade registro firmado multi-route, rotación
-> staged del token y reconciliación del runtime de intake; todavía no se ha
-> desplegado. El WordPress público de Propdental continúa ejecutando
-> `2.0.0-alpha.7`, instalado y activo junto al plugin de medición
+> staged del token y reconciliación del runtime de intake. Backend/plugin
+> `1cdfaa1` se promovió a staging mediante `aa8bc4c`; el WordPress público de
+> Propdental ya ejecuta `2.0.0-alpha.8`, instalado y activo junto al plugin de medición
 > `clinicaclick` `1.1.7`; WP-CLI y la fila DB están alineados. La instalación
-> está `connected` en `https://www.propdental.es` y `/cita/` conserva el
-> artefacto verificado renderer `1.2.1`. Quedan
-> fuera del rollout hosted/custom y multi-route; relay atribuible, limpieza,
+> está `connected` en `https://www.propdental.es`. `/cita/` sirve ya la misma
+> revisión/proyecto recompilada con renderer `1.5.0`, hash de artefacto `d875201…` y
+> body SHA `e851688…`. El handshake schema 2, el claim de
+> sitio y la promoción del token staged terminaron correctamente;
+> desired/reported coincidían en secuencia 8 antes del E2E de rutas. El E2E
+> público multi-route terminó con rollback, formulario, limpieza y tombstone
+> desired=reported sequence 12; `/cita/` conservó su body/artefacto durante esa
+> prueba y después se recompiló a renderer `1.5.0`. La rotación HMAC y el
+> readback ETag `304` quedaron cerrados; quedan fuera del
+> rollout hosted/custom. Relay atribuible, limpieza,
 > rollback y monitor del piloto WordPress ya están cerrados. No se ha publicado
 > aún una revisión `1.3.0` con formulario global: actualizar el binario no cambia
-> contenido. `alpha.6` queda como rollback operativo real y `alpha.5` solo como
-> recuperación histórica.
+> contenido. `alpha.6`/`alpha.5` quedan como evidencia histórica; después de
+> schema 2 el rollback operativo mantiene `alpha.8` + last-known-good.
 
 Este paquete añade el publicador web mantenido junto al plugin de medición
 `clinicaclick` `1.1.7`. Usa el slug independiente `clinicaclick-web/`: instalarlo
@@ -47,8 +54,9 @@ retira esa marca si el loader no llega a cargar.
   `/cita/<slug>/` y el router elige el prefijo firmado más largo. La capacidad
   y el historial son conceptos distintos: un tombstone confirmado libera un
   slot, pero la ruta retirada nunca se reasigna. El historial queda acotado a
-  200 filas por instalación. Este contrato está cerrado en código y pruebas,
-  no habilitado todavía en el WordPress público. El rollback local del piloto
+  200 filas por instalación. Este contrato está cerrado en código y pruebas y
+  ya está desplegado en el WordPress público. El E2E desechable de dos rutas
+  quedó cerrado con aislamiento, rollback, formulario, cleanup y tombstone. El rollback local del piloto
   restaura conjuntamente artefacto, manifest y runtime en `active.json` y
   `routes.json`; durante los dos renames el resolver solo acepta el runtime
   cuyo hash corresponde al artefacto activo, por lo que intake y eventos no
@@ -182,8 +190,14 @@ y 18 en el provisionado; el único fichero adicional es
 includes presentes y con ambos builders actuales. Fixtures, tests, tools,
 claves privadas y `.env` nunca entran en el paquete. El provisionado histórico
 de `alpha.7` tenía 17 ficheros porque todavía no incluía
-`class-ccw-site-claim.php`; ese recuento histórico no describe el candidato
+`class-ccw-site-claim.php`; ese recuento histórico no describe el corte vigente
 `alpha.8`.
+
+Evidencia del paquete final instalado: el ZIP genérico de 17 entradas tiene
+SHA-256
+`126e0fb6f77ad08e1c2ed53b673ed094dd25de8ebd99e28d0f167e8439409bc7`.
+El provisionado final de 18 entradas tiene SHA-256
+`86792a2ebf69cd9c36f529f98b1528e2ed5b08c9fe5d33216ea33b348695479f`.
 
 Variables del backend/control plane necesarias fuera de Git:
 
@@ -581,8 +595,8 @@ válida.
 3. Desde la raíz del backend, ejecutar `npm run test:marketing-web`; ese runner
    lanza los contratos Node y después `./wordpress/clinicaclick-web/tests/run.sh`.
    El harness PHP genera además un ZIP provisionado real que se extrae, carga y
-   activa desde sus propios ficheros empaquetados. El corte candidato actual
-   acredita **319/319** contratos Node, **39/39** PHP y **3/3** pruebas de
+   activa desde sus propios ficheros empaquetados. El corte actual acredita
+   **320/320** contratos Node, **40/40** PHP y **3/3** pruebas de
    interoperabilidad/compilador/paquete provisionado.
 4. En un WordPress desechable, definir una caché privada fuera del document
    root, instalar el ZIP provisionado y activar el plugin.
@@ -606,6 +620,74 @@ instalación, cron, handshake y loader único; el artefacto estable `1.2.1`
 conserva publicación/readback, relay atribuible con limpieza, rollback y
 monitor de `/cita/` ya probados antes del upgrade. No se debe reinterpretar esa
 evidencia histórica como despliegue de `alpha.8`.
+
+### Rollout controlado a `alpha.8` en Propdental
+
+1. Las siete migraciones `20260718230000`, `20260718233000`,
+   `20260719090000`, `20260719091500`, `20260719093000`, `20260719094500` y
+   `20260719100000` están aplicadas en staging.
+2. WP-CLI y la fila de instalación reportan `2.0.0-alpha.8`; la instalación
+   sigue `connected` y el plugin de medición legado continúa activo sin un
+   segundo loader.
+3. El handshake schema 2 confirmó el claim del origen, promocionó el token
+   staged y dejó desired/reported en secuencia de registro 8 antes de iniciar
+   el E2E de dos rutas. El endpoint temporal de claim quedó oculto tras el ACK.
+4. La caché gestionada está fuera del document root. Sus rutas privadas y las
+   antiguas rutas públicas de caché responden `404`.
+5. El upgrade binario no cambió inicialmente el body ni el artefacto servido
+   por `/cita/`; el E2E multi-route se cerró todavía sobre ese LKG.
+6. El E2E público multi-route quedó cerrado sobre el proyecto desechable
+   `f758cce8…` y la publicación `69f06cf0…`: A
+   `e2de500c…`/artefacto `831177bc…`, B
+   `4c1f3005…`/artefacto `0b9a41a2…` y rollback A verificados. El formulario
+   devolvió `303` y creó `LeadIntake #7269`, `FormSubmissionEvent #24` y
+   `WebEvent #38157` con atribución exacta a clínica `59`/grupo `5` y sin click
+   IDs ni intentos Ads.
+7. Cleanup `dry-run -> simulate -> apply` dejó cero en 11 categorías. El
+   proyecto quedó archivado, la publicación/ruta retirada y el tombstone en
+   desired=reported sequence `12`. La ruta respondió `410` mientras el
+   tombstone estuvo activo; después de liberarlo, el readback live final
+   devuelve `404` y solo queda activa la ruta piloto. `/cita/` conservó el body
+   SHA `f3ddf142…` y su artefacto.
+8. La rotación HMAC terminó mediante reconciliación
+   `889cc3a4-7d09-4cb0-accb-65acbdbfbb61`, generación 1, `completed`.
+   `JobRequest #32179` finalizó el `2026-07-19T07:24:30Z`, con dos intentos y
+   sin error. Target y source se aceptaron durante la gracia; después se
+   eliminaron ambos envelopes, quedó `accepted_key_count=1`, se restauró
+   `86400000` ms y staging continuó online.
+9. Los fixes que preservan el source durante la rotación son
+   `aacd01b`/staging `4769283` (plainification de publicación bloqueada) y
+   `29e0179`/staging `93c45f4` (contrato de medición WordPress).
+10. El router elimina el magic-quotes aplicado por WordPress a
+    `HTTP_IF_NONE_MATCH`. El fix `5d11cf8`/staging `e562936` está live;
+    Cloudflare y origen devuelven `304` con `If-None-Match` exacto.
+11. Después se recompiló deliberadamente el mismo proyecto/revisión piloto a
+    renderer `1.5.0`: `document_hash=ba60…`,
+    `content_snapshot_hash=5f447…`, contenido/SEO/Schema iguales, nuevo
+    `web_artifact_input_hash`, CSS de `divider`/`spacer`/`gallery`, artefacto
+    `d875201…` y body SHA `e851688…`.
+12. Chromium real a `390px` acreditó `scrollWidth=390`; solo el honeypot queda
+    fuera de pantalla. **Aceptar todo** ocupa todo el ancho, el aviso desaparece
+    al aceptar, `cc_consent_v2` persiste y el formulario conserva 11 campos, sin
+    excepciones ni fallos de red.
+
+Ese conteo visual no cierra la semántica editorial del piloto: la revisión live
+declara email como contacto preferido, pero no ofrece un campo de email. Además,
+los datos Social y Schema del piloto están incompletos. Debe corregirse mediante
+una revisión nueva y aprobada —añadir email o cambiar el canal preferido y
+completar Social/Schema—, nunca reescribiendo silenciosamente el artefacto
+congelado.
+
+El último audit de release también confirma que el backend de staging no está
+en paridad completa con el worktree de integración. Los commits live y
+readbacks citados arriba sí están acreditados, pero no permiten declarar
+desplegado todo el contenido de integración. Antes de la siguiente promoción se
+debe reconciliar el diff, repetir suites y volver a comprobar el readback.
+
+La comprobación **Guardar** de Consent fue solo de harness: un diagnóstico
+saneado probó que el handler persistía el estado, retiraba el banner,
+inicializaba el runtime y no generaba `pageerror`. No sustituye una prueba
+pública.
 
 ### Rotación online Ed25519
 
@@ -737,15 +819,11 @@ publicaciones. Después la identidad vuelve a ser estricta; no es una regla de
 equivalencia general entre hosts.
 
 Durante una diagnosis privada se imprimió accidentalmente el HMAC de intake.
-La rotación **todavía no se ha ejecutado**: queda pendiente hasta que Propdental
-haya adoptado `alpha.8` y pueda completar el cambio en dos fases mediante el
-reconciliador de runtime, sin dejar al plugin vivo con un HMAC incompatible. En
-ese cutover se deberá acreditar el ACK del runtime nuevo y solo entonces retirar
-la clave anterior. Tampoco se da por demostrada la eliminación de temporales
-hasta verificarla expresamente durante el rollout. La revisión del HTML/JS
-público no encontró el secreto, pero eso no sustituye la rotación. No imprimir
-nunca el runtime completo como técnica de diagnóstico ni copiar el valor a esta
-documentación, commits o logs.
+La rotación posterior quedó cerrada por el reconciliador two-phase: target
+aceptado, source aceptado durante la gracia, finalizer completado, envelopes
+retirados y una única clave aceptada. La revisión del HTML/JS público tampoco
+encontró el secreto. No imprimir nunca el runtime completo como técnica de
+diagnóstico ni copiar el valor a esta documentación, commits o logs.
 
 Un paquete genérico sobrescribió temporalmente la configuración del piloto en
 una recuperación histórica. Se

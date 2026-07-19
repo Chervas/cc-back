@@ -11,6 +11,10 @@ const {
   buildManagedCampaignPublishingPlan,
   managedCampaignPublishingAccountScopeInput,
 } = require('../services/managedCampaignPublishing.service');
+const managedCampaignProviderExecution = require('../services/managedCampaignProviderExecution.service');
+const {
+  requiresManagedCampaignProviderExecutionPath,
+} = require('../services/managedCampaignProviderExecutionRegistry.service');
 const {
   assignmentBelongsToGroup,
   findAssociationAccountScope,
@@ -65,6 +69,7 @@ const {
   ManagedCampaignBankTransaction,
   ManagedCampaignReconciliationMatch,
   ManagedCampaignPublishingAudit,
+  ManagedCampaignProviderExecution,
   Tratamiento,
   Usuario,
 } = db;
@@ -273,6 +278,12 @@ function protectedPlatformRefsPatch(currentValue, requestedValue) {
   const requested = safeObject(requestedValue);
   return {
     ...requested,
+    ...(current.managed_execution_id
+      ? {
+          managed_execution_id: current.managed_execution_id,
+          ...(current.campaign_id ? { campaign_id: current.campaign_id } : {}),
+        }
+      : {}),
     ...(Array.isArray(current.benchmark_external_campaigns)
       ? { benchmark_external_campaigns: current.benchmark_external_campaigns }
       : {}),
@@ -802,13 +813,25 @@ exports.getPublishingPlan = asyncHandler(async (req, res) => {
   const gateEvidence = publishingGateEvidence(req.query, prepaymentVerified);
   const accountAuthorization = await managedCampaignPublishingAccountAuthorization(row);
   const plan = buildManagedCampaignPublishingPlan({ campaign: row, gateEvidence, accountAuthorization });
+  const featureEnabled = managedCampaignProviderExecution.explicitEnabled();
+  const adapterAvailable = plan.execution?.execution_adapter_available === true;
   res.set('Cache-Control', 'no-store');
   return res.json({
     success: true,
     dry_run: true,
     audit_persisted: false,
     external_mutation_performed: false,
+    // This GET has not persisted the reviewed plan yet. Expose eligibility,
+    // but never advertise the enqueue command as available before the durable
+    // dry-run audit exists.
     execute_available: false,
+    execution_capability: {
+      feature_enabled: featureEnabled,
+      adapter_available: adapterAvailable,
+      eligible_after_persisted_dry_run: featureEnabled && adapterAvailable && plan.readiness.ready === true,
+      supported_scope: adapterAvailable ? 'google_search_create_new_paused' : null,
+      provider_call_performed: false,
+    },
     plan,
   });
 });
@@ -869,7 +892,9 @@ exports.createPublishingDryRun = asyncHandler(async (req, res) => {
       dry_run: true,
       idempotent: true,
       external_mutation_performed: false,
-      execute_available: false,
+      execute_available: managedCampaignProviderExecution.explicitEnabled()
+        && plan.execution?.execution_adapter_available === true
+        && plan.readiness.ready === true,
       audit: publishingAuditDto(existing),
       plan,
     });
@@ -915,7 +940,9 @@ exports.createPublishingDryRun = asyncHandler(async (req, res) => {
     dry_run: true,
     idempotent: !created,
     external_mutation_performed: false,
-    execute_available: false,
+    execute_available: managedCampaignProviderExecution.explicitEnabled()
+      && plan.execution?.execution_adapter_available === true
+      && plan.readiness.ready === true,
     audit: publishingAuditDto(audit),
     plan,
   });
@@ -935,8 +962,132 @@ exports.listPublishingAudits = asyncHandler(async (req, res) => {
   return res.json({
     success: true,
     dry_run_only: true,
+    execution_audits_separate: true,
     external_mutation_performed: false,
     items: rows.map((item) => publishingAuditDto(item)),
+  });
+});
+
+function providerExecutionErrorResponse(res, error) {
+  const status = Number(error?.httpStatus) || 500;
+  return res.status(status).json({
+    success: false,
+    error: error?.code || 'managed_campaign_provider_execution_failed',
+    message: status >= 500 && error?.code !== 'managed_campaign_provider_execution_disabled'
+      ? 'No se pudo preparar la ejecución gestionada.'
+      : error.message,
+    ...(error?.details ? { details: error.details } : {}),
+  });
+}
+
+exports.createPublishingExecution = asyncHandler(async (req, res) => {
+  const userId = assertOperator(req, res);
+  if (!userId) return;
+  let result;
+  try {
+    result = await managedCampaignProviderExecution.enqueueExecution({
+      campaignId: req.params.id,
+      sourcePublishingAuditId: req.body?.source_publishing_audit_id,
+      actorUserId: userId,
+      expectedPlanHash: req.body?.expected_plan_hash,
+      idempotencyKey: req.body?.idempotency_key,
+      changeReference: req.body?.change_reference,
+      confirmation: req.body,
+    });
+  } catch (error) {
+    return providerExecutionErrorResponse(res, error);
+  }
+  return res.status(result.created ? 202 : 200).json({
+    success: true,
+    accepted: result.created,
+    idempotent: !result.created,
+    external_mutation_performed: false,
+    job_request_id: result.job?.id || result.execution?.job_request_id || null,
+    execution: managedCampaignProviderExecution.executionDto(result.execution),
+  });
+});
+
+exports.listPublishingExecutions = asyncHandler(async (req, res) => {
+  if (!assertOperator(req, res)) return;
+  const campaign = await ManagedCampaign.findByPk(req.params.id, { attributes: ['id'], raw: true });
+  if (!campaign) return res.status(404).json({ success: false, error: 'not_found' });
+  const rows = await managedCampaignProviderExecution.listExecutions({
+    campaignId: campaign.id,
+    limit: positiveInt(req.query?.limit) || 25,
+  });
+  res.set('Cache-Control', 'no-store');
+  return res.json({
+    success: true,
+    feature_enabled: managedCampaignProviderExecution.explicitEnabled(),
+    activation_feature_enabled: managedCampaignProviderExecution.explicitEnabled()
+      && managedCampaignProviderExecution.explicitActivationEnabled(),
+    activation_contract: {
+      endpoint_suffix: '/activate',
+      idempotency_header: 'Idempotency-Key',
+      required_confirmations: [...managedCampaignProviderExecution.REQUIRED_ACTIVATION_CONFIRMATIONS],
+      eligible_execution_status: 'succeeded',
+      provider_transition: 'PAUSED_TO_ENABLED',
+      provider_call_performed_by_request: false,
+      eligibility_revalidated_transactionally: true,
+      customer_contract_path: 'ownership_snapshot.customer_contract',
+      required_goal_policy_stage: 'qualified_lead',
+      goal_policy_result_path: 'goal_policy_snapshot',
+      goal_policy_verified_by_job_before_provider_activation: true,
+      rollback_eligible_execution_statuses: ['succeeded', 'active', 'activation_failed'],
+    },
+    items: rows.map(managedCampaignProviderExecution.executionDto),
+  });
+});
+
+exports.createPublishingActivation = asyncHandler(async (req, res) => {
+  const userId = assertOperator(req, res);
+  if (!userId) return;
+  let result;
+  try {
+    result = await managedCampaignProviderExecution.enqueueActivation({
+      campaignId: req.params.id,
+      executionId: req.params.executionId,
+      actorUserId: userId,
+      expectedPlanHash: req.body?.expected_plan_hash,
+      idempotencyKey: req.get('Idempotency-Key'),
+      changeReference: req.body?.change_reference,
+      confirmation: req.body,
+    });
+  } catch (error) {
+    return providerExecutionErrorResponse(res, error);
+  }
+  return res.status(result.created ? 202 : 200).json({
+    success: true,
+    accepted: result.created,
+    idempotent: !result.created,
+    external_mutation_performed: false,
+    job_request_id: result.job?.id || result.execution?.activation_job_request_id || null,
+    execution: managedCampaignProviderExecution.executionDto(result.execution),
+  });
+});
+
+exports.createPublishingRollback = asyncHandler(async (req, res) => {
+  const userId = assertOperator(req, res);
+  if (!userId) return;
+  let result;
+  try {
+    result = await managedCampaignProviderExecution.enqueueRollback({
+      campaignId: req.params.id,
+      executionId: req.params.executionId,
+      actorUserId: userId,
+      idempotencyKey: req.body?.idempotency_key,
+      confirmRollback: req.body?.confirm_rollback === true,
+    });
+  } catch (error) {
+    return providerExecutionErrorResponse(res, error);
+  }
+  return res.status(result.created ? 202 : 200).json({
+    success: true,
+    accepted: result.created,
+    idempotent: !result.created,
+    external_mutation_performed: false,
+    job_request_id: result.job?.id || result.execution?.rollback_job_request_id || null,
+    execution: managedCampaignProviderExecution.executionDto(result.execution),
   });
 });
 
@@ -1193,6 +1344,57 @@ exports.transitionCampaign = asyncHandler(async (req, res) => {
   if (!row) return res.status(404).json({ success: false, error: 'not_found' });
   if (!nextStatus || !MANAGED_STATUSES.has(nextStatus) || !STATUS_TRANSITIONS[row.status]?.has(nextStatus)) {
     return res.status(409).json({ success: false, error: 'invalid_transition', message: `${row.status} → ${nextStatus || '?'} no está permitido` });
+  }
+  const managedExecutionId = cleanString(safeObject(row.platform_refs).managed_execution_id, 36);
+  const providerExecutionExclusive = requiresManagedCampaignProviderExecutionPath(row);
+  if (providerExecutionExclusive && ['launching', 'active'].includes(nextStatus)) {
+    const execution = await ManagedCampaignProviderExecution.findOne({
+      where: {
+        managed_campaign_id: row.id,
+        ...(managedExecutionId ? { id: managedExecutionId } : {
+          status: { [Op.in]: [
+            'queued', 'executing', 'succeeded', 'activation_queued', 'activating', 'active',
+            'activation_failed', 'manual_recovery_required', 'rollback_queued', 'rolling_back',
+          ] },
+        }),
+      },
+      attributes: ['id', 'status'],
+      order: [['created_at', 'DESC']],
+      raw: true,
+    });
+    return res.status(409).json({
+      success: false,
+      error: 'managed_execution_activation_endpoint_required',
+      message: nextStatus === 'launching'
+        ? 'Una campaña Piloto Google Search solo puede entrar en lanzamiento mediante su ejecución de proveedor, que crea los recursos en PAUSED con JobRequest y readback exacto.'
+        : 'Una campaña Piloto Google Search solo puede pasar a activa mediante su endpoint de activación PAUSED → ENABLED y el JobRequest con readback exacto.',
+      execution_status: execution?.status || 'missing',
+      required_route: nextStatus === 'launching' ? 'provider_execution_create' : 'provider_execution_activate',
+    });
+  }
+  if (nextStatus === 'active') {
+    const execution = await ManagedCampaignProviderExecution.findOne({
+      where: {
+        managed_campaign_id: row.id,
+        ...(managedExecutionId ? { id: managedExecutionId } : {
+          status: { [Op.in]: [
+            'queued', 'executing', 'succeeded', 'activation_queued', 'activating', 'active',
+            'activation_failed', 'manual_recovery_required', 'rollback_queued', 'rolling_back',
+          ] },
+        }),
+      },
+      attributes: ['id', 'status'],
+      order: [['created_at', 'DESC']],
+      raw: true,
+    });
+    if (managedExecutionId || execution) {
+      return res.status(409).json({
+        success: false,
+        error: 'managed_execution_activation_endpoint_required',
+        message: 'Una campaña creada por Piloto solo puede pasar a activa mediante su endpoint de activación PAUSED → ENABLED y el JobRequest con readback exacto.',
+        execution_status: execution?.status || 'missing',
+      });
+    }
   }
   if (nextStatus === 'pending_client_review') {
     const proposal = proposalReadiness(row);
@@ -1760,20 +1962,33 @@ exports.recordSpend = asyncHandler(async (req, res) => {
         transaction,
       });
       const nextSpend = money(total);
-      const available = money(money(funding.media_budget_net) - nextSpend - money(funding.reserved_amount));
+      const delta = money(amount - oldAmount);
+      // El presupuesto creado por Piloto queda reservado mientras la campaña
+      // está en PAUSED. Cuando llega gasto real, el mismo euro pasa de reserva
+      // a gasto; no puede descontarse dos veces del saldo disponible.
+      const reservedBefore = money(funding.reserved_amount);
+      const reservedConsumed = delta > 0 ? Math.min(delta, reservedBefore) : 0;
+      const nextReserved = money(reservedBefore - reservedConsumed);
+      const available = money(money(funding.media_budget_net) - nextSpend - nextReserved);
       await funding.update({
         media_spend: nextSpend,
+        reserved_amount: nextReserved,
         available_amount: Math.max(0, available),
         status: available <= 0 ? 'depleted' : (available <= money(funding.media_budget_net) * 0.2 ? 'low_balance' : 'funded'),
       }, { transaction });
-      const delta = money(amount - oldAmount);
       if (delta !== 0) {
         await ManagedCampaignLedgerEntry.create({
           id: crypto.randomUUID(), funding_account_id: funding.id,
           entry_type: delta > 0 ? 'media_spend' : 'adjustment', direction: delta > 0 ? 'debit' : 'credit',
           amount: Math.abs(delta), currency: funding.currency, occurred_at: capturedAt,
           external_ref: `spend:${provider}:${spendDate}:${crypto.randomUUID()}`,
-          metadata: { provider, customer_id: customerId, platform_campaign_id: platformCampaignId, spend_date: spendDate },
+          metadata: {
+            provider,
+            customer_id: customerId,
+            platform_campaign_id: platformCampaignId,
+            spend_date: spendDate,
+            reserved_amount_consumed: reservedConsumed,
+          },
           created_by_user_id: userId,
         }, { transaction });
       }

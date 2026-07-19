@@ -29,5 +29,15 @@ for (const contract of [
 ]) {
   assert.equal(routes.includes(contract), true, `falta contrato de ruta: ${contract}`);
 }
+assert.match(
+  routes,
+  /const limitWebContentAcceptances = webRateLimit\(\{ operation: 'web_content_generation_accept', limit: 60,/,
+  'accept debe tener un límite antiabuso independiente de la cuota de llamadas a OpenAI'
+);
+assert.match(
+  routes,
+  /router\.post\(\s*'\/web-content\/generations\/:generationId\/accept',\s*limitWebContentAcceptances,/,
+  'aceptar un borrador no debe consumir la cuota de generación del proveedor'
+);
 
 console.log('web content/media controller contract: ok');

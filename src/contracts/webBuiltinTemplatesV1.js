@@ -244,7 +244,7 @@ function generalClinic() {
     'clinic-trust-two': text('clinic-trust-two', 'Explicamos el plan y resolvemos tus dudas sin prisas.'),
     'clinic-trust-three': text('clinic-trust-three', 'Facilitamos el contacto y el seguimiento desde el primer día.'),
     'clinic-form-section': section('clinic-form-section', [formId], { background: 'muted', width: 'narrow' }),
-    [formId]: intakeForm(formId, { message: true, preferredContact: true }),
+    [formId]: intakeForm(formId, { email: true, message: true, preferredContact: true }),
   };
   const bindings = {
     'clinic-name-binding': {
@@ -276,7 +276,7 @@ function localCallWhatsapp() {
     'local-address-title': heading('local-address-title', 'Dónde estamos', 2),
     'local-address-value': text('local-address-value', 'Dirección de la clínica', { bindingIds: ['local-address-binding'] }),
     'local-form-section': section('local-form-section', [formId], { background: 'muted', width: 'narrow' }),
-    [formId]: intakeForm(formId, { preferredContact: true, message: true }),
+    [formId]: intakeForm(formId, { email: true, preferredContact: true, message: true }),
   };
   // text() no añade bindings para mantener su API pequeña.
   nodes['local-address-value'].binding_ids = ['local-address-binding'];

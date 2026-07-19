@@ -829,7 +829,7 @@ async function auditConnectOnlyCampaignQuality({
     allIssues.push({
       severity: 'critical',
       code: 'CONNECT_ONLY_CONNECTED_CAMPAIGNS_MISSING',
-      message: 'La estrategia Mide y mejora no contiene campañas Google Ads conectadas auditables.',
+      message: 'La estrategia Mide y entiende no contiene campañas Google Ads conectadas auditables.',
     });
   }
   const observedCampaignCount = accounts.reduce((sum, account) => (

@@ -13,7 +13,7 @@ const {
   webArtifactBundleFootprintBytes,
 } = require('./webArtifactBudget');
 
-const RENDERER_VERSION = 'clinicaclick-web-renderer/1.5.0';
+const RENDERER_VERSION = 'clinicaclick-web-renderer/1.6.0';
 const SAFE_EXTERNAL_REL = /^(?:\/[A-Za-z0-9_][A-Za-z0-9/_-]*|https:\/\/[^\s]+)$/;
 const PRODUCTION_INTAKE_ENDPOINT = '/_clinicaclick/intake';
 const CLINIC_BINDING_FIELDS = new Set([
@@ -22,6 +22,7 @@ const CLINIC_BINDING_FIELDS = new Set([
   'phone',
   'email',
   'website',
+  'image',
   'hours',
   'booking_url',
 ]);
@@ -59,6 +60,14 @@ function escapeHtml(value) {
 
 function escapeXml(value) {
   return escapeHtml(value);
+}
+
+function faviconDataUrl(value) {
+  const candidate = Array.from(String(value || '').normalize('NFC'))
+    .find((character) => /[\p{L}\p{N}]/u.test(character)) || 'C';
+  const label = escapeXml(candidate.toLocaleUpperCase().slice(0, 1));
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="16" fill="#111827"/><text x="32" y="43" text-anchor="middle" font-family="Arial,sans-serif" font-size="34" font-weight="700" fill="#ffffff">${label}</text></svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
 
 function stableJson(value) {
@@ -146,9 +155,15 @@ function normalizeClinicSnapshot(value = {}) {
     }
     const text = String(raw).normalize('NFC').trim();
     if (!text) continue;
-    if (field === 'website' || field === 'booking_url') {
+    if (field === 'website' || field === 'booking_url' || field === 'image') {
       const safeUrl = publicHttpUrl(text, { requireHttps: true });
       if (!safeUrl) {
+        // The clinic avatar is only an optional Social/Schema fallback. Legacy
+        // clinic records can contain relative admin paths or stale provider
+        // URLs; omitting that optional fallback is safer than blocking an
+        // otherwise publishable revision. Explicit website/booking bindings
+        // remain fail-closed because they become actionable public links.
+        if (field === 'image') continue;
         fail(
           'web_artifact_clinic_url_invalid',
           'Las URLs públicas de la clínica deben usar HTTPS y un host público.',
@@ -489,6 +504,7 @@ function buttonHref(node, context) {
 }
 
 function renderIntakeForm(node, context) {
+  const availableContactFields = new Set(node.props.fields.map((field) => field.name));
   const fields = node.props.fields.map((field) => {
     const id = `cc-field-${field.id}`;
     if (field.type === 'checkbox') {
@@ -502,7 +518,10 @@ function renderIntakeForm(node, context) {
       return `<label class="cc-field cc-checkbox" for="${id}"><input id="${id}" name="${escapeHtml(field.name)}" type="checkbox" value="1"${field.required ? ' required' : ''}> <span>${escapeHtml(text)}${legal}</span></label>`;
     }
     if (field.type === 'select') {
-      const options = (field.options || []).map((option) => `<option value="${escapeHtml(option.value)}">${escapeHtml(option.label)}</option>`).join('');
+      const selectableOptions = field.name === 'preferred_contact'
+        ? (field.options || []).filter((option) => option.value !== 'email' || availableContactFields.has('email'))
+        : (field.options || []);
+      const options = selectableOptions.map((option) => `<option value="${escapeHtml(option.value)}">${escapeHtml(option.label)}</option>`).join('');
       return `<label class="cc-field" for="${id}"><span>${escapeHtml(field.label)}</span><select id="${id}" name="${escapeHtml(field.name)}"${field.required ? ' required' : ''}><option value="">Selecciona una opción</option>${options}</select></label>`;
     }
     const tag = field.type === 'textarea' ? 'textarea' : 'input';
@@ -681,7 +700,7 @@ function reachableNodeIds(page, document) {
   return reachable;
 }
 
-function buildStructuredData({ project, page, pageUrl, baseUrl, clinic, document }) {
+function buildStructuredData({ project, page, pageUrl, baseUrl, clinic, document, socialImageUrl = null }) {
   const root = `${baseUrl}/#website`;
   const organizationId = `${baseUrl}/#organization`;
   const graph = [{
@@ -699,6 +718,7 @@ function buildStructuredData({ project, page, pageUrl, baseUrl, clinic, document
     ...(clinic.phone ? { telephone: clinic.phone } : {}),
     ...(clinic.email ? { email: clinic.email } : {}),
     ...(clinicAddress(clinic) ? { address: clinicAddress(clinic) } : {}),
+    ...(socialImageUrl && isSafePublicAssetUrl(socialImageUrl) ? { image: socialImageUrl } : {}),
     ...(clinic.schema_type === 'Dentist' ? { medicalSpecialty: 'Dentistry' } : {}),
   }, {
     '@type': 'WebPage',
@@ -795,7 +815,24 @@ function renderPage({ page, document, snapshot, context, project, baseUrl, clini
   const canonical = context.environment === 'production'
     ? (page.seo?.canonical_url || pageUrl)
     : pageUrl;
-  const jsonLd = buildStructuredData({ project, page, pageUrl: canonical, baseUrl, clinic, document });
+  const socialId = page.seo?.social_asset_id || document.seo.default_social_asset_id;
+  const social = socialId ? snapshot.media_assets?.[socialId] : null;
+  const socialUrl = social?.variants?.[0]?.url || social?.public_media?.url || null;
+  const safeSocialUrl = socialUrl && isSafePublicAssetUrl(socialUrl)
+    ? socialUrl
+    : (clinic.image && isSafePublicAssetUrl(clinic.image) ? clinic.image : null);
+  const socialImageAlt = social?.alt_text
+    ? String(social.alt_text).normalize('NFC').trim().slice(0, 300)
+    : (clinic.name || project.name);
+  const jsonLd = buildStructuredData({
+    project,
+    page,
+    pageUrl: canonical,
+    baseUrl,
+    clinic,
+    document,
+    socialImageUrl: safeSocialUrl,
+  });
   const jsonLdText = stableJson(jsonLd);
   const jsonLdCspHash = sha256(jsonLdText, 'base64');
   const measurementOrigin = context.measurement.enabled ? context.measurement.api_url : null;
@@ -804,14 +841,15 @@ function renderPage({ page, document, snapshot, context, project, baseUrl, clini
   // measurement origin. Keep the stricter static-site policy when measurement
   // is disabled, and open only those two directives when the trusted runtime
   // is embedded.
-  const runtimeImageSources = measurementOrigin ? ` ${measurementOrigin} data:` : '';
+  const runtimeImageSources = `${measurementOrigin ? ` ${measurementOrigin}` : ''} data:`;
   const runtimeStyleSources = measurementOrigin ? " 'unsafe-inline'" : '';
   const pageCsp = `default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' https://media.clinicaclick.com${runtimeImageSources}; style-src 'self'${runtimeStyleSources}; script-src 'sha256-${jsonLdCspHash}'${measurementOrigin ? ` ${measurementOrigin}` : ''}; connect-src 'self'${measurementOrigin ? ` ${measurementOrigin}` : ''}; font-src 'self'; manifest-src 'self'; upgrade-insecure-requests`;
-  const socialId = page.seo?.social_asset_id || document.seo.default_social_asset_id;
-  const social = socialId ? snapshot.media_assets?.[socialId] : null;
-  const socialUrl = social?.variants?.[0]?.url || social?.public_media?.url || null;
   const publicationBasePath = new URL(`${baseUrl}/`).pathname;
-  const html = `<!doctype html><html lang="${escapeHtml(project.locale)}"><head><meta charset="utf-8"><meta name="clinicaclick-artifact-input" content="${escapeHtml(artifactMarker)}"><meta http-equiv="Content-Security-Policy" content="${escapeHtml(pageCsp)}"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><meta name="description" content="${escapeHtml(description)}"><meta name="robots" content="${robots}"><link rel="canonical" href="${escapeHtml(canonical)}"><meta property="og:type" content="website"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${escapeHtml(description)}"><meta property="og:url" content="${escapeHtml(canonical)}">${socialUrl && isSafePublicAssetUrl(socialUrl) ? `<meta property="og:image" content="${escapeHtml(socialUrl)}">` : ''}<link rel="stylesheet" href="${escapeHtml(`${baseUrl}/${cssFile}`)}"><script type="application/ld+json">${jsonLdText}</script>${measurementLoaderTag(context.measurement, { projectId: project.id, revisionId: context.revisionId, pageId: page.id, artifactMarker })}</head><body data-cc-web-project-id="${escapeHtml(project.id)}" data-cc-web-revision-id="${escapeHtml(context.revisionId)}" data-cc-web-artifact-input-hash="${escapeHtml(artifactMarker)}" data-cc-web-base-path="${escapeHtml(publicationBasePath)}">${header}${body}${footer}</body></html>`;
+  const favicon = faviconDataUrl(clinic.name || project.name);
+  const socialImageTags = safeSocialUrl
+    ? `<meta property="og:image" content="${escapeHtml(safeSocialUrl)}"><meta property="og:image:alt" content="${escapeHtml(socialImageAlt)}"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:image" content="${escapeHtml(safeSocialUrl)}"><meta name="twitter:image:alt" content="${escapeHtml(socialImageAlt)}">`
+    : '<meta name="twitter:card" content="summary">';
+  const html = `<!doctype html><html lang="${escapeHtml(project.locale)}"><head><meta charset="utf-8"><meta name="clinicaclick-artifact-input" content="${escapeHtml(artifactMarker)}"><meta http-equiv="Content-Security-Policy" content="${escapeHtml(pageCsp)}"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" type="image/svg+xml" href="${escapeHtml(favicon)}"><title>${escapeHtml(title)}</title><meta name="description" content="${escapeHtml(description)}"><meta name="robots" content="${robots}"><link rel="canonical" href="${escapeHtml(canonical)}"><meta property="og:type" content="website"><meta property="og:site_name" content="${escapeHtml(project.name)}"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${escapeHtml(description)}"><meta property="og:url" content="${escapeHtml(canonical)}">${socialImageTags}<meta name="twitter:title" content="${escapeHtml(title)}"><meta name="twitter:description" content="${escapeHtml(description)}"><link rel="stylesheet" href="${escapeHtml(`${baseUrl}/${cssFile}`)}"><script type="application/ld+json">${jsonLdText}</script>${measurementLoaderTag(context.measurement, { projectId: project.id, revisionId: context.revisionId, pageId: page.id, artifactMarker })}</head><body data-cc-web-project-id="${escapeHtml(project.id)}" data-cc-web-revision-id="${escapeHtml(context.revisionId)}" data-cc-web-artifact-input-hash="${escapeHtml(artifactMarker)}" data-cc-web-base-path="${escapeHtml(publicationBasePath)}">${header}${body}${footer}</body></html>`;
   return {
     path: page.slug === 'inicio' ? '/' : `/${page.slug}/`,
     html,
@@ -900,7 +938,7 @@ function compileWebArtifact(input = {}) {
   }));
   const scriptHashes = [...new Set(pages.map((page) => `'sha256-${page.json_ld_csp_hash}'`))].sort();
   const measurementOrigin = runtime.measurement.enabled ? runtime.measurement.api_url : null;
-  const runtimeImageSources = measurementOrigin ? ` ${measurementOrigin} data:` : '';
+  const runtimeImageSources = `${measurementOrigin ? ` ${measurementOrigin}` : ''} data:`;
   const runtimeStyleSources = measurementOrigin ? " 'unsafe-inline'" : '';
   const headers = {
     'content-security-policy': `default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' https://media.clinicaclick.com${runtimeImageSources}; style-src 'self'${runtimeStyleSources}; script-src ${scriptHashes.join(' ')}${measurementOrigin ? ` ${measurementOrigin}` : ''}; connect-src 'self'${measurementOrigin ? ` ${measurementOrigin}` : ''}; font-src 'self'; manifest-src 'self'; upgrade-insecure-requests`,
@@ -1028,6 +1066,7 @@ module.exports = {
   applyBindings,
   compileWebArtifact,
   escapeHtml,
+  faviconDataUrl,
   normalizeClinicSnapshot,
   pageSeoAudit,
   safeAbsoluteBaseUrl,

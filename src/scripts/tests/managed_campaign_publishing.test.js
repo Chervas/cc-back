@@ -36,9 +36,30 @@ function baseCampaign(overrides = {}) {
     family: 'google_search',
     status: 'approved_to_launch',
     name: 'Implantes Badalona',
-    target_config: { geo: { radius_km: 12 }, keywords: ['implantes dentales', 'dentista implantes'] },
+    target_config: {
+      geo: { radius_km: 12 },
+      keywords: ['implantes dentales', 'dentista implantes'],
+      google_ads: {
+        geo_target_constant_ids: ['1005424'],
+        language_constant_ids: ['1003'],
+        positive_geo_target_type: 'PRESENCE',
+        negative_geo_target_type: 'PRESENCE',
+      },
+    },
     budget_config: { amount: 500, currency: 'EUR', period: 'monthly' },
-    schedule_config: { start_date: '2026-08-01' },
+    schedule_config: {
+      start_date: '2026-08-01',
+      google_ads: {
+        time_zone: 'Europe/Madrid',
+        ad_schedules: [{
+          day_of_week: 'MONDAY',
+          start_hour: 8,
+          start_minute: 'ZERO',
+          end_hour: 20,
+          end_minute: 'ZERO',
+        }],
+      },
+    },
     destination_config: { final_url: 'https://example.test/implantes' },
     audience_config: {},
     creative_config: {
@@ -122,6 +143,18 @@ function directSearchSpecification(overrides = {}) {
       period: 'monthly',
     },
     final_url: 'https://example.test/implantes',
+    targeting: {
+      geo_target_constant_ids: ['1005424'],
+      language_constant_ids: ['1003'],
+      positive_geo_target_type: 'PRESENCE',
+      negative_geo_target_type: 'PRESENCE',
+    },
+    schedule: {
+      time_zone: 'Europe/Madrid',
+      ad_schedules: [{
+        day_of_week: 'MONDAY', start_hour: 8, start_minute: 'ZERO', end_hour: 20, end_minute: 'ZERO',
+      }],
+    },
     ad_group: { keywords: ['implantes dentales'] },
     creative: {
       headlines: ['Implantes dentales', 'Recupera tu sonrisa', 'Valoración personalizada'],
@@ -180,17 +213,32 @@ function directMetaSpecification(family = 'meta_reach', overrides = {}) {
 function testDeterministicGoogleSearchPlan() {
   const first = buildManagedCampaignPublishingPlan({ campaign: baseCampaign(), gateEvidence });
   const reordered = baseCampaign({
-    target_config: { keywords: ['implantes dentales', 'dentista implantes'], geo: { radius_km: 12 } },
+    target_config: {
+      google_ads: {
+        negative_geo_target_type: 'PRESENCE',
+        positive_geo_target_type: 'PRESENCE',
+        language_constant_ids: ['1003'],
+        geo_target_constant_ids: ['1005424'],
+      },
+      keywords: ['implantes dentales', 'dentista implantes'],
+      geo: { radius_km: 12 },
+    },
   });
   const second = buildManagedCampaignPublishingPlan({ campaign: reordered, gateEvidence: { ...gateEvidence } });
   assert.equal(first.plan_hash, second.plan_hash);
   assert.equal(first.plan_id, second.plan_id);
   assert.equal(first.mode, 'dry_run');
   assert.equal(first.readiness.ready, true);
-  assert.equal(first.execution.adapter_available, false);
-  assert.equal(first.execution.execution_adapter_available, false);
+  assert.equal(first.execution.adapter_available, true);
+  assert.equal(first.execution.execution_adapter_available, true);
+  assert.equal(first.execution.execution_adapter_version, 'managed-google-search-execution-adapter/v3');
+  assert.equal(first.execution.safety.initial_campaign_status, 'PAUSED');
+  assert.equal(first.execution.safety.activation_supported, true);
+  assert.equal(first.execution.safety.activation_requires_separate_job, true);
+  assert.equal(first.execution.safety.targeting_materialized, true);
+  assert.equal(first.execution.safety.schedule_materialized, true);
   assert.equal(first.execution.dry_run_adapter_available, true);
-  assert.equal(first.execution.dry_run_operation_count, 5);
+  assert.equal(first.execution.dry_run_operation_count, 6);
   assert.equal(first.execution.provider_call_performed, false);
   assert.equal(first.dry_run_adapter.readiness.ready, true);
   assert.equal(first.dry_run_adapter.provider_call_performed, false);
@@ -202,7 +250,9 @@ function testDeterministicGoogleSearchPlan() {
   assert.equal(first.dry_run_adapter.budget.provider_media_budget_amount, 450);
   assert.equal(first.dry_run_adapter.operations[0].payload_preview.amount_micros, 14_802_631);
   assert.equal(first.dry_run_adapter.operations[1].payload_preview.status, 'PAUSED');
-  assert.equal(first.dry_run_adapter.operations[4].resource_type, 'AdGroupAd');
+  assert.equal(first.dry_run_adapter.operations[2].resource_type, 'CampaignCriterion');
+  assert.equal(first.dry_run_adapter.operations[3].payload_preview.status, 'PAUSED');
+  assert.equal(first.dry_run_adapter.operations[5].resource_type, 'AdGroupAd');
   assert.equal(first.dry_run_adapter.manifest_hash, second.dry_run_adapter.manifest_hash);
   assert.equal(first.specification.provider_campaign_type, 'SEARCH');
   assert.deepEqual(first.specification.creative.headlines, baseCampaign().creative_config.headlines);
@@ -212,6 +262,35 @@ function testDeterministicGoogleSearchPlan() {
   assert.doesNotMatch(serialized, /must-never-leak|secret-google-token|also-secret|hidden/);
   assert.doesNotMatch(serialized, /access_token|accessToken|refreshToken|clientSecret/);
   assert.match(serialized, /managed-google-ads-dry-run-adapter\/v1/);
+}
+
+function testGoogleSearchRequiresExplicitProviderTargetingAndAccountTimeZone() {
+  const missing = buildManagedCampaignPublishingPlan({
+    campaign: baseCampaign({ target_config: { keywords: ['implantes dentales'] }, schedule_config: {} }),
+    gateEvidence,
+  });
+  const missingCodes = new Set(missing.readiness.blockers.map((item) => item.code));
+  assert.equal(missing.readiness.ready, false);
+  for (const code of [
+    'search_geo_target_required',
+    'search_language_target_required',
+    'search_positive_geo_type_required',
+    'search_negative_geo_type_required',
+    'search_time_zone_required',
+    'search_ad_schedule_required',
+  ]) assert.equal(missingCodes.has(code), true, `missing blocker ${code}`);
+
+  const invalidTimeZone = baseCampaign();
+  invalidTimeZone.schedule_config = {
+    ...invalidTimeZone.schedule_config,
+    google_ads: {
+      ...invalidTimeZone.schedule_config.google_ads,
+      time_zone: 'Europe/Not-A-Real-Zone',
+    },
+  };
+  const invalid = buildManagedCampaignPublishingPlan({ campaign: invalidTimeZone, gateEvidence });
+  assert.equal(invalid.readiness.ready, false);
+  assert.equal(invalid.readiness.blockers.some((item) => item.code === 'search_time_zone_required'), true);
 }
 
 function testPublishingAccountScopeAuthorization() {
@@ -663,9 +742,9 @@ function testDirectAdapterRejectsMalformedEffectivePayloads() {
   assert.equal(malformedCodes.has('adapter_search_keywords_invalid'), true);
   assert.equal(malformedCodes.has('adapter_search_headlines_invalid'), true);
   assert.equal(malformedCodes.has('adapter_search_descriptions_invalid'), true);
-  assert.equal(malformed.operations[3].payload_preview.criteria.length, 0);
-  assert.equal(malformed.operations[4].payload_preview.headlines.length, 0);
-  assert.deepEqual(malformed.operations[4].payload_preview.final_urls, []);
+  assert.equal(malformed.operations[4].payload_preview.criteria.length, 0);
+  assert.equal(malformed.operations[5].payload_preview.headlines.length, 0);
+  assert.deepEqual(malformed.operations[5].payload_preview.final_urls, []);
   assert.doesNotMatch(JSON.stringify(malformed), /operator|must-not-leak|127\.0\.0\.1/);
 
   const overLimits = buildManagedCampaignDryRunAdapter({
@@ -684,7 +763,7 @@ function testDirectAdapterRejectsMalformedEffectivePayloads() {
   assert.equal(overLimitCodes.has('adapter_search_keywords_too_long'), true);
   assert.equal(overLimitCodes.has('adapter_search_keywords_required'), true);
   assert.equal(overLimitCodes.has('adapter_search_headlines_too_many'), true);
-  assert.equal(overLimits.operations[4].payload_preview.headlines.length, 15);
+  assert.equal(overLimits.operations[5].payload_preview.headlines.length, 15);
 
   const pmaxMalformed = buildManagedCampaignDryRunAdapter({
     provider: 'google_ads',
@@ -1237,7 +1316,8 @@ function testUpdateExistingAdapterSemantics() {
   assert.equal(update.operations[1].action, 'update');
   assert.equal(Object.prototype.hasOwnProperty.call(update.operations[1].payload_preview, 'status'), false);
   assert.equal(update.operations[2].action, 'create');
-  assert.equal(update.operations[4].action, 'create');
+  assert.equal(update.operations[4].action, 'sync');
+  assert.equal(update.operations[5].action, 'create');
   assert.equal(update.safety.initial_campaign_status, null);
   assert.equal(update.safety.existing_campaign_status_preserved, true);
 }
@@ -1314,15 +1394,15 @@ function testFutureExecutionGates() {
   );
 
   const fullyConfirmed = evaluateManagedCampaignExecutionGates({ plan, confirmation: fullConfirmation(plan) });
-  assert.equal(fullyConfirmed.allowed, false);
-  assert.equal(fullyConfirmed.failures.some((item) => item.code === 'execution_adapter_unavailable'), true);
+  assert.equal(fullyConfirmed.allowed, true);
+  assert.equal(fullyConfirmed.failures.length, 0);
   assert.equal(fullyConfirmed.failures.some((item) => item.code === 'plan_hash_invalid'), false);
   assert.equal(fullyConfirmed.failures.some((item) => item.code === 'plan_id_invalid'), false);
   assert.equal(fullyConfirmed.failures.some((item) => item.code === 'dry_run_manifest_invalid'), false);
-  assert.throws(
-    () => assertManagedCampaignExecutionGates({ plan, confirmation: fullConfirmation(plan) }),
-    (error) => error?.failures?.some((item) => item.code === 'execution_adapter_unavailable')
-  );
+  assert.equal(assertManagedCampaignExecutionGates({
+    plan,
+    confirmation: fullConfirmation(plan),
+  }).allowed, true);
 
   const tampered = JSON.parse(JSON.stringify(plan));
   tampered.dry_run_adapter.operations[0].payload_preview.amount_micros = 500_000_000;
@@ -1338,12 +1418,11 @@ function testFutureExecutionGates() {
   assert.equal(renamedResult.failures.some((item) => item.code === 'plan_id_invalid'), true);
 
   const forged = JSON.parse(JSON.stringify(plan));
-  forged.execution.execution_adapter_available = true;
-  forged.execution.adapter_available = true;
+  forged.execution.execution_adapter_version = 'forged-adapter/v999';
   const forgedResult = evaluateManagedCampaignExecutionGates({ plan: forged, confirmation: fullConfirmation(forged) });
   assert.equal(forgedResult.allowed, false);
   assert.equal(forgedResult.failures.some((item) => item.code === 'plan_hash_invalid'), true);
-  assert.equal(forgedResult.failures.some((item) => item.code === 'execution_adapter_unavailable'), true);
+  assert.equal(forgedResult.failures.some((item) => item.code === 'execution_adapter_manifest_invalid'), true);
 }
 
 function testNoProviderIntegration() {
@@ -1352,6 +1431,7 @@ function testNoProviderIntegration() {
       'node:crypto',
       '../lib/safeHttpTarget',
       './managedCampaignProviderAdapterRegistry.service',
+      './managedCampaignProviderExecutionRegistry.service',
     ]],
     ['../../services/managedCampaignGoogleAdsDryRunAdapter.service.js', [
       'node:crypto',
@@ -1415,10 +1495,13 @@ function testAdminDryRunApiContract() {
   assert.match(routeSource, /router\.get\('\/:id\/publishing-plan', controller\.getPublishingPlan\)/);
   assert.match(routeSource, /router\.post\('\/:id\/publishing-dry-run', controller\.createPublishingDryRun\)/);
   assert.match(routeSource, /router\.get\('\/:id\/publishing-audits', controller\.listPublishingAudits\)/);
+  assert.match(routeSource, /router\.post\('\/:id\/publishing-executions', controller\.createPublishingExecution\)/);
+  assert.match(routeSource, /router\.get\('\/:id\/publishing-executions', controller\.listPublishingExecutions\)/);
+  assert.match(routeSource, /router\.post\('\/:id\/publishing-executions\/:executionId\/rollback', controller\.createPublishingRollback\)/);
   assert.match(routeSource, /Cache-Control['"],\s*['"]no-store/,
     'Authenticated admin GET/HEAD responses must opt out of browser and intermediary caches');
   assert.doesNotMatch(routeSource, /publishing-execute|\/execute|executePublishing/,
-    'No provider execution route may exist in the dry-run phase');
+    'The execution endpoint must remain the explicit publishing-executions contract');
 
   const readPlan = sourceSection(controllerSource, 'exports.getPublishingPlan', 'exports.createPublishingDryRun');
   const persistDryRun = sourceSection(controllerSource, 'exports.createPublishingDryRun', 'exports.listPublishingAudits');
@@ -1430,6 +1513,8 @@ function testAdminDryRunApiContract() {
     'GET publishing-plan must remain read-only');
   assert.match(readPlan, /audit_persisted:\s*false/);
   assert.match(readPlan, /external_mutation_performed:\s*false/);
+  assert.match(readPlan, /execute_available:\s*false/);
+  assert.match(readPlan, /eligible_after_persisted_dry_run/);
 
   assert.match(persistDryRun, /assertOperator\(req, res\)/);
   assert.match(persistDryRun, /managedCampaignPublishingAccountAuthorization\(row\)/);
@@ -1441,7 +1526,7 @@ function testAdminDryRunApiContract() {
   assert.match(persistDryRun, /publishing_plan_changed/);
   assert.match(persistDryRun, /ManagedCampaignPublishingAudit\.create/);
   assert.match(persistDryRun, /provider_call_performed:\s*false/);
-  assert.match(persistDryRun, /execute_available:\s*false/);
+  assert.match(persistDryRun, /managedCampaignProviderExecution\.explicitEnabled\(\)/);
   assert.doesNotMatch(persistDryRun, /googleAdsRequest|metaGet|axios|fetch\s*\(/);
 
   assert.match(listAudits, /assertOperator\(req, res\)/);
@@ -1453,6 +1538,7 @@ function testAdminDryRunApiContract() {
 
 function run() {
   testDeterministicGoogleSearchPlan();
+  testGoogleSearchRequiresExplicitProviderTargetingAndAccountTimeZone();
   testPublishingAccountScopeAuthorization();
   testNoInventedAssetsAndUnsupportedFamily();
   testCommissionNeverEntersProviderBudget();

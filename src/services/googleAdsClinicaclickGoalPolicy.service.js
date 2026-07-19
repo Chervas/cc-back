@@ -2016,7 +2016,7 @@ async function discoverGoalPolicyAuditTargets({
       severity: 'critical',
       code: 'CONNECT_ONLY_MEASUREMENT_INTAKE_CONFIG_MISSING',
       reason: 'connect_only_measurement_intake_config_missing',
-      message: `La clínica ${clinicId} tiene Mide y mejora activo, pero no existe una configuración de medición vinculada para auditar.`,
+      message: `La clínica ${clinicId} tiene Mide y entiende activo, pero no existe una configuración de medición vinculada para auditar.`,
       clinic_id: clinicId,
     });
   }
@@ -2126,7 +2126,7 @@ async function executePersistedGoalPolicyAudit({ dependencies = {} } = {}) {
         issues.push({
           severity: 'critical',
           code: error.code || 'CONNECT_ONLY_MEASUREMENT_AUDIT_FAILED',
-          message: String(error.message || 'No se pudo auditar Mide y mejora').slice(0, 500),
+          message: String(error.message || 'No se pudo auditar Mide y entiende').slice(0, 500),
           intake_config_id: target.intake_config_id,
           audit_mode: 'connect_only_measurement',
         });

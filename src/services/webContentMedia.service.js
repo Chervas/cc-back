@@ -367,9 +367,21 @@ async function listContent({ actorId, query = {}, models = db, assertFeatureAcce
   };
 }
 
-async function createContent({ actorId, body = {}, requestId = null, models = db, sequelize = db.sequelize } = {}) {
+async function createContent({
+  actorId,
+  body = {},
+  requestId = null,
+  models = db,
+  sequelize = db.sequelize,
+  transaction: outerTransaction = null,
+  assertFeatureAccess = undefined,
+} = {}) {
   const scope = normalizeScope(body);
-  await assertScopeAccess(actorId, scope, 'marketing.web.edit', { models });
+  await assertScopeAccess(actorId, scope, 'marketing.web.edit', {
+    models,
+    transaction: outerTransaction || undefined,
+    assertFeatureAccess,
+  });
   if (body.status !== undefined && String(body.status).trim().toLowerCase() !== 'draft') {
     throw new WebContentMediaServiceError(
       'content_create_requires_draft',
@@ -378,7 +390,7 @@ async function createContent({ actorId, body = {}, requestId = null, models = db
     );
   }
   const normalized = validateWebContentEntry(body);
-  return sequelize.transaction(async (transaction) => {
+  const createWithinTransaction = async (transaction) => {
     const entry = await models.WebContentEntry.create({
       id: crypto.randomUUID(),
       ...scopeColumns(scope),
@@ -408,7 +420,9 @@ async function createContent({ actorId, body = {}, requestId = null, models = db
       metadata: { version: 1, type: entry.type, status: entry.status },
     });
     return serializeContentEntry(entry, { requestedScope: scope });
-  });
+  };
+  if (outerTransaction) return createWithinTransaction(outerTransaction);
+  return sequelize.transaction(createWithinTransaction);
 }
 
 const CONTENT_TRANSITIONS = Object.freeze({
