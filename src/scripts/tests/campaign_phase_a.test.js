@@ -178,6 +178,11 @@ function testCampaignScopeAndWritableModesRegression() {
     'startCampaignOnboarding',
     'getCampaignOnboardingStatus'
   );
+  const update = controllerSection(
+    source,
+    'updateMarketingStrategy',
+    'transitionMarketingStrategyStatus'
+  );
   const create = controllerSection(source, 'createMarketingStrategy');
 
   assert.match(pixels, /requireMarketingClinicScope\(req, res, scope\.clinic_ids, 'read'\)/,
@@ -194,6 +199,15 @@ function testCampaignScopeAndWritableModesRegression() {
     'Every onboarding provider must pass the privacy readiness gate before start');
   assert.match(create, /if \(!CREATABLE_MODES\.has\(effectiveMode\)\)/,
     'Historical managed_self must not create new strategies');
+  assert.match(update, /if \(effectiveMode === CAMPAIGN_MODES\.LEGACY_SELF_MANAGED\)/,
+    'Historical managed_self must be rejected before any strategy update');
+  assert.match(update, /status\(409\)[\s\S]*error:\s*'legacy_mode_read_only'/,
+    'Historical managed_self updates must return the stable read-only conflict');
+  assert.ok(
+    update.indexOf('effectiveMode === CAMPAIGN_MODES.LEGACY_SELF_MANAGED')
+      < update.indexOf('normalizeStrategyTreatments('),
+    'The legacy read-only guard must run before mutation input is normalized'
+  );
 
   const customerScopeCheck = start.indexOf("customerScopeError.code = 'CUSTOMER_NOT_ASSIGNED_TO_SCOPE'");
   const conversionEnsure = start.indexOf('evaluateGoogleConversionOnboardingReadiness({');

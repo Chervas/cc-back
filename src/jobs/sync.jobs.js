@@ -2437,7 +2437,7 @@ class MetaSyncJobs {
             validate_only: true,
             error: {
               code: error.code || 'CONNECT_ONLY_STRATEGY_READINESS_RECONCILIATION_ERROR',
-              message: 'Falló la reconciliación de readiness de las estrategias Conecta y mejora'
+              message: 'Falló la reconciliación de readiness de las estrategias Mide y entiende'
             },
             external_mutation_performed: false,
             google_ads_mutated: false

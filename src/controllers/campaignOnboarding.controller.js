@@ -9992,6 +9992,13 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
   const currentScope = extractStrategyScopeFromPayload(currentPayload, rows);
   const currentMode = String(currentPayload.mode_snapshot || currentPayload.mode || '').trim().toLowerCase();
   const effectiveMode = VALID_MODES.has(currentMode) ? currentMode : CAMPAIGN_MODES.MEASURE;
+  if (effectiveMode === CAMPAIGN_MODES.LEGACY_SELF_MANAGED) {
+    return res.status(409).json({
+      success: false,
+      error: 'legacy_mode_read_only',
+      message: 'La configuración antigua de gestión propia es solo de lectura. Selecciona Mide y entiende, Mejora o Piloto automático antes de modificarla.'
+    });
+  }
   const objectiveId = String(currentPayload.objective_id || '').trim().toLowerCase();
   const promotionType = String(req.body?.promotion_type || currentPayload.promotion_type || '').trim().toLowerCase() === 'generic'
     ? 'generic'
