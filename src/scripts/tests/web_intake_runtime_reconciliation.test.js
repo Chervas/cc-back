@@ -270,6 +270,81 @@ async function testGroupEffectiveScopeAcrossInstallationsAndChannels() {
   );
 }
 
+async function testDesiredWordpressRuntimeUsesPluginMeasurementContract() {
+  const source = intake({ hmac: OLD_KEY, chat: false });
+  const target = intake({ hmac: NEW_KEY, chat: true });
+  const installationId = '77777777-7777-4777-8777-777777777777';
+  const publication = {
+    id: 'wordpress-runtime-publication',
+    scopeType: 'clinic',
+    clinicaId: 55,
+    channel: 'wordpress',
+    wordpressInstallationId: installationId,
+  };
+  const transition = sealTestReconciliation({
+    id: '88888888-8888-4888-8888-888888888888',
+    generation: 1,
+    status: 'deploying',
+    scopeType: 'clinic',
+    scopeId: 55,
+    sourceConfigPatch: reconciliation.runtimeConfigPatch(source),
+    targetConfigPatch: reconciliation.runtimeConfigPatch(target),
+    sourceHmacKey: OLD_KEY,
+    targetHmacKey: NEW_KEY,
+    expectedDeployments: {
+      [publication.id]: {
+        publication_id: publication.id,
+        installation_id: installationId,
+      },
+    },
+  });
+  const models = {
+    WebIntakeRuntimeReconciliation: { findAll: async () => [transition] },
+    WebPublication: { findByPk: async () => publication },
+    IntakeConfig: {
+      findOne: async () => source,
+      findAll: async () => [],
+    },
+  };
+  const expectedKeys = [
+    'enabled',
+    'scope_type',
+    'scope_id',
+    'loader_path',
+    'hmac_key',
+    'consent_mode_enabled',
+    'consent_provider',
+    'chat_enabled',
+    'whatsapp_enabled',
+    'phone_enabled',
+  ].sort();
+
+  const deploying = await reconciliation.desiredRuntimeForInstallation({
+    installation: { id: installationId },
+    models,
+  });
+  assert.deepEqual(Object.keys(deploying.measurement).sort(), expectedKeys);
+  assert.equal(deploying.measurement.loader_path, '/assets/loader.js');
+  assert.equal(Object.prototype.hasOwnProperty.call(deploying.measurement, 'api_url'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(deploying.measurement, 'loader_url'), false);
+  assert.equal(deploying.measurement.hmac_key === NEW_KEY, true);
+  assert.equal(deploying.measurement.chat_enabled, true);
+  assert.equal(deploying.runtime.runtime_config_hash, reconciliation.runtimeHashForRecord(target));
+
+  transition.status = 'rolling_back';
+  const rollingBack = await reconciliation.desiredRuntimeForInstallation({
+    installation: { id: installationId },
+    models,
+  });
+  assert.deepEqual(Object.keys(rollingBack.measurement).sort(), expectedKeys);
+  assert.equal(rollingBack.measurement.loader_path, '/assets/loader.js');
+  assert.equal(Object.prototype.hasOwnProperty.call(rollingBack.measurement, 'api_url'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(rollingBack.measurement, 'loader_url'), false);
+  assert.equal(rollingBack.measurement.hmac_key === OLD_KEY, true);
+  assert.equal(rollingBack.measurement.chat_enabled, false);
+  assert.equal(rollingBack.runtime.runtime_config_hash, reconciliation.runtimeHashForRecord(source));
+}
+
 async function testMaterializedClinicFollowsSubsequentGroupRuntime() {
   const source = intake({
     scope: 'group', scopeId: 5, hmac: OLD_KEY, chat: false, locations: [{ id: 55 }],
@@ -1388,6 +1463,7 @@ async function run() {
     testDualRuntimeAuthenticationUsesMatchingFeatures,
     testInheritedPublicAuthenticationBeforeDuringAndAfterGrace,
     testGroupEffectiveScopeAcrossInstallationsAndChannels,
+    testDesiredWordpressRuntimeUsesPluginMeasurementContract,
     testMaterializedClinicFollowsSubsequentGroupRuntime,
     testHistoricalTransparentClinicRowFollowsGroupRotation,
     testInheritedNonRuntimeCreateMaterializesRuntimeWithoutRollout,

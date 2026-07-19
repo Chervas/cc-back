@@ -2787,13 +2787,17 @@ async function desiredRuntimeForInstallation({
     const plans = await effectiveRuntimePlans({
       scope, sourceRecord: source, targetRecord: target, publications: [publication], models, transaction, env,
     });
+    const plan = plans[0];
     const runtime = reconciliation.status === 'rolling_back'
-      ? plans[0]?.source_runtime
-      : plans[0]?.target_runtime;
+      ? plan?.source_runtime
+      : plan?.target_runtime;
+    const effectiveRecord = reconciliation.status === 'rolling_back'
+      ? plan?.source_effective
+      : plan?.target_effective;
     if (!runtime) continue;
     matches.push({
       runtime,
-      measurement: runtime.measurement,
+      measurement: measurementFromIntake(effectiveRecord),
       reconciliation_id: reconciliation.id,
       generation: Number(reconciliation.generation),
     });
