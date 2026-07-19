@@ -32,7 +32,8 @@ La ruta `/cita/qa-globales-galeria-20260719/` pasó renderer 1.7, aserciones
 públicas y Chromium desktop/móvil; Schema 1 objeto/0 errores/0 avisos;
 Lighthouse 88/100/100/69, con SEO deliberadamente reducido por `noindex`, FCP
 1,0 s, LCP 3,9 s, CLS 0 y TBT 0. Después se archivó el proyecto y se retiró la
-publicación: el **410 Gone** actual es el tombstone esperado. El QA admin
+publicación: la retirada se acreditó primero con **410 Gone** y, tras liberar
+el tombstone, el readback actual devuelve **404**, sin contenido público. El QA admin
 autenticado contra `https://crm.clinicaclick.com` recorrió Proyectos y
 Contenidos a `1440` y `390`: cuatro HTTP 200, sin overflow, page errors,
 requests fallidas ni errores HTTP. Evidencia en
