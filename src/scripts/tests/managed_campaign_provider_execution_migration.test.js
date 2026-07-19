@@ -170,6 +170,16 @@ class FakeQueryInterface {
 }
 
 async function main() {
+  const dialectBoundEnum = {
+    key: 'ENUM',
+    values: ['queued', 'failed'],
+    toString() { throw new Error('dialect-bound ENUM must not be stringified directly'); },
+  };
+  assert.equal(
+    migration.__testing.expectedTypeDescriptor(dialectBoundEnum),
+    "ENUM('queued','failed')"
+  );
+
   const query = new FakeQueryInterface();
   await migration.up(query, Sequelize);
   assert.equal(query.tables.has(TABLE), true);

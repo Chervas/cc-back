@@ -53,6 +53,17 @@ function normalizeType(value) {
   return String(value || '').toUpperCase().replace(/\s+/g, ' ').trim();
 }
 
+function expectedTypeDescriptor(value) {
+  const key = String(value?.key || value?.constructor?.key || '').toUpperCase();
+  if (key === 'ENUM') {
+    const values = Array.isArray(value?.values)
+      ? value.values
+      : (Array.isArray(value?.options?.values) ? value.options.values : []);
+    return `ENUM(${values.map((entry) => `'${String(entry).replace(/'/g, "''")}'`).join(',')})`;
+  }
+  return normalizeType(value);
+}
+
 async function tableInventory(queryInterface) {
   return (await queryInterface.showAllTables()).map(tableNameOf).filter(Boolean);
 }
@@ -243,7 +254,11 @@ function expectedTypeMatches(actual, expected, { allowStatusSubset = false } = {
   const actualType = normalizeType(actual?.type);
   const expectedType = expected?.type;
   const key = String(expectedType?.key || expectedType?.constructor?.key || '').toUpperCase();
-  const expectedSql = normalizeType(expectedType);
+  // A MySQL ENUM DataType can be bound/mutated by QueryInterface after the
+  // CREATE TABLE statement. String(boundEnum) then calls dialect escape(),
+  // which is unavailable in this post-DDL verifier. Read the public values
+  // metadata instead so a fresh migration and an idempotent rerun behave alike.
+  const expectedSql = expectedTypeDescriptor(expectedType);
   if (key === 'STRING') return actualType === expectedSql;
   if (key === 'INTEGER') {
     const actualUnsigned = actualType.includes('UNSIGNED');
@@ -311,7 +326,7 @@ function assertCompatibleColumn(name, actual, expected, { allowStatusSubset = fa
       : 'managed_provider_execution_migration_incompatible_column';
     error.details = {
       column: name,
-      expected_type: normalizeType(expected.type),
+      expected_type: expectedTypeDescriptor(expected.type),
       actual_type: normalizeType(actual.type),
       expected_allow_null: expected.allowNull !== false,
       actual_allow_null: actual.allowNull,
@@ -542,6 +557,7 @@ module.exports = {
     definition,
     enumValues,
     expectedDefaultContract,
+    expectedTypeDescriptor,
     normalizeAction,
     normalizeDefaultExpression,
     normalizeType,
