@@ -2,6 +2,53 @@
 
 Este índice separa la arquitectura general de los procedimientos que deben usarse para operar o verificar Marketing. La fuente canónica de arquitectura es `src/Documentacion/13-backend.md`; su copia en el repositorio frontend es un espejo completo para conservar enlaces internos y debe sincronizarse después de cada cambio.
 
+## Cierre funcional Marketing Web W1-W5 (2026-07-19)
+
+La referencia vigente del candidato es backend `35c277a` (staging
+`24ba96c`) y frontend `379a9570` (staging `a1ae678f`). Cierra el editor
+**Guiado/Avanzado** con ACL y reordenación
+contextual, el listado/editor CMS y los ajustes General/SEO/Social, las cinco
+plantillas builtin `version=1`/`builtin_revision=2`, y el renderer WordPress
+`1.7.0` con globales y galería real. La migración
+`20260719174500-harden-web-builtin-templates-v1.js` solo reconcilia hashes
+conocidos, usa CAS, verifica el resultado y falla cerrada; no pisa contenido de
+usuario y su rollback es no-op.
+
+Evidencia automatizada: **361/361** Marketing Web backend, **40/40**
+WordPress/PHP, **3/3** interoperabilidad, **263/263** Marketing Web frontend,
+**88/88** focales de editor/CMS y TypeScript verde. Los recuentos inferiores
+que aparecen en cortes posteriores de este documento son históricos.
+El frontend estático acreditado es el build `a8170ed3c0c644ef`, con 482
+ficheros e `index.html` SHA-256
+`b39aaed67329ead594d53fe5738afda0e3d725320ef70861c2419c3d42dcd570`.
+
+La evidencia pública final usó publicación
+`77d0f7a9-b42e-4844-83d6-cc71d46d14fb`, revisión
+`b841dead-f9a7-4d6b-937c-bf7117521559`, deployment
+`262d7091-0ff4-441c-979b-0db4cb3aead6`, artefacto
+`f2e6f7f7-e08f-408c-9b80-d10d910bc08f` y hash
+`f922298aeb6e1e7a5ca25fc3640c38b1d3874f0987427cee6274d97c24e6cdda`.
+La ruta `/cita/qa-globales-galeria-20260719/` pasó renderer 1.7, aserciones
+públicas y Chromium desktop/móvil; Schema 1 objeto/0 errores/0 avisos;
+Lighthouse 88/100/100/69, con SEO deliberadamente reducido por `noindex`, FCP
+1,0 s, LCP 3,9 s, CLS 0 y TBT 0. Después se archivó el proyecto y se retiró la
+publicación: el **410 Gone** actual es el tombstone esperado. El QA admin
+autenticado contra `https://crm.clinicaclick.com` recorrió Proyectos y
+Contenidos a `1440` y `390`: cuatro HTTP 200, sin overflow, page errors,
+requests fallidas ni errores HTTP. Evidencia en
+`/home/ubuntu/qa-evidence/marketing-web-editor/staging-admin-overflow/`.
+
+Límites vigentes: `connect_only` = **Mide y entiende**,
+`guided_improvement` = **Mejora**, `managed_service` = **Piloto** y
+`managed_self` queda solo como legado de lectura: la UI no ofrece edición ni
+transiciones y el backend rechaza cualquier actualización con
+`409 legacy_mode_read_only`. Propdental sigue en `connect_only`;
+flags hosted/custom y de mutación de proveedor apagados. La migración `1520`
+continúa cancelada/no-op. La protección de propietarios en
+`personal.controller.js` tampoco pertenece a este cambio: personal operativo
+usa `team.manage`, pero `owner_membership_manage_forbidden` y
+`owner_unlink_forbidden` deben permanecer fail-closed.
+
 ## Marketing, intake y Google Ads
 
 | Documento | Cuándo usarlo |
@@ -347,9 +394,10 @@ el flujo editorial/historial, los globales y la hidratación de medios ya
 existen en la implementación. La galería semántica y la autoría
 Página/Cabecera/Pie, archivo/restauración de proyectos y la ruta frontend real
 `/marketing/web/plantillas` están promovidos. Un archivado no puede
-publicarse y restaurar siempre vuelve a borrador. Sigue pendiente la aceptación visual completa
-contra Figma, drag/drop avanzado y el E2E público de esta tanda. Se reutiliza
-la UX, no el runtime ModSuite. Véase `20.14`/`20.15` en frontend.
+publicarse y restaurar siempre vuelve a borrador. **En aquel corte** quedaban
+pendientes la aceptación funcional Figma, los modos/reordenación y el E2E
+público; el cierre W1-W5 de la cabecera ya los completa. Se reutiliza la UX, no
+el runtime ModSuite. Véase `20.14`/`20.15` en frontend.
 
 Evidencia base: 223/223 contratos Node, 26/26 PHP/WordPress, 3/3 de
 interoperabilidad y frontend Marketing Web 153/153. El build staging
@@ -361,8 +409,9 @@ consola/página/request/HTTP, mutaciones Marketing Web u overflow. El fix
 reproducido en Chromium. Backend y
 plugin también están live. El readback, relay/atribución, limpieza, rollback y
 monitor acreditaron primero el artefacto público renderer `1.2.1`; la misma
-revisión/proyecto se recompiló después y el artefacto WordPress live actual es
-renderer `1.6.0`; sus identificadores y hashes completos figuran arriba. El QA
+revisión/proyecto se recompiló después y aquel corte llegó a renderer `1.6.0`.
+El estado vigente es renderer `1.7.0` y sus identificadores/hashes figuran en
+la cabecera. El QA
   adicional del diálogo IA y control gestionado en desktop/móvil tiene cero
   overflow, errores y solapamiento; evidencia SHA-256
   `c1f4a16feea37dd8c42917642f9f2a95820f4721781259a0696ed8d91d25f35c`.
@@ -384,7 +433,7 @@ staging Galería `1440`/`390` con index SHA
 3. Para objetivos o pujas: `google-ads-goal-policy-v4.md`; readiness de conversiones no autoriza una mutación de campaña.
 4. Para una fuente que aparece `Pendiente` en un módulo y conectada en otro: `group-asset-mapping.md`; comparar conexión efectiva, mapping, sync y datos por separado, y revisar que el lector incluya el fallback de grupo.
 
-No se deben interpretar un HTTP 200, una acción secundaria creada o un snapshot `activation_readiness` verde como Piloto automático activo. Propdental continúa en `connect_only` hasta que exista y se apruebe una orden gestionada separada.
+No se deben interpretar un HTTP 200, una acción secundaria creada o un snapshot `activation_readiness` verde como Piloto activo. Propdental continúa en `connect_only` hasta que exista y se apruebe una orden gestionada separada.
 
 En el contrato integrado de tres niveles, `connect_only` se llama **Mide y
 entiende**: conecta cuentas existentes, importa/unifica leads, atribuye su

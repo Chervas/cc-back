@@ -23,9 +23,10 @@
 > quedó verificado y limpiado sin escrituras externas. Hosted/custom quedan
 > fuera del rollout validado. El ciclo real `1.6 -> rollback 1.5 -> 1.6` quedó
 > acreditado en secuencias `8`, `9` y `10`. Relay atribuible, limpieza,
-> rollback y monitor del piloto WordPress ya están cerrados. No se ha publicado
-> aún una revisión `1.3.0` con formulario global: actualizar el binario no cambia
-> contenido. `alpha.6`/`alpha.5` quedan como evidencia histórica; después de
+> rollback y monitor del piloto WordPress ya están cerrados. La revisión QA de
+> globales+galería descrita debajo se publicó, verificó y retiró con tombstone
+> `410`; no es contenido live actual. Actualizar
+> el binario por sí solo no cambia contenido. `alpha.6`/`alpha.5` quedan como evidencia histórica; después de
 > schema 2 el rollback operativo mantiene `alpha.8` + last-known-good.
 
 Este paquete añade el publicador web mantenido junto al plugin de medición
@@ -42,6 +43,47 @@ propias y separa dos responsabilidades:
 El plugin no consulta el CRM durante una visita, no evalúa PHP, no acepta HTML
 o JavaScript remoto como configuración y no toca Complianz, Site Kit, el CMP,
 JoinChat ni ningún otro plugin.
+
+## Cierre funcional globales + galería (candidato 2026-07-19)
+
+El renderer permanece en `clinicaclick-web-renderer/1.7.0` y el plugin en
+`2.0.0-alpha.8`. El candidato actual publica una revisión que ejerce cabecera y
+pie globales y una galería real con assets congelados; conserva desired-state
+multi-ruta, hashes/manifest, ETag, CSP, formulario, last-known-good y rollback.
+No introduce HTML, CSS ni JavaScript aportado por el usuario.
+
+Pruebas del candidato: backend Marketing Web **361/361**, este plugin
+**40/40** e interoperabilidad backend-plugin **3/3**. El frontend asociado pasa
+**263/263**, sus focales editor/CMS **88/88** y TypeScript. Los totales 320/320
+y 354/354 citados después pertenecen a publicaciones anteriores.
+
+La prueba pública final se cerró con:
+
+- publicación `77d0f7a9-b42e-4844-83d6-cc71d46d14fb`;
+- revisión `b841dead-f9a7-4d6b-937c-bf7117521559`;
+- deployment `262d7091-0ff4-441c-979b-0db4cb3aead6`;
+- artefacto `f2e6f7f7-e08f-408c-9b80-d10d910bc08f`;
+- hash
+  `f922298aeb6e1e7a5ca25fc3640c38b1d3874f0987427cee6274d97c24e6cdda`;
+- `/cita/qa-globales-galeria-20260719/`, renderer 1.7 y aserciones públicas y
+  Chromium desktop/móvil verdes;
+- Schema 1 objeto, 0 errores y 0 avisos;
+- Lighthouse: rendimiento 88, accesibilidad 100, buenas prácticas 100 y SEO
+  69 (`noindex` deliberado); FCP 1,0 s, LCP 3,9 s, CLS 0 y TBT 0.
+
+Al terminar se archivó el proyecto y se retiró la publicación. El router sirve
+ahora **410 Gone** intencionalmente; no es una caída ni debe esperarse 404.
+El QA admin autenticado directo contra `https://crm.clinicaclick.com` recorrió
+Proyectos y Contenidos a `1440` y `390`: cuatro HTTP 200, sin overflow, page
+errors, requests fallidas ni errores HTTP. Evidencia en
+`/home/ubuntu/qa-evidence/marketing-web-editor/staging-admin-overflow/`.
+
+Esta evidencia provisional no amplía el rollout. Hosted/custom y mutaciones de
+proveedor siguen apagados; Propdental continúa en `connect_only` (**Mide y
+entiende**). `guided_improvement` se presenta como **Mejora**,
+`managed_service` como **Piloto** y `managed_self` solo se conserva para leer
+histórico: no admite edición/transiciones en la UI y el backend responde
+`409 legacy_mode_read_only` ante cualquier actualización.
 
 Cuando la medición y Consent Mode están activos, WordPress emite antes del
 loader asíncrono un bootstrap inline mínimo: conserva cualquier señal previa de
@@ -187,7 +229,7 @@ el E2E campaña -> ruta Hospitalet están acreditados. El lead/intake controlado
 `#7272` y su cleanup también están cerrados, con postcheck final a cero y sin
 escrituras externas.
 
-El corte promovido pasa Marketing Web 354/354 Node, WordPress 40/40, Campañas
+El corte promovido anterior pasó Marketing Web 354/354 Node, WordPress 40/40, Campañas
 81/81, reviewer 96/96 con GO sin high/medium, frontend Marketing 302/302 y
 TypeScript app/spec exit `0`. Ng-serve compiló en desarrollo con hash
 `fa3f6c6dfda1977c`; no es un deploy estático. Renderer 1.7 y la herencia de publicación ya

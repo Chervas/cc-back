@@ -7,7 +7,161 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
 
 ---
 
-## 2026-07-19 - Corte vigente Marketing Web 1.7 y contenido IA durable
+## 2026-07-19 - Cierre funcional Marketing Web W1-W5
+
+Este bloque es la **verdad vigente** del cierre funcional. Los cortes que
+aparecen después conservan evidencia histórica de despliegues anteriores, pero
+no deben usarse para reabrir capacidades ya terminadas. El candidato fuente
+queda en backend `35c277a` (staging `24ba96c`) y frontend `379a9570`
+(staging `a1ae678f`); la evidencia pública final ya se cerró y la ruta QA se
+retiró de forma deliberada después de verificarla.
+
+### Editor, CMS y ajustes del sitio
+
+- El editor comparte un único `WebDocument` y ofrece **Guiado** y
+  **Avanzado**. Guiado es el modo inicial y limita la interfaz a controles
+  esenciales y seguros. Avanzado requiere `marketing.web.advanced_edit`,
+  habilita controles de diseño por dispositivo y vuelve a Guiado si se pierde
+  el permiso; la preferencia local nunca evita el ACL.
+- La inserción y reordenación son contextuales. Canvas, overlay y outline
+  trabajan sobre la lista real de hermanos del contexto actual, validan índice
+  y nodo, y delegan en el comando undoable `move_node`. No existe drag/drop
+  arbitrario entre padres; los intentos inválidos son no-op y siempre hay
+  alternativa accesible de teclado/click.
+- Contenidos dispone de tabs Todos/Borradores/En revisión/Publicados/Archivados,
+  búsqueda, filtros de tipo/idioma, paginación, tabla desktop/lista móvil,
+  selección por página y acciones masivas con PATCH versionado, concurrencia
+  acotada y resultado parcial. Archivar es reversible; no se añadió borrado
+  destructivo ni un endpoint bulk que el backend no tenga.
+- El editor CMS es tipado: reordena, duplica y retira bloques, mantiene las
+  fuentes colapsables y renderiza texto mediante interpolación Angular segura,
+  nunca como HTML aportado por el usuario.
+- Los ajustes del sitio se dividen en **General**, **SEO** y **Social**.
+  General conserva diseño, contacto y consentimiento; SEO contiene sufijo de
+  título e indexación; Social define la imagen social global. El SEO de página
+  sigue teniendo precedencia. No se inventaron categorías, autores resueltos,
+  contadores agregados ni una imagen editorial distinta de
+  `seo.default_social_asset_id`.
+
+### Cinco plantillas builtin, revisión 2
+
+El catálogo conserva `schema_version=1`, `version=1` y sus claves comerciales;
+`builtin_revision=2` identifica la corrección segura sin duplicar plantillas:
+
+| `catalog_key` | Nombre visible | Uso |
+|---|---|---|
+| `quick-treatment-v1` | Tratamiento directo | Tratamiento de decisión rápida. |
+| `considered-treatment-v1` | Tratamiento explicado | Tratamiento de alta consideración. |
+| `general-clinic-v1` | Clínica general | Captación general. |
+| `local-call-whatsapp-v1` | Contacto local | Contacto local mediante formulario nativo, sin teléfono ficticio. |
+| `qualification-form-v1` | Formulario de cualificación | Captación y cualificación. |
+
+La migración
+`20260719174500-harden-web-builtin-templates-v1.js` reconcilia únicamente una
+fila builtin con identidad global exacta cuyo hash sea uno de los legados
+conocidos o el hash final. Usa actualización CAS, es idempotente, verifica el
+resultado y falla cerrada ante dependencia, ausencia, conflicto de identidad,
+contenido desconocido o verificación fallida:
+
+- `web_builtin_template_hardening_missing_dependency`;
+- `web_builtin_template_hardening_template_missing`;
+- `web_builtin_template_hardening_identity_conflict`;
+- `web_builtin_template_hardening_content_conflict`;
+- `web_builtin_template_hardening_verification_failed`.
+
+Nunca sobrescribe una plantilla editada por un usuario. Su `down()` es no-op
+porque un rollback de código no debe reintroducir teléfonos ficticios ni el
+contenido inseguro anterior.
+
+### Renderer 1.7 y publicación WordPress
+
+El compilador/renderer público permanece en
+`clinicaclick-web-renderer/1.7.0`. El cierre cubre cabecera y pie globales y una
+galería real congelada por assets, además de SEO/Social/Schema, formulario,
+hashes, manifest, ETag y desired-state multi-ruta del plugin
+`clinicaclick-web 2.0.0-alpha.8`. La página publicada no ejecuta HTML, CSS o
+JavaScript libre del usuario y el plugin conserva last-known-good/rollback.
+
+La evidencia pública final ejerció globales y galería con estos identificadores
+completos:
+
+- publicación: `77d0f7a9-b42e-4844-83d6-cc71d46d14fb`;
+- revisión: `b841dead-f9a7-4d6b-937c-bf7117521559`;
+- deployment: `262d7091-0ff4-441c-979b-0db4cb3aead6`;
+- artefacto: `f2e6f7f7-e08f-408c-9b80-d10d910bc08f`;
+- hash de artefacto:
+  `f922298aeb6e1e7a5ca25fc3640c38b1d3874f0987427cee6274d97c24e6cdda`;
+- ruta verificada: `/cita/qa-globales-galeria-20260719/`;
+- renderer `clinicaclick-web-renderer/1.7.0`, todas las aserciones públicas y
+  Chromium desktop/móvil verdes;
+- Schema: 1 objeto, 0 errores y 0 avisos;
+- Lighthouse: rendimiento 88, accesibilidad 100, buenas prácticas 100 y SEO
+  69. El SEO reducido es deliberado porque la revisión QA emitía `noindex`;
+  FCP 1,0 s, LCP 3,9 s, CLS 0 y TBT 0.
+
+Tras la validación se archivó el proyecto y se retiró la publicación. La ruta
+responde ahora **HTTP 410 Gone** por el router de tombstone; es el resultado
+intencional y no un fallo ni un 404 esperado. El QA admin autenticado contra
+`https://crm.clinicaclick.com` recorrió Proyectos y Contenidos a `1440` y `390`:
+cuatro recorridos HTTP 200, sin overflow, page errors, requests fallidas ni
+errores HTTP. Evidencia:
+`/home/ubuntu/qa-evidence/marketing-web-editor/staging-admin-overflow/result.json` y sus
+capturas.
+Hosted y dominio propio continúan fuera del rollout: sus flags,
+DNS/TLS/proveedor, retiro y E2E público siguen cerrados.
+
+### Evidencia automatizada del candidato
+
+| Superficie | Resultado |
+|---|---:|
+| Backend Marketing Web | **361/361** |
+| WordPress/PHP | **40/40** |
+| Interoperabilidad backend-plugin | **3/3** |
+| Frontend Marketing Web | **263/263** |
+| Focales editor/CMS | **88/88** |
+| TypeScript | **verde** |
+
+El frontend estático promovido corresponde al build `a8170ed3c0c644ef`: 482
+ficheros, `index.html` SHA-256
+`b39aaed67329ead594d53fe5738afda0e3d725320ef70861c2419c3d42dcd570`,
+bundle principal `main.5e80d0ee5d4c9ec5.js`, chunk Marketing
+`3584.9c78544ecd67faf6.js` y chunk editor `5315.994aab1499ae3f97.js`.
+
+Los totales 320/320, 351/351 y 354/354 citados más abajo son cortes históricos,
+no regresiones del candidato actual.
+
+### Niveles de Campañas y límites operativos
+
+| Valor técnico | Etiqueta vigente | Autoridad |
+|---|---|---|
+| `connect_only` | **Mide y entiende** | Mide, atribuye y recomienda; no muta campañas ni proveedor. |
+| `guided_improvement` | **Mejora** | Solo aplica cambios expresamente autorizados y revalidados. |
+| `managed_service` | **Piloto** | Operación gestionada con spec, policy, fondos y aprobación. |
+| `managed_self` | **Legado de solo lectura** | Compatibilidad histórica; la UI no ofrece edición/transiciones y el backend devuelve `409 legacy_mode_read_only` ante cualquier actualización. No sustituye Mejora. |
+
+Propdental sigue en `connect_only`. Las capacidades hosted/custom y las
+mutaciones de proveedor permanecen apagadas; este cierre de editor/CMS no
+autoriza goals, URLs, pujas, presupuesto, estado ni altas Google/Meta.
+
+### Salvaguardas ajenas a Marketing Web
+
+- `20260715152000-purge-google-places-competition-content.js` continúa
+  cancelada: `up` y `down` son no-op. No debe ejecutarse como purga pendiente.
+- `src/controllers/personal.controller.js` conserva SHA-256
+  `776da1bf46ca128e08c2f215f64c7dd48dd6615859c96cb75a5b4e8a7ba75b30`.
+  `administrativo/admin_staff` mantiene `clinic.settings.edit` y
+  `team.manage`, pero no puede asignar, modificar ni retirar propietarios; los
+  errores de frontera son `owner_membership_manage_forbidden` y
+  `owner_unlink_forbidden`. No se debe relajar ese contrato al tocar horarios,
+  instalaciones, tratamientos o equipo.
+
+Limitaciones externas que siguen abiertas: hosted/custom, credenciales y
+proveedor de esos canales, su DNS/TLS/deprovisión/E2E y la procedencia/licencia
+de cualquier asset de ModSuite que se quisiera reutilizar. Ninguna bloquea el
+cierre funcional Guiado/Avanzado, CMS/SEO/Social, plantillas builtin revisión 2
+o WordPress globales+galería.
+
+## 2026-07-19 - Corte promovido anterior Marketing Web 1.7 e IA durable
 
 El corte backend vigente es `3f0c0e0`, promovido a staging mediante `a22b773`;
 incluye el E2E final de intake/snapshot sobre el hardening de destinos
@@ -4412,7 +4566,7 @@ Se repite el mismo esquema en `contact`, `qualified_lead`, `schedule` y `purchas
 
 #### `new_patients`: Mide, Mejora y Piloto automático (2026-07-17)
 
-La respuesta de bootstrap ofrece `connect_only`, `guided_improvement` y `managed_service`; `managed_self` permanece en `legacy_modes` para lectura histórica. `connect_only` mide, atribuye y sube conversiones consentidas sin crear ni aplicar un destino nuevo. La única excepción de mutación es un rollback de seguridad, automático o solicitado manualmente: puede restaurar exclusivamente el `beforeState` capturado por una operación autorizada antes del downgrade a Mide y entiende; nunca acepta una URL arbitraria ni reutiliza el binding para aplicar su `desiredState`. `guided_improvement` trabaja sobre campañas existentes y puede gestionar el objetivo de conversión y publicar una landing para campañas Google Search/PMax vinculadas, después de guardar la autorización cliente v1 con los scopes exactos `conversion_goal`, `landing_publish` y `campaign_destination`; nunca puede tocar pujas, presupuesto, segmentación ni activar/pausar campañas. Con esa autorización válida, `mode_contract.publish_landings=true`, `change_destinations=true`, el hook `marketing_web.landing_published.v1` queda `available` y el destino queda `available_after_landing_published`. Publicar no cambia Google automáticamente: materializa un binding auditable y el usuario debe confirmar una segunda operación acotada al digest exacto del destino, las cuentas seleccionadas y `readback_required=true`. El worker serializado aplica URL final en anuncios Search o en asset groups PMax, persiste la decisión explícita sobre expansión de URL, relee Google y solo marca éxito si todo coincide. Un fallo parcial encola rollback compensatorio al estado anterior; la auditoría diaria `marketing_campaign.destination_drift_audit.v1` detecta cambios posteriores sin autorepararlos. Los destinos web solo admiten URL HTTPS públicas y estables, sin credenciales, fragmento, host privado ni parámetros efímeros de atribución/firma/caducidad. `managed_service` usa el mismo puente únicamente dentro de una `ManagedCampaign` aprobada y de sus constraints; guardar la estrategia solo provisiona una spec por canal en `draft + observe`, junto con su cuenta `unfunded`, y no llama a Google/Meta.
+La respuesta de bootstrap ofrece `connect_only`, `guided_improvement` y `managed_service`; `managed_self` permanece en `legacy_modes` exclusivamente para lectura histórica. El frontend lo rotula como solo lectura, oculta edición y transiciones y bloquea también la entrada directa al wizard; el backend aplica la misma frontera antes de normalizar el payload y devuelve `409 legacy_mode_read_only` ante cualquier actualización. `connect_only` mide, atribuye y sube conversiones consentidas sin crear ni aplicar un destino nuevo. La única excepción de mutación es un rollback de seguridad, automático o solicitado manualmente: puede restaurar exclusivamente el `beforeState` capturado por una operación autorizada antes del downgrade a Mide y entiende; nunca acepta una URL arbitraria ni reutiliza el binding para aplicar su `desiredState`. `guided_improvement` trabaja sobre campañas existentes y puede gestionar el objetivo de conversión y publicar una landing para campañas Google Search/PMax vinculadas, después de guardar la autorización cliente v1 con los scopes exactos `conversion_goal`, `landing_publish` y `campaign_destination`; nunca puede tocar pujas, presupuesto, segmentación ni activar/pausar campañas. Con esa autorización válida, `mode_contract.publish_landings=true`, `change_destinations=true`, el hook `marketing_web.landing_published.v1` queda `available` y el destino queda `available_after_landing_published`. Publicar no cambia Google automáticamente: materializa un binding auditable y el usuario debe confirmar una segunda operación acotada al digest exacto del destino, las cuentas seleccionadas y `readback_required=true`. El worker serializado aplica URL final en anuncios Search o en asset groups PMax, persiste la decisión explícita sobre expansión de URL, relee Google y solo marca éxito si todo coincide. Un fallo parcial encola rollback compensatorio al estado anterior; la auditoría diaria `marketing_campaign.destination_drift_audit.v1` detecta cambios posteriores sin autorepararlos. Los destinos web solo admiten URL HTTPS públicas y estables, sin credenciales, fragmento, host privado ni parámetros efímeros de atribución/firma/caducidad. `managed_service` usa el mismo puente únicamente dentro de una `ManagedCampaign` aprobada y de sus constraints; guardar la estrategia solo provisiona una spec por canal en `draft + observe`, junto con su cuenta `unfunded`, y no llama a Google/Meta.
 
 El resultado de esa auditoría se persiste como
 `CampaignDestinationBindingEvent.event_type=drift_detected`, no como texto de
