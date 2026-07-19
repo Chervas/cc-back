@@ -62,6 +62,10 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: true,
       },
+      created_by_user_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
       origin: {
         type: DataTypes.ENUM('catalog', 'custom', 'external'),
         allowNull: false,
@@ -94,6 +98,14 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: true,
       },
       superseded_by_template_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
+      retired_at: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
+      retired_by_user_id: {
         type: DataTypes.INTEGER,
         allowNull: true,
       },

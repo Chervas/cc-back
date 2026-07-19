@@ -2038,25 +2038,55 @@ async function replaceTemplateInEditableBulkSends({ oldTemplateId, newTemplate }
   return true;
 }
 
-async function deactivateReplacedTemplateFamily({ wabaId, clinicId, displayName, keepTemplateId }) {
+async function deactivateReplacedTemplateFamily({
+  wabaId,
+  clinicId,
+  displayName,
+  keepTemplateId,
+  replacedTemplateId,
+  createdByUserId,
+}) {
   const safeWabaId = cleanString(wabaId);
   const safeClinicId = Number(clinicId || 0) || null;
   const safeDisplayName = cleanString(displayName);
   const safeKeepTemplateId = Number(keepTemplateId || 0);
-  if (!safeWabaId || !safeDisplayName || !safeKeepTemplateId) return;
+  const safeReplacedTemplateId = Number(replacedTemplateId || 0);
+  const safeCreatedByUserId = Number(createdByUserId || 0);
+  if (
+    !safeWabaId
+    || !safeKeepTemplateId
+    || !safeReplacedTemplateId
+    || !Number.isInteger(safeCreatedByUserId)
+    || safeCreatedByUserId <= 0
+  ) return;
+
+  // El id elegido debe retirarse aunque sea una fila WABA compartida
+  // (`clinic_id=NULL`) y la edición se haya iniciado desde una clínica. El
+  // barrido adicional por nombre sí queda limitado a esa clínica para no
+  // retirar por accidente plantillas homónimas de otras sedes.
+  const replacedFamily = [{ id: safeReplacedTemplateId }];
+  if (safeDisplayName) {
+    replacedFamily.push({
+      display_name: safeDisplayName,
+      ...(safeClinicId ? { clinic_id: safeClinicId } : {}),
+    });
+  }
 
   await WhatsappTemplate.update(
-    { is_active: false },
+    {
+      is_active: false,
+      superseded_by_template_id: safeKeepTemplateId,
+    },
     {
       where: {
         waba_id: safeWabaId,
-        display_name: safeDisplayName,
+        created_by_user_id: safeCreatedByUserId,
         is_active: true,
         id: { [Op.ne]: safeKeepTemplateId },
-        ...(safeClinicId ? { clinic_id: safeClinicId } : {}),
+        [Op.or]: replacedFamily,
       },
     }
-  ).catch(() => null);
+  );
 }
 
 async function createCustomTemplateForClinic({
@@ -2070,6 +2100,7 @@ async function createCustomTemplateForClinic({
   variables = [],
   templateUsage = null,
   replaceTemplateId = null,
+  createdByUserId = null,
 }) {
   const safeClinicId = Number(clinicId || 0) || null;
   const safeWabaId = cleanString(wabaId);
@@ -2085,6 +2116,36 @@ async function createCustomTemplateForClinic({
     throw new Error('template_body_required');
   }
   const safeReplaceTemplateId = Number(replaceTemplateId || 0) || null;
+  const parsedCreatedByUserId = Number(createdByUserId || 0);
+  const safeCreatedByUserId = Number.isInteger(parsedCreatedByUserId) && parsedCreatedByUserId > 0
+    ? parsedCreatedByUserId
+    : null;
+  if (!safeCreatedByUserId) {
+    const error = new Error('template_creator_required');
+    error.code = 'template_creator_required';
+    error.statusCode = 401;
+    throw error;
+  }
+
+  let replacedTemplate = null;
+  if (safeReplaceTemplateId) {
+    replacedTemplate = await WhatsappTemplate.findByPk(safeReplaceTemplateId);
+    if (!replacedTemplate || replacedTemplate.is_active === false) {
+      const error = new Error('template_not_found');
+      error.code = 'template_not_found';
+      error.statusCode = 404;
+      throw error;
+    }
+    if (
+      Number(replacedTemplate.created_by_user_id || 0) !== safeCreatedByUserId
+      || String(replacedTemplate.waba_id || '') !== safeWabaId
+    ) {
+      const error = new Error('template_owner_forbidden');
+      error.code = 'template_owner_forbidden';
+      error.statusCode = 403;
+      throw error;
+    }
+  }
 
   const contract = buildVariableContractFromBody(safeBodyText, variables);
   const validationIssues = validateTemplateBodyForMeta(contract.body);
@@ -2132,6 +2193,7 @@ async function createCustomTemplateForClinic({
       status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING,
       components: [bodyComponent, ...extraComponents],
       variables: annotateTemplateVariables(contract.variables, safeTemplateUsage),
+      created_by_user_id: safeCreatedByUserId,
       origin: 'custom',
       rejection_reason: buildLocalPendingReasonFromMetaError(err),
       is_active: true,
@@ -2150,6 +2212,7 @@ async function createCustomTemplateForClinic({
     status: WHATSAPP_TEMPLATE_STATUS.PENDING,
     components: [bodyComponent, ...extraComponents],
     variables: annotateTemplateVariables(contract.variables, safeTemplateUsage),
+    created_by_user_id: safeCreatedByUserId,
     meta_template_id: metaTemplateId,
     origin: 'custom',
     rejection_reason: null,
@@ -2173,8 +2236,10 @@ async function createCustomTemplateForClinic({
       await deactivateReplacedTemplateFamily({
         wabaId: safeWabaId,
         clinicId: safeClinicId,
-        displayName: safeDisplayName,
+        displayName: replacedTemplate?.display_name || safeDisplayName,
         keepTemplateId: row.id,
+        replacedTemplateId: safeReplaceTemplateId,
+        createdByUserId: safeCreatedByUserId,
       });
     }
   }

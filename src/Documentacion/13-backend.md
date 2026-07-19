@@ -2018,7 +2018,16 @@ Estado actual en integración:
 
 - el runtime operativo de envío ya no cae a `META_WHATSAPP_ACCESS_TOKEN` / `META_WHATSAPP_PHONE_NUMBER_ID` como ruta normal;
 - `src/services/whatsapp.service.js` resuelve exclusivamente activos scoped (`clinic` o herencia `group`);
-- el endpoint `POST /api/whatsapp/messages` exige `auth` y `clinic_id`;
+- el endpoint `POST /api/whatsapp/messages` exige `auth`, `clinic_id`, membresía
+  activa de staff sobre esa clínica y acceso al activo WhatsApp efectivo; esta
+  validación también se aplica al texto libre;
+- si `POST /api/whatsapp/messages` usa plantilla, el backend resuelve una fila
+  activa `APPROVED` del WABA, permite solo catálogo/sistema o una plantilla del
+  propio autor y envía el `name`/`language` canónico persistido, sin confiar en
+  esos valores aportados por el cliente;
+- `POST /api/conversations/:id/messages` aplica asimismo `is_active=true`,
+  `status=APPROVED` y la política catálogo/sistema o autor antes de encolar una
+  plantilla;
 - los tokens de entorno de WhatsApp siguen siendo válidos para:
   - embedded signup / bootstrap técnico;
   - scripts de backfill o diagnóstico;
@@ -3092,6 +3101,37 @@ Mitigación:
   - listado/búsqueda/estadísticas;
   - detalle y actividad;
   - cambio de estado, registro de contacto, búsqueda de citas candidatas, resultado de llamada y borrado.
+
+## 2026-07-17 - Autoría y scope de plantillas personales
+
+- `WhatsappTemplates.created_by_user_id` es la identidad canónica del usuario
+  que creó una plantilla personalizada desde ClinicaClick. Es nullable y no se
+  rellena históricamente a partir del propietario de Meta.
+- Listado, resumen, sync, creación y retirada exigen admin global o una
+  membresía activa de staff en la clínica solicitada
+  (`estado_invitacion=aceptada|NULL`; roles `propietario`,
+  `personaldeclinica` o `agencia`). Una membresía pendiente/cancelada,
+  `paciente` o ser propietario de otra clínica no amplía el scope.
+- `GET /api/whatsapp/templates` devuelve por defecto catálogo/sistema más las
+  plantillas del usuario autenticado, tanto en la gestión como en los selectores
+  de Leads, QuickChat, Agenda y paciente. `include_all=1` queda reservado a un
+  admin global como inspección técnica y no concede edición.
+- Una WABA de grupo permite que el autor consuma y gestione su plantilla desde
+  las sedes accesibles que resuelven esa WABA, pero no revela la plantilla a
+  otros usuarios ni da acceso a otra clínica del grupo.
+- Sistema se identifica por `catalog_template_id`, `origin=catalog` o una
+  allowlist exacta de cuatro nombres legacy auditados. Un prefijo abierto
+  `clinicaclick_*` no convierte una plantilla externa en sistema.
+- El filtro visual no constituye autorización. Al enviar,
+  `POST /api/conversations/:id/messages` resuelve la fila dentro de la WABA,
+  verifica autoría y encola siempre el nombre e idioma canónicos persistidos;
+  los valores del navegador no sustituyen esos campos.
+- Crear, reemplazar y retirar una plantilla personal exige ser su autor. Las de
+  catálogo/sistema son de solo lectura también para la UI normal.
+- Las 16 plantillas activas históricas sin autor verificable no se atribuyen por
+  inferencia. El rollout de esta migración queda retenido hasta asignarlas de
+  forma auditada a una persona o aceptar explícitamente que dejen de aparecer
+  en los selectores personales.
 
 ## 2026-03-16 - Trigger explícito en flujos V2
 
@@ -5434,6 +5474,18 @@ Plantillas:
 - `WhatsappTemplates.status` es la fuente de verdad WABA. Una plantilla `MessageTemplates` pendiente no está aprobada ni sincronizable por Meta si no existe registro WABA.
 - `PENDING_LOCAL` en una plantilla WABA custom significa que ClinicaClick la guardó localmente, pero Meta no dejó abierta una revisión real. La UI debe mostrarla como `No enviada a Meta` y no como aprobada ni en revisión.
 - `DELETE /api/whatsapp/templates/:id` devuelve `409 template_linked_to_campaigns` si la plantilla está referenciada por campañas/listas no archivadas. La UI debe pedir confirmación explícita antes de ocultarla; las campañas conservan `template_snapshot`, pero no deben poder reutilizar una plantilla oculta.
+- La retirada manual de una plantilla personal escribe `is_active=false`,
+  `retired_at` y `retired_by_user_id`. `retired_at` es el tombstone funcional;
+  no se falsifica `status`, porque ese campo continúa reflejando el estado que
+  devolvió Meta (`APPROVED`, `REJECTED`, etc.). Si el usuario desaparece,
+  `retired_by_user_id` puede quedar a `NULL`, pero `retired_at` se conserva.
+- Sustituir una plantilla personal marca la versión anterior con
+  `is_active=false` y `superseded_by_template_id=<id_nuevo>`. La sincronización
+  WABA respeta tanto el tombstone manual como el enlace de sustitución y nunca
+  reactiva esas filas aunque Meta siga devolviéndolas. Una fila meramente
+  inactiva, rechazada o temporalmente desconectada, sin ninguno de esos dos
+  marcadores, no se confunde con una retirada y puede volver a reflejar el
+  estado remoto vigente.
 
 ## Contrato backend: ayuda de acceso a la clinica (2026-07-14)
 
