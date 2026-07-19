@@ -14,6 +14,9 @@ const {
   collectWebResourceReferences,
   resolveWebDocumentResources,
 } = require('./webResourceResolver.service');
+const {
+  effectiveIntakeConfigForScope,
+} = require('./webEffectiveIntakeConfig.service');
 
 const PROJECT_PURPOSES = new Set(['landing', 'microsite', 'website']);
 const PROJECT_STATUSES = new Set(['draft', 'active', 'archived']);
@@ -218,29 +221,22 @@ async function intakeConfigForWebScope(scope, options = {}) {
   const models = options.models || db;
   if (!models.IntakeConfig?.findOne) return null;
   if (scope.type === 'group') {
-    return models.IntakeConfig.findOne({
-      where: { assignment_scope: 'group', group_id: scope.id },
-      raw: true,
+    return effectiveIntakeConfigForScope({
+      scopeType: 'group',
+      groupId: scope.id,
+      rejectInvalidInheritance: true,
+      models,
       transaction: options.transaction,
     });
   }
-  const direct = await models.IntakeConfig.findOne({
-    where: { assignment_scope: 'clinic', clinic_id: scope.id },
-    raw: true,
+  return effectiveIntakeConfigForScope({
+    scopeType: 'clinic',
+    clinicId: scope.id,
+    preserveClinicConfig: true,
+    rejectInvalidInheritance: true,
+    models,
     transaction: options.transaction,
   });
-  if (direct) return direct;
-  const groupId = await groupIdForClinic(scope.id, options);
-  if (!groupId) return null;
-  const inherited = await models.IntakeConfig.findOne({
-    where: { assignment_scope: 'group', group_id: groupId },
-    raw: true,
-    transaction: options.transaction,
-  });
-  const locations = Array.isArray(inherited?.config?.locations) ? inherited.config.locations : [];
-  return locations.some((location) => positiveInteger(location?.id ?? location?.clinic_id) === scope.id)
-    ? inherited
-    : null;
 }
 
 function siteDefaultsFromIntake(record) {

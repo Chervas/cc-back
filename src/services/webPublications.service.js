@@ -16,12 +16,22 @@ const jobRequestsService = require('./jobRequests.service');
 const {
   MIN_GLOBAL_INTAKE_PLUGIN_VERSION,
   documentHasGlobalIntakeForm,
+  isReleasedWordpressPublication,
   semverAtLeast,
+  supportsMultiPublication,
 } = require('../lib/webWordpressCompatibility');
 
 const PUBLICATION_CHANNELS = new Set(['clinicaclick_hosted', 'wordpress', 'custom_domain']);
 const BUSY_PUBLICATION_STATUSES = new Set(['pending', 'publishing', 'rolling_back']);
 const TERMINAL_DEPLOYMENT_STATUSES = new Set(['verified', 'failed', 'superseded']);
+const MAX_WORDPRESS_PUBLICATIONS = 20;
+// Retired routes remain immutable reservations so an old URL can never be
+// silently rebound to another landing. Bound that history to keep the locked
+// create/sync working set finite; an explicit archival migration can extend it
+// later without weakening route ownership.
+const MAX_WORDPRESS_PUBLICATION_HISTORY = 200;
+const WORDPRESS_ROOT_PATH = '/cita/';
+const WORDPRESS_RESERVED_ROUTE_SEGMENTS = new Set(['assets', 'robots.txt', 'sitemap.xml', 'api']);
 
 class WebPublicationServiceError extends Error {
   constructor(code, message, status = 400, details = undefined) {
@@ -51,6 +61,83 @@ function normalizeSlug(value) {
     );
   }
   return slug;
+}
+
+function slugifyProjectName(value) {
+  const slug = String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 63)
+    .replace(/-+$/g, '');
+  return normalizeSlug(slug);
+}
+
+function wordpressPublicationPath(project, body, existingCount) {
+  if (existingCount === 0) {
+    const requested = normalizeRoutePath(body.path || WORDPRESS_ROOT_PATH);
+    if (requested !== WORDPRESS_ROOT_PATH) {
+      throw new WebPublicationServiceError(
+        'web_wordpress_pilot_path_invalid',
+        'La primera publicación conserva la ruta estable /cita/.',
+        422
+      );
+    }
+    return WORDPRESS_ROOT_PATH;
+  }
+  let requested = normalizeRoutePath(body.path || WORDPRESS_ROOT_PATH);
+  if (requested === WORDPRESS_ROOT_PATH) {
+    const slug = body.slug ? normalizeSlug(body.slug) : slugifyProjectName(plain(project)?.name);
+    requested = `/cita/${slug}/`;
+  }
+  const match = requested.match(/^\/cita\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\/$/);
+  if (!match || WORDPRESS_RESERVED_ROUTE_SEGMENTS.has(match[1])) {
+    throw new WebPublicationServiceError(
+      'web_wordpress_publication_path_invalid',
+      'Las publicaciones adicionales usan una ruta única bajo /cita/.',
+      422
+    );
+  }
+  return requested;
+}
+
+function wordpressChildSegment(path) {
+  const match = String(path || '').match(/^\/cita\/([^/]+)\/$/);
+  return match ? match[1] : null;
+}
+
+function manifestClaimsWordpressChild(manifest, childSegment) {
+  if (!childSegment) return false;
+  const routes = manifest?.page_routes;
+  if (!routes || typeof routes !== 'object' || Array.isArray(routes)) return false;
+  return Object.values(routes).some((route) => {
+    const first = String(route?.page_path || '/').split('/').filter(Boolean)[0] || null;
+    return first === childSegment;
+  });
+}
+
+function assertWordpressPilotManifestCompatible(publication, siblings, manifest) {
+  const value = plain(publication);
+  if (value?.channel !== 'wordpress' || value.path !== WORDPRESS_ROOT_PATH) return true;
+  const childSegments = new Set((siblings || [])
+    .map(plain)
+    .filter((row) => row?.id !== value.id)
+    .map((row) => wordpressChildSegment(row?.path))
+    .filter(Boolean));
+  const conflict = Object.values(manifest?.page_routes || {}).find((route) => {
+    const first = String(route?.page_path || '/').split('/').filter(Boolean)[0] || null;
+    return first && childSegments.has(first);
+  });
+  if (conflict) {
+    throw new WebPublicationServiceError(
+      'web_wordpress_publication_manifest_route_conflict',
+      'Una página del piloto ocupa la ruta reservada por otra publicación.',
+      409
+    );
+  }
+  return true;
 }
 
 function hostedTarget(input = {}, env = process.env) {
@@ -136,9 +223,120 @@ function serializePublication(row) {
     version: Number(value.version),
     published_at: value.publishedAt || null,
     last_healthy_at: value.lastHealthyAt || null,
+    retired_at: value.retiredAt || null,
     created_at: value.created_at,
     updated_at: value.updated_at,
   };
+}
+
+async function retireWordpressPublication({
+  actorId,
+  publicationId,
+  requestId = null,
+  models = db,
+  sequelize = db.sequelize,
+  assertAccess = assertProjectAccess,
+} = {}) {
+  return sequelize.transaction(async (transaction) => {
+    const pointer = await models.WebPublication.findByPk(String(publicationId || ''), {
+      attributes: ['id', 'projectId', 'channel', 'wordpressInstallationId'],
+      transaction,
+    });
+    if (!pointer) {
+      throw new WebPublicationServiceError('web_publication_not_found', 'La publicación no existe.', 404);
+    }
+    const project = await models.WebProject.findByPk(pointer.projectId, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!project) {
+      throw new WebPublicationServiceError('web_publication_not_found', 'La publicación no existe.', 404);
+    }
+    await assertAccess(actorId, project, 'marketing.web.publish', { models, transaction });
+    if (pointer.channel !== 'wordpress' || !pointer.wordpressInstallationId) {
+      throw new WebPublicationServiceError(
+        'web_publication_retire_channel_unsupported',
+        'Esta operación de retirada solo está disponible para publicaciones de WordPress.',
+        409
+      );
+    }
+
+    const installation = await models.WebWordpressInstallation.findByPk(pointer.wordpressInstallationId, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!installation) {
+      throw new WebPublicationServiceError('web_wordpress_installation_not_found', 'La instalación no existe.', 404);
+    }
+    const siblings = await models.WebPublication.findAll({
+      where: { wordpressInstallationId: pointer.wordpressInstallationId },
+      order: [['path', 'ASC'], ['id', 'ASC']],
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    const publication = siblings.find((candidate) => String(candidate.id) === String(pointer.id));
+    if (!publication || String(publication.projectId) !== String(project.id)) {
+      throw new WebPublicationServiceError('web_publication_not_found', 'La publicación no existe.', 404);
+    }
+    if (publication.status === 'retired') {
+      return { publication: serializePublication(publication), already_retired: true };
+    }
+    if (BUSY_PUBLICATION_STATUSES.has(publication.status)) {
+      throw new WebPublicationServiceError(
+        'web_publication_busy',
+        'Espera a que termine la actualización antes de retirar esta publicación.',
+        409,
+        { job_request_id: publication.jobRequestId || null }
+      );
+    }
+    const activeDeployment = await models.WebPublicationDeployment.findOne({
+      where: {
+        publicationId: publication.id,
+        status: { [Op.in]: ['queued', 'running'] },
+      },
+      order: [['sequence', 'DESC']],
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (activeDeployment) {
+      throw new WebPublicationServiceError(
+        'web_publication_busy',
+        'Espera a que termine la actualización antes de retirar esta publicación.',
+        409,
+        { job_request_id: activeDeployment.jobRequestId || publication.jobRequestId || null }
+      );
+    }
+
+    const retiredAt = new Date();
+    await publication.update({
+      status: 'retired',
+      retiredAt,
+      desiredRevisionId: null,
+      jobRequestId: null,
+      version: Number(publication.version) + 1,
+      updatedByUserId: positiveInteger(actorId),
+      lastErrorCode: null,
+      lastErrorMessage: null,
+    }, { transaction });
+    const scope = scopeFromProject(plain(project));
+    await models.WebAuditEvent.create({
+      projectId: project.id,
+      ...scopeColumns(scope),
+      actorUserId: positiveInteger(actorId),
+      eventType: 'web.publication.retired',
+      entityType: 'web_publication',
+      entityId: publication.id,
+      requestId,
+      metadata: {
+        channel: 'wordpress',
+        wordpress_installation_id: installation.id,
+        host_hash: sha256(publication.host),
+        path: publication.path,
+        tombstone_pending: true,
+      },
+    }, { transaction });
+    return { publication: serializePublication(publication), already_retired: false };
+  });
 }
 
 function campaignContextSnapshot(project) {
@@ -215,19 +413,71 @@ async function resolveTarget({ project, body, models, transaction, env }) {
   }
   const installation = await models.WebWordpressInstallation.findByPk(
     String(body.wordpress_installation_id || ''),
-    { transaction }
+    { transaction, lock: transaction?.LOCK?.UPDATE }
   );
   if (!installation || installation.status === 'revoked' || !scopeMatches(installation, scope)) {
     throw new WebPublicationServiceError('web_wordpress_installation_not_found', 'La instalación no existe.', 404);
   }
-  const site = normalizeSiteUrl(installation.siteUrl);
-  const requestedPath = normalizeRoutePath(body.path || '/cita/');
-  if (requestedPath !== '/cita/') {
+  const installationPublications = await models.WebPublication.findAll({
+    where: { wordpressInstallationId: installation.id },
+    order: [['created_at', 'ASC'], ['id', 'ASC']],
+    transaction,
+    lock: transaction?.LOCK?.UPDATE,
+  });
+  if (installationPublications.length >= MAX_WORDPRESS_PUBLICATION_HISTORY) {
     throw new WebPublicationServiceError(
-      'web_wordpress_publication_path_invalid',
-      'Las páginas gestionadas en WordPress se publican bajo /cita/.',
-      422
+      'web_wordpress_publication_history_limit_reached',
+      'La instalación ha alcanzado el límite seguro de historial de rutas. Archiva rutas antiguas antes de publicar otra.',
+      409
     );
+  }
+  const slotPublications = installationPublications
+    .map(plain)
+    .filter((row) => !isReleasedWordpressPublication(plain(installation), row));
+  if (slotPublications.length >= MAX_WORDPRESS_PUBLICATIONS) {
+    throw new WebPublicationServiceError(
+      'web_wordpress_publication_limit_reached',
+      `Una instalación admite como máximo ${MAX_WORDPRESS_PUBLICATIONS} publicaciones.`,
+      409
+    );
+  }
+  if (installationPublications.length > 0 && !supportsMultiPublication(installation)) {
+    throw new WebPublicationServiceError(
+      'web_wordpress_multi_publication_plugin_update_required',
+      'Actualiza el plugin de WordPress antes de añadir otra publicación.',
+      409
+    );
+  }
+  const site = normalizeSiteUrl(installation.siteUrl);
+  const requestedPath = wordpressPublicationPath(project, body, installationPublications.length);
+  const childSegment = wordpressChildSegment(requestedPath);
+  if (childSegment) {
+    const pilot = installationPublications.map(plain).find((row) => row.path === WORDPRESS_ROOT_PATH);
+    const artifactIds = [...new Set([pilot?.activeArtifactId, pilot?.lastGoodArtifactId].filter(Boolean))];
+    if (pilot && typeof models.WebPublicationDeployment?.findOne === 'function') {
+      const desiredDeployment = await models.WebPublicationDeployment.findOne({
+        where: {
+          publicationId: pilot.id,
+          status: { [Op.in]: ['queued', 'running'] },
+          artifactId: { [Op.ne]: null },
+        },
+        order: [['sequence', 'DESC']],
+        transaction,
+        lock: transaction?.LOCK?.UPDATE,
+      });
+      if (desiredDeployment?.artifactId) artifactIds.push(desiredDeployment.artifactId);
+    }
+    for (const artifactId of [...new Set(artifactIds)]) {
+      const artifact = await models.WebArtifact.findByPk(artifactId, { transaction });
+      if (manifestClaimsWordpressChild(plain(artifact)?.manifest, childSegment)) {
+        throw new WebPublicationServiceError(
+          'web_wordpress_publication_manifest_route_conflict',
+          'La ruta ya pertenece a una página publicada dentro de /cita/.',
+          409,
+          { path: requestedPath }
+        );
+      }
+    }
   }
   return {
     channel,
@@ -236,6 +486,7 @@ async function resolveTarget({ project, body, models, transaction, env }) {
     domainId: null,
     wordpressInstallationId: installation.id,
     wordpress_status: installation.status,
+    wordpress_publications: installationPublications.map(plain),
   };
 }
 
@@ -272,7 +523,15 @@ async function createPublication({
     });
     const overlap = existingTargets
       .map(plain)
-      .find((candidate) => publicationPathsOverlap(candidate.path, target.path));
+      .find((candidate) => {
+        if (
+          target.channel === 'wordpress'
+          && candidate.channel === 'wordpress'
+          && candidate.wordpressInstallationId === target.wordpressInstallationId
+          && (candidate.path === WORDPRESS_ROOT_PATH || target.path === WORDPRESS_ROOT_PATH)
+        ) return candidate.path === target.path;
+        return publicationPathsOverlap(candidate.path, target.path);
+      });
     if (overlap) {
       throw new WebPublicationServiceError(
         'web_publication_route_overlap',
@@ -385,7 +644,7 @@ async function listProjectPublications({
   return { items: rows.map(serializePublication), pagination: { limit, has_more: rows.length === limit } };
 }
 
-async function assertChannelReady(publication, { models, transaction }) {
+async function assertChannelReady(publication, { models, transaction, lockedWordpressInstallation = null }) {
   const value = plain(publication);
   if (value.channel === 'custom_domain') {
     const domain = await models.WebDomain.findByPk(value.domainId, { transaction, lock: transaction.LOCK.UPDATE });
@@ -398,7 +657,7 @@ async function assertChannelReady(publication, { models, transaction }) {
     }
   }
   if (value.channel === 'wordpress') {
-    const installation = await models.WebWordpressInstallation.findByPk(
+    const installation = lockedWordpressInstallation || await models.WebWordpressInstallation.findByPk(
       value.wordpressInstallationId,
       { transaction, lock: transaction.LOCK.UPDATE }
     );
@@ -447,16 +706,39 @@ async function enqueueDeployment({
 } = {}) {
   return sequelize.transaction(async (transaction) => {
     const pointer = await models.WebPublication.findByPk(String(publicationId || ''), {
-      attributes: ['id', 'projectId'], transaction,
+      attributes: ['id', 'projectId', 'channel', 'wordpressInstallationId'], transaction,
     });
     if (!pointer) throw new WebPublicationServiceError('web_publication_not_found', 'La publicación no existe.', 404);
     const project = await models.WebProject.findByPk(pointer.projectId, { transaction, lock: transaction.LOCK.UPDATE });
     if (!project) throw new WebPublicationServiceError('web_publication_not_found', 'La publicación no existe.', 404);
     await assertAccess(actorId, project, 'marketing.web.publish', { models, transaction });
     const scope = scopeFromProject(plain(project));
-    const publication = await models.WebPublication.findByPk(pointer.id, { transaction, lock: transaction.LOCK.UPDATE });
+    let lockedWordpressInstallation = null;
+    let wordpressPublications = null;
+    if (pointer.channel === 'wordpress') {
+      lockedWordpressInstallation = await models.WebWordpressInstallation.findByPk(
+        pointer.wordpressInstallationId,
+        { transaction, lock: transaction.LOCK.UPDATE }
+      );
+      wordpressPublications = await models.WebPublication.findAll({
+        where: { wordpressInstallationId: pointer.wordpressInstallationId },
+        order: [['path', 'ASC'], ['id', 'ASC']],
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+    }
+    const publication = wordpressPublications
+      ? wordpressPublications.find((row) => String(row.id) === String(pointer.id))
+      : await models.WebPublication.findByPk(pointer.id, { transaction, lock: transaction.LOCK.UPDATE });
     if (!publication || publication.projectId !== project.id) {
       throw new WebPublicationServiceError('web_publication_not_found', 'La publicación no existe.', 404);
+    }
+    if (publication.status === 'retired') {
+      throw new WebPublicationServiceError(
+        'web_publication_retired',
+        'Una publicación retirada conserva su ruta como tombstone y no se puede volver a publicar.',
+        409
+      );
     }
     assertPublishing(scope, publication.channel, env);
     if (BUSY_PUBLICATION_STATUSES.has(publication.status)) {
@@ -467,7 +749,11 @@ async function enqueueDeployment({
         { job_request_id: publication.jobRequestId || null }
       );
     }
-    const channelState = await assertChannelReady(publication, { models, transaction });
+    const channelState = await assertChannelReady(publication, {
+      models,
+      transaction,
+      lockedWordpressInstallation,
+    });
 
     let revision = null;
     let artifact = null;
@@ -491,6 +777,9 @@ async function enqueueDeployment({
       artifact = await models.WebArtifact.findByPk(String(artifactId || ''), { transaction });
       if (!artifact || artifact.projectId !== project.id || artifact.environment !== 'production') {
         throw new WebPublicationServiceError('web_artifact_not_found', 'El artefacto no existe.', 404);
+      }
+      if (publication.channel === 'wordpress') {
+        assertWordpressPilotManifestCompatible(publication, wordpressPublications, plain(artifact).manifest);
       }
       const previousVerified = await models.WebPublicationDeployment.findOne({
         where: { publicationId: publication.id, artifactId: artifact.id, status: 'verified' },
@@ -599,6 +888,7 @@ module.exports = {
   PUBLICATION_CHANNELS,
   TERMINAL_DEPLOYMENT_STATUSES,
   WebPublicationServiceError,
+  assertWordpressPilotManifestCompatible,
   assertWordpressRevisionCompatibility,
   campaignContextSnapshot,
   createPublication,
@@ -610,6 +900,7 @@ module.exports = {
   normalizeSiteUrl,
   publicationBaseUrl,
   publicationPathsOverlap,
+  retireWordpressPublication,
   scopeMatches,
   serializeDeployment,
   serializePublication,

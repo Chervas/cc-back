@@ -9,6 +9,7 @@ const {
   hostedTarget,
   normalizeSiteUrl,
   publicationBaseUrl,
+  retireWordpressPublication,
 } = require('../../services/webPublications.service');
 const {
   MIN_GLOBAL_INTAKE_PLUGIN_VERSION,
@@ -65,6 +66,304 @@ test('WordPress exige origen HTTPS exacto', () => {
   });
   assert.throws(() => normalizeSiteUrl('http://cliente.example.com'));
   assert.throws(() => normalizeSiteUrl('https://cliente.example.com/wp?token=x'));
+});
+
+test('WordPress conserva /cita/ para el piloto y asigna una ruta hija solo con capability v2', async () => {
+  const source = project();
+  source.name = 'Implantes Badalona';
+  const installation = new Row({
+    id: 'b77c9c88-740f-474c-8160-9178afed7e70',
+    scopeType: 'clinic', clinicaId: 66, grupoClinicaId: null,
+    siteUrl: 'https://cliente.example.com', status: 'connected',
+    pluginVersion: '2.0.0-alpha.7', capabilities: {},
+  });
+  const saved = [];
+  const pilot = new Row({
+    id: '11111111-1111-4111-8111-111111111111',
+    projectId: 'pilot-project', channel: 'wordpress',
+    wordpressInstallationId: installation.id,
+    host: 'cliente.example.com', path: '/cita/', status: 'published',
+  });
+  let existing = [];
+  const models = {
+    WebProject: { findByPk: async () => source },
+    WebWordpressInstallation: { findByPk: async () => installation },
+    WebPublication: {
+      findAll: async ({ where }) => (where.wordpressInstallationId ? existing : existing),
+      create: async (value) => {
+        saved.push(value);
+        return new Row({ ...value, created_at: new Date(), updated_at: new Date() });
+      },
+    },
+    WebArtifact: {
+      findByPk: async (id) => (id === 'pilot-artifact'
+        ? new Row({ id, manifest: { page_routes: { page: { page_path: '/implantes-badalona/' } } } })
+        : null),
+    },
+    WebPublicationDeployment: { findOne: async () => null },
+    WebAuditEvent: { create: async () => true },
+  };
+  const common = {
+    actorId: 9,
+    models,
+    sequelize: sequelize(),
+    assertAccess: async () => true,
+    assertPublishing: () => true,
+  };
+  const first = await createPublication({
+    ...common,
+    body: {
+      project_id: source.id,
+      channel: 'wordpress',
+      wordpress_installation_id: installation.id,
+      slug: 'ignorado-en-piloto',
+    },
+  });
+  assert.equal(first.path, '/cita/');
+
+  existing = [pilot];
+  await assert.rejects(
+    () => createPublication({
+      ...common,
+      body: { project_id: source.id, channel: 'wordpress', wordpress_installation_id: installation.id },
+    }),
+    (error) => error.code === 'web_wordpress_multi_publication_plugin_update_required'
+  );
+
+  installation.pluginVersion = '2.0.0-alpha.8';
+  installation.capabilities = { multi_publication_v2: true };
+  pilot.activeArtifactId = 'pilot-artifact';
+  await assert.rejects(
+    () => createPublication({
+      ...common,
+      body: {
+        project_id: source.id,
+        channel: 'wordpress',
+        wordpress_installation_id: installation.id,
+        slug: 'implantes-badalona',
+      },
+    }),
+    (error) => error.code === 'web_wordpress_publication_manifest_route_conflict'
+  );
+  pilot.activeArtifactId = null;
+  const child = await createPublication({
+    ...common,
+    body: {
+      project_id: source.id,
+      channel: 'wordpress',
+      wordpress_installation_id: installation.id,
+      slug: 'implantes-badalona',
+    },
+  });
+  assert.equal(child.path, '/cita/implantes-badalona/');
+  assert.equal(child.public_url, 'https://cliente.example.com/cita/implantes-badalona/');
+  assert.equal(saved.length, 2);
+});
+
+test('un tombstone retirado y confirmado libera un slot pero conserva su ruta, con historial total acotado', async () => {
+  const source = project();
+  source.name = 'Nueva landing';
+  const retiredId = '11111111-1111-4111-8111-111111111111';
+  const installation = new Row({
+    id: 'b77c9c88-740f-474c-8160-9178afed7e70',
+    scopeType: 'clinic',
+    clinicaId: 66,
+    grupoClinicaId: null,
+    siteUrl: 'https://cliente.example.com',
+    status: 'connected',
+    pluginVersion: '2.0.0-alpha.8',
+    capabilities: { multi_publication_v2: true },
+    reportedState: {
+      confirmed_routes: {
+        [retiredId]: { status: 'retired', route_prefix: '/cita/old/', artifact_hash: null },
+      },
+    },
+  });
+  const publications = Array.from({ length: 20 }, (_, index) => new Row({
+    id: index === 0 ? retiredId : `22222222-2222-4222-8222-${String(index).padStart(12, '0')}`,
+    projectId: `project-${index}`,
+    channel: 'wordpress',
+    wordpressInstallationId: installation.id,
+    host: 'cliente.example.com',
+    path: index === 0 ? '/cita/old/' : (index === 1 ? '/cita/' : `/cita/existing-${index}/`),
+    status: index === 0 ? 'retired' : 'published',
+    activeArtifactId: null,
+    lastGoodArtifactId: null,
+  }));
+  let created = 0;
+  const models = {
+    WebProject: { findByPk: async () => source },
+    WebWordpressInstallation: { findByPk: async () => installation },
+    WebPublication: {
+      findAll: async () => publications,
+      create: async (value) => { created += 1; return new Row(value); },
+    },
+    WebPublicationDeployment: { findOne: async () => null },
+    WebArtifact: { findByPk: async () => null },
+    WebAuditEvent: { create: async () => true },
+  };
+  const common = {
+    actorId: 9,
+    models,
+    sequelize: sequelize(),
+    assertAccess: async () => true,
+    assertPublishing: () => true,
+  };
+  const createdPublication = await createPublication({
+    ...common,
+    body: {
+      project_id: source.id,
+      channel: 'wordpress',
+      wordpress_installation_id: installation.id,
+      slug: 'nueva',
+    },
+  });
+  assert.equal(createdPublication.path, '/cita/nueva/');
+  assert.equal(created, 1);
+
+  await assert.rejects(
+    () => createPublication({
+      ...common,
+      body: {
+        project_id: source.id,
+        channel: 'wordpress',
+        wordpress_installation_id: installation.id,
+        slug: 'old',
+      },
+    }),
+    (error) => error.code === 'web_publication_route_overlap'
+  );
+
+  installation.reportedState = {};
+  await assert.rejects(
+    () => createPublication({
+      ...common,
+      body: {
+        project_id: source.id,
+        channel: 'wordpress',
+        wordpress_installation_id: installation.id,
+        slug: 'otra',
+      },
+    }),
+    (error) => error.code === 'web_wordpress_publication_limit_reached'
+  );
+
+  installation.reportedState = {
+    confirmed_routes: {
+      [retiredId]: { status: 'retired', route_prefix: '/cita/old/', artifact_hash: null },
+    },
+  };
+  publications.push(...Array.from({ length: 180 }, (_, index) => new Row({
+    id: `33333333-3333-4333-8333-${String(index).padStart(12, '0')}`,
+    path: `/cita/archive-${index}/`,
+    status: 'retired',
+  })));
+  await assert.rejects(
+    () => createPublication({
+      ...common,
+      body: {
+        project_id: source.id,
+        channel: 'wordpress',
+        wordpress_installation_id: installation.id,
+        slug: 'history-overflow',
+      },
+    }),
+    (error) => error.code === 'web_wordpress_publication_history_limit_reached'
+  );
+});
+
+test('retirar WordPress crea el tombstone auditable sin esperar un job ni reutilizar la ruta', async () => {
+  const source = project();
+  const installation = new Row({
+    id: 'b77c9c88-740f-474c-8160-9178afed7e70',
+    status: 'connected',
+  });
+  const publication = new Row({
+    id: '11111111-1111-4111-8111-111111111111',
+    projectId: source.id,
+    scopeType: 'clinic',
+    clinicaId: 66,
+    grupoClinicaId: null,
+    channel: 'wordpress',
+    wordpressInstallationId: installation.id,
+    host: 'cliente.example.com',
+    path: '/cita/implantes/',
+    status: 'published',
+    desiredRevisionId: '22222222-2222-4222-8222-222222222222',
+    activeArtifactId: '33333333-3333-4333-8333-333333333333',
+    version: 4,
+  });
+  const audits = [];
+  const models = {
+    WebProject: { findByPk: async () => source },
+    WebWordpressInstallation: { findByPk: async () => installation },
+    WebPublication: {
+      findByPk: async () => publication,
+      findAll: async () => [publication],
+    },
+    WebPublicationDeployment: { findOne: async () => null },
+    WebAuditEvent: { create: async (value) => { audits.push(value); } },
+  };
+  const first = await retireWordpressPublication({
+    actorId: 9,
+    publicationId: publication.id,
+    requestId: 'req-retire',
+    models,
+    sequelize: sequelize(),
+    assertAccess: async () => true,
+  });
+  assert.equal(first.already_retired, false);
+  assert.equal(first.publication.status, 'retired');
+  assert.ok(first.publication.retired_at instanceof Date);
+  assert.equal(publication.version, 5);
+  assert.equal(publication.desiredRevisionId, null);
+  assert.equal(publication.activeArtifactId, '33333333-3333-4333-8333-333333333333');
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].eventType, 'web.publication.retired');
+  assert.equal(audits[0].metadata.tombstone_pending, true);
+
+  const replay = await retireWordpressPublication({
+    actorId: 9,
+    publicationId: publication.id,
+    models,
+    sequelize: sequelize(),
+    assertAccess: async () => true,
+  });
+  assert.equal(replay.already_retired, true);
+  assert.equal(audits.length, 1);
+});
+
+test('retirar WordPress falla cerrado mientras hay un despliegue en curso', async () => {
+  const source = project();
+  const installation = new Row({ id: 'b77c9c88-740f-474c-8160-9178afed7e70' });
+  const publication = new Row({
+    id: '11111111-1111-4111-8111-111111111111',
+    projectId: source.id,
+    channel: 'wordpress',
+    wordpressInstallationId: installation.id,
+    status: 'published',
+    version: 4,
+  });
+  const models = {
+    WebProject: { findByPk: async () => source },
+    WebWordpressInstallation: { findByPk: async () => installation },
+    WebPublication: { findByPk: async () => publication, findAll: async () => [publication] },
+    WebPublicationDeployment: {
+      findOne: async () => new Row({ status: 'running', jobRequestId: 91 }),
+    },
+    WebAuditEvent: { create: async () => { throw new Error('must_not_audit'); } },
+  };
+  await assert.rejects(
+    () => retireWordpressPublication({
+      actorId: 9,
+      publicationId: publication.id,
+      models,
+      sequelize: sequelize(),
+      assertAccess: async () => true,
+    }),
+    (error) => error.code === 'web_publication_busy' && error.details?.job_request_id === 91
+  );
+  assert.equal(publication.status, 'published');
 });
 
 test('el mínimo WordPress para intake global compara SemVer y prereleases sin atajos por major', () => {
@@ -212,7 +511,10 @@ function deploymentModels({ publicationStatus = 'draft', revisionStatus = 'appro
     publication,
     models: {
       WebProject: { findByPk: async () => p },
-      WebPublication: { findByPk: async () => publication },
+      WebPublication: {
+        findByPk: async () => publication,
+        findAll: async () => [publication],
+      },
       WebRevision: {
         findByPk: async () => new Row({
           id: '6cf410dc-cc39-4405-b7e5-9fb56ccbc8f4',
@@ -278,6 +580,26 @@ test('una publicación ocupada no encola un segundo despliegue', async () => {
     enqueueJob: async () => { jobs += 1; },
   }), (error) => error.code === 'web_publication_busy');
   assert.equal(jobs, 0);
+});
+
+test('POST publish no resucita una publicación retirada ni encola un despliegue', async () => {
+  const fixture = deploymentModels({ publicationStatus: 'retired' });
+  let jobs = 0;
+  await assert.rejects(() => enqueueDeployment({
+    actorId: 9,
+    publicationId: fixture.publication.id,
+    revisionId: '6cf410dc-cc39-4405-b7e5-9fb56ccbc8f4',
+    action: 'publish',
+    models: fixture.models,
+    sequelize: sequelize(),
+    assertAccess: async () => true,
+    assertPublishing: () => true,
+    enqueueJob: async () => { jobs += 1; },
+  }), (error) => error.code === 'web_publication_retired' && error.status === 409);
+  assert.equal(jobs, 0);
+  assert.equal(fixture.created.length, 0);
+  assert.equal(fixture.publication.status, 'retired');
+  assert.equal(fixture.publication.version, 1);
 });
 
 test('una revisión no aprobada no puede entrar al orquestador', async () => {

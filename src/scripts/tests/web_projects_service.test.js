@@ -122,6 +122,51 @@ async function testInheritedIntakeRequiresExplicitLocation() {
   assert.equal(queries.length, 4);
 }
 
+async function testMaterializedProjectDefaultsFollowCurrentGroupRuntime() {
+  const direct = {
+    id: 12,
+    assignment_scope: 'clinic',
+    clinic_id: 66,
+    hmac_key: 'old-group-hmac',
+    config: {
+      runtime_inheritance: { schema_version: 1, scope_type: 'group', scope_id: 7 },
+      features: { consent_mode_enabled: false, chat_enabled: false },
+      texts: {
+        privacy_url: '/privacidad-clinica/',
+        consent_text: 'Acepto la privacidad de esta clínica.',
+      },
+    },
+  };
+  const group = {
+    id: 9,
+    assignment_scope: 'group',
+    group_id: 7,
+    hmac_key: 'current-group-hmac',
+    config: {
+      locations: [{ id: 66 }],
+      features: {
+        consent_mode_enabled: true,
+        consent_provider: 'clinicaclick',
+        chat_enabled: true,
+        tel_modal_enabled: true,
+      },
+    },
+  };
+  const models = {
+    Clinica: { findByPk: async () => ({ grupoClinicaId: 7 }) },
+    IntakeConfig: {
+      findOne: async ({ where }) => (where.assignment_scope === 'clinic' ? direct : group),
+    },
+  };
+  const effective = await intakeConfigForWebScope({ type: 'clinic', id: 66 }, { models });
+  assert.equal(effective.hmac_key, group.hmac_key);
+  assert.equal(effective.config.features.chat_enabled, true);
+  assert.equal(effective.config.texts.privacy_url, '/privacidad-clinica/');
+  const defaults = siteDefaultsFromIntake(effective);
+  assert.equal(defaults.consent_ready, true);
+  assert.equal(defaults.integrations.chat_enabled, true);
+}
+
 function testTemplateInstantiationDoesNotReuseStructuralIds() {
   const source = createBlankWebDocument({ name: 'Plantilla maestra' });
   source.design_system.tokens.font_heading = 'manrope';
@@ -903,6 +948,7 @@ async function main() {
   await testBlankDocument();
   testIntakeDefaultsMakeAConfiguredDraftApprovable();
   await testInheritedIntakeRequiresExplicitLocation();
+  await testMaterializedProjectDefaultsFollowCurrentGroupRuntime();
   testTemplateInstantiationDoesNotReuseStructuralIds();
   testScopeValidation();
   testCampaignContextContract();

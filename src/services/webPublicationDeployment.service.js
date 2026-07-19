@@ -21,6 +21,7 @@ const {
 const jobRequestsService = require('./jobRequests.service');
 const {
   WebPublicationServiceError,
+  assertWordpressPilotManifestCompatible,
   publicationBaseUrl,
   serializeDeployment,
   serializePublication,
@@ -30,12 +31,20 @@ const {
   measurementFromIntake,
 } = require('./webWordpressInstallations.service');
 const { assertWebPublishingChannelEnabled } = require('../lib/marketingWebFeatureFlags');
+const {
+  effectiveIntakeConfigForScope,
+} = require('./webEffectiveIntakeConfig.service');
 const { inspectDns, inspectTls } = require('./webDomains.service');
 const {
   MIN_GLOBAL_INTAKE_PLUGIN_VERSION,
   manifestHasGlobalIntakeContract,
   semverAtLeast,
+  supportsMultiPublication,
 } = require('../lib/webWordpressCompatibility');
+const {
+  MAX_WEB_ARTIFACT_BUNDLE_BYTES,
+  webArtifactBundleFootprintBytes,
+} = require('../lib/webArtifactBudget');
 
 function plain(row) {
   return row?.get ? row.get({ plain: true }) : row;
@@ -46,6 +55,119 @@ function safeError(error) {
     code: String(error?.code || error?.message || 'web_publication_deploy_failed').slice(0, 128),
     message: String(error?.message || 'No se pudo desplegar la publicación.').slice(0, 1000),
   };
+}
+
+function runtimeReconciliationMarker(storage) {
+  const value = storage && typeof storage === 'object' && !Array.isArray(storage) ? storage : {};
+  const marker = value.runtime_reconciliation;
+  if (!marker || typeof marker !== 'object' || Array.isArray(marker)) return null;
+  const keys = Object.keys(marker).sort();
+  const keyset = keys.join(',');
+  const isTarget = keyset === 'generation,reconciliation_id,suppress_landing_published';
+  const isSourceRollback = keyset === 'generation,reconciliation_id,role,suppress_landing_published'
+    && marker.role === 'source_rollback';
+  if (!isTarget && !isSourceRollback) return null;
+  const reconciliationId = String(marker.reconciliation_id || '').trim();
+  const generation = positiveInteger(marker.generation);
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(reconciliationId)
+    || !generation
+    || marker.suppress_landing_published !== true
+  ) return null;
+  return {
+    reconciliation_id: reconciliationId,
+    generation,
+    ...(isSourceRollback ? { role: 'source_rollback' } : {}),
+    suppress_landing_published: true,
+  };
+}
+
+function runtimeReconciliationDeclaration(result) {
+  const value = result && typeof result === 'object' && !Array.isArray(result) ? result : {};
+  const declaration = value.runtime_reconciliation;
+  if (!declaration || typeof declaration !== 'object' || Array.isArray(declaration)) return null;
+  const keys = Object.keys(declaration).sort();
+  const keyset = keys.join(',');
+  const isTarget = keyset === 'generation,reconciliation_id';
+  const isSourceRollback = keyset === 'generation,reconciliation_id,role'
+    && declaration.role === 'source_rollback';
+  if (!isTarget && !isSourceRollback) return null;
+  const reconciliationId = String(declaration.reconciliation_id || '').trim();
+  const generation = positiveInteger(declaration.generation);
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(reconciliationId)
+    || !generation
+  ) return null;
+  return {
+    reconciliation_id: reconciliationId,
+    generation,
+    ...(isSourceRollback ? { role: 'source_rollback' } : {}),
+  };
+}
+
+function runtimeReconciliationState(deployment) {
+  const value = plain(deployment) || {};
+  const storage = value.storage && typeof value.storage === 'object' && !Array.isArray(value.storage)
+    ? value.storage
+    : {};
+  const result = value.result && typeof value.result === 'object' && !Array.isArray(value.result)
+    ? value.result
+    : {};
+  const storageDeclares = Object.prototype.hasOwnProperty.call(storage, 'runtime_reconciliation');
+  const resultDeclares = Object.prototype.hasOwnProperty.call(result, 'runtime_reconciliation');
+  const marker = runtimeReconciliationMarker(storage);
+  const declaration = runtimeReconciliationDeclaration(result);
+  const coherent = (
+    !storageDeclares
+    && !resultDeclares
+  ) || (
+    storageDeclares
+    && resultDeclares
+    && marker
+    && declaration
+    && marker.reconciliation_id === declaration.reconciliation_id
+    && marker.generation === declaration.generation
+    && (marker.role || null) === (declaration.role || null)
+  );
+  return { coherent: Boolean(coherent), marker, declaration, storageDeclares, resultDeclares };
+}
+
+function validatedRuntimeReconciliationMarker(deployment) {
+  const state = runtimeReconciliationState(deployment);
+  if (!state.coherent) {
+    throw new WebPublicationServiceError(
+      'web_runtime_reconciliation_marker_invalid',
+      'El deployment no conserva una identidad íntegra de reconciliación.',
+      409,
+      { runtime_reconciliation: state.declaration || state.marker || null }
+    );
+  }
+  return state.marker;
+}
+
+function replaceArtifactStorageDescriptor(previousStorage, replacementStorage) {
+  const replacement = replacementStorage && typeof replacementStorage === 'object' && !Array.isArray(replacementStorage)
+    ? replacementStorage
+    : {};
+  // Storage providers never own orchestration metadata. Strip anything they
+  // return under this key, then preserve only the exact marker already written
+  // by the trusted reconciliation transaction.
+  const { runtime_reconciliation: ignoredRuntimeMarker, ...descriptor } = replacement;
+  void ignoredRuntimeMarker;
+  const marker = runtimeReconciliationMarker(previousStorage);
+  if (
+    previousStorage
+    && typeof previousStorage === 'object'
+    && Object.prototype.hasOwnProperty.call(previousStorage, 'runtime_reconciliation')
+    && !marker
+  ) {
+    throw new WebPublicationServiceError(
+      'web_runtime_reconciliation_marker_invalid',
+      'El deployment no conserva una identidad íntegra de reconciliación.',
+      409
+    );
+  }
+  return marker ? { ...descriptor, runtime_reconciliation: marker } : descriptor;
 }
 
 const LANDING_PUBLISHED_EVENT = 'marketing_web.landing_published.v1';
@@ -218,12 +340,68 @@ async function persistArtifactPreparation({
   deploymentId,
   publicationId,
   artifactId,
+  artifactManifest,
   storage,
   models,
   sequelize,
 }) {
   return sequelize.transaction(async (transaction) => {
-    const { publication, deployment } = await lockDeploymentGraph({ deploymentId, publicationId, models, transaction });
+    const pointer = await models.WebPublicationDeployment.findByPk(String(deploymentId || ''), {
+      attributes: ['id', 'publicationId', 'projectId'],
+      transaction,
+    });
+    if (!pointer || (publicationId && String(pointer.publicationId) !== String(publicationId))) {
+      throw new WebPublicationServiceError('web_publication_deployment_not_found', 'El despliegue no existe.', 404);
+    }
+    const locator = await models.WebPublication.findByPk(pointer.publicationId, {
+      attributes: ['id', 'projectId', 'channel', 'wordpressInstallationId'],
+      transaction,
+    });
+    if (!locator || String(locator.projectId) !== String(pointer.projectId)) {
+      throw new WebPublicationServiceError('web_publication_deployment_not_found', 'El despliegue no existe.', 404);
+    }
+    const project = await models.WebProject.findByPk(pointer.projectId, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!project) {
+      throw new WebPublicationServiceError('web_publication_deployment_not_found', 'El despliegue no existe.', 404);
+    }
+    let siblings = null;
+    let publication = null;
+    if (locator.channel === 'wordpress') {
+      const installation = await models.WebWordpressInstallation.findByPk(locator.wordpressInstallationId, {
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+      if (!installation) {
+        throw new WebPublicationServiceError('web_wordpress_installation_not_found', 'La instalación no existe.', 404);
+      }
+      siblings = await models.WebPublication.findAll({
+        where: { wordpressInstallationId: locator.wordpressInstallationId },
+        order: [['path', 'ASC'], ['id', 'ASC']],
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+      publication = siblings.find((row) => String(row.id) === String(pointer.publicationId)) || null;
+    } else {
+      publication = await models.WebPublication.findByPk(pointer.publicationId, {
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+    }
+    const deployment = await models.WebPublicationDeployment.findByPk(pointer.id, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (
+      !publication
+      || !deployment
+      || String(publication.projectId) !== String(project.id)
+      || String(deployment.projectId) !== String(project.id)
+    ) {
+      throw new WebPublicationServiceError('web_publication_deployment_not_found', 'El despliegue no existe.', 404);
+    }
     if (Number(publication.version) !== Number(deployment.expectedPublicationVersion)) {
       throw new WebPublicationServiceError(
         'web_publication_version_changed',
@@ -231,35 +409,24 @@ async function persistArtifactPreparation({
         409
       );
     }
+    if (publication.channel === 'wordpress') {
+      // The desired artifact becomes visible to the pull endpoint through this
+      // exact update. Validate the signed route namespace while installation
+      // and every sibling publication are locked, never afterwards.
+      assertWordpressPilotManifestCompatible(publication, siblings, artifactManifest);
+    }
     await deployment.update({ artifactId, storage: storage || deployment.storage || {} }, { transaction });
     return { publication: plain(publication), deployment: plain(deployment) };
   });
 }
 
 async function intakeConfigForPublication(publication, { models }) {
-  if (publication.scopeType === 'group') {
-    return models.IntakeConfig.findOne({
-      where: { assignment_scope: 'group', group_id: positiveInteger(publication.grupoClinicaId) },
-      raw: true,
-    });
-  }
-  const clinicId = positiveInteger(publication.clinicaId);
-  const direct = await models.IntakeConfig.findOne({
-    where: { assignment_scope: 'clinic', clinic_id: clinicId },
-    raw: true,
+  return effectiveIntakeConfigForScope({
+    scopeType: publication.scopeType,
+    clinicId: publication.clinicaId,
+    groupId: publication.grupoClinicaId,
+    models,
   });
-  if (direct) return direct;
-  const clinic = await models.Clinica.findByPk(clinicId, { attributes: ['grupoClinicaId'], raw: true });
-  const groupId = positiveInteger(clinic?.grupoClinicaId);
-  if (!groupId) return null;
-  const inherited = await models.IntakeConfig.findOne({
-    where: { assignment_scope: 'group', group_id: groupId },
-    raw: true,
-  });
-  const locations = Array.isArray(inherited?.config?.locations) ? inherited.config.locations : [];
-  return locations.some((location) => positiveInteger(location?.id ?? location?.clinic_id) === clinicId)
-    ? inherited
-    : null;
 }
 
 async function trustedRuntimeForPublication(publication, { models, env = process.env }) {
@@ -273,7 +440,16 @@ async function trustedRuntimeForPublication(publication, { models, env = process
 }
 
 async function loadArtifactBundle({ deployment, publication, models, compile, env = process.env }) {
-  const runtime = await trustedRuntimeForPublication(publication, { models, env });
+  const runtimeMarker = validatedRuntimeReconciliationMarker(deployment);
+  const reconciliationRuntime = runtimeMarker
+    ? await require('./webIntakeRuntimeReconciliation.service').runtimeForMarkedDeployment({
+        publication,
+        deployment,
+        models,
+        env,
+      })
+    : null;
+  const runtime = reconciliationRuntime || await trustedRuntimeForPublication(publication, { models, env });
   if (deployment.artifactId) {
     const artifact = await models.WebArtifact.findByPk(deployment.artifactId);
     if (!artifact || artifact.projectId !== publication.projectId || artifact.environment !== 'production') {
@@ -346,8 +522,11 @@ function artifactStorageContract(storage, artifact) {
     }
   });
   const artifactValid = /^[a-f0-9]{64}$/.test(artifactHash) && artifactHash === manifestHash;
+  const bundleSizeBytes = webArtifactBundleFootprintBytes(artifact?.manifest);
   return {
     ready: artifactValid
+      && bundleSizeBytes !== null
+      && bundleSizeBytes <= MAX_WEB_ARTIFACT_BUNDLE_BYTES
       && providerSupported
       && storedHash === artifactHash
       && pathsMatch
@@ -517,12 +696,58 @@ async function channelDeploy({
   models,
 }) {
   if (publication.channel === 'wordpress') {
+    let wordpressPublications = null;
+    if (publication.path === '/cita/') {
+      const validateRoutes = async (transaction = null) => {
+        if (transaction) {
+          await models.WebWordpressInstallation.findByPk(publication.wordpressInstallationId, {
+            transaction,
+            lock: transaction.LOCK.UPDATE,
+          });
+        }
+        const siblings = await models.WebPublication.findAll({
+          where: { wordpressInstallationId: publication.wordpressInstallationId },
+          ...(transaction ? { transaction, lock: transaction.LOCK.UPDATE } : {}),
+        });
+        const childSegments = new Set(siblings
+          .map(plain)
+          .filter((row) => row.id !== publication.id && /^\/cita\/[^/]+\/$/.test(String(row.path || '')))
+          .map((row) => String(row.path).split('/').filter(Boolean)[1]));
+        const conflict = Object.values(artifact.manifest?.page_routes || {}).find((route) => {
+          const first = String(route?.page_path || '/').split('/').filter(Boolean)[0];
+          return first && childSegments.has(first);
+        });
+        if (conflict) {
+          throw new WebPublicationServiceError(
+            'web_wordpress_publication_manifest_route_conflict',
+            'Una página del piloto ocupa la ruta reservada por otra publicación.',
+            409
+          );
+        }
+        return siblings;
+      };
+      if (typeof models.sequelize?.transaction === 'function') {
+        wordpressPublications = await models.sequelize.transaction((transaction) => validateRoutes(transaction));
+      } else {
+        wordpressPublications = await validateRoutes();
+      }
+    }
     const installation = await models.WebWordpressInstallation.findByPk(publication.wordpressInstallationId);
     // Re-check at the final pointer transition as well as at enqueue time. A
     // token rotation can move an installation back to pending while a job is
     // running; an old lastArtifactHash must never complete that publication.
     if (!installation || installation.status !== 'connected') {
       throw new WebPublicationServiceError('web_wordpress_not_connected', 'El plugin de WordPress no está conectado.', 409);
+    }
+    if (
+      !supportsMultiPublication(installation)
+      && (publication.path !== '/cita/' || (wordpressPublications && wordpressPublications.length > 1))
+    ) {
+      throw new WebPublicationServiceError(
+        'web_wordpress_multi_publication_plugin_update_required',
+        'Actualiza el plugin de WordPress antes de desplegar varias publicaciones.',
+        409
+      );
     }
     if (manifestHasGlobalIntakeContract(artifact.manifest)) {
       const actualVersion = String(installation.pluginVersion || '').trim() || null;
@@ -538,13 +763,34 @@ async function channelDeploy({
         );
       }
     }
-    if (String(installation.lastArtifactHash || '') !== String(artifact.artifact_hash)) {
+    const multiPublication = supportsMultiPublication(installation);
+    const stableAck = multiPublication
+      ? installation.reportedState?.confirmed_routes?.[publication.id]
+      : null;
+    const routeConfirmed = multiPublication
+      ? stableAck?.status === 'active'
+        && stableAck?.route_prefix === publication.path
+        && Number(stableAck?.registry_sequence) === Number(installation.desiredSequence || 0)
+        && String(stableAck?.artifact_hash || '') === String(artifact.artifact_hash)
+      : true;
+    const reportedArtifactHash = multiPublication
+      ? stableAck?.artifact_hash
+      : installation.lastArtifactHash;
+    const routeMatches = !multiPublication
+      || (
+        stableAck
+        &&
+        stableAck.route_prefix === publication.path
+        && stableAck.status === 'active'
+      );
+    if (!routeConfirmed || !routeMatches || String(reportedArtifactHash || '') !== String(artifact.artifact_hash)) {
       return {
         waiting: true,
         result: {
           reason: 'wordpress_waiting_for_pull',
           desired_artifact_hash: artifact.artifact_hash,
           installation_id: installation.id,
+          publication_id: publication.id,
         },
       };
     }
@@ -674,8 +920,21 @@ async function finishDeployment({
     if (deployment.status === 'verified') {
       return { publication: serializePublication(publication), deployment: serializeDeployment(deployment) };
     }
+    const runtimeReconciliation = validatedRuntimeReconciliationMarker(deployment);
+    const suppressLandingPublished = Boolean(runtimeReconciliation);
     if (Number(publication.version) !== Number(deployment.expectedPublicationVersion)) {
       await deployment.update({ status: 'superseded', completedAt: new Date(), errorCode: 'web_publication_version_changed' }, { transaction });
+      if (suppressLandingPublished) {
+        await require('./webIntakeRuntimeReconciliation.service').enqueueRuntimeFinalization({
+          reconciliationId: runtimeReconciliation.reconciliation_id,
+          generation: runtimeReconciliation.generation,
+          deploymentId: deployment.id,
+          models,
+          sequelize,
+          transaction,
+          enqueueUniqueJobRequest: enqueueUniqueJob,
+        });
+      }
       return { publication: serializePublication(publication), deployment: serializeDeployment(deployment), superseded: true };
     }
     const artifact = await models.WebArtifact.findByPk(artifactId, { transaction });
@@ -683,9 +942,11 @@ async function finishDeployment({
       throw new WebPublicationServiceError('web_artifact_not_found', 'El artefacto no existe.', 404);
     }
     const now = new Date();
-    const integrationEvent = landingPublishedEvent({
-      project, publication, deployment, artifact, occurredAt: now,
-    });
+    const integrationEvent = suppressLandingPublished
+      ? null
+      : landingPublishedEvent({
+          project, publication, deployment, artifact, occurredAt: now,
+        });
     const activateProject = project.status === 'active'
       ? Promise.resolve(project)
       : project.update({
@@ -699,7 +960,14 @@ async function finishDeployment({
         artifactId: artifact.id,
         status: 'verified',
         storage: storage || deployment.storage || {},
-        result: result || {},
+        result: runtimeReconciliation ? {
+          ...(result || {}),
+          runtime_reconciliation: {
+            reconciliation_id: runtimeReconciliation.reconciliation_id,
+            generation: runtimeReconciliation.generation,
+            ...(runtimeReconciliation.role ? { role: runtimeReconciliation.role } : {}),
+          },
+        } : (result || {}),
         completedAt: now,
         errorCode: null,
         errorDetails: null,
@@ -740,31 +1008,65 @@ async function finishDeployment({
           sequence: deployment.sequence,
           channel: publication.channel,
           campaign_event_id: integrationEvent?.event_id || null,
+          runtime_reconciliation: suppressLandingPublished ? {
+            reconciliation_id: runtimeReconciliation.reconciliation_id,
+            generation: runtimeReconciliation.generation,
+            landing_published_suppressed: true,
+          } : null,
         },
       }, { transaction }),
     ]);
-    const integration = await enqueueLandingPublishedEvent({
-      event: integrationEvent,
-      models,
-      sequelize,
-      transaction,
-      enqueueUniqueJob,
-    });
+    const runtimeFinalization = suppressLandingPublished
+      ? await require('./webIntakeRuntimeReconciliation.service').enqueueRuntimeFinalization({
+          reconciliationId: runtimeReconciliation.reconciliation_id,
+          generation: runtimeReconciliation.generation,
+          deploymentId: deployment.id,
+          models,
+          sequelize,
+          transaction,
+          enqueueUniqueJobRequest: enqueueUniqueJob,
+        })
+      : null;
+    const integration = suppressLandingPublished
+      ? { suppressed: true, reason: 'runtime_reconciliation' }
+      : await enqueueLandingPublishedEvent({
+          event: integrationEvent,
+          models,
+          sequelize,
+          transaction,
+          enqueueUniqueJob,
+        });
     return {
       publication: serializePublication(publication),
       deployment: serializeDeployment(deployment),
       integration_event: integration,
+      runtime_reconciliation: runtimeFinalization,
     };
   });
 }
 
-async function failDeployment({ deploymentId, publicationId, error, models, sequelize }) {
-  const safe = safeError(error);
+async function failDeployment({
+  deploymentId,
+  publicationId,
+  error,
+  models,
+  sequelize,
+  enqueueUniqueJob = jobRequestsService.enqueueUniqueJobRequest,
+}) {
   return sequelize.transaction(async (transaction) => {
     const { project, publication, deployment } = await lockDeploymentGraph({
       deploymentId, publicationId, models, transaction,
     });
     if (['verified', 'failed', 'superseded'].includes(deployment.status)) return;
+    const markerState = runtimeReconciliationState(deployment);
+    const runtimeReconciliation = markerState.coherent
+      ? markerState.marker
+      : (markerState.declaration || markerState.marker);
+    const safe = safeError(markerState.coherent
+      ? error
+      : Object.assign(new Error('El deployment no conserva una identidad íntegra de reconciliación.'), {
+          code: 'web_runtime_reconciliation_marker_invalid',
+        }));
     await Promise.all([
       deployment.update({
         status: 'failed',
@@ -789,6 +1091,17 @@ async function failDeployment({ deploymentId, publicationId, error, models, sequ
         metadata: { publication_id: publication.id, error_code: safe.code },
       }, { transaction }),
     ]);
+    if (runtimeReconciliation) {
+      await require('./webIntakeRuntimeReconciliation.service').enqueueRuntimeFinalization({
+        reconciliationId: runtimeReconciliation.reconciliation_id,
+        generation: runtimeReconciliation.generation,
+        deploymentId: deployment.id,
+        models,
+        sequelize,
+        transaction,
+        enqueueUniqueJobRequest: enqueueUniqueJob,
+      });
+    }
   });
 }
 
@@ -834,11 +1147,12 @@ async function runPublicationDeploymentJob(payload = {}, jobRequest = null, depe
       // el descriptor inmutable anterior; una URL existente no demuestra que
       // ese descriptor pertenezca al bundle recién compilado.
       if (!artifactStorageContract(storage, bundle.serialized).ready) {
-        storage = await (dependencies.storeArtifactBundle || storeArtifactBundle)({
+        const replacementStorage = await (dependencies.storeArtifactBundle || storeArtifactBundle)({
           artifact: bundle.serialized,
           installationId: publication.wordpressInstallationId || null,
           env,
         });
+        storage = replaceArtifactStorageDescriptor(storage, replacementStorage);
       }
       assertArtifactStorageContract(storage, bundle.serialized);
     }
@@ -846,6 +1160,7 @@ async function runPublicationDeploymentJob(payload = {}, jobRequest = null, depe
       deploymentId,
       publicationId,
       artifactId: bundle.row.id,
+      artifactManifest: bundle.serialized.manifest,
       storage,
       models,
       sequelize,
@@ -922,7 +1237,14 @@ async function runPublicationDeploymentJob(payload = {}, jobRequest = null, depe
     const attempts = Number(jobRequest?.attempts || 0);
     const maxAttempts = Number(jobRequest?.max_attempts || jobRequest?.maxAttempts || 5);
     if (!retryable || (attempts > 0 && attempts >= maxAttempts)) {
-      await failDeployment({ deploymentId, publicationId, error, models, sequelize }).catch(() => undefined);
+      await failDeployment({
+        deploymentId,
+        publicationId,
+        error,
+        models,
+        sequelize,
+        enqueueUniqueJob: dependencies.enqueueUniqueJobRequest || jobRequestsService.enqueueUniqueJobRequest,
+      }).catch(() => undefined);
     }
     return { status: 'failed', retryable, error };
   }
@@ -944,6 +1266,8 @@ module.exports = {
   lockDeploymentGraph,
   persistArtifactPreparation,
   runPublicationDeploymentJob,
+  replaceArtifactStorageDescriptor,
+  runtimeReconciliationMarker,
   safeError,
   shouldStorePublicBundle,
   trustedRuntimeForPublication,

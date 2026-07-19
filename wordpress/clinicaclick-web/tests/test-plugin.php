@@ -21,6 +21,69 @@ $tests['configuration rejects unsafe API, token and installation id'] = static f
     });
 };
 
+$tests['managed runtime fails closed when the default cache is below document root'] = static function () {
+    $public_root = __DIR__ . '/tmp/nginx-public';
+    $default_cache = $public_root . '/wp-content/clinicaclick-web-cache/site';
+    $unsafe_context = array(
+        'managed' => true,
+        'server_software' => 'nginx/1.26.1',
+        'uses_default' => true,
+        'document_root' => $public_root,
+    );
+    $diagnostic = CCW_Config::cache_storage_diagnostic($default_cache, $unsafe_context);
+    ccw_test_assert(empty($diagnostic['safe']), 'managed runtime accepted the default public cache');
+    ccw_test_assert(
+        ($diagnostic['code'] ?? '') === 'ccw_managed_cache_directory_public',
+        'unsafe cache diagnostic lost its stable error code'
+    );
+    ccw_test_assert(
+        strpos((string) ($diagnostic['message'] ?? ''), 'CLINICACLICK_WEB_CACHE_DIR') !== false,
+        'unsafe cache diagnostic does not explain the repair'
+    );
+
+    $blocked = new CCW_Cache($default_cache, $unsafe_context);
+    ccw_test_throws('ccw_managed_cache_directory_public', static function () use ($blocked) {
+        $blocked->initialize();
+    });
+    ccw_test_throws('ccw_managed_cache_directory_public', static function () use ($blocked) {
+        $blocked->pointer();
+    });
+    ccw_test_throws('ccw_managed_cache_directory_public', static function () use ($blocked) {
+        $blocked->resolve_pointer(array('status' => 'active'), 'index.html');
+    });
+    ccw_test_assert(!is_dir($default_cache), 'fail-closed guard wrote into the unsafe cache');
+
+    $apache_context = array_replace($unsafe_context, array('server_software' => 'Apache/2.4.62'));
+    ccw_test_assert(
+        empty(CCW_Config::cache_storage_diagnostic($default_cache, $apache_context)['safe']),
+        'managed Apache bypassed the portable private-cache requirement'
+    );
+    $cli_context = array_replace($unsafe_context, array('server_software' => ''));
+    ccw_test_assert(
+        empty(CCW_Config::cache_storage_diagnostic($default_cache, $cli_context)['safe']),
+        'WP-CLI bypassed the managed private-cache requirement'
+    );
+    $explicit_public_context = array_replace($unsafe_context, array('uses_default' => false));
+    ccw_test_assert(
+        empty(CCW_Config::cache_storage_diagnostic($default_cache, $explicit_public_context)['safe']),
+        'an explicit managed cache constant inside document root bypassed the guard'
+    );
+
+    $private_cache = __DIR__ . '/tmp/nginx-private/clinicaclick-web-cache/site';
+    $private_context = array_replace($unsafe_context, array(
+        'uses_default' => false,
+        'document_root' => $public_root,
+    ));
+    $private = new CCW_Cache($private_cache, $private_context);
+    $private->initialize();
+    ccw_test_assert(is_dir($private_cache . '/releases'), 'private Nginx cache was blocked');
+
+    $generic = CCW_Config::cache_storage_diagnostic($default_cache, array_replace($unsafe_context, array(
+        'managed' => false,
+    )));
+    ccw_test_assert(!empty($generic['safe']), 'generic unmanaged install was broken by the managed guard');
+};
+
 $tests['artifact bearer is sent only to the exact API origin'] = static function () {
     $GLOBALS['ccw_test_options'] = array();
     $GLOBALS['ccw_test_http'] = array();
@@ -107,6 +170,29 @@ $tests['trust store verifies signatures and blocks untrusted self-bootstrap'] = 
     $rotated = ccw_test_keypair();
     CCW_Trust_Store::trust_remote_descriptor($rotated['descriptor'], ccw_test_sign($rotated['descriptor'], $key));
     ccw_test_assert(isset(CCW_Trust_Store::all()[$rotated['descriptor']['key_id']]), 'signed key rotation was not persisted');
+    ccw_test_assert(
+        CCW_Trust_Store::active_key_id() === $key['descriptor']['key_id'],
+        'descriptor trust prematurely promoted the signing key'
+    );
+    CCW_Trust_Store::promote_remote_descriptor($rotated['descriptor']['key_id']);
+    ccw_test_assert(
+        CCW_Trust_Store::active_key_id() === $rotated['descriptor']['key_id'],
+        'successful transition did not promote the signing key'
+    );
+    ccw_test_throws('ccw_key_downgrade_blocked', static function () use ($key, $rotated) {
+        CCW_Trust_Store::trust_remote_descriptor($key['descriptor'], ccw_test_sign($key['descriptor'], $rotated));
+    });
+    $unsigned = ccw_test_keypair();
+    ccw_test_throws('ccw_key_rotation_signature_invalid', static function () use ($unsigned) {
+        CCW_Trust_Store::trust_remote_descriptor($unsigned['descriptor'], array());
+    });
+    $wrong_signer = ccw_test_keypair();
+    ccw_test_throws('ccw_key_rotation_signature_invalid', static function () use ($unsigned, $wrong_signer) {
+        CCW_Trust_Store::trust_remote_descriptor(
+            $unsigned['descriptor'],
+            ccw_test_sign($unsigned['descriptor'], $wrong_signer)
+        );
+    });
     ccw_test_throws('ccw_private_key_forbidden', static function () use ($key) {
         CCW_Trust_Store::validate_descriptor($key['descriptor'] + array('private_key' => 'forbidden'));
     });
@@ -169,6 +255,7 @@ function ccw_test_artifact($marker)
         );
     }
     $hash = hash('sha256', 'artifact-' . $marker);
+    $artifact_input_hash = hash('sha256', 'artifact-input-' . $marker);
     $runtime_config_hash = hash('sha256', CCW_JSON::canonical(array(
         'schema_version' => 1,
         'measurement' => array(
@@ -192,6 +279,7 @@ function ccw_test_artifact($marker)
             'renderer_version' => 'clinicaclick-web-renderer/1.0.0',
             'environment' => 'production',
             'artifact_hash' => $hash,
+            'artifact_input_hash' => $artifact_input_hash,
             'project_id' => $project_id,
             'revision_id' => $revision_id,
             'runtime_config_hash' => $runtime_config_hash,
@@ -225,6 +313,7 @@ function ccw_test_artifact($marker)
             'page_id' => $page_id,
             'info_page_id' => $info_page_id,
             'form_id' => $form_id,
+            'artifact_input_hash' => $artifact_input_hash,
         ),
     );
 }
@@ -338,7 +427,13 @@ $tests['manifest requires an exact signed route for every HTML page and form'] =
     });
 };
 
-function ccw_test_install_remote(array $artifact, array $key, $sequence, $etag = '"v1"')
+function ccw_test_install_remote(
+    array $artifact,
+    array $key,
+    $sequence,
+    $etag = '"v1"',
+    array $descriptor_envelope = array()
+)
 {
     $installation = CCW_Config::installation_id();
     $origin = 'https://artifacts.example.test/' . $artifact['hash'];
@@ -379,7 +474,7 @@ function ccw_test_install_remote(array $artifact, array $key, $sequence, $etag =
             'envelope_url' => $envelope_url,
             'files' => $urls,
             'signing_key_descriptor' => $key['descriptor'],
-            'signing_key_descriptor_envelope' => array(),
+            'signing_key_descriptor_envelope' => $descriptor_envelope,
             'runtime_configuration' => $runtime,
             'runtime_configuration_envelope' => ccw_test_sign($runtime, $key),
         ),
@@ -388,6 +483,269 @@ function ccw_test_install_remote(array $artifact, array $key, $sequence, $etag =
     $GLOBALS['ccw_test_http'][$api] = array('code' => 200, 'headers' => array('etag' => $etag), 'body' => json_encode($desired));
     return array('api' => $api, 'manifest_url' => $manifest_url, 'envelope_url' => $envelope_url, 'desired' => $desired);
 }
+
+/** @param array<string,array<string,mixed>> $routes */
+function ccw_test_install_remote_v2(
+    array $routes,
+    array $key,
+    $sequence,
+    $etag = '"multi"',
+    array $descriptor_envelope = array()
+)
+{
+    $installation = CCW_Config::installation_id();
+    $measurement = array(
+        'enabled' => true,
+        'scope_type' => 'clinic',
+        'scope_id' => 56,
+        'loader_path' => '/assets/loader.js',
+        'hmac_key' => str_repeat('h', 40),
+        'consent_mode_enabled' => true,
+        'consent_provider' => 'external_cmp',
+        'chat_enabled' => false,
+        'whatsapp_enabled' => false,
+        'phone_enabled' => false,
+    );
+    $registry_routes = array();
+    $artifacts = array();
+    foreach ($routes as $publication_id => $route) {
+        $status = (string) ($route['status'] ?? 'pending');
+        $artifact = $route['artifact'] ?? null;
+        $hash = $status === 'active' && is_array($artifact) ? $artifact['hash'] : null;
+        $registry_routes[$publication_id] = array(
+            'publication_id' => $publication_id,
+            'route_prefix' => (string) $route['route_prefix'],
+            'status' => $status,
+            'desired_artifact_hash' => $hash,
+        );
+        if ($hash === null || isset($artifacts[$hash])) continue;
+        $origin = 'https://artifacts.example.test/' . $hash;
+        $urls = array();
+        foreach ($artifact['files'] as $path => $body) {
+            $urls[$path] = $origin . '/' . $path;
+            $GLOBALS['ccw_test_http'][$urls[$path]] = array('code' => 200, 'body' => $body);
+        }
+        $manifest_url = $origin . '/manifest.json';
+        $envelope_url = $origin . '/manifest.sig.json';
+        $GLOBALS['ccw_test_http'][$manifest_url] = array('code' => 200, 'body' => json_encode($artifact['manifest']));
+        $GLOBALS['ccw_test_http'][$envelope_url] = array('code' => 200, 'body' => json_encode(ccw_test_sign($artifact['manifest'], $key)));
+        $artifacts[$hash] = array(
+            'artifact_hash' => $hash,
+            'manifest_url' => $manifest_url,
+            'envelope_url' => $envelope_url,
+            'files' => $urls,
+        );
+    }
+    ksort($registry_routes, SORT_STRING);
+    ksort($artifacts, SORT_STRING);
+    $registry = array(
+        'schema_version' => 2,
+        'installation_id' => $installation,
+        'sequence' => (int) $sequence,
+        'measurement' => $measurement,
+        'routes' => $registry_routes,
+    );
+    $desired = array(
+        'schema_version' => 2,
+        'request_id' => 'req-multi-' . $sequence,
+        'installation_id' => $installation,
+        'desired_state' => array(
+            'status' => 'multi',
+            'signing_key_descriptor' => $key['descriptor'],
+            'signing_key_descriptor_envelope' => $descriptor_envelope,
+            'registry_configuration' => $registry,
+            'registry_configuration_envelope' => ccw_test_sign($registry, $key),
+            'artifacts' => $artifacts,
+        ),
+    );
+    $api = CCW_Config::api_base() . '/api/marketing/web-installations/' . rawurlencode($installation) . '/desired-state';
+    $GLOBALS['ccw_test_http'][$api] = array('code' => 200, 'headers' => array('etag' => $etag), 'body' => json_encode($desired));
+    return array('api' => $api, 'desired' => $desired, 'registry' => $registry);
+}
+
+$tests['online Ed25519 rotation cross-signs, ACKs only success and blocks downgrade replay'] = static function () {
+    ccw_test_remove_tree(__DIR__ . '/tmp');
+    $GLOBALS['ccw_test_options'] = array();
+    $GLOBALS['ccw_test_http'] = array();
+    $GLOBALS['ccw_test_posts'] = array();
+    $GLOBALS['ccw_test_gets'] = array();
+    update_option(CCW_Config::OPTION_INSTALLATION_ID, 'd6d6d9bb-093e-4a40-8465-5ebf9edcde44');
+    update_option(CCW_Config::OPTION_API_BASE, 'https://api.example.test');
+    update_option(CCW_Config::OPTION_TOKEN, str_repeat('t', 48));
+    $old = ccw_test_keypair();
+    $current = ccw_test_keypair();
+    CCW_Trust_Store::import_configured_descriptor($old['descriptor']);
+
+    $publication_id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    $artifact = ccw_test_artifact('key-rotation-v2');
+    $remote = ccw_test_install_remote_v2(array(
+        $publication_id => array(
+            'route_prefix' => '/cita/',
+            'status' => 'active',
+            'artifact' => $artifact,
+        ),
+    ), $current, 1, '"rotation-current"', ccw_test_sign($current['descriptor'], $old));
+
+    $manifest_envelope_url = $remote['desired']['desired_state']['artifacts'][$artifact['hash']]['envelope_url'];
+    $manifest_envelope = json_decode((string) $GLOBALS['ccw_test_http'][$manifest_envelope_url]['body'], true);
+    ccw_test_assert(
+        ($manifest_envelope['key_id'] ?? '') === $current['descriptor']['key_id'],
+        'rotated artifact manifest was not signed by the current key'
+    );
+
+    $report_url = CCW_Config::api_base() . '/api/marketing/web-installations/'
+        . rawurlencode(CCW_Config::installation_id()) . '/reports';
+    $sync_results = 0;
+    $GLOBALS['ccw_test_http'][$report_url] = static function ($url, $args) use (&$sync_results) {
+        $payload = json_decode((string) ($args['body'] ?? ''), true);
+        if (($payload['event'] ?? '') === 'sync_result') {
+            $sync_results++;
+            return array('code' => $sync_results === 1 ? 500 : 202, 'body' => '');
+        }
+        return array('code' => 202, 'body' => '');
+    };
+    $sync = new CCW_Sync();
+    $first_result = $sync->run(true);
+    ccw_test_assert(
+        $first_result['result'] === 'multi_report_pending',
+        'lost rotation ACK was treated as acknowledged'
+    );
+    ccw_test_assert(
+        CCW_Trust_Store::active_key_id() === $current['descriptor']['key_id'],
+        'plugin did not promote the current key after a complete sync'
+    );
+    $result = $sync->run(true);
+    ccw_test_assert($result['result'] === 'multi_synced', 'rotated v2 ACK was not retried');
+    ccw_test_assert($sync_results === 2, 'rotation did not retry the lost sync_result');
+    $last_post = end($GLOBALS['ccw_test_posts']);
+    $report = json_decode((string) ($last_post['args']['body'] ?? ''), true);
+    ccw_test_assert(($report['event'] ?? '') === 'sync_result', 'rotation did not emit sync_result');
+    ccw_test_assert(
+        ($report['signing_key_id'] ?? '') === $current['descriptor']['key_id'],
+        'rotation ACK did not identify the accepted current key'
+    );
+    ccw_test_assert(
+        (int) ($report['configuration_sequence'] ?? 0) === 1
+            && (int) ($report['registry_sequence'] ?? 0) === 1,
+        'rotation ACK was not bound to the signed registry sequence'
+    );
+
+    // Keeping retired descriptors for immutable local history must not let a
+    // retired private key authorize a new control document while the response
+    // still advertises the current descriptor.
+    $wrong_registry_signer = ccw_test_install_remote_v2(array(
+        $publication_id => array(
+            'route_prefix' => '/cita/',
+            'status' => 'active',
+            'artifact' => $artifact,
+        ),
+    ), $current, 2, '"rotation-wrong-registry-signer"');
+    $wrong_registry_signer['desired']['desired_state']['registry_configuration_envelope'] = ccw_test_sign(
+        $wrong_registry_signer['registry'],
+        $old
+    );
+    $GLOBALS['ccw_test_http'][$wrong_registry_signer['api']]['body'] = json_encode(
+        $wrong_registry_signer['desired']
+    );
+    ccw_test_throws('ccw_registry_signature_invalid', static function () {
+        (new CCW_Sync())->run(true);
+    });
+
+    // Artifact envelopes are bound to the same accepted descriptor. A route
+    // failure is reported rather than replacing the last known good release.
+    $next_artifact = ccw_test_artifact('key-rotation-wrong-manifest-signer');
+    $wrong_manifest_signer = ccw_test_install_remote_v2(array(
+        $publication_id => array(
+            'route_prefix' => '/cita/',
+            'status' => 'active',
+            'artifact' => $next_artifact,
+        ),
+    ), $current, 2, '"rotation-wrong-manifest-signer"');
+    $manifest_envelope_url = $wrong_manifest_signer['desired']['desired_state']
+        ['artifacts'][$next_artifact['hash']]['envelope_url'];
+    $GLOBALS['ccw_test_http'][$manifest_envelope_url]['body'] = json_encode(
+        ccw_test_sign($next_artifact['manifest'], $old)
+    );
+    $manifest_result = (new CCW_Sync())->run(true);
+    ccw_test_assert(
+        $manifest_result['result'] === 'multi_partial_failed'
+            && ($manifest_result['routes'][$publication_id]['error_code'] ?? '') === 'ccw_manifest_signature_invalid',
+        'retired key authorized a newly downloaded artifact manifest'
+    );
+    ccw_test_assert(
+        CCW_Trust_Store::active_key_id() === $current['descriptor']['key_id'],
+        'wrong artifact signer changed the active signing key'
+    );
+
+    $replay = ccw_test_install_remote_v2(array(
+        $publication_id => array(
+            'route_prefix' => '/cita/',
+            'status' => 'active',
+            'artifact' => $artifact,
+        ),
+    ), $old, 2, '"rotation-downgrade"', ccw_test_sign($old['descriptor'], $current));
+    $GLOBALS['ccw_test_http'][$replay['api']]['body'] = json_encode($replay['desired']);
+    ccw_test_throws('ccw_key_downgrade_blocked', static function () {
+        (new CCW_Sync())->run(true);
+    });
+    ccw_test_assert(
+        CCW_Trust_Store::active_key_id() === $current['descriptor']['key_id'],
+        'downgrade replay changed the active signing key'
+    );
+};
+
+$tests['legacy v1 runtime can cross-sign the key but cannot self-bootstrap'] = static function () {
+    ccw_test_remove_tree(__DIR__ . '/tmp');
+    $GLOBALS['ccw_test_options'] = array();
+    $GLOBALS['ccw_test_http'] = array();
+    $GLOBALS['ccw_test_posts'] = array();
+    $GLOBALS['ccw_test_gets'] = array();
+    update_option(CCW_Config::OPTION_INSTALLATION_ID, 'd6d6d9bb-093e-4a40-8465-5ebf9edcde44');
+    update_option(CCW_Config::OPTION_API_BASE, 'https://api.example.test');
+    update_option(CCW_Config::OPTION_TOKEN, str_repeat('t', 48));
+    $old = ccw_test_keypair();
+    $current = ccw_test_keypair();
+    CCW_Trust_Store::import_configured_descriptor($old['descriptor']);
+    $artifact = ccw_test_artifact('key-rotation-v1');
+    ccw_test_install_remote(
+        $artifact,
+        $current,
+        1,
+        '"rotation-v1"',
+        ccw_test_sign($current['descriptor'], $old)
+    );
+    $result = (new CCW_Sync())->run(true);
+    ccw_test_assert($result['result'] === 'activated', 'rotated v1 desired-state did not complete');
+    ccw_test_assert(
+        CCW_Trust_Store::active_key_id() === $current['descriptor']['key_id'],
+        'v1 runtime did not activate the cross-signed key'
+    );
+    $last_post = end($GLOBALS['ccw_test_posts']);
+    $report = json_decode((string) ($last_post['args']['body'] ?? ''), true);
+    ccw_test_assert(
+        ($report['signing_key_id'] ?? '') === $current['descriptor']['key_id']
+            && (int) ($report['configuration_sequence'] ?? 0) === 1,
+        'v1 rotation report omitted its accepted key or sequence'
+    );
+
+    $wrong_runtime_signer = ccw_test_install_remote(
+        $artifact,
+        $current,
+        2,
+        '"rotation-v1-wrong-runtime-signer"'
+    );
+    $runtime = $wrong_runtime_signer['desired']['desired_state']['runtime_configuration'];
+    $wrong_runtime_signer['desired']['desired_state']['runtime_configuration_envelope'] = ccw_test_sign(
+        $runtime,
+        $old
+    );
+    $GLOBALS['ccw_test_http'][$wrong_runtime_signer['api']]['body'] = json_encode(
+        $wrong_runtime_signer['desired']
+    );
+    ccw_test_throws('ccw_runtime_signature_invalid', static function () {
+        (new CCW_Sync())->run(true);
+    });
+};
 
 /** @return array<string,mixed> */
 function ccw_test_setup_intake($marker = 'intake', $global_form = false)
@@ -424,6 +782,7 @@ function ccw_test_setup_intake($marker = 'intake', $global_form = false)
         'web_form_id' => $identity['form_id'],
     );
     return array(
+        'key' => $key,
         'artifact' => $artifact,
         'bridge' => new CCW_Intake_Bridge(new CCW_Cache()),
         'fields' => $fields,
@@ -540,6 +899,425 @@ $tests['full sync verifies, atomically promotes, keeps LKG and fails closed'] = 
             ccw_test_assert(!$has_authorization, 'Authorization leaked to artifact origin');
         }
     }
+};
+
+$tests['route registry adopts active pilot unchanged and resolves the longest signed prefix'] = static function () {
+    ccw_test_setup_intake('route-registry');
+    $cache = new CCW_Cache();
+    $active_path = $cache->root() . '/active.json';
+    $active_before = (string) file_get_contents($active_path);
+    $legacy_pointer = $cache->pointer();
+    $pilot_id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    $child_id = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+
+    $adopted = $cache->adopt_pilot_route(
+        $pilot_id,
+        '/cita/',
+        $legacy_pointer['active_hash'],
+        $legacy_pointer['runtime_configuration']
+    );
+    ccw_test_assert(is_array($adopted), 'legacy pilot was not adopted into routes.json');
+    ccw_test_assert($adopted['active_hash'] === $legacy_pointer['active_hash'], 'pilot adoption changed the active hash');
+    ccw_test_assert((string) file_get_contents($active_path) === $active_before, 'pilot adoption rewrote active.json');
+
+    $cache->register_pending_route($child_id, '/cita/implantes/', array(
+        'schema_version' => 2,
+        'installation_id' => CCW_Config::installation_id(),
+        'sequence' => 2,
+        'status' => 'pending',
+        'route_prefix' => '/cita/implantes/',
+        'desired_artifact_hash' => null,
+        'measurement' => array('enabled' => false),
+    ));
+    $registry = $cache->route_registry();
+    ccw_test_assert(is_file($cache->root() . '/routes.json'), 'route registry was not persisted');
+    ccw_test_assert(count($registry['routes']) === 2, 'route registry did not retain pilot and child');
+
+    $child = $cache->match_route('/cita/implantes/gracias/');
+    ccw_test_assert(($child['publication_id'] ?? '') === $child_id, 'child route lost longest-prefix precedence');
+    ccw_test_assert(($child['relative_path'] ?? '') === 'gracias/', 'child relative path is incorrect');
+    $pilot = $cache->match_route('/cita/informacion/');
+    ccw_test_assert(($pilot['publication_id'] ?? '') === $pilot_id, 'pilot fallback route is incorrect');
+    ccw_test_assert(($pilot['relative_path'] ?? '') === 'informacion/', 'pilot relative path is incorrect');
+    ccw_test_assert((string) file_get_contents($active_path) === $active_before, 'child registration rewrote active.json');
+};
+
+$tests['v2 pilot rollback keeps route runtime coherent for intake and event bridges'] = static function () {
+    ccw_test_remove_tree(__DIR__ . '/tmp');
+    $GLOBALS['ccw_test_options'] = array();
+    $GLOBALS['ccw_test_http'] = array();
+    $GLOBALS['ccw_test_posts'] = array();
+    $GLOBALS['ccw_test_gets'] = array();
+    update_option(CCW_Config::OPTION_INSTALLATION_ID, 'd6d6d9bb-093e-4a40-8465-5ebf9edcde44');
+    update_option(CCW_Config::OPTION_API_BASE, 'https://api.example.test');
+    update_option(CCW_Config::OPTION_TOKEN, str_repeat('t', 48));
+    $key = ccw_test_keypair();
+    CCW_Trust_Store::import_configured_descriptor($key['descriptor']);
+
+    $publication_id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    $first = ccw_test_artifact('pilot-rollback-one');
+    $second = ccw_test_artifact('pilot-rollback-two');
+    $sync = new CCW_Sync();
+    ccw_test_install_remote_v2(array(
+        $publication_id => array(
+            'route_prefix' => '/cita/',
+            'status' => 'active',
+            'artifact' => $first,
+        ),
+    ), $key, 1, '"pilot-rollback-1"');
+    $sync->run(true);
+    ccw_test_install_remote_v2(array(
+        $publication_id => array(
+            'route_prefix' => '/cita/',
+            'status' => 'active',
+            'artifact' => $second,
+        ),
+    ), $key, 2, '"pilot-rollback-2"');
+    $sync->run(true);
+
+    $cache = new CCW_Cache();
+    $before = $cache->route_pointer($publication_id, '/cita/');
+    ccw_test_assert($before['active_hash'] === $second['hash'], 'second pilot artifact was not active');
+    ccw_test_assert(
+        ($before['runtime_configuration']['desired_artifact_hash'] ?? '') === $second['hash'],
+        'second pilot runtime was not paired before rollback'
+    );
+
+    $rolled = $cache->rollback_local();
+    $registry = $cache->route_registry();
+    $matched = $cache->match_route('/cita/');
+    ccw_test_assert($rolled['active_hash'] === $first['hash'], 'pilot rollback did not restore first artifact');
+    ccw_test_assert(
+        ($registry['routes'][$publication_id]['runtime_configuration']['desired_artifact_hash'] ?? '') === $first['hash'],
+        'routes.json retained the target runtime after pilot rollback'
+    );
+    ccw_test_assert(
+        ($matched['pointer']['runtime_configuration']['desired_artifact_hash'] ?? '') === $first['hash'],
+        'route lookup combined the rolled-back artifact with another runtime'
+    );
+
+    $captured_lead = null;
+    $lead_url = 'https://api.example.test/api/intake/leads';
+    $GLOBALS['ccw_test_http'][$lead_url] = static function ($url, $args) use (&$captured_lead) {
+        $captured_lead = array('url' => $url, 'args' => $args);
+        return array('code' => 201, 'body' => '{"id":701}');
+    };
+    $identity = $first['identity'];
+    $fields = array(
+        'email' => 'rollback@example.test',
+        'privacy_consent' => '1',
+        '_cc_company' => '',
+        'web_project_id' => $identity['project_id'],
+        'web_revision_id' => $identity['revision_id'],
+        'web_page_id' => $identity['page_id'],
+        'web_form_id' => $identity['form_id'],
+    );
+    $server = array(
+        'REQUEST_METHOD' => 'POST',
+        'CONTENT_TYPE' => 'application/x-www-form-urlencoded; charset=UTF-8',
+        'HTTP_ORIGIN' => 'https://cliente.example.test',
+        'HTTP_REFERER' => 'https://cliente.example.test/cita/?gclid=rollback_click',
+        'HTTP_USER_AGENT' => 'Rollback Test/1.0',
+        'REMOTE_ADDR' => '203.0.113.44',
+    );
+    $bridge = new CCW_Intake_Bridge($cache);
+    $lead_result = ccw_test_bridge_process($bridge, $server, $fields, 1784290000);
+    $lead_payload = json_decode((string) ($captured_lead['args']['body'] ?? ''), true);
+    ccw_test_assert(
+        is_array($captured_lead) && empty($lead_result['honeypot'])
+        && preg_match('/^ccw_[a-f0-9]{64}$/', (string) ($lead_result['event_id'] ?? '')) === 1,
+        'rolled-back intake was not accepted'
+    );
+    ccw_test_assert(
+        ($lead_payload['web_artifact_input_hash'] ?? '') === $first['identity']['artifact_input_hash'],
+        'rolled-back intake used the target artifact identity'
+    );
+
+    $captured_event = null;
+    $event_url = 'https://api.example.test/_clinicaclick/events';
+    $GLOBALS['ccw_test_http'][$event_url] = static function ($url, $args) use (&$captured_event) {
+        $captured_event = array('url' => $url, 'args' => $args);
+        return array('code' => 200, 'body' => '{"success":true,"id":702}');
+    };
+    $event_server = $server;
+    $event_server['CONTENT_TYPE'] = 'application/json';
+    $event_wrapper = array(
+        'schema_version' => 1,
+        'endpoint' => 'events',
+        'payload' => array('event_name' => 'ViewContent'),
+        'web_project_id' => $identity['project_id'],
+        'web_revision_id' => $identity['revision_id'],
+        'web_page_id' => $identity['page_id'],
+    );
+    $event_result = ccw_test_event_process($bridge, $event_server, $event_wrapper, 1784290100);
+    $event_payload = json_decode((string) ($captured_event['args']['body'] ?? ''), true);
+    ccw_test_assert(($event_result['body']['id'] ?? null) === 702, 'rolled-back event was not accepted');
+    ccw_test_assert(
+        ($event_payload['web_artifact_input_hash'] ?? '') === $first['identity']['artifact_input_hash'],
+        'rolled-back event used the target artifact identity'
+    );
+};
+
+$tests['v2 retries a lost sync_result and rebuilds a deleted local registry without ETag'] = static function () {
+    ccw_test_remove_tree(__DIR__ . '/tmp');
+    $GLOBALS['ccw_test_options'] = array();
+    $GLOBALS['ccw_test_http'] = array();
+    $GLOBALS['ccw_test_posts'] = array();
+    $GLOBALS['ccw_test_gets'] = array();
+    update_option(CCW_Config::OPTION_INSTALLATION_ID, 'd6d6d9bb-093e-4a40-8465-5ebf9edcde44');
+    update_option(CCW_Config::OPTION_API_BASE, 'https://api.example.test');
+    update_option(CCW_Config::OPTION_TOKEN, str_repeat('t', 48));
+    $key = ccw_test_keypair();
+    CCW_Trust_Store::import_configured_descriptor($key['descriptor']);
+    $publication_id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    $remote = ccw_test_install_remote_v2(array(
+        $publication_id => array('route_prefix' => '/cita/', 'status' => 'pending'),
+    ), $key, 1, '"multi-pending"');
+    $report_url = CCW_Config::api_base() . '/api/marketing/web-installations/'
+        . rawurlencode(CCW_Config::installation_id()) . '/reports';
+    $sync_results = 0;
+    $GLOBALS['ccw_test_http'][$report_url] = static function ($url, $args) use (&$sync_results) {
+        $payload = json_decode((string) ($args['body'] ?? ''), true);
+        if (($payload['event'] ?? '') === 'sync_result') {
+            $sync_results++;
+            return array('code' => $sync_results === 1 ? 500 : 202, 'body' => '');
+        }
+        return array('code' => 202, 'body' => '');
+    };
+
+    $sync = new CCW_Sync();
+    $first = $sync->run(true);
+    ccw_test_assert($first['result'] === 'multi_report_pending' && $first['ok'] === false, 'lost report was treated as acknowledged');
+    ccw_test_assert((CCW_Config::sync_state()['etag'] ?? 'not-empty') === '', 'ETag survived an unacknowledged report');
+
+    $GLOBALS['ccw_test_gets'] = array();
+    $second = $sync->run(false);
+    ccw_test_assert($second['result'] === 'multi_synced', 'the lost report was not retried');
+    $desired_get = $GLOBALS['ccw_test_gets'][0] ?? array();
+    ccw_test_assert(!isset($desired_get['args']['headers']['If-None-Match']), 'retry incorrectly sent the unacknowledged ETag');
+    ccw_test_assert($sync_results === 2, 'sync_result was not emitted again');
+
+    $cache = new CCW_Cache();
+    @unlink($cache->root() . '/routes.json');
+    $GLOBALS['ccw_test_gets'] = array();
+    $rebuilt = $sync->run(false);
+    ccw_test_assert($rebuilt['result'] === 'multi_synced', 'deleted registry was not rebuilt');
+    ccw_test_assert(isset($cache->route_registry()['routes'][$publication_id]), 'rebuilt registry lost its route');
+    $recovery_get = $GLOBALS['ccw_test_gets'][0] ?? array();
+    ccw_test_assert(!isset($recovery_get['args']['headers']['If-None-Match']), 'missing registry trusted an ETag');
+};
+
+$tests['v2 applies and reports an empty signed registry after the final retired tombstone'] = static function () {
+    ccw_test_remove_tree(__DIR__ . '/tmp');
+    $GLOBALS['ccw_test_options'] = array();
+    $GLOBALS['ccw_test_http'] = array();
+    $GLOBALS['ccw_test_posts'] = array();
+    $GLOBALS['ccw_test_gets'] = array();
+    update_option(CCW_Config::OPTION_INSTALLATION_ID, 'd6d6d9bb-093e-4a40-8465-5ebf9edcde44');
+    update_option(CCW_Config::OPTION_API_BASE, 'https://api.example.test');
+    update_option(CCW_Config::OPTION_TOKEN, str_repeat('t', 48));
+    $key = ccw_test_keypair();
+    CCW_Trust_Store::import_configured_descriptor($key['descriptor']);
+    $publication_id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    ccw_test_install_remote_v2(array(
+        $publication_id => array('route_prefix' => '/cita/', 'status' => 'retired'),
+    ), $key, 1, '"retired-route"');
+    $sync = new CCW_Sync();
+    $sync->run(true);
+    ccw_test_assert(
+        ((new CCW_Cache())->route_pointer($publication_id, '/cita/')['status'] ?? '') === 'retired',
+        'retirement was not applied before tombstone release'
+    );
+
+    $empty = ccw_test_install_remote_v2(array(), $key, 2, '"empty-registry"');
+    $GLOBALS['ccw_test_posts'] = array();
+    $result = $sync->run(true);
+    $cache = new CCW_Cache();
+    ccw_test_assert($result['result'] === 'multi_synced', 'empty signed registry was rejected');
+    ccw_test_assert($cache->route_registry()['routes'] === array(), 'retired local tombstone was not pruned');
+    $last_post = end($GLOBALS['ccw_test_posts']);
+    $report = json_decode((string) ($last_post['args']['body'] ?? ''), true);
+    ccw_test_assert(($report['routes'] ?? null) === array(), 'empty desired registry rehydrated local routes in sync_result');
+
+    $GLOBALS['ccw_test_http'][$empty['api']] = static function ($url, $args) use ($empty) {
+        return ($args['headers']['If-None-Match'] ?? '') === '"empty-registry"'
+            ? array('code' => 304, 'body' => '')
+            : array('code' => 200, 'headers' => array('etag' => '"empty-registry"'), 'body' => json_encode($empty['desired']));
+    };
+    $not_modified = $sync->run(false);
+    ccw_test_assert($not_modified['result'] === 'not_modified', 'coherent empty registry did not revalidate with ETag');
+};
+
+$tests['v2 rejects an oversized transport plan before downloading artifact files'] = static function () {
+    $setup = ccw_test_setup_intake('budget-base');
+    $cache = new CCW_Cache();
+    $active_before = $cache->pointer()['active_hash'];
+    $publication_id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    $remote = ccw_test_install_remote_v2(array(
+        $publication_id => array(
+            'route_prefix' => '/cita/',
+            'status' => 'active',
+            'artifact' => $setup['artifact'],
+        ),
+    ), $setup['key'], 2, '"budget-overflow"');
+    $hash = $setup['artifact']['hash'];
+    for ($index = count($remote['desired']['desired_state']['artifacts'][$hash]['files']); $index <= 400; $index++) {
+        $path = 'assets/budget-' . $index . '.css';
+        $remote['desired']['desired_state']['artifacts'][$hash]['files'][$path]
+            = 'https://artifacts.example.test/' . $hash . '/' . $path;
+    }
+    $GLOBALS['ccw_test_http'][$remote['api']] = array(
+        'code' => 200,
+        'headers' => array('etag' => '"budget-overflow"'),
+        'body' => json_encode($remote['desired']),
+    );
+    $GLOBALS['ccw_test_gets'] = array();
+    ccw_test_throws('ccw_transport_budget_exceeded', static function () {
+        (new CCW_Sync())->run(true);
+    });
+    ccw_test_assert($cache->pointer()['active_hash'] === $active_before, 'transport overflow changed the active landing');
+    $artifact_requests = array_filter($GLOBALS['ccw_test_gets'], static function ($request) use ($hash) {
+        return strpos((string) ($request['url'] ?? ''), 'https://artifacts.example.test/' . $hash . '/') === 0;
+    });
+    ccw_test_assert($artifact_requests === array(), 'transport overflow downloaded artifact files before rejection');
+};
+
+$tests['configuration options are fail-closed across installation reprovisioning'] = static function () {
+    $GLOBALS['ccw_test_options'] = array();
+    $installation_a = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    $installation_b = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    update_option(CCW_Config::OPTION_INSTALLATION_ID, $installation_b);
+    update_option(CCW_Config::OPTION_API_BASE, 'https://api.example.test');
+    update_option(CCW_Config::OPTION_TOKEN, str_repeat('t', 48));
+    update_option(CCW_Config::OPTION_RUNTIME, array(
+        'schema_version' => 1,
+        'installation_id' => $installation_a,
+        'sequence' => 99,
+        'measurement' => array('enabled' => true, 'scope_type' => 'clinic', 'scope_id' => 999),
+    ));
+    update_option(CCW_Config::OPTION_SYNC, array(
+        'installation_id' => $installation_a,
+        'api_base_hash' => hash('sha256', 'https://api.example.test'),
+        'etag' => '"tenant-a"',
+        'v2_capability_handshake_at' => gmdate('c'),
+        'v2_capability_handshake_installation_id' => $installation_a,
+    ));
+    ccw_test_assert(CCW_Config::runtime_configuration() === array(), 'tenant A runtime survived tenant B reprovisioning');
+    ccw_test_assert(CCW_Config::sync_state() === array(), 'tenant A ETag/handshake survived tenant B reprovisioning');
+    ob_start();
+    (new CCW_Router(new CCW_Cache()))->measurement_tag();
+    $markup = (string) ob_get_clean();
+    ccw_test_assert($markup === '', 'tenant A measurement rendered under tenant B');
+
+    $GLOBALS['ccw_test_options'] = array();
+    CCW_Config::save_admin_configuration(array(
+        'installation_id' => $installation_a,
+        'api_base' => 'https://api-a.example.test',
+        'token' => str_repeat('a', 48),
+    ));
+    CCW_Config::set_runtime_configuration(array(
+        'schema_version' => 1,
+        'installation_id' => $installation_a,
+        'sequence' => 1,
+        'measurement' => array('enabled' => true, 'scope_type' => 'clinic', 'scope_id' => 66),
+    ));
+    CCW_Config::set_sync_state(array('etag' => '"api-a"'));
+    update_option(CCW_Config::OPTION_API_BASE, 'https://api-b.example.test');
+    ccw_test_assert(CCW_Config::runtime_configuration() === array(), 'runtime survived a same-id API identity change');
+    ccw_test_assert(CCW_Config::sync_state() === array(), 'sync state survived a same-id API identity change');
+
+    update_option(CCW_Config::OPTION_API_BASE, 'https://api-a.example.test');
+    CCW_Config::set_runtime_configuration(array(
+        'schema_version' => 1,
+        'installation_id' => $installation_a,
+        'sequence' => 2,
+        'measurement' => array('enabled' => true, 'scope_type' => 'clinic', 'scope_id' => 66),
+    ));
+    CCW_Config::set_sync_state(array('etag' => '"api-a-2"'));
+    CCW_Config::save_admin_configuration(array(
+        'installation_id' => $installation_a,
+        'api_base' => 'https://api-b.example.test',
+        'token' => '',
+    ));
+    ccw_test_assert(get_option(CCW_Config::OPTION_RUNTIME, array()) === array(), 'save did not clear runtime on API reprovisioning');
+    ccw_test_assert(get_option(CCW_Config::OPTION_SYNC, array()) === array(), 'save did not clear sync state on API reprovisioning');
+};
+
+$tests['alpha.8 adopts only the exact alpha.7 raw runtime identity'] = static function () {
+    $GLOBALS['ccw_test_options'] = array();
+    $installation = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    $api = 'https://api.example.test';
+    update_option(CCW_Config::OPTION_INSTALLATION_ID, $installation);
+    update_option(CCW_Config::OPTION_API_BASE, $api);
+    update_option(CCW_Config::OPTION_TOKEN, str_repeat('t', 48));
+    $raw = array(
+        'schema_version' => 1,
+        'installation_id' => $installation,
+        'sequence' => 7,
+        'measurement' => array(
+            'enabled' => true,
+            'scope_type' => 'clinic',
+            'scope_id' => 66,
+            'api_url' => $api,
+        ),
+    );
+    update_option(CCW_Config::OPTION_RUNTIME, $raw);
+    ccw_test_assert(CCW_Config::runtime_configuration() === $raw, 'valid alpha.7 runtime was not adopted');
+    ccw_test_assert(get_option(CCW_Config::OPTION_RUNTIME) === array(
+        'installation_id' => $installation,
+        'api_base_hash' => hash('sha256', $api),
+        'value' => $raw,
+    ), 'alpha.7 runtime was not wrapped after adoption');
+    $GLOBALS['ccw_test_gets'] = array();
+    ob_start();
+    (new CCW_Router(new CCW_Cache()))->measurement_tag();
+    $markup = (string) ob_get_clean();
+    ccw_test_assert(strpos($markup, $api . '/assets/loader.js') !== false, 'offline upgrade disabled the existing measurement tag');
+    ccw_test_assert($GLOBALS['ccw_test_gets'] === array(), 'runtime adoption unexpectedly contacted the API');
+
+    update_option(CCW_Config::OPTION_RUNTIME, array_replace($raw, array(
+        'installation_id' => 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    )));
+    ccw_test_assert(CCW_Config::runtime_configuration() === array(), 'foreign tenant raw runtime was adopted');
+
+    update_option(CCW_Config::OPTION_RUNTIME, array_replace($raw, array(
+        'measurement' => array_replace($raw['measurement'], array('api_url' => 'https://other.example.test')),
+    )));
+    ccw_test_assert(CCW_Config::runtime_configuration() === array(), 'foreign API raw runtime was adopted');
+};
+
+$tests['capability upgrade resets a corrupt registry without breaking wp-admin'] = static function () {
+    ccw_test_remove_tree(__DIR__ . '/tmp');
+    $GLOBALS['ccw_test_options'] = array();
+    $GLOBALS['ccw_test_http'] = array();
+    $GLOBALS['ccw_test_posts'] = array();
+    update_option(CCW_Config::OPTION_INSTALLATION_ID, 'd6d6d9bb-093e-4a40-8465-5ebf9edcde44');
+    update_option(CCW_Config::OPTION_API_BASE, 'https://api.example.test');
+    update_option(CCW_Config::OPTION_TOKEN, str_repeat('t', 48));
+    $cache = new CCW_Cache();
+    $cache->initialize();
+    file_put_contents($cache->root() . '/routes.json', '{not-json');
+    $reported = CCW_Plugin::report_capabilities($cache);
+    ccw_test_assert($reported === true, 'corrupt registry prevented the capability heartbeat');
+    ccw_test_assert($cache->route_registry()['routes'] === array(), 'corrupt registry was not reset safely');
+    $last_post = end($GLOBALS['ccw_test_posts']);
+    $payload = json_decode((string) ($last_post['args']['body'] ?? ''), true);
+    ccw_test_assert(($payload['schema_version'] ?? null) === 2, 'capability report lost schema v2');
+    ccw_test_assert(($payload['routes'] ?? null) === array(), 'capability report invented routes after recovery');
+};
+
+$tests['release GC preserves every active and LKG hash and removes only stale releases'] = static function () {
+    $setup = ccw_test_setup_intake('gc-active');
+    $cache = new CCW_Cache();
+    $active = $cache->pointer()['active_hash'];
+    $stale = str_repeat('f', 64);
+    $stale_path = $cache->root() . '/releases/' . $stale;
+    wp_mkdir_p($stale_path);
+    file_put_contents($stale_path . '/stale.txt', 'stale');
+    $removed = $cache->prune_releases();
+    ccw_test_assert(in_array($stale, $removed, true), 'stale release was not collected');
+    ccw_test_assert(is_dir($cache->root() . '/releases/' . $active), 'active release was collected');
+    ccw_test_assert(!is_dir($stale_path), 'stale release directory remains');
 };
 
 $tests['retired state returns no active file but retains release'] = static function () {
@@ -723,6 +1501,10 @@ $tests['signed landing event relay preserves identity for the control plane with
         ccw_test_assert(($decoded['web_project_id'] ?? '') === $identity['web_project_id'], 'project identity was removed before control-plane validation');
         ccw_test_assert(($decoded['web_revision_id'] ?? '') === $identity['web_revision_id'], 'revision identity was removed before control-plane validation');
         ccw_test_assert(($decoded['web_page_id'] ?? '') === $identity['web_page_id'], 'page identity was removed before control-plane validation');
+        ccw_test_assert(
+            ($decoded['web_artifact_input_hash'] ?? '') === $setup['artifact']['identity']['artifact_input_hash'],
+            'legacy loader event did not receive its server-resolved artifact identity'
+        );
         ccw_test_assert(($decoded['payload']['clinic_id'] ?? null) === 999, 'WordPress unexpectedly replaced control-plane canonicalization');
         ccw_test_assert(preg_match('/^ccw_evt_[a-f0-9]{64}$/', (string) ($decoded['payload']['event_id'] ?? '')) === 1, 'server event id was not added to the wrapper');
         ccw_test_assert(($headers['Origin'] ?? '') === $server['HTTP_ORIGIN'], 'original Origin was not relayed');
@@ -855,6 +1637,10 @@ $tests['signed landing bridge forwards a minimal HMAC request and redirects with
     ccw_test_assert(($payload['consent']['ad_personalization'] ?? '') === 'denied', 'ad_personalization choice was not forwarded');
     ccw_test_assert(($payload['lead_data']['telefono'] ?? '') === '+34612345678', 'phone was not normalized');
     ccw_test_assert(($payload['web_form_id'] ?? '') === 'form-bridge', 'signed form identity missing');
+    ccw_test_assert(
+        ($payload['web_artifact_input_hash'] ?? '') === $setup['artifact']['identity']['artifact_input_hash'],
+        'legacy alpha.7 form did not receive its server-resolved artifact identity'
+    );
 
     $without_ads = $setup['fields'];
     unset($without_ads['_cc_ad_user_data'], $without_ads['_cc_ad_personalization']);
@@ -977,6 +1763,12 @@ $tests['landing bridge fails closed on forged browser metadata, duplicate fields
     $forged['web_project_id'] = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
     ccw_test_throws('ccw_intake_signed_form_mismatch', static function () use ($setup, $forged) {
         ccw_test_bridge_process($setup['bridge'], $setup['server'], $forged);
+    });
+
+    $forged_artifact = $setup['fields'];
+    $forged_artifact['web_artifact_input_hash'] = str_repeat('f', 64);
+    ccw_test_throws('ccw_intake_artifact_identity_mismatch', static function () use ($setup, $forged_artifact) {
+        ccw_test_bridge_process($setup['bridge'], $setup['server'], $forged_artifact);
     });
 
     $cross_origin = $setup['server'];
@@ -1113,6 +1905,33 @@ $tests['artifact CSP limits dynamic runtime allowances to styles and images'] = 
             CCW_Manifest::safe_headers(array_merge($headers, array('content-security-policy' => $unsafe)), $runtime);
         });
     }
+};
+
+$tests['site claim exposes only a digest and disappears after backend ACK'] = static function () {
+    $installation_id = 'f6d6d9bb-093e-4a40-8465-5ebf9edcde44';
+    $raw_claim = str_repeat('q', 43);
+    $reflection = new ReflectionClass('CCW_Config');
+    $property = $reflection->getProperty('provisioned');
+    $property->setAccessible(true);
+    $property->setValue(null, array(
+        'installation_id' => $installation_id,
+        'api_base' => 'https://crm.clinicaclick.com',
+        'token' => 'ccw_' . str_repeat('a', 43),
+        'site_claim_token' => $raw_claim,
+    ));
+    delete_option(CCW_Config::OPTION_SITE_CLAIM_ACK);
+
+    $document = CCW_Site_Claim::claim_document();
+    ccw_test_assert(is_array($document), 'site claim was not exposed while pending');
+    ccw_test_assert(($document['installation_id'] ?? '') === $installation_id, 'site claim installation mismatch');
+    ccw_test_assert(($document['canonical_home_url'] ?? '') === 'https://cliente.example.test', 'site claim home mismatch');
+    ccw_test_assert(($document['claim_token_sha256'] ?? '') === hash('sha256', $raw_claim), 'site claim digest mismatch');
+    ccw_test_assert(strpos(json_encode($document), $raw_claim) === false, 'site claim leaked the raw challenge');
+
+    ccw_test_assert(CCW_Config::acknowledge_site_claim() === true, 'site claim ACK was not persisted');
+    ccw_test_assert(CCW_Site_Claim::claim_document() === null, 'site claim remained public after ACK');
+    $property->setValue(null, array());
+    delete_option(CCW_Config::OPTION_SITE_CLAIM_ACK);
 };
 
 $passed = 0;

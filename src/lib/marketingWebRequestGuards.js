@@ -7,6 +7,7 @@ const MARKETING_WEB_JSON_LIMIT_BYTES = 1024 * 1024;
 const PUBLIC_RATE_LIMIT_PREFIX = String(
   process.env.MARKETING_WEB_RATE_LIMIT_PREFIX || 'clinicaclick:marketing-web-rate-limit:v1'
 ).trim();
+const MAX_LOCAL_PUBLIC_RATE_LIMIT_BUCKETS = 10000;
 let publicRateLimitRedis = null;
 
 function getPublicRateLimitRedis() {
@@ -61,12 +62,35 @@ function createPublicMarketingWebRateLimiter({
   // `false` mantiene un almacén local determinista para tests. En ejecución
   // real Redis hace que el límite sea único aunque PM2 tenga varios workers.
   store = undefined,
+  maxLocalBuckets = MAX_LOCAL_PUBLIC_RATE_LIMIT_BUCKETS,
 } = {}) {
+  if (!Number.isInteger(maxLocalBuckets) || maxLocalBuckets < 2) {
+    throw new TypeError('public_marketing_web_local_bucket_limit_invalid');
+  }
   const buckets = new Map();
   const distributedStore = store === undefined ? getPublicRateLimitRedis() : store;
 
+  function pruneExpiredLocalBuckets(currentTime) {
+    for (const [bucketKey, value] of buckets.entries()) {
+      if (value.resetAt <= currentTime) buckets.delete(bucketKey);
+    }
+  }
+
   function localIncrement(key, limit, windowMs, currentTime) {
     const current = buckets.get(key);
+    if (!current && buckets.size >= maxLocalBuckets) {
+      pruneExpiredLocalBuckets(currentTime);
+      // Si Redis no está disponible y el mapa local alcanza su cota con
+      // buckets vivos, una identidad nueva se rechaza. Vaciar el mapa abriría
+      // precisamente el bypass que este fallback debe contener.
+      if (buckets.size >= maxLocalBuckets) {
+        return {
+          count: limit + 1,
+          limit,
+          retryAfter: Math.max(1, Math.ceil(windowMs / 1000)),
+        };
+      }
+    }
     const bucket = !current || current.resetAt <= currentTime
       ? { count: 0, resetAt: currentTime + windowMs }
       : current;
@@ -101,35 +125,30 @@ function createPublicMarketingWebRateLimiter({
     limit,
     windowMs,
     identity = null,
-    globalIpLimit = null,
+    globalIpLimit,
   }) {
+    if (!/^[a-z0-9][a-z0-9:_-]{1,95}$/i.test(String(operation || ''))) {
+      throw new TypeError('public_marketing_web_rate_limit_operation_invalid');
+    }
+    if (!Number.isInteger(limit) || limit <= 0) {
+      throw new TypeError('public_marketing_web_rate_limit_invalid');
+    }
+    if (!Number.isInteger(windowMs) || windowMs <= 0) {
+      throw new TypeError('public_marketing_web_rate_limit_window_invalid');
+    }
+    // Toda operación pública debe declarar un backstop global por IP mayor que
+    // su bucket individual. Así se permiten varias instalaciones legítimas tras
+    // una NAT, pero rotar UUID no permite consultas ilimitadas antes de auth.
+    if (!Number.isInteger(globalIpLimit) || globalIpLimit <= limit) {
+      throw new TypeError('public_marketing_web_global_ip_rate_limit_required');
+    }
     return (req, res, next) => {
-      const suppliedIdentity = typeof identity === 'function'
-        ? identity(req)
-        : req.params?.installationId;
-      const installationId = /^[a-f0-9-]{36}$/i.test(String(suppliedIdentity || ''))
-        ? String(suppliedIdentity).toLowerCase()
-        : 'invalid';
       const ip = String(req.ip || req.socket?.remoteAddress || 'unknown').slice(0, 96);
       const currentTime = now();
-      const identities = [{ key: `${operation}:${installationId}:${ip}`, limit }];
-      if (Number.isInteger(globalIpLimit) && globalIpLimit > limit) {
-        identities.push({ key: `${operation}:global-ip:${ip}`, limit: globalIpLimit });
-      }
-      const run = async () => {
-        let exceeded = null;
-        for (const item of identities) {
-          const bucket = await distributedIncrement(item.key, item.limit, windowMs, currentTime);
-          if (!exceeded && bucket.count > item.limit) exceeded = bucket;
-        }
-        if (buckets.size > 10000) {
-          for (const [bucketKey, value] of buckets.entries()) {
-            if (value.resetAt <= currentTime) buckets.delete(bucketKey);
-          }
-          if (buckets.size > 10000) buckets.clear();
-        }
-        if (!exceeded) return next();
-        const retryAfter = exceeded.retryAfter;
+      const globalKey = `${operation}:global-ip:${ip}`;
+
+      function rejectRateLimit(bucket) {
+        const retryAfter = bucket.retryAfter;
         const requestId = crypto.randomUUID();
         res.set('Retry-After', String(retryAfter));
         res.set('X-Request-Id', requestId);
@@ -143,6 +162,34 @@ function createPublicMarketingWebRateLimiter({
           },
           request_id: requestId,
         });
+      }
+
+      const run = async () => {
+        // Este bucket se evalúa antes incluso de normalizar la identidad. Si la
+        // IP ya agotó su cuota, no se crea una clave Redis distinta por cada
+        // installationId válido o inválido que rote el atacante.
+        const globalBucket = await distributedIncrement(
+          globalKey,
+          globalIpLimit,
+          windowMs,
+          currentTime
+        );
+        if (globalBucket.count > globalIpLimit) return rejectRateLimit(globalBucket);
+
+        const suppliedIdentity = typeof identity === 'function'
+          ? identity(req)
+          : req.params?.installationId;
+        const installationId = /^[a-f0-9-]{36}$/i.test(String(suppliedIdentity || ''))
+          ? String(suppliedIdentity).toLowerCase()
+          : 'invalid';
+        const identityBucket = await distributedIncrement(
+          `${operation}:${installationId}:${ip}`,
+          limit,
+          windowMs,
+          currentTime
+        );
+        if (identityBucket.count > limit) return rejectRateLimit(identityBucket);
+        return next();
       };
       return run().catch(next);
     };

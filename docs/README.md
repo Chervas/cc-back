@@ -23,7 +23,29 @@ Fuente canónica de arquitectura: `src/Documentacion/13-backend.md`, secciones
 Operación WordPress: `wordpress/clinicaclick-web/README.md`. Origen alojado:
 `ops/nginx/README-marketing-web.md`.
 
-Estado 2026-07-18:
+Estado 2026-07-19:
+
+- candidato backend/plugin `2.0.0-alpha.8` (aún sin deploy): registro firmado
+  schema 2 para hasta 20 rutas por WordPress, `/cita/` estable más
+  `/cita/<slug>/`, tombstones con ACK antes de liberar capacidad, token staged,
+  artefactos autenticados por lookup dirigido y reconciliación transaccional
+  del runtime de intake. Una instalación `pending` ya no reserva el dominio:
+  debe demostrar control con un challenge independiente servido por HTTPS antes
+  de recibir desired-state o artefactos. Runtime, registro y manifests se ligan
+  a la clave Ed25519 exacta aceptada para impedir replay con una retirada. La
+  instalación pública continúa en `alpha.7` hasta un rollout explícito;
+
+- validación del candidato: **319/319** contratos Node de Marketing Web,
+  **39/39** contratos PHP/WordPress y los tres contratos de interoperabilidad,
+  compilador real y ZIP provisionado pasan. La auditoría P0/P1/HIGH termina con
+  cero abiertos. La migración de claim pasó además un preflight sobre MySQL real
+  en una tabla desechable del esquema de staging y se limpió al terminar. El
+  preflight de sobres runtime pasó también sobre MySQL 8.0.42: espera frente a
+  un writer previo, fence INSERT/UPDATE/DELETE, caída DDL, rerun, descifrado y
+  limpieza final sin tabla/trigger residual;
+- ZIP genérico `alpha.8` reconstruido dos veces de forma determinista: 17
+  entradas, incluida `class-ccw-site-claim.php`, SHA-256
+  `e7d852f2fd2c1bb028840974a9fce31fae829f6378c9e2690d6877f86e011eda`;
 
 - el baseline backend integrado llegó a `4e4b555`/staging `5e57431`; el corte
   vigente de renderer/galería y drift está en `c9fe9dc`/`68360ed`, promovido a
@@ -37,6 +59,10 @@ Estado 2026-07-18:
 - migraciones `19000..25000` aplicadas tras backup, más la aditiva
   `20260718225000-add-campaign-destination-drift-event.js`; 17 tablas y cinco
   plantillas; cero policies/bindings reales creados;
+- las siete migraciones candidatas —`20260718230000`, `20260718233000`,
+  `20260719090000`, `20260719091500`, `20260719093000`, `20260719094500` y
+  `20260719100000`— están implementadas y probadas, pero no se consideran
+  aplicadas hasta el rollout controlado de staging;
 - gates de staging: editor para scopes Propdental y publicación solo
   `group:5` mediante `MARKETING_WEB_PUBLISHING_SCOPES`;
 - plugin WordPress `2.0.0-alpha.7` instalado/activo en Propdental junto al
@@ -66,8 +92,9 @@ Estado 2026-07-18:
   auditoría de destino usa el orquestador común una vez al día (`5 3 * * *`),
   sin autoreparación. La suite de Campañas pasa 34 contratos/46 pruebas;
 - hosted/custom domain no están disponibles;
-- un WordPress compartido por varias clínicas exige multi-route antes de
-  ampliar el piloto, y la rotación Ed25519 operativa sigue siendo gate de GA.
+- el candidato ya implementa un WordPress compartido por varias clínicas y la
+  rotación Ed25519 online. Lo que sigue siendo gate de GA es migrarlo,
+  desplegarlo y acreditar el E2E real de dos rutas y una rotación completa.
 
 La migración `20260715152000-purge-google-places-competition-content.js` está
 cancelada y sus `up`/`down` son no-op. No es una migración pendiente ni debe
@@ -130,8 +157,10 @@ Tanda promovida y desplegada:
 - `marketing_web_publication_health_monitor` opera cada hora, lote 25,
   sin autoreparación ni APIs publicitarias;
 - la suite completa, promoción y E2E público con limpieza están cerrados.
-  WordPress multi-route y rotación Ed25519 operativa siguen siendo gates; los
-  canales hosted/custom continúan bloqueados por DNS/TLS/origen/proveedor.
+  Esta es evidencia histórica de `alpha.7`: multi-route y rotación Ed25519 no
+  estaban en ese runtime. El candidato `alpha.8` los implementa, pero aún debe
+  completar migración, despliegue y E2E; hosted/custom siguen bloqueados por
+  DNS/TLS/origen/proveedor.
 
 La auditoría Figma se materializó en un onboarding de tres pasos y un selector
 de plantillas compatible con la campaña, sin fallback arbitrario. El frontend
@@ -182,8 +211,10 @@ diagnósticos/recomendaciones. No cambia campañas, custom goals, URLs, pujas,
 presupuesto ni estados. Las referencias posteriores a **Conecta y mejora** son
 el nombre visible del corte histórico de julio previo a esta integración.
 
-Estado de arquitectura vigente (2026-07-18): staging registra **33 tareas
-periódicas**, **10 integraciones dirigidas/background** y **58 handlers**. La
+Estado de arquitectura candidato (2026-07-19): registra **33 tareas
+periódicas**, **10 integraciones dirigidas/background** y **59 handlers**. El
+handler adicional `web_intake_runtime_reconcile` pertenece al mismo
+`JobRequest`; no crea un timer lateral. La
 publicación, los destinos y el monitor Web continúan dentro del mismo
 `JobRequest`, nunca en un cron paralelo. El detalle histórico siguiente sobre
 outbox/retención se conserva: también son durables `marketing_competition_heatmap_refresh`, `automation_whatsapp_quiet_send`, `whatsapp_template_sync_delayed` e `intake_quickchat_summary_materialize`. Este último es un outbox de prioridad alta compartido por `source_detail=chatbot` y `chatbot_quickchat`: cada payload aceptado conserva en una transacción su audit exacto y job, tanto para un lead nuevo como para uno deduplicado. El JobRequest solo guarda `lead_id + audit_id` más el namespace técnico añadido por la cola; la sede validada queda en `audit.attribution_steps.resolved_clinic_id`. El handler exige esa sede y un mismatch con el lead termina `409` sin Message/socket; solo audits legacy sin marcador caen de forma segura en la clínica del lead. `Messages.metadata.intake_audit_id` impone orden durable: bajo lock del lead, el audit mayor gana y cualquier job antiguo completa como `skipped/stale` sin cambiar contenido, socket ni `last_message_at`; el watermark avanza aunque hash/contenido sean idénticos y un mensaje legacy idéntico adopta el primer marcador. El fast path admite el `result_summary` envuelto por `JobExecutor` y el formato directo compatible de callers/tests, devuelve `saved=true` solo si terminó, `202 + queued` si queda reintentable y preserva `4xx` seguros como el `409` de sede. Si falla el disparo, relee `JobRequest`; si tampoco puede releerlo responde `202 unknown_durable`, no inventa `pending`. Un `chatbot` deduplicado termina con ese outcome antes de Meta/Google para no duplicar conversiones, mientras los demás dedupes conservan `409`. Teléfonos fuera de 9–15 dígitos y emails presentes inválidos devuelven `422` antes de confirmar el lead. `pm2-back-staging` opera con cron leader + worker; las cinco líneas OPS se retiraron del crontab. `#23664-#23670` validaron los bridges y `payloadDefaults`; `#23672` completó la retención real. `SyncLogs` (auditoría funcional BD) y ficheros PM2 (stdout/stderr, 60 días) son retenciones independientes.

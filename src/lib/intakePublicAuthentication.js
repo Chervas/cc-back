@@ -45,12 +45,33 @@ function validateHmacRequest(req, secret, providedSignature = intakeSignature(re
   return secureHexEqual(signature, expected);
 }
 
+function scopedHmacKeys(config) {
+  const values = [
+    config?.hmac_key,
+    ...(Array.isArray(config?.accepted_hmac_keys) ? config.accepted_hmac_keys : []),
+  ].map((value) => String(value || '').trim()).filter(Boolean);
+  return [...new Set(values)];
+}
+
+function runtimeCandidates(config) {
+  if (!config) return [];
+  const transition = Array.isArray(config.runtime_transition_candidates)
+    ? config.runtime_transition_candidates.filter(Boolean)
+    : [];
+  return transition.length ? transition : [config];
+}
+
+function candidateOwnsHmac(config) {
+  return runtimeCandidates(config).some((runtimeConfig) => scopedHmacKeys(runtimeConfig).length > 0);
+}
+
 /**
  * Resolve the applicable IntakeConfig without allowing a broader credential to
- * shadow a narrower one. A correctly signed candidate always wins. If no
- * candidate verifies, return the first candidate that owns an HMAC so the
- * authentication gate rejects the request instead of falling through to an
- * unsigned clinic record or the global server credential.
+ * shadow or rescue a narrower one. The first candidate that owns an HMAC is
+ * the sole credential owner; only its transition candidates may verify. If
+ * none verifies, return that same owner so the authentication gate rejects the
+ * request instead of falling through to a broader scope, an unsigned record,
+ * or the global server credential.
  */
 function pickMatchingIntakeConfig({
   req,
@@ -62,19 +83,21 @@ function pickMatchingIntakeConfig({
   const candidates = [clinicCfg, groupCfg, domainCfg].filter(Boolean);
   if (!candidates.length) return null;
 
-  if (providedSignature) {
-    const matched = candidates.find((config) => (
-      String(config?.hmac_key || '').trim()
-      && validateHmacRequest(req, config.hmac_key, providedSignature)
-    ));
-    if (matched) return matched;
+  // Select exactly one credential owner by scope precedence. A signature from
+  // a broader group/domain must never rescue a failed clinic credential. The
+  // caller will authenticate the returned owner and issue 401 when it fails.
+  const owner = candidates.find(candidateOwnsHmac);
+  if (owner) {
+    if (providedSignature) {
+      const matched = runtimeCandidates(owner).find((runtimeConfig) => (
+        scopedHmacKeys(runtimeConfig).some((key) => validateHmacRequest(req, key, providedSignature))
+      ));
+      if (matched) return matched;
+    }
+    return owner;
   }
 
-  return candidates.find((config) => String(config?.hmac_key || '').trim())
-    || clinicCfg
-    || groupCfg
-    || domainCfg
-    || null;
+  return clinicCfg || groupCfg || domainCfg || null;
 }
 
 /**
@@ -91,12 +114,13 @@ function authenticatePublicIntakeRequest({
   config = null,
   fallbackSecret = '',
 } = {}) {
-  const scopedSecret = String(config?.hmac_key || '').trim();
+  const scopedSecrets = scopedHmacKeys(config);
   const serverSecret = String(fallbackSecret || '').trim();
 
-  if (scopedSecret) {
-    return validateHmacRequest(req, scopedSecret)
-      ? { ok: true, source: 'intake_config_hmac' }
+  if (scopedSecrets.length) {
+    const matchedIndex = scopedSecrets.findIndex((secret) => validateHmacRequest(req, secret));
+    return matchedIndex >= 0
+      ? { ok: true, source: matchedIndex === 0 ? 'intake_config_hmac' : 'intake_runtime_transition_hmac' }
       : {
           ok: false,
           status: 401,
@@ -160,4 +184,7 @@ module.exports = {
   pickMatchingIntakeConfig,
   rawBodyBuffer,
   validateHmacRequest,
+  scopedHmacKeys,
+  runtimeCandidates,
+  candidateOwnsHmac,
 };

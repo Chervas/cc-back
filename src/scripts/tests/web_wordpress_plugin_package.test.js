@@ -84,7 +84,7 @@ test('genera un ZIP provisionado mantenido, acotado y sin fuentes de test', asyn
   const first = await buildProvisionedPluginPackage({ credentials: credentials() });
   const second = await buildProvisionedPluginPackage({ credentials: credentials() });
   assert.equal(first.filename, 'clinicaclick-web.zip');
-  assert.equal(first.plugin_version, '2.0.0-alpha.7');
+  assert.equal(first.plugin_version, '2.0.0-alpha.8');
   assert.equal(first.sha256, second.sha256);
   assert.deepEqual(first.buffer, second.buffer);
   assert.equal(first.buffer.readUInt32LE(0), 0x04034b50);
@@ -143,6 +143,69 @@ test('un hash de instalación malformado falla cerrado sin excepción criptográ
   );
 });
 
+test('un ZIP de rotación exige exclusivamente el token staged vigente en una instalación conectada', async () => {
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
+  const previousKeys = crypto.generateKeyPairSync('ed25519');
+  const signingOptions = {
+    privateKeyPem: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+    publicKeyPem: publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+  };
+  const previousSigningOptions = {
+    privateKeyPem: previousKeys.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+    publicKeyPem: previousKeys.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+  };
+  const activeToken = `ccw_${crypto.randomBytes(32).toString('base64url')}`;
+  const stagedToken = `ccw_${crypto.randomBytes(32).toString('base64url')}`;
+  const bootstrapEnv = {
+    MARKETING_WEB_PLUGIN_BOOTSTRAP_KEY: crypto.randomBytes(32).toString('base64url'),
+    MARKETING_WEB_API_BASE_URL: 'https://crm.clinicaclick.com',
+  };
+  const installation = {
+    id: credentials().installation_id,
+    status: 'connected',
+    tokenHash: tokenHash(activeToken),
+    nextTokenHash: tokenHash(stagedToken),
+    nextTokenExpiresAt: new Date(Date.now() + 60_000),
+    publicKeyId: pluginKeyDescriptor(previousSigningOptions).key_id,
+  };
+  const ticketFor = (token) => issueBootstrapTicket({
+    installationId: installation.id,
+    actorId: 77,
+    token,
+    env: bootstrapEnv,
+  }).ticket;
+  const common = {
+    actorId: 77,
+    installationId: installation.id,
+    env: bootstrapEnv,
+    models: { WebAuditEvent: { create: async () => {} } },
+    signingOptions,
+    getInstallation: async () => ({ installation, scope: { type: 'clinic', id: 66 } }),
+  };
+  await assert.rejects(
+    () => provisionWordpressPluginPackage({ ...common, bootstrapTicket: ticketFor(activeToken) }),
+    (error) => error.code === 'web_wordpress_bootstrap_ticket_invalid'
+  );
+  const archive = await provisionWordpressPluginPackage({
+    ...common,
+    bootstrapTicket: ticketFor(stagedToken),
+  });
+  assert.equal(archive.plugin_version, '2.0.0-alpha.8');
+  assert.equal(archive.buffer.includes(Buffer.from(stagedToken)), true);
+  assert.equal(
+    archive.buffer.includes(Buffer.from(pluginKeyDescriptor(signingOptions).key_id)),
+    true,
+    'fresh ZIP did not carry the current trust anchor while database ACK was still old'
+  );
+  assert.notEqual(installation.publicKeyId, pluginKeyDescriptor(signingOptions).key_id);
+
+  installation.nextTokenExpiresAt = new Date(Date.now() - 1_000);
+  await assert.rejects(
+    () => provisionWordpressPluginPackage({ ...common, bootstrapTicket: ticketFor(stagedToken) }),
+    (error) => error.code === 'web_wordpress_bootstrap_ticket_invalid'
+  );
+});
+
 test('una instalación pending completa el handshake y una retirada confirmada invalida su hash activo', async () => {
   const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
   const signingOptions = {
@@ -150,12 +213,17 @@ test('una instalación pending completa el handshake y una retirada confirmada i
     publicKeyPem: publicKey.export({ type: 'spki', format: 'pem' }).toString(),
   };
   const token = `ccw_${crypto.randomBytes(32).toString('base64url')}`;
+  const siteClaimToken = crypto.randomBytes(32).toString('base64url');
   const installation = {
     id: 'd6d6d9bb-093e-4a40-8465-5ebf9edcde44',
     scopeType: 'clinic',
     clinicaId: 66,
     grupoClinicaId: null,
     siteUrl: 'https://cliente.example.test',
+    siteUrlHash: crypto.createHash('sha256').update('https://cliente.example.test').digest('hex'),
+    claimedSiteHash: null,
+    siteClaimTokenHash: tokenHash(siteClaimToken),
+    siteClaimExpiresAt: new Date(Date.now() + 60_000),
     tokenHash: tokenHash(token),
     tokenPrefix: token.slice(0, 12),
     status: 'pending',
@@ -172,6 +240,7 @@ test('una instalación pending completa el handshake y una retirada confirmada i
     installationId: installation.id,
     actorId: 77,
     token,
+    siteClaimToken,
     env: bootstrapEnv,
   });
   const audits = [];
@@ -191,7 +260,7 @@ test('una instalación pending completa el handshake y una retirada confirmada i
 
   const handshakeModels = {
     WebWordpressInstallation: {
-      findOne: async () => installation,
+      findByPk: async () => installation,
       findByPk: async () => installation,
     },
     WebPublication: { findAll: async () => [] },
@@ -217,6 +286,12 @@ test('una instalación pending completa el handshake y una retirada confirmada i
     },
     models: handshakeModels,
     sequelize,
+    verifySiteClaim: async ({ expectedClaimTokenHash }) => ({
+      installation_id: installation.id,
+      site_url: installation.siteUrl,
+      site_url_hash: installation.siteUrlHash,
+      claim_token_hash: expectedClaimTokenHash,
+    }),
   });
   assert.equal(report.accepted, true);
   assert.equal(installation.status, 'connected');

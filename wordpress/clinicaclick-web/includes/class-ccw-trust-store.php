@@ -7,6 +7,7 @@ if (!defined('ABSPATH') && !defined('CCW_TESTING')) {
 final class CCW_Trust_Store
 {
     const SPKI_PREFIX_HEX = '302a300506032b6570032100';
+    const MAX_RETIRED_KEYS = 32;
 
     /** @return array<string,array<string,mixed>> */
     public static function all()
@@ -57,8 +58,30 @@ final class CCW_Trust_Store
         $normalized = self::validate_descriptor($descriptor);
         $stored = get_option(CCW_Config::OPTION_TRUSTED_KEYS, array());
         $stored = is_array($stored) ? $stored : array();
+        $previous_active = self::active_key_id(self::all());
+        $previous_state = self::read_state();
         $stored[$normalized['key_id']] = $normalized;
         update_option(CCW_Config::OPTION_TRUSTED_KEYS, $stored, false);
+        // This method is reachable only through an explicit administrator or
+        // provisioned out-of-band action. It is therefore also the break-glass
+        // path when the previous private key is lost/compromised; remote
+        // desired-state never calls it.
+        $retired = $previous_state['retired_key_ids'];
+        if ($previous_active !== '' && !hash_equals($previous_active, $normalized['key_id'])) {
+            $retired[] = $previous_active;
+        }
+        $retired = array_values(array_unique(array_filter($retired, static function ($candidate) use ($normalized) {
+            return !hash_equals((string) $candidate, $normalized['key_id']);
+        })));
+        if (count($retired) > self::MAX_RETIRED_KEYS) {
+            $retired = array_slice($retired, -self::MAX_RETIRED_KEYS);
+        }
+        self::write_state(array(
+            'active_key_id' => $normalized['key_id'],
+            'pending_key_id' => null,
+            'pending_from_key_id' => null,
+            'retired_key_ids' => $retired,
+        ));
         return $normalized;
     }
 
@@ -67,27 +90,217 @@ final class CCW_Trust_Store
     {
         $normalized = self::validate_descriptor($descriptor);
         $keys = self::all();
-        if (isset($keys[$normalized['key_id']])) {
-            $existing = self::validate_descriptor($keys[$normalized['key_id']]);
-            if (!hash_equals(self::raw_public_key($existing), self::raw_public_key($normalized))) {
-                throw new CCW_Error('ccw_key_id_collision', 'El descriptor remoto no coincide con la clave pública ya confiada.');
-            }
-            return $existing;
-        }
         if ($keys === array()) {
             throw new CCW_Error(
                 'ccw_trust_not_configured',
                 'Falta configurar el descriptor inicial de la clave pública de ClinicaClick.'
             );
         }
-        if (!self::verify_signed_payload($normalized, $envelope, $keys)) {
+        $active_key_id = self::active_key_id($keys);
+        if ($active_key_id === '' || !isset($keys[$active_key_id])) {
+            throw new CCW_Error(
+                'ccw_trust_state_ambiguous',
+                'No se puede determinar de forma segura la clave de firma activa.'
+            );
+        }
+        $state = self::read_state();
+        $retired = array_fill_keys($state['retired_key_ids'], true);
+        if (isset($retired[$normalized['key_id']])) {
+            throw new CCW_Error('ccw_key_downgrade_blocked', 'Se ha rechazado una clave de firma retirada anteriormente.');
+        }
+        if (hash_equals($active_key_id, $normalized['key_id'])) {
+            $existing = self::validate_descriptor($keys[$normalized['key_id']]);
+            if (!hash_equals(self::raw_public_key($existing), self::raw_public_key($normalized))) {
+                throw new CCW_Error('ccw_key_id_collision', 'El descriptor remoto no coincide con la clave pública ya confiada.');
+            }
+            return $existing;
+        }
+
+        if (isset($keys[$normalized['key_id']])) {
+            $existing = self::validate_descriptor($keys[$normalized['key_id']]);
+            if (!hash_equals(self::raw_public_key($existing), self::raw_public_key($normalized))) {
+                throw new CCW_Error('ccw_key_id_collision', 'El descriptor remoto no coincide con la clave pública ya confiada.');
+            }
+            if (
+                !hash_equals((string) ($state['pending_key_id'] ?? ''), $normalized['key_id'])
+                || !hash_equals((string) ($state['pending_from_key_id'] ?? ''), $active_key_id)
+            ) {
+                throw new CCW_Error('ccw_key_rotation_not_authorized', 'La clave remota no pertenece a la transición activa.');
+            }
+        }
+        if (!self::verify_signed_payload($normalized, $envelope, array($active_key_id => $keys[$active_key_id]))) {
             throw new CCW_Error('ccw_key_rotation_signature_invalid', 'La rotación de clave pública no está firmada por una clave confiada.');
         }
         $stored = get_option(CCW_Config::OPTION_TRUSTED_KEYS, array());
         $stored = is_array($stored) ? $stored : array();
         $stored[$normalized['key_id']] = $normalized;
         update_option(CCW_Config::OPTION_TRUSTED_KEYS, $stored, false);
+        self::write_state(array(
+            'active_key_id' => $active_key_id,
+            'pending_key_id' => $normalized['key_id'],
+            'pending_from_key_id' => $active_key_id,
+            'retired_key_ids' => $state['retired_key_ids'],
+        ));
         return $normalized;
+    }
+
+    /**
+     * Marks a remotely introduced key active only after the signed desired
+     * state has been applied completely. The previous active key remains in
+     * the verification store for immutable historical artifacts, but can never
+     * become active again through desired-state.
+     */
+    public static function promote_remote_descriptor($key_id)
+    {
+        $key_id = (string) $key_id;
+        $keys = self::all();
+        $active_key_id = self::active_key_id($keys);
+        if ($active_key_id !== '' && hash_equals($active_key_id, $key_id)) {
+            return $key_id;
+        }
+        $state = self::read_state();
+        if (
+            $active_key_id === ''
+            || !isset($keys[$key_id])
+            || !hash_equals((string) ($state['pending_key_id'] ?? ''), $key_id)
+            || !hash_equals((string) ($state['pending_from_key_id'] ?? ''), $active_key_id)
+        ) {
+            throw new CCW_Error('ccw_key_rotation_not_authorized', 'La nueva clave no ha completado una transición firmada válida.');
+        }
+        $retired = array_values(array_unique(array_merge(
+            $state['retired_key_ids'],
+            array($active_key_id)
+        )));
+        $retired = array_values(array_filter($retired, static function ($candidate) use ($key_id) {
+            return !hash_equals((string) $candidate, $key_id);
+        }));
+        if (count($retired) > self::MAX_RETIRED_KEYS) {
+            $retired = array_slice($retired, -self::MAX_RETIRED_KEYS);
+        }
+        self::write_state(array(
+            'active_key_id' => $key_id,
+            'pending_key_id' => null,
+            'pending_from_key_id' => null,
+            'retired_key_ids' => $retired,
+        ));
+        return $key_id;
+    }
+
+    /** @return string */
+    public static function active_key_id(array $keys = null)
+    {
+        $keys = $keys === null ? self::all() : $keys;
+        $state = self::read_state();
+        $active = (string) ($state['active_key_id'] ?? '');
+        if ($active !== '' && isset($keys[$active])) {
+            return $active;
+        }
+
+        $bootstrap = self::bootstrap_descriptor();
+        if (is_array($bootstrap)) {
+            try {
+                $normalized = self::validate_descriptor($bootstrap);
+                if (isset($keys[$normalized['key_id']])) {
+                    self::write_state(array(
+                        'active_key_id' => $normalized['key_id'],
+                        'pending_key_id' => null,
+                        'pending_from_key_id' => null,
+                        'retired_key_ids' => array(),
+                    ));
+                    return $normalized['key_id'];
+                }
+            } catch (CCW_Error $error) {
+                return '';
+            }
+        }
+        if (count($keys) === 1) {
+            $key_id = (string) array_key_first($keys);
+            self::write_state(array(
+                'active_key_id' => $key_id,
+                'pending_key_id' => null,
+                'pending_from_key_id' => null,
+                'retired_key_ids' => array(),
+            ));
+            return $key_id;
+        }
+        return '';
+    }
+
+    /** @return array<string,mixed> */
+    private static function read_state()
+    {
+        $empty = array(
+            'active_key_id' => '',
+            'pending_key_id' => null,
+            'pending_from_key_id' => null,
+            'retired_key_ids' => array(),
+        );
+        $stored = get_option(CCW_Config::OPTION_SIGNING_TRUST_STATE, array());
+        if (!is_array($stored)) {
+            return $empty;
+        }
+        try {
+            $installation_id = CCW_Config::installation_id();
+            $api_base_hash = hash('sha256', CCW_Config::api_base());
+        } catch (CCW_Error $error) {
+            return $empty;
+        }
+        if (
+            !isset($stored['installation_id'], $stored['api_base_hash'])
+            || !hash_equals($installation_id, (string) $stored['installation_id'])
+            || !hash_equals($api_base_hash, (string) $stored['api_base_hash'])
+        ) {
+            return $empty;
+        }
+        $key_pattern = '/^ed25519-[a-f0-9]{16}$/';
+        $active = (string) ($stored['active_key_id'] ?? '');
+        $pending = isset($stored['pending_key_id']) ? (string) $stored['pending_key_id'] : null;
+        $pending_from = isset($stored['pending_from_key_id']) ? (string) $stored['pending_from_key_id'] : null;
+        $retired = is_array($stored['retired_key_ids'] ?? null) ? $stored['retired_key_ids'] : array();
+        if (
+            ($active !== '' && !preg_match($key_pattern, $active))
+            || ($pending !== null && !preg_match($key_pattern, $pending))
+            || ($pending_from !== null && !preg_match($key_pattern, $pending_from))
+            || count($retired) > self::MAX_RETIRED_KEYS
+        ) {
+            return $empty;
+        }
+        $retired = array_values(array_unique(array_filter(array_map('strval', $retired), static function ($candidate) use ($key_pattern) {
+            return preg_match($key_pattern, $candidate) === 1;
+        })));
+        return array(
+            'active_key_id' => $active,
+            'pending_key_id' => $pending,
+            'pending_from_key_id' => $pending_from,
+            'retired_key_ids' => $retired,
+        );
+    }
+
+    /** @param array<string,mixed> $state */
+    private static function write_state(array $state)
+    {
+        update_option(CCW_Config::OPTION_SIGNING_TRUST_STATE, array(
+            'installation_id' => CCW_Config::installation_id(),
+            'api_base_hash' => hash('sha256', CCW_Config::api_base()),
+            'active_key_id' => (string) ($state['active_key_id'] ?? ''),
+            'pending_key_id' => $state['pending_key_id'] ?? null,
+            'pending_from_key_id' => $state['pending_from_key_id'] ?? null,
+            'retired_key_ids' => array_values($state['retired_key_ids'] ?? array()),
+        ), false);
+    }
+
+    /** @return array<string,mixed>|null */
+    private static function bootstrap_descriptor()
+    {
+        $provisioned = CCW_Config::provisioned();
+        if (is_array($provisioned['trust_descriptor'] ?? null)) {
+            return $provisioned['trust_descriptor'];
+        }
+        if (!defined('CLINICACLICK_WEB_TRUST_DESCRIPTOR_JSON')) {
+            return null;
+        }
+        $configured = json_decode((string) constant('CLINICACLICK_WEB_TRUST_DESCRIPTOR_JSON'), true);
+        return is_array($configured) && isset($configured['key_id']) ? $configured : null;
     }
 
     /** @return array<string,mixed> */
@@ -189,5 +402,34 @@ final class CCW_Trust_Store
         }
         $descriptor = self::validate_descriptor($keys[$key_id]);
         return sodium_crypto_sign_verify_detached($signature, $canonical, self::raw_public_key($descriptor));
+    }
+
+    /**
+     * Verifies a control-plane document with exactly the descriptor accepted
+     * for this desired-state response. Retired keys remain in the store only
+     * so immutable local history can be inspected; they must never authorize a
+     * new runtime, registry or remotely downloaded artifact.
+     *
+     * @param mixed $payload
+     * @param array<string,mixed> $envelope
+     */
+    public static function verify_signed_payload_for_key($payload, array $envelope, $expected_key_id)
+    {
+        $expected_key_id = (string) $expected_key_id;
+        if (
+            !preg_match('/^ed25519-[a-f0-9]{16}$/', $expected_key_id)
+            || !hash_equals($expected_key_id, (string) ($envelope['key_id'] ?? ''))
+        ) {
+            return false;
+        }
+        $keys = self::all();
+        if (!isset($keys[$expected_key_id])) {
+            return false;
+        }
+        return self::verify_signed_payload(
+            $payload,
+            $envelope,
+            array($expected_key_id => $keys[$expected_key_id])
+        );
     }
 }

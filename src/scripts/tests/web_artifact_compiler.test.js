@@ -8,6 +8,7 @@ const {
   escapeHtml,
   safePublicButtonUrl,
 } = require('../../lib/webArtifactCompiler');
+const { MAX_WEB_ARTIFACT_BUNDLE_BYTES } = require('../../lib/webArtifactBudget');
 
 function fixture(overrides = {}) {
   const document = createBlankWebDocument({ name: 'Implantes dentales', locale: 'es-ES' });
@@ -57,6 +58,55 @@ test('compila el mismo input de forma determinista y preview siempre es noindex'
   assert.match(stylesheet, /\.cc-section\.cc-bg-brand \.cc-button-primary\{background:var\(--cc-surface\);color:var\(--cc-primary\)\}/);
 });
 
+test('rechaza antes de persistir una expansión HTML que supera el contrato común del bundle', () => {
+  const input = fixture();
+  const document = input.document;
+  const headerId = 'oversize-global-header';
+  const textIds = Array.from({ length: 19 }, (_, index) => `oversize-global-text-${index}`);
+  document.nodes[headerId] = {
+    id: headerId,
+    type: 'section',
+    version: 1,
+    props: { layout: 'stack', columns: 1, semantic_tag: 'header' },
+    children: textIds,
+  };
+  for (const textId of textIds) {
+    document.nodes[textId] = {
+      id: textId,
+      type: 'text',
+      version: 1,
+      props: { text: "'".repeat(5000) },
+      children: [],
+    };
+  }
+  document.globals.header_node_id = headerId;
+  for (let index = 1; index < 18; index += 1) {
+    const rootId = `oversize-page-root-${index}`;
+    document.nodes[rootId] = {
+      id: rootId,
+      type: 'section',
+      version: 1,
+      props: { layout: 'stack', columns: 1, semantic_tag: 'main' },
+      children: [],
+    };
+    document.pages.push({
+      ...document.pages[0],
+      id: `oversize-page-${index}`,
+      title: `Página ${index}`,
+      slug: `pagina-${index}`,
+      root_node_ids: [rootId],
+      seo: { ...document.pages[0].seo, title: `Página ${index}` },
+    });
+  }
+  assert.equal(MAX_WEB_ARTIFACT_BUNDLE_BYTES, 8 * 1024 * 1024);
+  assert.throws(
+    () => compileWebArtifact(input),
+    (error) => error.code === 'web_artifact_bundle_too_large'
+      && error.details.max_size_bytes === MAX_WEB_ARTIFACT_BUNDLE_BYTES
+      && error.details.size_bytes > MAX_WEB_ARTIFACT_BUNDLE_BYTES
+  );
+});
+
 test('producción indexa únicamente las páginas expresamente indexables', () => {
   const input = fixture({ environment: 'production', intakeEndpoint: '/_clinicaclick/intake' });
   input.document.seo.indexing = 'index';
@@ -91,6 +141,10 @@ test('producción fija el envío de formularios al puente same-origin', () => {
   const input = fixture({ environment: 'production', intakeEndpoint: '/_clinicaclick/intake' });
   const artifact = compileWebArtifact(input);
   assert.match(artifact.files['index.html'], /action="\/_clinicaclick\/intake"/);
+  assert.match(
+    artifact.files['index.html'],
+    new RegExp(`name="web_artifact_input_hash" value="${artifact.manifest.artifact_input_hash}"`)
+  );
   assert.throws(
     () => compileWebArtifact(fixture({ environment: 'production', intakeEndpoint: '/api/intake/web' })),
     (error) => error.code === 'web_artifact_intake_endpoint_invalid'

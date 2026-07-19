@@ -14,8 +14,14 @@ Preflight before enabling it:
    to DonDominio parking and HTTPS returns 521; do not claim the hosted channel
    is available until the DNS record targets `51.44.225.192` and public
    readback succeeds.
-2. Port 80 must serve the ACME challenge and a valid certificate must exist at
-   the paths in the template.
+2. For the first certificate, install only
+   `sites.clinicaclick.com.acme.conf`, validate/reload Nginx and point DNS at
+   the origin. Issue the certificate with the webroot
+   `/var/www/letsencrypt`; ordinary requests intentionally receive `503` in
+   this bootstrap phase. Once the certificate exists, replace that vhost with
+   `sites.clinicaclick.com.conf`, validate/reload again and verify the HTTPS
+   origin before enabling the application flag. This avoids installing a TLS
+   configuration that references certificate files which do not yet exist.
 3. The backend runtime behind `127.0.0.1:3001` must include the hosted-origin
    middleware and the exact `POST /_clinicaclick/intake` and
    `POST /_clinicaclick/events` routes. Nginx keeps the ordinary hosted origin

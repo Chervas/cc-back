@@ -8,6 +8,9 @@ const { measurementFromIntake } = require('../../services/webWordpressInstallati
 const {
   prepareWebLandingEventBridge,
 } = require('../../services/webLandingEventBridge.service');
+const {
+  PUBLIC_WEB_ARTIFACT_METADATA_ATTRIBUTES,
+} = require('../../services/webArtifactMetadata.service');
 
 const IDS = {
   project: '11111111-1111-4111-8111-111111111111',
@@ -38,11 +41,13 @@ function fixture(endpoint = 'events') {
     activeArtifactId: IDS.artifact,
     scopeType: 'clinic',
     clinicaId: 66,
+    channel: 'clinicaclick_hosted',
     host: 'landing.example.test',
     path: '/implantes/',
     status: 'published',
   };
   const artifactHash = 'a'.repeat(64);
+  const artifactInputHash = 'b'.repeat(64);
   const artifact = {
     id: IDS.artifact,
     projectId: IDS.project,
@@ -50,10 +55,12 @@ function fixture(endpoint = 'events') {
     environment: 'production',
     status: 'ready',
     artifactHash,
+    runtimeConfigHash: runtime.runtime_config_hash,
     manifest: {
       project_id: IDS.project,
       revision_id: IDS.revision,
       artifact_hash: artifactHash,
+      artifact_input_hash: artifactInputHash,
       runtime_config_hash: runtime.runtime_config_hash,
       page_routes: { [IDS.page]: { page_path: '/' } },
     },
@@ -70,7 +77,10 @@ function fixture(endpoint = 'events') {
       pageKey: IDS.page,
       slug: 'inicio',
     }) },
-    WebPublication: { findAll: async () => [publication] },
+    WebPublication: {
+      findAll: async () => [publication],
+      findByPk: async (id) => String(id) === String(publication.id) ? publication : null,
+    },
     WebArtifact: { findByPk: async () => artifact },
     Clinica: { findByPk: async () => ({ id_clinica: 66, grupoClinicaId: 7, estado_clinica: 1 }) },
     IntakeConfig: { findOne: async ({ where }) => where.assignment_scope === 'clinic' ? intake : null },
@@ -94,6 +104,7 @@ function fixture(endpoint = 'events') {
       web_project_id: IDS.project,
       web_revision_id: IDS.revision,
       web_page_id: IDS.page,
+      web_artifact_input_hash: artifactInputHash,
     },
     headers: {
       referer: 'https://landing.example.test/implantes/?gclid=real-click',
@@ -133,6 +144,54 @@ test('firma server-side y sustituye scope, host y URL elegidos por el navegador'
   );
 });
 
+test('el event bridge solo proyecta metadatos y nunca hidrata files/qaReport', async () => {
+  const state = fixture('events');
+  let artifactReads = 0;
+  Object.defineProperties(state.artifact, {
+    files: { get() { throw new Error('files no debe hidratarse ni leerse'); } },
+    qaReport: { get() { throw new Error('qaReport no debe hidratarse ni leerse'); } },
+  });
+  state.models.WebArtifact.findByPk = async (id, options) => {
+    artifactReads += 1;
+    assert.equal(id, IDS.artifact);
+    assert.deepEqual(options.attributes, [...PUBLIC_WEB_ARTIFACT_METADATA_ATTRIBUTES]);
+    assert.equal(options.raw, true);
+    return state.artifact;
+  };
+
+  const result = await prepareWebLandingEventBridge({ ...state, env: ENV });
+
+  assert.equal(result.attribution.artifact_id, IDS.artifact);
+  assert.equal(artifactReads, 1);
+});
+
+test('el relay root+child usa el mismo prefijo más largo que el router', async () => {
+  const state = fixture('events');
+  const root = (await state.models.WebPublication.findAll())[0];
+  root.path = '/cita/';
+  const childArtifact = {
+    ...state.artifact,
+    id: '66666666-6666-4666-8666-666666666667',
+  };
+  const child = {
+    ...root,
+    id: '55555555-5555-4555-8555-555555555556',
+    activeArtifactId: childArtifact.id,
+    path: '/cita/implantes/',
+  };
+  state.models.WebPublication.findAll = async (options) => {
+    assert.equal(options.where.host, 'landing.example.test');
+    assert.equal(Object.hasOwn(options, 'limit'), false);
+    return [root, child];
+  };
+  state.models.WebArtifact.findByPk = async (id) => id === childArtifact.id ? childArtifact : state.artifact;
+  state.headers.referer = 'https://landing.example.test/cita/implantes/?gclid=child-event';
+
+  const result = await prepareWebLandingEventBridge({ ...state, env: ENV });
+  assert.equal(result.attribution.publication_id, child.id);
+  assert.equal(result.attribution.artifact_id, childArtifact.id);
+});
+
 test('el mismo contrato cubre leads de chat y el registro previo de WhatsApp', async () => {
   for (const endpoint of ['leads', 'whatsapp-origin']) {
     const state = fixture(endpoint);
@@ -147,6 +206,60 @@ test('el mismo contrato cubre leads de chat y el registro previo de WhatsApp', a
       crypto.createHmac('sha256', HMAC).update(result.raw_body).digest('hex')
     );
   }
+});
+
+test('WordPress legacy resuelve el artefacto por cabecera server-side sin confiar en el loader', async () => {
+  const state = fixture('events');
+  const publication = (await state.models.WebPublication.findAll())[0];
+  publication.channel = 'wordpress';
+  publication.wordpressInstallationId = '77777777-7777-4777-8777-777777777777';
+  delete state.body.web_artifact_input_hash; // loader alpha.7 / renderer 1.2.1
+  state.headers['x-clinicaclick-web-artifact'] = state.artifact.artifactHash;
+  const result = await prepareWebLandingEventBridge({ ...state, env: ENV });
+  assert.equal(result.attribution.artifact_id, state.artifact.id);
+  assert.equal(
+    result.signature,
+    crypto.createHmac('sha256', HMAC).update(result.raw_body).digest('hex')
+  );
+
+  const forged = fixture('events');
+  const forgedPublication = (await forged.models.WebPublication.findAll())[0];
+  forgedPublication.channel = 'wordpress';
+  delete forged.body.web_artifact_input_hash;
+  forged.headers['x-clinicaclick-web-artifact'] = 'f'.repeat(64);
+  await assert.rejects(
+    () => prepareWebLandingEventBridge({ ...forged, env: ENV }),
+    (error) => error.code === 'web_event_bridge_artifact_not_active'
+  );
+});
+
+test('hosted/custom acepta el artefacto desired exacto mientras su deployment está en curso', async () => {
+  const state = fixture('events');
+  const publication = (await state.models.WebPublication.findAll())[0];
+  publication.activeRevisionId = '77777777-7777-4777-8777-777777777777';
+  publication.desiredRevisionId = IDS.revision;
+  publication.activeArtifactId = '88888888-8888-4888-8888-888888888888';
+  publication.status = 'publishing';
+  let deployment = {
+    id: '99999999-9999-4999-8999-999999999999',
+    publicationId: publication.id,
+    revisionId: IDS.revision,
+    artifactId: state.artifact.id,
+    action: 'publish',
+    status: 'running',
+    sequence: 2,
+  };
+  state.models.WebPublicationDeployment = { findOne: async () => deployment };
+  state.models.WebArtifact.findByPk = async (id) => String(id) === IDS.artifact ? state.artifact : null;
+
+  const result = await prepareWebLandingEventBridge({ ...state, env: ENV });
+  assert.equal(result.attribution.artifact_id, IDS.artifact);
+
+  deployment = { ...deployment, artifactId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' };
+  await assert.rejects(
+    () => prepareWebLandingEventBridge({ ...state, env: ENV }),
+    (error) => error.code === 'web_event_bridge_artifact_not_active'
+  );
 });
 
 test('rechaza origen cruzado, endpoint libre y runtime distinto al artefacto aprobado', async () => {
@@ -166,6 +279,7 @@ test('rechaza origen cruzado, endpoint libre y runtime distinto al artefacto apr
 
   const drift = fixture();
   drift.artifact.manifest.runtime_config_hash = 'f'.repeat(64);
+  drift.artifact.runtimeConfigHash = 'f'.repeat(64);
   await assert.rejects(
     () => prepareWebLandingEventBridge({ ...drift, env: ENV }),
     (error) => error.code === 'web_event_bridge_runtime_drift'

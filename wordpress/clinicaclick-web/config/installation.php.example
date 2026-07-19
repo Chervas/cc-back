@@ -3,6 +3,7 @@
   "installation_id": "REEMPLAZAR_UUID_V4",
   "api_base": "https://crm.clinicaclick.com",
   "token": "REEMPLAZAR_TOKEN_OPACO",
+  "site_claim_token": "REEMPLAZAR_CHALLENGE_BASE64URL_43_CARACTERES",
   "trust_descriptor": {
     "schema_version": 1,
     "algorithm": "Ed25519",

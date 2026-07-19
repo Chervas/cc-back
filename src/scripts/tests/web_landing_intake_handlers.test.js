@@ -9,11 +9,20 @@ const handlersSource = fs.readFileSync(
   path.join(__dirname, '../../routes/webLandingIntake.handlers.js'),
   'utf8'
 );
+const controllerSource = fs.readFileSync(
+  path.join(__dirname, '../../controllers/webLandingIntake.controller.js'),
+  'utf8'
+);
 const prepareIndex = handlersSource.indexOf('webLandingIntakeController.prepare,');
 const redirectIndex = handlersSource.indexOf('webLandingIntakeController.redirectResponse,');
 const verifiedLimiterIndex = handlersSource.indexOf("operation: 'landing_intake',", prepareIndex);
 assert.ok(prepareIndex >= 0 && redirectIndex > prepareIndex && verifiedLimiterIndex > redirectIndex,
   'el redirect debe envolver también el rate limit de la publicación validada');
+assert.match(
+  controllerSource,
+  /req\.webLandingEventAttribution = prepared\.attribution;[\s\S]*req\.webLandingArtifactMetadata = webLandingInternalContext\(prepared\.attribution\)\?\.artifact \|\| null;/,
+  'form prepare debe reutilizar atribución y metadatos al entrar en intake'
+);
 
 const req = { webLandingRedirect: { success: 'https://example.test/#ok', error: 'https://example.test/#error' } };
 const res = {

@@ -69,6 +69,7 @@ module.exports = (sequelize, DataTypes) => {
     indexes: [
       { unique: true, fields: ['publication_id', 'sequence'] },
       { fields: ['publication_id', 'status', 'created_at'] },
+      { name: 'idx_web_publication_deployments_artifact_status', fields: ['artifact_id', 'status', 'publication_id'] },
       { fields: ['job_request_id'] },
     ],
     hooks: {

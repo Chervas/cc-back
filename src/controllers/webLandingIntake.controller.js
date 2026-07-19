@@ -6,6 +6,9 @@ const {
   WebLandingSubmissionError,
   prepareWebLandingSubmission,
 } = require('../services/webLandingSubmission.service');
+const {
+  webLandingInternalContext,
+} = require('../services/webArtifactMetadata.service');
 
 function noStore(res) {
   res.set('Cache-Control', 'no-store, max-age=0');
@@ -45,6 +48,8 @@ const prepare = asyncHandler(async (req, res, next) => {
   req.headers['x-cc-signature'] = prepared.signature;
   req.headers['x-cc-event-id'] = prepared.event_id;
   req.headers['x-clinicaclick-web-artifact'] = prepared.attribution.artifact_hash;
+  req.webLandingEventAttribution = prepared.attribution;
+  req.webLandingArtifactMetadata = webLandingInternalContext(prepared.attribution)?.artifact || null;
   req.webLandingRateLimitIdentity = prepared.attribution.publication_id;
   req.webLandingRedirect = {
     success: prepared.success_url,

@@ -18,6 +18,7 @@ const {
 
 const installationId = 'd6d6d9bb-493e-4a40-8465-5ebf9edcde44';
 const token = `ccw_${'a'.repeat(43)}`;
+const siteClaimToken = 's'.repeat(43);
 const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
 const privateKeyPem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
 const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
@@ -51,6 +52,7 @@ const credentials = {
   installation_id: installationId,
   api_base: 'https://crm.clinicaclick.com',
   token,
+  site_claim_token: siteClaimToken,
   trust_descriptor: {
     schema_version: 1,
     algorithm: publicDescriptor.algorithm,

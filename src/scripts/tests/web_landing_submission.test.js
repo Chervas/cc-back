@@ -3,9 +3,15 @@
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const test = require('node:test');
+const { trustedRuntime } = require('../../lib/webMeasurementRuntime');
 const {
   prepareWebLandingSubmission,
 } = require('../../services/webLandingSubmission.service');
+const { longestPublicationMatch } = require('../../services/webLandingAttribution.service');
+const { measurementFromIntake } = require('../../services/webWordpressInstallations.service');
+const {
+  PUBLIC_WEB_ARTIFACT_METADATA_ATTRIBUTES,
+} = require('../../services/webArtifactMetadata.service');
 
 const IDS = {
   project: '11111111-1111-4111-8111-111111111111',
@@ -21,6 +27,18 @@ const IDS = {
 const HMAC = '0123456789abcdef0123456789abcdef';
 
 function fixture() {
+  const intake = {
+    assignment_scope: 'clinic',
+    clinic_id: 66,
+    hmac_key: HMAC,
+    config: {},
+  };
+  const runtime = trustedRuntime({
+    measurement: {
+      ...measurementFromIntake(intake),
+      api_url: 'https://crm.clinicaclick.com',
+    },
+  }, { environment: 'production' });
   const formFields = [
     { name: 'first_name', type: 'text', required: true },
     { name: 'last_name', type: 'text', required: false },
@@ -54,6 +72,7 @@ function fixture() {
     status: 'published',
   };
   const artifactHash = 'a'.repeat(64);
+  const artifactInputHash = 'b'.repeat(64);
   const artifact = {
     id: IDS.artifact,
     projectId: IDS.project,
@@ -61,11 +80,14 @@ function fixture() {
     environment: 'production',
     status: 'ready',
     artifactHash,
+    runtimeConfigHash: runtime.runtime_config_hash,
     manifest: {
       project_id: IDS.project,
       revision_id: IDS.revision,
       environment: 'production',
       artifact_hash: artifactHash,
+      artifact_input_hash: artifactInputHash,
+      runtime_config_hash: runtime.runtime_config_hash,
       page_routes: {
         [IDS.page]: { page_path: '/' },
         [IDS.landingPage]: { page_path: '/informacion/' },
@@ -91,13 +113,14 @@ function fixture() {
         slug: 'inicio',
       }),
     },
-    WebPublication: { findAll: async () => [publication] },
+    WebPublication: {
+      findAll: async () => [publication],
+      findByPk: async (id) => String(id) === String(publication.id) ? publication : null,
+    },
     WebArtifact: { findByPk: async () => artifact },
     Clinica: { findByPk: async () => ({ id_clinica: 66, grupoClinicaId: 7 }) },
     IntakeConfig: {
-      findOne: async ({ where }) => where.assignment_scope === 'clinic'
-        ? { assignment_scope: 'clinic', clinic_id: 66, hmac_key: HMAC }
-        : null,
+      findOne: async ({ where }) => where.assignment_scope === 'clinic' ? intake : null,
     },
     ClinicGoogleAdsAccount: { findAll: async () => [] },
     ExternalCampaignAssignment: { findOne: async () => null },
@@ -116,6 +139,7 @@ function fixture() {
     web_revision_id: IDS.revision,
     web_page_id: IDS.page,
     web_form_id: IDS.form,
+    web_artifact_input_hash: artifactInputHash,
   };
   const headers = {
     referer: 'https://landing.example.test/implantes/?utm_source=google&utm_medium=cpc&gclid=test-click',
@@ -153,6 +177,75 @@ test('convierte el formulario firmado en un lead atribuido sin inventar consenti
   const expected = crypto.createHmac('sha256', HMAC).update(result.raw_body).digest('hex');
   assert.equal(result.signature, expected);
   assert.deepEqual(JSON.parse(result.raw_body.toString('utf8')), result.payload);
+});
+
+test('prepare+submission consulta una sola vez únicamente metadatos del artefacto público', async () => {
+  const state = fixture();
+  let artifactReads = 0;
+  Object.defineProperties(state.artifact, {
+    files: { get() { throw new Error('files no debe hidratarse ni leerse'); } },
+    qaReport: { get() { throw new Error('qaReport no debe hidratarse ni leerse'); } },
+  });
+  state.models.WebArtifact.findByPk = async (id, options) => {
+    artifactReads += 1;
+    assert.equal(id, IDS.artifact);
+    assert.deepEqual(options.attributes, [...PUBLIC_WEB_ARTIFACT_METADATA_ATTRIBUTES]);
+    assert.equal(options.raw, true);
+    return state.artifact;
+  };
+
+  const result = await prepareWebLandingSubmission({
+    body: state.body,
+    headers: state.headers,
+    models: state.models,
+  });
+
+  assert.equal(result.spam, false);
+  assert.equal(result.attribution.artifact_id, IDS.artifact);
+  assert.equal(artifactReads, 1, 'submission reutiliza el artefacto validado por attribution');
+});
+
+test('root y child del mismo proyecto atribuyen por el prefijo publicado más largo', async () => {
+  const state = fixture();
+  state.publication.path = '/cita/';
+  const childArtifact = {
+    ...state.artifact,
+    id: '66666666-6666-4666-8666-666666666667',
+  };
+  const child = {
+    ...state.publication,
+    id: '55555555-5555-4555-8555-555555555556',
+    activeArtifactId: childArtifact.id,
+    path: '/cita/implantes/',
+  };
+  state.models.WebPublication.findAll = async (options) => {
+    assert.equal(options.where.host, 'landing.example.test');
+    assert.equal(Object.hasOwn(options, 'limit'), false);
+    return [state.publication, child];
+  };
+  state.models.WebPublication.findByPk = async (id) => (
+    String(id) === String(child.id) ? child : state.publication
+  );
+  state.models.WebArtifact.findByPk = async (id) => id === childArtifact.id ? childArtifact : state.artifact;
+  state.headers.referer = 'https://landing.example.test/cita/implantes/?gclid=child-click';
+
+  const result = await prepareWebLandingSubmission({
+    body: state.body,
+    headers: state.headers,
+    models: state.models,
+  });
+  assert.equal(result.attribution.publication_id, child.id);
+  assert.equal(result.success_url, `https://landing.example.test/cita/implantes/?gclid=child-click#cc-${IDS.form}-success`);
+
+  const root = longestPublicationMatch(
+    [state.publication, child],
+    new URL('https://landing.example.test/cita/')
+  );
+  assert.equal(root.id, state.publication.id);
+  assert.equal(longestPublicationMatch([
+    state.publication,
+    { ...state.publication, id: 'duplicate-root' },
+  ], new URL('https://landing.example.test/cita/')), null, 'un empate exacto falla cerrado');
 });
 
 test('acepta un formulario global solo mediante el contrato firmado de la página actual', async () => {

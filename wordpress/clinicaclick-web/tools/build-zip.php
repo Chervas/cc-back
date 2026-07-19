@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 $root = dirname(__DIR__);
-$version = '2.0.0-alpha.7';
+$version = '2.0.0-alpha.8';
 $output = $root . '/dist/clinicaclick-web-' . $version . '.zip';
 
 $files = [

@@ -5,13 +5,22 @@ const test = require('node:test');
 
 const {
   LANDING_PUBLISHED_EVENT,
+  artifactStorageContract,
   channelDeploy,
+  failDeployment,
+  finishDeployment,
+  replaceArtifactStorageDescriptor,
   runPublicationDeploymentJob,
+  runtimeReconciliationMarker,
   verifyPublicArtifact,
 } = require('../../services/webPublicationDeployment.service');
+const { MAX_WEB_ARTIFACT_BUNDLE_BYTES } = require('../../lib/webArtifactBudget');
 const { compileRevision } = require('../../services/webArtifacts.service');
 const { createBlankWebDocument } = require('../../services/webProjects.service');
 const { trustedRuntime } = require('../../lib/webMeasurementRuntime');
+const {
+  runtimeConfigPatch,
+} = require('../../services/webIntakeRuntimeReconciliation.service');
 
 class Row {
   constructor(value) { Object.assign(this, value); }
@@ -51,7 +60,7 @@ function fixture(channel = 'clinicaclick_hosted', withCampaign = false) {
       : channel === 'custom_domain'
         ? 'landing.example.com'
         : 'sites.clinicaclick.com',
-    path: channel === 'wordpress' ? '/cita/implantes/' : '/implantes/',
+    path: channel === 'wordpress' ? '/cita/' : '/implantes/',
     status: 'pending',
     desiredRevisionId: 'c482e859-4551-46b0-bce2-ab74da5887df',
     activeRevisionId: null,
@@ -119,7 +128,10 @@ function fixture(channel = 'clinicaclick_hosted', withCampaign = false) {
   const models = {
     WebPublicationDeployment: { findByPk: async () => deployment },
     WebProject: { findByPk: async () => project },
-    WebPublication: { findByPk: async () => publication },
+    WebPublication: {
+      findByPk: async () => publication,
+      findAll: async () => [publication],
+    },
     WebArtifact: { findByPk: async (id) => String(id) === artifact.id ? artifact : null },
     WebWordpressInstallation: { findByPk: async () => installation },
     WebDomain: { findByPk: async (id) => String(id) === String(domain.id) ? domain : null },
@@ -130,6 +142,32 @@ function fixture(channel = 'clinicaclick_hosted', withCampaign = false) {
   };
   return { project, publication, deployment, artifact, installation, domain, audits, models };
 }
+
+test('un descriptor legacy listo no elude el límite común antes de publicar', () => {
+  const hash = 'a'.repeat(64);
+  const artifact = {
+    artifact_hash: hash,
+    manifest: {
+      artifact_hash: hash,
+      files: {
+        'index.html': {
+          sha256: 'b'.repeat(64),
+          content_type: 'text/html; charset=utf-8',
+          size_bytes: MAX_WEB_ARTIFACT_BUNDLE_BYTES,
+        },
+      },
+    },
+    files: { 'index.html': 'legacy' },
+  };
+  const storage = {
+    provider: 's3_immutable',
+    artifact_hash: hash,
+    manifest_url: 'https://assets.example.test/manifest',
+    signature_url: 'https://assets.example.test/envelope',
+    files: { 'index.html': 'https://assets.example.test/index.html' },
+  };
+  assert.equal(artifactStorageContract(storage, artifact).ready, false);
+});
 
 function dependencies(state, overrides = {}) {
   return {
@@ -168,6 +206,52 @@ function dependencies(state, overrides = {}) {
     ...overrides,
   };
 }
+
+test('reparar storage preserva solo el marker exacto del reconciliador', () => {
+  const marker = {
+    reconciliation_id: '77777777-7777-4777-8777-777777777777',
+    generation: 3,
+    suppress_landing_published: true,
+  };
+  const replacement = {
+    provider: 's3_immutable',
+    artifact_hash: 'a'.repeat(64),
+    runtime_reconciliation: {
+      reconciliation_id: '88888888-8888-4888-8888-888888888888',
+      generation: 99,
+      suppress_landing_published: true,
+    },
+  };
+  assert.deepEqual(replaceArtifactStorageDescriptor(
+    { runtime_reconciliation: marker },
+    replacement
+  ), {
+    provider: 's3_immutable',
+    artifact_hash: 'a'.repeat(64),
+    runtime_reconciliation: marker,
+  });
+  assert.deepEqual(runtimeReconciliationMarker({ runtime_reconciliation: marker }), marker);
+
+  const rollbackMarker = { ...marker, role: 'source_rollback' };
+  assert.deepEqual(
+    runtimeReconciliationMarker({ runtime_reconciliation: rollbackMarker }),
+    rollbackMarker
+  );
+  assert.deepEqual(replaceArtifactStorageDescriptor(
+    { runtime_reconciliation: rollbackMarker },
+    replacement
+  ).runtime_reconciliation, rollbackMarker);
+  assert.equal(runtimeReconciliationMarker({
+    runtime_reconciliation: { ...marker, role: 'target' },
+  }), null);
+
+  const invalid = { ...marker, attacker_field: true };
+  assert.equal(runtimeReconciliationMarker({ runtime_reconciliation: invalid }), null);
+  assert.throws(
+    () => replaceArtifactStorageDescriptor({ runtime_reconciliation: invalid }, replacement),
+    (error) => error.code === 'web_runtime_reconciliation_marker_invalid'
+  );
+});
 
 test('despliegue hosted compila, verifica y conmuta estado solo tras readback', async () => {
   const state = fixture();
@@ -260,6 +344,32 @@ test('deployment WordPress alpha.6 no bloquea contratos intake locales legacy', 
   });
   assert.equal(result.waiting, false);
   assert.equal(result.result.plugin_version, '2.0.0-alpha.6');
+});
+
+test('un plugin sin v2 nunca confirma una ruta hija con el hash legado de la instalación', async () => {
+  const state = fixture('wordpress');
+  state.publication.path = '/cita/implantes/';
+  state.installation.pluginVersion = '2.0.0-alpha.7';
+  state.installation.capabilities = {};
+  state.installation.lastArtifactHash = state.artifact.artifactHash;
+  await assert.rejects(
+    () => channelDeploy({
+      publication: state.publication,
+      deployment: state.deployment,
+      artifact: {
+        artifact_hash: state.artifact.artifactHash,
+        manifest: state.artifact.manifest,
+        files: state.artifact.files,
+      },
+      storage: {},
+      env: {},
+      publishHosted: async () => { throw new Error('not hosted'); },
+      verifyHosted: async () => false,
+      verifyPublic: async () => true,
+      models: state.models,
+    }),
+    (error) => error.code === 'web_wordpress_multi_publication_plugin_update_required'
+  );
 });
 
 test('un gate de canal cerrado detiene un job ya encolado antes de compilar o mutar', async () => {
@@ -545,6 +655,192 @@ test('publicacion sana emite una sola vez el evento canonico para Campanas', asy
   assert.equal(enqueued.length, 1, 'releer un deployment terminal no duplica el outbox');
 });
 
+test('republicar por reconciliación confirma el ACK sin emitir un falso landing_published', async () => {
+  const state = fixture('clinicaclick_hosted', true);
+  const reconciliation = new Row({
+    id: '77777777-7777-4777-8777-777777777777',
+    generation: 3,
+    status: 'deploying',
+  });
+  state.deployment.status = 'running';
+  state.deployment.storage = {
+    runtime_reconciliation: {
+      reconciliation_id: reconciliation.id,
+      generation: reconciliation.generation,
+      suppress_landing_published: true,
+    },
+  };
+  state.deployment.result = {
+    runtime_reconciliation: {
+      reconciliation_id: reconciliation.id,
+      generation: reconciliation.generation,
+    },
+  };
+  state.models.WebIntakeRuntimeReconciliation = { findByPk: async () => reconciliation };
+  const enqueued = [];
+  const result = await finishDeployment({
+    deploymentId: state.deployment.id,
+    publicationId: state.publication.id,
+    artifactId: state.artifact.id,
+    result: { verified: true },
+    storage: state.deployment.storage,
+    models: state.models,
+    sequelize: fakeSequelize(),
+    enqueueUniqueJob: async (input, options) => {
+      enqueued.push({ input, options });
+      return { job: new Row({ id: 909 }), created: true };
+    },
+  });
+  assert.equal(result.integration_event.suppressed, true);
+  assert.equal(result.integration_event.reason, 'runtime_reconciliation');
+  assert.equal(enqueued.length, 1);
+  assert.equal(enqueued[0].input.type, 'web_intake_runtime_reconcile');
+  assert.equal(enqueued[0].input.payload.reconciliation_id, reconciliation.id);
+  assert.equal(enqueued[0].input.payload.generation, 3);
+  assert.ok(enqueued[0].options.transaction?.LOCK);
+  assert.equal(state.audits[0].metadata.campaign_event_id, null);
+  assert.equal(state.audits[0].metadata.runtime_reconciliation.landing_published_suppressed, true);
+});
+
+test('un rollback source con marker exacto recorre el worker y queda verificado', async () => {
+  const state = fixture('clinicaclick_hosted');
+  const reconciliation = new Row({
+    id: '66666666-6666-4666-8666-666666666666',
+    generation: 4,
+    status: 'rolling_back',
+    scopeType: 'clinic',
+    scopeId: 66,
+    sourceConfigPatch: runtimeConfigPatch(null),
+    targetConfigPatch: runtimeConfigPatch(null),
+    sourceHmacEnvelope: null,
+    targetHmacEnvelope: null,
+    expectedDeployments: {
+      [state.publication.id]: {
+        publication_id: state.publication.id,
+        deployment_id: 'failed-target-deployment',
+        artifact_id: 'failed-target-artifact',
+        rollback_deployment_id: state.deployment.id,
+        source_artifact_id: state.artifact.id,
+      },
+    },
+  });
+  state.publication.status = 'rolling_back';
+  state.deployment.action = 'rollback';
+  state.deployment.artifactId = state.artifact.id;
+  state.deployment.storage = {
+    runtime_reconciliation: {
+      reconciliation_id: reconciliation.id,
+      generation: reconciliation.generation,
+      role: 'source_rollback',
+      suppress_landing_published: true,
+    },
+  };
+  state.deployment.result = {
+    runtime_reconciliation: {
+      reconciliation_id: reconciliation.id,
+      generation: reconciliation.generation,
+      role: 'source_rollback',
+    },
+  };
+  state.models.WebIntakeRuntimeReconciliation = { findByPk: async () => reconciliation };
+  state.models.IntakeConfig = {
+    findOne: async () => ({
+      assignment_scope: 'clinic', clinic_id: 66, group_id: null,
+      config: {}, hmac_key: null,
+    }),
+    findAll: async () => [],
+  };
+  const enqueued = [];
+  const result = await runPublicationDeploymentJob({
+    publication_id: state.publication.id,
+    deployment_id: state.deployment.id,
+  }, { id: 77, attempts: 1, max_attempts: 5 }, dependencies(state, {
+    enqueueUniqueJobRequest: async (input, options) => {
+      enqueued.push({ input, options });
+      return { job: new Row({ id: 912 }), created: true };
+    },
+  }));
+  assert.equal(result.status, 'completed');
+  assert.equal(state.deployment.status, 'verified');
+  assert.equal(state.publication.status, 'published');
+  assert.equal(state.deployment.result.runtime_reconciliation.role, 'source_rollback');
+  assert.equal(state.audits[0].eventType, 'web.publication.rolled_back');
+  assert.equal(enqueued.length, 1);
+  assert.equal(enqueued[0].input.type, 'web_intake_runtime_reconcile');
+  assert.equal(enqueued[0].input.payload.reconciliation_id, reconciliation.id);
+});
+
+test('un deployment reconciliado fallido despierta el finalizador en la misma transacción', async () => {
+  const state = fixture();
+  const reconciliation = new Row({
+    id: '77777777-7777-4777-8777-777777777777', generation: 4, status: 'deploying',
+  });
+  state.deployment.status = 'running';
+  state.deployment.storage = {
+    runtime_reconciliation: {
+      reconciliation_id: reconciliation.id,
+      generation: reconciliation.generation,
+      suppress_landing_published: true,
+    },
+  };
+  state.deployment.result = {
+    runtime_reconciliation: {
+      reconciliation_id: reconciliation.id,
+      generation: reconciliation.generation,
+    },
+  };
+  state.models.WebIntakeRuntimeReconciliation = { findByPk: async () => reconciliation };
+  const enqueued = [];
+  await failDeployment({
+    deploymentId: state.deployment.id,
+    publicationId: state.publication.id,
+    error: Object.assign(new Error('boom'), { code: 'boom' }),
+    models: state.models,
+    sequelize: fakeSequelize(),
+    enqueueUniqueJob: async (input, options) => {
+      enqueued.push({ input, options });
+      return { job: new Row({ id: 910 }), created: true };
+    },
+  });
+  assert.equal(state.deployment.status, 'failed');
+  assert.equal(enqueued.length, 1);
+  assert.equal(enqueued[0].input.payload.trigger, 'deployment_ack');
+  assert.ok(enqueued[0].options.transaction?.LOCK);
+});
+
+test('un marker reconciliado borrado tras commit falla cerrado y despierta recuperación', async () => {
+  const state = fixture();
+  const reconciliation = new Row({
+    id: '77777777-7777-4777-8777-777777777777', generation: 5, status: 'deploying',
+  });
+  state.deployment.result = {
+    runtime_reconciliation: {
+      reconciliation_id: reconciliation.id,
+      generation: reconciliation.generation,
+    },
+  };
+  state.deployment.storage = {}; // simula corrupción/borrado posterior al commit durable
+  state.models.WebIntakeRuntimeReconciliation = { findByPk: async () => reconciliation };
+  const enqueued = [];
+  const result = await runPublicationDeploymentJob({
+    publication_id: state.publication.id,
+    deployment_id: state.deployment.id,
+  }, { id: 77, attempts: 1, max_attempts: 5 }, dependencies(state, {
+    enqueueUniqueJobRequest: async (input, options) => {
+      enqueued.push({ input, options });
+      return { job: new Row({ id: 911 }), created: true };
+    },
+  }));
+  assert.equal(result.status, 'failed');
+  assert.equal(result.retryable, false);
+  assert.equal(result.error.code, 'web_runtime_reconciliation_marker_invalid');
+  assert.equal(state.deployment.status, 'failed');
+  assert.equal(state.deployment.errorCode, 'web_runtime_reconciliation_marker_invalid');
+  assert.equal(enqueued.length, 1);
+  assert.equal(enqueued[0].input.payload.reconciliation_id, reconciliation.id);
+  assert.equal(enqueued[0].input.payload.generation, 5);
+});
+
 test('WordPress espera al pull y luego termina idempotentemente con heartbeat', async () => {
   const state = fixture('wordpress');
   const healthChecks = [];
@@ -569,7 +865,7 @@ test('WordPress espera al pull y luego termina idempotentemente con heartbeat', 
   assert.equal(completed.status, 'completed');
   assert.equal(state.publication.status, 'published');
   assert.equal(healthChecks.length, 1, 'el heartbeat no sustituye el GET de salud público');
-  assert.equal(healthChecks[0].publicUrl, 'https://cliente.example.com/cita/implantes/');
+  assert.equal(healthChecks[0].publicUrl, 'https://cliente.example.com/cita/');
   assert.equal(healthChecks[0].inputHash, state.artifact.manifest.artifact_input_hash);
   assert.equal(completed.result.deployment.result.public_verified, true);
 });
@@ -723,6 +1019,34 @@ test('no persiste un descriptor de storage cuyo hash no corresponde al bundle co
   assert.equal(storeCalls, 1);
   assert.deepEqual(state.deployment.storage, staleStorage, 'el descriptor ajeno no alcanza la persistencia');
   assert.equal(state.deployment.artifactId, null, 'tampoco enlaza el artefacto con storage inválido');
+});
+
+test('el bundle piloto conflictivo nunca se hace visible antes de validar rutas hijas', async () => {
+  const state = fixture('wordpress');
+  const child = new Row({
+    id: '77777777-7777-4777-8777-777777777777',
+    projectId: 'child-project',
+    channel: 'wordpress',
+    wordpressInstallationId: state.installation.id,
+    host: state.publication.host,
+    path: '/cita/implantes/',
+    status: 'published',
+  });
+  state.artifact.manifest.page_routes = {
+    child_collision: { page_path: '/implantes/' },
+  };
+  state.models.WebPublication.findAll = async () => [state.publication, child];
+
+  const result = await runPublicationDeploymentJob({
+    publication_id: state.publication.id,
+    deployment_id: state.deployment.id,
+  }, { id: 77, attempts: 1, max_attempts: 180 }, dependencies(state));
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.retryable, false);
+  assert.equal(result.error.code, 'web_wordpress_publication_manifest_route_conflict');
+  assert.equal(state.deployment.artifactId, null, 'publicationDesiredStates nunca puede observar el bundle inválido');
+  assert.equal(state.deployment.status, 'failed');
 });
 
 test('WordPress no confirma publicado si el permalink público no sirve el marcador esperado', async () => {

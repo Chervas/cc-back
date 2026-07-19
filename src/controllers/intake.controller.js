@@ -111,7 +111,15 @@ const {
   maybeUploadQualifiedLeadStatusTransition,
   uploadScheduleForLinkedAppointment,
 } = require('../services/leadQualificationMilestone.service');
-const { resolveWebLandingAttribution } = require('../services/webLandingAttribution.service');
+const {
+  resolveWebLandingAttribution,
+} = require('../services/webLandingAttribution.service');
+const {
+  runtimeConfigFromArtifactHeader,
+} = require('../services/webArtifactRuntimeHeader.service');
+const {
+  resolveEffectivePublicIntakeRecords,
+} = require('../services/webEffectiveIntakeConfig.service');
 const {
   authenticatePublicIntakeRequest,
   createMetaSignatureValidator,
@@ -135,6 +143,13 @@ const SIGNATURE_HEADER = 'x-cc-signature';
 const SIGNATURE_HEADER_SHA = 'x-cc-signature-sha256';
 const EVENT_ID_HEADER = 'x-cc-event-id';
 const parseInteger = parseIntakeId;
+const withRuntimeTransitionHmacs = async (config) => {
+  if (!config) return null;
+  const value = config.get ? config.get({ plain: true }) : config;
+  const candidates = await require('../services/webIntakeRuntimeReconciliation.service')
+    .authenticationCandidatesForConfig(value, { models: db });
+  return { ...value, runtime_transition_candidates: candidates };
+};
 const requireIntakeConfigScopeAccess = async (req, res, { clinicId = null, groupId = null, access = 'read' } = {}) => {
   const userId = Number.parseInt(String(req.userData?.userId || ''), 10);
   let clinicIds = [];
@@ -1599,8 +1614,25 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     if (domainCfg) domainCfg = domainCfg.get ? domainCfg.get({ plain: true }) : domainCfg;
   }
 
+  ({ clinicCfg, groupCfg, domainCfg } = await resolveEffectivePublicIntakeRecords({
+    clinicCfg,
+    groupCfg,
+    domainCfg,
+    clinicId: clinicaIdParsed,
+    groupId: grupoClinicaIdParsed,
+    models: db,
+  }));
+  [clinicCfg, groupCfg, domainCfg] = await Promise.all([
+    withRuntimeTransitionHmacs(clinicCfg),
+    withRuntimeTransitionHmacs(groupCfg),
+    withRuntimeTransitionHmacs(domainCfg),
+  ]);
   const providedSignature = req.headers[SIGNATURE_HEADER] || req.headers[SIGNATURE_HEADER_SHA];
-  const cfg = pickMatchingIntakeConfig({
+  const artifactRuntime = await runtimeConfigFromArtifactHeader(req, [clinicCfg, groupCfg, domainCfg]);
+  if (artifactRuntime.present && !artifactRuntime.config) {
+    return res.status(409).json({ message: 'La versión web publicada ya no está autorizada.', code: 'intake_web_artifact_not_authorized' });
+  }
+  const cfg = artifactRuntime.config || pickMatchingIntakeConfig({
     req,
     providedSignature,
     clinicCfg,
@@ -4461,8 +4493,25 @@ exports.registerWhatsappOrigin = asyncHandler(async (req, res) => {
     }
   }
 
+  ({ clinicCfg, groupCfg, domainCfg } = await resolveEffectivePublicIntakeRecords({
+    clinicCfg,
+    groupCfg,
+    domainCfg,
+    clinicId: clinicIdParsed,
+    groupId: groupIdParsed,
+    models: db,
+  }));
+  [clinicCfg, groupCfg, domainCfg] = await Promise.all([
+    withRuntimeTransitionHmacs(clinicCfg),
+    withRuntimeTransitionHmacs(groupCfg),
+    withRuntimeTransitionHmacs(domainCfg),
+  ]);
   const provided = req.headers[SIGNATURE_HEADER] || req.headers[SIGNATURE_HEADER_SHA];
-  const cfg = pickMatchingIntakeConfig({
+  const artifactRuntime = await runtimeConfigFromArtifactHeader(req, [clinicCfg, groupCfg, domainCfg]);
+  if (artifactRuntime.present && !artifactRuntime.config) {
+    return res.status(409).json({ success: false, message: 'La versión web publicada ya no está autorizada.', code: 'intake_web_artifact_not_authorized' });
+  }
+  const cfg = artifactRuntime.config || pickMatchingIntakeConfig({
     req,
     providedSignature: provided,
     clinicCfg,
@@ -4671,8 +4720,25 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
     if (domainCfg) domainCfg = domainCfg.get ? domainCfg.get({ plain: true }) : domainCfg;
   }
 
+  ({ clinicCfg, groupCfg, domainCfg } = await resolveEffectivePublicIntakeRecords({
+    clinicCfg,
+    groupCfg,
+    domainCfg,
+    clinicId: clinicIdParsed,
+    groupId: groupIdParsed,
+    models: db,
+  }));
+  [clinicCfg, groupCfg, domainCfg] = await Promise.all([
+    withRuntimeTransitionHmacs(clinicCfg),
+    withRuntimeTransitionHmacs(groupCfg),
+    withRuntimeTransitionHmacs(domainCfg),
+  ]);
   const provided = req.headers['x-cc-signature'] || req.headers['x-cc-signature-sha256'];
-  const cfg = pickMatchingIntakeConfig({
+  const artifactRuntime = await runtimeConfigFromArtifactHeader(req, [clinicCfg, groupCfg, domainCfg]);
+  if (artifactRuntime.present && !artifactRuntime.config) {
+    return res.status(409).json({ message: 'La versión web publicada ya no está autorizada.', code: 'intake_web_artifact_not_authorized' });
+  }
+  const cfg = artifactRuntime.config || pickMatchingIntakeConfig({
     req,
     providedSignature: provided,
     clinicCfg,

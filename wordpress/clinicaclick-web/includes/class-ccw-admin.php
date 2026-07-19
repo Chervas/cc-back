@@ -39,9 +39,17 @@ final class CCW_Admin
         } catch (CCW_Error $error) {
             // Render the form without reflecting an invalid secret or payload.
         }
-        $pointer = (new CCW_Cache())->pointer();
+        $storage = CCW_Config::cache_storage_diagnostic();
+        $pointer = array();
+        if (!empty($storage['safe'])) {
+            try {
+                $pointer = (new CCW_Cache())->pointer();
+            } catch (CCW_Error $error) {
+                $pointer = array();
+            }
+        }
         $sync = CCW_Config::sync_state();
-        $managed = defined('CLINICACLICK_WEB_INSTALLATION_ID') || defined('CLINICACLICK_WEB_API_BASE') || CCW_Config::provisioned() !== array();
+        $managed = CCW_Config::is_managed_configuration();
         ?>
         <div class="wrap">
             <h1>ClinicaClick Web</h1>
@@ -52,12 +60,21 @@ final class CCW_Admin
                 <tbody>
                     <tr><th>Plugin</th><td><?php echo esc_html(CCW_VERSION); ?></td></tr>
                     <tr><th>Configuración</th><td><?php echo CCW_Config::is_configured() ? 'Completa' : 'Pendiente'; ?></td></tr>
+                    <tr><th>Almacenamiento privado</th><td><?php echo !empty($storage['safe']) ? 'Protegido' : 'Bloqueado por seguridad'; ?></td></tr>
                     <tr><th>Publicación local</th><td><?php echo esc_html((string) ($pointer['status'] ?? 'Sin contenido')); ?></td></tr>
                     <tr><th>Artefacto activo</th><td><code><?php echo esc_html(self::short_hash($pointer['active_hash'] ?? null)); ?></code></td></tr>
                     <tr><th>Última sincronización correcta</th><td><?php echo esc_html((string) ($sync['last_success_at'] ?? 'Todavía no')); ?></td></tr>
                     <tr><th>Último resultado</th><td><code><?php echo esc_html((string) ($sync['last_result'] ?? 'pendiente')); ?></code></td></tr>
                 </tbody>
             </table>
+
+            <?php if (empty($storage['safe'])) : ?>
+                <div class="notice notice-error inline" style="max-width:860px;margin:16px 0 0">
+                    <p><strong>La publicación está detenida para proteger las credenciales de medición.</strong></p>
+                    <p><?php echo esc_html((string) $storage['message']); ?></p>
+                    <p>Añade en <code>wp-config.php</code> una ruta privada, por ejemplo <code>define('CLINICACLICK_WEB_CACHE_DIR', '/ruta/fuera-del-document-root/clinicaclick-web-cache');</code>. El plugin no mueve ni copia automáticamente la caché existente. Si ya había una caché pública, el responsable del servidor debe bloquearla o retirarla y verificar que sus JSON responden <code>404</code>.</p>
+                </div>
+            <?php endif; ?>
 
             <h2>Conexión</h2>
             <?php if ($managed) : ?>
@@ -89,21 +106,25 @@ final class CCW_Admin
             <?php endif; ?>
 
             <h2>Operación</h2>
-            <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
-                    <input type="hidden" name="action" value="ccw_sync_now">
-                    <?php wp_nonce_field('ccw_sync_now'); ?>
-                    <?php submit_button(!empty($pointer['manual_hold']) ? 'Reanudar y sincronizar' : 'Sincronizar ahora', 'primary', 'submit', false); ?>
-                </form>
-                <?php if (!empty($pointer['last_known_good_hash']) && ($pointer['last_known_good_hash'] ?? '') !== ($pointer['active_hash'] ?? '')) : ?>
-                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" onsubmit="return confirm('¿Restaurar la versión local anterior y pausar la sincronización automática?');">
-                        <input type="hidden" name="action" value="ccw_rollback_local">
-                        <?php wp_nonce_field('ccw_rollback_local'); ?>
-                        <?php submit_button('Rollback local', 'secondary', 'submit', false); ?>
+            <?php if (!empty($storage['safe'])) : ?>
+                <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                        <input type="hidden" name="action" value="ccw_sync_now">
+                        <?php wp_nonce_field('ccw_sync_now'); ?>
+                        <?php submit_button(!empty($pointer['manual_hold']) ? 'Reanudar y sincronizar' : 'Sincronizar ahora', 'primary', 'submit', false); ?>
                     </form>
-                <?php endif; ?>
-            </div>
-            <p class="description">El rollback local activa una retención manual. “Reanudar y sincronizar” vuelve a aplicar el estado firmado más reciente.</p>
+                    <?php if (!empty($pointer['last_known_good_hash']) && ($pointer['last_known_good_hash'] ?? '') !== ($pointer['active_hash'] ?? '')) : ?>
+                        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" onsubmit="return confirm('¿Restaurar la versión local anterior y pausar la sincronización automática?');">
+                            <input type="hidden" name="action" value="ccw_rollback_local">
+                            <?php wp_nonce_field('ccw_rollback_local'); ?>
+                            <?php submit_button('Rollback local', 'secondary', 'submit', false); ?>
+                        </form>
+                    <?php endif; ?>
+                </div>
+                <p class="description">El rollback local activa una retención manual. “Reanudar y sincronizar” vuelve a aplicar el estado firmado más reciente.</p>
+            <?php else : ?>
+                <p>Configura primero el almacenamiento privado para habilitar sincronización y rollback.</p>
+            <?php endif; ?>
         </div>
         <?php
     }
@@ -141,25 +162,50 @@ final class CCW_Admin
     public function rollback_local()
     {
         $this->authorize('ccw_rollback_local');
+        $lock = null;
+        $notice_type = 'warning';
+        $notice_message = 'Se ha restaurado la última versión válida. La sincronización automática queda pausada hasta que la reanudes.';
         try {
-            $pointer = (new CCW_Cache())->rollback_local();
-            (new CCW_HTTP())->report(array(
-                'schema_version' => 1,
+            $cache = new CCW_Cache();
+            $lock = $cache->acquire_lock();
+            $registry = $cache->route_registry();
+            $multi = (int) ($registry['sequence'] ?? 0) > 0;
+            if ($multi && empty($registry['routes'])) {
+                throw new CCW_Error(
+                    'ccw_rollback_unavailable',
+                    'No queda una ruta publicada que pueda restaurarse.'
+                );
+            }
+            $pointer = $cache->rollback_local();
+            $payload = array(
+                'schema_version' => $multi ? 2 : 1,
                 'event' => 'local_rollback',
                 'plugin_version' => CCW_VERSION,
                 'wordpress_version' => get_bloginfo('version'),
                 'php_version' => PHP_VERSION,
                 'site_hash' => hash('sha256', home_url('/')),
-                'status' => 'active',
-                'active_artifact_hash' => $pointer['active_hash'],
-                'result' => 'local_rollback',
                 'duration_ms' => 0,
                 'reported_at' => gmdate('c'),
-            ));
-            $this->redirect_notice('warning', 'Se ha restaurado la última versión válida. La sincronización automática queda pausada hasta que la reanudes.');
+            );
+            if ($multi) {
+                $payload['capabilities'] = array('multi_publication_v2' => true);
+                $payload['registry_sequence'] = (int) ($registry['sequence'] ?? 0);
+                $payload['routes'] = $cache->route_report();
+            } else {
+                $payload['status'] = 'active';
+                $payload['active_artifact_hash'] = $pointer['active_hash'];
+                $payload['result'] = 'local_rollback';
+            }
+            (new CCW_HTTP())->report($payload);
         } catch (CCW_Error $error) {
-            $this->redirect_notice('error', $error->getMessage());
+            $notice_type = 'error';
+            $notice_message = $error->getMessage();
+        } finally {
+            if ($lock !== null) {
+                $cache->release_lock($lock);
+            }
         }
+        $this->redirect_notice($notice_type, $notice_message);
     }
 
     public function notice()

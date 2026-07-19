@@ -7,6 +7,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { createBlankWebDocument } = require('../../services/webProjects.service');
 const { compileRevision } = require('../../services/webArtifacts.service');
+const { trustedRuntime } = require('../../lib/webMeasurementRuntime');
 
 function row(value) {
   return {
@@ -244,6 +245,63 @@ test('un proyecto de grupo solo compila una clínica activa incluida explícitam
       sequelize: inactive.sequelize,
     }),
     (error) => error.code === 'web_artifact_clinic_inactive' && error.status === 409
+  );
+});
+
+test('una reconciliación durable puede precompilar una clínica nueva del target antes de promover IntakeConfig', async () => {
+  const state = fixture({ group: true });
+  state.revision.document.integrations.intake_config_id = '12';
+  state.revision.contentSnapshot.intake_config = {
+    id: '12',
+    scope: { type: 'group', id: 7, inherited: false },
+  };
+  state.models.IntakeConfig.findByPk = async () => ({
+    id: 12,
+    assignment_scope: 'group',
+    group_id: 7,
+    config: { locations: [{ id: 55 }] },
+  });
+  const normalizedRuntime = trustedRuntime({}, { environment: 'preview' });
+  const staged = {
+    id: '99999999-9999-4999-8999-999999999999',
+    generation: 4,
+    status: 'preparing',
+    scopeType: 'group',
+    scopeId: 7,
+    targetRuntimeHash: normalizedRuntime.runtime_config_hash,
+    targetConfigPatch: {
+      locations: { present: true, value: [{ id: 55 }, { id: 66 }] },
+    },
+  };
+  state.models.WebIntakeRuntimeReconciliation = {
+    findByPk: async (id) => id === staged.id ? staged : null,
+  };
+  await assert.doesNotReject(() => compileRevision({
+    actorId: 1,
+    revisionId: state.revision.id,
+    body: {
+      environment: 'preview',
+      base_url: 'https://preview.sites.clinicaclick.com',
+      clinic_id: 66,
+    },
+    runtimeReconciliation: { id: staged.id, generation: 4 },
+    models: state.models,
+    sequelize: state.sequelize,
+  }));
+  await assert.rejects(
+    () => compileRevision({
+      actorId: 1,
+      revisionId: state.revision.id,
+      body: {
+        environment: 'preview',
+        base_url: 'https://preview.sites.clinicaclick.com',
+        clinic_id: 66,
+      },
+      runtimeReconciliation: { id: staged.id, generation: 5 },
+      models: state.models,
+      sequelize: state.sequelize,
+    }),
+    (error) => error.code === 'web_artifact_runtime_reconciliation_invalid'
   );
 });
 

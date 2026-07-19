@@ -17,6 +17,9 @@ const { metaSyncJobs } = require('../jobs/sync.jobs');
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
 const automationDefaultsService = require('../services/automationDefaults.service');
+const {
+    assertClinicWebRuntimeGroupChangeSafe,
+} = require('../services/clinicWebRuntimeMembership.service');
 const { STAFF_ROLES, ADMIN_ROLES, isGlobalAdmin } = require('../lib/role-helpers');
 const {
     assertUserCanAccessFeature,
@@ -760,6 +763,12 @@ exports.updateClinica = async (req, res) => {
                     previousGroupId,
                     requestedGroupId
                 );
+                await assertClinicWebRuntimeGroupChangeSafe({
+                    clinicId: id_clinica,
+                    previousGroupId,
+                    requestedGroupId,
+                    transaction,
+                });
             }
             if (grupoClinicaId !== undefined) {
                 scalarUpdates.grupoClinicaId = requestedGroupId;

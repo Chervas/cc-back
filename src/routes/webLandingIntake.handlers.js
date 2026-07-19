@@ -12,6 +12,7 @@ const landingIntakeHandlers = [
   publicWebRateLimit({
     operation: 'landing_intake_prepare',
     limit: 60,
+    globalIpLimit: 240,
     windowMs: 10 * 60 * 1000,
     identity: () => '00000000-0000-4000-8000-000000000000',
   }),
@@ -24,6 +25,7 @@ const landingIntakeHandlers = [
   publicWebRateLimit({
     operation: 'landing_intake',
     limit: 8,
+    globalIpLimit: 64,
     windowMs: 10 * 60 * 1000,
     identity: (req) => req.webLandingRateLimitIdentity,
   }),

@@ -60,6 +60,15 @@ const requestRollback = withRequestContext(async (req, res, requestId) => {
   return res.status(202).json({ success: true, ...result, request_id: requestId });
 }, 'No se ha podido iniciar la restauración web.');
 
+const retireWordpressPublication = withRequestContext(async (req, res, requestId) => {
+  const result = await webPublicationsService.retireWordpressPublication({
+    actorId: req.userData?.userId,
+    publicationId: req.params.publicationId,
+    requestId,
+  });
+  return res.json({ success: true, ...result, request_id: requestId });
+}, 'No se ha podido retirar la publicación web.');
+
 const listDeployments = withRequestContext(async (req, res, requestId) => {
   const result = await webPublicationsService.listDeployments({
     actorId: req.userData?.userId,
@@ -87,4 +96,5 @@ module.exports = {
   listProjectPublications,
   requestPublish,
   requestRollback,
+  retireWordpressPublication,
 };

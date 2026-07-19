@@ -8,6 +8,10 @@ const {
 const { assertWebContentSnapshot, isSafePublicAssetUrl } = require('./webContent');
 const { trustedRuntime } = require('./webMeasurementRuntime');
 const { publicHttpUrl } = require('./safeHttpTarget');
+const {
+  MAX_WEB_ARTIFACT_BUNDLE_BYTES,
+  webArtifactBundleFootprintBytes,
+} = require('./webArtifactBudget');
 
 const RENDERER_VERSION = 'clinicaclick-web-renderer/1.5.0';
 const SAFE_EXTERNAL_REL = /^(?:\/[A-Za-z0-9_][A-Za-z0-9/_-]*|https:\/\/[^\s]+)$/;
@@ -510,7 +514,7 @@ function renderIntakeForm(node, context) {
   }).join('');
   const successId = `cc-${node.id}-success`;
   const errorId = `cc-${node.id}-error`;
-  return `<form id="cc-${escapeHtml(node.id)}" class="cc-node cc-form ${styleClassList(node)}" action="${escapeHtml(context.intakeEndpoint)}" method="post" enctype="application/x-www-form-urlencoded" accept-charset="UTF-8" data-cc-native-intake="true"><h2>${escapeHtml(node.props.title)}</h2>${node.props.description ? `<p>${escapeHtml(node.props.description)}</p>` : ''}<input type="hidden" name="web_project_id" value="${escapeHtml(context.projectId)}"><input type="hidden" name="web_revision_id" value="${escapeHtml(context.revisionId)}"><input type="hidden" name="web_page_id" value="${escapeHtml(context.page.id)}"><input type="hidden" name="web_form_id" value="${escapeHtml(node.id)}"><input class="cc-honeypot" type="text" name="_cc_company" value="" tabindex="-1" autocomplete="off" aria-hidden="true">${fields}<button type="submit" class="cc-button cc-button-primary">${escapeHtml(node.props.submit_label)}</button><p id="${escapeHtml(successId)}" class="cc-form-status cc-form-success" role="status">${escapeHtml(node.props.success_message)}</p><p id="${escapeHtml(errorId)}" class="cc-form-status cc-form-error" role="alert">No hemos podido enviar el formulario. Inténtalo de nuevo en unos minutos.</p></form>`;
+  return `<form id="cc-${escapeHtml(node.id)}" class="cc-node cc-form ${styleClassList(node)}" action="${escapeHtml(context.intakeEndpoint)}" method="post" enctype="application/x-www-form-urlencoded" accept-charset="UTF-8" data-cc-native-intake="true"><h2>${escapeHtml(node.props.title)}</h2>${node.props.description ? `<p>${escapeHtml(node.props.description)}</p>` : ''}<input type="hidden" name="web_project_id" value="${escapeHtml(context.projectId)}"><input type="hidden" name="web_revision_id" value="${escapeHtml(context.revisionId)}"><input type="hidden" name="web_page_id" value="${escapeHtml(context.page.id)}"><input type="hidden" name="web_form_id" value="${escapeHtml(node.id)}"><input type="hidden" name="web_artifact_input_hash" value="${escapeHtml(context.artifactMarker)}"><input class="cc-honeypot" type="text" name="_cc_company" value="" tabindex="-1" autocomplete="off" aria-hidden="true">${fields}<button type="submit" class="cc-button cc-button-primary">${escapeHtml(node.props.submit_label)}</button><p id="${escapeHtml(successId)}" class="cc-form-status cc-form-success" role="status">${escapeHtml(node.props.success_message)}</p><p id="${escapeHtml(errorId)}" class="cc-form-status cc-form-error" role="alert">No hemos podido enviar el formulario. Inténtalo de nuevo en unos minutos.</p></form>`;
 }
 
 function renderNode(nodeId, document, snapshot, context, ancestors = new Set(), rootSemanticTag = null) {
@@ -766,11 +770,11 @@ function measurementLoaderTag(measurement, identity = {}) {
   // hmac_key is server-only IntakeConfig material. The browser receives only
   // public routing/configuration attributes; native landing forms are signed
   // by the same-origin bridge after canonical server-side validation.
-  return `<script src="${escapeHtml(measurement.loader_url)}" ${scopeAttribute} data-api-url="${escapeHtml(measurement.api_url)}" data-event-bridge-url="/_clinicaclick/events" data-web-project-id="${escapeHtml(identity.projectId)}" data-web-revision-id="${escapeHtml(identity.revisionId)}" data-web-page-id="${escapeHtml(identity.pageId)}" data-consent-mode-enabled="${measurement.consent_mode_enabled ? 'true' : 'false'}" data-consent-provider="${escapeHtml(measurement.consent_provider)}" async></script>`;
+  return `<script src="${escapeHtml(measurement.loader_url)}" ${scopeAttribute} data-api-url="${escapeHtml(measurement.api_url)}" data-event-bridge-url="/_clinicaclick/events" data-web-project-id="${escapeHtml(identity.projectId)}" data-web-revision-id="${escapeHtml(identity.revisionId)}" data-web-page-id="${escapeHtml(identity.pageId)}" data-web-artifact-input-hash="${escapeHtml(identity.artifactMarker)}" data-consent-mode-enabled="${measurement.consent_mode_enabled ? 'true' : 'false'}" data-consent-provider="${escapeHtml(measurement.consent_provider)}" async></script>`;
 }
 
 function renderPage({ page, document, snapshot, context, project, baseUrl, clinic, cssFile, artifactMarker }) {
-  const pageContext = { ...context, page };
+  const pageContext = { ...context, page, artifactMarker };
   const headerId = document.globals?.header_node_id || null;
   const footerId = document.globals?.footer_node_id || null;
   const header = headerId
@@ -807,7 +811,7 @@ function renderPage({ page, document, snapshot, context, project, baseUrl, clini
   const social = socialId ? snapshot.media_assets?.[socialId] : null;
   const socialUrl = social?.variants?.[0]?.url || social?.public_media?.url || null;
   const publicationBasePath = new URL(`${baseUrl}/`).pathname;
-  const html = `<!doctype html><html lang="${escapeHtml(project.locale)}"><head><meta charset="utf-8"><meta name="clinicaclick-artifact-input" content="${escapeHtml(artifactMarker)}"><meta http-equiv="Content-Security-Policy" content="${escapeHtml(pageCsp)}"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><meta name="description" content="${escapeHtml(description)}"><meta name="robots" content="${robots}"><link rel="canonical" href="${escapeHtml(canonical)}"><meta property="og:type" content="website"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${escapeHtml(description)}"><meta property="og:url" content="${escapeHtml(canonical)}">${socialUrl && isSafePublicAssetUrl(socialUrl) ? `<meta property="og:image" content="${escapeHtml(socialUrl)}">` : ''}<link rel="stylesheet" href="${escapeHtml(`${baseUrl}/${cssFile}`)}"><script type="application/ld+json">${jsonLdText}</script>${measurementLoaderTag(context.measurement, { projectId: project.id, revisionId: context.revisionId, pageId: page.id })}</head><body data-cc-web-project-id="${escapeHtml(project.id)}" data-cc-web-revision-id="${escapeHtml(context.revisionId)}" data-cc-web-base-path="${escapeHtml(publicationBasePath)}">${header}${body}${footer}</body></html>`;
+  const html = `<!doctype html><html lang="${escapeHtml(project.locale)}"><head><meta charset="utf-8"><meta name="clinicaclick-artifact-input" content="${escapeHtml(artifactMarker)}"><meta http-equiv="Content-Security-Policy" content="${escapeHtml(pageCsp)}"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><meta name="description" content="${escapeHtml(description)}"><meta name="robots" content="${robots}"><link rel="canonical" href="${escapeHtml(canonical)}"><meta property="og:type" content="website"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${escapeHtml(description)}"><meta property="og:url" content="${escapeHtml(canonical)}">${socialUrl && isSafePublicAssetUrl(socialUrl) ? `<meta property="og:image" content="${escapeHtml(socialUrl)}">` : ''}<link rel="stylesheet" href="${escapeHtml(`${baseUrl}/${cssFile}`)}"><script type="application/ld+json">${jsonLdText}</script>${measurementLoaderTag(context.measurement, { projectId: project.id, revisionId: context.revisionId, pageId: page.id, artifactMarker })}</head><body data-cc-web-project-id="${escapeHtml(project.id)}" data-cc-web-revision-id="${escapeHtml(context.revisionId)}" data-cc-web-artifact-input-hash="${escapeHtml(artifactMarker)}" data-cc-web-base-path="${escapeHtml(publicationBasePath)}">${header}${body}${footer}</body></html>`;
   return {
     path: page.slug === 'inicio' ? '/' : `/${page.slug}/`,
     html,
@@ -976,9 +980,21 @@ function compileWebArtifact(input = {}) {
     headers,
   };
   const artifactHash = sha256(canonicalSerialize(manifestCore));
+  const manifest = { ...manifestCore, artifact_hash: artifactHash };
+  const bundleSizeBytes = webArtifactBundleFootprintBytes(manifest);
+  if (bundleSizeBytes === null || bundleSizeBytes > MAX_WEB_ARTIFACT_BUNDLE_BYTES) {
+    fail(
+      'web_artifact_bundle_too_large',
+      'La web generada supera el tamaño máximo publicable.',
+      {
+        size_bytes: bundleSizeBytes,
+        max_size_bytes: MAX_WEB_ARTIFACT_BUNDLE_BYTES,
+      }
+    );
+  }
   return {
     artifact_hash: artifactHash,
-    manifest: { ...manifestCore, artifact_hash: artifactHash },
+    manifest,
     files: {
       [cssFile]: css,
       'robots.txt': robots,

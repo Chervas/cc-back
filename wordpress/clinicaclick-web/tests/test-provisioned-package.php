@@ -122,14 +122,18 @@ foreach ($entries as $entry) {
     ccw_package_assert(strpos($entry, 'clinicaclick/') !== 0, 'Legacy plugin root leaked into the package');
 }
 
-define('ABSPATH', $temporaryRoot . '/wordpress/');
-define('WP_CONTENT_DIR', $temporaryRoot . '/wp-content');
+define('ABSPATH', $temporaryRoot . '/public/wordpress/');
+define('WP_CONTENT_DIR', $temporaryRoot . '/public/wp-content');
+define('CLINICACLICK_WEB_CACHE_DIR', $temporaryRoot . '/private/clinicaclick-web-cache');
 define('DAY_IN_SECONDS', 86400);
 define('MINUTE_IN_SECONDS', 60);
+$_SERVER['SERVER_SOFTWARE'] = 'nginx/1.26.1';
+$_SERVER['DOCUMENT_ROOT'] = $temporaryRoot . '/public';
 
 $GLOBALS['ccw_package_options'] = array();
 $GLOBALS['ccw_package_rewrites'] = array();
 $GLOBALS['ccw_package_posts'] = array();
+$GLOBALS['ccw_package_response_body'] = '';
 
 final class WP_Error
 {
@@ -182,7 +186,11 @@ function wp_json_encode($value, $flags = 0)
 function wp_safe_remote_post($url, $args = array())
 {
     $GLOBALS['ccw_package_posts'][] = array('url' => $url, 'args' => $args);
-    return array('response' => array('code' => 202), 'headers' => array(), 'body' => '');
+    return array(
+        'response' => array('code' => 202),
+        'headers' => array(),
+        'body' => (string) $GLOBALS['ccw_package_response_body'],
+    );
 }
 
 function is_wp_error($value)
@@ -193,6 +201,11 @@ function is_wp_error($value)
 function wp_remote_retrieve_response_code($response)
 {
     return (int) ($response['response']['code'] ?? 0);
+}
+
+function wp_remote_retrieve_body($response)
+{
+    return (string) ($response['body'] ?? '');
 }
 
 function wp_mkdir_p($path)
@@ -274,9 +287,15 @@ require $pluginRoot . '/clinicaclick.php';
 
 $expectedInstallationId = 'd6d6d9bb-493e-4a40-8465-5ebf9edcde44';
 ccw_package_assert(CCW_Config::is_configured(), 'Extracted plugin did not accept its provisioned configuration');
+ccw_package_assert(CCW_Config::is_managed_configuration(), 'Provisioned plugin was not classified as managed');
+ccw_package_assert(
+    !empty(CCW_Config::cache_storage_diagnostic()['safe']),
+    'Provisioned Nginx plugin rejected its private cache constant'
+);
 ccw_package_assert(CCW_Config::installation_id() === $expectedInstallationId, 'Installation id changed in transit');
 ccw_package_assert(CCW_Config::api_base() === 'https://crm.clinicaclick.com', 'API base changed in transit');
 ccw_package_assert(CCW_Config::token() === 'ccw_' . str_repeat('a', 43), 'Opaque token changed in transit');
+ccw_package_assert(CCW_Config::site_claim_token() === str_repeat('s', 43), 'Site claim changed in transit');
 
 $provisioned = CCW_Config::provisioned();
 ccw_package_assert(array_keys($provisioned) === array(
@@ -284,6 +303,7 @@ ccw_package_assert(array_keys($provisioned) === array(
     'bootstrap_runtime_configuration',
     'bootstrap_runtime_envelope',
     'installation_id',
+    'site_claim_token',
     'token',
     'trust_descriptor',
 ), 'Provisioned config gained or lost a top-level field');
@@ -304,7 +324,7 @@ ccw_package_assert(
 
 CCW_Plugin::activate(false);
 ccw_package_assert(get_option(CCW_Plugin::OPTION_VERSION, '') === CCW_VERSION, 'Extracted plugin activation did not complete');
-ccw_package_assert(count($GLOBALS['ccw_package_rewrites']) === 4, 'Activation did not register intake, event and landing routes');
+ccw_package_assert(count($GLOBALS['ccw_package_rewrites']) === 5, 'Activation did not register claim, intake, event and landing routes');
 ccw_package_assert(is_dir(CCW_Config::cache_root() . '/releases'), 'Activation did not initialize the local release cache');
 ccw_package_assert(count($GLOBALS['ccw_package_posts']) === 1, 'Activation did not send its authenticated handshake');
 $handshake = $GLOBALS['ccw_package_posts'][0];
@@ -312,9 +332,39 @@ ccw_package_assert(
     ($handshake['args']['headers']['Authorization'] ?? '') === 'Bearer ccw_' . str_repeat('a', 43),
     'Activation handshake omitted the installation bearer'
 );
+$handshake_payload = json_decode((string) $handshake['args']['body'], true);
 ccw_package_assert(
-    strpos((string) $handshake['args']['body'], 'activation_handshake') !== false,
-    'Activation handshake payload is missing'
+    is_array($handshake_payload)
+        && (int) ($handshake_payload['schema_version'] ?? 0) === 2
+        && (string) ($handshake_payload['event'] ?? '') === 'heartbeat'
+        && ($handshake_payload['capabilities']['multi_publication_v2'] ?? false) === true
+        && (int) ($handshake_payload['registry_sequence'] ?? -1) === 0
+        && ($handshake_payload['routes'] ?? null) === array(),
+    'Activation capability heartbeat payload is missing or invalid'
 );
+
+$claim = CCW_Site_Claim::claim_document();
+ccw_package_assert(is_array($claim), 'Provisioned plugin did not expose its temporary site claim');
+ccw_package_assert(
+    ($claim['installation_id'] ?? '') === $expectedInstallationId
+        && ($claim['canonical_home_url'] ?? '') === 'https://cliente.example.test'
+        && ($claim['claim_token_sha256'] ?? '') === hash('sha256', str_repeat('s', 43)),
+    'Temporary site claim is not bound to installation, digest and canonical home'
+);
+ccw_package_assert(strpos(json_encode($claim), str_repeat('s', 43)) === false, 'Public site claim leaked its raw challenge');
+foreach ($entries as $entry) {
+    if ($entry === 'clinicaclick-web/config/installation.php') continue;
+    $entryBody = file_get_contents($temporaryRoot . '/' . $entry);
+    ccw_package_assert(
+        !is_string($entryBody) || strpos($entryBody, str_repeat('s', 43)) === false,
+        'Raw site claim leaked outside the provisioned config'
+    );
+}
+$GLOBALS['ccw_package_response_body'] = json_encode(array('site_claim_acknowledged' => true));
+ccw_package_assert((new CCW_HTTP())->report(array(
+    'schema_version' => 2,
+    'event' => 'heartbeat',
+)) === true, 'Backend claim ACK report failed');
+ccw_package_assert(CCW_Site_Claim::claim_document() === null, 'Site claim remained public after backend ACK');
 
 echo "ok - Node provisioned ZIP boots and activates with the packaged PHP plugin\n";

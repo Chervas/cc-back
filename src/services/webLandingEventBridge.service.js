@@ -1,26 +1,34 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { Op } = require('sequelize');
 const db = require('../../models');
-const { trustedRuntime } = require('../lib/webMeasurementRuntime');
 const {
   UUID_V4,
-  pathMatchesPublication,
+  longestPublicationMatch,
   publishedPagePath,
+  resolvePublicationArtifact,
   resolveAuthorizedGoogleAttribution,
   safePageUrl,
 } = require('./webLandingAttribution.service');
 const { intakeConfigForAttribution } = require('./webLandingSubmission.service');
 const {
-  installationApiBase,
-  measurementFromIntake,
-} = require('./webWordpressInstallations.service');
+  attachWebLandingInternalContext,
+} = require('./webArtifactMetadata.service');
+const {
+  runtimeCandidateForPublicationArtifact,
+} = require('./webIntakeRuntimeReconciliation.service');
 
 const ENDPOINTS = new Set(['leads', 'events', 'whatsapp-origin']);
 const WRAPPER_FIELDS = new Set([
   'schema_version', 'endpoint', 'payload', 'web_project_id', 'web_revision_id', 'web_page_id',
+  'web_artifact_input_hash',
 ]);
 const MAX_CANONICAL_BYTES = 64 * 1024;
+const ARTIFACT_HASH = /^[a-f0-9]{64}$/;
+const SERVED_PUBLICATION_STATUSES = Object.freeze([
+  'pending', 'publishing', 'published', 'failed', 'rolling_back',
+]);
 
 class WebLandingEventBridgeError extends Error {
   constructor(code, message, status = 422) {
@@ -68,6 +76,18 @@ function selectedClinic(publication) {
     : Number(publication.configuration?.clinic_id);
 }
 
+function optionalArtifactHash(value) {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string' || !ARTIFACT_HASH.test(value.trim().toLowerCase())) {
+    throw new WebLandingEventBridgeError(
+      'web_event_bridge_artifact_identity_invalid',
+      'La versión publicada de la página no es válida.',
+      409
+    );
+  }
+  return value.trim().toLowerCase();
+}
+
 function canonicalPayload(input, context) {
   const payload = { ...input };
   for (const field of [
@@ -75,6 +95,7 @@ function canonicalPayload(input, context) {
     'group_id', 'grupo_clinica_id', 'groupId', 'grupoClinicaId',
     'domain', 'page_url', 'pageUrl', 'event_source_url', 'eventSourceUrl',
     'web_project_id', 'web_revision_id', 'web_page_id', 'web_form_id',
+    'web_artifact_input_hash',
   ]) delete payload[field];
   payload.clinic_id = context.clinicId;
   if (context.groupId) payload.group_id = context.groupId;
@@ -136,19 +157,38 @@ async function resolveContext({ body, headers, models, env }) {
     throw new WebLandingEventBridgeError('web_event_bridge_page_projection_invalid', 'La página publicada no coincide con su proyección activa.', 409);
   }
   const publications = await models.WebPublication.findAll({
-    where: { projectId, activeRevisionId: revisionId, status: 'published' },
+    where: {
+      projectId,
+      [Op.or]: [
+        { activeRevisionId: revisionId },
+        { desiredRevisionId: revisionId },
+      ],
+      status: { [Op.in]: SERVED_PUBLICATION_STATUSES },
+      host: pageUrl.hostname.toLowerCase(),
+    },
     order: [['published_at', 'DESC'], ['id', 'ASC']],
-    limit: 20,
   });
-  const matches = publications.map(plain).filter((publication) => (
-    String(publication.host || '').toLowerCase() === pageUrl.hostname.toLowerCase()
-    && pathMatchesPublication(pageUrl.pathname, publication.path)
-  ));
-  if (matches.length !== 1) {
+  const publication = longestPublicationMatch(publications, pageUrl);
+  if (!publication) {
     throw new WebLandingEventBridgeError('web_event_bridge_publication_not_active', 'No existe una publicación activa única para esta página.', 409);
   }
-  const publication = matches[0];
-  const artifact = plain(await models.WebArtifact.findByPk(publication.activeArtifactId));
+  const inputHash = optionalArtifactHash(body.web_artifact_input_hash);
+  const finalHash = optionalArtifactHash(headers['x-clinicaclick-web-artifact']);
+  if (publication.channel === 'wordpress' ? !finalHash : !inputHash) {
+    throw new WebLandingEventBridgeError(
+      'web_event_bridge_artifact_identity_required',
+      'No se ha podido identificar la versión publicada de la página.',
+      409
+    );
+  }
+  const artifact = await resolvePublicationArtifact({
+    publication,
+    projectId,
+    revisionId,
+    artifactInputHash: inputHash,
+    artifactHash: finalHash,
+    models,
+  });
   const manifest = artifact?.manifest;
   const pageRoute = manifest?.page_routes?.[pageId];
   const expectedRelativePath = page.slug === 'inicio' ? '/' : `/${page.slug}/`;
@@ -186,17 +226,37 @@ async function resolveContext({ body, headers, models, env }) {
     groupId = Number(clinic.grupoClinicaId) || null;
   }
   const attribution = { scope_type: publication.scopeType, clinic_id: clinicId, group_id: groupId };
-  const intake = await intakeConfigForAttribution(attribution, { models });
-  const measurement = measurementFromIntake(intake);
-  const runtime = trustedRuntime({
-    measurement: measurement.enabled
-      ? { ...measurement, api_url: installationApiBase(env) }
-      : measurement,
-  }, { environment: 'production' });
-  if (!measurement.enabled || runtime.runtime_config_hash !== manifest.runtime_config_hash) {
+  const committedIntake = await intakeConfigForAttribution(attribution, { models });
+  const selectedRuntime = await runtimeCandidateForPublicationArtifact({
+    intake: committedIntake,
+    publication,
+    artifact,
+    models,
+    env,
+  });
+  const intake = selectedRuntime?.intake || null;
+  const hmacKey = String(intake?.hmac_key || '').trim();
+  if (
+    !selectedRuntime
+    || hmacKey.length < 16
+    || hmacKey.length > 512
+    || /[\x00-\x20\x7f]/.test(hmacKey)
+  ) {
     throw new WebLandingEventBridgeError('web_event_bridge_runtime_drift', 'La medición publicada necesita actualizarse.', 409);
   }
-  return { artifact, clinicId, groupId, intake, pageUrl, pageProjection, projectId, publication, revisionId, pageId };
+  return {
+    artifact,
+    clinicId,
+    groupId,
+    intake,
+    pageUrl,
+    pageProjection,
+    projectId,
+    publication,
+    revisionId,
+    pageId,
+    runtimeRole: selectedRuntime.role,
+  };
 }
 
 async function prepareWebLandingEventBridge({
@@ -238,6 +298,28 @@ async function prepareWebLandingEventBridge({
   }
   const secret = String(context.intake?.hmac_key || '');
   const signature = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+  const attribution = attachWebLandingInternalContext({
+    project_id: context.projectId,
+    revision_id: context.revisionId,
+    page_id: context.pageProjection.id,
+    document_page_id: context.pageId,
+    publication_id: context.publication.id,
+    artifact_id: context.artifact.id,
+    artifact_hash: context.artifact.artifactHash,
+    form_id: null,
+    scope_type: context.publication.scopeType,
+    clinic_id: context.clinicId,
+    group_id: context.groupId,
+    ...(googleAttribution ? {
+      google_ads_customer_id: googleAttribution.customer_id,
+      google_ads_campaign_id: googleAttribution.campaign_id,
+      google_ads_assignment_id: googleAttribution.assignment_id,
+      strategy_campaign_id: googleAttribution.strategy_campaign_id,
+      campaign_request_id: googleAttribution.campaign_request_id,
+      target_kind: googleAttribution.target_kind,
+      target_treatment_id: googleAttribution.target_treatment_id,
+    } : {}),
+  }, { artifact: context.artifact, publication: context.publication });
   return {
     endpoint,
     payload,
@@ -245,28 +327,7 @@ async function prepareWebLandingEventBridge({
     signature,
     artifact_hash: context.artifact.artifactHash,
     publication_id: context.publication.id,
-    attribution: {
-      project_id: context.projectId,
-      revision_id: context.revisionId,
-      page_id: context.pageProjection.id,
-      document_page_id: context.pageId,
-      publication_id: context.publication.id,
-      artifact_id: context.artifact.id,
-      artifact_hash: context.artifact.artifactHash,
-      form_id: null,
-      scope_type: context.publication.scopeType,
-      clinic_id: context.clinicId,
-      group_id: context.groupId,
-      ...(googleAttribution ? {
-        google_ads_customer_id: googleAttribution.customer_id,
-        google_ads_campaign_id: googleAttribution.campaign_id,
-        google_ads_assignment_id: googleAttribution.assignment_id,
-        strategy_campaign_id: googleAttribution.strategy_campaign_id,
-        campaign_request_id: googleAttribution.campaign_request_id,
-        target_kind: googleAttribution.target_kind,
-        target_treatment_id: googleAttribution.target_treatment_id,
-      } : {}),
-    },
+    attribution,
   };
 }
 
