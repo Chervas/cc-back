@@ -17,6 +17,17 @@ const DESIGN_SYSTEM = Object.freeze({
   },
 });
 
+// La versión del WebDocument y la versión comercial de cada plantilla siguen
+// siendo v1. Esta revisión identifica correcciones seguras sobre esas mismas
+// plantillas sin duplicarlas en el catálogo ni romper overrides de scope v1.
+const BUILTIN_WEB_TEMPLATES_REVISION = 2;
+const BUILTIN_WEB_TEMPLATE_COMPATIBILITY = Object.freeze({
+  schema_version: 1,
+  renderer_min: 'clinicaclick-web-renderer/1.0.0',
+  breakpoints: Object.freeze(['desktop', 'tablet', 'mobile']),
+  builtin_revision: BUILTIN_WEB_TEMPLATES_REVISION,
+});
+
 function baseDocument({ title, slug = 'inicio', rootIds, nodes, bindings = {}, seoDescription }) {
   return {
     schema_version: 1,
@@ -56,6 +67,9 @@ function baseDocument({ title, slug = 'inicio', rootIds, nodes, bindings = {}, s
 }
 
 function section(id, children, options = {}) {
+  const isResponsiveGrid = options.layout === 'grid' && Number(options.columns) > 1;
+  const desktopColumns = Number(options.columns) || 1;
+  const tabletColumns = Math.min(2, desktopColumns);
   return {
     id,
     type: 'section',
@@ -77,7 +91,13 @@ function section(id, children, options = {}) {
       shadow: 'none',
       align: options.align || 'stretch',
     },
-    responsive: options.columns && options.columns > 1 ? { mobile: { columns: 1 } } : {},
+    responsive: isResponsiveGrid
+      ? {
+        desktop: { columns: desktopColumns },
+        tablet: { columns: tabletColumns },
+        mobile: { columns: 1 },
+      }
+      : {},
   };
 }
 
@@ -268,10 +288,13 @@ function localCallWhatsapp() {
   const formId = 'local-form-primary';
   const nodes = {
     'local-hero': section('local-hero', ['local-title', 'local-copy', 'local-call', 'local-whatsapp'], { semanticTag: 'main', background: 'accent', foreground: 'inverse', width: 'narrow', spacingTop: '2xl', spacingBottom: '2xl', align: 'center' }),
-    'local-title': heading('local-title', 'Habla ahora con una clínica cercana', 1, { tone: 'inverse', align: 'center' }),
-    'local-copy': text('local-copy', 'Elige cómo prefieres contactar o déjanos tus datos para que te llamemos.', { tone: 'inverse', align: 'center', size: 'lg' }),
-    'local-call': button('local-call', 'Llamar a la clínica', '+34900000000', { action: 'phone', variant: 'secondary', bindingIds: ['local-phone-binding'] }),
-    'local-whatsapp': button('local-whatsapp', 'Escribir por WhatsApp', '+34900000000', { action: 'whatsapp', variant: 'outline', bindingIds: ['local-whatsapp-binding'] }),
+    'local-title': heading('local-title', 'Contacta con una clínica cercana', 1, { tone: 'inverse', align: 'center' }),
+    'local-copy': text('local-copy', 'Déjanos tus datos e indica cómo prefieres que te contactemos.', { tone: 'inverse', align: 'center', size: 'lg' }),
+    // Una plantilla global no conoce todavía los canales reales de la clínica.
+    // Ambos CTA llevan al formulario nativo, donde el paciente puede indicar su
+    // preferencia, en lugar de publicar un teléfono ficticio como fallback.
+    'local-call': button('local-call', 'Quiero que me llamen', formId, { variant: 'secondary' }),
+    'local-whatsapp': button('local-whatsapp', 'Prefiero WhatsApp', formId, { variant: 'outline' }),
     'local-address': section('local-address', ['local-address-title', 'local-address-value'], { width: 'narrow' }),
     'local-address-title': heading('local-address-title', 'Dónde estamos', 2),
     'local-address-value': text('local-address-value', 'Dirección de la clínica', { bindingIds: ['local-address-binding'] }),
@@ -281,8 +304,6 @@ function localCallWhatsapp() {
   // text() no añade bindings para mantener su API pequeña.
   nodes['local-address-value'].binding_ids = ['local-address-binding'];
   const bindings = {
-    'local-phone-binding': { target_node_id: 'local-call', target_prop: 'target', source: 'clinic', source_id: null, field: 'phone' },
-    'local-whatsapp-binding': { target_node_id: 'local-whatsapp', target_prop: 'target', source: 'clinic', source_id: null, field: 'phone' },
     'local-address-binding': { target_node_id: 'local-address-value', target_prop: 'text', source: 'clinic', source_id: null, field: 'address' },
   };
   const document = baseDocument({
@@ -290,19 +311,18 @@ function localCallWhatsapp() {
     rootIds: ['local-hero', 'local-address', 'local-form-section'],
     nodes,
     bindings,
-    seoDescription: 'Landing local centrada en llamada, WhatsApp y contacto rápido con la clínica.',
+    seoDescription: 'Landing local de contacto rápido con formulario y preferencia de llamada, WhatsApp o email.',
   });
-  document.integrations.whatsapp_enabled = true;
-  document.integrations.phone_enabled = true;
   return document;
 }
 
 function qualificationForm() {
   const formId = 'qualify-form-primary';
   const nodes = {
-    'qualify-hero': section('qualify-hero', ['qualify-title', 'qualify-copy'], { semanticTag: 'main', width: 'narrow', spacingTop: '2xl' }),
+    'qualify-hero': section('qualify-hero', ['qualify-title', 'qualify-copy', 'qualify-cta'], { semanticTag: 'main', width: 'narrow', spacingTop: '2xl' }),
     'qualify-title': heading('qualify-title', 'Cuéntanos qué necesitas', 1),
     'qualify-copy': text('qualify-copy', 'Con unas pocas respuestas podremos preparar mejor el primer contacto contigo.', { size: 'lg' }),
+    'qualify-cta': button('qualify-cta', 'Empezar mi solicitud', formId),
     'qualify-form-section': section('qualify-form-section', [formId], { width: 'narrow', spacingTop: 'lg' }),
     [formId]: intakeForm(formId, {
       email: true,
@@ -352,7 +372,7 @@ const DEFINITIONS = Object.freeze([
     id: '61e5a73e-bcd5-47f0-a145-a0ddcbd76004',
     catalog_key: 'local-call-whatsapp-v1',
     name: 'Contacto local',
-    description: 'Prioriza llamada y WhatsApp, manteniendo un formulario como alternativa.',
+    description: 'Contacto local mediante formulario, con preferencia de llamada o WhatsApp sin publicar canales ficticios.',
     category: 'local',
     document: localCallWhatsapp(),
   },
@@ -370,5 +390,7 @@ for (const definition of DEFINITIONS) assertValidWebDocument(definition.document
 
 module.exports = {
   BUILTIN_WEB_TEMPLATES_V1: DEFINITIONS,
+  BUILTIN_WEB_TEMPLATES_REVISION,
+  BUILTIN_WEB_TEMPLATE_COMPATIBILITY,
   DESIGN_SYSTEM,
 };

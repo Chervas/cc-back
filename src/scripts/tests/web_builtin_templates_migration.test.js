@@ -31,6 +31,11 @@ async function main() {
   assert.equal(queryInterface.rows.length, 5);
   assert.ok(queryInterface.rows.every((row) => row.scope_type === 'global' && row.is_public === true && row.status === 'active'));
   assert.ok(queryInterface.rows.every((row) => /^[a-f0-9]{64}$/.test(row.document_hash)));
+  assert.ok(queryInterface.rows.every((row) => JSON.parse(row.compatibility).builtin_revision === 2));
+  assert.doesNotMatch(
+    queryInterface.rows.map((row) => row.document).join('\n'),
+    /\+3490{6,}|900000000|example\.(?:com|org|net)|localhost/i
+  );
   const firstHashes = queryInterface.rows.map((row) => row.document_hash);
   await migration.up(queryInterface);
   assert.equal(queryInterface.rows.length, 5);
