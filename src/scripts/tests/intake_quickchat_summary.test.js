@@ -652,15 +652,20 @@ function testControllerStopsBeforeExternalTracking() {
   assert.match(ingest, /quickChatOutbox: isQuickChatOutboxLead/);
   assert.match(ingest, /onQuickChatOutboxCreated/);
   assert.match(ingest, /persistExistingLeadAuditAndQuickChatOutbox\([\s\S]*?rawPayload: req\.body \|\| \{\}/);
-  assert.equal(
-    (ingest.match(/resolved_clinic_id: clinicaIdParsed/g) || []).length,
-    2,
-    'new and deduplicated outboxes must persist the resolved clinic in their exact audit'
+  assert.match(
+    ingest,
+    /const leadAttributionSteps = buildWebLandingAttributionSteps\(webLandingAttribution, \{[\s\S]*?resolved_clinic_id: clinicaIdParsed,[\s\S]*?resolved_group_id: grupoClinicaIdParsed,[\s\S]*?\}\);/,
+    'the shared audit snapshot must retain the resolved clinic and group'
   );
-  assert.equal(
-    (ingest.match(/resolved_group_id: grupoClinicaIdParsed/g) || []).length,
-    2,
-    'new and deduplicated outboxes must persist the resolved group in their exact audit'
+  assert.match(
+    ingest,
+    /dedupeAndCreateLead\(leadPayload, req\.body \|\| \{\}, leadAttributionSteps, \{/,
+    'new QuickChat leads must persist the shared server-resolved audit snapshot'
+  );
+  assert.match(
+    ingest,
+    /persistExistingLeadAuditAndQuickChatOutbox\([\s\S]*?attributionSteps: leadAttributionSteps,/,
+    'deduplicated QuickChat leads must persist the same server-resolved audit snapshot'
   );
   assert.doesNotMatch(
     ingest,

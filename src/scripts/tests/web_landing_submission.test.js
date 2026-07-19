@@ -7,7 +7,10 @@ const { trustedRuntime } = require('../../lib/webMeasurementRuntime');
 const {
   prepareWebLandingSubmission,
 } = require('../../services/webLandingSubmission.service');
-const { longestPublicationMatch } = require('../../services/webLandingAttribution.service');
+const {
+  buildWebLandingAttributionSteps: buildResolvedLandingAuditSteps,
+  longestPublicationMatch,
+} = require('../../services/webLandingAttribution.service');
 const { measurementFromIntake } = require('../../services/webWordpressInstallations.service');
 const {
   PUBLIC_WEB_ARTIFACT_METADATA_ATTRIBUTES,
@@ -149,6 +152,79 @@ function fixture() {
   };
   return { artifact, body, headers, models, publication };
 }
+
+test('fija identidad web, asignación y estrategia resueltas sin copiar campos del navegador', () => {
+  const base = {
+    clinic_match_source: 'clinicaclick_web_publication',
+    clinic_match_value: IDS.publication,
+    resolved_clinic_id: 66,
+    resolved_group_id: 7,
+  };
+  const steps = buildResolvedLandingAuditSteps({
+    project_id: IDS.project.toUpperCase(),
+    revision_id: IDS.revision,
+    page_id: IDS.pageRecord,
+    document_page_id: IDS.page,
+    publication_id: IDS.publication,
+    artifact_id: IDS.artifact,
+    artifact_hash: 'A'.repeat(64),
+    form_id: IDS.form,
+    scope_type: 'CLINIC',
+    clinic_id: 66,
+    group_id: 7,
+    google_ads_customer_id: '1851215478',
+    google_ads_campaign_id: '21316904358',
+    google_ads_assignment_id: 90,
+    strategy_campaign_id: 41,
+    campaign_request_id: 42,
+    target_kind: 'general',
+    target_treatment_id: null,
+    email: 'must-not-be-copied@example.test',
+    raw_payload: { forged: true },
+  }, base);
+
+  assert.deepEqual(steps, {
+    ...base,
+    web_landing: {
+      schema_version: 1,
+      identity: {
+        project_id: IDS.project,
+        revision_id: IDS.revision,
+        page_id: IDS.pageRecord,
+        document_page_id: IDS.page,
+        publication_id: IDS.publication,
+        artifact_id: IDS.artifact,
+        artifact_hash: 'a'.repeat(64),
+        form_id: IDS.form,
+        scope_type: 'clinic',
+        clinic_id: 66,
+        group_id: 7,
+      },
+      google_ads_assignment: {
+        provider: 'google_ads',
+        assignment_id: 90,
+        customer_id: '1851215478',
+        campaign_id: '21316904358',
+      },
+      strategy: {
+        strategy_campaign_id: 41,
+        campaign_request_id: 42,
+        target_kind: 'generic',
+        target_treatment_id: null,
+      },
+    },
+  });
+  assert.equal(Object.isFrozen(steps), true);
+  assert.equal(Object.isFrozen(steps.web_landing), true);
+  assert.equal(Object.isFrozen(steps.web_landing.identity), true);
+  assert.equal(Object.hasOwn(steps.web_landing, 'email'), false);
+  assert.equal(Object.hasOwn(steps.web_landing, 'raw_payload'), false);
+
+  const quickChatSteps = buildResolvedLandingAuditSteps(null, base);
+  assert.deepEqual(quickChatSteps, base);
+  assert.equal(Object.hasOwn(quickChatSteps, 'web_landing'), false);
+  assert.notEqual(quickChatSteps, base, 'the builder must not mutate or reuse the caller object');
+});
 
 test('convierte el formulario firmado en un lead atribuido sin inventar consentimiento publicitario', async () => {
   const state = fixture();
