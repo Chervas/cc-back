@@ -744,3 +744,30 @@ test('el contrato persiste autor, filtra el selector y autoriza el envío server
   assert.match(migration, /references:\s*\{ model: 'Usuarios', key: 'id_usuario' \}/);
   assert.doesNotMatch(migration, /UPDATE\s+WhatsappTemplates/i);
 });
+
+test('la migración de autoría es aditiva, idempotente y no hace backfill inferido', async () => {
+  const migration = require('../../../migrations/20260717113000-add-whatsapp-template-creator');
+  const state = { columns: {}, indexes: [] };
+  const calls = { addColumn: 0, addIndex: 0 };
+  const queryInterface = {
+    async describeTable() { return { ...state.columns }; },
+    async showIndex() { return state.indexes.map(name => ({ name })); },
+    async addColumn(_table, column) {
+      calls.addColumn += 1;
+      state.columns[column] = { allowNull: true };
+    },
+    async addIndex(_table, _columns, options) {
+      calls.addIndex += 1;
+      state.indexes.push(options.name);
+    },
+  };
+  const Sequelize = { INTEGER: 'INTEGER' };
+
+  await migration.up(queryInterface, Sequelize);
+  await migration.up(queryInterface, Sequelize);
+
+  assert.equal(calls.addColumn, 1);
+  assert.equal(calls.addIndex, 1);
+  assert.ok(state.columns.created_by_user_id);
+  assert.ok(state.indexes.includes('idx_whatsapp_templates_creator_active'));
+});
