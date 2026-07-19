@@ -830,6 +830,7 @@ test('renderer 1.7 honra tokens, responsive, fuentes e imagen focal en CSS de pr
   assert.match(css, /\.cc-node\.cc-bg-brand\{background:var\(--cc-primary\)\}/);
   assert.match(css, /\.cc-node\.cc-fg-inverse,\.cc-node\.cc-tone-inverse\{color:#fff\}/);
   assert.doesNotMatch(css, /,\.cc-tone-inverse\{color:#fff\}/);
+  assert.match(css, /\.cc-node\.cc-fg-muted,\.cc-node\.cc-tone-muted\{color:#5f6b7f\}/);
   assert.match(css, /\.cc-node\.cc-radius-full\{border-radius:9999px\}/);
   assert.match(css, /\.cc-node\.cc-tablet-pt-lg\{padding-top:var\(--cc-lg\)\}/);
   assert.match(css, /\.cc-section\.cc-tablet-cols-2>.cc-container\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)\}/);
