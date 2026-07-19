@@ -71,8 +71,9 @@ La prueba pública final se cerró con:
 - Lighthouse: rendimiento 88, accesibilidad 100, buenas prácticas 100 y SEO
   69 (`noindex` deliberado); FCP 1,0 s, LCP 3,9 s, CLS 0 y TBT 0.
 
-Al terminar se archivó el proyecto y se retiró la publicación. El router sirve
-ahora **410 Gone** intencionalmente; no es una caída ni debe esperarse 404.
+Al terminar se archivó el proyecto y se retiró la publicación. La evidencia
+capturó **410 Gone** con el tombstone activo; tras liberarlo, el readback actual
+es **404**, sin contenido público y como estado final esperado.
 El QA admin autenticado directo contra `https://crm.clinicaclick.com` recorrió
 Proyectos y Contenidos a `1440` y `390`: cuatro HTTP 200, sin overflow, page
 errors, requests fallidas ni errores HTTP. Evidencia en

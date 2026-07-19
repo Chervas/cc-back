@@ -99,9 +99,10 @@ completos:
   69. El SEO reducido es deliberado porque la revisión QA emitía `noindex`;
   FCP 1,0 s, LCP 3,9 s, CLS 0 y TBT 0.
 
-Tras la validación se archivó el proyecto y se retiró la publicación. La ruta
-responde ahora **HTTP 410 Gone** por el router de tombstone; es el resultado
-intencional y no un fallo ni un 404 esperado. El QA admin autenticado contra
+Tras la validación se archivó el proyecto y se retiró la publicación. La
+evidencia de retirada capturó **HTTP 410 Gone** mientras el tombstone estaba
+activo; tras su liberación, el readback actual responde **HTTP 404**, también
+sin contenido público y como estado final esperado. El QA admin autenticado contra
 `https://crm.clinicaclick.com` recorrió Proyectos y Contenidos a `1440` y `390`:
 cuatro recorridos HTTP 200, sin overflow, page errors, requests fallidas ni
 errores HTTP. Evidencia:
