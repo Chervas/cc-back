@@ -38,6 +38,11 @@ function casGenerationModel(row, options = {}) {
   return {
     async findByPk() { return row; },
     async update(patch, query = {}) {
+      assert.equal(
+        query.validate,
+        false,
+        'partial generation state updates must bypass the full-instance scope validator'
+      );
       if (!whereMatches(row, query.where)) return [0];
       Object.assign(row, patch);
       updates += 1;
@@ -744,6 +749,11 @@ async function main() {
       JobRequest: { findByPk: async () => ({ id: 902, status: 'failed', completed_at: new Date() }) },
       WebContentGeneration: {
         update: async (patch, options) => {
+          assert.equal(
+            options.validate,
+            false,
+            'job reconciliation must not validate a partial instance without scope fields'
+          );
           const allowed = options.where.status[Object.getOwnPropertySymbols(options.where.status)[0]];
           if (!allowed.includes(orphan.status)) return [0];
           Object.assign(orphan, patch);
@@ -774,7 +784,14 @@ async function main() {
         },
       },
       WebContentGeneration: {
-        update: async () => raced.status === 'completed' ? [0] : [1],
+        update: async (_patch, options) => {
+          assert.equal(
+            options.validate,
+            false,
+            'racing reconciliation must use the same partial-update validation contract'
+          );
+          return raced.status === 'completed' ? [0] : [1];
+        },
         findByPk: async () => raced,
       },
     });
