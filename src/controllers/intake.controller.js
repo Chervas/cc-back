@@ -112,6 +112,7 @@ const {
   uploadScheduleForLinkedAppointment,
 } = require('../services/leadQualificationMilestone.service');
 const {
+  buildWebLandingAttributionSteps,
   resolveWebLandingAttribution,
 } = require('../services/webLandingAttribution.service');
 const {
@@ -2044,13 +2045,14 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   let lead;
   let dedupeConflict = null;
   let shouldEmitLeadCreated = false;
+  const leadAttributionSteps = buildWebLandingAttributionSteps(webLandingAttribution, {
+    clinic_match_source: clinicMatchSource || null,
+    clinic_match_value: clinicMatchValue || null,
+    resolved_clinic_id: clinicaIdParsed,
+    resolved_group_id: grupoClinicaIdParsed,
+  });
   try {
-    lead = await dedupeAndCreateLead(leadPayload, req.body || {}, {
-      clinic_match_source: clinicMatchSource || null,
-      clinic_match_value: clinicMatchValue || null,
-      resolved_clinic_id: clinicaIdParsed,
-      resolved_group_id: grupoClinicaIdParsed,
-    }, {
+    lead = await dedupeAndCreateLead(leadPayload, req.body || {}, leadAttributionSteps, {
       quickChatOutbox: isQuickChatOutboxLead,
       onQuickChatOutboxCreated: ({ job }) => {
         quickChatOutboxJob = job || null;
@@ -2088,12 +2090,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
             const persisted = await persistExistingLeadAuditAndQuickChatOutbox({
               leadId: lead.id,
               rawPayload: req.body || {},
-              attributionSteps: {
-                clinic_match_source: clinicMatchSource || null,
-                clinic_match_value: clinicMatchValue || null,
-                resolved_clinic_id: clinicaIdParsed,
-                resolved_group_id: grupoClinicaIdParsed,
-              },
+              attributionSteps: leadAttributionSteps,
               leadUpdates,
             });
             lead = persisted.lead;

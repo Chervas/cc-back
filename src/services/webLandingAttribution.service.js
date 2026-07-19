@@ -180,6 +180,69 @@ function positiveInteger(value) {
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
+function auditString(value, { lowercase = false } = {}) {
+  const normalized = String(value ?? '').trim();
+  if (!normalized) return null;
+  return lowercase ? normalized.toLowerCase() : normalized;
+}
+
+/**
+ * Builds the append-only audit snapshot from the server-resolved landing
+ * attribution. Browser payload fields are deliberately not spread here: the
+ * resolver above is the authority for the publication, artifact, clinic and
+ * optional Google Ads assignment/strategy identities.
+ */
+function buildWebLandingAttributionSteps(attribution, baseSteps = {}) {
+  const base = baseSteps && typeof baseSteps === 'object' && !Array.isArray(baseSteps)
+    ? { ...baseSteps }
+    : {};
+  if (!attribution || typeof attribution !== 'object' || Array.isArray(attribution)) {
+    return Object.freeze(base);
+  }
+
+  const identity = Object.freeze({
+    project_id: auditString(attribution.project_id, { lowercase: true }),
+    revision_id: auditString(attribution.revision_id, { lowercase: true }),
+    page_id: auditString(attribution.page_id, { lowercase: true }),
+    document_page_id: auditString(attribution.document_page_id, { lowercase: true }),
+    publication_id: auditString(attribution.publication_id, { lowercase: true }),
+    artifact_id: auditString(attribution.artifact_id, { lowercase: true }),
+    artifact_hash: auditString(attribution.artifact_hash, { lowercase: true }),
+    form_id: auditString(attribution.form_id),
+    scope_type: auditString(attribution.scope_type, { lowercase: true }),
+    clinic_id: positiveInteger(attribution.clinic_id),
+    group_id: positiveInteger(attribution.group_id),
+  });
+
+  const customerId = auditString(attribution.google_ads_customer_id);
+  const campaignId = auditString(attribution.google_ads_campaign_id);
+  const assignmentId = positiveInteger(attribution.google_ads_assignment_id);
+  const hasGoogleAssignment = Boolean(customerId || campaignId || assignmentId);
+  const snapshot = {
+    schema_version: 1,
+    identity,
+  };
+  if (hasGoogleAssignment) {
+    snapshot.google_ads_assignment = Object.freeze({
+      provider: 'google_ads',
+      assignment_id: assignmentId,
+      customer_id: customerId,
+      campaign_id: campaignId,
+    });
+    snapshot.strategy = Object.freeze({
+      strategy_campaign_id: positiveInteger(attribution.strategy_campaign_id),
+      campaign_request_id: positiveInteger(attribution.campaign_request_id),
+      target_kind: canonicalTargetKind(attribution.target_kind),
+      target_treatment_id: positiveInteger(attribution.target_treatment_id),
+    });
+  }
+
+  return Object.freeze({
+    ...base,
+    web_landing: Object.freeze(snapshot),
+  });
+}
+
 function googleIdentifier(body, aliases, pattern, field) {
   const attribution = body?.attribution && typeof body.attribution === 'object' && !Array.isArray(body.attribution)
     ? body.attribution
@@ -731,6 +794,7 @@ module.exports = {
   publishedPagePath,
   publishedPagePaths,
   requiredArtifactHash,
+  buildWebLandingAttributionSteps,
   resolvePublicationArtifact,
   resolveAuthorizedGoogleAttribution,
   resolveWebLandingAttribution,
