@@ -6,6 +6,7 @@ const { createBlankWebDocument } = require('../../services/webProjects.service')
 const {
   compileWebArtifact,
   escapeHtml,
+  faviconDataUrl,
   safePublicButtonUrl,
 } = require('../../lib/webArtifactCompiler');
 const { MAX_WEB_ARTIFACT_BUNDLE_BYTES } = require('../../lib/webArtifactBudget');
@@ -52,10 +53,20 @@ test('compila el mismo input de forma determinista y preview siempre es noindex'
   assert.match(first.files['robots.txt'], /Disallow: \/$/m);
   assert.match(first.manifest.headers['content-security-policy'], /default-src 'none'/);
   assert.match(first.files['index.html'], /http-equiv="Content-Security-Policy"/);
+  assert.match(first.files['index.html'], /<link rel="icon" type="image\/svg\+xml" href="data:image\/svg\+xml,/);
+  assert.match(first.manifest.headers['content-security-policy'], /img-src[^;]+data:/);
   assert.match(first.files['index.html'], /href="https:\/\/implantes\.sites\.clinicaclick\.com\/assets\/styles\./);
   assert.doesNotMatch(first.files['index.html'], /on(?:click|load|error)=/i);
   const stylesheet = Object.entries(first.files).find(([name]) => name.startsWith('assets/styles.'))?.[1];
   assert.match(stylesheet, /\.cc-section\.cc-bg-brand \.cc-button-primary\{background:var\(--cc-surface\);color:var\(--cc-primary\)\}/);
+});
+
+test('el favicon inline es determinista, generado por el compilador y no contiene markup ejecutable', () => {
+  const first = faviconDataUrl('Clínica Centro');
+  const second = faviconDataUrl('Clínica Centro');
+  assert.equal(first, second);
+  assert.match(first, /^data:image\/svg\+xml,/);
+  assert.doesNotMatch(decodeURIComponent(first), /<script|onload=|onerror=/i);
 });
 
 test('rechaza antes de persistir una expansión HTML que supera el contrato común del bundle', () => {
@@ -135,6 +146,77 @@ test('canonical, Open Graph, Schema y sitemap conservan una única URL autoritat
   assert.equal(webPage['@id'], `${canonical}#webpage`);
   assert.doesNotMatch(artifact.files['sitemap.xml'], /clinic\.example/);
   assert.doesNotMatch(artifact.files['sitemap.xml'], /implantes\.sites\.clinicaclick\.com/);
+  assert.match(html, /<meta name="twitter:card" content="summary">/);
+  assert.match(html, /<meta name="twitter:title" content="Implantes dentales en Barcelona">/);
+});
+
+test('la imagen social alimenta Open Graph, Twitter y la entidad clínica de Schema', () => {
+  const input = fixture();
+  const socialAssetId = '22222222-2222-4222-8222-222222222222';
+  const socialUrl = 'https://media.clinicaclick.com/web/social-clinica.webp';
+  input.document.seo.default_social_asset_id = socialAssetId;
+  input.contentSnapshot.media_assets[socialAssetId] = {
+    id: socialAssetId,
+    scope: { type: 'clinic', id: 66, inherited: false },
+    status: 'ready',
+    kind: 'image',
+    title: 'Imagen social',
+    alt_text: 'Clínica Dental Centro',
+    decorative: false,
+    focal_points: {},
+    rights: { origin: 'owned' },
+    variants: [{
+      key: 'social',
+      url: socialUrl,
+      content_type: 'image/webp',
+      width: 1200,
+      height: 630,
+    }],
+    metadata: {},
+    version: 1,
+  };
+
+  const artifact = compileWebArtifact(input);
+  const html = artifact.files['index.html'];
+  const clinic = artifact.pages[0].json_ld['@graph'].find((entry) => entry['@type'] === 'Dentist');
+  assert.match(html, new RegExp(`<meta property="og:image" content="${socialUrl}">`));
+  assert.match(html, /<meta property="og:image:alt" content="Clínica Dental Centro">/);
+  assert.match(html, /<meta name="twitter:card" content="summary_large_image">/);
+  assert.match(html, new RegExp(`<meta name="twitter:image" content="${socialUrl}">`));
+  assert.match(html, /<meta name="twitter:image:alt" content="Clínica Dental Centro">/);
+  assert.equal(clinic.image, socialUrl);
+});
+
+test('la imagen pública de la clínica cubre el fallback social sin inventar contenido', () => {
+  const clinicImage = 'https://media.clinicaclick.com/clinics/demo-avatar.webp';
+  const input = fixture({
+    clinicSnapshot: {
+      ...fixture().clinicSnapshot,
+      image: clinicImage,
+    },
+  });
+  const artifact = compileWebArtifact(input);
+  const html = artifact.files['index.html'];
+  const clinic = artifact.pages[0].json_ld['@graph'].find((entry) => entry['@type'] === 'Dentist');
+  assert.match(html, new RegExp(`<meta property="og:image" content="${clinicImage}">`));
+  assert.match(html, /<meta name="twitter:card" content="summary_large_image">/);
+  assert.equal(clinic.image, clinicImage);
+});
+
+test('un avatar legacy no público se omite sin bloquear la publicación', () => {
+  const input = fixture({
+    clinicSnapshot: {
+      ...fixture().clinicSnapshot,
+      image: '/uploads/clinics/avatar.webp',
+    },
+  });
+  const artifact = compileWebArtifact(input);
+  const html = artifact.files['index.html'];
+  const clinic = artifact.pages[0].json_ld['@graph'].find((entry) => entry['@type'] === 'Dentist');
+
+  assert.match(html, /<meta name="twitter:card" content="summary">/);
+  assert.doesNotMatch(html, /property="og:image"/);
+  assert.equal(clinic.image, undefined);
 });
 
 test('producción fija el envío de formularios al puente same-origin', () => {
@@ -149,6 +231,27 @@ test('producción fija el envío de formularios al puente same-origin', () => {
     () => compileWebArtifact(fixture({ environment: 'production', intakeEndpoint: '/api/intake/web' })),
     (error) => error.code === 'web_artifact_intake_endpoint_invalid'
   );
+});
+
+test('no publica una preferencia por email cuando el formulario no recoge email', () => {
+  const input = fixture({ environment: 'production', intakeEndpoint: '/_clinicaclick/intake' });
+  const form = Object.values(input.document.nodes).find((node) => node.type === 'intake_form');
+  form.props.fields = form.props.fields.filter((field) => field.name !== 'email');
+  form.props.fields.splice(form.props.fields.length - 1, 0, {
+    id: 'preferred_contact_without_email',
+    name: 'preferred_contact',
+    type: 'select',
+    label: '¿Cómo prefieres que contactemos?',
+    required: false,
+    options: [
+      { value: 'telefono', label: 'Por teléfono' },
+      { value: 'email', label: 'Por email' },
+    ],
+  });
+
+  const html = compileWebArtifact(input).files['index.html'];
+  assert.match(html, /value="telefono">Por teléfono/);
+  assert.doesNotMatch(html, /value="email">Por email/);
 });
 
 test('escapa todo texto editorial y nunca lo convierte en markup', () => {
@@ -601,7 +704,7 @@ test('renderiza globals una vez y los incluye en SEO, Schema e intake de cada p�
   assert.match(secondaryHtml, /name="web_page_id" value="page_global_secondary"/);
 });
 
-test('renderer 1.5 honra tokens, responsive, fuentes e imagen focal en CSS de producción', () => {
+test('renderer 1.6 honra tokens, responsive, fuentes e imagen focal en CSS de producción', () => {
   const input = fixture();
   const section = Object.values(input.document.nodes).find((node) => node.type === 'section');
   section.props.layout = 'grid';
@@ -655,7 +758,7 @@ test('renderer 1.5 honra tokens, responsive, fuentes e imagen focal en CSS de pr
   const cssPath = Object.keys(artifact.files).find((path) => path.endsWith('.css'));
   const css = artifact.files[cssPath];
   const html = artifact.files['index.html'];
-  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.5.0');
+  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.6.0');
   assert.match(html, /cc-layout-grid cc-cols-4[^"\n]*cc-bg-brand[^"\n]*cc-width-wide[^"\n]*cc-pt-2xl[^"\n]*cc-radius-full[^"\n]*cc-shadow-lg[^"\n]*cc-mobile-cols-1/);
   assert.match(html, /cc-fit-contain cc-aspect-21-9 cc-focal-37-62/);
   assert.match(html, /<div class="cc-image-frame"><img[^>]*width="2100" height="900">/);

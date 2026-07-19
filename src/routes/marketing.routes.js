@@ -12,6 +12,7 @@ const managedCampaignsController = require('../controllers/managedCampaigns.cont
 const campaignOptimizationController = require('../controllers/campaignOptimization.controller');
 const webProjectsController = require('../controllers/webProjects.controller');
 const webContentMediaController = require('../controllers/webContentMedia.controller');
+const webContentGenerationController = require('../controllers/webContentGeneration.controller');
 const webArtifactsController = require('../controllers/webArtifacts.controller');
 const webPublicationsController = require('../controllers/webPublications.controller');
 const webDomainsController = require('../controllers/webDomains.controller');
@@ -78,6 +79,8 @@ const limitWebRevisions = webRateLimit({ operation: 'web_revision_create', limit
 const limitWebProjects = webRateLimit({ operation: 'web_project_create', limit: 20, windowMs: 60 * 60 * 1000 });
 const limitWebTemplates = webRateLimit({ operation: 'web_template_write', limit: 30, windowMs: 60 * 60 * 1000 });
 const limitWebContentWrites = webRateLimit({ operation: 'web_content_write', limit: 120, windowMs: 10 * 60 * 1000 });
+const limitWebContentGenerations = webRateLimit({ operation: 'web_content_generation', limit: 12, windowMs: 60 * 60 * 1000 });
+const limitWebContentAcceptances = webRateLimit({ operation: 'web_content_generation_accept', limit: 60, windowMs: 60 * 60 * 1000 });
 const limitWebMediaWrites = webRateLimit({ operation: 'web_media_write', limit: 60, windowMs: 60 * 60 * 1000 });
 const limitWebCompiles = webRateLimit({ operation: 'web_artifact_compile', limit: 20, windowMs: 60 * 60 * 1000 });
 const limitWebPublicationWrites = webRateLimit({ operation: 'web_publication_write', limit: 20, windowMs: 60 * 60 * 1000 });
@@ -121,6 +124,14 @@ router.patch('/web-templates/:templateId', limitWebTemplates, webProjectsControl
 router.delete('/web-templates/:templateId', limitWebTemplates, webProjectsController.archiveTemplate);
 router.get('/web-content', webContentMediaController.listContent);
 router.post('/web-content', limitWebContentWrites, webContentMediaController.createContent);
+router.get('/web-content/generations/configuration', webContentGenerationController.getConfiguration);
+router.post('/web-content/generations', limitWebContentGenerations, webContentGenerationController.createGeneration);
+router.get('/web-content/generations/:generationId', webContentGenerationController.getGeneration);
+router.post(
+  '/web-content/generations/:generationId/accept',
+  limitWebContentAcceptances,
+  webContentGenerationController.acceptGeneration
+);
 router.patch('/web-content/:contentId', limitWebContentWrites, webContentMediaController.updateContent);
 router.get('/web-content/:contentId/versions', webContentMediaController.listContentVersions);
 router.get('/web-media', webContentMediaController.listMedia);

@@ -71,6 +71,7 @@ function clinicProjection(row) {
     phone: value.telefono_movil || value.telefono_fijo || value.telefono,
     email: value.email,
     website: value.url_web,
+    image: value.url_avatar,
     hours: value.horario_atencion,
   });
 }
@@ -99,7 +100,7 @@ async function resolveClinicForProject(project, requestedClinicId, {
     attributes: [
       'id_clinica', 'grupoClinicaId', 'nombre_clinica', 'direccion', 'codigo_postal',
       'ciudad', 'provincia', 'pais', 'telefono', 'telefono_fijo', 'telefono_movil',
-      'email', 'url_web', 'horario_atencion', 'estado_clinica',
+      'email', 'url_web', 'url_avatar', 'horario_atencion', 'estado_clinica',
     ],
     transaction,
   });

@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const { publicHttpUrl } = require('../lib/safeHttpTarget');
 
 const ADAPTER_SCHEMA_VERSION = 'managed-google-ads-dry-run-adapter/v1';
-const ADAPTER_VERSION = '1.0.0';
+const ADAPTER_VERSION = '1.1.0';
 const MONTHLY_BUDGET_DAYS = 30.4;
 const SUPPORTED_FAMILIES = Object.freeze(['google_search', 'google_pmax']);
 const SUPPORTED_OPERATIONS = Object.freeze(['create_new', 'update_existing']);
@@ -106,6 +106,17 @@ function strictText(value, max) {
   if (!clean) return { value: null, reason: 'empty' };
   if (clean.length > max) return { value: null, reason: 'length' };
   return { value: clean, reason: null };
+}
+
+function ianaTimeZone(value) {
+  const clean = text(value, 128);
+  if (!clean) return null;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: clean }).format(new Date(0));
+    return clean;
+  } catch (_) {
+    return null;
+  }
 }
 
 function normalizeTextList(value, {
@@ -383,18 +394,40 @@ function googleSearchOperations(specification, budget, warnings) {
       targeting: safeObject(specification.targeting),
       schedule: safeObject(specification.schedule),
     }, ['campaign_budget']),
-    operation(3, 'ad_group', 'AdGroup', 'create', 'Preparar nuevo grupo de anuncios', {
+    operation(3, 'campaign_criteria', 'CampaignCriterion', 'create', 'Preparar ubicaciones, idiomas y horarios explícitos', {
+      campaign_ref: '$campaign',
+      locations: list(specification.targeting?.geo_target_constant_ids).map((id) => ({
+        geo_target_constant: `geoTargetConstants/${id}`,
+        status: 'ENABLED',
+        negative: false,
+      })),
+      languages: list(specification.targeting?.language_constant_ids).map((id) => ({
+        language_constant: `languageConstants/${id}`,
+        status: 'ENABLED',
+        negative: false,
+      })),
+      geo_target_type_setting: {
+        positive_geo_target_type: specification.targeting?.positive_geo_target_type || null,
+        negative_geo_target_type: specification.targeting?.negative_geo_target_type || null,
+      },
+      ad_schedules: list(specification.schedule?.ad_schedules).map((item) => ({
+        ...safeObject(item),
+        status: 'ENABLED',
+        negative: false,
+      })),
+    }, ['campaign']),
+    operation(4, 'ad_group', 'AdGroup', 'create', 'Preparar nuevo grupo de anuncios en pausa', {
       name: campaignName ? `${campaignName} · Grupo principal` : null,
       campaign_ref: '$campaign',
-      status: 'ENABLED',
+      status: 'PAUSED',
       type: 'SEARCH_STANDARD',
-    }, ['campaign']),
-    operation(4, 'keywords', 'AdGroupCriterion', 'sync', 'Preparar keywords revisadas', {
+    }, ['campaign', 'campaign_criteria']),
+    operation(5, 'keywords', 'AdGroupCriterion', 'sync', 'Preparar keywords revisadas', {
       ad_group_ref: '$ad_group',
       criteria: keywords,
       destructive_replace: false,
     }, ['ad_group']),
-    operation(5, 'responsive_search_ad', 'AdGroupAd', 'create', 'Preparar nuevo anuncio de búsqueda adaptable', {
+    operation(6, 'responsive_search_ad', 'AdGroupAd', 'create', 'Preparar nuevo anuncio de búsqueda adaptable', {
       ad_group_ref: '$ad_group',
       status: 'PAUSED',
       final_urls: list(specification.final_urls),
@@ -510,6 +543,8 @@ function normalizeSpecification(specification, family, blockers) {
   if (family === 'google_search') {
     const creative = safeObject(specification.creative);
     const adGroup = safeObject(specification.ad_group);
+    const targeting = safeObject(specification.targeting);
+    const schedule = safeObject(specification.schedule);
     normalized.final_url = null;
     normalized.final_urls = normalizePublicUrlList([specification.final_url], {
       field: 'specification.final_url', code: 'adapter_search_final_url', label: 'URL final de Search', min: 1, max: 1,
@@ -527,6 +562,40 @@ function normalizeSpecification(specification, family, blockers) {
         field: 'specification.creative.descriptions', code: 'adapter_search_descriptions', label: 'Descripciones de Search', ...GOOGLE_LIMITS.search.descriptions,
       }, blockers),
     };
+    normalized.targeting = {
+      geo_target_constant_ids: normalizeTextList(targeting.geo_target_constant_ids, {
+        field: 'specification.targeting.geo_target_constant_ids', code: 'adapter_search_geo_targets', label: 'Ubicaciones Google Search', min: 1, max: 10_000, text: 32,
+      }, blockers).filter((value) => {
+        if (/^\d+$/.test(value)) return true;
+        blockers.push(issue('adapter_search_geo_targets_invalid', 'specification.targeting.geo_target_constant_ids', 'Las ubicaciones deben ser IDs numéricos de GeoTargetConstant.'));
+        return false;
+      }),
+      language_constant_ids: normalizeTextList(targeting.language_constant_ids, {
+        field: 'specification.targeting.language_constant_ids', code: 'adapter_search_languages', label: 'Idiomas Google Search', min: 1, max: 1_000, text: 32,
+      }, blockers).filter((value) => {
+        if (/^\d+$/.test(value)) return true;
+        blockers.push(issue('adapter_search_languages_invalid', 'specification.targeting.language_constant_ids', 'Los idiomas deben ser IDs numéricos de LanguageConstant.'));
+        return false;
+      }),
+      positive_geo_target_type: text(targeting.positive_geo_target_type, 64)?.toUpperCase() || null,
+      negative_geo_target_type: text(targeting.negative_geo_target_type, 64)?.toUpperCase() || null,
+    };
+    if (!['PRESENCE', 'PRESENCE_OR_INTEREST'].includes(normalized.targeting.positive_geo_target_type)) {
+      blockers.push(issue('adapter_search_positive_geo_type_required', 'specification.targeting.positive_geo_target_type', 'Search requiere PRESENCE o PRESENCE_OR_INTEREST de forma explícita.'));
+    }
+    if (normalized.targeting.negative_geo_target_type !== 'PRESENCE') {
+      blockers.push(issue('adapter_search_negative_geo_type_required', 'specification.targeting.negative_geo_target_type', 'Search requiere PRESENCE como tipo geográfico negativo explícito.'));
+    }
+    normalized.schedule = {
+      time_zone: ianaTimeZone(schedule.time_zone),
+      ad_schedules: list(schedule.ad_schedules).map((item) => sanitize(safeObject(item))),
+    };
+    if (!normalized.schedule.time_zone) {
+      blockers.push(issue('adapter_search_time_zone_required', 'specification.schedule.time_zone', 'Search requiere una zona horaria IANA explícita.'));
+    }
+    if (!normalized.schedule.ad_schedules.length) {
+      blockers.push(issue('adapter_search_ad_schedule_required', 'specification.schedule.ad_schedules', 'Search requiere al menos una franja semanal explícita.'));
+    }
   }
 
   if (family === 'google_pmax') {

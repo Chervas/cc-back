@@ -5,6 +5,10 @@ const { publicHttpUrl } = require('../lib/safeHttpTarget');
 const {
   buildManagedCampaignDryRunAdapter,
 } = require('./managedCampaignProviderAdapterRegistry.service');
+const {
+  executionCapability,
+  hasManagedCampaignExecutionAdapter,
+} = require('./managedCampaignProviderExecutionRegistry.service');
 
 const PLAN_SCHEMA_VERSION = 'managed-campaign-publishing-plan/v1';
 const AUTHORIZATION_SCHEMA_VERSION = 'managed-campaign-publishing-authorization/v1';
@@ -35,11 +39,17 @@ const REQUIRED_EXECUTION_CONFIRMATIONS = Object.freeze([
   'confirm_tracking_configuration',
   'confirm_creative_rights',
 ]);
-// Intentionally empty while this module is dry-run only. A future provider
-// execution adapter must be registered here in code; a client-supplied plan
-// flag can never enable external mutations by itself.
-const EXECUTION_ADAPTER_KEYS = Object.freeze([]);
-
+const GOOGLE_AD_SCHEDULE_DAYS = Object.freeze([
+  'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY', 'SUNDAY',
+]);
+const GOOGLE_AD_SCHEDULE_MINUTES = Object.freeze({
+  0: 'ZERO',
+  15: 'FIFTEEN',
+  30: 'THIRTY',
+  45: 'FORTY_FIVE',
+});
+const GOOGLE_POSITIVE_GEO_TARGET_TYPES = new Set(['PRESENCE', 'PRESENCE_OR_INTEREST']);
+const GOOGLE_NEGATIVE_GEO_TARGET_TYPES = new Set(['PRESENCE']);
 function plainCampaign(campaign) {
   if (!campaign || typeof campaign !== 'object') return null;
   return typeof campaign.get === 'function' ? campaign.get({ plain: true }) : campaign;
@@ -301,6 +311,222 @@ function scalarAlias(object, keys, normalize = (value) => value) {
   };
 }
 
+function valueAt(object, path) {
+  let value = object;
+  for (const segment of String(path || '').split('.')) {
+    if (!value || typeof value !== 'object') return undefined;
+    value = value[segment];
+  }
+  return value;
+}
+
+function explicitConstantIds(config, paths, resourcePrefix) {
+  const candidates = paths
+    .map((path) => valueAt(config, path))
+    .filter((value) => value !== undefined && value !== null && value !== '');
+  const normalize = (value) => {
+    const source = Array.isArray(value) ? value : [value];
+    const normalized = source.map((item) => {
+      const clean = text(item, 128);
+      if (!clean) return null;
+      const match = clean.match(new RegExp(`^(?:${resourcePrefix}/)?(\\d+)$`, 'i'));
+      return match?.[1] || null;
+    });
+    return {
+      valid: normalized.every(Boolean),
+      values: Array.from(new Set(normalized.filter(Boolean))).sort((left, right) => (
+        left.length - right.length || left.localeCompare(right)
+      )),
+    };
+  };
+  const normalized = candidates.map(normalize);
+  return {
+    values: normalized[0]?.values || [],
+    invalid: normalized.some((item) => !item.valid),
+    conflict: normalized.length > 1
+      && new Set(normalized.map((item) => JSON.stringify(item.values))).size > 1,
+  };
+}
+
+function googleMinute(value) {
+  const clean = text(value, 32)?.toUpperCase();
+  if (clean && Object.values(GOOGLE_AD_SCHEDULE_MINUTES).includes(clean)) return clean;
+  const number = Number(value);
+  return Number.isInteger(number) ? GOOGLE_AD_SCHEDULE_MINUTES[number] || null : null;
+}
+
+function googleMinuteNumber(value) {
+  const entry = Object.entries(GOOGLE_AD_SCHEDULE_MINUTES).find(([, name]) => name === value);
+  return entry ? Number(entry[0]) : null;
+}
+
+function ianaTimeZone(value) {
+  const clean = text(value, 128);
+  if (!clean) return null;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: clean }).format(new Date(0));
+    return clean;
+  } catch (_) {
+    return null;
+  }
+}
+
+function canonicalGoogleSchedules(scheduleConfig, blockers) {
+  const candidates = [
+    valueAt(scheduleConfig, 'google_ads.ad_schedules'),
+    valueAt(scheduleConfig, 'ad_schedules'),
+  ].filter((value) => value !== undefined && value !== null && value !== '');
+  if (candidates.length > 1 && canonicalStringify(candidates[0]) !== canonicalStringify(candidates[1])) {
+    blockers.push(blocker(
+      'search_schedule_alias_conflict',
+      'schedule_config.google_ads.ad_schedules',
+      'Hay horarios Google distintos en dos campos. Conserva una única configuración explícita.',
+    ));
+  }
+  const source = candidates[0];
+  if (!Array.isArray(source) || !source.length) {
+    blockers.push(blocker(
+      'search_ad_schedule_required',
+      'schedule_config.google_ads.ad_schedules',
+      'Google Search requiere al menos un horario semanal explícito.',
+    ));
+    return [];
+  }
+  const normalized = [];
+  for (const item of source) {
+    const row = safeObject(item);
+    const day = text(row.day_of_week ?? row.day, 32)?.toUpperCase();
+    const startHour = Number(row.start_hour);
+    const endHour = Number(row.end_hour);
+    const startMinute = googleMinute(row.start_minute);
+    const endMinute = googleMinute(row.end_minute);
+    const startTotal = startHour * 60 + googleMinuteNumber(startMinute);
+    const endTotal = endHour * 60 + googleMinuteNumber(endMinute);
+    if (!GOOGLE_AD_SCHEDULE_DAYS.includes(day)
+      || !Number.isInteger(startHour) || startHour < 0 || startHour > 23
+      || !Number.isInteger(endHour) || endHour < 0 || endHour > 24
+      || !startMinute || !endMinute
+      || (endHour === 24 && endMinute !== 'ZERO')
+      || !Number.isFinite(startTotal) || !Number.isFinite(endTotal)
+      || startTotal >= endTotal) {
+      blockers.push(blocker(
+        'search_ad_schedule_invalid',
+        'schedule_config.google_ads.ad_schedules',
+        'Cada horario debe usar un día oficial, horas válidas y minutos 00, 15, 30 o 45, con inicio anterior al fin.',
+      ));
+      continue;
+    }
+    normalized.push({
+      day_of_week: day,
+      start_hour: startHour,
+      start_minute: startMinute,
+      end_hour: endHour,
+      end_minute: endMinute,
+    });
+  }
+  const dayOrder = new Map(GOOGLE_AD_SCHEDULE_DAYS.map((day, index) => [day, index]));
+  const unique = Array.from(new Map(normalized.map((item) => [canonicalStringify(item), item])).values())
+    .sort((left, right) => (
+      dayOrder.get(left.day_of_week) - dayOrder.get(right.day_of_week)
+      || left.start_hour - right.start_hour
+      || googleMinuteNumber(left.start_minute) - googleMinuteNumber(right.start_minute)
+      || left.end_hour - right.end_hour
+      || googleMinuteNumber(left.end_minute) - googleMinuteNumber(right.end_minute)
+    ));
+  for (const day of GOOGLE_AD_SCHEDULE_DAYS) {
+    const items = unique.filter((item) => item.day_of_week === day);
+    if (items.length > 6) {
+      blockers.push(blocker(
+        'search_ad_schedule_daily_limit',
+        'schedule_config.google_ads.ad_schedules',
+        'Google Ads admite como máximo seis franjas por día.',
+      ));
+    }
+    for (let index = 1; index < items.length; index += 1) {
+      const previousEnd = items[index - 1].end_hour * 60 + googleMinuteNumber(items[index - 1].end_minute);
+      const currentStart = items[index].start_hour * 60 + googleMinuteNumber(items[index].start_minute);
+      if (currentStart < previousEnd) {
+        blockers.push(blocker(
+          'search_ad_schedule_overlap',
+          'schedule_config.google_ads.ad_schedules',
+          'Las franjas de un mismo día no pueden solaparse.',
+        ));
+        break;
+      }
+    }
+  }
+  return unique;
+}
+
+function canonicalGoogleSearchTargeting(targetConfig, scheduleConfig, blockers) {
+  const locations = explicitConstantIds(targetConfig, [
+    'google_ads.geo_target_constant_ids',
+    'geo_target_constant_ids',
+    'google_geo_target_constant_ids',
+  ], 'geoTargetConstants');
+  const languages = explicitConstantIds(targetConfig, [
+    'google_ads.language_constant_ids',
+    'language_constant_ids',
+    'google_language_constant_ids',
+  ], 'languageConstants');
+  if (locations.conflict) blockers.push(blocker('search_geo_alias_conflict', 'target_config.google_ads.geo_target_constant_ids', 'Hay ubicaciones Google distintas en dos campos.'));
+  if (locations.invalid) blockers.push(blocker('search_geo_target_invalid', 'target_config.google_ads.geo_target_constant_ids', 'Las ubicaciones deben usar IDs numéricos de GeoTargetConstant.'));
+  if (!locations.values.length) blockers.push(blocker('search_geo_target_required', 'target_config.google_ads.geo_target_constant_ids', 'Google Search requiere al menos una ubicación explícita.'));
+  if (languages.conflict) blockers.push(blocker('search_language_alias_conflict', 'target_config.google_ads.language_constant_ids', 'Hay idiomas Google distintos en dos campos.'));
+  if (languages.invalid) blockers.push(blocker('search_language_target_invalid', 'target_config.google_ads.language_constant_ids', 'Los idiomas deben usar IDs numéricos de LanguageConstant.'));
+  if (!languages.values.length) blockers.push(blocker('search_language_target_required', 'target_config.google_ads.language_constant_ids', 'Google Search requiere al menos un idioma explícito.'));
+
+  const positiveGeoType = text(
+    valueAt(targetConfig, 'google_ads.positive_geo_target_type')
+      ?? valueAt(targetConfig, 'positive_geo_target_type'),
+    64,
+  )?.toUpperCase();
+  const negativeGeoType = text(
+    valueAt(targetConfig, 'google_ads.negative_geo_target_type')
+      ?? valueAt(targetConfig, 'negative_geo_target_type'),
+    64,
+  )?.toUpperCase();
+  if (!GOOGLE_POSITIVE_GEO_TARGET_TYPES.has(positiveGeoType)) {
+    blockers.push(blocker('search_positive_geo_type_required', 'target_config.google_ads.positive_geo_target_type', 'Define PRESENCE o PRESENCE_OR_INTEREST para la ubicación positiva.'));
+  }
+  if (!GOOGLE_NEGATIVE_GEO_TARGET_TYPES.has(negativeGeoType)) {
+    blockers.push(blocker('search_negative_geo_type_required', 'target_config.google_ads.negative_geo_target_type', 'Define PRESENCE para la exclusión geográfica.'));
+  }
+  const timeZoneCandidates = [
+    valueAt(scheduleConfig, 'google_ads.time_zone'),
+    valueAt(scheduleConfig, 'time_zone'),
+  ].filter((value) => value !== undefined && value !== null && value !== '');
+  const normalizedTimeZones = timeZoneCandidates.map(ianaTimeZone);
+  if (timeZoneCandidates.length > 1
+    && (normalizedTimeZones.some((value) => !value) || new Set(normalizedTimeZones).size > 1)) {
+    blockers.push(blocker(
+      'search_time_zone_alias_conflict',
+      'schedule_config.google_ads.time_zone',
+      'Hay zonas horarias Google distintas en dos campos. Conserva una única configuración explícita.',
+    ));
+  }
+  const timeZone = normalizedTimeZones[0] || null;
+  if (!timeZone) {
+    blockers.push(blocker(
+      'search_time_zone_required',
+      'schedule_config.google_ads.time_zone',
+      'Google Search requiere una zona horaria IANA explícita que coincida con la cuenta publicitaria.',
+    ));
+  }
+  return {
+    targeting: {
+      geo_target_constant_ids: locations.values,
+      language_constant_ids: languages.values,
+      positive_geo_target_type: positiveGeoType || null,
+      negative_geo_target_type: negativeGeoType || null,
+    },
+    schedule: {
+      time_zone: timeZone,
+      ad_schedules: canonicalGoogleSchedules(scheduleConfig, blockers),
+    },
+  };
+}
+
 function blocker(code, field, message) {
   return { code, field, message };
 }
@@ -404,6 +630,11 @@ function buildGoogleSearchSpec(campaign, refs, blockers) {
   const headlines = assetArray(creative, ['headlines', 'responsive_search_ad.headlines']);
   const descriptions = assetArray(creative, ['descriptions', 'responsive_search_ad.descriptions']);
   const keywords = assetArray(target, ['keywords', 'search_keywords']);
+  const explicitTargeting = canonicalGoogleSearchTargeting(
+    target,
+    safeObject(campaign.schedule_config),
+    blockers,
+  );
   const rawFinalUrl = valuesAt(common.destination, ['final_url', 'effective_url', 'landing_url', 'url']);
   const finalUrl = httpUrl(rawFinalUrl);
 
@@ -418,6 +649,8 @@ function buildGoogleSearchSpec(campaign, refs, blockers) {
 
   return {
     ...common,
+    targeting: explicitTargeting.targeting,
+    schedule: explicitTargeting.schedule,
     provider_campaign_type: 'SEARCH',
     final_url: finalUrl,
     ad_group: { keywords },
@@ -702,6 +935,7 @@ function buildManagedCampaignPublishingPlan({
   for (const item of dryRunAdapter.readiness.warnings || []) {
     if (!warnings.some((existing) => existing.code === item.code)) warnings.push(item);
   }
+  const providerExecution = executionCapability(provider, family, sanitizedSpecification.operation);
   const deterministicPayload = {
     schema_version: PLAN_SCHEMA_VERSION,
     mode: 'dry_run',
@@ -725,8 +959,11 @@ function buildManagedCampaignPublishingPlan({
       dry_run_adapter_available: dryRunAdapter.dry_run_adapter_available === true,
       dry_run_adapter_version: dryRunAdapter.adapter_version || null,
       dry_run_operation_count: Array.isArray(dryRunAdapter.operations) ? dryRunAdapter.operations.length : 0,
-      execution_adapter_available: false,
-      adapter_available: false,
+      execution_adapter_available: providerExecution.registered,
+      execution_adapter_version: providerExecution.adapter_version,
+      adapter_available: providerExecution.registered,
+      supported_operation: providerExecution.operation,
+      safety: providerExecution.safety,
       provider_call_performed: false,
       required_confirmations: [...REQUIRED_EXECUTION_CONFIRMATIONS],
     },
@@ -755,10 +992,6 @@ function deterministicPublishingPayload(plan) {
     readiness: source.readiness,
     execution: source.execution,
   };
-}
-
-function hasManagedCampaignExecutionAdapter(provider, family) {
-  return EXECUTION_ADAPTER_KEYS.includes(`${text(provider, 32)}:${text(family, 64)}`);
 }
 
 function evaluateManagedCampaignExecutionGates({ plan, confirmation = {} } = {}) {
@@ -791,10 +1024,30 @@ function evaluateManagedCampaignExecutionGates({ plan, confirmation = {} } = {})
     || canonicalStringify(expectedDryRunAdapter) !== canonicalStringify(plan?.dry_run_adapter)) {
     failures.push(blocker('dry_run_manifest_invalid', 'plan.dry_run_adapter', 'El manifiesto dry-run no coincide con el adaptador versionado del servidor.'));
   }
-  if (!hasManagedCampaignExecutionAdapter(plan?.campaign?.provider, plan?.campaign?.family)
-    || plan?.execution?.execution_adapter_available !== true
+  const currentExecutionCapability = executionCapability(
+    plan?.campaign?.provider,
+    plan?.campaign?.family,
+    plan?.specification?.operation,
+  );
+  if (!hasManagedCampaignExecutionAdapter(
+    plan?.campaign?.provider,
+    plan?.campaign?.family,
+    plan?.specification?.operation,
+  ) || plan?.execution?.execution_adapter_available !== true
     || plan?.execution?.adapter_available !== true) {
     failures.push(blocker('execution_adapter_unavailable', 'plan.execution', 'No existe un adaptador de ejecución registrado para esta familia; el dry-run nunca autoriza una mutación externa.'));
+  }
+  if (currentExecutionCapability.registered
+    && (plan?.execution?.execution_adapter_version !== currentExecutionCapability.adapter_version
+      || plan?.execution?.supported_operation !== currentExecutionCapability.operation
+      || canonicalStringify(plan?.execution?.safety) !== canonicalStringify(currentExecutionCapability.safety)
+      || canonicalStringify(plan?.execution?.required_confirmations)
+        !== canonicalStringify(REQUIRED_EXECUTION_CONFIRMATIONS))) {
+    failures.push(blocker(
+      'execution_adapter_manifest_invalid',
+      'plan.execution',
+      'El plan fue generado con otro contrato de ejecución; crea y confirma un dry-run nuevo.',
+    ));
   }
   if (!text(confirmation.plan_hash, 64) || confirmation.plan_hash !== plan?.plan_hash) {
     failures.push(blocker('plan_hash_confirmation_required', 'confirmation.plan_hash', 'La confirmación no corresponde al hash del plan.'));

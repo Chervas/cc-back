@@ -152,6 +152,9 @@ const TARGETED_INTEGRATION_JOB_TYPES = Object.freeze([
   'business_profile_backfill_locations',
   'marketing_competition_heatmap_refresh',
   'marketing_ai_visibility_run',
+  // Explicit, user-triggered AI drafts. Provider calls share the serialized
+  // background lane and never publish the generated content automatically.
+  'web_content_generation',
   // Mutates Google conversion goals. It must share the serialized provider
   // lane and distributed lease with sync/backfill jobs.
   'guided_campaign_goal_policy_apply',
@@ -159,6 +162,12 @@ const TARGETED_INTEGRATION_JOB_TYPES = Object.freeze([
   // the same distributed integration lease as Google Ads sync/mutations.
   'marketing_campaign.destination_apply.v1',
   'marketing_campaign.destination_rollback.v1',
+  // Piloto creates and compensates Google Search resources in one serialized
+  // provider lane. The execution service still denies both while its explicit
+  // environment feature flag is off.
+  'managed_campaign.google_search_create.v1',
+  'managed_campaign.google_search_activate.v1',
+  'managed_campaign.google_search_rollback.v1',
   'whatsapp_template_sync_delayed',
 ]);
 

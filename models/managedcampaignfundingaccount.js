@@ -16,6 +16,14 @@ module.exports = (sequelize, DataTypes) => {
           as: 'ledger_entries',
         });
       }
+      if (models.ManagedCampaignProviderExecution) {
+        ManagedCampaignFundingAccount.hasMany(models.ManagedCampaignProviderExecution, {
+          foreignKey: 'funding_account_id',
+          as: 'provider_executions',
+          onUpdate: 'CASCADE',
+          onDelete: 'RESTRICT',
+        });
+      }
     }
   }
 

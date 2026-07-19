@@ -8,6 +8,7 @@ const marketingBulkSendsService = require('./marketingBulkSends.service');
 const googleReviewMatchService = require('./googleReviewMatch.service');
 const intakeQuickChatOutboxService = require('./intakeQuickChatOutbox.service');
 const marketingAiVisibilityService = require('./marketingAiVisibility.service');
+const webContentGenerationService = require('./webContentGeneration.service');
 const { buildNotificationContent } = require('./notifications.service');
 const { emitNotificationCreated } = require('./notificationsRealtime.service');
 const {
@@ -399,6 +400,9 @@ const JOB_HANDLERS = {
   business_profile_backfill_locations: async (payload = {}) => metaSyncJobs.executeBusinessProfileBackfillForLocations(payload.mappings || []),
   marketing_competition_heatmap_refresh: async (payload = {}) => metaSyncJobs.executeCompetitionHeatmapRefresh(payload),
   marketing_ai_visibility_run: async (payload = {}) => marketingAiVisibilityService.executeRun(payload),
+  web_content_generation: async (payload = {}, jobRequest = null) => (
+    webContentGenerationService.executeGeneration(payload, { jobRequest })
+  ),
   'marketing_web.landing_published.v1': async (payload = {}) => {
     const result = await require('./campaignDestinationBindings.service').consumeLandingPublishedEvent(payload);
     return { status: 'completed', result };
@@ -411,6 +415,15 @@ const JOB_HANDLERS = {
   ),
   'marketing_campaign.destination_rollback.v1': async (payload = {}) => (
     require('./campaignDestinationBindings.service').runDestinationRollbackJob(payload)
+  ),
+  'managed_campaign.google_search_create.v1': async (payload = {}, jobRequest = null) => (
+    require('./managedCampaignProviderExecution.service').runExecutionJob(payload, jobRequest)
+  ),
+  'managed_campaign.google_search_activate.v1': async (payload = {}, jobRequest = null) => (
+    require('./managedCampaignProviderExecution.service').runActivationJob(payload, jobRequest)
+  ),
+  'managed_campaign.google_search_rollback.v1': async (payload = {}, jobRequest = null) => (
+    require('./managedCampaignProviderExecution.service').runRollbackJob(payload, jobRequest)
   ),
   guided_campaign_goal_policy_apply: async (payload = {}) => (
     require('./guidedCampaignOptimizationJobs.service').runGuidedCampaignOptimizationJob(payload)

@@ -51,6 +51,7 @@ const marketingCompetitionService = require('../services/marketingCompetition.se
 const marketingAiVisibilityService = require('../services/marketingAiVisibility.service');
 const webEventsService = require('../services/webEvents.service');
 const webContentMediaService = require('../services/webContentMedia.service');
+const webContentGenerationService = require('../services/webContentGeneration.service');
 const webDomainsService = require('../services/webDomains.service');
 const webPublicationHealthMonitorService = require('../services/webPublicationHealthMonitor.service');
 const googleReviewMatchService = require('../services/googleReviewMatch.service');
@@ -3573,6 +3574,12 @@ async syncFacebookPageMetrics(asset) {
       const aiVisibilityRunsDeleted = await marketingAiVisibilityService.cleanupExpiredRuns();
       totalDeleted += aiVisibilityRunsDeleted;
 
+      // Los borradores generados no aceptados conservan su procedencia durante
+      // una ventana finita. La aceptación crea una entrada CMS independiente;
+      // nunca se borra contenido aceptado desde esta limpieza.
+      const webContentGenerationsDeleted = await webContentGenerationService.cleanupExpiredGenerations();
+      totalDeleted += webContentGenerationsDeleted;
+
       // Las imágenes del editor se suben primero en cuarentena. El mismo
       // barrido durable y serializado retira del storage las que nunca llegaron
       // a registrarse, sin crear un cron paralelo ni exponer su object_key.
@@ -3604,6 +3611,7 @@ async syncFacebookPageMetrics(asset) {
           socialStats: socialStatsDeleted,
           competitionHeatmaps: competitionHeatmapsDeleted,
           aiVisibilityRuns: aiVisibilityRunsDeleted,
+          webContentGenerations: webContentGenerationsDeleted,
           webEditorMedia: webEditorMediaCleanup.archived,
           webEditorMediaFailed: webEditorMediaCleanup.failed.length
         }

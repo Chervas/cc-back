@@ -30,3 +30,15 @@ test('cada plantilla tiene exactamente un h1 y texto responsive sin HTML libre',
     assert.doesNotMatch(JSON.stringify(template.document), /<\/?(?:script|iframe|style|div|span)\b/i);
   }
 });
+
+test('las preferencias de contacto solo ofrecen email cuando el formulario lo recoge', () => {
+  for (const template of BUILTIN_WEB_TEMPLATES_V1) {
+    const forms = Object.values(template.document.nodes).filter((node) => node.type === 'intake_form');
+    for (const form of forms) {
+      const names = new Set(form.props.fields.map((field) => field.name));
+      const preferred = form.props.fields.find((field) => field.name === 'preferred_contact');
+      const offersEmail = preferred?.options?.some((option) => option.value === 'email') === true;
+      assert.equal(offersEmail && !names.has('email'), false, template.name);
+    }
+  }
+});

@@ -1169,7 +1169,7 @@ async function testDiscoveryOnlyReadsExplicitOptIns() {
   assert.equal(writeCalls, 0);
   assert.equal(discovered.targets.length, 1);
   assert.equal(discovered.measurement_targets.length, 2,
-    'Mide y mejora must be discovered even when its Google config has drifted');
+    'Mide y entiende must be discovered even when its Google config has drifted');
   assert.equal(discovered.measurement_targets[0].intake_config_id, 3);
   assert.equal(discovered.measurement_targets[1].intake_config_id, 4);
   assert.equal(discovered.issues.length, 1);

@@ -775,6 +775,14 @@ async function executeManagedCampaignGoalPolicy({
   });
   let result;
   try {
+    if (typeof dependencies.beforeExternalMutation === 'function') {
+      await dependencies.beforeExternalMutation({
+        operation: 'google_ads_goal_policy_apply',
+        customer_id: context.plan.configured_account.customer_id,
+        campaign_ids: context.plan.campaign_ids,
+        preview_digest: preview.digest,
+      });
+    }
     result = await apply({
       scope: {
         ...context.plan.scope.providerScope,

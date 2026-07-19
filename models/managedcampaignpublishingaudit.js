@@ -11,6 +11,14 @@ module.exports = (sequelize, DataTypes) => {
           as: 'campaign',
         });
       }
+      if (models.ManagedCampaignProviderExecution) {
+        ManagedCampaignPublishingAudit.hasMany(models.ManagedCampaignProviderExecution, {
+          foreignKey: 'source_publishing_audit_id',
+          as: 'provider_executions',
+          onUpdate: 'CASCADE',
+          onDelete: 'SET NULL',
+        });
+      }
     }
   }
 
