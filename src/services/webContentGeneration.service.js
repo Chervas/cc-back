@@ -1051,6 +1051,12 @@ async function reconcileGenerationWithJob(row, models = db) {
   // update turns reconciliation into a compare-and-set and preserves every
   // terminal state won by the worker.
   const [updated] = await models.WebContentGeneration.update(terminalPatch, {
+    // Bulk updates validate an instance built only from `terminalPatch`.
+    // `WebContentGeneration` has a model-level scope validator, so validating
+    // that partial instance would reject it because the immutable scope fields
+    // are intentionally absent. The row was loaded above and its scope access
+    // was already checked; the WHERE clause is the compare-and-set fence.
+    validate: false,
     where: {
       id: row.id,
       status: { [Op.in]: ['queued', 'running'] },
@@ -1125,6 +1131,10 @@ async function reloadGeneration(Model, generationId) {
 
 async function casAttempt(Model, generationId, attemptTokenHash, patch) {
   const result = await Model.update(patch, {
+    // State/provenance patches never change scope. Sequelize otherwise runs
+    // the scope validator against a partial bulk-update instance that has no
+    // scope fields and rejects the transition before the provider is called.
+    validate: false,
     where: {
       id: generationId,
       status: 'running',
@@ -1219,7 +1229,12 @@ async function executeGeneration(payload = {}, dependencies = {}) {
     executionAttemptTokenHash: attemptTokenHash,
     startedAt: now,
     errorSummary: null,
-  }, { where: claimWhere }));
+  }, {
+    // `claimWhere` is the one-shot dispatch fence. Scope is immutable and was
+    // read from the full row above, so do not validate this partial instance.
+    validate: false,
+    where: claimWhere,
+  }));
   if (claimed !== 1) {
     row = await reloadGeneration(Model, generationId);
     const racedTerminal = terminalExecutionResult(row, generationId);
