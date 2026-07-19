@@ -14,11 +14,25 @@ const MIGRATION_TIME = new Date('2026-07-19T17:45:00.000Z');
 // solo se permite desde uno de estos hashes conocidos o desde el hash final;
 // una plantilla editada por un usuario/operador nunca se pisa silenciosamente.
 const LEGACY_DOCUMENT_HASHES = Object.freeze({
-  '61e5a73e-bcd5-47f0-a145-a0ddcbd76001': '603c815f1ce3d3aa5ef5cd673a5d8a2df87a66d93dfe67d8f94119d3288f09c8',
-  '61e5a73e-bcd5-47f0-a145-a0ddcbd76002': 'dce4c89a51e8ca2590141416b63fdb4c60d6d235e2873032f2c1bdd5cc2c4441',
-  '61e5a73e-bcd5-47f0-a145-a0ddcbd76003': 'abba8a38ada8bf0a238cc94d7970314dde16a0efa98c3cb1a5dad94343341505',
-  '61e5a73e-bcd5-47f0-a145-a0ddcbd76004': '199d3e760934e241e6eb3701b3f408954b325321a1fe0d04aeb4a9e7ac8bbde6',
-  '61e5a73e-bcd5-47f0-a145-a0ddcbd76005': '378d44a7f08c3ca8691974ce562feb07824816cc57755384deb7d7d913d662c3',
+  '61e5a73e-bcd5-47f0-a145-a0ddcbd76001': Object.freeze([
+    '603c815f1ce3d3aa5ef5cd673a5d8a2df87a66d93dfe67d8f94119d3288f09c8',
+  ]),
+  '61e5a73e-bcd5-47f0-a145-a0ddcbd76002': Object.freeze([
+    'dce4c89a51e8ca2590141416b63fdb4c60d6d235e2873032f2c1bdd5cc2c4441',
+  ]),
+  '61e5a73e-bcd5-47f0-a145-a0ddcbd76003': Object.freeze([
+    // Revisión sembrada originalmente, antes de añadir email al formulario.
+    '54ae3906d423c89cb298ecabb7b41f52c2995f10aa466711fe12e766cb59ea8a',
+    'abba8a38ada8bf0a238cc94d7970314dde16a0efa98c3cb1a5dad94343341505',
+  ]),
+  '61e5a73e-bcd5-47f0-a145-a0ddcbd76004': Object.freeze([
+    // Revisión sembrada originalmente, antes de añadir email al formulario.
+    '7a1d175df7502fea0d70f11cfe2018d2575097f2d32eb93c49497ce3fb12cfd1',
+    '199d3e760934e241e6eb3701b3f408954b325321a1fe0d04aeb4a9e7ac8bbde6',
+  ]),
+  '61e5a73e-bcd5-47f0-a145-a0ddcbd76005': Object.freeze([
+    '378d44a7f08c3ca8691974ce562feb07824816cc57755384deb7d7d913d662c3',
+  ]),
 });
 
 function tableNameOf(value) {
@@ -150,8 +164,8 @@ module.exports = {
           { template_id: template.id }
         );
       }
-      const legacyHash = LEGACY_DOCUMENT_HASHES[template.id];
-      if (![legacyHash, template.document_hash].includes(row.document_hash)) {
+      const legacyHashes = LEGACY_DOCUMENT_HASHES[template.id] || [];
+      if (![...legacyHashes, template.document_hash].includes(row.document_hash)) {
         throw migrationError(
           'web_builtin_template_hardening_content_conflict',
           `La plantilla ${template.id} contiene una edición no reconocida y no se sobrescribirá.`,

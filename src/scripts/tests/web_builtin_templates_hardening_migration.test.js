@@ -55,7 +55,7 @@ function legacyRows() {
     category: template.category,
     schema_version: 1,
     version: 1,
-    document_hash: migration.LEGACY_DOCUMENT_HASHES[template.id],
+    document_hash: migration.LEGACY_DOCUMENT_HASHES[template.id][0],
     document: '{}',
     compatibility: JSON.stringify({
       schema_version: 1,
@@ -118,6 +118,21 @@ test('rechaza contenido builtin desconocido sin sobrescribirlo', async () => {
   );
   assert.equal(queryInterface.rows[3].document_hash, 'f'.repeat(64));
   assert.equal(queryInterface.rows[3].document, '{"custom":true}');
+});
+
+test('acepta las revisiones conocidas posteriores al seed inicial', async () => {
+  const rows = legacyRows();
+  rows[2].document_hash = migration.LEGACY_DOCUMENT_HASHES[rows[2].id][1];
+  rows[3].document_hash = migration.LEGACY_DOCUMENT_HASHES[rows[3].id][1];
+  const queryInterface = new FakeQueryInterface(rows);
+
+  await migration.up(queryInterface);
+  assert.equal(queryInterface.updateCount, 5);
+  assert.ok(queryInterface.rows.every((row) => (
+    row.document_hash === assertValidWebDocument(
+      BUILTIN_WEB_TEMPLATES_V1.find((template) => template.id === row.id).document
+    ).hash
+  )));
 });
 
 test('rechaza IDs builtin apropiados por usuario y dependencias incompletas', async () => {
