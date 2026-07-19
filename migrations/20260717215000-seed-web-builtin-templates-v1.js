@@ -1,6 +1,9 @@
 'use strict';
 
-const { BUILTIN_WEB_TEMPLATES_V1 } = require('../src/contracts/webBuiltinTemplatesV1');
+const {
+  BUILTIN_WEB_TEMPLATES_V1,
+  BUILTIN_WEB_TEMPLATE_COMPATIBILITY,
+} = require('../src/contracts/webBuiltinTemplatesV1');
 const { assertValidWebDocument } = require('../src/lib/webDocument');
 
 const IDS = BUILTIN_WEB_TEMPLATES_V1.map((item) => item.id);
@@ -42,11 +45,7 @@ function expectedRows() {
       document: JSON.stringify(template.document),
       document_hash: integrity.hash,
       version: 1,
-      compatibility: JSON.stringify({
-        schema_version: 1,
-        renderer_min: 'clinicaclick-web-renderer/1.0.0',
-        breakpoints: ['desktop', 'tablet', 'mobile'],
-      }),
+      compatibility: JSON.stringify(BUILTIN_WEB_TEMPLATE_COMPATIBILITY),
       preview_asset_id: null,
       is_public: true,
       status: 'active',
