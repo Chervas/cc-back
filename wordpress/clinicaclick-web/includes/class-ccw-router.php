@@ -76,7 +76,7 @@ final class CCW_Router
         }
 
         $etag = '"sha256-' . hash_file('sha256', $resolved['path']) . '"';
-        if (trim((string) ($_SERVER['HTTP_IF_NONE_MATCH'] ?? '')) === $etag) {
+        if (self::request_etag_matches($etag)) {
             status_header(304);
             header('ETag: ' . $etag);
             exit;
@@ -100,6 +100,14 @@ final class CCW_Router
             readfile($resolved['path']);
         }
         exit;
+    }
+
+    private static function request_etag_matches($etag)
+    {
+        // WordPress applies magic quotes to $_SERVER during bootstrap. Core
+        // conditional requests remove that escaping before comparing ETags.
+        $candidate = stripslashes((string) ($_SERVER['HTTP_IF_NONE_MATCH'] ?? ''));
+        return trim($candidate) === (string) $etag;
     }
 
     public function measurement_tag()
