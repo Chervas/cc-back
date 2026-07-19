@@ -215,6 +215,20 @@ function testCampaignScopeAndWritableModesRegression() {
     'Requested Google Ads customers must be checked against scoped assignments before listing or creating conversion actions');
 
   const transition = controllerSection(source, 'transitionMarketingStrategyStatus', 'createMarketingStrategy');
+  assert.match(transition, /if \(strategy\?\.mode === CAMPAIGN_MODES\.LEGACY_SELF_MANAGED\)/,
+    'Historical managed_self must be rejected before any lifecycle transition');
+  assert.match(transition, /status\(409\)[\s\S]*error:\s*'legacy_mode_read_only'/,
+    'Historical managed_self transitions must return the stable read-only conflict');
+  assert.ok(
+    transition.indexOf('strategy?.mode === CAMPAIGN_MODES.LEGACY_SELF_MANAGED')
+      < transition.indexOf('const currentStatus = normalizeStrategyStatus(strategy?.status)'),
+    'The legacy read-only guard must run before status/readiness processing'
+  );
+  assert.ok(
+    transition.indexOf('strategy?.mode === CAMPAIGN_MODES.LEGACY_SELF_MANAGED')
+      < transition.indexOf('CampaignRequest.update({'),
+    'The legacy read-only guard must run before lifecycle persistence'
+  );
   const consentGate = transition.indexOf("error: 'consent_readiness_pending'");
   const googleGate = transition.indexOf('if (strategyPayloadUsesGoogleAds(strategyPayload))');
   assert.ok(consentGate >= 0 && googleGate > consentGate,

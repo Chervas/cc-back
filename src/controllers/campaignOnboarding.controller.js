@@ -10275,6 +10275,13 @@ exports.transitionMarketingStrategyStatus = asyncHandler(async (req, res) => {
 
   const campaignsById = await loadCampaignsByIds(rows.map((row) => row.campaign_id));
   const strategy = buildStrategyItemFromRows(rows, campaignsById);
+  if (strategy?.mode === CAMPAIGN_MODES.LEGACY_SELF_MANAGED) {
+    return res.status(409).json({
+      success: false,
+      error: 'legacy_mode_read_only',
+      message: 'La configuración antigua de gestión propia es solo de lectura. Selecciona Mide y entiende, Mejora o Piloto automático antes de modificarla.'
+    });
+  }
   const currentStatus = normalizeStrategyStatus(strategy?.status);
   const strategyPayloadForTransition = rows[0]?.solicitud && typeof rows[0].solicitud === 'object'
     ? rows[0].solicitud
