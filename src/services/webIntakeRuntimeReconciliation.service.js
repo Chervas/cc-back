@@ -1135,6 +1135,23 @@ async function commitPreparedRuntime({
         409
       );
     }
+    const lockedPublicationById = new Map(publications.map((publication) => [
+      String(plain(publication)?.id || ''),
+      publication,
+    ]));
+    const writableMismatches = mismatches.map((plan) => {
+      const publicationId = String(plan.publication.id);
+      const lockedPublication = lockedPublicationById.get(publicationId);
+      if (!lockedPublication || typeof lockedPublication.update !== 'function') {
+        throw new WebIntakeRuntimeReconciliationError(
+          'web_intake_runtime_publication_lock_invalid',
+          'No se pudo bloquear una publicación durante la reconciliación.',
+          409,
+          { publication_id: plan.publication.id }
+        );
+      }
+      return { ...plan, locked_publication: lockedPublication };
+    });
     const planByPublication = new Map(plans.map((plan) => [String(plan.publication.id), plan]));
     const mismatchIds = new Set(expectedIds);
     const carriedLineage = objectValue(plain(reconciliation).expectedDeployments);
@@ -1206,7 +1223,7 @@ async function commitPreparedRuntime({
     }
     const preparedById = new Map(prepared.map((item) => [String(item.publication_id), item]));
     const deployments = [];
-    for (const { publication, target_runtime: runtime } of mismatches) {
+    for (const { publication, target_runtime: runtime, locked_publication: lockedPublication } of writableMismatches) {
       const item = preparedById.get(String(publication.id));
       if (
         Number(publication.version) !== Number(item.publication_version)
@@ -1277,7 +1294,7 @@ async function commitPreparedRuntime({
         requestId: `runtime:${reconciliation.id}:${generation}`,
         actorUserId: item.actor_id,
       }, { transaction });
-      await publication.update({
+      await lockedPublication.update({
         desiredRevisionId: item.revision_id,
         status: 'pending',
         version: expectedVersion,
@@ -1305,7 +1322,7 @@ async function commitPreparedRuntime({
       }, { transaction, JobRequestModel: models.JobRequest });
       await Promise.all([
         deployment.update({ jobRequestId: job.id }, { transaction }),
-        publication.update({ jobRequestId: job.id }, { transaction }),
+        lockedPublication.update({ jobRequestId: job.id }, { transaction }),
         models.WebAuditEvent.create({
           projectId: publication.projectId,
           scopeType: publication.scopeType,
