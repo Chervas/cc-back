@@ -98,6 +98,12 @@ final class CCW_HTTP
         if (!CCW_Config::is_configured()) {
             return false;
         }
+        // Schema v2 defines routes as a JSON object keyed by publication UUID.
+        // PHP otherwise serializes the empty associative map as [], which the
+        // control-plane contract correctly distinguishes from an object.
+        if ((int) ($payload['schema_version'] ?? 0) === 2 && ($payload['routes'] ?? null) === array()) {
+            $payload['routes'] = (object) $payload['routes'];
+        }
         $id = rawurlencode(CCW_Config::installation_id());
         $url = CCW_Config::api_base() . '/api/marketing/web-installations/' . $id . '/reports';
         $body = wp_json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);

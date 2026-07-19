@@ -1771,6 +1771,10 @@ function normalizeReportCapabilities(value, schemaVersion) {
 
 function normalizeReportRoutes(value, schemaVersion) {
   if (schemaVersion === 1) return {};
+  // PHP cannot preserve the array/object distinction for an empty associative
+  // array without an explicit cast. Accept the already-built alpha.8 wire
+  // representation while keeping non-empty JSON lists invalid.
+  if (Array.isArray(value) && value.length === 0) return {};
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length > MAX_WORDPRESS_PUBLICATIONS) {
     throw new WebPublicationServiceError('web_installation_report_invalid', 'Las rutas reportadas no son válidas.', 422);
   }
