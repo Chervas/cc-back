@@ -28,6 +28,11 @@ const { CITA_STATUS_VALUES } = require('../lib/status-catalog');
 const { getIO } = require('../services/socket.service');
 const { normalizePhoneDigits, getPhoneLookupCandidates } = require('../lib/phone');
 const { normalizeHumanName } = require('../lib/name');
+const {
+    createAppointmentWithPatientLanguage,
+    normalizePatientLanguage,
+    preferredLanguagePayload,
+} = require('../lib/patient-language');
 const consentimientosService = require('../services/consentimientos.service');
 const appointmentNotificationCleanup = require('../services/appointmentNotificationCleanup.service');
 const {
@@ -1171,6 +1176,7 @@ function mapCalendarCitaRow(cita) {
             apellidos: plain.paciente.apellidos,
             telefono_movil: plain.paciente.telefono_movil,
             foto: plain.paciente.foto,
+            ...preferredLanguagePayload(plain.paciente.idioma_preferido),
         } : null,
         instalacion: plain.instalacion ? {
             id: plain.instalacion.id,
@@ -1305,6 +1311,9 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
         apellidos: normalizeHumanName(apellidos || ''),
         telefono_movil: normalizedPhone || telefono || '',
         email: email || null,
+        // La preferencia explícita se aplica únicamente cuando la cita ya existe.
+        // Así un fallo al crear la cita no deja un cambio de idioma persistido.
+        idioma_preferido: 'es',
         clinica_id: clinica_id
     });
 
@@ -1870,6 +1879,10 @@ exports.createCita = asyncHandler(async (req, res) => {
             return res.status(400).json({ message: 'clinica_id, inicio, (fin o duracion_min) y paciente son obligatorios' });
         }
 
+        // Validar antes de reservar recursos o modificar el paciente. El campo
+        // ausente es deliberadamente distinto de enviar `es` explícitamente.
+        normalizePatientLanguage(datosPaciente.idioma_preferido, { optional: true });
+
         const estadoRaw = String(estado || '').trim().toLowerCase();
         if (!CITA_ESTADOS_VALIDOS.has(estadoRaw)) {
             return res.status(400).json({
@@ -1991,7 +2004,7 @@ exports.createCita = asyncHandler(async (req, res) => {
             apellidos: datosPaciente.apellidos,
             telefono: datosPaciente.telefono,
             email: datosPaciente.email,
-            id_paciente: datosPaciente.id_paciente || datosPaciente.id
+            id_paciente: datosPaciente.id_paciente || datosPaciente.id,
         });
 
         const shouldAutoLinkPendingCallLead = !lead
@@ -2004,24 +2017,32 @@ exports.createCita = asyncHandler(async (req, res) => {
             resolvedLeadIntakeId = parsePositiveInt(lead?.id) || null;
         }
 
-        // Crear cita
-        const cita = await CitaPaciente.create({
-            clinica_id,
-            paciente_id: paciente.id_paciente,
-            lead_intake_id: resolvedLeadIntakeId || null,
-            doctor_id,
-            instalacion_id,
-            tratamiento_id,
-            campana_id: campana_id || lead?.campana_id || null,
-            created_by: req.userData?.userId || null,
-            updated_by: req.userData?.userId || null,
-            titulo: datosPaciente.titulo || null,
-            nota: nota || null,
-            motivo: motivo || null,
-            tipo_cita,
-            estado: estadoRaw,
-            inicio: inicioDate,
-            fin: finDate
+        // La cita y un cambio explícito de idioma forman una única unidad. Si
+        // falla la actualización del paciente, la transacción elimina también
+        // la cita y ningún flujo puede arrancar con el idioma anterior.
+        const cita = await createAppointmentWithPatientLanguage({
+            sequelize: db.sequelize,
+            AppointmentModel: CitaPaciente,
+            appointmentValues: {
+                clinica_id,
+                paciente_id: paciente.id_paciente,
+                lead_intake_id: resolvedLeadIntakeId || null,
+                doctor_id,
+                instalacion_id,
+                tratamiento_id,
+                campana_id: campana_id || lead?.campana_id || null,
+                created_by: req.userData?.userId || null,
+                updated_by: req.userData?.userId || null,
+                titulo: datosPaciente.titulo || null,
+                nota: nota || null,
+                motivo: motivo || null,
+                tipo_cita,
+                estado: estadoRaw,
+                inicio: inicioDate,
+                fin: finDate
+            },
+            patient: paciente,
+            requestedLanguage: datosPaciente.idioma_preferido,
         });
 
         // Disparar motor v2 de automatizaciones de cita (si el tratamiento tiene plantilla v2 asignada).
@@ -2124,6 +2145,12 @@ exports.createCita = asyncHandler(async (req, res) => {
 
         return res.status(201).json(await protectAppointmentsForRequest(req, citaCreada));
     } catch (err) {
+        if (err.status === 400 && err.message === 'unsupported_patient_language') {
+            return res.status(400).json({
+                message: 'idioma_preferido inválido',
+                allowed: err.details?.allowed || ['es', 'ca', 'en'],
+            });
+        }
         const handled = sendAppointmentAccessPolicyError(err, res);
         if (handled) return handled;
         console.error('❌ [createCita] Error:', err.message, err.original?.sqlMessage || '', err);
@@ -2253,7 +2280,7 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
             {
                 model: Paciente,
                 as: 'paciente',
-                attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'telefono_movil', 'foto'],
+                attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'telefono_movil', 'foto', 'idioma_preferido'],
             },
             {
                 model: Instalacion,

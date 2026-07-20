@@ -6774,3 +6774,54 @@ el validador con una dependencia explícita `allowUnsignedForTests: true`.
 `META_APP_SECRET` se captura al cargar el módulo: rotarlo exige actualizar el
 secreto en todos los procesos y reiniciarlos de forma controlada; un worker con
 el valor anterior rechazará firmas nuevas.
+
+## Idioma preferido del paciente (2026-07-20)
+
+### Persistencia y valores canónicos
+
+La migración `20260720090000-add-patient-preferred-language.js` añade
+`Pacientes.idioma_preferido ENUM('es','ca','en') NOT NULL DEFAULT 'es'`. Es idempotente
+frente a una columna ya existente. Los únicos valores de negocio aceptados son:
+
+| Valor | Etiqueta API | Uso |
+|---|---|---|
+| `es` | Español | valor por defecto y compatibilidad de registros previos |
+| `ca` | Catalán | comunicaciones en catalán |
+| `en` | Inglés | comunicaciones en inglés |
+
+No se guarda `cat`: ese id pertenece únicamente al catálogo Transloco
+histórico del frontend. `src/lib/patient-language.js` concentra normalización,
+etiquetas, default y actualización explícita para que citas, pacientes y
+automatizaciones no mantengan reglas divergentes.
+
+### Contrato API
+
+- Las serializaciones de paciente y calendario exponen
+  `idioma_preferido` y `idioma_preferido_label`.
+- `POST /api/pacientes` acepta el campo; si se omite crea en `es`.
+- `PATCH /api/pacientes/:id` permite cambiarlo respetando exactamente el ACL y
+  scope de edición de la ficha. Un valor distinto de `es|ca|en` responde `400`
+  con `allowed`.
+- `POST /api/citas` acepta `paciente.idioma_preferido`.
+  - campo omitido + paciente existente: conserva el idioma;
+  - campo omitido + paciente nuevo: usa `es`;
+  - campo presente: aplica la preferencia explícita.
+
+`createAppointmentWithPatientLanguage` ejecuta `CitaPaciente.create(...)` y la
+actualización explícita del idioma dentro de **la misma transacción Sequelize**.
+Si falla cualquiera de las dos escrituras, se revierten ambas: no queda un
+cambio de idioma sin cita ni una cita fantasma con el idioma anterior, y el
+runtime de automatizaciones solo se encola después del commit. El alta
+histórica de un paciente nuevo puede haber creado antes su ficha base en `es`,
+pero nunca persiste el idioma alternativo si la cita no llega a confirmarse.
+
+### Compatibilidad y pruebas
+
+La columna con default `es` hace compatibles las filas históricas y los
+clientes API antiguos. Omitir no equivale a enviar `es`: la distinción protege
+a pacientes ya configurados en catalán o inglés.
+
+`node --test src/scripts/tests/patient_preferred_language.test.js` cubre default,
+preservación sin escritura, cambio explícito, validación, contrato de
+migración/modelo/PATCH, propagación de la transacción y rollback de la cita
+cuando falla la escritura del idioma.
