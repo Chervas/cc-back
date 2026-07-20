@@ -545,6 +545,26 @@ function styleClassList(node) {
   return classes.join(' ');
 }
 
+function validColumnTracks(node, breakpoint) {
+  const tracks = node?.props?.column_tracks?.[breakpoint];
+  if (!Array.isArray(tracks)) return null;
+  const expectedColumns = breakpoint === 'desktop'
+    ? node.props.columns
+    : (node.responsive?.[breakpoint]?.columns || node.props.columns);
+  if (tracks.length !== expectedColumns) return null;
+  if (tracks.some((track) => !Number.isInteger(track) || track < 1 || track > 12)) return null;
+  return tracks.reduce((sum, track) => sum + track, 0) === 12 ? tracks : null;
+}
+
+function sectionTrackClassList(node) {
+  return ['desktop', 'tablet', 'mobile'].map((breakpoint) => {
+    const tracks = validColumnTracks(node, breakpoint);
+    if (!tracks) return '';
+    const prefix = breakpoint === 'desktop' ? 'cc-tracks' : `cc-${breakpoint}-tracks`;
+    return `${prefix}-${tracks.join('-')}`;
+  }).filter(Boolean).join(' ');
+}
+
 function imageClassList(node) {
   const fit = node.props.fit === 'contain' ? 'contain' : 'cover';
   const aspect = String(node.props.aspect_ratio || 'auto').replace(':', '-');
@@ -672,7 +692,7 @@ function renderNode(nodeId, document, snapshot, context, ancestors = new Set(), 
     const children = node.children.map((childId) => renderNode(childId, document, snapshot, context, nextAncestors)).join('');
     const globalAttribute = globalSlot ? ` data-cc-global="${globalSlot}"` : '';
     const globalClass = globalSlot ? ` cc-site-${globalSlot}` : '';
-    return `<${tag} id="cc-${escapeHtml(node.id)}"${globalAttribute} class="cc-node cc-section${globalClass} cc-layout-${escapeHtml(node.props.layout)} cc-cols-${Number(node.props.columns)} ${styleClassList(node)}"><div class="cc-container">${children}</div></${tag}>`;
+    return `<${tag} id="cc-${escapeHtml(node.id)}"${globalAttribute} class="cc-node cc-section${globalClass} cc-layout-${escapeHtml(node.props.layout)} cc-cols-${Number(node.props.columns)} ${sectionTrackClassList(node)} ${styleClassList(node)}"><div class="cc-container">${children}</div></${tag}>`;
   }
   if (node.type === 'heading') {
     const level = Math.min(6, Math.max(1, Number(node.props.level) || 2));
@@ -742,11 +762,24 @@ function stylesheet(tokens, document = { nodes: {} }) {
       : `.cc-layout-grid.cc-cols-${count}`;
     return `${selector}>.cc-container{display:grid;grid-template-columns:repeat(${count},minmax(0,1fr))}`;
   }).join('');
+  const columnTrackRules = (breakpoint) => Object.values(document.nodes || {})
+    .filter((node) => node.type === 'section')
+    .map((node) => validColumnTracks(node, breakpoint))
+    .filter(Boolean)
+    .map((tracks) => {
+      const prefix = breakpoint === 'desktop' ? 'cc-tracks' : `cc-${breakpoint}-tracks`;
+      const className = `${prefix}-${tracks.join('-')}`;
+      const template = tracks.map((track) => `minmax(0,${track}fr)`).join(' ');
+      return `.cc-section.${className}>.cc-container{display:grid;grid-template-columns:${template}}`;
+    })
+    .filter((rule, index, rules) => rules.indexOf(rule) === index)
+    .join('');
   const responsiveRules = (breakpoint) => (
     `.cc-node.cc-hide-${breakpoint}{display:none!important}`
     + spacingRules(`${breakpoint}-`)
     + alignRules(`${breakpoint}-`)
     + columnRules(`${breakpoint}-`)
+    + columnTrackRules(breakpoint)
   );
   const focalRules = [...new Set(Object.values(document.nodes || {})
     .flatMap((node) => {

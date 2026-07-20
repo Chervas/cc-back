@@ -104,6 +104,34 @@ function testNoArbitraryCodeMarkupStylesOrClasses() {
   assertInvalid(javascriptUrl, 'forbiddenContent');
 }
 
+function testSectionColumnTracksUseSafeTwelveColumnGrid() {
+  const valid = buildValidWebDocument();
+  valid.nodes.section_hero.props.layout = 'grid';
+  valid.nodes.section_hero.props.columns = 2;
+  valid.nodes.section_hero.props.column_tracks = {
+    desktop: [8, 4],
+    tablet: [7, 5],
+    mobile: [12],
+  };
+  valid.nodes.section_hero.responsive = {
+    tablet: { columns: 2 },
+    mobile: { columns: 1 },
+  };
+  assert.equal(validateWebDocument(valid).valid, true);
+
+  const wrongTotal = buildValidWebDocument();
+  wrongTotal.nodes.section_hero.props.layout = 'grid';
+  wrongTotal.nodes.section_hero.props.columns = 2;
+  wrongTotal.nodes.section_hero.props.column_tracks = { desktop: [8, 8] };
+  assertInvalid(wrongTotal, 'columnTracks');
+
+  const wrongLength = buildValidWebDocument();
+  wrongLength.nodes.section_hero.props.layout = 'grid';
+  wrongLength.nodes.section_hero.props.columns = 3;
+  wrongLength.nodes.section_hero.props.column_tracks = { desktop: [6, 6] };
+  assertInvalid(wrongLength, 'columnTracks');
+}
+
 function testGraphReferencesCyclesDepthAndOrphans() {
   const missing = buildValidWebDocument();
   missing.nodes.section_hero.children.push('node_missing');
@@ -399,6 +427,7 @@ function testCanonicalSerializationAndHash() {
 function run() {
   testValidContractCoversInitialBlocks();
   testNoArbitraryCodeMarkupStylesOrClasses();
+  testSectionColumnTracksUseSafeTwelveColumnGrid();
   testGraphReferencesCyclesDepthAndOrphans();
   testSemanticImageFormButtonAndBindingRules();
   testTypedDividerAndSpacerAreClosedLeafNodes();

@@ -64,6 +64,36 @@ test('compila el mismo input de forma determinista y preview siempre es noindex'
   assert.match(stylesheet, /\.cc-section\.cc-bg-brand \.cc-button-primary\{background:var\(--cc-surface\);color:var\(--cc-primary\)\}/);
 });
 
+test('publica anchos dinámicos de columnas desde el modelo seguro de 12 partes', () => {
+  const input = fixture();
+  const sectionId = input.document.pages[0].root_node_ids[0];
+  const section = input.document.nodes[sectionId];
+  section.props = {
+    ...section.props,
+    layout: 'grid',
+    columns: 2,
+    column_tracks: {
+      desktop: [8, 4],
+      tablet: [7, 5],
+      mobile: [12],
+    },
+  };
+  section.responsive = {
+    tablet: { columns: 2 },
+    mobile: { columns: 1 },
+  };
+
+  const artifact = compileWebArtifact(input);
+  const stylesheetPath = Object.keys(artifact.files).find((path) => path.startsWith('assets/styles.'));
+  const css = artifact.files[stylesheetPath];
+  const html = artifact.files['index.html'];
+
+  assert.match(html, /cc-layout-grid cc-cols-2 cc-tracks-8-4 cc-tablet-tracks-7-5 cc-mobile-tracks-12/);
+  assert.match(css, /\.cc-section\.cc-tracks-8-4>\.cc-container\{display:grid;grid-template-columns:minmax\(0,8fr\) minmax\(0,4fr\)\}/);
+  assert.match(css, /\.cc-section\.cc-tablet-tracks-7-5>\.cc-container\{display:grid;grid-template-columns:minmax\(0,7fr\) minmax\(0,5fr\)\}/);
+  assert.match(css, /\.cc-section\.cc-mobile-tracks-12>\.cc-container\{display:grid;grid-template-columns:minmax\(0,12fr\)\}/);
+});
+
 test('el favicon inline es determinista, generado por el compilador y no contiene markup ejecutable', () => {
   const first = faviconDataUrl('Clínica Centro');
   const second = faviconDataUrl('Clínica Centro');
