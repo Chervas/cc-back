@@ -6020,6 +6020,19 @@ uno con un contrato JSON cerrado. Estados: `draft -> review -> published` y
 Publicar o archivar exige `marketing.web.review`; leer y editar usan
 `marketing.web.view|edit` dentro del scope explícito.
 
+Desde el corte del 2026-07-20, `WebContentEntries` y
+`WebContentEntryVersions` incluyen `schema_config` versionado. El valor por
+defecto es `{ enabled: true, profile: 'auto', include_sources: false }`. Los
+perfiles son cerrados y se validan por tipo de contenido: `faq` solo admite
+`auto|FAQPage|WebPage`, `article` `auto|Article|WebPage`,
+`professional_bio` `auto|Person|WebPage`, `testimonial`
+`auto|Review|CreativeWork`, `treatment_copy` `auto|MedicalWebPage|WebPage`,
+`category` `auto|CollectionPage|WebPage`, y los textos generales/legales solo
+sus variantes seguras `WebPage|CreativeWork`. Desactivar schema normaliza el
+perfil a `auto` y `include_sources=false`. El campo participa en el hash de
+contenido y en cada versión, por lo que cambiarlo es un cambio editorial
+auditable; no existe JSON-LD libre en API, frontend ni generación asistida.
+
 La API proyecta autorización efectiva, no obliga al frontend a inferirla:
 `capabilities.can_create`, `can_edit_own` y `can_review` describen al actor, y
 cada fila devuelve `can_edit` y `read_only`. El autor puede modificar su propio
@@ -6186,7 +6199,9 @@ El proveedor es OpenAI Responses API desde backend:
 
 Antes de persistir la petición se verifica que la credencial existe. El output
 vuelve a pasar por el validador canónico de `WebContentEntry`; un JSON válido
-para OpenAI no basta si incumple el contrato Clinicaclick. La procedencia
+para OpenAI no basta si incumple el contrato Clinicaclick. La propuesta puede
+incluir `schema_config`, pero se valida con el mismo contrato cerrado antes de
+aceptarse como borrador CMS; no puede publicar ni saltarse revisión. La procedencia
 audita proveedor, modelo efectivo, `response_id`, fecha, tokens,
 `application_state_store=false`, Structured Outputs y fuentes estructuradas.
 `estimated_cost_micros` y moneda quedan `null` hasta disponer de una tarifa

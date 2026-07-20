@@ -169,6 +169,7 @@ function serializeContentEntry(row, options = {}) {
     title: value.title,
     content: value.content,
     sources: value.sources || [],
+    schema_config: value.schemaConfig || { enabled: true, profile: 'auto', include_sources: false },
     content_hash: value.contentHash,
     status: value.status,
     version: Number(value.version),
@@ -190,6 +191,7 @@ function serializeContentVersion(row) {
     title: value.title,
     content: value.content,
     sources: value.sources || [],
+    schema_config: value.schemaConfig || { enabled: true, profile: 'auto', include_sources: false },
     content_hash: value.contentHash,
     status: value.status,
     actor_user_id: value.actorUserId || null,
@@ -314,6 +316,7 @@ async function persistContentVersion({ entry, actorId, models, transaction }) {
     title: value.title,
     content: value.content,
     sources: value.sources || [],
+    schemaConfig: value.schemaConfig || { enabled: true, profile: 'auto', include_sources: false },
     contentHash: value.contentHash,
     status: value.status,
     actorUserId: positiveInteger(actorId),
@@ -400,6 +403,7 @@ async function createContent({
       title: normalized.title,
       content: normalized.content,
       sources: normalized.sources,
+      schemaConfig: normalized.schema_config,
       contentHash: normalized.hash,
       status: 'draft',
       version: 1,
@@ -465,7 +469,7 @@ async function updateContent({ actorId, contentId, body = {}, requestId = null, 
     if (body.type !== undefined && String(body.type).trim().toLowerCase() !== value.type) {
       throw new WebContentMediaServiceError('content_type_immutable', 'El tipo de una entrada existente no se puede cambiar.', 422);
     }
-    const dataChanged = ['title', 'locale', 'content', 'sources'].some((field) => body[field] !== undefined);
+    const dataChanged = ['title', 'locale', 'content', 'sources', 'schema_config'].some((field) => body[field] !== undefined);
     let targetStatus = body.status === undefined ? value.status : String(body.status || '').trim().toLowerCase();
     if (!WEB_CONTENT_STATUSES.includes(targetStatus)) {
       throw new WebContentMediaServiceError('invalid_content_status', 'El estado solicitado no es válido.', 422);
@@ -499,6 +503,7 @@ async function updateContent({ actorId, contentId, body = {}, requestId = null, 
       title: body.title ?? value.title,
       content: body.content ?? value.content,
       sources: body.sources ?? value.sources,
+      schema_config: body.schema_config ?? value.schemaConfig,
     });
     const previousHash = value.contentHash;
     await entry.update({
@@ -506,6 +511,7 @@ async function updateContent({ actorId, contentId, body = {}, requestId = null, 
       title: normalized.title,
       content: normalized.content,
       sources: normalized.sources,
+      schemaConfig: normalized.schema_config,
       contentHash: normalized.hash,
       status: targetStatus,
       version: expectedVersion + 1,

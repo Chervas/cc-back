@@ -18,6 +18,29 @@ const WEB_CONTENT_STATUSES = Object.freeze(['draft', 'review', 'published', 'arc
 const WEB_MEDIA_STATUSES = Object.freeze(['processing', 'ready', 'failed', 'archived']);
 const WEB_MEDIA_KINDS = Object.freeze(['image']);
 const WEB_RIGHTS_ORIGINS = Object.freeze(['owned', 'licensed', 'stock', 'generated']);
+const WEB_CONTENT_SCHEMA_PROFILES = Object.freeze([
+  'auto',
+  'WebPage',
+  'CreativeWork',
+  'FAQPage',
+  'Article',
+  'Person',
+  'Review',
+  'MedicalWebPage',
+  'CollectionPage',
+]);
+
+const WEB_CONTENT_SCHEMA_PROFILE_BY_TYPE = Object.freeze({
+  value_proposition: Object.freeze(['auto', 'WebPage', 'CreativeWork']),
+  benefit: Object.freeze(['auto', 'CreativeWork', 'WebPage']),
+  faq: Object.freeze(['auto', 'FAQPage', 'WebPage']),
+  treatment_copy: Object.freeze(['auto', 'MedicalWebPage', 'WebPage']),
+  professional_bio: Object.freeze(['auto', 'Person', 'WebPage']),
+  testimonial: Object.freeze(['auto', 'Review', 'CreativeWork']),
+  legal_copy: Object.freeze(['auto', 'WebPage', 'CreativeWork']),
+  article: Object.freeze(['auto', 'Article', 'WebPage']),
+  category: Object.freeze(['auto', 'CollectionPage', 'WebPage']),
+});
 
 class WebContentValidationError extends Error {
   constructor(code, message, details = undefined) {
@@ -316,6 +339,27 @@ function validateTypedContent(type, value) {
   }
 }
 
+function validateWebContentSchemaConfig(type, value = undefined) {
+  const path = '/schema_config';
+  if (value === undefined || value === null) {
+    return { enabled: true, profile: 'auto', include_sources: false };
+  }
+  assertKeys(value, ['enabled', 'profile', 'include_sources'], [], path);
+  const enabled = value.enabled !== false;
+  const profile = String(value.profile || 'auto').trim();
+  const allowedProfiles = WEB_CONTENT_SCHEMA_PROFILE_BY_TYPE[type] || ['auto'];
+  if (!WEB_CONTENT_SCHEMA_PROFILES.includes(profile) || !allowedProfiles.includes(profile)) {
+    fail('invalid_content_schema_profile', `${path}.profile no es válido para este tipo de contenido.`, `${path}/profile`, {
+      allowed: allowedProfiles,
+    });
+  }
+  return {
+    enabled,
+    profile: enabled ? profile : 'auto',
+    include_sources: enabled ? value.include_sources === true : false,
+  };
+}
+
 function validateWebContentEntry(input = {}) {
   const type = String(input.type || '').trim().toLowerCase();
   if (!WEB_CONTENT_TYPES.includes(type)) {
@@ -331,6 +375,7 @@ function validateWebContentEntry(input = {}) {
     title: assertText(input.title, '/title', { min: 1, max: 191 }),
     content: validateTypedContent(type, input.content),
     sources: validateSources(input.sources),
+    schema_config: validateWebContentSchemaConfig(type, input.schema_config),
   };
   // Reutiliza la inspección JSON defensiva del WebDocument para prototipos,
   // getters, claves de código, strings ejecutables, profundidad y tamaño.
@@ -539,6 +584,8 @@ function assertWebContentSnapshot(value) {
 module.exports = {
   WEB_CONTENT_STATUSES,
   WEB_CONTENT_TYPES,
+  WEB_CONTENT_SCHEMA_PROFILE_BY_TYPE,
+  WEB_CONTENT_SCHEMA_PROFILES,
   WEB_MEDIA_KINDS,
   WEB_MEDIA_STATUSES,
   WEB_RIGHTS_ORIGINS,
@@ -554,6 +601,7 @@ module.exports = {
   validateFocalPoints,
   validateMediaRights,
   validateSources,
+  validateWebContentSchemaConfig,
   validateWebContentEntry,
   validateWebMediaPresentation,
 };
