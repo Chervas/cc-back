@@ -5,7 +5,12 @@ const path = require('path');
 require('dotenv').config({ path: path.resolve(process.cwd(), '.env') });
 
 const { Op } = require('sequelize');
+// El bootstrap histórico de modelos enumera todos los modelos por consola.
+// Este canario debe emitir únicamente su JSON seguro y parseable.
+const originalConsoleLog = console.log;
+console.log = () => undefined;
 const db = require('../../../models');
+console.log = originalConsoleLog;
 const jobRequestsService = require('../../services/jobRequests.service');
 const whatsappService = require('../../services/whatsapp.service');
 const { normalizeWhatsappLocale } = require('../../lib/whatsapp-template-locale');
@@ -394,4 +399,3 @@ main()
   .finally(async () => {
     await db.sequelize.close().catch(() => undefined);
   });
-
