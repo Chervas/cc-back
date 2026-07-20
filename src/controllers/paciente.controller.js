@@ -5,6 +5,10 @@ const crypto = require('crypto');
 const { normalizePhoneDigits } = require('../lib/phone');
 const { normalizeHumanName } = require('../lib/name');
 const {
+  normalizePatientLanguage,
+  languageForNewPatient,
+} = require('../lib/patient-language');
+const {
   assertUserCanAccessFeature,
   canUserAccessFeature,
   getAccessibleClinicIdsForFeature,
@@ -1374,7 +1378,7 @@ exports.getPacienteActivity = async (req, res) => {
 
 exports.createPaciente = async (req, res) => {
   try {
-    const { nombre, apellidos, dni, telefono_movil, email, telefono_secundario, foto, fecha_nacimiento, edad, estatura, peso, sexo, profesion, fecha_alta, fecha_baja, alergias, antecedentes, medicacion, paciente_conocido, como_nos_conocio, procedencia, clinica_id, tutor } = req.body;
+    const { nombre, apellidos, dni, telefono_movil, email, telefono_secundario, foto, fecha_nacimiento, edad, estatura, peso, sexo, profesion, fecha_alta, fecha_baja, alergias, antecedentes, medicacion, idioma_preferido, paciente_conocido, como_nos_conocio, procedencia, clinica_id, tutor } = req.body;
     const normPhone = normalizePhone(telefono_movil);
     const normEmail = normalizeEmail(email);
     const normalizedNombre = normalizeHumanName(nombre);
@@ -1449,6 +1453,7 @@ exports.createPaciente = async (req, res) => {
       alergias,
       antecedentes,
       medicacion,
+      idioma_preferido: languageForNewPatient(idioma_preferido),
       paciente_conocido,
       como_nos_conocio,
       procedencia,
@@ -1479,6 +1484,12 @@ exports.createPaciente = async (req, res) => {
       vinculado: true
     });
   } catch (error) {
+    if (error.status === 400 && error.message === 'unsupported_patient_language') {
+      return res.status(400).json({
+        message: 'idioma_preferido inválido',
+        allowed: error.details?.allowed || ['es', 'ca', 'en'],
+      });
+    }
     const handled = sendAccessPolicyError(error, res);
     if (handled) return handled;
     res.status(500).json({ message: 'Error creating paciente', error: error.message });
@@ -1576,7 +1587,7 @@ exports.updatePaciente = async (req, res) => {
       }
     }
 
-    const fieldsToUpdate = ['nombre', 'apellidos', 'dni', 'telefono_movil', 'email', 'telefono_secundario', 'foto', 'fecha_nacimiento', 'edad', 'estatura', 'peso', 'sexo', 'profesion', 'fecha_alta', 'fecha_baja', 'alergias', 'antecedentes', 'medicacion', 'paciente_conocido', 'como_nos_conocio', 'procedencia', 'clinica_id'];
+    const fieldsToUpdate = ['nombre', 'apellidos', 'dni', 'telefono_movil', 'email', 'telefono_secundario', 'foto', 'fecha_nacimiento', 'edad', 'estatura', 'peso', 'sexo', 'profesion', 'fecha_alta', 'fecha_baja', 'alergias', 'antecedentes', 'medicacion', 'idioma_preferido', 'paciente_conocido', 'como_nos_conocio', 'procedencia', 'clinica_id'];
     fieldsToUpdate.forEach(field => {
       if (req.body[field] !== undefined) {
         if (field === 'telefono_movil') {
@@ -1591,6 +1602,10 @@ exports.updatePaciente = async (req, res) => {
           paciente[field] = normalizeHumanName(req.body[field]);
           return;
         }
+        if (field === 'idioma_preferido') {
+          paciente[field] = normalizePatientLanguage(req.body[field]);
+          return;
+        }
         paciente[field] = req.body[field];
       }
     });
@@ -1600,6 +1615,12 @@ exports.updatePaciente = async (req, res) => {
       paciente
     });
   } catch (error) {
+    if (error.status === 400 && error.message === 'unsupported_patient_language') {
+      return res.status(400).json({
+        message: 'idioma_preferido inválido',
+        allowed: error.details?.allowed || ['es', 'ca', 'en'],
+      });
+    }
     const handled = sendAccessPolicyError(error, res);
     if (handled) return handled;
     res.status(500).json({ message: 'Error updating paciente', error: error.message });

@@ -66,6 +66,22 @@ module.exports = (sequelize, DataTypes) => {
     alergias: DataTypes.TEXT,
     antecedentes: DataTypes.TEXT,
     medicacion: DataTypes.TEXT,
+    idioma_preferido: {
+      type: DataTypes.ENUM('es', 'ca', 'en'),
+      allowNull: false,
+      defaultValue: 'es',
+      validate: {
+        isIn: [['es', 'ca', 'en']]
+      }
+    },
+    idioma_preferido_label: {
+      type: DataTypes.VIRTUAL,
+      get() {
+        const labels = { es: 'Español', ca: 'Catalán', en: 'Inglés' };
+        const language = this.getDataValue('idioma_preferido') || 'es';
+        return labels[language] || labels.es;
+      }
+    },
     paciente_conocido: {
       type: DataTypes.BOOLEAN,
       allowNull: false,
