@@ -172,6 +172,23 @@ La validación está duplicada y cubierta en frontend/backend:
 - tests `web_document_contract`, `web_artifact_compiler`,
   `web_gallery_backend`, `web_artifacts_service` y focales frontend.
 
+### Schema de página con presets seguros
+
+`WebDocument v1` admite `page.seo.schema` como configuración editorial cerrada,
+no como JSON-LD libre. El contrato backend valida dos campos:
+
+- `page_type`: `auto`, `web_page` o `medical_web_page`;
+- `include_faq`: booleano para publicar u omitir `FAQPage` cuando la página
+  contiene preguntas/respuestas visibles.
+
+El compilador mantiene la allowlist: emite `WebPage` por defecto,
+`MedicalWebPage` solo cuando el preset lo solicita, y `FAQPage` únicamente si
+hay FAQs visibles y `include_faq !== false`. La prueba focal
+`web_artifact_compiler.test.js` cubre que una FAQ pueda permanecer visible en
+HTML sin publicar `FAQPage`, y `web_document_contract.test.js` rechaza presets
+fuera de la lista. No se aceptan tipos Schema arbitrarios, scripts ni contenido
+JSON-LD pegado por el usuario.
+
 ### Renderer 1.7 y publicación WordPress histórica
 
 El cierre anterior con `clinicaclick-web-renderer/1.7.0` cubrió cabecera y pie globales y una

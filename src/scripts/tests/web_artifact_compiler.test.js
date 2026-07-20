@@ -669,6 +669,30 @@ test('FAQ se renderiza como disclosure seguro y su schema solo alcanza la págin
   assert.deepEqual(secondaryFaq.mainEntity.map((entry) => entry.name), ['¿Pregunta de otra página?']);
 });
 
+test('Schema configurable por página solo usa presets seguros y puede omitir FAQPage', () => {
+  const input = fixture();
+  const primarySection = Object.values(input.document.nodes).find((node) => node.type === 'section');
+  input.document.pages[0].seo.schema = {
+    page_type: 'medical_web_page',
+    include_faq: false,
+  };
+  input.document.nodes.faq_schema_config = {
+    id: 'faq_schema_config',
+    type: 'faq',
+    version: 1,
+    props: { question: '¿Publicar como FAQ?', answer: 'No en esta página.' },
+    children: [],
+  };
+  primarySection.children.push('faq_schema_config');
+
+  const artifact = compileWebArtifact(input);
+  const graph = artifact.pages[0].json_ld['@graph'];
+  assert.equal(graph.find((entry) => entry['@id']?.endsWith('#webpage'))['@type'], 'MedicalWebPage');
+  assert.equal(graph.some((entry) => entry['@type'] === 'FAQPage'), false);
+  assert.match(artifact.files['index.html'], /¿Publicar como FAQ\?/);
+  assert.doesNotMatch(artifact.files['index.html'], /LocalBusiness<script>/);
+});
+
 test('renderiza globals una vez y los incluye en SEO, Schema e intake de cada página efectiva', () => {
   const input = fixture();
   const pageForm = Object.values(input.document.nodes).find((node) => node.type === 'intake_form');

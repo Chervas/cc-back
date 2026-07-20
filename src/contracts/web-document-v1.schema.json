@@ -302,7 +302,23 @@
           ]
         },
         "index": { "type": "boolean" },
-        "follow": { "type": "boolean" }
+        "follow": { "type": "boolean" },
+        "schema": {
+          "$ref": "#/definitions/pageSchema"
+        }
+      }
+    },
+    "pageSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["page_type", "include_faq"],
+      "properties": {
+        "page_type": {
+          "enum": ["auto", "web_page", "medical_web_page"]
+        },
+        "include_faq": {
+          "type": "boolean"
+        }
       }
     },
     "styleTokens": {

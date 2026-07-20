@@ -861,6 +861,11 @@ function reachableNodeIds(page, document) {
 function buildStructuredData({ project, page, pageUrl, baseUrl, clinic, document, socialImageUrl = null }) {
   const root = `${baseUrl}/#website`;
   const organizationId = `${baseUrl}/#organization`;
+  const schemaConfig = page.seo?.schema && typeof page.seo.schema === 'object'
+    ? page.seo.schema
+    : {};
+  const pageType = schemaConfig.page_type === 'medical_web_page' ? 'MedicalWebPage' : 'WebPage';
+  const includeFaq = schemaConfig.include_faq !== false;
   const graph = [{
     '@type': 'WebSite',
     '@id': root,
@@ -882,7 +887,7 @@ function buildStructuredData({ project, page, pageUrl, baseUrl, clinic, document
     ...(socialImageUrl && isSafePublicAssetUrl(socialImageUrl) ? { image: socialImageUrl } : {}),
     ...(clinic.schema_type === 'Dentist' ? { medicalSpecialty: 'Dentistry' } : {}),
   }, {
-    '@type': 'WebPage',
+    '@type': pageType,
     '@id': `${pageUrl}#webpage`,
     url: pageUrl,
     name: page.seo?.title || page.title,
@@ -900,7 +905,7 @@ function buildStructuredData({ project, page, pageUrl, baseUrl, clinic, document
       name: node.props.question,
       acceptedAnswer: { '@type': 'Answer', text: node.props.answer },
     }));
-  if (faqEntries.length) {
+  if (includeFaq && faqEntries.length) {
     graph.push({
       '@type': 'FAQPage',
       '@id': `${pageUrl}#faq`,

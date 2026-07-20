@@ -356,6 +356,20 @@ function testTypedFaqIsPlainTextAndLeafOnly() {
   assertInvalid(wrongFaqTarget, 'bindingTarget');
 }
 
+function testPageSchemaUsesClosedPresets() {
+  const document = buildValidWebDocument();
+  document.pages[0].seo.schema = { page_type: 'medical_web_page', include_faq: false };
+  assert.equal(assertValidWebDocument(document).valid, true);
+
+  const arbitraryType = clone(document);
+  arbitraryType.pages[0].seo.schema.page_type = 'local_business';
+  assertInvalid(arbitraryType, 'enum');
+
+  const arbitraryPayload = clone(document);
+  arbitraryPayload.pages[0].seo.schema.raw_json_ld = { '@type': 'Thing' };
+  assertInvalid(arbitraryPayload, 'additionalProperties');
+}
+
 function testStructuralAndByteLimits() {
   const tooManyNodes = buildValidWebDocument();
   for (let index = 0; index < WEB_DOCUMENT_LIMITS.maxNodes; index += 1) {
@@ -449,6 +463,7 @@ function run() {
   testTypedDividerAndSpacerAreClosedLeafNodes();
   testIntakeButtonTargetsStayInsideTheirEffectiveScope();
   testTypedFaqIsPlainTextAndLeafOnly();
+  testPageSchemaUsesClosedPresets();
   testStructuralAndByteLimits();
   testCanonicalSerializationAndHash();
   console.log('web_document_contract.test.js: ok');
