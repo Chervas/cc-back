@@ -1,5 +1,5 @@
 > **Módulo:** Arquitectura del Backend
-> **Última actualización:** 2026-07-19
+> **Última actualización:** 2026-07-20
 > **Relacionado con:** `cc-front/src/Documentacion/20.1-motor-flujos-v2.md` | documento operativo `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`
 > **Fuente canónica:** este archivo del repositorio backend. `cc-front/src/Documentacion/13-backend.md` es un espejo completo para conservar los enlaces internos del manual frontend; cualquier cambio se hace aquí primero y después se sincroniza el espejo.
 
@@ -27,6 +27,11 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
 - El runtime conserva `context.communication_language` por ejecución y resuelve
   familia, locale y WABA efectivo antes de crear el `Message`. Un reintento
   reutiliza esa selección; no mezcla idiomas ni cae silenciosamente a español.
+- Validación 2026-07-20: `whatsapp_multilingual_automation.test.js` confirma
+  que cada mensaje nuevo usa el idioma vivo del paciente enriquecido. Si se
+  activa catalán después del primer envío, los siguientes nodos pueden salir en
+  catalán; solo los reintentos del mismo `Message` conservan el snapshot ya
+  materializado.
 - El canary autorizado usó una única ejecución (`#954`, job `#32877`) y creó un
   único mensaje (`#49928`) en catalán hacia el número QA terminado en `0236`.
   Meta lo aceptó, entregó y marcó leído. No hubo segundo envío. El flujo terminó
