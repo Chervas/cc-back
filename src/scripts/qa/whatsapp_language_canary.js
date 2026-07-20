@@ -115,9 +115,32 @@ async function loadPreflight() {
     fail('qa_catalan_variant_missing');
   }
 
-  const template = await db.WhatsappTemplate.findByPk(Number(variant.template_id), {
+  let template = await db.WhatsappTemplate.findByPk(Number(variant.template_id), {
     include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', required: false }],
   });
+  const requestedCatalogId = Number(
+    variant.catalog_template_id || template?.catalog_template_id
+  ) || null;
+  if (
+    requestedCatalogId
+    && cleanString(template?.waba_id) !== cleanString(clinicConfig.wabaId)
+  ) {
+    const wabaCandidates = await db.WhatsappTemplate.findAll({
+      where: {
+        catalog_template_id: requestedCatalogId,
+        waba_id: cleanString(clinicConfig.wabaId),
+        is_active: true,
+      },
+      include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', required: false }],
+      order: [['id', 'DESC']],
+    });
+    const compatible = wabaCandidates.find((candidate) => (
+      normalizeWhatsappLocale(candidate?.language || candidate?.catalog?.locale) === LANGUAGE
+      && cleanString(candidate?.status).toUpperCase() === 'APPROVED'
+      && cleanString(candidate?.meta_template_id)
+    ));
+    if (compatible) template = compatible;
+  }
   const templateLocale = normalizeWhatsappLocale(template?.language || template?.catalog?.locale);
   if (!template || cleanString(template.status).toUpperCase() !== 'APPROVED') {
     fail('qa_catalan_template_not_approved');
