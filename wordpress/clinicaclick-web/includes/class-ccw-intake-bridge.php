@@ -1022,9 +1022,9 @@ final class CCW_Intake_Bridge
         if ($has_identity_fields && $matched_route === null) {
             $this->fail('ccw_event_bridge_identity_mismatch', 409);
         }
-        $pointer = $matched_route !== null ? $matched_route['pointer'] : $this->cache->pointer();
+        $pointer = $matched_route !== null ? $matched_route['pointer'] : array();
         $manifest = is_array($pointer['manifest'] ?? null) ? $pointer['manifest'] : array();
-        $artifact_hash = (string) ($pointer['active_hash'] ?? '');
+        $artifact_hash = $matched_route !== null ? (string) ($pointer['active_hash'] ?? '') : '';
         $runtime = $matched_route !== null && is_array($pointer['runtime_configuration'] ?? null)
             ? $pointer['runtime_configuration']
             : CCW_Config::runtime_configuration();
@@ -1035,8 +1035,10 @@ final class CCW_Intake_Bridge
             && hash_equals($artifact_hash, (string) ($runtime['desired_artifact_hash'] ?? ''))
         );
         if (
-            ($pointer['status'] ?? '') !== 'active'
-            || !preg_match('/^[a-f0-9]{64}$/', $artifact_hash)
+            ($matched_route !== null && (
+                ($pointer['status'] ?? '') !== 'active'
+                || !preg_match('/^[a-f0-9]{64}$/', $artifact_hash)
+            ))
             || !$route_runtime_valid
             || empty($measurement['enabled'])
             || !in_array((string) ($measurement['scope_type'] ?? ''), array('clinic', 'group'), true)
@@ -1230,15 +1232,22 @@ final class CCW_Intake_Bridge
             $this->fail('ccw_event_bridge_payload_invalid', 413);
         }
         $url = CCW_Config::api_base() . '/api/intake/' . $endpoint;
+        $headers = array(
+            'Accept' => 'application/json',
+            'Content-Type' => 'application/json',
+            'X-CC-Signature' => hash_hmac('sha256', $body, $secret),
+            'X-CC-Event-Id' => $event_id,
+            'X-Clinicaclick-Plugin-Version' => CCW_VERSION,
+        );
+        // Ordinary WordPress pages authenticate with the signed installation
+        // runtime, independently from any landing publication. Sending a
+        // retired landing hash here would make the control plane reject valid
+        // global measurement after the last landing is withdrawn.
+        if (preg_match('/^[a-f0-9]{64}$/', (string) $artifact_hash)) {
+            $headers['X-Clinicaclick-Web-Artifact'] = $artifact_hash;
+        }
         $response = wp_safe_remote_post($url, array(
-            'headers' => array(
-                'Accept' => 'application/json',
-                'Content-Type' => 'application/json',
-                'X-CC-Signature' => hash_hmac('sha256', $body, $secret),
-                'X-CC-Event-Id' => $event_id,
-                'X-Clinicaclick-Web-Artifact' => $artifact_hash,
-                'X-Clinicaclick-Plugin-Version' => CCW_VERSION,
-            ),
+            'headers' => $headers,
             'body' => $body,
             'timeout' => 10,
             'redirection' => 0,
