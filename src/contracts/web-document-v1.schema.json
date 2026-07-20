@@ -335,6 +335,9 @@
     "spacing": {
       "enum": ["none", "xs", "sm", "md", "lg", "xl", "2xl"]
     },
+    "animationPreset": {
+      "enum": ["none", "fade_in", "slide_up", "scale_in"]
+    },
     "responsive": {
       "type": "object",
       "additionalProperties": false,
@@ -420,6 +423,7 @@
         },
         "style_tokens": { "$ref": "#/definitions/styleTokens" },
         "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
@@ -464,6 +468,7 @@
         },
         "style_tokens": { "$ref": "#/definitions/styleTokens" },
         "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
@@ -503,6 +508,7 @@
         },
         "style_tokens": { "$ref": "#/definitions/styleTokens" },
         "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
@@ -529,6 +535,7 @@
         },
         "style_tokens": { "$ref": "#/definitions/styleTokens" },
         "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
@@ -554,6 +561,7 @@
         },
         "style_tokens": { "$ref": "#/definitions/styleTokens" },
         "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
@@ -590,6 +598,7 @@
         },
         "style_tokens": { "$ref": "#/definitions/styleTokens" },
         "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
@@ -643,6 +652,7 @@
         },
         "style_tokens": { "$ref": "#/definitions/styleTokens" },
         "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
@@ -676,6 +686,7 @@
         },
         "style_tokens": { "$ref": "#/definitions/styleTokens" },
         "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
@@ -763,6 +774,7 @@
         },
         "style_tokens": { "$ref": "#/definitions/styleTokens" },
         "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
@@ -818,6 +830,7 @@
         },
         "style_tokens": { "$ref": "#/definitions/styleTokens" },
         "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },

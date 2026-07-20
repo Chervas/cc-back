@@ -94,6 +94,25 @@ test('publica anchos dinámicos de columnas desde el modelo seguro de 12 partes'
   assert.match(css, /\.cc-section\.cc-mobile-tracks-12>\.cc-container\{display:grid;grid-template-columns:minmax\(0,12fr\)\}/);
 });
 
+test('publica animaciones tipadas como clases seguras generadas por el renderer', () => {
+  const input = fixture();
+  const sectionId = input.document.pages[0].root_node_ids[0];
+  const section = input.document.nodes[sectionId];
+  section.animation = 'slide_up';
+
+  const artifact = compileWebArtifact(input);
+  const stylesheetPath = Object.keys(artifact.files).find((path) => path.startsWith('assets/styles.'));
+  const css = artifact.files[stylesheetPath];
+  const html = artifact.files['index.html'];
+
+  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.8.0');
+  assert.match(html, /cc-animate-slide_up/);
+  assert.match(css, /\.cc-animate-slide_up\{animation:ccSlideUp \.46s cubic-bezier/);
+  assert.match(css, /@media\(prefers-reduced-motion:no-preference\)/);
+  assert.doesNotMatch(html, /animate-\[/);
+  assert.doesNotMatch(css, /style="/);
+});
+
 test('el favicon inline es determinista, generado por el compilador y no contiene markup ejecutable', () => {
   const first = faviconDataUrl('Clínica Centro');
   const second = faviconDataUrl('Clínica Centro');
@@ -796,7 +815,7 @@ test('renderiza globals una vez y los incluye en SEO, Schema e intake de cada p�
   assert.match(secondaryHtml, /name="web_page_id" value="page_global_secondary"/);
 });
 
-test('renderer 1.7 honra tokens, responsive, fuentes e imagen focal en CSS de producción', () => {
+test('renderer 1.8 honra tokens, responsive, fuentes e imagen focal en CSS de producción', () => {
   const input = fixture();
   const section = Object.values(input.document.nodes).find((node) => node.type === 'section');
   section.props.layout = 'grid';
@@ -850,7 +869,7 @@ test('renderer 1.7 honra tokens, responsive, fuentes e imagen focal en CSS de pr
   const cssPath = Object.keys(artifact.files).find((path) => path.endsWith('.css'));
   const css = artifact.files[cssPath];
   const html = artifact.files['index.html'];
-  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.7.0');
+  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.8.0');
   assert.match(html, /cc-layout-grid cc-cols-4[^"\n]*cc-bg-brand[^"\n]*cc-width-wide[^"\n]*cc-pt-2xl[^"\n]*cc-radius-full[^"\n]*cc-shadow-lg[^"\n]*cc-mobile-cols-1/);
   assert.match(html, /cc-fit-contain cc-aspect-21-9 cc-focal-37-62/);
   assert.match(html, /<div class="cc-image-frame"><img[^>]*width="2100" height="900">/);

@@ -153,10 +153,28 @@ Nunca sobrescribe una plantilla editada por un usuario. Su `down()` es no-op
 porque un rollback de código no debe reintroducir teléfonos ficticios ni el
 contenido inseguro anterior.
 
-### Renderer 1.7 y publicación WordPress
+### Renderer 1.8 y animaciones tipadas
 
-El compilador/renderer público permanece en
-`clinicaclick-web-renderer/1.7.0`. El cierre cubre cabecera y pie globales y una
+El compilador público activo pasa a `clinicaclick-web-renderer/1.8.0` para
+soportar animaciones de entrada cerradas en `WebDocument v1`. Cada nodo puede
+declarar `animation` con uno de estos valores: `none`, `fade_in`, `slide_up` o
+`scale_in`. El compilador genera únicamente clases propias `cc-animate-*` y
+keyframes deterministas protegidos por `prefers-reduced-motion`; no acepta
+`className`, `animate-[...]`, CSS inline ni estilos arbitrarios importados de
+ModSuite.
+
+La validación está duplicada y cubierta en frontend/backend:
+
+- JSON Schema backend `web-document-v1.schema.json`;
+- validador frontend `web-document.validation.ts`;
+- comandos del editor con undo/redo para `animation`;
+- preview del editor y compilador público;
+- tests `web_document_contract`, `web_artifact_compiler`,
+  `web_gallery_backend`, `web_artifacts_service` y focales frontend.
+
+### Renderer 1.7 y publicación WordPress histórica
+
+El cierre anterior con `clinicaclick-web-renderer/1.7.0` cubrió cabecera y pie globales y una
 galería real congelada por assets, además de SEO/Social/Schema, formulario,
 hashes, manifest, ETag y desired-state multi-ruta del plugin
 `clinicaclick-web 2.0.0-alpha.8`. La página publicada no ejecuta HTML, CSS o
@@ -477,7 +495,7 @@ fail-closed. Los locks mixtos de publicaciones clinic/group se ordenan por
 la suite integral de aquel corte pasó 351/351 y el cierre final posterior
 amplía Marketing Web a 354/354.
 
-Contrato live del renderer **1.7**: el compilador puede
+Contrato live del renderer **1.7/1.8**: el compilador puede
 completar `PostalAddress` y `OpeningHoursSpecification` desde la ubicación
 efectiva verificada, pero no reutiliza automáticamente fotos de Google Business
 Profile ni sus `googleUrl`. Para OG/Schema solo admite la imagen canónica de
@@ -486,6 +504,8 @@ imagen. La ficha GBP efectiva nunca se elige por `last_synced_at`: en modo de
 grupo se usa exclusivamente `business_profile_primary_location_id`; en modo
 clínica se exige una única asignación explícita y, si no existe, una única
 `ClinicBusinessLocation` directa que esté activa, verificada y no suspendida.
+La diferencia de `1.8` frente a `1.7` es el soporte de `animation` tipado y
+clases `cc-animate-*`; el contrato GBP/SEO anterior no cambia.
 Dos asignaciones o dos fichas directas candidatas son ambiguas y el compilador
 no completa dirección/horario desde Google. Los contratos primaria frente a
 reciente y doble ficha ambigua pasan **21/21** focales. La identidad inmutable

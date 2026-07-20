@@ -132,6 +132,21 @@ function testSectionColumnTracksUseSafeTwelveColumnGrid() {
   assertInvalid(wrongLength, 'columnTracks');
 }
 
+function testNodeAnimationsUseClosedPresets() {
+  const valid = buildValidWebDocument();
+  valid.nodes.section_hero.animation = 'slide_up';
+  valid.nodes.text_intro.animation = 'fade_in';
+  assert.equal(validateWebDocument(valid).valid, true);
+
+  const invalid = buildValidWebDocument();
+  invalid.nodes.section_hero.animation = 'animate-[spin_1s_linear_infinite]';
+  assertInvalid(invalid, 'enum');
+
+  const css = buildValidWebDocument();
+  css.nodes.section_hero.style = { animation: 'spin 1s linear infinite' };
+  assertInvalid(css, 'forbiddenProperty');
+}
+
 function testGraphReferencesCyclesDepthAndOrphans() {
   const missing = buildValidWebDocument();
   missing.nodes.section_hero.children.push('node_missing');
@@ -428,6 +443,7 @@ function run() {
   testValidContractCoversInitialBlocks();
   testNoArbitraryCodeMarkupStylesOrClasses();
   testSectionColumnTracksUseSafeTwelveColumnGrid();
+  testNodeAnimationsUseClosedPresets();
   testGraphReferencesCyclesDepthAndOrphans();
   testSemanticImageFormButtonAndBindingRules();
   testTypedDividerAndSpacerAreClosedLeafNodes();
