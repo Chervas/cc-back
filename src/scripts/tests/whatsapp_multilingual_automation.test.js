@@ -71,13 +71,13 @@ test('normaliza locale interno y conserva el código completo exigido por Meta',
   assert.equal(resolveMetaTemplateLanguage('en'), 'en_US');
 });
 
-test('el idioma queda fijado por ejecución y no cambia si se edita el paciente', () => {
+test('cada nuevo mensaje usa el idioma vivo del paciente enriquecido', () => {
   const first = stampExecutionCommunicationLanguage({
-    patient: { preferred_language: 'ca' },
+    patient: { preferred_language: 'es' },
   });
-  assert.equal(first.communication_language, 'ca');
+  assert.equal(first.communication_language, 'es');
 
-  first.patient.preferred_language = 'es';
+  first.patient.preferred_language = 'ca';
   assert.equal(resolveExecutionCommunicationLanguage(first), 'ca');
   const selected = resolveWhatsappLanguageRouting({
     language_routing: {
@@ -92,17 +92,21 @@ test('el idioma queda fijado por ejecución y no cambia si se edita el paciente'
   assert.equal(selected.config.manual_message_text, 'Català');
 
   const second = stampExecutionCommunicationLanguage({
-    patient: { preferred_language: 'es' },
+    patient: { preferred_language: 'ca' },
   });
-  assert.equal(second.communication_language, 'es');
+  assert.equal(second.communication_language, 'ca');
+  second.patient.preferred_language = 'es';
   assert.equal(resolveWhatsappLanguageRouting({
     language_routing: { enabled: true, variants: {} },
   }, second).selected_language, 'es');
 });
 
-test('ejecuciones históricas sin snapshot permanecen en español', () => {
+test('ejecuciones sin paciente enriquecido usan el snapshot o español', () => {
   assert.equal(resolveExecutionCommunicationLanguage({
-    patient: { preferred_language: 'ca' },
+    communication_language: 'ca',
+  }), 'ca');
+  assert.equal(resolveExecutionCommunicationLanguage({
+    trigger: { data: { preferred_language: 'ca' } },
   }), 'es');
   assert.equal(captureExecutionCommunicationLanguage({
     patient: { preferred_language: 'en' },

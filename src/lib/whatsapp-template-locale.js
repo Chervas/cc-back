@@ -38,7 +38,7 @@ function resolveCatalogFamilyKey(catalog) {
   return String(catalog?.family_key || catalog?.name || '').trim() || null;
 }
 
-function resolvePatientPreferredLanguage(context = {}) {
+function resolvePatientPreferredLanguageCandidate(context = {}) {
   const candidates = [
     context?.patient?.preferred_language,
     context?.patient?.idioma_preferido,
@@ -51,6 +51,12 @@ function resolvePatientPreferredLanguage(context = {}) {
     const locale = normalizeWhatsappLocale(candidate);
     if (locale) return locale;
   }
+  return null;
+}
+
+function resolvePatientPreferredLanguage(context = {}) {
+  const locale = resolvePatientPreferredLanguageCandidate(context);
+  if (locale) return locale;
   // Contrato de pacientes: los registros históricos y los nuevos tienen
   // español como valor por defecto. No se infiere el idioma por el texto.
   return 'es';
@@ -61,10 +67,14 @@ function captureExecutionCommunicationLanguage(context = {}) {
 }
 
 function resolveExecutionCommunicationLanguage(context = {}) {
-  // El idioma de una ejecución es un snapshot inmutable. No consultamos aquí
-  // la ficha viva del paciente: cambiarla durante una espera no puede mezclar
-  // idiomas dentro del mismo flujo. Las ejecuciones históricas sin snapshot se
-  // mantienen en español por compatibilidad.
+  // Cada nuevo mensaje parte del paciente enriquecido justo antes de resolver
+  // plantilla. Los reintentos del mismo Message conservan su selección durable
+  // en metadata, así que esto no duplica ni cambia mensajes ya materializados.
+  const patientLanguage = resolvePatientPreferredLanguageCandidate({
+    patient: context?.patient,
+    paciente: context?.paciente,
+  });
+  if (patientLanguage) return patientLanguage;
   return normalizeWhatsappLocale(context?.communication_language, { fallback: 'es' }) || 'es';
 }
 
