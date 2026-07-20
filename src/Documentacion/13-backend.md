@@ -7,6 +7,37 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
 
 ---
 
+## 2026-07-20 - Plantillas personales y automatizaciones WhatsApp trilingües operativas
+
+- La autoría por `WhatsappTemplates.created_by_user_id` está integrada en
+  `dev`/`staging` y publicada en CRM. `Mis plantillas` significa únicamente
+  «creadas por el usuario autenticado»; catálogo/sistema continúa compartido y
+  las filas históricas sin autor verificable aparecen como `Anteriores`,
+  utilizables en su scope previo pero de solo lectura. Gestión, Leads,
+  QuickChat, Agenda y ficha de paciente consumen el mismo contrato backend.
+- El inventario preexistente conserva 18 filas no-sistema sin autor: seis
+  remotas anteriores y doce creadas/sincronizadas sin trazabilidad suficiente.
+  No se les inventó propietario y no fue necesario ocultarlas ni borrarlas para
+  desplegar la autoría correcta de las plantillas nuevas.
+- Las migraciones de idioma de paciente y catálogo están aplicadas. El rollout
+  durable `JobRequest #32802` terminó `completed`: 30/30 variantes requeridas
+  quedaron aprobadas en Meta, se reconciliaron 144 identificadores de variante
+  y las 905/905 referencias WhatsApp de las versiones activas quedaron
+  localizadas sin familias activas duplicadas.
+- El runtime conserva `context.communication_language` por ejecución y resuelve
+  familia, locale y WABA efectivo antes de crear el `Message`. Un reintento
+  reutiliza esa selección; no mezcla idiomas ni cae silenciosamente a español.
+- El canary autorizado usó una única ejecución (`#954`, job `#32877`) y creó un
+  único mensaje (`#49928`) en catalán hacia el número QA terminado en `0236`.
+  Meta lo aceptó, entregó y marcó leído. No hubo segundo envío. El flujo terminó
+  después en `change_status_target_not_found:appointment`, de forma deliberada,
+  porque el canary no fabrica una cita.
+- El preflight del canary resuelve la variante aprobada correspondiente al WABA
+  del remitente, no una fila canónica sin WABA. La corrección está en
+  `dev@64f155e` y `staging@88bb945`.
+
+---
+
 ## 2026-07-20 - Marketing Web alpha.9, retirada segura y medición global
 
 Estado autoritativo actual de Propdental:
@@ -7004,8 +7035,9 @@ del corte auditado anterior. También cubre cambio `ca -> es` entre ejecuciones,
 legacy sin snapshot, ausencia de variante, WABA ajeno, caída tras respuesta de
 Meta, replay de plantilla/locale y respuestas entrantes en los tres idiomas.
 
-Este código no autoriza un rollout ni un envío real. Antes de operación hay que
-integrar la migración de idioma de paciente, aplicar las dos migraciones de
-catálogo, revisar/aceptar el preflight, obtener aprobación Meta para todas las
-familias/WABA del scope y después iniciar explícitamente el job. No se deben
-fabricar mensajes de prueba en números reales para validar esta fase.
+El párrafo anterior describía el gate previo a la ejecución. El cierre
+operativo posterior está registrado al inicio de este documento: migraciones
+aplicadas, job durable `#32802` completado, 30/30 aprobaciones, 905/905 nodos
+localizados y un único canary autorizado leído. No se deben fabricar mensajes
+ni citas para repetir esa validación; cualquier nuevo canary exige destinatario
+QA explícitamente autorizado y conserva idempotencia por ejecución/nodo.
