@@ -446,6 +446,15 @@ test('retirar WordPress crea el tombstone auditable sin esperar un job ni reutil
     version: 4,
   });
   const audits = [];
+  const binding = new Row({
+    id: '44444444-4444-4444-8444-444444444444',
+    publicationId: publication.id,
+    publicationStatus: 'verified',
+    destinationStatus: 'ready',
+    capabilityStatus: 'ready',
+    lastErrorCode: null,
+    version: 3,
+  });
   const models = {
     WebProject: { findByPk: async () => source },
     WebWordpressInstallation: { findByPk: async () => installation },
@@ -454,6 +463,7 @@ test('retirar WordPress crea el tombstone auditable sin esperar un job ni reutil
       findAll: async () => [publication],
     },
     WebPublicationDeployment: { findOne: async () => null },
+    CampaignDestinationBinding: { findAll: async () => [binding] },
     WebAuditEvent: { create: async (value) => { audits.push(value); } },
   };
   const first = await retireWordpressPublication({
@@ -473,6 +483,12 @@ test('retirar WordPress crea el tombstone auditable sin esperar un job ni reutil
   assert.equal(audits.length, 1);
   assert.equal(audits[0].eventType, 'web.publication.retired');
   assert.equal(audits[0].metadata.tombstone_pending, true);
+  assert.equal(audits[0].metadata.campaign_destination_bindings_blocked, 1);
+  assert.equal(binding.publicationStatus, 'retired');
+  assert.equal(binding.destinationStatus, 'blocked');
+  assert.equal(binding.capabilityStatus, 'blocked');
+  assert.equal(binding.lastErrorCode, 'campaign_destination_publication_retired');
+  assert.equal(binding.version, 4);
 
   const replay = await retireWordpressPublication({
     actorId: 9,
@@ -483,6 +499,7 @@ test('retirar WordPress crea el tombstone auditable sin esperar un job ni reutil
   });
   assert.equal(replay.already_retired, true);
   assert.equal(audits.length, 1);
+  assert.equal(binding.version, 4, 'idempotent retirement changed an already reconciled binding');
 });
 
 test('retirar WordPress falla cerrado mientras hay un despliegue en curso', async () => {

@@ -84,7 +84,7 @@ test('genera un ZIP provisionado mantenido, acotado y sin fuentes de test', asyn
   const first = await buildProvisionedPluginPackage({ credentials: credentials() });
   const second = await buildProvisionedPluginPackage({ credentials: credentials() });
   assert.equal(first.filename, 'clinicaclick-web.zip');
-  assert.equal(first.plugin_version, '2.0.0-alpha.8');
+  assert.equal(first.plugin_version, '2.0.0-alpha.9');
   assert.equal(first.sha256, second.sha256);
   assert.deepEqual(first.buffer, second.buffer);
   assert.equal(first.buffer.readUInt32LE(0), 0x04034b50);
@@ -190,7 +190,7 @@ test('un ZIP de rotación exige exclusivamente el token staged vigente en una in
     ...common,
     bootstrapTicket: ticketFor(stagedToken),
   });
-  assert.equal(archive.plugin_version, '2.0.0-alpha.8');
+  assert.equal(archive.plugin_version, '2.0.0-alpha.9');
   assert.equal(archive.buffer.includes(Buffer.from(stagedToken)), true);
   assert.equal(
     archive.buffer.includes(Buffer.from(pluginKeyDescriptor(signingOptions).key_id)),

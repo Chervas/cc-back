@@ -7,7 +7,56 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
 
 ---
 
-## 2026-07-19 - Cierre funcional Marketing Web W1-W5
+## 2026-07-20 - Marketing Web alpha.9, retirada segura y medición global
+
+Estado autoritativo actual de Propdental:
+
+- `clinicaclick-web 2.0.0-alpha.9` está activo y el plugin legado
+  `clinicaclick 1.1.7` está inactivo. El v2 es el propietario único del loader
+  y del bridge global; home y las cinco páginas de clínica exponen una sola
+  instancia y ningún HMAC público.
+- `/cita/` y `/cita/primera-visita-hospitalet/` están retiradas y responden
+  `410`. Los proyectos/revisiones siguen siendo historial editorial, pero no
+  deben presentarse como publicaciones online ni destinos de campañas.
+- `webProjects.listProjects()` agrega por proyecto un resumen independiente de
+  `WebPublication`: `state`, estado crudo, `is_live`, canal, URL pública,
+  revisión activa/deseada, fechas y recuentos. La prioridad es determinista y
+  evita inferir publicación
+  desde `WebProject.status`.
+- `retireWordpressPublication()` reconcilia dentro de la transacción todos los
+  `CampaignDestinationBinding` de la publicación a `retired/blocked`, guarda
+  `campaign_destination_publication_retired`, incrementa versión y registra el
+  recuento en auditoría. El replay idempotente repara bindings antiguos sin
+  revivir ni volver a retirar contenido.
+- Una página WordPress ordinaria ya no consulta el puntero del último
+  artefacto. Resuelve el runtime firmado global con
+  `CCW_Config::runtime_configuration()` y omite
+  `X-Clinicaclick-Web-Artifact`; las rutas firmadas de landing conservan el
+  contrato estricto. Esto evita que retirar la última landing cause
+  `ccw_event_bridge_runtime_unavailable` o reenvíe un hash retirado.
+- Verificación live: relay ordinario `200`; un evento analytics-granted y
+  ads-denied persistió en grupo `5`; un lead sintético de clínica `59` se creó
+  una sola vez y el reintento con el mismo `event_id` devolvió el mismo ID;
+  cero intentos Google. El cleanup `dry-run -> simulate -> apply` eliminó lead,
+  auditoría y evento y dejó el postcheck a cero.
+- `routes.json` y toda la caché gestionada deben pertenecer al usuario OS del
+  sitio. Un cron/WP-CLI ejecutado como root puede producir
+  `ccw_route_registry_invalid`; no se debe relajar la validación: se corrige
+  ownership y se repite como el usuario del sitio.
+- Pruebas del delta: `web_projects_service`, `web_publications_service` y
+  paquete provisionado verdes; plugin **41/41**. ZIP genérico determinista
+  SHA-256
+  `daf4f84500ac559901c0532a324b36ae6091ede5c6710fd148f70e9cdf2b2f45`.
+  Backup pre-alpha9 root-only:
+  `/furanet/sites/propdental.es/web/.clinicaclick-web-rollbacks/plugin-before-alpha9-20260720T0730Z/clinicaclick-web-alpha8.tgz`
+  (SHA-256
+  `92d0077446ef917b1b408edb3c61ff075e5957c7b87643b6910fda88fd1732f9`).
+
+Las secciones de 2026-07-18/19 que describen rutas `200`, plugin legado activo
+o `alpha.8` live son snapshots históricos de sus respectivos E2E. No describen
+el estado público posterior a esta retirada.
+
+## 2026-07-19 - Cierre funcional Marketing Web W1-W5 (histórico)
 
 Este bloque es la **verdad vigente** del cierre funcional. Los cortes que
 aparecen después conservan evidencia histórica de despliegues anteriores, pero
@@ -6127,8 +6176,9 @@ conservan un único loader. `ccw_sync_event` está programado cada 15 minutos y,
 si se ejecuta manualmente, debe correr como el usuario del sitio para no crear
 caché propiedad de `root`.
 
-Estado live: Propdental y la fila de control reportan `clinicaclick-web`
-`2.0.0-alpha.8`; el código y el ZIP determinista corresponden a esa versión.
+Estado histórico de ese corte: Propdental y la fila de control reportaban
+`clinicaclick-web 2.0.0-alpha.8`; el estado live posterior es `alpha.9` y está
+descrito al principio de este documento.
 El baseline histórico `alpha.7` consume el manifest de formularios globales por página
 emitido por renderer `1.3.0` y valida que todo
 formulario global cubra las rutas/páginas firmadas que lo usan y que sus campos
@@ -6263,7 +6313,8 @@ entradas, dos minutos y cuatro cargas completas concurrentes, con singleflight
 por hash. Cada petición vuelve a comprobar en base de datos que el artefacto
 sigue `ready`; una retirada invalida el servicio aunque queden bytes en RAM.
 
-Tanto el plugin histórico `2.0.0-alpha.7` como el live `alpha.8` deciden las
+Tanto el plugin histórico `2.0.0-alpha.7` como `alpha.8` y el live `alpha.9`
+deciden las
 cabeceras por origen: añaden bearer y versión únicamente cuando el origen
 completo de la descarga coincide con `api_base`; nunca los reenvían a S3/CDN.
 En ambos modos conservan la segunda barrera: firma, key id exacto, hash, tamaño,
@@ -6392,7 +6443,7 @@ después se eliminaron ambos envelopes, quedó una única clave aceptada y se
 restauró la gracia normal a `86400000` ms. Staging permaneció online. Nunca se
 debe imprimir la configuración runtime completa para diagnosticar este canal.
 
-El plugin live `2.0.0-alpha.8` despliega el contrato multi-route. Una
+El plugin live `2.0.0-alpha.9` despliega el contrato multi-route. Una
 instalación conserva el piloto histórico `/cita/` y admite rutas adicionales
 inmutables `/cita/<slug>/`; backend y plugin resuelven por el prefijo más largo.
 El desired state schema 2 firma un registro de hasta 20 rutas y acota cada sync
@@ -6474,7 +6525,8 @@ acotado a 200 rutas para mantener finito el conjunto bloqueado.
 
 La rotación de token también es staged. En instalaciones conectadas el token
 nuevo caduca por defecto en 24 horas y solo un reporte schema 2 válido de
-`alpha.8` lo promueve bajo lock; el anterior sigue sirviendo hasta ese ACK y
+`alpha.8` y posteriores lo promueven bajo lock; el anterior sigue sirviendo
+hasta ese ACK y
 falla inmediatamente después. Reemitir invalida el candidato previo y revocar
 borra ambos. Una instalación `pending` sí reemplaza su token primario al
 reemitir porque todavía no existe tráfico que preservar. La descarga de
