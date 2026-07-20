@@ -6909,27 +6909,35 @@ preservación sin escritura, cambio explícito, validación, contrato de
 migración/modelo/PATCH, propagación de la transacción y rollback de la cita
 cuando falla la escritura del idioma.
 
-## 2026-07-20 - Idioma fijo por ejecución y rollout WhatsApp `es/ca/en`
+## 2026-07-20 - Idioma de paciente por mensaje y rollout WhatsApp `es/ca/en`
 
 Este corte añade el contrato backend para que las automatizaciones WhatsApp
-puedan enviar en español, catalán o inglés sin mezclar idiomas dentro de una
-misma ejecución. Depende del contrato de paciente que persiste
+puedan enviar en español, catalán o inglés siguiendo el idioma vigente del
+paciente en cada nuevo mensaje, sin duplicar ni alterar mensajes ya
+materializados. Depende del contrato de paciente que persiste
 `Pacientes.idioma_preferido` como `ENUM('es','ca','en') NOT NULL DEFAULT 'es'`.
 No se infiere el idioma a partir de mensajes, nombres, navegador ni clínica.
 
-### Frontera inmutable de idioma
+### Resolución por mensaje con replay durable
 
 Al crear una `FlowExecutionV2`, tanto el endpoint manual como el scheduler de
 citas leen el idioma del paciente y guardan una copia en
-`context.communication_language`. Desde ese momento el motor solo consulta ese
-snapshot:
+`context.communication_language` como fallback operativo. Antes de cada nodo
+`send_whatsapp`, el motor enriquece el contexto desde `Pacientes` y resuelve el
+idioma con esta precedencia:
 
-- si el paciente cambia de `ca` a `es` mientras el flujo espera, la ejecución
-  existente continúa en `ca`;
-- una ejecución nueva ya usa `es`;
-- una ejecución histórica que no tenga el campo queda forzada a `es` y lo
-  persiste antes de continuar;
-- todos los nodos y reintentos de la misma ejecución reutilizan el snapshot.
+- `patient/paciente.preferred_language` o `idioma_preferido` recién leído de
+  base de datos;
+- `context.communication_language`, para ejecuciones antiguas o contextos sin
+  paciente enriquecido;
+- `es`, como default histórico seguro.
+
+Así, si una clínica envía el primer recordatorio en español y después cambia el
+paciente a catalán, los siguientes nodos de esa automatización saldrán en
+catalán. En cambio, un reintento del mismo `Message` no vuelve a decidir idioma:
+reutiliza la plantilla, parámetros y locale guardados en `Messages.metadata`.
+Esto evita envíos duplicados y cambios de idioma dentro del mismo mensaje ya
+preparado.
 
 La selección localizada vive en `config.language_routing`:
 
