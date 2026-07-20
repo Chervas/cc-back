@@ -1,6 +1,5 @@
 'use strict';
 
-const fs = require('fs');
 const { Op } = require('sequelize');
 const axios = require('axios');
 const db = require('../../models');
@@ -31,6 +30,11 @@ const {
   buildPositionalBindingsFromNamed,
   buildEffectiveNamedBindings,
 } = require('../lib/whatsapp-template-contract');
+const {
+  normalizeWhatsappLocale,
+  resolveCatalogFamilyKey,
+  resolveExecutionCommunicationLanguage,
+} = require('../lib/whatsapp-template-locale');
 
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const FlowExecutionV2 = db.FlowExecutionV2;
@@ -681,7 +685,7 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
 
   if (effectivePatientId) {
     const patient = await db.Paciente.findByPk(effectivePatientId, {
-      attributes: ['id_paciente', 'clinica_id', 'nombre', 'apellidos', 'telefono_movil', 'email'],
+      attributes: ['id_paciente', 'clinica_id', 'nombre', 'apellidos', 'telefono_movil', 'email', 'idioma_preferido'],
       raw: true,
     });
     if (patient) {
@@ -697,6 +701,8 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
         telefono: cleanString(patient.telefono_movil),
         telefono_movil: cleanString(patient.telefono_movil),
         email: cleanString(patient.email),
+        idioma_preferido: normalizeWhatsappLocale(patient.idioma_preferido, { fallback: 'es' }),
+        preferred_language: normalizeWhatsappLocale(patient.idioma_preferido, { fallback: 'es' }),
       };
       out.patient = mergeContextObject(out.patient, patientPatch);
       out.paciente = mergeContextObject(out.paciente, {
@@ -1153,6 +1159,8 @@ function buildAiSystemPrompt(outputFormat, outputFields = []) {
 
   return [
     'Eres un motor de análisis para automatizaciones clínicas.',
+    'El texto del paciente puede estar en español, catalán o inglés. Clasifica la intención por el contenido real, con independencia del idioma de la plantilla enviada.',
+    'No traduzcas ni inventes una intención basándote únicamente en el idioma configurado del paciente.',
     'Responde exclusivamente con JSON válido, sin markdown ni texto adicional.',
     'Debes devolver exactamente los campos indicados con sus tipos.',
     'Si no dispones de un dato, devuelve un valor vacío válido para su tipo.',
@@ -1185,22 +1193,6 @@ function buildAiSimulatedOutput(outputFormat, analysisMode, model) {
 
 async function runGroqAiAnalysis({ prompt, inputText, outputFormat, outputFields, analysisMode, maxTokens }) {
   const apiKey = cleanString(process.env.GROQ_API_KEY);
-  try {
-    fs.appendFileSync('/tmp/cc-groq-debug.log', `${JSON.stringify({
-      ts: new Date().toISOString(),
-      source: 'back-integracion',
-      pid: process.pid,
-      cwd: process.cwd(),
-      port: process.env.PORT || null,
-      runtimeNamespace: process.env.JOB_RUNTIME_NAMESPACE || process.env.RUNTIME_NAMESPACE || null,
-      hasGroqKey: !!apiKey,
-      groqKeyPrefix: apiKey ? `${String(apiKey).slice(0, 6)}...` : null,
-      hasBaseUrl: !!cleanString(process.env.GROQ_API_BASE_URL),
-      analysisMode: normalizeAiAnalysisMode(analysisMode),
-    })}\n`);
-  } catch (_) {
-    // no-op debug fallback
-  }
   if (!apiKey) {
     console.error('[ai_analysis] GROQ_API_KEY ausente en runtime activo', {
       pid: process.pid,
@@ -1556,6 +1548,50 @@ function normalizeWhatsappMessageMode(value) {
   return 'template';
 }
 
+function resolveWhatsappLanguageRouting(config, context) {
+  const routing = isObject(config?.language_routing) ? config.language_routing : {};
+  const enabled = parseBool(resolveTemplateValue(routing.enabled, context), false);
+  const patientLanguage = resolveExecutionCommunicationLanguage(context);
+  if (!enabled) {
+    return {
+      enabled: false,
+      patient_language: patientLanguage,
+      selected_language: null,
+      config,
+    };
+  }
+
+  if (patientLanguage === 'es') {
+    return {
+      enabled: true,
+      patient_language: patientLanguage,
+      selected_language: 'es',
+      config,
+    };
+  }
+
+  const variants = isObject(routing.variants) ? routing.variants : {};
+  const variant = isObject(variants[patientLanguage]) ? variants[patientLanguage] : null;
+  if (!variant) {
+    throw new Error(`whatsapp_language_variant_missing:${patientLanguage}`);
+  }
+
+  return {
+    enabled: true,
+    patient_language: patientLanguage,
+    selected_language: patientLanguage,
+    config: {
+      ...config,
+      ...variant,
+      language_routing: routing,
+    },
+  };
+}
+
+function resolveConfiguredCatalogFamilyKey(config, key = 'catalog_family_key') {
+  return cleanString(config?.[key]);
+}
+
 function normalizeFormSubmissionMatchMode(value) {
   const normalized = normalizeKey(value);
   if (FORM_SUBMISSION_MATCH_MODES.has(normalized)) return normalized;
@@ -1637,6 +1673,15 @@ function buildDeterministicConfirmAppointmentTextOutput(context = {}) {
     /\botro\s+dia\b/,
     /\bcambiar\b.*\b(cita|hora|dia|fecha)\b/,
     /\b(reprogramar|reprogramad[ao]s?|posponer|cancelar|anular)\b/,
+    // Català
+    /\bno\s+(puc|podre|podria|anire|vindre|assistire|arribare)\b/,
+    /\bno\s+em\s+(va|ve)\s+be\b/,
+    /\bem\s+(va|ve)\s+mal\b/,
+    /\b(canviar|reprogramar|ajornar|cancel\s*la(?:r)?|anul\s*la(?:r)?)\b.*\b(cita|hora|dia|data)\b/,
+    // English
+    /\b(i\s+)?(can\s*t|cannot|won\s*t|will\s+not)\s+(make\s+it|come|attend|arrive|be\s+there)\b/,
+    /\b(that|the)\s+(day|time)\s+(doesn\s*t|does\s+not)\s+work\b/,
+    /\b(reschedule|postpone|cancel|move)\b.*\b(appointment|time|day|date)\b/,
   ];
 
   if (hardNegativePatterns.some((pattern) => pattern.test(text))) {
@@ -1658,6 +1703,8 @@ function buildDeterministicConfirmAppointmentTextOutput(context = {}) {
     /\bpuede\s+ser\b/,
     /\blo\s+miro\b/,
     /\bconfirmo\s+luego\b/,
+    /\b(no\s+ho\s+se|no\s+n\s+estic\s+segur[ae]?|potser|dep[eè]n|tinc\s+dubtes?|ja\s+confirmare)\b/,
+    /\b(i\s+don\s*t\s+know|not\s+sure|maybe|it\s+depends|i\s+ll\s+confirm\s+later)\b/,
   ];
 
   if (doubtPatterns.some((pattern) => pattern.test(text))) {
@@ -1674,6 +1721,8 @@ function buildDeterministicConfirmAppointmentTextOutput(context = {}) {
   const strongPositivePatterns = [
     /\b(confirmo|confirmado|confirmada|confirmadisimo|confirmadisima)\b/,
     /\b(nos vemos|alli estare|ahi estare|asistire|acudire)\b/,
+    /\b(confirmo|confirmat|confirmada|ens\s+veiem|hi\s+sere|vindre|assistire)\b/,
+    /\b(i\s+confirm|confirmed|see\s+you|i\s+ll\s+be\s+there|i\s+will\s+be\s+there|i\s+ll\s+attend)\b/,
   ];
   const hasStrongConfirmation = strongPositivePatterns.some((pattern) => pattern.test(text));
   const shortPositiveTexts = new Set([
@@ -1693,6 +1742,18 @@ function buildDeterministicConfirmAppointmentTextOutput(context = {}) {
     'nos vemos',
     'alli estare',
     'ahi estare',
+    'd acord',
+    'perfecte',
+    'molt be',
+    'ens veiem',
+    'hi sere',
+    'yes',
+    'yes i confirm',
+    'confirmed',
+    'sure',
+    'sounds good',
+    'see you',
+    'i ll be there',
   ]);
   const looksLikeQuestion = /[?¿]/.test(rawResponse);
   const tokenCount = text.split(/\s+/).filter(Boolean).length;
@@ -1820,6 +1881,9 @@ function buildDeterministicAppointmentUnconfirmedReplyOutput(context = {}) {
     /\b(cancelar|cancela|cancelad[ao]s?|anular|anula|dar\s+de\s+baja)\b/,
     /\b(no\s+voy|no\s+ire|no\s+asistire|no\s+acudire)\b/,
     /\b(la\s+perdemos|no\s+la\s+quiero|mejor\s+no)\b/,
+    /\b(cancel\s*la(?:r)?|anul\s*la(?:r)?|donar\s+de\s+baixa)\b/,
+    /\b(no\s+(hi\s+anire|vindre|assistire))\b/,
+    /\b(cancel|cancel\s+it|i\s+won\s*t\s+(come|attend)|i\s+will\s+not\s+(come|attend))\b/,
   ];
   if (cancelPatterns.some((pattern) => pattern.test(text))) {
     return {
@@ -1835,6 +1899,10 @@ function buildDeterministicAppointmentUnconfirmedReplyOutput(context = {}) {
   const reschedulePatterns = [
     /\b(reprogramar|reprograma|cambiar|cambio|mover|mueve|posponer|aplazar|otra\s+hora|otro\s+dia|otro\s+d[ií]a|mas\s+tarde|más\s+tarde)\b/,
     /\b(no\s+puedo|me\s+viene\s+mal|me\s+va\s+mal|no\s+me\s+encaja|imposible)\b/,
+    /\b(reprogramar|canviar|moure|ajornar|una\s+altra\s+hora|un\s+altre\s+dia|mes\s+tard)\b/,
+    /\b(no\s+puc|em\s+(va|ve)\s+mal|no\s+em\s+va\s+be)\b/,
+    /\b(reschedule|change|move|postpone|another\s+time|another\s+day|later)\b/,
+    /\b(can\s*t\s+make\s+it|cannot\s+make\s+it|doesn\s*t\s+work)\b/,
   ];
   if (reschedulePatterns.some((pattern) => pattern.test(text))) {
     return {
@@ -1867,12 +1935,29 @@ function getWhatsappTemplateWabaId(template) {
   return cleanString(plain.waba_id || plain.wabaId);
 }
 
-function scoreWhatsappTemplateCandidate(template, { clinicId = null, targetWabaId = '', requireCurrentCatalogBody = false } = {}) {
+function scoreWhatsappTemplateCandidate(
+  template,
+  {
+    clinicId = null,
+    targetWabaId = '',
+    requireCurrentCatalogBody = false,
+    expectedLocale = null,
+    expectedFamilyKey = null,
+  } = {}
+) {
   const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  const catalog = plain.catalog?.get ? plain.catalog.get({ plain: true }) : plain.catalog;
   const rowClinicId = toIntOrNull(plain.clinic_id);
   const wabaId = getWhatsappTemplateWabaId(plain);
   const safeClinicId = toIntOrNull(clinicId);
   const safeTargetWabaId = cleanString(targetWabaId);
+  const safeExpectedLocale = normalizeWhatsappLocale(expectedLocale);
+  const templateLocale = normalizeWhatsappLocale(plain.language || catalog?.locale, { fallback: 'es' });
+  const safeExpectedFamilyKey = cleanString(expectedFamilyKey);
+  const templateFamilyKey = resolveCatalogFamilyKey(catalog);
+
+  if (safeExpectedLocale && templateLocale !== safeExpectedLocale) return 0;
+  if (safeExpectedFamilyKey && templateFamilyKey !== safeExpectedFamilyKey) return 0;
 
   if (requireCurrentCatalogBody && !matchesCurrentCatalogBody(template)) {
     return 0;
@@ -2811,6 +2896,8 @@ async function loadConfiguredWhatsappTemplate(
     catalogTemplateIdKey = 'catalog_template_id',
     targetWabaId = '',
     requireCurrentCatalogBody = false,
+    expectedLocale = null,
+    expectedFamilyKey = null,
   } = {}
 ) {
   const templateId = toIntOrNull(resolveTemplateValue(config?.[templateIdKey], context));
@@ -2829,7 +2916,11 @@ async function loadConfiguredWhatsappTemplate(
 
   const baseQuery = {
     attributes: ['id', 'name', 'language', 'status', 'components', 'catalog_template_id', 'clinic_id', 'waba_id', 'meta_template_id'],
-    include: [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'variables', 'body_text'] }],
+    include: [{
+      model: WhatsappTemplateCatalog,
+      as: 'catalog',
+      attributes: ['id', 'name', 'family_key', 'locale', 'variables', 'body_text'],
+    }],
   };
 
   if (catalogTemplateId) {
@@ -2841,7 +2932,13 @@ async function loadConfiguredWhatsappTemplate(
       },
     });
 
-    const selected = selectBestWhatsappTemplateCandidate(candidates, { clinicId, targetWabaId, requireCurrentCatalogBody });
+    const selected = selectBestWhatsappTemplateCandidate(candidates, {
+      clinicId,
+      targetWabaId,
+      requireCurrentCatalogBody,
+      expectedLocale,
+      expectedFamilyKey,
+    });
     if (selected) return selected;
   }
 
@@ -2863,6 +2960,27 @@ async function loadConfiguredWhatsappTemplate(
     where,
   });
   if (!requested) return null;
+  if (scoreWhatsappTemplateCandidate(requested, {
+    clinicId,
+    targetWabaId,
+    requireCurrentCatalogBody: false,
+    expectedLocale,
+    expectedFamilyKey,
+  }) <= 0) {
+    const requestedCatalogId = toIntOrNull(requested.catalog_template_id);
+    if (!requestedCatalogId) return null;
+    const candidates = await WhatsappTemplate.findAll({
+      ...baseQuery,
+      where: { catalog_template_id: requestedCatalogId, is_active: true },
+    });
+    return selectBestWhatsappTemplateCandidate(candidates, {
+      clinicId,
+      targetWabaId,
+      requireCurrentCatalogBody,
+      expectedLocale,
+      expectedFamilyKey,
+    });
+  }
   if (requireCurrentCatalogBody && !matchesCurrentCatalogBody(requested)) {
     const requestedCatalogId = toIntOrNull(requested.catalog_template_id);
     if (requestedCatalogId) {
@@ -2873,7 +2991,13 @@ async function loadConfiguredWhatsappTemplate(
           is_active: true,
         },
       });
-      return selectBestWhatsappTemplateCandidate(candidates, { clinicId, targetWabaId, requireCurrentCatalogBody });
+      return selectBestWhatsappTemplateCandidate(candidates, {
+        clinicId,
+        targetWabaId,
+        requireCurrentCatalogBody,
+        expectedLocale,
+        expectedFamilyKey,
+      });
     }
     return null;
   }
@@ -2896,7 +3020,13 @@ async function loadConfiguredWhatsappTemplate(
         is_active: true,
       },
     });
-    const replacement = selectBestWhatsappTemplateCandidate(candidates, { clinicId, targetWabaId, requireCurrentCatalogBody });
+    const replacement = selectBestWhatsappTemplateCandidate(candidates, {
+      clinicId,
+      targetWabaId,
+      requireCurrentCatalogBody,
+      expectedLocale,
+      expectedFamilyKey,
+    });
     if (replacement) return replacement;
     if (cleanString(targetWabaId) && requestedWabaId && requestedWabaId !== cleanString(targetWabaId)) {
       return null;
@@ -2986,10 +3116,24 @@ async function findOrCreateAutomationWhatsappMessage({
   return { message, created };
 }
 
+function readStoredWhatsappReplaySelection(metadata) {
+  const stored = metadata && typeof metadata === 'object' ? metadata : {};
+  return {
+    template_id: stored.template_id || null,
+    template_name: stored.template_name || null,
+    patient_language: stored.patient_language || null,
+    selected_language: stored.selected_language || stored.template_language || null,
+    template_language: stored.template_language || null,
+    template_family_key: stored.template_family_key || null,
+    template_params: clone(stored.template_params) || {},
+  };
+}
+
 async function reuseExistingAutomationWhatsappMessage({ existingMessage, node }) {
   const existingMetadata = existingMessage?.metadata && typeof existingMessage.metadata === 'object'
     ? existingMessage.metadata
     : {};
+  const storedSelection = readStoredWhatsappReplaySelection(existingMetadata);
   const existingStatus = toLowerSafe(existingMessage?.status) || 'pending';
   const conversation = await Conversation.findByPk(existingMessage?.conversation_id);
   if (!conversation) {
@@ -3066,13 +3210,16 @@ async function reuseExistingAutomationWhatsappMessage({ existingMessage, node })
       scheduled_for: hasValidSchedule ? scheduledFor.toISOString() : null,
       message_mode: existingMetadata.message_mode || null,
       delivery_mode: existingMetadata.delivery_mode || null,
-      template_id: existingMetadata.template_id || null,
-      template_name: existingMetadata.template_name || null,
+      template_id: storedSelection.template_id,
+      template_name: storedSelection.template_name,
       template_branch: existingMetadata.template_branch || 'base',
       access_guidance_variant_requested: existingMetadata.access_guidance_variant_requested === true,
       access_guidance_variant_used: existingMetadata.access_guidance_variant_used === true,
       access_guidance_fallback_used: existingMetadata.access_guidance_fallback_used === true,
       access_guidance_fallback_reason: existingMetadata.access_guidance_fallback_reason || null,
+      patient_language: storedSelection.patient_language,
+      selected_language: storedSelection.selected_language,
+      language_routing_enabled: existingMetadata.language_routing_enabled === true,
       template_has_image: Array.isArray(existingMetadata.template_components),
       conversation_id: conversation.id,
     },
@@ -3159,6 +3306,11 @@ async function handleSendWhatsapp(node, context, runtime) {
       day_part_greeting: resolveMadridDayPartGreeting(effectiveSendAt),
     },
   });
+  const languageSelection = resolveWhatsappLanguageRouting(config, templateContext);
+  const contentConfig = languageSelection.config;
+  const expectedTemplateLocale = languageSelection.enabled
+    ? languageSelection.selected_language
+    : null;
   const recipientData = await resolveWhatsAppRecipient({ node, config, context: templateContext, targets });
 
   const originalMessageMode = messageMode;
@@ -3168,7 +3320,9 @@ async function handleSendWhatsapp(node, context, runtime) {
   let previewText = '';
   let messageContent = '';
   let messageType = 'text';
-  let templateLanguage = cleanString(resolveTemplateValue(config?.language_code, context)) || 'es_ES';
+  let templateLanguage = expectedTemplateLocale
+    || cleanString(resolveTemplateValue(contentConfig?.language_code, context))
+    || 'es_ES';
   let fallbackTemplate = null;
   let fallbackTemplateParams = {};
   let fallbackPreviewText = '';
@@ -3192,18 +3346,18 @@ async function handleSendWhatsapp(node, context, runtime) {
 
   if (messageMode === 'template') {
     senderData = await getSenderData();
-    let selectedTemplateConfig = config;
-    const explicitAccessGuidanceVariant = isExplicitAccessGuidanceVariantNode(config);
+    let selectedTemplateConfig = contentConfig;
+    const explicitAccessGuidanceVariant = isExplicitAccessGuidanceVariantNode(contentConfig);
 
     if (explicitAccessGuidanceVariant) {
-      const fallbackConfig = buildFallbackWhatsappTemplateConfig(config);
+      const fallbackConfig = buildFallbackWhatsappTemplateConfig(contentConfig);
       const hasVariantReference = !!(
-        toIntOrNull(resolveTemplateValue(config.catalog_template_id, templateContext))
-        || cleanString(resolveTemplateValue(config.template_name, templateContext))
-        || toIntOrNull(resolveTemplateValue(config.template_id, templateContext))
+        toIntOrNull(resolveTemplateValue(contentConfig.catalog_template_id, templateContext))
+        || cleanString(resolveTemplateValue(contentConfig.template_name, templateContext))
+        || toIntOrNull(resolveTemplateValue(contentConfig.template_id, templateContext))
       );
       const variantConfigured = parseBool(
-        resolveTemplateValue(config.access_guidance_delivery?.enabled, templateContext),
+        resolveTemplateValue(contentConfig.access_guidance_delivery?.enabled, templateContext),
         true
       ) && hasVariantReference;
       const appointmentType = cleanString(
@@ -3226,12 +3380,14 @@ async function handleSendWhatsapp(node, context, runtime) {
       let variantLookupError = null;
       if (eligibility.eligible && !accessGuidanceAssetError) {
         try {
-          variantTemplate = await loadConfiguredWhatsappTemplate(config, templateContext, {
+          variantTemplate = await loadConfiguredWhatsappTemplate(contentConfig, templateContext, {
             targetWabaId: senderData.clinic_config?.wabaId || '',
             requireCurrentCatalogBody: parseBool(
-              resolveTemplateValue(config.require_current_catalog_body, templateContext),
+              resolveTemplateValue(contentConfig.require_current_catalog_body, templateContext),
               true
             ),
+            expectedLocale: expectedTemplateLocale,
+            expectedFamilyKey: resolveConfiguredCatalogFamilyKey(contentConfig),
           });
         } catch (error) {
           variantLookupError = error;
@@ -3257,17 +3413,19 @@ async function handleSendWhatsapp(node, context, runtime) {
       }
       if (accessGuidanceDecision.variant_used) {
         template = variantTemplate;
-        selectedTemplateConfig = config;
+        selectedTemplateConfig = contentConfig;
       } else {
-        const accessFallbackTemplate = await loadConfiguredWhatsappTemplate(config, templateContext, {
+        const accessFallbackTemplate = await loadConfiguredWhatsappTemplate(contentConfig, templateContext, {
           templateIdKey: 'fallback_template_id',
           templateNameKey: 'fallback_template_name',
           catalogTemplateIdKey: 'fallback_catalog_template_id',
           targetWabaId: senderData.clinic_config?.wabaId || '',
           requireCurrentCatalogBody: parseBool(
-            resolveTemplateValue(config?.fallback_require_current_catalog_body, templateContext),
+            resolveTemplateValue(contentConfig?.fallback_require_current_catalog_body, templateContext),
             false
           ),
+          expectedLocale: expectedTemplateLocale,
+          expectedFamilyKey: resolveConfiguredCatalogFamilyKey(contentConfig, 'fallback_catalog_family_key'),
         });
         if (!accessFallbackTemplate) {
           throw new Error('whatsapp_access_guidance_fallback_template_missing');
@@ -3281,15 +3439,21 @@ async function handleSendWhatsapp(node, context, runtime) {
       }
       useDurableAccessGuidanceTransport = accessGuidanceDecision.variant_requested;
     } else {
-      const baseTemplate = await loadConfiguredWhatsappTemplate(config, templateContext, {
+      const baseTemplate = await loadConfiguredWhatsappTemplate(contentConfig, templateContext, {
         templateIdKey: 'template_id',
         templateNameKey: 'template_name',
         catalogTemplateIdKey: 'catalog_template_id',
         targetWabaId: senderData.clinic_config?.wabaId || '',
-        requireCurrentCatalogBody: parseBool(resolveTemplateValue(config?.require_current_catalog_body, templateContext), false),
+        requireCurrentCatalogBody: parseBool(resolveTemplateValue(contentConfig?.require_current_catalog_body, templateContext), false),
+        expectedLocale: expectedTemplateLocale,
+        expectedFamilyKey: resolveConfiguredCatalogFamilyKey(contentConfig),
       });
       if (!baseTemplate) {
-        throw new Error('whatsapp_template_id_missing');
+        throw new Error(
+          languageSelection.enabled
+            ? `whatsapp_language_template_unavailable:${languageSelection.selected_language}`
+            : 'whatsapp_template_id_missing'
+        );
       }
 
       const baseTemplateStatus = toLowerSafe(baseTemplate.status);
@@ -3298,8 +3462,8 @@ async function handleSendWhatsapp(node, context, runtime) {
       }
 
       template = baseTemplate;
-      const accessGuidanceVariantConfig = isObject(config.access_guidance_variant)
-        ? config.access_guidance_variant
+      const accessGuidanceVariantConfig = isObject(contentConfig.access_guidance_variant)
+        ? contentConfig.access_guidance_variant
         : null;
       if (accessGuidanceVariantConfig) {
         const variantConfigured = parseBool(
@@ -3342,6 +3506,8 @@ async function handleSendWhatsapp(node, context, runtime) {
                   ),
                   true
                 ),
+                expectedLocale: expectedTemplateLocale,
+                expectedFamilyKey: resolveConfiguredCatalogFamilyKey(accessGuidanceVariantConfig),
               }
             );
           } catch (error) {
@@ -3400,7 +3566,7 @@ async function handleSendWhatsapp(node, context, runtime) {
       });
     }
   } else {
-    const manualText = cleanString(resolveTemplateValue(config?.manual_message_text, templateContext));
+    const manualText = cleanString(resolveTemplateValue(contentConfig?.manual_message_text, templateContext));
     if (!manualText) {
       throw new Error('whatsapp_manual_message_text_missing');
     }
@@ -3408,11 +3574,13 @@ async function handleSendWhatsapp(node, context, runtime) {
     messageContent = manualText;
     messageType = 'text';
 
-    fallbackTemplate = await loadConfiguredWhatsappTemplate(config, templateContext, {
+    fallbackTemplate = await loadConfiguredWhatsappTemplate(contentConfig, templateContext, {
       templateIdKey: 'fallback_template_id',
       templateNameKey: 'fallback_template_name',
       catalogTemplateIdKey: 'fallback_catalog_template_id',
-      requireCurrentCatalogBody: parseBool(resolveTemplateValue(config?.fallback_require_current_catalog_body, templateContext), false),
+      requireCurrentCatalogBody: parseBool(resolveTemplateValue(contentConfig?.fallback_require_current_catalog_body, templateContext), false),
+      expectedLocale: expectedTemplateLocale,
+      expectedFamilyKey: resolveConfiguredCatalogFamilyKey(contentConfig, 'fallback_catalog_family_key'),
     });
     if (fallbackTemplate) {
       const fallbackStatus = toLowerSafe(fallbackTemplate.status);
@@ -3421,7 +3589,7 @@ async function handleSendWhatsapp(node, context, runtime) {
       }
 
       fallbackTemplateParams = resolveTemplateVariablesWithKeys(
-        config,
+        contentConfig,
         templateContext,
         fallbackTemplate,
         {
@@ -3620,6 +3788,10 @@ async function handleSendWhatsapp(node, context, runtime) {
       template_commercial: config.template_commercial === true,
       template_id: template?.id || null,
       template_name: template?.name || null,
+      patient_language: languageSelection.patient_language,
+      selected_language: expectedTemplateLocale || normalizeWhatsappLocale(templateLanguage, { fallback: 'es' }),
+      language_routing_enabled: languageSelection.enabled,
+      template_family_key: resolveCatalogFamilyKey(template?.catalog) || null,
       fallback_used: !!fallbackTriggeredReason,
       fallback_reason: fallbackTriggeredReason,
       fallback_template_id: fallbackTriggeredReason ? template?.id || null : null,
@@ -3651,6 +3823,10 @@ async function handleSendWhatsapp(node, context, runtime) {
     delivery_mode: effectiveMessageMode,
     template_id: template?.id || null,
     template_name: template?.name || null,
+    patient_language: languageSelection.patient_language,
+    selected_language: expectedTemplateLocale || normalizeWhatsappLocale(templateLanguage, { fallback: 'es' }),
+    language_routing_enabled: languageSelection.enabled,
+    template_family_key: resolveCatalogFamilyKey(template?.catalog) || null,
     fallback_used: !!fallbackTriggeredReason,
     fallback_reason: fallbackTriggeredReason,
     fallback_template_id: fallbackTriggeredReason ? template?.id || null : null,
@@ -5766,6 +5942,12 @@ async function runExecution(executionId, options = {}) {
   const nodeMap = new Map(nodes.map((node) => [cleanString(node?.id), node]));
 
   let context = clone(execution.context) || {};
+  if (!normalizeWhatsappLocale(context.communication_language)) {
+    // Frontera de compatibilidad: una ejecución creada antes de introducir el
+    // snapshot conserva español. Nunca se rellena desde la ficha viva al reanudar.
+    context.communication_language = 'es';
+    await execution.update({ context });
+  }
   if (!context.outputs || typeof context.outputs !== 'object') {
     context.outputs = {};
   }
@@ -6063,10 +6245,16 @@ module.exports = {
   findAutomationWhatsappMessageByDeliveryKey,
   findOrCreateAutomationWhatsappMessage,
   reuseExistingAutomationWhatsappMessage,
+  readStoredWhatsappReplaySelection,
   buildWhatsappTransportHandoffRetryState,
   enqueueAutomationWhatsappTransport,
   enqueueQuietHoursWhatsappJob,
   resolveScheduledWhatsappSenderConfig,
   validateAccessGuidancePublicMediaAsset,
   runScheduledWhatsappSendJob,
+  resolveWhatsappLanguageRouting,
+  scoreWhatsappTemplateCandidate,
+  selectBestWhatsappTemplateCandidate,
+  buildDeterministicConfirmAppointmentTextOutput,
+  buildDeterministicAppointmentUnconfirmedReplyOutput,
 };

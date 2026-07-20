@@ -19,6 +19,12 @@ const {
   buildPendingTemplateResubmitDedupeScope,
   shouldKeepRemoteTemplateActive,
 } = require('../lib/whatsapp-template-pending-resubmission');
+const {
+  normalizeWhatsappLocale,
+  resolveCatalogLocale,
+  resolveCatalogFamilyKey,
+  resolveMetaTemplateLanguage,
+} = require('../lib/whatsapp-template-locale');
 
 const {
   ClinicMetaAsset,
@@ -358,6 +364,16 @@ function hasSameMetaFacingContract(template, instance) {
   );
 }
 
+function getCatalogTemplateLanguage(template) {
+  return resolveMetaTemplateLanguage(
+    resolveCatalogLocale(template, normalizeWhatsappLocale(DEFAULT_LANGUAGE, { fallback: 'es' }) || 'es')
+  );
+}
+
+function getCatalogTechnicalFamilyName(template) {
+  return resolveCatalogFamilyKey(template) || cleanString(template?.name);
+}
+
 function buildVersionedTechnicalTemplateName(baseName, version) {
   const safeBaseName = cleanString(baseName);
   if (!safeBaseName) return '';
@@ -418,18 +434,20 @@ function mapRemoteStatusToLocalStatus(remoteStatus) {
 
 async function findLatestLocalTemplateForClinic({ clinicId, template }) {
   if (!clinicId || !template) return null;
+  const language = getCatalogTemplateLanguage(template);
+  const familyName = getCatalogTechnicalFamilyName(template);
   const candidates = await WhatsappTemplate.findAll({
     where: {
       clinic_id: clinicId,
       waba_id: null,
-      language: DEFAULT_LANGUAGE,
+      language,
       is_active: true,
       [Op.or]: [
         ...(Number.isFinite(Number(template.id)) && Number(template.id) > 0
           ? [{ catalog_template_id: Number(template.id) }]
           : []),
-        { name: template.name },
-        { name: { [Op.like]: `${template.name}%` } },
+        { name: familyName },
+        { name: { [Op.like]: `${familyName}%` } },
       ],
     },
     order: [['updatedAt', 'DESC']],
@@ -440,15 +458,17 @@ async function findLatestLocalTemplateForClinic({ clinicId, template }) {
     if (Number.isFinite(catalogId) && catalogId > 0 && catalogId === Number(template.id)) {
       return true;
     }
-    return isTechnicalTemplateFamilyName(template.name, row?.name);
+    return isTechnicalTemplateFamilyName(familyName, row?.name);
   }) || null;
 }
 
 async function loadTemplateFamilyRows({ clinicId, wabaId, template }) {
   if (!template) return [];
+  const language = getCatalogTemplateLanguage(template);
+  const familyName = getCatalogTechnicalFamilyName(template);
   const rows = await WhatsappTemplate.findAll({
     where: {
-      language: DEFAULT_LANGUAGE,
+      language,
       is_active: true,
       [Op.or]: [
         ...(Number.isFinite(Number(template.id)) && Number(template.id) > 0
@@ -457,14 +477,14 @@ async function loadTemplateFamilyRows({ clinicId, wabaId, template }) {
         ...(wabaId
           ? [{
               waba_id: String(wabaId),
-              name: { [Op.like]: `${template.name}%` },
+              name: { [Op.like]: `${familyName}%` },
             }]
           : []),
         ...(clinicId
           ? [{
               clinic_id: clinicId,
               waba_id: null,
-              name: { [Op.like]: `${template.name}%` },
+              name: { [Op.like]: `${familyName}%` },
             }]
           : []),
       ],
@@ -477,7 +497,7 @@ async function loadTemplateFamilyRows({ clinicId, wabaId, template }) {
     if (Number.isFinite(catalogId) && catalogId > 0 && catalogId === Number(template.id)) {
       return true;
     }
-    return isTechnicalTemplateFamilyName(template.name, row?.name);
+    return isTechnicalTemplateFamilyName(familyName, row?.name);
   });
 }
 
@@ -573,12 +593,16 @@ function buildTemplateForTechnicalName(template, technicalName) {
   };
 }
 
-function resolveCatalogTemplateByTechnicalName(catalogs, technicalName) {
+function resolveCatalogTemplateByTechnicalName(catalogs, technicalName, language = null) {
   const safeTechnicalName = cleanString(technicalName);
   if (!safeTechnicalName || !Array.isArray(catalogs) || !catalogs.length) return null;
-  const matches = catalogs.filter((catalog) => isTechnicalTemplateFamilyName(catalog?.name, safeTechnicalName));
+  const locale = normalizeWhatsappLocale(language);
+  const matches = catalogs.filter((catalog) => (
+    (!locale || resolveCatalogLocale(catalog, 'es') === locale)
+    && isTechnicalTemplateFamilyName(getCatalogTechnicalFamilyName(catalog), safeTechnicalName)
+  ));
   if (!matches.length) return null;
-  matches.sort((left, right) => String(right?.name || '').length - String(left?.name || '').length);
+  matches.sort((left, right) => String(getCatalogTechnicalFamilyName(right) || '').length - String(getCatalogTechnicalFamilyName(left) || '').length);
   return matches[0] || null;
 }
 
@@ -600,11 +624,38 @@ function templateAppliesToDisciplines(template, disciplinas) {
 }
 
 function isRetryableMetaError(err) {
+  if (err?.retryable === true) return true;
   const status = err?.response?.status;
   if (status && (status >= 500 || status === 429)) {
     return true;
   }
   return false;
+}
+
+function isDuplicateTemplateNameError(err) {
+  const parsed = parseMetaError(err);
+  const haystack = [
+    parsed?.message,
+    parsed?.userTitle,
+    parsed?.userMessage,
+  ].map((value) => cleanString(value).toLowerCase()).filter(Boolean).join(' ');
+  return (
+    Number(parsed?.subcode) === 2388024
+    || (haystack.includes('template') && (
+      haystack.includes('already exists')
+      || haystack.includes('duplicate')
+      || haystack.includes('name is already')
+      || haystack.includes('nombre ya existe')
+    ))
+  );
+}
+
+function buildMetaTemplateCheckpointPendingError(cause) {
+  const error = new Error('whatsapp_template_meta_checkpoint_pending');
+  error.code = 'whatsapp_template_meta_checkpoint_pending';
+  error.retryable = true;
+  error.cause = cause;
+  return error;
 }
 
 function parseMetaError(err) {
@@ -845,11 +896,13 @@ async function createPlaceholderTemplatesForClinic({ clinicId, assignmentScope, 
   const created = [];
 
   for (const template of templates) {
+    const language = getCatalogTemplateLanguage(template);
+    const familyName = getCatalogTechnicalFamilyName(template);
     const existing = await WhatsappTemplate.findOne({
       where: {
         clinic_id: clinicId,
-        name: template.name,
-        language: DEFAULT_LANGUAGE,
+        name: familyName,
+        language,
         status: 'SIN_CONECTAR',
       },
     });
@@ -858,8 +911,8 @@ async function createPlaceholderTemplatesForClinic({ clinicId, assignmentScope, 
     const row = await WhatsappTemplate.create({
       clinic_id: clinicId,
       waba_id: null,
-      name: template.name,
-      language: DEFAULT_LANGUAGE,
+      name: familyName,
+      language,
       category: template.category,
       status: 'SIN_CONECTAR',
       components: normalizeTemplateComponentsForMeta(template.components),
@@ -882,8 +935,8 @@ async function upsertPlaceholderTemplateForClinic({ clinicId, template }) {
   const payload = {
     clinic_id: clinicId,
     waba_id: null,
-    name: template.name,
-    language: DEFAULT_LANGUAGE,
+    name: getCatalogTechnicalFamilyName(template),
+    language: getCatalogTemplateLanguage(template),
     category: template.category,
     status: 'SIN_CONECTAR',
     components: normalizeTemplateComponentsForMeta(template.components),
@@ -919,8 +972,8 @@ async function upsertClinicOverrideTemplateForClinic({
   const payload = {
     clinic_id: clinicId,
     waba_id: null,
-    name: cleanString(technicalName) || template.name,
-    language: DEFAULT_LANGUAGE,
+    name: cleanString(technicalName) || getCatalogTechnicalFamilyName(template),
+    language: getCatalogTemplateLanguage(template),
     category: template.category,
     status,
     components: normalizeTemplateComponentsForMeta(template.components),
@@ -966,12 +1019,12 @@ async function upsertConnectedTemplateForWaba({
 }) {
   if (!wabaId || !template) return { action: 'skipped' };
 
-  const safeTechnicalName = cleanString(technicalName) || cleanString(template.name);
+  const safeTechnicalName = cleanString(technicalName) || getCatalogTechnicalFamilyName(template);
   const payload = {
     waba_id: String(wabaId),
     clinic_id: null,
     name: safeTechnicalName,
-    language: DEFAULT_LANGUAGE,
+    language: getCatalogTemplateLanguage(template),
     category: template.category,
     status,
     components: normalizeTemplateComponentsForMeta(template.components),
@@ -988,7 +1041,7 @@ async function upsertConnectedTemplateForWaba({
     where: {
       waba_id: String(wabaId),
       name: safeTechnicalName,
-      language: DEFAULT_LANGUAGE,
+      language: getCatalogTemplateLanguage(template),
     },
     order: [['updatedAt', 'DESC']],
   });
@@ -1138,10 +1191,13 @@ async function fetchTemplatesFromMeta({ wabaId, accessToken }) {
   return items;
 }
 
-function findRemoteTemplate(items, { name, metaTemplateId } = {}) {
+function findRemoteTemplate(items, { name, metaTemplateId, language = null } = {}) {
   const safeName = cleanString(name).toLowerCase();
   const safeMetaTemplateId = cleanString(metaTemplateId);
-  const rows = Array.isArray(items) ? items : [];
+  const locale = normalizeWhatsappLocale(language);
+  const rows = (Array.isArray(items) ? items : []).filter((item) => (
+    !locale || normalizeWhatsappLocale(item?.language, { fallback: 'es' }) === locale
+  ));
   if (safeMetaTemplateId) {
     const byId = rows.find((item) => cleanString(item?.id) === safeMetaTemplateId);
     if (byId) return byId;
@@ -1210,7 +1266,8 @@ function isApprovedCurrentCatalogSibling(row, catalog, sourceId = null) {
     row.is_active
     && cleanString(row.status).toUpperCase() === WHATSAPP_TEMPLATE_STATUS.APPROVED
     && cleanString(row.meta_template_id)
-    && isTechnicalTemplateFamilyName(catalog?.name, row.name)
+    && normalizeWhatsappLocale(row.language, { fallback: 'es' }) === normalizeWhatsappLocale(getCatalogTemplateLanguage(catalog), { fallback: 'es' })
+    && isTechnicalTemplateFamilyName(getCatalogTechnicalFamilyName(catalog), row.name)
     && hasSameMetaFacingContent(catalog, row)
   );
 }
@@ -1224,7 +1281,7 @@ async function loadWabaCatalogFamily({ wabaId, catalog, language = DEFAULT_LANGU
       language: cleanString(language) || DEFAULT_LANGUAGE,
       [Op.or]: [
         { catalog_template_id: Number(catalog.id) },
-        { name: { [Op.like]: `${catalog.name}%` } },
+        { name: { [Op.like]: `${getCatalogTechnicalFamilyName(catalog)}%` } },
       ],
     },
     order: [['id', 'ASC']],
@@ -1326,7 +1383,7 @@ async function enqueueStalePendingTemplateResubmissions({ wabaId, now = new Date
     if (!decision.eligible) continue;
     candidates += 1;
 
-    const replacementName = resolveNextTechnicalTemplateName(catalog.name, familyRows);
+    const replacementName = resolveNextTechnicalTemplateName(getCatalogTechnicalFamilyName(catalog), familyRows);
     const dedupeScope = buildPendingTemplateResubmitDedupeScope(row);
     if (!replacementName || !dedupeScope) continue;
 
@@ -1502,6 +1559,7 @@ async function cleanupSupersededRemoteTemplate({ source, replacement, asset }) {
   const remoteSource = findRemoteTemplate(remoteItems, {
     name: source.name,
     metaTemplateId: source.meta_template_id,
+    language: source.language,
   });
   if (!remoteSource) {
     await source.update({ auto_resubmit_error: null });
@@ -1599,6 +1657,7 @@ async function cancelPlannedReplacement({
   const remotePlanned = findRemoteTemplate(remoteItems, {
     name: planned.name,
     metaTemplateId: planned.meta_template_id,
+    language: planned.language || source.language,
   });
   if (!remotePlanned) {
     await markCancelled();
@@ -1787,7 +1846,7 @@ async function runStalePendingTemplateResubmission(payload = {}) {
       ...cancellation,
     };
   }
-  if (!isTechnicalTemplateFamilyName(catalog.name, replacementName) || replacementName === source.name) {
+  if (!isTechnicalTemplateFamilyName(getCatalogTechnicalFamilyName(catalog), replacementName) || replacementName === source.name) {
     throw new Error('invalid_stale_pending_replacement_name');
   }
 
@@ -1795,10 +1854,14 @@ async function runStalePendingTemplateResubmission(payload = {}) {
     wabaId: expectedWabaId,
     accessToken: asset.waAccessToken,
   });
-  let remoteReplacement = findRemoteTemplate(remoteItems, { name: replacementName });
+  let remoteReplacement = findRemoteTemplate(remoteItems, {
+    name: replacementName,
+    language: source.language,
+  });
   const remoteApprovedSibling = remoteItems.find((item) => (
     cleanString(item?.status).toUpperCase() === WHATSAPP_TEMPLATE_STATUS.APPROVED
-    && isTechnicalTemplateFamilyName(catalog.name, item?.name)
+    && normalizeWhatsappLocale(item?.language, { fallback: 'es' }) === normalizeWhatsappLocale(getCatalogTemplateLanguage(catalog), { fallback: 'es' })
+    && isTechnicalTemplateFamilyName(getCatalogTechnicalFamilyName(catalog), item?.name)
     && hasSameMetaFacingContent(catalog, item)
     && cleanString(item?.id) !== cleanString(remoteReplacement?.id)
   ));
@@ -1878,13 +1941,15 @@ async function runStalePendingTemplateResubmission(payload = {}) {
   const latestRemoteReplacement = findRemoteTemplate(latestRemoteItems, {
     name: replacementName,
     metaTemplateId: remoteReplacement.id,
+    language: source.language,
   });
   if (latestRemoteReplacement) {
     remoteReplacement = latestRemoteReplacement;
   }
   const lateApprovedSibling = latestRemoteItems.find((item) => (
     cleanString(item?.status).toUpperCase() === WHATSAPP_TEMPLATE_STATUS.APPROVED
-    && isTechnicalTemplateFamilyName(catalog.name, item?.name)
+    && normalizeWhatsappLocale(item?.language, { fallback: 'es' }) === normalizeWhatsappLocale(getCatalogTemplateLanguage(catalog), { fallback: 'es' })
+    && isTechnicalTemplateFamilyName(getCatalogTechnicalFamilyName(catalog), item?.name)
     && hasSameMetaFacingContent(catalog, item)
     && cleanString(item?.id) !== cleanString(remoteReplacement.id)
   ));
@@ -2365,9 +2430,11 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
       continue;
     }
 
+    const familyName = getCatalogTechnicalFamilyName(template);
+    const language = getCatalogTemplateLanguage(template);
     const technicalName = familyRows.length
-      ? resolveNextTechnicalTemplateName(template.name, familyRows)
-      : template.name;
+      ? resolveNextTechnicalTemplateName(familyName, familyRows)
+      : familyName;
     const preparedTemplate = await prepareTemplateImageHeaderForMeta({
       template: buildTemplateForTechnicalName(template, technicalName),
       accessToken: asset.waAccessToken,
@@ -2408,7 +2475,7 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
         wabaId,
         accessToken: asset.waAccessToken,
         template: metaTemplate,
-        language: DEFAULT_LANGUAGE,
+        language,
       });
 
       await upsertConnectedTemplateForWaba({
@@ -2465,14 +2532,29 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
   return result;
 }
 
-async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger = console, sourceUpdatedAt = null }) {
+async function propagateCatalogTemplateToAllClinics({
+  templateCatalogId,
+  logger = console,
+  sourceUpdatedAt = null,
+  clinicIds = null,
+  wabaIds = null,
+  updateCatalogPropagationState = true,
+  enqueueFollowupSync = true,
+} = {}) {
   const template = await getCatalogTemplateById(templateCatalogId);
   if (!template) {
     throw new Error('catalog_not_found');
   }
 
   const sourceUpdatedAtTs = sourceUpdatedAt ? new Date(sourceUpdatedAt).getTime() : null;
+  const scopedClinicIds = Array.isArray(clinicIds)
+    ? Array.from(new Set(clinicIds.map(Number).filter((id) => Number.isInteger(id) && id > 0)))
+    : null;
+  const scopedWabaIds = Array.isArray(wabaIds)
+    ? new Set(wabaIds.map((value) => cleanString(String(value || ''))).filter(Boolean))
+    : null;
   const canMarkCompleted = async () => {
+    if (!updateCatalogPropagationState) return false;
     if (!Number.isFinite(sourceUpdatedAtTs)) return true;
     await template.reload();
     const currentUpdatedAtTs = new Date(template.updated_at || template.updatedAt || 0).getTime();
@@ -2481,6 +2563,9 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
 
   try {
     const clinics = await Clinica.findAll({
+      ...(scopedClinicIds
+        ? { where: { id_clinica: { [Op.in]: scopedClinicIds } } }
+        : {}),
       attributes: ['id_clinica', 'configuracion'],
       order: [['id_clinica', 'ASC']],
       raw: true,
@@ -2507,7 +2592,9 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
       const clinicId = Number(clinic.id_clinica);
       const clinicDisciplines = normalizeDisciplines(clinic?.configuracion?.disciplinas);
       const effectiveDisciplines = clinicDisciplines.length ? clinicDisciplines : ['dental'];
-      let pendingTechnicalName = cleanString(template.name);
+      const familyName = getCatalogTechnicalFamilyName(template);
+      const language = getCatalogTemplateLanguage(template);
+      let pendingTechnicalName = familyName;
 
       if (!templateAppliesToDisciplines(template, effectiveDisciplines)) {
         summary.skipped_not_applicable += 1;
@@ -2519,6 +2606,10 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
       try {
         const clinicConfig = await whatsappService.getClinicConfig(clinicId);
         const wabaId = clinicConfig?.wabaId ? String(clinicConfig.wabaId) : null;
+        if (scopedWabaIds && (!wabaId || !scopedWabaIds.has(wabaId))) {
+          summary.skipped_outside_scope = (summary.skipped_outside_scope || 0) + 1;
+          continue;
+        }
         if (!wabaId) {
           const result = await upsertPlaceholderTemplateForClinic({ clinicId, template });
           if (result.action === 'created') summary.placeholders_created += 1;
@@ -2571,8 +2662,8 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
         }
 
         const technicalName = familyRows.length
-          ? resolveNextTechnicalTemplateName(template.name, familyRows)
-          : template.name;
+          ? resolveNextTechnicalTemplateName(familyName, familyRows)
+          : familyName;
         pendingTechnicalName = cleanString(technicalName) || pendingTechnicalName;
         const preparedTemplate = await prepareTemplateImageHeaderForMeta({
           template: buildTemplateForTechnicalName(template, technicalName),
@@ -2614,18 +2705,47 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
           continue;
         }
 
-        const metaResp = await createTemplateInMeta({
-          wabaId,
-          accessToken: clinicConfig.accessToken,
-          template: metaTemplate,
-          language: DEFAULT_LANGUAGE,
-        });
+        let metaResp;
+        try {
+          metaResp = await createTemplateInMeta({
+            wabaId,
+            accessToken: clinicConfig.accessToken,
+            template: metaTemplate,
+            language,
+          });
+        } catch (createError) {
+          // Meta no ofrece una clave de idempotencia para esta operación. La
+          // identidad estable es nombre técnico + idioma. Si el proceso cae
+          // después del HTTP 200 y antes del checkpoint local, el reintento
+          // recibe "already exists": resincronizamos y reutilizamos ese mismo
+          // contrato; nunca generamos otro nombre por este borde de caída.
+          if (!isDuplicateTemplateNameError(createError)) throw createError;
+          await syncTemplatesForWaba({ wabaId, accessToken: clinicConfig.accessToken });
+          const recoveredRows = await loadTemplateFamilyRows({ clinicId, wabaId, template });
+          const recovered = findSameContractRemoteTemplate({
+            familyRows: recoveredRows,
+            wabaId,
+            template,
+          });
+          if (!recovered || cleanString(recovered.name) !== cleanString(technicalName)) {
+            throw buildMetaTemplateCheckpointPendingError(createError);
+          }
+          metaResp = {
+            id: recovered.meta_template_id,
+            status: recovered.status,
+            recovered_after_duplicate: true,
+          };
+        }
+
+        const submittedStatus = mapRemoteStatusToLocalStatus(
+          metaResp?.status || WHATSAPP_TEMPLATE_STATUS.PENDING
+        );
 
         await upsertConnectedTemplateForWaba({
           wabaId,
           template,
           technicalName,
-          status: WHATSAPP_TEMPLATE_STATUS.PENDING,
+          status: submittedStatus,
           metaTemplateId: metaResp?.id || null,
           rejectionReason: null,
         });
@@ -2634,7 +2754,7 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
           clinicId,
           template,
           technicalName,
-          status: WHATSAPP_TEMPLATE_STATUS.PENDING,
+          status: submittedStatus,
           metaTemplateId: metaResp?.id || null,
           rejectionReason: null,
           logger,
@@ -2646,8 +2766,13 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
           affectedTemplateInstances.set(Number(result.row.id), result.row);
         }
 
-        summary.created_in_meta += 1;
+        if (metaResp?.recovered_after_duplicate) {
+          summary.recovered_after_meta_checkpoint = (summary.recovered_after_meta_checkpoint || 0) + 1;
+        } else {
+          summary.created_in_meta += 1;
+        }
       } catch (err) {
+        if (isRetryableMetaError(err)) throw err;
         const parsedMetaError = parseMetaError(err);
         const hasMetaResponse = !!(err?.response?.data || parsedMetaError?.message);
         if (hasMetaResponse && !isRetryableMetaError(err)) {
@@ -2719,7 +2844,7 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
       }
     }
 
-    if (followupSyncs.size > 0) {
+    if (enqueueFollowupSync && followupSyncs.size > 0) {
       const delayMs = DEFAULT_PROPAGATE_RESYNC_DELAY_MINUTES * 60 * 1000;
       await Promise.all(
         Array.from(followupSyncs.entries()).map(([wabaId, accessToken]) =>
@@ -2733,7 +2858,10 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
       summary.followup_sync_wabas = Array.from(followupSyncs.keys());
     }
 
-    if (summary.errors.length === 0) {
+    if (!updateCatalogPropagationState) {
+      // Un rollout acotado no equivale a la propagación global del catálogo.
+      // Conservamos sus marcadores globales sin cambios.
+    } else if (summary.errors.length === 0) {
       if (await canMarkCompleted()) {
         await template.update({
           last_propagated_at: new Date(),
@@ -2752,9 +2880,11 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
 
     return summary;
   } catch (err) {
-    await template.update({
-      propagation_state: 'failed',
-    });
+    if (updateCatalogPropagationState) {
+      await template.update({
+        propagation_state: 'failed',
+      });
+    }
     throw err;
   }
 }
@@ -2767,7 +2897,7 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
   const items = await fetchTemplatesFromMeta({ wabaId, accessToken });
   const now = new Date();
   const catalogs = await WhatsappTemplateCatalog.findAll({
-    attributes: ['id', 'name', 'display_name', 'body_text', 'is_active'],
+    attributes: ['id', 'name', 'family_key', 'locale', 'display_name', 'body_text', 'is_active'],
     raw: true,
   });
   const catalogById = new Map(
@@ -2775,7 +2905,7 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
   );
 
   for (const tpl of items) {
-    const catalog = resolveCatalogTemplateByTechnicalName(catalogs, tpl.name);
+    const catalog = resolveCatalogTemplateByTechnicalName(catalogs, tpl.name, tpl.language);
     const catalogIsActive = !catalog || (catalog.is_active !== false && Number(catalog.is_active) !== 0);
     const isStaleReviewTemplate = isStaleReviewRequestTemplate(tpl, catalog);
     const remoteRejectionReason = tpl.rejected_reason || tpl.rejection_reason || null;
@@ -3122,4 +3252,9 @@ module.exports = {
   runDelayedSyncTemplatesJob,
   enqueueSyncForAllWabas,
   upsertClinicOverrideTemplateForClinic,
+  _test: {
+    findSameContractRemoteTemplate,
+    isDuplicateTemplateNameError,
+    buildMetaTemplateCheckpointPendingError,
+  },
 };

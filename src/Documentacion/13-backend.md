@@ -6877,3 +6877,135 @@ a pacientes ya configurados en catalán o inglés.
 preservación sin escritura, cambio explícito, validación, contrato de
 migración/modelo/PATCH, propagación de la transacción y rollback de la cita
 cuando falla la escritura del idioma.
+
+## 2026-07-20 - Idioma fijo por ejecución y rollout WhatsApp `es/ca/en`
+
+Este corte añade el contrato backend para que las automatizaciones WhatsApp
+puedan enviar en español, catalán o inglés sin mezclar idiomas dentro de una
+misma ejecución. Depende del contrato de paciente que persiste
+`Pacientes.idioma_preferido` como `ENUM('es','ca','en') NOT NULL DEFAULT 'es'`.
+No se infiere el idioma a partir de mensajes, nombres, navegador ni clínica.
+
+### Frontera inmutable de idioma
+
+Al crear una `FlowExecutionV2`, tanto el endpoint manual como el scheduler de
+citas leen el idioma del paciente y guardan una copia en
+`context.communication_language`. Desde ese momento el motor solo consulta ese
+snapshot:
+
+- si el paciente cambia de `ca` a `es` mientras el flujo espera, la ejecución
+  existente continúa en `ca`;
+- una ejecución nueva ya usa `es`;
+- una ejecución histórica que no tenga el campo queda forzada a `es` y lo
+  persiste antes de continuar;
+- todos los nodos y reintentos de la misma ejecución reutilizan el snapshot.
+
+La selección localizada vive en `config.language_routing`:
+
+```json
+{
+  "enabled": true,
+  "source": "patient_preferred_language",
+  "variants": {
+    "ca": { "language_code": "ca", "catalog_template_id": 101 },
+    "en": { "language_code": "en_US", "catalog_template_id": 102 }
+  }
+}
+```
+
+La configuración española sigue siendo la base del nodo. Los códigos internos
+son `es`, `ca` y `en`; al hablar con Meta se usan `es`, `ca` y `en_US`. Para
+`ca/en` se exige catálogo de la misma familia, locale exacto, contrato de
+variables compatible, WABA efectivo y estado `APPROVED`. La ausencia de una
+variante requerida termina con `whatsapp_language_variant_missing:<locale>` o
+`whatsapp_language_template_unavailable:<locale>`; nunca cae silenciosamente a
+español.
+
+El `Message` se materializa antes del transporte con idioma, familia, plantilla,
+parámetros y componentes resueltos. La clave idempotente depende de ejecución y
+nodo/`delivery_slot`, no del locale. Un replay busca primero ese `Message` y
+reutiliza su snapshot: no vuelve a leer al paciente ni elige otra plantilla.
+Esto cubre transporte inmediato, horario silencioso y reintentos de handoff.
+
+Las reglas deterministas de respuesta de cita reconocen confirmación,
+cancelación y reprogramación en español, catalán e inglés antes de recurrir a
+IA. El locale del mensaje saliente no altera la semántica del estado de cita.
+
+### Familias de catálogo y traducciones
+
+`WhatsappTemplateCatalog` incorpora:
+
+- `family_key`: identidad funcional estable compartida por idiomas;
+- `locale`: `es`, `ca` o `en`;
+- índice único `(family_key, locale)`.
+
+`name` continúa siendo único para identificar la fila local. En Meta, todas las
+variantes de una familia comparten el nombre técnico/versionado y se distinguen
+por idioma. La migración de esquema rellena `family_key=name` y `locale=es` para
+el histórico. La migración editorial crea borradores inactivos `ca/en` para las
+34 familias españolas existentes, conserva exactamente sus placeholders, copia
+disciplinas y no sobrescribe una traducción que una persona ya haya editado.
+No llama a Meta ni modifica flujos.
+
+El CRUD admin expone `family_key`/`locale` y permite crear una traducción desde
+la variante española. La traducción nace inactiva, con disciplinas copiadas y
+contrato de placeholders validado. En el editor de automatizaciones, activar
+"elegir el mensaje según el idioma del paciente" muestra las variantes `ca/en`
+y solo ofrece plantillas aprobadas de la misma familia e idioma.
+
+### Rollout durable, acotado y atómico
+
+El rollout no se ejecuta al desplegar migraciones ni al abrir la UI. Solo puede
+iniciarlo un admin mediante `POST /api/whatsapp/template-catalog/language-rollout`.
+Su estado se consulta con `GET` sobre la misma ruta. Corre como un único
+`JobRequest.type=whatsapp_language_rollout`; no usa un cron lateral ni abre un
+segundo worker. La respuesta de estado combina el `result_summary` ya asentado
+con `payload.progress`, por lo que también muestra la operación en curso.
+
+Fases:
+
+1. `prepare`: inventaría únicamente las versiones publicadas activas, nodos
+   WhatsApp, contratos manuales y familias realmente referenciadas;
+2. `propagate`: activa los borradores necesarios y envía una familia/locale por
+   ejecución del job;
+3. `sync`: sincroniza solo los WABA efectivos del alcance calculado;
+4. `audit`: espera aprobación por familia, locale y WABA objetivo;
+5. `publish`: bajo locks de base de datos vuelve a auditar y publica versiones
+   nuevas, desactivando las anteriores en la misma transacción.
+
+El alcance no usa la aplicabilidad genérica del catálogo. Un flujo de clínica
+solo aporta esa clínica; uno de grupo expande únicamente las clínicas del
+grupo; un flujo global heredado deriva clínicas/WABA de las instancias
+españolas que ya referencia. Las clínicas sin WABA efectivo no abren llamadas a
+Meta. Una referencia global sin instancia resoluble o una familia sin scope
+efectivo bloquea el preflight de forma observable. La auditoría usa exactamente
+el mismo mapa `family -> clinic_ids/waba_ids`; un rechazo de otra cuenta no
+bloquea este rollout y tampoco se crea allí una plantilla.
+
+Antes de cada llamada remota se guarda `propagation_inflight` y el progreso. La
+identidad idempotente de Meta es `nombre técnico + idioma`. Si el proceso cae
+después de que Meta acepte la plantilla pero antes del checkpoint local, el
+reintento sincroniza el WABA y reutiliza el mismo contrato. Si Meta responde
+"already exists", se repite la sync; si aún no es visible, el job espera y
+reintenta la misma identidad en vez de inventar una versión. Solo después se
+avanza `catalog_cursor`.
+
+No se publica ningún flujo mientras falte una aprobación. Un rechazo, cambio de
+scope, draft paralelo o modificación del conjunto activo aborta sin tocar las
+versiones anteriores. La publicación revalida catálogos e instancias con locks;
+si todos los nodos ya estaban localizados, el job termina idempotentemente sin
+crear versiones adicionales.
+
+El preflight de lectura sobre los datos de desarrollo del 2026-07-20 encontró
+155 versiones activas, 905 nodos WhatsApp, 21 contratos canónicos, 15 familias,
+13 clínicas conectadas y 11 WABA efectivos. La suite de volumen añade un fixture
+equivalente de 158 versiones, 929 nodos y 24 contratos para conservar el tamaño
+del corte auditado anterior. También cubre cambio `ca -> es` entre ejecuciones,
+legacy sin snapshot, ausencia de variante, WABA ajeno, caída tras respuesta de
+Meta, replay de plantilla/locale y respuestas entrantes en los tres idiomas.
+
+Este código no autoriza un rollout ni un envío real. Antes de operación hay que
+integrar la migración de idioma de paciente, aplicar las dos migraciones de
+catálogo, revisar/aceptar el preflight, obtener aprobación Meta para todas las
+familias/WABA del scope y después iniciar explícitamente el job. No se deben
+fabricar mensajes de prueba en números reales para validar esta fase.

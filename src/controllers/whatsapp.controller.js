@@ -22,6 +22,11 @@ const {
   getAccessibleMarketingClinicIds,
   hasMarketingClinicScopeAccess,
 } = require('../lib/marketingScopeAccess');
+const {
+  normalizeWhatsappLocale,
+  requireWhatsappLocale,
+  resolveCatalogFamilyKey,
+} = require('../lib/whatsapp-template-locale');
 
 const {
   ClinicMetaAsset,
@@ -99,6 +104,58 @@ function assertAdmin(req, res) {
     return false;
   }
   return true;
+}
+
+function extractTemplatePlaceholderIndexes(value) {
+  return Array.from(new Set(
+    Array.from(String(value || '').matchAll(/{{\s*(\d+)\s*}}/g))
+      .map((match) => Number(match[1]))
+      .filter((index) => Number.isInteger(index) && index > 0)
+  )).sort((left, right) => left - right);
+}
+
+function assertMatchingTranslationVariableContract({ sourceBody, translatedBody }, res) {
+  const source = extractTemplatePlaceholderIndexes(sourceBody);
+  const translated = extractTemplatePlaceholderIndexes(translatedBody);
+  if (JSON.stringify(source) === JSON.stringify(translated)) return true;
+  res.status(400).json({
+    error: 'whatsapp_template_translation_variable_contract_mismatch',
+    message: 'La traducción debe conservar exactamente las mismas variables que la plantilla original.',
+    expected_placeholders: source,
+    received_placeholders: translated,
+  });
+  return false;
+}
+
+function buildCatalogTranslationName(familyKey, locale) {
+  const suffix = `__${locale}`;
+  const base = String(familyKey || 'plantilla').slice(0, Math.max(1, 100 - suffix.length));
+  return `${base}${suffix}`;
+}
+
+function buildCatalogTranslationDisplayName(item, locale) {
+  const label = locale === 'ca' ? 'Català' : 'English';
+  return `${String(item?.display_name || item?.name || 'Plantilla').trim()} · ${label}`.slice(0, 150);
+}
+
+function replaceCatalogBodyComponent(components, bodyText) {
+  const parsed = Array.isArray(components)
+    ? components
+    : (() => {
+        try {
+          return JSON.parse(components || '[]');
+        } catch (_error) {
+          return [];
+        }
+      })();
+  if (!Array.isArray(parsed) || !parsed.length) return components || null;
+  let replaced = false;
+  const next = parsed.map((component) => {
+    if (String(component?.type || '').trim().toUpperCase() !== 'BODY') return component;
+    replaced = true;
+    return { ...component, text: bodyText };
+  });
+  return replaced ? next : [...next, { type: 'BODY', text: bodyText }];
 }
 
 function buildDuplicateDisplayName(baseDisplayName, duplicateIndex) {
@@ -535,7 +592,7 @@ async function loadEffectiveWhatsappTemplatesForClinic({
   await assertWhatsappTemplateClinicAccess({ clinicId, userId });
 
   const includeCatalogConfig = includeCatalog
-    ? [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'category', 'body_text', 'variables', 'is_active'] }]
+    ? [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'family_key', 'locale', 'display_name', 'category', 'body_text', 'variables', 'is_active'] }]
     : [];
 
   const overrides = await WhatsappTemplate.findAll({
@@ -1412,7 +1469,7 @@ exports.listTemplatesForClinic = async (req, res) => {
           waba_id: asset.wabaId,
           is_active: true,
         },
-        include: [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'category', 'body_text', 'variables'] }],
+        include: [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'family_key', 'locale', 'display_name', 'category', 'body_text', 'variables'] }],
         order: [['name', 'ASC']],
       });
     }
@@ -1995,6 +2052,7 @@ exports.listCatalog = async (req, res) => {
             'id',
             'catalog_template_id',
             'name',
+            'language',
             'category',
             'components',
             'status',
@@ -2121,26 +2179,33 @@ exports.listCatalog = async (req, res) => {
 exports.createCatalog = async (req, res) => {
   if (!assertAdmin(req, res)) return;
   try {
-    const { name, display_name, category, body_text, variables, components, is_generic = false, is_active = true } = req.body || {};
+    const { name, family_key, locale = 'es', display_name, category, body_text, variables, components, is_generic = false, is_active = true } = req.body || {};
     if (!name || !category || !body_text) {
       return res.status(400).json({ error: 'name, category y body_text son obligatorios' });
     }
     if (!assertValidCatalogTemplatePayload({ bodyText: body_text }, res)) {
       return;
     }
+    const normalizedLocale = requireWhatsappLocale(locale);
+    const normalizedFamilyKey = String(family_key || name).trim();
     const item = await WhatsappTemplateCatalog.create({
       name,
+      family_key: normalizedFamilyKey,
+      locale: normalizedLocale,
       display_name: display_name || null,
       category,
       body_text,
       variables: variables || null,
-      components: components || null,
+      components: replaceCatalogBodyComponent(components, body_text) || null,
       propagation_state: null,
       is_generic: !!is_generic,
       is_active: !!is_active,
     });
     return res.status(201).json(item);
   } catch (err) {
+    if (err?.code === 'whatsapp_template_locale_invalid') {
+      return res.status(400).json({ error: err.code, message: 'Idioma no admitido. Usa es, ca o en.' });
+    }
     console.error('Error createCatalog', err);
     return res.status(500).json({ error: 'Error creando catálogo' });
   }
@@ -2158,13 +2223,34 @@ exports.updateCatalog = async (req, res) => {
     if (!assertValidCatalogTemplatePayload({ bodyText: nextBodyText }, res)) {
       return;
     }
+    const familyKey = resolveCatalogFamilyKey(item);
+    const familyBase = familyKey
+      ? await WhatsappTemplateCatalog.findOne({
+          where: { family_key: familyKey, locale: 'es' },
+          attributes: ['id', 'body_text'],
+          raw: true,
+        })
+      : null;
+    if (
+      normalizeWhatsappLocale(item.locale, { fallback: 'es' }) !== 'es'
+      && familyBase
+      && !assertMatchingTranslationVariableContract({
+        sourceBody: familyBase.body_text,
+        translatedBody: nextBodyText,
+      }, res)
+    ) {
+      return;
+    }
     await item.update({
       name: name || item.name,
       display_name: display_name !== undefined ? display_name : item.display_name,
       category: category || item.category,
       body_text: nextBodyText,
       variables: variables !== undefined ? variables : item.variables,
-      components: components !== undefined ? components : item.components,
+      components: replaceCatalogBodyComponent(
+        components !== undefined ? components : item.components,
+        nextBodyText
+      ),
       propagation_state: null,
       is_generic: is_generic !== undefined ? !!is_generic : item.is_generic,
       is_active: is_active !== undefined ? !!is_active : item.is_active,
@@ -2236,6 +2322,8 @@ exports.duplicateCatalog = async (req, res) => {
 
     const duplicated = await WhatsappTemplateCatalog.create({
       name: names.name,
+      family_key: names.name,
+      locale: normalizeWhatsappLocale(item.locale, { fallback: 'es' }),
       display_name: names.display_name,
       category: item.category,
       body_text: item.body_text,
@@ -2276,6 +2364,151 @@ exports.duplicateCatalog = async (req, res) => {
   } catch (err) {
     console.error('Error duplicateCatalog', err);
     return res.status(500).json({ error: 'Error duplicando catálogo' });
+  }
+};
+
+exports.createCatalogTranslation = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  try {
+    const id = Number(req.params.id);
+    const locale = requireWhatsappLocale(req.body?.locale);
+    if (locale === 'es') {
+      return res.status(400).json({
+        error: 'whatsapp_template_translation_source_locale',
+        message: 'La plantilla base ya es la variante en español.',
+      });
+    }
+
+    const source = await WhatsappTemplateCatalog.findByPk(id, {
+      include: [{
+        model: WhatsappTemplateCatalogDiscipline,
+        as: 'disciplinas',
+        attributes: ['id', 'disciplina_code'],
+      }],
+    });
+    if (!source) return res.status(404).json({ error: 'catalog_not_found' });
+    if (normalizeWhatsappLocale(source.locale, { fallback: 'es' }) !== 'es') {
+      return res.status(400).json({
+        error: 'whatsapp_template_translation_source_must_be_spanish',
+        message: 'Crea la traducción desde la variante española de la familia.',
+      });
+    }
+
+    const familyKey = resolveCatalogFamilyKey(source);
+    const existing = await WhatsappTemplateCatalog.findOne({
+      where: { family_key: familyKey, locale },
+    });
+    if (existing) {
+      return res.status(409).json({
+        error: 'whatsapp_template_translation_exists',
+        catalog_template_id: existing.id,
+      });
+    }
+
+    const translatedBody = String(req.body?.body_text || source.body_text || '').trim();
+    if (!assertValidCatalogTemplatePayload({ bodyText: translatedBody }, res)) return;
+    if (!assertMatchingTranslationVariableContract({
+      sourceBody: source.body_text,
+      translatedBody,
+    }, res)) return;
+
+    const created = await db.sequelize.transaction(async (transaction) => {
+      const translation = await WhatsappTemplateCatalog.create({
+        name: buildCatalogTranslationName(familyKey, locale),
+        family_key: familyKey,
+        locale,
+        display_name: String(req.body?.display_name || buildCatalogTranslationDisplayName(source, locale)).trim(),
+        category: source.category,
+        body_text: translatedBody,
+        variables: source.variables || null,
+        components: replaceCatalogBodyComponent(
+          req.body?.components || source.components,
+          translatedBody
+        ) || null,
+        propagation_state: null,
+        is_generic: !!source.is_generic,
+        // Crear la traducción nunca la registra ni la activa silenciosamente.
+        is_active: false,
+      }, { transaction });
+
+      const disciplineCodes = Array.isArray(source.disciplinas)
+        ? source.disciplinas
+            .map((discipline) => String(discipline?.disciplina_code || '').trim())
+            .filter(Boolean)
+        : [];
+      if (!translation.is_generic && disciplineCodes.length) {
+        await WhatsappTemplateCatalogDiscipline.bulkCreate(
+          disciplineCodes.map((code) => ({
+            template_catalog_id: translation.id,
+            disciplina_code: code,
+            created_at: new Date(),
+            updated_at: new Date(),
+          })),
+          { transaction }
+        );
+      }
+      return translation;
+    });
+
+    const response = await WhatsappTemplateCatalog.findByPk(created.id, {
+      include: [{
+        model: WhatsappTemplateCatalogDiscipline,
+        as: 'disciplinas',
+        attributes: ['id', 'disciplina_code'],
+      }],
+    });
+    return res.status(201).json(response);
+  } catch (err) {
+    if (err?.code === 'whatsapp_template_locale_invalid') {
+      return res.status(400).json({ error: err.code, message: 'Idioma no admitido. Usa ca o en.' });
+    }
+    if (err?.name === 'SequelizeUniqueConstraintError') {
+      return res.status(409).json({ error: 'whatsapp_template_translation_exists' });
+    }
+    console.error('Error createCatalogTranslation', err);
+    return res.status(500).json({ error: 'Error creando traducción de catálogo' });
+  }
+};
+
+exports.startLanguageRollout = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  try {
+    const service = require('../services/whatsappLanguageRollout.service');
+    const { job, created } = await service.enqueueRollout({
+      requestedBy: req.userData?.userId || null,
+      requestedByName: req.userData?.name || req.userData?.email || null,
+    });
+    return res.status(created ? 202 : 200).json({
+      success: true,
+      created,
+      job: service.buildRolloutJobView(job),
+    });
+  } catch (error) {
+    console.error('Error startLanguageRollout', error);
+    return res.status(500).json({
+      success: false,
+      error: 'whatsapp_language_rollout_enqueue_failed',
+      message: error?.message || 'No se pudo preparar el despliegue de idiomas.',
+    });
+  }
+};
+
+exports.getLanguageRolloutStatus = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  try {
+    const service = require('../services/whatsappLanguageRollout.service');
+    const job = await service.getLatestRollout();
+    if (!job) return res.json({ success: true, job: null });
+    return res.json({
+      success: true,
+      job: service.buildRolloutJobView(job),
+    });
+  } catch (error) {
+    console.error('Error getLanguageRolloutStatus', error);
+    return res.status(500).json({
+      success: false,
+      error: 'whatsapp_language_rollout_status_failed',
+    });
   }
 };
 

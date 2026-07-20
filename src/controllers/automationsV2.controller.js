@@ -35,6 +35,11 @@ const {
   normalizePositionalBindings,
   buildPositionalBindingsFromNamed,
 } = require('../lib/whatsapp-template-contract');
+const {
+  normalizeWhatsappLocale,
+  resolveCatalogFamilyKey,
+  captureExecutionCommunicationLanguage,
+} = require('../lib/whatsapp-template-locale');
 
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1,44')
   .split(',')
@@ -398,7 +403,7 @@ async function buildHydratedExecutionContext({
           model: Paciente,
           as: 'paciente',
           required: false,
-          attributes: ['id_paciente', 'clinica_id', 'nombre', 'apellidos', 'telefono_movil', 'email'],
+          attributes: ['id_paciente', 'clinica_id', 'nombre', 'apellidos', 'telefono_movil', 'email', 'idioma_preferido'],
         },
         {
           model: Clinica,
@@ -456,6 +461,8 @@ async function buildHydratedExecutionContext({
           telefono: cleanString(paciente.telefono_movil),
           telefono_movil: cleanString(paciente.telefono_movil),
           email: cleanString(paciente.email),
+          idioma_preferido: normalizeWhatsappLocale(paciente.idioma_preferido, { fallback: 'es' }),
+          preferred_language: normalizeWhatsappLocale(paciente.idioma_preferido, { fallback: 'es' }),
         };
         out.patient = {
           ...(isObject(out.patient) ? out.patient : {}),
@@ -578,7 +585,7 @@ async function buildHydratedExecutionContext({
     }
   } else if (patientCandidateId && ['patient', 'paciente'].includes(normalizedType)) {
     const patient = await Paciente.findByPk(patientCandidateId, {
-      attributes: ['id_paciente', 'clinica_id', 'nombre', 'apellidos', 'telefono_movil', 'email'],
+      attributes: ['id_paciente', 'clinica_id', 'nombre', 'apellidos', 'telefono_movil', 'email', 'idioma_preferido'],
       raw: true,
     });
     if (patient) {
@@ -593,6 +600,8 @@ async function buildHydratedExecutionContext({
         telefono: cleanString(patient.telefono_movil),
         telefono_movil: cleanString(patient.telefono_movil),
         email: cleanString(patient.email),
+        idioma_preferido: normalizeWhatsappLocale(patient.idioma_preferido, { fallback: 'es' }),
+        preferred_language: normalizeWhatsappLocale(patient.idioma_preferido, { fallback: 'es' }),
       };
       out.patient = {
         ...(isObject(out.patient) ? out.patient : {}),
@@ -3235,6 +3244,239 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
         });
       }
     }
+
+    const languageRouting = isObject(config.language_routing) ? config.language_routing : {};
+    const languageRoutingEnabled = languageRouting.enabled === true;
+    if (languageRoutingEnabled) {
+      const variants = isObject(languageRouting.variants) ? languageRouting.variants : {};
+      const resolveConfiguredRow = (candidateConfig, { fallback = false } = {}) => {
+        const prefix = fallback ? 'fallback_' : '';
+        const templateId = parseIntOrNull(candidateConfig?.[`${prefix}template_id`]);
+        const templateNameValue = cleanString(candidateConfig?.[`${prefix}template_name`]);
+        const catalogId = parseIntOrNull(candidateConfig?.[`${prefix}catalog_template_id`]);
+        return (templateId && templateLookup.byId instanceof Map ? templateLookup.byId.get(templateId) : null)
+          || (templateNameValue && templateLookup.byName instanceof Map ? templateLookup.byName.get(templateNameValue) : null)
+          || (catalogId && templateLookup.byCatalogId instanceof Map ? templateLookup.byCatalogId.get(catalogId) : null)
+          || null;
+      };
+      const getRowLocale = (row) => normalizeWhatsappLocale(
+        row?.language || row?.catalog?.locale || row?.locale,
+        { fallback: null }
+      );
+      const getRowFamily = (row) => resolveCatalogFamilyKey(row?.catalog || row);
+      const baseRow = messageMode === 'template'
+        ? resolveConfiguredRow(config)
+        : resolveConfiguredRow(config, { fallback: true });
+      const baseFallbackRow = resolveConfiguredRow(config, { fallback: true });
+      const baseFamily = cleanString(config.catalog_family_key)
+        || cleanString(config.fallback_catalog_family_key)
+        || getRowFamily(baseRow);
+      const baseFallbackFamily = cleanString(config.fallback_catalog_family_key)
+        || getRowFamily(baseFallbackRow);
+
+      if (baseRow && getRowLocale(baseRow) !== 'es') {
+        errors.push(buildValidationError(
+          'whatsapp_language_base_must_be_spanish',
+          `El nodo ${nodeId} debe usar español como variante base`,
+          { node_id: nodeId, node_type: nodeType, key: 'language_routing', expected_locale: 'es' }
+        ));
+      }
+
+      for (const locale of ['ca', 'en']) {
+        const variant = isObject(variants[locale]) ? variants[locale] : null;
+        if (!variant) {
+          errors.push(buildValidationError(
+            'whatsapp_language_variant_required',
+            `El nodo ${nodeId} requiere una variante ${locale === 'ca' ? 'en catalán' : 'en inglés'}`,
+            { node_id: nodeId, node_type: nodeType, key: `language_routing.variants.${locale}`, locale }
+          ));
+          continue;
+        }
+
+        const variantManualText = cleanString(variant.manual_message_text);
+        const variantRow = messageMode === 'template' ? resolveConfiguredRow(variant) : null;
+        const variantFallbackRow = resolveConfiguredRow(variant, { fallback: true });
+        if (messageMode === 'manual' && !variantManualText) {
+          errors.push(buildValidationError(
+            'whatsapp_language_manual_text_required',
+            `El nodo ${nodeId} requiere el texto manual en ${locale === 'ca' ? 'catalán' : 'inglés'}`,
+            { node_id: nodeId, node_type: nodeType, key: `language_routing.variants.${locale}.manual_message_text`, locale }
+          ));
+        }
+        if (messageMode === 'template' && !variantRow) {
+          errors.push(buildValidationError(
+            'whatsapp_language_template_required',
+            `El nodo ${nodeId} requiere una plantilla sincronizada en ${locale === 'ca' ? 'catalán' : 'inglés'}`,
+            { node_id: nodeId, node_type: nodeType, key: `language_routing.variants.${locale}.template_id`, locale }
+          ));
+          continue;
+        }
+
+        if (variantRow) {
+          const rowLocale = getRowLocale(variantRow);
+          const rowFamily = getRowFamily(variantRow);
+          if (rowLocale !== locale) {
+            errors.push(buildValidationError(
+              'whatsapp_language_template_locale_mismatch',
+              `La plantilla elegida para ${locale} no pertenece a ese idioma`,
+              { node_id: nodeId, node_type: nodeType, locale, template_id: variantRow.id, template_locale: rowLocale }
+            ));
+          }
+          if (baseFamily && rowFamily && rowFamily !== baseFamily) {
+            errors.push(buildValidationError(
+              'whatsapp_language_template_family_mismatch',
+              `La plantilla ${locale} no pertenece a la misma familia que la española`,
+              { node_id: nodeId, node_type: nodeType, locale, expected_family: baseFamily, template_family: rowFamily }
+            ));
+          }
+          if (cleanString(variantRow.status).toUpperCase() !== 'APPROVED') {
+            errors.push(buildValidationError(
+              'whatsapp_language_template_not_approved',
+              `La plantilla ${locale} debe estar aprobada por Meta antes de activar el flujo`,
+              { node_id: nodeId, node_type: nodeType, locale, template_id: variantRow.id, status: variantRow.status || null }
+            ));
+          }
+          validateWhatsappTemplateContract(variantRow, {
+            templateIdValue: parseIntOrNull(variant.template_id),
+            templateNameValue: cleanString(variant.template_name),
+            positionalValue: variant.variables,
+            namedValue: variant.variables_named,
+            templateIdKey: 'template_id',
+          });
+        }
+
+        if (variantFallbackRow) {
+          const fallbackLocale = getRowLocale(variantFallbackRow);
+          const fallbackFamily = getRowFamily(variantFallbackRow);
+          if (fallbackLocale !== locale) {
+            errors.push(buildValidationError(
+              'whatsapp_language_fallback_locale_mismatch',
+              `La plantilla de respaldo elegida para ${locale} no pertenece a ese idioma`,
+              { node_id: nodeId, node_type: nodeType, locale, template_id: variantFallbackRow.id, template_locale: fallbackLocale }
+            ));
+          }
+          if (baseFallbackFamily && fallbackFamily && fallbackFamily !== baseFallbackFamily) {
+            errors.push(buildValidationError(
+              'whatsapp_language_fallback_family_mismatch',
+              `La plantilla de respaldo ${locale} no pertenece a la misma familia que la española`,
+              {
+                node_id: nodeId,
+                node_type: nodeType,
+                locale,
+                expected_family: baseFallbackFamily,
+                template_family: fallbackFamily,
+              }
+            ));
+          }
+          if (cleanString(variantFallbackRow.status).toUpperCase() !== 'APPROVED') {
+            errors.push(buildValidationError(
+              'whatsapp_language_fallback_not_approved',
+              `La plantilla de respaldo ${locale} debe estar aprobada por Meta`,
+              { node_id: nodeId, node_type: nodeType, locale, template_id: variantFallbackRow.id, status: variantFallbackRow.status || null }
+            ));
+          }
+          validateWhatsappTemplateContract(variantFallbackRow, {
+            templateIdValue: parseIntOrNull(variant.fallback_template_id),
+            templateNameValue: cleanString(variant.fallback_template_name),
+            positionalValue: variant.fallback_variables,
+            namedValue: variant.fallback_variables_named,
+            templateIdKey: 'fallback_template_id',
+          });
+        }
+
+        const baseAccessConfig = isObject(config.access_guidance_variant)
+          ? config.access_guidance_variant
+          : null;
+        if (baseAccessConfig) {
+          const localizedAccessConfig = isObject(variant.access_guidance_variant)
+            ? variant.access_guidance_variant
+            : null;
+          if (!localizedAccessConfig) {
+            errors.push(buildValidationError(
+              'whatsapp_language_access_guidance_variant_required',
+              `El nodo ${nodeId} requiere la variante de acceso en ${locale === 'ca' ? 'catalán' : 'inglés'}`,
+              {
+                node_id: nodeId,
+                node_type: nodeType,
+                locale,
+                key: `language_routing.variants.${locale}.access_guidance_variant`,
+              }
+            ));
+            continue;
+          }
+
+          for (const fallback of [false, true]) {
+            const prefix = fallback ? 'fallback_' : '';
+            const baseAccessRow = resolveConfiguredRow(baseAccessConfig, { fallback });
+            if (!baseAccessRow) continue;
+            const localizedAccessRow = resolveConfiguredRow(localizedAccessConfig, { fallback });
+            const baseAccessFamily = cleanString(baseAccessConfig[`${prefix}catalog_family_key`])
+              || getRowFamily(baseAccessRow);
+            if (!localizedAccessRow) {
+              errors.push(buildValidationError(
+                'whatsapp_language_access_guidance_template_required',
+                `El nodo ${nodeId} requiere la plantilla de acceso ${fallback ? 'de respaldo ' : ''}en ${locale === 'ca' ? 'catalán' : 'inglés'}`,
+                {
+                  node_id: nodeId,
+                  node_type: nodeType,
+                  locale,
+                  key: `language_routing.variants.${locale}.access_guidance_variant.${prefix}template_id`,
+                }
+              ));
+              continue;
+            }
+            const localizedAccessLocale = getRowLocale(localizedAccessRow);
+            const localizedAccessFamily = getRowFamily(localizedAccessRow);
+            if (localizedAccessLocale !== locale) {
+              errors.push(buildValidationError(
+                'whatsapp_language_access_guidance_locale_mismatch',
+                `La plantilla de acceso ${locale} no pertenece a ese idioma`,
+                {
+                  node_id: nodeId,
+                  node_type: nodeType,
+                  locale,
+                  template_id: localizedAccessRow.id,
+                  template_locale: localizedAccessLocale,
+                }
+              ));
+            }
+            if (baseAccessFamily && localizedAccessFamily !== baseAccessFamily) {
+              errors.push(buildValidationError(
+                'whatsapp_language_access_guidance_family_mismatch',
+                `La plantilla de acceso ${locale} no pertenece a la misma familia que la española`,
+                {
+                  node_id: nodeId,
+                  node_type: nodeType,
+                  locale,
+                  expected_family: baseAccessFamily,
+                  template_family: localizedAccessFamily,
+                }
+              ));
+            }
+            if (cleanString(localizedAccessRow.status).toUpperCase() !== 'APPROVED') {
+              errors.push(buildValidationError(
+                'whatsapp_language_access_guidance_not_approved',
+                `La plantilla de acceso ${locale} debe estar aprobada por Meta`,
+                {
+                  node_id: nodeId,
+                  node_type: nodeType,
+                  locale,
+                  template_id: localizedAccessRow.id,
+                  status: localizedAccessRow.status || null,
+                }
+              ));
+            }
+            validateWhatsappTemplateContract(localizedAccessRow, {
+              templateIdValue: parseIntOrNull(localizedAccessConfig[`${prefix}template_id`]),
+              templateNameValue: cleanString(localizedAccessConfig[`${prefix}template_name`]),
+              positionalValue: localizedAccessConfig[`${prefix}variables`],
+              namedValue: localizedAccessConfig[`${prefix}variables_named`],
+              templateIdKey: `${prefix}template_id`,
+            });
+          }
+        }
+      }
+    }
   }
 
   if (nodeType === 'delay/fixed') {
@@ -3730,19 +3972,33 @@ async function loadWhatsappTemplateLookup(nodes) {
   for (const node of safeNodes) {
     if (cleanString(node?.type) !== 'action/send_whatsapp') continue;
     const config = isObject(node?.config) ? node.config : {};
-    const messageMode = cleanString(config?.message_mode || 'template');
-    const templateId = messageMode === 'template' ? parseIntOrNull(config?.template_id) : null;
-    const templateName = messageMode === 'template' ? cleanString(config?.template_name) : null;
-    const catalogTemplateId = messageMode === 'template' ? parseIntOrNull(config?.catalog_template_id) : null;
-    const fallbackTemplateId = parseIntOrNull(config?.fallback_template_id);
-    const fallbackTemplateName = cleanString(config?.fallback_template_name);
-    const fallbackCatalogTemplateId = parseIntOrNull(config?.fallback_catalog_template_id);
-    if (templateId) templateIds.add(templateId);
-    if (templateName) templateNames.add(templateName);
-    if (catalogTemplateId) catalogTemplateIds.add(catalogTemplateId);
-    if (fallbackTemplateId) templateIds.add(fallbackTemplateId);
-    if (fallbackTemplateName) templateNames.add(fallbackTemplateName);
-    if (fallbackCatalogTemplateId) catalogTemplateIds.add(fallbackCatalogTemplateId);
+    const routing = isObject(config.language_routing) ? config.language_routing : {};
+    const variants = isObject(routing.variants) ? routing.variants : {};
+    const configs = [config, ...['ca', 'en'].map((locale) => variants[locale]).filter(isObject)];
+    for (const currentConfig of configs) {
+      const messageMode = cleanString(config?.message_mode || 'template');
+      const referenceConfigs = [
+        { value: currentConfig, includePrimary: messageMode === 'template' },
+        ...(isObject(currentConfig?.access_guidance_variant)
+          ? [{ value: currentConfig.access_guidance_variant, includePrimary: true }]
+          : []),
+      ];
+      for (const referenceConfig of referenceConfigs) {
+        const value = referenceConfig.value;
+        const templateId = referenceConfig.includePrimary ? parseIntOrNull(value?.template_id) : null;
+        const templateName = referenceConfig.includePrimary ? cleanString(value?.template_name) : null;
+        const catalogTemplateId = referenceConfig.includePrimary ? parseIntOrNull(value?.catalog_template_id) : null;
+        const fallbackTemplateId = parseIntOrNull(value?.fallback_template_id);
+        const fallbackTemplateName = cleanString(value?.fallback_template_name);
+        const fallbackCatalogTemplateId = parseIntOrNull(value?.fallback_catalog_template_id);
+        if (templateId) templateIds.add(templateId);
+        if (templateName) templateNames.add(templateName);
+        if (catalogTemplateId) catalogTemplateIds.add(catalogTemplateId);
+        if (fallbackTemplateId) templateIds.add(fallbackTemplateId);
+        if (fallbackTemplateName) templateNames.add(fallbackTemplateName);
+        if (fallbackCatalogTemplateId) catalogTemplateIds.add(fallbackCatalogTemplateId);
+      }
+    }
   }
 
   if (!templateIds.size && !templateNames.size && !catalogTemplateIds.size) {
@@ -3768,7 +4024,7 @@ async function loadWhatsappTemplateLookup(nodes) {
 
   const rows = await WhatsappTemplate.findAll({
     where,
-    include: [{ association: 'catalog', attributes: ['id', 'variables'], required: false }],
+    include: [{ association: 'catalog', attributes: ['id', 'name', 'family_key', 'locale', 'variables'], required: false }],
   });
 
   const byId = new Map();
@@ -3793,7 +4049,7 @@ async function loadWhatsappTemplateLookup(nodes) {
       else catalogWhere[Op.or] = catalogOr;
       const catalogRows = await WhatsappTemplateCatalog.findAll({
         where: catalogWhere,
-        attributes: ['id', 'name', 'components', 'variables'],
+        attributes: ['id', 'name', 'family_key', 'locale', 'components', 'variables'],
       });
       for (const catalogRow of catalogRows) {
         const catalogId = parseIntOrNull(catalogRow.id);
@@ -5507,6 +5763,7 @@ exports.executeTemplateVersion = async (req, res) => {
           : {}),
       },
     };
+    context.communication_language = captureExecutionCommunicationLanguage(context);
 
     const hydratedClinicId = parseIntOrNull(
       hydratedContext?.clinic?.id_clinica
