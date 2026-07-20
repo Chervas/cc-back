@@ -332,6 +332,38 @@ function validateIntakeForm(node, path, errors) {
   }
 }
 
+function effectiveSectionColumns(node, breakpoint) {
+  if (breakpoint === 'desktop') return Number(node.props.columns);
+  const override = node.responsive && node.responsive[breakpoint];
+  return Number(override && Number.isInteger(override.columns) ? override.columns : node.props.columns);
+}
+
+function validateSectionColumnTracks(node, path, errors) {
+  const tracksByBreakpoint = node.props.column_tracks;
+  if (!tracksByBreakpoint) return;
+  for (const breakpoint of ['desktop', 'tablet', 'mobile']) {
+    const tracks = tracksByBreakpoint[breakpoint];
+    if (!tracks) continue;
+    const expectedColumns = effectiveSectionColumns(node, breakpoint);
+    if (tracks.length !== expectedColumns) {
+      errors.push(validationError(
+        'columnTracks',
+        `${path}/props/column_tracks/${breakpoint}`,
+        `debe incluir ${expectedColumns} anchos, uno por columna`
+      ));
+      continue;
+    }
+    const total = tracks.reduce((sum, value) => sum + value, 0);
+    if (total !== 12) {
+      errors.push(validationError(
+        'columnTracks',
+        `${path}/props/column_tracks/${breakpoint}`,
+        'los anchos de columnas deben sumar 12'
+      ));
+    }
+  }
+}
+
 function validateGraph(document) {
   const errors = [];
   const nodes = document.nodes;
@@ -443,6 +475,10 @@ function validateGraph(document) {
       if (!node.props.decorative && node.props.alt.trim() === '') {
         errors.push(validationError('imageAlt', `${nodePath}/props/alt`, 'una imagen informativa necesita texto alternativo'));
       }
+    }
+
+    if (node.type === 'section') {
+      validateSectionColumnTracks(node, nodePath, errors);
     }
 
     if (node.type === 'gallery') {
