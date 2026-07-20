@@ -433,6 +433,9 @@ const JOB_HANDLERS = {
   whatsapp_coexistence_sync_history: async (payload = {}) => whatsappCoexistenceService.runHistorySyncJob(payload),
   whatsapp_template_create: async (payload = {}) => runWhatsappTemplateCreateJob(payload),
   whatsapp_template_sync_delayed: async (payload = {}) => whatsappTemplatesService.runDelayedSyncTemplatesJob(payload),
+  whatsapp_language_rollout: async (payload = {}, jobRequest = null) => (
+    require('./whatsappLanguageRollout.service').runRolloutJob(payload, jobRequest)
+  ),
   marketing_bulk_send_dispatch: async (payload = {}, jobRequest) => marketingBulkSendsService.runDispatchJob(payload, jobRequest),
   marketing_review_request_reminder: async (payload = {}, jobRequest) => marketingBulkSendsService.runReviewRequestReminderJob(payload, jobRequest),
   marketing_review_request_no_response: async (payload = {}, jobRequest) => marketingBulkSendsService.runReviewNoResponseJob(payload, jobRequest),

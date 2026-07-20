@@ -120,6 +120,7 @@ test('enqueueExecutionForTemplate deduplica por cita, versión y ventana', async
     executionFind: db.FlowExecutionV2.findOne,
     executionCreate: db.FlowExecutionV2.create,
     clinicFind: db.Clinica.findByPk,
+    patientFind: db.Paciente.findByPk,
     enqueueUnique: jobRequestsService.enqueueUniqueJobRequest,
     triggerImmediate: jobScheduler.triggerImmediate,
   };
@@ -139,6 +140,7 @@ test('enqueueExecutionForTemplate deduplica por cita, versión y ventana', async
       return created;
     };
     db.Clinica.findByPk = async () => ({ id_clinica: 66, grupoClinicaId: 29 });
+    db.Paciente.findByPk = async () => ({ idioma_preferido: 'ca' });
     jobRequestsService.enqueueUniqueJobRequest = async (options) => {
       if (failFirstDispatch) {
         failFirstDispatch = false;
@@ -162,6 +164,7 @@ test('enqueueExecutionForTemplate deduplica por cita, versión y ventana', async
     assert.equal(repeated.deduplicated, true);
     assert.equal(repeated.execution.id, 12001);
     assert.equal(creates, 1);
+    assert.equal(repeated.execution.context.communication_language, 'ca');
     assert.equal(queued.length, 1);
     assert.deepEqual(queued[0].payload, { execution_id: 12001 });
     assert.equal(queued[0].dedupeScope, 'flow_execution:12001');
@@ -169,6 +172,7 @@ test('enqueueExecutionForTemplate deduplica por cita, versión y ventana', async
     db.FlowExecutionV2.findOne = originals.executionFind;
     db.FlowExecutionV2.create = originals.executionCreate;
     db.Clinica.findByPk = originals.clinicFind;
+    db.Paciente.findByPk = originals.patientFind;
     jobRequestsService.enqueueUniqueJobRequest = originals.enqueueUnique;
     jobScheduler.triggerImmediate = originals.triggerImmediate;
   }
