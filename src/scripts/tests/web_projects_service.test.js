@@ -381,6 +381,19 @@ async function testListContract() {
     WebPage: {},
     WebDraft: {},
     WebRevision: { findAll: async () => [] },
+    WebPublication: { findAll: async () => [{
+      id: '5d36bccc-64b0-41ac-a272-54ffaf18510f',
+      projectId: project.id,
+      channel: 'wordpress',
+      host: 'www.propdental.es',
+      path: '/cita/primera-visita-hospitalet/',
+      status: 'retired',
+      activeRevisionId: 'fc244f6e-b0b5-46cf-af72-05041a70c3a3',
+      desiredRevisionId: null,
+      publishedAt: new Date('2026-07-19T10:00:00Z'),
+      retiredAt: new Date('2026-07-20T05:19:26Z'),
+      updated_at: new Date('2026-07-20T05:19:26Z'),
+    }] },
   };
   const result = await listProjects({
     actorId: 1,
@@ -403,6 +416,21 @@ async function testListContract() {
   assert.deepEqual(result.items[0].capabilities, result.capabilities);
   assert.equal(result.items[0].draft.lock_version, 2);
   assert.equal(result.items[0].page_count, 1);
+  assert.deepEqual(result.items[0].publication, {
+    id: '5d36bccc-64b0-41ac-a272-54ffaf18510f',
+    state: 'retired',
+    status: 'retired',
+    is_live: false,
+    channel: 'wordpress',
+    public_url: 'https://www.propdental.es/cita/primera-visita-hospitalet/',
+    active_revision_id: 'fc244f6e-b0b5-46cf-af72-05041a70c3a3',
+    desired_revision_id: null,
+    published_at: new Date('2026-07-19T10:00:00Z'),
+    retired_at: new Date('2026-07-20T05:19:26Z'),
+    updated_at: new Date('2026-07-20T05:19:26Z'),
+    total: 1,
+    live_count: 0,
+  });
   assert.deepEqual(result.pagination, { page: 1, limit: 12, total: 1, total_pages: 1 });
 }
 

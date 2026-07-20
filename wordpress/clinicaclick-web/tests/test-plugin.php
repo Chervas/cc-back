@@ -1579,8 +1579,39 @@ $tests['ordinary WordPress event relay keeps the direct server-side HMAC contrac
         ccw_test_assert(($decoded['domain'] ?? '') === 'cliente.example.test', 'ordinary relay did not canonicalize its domain');
         ccw_test_assert(($decoded['page_url'] ?? '') === $server['HTTP_REFERER'], 'ordinary relay did not canonicalize its page URL');
         ccw_test_assert(hash_equals(hash_hmac('sha256', $body, $setup['secret']), $headers['X-CC-Signature']), 'ordinary event relay HMAC mismatch');
+        ccw_test_assert(!isset($headers['X-Clinicaclick-Web-Artifact']), 'ordinary event relay inherited a landing artifact');
         ccw_test_assert(strpos($body, $setup['secret']) === false, 'server-side HMAC leaked into the ordinary payload');
     }
+};
+
+$tests['ordinary WordPress event relay remains active after the last landing is retired'] = static function () {
+    $setup = ccw_test_setup_intake('ordinary-event-after-retirement');
+    (new CCW_Cache())->retire(array(
+        'schema_version' => 1,
+        'installation_id' => CCW_Config::installation_id(),
+        'status' => 'retired',
+        'desired_artifact_hash' => null,
+        'measurement' => array('enabled' => false),
+    ));
+    $captured = null;
+    $url = 'https://api.example.test/api/intake/events';
+    $GLOBALS['ccw_test_http'][$url] = static function ($requested_url, $args) use (&$captured) {
+        $captured = array('url' => $requested_url, 'args' => $args);
+        return array('code' => 200, 'body' => '{"success":true,"id":603}');
+    };
+    $wrapper = array(
+        'schema_version' => 1,
+        'endpoint' => 'events',
+        'payload' => array('event_name' => 'ViewContent'),
+    );
+    $server = $setup['server'];
+    $server['CONTENT_TYPE'] = 'application/json';
+    $server['HTTP_REFERER'] = 'https://cliente.example.test/contacto/';
+    $result = ccw_test_event_process($setup['bridge'], $server, $wrapper, 1784281290);
+    ccw_test_assert(($result['body']['success'] ?? false) === true, 'retired landing disabled ordinary measurement');
+    ccw_test_assert(is_array($captured), 'ordinary event was not forwarded after landing retirement');
+    $headers = $captured['args']['headers'];
+    ccw_test_assert(!isset($headers['X-Clinicaclick-Web-Artifact']), 'retired landing artifact leaked into global measurement');
 };
 
 $tests['landing event relay rejects cross-origin incomplete forged and browser-signed wrappers locally'] = static function () {

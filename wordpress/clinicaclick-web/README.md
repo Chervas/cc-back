@@ -1,11 +1,18 @@
 # ClinicaClick WordPress plugin v2
 
-> Estado 2026-07-19: la fuente y los ZIP deterministas corresponden a
-> `2.0.0-alpha.8`. Este corte añade registro firmado multi-route, rotación
+> Estado 2026-07-20: la fuente y los ZIP deterministas corresponden a
+> `2.0.0-alpha.9`. Este corte desacopla la medición de páginas WordPress de la
+> publicación de landings: retirar la última ruta ya no desactiva el bridge
+> `/_clinicaclick/events` ni envía al backend el hash de un artefacto retirado.
+> Propdental ejecuta esta versión con el plugin legado `clinicaclick` inactivo;
+> el runtime global firmado mantiene la medición y las rutas retiradas conservan
+> su tombstone `410` de forma independiente.
+>
+> Cierre histórico 2026-07-19: `2.0.0-alpha.8` añadió registro firmado multi-route, rotación
 > staged del token y reconciliación del runtime de intake. Backend/plugin
 > `1cdfaa1` se promovió a staging mediante `aa8bc4c`; el WordPress público de
-> Propdental ya ejecuta `2.0.0-alpha.8`, instalado y activo junto al plugin de medición
-> `clinicaclick` `1.1.7`; WP-CLI y la fila DB están alineados. La instalación
+> Propdental ejecutó `2.0.0-alpha.8`, instalado junto al plugin de medición
+> `clinicaclick` `1.1.7`; WP-CLI y la fila DB quedaron alineados. La instalación
 > está `connected` en `https://www.propdental.es`. `/cita/` sirve ya renderer
 > `1.7.0`; la primera republicación usó deployment `18fa50be…`, secuencia 11,
 > artefacto `aa05cb59-b27f-4d83-b8fb-f6ef0d4d5cb9`, hash `648cf766…` y HTML
@@ -29,16 +36,20 @@
 > el binario por sí solo no cambia contenido. `alpha.6`/`alpha.5` quedan como evidencia histórica; después de
 > schema 2 el rollback operativo mantiene `alpha.8` + last-known-good.
 
-Este paquete añade el publicador web mantenido junto al plugin de medición
-`clinicaclick` `1.1.7`. Usa el slug independiente `clinicaclick-web/`: instalarlo
-no sobrescribe, actualiza ni desactiva el plugin legado. Tampoco lee, copia o
-reutiliza su token ni su HMAC; el alta del publicador recibe credenciales
-propias y separa dos responsabilidades:
+Este paquete es el publicador web y, desde el rollout `alpha.9` de Propdental,
+también el propietario único de la medición global. Usa el slug independiente
+`clinicaclick-web/`. Mantiene credenciales propias y separa dos
+responsabilidades:
 
 - la medición estable (`loader.js`) se configura mediante un documento
   estructurado y firmado;
 - las landings se descargan como artefactos inmutables, se verifican y se
   sirven desde caché local bajo `/cita/`.
+
+La coexistencia con `clinicaclick 1.1.7` sigue soportada como transición, pero
+no es el estado operativo de Propdental: allí el legado está inactivo para
+evitar dos propietarios del loader. `clinicaclick-web` no reutiliza su token ni
+su HMAC.
 
 El plugin no consulta el CRM durante una visita, no evalúa PHP, no acepta HTML
 o JavaScript remoto como configuración y no toca Complianz, Site Kit, el CMP,
@@ -242,12 +253,47 @@ ejecutarse como el usuario OS del sitio `propdental.es`, no como `root`. El
 primer intento 1.7 como root dejó la caché privada ilegible; se reparó ownership
 y se repitió como el usuario del sitio. El cron conserva el usuario correcto.
 
+## Cierre operativo `alpha.9` en Propdental (2026-07-20)
+
+Estado actual y procedimiento reproducible:
+
+1. Se retiraron las publicaciones de `/cita/` y
+   `/cita/primera-visita-hospitalet/`; ambas responden `410`. Retirar contenido
+   no desinstala ni desactiva el runtime global.
+2. Se desactivó únicamente el plugin legado `clinicaclick 1.1.7`. El plugin
+   `clinicaclick-web` permanece activo y WP-CLI reporta `2.0.0-alpha.9`.
+3. Home y las cinco páginas de clínica se comprobaron con exactamente un
+   loader y un bridge; no contienen HMAC de intake en HTML/JS público.
+4. El relay de una página WordPress ordinaria se probó contra
+   `POST /_clinicaclick/events` después de retirar la última landing y devolvió
+   `200`. Estas páginas usan `CCW_Config::runtime_configuration()` y omiten
+   `X-Clinicaclick-Web-Artifact`; una ruta firmada de landing conserva el
+   contrato estricto de artefacto.
+5. Un evento real con analytics concedido y ads denegado persistió en el scope
+   esperado. Un lead sintético se creó una sola vez y el reintento con el mismo
+   `event_id` devolvió el mismo ID; hubo cero intentos Google. El cleanup
+   `dry-run -> simulate -> apply` dejó lead, auditoría y evento a cero.
+6. Antes del despliegue se guardó un rollback root-only fuera del docroot en
+   `/furanet/sites/propdental.es/web/.clinicaclick-web-rollbacks/plugin-before-alpha9-20260720T0730Z/clinicaclick-web-alpha8.tgz`,
+   SHA-256
+   `92d0077446ef917b1b408edb3c61ff075e5957c7b87643b6910fda88fd1732f9`.
+7. El ZIP genérico determinista `alpha.9` tiene SHA-256
+   `daf4f84500ac559901c0532a324b36ae6091ede5c6710fd148f70e9cdf2b2f45`.
+   El harness PHP pasa **41/41**; paquete provisionado **6/6** y servicios de
+   proyectos/publicaciones verdes.
+
+No ejecutar WP-CLI de sincronización como `root`: debe usarse el propietario
+OS del sitio. Si una ejecución administrativa deja `routes.json` con ownership
+incorrecto, el plugin falla con `ccw_route_registry_invalid`; corregir el
+owner al usuario del sitio y repetir la sincronización antes de interpretar el
+fallo como problema de firma o publicación.
+
 ## Compatibilidad y límites de esta versión
 
 - WordPress 5.8 o posterior; PHP 7.4 o posterior; extensión Sodium obligatoria.
 - Activación por sitio. La activación de red multisite falla cerrada en esta
   primera versión.
-- `alpha.8` admite hasta 20 rutas activas por instalación mediante desired
+- `alpha.9` admite hasta 20 rutas activas por instalación mediante desired
   state schema 2. El piloto histórico conserva `/cita/`; las adicionales usan
   `/cita/<slug>/` y el router elige el prefijo firmado más largo. La capacidad
   y el historial son conceptos distintos: un tombstone confirmado libera un
@@ -382,20 +428,24 @@ clinicaclick-web/includes/class-ccw-trust-store.php
 clinicaclick-web/config/installation.php
 ```
 
-La allowlist fuente actual de `alpha.8` contiene 17 ficheros en el ZIP genérico
+La allowlist fuente actual de `alpha.9` contiene 17 ficheros en el ZIP genérico
 y 18 en el provisionado; el único fichero adicional es
 `config/installation.php`. Estos recuentos se han contrastado con los 13
 includes presentes y con ambos builders actuales. Fixtures, tests, tools,
 claves privadas y `.env` nunca entran en el paquete. El provisionado histórico
 de `alpha.7` tenía 17 ficheros porque todavía no incluía
 `class-ccw-site-claim.php`; ese recuento histórico no describe el corte vigente
-`alpha.8`.
+`alpha.9`.
 
-Evidencia del paquete final instalado: el ZIP genérico de 17 entradas tiene
+Evidencia histórica de `alpha.8`: el ZIP genérico de 17 entradas tenía
 SHA-256
 `126e0fb6f77ad08e1c2ed53b673ed094dd25de8ebd99e28d0f167e8439409bc7`.
 El provisionado final de 18 entradas tiene SHA-256
 `86792a2ebf69cd9c36f529f98b1528e2ed5b08c9fe5d33216ea33b348695479f`.
+El ZIP genérico actual `alpha.9` tiene SHA-256
+`daf4f84500ac559901c0532a324b36ae6091ede5c6710fd148f70e9cdf2b2f45`;
+cada provisionado incorpora la identidad opaca de su instalación y se audita
+por separado.
 
 Variables del backend/control plane necesarias fuera de Git:
 
@@ -482,8 +532,9 @@ incluye en logs/reportes.
 
 La rotación de una instalación conectada es staged: el ZIP nuevo lleva un
 token candidato con caducidad por defecto de 24 horas, mientras el token activo
-continúa autorizando el servicio. Solo un reporte schema 2 válido de
-`alpha.8` promueve el candidato bajo lock; desde ese instante el token anterior
+continúa autorizando el servicio. Solo un reporte schema 2 válido de una
+versión compatible (`alpha.8` o posterior) promueve el candidato bajo lock;
+desde ese instante el token anterior
 falla. Reemitir otro candidato invalida el staged previo. En una instalación
 todavía `pending`, reemitir reemplaza el token primario inmediatamente porque
 no existe tráfico que preservar. Revocar elimina ambos slots.
@@ -637,7 +688,7 @@ Accept: application/json
 X-CC-Signature: <HMAC-SHA256 hexadecimal del body exacto>
 X-CC-Event-Id: ccw_<64 hex>
 X-Clinicaclick-Web-Artifact: <hash activo>
-X-Clinicaclick-Plugin-Version: 2.0.0-alpha.8
+X-Clinicaclick-Plugin-Version: 2.0.0-alpha.9
 ```
 
 No envía el bearer de instalación. El payload fija server-side
@@ -667,7 +718,7 @@ Solo los endpoints de control de la instalación reciben:
 
 ```http
 Authorization: Bearer <installation token>
-X-Clinicaclick-Plugin-Version: 2.0.0-alpha.8
+X-Clinicaclick-Plugin-Version: 2.0.0-alpha.9
 Accept: application/json
 ```
 
@@ -758,7 +809,8 @@ server-side,
 secuencia, estado y hash deseado. Una rotación cubre el descriptor normalizado
 de la nueva clave y está firmada por la clave anterior (`envelope.key_id`).
 
-En schema 2, usado por `alpha.8`, la raíz declara `schema_version=2` y
+En schema 2, usado por `alpha.8` y posteriores, la raíz declara
+`schema_version=2` y
 `desired_state.status=multi`. El estado incluye el descriptor y su envelope,
 un `registry_configuration` firmado y un mapa `artifacts` indexado por hash.
 El registro liga instalación, medición, secuencia monótona y como máximo 20
@@ -793,9 +845,10 @@ válida.
 3. Desde la raíz del backend, ejecutar `npm run test:marketing-web`; ese runner
    lanza los contratos Node y después `./wordpress/clinicaclick-web/tests/run.sh`.
    El harness PHP genera además un ZIP provisionado real que se extrae, carga y
-   activa desde sus propios ficheros empaquetados. El corte actual acredita
-   **320/320** contratos Node, **40/40** PHP y **3/3** pruebas de
-   interoperabilidad/compilador/paquete provisionado.
+   activa desde sus propios ficheros empaquetados. El corte completo anterior
+   acreditó **320/320** contratos Node, **40/40** PHP y **3/3** de
+   interoperabilidad. El delta `alpha.9` acredita **41/41** PHP, **6/6** del
+   paquete provisionado y los servicios focales de proyectos/publicaciones.
 4. En un WordPress desechable, definir una caché privada fuera del document
    root, instalar el ZIP provisionado y activar el plugin.
 5. Antes de aceptar el alta, comprobar que el endpoint temporal de claim expone
@@ -819,7 +872,7 @@ conserva publicación/readback, relay atribuible con limpieza, rollback y
 monitor de `/cita/` ya probados antes del upgrade. No se debe reinterpretar esa
 evidencia histórica como despliegue de `alpha.8`.
 
-### Rollout controlado a `alpha.8` en Propdental
+### Rollout controlado histórico a `alpha.8` en Propdental
 
 1. Las siete migraciones `20260718230000`, `20260718233000`,
    `20260719090000`, `20260719091500`, `20260719093000`, `20260719094500` y
@@ -1036,7 +1089,7 @@ explícita `ccw_purge_on_uninstall=true`.
 ```bash
 ./tests/run.sh
 ./tools/build-zip.sh
-sha256sum dist/clinicaclick-web-2.0.0-alpha.8.zip
+sha256sum dist/clinicaclick-web-2.0.0-alpha.9.zip
 ```
 
 El builder copia una allowlist, ordena entradas, fija un timestamp DOS y

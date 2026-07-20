@@ -661,11 +661,65 @@ function serializeProject(row, options = {}) {
     page_count: Number(options.pageCount ?? pages.length ?? 0),
     draft: serializeDraft(options.draft ?? project.draft),
     latest_revision: serializeRevision(options.latestRevision),
+    publication: options.publication || null,
     ...(options.publishingCapabilities ? {
       capabilities: options.publishingCapabilities,
     } : {}),
     created_at: project.created_at,
     updated_at: project.updated_at,
+  };
+}
+
+const PUBLICATION_STATUS_PRIORITY = Object.freeze({
+  published: 0,
+  publishing: 1,
+  pending: 2,
+  rolling_back: 3,
+  failed: 4,
+  retired: 5,
+  draft: 6,
+});
+
+function publicationPublicUrl(publication) {
+  const host = String(publication?.host || '').trim().toLowerCase();
+  const path = String(publication?.path || '/').trim();
+  if (!host || !path.startsWith('/')) return null;
+  return `https://${host}${path}`;
+}
+
+function summarizeProjectPublications(rows = []) {
+  const publications = rows.map(plain).filter(Boolean);
+  if (!publications.length) return null;
+  publications.sort((left, right) => {
+    const priority = (PUBLICATION_STATUS_PRIORITY[left.status] ?? 99)
+      - (PUBLICATION_STATUS_PRIORITY[right.status] ?? 99);
+    if (priority !== 0) return priority;
+    const leftUpdated = new Date(left.updated_at || 0).getTime() || 0;
+    const rightUpdated = new Date(right.updated_at || 0).getTime() || 0;
+    if (leftUpdated !== rightUpdated) return rightUpdated - leftUpdated;
+    return String(left.id || '').localeCompare(String(right.id || ''));
+  });
+  const selected = publications[0];
+  const status = String(selected.status || 'draft');
+  const state = status === 'published'
+    ? 'published'
+    : (['pending', 'publishing', 'rolling_back'].includes(status)
+        ? 'publishing'
+        : (status === 'failed' ? 'failed' : (status === 'retired' ? 'retired' : 'draft')));
+  return {
+    id: selected.id,
+    state,
+    status,
+    is_live: status === 'published',
+    channel: selected.channel || null,
+    public_url: publicationPublicUrl(selected),
+    active_revision_id: selected.activeRevisionId || null,
+    desired_revision_id: selected.desiredRevisionId || null,
+    published_at: selected.publishedAt || selected.published_at || null,
+    retired_at: selected.retiredAt || selected.retired_at || null,
+    updated_at: selected.updated_at || null,
+    total: publications.length,
+    live_count: publications.filter((publication) => publication.status === 'published').length,
   };
 }
 
@@ -756,12 +810,32 @@ async function listProjects({ actorId, query = {}, models = db, env = process.en
     if (!latestRevisionByProject.has(projectId)) latestRevisionByProject.set(projectId, revision);
   }
 
+  const publicationRows = projectIds.length > 0 && models.WebPublication?.findAll
+    ? await models.WebPublication.findAll({
+      where: { projectId: { [Op.in]: projectIds } },
+      attributes: [
+        'id', 'projectId', 'channel', 'host', 'path', 'status',
+        'activeRevisionId', 'desiredRevisionId',
+        'publishedAt', 'retiredAt', 'updated_at',
+      ],
+      order: [['updated_at', 'DESC'], ['id', 'ASC']],
+      raw: true,
+    })
+    : [];
+  const publicationsByProject = new Map();
+  for (const publication of publicationRows) {
+    const projectId = String(publication.projectId);
+    if (!publicationsByProject.has(projectId)) publicationsByProject.set(projectId, []);
+    publicationsByProject.get(projectId).push(publication);
+  }
+
   const total = Number(result.count || 0);
   return {
     scope: { type: scope.type, id: scope.id },
     capabilities: publishingCapabilities,
     items: rows.map((project) => serializeProject(project, {
       latestRevision: latestRevisionByProject.get(String(project.id)) || null,
+      publication: summarizeProjectPublications(publicationsByProject.get(String(project.id)) || []),
       publishingCapabilities,
     })),
     pagination: {

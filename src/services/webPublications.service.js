@@ -253,6 +253,37 @@ function serializePublication(row) {
   };
 }
 
+async function retireCampaignDestinationBindings(publication, retiredAt, { models, transaction }) {
+  if (!models.CampaignDestinationBinding?.findAll) return 0;
+  const bindings = await models.CampaignDestinationBinding.findAll({
+    where: { publicationId: publication.id },
+    transaction,
+    lock: transaction?.LOCK?.UPDATE,
+  });
+  let updated = 0;
+  for (const binding of bindings) {
+    if (
+      binding.publicationStatus === 'retired'
+      && binding.destinationStatus === 'blocked'
+      && binding.capabilityStatus === 'blocked'
+      && binding.lastErrorCode === 'campaign_destination_publication_retired'
+    ) continue;
+    await binding.update({
+      publicationStatus: 'retired',
+      destinationStatus: 'blocked',
+      capabilityStatus: 'blocked',
+      lastErrorCode: 'campaign_destination_publication_retired',
+      lastErrorDetails: {
+        publication_id: publication.id,
+        retired_at: retiredAt instanceof Date ? retiredAt.toISOString() : String(retiredAt || ''),
+      },
+      version: Number(binding.version || 0) + 1,
+    }, { transaction });
+    updated += 1;
+  }
+  return updated;
+}
+
 async function retireWordpressPublication({
   actorId,
   publicationId,
@@ -309,6 +340,11 @@ async function retireWordpressPublication({
       throw new WebPublicationServiceError('web_publication_not_found', 'La publicación no existe.', 404);
     }
     if (publication.status === 'retired') {
+      await retireCampaignDestinationBindings(
+        publication,
+        publication.retiredAt || new Date(),
+        { models, transaction }
+      );
       return { publication: serializePublication(publication), already_retired: true };
     }
     if (BUSY_PUBLICATION_STATUSES.has(publication.status)) {
@@ -348,6 +384,11 @@ async function retireWordpressPublication({
       lastErrorCode: null,
       lastErrorMessage: null,
     }, { transaction });
+    const retiredBindings = await retireCampaignDestinationBindings(
+      publication,
+      retiredAt,
+      { models, transaction }
+    );
     await models.WebAuditEvent.create({
       projectId: project.id,
       ...scopeColumns(scope),
@@ -362,6 +403,7 @@ async function retireWordpressPublication({
         host_hash: sha256(publication.host),
         path: publication.path,
         tombstone_pending: true,
+        campaign_destination_bindings_blocked: retiredBindings,
       },
     }, { transaction });
     return { publication: serializePublication(publication), already_retired: false };
