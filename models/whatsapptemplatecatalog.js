@@ -19,6 +19,8 @@ module.exports = (sequelize, DataTypes) => {
     {
       id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
       name: { type: DataTypes.STRING(100), allowNull: false, unique: true },
+      family_key: { type: DataTypes.STRING(100), allowNull: false },
+      locale: { type: DataTypes.STRING(5), allowNull: false, defaultValue: 'es' },
       display_name: { type: DataTypes.STRING(150), allowNull: true },
       category: { type: DataTypes.ENUM('UTILITY', 'MARKETING'), allowNull: false },
       body_text: { type: DataTypes.TEXT, allowNull: false },
@@ -36,6 +38,13 @@ module.exports = (sequelize, DataTypes) => {
       timestamps: true,
       createdAt: 'created_at',
       updatedAt: 'updated_at',
+      indexes: [
+        {
+          name: 'uniq_whatsapp_template_catalog_family_locale',
+          unique: true,
+          fields: ['family_key', 'locale'],
+        },
+      ],
     }
   );
 

@@ -51,7 +51,8 @@ function normalizeCatalogComponents(catalog) {
 
 function hasCurrentCatalogContract(catalog, instance) {
   if (!catalog || !instance) return false;
-  if (extractTechnicalTemplateVersion(catalog.name, instance.name) === null) return false;
+  const technicalFamilyName = cleanString(catalog.family_key) || cleanString(catalog.name);
+  if (extractTechnicalTemplateVersion(technicalFamilyName, instance.name) === null) return false;
   if (
     cleanString(catalog.category).toUpperCase()
     !== cleanString(instance.category).toUpperCase()
@@ -187,7 +188,10 @@ function buildWhatsappTemplateCatalogCoverage({
   ).sort();
   const remoteFamilyRows = (Array.isArray(familyRows) ? familyRows : []).filter((row) => (
     !!cleanString(row?.waba_id)
-    && extractTechnicalTemplateVersion(catalog?.name, row?.name) !== null
+    && extractTechnicalTemplateVersion(
+      cleanString(catalog?.family_key) || cleanString(catalog?.name),
+      row?.name
+    ) !== null
   ));
 
   const coverageByWaba = new Map();

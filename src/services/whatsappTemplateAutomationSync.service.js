@@ -56,12 +56,27 @@ async function recomposeAutomationsUsingTemplate({ templateInstance, logger = co
   const templateJson = templateInstance.toJSON ? templateInstance.toJSON() : templateInstance;
   if (!templateJson.catalog && Number(templateJson.catalog_template_id)) {
     const catalog = await WhatsappTemplateCatalog.findByPk(Number(templateJson.catalog_template_id), {
-      attributes: ['id', 'variables'],
+      attributes: ['id', 'variables', 'locale'],
       raw: true,
     });
     if (catalog) {
       templateJson.catalog = catalog;
     }
+  }
+  const catalogLocale = cleanString(templateJson?.catalog?.locale).toLowerCase().split(/[-_]/)[0] || 'es';
+  if (catalogLocale !== 'es') {
+    // Las variantes ca/en se resuelven por catalog_template_id dentro de
+    // language_routing. Antes del rollout no deben sustituir referencias base
+    // españolas por compartir el mismo nombre técnico en Meta.
+    return {
+      success: true,
+      skipped: true,
+      reason: 'localized_variant_resolved_at_runtime',
+      template_id: Number(templateJson.id) || null,
+      catalog_template_id: Number(templateJson.catalog_template_id) || null,
+      template_versions_touched: 0,
+      nodes_touched: 0,
+    };
   }
   const templateVariables = buildWhatsappTemplateVariableContract(templateJson);
   const templateId = Number(templateJson.id);

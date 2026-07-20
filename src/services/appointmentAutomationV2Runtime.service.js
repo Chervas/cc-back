@@ -12,6 +12,7 @@ const FlowExecutionV2 = db.FlowExecutionV2;
 const FlowExecutionLogV2 = db.FlowExecutionLogV2;
 const JobRequest = db.JobRequest;
 const { getIO } = require('./socket.service');
+const { normalizeWhatsappLocale } = require('../lib/whatsapp-template-locale');
 const { Op } = db.Sequelize;
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
 const REVIEW_AUTOMATION_TRIGGER = 'appointment_completed';
@@ -1039,6 +1040,16 @@ function buildExecutionContext({ cita, eventName, userName = null, userEmail = n
   };
 }
 
+async function resolveAppointmentCommunicationLanguage(cita) {
+  const patientId = toIntOrNull(cita?.paciente_id);
+  if (!patientId) return 'es';
+  const patient = await db.Paciente.findByPk(patientId, {
+    attributes: ['idioma_preferido'],
+    raw: true,
+  });
+  return normalizeWhatsappLocale(patient?.idioma_preferido, { fallback: 'es' }) || 'es';
+}
+
 async function enqueueExecutionForTemplate(cita, template, options = {}) {
   const citaId = toIntOrNull(cita?.id_cita);
   if (!citaId || !template) {
@@ -1100,6 +1111,7 @@ async function enqueueExecutionForTemplate(cita, template, options = {}) {
     userEmail: options.user_email || null,
     triggerData: options.trigger_data || null,
   });
+  context.communication_language = await resolveAppointmentCommunicationLanguage(cita);
 
   let createdExecution = null;
   let executionCreated = false;
