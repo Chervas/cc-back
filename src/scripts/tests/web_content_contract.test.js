@@ -26,6 +26,7 @@ function main() {
   });
   assert.match(faq.hash, /^[a-f0-9]{64}$/);
   assert.equal(faq.content.answer.includes('<'), false);
+  assert.deepEqual(faq.schema_config, { enabled: true, profile: 'auto', include_sources: false });
   const faqFields = contentFieldValues({ title: 'Nombre interno FAQ', content: faq.content });
   assert.equal(faqFields.title, 'Nombre interno FAQ');
   assert.equal(faqFields.question, faq.content.question);
@@ -72,6 +73,38 @@ function main() {
       content: { question: 'Pregunta', answer: 'Respuesta', raw_html: '<b>Respuesta</b>' },
     }),
     (error) => error instanceof WebContentValidationError && error.code === 'invalid_content_field'
+  );
+  const schemaConfigured = validateWebContentEntry({
+    type: 'article',
+    locale: 'es-ES',
+    title: 'Artículo con schema',
+    content: {
+      title: 'Implantes dentales',
+      excerpt: 'Guía clara.',
+      sections: [{ heading: 'Preparación', paragraphs: ['Primer párrafo.'] }],
+    },
+    schema_config: { enabled: true, profile: 'Article', include_sources: true },
+  });
+  assert.deepEqual(schemaConfigured.schema_config, { enabled: true, profile: 'Article', include_sources: true });
+  assert.notEqual(schemaConfigured.hash, validateWebContentEntry({
+    type: 'article',
+    locale: 'es-ES',
+    title: 'Artículo con schema',
+    content: {
+      title: 'Implantes dentales',
+      excerpt: 'Guía clara.',
+      sections: [{ heading: 'Preparación', paragraphs: ['Primer párrafo.'] }],
+    },
+    schema_config: { enabled: false, profile: 'Article', include_sources: true },
+  }).hash);
+  assert.throws(
+    () => validateWebContentEntry({
+      type: 'faq',
+      title: 'FAQ mal perfilada',
+      content: { question: 'Pregunta', answer: 'Respuesta' },
+      schema_config: { enabled: true, profile: 'Article' },
+    }),
+    (error) => error instanceof WebContentValidationError && error.code === 'invalid_content_schema_profile'
   );
 
   const media = validateWebMediaPresentation({

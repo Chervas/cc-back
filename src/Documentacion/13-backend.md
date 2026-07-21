@@ -1,5 +1,5 @@
 > **Módulo:** Arquitectura del Backend
-> **Última actualización:** 2026-07-19
+> **Última actualización:** 2026-07-20
 > **Relacionado con:** `cc-front/src/Documentacion/20.1-motor-flujos-v2.md` | documento operativo `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`
 > **Fuente canónica:** este archivo del repositorio backend. `cc-front/src/Documentacion/13-backend.md` es un espejo completo para conservar los enlaces internos del manual frontend; cualquier cambio se hace aquí primero y después se sincroniza el espejo.
 
@@ -27,6 +27,11 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
 - El runtime conserva `context.communication_language` por ejecución y resuelve
   familia, locale y WABA efectivo antes de crear el `Message`. Un reintento
   reutiliza esa selección; no mezcla idiomas ni cae silenciosamente a español.
+- Validación 2026-07-20: `whatsapp_multilingual_automation.test.js` confirma
+  que cada mensaje nuevo usa el idioma vivo del paciente enriquecido. Si se
+  activa catalán después del primer envío, los siguientes nodos pueden salir en
+  catalán; solo los reintentos del mismo `Message` conservan el snapshot ya
+  materializado.
 - El canary autorizado usó una única ejecución (`#954`, job `#32877`) y creó un
   único mensaje (`#49928`) en catalán hacia el número QA terminado en `0236`.
   Meta lo aceptó, entregó y marcó leído. No hubo segundo envío. El flujo terminó
@@ -153,10 +158,45 @@ Nunca sobrescribe una plantilla editada por un usuario. Su `down()` es no-op
 porque un rollback de código no debe reintroducir teléfonos ficticios ni el
 contenido inseguro anterior.
 
-### Renderer 1.7 y publicación WordPress
+### Renderer 1.8 y animaciones tipadas
 
-El compilador/renderer público permanece en
-`clinicaclick-web-renderer/1.7.0`. El cierre cubre cabecera y pie globales y una
+El compilador público activo pasa a `clinicaclick-web-renderer/1.8.0` para
+soportar animaciones de entrada cerradas en `WebDocument v1`. Cada nodo puede
+declarar `animation` con uno de estos valores: `none`, `fade_in`, `slide_up` o
+`scale_in`. El compilador genera únicamente clases propias `cc-animate-*` y
+keyframes deterministas protegidos por `prefers-reduced-motion`; no acepta
+`className`, `animate-[...]`, CSS inline ni estilos arbitrarios importados de
+ModSuite.
+
+La validación está duplicada y cubierta en frontend/backend:
+
+- JSON Schema backend `web-document-v1.schema.json`;
+- validador frontend `web-document.validation.ts`;
+- comandos del editor con undo/redo para `animation`;
+- preview del editor y compilador público;
+- tests `web_document_contract`, `web_artifact_compiler`,
+  `web_gallery_backend`, `web_artifacts_service` y focales frontend.
+
+### Schema de página con presets seguros
+
+`WebDocument v1` admite `page.seo.schema` como configuración editorial cerrada,
+no como JSON-LD libre. El contrato backend valida dos campos:
+
+- `page_type`: `auto`, `web_page` o `medical_web_page`;
+- `include_faq`: booleano para publicar u omitir `FAQPage` cuando la página
+  contiene preguntas/respuestas visibles.
+
+El compilador mantiene la allowlist: emite `WebPage` por defecto,
+`MedicalWebPage` solo cuando el preset lo solicita, y `FAQPage` únicamente si
+hay FAQs visibles y `include_faq !== false`. La prueba focal
+`web_artifact_compiler.test.js` cubre que una FAQ pueda permanecer visible en
+HTML sin publicar `FAQPage`, y `web_document_contract.test.js` rechaza presets
+fuera de la lista. No se aceptan tipos Schema arbitrarios, scripts ni contenido
+JSON-LD pegado por el usuario.
+
+### Renderer 1.7 y publicación WordPress histórica
+
+El cierre anterior con `clinicaclick-web-renderer/1.7.0` cubrió cabecera y pie globales y una
 galería real congelada por assets, además de SEO/Social/Schema, formulario,
 hashes, manifest, ETag y desired-state multi-ruta del plugin
 `clinicaclick-web 2.0.0-alpha.8`. La página publicada no ejecuta HTML, CSS o
@@ -477,7 +517,7 @@ fail-closed. Los locks mixtos de publicaciones clinic/group se ordenan por
 la suite integral de aquel corte pasó 351/351 y el cierre final posterior
 amplía Marketing Web a 354/354.
 
-Contrato live del renderer **1.7**: el compilador puede
+Contrato live del renderer **1.7/1.8**: el compilador puede
 completar `PostalAddress` y `OpeningHoursSpecification` desde la ubicación
 efectiva verificada, pero no reutiliza automáticamente fotos de Google Business
 Profile ni sus `googleUrl`. Para OG/Schema solo admite la imagen canónica de
@@ -486,6 +526,8 @@ imagen. La ficha GBP efectiva nunca se elige por `last_synced_at`: en modo de
 grupo se usa exclusivamente `business_profile_primary_location_id`; en modo
 clínica se exige una única asignación explícita y, si no existe, una única
 `ClinicBusinessLocation` directa que esté activa, verificada y no suspendida.
+La diferencia de `1.8` frente a `1.7` es el soporte de `animation` tipado y
+clases `cc-animate-*`; el contrato GBP/SEO anterior no cambia.
 Dos asignaciones o dos fichas directas candidatas son ambiguas y el compilador
 no completa dirección/horario desde Google. Los contratos primaria frente a
 reciente y doble ficha ambigua pasan **21/21** focales. La identidad inmutable
@@ -1869,7 +1911,7 @@ Reglas:
 - Las listas importadas/manuales de `mass_sends` no crean ni actualizan `Pacientes`, pero `POST /campaigns` cruza cada item con pacientes existentes del scope por telefono/email. Si hay match, guarda `MarketingPatientListItems.paciente_id` y mezcla en `custom_fields` variables estándar del paciente y `PatientCustomFields` existentes.
 - Si un contacto externo responde por WhatsApp, el webhook resuelve la conversacion por telefono. Si existe paciente se vincula `patient_id`; si no existe, se conserva contacto externo y el opt-out comercial se aplica por `phone_digits`.
 - QuickChat no debe crear `Paciente` ni `LeadIntake` para poder nombrar un contacto externo de una lista. Cuando una conversacion WhatsApp no tiene `patient_id` ni `lead_id`, el backend puede hidratar `conversation.contact` desde `MarketingPatientListItems` por `conversation_id` o telefono normalizado.
-- `GET /api/conversations` pagina por `limit/offset` y devuelve `X-Has-More`/`X-Next-Offset`; QuickChat debe consumirlo con scroll infinito. Tambien devuelve `X-Total-Unread`, calculado sobre todo el scope accesible y no sobre la pagina cargada, para que el badge de pendientes no dependa de la paginacion. La pestaña visible `Otros` mantiene `filter=leads` por compatibilidad, pero backend incluye `lead_id` y conversaciones externas de campañas presentes en `MarketingPatientListItems.conversation_id`, excluyendo siempre conversaciones con `patient_id`.
+- `GET /api/conversations` pagina por `limit/offset` y devuelve `X-Has-More`/`X-Next-Offset`; QuickChat debe consumirlo con scroll infinito. Tambien devuelve `X-Total-Unread`, calculado sobre todo el scope accesible y no sobre la pagina cargada, para que el badge de pendientes no dependa de la paginacion. Desde 2026-07-21 «pendiente» significa inbound posterior al último outbound real, no lectura por usuario. La pestaña visible `Otros` mantiene `filter=leads` por compatibilidad, pero backend incluye `lead_id` y conversaciones externas de campañas presentes en `MarketingPatientListItems.conversation_id`, excluyendo siempre conversaciones con `patient_id`.
 - `GET /api/conversations` y `X-Total-Unread` aplican ACL por categoría: conversaciones con `patient_id` requieren `quickchat.read_patients`, `channel=internal` requiere `quickchat.read_team` y conversaciones WhatsApp/externas sin paciente requieren `quickchat.read_leads`. La misma categoría se valida en `GET /api/conversations/:id/messages`, media, marcar leído, envío normal y `send-now`.
 - La busqueda de `GET /api/conversations?q=...` debe cubrir pacientes, leads, `contact_id` y contactos externos de listas/campanas (`MarketingPatientListItems.name`, `phone`, `email` y `custom_fields.nombre_completo`). Las busquedas con varias palabras aceptan coincidencia de frase completa o todos los tokens en cualquier campo, para que `Nombre Apellido2` encuentre pacientes con nombre compuesto o dos apellidos. No buscar en todo `Messages.content` desde este endpoint sin un indice/previsualizacion materializada, porque penaliza la bandeja paginada de QuickChat.
 - `POST /campaigns/:id/prepare` y `/test-send` validan todas las variables de la plantilla real contra los items `ready`; si falta algun valor devuelven `409` con `details.missing_variables[]` y no usan ejemplos de plantilla como fallback operativo.
@@ -3428,7 +3470,7 @@ En `.env` / `.env.example`:
 - En integración, las colas `BullMQ` deben ir aisladas con `QUEUE_PREFIX=integracion`. Si el proceso comparte prefijo con `staging` u otro backend, los workers pueden consumir webhooks/mensajes en el proceso equivocado y el socket del entorno activo deja de emitir a su propia UI.
 - Además, el realtime ya no depende solo del `ioInstance` local del proceso. `src/services/socket.service.js` publica y suscribe eventos por Redis (`clinicaclick:socket:events:<db>`), de forma que si el webhook real entra por `clinicaclick-auth` o cualquier otro backend PM2, `clinicaclick-integracion` recibe el evento y lo reemite a sus sockets conectados.
 - Ese bus también cubre runtime V2. Cuando integración recibe por Redis un `message:created` inbound originado en otro backend, `src/app.js` reejecuta `enqueueInboundResponseResume(...)` con la conversación canónica. Sin este paso, el mensaje entra en BD y se ve en QuickChat, pero el flujo se queda en `wait_response` porque el backend que procesó el webhook no tiene por qué tener el runtime V2 activo.
-- `Conversations.unread_count` se mantiene como dato agregado, pero el valor canónico de no leídos en UI es por usuario. `conversation.controller.js` recalcula `unread_count` desde `ConversationReads.last_read_at` también en endpoints de detalle (`getMessages`, `getConversationByPatient`, `getConversationByLead`) para evitar que una conversación abierta vuelva a mostrar badge tras recargar el hilo.
+- `Conversations.unread_count` se mantiene por compatibilidad, pero el valor canónico de la UI es el pendiente de respuesta calculado desde `Messages`: cuenta inbound visibles posteriores al último outbound no fallido y distinto de `event`. `ConversationReads.last_read_at` conserva posición de lectura, pero abrir el hilo no resuelve trabajo pendiente. Un outbound desde CRM o un eco de coexistencia móvil lo deja a cero. `conversationPendingReply.service.js` resuelve el lote sin N+1 y añade `pending_automation_attention=true` si existe una `Notifications.event=automation.system_notification` no leída para `data.quickChatConversationId`; la migración `20260721143000-index-notification-automation-attention.js` indexa `event + is_read`.
 - El evento `message:created` ya no puede limitarse a `{ content, message_type }`. Debe incluir `metadata` y, cuando el inbound no es texto plano, un `resume_text` explícito para que el runtime V2 no dependa de reconstruir semántica desde la UI.
 - Estados WhatsApp outbound:
   - `Messages.sent_at` representa cuándo se envió realmente el mensaje, no cuándo se entregó ni cuándo se leyó.
@@ -5979,6 +6021,19 @@ uno con un contrato JSON cerrado. Estados: `draft -> review -> published` y
 Publicar o archivar exige `marketing.web.review`; leer y editar usan
 `marketing.web.view|edit` dentro del scope explícito.
 
+Desde el corte del 2026-07-20, `WebContentEntries` y
+`WebContentEntryVersions` incluyen `schema_config` versionado. El valor por
+defecto es `{ enabled: true, profile: 'auto', include_sources: false }`. Los
+perfiles son cerrados y se validan por tipo de contenido: `faq` solo admite
+`auto|FAQPage|WebPage`, `article` `auto|Article|WebPage`,
+`professional_bio` `auto|Person|WebPage`, `testimonial`
+`auto|Review|CreativeWork`, `treatment_copy` `auto|MedicalWebPage|WebPage`,
+`category` `auto|CollectionPage|WebPage`, y los textos generales/legales solo
+sus variantes seguras `WebPage|CreativeWork`. Desactivar schema normaliza el
+perfil a `auto` y `include_sources=false`. El campo participa en el hash de
+contenido y en cada versión, por lo que cambiarlo es un cambio editorial
+auditable; no existe JSON-LD libre en API, frontend ni generación asistida.
+
 La API proyecta autorización efectiva, no obliga al frontend a inferirla:
 `capabilities.can_create`, `can_edit_own` y `can_review` describen al actor, y
 cada fila devuelve `can_edit` y `read_only`. El autor puede modificar su propio
@@ -6145,7 +6200,9 @@ El proveedor es OpenAI Responses API desde backend:
 
 Antes de persistir la petición se verifica que la credencial existe. El output
 vuelve a pasar por el validador canónico de `WebContentEntry`; un JSON válido
-para OpenAI no basta si incumple el contrato Clinicaclick. La procedencia
+para OpenAI no basta si incumple el contrato Clinicaclick. La propuesta puede
+incluir `schema_config`, pero se valida con el mismo contrato cerrado antes de
+aceptarse como borrador CMS; no puede publicar ni saltarse revisión. La procedencia
 audita proveedor, modelo efectivo, `response_id`, fecha, tokens,
 `application_state_store=false`, Structured Outputs y fuentes estructuradas.
 `estimated_cost_micros` y moneda quedan `null` hasta disponer de una tarifa

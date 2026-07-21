@@ -94,6 +94,25 @@ test('publica anchos dinámicos de columnas desde el modelo seguro de 12 partes'
   assert.match(css, /\.cc-section\.cc-mobile-tracks-12>\.cc-container\{display:grid;grid-template-columns:minmax\(0,12fr\)\}/);
 });
 
+test('publica animaciones tipadas como clases seguras generadas por el renderer', () => {
+  const input = fixture();
+  const sectionId = input.document.pages[0].root_node_ids[0];
+  const section = input.document.nodes[sectionId];
+  section.animation = 'slide_up';
+
+  const artifact = compileWebArtifact(input);
+  const stylesheetPath = Object.keys(artifact.files).find((path) => path.startsWith('assets/styles.'));
+  const css = artifact.files[stylesheetPath];
+  const html = artifact.files['index.html'];
+
+  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.8.0');
+  assert.match(html, /cc-animate-slide_up/);
+  assert.match(css, /\.cc-animate-slide_up\{animation:ccSlideUp \.46s cubic-bezier/);
+  assert.match(css, /@media\(prefers-reduced-motion:no-preference\)/);
+  assert.doesNotMatch(html, /animate-\[/);
+  assert.doesNotMatch(css, /style="/);
+});
+
 test('el favicon inline es determinista, generado por el compilador y no contiene markup ejecutable', () => {
   const first = faviconDataUrl('Clínica Centro');
   const second = faviconDataUrl('Clínica Centro');
@@ -650,6 +669,30 @@ test('FAQ se renderiza como disclosure seguro y su schema solo alcanza la págin
   assert.deepEqual(secondaryFaq.mainEntity.map((entry) => entry.name), ['¿Pregunta de otra página?']);
 });
 
+test('Schema configurable por página solo usa presets seguros y puede omitir FAQPage', () => {
+  const input = fixture();
+  const primarySection = Object.values(input.document.nodes).find((node) => node.type === 'section');
+  input.document.pages[0].seo.schema = {
+    page_type: 'medical_web_page',
+    include_faq: false,
+  };
+  input.document.nodes.faq_schema_config = {
+    id: 'faq_schema_config',
+    type: 'faq',
+    version: 1,
+    props: { question: '¿Publicar como FAQ?', answer: 'No en esta página.' },
+    children: [],
+  };
+  primarySection.children.push('faq_schema_config');
+
+  const artifact = compileWebArtifact(input);
+  const graph = artifact.pages[0].json_ld['@graph'];
+  assert.equal(graph.find((entry) => entry['@id']?.endsWith('#webpage'))['@type'], 'MedicalWebPage');
+  assert.equal(graph.some((entry) => entry['@type'] === 'FAQPage'), false);
+  assert.match(artifact.files['index.html'], /¿Publicar como FAQ\?/);
+  assert.doesNotMatch(artifact.files['index.html'], /LocalBusiness<script>/);
+});
+
 test('renderiza globals una vez y los incluye en SEO, Schema e intake de cada página efectiva', () => {
   const input = fixture();
   const pageForm = Object.values(input.document.nodes).find((node) => node.type === 'intake_form');
@@ -796,7 +839,7 @@ test('renderiza globals una vez y los incluye en SEO, Schema e intake de cada p�
   assert.match(secondaryHtml, /name="web_page_id" value="page_global_secondary"/);
 });
 
-test('renderer 1.7 honra tokens, responsive, fuentes e imagen focal en CSS de producción', () => {
+test('renderer 1.8 honra tokens, responsive, fuentes e imagen focal en CSS de producción', () => {
   const input = fixture();
   const section = Object.values(input.document.nodes).find((node) => node.type === 'section');
   section.props.layout = 'grid';
@@ -850,7 +893,7 @@ test('renderer 1.7 honra tokens, responsive, fuentes e imagen focal en CSS de pr
   const cssPath = Object.keys(artifact.files).find((path) => path.endsWith('.css'));
   const css = artifact.files[cssPath];
   const html = artifact.files['index.html'];
-  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.7.0');
+  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.8.0');
   assert.match(html, /cc-layout-grid cc-cols-4[^"\n]*cc-bg-brand[^"\n]*cc-width-wide[^"\n]*cc-pt-2xl[^"\n]*cc-radius-full[^"\n]*cc-shadow-lg[^"\n]*cc-mobile-cols-1/);
   assert.match(html, /cc-fit-contain cc-aspect-21-9 cc-focal-37-62/);
   assert.match(html, /<div class="cc-image-frame"><img[^>]*width="2100" height="900">/);

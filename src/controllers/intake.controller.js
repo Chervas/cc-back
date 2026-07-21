@@ -6,6 +6,7 @@ const { Op, literal } = db.Sequelize;
 
 const LeadIntake = db.LeadIntake;
 const LeadAttributionAudit = db.LeadAttributionAudit;
+const LeadContactAttempt = db.LeadContactAttempt;
 const FormSubmissionEvent = db.FormSubmissionEvent;
 const Conversation = db.Conversation;
 const Message = db.Message;
@@ -34,6 +35,7 @@ const {
 const webEventsService = require('../services/webEvents.service');
 const { getIO } = require('../services/socket.service');
 const jobRequestsService = require('../services/jobRequests.service');
+const leadAutoReplyService = require('../services/leadAutoReply.service');
 const {
   enqueueGoogleDataManagerControlPlaneReconciliation,
 } = require('../services/googleDataManagerDiagnosticsEnqueue.service');
@@ -112,6 +114,9 @@ const {
   uploadScheduleForLinkedAppointment,
 } = require('../services/leadQualificationMilestone.service');
 const {
+  getPendingReplyStatesByConversationIds,
+} = require('../services/conversationPendingReply.service');
+const {
   buildWebLandingAttributionSteps,
   resolveWebLandingAttribution,
 } = require('../services/webLandingAttribution.service');
@@ -170,6 +175,20 @@ const requireIntakeConfigScopeAccess = async (req, res, { clinicId = null, group
   const allowed = await hasMarketingClinicScopeAccess({ userId, clinicIds, access });
   if (allowed) return true;
   res.status(403).json({ success: false, error: 'scope_forbidden' });
+  return false;
+};
+
+const requireLeadAutomationClinicAccess = async (req, res, clinicId) => {
+  if (!(await requireIntakeConfigScopeAccess(req, res, { clinicId, access: 'write' }))) return false;
+  const actorId = parseInteger(req.userData?.userId);
+  if (isGlobalAdmin(actorId)) return true;
+  const allowed = actorId !== null && await canUserAccessFeature({
+    actorId,
+    featureKey: 'leads.manage',
+    clinicId,
+  }).catch(() => false);
+  if (allowed) return true;
+  res.status(403).json({ success: false, error: 'lead_manage_forbidden' });
   return false;
 };
 
@@ -577,6 +596,8 @@ const redactLeadForPrivacy = (lead) => {
     formSubmissionEvents: [],
     historial_contactos: [],
     conversation_id: null,
+    pending_whatsapp_reply_count: 0,
+    pending_automation_attention: false,
   });
 };
 
@@ -623,7 +644,8 @@ const buildLeadSearchConditions = (search, {
 
   conditions.push({ utm_campaign: { [Op.like]: term } });
   if (includeCampaignRelation) {
-    conditions.push({ '$campana.nombre$': { [Op.like]: term } });
+    // Sequelize does not map nested $alias.attribute$ paths to the physical field name.
+    conditions.push({ '$campana.nombre_campana$': { [Op.like]: term } });
   }
 
   const normalizedSource = rawTerm.toLowerCase();
@@ -779,7 +801,8 @@ const enrichLeadsWithPatientMatches = async (leadRows = []) => {
   if (!phoneSet.size && !emailSet.size) {
     return leads.map((lead) => ({
       ...lead,
-      patient_match: null
+      patient_match: null,
+      es_paciente: ['acudio_cita', 'convertido'].includes(String(lead?.status_lead || '').trim().toLowerCase()),
     }));
   }
 
@@ -810,7 +833,62 @@ const enrichLeadsWithPatientMatches = async (leadRows = []) => {
     return {
       ...lead,
       patient_match: patientMatch,
-      es_paciente: !!patientMatch
+      // Al agendar se crea la ficha técnica del paciente, pero comercialmente
+      // el lead no se convierte hasta que acude a clínica.
+      es_paciente: ['acudio_cita', 'convertido'].includes(String(lead?.status_lead || '').trim().toLowerCase()),
+    };
+  });
+};
+
+const enrichLeadsWithConversationState = async (leadRows = []) => {
+  const leads = leadRows.map((lead) => toPlain(lead));
+  const leadIds = Array.from(new Set(
+    leads
+      .map((lead) => parseInteger(lead?.id))
+      .filter((id) => id !== null)
+  ));
+
+  if (!leads.length || !leadIds.length || !Conversation) {
+    return leads.map((lead) => ({
+      ...lead,
+      conversation_id: lead?.conversation_id || null,
+      pending_whatsapp_reply_count: 0,
+      pending_automation_attention: false,
+    }));
+  }
+
+  const conversations = await Conversation.findAll({
+    where: {
+      lead_id: { [Op.in]: leadIds },
+      channel: 'whatsapp',
+    },
+    attributes: ['id', 'lead_id', 'last_message_at', 'updatedAt'],
+    order: [['last_message_at', 'DESC'], ['updatedAt', 'DESC'], ['id', 'DESC']],
+    raw: true,
+  });
+
+  const conversationByLead = new Map();
+  conversations.forEach((conversation) => {
+    const leadId = parseInteger(conversation.lead_id);
+    if (leadId !== null && !conversationByLead.has(leadId)) {
+      conversationByLead.set(leadId, conversation);
+    }
+  });
+
+  const pendingStates = await getPendingReplyStatesByConversationIds([
+    ...Array.from(conversationByLead.values()).map((conversation) => conversation.id),
+    ...leads.map((lead) => lead?.conversation_id),
+  ]);
+
+  return leads.map((lead) => {
+    const conversation = conversationByLead.get(parseInteger(lead?.id));
+    const conversationId = parseInteger(conversation?.id) || parseInteger(lead?.conversation_id);
+    const pendingState = conversationId !== null ? pendingStates.get(conversationId) : null;
+    return {
+      ...lead,
+      conversation_id: conversationId,
+      pending_whatsapp_reply_count: pendingState?.count || 0,
+      pending_automation_attention: pendingState?.requiresAutomationAttention === true,
     };
   });
 };
@@ -989,7 +1067,8 @@ const enrichLeadsWithAttributionView = async (leadRows = []) => {
 const enrichLeadsForUi = async (leadRows = []) => {
   const withAttribution = await enrichLeadsWithAttributionView(leadRows);
   const withPatientMatches = await enrichLeadsWithPatientMatches(withAttribution);
-  return enrichLeadsWithLinkedAppointments(withPatientMatches);
+  const withAppointments = await enrichLeadsWithLinkedAppointments(withPatientMatches);
+  return enrichLeadsWithConversationState(withAppointments);
 };
 
 const resolveClinicIdsForSocket = async ({ clinicId, groupId }) => {
@@ -2141,6 +2220,18 @@ exports.ingestLead = asyncHandler(async (req, res) => {
 
   // Esta segunda acción pública termina aquí: representa solo el resumen
   // interno y jamás invoca Meta CAPI, Google Ads ni una salida de WhatsApp.
+  if (lead && shouldEmitLeadCreated && cleanString(lead.source).toLowerCase() !== 'call_click') {
+    try {
+      await leadAutoReplyService.enqueueForLead({
+        lead,
+        eventKind: 'write',
+        eventAt: lead.created_at || lead.createdAt || new Date(),
+      });
+    } catch (automationError) {
+      console.warn('⚠️ No se pudo encolar la respuesta automática del lead:', automationError.message || automationError);
+    }
+  }
+
   if (isDirectQuickChatSummary) {
     if (lead && shouldEmitLeadCreated) {
       try {
@@ -4920,9 +5011,10 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
     }
 
     if (lead) {
+      const callInitiatedAt = new Date();
       const updatePayload = {
         call_initiated: true,
-        call_initiated_at: new Date(),
+        call_initiated_at: callInitiatedAt,
         call_outcome: null,
         call_outcome_at: null,
         call_outcome_notes: null,
@@ -4935,6 +5027,16 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
         updatePayload.grupo_clinica_id = resolvedGroupId;
       }
       await lead.update(updatePayload);
+
+      try {
+        await leadAutoReplyService.enqueueForLead({
+          lead,
+          eventKind: 'call',
+          eventAt: callInitiatedAt,
+        });
+      } catch (automationError) {
+        console.warn('⚠️ No se pudo encolar la respuesta automática tras la llamada:', automationError.message || automationError);
+      }
 
       try {
         await LeadAttributionAudit.create({
@@ -5112,10 +5214,29 @@ exports.receiveMetaWebhook = asyncHandler(async (req, res) => {
       };
 
       try {
-        await dedupeAndCreateLead(leadPayload, { change: changeValue, meta_lead_data: leadData }, { meta_page_id: pageId });
+        const createdLead = await dedupeAndCreateLead(
+          leadPayload,
+          { change: changeValue, meta_lead_data: leadData },
+          { meta_page_id: pageId }
+        );
+        await leadAutoReplyService.enqueueForLead({
+          lead: createdLead,
+          eventKind: 'write',
+          eventAt: createdLead.created_at || createdLead.createdAt || new Date(),
+        });
       } catch (err) {
         if (err.status === 409) {
           console.info(`Lead Meta duplicado (${err.message}) -> ${err.existingId}`);
+          const existingLead = err.existingId
+            ? await LeadIntake.findByPk(err.existingId)
+            : null;
+          if (existingLead) {
+            await leadAutoReplyService.enqueueForLead({
+              lead: existingLead,
+              eventKind: 'write',
+              eventAt: existingLead.created_at || existingLead.createdAt || new Date(),
+            });
+          }
           continue;
         }
         console.error('Error creando LeadIntake desde Meta webhook:', err.message || err);
@@ -5225,6 +5346,45 @@ const buildLeadListPayload = async (query = {}, context = {}) => {
 exports.listLeads = asyncHandler(async (req, res) => {
   const payload = await buildLeadListPayload(req.query, { userId: req.userData?.userId });
   res.status(200).json(payload);
+});
+
+exports.getLeadAutoReplyStatus = asyncHandler(async (req, res) => {
+  const clinicId = parseInteger(req.query.clinic_id || req.query.clinicId);
+  if (clinicId === null) {
+    return res.status(400).json({ success: false, error: 'clinic_id_required' });
+  }
+  if (!(await requireLeadAutomationClinicAccess(req, res, clinicId))) return;
+  const status = await leadAutoReplyService.getStatus(clinicId);
+  return res.status(200).json({ success: true, data: status });
+});
+
+exports.updateLeadAutoReply = asyncHandler(async (req, res) => {
+  const clinicId = parseInteger(req.body?.clinic_id || req.body?.clinicId);
+  if (clinicId === null) {
+    return res.status(400).json({ success: false, error: 'clinic_id_required' });
+  }
+  if (!(await requireLeadAutomationClinicAccess(req, res, clinicId))) return;
+  try {
+    const hasConfig = req.body?.config && typeof req.body.config === 'object' && !Array.isArray(req.body.config);
+    const status = hasConfig
+      ? await leadAutoReplyService.saveConfig({
+          clinicId,
+          actorUserId: parseInteger(req.userData?.userId) || 1,
+          input: {
+            ...req.body.config,
+            ...(req.body.active !== undefined ? { active: req.body.active === true } : {}),
+          },
+        })
+      : await leadAutoReplyService.setActive({ clinicId, active: req.body?.active === true });
+    return res.status(200).json({ success: true, data: status });
+  } catch (error) {
+    return res.status(error.status || 500).json({
+      success: false,
+      error: error.code || 'lead_auto_reply_update_failed',
+      message: error.message,
+      details: error.details || null,
+    });
+  }
 });
 
 exports.searchLeads = asyncHandler(async (req, res) => {
@@ -5740,10 +5900,12 @@ exports.registrarContacto = asyncHandler(async (req, res) => {
   const historial = lead.historial_contactos || [];
   
   // Añadir nuevo registro de contacto
+  const contactedAt = new Date();
   const nuevoContacto = {
-    fecha: new Date().toISOString(),
+    fecha: contactedAt.toISOString(),
     motivo: motivo || 'no_contesta',
     notas: notas || null,
+    canal: 'llamada',
     usuario_id: req.userData?.userId || null
   };
   
@@ -5790,7 +5952,7 @@ exports.registrarContacto = asyncHandler(async (req, res) => {
   const updatePayload = {
     historial_contactos: historial,
     num_contactos: (lead.num_contactos || 0) + 1,
-    ultimo_contacto: new Date(),
+    ultimo_contacto: contactedAt,
     // Registrar otro intento no degrada hitos CRM ya alcanzados. Volver a
     // `contactado` desde `cualificado` solo puede ser una transición explícita.
     status_lead: ['cualificado', 'citado', 'acudio_cita', 'convertido', 'descartado']
@@ -5808,6 +5970,24 @@ exports.registrarContacto = asyncHandler(async (req, res) => {
   }
 
   await lead.update(updatePayload);
+
+  if (LeadContactAttempt) {
+    try {
+      await LeadContactAttempt.create({
+        lead_intake_id: lead.id,
+        usuario_id: req.userData?.userId || null,
+        canal: 'llamada',
+        motivo: motivo || 'no_contesta',
+        notas: notas || null,
+        created_at: contactedAt,
+        updated_at: contactedAt,
+      });
+    } catch (attemptErr) {
+      // El historial legado ya conserva el contacto; no hacemos fallar una
+      // acción del usuario por una incidencia de normalización secundaria.
+      console.warn('⚠️ No se pudo normalizar el intento de contacto:', attemptErr.message || attemptErr);
+    }
+  }
 
   // Registrar auditoría
   try {

@@ -302,7 +302,23 @@
           ]
         },
         "index": { "type": "boolean" },
-        "follow": { "type": "boolean" }
+        "follow": { "type": "boolean" },
+        "schema": {
+          "$ref": "#/definitions/pageSchema"
+        }
+      }
+    },
+    "pageSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["page_type", "include_faq"],
+      "properties": {
+        "page_type": {
+          "enum": ["auto", "web_page", "medical_web_page"]
+        },
+        "include_faq": {
+          "type": "boolean"
+        }
       }
     },
     "styleTokens": {
@@ -334,6 +350,9 @@
     },
     "spacing": {
       "enum": ["none", "xs", "sm", "md", "lg", "xl", "2xl"]
+    },
+    "animationPreset": {
+      "enum": ["none", "fade_in", "slide_up", "scale_in"]
     },
     "responsive": {
       "type": "object",
@@ -409,6 +428,9 @@
             "column_tracks": { "$ref": "#/definitions/columnTracks" },
             "semantic_tag": {
               "enum": ["section", "header", "main", "aside", "footer"]
+            },
+            "structure_role": {
+              "enum": ["section", "container", "row", "column"]
             }
           }
         },
@@ -420,6 +442,7 @@
         },
         "style_tokens": { "$ref": "#/definitions/styleTokens" },
         "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
@@ -464,6 +487,7 @@
         },
         "style_tokens": { "$ref": "#/definitions/styleTokens" },
         "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
@@ -503,6 +527,7 @@
         },
         "style_tokens": { "$ref": "#/definitions/styleTokens" },
         "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
@@ -529,6 +554,7 @@
         },
         "style_tokens": { "$ref": "#/definitions/styleTokens" },
         "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
@@ -554,6 +580,7 @@
         },
         "style_tokens": { "$ref": "#/definitions/styleTokens" },
         "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
@@ -590,6 +617,7 @@
         },
         "style_tokens": { "$ref": "#/definitions/styleTokens" },
         "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
@@ -643,6 +671,7 @@
         },
         "style_tokens": { "$ref": "#/definitions/styleTokens" },
         "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
@@ -676,6 +705,7 @@
         },
         "style_tokens": { "$ref": "#/definitions/styleTokens" },
         "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
@@ -763,6 +793,7 @@
         },
         "style_tokens": { "$ref": "#/definitions/styleTokens" },
         "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
@@ -818,6 +849,7 @@
         },
         "style_tokens": { "$ref": "#/definitions/styleTokens" },
         "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },

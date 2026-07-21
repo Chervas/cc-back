@@ -56,6 +56,22 @@ function isWhatsappGlobalAdmin(userId) {
   return ADMIN_USER_IDS.includes(Number(userId));
 }
 
+function getWhatsappTemplateUsages(template) {
+  let variables = template?.variables;
+  if (typeof variables === 'string') {
+    try {
+      variables = JSON.parse(variables);
+    } catch (_error) {
+      variables = [];
+    }
+  }
+  return Array.from(new Set(
+    (Array.isArray(variables) ? variables : [])
+      .map((variable) => String(variable?.template_usage || '').trim().toLowerCase())
+      .filter(Boolean)
+  ));
+}
+
 async function assertWhatsappTemplateClinicAccess({ clinicId, userId }) {
   const safeClinicId = Number(clinicId);
   const safeUserId = Number(userId);
@@ -1489,6 +1505,7 @@ exports.listTemplatesForClinic = async (req, res) => {
           return {
             ...publicJson,
             variables: buildWhatsappTemplateVariableContract(json),
+            template_usages: getWhatsappTemplateUsages(json),
             usage,
             is_system: isSystem,
             is_owned_by_current_user: isOwnedByCurrentUser,
@@ -1709,6 +1726,7 @@ exports.createCustomTemplate = async (req, res) => {
       template: {
         ...json,
         variables: buildWhatsappTemplateVariableContract(json),
+        template_usages: getWhatsappTemplateUsages(rawJson),
         is_system: false,
         is_owned_by_current_user: true,
         is_legacy_unassigned: false,

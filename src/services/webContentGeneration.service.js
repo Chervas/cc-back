@@ -717,6 +717,7 @@ function serializeGeneration(row) {
       title: value.proposal.title,
       content: value.proposal.content,
       sources: Array.isArray(value.proposal.sources) ? value.proposal.sources : [],
+      schema_config: value.proposal.schema_config || { enabled: true, profile: 'auto', include_sources: false },
     }
     : null;
   const provenance = value.provenance && typeof value.provenance === 'object'
@@ -1263,6 +1264,7 @@ async function executeGeneration(payload = {}, dependencies = {}) {
       title: normalized.title,
       content: normalized.content,
       sources: normalized.sources,
+      schema_config: normalized.schema_config,
     };
     const safeSelectedContext = providerSafeContextSnapshot(row.contextSnapshot).selected_context;
     const provenance = {
@@ -1381,6 +1383,7 @@ async function acceptGeneration({
         title: row.proposal.title,
         content: row.proposal.content,
         sources: row.proposal.sources || [],
+        schema_config: row.proposal.schema_config,
       },
       requestId,
       models,

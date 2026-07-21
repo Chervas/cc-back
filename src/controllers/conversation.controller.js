@@ -7,6 +7,9 @@ const whatsappService = require('../services/whatsapp.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { canUserAccessFeature } = require('../lib/access-policy');
 const { canUserSelectWhatsappTemplate } = require('../lib/whatsapp-template-ownership');
+const {
+  getPendingReplyStatesByConversationIds,
+} = require('../services/conversationPendingReply.service');
 
 const {
   Conversation,
@@ -421,38 +424,6 @@ function ensureAccess({ clinicIds, isAggregateAllowed }, requestedClinicId) {
   return parsed.every((id) => clinicIds.includes(id));
 }
 
-async function getReadMap(userId, conversationIds) {
-  if (!conversationIds.length) return new Map();
-  const reads = await ConversationRead.findAll({
-    where: {
-      user_id: userId,
-      conversation_id: { [Op.in]: conversationIds },
-    },
-    raw: true,
-  });
-  return new Map(reads.map((r) => [r.conversation_id, r.last_read_at]));
-}
-
-async function getUnreadCountForConversation(conversationId, lastReadAt) {
-  const where = { conversation_id: conversationId, direction: 'inbound' };
-  if (lastReadAt) {
-    where.createdAt = { [Op.gt]: lastReadAt };
-  }
-  return Message.count({ where });
-}
-
-async function getUnreadCountsByConversation(userId, conversationIds) {
-  const readMap = await getReadMap(userId, conversationIds);
-  const counts = await Promise.all(
-    conversationIds.map(async (conversationId) => {
-      const lastReadAt = readMap.get(conversationId);
-      const count = await getUnreadCountForConversation(conversationId, lastReadAt);
-      return [conversationId, count];
-    })
-  );
-  return new Map(counts);
-}
-
 async function enrichConversationUnreadForUser(userId, conversationLike) {
   if (!conversationLike) {
     return conversationLike;
@@ -468,8 +439,10 @@ async function enrichConversationUnreadForUser(userId, conversationLike) {
     return plain;
   }
 
-  const unreadMap = await getUnreadCountsByConversation(userId, [conversationId]);
-  plain.unread_count = unreadMap.get(conversationId) ?? 0;
+  const pendingStates = await getPendingReplyStatesByConversationIds([conversationId]);
+  const pendingState = pendingStates.get(conversationId);
+  plain.unread_count = pendingState?.count ?? 0;
+  plain.pending_automation_attention = pendingState?.requiresAutomationAttention === true;
   const [hydrated] = await hydrateMarketingContactFallbacks([plain]);
   return hydrated || plain;
 }
@@ -795,15 +768,27 @@ async function getTotalUnreadCountForUser(userId, clinicIds, isAggregateAllowed,
 
   const [row] = await db.sequelize.query(
     `
-      SELECT COUNT(m.id) AS total
-      FROM Messages m
-      INNER JOIN Conversations c ON c.id = m.conversation_id
-      LEFT JOIN ConversationReads cr
-        ON cr.conversation_id = c.id
-       AND cr.user_id = :userId
-      WHERE m.direction = 'inbound'
-        AND m.createdAt > COALESCE(cr.last_read_at, '1970-01-01')
-        AND c.clinic_id IN (:clinicIds)
+      SELECT COUNT(inbound.id) AS total
+      FROM Conversations c
+      LEFT JOIN (
+        SELECT outbound.conversation_id, MAX(outbound.id) AS last_outbound_id
+        FROM Messages outbound
+        INNER JOIN Conversations scoped_conversation
+          ON scoped_conversation.id = outbound.conversation_id
+        WHERE scoped_conversation.clinic_id IN (:clinicIds)
+          AND outbound.direction = 'outbound'
+          AND outbound.message_type <> 'event'
+          AND outbound.status <> 'failed'
+        GROUP BY outbound.conversation_id
+      ) last_outbound ON last_outbound.conversation_id = c.id
+      LEFT JOIN Messages inbound
+        ON inbound.conversation_id = c.id
+       AND inbound.direction = 'inbound'
+       AND inbound.message_type <> 'event'
+       AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(inbound.metadata, '$.qa_cleanup')), 'false') <> 'true'
+       AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(inbound.metadata, '$.hide_from_quickchat')), 'false') <> 'true'
+       AND inbound.id > COALESCE(last_outbound.last_outbound_id, 0)
+      WHERE c.clinic_id IN (:clinicIds)
         AND ${categorySql}
     `,
     { replacements, type: db.Sequelize.QueryTypes.SELECT }
@@ -960,7 +945,7 @@ exports.listConversations = async (req, res) => {
       offset,
       include: [
         { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'foto', 'telefono_movil', 'email'] },
-        { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email'] },
+        { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email', 'status_lead'] },
         {
           model: Message,
           as: 'messages',
@@ -975,7 +960,7 @@ exports.listConversations = async (req, res) => {
     const conversations = hasMore ? conversationsPlusOne.slice(0, limit) : conversationsPlusOne;
 
     const conversationIds = conversations.map((c) => c.id);
-    const unreadMap = await getUnreadCountsByConversation(userId, conversationIds);
+    const pendingStates = await getPendingReplyStatesByConversationIds(conversationIds);
 
     const rawPayload = conversations.map((c) => {
       const data = c.toJSON();
@@ -984,7 +969,9 @@ exports.listConversations = async (req, res) => {
         || recentMessages[0]
         || null;
       delete data.messages;
-      data.unread_count = unreadMap.get(data.id) ?? 0;
+      const pendingState = pendingStates.get(Number(data.id));
+      data.unread_count = pendingState?.count ?? 0;
+      data.pending_automation_attention = pendingState?.requiresAutomationAttention === true;
       return data;
     });
     const payload = await hydrateMarketingContactFallbacks(rawPayload, { searchQuery });
@@ -1058,7 +1045,7 @@ exports.getMessages = async (req, res) => {
     let conversation = await Conversation.findByPk(conversationId, {
       include: [
         { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'foto', 'telefono_movil', 'email'] },
-        { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email'] },
+        { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email', 'status_lead'] },
       ],
     });
     if (!conversation) {
@@ -1077,7 +1064,7 @@ exports.getMessages = async (req, res) => {
         conversation = await Conversation.findByPk(canonical.id, {
           include: [
             { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'foto', 'telefono_movil', 'email'] },
-            { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email'] },
+            { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email', 'status_lead'] },
           ],
         });
       }
@@ -1295,6 +1282,8 @@ exports.markAsRead = async (req, res) => {
       last_read_at: new Date(),
     });
 
+    const pendingStates = await getPendingReplyStatesByConversationIds([Number(conversation.id)]);
+    const pendingState = pendingStates.get(Number(conversation.id));
     const totalUnread = await getTotalUnreadCountForUser(
       userId,
       clinicIds,
@@ -1307,7 +1296,8 @@ exports.markAsRead = async (req, res) => {
       io.to(room).emit('unread:updated', { totalUnreadCount: totalUnread || 0 });
       io.to(room).emit('conversation:updated', {
         id: conversation.id,
-        unread_count: 0,
+        unread_count: pendingState?.count ?? 0,
+        pending_automation_attention: pendingState?.requiresAutomationAttention === true,
         last_message_at: conversation.last_message_at,
       });
     }

@@ -136,7 +136,8 @@ const SAFE_REDACTED_KEYS = new Set([
   'created_at', 'updated_at', 'archived_at', 'nombre', 'apellidos',
   'privacy_redacted', 'privacy_access', 'source_trace', 'patient_match', 'es_paciente',
   'linked_appointment', 'recent_appointment', 'formSubmissionEvents',
-  'historial_contactos', 'conversation_id',
+  'historial_contactos', 'conversation_id', 'pending_whatsapp_reply_count',
+  'pending_automation_attention',
 ]);
 for (const field of Object.keys(redacted)) {
   assert.ok(SAFE_REDACTED_KEYS.has(field), `unexpected redacted field escaped allowlist: ${field}`);
@@ -156,7 +157,7 @@ for (const forbiddenSearchField of ['nombre', 'email', 'telefono', 'source_detai
     `${forbiddenSearchField} must not be searchable without leads.sensitive.view`);
 }
 assert.ok(publicSearchFields.includes('utm_campaign'));
-assert.ok(publicSearchFields.includes('$campana.nombre$'));
+assert.ok(publicSearchFields.includes('$campana.nombre_campana$'));
 
 const publicSourceSearch = buildLeadSearchConditions('google_ads', { canSearchSensitive: false });
 assert.ok(publicSourceSearch.some((condition) => condition.source === 'google_ads'));

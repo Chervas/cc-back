@@ -42,6 +42,11 @@ module.exports = (sequelize, DataTypes) => {
     title: { type: DataTypes.STRING(191), allowNull: false, validate: { len: [1, 191] } },
     content: { type: DataTypes.JSON, allowNull: false },
     sources: { type: DataTypes.JSON, allowNull: false, defaultValue: [] },
+    schemaConfig: {
+      type: DataTypes.JSON,
+      allowNull: true,
+      field: 'schema_config',
+    },
     contentHash: {
       type: DataTypes.STRING(64),
       allowNull: false,
@@ -76,12 +81,14 @@ module.exports = (sequelize, DataTypes) => {
           title: instance.title,
           content: instance.content,
           sources: instance.sources,
+          schema_config: instance.schemaConfig,
         });
         instance.type = normalized.type;
         instance.locale = normalized.locale;
         instance.title = normalized.title;
         instance.content = normalized.content;
         instance.sources = normalized.sources;
+        instance.schemaConfig = normalized.schema_config;
         instance.contentHash = normalized.hash;
       },
     },

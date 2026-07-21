@@ -132,6 +132,21 @@ function testSectionColumnTracksUseSafeTwelveColumnGrid() {
   assertInvalid(wrongLength, 'columnTracks');
 }
 
+function testNodeAnimationsUseClosedPresets() {
+  const valid = buildValidWebDocument();
+  valid.nodes.section_hero.animation = 'slide_up';
+  valid.nodes.text_intro.animation = 'fade_in';
+  assert.equal(validateWebDocument(valid).valid, true);
+
+  const invalid = buildValidWebDocument();
+  invalid.nodes.section_hero.animation = 'animate-[spin_1s_linear_infinite]';
+  assertInvalid(invalid, 'enum');
+
+  const css = buildValidWebDocument();
+  css.nodes.section_hero.style = { animation: 'spin 1s linear infinite' };
+  assertInvalid(css, 'forbiddenProperty');
+}
+
 function testGraphReferencesCyclesDepthAndOrphans() {
   const missing = buildValidWebDocument();
   missing.nodes.section_hero.children.push('node_missing');
@@ -341,6 +356,20 @@ function testTypedFaqIsPlainTextAndLeafOnly() {
   assertInvalid(wrongFaqTarget, 'bindingTarget');
 }
 
+function testPageSchemaUsesClosedPresets() {
+  const document = buildValidWebDocument();
+  document.pages[0].seo.schema = { page_type: 'medical_web_page', include_faq: false };
+  assert.equal(assertValidWebDocument(document).valid, true);
+
+  const arbitraryType = clone(document);
+  arbitraryType.pages[0].seo.schema.page_type = 'local_business';
+  assertInvalid(arbitraryType, 'enum');
+
+  const arbitraryPayload = clone(document);
+  arbitraryPayload.pages[0].seo.schema.raw_json_ld = { '@type': 'Thing' };
+  assertInvalid(arbitraryPayload, 'additionalProperties');
+}
+
 function testStructuralAndByteLimits() {
   const tooManyNodes = buildValidWebDocument();
   for (let index = 0; index < WEB_DOCUMENT_LIMITS.maxNodes; index += 1) {
@@ -428,11 +457,13 @@ function run() {
   testValidContractCoversInitialBlocks();
   testNoArbitraryCodeMarkupStylesOrClasses();
   testSectionColumnTracksUseSafeTwelveColumnGrid();
+  testNodeAnimationsUseClosedPresets();
   testGraphReferencesCyclesDepthAndOrphans();
   testSemanticImageFormButtonAndBindingRules();
   testTypedDividerAndSpacerAreClosedLeafNodes();
   testIntakeButtonTargetsStayInsideTheirEffectiveScope();
   testTypedFaqIsPlainTextAndLeafOnly();
+  testPageSchemaUsesClosedPresets();
   testStructuralAndByteLimits();
   testCanonicalSerializationAndHash();
   console.log('web_document_contract.test.js: ok');

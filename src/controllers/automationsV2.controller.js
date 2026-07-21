@@ -21,6 +21,7 @@ const Clinica = db.Clinica;
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
 const appointmentAutomationV2Runtime = require('../services/appointmentAutomationV2Runtime.service');
+const leadAutoReplyService = require('../services/leadAutoReply.service');
 const {
   mergeClinicLinksIntoContext,
   resolveClinicGoogleLocalLinks,
@@ -75,7 +76,7 @@ const FORM_MATCH_MODE_OPTIONS = ['url_contains', 'url_equals', 'form_id', 'selec
 const FIELD_CHECK_LEFT_REF_SOURCES = ['node_output', 'trigger_data', 'context', 'manual'];
 const FIELD_CHECK_VALUE_TYPES = ['string', 'number', 'boolean'];
 const FIELD_CHECK_OPERATOR_OPTIONS = ['equals', 'not_equals', 'contains', 'greater_than', 'greater_than_or_equals', 'less_than', 'exists'];
-const FIELD_CHECK_MODE_OPTIONS = ['simple', 'appointment_booking_timing'];
+const FIELD_CHECK_MODE_OPTIONS = ['simple', 'appointment_booking_timing', 'lead_contact_state'];
 const FIELD_CHECK_SWITCH_TYPE_OPTIONS = ['appointment_booking'];
 const FIELD_CHECK_APPOINTMENT_WINDOW_OPTIONS = ['same_day', 'day_before', 'more_than_day_before'];
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
@@ -1460,6 +1461,34 @@ function normalizeTriggerConfigForTemplate({ triggerType, entryNodeId, nodes }) 
     };
   }
 
+  if (
+    normalizedTriggerType === 'lead_nuevo'
+    && cleanString(rawConfig.managed_feature) === 'lead_auto_reply'
+  ) {
+    const sources = Array.isArray(rawConfig.sources)
+      ? Array.from(new Set(rawConfig.sources.map((value) => cleanString(value)).filter((value) => ['write', 'call'].includes(value))))
+      : [];
+    return {
+      ok: true,
+      trigger_config: {
+        managed_feature: cleanString(rawConfig.managed_feature) || null,
+        configured: parseBool(rawConfig.configured, false) === true,
+        sources,
+        timing: ['immediate', 'next_day'].includes(cleanString(rawConfig.timing))
+          ? cleanString(rawConfig.timing)
+          : 'immediate',
+        schedule_scope: ['clinic_hours', 'all_days'].includes(cleanString(rawConfig.schedule_scope))
+          ? cleanString(rawConfig.schedule_scope)
+          : 'clinic_hours',
+        whatsapp_template_id: parseIntOrNull(rawConfig.whatsapp_template_id),
+        whatsapp_template_name: cleanString(rawConfig.whatsapp_template_name) || null,
+        whatsapp_template_language: cleanString(rawConfig.whatsapp_template_language) || null,
+        updated_at: rawConfig.updated_at || null,
+        updated_by: parseIntOrNull(rawConfig.updated_by),
+      },
+    };
+  }
+
   if (normalizedTriggerType !== 'appointment_created') {
     return { ok: true, trigger_config: null };
   }
@@ -1622,6 +1651,12 @@ function applyTriggerConfigToNodes({ triggerType, entryNodeId, nodes, triggerCon
       schedule_time_mode: cleanString(triggerConfig.schedule_time_mode || 'custom').toLowerCase() || 'custom',
       custom_time: cleanString(triggerConfig.custom_time || '09:00') || null,
     };
+  } else if (
+    normalizedTriggerType === 'lead_nuevo'
+    && isObject(triggerConfig)
+    && cleanString(triggerConfig.managed_feature) === 'lead_auto_reply'
+  ) {
+    sanitizedTriggerConfig = { ...triggerConfig };
   }
 
   return nodes.map((node) => {
@@ -2095,6 +2130,13 @@ function getCatalogManagedListFamilyKey(item) {
     return 'catalog:review_request_system';
   }
 
+  if (
+    strippedKey === 'lead_auto_reply_system'
+    || cleanString(item?.trigger_config?.managed_feature) === 'lead_auto_reply'
+  ) {
+    return 'catalog:lead_auto_reply_system';
+  }
+
   return null;
 }
 
@@ -2127,6 +2169,7 @@ function collapseCatalogManagedRowsForScopedList(rows, shouldCollapse) {
   groups.forEach((groupRows, familyKey) => {
     const scopedRows = groupRows.filter((row) => hasTemplateOperationalScope(row));
     const isReviewRequestFamily = familyKey === 'catalog:review_request_system';
+    const isLeadAutoReplyFamily = familyKey === 'catalog:lead_auto_reply_system';
     const hasScopedCopy = scopedRows.length > 0;
 
     groupRows.forEach((row) => {
@@ -2134,10 +2177,17 @@ function collapseCatalogManagedRowsForScopedList(rows, shouldCollapse) {
       // La automatización de reseñas solo es operativa cuando existe una copia
       // configurada para la clínica/grupo desde Campañas > Reseñas. La base de
       // sistema es catálogo y no debe aparecer como "activa" en scope de cliente.
-      if ((isReviewRequestFamily || hasScopedCopy) && isSystemBase) {
+      if ((isReviewRequestFamily || isLeadAutoReplyFamily || hasScopedCopy) && isSystemBase) {
         hiddenIds.add(Number(row.id));
       }
       if (isReviewRequestFamily && hasTemplateOperationalScope(row) && isPublishedTemplate(row) && !isActiveTemplate(row)) {
+        hiddenIds.add(Number(row.id));
+      }
+      if (
+        isLeadAutoReplyFamily
+        && hasTemplateOperationalScope(row)
+        && row?.trigger_config?.configured !== true
+      ) {
         hiddenIds.add(Number(row.id));
       }
     });
@@ -3729,7 +3779,7 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
           )
         );
       }
-    } else {
+    } else if (mode !== 'lead_contact_state') {
       const leftRefRaw = parseJsonIfString(config.left_ref);
       const leftRef = isObject(leftRefRaw) ? leftRefRaw : null;
 
@@ -5209,6 +5259,21 @@ exports.updateTemplateDraft = async (req, res) => {
 
       const wasActive = row.is_active !== false;
       const nextActive = parseBool(body.is_active, row.is_active);
+
+      if (nextActive && !wasActive) {
+        const readiness = await leadAutoReplyService.validateFlowActivation(row);
+        if (readiness.managed && !readiness.ready) {
+          const noClinicHours = readiness.reasons?.includes('clinic_hours_not_configured');
+          return res.status(409).json({
+            success: false,
+            error: readiness.reasons?.[0] || 'lead_auto_reply_not_ready',
+            message: noClinicHours
+              ? 'No hay un horario de clínica configurado.'
+              : 'Configura la respuesta automática de leads antes de activarla.',
+            details: readiness.reasons || [],
+          });
+        }
+      }
 
       await row.update({
         is_active: nextActive,

@@ -134,6 +134,8 @@ function mergeLocalReviewConfigIntoCatalogNodes(sourceNodes, latestPublishedTemp
   const nodes = cloneJson(sourceNodes) || [];
   const localNodes = getNodesArray(latestPublishedTemplate);
   if (!nodes.length || !localNodes.length) return nodes;
+  const localTriggerConfig = latestPublishedTemplate?.trigger_config;
+  const preservesManagedLeadConfig = localTriggerConfig?.managed_feature === 'lead_auto_reply';
 
   const localById = new Map(localNodes.map((node) => [String(node?.id || ''), node]));
   const localByType = new Map();
@@ -156,9 +158,38 @@ function mergeLocalReviewConfigIntoCatalogNodes(sourceNodes, latestPublishedTemp
       'review_team_photo_overlay_color',
     ],
   };
+  const managedLeadPreserveByNodeId = {
+    N1: [
+      'managed_feature', 'configured', 'sources', 'timing', 'schedule_scope',
+      'whatsapp_template_id', 'whatsapp_template_name', 'whatsapp_template_language',
+      'updated_at', 'updated_by',
+    ],
+    N3: ['timing', 'schedule_scope'],
+    N4: ['duration', 'unit'],
+    N5: ['timing', 'schedule_scope'],
+    N7: ['template_id', 'template_name', 'language_code'],
+  };
 
   return nodes.map((node) => {
     const type = String(node?.type || '');
+    const localNodeById = localById.get(String(node?.id || ''));
+    if (preservesManagedLeadConfig && localNodeById?.config && typeof localNodeById.config === 'object') {
+      const preserveKeys = managedLeadPreserveByNodeId[String(node?.id || '')] || [];
+      if (!preserveKeys.length) return node;
+      const config = { ...(node.config || {}) };
+      preserveKeys.forEach((key) => {
+        if (localNodeById.config[key] !== undefined) {
+          config[key] = cloneJson(localNodeById.config[key]);
+        }
+      });
+      if (String(node?.id || '') === 'N7' && config.template_id) {
+        config.catalog_template_id = null;
+      }
+      return {
+        ...node,
+        config,
+      };
+    }
     const preserveKeys = preserveByType[type];
     if (!preserveKeys?.length) return node;
 
@@ -453,10 +484,14 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
     existingDraft = null;
   }
 
+  const isManagedLeadAutoReply = catalogFlow.name === 'auto_bienvenida_lead';
   const targetActive = latestPublished
     ? latestPublished.is_active !== false
-    : true;
+    : !isManagedLeadAutoReply;
   const nodes = mergeLocalReviewConfigIntoCatalogNodes(linkedTemplate.nodes, latestPublished);
+  const triggerConfig = isManagedLeadAutoReply && latestPublished?.trigger_config?.managed_feature === 'lead_auto_reply'
+    ? cloneJson(latestPublished.trigger_config)
+    : linkedTemplate.trigger_config ?? null;
 
   const payload = {
     engine_version: 'v2',
@@ -469,7 +504,7 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
     group_id: clinicScope.group_id,
     entry_node_id: linkedTemplate.entry_node_id,
     nodes,
-    trigger_config: linkedTemplate.trigger_config ?? null,
+    trigger_config: triggerConfig,
     published_at: null,
     published_by: null,
     created_by: actorUserId || linkedTemplate.created_by || 1,

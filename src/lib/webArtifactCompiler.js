@@ -13,7 +13,7 @@ const {
   webArtifactBundleFootprintBytes,
 } = require('./webArtifactBudget');
 
-const RENDERER_VERSION = 'clinicaclick-web-renderer/1.7.0';
+const RENDERER_VERSION = 'clinicaclick-web-renderer/1.8.0';
 const SAFE_EXTERNAL_REL = /^(?:\/[A-Za-z0-9_][A-Za-z0-9/_-]*|https:\/\/[^\s]+)$/;
 const PRODUCTION_INTAKE_ENDPOINT = '/_clinicaclick/intake';
 const CLINIC_BINDING_FIELDS = new Set([
@@ -532,6 +532,7 @@ function styleClassList(node) {
     `cc-shadow-${style.shadow || 'none'}`,
     `cc-align-${style.align || 'stretch'}`,
   ];
+  if (node.animation && node.animation !== 'none') classes.push(`cc-animate-${node.animation}`);
   for (const breakpoint of ['desktop', 'tablet', 'mobile']) {
     const override = responsive[breakpoint];
     if (!override) continue;
@@ -692,7 +693,8 @@ function renderNode(nodeId, document, snapshot, context, ancestors = new Set(), 
     const children = node.children.map((childId) => renderNode(childId, document, snapshot, context, nextAncestors)).join('');
     const globalAttribute = globalSlot ? ` data-cc-global="${globalSlot}"` : '';
     const globalClass = globalSlot ? ` cc-site-${globalSlot}` : '';
-    return `<${tag} id="cc-${escapeHtml(node.id)}"${globalAttribute} class="cc-node cc-section${globalClass} cc-layout-${escapeHtml(node.props.layout)} cc-cols-${Number(node.props.columns)} ${sectionTrackClassList(node)} ${styleClassList(node)}"><div class="cc-container">${children}</div></${tag}>`;
+    const roleClass = `cc-role-${escapeHtml(node.props.structure_role || 'section')}`;
+    return `<${tag} id="cc-${escapeHtml(node.id)}"${globalAttribute} class="cc-node cc-section${globalClass} ${roleClass} cc-layout-${escapeHtml(node.props.layout)} cc-cols-${Number(node.props.columns)} ${sectionTrackClassList(node)} ${styleClassList(node)}"><div class="cc-container">${children}</div></${tag}>`;
   }
   if (node.type === 'heading') {
     const level = Math.min(6, Math.max(1, Number(node.props.level) || 2));
@@ -796,13 +798,14 @@ function stylesheet(tokens, document = { nodes: {} }) {
   return [
     `:root{--cc-primary:${tokens.color_primary};--cc-secondary:${tokens.color_secondary};--cc-accent:${tokens.color_accent};--cc-surface:${tokens.color_surface};--cc-text:${tokens.color_text};--cc-radius:${radius};--cc-font-heading:${fontStackCss(tokens.font_heading)};--cc-font-body:${fontStackCss(tokens.font_body)};--cc-sm:${density.sm};--cc-md:${density.md};--cc-lg:${density.lg};--cc-xl:${density.xl};--cc-2xl:${density.xxl};color-scheme:light}`,
     '*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--cc-surface);color:var(--cc-text);font-family:var(--cc-font-body);line-height:1.55}img{display:block;max-width:100%}',
-    '.cc-node{min-width:0}.cc-container{margin-inline:auto;display:inherit;flex-direction:inherit;flex-wrap:inherit;gap:inherit}.cc-section{display:flex;width:100%}.cc-layout-stack>.cc-container{display:flex;flex-direction:column}.cc-layout-row>.cc-container{display:flex;flex-direction:row;flex-wrap:wrap}.cc-layout-grid>.cc-container{display:grid}',
+    '.cc-node{min-width:0}.cc-container{margin-inline:auto;display:inherit;flex-direction:inherit;flex-wrap:inherit;gap:inherit}.cc-section{display:flex;width:100%}.cc-role-container>.cc-container,.cc-role-row>.cc-container{align-items:stretch}.cc-role-column{min-width:0}.cc-role-column>.cc-container{width:100%;min-width:0}.cc-layout-stack>.cc-container{display:flex;flex-direction:column}.cc-layout-row>.cc-container{display:flex;flex-direction:row;flex-wrap:wrap}.cc-layout-grid>.cc-container{display:grid}',
     columnRules(),
     '.cc-section.cc-width-narrow>.cc-container{width:min(100% - 2rem,48rem)}.cc-section.cc-width-standard>.cc-container{width:min(100% - 2rem,72rem)}.cc-section.cc-width-wide>.cc-container{width:min(100% - 2rem,82.5rem)}.cc-section.cc-width-full>.cc-container{width:100%;padding-inline:1rem}.cc-node.cc-width-narrow:not(.cc-section){width:min(100%,48rem)}.cc-node.cc-width-standard:not(.cc-section){width:min(100%,72rem)}.cc-node.cc-width-wide:not(.cc-section){width:min(100%,82.5rem)}.cc-node.cc-width-full:not(.cc-section){width:100%}',
     spacingRules(),
     alignRules(),
     '.cc-node.cc-bg-transparent{background:transparent}.cc-node.cc-bg-surface{background:var(--cc-surface)}.cc-node.cc-bg-muted{background:#f5f6fa}.cc-node.cc-bg-brand{background:var(--cc-primary)}.cc-node.cc-bg-accent{background:var(--cc-accent)}.cc-node.cc-fg-default{color:var(--cc-text)}.cc-node.cc-fg-muted,.cc-node.cc-tone-muted{color:#5f6b7f}.cc-node.cc-fg-inverse,.cc-node.cc-tone-inverse{color:#fff}.cc-node.cc-fg-brand,.cc-node.cc-tone-brand{color:var(--cc-primary)}.cc-node.cc-fg-accent,.cc-node.cc-tone-accent{color:var(--cc-accent)}.cc-node.cc-tone-default{color:var(--cc-text)}',
     '.cc-node.cc-radius-inherit{border-radius:var(--cc-radius)}.cc-node.cc-radius-none{border-radius:0}.cc-node.cc-radius-sm{border-radius:.25rem}.cc-node.cc-radius-md{border-radius:.5rem}.cc-node.cc-radius-lg{border-radius:.9rem}.cc-node.cc-radius-xl{border-radius:1.35rem}.cc-node.cc-radius-full{border-radius:9999px}.cc-node.cc-shadow-none{box-shadow:none}.cc-node.cc-shadow-sm{box-shadow:0 2px 8px #181d3514}.cc-node.cc-shadow-md{box-shadow:0 8px 24px #181d3521}.cc-node.cc-shadow-lg{box-shadow:0 18px 50px #181d3529}',
+    '@media(prefers-reduced-motion:no-preference){.cc-animate-fade_in{animation:ccFadeIn .42s cubic-bezier(.2,0,0,1) both}.cc-animate-slide_up{animation:ccSlideUp .46s cubic-bezier(.2,0,0,1) both}.cc-animate-scale_in{animation:ccScaleIn .38s cubic-bezier(.2,0,0,1) both}}@keyframes ccFadeIn{from{opacity:0}to{opacity:1}}@keyframes ccSlideUp{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:translateY(0)}}@keyframes ccScaleIn{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}',
     '.cc-heading{margin:0;font-family:var(--cc-font-heading);line-height:1.12;letter-spacing:-.025em}.cc-heading.cc-size-sm{font-size:1.25rem}.cc-heading.cc-size-md{font-size:1.5rem}.cc-heading.cc-size-lg{font-size:1.875rem}.cc-heading.cc-size-xl{font-size:clamp(1.55rem,3vw,2.35rem)}.cc-heading.cc-size-2xl{font-size:clamp(1.9rem,4vw,3.2rem)}.cc-heading.cc-size-3xl{font-size:clamp(2.25rem,6vw,4.5rem)}.cc-text{margin:0;max-width:68ch;white-space:pre-wrap}.cc-text.cc-size-sm{font-size:.875rem}.cc-text.cc-size-md{font-size:1rem}.cc-text.cc-size-lg{font-size:1.125rem}.cc-text-left{text-align:left}.cc-text-center{text-align:center}.cc-text-right{text-align:right}',
     '.cc-divider{width:100%;height:0;margin:0;border:0;border-top-width:1px;border-top-style:solid}.cc-divider-solid{border-top-style:solid}.cc-divider-dashed{border-top-style:dashed}.cc-divider-dotted{border-top-style:dotted}.cc-divider-tone-muted{border-top-color:#dfe3ec}.cc-divider-tone-brand{border-top-color:var(--cc-primary)}.cc-divider-tone-accent{border-top-color:var(--cc-accent)}.cc-spacer{display:block;width:100%;flex:none}.cc-spacer-xs{height:.25rem}.cc-spacer-sm{height:var(--cc-sm)}.cc-spacer-md{height:var(--cc-md)}.cc-spacer-lg{height:var(--cc-lg)}.cc-spacer-xl{height:var(--cc-xl)}.cc-spacer-2xl{height:var(--cc-2xl)}',
     '.cc-button{display:inline-flex;width:fit-content;align-items:center;justify-content:center;min-height:44px;padding:.75rem 1.15rem;border-radius:var(--cc-radius);font-weight:700;text-decoration:none;border:1px solid transparent;cursor:pointer}.cc-button-primary{background:var(--cc-primary);color:#fff}.cc-section.cc-bg-brand .cc-button-primary{background:var(--cc-surface);color:var(--cc-primary)}.cc-button-secondary{background:var(--cc-secondary);color:#fff}.cc-button-outline{border-color:currentColor;color:var(--cc-primary);background:transparent}.cc-button-link{padding-inline:0;color:var(--cc-primary)}',
@@ -859,6 +862,11 @@ function reachableNodeIds(page, document) {
 function buildStructuredData({ project, page, pageUrl, baseUrl, clinic, document, socialImageUrl = null }) {
   const root = `${baseUrl}/#website`;
   const organizationId = `${baseUrl}/#organization`;
+  const schemaConfig = page.seo?.schema && typeof page.seo.schema === 'object'
+    ? page.seo.schema
+    : {};
+  const pageType = schemaConfig.page_type === 'medical_web_page' ? 'MedicalWebPage' : 'WebPage';
+  const includeFaq = schemaConfig.include_faq !== false;
   const graph = [{
     '@type': 'WebSite',
     '@id': root,
@@ -880,7 +888,7 @@ function buildStructuredData({ project, page, pageUrl, baseUrl, clinic, document
     ...(socialImageUrl && isSafePublicAssetUrl(socialImageUrl) ? { image: socialImageUrl } : {}),
     ...(clinic.schema_type === 'Dentist' ? { medicalSpecialty: 'Dentistry' } : {}),
   }, {
-    '@type': 'WebPage',
+    '@type': pageType,
     '@id': `${pageUrl}#webpage`,
     url: pageUrl,
     name: page.seo?.title || page.title,
@@ -898,7 +906,7 @@ function buildStructuredData({ project, page, pageUrl, baseUrl, clinic, document
       name: node.props.question,
       acceptedAnswer: { '@type': 'Answer', text: node.props.answer },
     }));
-  if (faqEntries.length) {
+  if (includeFaq && faqEntries.length) {
     graph.push({
       '@type': 'FAQPage',
       '@id': `${pageUrl}#faq`,

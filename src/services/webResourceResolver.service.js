@@ -178,6 +178,7 @@ function snapshotContent(row, inherited) {
     title: value.title,
     content: publicContent,
     sources: value.sources || [],
+    schema_config: value.schemaConfig || { enabled: true, profile: 'auto', include_sources: false },
     content_hash: value.contentHash,
     fields: contentFieldValues(value),
   };
