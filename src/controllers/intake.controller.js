@@ -6,6 +6,7 @@ const { Op, literal } = db.Sequelize;
 
 const LeadIntake = db.LeadIntake;
 const LeadAttributionAudit = db.LeadAttributionAudit;
+const LeadContactAttempt = db.LeadContactAttempt;
 const FormSubmissionEvent = db.FormSubmissionEvent;
 const Conversation = db.Conversation;
 const Message = db.Message;
@@ -111,6 +112,9 @@ const {
   maybeUploadQualifiedLeadStatusTransition,
   uploadScheduleForLinkedAppointment,
 } = require('../services/leadQualificationMilestone.service');
+const {
+  getPendingReplyStatesByConversationIds,
+} = require('../services/conversationPendingReply.service');
 const {
   buildWebLandingAttributionSteps,
   resolveWebLandingAttribution,
@@ -577,6 +581,8 @@ const redactLeadForPrivacy = (lead) => {
     formSubmissionEvents: [],
     historial_contactos: [],
     conversation_id: null,
+    pending_whatsapp_reply_count: 0,
+    pending_automation_attention: false,
   });
 };
 
@@ -623,7 +629,8 @@ const buildLeadSearchConditions = (search, {
 
   conditions.push({ utm_campaign: { [Op.like]: term } });
   if (includeCampaignRelation) {
-    conditions.push({ '$campana.nombre$': { [Op.like]: term } });
+    // Sequelize does not map nested $alias.attribute$ paths to the physical field name.
+    conditions.push({ '$campana.nombre_campana$': { [Op.like]: term } });
   }
 
   const normalizedSource = rawTerm.toLowerCase();
@@ -779,7 +786,8 @@ const enrichLeadsWithPatientMatches = async (leadRows = []) => {
   if (!phoneSet.size && !emailSet.size) {
     return leads.map((lead) => ({
       ...lead,
-      patient_match: null
+      patient_match: null,
+      es_paciente: ['acudio_cita', 'convertido'].includes(String(lead?.status_lead || '').trim().toLowerCase()),
     }));
   }
 
@@ -810,7 +818,62 @@ const enrichLeadsWithPatientMatches = async (leadRows = []) => {
     return {
       ...lead,
       patient_match: patientMatch,
-      es_paciente: !!patientMatch
+      // Al agendar se crea la ficha técnica del paciente, pero comercialmente
+      // el lead no se convierte hasta que acude a clínica.
+      es_paciente: ['acudio_cita', 'convertido'].includes(String(lead?.status_lead || '').trim().toLowerCase()),
+    };
+  });
+};
+
+const enrichLeadsWithConversationState = async (leadRows = []) => {
+  const leads = leadRows.map((lead) => toPlain(lead));
+  const leadIds = Array.from(new Set(
+    leads
+      .map((lead) => parseInteger(lead?.id))
+      .filter((id) => id !== null)
+  ));
+
+  if (!leads.length || !leadIds.length || !Conversation) {
+    return leads.map((lead) => ({
+      ...lead,
+      conversation_id: lead?.conversation_id || null,
+      pending_whatsapp_reply_count: 0,
+      pending_automation_attention: false,
+    }));
+  }
+
+  const conversations = await Conversation.findAll({
+    where: {
+      lead_id: { [Op.in]: leadIds },
+      channel: 'whatsapp',
+    },
+    attributes: ['id', 'lead_id', 'last_message_at', 'updatedAt'],
+    order: [['last_message_at', 'DESC'], ['updatedAt', 'DESC'], ['id', 'DESC']],
+    raw: true,
+  });
+
+  const conversationByLead = new Map();
+  conversations.forEach((conversation) => {
+    const leadId = parseInteger(conversation.lead_id);
+    if (leadId !== null && !conversationByLead.has(leadId)) {
+      conversationByLead.set(leadId, conversation);
+    }
+  });
+
+  const pendingStates = await getPendingReplyStatesByConversationIds([
+    ...Array.from(conversationByLead.values()).map((conversation) => conversation.id),
+    ...leads.map((lead) => lead?.conversation_id),
+  ]);
+
+  return leads.map((lead) => {
+    const conversation = conversationByLead.get(parseInteger(lead?.id));
+    const conversationId = parseInteger(conversation?.id) || parseInteger(lead?.conversation_id);
+    const pendingState = conversationId !== null ? pendingStates.get(conversationId) : null;
+    return {
+      ...lead,
+      conversation_id: conversationId,
+      pending_whatsapp_reply_count: pendingState?.count || 0,
+      pending_automation_attention: pendingState?.requiresAutomationAttention === true,
     };
   });
 };
@@ -989,7 +1052,8 @@ const enrichLeadsWithAttributionView = async (leadRows = []) => {
 const enrichLeadsForUi = async (leadRows = []) => {
   const withAttribution = await enrichLeadsWithAttributionView(leadRows);
   const withPatientMatches = await enrichLeadsWithPatientMatches(withAttribution);
-  return enrichLeadsWithLinkedAppointments(withPatientMatches);
+  const withAppointments = await enrichLeadsWithLinkedAppointments(withPatientMatches);
+  return enrichLeadsWithConversationState(withAppointments);
 };
 
 const resolveClinicIdsForSocket = async ({ clinicId, groupId }) => {
@@ -5740,10 +5804,12 @@ exports.registrarContacto = asyncHandler(async (req, res) => {
   const historial = lead.historial_contactos || [];
   
   // Añadir nuevo registro de contacto
+  const contactedAt = new Date();
   const nuevoContacto = {
-    fecha: new Date().toISOString(),
+    fecha: contactedAt.toISOString(),
     motivo: motivo || 'no_contesta',
     notas: notas || null,
+    canal: 'llamada',
     usuario_id: req.userData?.userId || null
   };
   
@@ -5790,7 +5856,7 @@ exports.registrarContacto = asyncHandler(async (req, res) => {
   const updatePayload = {
     historial_contactos: historial,
     num_contactos: (lead.num_contactos || 0) + 1,
-    ultimo_contacto: new Date(),
+    ultimo_contacto: contactedAt,
     // Registrar otro intento no degrada hitos CRM ya alcanzados. Volver a
     // `contactado` desde `cualificado` solo puede ser una transición explícita.
     status_lead: ['cualificado', 'citado', 'acudio_cita', 'convertido', 'descartado']
@@ -5808,6 +5874,24 @@ exports.registrarContacto = asyncHandler(async (req, res) => {
   }
 
   await lead.update(updatePayload);
+
+  if (LeadContactAttempt) {
+    try {
+      await LeadContactAttempt.create({
+        lead_intake_id: lead.id,
+        usuario_id: req.userData?.userId || null,
+        canal: 'llamada',
+        motivo: motivo || 'no_contesta',
+        notas: notas || null,
+        created_at: contactedAt,
+        updated_at: contactedAt,
+      });
+    } catch (attemptErr) {
+      // El historial legado ya conserva el contacto; no hacemos fallar una
+      // acción del usuario por una incidencia de normalización secundaria.
+      console.warn('⚠️ No se pudo normalizar el intento de contacto:', attemptErr.message || attemptErr);
+    }
+  }
 
   // Registrar auditoría
   try {
