@@ -27,6 +27,8 @@ router.get('/leads', intakeController.listLeads);
 router.get('/leads/stats', intakeController.getLeadStats);
 router.post('/leads/import/preview', intakeController.previewLeadImport);
 router.post('/leads/import/execute', intakeController.executeLeadImport);
+router.get('/leads/auto-reply/status', intakeController.getLeadAutoReplyStatus);
+router.patch('/leads/auto-reply', intakeController.updateLeadAutoReply);
 router.get('/leads/:id', intakeController.getLeadById);
 router.get('/leads/:id/activity', intakeController.getLeadActivity);
 router.get('/leads/:id/candidate-appointments', intakeController.getCandidateAppointments);

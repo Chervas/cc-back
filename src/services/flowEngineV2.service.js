@@ -41,6 +41,7 @@ const FlowExecutionV2 = db.FlowExecutionV2;
 const FlowExecutionLogV2 = db.FlowExecutionLogV2;
 const CitaPaciente = db.CitaPaciente;
 const LeadIntake = db.LeadIntake;
+const LeadContactAttempt = db.LeadContactAttempt;
 const Conversation = db.Conversation;
 const Message = db.Message;
 const Notification = db.Notification;
@@ -55,6 +56,8 @@ const whatsappService = require('./whatsapp.service');
 const whatsappConnectionStatusService = require('./whatsappConnectionStatus.service');
 const marketingBulkSendsService = require('./marketingBulkSends.service');
 const appointmentNotificationCleanup = require('./appointmentNotificationCleanup.service');
+const { resolveLeadAutoReplyWait } = require('./clinicOpeningHours.service');
+const { evaluatePendingLeadContact } = require('./leadContactState.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { buildConversationContext } = require('../lib/automation-conversation-context');
 const UPDATE_LEAD_INFO_MODES = new Set([
@@ -70,7 +73,7 @@ const AI_ANALYSIS_MODES = new Set(['auto', 'quick_qa', 'complex_reasoning']);
 const FORM_SUBMISSION_MATCH_MODES = new Set(['url_contains', 'url_equals', 'form_id', 'selector']);
 const FIELD_CHECK_LEFT_REF_SOURCES = new Set(['node_output', 'trigger_data', 'context', 'manual']);
 const FIELD_CHECK_VALUE_TYPES = new Set(['string', 'number', 'boolean']);
-const FIELD_CHECK_MODE_VALUES = new Set(['simple', 'appointment_booking_timing']);
+const FIELD_CHECK_MODE_VALUES = new Set(['simple', 'appointment_booking_timing', 'lead_contact_state']);
 const FIELD_CHECK_SWITCH_TYPE_VALUES = new Set(['appointment_booking']);
 const FIELD_CHECK_APPOINTMENT_WINDOW_VALUES = new Set(['same_day', 'day_before', 'more_than_day_before']);
 const PROTECTED_APPOINTMENT_STATUSES = new Set(['cancelada', 'completada', 'no_asistio']);
@@ -3266,6 +3269,56 @@ function buildFallbackWhatsappTemplateConfig(config) {
   };
 }
 
+async function registerLeadAutoReplyContactAttempt({ execution, context, node, message }) {
+  if (cleanString(node?.config?.template_usage) !== 'lead_auto_reply') return null;
+  const targets = resolveRuntimeTargets(execution, context);
+  const leadId = toIntOrNull(targets.lead_intake_id);
+  const messageId = toIntOrNull(message?.id);
+  if (!leadId || !messageId || !LeadContactAttempt) return null;
+
+  const motivo = `lead_auto_reply:${messageId}`;
+  return db.sequelize.transaction(async (transaction) => {
+    const lead = await LeadIntake.findByPk(leadId, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!lead) return null;
+
+    const existing = await LeadContactAttempt.findOne({
+      where: { lead_intake_id: leadId, canal: 'whatsapp', motivo },
+      transaction,
+    });
+    if (existing) return existing;
+
+    const now = new Date();
+    const historial = Array.isArray(lead.historial_contactos) ? [...lead.historial_contactos] : [];
+    historial.push({
+      fecha: now.toISOString(),
+      motivo: 'lead_auto_reply',
+      notas: 'Respuesta automática de WhatsApp',
+      canal: 'whatsapp',
+      usuario_id: null,
+      message_id: messageId,
+    });
+    const protectedStatuses = new Set(['citado', 'acudio_cita', 'convertido', 'descartado']);
+    await lead.update({
+      historial_contactos: historial,
+      num_contactos: (Number(lead.num_contactos || 0) || 0) + 1,
+      ultimo_contacto: now,
+      status_lead: protectedStatuses.has(cleanString(lead.status_lead).toLowerCase())
+        ? lead.status_lead
+        : 'contactado',
+    }, { transaction });
+    return LeadContactAttempt.create({
+      lead_intake_id: leadId,
+      usuario_id: null,
+      canal: 'whatsapp',
+      motivo,
+      notas: cleanString(message?.content).slice(0, 500) || 'Respuesta automática de WhatsApp',
+    }, { transaction });
+  });
+}
+
 async function handleSendWhatsapp(node, context, runtime) {
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
   const execution = runtime?.execution || null;
@@ -3276,6 +3329,12 @@ async function handleSendWhatsapp(node, context, runtime) {
       messageType: ['template', 'text'],
     });
     if (existingMessage) {
+      await registerLeadAutoReplyContactAttempt({
+        execution,
+        context,
+        node,
+        message: existingMessage,
+      });
       return reuseExistingAutomationWhatsappMessage({ existingMessage, node });
     }
   }
@@ -3947,6 +4006,8 @@ async function handleSendWhatsapp(node, context, runtime) {
     });
     await conversation.update({ last_message_at: new Date() });
 
+    await registerLeadAutoReplyContactAttempt({ execution, context, node, message: msg });
+
     return {
       kind: 'success',
       output: {
@@ -4119,6 +4180,8 @@ async function handleSendWhatsapp(node, context, runtime) {
       throw new Error(`whatsapp_send_failed:${providerMessage}`);
     }
   }
+
+  await registerLeadAutoReplyContactAttempt({ execution, context, node, message: msg });
 
   return {
     kind: 'success',
@@ -5395,12 +5458,43 @@ async function processNode(node, context, runtime = {}) {
     }
 
     case 'delay/wait_until': {
-      const waitUntil = parseWaitUntilExpression(config?.datetime_expression, context) || new Date();
+      let waitUntil = null;
+      let reason = 'wait_until';
+      let timeZone = null;
+      if (cleanString(config?.mode) === 'clinic_schedule') {
+        const targets = resolveRuntimeTargets(runtime?.execution, context);
+        const schedule = await resolveLeadAutoReplyWait({
+          clinicId: toIntOrNull(targets.clinic_id),
+          scheduleScope: cleanString(config?.schedule_scope) || 'clinic_hours',
+          timing: cleanString(config?.timing) || 'immediate',
+        });
+        if (!schedule.available || !schedule.waitUntil) {
+          throw new Error(schedule.reason || 'clinic_opening_not_found');
+        }
+        waitUntil = schedule.waitUntil;
+        reason = schedule.reason;
+        timeZone = schedule.timeZone || null;
+      } else {
+        waitUntil = parseWaitUntilExpression(config?.datetime_expression, context) || new Date();
+      }
+      if (waitUntil.getTime() <= Date.now() + 1000) {
+        return {
+          kind: 'success',
+          output: {
+            wait_until: waitUntil.toISOString(),
+            reason,
+            time_zone: timeZone,
+            waited: false,
+          },
+          next_node_id: readOutputTarget(node, 'on_complete'),
+        };
+      }
       return {
         kind: 'waiting',
         output: {
           wait_until: waitUntil.toISOString(),
-          reason: 'wait_until',
+          reason,
+          time_zone: timeZone,
         },
         waiting_meta: {
           type: nodeType,
@@ -5594,6 +5688,21 @@ async function processNode(node, context, runtime = {}) {
     }
 
     case 'condition/field_check': {
+      if (cleanString(config?.mode) === 'lead_contact_state') {
+        const targets = resolveRuntimeTargets(runtime?.execution, context);
+        const result = await evaluatePendingLeadContact({
+          leadId: toIntOrNull(targets.lead_intake_id),
+          triggeredAt: context?.trigger?.data?.event_at || runtime?.execution?.created_at || null,
+        });
+        return {
+          kind: 'success',
+          output: {
+            ...result,
+            next_output_key: result.decision ? 'on_true' : 'on_false',
+          },
+          next_node_id: readOutputTarget(node, result.decision ? 'on_true' : 'on_false'),
+        };
+      }
       let evaluationContext = context;
       if (isAccessGuidanceReminderFieldCheck(config)) {
         let targets = resolveRuntimeTargets(runtime?.execution, context);
