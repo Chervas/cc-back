@@ -1,6 +1,7 @@
 'use strict';
 
 const db = require('../../models');
+const { getPhoneLookupCandidates } = require('../lib/phone');
 
 const { Op } = db.Sequelize;
 const TERMINAL_LEAD_STATUSES = new Set(['citado', 'acudio_cita', 'convertido', 'descartado']);
@@ -20,7 +21,10 @@ function isEffectiveContactAttempt(attempt) {
 
 async function evaluatePendingLeadContact({ leadId, triggeredAt, models = db }) {
   const lead = await models.LeadIntake.findByPk(leadId, {
-    attributes: ['id', 'status_lead', 'call_outcome', 'call_outcome_at', 'archived_at', 'created_at'],
+    attributes: [
+      'id', 'clinica_id', 'telefono', 'status_lead', 'call_outcome', 'call_outcome_at',
+      'archived_at', 'created_at',
+    ],
     raw: true,
   });
   if (!lead || lead.archived_at) return { decision: false, reason: 'lead_not_available' };
@@ -45,8 +49,15 @@ async function evaluatePendingLeadContact({ leadId, triggeredAt, models = db }) 
   }
 
   if (models.Conversation && models.Message) {
+    const phoneCandidates = getPhoneLookupCandidates(lead.telefono);
     const conversations = await models.Conversation.findAll({
-      where: { lead_id: leadId },
+      where: {
+        ...(lead.clinica_id ? { clinic_id: lead.clinica_id } : {}),
+        [Op.or]: [
+          { lead_id: leadId },
+          ...(phoneCandidates.length ? [{ contact_id: { [Op.in]: phoneCandidates } }] : []),
+        ],
+      },
       attributes: ['id'],
       raw: true,
     });
@@ -56,10 +67,9 @@ async function evaluatePendingLeadContact({ leadId, triggeredAt, models = db }) 
         where: {
           conversation_id: { [Op.in]: conversationIds },
           direction: 'outbound',
-          status: { [Op.notIn]: ['failed', 'cancelled'] },
-          created_at: { [Op.gte]: Number.isFinite(since.getTime()) ? since : new Date(0) },
+          status: { [Op.ne]: 'failed' },
         },
-        order: [['created_at', 'ASC']],
+        order: [['createdAt', 'ASC']],
         raw: true,
       });
       if (outbound) {

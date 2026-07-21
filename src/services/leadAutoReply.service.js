@@ -13,6 +13,8 @@ const FEATURE_KEY = 'lead_auto_reply';
 const CATALOG_NAME = 'auto_bienvenida_lead';
 const BASE_TEMPLATE_KEY = 'lead_auto_reply_system';
 const FLOW_NAME = 'Contestar a los leads automáticamente';
+const BACKFILL_JOB_TYPE = 'lead_auto_reply_backfill';
+const TERMINAL_LEAD_STATUSES = ['citado', 'acudio_cita', 'convertido', 'descartado'];
 const SOURCE_VALUES = new Set(['write', 'call']);
 const TIMING_VALUES = new Set(['immediate', 'next_day']);
 const SCHEDULE_VALUES = new Set(['clinic_hours', 'all_days']);
@@ -384,7 +386,7 @@ async function validateFlowActivation(flow) {
   return { managed: true, ...(await buildReadiness(config, clinicId)) };
 }
 
-function buildExecutionContext(lead, eventKind, eventAt) {
+function buildExecutionContext(lead, eventKind, eventAt, triggerData = {}) {
   return {
     trigger: {
       type: 'lead_nuevo',
@@ -395,6 +397,7 @@ function buildExecutionContext(lead, eventKind, eventAt) {
         clinica_id: lead.clinica_id,
         event_kind: eventKind,
         event_at: eventAt.toISOString(),
+        ...triggerData,
       },
     },
     lead: {
@@ -410,18 +413,27 @@ function buildExecutionContext(lead, eventKind, eventAt) {
   };
 }
 
-async function enqueueForLead({ lead, eventKind, eventAt = new Date() }) {
+async function enqueueForLead({
+  lead,
+  eventKind,
+  eventAt = new Date(),
+  idempotencyScope = 'event',
+  bypassSourceFilter = false,
+  triggerData = {},
+}) {
   const clinicId = toIntOrNull(lead?.clinica_id);
   const normalizedKind = cleanString(eventKind);
   if (!clinicId || !SOURCE_VALUES.has(normalizedKind)) return { skipped: true, reason: 'invalid_event_scope' };
   const flow = await findLatestClinicFlow(clinicId, { activeOnly: true });
   if (!flow) return { skipped: true, reason: 'no_active_flow' };
   const config = normalizeConfig(flow.trigger_config || {});
-  if (!config.configured || !config.sources.includes(normalizedKind)) return { skipped: true, reason: 'event_source_disabled' };
+  if (!config.configured || (!bypassSourceFilter && !config.sources.includes(normalizedKind))) {
+    return { skipped: true, reason: 'event_source_disabled' };
+  }
 
   const eventDate = eventAt instanceof Date ? eventAt : new Date(eventAt);
   const digest = crypto.createHash('sha256')
-    .update(`${flow.id}:${lead.id}:lead_auto_reply`)
+    .update(`${flow.id}:${lead.id}:lead_auto_reply:${cleanString(idempotencyScope) || 'event'}`)
     .digest('hex');
   const idempotencyKey = `lead_auto_reply:${digest}`;
   let execution = await db.FlowExecutionV2.findOne({ where: { idempotency_key: idempotencyKey } });
@@ -433,7 +445,7 @@ async function enqueueForLead({ lead, eventKind, eventAt = new Date() }) {
         template_version_id: flow.id,
         engine_version: 'v2',
         status: 'running',
-        context: buildExecutionContext(lead, normalizedKind, eventDate),
+        context: buildExecutionContext(lead, normalizedKind, eventDate, triggerData),
         current_node_id: flow.entry_node_id,
         trigger_type: 'lead_nuevo',
         trigger_entity_type: 'lead_nuevo',
@@ -464,7 +476,209 @@ async function enqueueForLead({ lead, eventKind, eventAt = new Date() }) {
   return { skipped: false, created, execution_id: execution.id, job_request_id: job.id };
 }
 
+function resolveLeadEventKind(lead) {
+  return lead?.call_initiated === true || cleanString(lead?.source).toLowerCase() === 'call_click'
+    ? 'call'
+    : 'write';
+}
+
+async function listPendingLeadIds(clinicId, config) {
+  const ids = [];
+  let cursor = 0;
+  while (true) {
+    const rows = await db.LeadIntake.findAll({
+      where: {
+        clinica_id: clinicId,
+        id: { [Op.gt]: cursor },
+        archived_at: null,
+        telefono: { [Op.ne]: null },
+        status_lead: { [Op.notIn]: TERMINAL_LEAD_STATUSES },
+      },
+      attributes: [
+        'id', 'clinica_id', 'grupo_clinica_id', 'source', 'telefono', 'call_initiated',
+        'created_at',
+      ],
+      order: [['id', 'ASC']],
+      limit: 100,
+      raw: true,
+    });
+    if (!rows.length) break;
+    for (const lead of rows) {
+      cursor = Math.max(cursor, Number(lead.id) || cursor);
+      if (!cleanString(lead.telefono)) continue;
+      const eventKind = resolveLeadEventKind(lead);
+      if (!config.sources.includes(eventKind)) continue;
+      const contactState = await evaluatePendingLeadContact({
+        leadId: lead.id,
+        triggeredAt: lead.created_at || new Date(),
+      });
+      if (contactState.decision) ids.push(lead.id);
+    }
+    if (rows.length < 100) break;
+  }
+  return ids;
+}
+
+async function getPendingPreview(clinicId) {
+  const flow = await findLatestClinicFlow(clinicId);
+  const config = normalizeConfig(flow?.trigger_config || {});
+  if (!flow || !config.configured || !config.sources.length) {
+    return { clinic_id: clinicId, count: 0, configured: false };
+  }
+  const leadIds = await listPendingLeadIds(clinicId, config);
+  return { clinic_id: clinicId, count: leadIds.length, configured: true };
+}
+
+async function startPendingBatch({ clinicId, actorUserId }) {
+  const flow = await findLatestClinicFlow(clinicId, { activeOnly: true });
+  if (!flow) {
+    const error = new Error('Activa la automatización antes de enviar a los leads pendientes.');
+    error.status = 409;
+    error.code = 'lead_auto_reply_not_active';
+    throw error;
+  }
+  const config = normalizeConfig(flow.trigger_config || {});
+  const leadIds = await listPendingLeadIds(clinicId, config);
+  if (!leadIds.length) {
+    return { job_id: null, total: 0, status: 'completed' };
+  }
+  const initialSummary = {
+    clinic_id: clinicId,
+    total: leadIds.length,
+    processed: 0,
+    queued: 0,
+    skipped: 0,
+    execution_ids: [],
+  };
+  const { job } = await jobRequestsService.enqueueUniqueJobRequest({
+    type: BACKFILL_JOB_TYPE,
+    priority: 'high',
+    origin: FEATURE_KEY,
+    payload: {
+      clinic_id: clinicId,
+      flow_id: flow.id,
+      lead_ids: leadIds,
+    },
+    resultSummary: initialSummary,
+    dedupeScope: `${BACKFILL_JOB_TYPE}:clinic:${clinicId}`,
+    requestedBy: actorUserId,
+    requestedByRole: 'user',
+  });
+  jobScheduler.triggerImmediate(job.id).catch(() => {});
+  return { job_id: job.id, total: leadIds.length, status: cleanString(job.status) || 'pending' };
+}
+
+async function runPendingBatchJob(payload = {}, jobRequest = null) {
+  const clinicId = toIntOrNull(payload.clinic_id);
+  const leadIds = Array.from(new Set((Array.isArray(payload.lead_ids) ? payload.lead_ids : [])
+    .map(toIntOrNull)
+    .filter(Boolean)));
+  if (!clinicId || !leadIds.length) {
+    return { clinic_id: clinicId, total: 0, processed: 0, queued: 0, skipped: 0, execution_ids: [] };
+  }
+  const summary = {
+    clinic_id: clinicId,
+    total: leadIds.length,
+    processed: 0,
+    queued: 0,
+    skipped: 0,
+    execution_ids: [],
+  };
+  for (const leadId of leadIds) {
+    const lead = await db.LeadIntake.findOne({ where: { id: leadId, clinica_id: clinicId } });
+    if (!lead) {
+      summary.skipped += 1;
+      summary.processed += 1;
+      continue;
+    }
+    const contactState = await evaluatePendingLeadContact({
+      leadId,
+      triggeredAt: lead.created_at || lead.createdAt || new Date(),
+    });
+    if (!contactState.decision) {
+      summary.skipped += 1;
+      summary.processed += 1;
+    } else {
+      const result = await enqueueForLead({
+        lead,
+        eventKind: resolveLeadEventKind(lead),
+        eventAt: new Date(),
+        idempotencyScope: 'backfill',
+        triggerData: {
+          backfill: true,
+          backfill_job_id: jobRequest?.id || null,
+        },
+      });
+      if (result.execution_id) {
+        summary.execution_ids.push(result.execution_id);
+        summary.queued += 1;
+      } else {
+        summary.skipped += 1;
+      }
+      summary.processed += 1;
+    }
+    if (jobRequest?.update && (summary.processed % 5 === 0 || summary.processed === summary.total)) {
+      await jobRequest.update({ result_summary: summary });
+    }
+  }
+  return summary;
+}
+
+function unwrapBatchSummary(value) {
+  if (value?.result && typeof value.result === 'object') return value.result;
+  return value && typeof value === 'object' ? value : {};
+}
+
+async function getPendingBatchProgress({ clinicId, jobId }) {
+  const job = await db.JobRequest.findByPk(jobId, { raw: true });
+  if (!job || cleanString(job.type) !== BACKFILL_JOB_TYPE || toIntOrNull(job.payload?.clinic_id) !== clinicId) {
+    const error = new Error('Envío de leads pendientes no encontrado.');
+    error.status = 404;
+    error.code = 'lead_auto_reply_batch_not_found';
+    throw error;
+  }
+  const summary = unwrapBatchSummary(job.result_summary);
+  const executionIds = Array.from(new Set((Array.isArray(summary.execution_ids) ? summary.execution_ids : [])
+    .map(toIntOrNull)
+    .filter(Boolean)));
+  const executions = executionIds.length
+    ? await db.FlowExecutionV2.findAll({
+        where: { id: { [Op.in]: executionIds }, clinic_id: clinicId },
+        attributes: ['id', 'status', 'context', 'last_error'],
+        raw: true,
+      })
+    : [];
+  let sent = 0;
+  let failed = 0;
+  let pending = 0;
+  for (const execution of executions) {
+    const status = cleanString(execution.status).toLowerCase();
+    const sendOutput = execution.context?.outputs?.N7 || {};
+    if (sendOutput.message_id && ['sent', 'queued'].includes(cleanString(sendOutput.status).toLowerCase())) sent += 1;
+    else if (cleanString(sendOutput.status).toLowerCase() === 'error' || ['failed', 'dead_letter'].includes(status)) failed += 1;
+    else if (['completed', 'cancelled'].includes(status)) summary.skipped = Number(summary.skipped || 0) + 1;
+    else pending += 1;
+  }
+  const total = Number(summary.total || 0);
+  const skipped = Number(summary.skipped || 0);
+  const jobTerminal = ['completed', 'failed', 'cancelled'].includes(cleanString(job.status).toLowerCase());
+  const complete = jobTerminal && pending === 0 && sent + failed + skipped >= total;
+  return {
+    job_id: job.id,
+    job_status: job.status,
+    total,
+    processed: Math.min(total, sent + failed + skipped),
+    sent,
+    failed,
+    skipped,
+    pending: Math.max(pending, total - sent - failed - skipped),
+    complete,
+    error: job.status === 'failed' ? cleanString(job.error_message) || 'No se pudo completar el envío.' : null,
+  };
+}
+
 module.exports = {
+  BACKFILL_JOB_TYPE,
   BASE_TEMPLATE_KEY,
   CATALOG_NAME,
   FEATURE_KEY,
@@ -474,11 +688,15 @@ module.exports = {
   enqueueForLead,
   evaluatePendingLeadContact,
   getStatus,
+  getPendingBatchProgress,
+  getPendingPreview,
   getUnsupportedLeadTemplateVariables,
   isEffectiveContactAttempt,
   isLeadAutoReplyTemplate,
   normalizeConfig,
+  runPendingBatchJob,
   saveConfig,
+  startPendingBatch,
   setActive,
   validateFlowActivation,
 };
