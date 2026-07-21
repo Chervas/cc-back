@@ -415,7 +415,10 @@ function pickPreferredExecution(rows) {
 
 async function resolveTemplateForCitaEvent(cita, eventName) {
   const boundTemplate = await resolveTemplateBoundToTratamiento(cita, eventName);
-  if (boundTemplate) {
+  if (boundTemplate && (
+    eventName !== 'appointment_rescheduled'
+    || isRescheduleTemplateEligible(boundTemplate, cita)
+  )) {
     return boundTemplate;
   }
 
@@ -665,6 +668,20 @@ function getTemplateTriggerConfig(template) {
   return normalizeAppointmentCreatedTriggerConfig(entryNode?.config);
 }
 
+function isRescheduleTemplateEligible(template, cita) {
+  const reason = cleanString(cita?.reschedule_reason).toLowerCase() || 'clinic_schedule';
+  const rawConfig = template && typeof template.trigger_config === 'object'
+    ? template.trigger_config
+    : {};
+  const allowedReasons = normalizeStringArray(rawConfig?.reschedule_reasons)
+    .map((value) => value.toLowerCase());
+
+  if (!allowedReasons.length) {
+    return reason !== 'patient_request';
+  }
+  return allowedReasons.includes(reason);
+}
+
 async function resolveClinicFallbackTemplate(cita, eventName) {
   const clinicId = toIntOrNull(cita?.clinica_id);
   if (!clinicId) return null;
@@ -713,6 +730,10 @@ async function resolveClinicFallbackTemplate(cita, eventName) {
         && toIntOrNull(template?.clinic_id) !== clinicId
       ) {
         return false;
+      }
+
+      if (cleanString(template?.trigger_type) === 'appointment_rescheduled') {
+        return isRescheduleTemplateEligible(template, cita);
       }
 
       if (cleanString(template?.trigger_type) !== 'appointment_created') {
@@ -1004,6 +1025,7 @@ function buildExecutionContext({ cita, eventName, userName = null, userEmail = n
         appointment_origin: appointmentOrigin,
         origin: appointmentOrigin,
         estado: cleanString(cita?.estado).toLowerCase() || null,
+        reschedule_reason: cleanString(cita?.reschedule_reason).toLowerCase() || null,
         usuario_nombre: cleanString(userName),
         usuario_email: cleanString(userEmail),
         created_at: createdAt,
@@ -1023,6 +1045,7 @@ function buildExecutionContext({ cita, eventName, userName = null, userEmail = n
       lead_intake_id: leadIntakeId,
       origin: appointmentOrigin,
       estado: cleanString(cita?.estado).toLowerCase() || null,
+      reschedule_reason: cleanString(cita?.reschedule_reason).toLowerCase() || null,
       usuario_nombre: cleanString(userName),
       usuario_email: cleanString(userEmail),
       created_at: createdAt,
@@ -1654,4 +1677,5 @@ module.exports = {
   getLatestExecutionByAppointmentId,
   getExecutionLogs,
   isAppointmentConfirmedForReminder,
+  isRescheduleTemplateEligible,
 };
