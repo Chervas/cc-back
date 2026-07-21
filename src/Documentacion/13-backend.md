@@ -3539,6 +3539,7 @@ Regla funcional validada en QA para `condition/ai_analysis` con `preset_key = co
   - `confirm_appointment` devuelve `decision=incongruente` de forma determinista porque el modelo actual no analiza el contenido visual del sticker;
   - `appointment_unconfirmed_reply` devuelve `decision=duda` para que recepción lo revise;
   - no se confirma, cancela ni reprograma una cita solo por recibir un sticker. Si se añade IA multimodal real, deberá cambiarse esta regla de forma explícita y auditable.
+- Corrección operativa 2026-07-21: `confirm_appointment` no debe ejecutarse pegado a `action/send_whatsapp` ni a `control/join`. El patrón válido es `send_whatsapp` -> `delay/wait_response` -> `condition/ai_analysis`; si hay un `join` tras ramas alternativas de WhatsApp, el `wait_response` queda entre el `join` y la IA y el runtime reancla la escucha al último outbound real con `conversation_id`/`message_id`. La migración `20260721101000-add-wait-response-before-confirm-ai` publica una versión nueva de las plantillas activas afectadas y añade un `wait_response` de 12h, sin salida de timeout, antes de la IA.
 
 Checklist obligatorio al pasar a `staging` y luego a `main`:
 
