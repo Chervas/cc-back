@@ -443,6 +443,9 @@ const JOB_HANDLERS = {
   automation_whatsapp_quiet_send: async (payload = {}) => flowEngineV2Service.runScheduledWhatsappSendJob(payload),
   appointment_automation_schedule_fire: async (payload = {}) => runAppointmentAutomationScheduleJob(payload),
   lead_callback_reminder_notify: async (payload = {}, jobRequest) => runLeadCallbackReminderJob(payload, jobRequest),
+  lead_auto_reply_backfill: async (payload = {}, jobRequest) => (
+    require('./leadAutoReply.service').runPendingBatchJob(payload, jobRequest)
+  ),
   intake_quickchat_summary_materialize: async (payload = {}) => (
     intakeQuickChatOutboxService.runIntakeQuickChatSummaryMaterializeJob(payload)
   ),

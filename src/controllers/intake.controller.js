@@ -5359,6 +5359,52 @@ exports.getLeadAutoReplyStatus = asyncHandler(async (req, res) => {
   return res.status(200).json({ success: true, data: status });
 });
 
+exports.getLeadAutoReplyPendingPreview = asyncHandler(async (req, res) => {
+  const clinicId = parseInteger(req.query.clinic_id || req.query.clinicId);
+  if (clinicId === null) return res.status(400).json({ success: false, error: 'clinic_id_required' });
+  if (!(await requireLeadAutomationClinicAccess(req, res, clinicId))) return;
+  const preview = await leadAutoReplyService.getPendingPreview(clinicId);
+  return res.status(200).json({ success: true, data: preview });
+});
+
+exports.startLeadAutoReplyPendingSend = asyncHandler(async (req, res) => {
+  const clinicId = parseInteger(req.body?.clinic_id || req.body?.clinicId);
+  if (clinicId === null) return res.status(400).json({ success: false, error: 'clinic_id_required' });
+  if (!(await requireLeadAutomationClinicAccess(req, res, clinicId))) return;
+  try {
+    const batch = await leadAutoReplyService.startPendingBatch({
+      clinicId,
+      actorUserId: parseInteger(req.userData?.userId) || 1,
+    });
+    return res.status(202).json({ success: true, data: batch });
+  } catch (error) {
+    return res.status(error.status || 500).json({
+      success: false,
+      error: error.code || 'lead_auto_reply_batch_start_failed',
+      message: error.message,
+    });
+  }
+});
+
+exports.getLeadAutoReplyPendingProgress = asyncHandler(async (req, res) => {
+  const clinicId = parseInteger(req.query.clinic_id || req.query.clinicId);
+  const jobId = parseInteger(req.params.jobId);
+  if (clinicId === null || jobId === null) {
+    return res.status(400).json({ success: false, error: 'clinic_id_and_job_id_required' });
+  }
+  if (!(await requireLeadAutomationClinicAccess(req, res, clinicId))) return;
+  try {
+    const progress = await leadAutoReplyService.getPendingBatchProgress({ clinicId, jobId });
+    return res.status(200).json({ success: true, data: progress });
+  } catch (error) {
+    return res.status(error.status || 500).json({
+      success: false,
+      error: error.code || 'lead_auto_reply_batch_progress_failed',
+      message: error.message,
+    });
+  }
+});
+
 exports.updateLeadAutoReply = asyncHandler(async (req, res) => {
   const clinicId = parseInteger(req.body?.clinic_id || req.body?.clinicId);
   if (clinicId === null) {
