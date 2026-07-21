@@ -1144,7 +1144,7 @@ const NODE_TYPES_V2 = [
       timeout_unit: 'hours',
       listens_to_node_id: null,
       response_buffer_enabled: true,
-      response_buffer_delay_seconds: 90,
+      response_buffer_delay_seconds: 180,
     },
     config_schema: [
       { key: 'timeout_duration', label: 'Tiempo de espera', input_type: 'number', required: true },

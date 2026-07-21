@@ -316,7 +316,7 @@ function getResponseBufferConfig(waitNode) {
     ?? (explicitDelaySeconds !== null ? explicitDelaySeconds * 1000 : null)
     ?? envDelayMs
     ?? (envDelaySeconds !== null ? envDelaySeconds * 1000 : null)
-    ?? 90 * 1000;
+    ?? 180 * 1000;
   return {
     enabled: parseBool(cfg.response_buffer_enabled, true),
     delayMs: resolvedDelayMs,

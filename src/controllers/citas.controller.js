@@ -2587,6 +2587,13 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     if (await denyAppointmentManageAccessIfNeeded(req, res, cita.clinica_id)) return;
 
     const previousStatus = cita.estado;
+    const rescheduleReason = String(req.body?.reschedule_reason || 'clinic_schedule').trim().toLowerCase();
+    if (!['patient_request', 'clinic_schedule'].includes(rescheduleReason)) {
+        return res.status(400).json({
+            message: 'reschedule_reason inválido',
+            allowed: ['patient_request', 'clinic_schedule'],
+        });
+    }
 
     const inicio = req.body?.inicio ? new Date(req.body.inicio) : null;
     const fin = req.body?.fin ? new Date(req.body.fin) : null;
@@ -2636,6 +2643,7 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
 
     cita.inicio = inicio;
     cita.fin = fin;
+    cita.reschedule_reason = rescheduleReason;
     if (nextDoctorIdRaw !== undefined) {
         cita.doctor_id = nextDoctorId;
     }
@@ -2669,6 +2677,7 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
         });
         await appointmentAutomationV2Runtime.enqueueExecutionForCita(cita, {
             event_name: 'appointment_rescheduled',
+            trigger_data: { reschedule_reason: rescheduleReason },
             user_id: req.userData?.userId || null,
             user_name: req.userData?.name || req.userData?.nombre || req.userData?.email || null,
             user_role: req.userData?.role || req.userData?.rol || 'admin',
