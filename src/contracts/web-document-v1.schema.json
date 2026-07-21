@@ -428,6 +428,9 @@
             "column_tracks": { "$ref": "#/definitions/columnTracks" },
             "semantic_tag": {
               "enum": ["section", "header", "main", "aside", "footer"]
+            },
+            "structure_role": {
+              "enum": ["section", "container", "row", "column"]
             }
           }
         },

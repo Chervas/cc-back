@@ -693,7 +693,8 @@ function renderNode(nodeId, document, snapshot, context, ancestors = new Set(), 
     const children = node.children.map((childId) => renderNode(childId, document, snapshot, context, nextAncestors)).join('');
     const globalAttribute = globalSlot ? ` data-cc-global="${globalSlot}"` : '';
     const globalClass = globalSlot ? ` cc-site-${globalSlot}` : '';
-    return `<${tag} id="cc-${escapeHtml(node.id)}"${globalAttribute} class="cc-node cc-section${globalClass} cc-layout-${escapeHtml(node.props.layout)} cc-cols-${Number(node.props.columns)} ${sectionTrackClassList(node)} ${styleClassList(node)}"><div class="cc-container">${children}</div></${tag}>`;
+    const roleClass = `cc-role-${escapeHtml(node.props.structure_role || 'section')}`;
+    return `<${tag} id="cc-${escapeHtml(node.id)}"${globalAttribute} class="cc-node cc-section${globalClass} ${roleClass} cc-layout-${escapeHtml(node.props.layout)} cc-cols-${Number(node.props.columns)} ${sectionTrackClassList(node)} ${styleClassList(node)}"><div class="cc-container">${children}</div></${tag}>`;
   }
   if (node.type === 'heading') {
     const level = Math.min(6, Math.max(1, Number(node.props.level) || 2));
@@ -797,7 +798,7 @@ function stylesheet(tokens, document = { nodes: {} }) {
   return [
     `:root{--cc-primary:${tokens.color_primary};--cc-secondary:${tokens.color_secondary};--cc-accent:${tokens.color_accent};--cc-surface:${tokens.color_surface};--cc-text:${tokens.color_text};--cc-radius:${radius};--cc-font-heading:${fontStackCss(tokens.font_heading)};--cc-font-body:${fontStackCss(tokens.font_body)};--cc-sm:${density.sm};--cc-md:${density.md};--cc-lg:${density.lg};--cc-xl:${density.xl};--cc-2xl:${density.xxl};color-scheme:light}`,
     '*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--cc-surface);color:var(--cc-text);font-family:var(--cc-font-body);line-height:1.55}img{display:block;max-width:100%}',
-    '.cc-node{min-width:0}.cc-container{margin-inline:auto;display:inherit;flex-direction:inherit;flex-wrap:inherit;gap:inherit}.cc-section{display:flex;width:100%}.cc-layout-stack>.cc-container{display:flex;flex-direction:column}.cc-layout-row>.cc-container{display:flex;flex-direction:row;flex-wrap:wrap}.cc-layout-grid>.cc-container{display:grid}',
+    '.cc-node{min-width:0}.cc-container{margin-inline:auto;display:inherit;flex-direction:inherit;flex-wrap:inherit;gap:inherit}.cc-section{display:flex;width:100%}.cc-role-container>.cc-container,.cc-role-row>.cc-container{align-items:stretch}.cc-role-column{min-width:0}.cc-role-column>.cc-container{width:100%;min-width:0}.cc-layout-stack>.cc-container{display:flex;flex-direction:column}.cc-layout-row>.cc-container{display:flex;flex-direction:row;flex-wrap:wrap}.cc-layout-grid>.cc-container{display:grid}',
     columnRules(),
     '.cc-section.cc-width-narrow>.cc-container{width:min(100% - 2rem,48rem)}.cc-section.cc-width-standard>.cc-container{width:min(100% - 2rem,72rem)}.cc-section.cc-width-wide>.cc-container{width:min(100% - 2rem,82.5rem)}.cc-section.cc-width-full>.cc-container{width:100%;padding-inline:1rem}.cc-node.cc-width-narrow:not(.cc-section){width:min(100%,48rem)}.cc-node.cc-width-standard:not(.cc-section){width:min(100%,72rem)}.cc-node.cc-width-wide:not(.cc-section){width:min(100%,82.5rem)}.cc-node.cc-width-full:not(.cc-section){width:100%}',
     spacingRules(),
