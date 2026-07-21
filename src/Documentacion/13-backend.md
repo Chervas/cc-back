@@ -7107,3 +7107,11 @@ aplicadas, job durable `#32802` completado, 30/30 aprobaciones, 905/905 nodos
 localizados y un único canary autorizado leído. No se deben fabricar mensajes
 ni citas para repetir esa validación; cualquier nuevo canary exige destinatario
 QA explícitamente autorizado y conserva idempotencia por ejecución/nodo.
+
+## 2026-07-21 - Leads: WhatsApp manual y descarte por información
+
+Este corte ajusta el contrato operativo de Leads/QuickChat:
+
+- `POST /api/conversations/:id/messages`, cuando envía un WhatsApp desde una conversación asociada a `LeadIntake`, registra el envío como intento de contacto del lead. Actualiza `historial_contactos`, incrementa `num_contactos`, rellena `ultimo_contacto` y crea `LeadContactAttempt` con `canal=whatsapp`. No degrada estados ya avanzados (`cualificado`, `citado`, `acudio_cita`, `convertido`, `descartado`).
+- `POST /api/intake/leads/:id/call-outcome` con `outcome=informacion` cierra el lead como `descartado` y persiste `motivo_descarte=solo_pidio_informacion`. La auditoría y la cancelación de recordatorios pendientes se mantienen.
+- La migración `20260721121500-seed-lead-first-visit-whatsapp-template.js` añade al catálogo `clinicaclick_lead_primera_visita_programar`, plantilla `UTILITY` genérica para responder a una solicitud de primera visita. No crea ni modifica automatizaciones; la propagación usa el servicio estándar de plantillas.

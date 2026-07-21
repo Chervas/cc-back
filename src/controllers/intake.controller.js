@@ -5962,8 +5962,9 @@ exports.saveCallOutcome = asyncHandler(async (req, res) => {
   }
   if (outcome === 'citado') {
     updatePayload.status_lead = 'citado';
-  } else if (outcome === 'informacion' && lead.status_lead === 'nuevo') {
-    updatePayload.status_lead = 'contactado';
+  } else if (outcome === 'informacion') {
+    updatePayload.status_lead = 'descartado';
+    updatePayload.motivo_descarte = 'solo_pidio_informacion';
   }
 
   if (linkedAppointment && parseInteger(linkedAppointment.lead_intake_id) !== leadId) {
