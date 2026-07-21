@@ -14,6 +14,7 @@ const {
   UsuarioClinica,
   Paciente,
   LeadIntake,
+  LeadContactAttempt,
   ConversationRead,
   Clinica,
   MarketingPatientListItem,
@@ -21,6 +22,7 @@ const {
 } = db;
 
 const ROLE_AGGREGATE = ['propietario', 'admin'];
+const LEAD_CONTACT_PROTECTED_STATUSES = new Set(['cualificado', 'citado', 'acudio_cita', 'convertido', 'descartado']);
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1,44')
   .split(',')
   .map((v) => parseInt(v.trim(), 10))
@@ -74,6 +76,54 @@ function downloadFailedMediaError(kind) {
 function cleanText(value) {
   if (value === undefined || value === null) return '';
   return String(value).trim();
+}
+
+async function registerLeadWhatsappContactAttempt({ leadId, userId, isTemplate, body }) {
+  const safeLeadId = Number(leadId);
+  if (!Number.isInteger(safeLeadId) || safeLeadId <= 0) {
+    return null;
+  }
+
+  const lead = await LeadIntake.findByPk(safeLeadId);
+  if (!lead) {
+    return null;
+  }
+
+  const now = new Date();
+  const historial = Array.isArray(lead.historial_contactos)
+    ? [...lead.historial_contactos]
+    : [];
+  const motivo = isTemplate ? 'whatsapp_template_sent' : 'whatsapp_message_sent';
+  const notas = isTemplate ? 'Plantilla WhatsApp enviada' : 'WhatsApp enviado';
+
+  historial.push({
+    fecha: now.toISOString(),
+    motivo,
+    notas,
+    canal: 'whatsapp',
+    usuario_id: userId || null,
+  });
+
+  await lead.update({
+    historial_contactos: historial,
+    num_contactos: (Number(lead.num_contactos || 0) || 0) + 1,
+    ultimo_contacto: now,
+    status_lead: LEAD_CONTACT_PROTECTED_STATUSES.has(String(lead.status_lead || '').trim().toLowerCase())
+      ? lead.status_lead
+      : 'contactado',
+  });
+
+  if (LeadContactAttempt) {
+    await LeadContactAttempt.create({
+      lead_intake_id: lead.id,
+      usuario_id: userId || null,
+      canal: 'whatsapp',
+      motivo,
+      notas: cleanText(body).slice(0, 500) || notas,
+    });
+  }
+
+  return lead;
 }
 
 function isTechnicalWhatsappFailureNotice(message) {
@@ -1558,9 +1608,11 @@ exports.postMessage = async (req, res) => {
 
     await transaction.commit();
 
+    let outboundWhatsappQueued = false;
     if (outboundJobPayload) {
       try {
         await queues.outboundWhatsApp.add('send', outboundJobPayload);
+        outboundWhatsappQueued = true;
       } catch (enqueueErr) {
         console.error('Error encolando outbound WhatsApp', enqueueErr);
         const errorMetadata = {
@@ -1582,6 +1634,23 @@ exports.postMessage = async (req, res) => {
         }
         msg.status = 'failed';
         msg.metadata = errorMetadata;
+      }
+    }
+
+    if (outboundWhatsappQueued && conversation.lead_id) {
+      try {
+        await registerLeadWhatsappContactAttempt({
+          leadId: conversation.lead_id,
+          userId,
+          isTemplate,
+          body: message,
+        });
+      } catch (leadContactErr) {
+        console.warn('No se pudo registrar intento WhatsApp del lead', {
+          leadId: conversation.lead_id,
+          conversationId: conversation.id,
+          error: leadContactErr?.message || leadContactErr,
+        });
       }
     }
 
