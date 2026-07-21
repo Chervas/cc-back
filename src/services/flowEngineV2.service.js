@@ -1620,7 +1620,9 @@ function normalizeIntentText(value) {
 }
 
 function isPositiveConfirmationEmojiText(value) {
-  const raw = cleanString(value).normalize('NFC');
+  const text = cleanString(value);
+  if (!text) return false;
+  const raw = text.normalize('NFC');
   if (!raw) return false;
   if (POSITIVE_CONFIRMATION_REACTION_EMOJIS.has(raw)) return true;
 

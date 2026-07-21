@@ -227,6 +227,11 @@ test('clasificadores deterministas entienden confirmación, cancelación y cambi
   }
 });
 
+test('confirm_appointment no falla cuando no hay texto de respuesta', () => {
+  assert.equal(buildDeterministicConfirmAppointmentTextOutput({ last_response: null }), null);
+  assert.equal(buildDeterministicConfirmAppointmentTextOutput({ last_response_context: {} }), null);
+});
+
 test('las nueve respuestas manuales reales tienen traducción ca/en', () => {
   assert.equal(rollout.MANUAL_TRANSLATION_ROWS.length, 9);
   for (const row of rollout.MANUAL_TRANSLATION_ROWS) {
