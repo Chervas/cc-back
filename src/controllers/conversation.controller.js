@@ -1282,25 +1282,9 @@ exports.markAsRead = async (req, res) => {
       last_read_at: new Date(),
     });
 
-    const pendingStates = await getPendingReplyStatesByConversationIds([Number(conversation.id)]);
-    const pendingState = pendingStates.get(Number(conversation.id));
-    const totalUnread = await getTotalUnreadCountForUser(
-      userId,
-      clinicIds,
-      isAggregateAllowed,
-      conversation.clinic_id
-    );
-    const io = getIO();
-    if (io) {
-      const room = `user:${userId}`;
-      io.to(room).emit('unread:updated', { totalUnreadCount: totalUnread || 0 });
-      io.to(room).emit('conversation:updated', {
-        id: conversation.id,
-        unread_count: pendingState?.count ?? 0,
-        pending_automation_attention: pendingState?.requiresAutomationAttention === true,
-        last_message_at: conversation.last_message_at,
-      });
-    }
+    // Abrir una conversación no modifica el estado "pendiente de respuesta".
+    // Evitamos recalcular aquí los agregados globales: se actualizan al entrar
+    // o salir mensajes, que es cuando el contador realmente puede cambiar.
     return res.json({ success: true });
   } catch (err) {
     console.error('Error markAsRead', err);

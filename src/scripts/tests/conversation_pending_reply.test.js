@@ -1,6 +1,8 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const test = require('node:test');
 
 const db = require('../../../models');
@@ -52,4 +54,18 @@ test('un conjunto vacío no consulta la base de datos', async (t) => {
 
   const states = await getPendingReplyStatesByConversationIds([]);
   assert.equal(states.size, 0);
+});
+
+test('abrir una conversación no recalcula el pendiente ni el agregado global', () => {
+  const controller = fs.readFileSync(
+    path.resolve(__dirname, '../../controllers/conversation.controller.js'),
+    'utf8',
+  );
+  const start = controller.indexOf('exports.markAsRead = async');
+  const end = controller.indexOf('\nexports.postMessage', start);
+  assert.ok(start >= 0 && end > start, 'markAsRead debe existir');
+  const block = controller.slice(start, end);
+
+  assert.match(block, /ConversationRead\.upsert/);
+  assert.doesNotMatch(block, /getPendingReplyStatesByConversationIds|getTotalUnreadCountForUser|unread:updated/);
 });
