@@ -17,6 +17,7 @@ const {
   selectBestWhatsappTemplateCandidate,
   buildDeterministicConfirmAppointmentTextOutput,
   buildDeterministicAppointmentUnconfirmedReplyOutput,
+  formatAppointmentLocalDateTime,
   readStoredWhatsappReplaySelection,
 } = require('../../services/flowEngineV2.service');
 const rollout = require('../../services/whatsappLanguageRollout.service')._test;
@@ -69,6 +70,17 @@ test('normaliza locale interno y conserva el código completo exigido por Meta',
   assert.equal(resolveMetaTemplateLanguage('es'), 'es');
   assert.equal(resolveMetaTemplateLanguage('ca'), 'ca');
   assert.equal(resolveMetaTemplateLanguage('en'), 'en_US');
+});
+
+test('la hora de cita del recordatorio se resuelve en la zona horaria de la clínica', () => {
+  assert.deepEqual(
+    formatAppointmentLocalDateTime('2026-07-22T14:15:00.000Z', 'Europe/Madrid'),
+    { fecha: '22/07/2026', hora: '16:15' }
+  );
+  assert.deepEqual(
+    formatAppointmentLocalDateTime('2026-01-22T14:15:00.000Z', 'Europe/Madrid'),
+    { fecha: '22/01/2026', hora: '15:15' }
+  );
 });
 
 test('cada nuevo mensaje usa el idioma vivo del paciente enriquecido', () => {

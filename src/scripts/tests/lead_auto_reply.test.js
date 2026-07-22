@@ -4,6 +4,7 @@ const assert = require('assert');
 const db = require('../../../models');
 const {
   computeNextClinicOpening,
+  localDateTimeToUtc,
 } = require('../../services/clinicOpeningHours.service');
 const {
   evaluatePendingLeadContact,
@@ -39,6 +40,11 @@ async function evaluateWith({ lead, attempts = [], outboundMessage = null, captu
 }
 
 async function run() {
+  assert.equal(
+    localDateTimeToUtc('2026-07-22', '00:00:00', 'Europe/Madrid').toISOString(),
+    '2026-07-21T22:00:00.000Z'
+  );
+
   const mondayRows = [
     { dia_semana: 1, activo: true, hora_inicio: '09:00', hora_fin: '13:00' },
     { dia_semana: 1, activo: true, hora_inicio: '15:00', hora_fin: '19:00' },

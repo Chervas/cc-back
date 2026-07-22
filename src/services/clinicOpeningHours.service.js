@@ -56,7 +56,9 @@ function partsInTimeZone(date, timeZone) {
   parts.forEach((part) => {
     if (part.type !== 'literal') bag[part.type] = part.value;
   });
-  return Object.fromEntries(Object.entries(bag).map(([key, value]) => [key, Number(value)]));
+  const numeric = Object.fromEntries(Object.entries(bag).map(([key, value]) => [key, Number(value)]));
+  if (numeric.hour === 24) numeric.hour = 0;
+  return numeric;
 }
 
 function localDate(date, timeZone) {

@@ -11,6 +11,12 @@ const {
 } = require('../lib/personal-schedule-recurring');
 const { isGlobalAdmin } = require('../lib/role-helpers');
 const { getAccessibleClinicIdsForFeature } = require('../lib/access-policy');
+const {
+  DEFAULT_TIME_ZONE,
+  addLocalDays,
+  localDateTimeToUtc,
+  resolveClinicTimeZone,
+} = require('./clinicOpeningHours.service');
 
 const {
   CitaPaciente,
@@ -76,21 +82,25 @@ function parseCsvIds(raw) {
   return uniqueInts(String(raw).split(',').map((part) => part.trim()));
 }
 
-function dateOnly(date) {
+function dateOnly(date, timeZone = DEFAULT_TIME_ZONE) {
   if (!(date instanceof Date) || Number.isNaN(date.getTime())) return null;
-  const yyyy = date.getFullYear();
-  const mm = String(date.getMonth() + 1).padStart(2, '0');
-  const dd = String(date.getDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}`;
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
 }
 
-function dayRange(dateValue) {
-  const normalized = normalizeDateOnly(dateValue) || dateOnly(new Date());
-  const base = normalized ? new Date(`${normalized}T00:00:00`) : new Date();
-  base.setHours(0, 0, 0, 0);
-  const end = new Date(base);
-  end.setHours(23, 59, 59, 999);
-  return { start: base, end, date: dateOnly(base) };
+function dayRange(dateValue, timeZone = DEFAULT_TIME_ZONE) {
+  const normalized = normalizeDateOnly(dateValue) || dateOnly(new Date(), timeZone);
+  const nextDate = addLocalDays(normalized, 1);
+  const start = localDateTimeToUtc(normalized, '00:00:00', timeZone);
+  const nextStart = localDateTimeToUtc(nextDate, '00:00:00', timeZone);
+  const end = new Date(nextStart.getTime() - 1);
+  return { start, end, date: normalized, timeZone };
 }
 
 function startOfWeek(dateIso) {
@@ -113,10 +123,50 @@ function doctorShort(row) {
   return [name, surname ? `${surname[0]}.` : ''].filter(Boolean).join(' ');
 }
 
-function timeLabel(value) {
+function timeLabel(value, timeZone = DEFAULT_TIME_ZONE) {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return 'Sin hora';
-  return date.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+  return date.toLocaleTimeString('es-ES', {
+    timeZone,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+function buildClinicDayRanges({ clinicIds, clinicMap, dateValue }) {
+  const grouped = new Map();
+  for (const clinicId of uniqueInts(clinicIds)) {
+    const clinic = clinicMap instanceof Map ? clinicMap.get(clinicId) : null;
+    const timeZone = resolveClinicTimeZone(clinic);
+    const range = dayRange(dateValue, timeZone);
+    const key = `${range.start.toISOString()}|${range.end.toISOString()}`;
+    if (!grouped.has(key)) {
+      grouped.set(key, { ...range, clinicIds: [] });
+    }
+    grouped.get(key).clinicIds.push(clinicId);
+  }
+  return Array.from(grouped.values());
+}
+
+function clinicRangeWhere(field, ranges, mode = 'today', now = new Date()) {
+  const clauses = (Array.isArray(ranges) ? ranges : []).map((range) => {
+    let temporalWhere;
+    if (mode === 'next') {
+      temporalWhere = { [Op.gt]: range.end };
+    } else if (mode === 'past') {
+      const pastDate = addLocalDays(range.date, -14);
+      const pastStart = localDateTimeToUtc(pastDate, '00:00:00', range.timeZone);
+      temporalWhere = { [Op.between]: [pastStart, now] };
+    } else {
+      temporalWhere = { [Op.between]: [range.start, range.end] };
+    }
+    return {
+      ...scopedWhere('clinica_id', range.clinicIds),
+      [field]: temporalWhere,
+    };
+  });
+  return clauses.length ? { [Op.or]: clauses } : { id_cita: null };
 }
 
 function dayLabel(dateIso) {
@@ -271,7 +321,14 @@ async function resolveClinicScope(rawScope, memberships, { allowAllClinics = fal
   const clinics = clinicIds.length && Clinica
     ? await Clinica.findAll({
         where: scopedWhere('id_clinica', clinicIds),
-        attributes: ['id_clinica', 'nombre_clinica', 'url_avatar', 'url_ficha_local', 'grupoClinicaId'],
+        attributes: [
+          'id_clinica',
+          'nombre_clinica',
+          'url_avatar',
+          'url_ficha_local',
+          'grupoClinicaId',
+          'configuracion',
+        ],
         raw: true,
       })
     : [];
@@ -337,10 +394,11 @@ function mapAppointment(row, maps, now) {
   const installation = maps.installations.get(Number(row.instalacion_id));
   const treatment = maps.treatments.get(Number(row.tratamiento_id));
   const clinic = maps.clinics.get(Number(row.clinica_id));
+  const timeZone = resolveClinicTimeZone(clinic);
   const ui = statusUi(row.estado);
   const start = row.inicio instanceof Date ? row.inicio : new Date(row.inicio);
   const end = row.fin instanceof Date ? row.fin : new Date(row.fin || row.inicio);
-  const date = dateOnly(start);
+  const date = dateOnly(start, timeZone);
   const appointmentId = Number(row.id_cita);
 
   return {
@@ -359,7 +417,7 @@ function mapAppointment(row, maps, now) {
     treatmentId: Number(row.tratamiento_id) || null,
     treatment: treatment?.nombre || row.motivo || row.titulo || null,
     specialty: treatment?.especialidad || treatment?.disciplina || null,
-    timeLabel: timeLabel(start),
+    timeLabel: timeLabel(start, timeZone),
     timeISO: Number.isNaN(start.getTime()) ? null : start.toISOString(),
     endTimeISO: Number.isNaN(end.getTime()) ? null : end.toISOString(),
     date,
@@ -396,8 +454,7 @@ function isInactiveTodayAppointment(item, { includeClosedToday = false } = {}) {
 async function loadAppointments({
   clinicIds,
   clinicMap,
-  todayStart,
-  todayEnd,
+  todayDate,
   now,
   doctorId = null,
   includeToday = true,
@@ -409,24 +466,24 @@ async function loadAppointments({
     return { today: [], inactiveToday: [], pastAttendance: [], next: [] };
   }
 
-  const pastStart = new Date(todayStart);
-  pastStart.setDate(pastStart.getDate() - 14);
+  const dayRanges = buildClinicDayRanges({
+    clinicIds,
+    clinicMap,
+    dateValue: todayDate,
+  });
 
   const appointmentAttributes = [
     'id_cita', 'clinica_id', 'paciente_id', 'doctor_id', 'instalacion_id',
     'tratamiento_id', 'titulo', 'motivo', 'tipo_cita', 'estado', 'inicio', 'fin',
   ];
-  const appointmentScope = {
-    ...scopedWhere('clinica_id', clinicIds),
-    ...(doctorId ? { doctor_id: doctorId } : {}),
-  };
+  const doctorScope = doctorId ? { doctor_id: doctorId } : {};
 
   const [todayRows, pastRows, nextRows] = await Promise.all([
     includeToday
       ? CitaPaciente.findAll({
           where: {
-            ...appointmentScope,
-            inicio: { [Op.between]: [todayStart, todayEnd] },
+            ...doctorScope,
+            ...clinicRangeWhere('inicio', dayRanges, 'today', now),
           },
           attributes: appointmentAttributes,
           order: [['inicio', 'ASC']],
@@ -436,8 +493,8 @@ async function loadAppointments({
     includePastAttendance
       ? CitaPaciente.findAll({
           where: {
-            ...appointmentScope,
-            fin: { [Op.between]: [pastStart, now] },
+            ...doctorScope,
+            ...clinicRangeWhere('fin', dayRanges, 'past', now),
             estado: { [Op.in]: [...ATTENDANCE_OPEN_STATUSES] },
           },
           attributes: appointmentAttributes,
@@ -449,8 +506,8 @@ async function loadAppointments({
     includeNext
       ? CitaPaciente.findAll({
           where: {
-            ...appointmentScope,
-            inicio: { [Op.gt]: todayEnd },
+            ...doctorScope,
+            ...clinicRangeWhere('inicio', dayRanges, 'next', now),
             estado: { [Op.notIn]: [...CANCELLED_STATUSES] },
           },
           attributes: appointmentAttributes,
@@ -479,7 +536,7 @@ async function loadAppointments({
   };
 }
 
-async function countTasks({ clinicIds, todayStart, todayEnd }) {
+async function countTasks({ clinicIds, clinicMap, todayDate }) {
   if (!clinicIds.length) {
     return { leadsPending: 0, pendingConsents: 0, pendingReviews: 0 };
   }
@@ -513,11 +570,11 @@ async function countTasks({ clinicIds, todayStart, todayEnd }) {
       : 0,
   ]);
 
+  const dayRanges = buildClinicDayRanges({ clinicIds, clinicMap, dateValue: todayDate });
   const unconfirmedToday = CitaPaciente
     ? await CitaPaciente.count({
         where: {
-          ...scopedWhere('clinica_id', clinicIds),
-          inicio: { [Op.between]: [todayStart, todayEnd] },
+          ...clinicRangeWhere('inicio', dayRanges),
           estado: { [Op.in]: UNCONFIRMED_TODAY_STATUSES },
         },
       })
@@ -1243,8 +1300,7 @@ async function getMainDashboard({ userId, query = {} }) {
   const appointments = await loadAppointments({
     clinicIds: dashboardAccess.appointmentClinicIds,
     clinicMap: scope.clinicMap,
-    todayStart: today.start,
-    todayEnd: today.end,
+    todayDate: today.date,
     now,
     doctorId,
     includeToday: sections.operations || sections.doctor,
@@ -1255,8 +1311,8 @@ async function getMainDashboard({ userId, query = {} }) {
   const counts = sections.operations
     ? await countTasks({
         clinicIds: dashboardAccess.taskClinicIds,
-        todayStart: today.start,
-        todayEnd: today.end,
+        clinicMap: scope.clinicMap,
+        todayDate: today.date,
       })
     : { leadsPending: 0, pendingConsents: 0, pendingReviews: 0, unconfirmedToday: 0 };
 
@@ -1382,5 +1438,10 @@ module.exports = {
     roleSections,
     applyDashboardAccessGuard,
     intersectClinicIds,
+    buildClinicDayRanges,
+    dateOnly,
+    dayRange,
+    mapAppointment,
+    timeLabel,
   },
 };
