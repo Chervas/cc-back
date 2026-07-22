@@ -8,6 +8,24 @@ const path = require('node:path');
 const db = require('../../../models');
 const accessPolicy = require('../../lib/access-policy');
 
+function testLeadAutomationAuthorizationContract() {
+  const controllerSource = fs.readFileSync(
+    path.resolve(__dirname, '../../controllers/intake.controller.js'),
+    'utf8',
+  );
+  const start = controllerSource.indexOf('const requireLeadAutomationClinicAccess');
+  const end = controllerSource.indexOf('const resolveIntakeCandidateClinicIds', start);
+  assert.ok(start >= 0 && end > start, 'lead automation access guard must exist');
+
+  const guardSource = controllerSource.slice(start, end);
+  assert.match(guardSource, /featureKey:\s*'leads\.manage'/);
+  assert.doesNotMatch(
+    guardSource,
+    /requireIntakeConfigScopeAccess/,
+    'lead automation must not require generic Marketing write access in addition to leads.manage',
+  );
+}
+
 async function testClinicSettingsAuthorizationMatrix() {
   const originals = {
     membershipFindOne: db.UsuarioClinica.findOne,
@@ -97,6 +115,7 @@ async function testClinicSettingsAuthorizationMatrix() {
 }
 
 async function run() {
+  testLeadAutomationAuthorizationContract();
   const catalog = accessPolicy.getAccessPolicyCatalog();
   const features = new Map(catalog.features.map((feature) => [feature.key, feature]));
   const allowedFeatureKeys = [...accessPolicy.ALLOWED_FEATURE_KEYS].sort();
@@ -158,7 +177,9 @@ async function run() {
   assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has('leads.manage'), true);
   assert.equal(features.get('leads.manage')?.enforcement_status, 'backend');
   assert.equal(accessPolicy.defaultForFeature('leads.manage', 'agencia'), false);
+  assert.equal(accessPolicy.defaultForFeature('leads.manage', 'reception'), true);
   assert.equal(accessPolicy.defaultForFeature('leads.manage', 'admin_staff'), true);
+  assert.equal(accessPolicy.defaultForFeature('leads.manage', 'doctor'), false);
   assert.equal(accessPolicy.defaultForFeature('consents.view', 'agencia'), false);
   assert.equal(accessPolicy.defaultForFeature('quickchat.read_patients', 'agencia'), false);
   assert.equal(accessPolicy.defaultForFeature('quickchat.read_team', 'agencia'), false);

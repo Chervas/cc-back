@@ -179,7 +179,6 @@ const requireIntakeConfigScopeAccess = async (req, res, { clinicId = null, group
 };
 
 const requireLeadAutomationClinicAccess = async (req, res, clinicId) => {
-  if (!(await requireIntakeConfigScopeAccess(req, res, { clinicId, access: 'write' }))) return false;
   const actorId = parseInteger(req.userData?.userId);
   if (isGlobalAdmin(actorId)) return true;
   const allowed = actorId !== null && await canUserAccessFeature({
