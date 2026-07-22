@@ -43,6 +43,56 @@ async function pickPatientMembership() {
 }
 
 async function run() {
+  const summerRange = __testing.dayRange('2026-07-22', 'Europe/Madrid');
+  assert.equal(summerRange.start.toISOString(), '2026-07-21T22:00:00.000Z');
+  assert.equal(summerRange.end.toISOString(), '2026-07-22T21:59:59.999Z');
+
+  const dstStartRange = __testing.dayRange('2026-03-29', 'Europe/Madrid');
+  assert.equal(dstStartRange.start.toISOString(), '2026-03-28T23:00:00.000Z');
+  assert.equal(dstStartRange.end.toISOString(), '2026-03-29T21:59:59.999Z');
+  assert.equal(dstStartRange.end.getTime() - dstStartRange.start.getTime() + 1, 23 * 60 * 60 * 1000);
+
+  const clinicMap = new Map([[
+    59,
+    {
+      id_clinica: 59,
+      nombre_clinica: 'Propdental Hospitalet',
+      configuracion: { timezone: 'Europe/Madrid' },
+    },
+  ]]);
+  const appointmentMaps = {
+    patients: new Map([[2700, { id_paciente: 2700, nombre: 'Dunia', apellidos: 'Irías' }]]),
+    doctors: new Map(),
+    installations: new Map(),
+    treatments: new Map(),
+    clinics: clinicMap,
+  };
+  const mappedAppointment = __testing.mapAppointment({
+    id_cita: 2702,
+    clinica_id: 59,
+    paciente_id: 2700,
+    doctor_id: null,
+    instalacion_id: null,
+    tratamiento_id: null,
+    estado: 'recordatorio_confirmado',
+    inicio: new Date('2026-07-22T14:15:00.000Z'),
+    fin: new Date('2026-07-22T14:30:00.000Z'),
+  }, appointmentMaps, new Date('2026-07-22T12:00:00.000Z'));
+  assert.equal(mappedAppointment.timeLabel, '16:15');
+  assert.equal(mappedAppointment.date, '2026-07-22');
+  assert.equal(mappedAppointment.agendaQuery.fecha, '2026-07-22');
+
+  const afterUtcMidnight = __testing.mapAppointment({
+    id_cita: 2703,
+    clinica_id: 59,
+    paciente_id: 2700,
+    estado: 'pendiente',
+    inicio: new Date('2026-07-22T22:30:00.000Z'),
+    fin: new Date('2026-07-22T22:45:00.000Z'),
+  }, appointmentMaps, new Date('2026-07-22T12:00:00.000Z'));
+  assert.equal(afterUtcMidnight.timeLabel, '00:30');
+  assert.equal(afterUtcMidnight.date, '2026-07-23');
+
   const agencySections = __testing.roleSections('agencia', 'unknown');
   assert.equal(agencySections.ownerLike, false);
   assert.equal(agencySections.operations, false);

@@ -4,6 +4,16 @@ const FALLBACK_CODE = 'general';
 const VERSION = 'medical-area-contracts-v1';
 const db = require('../../models');
 const MedicalAreaContract = db.MedicalAreaContract;
+const LEGACY_APPLICATION_HINT_REPLACEMENTS = new Map([
+  ['No usa piezas dentales. La zona capilar se gestionará en la ficha capilar del paciente.', 'La zona capilar se gestionará en la ficha clínica propia del área.'],
+  ['No usa piezas ni laboratorio dental. El detalle vive en la ficha nutricional.', 'El detalle clínico y las mediciones viven en la ficha nutricional.'],
+  ['No usa piezas. La modalidad y el seguimiento se definen en la ficha clínica.', 'La modalidad y el seguimiento se definen en la ficha clínica del área.'],
+  ['No usa piezas dentales. La zona corporal se gestionará en la ficha funcional.', 'La zona corporal se gestionará en la ficha funcional del área.'],
+  ['No usa piezas dentales. La zona tratada se gestiona como dato clínico del tratamiento.', 'La zona tratada se gestiona como dato clínico del tratamiento.'],
+  ['No usa piezas dentales humanas. El detalle se gestiona en ficha específica.', 'El detalle clínico se gestiona en la ficha específica del área.'],
+  ['No usa piezas dentales. La zona podológica vive en la ficha clínica.', 'La zona podológica vive en la ficha clínica del área.'],
+  ['No usa piezas dentales. Los requisitos quirúrgicos se gestionan como protocolo del área.', 'Los requisitos quirúrgicos se gestionan como protocolo del área.'],
+]);
 
 const TREATMENT_AREA_PROFILES = {
   dental: {
@@ -30,7 +40,7 @@ const TREATMENT_AREA_PROFILES = {
     defaultSessions: 1,
     supportsPiece: false,
     supportsLaboratory: false,
-    applicationHint: 'No usa piezas dentales. La zona capilar se gestionará en la ficha capilar del paciente.',
+    applicationHint: 'La zona capilar se gestionará en la ficha clínica propia del área.',
     applicationOptions: [{ value: 'general', label: 'General / zona capilar' }],
   },
   nutricion: {
@@ -41,7 +51,7 @@ const TREATMENT_AREA_PROFILES = {
     defaultSessions: 1,
     supportsPiece: false,
     supportsLaboratory: false,
-    applicationHint: 'No usa piezas ni laboratorio dental. El detalle vive en la ficha nutricional.',
+    applicationHint: 'El detalle clínico y las mediciones viven en la ficha nutricional.',
     applicationOptions: [{ value: 'general', label: 'General / seguimiento' }],
   },
   psicologia: {
@@ -52,7 +62,7 @@ const TREATMENT_AREA_PROFILES = {
     defaultSessions: 1,
     supportsPiece: false,
     supportsLaboratory: false,
-    applicationHint: 'No usa piezas. La modalidad y el seguimiento se definen en la ficha clínica.',
+    applicationHint: 'La modalidad y el seguimiento se definen en la ficha clínica del área.',
     applicationOptions: [{ value: 'general', label: 'General / sesión' }],
   },
   fisioterapia: {
@@ -63,7 +73,7 @@ const TREATMENT_AREA_PROFILES = {
     defaultSessions: 1,
     supportsPiece: false,
     supportsLaboratory: false,
-    applicationHint: 'No usa piezas dentales. La zona corporal se gestionará en la ficha funcional.',
+    applicationHint: 'La zona corporal se gestionará en la ficha funcional del área.',
     applicationOptions: [{ value: 'general', label: 'General / zona corporal' }],
   },
   estetica: {
@@ -74,7 +84,7 @@ const TREATMENT_AREA_PROFILES = {
     defaultSessions: 1,
     supportsPiece: false,
     supportsLaboratory: false,
-    applicationHint: 'No usa piezas dentales. La zona tratada se gestiona como dato clínico del tratamiento.',
+    applicationHint: 'La zona tratada se gestiona como dato clínico del tratamiento.',
     applicationOptions: [{ value: 'general', label: 'General / zona tratada' }],
   },
   veterinaria: {
@@ -85,7 +95,7 @@ const TREATMENT_AREA_PROFILES = {
     defaultSessions: 1,
     supportsPiece: false,
     supportsLaboratory: false,
-    applicationHint: 'No usa piezas dentales humanas. El detalle se gestiona en ficha específica.',
+    applicationHint: 'El detalle clínico se gestiona en la ficha específica del área.',
     applicationOptions: [{ value: 'general', label: 'General' }],
   },
   podologia: {
@@ -96,7 +106,7 @@ const TREATMENT_AREA_PROFILES = {
     defaultSessions: 1,
     supportsPiece: false,
     supportsLaboratory: false,
-    applicationHint: 'No usa piezas dentales. La zona podológica vive en la ficha clínica.',
+    applicationHint: 'La zona podológica vive en la ficha clínica del área.',
     applicationOptions: [{ value: 'general', label: 'General / zona' }],
   },
   cirugia_digestiva: {
@@ -107,7 +117,7 @@ const TREATMENT_AREA_PROFILES = {
     defaultSessions: 1,
     supportsPiece: false,
     supportsLaboratory: false,
-    applicationHint: 'No usa piezas dentales. Los requisitos quirúrgicos se gestionan como protocolo del área.',
+    applicationHint: 'Los requisitos quirúrgicos se gestionan como protocolo del área.',
     applicationOptions: [{ value: 'general', label: 'General / procedimiento' }],
   },
   general: {
@@ -404,7 +414,7 @@ const APPOINTMENT_ACTIONS = {
     route: null,
     label: 'Abrir ficha clínica',
     compareLabel: 'Abrir seguimiento',
-    detail: 'Abre el workspace clínico definido por el área médica.',
+    detail: 'Abre la ficha clínica definida por el área médica.',
     icon: 'heroicons_outline:squares-2x2',
     compareIcon: 'heroicons_outline:arrows-right-left',
     noProfileMessage: 'Esta cita no tiene una acción clínica configurada',
@@ -430,7 +440,7 @@ const MEDICAL_AREA_CONTRACT_SECTIONS = {
       chips: ['primera_con_trat', 'continuacion', 'revision'],
     },
     {
-      title: 'Workspace',
+      title: 'Ficha clínica',
       icon: 'heroicons_outline:squares-2x2',
       body: 'Abre ficha dental, odontograma y reglas de laboratorio cuando el tratamiento lo requiere.',
       chips: ['Odontograma', 'Laboratorio', 'Consentimientos'],
@@ -470,7 +480,7 @@ const MEDICAL_AREA_CONTRACT_SECTIONS = {
       chips: ['Primera visita', 'Sesión', 'Control'],
     },
     {
-      title: 'Workspace',
+      title: 'Ficha clínica',
       icon: 'heroicons_outline:camera',
       body: 'La ficha debe priorizar zonas capilares, fotos clínicas privadas, evolución y cuidados posteriores.',
       chips: ['Fotos privadas', 'Zonas', 'Cuidados post'],
@@ -490,7 +500,7 @@ const MEDICAL_AREA_CONTRACT_SECTIONS = {
       chips: ['Presencial', 'Online', 'Recurrente'],
     },
     {
-      title: 'Workspace',
+      title: 'Ficha clínica',
       icon: 'heroicons_outline:lock-closed',
       body: 'La ficha debe separar notas privadas, objetivos terapéuticos y seguimiento.',
       chips: ['Notas privadas', 'Objetivos', 'Seguimiento'],
@@ -510,7 +520,7 @@ const MEDICAL_AREA_CONTRACT_SECTIONS = {
       chips: ['Primera visita', 'Sesión', 'Reevaluación'],
     },
     {
-      title: 'Workspace',
+      title: 'Ficha clínica',
       icon: 'heroicons_outline:hand-raised',
       body: 'La ficha debe trabajar con zona corporal, ejercicios, evolución y alta funcional.',
       chips: ['Zona corporal', 'Ejercicios', 'Evolución'],
@@ -530,7 +540,7 @@ const MEDICAL_AREA_CONTRACT_SECTIONS = {
       chips: ['Valoración', 'Sesión', 'Revisión'],
     },
     {
-      title: 'Workspace',
+      title: 'Ficha clínica',
       icon: 'heroicons_outline:sparkles',
       body: 'La ficha debe activar zona tratada, consentimiento, fotos privadas y controles.',
       chips: ['Consentimiento', 'Fotos privadas', 'Control'],
@@ -552,7 +562,7 @@ const FALLBACK_AREA_CONTRACT_SECTIONS = [
     chips: ['Primera cita', 'Revisión', 'Continuación'],
   },
   {
-    title: 'Workspace',
+    title: 'Ficha clínica',
     icon: 'heroicons_outline:squares-2x2',
     body: 'La ficha clínica activa los campos propios del área médica.',
     chips: ['Ficha clínica', 'Seguimiento', 'Informes'],
@@ -846,6 +856,11 @@ function normalizeApplicationOptions(value, fallback = []) {
   return options.length ? options : cloneJson(fallback);
 }
 
+function normalizeApplicationHint(value, fallback) {
+  const hint = cleanString(value, fallback);
+  return LEGACY_APPLICATION_HINT_REPLACEMENTS.get(hint) || hint;
+}
+
 function normalizeProfile(value, fallback) {
   const source = value && typeof value === 'object' ? value : {};
   return {
@@ -860,7 +875,7 @@ function normalizeProfile(value, fallback) {
       : fallback.defaultSessions,
     supportsPiece: source.supportsPiece === undefined ? !!fallback.supportsPiece : !!source.supportsPiece,
     supportsLaboratory: source.supportsLaboratory === undefined ? !!fallback.supportsLaboratory : !!source.supportsLaboratory,
-    applicationHint: cleanString(source.applicationHint, fallback.applicationHint),
+    applicationHint: normalizeApplicationHint(source.applicationHint, fallback.applicationHint),
     applicationOptions: normalizeApplicationOptions(source.applicationOptions, fallback.applicationOptions),
   };
 }

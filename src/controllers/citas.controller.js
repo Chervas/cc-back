@@ -1388,7 +1388,7 @@ const formatPartsInTimeZone = (date, timeZone) => {
         year: Number(bag.year),
         month: Number(bag.month),
         day: Number(bag.day),
-        hour: Number(bag.hour),
+        hour: Number(bag.hour) === 24 ? 0 : Number(bag.hour),
         minute: Number(bag.minute),
         second: Number(bag.second)
     };

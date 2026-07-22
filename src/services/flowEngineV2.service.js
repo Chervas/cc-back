@@ -232,28 +232,35 @@ function formatAutomationTimestamp(date = new Date()) {
   }
 }
 
-function formatDateEs(rawDate) {
+function formatDateEs(rawDate, timeZone = DEFAULT_TIMEZONE) {
   if (!rawDate) return null;
   const date = rawDate instanceof Date ? rawDate : new Date(rawDate);
   if (!Number.isFinite(date.getTime())) return null;
   return new Intl.DateTimeFormat('es-ES', {
-    timeZone: 'Europe/Madrid',
+    timeZone: isValidTimeZone(timeZone) ? timeZone : DEFAULT_TIMEZONE,
     day: '2-digit',
     month: '2-digit',
     year: 'numeric',
   }).format(date);
 }
 
-function formatTimeEs(rawDate) {
+function formatTimeEs(rawDate, timeZone = DEFAULT_TIMEZONE) {
   if (!rawDate) return null;
   const date = rawDate instanceof Date ? rawDate : new Date(rawDate);
   if (!Number.isFinite(date.getTime())) return null;
   return new Intl.DateTimeFormat('es-ES', {
-    timeZone: 'Europe/Madrid',
+    timeZone: isValidTimeZone(timeZone) ? timeZone : DEFAULT_TIMEZONE,
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
   }).format(date);
+}
+
+function formatAppointmentLocalDateTime(rawDate, timeZone = DEFAULT_TIMEZONE) {
+  return {
+    fecha: formatDateEs(rawDate, timeZone),
+    hora: formatTimeEs(rawDate, timeZone),
+  };
 }
 
 function formatPartsInTimeZone(date, timeZone) {
@@ -277,7 +284,7 @@ function formatPartsInTimeZone(date, timeZone) {
     year: Number(bag.year),
     month: Number(bag.month),
     day: Number(bag.day),
-    hour: Number(bag.hour),
+    hour: Number(bag.hour) === 24 ? 0 : Number(bag.hour),
     minute: Number(bag.minute),
     second: Number(bag.second),
   };
@@ -617,8 +624,7 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
         inicio: appointment.inicio || null,
         fin: appointment.fin || null,
         created_at: appointment.created_at || appointment.createdAt || null,
-        fecha: formatDateEs(appointment.inicio),
-        hora: formatTimeEs(appointment.inicio),
+        ...formatAppointmentLocalDateTime(appointment.inicio),
         titulo: cleanString(appointment.titulo),
         motivo: cleanString(appointment.motivo),
         usuario_nombre: creatorNameCandidate || null,
@@ -760,6 +766,15 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
         access_guidance_image_asset_id: accessGuidance.image_asset_id,
         access_guidance_image_url: accessGuidance.image_url,
       };
+      const appointmentStart = out?.appointment?.inicio || out?.cita?.inicio;
+      if (appointmentStart) {
+        const appointmentLocalDateTime = formatAppointmentLocalDateTime(
+          appointmentStart,
+          clinicPatchBase.timezone
+        );
+        out.appointment = mergeContextObject(out.appointment, appointmentLocalDateTime);
+        out.cita = mergeContextObject(out.cita, appointmentLocalDateTime);
+      }
       const clinicLinks = await resolveClinicGoogleLocalLinks(clinic);
       const clinicPatch = mergeClinicLinksIntoContext(clinicPatchBase, clinicLinks);
       out.clinic = mergeContextObject(out.clinic, clinicPatch);
@@ -6357,6 +6372,7 @@ module.exports = {
   findOrCreateAutomationWhatsappMessage,
   reuseExistingAutomationWhatsappMessage,
   readStoredWhatsappReplaySelection,
+  formatAppointmentLocalDateTime,
   buildWhatsappTransportHandoffRetryState,
   enqueueAutomationWhatsappTransport,
   enqueueQuietHoursWhatsappJob,
