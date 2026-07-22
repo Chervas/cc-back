@@ -82,7 +82,7 @@ module.exports = {
         defaultValue: {},
       },
       snapshot_html: {
-        type: Sequelize.TEXT,
+        type: Sequelize.TEXT('medium'),
         allowNull: true,
       },
       snapshot_hash: {

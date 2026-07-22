@@ -73,7 +73,7 @@ module.exports = (sequelize, DataTypes) => {
     status: { type: DataTypes.STRING(40), allowNull: false, defaultValue: 'active' },
     formula_version: { type: DataTypes.STRING(80), allowNull: false },
     snapshot_json: { type: DataTypes.JSON, allowNull: false, defaultValue: {} },
-    snapshot_html: { type: DataTypes.TEXT, allowNull: true },
+    snapshot_html: { type: DataTypes.TEXT('medium'), allowNull: true },
     snapshot_hash: { type: DataTypes.STRING(128), allowNull: false },
     pdf_asset_id: { type: DataTypes.INTEGER, allowNull: true },
     storage_strategy: {
