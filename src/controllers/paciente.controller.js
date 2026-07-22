@@ -1,5 +1,5 @@
 'use strict';
-const { Paciente, Clinica, PacienteRelacion, PacienteClinica, PacienteConsentimiento, CitaPaciente, Usuario, Tratamiento, PatientNutritionReport, PatientNutritionMeasurement, sequelize } = require('../../models');
+const { Paciente, Clinica, PacienteRelacion, PacienteClinica, PacienteConsentimiento, CitaPaciente, Usuario, Tratamiento, PatientCustomField, PatientNutritionReport, PatientNutritionMeasurement, sequelize } = require('../../models');
 const { Op, literal, QueryTypes } = require('sequelize');
 const crypto = require('crypto');
 const { normalizePhoneDigits } = require('../lib/phone');
@@ -958,6 +958,12 @@ exports.getPacienteById = async (req, res) => {
       include: [
         { model: Clinica, as: 'clinica' },
         { model: PacienteClinica, as: 'clinicasVinculadas', required: false, include: [{ model: Clinica, as: 'clinica' }] },
+        {
+          model: PatientCustomField,
+          as: 'camposPersonalizados',
+          required: false,
+          attributes: ['field_key', 'label', 'value', 'value_type', 'source']
+        },
         {
           model: PacienteRelacion,
           as: 'relaciones',
