@@ -90,6 +90,26 @@ function testProvisionalEmptyTailIsNotPresentedAsARealDrop() {
   );
 }
 
+function testIncompleteProviderTailIsNotPresentedAsARealDrop() {
+  const recent = new Date(Date.now() - (5 * 24 * 60 * 60 * 1000)).toISOString().slice(0, 10);
+  const incomplete = [
+    { metric_type: 'BUSINESS_IMPRESSIONS_DESKTOP_MAPS', value: 8 },
+    { metric_type: 'BUSINESS_IMPRESSIONS_MOBILE_MAPS', value: 31 },
+    { metric_type: 'BUSINESS_IMPRESSIONS_MOBILE_SEARCH', value: 44 },
+  ].map((row, index) => ({
+    id: 300 + index,
+    business_location_id: 10,
+    date: recent,
+    metric_subtype: '',
+    ...row,
+  }));
+  assert.deepEqual(
+    collapseMetricRows(incomplete),
+    [],
+    'a partially published Performance day must not look like a real clinic-wide drop',
+  );
+}
+
 function testPersistedLegacyNullCoercionDoesNotReappearAfterTailWindow() {
   const legacyTypes = [
     'BUSINESS_IMPRESSIONS_DESKTOP_MAPS',
@@ -136,6 +156,8 @@ function testContentNormalization() {
   assert.equal(service.name, 'Implantes dentales');
   assert.equal(service.category, 'dental clinic');
   assert.equal(service.status, 'publicado');
+  assert.equal(service.sourceKind, 'free_form_service');
+  assert.equal(service.descriptionSource, 'google_business_profile');
   assert.match(service.priceFrom, /45/);
 
   const photo = normalizeMediaItem({
@@ -370,6 +392,7 @@ async function run() {
   testMetricDeduplicationAndTotals();
   testMetricTotalsAcrossLocations();
   testProvisionalEmptyTailIsNotPresentedAsARealDrop();
+  testIncompleteProviderTailIsNotPresentedAsARealDrop();
   testPersistedLegacyNullCoercionDoesNotReappearAfterTailWindow();
   testContentNormalization();
   testVerificationStateUsesProviderSignalWithoutGuessing();

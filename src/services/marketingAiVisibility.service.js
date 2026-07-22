@@ -29,7 +29,7 @@ const GEMINI_MODEL = cleanString(process.env.GEMINI_AI_VISIBILITY_MODEL) || 'gem
 
 const TYPICAL_QUERY_DEFINITIONS = Object.freeze([
   Object.freeze({ key: 'best_local', label: 'Mejor clínica de la zona' }),
-  Object.freeze({ key: 'best_dentist', label: 'Mejor dentista de la zona' }),
+  Object.freeze({ key: 'category_options', label: 'Opciones de esta especialidad' }),
   Object.freeze({ key: 'recommended_local', label: 'Clínica recomendada' }),
   Object.freeze({ key: 'trusted_reviews', label: 'Clínica con buenas reseñas' }),
 ]);
@@ -497,7 +497,7 @@ function buildTypicalQueries(clinic) {
     : `¿Qué ${category} es la mejor opción en ${place}?`;
   const queries = [
     bestLocalQuery,
-    `¿Cuál es el mejor dentista en ${place}?`,
+    `¿Qué opciones de ${category} destacan en ${place}?`,
     `¿Qué ${category} recomiendan en ${place}?`,
     `¿Qué ${category} tiene buenas reseñas en ${place}?`,
   ];

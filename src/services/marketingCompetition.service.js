@@ -1631,13 +1631,30 @@ function rankingTermsForClinic(clinic, limit = DEFAULT_RANKING_LIMIT) {
     ? clinic.configuracion.disciplinas.map((item) => String(item || '').toLowerCase())
     : [];
   let baseTerms = [serviceHint];
+  const localProfileHint = specialtyHintFromText([
+    clinic?.business_primary_category,
+    clinic?.business_location_name,
+  ].map(cleanString).filter(Boolean).join(' '));
 
-  if (disciplineKeys.some((item) => ['capilar', 'medicina_capilar', 'trasplante_capilar'].includes(item))) {
+  if (localProfileHint === 'clínica estética') {
+    baseTerms = ['clínica estética', 'medicina estética', 'cirugía plástica'];
+  } else if (localProfileHint === 'clínica capilar') {
+    baseTerms = ['clínica capilar', 'injerto capilar', 'trasplante capilar', 'tratamiento capilar'];
+  } else if (localProfileHint === 'podólogo') {
+    baseTerms = ['podólogo', 'clínica podológica', 'podología', 'podólogo uñas encarnadas'];
+  } else if (localProfileHint === 'clínica dental') {
+    baseTerms = ['clínica dental', 'dentista', 'implantes dentales', 'ortodoncia'];
+  } else if (disciplineKeys.some((item) => ['capilar', 'medicina_capilar', 'trasplante_capilar'].includes(item))) {
     baseTerms = ['clínica capilar', 'injerto capilar', 'trasplante capilar', 'tratamiento capilar'];
   } else if (disciplineKeys.includes('podologia')) {
     baseTerms = ['podólogo', 'clínica podológica', 'podología', 'podólogo uñas encarnadas'];
   } else if (disciplineKeys.some((item) => ['dental', 'odontologia'].includes(item))) {
     baseTerms = ['clínica dental', 'dentista', 'implantes dentales', 'ortodoncia'];
+  } else if (
+    serviceHint === 'clínica estética'
+    || disciplineKeys.some((item) => ['estetica', 'medicina_estetica', 'cirugia_plastica'].includes(item))
+  ) {
+    baseTerms = ['clínica estética', 'medicina estética', 'cirugía plástica'];
   }
 
   return [...new Set(baseTerms.map((term) => `${term} en ${city}`))].slice(0, limit);
@@ -1717,6 +1734,7 @@ function specialtyHintFromText(value) {
   if (/(^| )(hepatobiliar|pancreat|laparoscop|cirugia digestiva|cirujano digestivo|digestiv)( |$)/.test(text)) return 'cirujano hepatobiliar';
   if (/(^| )(podolog|podologo|podologa|podologia|pies|pie)( |$)/.test(text)) return 'podólogo';
   if (/(^| )(dental|dentista|odontolog|ortodoncia|implante dental)( |$)/.test(text)) return 'clínica dental';
+  if (/(^| )(cirugia plastica|medicina estetica|clinica estetica|estetica medica|plastic surgery)( |$)/.test(text)) return 'clínica estética';
   return null;
 }
 
@@ -4321,6 +4339,24 @@ async function hydrateCompetitors(rows) {
 }
 
 function competitionDisciplineKeys(clinic) {
+  // La ficha local describe la actividad pública que se está comparando y
+  // gana a disciplinas internas secundarias. Así una clínica estética con
+  // una consulta digestiva no evalúa todos sus competidores como digestivos.
+  const localProfileHint = specialtyHintFromText([
+    clinic?.business_primary_category,
+    clinic?.business_location_name,
+  ].map(cleanString).filter(Boolean).join(' '));
+  const localProfileKeys = {
+    'clínica capilar': ['capilar'],
+    'cirujano hepatobiliar': ['cirugia_digestiva'],
+    'podólogo': ['podologia'],
+    'clínica dental': ['dental'],
+    'clínica estética': ['estetica'],
+  };
+  if (localProfileHint && localProfileKeys[localProfileHint]) {
+    return localProfileKeys[localProfileHint];
+  }
+
   const configured = Array.isArray(clinic?.configuracion?.disciplinas)
     ? clinic.configuracion.disciplinas.map((item) => String(item || '').toLowerCase()).filter(Boolean)
     : [];
@@ -4365,6 +4401,11 @@ function competitorRelevanceForClinic(competitor, clinic) {
       keys: ['dental', 'odontologia'],
       terms: ['dental', 'dentista', 'odont', 'ortodon', 'implante'],
       label: 'dental'
+    },
+    {
+      keys: ['estetica', 'medicina_estetica', 'cirugia_plastica'],
+      terms: ['estetica', 'estética', 'medicina estetica', 'cirugia plastica', 'cirugía plástica', 'plastic', 'beauty'],
+      label: 'medicina estética/cirugía plástica'
     }
   ];
   const group = groups.find((item) => keys.some((key) => item.keys.includes(key)));
@@ -5076,6 +5117,8 @@ module.exports = {
     fetchPublicHtmlPage,
     generateLocalRankingHeatmapSnapshot,
     inferCompetitionQuery,
+    rankingTermsForClinic,
+    competitorRelevanceForClinic,
     competitionPlacesFeatureEnabled,
     listCompetitionWithDependencies,
     localHeatmapPlaceKey,

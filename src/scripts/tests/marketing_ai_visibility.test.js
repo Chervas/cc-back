@@ -104,13 +104,13 @@ async function main() {
   });
   assert.deepEqual(typicalQueries.map((item) => item.key), [
     'best_local',
-    'best_dentist',
+    'category_options',
     'recommended_local',
     'trusted_reviews',
   ]);
   assert.deepEqual(typicalQueries.map((item) => item.query), [
     '¿Cuál es la mejor clínica dental en Hospitalet?',
-    '¿Cuál es el mejor dentista en Hospitalet?',
+    '¿Qué opciones de clínica dental destacan en Hospitalet?',
     '¿Qué clínica dental recomiendan en Hospitalet?',
     '¿Qué clínica dental tiene buenas reseñas en Hospitalet?',
   ]);
@@ -118,6 +118,15 @@ async function main() {
     buildTypicalQueries({ category: 'Podólogo', city: 'Bilbao' })[0].query,
     '¿Qué podólogo es la mejor opción en Bilbao?',
   );
+  const aestheticQueries = buildTypicalQueries({
+    category: 'Clínica de cirugía plástica',
+    city: 'Alicante',
+  });
+  assert.equal(
+    aestheticQueries[1].query,
+    '¿Qué opciones de clínica de cirugía plástica destacan en Alicante?',
+  );
+  assert.equal(aestheticQueries.some((item) => /dentista/i.test(item.query)), false);
   assert.equal(
     findTypicalQuery({ category: 'Clínica dental', city: 'Hospitalet' }, { queryKey: 'recommended_local' }).key,
     'recommended_local',
