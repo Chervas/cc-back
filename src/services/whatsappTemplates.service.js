@@ -242,6 +242,7 @@ function isStaleReviewRequestTemplate(template, catalog = null) {
 
 async function notifyReviewPhotoTemplateApproved(template, catalog = null) {
   if (!isReviewPhotoTemplate(template, catalog)) return;
+  if (Number(template?.catalog_template_id || catalog?.id || 0) > 0) return;
   const clinicId = Number(template?.clinic_id || 0);
   if (!Number.isInteger(clinicId) || clinicId <= 0) return;
 
