@@ -9,6 +9,7 @@ const ClinicaEspecialidades = db.ClinicaEspecialidades;
 const Clinica = db.Clinica;
 const medicalAreaContractsService = require('../services/medicalAreaContracts.service');
 const { canUserAccessFeature } = require('../lib/access-policy');
+const { isGlobalAdmin } = require('../lib/role-helpers');
 const {
     mergeClinicConfiguration,
     parseConfiguration,
@@ -73,6 +74,19 @@ async function canAccessClinicFeature(req, res, clinicId, featureKey) {
     return true;
 }
 
+function requireGlobalAdmin(req, res) {
+    const actorId = Number(req.userData?.userId || req.user?.id || 0);
+    if (!actorId) {
+        res.status(401).json({ message: 'Token JWT inválido o no proporcionado' });
+        return false;
+    }
+    if (!isGlobalAdmin(actorId)) {
+        res.status(403).json({ message: 'Solo un administrador global puede modificar el catálogo del sistema' });
+        return false;
+    }
+    return true;
+}
+
 // ============ ESPECIALIDADES DE SISTEMA ============
 
 exports.getMedicalAreaContracts = asyncHandler(async (req, res) => {
@@ -90,6 +104,8 @@ exports.getMedicalAreaContract = asyncHandler(async (req, res) => {
 });
 
 exports.updateMedicalAreaContract = asyncHandler(async (req, res) => {
+    if (!requireGlobalAdmin(req, res)) return;
+
     const code = String(req.params.code || '').trim().toLowerCase();
     if (!code) {
         return res.status(400).json({ message: 'code es obligatorio' });
@@ -128,6 +144,8 @@ exports.getEspecialidadesSistema = asyncHandler(async (req, res) => {
 });
 
 exports.createEspecialidadSistema = asyncHandler(async (req, res) => {
+    if (!requireGlobalAdmin(req, res)) return;
+
     const nombre = String(req.body?.nombre || '').trim();
     const disciplina = String(req.body?.disciplina || '').trim().toLowerCase();
 
@@ -162,6 +180,8 @@ exports.createEspecialidadSistema = asyncHandler(async (req, res) => {
 });
 
 exports.updateEspecialidadSistema = asyncHandler(async (req, res) => {
+    if (!requireGlobalAdmin(req, res)) return;
+
     const { id } = req.params;
     const especialidad = await EspecialidadSistema.findByPk(id);
     if (!especialidad) {
@@ -195,6 +215,8 @@ exports.updateEspecialidadSistema = asyncHandler(async (req, res) => {
 });
 
 exports.deleteEspecialidadSistema = asyncHandler(async (req, res) => {
+    if (!requireGlobalAdmin(req, res)) return;
+
     const { id } = req.params;
     const especialidad = await EspecialidadSistema.findByPk(id);
     if (!especialidad) {
