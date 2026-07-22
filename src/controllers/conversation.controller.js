@@ -444,7 +444,7 @@ async function enrichConversationUnreadForUser(userId, conversationLike) {
   plain.unread_count = pendingState?.unreadCount ?? 0;
   plain.pending_automation_attention = pendingState?.requiresAutomationAttention === true;
   plain.pending_automation_count = pendingState?.requiresAutomationAttention === true
-    ? (pendingState?.count ?? 0)
+    ? (pendingState?.unreadCount ?? 0)
     : 0;
   const [hydrated] = await hydrateMarketingContactFallbacks([plain]);
   return hydrated || plain;
@@ -931,7 +931,7 @@ exports.listConversations = async (req, res) => {
       data.unread_count = pendingState?.unreadCount ?? 0;
       data.pending_automation_attention = pendingState?.requiresAutomationAttention === true;
       data.pending_automation_count = pendingState?.requiresAutomationAttention === true
-        ? (pendingState?.count ?? 0)
+        ? (pendingState?.unreadCount ?? 0)
         : 0;
       return data;
     });
@@ -1257,9 +1257,9 @@ exports.markAsRead = async (req, res) => {
       });
     }
 
-    // El leído individual no resuelve la atención amarilla de una automatización.
-    // Tampoco recalculamos aquí agregados globales: responder sí limpia el
-    // pendiente para todos mediante el evento saliente de la conversación.
+    // La lectura oculta también el indicador amarillo para este usuario, pero
+    // conserva la notificación de automatización como trazabilidad operativa.
+    // Una respuesta saliente limpia el pendiente para todos.
     return res.json({ success: true });
   } catch (err) {
     console.error('Error markAsRead', err);

@@ -72,4 +72,6 @@ test('abrir una conversación actualiza solo la lectura del usuario', () => {
   assert.match(block, /ConversationRead\.upsert/);
   assert.match(block, /user:\$\{userId\}.*conversation:read/s);
   assert.doesNotMatch(block, /getPendingReplyStatesByConversationIds|unread:updated/);
+  assert.match(controller, /pending_automation_count = pendingState\?\.requiresAutomationAttention === true\s*\? \(pendingState\?\.unreadCount \?\? 0\)/);
+  assert.doesNotMatch(controller, /pending_automation_count = pendingState\?\.requiresAutomationAttention === true\s*\? \(pendingState\?\.count \?\? 0\)/);
 });
