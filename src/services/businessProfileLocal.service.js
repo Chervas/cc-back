@@ -89,7 +89,10 @@ const LEGACY_NULL_COERCION_METRICS = Object.freeze([
   'BUSINESS_BOOKINGS',
   'BUSINESS_CONVERSATIONS',
 ]);
-const BUSINESS_PROFILE_PROVISIONAL_WINDOW_DAYS = 2;
+// Performance publica su cola por métrica y no siempre completa todas las
+// series el mismo día. Esta ventana cubre el retraso observado sin ocultar
+// huecos históricos que sí deben investigarse.
+const BUSINESS_PROFILE_PROVISIONAL_WINDOW_DAYS = 7;
 const LEGACY_NULL_COERCION_WRITTEN_FROM = Date.parse('2026-07-15T00:00:00.000Z');
 const LEGACY_NULL_COERCION_WRITTEN_BEFORE = Date.parse('2026-07-18T00:00:00.000Z');
 
@@ -450,9 +453,9 @@ function collapseMetricRows(rows) {
       && date <= today;
     // The old parser converted an absent protobuf value into 0. The affected
     // cohort is bounded by its write window and exact nine-series batch shape,
-    // so those already-persisted rows stay hidden after the rolling two-day
-    // provisional window expires. A real explicit zero written by the fixed
-    // parser outside that cohort remains reportable.
+    // so those already-persisted rows stay hidden after the rolling provisional
+    // window expires. A real explicit zero written by the fixed parser outside
+    // that cohort remains reportable after the same window.
     const hasLegacyNullCoercionShape = LEGACY_NULL_COERCION_METRICS.every((metric) => types.has(metric));
     const isKnownLegacyNullCoercionBatch = hasLegacyNullCoercionShape && dateRows.every((row) => {
       const writtenAt = new Date(row.created_at || row.createdAt || row.updated_at || row.updatedAt || 0).getTime();
@@ -460,7 +463,9 @@ function collapseMetricRows(rows) {
         && writtenAt >= LEGACY_NULL_COERCION_WRITTEN_FROM
         && writtenAt < LEGACY_NULL_COERCION_WRITTEN_BEFORE;
     });
-    if (allZero && ((hasCompleteRawShape && isRecentProviderTail) || isKnownLegacyNullCoercionBatch)) {
+    const hasAnyRawMetric = RAW_REPORTING_COMPLETENESS_METRICS.some((metric) => types.has(metric));
+    const isIncompleteProviderTail = isRecentProviderTail && hasAnyRawMetric && !hasCompleteRawShape;
+    if (isIncompleteProviderTail || (allZero && ((hasCompleteRawShape && isRecentProviderTail) || isKnownLegacyNullCoercionBatch))) {
       provisionalKeys.add(key);
     }
   }
@@ -758,6 +763,8 @@ function normalizeServiceItem(item, index) {
     category: categoryName ? String(categoryName).split('/').pop().replace(/^gcid:/, '').replace(/_/g, ' ') : 'Servicio',
     categoryResource: categoryName,
     description,
+    sourceKind: freeForm ? 'free_form_service' : (structured ? 'structured_service' : 'unknown'),
+    descriptionSource: description ? 'google_business_profile' : 'missing_in_google_business_profile',
     priceFrom: formatMoney(item?.price),
     priceInterpretation: item?.price?.priceInterpretation || item?.price?.price_interpretation || null,
     status: description ? 'publicado' : 'falta-descripcion',

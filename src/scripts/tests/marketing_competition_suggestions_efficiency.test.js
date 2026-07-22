@@ -155,11 +155,33 @@ function testAutomaticQueryUsesBusinessProfileLocality() {
   );
 }
 
+function testBusinessProfileCategoryWinsOverSecondaryClinicDiscipline() {
+  const clinic = {
+    business_primary_category: 'Clínica de cirugía plástica',
+    business_location_name: 'BS Medical - Cirugía y Medicina Estética',
+    ciudad: 'Alicante',
+    configuracion: { disciplinas: ['estetica', 'nutricion', 'cirugia_digestiva'] },
+  };
+  assert.deepEqual(__testing.rankingTermsForClinic(clinic), [
+    'clínica estética en Alicante',
+    'medicina estética en Alicante',
+    'cirugía plástica en Alicante',
+  ]);
+  const relevance = __testing.competitorRelevanceForClinic({
+    name: 'SEA Clinic | Medicina estética y Cirugía Plástica Alicante',
+    google: { primary_category: 'Clínica estética' },
+  }, clinic);
+  assert.equal(relevance.status, 'match');
+  assert.match(relevance.label, /medicina estética\/cirugía plástica/);
+  assert.doesNotMatch(relevance.label, /digestiva|hepatobiliar/);
+}
+
 async function run() {
   try {
     await testSuggestionSearchUsesLightweightSingleRequest();
     await testSuggestionCenterFallsBackToOwnPlaceDetails();
     testAutomaticQueryUsesBusinessProfileLocality();
+    testBusinessProfileCategoryWinsOverSecondaryClinicDiscipline();
     console.log('marketing_competition_suggestions_efficiency.test.js OK');
   } finally {
     await db.sequelize.close();
