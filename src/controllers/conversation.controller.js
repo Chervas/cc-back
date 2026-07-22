@@ -439,10 +439,13 @@ async function enrichConversationUnreadForUser(userId, conversationLike) {
     return plain;
   }
 
-  const pendingStates = await getPendingReplyStatesByConversationIds([conversationId]);
+  const pendingStates = await getPendingReplyStatesByConversationIds([conversationId], { userId });
   const pendingState = pendingStates.get(conversationId);
-  plain.unread_count = pendingState?.count ?? 0;
+  plain.unread_count = pendingState?.unreadCount ?? 0;
   plain.pending_automation_attention = pendingState?.requiresAutomationAttention === true;
+  plain.pending_automation_count = pendingState?.requiresAutomationAttention === true
+    ? (pendingState?.count ?? 0)
+    : 0;
   const [hydrated] = await hydrateMarketingContactFallbacks([plain]);
   return hydrated || plain;
 }
@@ -752,51 +755,6 @@ async function hydrateMarketingContactFallbacks(conversations = [], options = {}
   return plainRows;
 }
 
-async function getTotalUnreadCountForUser(userId, clinicIds, isAggregateAllowed, requestedClinicId) {
-  const replacements = { userId };
-  const scope = resolveConversationClinicScope({ clinicIds, isAggregateAllowed, requestedClinicId });
-  if (scope.error || !scope.clinicIds.length) {
-    return 0;
-  }
-
-  replacements.clinicIds = scope.clinicIds;
-  const allowedClinicIdsByCategory = await getAllowedQuickChatClinicIdsByCategory(userId, scope.clinicIds);
-  const categorySql = buildQuickChatCategorySql(allowedClinicIdsByCategory, replacements);
-  if (!categorySql) {
-    return 0;
-  }
-
-  const [row] = await db.sequelize.query(
-    `
-      SELECT COUNT(inbound.id) AS total
-      FROM Conversations c
-      LEFT JOIN (
-        SELECT outbound.conversation_id, MAX(outbound.id) AS last_outbound_id
-        FROM Messages outbound
-        INNER JOIN Conversations scoped_conversation
-          ON scoped_conversation.id = outbound.conversation_id
-        WHERE scoped_conversation.clinic_id IN (:clinicIds)
-          AND outbound.direction = 'outbound'
-          AND outbound.message_type <> 'event'
-          AND outbound.status <> 'failed'
-        GROUP BY outbound.conversation_id
-      ) last_outbound ON last_outbound.conversation_id = c.id
-      LEFT JOIN Messages inbound
-        ON inbound.conversation_id = c.id
-       AND inbound.direction = 'inbound'
-       AND inbound.message_type <> 'event'
-       AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(inbound.metadata, '$.qa_cleanup')), 'false') <> 'true'
-       AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(inbound.metadata, '$.hide_from_quickchat')), 'false') <> 'true'
-       AND inbound.id > COALESCE(last_outbound.last_outbound_id, 0)
-      WHERE c.clinic_id IN (:clinicIds)
-        AND ${categorySql}
-    `,
-    { replacements, type: db.Sequelize.QueryTypes.SELECT }
-  );
-
-  return Number(row?.total || 0);
-}
-
 exports.listConversations = async (req, res) => {
   try {
     const userId = req.userData?.userId;
@@ -960,7 +918,7 @@ exports.listConversations = async (req, res) => {
     const conversations = hasMore ? conversationsPlusOne.slice(0, limit) : conversationsPlusOne;
 
     const conversationIds = conversations.map((c) => c.id);
-    const pendingStates = await getPendingReplyStatesByConversationIds(conversationIds);
+    const pendingStates = await getPendingReplyStatesByConversationIds(conversationIds, { userId });
 
     const rawPayload = conversations.map((c) => {
       const data = c.toJSON();
@@ -970,12 +928,21 @@ exports.listConversations = async (req, res) => {
         || null;
       delete data.messages;
       const pendingState = pendingStates.get(Number(data.id));
-      data.unread_count = pendingState?.count ?? 0;
+      data.unread_count = pendingState?.unreadCount ?? 0;
       data.pending_automation_attention = pendingState?.requiresAutomationAttention === true;
+      data.pending_automation_count = pendingState?.requiresAutomationAttention === true
+        ? (pendingState?.count ?? 0)
+        : 0;
       return data;
     });
     const payload = await hydrateMarketingContactFallbacks(rawPayload, { searchQuery });
-    const totalUnread = await getTotalUnreadCountForUser(userId, clinicIds, isAggregateAllowed, clinic_id);
+    const totalUnread = payload.reduce((total, item) => {
+      const unread = Number(item?.unread_count || 0);
+      const automationPending = item?.pending_automation_attention
+        ? Number(item?.pending_automation_count || 0)
+        : 0;
+      return total + Math.max(unread, automationPending);
+    }, 0);
 
     res.set('X-Has-More', hasMore ? 'true' : 'false');
     res.set('X-Next-Offset', String(offset + payload.length));
@@ -1282,9 +1249,17 @@ exports.markAsRead = async (req, res) => {
       last_read_at: new Date(),
     });
 
-    // Abrir una conversación no modifica el estado "pendiente de respuesta".
-    // Evitamos recalcular aquí los agregados globales: se actualizan al entrar
-    // o salir mensajes, que es cuando el contador realmente puede cambiar.
+    const io = getIO();
+    if (io) {
+      io.to(`user:${userId}`).emit('conversation:read', {
+        id: conversation.id,
+        unread_count: 0,
+      });
+    }
+
+    // El leído individual no resuelve la atención amarilla de una automatización.
+    // Tampoco recalculamos aquí agregados globales: responder sí limpia el
+    // pendiente para todos mediante el evento saliente de la conversación.
     return res.json({ success: true });
   } catch (err) {
     console.error('Error markAsRead', err);

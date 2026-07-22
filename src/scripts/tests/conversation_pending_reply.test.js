@@ -22,13 +22,16 @@ test('normaliza conversaciones y combina pendientes con atención de automatizac
   db.sequelize.query = async (sql, options) => {
     queryIndex += 1;
     assert.deepEqual(options.replacements.conversationIds, [7, 8]);
+    assert.equal(options.replacements.userId, 44);
     if (queryIndex === 1) {
       assert.match(sql, /direction = 'outbound'/);
       assert.match(sql, /status <> 'failed'/);
       assert.match(sql, /inbound\.id > COALESCE/);
+      assert.match(sql, /ConversationReads conversation_read/);
+      assert.match(sql, /inbound\.createdAt > conversation_read\.last_read_at/);
       return [
-        { conversation_id: 7, pending_count: 2 },
-        { conversation_id: 8, pending_count: 0 },
+        { conversation_id: 7, pending_count: 2, unread_count: 1 },
+        { conversation_id: 8, pending_count: 0, unread_count: 0 },
       ];
     }
     assert.match(sql, /automation\.system_notification/);
@@ -36,10 +39,10 @@ test('normaliza conversaciones y combina pendientes con atención de automatizac
   };
 
   assert.deepEqual(normalizeConversationIds([7, '8', 7, 0, null, 'x']), [7, 8]);
-  const states = await getPendingReplyStatesByConversationIds([7, '8', 7]);
+  const states = await getPendingReplyStatesByConversationIds([7, '8', 7], { userId: 44 });
 
-  assert.deepEqual(states.get(7), { count: 2, requiresAutomationAttention: false });
-  assert.deepEqual(states.get(8), { count: 0, requiresAutomationAttention: true });
+  assert.deepEqual(states.get(7), { count: 2, unreadCount: 1, requiresAutomationAttention: false });
+  assert.deepEqual(states.get(8), { count: 0, unreadCount: 0, requiresAutomationAttention: true });
   assert.equal(queryIndex, 2);
 });
 
@@ -56,7 +59,7 @@ test('un conjunto vacío no consulta la base de datos', async (t) => {
   assert.equal(states.size, 0);
 });
 
-test('abrir una conversación no recalcula el pendiente ni el agregado global', () => {
+test('abrir una conversación actualiza solo la lectura del usuario', () => {
   const controller = fs.readFileSync(
     path.resolve(__dirname, '../../controllers/conversation.controller.js'),
     'utf8',
@@ -67,5 +70,6 @@ test('abrir una conversación no recalcula el pendiente ni el agregado global', 
   const block = controller.slice(start, end);
 
   assert.match(block, /ConversationRead\.upsert/);
-  assert.doesNotMatch(block, /getPendingReplyStatesByConversationIds|getTotalUnreadCountForUser|unread:updated/);
+  assert.match(block, /user:\$\{userId\}.*conversation:read/s);
+  assert.doesNotMatch(block, /getPendingReplyStatesByConversationIds|unread:updated/);
 });

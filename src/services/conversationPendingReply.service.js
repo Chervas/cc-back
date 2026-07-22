@@ -14,6 +14,7 @@ async function getPendingReplyStatesByConversationIds(conversationIds, options =
   const ids = normalizeConversationIds(conversationIds);
   const states = new Map(ids.map((id) => [id, {
     count: 0,
+    unreadCount: 0,
     requiresAutomationAttention: false,
   }]));
 
@@ -21,8 +22,13 @@ async function getPendingReplyStatesByConversationIds(conversationIds, options =
     return states;
   }
 
+  const userId = Number(options.userId);
+  const hasUser = Number.isInteger(userId) && userId > 0;
   const queryOptions = {
-    replacements: { conversationIds: ids },
+    replacements: {
+      conversationIds: ids,
+      ...(hasUser ? { userId } : {}),
+    },
     type: db.Sequelize.QueryTypes.SELECT,
     ...(options.transaction ? { transaction: options.transaction } : {}),
   };
@@ -30,7 +36,13 @@ async function getPendingReplyStatesByConversationIds(conversationIds, options =
   const pendingRows = await db.sequelize.query(`
     SELECT
       base.conversation_id,
-      COUNT(inbound.id) AS pending_count
+      COUNT(inbound.id) AS pending_count,
+      ${hasUser
+        ? `SUM(CASE
+            WHEN inbound.id IS NOT NULL
+             AND (conversation_read.last_read_at IS NULL OR inbound.createdAt > conversation_read.last_read_at)
+            THEN 1 ELSE 0 END)`
+        : 'COUNT(inbound.id)'} AS unread_count
     FROM (
       SELECT id AS conversation_id
       FROM Conversations
@@ -46,6 +58,9 @@ async function getPendingReplyStatesByConversationIds(conversationIds, options =
       GROUP BY conversation_id
     ) last_outbound
       ON last_outbound.conversation_id = base.conversation_id
+    ${hasUser ? `LEFT JOIN ConversationReads conversation_read
+      ON conversation_read.conversation_id = base.conversation_id
+     AND conversation_read.user_id = :userId` : ''}
     LEFT JOIN Messages inbound
       ON inbound.conversation_id = base.conversation_id
      AND inbound.direction = 'inbound'
@@ -61,6 +76,7 @@ async function getPendingReplyStatesByConversationIds(conversationIds, options =
     const state = states.get(id);
     if (state) {
       state.count = Number(row.pending_count || 0);
+      state.unreadCount = Number(row.unread_count || 0);
     }
   });
 
