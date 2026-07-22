@@ -4232,6 +4232,12 @@ Prefijo: `/api/consentimientos`
 | GET | `/public/:token` | Abrir paquete de firma por token opaco. |
 | POST | `/public/:token/sign` | Firmar paquete por token opaco. |
 
+Nota dev 2026-07-22: el middleware de origen web alojado (`webHostedOrigin`)
+debe ignorar siempre rutas internas `/api`, `/oauth` y `/socket.io` antes de
+resolver hosts publicados. Esto evita que `tablet.clinicaclick.com` intercepte
+`GET /api/consentimientos/public/:token` como si fuera una landing alojada y
+devuelva `Página no encontrada` para tokens JWT con puntos.
+
 ### Seed Admin Base
 
 Migración de datos:

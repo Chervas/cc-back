@@ -2,7 +2,18 @@
 
 const { resolveHostedResponse, WebHostedOriginError } = require('../services/webHostedOrigin.service');
 
+function shouldBypassHostedOrigin(req) {
+  const pathname = String(req.originalUrl || req.url || req.path || '/');
+  return pathname === '/api'
+    || pathname.startsWith('/api/')
+    || pathname === '/oauth'
+    || pathname.startsWith('/oauth/')
+    || pathname === '/socket.io'
+    || pathname.startsWith('/socket.io/');
+}
+
 async function webHostedOrigin(req, res, next) {
+  if (shouldBypassHostedOrigin(req)) return next();
   const method = String(req.method || 'GET').toUpperCase();
   if (!['GET', 'HEAD'].includes(method)) return next();
   try {
