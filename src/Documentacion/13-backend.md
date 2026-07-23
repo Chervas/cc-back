@@ -901,6 +901,7 @@ Reglas:
 - Desde 2026-07-07 la respuesta incluye `unansweredReviews` para roles operativos: lista acotada de reseñas de Google sin respuesta con autor, puntuación, comentario, clínica, paciente conciliado si existe, enlace interno filtrado a `Marketing > Perfil Google` y URL externa de Google cuando está disponible. El frontend no debe llamar a `/api/local/clinica/:id/reviews` desde el panel principal para recomponer este bloque.
 - Desde 2026-07-16 el panel aplica capacidades por clínica antes de consultar cualquier colección con identidad. Agencia recibe contexto de Marketing/atribución, pero no `todayAppointments`, próximas/pasadas, pacientes, consentimientos, tareas clínicas, reseñas conciliadas ni setup operativo. `roleSections()` no trata agencia como owner/operations y un scope válido de Marketing no abre datos del dashboard.
 - El feedback positivo de ejemplo no se devuelve; cuando se reactive debe venir como señal real atribuible a ClinicaClick.
+- Desde 2026-07-23 la narrativa owner/operaciones no mezcla "primeros pasos" en la tarjeta principal; el setup ya viaja como bloque separado y el `subtitle` se centra en agenda, asistencia, consentimientos y oportunidades.
 
 ## Control de acceso por capacidades
 
