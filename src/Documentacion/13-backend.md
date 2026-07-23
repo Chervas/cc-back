@@ -1000,6 +1000,17 @@ Contrato:
 - `GET /api/paneles/main` devuelve `inactiveTodayAppointments` además de `todayAppointments`. `todayAppointments` conserva solo citas activas esperadas y no vencidas; `inactiveTodayAppointments` recoge citas del día cerradas, canceladas o reprogramadas para que el frontend explique estados vacíos sin contarlas como citas esperadas. Las citas abiertas vencidas salen en `pastAttendancePending`.
 - Para roles `paciente` y `laboratorio`, `GET /api/paneles/main` no entrega bloques internos de clínica: no carga citas operativas, oportunidades, alertas, errores de configuración ni tareas. El aislamiento se aplica en backend aunque el frontend también oculte esas secciones.
 - `ClinicalPrivateAssets` es la tabla base para binarios clinicos privados: PDFs finales cacheados, fotos clinicas de Nutricion y futuros adjuntos de historia. En dev usa provider `local_private` con raiz configurable `CLINICAL_PRIVATE_STORAGE_ROOT` y fallback fuera del checkout (`../clinical-private-storage`). El contrato esta preparado para migrar a S3 privado sin exponer URL publica.
+- Importaciones reales 2026-07-23: los exports originales deben entrar fuera de
+  los repositorios, por ejemplo
+  `/home/ubuntu/secure-imports/clinic-real-20260723/incoming/`, con backups en
+  `db-backups/` y payloads revisables/pseudonimizados en `review/`. Los
+  importadores deben escribir adjuntos en `ClinicalPrivateAssets` con
+  `purpose=clinical_attachment` salvo purpose clinico mas especifico, incluir
+  `metadata.source_batch`/origen, no poner PII en `object_key`, `public_id`,
+  rutas o nombres de carpeta, y exponerlos solo por endpoints autenticados con
+  `Cache-Control: private, no-store`. Nunca mover PDFs, fotos clinicas,
+  consentimientos, informes, facturas identificables ni documentos de paciente
+  a `PUBLIC_MEDIA`.
 - Las fotos clinicas de Nutricion se guardan con `purpose=nutrition_clinical_photo`, `owner_type=patient_nutrition_measurement`, `owner_id=<measurement_id>`, `patient_id` y `clinic_id`. Listado y descarga quedan protegidos por `nutrition.workspace.view`; subida queda protegida por `nutrition.measurements.create`.
 - La pestana `Adjuntos` del paciente consume `GET /api/pacientes/:id/clinical-attachments`. El backend filtra por permisos segun `purpose`: `nutrition_report_pdf` y `nutrition_clinical_photo` requieren `nutrition.workspace.view`, `consent_document_pdf` requiere `consents.view`, y `clinical_attachment` requiere `patients.sensitive.view`. La subida general queda pendiente hasta cerrar categorias clinicas y permisos de escritura; no se debe volver al mock ni a `PUBLIC_MEDIA`.
 - `GET /api/pacientes/:id/activity` expone cada informe final como evento `nutrition_report_finalized`, con titulo, icono, resumen de medicion/servicio/formula/hash y actor de cierre. El evento solo se adjunta si el usuario tiene `nutrition.workspace.view` en la clínica concreta del informe y esa sede pertenece al scope legible del paciente; el mismo filtro por sede se aplica a citas y eventos de reseñas.
