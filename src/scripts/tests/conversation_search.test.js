@@ -37,6 +37,11 @@ async function run() {
     /SELECT DISTINCT mpli\.conversation_id[\s\S]*WHERE mpli\.conversation_id IS NOT NULL/,
     'Linked marketing contacts must be searchable by conversation_id'
   );
+  assert.match(
+    literalSql,
+    /`Conversation`\.`patient_id` IS NULL AND `Conversation`\.`lead_id` IS NULL[\s\S]*SELECT DISTINCT mpli\.conversation_id/,
+    'Marketing list contact matches must only apply to conversations without patient or lead'
+  );
   assert.doesNotMatch(
     literalSql,
     /mpli\.phone IS NULL OR mpli\.phone = ''/,

@@ -476,6 +476,7 @@ function buildConversationSearchClause(searchQuery) {
   const likeSql = (like) => db.sequelize.escape(like);
   const conversationPhoneDigits = sqlPhoneDigitsExpression('`Conversation`.`contact_id`');
   const marketingPhoneDigits = sqlPhoneDigitsExpression('mpli.phone');
+  const externalConversationSql = '(`Conversation`.`patient_id` IS NULL AND `Conversation`.`lead_id` IS NULL)';
   const marketingItemMatchesSearch = (like) => `(
     LOWER(COALESCE(mpli.name, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
     OR LOWER(COALESCE(mpli.phone, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
@@ -487,25 +488,28 @@ function buildConversationSearchClause(searchQuery) {
   )`;
   const externalContactClause = (like) => db.Sequelize.literal(`
     (
-      \`Conversation\`.\`id\` IN (
-        SELECT DISTINCT mpli.conversation_id
-        FROM MarketingPatientListItems mpli
-        WHERE mpli.conversation_id IS NOT NULL
-          AND ${marketingItemMatchesSearch(like)}
-      )
-      OR ${conversationPhoneDigits} IN (
-        SELECT DISTINCT ${marketingPhoneDigits}
-        FROM MarketingPatientListItems mpli
-        WHERE mpli.phone IS NOT NULL
-          AND mpli.phone <> ''
-          AND ${marketingItemMatchesSearch(like)}
-      )
-      OR RIGHT(${conversationPhoneDigits}, 9) IN (
-        SELECT DISTINCT RIGHT(${marketingPhoneDigits}, 9)
-        FROM MarketingPatientListItems mpli
-        WHERE mpli.phone IS NOT NULL
-          AND mpli.phone <> ''
-          AND ${marketingItemMatchesSearch(like)}
+      ${externalConversationSql}
+      AND (
+        \`Conversation\`.\`id\` IN (
+          SELECT DISTINCT mpli.conversation_id
+          FROM MarketingPatientListItems mpli
+          WHERE mpli.conversation_id IS NOT NULL
+            AND ${marketingItemMatchesSearch(like)}
+        )
+        OR ${conversationPhoneDigits} IN (
+          SELECT DISTINCT ${marketingPhoneDigits}
+          FROM MarketingPatientListItems mpli
+          WHERE mpli.phone IS NOT NULL
+            AND mpli.phone <> ''
+            AND ${marketingItemMatchesSearch(like)}
+        )
+        OR RIGHT(${conversationPhoneDigits}, 9) IN (
+          SELECT DISTINCT RIGHT(${marketingPhoneDigits}, 9)
+          FROM MarketingPatientListItems mpli
+          WHERE mpli.phone IS NOT NULL
+            AND mpli.phone <> ''
+            AND ${marketingItemMatchesSearch(like)}
+        )
       )
     )
   `);
@@ -513,20 +517,23 @@ function buildConversationSearchClause(searchQuery) {
     const digitsLike = db.sequelize.escape(`%${escapeLikePattern(digits)}%`);
     return db.Sequelize.literal(`
       (
-        ${conversationPhoneDigits} LIKE ${digitsLike} ESCAPE '\\\\'
-        OR ${conversationPhoneDigits} IN (
-          SELECT DISTINCT ${marketingPhoneDigits}
-          FROM MarketingPatientListItems mpli
-          WHERE mpli.phone IS NOT NULL
-            AND mpli.phone <> ''
-            AND ${marketingPhoneDigits} LIKE ${digitsLike} ESCAPE '\\\\'
-        )
-        OR RIGHT(${conversationPhoneDigits}, 9) IN (
-          SELECT DISTINCT RIGHT(${marketingPhoneDigits}, 9)
-          FROM MarketingPatientListItems mpli
-          WHERE mpli.phone IS NOT NULL
-            AND mpli.phone <> ''
-            AND ${marketingPhoneDigits} LIKE ${digitsLike} ESCAPE '\\\\'
+        ${externalConversationSql}
+        AND (
+          ${conversationPhoneDigits} LIKE ${digitsLike} ESCAPE '\\\\'
+          OR ${conversationPhoneDigits} IN (
+            SELECT DISTINCT ${marketingPhoneDigits}
+            FROM MarketingPatientListItems mpli
+            WHERE mpli.phone IS NOT NULL
+              AND mpli.phone <> ''
+              AND ${marketingPhoneDigits} LIKE ${digitsLike} ESCAPE '\\\\'
+          )
+          OR RIGHT(${conversationPhoneDigits}, 9) IN (
+            SELECT DISTINCT RIGHT(${marketingPhoneDigits}, 9)
+            FROM MarketingPatientListItems mpli
+            WHERE mpli.phone IS NOT NULL
+              AND mpli.phone <> ''
+              AND ${marketingPhoneDigits} LIKE ${digitsLike} ESCAPE '\\\\'
+          )
         )
       )
     `);
