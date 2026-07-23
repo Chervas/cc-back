@@ -4353,6 +4353,7 @@ El scheduler no envía recordatorios de consentimiento por su cuenta. Los record
 - `tablet-session` encola la firma para el kiosco sin duplicar eventos `queued` del mismo documento.
 - La firma profesional se guarda en `PatientConsentDocuments.professional_signed_by` y `professional_signed_at`, además de `snapshot_json.professional_signature_evidence`.
 - Menores/tutores deben resolverse en la fase de firma usando los datos ya modelados en paciente.
+- QA demo 2026-07-23: `src/scripts/qa/prepare-consentimientos-tablet-demo.js` deja el caso pendiente como cita futura confirmada, asigna un profesional activo de la clínica si existe y deja el caso ya firmado como cita pasada `completada`. Así la ficha de `Demo Firmado Consentimientos` enseña `Todo firmado`, `Ver firmado` y `PDF` sin mezclar una tarea ajena de asistencia pendiente ni `Profesional pendiente`. Revalidado con Chromium/CDP en `demo-consentimientos-tablet-current-20260723/validation-after-ux.json` y flujo kiosco `demo-consentimientos-tablet-20260722/tablet-current-flow-20260723.json`, sin errores HTTP/consola ni overflow.
 
 ## 2026-03-15 - Contexto V2 enriquecido con datos clínicos
 

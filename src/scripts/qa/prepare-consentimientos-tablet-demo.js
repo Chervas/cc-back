@@ -121,7 +121,15 @@ async function ensurePatient({ publicId, nombre, apellidos, email, phone }) {
   return patient;
 }
 
-async function ensureAppointment({ patient, treatment, title, start }) {
+async function findDemoDoctorId() {
+  const relation = await db.DoctorClinica.findOne({
+    where: { clinica_id: CLINIC_ID, activo: true },
+    order: [['recibe_citas', 'DESC'], ['id', 'ASC']],
+  });
+  return relation?.doctor_id || null;
+}
+
+async function ensureAppointment({ patient, treatment, title, start, estado = 'recordatorio_confirmado', doctorId = null }) {
   let appointment = await db.CitaPaciente.findOne({
     where: {
       clinica_id: CLINIC_ID,
@@ -134,10 +142,11 @@ async function ensureAppointment({ patient, treatment, title, start }) {
     clinica_id: CLINIC_ID,
     paciente_id: patient.id_paciente,
     tratamiento_id: treatment.id_tratamiento,
+    doctor_id: doctorId,
     titulo: title,
     motivo: title,
     tipo_cita: 'primera_con_trat',
-    estado: 'recordatorio_confirmado',
+    estado,
     inicio: start,
     fin: minutesAfter(start, 60),
   };
@@ -444,6 +453,7 @@ async function main() {
   ]);
   await ensureRequirements(treatment, templates);
   await ensureKiosk();
+  const demoDoctorId = await findDemoDoctorId();
 
   const pendingPatient = await ensurePatient({
     publicId: 'pac_demo_consentimientos_tablet_pendiente',
@@ -465,12 +475,15 @@ async function main() {
     treatment,
     title: 'DEMO consentimientos - tablet pendiente',
     start: addDays(1, 10, 30),
+    doctorId: demoDoctorId,
   });
   const signedAppointment = await ensureAppointment({
     patient: signedPatient,
     treatment,
     title: 'DEMO consentimientos - firmado',
     start: addDays(-1, 10, 30),
+    estado: 'completada',
+    doctorId: demoDoctorId,
   });
 
   await deletePackageByPublicId(PENDING_PACKAGE_PUBLIC_ID);
