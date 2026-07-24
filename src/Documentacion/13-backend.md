@@ -3,6 +3,11 @@
 > **Relacionado con:** `cc-front/src/Documentacion/20.1-motor-flujos-v2.md` | documento operativo `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`
 > **Fuente canónica:** este archivo del repositorio backend. `cc-front/src/Documentacion/13-backend.md` es un espejo completo para conservar los enlaces internos del manual frontend; cualquier cambio se hace aquí primero y después se sincroniza el espejo.
 
+Economia del paciente: el contrato persistido de presupuestos, versiones,
+cobros, saldo, bonos, plantillas y documentos fiscales se documenta en
+[14-economia-paciente](./14-economia-paciente.md). VeriFactu permanece como
+simulacion visible y no comunica con AEAT.
+
 Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Data Manager/Conversiones mejoradas, política de goals y E2E/limpieza de intake.
 
 ---
