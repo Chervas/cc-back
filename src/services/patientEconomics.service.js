@@ -31,6 +31,7 @@ const BUDGET_STATUSES = new Set([
   'superseded',
 ]);
 const PAYMENT_MODES = new Set(['none', 'single', 'clinic_installments', 'external_financing', 'patient_balance']);
+const PAYMENT_OPTION_MODES = new Set(['single', 'clinic_installments', 'external_financing', 'patient_balance']);
 const PAYMENT_METHODS = new Set(['cash', 'card', 'transfer', 'bizum', 'financing', 'insurance', 'other']);
 const TEMPLATE_TYPES = new Set(['budget', 'invoice']);
 const PRODUCT_TYPES = new Set(['treatment', 'voucher', 'pack']);
@@ -56,7 +57,7 @@ const BUILTIN_BUDGET_TEMPLATES = [
       header_variant: 'family',
       accent: 'primary',
       highlighted_block: 'clinic_installments',
-      blocks: ['header', 'patient', 'services', 'single_payment', 'clinic_installments', 'financing', 'conditions'],
+      blocks: ['header', 'patient', 'services', 'single_payment', 'clinic_installments', 'financing', 'patient_balance', 'conditions'],
       block_visibility: {
         header: true,
         patient: true,
@@ -64,6 +65,7 @@ const BUILTIN_BUDGET_TEMPLATES = [
         single_payment: true,
         clinic_installments: true,
         financing: true,
+        patient_balance: true,
         conditions: true,
       },
     },
@@ -139,12 +141,30 @@ const BUILTIN_BUDGET_TEMPLATES = [
 const BUILTIN_INVOICE_TEMPLATE = {
   public_id: 'builtin-invoice-standard',
   template_type: 'invoice',
-  name: 'Factura clínica',
+  name: 'Fuse moderna',
   area_code: null,
   is_default: true,
   source: 'builtin',
   config: {
-    header_variant: 'clinic',
+    renderer: 'modern',
+    header_variant: 'modern',
+    show_logo: true,
+    show_payment_details: true,
+    show_legal_footer: true,
+    accent: 'neutral',
+  },
+};
+
+const BUILTIN_COMPACT_INVOICE_TEMPLATE = {
+  public_id: 'builtin-invoice-compact',
+  template_type: 'invoice',
+  name: 'Fuse compacta',
+  area_code: null,
+  is_default: false,
+  source: 'builtin',
+  config: {
+    renderer: 'compact',
+    header_variant: 'compact',
     show_logo: true,
     show_payment_details: true,
     show_legal_footer: true,
@@ -486,14 +506,33 @@ function calculateBudgetPayload(payload) {
 
 function normalizePaymentProposal(raw, total) {
   const proposal = raw && typeof raw === 'object' ? cloneJson(raw) : {};
-  const mode = cleanString(proposal.mode || 'none', 30).toLowerCase();
-  if (!PAYMENT_MODES.has(mode)) {
+  const legacyMode = cleanString(proposal.mode || 'none', 30).toLowerCase();
+  if (!PAYMENT_MODES.has(legacyMode)) {
     throw domainError(400, 'payment_mode_invalid', 'La forma de pago no es válida.');
   }
-  const normalized = { mode, selected_financing_months: null, schedule: [], financing_options: [], balance_application: null };
-  if (mode === 'single') {
-    normalized.schedule = [{ key: 'single', label: 'Pago único', amount: total, due_date: null, milestone: 'acceptance' }];
-  } else if (mode === 'clinic_installments') {
+  const requestedModes = Array.isArray(proposal.included_modes)
+    ? proposal.included_modes.map((value) => cleanString(value, 30).toLowerCase())
+    : legacyMode === 'none' ? [] : [legacyMode];
+  const includedModes = [...new Set(requestedModes)];
+  if (includedModes.some((mode) => !PAYMENT_OPTION_MODES.has(mode))) {
+    throw domainError(400, 'payment_options_invalid', 'Una de las alternativas de pago no es válida.');
+  }
+  const normalized = {
+    mode: includedModes[0] || 'none',
+    included_modes: includedModes,
+    single_payment: null,
+    selected_financing_months: null,
+    schedule: [],
+    financing_options: [],
+    balance_application: null,
+  };
+  if (includedModes.includes('single')) {
+    normalized.single_payment = {
+      amount: total,
+      savings: roundMoney(proposal.single_payment?.savings || 0),
+    };
+  }
+  if (includedModes.includes('clinic_installments')) {
     const schedule = Array.isArray(proposal.schedule) ? proposal.schedule : [];
     if (!schedule.length) {
       throw domainError(400, 'payment_schedule_required', 'Define al menos una fase de pago.');
@@ -515,7 +554,8 @@ function normalizePaymentProposal(raw, total) {
         actual: scheduleTotal,
       });
     }
-  } else if (mode === 'external_financing') {
+  }
+  if (includedModes.includes('external_financing')) {
     const options = Array.isArray(proposal.financing_options) ? proposal.financing_options : [];
     if (!options.length) {
       throw domainError(400, 'financing_options_required', 'Añade al menos una opción de financiación.');
@@ -559,7 +599,8 @@ function normalizePaymentProposal(raw, total) {
       throw domainError(400, 'financing_selection_required', 'Selecciona el plazo que se mostrará como principal.');
     }
     normalized.selected_financing_months = selectedMonths;
-  } else if (mode === 'patient_balance') {
+  }
+  if (includedModes.includes('patient_balance')) {
     const amount = roundMoney(proposal.balance_application?.amount || 0);
     if (amount <= 0 || amount > total) {
       throw domainError(400, 'balance_application_invalid', 'El saldo aplicado no es válido.');
@@ -567,6 +608,28 @@ function normalizePaymentProposal(raw, total) {
     normalized.balance_application = { amount };
   }
   return normalized;
+}
+
+function serializePaymentProposal(value) {
+  const proposal = parseJson(value, {});
+  const mode = PAYMENT_MODES.has(proposal.mode) ? proposal.mode : 'none';
+  const includedModes = Array.isArray(proposal.included_modes)
+    ? [...new Set(proposal.included_modes.filter((item) => PAYMENT_OPTION_MODES.has(item)))]
+    : mode === 'none' ? [] : [mode];
+  return {
+    ...proposal,
+    mode: includedModes[0] || 'none',
+    included_modes: includedModes,
+    single_payment: includedModes.includes('single')
+      ? proposal.single_payment || {
+        amount: numberValue(proposal.schedule?.find((step) => step.key === 'single')?.amount),
+        savings: 0,
+      }
+      : null,
+    schedule: Array.isArray(proposal.schedule) ? proposal.schedule : [],
+    financing_options: Array.isArray(proposal.financing_options) ? proposal.financing_options : [],
+    balance_application: proposal.balance_application || null,
+  };
 }
 
 function normalizeDesignConfig(payload, template) {
@@ -597,7 +660,7 @@ async function listTemplates({ clinicId, templateType = null, areaCode = null })
   const custom = await ClinicEconomicTemplate.findAll({ where, order: [['is_default', 'DESC'], ['name', 'ASC']] });
   const builtins = [
     ...(type === 'invoice' ? [] : BUILTIN_BUDGET_TEMPLATES),
-    ...(type === 'budget' ? [] : [BUILTIN_INVOICE_TEMPLATE]),
+    ...(type === 'budget' ? [] : [BUILTIN_INVOICE_TEMPLATE, BUILTIN_COMPACT_INVOICE_TEMPLATE]),
   ];
   return [
     ...custom.map((row) => ({ ...row.toJSON(), source: 'clinic' })),
@@ -1682,7 +1745,7 @@ function serializeVersion(version) {
     version: Number(version.version_number),
     lines: parseJson(version.lines, []),
     totals: parseJson(version.totals, {}),
-    payment_proposal: parseJson(version.payment_proposal, {}),
+    payment_proposal: serializePaymentProposal(version.payment_proposal),
     design_config: parseJson(version.design_config, {}),
     clinic_snapshot: parseJson(version.clinic_snapshot, {}),
     patient_snapshot: parseJson(version.patient_snapshot, {}),

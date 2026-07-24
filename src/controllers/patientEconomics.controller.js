@@ -220,7 +220,7 @@ exports.createVoucher = asyncHandler(async (req, res) => {
 });
 
 exports.createFiscalDocument = asyncHandler(async (req, res) => {
-  await requireBudgetFeature(req, 'patients.edit');
+  await requireBudgetFeature(req, 'billing.documents.manage');
   const document = await economics.createFiscalDocument({
     publicId: req.params.budgetId,
     actorId: actorId(req),
@@ -230,7 +230,7 @@ exports.createFiscalDocument = asyncHandler(async (req, res) => {
 });
 
 exports.updateFiscalDocument = asyncHandler(async (req, res) => {
-  await requireFiscalDocumentFeature(req, 'patients.edit');
+  await requireFiscalDocumentFeature(req, 'billing.documents.manage');
   const document = await economics.updateFiscalDocument({
     publicId: req.params.documentId,
     actorId: actorId(req),

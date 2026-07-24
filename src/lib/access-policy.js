@@ -12,6 +12,10 @@ const ALLOWED_FEATURE_KEYS = new Set([
   'team.manage',
   'team.schedule.self.manage',
   'billing.reports.view',
+  'billing.documents.manage',
+  'accounting.expenses.manage',
+  'accounting.cash.manage',
+  'accounting.export',
   'patients.view',
   'patients.sensitive.view',
   'patients.edit',
@@ -43,6 +47,7 @@ const ALLOWED_ROLE_CODES = new Set([
   'assistant',
   'reception',
   'admin_staff',
+  'accountant',
   'unknown',
 ]);
 
@@ -54,6 +59,7 @@ const DEFAULT_FEATURES = {
     assistant: true,
     reception: true,
     admin_staff: true,
+    accountant: false,
     unknown: true,
   },
   'clinic.settings.view': {
@@ -63,6 +69,7 @@ const DEFAULT_FEATURES = {
     assistant: true,
     reception: true,
     admin_staff: true,
+    accountant: false,
     unknown: true,
   },
   'clinic.settings.edit': {
@@ -72,6 +79,7 @@ const DEFAULT_FEATURES = {
     assistant: false,
     reception: true,
     admin_staff: true,
+    accountant: false,
     unknown: false,
   },
   'team.view': {
@@ -81,6 +89,7 @@ const DEFAULT_FEATURES = {
     assistant: true,
     reception: true,
     admin_staff: true,
+    accountant: false,
     unknown: false,
   },
   'team.manage': {
@@ -90,6 +99,7 @@ const DEFAULT_FEATURES = {
     assistant: false,
     reception: true,
     admin_staff: true,
+    accountant: false,
     unknown: false,
   },
   'team.schedule.self.manage': {
@@ -99,6 +109,7 @@ const DEFAULT_FEATURES = {
     assistant: true,
     reception: true,
     admin_staff: true,
+    accountant: false,
     unknown: false,
   },
   'billing.reports.view': {
@@ -108,6 +119,47 @@ const DEFAULT_FEATURES = {
     assistant: false,
     reception: false,
     admin_staff: true,
+    accountant: true,
+    unknown: false,
+  },
+  'billing.documents.manage': {
+    propietario: true,
+    agencia: false,
+    doctor: false,
+    assistant: false,
+    reception: true,
+    admin_staff: true,
+    accountant: false,
+    unknown: false,
+  },
+  'accounting.expenses.manage': {
+    propietario: true,
+    agencia: false,
+    doctor: false,
+    assistant: false,
+    reception: false,
+    admin_staff: true,
+    accountant: false,
+    unknown: false,
+  },
+  'accounting.cash.manage': {
+    propietario: true,
+    agencia: false,
+    doctor: false,
+    assistant: false,
+    reception: false,
+    admin_staff: true,
+    accountant: false,
+    unknown: false,
+  },
+  'accounting.export': {
+    propietario: true,
+    agencia: false,
+    doctor: false,
+    assistant: false,
+    reception: false,
+    admin_staff: true,
+    accountant: true,
     unknown: false,
   },
   'patients.view': {
@@ -117,6 +169,7 @@ const DEFAULT_FEATURES = {
     assistant: true,
     reception: true,
     admin_staff: true,
+    accountant: false,
     unknown: true,
   },
   'patients.sensitive.view': {
@@ -126,6 +179,7 @@ const DEFAULT_FEATURES = {
     assistant: true,
     reception: true,
     admin_staff: true,
+    accountant: false,
     unknown: false,
   },
   'patients.edit': {
@@ -135,6 +189,7 @@ const DEFAULT_FEATURES = {
     assistant: true,
     reception: true,
     admin_staff: true,
+    accountant: false,
     unknown: false,
   },
   'leads.sensitive.view': {
@@ -144,6 +199,7 @@ const DEFAULT_FEATURES = {
     assistant: true,
     reception: true,
     admin_staff: true,
+    accountant: false,
     unknown: false,
   },
   'leads.manage': {
@@ -153,6 +209,7 @@ const DEFAULT_FEATURES = {
     assistant: true,
     reception: true,
     admin_staff: true,
+    accountant: false,
     unknown: false,
   },
   'marketing.web.view': {
@@ -162,6 +219,7 @@ const DEFAULT_FEATURES = {
     assistant: true,
     reception: true,
     admin_staff: true,
+    accountant: false,
     unknown: false,
   },
   'marketing.web.edit': {
@@ -171,6 +229,7 @@ const DEFAULT_FEATURES = {
     assistant: false,
     reception: true,
     admin_staff: true,
+    accountant: false,
     unknown: false,
   },
   'marketing.web.advanced_edit': {
@@ -180,6 +239,7 @@ const DEFAULT_FEATURES = {
     assistant: false,
     reception: false,
     admin_staff: true,
+    accountant: false,
     unknown: false,
   },
   'marketing.web.review': {
@@ -189,6 +249,7 @@ const DEFAULT_FEATURES = {
     assistant: false,
     reception: false,
     admin_staff: true,
+    accountant: false,
     unknown: false,
   },
   'marketing.web.publish': {
@@ -198,6 +259,7 @@ const DEFAULT_FEATURES = {
     assistant: false,
     reception: false,
     admin_staff: true,
+    accountant: false,
     unknown: false,
   },
   'marketing.web.domains.manage': {
@@ -207,6 +269,7 @@ const DEFAULT_FEATURES = {
     assistant: false,
     reception: false,
     admin_staff: true,
+    accountant: false,
     unknown: false,
   },
   'marketing.web.templates.manage': {
@@ -216,6 +279,7 @@ const DEFAULT_FEATURES = {
     assistant: false,
     reception: false,
     admin_staff: false,
+    accountant: false,
     unknown: false,
   },
   'appointments.view': {
@@ -225,6 +289,7 @@ const DEFAULT_FEATURES = {
     assistant: true,
     reception: true,
     admin_staff: true,
+    accountant: false,
     unknown: true,
   },
   'appointments.manage': {
@@ -234,6 +299,7 @@ const DEFAULT_FEATURES = {
     assistant: true,
     reception: true,
     admin_staff: true,
+    accountant: false,
     unknown: false,
   },
   'consents.view': {
@@ -243,6 +309,7 @@ const DEFAULT_FEATURES = {
     assistant: true,
     reception: true,
     admin_staff: true,
+    accountant: false,
     unknown: false,
   },
   'consents.manage': {
@@ -252,6 +319,7 @@ const DEFAULT_FEATURES = {
     assistant: true,
     reception: true,
     admin_staff: true,
+    accountant: false,
     unknown: false,
   },
   'quickchat.read_patients': {
@@ -261,6 +329,7 @@ const DEFAULT_FEATURES = {
     assistant: true,
     reception: true,
     admin_staff: true,
+    accountant: false,
     unknown: false,
   },
   'quickchat.read_team': {
@@ -270,6 +339,7 @@ const DEFAULT_FEATURES = {
     assistant: true,
     reception: true,
     admin_staff: true,
+    accountant: false,
     unknown: false,
   },
   'quickchat.read_leads': {
@@ -279,6 +349,7 @@ const DEFAULT_FEATURES = {
     assistant: true,
     reception: true,
     admin_staff: true,
+    accountant: false,
     unknown: false,
   },
   'nutrition.workspace.view': {
@@ -288,6 +359,7 @@ const DEFAULT_FEATURES = {
     assistant: true,
     reception: false,
     admin_staff: false,
+    accountant: false,
     unknown: false,
   },
   'nutrition.measurements.create': {
@@ -297,6 +369,7 @@ const DEFAULT_FEATURES = {
     assistant: true,
     reception: false,
     admin_staff: false,
+    accountant: false,
     unknown: false,
   },
   'nutrition.reports.finalize': {
@@ -306,6 +379,7 @@ const DEFAULT_FEATURES = {
     assistant: false,
     reception: false,
     admin_staff: false,
+    accountant: false,
     unknown: false,
   },
 };
@@ -340,6 +414,11 @@ const ROLE_CATALOG = [
     code: 'admin_staff',
     label: 'Administración',
     description: 'Administración interna de la clínica.',
+  },
+  {
+    code: 'accountant',
+    label: 'Gestoría',
+    description: 'Acceso externo restringido a documentos y exportaciones contables.',
   },
   {
     code: 'unknown',
@@ -522,7 +601,39 @@ const FEATURE_CATALOG = [
     group: 'administration',
     kind: 'view',
     label: 'Ver informes de facturación',
-    enforcement_status: 'prepared',
+    enforcement_status: 'backend',
+    sensitive: true,
+  },
+  {
+    key: 'billing.documents.manage',
+    group: 'administration',
+    kind: 'action',
+    label: 'Crear y emitir facturas y recibos',
+    enforcement_status: 'backend',
+    sensitive: true,
+  },
+  {
+    key: 'accounting.expenses.manage',
+    group: 'administration',
+    kind: 'action',
+    label: 'Gestionar facturas recibidas y gastos',
+    enforcement_status: 'backend',
+    sensitive: true,
+  },
+  {
+    key: 'accounting.cash.manage',
+    group: 'administration',
+    kind: 'action',
+    label: 'Registrar movimientos y cerrar caja',
+    enforcement_status: 'backend',
+    sensitive: true,
+  },
+  {
+    key: 'accounting.export',
+    group: 'administration',
+    kind: 'action',
+    label: 'Exportar información para gestoría',
+    enforcement_status: 'backend',
     sensitive: true,
   },
   {
@@ -610,6 +721,7 @@ function roleCodeFromMembership(membership) {
   if (subrole === 'auxiliares y enfermeros' || subrole.includes('auxiliar') || subrole.includes('enfermer')) return 'assistant';
   if (subrole === 'recepción / comercial ventas' || subrole.includes('recep') || subrole.includes('comercial') || subrole.includes('ventas')) return 'reception';
   if (subrole === 'administrativos' || subrole.includes('admin')) return 'admin_staff';
+  if (subrole === 'gestoría' || subrole === 'gestoria' || subrole.includes('gestor')) return 'accountant';
 
   return 'unknown';
 }

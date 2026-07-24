@@ -49,12 +49,25 @@ Bonos:
 - `POST /patients/:patientId/vouchers`
 - `POST /vouchers/:voucherId/consume`
 
+La alta manual admite dos usos con el mismo contrato: bono nuevo
+(`source_system=clinicaclick`) e importacion idempotente
+(`source_system` + `source_reference`). El cobro sigue siendo una operacion
+separada.
+
 Fiscal y plantillas:
 
 - `POST /budgets/:budgetId/fiscal-documents`
 - `PATCH /fiscal-documents/:documentId`
 - `POST /templates`
 - `PATCH /templates/:templateId`
+
+La impresion de presupuestos y documentos fiscales se hace en frontend desde
+el snapshot estructurado. El presupuesto puede incluir simultaneamente pago
+unico, fases, financiacion y saldo mediante `included_modes`; `mode` solo se
+conserva para leer versiones antiguas.
+
+Contabilidad transversal y portal:
+[15-contabilidad-y-gestoria](./15-contabilidad-y-gestoria.md).
 
 ## Invariantes
 
@@ -68,6 +81,7 @@ Fiscal y plantillas:
 - Las fases deben sumar el total del presupuesto.
 - Un bono conserva unidades y movimientos; no es metodo de pago.
 - Una factura requiere emisor y destinatario fiscal completos.
+- Crear o editar facturas y recibos requiere `billing.documents.manage`.
 - Solo se edita un documento fiscal en borrador.
 - Numeros automaticos se serializan bloqueando la fila de clinica y calculando
   la secuencia maxima del año/serie; los indices unicos son la segunda barrera.

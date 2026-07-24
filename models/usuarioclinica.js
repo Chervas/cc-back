@@ -35,9 +35,9 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: false,
       defaultValue: 'paciente'
     },
-    // Subrol: 'Auxiliares y enfermeros', 'Doctores' o 'Administrativos'
+    // Subrol operativo o acceso externo restringido de gestoría.
     subrol_clinica: {
-      type: DataTypes.ENUM('Auxiliares y enfermeros', 'Doctores', 'Administrativos', 'Recepción / Comercial ventas'),
+      type: DataTypes.ENUM('Auxiliares y enfermeros', 'Doctores', 'Administrativos', 'Recepción / Comercial ventas', 'Gestoría'),
       allowNull: true,
       defaultValue: null
     },
