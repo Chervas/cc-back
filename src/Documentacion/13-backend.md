@@ -4274,6 +4274,27 @@ Añade plantillas admin reales para portal del paciente, ácido hialurónico, to
 
 Meta no acepta variables al inicio o final absoluto de una plantilla. La plantilla `clinicaclick_envio_consentimiento_firma` no debe terminar en `{{enlace}}`/`{{4}}`; el copy actual añade texto posterior (`Gracias.`) y la migración `20260628085000-fix-consent-whatsapp-template-copy` desactiva revisiones locales fallidas sin `meta_template_id` para que la siguiente propagación abra una revisión válida.
 
+Migración de biblioteca por áreas:
+
+- `migrations/20260724062000-seed-consentimientos-area-library.js`
+
+Añade 9 plantillas admin base para Nutrición, Estética, Capilar y financiación/pago aplazado:
+
+- Nutrición: valoración nutricional y antropometría, plan nutricional y seguimiento, imágenes clínicas privadas de nutrición.
+- Estética: láser/luz pulsada, peeling químico e imágenes clínicas antes/después.
+- Capilar: PRP/mesoterapia capilar e imágenes clínicas capilares.
+- Genérica: información/autorización para financiación o pago aplazado.
+
+Estas plantillas usan `ConsentTemplateCatalogDisciplines` para scope por área y `variable_schema.signing_timing`/`clinical_policy` para momento operativo de firma. Son textos base de Clinicaclick para demo y revisión legal de la clínica; no son copia de textos de terceros y no sustituyen validación jurídica antes de uso definitivo.
+
+Script demo reproducible:
+
+```bash
+node src/scripts/qa/prepare-consentimientos-area-library-demo.js
+```
+
+Sincroniza de forma idempotente la biblioteca admin en clínicas dev compatibles por `Clinicas.configuracion.disciplinas` (`BS Capilar`, `BS Medical`, `Vitaldiet`, `Clínica Segura y Guerrero`, `Clínica Navae` por defecto) y devuelve URLs de `/consentimientos?tab=templates&clinica_id=<id>`. La evidencia 2026-07-24 queda fuera de git en `/home/ubuntu/secure-imports/clinic-real-20260722/review/ui-validation/consentimientos-area-library-20260724/`.
+
 ### Propagación admin a clínicas existentes
 
 - Endpoint: `POST /api/consentimientos/admin/templates/:id/propagate`.
