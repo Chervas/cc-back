@@ -170,10 +170,12 @@ El script crea o actualiza `BS Medical · DEMO`, sin grupo, con marcador
 `configuracion.qa_demo.key=bs-medical-accounting-demo-v1`. Todos los pacientes,
 tratamientos, presupuesto, cobro, bono, factura emitida, factura recibida,
 adjuntos privados, trabajo OCR, apertura/cierre de caja, resumen de nominas y
-gestoria que contiene son sinteticos. La primera ejecucion genera las
-credenciales de la gestoria; las siguientes no restablecen su contraseña. Es
-idempotente y se elimina, incluidos los archivos privados y el usuario externo,
-con:
+gestoria que contiene son sinteticos. Tambien crea una usuaria de Recepcion:
+puede abrir, operar y cerrar Caja, pero no recibe acceso al resumen contable,
+gastos, nominas ni gestoria. La primera ejecucion genera las credenciales de
+Recepcion y gestoria; las siguientes no restablecen sus contraseñas. Es
+idempotente y se elimina, incluidos los archivos privados y ambos usuarios
+sinteticos, con:
 
 ```bash
 node src/scripts/qa/prepare-bs-medical-demo-clinic.js --cleanup

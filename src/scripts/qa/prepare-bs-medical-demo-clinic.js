@@ -5,6 +5,7 @@ require('dotenv').config();
 
 const crypto = require('crypto');
 const fs = require('fs/promises');
+const bcrypt = require('bcryptjs');
 const sharp = require('sharp');
 
 const db = require('../../../models');
@@ -17,6 +18,8 @@ const economics = require('../../services/patientEconomics.service');
 const DEMO_KEY = 'bs-medical-accounting-demo-v1';
 const DEMO_NAME = 'BS Medical · DEMO';
 const DEMO_PATIENT_PUBLIC_ID = 'demo_bsmedical_accounting_v1';
+const DEMO_RECEPTION_EMAIL = 'recepcion+bs-medical-demo@invalid.clinicaclick.local';
+const DEMO_RECEPTION_CARGO = `Recepción demo · ${DEMO_KEY}`;
 const SOURCE_CLINIC_ID = Number(process.env.BS_MEDICAL_DEMO_SOURCE_CLINIC_ID || 72);
 const ACTOR_ID = Number(process.env.BS_MEDICAL_DEMO_ACTOR_ID || 1);
 const ACCESS_USER_IDS = String(process.env.BS_MEDICAL_DEMO_USER_IDS || '1,44')
@@ -52,6 +55,10 @@ function addMonths(base, months) {
 
 function cleanObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function readablePassword() {
+  return crypto.randomBytes(18).toString('base64url').match(/.{1,4}/g).join('-');
 }
 
 function pdfText(value) {
@@ -201,6 +208,57 @@ async function ensureDemoAccess(clinicId) {
       },
     });
   }
+
+  let reception = await db.Usuario.findOne({
+    where: { email_usuario: DEMO_RECEPTION_EMAIL },
+  });
+  let credentials = null;
+  if (reception && reception.cargo_usuario !== DEMO_RECEPTION_CARGO) {
+    throw new Error(`El correo sintético ${DEMO_RECEPTION_EMAIL} ya pertenece a otro usuario.`);
+  }
+  if (!reception) {
+    const password = readablePassword();
+    reception = await db.Usuario.create({
+      nombre: 'Laura',
+      apellidos: 'Recepción Demo',
+      email_usuario: DEMO_RECEPTION_EMAIL,
+      email_factura: DEMO_RECEPTION_EMAIL,
+      email_notificacion: DEMO_RECEPTION_EMAIL,
+      password_usuario: await bcrypt.hash(password, 10),
+      cargo_usuario: DEMO_RECEPTION_CARGO,
+      estado_cuenta: 'activo',
+      es_provisional: false,
+      creado_por: ACTOR_ID,
+    });
+    credentials = {
+      email: DEMO_RECEPTION_EMAIL,
+      password,
+    };
+  }
+  const [membership] = await db.UsuarioClinica.findOrCreate({
+    where: { id_usuario: reception.id_usuario, id_clinica: clinicId },
+    defaults: {
+      rol_clinica: 'personaldeclinica',
+      subrol_clinica: 'Recepción / Comercial ventas',
+      estado_invitacion: 'aceptada',
+      invitado_por: ACTOR_ID,
+      fecha_invitacion: new Date(),
+      responded_at: new Date(),
+    },
+  });
+  if (
+    membership.rol_clinica !== 'personaldeclinica'
+    || membership.subrol_clinica !== 'Recepción / Comercial ventas'
+    || membership.estado_invitacion !== 'aceptada'
+  ) {
+    await membership.update({
+      rol_clinica: 'personaldeclinica',
+      subrol_clinica: 'Recepción / Comercial ventas',
+      estado_invitacion: 'aceptada',
+      responded_at: new Date(),
+    });
+  }
+  return { user: reception, credentials };
 }
 
 async function ensureDemoPatient(clinicId) {
@@ -755,7 +813,7 @@ async function prepare() {
   const businessDate = process.env.BS_MEDICAL_DEMO_BUSINESS_DATE || dateOnly(new Date());
   const clinic = await ensureDemoClinic(sourceClinic, businessDate);
   const clinicId = Number(clinic.id_clinica);
-  await ensureDemoAccess(clinicId);
+  const access = await ensureDemoAccess(clinicId);
   const patient = await ensureDemoPatient(clinicId);
   const treatments = await ensureDemoTreatments(clinicId);
   const economicsState = await ensureBudgetAndPayment({
@@ -856,12 +914,21 @@ async function prepare() {
       portal_url: firmState.firm.portal_url,
       credentials_issued_now: firmState.credentials,
     },
+    reception: {
+      user_id: access.user.id_usuario,
+      email: access.user.email_usuario,
+      role: 'Recepción / Comercial ventas',
+      credentials_issued_now: access.credentials,
+      expected_access: ['Caja'],
+      forbidden_access: ['Resumen contable', 'Gastos', 'Nóminas', 'Gestoría'],
+    },
     accounting: {
       summary: workspace.summary,
       cash: workspace.cash.current,
     },
     urls: {
       accounting: 'http://localhost:4203/contabilidad',
+      reception_cash: 'http://localhost:4203/contabilidad?section=cash',
       patient: `http://localhost:4203/pacientes/detalle/${patient.public_id}/presupuestos`,
     },
     cleanup: 'node src/scripts/qa/prepare-bs-medical-demo-clinic.js --cleanup',
@@ -925,6 +992,15 @@ async function cleanup() {
     })
     : [];
   const firmUserIds = [...new Set(firmUsers.map((row) => Number(row.user_id)).filter(Boolean))];
+  const receptionUser = await db.Usuario.findOne({
+    where: {
+      email_usuario: DEMO_RECEPTION_EMAIL,
+      cargo_usuario: DEMO_RECEPTION_CARGO,
+    },
+    attributes: ['id_usuario'],
+    raw: true,
+  });
+  const receptionUserId = Number(receptionUser?.id_usuario) || null;
   const remittances = await db.AccountingRemittance.findAll({
     where: { clinic_id: clinicId },
     attributes: ['id'],
@@ -1012,6 +1088,22 @@ async function cleanup() {
     await db.Clinica.destroy({ where: { id_clinica: clinicId }, transaction });
     if (firmUserIds.length) {
       await db.Usuario.destroy({ where: { id_usuario: firmUserIds }, transaction });
+    }
+    if (receptionUserId) {
+      const remainingMemberships = await db.UsuarioClinica.count({
+        where: { id_usuario: receptionUserId },
+        transaction,
+      });
+      if (!remainingMemberships) {
+        await db.Usuario.destroy({
+          where: {
+            id_usuario: receptionUserId,
+            email_usuario: DEMO_RECEPTION_EMAIL,
+            cargo_usuario: DEMO_RECEPTION_CARGO,
+          },
+          transaction,
+        });
+      }
     }
   });
 
