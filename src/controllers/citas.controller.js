@@ -283,32 +283,6 @@ async function resolveAppointmentReadClinicIdsOrRespond(req, res, value) {
     }
 }
 
-function isDateOnlyParam(value) {
-    return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value.trim());
-}
-
-function parseDateBoundary(value, endOfDay = false) {
-    if (!value) return null;
-    let date;
-    if (isDateOnlyParam(value)) {
-        date = new Date(`${String(value).trim()}T00:00:00`);
-        if (endOfDay) {
-            date.setHours(23, 59, 59, 999);
-        }
-    } else {
-        date = new Date(value);
-    }
-    return Number.isNaN(date.getTime()) ? null : date;
-}
-
-function buildDateRangeWhere(startDate, endDate) {
-    if (!startDate || !endDate) return null;
-    const start = parseDateBoundary(startDate, false);
-    const end = parseDateBoundary(endDate, true);
-    if (!start || !end) return null;
-    return { [Op.between]: [start, end] };
-}
-
 function normalizeMoneyValue(value) {
     if (value === null || value === undefined || value === '') {
         return null;
@@ -1147,7 +1121,7 @@ async function attachNutritionLatestMeasurementsToCitas(citas) {
     return citas;
 }
 
-function mapCalendarCitaRow(cita) {
+function mapCalendarCitaRow(cita, timeZone = DEFAULT_TIMEZONE) {
     const plain = plainCita(cita);
     if (!plain) return null;
     return {
@@ -1165,6 +1139,9 @@ function mapCalendarCitaRow(cita) {
         estado: plain.estado,
         inicio: plain.inicio,
         fin: plain.fin,
+        inicio_local: formatDateTimeLocal(plain.inicio, timeZone),
+        fin_local: formatDateTimeLocal(plain.fin, timeZone),
+        time_zone: timeZone,
         precio_cita_resuelto: resolveCitaAppointmentPrice(plain),
         conversation_id: plain.conversation_id || null,
         unread_count: Number(plain.unread_count || 0) || 0,
@@ -1438,6 +1415,79 @@ const formatDateLocal = (date, timeZone) => {
     const pad = (n) => String(n).padStart(2, '0');
     return `${p.year}-${pad(p.month)}-${pad(p.day)}`;
 };
+
+const formatDateTimeLocal = (value, timeZone) => {
+    const date = value instanceof Date ? value : new Date(value);
+    if (!Number.isFinite(date.getTime())) return null;
+    const p = formatPartsInTimeZone(date, timeZone);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${p.year}-${pad(p.month)}-${pad(p.day)}T${pad(p.hour)}:${pad(p.minute)}:${pad(p.second)}`;
+};
+
+const calendarBoundaryInTimeZone = (value, timeZone, endBoundary = false) => {
+    if (!value) return null;
+    const raw = String(value).trim();
+    if (!raw) return null;
+    if (/Z$|[+-]\d{2}:?\d{2}$/.test(raw)) {
+        const instant = new Date(raw);
+        return Number.isFinite(instant.getTime()) ? instant : null;
+    }
+
+    const normalized = raw.replace(' ', 'T');
+    const match = normalized.match(/^(\d{4}-\d{2}-\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?)?$/);
+    if (!match) return null;
+    const time = match[2]
+        ? `${match[2]}:${match[3]}:${match[4] || '00'}`
+        : (endBoundary ? '23:59:59' : '00:00:00');
+    const instant = localDateTimeToUtc(match[1], time, timeZone);
+    if (!instant) return null;
+    if (endBoundary && (!match[2] || (match[2] === '23' && match[3] === '59' && (match[4] || '00') === '59'))) {
+        instant.setUTCMilliseconds(999);
+    } else if (match[5]) {
+        instant.setUTCMilliseconds(Number(match[5].padEnd(3, '0')));
+    }
+    return instant;
+};
+
+const buildCalendarRangeForTimeZone = (startDate, endDate, timeZone) => {
+    if (!startDate || !endDate) return null;
+    const start = calendarBoundaryInTimeZone(startDate, timeZone, false);
+    const end = calendarBoundaryInTimeZone(endDate, timeZone, true);
+    if (!start || !end || end < start) return null;
+    return { start, end };
+};
+
+async function buildClinicCalendarScope(clinicIds, startDate, endDate) {
+    const normalizedIds = Array.from(new Set((clinicIds || [])
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value > 0)));
+    const clinics = normalizedIds.length
+        ? await Clinica.findAll({
+            where: { id_clinica: { [Op.in]: normalizedIds } },
+            attributes: ['id_clinica', 'configuracion'],
+        })
+        : [];
+    const timeZones = new Map(clinics.map((clinic) => [
+        Number(clinic.id_clinica),
+        resolveClinicTimezone(clinic),
+    ]));
+    normalizedIds.forEach((clinicId) => {
+        if (!timeZones.has(clinicId)) timeZones.set(clinicId, DEFAULT_TIMEZONE);
+    });
+
+    const groups = normalizedIds.map((clinicId) => {
+        const range = buildCalendarRangeForTimeZone(
+            startDate,
+            endDate,
+            timeZones.get(clinicId) || DEFAULT_TIMEZONE,
+        );
+        return {
+            clinica_id: clinicId,
+            ...(range ? { inicio: { [Op.between]: [range.start, range.end] } } : {}),
+        };
+    });
+    return { groups, timeZones };
+}
 
 const buildWindowsFromHorarios = (horarios, dow, fechaIso, timeZone) => {
     const exceptionMap = buildHorarioExceptionMap(
@@ -2169,11 +2219,10 @@ exports.getCitas = asyncHandler(async (req, res) => {
 
     const readableClinicIds = await resolveAppointmentReadClinicIdsOrRespond(req, res, clinica_id);
     if (!readableClinicIds) return;
-    const where = {
-        clinica_id: readableClinicIds.length === 1
-            ? readableClinicIds[0]
-            : { [Op.in]: readableClinicIds },
-    };
+    const calendarScope = await buildClinicCalendarScope(readableClinicIds, startDate, endDate);
+    const where = calendarScope.groups.length === 1
+        ? { ...calendarScope.groups[0] }
+        : { [Op.or]: calendarScope.groups };
     const pacienteIdRaw = paciente_id || patient_id;
     if (pacienteIdRaw) {
         let pacienteId = Number(pacienteIdRaw);
@@ -2191,11 +2240,6 @@ exports.getCitas = asyncHandler(async (req, res) => {
         }
         where.paciente_id = pacienteId;
     }
-    const dateRange = buildDateRangeWhere(startDate, endDate);
-    if (dateRange) {
-        where.inicio = dateRange;
-    }
-
     const citas = await CitaPaciente.findAll({
         where,
         order: [['inicio', 'ASC']],
@@ -2226,11 +2270,10 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
 
     const readableClinicIds = await resolveAppointmentReadClinicIdsOrRespond(req, res, clinica_id);
     if (!readableClinicIds) return;
-    const where = {
-        clinica_id: readableClinicIds.length === 1
-            ? readableClinicIds[0]
-            : { [Op.in]: readableClinicIds },
-    };
+    const calendarScope = await buildClinicCalendarScope(readableClinicIds, startDate, endDate);
+    const where = calendarScope.groups.length === 1
+        ? { ...calendarScope.groups[0] }
+        : { [Op.or]: calendarScope.groups };
 
     const pacienteIdRaw = paciente_id || patient_id;
     if (pacienteIdRaw) {
@@ -2248,11 +2291,6 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
             return res.status(400).json({ message: 'paciente_id inválido' });
         }
         where.paciente_id = pacienteId;
-    }
-
-    const dateRange = buildDateRangeWhere(startDate, endDate);
-    if (dateRange) {
-        where.inicio = dateRange;
     }
 
     const citas = await CitaPaciente.findAll({
@@ -2307,7 +2345,12 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
     await attachNutritionLatestMeasurementsToCitas(citas);
 
     res.set('X-Agenda-Endpoint', 'calendar-lite');
-    const calendarRows = citas.map(mapCalendarCitaRow).filter(Boolean);
+    const calendarRows = citas
+        .map((cita) => mapCalendarCitaRow(
+            cita,
+            calendarScope.timeZones.get(Number(cita.clinica_id)) || DEFAULT_TIMEZONE,
+        ))
+        .filter(Boolean);
     res.json(await protectAppointmentsForRequest(req, calendarRows));
 });
 
@@ -2656,4 +2699,10 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     await consentimientosService.attachConsentSummaryToCitas(citaActualizada);
     emitAppointmentSocketEvent('appointment:updated', citaActualizada?.toJSON ? citaActualizada.toJSON() : citaActualizada);
     return res.json(await protectAppointmentsForRequest(req, citaActualizada));
+});
+
+exports.__testing = Object.freeze({
+    calendarBoundaryInTimeZone,
+    buildCalendarRangeForTimeZone,
+    formatDateTimeLocal,
 });
