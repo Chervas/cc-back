@@ -11,6 +11,8 @@ const {
   AccountingRemittance,
   AccountingRemittanceItem,
   EconomicBudget,
+  EconomicBudgetEvent,
+  EconomicPayment,
   Paciente,
   PacienteClinica,
   Clinica,
@@ -35,6 +37,16 @@ function positiveInteger(value) {
 
 function money(value) {
   return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+function json(value, fallback = {}) {
+  if (value == null) return fallback;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
 }
 
 function dateOnly(value) {
@@ -102,6 +114,85 @@ function serializeRemittance(row, items = []) {
   };
 }
 
+async function listEligibleCharges({ clinicId, mandates, remittances, remittanceItems }) {
+  const activeMandates = mandates.filter((row) => row.status === 'active');
+  const mandateByPatient = new Map(activeMandates.map((row) => [Number(row.patient_id), row]));
+  if (!mandateByPatient.size) return [];
+  const budgets = await EconomicBudget.findAll({
+    where: {
+      clinic_id: clinicId,
+      patient_id: { [Op.in]: [...mandateByPatient.keys()] },
+      status: { [Op.in]: ['accepted', 'partially_accepted'] },
+    },
+    order: [['responded_at', 'DESC'], ['id', 'DESC']],
+  });
+  if (!budgets.length) return [];
+  const budgetIds = budgets.map((row) => row.id);
+  const [events, payments, patients] = await Promise.all([
+    EconomicBudgetEvent.findAll({
+      where: {
+        budget_id: { [Op.in]: budgetIds },
+        event_type: { [Op.in]: ['accepted', 'partially_accepted'] },
+      },
+      order: [['created_at', 'ASC']],
+    }),
+    EconomicPayment.findAll({
+      where: { budget_id: { [Op.in]: budgetIds }, status: 'confirmed' },
+      attributes: ['budget_id', 'amount', 'application'],
+    }),
+    Paciente.findAll({
+      where: { id_paciente: { [Op.in]: [...mandateByPatient.keys()] } },
+      attributes: ['id_paciente', 'nombre', 'apellidos'],
+    }),
+  ]);
+  const acceptanceByBudget = new Map();
+  for (const event of events) acceptanceByBudget.set(String(event.budget_id), json(event.metadata));
+  const paidByBudget = new Map();
+  for (const payment of payments) {
+    const allocations = json(payment.application, {}).allocations || [];
+    const applied = allocations
+      .filter((item) => ['budget', 'budget_line'].includes(item.target_type))
+      .reduce((sum, item) => sum + Number(item.amount || 0), 0);
+    const key = String(payment.budget_id);
+    paidByBudget.set(key, money((paidByBudget.get(key) || 0) + applied));
+  }
+  const activeRemittanceIds = new Set(remittances
+    .filter((row) => !['cancelled', 'rejected'].includes(row.status))
+    .map((row) => Number(row.id)));
+  const remittedByBudget = new Map();
+  for (const item of remittanceItems.filter((row) => activeRemittanceIds.has(Number(row.remittance_id)))) {
+    if (!item.budget_id) continue;
+    const key = String(item.budget_id);
+    remittedByBudget.set(key, money((remittedByBudget.get(key) || 0) + Number(item.amount || 0)));
+  }
+  const patientById = new Map(patients.map((row) => [Number(row.id_paciente), row]));
+  return budgets.flatMap((budget) => {
+    const acceptance = acceptanceByBudget.get(String(budget.id)) || {};
+    if (acceptance.collection_method !== 'direct_debit') return [];
+    const pending = money(
+      Number(budget.accepted_amount || 0)
+      - Number(paidByBudget.get(String(budget.id)) || 0)
+      - Number(remittedByBudget.get(String(budget.id)) || 0),
+    );
+    const mandate = mandateByPatient.get(Number(budget.patient_id));
+    if (!mandate || pending <= 0) return [];
+    const patient = patientById.get(Number(budget.patient_id));
+    return [{
+      id: budget.public_id,
+      budget_id: budget.public_id,
+      budget_number: budget.number,
+      mandate_id: mandate.public_id,
+      patient_id: Number(budget.patient_id),
+      patient_name: patient
+        ? [patient.nombre, patient.apellidos].filter(Boolean).join(' ')
+        : mandate.account_holder,
+      iban_masked: `•••• ${mandate.iban_last4}`,
+      pending_amount: pending,
+      concept: `Presupuesto ${budget.number}`,
+    }];
+  });
+}
+
 async function resolvePatient(value, clinicId, transaction = null) {
   const numericId = positiveInteger(value);
   const patient = numericId
@@ -156,6 +247,12 @@ async function list({ clinicId }) {
   return {
     mandates: mandates.map((row) => serializeMandate(row, patientById.get(Number(row.patient_id)))),
     remittances: remittances.map((row) => serializeRemittance(row, itemsByRemittance.get(String(row.id)) || [])),
+    eligible_charges: await listEligibleCharges({
+      clinicId,
+      mandates,
+      remittances,
+      remittanceItems: items,
+    }),
   };
 }
 
@@ -228,6 +325,16 @@ async function createRemittance({ clinicId, actorId, payload }) {
     const clinic = await Clinica.findByPk(clinicId, { transaction });
     if (!clinic) throw domainError(404, 'clinic_not_found', 'Clínica no encontrada.');
     const creditor = clinicCreditor(clinic);
+    const activeRemittances = await AccountingRemittance.findAll({
+      where: {
+        clinic_id: clinicId,
+        status: { [Op.notIn]: ['cancelled', 'rejected'] },
+      },
+      attributes: ['id'],
+      transaction,
+    });
+    const activeRemittanceIds = activeRemittances.map((row) => Number(row.id));
+    const queuedByBudget = new Map();
     const items = [];
     for (const [index, item] of rawItems.entries()) {
       const mandate = await AccountingSepaMandate.findOne({
@@ -244,11 +351,81 @@ async function createRemittance({ clinicId, actorId, payload }) {
       let budgetId = null;
       if (item.budget_id) {
         const budget = await EconomicBudget.findOne({
-          where: { public_id: clean(item.budget_id, 36), clinic_id: clinicId, patient_id: mandate.patient_id },
-          attributes: ['id'],
+          where: {
+            public_id: clean(item.budget_id, 36),
+            clinic_id: clinicId,
+            patient_id: mandate.patient_id,
+            status: { [Op.in]: ['accepted', 'partially_accepted'] },
+          },
+          attributes: ['id', 'accepted_amount'],
           transaction,
         });
-        budgetId = budget?.id || null;
+        if (!budget) {
+          throw domainError(400, 'sepa_budget_invalid', `El presupuesto del recibo ${index + 1} no está disponible.`);
+        }
+        const acceptance = await EconomicBudgetEvent.findOne({
+          where: {
+            budget_id: budget.id,
+            event_type: { [Op.in]: ['accepted', 'partially_accepted'] },
+          },
+          order: [['created_at', 'DESC']],
+          transaction,
+        });
+        if (json(acceptance?.metadata).collection_method !== 'direct_debit') {
+          throw domainError(
+            400,
+            'sepa_budget_not_direct_debit',
+            `El presupuesto del recibo ${index + 1} no se aceptó mediante domiciliación.`,
+          );
+        }
+        const [payments, existingItems] = await Promise.all([
+          EconomicPayment.findAll({
+            where: {
+              budget_id: budget.id,
+              status: 'confirmed',
+            },
+            attributes: ['amount', 'application'],
+            transaction,
+          }),
+          activeRemittanceIds.length
+            ? AccountingRemittanceItem.findAll({
+              where: {
+                budget_id: budget.id,
+                remittance_id: { [Op.in]: activeRemittanceIds },
+              },
+              attributes: ['amount'],
+              transaction,
+            })
+            : Promise.resolve([]),
+        ]);
+        const alreadyPaid = money(payments.reduce((sum, payment) => {
+          const allocations = json(payment.application, {}).allocations || [];
+          return sum + allocations
+            .filter((allocation) => ['budget', 'budget_line'].includes(allocation.target_type))
+            .reduce((allocationSum, allocation) => (
+              allocationSum + Number(allocation.amount || 0)
+            ), 0);
+        }, 0));
+        const alreadyRemitted = money(existingItems.reduce(
+          (sum, existingItem) => sum + Number(existingItem.amount || 0),
+          0,
+        ));
+        const queued = money(queuedByBudget.get(String(budget.id)) || 0);
+        const pending = money(
+          Number(budget.accepted_amount || 0)
+          - alreadyPaid
+          - alreadyRemitted
+          - queued,
+        );
+        if (amount > pending) {
+          throw domainError(
+            400,
+            'sepa_amount_exceeds_pending',
+            `El recibo ${index + 1} supera los ${pending.toFixed(2)} € pendientes del presupuesto.`,
+          );
+        }
+        queuedByBudget.set(String(budget.id), money(queued + amount));
+        budgetId = budget.id;
       }
       items.push({
         mandate,
@@ -287,6 +464,34 @@ async function createRemittance({ clinicId, actorId, payload }) {
     }
     return serializeRemittance(remittance, createdItems);
   });
+}
+
+async function updateRemittanceStatus({ clinicId, publicId, status }) {
+  const target = clean(status, 20);
+  if (!['submitted', 'settled', 'rejected', 'cancelled'].includes(target)) {
+    throw domainError(400, 'sepa_remittance_status_invalid', 'El estado de la remesa no es válido.');
+  }
+  const remittance = await AccountingRemittance.findOne({
+    where: { public_id: publicId, clinic_id: clinicId },
+  });
+  if (!remittance) throw domainError(404, 'sepa_remittance_not_found', 'Remesa no encontrada.');
+  const allowed = {
+    draft: ['cancelled'],
+    exported: ['submitted', 'cancelled'],
+    submitted: ['settled', 'rejected', 'cancelled'],
+    settled: [],
+    rejected: [],
+    cancelled: [],
+  };
+  if (!allowed[remittance.status]?.includes(target)) {
+    throw domainError(409, 'sepa_remittance_transition_invalid', 'Ese cambio de estado no está permitido.');
+  }
+  await remittance.update({ status: target });
+  const items = await AccountingRemittanceItem.findAll({
+    where: { remittance_id: remittance.id },
+    order: [['id', 'ASC']],
+  });
+  return serializeRemittance(remittance, items);
 }
 
 function xml(value) {
@@ -387,6 +592,7 @@ module.exports = {
   list,
   saveMandate,
   createRemittance,
+  updateRemittanceStatus,
   exportRemittance,
   __testing: { normalizeIban },
 };

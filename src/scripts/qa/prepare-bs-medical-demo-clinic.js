@@ -12,6 +12,7 @@ const db = require('../../../models');
 const accounting = require('../../services/accounting.service');
 const accountingFirms = require('../../services/accountingFirms.service');
 const accountingIngestion = require('../../services/accountingIngestion.service');
+const accountingSepa = require('../../services/accountingSepa.service');
 const appointmentClinicalReports = require('../../services/appointmentClinicalReports.service');
 const clinicalPrivateStorage = require('../../services/clinicalPrivateStorage.service');
 const consentimientosService = require('../../services/consentimientos.service');
@@ -52,6 +53,8 @@ const REFERENCES = Object.freeze({
   payroll: `${DEMO_KEY}:payroll`,
   ingestionProvider: 'clinicaclick_demo',
   ingestionModel: `${DEMO_KEY}:fixture`,
+  payrollIngestionProvider: 'clinicaclick_demo_payroll',
+  payrollIngestionModel: `${DEMO_KEY}:payroll-fixture`,
 });
 
 const SIGNATURE_DATA_URL = `data:image/svg+xml;base64,${Buffer.from(`
@@ -148,8 +151,8 @@ async function buildPendingInvoicePng() {
       <text x="72" y="105" font-family="Arial, sans-serif" font-size="42" font-weight="700" fill="#111827">Factura de proveedor</text>
       <text x="72" y="157" font-family="Arial, sans-serif" font-size="22" fill="#64748b">Documento de demostracion pendiente de revisar</text>
       <line x1="72" y1="205" x2="828" y2="205" stroke="#cbd5e1" stroke-width="2"/>
-      <text x="72" y="270" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#111827">Laboratorio Demo Mediterraneo SL</text>
-      <text x="72" y="310" font-family="Arial, sans-serif" font-size="20" fill="#475569">B76543210 · FACT-DEMO-2026-081</text>
+      <text x="72" y="270" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#111827">Suministros Sanitarios Demo SL</text>
+      <text x="72" y="310" font-family="Arial, sans-serif" font-size="20" fill="#475569">B12345678 · FACT-DEMO-2026-081</text>
       <text x="72" y="350" font-family="Arial, sans-serif" font-size="20" fill="#475569">Material de consulta y consumibles</text>
       <rect x="72" y="430" width="756" height="76" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
       <text x="96" y="477" font-family="Arial, sans-serif" font-size="21" fill="#334155">Base imponible</text>
@@ -161,6 +164,34 @@ async function buildPendingInvoicePng() {
       <text x="96" y="676" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#312e81">TOTAL</text>
       <text x="790" y="688" text-anchor="end" font-family="Arial, sans-serif" font-size="38" font-weight="700" fill="#312e81">242,00 EUR</text>
       <text x="72" y="1110" font-family="Arial, sans-serif" font-size="18" fill="#94a3b8">Datos sinteticos para QA. No es una factura real.</text>
+    </svg>
+  `;
+  return sharp(Buffer.from(svg)).png().toBuffer();
+}
+
+async function buildPendingPayrollPng() {
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="900" height="1200">
+      <rect width="900" height="1200" fill="#ffffff"/>
+      <rect width="900" height="18" fill="#4f46e5"/>
+      <text x="72" y="105" font-family="Arial, sans-serif" font-size="42" font-weight="700" fill="#111827">Nomina</text>
+      <text x="72" y="157" font-family="Arial, sans-serif" font-size="22" fill="#64748b">Documento privado de demostracion</text>
+      <line x1="72" y1="205" x2="828" y2="205" stroke="#cbd5e1" stroke-width="2"/>
+      <text x="72" y="270" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#111827">Marta Lopez Demo</text>
+      <text x="72" y="310" font-family="Arial, sans-serif" font-size="20" fill="#475569">BS Medical · DEMO</text>
+      <rect x="72" y="420" width="756" height="76" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+      <text x="96" y="467" font-family="Arial, sans-serif" font-size="21" fill="#334155">Salario bruto</text>
+      <text x="790" y="467" text-anchor="end" font-family="Arial, sans-serif" font-size="21" fill="#0f172a">2.300,00 EUR</text>
+      <rect x="72" y="505" width="756" height="76" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+      <text x="96" y="552" font-family="Arial, sans-serif" font-size="21" fill="#334155">Seguridad Social trabajador</text>
+      <text x="790" y="552" text-anchor="end" font-family="Arial, sans-serif" font-size="21" fill="#0f172a">147,50 EUR</text>
+      <rect x="72" y="590" width="756" height="76" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+      <text x="96" y="637" font-family="Arial, sans-serif" font-size="21" fill="#334155">IRPF</text>
+      <text x="790" y="637" text-anchor="end" font-family="Arial, sans-serif" font-size="21" fill="#0f172a">397,50 EUR</text>
+      <rect x="72" y="695" width="756" height="112" rx="8" fill="#eef2ff" stroke="#818cf8" stroke-width="2"/>
+      <text x="96" y="751" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#312e81">NETO</text>
+      <text x="790" y="763" text-anchor="end" font-family="Arial, sans-serif" font-size="38" font-weight="700" fill="#312e81">1.755,00 EUR</text>
+      <text x="72" y="1110" font-family="Arial, sans-serif" font-size="18" fill="#94a3b8">Datos sinteticos para QA. No corresponde a una persona real.</text>
     </svg>
   `;
   return sharp(Buffer.from(svg)).png().toBuffer();
@@ -1699,8 +1730,26 @@ async function ensureBudgetAndPayment({ clinicId, patient, treatments, businessD
       publicId: budgetRow.public_id,
       actorId: ACTOR_ID,
       action: 'accept',
+      payload: {
+        selected_payment_mode: 'clinic_installments',
+        collection_method: 'direct_debit',
+      },
     });
     await budgetRow.reload();
+  }
+  const acceptedEvent = await db.EconomicBudgetEvent.findOne({
+    where: { budget_id: budgetRow.id, event_type: 'accepted' },
+    order: [['created_at', 'DESC']],
+  });
+  if (acceptedEvent) {
+    await acceptedEvent.update({
+      metadata: {
+        ...(acceptedEvent.metadata || {}),
+        selected_payment_mode: 'clinic_installments',
+        selected_financing_months: null,
+        collection_method: 'direct_debit',
+      },
+    });
   }
 
   let payment = await db.EconomicPayment.findOne({
@@ -1788,6 +1837,21 @@ async function ensureFiscalDocument({ clinicId, patient, payment, businessDate }
       where: { clinic_id: clinicId, number },
     });
   }
+  if (document.pdf_asset_id) {
+    const currentPdf = await db.ClinicalPrivateAsset.findByPk(document.pdf_asset_id);
+    let metadata = currentPdf?.metadata || {};
+    if (typeof metadata === 'string') {
+      try {
+        metadata = JSON.parse(metadata);
+      } catch {
+        metadata = {};
+      }
+    }
+    if (metadata.renderer_version !== 'invoice-pdf-v2') {
+      await document.update({ pdf_asset_id: null });
+      if (currentPdf) await currentPdf.update({ status: 'superseded' });
+    }
+  }
   return document;
 }
 
@@ -1851,7 +1915,35 @@ async function ensureExpense({ clinicId, businessDate }) {
   return expense;
 }
 
+async function ensureSepaMandate({ clinicId, patient, businessDate }) {
+  const reference = 'Mandato recurrente · DEMO';
+  const existing = await db.AccountingSepaMandate.findOne({
+    where: {
+      clinic_id: clinicId,
+      patient_id: patient.id_paciente,
+    },
+    attributes: ['public_id'],
+  });
+  return accountingSepa.saveMandate({
+    clinicId,
+    actorId: ACTOR_ID,
+    publicId: existing?.public_id || null,
+    payload: {
+      patient_id: patient.public_id,
+      reference,
+      account_holder: [patient.nombre, patient.apellidos].filter(Boolean).join(' '),
+      iban: 'ES9121000418450200051332',
+      signature_date: shiftedDate(businessDate, -30),
+      scheme: 'CORE',
+      sequence_type: 'RCUR',
+      status: 'active',
+      notes: 'Mandato sintético exclusivo de la demo de contabilidad.',
+    },
+  });
+}
+
 async function ensureIngestionReview({ clinicId, businessDate }) {
+  const image = await buildPendingInvoicePng();
   let job = await db.AccountingIngestionJob.findOne({
     where: {
       clinic_id: clinicId,
@@ -1860,7 +1952,6 @@ async function ensureIngestionReview({ clinicId, businessDate }) {
     },
   });
   if (!job) {
-    const image = await buildPendingInvoicePng();
     const queued = await accountingIngestion.enqueue({
       clinicId,
       actorId: ACTOR_ID,
@@ -1873,18 +1964,32 @@ async function ensureIngestionReview({ clinicId, businessDate }) {
     job = await db.AccountingIngestionJob.findOne({
       where: { public_id: queued.id, clinic_id: clinicId },
     });
+  }
+
+  if (job.status !== 'accepted') {
+    const sourceAsset = await db.ClinicalPrivateAsset.findByPk(job.source_asset_id);
+    if (sourceAsset?.provider === 'local_private') {
+      const objectPath = clinicalPrivateStorage.__testing.objectPathForKey(sourceAsset.object_key);
+      await fs.writeFile(objectPath, image, { mode: 0o600 });
+      await sourceAsset.update({
+        size_bytes: image.length,
+        sha256: crypto.createHash('sha256').update(image).digest('hex'),
+        original_filename: 'factura-pendiente-demo.png',
+        content_type: 'image/png',
+      });
+    }
     await job.update({
       status: 'review',
       provider: REFERENCES.ingestionProvider,
       model: REFERENCES.ingestionModel,
       extracted_data: {
-        supplier_name: 'Laboratorio Demo Mediterráneo SL',
-        supplier_tax_id: 'B76543210',
-        supplier_address: 'Calle del Laboratorio 20, Alicante',
+        supplier_name: 'Suministros Sanitarios Demo SL',
+        supplier_tax_id: 'B12345678',
+        supplier_address: 'Avenida de la Demostración 10, Alicante',
         document_number: 'FACT-DEMO-2026-081',
         issue_date: businessDate,
         due_date: shiftedDate(businessDate, 30),
-        category: 'Laboratorio',
+        category: 'Material clínico',
         payment_method: 'transfer',
         taxable_base: 200,
         tax_amount: 42,
@@ -1893,8 +1998,73 @@ async function ensureIngestionReview({ clinicId, businessDate }) {
         currency: 'EUR',
         confidence: 0.94,
         warnings: ['Datos sintéticos preparados para revisión manual.'],
+        learning: {
+          supplier_recognized: true,
+          previous_documents: 1,
+          suggested_category: 'Material clínico',
+          category_applied: true,
+        },
       },
       confidence: 0.94,
+      attempts: 1,
+      processed_at: new Date(),
+    });
+  }
+  return job;
+}
+
+async function ensurePayrollIngestionReview({ clinicId, businessDate, doctor }) {
+  let job = await db.AccountingIngestionJob.findOne({
+    where: {
+      clinic_id: clinicId,
+      provider: REFERENCES.payrollIngestionProvider,
+      model: REFERENCES.payrollIngestionModel,
+    },
+  });
+  if (!job) {
+    const image = await buildPendingPayrollPng();
+    const queued = await accountingIngestion.enqueue({
+      clinicId,
+      actorId: ACTOR_ID,
+      documentKind: 'payroll',
+      attachment: {
+        filename: 'nomina-marta-lopez-demo.png',
+        content_type: 'image/png',
+        base64: image.toString('base64'),
+      },
+    });
+    job = await db.AccountingIngestionJob.findOne({
+      where: { public_id: queued.id, clinic_id: clinicId },
+    });
+    const employeeName = [doctor.nombre, doctor.apellidos].filter(Boolean).join(' ');
+    await job.update({
+      status: 'review',
+      provider: REFERENCES.payrollIngestionProvider,
+      model: REFERENCES.payrollIngestionModel,
+      extracted_data: {
+        employee_name: employeeName,
+        employee_tax_id: null,
+        period_month: `${businessDate.slice(0, 7)}-01`,
+        gross_salary: 2300,
+        employee_social_security: 147.50,
+        irpf_withholding: 397.50,
+        net_salary: 1755,
+        other_amounts: 0,
+        currency: 'EUR',
+        confidence: 0.96,
+        warnings: ['Datos sintéticos preparados para revisión manual.'],
+        employee_match: {
+          matched: true,
+          suggested_employee_id: Number(doctor.id_usuario),
+          suggested_employee_name: employeeName,
+          candidates: [{
+            id: Number(doctor.id_usuario),
+            name: employeeName,
+            score: 100,
+          }],
+        },
+      },
+      confidence: 0.96,
       attempts: 1,
       processed_at: new Date(),
     });
@@ -2068,6 +2238,11 @@ async function prepare() {
     treatments,
     businessDate,
   });
+  const sepaMandate = await ensureSepaMandate({
+    clinicId,
+    patient,
+    businessDate,
+  });
   const fiscalDocument = await ensureFiscalDocument({
     clinicId,
     patient,
@@ -2079,6 +2254,11 @@ async function prepare() {
   const closure = await ensureOpeningCash({ clinicId, businessDate });
   const cashSession = await ensureCurrentCashSession({ clinicId, businessDate });
   const payroll = await ensurePayroll({ clinicId, businessDate });
+  const payrollIngestion = await ensurePayrollIngestionReview({
+    clinicId,
+    businessDate,
+    doctor,
+  });
   const firmState = await ensureAccountingFirm({ clinicId });
   const workspace = await accounting.getWorkspace({
     clinicId,
@@ -2146,6 +2326,11 @@ async function prepare() {
       amount: Number(economicsState.payment.amount),
       method: economicsState.payment.method,
     },
+    sepa_mandate: {
+      id: sepaMandate.id,
+      status: sepaMandate.status,
+      iban_masked: sepaMandate.iban_masked,
+    },
     voucher_count: patientWorkspace.vouchers.length,
     fiscal_document: {
       id: fiscalDocument.public_id,
@@ -2177,6 +2362,10 @@ async function prepare() {
       period_month: payroll.period_month,
       total_personnel_cost: Number(payroll.total_personnel_cost),
       document_asset_id: payroll.document_asset_id,
+    },
+    payroll_ingestion: {
+      id: payrollIngestion.public_id,
+      status: payrollIngestion.status,
     },
     accounting_firm: {
       id: firmState.firm.id,
@@ -2362,6 +2551,7 @@ async function cleanup() {
     await db.EconomicBudget.destroy({ where: { clinic_id: clinicId }, transaction });
     await db.AccountingIngestionJob.destroy({ where: { clinic_id: clinicId }, transaction });
     await db.AccountingExpenseDocument.destroy({ where: { clinic_id: clinicId }, transaction });
+    await db.AccountingPayrollDocument.destroy({ where: { clinic_id: clinicId }, transaction });
     await db.AccountingPayrollPeriod.destroy({ where: { clinic_id: clinicId }, transaction });
     await db.AccountingCashMovement.destroy({ where: { clinic_id: clinicId }, transaction });
     await db.AccountingCashSession.destroy({ where: { clinic_id: clinicId }, transaction });

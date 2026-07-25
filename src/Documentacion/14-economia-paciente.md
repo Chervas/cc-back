@@ -1,6 +1,6 @@
 # Backend de economia del paciente
 
-> Implementado en `dev` el 2026-07-24.
+> Implementado y repulido en `dev` el 2026-07-25.
 > Prefijo API: `/api/economics`.
 > Migracion: `20260724183000-create-patient-economics-domain.js`.
 
@@ -79,10 +79,19 @@ puede incluir simultaneamente pago
 unico, fases, financiacion y saldo mediante `included_modes`; `mode` solo se
 conserva para leer versiones antiguas.
 
+Al aceptar o aceptar parcialmente, el backend valida
+`selected_payment_mode`, `selected_financing_months` y `collection_method`
+contra la version ofrecida y los guarda en `EconomicBudgetEvent.metadata`.
+Las salidas posteriores muestran solo esa decision; las alternativas completas
+siguen visibles unicamente mientras el paciente todavia debe elegir.
+
 La creacion fiscal general admite origen `manual`, `budget` o `payment`. El
 backend calcula lo ya documentado y rechaza importes superiores al pendiente,
 por lo que una factura o recibo puede cubrir solo una parte sin duplicar dinero.
-El logo elegido queda congelado en el snapshot de plantilla.
+El logo elegido queda congelado en el snapshot de plantilla. Los logos
+personalizados se suben antes mediante `purpose=invoice_logo`: son branding
+publico de clinica, reencodeado a WebP y sin nombre original ni asociacion a un
+paciente. El PDF fiscal y sus datos siguen siendo privados.
 
 Planificacion de bonos:
 
@@ -105,6 +114,8 @@ Contabilidad transversal y portal:
 - Solo un borrador puede editarse directamente.
 - Cada edicion genera una version nueva.
 - Las transiciones de estado son explicitas.
+- Una aceptacion con varias alternativas exige elegir una; una financiacion
+  exige un plazo ofrecido y el medio de cobro debe pertenecer al catalogo.
 - Cobros + saldo aplicado no pueden superar el importe aceptado/pendiente.
 - Las fases deben sumar el total del presupuesto.
 - Cada alternativa de pago puede aplicar su descuento propio mediante

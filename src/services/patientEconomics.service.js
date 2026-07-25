@@ -32,7 +32,19 @@ const BUDGET_STATUSES = new Set([
 ]);
 const PAYMENT_MODES = new Set(['none', 'single', 'clinic_installments', 'external_financing', 'patient_balance']);
 const PAYMENT_OPTION_MODES = new Set(['single', 'clinic_installments', 'external_financing', 'patient_balance']);
-const PAYMENT_METHODS = new Set(['cash', 'card', 'transfer', 'bizum', 'financing', 'insurance', 'other']);
+const PAYMENT_METHODS = new Set(['cash', 'card', 'transfer', 'direct_debit', 'bizum', 'financing', 'insurance', 'other']);
+const ACCEPTANCE_COLLECTION_METHODS = new Set([
+  'pending',
+  'cash',
+  'card',
+  'transfer',
+  'direct_debit',
+  'bizum',
+  'financing',
+  'patient_balance',
+  'insurance',
+  'other',
+]);
 const TEMPLATE_TYPES = new Set(['budget', 'invoice']);
 const PRODUCT_TYPES = new Set(['treatment', 'voucher', 'pack']);
 const FISCAL_DOCUMENT_TYPES = new Set(['receipt', 'invoice', 'credit_note']);
@@ -1059,8 +1071,10 @@ async function transitionBudget({ publicId, actorId, action, payload = {} }) {
       transaction,
     });
     const totals = parseJson(version.totals, {});
+    const proposal = parseJson(version.payment_proposal, {});
     let acceptedAmount = 0;
     let acceptedLineKeys = [];
+    let acceptance = {};
     if (transition.to === 'accepted') {
       acceptedAmount = numberValue(totals.total);
       acceptedLineKeys = parseJson(version.lines, []).map((line) => line.key);
@@ -1075,6 +1089,65 @@ async function transitionBudget({ publicId, actorId, action, payload = {} }) {
       if (!acceptedLineKeys.length || acceptedAmount <= 0) {
         throw domainError(400, 'accepted_lines_required', 'Selecciona las líneas que el paciente ha aceptado.');
       }
+    }
+    if (['accepted', 'partially_accepted'].includes(transition.to)) {
+      const includedModes = Array.isArray(proposal.included_modes)
+        ? proposal.included_modes.filter((mode) => PAYMENT_OPTION_MODES.has(mode))
+        : PAYMENT_OPTION_MODES.has(proposal.mode) ? [proposal.mode] : [];
+      const selectedPaymentMode = cleanString(
+        payload.selected_payment_mode || (includedModes.length === 1 ? includedModes[0] : ''),
+        30,
+      ).toLowerCase();
+      if (includedModes.length > 1 && !selectedPaymentMode) {
+        throw domainError(
+          400,
+          'accepted_payment_mode_required',
+          'Indica qué forma de pago ha elegido el paciente.',
+        );
+      }
+      if (selectedPaymentMode && !includedModes.includes(selectedPaymentMode)) {
+        throw domainError(
+          400,
+          'accepted_payment_mode_invalid',
+          'La forma de pago elegida no forma parte de este presupuesto.',
+        );
+      }
+      let selectedFinancingMonths = null;
+      if (selectedPaymentMode === 'external_financing') {
+        selectedFinancingMonths = optionalPositiveInteger(
+          payload.selected_financing_months || proposal.selected_financing_months,
+        );
+        const financingOptions = Array.isArray(proposal.financing_options)
+          ? proposal.financing_options
+          : [];
+        if (!selectedFinancingMonths
+          || !financingOptions.some((option) => Number(option.months) === selectedFinancingMonths)) {
+          throw domainError(
+            400,
+            'accepted_financing_term_invalid',
+            'Selecciona uno de los plazos de financiación ofrecidos.',
+          );
+        }
+      }
+      const defaultCollectionMethod = selectedPaymentMode === 'external_financing'
+        ? 'financing'
+        : selectedPaymentMode === 'patient_balance' ? 'patient_balance' : 'pending';
+      const collectionMethod = cleanString(
+        payload.collection_method || defaultCollectionMethod,
+        30,
+      ).toLowerCase();
+      if (!ACCEPTANCE_COLLECTION_METHODS.has(collectionMethod)) {
+        throw domainError(
+          400,
+          'accepted_collection_method_invalid',
+          'El método de cobro previsto no es válido.',
+        );
+      }
+      acceptance = {
+        selected_payment_mode: selectedPaymentMode || null,
+        selected_financing_months: selectedFinancingMonths,
+        collection_method: collectionMethod,
+      };
     }
     const now = new Date();
     await budget.update({
@@ -1094,6 +1167,7 @@ async function transitionBudget({ publicId, actorId, action, payload = {} }) {
         reason: cleanString(payload.reason, 500) || null,
         accepted_line_keys: acceptedLineKeys,
         accepted_amount: acceptedAmount,
+        ...acceptance,
       },
       actor_id: actorId,
       created_at: now,

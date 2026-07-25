@@ -24,6 +24,7 @@ router.get('/sepa', controller.getSepa);
 router.post('/sepa/mandates', controller.createSepaMandate);
 router.patch('/sepa/mandates/:mandateId', controller.updateSepaMandate);
 router.post('/sepa/remittances', controller.createRemittance);
+router.patch('/sepa/remittances/:remittanceId', controller.updateRemittanceStatus);
 router.get('/sepa/remittances/:remittanceId.xml', controller.exportRemittance);
 router.get('/documents/:documentId', controller.getFiscalDocument);
 router.get('/export.csv', controller.exportCsv);
@@ -37,6 +38,7 @@ router.post('/cash/closures', controller.closeCash);
 router.post('/payroll', controller.createPayroll);
 router.patch('/payroll/:payrollId', controller.updatePayroll);
 router.get('/payroll/:payrollId/document', controller.downloadPayrollAttachment);
+router.get('/payroll-documents/:documentId/document', controller.downloadPayrollDocumentAttachment);
 
 router.use((error, req, res, next) => {
   if (!error?.statusCode && !error?.status) return next(error);

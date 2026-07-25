@@ -190,6 +190,21 @@ exports.downloadPayrollAttachment = asyncHandler(async (req, res) => {
   res.send(buffer);
 });
 
+exports.downloadPayrollDocumentAttachment = asyncHandler(async (req, res) => {
+  const resolvedClinicId = await requireFeature(req, 'accounting.payroll.view');
+  const { asset, buffer } = await accounting.readPayrollDocumentAttachment({
+    publicId: req.params.documentId,
+    clinicId: resolvedClinicId,
+  });
+  res.setHeader('Content-Type', asset.content_type);
+  res.setHeader(
+    'Content-Disposition',
+    `inline; filename="${String(asset.original_filename || 'nomina').replace(/"/g, '')}"`,
+  );
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.send(buffer);
+});
+
 exports.getFiscalDocument = asyncHandler(async (req, res) => {
   const resolvedClinicId = await requireAnyFeature(req, ['billing.reports.view', 'patients.view']);
   res.json(await accounting.getFiscalDocument({
@@ -248,20 +263,35 @@ exports.exportPortalCsv = asyncHandler(async (req, res) => {
 
 exports.listIngestion = asyncHandler(async (req, res) => {
   const resolvedClinicId = await requireFeature(req, 'accounting.ocr.manage');
-  res.json(await accountingIngestion.list({ clinicId: resolvedClinicId }));
+  if (String(req.query.document_kind || '').toLowerCase() === 'payroll') {
+    await requireFeature(req, 'accounting.payroll.view');
+  }
+  res.json(await accountingIngestion.list({
+    clinicId: resolvedClinicId,
+    documentKind: req.query.document_kind,
+  }));
 });
 
 exports.enqueueIngestion = asyncHandler(async (req, res) => {
   const resolvedClinicId = await requireFeature(req, 'accounting.ocr.manage');
+  const documentKind = String(req.body.document_kind || 'expense').toLowerCase();
+  if (documentKind === 'payroll') await requireFeature(req, 'accounting.payroll.manage');
   res.status(201).json(await accountingIngestion.enqueue({
     clinicId: resolvedClinicId,
     actorId: actorId(req),
     attachment: req.body.attachment,
+    documentKind,
   }));
 });
 
 exports.processIngestion = asyncHandler(async (req, res) => {
   const resolvedClinicId = await requireFeature(req, 'accounting.ocr.manage');
+  if (await accountingIngestion.kind({
+    publicId: req.params.jobId,
+    clinicId: resolvedClinicId,
+  }) === 'payroll') {
+    await requireFeature(req, 'accounting.payroll.manage');
+  }
   res.json(await accountingIngestion.process({
     publicId: req.params.jobId,
     clinicId: resolvedClinicId,
@@ -270,6 +300,12 @@ exports.processIngestion = asyncHandler(async (req, res) => {
 
 exports.acceptIngestion = asyncHandler(async (req, res) => {
   const resolvedClinicId = await requireFeature(req, 'accounting.ocr.manage');
+  if (await accountingIngestion.kind({
+    publicId: req.params.jobId,
+    clinicId: resolvedClinicId,
+  }) === 'payroll') {
+    await requireFeature(req, 'accounting.payroll.manage');
+  }
   res.json(await accountingIngestion.accept({
     publicId: req.params.jobId,
     clinicId: resolvedClinicId,
@@ -280,6 +316,12 @@ exports.acceptIngestion = asyncHandler(async (req, res) => {
 
 exports.downloadIngestionSource = asyncHandler(async (req, res) => {
   const resolvedClinicId = await requireFeature(req, 'accounting.ocr.manage');
+  if (await accountingIngestion.kind({
+    publicId: req.params.jobId,
+    clinicId: resolvedClinicId,
+  }) === 'payroll') {
+    await requireFeature(req, 'accounting.payroll.view');
+  }
   const { asset, buffer } = await accountingIngestion.readSource({
     publicId: req.params.jobId,
     clinicId: resolvedClinicId,
@@ -320,6 +362,15 @@ exports.createRemittance = asyncHandler(async (req, res) => {
     clinicId: resolvedClinicId,
     actorId: actorId(req),
     payload: req.body,
+  }));
+});
+
+exports.updateRemittanceStatus = asyncHandler(async (req, res) => {
+  const resolvedClinicId = await requireFeature(req, 'accounting.sepa.manage');
+  res.json(await accountingSepa.updateRemittanceStatus({
+    clinicId: resolvedClinicId,
+    publicId: req.params.remittanceId,
+    status: req.body.status,
   }));
 });
 

@@ -2,6 +2,7 @@
 
 const axios = require('axios');
 const crypto = require('crypto');
+const { Op } = require('sequelize');
 const db = require('../../models');
 const clinicalPrivateStorage = require('./clinicalPrivateStorage.service');
 const accounting = require('./accounting.service');
@@ -10,7 +11,10 @@ const {
   sequelize,
   AccountingIngestionJob,
   AccountingExpenseDocument,
+  AccountingPayrollDocument,
   ClinicalPrivateAsset,
+  Usuario,
+  UsuarioClinica,
 } = db;
 
 const ALLOWED_TYPES = new Set(['application/pdf', 'image/jpeg', 'image/jpg', 'image/png', 'image/webp']);
@@ -53,6 +57,7 @@ function serialize(job, asset = null) {
   const value = job.toJSON ? job.toJSON() : job;
   return {
     id: value.public_id,
+    document_kind: value.document_kind || 'expense',
     status: value.status,
     provider: value.provider || null,
     model: value.model || null,
@@ -64,6 +69,7 @@ function serialize(job, asset = null) {
     } : null,
     attempts: Number(value.attempts || 0),
     expense_document_id: value.expense_document_id ? String(value.expense_document_id) : null,
+    payroll_document_id: value.payroll_document_id ? String(value.payroll_document_id) : null,
     file: asset ? {
       name: asset.original_filename,
       content_type: asset.content_type,
@@ -74,9 +80,16 @@ function serialize(job, asset = null) {
   };
 }
 
-async function list({ clinicId }) {
+async function list({ clinicId, documentKind = 'expense' }) {
+  const normalizedKind = clean(documentKind || 'expense', 20).toLowerCase();
+  if (!['expense', 'payroll'].includes(normalizedKind)) {
+    throw domainError(400, 'accounting_ingestion_kind_invalid', 'El tipo de documento no es válido.');
+  }
   const jobs = await AccountingIngestionJob.findAll({
-    where: { clinic_id: clinicId },
+    where: {
+      clinic_id: clinicId,
+      document_kind: normalizedKind,
+    },
     order: [['created_at', 'DESC']],
     limit: 100,
   });
@@ -88,10 +101,21 @@ async function list({ clinicId }) {
   return jobs.map((job) => serialize(job, byId.get(Number(job.source_asset_id))));
 }
 
-async function enqueue({ clinicId, actorId, attachment }) {
+async function enqueue({
+  clinicId,
+  actorId,
+  attachment,
+  documentKind = 'expense',
+}) {
+  const normalizedKind = clean(documentKind, 20).toLowerCase();
+  if (!['expense', 'payroll'].includes(normalizedKind)) {
+    throw domainError(400, 'accounting_ingestion_kind_invalid', 'El tipo de documento no es válido.');
+  }
   const file = decodeAttachment(attachment);
   const asset = await clinicalPrivateStorage.storeClinicalPrivateAsset({
-    purpose: 'accounting_expense_document',
+    purpose: normalizedKind === 'payroll'
+      ? 'accounting_payroll_document'
+      : 'accounting_expense_document',
     clinicId,
     ownerType: 'accounting_ingestion',
     ownerId: crypto.randomUUID(),
@@ -99,11 +123,16 @@ async function enqueue({ clinicId, actorId, attachment }) {
     contentType: file.contentType,
     buffer: file.buffer,
     createdBy: actorId,
-    metadata: { queue: 'accounting_expenses' },
+    metadata: {
+      queue: normalizedKind === 'payroll'
+        ? 'accounting_payroll'
+        : 'accounting_expenses',
+    },
   });
   const job = await AccountingIngestionJob.create({
     public_id: crypto.randomUUID(),
     clinic_id: clinicId,
+    document_kind: normalizedKind,
     source_asset_id: asset.id,
     status: 'queued',
     attempts: 0,
@@ -112,7 +141,7 @@ async function enqueue({ clinicId, actorId, attachment }) {
   return serialize(job, asset);
 }
 
-function schema() {
+function expenseSchema() {
   return {
     type: 'object',
     additionalProperties: false,
@@ -156,6 +185,39 @@ function schema() {
   };
 }
 
+function payrollSchema() {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: [
+      'employee_name',
+      'employee_tax_id',
+      'period_month',
+      'gross_salary',
+      'employee_social_security',
+      'irpf_withholding',
+      'net_salary',
+      'other_amounts',
+      'currency',
+      'confidence',
+      'warnings',
+    ],
+    properties: {
+      employee_name: { type: ['string', 'null'] },
+      employee_tax_id: { type: ['string', 'null'] },
+      period_month: { type: ['string', 'null'], description: 'YYYY-MM-01' },
+      gross_salary: { type: ['number', 'null'] },
+      employee_social_security: { type: ['number', 'null'] },
+      irpf_withholding: { type: ['number', 'null'] },
+      net_salary: { type: ['number', 'null'] },
+      other_amounts: { type: ['number', 'null'] },
+      currency: { type: ['string', 'null'] },
+      confidence: { type: 'number', minimum: 0, maximum: 1 },
+      warnings: { type: 'array', items: { type: 'string' }, maxItems: 10 },
+    },
+  };
+}
+
 function responseText(payload) {
   if (clean(payload?.output_text, 100000)) return String(payload.output_text);
   for (const item of Array.isArray(payload?.output) ? payload.output : []) {
@@ -166,19 +228,28 @@ function responseText(payload) {
   return '';
 }
 
-async function extractWithOpenAi(asset, buffer) {
+async function extractWithOpenAi(asset, buffer, documentKind = 'expense') {
   const apiKey = clean(process.env.OPENAI_API_KEY, 1000);
   if (!apiKey) {
     throw domainError(503, 'accounting_ocr_not_configured', 'La lectura automática no está configurada.');
   }
+  const isPayroll = documentKind === 'payroll';
   const content = [{
     type: 'input_text',
-    text: [
-      'Extrae los datos de esta factura o ticket de proveedor.',
-      'No inventes valores. Usa null cuando no sean legibles.',
-      'Comprueba que base + impuestos - retención coincide con total y añade una advertencia si no coincide.',
-      'El resultado siempre será revisado por una persona antes de contabilizarse.',
-    ].join(' '),
+    text: isPayroll
+      ? [
+        'Extrae los datos de esta nómina individual.',
+        'No inventes valores y usa null cuando no sean legibles.',
+        'period_month debe ser el primer día del mes en formato YYYY-MM-01.',
+        'Distingue salario bruto, Seguridad Social del trabajador, IRPF, neto y otros importes.',
+        'El resultado siempre será revisado por una persona y vinculado al trabajador correcto.',
+      ].join(' ')
+      : [
+        'Extrae los datos de esta factura o ticket de proveedor.',
+        'No inventes valores. Usa null cuando no sean legibles.',
+        'Comprueba que base + impuestos - retención coincide con total y añade una advertencia si no coincide.',
+        'El resultado siempre será revisado por una persona antes de contabilizarse.',
+      ].join(' '),
   }];
   const encoded = buffer.toString('base64');
   if (asset.content_type === 'application/pdf') {
@@ -213,9 +284,9 @@ async function extractWithOpenAi(asset, buffer) {
     text: {
       format: {
         type: 'json_schema',
-        name: 'accounting_expense_invoice',
+        name: isPayroll ? 'accounting_payroll_document' : 'accounting_expense_invoice',
         strict: true,
-        schema: schema(),
+        schema: isPayroll ? payrollSchema() : expenseSchema(),
       },
     },
   }, {
@@ -233,6 +304,110 @@ async function extractWithOpenAi(asset, buffer) {
   return {
     data: parsed,
     model: clean(response.data?.model, 100) || MODEL,
+  };
+}
+
+function mostCommon(values) {
+  const counts = new Map();
+  for (const value of values.map((item) => clean(item, 180)).filter(Boolean)) {
+    counts.set(value, (counts.get(value) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((left, right) => right[1] - left[1])[0]?.[0] || null;
+}
+
+async function applySupplierHistory(clinicId, extracted) {
+  const supplierTaxId = clean(extracted.supplier_tax_id, 40);
+  const supplierName = clean(extracted.supplier_name, 180);
+  if (!supplierTaxId && !supplierName) return extracted;
+  const conditions = [];
+  if (supplierTaxId) conditions.push({ supplier_tax_id: supplierTaxId });
+  if (supplierName) conditions.push({ supplier_name: supplierName });
+  const previous = await AccountingExpenseDocument.findAll({
+    where: {
+      clinic_id: clinicId,
+      [Op.or]: conditions,
+    },
+    attributes: ['category', 'payment_method'],
+    order: [['issue_date', 'DESC'], ['id', 'DESC']],
+    limit: 20,
+  });
+  const suggestedCategory = mostCommon(previous.map((row) => row.category));
+  const suggestedPaymentMethod = mostCommon(previous.map((row) => row.payment_method));
+  const categoryIsGeneric = !clean(extracted.category, 180)
+    || ['otro', 'otros', 'other'].includes(clean(extracted.category, 180).toLowerCase());
+  const paymentMethodMissing = !clean(extracted.payment_method, 30);
+  return {
+    ...extracted,
+    category: categoryIsGeneric && suggestedCategory ? suggestedCategory : extracted.category,
+    payment_method: paymentMethodMissing && suggestedPaymentMethod
+      ? suggestedPaymentMethod
+      : extracted.payment_method,
+    learning: {
+      supplier_recognized: previous.length > 0,
+      previous_documents: previous.length,
+      suggested_category: suggestedCategory,
+      category_applied: Boolean(categoryIsGeneric && suggestedCategory),
+    },
+  };
+}
+
+function normalizePersonName(value) {
+  return clean(value, 240)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function applyEmployeeMatching(clinicId, extracted) {
+  const pivots = await UsuarioClinica.findAll({
+    where: {
+      id_clinica: clinicId,
+      estado_invitacion: 'aceptada',
+    },
+    attributes: ['id_usuario'],
+  });
+  const userIds = [...new Set(pivots.map((row) => Number(row.id_usuario)).filter(Boolean))];
+  const users = userIds.length
+    ? await Usuario.findAll({
+      where: { id_usuario: { [Op.in]: userIds } },
+      attributes: ['id_usuario', 'nombre', 'apellidos'],
+    })
+    : [];
+  const extractedName = normalizePersonName(extracted.employee_name);
+  const ranked = users
+    .map((user) => {
+      const name = clean(`${user.nombre || ''} ${user.apellidos || ''}`, 180);
+      const normalized = normalizePersonName(name);
+      const expectedTokens = new Set(extractedName.split(' ').filter(Boolean));
+      const actualTokens = new Set(normalized.split(' ').filter(Boolean));
+      const common = [...expectedTokens].filter((token) => actualTokens.has(token)).length;
+      const score = normalized === extractedName
+        ? 100
+        : expectedTokens.size
+          ? Math.round(common / expectedTokens.size * 100)
+          : 0;
+      return {
+        id: Number(user.id_usuario),
+        name,
+        score,
+      };
+    })
+    .filter((candidate) => candidate.score >= 40)
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 5);
+  const exact = ranked.find((candidate) => candidate.score === 100) || null;
+  return {
+    ...extracted,
+    employee_match: {
+      matched: Boolean(exact),
+      suggested_employee_id: exact?.id || null,
+      suggested_employee_name: exact?.name || null,
+      candidates: ranked,
+    },
   };
 }
 
@@ -265,7 +440,11 @@ async function processJob({ publicId, clinicId }) {
       throw domainError(404, 'accounting_ingestion_asset_missing', 'El archivo privado no está disponible.');
     }
     const stored = await clinicalPrivateStorage.readClinicalPrivateAsset(asset);
-    const result = await extractWithOpenAi(asset, stored.buffer);
+    const documentKind = job.document_kind || 'expense';
+    const result = await extractWithOpenAi(asset, stored.buffer, documentKind);
+    result.data = documentKind === 'payroll'
+      ? await applyEmployeeMatching(clinicId, result.data)
+      : await applySupplierHistory(clinicId, result.data);
     await job.update({
       status: 'review',
       provider: 'openai',
@@ -301,6 +480,31 @@ async function accept({ publicId, clinicId, actorId, payload }) {
     if (!job) throw domainError(404, 'accounting_ingestion_not_found', 'Documento de la cola no encontrado.');
     if (job.status !== 'review') {
       throw domainError(409, 'accounting_ingestion_not_reviewable', 'El documento todavía no está listo para revisar.');
+    }
+    if ((job.document_kind || 'expense') === 'payroll') {
+      const payrollDocument = await accounting.createPayrollDocument({
+        clinicId,
+        actorId,
+        payload,
+        sourceAssetId: job.source_asset_id,
+        transaction,
+      });
+      const payrollRow = await AccountingPayrollDocument.findOne({
+        where: { public_id: payrollDocument.id, clinic_id: clinicId },
+        attributes: ['id'],
+        transaction,
+      });
+      await job.update({
+        status: 'accepted',
+        payroll_document_id: payrollRow.id,
+        reviewed_by: actorId,
+        reviewed_at: new Date(),
+      }, { transaction });
+      const asset = await ClinicalPrivateAsset.findByPk(job.source_asset_id, { transaction });
+      return {
+        job: serialize(job, asset),
+        payroll_document: payrollDocument,
+      };
     }
     const expense = await accounting.createExpense({
       clinicId,
@@ -356,6 +560,15 @@ async function readSource({ publicId, clinicId }) {
   return { asset, buffer: stored.buffer };
 }
 
+async function kind({ publicId, clinicId }) {
+  const job = await AccountingIngestionJob.findOne({
+    where: { public_id: publicId, clinic_id: clinicId },
+    attributes: ['document_kind'],
+  });
+  if (!job) throw domainError(404, 'accounting_ingestion_not_found', 'Documento de la cola no encontrado.');
+  return job.document_kind || 'expense';
+}
+
 module.exports = {
   domainError,
   list,
@@ -363,4 +576,5 @@ module.exports = {
   process: processJob,
   accept,
   readSource,
+  kind,
 };

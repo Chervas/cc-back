@@ -59,6 +59,7 @@ function assertAllowedPurpose(purpose) {
     'whatsapp_image',
     'clinic_access_image',
     'clinic_logo',
+    'invoice_logo',
     'marketing_image',
     'web_editor_media',
     'frontend_asset',
@@ -260,7 +261,7 @@ async function preparePublicMediaPayload(input = {}) {
     buffer = await normalizeWhatsappImageToJpeg(buffer);
     contentType = 'image/jpeg';
     transformed = true;
-  } else if (purpose === 'web_editor_media') {
+  } else if (['web_editor_media', 'invoice_logo'].includes(purpose)) {
     buffer = await normalizeWebEditorImageToWebp(buffer);
     contentType = 'image/webp';
     transformed = true;
@@ -290,7 +291,7 @@ async function preparePublicMediaPayload(input = {}) {
       output_width: outputImage?.width || null,
       output_height: outputImage?.height || null,
       transformed,
-      metadata_stripped: ['clinic_access_image', 'web_editor_media'].includes(purpose),
+      metadata_stripped: ['clinic_access_image', 'web_editor_media', 'invoice_logo'].includes(purpose),
       content_disarm: purpose === 'web_editor_media' ? 'sharp_reencode_v1' : null,
       malware_scan_status: purpose === 'web_editor_media' ? 'not_available' : null,
       whatsapp_compatible: purpose === 'clinic_access_image'
@@ -315,6 +316,8 @@ function prefixForPurpose(purpose) {
       return 'whatsapp/clinic-access';
     case 'clinic_logo':
       return 'logos/clinicas';
+    case 'invoice_logo':
+      return 'logos/facturas';
     case 'marketing_image':
       return 'marketing';
     case 'web_editor_media':

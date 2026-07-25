@@ -11,11 +11,14 @@ const {
   AccountingCashMovement,
   AccountingCashClosure,
   AccountingCashSession,
+  AccountingPayrollDocument,
   AccountingPayrollPeriod,
   ClinicalPrivateAsset,
   EconomicPayment,
   PatientFiscalDocument,
   Clinica,
+  Usuario,
+  UsuarioClinica,
 } = db;
 
 const EXPENSE_STATUSES = new Set(['pending', 'paid', 'cancelled']);
@@ -371,11 +374,38 @@ function serializePayroll(row, asset = null) {
   };
 }
 
+function serializePayrollDocument(row, asset = null) {
+  const value = row.toJSON ? row.toJSON() : row;
+  return {
+    id: value.public_id,
+    clinic_id: Number(value.clinic_id),
+    payroll_period_id: value.payroll_period_id ? String(value.payroll_period_id) : null,
+    employee_id: value.employee_id ? Number(value.employee_id) : null,
+    employee_name: value.employee_name,
+    period_month: value.period_month,
+    gross_salary: money(value.gross_salary),
+    employee_social_security: money(value.employee_social_security),
+    irpf_withholding: money(value.irpf_withholding),
+    net_salary: money(value.net_salary),
+    other_amounts: money(value.other_amounts),
+    match_status: value.match_status,
+    document: asset ? {
+      id: asset.public_id,
+      filename: asset.original_filename,
+      content_type: asset.content_type,
+      size_bytes: Number(asset.size_bytes),
+    } : null,
+    created_at: value.created_at,
+    updated_at: value.updated_at,
+  };
+}
+
 async function loadClinic(clinicId) {
   const clinic = await Clinica.findByPk(clinicId, {
     attributes: [
       'id_clinica',
       'nombre_clinica',
+      'url_avatar',
       'datos_fiscales_clinica',
       'direccion',
       'codigo_postal',
@@ -393,6 +423,7 @@ async function loadClinic(clinicId) {
   return {
     id: Number(clinic.id_clinica),
     name: clinic.nombre_clinica,
+    logo_url: clinic.url_avatar || null,
     legal_name: fiscal.denominacion_social || fiscal.razon_social || clinic.nombre_clinica,
     tax_id: fiscal.nif || fiscal.cif || null,
     address: fiscal.direccion || clinic.direccion || null,
@@ -501,6 +532,7 @@ async function getWorkspace({
     lastClosure,
     currentSession,
     payrollPeriods,
+    payrollDocuments,
   ] = await Promise.all([
     PatientFiscalDocument.findAll({
       where: { clinic_id: clinicId, issue_date: { [Op.gte]: period.from, [Op.lt]: period.toExclusive } },
@@ -548,6 +580,15 @@ async function getWorkspace({
           period_month: { [Op.between]: [period.fromDate, period.toDate] },
         },
         order: [['period_month', 'DESC']],
+      })
+      : Promise.resolve([]),
+    includePayroll
+      ? AccountingPayrollDocument.findAll({
+        where: {
+          clinic_id: clinicId,
+          period_month: { [Op.between]: [period.fromDate, period.toDate] },
+        },
+        order: [['period_month', 'DESC'], ['created_at', 'DESC']],
       })
       : Promise.resolve([]),
   ]);
@@ -636,6 +677,10 @@ async function getWorkspace({
     payroll_periods: payrollPeriods.map((payroll) => serializePayroll(
       payroll,
       payroll.document_asset_id ? assetMap.get(String(payroll.document_asset_id)) : null,
+    )),
+    payroll_documents: payrollDocuments.map((document) => serializePayrollDocument(
+      document,
+      assetMap.get(String(document.source_asset_id)),
     )),
     cash: portalMode ? null : {
       session: serializeCashSession(currentSession),
@@ -1163,6 +1208,123 @@ async function readPayrollAttachment({ publicId, clinicId }) {
   return { asset, buffer: stored.buffer };
 }
 
+async function createPayrollDocument({
+  clinicId,
+  actorId,
+  payload,
+  sourceAssetId,
+  transaction = null,
+}) {
+  const periodMonthRaw = dateOnly(payload.period_month);
+  if (!periodMonthRaw) {
+    throw domainError(400, 'payroll_document_period_required', 'Selecciona el mes de la nómina.');
+  }
+  const periodMonth = `${periodMonthRaw.slice(0, 7)}-01`;
+  const employeeId = Number.parseInt(String(payload.employee_id || ''), 10) || null;
+  let employeeName = clean(payload.employee_name, 180);
+  if (employeeId) {
+    const pivot = await UsuarioClinica.findOne({
+      where: {
+        id_usuario: employeeId,
+        id_clinica: clinicId,
+        estado_invitacion: 'aceptada',
+      },
+      attributes: ['id_usuario'],
+      transaction,
+    });
+    if (!pivot) {
+      throw domainError(
+        400,
+        'payroll_document_employee_invalid',
+        'La persona seleccionada no pertenece a esta clínica.',
+      );
+    }
+    const user = await Usuario.findByPk(employeeId, {
+      attributes: ['id_usuario', 'nombre', 'apellidos'],
+      transaction,
+    });
+    employeeName = clean(
+      `${user?.nombre || ''} ${user?.apellidos || ''}`,
+      180,
+    ) || employeeName;
+  }
+  if (!employeeName) {
+    throw domainError(
+      400,
+      'payroll_document_employee_name_required',
+      'Indica el nombre que aparece en la nómina.',
+    );
+  }
+  const amounts = {
+    gross_salary: money(payload.gross_salary),
+    employee_social_security: money(payload.employee_social_security),
+    irpf_withholding: money(payload.irpf_withholding),
+    net_salary: money(payload.net_salary),
+    other_amounts: money(payload.other_amounts),
+  };
+  if (Object.values(amounts).some((value) => value < 0)) {
+    throw domainError(
+      400,
+      'payroll_document_amount_invalid',
+      'Los importes de la nómina no pueden ser negativos.',
+    );
+  }
+  const sourceAsset = await ClinicalPrivateAsset.findOne({
+    where: {
+      id: sourceAssetId,
+      clinic_id: clinicId,
+      purpose: 'accounting_payroll_document',
+      status: 'active',
+    },
+    attributes: ['id'],
+    transaction,
+  });
+  if (!sourceAsset) {
+    throw domainError(404, 'payroll_document_asset_missing', 'El documento privado no está disponible.');
+  }
+  const payrollPeriod = await AccountingPayrollPeriod.findOne({
+    where: { clinic_id: clinicId, period_month: periodMonth },
+    attributes: ['id'],
+    transaction,
+  });
+  const row = await AccountingPayrollDocument.create({
+    public_id: crypto.randomUUID(),
+    clinic_id: clinicId,
+    payroll_period_id: payrollPeriod?.id || null,
+    employee_id: employeeId,
+    employee_name: employeeName,
+    period_month: periodMonth,
+    ...amounts,
+    match_status: employeeId ? 'matched' : 'unmatched',
+    source_asset_id: sourceAssetId,
+    created_by: actorId,
+    updated_by: actorId,
+  }, { transaction });
+  const asset = await ClinicalPrivateAsset.findByPk(sourceAssetId, { transaction });
+  return serializePayrollDocument(row, asset);
+}
+
+async function readPayrollDocumentAttachment({ publicId, clinicId }) {
+  const document = await AccountingPayrollDocument.findOne({
+    where: { public_id: publicId, clinic_id: clinicId },
+    attributes: ['source_asset_id'],
+  });
+  if (!document?.source_asset_id) {
+    throw domainError(404, 'payroll_document_attachment_not_found', 'Esta nómina no tiene documento adjunto.');
+  }
+  const asset = await ClinicalPrivateAsset.findOne({
+    where: {
+      id: document.source_asset_id,
+      clinic_id: clinicId,
+      purpose: 'accounting_payroll_document',
+      status: 'active',
+    },
+  });
+  if (!asset) throw domainError(404, 'payroll_document_attachment_not_found', 'Documento privado no encontrado.');
+  const stored = await clinicalPrivateStorage.readClinicalPrivateAsset(asset);
+  return { asset, buffer: stored.buffer };
+}
+
 async function getFiscalDocument({ publicId, clinicId }) {
   const document = await PatientFiscalDocument.findOne({ where: { public_id: publicId, clinic_id: clinicId } });
   if (!document) throw domainError(404, 'fiscal_document_not_found', 'Documento fiscal no encontrado.');
@@ -1219,6 +1381,8 @@ module.exports = {
   createPayroll,
   updatePayroll,
   readPayrollAttachment,
+  createPayrollDocument,
+  readPayrollDocumentAttachment,
   getFiscalDocument,
   exportCsv,
 };

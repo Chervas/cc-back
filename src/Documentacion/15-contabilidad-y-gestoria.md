@@ -1,12 +1,14 @@
 # Backend de contabilidad y gestoria
 
-> Implementado en `dev` el 2026-07-24.
+> Implementado y repulido en `dev` el 2026-07-25.
 > Prefijo API: `/api/accounting`.
 > Migraciones: `20260724203000-create-accounting-domain.js` y ampliacion
 > `20260725090000-expand-clinical-accounting-workflows.js`. La relacion entre
 > bonos y citas se añade en `20260725100000-link-voucher-appointments.js`.
 > Apertura de caja y costes de personal:
 > `20260725120000-add-cash-sessions-and-payroll-periods.js`.
+> Nominas privadas individuales y separacion de colas:
+> `20260725183000-add-accounting-payroll-documents.js`.
 
 ## Dominio
 
@@ -16,10 +18,12 @@
 - `AccountingCashSessions`: apertura explicita, estado abierto/cerrado y
   relacion con el cierre.
 - `AccountingPayrollPeriods`: resumen mensual agregado del coste de personal.
+- `AccountingPayrollDocuments`: nominas individuales revisadas, vinculadas o
+  pendientes de emparejar con Personal.
 - `PatientFiscalDocuments`: fuente de facturas/recibos emitidos.
 - `EconomicPayments`: fuente de cobros de pacientes.
-- `ClinicalPrivateAssets`: adjuntos privados de proveedor con proposito
-  `accounting_expense_document`.
+- `ClinicalPrivateAssets`: adjuntos privados de proveedor
+  (`accounting_expense_document`) y nomina (`accounting_payroll_document`).
 - `AccountingFirms`, asignaciones y usuarios: scope externo por grupo o
   clinica independiente.
 - `AccountingIngestionJobs`: cola durable de lectura y revision.
@@ -43,6 +47,7 @@ El servicio usa consultas separadas y mapas en memoria; no usa `LEFT JOIN`.
 - `GET /sepa`
 - `POST|PATCH /sepa/mandates`
 - `POST /sepa/remittances`
+- `PATCH /sepa/remittances/:id`
 - `GET /sepa/remittances/:id.xml`
 - `POST /expenses`
 - `PATCH /expenses/:expenseId`
@@ -53,6 +58,7 @@ El servicio usa consultas separadas y mapas en memoria; no usa `LEFT JOIN`.
 - `POST /cash/open`
 - `POST|PATCH /payroll`
 - `GET /payroll/:payrollId/document`
+- `GET /payroll-documents/:documentId/document`
 
 Los adjuntos no tienen URL publica. La descarga exige JWT, permiso y clinica,
 y responde `private, no-store`. Solo admite PDF/JPEG/PNG/WebP hasta 18 MB y
@@ -106,6 +112,15 @@ Los documentos fiscales conservan un snapshot de plantilla. Builtins:
 - `builtin-invoice-standard`: `Moderna`, renderer `modern`;
 - `builtin-invoice-compact`: `Compacta`, renderer `compact`.
 
+El renderer PDF v2 genera una hoja documental blanca con cabecera,
+emisor/destinatario, tabla, totales y pie; no serializa tarjetas ni estados de
+la web. Un PDF emitido permanece privado e inmutable.
+
+Los logos personalizados usan el endpoint de medios publicos con
+`purpose=invoice_logo`. El backend fuerza scope y owner de clinica, elimina el
+nombre original y reencodea a WebP sin metadatos. Solo el logo es publico; el
+documento fiscal, sus datos y sus adjuntos nunca usan `PUBLIC_MEDIA`.
+
 ## Nominas
 
 Las nominas no se registran como factura de proveedor. Se guarda un resumen
@@ -121,6 +136,14 @@ El coste total reduce el resultado operativo. Los documentos agregados
 (`RLC`, `RNT` o resumen de nominas) usan `ClinicalPrivateAssets` con proposito
 `accounting_payroll_document`. Recepcion, gestor externo y roles clinicos no
 reciben filas ni adjuntos de nominas por defecto.
+
+La cola OCR tambien admite `document_kind=payroll`. El original crea un
+`AccountingPayrollDocument` separado del resumen mensual: nombre, mes, bruto,
+SS trabajador, IRPF, neto, otros importes, `employee_id` opcional y
+`match_status`. Se intenta emparejar por las personas aceptadas de la clinica;
+si no hay coincidencia puede conservarse como `unmatched`. Estos documentos no
+se vuelven a sumar a `summary.payroll_total`, evitando contabilizar dos veces
+la misma nomina.
 
 El backend devuelve datos estructurados; el frontend genera la misma vista.
 El PDF A4 se genera con Chromium. Un documento emitido conserva un unico PDF
@@ -142,13 +165,32 @@ y el modelo configurable `ACCOUNTING_OCR_MODEL` (default
 `gpt-5.4-nano`). Ningun dato se contabiliza automaticamente: `accept` reutiliza
 el mismo adjunto privado y crea la factura recibida solo tras revision humana.
 
+Tras leer una factura, el servicio consulta documentos anteriores del mismo
+proveedor por NIF o nombre y propone la categoria y medio mas frecuentes. No
+necesita un `LEFT JOIN` ni una tabla duplicada de proveedores. La respuesta
+incluye `learning` para explicar si se reconocio.
+
+`GET /ingestion` devuelve `expense` por defecto. Para ver `payroll` hay que
+pedir `document_kind=payroll` y superar ademas
+`accounting.payroll.view`; omitir el filtro nunca expone metadatos de nominas a
+un rol con solo permiso OCR.
+
 ## Domiciliaciones
 
 El IBAN del paciente se valida con modulo 97 y se cifra con AES-256-GCM. La API
 solo devuelve los ultimos cuatro digitos. La exportacion genera `pain.008` y
 exige identificador de acreedor e IBAN fiscal de la clinica. La clave dedicada
-es `ACCOUNTING_DATA_ENCRYPTION_KEY`; mientras se despliega puede caer en
-`JWT_SECRET`, pero produccion debe configurar una clave separada.
+es `ACCOUNTING_DATA_ENCRYPTION_KEY`, debe tener al menos 16 caracteres,
+permanecer estable y ser distinta por entorno. El fallback a `JWT_SECRET`
+existe por compatibilidad, pero no debe usarse en produccion.
+
+La lista de cobros elegibles exige presupuesto aceptado/parcial, evento de
+aceptacion con `collection_method=direct_debit`, mandato activo e importe
+pendiente. Cobros confirmados y remesas operativas se descuentan; la
+transaccion de alta vuelve a comprobar el maximo para evitar duplicados. Una
+transferencia no entra en SEPA. Estados:
+`draft -> exported -> submitted -> settled|rejected`; `rejected` y
+`cancelled` liberan el importe para volver a remesarlo.
 
 ## VeriFactu
 
@@ -163,6 +205,8 @@ Solo se conserva estado preparatorio. No hay transporte a AEAT:
 La demo visual aislada no reutiliza una clinica real:
 
 ```bash
+# Configurar antes una clave estable fuera de Git.
+# ACCOUNTING_DATA_ENCRYPTION_KEY=$(openssl rand -hex 32)
 node src/scripts/qa/prepare-bs-medical-demo-clinic.js
 ```
 
@@ -178,7 +222,8 @@ sintetico y eliminable:
   consentimientos firmados y dos pendientes para tablet;
 - ocho tratamientos, instalaciones, horarios, profesional y citas del dia;
 - factura recibida privada, miniatura OCR, caja abierta, cierre anterior,
-  resumen mensual de personal, domiciliacion, gestoria y plantillas fiscales.
+  resumen mensual de personal, nomina individual pendiente, mandato SEPA
+  cifrado, pendiente domiciliable, gestoria y plantillas fiscales.
 
 La doctora sintetica usa
 `doctora+bs-medical-demo@invalid.clinicaclick.local` /
@@ -233,6 +278,18 @@ QA_AUTH_TOKEN=... node src/scripts/qa/verify-accounting-demo.js
 Comprueba workspace, documento fiscal, CSV, PDF privado, zona horaria/caja y
 que un adjunto invalido se rechaza sin crear una fila residual.
 
+Validacion visual focal:
+
+```bash
+cd /home/ubuntu/wt/front-dev
+QA_AUTH_TOKEN=... node scripts/tests/accounting_visual_qa.js
+```
+
+La evidencia queda en
+`/home/ubuntu/qa-evidence/accounting-visual-20260725/report.json` y cubre
+dashboard, OCR de gastos/nominas, caja, SEPA, plantillas, importaciones,
+presupuesto aceptado, editor fiscal y print en desktop/movil.
+
 Validacion ampliada del corte `20260725090000`:
 
 - los contratos de acceso backend y de paciente compartido pasan;
@@ -259,6 +316,7 @@ runtimes carguen el cambio, antes de reiniciar.
 Rollback destructivo solo sin datos que conservar:
 
 ```bash
+npx sequelize-cli db:migrate:undo --name 20260725183000-add-accounting-payroll-documents.js
 npx sequelize-cli db:migrate:undo --name 20260725100000-link-voucher-appointments.js
 npx sequelize-cli db:migrate:undo --name 20260725090000-expand-clinical-accounting-workflows.js
 npx sequelize-cli db:migrate:undo --name 20260724203000-create-accounting-domain.js
