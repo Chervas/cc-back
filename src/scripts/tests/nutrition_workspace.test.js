@@ -448,6 +448,8 @@ function run() {
   assert.match(html, /Proyección temporal/);
   assert.match(html, /Gráficas de evolución/);
   assert.match(html, /Cómo leer el informe/);
+  assert.match(html, /Vista calculada/);
+  assert.doesNotMatch(html, /Borrador calculado/);
   assert.match(html, /Profesional explicando el informe/);
   assert.match(html, /report-intro-img \{[^}]*mix-blend-mode: multiply/);
   assert.match(html, /section-story-img \{[^}]*mix-blend-mode: multiply/);

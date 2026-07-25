@@ -12,14 +12,31 @@ const db = require('../../../models');
 const accounting = require('../../services/accounting.service');
 const accountingFirms = require('../../services/accountingFirms.service');
 const accountingIngestion = require('../../services/accountingIngestion.service');
+const appointmentClinicalReports = require('../../services/appointmentClinicalReports.service');
 const clinicalPrivateStorage = require('../../services/clinicalPrivateStorage.service');
+const consentimientosService = require('../../services/consentimientos.service');
 const economics = require('../../services/patientEconomics.service');
+const nutritionWorkspace = require('../../services/nutritionWorkspace.service');
 
 const DEMO_KEY = 'bs-medical-accounting-demo-v1';
 const DEMO_NAME = 'BS Medical · DEMO';
 const DEMO_PATIENT_PUBLIC_ID = 'demo_bsmedical_accounting_v1';
+const DEMO_NUTRITION_PATIENT_PUBLIC_ID = 'demo_bsmedical_nutrition_v1';
+const DEMO_CAPILLARY_PATIENT_PUBLIC_ID = 'demo_bsmedical_capillary_v1';
 const DEMO_RECEPTION_EMAIL = 'recepcion+bs-medical-demo@invalid.clinicaclick.local';
 const DEMO_RECEPTION_CARGO = `Recepción demo · ${DEMO_KEY}`;
+const DEMO_DOCTOR_EMAIL = 'doctora+bs-medical-demo@invalid.clinicaclick.local';
+const DEMO_DOCTOR_CARGO = `Doctora demo · ${DEMO_KEY}`;
+const DEMO_DOCTOR_PASSWORD = 'DemoDoctor2026!';
+const DEMO_TABLET_USERNAME = 'bs-medical-demo-tablet';
+const DEMO_TABLET_PASSWORD = 'DemoTablet2026!';
+const DEMO_TABLET_PUBLIC_ID = 'kiosk_bsmedical_demo_v1';
+const DEMO_CONSENT_IDS = Object.freeze({
+  clinicalTemplate: 'cclin_bsmedical_demo_capillary_v1',
+  photosTemplate: 'cclin_bsmedical_demo_photos_v1',
+  pendingPackage: 'cpkg_bsmedical_demo_capillary_pending_v1',
+  signedPackage: 'cpkg_bsmedical_demo_capillary_signed_v1',
+});
 const SOURCE_CLINIC_ID = Number(process.env.BS_MEDICAL_DEMO_SOURCE_CLINIC_ID || 72);
 const ACTOR_ID = Number(process.env.BS_MEDICAL_DEMO_ACTOR_ID || 1);
 const ACCESS_USER_IDS = String(process.env.BS_MEDICAL_DEMO_USER_IDS || '1,44')
@@ -37,6 +54,14 @@ const REFERENCES = Object.freeze({
   ingestionModel: `${DEMO_KEY}:fixture`,
 });
 
+const SIGNATURE_DATA_URL = `data:image/svg+xml;base64,${Buffer.from(`
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="180" viewBox="0 0 640 180">
+  <rect width="640" height="180" fill="white"/>
+  <path d="M52 115 C106 70, 132 145, 185 98 S276 82, 310 106 S374 138, 426 91 S520 70, 586 104" fill="none" stroke="#111827" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M82 136 H560" stroke="#CBD5E1" stroke-width="2" stroke-linecap="round"/>
+</svg>
+`).toString('base64')}`;
+
 function dateOnly(date) {
   return date.toISOString().slice(0, 10);
 }
@@ -45,6 +70,17 @@ function shiftedDate(base, days) {
   const result = new Date(`${base}T12:00:00.000Z`);
   result.setUTCDate(result.getUTCDate() + days);
   return dateOnly(result);
+}
+
+function dateTimeAt(base, days, hour, minute = 0) {
+  const result = new Date(`${base}T12:00:00.000Z`);
+  result.setUTCDate(result.getUTCDate() + days);
+  result.setUTCHours(hour, minute, 0, 0);
+  return result;
+}
+
+function minutesAfter(date, minutes) {
+  return new Date(date.getTime() + minutes * 60 * 1000);
 }
 
 function addMonths(base, months) {
@@ -140,12 +176,8 @@ async function ensureDemoClinic(sourceClinic, businessDate) {
     throw new Error(`La clínica "${DEMO_NAME}" ya existe y no pertenece a este seed.`);
   }
 
-  const sourceConfig = cleanObject(sourceClinic.configuracion);
-  const disciplinas = Array.isArray(sourceConfig.disciplinas) && sourceConfig.disciplinas.length
-    ? sourceConfig.disciplinas
-    : ['estetica', 'nutricion'];
   const configuracion = {
-    disciplinas,
+    disciplinas: ['estetica', 'nutricion', 'capilar'],
     timezone: 'Europe/Madrid',
     qa_demo: {
       key: DEMO_KEY,
@@ -261,6 +293,100 @@ async function ensureDemoAccess(clinicId) {
   return { user: reception, credentials };
 }
 
+async function ensureDemoDoctor(clinicId) {
+  let doctor = await db.Usuario.findOne({
+    where: { email_usuario: DEMO_DOCTOR_EMAIL },
+  });
+  if (doctor && doctor.cargo_usuario !== DEMO_DOCTOR_CARGO) {
+    throw new Error(`El correo sintético ${DEMO_DOCTOR_EMAIL} ya pertenece a otro usuario.`);
+  }
+  const payload = {
+    nombre: 'Marta',
+    apellidos: 'López · Demo',
+    email_usuario: DEMO_DOCTOR_EMAIL,
+    email_factura: DEMO_DOCTOR_EMAIL,
+    email_notificacion: DEMO_DOCTOR_EMAIL,
+    password_usuario: await bcrypt.hash(DEMO_DOCTOR_PASSWORD, 10),
+    cargo_usuario: DEMO_DOCTOR_CARGO,
+    telefono: '+34600000083',
+    isProfesional: true,
+    estado_cuenta: 'activo',
+    es_provisional: false,
+    creado_por: ACTOR_ID,
+  };
+  if (!doctor) doctor = await db.Usuario.create(payload);
+  else await doctor.update(payload);
+
+  const [membership] = await db.UsuarioClinica.findOrCreate({
+    where: { id_usuario: doctor.id_usuario, id_clinica: clinicId },
+    defaults: {
+      rol_clinica: 'personaldeclinica',
+      subrol_clinica: 'Doctores',
+      estado_invitacion: 'aceptada',
+      invitado_por: ACTOR_ID,
+      fecha_invitacion: new Date(),
+      responded_at: new Date(),
+    },
+  });
+  await membership.update({
+    rol_clinica: 'personaldeclinica',
+    subrol_clinica: 'Doctores',
+    estado_invitacion: 'aceptada',
+    responded_at: new Date(),
+  });
+
+  const [link] = await db.DoctorClinica.findOrCreate({
+    where: { doctor_id: doctor.id_usuario, clinica_id: clinicId },
+    defaults: {
+      rol_en_clinica: 'Medicina estética, nutrición y capilar',
+      recibe_citas: true,
+      activo: true,
+    },
+  });
+  await link.update({
+    rol_en_clinica: 'Medicina estética, nutrición y capilar',
+    recibe_citas: true,
+    activo: true,
+  });
+  for (let day = 0; day <= 6; day += 1) {
+    const [schedule] = await db.DoctorHorario.findOrCreate({
+      where: { doctor_clinica_id: link.id, dia_semana: day },
+      defaults: {
+        activo: day !== 0,
+        hora_inicio: '08:00',
+        hora_fin: day === 6 ? '20:00' : '21:00',
+      },
+    });
+    await schedule.update({
+      activo: day !== 0,
+      hora_inicio: '08:00',
+      hora_fin: day === 6 ? '20:00' : '21:00',
+      fecha_inicio_vigencia: null,
+      fecha_fin_vigencia: null,
+      rrule: null,
+    });
+  }
+  return doctor;
+}
+
+async function ensureDemoClinicSchedule(clinicId) {
+  for (let day = 0; day <= 6; day += 1) {
+    const [schedule] = await db.ClinicaHorario.findOrCreate({
+      where: { clinica_id: clinicId, dia_semana: day },
+      defaults: {
+        activo: day !== 0,
+        hora_inicio: '08:00',
+        hora_fin: day === 6 ? '20:00' : '21:00',
+      },
+    });
+    await schedule.update({
+      activo: day !== 0,
+      hora_inicio: '08:00',
+      hora_fin: day === 6 ? '20:00' : '21:00',
+    });
+  }
+}
+
 async function ensureDemoPatient(clinicId) {
   let patient = await db.Paciente.findOne({ where: { public_id: DEMO_PATIENT_PUBLIC_ID } });
   if (patient && Number(patient.clinica_id) !== clinicId) {
@@ -286,7 +412,88 @@ async function ensureDemoPatient(clinicId) {
     where: { paciente_id: patient.id_paciente, clinica_id: clinicId },
     defaults: { es_principal: true },
   });
+  await ensurePatientArea(patient, clinicId, 'estetica');
   return patient;
+}
+
+async function ensurePatientArea(patient, clinicId, areaCode) {
+  const [row] = await db.PatientCustomField.findOrCreate({
+    where: {
+      paciente_id: patient.id_paciente,
+      clinica_id: clinicId,
+      field_key: 'cliniccloud_demo_area',
+    },
+    defaults: {
+      label: 'Área médica del caso demo',
+      value: areaCode,
+      value_type: 'text',
+      source: 'qa_seed',
+      source_column: DEMO_KEY,
+      last_imported_at: new Date(),
+    },
+  });
+  await row.update({
+    label: 'Área médica del caso demo',
+    value: areaCode,
+    value_type: 'text',
+    source: 'qa_seed',
+    source_column: DEMO_KEY,
+    last_imported_at: new Date(),
+  });
+}
+
+async function ensureClinicalDemoPatient(clinicId, payload) {
+  let patient = await db.Paciente.findOne({ where: { public_id: payload.public_id } });
+  if (patient && Number(patient.clinica_id) !== clinicId) {
+    throw new Error(`El paciente ${payload.public_id} ya pertenece a otra clínica.`);
+  }
+  const values = {
+    nombre: payload.nombre,
+    apellidos: payload.apellidos,
+    dni: payload.dni,
+    telefono_movil: payload.telefono,
+    email: payload.email,
+    fecha_nacimiento: new Date(payload.fecha_nacimiento),
+    sexo: payload.sexo,
+    fecha_alta: patient?.fecha_alta || new Date(),
+    idioma_preferido: 'es',
+    paciente_conocido: true,
+    clinica_id: clinicId,
+  };
+  if (!patient) patient = await db.Paciente.create({ public_id: payload.public_id, ...values });
+  else await patient.update(values);
+  await db.PacienteClinica.findOrCreate({
+    where: { paciente_id: patient.id_paciente, clinica_id: clinicId },
+    defaults: { es_principal: true },
+  });
+  await ensurePatientArea(patient, clinicId, payload.area_code);
+  return patient;
+}
+
+async function ensureClinicalDemoPatients(clinicId) {
+  const nutrition = await ensureClinicalDemoPatient(clinicId, {
+    public_id: DEMO_NUTRITION_PATIENT_PUBLIC_ID,
+    nombre: 'Daniel',
+    apellidos: 'Moreno · Demo Nutrición',
+    dni: '00000001R',
+    telefono: '+34600000081',
+    email: 'nutricion-demo@invalid.clinicaclick.local',
+    fecha_nacimiento: '1990-03-18T00:00:00.000Z',
+    sexo: 'Hombre',
+    area_code: 'nutricion',
+  });
+  const capillary = await ensureClinicalDemoPatient(clinicId, {
+    public_id: DEMO_CAPILLARY_PATIENT_PUBLIC_ID,
+    nombre: 'Javier',
+    apellidos: 'Ruiz · Demo Capilar',
+    dni: '00000002W',
+    telefono: '+34600000082',
+    email: 'capilar-demo@invalid.clinicaclick.local',
+    fecha_nacimiento: '1985-09-02T00:00:00.000Z',
+    sexo: 'Hombre',
+    area_code: 'capilar',
+  });
+  return { nutrition, capillary };
 }
 
 async function ensureTreatment(clinicId, payload) {
@@ -373,7 +580,1019 @@ async function ensureDemoTreatments(clinicId) {
       },
     },
   });
-  return { facial, voucher, nutrition };
+  const peeling = await ensureTreatment(clinicId, {
+    codigo: 'DEMO-EST-PEELING',
+    nombre: 'Peeling químico facial',
+    descripcion: 'Renovación cutánea facial con control de evolución y consentimiento previo.',
+    disciplina: 'estetica',
+    especialidad: 'Estética facial',
+    categoria: 'Facial',
+    duracion_min: 45,
+    precio_base: 140,
+    color: '#db2777',
+    origen: 'clinica',
+    sesiones_defecto: 1,
+    requiere_pieza: false,
+    requiere_zona: true,
+    activo: true,
+    clinical_config: {
+      medical_area_code: 'estetica',
+      product_type: 'treatment',
+      commercial: { product_type: 'treatment', unit_label: 'sesión', recommended: true },
+      financing: { enabled: false },
+    },
+  });
+  const filler = await ensureTreatment(clinicId, {
+    codigo: 'DEMO-EST-HIALURONICO',
+    nombre: 'Ácido hialurónico facial',
+    descripcion: 'Servicio estético facial apto para presupuesto y seguimiento por zonas.',
+    disciplina: 'estetica',
+    especialidad: 'Medicina estética',
+    categoria: 'Facial',
+    duracion_min: 50,
+    precio_base: 390,
+    color: '#7c3aed',
+    origen: 'clinica',
+    sesiones_defecto: 1,
+    requiere_pieza: false,
+    requiere_zona: true,
+    activo: true,
+    clinical_config: {
+      medical_area_code: 'estetica',
+      product_type: 'treatment',
+      commercial: { product_type: 'treatment', unit_label: 'tratamiento', recommended: true },
+      financing: { enabled: true },
+    },
+  });
+  const nutritionStudy = await ensureTreatment(clinicId, {
+    codigo: 'DEMO-NUT-ANTROP',
+    nombre: 'Estudio antropométrico completo',
+    descripcion: 'Medición completa, comparación evolutiva e informe clínico para el paciente.',
+    disciplina: 'nutricion',
+    especialidad: 'Nutrición clínica',
+    categoria: 'Valoración corporal',
+    duracion_min: 60,
+    precio_base: 85,
+    color: '#0284c7',
+    origen: 'clinica',
+    sesiones_defecto: 1,
+    requiere_pieza: false,
+    requiere_zona: false,
+    activo: true,
+    clinical_config: {
+      medical_area_code: 'nutricion',
+      product_type: 'treatment',
+      commercial: { product_type: 'treatment', unit_label: 'estudio', recommended: true },
+      financing: { enabled: false },
+      nutrition: {
+        service_kind: 'isak_study',
+        measurement_profile_code: 'express_isak',
+        generate_report: true,
+        compare_previous: true,
+      },
+    },
+  });
+  const capillaryPrp = await ensureTreatment(clinicId, {
+    codigo: 'DEMO-CAP-PRP',
+    nombre: 'PRP capilar',
+    descripcion: 'Sesión de plasma rico en plaquetas con control fotográfico privado.',
+    disciplina: 'capilar',
+    especialidad: 'Medicina capilar',
+    categoria: 'Regeneración capilar',
+    duracion_min: 50,
+    precio_base: 220,
+    color: '#0f766e',
+    origen: 'clinica',
+    sesiones_defecto: 3,
+    requiere_pieza: false,
+    requiere_zona: true,
+    activo: true,
+    clinical_config: {
+      medical_area_code: 'capilar',
+      product_type: 'pack',
+      commercial: { product_type: 'pack', unit_label: 'sesiones', recommended: true },
+      financing: { enabled: false },
+    },
+  });
+  const capillaryGraft = await ensureTreatment(clinicId, {
+    codigo: 'DEMO-CAP-INJERTO',
+    nombre: 'Injerto capilar',
+    descripcion: 'Procedimiento capilar con valoración, consentimiento y controles posteriores.',
+    disciplina: 'capilar',
+    especialidad: 'Cirugía capilar',
+    categoria: 'Injerto capilar',
+    duracion_min: 240,
+    precio_base: 4200,
+    color: '#0369a1',
+    origen: 'clinica',
+    sesiones_defecto: 1,
+    requiere_pieza: false,
+    requiere_zona: true,
+    activo: true,
+    clinical_config: {
+      medical_area_code: 'capilar',
+      product_type: 'treatment',
+      commercial: { product_type: 'treatment', unit_label: 'procedimiento', recommended: true },
+      financing: { enabled: true },
+    },
+  });
+  return {
+    facial,
+    voucher,
+    nutrition,
+    peeling,
+    filler,
+    nutritionStudy,
+    capillaryPrp,
+    capillaryGraft,
+  };
+}
+
+async function ensureDemoInstallations(clinicId) {
+  const definitions = [
+    {
+      key: 'consultation',
+      nombre: 'Consulta clínica · DEMO',
+      tipo: 'consulta',
+      descripcion: 'Valoraciones, revisiones, nutrición y controles clínicos del entorno demo.',
+      color: '#0284c7',
+      default_duracion_minutos: 45,
+      orden_visualizacion: 1,
+    },
+    {
+      key: 'treatmentRoom',
+      nombre: 'Sala de tratamientos · DEMO',
+      tipo: 'sala',
+      descripcion: 'Procedimientos de estética y capilar del entorno demo.',
+      color: '#0f766e',
+      default_duracion_minutos: 60,
+      orden_visualizacion: 2,
+    },
+  ];
+  const result = {};
+  for (const definition of definitions) {
+    let installation = await db.Instalacion.findOne({
+      where: { clinica_id: clinicId, nombre: definition.nombre },
+    });
+    const payload = {
+      clinica_id: clinicId,
+      nombre: definition.nombre,
+      tipo: definition.tipo,
+      descripcion: definition.descripcion,
+      color: definition.color,
+      capacidad: 1,
+      activo: true,
+      requiere_preparacion: false,
+      tiempo_preparacion_minutos: 0,
+      es_exclusiva: true,
+      default_duracion_minutos: definition.default_duracion_minutos,
+      especialidades_permitidas: ['estetica', 'nutricion', 'capilar'],
+      tratamientos_exclusivos: [],
+      equipamiento: [],
+      orden_visualizacion: definition.orden_visualizacion,
+    };
+    if (!installation) installation = await db.Instalacion.create(payload);
+    else await installation.update(payload);
+
+    for (let day = 0; day <= 6; day += 1) {
+      const [schedule] = await db.InstalacionHorario.findOrCreate({
+        where: { instalacion_id: installation.id, dia_semana: day },
+        defaults: {
+          activo: day !== 0,
+          hora_inicio: '08:00',
+          hora_fin: day === 6 ? '20:00' : '21:00',
+        },
+      });
+      await schedule.update({
+        activo: day !== 0,
+        hora_inicio: '08:00',
+        hora_fin: day === 6 ? '20:00' : '21:00',
+      });
+    }
+    result[definition.key] = installation;
+  }
+  return result;
+}
+
+async function ensureAppointment({
+  clinicId,
+  patient,
+  treatment,
+  installation,
+  doctor,
+  title,
+  start,
+  durationMinutes,
+  state,
+  type = 'continuacion',
+}) {
+  let appointment = await db.CitaPaciente.findOne({
+    where: {
+      clinica_id: clinicId,
+      paciente_id: patient.id_paciente,
+      titulo: title,
+    },
+  });
+  const payload = {
+    clinica_id: clinicId,
+    paciente_id: patient.id_paciente,
+    doctor_id: doctor?.id_usuario || ACTOR_ID,
+    instalacion_id: installation?.id || null,
+    tratamiento_id: treatment?.id_tratamiento || null,
+    created_by: ACTOR_ID,
+    updated_by: ACTOR_ID,
+    titulo: title,
+    nota: `${DEMO_KEY}. Datos clínicos sintéticos y eliminables.`,
+    motivo: title,
+    tipo_cita: type,
+    estado: state,
+    inicio: start,
+    fin: minutesAfter(start, durationMinutes),
+    es_provisional: false,
+  };
+  if (!appointment) appointment = await db.CitaPaciente.create(payload);
+  else await appointment.update(payload);
+  return appointment;
+}
+
+async function ensureClinicalReport(appointment, payload) {
+  let report = await db.AppointmentClinicalReport.findOne({
+    where: { appointment_id: appointment.id_cita },
+  });
+  if (!report) {
+    await appointmentClinicalReports.save({
+      appointmentId: appointment.id_cita,
+      actorId: ACTOR_ID,
+      payload,
+      finalize: true,
+    });
+    report = await db.AppointmentClinicalReport.findOne({
+      where: { appointment_id: appointment.id_cita },
+    });
+  }
+  return report;
+}
+
+function clinicalImageSvg({ kind, stage }) {
+  const isAfter = stage === 'after';
+  const accent = isAfter ? '#0f766e' : '#d97706';
+  const soft = isAfter ? '#ccfbf1' : '#fef3c7';
+  const label = isAfter ? 'CONTROL DE EVOLUCIÓN' : 'REGISTRO INICIAL';
+  const synthetic = 'IMAGEN CLÍNICA SINTÉTICA';
+  if (kind === 'capillary') {
+    const follicles = Array.from({ length: isAfter ? 52 : 23 }, (_, index) => {
+      const column = index % 9;
+      const row = Math.floor(index / 9);
+      const x = 372 + (column * 57) + ((row % 2) * 18);
+      const y = 270 + (row * 58);
+      return `<path d="M${x} ${y + 15} q 8 -25 20 -34" fill="none" stroke="${accent}" stroke-width="6" stroke-linecap="round"/>`;
+    }).join('');
+    return `
+      <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="900" viewBox="0 0 1200 900">
+        <rect width="1200" height="900" fill="#f8fafc"/>
+        <rect x="48" y="48" width="1104" height="804" rx="24" fill="#ffffff" stroke="#cbd5e1" stroke-width="3"/>
+        <text x="92" y="112" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#334155">${synthetic}</text>
+        <text x="92" y="154" font-family="Arial, sans-serif" font-size="18" fill="#64748b">${label} · CASO CAPILAR DEMO</text>
+        <ellipse cx="600" cy="468" rx="300" ry="250" fill="${soft}" stroke="#334155" stroke-width="8"/>
+        <path d="M358 540 C425 670, 775 670, 842 540" fill="none" stroke="#334155" stroke-width="8"/>
+        <path d="M418 300 C505 210, 695 210, 782 300" fill="none" stroke="#94a3b8" stroke-width="5" stroke-dasharray="12 12"/>
+        ${follicles}
+        <circle cx="600" cy="468" r="18" fill="${accent}"/>
+        <text x="600" y="785" text-anchor="middle" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#0f172a">${isAfter ? 'Mayor densidad visual en zona superior' : 'Zona superior seleccionada para seguimiento'}</text>
+      </svg>
+    `;
+  }
+  const marks = isAfter
+    ? '<circle cx="500" cy="470" r="16" fill="#14b8a6"/><circle cx="700" cy="470" r="16" fill="#14b8a6"/>'
+    : '<circle cx="500" cy="470" r="26" fill="#f59e0b"/><circle cx="700" cy="470" r="26" fill="#f59e0b"/><path d="M470 510 Q600 560 730 510" fill="none" stroke="#f59e0b" stroke-width="12" opacity=".55"/>';
+  return `
+    <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="900" viewBox="0 0 1200 900">
+      <rect width="1200" height="900" fill="#f8fafc"/>
+      <rect x="48" y="48" width="1104" height="804" rx="24" fill="#ffffff" stroke="#cbd5e1" stroke-width="3"/>
+      <text x="92" y="112" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#334155">${synthetic}</text>
+      <text x="92" y="154" font-family="Arial, sans-serif" font-size="18" fill="#64748b">${label} · CASO DE ESTÉTICA DEMO</text>
+      <ellipse cx="600" cy="445" rx="220" ry="270" fill="#f1f5f9" stroke="#334155" stroke-width="8"/>
+      <path d="M420 690 Q600 770 780 690" fill="#e2e8f0" stroke="#334155" stroke-width="8"/>
+      <path d="M520 395 Q555 370 590 395 M610 395 Q645 370 680 395" fill="none" stroke="#334155" stroke-width="8" stroke-linecap="round"/>
+      <path d="M548 570 Q600 600 652 570" fill="none" stroke="#334155" stroke-width="8" stroke-linecap="round"/>
+      <path d="M600 420 L580 520 L620 520" fill="none" stroke="#64748b" stroke-width="6" stroke-linecap="round"/>
+      ${marks}
+      <text x="600" y="815" text-anchor="middle" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#0f172a">${isAfter ? 'Control posterior con evolución favorable' : 'Registro basal antes del procedimiento'}</text>
+    </svg>
+  `;
+}
+
+async function buildClinicalImagePng(options) {
+  return sharp(Buffer.from(clinicalImageSvg(options))).png().toBuffer();
+}
+
+async function setPrivateAssetTimestamp(asset, timestamp) {
+  await db.ClinicalPrivateAsset.update({
+    created_at: timestamp,
+    updated_at: timestamp,
+  }, {
+    where: { id: asset.id },
+    silent: true,
+  });
+  await asset.reload();
+  return asset;
+}
+
+async function ensureClinicalAsset({
+  clinicId,
+  patient,
+  ownerId,
+  filename,
+  contentType,
+  buffer,
+  timestamp,
+  metadata,
+}) {
+  let asset = await db.ClinicalPrivateAsset.findOne({
+    where: {
+      clinic_id: clinicId,
+      patient_id: patient.id_paciente,
+      owner_type: 'qa_demo_clinical_case',
+      owner_id: ownerId,
+      purpose: 'clinical_attachment',
+      original_filename: filename,
+    },
+  });
+  if (!asset) {
+    asset = await clinicalPrivateStorage.storeClinicalPrivateAsset({
+      clinicId,
+      patientId: patient.id_paciente,
+      ownerType: 'qa_demo_clinical_case',
+      ownerId,
+      purpose: 'clinical_attachment',
+      originalFilename: filename,
+      contentType,
+      buffer,
+      metadata: {
+        demo_seed: DEMO_KEY,
+        synthetic: true,
+        ...metadata,
+      },
+      createdBy: ACTOR_ID,
+    });
+    await setPrivateAssetTimestamp(asset, timestamp);
+  }
+  return asset;
+}
+
+async function ensureGeneralClinicalCases({
+  clinicId,
+  aestheticPatient,
+  capillaryPatient,
+  treatments,
+  installations,
+  doctor,
+  businessDate,
+}) {
+  const aestheticCompleted = await ensureAppointment({
+    clinicId,
+    patient: aestheticPatient,
+    treatment: treatments.peeling,
+    installation: installations.treatmentRoom,
+    doctor,
+    title: 'Peeling facial · control realizado',
+    start: dateTimeAt(businessDate, -21, 10, 0),
+    durationMinutes: 45,
+    state: 'completada',
+    type: 'primera_con_trat',
+  });
+  const aestheticToday = await ensureAppointment({
+    clinicId,
+    patient: aestheticPatient,
+    treatment: treatments.facial,
+    installation: installations.treatmentRoom,
+    doctor,
+    title: 'Control de evolución facial',
+    start: dateTimeAt(businessDate, 0, 16, 0),
+    durationMinutes: 40,
+    state: 'recordatorio_confirmado',
+    type: 'revision',
+  });
+  await ensureClinicalReport(aestheticCompleted, {
+    reason: 'Control posterior a peeling químico facial.',
+    summary: 'Evolución favorable, textura más uniforme y ausencia de complicaciones.',
+    findings: 'Eritema leve resuelto. Piel íntegra y correctamente hidratada.',
+    interventions: 'Revisión fotográfica privada y ajuste de cuidados domiciliarios.',
+    outcome: 'Respuesta clínica dentro de lo esperado.',
+    plan: 'Mantener fotoprotección y control en cuatro semanas.',
+    next_steps: 'Comparar con registro fotográfico inicial en la próxima visita.',
+    private_notes: `${DEMO_KEY}:aesthetic-report`,
+  });
+  await ensureClinicalAsset({
+    clinicId,
+    patient: aestheticPatient,
+    ownerId: `${DEMO_KEY}:aesthetic:before`,
+    filename: 'Estética facial · antes.png',
+    contentType: 'image/png',
+    buffer: await buildClinicalImagePng({ kind: 'aesthetic', stage: 'before' }),
+    timestamp: dateTimeAt(businessDate, -28, 10, 0),
+    metadata: { area_code: 'estetica', stage: 'before' },
+  });
+  await ensureClinicalAsset({
+    clinicId,
+    patient: aestheticPatient,
+    ownerId: `${DEMO_KEY}:aesthetic:after`,
+    filename: 'Estética facial · control.png',
+    contentType: 'image/png',
+    buffer: await buildClinicalImagePng({ kind: 'aesthetic', stage: 'after' }),
+    timestamp: dateTimeAt(businessDate, -7, 10, 0),
+    metadata: { area_code: 'estetica', stage: 'after' },
+  });
+  await ensureClinicalAsset({
+    clinicId,
+    patient: aestheticPatient,
+    ownerId: `${DEMO_KEY}:aesthetic:care`,
+    filename: 'Cuidados posteriores · peeling facial.pdf',
+    contentType: 'application/pdf',
+    buffer: buildDemoPdf({
+      title: 'Cuidados posteriores - demo',
+      lines: [
+        'Caso sintetico de estetica facial',
+        'Fotoproteccion diaria',
+        'Hidratacion pautada por el profesional',
+        'Consultar ante molestias no esperadas',
+        'Documento de demostracion sin validez clinica',
+      ],
+    }),
+    timestamp: dateTimeAt(businessDate, -20, 12, 0),
+    metadata: { area_code: 'estetica', document_kind: 'aftercare' },
+  });
+
+  const capillaryCompleted = await ensureAppointment({
+    clinicId,
+    patient: capillaryPatient,
+    treatment: treatments.capillaryGraft,
+    installation: installations.treatmentRoom,
+    doctor,
+    title: 'Valoración e injerto capilar · realizado',
+    start: dateTimeAt(businessDate, -90, 9, 0),
+    durationMinutes: 240,
+    state: 'completada',
+    type: 'primera_con_trat',
+  });
+  const capillaryAttendancePending = await ensureAppointment({
+    clinicId,
+    patient: capillaryPatient,
+    treatment: treatments.capillaryPrp,
+    installation: installations.consultation,
+    doctor,
+    title: 'Control capilar pendiente de cerrar',
+    start: dateTimeAt(businessDate, 0, 8, 30),
+    durationMinutes: 45,
+    state: 'recordatorio_confirmado',
+    type: 'revision',
+  });
+  const capillaryFuture = await ensureAppointment({
+    clinicId,
+    patient: capillaryPatient,
+    treatment: treatments.capillaryGraft,
+    installation: installations.consultation,
+    doctor,
+    title: 'Control capilar y firma en tablet',
+    start: dateTimeAt(businessDate, 1, 10, 30),
+    durationMinutes: 60,
+    state: 'recordatorio_confirmado',
+    type: 'revision',
+  });
+  await ensureClinicalReport(capillaryCompleted, {
+    reason: 'Procedimiento de injerto capilar y planificación de controles.',
+    summary: 'Procedimiento completado sin incidencias y seguimiento fotográfico iniciado.',
+    findings: 'Zona donante y receptora dentro de los parámetros previstos.',
+    interventions: 'Implantación según planificación y entrega de cuidados posteriores.',
+    outcome: 'Alta de procedimiento con revisión programada.',
+    plan: 'Control evolutivo, registro fotográfico privado y valoración de PRP.',
+    next_steps: 'Revisión de densidad y adherencia a cuidados.',
+    private_notes: `${DEMO_KEY}:capillary-report`,
+  });
+  await ensureClinicalAsset({
+    clinicId,
+    patient: capillaryPatient,
+    ownerId: `${DEMO_KEY}:capillary:before`,
+    filename: 'Zona capilar · antes.png',
+    contentType: 'image/png',
+    buffer: await buildClinicalImagePng({ kind: 'capillary', stage: 'before' }),
+    timestamp: dateTimeAt(businessDate, -90, 8, 30),
+    metadata: { area_code: 'capilar', stage: 'before' },
+  });
+  await ensureClinicalAsset({
+    clinicId,
+    patient: capillaryPatient,
+    ownerId: `${DEMO_KEY}:capillary:after`,
+    filename: 'Zona capilar · evolución.png',
+    contentType: 'image/png',
+    buffer: await buildClinicalImagePng({ kind: 'capillary', stage: 'after' }),
+    timestamp: dateTimeAt(businessDate, -14, 11, 0),
+    metadata: { area_code: 'capilar', stage: 'after' },
+  });
+  await ensureClinicalAsset({
+    clinicId,
+    patient: capillaryPatient,
+    ownerId: `${DEMO_KEY}:capillary:care`,
+    filename: 'Cuidados posteriores · injerto capilar.pdf',
+    contentType: 'application/pdf',
+    buffer: buildDemoPdf({
+      title: 'Cuidados posteriores - demo',
+      lines: [
+        'Caso sintetico de injerto capilar',
+        'Seguir las indicaciones del profesional',
+        'Evitar friccion sobre la zona tratada',
+        'Acudir a los controles programados',
+        'Documento de demostracion sin validez clinica',
+      ],
+    }),
+    timestamp: dateTimeAt(businessDate, -89, 12, 0),
+    metadata: { area_code: 'capilar', document_kind: 'aftercare' },
+  });
+
+  return {
+    aesthetic: {
+      completed: aestheticCompleted,
+      today: aestheticToday,
+    },
+    capillary: {
+      completed: capillaryCompleted,
+      attendancePending: capillaryAttendancePending,
+      future: capillaryFuture,
+    },
+  };
+}
+
+function nutritionValues(overrides = {}) {
+  return {
+    stature_cm: 178,
+    hip_cm: 102,
+    arm_flexed_tensed_cm: 36,
+    arm_relaxed_cm: 33,
+    forearm_cm: 29,
+    thigh_cm: 58,
+    calf_cm: 40,
+    chest_cm: 104,
+    head_cm: 56,
+    sitting_height_cm: 92,
+    skinfold_triceps_mm: 18,
+    skinfold_subscapular_mm: 20,
+    skinfold_biceps_mm: 9,
+    skinfold_iliac_crest_mm: 24,
+    skinfold_supraspinale_mm: 20,
+    skinfold_abdominal_mm: 28,
+    skinfold_front_thigh_mm: 25,
+    skinfold_medial_calf_mm: 14,
+    breadth_humerus_cm: 7.2,
+    breadth_femur_cm: 9.8,
+    breadth_biacromial_cm: 42,
+    breadth_biiliocristal_cm: 30,
+    depth_chest_ap_cm: 21,
+    breadth_chest_transverse_cm: 30,
+    weight_kg: 85,
+    waist_cm: 96,
+    objective: 'Mejorar composición corporal y hábitos de forma sostenible.',
+    ...overrides,
+  };
+}
+
+async function ensureNutritionMeasurement({
+  clinicId,
+  patient,
+  treatment,
+  appointment,
+  measuredAt,
+  key,
+  values,
+}) {
+  const notes = `${DEMO_KEY}:nutrition:${key}`;
+  let row = await db.PatientNutritionMeasurement.findOne({
+    where: {
+      patient_id: patient.id_paciente,
+      clinic_id: clinicId,
+      notes,
+    },
+  });
+  if (!row) {
+    await nutritionWorkspace.createNutritionMeasurement(patient.public_id, {
+      clinic_id: clinicId,
+      professional_id: ACTOR_ID,
+      appointment_id: appointment.id_cita,
+      treatment_id: treatment.id_tratamiento,
+      profile_code: 'express_isak',
+      measured_at: measuredAt.toISOString(),
+      raw_values: values,
+      notes,
+    }, ACTOR_ID);
+    row = await db.PatientNutritionMeasurement.findOne({
+      where: {
+        patient_id: patient.id_paciente,
+        clinic_id: clinicId,
+        notes,
+      },
+    });
+  }
+  if (!row) throw new Error(`No se pudo crear la medición demo ${key}.`);
+  return row;
+}
+
+async function ensureNutritionCase({ clinicId, patient, treatment, installation, doctor, businessDate }) {
+  const baselineAppointment = await ensureAppointment({
+    clinicId,
+    patient,
+    treatment,
+    installation,
+    doctor,
+    title: 'Estudio antropométrico inicial',
+    start: dateTimeAt(businessDate, -56, 11, 0),
+    durationMinutes: 60,
+    state: 'completada',
+    type: 'primera_con_trat',
+  });
+  const followUpAppointment = await ensureAppointment({
+    clinicId,
+    patient,
+    treatment,
+    installation,
+    doctor,
+    title: 'Seguimiento antropométrico',
+    start: dateTimeAt(businessDate, -7, 11, 0),
+    durationMinutes: 60,
+    state: 'completada',
+    type: 'continuacion',
+  });
+  const todayAppointment = await ensureAppointment({
+    clinicId,
+    patient,
+    treatment,
+    installation,
+    doctor,
+    title: 'Revisión del plan nutricional',
+    start: dateTimeAt(businessDate, 0, 17, 0),
+    durationMinutes: 45,
+    state: 'info_confirmada',
+    type: 'revision',
+  });
+  const baseline = await ensureNutritionMeasurement({
+    clinicId,
+    patient,
+    treatment,
+    appointment: baselineAppointment,
+    measuredAt: dateTimeAt(businessDate, -56, 11, 15),
+    key: 'baseline',
+    values: nutritionValues(),
+  });
+  await nutritionWorkspace.finalizeNutritionMeasurementReportSnapshot(
+    patient.public_id,
+    baseline.id,
+    ACTOR_ID,
+  );
+  const followUp = await ensureNutritionMeasurement({
+    clinicId,
+    patient,
+    treatment,
+    appointment: followUpAppointment,
+    measuredAt: dateTimeAt(businessDate, -7, 11, 15),
+    key: 'follow-up',
+    values: nutritionValues({
+      weight_kg: 82.5,
+      waist_cm: 91,
+      hip_cm: 100,
+      arm_flexed_tensed_cm: 36.4,
+      arm_relaxed_cm: 33.2,
+      thigh_cm: 57,
+      calf_cm: 39.5,
+      chest_cm: 102,
+      skinfold_triceps_mm: 16,
+      skinfold_subscapular_mm: 18,
+      skinfold_biceps_mm: 8,
+      skinfold_iliac_crest_mm: 20,
+      skinfold_supraspinale_mm: 17,
+      skinfold_abdominal_mm: 23,
+      skinfold_front_thigh_mm: 22,
+      skinfold_medial_calf_mm: 12,
+      objective: 'Consolidar la pérdida de grasa manteniendo masa muscular.',
+    }),
+  });
+  await nutritionWorkspace.finalizeNutritionMeasurementReportSnapshot(
+    patient.public_id,
+    followUp.id,
+    ACTOR_ID,
+  );
+  await ensureClinicalReport(followUpAppointment, {
+    reason: 'Revisión de evolución nutricional y composición corporal.',
+    summary: 'Descenso progresivo de peso y perímetro de cintura con buena adherencia.',
+    findings: 'Evolución favorable en medidas comparables y mantenimiento funcional.',
+    interventions: 'Ajuste del plan nutricional y revisión del informe antropométrico.',
+    outcome: 'Objetivo intermedio alcanzado.',
+    plan: 'Continuar cuatro semanas y repetir medición comparable.',
+    next_steps: 'Revisar tendencia y adherencia en la próxima cita.',
+    private_notes: `${DEMO_KEY}:nutrition-report`,
+  });
+  return {
+    baseline,
+    followUp,
+    appointments: {
+      baseline: baselineAppointment,
+      followUp: followUpAppointment,
+      today: todayAppointment,
+    },
+  };
+}
+
+async function ensureConsentTemplate({
+  clinicId,
+  publicId,
+  name,
+  purpose,
+  blockingPolicy,
+  requiresProfessionalSignature,
+  bodyHtml,
+}) {
+  const payload = {
+    clinic_id: clinicId,
+    name,
+    description: `Plantilla clínica sintética del seed ${DEMO_KEY}.`,
+    purpose,
+    status: 'active',
+    blocking_policy: blockingPolicy,
+    validity_mode: purpose === 'clinical_image' ? 'treatment_episode' : 'single_act',
+    is_default: false,
+    requires_patient_signature: true,
+    requires_representative_when_minor: true,
+    requires_professional_signature: requiresProfessionalSignature,
+    catalog_key: publicId,
+  };
+  let template = await db.ClinicConsentTemplate.findOne({ where: { public_id: publicId } });
+  if (!template) template = await db.ClinicConsentTemplate.create({ public_id: publicId, ...payload });
+  else await template.update(payload);
+
+  let version = await db.ClinicConsentTemplateVersion.findOne({
+    where: { clinic_template_id: template.id, locale: 'es' },
+    order: [['version', 'DESC'], ['id', 'DESC']],
+  });
+  const versionPayload = {
+    clinic_template_id: template.id,
+    version: version?.version || 1,
+    locale: 'es',
+    title: name,
+    body_json: null,
+    body_html: bodyHtml,
+    variable_schema: {
+      signing_timing: { mode: purpose === 'clinical_image' ? 'before_treatment' : 'at_least_24h_before' },
+      clinical_policy: {
+        signing_timing: purpose === 'clinical_image' ? 'before_treatment' : 'at_least_24h_before',
+      },
+      demo_seed: DEMO_KEY,
+    },
+    status: 'published',
+    published_at: new Date(),
+    created_by: ACTOR_ID,
+  };
+  if (!version) version = await db.ClinicConsentTemplateVersion.create(versionPayload);
+  else await version.update(versionPayload);
+  return template;
+}
+
+async function ensureConsentRequirement(clinicId, treatment, template, options = {}) {
+  const rows = await db.TreatmentConsentRequirement.findAll({
+    where: {
+      tratamiento_id: treatment.id_tratamiento,
+      clinica_id: clinicId,
+      clinic_template_id: template.id,
+    },
+    order: [['id', 'ASC']],
+  });
+  const payload = {
+    tratamiento_id: treatment.id_tratamiento,
+    clinica_id: clinicId,
+    clinic_template_id: template.id,
+    catalog_template_id: null,
+    requirement_scope: 'treatment',
+    condition_key: null,
+    required: options.required !== false,
+    blocking_policy: options.blockingPolicy || 'hard',
+    sort_order: Number(options.sortOrder || 0),
+  };
+  if (!rows.length) return db.TreatmentConsentRequirement.create(payload);
+  await rows[0].update(payload);
+  for (const duplicate of rows.slice(1)) await duplicate.destroy();
+  return rows[0];
+}
+
+async function ensureDemoTablet(clinicId) {
+  const passwordHash = await bcrypt.hash(DEMO_TABLET_PASSWORD, 12);
+  let kiosk = await db.ClinicTabletKiosk.findOne({
+    where: { username: DEMO_TABLET_USERNAME },
+  });
+  if (kiosk && Number(kiosk.clinic_id) !== clinicId) {
+    throw new Error(`El usuario tablet ${DEMO_TABLET_USERNAME} pertenece a otra clínica.`);
+  }
+  const payload = {
+    public_id: DEMO_TABLET_PUBLIC_ID,
+    clinic_id: clinicId,
+    username: DEMO_TABLET_USERNAME,
+    password_hash: passwordHash,
+    display_name: 'Tablet recepción · BS Medical DEMO',
+    status: 'active',
+    created_by: ACTOR_ID,
+  };
+  if (!kiosk) kiosk = await db.ClinicTabletKiosk.create(payload);
+  else await kiosk.update(payload);
+  return kiosk;
+}
+
+async function consentPackageByPublicId(publicId) {
+  return db.ConsentSignaturePackage.findOne({
+    where: { public_id: publicId },
+    include: [
+      { model: db.PatientConsentDocument, as: 'documents', required: false },
+      { model: db.Paciente, as: 'paciente', required: false },
+      { model: db.Tratamiento, as: 'tratamiento', required: false },
+      { model: db.CitaPaciente, as: 'cita', required: false },
+    ],
+  });
+}
+
+async function ensureConsentPackage(appointment, publicId, triggerSource) {
+  let packageRow = await consentPackageByPublicId(publicId);
+  if (packageRow) return packageRow;
+  packageRow = await consentimientosService.createPackageForAppointment(
+    appointment.id_cita,
+    { triggerSource },
+  );
+  if (packageRow.public_id !== publicId) {
+    const conflict = await db.ConsentSignaturePackage.findOne({
+      where: {
+        public_id: publicId,
+        id: { [db.Sequelize.Op.ne]: packageRow.id },
+      },
+    });
+    if (conflict) return consentPackageByPublicId(publicId);
+    await packageRow.update({ public_id: publicId });
+  }
+  return consentPackageByPublicId(publicId);
+}
+
+function clearConsentSignatureSnapshot(snapshot) {
+  const next = cleanObject(snapshot);
+  const sanitized = { ...next };
+  delete sanitized.signature_evidence;
+  delete sanitized.professional_signature_evidence;
+  delete sanitized.revocation_evidence;
+  delete sanitized.signed_copy;
+  return sanitized;
+}
+
+async function resetConsentPackagePending(packageRow, businessDate) {
+  const documents = await db.PatientConsentDocument.findAll({
+    where: { package_id: packageRow.id },
+  });
+  for (const document of documents) {
+    await document.update({
+      status: 'viewed',
+      signed_at: null,
+      signed_by_patient_id: null,
+      signed_by_representative_id: null,
+      professional_signed_by: null,
+      professional_signed_at: null,
+      revoked_at: null,
+      channel: 'tablet',
+      delivery_status: 'queued',
+      snapshot_json: clearConsentSignatureSnapshot(document.snapshot_json),
+    });
+  }
+  await packageRow.update({
+    status: 'pending',
+    signed_count: 0,
+    required_count: documents.filter((document) => document.required).length,
+    due_at: dateTimeAt(businessDate, 1, 10, 30),
+    expires_at: dateTimeAt(businessDate, 30, 23, 59),
+    trigger_source: `${DEMO_KEY}:tablet-pending`,
+  });
+  return consentPackageByPublicId(packageRow.public_id);
+}
+
+async function ensureConsentPackageSigned(packageRow) {
+  const documents = await db.PatientConsentDocument.findAll({
+    where: { package_id: packageRow.id },
+  });
+  for (const document of documents) {
+    if (document.status !== 'signed') {
+      await consentimientosService.signConsentDocument(document.public_id, {
+        signer_name: 'Javier Ruiz · Demo Capilar',
+        signer_role: 'patient',
+        signature_data_url: SIGNATURE_DATA_URL,
+        accepted_statement: true,
+        method: 'tablet_signature',
+        device_label: 'Tablet recepción · BS Medical DEMO',
+      }, {
+        ip: '127.0.0.1',
+        userAgent: 'ClinicaClick BS Medical demo seed',
+      });
+    }
+    const refreshed = await db.PatientConsentDocument.findByPk(document.id);
+    if (
+      cleanObject(refreshed?.snapshot_json).template?.requires_professional_signature
+      && !refreshed.professional_signed_at
+    ) {
+      await consentimientosService.signProfessionalConsentDocument(refreshed.public_id, {
+        professional_name: 'Dr. Carlos Demo',
+        accepted_statement: true,
+        method: 'professional_confirmation',
+      }, ACTOR_ID, {
+        ip: '127.0.0.1',
+        userAgent: 'ClinicaClick BS Medical demo seed',
+      });
+    }
+  }
+  return consentPackageByPublicId(packageRow.public_id);
+}
+
+async function ensureConsentAndTabletDemo({
+  clinicId,
+  treatments,
+  appointments,
+  businessDate,
+}) {
+  const clinicalTemplate = await ensureConsentTemplate({
+    clinicId,
+    publicId: DEMO_CONSENT_IDS.clinicalTemplate,
+    name: 'Consentimiento informado · injerto capilar DEMO',
+    purpose: 'clinical',
+    blockingPolicy: 'hard',
+    requiresProfessionalSignature: true,
+    bodyHtml: [
+      '<h2>Consentimiento informado para injerto capilar</h2>',
+      '<p>Paciente: {{paciente.nombre_completo}}</p>',
+      '<p>Clínica: {{clinica.nombre}}</p>',
+      '<p>Tratamiento: {{tratamiento.nombre}}</p>',
+      '<p>El paciente declara haber recibido información comprensible sobre preparación, procedimiento, alternativas, cuidados, evolución esperada y posibles complicaciones.</p>',
+      '<p>Texto sintético para demostración. La clínica debe validar jurídicamente su versión definitiva.</p>',
+    ].join('\n'),
+  });
+  const photosTemplate = await ensureConsentTemplate({
+    clinicId,
+    publicId: DEMO_CONSENT_IDS.photosTemplate,
+    name: 'Autorización de imágenes clínicas privadas · DEMO',
+    purpose: 'clinical_image',
+    blockingPolicy: 'soft',
+    requiresProfessionalSignature: false,
+    bodyHtml: [
+      '<h2>Autorización de imágenes clínicas privadas</h2>',
+      '<p>Paciente: {{paciente.nombre_completo}}</p>',
+      '<p>Autorizo la toma de imágenes privadas para diagnóstico, planificación y comparación de la evolución dentro de mi historia clínica.</p>',
+      '<p>Estas imágenes no se usarán con fines publicitarios sin una autorización separada.</p>',
+    ].join('\n'),
+  });
+  await ensureConsentRequirement(clinicId, treatments.capillaryGraft, clinicalTemplate, {
+    blockingPolicy: 'hard',
+    sortOrder: 0,
+  });
+  await ensureConsentRequirement(clinicId, treatments.capillaryGraft, photosTemplate, {
+    blockingPolicy: 'soft',
+    sortOrder: 1,
+  });
+  await ensureConsentRequirement(clinicId, treatments.peeling, photosTemplate, {
+    blockingPolicy: 'soft',
+    sortOrder: 0,
+  });
+  await ensureDemoTablet(clinicId);
+
+  let signedPackage = await ensureConsentPackage(
+    appointments.completed,
+    DEMO_CONSENT_IDS.signedPackage,
+    `${DEMO_KEY}:signed`,
+  );
+  signedPackage = await ensureConsentPackageSigned(signedPackage);
+  let pendingPackage = await ensureConsentPackage(
+    appointments.future,
+    DEMO_CONSENT_IDS.pendingPackage,
+    `${DEMO_KEY}:tablet-pending`,
+  );
+  pendingPackage = await resetConsentPackagePending(pendingPackage, businessDate);
+  const tabletSession = await consentimientosService.createTabletSession(pendingPackage.id, {
+    base_url: 'http://localhost:4203',
+    ttl_hours: 72,
+  });
+  const signedDocuments = await db.PatientConsentDocument.findAll({
+    where: { package_id: signedPackage.id },
+    attributes: ['id', 'public_id', 'title', 'status', 'signed_at', 'professional_signed_at'],
+    order: [['id', 'ASC']],
+    raw: true,
+  });
+  const pendingDocuments = await db.PatientConsentDocument.findAll({
+    where: { package_id: pendingPackage.id },
+    attributes: ['id', 'public_id', 'title', 'status'],
+    order: [['id', 'ASC']],
+    raw: true,
+  });
+  return {
+    signedPackage,
+    pendingPackage,
+    signedDocuments,
+    pendingDocuments,
+    tabletSession,
+  };
 }
 
 async function ensureBudgetAndPayment({ clinicId, patient, treatments, businessDate }) {
@@ -814,8 +2033,35 @@ async function prepare() {
   const clinic = await ensureDemoClinic(sourceClinic, businessDate);
   const clinicId = Number(clinic.id_clinica);
   const access = await ensureDemoAccess(clinicId);
+  const doctor = await ensureDemoDoctor(clinicId);
+  await ensureDemoClinicSchedule(clinicId);
   const patient = await ensureDemoPatient(clinicId);
+  const clinicalPatients = await ensureClinicalDemoPatients(clinicId);
   const treatments = await ensureDemoTreatments(clinicId);
+  const installations = await ensureDemoInstallations(clinicId);
+  const clinicalCases = await ensureGeneralClinicalCases({
+    clinicId,
+    aestheticPatient: patient,
+    capillaryPatient: clinicalPatients.capillary,
+    treatments,
+    installations,
+    doctor,
+    businessDate,
+  });
+  const nutritionCase = await ensureNutritionCase({
+    clinicId,
+    patient: clinicalPatients.nutrition,
+    treatment: treatments.nutritionStudy,
+    installation: installations.consultation,
+    doctor,
+    businessDate,
+  });
+  const consentDemo = await ensureConsentAndTabletDemo({
+    clinicId,
+    treatments,
+    appointments: clinicalCases.capillary,
+    businessDate,
+  });
   const economicsState = await ensureBudgetAndPayment({
     clinicId,
     patient,
@@ -860,10 +2106,35 @@ async function prepare() {
       id: patient.public_id,
       name: `${patient.nombre} ${patient.apellidos}`,
     },
+    clinical_cases: {
+      aesthetic: {
+        patient_id: patient.public_id,
+        patient_name: `${patient.nombre} ${patient.apellidos}`,
+        history_url: `http://localhost:4203/pacientes/detalle/${patient.public_id}/historia-clinica?clinica_id=${clinicId}`,
+        private_assets: 3,
+      },
+      nutrition: {
+        patient_id: clinicalPatients.nutrition.public_id,
+        patient_name: `${clinicalPatients.nutrition.nombre} ${clinicalPatients.nutrition.apellidos}`,
+        workspace_url: `http://localhost:4203/pacientes/detalle/${clinicalPatients.nutrition.public_id}/nutricion?clinica_id=${clinicId}`,
+        measurements: [nutritionCase.baseline.id, nutritionCase.followUp.id],
+      },
+      capillary: {
+        patient_id: clinicalPatients.capillary.public_id,
+        patient_name: `${clinicalPatients.capillary.nombre} ${clinicalPatients.capillary.apellidos}`,
+        history_url: `http://localhost:4203/pacientes/detalle/${clinicalPatients.capillary.public_id}/historia-clinica?clinica_id=${clinicId}`,
+        private_assets: 3,
+      },
+    },
     treatments: Object.values(treatments).map((item) => ({
       id: item.id_tratamiento,
       code: item.codigo,
       name: item.nombre,
+    })),
+    installations: Object.values(installations).map((item) => ({
+      id: item.id,
+      name: item.nombre,
+      type: item.tipo,
     })),
     budget: {
       id: economicsState.budgetRow.public_id,
@@ -922,6 +2193,31 @@ async function prepare() {
       expected_access: ['Caja'],
       forbidden_access: ['Resumen contable', 'Gastos', 'Nóminas', 'Gestoría'],
     },
+    doctor: {
+      user_id: doctor.id_usuario,
+      email: DEMO_DOCTOR_EMAIL,
+      password: DEMO_DOCTOR_PASSWORD,
+      role: 'Doctores',
+      expected_access: ['Panel médico', 'Agenda', 'Historias clínicas y consentimientos de sus pacientes'],
+    },
+    consents_and_tablet: {
+      tablet: {
+        url: 'http://localhost:4203/tablet',
+        username: DEMO_TABLET_USERNAME,
+        password: DEMO_TABLET_PASSWORD,
+      },
+      pending: {
+        package_id: consentDemo.pendingPackage.public_id,
+        direct_signature_url: consentDemo.tabletSession.public_url,
+        documents: consentDemo.pendingDocuments,
+      },
+      signed: {
+        package_id: consentDemo.signedPackage.public_id,
+        patient_url: `http://localhost:4203/pacientes/detalle/${clinicalPatients.capillary.public_id}/consentimientos?clinica_id=${clinicId}`,
+        documents: consentDemo.signedDocuments,
+      },
+      dashboard_url: `http://localhost:4203/consentimientos?tab=pendientes&clinica_id=${clinicId}`,
+    },
     accounting: {
       summary: workspace.summary,
       cash: workspace.cash.current,
@@ -930,6 +2226,8 @@ async function prepare() {
       accounting: 'http://localhost:4203/contabilidad',
       reception_cash: 'http://localhost:4203/contabilidad?section=cash',
       patient: `http://localhost:4203/pacientes/detalle/${patient.public_id}/presupuestos`,
+      treatments: 'http://localhost:4203/catalogo-tratamientos',
+      medical_areas: 'http://localhost:4203/areas-medicas-admin',
     },
     cleanup: 'node src/scripts/qa/prepare-bs-medical-demo-clinic.js --cleanup',
   }, null, 2)}\n`);
@@ -1001,6 +2299,15 @@ async function cleanup() {
     raw: true,
   });
   const receptionUserId = Number(receptionUser?.id_usuario) || null;
+  const doctorUser = await db.Usuario.findOne({
+    where: {
+      email_usuario: DEMO_DOCTOR_EMAIL,
+      cargo_usuario: DEMO_DOCTOR_CARGO,
+    },
+    attributes: ['id_usuario'],
+    raw: true,
+  });
+  const doctorUserId = Number(doctorUser?.id_usuario) || null;
   const remittances = await db.AccountingRemittance.findAll({
     where: { clinic_id: clinicId },
     attributes: ['id'],
@@ -1012,6 +2319,30 @@ async function cleanup() {
     attributes: ['id', 'public_id', 'object_key'],
     raw: true,
   });
+  const clinicalReports = await db.AppointmentClinicalReport.findAll({
+    where: { clinic_id: clinicId },
+    attributes: ['id'],
+    raw: true,
+  });
+  const clinicalReportIds = clinicalReports.map((row) => Number(row.id));
+  const consentPackages = await db.ConsentSignaturePackage.findAll({
+    where: { clinica_id: clinicId },
+    attributes: ['id'],
+    raw: true,
+  });
+  const consentPackageIds = consentPackages.map((row) => Number(row.id));
+  const consentDocuments = await db.PatientConsentDocument.findAll({
+    where: { clinica_id: clinicId },
+    attributes: ['id'],
+    raw: true,
+  });
+  const consentDocumentIds = consentDocuments.map((row) => Number(row.id));
+  const consentTemplates = await db.ClinicConsentTemplate.findAll({
+    where: { clinic_id: clinicId },
+    attributes: ['id'],
+    raw: true,
+  });
+  const consentTemplateIds = consentTemplates.map((row) => Number(row.id));
 
   await db.sequelize.transaction(async (transaction) => {
     if (voucherIds.length) {
@@ -1058,6 +2389,110 @@ async function cleanup() {
     }
     await db.ClinicEconomicTemplate.destroy({ where: { clinic_id: clinicId }, transaction });
 
+    if (consentDocumentIds.length) {
+      await db.ConsentDeliveryEvent.destroy({
+        where: { patient_consent_document_id: consentDocumentIds },
+        transaction,
+      });
+    }
+    if (consentPackageIds.length) {
+      await db.ConsentDeliveryEvent.destroy({
+        where: { package_id: consentPackageIds },
+        transaction,
+      });
+    }
+    await db.PatientConsentDocument.destroy({ where: { clinica_id: clinicId }, transaction });
+    await db.ConsentSignaturePackage.destroy({ where: { clinica_id: clinicId }, transaction });
+    await db.TreatmentConsentRequirement.destroy({ where: { clinica_id: clinicId }, transaction });
+    if (consentTemplateIds.length) {
+      await db.ClinicConsentTemplateVersion.destroy({
+        where: { clinic_template_id: consentTemplateIds },
+        transaction,
+      });
+    }
+    await db.ClinicConsentTemplate.destroy({ where: { clinic_id: clinicId }, transaction });
+    await db.ClinicTabletKiosk.destroy({ where: { clinic_id: clinicId }, transaction });
+
+    await db.PatientNutritionReport.destroy({ where: { clinic_id: clinicId }, transaction });
+    await db.PatientNutritionMeasurement.destroy({ where: { clinic_id: clinicId }, transaction });
+    if (clinicalReportIds.length) {
+      await db.AppointmentClinicalReportRevision.destroy({
+        where: { report_id: clinicalReportIds },
+        transaction,
+      });
+    }
+    await db.AppointmentClinicalReport.destroy({ where: { clinic_id: clinicId }, transaction });
+    await db.CitaPaciente.destroy({ where: { clinica_id: clinicId }, transaction });
+
+    const doctorLinks = await db.DoctorClinica.findAll({
+      where: { clinica_id: clinicId },
+      attributes: ['id'],
+      raw: true,
+      transaction,
+    });
+    const doctorLinkIds = doctorLinks.map((row) => Number(row.id));
+    if (doctorLinkIds.length) {
+      const doctorSchedules = await db.DoctorHorario.findAll({
+        where: { doctor_clinica_id: doctorLinkIds },
+        attributes: ['id'],
+        raw: true,
+        transaction,
+      });
+      const doctorScheduleIds = doctorSchedules.map((row) => Number(row.id));
+      if (doctorScheduleIds.length && db.DoctorHorarioExcepcion) {
+        await db.DoctorHorarioExcepcion.destroy({
+          where: { doctor_horario_id: doctorScheduleIds },
+          transaction,
+        });
+      }
+      await db.DoctorHorario.destroy({
+        where: { doctor_clinica_id: doctorLinkIds },
+        transaction,
+      });
+      await db.DoctorClinica.destroy({
+        where: { id: doctorLinkIds },
+        transaction,
+      });
+    }
+    if (doctorUserId && db.DoctorBloqueo) {
+      const doctorBlocks = await db.DoctorBloqueo.findAll({
+        where: { doctor_id: doctorUserId },
+        attributes: ['id'],
+        raw: true,
+        transaction,
+      });
+      const doctorBlockIds = doctorBlocks.map((row) => Number(row.id));
+      if (doctorBlockIds.length && db.DoctorBloqueoExcepcion) {
+        await db.DoctorBloqueoExcepcion.destroy({
+          where: { doctor_bloqueo_id: doctorBlockIds },
+          transaction,
+        });
+      }
+      await db.DoctorBloqueo.destroy({
+        where: { doctor_id: doctorUserId },
+        transaction,
+      });
+    }
+
+    const installationRows = await db.Instalacion.findAll({
+      where: { clinica_id: clinicId },
+      attributes: ['id'],
+      raw: true,
+      transaction,
+    });
+    const installationIds = installationRows.map((row) => Number(row.id));
+    if (installationIds.length) {
+      await db.InstalacionBloqueo.destroy({
+        where: { instalacion_id: installationIds },
+        transaction,
+      });
+      await db.InstalacionHorario.destroy({
+        where: { instalacion_id: installationIds },
+        transaction,
+      });
+    }
+    await db.Instalacion.destroy({ where: { clinica_id: clinicId }, transaction });
+
     const treatmentRows = await db.Tratamiento.findAll({
       where: { clinica_id: clinicId },
       attributes: ['id_tratamiento'],
@@ -1079,12 +2514,14 @@ async function cleanup() {
     await db.Tratamiento.destroy({ where: { clinica_id: clinicId }, transaction });
 
     if (patientIds.length) {
+      await db.PatientCustomField.destroy({ where: { paciente_id: patientIds }, transaction });
       await db.PacienteClinica.destroy({ where: { paciente_id: patientIds }, transaction });
     }
     await db.PacienteClinica.destroy({ where: { clinica_id: clinicId }, transaction });
     await db.ClinicalPrivateAsset.destroy({ where: { clinic_id: clinicId }, transaction });
     await db.UsuarioClinica.destroy({ where: { id_clinica: clinicId }, transaction });
     await db.Paciente.destroy({ where: { clinica_id: clinicId }, transaction });
+    await db.ClinicaHorario.destroy({ where: { clinica_id: clinicId }, transaction });
     await db.Clinica.destroy({ where: { id_clinica: clinicId }, transaction });
     if (firmUserIds.length) {
       await db.Usuario.destroy({ where: { id_usuario: firmUserIds }, transaction });
@@ -1100,6 +2537,22 @@ async function cleanup() {
             id_usuario: receptionUserId,
             email_usuario: DEMO_RECEPTION_EMAIL,
             cargo_usuario: DEMO_RECEPTION_CARGO,
+          },
+          transaction,
+        });
+      }
+    }
+    if (doctorUserId) {
+      const remainingMemberships = await db.UsuarioClinica.count({
+        where: { id_usuario: doctorUserId },
+        transaction,
+      });
+      if (!remainingMemberships) {
+        await db.Usuario.destroy({
+          where: {
+            id_usuario: doctorUserId,
+            email_usuario: DEMO_DOCTOR_EMAIL,
+            cargo_usuario: DEMO_DOCTOR_CARGO,
           },
           transaction,
         });

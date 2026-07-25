@@ -167,23 +167,52 @@ node src/scripts/qa/prepare-bs-medical-demo-clinic.js
 ```
 
 El script crea o actualiza `BS Medical · DEMO`, sin grupo, con marcador
-`configuracion.qa_demo.key=bs-medical-accounting-demo-v1`. Todos los pacientes,
-tratamientos, presupuesto, cobro, bono, factura emitida, factura recibida,
-adjuntos privados, trabajo OCR, apertura/cierre de caja, resumen de nominas y
-gestoria que contiene son sinteticos. Tambien crea una usuaria de Recepcion:
-puede abrir, operar y cerrar Caja, pero no recibe acceso al resumen contable,
-gastos, nominas ni gestoria. La primera ejecucion genera las credenciales de
-Recepcion y gestoria; las siguientes no restablecen sus contraseñas. Es
-idempotente y se elimina, incluidos los archivos privados y ambos usuarios
-sinteticos, con:
+`configuracion.qa_demo.key=bs-medical-accounting-demo-v1`. Todo su contenido es
+sintetico y eliminable:
+
+- `demo_bsmedical_accounting_v1`: caso de Estetica, historia con antes/despues,
+  presupuesto, cobro, bono y factura;
+- `demo_bsmedical_nutrition_v1`: caso de Nutricion con dos mediciones completas,
+  42 metricas por visita e informe comparativo;
+- `demo_bsmedical_capillary_v1`: caso Capilar con antes/despues, informes,
+  consentimientos firmados y dos pendientes para tablet;
+- ocho tratamientos, instalaciones, horarios, profesional y citas del dia;
+- factura recibida privada, miniatura OCR, caja abierta, cierre anterior,
+  resumen mensual de personal, domiciliacion, gestoria y plantillas fiscales.
+
+La doctora sintetica usa
+`doctora+bs-medical-demo@invalid.clinicaclick.local` /
+`DemoDoctor2026!`. La tablet usa `bs-medical-demo-tablet` /
+`DemoTablet2026!`. La primera ejecucion genera las credenciales de Recepcion y
+gestoria y las imprime una sola vez; las siguientes no restablecen sus
+contrasenas.
+
+Recepcion puede abrir, operar y cerrar Caja, pero no recibe resumen contable,
+gastos, nominas ni gestion de gestoria. La doctora ve agenda, consentimientos e
+historia clinica, sin economia. La cuenta de gestoria solo ve los documentos de
+las clinicas asignadas y no recibe navegacion general ni datos clinicos.
+
+El seed es idempotente y se elimina, incluidos archivos privados, sesiones de
+tablet y usuarios sinteticos, con:
 
 ```bash
 node src/scripts/qa/prepare-bs-medical-demo-clinic.js --cleanup
 ```
 
 La limpieza rechaza cualquier clinica sin el marcador exacto. En `dev`, la
-preparacion validada el 2026-07-25 creo `clinica_id=81`; el consumidor debe
-resolverla por nombre o marcador y no fijar ese id en codigo.
+preparacion validada el 2026-07-25 creo `clinica_id=82`; el consumidor debe
+resolverla por nombre o marcador y no fijar ese id en codigo. La fecha
+operativa se puede fijar sin tocar datos reales:
+
+```bash
+BS_MEDICAL_DEMO_BUSINESS_DATE=2026-07-25 \
+  node src/scripts/qa/prepare-bs-medical-demo-clinic.js
+```
+
+La migracion
+`20260725170000-seed-nutrition-system-specialties.js` completa el catalogo
+global de Nutricion con Nutricion clinica, deportiva, digestiva y Antropometria
+avanzada. No activa areas en clinicas reales.
 
 El seed historico siguiente modifica la clinica 66 y solo se conserva para sus
 pruebas API existentes; no debe usarse para preparar demos de producto:
@@ -213,8 +242,8 @@ Validacion ampliada del corte `20260725090000`:
 - la descarga ZIP contiene CSV, PDF emitidos y adjunto de proveedor;
 - presupuesto y documento fiscal se descargan como PDF 1.4;
 - la cola OCR conserva el documento en `review` hasta confirmacion humana;
-- Chromium desktop/movil queda registrado en
-  `/home/ubuntu/qa-evidence/clinical-accounting-goal-20260725/report.json`.
+- Chromium desktop/movil, roles y tablet quedan registrados en
+  `/home/ubuntu/qa-evidence/bs-medical-operational-20260725/final/report.json`.
 
 En cada runtime:
 
