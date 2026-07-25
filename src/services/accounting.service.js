@@ -311,6 +311,8 @@ function serializeClosure(row) {
     cash_outflows: money(value.cash_outflows),
     expected_cash: money(value.expected_cash),
     actual_cash: money(value.actual_cash),
+    denomination_breakdown: value.denomination_breakdown || {},
+    tender_reconciliation: value.tender_reconciliation || {},
     difference: money(value.difference),
     notes: value.notes,
     closed_by: value.closed_by,
@@ -365,10 +367,9 @@ async function cashForDate(
       where: {
         clinic_id: clinicId,
         status: 'confirmed',
-        method: 'cash',
         paid_at: { [Op.gte]: start, [Op.lt]: end },
       },
-      attributes: ['id', 'public_id', 'amount'],
+      attributes: ['id', 'public_id', 'amount', 'method'],
     }),
     AccountingExpenseDocument.findAll({
       where: {
@@ -382,25 +383,31 @@ async function cashForDate(
     AccountingCashMovement.findAll({
       where: {
         clinic_id: clinicId,
-        method: 'cash',
         occurred_at: { [Op.gte]: start, [Op.lt]: end },
       },
-      attributes: ['id', 'public_id', 'movement_type', 'amount'],
+      attributes: ['id', 'public_id', 'movement_type', 'amount', 'method'],
     }),
   ]);
-  const patientReceipts = money(payments.reduce((sum, row) => sum + Number(row.amount), 0));
-  const manualIncome = money(movements
+  const cashPayments = payments.filter((row) => row.method === 'cash');
+  const cashMovements = movements.filter((row) => row.method === 'cash');
+  const patientReceipts = money(cashPayments.reduce((sum, row) => sum + Number(row.amount), 0));
+  const manualIncome = money(cashMovements
     .filter((row) => row.movement_type === 'income')
     .reduce((sum, row) => sum + Number(row.amount), 0));
   const expenseOutflows = money(expenses.reduce((sum, row) => sum + Number(row.total), 0));
-  const manualOutflows = money(movements
+  const manualOutflows = money(cashMovements
     .filter((row) => row.movement_type === 'expense')
     .reduce((sum, row) => sum + Number(row.amount), 0));
-  const adjustments = money(movements
+  const adjustments = money(cashMovements
     .filter((row) => row.movement_type === 'adjustment')
     .reduce((sum, row) => sum + Number(row.amount), 0));
   const cashReceipts = money(patientReceipts + manualIncome);
   const cashOutflows = money(expenseOutflows + manualOutflows);
+  const tenderReconciliation = {};
+  for (const payment of payments) {
+    const method = payment.method || 'other';
+    tenderReconciliation[method] = money((tenderReconciliation[method] || 0) + Number(payment.amount));
+  }
   return {
     business_date: businessDate,
     opening_cash: money(openingCash),
@@ -412,6 +419,7 @@ async function cashForDate(
     cash_receipts: cashReceipts,
     cash_outflows: cashOutflows,
     expected_cash: money(openingCash + cashReceipts - cashOutflows + adjustments),
+    tender_reconciliation: tenderReconciliation,
     source_ids: {
       payments: payments.map((row) => row.public_id),
       expenses: expenses.map((row) => row.public_id),
@@ -420,7 +428,7 @@ async function cashForDate(
   };
 }
 
-async function getWorkspace({ clinicId, query = {} }) {
+async function getWorkspace({ clinicId, query = {}, portalMode = false }) {
   const period = periodBounds(query);
   const clinic = await loadClinic(clinicId);
   const businessDate = dateOnly(
@@ -475,6 +483,43 @@ async function getWorkspace({ clinicId, query = {} }) {
   const salesTotal = money(issuedDocuments.reduce((sum, document) => sum + Number(document.totals?.total || 0), 0));
   const expensesTotal = money(activeExpenses.reduce((sum, expense) => sum + Number(expense.total), 0));
   const collectedTotal = money(payments.reduce((sum, payment) => sum + Number(payment.amount), 0));
+  const daily = new Map();
+  const dayKey = (value) => {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? String(value).slice(0, 10) : parsed.toISOString().slice(0, 10);
+  };
+  const ensureDay = (value) => {
+    const key = dayKey(value);
+    if (!daily.has(key)) daily.set(key, { date: key, sales: 0, expenses: 0, collected: 0 });
+    return daily.get(key);
+  };
+  for (const document of issuedDocuments) {
+    ensureDay(document.issue_date).sales = money(
+      ensureDay(document.issue_date).sales + Number(document.totals?.total || 0),
+    );
+  }
+  for (const expense of activeExpenses) {
+    ensureDay(expense.issue_date).expenses = money(
+      ensureDay(expense.issue_date).expenses + Number(expense.total),
+    );
+  }
+  for (const payment of payments) {
+    ensureDay(payment.paid_at).collected = money(
+      ensureDay(payment.paid_at).collected + Number(payment.amount),
+    );
+  }
+  const paymentMethods = {};
+  for (const payment of payments) {
+    paymentMethods[payment.method || 'other'] = money(
+      (paymentMethods[payment.method || 'other'] || 0) + Number(payment.amount),
+    );
+  }
+  const expenseCategories = {};
+  for (const expense of activeExpenses) {
+    expenseCategories[expense.category || 'Otros'] = money(
+      (expenseCategories[expense.category || 'Otros'] || 0) + Number(expense.total),
+    );
+  }
   return {
     clinic,
     period: { from: period.fromDate, to: period.toDate },
@@ -491,12 +536,27 @@ async function getWorkspace({ clinicId, query = {} }) {
       expense,
       expense.attachment_asset_id ? assetMap.get(String(expense.attachment_asset_id)) : null
     )),
-    cash: {
+    cash: portalMode ? null : {
       current: currentCash,
       movements: movements.map(serializeMovement),
       closures: closures.map(serializeClosure),
     },
-    templates,
+    analytics: {
+      daily: [...daily.values()].sort((a, b) => a.date.localeCompare(b.date)),
+      payment_methods: Object.entries(paymentMethods).map(([label, value]) => ({ label, value })),
+      expense_categories: Object.entries(expenseCategories)
+        .map(([label, value]) => ({ label, value }))
+        .sort((a, b) => b.value - a.value),
+      receivables: {
+        pending_expenses_amount: money(activeExpenses
+          .filter((expense) => expense.status === 'pending')
+          .reduce((sum, expense) => sum + Number(expense.total), 0)),
+        draft_issued_amount: money(documents
+          .filter((document) => document.status === 'draft')
+          .reduce((sum, document) => sum + Number(document.totals?.total || 0), 0)),
+      },
+    },
+    templates: portalMode ? [] : templates,
     verifactu: {
       mode: 'mock',
       enabled: false,
@@ -548,7 +608,13 @@ function normalizeExpense(payload) {
   };
 }
 
-async function storeExpenseAttachment({ expense, clinicId, actorId, preparedAttachment }) {
+async function storeExpenseAttachment({
+  expense,
+  clinicId,
+  actorId,
+  preparedAttachment,
+  transaction = null,
+}) {
   if (!preparedAttachment) return null;
   const asset = await clinicalPrivateStorage.storeClinicalPrivateAsset({
     purpose: 'accounting_expense_document',
@@ -561,11 +627,14 @@ async function storeExpenseAttachment({ expense, clinicId, actorId, preparedAtta
     createdBy: actorId,
     metadata: { document_number: expense.document_number },
   });
-  await expense.update({ attachment_asset_id: asset.id, updated_by: actorId });
+  await expense.update(
+    { attachment_asset_id: asset.id, updated_by: actorId },
+    { transaction },
+  );
   return asset;
 }
 
-async function createExpense({ clinicId, actorId, payload }) {
+async function createExpense({ clinicId, actorId, payload, transaction = null }) {
   const values = normalizeExpense(payload);
   const preparedAttachment = prepareExpenseAttachment(payload.attachment);
   const expense = await AccountingExpenseDocument.create({
@@ -574,7 +643,7 @@ async function createExpense({ clinicId, actorId, payload }) {
     ...values,
     created_by: actorId,
     updated_by: actorId,
-  });
+  }, { transaction });
   let asset = null;
   try {
     asset = await storeExpenseAttachment({
@@ -582,9 +651,10 @@ async function createExpense({ clinicId, actorId, payload }) {
       clinicId,
       actorId,
       preparedAttachment,
+      transaction,
     });
   } catch (error) {
-    await expense.destroy();
+    await expense.destroy({ transaction });
     throw error;
   }
   return serializeExpense(expense, asset);
@@ -651,10 +721,40 @@ async function closeCash({ clinicId, actorId, payload }) {
   );
   const existing = await AccountingCashClosure.findOne({ where: { clinic_id: clinicId, business_date: businessDate } });
   if (existing) throw domainError(409, 'cash_already_closed', 'La caja de este día ya está cerrada.');
-  const openingCash = money(payload.opening_cash);
-  const actualCash = money(payload.actual_cash);
-  if (openingCash < 0 || actualCash < 0) throw domainError(400, 'cash_amount_invalid', 'Los importes de caja no son válidos.');
+  const lastClosure = await AccountingCashClosure.findOne({
+    where: { clinic_id: clinicId, business_date: { [Op.lt]: businessDate } },
+    order: [['business_date', 'DESC']],
+    attributes: ['actual_cash'],
+  });
+  const openingCash = money(lastClosure?.actual_cash);
+  const allowedDenominations = new Set([
+    '500', '200', '100', '50', '20', '10', '5', '2', '1',
+    '0.5', '0.2', '0.1', '0.05', '0.02', '0.01',
+  ]);
+  const rawBreakdown = payload.denomination_breakdown && typeof payload.denomination_breakdown === 'object'
+    ? payload.denomination_breakdown
+    : {};
+  const denominationBreakdown = {};
+  for (const [rawDenomination, rawCount] of Object.entries(rawBreakdown)) {
+    const denomination = String(Number(rawDenomination));
+    const count = Number.parseInt(String(rawCount), 10);
+    if (!allowedDenominations.has(denomination) || !Number.isInteger(count) || count < 0 || count > 10000) {
+      throw domainError(400, 'cash_denomination_invalid', 'El recuento de efectivo contiene un valor no válido.');
+    }
+    if (count) denominationBreakdown[denomination] = count;
+  }
+  const countedFromBreakdown = money(Object.entries(denominationBreakdown)
+    .reduce((sum, [denomination, count]) => sum + Number(denomination) * Number(count), 0));
+  const actualCash = Object.keys(denominationBreakdown).length
+    ? countedFromBreakdown
+    : money(payload.actual_cash);
+  if (actualCash < 0) throw domainError(400, 'cash_amount_invalid', 'El efectivo contado no es válido.');
   const snapshot = await cashForDate(clinicId, businessDate, openingCash, clinic.time_zone);
+  const difference = money(actualCash - snapshot.expected_cash);
+  const notes = clean(payload.notes, 4000) || null;
+  if (Math.abs(difference) > 0.01 && !notes) {
+    throw domainError(400, 'cash_difference_note_required', 'Indica el motivo de la diferencia para cerrar la caja.');
+  }
   const row = await AccountingCashClosure.create({
     public_id: crypto.randomUUID(),
     clinic_id: clinicId,
@@ -664,8 +764,10 @@ async function closeCash({ clinicId, actorId, payload }) {
     cash_outflows: snapshot.cash_outflows,
     expected_cash: snapshot.expected_cash,
     actual_cash: actualCash,
-    difference: money(actualCash - snapshot.expected_cash),
-    notes: clean(payload.notes, 4000) || null,
+    denomination_breakdown: denominationBreakdown,
+    tender_reconciliation: snapshot.tender_reconciliation,
+    difference,
+    notes,
     snapshot,
     closed_by: actorId,
     closed_at: new Date(),

@@ -2,6 +2,10 @@
 
 const asyncHandler = require('express-async-handler');
 const accounting = require('../services/accounting.service');
+const accountingFirms = require('../services/accountingFirms.service');
+const accountingIngestion = require('../services/accountingIngestion.service');
+const accountingSepa = require('../services/accountingSepa.service');
+const accountingExport = require('../services/accountingExport.service');
 const { canUserAccessFeature } = require('../lib/access-policy');
 
 function positiveInteger(value) {
@@ -23,8 +27,19 @@ function clinicId(req) {
 
 async function requireFeature(req, featureKey) {
   const resolvedClinicId = clinicId(req);
+  const resolvedActorId = actorId(req);
+  if (await accountingFirms.isPortalUser({ actorId: resolvedActorId })) {
+    if (!['billing.reports.view', 'accounting.export'].includes(featureKey)) {
+      throw accounting.domainError(403, 'accounting_portal_read_only', 'El portal de gestoría es de solo lectura.');
+    }
+    await accountingFirms.assertPortalClinic({
+      actorId: resolvedActorId,
+      clinicId: resolvedClinicId,
+    });
+    return resolvedClinicId;
+  }
   const allowed = await canUserAccessFeature({
-    actorId: actorId(req),
+    actorId: resolvedActorId,
     featureKey,
     clinicId: resolvedClinicId,
   });
@@ -34,8 +49,19 @@ async function requireFeature(req, featureKey) {
 
 async function requireAnyFeature(req, featureKeys) {
   const resolvedClinicId = clinicId(req);
+  const resolvedActorId = actorId(req);
+  if (await accountingFirms.isPortalUser({ actorId: resolvedActorId })) {
+    if (!featureKeys.some((featureKey) => ['billing.reports.view', 'accounting.export'].includes(featureKey))) {
+      throw accounting.domainError(403, 'accounting_portal_read_only', 'El portal de gestoría es de solo lectura.');
+    }
+    await accountingFirms.assertPortalClinic({
+      actorId: resolvedActorId,
+      clinicId: resolvedClinicId,
+    });
+    return resolvedClinicId;
+  }
   const decisions = await Promise.all(featureKeys.map((featureKey) => canUserAccessFeature({
-    actorId: actorId(req),
+    actorId: resolvedActorId,
     featureKey,
     clinicId: resolvedClinicId,
   })));
@@ -45,7 +71,12 @@ async function requireAnyFeature(req, featureKeys) {
 
 exports.getWorkspace = asyncHandler(async (req, res) => {
   const resolvedClinicId = await requireFeature(req, 'billing.reports.view');
-  res.json(await accounting.getWorkspace({ clinicId: resolvedClinicId, query: req.query }));
+  const portalMode = await accountingFirms.isPortalUser({ actorId: actorId(req) });
+  res.json(await accounting.getWorkspace({
+    clinicId: resolvedClinicId,
+    query: req.query,
+    portalMode,
+  }));
 });
 
 exports.createExpense = asyncHandler(async (req, res) => {
@@ -111,4 +142,163 @@ exports.exportCsv = asyncHandler(async (req, res) => {
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="contabilidad-${resolvedClinicId}.csv"`);
   res.send(`\uFEFF${csv}`);
+});
+
+exports.getFirm = asyncHandler(async (req, res) => {
+  const resolvedClinicId = await requireFeature(req, 'accounting.firm.manage');
+  res.json(await accountingFirms.getFirm({ clinicId: resolvedClinicId }));
+});
+
+exports.issueFirmCredentials = asyncHandler(async (req, res) => {
+  const resolvedClinicId = await requireFeature(req, 'accounting.firm.manage');
+  res.json(await accountingFirms.issueCredentials({
+    clinicId: resolvedClinicId,
+    actorId: actorId(req),
+  }));
+});
+
+exports.getPortalScope = asyncHandler(async (req, res) => {
+  res.json(await accountingFirms.portalScope({ actorId: actorId(req) }));
+});
+
+exports.getPortalWorkspace = asyncHandler(async (req, res) => {
+  const { clinicId: resolvedClinicId } = await accountingFirms.assertPortalClinic({
+    actorId: actorId(req),
+    clinicId: req.query.clinic_id,
+  });
+  res.json(await accounting.getWorkspace({
+    clinicId: resolvedClinicId,
+    query: req.query,
+    portalMode: true,
+  }));
+});
+
+exports.exportPortalCsv = asyncHandler(async (req, res) => {
+  const { clinicId: resolvedClinicId } = await accountingFirms.assertPortalClinic({
+    actorId: actorId(req),
+    clinicId: req.query.clinic_id,
+  });
+  const csv = await accounting.exportCsv({ clinicId: resolvedClinicId, query: req.query });
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="gestoria-${resolvedClinicId}.csv"`);
+  res.send(`\uFEFF${csv}`);
+});
+
+exports.listIngestion = asyncHandler(async (req, res) => {
+  const resolvedClinicId = await requireFeature(req, 'accounting.ocr.manage');
+  res.json(await accountingIngestion.list({ clinicId: resolvedClinicId }));
+});
+
+exports.enqueueIngestion = asyncHandler(async (req, res) => {
+  const resolvedClinicId = await requireFeature(req, 'accounting.ocr.manage');
+  res.status(201).json(await accountingIngestion.enqueue({
+    clinicId: resolvedClinicId,
+    actorId: actorId(req),
+    attachment: req.body.attachment,
+  }));
+});
+
+exports.processIngestion = asyncHandler(async (req, res) => {
+  const resolvedClinicId = await requireFeature(req, 'accounting.ocr.manage');
+  res.json(await accountingIngestion.process({
+    publicId: req.params.jobId,
+    clinicId: resolvedClinicId,
+  }));
+});
+
+exports.acceptIngestion = asyncHandler(async (req, res) => {
+  const resolvedClinicId = await requireFeature(req, 'accounting.ocr.manage');
+  res.json(await accountingIngestion.accept({
+    publicId: req.params.jobId,
+    clinicId: resolvedClinicId,
+    actorId: actorId(req),
+    payload: req.body,
+  }));
+});
+
+exports.downloadIngestionSource = asyncHandler(async (req, res) => {
+  const resolvedClinicId = await requireFeature(req, 'accounting.ocr.manage');
+  const { asset, buffer } = await accountingIngestion.readSource({
+    publicId: req.params.jobId,
+    clinicId: resolvedClinicId,
+  });
+  res.setHeader('Content-Type', asset.content_type);
+  res.setHeader('Content-Disposition', `inline; filename="${String(asset.original_filename || 'factura').replace(/"/g, '')}"`);
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.send(buffer);
+});
+
+exports.getSepa = asyncHandler(async (req, res) => {
+  const resolvedClinicId = await requireFeature(req, 'accounting.sepa.manage');
+  res.json(await accountingSepa.list({ clinicId: resolvedClinicId }));
+});
+
+exports.createSepaMandate = asyncHandler(async (req, res) => {
+  const resolvedClinicId = await requireFeature(req, 'accounting.sepa.manage');
+  res.status(201).json(await accountingSepa.saveMandate({
+    clinicId: resolvedClinicId,
+    actorId: actorId(req),
+    payload: req.body,
+  }));
+});
+
+exports.updateSepaMandate = asyncHandler(async (req, res) => {
+  const resolvedClinicId = await requireFeature(req, 'accounting.sepa.manage');
+  res.json(await accountingSepa.saveMandate({
+    clinicId: resolvedClinicId,
+    actorId: actorId(req),
+    payload: req.body,
+    publicId: req.params.mandateId,
+  }));
+});
+
+exports.createRemittance = asyncHandler(async (req, res) => {
+  const resolvedClinicId = await requireFeature(req, 'accounting.sepa.manage');
+  res.status(201).json(await accountingSepa.createRemittance({
+    clinicId: resolvedClinicId,
+    actorId: actorId(req),
+    payload: req.body,
+  }));
+});
+
+exports.exportRemittance = asyncHandler(async (req, res) => {
+  const resolvedClinicId = await requireFeature(req, 'accounting.sepa.manage');
+  const result = await accountingSepa.exportRemittance({
+    clinicId: resolvedClinicId,
+    publicId: req.params.remittanceId,
+  });
+  res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
+  res.send(result.document);
+});
+
+exports.exportZip = asyncHandler(async (req, res) => {
+  const resolvedClinicId = await requireFeature(req, 'accounting.export');
+  const bundle = await accountingExport.exportBundle({
+    clinicIds: [resolvedClinicId],
+    query: req.query,
+    actorId: actorId(req),
+  });
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="contabilidad-${resolvedClinicId}.zip"`);
+  res.send(bundle);
+});
+
+exports.exportPortalZip = asyncHandler(async (req, res) => {
+  const scope = await accountingFirms.portalScope({ actorId: actorId(req) });
+  const requestedClinicId = positiveInteger(req.query.clinic_id);
+  const clinicIds = requestedClinicId
+    ? scope.clinics.filter((clinic) => clinic.id === requestedClinicId).map((clinic) => clinic.id)
+    : scope.clinics.map((clinic) => clinic.id);
+  if (!clinicIds.length) {
+    throw accounting.domainError(403, 'accounting_portal_clinic_forbidden', 'La clínica no pertenece a esta gestoría.');
+  }
+  const bundle = await accountingExport.exportBundle({
+    clinicIds,
+    query: req.query,
+    actorId: actorId(req),
+  });
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', 'attachment; filename="gestoria-documentos.zip"');
+  res.send(bundle);
 });

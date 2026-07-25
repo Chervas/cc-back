@@ -18,6 +18,7 @@ const ALLOWED_PURPOSES = new Set([
   'clinical_attachment',
   'consent_document_pdf',
   'accounting_expense_document',
+  'fiscal_document_pdf',
 ]);
 
 const CONTENT_TYPE_EXTENSIONS = new Map([
@@ -83,7 +84,9 @@ function assertPayload({ purpose, contentType, buffer }) {
     err.status = 400;
     throw err;
   }
-  const allowedForPurpose = purpose === 'nutrition_report_pdf' || purpose === 'consent_document_pdf'
+  const allowedForPurpose = purpose === 'nutrition_report_pdf'
+    || purpose === 'consent_document_pdf'
+    || purpose === 'fiscal_document_pdf'
     ? contentType === 'application/pdf'
     : purpose === 'nutrition_clinical_photo'
       ? ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'].includes(contentType)

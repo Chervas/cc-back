@@ -22,6 +22,7 @@ module.exports = (sequelize, DataTypes) => {
     totals: { type: DataTypes.JSON, allowNull: false },
     payment_data: DataTypes.JSON,
     template_snapshot: { type: DataTypes.JSON, allowNull: false },
+    pdf_asset_id: DataTypes.INTEGER,
     verifactu_status: { type: DataTypes.STRING(20), allowNull: false, defaultValue: 'mock_pending' },
     notes: DataTypes.TEXT,
     created_by: DataTypes.INTEGER,

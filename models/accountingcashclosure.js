@@ -15,6 +15,8 @@ module.exports = (sequelize, DataTypes) => {
     cash_outflows: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: 0 },
     expected_cash: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: 0 },
     actual_cash: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: 0 },
+    denomination_breakdown: DataTypes.JSON,
+    tender_reconciliation: DataTypes.JSON,
     difference: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: 0 },
     notes: { type: DataTypes.TEXT, allowNull: true },
     snapshot: { type: DataTypes.JSON, allowNull: false },

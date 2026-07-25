@@ -525,14 +525,29 @@ function normalizePaymentProposal(raw, total) {
     schedule: [],
     financing_options: [],
     balance_application: null,
+    option_discounts: {},
   };
+  const rawDiscounts = proposal.option_discounts && typeof proposal.option_discounts === 'object'
+    ? proposal.option_discounts
+    : {};
+  for (const mode of PAYMENT_OPTION_MODES) {
+    const percentage = roundMoney(rawDiscounts[mode] || 0);
+    if (percentage < 0 || percentage > 100) {
+      throw domainError(400, 'payment_option_discount_invalid', 'El descuento de una forma de pago no es válido.');
+    }
+    normalized.option_discounts[mode] = percentage;
+  }
+  const optionTotal = (mode) => roundMoney(total * (1 - normalized.option_discounts[mode] / 100));
   if (includedModes.includes('single')) {
     normalized.single_payment = {
-      amount: total,
-      savings: roundMoney(proposal.single_payment?.savings || 0),
+      base_amount: total,
+      amount: optionTotal('single'),
+      discount_percent: normalized.option_discounts.single,
+      savings: roundMoney(total - optionTotal('single')),
     };
   }
   if (includedModes.includes('clinic_installments')) {
+    const clinicInstallmentsTotal = optionTotal('clinic_installments');
     const schedule = Array.isArray(proposal.schedule) ? proposal.schedule : [];
     if (!schedule.length) {
       throw domainError(400, 'payment_schedule_required', 'Define al menos una fase de pago.');
@@ -548,14 +563,21 @@ function normalizePaymentProposal(raw, total) {
       throw domainError(400, 'payment_schedule_amount_invalid', 'Todas las fases deben tener un importe mayor que cero.');
     }
     const scheduleTotal = roundMoney(normalized.schedule.reduce((sum, step) => sum + step.amount, 0));
-    if (Math.abs(scheduleTotal - total) > 0.01) {
+    if (Math.abs(scheduleTotal - clinicInstallmentsTotal) > 0.01) {
       throw domainError(400, 'payment_schedule_total_mismatch', 'Las fases deben sumar el total del presupuesto.', {
-        expected: total,
+        expected: clinicInstallmentsTotal,
         actual: scheduleTotal,
       });
     }
+    normalized.clinic_installments = {
+      base_amount: total,
+      amount: clinicInstallmentsTotal,
+      discount_percent: normalized.option_discounts.clinic_installments,
+      savings: roundMoney(total - clinicInstallmentsTotal),
+    };
   }
   if (includedModes.includes('external_financing')) {
+    const externalFinancingTotal = optionTotal('external_financing');
     const options = Array.isArray(proposal.financing_options) ? proposal.financing_options : [];
     if (!options.length) {
       throw domainError(400, 'financing_options_required', 'Añade al menos una opción de financiación.');
@@ -565,7 +587,7 @@ function normalizePaymentProposal(raw, total) {
       const entry = roundMoney(option.entry || 0);
       const openingFeePercent = roundMoney(option.opening_fee_percent || 0);
       const interestPercent = roundMoney(option.interest_percent || option.nominal_interest_percent || 0);
-      if (entry < 0 || entry > total) {
+      if (entry < 0 || entry > externalFinancingTotal) {
         throw domainError(400, 'financing_entry_invalid', 'La entrada de financiación no es válida.');
       }
       if (openingFeePercent < 0 || openingFeePercent > 100) {
@@ -574,7 +596,7 @@ function normalizePaymentProposal(raw, total) {
       if (interestPercent < 0 || interestPercent > 100) {
         throw domainError(400, 'financing_interest_invalid', 'El interés de financiación no es válido.');
       }
-      const financedPrincipal = roundMoney(Math.max(0, total - entry));
+      const financedPrincipal = roundMoney(Math.max(0, externalFinancingTotal - entry));
       const totalFinanced = roundMoney(financedPrincipal * (1 + interestPercent / 100));
       return {
         months,
@@ -590,6 +612,10 @@ function normalizePaymentProposal(raw, total) {
           ? option.required_documents.map((item) => cleanString(item, 120)).filter(Boolean)
           : [],
         highlighted: !!option.highlighted,
+        base_amount: total,
+        option_amount: externalFinancingTotal,
+        discount_percent: normalized.option_discounts.external_financing,
+        savings: roundMoney(total - externalFinancingTotal),
       };
     });
     const selectedMonths = optionalPositiveInteger(proposal.selected_financing_months)
@@ -602,10 +628,14 @@ function normalizePaymentProposal(raw, total) {
   }
   if (includedModes.includes('patient_balance')) {
     const amount = roundMoney(proposal.balance_application?.amount || 0);
-    if (amount <= 0 || amount > total) {
+    if (amount <= 0 || amount > optionTotal('patient_balance')) {
       throw domainError(400, 'balance_application_invalid', 'El saldo aplicado no es válido.');
     }
-    normalized.balance_application = { amount };
+    normalized.balance_application = {
+      amount,
+      option_amount: optionTotal('patient_balance'),
+      discount_percent: normalized.option_discounts.patient_balance,
+    };
   }
   return normalized;
 }
@@ -629,6 +659,8 @@ function serializePaymentProposal(value) {
     schedule: Array.isArray(proposal.schedule) ? proposal.schedule : [],
     financing_options: Array.isArray(proposal.financing_options) ? proposal.financing_options : [],
     balance_application: proposal.balance_application || null,
+    option_discounts: proposal.option_discounts || {},
+    clinic_installments: proposal.clinic_installments || null,
   };
 }
 
@@ -641,11 +673,14 @@ function normalizeDesignConfig(payload, template) {
     template_name: template?.name || 'Familiar',
     header_variant: cleanString(requested.header_variant || base.header_variant, 50) || 'family',
     header_asset_url: cleanString(requested.header_asset_url, 1000) || null,
+    logo_mode: ['clinic', 'custom', 'none'].includes(requested.logo_mode) ? requested.logo_mode : 'clinic',
+    logo_url: cleanString(requested.logo_url, 1000) || null,
     accent: cleanString(requested.accent || base.accent, 30) || 'primary',
     highlighted_block: cleanString(requested.highlighted_block || base.highlighted_block, 50) || 'services',
     blocks,
     block_visibility: { ...(base.block_visibility || {}), ...(requested.block_visibility || {}) },
     conditions: cleanString(requested.conditions, 4000) || null,
+    clinic_message: cleanString(requested.clinic_message, 4000) || null,
     custom_title: cleanString(requested.custom_title, 180) || null,
   };
 }
@@ -1520,6 +1555,210 @@ function normalizeFiscalLines(rawLines, budgetVersion) {
   });
 }
 
+async function nextFiscalNumber({ clinicId, documentType, series, transaction }) {
+  await Clinica.findByPk(clinicId, {
+    attributes: ['id_clinica'],
+    transaction,
+    lock: transaction.LOCK.UPDATE,
+  });
+  const year = new Date().getFullYear();
+  const numberPrefix = `${series}-${year}-`;
+  const existingDocuments = await PatientFiscalDocument.findAll({
+    where: {
+      clinic_id: clinicId,
+      document_type: documentType,
+      series,
+      number: { [Op.like]: `${numberPrefix}%` },
+    },
+    attributes: ['number'],
+    transaction,
+  });
+  const lastSequence = existingDocuments.reduce((max, existingDocument) => {
+    const sequence = Number.parseInt(String(existingDocument.number).slice(numberPrefix.length), 10);
+    return Number.isInteger(sequence) ? Math.max(max, sequence) : max;
+  }, 0);
+  return `${numberPrefix}${String(lastSequence + 1).padStart(4, '0')}`;
+}
+
+function assertFiscalParties({ documentType, status, issuer, recipient }) {
+  if (documentType === 'receipt' || status !== 'issued') return;
+  const required = ['legal_name', 'tax_id', 'address', 'postal_code', 'city', 'country'];
+  const recipientMissing = required.filter((field) => !recipient[field]);
+  const issuerMissing = required.filter((field) => !issuer[field]);
+  if (recipientMissing.length) {
+    throw domainError(400, 'invoice_recipient_incomplete', 'Completa los datos fiscales del destinatario.', {
+      missing: recipientMissing,
+    });
+  }
+  if (issuerMissing.length) {
+    throw domainError(400, 'invoice_issuer_incomplete', 'Completa los datos fiscales de la clínica.', {
+      missing: issuerMissing,
+    });
+  }
+}
+
+async function createPatientFiscalDocument({
+  patientIdentifier,
+  clinicId,
+  actorId,
+  payload,
+}) {
+  return sequelize.transaction(async (transaction) => {
+    const { patient, clinic } = await loadContext(patientIdentifier, clinicId);
+    const sourceType = cleanString(payload.source_type || payload.source?.type || 'manual', 20).toLowerCase();
+    if (!['manual', 'budget', 'payment'].includes(sourceType)) {
+      throw domainError(400, 'fiscal_source_invalid', 'El origen del documento no es válido.');
+    }
+    let budget = null;
+    let payment = null;
+    let version = null;
+    if (sourceType === 'budget') {
+      const budgetId = cleanString(payload.source_id || payload.source?.id, 36);
+      budget = await EconomicBudget.findOne({
+        where: {
+          public_id: budgetId,
+          clinic_id: clinicId,
+          patient_id: patient.id_paciente,
+        },
+        transaction,
+      });
+      if (!budget) throw domainError(404, 'budget_not_found', 'Presupuesto no encontrado.');
+      version = await EconomicBudgetVersion.findOne({
+        where: { budget_id: budget.id, version_number: budget.current_version },
+        transaction,
+      });
+    } else if (sourceType === 'payment') {
+      const paymentId = cleanString(payload.source_id || payload.source?.id, 36);
+      payment = await EconomicPayment.findOne({
+        where: {
+          public_id: paymentId,
+          clinic_id: clinicId,
+          patient_id: patient.id_paciente,
+          status: 'confirmed',
+        },
+        transaction,
+      });
+      if (!payment) throw domainError(404, 'payment_not_found', 'Cobro no encontrado.');
+      if (payment.budget_id) {
+        budget = await EconomicBudget.findByPk(payment.budget_id, { transaction });
+        version = budget
+          ? await EconomicBudgetVersion.findOne({
+            where: { budget_id: budget.id, version_number: payment.budget_version || budget.current_version },
+            transaction,
+          })
+          : null;
+      }
+    }
+    const documentType = cleanString(payload.document_type, 20).toLowerCase();
+    if (!FISCAL_DOCUMENT_TYPES.has(documentType)) {
+      throw domainError(400, 'fiscal_document_type_invalid', 'El tipo de documento no es válido.');
+    }
+    const status = cleanString(payload.status || 'draft', 20);
+    if (!['draft', 'issued'].includes(status)) {
+      throw domainError(400, 'fiscal_document_status_invalid', 'Estado fiscal no válido.');
+    }
+    const issuer = normalizeFiscalParty(payload.issuer, mapClinicSnapshot(clinic));
+    const recipient = normalizeFiscalParty(payload.recipient, mapPatientSnapshot(patient));
+    assertFiscalParties({ documentType, status, issuer, recipient });
+    const lines = normalizeFiscalLines(payload.lines, version);
+    const totals = {
+      currency: 'EUR',
+      taxable_base: roundMoney(lines.reduce((sum, line) => sum + line.taxable_base, 0)),
+      taxes: roundMoney(lines.reduce((sum, line) => sum + line.tax_amount, 0)),
+      total: roundMoney(lines.reduce((sum, line) => sum + line.total, 0)),
+    };
+    if (documentType !== 'credit_note' && sourceType !== 'manual') {
+      const sourceWhere = sourceType === 'budget'
+        ? { budget_id: budget.id }
+        : { payment_id: payment.id };
+      const previousDocuments = await PatientFiscalDocument.findAll({
+        where: {
+          clinic_id: clinicId,
+          patient_id: patient.id_paciente,
+          status: { [Op.ne]: 'voided' },
+          document_type: { [Op.in]: ['invoice', 'receipt'] },
+          ...sourceWhere,
+        },
+        attributes: ['totals'],
+        transaction,
+      });
+      const alreadyDocumented = roundMoney(previousDocuments.reduce(
+        (sum, document) => sum + numberValue(parseJson(document.totals, {}).total),
+        0,
+      ));
+      const sourceAmount = sourceType === 'payment'
+        ? roundMoney(payment.amount)
+        : numberValue(parseJson(version?.totals, {}).total);
+      if (totals.total - roundMoney(sourceAmount - alreadyDocumented) > 0.01) {
+        throw domainError(
+          409,
+          'fiscal_source_amount_exceeded',
+          'El importe supera la parte pendiente de documentar.',
+          {
+            source_amount: sourceAmount,
+            already_documented: alreadyDocumented,
+            available: roundMoney(Math.max(0, sourceAmount - alreadyDocumented)),
+          },
+        );
+      }
+    }
+    const template = await resolveTemplate({
+      clinicId,
+      templateId: payload.template_id,
+      templateType: 'invoice',
+    });
+    const series = cleanString(payload.series, 30) || (documentType === 'receipt' ? 'REC' : 'FAC');
+    const number = cleanString(payload.number, 60)
+      || await nextFiscalNumber({ clinicId, documentType, series, transaction });
+    const sourceData = {
+      ...(payload.payment_data && typeof payload.payment_data === 'object' ? payload.payment_data : {}),
+      source: {
+        type: sourceType,
+        id: sourceType === 'budget'
+          ? budget?.public_id
+          : sourceType === 'payment'
+            ? payment?.public_id
+            : null,
+        applied_amount: totals.total,
+      },
+    };
+    const document = await PatientFiscalDocument.create({
+      public_id: crypto.randomUUID(),
+      clinic_id: clinicId,
+      patient_id: patient.id_paciente,
+      budget_id: budget?.id || null,
+      payment_id: payment?.id || null,
+      document_type: documentType,
+      series,
+      number,
+      status,
+      issue_date: dateOrNull(payload.issue_date) || new Date(),
+      due_date: dateOrNull(payload.due_date),
+      issuer_snapshot: issuer,
+      recipient_snapshot: recipient,
+      lines,
+      totals,
+      payment_data: sourceData,
+      template_snapshot: {
+        id: template.public_id,
+        name: template.name,
+        config: {
+          ...cloneJson(template.config),
+          logo_mode: payload.logo_mode || template.config?.logo_mode || 'clinic',
+          logo_url: cleanString(payload.logo_url, 1000) || template.config?.logo_url || null,
+        },
+      },
+      verifactu_status: documentType === 'receipt'
+        ? 'not_applicable'
+        : (status === 'issued' ? 'ready' : 'mock_pending'),
+      notes: cleanString(payload.notes, 5000) || null,
+      created_by: actorId,
+      updated_by: actorId,
+    }, { transaction });
+    return serializeFiscalDocument(document, budget?.public_id || null);
+  });
+}
+
 async function createFiscalDocument({ publicId, actorId, payload }) {
   return sequelize.transaction(async (transaction) => {
     const budget = await loadBudgetByPublicId(publicId, transaction);
@@ -2022,5 +2261,6 @@ module.exports = {
   createVoucher,
   consumeVoucher,
   createFiscalDocument,
+  createPatientFiscalDocument,
   updateFiscalDocument,
 };

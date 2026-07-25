@@ -2,6 +2,8 @@
 
 const db = require('../../models');
 const economics = require('../services/patientEconomics.service');
+const economicDocumentPdf = require('../services/economicDocumentPdf.service');
+const voucherAppointments = require('../services/patientVoucherAppointments.service');
 const { getAccessibleClinicIdsForFeature } = require('../lib/access-policy');
 
 function positiveInteger(value) {
@@ -227,6 +229,64 @@ exports.createFiscalDocument = asyncHandler(async (req, res) => {
     payload: req.body,
   });
   res.status(201).json(document);
+});
+
+exports.createPatientFiscalDocument = asyncHandler(async (req, res) => {
+  const clinicId = await requireClinicFeature(
+    req,
+    'billing.documents.manage',
+    req.body.clinic_id ?? req.body.clinica_id
+  );
+  const document = await economics.createPatientFiscalDocument({
+    patientIdentifier: req.params.patientId,
+    clinicId,
+    actorId: actorId(req),
+    payload: req.body,
+  });
+  res.status(201).json(document);
+});
+
+exports.downloadBudgetPdf = asyncHandler(async (req, res) => {
+  await requireBudgetFeature(req, 'patients.view');
+  const result = await economicDocumentPdf.budgetPdf({ publicId: req.params.budgetId });
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${result.filename.replace(/"/g, '')}"`);
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.send(result.buffer);
+});
+
+exports.downloadFiscalDocumentPdf = asyncHandler(async (req, res) => {
+  await requireFiscalDocumentFeature(req, 'billing.reports.view');
+  const result = await economicDocumentPdf.fiscalPdf({
+    publicId: req.params.documentId,
+    actorId: actorId(req),
+  });
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${result.filename.replace(/"/g, '')}"`);
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.send(result.buffer);
+});
+
+exports.getVoucherAppointmentResources = asyncHandler(async (req, res) => {
+  await requireVoucherFeature(req, 'patients.view');
+  res.json(await voucherAppointments.resources({ publicId: req.params.voucherId }));
+});
+
+exports.previewVoucherAppointments = asyncHandler(async (req, res) => {
+  await requireVoucherFeature(req, 'appointments.manage');
+  res.json(await voucherAppointments.preview({
+    publicId: req.params.voucherId,
+    payload: req.body,
+  }));
+});
+
+exports.createVoucherAppointments = asyncHandler(async (req, res) => {
+  await requireVoucherFeature(req, 'appointments.manage');
+  res.status(201).json(await voucherAppointments.create({
+    publicId: req.params.voucherId,
+    actorId: actorId(req),
+    payload: req.body,
+  }));
 });
 
 exports.updateFiscalDocument = asyncHandler(async (req, res) => {

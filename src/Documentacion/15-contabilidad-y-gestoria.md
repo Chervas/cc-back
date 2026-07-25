@@ -2,7 +2,9 @@
 
 > Implementado en `dev` el 2026-07-24.
 > Prefijo API: `/api/accounting`.
-> Migracion: `20260724203000-create-accounting-domain.js`.
+> Migraciones: `20260724203000-create-accounting-domain.js` y ampliacion
+> `20260725090000-expand-clinical-accounting-workflows.js`. La relacion entre
+> bonos y citas se añade en `20260725100000-link-voucher-appointments.js`.
 
 ## Dominio
 
@@ -13,6 +15,11 @@
 - `EconomicPayments`: fuente de cobros de pacientes.
 - `ClinicalPrivateAssets`: adjuntos privados de proveedor con proposito
   `accounting_expense_document`.
+- `AccountingFirms`, asignaciones y usuarios: scope externo por grupo o
+  clinica independiente.
+- `AccountingIngestionJobs`: cola durable de lectura y revision.
+- `AccountingSepaMandates`, `AccountingRemittances` e items: domiciliaciones y
+  lotes de cobro.
 
 El servicio usa consultas separadas y mapas en memoria; no usa `LEFT JOIN`.
 
@@ -21,6 +28,17 @@ El servicio usa consultas separadas y mapas en memoria; no usa `LEFT JOIN`.
 - `GET /workspace?clinic_id=&from=&to=&business_date=`
 - `GET /documents/:documentId?clinic_id=`
 - `GET /export.csv?clinic_id=&from=&to=`
+- `GET /export.zip?clinic_id=&from=&to=`
+- `GET /firm` y `POST /firm/credentials`
+- `GET /portal/scope`, `GET /portal/workspace`
+- `GET /portal/export.csv` y `GET /portal/export.zip`
+- `GET|POST /ingestion`
+- `POST /ingestion/:jobId/process`
+- `POST /ingestion/:jobId/accept`
+- `GET /sepa`
+- `POST|PATCH /sepa/mandates`
+- `POST /sepa/remittances`
+- `GET /sepa/remittances/:id.xml`
 - `POST /expenses`
 - `PATCH /expenses/:expenseId`
 - `GET /expenses/:expenseId/attachment?clinic_id=`
@@ -38,8 +56,11 @@ Formula:
 `apertura + cobros efectivo + entradas - facturas recibidas pagadas en efectivo
 - salidas + ajustes`
 
-El cierre guarda esperado, contado, diferencia y los ids de documentos y
-movimientos usados. Existe una restriccion unica por clinica y dia.
+El cierre guarda esperado, contado, diferencia, recuento por denominacion y
+conciliacion por medio de pago. La apertura se toma del ultimo cierre; no se
+edita desde la interfaz. Solo el efectivo interviene en el cajon. Tarjeta,
+transferencia, Bizum y otros medios quedan en el snapshot de conciliacion.
+Existe una restriccion unica por clinica y dia.
 El rango diario se convierte desde la zona de `Clinicas.configuracion`, con
 fallback `Europe/Madrid`; no usa medianoche UTC como limite operativo.
 
@@ -49,11 +70,18 @@ fallback `Europe/Madrid`; no usa medianoche UTC como limite operativo.
 - exportacion: `accounting.export`;
 - gastos: `accounting.expenses.manage`;
 - caja: `accounting.cash.manage`;
+- OCR: `accounting.ocr.manage`;
+- domiciliaciones: `accounting.sepa.manage`;
+- acceso externo: `accounting.firm.manage`;
 - documentos emitidos: `billing.documents.manage`;
 - plantillas: `clinic.settings.edit`.
 
 El subrol `Gestoria` se normaliza como `accountant`: lectura/exportacion si,
-mutaciones y datos clinicos no. Los defaults desconocidos devuelven `false`.
+mutaciones, caja y datos clinicos no. Cada grupo obtiene una gestoria y las
+clinicas independientes la suya. Las credenciales temporales solo se devuelven
+al crearlas o restablecerlas. El portal obtiene su scope desde
+`AccountingFirmUser`, no desde filtros enviados por el navegador. Los defaults
+desconocidos devuelven `false`.
 La creación y edición de facturas/recibos en `/api/economics` exige
 `billing.documents.manage`, no el permiso genérico de editar pacientes.
 
@@ -64,8 +92,33 @@ Los documentos fiscales conservan un snapshot de plantilla. Builtins:
 - `builtin-invoice-standard`: `Fuse moderna`, renderer `modern`;
 - `builtin-invoice-compact`: `Fuse compacta`, renderer `compact`.
 
-El backend devuelve datos estructurados; el frontend genera vista e impresion
-A4 con el mismo renderer. No se persiste un PDF duplicado.
+El backend devuelve datos estructurados; el frontend genera la misma vista.
+El PDF A4 se genera con Chromium. Un documento emitido conserva un unico PDF
+privado inmutable; los ZIP de gestoria incluyen CSV, PDF emitidos y adjuntos
+recibidos organizados por clinica.
+
+Chromium solo puede cargar imagenes desde el frontend, `PUBLIC_MEDIA_BASE_URL`
+y los origenes explicitos de `ECONOMIC_PDF_ASSET_ORIGINS`. Las redirecciones a
+otros destinos se bloquean para evitar SSRF al usar logos personalizados.
+
+## Lectura automatica de gastos
+
+La cola acepta PDF/JPEG/PNG/WebP hasta 18 MB. El archivo se guarda primero en
+almacenamiento privado y el job pasa por `queued`, `processing`, `review`,
+`accepted` o `failed`.
+
+El extractor usa Responses API con salida JSON Schema estricta, `store:false`
+y el modelo configurable `ACCOUNTING_OCR_MODEL` (default
+`gpt-5.4-nano`). Ningun dato se contabiliza automaticamente: `accept` reutiliza
+el mismo adjunto privado y crea la factura recibida solo tras revision humana.
+
+## Domiciliaciones
+
+El IBAN del paciente se valida con modulo 97 y se cifra con AES-256-GCM. La API
+solo devuelve los ultimos cuatro digitos. La exportacion genera `pain.008` y
+exige identificador de acreedor e IBAN fiscal de la clinica. La clave dedicada
+es `ACCOUNTING_DATA_ENCRYPTION_KEY`; mientras se despliega puede caer en
+`JWT_SECRET`, pero produccion debe configurar una clave separada.
 
 ## VeriFactu
 
@@ -93,6 +146,18 @@ QA_AUTH_TOKEN=... node src/scripts/qa/verify-accounting-demo.js
 Comprueba workspace, documento fiscal, CSV, PDF privado, zona horaria/caja y
 que un adjunto invalido se rechaza sin crear una fila residual.
 
+Validacion ampliada del corte `20260725090000`:
+
+- los contratos de acceso backend y de paciente compartido pasan;
+- el portal resuelve dos clinicas del grupo de prueba sin aceptar ids ajenos;
+- una cuenta de gestoria recibe `cash: null` incluso si llama al workspace
+  general, y el alcance se recalcula cuando cambia la composicion del grupo;
+- la descarga ZIP contiene CSV, PDF emitidos y adjunto de proveedor;
+- presupuesto y documento fiscal se descargan como PDF 1.4;
+- la cola OCR conserva el documento en `review` hasta confirmacion humana;
+- Chromium desktop/movil queda registrado en
+  `/home/ubuntu/qa-evidence/clinical-accounting-goal-20260725/report.json`.
+
 En cada runtime:
 
 ```bash
@@ -107,7 +172,9 @@ runtimes carguen el cambio, antes de reiniciar.
 Rollback destructivo solo sin datos que conservar:
 
 ```bash
+npx sequelize-cli db:migrate:undo --name 20260725100000-link-voucher-appointments.js
+npx sequelize-cli db:migrate:undo --name 20260725090000-expand-clinical-accounting-workflows.js
 npx sequelize-cli db:migrate:undo --name 20260724203000-create-accounting-domain.js
 ```
 
-No se aplico esta migracion en staging durante el corte.
+No se aplico ninguna de estas migraciones en staging durante el corte.

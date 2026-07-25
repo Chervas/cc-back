@@ -56,15 +56,35 @@ separada.
 
 Fiscal y plantillas:
 
+- `POST /patients/:patientId/fiscal-documents`
 - `POST /budgets/:budgetId/fiscal-documents`
+- `GET /budgets/:budgetId/pdf`
+- `GET /fiscal-documents/:documentId/pdf`
 - `PATCH /fiscal-documents/:documentId`
 - `POST /templates`
 - `PATCH /templates/:templateId`
 
-La impresion de presupuestos y documentos fiscales se hace en frontend desde
-el snapshot estructurado. El presupuesto puede incluir simultaneamente pago
+La impresion conserva el snapshot estructurado y tambien dispone de PDF
+generado en backend. Los PDF fiscales emitidos se materializan una sola vez en
+almacenamiento privado; los borradores se generan bajo demanda. El presupuesto
+puede incluir simultaneamente pago
 unico, fases, financiacion y saldo mediante `included_modes`; `mode` solo se
 conserva para leer versiones antiguas.
+
+La creacion fiscal general admite origen `manual`, `budget` o `payment`. El
+backend calcula lo ya documentado y rechaza importes superiores al pendiente,
+por lo que una factura o recibo puede cubrir solo una parte sin duplicar dinero.
+El logo elegido queda congelado en el snapshot de plantilla.
+
+Planificacion de bonos:
+
+- `GET /vouchers/:voucherId/appointment-resources`
+- `POST /vouchers/:voucherId/appointment-plan`
+- `POST /vouchers/:voucherId/appointments`
+
+La previsualizacion calcula una serie futura y conflictos por profesional o
+instalacion. La confirmacion crea citas reales y encola las automatizaciones
+de cita existentes.
 
 Contabilidad transversal y portal:
 [15-contabilidad-y-gestoria](./15-contabilidad-y-gestoria.md).
@@ -79,6 +99,8 @@ Contabilidad transversal y portal:
 - Las transiciones de estado son explicitas.
 - Cobros + saldo aplicado no pueden superar el importe aceptado/pendiente.
 - Las fases deben sumar el total del presupuesto.
+- Cada alternativa de pago puede aplicar su descuento propio mediante
+  `option_discounts`; sus fases y financiacion se calculan sobre ese importe.
 - Un bono conserva unidades y movimientos; no es metodo de pago.
 - Una factura requiere emisor y destinatario fiscal completos.
 - Crear o editar facturas y recibos requiere `billing.documents.manage`.
@@ -120,3 +142,16 @@ npx sequelize-cli db:migrate:undo --name 20260724183000-create-patient-economics
 ```
 
 No se ha aplicado nada en `staging` en este corte.
+
+## Ampliacion 2026-07-25
+
+La migracion `20260725090000-expand-clinical-accounting-workflows.js` agrega el
+snapshot PDF fiscal y los contratos transversales de informes de cita,
+gestorias, OCR y SEPA. Se aplico solo en `dev`. Su rollback es destructivo para
+esas entidades nuevas y no debe ejecutarse si ya hay informes, credenciales,
+mandatos, remesas o archivos procesados que deban conservarse.
+
+La migracion `20260725100000-link-voucher-appointments.js` enlaza cada cita
+planificada con su bono. Al calcular nuevas citas, se restan las sesiones ya
+reservadas que todavia no tengan un movimiento de consumo; esto evita generar
+dos veces la misma serie.
