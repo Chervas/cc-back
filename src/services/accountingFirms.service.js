@@ -211,7 +211,8 @@ async function issueCredentials({ clinicId, actorId }) {
       `Acceso a ${firm.name}`,
       `URL: ${base.portal_url}`,
       `Usuario: ${user.email_usuario}`,
-      `Contraseña temporal: ${password}`,
+      `Contraseña inicial: ${password}`,
+      'El acceso no caduca. Puedes revocarlo o restablecer la contraseña desde Clinicaclick.',
       'Por seguridad, guarda estas credenciales en tu gestor de contraseñas.',
     ].join('\n');
     return {

@@ -302,6 +302,15 @@ async function run() {
   assert.equal(accessPolicy.defaultForFeature('billing.documents.manage', 'accountant'), false);
   assert.equal(accessPolicy.defaultForFeature('accounting.expenses.manage', 'accountant'), false);
   assert.equal(accessPolicy.defaultForFeature('accounting.cash.manage', 'accountant'), false);
+  assert.equal(accessPolicy.defaultForFeature('accounting.cash.manage', 'reception'), true);
+  assert.equal(accessPolicy.defaultForFeature('accounting.cash.manage', 'assistant'), true);
+  assert.equal(accessPolicy.defaultForFeature('billing.reports.view', 'reception'), false);
+  assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has('accounting.payroll.view'), true);
+  assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has('accounting.payroll.manage'), true);
+  assert.equal(accessPolicy.defaultForFeature('accounting.payroll.view', 'propietario'), true);
+  assert.equal(accessPolicy.defaultForFeature('accounting.payroll.view', 'admin_staff'), true);
+  assert.equal(accessPolicy.defaultForFeature('accounting.payroll.view', 'reception'), false);
+  assert.equal(accessPolicy.defaultForFeature('accounting.payroll.manage', 'reception'), false);
   assert.equal(accessPolicy.defaultForFeature('patients.view', 'accountant'), false);
   assert.equal(accessPolicy.defaultForFeature('quickchat.read_patients', 'accountant'), false);
 

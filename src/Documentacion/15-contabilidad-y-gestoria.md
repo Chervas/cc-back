@@ -5,12 +5,17 @@
 > Migraciones: `20260724203000-create-accounting-domain.js` y ampliacion
 > `20260725090000-expand-clinical-accounting-workflows.js`. La relacion entre
 > bonos y citas se añade en `20260725100000-link-voucher-appointments.js`.
+> Apertura de caja y costes de personal:
+> `20260725120000-add-cash-sessions-and-payroll-periods.js`.
 
 ## Dominio
 
 - `AccountingExpenseDocuments`: facturas recibidas y gastos.
 - `AccountingCashMovements`: entradas, salidas y ajustes manuales.
 - `AccountingCashClosures`: arqueo inmutable y snapshot de fuentes.
+- `AccountingCashSessions`: apertura explicita, estado abierto/cerrado y
+  relacion con el cierre.
+- `AccountingPayrollPeriods`: resumen mensual agregado del coste de personal.
 - `PatientFiscalDocuments`: fuente de facturas/recibos emitidos.
 - `EconomicPayments`: fuente de cobros de pacientes.
 - `ClinicalPrivateAssets`: adjuntos privados de proveedor con proposito
@@ -44,6 +49,10 @@ El servicio usa consultas separadas y mapas en memoria; no usa `LEFT JOIN`.
 - `GET /expenses/:expenseId/attachment?clinic_id=`
 - `POST /cash/movements`
 - `POST /cash/closures`
+- `GET /cash/workspace`
+- `POST /cash/open`
+- `POST|PATCH /payroll`
+- `GET /payroll/:payrollId/document`
 
 Los adjuntos no tienen URL publica. La descarga exige JWT, permiso y clinica,
 y responde `private, no-store`. Solo admite PDF/JPEG/PNG/WebP hasta 18 MB y
@@ -57,8 +66,10 @@ Formula:
 - salidas + ajustes`
 
 El cierre guarda esperado, contado, diferencia, recuento por denominacion y
-conciliacion por medio de pago. La apertura se toma del ultimo cierre; no se
-edita desde la interfaz. Solo el efectivo interviene en el cajon. Tarjeta,
+conciliacion por medio de pago. La auxiliar abre la caja confirmando el fondo
+propuesto desde el ultimo cierre. Sin sesion abierta no se aceptan movimientos
+manuales ni cierre; una sesion cerrada no se puede reabrir. Solo el efectivo
+interviene en el cajon. Tarjeta,
 transferencia, Bizum y otros medios quedan en el snapshot de conciliacion.
 Existe una restriccion unica por clinica y dia.
 El rango diario se convierte desde la zona de `Clinicas.configuracion`, con
@@ -70,6 +81,8 @@ fallback `Europe/Madrid`; no usa medianoche UTC como limite operativo.
 - exportacion: `accounting.export`;
 - gastos: `accounting.expenses.manage`;
 - caja: `accounting.cash.manage`;
+- nominas (lectura): `accounting.payroll.view`;
+- nominas (edicion): `accounting.payroll.manage`;
 - OCR: `accounting.ocr.manage`;
 - domiciliaciones: `accounting.sepa.manage`;
 - acceso externo: `accounting.firm.manage`;
@@ -78,8 +91,9 @@ fallback `Europe/Madrid`; no usa medianoche UTC como limite operativo.
 
 El subrol `Gestoria` se normaliza como `accountant`: lectura/exportacion si,
 mutaciones, caja y datos clinicos no. Cada grupo obtiene una gestoria y las
-clinicas independientes la suya. Las credenciales temporales solo se devuelven
-al crearlas o restablecerlas. El portal obtiene su scope desde
+clinicas independientes la suya. Las credenciales iniciales solo se devuelven
+al crearlas o restablecerlas y no caducan por tiempo; se revocan o restablecen
+expresamente. El portal obtiene su scope desde
 `AccountingFirmUser`, no desde filtros enviados por el navegador. Los defaults
 desconocidos devuelven `false`.
 La creación y edición de facturas/recibos en `/api/economics` exige
@@ -89,8 +103,24 @@ La creación y edición de facturas/recibos en `/api/economics` exige
 
 Los documentos fiscales conservan un snapshot de plantilla. Builtins:
 
-- `builtin-invoice-standard`: `Fuse moderna`, renderer `modern`;
-- `builtin-invoice-compact`: `Fuse compacta`, renderer `compact`.
+- `builtin-invoice-standard`: `Moderna`, renderer `modern`;
+- `builtin-invoice-compact`: `Compacta`, renderer `compact`.
+
+## Nominas
+
+Las nominas no se registran como factura de proveedor. Se guarda un resumen
+agregado por clinica y mes:
+
+- salario bruto;
+- Seguridad Social del trabajador e IRPF como desglose de obligaciones;
+- neto pagado;
+- Seguridad Social a cargo de la empresa y otros costes;
+- coste total de personal = bruto + SS empresa + otros costes.
+
+El coste total reduce el resultado operativo. Los documentos agregados
+(`RLC`, `RNT` o resumen de nominas) usan `ClinicalPrivateAssets` con proposito
+`accounting_payroll_document`. Recepcion, gestor externo y roles clinicos no
+reciben filas ni adjuntos de nominas por defecto.
 
 El backend devuelve datos estructurados; el frontend genera la misma vista.
 El PDF A4 se genera con Chromium. Un documento emitido conserva un unico PDF

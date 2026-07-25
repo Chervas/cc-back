@@ -18,6 +18,7 @@ const ALLOWED_PURPOSES = new Set([
   'clinical_attachment',
   'consent_document_pdf',
   'accounting_expense_document',
+  'accounting_payroll_document',
   'fiscal_document_pdf',
 ]);
 
@@ -72,7 +73,9 @@ function extensionForContentType(contentType) {
 }
 
 function maxBytesFor({ purpose, contentType }) {
-  if (purpose === 'accounting_expense_document') return MAX_ACCOUNTING_DOCUMENT_BYTES;
+  if (purpose === 'accounting_expense_document' || purpose === 'accounting_payroll_document') {
+    return MAX_ACCOUNTING_DOCUMENT_BYTES;
+  }
   if (contentType === 'application/pdf' || purpose.endsWith('_pdf')) return MAX_PDF_BYTES;
   if (contentType.startsWith('image/')) return MAX_IMAGE_BYTES;
   return MAX_BINARY_BYTES;
@@ -90,7 +93,7 @@ function assertPayload({ purpose, contentType, buffer }) {
     ? contentType === 'application/pdf'
     : purpose === 'nutrition_clinical_photo'
       ? ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'].includes(contentType)
-      : purpose === 'accounting_expense_document'
+      : purpose === 'accounting_expense_document' || purpose === 'accounting_payroll_document'
         ? ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png', 'image/webp'].includes(contentType)
         : contentType === 'application/pdf' || contentType.startsWith('image/') || contentType === 'application/octet-stream';
   if (!allowedForPurpose) {

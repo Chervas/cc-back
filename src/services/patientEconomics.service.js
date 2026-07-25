@@ -141,7 +141,7 @@ const BUILTIN_BUDGET_TEMPLATES = [
 const BUILTIN_INVOICE_TEMPLATE = {
   public_id: 'builtin-invoice-standard',
   template_type: 'invoice',
-  name: 'Fuse moderna',
+  name: 'Moderna',
   area_code: null,
   is_default: true,
   source: 'builtin',
@@ -158,7 +158,7 @@ const BUILTIN_INVOICE_TEMPLATE = {
 const BUILTIN_COMPACT_INVOICE_TEMPLATE = {
   public_id: 'builtin-invoice-compact',
   template_type: 'invoice',
-  name: 'Fuse compacta',
+  name: 'Compacta',
   area_code: null,
   is_default: false,
   source: 'builtin',

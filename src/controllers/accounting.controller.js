@@ -71,11 +71,26 @@ async function requireAnyFeature(req, featureKeys) {
 
 exports.getWorkspace = asyncHandler(async (req, res) => {
   const resolvedClinicId = await requireFeature(req, 'billing.reports.view');
-  const portalMode = await accountingFirms.isPortalUser({ actorId: actorId(req) });
+  const resolvedActorId = actorId(req);
+  const portalMode = await accountingFirms.isPortalUser({ actorId: resolvedActorId });
+  const includePayroll = !portalMode && await canUserAccessFeature({
+    actorId: resolvedActorId,
+    featureKey: 'accounting.payroll.view',
+    clinicId: resolvedClinicId,
+  });
   res.json(await accounting.getWorkspace({
     clinicId: resolvedClinicId,
     query: req.query,
     portalMode,
+    includePayroll,
+  }));
+});
+
+exports.getCashWorkspace = asyncHandler(async (req, res) => {
+  const resolvedClinicId = await requireFeature(req, 'accounting.cash.manage');
+  res.json(await accounting.getCashWorkspace({
+    clinicId: resolvedClinicId,
+    query: req.query,
   }));
 });
 
@@ -99,7 +114,11 @@ exports.updateExpense = asyncHandler(async (req, res) => {
 });
 
 exports.downloadExpenseAttachment = asyncHandler(async (req, res) => {
-  const resolvedClinicId = await requireFeature(req, 'billing.reports.view');
+  const resolvedClinicId = await requireAnyFeature(req, [
+    'billing.reports.view',
+    'accounting.expenses.manage',
+    'accounting.ocr.manage',
+  ]);
   const { asset, buffer } = await accounting.readExpenseAttachment({
     publicId: req.params.expenseId,
     clinicId: resolvedClinicId,
@@ -108,6 +127,15 @@ exports.downloadExpenseAttachment = asyncHandler(async (req, res) => {
   res.setHeader('Content-Disposition', `inline; filename="${String(asset.original_filename || 'factura').replace(/"/g, '')}"`);
   res.setHeader('Cache-Control', 'private, no-store');
   res.send(buffer);
+});
+
+exports.openCash = asyncHandler(async (req, res) => {
+  const resolvedClinicId = await requireFeature(req, 'accounting.cash.manage');
+  res.status(201).json(await accounting.openCash({
+    clinicId: resolvedClinicId,
+    actorId: actorId(req),
+    payload: req.body,
+  }));
 });
 
 exports.createCashMovement = asyncHandler(async (req, res) => {
@@ -126,6 +154,40 @@ exports.closeCash = asyncHandler(async (req, res) => {
     actorId: actorId(req),
     payload: req.body,
   }));
+});
+
+exports.createPayroll = asyncHandler(async (req, res) => {
+  const resolvedClinicId = await requireFeature(req, 'accounting.payroll.manage');
+  res.status(201).json(await accounting.createPayroll({
+    clinicId: resolvedClinicId,
+    actorId: actorId(req),
+    payload: req.body,
+  }));
+});
+
+exports.updatePayroll = asyncHandler(async (req, res) => {
+  const resolvedClinicId = await requireFeature(req, 'accounting.payroll.manage');
+  res.json(await accounting.updatePayroll({
+    publicId: req.params.payrollId,
+    clinicId: resolvedClinicId,
+    actorId: actorId(req),
+    payload: req.body,
+  }));
+});
+
+exports.downloadPayrollAttachment = asyncHandler(async (req, res) => {
+  const resolvedClinicId = await requireFeature(req, 'accounting.payroll.view');
+  const { asset, buffer } = await accounting.readPayrollAttachment({
+    publicId: req.params.payrollId,
+    clinicId: resolvedClinicId,
+  });
+  res.setHeader('Content-Type', asset.content_type);
+  res.setHeader(
+    'Content-Disposition',
+    `inline; filename="${String(asset.original_filename || 'nominas').replace(/"/g, '')}"`,
+  );
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.send(buffer);
 });
 
 exports.getFiscalDocument = asyncHandler(async (req, res) => {

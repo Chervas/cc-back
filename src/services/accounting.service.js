@@ -10,6 +10,8 @@ const {
   AccountingExpenseDocument,
   AccountingCashMovement,
   AccountingCashClosure,
+  AccountingCashSession,
+  AccountingPayrollPeriod,
   ClinicalPrivateAsset,
   EconomicPayment,
   PatientFiscalDocument,
@@ -20,6 +22,8 @@ const EXPENSE_STATUSES = new Set(['pending', 'paid', 'cancelled']);
 const EXPENSE_PAYMENT_METHODS = new Set(['cash', 'card', 'transfer', 'direct_debit', 'other']);
 const CASH_MOVEMENT_TYPES = new Set(['income', 'expense', 'adjustment']);
 const CASH_METHODS = new Set(['cash', 'card', 'transfer', 'bizum', 'other']);
+const CASH_SESSION_STATUSES = new Set(['open', 'closed']);
+const PAYROLL_STATUSES = new Set(['draft', 'scheduled', 'paid']);
 const DEFAULT_CLINIC_TIME_ZONE = 'Europe/Madrid';
 const MAX_EXPENSE_ATTACHMENT_BYTES = 18 * 1024 * 1024;
 const EXPENSE_ATTACHMENT_TYPES = new Set([
@@ -321,6 +325,52 @@ function serializeClosure(row) {
   };
 }
 
+function serializeCashSession(row) {
+  if (!row) return null;
+  const value = row.toJSON ? row.toJSON() : row;
+  return {
+    id: value.public_id,
+    clinic_id: Number(value.clinic_id),
+    business_date: value.business_date,
+    opening_cash: money(value.opening_cash),
+    suggested_opening_cash: money(value.suggested_opening_cash),
+    status: CASH_SESSION_STATUSES.has(value.status) ? value.status : 'open',
+    closure_id: value.closure_id ? Number(value.closure_id) : null,
+    notes: value.notes || null,
+    opened_by: value.opened_by || null,
+    opened_at: value.opened_at,
+    closed_by: value.closed_by || null,
+    closed_at: value.closed_at || null,
+  };
+}
+
+function serializePayroll(row, asset = null) {
+  const value = row.toJSON ? row.toJSON() : row;
+  return {
+    id: value.public_id,
+    clinic_id: Number(value.clinic_id),
+    period_month: value.period_month,
+    gross_salaries: money(value.gross_salaries),
+    employee_social_security: money(value.employee_social_security),
+    irpf_withholding: money(value.irpf_withholding),
+    net_paid: money(value.net_paid),
+    employer_social_security: money(value.employer_social_security),
+    other_costs: money(value.other_costs),
+    total_personnel_cost: money(value.total_personnel_cost),
+    status: value.status,
+    paid_at: value.paid_at || null,
+    notes: value.notes || null,
+    document: asset ? {
+      id: asset.public_id,
+      filename: asset.original_filename,
+      content_type: asset.content_type,
+      size_bytes: Number(asset.size_bytes),
+    } : null,
+    created_at: value.created_at,
+    updated_at: value.updated_at,
+  };
+}
+
 async function loadClinic(clinicId) {
   const clinic = await Clinica.findByPk(clinicId, {
     attributes: [
@@ -428,14 +478,30 @@ async function cashForDate(
   };
 }
 
-async function getWorkspace({ clinicId, query = {}, portalMode = false }) {
+async function getWorkspace({
+  clinicId,
+  query = {},
+  portalMode = false,
+  includePayroll = false,
+}) {
   const period = periodBounds(query);
   const clinic = await loadClinic(clinicId);
   const businessDate = dateOnly(
     query.business_date,
     dateInTimeZone(new Date(), clinic.time_zone),
   );
-  const [documents, expenses, payments, movements, closures, assets, templates, lastClosure] = await Promise.all([
+  const [
+    documents,
+    expenses,
+    payments,
+    movements,
+    closures,
+    assets,
+    templates,
+    lastClosure,
+    currentSession,
+    payrollPeriods,
+  ] = await Promise.all([
     PatientFiscalDocument.findAll({
       where: { clinic_id: clinicId, issue_date: { [Op.gte]: period.from, [Op.lt]: period.toExclusive } },
       order: [['issue_date', 'DESC'], ['id', 'DESC']],
@@ -459,7 +525,9 @@ async function getWorkspace({ clinicId, query = {}, portalMode = false }) {
     ClinicalPrivateAsset.findAll({
       where: {
         clinic_id: clinicId,
-        purpose: 'accounting_expense_document',
+        purpose: includePayroll
+          ? { [Op.in]: ['accounting_expense_document', 'accounting_payroll_document'] }
+          : 'accounting_expense_document',
         status: 'active',
       },
       attributes: ['id', 'public_id', 'original_filename', 'content_type', 'size_bytes'],
@@ -470,18 +538,34 @@ async function getWorkspace({ clinicId, query = {}, portalMode = false }) {
       order: [['business_date', 'DESC']],
       attributes: ['actual_cash'],
     }),
+    AccountingCashSession.findOne({
+      where: { clinic_id: clinicId, business_date: businessDate },
+    }),
+    includePayroll
+      ? AccountingPayrollPeriod.findAll({
+        where: {
+          clinic_id: clinicId,
+          period_month: { [Op.between]: [period.fromDate, period.toDate] },
+        },
+        order: [['period_month', 'DESC']],
+      })
+      : Promise.resolve([]),
   ]);
   const assetMap = new Map(assets.map((asset) => [String(asset.id), asset]));
   const currentCash = await cashForDate(
     clinicId,
     businessDate,
-    money(lastClosure?.actual_cash),
+    money(currentSession?.opening_cash ?? lastClosure?.actual_cash),
     clinic.time_zone,
   );
   const issuedDocuments = documents.filter((document) => document.status === 'issued');
   const activeExpenses = expenses.filter((expense) => expense.status !== 'cancelled');
   const salesTotal = money(issuedDocuments.reduce((sum, document) => sum + Number(document.totals?.total || 0), 0));
   const expensesTotal = money(activeExpenses.reduce((sum, expense) => sum + Number(expense.total), 0));
+  const payrollTotal = money(payrollPeriods.reduce(
+    (sum, payroll) => sum + Number(payroll.total_personnel_cost),
+    0,
+  ));
   const collectedTotal = money(payments.reduce((sum, payment) => sum + Number(payment.amount), 0));
   const daily = new Map();
   const dayKey = (value) => {
@@ -490,7 +574,15 @@ async function getWorkspace({ clinicId, query = {}, portalMode = false }) {
   };
   const ensureDay = (value) => {
     const key = dayKey(value);
-    if (!daily.has(key)) daily.set(key, { date: key, sales: 0, expenses: 0, collected: 0 });
+    if (!daily.has(key)) {
+      daily.set(key, {
+        date: key,
+        sales: 0,
+        expenses: 0,
+        payroll: 0,
+        collected: 0,
+      });
+    }
     return daily.get(key);
   };
   for (const document of issuedDocuments) {
@@ -507,6 +599,10 @@ async function getWorkspace({ clinicId, query = {}, portalMode = false }) {
     ensureDay(payment.paid_at).collected = money(
       ensureDay(payment.paid_at).collected + Number(payment.amount),
     );
+  }
+  for (const payroll of payrollPeriods) {
+    const day = ensureDay(payroll.paid_at || payroll.period_month);
+    day.payroll = money(day.payroll + Number(payroll.total_personnel_cost));
   }
   const paymentMethods = {};
   for (const payment of payments) {
@@ -526,7 +622,8 @@ async function getWorkspace({ clinicId, query = {}, portalMode = false }) {
     summary: {
       sales_total: salesTotal,
       expenses_total: expensesTotal,
-      result: money(salesTotal - expensesTotal),
+      payroll_total: payrollTotal,
+      result: money(salesTotal - expensesTotal - payrollTotal),
       collected_total: collectedTotal,
       pending_expenses: activeExpenses.filter((expense) => expense.status === 'pending').length,
       issued_documents: issuedDocuments.length,
@@ -536,7 +633,12 @@ async function getWorkspace({ clinicId, query = {}, portalMode = false }) {
       expense,
       expense.attachment_asset_id ? assetMap.get(String(expense.attachment_asset_id)) : null
     )),
+    payroll_periods: payrollPeriods.map((payroll) => serializePayroll(
+      payroll,
+      payroll.document_asset_id ? assetMap.get(String(payroll.document_asset_id)) : null,
+    )),
     cash: portalMode ? null : {
+      session: serializeCashSession(currentSession),
       current: currentCash,
       movements: movements.map(serializeMovement),
       closures: closures.map(serializeClosure),
@@ -687,6 +789,110 @@ async function readExpenseAttachment({ publicId, clinicId }) {
   return { asset, buffer: stored.buffer };
 }
 
+async function getCashWorkspace({ clinicId, query = {} }) {
+  const clinic = await loadClinic(clinicId);
+  const businessDate = dateOnly(
+    query.business_date,
+    dateInTimeZone(new Date(), clinic.time_zone),
+  );
+  const start = localDateTimeToUtc(businessDate, '00:00:00', clinic.time_zone);
+  const end = localDateTimeToUtc(nextDate(businessDate), '00:00:00', clinic.time_zone);
+  const [session, closure, lastClosure, movements, recentClosures] = await Promise.all([
+    AccountingCashSession.findOne({
+      where: { clinic_id: clinicId, business_date: businessDate },
+    }),
+    AccountingCashClosure.findOne({
+      where: { clinic_id: clinicId, business_date: businessDate },
+    }),
+    AccountingCashClosure.findOne({
+      where: { clinic_id: clinicId, business_date: { [Op.lt]: businessDate } },
+      order: [['business_date', 'DESC']],
+      attributes: ['actual_cash'],
+    }),
+    AccountingCashMovement.findAll({
+      where: {
+        clinic_id: clinicId,
+        occurred_at: { [Op.gte]: start, [Op.lt]: end },
+      },
+      order: [['occurred_at', 'DESC']],
+    }),
+    AccountingCashClosure.findAll({
+      where: { clinic_id: clinicId, business_date: { [Op.lte]: businessDate } },
+      order: [['business_date', 'DESC']],
+      limit: 14,
+    }),
+  ]);
+  const suggestedOpeningCash = money(lastClosure?.actual_cash);
+  const openingCash = money(session?.opening_cash ?? closure?.opening_cash ?? suggestedOpeningCash);
+  const current = await cashForDate(
+    clinicId,
+    businessDate,
+    openingCash,
+    clinic.time_zone,
+  );
+  return {
+    clinic: {
+      id: clinic.id,
+      name: clinic.name,
+      time_zone: clinic.time_zone,
+    },
+    business_date: businessDate,
+    suggested_opening_cash: suggestedOpeningCash,
+    session: serializeCashSession(session),
+    current,
+    movements: movements.map(serializeMovement),
+    closure: closure ? serializeClosure(closure) : null,
+    recent_closures: recentClosures.map(serializeClosure),
+  };
+}
+
+async function openCash({ clinicId, actorId, payload = {} }) {
+  const clinic = await loadClinic(clinicId);
+  const businessDate = dateOnly(
+    payload.business_date,
+    dateInTimeZone(new Date(), clinic.time_zone),
+  );
+  const [existingSession, existingClosure, lastClosure] = await Promise.all([
+    AccountingCashSession.findOne({
+      where: { clinic_id: clinicId, business_date: businessDate },
+    }),
+    AccountingCashClosure.findOne({
+      where: { clinic_id: clinicId, business_date: businessDate },
+      attributes: ['id'],
+    }),
+    AccountingCashClosure.findOne({
+      where: { clinic_id: clinicId, business_date: { [Op.lt]: businessDate } },
+      order: [['business_date', 'DESC']],
+      attributes: ['actual_cash'],
+    }),
+  ]);
+  if (existingClosure || existingSession?.status === 'closed') {
+    throw domainError(409, 'cash_already_closed', 'La caja de este día ya está cerrada.');
+  }
+  if (existingSession) {
+    throw domainError(409, 'cash_already_open', 'La caja de este día ya está abierta.');
+  }
+  const suggestedOpeningCash = money(lastClosure?.actual_cash);
+  const openingCash = payload.opening_cash === undefined || payload.opening_cash === null
+    ? suggestedOpeningCash
+    : money(payload.opening_cash);
+  if (openingCash < 0) {
+    throw domainError(400, 'cash_opening_invalid', 'El fondo de apertura no puede ser negativo.');
+  }
+  const session = await AccountingCashSession.create({
+    public_id: crypto.randomUUID(),
+    clinic_id: clinicId,
+    business_date: businessDate,
+    opening_cash: openingCash,
+    suggested_opening_cash: suggestedOpeningCash,
+    status: 'open',
+    notes: clean(payload.notes, 1000) || null,
+    opened_by: actorId,
+    opened_at: new Date(),
+  });
+  return serializeCashSession(session);
+}
+
 async function createCashMovement({ clinicId, actorId, payload }) {
   const movementType = clean(payload.movement_type, 30).toLowerCase();
   const method = clean(payload.method || 'cash', 30).toLowerCase();
@@ -698,6 +904,19 @@ async function createCashMovement({ clinicId, actorId, payload }) {
   if (!description || (movementType === 'adjustment' ? amount === 0 : amount <= 0)) {
     throw domainError(400, 'cash_movement_required', 'Completa una descripción y un importe válido.');
   }
+  const occurredAt = dateTime(payload.occurred_at, new Date());
+  const clinic = await loadClinic(clinicId);
+  const businessDate = dateInTimeZone(occurredAt, clinic.time_zone);
+  const session = await AccountingCashSession.findOne({
+    where: { clinic_id: clinicId, business_date: businessDate },
+    attributes: ['status'],
+  });
+  if (!session) {
+    throw domainError(409, 'cash_not_open', 'Abre la caja antes de registrar movimientos manuales.');
+  }
+  if (session.status !== 'open') {
+    throw domainError(409, 'cash_already_closed', 'La caja de este día ya está cerrada.');
+  }
   const row = await AccountingCashMovement.create({
     public_id: crypto.randomUUID(),
     clinic_id: clinicId,
@@ -707,7 +926,7 @@ async function createCashMovement({ clinicId, actorId, payload }) {
     description,
     source_type: clean(payload.source_type, 60) || null,
     source_id: clean(payload.source_id, 80) || null,
-    occurred_at: dateTime(payload.occurred_at, new Date()),
+    occurred_at: occurredAt,
     created_by: actorId,
   });
   return serializeMovement(row);
@@ -721,12 +940,12 @@ async function closeCash({ clinicId, actorId, payload }) {
   );
   const existing = await AccountingCashClosure.findOne({ where: { clinic_id: clinicId, business_date: businessDate } });
   if (existing) throw domainError(409, 'cash_already_closed', 'La caja de este día ya está cerrada.');
-  const lastClosure = await AccountingCashClosure.findOne({
-    where: { clinic_id: clinicId, business_date: { [Op.lt]: businessDate } },
-    order: [['business_date', 'DESC']],
-    attributes: ['actual_cash'],
+  const session = await AccountingCashSession.findOne({
+    where: { clinic_id: clinicId, business_date: businessDate },
   });
-  const openingCash = money(lastClosure?.actual_cash);
+  if (!session) throw domainError(409, 'cash_not_open', 'Abre la caja antes de cerrarla.');
+  if (session.status !== 'open') throw domainError(409, 'cash_already_closed', 'La caja de este día ya está cerrada.');
+  const openingCash = money(session.opening_cash);
   const allowedDenominations = new Set([
     '500', '200', '100', '50', '20', '10', '5', '2', '1',
     '0.5', '0.2', '0.1', '0.05', '0.02', '0.01',
@@ -772,7 +991,176 @@ async function closeCash({ clinicId, actorId, payload }) {
     closed_by: actorId,
     closed_at: new Date(),
   });
+  await session.update({
+    status: 'closed',
+    closure_id: row.id,
+    closed_by: actorId,
+    closed_at: row.closed_at,
+  });
   return serializeClosure(row);
+}
+
+function normalizePayroll(payload) {
+  const periodMonthRaw = dateOnly(payload.period_month);
+  if (!periodMonthRaw) {
+    throw domainError(400, 'payroll_period_required', 'Selecciona el mes de la nómina.');
+  }
+  const periodMonth = `${periodMonthRaw.slice(0, 7)}-01`;
+  const status = clean(payload.status || 'draft', 20).toLowerCase();
+  if (!PAYROLL_STATUSES.has(status)) {
+    throw domainError(400, 'payroll_status_invalid', 'El estado de la nómina no es válido.');
+  }
+  const grossSalaries = money(payload.gross_salaries);
+  const employeeSocialSecurity = money(payload.employee_social_security);
+  const irpfWithholding = money(payload.irpf_withholding);
+  const netPaid = money(payload.net_paid);
+  const employerSocialSecurity = money(payload.employer_social_security);
+  const otherCosts = money(payload.other_costs);
+  if ([
+    grossSalaries,
+    employeeSocialSecurity,
+    irpfWithholding,
+    netPaid,
+    employerSocialSecurity,
+    otherCosts,
+  ].some((value) => value < 0)) {
+    throw domainError(400, 'payroll_amount_invalid', 'Los importes de nómina no pueden ser negativos.');
+  }
+  if (employeeSocialSecurity + irpfWithholding > grossSalaries + 0.01) {
+    throw domainError(
+      400,
+      'payroll_withholdings_invalid',
+      'Las retenciones no pueden superar los salarios brutos.',
+    );
+  }
+  return {
+    period_month: periodMonth,
+    gross_salaries: grossSalaries,
+    employee_social_security: employeeSocialSecurity,
+    irpf_withholding: irpfWithholding,
+    net_paid: netPaid,
+    employer_social_security: employerSocialSecurity,
+    other_costs: otherCosts,
+    total_personnel_cost: money(grossSalaries + employerSocialSecurity + otherCosts),
+    status,
+    paid_at: status === 'paid' ? dateTime(payload.paid_at, new Date()) : null,
+    notes: clean(payload.notes, 4000) || null,
+  };
+}
+
+async function storePayrollAttachment({
+  payroll,
+  clinicId,
+  actorId,
+  preparedAttachment,
+}) {
+  if (!preparedAttachment) return null;
+  const asset = await clinicalPrivateStorage.storeClinicalPrivateAsset({
+    purpose: 'accounting_payroll_document',
+    clinicId,
+    ownerType: 'accounting_payroll',
+    ownerId: payroll.public_id,
+    originalFilename: preparedAttachment.filename,
+    contentType: preparedAttachment.contentType,
+    buffer: preparedAttachment.buffer,
+    createdBy: actorId,
+    metadata: { period_month: payroll.period_month },
+  });
+  await payroll.update({ document_asset_id: asset.id, updated_by: actorId });
+  return asset;
+}
+
+async function createPayroll({ clinicId, actorId, payload }) {
+  const values = normalizePayroll(payload);
+  const existing = await AccountingPayrollPeriod.findOne({
+    where: { clinic_id: clinicId, period_month: values.period_month },
+    attributes: ['id'],
+  });
+  if (existing) {
+    throw domainError(
+      409,
+      'payroll_period_exists',
+      'Ya existe un registro de nóminas para ese mes.',
+    );
+  }
+  const preparedAttachment = prepareExpenseAttachment(payload.attachment);
+  const payroll = await AccountingPayrollPeriod.create({
+    public_id: crypto.randomUUID(),
+    clinic_id: clinicId,
+    ...values,
+    created_by: actorId,
+    updated_by: actorId,
+  });
+  let asset = null;
+  try {
+    asset = await storePayrollAttachment({
+      payroll,
+      clinicId,
+      actorId,
+      preparedAttachment,
+    });
+  } catch (error) {
+    await payroll.destroy();
+    throw error;
+  }
+  return serializePayroll(payroll, asset);
+}
+
+async function updatePayroll({ publicId, clinicId, actorId, payload }) {
+  const payroll = await AccountingPayrollPeriod.findOne({
+    where: { public_id: publicId, clinic_id: clinicId },
+  });
+  if (!payroll) throw domainError(404, 'payroll_not_found', 'Registro de nóminas no encontrado.');
+  const values = normalizePayroll(payload);
+  const duplicate = await AccountingPayrollPeriod.findOne({
+    where: {
+      clinic_id: clinicId,
+      period_month: values.period_month,
+      id: { [Op.ne]: payroll.id },
+    },
+    attributes: ['id'],
+  });
+  if (duplicate) {
+    throw domainError(
+      409,
+      'payroll_period_exists',
+      'Ya existe un registro de nóminas para ese mes.',
+    );
+  }
+  const preparedAttachment = prepareExpenseAttachment(payload.attachment);
+  await payroll.update({ ...values, updated_by: actorId });
+  const asset = preparedAttachment
+    ? await storePayrollAttachment({
+      payroll,
+      clinicId,
+      actorId,
+      preparedAttachment,
+    })
+    : payroll.document_asset_id
+      ? await ClinicalPrivateAsset.findByPk(payroll.document_asset_id)
+      : null;
+  return serializePayroll(payroll, asset);
+}
+
+async function readPayrollAttachment({ publicId, clinicId }) {
+  const payroll = await AccountingPayrollPeriod.findOne({
+    where: { public_id: publicId, clinic_id: clinicId },
+    attributes: ['document_asset_id'],
+  });
+  if (!payroll?.document_asset_id) {
+    throw domainError(404, 'payroll_attachment_not_found', 'Este registro no tiene documento adjunto.');
+  }
+  const asset = await ClinicalPrivateAsset.findOne({
+    where: {
+      id: payroll.document_asset_id,
+      clinic_id: clinicId,
+      purpose: 'accounting_payroll_document',
+      status: 'active',
+    },
+  });
+  if (!asset) throw domainError(404, 'payroll_attachment_not_found', 'Documento privado no encontrado.');
+  const stored = await clinicalPrivateStorage.readClinicalPrivateAsset(asset);
+  return { asset, buffer: stored.buffer };
 }
 
 async function getFiscalDocument({ publicId, clinicId }) {
@@ -821,11 +1209,16 @@ async function exportCsv({ clinicId, query = {} }) {
 module.exports = {
   domainError,
   getWorkspace,
+  getCashWorkspace,
   createExpense,
   updateExpense,
   readExpenseAttachment,
+  openCash,
   createCashMovement,
   closeCash,
+  createPayroll,
+  updatePayroll,
+  readPayrollAttachment,
   getFiscalDocument,
   exportCsv,
 };

@@ -8,6 +8,7 @@ const router = express.Router();
 router.use(authMiddleware);
 
 router.get('/workspace', controller.getWorkspace);
+router.get('/cash/workspace', controller.getCashWorkspace);
 router.get('/firm', controller.getFirm);
 router.post('/firm/credentials', controller.issueFirmCredentials);
 router.get('/portal/scope', controller.getPortalScope);
@@ -30,8 +31,12 @@ router.get('/export.zip', controller.exportZip);
 router.post('/expenses', controller.createExpense);
 router.patch('/expenses/:expenseId', controller.updateExpense);
 router.get('/expenses/:expenseId/attachment', controller.downloadExpenseAttachment);
+router.post('/cash/open', controller.openCash);
 router.post('/cash/movements', controller.createCashMovement);
 router.post('/cash/closures', controller.closeCash);
+router.post('/payroll', controller.createPayroll);
+router.patch('/payroll/:payrollId', controller.updatePayroll);
+router.get('/payroll/:payrollId/document', controller.downloadPayrollAttachment);
 
 router.use((error, req, res, next) => {
   if (!error?.statusCode && !error?.status) return next(error);
