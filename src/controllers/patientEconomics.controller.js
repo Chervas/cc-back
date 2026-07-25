@@ -221,6 +221,21 @@ exports.createVoucher = asyncHandler(async (req, res) => {
   res.status(201).json(voucher);
 });
 
+exports.sellVoucher = asyncHandler(async (req, res) => {
+  const clinicId = await requireClinicFeature(
+    req,
+    'patients.edit',
+    req.body.clinic_id ?? req.body.clinica_id,
+  );
+  const sale = await economics.sellVoucher({
+    patientIdentifier: req.params.patientId,
+    clinicId,
+    actorId: actorId(req),
+    payload: req.body,
+  });
+  res.status(201).json(sale);
+});
+
 exports.createFiscalDocument = asyncHandler(async (req, res) => {
   await requireBudgetFeature(req, 'billing.documents.manage');
   const document = await economics.createFiscalDocument({

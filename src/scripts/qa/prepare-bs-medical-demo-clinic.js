@@ -9,6 +9,7 @@ const sharp = require('sharp');
 
 const db = require('../../../models');
 const accounting = require('../../services/accounting.service');
+const accountingFirms = require('../../services/accountingFirms.service');
 const accountingIngestion = require('../../services/accountingIngestion.service');
 const clinicalPrivateStorage = require('../../services/clinicalPrivateStorage.service');
 const economics = require('../../services/patientEconomics.service');
@@ -28,6 +29,7 @@ const REFERENCES = Object.freeze({
   payment: `${DEMO_KEY}:payment`,
   voucher: `${DEMO_KEY}:voucher`,
   expense: `${DEMO_KEY}:expense`,
+  payroll: `${DEMO_KEY}:payroll`,
   ingestionProvider: 'clinicaclick_demo',
   ingestionModel: `${DEMO_KEY}:fixture`,
 });
@@ -664,6 +666,81 @@ async function ensureOpeningCash({ clinicId, businessDate }) {
   return closure;
 }
 
+async function ensureCurrentCashSession({ clinicId, businessDate }) {
+  const existing = await db.AccountingCashSession.findOne({
+    where: { clinic_id: clinicId, business_date: businessDate },
+  });
+  if (existing) return existing;
+  await accounting.openCash({
+    clinicId,
+    actorId: ACTOR_ID,
+    payload: {
+      business_date: businessDate,
+      notes: 'Caja abierta por el seed sintético de BS Medical.',
+    },
+  });
+  return db.AccountingCashSession.findOne({
+    where: { clinic_id: clinicId, business_date: businessDate },
+  });
+}
+
+async function ensurePayroll({ clinicId, businessDate }) {
+  const periodMonth = `${businessDate.slice(0, 7)}-01`;
+  let payroll = await db.AccountingPayrollPeriod.findOne({
+    where: { clinic_id: clinicId, period_month: periodMonth },
+  });
+  if (payroll) return payroll;
+  const attachment = buildDemoPdf({
+    title: 'Resumen de nominas demo',
+    lines: [
+      `Periodo: ${businessDate.slice(0, 7)}`,
+      'Salarios brutos: 4600.00 EUR',
+      'Seguridad Social empresa: 1420.00 EUR',
+      'Otros costes: 120.00 EUR',
+      'Coste total de personal: 6140.00 EUR',
+      'Documento agregado sintetico. Sin datos de empleados.',
+    ],
+  });
+  await accounting.createPayroll({
+    clinicId,
+    actorId: ACTOR_ID,
+    payload: {
+      period_month: periodMonth,
+      gross_salaries: 4600,
+      employee_social_security: 295,
+      irpf_withholding: 795,
+      net_paid: 3510,
+      employer_social_security: 1420,
+      other_costs: 120,
+      status: 'paid',
+      paid_at: `${businessDate}T08:15:00.000Z`,
+      notes: `${REFERENCES.payroll}. Datos sintéticos agregados para la demo.`,
+      attachment: {
+        filename: `resumen-nominas-demo-${businessDate.slice(0, 7)}.pdf`,
+        content_type: 'application/pdf',
+        base64: attachment.toString('base64'),
+      },
+    },
+  });
+  payroll = await db.AccountingPayrollPeriod.findOne({
+    where: { clinic_id: clinicId, period_month: periodMonth },
+  });
+  return payroll;
+}
+
+async function ensureAccountingFirm({ clinicId }) {
+  let firm = await accountingFirms.getFirm({ clinicId });
+  let credentials = null;
+  if (!firm.access.configured) {
+    firm = await accountingFirms.issueCredentials({
+      clinicId,
+      actorId: ACTOR_ID,
+    });
+    credentials = firm.credentials;
+  }
+  return { firm, credentials };
+}
+
 async function prepare() {
   if (!Number.isInteger(SOURCE_CLINIC_ID) || SOURCE_CLINIC_ID <= 0) {
     throw new Error('BS_MEDICAL_DEMO_SOURCE_CLINIC_ID debe ser un entero positivo.');
@@ -696,8 +773,12 @@ async function prepare() {
   const expense = await ensureExpense({ clinicId, businessDate });
   const ingestion = await ensureIngestionReview({ clinicId, businessDate });
   const closure = await ensureOpeningCash({ clinicId, businessDate });
+  const cashSession = await ensureCurrentCashSession({ clinicId, businessDate });
+  const payroll = await ensurePayroll({ clinicId, businessDate });
+  const firmState = await ensureAccountingFirm({ clinicId });
   const workspace = await accounting.getWorkspace({
     clinicId,
+    includePayroll: true,
     query: {
       from: `${businessDate.slice(0, 8)}01`,
       to: businessDate,
@@ -755,6 +836,25 @@ async function prepare() {
       id: closure.public_id,
       business_date: closure.business_date,
       actual_cash: Number(closure.actual_cash),
+    },
+    cash_session: {
+      id: cashSession.public_id,
+      business_date: cashSession.business_date,
+      opening_cash: Number(cashSession.opening_cash),
+      status: cashSession.status,
+    },
+    payroll: {
+      id: payroll.public_id,
+      period_month: payroll.period_month,
+      total_personnel_cost: Number(payroll.total_personnel_cost),
+      document_asset_id: payroll.document_asset_id,
+    },
+    accounting_firm: {
+      id: firmState.firm.id,
+      name: firmState.firm.name,
+      email: firmState.firm.access.email,
+      portal_url: firmState.firm.portal_url,
+      credentials_issued_now: firmState.credentials,
     },
     accounting: {
       summary: workspace.summary,
@@ -817,6 +917,14 @@ async function cleanup() {
     raw: true,
   });
   const firmIds = [...new Set(firmAssignments.map((row) => Number(row.firm_id)).filter(Boolean))];
+  const firmUsers = firmIds.length
+    ? await db.AccountingFirmUser.findAll({
+      where: { firm_id: firmIds },
+      attributes: ['user_id'],
+      raw: true,
+    })
+    : [];
+  const firmUserIds = [...new Set(firmUsers.map((row) => Number(row.user_id)).filter(Boolean))];
   const remittances = await db.AccountingRemittance.findAll({
     where: { clinic_id: clinicId },
     attributes: ['id'],
@@ -847,7 +955,9 @@ async function cleanup() {
     await db.EconomicBudget.destroy({ where: { clinic_id: clinicId }, transaction });
     await db.AccountingIngestionJob.destroy({ where: { clinic_id: clinicId }, transaction });
     await db.AccountingExpenseDocument.destroy({ where: { clinic_id: clinicId }, transaction });
+    await db.AccountingPayrollPeriod.destroy({ where: { clinic_id: clinicId }, transaction });
     await db.AccountingCashMovement.destroy({ where: { clinic_id: clinicId }, transaction });
+    await db.AccountingCashSession.destroy({ where: { clinic_id: clinicId }, transaction });
     await db.AccountingCashClosure.destroy({ where: { clinic_id: clinicId }, transaction });
     if (remittanceIds.length) {
       await db.AccountingRemittanceItem.destroy({
@@ -900,6 +1010,9 @@ async function cleanup() {
     await db.UsuarioClinica.destroy({ where: { id_clinica: clinicId }, transaction });
     await db.Paciente.destroy({ where: { clinica_id: clinicId }, transaction });
     await db.Clinica.destroy({ where: { id_clinica: clinicId }, transaction });
+    if (firmUserIds.length) {
+      await db.Usuario.destroy({ where: { id_usuario: firmUserIds }, transaction });
+    }
   });
 
   const privateFiles = await removePrivateFiles(assets);

@@ -47,12 +47,20 @@ Cobros y saldo:
 Bonos:
 
 - `POST /patients/:patientId/vouchers`
+- `POST /patients/:patientId/voucher-sales`
 - `POST /vouchers/:voucherId/consume`
 
-La alta manual admite dos usos con el mismo contrato: bono nuevo
-(`source_system=clinicaclick`) e importacion idempotente
-(`source_system` + `source_reference`). El cobro sigue siendo una operacion
-separada.
+Los contratos separan dos operaciones que no deben confundirse:
+
+- `voucher-sales` vende un bono nuevo desde el catalogo o desde un servicio,
+  acepta el presupuesto, activa sus sesiones y puede registrar un cobro total
+  o parcial en la misma operacion;
+- `vouchers` incorpora un saldo ya vendido en ClinicCloud, Flowww u otro
+  sistema. Es idempotente mediante `source_system` + `source_reference` y no
+  inventa presupuesto ni cobro.
+
+En ambos casos, cualquier `treatment_id` se revalida contra el catalogo real de
+la clinica o su grupo.
 
 Fiscal y plantillas:
 
@@ -102,6 +110,8 @@ Contabilidad transversal y portal:
 - Cada alternativa de pago puede aplicar su descuento propio mediante
   `option_discounts`; sus fases y financiacion se calculan sobre ese importe.
 - Un bono conserva unidades y movimientos; no es metodo de pago.
+- Vender e importar un bono son acciones distintas: solo la venta crea el
+  presupuesto y, si se solicita, el cobro.
 - Una factura requiere emisor y destinatario fiscal completos.
 - Crear o editar facturas y recibos requiere `billing.documents.manage`.
 - Solo se edita un documento fiscal en borrador.

@@ -169,15 +169,18 @@ node src/scripts/qa/prepare-bs-medical-demo-clinic.js
 El script crea o actualiza `BS Medical · DEMO`, sin grupo, con marcador
 `configuracion.qa_demo.key=bs-medical-accounting-demo-v1`. Todos los pacientes,
 tratamientos, presupuesto, cobro, bono, factura emitida, factura recibida,
-adjuntos privados, trabajo OCR y cierre de caja que contiene son sinteticos.
-Es idempotente y se elimina, incluidos los archivos privados, con:
+adjuntos privados, trabajo OCR, apertura/cierre de caja, resumen de nominas y
+gestoria que contiene son sinteticos. La primera ejecucion genera las
+credenciales de la gestoria; las siguientes no restablecen su contraseña. Es
+idempotente y se elimina, incluidos los archivos privados y el usuario externo,
+con:
 
 ```bash
 node src/scripts/qa/prepare-bs-medical-demo-clinic.js --cleanup
 ```
 
 La limpieza rechaza cualquier clinica sin el marcador exacto. En `dev`, la
-preparacion validada el 2026-07-25 creo `clinica_id=80`; el consumidor debe
+preparacion validada el 2026-07-25 creo `clinica_id=81`; el consumidor debe
 resolverla por nombre o marcador y no fijar ese id en codigo.
 
 El seed historico siguiente modifica la clinica 66 y solo se conserva para sus

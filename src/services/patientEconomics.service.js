@@ -361,6 +361,32 @@ function mapCatalogItem(treatment) {
   };
 }
 
+function treatmentIsAvailableForClinic(treatment, context) {
+  if (!treatment?.activo) return false;
+  const hiddenFor = parseJson(treatment.eliminado_por_clinica, []).map(Number);
+  if (hiddenFor.includes(Number(context.clinicId))) return false;
+  const origin = cleanString(treatment.origen, 30).toLowerCase();
+  return origin === 'sistema'
+    || (origin === 'clinica' && Number(treatment.clinica_id) === Number(context.clinicId))
+    || (
+      origin === 'grupo'
+      && Number(treatment.grupo_clinica_id) === Number(context.clinic.grupoClinicaId)
+    );
+}
+
+async function resolveCatalogItemForClinic(treatmentId, context) {
+  if (!treatmentId) return null;
+  const treatment = await Tratamiento.findByPk(treatmentId);
+  if (!treatmentIsAvailableForClinic(treatment, context)) {
+    throw domainError(
+      400,
+      'voucher_treatment_invalid',
+      'El servicio seleccionado no está disponible en el catálogo de esta clínica.',
+    );
+  }
+  return mapCatalogItem(treatment);
+}
+
 async function listCatalog({ clinicId, patientIdentifier, query = {} }) {
   const { clinic, patient } = await loadContext(patientIdentifier, clinicId);
   const clinicConfig = parseJson(clinic.configuracion, {});
@@ -406,9 +432,13 @@ async function listCatalog({ clinicId, patientIdentifier, query = {} }) {
       return !Array.isArray(hiddenFor) || !hiddenFor.map(Number).includes(clinicIdNumber);
     })
     .map(mapCatalogItem);
-  const productType = cleanString(query.product_type || query.type, 20).toLowerCase();
-  if (PRODUCT_TYPES.has(productType)) {
-    items = items.filter((item) => item.product_type === productType);
+  const productTypes = cleanString(query.product_type || query.type, 80)
+    .toLowerCase()
+    .split(',')
+    .map((value) => value.trim())
+    .filter((value) => PRODUCT_TYPES.has(value));
+  if (productTypes.length) {
+    items = items.filter((item) => productTypes.includes(item.product_type));
   }
 
   const page = Math.max(1, optionalPositiveInteger(query.page) || 1);
@@ -1422,7 +1452,10 @@ async function consumeVoucher({ publicId, actorId, payload }) {
 }
 
 async function createVoucher({ patientIdentifier, clinicId, actorId, payload }) {
-  const { patient } = await loadContext(patientIdentifier, clinicId);
+  const context = await loadContext(patientIdentifier, clinicId);
+  const { patient } = context;
+  const treatmentId = optionalPositiveInteger(payload.treatment_id);
+  await resolveCatalogItemForClinic(treatmentId, context);
   const totalUnits = roundMoney(payload.total_units);
   const availableUnits = payload.available_units == null
     ? totalUnits
@@ -1472,7 +1505,7 @@ async function createVoucher({ patientIdentifier, clinicId, actorId, payload }) 
       patient_id: patient.id_paciente,
       budget_id: null,
       budget_line_key: null,
-      treatment_id: optionalPositiveInteger(payload.treatment_id),
+      treatment_id: treatmentId,
       name,
       unit_label: cleanString(payload.unit_label, 40) || 'sesiones',
       total_units: totalUnits,
@@ -1498,6 +1531,149 @@ async function createVoucher({ patientIdentifier, clinicId, actorId, payload }) 
     }
     return serializeVoucher(voucher, []);
   });
+}
+
+async function sellVoucher({ patientIdentifier, clinicId, actorId, payload }) {
+  const context = await loadContext(patientIdentifier, clinicId);
+  const treatmentId = optionalPositiveInteger(payload.treatment_id);
+  const catalogItem = await resolveCatalogItemForClinic(treatmentId, context);
+  const name = cleanString(payload.name || catalogItem?.name, 180);
+  const totalUnits = roundMoney(payload.total_units ?? catalogItem?.default_units);
+  const unitLabel = cleanString(payload.unit_label || catalogItem?.unit_label, 40) || 'sesiones';
+  const requestedTotal = roundMoney(payload.sold_amount ?? catalogItem?.base_price);
+  if (!name) throw domainError(400, 'voucher_name_required', 'El bono necesita un nombre.');
+  if (totalUnits <= 0 || requestedTotal < 0) {
+    throw domainError(400, 'voucher_sale_invalid', 'Revisa las sesiones y el precio del bono.');
+  }
+  const saleToken = cleanString(payload.sale_reference, 80) || crypto.randomUUID();
+  const sourceReference = `voucher-sale:${saleToken}`;
+  const lineKey = `voucher-${saleToken}`.slice(0, 80);
+  const productType = ['voucher', 'pack'].includes(catalogItem?.product_type)
+    ? catalogItem.product_type
+    : 'voucher';
+  let budget = await createBudget({
+    patientIdentifier,
+    clinicId,
+    actorId,
+    payload: {
+      status: 'presented',
+      source_system: 'clinicaclick',
+      source_reference: sourceReference,
+      valid_until: payload.valid_until,
+      lines: [{
+        key: lineKey,
+        treatment_id: treatmentId,
+        code: catalogItem?.code || `BONO-${saleToken.slice(0, 8)}`,
+        name,
+        description: cleanString(payload.description || catalogItem?.description, 500),
+        product_type: productType,
+        area_code: catalogItem?.area_code || 'general',
+        specialty: catalogItem?.specialty || null,
+        category: catalogItem?.category || 'Bonos',
+        quantity: totalUnits,
+        unit_label: unitLabel,
+        unit_price: totalUnits ? roundMoney(requestedTotal / totalUnits) : 0,
+        discount_percent: 0,
+        activation_rule: 'on_acceptance',
+        notes: cleanString(payload.notes, 500) || null,
+      }],
+      global_discount_percent: 0,
+      payment_proposal: {
+        mode: 'single',
+        included_modes: ['single'],
+        single_payment: { amount: requestedTotal, savings: 0 },
+        schedule: [],
+        financing_options: [],
+      },
+      notes: cleanString(payload.patient_notes, 10000) || null,
+      internal_notes: cleanString(payload.notes, 10000) || null,
+    },
+  });
+  if (budget.status === 'draft') {
+    budget = await transitionBudget({
+      publicId: budget.id,
+      actorId,
+      action: 'present',
+    });
+  }
+  if (budget.status === 'presented') {
+    budget = await transitionBudget({
+      publicId: budget.id,
+      actorId,
+      action: 'accept',
+    });
+  }
+  if (!['accepted', 'partially_accepted'].includes(budget.status)) {
+    throw domainError(409, 'voucher_sale_budget_invalid', 'La venta no ha podido quedar aceptada.');
+  }
+
+  const storedBudget = await EconomicBudget.findOne({
+    where: { public_id: budget.id, clinic_id: context.clinicId },
+  });
+  const voucher = await PatientVoucher.findOne({
+    where: {
+      budget_id: storedBudget.id,
+      budget_line_key: lineKey,
+    },
+  });
+  if (!voucher) throw domainError(500, 'voucher_sale_not_created', 'No se pudo activar el bono vendido.');
+  if (payload.expires_at) {
+    await voucher.update({ expires_at: dateOrNull(payload.expires_at) });
+  }
+
+  let payment = null;
+  if (payload.collect_now && numberValue(budget.accepted_amount) > 0) {
+    const paymentReference = `voucher-payment:${saleToken}`;
+    const existingPayment = await EconomicPayment.findOne({
+      where: {
+        budget_id: storedBudget.id,
+        reference: paymentReference,
+        status: 'confirmed',
+      },
+    });
+    if (existingPayment) {
+      payment = serializePayment(existingPayment, budget.id);
+    } else {
+      const pending = numberValue(budget.accepted_amount);
+      const requestedPayment = payload.payment_amount == null
+        ? pending
+        : roundMoney(payload.payment_amount);
+      if (requestedPayment <= 0 || requestedPayment > pending + 0.01) {
+        throw domainError(
+          400,
+          'voucher_payment_amount_invalid',
+          'El cobro debe ser mayor que cero y no superar el precio del bono.',
+          { pending },
+        );
+      }
+      payment = await createPayment({
+        publicId: budget.id,
+        actorId,
+        payload: {
+          amount: requestedPayment,
+          method: payload.payment_method,
+          reference: paymentReference,
+          notes: cleanString(payload.payment_notes, 2000) || `Venta de ${name}`,
+          paid_at: payload.paid_at,
+          allocations: [{
+            target_type: 'budget',
+            amount: requestedPayment,
+            label: name,
+          }],
+        },
+      });
+    }
+  }
+  voucher.setDataValue('budget_public_id', budget.id);
+  const movements = await PatientVoucherMovement.findAll({
+    where: { voucher_id: voucher.id },
+    order: [['occurred_at', 'ASC']],
+  });
+  return {
+    budget,
+    voucher: serializeVoucher(voucher, movements),
+    payment,
+  };
 }
 
 function normalizeFiscalParty(raw, fallback = {}) {
@@ -2259,6 +2435,7 @@ module.exports = {
   voidPayment,
   applyWallet,
   createVoucher,
+  sellVoucher,
   consumeVoucher,
   createFiscalDocument,
   createPatientFiscalDocument,

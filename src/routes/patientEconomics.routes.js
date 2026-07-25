@@ -23,6 +23,7 @@ router.get('/budgets/:budgetId/pdf', controller.downloadBudgetPdf);
 router.patch('/fiscal-documents/:documentId', controller.updateFiscalDocument);
 router.get('/fiscal-documents/:documentId/pdf', controller.downloadFiscalDocumentPdf);
 router.post('/patients/:patientId/vouchers', controller.createVoucher);
+router.post('/patients/:patientId/voucher-sales', controller.sellVoucher);
 router.post('/vouchers/:voucherId/consume', controller.consumeVoucher);
 router.get('/vouchers/:voucherId/appointment-resources', controller.getVoucherAppointmentResources);
 router.post('/vouchers/:voucherId/appointment-plan', controller.previewVoucherAppointments);
