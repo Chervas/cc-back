@@ -15,6 +15,7 @@ const {
   PatientVoucher,
   PatientVoucherMovement,
   PatientFiscalDocument,
+  CitaPaciente,
   Paciente,
   PacienteClinica,
   Clinica,
@@ -1558,6 +1559,25 @@ async function consumeVoucher({ publicId, actorId, payload }) {
       lock: transaction.LOCK.UPDATE,
     });
     if (!voucher) throw domainError(404, 'voucher_not_found', 'Bono no encontrado.');
+    const appointmentId = optionalPositiveInteger(payload.appointment_id);
+    if (appointmentId) {
+      const existingMovement = await PatientVoucherMovement.findOne({
+        where: {
+          voucher_id: voucher.id,
+          movement_type: 'consumption',
+          appointment_id: appointmentId,
+        },
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+      if (existingMovement) {
+        return {
+          voucher: serializeVoucher(voucher, [existingMovement]),
+          movement: existingMovement.toJSON(),
+          already_consumed: true,
+        };
+      }
+    }
     if (voucher.status !== 'active') throw domainError(409, 'voucher_not_active', 'El bono no está activo.');
     const units = roundMoney(payload.units);
     const available = numberValue(voucher.available_units);
@@ -1570,13 +1590,109 @@ async function consumeVoucher({ publicId, actorId, payload }) {
       voucher_id: voucher.id,
       movement_type: 'consumption',
       units: -units,
-      appointment_id: optionalPositiveInteger(payload.appointment_id),
+      appointment_id: appointmentId,
       notes: cleanString(payload.notes, 2000) || null,
       occurred_at: dateOrNull(payload.occurred_at) || new Date(),
       created_by: actorId,
       created_at: new Date(),
     }, { transaction });
     return { voucher: serializeVoucher(voucher, []), movement: movement.toJSON() };
+  });
+}
+
+async function consumeVoucherForCompletedAppointment({ appointmentId, actorId }) {
+  const normalizedAppointmentId = optionalPositiveInteger(appointmentId);
+  if (!normalizedAppointmentId) {
+    return { consumed: false, reason: 'appointment_id_invalid' };
+  }
+
+  return sequelize.transaction(async (transaction) => {
+    const appointment = await CitaPaciente.findByPk(normalizedAppointmentId, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!appointment) return { consumed: false, reason: 'appointment_not_found' };
+    if (String(appointment.estado || '') !== 'completada') {
+      return { consumed: false, reason: 'appointment_not_completed' };
+    }
+
+    const voucherId = optionalPositiveInteger(appointment.voucher_id);
+    if (!voucherId) return { consumed: false, reason: 'appointment_without_voucher' };
+
+    const voucher = await PatientVoucher.findOne({
+      where: {
+        id: voucherId,
+        clinic_id: appointment.clinica_id,
+        patient_id: appointment.paciente_id,
+      },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!voucher) return { consumed: false, reason: 'voucher_not_found' };
+
+    const existingMovement = await PatientVoucherMovement.findOne({
+      where: {
+        voucher_id: voucher.id,
+        movement_type: 'consumption',
+        appointment_id: appointment.id_cita,
+      },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (existingMovement) {
+      return {
+        consumed: false,
+        already_consumed: true,
+        reason: 'already_consumed_for_appointment',
+        voucher_id: voucher.public_id,
+        movement_id: String(existingMovement.id),
+        available_units: numberValue(voucher.available_units),
+      };
+    }
+
+    if (voucher.status !== 'active') {
+      return {
+        consumed: false,
+        reason: 'voucher_not_active',
+        voucher_id: voucher.public_id,
+        available_units: numberValue(voucher.available_units),
+      };
+    }
+
+    const available = numberValue(voucher.available_units);
+    if (available <= 0) {
+      return {
+        consumed: false,
+        reason: 'voucher_without_available_units',
+        voucher_id: voucher.public_id,
+        available_units: available,
+      };
+    }
+
+    const remaining = roundMoney(available - 1);
+    await voucher.update({
+      available_units: Math.max(0, remaining),
+      status: remaining <= 0 ? 'consumed' : 'active',
+    }, { transaction });
+    const movement = await PatientVoucherMovement.create({
+      voucher_id: voucher.id,
+      movement_type: 'consumption',
+      units: -1,
+      appointment_id: appointment.id_cita,
+      notes: `Consumo automático al confirmar asistencia de la cita ${appointment.id_cita}.`,
+      occurred_at: new Date(),
+      created_by: actorId,
+      created_at: new Date(),
+    }, { transaction });
+
+    return {
+      consumed: true,
+      reason: 'consumed_on_attendance',
+      voucher_id: voucher.public_id,
+      movement_id: String(movement.id),
+      consumed_units: 1,
+      available_units: Math.max(0, remaining),
+    };
   });
 }
 
@@ -2566,6 +2682,7 @@ module.exports = {
   createVoucher,
   sellVoucher,
   consumeVoucher,
+  consumeVoucherForCompletedAppointment,
   createFiscalDocument,
   createPatientFiscalDocument,
   updateFiscalDocument,

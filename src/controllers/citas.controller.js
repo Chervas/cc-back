@@ -35,6 +35,7 @@ const {
 } = require('../lib/patient-language');
 const consentimientosService = require('../services/consentimientos.service');
 const appointmentNotificationCleanup = require('../services/appointmentNotificationCleanup.service');
+const patientEconomics = require('../services/patientEconomics.service');
 const {
     processAppointmentLeadMilestones,
     syncLeadStatusFromAppointments,
@@ -2510,6 +2511,22 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
     await cita.save();
 
     await processAppointmentLeadMilestones({ cita, previousStatus });
+    let voucherConsumptionResult = null;
+    if (estadoRaw === 'completada') {
+        try {
+            voucherConsumptionResult = await patientEconomics.consumeVoucherForCompletedAppointment({
+                appointmentId: cita.id_cita,
+                actorId: req.userData?.userId || null,
+            });
+        } catch (error) {
+            voucherConsumptionResult = {
+                consumed: false,
+                reason: error.code || 'voucher_consumption_failed',
+                message: error.message || 'No se pudo descontar el bono asociado.',
+            };
+            console.error('⚠️ [updateCitaEstado] Error descontando bono de la cita:', error.message || error);
+        }
+    }
 
     try {
         const automationEvent = mapEstadoToAutomationV2Event(estadoRaw);
@@ -2555,6 +2572,9 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
     await attachFlowSummaryToCitas(citaActualizada);
     await attachUnreadCountsToCitas(citaActualizada, req.userData?.userId || null);
     await consentimientosService.attachConsentSummaryToCitas(citaActualizada);
+    if (voucherConsumptionResult) {
+        setCitaDataValue(citaActualizada, 'voucher_consumption', voucherConsumptionResult);
+    }
     emitAppointmentSocketEvent('appointment:updated', citaActualizada?.toJSON ? citaActualizada.toJSON() : citaActualizada);
     return res.json(await protectAppointmentsForRequest(req, citaActualizada));
 });

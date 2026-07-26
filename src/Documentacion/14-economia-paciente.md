@@ -103,6 +103,11 @@ La previsualizacion calcula una serie futura y conflictos por profesional o
 instalacion. La confirmacion crea citas reales y encola las automatizaciones
 de cita existentes.
 
+Cuando una cita enlazada a un bono se marca como `completada`, Agenda descuenta
+automaticamente una unidad del bono desde el backend. El consumo es idempotente
+por `voucher_id + appointment_id`: repetir el cierre de asistencia no resta otra
+sesion. Las citas `no_asistio`, `cancelada` o `reprogramada` no consumen bono.
+
 Contabilidad transversal y portal:
 [15-contabilidad-y-gestoria](./15-contabilidad-y-gestoria.md).
 
