@@ -43,6 +43,9 @@ module.exports = (sequelize, DataTypes) => {
     nota: { type: DataTypes.TEXT, allowNull: true },
     motivo: { type: DataTypes.STRING(255), allowNull: true },
     reschedule_reason: { type: DataTypes.STRING(32), allowNull: true },
+    source_system: { type: DataTypes.STRING(40), allowNull: true },
+    source_reference: { type: DataTypes.STRING(120), allowNull: true },
+    import_metadata: { type: DataTypes.JSON, allowNull: true },
     tipo_cita: {
       type: DataTypes.ENUM('primera_sin_trat', 'primera_con_trat', 'continuacion', 'urgencia', 'revision'),
       allowNull: false,

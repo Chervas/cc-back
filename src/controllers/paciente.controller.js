@@ -389,9 +389,11 @@ const buildAppointmentActivityDescription = ({ telefono, inicio, tratamiento, es
 
 const isImportedHistoricalAppointment = (cita) => {
   const tipoCita = String(cita?.tipo_cita || '').trim().toLowerCase();
+  const sourceSystem = String(cita?.source_system || '').trim().toLowerCase();
   const motivo = String(cita?.motivo || '').trim().toLowerCase();
   const nota = String(cita?.nota || '').trim().toLowerCase();
   return tipoCita === 'historico_importado'
+    || sourceSystem === 'cliniccloud'
     || motivo === 'importación de pacientes para reactivación'
     || nota.includes('cita histórica creada automáticamente desde una importación');
 };
