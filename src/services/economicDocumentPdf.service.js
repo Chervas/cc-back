@@ -177,7 +177,9 @@ function baseStyles() {
     .budget-grand-total span { color: #64748b; font-size: 11px; }
     .budget-grand-total strong { font-size: 22px; }
     .payment-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; }
-    .payment-method { color: #475569; font-size: 10px; font-weight: bold; }
+    .payment-method { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; min-width: 165px; padding: 7px 10px; border: 1px solid #dfe5ed; border-radius: 6px; background: #f8fafc; color: #172033; font-size: 10px; font-weight: bold; }
+    .payment-method span { color: #64748b; font-size: 8px; text-transform: uppercase; }
+    .payment-method strong { font-size: 11px; }
     .payment-list { margin-top: 12px; overflow: hidden; border: 1px solid #dfe5ed; border-radius: 6px; }
     .payment-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 24px; padding: 11px 12px; border-bottom: 1px solid #e8edf3; }
     .payment-row:last-child { border-bottom: 0; }
@@ -229,7 +231,7 @@ function paymentRows(budget, proposal, total, acceptance) {
     }
     if (mode === 'clinic_installments') {
       const schedule = Array.isArray(proposal.schedule) ? proposal.schedule : [];
-      return `<div class="payment-row"><div><strong>Pago por fases</strong><small>${schedule.length} cobros acordados</small><div class="payment-detail">${schedule.map((phase) => `<div><span>${escapeHtml(phase.label)}${phase.due_date ? ` · ${escapeHtml(date(phase.due_date))}` : ''}</span><strong>${escapeHtml(money(phase.amount))}</strong></div>`).join('')}</div></div></div>`;
+      return `<div class="payment-row"><div><strong>Aplazado en clínica</strong><small>${schedule.length} cobros acordados</small><div class="payment-detail">${schedule.map((phase) => `<div><span>${escapeHtml(phase.label)}${phase.due_date ? ` · ${escapeHtml(date(phase.due_date))}` : ''}</span><strong>${escapeHtml(money(phase.amount))}</strong></div>`).join('')}</div></div></div>`;
     }
     if (mode === 'external_financing') {
       const options = Array.isArray(proposal.financing_options) ? proposal.financing_options : [];
@@ -268,7 +270,7 @@ function budgetHtml(budget, version, events = []) {
       </section>
       <section class="budget-meta"><div><span>Paciente</span><strong>${escapeHtml(patient.name)}</strong></div><div><span>Fecha</span><strong>${escapeHtml(date(budget.created_at))}</strong></div><div><span>Válido hasta</span><strong>${escapeHtml(date(budget.valid_until))}</strong></div></section>
       <section class="budget-section"><h2>Tratamientos y servicios</h2><div class="budget-table"><table><thead><tr><th>Concepto</th><th class="right">Cantidad</th><th class="right">Precio</th><th class="right">Importe</th></tr></thead><tbody>${lines.map((line) => `<tr><td><strong>${escapeHtml(line.name)}</strong>${line.tooth ? `<small>Pieza ${escapeHtml(line.tooth)}</small>` : ''}${line.discount_percent ? `<small>${escapeHtml(line.discount_percent)}% de descuento</small>` : ''}</td><td class="right">${escapeHtml(line.quantity)}</td><td class="right">${escapeHtml(money(line.unit_price))}</td><td class="right"><strong>${escapeHtml(money(line.total))}</strong></td></tr>`).join('')}</tbody></table></div><div class="budget-grand-total"><span>Total</span><strong>${escapeHtml(money(totals.total))}</strong></div></section>
-      ${payments ? `<section class="budget-section"><div class="payment-head"><div><span class="kicker">${accepted ? 'Decisión del paciente' : 'Propuesta económica'}</span><h2>${accepted ? 'Forma de pago acordada' : 'Alternativas de pago'}</h2></div>${accepted && collectionMethod ? `<span class="payment-method">${escapeHtml(collectionMethod)}</span>` : ''}</div><div class="payment-list">${payments}</div></section>` : ''}
+      ${payments ? `<section class="budget-section"><div class="payment-head"><div><span class="kicker">${accepted ? 'Decisión del paciente' : 'Propuesta económica'}</span><h2>${accepted ? 'Forma de pago acordada' : 'Alternativas de pago'}</h2></div>${accepted && collectionMethod ? `<span class="payment-method"><span>Cobro previsto</span><strong>${escapeHtml(collectionMethod)}</strong></span>` : ''}</div><div class="payment-list">${payments}</div></section>` : ''}
       ${design.conditions || version.notes ? `<section class="budget-conditions"><strong>Condiciones</strong><br>${escapeHtml(design.conditions || version.notes)}</section>` : ''}
       <footer class="budget-footer"><span>${escapeHtml(clinic.legal_name || clinic.name)}</span><span>${escapeHtml(budget.number)} · ${escapeHtml(date(budget.created_at))}</span></footer>
     </main></body></html>`;

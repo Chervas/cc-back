@@ -84,6 +84,9 @@ Al aceptar o aceptar parcialmente, el backend valida
 contra la version ofrecida y los guarda en `EconomicBudgetEvent.metadata`.
 Las salidas posteriores muestran solo esa decision; las alternativas completas
 siguen visibles unicamente mientras el paciente todavia debe elegir.
+La salida documental de presupuesto presenta `collection_method` como
+`Cobro previsto` y muestra `clinic_installments` al paciente como
+`Aplazado en clinica`; esos textos no cambian los codigos internos.
 
 La creacion fiscal general admite origen `manual`, `budget` o `payment`. El
 backend calcula lo ya documentado y rechaza importes superiores al pendiente,
