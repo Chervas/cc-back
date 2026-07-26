@@ -15,6 +15,8 @@ const {
 
 const RENDERER_VERSION = 'clinicaclick-web-renderer/1.8.0';
 const SAFE_EXTERNAL_REL = /^(?:\/[A-Za-z0-9_][A-Za-z0-9/_-]*|https:\/\/[^\s]+)$/;
+const SAFE_YOUTUBE_VIDEO_ID = /^[A-Za-z0-9_-]{6,64}$/;
+const SAFE_VIMEO_VIDEO_ID = /^[0-9]{6,12}$/;
 const PRODUCTION_INTAKE_ENDPOINT = '/_clinicaclick/intake';
 const CLINIC_BINDING_FIELDS = new Set([
   'name',
@@ -574,6 +576,45 @@ function imageClassList(node) {
   return `cc-fit-${fit} cc-aspect-${aspect} cc-focal-${focalX}-${focalY}`;
 }
 
+function videoEmbedUrl(node) {
+  const provider = String(node.props.provider || '').trim();
+  const videoId = String(node.props.video_id || '').trim();
+  if (provider === 'youtube') {
+    if (!SAFE_YOUTUBE_VIDEO_ID.test(videoId)) {
+      fail('web_artifact_video_id_invalid', 'El ID de YouTube no es válido.', {
+        node_id: node.id,
+        provider,
+      });
+    }
+    return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(videoId)}`;
+  }
+  if (provider === 'vimeo') {
+    if (!SAFE_VIMEO_VIDEO_ID.test(videoId)) {
+      fail('web_artifact_video_id_invalid', 'El ID de Vimeo no es válido.', {
+        node_id: node.id,
+        provider,
+      });
+    }
+    return `https://player.vimeo.com/video/${encodeURIComponent(videoId)}`;
+  }
+  fail('web_artifact_video_provider_invalid', 'El proveedor de vídeo no está soportado.', {
+    node_id: node.id,
+    provider,
+  });
+}
+
+function webDocumentHasNodeType(document, nodeType) {
+  return Object.values(document?.nodes || {}).some((node) => node?.type === nodeType);
+}
+
+function videoFrameCspDirective(document) {
+  if (!webDocumentHasNodeType(document, 'video')) {
+    return '';
+  }
+  const sources = 'https://www.youtube-nocookie.com https://player.vimeo.com';
+  return ` frame-src ${sources}; child-src ${sources};`;
+}
+
 function resolvedMediaImage(snapshot, assetId, details = {}) {
   const media = snapshot.media_assets?.[assetId];
   if (!media) fail('web_artifact_media_unresolved', 'La revisión referencia una imagen no congelada.', {
@@ -631,6 +672,16 @@ function renderGallery(node, snapshot) {
     return `<figure class="cc-gallery-item ${classes}"><div class="cc-image-frame"><img src="${escapeHtml(source)}" alt="${escapeHtml(alt)}" loading="lazy" decoding="async"${dimensions}></div>${caption}</figure>`;
   }).join('');
   return `<div id="cc-${escapeHtml(node.id)}" class="cc-node cc-gallery cc-gallery-cols-${Number(node.props.columns)} ${styleClassList(node)}">${figures}</div>`;
+}
+
+function renderVideo(node) {
+  const source = videoEmbedUrl(node);
+  const loading = node.props.loading === 'eager' ? 'eager' : 'lazy';
+  const aspect = String(node.props.aspect_ratio || '16:9').replace(':', '-');
+  const caption = node.props.caption
+    ? `<figcaption>${escapeHtml(node.props.caption)}</figcaption>`
+    : '';
+  return `<figure id="cc-${escapeHtml(node.id)}" class="cc-node cc-video cc-video-aspect-${escapeHtml(aspect)} ${styleClassList(node)}"><div class="cc-video-frame"><iframe src="${escapeHtml(source)}" title="${escapeHtml(node.props.title)}" loading="${loading}" referrerpolicy="strict-origin-when-cross-origin" allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe></div>${caption}</figure>`;
 }
 
 function buttonHref(node, context) {
@@ -714,6 +765,7 @@ function renderNode(nodeId, document, snapshot, context, ancestors = new Set(), 
   }
   if (node.type === 'image') return renderImage(node, snapshot);
   if (node.type === 'gallery') return renderGallery(node, snapshot);
+  if (node.type === 'video') return renderVideo(node);
   if (node.type === 'button') {
     const href = buttonHref(node, context);
     const external = node.props.action === 'external_url' && node.props.open_in_new_tab === true;
@@ -810,7 +862,7 @@ function stylesheet(tokens, document = { nodes: {} }) {
     '.cc-divider{width:100%;height:0;margin:0;border:0;border-top-width:1px;border-top-style:solid}.cc-divider-solid{border-top-style:solid}.cc-divider-dashed{border-top-style:dashed}.cc-divider-dotted{border-top-style:dotted}.cc-divider-tone-muted{border-top-color:#dfe3ec}.cc-divider-tone-brand{border-top-color:var(--cc-primary)}.cc-divider-tone-accent{border-top-color:var(--cc-accent)}.cc-spacer{display:block;width:100%;flex:none}.cc-spacer-xs{height:.25rem}.cc-spacer-sm{height:var(--cc-sm)}.cc-spacer-md{height:var(--cc-md)}.cc-spacer-lg{height:var(--cc-lg)}.cc-spacer-xl{height:var(--cc-xl)}.cc-spacer-2xl{height:var(--cc-2xl)}',
     '.cc-button{display:inline-flex;width:fit-content;align-items:center;justify-content:center;min-height:44px;padding:.75rem 1.15rem;border-radius:var(--cc-radius);font-weight:700;text-decoration:none;border:1px solid transparent;cursor:pointer}.cc-button-primary{background:var(--cc-primary);color:#fff}.cc-section.cc-bg-brand .cc-button-primary{background:var(--cc-surface);color:var(--cc-primary)}.cc-button-secondary{background:var(--cc-secondary);color:#fff}.cc-button-outline{border-color:currentColor;color:var(--cc-primary);background:transparent}.cc-button-link{padding-inline:0;color:var(--cc-primary)}',
     '.cc-form{display:grid;gap:var(--cc-md);padding:var(--cc-xl);border:1px solid #dfe3ec;border-radius:var(--cc-radius);background:#fff}.cc-field{display:grid;gap:.35rem}.cc-field input:not([type=checkbox]),.cc-field textarea,.cc-field select{width:100%;min-height:44px;border:1px solid #aab1c2;border-radius:.5rem;padding:.7rem;font:inherit}.cc-checkbox{grid-template-columns:auto 1fr;align-items:start}.cc-honeypot{position:absolute!important;left:-10000px!important;width:1px!important;height:1px!important;overflow:hidden!important}.cc-form-status{display:none;padding:.75rem;border-radius:.5rem}.cc-form-success{background:#e9f8f1;color:#145c3d}.cc-form-error{background:#fff1f1;color:#8b1f1f}.cc-form-status:target{display:block}',
-    '.cc-image{margin:0}.cc-gallery{display:grid}.cc-gallery-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}.cc-gallery-cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}.cc-gallery-cols-4{grid-template-columns:repeat(4,minmax(0,1fr))}.cc-gallery-item{min-width:0;margin:0;border-radius:inherit}.cc-image-frame{overflow:hidden;border-radius:inherit;background:#eef1f6}.cc-image img,.cc-gallery-item img{width:100%;height:100%;object-fit:cover}.cc-fit-contain img{object-fit:contain}.cc-aspect-auto .cc-image-frame img{height:auto}.cc-aspect-1-1 .cc-image-frame{aspect-ratio:1/1}.cc-aspect-4-3 .cc-image-frame{aspect-ratio:4/3}.cc-aspect-3-2 .cc-image-frame{aspect-ratio:3/2}.cc-aspect-16-9 .cc-image-frame{aspect-ratio:16/9}.cc-aspect-21-9 .cc-image-frame{aspect-ratio:21/9}.cc-image figcaption,.cc-gallery-item figcaption{padding-top:.5rem;color:#5f6b7f;font-size:.8125rem}',
+    '.cc-image{margin:0}.cc-gallery{display:grid}.cc-gallery-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}.cc-gallery-cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}.cc-gallery-cols-4{grid-template-columns:repeat(4,minmax(0,1fr))}.cc-gallery-item{min-width:0;margin:0;border-radius:inherit}.cc-image-frame{overflow:hidden;border-radius:inherit;background:#eef1f6}.cc-image img,.cc-gallery-item img{width:100%;height:100%;object-fit:cover}.cc-fit-contain img{object-fit:contain}.cc-aspect-auto .cc-image-frame img{height:auto}.cc-aspect-1-1 .cc-image-frame{aspect-ratio:1/1}.cc-aspect-4-3 .cc-image-frame{aspect-ratio:4/3}.cc-aspect-3-2 .cc-image-frame{aspect-ratio:3/2}.cc-aspect-16-9 .cc-image-frame{aspect-ratio:16/9}.cc-aspect-21-9 .cc-image-frame{aspect-ratio:21/9}.cc-image figcaption,.cc-gallery-item figcaption,.cc-video figcaption{padding-top:.5rem;color:#5f6b7f;font-size:.8125rem}.cc-video{margin:0}.cc-video-frame{position:relative;overflow:hidden;border-radius:inherit;background:#eef1f6}.cc-video-frame iframe{position:absolute;inset:0;width:100%;height:100%;border:0}.cc-video-aspect-16-9 .cc-video-frame{aspect-ratio:16/9}.cc-video-aspect-4-3 .cc-video-frame{aspect-ratio:4/3}.cc-video-aspect-1-1 .cc-video-frame{aspect-ratio:1/1}',
     focalRules,
     '.cc-faq{border:1px solid #dfe3ec;background:#fff;padding:var(--cc-md);border-radius:var(--cc-radius)}.cc-faq summary{cursor:pointer;font-family:var(--cc-font-heading);font-weight:700}.cc-faq p{margin:var(--cc-sm) 0 0;white-space:pre-wrap}',
     `@media(max-width:767px){.cc-layout-row>.cc-container{flex-direction:column}.cc-layout-grid>.cc-container,.cc-gallery{grid-template-columns:1fr}.cc-form{padding:var(--cc-lg)}.cc-button{width:100%}${responsiveRules('mobile')}}`,
@@ -1010,10 +1062,11 @@ function renderPage({ page, document, snapshot, context, project, baseUrl, clini
   // is embedded.
   const runtimeImageSources = `${measurementOrigin ? ` ${measurementOrigin}` : ''} data:`;
   const runtimeStyleSources = measurementOrigin ? " 'unsafe-inline'" : '';
+  const runtimeFrameSources = videoFrameCspDirective(document);
   // `frame-ancestors` is ignored in a meta CSP and causes a browser warning.
   // It remains enforced in the response-header contract below together with
   // X-Frame-Options, while the meta policy preserves the useful early guards.
-  const pageCsp = `default-src 'none'; base-uri 'none'; form-action 'self'; img-src 'self' https://media.clinicaclick.com${runtimeImageSources}; style-src 'self'${runtimeStyleSources}; script-src 'sha256-${jsonLdCspHash}'${measurementOrigin ? ` ${measurementOrigin}` : ''}; connect-src 'self'${measurementOrigin ? ` ${measurementOrigin}` : ''}; font-src 'self'; manifest-src 'self'; upgrade-insecure-requests`;
+  const pageCsp = `default-src 'none'; base-uri 'none'; form-action 'self'; img-src 'self' https://media.clinicaclick.com${runtimeImageSources}; style-src 'self'${runtimeStyleSources}; script-src 'sha256-${jsonLdCspHash}'${measurementOrigin ? ` ${measurementOrigin}` : ''}; connect-src 'self'${measurementOrigin ? ` ${measurementOrigin}` : ''}; font-src 'self'; manifest-src 'self';${runtimeFrameSources} upgrade-insecure-requests`;
   const publicationBasePath = new URL(`${baseUrl}/`).pathname;
   const favicon = faviconDataUrl(clinic.name || project.name);
   const socialImageTags = safeSocialUrl
@@ -1112,8 +1165,9 @@ function compileWebArtifact(input = {}) {
   const measurementOrigin = runtime.measurement.enabled ? runtime.measurement.api_url : null;
   const runtimeImageSources = `${measurementOrigin ? ` ${measurementOrigin}` : ''} data:`;
   const runtimeStyleSources = measurementOrigin ? " 'unsafe-inline'" : '';
+  const runtimeFrameSources = videoFrameCspDirective(document);
   const headers = {
-    'content-security-policy': `default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' https://media.clinicaclick.com${runtimeImageSources}; style-src 'self'${runtimeStyleSources}; script-src ${scriptHashes.join(' ')}${measurementOrigin ? ` ${measurementOrigin}` : ''}; connect-src 'self'${measurementOrigin ? ` ${measurementOrigin}` : ''}; font-src 'self'; manifest-src 'self'; upgrade-insecure-requests`,
+    'content-security-policy': `default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' https://media.clinicaclick.com${runtimeImageSources}; style-src 'self'${runtimeStyleSources}; script-src ${scriptHashes.join(' ')}${measurementOrigin ? ` ${measurementOrigin}` : ''}; connect-src 'self'${measurementOrigin ? ` ${measurementOrigin}` : ''}; font-src 'self'; manifest-src 'self';${runtimeFrameSources} upgrade-insecure-requests`,
     'cross-origin-opener-policy': 'same-origin',
     'cross-origin-resource-policy': 'same-site',
     'permissions-policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',

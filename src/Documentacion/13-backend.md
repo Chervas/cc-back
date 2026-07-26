@@ -182,6 +182,18 @@ La validación está duplicada y cubierta en frontend/backend:
 - tests `web_document_contract`, `web_artifact_compiler`,
   `web_gallery_backend`, `web_artifacts_service` y focales frontend.
 
+El mismo renderer 1.8 admite ahora el nodo cerrado `video` como extensión
+aditiva de `WebDocument v1`. No se incrementa la versión del renderer para no
+forzar republicaciones de artefactos/LKG sin vídeo: la salida solo cambia
+cuando el documento contiene explícitamente ese nodo. El contrato acepta
+únicamente `provider` (`youtube` o `vimeo`), `video_id`, título accesible,
+proporción, estrategia de carga y pie de vídeo. Rechaza hijos, iframe pegado,
+HTML, JavaScript y URLs arbitrarias. El compilador transforma esos datos en
+iframe seguro (`youtube-nocookie.com` o `player.vimeo.com`) y añade
+`frame-src`/`child-src` a la CSP del meta HTML y del manifest solo cuando existe
+un vídeo. La prueba focal `web_video_backend.test.js` cubre validación cerrada,
+salida determinista, CSP y ausencia de handlers.
+
 ### Schema de página con presets seguros
 
 `WebDocument v1` admite `page.seo.schema` como configuración editorial cerrada,
@@ -1005,7 +1017,15 @@ Contrato:
 - Los assets visuales estaticos del informe viven en `src/assets/nutrition/images` y se embeben como `data:` dentro del HTML/PDF generado por backend. Son ilustraciones genericas sin dato clinico ni paciente; no van a `PUBLIC_MEDIA`. El video de pliegue subido como referencia queda fuera del informe hasta cerrar una ayuda interactiva especifica de mediciones.
 - `GET /api/paneles/main` devuelve `inactiveTodayAppointments` además de `todayAppointments`. `todayAppointments` conserva solo citas activas esperadas y no vencidas; `inactiveTodayAppointments` recoge citas del día cerradas, canceladas o reprogramadas para que el frontend explique estados vacíos sin contarlas como citas esperadas. Las citas abiertas vencidas salen en `pastAttendancePending`.
 - Para roles `paciente` y `laboratorio`, `GET /api/paneles/main` no entrega bloques internos de clínica: no carga citas operativas, oportunidades, alertas, errores de configuración ni tareas. El aislamiento se aplica en backend aunque el frontend también oculte esas secciones.
-- `ClinicalPrivateAssets` es la tabla base para binarios clinicos privados: PDFs finales cacheados, fotos clinicas de Nutricion y futuros adjuntos de historia. En dev usa provider `local_private` con raiz configurable `CLINICAL_PRIVATE_STORAGE_ROOT` y fallback fuera del checkout (`../clinical-private-storage`). El contrato esta preparado para migrar a S3 privado sin exponer URL publica.
+- `ClinicalPrivateAssets` es la tabla base para binarios clinicos privados: PDFs finales cacheados, fotos clinicas de Nutricion y futuros adjuntos de historia. En dev usa provider `local_private` con raiz configurable `CLINICAL_PRIVATE_STORAGE_ROOT` y fallback fuera del checkout (`../clinical-private-storage`). La raiz operativa recomendada en el servidor actual es `/home/ubuntu/.clinicaclick-private`; si se anade un disco dedicado, la raiz recomendada pasa a ser `/mnt/clinicaclick-clinical-private`. En ambos casos el directorio debe tener permisos `700`, los objetos no exponen rutas directas y se sirven solo por backend autenticado. El contrato esta preparado para migrar a S3 privado sin exponer URL publica.
+- Estrategia futura de almacenamiento privado y backups:
+  - Diferenciar storage operativo y backup. El storage operativo es donde la app lee/escribe a diario desde `ClinicalPrivateAssets`; el backup es una copia cifrada para recuperacion y no debe usarse como disco de trabajo.
+  - Fase 0, estado actual: mantener `local_private`, limpiar caches/artefactos tecnicos antes de comprar almacenamiento, no cambiar provider clinico, asegurar permisos `700` en la raiz privada y servir assets solo con permisos de backend. No usar `media.clinicaclick.com` para datos clinicos.
+  - Fase 1, si crece el almacenamiento activo: anadir disco dedicado barato en la misma zona de la instancia, montarlo en `/mnt/clinicaclick-clinical-private`, permisos `700`, configurar `CLINICAL_PRIVATE_STORAGE_ROOT=/mnt/clinicaclick-clinical-private` y conservar `ClinicalPrivateAssets` como fuente de metadatos. No exponer rutas de filesystem ni URLs publicas.
+  - Fase 2, backups economicos: crear bucket S3 privado y cifrado en region UE, preferiblemente `eu-south-2` si DPO/legal lo aprueba o `eu-west-3` por cercania a la infraestructura actual. Usar SSE-S3 o SSE-KMS si se requiere auditoria/control de claves. Subir backups cifrados de storage clinico, base de datos y documentacion operativa. Aplicar lifecycle: primeros dias/semanas en S3 Standard o Standard-IA; archivo antiguo a Glacier Instant/Flexible segun RTO/RPO acordado. Glacier es backup/archivo, no storage operativo diario.
+  - Fase 3, evolucion futura: implementar provider S3 privado para `ClinicalPrivateAssets` solo cuando el volumen lo justifique. Acceso siempre por backend autenticado, URLs prefirmadas muy cortas o streaming backend, auditoria de acceso por usuario, clinica, paciente, asset, accion, fecha, IP/contexto y revision DPO/legal antes de produccion clinica real.
+  - Costes orientativos a documentar en decisiones: disco Lightsail attached disk alrededor de `0.10 USD/GB-mes`; S3 Standard UE alrededor de `0.023-0.024 USD/GB-mes`; S3 Standard-IA alrededor de `0.0125-0.0131 USD/GB-mes`; Glacier/archivo es mas barato pero solo para backup/archivo.
+  - Regla critica: `PUBLIC_MEDIA`/CloudFront es solo para assets publicos como logos, marketing, fotos publicas autorizadas de equipo, frontend o imagenes publicas de WhatsApp. Nunca RX, consentimientos, informes, audios, fotos clinicas, STL, documentos de laboratorio, facturas identificables ni datos de paciente en `PUBLIC_MEDIA`.
 - Importaciones reales 2026-07-23: los exports originales deben entrar fuera de
   los repositorios, por ejemplo
   `/home/ubuntu/secure-imports/clinic-real-20260723/incoming/`, con backups en

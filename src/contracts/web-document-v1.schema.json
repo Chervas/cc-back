@@ -67,6 +67,7 @@
           { "$ref": "#/definitions/faqNode" },
           { "$ref": "#/definitions/imageNode" },
           { "$ref": "#/definitions/galleryNode" },
+          { "$ref": "#/definitions/videoNode" },
           { "$ref": "#/definitions/buttonNode" },
           { "$ref": "#/definitions/intakeFormNode" }
         ]
@@ -738,6 +739,61 @@
             { "maxLength": 500 }
           ]
         }
+      }
+    },
+    "videoNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "version", "props", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "type": { "const": "video" },
+        "version": { "const": 1 },
+        "props": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["provider", "video_id", "title", "aspect_ratio", "loading"],
+          "properties": {
+            "provider": { "enum": ["youtube", "vimeo"] },
+            "video_id": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 64
+            },
+            "title": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 180 }
+              ]
+            },
+            "aspect_ratio": { "enum": ["16:9", "4:3", "1:1"] },
+            "loading": { "enum": ["lazy", "eager"] },
+            "caption": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "maxLength": 500 }
+              ]
+            }
+          },
+          "allOf": [
+            {
+              "if": { "properties": { "provider": { "const": "youtube" } } },
+              "then": { "properties": { "video_id": { "pattern": "^[A-Za-z0-9_-]{6,64}$" } } }
+            },
+            {
+              "if": { "properties": { "provider": { "const": "vimeo" } } },
+              "then": { "properties": { "video_id": { "pattern": "^[0-9]{6,12}$" } } }
+            }
+          ]
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "style_tokens": { "$ref": "#/definitions/styleTokens" },
+        "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
+        "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
     "buttonNode": {
