@@ -33,6 +33,9 @@ const PURPOSE_CONFIG = {
   },
 };
 
+const UPLOAD_CATEGORIES = new Set(['pruebas', 'informes', 'otros']);
+const MAX_GENERAL_ATTACHMENT_BYTES = 15 * 1024 * 1024;
+
 function toPlain(row) {
   return row && typeof row.toJSON === 'function' ? row.toJSON() : row;
 }
@@ -41,6 +44,41 @@ function toIntOrNull(value) {
   if (value === undefined || value === null || value === '') return null;
   const parsed = Number.parseInt(String(value), 10);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function cleanFilename(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[\\/\0]/g, '-')
+    .slice(0, 180);
+}
+
+function normalizeUploadCategory(value) {
+  const category = String(value || '').trim().toLowerCase();
+  return UPLOAD_CATEGORIES.has(category) ? category : 'pruebas';
+}
+
+function decodeBase64Payload(value) {
+  const raw = String(value || '').trim();
+  const base64 = raw.includes(',') ? raw.split(',').pop() : raw;
+  if (!base64) {
+    const error = new Error('clinical_attachment_empty_payload');
+    error.status = 400;
+    throw error;
+  }
+  const buffer = Buffer.from(base64, 'base64');
+  if (!buffer.length) {
+    const error = new Error('clinical_attachment_empty_payload');
+    error.status = 400;
+    throw error;
+  }
+  if (buffer.length > MAX_GENERAL_ATTACHMENT_BYTES) {
+    const error = new Error('clinical_attachment_file_size_not_allowed');
+    error.status = 413;
+    error.details = { maxBytes: MAX_GENERAL_ATTACHMENT_BYTES, sizeBytes: buffer.length };
+    throw error;
+  }
+  return buffer;
 }
 
 function contentTypeToFileType(contentType, filename = '') {
@@ -76,13 +114,18 @@ function clinicalAttachmentToJson(row) {
   const config = PURPOSE_CONFIG[asset.purpose] || PURPOSE_CONFIG.clinical_attachment;
   const filename = formatDefaultName(asset, config);
   const metadata = asset.metadata && typeof asset.metadata === 'object' ? asset.metadata : {};
+  const appointmentId = toIntOrNull(metadata.appointment_id)
+    || (asset.owner_type === 'patient_appointment' ? toIntOrNull(asset.owner_id) : null);
+  const category = asset.purpose === 'clinical_attachment'
+    ? normalizeUploadCategory(metadata.category)
+    : config.category;
 
   return {
     id: asset.id,
     public_id: asset.public_id,
     name: filename,
     purpose: asset.purpose,
-    category: config.category,
+    category,
     content_type: asset.content_type,
     file_type: contentTypeToFileType(asset.content_type, filename),
     size_bytes: Number(asset.size_bytes || 0),
@@ -92,6 +135,7 @@ function clinicalAttachmentToJson(row) {
     owner_type: asset.owner_type || null,
     owner_id: asset.owner_id || null,
     measurement_id: toIntOrNull(metadata.measurement_id) || (asset.owner_type === 'patient_nutrition_measurement' ? toIntOrNull(asset.owner_id) : null),
+    appointment_id: appointmentId,
     report_public_id: metadata.report_public_id || null,
     snapshot_hash: metadata.snapshot_hash || null,
     formula_version: metadata.formula_version || null,
@@ -231,9 +275,77 @@ async function readPatientClinicalAttachment(patientIdentifier, attachmentIdenti
   return clinicalPrivateStorage.readClinicalPrivateAsset(asset);
 }
 
+async function createPatientClinicalAttachment(patientIdentifier, actorId, payload = {}) {
+  const patient = await findPatient(patientIdentifier);
+  if (!patient) {
+    const error = new Error('patient_not_found');
+    error.status = 404;
+    throw error;
+  }
+
+  const clinicId = Number(patient.clinica_id);
+  const canEdit = await canUserAccessFeature({ actorId, featureKey: 'patients.edit', clinicId });
+  if (!canEdit) {
+    const error = new Error('access_policy_forbidden');
+    error.status = 403;
+    error.details = { feature_key: 'patients.edit', clinic_id: clinicId };
+    throw error;
+  }
+
+  const contentType = String(payload.content_type || payload.contentType || '').trim().toLowerCase();
+  const allowedContentTypes = new Set(['application/pdf', 'image/jpeg', 'image/jpg', 'image/png', 'image/webp']);
+  if (!allowedContentTypes.has(contentType)) {
+    const error = new Error('clinical_attachment_content_type_not_allowed');
+    error.status = 400;
+    error.details = { allowed: [...allowedContentTypes] };
+    throw error;
+  }
+
+  const appointmentId = toIntOrNull(payload.appointment_id || payload.appointmentId);
+  if (appointmentId) {
+    const appointment = await db.CitaPaciente.findOne({
+      where: {
+        id_cita: appointmentId,
+        paciente_id: Number(patient.id_paciente),
+        clinica_id: clinicId,
+      },
+      attributes: ['id_cita'],
+    });
+    if (!appointment) {
+      const error = new Error('appointment_not_found');
+      error.status = 404;
+      throw error;
+    }
+  }
+
+  const category = normalizeUploadCategory(payload.category);
+  const filename = cleanFilename(payload.filename || payload.original_filename) || 'adjunto-clinico';
+  const buffer = decodeBase64Payload(payload.data_base64 || payload.base64 || payload.dataUrl);
+  const asset = await clinicalPrivateStorage.storeClinicalPrivateAsset({
+    purpose: 'clinical_attachment',
+    clinicId,
+    patientId: Number(patient.id_paciente),
+    ownerType: appointmentId ? 'patient_appointment' : 'patient',
+    ownerId: appointmentId ? String(appointmentId) : String(patient.id_paciente),
+    originalFilename: filename,
+    contentType,
+    buffer,
+    metadata: {
+      category,
+      appointment_id: appointmentId,
+      uploaded_from: 'patient_attachments',
+      notes: String(payload.notes || '').trim().slice(0, 1000) || null,
+    },
+    createdBy: actorId,
+  });
+
+  return clinicalAttachmentToJson(asset);
+}
+
 module.exports = {
   PURPOSE_CONFIG,
   clinicalAttachmentToJson,
   listPatientClinicalAttachments,
   readPatientClinicalAttachment,
+  createPatientClinicalAttachment,
 };

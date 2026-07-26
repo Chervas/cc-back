@@ -26,6 +26,13 @@ function sendClinicalAttachmentError(error, res) {
   if (error.status === 404 || ['patient_not_found', 'clinical_attachment_not_found'].includes(error.message)) {
     return res.status(404).json({ message: 'Adjunto clinico no encontrado' });
   }
+  if (error.status === 400 || error.status === 413) {
+    return res.status(error.status).json({
+      message: 'No se pudo guardar el adjunto clinico',
+      code: error.message,
+      details: error.details || null,
+    });
+  }
   return null;
 }
 
@@ -54,6 +61,22 @@ exports.getPatientClinicalAttachment = asyncHandler(async (req, res) => {
     res.setHeader('Content-Length', buffer.length);
     res.setHeader('Cache-Control', 'private, no-store');
     return res.send(buffer);
+  } catch (error) {
+    const handled = sendClinicalAttachmentError(error, res);
+    if (handled) return handled;
+    throw error;
+  }
+});
+
+exports.createPatientClinicalAttachment = asyncHandler(async (req, res) => {
+  try {
+    const actorId = actorIdFromRequest(req);
+    const item = await patientClinicalAttachmentsService.createPatientClinicalAttachment(
+      req.params.id,
+      actorId,
+      req.body || {},
+    );
+    return res.status(201).json({ item });
   } catch (error) {
     const handled = sendClinicalAttachmentError(error, res);
     if (handled) return handled;
