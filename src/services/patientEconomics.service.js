@@ -45,6 +45,10 @@ const ACCEPTANCE_COLLECTION_METHODS = new Set([
   'insurance',
   'other',
 ]);
+const ACCEPTANCE_SEND_CHANNELS = new Set(['whatsapp', 'email', 'printed', 'none']);
+const ACCEPTANCE_SIGNATURE_CHANNELS = new Set(['tablet', 'mobile', 'printed', 'not_required']);
+const ACCEPTANCE_BANK_DATA_STATUSES = new Set(['not_required', 'pending', 'complete']);
+const ACCEPTANCE_FINANCING_STATUSES = new Set(['pending_approval', 'approved', 'rejected', 'paid_by_finance']);
 const TEMPLATE_TYPES = new Set(['budget', 'invoice']);
 const PRODUCT_TYPES = new Set(['treatment', 'voucher', 'pack']);
 const FISCAL_DOCUMENT_TYPES = new Set(['receipt', 'invoice', 'credit_note']);
@@ -1113,6 +1117,9 @@ async function transitionBudget({ publicId, actorId, action, payload = {} }) {
         );
       }
       let selectedFinancingMonths = null;
+      let financingProvider = null;
+      let financingStatus = null;
+      let financingFallbackMode = null;
       if (selectedPaymentMode === 'external_financing') {
         selectedFinancingMonths = optionalPositiveInteger(
           payload.selected_financing_months || proposal.selected_financing_months,
@@ -1120,12 +1127,42 @@ async function transitionBudget({ publicId, actorId, action, payload = {} }) {
         const financingOptions = Array.isArray(proposal.financing_options)
           ? proposal.financing_options
           : [];
+        financingProvider = cleanString(payload.financing_provider, 120) || null;
         if (!selectedFinancingMonths
           || !financingOptions.some((option) => Number(option.months) === selectedFinancingMonths)) {
           throw domainError(
             400,
             'accepted_financing_term_invalid',
             'Selecciona uno de los plazos de financiación ofrecidos.',
+          );
+        }
+        if (financingProvider
+          && !financingOptions.some((option) =>
+            Number(option.months) === selectedFinancingMonths
+            && cleanString(option.provider, 120) === financingProvider
+          )) {
+          throw domainError(
+            400,
+            'accepted_financing_provider_invalid',
+            'La financiera elegida no forma parte de este presupuesto.',
+          );
+        }
+        financingStatus = cleanString(payload.financing_status || 'pending_approval', 40).toLowerCase();
+        if (!ACCEPTANCE_FINANCING_STATUSES.has(financingStatus)) {
+          throw domainError(
+            400,
+            'accepted_financing_status_invalid',
+            'El estado de la financiación no es válido.',
+          );
+        }
+        financingFallbackMode = cleanString(payload.financing_fallback_mode, 40).toLowerCase() || null;
+        if (financingFallbackMode === 'none') financingFallbackMode = null;
+        if (financingFallbackMode
+          && (!includedModes.includes(financingFallbackMode) || financingFallbackMode === 'external_financing')) {
+          throw domainError(
+            400,
+            'accepted_financing_fallback_invalid',
+            'La alternativa de financiación no es válida.',
           );
         }
       }
@@ -1143,10 +1180,28 @@ async function transitionBudget({ publicId, actorId, action, payload = {} }) {
           'El método de cobro previsto no es válido.',
         );
       }
+      const sendChannel = cleanString(payload.send_channel || 'whatsapp', 30).toLowerCase();
+      if (!ACCEPTANCE_SEND_CHANNELS.has(sendChannel)) {
+        throw domainError(400, 'accepted_send_channel_invalid', 'El canal de entrega no es válido.');
+      }
+      const signatureChannel = cleanString(payload.signature_channel || 'tablet', 30).toLowerCase();
+      if (!ACCEPTANCE_SIGNATURE_CHANNELS.has(signatureChannel)) {
+        throw domainError(400, 'accepted_signature_channel_invalid', 'El canal de firma no es válido.');
+      }
+      const bankDataStatus = cleanString(payload.bank_data_status || 'not_required', 30).toLowerCase();
+      if (!ACCEPTANCE_BANK_DATA_STATUSES.has(bankDataStatus)) {
+        throw domainError(400, 'accepted_bank_data_status_invalid', 'El estado de datos bancarios no es válido.');
+      }
       acceptance = {
         selected_payment_mode: selectedPaymentMode || null,
         selected_financing_months: selectedFinancingMonths,
+        financing_provider: financingProvider,
+        financing_status: financingStatus,
+        financing_fallback_mode: financingFallbackMode,
         collection_method: collectionMethod,
+        send_channel: sendChannel,
+        signature_channel: signatureChannel,
+        bank_data_status: bankDataStatus,
       };
     }
     const now = new Date();

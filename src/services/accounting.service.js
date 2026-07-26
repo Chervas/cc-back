@@ -717,7 +717,7 @@ function normalizeExpense(payload) {
   const documentNumber = clean(payload.document_number, 100);
   const issueDate = dateOnly(payload.issue_date);
   const category = clean(payload.category, 100);
-  const status = clean(payload.status || 'pending', 30).toLowerCase();
+  const status = clean(payload.status || 'paid', 30).toLowerCase();
   const paymentMethod = clean(payload.payment_method || 'transfer', 30).toLowerCase();
   if (!supplierName || !documentNumber || !issueDate || !category) {
     throw domainError(400, 'expense_required_fields', 'Completa proveedor, número, fecha y categoría.');
@@ -784,6 +784,27 @@ async function storeExpenseAttachment({
 async function createExpense({ clinicId, actorId, payload, transaction = null }) {
   const values = normalizeExpense(payload);
   const preparedAttachment = prepareExpenseAttachment(payload.attachment);
+  const duplicateWhere = {
+    clinic_id: clinicId,
+    document_number: values.document_number,
+  };
+  if (values.supplier_tax_id) {
+    duplicateWhere.supplier_tax_id = values.supplier_tax_id;
+  } else {
+    duplicateWhere.supplier_name = values.supplier_name;
+  }
+  const duplicate = await AccountingExpenseDocument.findOne({
+    where: duplicateWhere,
+    transaction,
+  });
+  if (duplicate) {
+    throw domainError(
+      409,
+      'expense_duplicate_detected',
+      'Ya existe una factura recibida con ese proveedor y número.',
+      { expense_id: duplicate.public_id },
+    );
+  }
   const expense = await AccountingExpenseDocument.create({
     public_id: crypto.randomUUID(),
     clinic_id: clinicId,
