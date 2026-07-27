@@ -56,6 +56,20 @@ async function testQuietHoursUsesDurableJobRequest() {
   assert.doesNotMatch(delayedBlock, /outboundWhatsApp\.add[\s\S]*?delay:/);
 }
 
+function testOutsideSendWindowDiscardSkipsMaterialization() {
+  const source = read('services/flowEngineV2.service.js');
+  assert.match(source, /normalizeOutsideSendWindowPolicy/);
+  assert.match(source, /status:\s*'skipped_outside_send_window'/);
+  assert.match(source, /outside_send_window_policy:\s*selectedOutsideSendWindowPolicy/);
+
+  const discardStart = source.indexOf("status: 'skipped_outside_send_window'");
+  const conversationLookupStart = source.indexOf('const targetPatientId = toIntOrNull', discardStart);
+  const materializationStart = source.indexOf('findOrCreateAutomationWhatsappMessage', discardStart);
+  assert.ok(discardStart > 0);
+  assert.ok(conversationLookupStart > discardStart);
+  assert.ok(materializationStart > conversationLookupStart);
+}
+
 async function testDelayedTemplateSyncUsesDurableJobRequestWithoutToken() {
   const originalEnqueue = jobRequestsService.enqueueUniqueJobRequest;
   let captured = null;
@@ -596,6 +610,7 @@ async function closeQueues() {
 
 async function run() {
   await testQuietHoursUsesDurableJobRequest();
+  testOutsideSendWindowDiscardSkipsMaterialization();
   await testDelayedTemplateSyncUsesDurableJobRequestWithoutToken();
   await testQuietHoursHandlerWaitsAndDispatchesIdempotentTransportJob();
   await testImmediateTransportPersistsBeforePublishAndKeepsImageSnapshot();

@@ -49,14 +49,14 @@ const MANUAL_TRANSLATION_ROWS = Object.freeze([
     en: 'Sorry, {{paciente.nombre}}, but your appointment is coming up shortly and we need to know that you know how to get here. Could you confirm?',
   },
   {
-    es: 'Perdona {{paciente.nombre}}, pero la cita es mañana y necesitamos cerrar la agenda del doctor. ¿Nos la confirmas?',
-    ca: 'Perdona, {{paciente.nombre}}, però la cita és demà i necessitem tancar l’agenda del doctor. Ens la confirmes?',
-    en: 'Sorry, {{paciente.nombre}}, but your appointment is tomorrow and we need to finalize the doctor’s schedule. Could you confirm it?',
+    es: 'Lo primero pedirte disculpas por insistir 🙏 {{paciente.nombre}}. Sé que te he escrito muchas veces, pero es importante que dejemos cerrada la agenda médica con antelación.\n\n¿Me confirmas tu asistencia mañana?',
+    ca: 'Primer de tot, disculpa per insistir 🙏 {{paciente.nombre}}. Sé que t’he escrit moltes vegades, però és important que deixem tancada l’agenda mèdica amb antelació.\n\nEm confirmes la teva assistència demà?',
+    en: 'First of all, sorry for insisting 🙏 {{paciente.nombre}}. I know I have written to you many times, but it is important that we finalize the medical schedule in advance.\n\nCould you confirm your attendance tomorrow?',
   },
   {
-    es: 'Perdona {{paciente.nombre}}, pero necesitamos confirmación para cerrar la agenda del doctor. ¿Nos la confirmas?',
-    ca: 'Perdona, {{paciente.nombre}}, però necessitem la teva confirmació per tancar l’agenda del doctor. Ens la confirmes?',
-    en: 'Sorry, {{paciente.nombre}}, but we need your confirmation to finalize the doctor’s schedule. Could you confirm the appointment?',
+    es: 'Perdona por escribirte de nuevo {{paciente.nombre}} 😅, sé que acabamos de hablar, pero mandamos este mensaje para confirmar que el teléfono de contacto es correcto. ¿Nos confirmas tu cita si no es mucha molestia?🙏🙏',
+    ca: 'Perdona per escriure’t de nou {{paciente.nombre}} 😅, sé que acabem de parlar, però enviem aquest missatge per confirmar que el telèfon de contacte és correcte. Ens confirmes la cita si no és molta molèstia?🙏🙏',
+    en: 'Sorry to write to you again {{paciente.nombre}} 😅, I know we just spoke, but we send this message to confirm that the contact phone number is correct. Could you confirm your appointment if it is not too much trouble?🙏🙏',
   },
   {
     es: '¡Gracias {{paciente.nombre}}! Hasta mañana',

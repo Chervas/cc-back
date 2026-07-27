@@ -913,6 +913,7 @@ const NODE_TYPES_V2 = [
       sender_mode: 'clinic_default',
       sender_origin_id: null,
       quiet_hours_enabled: true,
+      outside_send_window_policy: 'schedule_next_window',
       variables: {},
       fallback_variables: {},
     },
@@ -939,6 +940,13 @@ const NODE_TYPES_V2 = [
       },
       { key: 'sender_origin_id', label: 'Origen específico (ID phone)', input_type: 'number', required: false },
       { key: 'quiet_hours_enabled', label: 'No enviar entre las 22 y las 7h', input_type: 'boolean', required: false },
+      {
+        key: 'outside_send_window_policy',
+        label: 'Si cae fuera de ventana',
+        input_type: 'select',
+        required: false,
+        options: ['schedule_next_window', 'discard'],
+      },
       { key: 'variables', label: 'Variables', input_type: 'json', required: false },
       { key: 'fallback_variables', label: 'Variables fallback', input_type: 'json', required: false },
     ],
@@ -3163,6 +3171,17 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
           )
         );
       }
+    }
+
+    const outsideSendWindowPolicy = cleanString(config.outside_send_window_policy || config.send_window_policy);
+    if (outsideSendWindowPolicy && !['schedule_next_window', 'discard'].includes(outsideSendWindowPolicy)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere outside_send_window_policy válido`,
+          { node_id: nodeId, node_type: nodeType, key: 'outside_send_window_policy', value: outsideSendWindowPolicy }
+        )
+      );
     }
 
     const validateWhatsappTemplateContract = (
