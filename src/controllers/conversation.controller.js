@@ -23,8 +23,10 @@ const {
   LeadContactAttempt,
   ConversationRead,
   Clinica,
+  FormSubmissionEvent,
   MarketingPatientListItem,
   WhatsappTemplate,
+  WhatsappTemplateCatalog,
 } = db;
 
 const ROLE_AGGREGATE = ['propietario', 'admin'];
@@ -82,6 +84,88 @@ function downloadFailedMediaError(kind) {
 function cleanText(value) {
   if (value === undefined || value === null) return '';
   return String(value).trim();
+}
+
+function cleanScalar(value) {
+  if (value === undefined || value === null) return '';
+  if (['string', 'number', 'boolean'].includes(typeof value)) {
+    return String(value).trim();
+  }
+  if (typeof value === 'object') {
+    for (const key of ['value', 'raw_value', 'answer', 'text', 'phone', 'telefono', 'mobile', 'whatsapp']) {
+      const nested = cleanScalar(value?.[key]);
+      if (nested) return nested;
+    }
+  }
+  return '';
+}
+
+function looksLikePhone(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  return digits.length >= 9 && digits.length <= 15;
+}
+
+const LEAD_PHONE_KEYS = ['phone', 'telefono', 'teléfono', 'tel', 'mobile', 'movil', 'móvil', 'whatsapp'];
+
+function extractPhoneFromObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return '';
+  }
+
+  for (const [rawKey, rawValue] of Object.entries(value)) {
+    const key = String(rawKey || '').toLocaleLowerCase('es-ES');
+    if (!LEAD_PHONE_KEYS.some((candidate) => key.includes(candidate))) {
+      continue;
+    }
+    const candidate = cleanScalar(rawValue);
+    const normalized = whatsappService.normalizePhoneNumber(candidate);
+    if (normalized || looksLikePhone(candidate)) {
+      return normalized || candidate;
+    }
+  }
+
+  return '';
+}
+
+async function resolveLeadWhatsappPhone(lead, { transaction = null } = {}) {
+  const currentPhone = cleanScalar(lead?.telefono);
+  const normalizedCurrentPhone = whatsappService.normalizePhoneNumber(currentPhone);
+  if (normalizedCurrentPhone || looksLikePhone(currentPhone)) {
+    return normalizedCurrentPhone || currentPhone;
+  }
+
+  if (!FormSubmissionEvent || !lead?.id) {
+    return '';
+  }
+
+  const latestSubmission = await FormSubmissionEvent.findOne({
+    where: { lead_intake_id: lead.id },
+    attributes: ['fields_json', 'payload_json', 'submitted_at'],
+    order: [
+      ['submitted_at', 'DESC'],
+      ['id', 'DESC'],
+    ],
+    raw: true,
+    transaction,
+  });
+
+  const payloadLeadData = latestSubmission?.payload_json?.lead_data;
+  const fallbackPhone = extractPhoneFromObject(payloadLeadData)
+    || extractPhoneFromObject(latestSubmission?.fields_json)
+    || extractPhoneFromObject(latestSubmission?.payload_json);
+
+  if (fallbackPhone && typeof lead.update === 'function') {
+    try {
+      await lead.update({ telefono: fallbackPhone }, { transaction });
+    } catch (err) {
+      console.warn('No se pudo persistir teléfono de fallback del lead', {
+        leadId: lead.id,
+        error: err?.message || err,
+      });
+    }
+  }
+
+  return fallbackPhone;
 }
 
 async function registerLeadWhatsappContactAttempt({ leadId, userId, isTemplate, body }) {
@@ -165,6 +249,141 @@ function filterQuickChatVisibleMessages(messages) {
   return Array.isArray(messages)
     ? messages.filter((message) => !isQuickChatHiddenMessage(message))
     : [];
+}
+
+function parseJsonValue(value, fallback = {}) {
+  if (!value) return fallback;
+  if (typeof value === 'object') return value;
+  if (typeof value !== 'string') return fallback;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function getTemplateBodyFromTemplate(template) {
+  const components = Array.isArray(template?.components)
+    ? template.components
+    : [];
+  const bodyComponent = components.find((component) => String(component?.type || '').toUpperCase() === 'BODY');
+  return cleanText(bodyComponent?.text)
+    || cleanText(template?.catalog?.body_text)
+    || cleanText(template?.catalog?.body)
+    || cleanText(template?.body_text)
+    || cleanText(template?.body);
+}
+
+function resolveTemplateParam(templateParams, position) {
+  if (!templateParams) return '';
+  if (Array.isArray(templateParams)) {
+    return cleanText(templateParams[Number(position) - 1]);
+  }
+  if (typeof templateParams === 'object') {
+    return cleanText(templateParams[position])
+      || cleanText(templateParams[Number(position)])
+      || cleanText(templateParams[`{{${position}}}`]);
+  }
+  return '';
+}
+
+function renderTemplatePreview(body, templateParams) {
+  return cleanText(body).replace(/\{\{\s*(\d+)\s*\}\}/g, (match, position) => (
+    resolveTemplateParam(templateParams, String(position)) || match
+  ));
+}
+
+async function hydrateTemplateMessagePreviews(messages, { clinicId = null } = {}) {
+  if (!Array.isArray(messages) || !messages.length || !WhatsappTemplate) {
+    return Array.isArray(messages) ? messages : [];
+  }
+
+  const templateRefs = [];
+  for (const message of messages) {
+    const type = cleanText(message?.message_type).toLowerCase();
+    if (type !== 'template' || cleanText(message?.content)) {
+      continue;
+    }
+    const metadata = parseJsonValue(message?.metadata, {});
+    const existingPreview = cleanText(metadata.preview_text)
+      || cleanText(metadata.previewText)
+      || cleanText(metadata.message_preview)
+      || cleanText(metadata.template_preview);
+    if (existingPreview) {
+      message.content = existingPreview;
+      message.metadata = { ...metadata, preview_text: existingPreview };
+      continue;
+    }
+    const templateName = cleanText(metadata.template_name || metadata.templateName);
+    if (!templateName) {
+      continue;
+    }
+    templateRefs.push({
+      message,
+      metadata,
+      templateName,
+      templateLanguage: cleanText(metadata.template_language || metadata.templateLanguage).toLowerCase(),
+    });
+  }
+
+  if (!templateRefs.length) {
+    return messages;
+  }
+
+  const names = [...new Set(templateRefs.map((item) => item.templateName))];
+  const scopeWhere = [];
+  const numericClinicId = Number(clinicId);
+  if (Number.isInteger(numericClinicId) && numericClinicId > 0) {
+    scopeWhere.push({ clinic_id: numericClinicId });
+  }
+  scopeWhere.push({ clinic_id: null });
+
+  const templates = await WhatsappTemplate.findAll({
+    where: {
+      name: { [Op.in]: names },
+      is_active: true,
+      [Op.or]: scopeWhere,
+    },
+    attributes: ['id', 'name', 'language', 'clinic_id', 'components', 'catalog_template_id'],
+    include: WhatsappTemplateCatalog
+      ? [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'body_text', 'components'], required: false }]
+      : [],
+  });
+
+  const byNameLanguage = new Map();
+  const byName = new Map();
+  for (const templateRow of templates) {
+    const template = templateRow?.toJSON ? templateRow.toJSON() : templateRow;
+    const plain = {
+      ...template,
+      components: parseJsonValue(template.components, []),
+      catalog: parseJsonValue(template.catalog, {}),
+    };
+    const name = cleanText(plain.name);
+    const language = cleanText(plain.language).toLowerCase();
+    if (!name) continue;
+    if (!byName.has(name)) byName.set(name, plain);
+    if (language) byNameLanguage.set(`${name}:${language}`, plain);
+  }
+
+  for (const ref of templateRefs) {
+    const template = (ref.templateLanguage && byNameLanguage.get(`${ref.templateName}:${ref.templateLanguage}`))
+      || byName.get(ref.templateName);
+    const body = getTemplateBodyFromTemplate(template);
+    const preview = renderTemplatePreview(body, ref.metadata.templateParams || ref.metadata.template_params);
+    if (!preview) {
+      continue;
+    }
+    ref.message.content = preview;
+    ref.message.metadata = {
+      ...ref.metadata,
+      preview_text: preview,
+      template_body: body,
+    };
+  }
+
+  return messages;
 }
 
 async function getUserClinics(userId) {
@@ -952,9 +1171,12 @@ exports.listConversations = async (req, res) => {
     const conversationIds = conversations.map((c) => c.id);
     const pendingStates = await getPendingReplyStatesByConversationIds(conversationIds, { userId });
 
-    const rawPayload = conversations.map((c) => {
+    const rawPayload = await Promise.all(conversations.map(async (c) => {
       const data = c.toJSON();
-      const recentMessages = filterQuickChatVisibleMessages(data.messages);
+      const recentMessages = await hydrateTemplateMessagePreviews(
+        filterQuickChatVisibleMessages(data.messages),
+        { clinicId: data.clinic_id }
+      );
       data.lastMessage = recentMessages.find((message) => !isTechnicalWhatsappFailureNotice(message))
         || recentMessages[0]
         || null;
@@ -966,7 +1188,7 @@ exports.listConversations = async (req, res) => {
         ? (pendingState?.unreadCount ?? 0)
         : 0;
       return data;
-    });
+    }));
     const payload = await hydrateMarketingContactFallbacks(rawPayload, { searchQuery });
     const totalUnread = payload.reduce((total, item) => {
       const unread = Number(item?.unread_count || 0);
@@ -1086,7 +1308,11 @@ exports.getMessages = async (req, res) => {
     });
 
     const conversationPayload = await enrichConversationUnreadForUser(userId, conversation);
-    return res.json({ conversation: conversationPayload, messages: filterQuickChatVisibleMessages(messages) });
+    const visibleMessages = await hydrateTemplateMessagePreviews(
+      filterQuickChatVisibleMessages(messages),
+      { clinicId: conversation.clinic_id }
+    );
+    return res.json({ conversation: conversationPayload, messages: visibleMessages });
   } catch (err) {
     console.error('Error getMessages', err);
     return res.status(500).json({ error: 'Error obteniendo mensajes' });
@@ -1204,7 +1430,11 @@ exports.getConversationByPatient = async (req, res) => {
     });
 
     const conversationPayload = await enrichConversationUnreadForUser(userId, conversation);
-    return res.json({ conversation: conversationPayload, messages: filterQuickChatVisibleMessages(messages) });
+    const visibleMessages = await hydrateTemplateMessagePreviews(
+      filterQuickChatVisibleMessages(messages),
+      { clinicId: conversation.clinic_id }
+    );
+    return res.json({ conversation: conversationPayload, messages: visibleMessages });
   } catch (err) {
     console.error('Error getConversationByPatient', err);
     return res.status(500).json({ error: 'Error obteniendo conversación' });
@@ -1215,24 +1445,42 @@ exports.getConversationByLead = async (req, res) => {
   try {
     const userId = req.userData?.userId;
     const leadId = req.params.leadId || req.params.lead_id;
+    const shouldCreate = ['1', 'true', 'yes'].includes(String(req.query.create_if_missing || req.query.create || '').toLowerCase());
+    const requestedClinicId = Number(req.query.clinic_id || req.query.clinicId || 0);
     const lead = await LeadIntake.findByPk(leadId, {
       attributes: ['id', 'clinica_id', 'telefono'],
-      raw: true,
     });
-    const conversation = lead
-      ? await findCanonicalWhatsappConversation({
-          clinicId: lead.clinica_id,
-          contactId: lead.telefono,
-          leadId: Number(leadId),
-          createIfMissing: false,
-        })
-      : null;
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead no encontrado' });
+    }
+
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    const leadClinicId = Number(lead.clinica_id || 0);
+    const clinicToResolve = Number.isInteger(requestedClinicId) && requestedClinicId > 0
+      ? requestedClinicId
+      : leadClinicId;
+    if (!Number.isInteger(clinicToResolve) || clinicToResolve <= 0) {
+      return res.status(400).json({ error: 'clinic_id_required' });
+    }
+    if (leadClinicId && Number(clinicToResolve) !== leadClinicId) {
+      return res.status(400).json({ error: 'lead_clinic_mismatch' });
+    }
+    if (!ensureAccess({ clinicIds, isAggregateAllowed }, clinicToResolve)) {
+      return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+    }
+
+    const contactPhone = await resolveLeadWhatsappPhone(lead);
+    const conversation = await findCanonicalWhatsappConversation({
+      clinicId: clinicToResolve,
+      contactId: contactPhone,
+      leadId: Number(leadId),
+      createIfMissing: shouldCreate,
+    });
 
     if (!conversation) {
       return res.status(404).json({ error: 'Conversación no encontrada' });
     }
 
-    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
     if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
       return res.status(403).json({ error: 'Acceso denegado a la clínica' });
     }
@@ -1249,7 +1497,11 @@ exports.getConversationByLead = async (req, res) => {
     });
 
     const conversationPayload = await enrichConversationUnreadForUser(userId, conversation);
-    return res.json({ conversation: conversationPayload, messages: filterQuickChatVisibleMessages(messages) });
+    const visibleMessages = await hydrateTemplateMessagePreviews(
+      filterQuickChatVisibleMessages(messages),
+      { clinicId: conversation.clinic_id }
+    );
+    return res.json({ conversation: conversationPayload, messages: visibleMessages });
   } catch (err) {
     console.error('Error getConversationByLead', err);
     return res.status(500).json({ error: 'Error obteniendo conversación' });
