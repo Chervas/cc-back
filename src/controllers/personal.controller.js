@@ -34,6 +34,7 @@ const {
     canUserAccessFeature,
     getAccessibleClinicIdsForFeature,
 } = require('../lib/access-policy');
+const personalPresenceService = require('../services/personalPresence.service');
 const {
     normalizeDateOnly,
     addDays,
@@ -691,6 +692,48 @@ function serializeBloqueoExceptionRow(row) {
         updated_at: row.updated_at,
     };
 }
+
+function respondPresenceError(res, error, fallbackMessage) {
+    const status = Number(error?.status || error?.statusCode || 500);
+    return res.status(status >= 400 && status < 600 ? status : 500).json({
+        message: error?.message || fallbackMessage,
+        details: error?.details || null,
+    });
+}
+
+exports.getPresenceToday = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+        const workspace = await personalPresenceService.getPresenceWorkspace({
+            actorId,
+            query: req.query || {},
+        });
+        return res.json(workspace);
+    } catch (error) {
+        console.error('[personal.getPresenceToday] Error:', error);
+        return respondPresenceError(res, error, 'Error al obtener presencia');
+    }
+};
+
+exports.createPresenceEvent = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+        const workspace = await personalPresenceService.createPresenceEvent({
+            actorId,
+            payload: req.body || {},
+        });
+        return res.status(201).json(workspace);
+    } catch (error) {
+        console.error('[personal.createPresenceEvent] Error:', error);
+        return respondPresenceError(res, error, 'Error al registrar fichaje');
+    }
+};
 
 exports.getPersonal = async (req, res) => {
     try {
