@@ -1656,6 +1656,18 @@ exports.createCustomTemplate = async (req, res) => {
     const clinicId = req.body?.clinic_id ? Number(req.body.clinic_id) : (req.query.clinic_id ? Number(req.query.clinic_id) : null);
     const phoneNumberId = req.body?.phone_number_id || req.query.phone_number_id || null;
     const userId = req.userData?.userId;
+    const templateUsage = String(
+      req.body?.template_usage || req.body?.uso || req.body?.usage || ''
+    ).trim().toLowerCase();
+    if (
+      ['solicitud_resena', 'resena', 'review_request', 'reviews'].includes(templateUsage)
+      && !isWhatsappGlobalAdmin(userId)
+    ) {
+      return res.status(403).json({
+        error: 'review_template_admin_only',
+        message: 'Solo un administrador puede cambiar el primer mensaje de una campana de resenas.',
+      });
+    }
 
     if (!clinicId && !phoneNumberId) {
       return res.status(400).json({ error: 'clinic_id o phone_number_id requerido' });
@@ -1676,10 +1688,11 @@ exports.createCustomTemplate = async (req, res) => {
       accessToken: asset.waAccessToken,
       displayName: req.body?.display_name || req.body?.nombre || req.body?.name,
       bodyText: req.body?.body_text || req.body?.contenido || req.body?.body,
+      headerImageUrl: req.body?.header_image_url || req.body?.headerImageUrl || null,
       category: req.body?.category || (req.body?.template_commercial ? 'MARKETING' : 'UTILITY'),
       language: req.body?.language || 'es',
       variables: req.body?.variables || [],
-      templateUsage: req.body?.template_usage || req.body?.uso || req.body?.usage || null,
+      templateUsage: templateUsage || null,
       replaceTemplateId: req.body?.replace_template_id || req.body?.replaceTemplateId || null,
       createdByUserId: userId,
     });

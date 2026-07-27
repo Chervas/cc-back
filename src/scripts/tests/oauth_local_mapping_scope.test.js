@@ -21,6 +21,9 @@ const {
 const {
   assertSharedMarketingAssetMutationAccess,
 } = require('../../lib/sharedMarketingAssetMutationAccess');
+const {
+  buildReviewProfileAliasConfiguration,
+} = require('../../lib/reviewProfileAlias');
 
 function expectInputError(input, code) {
   assert.throws(
@@ -65,6 +68,48 @@ function testOriginMoveDetection() {
     [56],
     'only a real cross-clinic move must require permission on the origin clinic'
   );
+}
+
+function testReviewProfileAliasKeepsGeneralMappingSeparate() {
+  const current = {
+    disciplinas: ['dental'],
+    reviews: {
+      google_business_profile_alias: {
+        clinic_id: 35,
+        location_id: 'locations/old',
+      },
+      google_business_profile_alias_clinic_id: 35,
+      google_business_profile_alias_location_id: 'locations/old',
+      unrelated_setting: true,
+    },
+  };
+  const updated = buildReviewProfileAliasConfiguration(current, {
+    targetClinicId: 57,
+    sourceClinicId: 56,
+    sourceClinicName: 'Propdental Sant Marti',
+    businessLocationId: 6,
+    locationId: 'locations/sant-marti',
+    updatedAt: new Date('2026-07-27T12:00:00.000Z'),
+  });
+
+  assert.deepEqual(updated.disciplinas, ['dental']);
+  assert.equal(updated.reviews.unrelated_setting, true);
+  assert.equal(updated.reviews.google_business_profile_alias, undefined);
+  assert.equal(updated.reviews.google_business_profile_alias_clinic_id, 56);
+  assert.equal(updated.reviews.google_business_profile_alias_business_location_id, 6);
+  assert.equal(updated.reviews.google_business_profile_alias_location_id, 'locations/sant-marti');
+  assert.equal(updated.reviews.google_business_profile_alias_updated_at, '2026-07-27T12:00:00.000Z');
+
+  const ownProfile = buildReviewProfileAliasConfiguration(updated, {
+    targetClinicId: 57,
+    sourceClinicId: 57,
+    sourceClinicName: 'Propdental Eixample',
+    businessLocationId: 12,
+    locationId: 'locations/eixample',
+  });
+  assert.equal(ownProfile.reviews.unrelated_setting, true);
+  assert.equal(ownProfile.reviews.google_business_profile_alias_clinic_id, undefined);
+  assert.equal(ownProfile.reviews.google_business_profile_alias_location_id, undefined);
 }
 
 async function testDestinationDerivedConnectionBlocksCrossScopeAttack() {
@@ -359,6 +404,7 @@ async function testSharedAssetMutationRequiresEveryConsumerClinic() {
 async function run() {
   testMappingValidation();
   testOriginMoveDetection();
+  testReviewProfileAliasKeepsGeneralMappingSeparate();
   await testDestinationDerivedConnectionBlocksCrossScopeAttack();
   await testExplicitScopeGuardRunsBeforeResolution();
   testScopeAliasesUseOneCanonicalParser();

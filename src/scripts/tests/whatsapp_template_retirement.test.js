@@ -185,6 +185,83 @@ test('reemplazar una plantilla enlaza de forma durable la versión anterior con 
   }
 });
 
+test('una plantilla personalizada de reseñas conserva la cabecera de imagen preparada para Meta', async () => {
+  const originals = {
+    templateCreate: db.WhatsappTemplate.create,
+    enqueueUniqueJobRequest: jobRequestsService.enqueueUniqueJobRequest,
+    axiosGet: axios.get,
+    axiosPost: axios.post,
+    reviewHeaderHandle: process.env.WHATSAPP_REVIEW_TEMPLATE_HEADER_HANDLE,
+    genericHeaderHandle: process.env.WHATSAPP_TEMPLATE_IMAGE_HEADER_HANDLE,
+  };
+  const created = [];
+  let postIndex = 0;
+
+  delete process.env.WHATSAPP_REVIEW_TEMPLATE_HEADER_HANDLE;
+  delete process.env.WHATSAPP_TEMPLATE_IMAGE_HEADER_HANDLE;
+  db.WhatsappTemplate.create = async (values) => {
+    const row = { id: 903, ...values };
+    created.push(row);
+    return row;
+  };
+  jobRequestsService.enqueueUniqueJobRequest = async () => ({ job: { id: 9903 } });
+  axios.get = async () => ({
+    data: Buffer.from('valid-public-image-sample'),
+    headers: { 'content-type': 'image/jpeg' },
+  });
+  axios.post = async () => {
+    postIndex += 1;
+    if (postIndex === 1) return { data: { id: 'upload-session-903' } };
+    if (postIndex === 2) return { data: { h: 'meta-image-handle-903' } };
+    return { data: { id: 'meta-template-903' } };
+  };
+
+  try {
+    const result = await whatsappTemplatesService.createCustomTemplateForClinic({
+      clinicId: 57,
+      wabaId: 'waba-propdental',
+      accessToken: 'test-token-not-real',
+      displayName: 'Solicitud de opinión personalizada',
+      bodyText: [
+        '¡Hola {{nombre_paciente}}! Soy {{firma_resenas}} de {{nombre_clinica}}.',
+        'Responde con un número para indicar tu valoración:',
+        '5 ⭐⭐⭐⭐⭐',
+        '4 ⭐⭐⭐⭐',
+        '3 ⭐⭐⭐',
+        '2 ⭐⭐',
+        '1 ⭐',
+      ].join('\n'),
+      headerImageUrl: 'https://media.clinicaclick.com/templates/reviews/team-example.jpg',
+      category: 'MARKETING',
+      templateUsage: 'solicitud_resena',
+      createdByUserId: 1,
+    });
+
+    assert.equal(result.submitted, true);
+    assert.equal(created.length, 1);
+    assert.equal(created[0].category, 'MARKETING');
+    assert.equal(created[0].components[0].type, 'HEADER');
+    assert.equal(created[0].components[0].format, 'IMAGE');
+    assert.deepEqual(created[0].components[0].example.header_handle, ['meta-image-handle-903']);
+    assert.equal(created[0].components[1].type, 'BODY');
+  } finally {
+    db.WhatsappTemplate.create = originals.templateCreate;
+    jobRequestsService.enqueueUniqueJobRequest = originals.enqueueUniqueJobRequest;
+    axios.get = originals.axiosGet;
+    axios.post = originals.axiosPost;
+    if (originals.reviewHeaderHandle === undefined) {
+      delete process.env.WHATSAPP_REVIEW_TEMPLATE_HEADER_HANDLE;
+    } else {
+      process.env.WHATSAPP_REVIEW_TEMPLATE_HEADER_HANDLE = originals.reviewHeaderHandle;
+    }
+    if (originals.genericHeaderHandle === undefined) {
+      delete process.env.WHATSAPP_TEMPLATE_IMAGE_HEADER_HANDLE;
+    } else {
+      process.env.WHATSAPP_TEMPLATE_IMAGE_HEADER_HANDLE = originals.genericHeaderHandle;
+    }
+  }
+});
+
 test('el sync de Meta no reactiva plantillas retiradas ni reemplazadas', async () => {
   const originals = {
     axiosGet: axios.get,

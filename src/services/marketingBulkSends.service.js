@@ -3350,6 +3350,13 @@ function reviewTemplateMatchesCurrentCatalogBody(template) {
   return templateBody === currentCatalogBody && reviewTemplateBodyHasSender(templateBody);
 }
 
+function isAdminCustomReviewTemplate(template) {
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  return String(plain.origin || '').toLowerCase() === 'custom'
+    && isGlobalAdmin(plain.created_by_user_id)
+    && isStarTextReviewBody(extractBodyText(plain.components));
+}
+
 function templateMatchesCurrentCatalogBody(template) {
   const plain = template?.get ? template.get({ plain: true }) : (template || {});
   const currentCatalogBody = normalizeText(plain.catalog?.body_text);
@@ -3408,6 +3415,63 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
   const targetWabaId = await getPrimaryWabaIdForScope(scope);
   const preferPhoto = options.preferPhoto === true;
 
+  if (explicitTemplateId) {
+    const explicit = await resolveWhatsappTemplate(explicitTemplateId, scope);
+    if (explicit && explicit.is_active !== false && String(explicit.status || '').toUpperCase() === 'APPROVED' && isPrimaryReviewRequestWhatsappTemplateCandidate(explicit)) {
+      const plainExplicit = explicit.get ? explicit.get({ plain: true }) : explicit;
+      const explicitMatchesWaba = !targetWabaId || !getTemplateWabaId(explicit) || getTemplateWabaId(explicit) === targetWabaId;
+      const explicitMatchesMedia = preferPhoto
+        ? templateHasImageHeader(explicit)
+        : !templateHasImageHeader(explicit);
+      const explicitHasAllowedCopy = reviewTemplateMatchesCurrentCatalogBody(explicit)
+        || isAdminCustomReviewTemplate(explicit);
+      if (explicitMatchesWaba && explicitMatchesMedia && explicitHasAllowedCopy) {
+        return explicit;
+      }
+      if (plainExplicit.catalog_template_id) {
+        const exactReplacement = await WhatsappTemplate.findOne({
+          where: {
+            is_active: true,
+            status: 'APPROVED',
+            catalog_template_id: plainExplicit.catalog_template_id,
+            ...(targetWabaId ? { waba_id: targetWabaId } : {}),
+          },
+          include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
+          order: [['updatedAt', 'DESC'], ['id', 'DESC']],
+        });
+        if (
+          exactReplacement
+          && isPrimaryReviewRequestWhatsappTemplateCandidate(exactReplacement)
+          && reviewTemplateMatchesCurrentCatalogBody(exactReplacement)
+          && (preferPhoto ? templateHasImageHeader(exactReplacement) : !templateHasImageHeader(exactReplacement))
+        ) {
+          return exactReplacement;
+        }
+      }
+      if (!explicitMatchesWaba) {
+        const replacement = await WhatsappTemplate.findOne({
+          where: {
+            is_active: true,
+            status: 'APPROVED',
+            catalog_template_id: plainExplicit.catalog_template_id || null,
+            waba_id: targetWabaId,
+          },
+          include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
+          order: [['updatedAt', 'DESC'], ['id', 'DESC']],
+        });
+        if (
+          replacement
+          && isPrimaryReviewRequestWhatsappTemplateCandidate(replacement)
+          && reviewTemplateMatchesCurrentCatalogBody(replacement)
+          && (preferPhoto ? templateHasImageHeader(replacement) : !templateHasImageHeader(replacement))
+        ) {
+          return replacement;
+        }
+      }
+    }
+    return null;
+  }
+
   if (preferPhoto) {
     const photoCandidates = await WhatsappTemplate.findAll({
       where: {
@@ -3434,56 +3498,6 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
         return Number(b.id || 0) - Number(a.id || 0);
       })[0] || null;
     if (photoTemplate) return photoTemplate;
-  }
-
-  if (explicitTemplateId) {
-    const explicit = await resolveWhatsappTemplate(explicitTemplateId, scope);
-    if (explicit && explicit.is_active !== false && String(explicit.status || '').toUpperCase() === 'APPROVED' && isPrimaryReviewRequestWhatsappTemplateCandidate(explicit)) {
-      const plainExplicit = explicit.get ? explicit.get({ plain: true }) : explicit;
-      const explicitMatchesWaba = !targetWabaId || !getTemplateWabaId(explicit) || getTemplateWabaId(explicit) === targetWabaId;
-      if (explicitMatchesWaba && reviewTemplateMatchesCurrentCatalogBody(explicit)) {
-        return explicit;
-      }
-      if (plainExplicit.catalog_template_id) {
-        const exactReplacement = await WhatsappTemplate.findOne({
-          where: {
-            is_active: true,
-            status: 'APPROVED',
-            catalog_template_id: plainExplicit.catalog_template_id,
-            ...(targetWabaId ? { waba_id: targetWabaId } : {}),
-          },
-          include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
-          order: [['updatedAt', 'DESC'], ['id', 'DESC']],
-        });
-        if (
-          exactReplacement
-          && isPrimaryReviewRequestWhatsappTemplateCandidate(exactReplacement)
-          && reviewTemplateMatchesCurrentCatalogBody(exactReplacement)
-        ) {
-          return exactReplacement;
-        }
-      }
-      if (!explicitMatchesWaba) {
-        const replacement = await WhatsappTemplate.findOne({
-          where: {
-            is_active: true,
-            status: 'APPROVED',
-            catalog_template_id: plainExplicit.catalog_template_id || null,
-            waba_id: targetWabaId,
-          },
-          include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
-          order: [['updatedAt', 'DESC'], ['id', 'DESC']],
-        });
-        if (
-          replacement
-          && isPrimaryReviewRequestWhatsappTemplateCandidate(replacement)
-          && reviewTemplateMatchesCurrentCatalogBody(replacement)
-        ) {
-          return replacement;
-        }
-      }
-    }
-    return null;
   }
 
   const candidates = await WhatsappTemplate.findAll({

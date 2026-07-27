@@ -89,3 +89,11 @@ Do not implement this as `WHERE clinicaId = selectedClinicId`. Shared records ma
 The reviews-only alias in `Clinicas.configuracion.reviews.google_business_profile_alias_*` is deliberately outside general asset assignment. It lets one clinic use another real location's `url_dejar_resena` without cloning `ClinicBusinessLocations`.
 
 It must only affect review-purpose status/sends and `review_profile_alias_*` trace metadata. It must not change the clinic's assigned Business Profile, local metrics, location/directions, Campaigns local asset or Reports source status.
+
+The contextual mapping UI must call
+`POST /oauth/google/local/map-locations` with `mapping_purpose=reviews`.
+That operation accepts exactly one target clinic and one already mapped active
+location, validates source/target access and same-group scope, then updates only
+the review alias. It must not change `ClinicBusinessLocations.clinica_id`.
+`GET /oauth/google/local/mappings?mapping_purpose=reviews&clinic_id=<id>`
+returns the effective review selection so the dialog can preselect it.
