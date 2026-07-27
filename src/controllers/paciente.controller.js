@@ -103,6 +103,13 @@ const patientClinicIds = (paciente) => normalizeClinicIds([
   ...((paciente?.clinicasVinculadas || []).map((link) => link?.clinica_id)),
 ]);
 
+const patientListOrder = [
+  [literal("CASE WHEN TRIM(COALESCE(`Paciente`.`nombre`, '')) REGEXP '^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]' THEN 0 ELSE 1 END"), 'ASC'],
+  ['nombre', 'ASC'],
+  ['apellidos', 'ASC'],
+  ['id_paciente', 'ASC'],
+];
+
 async function accessibleClinicIds(req, featureKey, clinicIds, { requireAll = false } = {}) {
   const actorId = Number(req.userData?.userId);
   const requested = normalizeClinicIds(clinicIds);
@@ -691,6 +698,21 @@ const getClinicaIdsForScope = async (clinicaId, scope) => {
 
 exports.getAllPacientes = async (req, res) => {
   try {
+    const requestedLimit = Number.parseInt(String(req.query.limit || ''), 10);
+    const requestedPage = Number.parseInt(String(req.query.page || ''), 10);
+    const requestedOffset = Number.parseInt(String(req.query.offset || ''), 10);
+    const isPaginated = Number.isInteger(requestedLimit) || Number.isInteger(requestedOffset) || Number.isInteger(requestedPage);
+    const limit = isPaginated
+      ? Math.min(Math.max(Number.isInteger(requestedLimit) ? requestedLimit : 80, 1), 200)
+      : null;
+    const offset = isPaginated
+      ? Math.max(
+          Number.isInteger(requestedOffset)
+            ? requestedOffset
+            : ((Number.isInteger(requestedPage) && requestedPage > 0 ? requestedPage - 1 : 0) * limit),
+          0
+        )
+      : 0;
     const requestedClinicIds = req.query.clinica_id
       ? normalizeClinicIds(String(req.query.clinica_id).split(','))
       : null;
@@ -698,7 +720,7 @@ exports.getAllPacientes = async (req, res) => {
       ? await accessibleClinicIds(req, 'patients.view', requestedClinicIds, { requireAll: true })
       : await allClinicsAccessibleToActor(req, 'patients.view');
     if (!readableClinicIds.length) {
-      return res.json([]);
+      return res.json(isPaginated ? { items: [], total: 0, limit, offset, has_more: false } : []);
     }
 
     const include = [
@@ -734,18 +756,53 @@ exports.getAllPacientes = async (req, res) => {
         clinicExists
       ]
     };
-    const pacientes = await Paciente.findAll({
-      where: whereClause,
-      include,
-      distinct: true,
-      order: [['nombre', 'ASC']]
-    });
+
+    let pacientes;
+    let total = null;
+    if (isPaginated) {
+      const page = await Paciente.findAndCountAll({
+        where: whereClause,
+        attributes: ['id_paciente'],
+        distinct: true,
+        col: 'id_paciente',
+        order: patientListOrder,
+        limit,
+        offset,
+      });
+      total = Number(page.count) || 0;
+      const ids = page.rows.map((row) => row.id_paciente).filter(Boolean);
+      pacientes = ids.length
+        ? await Paciente.findAll({
+            where: { id_paciente: { [Op.in]: ids } },
+            include,
+            distinct: true,
+            order: patientListOrder,
+          })
+        : [];
+    } else {
+      pacientes = await Paciente.findAll({
+        where: whereClause,
+        include,
+        distinct: true,
+        order: patientListOrder
+      });
+    }
     await Promise.all(pacientes.map((paciente) => ensurePacientePublicId(paciente)));
     const mayViewSensitive = await canViewSensitivePatientData(req, readableClinicIds);
     const scopedPatients = pacientes.map((paciente) => (
       restrictPacientePayloadToClinics(paciente, readableClinicIds)
     ));
-    res.json(mayViewSensitive ? scopedPatients : scopedPatients.map(redactEmbeddedPatient));
+    const items = mayViewSensitive ? scopedPatients : scopedPatients.map(redactEmbeddedPatient);
+    if (isPaginated) {
+      return res.json({
+        items,
+        total,
+        limit,
+        offset,
+        has_more: offset + items.length < total,
+      });
+    }
+    res.json(items);
   } catch (error) {
     const handled = sendAccessPolicyError(error, res);
     if (handled) return handled;

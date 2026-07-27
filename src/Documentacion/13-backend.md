@@ -1037,6 +1037,22 @@ Contrato:
   `Cache-Control: private, no-store`. Nunca mover PDFs, fotos clinicas,
   consentimientos, informes, facturas identificables ni documentos de paciente
   a `PUBLIC_MEDIA`.
+- Import ClinicCloud BS Medical 2026-07-26/27: el lote real usa
+  `source_batch=cliniccloud_bsmedical_real_20260726`. Las citas importadas
+  mantienen `source_system='cliniccloud'` para que automatizaciones y
+  recordatorios no se disparen retroactivamente. El backfill
+  `src/scripts/cliniccloud_backfill_agenda_resources.js` crea/reutiliza
+  profesionales o recursos provisionales a partir de `agenda_1.csv`, crea
+  instalaciones para cabinas/recursos y enlaza todas las citas por
+  `doctor_id`/`instalacion_id` sin borrar datos originales. Batch del backfill:
+  `cliniccloud_bsmedical_real_20260726_agenda_resources_v1`; informe ejecutado:
+  `/home/ubuntu/secure-imports/clinic-real-20260722/review/cliniccloud_bsmedical_real_20260726_agenda_resources_v1-execute.json`.
+  Cada cita enlazada queda marcada en `import_metadata.clinicaclick_agenda_backfill_v1`.
+  Para revertir solo este backfill, usar ese batch como filtro: limpiar
+  `doctor_id`/`instalacion_id` de citas `source_system='cliniccloud'` marcadas,
+  borrar recursos con email `cliniccloud.agenda.*@imports.clinicaclick.local`
+  y borrar instalaciones cuya descripcion contiene el batch. No tocar
+  pacientes, historiales, bonos ni assets clinicos.
 - Las fotos clinicas de Nutricion se guardan con `purpose=nutrition_clinical_photo`, `owner_type=patient_nutrition_measurement`, `owner_id=<measurement_id>`, `patient_id` y `clinic_id`. Listado y descarga quedan protegidos por `nutrition.workspace.view`; subida queda protegida por `nutrition.measurements.create`.
 - La pestana `Adjuntos` del paciente consume `GET /api/pacientes/:id/clinical-attachments` y sube pruebas generales con `POST /api/pacientes/:id/clinical-attachments`. El backend filtra por permisos segun `purpose`: `nutrition_report_pdf` y `nutrition_clinical_photo` requieren `nutrition.workspace.view`, `consent_document_pdf` requiere `consents.view`, y `clinical_attachment` requiere `patients.sensitive.view` para lectura y `patients.edit` para subida. La subida general usa `clinical_private_storage`, nunca `PUBLIC_MEDIA`, y puede asociarse a una cita mediante `appointment_id`.
 - `GET /api/pacientes/:id/activity` expone cada informe final como evento `nutrition_report_finalized`, con titulo, icono, resumen de medicion/servicio/formula/hash y actor de cierre. El evento solo se adjunta si el usuario tiene `nutrition.workspace.view` en la clínica concreta del informe y esa sede pertenece al scope legible del paciente; el mismo filtro por sede se aplica a citas y eventos de reseñas.
