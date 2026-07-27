@@ -10,6 +10,9 @@ const { canUserSelectWhatsappTemplate } = require('../lib/whatsapp-template-owne
 const {
   getPendingReplyStatesByConversationIds,
 } = require('../services/conversationPendingReply.service');
+const {
+  resolveWhatsappServiceWindow,
+} = require('../services/whatsappServiceWindow.service');
 
 const {
   Conversation,
@@ -446,6 +449,28 @@ async function enrichConversationUnreadForUser(userId, conversationLike) {
   plain.pending_automation_count = pendingState?.requiresAutomationAttention === true
     ? (pendingState?.unreadCount ?? 0)
     : 0;
+  if (plain.channel === 'whatsapp') {
+    plain.last_inbound_at_any_sender = plain.last_inbound_at || null;
+    try {
+      const clinicConfig = await whatsappService.getClinicConfig(plain.clinic_id);
+      const serviceWindow = await resolveWhatsappServiceWindow({
+        conversation: plain,
+        activePhoneNumberId: clinicConfig?.phoneNumberId || null,
+      });
+      plain.whatsapp_service_window_open = serviceWindow.open;
+      plain.whatsapp_service_window_last_inbound_at = serviceWindow.lastInboundAt;
+      plain.whatsapp_service_window_phone_number_id = serviceWindow.phoneNumberId;
+    } catch (error) {
+      console.warn('No se pudo resolver la ventana de WhatsApp para QuickChat', {
+        conversationId,
+        clinicId: plain.clinic_id,
+        error: error?.message || error,
+      });
+      plain.whatsapp_service_window_open = false;
+      plain.whatsapp_service_window_last_inbound_at = null;
+      plain.whatsapp_service_window_phone_number_id = null;
+    }
+  }
   const [hydrated] = await hydrateMarketingContactFallbacks([plain]);
   return hydrated || plain;
 }
@@ -1326,14 +1351,6 @@ exports.postMessage = async (req, res) => {
     }
 
     const isTemplate = useTemplate || message_type === 'template';
-    const windowOpen =
-      !!conversation.last_inbound_at &&
-      Date.now() - new Date(conversation.last_inbound_at).getTime() <= 24 * 60 * 60 * 1000;
-
-    if (!isTemplate && !windowOpen && conversation.channel === 'whatsapp') {
-      await transaction.rollback();
-      return res.status(400).json({ error: 'session_closed' });
-    }
 
     const io = getIO();
     let clinicConfig = null;
@@ -1373,6 +1390,22 @@ exports.postMessage = async (req, res) => {
       if (!clinicConfig?.accessToken || !clinicConfig?.phoneNumberId) {
         await transaction.rollback();
         return res.status(500).json({ error: 'whatsapp_config_missing' });
+      }
+      if (!isTemplate) {
+        const serviceWindow = await resolveWhatsappServiceWindow({
+          conversation,
+          activePhoneNumberId: clinicConfig.phoneNumberId,
+          transaction,
+        });
+        if (!serviceWindow.open) {
+          await transaction.rollback();
+          return res.status(400).json({
+            error: 'session_closed',
+            reason: 'sender_service_window_closed',
+            phone_number_id: serviceWindow.phoneNumberId,
+            last_inbound_at: serviceWindow.lastInboundAt,
+          });
+        }
       }
       if (isTemplate) {
         const safeTemplateId = Number(templateId || 0);

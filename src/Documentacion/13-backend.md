@@ -4165,6 +4165,9 @@ Esto explica casos como la cita `99`, donde el mensaje usó `Graci Gonzalez` aun
 
 - Ventana de 24h en WhatsApp
   - La ventana de texto libre se considera abierta solo si existe `last_inbound_at` real dentro de las últimas 24 horas.
+  - La ventana pertenece al `phone_number_id` remitente activo. Una respuesta recibida por el número anterior de la clínica no habilita texto libre desde el número nuevo.
+  - El backend contrasta los mensajes inbound recientes y su `metadata.phoneId|phoneNumberId|phone_number_id`. Solo usa el `last_inbound_at` global como compatibilidad cuando ningún inbound reciente conserva identificador de remitente.
+  - QuickChat recibe `whatsapp_service_window_open`, `whatsapp_service_window_last_inbound_at` y `whatsapp_service_window_phone_number_id`; el `POST` de texto repite la misma comprobación de forma autoritativa antes de crear el mensaje.
   - Enviar una plantilla aprobada por Meta no abre por sí solo el chat libre.
   - Tras enviar una plantilla, la UI debe permitir seguir enviando plantillas, pero no texto libre, hasta que el paciente responda.
   - Si frontend vuelve a tratar una plantilla outbound como apertura de sesión, reaparecerán mensajes `failed` en Meta y estados visuales incoherentes entre QuickChat y drawers.

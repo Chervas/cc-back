@@ -8,6 +8,9 @@ const { emitNotificationCreated } = require('./notificationsRealtime.service');
 const { queues } = require('./queue.service');
 const jobRequestsService = require('./jobRequests.service');
 const {
+  resolveWhatsappServiceWindow,
+} = require('./whatsappServiceWindow.service');
+const {
   mergeClinicLinksIntoContext,
   resolveClinicGoogleLocalLinks,
 } = require('./googleLocalLinks.service');
@@ -1614,13 +1617,6 @@ function normalizeFormSubmissionMatchMode(value) {
   const normalized = normalizeKey(value);
   if (FORM_SUBMISSION_MATCH_MODES.has(normalized)) return normalized;
   return 'url_contains';
-}
-
-function hasActiveInboundWindow(lastInboundAt) {
-  if (!lastInboundAt) return false;
-  const timestamp = new Date(lastInboundAt).getTime();
-  if (!Number.isFinite(timestamp)) return false;
-  return (Date.now() - timestamp) <= 24 * 60 * 60 * 1000;
 }
 
 function toLowerSafe(value) {
@@ -3744,7 +3740,16 @@ async function handleSendWhatsapp(node, context, runtime) {
     });
   }
 
-  if (messageMode === 'manual' && !hasActiveInboundWindow(conversation?.last_inbound_at)) {
+  let serviceWindow = null;
+  if (messageMode === 'manual') {
+    senderData = await getSenderData();
+    serviceWindow = await resolveWhatsappServiceWindow({
+      conversation,
+      activePhoneNumberId: senderData.clinic_config?.phoneNumberId || null,
+    });
+  }
+
+  if (messageMode === 'manual' && !serviceWindow?.open) {
     if (fallbackTemplate) {
       fallbackTriggeredReason = 'conversation_outside_24h_window';
       effectiveMessageMode = 'template_fallback';
@@ -3766,7 +3771,8 @@ async function handleSendWhatsapp(node, context, runtime) {
           recipient_mode: recipientData.recipient_mode,
           recipient: recipientData.recipient,
           conversation_id: conversation?.id || null,
-          last_inbound_at: conversation?.last_inbound_at || null,
+          last_inbound_at: serviceWindow?.lastInboundAt || null,
+          service_window_phone_number_id: serviceWindow?.phoneNumberId || null,
           fallback_used: false,
           fallback_template_id: null,
           fallback_template_name: null,
