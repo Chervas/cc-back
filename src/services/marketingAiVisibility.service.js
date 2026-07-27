@@ -26,6 +26,7 @@ const ACTIVE_RUN_REUSE_MINUTES = clampInt(process.env.AI_VISIBILITY_ACTIVE_RUN_R
 const PROVIDER_TIMEOUT_MS = clampInt(process.env.AI_VISIBILITY_PROVIDER_TIMEOUT_MS, 10000, 180000, 90000);
 const OPENAI_MODEL = cleanString(process.env.OPENAI_AI_VISIBILITY_MODEL) || 'gpt-5.6';
 const GEMINI_MODEL = cleanString(process.env.GEMINI_AI_VISIBILITY_MODEL) || 'gemini-3.5-flash';
+const LOCAL_PROFILE_URL_RESOLUTION_CONFIG_KEY = 'marketing_competition_local_profile';
 
 const TYPICAL_QUERY_DEFINITIONS = Object.freeze([
   Object.freeze({ key: 'best_local', label: 'Mejor clínica de la zona' }),
@@ -257,6 +258,101 @@ function asObject(value) {
   }
 }
 
+function normalizedSearchText(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLocaleLowerCase('es-ES')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function specialtyFromText(value) {
+  const text = normalizedSearchText(value);
+  if (!text) return null;
+  if (/(^| )(capilar|alopecia|injerto capilar|trasplante capilar|pelo|hair)( |$)/.test(text)) {
+    return 'clínica capilar';
+  }
+  if (/(^| )(hepatobiliar|pancreat|laparoscop|cirugia digestiva|cirujano digestivo|digestiv)( |$)/.test(text)) {
+    return 'clínica de cirugía digestiva y hepatobiliar';
+  }
+  if (/(^| )(podolog|podologo|podologa|podologia)( |$)/.test(text)) return 'clínica podológica';
+  if (/(^| )(dental|dentist|dentista|odontolog|ortodoncia|implante dental)( |$)/.test(text)) {
+    return 'clínica dental';
+  }
+  const hasPlasticSurgery = /(^| )(cirugia plastica|cirujano plastico|plastic surgery)( |$)/.test(text);
+  const hasAestheticMedicine = /(^| )(medicina estetica|clinica estetica|estetica medica|estetica)( |$)/.test(text);
+  if (hasPlasticSurgery && hasAestheticMedicine) {
+    return 'clínica de medicina estética y cirugía plástica';
+  }
+  if (hasPlasticSurgery) return 'clínica de cirugía plástica';
+  if (hasAestheticMedicine) return 'clínica de medicina estética';
+  if (/(^| )(fisioterap|rehabilitacion)( |$)/.test(text)) return 'clínica de fisioterapia';
+  if (/(^| )(dermatolog)( |$)/.test(text)) return 'clínica dermatológica';
+  if (/(^| )(oftalmolog|oculista)( |$)/.test(text)) return 'clínica oftalmológica';
+  if (/(^| )(nutricion|nutricionista|dietista)( |$)/.test(text)) return 'clínica de nutrición';
+  if (/(^| )(ginecolog)( |$)/.test(text)) return 'clínica ginecológica';
+  if (/(^| )(traumatolog)( |$)/.test(text)) return 'clínica traumatológica';
+  if (/(^| )(psicolog|psiquiatr)( |$)/.test(text)) return 'clínica de psicología y salud mental';
+  return null;
+}
+
+function isGenericClinicCategory(value) {
+  const category = normalizedSearchText(value);
+  return !category || [
+    'clinica',
+    'clinica medica',
+    'clinica especializada',
+    'centro medico',
+    'centro de salud',
+    'medico',
+    'doctor',
+    'hospital',
+    'medical clinic',
+    'medical center',
+    'specialized clinic',
+  ].includes(category);
+}
+
+function resolvedLocalProfileFromClinic(clinic) {
+  const config = asObject(clinic?.configuracion);
+  const profile = asObject(config[LOCAL_PROFILE_URL_RESOLUTION_CONFIG_KEY]);
+  if (profile.status !== 'resolved') return {};
+  const currentUrl = safeUrl(clinic?.url_ficha_local);
+  const sourceUrl = safeUrl(profile.source_url);
+  if (!currentUrl || !sourceUrl || currentUrl !== sourceUrl) return {};
+  return profile;
+}
+
+function resolveDisciplineCategory(clinic, location = null, resolvedProfile = null) {
+  const config = asObject(clinic?.configuracion);
+  const profile = resolvedProfile || resolvedLocalProfileFromClinic(clinic);
+  const primaryCategories = [
+    cleanString(location?.primary_category),
+    cleanString(profile?.primary_category),
+  ].filter(Boolean);
+  const specificPrimaryCategory = primaryCategories.find((value) => !isGenericClinicCategory(value));
+  if (specificPrimaryCategory) {
+    return specialtyFromText(specificPrimaryCategory)
+      || specificPrimaryCategory.toLocaleLowerCase('es-ES');
+  }
+
+  const configuredDisciplines = [
+    config.area_medica,
+    config.disciplina,
+    ...(Array.isArray(config.disciplinas) ? config.disciplinas : []),
+  ];
+  return specialtyFromText([
+    ...primaryCategories,
+    ...configuredDisciplines,
+    clinic?.servicios,
+    clinic?.descripcion,
+    profile?.name,
+    location?.location_name,
+    clinic?.nombre_clinica,
+  ].map((value) => cleanString(value)).filter(Boolean).join(' '));
+}
+
 function countryNameFromRegionCode(regionCode, fallback = null) {
   const code = cleanString(regionCode)?.toUpperCase();
   if (code === 'ES') return 'España';
@@ -279,6 +375,9 @@ async function resolveClinicContext(clinicId) {
       'ciudad',
       'provincia',
       'pais',
+      'servicios',
+      'descripcion',
+      'configuracion',
     ],
     raw: true,
   });
@@ -297,29 +396,42 @@ async function resolveClinicContext(clinicId) {
     })
     : null;
   const locationPayload = asObject(location?.raw_payload);
+  const resolvedProfile = resolvedLocalProfileFromClinic(clinic);
   const storefrontAddress = asObject(locationPayload.storefrontAddress || locationPayload.storefront_address);
   const addressLines = Array.isArray(storefrontAddress.addressLines)
     ? storefrontAddress.addressLines
     : (Array.isArray(storefrontAddress.address_lines) ? storefrontAddress.address_lines : []);
   const city = cleanString(clinic.ciudad)
     || cleanString(storefrontAddress.locality)
-    || cleanString(storefrontAddress.sublocality);
+    || cleanString(storefrontAddress.sublocality)
+    || cleanString(resolvedProfile.locality);
   const province = cleanString(clinic.provincia)
     || cleanString(storefrontAddress.administrativeArea)
-    || cleanString(storefrontAddress.administrative_area);
+    || cleanString(storefrontAddress.administrative_area)
+    || cleanString(resolvedProfile.administrative_area);
   const country = countryNameFromRegionCode(
-    storefrontAddress.regionCode || storefrontAddress.region_code,
+    storefrontAddress.regionCode
+      || storefrontAddress.region_code
+      || resolvedProfile.country_code
+      || resolvedProfile.country,
     clinic.pais,
   );
   return {
     id: Number(clinic.id_clinica),
-    name: cleanString(location?.location_name) || cleanString(clinic.nombre_clinica) || `Clínica ${clinicId}`,
-    category: cleanString(location?.primary_category) || 'clínica',
-    website: safeUrl(clinic.url_web),
+    name: cleanString(location?.location_name)
+      || cleanString(resolvedProfile.name)
+      || cleanString(clinic.nombre_clinica)
+      || `Clínica ${clinicId}`,
+    category: resolveDisciplineCategory(clinic, location, resolvedProfile),
+    website: safeUrl(clinic.url_web) || safeUrl(resolvedProfile.website_url),
     local_profile_url: safeUrl(clinic.url_ficha_local),
     address: [
-      cleanString(clinic.direccion) || addressLines.map((value) => cleanString(value)).filter(Boolean).join(', '),
-      cleanString(clinic.codigo_postal) || cleanString(storefrontAddress.postalCode || storefrontAddress.postal_code),
+      cleanString(clinic.direccion)
+        || addressLines.map((value) => cleanString(value)).filter(Boolean).join(', ')
+        || cleanString(resolvedProfile.address),
+      cleanString(clinic.codigo_postal)
+        || cleanString(storefrontAddress.postalCode || storefrontAddress.postal_code)
+        || cleanString(resolvedProfile.postal_code),
       city,
       province,
       country,
@@ -490,8 +602,9 @@ function providerConfiguration() {
 }
 
 function buildTypicalQueries(clinic) {
-  const category = cleanString(clinic?.category)?.toLocaleLowerCase('es-ES') || 'clínica';
-  const place = cleanString(clinic?.city) || cleanString(clinic?.province) || 'mi zona';
+  const category = cleanString(clinic?.category)?.toLocaleLowerCase('es-ES');
+  const place = cleanString(clinic?.city) || cleanString(clinic?.province);
+  if (!category || isGenericClinicCategory(category) || !place) return [];
   const bestLocalQuery = /^cl[ií]nica\b/u.test(category)
     ? `¿Cuál es la mejor ${category} en ${place}?`
     : `¿Qué ${category} es la mejor opción en ${place}?`;
@@ -513,6 +626,7 @@ function buildSuggestedQueries(clinic) {
 
 function findTypicalQuery(clinic, { queryKey = null, legacyQuery = null } = {}) {
   const typicalQueries = buildTypicalQueries(clinic);
+  if (!typicalQueries.length) return null;
   const normalizedKey = cleanString(queryKey, 64)?.toLocaleLowerCase('es-ES');
   if (normalizedKey) {
     const byKey = typicalQueries.find((item) => item.key === normalizedKey);
@@ -562,6 +676,12 @@ function serializeRun(run, typicalQueries = []) {
 }
 
 function overviewState({ providers, automatic, runs }) {
+  if (automatic.status === 'setup_required') {
+    return {
+      status: 'setup_required',
+      message: automatic.message,
+    };
+  }
   const configuredProviders = Object.values(providers).filter((provider) => provider.configured).length;
   const failedRuns = runs.filter((run) => run.status === 'failed');
   if (!configuredProviders) {
@@ -640,9 +760,11 @@ async function getOverview(clinicId, {
       requestedByRole,
     }, dependencies);
   }
+  const canonicalQueryHashes = typicalQueries.map((item) => queryHash(item.query));
   const rows = await RunModel.findAll({
     where: {
       clinica_id: clinicId,
+      query_hash: { [Op.in]: canonicalQueryHashes },
       expires_at: { [Op.gt]: new Date() },
       [Op.or]: [
         { status: { [Op.ne]: 'failed' } },
@@ -891,6 +1013,20 @@ async function ensureTypicalRuns({
   const configuredProviders = Object.values(providers).filter((provider) => provider.configured).length;
   const resolvedClinic = clinic || await (dependencies.resolveClinicContext || resolveClinicContext)(clinicId);
   const queries = typicalQueries || buildTypicalQueries(resolvedClinic);
+  if (!queries.length) {
+    return {
+      enabled: true,
+      status: 'setup_required',
+      triggered: false,
+      queued: 0,
+      reused: 0,
+      errors: [{
+        code: 'AI_VISIBILITY_DISCIPLINE_REQUIRED',
+        message: 'Falta la especialidad concreta de la clínica.',
+      }],
+      message: 'Completa o conecta la especialidad de la clínica para generar búsquedas de IA relevantes. No se harán consultas genéricas.',
+    };
+  }
   if (!configuredProviders) {
     return {
       enabled: true,
@@ -961,6 +1097,12 @@ async function enqueueTypicalRun({
   const clinic = await (dependencies.resolveClinicContext || resolveClinicContext)(clinicId);
   const typicalQueries = buildTypicalQueries(clinic);
   const typicalQuery = findTypicalQuery(clinic, { queryKey, legacyQuery });
+  if (!typicalQuery) {
+    const error = new Error('La clínica necesita una especialidad y una localidad concretas antes de comprobar su visibilidad en IA.');
+    error.code = 'AI_VISIBILITY_DISCIPLINE_REQUIRED';
+    error.status = 409;
+    throw error;
+  }
   return enqueueRun({
     clinicId,
     clinic,
@@ -1054,7 +1196,9 @@ module.exports = {
     partialRunIsReusable,
     publicProviderError,
     queryHash,
+    resolveDisciplineCategory,
     resolveClinicContext,
+    resolvedLocalProfileFromClinic,
     runGeminiSearch,
     runOpenAiSearch,
     serializeRun,

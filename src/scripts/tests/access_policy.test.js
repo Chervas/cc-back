@@ -220,6 +220,7 @@ async function run() {
       assistant: true,
       reception: true,
       admin_staff: true,
+      accountant: false,
       unknown: false,
     },
     'marketing.web.edit': {
@@ -229,6 +230,7 @@ async function run() {
       assistant: false,
       reception: true,
       admin_staff: true,
+      accountant: false,
       unknown: false,
     },
     'marketing.web.advanced_edit': {
@@ -238,6 +240,7 @@ async function run() {
       assistant: false,
       reception: false,
       admin_staff: true,
+      accountant: false,
       unknown: false,
     },
     'marketing.web.review': {
@@ -247,6 +250,7 @@ async function run() {
       assistant: false,
       reception: false,
       admin_staff: true,
+      accountant: false,
       unknown: false,
     },
     'marketing.web.publish': {
@@ -256,6 +260,7 @@ async function run() {
       assistant: false,
       reception: false,
       admin_staff: true,
+      accountant: false,
       unknown: false,
     },
     'marketing.web.domains.manage': {
@@ -265,6 +270,7 @@ async function run() {
       assistant: false,
       reception: false,
       admin_staff: true,
+      accountant: false,
       unknown: false,
     },
     'marketing.web.templates.manage': {
@@ -274,6 +280,7 @@ async function run() {
       assistant: false,
       reception: false,
       admin_staff: false,
+      accountant: false,
       unknown: false,
     },
   };
@@ -288,6 +295,24 @@ async function run() {
   assert.equal(features.get('marketing.web.publish')?.enforcement_status, 'backend');
   assert.equal(features.get('marketing.web.domains.manage')?.enforcement_status, 'backend');
   assert.equal(features.get('marketing.web.templates.manage')?.enforcement_status, 'backend');
+
+  assert.equal(accessPolicy.ALLOWED_ROLE_CODES.has('accountant'), true);
+  assert.equal(accessPolicy.defaultForFeature('billing.reports.view', 'accountant'), true);
+  assert.equal(accessPolicy.defaultForFeature('accounting.export', 'accountant'), true);
+  assert.equal(accessPolicy.defaultForFeature('billing.documents.manage', 'accountant'), false);
+  assert.equal(accessPolicy.defaultForFeature('accounting.expenses.manage', 'accountant'), false);
+  assert.equal(accessPolicy.defaultForFeature('accounting.cash.manage', 'accountant'), false);
+  assert.equal(accessPolicy.defaultForFeature('accounting.cash.manage', 'reception'), true);
+  assert.equal(accessPolicy.defaultForFeature('accounting.cash.manage', 'assistant'), true);
+  assert.equal(accessPolicy.defaultForFeature('billing.reports.view', 'reception'), false);
+  assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has('accounting.payroll.view'), true);
+  assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has('accounting.payroll.manage'), true);
+  assert.equal(accessPolicy.defaultForFeature('accounting.payroll.view', 'propietario'), true);
+  assert.equal(accessPolicy.defaultForFeature('accounting.payroll.view', 'admin_staff'), true);
+  assert.equal(accessPolicy.defaultForFeature('accounting.payroll.view', 'reception'), false);
+  assert.equal(accessPolicy.defaultForFeature('accounting.payroll.manage', 'reception'), false);
+  assert.equal(accessPolicy.defaultForFeature('patients.view', 'accountant'), false);
+  assert.equal(accessPolicy.defaultForFeature('quickchat.read_patients', 'accountant'), false);
 
   assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has('consents.view'), true);
   assert.equal(features.get('consents.view')?.kind, 'view');

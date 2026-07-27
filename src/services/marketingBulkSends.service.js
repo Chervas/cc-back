@@ -2749,9 +2749,11 @@ function mapReviewPatientItem({ patient, appointment = null, source = 'manual_se
 }
 
 function isImportedHistoricalAppointment(appointment) {
+  const sourceSystem = normalizeText(appointment?.source_system || appointment?.sourceSystem || '').toLowerCase();
   const reason = normalizeText(appointment?.motivo || appointment?.reason || '');
   const title = normalizeText(appointment?.titulo || appointment?.title || '');
-  return reason === IMPORTED_HISTORICAL_APPOINTMENT_REASON
+  return sourceSystem === 'cliniccloud'
+    || reason === IMPORTED_HISTORICAL_APPOINTMENT_REASON
     || reason.startsWith('Importación de pacientes')
     || title.startsWith('Histórico:');
 }

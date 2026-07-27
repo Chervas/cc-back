@@ -1255,7 +1255,7 @@ function rolePresentation(role, subrolCode, sections) {
       title: assistantLike ? 'Recepción y coordinación del día' : 'Lo importante de hoy',
       subtitle: assistantLike
         ? 'Confirmaciones, asistencia, consentimientos y tareas que mantienen la agenda al día.'
-        : 'Primeros pasos, agenda, asistencia, consentimientos y oportunidades que requieren acción.',
+        : 'Agenda, asistencia, consentimientos y oportunidades que requieren acción.',
       icon: 'heroicons_outline:clipboard-document-check',
       primaryActionLabel: 'Ver agenda',
       primaryActionLink: '/agenda-de-citas',

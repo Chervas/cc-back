@@ -3,6 +3,11 @@
 > **Relacionado con:** `cc-front/src/Documentacion/20.1-motor-flujos-v2.md` | documento operativo `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`
 > **Fuente canónica:** este archivo del repositorio backend. `cc-front/src/Documentacion/13-backend.md` es un espejo completo para conservar los enlaces internos del manual frontend; cualquier cambio se hace aquí primero y después se sincroniza el espejo.
 
+Economia del paciente: el contrato persistido de presupuestos, versiones,
+cobros, saldo, bonos, plantillas y documentos fiscales se documenta en
+[14-economia-paciente](./14-economia-paciente.md). VeriFactu permanece como
+simulacion visible y no comunica con AEAT.
+
 Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Data Manager/Conversiones mejoradas, política de goals y E2E/limpieza de intake.
 
 ---
@@ -176,6 +181,18 @@ La validación está duplicada y cubierta en frontend/backend:
 - preview del editor y compilador público;
 - tests `web_document_contract`, `web_artifact_compiler`,
   `web_gallery_backend`, `web_artifacts_service` y focales frontend.
+
+El mismo renderer 1.8 admite ahora el nodo cerrado `video` como extensión
+aditiva de `WebDocument v1`. No se incrementa la versión del renderer para no
+forzar republicaciones de artefactos/LKG sin vídeo: la salida solo cambia
+cuando el documento contiene explícitamente ese nodo. El contrato acepta
+únicamente `provider` (`youtube` o `vimeo`), `video_id`, título accesible,
+proporción, estrategia de carga y pie de vídeo. Rechaza hijos, iframe pegado,
+HTML, JavaScript y URLs arbitrarias. El compilador transforma esos datos en
+iframe seguro (`youtube-nocookie.com` o `player.vimeo.com`) y añade
+`frame-src`/`child-src` a la CSP del meta HTML y del manifest solo cuando existe
+un vídeo. La prueba focal `web_video_backend.test.js` cubre validación cerrada,
+salida determinista, CSP y ausencia de handlers.
 
 ### Schema de página con presets seguros
 
@@ -542,6 +559,18 @@ limpio mediante `LeadIntake #7272`; no hubo escrituras externas. El 1.7 retira
 `frame-ancestors` de la meta CSP, donde el navegador lo ignora, y lo conserva
 en el header CSP real.
 
+Desde 2026-07-27, el contrato de columnas del editor mantiene
+`column_tracks` como compatibilidad/fallback de fila y añade `column_widths`
+en `section.props` exclusivamente para nodos `structure_role=column`. El
+compilador valida que esos anchos sean enteros 1..12 y rechaza cualquier
+`column_widths` fuera de columnas. Cuando una fila contiene alguna columna con
+`column_widths`, el renderer emite `cc-column-widths` en la fila, cambia su
+grid a 12 columnas y añade `cc-col-span-*` por breakpoint a las columnas. Las
+hermanas sin override heredan su ancho desde `column_tracks` de la fila; si no
+hay track válido para ese índice/breakpoint, se apilan con fallback 12/12. Esto
+permite que el inspector edite una columna sin reescribir el reparto de las
+demás y mantiene documentos antiguos publicables.
+
 Evidencia definitiva del código promovido: backend Marketing Web **354/354**
 contratos Node, contratos WordPress **40/40**, Campañas **81/81**, reviewer
 focal **96/96** con GO explícito y sin hallazgos high/medium, frontend
@@ -625,8 +654,8 @@ generación IA, mutación gestionada o limpieza.
 
 ## 2026-07-17 - Visibilidad local en asistentes de IA
 
-- `GET /api/marketing/reports/competition/ai-visibility` exige una clínica concreta, revalida `marketingScopeAccess` y, al entrar el usuario en Informes, garantiza cuatro consultas canónicas del sistema: mejor opción local de su categoría, mejor dentista local, clínica recomendada y clínica con buenas reseñas. La primera usa `¿Cuál es la mejor clínica…?` cuando la categoría empieza por «clínica» y `¿Qué <categoría> es la mejor opción…?` en el resto, evitando concordancias incorrectas como «la mejor podólogo». No depende de texto libre ni de que el usuario pulse un botón. Este GET es el único disparador automático: `getOverview()` usa `autoStart=false` por defecto, `GET /:runId` solo hace polling y no existe cron diario/semanal de proveedores.
-- Categoría y zona proceden de la clínica y caen en `ClinicBusinessLocations.raw_payload.storefrontAddress` si el formulario interno no tiene ciudad/provincia. `typical_queries` publica el catálogo; cada run devuelve `query_key` y `query_source`.
+- `GET /api/marketing/reports/competition/ai-visibility` exige una clínica concreta, revalida `marketingScopeAccess` y, al entrar el usuario en Informes, garantiza cuatro consultas canónicas del sistema: mejor opción local de su categoría, opciones de la especialidad, clínica recomendada y clínica con buenas reseñas. La primera usa `¿Cuál es la mejor clínica…?` cuando la categoría empieza por «clínica» y `¿Qué <categoría> es la mejor opción…?` en el resto, evitando concordancias incorrectas como «la mejor podólogo». No depende de texto libre ni de que el usuario pulse un botón. Este GET es el único disparador automático: `getOverview()` usa `autoStart=false` por defecto, `GET /:runId` solo hace polling y no existe cron diario/semanal de proveedores.
+- Desde 2026-07-24, categoría y zona proceden también de la identidad canónica `Clinicas.configuracion.marketing_competition_local_profile` generada al resolver `url_ficha_local`, además de la ficha conectada y los campos internos. La categoría debe ser una disciplina concreta: si solo consta «clínica» o falta la localidad, el servicio devuelve `setup_required + AI_VISIBILITY_DISCIPLINE_REQUIRED` y no consulta proveedores. Los runs de una categoría/localidad anterior se conservan como auditoría, pero el overview solo presenta los cuatro hashes canónicos vigentes. `typical_queries` publica el catálogo; cada run devuelve `query_key` y `query_source`.
 - Si ningún proveedor tiene secreto, el GET devuelve `200 + configuration_required` y `automatic.waiting_configuration`: no crea filas/jobs y la UI puede explicar qué falta. Con al menos uno configurado, encola solo las consultas sin una ejecución de los últimos siete días y devuelve `collecting|partial|ready` sin convertir una carencia de configuración en un error de carga.
 - `POST` queda como compatibilidad temporal y solo elige una consulta canónica por `query_key`; un `query` legacy se acepta exclusivamente si coincide con el catálogo. No existe prompt libre. `GET /:runId` permite polling del run de esa clínica.
 - `MarketingAiVisibilityRuns` guarda consulta, estado, resultados normalizados, fuentes/citas y expiración. La migración es `20260717133000-create-marketing-ai-visibility-runs.js`.
@@ -901,6 +930,7 @@ Reglas:
 - Desde 2026-07-07 la respuesta incluye `unansweredReviews` para roles operativos: lista acotada de reseñas de Google sin respuesta con autor, puntuación, comentario, clínica, paciente conciliado si existe, enlace interno filtrado a `Marketing > Perfil Google` y URL externa de Google cuando está disponible. El frontend no debe llamar a `/api/local/clinica/:id/reviews` desde el panel principal para recomponer este bloque.
 - Desde 2026-07-16 el panel aplica capacidades por clínica antes de consultar cualquier colección con identidad. Agencia recibe contexto de Marketing/atribución, pero no `todayAppointments`, próximas/pasadas, pacientes, consentimientos, tareas clínicas, reseñas conciliadas ni setup operativo. `roleSections()` no trata agencia como owner/operations y un scope válido de Marketing no abre datos del dashboard.
 - El feedback positivo de ejemplo no se devuelve; cuando se reactive debe venir como señal real atribuible a ClinicaClick.
+- Desde 2026-07-23 la narrativa owner/operaciones no mezcla "primeros pasos" en la tarjeta principal; el setup ya viaja como bloque separado y el `subtitle` se centra en agenda, asistencia, consentimientos y oportunidades.
 
 ## Control de acceso por capacidades
 
@@ -971,6 +1001,7 @@ Endpoints reales:
 | `POST /api/pacientes/:id/nutrition-measurements/:measurementId/photos` | Operativo V1 dev | Guarda una foto clinica privada en `ClinicalPrivateAssets`, vinculada a la medicion. |
 | `GET /api/pacientes/:id/nutrition-measurements/:measurementId/photos/:photoId` | Operativo V1 dev | Sirve una foto clinica privada por endpoint autenticado, sin URL publica. |
 | `GET /api/pacientes/:id/clinical-attachments` | Operativo V1 dev | Lista assets clinicos privados del paciente desde `ClinicalPrivateAssets`, filtrados por permiso y proposito. |
+| `POST /api/pacientes/:id/clinical-attachments` | Operativo V1 dev | Sube un adjunto clinico privado general en JSON base64 (`application/pdf`, `image/jpeg`, `image/png`, `image/webp`), con `patients.edit`, categoria `pruebas`/`informes`/`otros` y asociacion opcional a `appointment_id`. |
 | `GET /api/pacientes/:id/clinical-attachments/:attachmentId` | Operativo V1 dev | Sirve un asset clinico privado por `public_id` o `id`, con `Cache-Control: private, no-store` y sin URL publica. |
 | `GET /api/pacientes/:id/activity` | Operativo V1 dev | Incluye eventos `nutrition_report_finalized` para informes finales de Nutricion cuando el rol puede ver `nutrition.workspace.view`. |
 | `GET /api/especialidades/area-contracts` | Operativo V1 dev | Requiere autenticacion. Devuelve contrato versionado por area medica para catalogo, agenda y ficha clinica: perfil de tratamiento, ejemplos de servicio, asistente de alta, resumen de flujo, protocolos, accion clinica de agenda y opciones/schemas especificos de Nutricion. |
@@ -992,15 +1023,50 @@ Contrato:
 - El motor `nutrition-basic-v3` calcula en backend IMC, ratio cintura/cadera, suma de pliegues, perimetros corregidos, somatotipo Heath-Carter cuando hay datos suficientes, composicion corporal estimada con ecuacion seleccionable, fraccionamiento Kerr-Ross de cinco componentes cuando esta completo el bloque avanzado y proyeccion lineal simple con las ultimas dos mediciones. Las mediciones historicas pueden conservar `nutrition-basic-v1` o `nutrition-basic-v2` en su snapshot.
 - Workspace e informes exponen `calculation_profile=clinicaclick-anthropometry-v3`: la formula guardada por defecto de masa grasa es Durnin-Womersley + Siri, pero `render`/`pdf` aceptan recalculo bajo demanda con Faulkner, Jackson-Pollock 4 sitios, Katch-McArdle, Sloan, Withers, Yuhasz-Carter o Slaughter. Heath-Carter, Kerr-Ross y proyeccion lineal siguen siendo bloques automaticos de calculo/trazabilidad.
 - El contrato de workspace e informes incluye `formula_references` con bases publicas/metodologicas usadas por `nutrition-basic-v3` para que el frontend y el HTML/PDF puedan mostrar la trazabilidad de calculo. Incluye IMC, perfil antropometrico completo, somatotipo Heath-Carter, la ecuacion de masa grasa aplicada en ese informe, Kerr-Ross cinco componentes y la proyeccion lineal simple propia.
-- Informes V1 se materializan en `PatientNutritionReports` como snapshot JSON/HTML con `snapshot_hash`, `formula_version`, `report_type`, `measurement_id`, `patient_id`, `clinic_id`, `appointment_id` y `treatment_id`. Al crear una medicion se intenta crear automaticamente el snapshot activo; `POST /api/pacientes/:id/nutrition-measurements/:measurementId/report/snapshot` permite materializarlo para mediciones antiguas. `POST /api/pacientes/:id/nutrition-measurements/:measurementId/report/finalize` crea un snapshot `final`, marca los borradores `active` como `superseded` y anota `finalized_by/finalized_at`; render y PDF priorizan siempre `final` sobre `active`. El contrato de workspace/informe expone `clinical_storage` para indicar `clinical_private`, snapshot privado en base de datos y `public_media=false`. Desde `ClinicalPrivateAssets`, el primer PDF solicitado de un informe `final` se cachea como asset clinico privado (`PatientNutritionReports.pdf_asset_id`) y las siguientes descargas leen ese binario privado; los borradores siguen generandose bajo demanda. No usar `PUBLIC_MEDIA` para informes, fotos clinicas ni datos antropometricos identificables.
+- Informes V1 se materializan en `PatientNutritionReports` como snapshot JSON/HTML con `snapshot_hash`, `formula_version`, `report_type`, `measurement_id`, `patient_id`, `clinic_id`, `appointment_id` y `treatment_id`. `snapshot_html` debe ser `MEDIUMTEXT`, porque los informes completos embeben CSS e ilustraciones y no caben de forma fiable en `TEXT`. Al crear una medicion se intenta crear automaticamente el snapshot activo; `POST /api/pacientes/:id/nutrition-measurements/:measurementId/report/snapshot` permite materializarlo para mediciones antiguas. `POST /api/pacientes/:id/nutrition-measurements/:measurementId/report/finalize` crea un snapshot `final`, marca los borradores `active` como `superseded` y anota `finalized_by/finalized_at`; render y PDF priorizan siempre `final` sobre `active`. El contrato de workspace/informe expone `clinical_storage` para indicar `clinical_private`, snapshot privado en base de datos y `public_media=false`. Desde `ClinicalPrivateAssets`, el primer PDF solicitado de un informe `final` se cachea como asset clinico privado (`PatientNutritionReports.pdf_asset_id`) y las siguientes descargas leen ese binario privado; los borradores siguen generandose bajo demanda. No usar `PUBLIC_MEDIA` para informes, fotos clinicas ni datos antropometricos identificables.
 - `GET /api/pacientes/:id/nutrition-measurements/:measurementId/report/render` y `/report/pdf` aceptan `compare_measurement_id=<measurement_id>` para renderizar HTML/PDF contra una medicion concreta y `compare_measurement_id=none` para generar el documento sin comparativa. Tambien aceptan `fat_mass_equation=<code>` para recalcular masa grasa con otra ecuacion disponible. Cuando se usa comparacion o ecuacion alternativa, el backend renderiza bajo demanda y no reutiliza ni reescribe snapshots finales; asi la UI puede cambiar la comparacion/formula sin romper la inmutabilidad clinica del informe cerrado.
 - El HTML/PDF de Nutricion debe ser entendible por paciente no tecnico: fraccionamiento molecular/tisular incluye explicaciones cortas, la distribucion adiposa/muscular diferencia `Actual` y `Comparacion` y la somatocarta mantiene etiquetas y valores separados para evitar solapes. La imagen central de distribucion solo localiza zonas; las barras son la fuente visual de valores. Desde `snapshot_version=15`, las cabeceras visuales no incluyen captions bajo la ilustracion, las imagenes de cabecera se integran sin tarjeta/fondo blanco propio, distribucion usa una cabecera visual consistente, cada tejido muestra su barra debajo del texto propio con ilustracion grande, las siluetas de somatotipo usan fondo transparente sin tarjeta blanca alrededor y las comparativas de un solo grupo ocupan todo el ancho para evitar columnas vacias.
 - Los assets visuales estaticos del informe viven en `src/assets/nutrition/images` y se embeben como `data:` dentro del HTML/PDF generado por backend. Son ilustraciones genericas sin dato clinico ni paciente; no van a `PUBLIC_MEDIA`. El video de pliegue subido como referencia queda fuera del informe hasta cerrar una ayuda interactiva especifica de mediciones.
 - `GET /api/paneles/main` devuelve `inactiveTodayAppointments` además de `todayAppointments`. `todayAppointments` conserva solo citas activas esperadas y no vencidas; `inactiveTodayAppointments` recoge citas del día cerradas, canceladas o reprogramadas para que el frontend explique estados vacíos sin contarlas como citas esperadas. Las citas abiertas vencidas salen en `pastAttendancePending`.
 - Para roles `paciente` y `laboratorio`, `GET /api/paneles/main` no entrega bloques internos de clínica: no carga citas operativas, oportunidades, alertas, errores de configuración ni tareas. El aislamiento se aplica en backend aunque el frontend también oculte esas secciones.
-- `ClinicalPrivateAssets` es la tabla base para binarios clinicos privados: PDFs finales cacheados, fotos clinicas de Nutricion y futuros adjuntos de historia. En dev usa provider `local_private` con raiz configurable `CLINICAL_PRIVATE_STORAGE_ROOT` y fallback fuera del checkout (`../clinical-private-storage`). El contrato esta preparado para migrar a S3 privado sin exponer URL publica.
+- `ClinicalPrivateAssets` es la tabla base para binarios clinicos privados: PDFs finales cacheados, fotos clinicas de Nutricion y futuros adjuntos de historia. En dev usa provider `local_private` con raiz configurable `CLINICAL_PRIVATE_STORAGE_ROOT` y fallback fuera del checkout (`../clinical-private-storage`). La raiz operativa recomendada en el servidor actual es `/home/ubuntu/.clinicaclick-private`; si se anade un disco dedicado, la raiz recomendada pasa a ser `/mnt/clinicaclick-clinical-private`. En ambos casos el directorio debe tener permisos `700`, los objetos no exponen rutas directas y se sirven solo por backend autenticado. El contrato esta preparado para migrar a S3 privado sin exponer URL publica.
+- Estrategia futura de almacenamiento privado y backups:
+  - Diferenciar storage operativo y backup. El storage operativo es donde la app lee/escribe a diario desde `ClinicalPrivateAssets`; el backup es una copia cifrada para recuperacion y no debe usarse como disco de trabajo.
+  - Fase 0, estado actual: mantener `local_private`, limpiar caches/artefactos tecnicos antes de comprar almacenamiento, no cambiar provider clinico, asegurar permisos `700` en la raiz privada y servir assets solo con permisos de backend. No usar `media.clinicaclick.com` para datos clinicos.
+  - Fase 1, si crece el almacenamiento activo: anadir disco dedicado barato en la misma zona de la instancia, montarlo en `/mnt/clinicaclick-clinical-private`, permisos `700`, configurar `CLINICAL_PRIVATE_STORAGE_ROOT=/mnt/clinicaclick-clinical-private` y conservar `ClinicalPrivateAssets` como fuente de metadatos. No exponer rutas de filesystem ni URLs publicas.
+  - Fase 2, backups economicos: crear bucket S3 privado y cifrado en region UE, preferiblemente `eu-south-2` si DPO/legal lo aprueba o `eu-west-3` por cercania a la infraestructura actual. Usar SSE-S3 o SSE-KMS si se requiere auditoria/control de claves. Subir backups cifrados de storage clinico, base de datos y documentacion operativa. Aplicar lifecycle: primeros dias/semanas en S3 Standard o Standard-IA; archivo antiguo a Glacier Instant/Flexible segun RTO/RPO acordado. Glacier es backup/archivo, no storage operativo diario.
+  - Fase 3, evolucion futura: implementar provider S3 privado para `ClinicalPrivateAssets` solo cuando el volumen lo justifique. Acceso siempre por backend autenticado, URLs prefirmadas muy cortas o streaming backend, auditoria de acceso por usuario, clinica, paciente, asset, accion, fecha, IP/contexto y revision DPO/legal antes de produccion clinica real.
+  - Costes orientativos a documentar en decisiones: disco Lightsail attached disk alrededor de `0.10 USD/GB-mes`; S3 Standard UE alrededor de `0.023-0.024 USD/GB-mes`; S3 Standard-IA alrededor de `0.0125-0.0131 USD/GB-mes`; Glacier/archivo es mas barato pero solo para backup/archivo.
+  - Regla critica: `PUBLIC_MEDIA`/CloudFront es solo para assets publicos como logos, marketing, fotos publicas autorizadas de equipo, frontend o imagenes publicas de WhatsApp. Nunca RX, consentimientos, informes, audios, fotos clinicas, STL, documentos de laboratorio, facturas identificables ni datos de paciente en `PUBLIC_MEDIA`.
+- Importaciones reales 2026-07-23: los exports originales deben entrar fuera de
+  los repositorios, por ejemplo
+  `/home/ubuntu/secure-imports/clinic-real-20260723/incoming/`, con backups en
+  `db-backups/` y payloads revisables/pseudonimizados en `review/`. Los
+  importadores deben escribir adjuntos en `ClinicalPrivateAssets` con
+  `purpose=clinical_attachment` salvo purpose clinico mas especifico, incluir
+  `metadata.source_batch`/origen, no poner PII en `object_key`, `public_id`,
+  rutas o nombres de carpeta, y exponerlos solo por endpoints autenticados con
+  `Cache-Control: private, no-store`. Nunca mover PDFs, fotos clinicas,
+  consentimientos, informes, facturas identificables ni documentos de paciente
+  a `PUBLIC_MEDIA`.
+- Import ClinicCloud BS Medical 2026-07-26/27: el lote real usa
+  `source_batch=cliniccloud_bsmedical_real_20260726`. Las citas importadas
+  mantienen `source_system='cliniccloud'` para que automatizaciones y
+  recordatorios no se disparen retroactivamente. El backfill
+  `src/scripts/cliniccloud_backfill_agenda_resources.js` crea/reutiliza
+  profesionales o recursos provisionales a partir de `agenda_1.csv`, crea
+  instalaciones para cabinas/recursos y enlaza todas las citas por
+  `doctor_id`/`instalacion_id` sin borrar datos originales. Batch del backfill:
+  `cliniccloud_bsmedical_real_20260726_agenda_resources_v1`; informe ejecutado:
+  `/home/ubuntu/secure-imports/clinic-real-20260722/review/cliniccloud_bsmedical_real_20260726_agenda_resources_v1-execute.json`.
+  Cada cita enlazada queda marcada en `import_metadata.clinicaclick_agenda_backfill_v1`.
+  Para revertir solo este backfill, usar ese batch como filtro: limpiar
+  `doctor_id`/`instalacion_id` de citas `source_system='cliniccloud'` marcadas,
+  borrar recursos con email `cliniccloud.agenda.*@imports.clinicaclick.local`
+  y borrar instalaciones cuya descripcion contiene el batch. No tocar
+  pacientes, historiales, bonos ni assets clinicos.
 - Las fotos clinicas de Nutricion se guardan con `purpose=nutrition_clinical_photo`, `owner_type=patient_nutrition_measurement`, `owner_id=<measurement_id>`, `patient_id` y `clinic_id`. Listado y descarga quedan protegidos por `nutrition.workspace.view`; subida queda protegida por `nutrition.measurements.create`.
-- La pestana `Adjuntos` del paciente consume `GET /api/pacientes/:id/clinical-attachments`. El backend filtra por permisos segun `purpose`: `nutrition_report_pdf` y `nutrition_clinical_photo` requieren `nutrition.workspace.view`, `consent_document_pdf` requiere `consents.view`, y `clinical_attachment` requiere `patients.sensitive.view`. La subida general queda pendiente hasta cerrar categorias clinicas y permisos de escritura; no se debe volver al mock ni a `PUBLIC_MEDIA`.
+- La pestana `Adjuntos` del paciente consume `GET /api/pacientes/:id/clinical-attachments` y sube pruebas generales con `POST /api/pacientes/:id/clinical-attachments`. El backend filtra por permisos segun `purpose`: `nutrition_report_pdf` y `nutrition_clinical_photo` requieren `nutrition.workspace.view`, `consent_document_pdf` requiere `consents.view`, y `clinical_attachment` requiere `patients.sensitive.view` para lectura y `patients.edit` para subida. La subida general usa `clinical_private_storage`, nunca `PUBLIC_MEDIA`, y puede asociarse a una cita mediante `appointment_id`.
 - `GET /api/pacientes/:id/activity` expone cada informe final como evento `nutrition_report_finalized`, con titulo, icono, resumen de medicion/servicio/formula/hash y actor de cierre. El evento solo se adjunta si el usuario tiene `nutrition.workspace.view` en la clínica concreta del informe y esa sede pertenece al scope legible del paciente; el mismo filtro por sede se aplica a citas y eventos de reseñas.
 - `GET /api/citas/calendar` incluye `tratamiento.disciplina`, `tratamiento.categoria` y `tratamiento.clinical_config` para que la agenda pueda mostrar `Registrar medicion` cuando el tratamiento tenga perfil de medicion asociado.
 - Para citas de Nutricion con perfil de medicion asociado, `GET /api/citas/calendar` y `GET /api/citas/:id` adjuntan `nutrition_latest_measurement` si existe una medicion anterior del paciente. Se calcula en backend con una consulta separada a `PatientNutritionMeasurements` y enriquecimiento por mapa, sin recomponerlo desde Angular.
@@ -1212,6 +1278,7 @@ Principios:
 
 - Sugerencia automática: requiere gates y API key. En esta instalación autorizada, la primera entrada a Competencia por clínica carga sugerencias una sola vez durante la vida del componente, con máscara de coste reducida y caché de seis horas; después el usuario puede refrescarlas explícitamente. Si faltan los gates o proveedor, `suggestions` devuelve acción de alta manual y no realiza llamadas externas.
 - Para sugerir competidores es obligatorio tener una ficha local propia conectada o `Clinica.url_ficha_local` guardada. Si falta, `GET /competition/suggestions` devuelve `setup_required=true`, `setup_code=LOCAL_PROFILE_REQUIRED` y no ejecuta una búsqueda genérica.
+- Desde 2026-07-24, una `Clinica.url_ficha_local` manual sin `ClinicBusinessLocation` se resuelve una sola vez antes de construir el informe. El backend sigue únicamente redirecciones HTTPS de hosts Google permitidos, extrae `place_id` directo o la identidad `q/kgmid`, exige coincidencia inequívoca de nombre/web en Places y persiste en `Clinicas.configuracion.marketing_competition_local_profile` la identidad canónica. Dirección, ciudad, provincia, CP y país solo completan columnas vacías; una ficha GBP conectada sigue teniendo prioridad. Los fallos quedan con `retry_after` de una hora y el informe devuelve `LOCAL_PROFILE_URL_UNRESOLVED` en vez de aparentar una configuración válida sin términos.
 - Si hay ancla local pero no hay categoría/especialidad suficiente, devuelve `setup_code=LOCAL_CATEGORY_REQUIRED`. No se debe usar fallback a "clínica médica" porque genera ruido en clínicas nuevas.
 - Cuando hay ficha local conectada, la categoría/nombre de Google Business Profile tiene prioridad sobre disciplinas mixtas de la clínica para inferir la búsqueda inicial. Ejemplo: si una clínica tiene varias áreas pero su ficha local es `Podólogo`, la competencia se busca como podología, no como otra disciplina secundaria.
 - Las sugerencias excluyen la propia ficha local por `place_id` y por nombre normalizado. La propia clínica no debe aparecer como competidor sugerido aunque Google la devuelva en los primeros resultados.
@@ -1918,6 +1985,7 @@ Reglas:
 - `GET /api/conversations` pagina por `limit/offset` y devuelve `X-Has-More`/`X-Next-Offset`; QuickChat debe consumirlo con scroll infinito. Tambien devuelve `X-Total-Unread`, calculado sobre todo el scope accesible y no sobre la pagina cargada, para que el badge de pendientes no dependa de la paginacion. Desde 2026-07-21 «pendiente» significa inbound posterior al último outbound real, no lectura por usuario. La pestaña visible `Otros` mantiene `filter=leads` por compatibilidad, pero backend incluye `lead_id` y conversaciones externas de campañas presentes en `MarketingPatientListItems.conversation_id`, excluyendo siempre conversaciones con `patient_id`.
 - `GET /api/conversations` y `X-Total-Unread` aplican ACL por categoría: conversaciones con `patient_id` requieren `quickchat.read_patients`, `channel=internal` requiere `quickchat.read_team` y conversaciones WhatsApp/externas sin paciente requieren `quickchat.read_leads`. La misma categoría se valida en `GET /api/conversations/:id/messages`, media, marcar leído, envío normal y `send-now`.
 - La busqueda de `GET /api/conversations?q=...` debe cubrir pacientes, leads, `contact_id` y contactos externos de listas/campanas (`MarketingPatientListItems.name`, `phone`, `email` y `custom_fields.nombre_completo`). Las busquedas con varias palabras aceptan coincidencia de frase completa o todos los tokens en cualquier campo, para que `Nombre Apellido2` encuentre pacientes con nombre compuesto o dos apellidos. No buscar en todo `Messages.content` desde este endpoint sin un indice/previsualizacion materializada, porque penaliza la bandeja paginada de QuickChat.
+- Las coincidencias de contactos externos de listas/campanas solo se aplican a conversaciones sin `patient_id` ni `lead_id`. Si una fila historica de `MarketingPatientListItems.conversation_id` queda apuntando a una conversacion que despues se canoniza como paciente, la busqueda debe priorizar el paciente/lead real y no devolver ese chat por el nombre importado antiguo.
 - `POST /campaigns/:id/prepare` y `/test-send` validan todas las variables de la plantilla real contra los items `ready`; si falta algun valor devuelven `409` con `details.missing_variables[]` y no usan ejemplos de plantilla como fallback operativo.
 - `GET /campaigns/:id`, `/campaigns/:id/recipients` y `/campaigns/:id/dispatch` hacen una reconciliacion ligera antes de responder: leen `Messages.metadata.wa_status_history`, materializan `sent/delivered/read/failed/replied` en `MarketingPatientListItems`, refrescan contadores y devuelven `report` agregado. Esto corrige informes atrasados sin cargar toda la lista en frontend.
 - El `report` de envios masivos expone `opt_out_share` (bajas sobre contactos realmente enviados), `read_hours` (lecturas por hora), clicks de enlaces, clicks por contacto y pais aproximado de click. Los listados detallados de abiertos/no abiertos/respuestas/bajas/clicks deben seguir saliendo de endpoints paginados, no de arrays completos en UI.
@@ -4232,6 +4300,12 @@ Prefijo: `/api/consentimientos`
 | GET | `/public/:token` | Abrir paquete de firma por token opaco. |
 | POST | `/public/:token/sign` | Firmar paquete por token opaco. |
 
+Nota dev 2026-07-22: el middleware de origen web alojado (`webHostedOrigin`)
+debe ignorar siempre rutas internas `/api`, `/oauth` y `/socket.io` antes de
+resolver hosts publicados. Esto evita que `tablet.clinicaclick.com` intercepte
+`GET /api/consentimientos/public/:token` como si fuera una landing alojada y
+devuelva `Página no encontrada` para tokens JWT con puntos.
+
 ### Seed Admin Base
 
 Migración de datos:
@@ -4254,6 +4328,27 @@ Migración de expansión:
 Añade plantillas admin reales para portal del paciente, ácido hialurónico, toxina botulínica y microinjerto capilar, además de la plantilla WhatsApp `clinicaclick_envio_consentimiento_firma` con variable de enlace público de consentimiento. Las plantillas invasivas incluyen `variable_schema.automation` con envío recomendado 24h antes y confirmación de explicación.
 
 Meta no acepta variables al inicio o final absoluto de una plantilla. La plantilla `clinicaclick_envio_consentimiento_firma` no debe terminar en `{{enlace}}`/`{{4}}`; el copy actual añade texto posterior (`Gracias.`) y la migración `20260628085000-fix-consent-whatsapp-template-copy` desactiva revisiones locales fallidas sin `meta_template_id` para que la siguiente propagación abra una revisión válida.
+
+Migración de biblioteca por áreas:
+
+- `migrations/20260724062000-seed-consentimientos-area-library.js`
+
+Añade 9 plantillas admin base para Nutrición, Estética, Capilar y financiación/pago aplazado:
+
+- Nutrición: valoración nutricional y antropometría, plan nutricional y seguimiento, imágenes clínicas privadas de nutrición.
+- Estética: láser/luz pulsada, peeling químico e imágenes clínicas antes/después.
+- Capilar: PRP/mesoterapia capilar e imágenes clínicas capilares.
+- Genérica: información/autorización para financiación o pago aplazado.
+
+Estas plantillas usan `ConsentTemplateCatalogDisciplines` para scope por área y `variable_schema.signing_timing`/`clinical_policy` para momento operativo de firma. Son textos base de Clinicaclick para demo y revisión legal de la clínica; no son copia de textos de terceros y no sustituyen validación jurídica antes de uso definitivo.
+
+Script demo reproducible:
+
+```bash
+node src/scripts/qa/prepare-consentimientos-area-library-demo.js
+```
+
+Sincroniza de forma idempotente la biblioteca admin en clínicas dev compatibles por `Clinicas.configuracion.disciplinas` (`BS Capilar`, `BS Medical`, `Vitaldiet`, `Clínica Segura y Guerrero`, `Clínica Navae` por defecto) y devuelve URLs de `/consentimientos?tab=templates&clinica_id=<id>`. La evidencia 2026-07-24 queda fuera de git en `/home/ubuntu/secure-imports/clinic-real-20260722/review/ui-validation/consentimientos-area-library-20260724/`.
 
 ### Propagación admin a clínicas existentes
 
@@ -4334,6 +4429,7 @@ El scheduler no envía recordatorios de consentimiento por su cuenta. Los record
 - `tablet-session` encola la firma para el kiosco sin duplicar eventos `queued` del mismo documento.
 - La firma profesional se guarda en `PatientConsentDocuments.professional_signed_by` y `professional_signed_at`, además de `snapshot_json.professional_signature_evidence`.
 - Menores/tutores deben resolverse en la fase de firma usando los datos ya modelados en paciente.
+- QA demo 2026-07-23: `src/scripts/qa/prepare-consentimientos-tablet-demo.js` deja el caso pendiente como cita futura confirmada, asigna un profesional activo de la clínica si existe y deja el caso ya firmado como cita pasada `completada`. Así la ficha de `Demo Firmado Consentimientos` enseña `Todo firmado`, `Ver firmado` y `PDF` sin mezclar una tarea ajena de asistencia pendiente ni `Profesional pendiente`. Revalidado con Chromium/CDP en `demo-consentimientos-tablet-current-20260723/validation-after-ux.json` y flujo kiosco `demo-consentimientos-tablet-20260722/tablet-current-flow-20260723.json`, sin errores HTTP/consola ni overflow.
 
 ## 2026-03-15 - Contexto V2 enriquecido con datos clínicos
 

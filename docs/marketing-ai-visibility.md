@@ -11,14 +11,24 @@ de forma idempotente estas cuatro consultas locales:
 1. `¿Cuál es la mejor <categoría> en <localidad>?` para categorías que empiezan
    por «clínica»; el resto usa `¿Qué <categoría> es la mejor opción en
    <localidad>?` para no asumir un género gramatical incorrecto.
-2. `¿Cuál es el mejor dentista en <localidad>?`
+2. `¿Qué opciones de <categoría> destacan en <localidad>?`
 3. `¿Qué <categoría> recomiendan en <localidad>?`
 4. `¿Qué <categoría> tiene buenas reseñas en <localidad>?`
 
-Categoría, localidad y provincia proceden de la clínica y, si esos campos
-están vacíos, de `ClinicBusinessLocations.raw_payload.storefrontAddress`. Así
-una clínica conectada a Perfil de Empresa no cae en el texto genérico `mi zona`
-por tener incompleto el formulario interno.
+La categoría debe representar una disciplina concreta. Se resuelve, por orden,
+desde la categoría del Perfil de Empresa conectado, la identidad canónica
+guardada al resolver `Clinica.url_ficha_local`, las disciplinas configuradas y
+los datos públicos de la clínica. Localidad y provincia proceden de la clínica,
+de `ClinicBusinessLocations.raw_payload.storefrontAddress` o de esa identidad
+canónica. Así, una URL de ficha de una clínica dental genera «mejor clínica
+dental en Almería» y nunca «mejor clínica en Almería».
+
+Si no hay especialidad concreta o localidad, el GET responde
+`status=setup_required`,
+`automatic.status=setup_required` y
+`AI_VISIBILITY_DISCIPLINE_REQUIRED`: no encola consultas genéricas ni consume
+cuota de ChatGPT o Gemini. Los runs de una categoría/localidad anterior se
+conservan para auditoría y retención, pero no se mezclan en el informe vigente.
 
 La respuesta incluye:
 

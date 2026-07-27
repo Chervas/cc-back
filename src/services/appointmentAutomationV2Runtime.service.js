@@ -100,9 +100,11 @@ function cleanString(value) {
 }
 
 function isImportedHistoricalAppointment(cita) {
+  const sourceSystem = cleanString(cita?.source_system).toLowerCase();
   const reason = cleanString(cita?.motivo).toLowerCase();
   const title = cleanString(cita?.titulo).toLowerCase();
-  return reason === IMPORTED_HISTORICAL_APPOINTMENT_REASON.toLowerCase()
+  return sourceSystem === 'cliniccloud'
+    || reason === IMPORTED_HISTORICAL_APPOINTMENT_REASON.toLowerCase()
     || reason.startsWith('importación de pacientes')
     || title.startsWith('histórico:');
 }

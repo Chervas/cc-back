@@ -84,7 +84,7 @@ function uploadFeatureForPurpose(purpose) {
   // La imagen de acceso forma parte de la configuracion de la clinica. Los
   // assets de campanas conservan su permiso de marketing (incluido el flujo
   // de foto de resenas que puede gestionar una agencia).
-  if (purpose === 'clinic_access_image') return CLINIC_EDIT_FEATURE;
+  if (['clinic_access_image', 'invoice_logo'].includes(purpose)) return CLINIC_EDIT_FEATURE;
   if (purpose === 'web_editor_media') return MARKETING_WEB_EDIT_FEATURE;
   return MARKETING_FEATURE;
 }
@@ -254,16 +254,20 @@ exports.upload = async (req, res) => {
       error.status = 400;
       throw error;
     }
-    if (purpose === 'clinic_access_image' && scope.scopeType !== 'clinic') {
-      const error = new Error('clinic_access_image_requires_clinic_scope');
+    if (['clinic_access_image', 'invoice_logo'].includes(purpose) && scope.scopeType !== 'clinic') {
+      const error = new Error(purpose === 'clinic_access_image'
+        ? 'clinic_access_image_requires_clinic_scope'
+        : 'invoice_logo_requires_clinic_scope');
       error.status = 400;
       throw error;
     }
 
     const ownerType = purpose === 'clinic_access_image'
       ? 'clinic_access_guidance'
-      : (String(req.body?.owner_type || req.body?.ownerType || '').trim() || null);
-    const ownerId = purpose === 'clinic_access_image'
+      : purpose === 'invoice_logo'
+        ? 'invoice_branding'
+        : (String(req.body?.owner_type || req.body?.ownerType || '').trim() || null);
+    const ownerId = ['clinic_access_image', 'invoice_logo'].includes(purpose)
       ? String(scope.clinicId)
       : (String(req.body?.owner_id || req.body?.ownerId || '').trim() || null);
 
@@ -320,7 +324,7 @@ exports.upload = async (req, res) => {
           status: quarantined ? 'quarantine' : 'active',
           metadata: {
             source: 'public_media_upload',
-            original_filename: purpose === 'clinic_access_image'
+            original_filename: ['clinic_access_image', 'invoice_logo'].includes(purpose)
               ? null
               : (req.body?.file_name || req.body?.fileName || null),
             non_clinical_asserted: true,

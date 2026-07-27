@@ -94,6 +94,70 @@ test('publica anchos dinámicos de columnas desde el modelo seguro de 12 partes'
   assert.match(css, /\.cc-section\.cc-mobile-tracks-12>\.cc-container\{display:grid;grid-template-columns:minmax\(0,12fr\)\}/);
 });
 
+test('publica anchos propios de columna con fallback seguro para hermanas heredadas', () => {
+  const input = fixture();
+  const rowId = input.document.pages[0].root_node_ids[0];
+  const row = input.document.nodes[rowId];
+  const originalChildren = [...row.children];
+  const leftColumnId = 'column_left_widths';
+  const rightColumnId = 'column_right_widths';
+  row.props = {
+    ...row.props,
+    layout: 'grid',
+    columns: 2,
+    structure_role: 'row',
+    column_tracks: {
+      desktop: [6, 6],
+      tablet: [6, 6],
+      mobile: [12],
+    },
+  };
+  row.responsive = {
+    tablet: { columns: 2 },
+    mobile: { columns: 1 },
+  };
+  row.children = [leftColumnId, rightColumnId];
+  input.document.nodes[leftColumnId] = {
+    id: leftColumnId,
+    type: 'section',
+    version: 1,
+    props: {
+      layout: 'stack',
+      columns: 1,
+      structure_role: 'column',
+      column_widths: {
+        desktop: 8,
+        tablet: 6,
+        mobile: 12,
+      },
+    },
+    children: originalChildren,
+  };
+  input.document.nodes[rightColumnId] = {
+    id: rightColumnId,
+    type: 'section',
+    version: 1,
+    props: {
+      layout: 'stack',
+      columns: 1,
+      structure_role: 'column',
+    },
+    children: [],
+  };
+
+  const artifact = compileWebArtifact(input);
+  const stylesheetPath = Object.keys(artifact.files).find((path) => path.startsWith('assets/styles.'));
+  const css = artifact.files[stylesheetPath];
+  const html = artifact.files['index.html'];
+
+  assert.match(html, /cc-role-row cc-layout-grid cc-cols-2 cc-column-widths/);
+  assert.doesNotMatch(html, /cc-tracks-6-6/);
+  assert.match(html, new RegExp(`${leftColumnId}[^"]*" class="[^"]*cc-col-span-8[^"]*cc-tablet-col-span-6[^"]*cc-mobile-col-span-12`));
+  assert.match(html, new RegExp(`${rightColumnId}[^"]*" class="[^"]*cc-col-span-6[^"]*cc-tablet-col-span-6[^"]*cc-mobile-col-span-12`));
+  assert.match(css, /\.cc-role-row\.cc-column-widths>\.cc-container\{display:grid;grid-template-columns:repeat\(12,minmax\(0,1fr\)\)\}/);
+  assert.match(css, /\.cc-role-row\.cc-column-widths>\.cc-container>\.cc-role-column\.cc-col-span-8\{grid-column:span 8\/span 8\}/);
+});
+
 test('publica animaciones tipadas como clases seguras generadas por el renderer', () => {
   const input = fixture();
   const sectionId = input.document.pages[0].root_node_ids[0];

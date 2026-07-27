@@ -15,6 +15,8 @@ const {
 
 const RENDERER_VERSION = 'clinicaclick-web-renderer/1.8.0';
 const SAFE_EXTERNAL_REL = /^(?:\/[A-Za-z0-9_][A-Za-z0-9/_-]*|https:\/\/[^\s]+)$/;
+const SAFE_YOUTUBE_VIDEO_ID = /^[A-Za-z0-9_-]{6,64}$/;
+const SAFE_VIMEO_VIDEO_ID = /^[0-9]{6,12}$/;
 const PRODUCTION_INTAKE_ENDPOINT = '/_clinicaclick/intake';
 const CLINIC_BINDING_FIELDS = new Set([
   'name',
@@ -557,7 +559,26 @@ function validColumnTracks(node, breakpoint) {
   return tracks.reduce((sum, track) => sum + track, 0) === 12 ? tracks : null;
 }
 
-function sectionTrackClassList(node) {
+function validColumnWidth(node, breakpoint) {
+  const width = node?.props?.column_widths?.[breakpoint];
+  return Number.isInteger(width) && width >= 1 && width <= 12 ? width : null;
+}
+
+function sectionRole(node) {
+  return node?.props?.structure_role || 'section';
+}
+
+function rowUsesColumnWidths(document, node) {
+  return sectionRole(node) === 'row' && (node.children || []).some((childId) => {
+    const child = document.nodes?.[childId];
+    return child?.type === 'section'
+      && sectionRole(child) === 'column'
+      && Boolean(child.props.column_widths && Object.keys(child.props.column_widths).length);
+  });
+}
+
+function sectionTrackClassList(document, node) {
+  if (rowUsesColumnWidths(document, node)) return 'cc-column-widths';
   return ['desktop', 'tablet', 'mobile'].map((breakpoint) => {
     const tracks = validColumnTracks(node, breakpoint);
     if (!tracks) return '';
@@ -566,12 +587,70 @@ function sectionTrackClassList(node) {
   }).filter(Boolean).join(' ');
 }
 
+function sectionColumnWidthClassList(document, node, parentRow = null, parentChildIndex = null) {
+  if (sectionRole(node) !== 'column') return '';
+  return ['desktop', 'tablet', 'mobile'].map((breakpoint) => {
+    const width = validColumnWidth(node, breakpoint)
+      || fallbackColumnWidthFromParent(document, parentRow, parentChildIndex, breakpoint);
+    if (!width) return '';
+    const prefix = breakpoint === 'desktop' ? 'cc-col-span' : `cc-${breakpoint}-col-span`;
+    return `${prefix}-${width}`;
+  }).filter(Boolean).join(' ');
+}
+
+function fallbackColumnWidthFromParent(document, parentRow, parentChildIndex, breakpoint) {
+  if (!parentRow || sectionRole(parentRow) !== 'row' || !rowUsesColumnWidths(document, parentRow)) return null;
+  if (!Number.isInteger(parentChildIndex) || parentChildIndex < 0) return null;
+  const tracks = validColumnTracks(parentRow, breakpoint);
+  const width = tracks?.[parentChildIndex];
+  return Number.isInteger(width) && width >= 1 && width <= 12 ? width : 12;
+}
+
 function imageClassList(node) {
   const fit = node.props.fit === 'contain' ? 'contain' : 'cover';
   const aspect = String(node.props.aspect_ratio || 'auto').replace(':', '-');
   const focalX = Number.isInteger(node.props.focal_x) ? node.props.focal_x : 50;
   const focalY = Number.isInteger(node.props.focal_y) ? node.props.focal_y : 50;
   return `cc-fit-${fit} cc-aspect-${aspect} cc-focal-${focalX}-${focalY}`;
+}
+
+function videoEmbedUrl(node) {
+  const provider = String(node.props.provider || '').trim();
+  const videoId = String(node.props.video_id || '').trim();
+  if (provider === 'youtube') {
+    if (!SAFE_YOUTUBE_VIDEO_ID.test(videoId)) {
+      fail('web_artifact_video_id_invalid', 'El ID de YouTube no es válido.', {
+        node_id: node.id,
+        provider,
+      });
+    }
+    return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(videoId)}`;
+  }
+  if (provider === 'vimeo') {
+    if (!SAFE_VIMEO_VIDEO_ID.test(videoId)) {
+      fail('web_artifact_video_id_invalid', 'El ID de Vimeo no es válido.', {
+        node_id: node.id,
+        provider,
+      });
+    }
+    return `https://player.vimeo.com/video/${encodeURIComponent(videoId)}`;
+  }
+  fail('web_artifact_video_provider_invalid', 'El proveedor de vídeo no está soportado.', {
+    node_id: node.id,
+    provider,
+  });
+}
+
+function webDocumentHasNodeType(document, nodeType) {
+  return Object.values(document?.nodes || {}).some((node) => node?.type === nodeType);
+}
+
+function videoFrameCspDirective(document) {
+  if (!webDocumentHasNodeType(document, 'video')) {
+    return '';
+  }
+  const sources = 'https://www.youtube-nocookie.com https://player.vimeo.com';
+  return ` frame-src ${sources}; child-src ${sources};`;
 }
 
 function resolvedMediaImage(snapshot, assetId, details = {}) {
@@ -633,6 +712,16 @@ function renderGallery(node, snapshot) {
   return `<div id="cc-${escapeHtml(node.id)}" class="cc-node cc-gallery cc-gallery-cols-${Number(node.props.columns)} ${styleClassList(node)}">${figures}</div>`;
 }
 
+function renderVideo(node) {
+  const source = videoEmbedUrl(node);
+  const loading = node.props.loading === 'eager' ? 'eager' : 'lazy';
+  const aspect = String(node.props.aspect_ratio || '16:9').replace(':', '-');
+  const caption = node.props.caption
+    ? `<figcaption>${escapeHtml(node.props.caption)}</figcaption>`
+    : '';
+  return `<figure id="cc-${escapeHtml(node.id)}" class="cc-node cc-video cc-video-aspect-${escapeHtml(aspect)} ${styleClassList(node)}"><div class="cc-video-frame"><iframe src="${escapeHtml(source)}" title="${escapeHtml(node.props.title)}" loading="${loading}" referrerpolicy="strict-origin-when-cross-origin" allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe></div>${caption}</figure>`;
+}
+
 function buttonHref(node, context) {
   const { action, target } = node.props;
   if (action === 'external_url') return safePublicButtonUrl(target, node.id);
@@ -680,7 +769,7 @@ function renderIntakeForm(node, context) {
   return `<form id="cc-${escapeHtml(node.id)}" class="cc-node cc-form ${styleClassList(node)}" action="${escapeHtml(context.intakeEndpoint)}" method="post" enctype="application/x-www-form-urlencoded" accept-charset="UTF-8" data-cc-native-intake="true"><h2>${escapeHtml(node.props.title)}</h2>${node.props.description ? `<p>${escapeHtml(node.props.description)}</p>` : ''}<input type="hidden" name="web_project_id" value="${escapeHtml(context.projectId)}"><input type="hidden" name="web_revision_id" value="${escapeHtml(context.revisionId)}"><input type="hidden" name="web_page_id" value="${escapeHtml(context.page.id)}"><input type="hidden" name="web_form_id" value="${escapeHtml(node.id)}"><input type="hidden" name="web_artifact_input_hash" value="${escapeHtml(context.artifactMarker)}"><input class="cc-honeypot" type="text" name="_cc_company" value="" tabindex="-1" autocomplete="off" aria-hidden="true">${fields}<button type="submit" class="cc-button cc-button-primary">${escapeHtml(node.props.submit_label)}</button><p id="${escapeHtml(successId)}" class="cc-form-status cc-form-success" role="status">${escapeHtml(node.props.success_message)}</p><p id="${escapeHtml(errorId)}" class="cc-form-status cc-form-error" role="alert">No hemos podido enviar el formulario. Inténtalo de nuevo en unos minutos.</p></form>`;
 }
 
-function renderNode(nodeId, document, snapshot, context, ancestors = new Set(), rootSemanticTag = null) {
+function renderNode(nodeId, document, snapshot, context, ancestors = new Set(), rootSemanticTag = null, parentSection = null, parentChildIndex = null) {
   const node = document.nodes[nodeId];
   if (!node) fail('web_artifact_node_missing', 'La revisión contiene una referencia de bloque rota.', { node_id: nodeId });
   if (ancestors.has(nodeId)) fail('web_artifact_node_cycle', 'La revisión contiene un ciclo de bloques.', { node_id: nodeId });
@@ -690,11 +779,11 @@ function renderNode(nodeId, document, snapshot, context, ancestors = new Set(), 
       ? rootSemanticTag
       : null;
     const tag = globalSlot || node.props.semantic_tag || 'section';
-    const children = node.children.map((childId) => renderNode(childId, document, snapshot, context, nextAncestors)).join('');
+    const children = node.children.map((childId, index) => renderNode(childId, document, snapshot, context, nextAncestors, null, node, index)).join('');
     const globalAttribute = globalSlot ? ` data-cc-global="${globalSlot}"` : '';
     const globalClass = globalSlot ? ` cc-site-${globalSlot}` : '';
     const roleClass = `cc-role-${escapeHtml(node.props.structure_role || 'section')}`;
-    return `<${tag} id="cc-${escapeHtml(node.id)}"${globalAttribute} class="cc-node cc-section${globalClass} ${roleClass} cc-layout-${escapeHtml(node.props.layout)} cc-cols-${Number(node.props.columns)} ${sectionTrackClassList(node)} ${styleClassList(node)}"><div class="cc-container">${children}</div></${tag}>`;
+    return `<${tag} id="cc-${escapeHtml(node.id)}"${globalAttribute} class="cc-node cc-section${globalClass} ${roleClass} cc-layout-${escapeHtml(node.props.layout)} cc-cols-${Number(node.props.columns)} ${sectionTrackClassList(document, node)} ${sectionColumnWidthClassList(document, node, parentSection, parentChildIndex)} ${styleClassList(node)}"><div class="cc-container">${children}</div></${tag}>`;
   }
   if (node.type === 'heading') {
     const level = Math.min(6, Math.max(1, Number(node.props.level) || 2));
@@ -714,6 +803,7 @@ function renderNode(nodeId, document, snapshot, context, ancestors = new Set(), 
   }
   if (node.type === 'image') return renderImage(node, snapshot);
   if (node.type === 'gallery') return renderGallery(node, snapshot);
+  if (node.type === 'video') return renderVideo(node);
   if (node.type === 'button') {
     const href = buttonHref(node, context);
     const external = node.props.action === 'external_url' && node.props.open_in_new_tab === true;
@@ -764,6 +854,13 @@ function stylesheet(tokens, document = { nodes: {} }) {
       : `.cc-layout-grid.cc-cols-${count}`;
     return `${selector}>.cc-container{display:grid;grid-template-columns:repeat(${count},minmax(0,1fr))}`;
   }).join('');
+  const columnWidthRules = (prefix = '') => (
+    '.cc-role-row.cc-column-widths>.cc-container{display:grid;grid-template-columns:repeat(12,minmax(0,1fr))}'
+    + '.cc-role-row.cc-column-widths>.cc-container>.cc-role-column{grid-column:span 12/span 12}'
+    + Array.from({ length: 12 }, (_value, index) => index + 1)
+      .map((span) => `.cc-role-row.cc-column-widths>.cc-container>.cc-role-column.cc-${prefix}col-span-${span}{grid-column:span ${span}/span ${span}}`)
+      .join('')
+  );
   const columnTrackRules = (breakpoint) => Object.values(document.nodes || {})
     .filter((node) => node.type === 'section')
     .map((node) => validColumnTracks(node, breakpoint))
@@ -781,6 +878,7 @@ function stylesheet(tokens, document = { nodes: {} }) {
     + spacingRules(`${breakpoint}-`)
     + alignRules(`${breakpoint}-`)
     + columnRules(`${breakpoint}-`)
+    + columnWidthRules(`${breakpoint}-`)
     + columnTrackRules(breakpoint)
   );
   const focalRules = [...new Set(Object.values(document.nodes || {})
@@ -800,6 +898,7 @@ function stylesheet(tokens, document = { nodes: {} }) {
     '*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--cc-surface);color:var(--cc-text);font-family:var(--cc-font-body);line-height:1.55}img{display:block;max-width:100%}',
     '.cc-node{min-width:0}.cc-container{margin-inline:auto;display:inherit;flex-direction:inherit;flex-wrap:inherit;gap:inherit}.cc-section{display:flex;width:100%}.cc-role-container>.cc-container,.cc-role-row>.cc-container{align-items:stretch}.cc-role-column{min-width:0}.cc-role-column>.cc-container{width:100%;min-width:0}.cc-layout-stack>.cc-container{display:flex;flex-direction:column}.cc-layout-row>.cc-container{display:flex;flex-direction:row;flex-wrap:wrap}.cc-layout-grid>.cc-container{display:grid}',
     columnRules(),
+    columnWidthRules(),
     '.cc-section.cc-width-narrow>.cc-container{width:min(100% - 2rem,48rem)}.cc-section.cc-width-standard>.cc-container{width:min(100% - 2rem,72rem)}.cc-section.cc-width-wide>.cc-container{width:min(100% - 2rem,82.5rem)}.cc-section.cc-width-full>.cc-container{width:100%;padding-inline:1rem}.cc-node.cc-width-narrow:not(.cc-section){width:min(100%,48rem)}.cc-node.cc-width-standard:not(.cc-section){width:min(100%,72rem)}.cc-node.cc-width-wide:not(.cc-section){width:min(100%,82.5rem)}.cc-node.cc-width-full:not(.cc-section){width:100%}',
     spacingRules(),
     alignRules(),
@@ -810,7 +909,7 @@ function stylesheet(tokens, document = { nodes: {} }) {
     '.cc-divider{width:100%;height:0;margin:0;border:0;border-top-width:1px;border-top-style:solid}.cc-divider-solid{border-top-style:solid}.cc-divider-dashed{border-top-style:dashed}.cc-divider-dotted{border-top-style:dotted}.cc-divider-tone-muted{border-top-color:#dfe3ec}.cc-divider-tone-brand{border-top-color:var(--cc-primary)}.cc-divider-tone-accent{border-top-color:var(--cc-accent)}.cc-spacer{display:block;width:100%;flex:none}.cc-spacer-xs{height:.25rem}.cc-spacer-sm{height:var(--cc-sm)}.cc-spacer-md{height:var(--cc-md)}.cc-spacer-lg{height:var(--cc-lg)}.cc-spacer-xl{height:var(--cc-xl)}.cc-spacer-2xl{height:var(--cc-2xl)}',
     '.cc-button{display:inline-flex;width:fit-content;align-items:center;justify-content:center;min-height:44px;padding:.75rem 1.15rem;border-radius:var(--cc-radius);font-weight:700;text-decoration:none;border:1px solid transparent;cursor:pointer}.cc-button-primary{background:var(--cc-primary);color:#fff}.cc-section.cc-bg-brand .cc-button-primary{background:var(--cc-surface);color:var(--cc-primary)}.cc-button-secondary{background:var(--cc-secondary);color:#fff}.cc-button-outline{border-color:currentColor;color:var(--cc-primary);background:transparent}.cc-button-link{padding-inline:0;color:var(--cc-primary)}',
     '.cc-form{display:grid;gap:var(--cc-md);padding:var(--cc-xl);border:1px solid #dfe3ec;border-radius:var(--cc-radius);background:#fff}.cc-field{display:grid;gap:.35rem}.cc-field input:not([type=checkbox]),.cc-field textarea,.cc-field select{width:100%;min-height:44px;border:1px solid #aab1c2;border-radius:.5rem;padding:.7rem;font:inherit}.cc-checkbox{grid-template-columns:auto 1fr;align-items:start}.cc-honeypot{position:absolute!important;left:-10000px!important;width:1px!important;height:1px!important;overflow:hidden!important}.cc-form-status{display:none;padding:.75rem;border-radius:.5rem}.cc-form-success{background:#e9f8f1;color:#145c3d}.cc-form-error{background:#fff1f1;color:#8b1f1f}.cc-form-status:target{display:block}',
-    '.cc-image{margin:0}.cc-gallery{display:grid}.cc-gallery-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}.cc-gallery-cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}.cc-gallery-cols-4{grid-template-columns:repeat(4,minmax(0,1fr))}.cc-gallery-item{min-width:0;margin:0;border-radius:inherit}.cc-image-frame{overflow:hidden;border-radius:inherit;background:#eef1f6}.cc-image img,.cc-gallery-item img{width:100%;height:100%;object-fit:cover}.cc-fit-contain img{object-fit:contain}.cc-aspect-auto .cc-image-frame img{height:auto}.cc-aspect-1-1 .cc-image-frame{aspect-ratio:1/1}.cc-aspect-4-3 .cc-image-frame{aspect-ratio:4/3}.cc-aspect-3-2 .cc-image-frame{aspect-ratio:3/2}.cc-aspect-16-9 .cc-image-frame{aspect-ratio:16/9}.cc-aspect-21-9 .cc-image-frame{aspect-ratio:21/9}.cc-image figcaption,.cc-gallery-item figcaption{padding-top:.5rem;color:#5f6b7f;font-size:.8125rem}',
+    '.cc-image{margin:0}.cc-gallery{display:grid}.cc-gallery-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}.cc-gallery-cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}.cc-gallery-cols-4{grid-template-columns:repeat(4,minmax(0,1fr))}.cc-gallery-item{min-width:0;margin:0;border-radius:inherit}.cc-image-frame{overflow:hidden;border-radius:inherit;background:#eef1f6}.cc-image img,.cc-gallery-item img{width:100%;height:100%;object-fit:cover}.cc-fit-contain img{object-fit:contain}.cc-aspect-auto .cc-image-frame img{height:auto}.cc-aspect-1-1 .cc-image-frame{aspect-ratio:1/1}.cc-aspect-4-3 .cc-image-frame{aspect-ratio:4/3}.cc-aspect-3-2 .cc-image-frame{aspect-ratio:3/2}.cc-aspect-16-9 .cc-image-frame{aspect-ratio:16/9}.cc-aspect-21-9 .cc-image-frame{aspect-ratio:21/9}.cc-image figcaption,.cc-gallery-item figcaption,.cc-video figcaption{padding-top:.5rem;color:#5f6b7f;font-size:.8125rem}.cc-video{margin:0}.cc-video-frame{position:relative;overflow:hidden;border-radius:inherit;background:#eef1f6}.cc-video-frame iframe{position:absolute;inset:0;width:100%;height:100%;border:0}.cc-video-aspect-16-9 .cc-video-frame{aspect-ratio:16/9}.cc-video-aspect-4-3 .cc-video-frame{aspect-ratio:4/3}.cc-video-aspect-1-1 .cc-video-frame{aspect-ratio:1/1}',
     focalRules,
     '.cc-faq{border:1px solid #dfe3ec;background:#fff;padding:var(--cc-md);border-radius:var(--cc-radius)}.cc-faq summary{cursor:pointer;font-family:var(--cc-font-heading);font-weight:700}.cc-faq p{margin:var(--cc-sm) 0 0;white-space:pre-wrap}',
     `@media(max-width:767px){.cc-layout-row>.cc-container{flex-direction:column}.cc-layout-grid>.cc-container,.cc-gallery{grid-template-columns:1fr}.cc-form{padding:var(--cc-lg)}.cc-button{width:100%}${responsiveRules('mobile')}}`,
@@ -1010,10 +1109,11 @@ function renderPage({ page, document, snapshot, context, project, baseUrl, clini
   // is embedded.
   const runtimeImageSources = `${measurementOrigin ? ` ${measurementOrigin}` : ''} data:`;
   const runtimeStyleSources = measurementOrigin ? " 'unsafe-inline'" : '';
+  const runtimeFrameSources = videoFrameCspDirective(document);
   // `frame-ancestors` is ignored in a meta CSP and causes a browser warning.
   // It remains enforced in the response-header contract below together with
   // X-Frame-Options, while the meta policy preserves the useful early guards.
-  const pageCsp = `default-src 'none'; base-uri 'none'; form-action 'self'; img-src 'self' https://media.clinicaclick.com${runtimeImageSources}; style-src 'self'${runtimeStyleSources}; script-src 'sha256-${jsonLdCspHash}'${measurementOrigin ? ` ${measurementOrigin}` : ''}; connect-src 'self'${measurementOrigin ? ` ${measurementOrigin}` : ''}; font-src 'self'; manifest-src 'self'; upgrade-insecure-requests`;
+  const pageCsp = `default-src 'none'; base-uri 'none'; form-action 'self'; img-src 'self' https://media.clinicaclick.com${runtimeImageSources}; style-src 'self'${runtimeStyleSources}; script-src 'sha256-${jsonLdCspHash}'${measurementOrigin ? ` ${measurementOrigin}` : ''}; connect-src 'self'${measurementOrigin ? ` ${measurementOrigin}` : ''}; font-src 'self'; manifest-src 'self';${runtimeFrameSources} upgrade-insecure-requests`;
   const publicationBasePath = new URL(`${baseUrl}/`).pathname;
   const favicon = faviconDataUrl(clinic.name || project.name);
   const socialImageTags = safeSocialUrl
@@ -1112,8 +1212,9 @@ function compileWebArtifact(input = {}) {
   const measurementOrigin = runtime.measurement.enabled ? runtime.measurement.api_url : null;
   const runtimeImageSources = `${measurementOrigin ? ` ${measurementOrigin}` : ''} data:`;
   const runtimeStyleSources = measurementOrigin ? " 'unsafe-inline'" : '';
+  const runtimeFrameSources = videoFrameCspDirective(document);
   const headers = {
-    'content-security-policy': `default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' https://media.clinicaclick.com${runtimeImageSources}; style-src 'self'${runtimeStyleSources}; script-src ${scriptHashes.join(' ')}${measurementOrigin ? ` ${measurementOrigin}` : ''}; connect-src 'self'${measurementOrigin ? ` ${measurementOrigin}` : ''}; font-src 'self'; manifest-src 'self'; upgrade-insecure-requests`,
+    'content-security-policy': `default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' https://media.clinicaclick.com${runtimeImageSources}; style-src 'self'${runtimeStyleSources}; script-src ${scriptHashes.join(' ')}${measurementOrigin ? ` ${measurementOrigin}` : ''}; connect-src 'self'${measurementOrigin ? ` ${measurementOrigin}` : ''}; font-src 'self'; manifest-src 'self';${runtimeFrameSources} upgrade-insecure-requests`,
     'cross-origin-opener-policy': 'same-origin',
     'cross-origin-resource-policy': 'same-site',
     'permissions-policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',

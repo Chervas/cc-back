@@ -3628,7 +3628,7 @@ function buildNutritionReportHtml(reportData, options = {}) {
   const brandHtml = buildReportBrandHtml(patient, options);
   const profileLabel = nutritionProfileLabel(measurement.profile_code);
   const isFinalDocument = meta?.document_status === 'final';
-  const documentStatusLabel = isFinalDocument ? '' : 'Borrador calculado';
+  const documentStatusLabel = isFinalDocument ? '' : 'Vista calculada';
   const documentStatusBadgeHtml = documentStatusLabel
     ? `<span class="pill">${escapeHtml(documentStatusLabel)}</span>`
     : '';

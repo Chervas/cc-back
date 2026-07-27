@@ -15,6 +15,11 @@ assert.match(
   /resolveAppointmentReadClinicIds[\s\S]*?getAccessibleClinicIdsForFeature[\s\S]*?featureKey: 'appointments\.view'/,
   'appointment list scope must be derived from effective appointments.view permissions'
 );
+assert.match(
+  controller,
+  /async function buildClinicCalendarScope[\s\S]*?normalizedIds\.map\(\(clinicId\)[\s\S]*?clinica_id: clinicId/,
+  'calendar scope builder must materialize each permitted clinic id into the appointment query scope'
+);
 for (const handler of ['getCitas', 'getCitasCalendar']) {
   const start = controller.indexOf(`exports.${handler} = asyncHandler`);
   const end = controller.indexOf('\nexports.', start + 1);
@@ -22,7 +27,7 @@ for (const handler of ['getCitas', 'getCitasCalendar']) {
   const block = controller.slice(start, end >= 0 ? end : undefined);
   assert.match(
     block,
-    /resolveAppointmentReadClinicIdsOrRespond[\s\S]*?clinica_id:[\s\S]*?Op\.in/,
+    /resolveAppointmentReadClinicIdsOrRespond[\s\S]*?buildClinicCalendarScope\(readableClinicIds, startDate, endDate\)[\s\S]*?const where = calendarScope\.groups\.length === 1[\s\S]*?calendarScope\.groups/,
     `${handler} must filter every query by the permitted clinic ids`
   );
 }

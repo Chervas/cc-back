@@ -13,6 +13,8 @@ const {
   partialRunIsReusable,
   parseGeminiResponse,
   parseOpenAiResponse,
+  resolveDisciplineCategory,
+  resolvedLocalProfileFromClinic,
   runGeminiSearch,
   runOpenAiSearch,
 } = service.__testing;
@@ -138,6 +140,50 @@ async function main() {
     ).key,
     'best_local',
   );
+  const arcosProfileClinic = {
+    nombre_clinica: 'Clínica Arcos',
+    url_ficha_local: 'https://share.google/NjK7I57llkX3CbbUD',
+    configuracion: {
+      marketing_competition_local_profile: {
+        status: 'resolved',
+        source_url: 'https://share.google/NjK7I57llkX3CbbUD',
+        name: 'Clínica Arcos',
+        primary_category: 'Clínica dental',
+      },
+    },
+  };
+  assert.equal(resolvedLocalProfileFromClinic(arcosProfileClinic).name, 'Clínica Arcos');
+  assert.deepEqual(
+    resolvedLocalProfileFromClinic({
+      ...arcosProfileClinic,
+      url_ficha_local: 'https://share.google/otro-perfil',
+    }),
+    {},
+    'una identidad resuelta para una URL anterior no debe contaminar la clínica actual',
+  );
+  assert.equal(resolveDisciplineCategory(arcosProfileClinic), 'clínica dental');
+  assert.equal(
+    buildTypicalQueries({ category: resolveDisciplineCategory(arcosProfileClinic), city: 'Almería' })[0].query,
+    '¿Cuál es la mejor clínica dental en Almería?',
+  );
+  assert.equal(
+    resolveDisciplineCategory({
+      nombre_clinica: 'Centro Salud',
+      configuracion: { disciplinas: ['medicina_estetica', 'cirugia_plastica'] },
+    }, { primary_category: 'Clínica' }),
+    'clínica de medicina estética y cirugía plástica',
+  );
+  assert.deepEqual(
+    buildTypicalQueries({ category: 'clínica', city: 'Almería' }),
+    [],
+    'una categoría genérica nunca debe generar búsquedas de proveedores',
+  );
+  assert.deepEqual(buildTypicalQueries({ category: 'Clínica especializada', city: 'Almería' }), []);
+  assert.deepEqual(
+    buildTypicalQueries({ category: 'Clínica dental' }),
+    [],
+    'una búsqueda local sin localidad tampoco debe generarse',
+  );
 
   const previousOpenAiKey = process.env.OPENAI_API_KEY;
   const previousGeminiKey = process.env.GEMINI_API_KEY;
@@ -165,9 +211,24 @@ async function main() {
   assert.equal(overviewWithoutSecrets.max_attempts_per_query_7d, 1);
   assert.equal(overviewWithoutSecrets.runs.length, 0);
 
+  const overviewWithoutDiscipline = await service.getOverview(78, { autoStart: true }, {
+    resolveClinicContext: async () => ({
+      id: 78,
+      name: 'Clínica sin categoría',
+      category: null,
+      city: 'Almería',
+      province: 'Almería',
+    }),
+    RunModel: { findAll: async () => [] },
+  });
+  assert.equal(overviewWithoutDiscipline.status, 'setup_required');
+  assert.equal(overviewWithoutDiscipline.automatic.status, 'setup_required');
+  assert.equal(overviewWithoutDiscipline.typical_queries.length, 0);
+
   process.env.OPENAI_API_KEY = 'test-openai-key';
   process.env.GEMINI_API_KEY = 'test-gemini-key';
   try {
+    let overviewFindAllWhere = null;
     const technicalRead = await service.getOverview(59, {}, {
       resolveClinicContext: async () => ({
         id: 59,
@@ -176,10 +237,20 @@ async function main() {
         city: 'Hospitalet',
         province: 'Barcelona',
       }),
-      RunModel: { findAll: async () => [] },
+      RunModel: {
+        findAll: async (options) => {
+          overviewFindAllWhere = options.where;
+          return [];
+        },
+      },
     });
     assert.equal(technicalRead.automatic.status, 'disabled_for_request');
     assert.equal(technicalRead.automatic.triggered, false);
+    assert.equal(
+      overviewFindAllWhere.query_hash[db.Sequelize.Op.in].length,
+      4,
+      'el overview solo debe mostrar runs de la disciplina y localidad actuales',
+    );
 
     assert.equal(partialRunIsReusable({
       status: 'completed_with_errors',

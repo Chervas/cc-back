@@ -10,12 +10,16 @@ const DEFAULT_BUCKET = 'clinicaclick-clinical-private-local';
 const MAX_PDF_BYTES = 25 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_BINARY_BYTES = 50 * 1024 * 1024;
+const MAX_ACCOUNTING_DOCUMENT_BYTES = 18 * 1024 * 1024;
 
 const ALLOWED_PURPOSES = new Set([
   'nutrition_report_pdf',
   'nutrition_clinical_photo',
   'clinical_attachment',
   'consent_document_pdf',
+  'accounting_expense_document',
+  'accounting_payroll_document',
+  'fiscal_document_pdf',
 ]);
 
 const CONTENT_TYPE_EXTENSIONS = new Map([
@@ -69,6 +73,9 @@ function extensionForContentType(contentType) {
 }
 
 function maxBytesFor({ purpose, contentType }) {
+  if (purpose === 'accounting_expense_document' || purpose === 'accounting_payroll_document') {
+    return MAX_ACCOUNTING_DOCUMENT_BYTES;
+  }
   if (contentType === 'application/pdf' || purpose.endsWith('_pdf')) return MAX_PDF_BYTES;
   if (contentType.startsWith('image/')) return MAX_IMAGE_BYTES;
   return MAX_BINARY_BYTES;
@@ -80,11 +87,15 @@ function assertPayload({ purpose, contentType, buffer }) {
     err.status = 400;
     throw err;
   }
-  const allowedForPurpose = purpose === 'nutrition_report_pdf' || purpose === 'consent_document_pdf'
+  const allowedForPurpose = purpose === 'nutrition_report_pdf'
+    || purpose === 'consent_document_pdf'
+    || purpose === 'fiscal_document_pdf'
     ? contentType === 'application/pdf'
     : purpose === 'nutrition_clinical_photo'
       ? ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'].includes(contentType)
-    : contentType === 'application/pdf' || contentType.startsWith('image/') || contentType === 'application/octet-stream';
+      : purpose === 'accounting_expense_document' || purpose === 'accounting_payroll_document'
+        ? ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png', 'image/webp'].includes(contentType)
+        : contentType === 'application/pdf' || contentType.startsWith('image/') || contentType === 'application/octet-stream';
   if (!allowedForPurpose) {
     const err = new Error('clinical_private_asset_content_type_not_allowed');
     err.status = 400;

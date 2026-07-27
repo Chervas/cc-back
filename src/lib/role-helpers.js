@@ -37,6 +37,7 @@ const SUBROLES_CLINICA = [
     'Doctores',
     'Administrativos',
     'Recepción / Comercial ventas',
+    'Gestoría',
 ];
 
 // ── Estados ───────────────────────────────────────────────────

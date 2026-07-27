@@ -9,6 +9,9 @@ const {
   resolveEffectiveMarketingAssetInventory,
 } = require('./effectiveMarketingAssets.service');
 const {
+  resolveGoogleLocalProfileUrl,
+} = require('./googleLocalProfileUrlResolver.service');
+const {
   buildHeatmapCacheIdentity,
   createHeatmapCacheCoordinator,
   heatmapCacheStatus,
@@ -91,6 +94,11 @@ const COMPETITION_PLACES_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(
 const COMPETITION_PLACE_DETAILS_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_PLACE_DETAILS_CACHE_TTL_MS || '43200000', 10)));
 const COMPETITION_PLACE_PHOTO_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_PLACE_PHOTO_CACHE_TTL_MS || '43200000', 10)));
 const COMPETITION_GOOGLE_CONCURRENCY = Math.max(1, Math.min(5, parseInt(process.env.COMPETITION_GOOGLE_CONCURRENCY || '3', 10)));
+const LOCAL_PROFILE_URL_RESOLUTION_CONFIG_KEY = 'marketing_competition_local_profile';
+const LOCAL_PROFILE_URL_RESOLUTION_RETRY_MS = Math.max(
+  5 * 60 * 1000,
+  Math.min(24 * 60 * 60 * 1000, parseInt(process.env.COMPETITION_LOCAL_PROFILE_URL_RETRY_MS || '3600000', 10))
+);
 const COMPETITION_CACHE_VERSION = process.env.COMPETITION_CACHE_VERSION || 'competition-v7-podology-relevance';
 // El proyecto opera principalmente en el EEE. Desde julio de 2025 Places API
 // limita sus usos permitidos y no permite este caso de inteligencia
@@ -1495,6 +1503,190 @@ function ownProfilePhotoUrlFromBusinessPayload(payload = {}) {
   return normalizeUrl(selected?.googleUrl || selected?.sourceUrl || selected?.thumbnailUrl);
 }
 
+function localProfileUrlResolutionRecord(clinic) {
+  const config = clinic?.configuracion && typeof clinic.configuracion === 'object' && !Array.isArray(clinic.configuracion)
+    ? clinic.configuracion
+    : {};
+  const record = config[LOCAL_PROFILE_URL_RESOLUTION_CONFIG_KEY];
+  return record && typeof record === 'object' && !Array.isArray(record) ? record : null;
+}
+
+function localProfileUrlMatches(record, value) {
+  const sourceUrl = normalizeUrl(value);
+  const storedUrl = normalizeUrl(record?.source_url);
+  return !!sourceUrl && !!storedUrl && sourceUrl === storedUrl;
+}
+
+function enrichClinicWithResolvedLocalProfile(clinic, identity) {
+  if (!clinic || !identity || !cleanString(identity.place_id)) return clinic;
+  return {
+    ...clinic,
+    business_location_name: cleanString(clinic.business_location_name) || cleanString(identity.name),
+    business_primary_category: cleanString(clinic.business_primary_category) || cleanString(identity.primary_category),
+    business_place_id: normalizePlaceId(clinic.business_place_id) || normalizePlaceId(identity.place_id),
+    business_maps_url: normalizeUrl(clinic.business_maps_url)
+      || normalizeUrl(identity.maps_url)
+      || buildGoogleMapsUrl(identity.place_id, identity.name),
+    business_locality: cleanString(clinic.business_locality) || cleanString(identity.locality),
+    business_administrative_area: cleanString(clinic.business_administrative_area)
+      || cleanString(identity.administrative_area),
+    business_postal_code: cleanString(clinic.business_postal_code) || cleanString(identity.postal_code),
+    business_address_lines: Array.isArray(clinic.business_address_lines) && clinic.business_address_lines.length
+      ? clinic.business_address_lines
+      : [cleanString(identity.address)].filter(Boolean),
+    business_latitude: toNumber(clinic.business_latitude) ?? toNumber(identity.latitude),
+    business_longitude: toNumber(clinic.business_longitude) ?? toNumber(identity.longitude),
+    business_profile_url_resolution: identity,
+  };
+}
+
+function retryBlockedByLocalProfileResolution(record, sourceUrl, now = Date.now()) {
+  if (!record || record.status !== 'error' || !localProfileUrlMatches(record, sourceUrl)) return false;
+  const retryAfter = Date.parse(record.retry_after || '');
+  return Number.isFinite(retryAfter) && retryAfter > now;
+}
+
+async function persistClinicLocalProfileResolution(clinicId, sourceUrl, identity, error = null) {
+  return db.sequelize.transaction(async (transaction) => {
+    const clinic = await Clinica.findByPk(clinicId, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!clinic) return null;
+    if (normalizeUrl(clinic.url_ficha_local) !== normalizeUrl(sourceUrl)) {
+      return clinic.get({ plain: true });
+    }
+
+    const config = clinic.configuracion && typeof clinic.configuracion === 'object' && !Array.isArray(clinic.configuracion)
+      ? { ...clinic.configuracion }
+      : {};
+    const previousResolution = config[LOCAL_PROFILE_URL_RESOLUTION_CONFIG_KEY];
+    const canReplaceGeneratedValue = (currentValue, previousValue) => (
+      !cleanString(currentValue)
+      || (
+        cleanString(previousValue)
+        && normalizeBusinessName(currentValue) === normalizeBusinessName(previousValue)
+      )
+    );
+    const attemptedAt = new Date();
+    const resolutionRecord = identity
+      ? {
+        version: 1,
+        status: 'resolved',
+        ...identity,
+        resolved_at: attemptedAt.toISOString(),
+      }
+      : {
+        version: 1,
+        status: 'error',
+        source: 'google_profile_url',
+        source_url: normalizeUrl(sourceUrl),
+        error_code: cleanString(error?.code) || 'GOOGLE_PROFILE_URL_RESOLUTION_FAILED',
+        error_message: cleanString(error?.message)?.slice(0, 500) || 'No se pudo resolver la ficha local.',
+        attempted_at: attemptedAt.toISOString(),
+        retry_after: new Date(attemptedAt.getTime() + LOCAL_PROFILE_URL_RESOLUTION_RETRY_MS).toISOString(),
+      };
+    const patch = {
+      configuracion: {
+        ...config,
+        [LOCAL_PROFILE_URL_RESOLUTION_CONFIG_KEY]: resolutionRecord,
+      },
+    };
+    if (identity) {
+      if (
+        canReplaceGeneratedValue(clinic.direccion, previousResolution?.address)
+        && cleanString(identity.address)
+      ) patch.direccion = cleanString(identity.address);
+      if (
+        canReplaceGeneratedValue(clinic.ciudad, previousResolution?.locality)
+        && cleanString(identity.locality)
+      ) patch.ciudad = cleanString(identity.locality);
+      if (
+        canReplaceGeneratedValue(clinic.provincia, previousResolution?.administrative_area)
+        && cleanString(identity.administrative_area)
+      ) {
+        patch.provincia = cleanString(identity.administrative_area);
+      }
+      if (
+        canReplaceGeneratedValue(clinic.codigo_postal, previousResolution?.postal_code)
+        && cleanString(identity.postal_code)
+      ) {
+        patch.codigo_postal = cleanString(identity.postal_code);
+      }
+      if (
+        canReplaceGeneratedValue(clinic.pais, previousResolution?.country)
+        && cleanString(identity.country)
+      ) patch.pais = cleanString(identity.country);
+    }
+    await clinic.update(patch, { transaction });
+    return clinic.get({ plain: true });
+  });
+}
+
+async function ensureClinicLocalProfileUrlIdentity(clinic, dependencies = {}) {
+  if (!clinic || normalizePlaceId(clinic.business_place_id)) return clinic;
+  const sourceUrl = normalizeUrl(clinic.url_ficha_local);
+  if (!sourceUrl) return clinic;
+
+  const stored = localProfileUrlResolutionRecord(clinic);
+  if (
+    stored?.status === 'resolved'
+    && localProfileUrlMatches(stored, sourceUrl)
+    && normalizePlaceId(stored.place_id)
+  ) {
+    return enrichClinicWithResolvedLocalProfile(clinic, stored);
+  }
+  if (retryBlockedByLocalProfileResolution(stored, sourceUrl)) {
+    return {
+      ...clinic,
+      business_profile_url_resolution_error: {
+        code: stored.error_code,
+        message: stored.error_message,
+        retry_after: stored.retry_after,
+      },
+    };
+  }
+  if (!competitionPlacesFeatureEnabled() || !getGooglePlacesApiKey()) return clinic;
+
+  const resolveProfile = dependencies.resolveProfile || resolveGoogleLocalProfileUrl;
+  const persistResolution = dependencies.persistResolution || persistClinicLocalProfileResolution;
+  const cacheIdentity = cacheKey(['local-profile-url-resolution', clinic.id_clinica, sourceUrl]);
+  return cachedCompetitionValue(
+    cacheIdentity,
+    COMPETITION_PLACE_DETAILS_CACHE_TTL_MS,
+    async () => {
+      try {
+        const identity = await resolveProfile({
+          url: sourceUrl,
+          clinicName: clinic.nombre_clinica,
+          websiteUrl: clinic.url_web,
+          locationHint: clinicLocationLabel(clinic),
+          apiKey: getGooglePlacesApiKey(),
+        });
+        const persisted = await persistResolution(clinic.id_clinica, sourceUrl, identity, null);
+        if (
+          cleanString(persisted?.url_ficha_local)
+          && normalizeUrl(persisted.url_ficha_local) !== sourceUrl
+        ) return persisted;
+        return enrichClinicWithResolvedLocalProfile({
+          ...clinic,
+          ...(persisted || {}),
+        }, identity);
+      } catch (error) {
+        const persisted = await persistResolution(clinic.id_clinica, sourceUrl, null, error);
+        return {
+          ...clinic,
+          ...(persisted || {}),
+          business_profile_url_resolution_error: {
+            code: cleanString(error?.code) || 'GOOGLE_PROFILE_URL_RESOLUTION_FAILED',
+            message: cleanString(error?.message) || 'No se pudo resolver la ficha local.',
+          },
+        };
+      }
+    },
+  );
+}
+
 async function resolvePrimaryClinic(scope) {
   const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.map(toInt).filter(Boolean) : [];
   const clinicId = clinicIds.length === 1 ? clinicIds[0] : null;
@@ -1558,7 +1750,7 @@ async function resolvePrimaryClinic(scope) {
   const businessLatLng = businessRaw.latlng || businessRaw.latLng || businessRaw.location || {};
   const businessPoint = strictGeoPoint(businessLatLng.latitude, businessLatLng.longitude);
 
-  return {
+  const resolvedClinic = {
     ...clinic,
     business_location_mapping_id: businessLocation?.id || null,
     business_location_name: businessLocation?.location_name || null,
@@ -1583,6 +1775,7 @@ async function resolvePrimaryClinic(scope) {
     business_photo_url: ownProfilePhotoUrlFromBusinessPayload(businessRaw),
     business_assignment_origin: cleanString(effectiveProfile?.assignment_origin),
   };
+  return ensureClinicLocalProfileUrlIdentity(resolvedClinic);
 }
 
 function competitionServiceHint(clinic) {
@@ -1595,13 +1788,20 @@ function competitionServiceHint(clinic) {
 }
 
 function clinicLocationLabel(clinic) {
+  const seen = new Set();
   const parts = [
     clinic?.ciudad || clinic?.business_locality,
     clinic?.provincia || clinic?.business_administrative_area,
     clinic?.codigo_postal || clinic?.business_postal_code
   ]
     .map(cleanString)
-    .filter(Boolean);
+    .filter((value) => {
+      if (!value) return false;
+      const key = normalizeBusinessName(value);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   return parts.length ? parts.join(', ') : (cleanString(clinic?.direccion) || cleanString(clinic?.business_address_lines?.[0]));
 }
 
@@ -1661,17 +1861,28 @@ function rankingTermsForClinic(clinic, limit = DEFAULT_RANKING_LIMIT) {
 }
 
 function competitionSetupBlocker(clinic, explicitQuery = null) {
+  const localProfileUrl = cleanString(clinic?.url_ficha_local);
+  const canonicalPlaceId = normalizePlaceId(clinic?.business_place_id);
+  const urlResolutionError = clinic?.business_profile_url_resolution_error;
   const hasLocalProfileAnchor = !!(
-    cleanString(clinic?.url_ficha_local)
+    canonicalPlaceId
     || (
       cleanString(clinic?.business_primary_category)
       && (
-        cleanString(clinic?.business_place_id)
-        || cleanString(clinic?.business_location_id)
+        cleanString(clinic?.business_location_id)
         || cleanString(clinic?.business_location_name)
       )
     )
   );
+
+  if (localProfileUrl && !hasLocalProfileAnchor) {
+    return {
+      code: 'LOCAL_PROFILE_URL_UNRESOLVED',
+      action: 'review_google_business_profile_url',
+      message: urlResolutionError?.message
+        || 'La URL de la ficha local está guardada, pero todavía no se ha podido convertir en una identidad Google válida. Revisa el enlace o la conexión con Perfil de Empresa.'
+    };
+  }
 
   if (!hasLocalProfileAnchor) {
     return {
@@ -5119,6 +5330,11 @@ module.exports = {
     inferCompetitionQuery,
     rankingTermsForClinic,
     competitorRelevanceForClinic,
+    ensureClinicLocalProfileUrlIdentity,
+    enrichClinicWithResolvedLocalProfile,
+    localProfileUrlResolutionRecord,
+    persistClinicLocalProfileResolution,
+    retryBlockedByLocalProfileResolution,
     competitionPlacesFeatureEnabled,
     listCompetitionWithDependencies,
     localHeatmapPlaceKey,

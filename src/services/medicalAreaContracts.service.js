@@ -573,7 +573,7 @@ const DEFAULT_TREATMENT_SETUP_STEPS = [
   {
     title: 'Servicio cobrable',
     icon: 'heroicons_outline:tag',
-    body: 'Área médica, familia y nombre del servicio o tratamiento que se cobra.',
+    body: 'Área médica, especialidad clínica y nombre del servicio o tratamiento que se cobra.',
     section: 'service',
   },
   {
@@ -595,7 +595,7 @@ const TREATMENT_SETUP_STEPS_BY_AREA = {
     {
       title: 'Tratamiento dental',
       icon: 'heroicons_outline:tag',
-      body: 'Área, familia, nombre y si aplica a pieza, rango, arcada o general.',
+      body: 'Área médica, especialidad clínica, nombre y si aplica a pieza, rango, arcada o general.',
       section: 'service',
     },
     {
@@ -938,7 +938,11 @@ function isLegacySetupStepCopy(section, title, body) {
   const normalizedBody = cleanString(body).toLowerCase();
 
   if (section === 'service') {
-    return normalizedBody === 'área médica, familia y nombre del servicio que se presupuesta.';
+    return [
+      'área médica, familia y nombre del servicio que se presupuesta.',
+      'área médica, familia y nombre del servicio o tratamiento que se cobra.',
+      'área, familia, nombre y si aplica a pieza, rango, arcada o general.',
+    ].includes(normalizedBody);
   }
 
   if (section === 'pricing') {

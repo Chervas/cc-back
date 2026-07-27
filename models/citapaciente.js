@@ -18,6 +18,9 @@ module.exports = (sequelize, DataTypes) => {
       if (models.Tratamiento) {
         CitaPaciente.belongsTo(models.Tratamiento, { foreignKey: 'tratamiento_id', targetKey: 'id_tratamiento', as: 'tratamiento' });
       }
+      if (models.PatientVoucher) {
+        CitaPaciente.belongsTo(models.PatientVoucher, { foreignKey: 'voucher_id', as: 'voucher' });
+      }
       if (models.Campana) {
         CitaPaciente.belongsTo(models.Campana, { foreignKey: 'campana_id', as: 'campana' });
       }
@@ -32,6 +35,7 @@ module.exports = (sequelize, DataTypes) => {
     doctor_id: { type: DataTypes.INTEGER, allowNull: true },
     instalacion_id: { type: DataTypes.INTEGER, allowNull: true },
     tratamiento_id: { type: DataTypes.INTEGER, allowNull: true },
+    voucher_id: { type: DataTypes.BIGINT.UNSIGNED, allowNull: true },
     campana_id: { type: DataTypes.INTEGER, allowNull: true },
     created_by: { type: DataTypes.INTEGER, allowNull: true },
     updated_by: { type: DataTypes.INTEGER, allowNull: true },
@@ -39,6 +43,9 @@ module.exports = (sequelize, DataTypes) => {
     nota: { type: DataTypes.TEXT, allowNull: true },
     motivo: { type: DataTypes.STRING(255), allowNull: true },
     reschedule_reason: { type: DataTypes.STRING(32), allowNull: true },
+    source_system: { type: DataTypes.STRING(40), allowNull: true },
+    source_reference: { type: DataTypes.STRING(120), allowNull: true },
+    import_metadata: { type: DataTypes.JSON, allowNull: true },
     tipo_cita: {
       type: DataTypes.ENUM('primera_sin_trat', 'primera_con_trat', 'continuacion', 'urgencia', 'revision'),
       allowNull: false,

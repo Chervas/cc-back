@@ -67,6 +67,7 @@
           { "$ref": "#/definitions/faqNode" },
           { "$ref": "#/definitions/imageNode" },
           { "$ref": "#/definitions/galleryNode" },
+          { "$ref": "#/definitions/videoNode" },
           { "$ref": "#/definitions/buttonNode" },
           { "$ref": "#/definitions/intakeFormNode" }
         ]
@@ -400,6 +401,27 @@
         "mobile": { "$ref": "#/definitions/columnTrackList" }
       }
     },
+    "columnWidths": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "desktop": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12
+        },
+        "tablet": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12
+        },
+        "mobile": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12
+        }
+      }
+    },
     "bindingIds": {
       "type": "array",
       "maxItems": 20,
@@ -426,6 +448,7 @@
               "maximum": 4
             },
             "column_tracks": { "$ref": "#/definitions/columnTracks" },
+            "column_widths": { "$ref": "#/definitions/columnWidths" },
             "semantic_tag": {
               "enum": ["section", "header", "main", "aside", "footer"]
             },
@@ -738,6 +761,61 @@
             { "maxLength": 500 }
           ]
         }
+      }
+    },
+    "videoNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "version", "props", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "type": { "const": "video" },
+        "version": { "const": 1 },
+        "props": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["provider", "video_id", "title", "aspect_ratio", "loading"],
+          "properties": {
+            "provider": { "enum": ["youtube", "vimeo"] },
+            "video_id": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 64
+            },
+            "title": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 180 }
+              ]
+            },
+            "aspect_ratio": { "enum": ["16:9", "4:3", "1:1"] },
+            "loading": { "enum": ["lazy", "eager"] },
+            "caption": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "maxLength": 500 }
+              ]
+            }
+          },
+          "allOf": [
+            {
+              "if": { "properties": { "provider": { "const": "youtube" } } },
+              "then": { "properties": { "video_id": { "pattern": "^[A-Za-z0-9_-]{6,64}$" } } }
+            },
+            {
+              "if": { "properties": { "provider": { "const": "vimeo" } } },
+              "then": { "properties": { "video_id": { "pattern": "^[0-9]{6,12}$" } } }
+            }
+          ]
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "style_tokens": { "$ref": "#/definitions/styleTokens" },
+        "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
+        "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
     "buttonNode": {
