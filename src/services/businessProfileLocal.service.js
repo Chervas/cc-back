@@ -16,6 +16,7 @@ const {
   PublicMediaAsset,
   GroupAssetClinicAssignment,
   Clinica,
+  ClinicaHorario,
   sequelize,
 } = db;
 
@@ -1182,6 +1183,142 @@ async function publishPhoto(resolved, payload = {}) {
   return { success: true, photo: normalizeMediaItem(media, 0) };
 }
 
+function googleTimeToHHmm(value) {
+  if (!value || typeof value !== 'object') return null;
+  const rawHours = value.hours ?? value.hour;
+  if (rawHours === undefined || rawHours === null || rawHours === '') return null;
+  const hours = Number(rawHours);
+  const minutes = Number(value.minutes ?? value.minute ?? 0);
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes)) return null;
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+}
+
+function hhmmToMinutes(value) {
+  const match = String(value || '').match(/^(\d{2}):(\d{2})$/);
+  if (!match) return null;
+  const minutes = Number(match[1]) * 60 + Number(match[2]);
+  return Number.isFinite(minutes) ? minutes : null;
+}
+
+function minutesToHHmm(value) {
+  const minutes = Math.max(0, Math.min((24 * 60) - 1, Math.round(Number(value || 0))));
+  return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+}
+
+function googleDayToClinicDay(value) {
+  const normalized = String(value || '').trim().toUpperCase();
+  const map = {
+    SUNDAY: 0,
+    MONDAY: 1,
+    TUESDAY: 2,
+    WEDNESDAY: 3,
+    THURSDAY: 4,
+    FRIDAY: 5,
+    SATURDAY: 6,
+  };
+  return Object.prototype.hasOwnProperty.call(map, normalized) ? map[normalized] : null;
+}
+
+function normalizeGoogleHoursPeriods(periods) {
+  const byDay = new Map();
+
+  for (const period of Array.isArray(periods) ? periods : []) {
+    const openDay = googleDayToClinicDay(period?.openDay || period?.open_day || period?.day);
+    const closeDay = googleDayToClinicDay(period?.closeDay || period?.close_day || period?.openDay || period?.open_day || period?.day);
+    const open = googleTimeToHHmm(period?.openTime || period?.open_time);
+    const close = googleTimeToHHmm(period?.closeTime || period?.close_time);
+    const startMin = hhmmToMinutes(open);
+    const endMin = hhmmToMinutes(close);
+    if (openDay === null || closeDay === null || startMin === null || endMin === null) continue;
+
+    const push = (day, start, end) => {
+      if (day === null || start === null || end === null || end <= start) return;
+      const list = byDay.get(day) || [];
+      list.push({ startMin: start, endMin: end });
+      byDay.set(day, list);
+    };
+
+    if (openDay === closeDay) {
+      push(openDay, startMin, endMin);
+    } else {
+      push(openDay, startMin, (24 * 60) - 1);
+      push(closeDay, 0, endMin);
+    }
+  }
+
+  const rows = [];
+  for (const [day, intervals] of byDay.entries()) {
+    const sorted = [...intervals].sort((left, right) => left.startMin - right.startMin || left.endMin - right.endMin);
+    const merged = [];
+    for (const interval of sorted) {
+      const last = merged[merged.length - 1];
+      if (last && interval.startMin <= last.endMin) {
+        last.endMin = Math.max(last.endMin, interval.endMin);
+      } else {
+        merged.push({ ...interval });
+      }
+    }
+    for (const interval of merged) {
+      rows.push({
+        dia_semana: day,
+        activo: true,
+        hora_inicio: minutesToHHmm(interval.startMin),
+        hora_fin: minutesToHHmm(interval.endMin),
+      });
+    }
+  }
+  return rows.sort((left, right) => left.dia_semana - right.dia_semana || left.hora_inicio.localeCompare(right.hora_inicio));
+}
+
+async function importRegularHoursToClinic(resolved) {
+  if (!ClinicaHorario) {
+    const error = new Error('clinic_hours_model_unavailable');
+    error.status = 503;
+    throw error;
+  }
+  const location = resolved.locations[0] || null;
+  if (!location) {
+    const error = new Error('business_profile_location_not_configured');
+    error.status = 409;
+    throw error;
+  }
+  const raw = rawPayload(location);
+  const periods = location.regularHours?.periods
+    || location.regular_hours?.periods
+    || raw.regularHours?.periods
+    || raw.regular_hours?.periods
+    || [];
+  const rows = normalizeGoogleHoursPeriods(periods).map((row) => ({
+    ...row,
+    clinica_id: resolved.clinicId,
+  }));
+  if (!rows.length) {
+    const error = new Error('business_profile_hours_empty');
+    error.status = 409;
+    throw error;
+  }
+
+  const horarios = await sequelize.transaction(async (transaction) => {
+    await ClinicaHorario.destroy({
+      where: { clinica_id: resolved.clinicId },
+      transaction,
+    });
+    await ClinicaHorario.bulkCreate(rows, { transaction });
+    return ClinicaHorario.findAll({
+      where: { clinica_id: resolved.clinicId },
+      order: [['dia_semana', 'ASC'], ['hora_inicio', 'ASC'], ['id', 'ASC']],
+      transaction,
+    });
+  });
+
+  return {
+    success: true,
+    imported: rows.length,
+    horarios,
+  };
+}
+
 module.exports = {
   METRIC_DEFINITIONS,
   GBP_MEDIA_CATEGORIES,
@@ -1197,6 +1334,7 @@ module.exports = {
   buildContent,
   buildReviewInsights,
   buildDashboard,
+  importRegularHoursToClinic,
   publishPhoto,
   serializeLocation,
   normalizeServiceItem,

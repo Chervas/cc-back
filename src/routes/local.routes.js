@@ -80,6 +80,22 @@ async function requireClinicMarketingWriteAccess(req, res, next) {
   }
 }
 
+async function requireClinicMarketingClinicWriteAccess(req, res, next) {
+  try {
+    const allowed = await hasMarketingClinicScopeAccess({
+      userId: req.userData?.userId,
+      clinicIds: [req.localClinicId],
+      access: 'write',
+    });
+    if (!allowed) {
+      return res.status(403).json({ success: false, error: 'scope_write_forbidden' });
+    }
+    return next();
+  } catch (error) {
+    return sendError(res, error);
+  }
+}
+
 router.use(authMiddleware);
 router.use('/clinica/:clinicaId', requireClinicMarketingAccess);
 
@@ -182,6 +198,18 @@ router.get('/clinica/:clinicaId/review-insights', async (req, res) => {
     return sendError(res, error, 'local_review_insights_failed');
   }
 });
+
+router.post(
+  '/clinica/:clinicaId/import-hours',
+  requireClinicMarketingClinicWriteAccess,
+  async (req, res) => {
+    try {
+      return res.json(await businessProfileLocal.importRegularHoursToClinic(req.localResolved));
+    } catch (error) {
+      return sendError(res, error, 'business_profile_hours_import_failed');
+    }
+  }
+);
 
 router.post(
   '/clinica/:clinicaId/photos',

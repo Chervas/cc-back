@@ -17,8 +17,10 @@ const {
   localDateTimeToUtc,
   resolveClinicTimeZone,
 } = require('./clinicOpeningHours.service');
+const personalPresenceService = require('./personalPresence.service');
 
 const {
+  AccountingCashSession,
   CitaPaciente,
   Clinica,
   ClinicMetaAsset,
@@ -1128,6 +1130,80 @@ async function loadOpportunities({ clinicIds }) {
   return opportunities;
 }
 
+async function loadCashStatus({ clinicIds, clinicMap, todayDate, manageClinicIds = [] }) {
+  const ids = uniqueInts(clinicIds);
+  if (!ids.length || !AccountingCashSession) return null;
+
+  const sessions = await AccountingCashSession.findAll({
+    where: {
+      clinic_id: ids.length === 1 ? ids[0] : { [Op.in]: ids },
+      business_date: todayDate,
+    },
+    raw: true,
+  });
+  const byClinic = new Map(sessions.map((session) => [Number(session.clinic_id), session]));
+  const clinics = ids.map((clinicId) => {
+    const clinic = clinicMap instanceof Map ? clinicMap.get(Number(clinicId)) : null;
+    const session = byClinic.get(Number(clinicId)) || null;
+    const status = !session
+      ? 'pending'
+      : String(session.status || '').toLowerCase() === 'closed'
+        ? 'closed'
+        : 'open';
+    return {
+      clinicId: Number(clinicId),
+      clinicName: clinic?.nombre_clinica || 'Clínica',
+      status,
+      statusLabel: status === 'pending'
+        ? 'Pendiente de apertura'
+        : status === 'closed'
+          ? 'Caja cerrada'
+          : 'Caja abierta',
+      openedAt: session?.opened_at || null,
+      closedAt: session?.closed_at || null,
+    };
+  });
+
+  const opened = clinics.filter((item) => item.status !== 'pending').length;
+  const closed = clinics.filter((item) => item.status === 'closed').length;
+  const pending = clinics.length - opened;
+  const status = pending === clinics.length
+    ? 'pending'
+    : pending > 0
+      ? 'mixed'
+      : closed === clinics.length
+        ? 'closed'
+        : 'open';
+  const singleClinicName = clinics.length === 1 ? clinics[0].clinicName : null;
+  const summaryLabel = status === 'pending'
+    ? `La apertura de caja${singleClinicName ? ` de ${singleClinicName}` : ''} está pendiente.`
+    : status === 'mixed'
+      ? `Hay ${pending} caja${pending === 1 ? '' : 's'} pendiente${pending === 1 ? '' : 's'} de apertura.`
+      : status === 'closed'
+        ? 'La caja de hoy ya se abrió y está cerrada.'
+        : 'La caja de hoy ya está abierta.';
+
+  const manageableIds = uniqueInts(manageClinicIds);
+  const linkClinicScope = manageableIds.length ? manageableIds : ids;
+  return {
+    businessDate: todayDate,
+    totalClinics: clinics.length,
+    opened,
+    closed,
+    pending,
+    status,
+    summaryLabel,
+    detailLabel: `${opened}/${clinics.length} clínica${clinics.length === 1 ? '' : 's'} con apertura registrada.`,
+    canManage: manageableIds.length > 0,
+    link: '/contabilidad',
+    queryParams: {
+      section: 'cash',
+      clinica_id: linkClinicScope.length === 1 ? linkClinicScope[0] : linkClinicScope.join(','),
+    },
+    clinics,
+  };
+}
+
 function roleSections(role, subrolCode) {
   const normalizedRole = String(role || '').toLowerCase();
   // Una asignación de agencia concede Marketing, no operativa clínica ni
@@ -1295,6 +1371,13 @@ async function getMainDashboard({ userId, query = {} }) {
     clinicIds: scope.clinicIds,
   });
   sections.operations = sections.operations && dashboardAccess.operationalClinicIds.length > 0;
+  const cashManageClinicIds = await getAccessibleClinicIdsForFeature({
+    actorId: userId,
+    featureKey: 'accounting.cash.manage',
+    clinicIds: scope.clinicIds,
+  });
+  const showStaffPresence = sections.ownerLike
+    || (context.role === 'personaldeclinica' && context.subrolCode === 'admin_staff');
   const presentation = rolePresentation(context.role, context.subrolCode, sections);
   const doctorId = sections.doctor ? userId : null;
   const appointments = await loadAppointments({
@@ -1323,6 +1406,8 @@ async function getMainDashboard({ userId, query = {} }) {
     weeklySchedule,
     whatsappStatus,
     opportunities,
+    cashStatus,
+    staffPresence,
   ] = await Promise.all([
     sections.operations ? loadPendingConsentCards({ clinicIds: dashboardAccess.consentClinicIds, limit: 6 }) : [],
     sections.operations ? loadUnansweredReviewCards({ clinicIds: dashboardAccess.reviewClinicIds, clinicMap: scope.clinicMap, limit: 4 }) : [],
@@ -1330,6 +1415,23 @@ async function getMainDashboard({ userId, query = {} }) {
     doctorId ? loadWeeklySchedule({ clinicIds: dashboardAccess.appointmentClinicIds, clinicMap: scope.clinicMap, userId: doctorId, todayIso: today.date }) : [],
     sections.shared ? loadWhatsappStatus({ clinicIds: scope.clinicIds, groupIds: scope.groupIds }) : { connected: null, paymentReady: null, paymentMissing: false },
     sections.shared ? loadOpportunities({ clinicIds: scope.clinicIds }) : [],
+    scope.clinicIds.length ? loadCashStatus({
+      clinicIds: scope.clinicIds,
+      clinicMap: scope.clinicMap,
+      todayDate: today.date,
+      manageClinicIds: cashManageClinicIds,
+    }).catch((error) => {
+      console.warn('[panelesDashboard] cash status unavailable:', error?.message || error);
+      return null;
+    }) : null,
+    showStaffPresence ? personalPresenceService.getDashboardPresenceSummary({
+      clinicIds: scope.clinicIds,
+      clinicMap: scope.clinicMap,
+      businessDate: today.date,
+    }).catch((error) => {
+      console.warn('[panelesDashboard] staff presence unavailable:', error?.message || error);
+      return null;
+    }) : null,
   ]);
 
   const setup = sections.operations
@@ -1409,6 +1511,8 @@ async function getMainDashboard({ userId, query = {} }) {
       total: sections.operations ? dashboardTasks.reduce((total, item) => total + Number(item.count || 0), 0) : 0,
     },
     setup,
+    cashStatus,
+    staffPresence,
     criticalAlerts: errors,
     growthOpportunities: opportunities,
     opportunities,
