@@ -2267,7 +2267,7 @@ exports.getCitas = asyncHandler(async (req, res) => {
  * Evita cargar detalle de flujos/consentimientos en el primer render; el drawer usa getCitaById.
  */
 exports.getCitasCalendar = asyncHandler(async (req, res) => {
-    const { clinica_id, startDate, endDate, paciente_id, patient_id } = req.query;
+    const { clinica_id, startDate, endDate, paciente_id, patient_id, summary } = req.query;
 
     const readableClinicIds = await resolveAppointmentReadClinicIdsOrRespond(req, res, clinica_id);
     if (!readableClinicIds) return;
@@ -2292,6 +2292,27 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
             return res.status(400).json({ message: 'paciente_id inválido' });
         }
         where.paciente_id = pacienteId;
+    }
+
+    const summaryOnly = ['1', 'true'].includes(String(summary || '').trim().toLowerCase());
+    if (summaryOnly) {
+        const citas = await CitaPaciente.findAll({
+            where,
+            attributes: ['clinica_id', 'doctor_id', 'instalacion_id', 'inicio'],
+            order: [['inicio', 'ASC']],
+        });
+        res.set('X-Agenda-Endpoint', 'calendar-summary');
+        return res.json(citas.map((cita) => {
+            const plain = plainCita(cita);
+            const timeZone = calendarScope.timeZones.get(Number(plain.clinica_id)) || DEFAULT_TIMEZONE;
+            return {
+                clinica_id: plain.clinica_id,
+                doctor_id: plain.doctor_id,
+                instalacion_id: plain.instalacion_id,
+                inicio: plain.inicio,
+                inicio_local: formatDateTimeLocal(plain.inicio, timeZone),
+            };
+        }));
     }
 
     const citas = await CitaPaciente.findAll({
