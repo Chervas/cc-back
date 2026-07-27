@@ -559,6 +559,18 @@ limpio mediante `LeadIntake #7272`; no hubo escrituras externas. El 1.7 retira
 `frame-ancestors` de la meta CSP, donde el navegador lo ignora, y lo conserva
 en el header CSP real.
 
+Desde 2026-07-27, el contrato de columnas del editor mantiene
+`column_tracks` como compatibilidad/fallback de fila y añade `column_widths`
+en `section.props` exclusivamente para nodos `structure_role=column`. El
+compilador valida que esos anchos sean enteros 1..12 y rechaza cualquier
+`column_widths` fuera de columnas. Cuando una fila contiene alguna columna con
+`column_widths`, el renderer emite `cc-column-widths` en la fila, cambia su
+grid a 12 columnas y añade `cc-col-span-*` por breakpoint a las columnas. Las
+hermanas sin override heredan su ancho desde `column_tracks` de la fila; si no
+hay track válido para ese índice/breakpoint, se apilan con fallback 12/12. Esto
+permite que el inspector edite una columna sin reescribir el reparto de las
+demás y mantiene documentos antiguos publicables.
+
 Evidencia definitiva del código promovido: backend Marketing Web **354/354**
 contratos Node, contratos WordPress **40/40**, Campañas **81/81**, reviewer
 focal **96/96** con GO explícito y sin hallazgos high/medium, frontend

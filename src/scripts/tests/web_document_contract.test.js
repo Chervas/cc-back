@@ -132,6 +132,26 @@ function testSectionColumnTracksUseSafeTwelveColumnGrid() {
   assertInvalid(wrongLength, 'columnTracks');
 }
 
+function testSectionColumnWidthsBelongToColumnsOnly() {
+  const valid = buildValidWebDocument();
+  valid.nodes.section_hero.props.structure_role = 'column';
+  valid.nodes.section_hero.props.column_widths = {
+    desktop: 8,
+    tablet: 6,
+    mobile: 12,
+  };
+  assert.equal(validateWebDocument(valid).valid, true);
+
+  const invalidRole = buildValidWebDocument();
+  invalidRole.nodes.section_hero.props.column_widths = { desktop: 8 };
+  assertInvalid(invalidRole, 'columnWidths');
+
+  const invalidWidth = buildValidWebDocument();
+  invalidWidth.nodes.section_hero.props.structure_role = 'column';
+  invalidWidth.nodes.section_hero.props.column_widths = { desktop: 13 };
+  assertInvalid(invalidWidth, 'maximum');
+}
+
 function testNodeAnimationsUseClosedPresets() {
   const valid = buildValidWebDocument();
   valid.nodes.section_hero.animation = 'slide_up';
@@ -457,6 +477,7 @@ function run() {
   testValidContractCoversInitialBlocks();
   testNoArbitraryCodeMarkupStylesOrClasses();
   testSectionColumnTracksUseSafeTwelveColumnGrid();
+  testSectionColumnWidthsBelongToColumnsOnly();
   testNodeAnimationsUseClosedPresets();
   testGraphReferencesCyclesDepthAndOrphans();
   testSemanticImageFormButtonAndBindingRules();

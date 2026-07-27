@@ -401,6 +401,27 @@
         "mobile": { "$ref": "#/definitions/columnTrackList" }
       }
     },
+    "columnWidths": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "desktop": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12
+        },
+        "tablet": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12
+        },
+        "mobile": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12
+        }
+      }
+    },
     "bindingIds": {
       "type": "array",
       "maxItems": 20,
@@ -427,6 +448,7 @@
               "maximum": 4
             },
             "column_tracks": { "$ref": "#/definitions/columnTracks" },
+            "column_widths": { "$ref": "#/definitions/columnWidths" },
             "semantic_tag": {
               "enum": ["section", "header", "main", "aside", "footer"]
             },

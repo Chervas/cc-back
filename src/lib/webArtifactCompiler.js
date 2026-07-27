@@ -559,13 +559,51 @@ function validColumnTracks(node, breakpoint) {
   return tracks.reduce((sum, track) => sum + track, 0) === 12 ? tracks : null;
 }
 
-function sectionTrackClassList(node) {
+function validColumnWidth(node, breakpoint) {
+  const width = node?.props?.column_widths?.[breakpoint];
+  return Number.isInteger(width) && width >= 1 && width <= 12 ? width : null;
+}
+
+function sectionRole(node) {
+  return node?.props?.structure_role || 'section';
+}
+
+function rowUsesColumnWidths(document, node) {
+  return sectionRole(node) === 'row' && (node.children || []).some((childId) => {
+    const child = document.nodes?.[childId];
+    return child?.type === 'section'
+      && sectionRole(child) === 'column'
+      && Boolean(child.props.column_widths && Object.keys(child.props.column_widths).length);
+  });
+}
+
+function sectionTrackClassList(document, node) {
+  if (rowUsesColumnWidths(document, node)) return 'cc-column-widths';
   return ['desktop', 'tablet', 'mobile'].map((breakpoint) => {
     const tracks = validColumnTracks(node, breakpoint);
     if (!tracks) return '';
     const prefix = breakpoint === 'desktop' ? 'cc-tracks' : `cc-${breakpoint}-tracks`;
     return `${prefix}-${tracks.join('-')}`;
   }).filter(Boolean).join(' ');
+}
+
+function sectionColumnWidthClassList(document, node, parentRow = null, parentChildIndex = null) {
+  if (sectionRole(node) !== 'column') return '';
+  return ['desktop', 'tablet', 'mobile'].map((breakpoint) => {
+    const width = validColumnWidth(node, breakpoint)
+      || fallbackColumnWidthFromParent(document, parentRow, parentChildIndex, breakpoint);
+    if (!width) return '';
+    const prefix = breakpoint === 'desktop' ? 'cc-col-span' : `cc-${breakpoint}-col-span`;
+    return `${prefix}-${width}`;
+  }).filter(Boolean).join(' ');
+}
+
+function fallbackColumnWidthFromParent(document, parentRow, parentChildIndex, breakpoint) {
+  if (!parentRow || sectionRole(parentRow) !== 'row' || !rowUsesColumnWidths(document, parentRow)) return null;
+  if (!Number.isInteger(parentChildIndex) || parentChildIndex < 0) return null;
+  const tracks = validColumnTracks(parentRow, breakpoint);
+  const width = tracks?.[parentChildIndex];
+  return Number.isInteger(width) && width >= 1 && width <= 12 ? width : 12;
 }
 
 function imageClassList(node) {
@@ -731,7 +769,7 @@ function renderIntakeForm(node, context) {
   return `<form id="cc-${escapeHtml(node.id)}" class="cc-node cc-form ${styleClassList(node)}" action="${escapeHtml(context.intakeEndpoint)}" method="post" enctype="application/x-www-form-urlencoded" accept-charset="UTF-8" data-cc-native-intake="true"><h2>${escapeHtml(node.props.title)}</h2>${node.props.description ? `<p>${escapeHtml(node.props.description)}</p>` : ''}<input type="hidden" name="web_project_id" value="${escapeHtml(context.projectId)}"><input type="hidden" name="web_revision_id" value="${escapeHtml(context.revisionId)}"><input type="hidden" name="web_page_id" value="${escapeHtml(context.page.id)}"><input type="hidden" name="web_form_id" value="${escapeHtml(node.id)}"><input type="hidden" name="web_artifact_input_hash" value="${escapeHtml(context.artifactMarker)}"><input class="cc-honeypot" type="text" name="_cc_company" value="" tabindex="-1" autocomplete="off" aria-hidden="true">${fields}<button type="submit" class="cc-button cc-button-primary">${escapeHtml(node.props.submit_label)}</button><p id="${escapeHtml(successId)}" class="cc-form-status cc-form-success" role="status">${escapeHtml(node.props.success_message)}</p><p id="${escapeHtml(errorId)}" class="cc-form-status cc-form-error" role="alert">No hemos podido enviar el formulario. Inténtalo de nuevo en unos minutos.</p></form>`;
 }
 
-function renderNode(nodeId, document, snapshot, context, ancestors = new Set(), rootSemanticTag = null) {
+function renderNode(nodeId, document, snapshot, context, ancestors = new Set(), rootSemanticTag = null, parentSection = null, parentChildIndex = null) {
   const node = document.nodes[nodeId];
   if (!node) fail('web_artifact_node_missing', 'La revisión contiene una referencia de bloque rota.', { node_id: nodeId });
   if (ancestors.has(nodeId)) fail('web_artifact_node_cycle', 'La revisión contiene un ciclo de bloques.', { node_id: nodeId });
@@ -741,11 +779,11 @@ function renderNode(nodeId, document, snapshot, context, ancestors = new Set(), 
       ? rootSemanticTag
       : null;
     const tag = globalSlot || node.props.semantic_tag || 'section';
-    const children = node.children.map((childId) => renderNode(childId, document, snapshot, context, nextAncestors)).join('');
+    const children = node.children.map((childId, index) => renderNode(childId, document, snapshot, context, nextAncestors, null, node, index)).join('');
     const globalAttribute = globalSlot ? ` data-cc-global="${globalSlot}"` : '';
     const globalClass = globalSlot ? ` cc-site-${globalSlot}` : '';
     const roleClass = `cc-role-${escapeHtml(node.props.structure_role || 'section')}`;
-    return `<${tag} id="cc-${escapeHtml(node.id)}"${globalAttribute} class="cc-node cc-section${globalClass} ${roleClass} cc-layout-${escapeHtml(node.props.layout)} cc-cols-${Number(node.props.columns)} ${sectionTrackClassList(node)} ${styleClassList(node)}"><div class="cc-container">${children}</div></${tag}>`;
+    return `<${tag} id="cc-${escapeHtml(node.id)}"${globalAttribute} class="cc-node cc-section${globalClass} ${roleClass} cc-layout-${escapeHtml(node.props.layout)} cc-cols-${Number(node.props.columns)} ${sectionTrackClassList(document, node)} ${sectionColumnWidthClassList(document, node, parentSection, parentChildIndex)} ${styleClassList(node)}"><div class="cc-container">${children}</div></${tag}>`;
   }
   if (node.type === 'heading') {
     const level = Math.min(6, Math.max(1, Number(node.props.level) || 2));
@@ -816,6 +854,13 @@ function stylesheet(tokens, document = { nodes: {} }) {
       : `.cc-layout-grid.cc-cols-${count}`;
     return `${selector}>.cc-container{display:grid;grid-template-columns:repeat(${count},minmax(0,1fr))}`;
   }).join('');
+  const columnWidthRules = (prefix = '') => (
+    '.cc-role-row.cc-column-widths>.cc-container{display:grid;grid-template-columns:repeat(12,minmax(0,1fr))}'
+    + '.cc-role-row.cc-column-widths>.cc-container>.cc-role-column{grid-column:span 12/span 12}'
+    + Array.from({ length: 12 }, (_value, index) => index + 1)
+      .map((span) => `.cc-role-row.cc-column-widths>.cc-container>.cc-role-column.cc-${prefix}col-span-${span}{grid-column:span ${span}/span ${span}}`)
+      .join('')
+  );
   const columnTrackRules = (breakpoint) => Object.values(document.nodes || {})
     .filter((node) => node.type === 'section')
     .map((node) => validColumnTracks(node, breakpoint))
@@ -833,6 +878,7 @@ function stylesheet(tokens, document = { nodes: {} }) {
     + spacingRules(`${breakpoint}-`)
     + alignRules(`${breakpoint}-`)
     + columnRules(`${breakpoint}-`)
+    + columnWidthRules(`${breakpoint}-`)
     + columnTrackRules(breakpoint)
   );
   const focalRules = [...new Set(Object.values(document.nodes || {})
@@ -852,6 +898,7 @@ function stylesheet(tokens, document = { nodes: {} }) {
     '*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--cc-surface);color:var(--cc-text);font-family:var(--cc-font-body);line-height:1.55}img{display:block;max-width:100%}',
     '.cc-node{min-width:0}.cc-container{margin-inline:auto;display:inherit;flex-direction:inherit;flex-wrap:inherit;gap:inherit}.cc-section{display:flex;width:100%}.cc-role-container>.cc-container,.cc-role-row>.cc-container{align-items:stretch}.cc-role-column{min-width:0}.cc-role-column>.cc-container{width:100%;min-width:0}.cc-layout-stack>.cc-container{display:flex;flex-direction:column}.cc-layout-row>.cc-container{display:flex;flex-direction:row;flex-wrap:wrap}.cc-layout-grid>.cc-container{display:grid}',
     columnRules(),
+    columnWidthRules(),
     '.cc-section.cc-width-narrow>.cc-container{width:min(100% - 2rem,48rem)}.cc-section.cc-width-standard>.cc-container{width:min(100% - 2rem,72rem)}.cc-section.cc-width-wide>.cc-container{width:min(100% - 2rem,82.5rem)}.cc-section.cc-width-full>.cc-container{width:100%;padding-inline:1rem}.cc-node.cc-width-narrow:not(.cc-section){width:min(100%,48rem)}.cc-node.cc-width-standard:not(.cc-section){width:min(100%,72rem)}.cc-node.cc-width-wide:not(.cc-section){width:min(100%,82.5rem)}.cc-node.cc-width-full:not(.cc-section){width:100%}',
     spacingRules(),
     alignRules(),

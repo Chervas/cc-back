@@ -365,6 +365,29 @@ function validateSectionColumnTracks(node, path, errors) {
   }
 }
 
+function validateSectionColumnWidths(node, path, errors) {
+  const widths = node.props.column_widths;
+  if (!widths) return;
+  if (node.props.structure_role !== 'column') {
+    errors.push(validationError(
+      'columnWidths',
+      `${path}/props/column_widths`,
+      'solo las columnas pueden guardar anchos por breakpoint'
+    ));
+  }
+  for (const breakpoint of ['desktop', 'tablet', 'mobile']) {
+    const width = widths[breakpoint];
+    if (width === undefined) continue;
+    if (!Number.isInteger(width) || width < 1 || width > 12) {
+      errors.push(validationError(
+        'columnWidths',
+        `${path}/props/column_widths/${breakpoint}`,
+        'debe ser un entero entre 1 y 12'
+      ));
+    }
+  }
+}
+
 function validateGraph(document) {
   const errors = [];
   const nodes = document.nodes;
@@ -480,6 +503,7 @@ function validateGraph(document) {
 
     if (node.type === 'section') {
       validateSectionColumnTracks(node, nodePath, errors);
+      validateSectionColumnWidths(node, nodePath, errors);
     }
 
     if (node.type === 'gallery') {
