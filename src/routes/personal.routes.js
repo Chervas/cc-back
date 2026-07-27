@@ -14,6 +14,10 @@ router.use(authMiddleware);
 // Listado filtrable por clinica/grupo (no hace dump global salvo admin/all)
 router.get('/', personalController.getPersonal);
 
+// Control de presencia real
+router.get('/presence/today', personalController.getPresenceToday);
+router.post('/presence/events', personalController.createPresenceEvent);
+
 // Onboarding de personal
 // Canónico v6.1 (usado por front onboarding actual)
 router.post('/buscar', personalController.buscarPersonal);
