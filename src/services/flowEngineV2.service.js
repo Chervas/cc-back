@@ -517,6 +517,12 @@ function computeQuietHoursDelayMs({
   return { delayMs, scheduledAt };
 }
 
+function normalizeOutsideSendWindowPolicy(value) {
+  const normalized = toLowerSafe(value);
+  if (normalized === 'discard' || normalized === 'skip') return 'discard';
+  return 'schedule_next_window';
+}
+
 function emitMessageCreatedToConversationRooms(conversation, message) {
   const io = getIO();
   if (!io || !conversation || !message) return;
@@ -3366,6 +3372,9 @@ async function handleSendWhatsapp(node, context, runtime) {
 
   const messageMode = normalizeWhatsappMessageMode(resolveTemplateValue(config?.message_mode, context));
   const quietHoursEnabled = parseBool(resolveTemplateValue(config?.quiet_hours_enabled, context), true);
+  const outsideSendWindowPolicy = normalizeOutsideSendWindowPolicy(
+    resolveTemplateValue(config?.outside_send_window_policy || config?.send_window_policy, context)
+  );
   const quietWindow = computeQuietHoursDelayMs({
     now: new Date(),
     enabled: quietHoursEnabled,
@@ -3384,6 +3393,12 @@ async function handleSendWhatsapp(node, context, runtime) {
   });
   const languageSelection = resolveWhatsappLanguageRouting(config, templateContext);
   const contentConfig = languageSelection.config;
+  const selectedOutsideSendWindowPolicy = normalizeOutsideSendWindowPolicy(
+    resolveTemplateValue(
+      contentConfig?.outside_send_window_policy || contentConfig?.send_window_policy || outsideSendWindowPolicy,
+      templateContext
+    )
+  );
   const expectedTemplateLocale = languageSelection.enabled
     ? languageSelection.selected_language
     : null;
@@ -3689,6 +3704,31 @@ async function handleSendWhatsapp(node, context, runtime) {
         fallbackTemplateParams
       );
     }
+  }
+
+  if (quietWindow.delayMs > 0 && selectedOutsideSendWindowPolicy === 'discard') {
+    return {
+      kind: 'success',
+      output: {
+        status: 'skipped_outside_send_window',
+        reason: 'outside_send_window',
+        message_mode: originalMessageMode,
+        delivery_mode: effectiveMessageMode,
+        template_id: template?.id || null,
+        template_name: template?.name || null,
+        fallback_used: !!fallbackTriggeredReason,
+        fallback_reason: fallbackTriggeredReason,
+        message_preview: previewText,
+        recipient_mode: recipientData.recipient_mode,
+        recipient: recipientData.recipient,
+        quiet_hours_applied: true,
+        quiet_hours_window: '22:00-07:00',
+        scheduled_for: quietScheduledFor ? quietScheduledFor.toISOString() : null,
+        outside_send_window_policy: selectedOutsideSendWindowPolicy,
+        discarded: true,
+      },
+      next_node_id: readOutputTarget(node, 'on_success'),
+    };
   }
 
   const targetPatientId = toIntOrNull(targets.patient_id);
