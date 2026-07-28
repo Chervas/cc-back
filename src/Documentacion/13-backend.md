@@ -7234,15 +7234,22 @@ clínica de BS Medical no se compara con Propdental salvo que se implemente un
 scope global administrativo explícito. Si no hay grupo o no hay al menos dos
 sedes comparables, el bloque devuelve `ready=false` con `reason`.
 
-La métrica principal es el tiempo hasta el primer contacto humano registrado en
-`LeadContactAttempts` con `usuario_id` no nulo. Como fallback operativo, si el
-lead ya tiene una cita vinculada y no existe intento normalizado, la creación de
-esa cita cuenta como señal de atención. Las auto-respuestas de leads quedan
-excluidas, por lo que una clínica con respuesta automática activa mide desde el
-siguiente contacto humano o desde la cita registrada. El cálculo usa horario de
-clínica `ClinicaHorarios`; si alguna sede no lo tiene configurado, se marca
-`business_hours_applied=false` y para esa sede se usa tiempo natural como
-fallback visible.
+La métrica principal es el tiempo hasta el primer contacto humano. Cuenta
+`LeadContactAttempts` con `usuario_id` no nulo y también mensajes WhatsApp
+outbound no fallidos en `Messages` cuando la conversación está vinculada al
+lead o coincide por teléfono dentro de la misma clínica. Esto cubre mensajes
+enviados desde Clinicaclick y ecos importados desde el móvil/WhatsApp conectado.
+Quedan excluidas automatizaciones propias por `automation_delivery_key` o
+metadata de Automatizaciones V2; si Meta expone un indicador explícito de
+respuesta automática de WhatsApp Business, se trata igual que una
+auto-respuesta. Como fallback operativo, si el lead ya tiene una cita vinculada
+y no existe intento normalizado, la creación de esa cita cuenta como señal de
+atención. Si hay auto-respuesta de leads y el paciente contesta después, el
+reloj empieza en esa respuesta del paciente; si no contesta, el lead no se
+marca como enfriado solo por el paso del tiempo desde la auto-respuesta. El
+cálculo usa horario de clínica `ClinicaHorarios`; si alguna sede no lo tiene
+configurado, se marca `business_hours_applied=false` y para esa sede se usa
+tiempo natural como fallback visible.
 
 El bloque también devuelve `appointment_conversion_rate`: porcentaje de leads
 del periodo que han terminado en cita (`citado`, `acudio_cita`, `convertido` o
@@ -7252,13 +7259,16 @@ total de leads, no volumen de citas.
 La comparativa acepta periodo propio sin alterar los contadores superiores del
 endpoint: la UI debe pedirla de forma explícita con `includeCompetition=true`;
 si no llega ese flag, `competition` se devuelve como `null` y no se calcula el
-ranking. Con el flag activo acepta `competitionPeriod=30d|90d|365d` o, para
-rangos explícitos, `competitionStartDate`/`competitionEndDate`. La respuesta incluye
-`competition.period.key` y `competition.trend.buckets`; cada bucket expone
-leads, contactos humanos, tiempo medio, ratio dentro de objetivo, leads
-enfriados y conversión a cita. Si hay clínica seleccionada, `trend.buckets`
-representa esa clínica; `trend.group_buckets` queda disponible para usos
-agregados posteriores.
+ranking. Con `competitionMode=summary` devuelve solo el bloque compacto necesario
+para el titular competitivo inicial. Con `competitionMode=full` devuelve ranking,
+tarjetas y gráficas; por compatibilidad, `includeCompetition=true` sin modo
+equivale a `full`. Con el flag activo acepta `competitionPeriod=30d|90d|365d`
+o, para rangos explícitos, `competitionStartDate`/`competitionEndDate`. La
+respuesta completa incluye `competition.period.key` y
+`competition.trend.buckets`; cada bucket expone leads, contactos humanos,
+tiempo medio, ratio dentro de objetivo, leads enfriados y conversión a cita. Si
+hay clínica seleccionada, `trend.buckets` representa esa clínica;
+`trend.group_buckets` queda disponible para usos agregados posteriores.
 
 Para proteger rendimiento, la comparativa usa una ventana por defecto de los
 últimos 30 días cuando la petición no trae rango temporal y se cachea por

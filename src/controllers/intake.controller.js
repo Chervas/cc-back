@@ -45,7 +45,7 @@ const {
 } = require('../services/googleDataManagerDiagnosticsEnqueue.service');
 const { previewLeadImport, executeLeadImport } = require('../services/leadImport.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
-const { normalizePhoneDigits } = require('../lib/phone');
+const { normalizePhoneDigits, getPhoneLookupCandidates } = require('../lib/phone');
 const { normalizeConfiguredLocations } = require('../lib/intake-public-locations');
 const { resolveChatStateClinicSelection } = require('../lib/intakeChatLocation');
 const {
@@ -906,12 +906,60 @@ const firstHumanContactFromHistory = (lead) => {
   return candidates.sort((a, b) => a.getTime() - b.getTime())[0];
 };
 
-const resolveHumanFirstContactAt = (lead, firstAttemptAt, linkedAppointmentCreatedAt = null) => {
+const firstLeadAutoReplyAt = (lead) => {
+  const createdAt = toFiniteDate(lead?.created_at);
+  const rows = parseJsonArrayForCompetition(lead?.historial_contactos);
+  const candidates = rows
+    .filter((row) => row && String(row?.motivo || '').toLowerCase().startsWith('lead_auto_reply'))
+    .map((row) => toFiniteDate(row.fecha))
+    .filter((date) => date && (!createdAt || date >= createdAt));
+  if (!candidates.length) return null;
+  return candidates.sort((a, b) => a.getTime() - b.getTime())[0];
+};
+
+const getLeadCompetitionMessageDate = (message) => (
+  toFiniteDate(message?.sent_at)
+  || toFiniteDate(message?.createdAt)
+  || toFiniteDate(message?.created_at)
+);
+
+const getLeadCompetitionMessageMetadata = (message) => {
+  const metadata = message?.metadata;
+  if (!metadata) return {};
+  if (typeof metadata === 'object') return metadata;
+  if (typeof metadata !== 'string') return {};
+  try {
+    const parsed = JSON.parse(metadata);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (_error) {
+    return {};
+  }
+};
+
+const isAutomatedLeadCompetitionOutboundMessage = (message) => {
+  const metadata = getLeadCompetitionMessageMetadata(message);
+  const source = String(cleanString(metadata.source) || '').toLowerCase();
+  const origin = String(cleanString(metadata.origin) || '').toLowerCase();
+  const sourceEvent = String(cleanString(metadata.source_event || metadata?.coexistence?.source_event) || '').toLowerCase();
+  const kind = String(cleanString(metadata.kind || metadata?.coexistence?.kind) || '').toLowerCase();
+  const rawType = String(cleanString(metadata.raw_type) || '').toLowerCase();
+  if (cleanString(message?.automation_delivery_key)) return true;
+  if (source.includes('automation') || origin.includes('automation')) return true;
+  if (metadata.execution_id || metadata.node_id || metadata.flow_execution_id) return true;
+  if (sourceEvent.includes('automation') || sourceEvent.includes('auto_reply')) return true;
+  if (sourceEvent.includes('away') || sourceEvent.includes('greeting')) return true;
+  if (kind.includes('automation') || kind.includes('auto_reply')) return true;
+  if (rawType.includes('auto_reply') || rawType.includes('away') || rawType.includes('greeting')) return true;
+  return false;
+};
+
+const resolveHumanFirstContactAt = (lead, firstAttemptAt, linkedAppointmentCreatedAt = null, extraCandidates = []) => {
   const createdAt = toFiniteDate(lead?.created_at);
   const candidates = [
     toFiniteDate(firstAttemptAt),
     firstHumanContactFromHistory(lead),
     toFiniteDate(linkedAppointmentCreatedAt),
+    ...extraCandidates.map((value) => toFiniteDate(value)),
   ];
 
   const callOutcome = String(cleanString(lead?.call_outcome) || '').toLowerCase();
@@ -1158,6 +1206,7 @@ const computeLeadCompetitionStats = async (req, scope) => {
       attributes: [
         'id',
         'clinica_id',
+        'telefono',
         'created_at',
         'status_lead',
         'num_contactos',
@@ -1190,6 +1239,31 @@ const computeLeadCompetitionStats = async (req, scope) => {
     parseInteger(row.lead_intake_id),
     row.first_contact_at,
   ]));
+  const autoReplyAtByLead = new Map(leads
+    .map((lead) => [parseInteger(lead.id), firstLeadAutoReplyAt(lead)])
+    .filter(([leadId, date]) => leadId !== null && date));
+  const autoReplyAttemptRows = leadIds.length && LeadContactAttempt
+    ? await LeadContactAttempt.findAll({
+        attributes: [
+          'lead_intake_id',
+          [db.Sequelize.fn('MIN', db.Sequelize.col('created_at')), 'first_auto_reply_at'],
+        ],
+        where: {
+          lead_intake_id: { [Op.in]: leadIds },
+          canal: 'whatsapp',
+          motivo: { [Op.like]: 'lead_auto_reply%' },
+        },
+        group: ['lead_intake_id'],
+        raw: true,
+      })
+    : [];
+  for (const row of autoReplyAttemptRows) {
+    const leadId = parseInteger(row.lead_intake_id);
+    const date = toFiniteDate(row.first_auto_reply_at);
+    if (leadId === null || !date) continue;
+    const current = toFiniteDate(autoReplyAtByLead.get(leadId));
+    if (!current || date < current) autoReplyAtByLead.set(leadId, date);
+  }
   const linkedAppointmentIds = leads
     .map((lead) => parseInteger(lead.call_outcome_appointment_id))
     .filter((value) => value !== null);
@@ -1219,6 +1293,112 @@ const computeLeadCompetitionStats = async (req, scope) => {
     const current = toFiniteDate(appointmentCreatedByLead.get(leadId));
     if (!current || createdAt < current) {
       appointmentCreatedByLead.set(leadId, createdAt);
+    }
+  }
+
+  const leadById = new Map(leads
+    .map((lead) => [parseInteger(lead.id), lead])
+    .filter(([leadId]) => leadId !== null));
+  const leadIdsByClinicPhone = new Map();
+  const phoneLookupCandidates = new Set();
+  const addLeadPhoneCandidate = (clinicId, phoneCandidate, leadId) => {
+    if (clinicId === null || leadId === null || !phoneCandidate) return;
+    const key = `${clinicId}:${phoneCandidate}`;
+    const list = leadIdsByClinicPhone.get(key) || [];
+    if (!list.includes(leadId)) list.push(leadId);
+    leadIdsByClinicPhone.set(key, list);
+    phoneLookupCandidates.add(phoneCandidate);
+  };
+  for (const lead of leads) {
+    const leadId = parseInteger(lead.id);
+    const clinicId = parseInteger(lead.clinica_id);
+    for (const candidate of getPhoneLookupCandidates(lead.telefono)) {
+      addLeadPhoneCandidate(clinicId, candidate, leadId);
+    }
+  }
+  const conversationLookupConditions = [];
+  if (leadIds.length) conversationLookupConditions.push({ lead_id: { [Op.in]: leadIds } });
+  if (phoneLookupCandidates.size) {
+    conversationLookupConditions.push({
+      clinic_id: { [Op.in]: scope.clinicIds },
+      contact_id: { [Op.in]: Array.from(phoneLookupCandidates) },
+    });
+  }
+  const conversationRows = conversationLookupConditions.length && Conversation
+    ? await Conversation.findAll({
+        where: conversationLookupConditions.length === 1
+          ? conversationLookupConditions[0]
+          : { [Op.or]: conversationLookupConditions },
+        attributes: ['id', 'clinic_id', 'lead_id', 'contact_id'],
+        raw: true,
+      })
+    : [];
+  const leadIdsByConversation = new Map();
+  const addConversationLead = (conversationId, leadId) => {
+    if (conversationId === null || leadId === null || !leadById.has(leadId)) return;
+    const list = leadIdsByConversation.get(conversationId) || [];
+    if (!list.includes(leadId)) list.push(leadId);
+    leadIdsByConversation.set(conversationId, list);
+  };
+  for (const conversation of conversationRows) {
+    const conversationId = parseInteger(conversation.id);
+    addConversationLead(conversationId, parseInteger(conversation.lead_id));
+    const clinicId = parseInteger(conversation.clinic_id);
+    for (const candidate of getPhoneLookupCandidates(conversation.contact_id)) {
+      const matchedLeadIds = leadIdsByClinicPhone.get(`${clinicId}:${candidate}`) || [];
+      for (const leadId of matchedLeadIds) addConversationLead(conversationId, leadId);
+    }
+  }
+  const messageRows = leadIdsByConversation.size && Message
+    ? await Message.findAll({
+        where: {
+          conversation_id: { [Op.in]: Array.from(leadIdsByConversation.keys()) },
+          direction: { [Op.in]: ['inbound', 'outbound'] },
+          status: { [Op.ne]: 'failed' },
+          [Op.or]: [
+            { sent_at: { [Op.gte]: period.start, [Op.lte]: period.end } },
+            { createdAt: { [Op.gte]: period.start, [Op.lte]: period.end } },
+          ],
+        },
+        attributes: [
+          'id',
+          'conversation_id',
+          'sender_id',
+          'direction',
+          'message_type',
+          'status',
+          'metadata',
+          'automation_delivery_key',
+          'sent_at',
+          'createdAt',
+        ],
+        order: [['sent_at', 'ASC'], ['id', 'ASC']],
+        raw: true,
+      })
+    : [];
+  const firstHumanWhatsappMessageByLead = new Map();
+  const firstInboundAfterAutoReplyByLead = new Map();
+  for (const message of messageRows) {
+    const conversationId = parseInteger(message.conversation_id);
+    const relatedLeadIds = leadIdsByConversation.get(conversationId) || [];
+    if (!relatedLeadIds.length) continue;
+    const messageAt = getLeadCompetitionMessageDate(message);
+    if (!messageAt) continue;
+    const direction = String(cleanString(message.direction) || '').toLowerCase();
+    for (const leadId of relatedLeadIds) {
+      const lead = leadById.get(leadId);
+      const leadCreatedAt = toFiniteDate(lead?.created_at);
+      if (leadCreatedAt && messageAt < leadCreatedAt) continue;
+      if (direction === 'inbound') {
+        const autoReplyAt = toFiniteDate(autoReplyAtByLead.get(leadId));
+        if (autoReplyAt && messageAt > autoReplyAt) {
+          const current = toFiniteDate(firstInboundAfterAutoReplyByLead.get(leadId));
+          if (!current || messageAt < current) firstInboundAfterAutoReplyByLead.set(leadId, messageAt);
+        }
+      } else if (direction === 'outbound' && !isAutomatedLeadCompetitionOutboundMessage(message)) {
+        const current = toFiniteDate(firstHumanWhatsappMessageByLead.get(leadId));
+        if (!current || messageAt < current) firstHumanWhatsappMessageByLead.set(leadId, messageAt);
+      }
     }
   }
 
@@ -1282,7 +1462,10 @@ const computeLeadCompetitionStats = async (req, scope) => {
       lead,
       firstAttemptByLead.get(leadId),
       appointmentCreatedByLead.get(leadId),
+      [firstHumanWhatsappMessageByLead.get(leadId)],
     );
+    const autoReplyAt = toFiniteDate(autoReplyAtByLead.get(leadId));
+    const inboundAfterAutoReplyAt = toFiniteDate(firstInboundAfterAutoReplyByLead.get(leadId));
     const appointmentConverted = appointmentConvertedStatusesForCompetition.has(status) || appointmentCreatedByLead.has(leadId);
     if (appointmentConverted) {
       stat.appointment_converted_count += 1;
@@ -1291,12 +1474,22 @@ const computeLeadCompetitionStats = async (req, scope) => {
     let responseMinutes = null;
     let openWithoutHumanResponseOverTarget = false;
     if (firstContactAt) {
-      responseMinutes = businessMinutesBetweenForCompetition(createdAt, firstContactAt, runtime);
+      const responseStartAt = autoReplyAt
+        && inboundAfterAutoReplyAt
+        && firstContactAt >= inboundAfterAutoReplyAt
+        ? inboundAfterAutoReplyAt
+        : createdAt;
+      responseMinutes = businessMinutesBetweenForCompetition(responseStartAt, firstContactAt, runtime);
       stat.response_minutes.push(responseMinutes);
       allResponseMinutes.push(responseMinutes);
       if (responseMinutes <= targetMinutes) stat.under_target_count += 1;
     } else if (activeLeadStatusesForCompetition.has(status)) {
-      const openMinutes = businessMinutesBetweenForCompetition(createdAt, period.end, runtime);
+      const openStartAt = autoReplyAt
+        ? inboundAfterAutoReplyAt
+        : createdAt;
+      const openMinutes = openStartAt
+        ? businessMinutesBetweenForCompetition(openStartAt, period.end, runtime)
+        : null;
       if (openMinutes > targetMinutes) {
         stat.open_without_human_response_over_target += 1;
         openWithoutHumanResponseOverTarget = true;
@@ -1511,9 +1704,68 @@ const getLeadCompetitionStatsForResponse = async (req, { clinicIdRaw = null, gro
   };
 };
 
-const shouldIncludeLeadCompetitionStats = (req) => {
-  const raw = req.query?.includeCompetition ?? req.query?.include_competition;
-  return ['1', 'true', 'yes', 'on'].includes(String(raw || '').trim().toLowerCase());
+const getLeadCompetitionStatsMode = (req) => {
+  const includeRaw = req.query?.includeCompetition ?? req.query?.include_competition;
+  const modeRaw = req.query?.competitionMode ?? req.query?.competition_mode;
+  const normalizedInclude = String(includeRaw || '').trim().toLowerCase();
+  const normalizedMode = String(modeRaw || '').trim().toLowerCase();
+  if (normalizedInclude === 'summary' || normalizedMode === 'summary') return 'summary';
+  if (normalizedInclude === 'full' || normalizedMode === 'full') return 'full';
+  if (['1', 'true', 'yes', 'on'].includes(normalizedInclude)) return 'full';
+  return null;
+};
+
+const compactLeadCompetitionSummaryClinic = (clinic) => {
+  if (!clinic) return null;
+  return {
+    clinic_id: clinic.clinic_id,
+    clinic_name: clinic.clinic_name,
+    leads_total: clinic.leads_total,
+    human_contacted: clinic.human_contacted,
+    avg_response_minutes: clinic.avg_response_minutes,
+    response_target_rate: clinic.response_target_rate,
+    open_without_human_response_over_target: clinic.open_without_human_response_over_target,
+    appointment_converted_count: clinic.appointment_converted_count,
+    appointment_conversion_rate: clinic.appointment_conversion_rate,
+    rank: clinic.rank,
+  };
+};
+
+const compactLeadCompetitionSummaryResponse = (competition) => {
+  if (!competition) return null;
+  const summary = competition.summary || null;
+  return {
+    ready: competition.ready,
+    refreshing: competition.refreshing,
+    stale: competition.stale,
+    reason: competition.reason,
+    detail_level: 'summary',
+    scope: competition.scope,
+    group_id: competition.group_id,
+    group_name: competition.group_name,
+    selected_clinic_id: competition.selected_clinic_id,
+    period: competition.period || null,
+    target_response_minutes: competition.target_response_minutes,
+    auto_reply_excluded: competition.auto_reply_excluded,
+    business_hours_applied: competition.business_hours_applied,
+    schedule_fallback_clinics: competition.schedule_fallback_clinics,
+    summary: summary ? {
+      clinics_count: summary.clinics_count,
+      leads_analyzed: summary.leads_analyzed,
+      human_contacted: summary.human_contacted,
+      avg_response_minutes: summary.avg_response_minutes,
+      median_response_minutes: summary.median_response_minutes,
+      response_target_rate: summary.response_target_rate,
+      open_without_human_response_over_target: summary.open_without_human_response_over_target,
+      appointment_converted_count: summary.appointment_converted_count,
+      appointment_conversion_rate: summary.appointment_conversion_rate,
+      best_clinic: compactLeadCompetitionSummaryClinic(summary.best_clinic),
+      selected_clinic: compactLeadCompetitionSummaryClinic(summary.selected_clinic),
+      selected_rank: summary.selected_rank,
+      selected_vs_group_avg_percent: summary.selected_vs_group_avg_percent,
+      selected_vs_best_minutes: summary.selected_vs_best_minutes,
+    } : null,
+  };
 };
 
 const requireLeadManageForImport = async (req, res) => {
@@ -6668,12 +6920,16 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
   const descartados = await LeadIntake.count({ where: { ...where, status_lead: 'descartado' } });
 
   const tasa_conversion = total > 0 ? (convertidos / total) * 100 : 0;
-  const competition = shouldIncludeLeadCompetitionStats(req)
+  const competitionMode = getLeadCompetitionStatsMode(req);
+  const rawCompetition = competitionMode
     ? await getLeadCompetitionStatsForResponse(req, {
       clinicIdRaw,
       groupIdRaw,
     })
     : null;
+  const competition = competitionMode === 'summary'
+    ? compactLeadCompetitionSummaryResponse(rawCompetition)
+    : (rawCompetition ? { ...rawCompetition, detail_level: 'full' } : null);
 
   res.status(200).json({
     total,
