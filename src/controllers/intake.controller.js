@@ -1511,9 +1511,68 @@ const getLeadCompetitionStatsForResponse = async (req, { clinicIdRaw = null, gro
   };
 };
 
-const shouldIncludeLeadCompetitionStats = (req) => {
-  const raw = req.query?.includeCompetition ?? req.query?.include_competition;
-  return ['1', 'true', 'yes', 'on'].includes(String(raw || '').trim().toLowerCase());
+const getLeadCompetitionStatsMode = (req) => {
+  const includeRaw = req.query?.includeCompetition ?? req.query?.include_competition;
+  const modeRaw = req.query?.competitionMode ?? req.query?.competition_mode;
+  const normalizedInclude = String(includeRaw || '').trim().toLowerCase();
+  const normalizedMode = String(modeRaw || '').trim().toLowerCase();
+  if (normalizedInclude === 'summary' || normalizedMode === 'summary') return 'summary';
+  if (normalizedInclude === 'full' || normalizedMode === 'full') return 'full';
+  if (['1', 'true', 'yes', 'on'].includes(normalizedInclude)) return 'full';
+  return null;
+};
+
+const compactLeadCompetitionSummaryClinic = (clinic) => {
+  if (!clinic) return null;
+  return {
+    clinic_id: clinic.clinic_id,
+    clinic_name: clinic.clinic_name,
+    leads_total: clinic.leads_total,
+    human_contacted: clinic.human_contacted,
+    avg_response_minutes: clinic.avg_response_minutes,
+    response_target_rate: clinic.response_target_rate,
+    open_without_human_response_over_target: clinic.open_without_human_response_over_target,
+    appointment_converted_count: clinic.appointment_converted_count,
+    appointment_conversion_rate: clinic.appointment_conversion_rate,
+    rank: clinic.rank,
+  };
+};
+
+const compactLeadCompetitionSummaryResponse = (competition) => {
+  if (!competition) return null;
+  const summary = competition.summary || null;
+  return {
+    ready: competition.ready,
+    refreshing: competition.refreshing,
+    stale: competition.stale,
+    reason: competition.reason,
+    detail_level: 'summary',
+    scope: competition.scope,
+    group_id: competition.group_id,
+    group_name: competition.group_name,
+    selected_clinic_id: competition.selected_clinic_id,
+    period: competition.period || null,
+    target_response_minutes: competition.target_response_minutes,
+    auto_reply_excluded: competition.auto_reply_excluded,
+    business_hours_applied: competition.business_hours_applied,
+    schedule_fallback_clinics: competition.schedule_fallback_clinics,
+    summary: summary ? {
+      clinics_count: summary.clinics_count,
+      leads_analyzed: summary.leads_analyzed,
+      human_contacted: summary.human_contacted,
+      avg_response_minutes: summary.avg_response_minutes,
+      median_response_minutes: summary.median_response_minutes,
+      response_target_rate: summary.response_target_rate,
+      open_without_human_response_over_target: summary.open_without_human_response_over_target,
+      appointment_converted_count: summary.appointment_converted_count,
+      appointment_conversion_rate: summary.appointment_conversion_rate,
+      best_clinic: compactLeadCompetitionSummaryClinic(summary.best_clinic),
+      selected_clinic: compactLeadCompetitionSummaryClinic(summary.selected_clinic),
+      selected_rank: summary.selected_rank,
+      selected_vs_group_avg_percent: summary.selected_vs_group_avg_percent,
+      selected_vs_best_minutes: summary.selected_vs_best_minutes,
+    } : null,
+  };
 };
 
 const requireLeadManageForImport = async (req, res) => {
@@ -6668,12 +6727,16 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
   const descartados = await LeadIntake.count({ where: { ...where, status_lead: 'descartado' } });
 
   const tasa_conversion = total > 0 ? (convertidos / total) * 100 : 0;
-  const competition = shouldIncludeLeadCompetitionStats(req)
+  const competitionMode = getLeadCompetitionStatsMode(req);
+  const rawCompetition = competitionMode
     ? await getLeadCompetitionStatsForResponse(req, {
       clinicIdRaw,
       groupIdRaw,
     })
     : null;
+  const competition = competitionMode === 'summary'
+    ? compactLeadCompetitionSummaryResponse(rawCompetition)
+    : (rawCompetition ? { ...rawCompetition, detail_level: 'full' } : null);
 
   res.status(200).json({
     total,

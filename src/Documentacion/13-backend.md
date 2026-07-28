@@ -7252,13 +7252,16 @@ total de leads, no volumen de citas.
 La comparativa acepta periodo propio sin alterar los contadores superiores del
 endpoint: la UI debe pedirla de forma explícita con `includeCompetition=true`;
 si no llega ese flag, `competition` se devuelve como `null` y no se calcula el
-ranking. Con el flag activo acepta `competitionPeriod=30d|90d|365d` o, para
-rangos explícitos, `competitionStartDate`/`competitionEndDate`. La respuesta incluye
-`competition.period.key` y `competition.trend.buckets`; cada bucket expone
-leads, contactos humanos, tiempo medio, ratio dentro de objetivo, leads
-enfriados y conversión a cita. Si hay clínica seleccionada, `trend.buckets`
-representa esa clínica; `trend.group_buckets` queda disponible para usos
-agregados posteriores.
+ranking. Con `competitionMode=summary` devuelve solo el bloque compacto necesario
+para el titular competitivo inicial. Con `competitionMode=full` devuelve ranking,
+tarjetas y gráficas; por compatibilidad, `includeCompetition=true` sin modo
+equivale a `full`. Con el flag activo acepta `competitionPeriod=30d|90d|365d`
+o, para rangos explícitos, `competitionStartDate`/`competitionEndDate`. La
+respuesta completa incluye `competition.period.key` y
+`competition.trend.buckets`; cada bucket expone leads, contactos humanos,
+tiempo medio, ratio dentro de objetivo, leads enfriados y conversión a cita. Si
+hay clínica seleccionada, `trend.buckets` representa esa clínica;
+`trend.group_buckets` queda disponible para usos agregados posteriores.
 
 Para proteger rendimiento, la comparativa usa una ventana por defecto de los
 últimos 30 días cuando la petición no trae rango temporal y se cachea por
