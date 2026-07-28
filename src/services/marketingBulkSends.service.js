@@ -403,7 +403,7 @@ function isStarTextReviewBody(value) {
 function reviewTemplateBodyHasSender(value) {
   const raw = String(value || '');
   const normalized = normalizeKey(raw);
-  return /soy\s+\{\{\s*3\s*\}\}/i.test(raw)
+  return /soy\s+\{\{\s*(2|3)\s*\}\}/i.test(raw)
     || normalized.includes('firma_resenas')
     || normalized.includes('remitente_resena')
     || normalized.includes('nombre_remitente_resenas')
@@ -3343,6 +3343,8 @@ function isPrimaryReviewRequestWhatsappTemplateCandidate(template) {
     || text.includes('solicitar_resena')
     || text.includes('solicitud_resena')
     || text.includes('solicitud_de_valoracion')
+    || text.includes('solicitud_de_opinion')
+    || text.includes('opinion_tras_visita')
     || REVIEW_TEMPLATE_USAGES.has(normalizeTemplateUsage(plain.variables?.template_usage));
 }
 
@@ -3359,6 +3361,47 @@ function isAdminCustomReviewTemplate(template) {
   return String(plain.origin || '').toLowerCase() === 'custom'
     && isGlobalAdmin(plain.created_by_user_id)
     && isStarTextReviewBody(extractBodyText(plain.components));
+}
+
+function isApprovedExternalReviewRequestTemplate(template) {
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  const origin = String(plain.origin || '').toLowerCase();
+  if (!['external', 'custom'].includes(origin)) return false;
+  if (getTemplateCategory(plain) !== 'MARKETING') return false;
+
+  const identity = normalizeKey([
+    plain.name,
+    plain.display_name,
+    JSON.stringify(plain.variables || ''),
+  ].filter(Boolean).join(' '));
+  const body = extractBodyText(plain.components);
+  const normalizedBody = normalizeKey(body);
+  const looksLikeReviewRequest =
+    identity.includes('solicitud_de_opinion')
+    || identity.includes('opinion_tras_visita')
+    || identity.includes('solicitud_resena')
+    || identity.includes('solicitar_resena')
+    || identity.includes('solicitud_de_valoracion')
+    || REVIEW_TEMPLATE_USAGES.has(normalizeTemplateUsage(plain.variables?.template_usage));
+
+  return looksLikeReviewRequest
+    && reviewTemplateBodyHasSender(body)
+    && (
+      isStarTextReviewBody(body)
+      || (
+        normalizedBody.includes('opinion')
+        && normalizedBody.includes('valorar')
+        && normalizedBody.includes('experiencia')
+        && /5\s*[⭐★]{5}/.test(body)
+        && /1\s*[⭐★]/.test(body)
+      )
+    );
+}
+
+function isAllowedReviewRequestTemplateCopy(template) {
+  return reviewTemplateMatchesCurrentCatalogBody(template)
+    || isAdminCustomReviewTemplate(template)
+    || isApprovedExternalReviewRequestTemplate(template);
 }
 
 function templateMatchesCurrentCatalogBody(template) {
@@ -3427,8 +3470,7 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
       const explicitMatchesMedia = preferPhoto
         ? templateHasImageHeader(explicit)
         : !templateHasImageHeader(explicit);
-      const explicitHasAllowedCopy = reviewTemplateMatchesCurrentCatalogBody(explicit)
-        || isAdminCustomReviewTemplate(explicit);
+      const explicitHasAllowedCopy = isAllowedReviewRequestTemplateCopy(explicit);
       if (explicitMatchesWaba && explicitMatchesMedia && explicitHasAllowedCopy) {
         return explicit;
       }
@@ -3493,7 +3535,7 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
     const photoTemplate = photoCandidates
       .filter(isPrimaryReviewRequestWhatsappTemplateCandidate)
       .filter(templateHasImageHeader)
-      .filter(reviewTemplateMatchesCurrentCatalogBody)
+      .filter(isAllowedReviewRequestTemplateCopy)
       .filter((template) => scoreWhatsappTemplateForScope(template, clinicIds, targetWabaId) > 0)
       .sort((a, b) => {
         const aScore = scoreWhatsappTemplateForScope(a, clinicIds, targetWabaId);
@@ -3522,8 +3564,12 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
             { name: { [Op.like]: '%solicitar_resena%' } },
             { name: { [Op.like]: '%solicitud_resena%' } },
             { name: { [Op.like]: '%solicitud_de_valoracion%' } },
+            { name: { [Op.like]: '%solicitud_de_opinion%' } },
+            { name: { [Op.like]: '%opinion_tras_visita%' } },
             { display_name: { [Op.like]: '%reseña%' } },
             { display_name: { [Op.like]: '%resena%' } },
+            { display_name: { [Op.like]: '%opinión%' } },
+            { display_name: { [Op.like]: '%opinion%' } },
             ...(targetWabaId ? [{ waba_id: targetWabaId }] : []),
           ],
         },
@@ -3534,7 +3580,7 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
   });
   return candidates
     .filter(isPrimaryReviewRequestWhatsappTemplateCandidate)
-    .filter(reviewTemplateMatchesCurrentCatalogBody)
+    .filter(isAllowedReviewRequestTemplateCopy)
     .filter((template) => scoreWhatsappTemplateForScope(template, clinicIds, targetWabaId) > 0)
     .sort((a, b) => {
       const aScore = scoreWhatsappTemplateForScope(a, clinicIds, targetWabaId);
