@@ -7235,10 +7235,12 @@ scope global administrativo explícito. Si no hay grupo o no hay al menos dos
 sedes comparables, el bloque devuelve `ready=false` con `reason`.
 
 La métrica principal es el tiempo hasta el primer contacto humano registrado en
-`LeadContactAttempts` con `usuario_id` no nulo. Las auto-respuestas de leads
-quedan excluidas, por lo que una clínica con respuesta automática activa mide
-desde el siguiente contacto humano. El cálculo usa horario de clínica
-`ClinicaHorarios`; si alguna sede no lo tiene configurado, se marca
+`LeadContactAttempts` con `usuario_id` no nulo. Como fallback operativo, si el
+lead ya tiene una cita vinculada y no existe intento normalizado, la creación de
+esa cita cuenta como señal de atención. Las auto-respuestas de leads quedan
+excluidas, por lo que una clínica con respuesta automática activa mide desde el
+siguiente contacto humano o desde la cita registrada. El cálculo usa horario de
+clínica `ClinicaHorarios`; si alguna sede no lo tiene configurado, se marca
 `business_hours_applied=false` y para esa sede se usa tiempo natural como
 fallback visible.
 

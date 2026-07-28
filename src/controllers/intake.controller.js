@@ -901,11 +901,12 @@ const firstHumanContactFromHistory = (lead) => {
   return candidates.sort((a, b) => a.getTime() - b.getTime())[0];
 };
 
-const resolveHumanFirstContactAt = (lead, firstAttemptAt) => {
+const resolveHumanFirstContactAt = (lead, firstAttemptAt, linkedAppointmentCreatedAt = null) => {
   const createdAt = toFiniteDate(lead?.created_at);
   const candidates = [
     toFiniteDate(firstAttemptAt),
     firstHumanContactFromHistory(lead),
+    toFiniteDate(linkedAppointmentCreatedAt),
   ];
 
   const callOutcome = String(cleanString(lead?.call_outcome) || '').toLowerCase();
@@ -1077,6 +1078,7 @@ const computeLeadCompetitionStats = async (req, scope) => {
         'historial_contactos',
         'call_outcome',
         'call_outcome_at',
+        'call_outcome_appointment_id',
       ],
       raw: true,
     }),
@@ -1101,6 +1103,37 @@ const computeLeadCompetitionStats = async (req, scope) => {
     parseInteger(row.lead_intake_id),
     row.first_contact_at,
   ]));
+  const linkedAppointmentIds = leads
+    .map((lead) => parseInteger(lead.call_outcome_appointment_id))
+    .filter((value) => value !== null);
+  const appointmentLookupConditions = [];
+  if (leadIds.length) appointmentLookupConditions.push({ lead_intake_id: { [Op.in]: leadIds } });
+  if (linkedAppointmentIds.length) appointmentLookupConditions.push({ id_cita: { [Op.in]: linkedAppointmentIds } });
+  const linkedAppointmentRows = appointmentLookupConditions.length && CitaPaciente
+    ? await CitaPaciente.findAll({
+        attributes: ['id_cita', 'lead_intake_id', 'created_at'],
+        where: appointmentLookupConditions.length === 1
+          ? appointmentLookupConditions[0]
+          : { [Op.or]: appointmentLookupConditions },
+        raw: true,
+      })
+    : [];
+  const leadIdByAppointmentId = new Map(leads
+    .map((lead) => [parseInteger(lead.call_outcome_appointment_id), parseInteger(lead.id)])
+    .filter(([appointmentId, leadId]) => appointmentId !== null && leadId !== null));
+  const appointmentCreatedByLead = new Map();
+  for (const row of linkedAppointmentRows) {
+    const directLeadId = parseInteger(row.lead_intake_id);
+    const leadId = directLeadId !== null
+      ? directLeadId
+      : (leadIdByAppointmentId.get(parseInteger(row.id_cita)) ?? null);
+    const createdAt = toFiniteDate(row.created_at);
+    if (leadId === null || !createdAt) continue;
+    const current = toFiniteDate(appointmentCreatedByLead.get(leadId));
+    if (!current || createdAt < current) {
+      appointmentCreatedByLead.set(leadId, createdAt);
+    }
+  }
 
   const schedulesByClinic = new Map();
   for (const row of scheduleRows || []) {
@@ -1151,7 +1184,12 @@ const computeLeadCompetitionStats = async (req, scope) => {
     stat.leads_total += 1;
 
     const runtime = clinicRuntimeById.get(clinicId) || { schedule: [], timeZone: 'Europe/Madrid' };
-    const firstContactAt = resolveHumanFirstContactAt(lead, firstAttemptByLead.get(parseInteger(lead.id)));
+    const leadId = parseInteger(lead.id);
+    const firstContactAt = resolveHumanFirstContactAt(
+      lead,
+      firstAttemptByLead.get(leadId),
+      appointmentCreatedByLead.get(leadId),
+    );
     if (firstContactAt) {
       const minutes = businessMinutesBetweenForCompetition(createdAt, firstContactAt, runtime);
       stat.response_minutes.push(minutes);
