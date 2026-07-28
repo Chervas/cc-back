@@ -2966,7 +2966,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
 
   // Esta segunda acción pública termina aquí: representa solo el resumen
   // interno y jamás invoca Meta CAPI, Google Ads ni una salida de WhatsApp.
-  if (lead && shouldEmitLeadCreated && cleanString(lead.source).toLowerCase() !== 'call_click') {
+  if (lead && shouldEmitLeadCreated && String(cleanString(lead.source) || '').toLowerCase() !== 'call_click') {
     try {
       await leadAutoReplyService.enqueueForLead({
         lead,
