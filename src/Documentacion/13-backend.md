@@ -1916,6 +1916,7 @@ Reglas de seguridad operativa:
 - La importación histórica no crea `Lead`.
 - Las citas históricas importadas no deben disparar `appointment_created`, recordatorios de cita ni automatizaciones de agenda. El runtime las omite por `motivo = "Importación de pacientes para reactivación"` o título `Histórico:`.
 - En reseñas, el tratamiento no es obligatorio: bastan nombre, móvil, fecha de atención y sede si el scope es de grupo. En reactivación clínica el tratamiento sigue siendo necesario para aplicar reglas de inactividad por tratamiento.
+- Las importaciones de reseñas envían `create_missing_treatments=false`: un valor corto no reconocido en una columna de tratamiento puede conservarse como contexto, pero no crea entradas nuevas en el catálogo. El mapeo de esa columna está desactivado por defecto y el texto libre de más de 255 caracteres se ignora; nunca debe llegar a un `INSERT` de `Tratamientos` ni a una variable de campaña.
 - Las filas sin móvil, con teléfono inválido, duplicadas, con sede ambigua/no reconocida, baja comercial o cita futura quedan excluidas con motivo visible; no bloquean la importación completa.
 - Si se reimporta el mismo paciente, el teléfono móvil manda. El paciente se actualiza de forma conservadora: se completan huecos, no se machacan datos existentes.
 
