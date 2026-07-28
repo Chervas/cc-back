@@ -733,6 +733,67 @@ test('FAQ se renderiza como disclosure seguro y su schema solo alcanza la págin
   assert.deepEqual(secondaryFaq.mainEntity.map((entry) => entry.name), ['¿Pregunta de otra página?']);
 });
 
+test('Testimonio se renderiza como bloque semántico seguro y publicable', () => {
+  const input = fixture();
+  const primarySection = Object.values(input.document.nodes).find((node) => node.type === 'section');
+  input.document.nodes.testimonial_primary = {
+    id: 'testimonial_primary',
+    type: 'testimonial',
+    version: 1,
+    props: {
+      quote: 'Texto provisional',
+      attribution: 'Paciente provisional',
+      role: '',
+      rating: 5,
+      source_label: 'Google',
+    },
+    children: [],
+    binding_ids: [
+      'testimonial_quote_binding',
+      'testimonial_attribution_binding',
+      'testimonial_role_binding',
+    ],
+  };
+  input.document.bindings.testimonial_quote_binding = {
+    target_node_id: 'testimonial_primary',
+    target_prop: 'quote',
+    source: 'content_entry',
+    source_id: 'testimonial_content_entry',
+    field: 'quote',
+  };
+  input.document.bindings.testimonial_attribution_binding = {
+    target_node_id: 'testimonial_primary',
+    target_prop: 'attribution',
+    source: 'content_entry',
+    source_id: 'testimonial_content_entry',
+    field: 'display_name',
+  };
+  input.document.bindings.testimonial_role_binding = {
+    target_node_id: 'testimonial_primary',
+    target_prop: 'role',
+    source: 'content_entry',
+    source_id: 'testimonial_content_entry',
+    field: 'role',
+  };
+  input.contentSnapshot.content_entries.testimonial_content_entry = {
+    id: 'testimonial_content_entry',
+    fields: {
+      quote: 'Trato rápido, cercano & buen resultado.',
+      display_name: 'María & familia',
+      role: 'Primera visita',
+    },
+  };
+  primarySection.children.push('testimonial_primary');
+
+  const artifact = compileWebArtifact(input);
+  const stylesheetPath = Object.keys(artifact.files).find((path) => path.startsWith('assets/styles.'));
+  assert.match(artifact.files['index.html'], /<figure[^>]*cc-testimonial[^>]*>/);
+  assert.match(artifact.files['index.html'], /<blockquote class="cc-testimonial-quote">Trato rápido, cercano &amp; buen resultado\.<\/blockquote>/);
+  assert.match(artifact.files['index.html'], /<strong>María &amp; familia<\/strong><span>Primera visita<\/span><span class="cc-testimonial-source">Google<\/span>/);
+  assert.match(artifact.files['index.html'], /aria-label="5 de 5 estrellas">★★★★★/);
+  assert.match(artifact.files[stylesheetPath], /\.cc-testimonial\{/);
+});
+
 test('Schema configurable por página solo usa presets seguros y puede omitir FAQPage', () => {
   const input = fixture();
   const primarySection = Object.values(input.document.nodes).find((node) => node.type === 'section');
