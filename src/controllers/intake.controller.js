@@ -1511,6 +1511,11 @@ const getLeadCompetitionStatsForResponse = async (req, { clinicIdRaw = null, gro
   };
 };
 
+const shouldIncludeLeadCompetitionStats = (req) => {
+  const raw = req.query?.includeCompetition ?? req.query?.include_competition;
+  return ['1', 'true', 'yes', 'on'].includes(String(raw || '').trim().toLowerCase());
+};
+
 const requireLeadManageForImport = async (req, res) => {
   const clinicId = parseInteger(req.body?.config?.clinic_id ?? req.body?.config?.clinica_id);
   const actorId = parseInteger(req.userData?.userId);
@@ -6663,10 +6668,12 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
   const descartados = await LeadIntake.count({ where: { ...where, status_lead: 'descartado' } });
 
   const tasa_conversion = total > 0 ? (convertidos / total) * 100 : 0;
-  const competition = await getLeadCompetitionStatsForResponse(req, {
-    clinicIdRaw,
-    groupIdRaw,
-  });
+  const competition = shouldIncludeLeadCompetitionStats(req)
+    ? await getLeadCompetitionStatsForResponse(req, {
+      clinicIdRaw,
+      groupIdRaw,
+    })
+    : null;
 
   res.status(200).json({
     total,

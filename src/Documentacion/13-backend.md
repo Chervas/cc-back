@@ -7250,8 +7250,10 @@ cita vinculada). Esta métrica mide efectividad de conversión a cita sobre el
 total de leads, no volumen de citas.
 
 La comparativa acepta periodo propio sin alterar los contadores superiores del
-endpoint: `competitionPeriod=30d|90d|365d` o, para rangos explícitos,
-`competitionStartDate`/`competitionEndDate`. La respuesta incluye
+endpoint: la UI debe pedirla de forma explícita con `includeCompetition=true`;
+si no llega ese flag, `competition` se devuelve como `null` y no se calcula el
+ranking. Con el flag activo acepta `competitionPeriod=30d|90d|365d` o, para
+rangos explícitos, `competitionStartDate`/`competitionEndDate`. La respuesta incluye
 `competition.period.key` y `competition.trend.buckets`; cada bucket expone
 leads, contactos humanos, tiempo medio, ratio dentro de objetivo, leads
 enfriados y conversión a cita. Si hay clínica seleccionada, `trend.buckets`
