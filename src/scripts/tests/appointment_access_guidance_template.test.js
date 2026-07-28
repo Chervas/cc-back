@@ -190,6 +190,38 @@ test('contrato semántico conserva el orden real 1..5 sin reutilizar indicacione
   );
 });
 
+test('contrato de reseñas con variables numéricas de Meta infiere paciente, remitente y clínica', () => {
+  const contract = buildWhatsappTemplateVariableContract({
+    name: 'cc_solicitud_de_opinion_tras_visita_con_imagen_ms4gsf3r',
+    variables: [
+      { index: 1, position: 1, name: '1', example: '1', description: 'Variable 1' },
+      { index: 2, position: 2, name: '2', example: '2', description: 'Variable 2' },
+      { index: 3, position: 3, name: '3', example: '3', description: 'Variable 3' },
+    ],
+    components: [
+      { type: 'HEADER', format: 'IMAGE' },
+      {
+        type: 'BODY',
+        text: '¡Hola {{1}}! Soy {{2}} de {{3}}. ¿Cómo valorarías tu experiencia?',
+        example: { body_text: [['1', '2', '3']] },
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    contract.map((variable) => variable.name),
+    ['nombre_paciente', 'firma_resenas', 'nombre_clinica']
+  );
+  assert.deepEqual(
+    buildPositionalBindingsFromNamed(buildSystemNamedBindingsForTemplateVariables(contract), {}, contract),
+    {
+      1: '{{paciente.nombre}}',
+      2: '{{clinica.firma_resenas}}',
+      3: '{{clinica.nombre}}',
+    }
+  );
+});
+
 test('componentes IMAGE conservan cabecera y parámetros BODY ordenados', () => {
   const components = buildAccessGuidanceTemplateComponents({
     imageUrl: VALID_GUIDANCE.image_url,
