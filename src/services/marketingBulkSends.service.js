@@ -2654,6 +2654,55 @@ function formatReviewDate(value) {
   return date.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
 }
 
+function parseReviewCandidateDate(value) {
+  if (!value) return null;
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+  const raw = normalizeText(value);
+  if (!raw) return null;
+  const direct = parseDate(raw);
+  if (direct) return direct;
+  const spanish = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})(?:\s+(\d{1,2}):(\d{2}))?/);
+  if (spanish) {
+    const year = Number(spanish[3].length === 2 ? `20${spanish[3]}` : spanish[3]);
+    const month = Number(spanish[2]);
+    const day = Number(spanish[1]);
+    const hour = Number(spanish[4] || 0);
+    const minute = Number(spanish[5] || 0);
+    const parsed = new Date(year, month - 1, day, hour, minute, 0, 0);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+  return null;
+}
+
+function getReviewCandidateSortTimestamp(item) {
+  const custom = asPlainObject(item?.custom_fields);
+  const candidates = [
+    item?.last_visit_at,
+    item?.appointment_at,
+    custom.fecha_fin_tratamiento,
+    custom.fecha_fin_realizacion,
+    custom.fecha_ultimo_tratamiento,
+    custom.fecha_ultima_cita,
+    custom.fecha_tratamiento,
+    custom.fecha_cita,
+    custom.fecha,
+  ];
+  for (const candidate of candidates) {
+    const parsed = parseReviewCandidateDate(candidate);
+    if (parsed) return parsed.getTime();
+  }
+  return 0;
+}
+
+function sortReviewRequestItemsByRecentCare(items = []) {
+  return [...(Array.isArray(items) ? items : [])]
+    .map((item, index) => ({ item, index, time: getReviewCandidateSortTimestamp(item) }))
+    .sort((left, right) => (right.time - left.time) || (left.index - right.index))
+    .map((entry) => entry.item);
+}
+
 function buildPatientDisplayName(patient) {
   return [patient?.nombre, patient?.apellidos].filter(Boolean).join(' ').trim() || 'Paciente';
 }
@@ -2991,7 +3040,7 @@ async function buildItemsForReviewRequest(scope, body = {}) {
       latestAppointmentByPatient.set(patientId, row);
     }
 
-    return applyReviewRequestExclusions(patients.map((patient) => {
+    return sortReviewRequestItemsByRecentCare(applyReviewRequestExclusions(patients.map((patient) => {
       const latestAppointment = latestAppointmentByPatient.get(Number(patient.id_paciente));
       const item = mapReviewPatientItem({
         patient,
@@ -3021,7 +3070,7 @@ async function buildItemsForReviewRequest(scope, body = {}) {
           ...(item.custom_fields || {}),
         },
       };
-    }), body);
+    }), body));
   }
 
   const appointmentWhere = {
@@ -3052,7 +3101,7 @@ async function buildItemsForReviewRequest(scope, body = {}) {
       { model: Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica'] },
       db.Tratamiento ? { model: db.Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre'] } : null,
     ].filter(Boolean),
-    order: [['inicio', 'ASC']],
+    order: [['inicio', 'DESC'], ['id_cita', 'DESC']],
     limit: Math.min(limit * 5, REVIEW_REQUEST_CANDIDATE_LIMIT * 5),
   });
 
@@ -3066,7 +3115,7 @@ async function buildItemsForReviewRequest(scope, body = {}) {
     if (selected.size >= limit) break;
   }
 
-  return applyReviewRequestExclusions(Array.from(selected.values()), body);
+  return sortReviewRequestItemsByRecentCare(applyReviewRequestExclusions(Array.from(selected.values()), body));
 }
 
 async function buildReviewTreatmentOptions(scope) {
@@ -4117,9 +4166,9 @@ async function getReviewRequestSummary(scope, options = {}) {
   const whatsappAvailable = scope?.scope === 'group'
     ? groupReadyClinics.length > 0
     : await hasWhatsappConfigForScope(effectiveScope);
-  const candidatePool = scope?.scope === 'group'
+  const candidatePool = sortReviewRequestItemsByRecentCare(scope?.scope === 'group'
     ? applyReviewClinicReadinessExclusions(candidates, clinicStatuses)
-    : candidates;
+    : candidates);
   const summaryCandidates = candidatePool.filter((item) => !String(item.status || '').startsWith('excluded'));
   const excludedCandidates = candidatePool.filter((item) => String(item.status || '').startsWith('excluded'));
   const reviewExclusionBreakdown = Array.from(excludedCandidates.reduce((counts, item) => {
@@ -4163,6 +4212,8 @@ async function getReviewRequestSummary(scope, options = {}) {
       candidates_preview: candidatePool.slice(0, previewLimit).map(serializeItem),
       candidates_preview_total: candidatePool.length,
       candidates_preview_limit: previewLimit,
+      review_send_order: 'recent_care_desc',
+      review_send_order_label: 'Se enviará primero a los pacientes con fecha de tratamiento o visita más reciente.',
       review_exclusions_total: excludedCandidates.length,
       review_exclusion_breakdown: reviewExclusionBreakdown,
       treatment_options: treatmentOptions,
@@ -5200,6 +5251,9 @@ async function createCampaign(scope, body = {}, userId = null) {
     if (importMetadata) {
       importSummary = buildImportSummary(itemPayloads, importMetadata);
     }
+    if (isReviewRequest) {
+      itemPayloads = sortReviewRequestItemsByRecentCare(itemPayloads);
+    }
     const counters = computeCounters(itemPayloads);
     const list = await MarketingPatientList.create({
       name: listName,
@@ -5226,6 +5280,8 @@ async function createCampaign(scope, body = {}, userId = null) {
         list_source: source,
         review_request: isReviewRequest,
         review_source: isReviewRequest ? reviewSource : null,
+        review_send_order: isReviewRequest ? 'recent_care_desc' : null,
+        review_send_order_label: isReviewRequest ? 'Se enviará primero a los pacientes con fecha de tratamiento o visita más reciente.' : null,
         review_group_clinic_ids: isReviewRequest ? parseReviewClinicIds(body) : [],
         review_treatment_id: isReviewRequest ? (reviewTreatmentIds[0] || null) : null,
         review_treatment_ids: isReviewRequest ? reviewTreatmentIds : [],
@@ -6487,6 +6543,8 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       consent_acknowledged: !!(body.consent_acknowledged ?? list.criteria?.consent_acknowledged),
       review_request: isReviewRequest,
       review_source: isReviewRequest ? reviewSource : null,
+      review_send_order: isReviewRequest ? 'recent_care_desc' : null,
+      review_send_order_label: isReviewRequest ? 'Se enviará primero a los pacientes con fecha de tratamiento o visita más reciente.' : null,
       review_treatment_id: isReviewRequest ? (reviewTreatmentIds[0] || null) : null,
       review_treatment_ids: isReviewRequest ? reviewTreatmentIds : [],
       review_treatment_moment: isReviewRequest ? normalizeText(body.review_treatment_moment || body.reviewTreatmentMoment || list.criteria?.review_treatment_moment || '') || null : null,
