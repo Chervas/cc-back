@@ -37,6 +37,10 @@ const { getIO } = require('../services/socket.service');
 const jobRequestsService = require('../services/jobRequests.service');
 const leadAutoReplyService = require('../services/leadAutoReply.service');
 const {
+  localDateTimeToUtc,
+  resolveClinicTimeZone,
+} = require('../services/clinicOpeningHours.service');
+const {
   enqueueGoogleDataManagerControlPlaneReconciliation,
 } = require('../services/googleDataManagerDiagnosticsEnqueue.service');
 const { previewLeadImport, executeLeadImport } = require('../services/leadImport.service');
@@ -136,6 +140,23 @@ const CHANNELS = new Set(['paid', 'organic', 'unknown']);
 const SOURCES = new Set(['meta_ads', 'google_ads', 'web', 'whatsapp', 'call_click', 'tiktok_ads', 'seo', 'direct', 'local_services']);
 const STATUSES = new Set(['nuevo', 'contactado', 'esperando_info', 'info_recibida', 'cualificado', 'citado', 'acudio_cita', 'convertido', 'descartado']);
 const DEDUPE_WINDOW_HOURS = parseInt(process.env.INTAKE_DEDUPE_WINDOW_HOURS || '24', 10);
+const LEAD_COMPETITION_STATS_CACHE_TTL_MS = Math.max(
+  60_000,
+  parseInt(process.env.LEAD_COMPETITION_STATS_CACHE_TTL_MS || `${5 * 60 * 1000}`, 10) || (5 * 60 * 1000),
+);
+const LEAD_COMPETITION_STATS_STALE_MS = Math.max(
+  LEAD_COMPETITION_STATS_CACHE_TTL_MS,
+  parseInt(process.env.LEAD_COMPETITION_STATS_STALE_MS || `${20 * 60 * 1000}`, 10) || (20 * 60 * 1000),
+);
+const LEAD_COMPETITION_DEFAULT_LOOKBACK_DAYS = Math.max(
+  1,
+  parseInt(process.env.LEAD_COMPETITION_DEFAULT_LOOKBACK_DAYS || '30', 10) || 30,
+);
+const LEAD_COMPETITION_RESPONSE_TARGET_MINUTES = Math.max(
+  15,
+  parseInt(process.env.LEAD_COMPETITION_RESPONSE_TARGET_MINUTES || '240', 10) || 240,
+);
+const leadCompetitionStatsCache = new Map();
 const LEAD_ACTIVE_APPOINTMENT_STATES = new Set([
   'pendiente',
   'info_enviada',
@@ -653,6 +674,683 @@ const buildLeadSearchConditions = (search, {
   }
 
   return conditions;
+};
+
+const buildLeadStatsWhereFromRequest = async (
+  req,
+  {
+    clinicIdRaw = null,
+    groupIdRaw = null,
+    scopeCondition = null,
+    includeSearch = true,
+    forceCreatedAtRange = null,
+  } = {},
+) => {
+  const {
+    clinicId,
+    groupId,
+    campanaId,
+    channel,
+    source,
+    search,
+    startDate,
+    endDate,
+  } = req.query || {};
+
+  const where = {};
+  const includeArchived = ['1', 'true', 'yes'].includes(
+    String(req.query?.includeArchived || req.query?.include_archived || '').toLowerCase(),
+  );
+  if (!includeArchived) where.archived_at = null;
+
+  const effectiveClinicIdRaw = clinicIdRaw || clinicId || req.query?.clinica_id;
+  const effectiveGroupIdRaw = groupIdRaw || groupId || req.query?.grupo_clinica_id;
+  const campanaIdParsed = parseInteger(campanaId || req.query?.campana_id);
+
+  if (scopeCondition) {
+    appendAndWhere(where, scopeCondition);
+  } else {
+    await applyLeadScopeWhere(
+      where,
+      { ...req.query, clinicId: effectiveClinicIdRaw, groupId: effectiveGroupIdRaw },
+      req.userData?.userId,
+    );
+  }
+
+  if (campanaIdParsed !== null) where.campana_id = campanaIdParsed;
+  if (channel && CHANNELS.has(channel)) where.channel = channel;
+  if (source && SOURCES.has(source)) {
+    const originWhere = buildMarketingOriginWhere(source, Op);
+    if (originWhere) where[Op.and] = [...(where[Op.and] || []), originWhere];
+  }
+
+  if (forceCreatedAtRange) {
+    where.created_at = forceCreatedAtRange;
+  } else if (startDate || endDate) {
+    where.created_at = {};
+    if (startDate) where.created_at[Op.gte] = new Date(startDate);
+    if (endDate) where.created_at[Op.lte] = new Date(endDate);
+  }
+
+  if (includeSearch && search) {
+    const canSearchSensitive = await canSearchSensitiveLeadFields(
+      { ...req.query, clinicId: effectiveClinicIdRaw, groupId: effectiveGroupIdRaw },
+      req.userData?.userId,
+    );
+    const searchConditions = buildLeadSearchConditions(search, { canSearchSensitive });
+    if (searchConditions.length) where[Op.or] = searchConditions;
+  }
+
+  return where;
+};
+
+const isValidDate = (date) => date instanceof Date && Number.isFinite(date.getTime());
+
+const toFiniteDate = (value) => {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return isValidDate(date) ? date : null;
+};
+
+const isFiniteNumberValue = (value) => (
+  value !== null
+  && value !== undefined
+  && value !== ''
+  && Number.isFinite(Number(value))
+);
+
+const roundOne = (value) => (
+  isFiniteNumberValue(value) ? Math.round(Number(value) * 10) / 10 : null
+);
+
+const average = (values) => {
+  const numeric = (values || []).filter(isFiniteNumberValue);
+  if (!numeric.length) return null;
+  return numeric.reduce((sum, value) => sum + Number(value), 0) / numeric.length;
+};
+
+const median = (values) => {
+  const numeric = (values || [])
+    .filter(isFiniteNumberValue)
+    .map(Number)
+    .sort((a, b) => a - b);
+  if (!numeric.length) return null;
+  const middle = Math.floor(numeric.length / 2);
+  return numeric.length % 2
+    ? numeric[middle]
+    : (numeric[middle - 1] + numeric[middle]) / 2;
+};
+
+const percent = (part, total) => {
+  const numerator = Number(part || 0);
+  const denominator = Number(total || 0);
+  if (!denominator) return null;
+  return roundOne((numerator / denominator) * 100);
+};
+
+const localPartsForCompetition = (date, timeZone) => {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(date);
+  const bag = {};
+  parts.forEach((part) => {
+    if (part.type !== 'literal') bag[part.type] = Number(part.value);
+  });
+  if (bag.hour === 24) bag.hour = 0;
+  return bag;
+};
+
+const localDateForCompetition = (date, timeZone) => {
+  const parts = localPartsForCompetition(date, timeZone);
+  return `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`;
+};
+
+const addLocalDateDaysForCompetition = (dateValue, days) => {
+  const match = String(dateValue || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]) + Number(days || 0)));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
+};
+
+const isoWeekdayForCompetition = (dateValue) => {
+  const match = String(dateValue || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const day = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))).getUTCDay();
+  return day === 0 ? 7 : day;
+};
+
+const normalizeCompetitionScheduleRows = (rows = []) => (Array.isArray(rows) ? rows : [])
+  .map((row) => row?.get ? row.get({ plain: true }) : row)
+  .filter((row) => row && (row.activo === undefined || row.activo === true || row.activo === 1))
+  .map((row) => ({
+    weekday: Number(row.dia_semana) === 0 ? 7 : Number(row.dia_semana),
+    start: cleanString(row.hora_inicio),
+    end: cleanString(row.hora_fin),
+  }))
+  .filter((row) => Number.isInteger(row.weekday)
+    && row.weekday >= 1
+    && row.weekday <= 7
+    && /^\d{2}:\d{2}$/.test(row.start)
+    && /^\d{2}:\d{2}$/.test(row.end)
+    && row.start < row.end)
+  .sort((a, b) => a.weekday - b.weekday || a.start.localeCompare(b.start));
+
+const businessMinutesBetweenForCompetition = (startValue, endValue, clinicRuntime) => {
+  const start = toFiniteDate(startValue);
+  const end = toFiniteDate(endValue);
+  if (!start || !end || end <= start) return 0;
+
+  const schedule = Array.isArray(clinicRuntime?.schedule) ? clinicRuntime.schedule : [];
+  if (!schedule.length) {
+    return Math.max(0, Math.round((end.getTime() - start.getTime()) / 60000));
+  }
+
+  const timeZone = clinicRuntime?.timeZone || 'Europe/Madrid';
+  let currentDate = localDateForCompetition(start, timeZone);
+  const finalDate = localDateForCompetition(end, timeZone);
+  let guard = 0;
+  let totalMs = 0;
+
+  while (currentDate && guard < 90) {
+    const weekday = isoWeekdayForCompetition(currentDate);
+    const intervals = schedule.filter((row) => row.weekday === weekday);
+    for (const interval of intervals) {
+      const windowStart = localDateTimeToUtc(currentDate, interval.start, timeZone);
+      const windowEnd = localDateTimeToUtc(currentDate, interval.end, timeZone);
+      if (!windowStart || !windowEnd || windowEnd <= windowStart) continue;
+      const overlapStart = Math.max(start.getTime(), windowStart.getTime());
+      const overlapEnd = Math.min(end.getTime(), windowEnd.getTime());
+      if (overlapEnd > overlapStart) totalMs += overlapEnd - overlapStart;
+    }
+
+    if (currentDate === finalDate) break;
+    currentDate = addLocalDateDaysForCompetition(currentDate, 1);
+    guard += 1;
+  }
+
+  return Math.max(0, Math.round(totalMs / 60000));
+};
+
+const parseJsonArrayForCompetition = (value) => {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== 'string') return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_error) {
+    return [];
+  }
+};
+
+const firstHumanContactFromHistory = (lead) => {
+  const createdAt = toFiniteDate(lead?.created_at);
+  const rows = parseJsonArrayForCompetition(lead?.historial_contactos);
+  const candidates = rows
+    .filter((row) => row && row.usuario_id !== null && row.usuario_id !== undefined)
+    .filter((row) => !String(row.motivo || '').startsWith('lead_auto_reply'))
+    .map((row) => toFiniteDate(row.fecha))
+    .filter((date) => date && (!createdAt || date >= createdAt));
+  if (!candidates.length) return null;
+  return candidates.sort((a, b) => a.getTime() - b.getTime())[0];
+};
+
+const resolveHumanFirstContactAt = (lead, firstAttemptAt) => {
+  const createdAt = toFiniteDate(lead?.created_at);
+  const candidates = [
+    toFiniteDate(firstAttemptAt),
+    firstHumanContactFromHistory(lead),
+  ];
+
+  const callOutcome = String(cleanString(lead?.call_outcome) || '').toLowerCase();
+  if (['citado', 'informacion'].includes(callOutcome)) {
+    candidates.push(toFiniteDate(lead?.call_outcome_at));
+  }
+
+  if (Number(lead?.num_contactos || 0) > 0) {
+    const history = parseJsonArrayForCompetition(lead?.historial_contactos);
+    const onlyAutoReply = history.length > 0 && history.every((row) => String(row?.motivo || '').startsWith('lead_auto_reply'));
+    if (!onlyAutoReply) candidates.push(toFiniteDate(lead?.ultimo_contacto));
+  }
+
+  const valid = candidates
+    .filter((date) => date && (!createdAt || date >= createdAt))
+    .sort((a, b) => a.getTime() - b.getTime());
+  return valid[0] || null;
+};
+
+const activeLeadStatusesForCompetition = new Set(['nuevo', 'contactado', 'esperando_info', 'info_recibida', 'cualificado']);
+
+const resolveLeadCompetitionScope = async (req, { clinicIdRaw = null, groupIdRaw = null } = {}) => {
+  const actorId = parseInteger(req.userData?.userId);
+  const requestedClinicIds = parseIntegerList(clinicIdRaw || req.query?.clinicId || req.query?.clinica_id);
+  const selectedClinicId = requestedClinicIds && requestedClinicIds.length === 1 ? requestedClinicIds[0] : null;
+  let groupId = parseInteger(groupIdRaw || req.query?.groupId || req.query?.grupo_clinica_id);
+
+  if (groupId === null && requestedClinicIds && requestedClinicIds.length) {
+    const rows = await Clinica.findAll({
+      where: { id_clinica: { [Op.in]: requestedClinicIds } },
+      attributes: ['grupoClinicaId'],
+      raw: true,
+    });
+    const groupIds = Array.from(new Set(rows
+      .map((row) => parseInteger(row.grupoClinicaId))
+      .filter((value) => value !== null)));
+    if (groupIds.length === 1) groupId = groupIds[0];
+  }
+
+  if (groupId === null && selectedClinicId !== null) {
+    const clinic = await Clinica.findByPk(selectedClinicId, {
+      attributes: ['id_clinica', 'grupoClinicaId'],
+      raw: true,
+    });
+    groupId = parseInteger(clinic?.grupoClinicaId);
+  }
+
+  if (groupId === null) {
+    return { ready: false, reason: 'group_scope_required' };
+  }
+
+  const group = await GrupoClinica.findByPk(groupId, {
+    attributes: ['id_grupo', 'nombre_grupo'],
+    raw: true,
+  });
+
+  const groupClinicRows = await Clinica.findAll({
+    where: { grupoClinicaId: groupId },
+    attributes: ['id_clinica', 'nombre_clinica', 'configuracion'],
+    raw: true,
+  });
+  const groupClinicIds = groupClinicRows
+    .map((row) => parseInteger(row.id_clinica))
+    .filter((value) => value !== null);
+
+  if (!groupClinicIds.length) {
+    return { ready: false, reason: 'group_without_clinics', groupId, groupName: group?.nombre_grupo || null };
+  }
+
+  let accessibleClinicIds = groupClinicIds;
+  if (!isGlobalAdmin(actorId)) {
+    accessibleClinicIds = await getAccessibleMarketingClinicIds({
+      userId: actorId,
+      clinicIds: groupClinicIds,
+      access: 'read',
+    });
+  }
+
+  if (selectedClinicId !== null && !accessibleClinicIds.includes(selectedClinicId)) {
+    return { ready: false, reason: 'selected_clinic_forbidden', groupId, groupName: group?.nombre_grupo || null };
+  }
+
+  if (accessibleClinicIds.length < 2) {
+    return {
+      ready: false,
+      reason: 'not_enough_peer_clinics',
+      groupId,
+      groupName: group?.nombre_grupo || null,
+      selectedClinicId,
+      clinicIds: accessibleClinicIds,
+    };
+  }
+
+  return {
+    ready: true,
+    scope: 'group',
+    groupId,
+    groupName: group?.nombre_grupo || null,
+    selectedClinicId,
+    clinicIds: accessibleClinicIds,
+  };
+};
+
+const leadCompetitionPeriodForRequest = (req) => {
+  const now = new Date();
+  const startDate = toFiniteDate(req.query?.startDate);
+  const endDate = toFiniteDate(req.query?.endDate);
+  const defaulted = !startDate && !endDate;
+  const start = startDate || new Date(now.getTime() - (LEAD_COMPETITION_DEFAULT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000));
+  const end = endDate || now;
+  return {
+    start,
+    end,
+    defaulted,
+    label: defaulted ? `Últimos ${LEAD_COMPETITION_DEFAULT_LOOKBACK_DAYS} días` : 'Periodo filtrado',
+  };
+};
+
+const compactClinicCompetitionStats = (stat) => {
+  const responseMinutes = stat.response_minutes || [];
+  const avgResponseMinutes = roundOne(average(responseMinutes));
+  return {
+    clinic_id: stat.clinic_id,
+    clinic_name: stat.clinic_name,
+    leads_total: stat.leads_total,
+    human_contacted: responseMinutes.length,
+    avg_response_minutes: avgResponseMinutes,
+    median_response_minutes: roundOne(median(responseMinutes)),
+    response_target_rate: percent(stat.under_target_count, responseMinutes.length),
+    under_target_count: stat.under_target_count,
+    open_without_human_response_over_target: stat.open_without_human_response_over_target,
+  };
+};
+
+const computeLeadCompetitionStats = async (req, scope) => {
+  const period = leadCompetitionPeriodForRequest(req);
+  const scopeCondition = { clinica_id: { [Op.in]: scope.clinicIds } };
+  const where = await buildLeadStatsWhereFromRequest(req, {
+    scopeCondition,
+    includeSearch: false,
+    forceCreatedAtRange: {
+      [Op.gte]: period.start,
+      [Op.lte]: period.end,
+    },
+  });
+
+  const [clinicRows, scheduleRows, leads] = await Promise.all([
+    Clinica.findAll({
+      where: { id_clinica: { [Op.in]: scope.clinicIds } },
+      attributes: ['id_clinica', 'nombre_clinica', 'configuracion'],
+      raw: true,
+    }),
+    ClinicaHorario
+      ? ClinicaHorario.findAll({
+          where: { clinica_id: { [Op.in]: scope.clinicIds }, activo: true },
+          attributes: ['clinica_id', 'dia_semana', 'hora_inicio', 'hora_fin', 'activo'],
+          raw: true,
+        })
+      : Promise.resolve([]),
+    LeadIntake.findAll({
+      where,
+      attributes: [
+        'id',
+        'clinica_id',
+        'created_at',
+        'status_lead',
+        'num_contactos',
+        'ultimo_contacto',
+        'historial_contactos',
+        'call_outcome',
+        'call_outcome_at',
+      ],
+      raw: true,
+    }),
+  ]);
+
+  const leadIds = leads.map((lead) => parseInteger(lead.id)).filter((value) => value !== null);
+  const firstAttemptRows = leadIds.length && LeadContactAttempt
+    ? await LeadContactAttempt.findAll({
+        attributes: [
+          'lead_intake_id',
+          [db.Sequelize.fn('MIN', db.Sequelize.col('created_at')), 'first_contact_at'],
+        ],
+        where: {
+          lead_intake_id: { [Op.in]: leadIds },
+          usuario_id: { [Op.not]: null },
+        },
+        group: ['lead_intake_id'],
+        raw: true,
+      })
+    : [];
+  const firstAttemptByLead = new Map(firstAttemptRows.map((row) => [
+    parseInteger(row.lead_intake_id),
+    row.first_contact_at,
+  ]));
+
+  const schedulesByClinic = new Map();
+  for (const row of scheduleRows || []) {
+    const clinicId = parseInteger(row.clinica_id);
+    if (clinicId === null) continue;
+    const list = schedulesByClinic.get(clinicId) || [];
+    list.push(row);
+    schedulesByClinic.set(clinicId, list);
+  }
+
+  const clinicRuntimeById = new Map();
+  const statsByClinic = new Map();
+  for (const clinic of clinicRows) {
+    const clinicId = parseInteger(clinic.id_clinica);
+    if (clinicId === null) continue;
+    const schedule = normalizeCompetitionScheduleRows(schedulesByClinic.get(clinicId) || []);
+    clinicRuntimeById.set(clinicId, {
+      timeZone: resolveClinicTimeZone(clinic),
+      schedule,
+    });
+    statsByClinic.set(clinicId, {
+      clinic_id: clinicId,
+      clinic_name: clinic.nombre_clinica || `Clínica ${clinicId}`,
+      leads_total: 0,
+      response_minutes: [],
+      under_target_count: 0,
+      open_without_human_response_over_target: 0,
+    });
+  }
+
+  const targetMinutes = LEAD_COMPETITION_RESPONSE_TARGET_MINUTES;
+  const allResponseMinutes = [];
+  let leadsAnalyzed = 0;
+  let scheduleFallbackClinics = 0;
+
+  for (const runtime of clinicRuntimeById.values()) {
+    if (!runtime.schedule.length) scheduleFallbackClinics += 1;
+  }
+
+  for (const lead of leads) {
+    const clinicId = parseInteger(lead.clinica_id);
+    const stat = statsByClinic.get(clinicId);
+    if (!stat) continue;
+    const createdAt = toFiniteDate(lead.created_at);
+    if (!createdAt) continue;
+
+    leadsAnalyzed += 1;
+    stat.leads_total += 1;
+
+    const runtime = clinicRuntimeById.get(clinicId) || { schedule: [], timeZone: 'Europe/Madrid' };
+    const firstContactAt = resolveHumanFirstContactAt(lead, firstAttemptByLead.get(parseInteger(lead.id)));
+    if (firstContactAt) {
+      const minutes = businessMinutesBetweenForCompetition(createdAt, firstContactAt, runtime);
+      stat.response_minutes.push(minutes);
+      allResponseMinutes.push(minutes);
+      if (minutes <= targetMinutes) stat.under_target_count += 1;
+      continue;
+    }
+
+    const status = String(cleanString(lead.status_lead) || '').toLowerCase();
+    if (activeLeadStatusesForCompetition.has(status)) {
+      const openMinutes = businessMinutesBetweenForCompetition(createdAt, period.end, runtime);
+      if (openMinutes > targetMinutes) {
+        stat.open_without_human_response_over_target += 1;
+      }
+    }
+  }
+
+  const ranking = Array.from(statsByClinic.values())
+    .map(compactClinicCompetitionStats)
+    .sort((a, b) => {
+      const aHas = isFiniteNumberValue(a.avg_response_minutes);
+      const bHas = isFiniteNumberValue(b.avg_response_minutes);
+      if (aHas && bHas) return Number(a.avg_response_minutes) - Number(b.avg_response_minutes);
+      if (aHas) return -1;
+      if (bHas) return 1;
+      return String(a.clinic_name || '').localeCompare(String(b.clinic_name || ''));
+    })
+    .map((row, index) => ({ ...row, rank: index + 1 }));
+
+  const selectedClinic = scope.selectedClinicId
+    ? ranking.find((row) => Number(row.clinic_id) === Number(scope.selectedClinicId)) || null
+    : null;
+  const bestClinic = ranking.find((row) => isFiniteNumberValue(row.avg_response_minutes)) || null;
+  const groupAvg = roundOne(average(allResponseMinutes));
+  const groupMedian = roundOne(median(allResponseMinutes));
+  const selectedAvg = selectedClinic?.avg_response_minutes;
+  const selectedVsGroupAvgPercent = isFiniteNumberValue(selectedAvg) && isFiniteNumberValue(groupAvg) && Number(groupAvg) > 0
+    ? roundOne(((Number(groupAvg) - Number(selectedAvg)) / Number(groupAvg)) * 100)
+    : null;
+  const selectedVsBestMinutes = selectedClinic && bestClinic
+    && isFiniteNumberValue(selectedClinic.avg_response_minutes)
+    && isFiniteNumberValue(bestClinic.avg_response_minutes)
+    ? roundOne(Number(selectedClinic.avg_response_minutes) - Number(bestClinic.avg_response_minutes))
+    : null;
+
+  const overdueOpenLeads = ranking.reduce((sum, row) => sum + Number(row.open_without_human_response_over_target || 0), 0);
+  const humanContacted = allResponseMinutes.length;
+
+  return {
+    ready: true,
+    refreshing: false,
+    stale: false,
+    scope: 'group',
+    group_id: scope.groupId,
+    group_name: scope.groupName,
+    selected_clinic_id: scope.selectedClinicId,
+    period: {
+      start: period.start.toISOString(),
+      end: period.end.toISOString(),
+      label: period.label,
+      defaulted: period.defaulted,
+    },
+    target_response_minutes: targetMinutes,
+    auto_reply_excluded: true,
+    business_hours_applied: scheduleFallbackClinics === 0,
+    schedule_fallback_clinics: scheduleFallbackClinics,
+    summary: {
+      clinics_count: ranking.length,
+      leads_analyzed: leadsAnalyzed,
+      human_contacted: humanContacted,
+      avg_response_minutes: groupAvg,
+      median_response_minutes: groupMedian,
+      response_target_rate: percent(ranking.reduce((sum, row) => sum + Number(row.under_target_count || 0), 0), humanContacted),
+      open_without_human_response_over_target: overdueOpenLeads,
+      best_clinic: bestClinic,
+      selected_clinic: selectedClinic,
+      selected_rank: selectedClinic?.rank || null,
+      selected_vs_group_avg_percent: selectedVsGroupAvgPercent,
+      selected_vs_best_minutes: selectedVsBestMinutes,
+    },
+    ranking,
+    next_metrics: {
+      treatment_conversion: {
+        status: 'coming_soon',
+        label: 'Conversión a tratamiento',
+      },
+    },
+    generated_at: new Date().toISOString(),
+  };
+};
+
+const leadCompetitionCacheKey = (req, scope) => JSON.stringify({
+  userId: parseInteger(req.userData?.userId),
+  scope: 'group',
+  groupId: scope.groupId,
+  selectedClinicId: scope.selectedClinicId,
+  clinicIds: scope.clinicIds,
+  campanaId: req.query?.campanaId || req.query?.campana_id || null,
+  channel: req.query?.channel || null,
+  source: req.query?.source || null,
+  startDate: req.query?.startDate || null,
+  endDate: req.query?.endDate || null,
+  includeArchived: req.query?.includeArchived || req.query?.include_archived || null,
+});
+
+const sweepLeadCompetitionCache = () => {
+  if (leadCompetitionStatsCache.size <= 100) return;
+  const now = Date.now();
+  for (const [key, entry] of leadCompetitionStatsCache.entries()) {
+    if (!entry?.refreshPromise && (!entry?.updatedAt || now - entry.updatedAt > LEAD_COMPETITION_STATS_STALE_MS)) {
+      leadCompetitionStatsCache.delete(key);
+    }
+  }
+};
+
+const scheduleLeadCompetitionRefresh = (key, req, scope) => {
+  const existing = leadCompetitionStatsCache.get(key);
+  if (existing?.refreshPromise) return existing.refreshPromise;
+
+  const requestSnapshot = {
+    query: { ...(req.query || {}) },
+    userData: { ...(req.userData || {}) },
+  };
+  const refreshPromise = Promise.resolve()
+    .then(() => computeLeadCompetitionStats(requestSnapshot, scope))
+    .then((value) => {
+      leadCompetitionStatsCache.set(key, {
+        value,
+        updatedAt: Date.now(),
+        refreshPromise: null,
+      });
+      sweepLeadCompetitionCache();
+      return value;
+    })
+    .catch((error) => {
+      console.warn('⚠️ No se pudo refrescar la comparativa de leads:', error.message || error);
+      leadCompetitionStatsCache.set(key, {
+        value: existing?.value || null,
+        updatedAt: existing?.updatedAt || 0,
+        error: error.message || String(error),
+        refreshPromise: null,
+      });
+      return null;
+    });
+
+  leadCompetitionStatsCache.set(key, {
+    value: existing?.value || null,
+    updatedAt: existing?.updatedAt || 0,
+    refreshPromise,
+  });
+  return refreshPromise;
+};
+
+const getLeadCompetitionStatsForResponse = async (req, { clinicIdRaw = null, groupIdRaw = null } = {}) => {
+  const scope = await resolveLeadCompetitionScope(req, { clinicIdRaw, groupIdRaw });
+  if (!scope.ready) {
+    return {
+      ready: false,
+      refreshing: false,
+      reason: scope.reason,
+      scope: 'group',
+      group_id: scope.groupId || null,
+      group_name: scope.groupName || null,
+      selected_clinic_id: scope.selectedClinicId || null,
+      target_response_minutes: LEAD_COMPETITION_RESPONSE_TARGET_MINUTES,
+    };
+  }
+
+  const key = leadCompetitionCacheKey(req, scope);
+  const entry = leadCompetitionStatsCache.get(key);
+  const now = Date.now();
+
+  if (entry?.value && entry.updatedAt && now - entry.updatedAt <= LEAD_COMPETITION_STATS_CACHE_TTL_MS) {
+    return { ...entry.value, refreshing: false, stale: false };
+  }
+
+  scheduleLeadCompetitionRefresh(key, req, scope);
+
+  if (entry?.value && entry.updatedAt && now - entry.updatedAt <= LEAD_COMPETITION_STATS_STALE_MS) {
+    return { ...entry.value, refreshing: true, stale: true };
+  }
+
+  const period = leadCompetitionPeriodForRequest(req);
+  return {
+    ready: false,
+    refreshing: true,
+    reason: 'refreshing',
+    scope: 'group',
+    group_id: scope.groupId,
+    group_name: scope.groupName,
+    selected_clinic_id: scope.selectedClinicId,
+    period: {
+      start: period.start.toISOString(),
+      end: period.end.toISOString(),
+      label: period.label,
+      defaulted: period.defaulted,
+    },
+    target_response_minutes: LEAD_COMPETITION_RESPONSE_TARGET_MINUTES,
+  };
 };
 
 const requireLeadManageForImport = async (req, res) => {
@@ -5787,46 +6485,12 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
 });
 
 exports.getLeadStats = asyncHandler(async (req, res) => {
-  const {
-    clinicId,
-    groupId,
-    campanaId,
-    channel,
-    source,
-    search,
-    startDate,
-    endDate
-  } = req.query;
-
-  const where = {};
-  const includeArchived = ['1', 'true', 'yes'].includes(String(req.query.includeArchived || req.query.include_archived || '').toLowerCase());
-  if (!includeArchived) where.archived_at = null;
-  const clinicIdRaw = clinicId || req.query.clinica_id;
-  const groupIdRaw = groupId || req.query.grupo_clinica_id;
-  const campanaIdParsed = parseInteger(campanaId || req.query.campana_id);
-
-  await applyLeadScopeWhere(where, { ...req.query, clinicId: clinicIdRaw, groupId: groupIdRaw }, req.userData?.userId);
-  if (campanaIdParsed !== null) where.campana_id = campanaIdParsed;
-  if (channel && CHANNELS.has(channel)) where.channel = channel;
-  if (source && SOURCES.has(source)) {
-    const originWhere = buildMarketingOriginWhere(source, Op);
-    if (originWhere) where[Op.and] = [...(where[Op.and] || []), originWhere];
-  }
-
-  if (startDate || endDate) {
-    where.created_at = {};
-    if (startDate) where.created_at[Op.gte] = new Date(startDate);
-    if (endDate) where.created_at[Op.lte] = new Date(endDate);
-  }
-
-  if (search) {
-    const canSearchSensitive = await canSearchSensitiveLeadFields(
-      { ...req.query, clinicId: clinicIdRaw, groupId: groupIdRaw },
-      req.userData?.userId,
-    );
-    const searchConditions = buildLeadSearchConditions(search, { canSearchSensitive });
-    if (searchConditions.length) where[Op.or] = searchConditions;
-  }
+  const clinicIdRaw = req.query.clinicId || req.query.clinica_id;
+  const groupIdRaw = req.query.groupId || req.query.grupo_clinica_id;
+  const where = await buildLeadStatsWhereFromRequest(req, {
+    clinicIdRaw,
+    groupIdRaw,
+  });
 
   // Obtener conteos por estado
   const total = await LeadIntake.count({ where });
@@ -5841,6 +6505,10 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
   const descartados = await LeadIntake.count({ where: { ...where, status_lead: 'descartado' } });
 
   const tasa_conversion = total > 0 ? (convertidos / total) * 100 : 0;
+  const competition = await getLeadCompetitionStatsForResponse(req, {
+    clinicIdRaw,
+    groupIdRaw,
+  });
 
   res.status(200).json({
     total,
@@ -5853,7 +6521,8 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
     acudio_cita,
     convertidos,
     descartados,
-    tasa_conversion
+    tasa_conversion,
+    competition
   });
 });
 

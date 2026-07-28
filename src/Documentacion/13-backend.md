@@ -7225,6 +7225,30 @@ Este corte ajusta el contrato operativo de Leads/QuickChat:
 - `POST /api/intake/leads/:id/call-outcome` con `outcome=informacion` cierra el lead como `descartado` y persiste `motivo_descarte=solo_pidio_informacion`. La auditoría y la cancelación de recordatorios pendientes se mantienen.
 - La migración `20260721121500-seed-lead-first-visit-whatsapp-template.js` añade al catálogo `clinicaclick_lead_primera_visita_programar`, plantilla `UTILITY` genérica para responder a una solicitud de primera visita. No crea ni modifica automatizaciones; la propagación usa el servicio estándar de plantillas.
 
+## 2026-07-28 - Leads: comparativa operativa por grupo
+
+`GET /api/intake/leads/stats` conserva los contadores históricos y añade
+`competition` como bloque opcional reutilizable por otros paneles. El scope por
+defecto compara solo clínicas del mismo grupo que el usuario pueda leer; una
+clínica de BS Medical no se compara con Propdental salvo que se implemente un
+scope global administrativo explícito. Si no hay grupo o no hay al menos dos
+sedes comparables, el bloque devuelve `ready=false` con `reason`.
+
+La métrica principal es el tiempo hasta el primer contacto humano registrado en
+`LeadContactAttempts` con `usuario_id` no nulo. Las auto-respuestas de leads
+quedan excluidas, por lo que una clínica con respuesta automática activa mide
+desde el siguiente contacto humano. El cálculo usa horario de clínica
+`ClinicaHorarios`; si alguna sede no lo tiene configurado, se marca
+`business_hours_applied=false` y para esa sede se usa tiempo natural como
+fallback visible.
+
+Para proteger rendimiento, la comparativa usa una ventana por defecto de los
+últimos 30 días cuando la petición no trae rango temporal y se cachea por
+usuario, grupo, clínica seleccionada y filtros ligeros. Las lecturas devuelven
+valor cacheado si está fresco; si está obsoleto se devuelve stale y se refresca
+en segundo plano. La UI puede repedir una vez cuando `refreshing=true`, pero no
+debe hacer polling permanente.
+
 ## 2026-07-27 - Resumen ligero del calendario
 
 `GET /api/citas/calendar` admite `summary=1` para indicadores agregados de la
