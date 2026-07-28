@@ -52,6 +52,7 @@ const BINDABLE_PROPS = Object.freeze({
   heading: new Set(['text']),
   text: new Set(['text']),
   faq: new Set(['question', 'answer']),
+  testimonial: new Set(['quote', 'attribution', 'role']),
   image: new Set(['asset_id', 'alt']),
   gallery: new Set(),
   video: new Set(['title', 'video_id']),
