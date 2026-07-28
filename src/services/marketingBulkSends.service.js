@@ -3696,7 +3696,7 @@ async function buildReviewClinicStatuses(scope, options = {}) {
       hasWhatsappConfigForScope(clinicScope),
       getReviewAutomationTemplate(clinicScope, { includeInactive: true }),
     ]);
-    const templatesReady = !!approvedTemplate && !!approvedReminderTemplate;
+    const templatesReady = !!approvedTemplate;
     const ready = !!googleReviewUrlAvailable && !!whatsappAvailable && templatesReady;
     const serializedAutomation = serializeReviewAutomationTemplate(clinicAutomationTemplate);
     const automationExcludedByOverride = !!clinicAutomationTemplate && clinicAutomationTemplate.is_active !== true;
@@ -3704,21 +3704,17 @@ async function buildReviewClinicStatuses(scope, options = {}) {
       !googleReviewUrlAvailable ? 'google_review_url' : null,
       !whatsappAvailable ? 'whatsapp_connection' : null,
       !approvedTemplate ? 'approved_whatsapp_template' : null,
-      approvedTemplate && !approvedReminderTemplate ? 'approved_review_reminder_template' : null,
     ].filter(Boolean);
     const googleLabel = googleReviewUrlAvailable ? 'Ficha lista' : 'Falta Perfil Google';
     const whatsappLabel = whatsappAvailable ? 'WhatsApp conectado' : 'Falta WhatsApp';
-    const templateLabel = templatesReady
-      ? 'Plantillas aprobadas'
-      : (approvedTemplate ? 'Recordatorio pendiente' : 'Plantilla del sistema pendiente');
+    const templateLabel = templatesReady ? 'Plantilla aprobada' : 'Plantilla del sistema pendiente';
     const statusLabel = ready ? 'Lista para enviar' : 'No enviará todavía';
     const statusHint = ready
-      ? 'Esta sede tiene Perfil Google, WhatsApp y plantillas aprobadas. Puede recibir solicitudes de valoración.'
+      ? 'Esta sede tiene Perfil Google, WhatsApp y plantilla aprobada. Puede recibir solicitudes de valoración.'
       : [
           !googleReviewUrlAvailable ? 'Conecta su Perfil Google para generar el enlace correcto de reseña.' : null,
           !whatsappAvailable ? 'Conecta WhatsApp para poder enviar la solicitud.' : null,
           !approvedTemplate ? 'ClinicaClick debe tener una plantilla de reseñas aprobada por WhatsApp para esta sede.' : null,
-          approvedTemplate && !approvedReminderTemplate ? 'ClinicaClick debe tener aprobada también la plantilla de recordatorio de reseñas.' : null,
         ].filter(Boolean).join(' ');
     const automationLabel = clinicAutomationTemplate?.is_active === true
       ? (ready ? 'Activa' : 'Configurada, sin enviar')
@@ -3740,7 +3736,7 @@ async function buildReviewClinicStatuses(scope, options = {}) {
       google_status_label: googleLabel,
       whatsapp_available: !!whatsappAvailable,
       whatsapp_status_label: whatsappLabel,
-      approved_template_available: templatesReady,
+      approved_template_available: !!approvedTemplate,
       approved_template_id: approvedTemplate?.id || null,
       approved_reminder_template_available: !!approvedReminderTemplate,
       approved_reminder_template_id: approvedReminderTemplate?.id || null,
@@ -4195,7 +4191,7 @@ async function getReviewRequestSummary(scope, options = {}) {
       automation_enabled: automationEnabled,
       automation_template: effectiveAutomationTemplate,
       last_request_template: lastRequestTemplate,
-      approved_template_available: !!effectiveApprovedTemplateId && !!effectiveApprovedReminderTemplateId,
+      approved_template_available: !!effectiveApprovedTemplateId,
       approved_template_id: effectiveApprovedTemplateId,
       approved_reminder_template_available: !!effectiveApprovedReminderTemplateId,
       approved_reminder_template_id: effectiveApprovedReminderTemplateId,
@@ -4439,7 +4435,7 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
       hasGoogleReviewUrlForScope(scope),
       hasWhatsappConfigForScope(scope),
     ]);
-    const templatesReady = !!approvedReviewTemplate && !!approvedReminderTemplate;
+    const templatesReady = !!approvedReviewTemplate;
     return {
       success: true,
       automation_enabled: false,
@@ -4452,16 +4448,14 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
       whatsapp_available: whatsappAvailable,
       warnings: [
         !approvedReviewTemplate ? 'template_not_approved' : null,
-        approvedReviewTemplate && !approvedReminderTemplate ? 'reminder_template_not_approved' : null,
         !googleReviewUrlAvailable ? 'google_review_url_missing' : null,
         !whatsappAvailable ? 'whatsapp_missing' : null,
       ].filter(Boolean),
     };
   }
 
-  const [readyApprovedTemplate, readyApprovedReminderTemplate, readyGoogleReviewUrlAvailable, readyWhatsappAvailable] = await Promise.all([
+  const [readyApprovedTemplate, readyGoogleReviewUrlAvailable, readyWhatsappAvailable] = await Promise.all([
     findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null),
-    findApprovedReviewReminderWhatsappTemplate(scope),
     hasGoogleReviewUrlForScope(scope),
     hasWhatsappConfigForScope(scope),
   ]);
@@ -4471,14 +4465,13 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     err.details = { reason: 'review_automation_requirements_missing', warnings: ['sender_name_missing'] };
     throw err;
   }
-  if (enabled && (!readyApprovedTemplate || !readyApprovedReminderTemplate || !readyGoogleReviewUrlAvailable || !readyWhatsappAvailable)) {
+  if (enabled && (!readyApprovedTemplate || !readyGoogleReviewUrlAvailable || !readyWhatsappAvailable)) {
     const warnings = [
       !readyApprovedTemplate ? 'template_not_approved' : null,
-      readyApprovedTemplate && !readyApprovedReminderTemplate ? 'reminder_template_not_approved' : null,
       !readyGoogleReviewUrlAvailable ? 'google_review_url_missing' : null,
       !readyWhatsappAvailable ? 'whatsapp_missing' : null,
     ].filter(Boolean);
-    const err = new Error('No se puede activar la automatización hasta conectar Perfil Google, WhatsApp y tener aprobadas las plantillas de reseñas y recordatorio.');
+    const err = new Error('No se puede activar la automatización hasta conectar Perfil Google, WhatsApp y tener aprobada la plantilla de reseñas.');
     err.status = 409;
     err.details = { reason: 'review_automation_requirements_missing', warnings };
     throw err;
@@ -4502,7 +4495,7 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     version: Math.max(Number(existing?.version || 0), 2),
     engine_version: 'v2',
     name: displayName,
-    description: 'Espera 24h tras finalizar un tratamiento, pide al paciente una valoración con escala 5 a 1 y deriva a Google solo si responde 5/5. Si no responde, manda un recordatorio 24h después y cierra si sigue sin respuesta otras 24h.',
+    description: 'Espera 24h tras finalizar un tratamiento, pide al paciente una valoración con escala 5 a 1 y deriva a Google solo si responde 5/5. Si no responde, intenta mandar un recordatorio 24h después cuando exista plantilla activa y cierra si sigue sin respuesta.',
     trigger_type: REVIEW_AUTOMATION_TRIGGER,
     trigger_config: { event_name: REVIEW_AUTOMATION_TRIGGER },
     is_active: enabled,
@@ -4523,7 +4516,7 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     hasGoogleReviewUrlForScope(scope),
     hasWhatsappConfigForScope(scope),
   ]);
-  const templatesReady = !!approvedReviewTemplate && !!approvedReminderTemplate;
+  const templatesReady = !!approvedReviewTemplate;
   return {
     success: true,
     automation_enabled: row.is_active === true,
@@ -4536,7 +4529,6 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     whatsapp_available: whatsappAvailable,
     warnings: [
       !approvedReviewTemplate ? 'template_not_approved' : null,
-      approvedReviewTemplate && !approvedReminderTemplate ? 'reminder_template_not_approved' : null,
       !googleReviewUrlAvailable ? 'google_review_url_missing' : null,
       !whatsappAvailable ? 'whatsapp_missing' : null,
     ].filter(Boolean),
@@ -4594,7 +4586,6 @@ async function setReviewRequestAutomation(scope, body = {}, userId = null) {
     },
     warnings: [
       !approvedTemplateAvailable ? 'template_not_approved' : null,
-      !approvedReminderTemplateAvailable ? 'reminder_template_not_approved' : null,
       !googleReviewUrlAvailable ? 'google_review_url_missing' : null,
       !whatsappAvailable ? 'whatsapp_missing' : null,
       results.some((result) => result.success === false) ? 'some_clinics_failed' : null,
@@ -4655,11 +4646,6 @@ async function createAndStartReviewRequestForAppointment(options = {}) {
   );
   if (!template) {
     return { success: true, sent: false, skipped: true, reason: 'approved_review_template_missing' };
-  }
-
-  const reminderTemplate = await findApprovedReviewReminderWhatsappTemplate(scope);
-  if (!reminderTemplate) {
-    return { success: true, sent: false, skipped: true, reason: 'approved_review_reminder_template_missing' };
   }
 
   try {
