@@ -126,9 +126,10 @@ function assertPublicMediaPayload({ purpose, contentType, buffer }) {
   }
 }
 
-function shouldNormalizeWhatsappImage({ purpose, contentType }) {
+function shouldNormalizeWhatsappImage({ purpose, contentType, buffer }) {
   return ['review_team_photo', 'whatsapp_image'].includes(purpose)
-    && ['image/webp', 'image/gif'].includes(contentType);
+    && IMAGE_TYPES.has(contentType)
+    && (contentType !== 'image/jpeg' || buffer.length > MAX_WHATSAPP_IMAGE_BYTES);
 }
 
 async function normalizeWhatsappImageToJpeg(buffer) {
@@ -257,7 +258,7 @@ async function preparePublicMediaPayload(input = {}) {
     buffer = await normalizeClinicAccessImageToJpeg(buffer);
     contentType = 'image/jpeg';
     transformed = true;
-  } else if (shouldNormalizeWhatsappImage({ purpose, contentType })) {
+  } else if (shouldNormalizeWhatsappImage({ purpose, contentType, buffer })) {
     buffer = await normalizeWhatsappImageToJpeg(buffer);
     contentType = 'image/jpeg';
     transformed = true;
@@ -291,10 +292,10 @@ async function preparePublicMediaPayload(input = {}) {
       output_width: outputImage?.width || null,
       output_height: outputImage?.height || null,
       transformed,
-      metadata_stripped: ['clinic_access_image', 'web_editor_media', 'invoice_logo'].includes(purpose),
+      metadata_stripped: transformed && ['clinic_access_image', 'web_editor_media', 'invoice_logo', 'review_team_photo', 'whatsapp_image'].includes(purpose),
       content_disarm: purpose === 'web_editor_media' ? 'sharp_reencode_v1' : null,
       malware_scan_status: purpose === 'web_editor_media' ? 'not_available' : null,
-      whatsapp_compatible: purpose === 'clinic_access_image'
+      whatsapp_compatible: ['clinic_access_image', 'review_team_photo', 'whatsapp_image'].includes(purpose)
         ? buffer.length <= MAX_WHATSAPP_IMAGE_BYTES
         : null,
     } : null,
