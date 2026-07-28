@@ -156,6 +156,11 @@ const LEAD_COMPETITION_RESPONSE_TARGET_MINUTES = Math.max(
   15,
   parseInt(process.env.LEAD_COMPETITION_RESPONSE_TARGET_MINUTES || '240', 10) || 240,
 );
+const LEAD_COMPETITION_PERIODS = {
+  '30d': { days: LEAD_COMPETITION_DEFAULT_LOOKBACK_DAYS, label: `Últimos ${LEAD_COMPETITION_DEFAULT_LOOKBACK_DAYS} días`, buckets: 6 },
+  '90d': { days: 90, label: 'Últimos 3 meses', buckets: 9 },
+  '365d': { days: 365, label: 'Último año', buckets: 12 },
+};
 const leadCompetitionStatsCache = new Map();
 const LEAD_ACTIVE_APPOINTMENT_STATES = new Set([
   'pendiente',
@@ -1011,20 +1016,99 @@ const resolveLeadCompetitionScope = async (req, { clinicIdRaw = null, groupIdRaw
   };
 };
 
+const normalizeLeadCompetitionPeriodKey = (value) => (
+  Object.prototype.hasOwnProperty.call(LEAD_COMPETITION_PERIODS, cleanString(value) || '')
+    ? cleanString(value)
+    : '30d'
+);
+
 const leadCompetitionPeriodForRequest = (req) => {
   const now = new Date();
-  const startDate = toFiniteDate(req.query?.startDate);
-  const endDate = toFiniteDate(req.query?.endDate);
+  const periodKey = normalizeLeadCompetitionPeriodKey(req.query?.competitionPeriod || req.query?.competition_period);
+  const preset = LEAD_COMPETITION_PERIODS[periodKey] || LEAD_COMPETITION_PERIODS['30d'];
+  const startDate = toFiniteDate(req.query?.competitionStartDate || req.query?.competition_start_date || req.query?.startDate);
+  const endDate = toFiniteDate(req.query?.competitionEndDate || req.query?.competition_end_date || req.query?.endDate);
   const defaulted = !startDate && !endDate;
-  const start = startDate || new Date(now.getTime() - (LEAD_COMPETITION_DEFAULT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000));
+  const start = startDate || new Date(now.getTime() - (preset.days * 24 * 60 * 60 * 1000));
   const end = endDate || now;
   return {
+    key: periodKey,
     start,
     end,
     defaulted,
-    label: defaulted ? `Últimos ${LEAD_COMPETITION_DEFAULT_LOOKBACK_DAYS} días` : 'Periodo filtrado',
+    bucketCount: preset.buckets,
+    label: defaulted ? preset.label : 'Periodo filtrado',
   };
 };
+
+const formatLeadCompetitionTrendLabel = (date) => {
+  const safeDate = toFiniteDate(date);
+  if (!safeDate) return '';
+  return `${String(safeDate.getUTCDate()).padStart(2, '0')}/${String(safeDate.getUTCMonth() + 1).padStart(2, '0')}`;
+};
+
+const buildLeadCompetitionTrendBuckets = (period) => {
+  const start = toFiniteDate(period?.start);
+  const end = toFiniteDate(period?.end);
+  if (!start || !end || end <= start) return [];
+  const bucketCount = Math.max(2, Math.min(12, Number(period.bucketCount || 6)));
+  const bucketMs = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / bucketCount));
+  return Array.from({ length: bucketCount }, (_, index) => {
+    const bucketStart = new Date(start.getTime() + (bucketMs * index));
+    const bucketEnd = index === bucketCount - 1
+      ? end
+      : new Date(Math.min(end.getTime(), start.getTime() + (bucketMs * (index + 1))));
+    return {
+      start: bucketStart,
+      end: bucketEnd,
+      label: formatLeadCompetitionTrendLabel(bucketStart),
+      leads_total: 0,
+      response_minutes: [],
+      under_target_count: 0,
+      open_without_human_response_over_target: 0,
+      appointment_converted_count: 0,
+    };
+  });
+};
+
+const findLeadCompetitionTrendBucket = (buckets, createdAt) => {
+  const timestamp = toFiniteDate(createdAt)?.getTime();
+  if (!Number.isFinite(timestamp) || !Array.isArray(buckets) || !buckets.length) return null;
+  return buckets.find((bucket, index) => (
+    timestamp >= bucket.start.getTime()
+    && (timestamp < bucket.end.getTime() || index === buckets.length - 1)
+  )) || null;
+};
+
+const updateLeadCompetitionTrendBucket = (bucket, {
+  targetMinutes,
+  responseMinutes = null,
+  openWithoutHumanResponseOverTarget = false,
+  appointmentConverted = false,
+}) => {
+  if (!bucket) return;
+  bucket.leads_total += 1;
+  if (isFiniteNumberValue(responseMinutes)) {
+    bucket.response_minutes.push(responseMinutes);
+    if (Number(responseMinutes) <= targetMinutes) bucket.under_target_count += 1;
+  } else if (openWithoutHumanResponseOverTarget) {
+    bucket.open_without_human_response_over_target += 1;
+  }
+  if (appointmentConverted) bucket.appointment_converted_count += 1;
+};
+
+const compactLeadCompetitionTrendBucket = (bucket) => ({
+  label: bucket.label,
+  start: bucket.start.toISOString(),
+  end: bucket.end.toISOString(),
+  leads_total: bucket.leads_total,
+  human_contacted: bucket.response_minutes.length,
+  avg_response_minutes: roundOne(average(bucket.response_minutes)),
+  response_target_rate: percent(bucket.under_target_count, bucket.response_minutes.length),
+  open_without_human_response_over_target: bucket.open_without_human_response_over_target,
+  appointment_converted_count: bucket.appointment_converted_count,
+  appointment_conversion_rate: percent(bucket.appointment_converted_count, bucket.leads_total),
+});
 
 const compactClinicCompetitionStats = (stat) => {
   const responseMinutes = stat.response_minutes || [];
@@ -1170,6 +1254,10 @@ const computeLeadCompetitionStats = async (req, scope) => {
 
   const targetMinutes = LEAD_COMPETITION_RESPONSE_TARGET_MINUTES;
   const allResponseMinutes = [];
+  const groupTrendBuckets = buildLeadCompetitionTrendBuckets(period);
+  const selectedTrendBuckets = scope.selectedClinicId !== null
+    ? buildLeadCompetitionTrendBuckets(period)
+    : null;
   let leadsAnalyzed = 0;
   let scheduleFallbackClinics = 0;
 
@@ -1195,22 +1283,35 @@ const computeLeadCompetitionStats = async (req, scope) => {
       firstAttemptByLead.get(leadId),
       appointmentCreatedByLead.get(leadId),
     );
-    if (appointmentConvertedStatusesForCompetition.has(status) || appointmentCreatedByLead.has(leadId)) {
+    const appointmentConverted = appointmentConvertedStatusesForCompetition.has(status) || appointmentCreatedByLead.has(leadId);
+    if (appointmentConverted) {
       stat.appointment_converted_count += 1;
     }
-    if (firstContactAt) {
-      const minutes = businessMinutesBetweenForCompetition(createdAt, firstContactAt, runtime);
-      stat.response_minutes.push(minutes);
-      allResponseMinutes.push(minutes);
-      if (minutes <= targetMinutes) stat.under_target_count += 1;
-      continue;
-    }
 
-    if (activeLeadStatusesForCompetition.has(status)) {
+    let responseMinutes = null;
+    let openWithoutHumanResponseOverTarget = false;
+    if (firstContactAt) {
+      responseMinutes = businessMinutesBetweenForCompetition(createdAt, firstContactAt, runtime);
+      stat.response_minutes.push(responseMinutes);
+      allResponseMinutes.push(responseMinutes);
+      if (responseMinutes <= targetMinutes) stat.under_target_count += 1;
+    } else if (activeLeadStatusesForCompetition.has(status)) {
       const openMinutes = businessMinutesBetweenForCompetition(createdAt, period.end, runtime);
       if (openMinutes > targetMinutes) {
         stat.open_without_human_response_over_target += 1;
+        openWithoutHumanResponseOverTarget = true;
       }
+    }
+
+    const trendPayload = {
+      targetMinutes,
+      responseMinutes,
+      openWithoutHumanResponseOverTarget,
+      appointmentConverted,
+    };
+    updateLeadCompetitionTrendBucket(findLeadCompetitionTrendBucket(groupTrendBuckets, createdAt), trendPayload);
+    if (selectedTrendBuckets && Number(clinicId) === Number(scope.selectedClinicId)) {
+      updateLeadCompetitionTrendBucket(findLeadCompetitionTrendBucket(selectedTrendBuckets, createdAt), trendPayload);
     }
   }
 
@@ -1255,6 +1356,7 @@ const computeLeadCompetitionStats = async (req, scope) => {
     group_name: scope.groupName,
     selected_clinic_id: scope.selectedClinicId,
     period: {
+      key: period.key,
       start: period.start.toISOString(),
       end: period.end.toISOString(),
       label: period.label,
@@ -1281,6 +1383,11 @@ const computeLeadCompetitionStats = async (req, scope) => {
       selected_vs_best_minutes: selectedVsBestMinutes,
     },
     ranking,
+    trend: {
+      scope: selectedTrendBuckets ? 'selected_clinic' : 'group',
+      buckets: (selectedTrendBuckets || groupTrendBuckets).map(compactLeadCompetitionTrendBucket),
+      group_buckets: groupTrendBuckets.map(compactLeadCompetitionTrendBucket),
+    },
     next_metrics: {
       treatment_conversion: {
         status: 'coming_soon',
@@ -1300,6 +1407,9 @@ const leadCompetitionCacheKey = (req, scope) => JSON.stringify({
   campanaId: req.query?.campanaId || req.query?.campana_id || null,
   channel: req.query?.channel || null,
   source: req.query?.source || null,
+  competitionPeriod: req.query?.competitionPeriod || req.query?.competition_period || null,
+  competitionStartDate: req.query?.competitionStartDate || req.query?.competition_start_date || null,
+  competitionEndDate: req.query?.competitionEndDate || req.query?.competition_end_date || null,
   startDate: req.query?.startDate || null,
   endDate: req.query?.endDate || null,
   includeArchived: req.query?.includeArchived || req.query?.include_archived || null,

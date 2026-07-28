@@ -7249,6 +7249,15 @@ del periodo que han terminado en cita (`citado`, `acudio_cita`, `convertido` o
 cita vinculada). Esta métrica mide efectividad de conversión a cita sobre el
 total de leads, no volumen de citas.
 
+La comparativa acepta periodo propio sin alterar los contadores superiores del
+endpoint: `competitionPeriod=30d|90d|365d` o, para rangos explícitos,
+`competitionStartDate`/`competitionEndDate`. La respuesta incluye
+`competition.period.key` y `competition.trend.buckets`; cada bucket expone
+leads, contactos humanos, tiempo medio, ratio dentro de objetivo, leads
+enfriados y conversión a cita. Si hay clínica seleccionada, `trend.buckets`
+representa esa clínica; `trend.group_buckets` queda disponible para usos
+agregados posteriores.
+
 Para proteger rendimiento, la comparativa usa una ventana por defecto de los
 últimos 30 días cuando la petición no trae rango temporal y se cachea por
 usuario, grupo, clínica seleccionada y filtros ligeros. Las lecturas devuelven
