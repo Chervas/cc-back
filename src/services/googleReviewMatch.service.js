@@ -6,6 +6,7 @@ const jobRequestsService = require('./jobRequests.service');
 
 const {
   BusinessProfileReview,
+  Clinica,
   JobRequest,
   MarketingPatientContactEvent,
   sequelize,
@@ -107,6 +108,99 @@ function scoreNameMatch(reviewName, candidateName) {
   return denominator ? matches / denominator : 0;
 }
 
+function asPlainObject(value) {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value !== 'string') return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function firstPositiveInteger(...values) {
+  for (const value of values) {
+    const parsed = Number(value || 0);
+    if (Number.isInteger(parsed) && parsed > 0) return parsed;
+  }
+  return null;
+}
+
+function firstString(...values) {
+  for (const value of values) {
+    const parsed = String(value || '').trim();
+    if (parsed) return parsed;
+  }
+  return '';
+}
+
+function clinicUsesReviewAlias(configuracion, review) {
+  const config = asPlainObject(configuracion);
+  const reviews = asPlainObject(config.reviews || config.resenas || config.review_requests);
+  const alias = asPlainObject(reviews.google_business_profile_alias || reviews.business_profile_alias);
+  const aliasBusinessLocationId = firstPositiveInteger(
+    alias.business_location_id,
+    alias.businessLocationId,
+    reviews.google_business_profile_alias_business_location_id,
+    reviews.google_business_location_alias_business_location_id,
+    config.review_google_business_profile_alias_business_location_id
+  );
+  const aliasLocationId = firstString(
+    alias.location_id,
+    alias.locationId,
+    reviews.google_business_profile_alias_location_id,
+    reviews.google_business_location_alias_location_id,
+    config.review_google_business_profile_alias_location_id
+  );
+  const reviewBusinessLocationId = Number(review.business_location_id || 0);
+  const reviewLocationId = firstString(review.location_id, review.locationId);
+  return !!(
+    aliasBusinessLocationId
+    && reviewBusinessLocationId
+    && aliasBusinessLocationId === reviewBusinessLocationId
+  ) || !!(
+    aliasLocationId
+    && reviewLocationId
+    && aliasLocationId === reviewLocationId
+  );
+}
+
+async function resolveCandidateClinicIdsForReview(review) {
+  const ids = new Set();
+  const reviewClinicId = Number(review.clinica_id || 0);
+  if (Number.isInteger(reviewClinicId) && reviewClinicId > 0) {
+    ids.add(reviewClinicId);
+  }
+
+  if (!Clinica || (!review.business_location_id && !review.location_id)) {
+    return Array.from(ids);
+  }
+
+  try {
+    const clinics = await Clinica.findAll({
+      attributes: ['id_clinica', 'configuracion'],
+      raw: true,
+    });
+    for (const clinic of clinics || []) {
+      if (clinicUsesReviewAlias(clinic.configuracion, review)) {
+        const clinicId = Number(clinic.id_clinica || 0);
+        if (Number.isInteger(clinicId) && clinicId > 0) {
+          ids.add(clinicId);
+        }
+      }
+    }
+  } catch (error) {
+    console.warn('[google-review-match] No se pudieron resolver alias de ficha para reseñas', {
+      review_id: review.id,
+      error: error?.message || error,
+    });
+  }
+
+  return Array.from(ids);
+}
+
 async function enqueueBusinessProfileReviewMatch(reviewId, options = {}) {
   const id = Number(reviewId || 0);
   if (!Number.isInteger(id) || id <= 0 || !JobRequest) {
@@ -142,6 +236,10 @@ async function enqueueBusinessProfileReviewMatch(reviewId, options = {}) {
 
 async function findBestReviewCandidate(review) {
   const reviewTime = review.create_time || review.update_time || review.created_at || new Date();
+  const candidateClinicIds = await resolveCandidateClinicIdsForReview(review);
+  if (!candidateClinicIds.length) {
+    return null;
+  }
   const rows = await sequelize.query(
     `
     SELECT
@@ -162,7 +260,7 @@ async function findBestReviewCandidate(review) {
     WHERE e.event_type = 'review_rating_followup_sent'
       AND e.channel = 'whatsapp'
       AND JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.kind')) = 'review_google_link_followup'
-      AND COALESCE(i.clinica_id, l.clinica_id) = :clinicId
+      AND COALESCE(i.clinica_id, l.clinica_id) IN (:candidateClinicIds)
       AND e.occurred_at >= DATE_SUB(:reviewTime, INTERVAL :windowHours HOUR)
       AND e.occurred_at <= DATE_ADD(:reviewTime, INTERVAL 15 MINUTE)
     ORDER BY e.occurred_at DESC
@@ -170,7 +268,7 @@ async function findBestReviewCandidate(review) {
     `,
     {
       replacements: {
-        clinicId: Number(review.clinica_id),
+        candidateClinicIds,
         reviewTime,
         windowHours: MATCH_WINDOW_HOURS,
       },

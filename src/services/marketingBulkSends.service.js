@@ -17,6 +17,7 @@ const {
   mergeClinicLinksIntoContext,
   resolveClinicGoogleLocalLinks,
   resolveClinicGoogleReviewLinks,
+  resolveClinicGoogleReviewProfile,
 } = require('./googleLocalLinks.service');
 const publicMediaPersonalizationService = require('./publicMediaPersonalization.service');
 
@@ -2707,6 +2708,27 @@ function buildPatientDisplayName(patient) {
   return [patient?.nombre, patient?.apellidos].filter(Boolean).join(' ').trim() || 'Paciente';
 }
 
+async function resolveReviewBusinessLocationIdsForClinics(clinicIds = []) {
+  const ids = new Set();
+  await Promise.all((Array.isArray(clinicIds) ? clinicIds : []).map(async (clinicId) => {
+    const safeClinicId = Number(clinicId || 0);
+    if (!Number.isInteger(safeClinicId) || safeClinicId <= 0) return;
+    try {
+      const profile = await resolveClinicGoogleReviewProfile(safeClinicId);
+      const businessLocationId = Number(profile?.location?.id || profile?.links?.business_location_id || 0);
+      if (Number.isInteger(businessLocationId) && businessLocationId > 0) {
+        ids.add(businessLocationId);
+      }
+    } catch (error) {
+      console.warn('[marketing-bulk-sends] No se pudo resolver la ficha Google de reseñas', {
+        clinic_id: safeClinicId,
+        error: error?.message || error,
+      });
+    }
+  }));
+  return Array.from(ids);
+}
+
 function resolveReviewTreatmentLabel(appointment, source = 'manual_selection') {
   const rawCandidates = [
     appointment?.tratamiento?.nombre,
@@ -3889,6 +3911,7 @@ async function getReviewRequestSummary(scope, options = {}) {
         review_exclusions_total: 0,
         review_exclusion_breakdown: [],
         requests_sent: 0,
+        active_queue_recipients: 0,
         ratings_1_to_4: 0,
         ratings_5: 0,
         treatment_options: [],
@@ -3902,13 +3925,17 @@ async function getReviewRequestSummary(scope, options = {}) {
       },
     };
   }
+  const reviewBusinessLocationIds = await resolveReviewBusinessLocationIdsForClinics(clinicIds);
+  const googleReviewScopePredicate = reviewBusinessLocationIds.length
+    ? 'r.business_location_id IN (:reviewBusinessLocationIds)'
+    : 'r.clinica_id IN (:clinicIds)';
 
   const [sentRow] = await db.sequelize.query(
     `
     SELECT COUNT(DISTINCT i.id) AS total
     FROM MarketingPatientListItems i
     INNER JOIN MarketingPatientLists l ON l.id = i.list_id
-    WHERE i.clinica_id IN (:clinicIds)
+    WHERE COALESCE(i.clinica_id, l.clinica_id) IN (:clinicIds)
       AND l.objective_id = :objectiveId
       AND (
         JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
@@ -3917,6 +3944,36 @@ async function getReviewRequestSummary(scope, options = {}) {
       AND (
         i.sent_at IS NOT NULL
         OR i.dispatch_status IN ('queued','sending','sent','delivered','read','replied')
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM MarketingPatientContactEvents te
+        WHERE te.list_id = i.list_id
+          AND te.item_id = i.id
+          AND te.event_type IN ('mass_campaign_test_sent', 'mass_campaign_test_failed')
+      )
+    `,
+    { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
+  );
+
+  const [activeQueueRow] = await db.sequelize.query(
+    `
+    SELECT COUNT(DISTINCT i.id) AS total
+    FROM MarketingPatientListItems i
+    INNER JOIN MarketingPatientLists l ON l.id = i.list_id
+    WHERE COALESCE(i.clinica_id, l.clinica_id) IN (:clinicIds)
+      AND l.objective_id = :objectiveId
+      AND l.status IN ('scheduled','sending','paused')
+      AND (
+        JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
+        OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.template_usage')) = 'solicitud_resena'
+      )
+      AND i.selected = TRUE
+      AND i.status = 'ready'
+      AND i.sent_at IS NULL
+      AND (
+        i.dispatch_status IS NULL
+        OR i.dispatch_status IN ('pending','queued','sending')
       )
       AND NOT EXISTS (
         SELECT 1
@@ -4004,7 +4061,7 @@ async function getReviewRequestSummary(scope, options = {}) {
     INNER JOIN MarketingPatientContactEvents e ON e.id = r.matched_contact_event_id
     INNER JOIN MarketingPatientLists l ON l.id = e.list_id
     INNER JOIN MarketingPatientListItems i ON i.id = e.item_id
-    WHERE r.clinica_id IN (:clinicIds)
+    WHERE COALESCE(i.clinica_id, l.clinica_id) IN (:clinicIds)
       AND l.objective_id = :objectiveId
       AND (
         JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
@@ -4019,21 +4076,21 @@ async function getReviewRequestSummary(scope, options = {}) {
           AND te.event_type IN ('mass_campaign_test_sent', 'mass_campaign_test_failed')
       )
     `,
-    { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
+    { replacements: { clinicIds, objectiveId: OBJECTIVE_ID, reviewBusinessLocationIds }, type: QueryTypes.SELECT }
   );
 
   const [googleReviewsAttributedRow] = await db.sequelize.query(
     `
     SELECT COUNT(DISTINCT r.id) AS total
     FROM BusinessProfileReviews r
-    WHERE r.clinica_id IN (:clinicIds)
+    WHERE ${googleReviewScopePredicate}
       AND CAST(r.star_rating AS UNSIGNED) BETWEEN 1 AND 5
       AND EXISTS (
         SELECT 1
         FROM MarketingPatientContactEvents e
         INNER JOIN MarketingPatientLists l ON l.id = e.list_id
         INNER JOIN MarketingPatientListItems i ON i.id = e.item_id
-        WHERE COALESCE(i.clinica_id, l.clinica_id) = r.clinica_id
+        WHERE COALESCE(i.clinica_id, l.clinica_id) IN (:clinicIds)
           AND l.objective_id = :objectiveId
           AND (
             JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
@@ -4052,7 +4109,7 @@ async function getReviewRequestSummary(scope, options = {}) {
           )
       )
     `,
-    { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
+    { replacements: { clinicIds, objectiveId: OBJECTIVE_ID, reviewBusinessLocationIds }, type: QueryTypes.SELECT }
   );
 
   const recentPrivateRatings = await db.sequelize.query(
@@ -4146,11 +4203,11 @@ async function getReviewRequestSummary(scope, options = {}) {
       SUM(CAST(star_rating AS UNSIGNED)) AS rating_sum,
       AVG(CAST(star_rating AS UNSIGNED)) AS average_rating,
       SUM(CASE WHEN CAST(star_rating AS UNSIGNED) = 5 THEN 1 ELSE 0 END) AS five_star_reviews
-    FROM BusinessProfileReviews
-    WHERE clinica_id IN (:clinicIds)
+    FROM BusinessProfileReviews r
+    WHERE ${googleReviewScopePredicate}
       AND CAST(star_rating AS UNSIGNED) BETWEEN 1 AND 5
     `,
-    { replacements: { clinicIds }, type: QueryTypes.SELECT }
+    { replacements: { clinicIds, reviewBusinessLocationIds }, type: QueryTypes.SELECT }
   );
 
   const [automationTemplate, lastRequestTemplate, approvedReviewTemplate, approvedReminderTemplate, approvedPhotoReviewTemplate, googleReviewUrlAvailable, clinicStatuses] = await Promise.all([
@@ -4218,6 +4275,7 @@ async function getReviewRequestSummary(scope, options = {}) {
       review_exclusion_breakdown: reviewExclusionBreakdown,
       treatment_options: treatmentOptions,
       requests_sent: Number(sentRow?.total || 0),
+      active_queue_recipients: Number(activeQueueRow?.total || 0),
       ratings_1_to_4: Number(ratingsRow?.ratings_1_to_4 || 0),
       ratings_5: Number(ratingsRow?.ratings_5 || 0),
       google_reviews_matched: Number(googleReviewsMatchedRow?.total || 0),
