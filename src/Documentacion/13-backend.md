@@ -7238,3 +7238,28 @@ paciente, tratamiento, notas, flujos, consentimientos ni otras relaciones. La
 cabecera `X-Agenda-Endpoint: calendar-summary` permite identificar esta variante
 en QA y trazas. La agenda diaria y el drawer continúan usando el contrato
 completo.
+
+## 2026-07-28 - Resenas: colas y clasificacion de respuestas
+
+Las colas manuales de resenas mantienen dos acciones distintas:
+
+- pausar: `POST /api/marketing/bulk-sends/campaigns/:id/cancel` conserva el
+  estado historico `paused`/`dispatch.cancelled` por compatibilidad y retiene
+  los pacientes pendientes;
+- cancelar cola: `DELETE /api/marketing/bulk-sends/campaigns/:id` archiva la
+  lista, marca `dispatch.status=archived` y libera pacientes pendientes para
+  una nueva seleccion. El worker de `marketing_bulk_send_dispatch` corta tambien
+  un lote en curso si detecta la lista archivada.
+
+`getReviewRequestedPatientIds` considera `l.status='paused'`, por lo que una
+cola pausada no devuelve pacientes al pool. Las colas `archived` quedan fuera
+del pool y de las metricas activas.
+
+`materializeInboundReply` sigue usando primero reglas deterministas para
+valoraciones `1-5`. Se anade reconocimiento de expresiones largas tipo
+`os doy un 5`. Si no hay nota determinista y el mensaje responde a una solicitud
+de resena, se llama a un fallback Groq-compatible (`REVIEW_RATING_AI_MODEL`,
+por defecto `GROQ_MODEL_FAST`) enviando solo el texto del inbound, sin nombre ni
+telefono. Solo se acepta si devuelve `rating` entero `1..5` con confianza >=
+`REVIEW_RATING_AI_MIN_CONFIDENCE` (0.78 por defecto). El evento conserva
+`inference_source`, `inference_confidence` y `inference_model`.
