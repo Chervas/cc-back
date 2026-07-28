@@ -58,6 +58,10 @@ const REVIEW_REMINDER_TEMPLATE_NAME = 'clinicaclick_recordatorio_resena_sin_resp
 const REVIEW_REMINDER_JOB_TYPE = 'marketing_review_request_reminder';
 const REVIEW_NO_RESPONSE_JOB_TYPE = 'marketing_review_request_no_response';
 const IMPORTED_HISTORICAL_APPOINTMENT_REASON = 'Importación de pacientes para reactivación';
+const REVIEW_REQUEST_CANDIDATE_LIMIT = Math.min(
+  50000,
+  Math.max(2000, Number.parseInt(process.env.MARKETING_REVIEW_REQUEST_CANDIDATE_LIMIT || '10000', 10) || 10000)
+);
 const DISPATCH_JOB_TYPE = 'marketing_bulk_send_dispatch';
 const DISPATCH_BATCH_SIZE = Math.max(1, Number.parseInt(process.env.MARKETING_BULK_SEND_BATCH_SIZE || '100', 10) || 100);
 const DISPATCH_BATCH_DELAY_MS = Math.max(2 * 60 * 1000, Number.parseInt(process.env.MARKETING_BULK_SEND_BATCH_DELAY_MS || String(2 * 60 * 1000), 10) || 2 * 60 * 1000);
@@ -2893,7 +2897,7 @@ async function buildItemsForReviewRequest(scope, body = {}) {
   }
 
   const source = normalizeReviewRequestSource(body.review_source || body.reviewRequestSource);
-  const limit = Math.min(Math.max(Number(body.limit || 500), 1), 2000);
+  const limit = clampInteger(body.limit, REVIEW_REQUEST_CANDIDATE_LIMIT, 1, REVIEW_REQUEST_CANDIDATE_LIMIT);
   const alreadyRequested = await getReviewRequestedPatientIds(scope);
 
   if (source === 'manual_selection' || !CitaPaciente) {
@@ -3049,7 +3053,7 @@ async function buildItemsForReviewRequest(scope, body = {}) {
       db.Tratamiento ? { model: db.Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre'] } : null,
     ].filter(Boolean),
     order: [['inicio', 'ASC']],
-    limit: Math.min(limit * 5, 10000),
+    limit: Math.min(limit * 5, REVIEW_REQUEST_CANDIDATE_LIMIT * 5),
   });
 
   const selected = new Map();
@@ -3635,7 +3639,9 @@ async function buildReviewClinicStatuses(scope, options = {}) {
         review_source: reviewSource,
         review_treatment_ids: treatmentIds,
         review_treatment_moment: options.review_treatment_moment || options.reviewTreatmentMoment || null,
-        limit: 5000,
+        excluded_review_patient_ids: options.excluded_review_patient_ids || options.excludedReviewPatientIds || null,
+        review_exclusion_rules: options.review_exclusion_rules || options.reviewExclusionRules || null,
+        limit: REVIEW_REQUEST_CANDIDATE_LIMIT,
       }),
       findApprovedReviewWhatsappTemplate(clinicScope),
       findApprovedReviewReminderWhatsappTemplate(clinicScope),
@@ -3678,11 +3684,12 @@ async function buildReviewClinicStatuses(scope, options = {}) {
       : (ready
         ? 'Puede activarse desde el interruptor general del grupo.'
         : 'No se ejecutará hasta resolver los requisitos pendientes.');
+    const possiblePatients = candidateItems.filter((item) => !String(item.status || '').startsWith('excluded')).length;
 
     return {
       clinic_id: clinicId,
       clinic_name: normalizeText(clinic.nombre_clinica) || `Clínica ${clinicId}`,
-      possible_patients: candidateItems.length,
+      possible_patients: possiblePatients,
       google_review_url_available: !!googleReviewUrlAvailable,
       google_status_label: googleLabel,
       whatsapp_available: !!whatsappAvailable,
@@ -3774,7 +3781,9 @@ async function getReviewRequestSummary(scope, options = {}) {
       review_source: reviewSource,
       review_treatment_ids: treatmentIds,
       review_treatment_moment: options.review_treatment_moment || options.reviewTreatmentMoment || null,
-      limit: 5000,
+      excluded_review_patient_ids: options.excluded_review_patient_ids || options.excludedReviewPatientIds || null,
+      review_exclusion_rules: options.review_exclusion_rules || options.reviewExclusionRules || null,
+      limit: REVIEW_REQUEST_CANDIDATE_LIMIT,
     }),
     buildReviewTreatmentOptions(effectiveScope),
   ]);
@@ -3785,6 +3794,9 @@ async function getReviewRequestSummary(scope, options = {}) {
       summary: {
         possible_patients: 0,
         candidates_preview: [],
+        candidates_preview_total: 0,
+        review_exclusions_total: 0,
+        review_exclusion_breakdown: [],
         requests_sent: 0,
         ratings_1_to_4: 0,
         ratings_5: 0,
@@ -4063,10 +4075,19 @@ async function getReviewRequestSummary(scope, options = {}) {
   const whatsappAvailable = scope?.scope === 'group'
     ? groupReadyClinics.length > 0
     : await hasWhatsappConfigForScope(effectiveScope);
-  const manuallyFilteredCandidates = candidates.filter((item) => !String(item.status || '').startsWith('excluded'));
-  const summaryCandidates = scope?.scope === 'group'
-    ? applyReviewClinicReadinessExclusions(manuallyFilteredCandidates, clinicStatuses).filter((item) => !String(item.status || '').startsWith('excluded'))
-    : manuallyFilteredCandidates;
+  const candidatePool = scope?.scope === 'group'
+    ? applyReviewClinicReadinessExclusions(candidates, clinicStatuses)
+    : candidates;
+  const summaryCandidates = candidatePool.filter((item) => !String(item.status || '').startsWith('excluded'));
+  const excludedCandidates = candidatePool.filter((item) => String(item.status || '').startsWith('excluded'));
+  const reviewExclusionBreakdown = Array.from(excludedCandidates.reduce((counts, item) => {
+    const label = normalizeText(item?.reason)
+      || (item?.exclusion_reason === 'manual' ? 'Excluido manualmente' : 'Exclusión automática');
+    counts.set(label, (counts.get(label) || 0) + 1);
+    return counts;
+  }, new Map()).entries())
+    .map(([label, count]) => ({ label, count }))
+    .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label, 'es'));
   const groupApprovedTemplate = groupReadyClinics.find((clinic) => clinic.approved_template_id)
     || clinicStatuses.find((clinic) => clinic.approved_template_id)
     || null;
@@ -4097,9 +4118,11 @@ async function getReviewRequestSummary(scope, options = {}) {
     success: true,
     summary: {
       possible_patients: summaryCandidates.length,
-      candidates_preview: summaryCandidates.slice(0, previewLimit).map(serializeItem),
-      candidates_preview_total: summaryCandidates.length,
+      candidates_preview: candidatePool.slice(0, previewLimit).map(serializeItem),
+      candidates_preview_total: candidatePool.length,
       candidates_preview_limit: previewLimit,
+      review_exclusions_total: excludedCandidates.length,
+      review_exclusion_breakdown: reviewExclusionBreakdown,
       treatment_options: treatmentOptions,
       requests_sent: Number(sentRow?.total || 0),
       ratings_1_to_4: Number(ratingsRow?.ratings_1_to_4 || 0),
