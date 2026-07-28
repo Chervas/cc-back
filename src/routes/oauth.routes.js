@@ -1751,35 +1751,31 @@ router.post('/google/local/map-locations', async (req, res) => {
         }
 
         const mappings = normalizeBusinessProfileLocationMappings(req.body?.mappings);
-        const { connection: conn, destinationClinicIds } = await resolveAuthorizedDestinationGoogleConnection({
-            userId,
-            mappings,
-            authorizeDestinations: hasMarketingClinicScopeAccess,
-            resolveForClinic: (clinicId) => resolveGoogleRequestConnection(req, {
-                allowLegacyUserFallback: true,
-                scopeInput: {
-                    clinicIdRaw: clinicId,
-                    groupIdRaw: null,
-                    assignmentScopeRaw: 'clinic'
-                }
-            })
-        });
-        const providerLocationsById = accessibleProviderLocationsById(
-            mappings,
-            await fetchAccessibleGoogleBusinessLocations(conn)
-        );
         const mappingPurpose = cleanString(req.body?.mapping_purpose || req.body?.mappingPurpose)?.toLowerCase();
 
         if (mappingPurpose === 'reviews') {
+            const destinationClinicIds = Array.from(new Set(
+                mappings.map((mapping) => Number(mapping.clinicaId)).filter(Boolean)
+            ));
             if (destinationClinicIds.length !== 1 || mappings.length !== 1) {
                 const error = new Error('Selecciona una sola clinica y una sola ficha para las resenas.');
                 error.code = 'review_profile_single_mapping_required';
                 error.httpStatus = 400;
                 throw error;
             }
+            const canWriteTarget = await hasMarketingClinicScopeAccess({
+                userId,
+                clinicIds: destinationClinicIds,
+                access: 'write'
+            });
+            if (!canWriteTarget) {
+                const error = new Error('No tienes permisos para cambiar el destino de resenas de esta clinica.');
+                error.code = 'review_profile_target_scope_forbidden';
+                error.httpStatus = 403;
+                throw error;
+            }
 
             const mapping = mappings[0];
-            const providerLocation = providerLocationsById.get(mapping.locationId);
             const savedAlias = await db.sequelize.transaction(async (transaction) => {
                 const location = await ClinicBusinessLocation.findOne({
                     where: {
@@ -1853,7 +1849,7 @@ router.post('/google/local/map-locations', async (req, res) => {
                     clinicaId: Number(targetClinic.id_clinica),
                     sourceClinicaId: Number(sourceClinic.id_clinica),
                     locationId: location.location_id,
-                    locationName: providerLocation?.locationName || location.location_name,
+                    locationName: location.location_name,
                     alias: Number(targetClinic.id_clinica) !== Number(sourceClinic.id_clinica)
                 };
             });
@@ -1866,6 +1862,23 @@ router.post('/google/local/map-locations', async (req, res) => {
             });
         }
 
+        const { connection: conn, destinationClinicIds } = await resolveAuthorizedDestinationGoogleConnection({
+            userId,
+            mappings,
+            authorizeDestinations: hasMarketingClinicScopeAccess,
+            resolveForClinic: (clinicId) => resolveGoogleRequestConnection(req, {
+                allowLegacyUserFallback: true,
+                scopeInput: {
+                    clinicIdRaw: clinicId,
+                    groupIdRaw: null,
+                    assignmentScopeRaw: 'clinic'
+                }
+            })
+        });
+        const providerLocationsById = accessibleProviderLocationsById(
+            mappings,
+            await fetchAccessibleGoogleBusinessLocations(conn)
+        );
         const createdOrUpdated = [];
         const locationsToBackfill = [];
         const replaceExisting = req.body?.replace_existing === true;
@@ -2031,14 +2044,9 @@ router.post('/google/local/map-locations', async (req, res) => {
  */
 router.get('/google/local/mappings', async (req, res) => {
     try {
-        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
-            allowLegacyUserFallback: true
-        });
+        const userId = getUserIdFromToken(req);
         if (!userId) {
             return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
-        }
-        if (!conn) {
-            return res.json({ success: true, mappings: [] });
         }
         const mappingPurpose = cleanString(req.query?.mapping_purpose || req.query?.mappingPurpose)?.toLowerCase();
         const targetClinicId = Number(req.query?.clinic_id || req.query?.clinica_id || 0);
@@ -2061,7 +2069,6 @@ router.get('/google/local/mappings', async (req, res) => {
                 : await ClinicBusinessLocation.findOne({
                     where: {
                         clinica_id: targetClinicId,
-                        google_connection_id: conn.id,
                         is_active: true
                     },
                     order: [['last_synced_at', 'DESC'], ['updated_at', 'DESC']],
@@ -2085,6 +2092,12 @@ router.get('/google/local/mappings', async (req, res) => {
             return res.json({ success: true, mappings, review_alias: !!profile.alias });
         }
 
+        const { connection: conn } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
+        if (!conn) {
+            return res.json({ success: true, mappings: [] });
+        }
         const allRows = await ClinicBusinessLocation.findAll({
             where: { google_connection_id: conn.id, is_active: true },
             include: [{ model: Clinica, as: 'clinica', required: false }],

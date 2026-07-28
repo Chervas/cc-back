@@ -112,6 +112,31 @@ function testReviewProfileAliasKeepsGeneralMappingSeparate() {
   assert.equal(ownProfile.reviews.google_business_profile_alias_location_id, undefined);
 }
 
+function testReviewProfileAliasSupportsManyClinicsPerSource() {
+  const source = {
+    clinicId: 56,
+    sourceClinicName: 'Propdental Sant Marti',
+    businessLocationId: 6,
+    locationId: 'locations/sant-marti',
+    updatedAt: new Date('2026-07-28T08:00:00.000Z'),
+  };
+  const eixample = buildReviewProfileAliasConfiguration(
+    { sede: 'eixample' },
+    { ...source, targetClinicId: 57, sourceClinicId: source.clinicId }
+  );
+  const glories = buildReviewProfileAliasConfiguration(
+    { sede: 'glories' },
+    { ...source, targetClinicId: 89, sourceClinicId: source.clinicId }
+  );
+
+  assert.equal(eixample.sede, 'eixample');
+  assert.equal(glories.sede, 'glories');
+  assert.equal(eixample.reviews.google_business_profile_alias_business_location_id, 6);
+  assert.equal(glories.reviews.google_business_profile_alias_business_location_id, 6);
+  assert.equal(eixample.reviews.google_business_profile_alias_clinic_id, 56);
+  assert.equal(glories.reviews.google_business_profile_alias_clinic_id, 56);
+}
+
 async function testDestinationDerivedConnectionBlocksCrossScopeAttack() {
   const mappings = normalizeBusinessProfileLocationMappings([
     { clinicaId: 55, locationId: 'locations/a' },
@@ -405,6 +430,7 @@ async function run() {
   testMappingValidation();
   testOriginMoveDetection();
   testReviewProfileAliasKeepsGeneralMappingSeparate();
+  testReviewProfileAliasSupportsManyClinicsPerSource();
   await testDestinationDerivedConnectionBlocksCrossScopeAttack();
   await testExplicitScopeGuardRunsBeforeResolution();
   testScopeAliasesUseOneCanonicalParser();

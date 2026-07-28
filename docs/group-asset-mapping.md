@@ -95,5 +95,11 @@ The contextual mapping UI must call
 That operation accepts exactly one target clinic and one already mapped active
 location, validates source/target access and same-group scope, then updates only
 the review alias. It must not change `ClinicBusinessLocations.clinica_id`.
+The relation is deliberately many-to-one: Eixample, Glories and any other
+authorized clinic in the group may point to the same Sant Marti location. Saving
+one target must not remove another target alias or require a Google connection
+owned by the target clinic; the source location is already the canonical,
+connected asset.
 `GET /oauth/google/local/mappings?mapping_purpose=reviews&clinic_id=<id>`
-returns the effective review selection so the dialog can preselect it.
+returns the effective review selection so the dialog can preselect it, even when
+the target clinic has no general Business Profile mapping of its own.
