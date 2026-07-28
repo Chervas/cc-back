@@ -722,6 +722,25 @@ function renderVideo(node) {
   return `<figure id="cc-${escapeHtml(node.id)}" class="cc-node cc-video cc-video-aspect-${escapeHtml(aspect)} ${styleClassList(node)}"><div class="cc-video-frame"><iframe src="${escapeHtml(source)}" title="${escapeHtml(node.props.title)}" loading="${loading}" referrerpolicy="strict-origin-when-cross-origin" allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe></div>${caption}</figure>`;
 }
 
+function renderTestimonial(node) {
+  const rating = Number.isInteger(node.props.rating)
+    ? Math.min(5, Math.max(0, node.props.rating))
+    : 0;
+  const stars = rating > 0
+    ? `<div class="cc-testimonial-stars" aria-label="${escapeHtml(`${rating} de 5 estrellas`)}">${escapeHtml('★'.repeat(rating))}${escapeHtml('☆'.repeat(5 - rating))}</div>`
+    : '';
+  const attribution = String(node.props.attribution || '').trim();
+  const role = String(node.props.role || '').trim();
+  const sourceLabel = String(node.props.source_label || '').trim();
+  const metaParts = [
+    attribution ? `<strong>${escapeHtml(attribution)}</strong>` : '',
+    role ? `<span>${escapeHtml(role)}</span>` : '',
+    sourceLabel ? `<span class="cc-testimonial-source">${escapeHtml(sourceLabel)}</span>` : '',
+  ].filter(Boolean).join('');
+  const meta = metaParts ? `<figcaption class="cc-testimonial-meta">${metaParts}</figcaption>` : '';
+  return `<figure id="cc-${escapeHtml(node.id)}" class="cc-node cc-testimonial ${styleClassList(node)}">${stars}<blockquote class="cc-testimonial-quote">${escapeHtml(node.props.quote)}</blockquote>${meta}</figure>`;
+}
+
 function buttonHref(node, context) {
   const { action, target } = node.props;
   if (action === 'external_url') return safePublicButtonUrl(target, node.id);
@@ -801,6 +820,7 @@ function renderNode(nodeId, document, snapshot, context, ancestors = new Set(), 
   if (node.type === 'faq') {
     return `<details id="cc-${escapeHtml(node.id)}" class="cc-node cc-faq ${styleClassList(node)}"><summary>${escapeHtml(node.props.question)}</summary><p>${escapeHtml(node.props.answer)}</p></details>`;
   }
+  if (node.type === 'testimonial') return renderTestimonial(node);
   if (node.type === 'image') return renderImage(node, snapshot);
   if (node.type === 'gallery') return renderGallery(node, snapshot);
   if (node.type === 'video') return renderVideo(node);
@@ -912,6 +932,7 @@ function stylesheet(tokens, document = { nodes: {} }) {
     '.cc-image{margin:0}.cc-gallery{display:grid}.cc-gallery-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}.cc-gallery-cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}.cc-gallery-cols-4{grid-template-columns:repeat(4,minmax(0,1fr))}.cc-gallery-item{min-width:0;margin:0;border-radius:inherit}.cc-image-frame{overflow:hidden;border-radius:inherit;background:#eef1f6}.cc-image img,.cc-gallery-item img{width:100%;height:100%;object-fit:cover}.cc-fit-contain img{object-fit:contain}.cc-aspect-auto .cc-image-frame img{height:auto}.cc-aspect-1-1 .cc-image-frame{aspect-ratio:1/1}.cc-aspect-4-3 .cc-image-frame{aspect-ratio:4/3}.cc-aspect-3-2 .cc-image-frame{aspect-ratio:3/2}.cc-aspect-16-9 .cc-image-frame{aspect-ratio:16/9}.cc-aspect-21-9 .cc-image-frame{aspect-ratio:21/9}.cc-image figcaption,.cc-gallery-item figcaption,.cc-video figcaption{padding-top:.5rem;color:#5f6b7f;font-size:.8125rem}.cc-video{margin:0}.cc-video-frame{position:relative;overflow:hidden;border-radius:inherit;background:#eef1f6}.cc-video-frame iframe{position:absolute;inset:0;width:100%;height:100%;border:0}.cc-video-aspect-16-9 .cc-video-frame{aspect-ratio:16/9}.cc-video-aspect-4-3 .cc-video-frame{aspect-ratio:4/3}.cc-video-aspect-1-1 .cc-video-frame{aspect-ratio:1/1}',
     focalRules,
     '.cc-faq{border:1px solid #dfe3ec;background:#fff;padding:var(--cc-md);border-radius:var(--cc-radius)}.cc-faq summary{cursor:pointer;font-family:var(--cc-font-heading);font-weight:700}.cc-faq p{margin:var(--cc-sm) 0 0;white-space:pre-wrap}',
+    '.cc-testimonial{margin:0;display:grid;gap:.65rem;border:1px solid #dfe3ec;background:#fff;padding:var(--cc-lg);border-radius:var(--cc-radius)}.cc-testimonial-stars{color:#f59e0b;letter-spacing:.08em;font-size:1rem;line-height:1}.cc-testimonial-quote{margin:0;font-family:var(--cc-font-heading);font-size:1.125rem;line-height:1.5;white-space:pre-wrap}.cc-testimonial-meta{display:flex;flex-wrap:wrap;gap:.35rem .65rem;align-items:center;color:#5f6b7f;font-size:.875rem}.cc-testimonial-meta strong{color:var(--cc-text);font-weight:800}.cc-testimonial-source{padding:.16rem .45rem;border-radius:9999px;background:#eef2ff;color:var(--cc-primary);font-size:.75rem;font-weight:700}',
     `@media(max-width:767px){.cc-layout-row>.cc-container{flex-direction:column}.cc-layout-grid>.cc-container,.cc-gallery{grid-template-columns:1fr}.cc-form{padding:var(--cc-lg)}.cc-button{width:100%}${responsiveRules('mobile')}}`,
     `@media(min-width:768px) and (max-width:1023px){.cc-gallery{grid-template-columns:repeat(2,minmax(0,1fr))}${responsiveRules('tablet')}}`,
     `@media(min-width:1024px){${responsiveRules('desktop')}}`,

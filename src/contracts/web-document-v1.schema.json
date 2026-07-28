@@ -65,6 +65,7 @@
           { "$ref": "#/definitions/dividerNode" },
           { "$ref": "#/definitions/spacerNode" },
           { "$ref": "#/definitions/faqNode" },
+          { "$ref": "#/definitions/testimonialNode" },
           { "$ref": "#/definitions/imageNode" },
           { "$ref": "#/definitions/galleryNode" },
           { "$ref": "#/definitions/videoNode" },
@@ -698,6 +699,60 @@
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
+    "testimonialNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "version", "props", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "type": { "const": "testimonial" },
+        "version": { "const": 1 },
+        "props": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["quote", "attribution"],
+          "properties": {
+            "quote": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 1000 }
+              ]
+            },
+            "attribution": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 180 }
+              ]
+            },
+            "role": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "maxLength": 180 }
+              ]
+            },
+            "rating": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5
+            },
+            "source_label": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "maxLength": 180 }
+              ]
+            }
+          }
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "style_tokens": { "$ref": "#/definitions/styleTokens" },
+        "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
+        "binding_ids": { "$ref": "#/definitions/bindingIds" }
+      }
+    },
     "galleryNode": {
       "type": "object",
       "additionalProperties": false,
@@ -992,7 +1047,7 @@
       "properties": {
         "target_node_id": { "$ref": "#/definitions/safeId" },
         "target_prop": {
-          "enum": ["text", "label", "title", "description", "question", "answer", "asset_id", "alt", "target"]
+          "enum": ["text", "label", "title", "description", "question", "answer", "quote", "attribution", "role", "asset_id", "alt", "target"]
         },
         "source": {
           "enum": ["clinic", "treatment", "professional", "content_entry"]

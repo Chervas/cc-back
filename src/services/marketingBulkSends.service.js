@@ -956,6 +956,41 @@ function formatBusinessTime(minutes) {
   return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
 }
 
+function normalizeBusinessIntervals(value) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  return Object.entries(source).reduce((acc, [weekdayKey, rawIntervals]) => {
+    const weekday = Number(weekdayKey);
+    if (!Number.isInteger(weekday) || weekday < 1 || weekday > 7) return acc;
+    const intervals = (Array.isArray(rawIntervals) ? rawIntervals : [rawIntervals])
+      .map((interval) => {
+        const sourceInterval = interval && typeof interval === 'object' ? interval : {};
+        const startMinutes = parseBusinessTimeToMinutes(
+          sourceInterval.start_time ?? sourceInterval.start,
+          Number.NaN
+        );
+        const endMinutes = parseBusinessTimeToMinutes(
+          sourceInterval.end_time ?? sourceInterval.end,
+          Number.NaN
+        );
+        if (!Number.isFinite(startMinutes) || !Number.isFinite(endMinutes) || endMinutes <= startMinutes) {
+          return null;
+        }
+        return {
+          start: Math.floor(startMinutes / 60),
+          end: Math.ceil(endMinutes / 60),
+          start_time: formatBusinessTime(startMinutes),
+          end_time: formatBusinessTime(endMinutes),
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => (
+        parseBusinessTimeToMinutes(a.start_time, 0) - parseBusinessTimeToMinutes(b.start_time, 0)
+      ));
+    if (intervals.length) acc[String(weekday)] = intervals;
+    return acc;
+  }, {});
+}
+
 function normalizeBusinessHours(input = {}) {
   const raw = input && typeof input === 'object' ? input : {};
   const defaultStart = DISPATCH_BUSINESS_START_HOUR * 60;
@@ -966,6 +1001,7 @@ function normalizeBusinessHours(input = {}) {
     startMinutes = defaultStart;
     endMinutes = defaultEnd;
   }
+  const intervalsByWeekday = normalizeBusinessIntervals(raw.intervals_by_weekday || raw.intervalsByWeekday);
   return {
     ...raw,
     start: Math.floor(startMinutes / 60),
@@ -974,6 +1010,7 @@ function normalizeBusinessHours(input = {}) {
     end_time: formatBusinessTime(endMinutes),
     timezone: raw.timezone || DISPATCH_TIMEZONE,
     allowed_weekdays: normalizeAllowedWeekdays(raw.allowed_weekdays || raw.weekdays || raw.days),
+    intervals_by_weekday: intervalsByWeekday,
   };
 }
 
@@ -989,6 +1026,26 @@ function isAllowedBusinessWeekday(parts, allowedWeekdays = []) {
   return !allowedWeekdays.length || allowedWeekdays.includes(Number(parts.weekday || 0));
 }
 
+function getBusinessIntervalsForWeekday(window, weekday) {
+  const keyedIntervals = window?.intervals_by_weekday?.[String(weekday)];
+  if (Array.isArray(keyedIntervals) && keyedIntervals.length) {
+    return keyedIntervals
+      .map((interval) => ({
+        startMinutes: parseBusinessTimeToMinutes(interval.start_time ?? interval.start, Number.NaN),
+        endMinutes: parseBusinessTimeToMinutes(interval.end_time ?? interval.end, Number.NaN),
+      }))
+      .filter((interval) => (
+        Number.isFinite(interval.startMinutes)
+        && Number.isFinite(interval.endMinutes)
+        && interval.endMinutes > interval.startMinutes
+      ))
+      .sort((a, b) => a.startMinutes - b.startMinutes);
+  }
+  const startMinutes = parseBusinessTimeToMinutes(window.start_time ?? window.start, DISPATCH_BUSINESS_START_HOUR * 60);
+  const endMinutes = parseBusinessTimeToMinutes(window.end_time ?? window.end, DISPATCH_BUSINESS_END_HOUR * 60);
+  return [{ startMinutes, endMinutes }];
+}
+
 function addLocalDays(parts, days) {
   const localNoon = zonedDateToUtc({ ...parts, hour: 12, minute: 0, second: 0 });
   return getMadridParts(new Date(localNoon.getTime() + days * 24 * 60 * 60 * 1000));
@@ -998,31 +1055,49 @@ function getNextBusinessAllowedAt(reference = new Date(), businessHours = null) 
   const window = normalizeBusinessHours(businessHours || {});
   const parts = getMadridParts(reference);
   const currentMinutes = parts.hour * 60 + parts.minute;
-  const startMinutes = parseBusinessTimeToMinutes(window.start_time ?? window.start, DISPATCH_BUSINESS_START_HOUR * 60);
-  const endMinutes = parseBusinessTimeToMinutes(window.end_time ?? window.end, DISPATCH_BUSINESS_END_HOUR * 60);
-  if (isAllowedBusinessWeekday(parts, window.allowed_weekdays) && currentMinutes >= startMinutes && currentMinutes < endMinutes) {
-    return reference;
-  }
-  if (isAllowedBusinessWeekday(parts, window.allowed_weekdays) && currentMinutes < startMinutes) {
-    return zonedDateToUtc({ ...parts, hour: Math.floor(startMinutes / 60), minute: startMinutes % 60, second: 0 });
+  if (isAllowedBusinessWeekday(parts, window.allowed_weekdays)) {
+    const todayIntervals = getBusinessIntervalsForWeekday(window, parts.weekday);
+    for (const interval of todayIntervals) {
+      if (currentMinutes >= interval.startMinutes && currentMinutes < interval.endMinutes) {
+        return reference;
+      }
+      if (currentMinutes < interval.startMinutes) {
+        return zonedDateToUtc({
+          ...parts,
+          hour: Math.floor(interval.startMinutes / 60),
+          minute: interval.startMinutes % 60,
+          second: 0,
+        });
+      }
+    }
   }
   for (let offset = 1; offset <= 7; offset += 1) {
     const nextParts = addLocalDays(parts, offset);
     if (isAllowedBusinessWeekday(nextParts, window.allowed_weekdays)) {
-      return zonedDateToUtc({ ...nextParts, hour: Math.floor(startMinutes / 60), minute: startMinutes % 60, second: 0 });
+      const nextIntervals = getBusinessIntervalsForWeekday(window, nextParts.weekday);
+      const firstInterval = nextIntervals[0];
+      if (firstInterval) {
+        return zonedDateToUtc({
+          ...nextParts,
+          hour: Math.floor(firstInterval.startMinutes / 60),
+          minute: firstInterval.startMinutes % 60,
+          second: 0,
+        });
+      }
     }
   }
   const fallbackParts = addLocalDays(parts, 1);
-  return zonedDateToUtc({ ...fallbackParts, hour: Math.floor(startMinutes / 60), minute: startMinutes % 60, second: 0 });
+  const fallbackStart = parseBusinessTimeToMinutes(window.start_time ?? window.start, DISPATCH_BUSINESS_START_HOUR * 60);
+  return zonedDateToUtc({ ...fallbackParts, hour: Math.floor(fallbackStart / 60), minute: fallbackStart % 60, second: 0 });
 }
 
 function isWithinBusinessHours(date = new Date(), businessHours = null) {
   const window = normalizeBusinessHours(businessHours || {});
   const parts = getMadridParts(date);
   const currentMinutes = parts.hour * 60 + parts.minute;
-  const startMinutes = parseBusinessTimeToMinutes(window.start_time ?? window.start, DISPATCH_BUSINESS_START_HOUR * 60);
-  const endMinutes = parseBusinessTimeToMinutes(window.end_time ?? window.end, DISPATCH_BUSINESS_END_HOUR * 60);
-  return isAllowedBusinessWeekday(parts, window.allowed_weekdays) && currentMinutes >= startMinutes && currentMinutes < endMinutes;
+  if (!isAllowedBusinessWeekday(parts, window.allowed_weekdays)) return false;
+  return getBusinessIntervalsForWeekday(window, parts.weekday)
+    .some((interval) => currentMinutes >= interval.startMinutes && currentMinutes < interval.endMinutes);
 }
 
 function parseMessagingLimit(value) {
@@ -5147,7 +5222,14 @@ async function enqueueReviewReminderJob({ list, item, sentAt = null, triggerMess
     return existing;
   }
   const base = sentAt ? new Date(sentAt) : new Date();
-  const nextRunAt = new Date((Number.isNaN(base.getTime()) ? Date.now() : base.getTime()) + REVIEW_REMINDER_DELAY_MS);
+  const rawNextRunAt = new Date((Number.isNaN(base.getTime()) ? Date.now() : base.getTime()) + REVIEW_REMINDER_DELAY_MS);
+  const clinicId = Number(item?.clinica_id || getClinicIdForList(list) || 0) || null;
+  const dispatchBusinessHours = await hydrateDispatchBusinessHoursForList(
+    list,
+    clinicId ? { scope: 'clinic', clinicIds: [clinicId] } : {},
+    getDispatchConfig(list).business_hours
+  );
+  const nextRunAt = getNextBusinessAllowedAt(rawNextRunAt, dispatchBusinessHours);
   return jobRequestsService.enqueueJobRequest({
     type: REVIEW_REMINDER_JOB_TYPE,
     payload: {
@@ -5186,6 +5268,27 @@ async function runReviewRequestReminderJob(payload = {}) {
   const reminderAlreadySent = await hasReviewEvent(listId, itemId, ['review_request_reminder_sent']);
   if (reminderAlreadySent) {
     return { status: 'completed', result: { skipped: true, reason: 'reminder_already_sent', list_id: listId, item_id: itemId } };
+  }
+
+  const clinicId = Number(item?.clinica_id || getClinicIdForList(list) || 0) || null;
+  const dispatchBusinessHours = await hydrateDispatchBusinessHoursForList(
+    list,
+    clinicId ? { scope: 'clinic', clinicIds: [clinicId] } : {},
+    getDispatchConfig(list).business_hours
+  );
+  if (!isWithinBusinessHours(new Date(), dispatchBusinessHours)) {
+    const nextAllowed = getNextBusinessAllowedAt(new Date(), dispatchBusinessHours);
+    return {
+      status: 'waiting',
+      nextRunAt: nextAllowed,
+      nextAllowedAt: nextAllowed,
+      result: {
+        waiting: true,
+        reason: 'outside_business_hours',
+        list_id: listId,
+        item_id: itemId,
+      },
+    };
   }
 
   const result = await sendReviewRequestReminder({ listId, itemId });
@@ -6227,21 +6330,96 @@ function getSingleClinicIdForDispatchCalendar(list, fallbackScope = {}) {
   return scopeClinicIds.length === 1 ? scopeClinicIds[0] : null;
 }
 
-async function hydrateDispatchBusinessHoursForList(list, scope = {}, businessHours = null) {
-  const normalized = normalizeBusinessHours(businessHours || {});
-  if (normalized.allowed_weekdays?.length || !ClinicaHorario) return normalized;
-  const clinicId = getSingleClinicIdForDispatchCalendar(list, scope);
-  if (!clinicId) return normalized;
-  const rows = await ClinicaHorario.findAll({
-    attributes: ['dia_semana'],
+async function loadDispatchCalendarRowsForClinic(clinicId) {
+  const safeClinicId = Number(clinicId || 0);
+  if (!safeClinicId || !ClinicaHorario) return [];
+  return ClinicaHorario.findAll({
+    attributes: ['dia_semana', 'hora_inicio', 'hora_fin'],
     where: {
-      clinica_id: clinicId,
+      clinica_id: safeClinicId,
       activo: true,
     },
+    order: [['dia_semana', 'ASC'], ['hora_inicio', 'ASC']],
     raw: true,
   }).catch(() => []);
-  const allowedWeekdays = normalizeAllowedWeekdays(rows.map((row) => row.dia_semana));
-  return allowedWeekdays.length ? { ...normalized, allowed_weekdays: allowedWeekdays } : normalized;
+}
+
+function buildBusinessHoursFromCalendarRows(rows = [], base = {}) {
+  const intervalsByWeekday = {};
+  let minStart = Number.POSITIVE_INFINITY;
+  let maxEnd = 0;
+  for (const row of rows) {
+    const weekday = Number(row?.dia_semana);
+    if (!Number.isInteger(weekday) || weekday < 1 || weekday > 7) continue;
+    const startMinutes = parseBusinessTimeToMinutes(row.hora_inicio, Number.NaN);
+    const endMinutes = parseBusinessTimeToMinutes(row.hora_fin, Number.NaN);
+    if (!Number.isFinite(startMinutes) || !Number.isFinite(endMinutes) || endMinutes <= startMinutes) continue;
+    const key = String(weekday);
+    if (!intervalsByWeekday[key]) intervalsByWeekday[key] = [];
+    intervalsByWeekday[key].push({
+      start: Math.floor(startMinutes / 60),
+      end: Math.ceil(endMinutes / 60),
+      start_time: formatBusinessTime(startMinutes),
+      end_time: formatBusinessTime(endMinutes),
+    });
+    minStart = Math.min(minStart, startMinutes);
+    maxEnd = Math.max(maxEnd, endMinutes);
+  }
+  const allowedWeekdays = normalizeAllowedWeekdays(Object.keys(intervalsByWeekday));
+  if (!allowedWeekdays.length) return null;
+  for (const key of Object.keys(intervalsByWeekday)) {
+    intervalsByWeekday[key].sort((a, b) => (
+      parseBusinessTimeToMinutes(a.start_time, 0) - parseBusinessTimeToMinutes(b.start_time, 0)
+    ));
+  }
+  return normalizeBusinessHours({
+    ...base,
+    start_time: formatBusinessTime(minStart),
+    end_time: formatBusinessTime(maxEnd),
+    allowed_weekdays: allowedWeekdays,
+    intervals_by_weekday: intervalsByWeekday,
+    label: `${formatBusinessTime(minStart)}-${formatBusinessTime(maxEnd)} (horario de clínica)`,
+    source: 'clinic_hours',
+  });
+}
+
+async function resolveReviewAliasClinicIdForDispatchCalendar(clinicId) {
+  const safeClinicId = Number(clinicId || 0);
+  if (!safeClinicId || !Clinica) return null;
+  const clinic = await Clinica.findByPk(safeClinicId, {
+    attributes: ['configuracion'],
+    raw: true,
+  }).catch(() => null);
+  const config = asPlainObject(clinic?.configuracion);
+  const aliasClinicId = Number(config?.reviews?.google_business_profile_alias_clinic_id || 0);
+  return Number.isInteger(aliasClinicId) && aliasClinicId > 0 && aliasClinicId !== safeClinicId
+    ? aliasClinicId
+    : null;
+}
+
+async function hydrateDispatchBusinessHoursForList(list, scope = {}, businessHours = null) {
+  const normalized = normalizeBusinessHours(businessHours || {});
+  if (!ClinicaHorario) return normalized;
+  const clinicId = getSingleClinicIdForDispatchCalendar(list, scope);
+  if (!clinicId) return normalized;
+  let rows = await loadDispatchCalendarRowsForClinic(clinicId);
+  let sourceClinicId = clinicId;
+  if (!rows.length && isReviewRequestList(list)) {
+    const aliasClinicId = await resolveReviewAliasClinicIdForDispatchCalendar(clinicId);
+    if (aliasClinicId) {
+      const aliasRows = await loadDispatchCalendarRowsForClinic(aliasClinicId);
+      if (aliasRows.length) {
+        rows = aliasRows;
+        sourceClinicId = aliasClinicId;
+      }
+    }
+  }
+  const calendarBusinessHours = buildBusinessHoursFromCalendarRows(rows, {
+    ...normalized,
+    timezone: normalized.timezone || DISPATCH_TIMEZONE,
+    source_clinic_id: sourceClinicId,
+  });
+  return calendarBusinessHours || normalized;
 }
 
 async function loadClinicForTemplateVariables(clinicId) {
