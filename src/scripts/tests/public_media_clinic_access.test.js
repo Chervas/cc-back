@@ -42,6 +42,25 @@ async function testClinicAccessImageIsNormalizedForWhatsapp() {
   assert.ok(prepared.buffer.length < publicMediaStorage.MAX_WHATSAPP_IMAGE_BYTES);
 }
 
+async function testReviewTeamPhotoIsNormalizedForWhatsapp() {
+  const source = await makePng();
+  const prepared = await publicMediaStorage.preparePublicMediaPayload({
+    purpose: 'review_team_photo',
+    contentType: 'image/png',
+    buffer: source,
+  });
+  const outputMetadata = await sharp(prepared.buffer).metadata();
+
+  assert.equal(prepared.contentType, 'image/jpeg');
+  assert.equal(outputMetadata.format, 'jpeg');
+  assert.equal(outputMetadata.orientation, undefined);
+  assert.equal(prepared.imageMetadata.source_content_type, 'image/png');
+  assert.equal(prepared.imageMetadata.transformed, true);
+  assert.equal(prepared.imageMetadata.metadata_stripped, true);
+  assert.equal(prepared.imageMetadata.whatsapp_compatible, true);
+  assert.ok(prepared.buffer.length < publicMediaStorage.MAX_WHATSAPP_IMAGE_BYTES);
+}
+
 async function testMagicBytesMustMatchDeclaredMime() {
   const source = await makePng();
   await assert.rejects(
@@ -191,6 +210,7 @@ function testReviewPhotoKeepsMarketingCapability() {
 
 async function run() {
   await testClinicAccessImageIsNormalizedForWhatsapp();
+  await testReviewTeamPhotoIsNormalizedForWhatsapp();
   await testMagicBytesMustMatchDeclaredMime();
   await testSourceSizeIsRejectedBeforeImageDecode();
   await testWebEditorPurposeIsAllowedAndKeepsImageContract();

@@ -80,6 +80,12 @@ const {
 const {
     resolveEffectiveGoogleMappings
 } = require('../services/effectiveMarketingAssets.service');
+const {
+    resolveClinicGoogleReviewProfile
+} = require('../services/googleLocalLinks.service');
+const {
+    buildReviewProfileAliasConfiguration
+} = require('../lib/reviewProfileAlias');
 
 // Configuración de la App de Meta
 const META_APP_ID = '1807844546609897'; // <-- App ID correcto
@@ -1745,6 +1751,117 @@ router.post('/google/local/map-locations', async (req, res) => {
         }
 
         const mappings = normalizeBusinessProfileLocationMappings(req.body?.mappings);
+        const mappingPurpose = cleanString(req.body?.mapping_purpose || req.body?.mappingPurpose)?.toLowerCase();
+
+        if (mappingPurpose === 'reviews') {
+            const destinationClinicIds = Array.from(new Set(
+                mappings.map((mapping) => Number(mapping.clinicaId)).filter(Boolean)
+            ));
+            if (destinationClinicIds.length !== 1 || mappings.length !== 1) {
+                const error = new Error('Selecciona una sola clinica y una sola ficha para las resenas.');
+                error.code = 'review_profile_single_mapping_required';
+                error.httpStatus = 400;
+                throw error;
+            }
+            const canWriteTarget = await hasMarketingClinicScopeAccess({
+                userId,
+                clinicIds: destinationClinicIds,
+                access: 'write'
+            });
+            if (!canWriteTarget) {
+                const error = new Error('No tienes permisos para cambiar el destino de resenas de esta clinica.');
+                error.code = 'review_profile_target_scope_forbidden';
+                error.httpStatus = 403;
+                throw error;
+            }
+
+            const mapping = mappings[0];
+            const savedAlias = await db.sequelize.transaction(async (transaction) => {
+                const location = await ClinicBusinessLocation.findOne({
+                    where: {
+                        location_id: mapping.locationId,
+                        is_active: true
+                    },
+                    transaction,
+                    lock: transaction.LOCK.UPDATE
+                });
+                if (!location) {
+                    const error = new Error(
+                        'Esta ficha debe estar conectada primero a su clinica real antes de compartirla para resenas.'
+                    );
+                    error.code = 'review_profile_source_not_mapped';
+                    error.httpStatus = 409;
+                    throw error;
+                }
+
+                const targetClinic = await Clinica.findByPk(mapping.clinicaId, {
+                    transaction,
+                    lock: transaction.LOCK.UPDATE
+                });
+                const sourceClinic = await Clinica.findByPk(location.clinica_id, {
+                    transaction
+                });
+                if (!targetClinic || !sourceClinic) {
+                    const error = new Error('No se ha encontrado la clinica asociada a la ficha.');
+                    error.code = 'review_profile_clinic_not_found';
+                    error.httpStatus = 404;
+                    throw error;
+                }
+
+                const targetGroupId = Number(targetClinic.grupoClinicaId || targetClinic.grupo_clinica_id || 0);
+                const sourceGroupId = Number(sourceClinic.grupoClinicaId || sourceClinic.grupo_clinica_id || 0);
+                if (
+                    Number(targetClinic.id_clinica) !== Number(sourceClinic.id_clinica)
+                    && (!targetGroupId || targetGroupId !== sourceGroupId)
+                ) {
+                    const error = new Error('Solo puedes compartir fichas entre clinicas del mismo grupo.');
+                    error.code = 'review_profile_group_scope_forbidden';
+                    error.httpStatus = 403;
+                    throw error;
+                }
+
+                const canReadSource = await hasMarketingClinicScopeAccess({
+                    userId,
+                    clinicIds: [Number(sourceClinic.id_clinica)],
+                    access: 'read'
+                });
+                if (!canReadSource) {
+                    const error = new Error('No tienes acceso a la clinica propietaria de esta ficha.');
+                    error.code = 'review_profile_source_scope_forbidden';
+                    error.httpStatus = 403;
+                    throw error;
+                }
+
+                const configuracion = buildReviewProfileAliasConfiguration(
+                    targetClinic.configuracion,
+                    {
+                        targetClinicId: targetClinic.id_clinica,
+                        sourceClinicId: sourceClinic.id_clinica,
+                        sourceClinicName: sourceClinic.nombre_clinica,
+                        businessLocationId: location.id,
+                        locationId: location.location_id
+                    }
+                );
+                await targetClinic.update({ configuracion }, { transaction });
+
+                return {
+                    id: location.id,
+                    clinicaId: Number(targetClinic.id_clinica),
+                    sourceClinicaId: Number(sourceClinic.id_clinica),
+                    locationId: location.location_id,
+                    locationName: location.location_name,
+                    alias: Number(targetClinic.id_clinica) !== Number(sourceClinic.id_clinica)
+                };
+            });
+
+            return res.json({
+                success: true,
+                mapped: 1,
+                review_alias: true,
+                locations: [savedAlias]
+            });
+        }
+
         const { connection: conn, destinationClinicIds } = await resolveAuthorizedDestinationGoogleConnection({
             userId,
             mappings,
@@ -1762,7 +1879,6 @@ router.post('/google/local/map-locations', async (req, res) => {
             mappings,
             await fetchAccessibleGoogleBusinessLocations(conn)
         );
-
         const createdOrUpdated = [];
         const locationsToBackfill = [];
         const replaceExisting = req.body?.replace_existing === true;
@@ -1928,16 +2044,60 @@ router.post('/google/local/map-locations', async (req, res) => {
  */
 router.get('/google/local/mappings', async (req, res) => {
     try {
-        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
-            allowLegacyUserFallback: true
-        });
+        const userId = getUserIdFromToken(req);
         if (!userId) {
             return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
         }
+        const mappingPurpose = cleanString(req.query?.mapping_purpose || req.query?.mappingPurpose)?.toLowerCase();
+        const targetClinicId = Number(req.query?.clinic_id || req.query?.clinica_id || 0);
+        if (mappingPurpose === 'reviews' && Number.isInteger(targetClinicId) && targetClinicId > 0) {
+            const canReadTarget = await hasMarketingClinicScopeAccess({
+                userId,
+                clinicIds: [targetClinicId],
+                access: 'read'
+            });
+            if (!canReadTarget) {
+                return res.status(403).json({
+                    success: false,
+                    error: 'review_profile_target_scope_forbidden'
+                });
+            }
+
+            const profile = await resolveClinicGoogleReviewProfile(targetClinicId);
+            const selectedLocation = profile.alias && profile.location
+                ? profile.location
+                : await ClinicBusinessLocation.findOne({
+                    where: {
+                        clinica_id: targetClinicId,
+                        is_active: true
+                    },
+                    order: [['last_synced_at', 'DESC'], ['updated_at', 'DESC']],
+                    raw: true
+                });
+            const clinic = profile.clinic || await Clinica.findByPk(targetClinicId, { raw: true });
+            const mappings = selectedLocation ? [{
+                clinicaId: targetClinicId,
+                clinicName: clinic?.nombre_clinica || null,
+                clinicAvatar: clinic?.url_avatar || null,
+                locations: [{
+                    locationId: selectedLocation.location_id,
+                    locationName: selectedLocation.location_name,
+                    storeCode: selectedLocation.store_code,
+                    primaryCategory: selectedLocation.primary_category,
+                    isVerified: !!selectedLocation.is_verified,
+                    isSuspended: !!selectedLocation.is_suspended,
+                    lastSyncedAt: selectedLocation.last_synced_at
+                }]
+            }] : [];
+            return res.json({ success: true, mappings, review_alias: !!profile.alias });
+        }
+
+        const { connection: conn } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         if (!conn) {
             return res.json({ success: true, mappings: [] });
         }
-
         const allRows = await ClinicBusinessLocation.findAll({
             where: { google_connection_id: conn.id, is_active: true },
             include: [{ model: Clinica, as: 'clinica', required: false }],

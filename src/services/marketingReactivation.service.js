@@ -47,6 +47,7 @@ const REACTIVATION_ACTION_TO_MODE = {
 };
 const STANDARD_IMPORT_FIELDS = new Set(['name', 'first_name', 'last_name', 'phone', 'phone_landline', 'email', 'treatment', 'last_visit_at', 'clinic']);
 const COMMERCIAL_TEMPLATE_USAGES = new Set(['marketing', 'comercial', 'promocion', 'promocional', 'reactivacion_pacientes']);
+const IMPORTED_LABEL_MAX_LENGTH = 255;
 
 function toDateMonthsAgo(months) {
   const date = new Date();
@@ -67,6 +68,12 @@ function repairMojibake(value) {
 
 function normalizeText(value) {
   return repairMojibake(String(value || '')).trim();
+}
+
+function truncateImportedLabel(value, maxLength = IMPORTED_LABEL_MAX_LENGTH) {
+  const text = normalizeText(value).replace(/\s+/g, ' ');
+  if (text.length <= maxLength) return text;
+  return text.slice(0, maxLength).trimEnd();
 }
 
 function normalizeKey(value) {
@@ -239,6 +246,15 @@ function titleCaseIfNeeded(value) {
   const text = normalizeText(value);
   if (!text) return text;
   return /^[^a-záéíóúñü]+$/.test(text) ? toTitleCaseName(text) : text;
+}
+
+function prepareImportedTreatmentValue(value) {
+  const normalized = titleCaseIfNeeded(value || 'Sin tratamiento asignado').replace(/\s+/g, ' ').trim();
+  return {
+    normalized,
+    storageName: truncateImportedLabel(normalized),
+    canCreateCatalogEntry: normalized.length <= IMPORTED_LABEL_MAX_LENGTH,
+  };
 }
 
 function normalizeTreatmentMappings(rawMappings = {}) {
@@ -1186,8 +1202,9 @@ async function buildUniqueTreatmentCode(baseCode, transaction) {
 }
 
 async function resolveImportedTreatment(rawTreatment, context, options = {}) {
-  const sourceName = titleCaseIfNeeded(rawTreatment || 'Sin tratamiento asignado');
-  const sourceKey = normalizeKey(sourceName);
+  const sourceValue = prepareImportedTreatmentValue(rawTreatment);
+  const sourceName = sourceValue.storageName;
+  const sourceKey = normalizeKey(sourceValue.normalized);
   const mapping = context.treatmentMappings.get(sourceKey);
   const mappedId = Number(mapping?.treatment_id || 0);
   if (mappedId && context.treatmentsById.has(mappedId)) {
@@ -1195,9 +1212,15 @@ async function resolveImportedTreatment(rawTreatment, context, options = {}) {
     return { id: mappedId, name: treatment.nombre || sourceName };
   }
 
-  const mappedName = titleCaseIfNeeded(mapping?.treatment_name || sourceName);
+  const mappedValue = prepareImportedTreatmentValue(mapping?.treatment_name || sourceValue.normalized);
+  const mappedName = mappedValue.storageName;
+  const catalogNameIsSafe = sourceValue.canCreateCatalogEntry && mappedValue.canCreateCatalogEntry;
+  if (!catalogNameIsSafe) {
+    return { id: null, name: null };
+  }
   const mappedKey = normalizeKey(mappedName);
-  const existing = await findExistingImportedTreatment(mappedName, context)
+  const findExisting = options.findExistingImportedTreatment || findExistingImportedTreatment;
+  const existing = await findExisting(mappedName, context)
     || context.treatmentsByKey.get(sourceKey);
   if (existing?.id_tratamiento) {
     return { id: Number(existing.id_tratamiento), name: existing.nombre || mappedName };
@@ -1405,6 +1428,8 @@ async function buildImportedItemPayloads(scope, body, transaction) {
   const nameFormat = normalizeNameFormat(body.name_format || body.nameFormat || 'auto');
   const customFieldsSchema = buildCustomFieldSchema(rows, columnMapping, body.custom_fields_schema || []);
   const treatmentMappings = normalizeTreatmentMappings(body.treatment_mappings || body.treatment_mapping || {});
+  const createMissingTreatments = body.create_missing_treatments !== false
+    && body.createMissingTreatments !== false;
   const clinicLookup = await loadImportClinicLookup(scope, transaction);
   const importTreatments = await loadImportTreatments(scope, defaultClinicId, transaction);
   const treatmentIndex = indexTreatments(importTreatments);
@@ -1539,7 +1564,7 @@ async function buildImportedItemPayloads(scope, body, transaction) {
     const resolvedTreatment = rawTreatment
       ? await resolveImportedTreatment(rawTreatment, treatmentContext, {
         clinicId: rowClinicId,
-        createIfMissing: validPhone && !!rowClinicId && !clinicAssignmentError,
+        createIfMissing: createMissingTreatments && validPhone && !!rowClinicId && !clinicAssignmentError,
       })
       : { id: null, name: null };
     const treatment = resolvedTreatment.name || null;
@@ -2688,4 +2713,8 @@ module.exports = {
   removeList,
   rebuildList,
   getEvents,
+  _test: {
+    prepareImportedTreatmentValue,
+    resolveImportedTreatment,
+  },
 };

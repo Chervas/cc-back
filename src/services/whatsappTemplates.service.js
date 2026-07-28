@@ -25,6 +25,9 @@ const {
   resolveCatalogFamilyKey,
   resolveMetaTemplateLanguage,
 } = require('../lib/whatsapp-template-locale');
+const {
+  acquireWabaCatalogCreationLease,
+} = require('../lib/waba-catalog-creation-lease');
 
 const {
   ClinicMetaAsset,
@@ -2215,6 +2218,7 @@ async function createCustomTemplateForClinic({
   accessToken,
   displayName,
   bodyText,
+  headerImageUrl = null,
   category = 'UTILITY',
   language = DEFAULT_LANGUAGE,
   variables = [],
@@ -2227,6 +2231,7 @@ async function createCustomTemplateForClinic({
   const safeAccessToken = cleanString(accessToken);
   const safeDisplayName = cleanString(displayName) || 'Plantilla WhatsApp';
   const safeBodyText = cleanString(bodyText);
+  const safeHeaderImageUrl = cleanString(headerImageUrl);
   const safeCategory = String(category || '').trim().toUpperCase() === 'MARKETING' ? 'MARKETING' : 'UTILITY';
   const safeTemplateUsage = cleanString(templateUsage).toLowerCase();
   if (!safeWabaId || !safeAccessToken) {
@@ -2283,11 +2288,36 @@ async function createCustomTemplateForClinic({
   };
   const extraComponents = buildCustomTemplateExtraComponents({ templateUsage: safeTemplateUsage });
   const technicalName = buildCustomTemplateTechnicalName(safeDisplayName);
-  const template = {
+  if (safeHeaderImageUrl && !/^https:\/\//i.test(safeHeaderImageUrl)) {
+    const error = new Error('La imagen de cabecera debe usar una URL HTTPS publica.');
+    error.code = 'invalid_template_header_image_url';
+    error.statusCode = 400;
+    throw error;
+  }
+  const imageHeaderComponents = safeHeaderImageUrl ? [{
+    type: 'HEADER',
+    format: 'IMAGE',
+    example: {
+      header_handle: [safeHeaderImageUrl],
+    },
+  }] : [];
+  const draftTemplate = {
     name: technicalName,
     category: safeCategory,
-    components: [bodyComponent, ...extraComponents],
+    components: [...imageHeaderComponents, bodyComponent, ...extraComponents],
   };
+  const preparedTemplate = await prepareTemplateImageHeaderForMeta({
+    template: draftTemplate,
+    accessToken: safeAccessToken,
+  });
+  if (preparedTemplate.issue) {
+    const error = new Error(buildImageHeaderSamplePendingReason(preparedTemplate.issue));
+    error.code = preparedTemplate.issue;
+    error.statusCode = 400;
+    error.details = [error.message];
+    throw error;
+  }
+  const template = preparedTemplate.template;
 
   let metaTemplateId = null;
   try {
@@ -2311,7 +2341,7 @@ async function createCustomTemplateForClinic({
       language,
       category: safeCategory,
       status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING,
-      components: [bodyComponent, ...extraComponents],
+      components: template.components,
       variables: annotateTemplateVariables(contract.variables, safeTemplateUsage),
       created_by_user_id: safeCreatedByUserId,
       origin: 'custom',
@@ -2330,7 +2360,7 @@ async function createCustomTemplateForClinic({
     language,
     category: safeCategory,
     status: WHATSAPP_TEMPLATE_STATUS.PENDING,
-    components: [bodyComponent, ...extraComponents],
+    components: template.components,
     variables: annotateTemplateVariables(contract.variables, safeTemplateUsage),
     created_by_user_id: safeCreatedByUserId,
     meta_template_id: metaTemplateId,
@@ -2380,6 +2410,40 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
     throw new Error('missing_wa_access_token');
   }
 
+  const lease = await acquireWabaCatalogCreationLease(wabaId, {
+    sequelizeInstance: db.sequelize,
+  });
+  if (!lease.acquired) {
+    return {
+      skipped: true,
+      reason: 'waba_catalog_creation_in_progress',
+      lock_name: lease.lockName || null,
+    };
+  }
+
+  try {
+    // Refresh remote state under the same WABA lease before calculating the
+    // next technical version.
+    await syncTemplatesForWaba({ wabaId, accessToken: asset.waAccessToken });
+    return await createTemplatesFromCatalogWithLease({
+      wabaId,
+      clinicId,
+      groupId,
+      assignmentScope,
+      asset,
+    });
+  } finally {
+    await lease.release();
+  }
+}
+
+async function createTemplatesFromCatalogWithLease({
+  wabaId,
+  clinicId,
+  groupId,
+  assignmentScope,
+  asset,
+}) {
   const disciplinas = await resolveDisciplines({
     clinicId: assignmentScope === 'clinic' ? clinicId : null,
     groupId: assignmentScope === 'group' ? groupId : null,

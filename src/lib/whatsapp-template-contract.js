@@ -130,11 +130,11 @@ const SYSTEM_TEMPLATE_OVERRIDES = {
   },
   clinicaclick_solicitar_resena: {
     2: ['nombre_paciente', 'nombre_clinica'],
-    3: ['nombre_paciente', 'nombre_clinica', 'firma_resenas'],
+    3: ['nombre_paciente', 'firma_resenas', 'nombre_clinica'],
   },
   clinicaclick_solicitar_resena_foto: {
     2: ['nombre_paciente', 'nombre_clinica'],
-    3: ['nombre_paciente', 'nombre_clinica', 'firma_resenas'],
+    3: ['nombre_paciente', 'firma_resenas', 'nombre_clinica'],
   },
   clinicaclick_recordatorio_resena_sin_respuesta: {
     1: ['nombre_paciente'],
@@ -155,6 +155,15 @@ function normalizeTemplateVariableName(rawName) {
 
   if (!normalized) return '';
   return VARIABLE_ALIASES[normalized] || normalized;
+}
+
+function isOpaqueTemplateVariableName(name, index) {
+  const normalized = normalizeTemplateVariableName(name || '');
+  const safeIndex = Number(index || 0);
+  if (!normalized || !Number.isFinite(safeIndex) || safeIndex <= 0) return false;
+  return normalized === String(safeIndex)
+    || normalized === `var_${safeIndex}`
+    || normalized === `variable_${safeIndex}`;
 }
 
 function extractWhatsappTemplatePlaceholderIndexes(templateOrComponents) {
@@ -244,22 +253,58 @@ function normalizeExplicitVariables(rawVariables) {
     .sort((a, b) => a.index - b.index);
 }
 
-function buildVariablesFromOverride(templateName, indexes, examples = []) {
-  const normalizedTemplateName = cleanString(templateName).replace(/_v\d+$/i, '');
-  const byCount = SYSTEM_TEMPLATE_OVERRIDES[normalizedTemplateName];
-  if (!byCount) return null;
-  const names = byCount[indexes.length];
+function isReviewRequestTemplateName(templateName) {
+  const normalizedTemplateName = cleanString(templateName).toLowerCase();
+  return normalizedTemplateName.includes('solicitar_resena')
+    || normalizedTemplateName.includes('solicitud_resena')
+    || normalizedTemplateName.includes('solicitud_de_opinion')
+    || normalizedTemplateName.includes('opinion_tras_visita')
+    || normalizedTemplateName.includes('valoracion_tras_visita');
+}
+
+function buildVariablesFromNames(indexes, names, examples = []) {
   if (!Array.isArray(names) || names.length !== indexes.length) return null;
   return indexes.map((index, offset) => {
     const name = normalizeTemplateVariableName(names[offset] || `var_${index}`);
+    const rawExample = cleanString(examples[offset]);
+    const usableExample = rawExample && rawExample !== String(index) ? rawExample : '';
     return {
       index,
       position: index,
       name,
-      example: cleanString(examples[offset]) || VARIABLE_METADATA[name]?.example || undefined,
+      example: usableExample || VARIABLE_METADATA[name]?.example || undefined,
       description: VARIABLE_METADATA[name]?.description || `Variable ${index}`,
     };
   });
+}
+
+function buildReviewRequestVariablesFromBody(templateName, indexes, bodyText, examples = []) {
+  if (!isReviewRequestTemplateName(templateName)) return null;
+  if (indexes.length === 1) return buildVariablesFromNames(indexes, ['nombre_paciente'], examples);
+  if (indexes.length === 2) return buildVariablesFromNames(indexes, ['nombre_paciente', 'nombre_clinica'], examples);
+  if (indexes.length !== 3) return null;
+
+  if (/soy\s*\{\{\s*2\s*\}\}\s+de\s+\{\{\s*3\s*\}\}/i.test(bodyText)) {
+    return buildVariablesFromNames(indexes, ['nombre_paciente', 'firma_resenas', 'nombre_clinica'], examples);
+  }
+  if (/soy\s*\{\{\s*3\s*\}\}\s+de\s+\{\{\s*2\s*\}\}/i.test(bodyText)) {
+    return buildVariablesFromNames(indexes, ['nombre_paciente', 'nombre_clinica', 'firma_resenas'], examples);
+  }
+
+  return buildVariablesFromNames(indexes, ['nombre_paciente', 'firma_resenas', 'nombre_clinica'], examples);
+}
+
+function buildVariablesFromOverride(templateName, indexes, examples = [], bodyText = '') {
+  const reviewVariables = buildReviewRequestVariablesFromBody(templateName, indexes, bodyText, examples);
+  if (reviewVariables) {
+    return reviewVariables;
+  }
+
+  const normalizedTemplateName = cleanString(templateName).replace(/_v\d+$/i, '');
+  const byCount = SYSTEM_TEMPLATE_OVERRIDES[normalizedTemplateName];
+  if (!byCount) return null;
+  const names = byCount[indexes.length];
+  return buildVariablesFromNames(indexes, names, examples);
 }
 
 function buildWhatsappTemplateVariableContract(template) {
@@ -267,8 +312,9 @@ function buildWhatsappTemplateVariableContract(template) {
   const actualIndexes = extractWhatsappTemplatePlaceholderIndexes(components);
   if (!actualIndexes.length) return [];
   const examples = resolveBodyExamples(components);
+  const bodyText = resolveBodyText(components);
 
-  const overrideVariables = buildVariablesFromOverride(template?.name, actualIndexes, examples);
+  const overrideVariables = buildVariablesFromOverride(template?.name, actualIndexes, examples, bodyText);
   if (overrideVariables) {
     return overrideVariables;
   }
@@ -283,13 +329,13 @@ function buildWhatsappTemplateVariableContract(template) {
   const canUseExplicit =
     explicitVariables.length > 0
     && explicitVariables.length === actualIndexes.length
-    && actualIndexes.every((index) => explicitByIndex.has(index));
+    && actualIndexes.every((index) => explicitByIndex.has(index))
+    && explicitVariables.every((variable) => !isOpaqueTemplateVariableName(variable.name, variable.index));
 
   if (canUseExplicit) {
     return actualIndexes.map((index) => ({ ...explicitByIndex.get(index) }));
   }
 
-  const bodyText = resolveBodyText(components);
   return actualIndexes.map((index) => {
     const explicit = explicitByIndex.get(index) || null;
     const inferredName = inferVariableNameFromTemplateBody(bodyText, index, examples[index - 1] || explicit?.example || '');
