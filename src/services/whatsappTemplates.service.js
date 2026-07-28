@@ -25,6 +25,9 @@ const {
   resolveCatalogFamilyKey,
   resolveMetaTemplateLanguage,
 } = require('../lib/whatsapp-template-locale');
+const {
+  acquireWabaCatalogCreationLease,
+} = require('../lib/waba-catalog-creation-lease');
 
 const {
   ClinicMetaAsset,
@@ -2353,6 +2356,40 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
     throw new Error('missing_wa_access_token');
   }
 
+  const lease = await acquireWabaCatalogCreationLease(wabaId, {
+    sequelizeInstance: db.sequelize,
+  });
+  if (!lease.acquired) {
+    return {
+      skipped: true,
+      reason: 'waba_catalog_creation_in_progress',
+      lock_name: lease.lockName || null,
+    };
+  }
+
+  try {
+    // Refresh remote state under the same WABA lease before calculating the
+    // next technical version.
+    await syncTemplatesForWaba({ wabaId, accessToken: asset.waAccessToken });
+    return await createTemplatesFromCatalogWithLease({
+      wabaId,
+      clinicId,
+      groupId,
+      assignmentScope,
+      asset,
+    });
+  } finally {
+    await lease.release();
+  }
+}
+
+async function createTemplatesFromCatalogWithLease({
+  wabaId,
+  clinicId,
+  groupId,
+  assignmentScope,
+  asset,
+}) {
   const disciplinas = await resolveDisciplines({
     clinicId: assignmentScope === 'clinic' ? clinicId : null,
     groupId: assignmentScope === 'group' ? groupId : null,
