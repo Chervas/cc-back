@@ -927,6 +927,7 @@ const resolveHumanFirstContactAt = (lead, firstAttemptAt, linkedAppointmentCreat
 };
 
 const activeLeadStatusesForCompetition = new Set(['nuevo', 'contactado', 'esperando_info', 'info_recibida', 'cualificado']);
+const appointmentConvertedStatusesForCompetition = new Set(['citado', 'acudio_cita', 'convertido']);
 
 const resolveLeadCompetitionScope = async (req, { clinicIdRaw = null, groupIdRaw = null } = {}) => {
   const actorId = parseInteger(req.userData?.userId);
@@ -1038,6 +1039,8 @@ const compactClinicCompetitionStats = (stat) => {
     response_target_rate: percent(stat.under_target_count, responseMinutes.length),
     under_target_count: stat.under_target_count,
     open_without_human_response_over_target: stat.open_without_human_response_over_target,
+    appointment_converted_count: stat.appointment_converted_count,
+    appointment_conversion_rate: percent(stat.appointment_converted_count, stat.leads_total),
   };
 };
 
@@ -1161,6 +1164,7 @@ const computeLeadCompetitionStats = async (req, scope) => {
       response_minutes: [],
       under_target_count: 0,
       open_without_human_response_over_target: 0,
+      appointment_converted_count: 0,
     });
   }
 
@@ -1185,11 +1189,15 @@ const computeLeadCompetitionStats = async (req, scope) => {
 
     const runtime = clinicRuntimeById.get(clinicId) || { schedule: [], timeZone: 'Europe/Madrid' };
     const leadId = parseInteger(lead.id);
+    const status = String(cleanString(lead.status_lead) || '').toLowerCase();
     const firstContactAt = resolveHumanFirstContactAt(
       lead,
       firstAttemptByLead.get(leadId),
       appointmentCreatedByLead.get(leadId),
     );
+    if (appointmentConvertedStatusesForCompetition.has(status) || appointmentCreatedByLead.has(leadId)) {
+      stat.appointment_converted_count += 1;
+    }
     if (firstContactAt) {
       const minutes = businessMinutesBetweenForCompetition(createdAt, firstContactAt, runtime);
       stat.response_minutes.push(minutes);
@@ -1198,7 +1206,6 @@ const computeLeadCompetitionStats = async (req, scope) => {
       continue;
     }
 
-    const status = String(cleanString(lead.status_lead) || '').toLowerCase();
     if (activeLeadStatusesForCompetition.has(status)) {
       const openMinutes = businessMinutesBetweenForCompetition(createdAt, period.end, runtime);
       if (openMinutes > targetMinutes) {
@@ -1236,6 +1243,7 @@ const computeLeadCompetitionStats = async (req, scope) => {
     : null;
 
   const overdueOpenLeads = ranking.reduce((sum, row) => sum + Number(row.open_without_human_response_over_target || 0), 0);
+  const appointmentConvertedLeads = ranking.reduce((sum, row) => sum + Number(row.appointment_converted_count || 0), 0);
   const humanContacted = allResponseMinutes.length;
 
   return {
@@ -1264,6 +1272,8 @@ const computeLeadCompetitionStats = async (req, scope) => {
       median_response_minutes: groupMedian,
       response_target_rate: percent(ranking.reduce((sum, row) => sum + Number(row.under_target_count || 0), 0), humanContacted),
       open_without_human_response_over_target: overdueOpenLeads,
+      appointment_converted_count: appointmentConvertedLeads,
+      appointment_conversion_rate: percent(appointmentConvertedLeads, leadsAnalyzed),
       best_clinic: bestClinic,
       selected_clinic: selectedClinic,
       selected_rank: selectedClinic?.rank || null,

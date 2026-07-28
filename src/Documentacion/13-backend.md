@@ -7244,6 +7244,11 @@ clínica `ClinicaHorarios`; si alguna sede no lo tiene configurado, se marca
 `business_hours_applied=false` y para esa sede se usa tiempo natural como
 fallback visible.
 
+El bloque también devuelve `appointment_conversion_rate`: porcentaje de leads
+del periodo que han terminado en cita (`citado`, `acudio_cita`, `convertido` o
+cita vinculada). Esta métrica mide efectividad de conversión a cita sobre el
+total de leads, no volumen de citas.
+
 Para proteger rendimiento, la comparativa usa una ventana por defecto de los
 últimos 30 días cuando la petición no trae rango temporal y se cachea por
 usuario, grupo, clínica seleccionada y filtros ligeros. Las lecturas devuelven
