@@ -5,10 +5,20 @@ const test = require('node:test');
 const { compileWebArtifact } = require('../../lib/webArtifactCompiler');
 const { validateWebDocument } = require('../../lib/webDocument');
 const { createBlankWebDocument } = require('../../services/webProjects.service');
+const { resolveWebDocumentResources } = require('../../services/webResourceResolver.service');
 const { buildValidWebDocument } = require('./fixtures/webDocumentV1.fixture');
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function row(value) {
+  return {
+    id: value.id,
+    get() {
+      return value;
+    },
+  };
 }
 
 function linkListNode(overrides = {}) {
@@ -142,6 +152,21 @@ test('link_list es un bloque hoja cerrado sin HTML, JS ni URLs inseguras', () =>
     target: '+34930000000',
   }));
   assert.equal(validateWebDocument(tooMany).valid, false);
+
+  const emptyManual = clone(valid);
+  emptyManual.nodes.link_list_main.props.items = [];
+  assert.equal(validateWebDocument(emptyManual).valid, false);
+
+  const cmsIndex = clone(valid);
+  cmsIndex.nodes.link_list_main.props.source = 'cms_index';
+  cmsIndex.nodes.link_list_main.props.items = [];
+  cmsIndex.nodes.link_list_main.props.cms_index = {
+    content_types: ['article', 'faq'],
+    limit: 2,
+    show_type: true,
+    empty_message: 'Aún no hay contenido publicado.',
+  };
+  assert.equal(validateWebDocument(cmsIndex).valid, true);
 });
 
 test('link_list compila enlaces internos, teléfono y HTTPS de forma determinista', () => {
@@ -162,6 +187,154 @@ test('link_list compila enlaces internos, teléfono y HTTPS de forma determinist
   assert.match(html, /<a href="https:\/\/propdental\.es\/" target="_blank" rel="noopener noreferrer">Web oficial<\/a>/);
   assert.doesNotMatch(html, /<iframe|onclick=|onload=|onerror=|javascript:/i);
   assert.match(css, /\.cc-link-list\{display:grid;gap:var\(--cc-sm\)\}/);
+});
+
+test('link_list en modo índice CMS compila contenido publicado sin fabricar URLs', () => {
+  const input = compilerFixture(linkListNode({
+    props: {
+      source: 'cms_index',
+      items: [],
+      cms_index: {
+        content_types: ['article', 'faq'],
+        limit: 2,
+        show_type: true,
+        empty_message: 'Aún no hay contenido publicado.',
+      },
+    },
+  }));
+  input.contentSnapshot.content_entries = {
+    content_article: {
+      id: 'content_article',
+      version: 4,
+      scope: { type: 'clinic', id: 66, inherited: false },
+      type: 'article',
+      locale: 'es-ES',
+      title: 'Artículo interno',
+      content: {},
+      fields: {
+        content_title: 'Guía para elegir implantes',
+        excerpt: 'Texto breve',
+        public_url: 'https://propdental.es/implantes/',
+      },
+    },
+    content_faq: {
+      id: 'content_faq',
+      version: 2,
+      scope: { type: 'group', id: 7, inherited: true },
+      type: 'faq',
+      locale: 'es-ES',
+      title: 'FAQ',
+      content: {},
+      fields: {
+        question: '¿Duele la primera visita?',
+        answer: 'No debería doler.',
+      },
+    },
+    content_legal: {
+      id: 'content_legal',
+      version: 1,
+      scope: { type: 'clinic', id: 66, inherited: false },
+      type: 'legal_copy',
+      locale: 'es-ES',
+      title: 'Legal',
+      content: {},
+      fields: {
+        content_title: 'Aviso legal',
+        text: 'No debe aparecer.',
+      },
+    },
+  };
+
+  const artifact = compileWebArtifact(input);
+  const html = artifact.files['index.html'];
+
+  assert.match(html, /class="cc-node cc-link-list cc-link-list-cards cc-link-list-cms[^\"]*"/);
+  assert.match(html, /<span class="cc-link-list-type">Artículo<\/span>/);
+  assert.match(html, /<a href="https:\/\/propdental\.es\/implantes\/"><span class="cc-link-list-type">Artículo<\/span><span>Guía para elegir implantes<\/span><\/a>/);
+  assert.match(html, /<span class="cc-link-list-static"><span class="cc-link-list-type">Pregunta frecuente<\/span><span>¿Duele la primera visita\?<\/span><\/span>/);
+  assert.doesNotMatch(html, /Aviso legal|javascript:|onclick=|href="#"/i);
+});
+
+test('link_list en modo índice CMS muestra estado vacío cuando no hay snapshot', () => {
+  const input = compilerFixture(linkListNode({
+    props: {
+      source: 'cms_index',
+      items: [],
+      cms_index: {
+        content_types: ['article'],
+        limit: 2,
+        show_type: false,
+        empty_message: 'Publica contenido CMS para mostrarlo aquí.',
+      },
+    },
+  }));
+  input.contentSnapshot.content_entries = {};
+  const artifact = compileWebArtifact(input);
+  assert.match(artifact.files['index.html'], /<li class="cc-link-list-empty">Publica contenido CMS para mostrarlo aquí\.<\/li>/);
+});
+
+test('resolver congela contenido publicado para link_list en modo índice CMS', async () => {
+  const document = createBlankWebDocument({ name: 'Landing clínica', locale: 'es-ES' });
+  addLinkList(document, linkListNode({
+    props: {
+      source: 'cms_index',
+      items: [],
+      cms_index: {
+        content_types: ['article'],
+        limit: 3,
+        show_type: true,
+        empty_message: 'Aún no hay contenido publicado.',
+      },
+    },
+  }));
+  const calls = [];
+  const models = {
+    Clinica: {
+      findByPk: async () => ({ grupoClinicaId: 7 }),
+      findAll: async () => [],
+    },
+    WebContentEntry: {
+      findAll: async (query) => {
+        calls.push(query);
+        return [
+          row({
+            id: 'clinic_article',
+            version: 1,
+            scopeType: 'clinic',
+            clinicaId: 66,
+            grupoClinicaId: null,
+            type: 'article',
+            locale: 'es-ES',
+            title: 'Artículo interno',
+            content: {
+              title: 'Contenido publicado para el índice',
+              excerpt: 'Resumen.',
+            },
+            sources: [],
+            schemaConfig: { enabled: true, profile: 'Article', include_sources: false },
+            contentHash: 'a'.repeat(64),
+            status: 'published',
+          }),
+        ];
+      },
+    },
+    Tratamiento: { findAll: async () => [] },
+    DoctorClinica: { findAll: async () => [] },
+    Usuario: {},
+    IntakeConfig: { findAll: async () => [] },
+  };
+
+  const resolution = await resolveWebDocumentResources({
+    document,
+    scope: { type: 'clinic', id: 66 },
+    models,
+    allowGroupInheritance: true,
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].limit, 3);
+  assert.deepEqual(Object.keys(resolution.snapshot.content_entries), ['clinic_article']);
+  assert.equal(resolution.snapshot.content_entries.clinic_article.fields.content_title, 'Contenido publicado para el índice');
 });
 
 test('link_list rechaza páginas internas inexistentes al compilar', () => {

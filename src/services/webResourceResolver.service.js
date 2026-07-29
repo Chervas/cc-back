@@ -102,6 +102,12 @@ function collectPostListContentTypes(document) {
       for (const type of node.props?.content_types || []) {
         if (POST_LIST_CONTENT_TYPES.has(type)) types.add(type);
       }
+    } else if (node?.type === 'link_list' && node.props?.source === 'cms_index') {
+      const nodeLimit = Number(node.props?.cms_index?.limit);
+      requested += Number.isSafeInteger(nodeLimit) && nodeLimit > 0 ? Math.min(12, nodeLimit) : 6;
+      for (const type of node.props?.cms_index?.content_types || []) {
+        if (POST_LIST_CONTENT_TYPES.has(type)) types.add(type);
+      }
     } else if (node?.type === 'category_list') {
       const nodeLimit = Number(node.props?.limit);
       requested += Number.isSafeInteger(nodeLimit) && nodeLimit > 0 ? Math.min(12, nodeLimit) : 8;
