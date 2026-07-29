@@ -56,6 +56,7 @@ const BINDABLE_PROPS = Object.freeze({
   image: new Set(['asset_id', 'alt']),
   gallery: new Set(),
   video: new Set(['title', 'video_id']),
+  location_map: new Set(['title', 'address', 'directions_url']),
   button: new Set(['label', 'target']),
   intake_form: new Set(['title', 'description']),
   section: new Set(),
@@ -554,6 +555,10 @@ function validateGraph(document) {
 
     if (node.type === 'intake_form') {
       validateIntakeForm(node, nodePath, errors);
+    }
+
+    if (node.type === 'location_map') {
+      validatePublicHttpsUrl(node.props.directions_url, `${nodePath}/props/directions_url`, errors);
     }
   }
 

@@ -69,6 +69,7 @@
           { "$ref": "#/definitions/imageNode" },
           { "$ref": "#/definitions/galleryNode" },
           { "$ref": "#/definitions/videoNode" },
+          { "$ref": "#/definitions/locationMapNode" },
           { "$ref": "#/definitions/buttonNode" },
           { "$ref": "#/definitions/intakeFormNode" }
         ]
@@ -873,6 +874,56 @@
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
+    "locationMapNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "version", "props", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "type": { "const": "location_map" },
+        "version": { "const": 1 },
+        "props": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["title", "address", "directions_url", "button_label", "show_map_placeholder"],
+          "properties": {
+            "title": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 180 }
+              ]
+            },
+            "address": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 500 }
+              ]
+            },
+            "directions_url": {
+              "type": "string",
+              "minLength": 12,
+              "maxLength": 2048,
+              "pattern": "^https://[^\\s]+$"
+            },
+            "button_label": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 120 }
+              ]
+            },
+            "show_map_placeholder": { "type": "boolean" }
+          }
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "style_tokens": { "$ref": "#/definitions/styleTokens" },
+        "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
+        "binding_ids": { "$ref": "#/definitions/bindingIds" }
+      }
+    },
     "buttonNode": {
       "type": "object",
       "additionalProperties": false,
@@ -1047,7 +1098,7 @@
       "properties": {
         "target_node_id": { "$ref": "#/definitions/safeId" },
         "target_prop": {
-          "enum": ["text", "label", "title", "description", "question", "answer", "quote", "attribution", "role", "asset_id", "alt", "target"]
+          "enum": ["text", "label", "title", "description", "question", "answer", "quote", "attribution", "role", "asset_id", "alt", "target", "address", "directions_url"]
         },
         "source": {
           "enum": ["clinic", "treatment", "professional", "content_entry"]
