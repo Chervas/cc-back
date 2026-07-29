@@ -10,6 +10,7 @@ const whatsappPaymentStatusService = require('./whatsappPaymentStatus.service');
 const whatsappConnectionStatusService = require('./whatsappConnectionStatus.service');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
 const { matchesReviewTemplateMedia } = require('../lib/review-template-media');
+const { usesExplicitDispatchWindow } = require('../lib/marketing-dispatch-window');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const marketingOptOutService = require('./marketingOptOut.service');
 const jobRequestsService = require('./jobRequests.service');
@@ -5342,10 +5343,10 @@ async function enqueueReviewReminderJob({ list, item, sentAt = null, triggerMess
   const base = sentAt ? new Date(sentAt) : new Date();
   const rawNextRunAt = new Date((Number.isNaN(base.getTime()) ? Date.now() : base.getTime()) + REVIEW_REMINDER_DELAY_MS);
   const clinicId = Number(item?.clinica_id || getClinicIdForList(list) || 0) || null;
-  const dispatchBusinessHours = await hydrateDispatchBusinessHoursForList(
+  const dispatchBusinessHours = await resolveDispatchBusinessHoursForList(
     list,
     clinicId ? { scope: 'clinic', clinicIds: [clinicId] } : {},
-    getDispatchConfig(list).business_hours
+    getDispatchConfig(list)
   );
   const nextRunAt = getNextBusinessAllowedAt(rawNextRunAt, dispatchBusinessHours);
   return jobRequestsService.enqueueJobRequest({
@@ -5389,10 +5390,10 @@ async function runReviewRequestReminderJob(payload = {}) {
   }
 
   const clinicId = Number(item?.clinica_id || getClinicIdForList(list) || 0) || null;
-  const dispatchBusinessHours = await hydrateDispatchBusinessHoursForList(
+  const dispatchBusinessHours = await resolveDispatchBusinessHoursForList(
     list,
     clinicId ? { scope: 'clinic', clinicIds: [clinicId] } : {},
-    getDispatchConfig(list).business_hours
+    getDispatchConfig(list)
   );
   if (!isWithinBusinessHours(new Date(), dispatchBusinessHours)) {
     const nextAllowed = getNextBusinessAllowedAt(new Date(), dispatchBusinessHours);
@@ -6696,6 +6697,14 @@ async function hydrateDispatchBusinessHoursForList(list, scope = {}, businessHou
   return calendarBusinessHours || normalized;
 }
 
+async function resolveDispatchBusinessHoursForList(list, scope = {}, dispatch = {}) {
+  const normalized = normalizeBusinessHours(dispatch.business_hours || {});
+  if (usesExplicitDispatchWindow(dispatch)) {
+    return normalized;
+  }
+  return hydrateDispatchBusinessHoursForList(list, scope, normalized);
+}
+
 async function loadClinicForTemplateVariables(clinicId) {
   const safeClinicId = Number(clinicId || 0);
   if (!safeClinicId || !Clinica) return null;
@@ -7970,7 +7979,7 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
   const accountQuality = await getWhatsappAccountQualityForList(list, scope);
   const scheduledAt = parseDate(body.scheduled_at || list.criteria?.scheduled_at);
   const reference = scheduledAt && scheduledAt.getTime() > Date.now() ? scheduledAt : new Date();
-  const dispatchBusinessHours = await hydrateDispatchBusinessHoursForList(list, scope, dispatch.business_hours);
+  const dispatchBusinessHours = await resolveDispatchBusinessHoursForList(list, scope, dispatch);
   const businessAllowedAt = getNextBusinessAllowedAt(reference, dispatchBusinessHours);
   const nextRunAt = businessAllowedAt.getTime() > Date.now() + 1000 ? businessAllowedAt : null;
   const baseDispatch = {
@@ -8086,7 +8095,7 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     err.status = 409;
     throw err;
   }
-  const dispatchBusinessHours = await hydrateDispatchBusinessHoursForList(list, scope, dispatch.business_hours);
+  const dispatchBusinessHours = await resolveDispatchBusinessHoursForList(list, scope, dispatch);
   const nextAllowed = getNextBusinessAllowedAt(new Date(), dispatchBusinessHours);
   const nextRunAt = nextAllowed.getTime() > Date.now() + 1000 ? nextAllowed : null;
   const baseDispatch = {
@@ -8435,7 +8444,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     return { status: 'completed', result: { skipped: true, reason: 'list_not_found_or_archived', list_id: listId } };
   }
   const rawDispatch = getDispatchConfig(list);
-  const dispatchBusinessHours = await hydrateDispatchBusinessHoursForList(list, scope, rawDispatch.business_hours);
+  const dispatchBusinessHours = await resolveDispatchBusinessHoursForList(list, scope, rawDispatch);
   const dispatch = {
     ...rawDispatch,
     business_hours: dispatchBusinessHours,
