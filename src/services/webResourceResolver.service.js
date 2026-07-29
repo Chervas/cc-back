@@ -120,6 +120,39 @@ function collectPostListContentTypes(document) {
   };
 }
 
+function contentMediaAssetReferences(row) {
+  const value = plain(row);
+  const entryId = String(value?.id || '');
+  const content = value?.content && typeof value.content === 'object' && !Array.isArray(value.content)
+    ? value.content
+    : {};
+  const references = [];
+  const push = (id, path) => {
+    const mediaId = String(id || '').trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,35}$/.test(mediaId)) return;
+    references.push({ id: mediaId, path });
+  };
+  push(content.image_asset_id, `/content_entries/${entryId}/content/image_asset_id`);
+  if (value?.type === 'article' && Array.isArray(content.blocks)) {
+    content.blocks.forEach((block, index) => {
+      if (block?.type === 'image') {
+        push(block.image_asset_id, `/content_entries/${entryId}/content/blocks/${index}/image_asset_id`);
+      }
+    });
+  }
+  return references;
+}
+
+function collectContentMediaAssetIds(rows) {
+  const ids = new Set();
+  for (const row of rows || []) {
+    for (const reference of contentMediaAssetReferences(row)) {
+      ids.add(reference.id);
+    }
+  }
+  return [...ids].sort();
+}
+
 async function groupIdForClinic(scope, models, transaction) {
   if (scope.type !== 'clinic') return null;
   const clinic = await models.Clinica.findByPk(scope.id, {
@@ -381,7 +414,7 @@ async function resolveWebDocumentResources({
     if (scope.type === 'group') return [{ scopeType: 'group', grupoClinicaId: Number(scope.id) }];
     return [];
   })();
-  const mediaRows = mediaIds.length
+  const directMediaRows = mediaIds.length
     ? await models.WebMediaAsset.findAll({
       where: { id: { [Op.in]: mediaIds } },
       include: [{
@@ -426,6 +459,32 @@ async function resolveWebDocumentResources({
     ...referencedContentRows,
     ...postListContentRows.filter((row) => !contentIds.includes(String(plain(row).id))),
   ];
+  const contentMediaIds = collectContentMediaAssetIds(contentRows);
+  const missingContentMediaIds = contentMediaIds.filter((id) => !mediaIds.includes(id));
+  const contentMediaRows = missingContentMediaIds.length && (!allowedKinds || allowedKinds.has('media'))
+    ? await models.WebMediaAsset.findAll({
+      where: { id: { [Op.in]: missingContentMediaIds } },
+      include: [{
+        model: models.PublicMediaAsset,
+        as: 'publicMediaAsset',
+        attributes: [
+          'id',
+          'scope_type',
+          'clinica_id',
+          'grupo_clinica_id',
+          'public_url',
+          'content_type',
+          'size_bytes',
+          'sensitivity',
+          'status',
+          'metadata',
+        ],
+        required: true,
+      }],
+      transaction,
+    })
+    : [];
+  const mediaRows = [...directMediaRows, ...contentMediaRows];
   const treatmentRows = treatmentIds.length && models.Tratamiento
     ? await models.Tratamiento.findAll({
       where: { id_tratamiento: { [Op.in]: treatmentIds } },
@@ -483,6 +542,31 @@ async function resolveWebDocumentResources({
   const professionals = {};
   let intakeConfig = null;
   const liveBindings = [];
+  const resolvedContentMedia = new Set();
+
+  const includeContentMediaAssets = (contentRow) => {
+    const value = plain(contentRow);
+    const entryId = String(value?.id || '');
+    for (const reference of contentMediaAssetReferences(contentRow)) {
+      if (resolvedContentMedia.has(`${entryId}:${reference.id}:${reference.path}`)) continue;
+      const mediaRow = mediaById.get(reference.id);
+      const access = mediaRow
+        ? accessForRow(mediaRow, scope, inheritedGroupId, allowGroupInheritance)
+        : { allowed: false, inherited: false };
+      if (!mediaRow || !access.allowed || !mediaAvailable(mediaRow)) continue;
+      if (!mediaAssets[reference.id]) mediaAssets[reference.id] = snapshotMedia(mediaRow, access.inherited);
+      resolvedContentMedia.add(`${entryId}:${reference.id}:${reference.path}`);
+      resolved.push({
+        kind: 'media',
+        id: reference.id,
+        path: reference.path,
+        version: Number(plain(mediaRow).version),
+        inherited: access.inherited,
+        source: 'content_entry',
+        content_entry_id: entryId,
+      });
+    }
+  };
 
   for (const reference of references) {
     if (reference.kind === 'treatment') {
@@ -609,6 +693,7 @@ async function resolveWebDocumentResources({
       continue;
     }
     if (!contentEntries[reference.id]) contentEntries[reference.id] = snapshotContent(row, access.inherited);
+    includeContentMediaAssets(row);
     resolved.push({
       kind: 'content_entry',
       id: reference.id,
@@ -626,6 +711,7 @@ async function resolveWebDocumentResources({
     const access = accessForRow(row, scope, inheritedGroupId, allowGroupInheritance);
     if (!access.allowed || value.status !== 'published' || !postListCollection.types.includes(value.type)) continue;
     contentEntries[id] = snapshotContent(row, access.inherited);
+    includeContentMediaAssets(row);
     resolved.push({
       kind: 'content_entry',
       id,

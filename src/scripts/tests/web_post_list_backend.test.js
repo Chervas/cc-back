@@ -8,6 +8,8 @@ const { createBlankWebDocument } = require('../../services/webProjects.service')
 const { resolveWebDocumentResources } = require('../../services/webResourceResolver.service');
 const { buildValidWebDocument } = require('./fixtures/webDocumentV1.fixture');
 
+const ARTICLE_IMAGE_ASSET = 'article_image_asset';
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
@@ -19,6 +21,43 @@ function row(value) {
       return value;
     },
   };
+}
+
+function mediaAssetRow(id = ARTICLE_IMAGE_ASSET, url = 'https://media.clinicaclick.com/web/article-card.webp') {
+  return row({
+    id,
+    scopeType: 'clinic',
+    clinicaId: 66,
+    grupoClinicaId: null,
+    kind: 'image',
+    title: 'Imagen editorial',
+    altText: 'Imagen editorial segura',
+    decorative: false,
+    focalPoints: {},
+    rights: { origin: 'owned' },
+    variants: [{
+      key: 'original',
+      url,
+      content_type: 'image/webp',
+      width: 1200,
+      height: 675,
+    }],
+    mediaMetadata: { content_type: 'image/webp', width: 1200, height: 675 },
+    status: 'ready',
+    version: 2,
+    publicMediaAsset: row({
+      id: 501,
+      scope_type: 'clinic',
+      clinica_id: 66,
+      grupo_clinica_id: null,
+      public_url: url,
+      content_type: 'image/webp',
+      size_bytes: 1000,
+      sensitivity: 'public',
+      status: 'active',
+      metadata: { non_clinical_asserted: true },
+    }),
+  });
 }
 
 function postListNode(overrides = {}) {
@@ -120,7 +159,18 @@ function compilerFixture(node = postListNode()) {
           type: 'article',
           locale: 'es-ES',
           title: 'Etiqueta editorial interna',
-          content: {},
+          content: {
+            blocks: [{
+              type: 'image',
+              image_asset_id: ARTICLE_IMAGE_ASSET,
+              alt_text: 'Paciente sonriendo tras revisar opciones de implantes',
+              caption: 'Imagen de apoyo editorial',
+            }, {
+              type: 'text',
+              heading: 'Opciones',
+              content: 'Texto editorial interno.',
+            }],
+          },
           fields: {
             content_title: 'Guía de implantes sin cirugía',
             excerpt: 'Una explicación clara para pacientes que comparan opciones.',
@@ -169,7 +219,33 @@ function compilerFixture(node = postListNode()) {
           },
         },
       },
-      media_assets: {},
+      media_assets: {
+        [ARTICLE_IMAGE_ASSET]: {
+          id: ARTICLE_IMAGE_ASSET,
+          version: 2,
+          scope: { type: 'clinic', id: 66, inherited: false },
+          kind: 'image',
+          title: 'Imagen editorial',
+          alt_text: 'Imagen editorial segura',
+          decorative: false,
+          focal_points: {},
+          rights: { origin: 'owned', license_url: null, credit: null, expires_at: null },
+          variants: [{
+            key: 'original',
+            url: 'https://media.clinicaclick.com/web/article-card.webp',
+            content_type: 'image/webp',
+            width: 1200,
+            height: 675,
+          }],
+          metadata: { content_type: 'image/webp', width: 1200, height: 675 },
+          public_media: {
+            id: 501,
+            url: 'https://media.clinicaclick.com/web/article-card.webp',
+            content_type: 'image/webp',
+            size_bytes: 1000,
+          },
+        },
+      },
       live_bindings: [],
     },
     project: {
@@ -221,6 +297,7 @@ test('post_list compila contenido CMS publicado de forma determinista y escapada
   assert.match(html, /aria-label="Listado de contenidos publicados"/);
   assert.match(html, /<h2 class="cc-post-list-title">Últimos contenidos<\/h2>/);
   assert.match(html, /<span class="cc-post-list-type">Artículo<\/span>/);
+  assert.match(html, /<img class="cc-post-list-image" src="https:\/\/media\.clinicaclick\.com\/web\/article-card\.webp" alt="Paciente sonriendo tras revisar opciones de implantes" loading="lazy" decoding="async" width="1200" height="675">/);
   assert.match(html, /<h3>Guía de implantes sin cirugía<\/h3>/);
   assert.match(html, /Una explicación clara para pacientes que comparan opciones\./);
   assert.match(html, /<span class="cc-post-list-type">Pregunta frecuente<\/span>/);
@@ -228,6 +305,7 @@ test('post_list compila contenido CMS publicado de forma determinista y escapada
   assert.doesNotMatch(html, /Aviso legal|onclick=|onload=|javascript:/i);
   assert.doesNotMatch(html, /<script(?! type="application\/ld\+json")/i);
   assert.match(css, /\.cc-post-list-cards \.cc-post-list-items\{grid-template-columns:repeat\(3,minmax\(0,1fr\)\)\}/);
+  assert.match(css, /\.cc-post-list-image\{width:100%;aspect-ratio:16\/9;object-fit:cover/);
 });
 
 test('post_list muestra estado vacío cuando no hay contenido congelado', () => {
@@ -335,12 +413,18 @@ test('resolver congela contenido publicado para post_list desde clínica y grupo
   const document = createBlankWebDocument({ name: 'Landing clínica', locale: 'es-ES' });
   addPostList(document, postListNode({ props: { content_types: ['article', 'faq'], limit: 6 } }));
   const calls = [];
+  const mediaCalls = [];
   const models = {
     Clinica: {
       findByPk: async () => ({ grupoClinicaId: 7 }),
       findAll: async () => [],
     },
-    WebMediaAsset: { findAll: async () => [] },
+    WebMediaAsset: {
+      findAll: async (query) => {
+        mediaCalls.push(query);
+        return [mediaAssetRow()];
+      },
+    },
     PublicMediaAsset: {},
     WebContentEntry: {
       findAll: async (query) => {
@@ -354,7 +438,15 @@ test('resolver congela contenido publicado para post_list desde clínica y grupo
             type: 'article',
             locale: 'es-ES',
             title: 'Artículo clínica',
-            content: { title: 'Artículo publicado', excerpt: 'Texto publicado.' },
+            content: {
+              title: 'Artículo publicado',
+              excerpt: 'Texto publicado.',
+              blocks: [{
+                type: 'image',
+                image_asset_id: ARTICLE_IMAGE_ASSET,
+                alt_text: 'Imagen editorial segura',
+              }],
+            },
             sources: [],
             schemaConfig: { enabled: true, profile: 'Article', include_sources: false },
             contentHash: 'a'.repeat(64),
@@ -408,10 +500,22 @@ test('resolver congela contenido publicado para post_list desde clínica y grupo
   });
 
   assert.equal(calls.length, 1);
+  assert.equal(mediaCalls.length, 1);
   assert.equal(calls[0].limit, 6);
   assert.deepEqual(Object.keys(resolution.snapshot.content_entries).sort(), ['clinic_article', 'group_faq']);
   assert.equal(resolution.snapshot.content_entries.clinic_article.fields.content_title, 'Artículo publicado');
   assert.equal(resolution.snapshot.content_entries.group_faq.fields.question, '¿Primera visita?');
+  assert.equal(
+    resolution.snapshot.media_assets[ARTICLE_IMAGE_ASSET].public_media.url,
+    'https://media.clinicaclick.com/web/article-card.webp'
+  );
+  assert.equal(
+    resolution.resolved.some((item) => item.kind === 'media'
+      && item.id === ARTICLE_IMAGE_ASSET
+      && item.source === 'content_entry'
+      && item.content_entry_id === 'clinic_article'),
+    true
+  );
   assert.equal(resolution.unresolved.length, 0);
 });
 
