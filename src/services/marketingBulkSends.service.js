@@ -3839,21 +3839,20 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
   if (explicitTemplateId) {
     const explicit = await resolveWhatsappTemplate(explicitTemplateId, scope);
     const explicitIsReviewCandidate = explicit
-      && (
-        isPrimaryReviewRequestWhatsappTemplateCandidate(explicit)
-        || isLegacyReviewRequestWhatsappTemplateCandidate(explicit)
-      );
+      && isPrimaryReviewRequestWhatsappTemplateCandidate(explicit);
     if (explicit && explicit.is_active !== false && String(explicit.status || '').toUpperCase() === 'APPROVED' && explicitIsReviewCandidate) {
       const plainExplicit = explicit.get ? explicit.get({ plain: true }) : explicit;
       const explicitMatchesWaba = !targetWabaId || !getTemplateWabaId(explicit) || getTemplateWabaId(explicit) === targetWabaId;
       const explicitHasImageHeader = templateHasImageHeader(explicit);
       const explicitMatchesMedia = explicitHasImageHeader ? preferPhoto : true;
-      const explicitHasAllowedCopy = isAllowedReviewRequestTemplateCopy(explicit)
-        || isLegacyReviewRequestWhatsappTemplateCandidate(explicit);
+      const explicitIsDefault = isDefaultReviewRequestWhatsappTemplateIdentity(explicit);
+      const explicitHasAllowedCopy = explicitIsDefault
+        ? reviewTemplateMatchesCurrentCatalogBody(explicit)
+        : isAllowedReviewRequestTemplateCopy(explicit);
       if (explicitMatchesWaba && explicitMatchesMedia && explicitHasAllowedCopy) {
         return explicit;
       }
-      if (plainExplicit.catalog_template_id) {
+      if (explicitIsDefault && plainExplicit.catalog_template_id) {
         const exactReplacement = await WhatsappTemplate.findOne({
           where: {
             is_active: true,
@@ -3873,7 +3872,7 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
           return exactReplacement;
         }
       }
-      if (!explicitMatchesWaba) {
+      if (explicitIsDefault && !explicitMatchesWaba) {
         const replacement = await WhatsappTemplate.findOne({
           where: {
             is_active: true,
@@ -3892,6 +3891,9 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
         ) {
           return replacement;
         }
+      }
+      if (!explicitIsDefault) {
+        return null;
       }
     }
     if (explicit && isDefaultReviewRequestWhatsappTemplateIdentity(explicit)) {
@@ -3918,7 +3920,8 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
     const photoTemplate = photoCandidates
       .filter(isPrimaryReviewRequestWhatsappTemplateCandidate)
       .filter(templateHasImageHeader)
-      .filter(isAllowedReviewRequestTemplateCopy)
+      .filter(isDefaultReviewRequestWhatsappTemplateIdentity)
+      .filter(reviewTemplateMatchesCurrentCatalogBody)
       .filter((template) => scoreWhatsappTemplateForScope(template, clinicIds, targetWabaId) > 0)
       .sort((a, b) => {
         const aScore = scoreWhatsappTemplateForScope(a, clinicIds, targetWabaId);
@@ -3966,7 +3969,8 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
   });
   return candidates
     .filter(isPrimaryReviewRequestWhatsappTemplateCandidate)
-    .filter(isAllowedReviewRequestTemplateCopy)
+    .filter(isDefaultReviewRequestWhatsappTemplateIdentity)
+    .filter(reviewTemplateMatchesCurrentCatalogBody)
     .filter((template) => (preferPhoto ? templateHasImageHeader(template) : !templateHasImageHeader(template)))
     .filter((template) => scoreWhatsappTemplateForScope(template, clinicIds, targetWabaId) > 0)
     .sort((a, b) => {
