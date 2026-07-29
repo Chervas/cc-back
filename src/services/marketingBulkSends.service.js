@@ -9,6 +9,8 @@ const whatsappService = require('./whatsapp.service');
 const whatsappPaymentStatusService = require('./whatsappPaymentStatus.service');
 const whatsappConnectionStatusService = require('./whatsappConnectionStatus.service');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
+const { matchesReviewTemplateMedia } = require('../lib/review-template-media');
+const { usesExplicitDispatchWindow } = require('../lib/marketing-dispatch-window');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const marketingOptOutService = require('./marketingOptOut.service');
 const jobRequestsService = require('./jobRequests.service');
@@ -25,6 +27,7 @@ const publicMediaPersonalizationService = require('./publicMediaPersonalization.
 const {
   Clinica,
   ClinicaHorario,
+  ClinicBusinessLocation,
   ClinicMetaAsset,
   Conversation,
   MarketingPatientContactEvent,
@@ -398,6 +401,17 @@ function isStarTextReviewBody(value) {
   return normalized.includes('numero')
     && normalized.includes('valoracion')
     && reviewTemplateBodyHasSender(value)
+    && /1\s*[⭐★]/.test(text)
+    && /2\s*[⭐★]{2}/.test(text)
+    && /3\s*[⭐★]{3}/.test(text)
+    && /4\s*[⭐★]{4}/.test(text)
+    && /5\s*[⭐★]{5}/.test(text);
+}
+
+function isLegacyStarTextReviewBody(value) {
+  const text = normalizeText(value);
+  const normalized = normalizeKey(text);
+  return normalized.includes('valoracion')
     && /1\s*[⭐★]/.test(text)
     && /2\s*[⭐★]{2}/.test(text)
     && /3\s*[⭐★]{3}/.test(text)
@@ -3647,6 +3661,42 @@ function isPrimaryReviewRequestWhatsappTemplateCandidate(template) {
     || REVIEW_TEMPLATE_USAGES.has(normalizeTemplateUsage(plain.variables?.template_usage));
 }
 
+function isLegacyReviewRequestWhatsappTemplateCandidate(template) {
+  if (!isReviewWhatsappTemplateCandidate(template)) return false;
+  if (isReviewReminderWhatsappTemplateCandidate(template)) return false;
+  if (templateHasButtonComponents(template)) return false;
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  const catalogTemplateId = Number(plain.catalog_template_id || plain.catalog?.id || 0);
+  const identity = normalizeKey([
+    plain.name,
+    plain.display_name,
+    plain.catalog?.name,
+    plain.catalog?.display_name,
+    JSON.stringify(plain.variables || ''),
+  ].filter(Boolean).join(' '));
+  const isDefaultReviewTemplate = catalogTemplateId === 9
+    || identity.includes('clinicaclick_solicitar_resena')
+    || identity.includes('solicitar_resena');
+  return isDefaultReviewTemplate
+    && getTemplateCategory(plain) === 'MARKETING'
+    && isLegacyStarTextReviewBody(extractBodyText(plain.components));
+}
+
+function isDefaultReviewRequestWhatsappTemplateIdentity(template) {
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  const catalogTemplateId = Number(plain.catalog_template_id || plain.catalog?.id || 0);
+  const identity = normalizeKey([
+    plain.name,
+    plain.display_name,
+    plain.catalog?.name,
+    plain.catalog?.display_name,
+    JSON.stringify(plain.variables || ''),
+  ].filter(Boolean).join(' '));
+  return catalogTemplateId === 9
+    || identity.includes(REVIEW_TEMPLATE_NAME)
+    || identity.includes('solicitar_resena');
+}
+
 function reviewTemplateMatchesCurrentCatalogBody(template) {
   const plain = template?.get ? template.get({ plain: true }) : (template || {});
   const currentCatalogBody = normalizeText(plain.catalog?.body_text);
@@ -3715,6 +3765,33 @@ function scoreReviewTemplateFreshness(template) {
   return reviewTemplateMatchesCurrentCatalogBody(template) ? 1 : 0;
 }
 
+function scoreReviewTemplatePreference(template, options = {}) {
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  const category = getTemplateCategory(plain);
+  const identity = normalizeKey([
+    plain.name,
+    plain.display_name,
+    plain.catalog?.name,
+    plain.catalog?.display_name,
+    JSON.stringify(plain.variables || ''),
+  ].filter(Boolean).join(' '));
+  const preferPhoto = options.preferPhoto === true;
+  const hasImageHeader = templateHasImageHeader(plain);
+  let score = 0;
+
+  if (category === 'MARKETING') score += 50;
+  if (category && category !== 'MARKETING') score -= 30;
+  if (isApprovedExternalReviewRequestTemplate(plain)) score += 30;
+  if (isAdminCustomReviewTemplate(plain)) score += 20;
+  if (identity.includes('solicitud_de_opinion') || identity.includes('opinion_tras_visita')) score += 20;
+  if (reviewTemplateMatchesCurrentCatalogBody(plain)) score += 10;
+  if (isDefaultReviewRequestWhatsappTemplateIdentity(plain)) score -= 15;
+  if (isLegacyReviewRequestWhatsappTemplateCandidate(plain)) score -= 10;
+  if (hasImageHeader) score += preferPhoto ? 8 : -25;
+
+  return score;
+}
+
 async function findApprovedReviewReminderWhatsappTemplate(scope) {
   const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
   if (!WhatsappTemplate || !clinicIds.length) return null;
@@ -3763,17 +3840,24 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
 
   if (explicitTemplateId) {
     const explicit = await resolveWhatsappTemplate(explicitTemplateId, scope);
-    if (explicit && explicit.is_active !== false && String(explicit.status || '').toUpperCase() === 'APPROVED' && isPrimaryReviewRequestWhatsappTemplateCandidate(explicit)) {
+    const explicitIsReviewCandidate = explicit
+      && isPrimaryReviewRequestWhatsappTemplateCandidate(explicit);
+    if (explicit && explicit.is_active !== false && String(explicit.status || '').toUpperCase() === 'APPROVED' && explicitIsReviewCandidate) {
       const plainExplicit = explicit.get ? explicit.get({ plain: true }) : explicit;
       const explicitMatchesWaba = !targetWabaId || !getTemplateWabaId(explicit) || getTemplateWabaId(explicit) === targetWabaId;
-      const explicitMatchesMedia = preferPhoto
-        ? templateHasImageHeader(explicit)
-        : !templateHasImageHeader(explicit);
-      const explicitHasAllowedCopy = isAllowedReviewRequestTemplateCopy(explicit);
+      const explicitHasImageHeader = templateHasImageHeader(explicit);
+      const explicitMatchesMedia = matchesReviewTemplateMedia({
+        hasImageHeader: explicitHasImageHeader,
+        hasPhoto: preferPhoto,
+      });
+      const explicitIsDefault = isDefaultReviewRequestWhatsappTemplateIdentity(explicit);
+      const explicitHasAllowedCopy = explicitIsDefault
+        ? reviewTemplateMatchesCurrentCatalogBody(explicit)
+        : isAllowedReviewRequestTemplateCopy(explicit);
       if (explicitMatchesWaba && explicitMatchesMedia && explicitHasAllowedCopy) {
         return explicit;
       }
-      if (plainExplicit.catalog_template_id) {
+      if (explicitIsDefault && plainExplicit.catalog_template_id) {
         const exactReplacement = await WhatsappTemplate.findOne({
           where: {
             is_active: true,
@@ -3788,12 +3872,15 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
           exactReplacement
           && isPrimaryReviewRequestWhatsappTemplateCandidate(exactReplacement)
           && reviewTemplateMatchesCurrentCatalogBody(exactReplacement)
-          && (preferPhoto ? templateHasImageHeader(exactReplacement) : !templateHasImageHeader(exactReplacement))
+          && matchesReviewTemplateMedia({
+            hasImageHeader: templateHasImageHeader(exactReplacement),
+            hasPhoto: preferPhoto,
+          })
         ) {
           return exactReplacement;
         }
       }
-      if (!explicitMatchesWaba) {
+      if (explicitIsDefault && !explicitMatchesWaba) {
         const replacement = await WhatsappTemplate.findOne({
           where: {
             is_active: true,
@@ -3808,11 +3895,21 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
           replacement
           && isPrimaryReviewRequestWhatsappTemplateCandidate(replacement)
           && reviewTemplateMatchesCurrentCatalogBody(replacement)
-          && (preferPhoto ? templateHasImageHeader(replacement) : !templateHasImageHeader(replacement))
+          && matchesReviewTemplateMedia({
+            hasImageHeader: templateHasImageHeader(replacement),
+            hasPhoto: preferPhoto,
+          })
         ) {
           return replacement;
         }
       }
+      if (!explicitIsDefault) {
+        return null;
+      }
+    }
+    if (explicit && isDefaultReviewRequestWhatsappTemplateIdentity(explicit)) {
+      const fallback = await findApprovedReviewWhatsappTemplate(scope, null, options);
+      if (fallback) return fallback;
     }
     return null;
   }
@@ -3834,12 +3931,16 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
     const photoTemplate = photoCandidates
       .filter(isPrimaryReviewRequestWhatsappTemplateCandidate)
       .filter(templateHasImageHeader)
-      .filter(isAllowedReviewRequestTemplateCopy)
+      .filter(isDefaultReviewRequestWhatsappTemplateIdentity)
+      .filter(reviewTemplateMatchesCurrentCatalogBody)
       .filter((template) => scoreWhatsappTemplateForScope(template, clinicIds, targetWabaId) > 0)
       .sort((a, b) => {
         const aScore = scoreWhatsappTemplateForScope(a, clinicIds, targetWabaId);
         const bScore = scoreWhatsappTemplateForScope(b, clinicIds, targetWabaId);
         if (aScore !== bScore) return bScore - aScore;
+        const aPreference = scoreReviewTemplatePreference(a, { preferPhoto });
+        const bPreference = scoreReviewTemplatePreference(b, { preferPhoto });
+        if (aPreference !== bPreference) return bPreference - aPreference;
         return Number(b.id || 0) - Number(a.id || 0);
       })[0] || null;
     if (photoTemplate) return photoTemplate;
@@ -3879,12 +3980,17 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
   });
   return candidates
     .filter(isPrimaryReviewRequestWhatsappTemplateCandidate)
-    .filter(isAllowedReviewRequestTemplateCopy)
+    .filter(isDefaultReviewRequestWhatsappTemplateIdentity)
+    .filter(reviewTemplateMatchesCurrentCatalogBody)
+    .filter((template) => (preferPhoto ? templateHasImageHeader(template) : !templateHasImageHeader(template)))
     .filter((template) => scoreWhatsappTemplateForScope(template, clinicIds, targetWabaId) > 0)
     .sort((a, b) => {
       const aScore = scoreWhatsappTemplateForScope(a, clinicIds, targetWabaId);
       const bScore = scoreWhatsappTemplateForScope(b, clinicIds, targetWabaId);
       if (aScore !== bScore) return bScore - aScore;
+      const aPreference = scoreReviewTemplatePreference(a, { preferPhoto });
+      const bPreference = scoreReviewTemplatePreference(b, { preferPhoto });
+      if (aPreference !== bPreference) return bPreference - aPreference;
       const aFresh = scoreReviewTemplateFreshness(a);
       const bFresh = scoreReviewTemplateFreshness(b);
       if (aFresh !== bFresh) return bFresh - aFresh;
@@ -4751,14 +4857,27 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     body.review_team_photo_overlay_color || body.reviewTeamPhotoOverlayColor
   );
   const reviewTeamMembersText = normalizeText(body.review_team_members_text || body.reviewTeamMembersText || '');
+  const reviewTemplateSelectionOptions = {
+    preferPhoto: isHttpsUrl(reviewTeamPhotoUrl),
+  };
 
   let approvedTemplate = null;
   if (whatsappTemplateId) {
-    approvedTemplate = await findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId);
+    approvedTemplate = await findApprovedReviewWhatsappTemplate(
+      scope,
+      whatsappTemplateId,
+      reviewTemplateSelectionOptions
+    );
     if (!approvedTemplate) {
-      const err = new Error('Selecciona una plantilla de reseñas aprobada por Meta.');
+      const err = reviewTemplateSelectionOptions.preferPhoto
+        ? new Error('La foto está configurada, pero la plantilla de reseñas con imagen todavía no está aprobada por Meta.')
+        : new Error('Selecciona una plantilla de reseñas aprobada por Meta.');
       err.status = 409;
-      err.details = { reason: 'review_template_not_approved' };
+      err.details = {
+        reason: reviewTemplateSelectionOptions.preferPhoto
+          ? 'review_photo_template_not_approved'
+          : 'review_template_not_approved',
+      };
       throw err;
     }
   }
@@ -4769,7 +4888,7 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
   });
   if (!enabled && !existing) {
     const [approvedReviewTemplate, approvedReminderTemplate, googleReviewUrlAvailable, whatsappAvailable] = await Promise.all([
-      findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null),
+      findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null, reviewTemplateSelectionOptions),
       findApprovedReviewReminderWhatsappTemplate(scope),
       hasGoogleReviewUrlForScope(scope),
       hasWhatsappConfigForScope(scope),
@@ -4794,7 +4913,7 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
   }
 
   const [readyApprovedTemplate, readyGoogleReviewUrlAvailable, readyWhatsappAvailable] = await Promise.all([
-    findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null),
+    findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null, reviewTemplateSelectionOptions),
     hasGoogleReviewUrlForScope(scope),
     hasWhatsappConfigForScope(scope),
   ]);
@@ -4850,7 +4969,7 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     ? await existing.update(payload)
     : await AutomationFlowTemplateV2.create(payload);
   const [approvedReviewTemplate, approvedReminderTemplate, googleReviewUrlAvailable, whatsappAvailable] = await Promise.all([
-    findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null),
+    findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null, reviewTemplateSelectionOptions),
     findApprovedReviewReminderWhatsappTemplate(scope),
     hasGoogleReviewUrlForScope(scope),
     hasWhatsappConfigForScope(scope),
@@ -5224,10 +5343,10 @@ async function enqueueReviewReminderJob({ list, item, sentAt = null, triggerMess
   const base = sentAt ? new Date(sentAt) : new Date();
   const rawNextRunAt = new Date((Number.isNaN(base.getTime()) ? Date.now() : base.getTime()) + REVIEW_REMINDER_DELAY_MS);
   const clinicId = Number(item?.clinica_id || getClinicIdForList(list) || 0) || null;
-  const dispatchBusinessHours = await hydrateDispatchBusinessHoursForList(
+  const dispatchBusinessHours = await resolveDispatchBusinessHoursForList(
     list,
     clinicId ? { scope: 'clinic', clinicIds: [clinicId] } : {},
-    getDispatchConfig(list).business_hours
+    getDispatchConfig(list)
   );
   const nextRunAt = getNextBusinessAllowedAt(rawNextRunAt, dispatchBusinessHours);
   return jobRequestsService.enqueueJobRequest({
@@ -5271,10 +5390,10 @@ async function runReviewRequestReminderJob(payload = {}) {
   }
 
   const clinicId = Number(item?.clinica_id || getClinicIdForList(list) || 0) || null;
-  const dispatchBusinessHours = await hydrateDispatchBusinessHoursForList(
+  const dispatchBusinessHours = await resolveDispatchBusinessHoursForList(
     list,
     clinicId ? { scope: 'clinic', clinicIds: [clinicId] } : {},
-    getDispatchConfig(list).business_hours
+    getDispatchConfig(list)
   );
   if (!isWithinBusinessHours(new Date(), dispatchBusinessHours)) {
     const nextAllowed = getNextBusinessAllowedAt(new Date(), dispatchBusinessHours);
@@ -6317,6 +6436,53 @@ function getClinicIdForList(list, fallbackScope = {}) {
   return Number.isInteger(fromScope) && fromScope > 0 ? fromScope : null;
 }
 
+async function getOrCreateReviewTestSampleItem(list, clinicId, listCriteria = {}) {
+  if (!list?.id || !MarketingPatientListItem) return null;
+  const safeClinicId = Number(clinicId || 0) || null;
+  const existing = await MarketingPatientListItem.findOne({
+    where: { list_id: list.id, status: 'test_sample' },
+    order: [['id', 'ASC']],
+  });
+  if (existing) {
+    return existing;
+  }
+
+  const displayClinicName = normalizeText(listCriteria.review_display_clinic_name || listCriteria.reviewDisplayClinicName || '')
+    || 'tu clínica';
+  const senderName = normalizeText(listCriteria.review_sender_name || listCriteria.reviewSenderName || '')
+    || 'Recepción';
+  return MarketingPatientListItem.create({
+    list_id: list.id,
+    paciente_id: null,
+    clinica_id: safeClinicId,
+    name: 'Paciente de ejemplo',
+    phone: null,
+    email: null,
+    treatment: 'Tratamiento de ejemplo',
+    last_visit_at: new Date(),
+    appointment_at: null,
+    treatment_completed: true,
+    status: 'test_sample',
+    selected: false,
+    reason: 'Contacto sintético para prueba interna; nunca entra en la cola real.',
+    exclusion_reason: null,
+    custom_fields: {
+      nombre: 'Paciente de ejemplo',
+      nombre_paciente: 'Paciente de ejemplo',
+      nombre_completo: 'Paciente de ejemplo',
+      clinica: displayClinicName,
+      nombre_clinica: displayClinicName,
+      firma_resenas: senderName,
+      tratamiento: 'Tratamiento de ejemplo',
+      fecha: new Date().toISOString().slice(0, 10),
+      test_sample: true,
+    },
+    missing_variables: [],
+    dispatch_status: 'test_only',
+    notes: 'Contacto sintético generado para enviar una prueba al teléfono del usuario.',
+  });
+}
+
 function getSingleClinicIdForDispatchCalendar(list, fallbackScope = {}) {
   const fromList = Number(list?.clinica_id || 0);
   if (Number.isInteger(fromList) && fromList > 0) return fromList;
@@ -6342,6 +6508,100 @@ async function loadDispatchCalendarRowsForClinic(clinicId) {
     order: [['dia_semana', 'ASC'], ['hora_inicio', 'ASC']],
     raw: true,
   }).catch(() => []);
+}
+
+function googleBusinessDayToIsoWeekday(value) {
+  const normalized = normalizeText(value).toUpperCase();
+  const map = {
+    MONDAY: 1,
+    TUESDAY: 2,
+    WEDNESDAY: 3,
+    THURSDAY: 4,
+    FRIDAY: 5,
+    SATURDAY: 6,
+    SUNDAY: 7,
+  };
+  return Object.prototype.hasOwnProperty.call(map, normalized) ? map[normalized] : null;
+}
+
+function googleBusinessTimeToMinutes(value) {
+  if (typeof value === 'string') {
+    const parsed = parseBusinessTimeToMinutes(value, Number.NaN);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  const source = value && typeof value === 'object' ? value : {};
+  const hour = Number(source.hours ?? source.hour ?? 0);
+  const minute = Number(source.minutes ?? source.minute ?? 0);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute) || hour < 0 || hour > 24 || minute < 0 || minute > 59) {
+    return null;
+  }
+  if (hour === 24 && minute > 0) return null;
+  return Math.min(24 * 60, Math.round(hour) * 60 + Math.round(minute));
+}
+
+function normalizeGoogleBusinessPeriods(periods = []) {
+  const byDay = new Map();
+  const push = (weekday, startMin, endMin) => {
+    if (!Number.isInteger(weekday) || weekday < 1 || weekday > 7) return;
+    if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) return;
+    const list = byDay.get(weekday) || [];
+    list.push({ startMin, endMin });
+    byDay.set(weekday, list);
+  };
+
+  for (const period of Array.isArray(periods) ? periods : []) {
+    const openDay = googleBusinessDayToIsoWeekday(period?.openDay || period?.open_day || period?.day);
+    const closeDay = googleBusinessDayToIsoWeekday(period?.closeDay || period?.close_day || period?.openDay || period?.open_day || period?.day);
+    const startMin = googleBusinessTimeToMinutes(period?.openTime || period?.open_time);
+    const endMin = googleBusinessTimeToMinutes(period?.closeTime || period?.close_time);
+    if (openDay === null || closeDay === null || startMin === null || endMin === null) continue;
+    if (openDay === closeDay) {
+      push(openDay, startMin, endMin);
+    } else {
+      push(openDay, startMin, 24 * 60);
+      push(closeDay, 0, endMin);
+    }
+  }
+
+  const rows = [];
+  for (const [weekday, intervals] of byDay.entries()) {
+    const sorted = intervals.sort((left, right) => left.startMin - right.startMin || left.endMin - right.endMin);
+    const merged = [];
+    for (const interval of sorted) {
+      const last = merged[merged.length - 1];
+      if (last && interval.startMin <= last.endMin) {
+        last.endMin = Math.max(last.endMin, interval.endMin);
+      } else {
+        merged.push({ ...interval });
+      }
+    }
+    for (const interval of merged) {
+      rows.push({
+        dia_semana: weekday,
+        activo: true,
+        hora_inicio: formatBusinessTime(interval.startMin),
+        hora_fin: formatBusinessTime(Math.min(interval.endMin, (24 * 60) - 1)),
+      });
+    }
+  }
+  return rows.sort((left, right) => left.dia_semana - right.dia_semana || left.hora_inicio.localeCompare(right.hora_inicio));
+}
+
+async function loadBusinessProfileCalendarRowsForClinic(clinicId) {
+  const safeClinicId = Number(clinicId || 0);
+  if (!safeClinicId || !ClinicBusinessLocation) return [];
+  const location = await ClinicBusinessLocation.findOne({
+    where: { clinica_id: safeClinicId, is_active: true },
+    order: [['last_synced_at', 'DESC'], ['id', 'DESC']],
+  }).catch(() => null);
+  const plain = location?.get ? location.get({ plain: true }) : location;
+  const raw = asPlainObject(plain?.raw_payload);
+  const periods = raw.regularHours?.periods
+    || raw.regular_hours?.periods
+    || raw.openingHours?.periods
+    || raw.opening_hours?.periods
+    || [];
+  return normalizeGoogleBusinessPeriods(periods);
 }
 
 function buildBusinessHoursFromCalendarRows(rows = [], base = {}) {
@@ -6378,8 +6638,8 @@ function buildBusinessHoursFromCalendarRows(rows = [], base = {}) {
     end_time: formatBusinessTime(maxEnd),
     allowed_weekdays: allowedWeekdays,
     intervals_by_weekday: intervalsByWeekday,
-    label: `${formatBusinessTime(minStart)}-${formatBusinessTime(maxEnd)} (horario de clínica)`,
-    source: 'clinic_hours',
+    label: base.label || `${formatBusinessTime(minStart)}-${formatBusinessTime(maxEnd)} (horario de clínica)`,
+    source: base.source || 'clinic_hours',
   });
 }
 
@@ -6399,11 +6659,17 @@ async function resolveReviewAliasClinicIdForDispatchCalendar(clinicId) {
 
 async function hydrateDispatchBusinessHoursForList(list, scope = {}, businessHours = null) {
   const normalized = normalizeBusinessHours(businessHours || {});
-  if (!ClinicaHorario) return normalized;
   const clinicId = getSingleClinicIdForDispatchCalendar(list, scope);
   if (!clinicId) return normalized;
   let rows = await loadDispatchCalendarRowsForClinic(clinicId);
   let sourceClinicId = clinicId;
+  let source = rows.length ? 'clinic_hours' : '';
+  if (!rows.length) {
+    rows = await loadBusinessProfileCalendarRowsForClinic(clinicId);
+    if (rows.length) {
+      source = 'business_profile_hours';
+    }
+  }
   if (!rows.length && isReviewRequestList(list)) {
     const aliasClinicId = await resolveReviewAliasClinicIdForDispatchCalendar(clinicId);
     if (aliasClinicId) {
@@ -6411,6 +6677,14 @@ async function hydrateDispatchBusinessHoursForList(list, scope = {}, businessHou
       if (aliasRows.length) {
         rows = aliasRows;
         sourceClinicId = aliasClinicId;
+        source = 'review_alias_clinic_hours';
+      } else {
+        const aliasProfileRows = await loadBusinessProfileCalendarRowsForClinic(aliasClinicId);
+        if (aliasProfileRows.length) {
+          rows = aliasProfileRows;
+          sourceClinicId = aliasClinicId;
+          source = 'review_alias_business_profile_hours';
+        }
       }
     }
   }
@@ -6418,8 +6692,17 @@ async function hydrateDispatchBusinessHoursForList(list, scope = {}, businessHou
     ...normalized,
     timezone: normalized.timezone || DISPATCH_TIMEZONE,
     source_clinic_id: sourceClinicId,
+    source,
   });
   return calendarBusinessHours || normalized;
+}
+
+async function resolveDispatchBusinessHoursForList(list, scope = {}, dispatch = {}) {
+  const normalized = normalizeBusinessHours(dispatch.business_hours || {});
+  if (usesExplicitDispatchWindow(dispatch)) {
+    return normalized;
+  }
+  return hydrateDispatchBusinessHoursForList(list, scope, normalized);
 }
 
 async function loadClinicForTemplateVariables(clinicId) {
@@ -7137,8 +7420,10 @@ async function sendTest(scope, campaignId, body = {}) {
     })
     : await resolveWhatsappTemplate(selectedTemplateId, scope);
   if (!template) {
-    const err = new Error('Selecciona una plantilla WhatsApp aprobada para enviar una prueba real.');
-    err.status = 400;
+    const err = isReviewTemplateUsage(templateUsage) && isHttpsUrl(reviewTeamPhotoUrlForSelection)
+      ? new Error('La foto está configurada, pero la plantilla de reseñas con imagen todavía no está aprobada por Meta. Cuando se apruebe, la prueba se enviará con foto.')
+      : new Error('Selecciona una plantilla WhatsApp aprobada para enviar una prueba real.');
+    err.status = isReviewTemplateUsage(templateUsage) && isHttpsUrl(reviewTeamPhotoUrlForSelection) ? 409 : 400;
     throw err;
   }
   if (String(template.status || '').toUpperCase() !== 'APPROVED') {
@@ -7146,32 +7431,42 @@ async function sendTest(scope, campaignId, body = {}) {
     err.status = 409;
     throw err;
   }
-  if (isReviewTemplateUsage(templateUsage) && isHttpsUrl(reviewTeamPhotoUrlForSelection) && !templateHasImageHeader(template)) {
+  if (
+    isReviewTemplateUsage(templateUsage)
+    && !matchesReviewTemplateMedia({
+      hasImageHeader: templateHasImageHeader(template),
+      hasPhoto: isHttpsUrl(reviewTeamPhotoUrlForSelection),
+    })
+  ) {
     const err = new Error('La foto está configurada, pero la plantilla de reseñas con imagen todavía no está aprobada por Meta. Cuando se apruebe, la prueba se enviará con foto.');
     err.status = 409;
     throw err;
   }
-  const item = body.item_id
+  let item = body.item_id
     ? await MarketingPatientListItem.findOne({ where: { id: body.item_id, list_id: list.id } })
     : await MarketingPatientListItem.findOne({ where: { list_id: list.id, status: 'ready' }, order: [['id', 'ASC']] });
-  if (!item) {
-    const err = new Error('La campaña no tiene contactos listos para generar variables de prueba.');
-    err.status = 400;
-    throw err;
-  }
   const targetPhone = whatsappService.normalizePhoneNumber(body.to || body.phone || '');
   if (!targetPhone) {
     const err = new Error('Número de prueba no válido.');
     err.status = 400;
     throw err;
   }
-  const plainItem = item.get({ plain: true });
-  const clinicId = Number(body.clinic_id || body.clinica_id || plainItem.clinica_id || getClinicIdForList(list, scope) || 0);
+  const initialPlainItem = item?.get ? item.get({ plain: true }) : item;
+  const clinicId = Number(body.clinic_id || body.clinica_id || initialPlainItem?.clinica_id || getClinicIdForList(list, scope) || 0);
   if (!clinicId) {
     const err = new Error('La campaña necesita una clínica concreta para enviar WhatsApp.');
     err.status = 400;
     throw err;
   }
+  if (!item && isReviewTemplateUsage(templateUsage)) {
+    item = await getOrCreateReviewTestSampleItem(list, clinicId, listCriteria);
+  }
+  if (!item) {
+    const err = new Error('La campaña no tiene contactos listos para generar variables de prueba.');
+    err.status = 400;
+    throw err;
+  }
+  const plainItem = item.get({ plain: true });
   const clinic = await loadClinicForTemplateVariables(clinicId);
   const clinicConfig = await whatsappService.getClinicConfig(clinicId);
   if (!clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
@@ -7684,7 +7979,7 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
   const accountQuality = await getWhatsappAccountQualityForList(list, scope);
   const scheduledAt = parseDate(body.scheduled_at || list.criteria?.scheduled_at);
   const reference = scheduledAt && scheduledAt.getTime() > Date.now() ? scheduledAt : new Date();
-  const dispatchBusinessHours = await hydrateDispatchBusinessHoursForList(list, scope, dispatch.business_hours);
+  const dispatchBusinessHours = await resolveDispatchBusinessHoursForList(list, scope, dispatch);
   const businessAllowedAt = getNextBusinessAllowedAt(reference, dispatchBusinessHours);
   const nextRunAt = businessAllowedAt.getTime() > Date.now() + 1000 ? businessAllowedAt : null;
   const baseDispatch = {
@@ -7800,7 +8095,7 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     err.status = 409;
     throw err;
   }
-  const dispatchBusinessHours = await hydrateDispatchBusinessHoursForList(list, scope, dispatch.business_hours);
+  const dispatchBusinessHours = await resolveDispatchBusinessHoursForList(list, scope, dispatch);
   const nextAllowed = getNextBusinessAllowedAt(new Date(), dispatchBusinessHours);
   const nextRunAt = nextAllowed.getTime() > Date.now() + 1000 ? nextAllowed : null;
   const baseDispatch = {
@@ -8149,7 +8444,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     return { status: 'completed', result: { skipped: true, reason: 'list_not_found_or_archived', list_id: listId } };
   }
   const rawDispatch = getDispatchConfig(list);
-  const dispatchBusinessHours = await hydrateDispatchBusinessHoursForList(list, scope, rawDispatch.business_hours);
+  const dispatchBusinessHours = await resolveDispatchBusinessHoursForList(list, scope, rawDispatch);
   const dispatch = {
     ...rawDispatch,
     business_hours: dispatchBusinessHours,

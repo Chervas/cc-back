@@ -41,6 +41,14 @@ const WEB_CONTENT_SCHEMA_PROFILE_BY_TYPE = Object.freeze({
   article: Object.freeze(['auto', 'Article', 'WebPage']),
   category: Object.freeze(['auto', 'CollectionPage', 'WebPage']),
 });
+const WEB_CONTENT_TYPES_WITH_IMAGE = Object.freeze([
+  'value_proposition',
+  'benefit',
+  'treatment_copy',
+  'professional_bio',
+  'article',
+  'category',
+]);
 
 class WebContentValidationError extends Error {
   constructor(code, message, details = undefined) {
@@ -228,6 +236,46 @@ function assertOpaqueReference(value, path) {
   return normalized;
 }
 
+function contentKeysForType(type, baseKeys) {
+  if (!WEB_CONTENT_TYPES_WITH_IMAGE.includes(type)) return baseKeys;
+  return [...baseKeys, 'image_asset_id', 'alt_text'];
+}
+
+function validateContentImageFields(type, value, path = '/content') {
+  if (!WEB_CONTENT_TYPES_WITH_IMAGE.includes(type)) return {};
+  const rawImageAssetId = value?.image_asset_id;
+  const rawAltText = value?.alt_text;
+  const hasImage = rawImageAssetId !== undefined && rawImageAssetId !== null && String(rawImageAssetId).trim() !== '';
+  const hasAlt = rawAltText !== undefined && rawAltText !== null && String(rawAltText).trim() !== '';
+  if (!hasImage && !hasAlt) return {};
+  if (!hasImage) {
+    fail(
+      'content_image_asset_required',
+      `${path}/image_asset_id es obligatorio cuando se define una descripción alternativa.`,
+      `${path}/image_asset_id`
+    );
+  }
+  const imageAssetId = assertText(rawImageAssetId, `${path}/image_asset_id`, { min: 1, max: 36 });
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,35}$/.test(imageAssetId)) {
+    fail(
+      'invalid_content_image_asset_id',
+      `${path}/image_asset_id debe ser un identificador opaco de Medios.`,
+      `${path}/image_asset_id`
+    );
+  }
+  if (!hasAlt) {
+    fail(
+      'content_image_alt_required',
+      `${path}/alt_text es obligatorio cuando el contenido usa una imagen.`,
+      `${path}/alt_text`
+    );
+  }
+  return {
+    image_asset_id: imageAssetId,
+    alt_text: assertText(rawAltText, `${path}/alt_text`, { min: 1, max: 500 }),
+  };
+}
+
 function validateSources(value) {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value) || value.length > 20) {
@@ -271,16 +319,18 @@ function validateTypedContent(type, value) {
   const path = '/content';
   switch (type) {
     case 'value_proposition':
-      assertKeys(value, ['headline', 'summary'], ['headline', 'summary'], path);
+      assertKeys(value, contentKeysForType(type, ['headline', 'summary']), ['headline', 'summary'], path);
       return {
         headline: assertText(value.headline, `${path}/headline`, { min: 1, max: 180 }),
         summary: assertText(value.summary, `${path}/summary`, { min: 1, max: 1200 }),
+        ...validateContentImageFields(type, value, path),
       };
     case 'benefit':
-      assertKeys(value, ['title', 'description'], ['title', 'description'], path);
+      assertKeys(value, contentKeysForType(type, ['title', 'description']), ['title', 'description'], path);
       return {
         title: assertText(value.title, `${path}/title`, { min: 1, max: 180 }),
         description: assertText(value.description, `${path}/description`, { min: 1, max: 2000 }),
+        ...validateContentImageFields(type, value, path),
       };
     case 'faq':
       assertKeys(value, ['question', 'answer'], ['question', 'answer'], path);
@@ -289,19 +339,31 @@ function validateTypedContent(type, value) {
         answer: assertText(value.answer, `${path}/answer`, { min: 1, max: 5000 }),
       };
     case 'treatment_copy':
-      assertKeys(value, ['title', 'short_description', 'description'], ['title', 'short_description', 'description'], path);
+      assertKeys(
+        value,
+        contentKeysForType(type, ['title', 'short_description', 'description']),
+        ['title', 'short_description', 'description'],
+        path
+      );
       return {
         title: assertText(value.title, `${path}/title`, { min: 1, max: 180 }),
         short_description: assertText(value.short_description, `${path}/short_description`, { min: 1, max: 500 }),
         description: assertText(value.description, `${path}/description`, { min: 1, max: 8000 }),
+        ...validateContentImageFields(type, value, path),
       };
     case 'professional_bio':
-      assertKeys(value, ['display_name', 'role', 'biography', 'credentials'], ['display_name', 'biography', 'credentials'], path);
+      assertKeys(
+        value,
+        contentKeysForType(type, ['display_name', 'role', 'biography', 'credentials']),
+        ['display_name', 'biography', 'credentials'],
+        path
+      );
       return {
         display_name: assertText(value.display_name, `${path}/display_name`, { min: 1, max: 180 }),
         role: value.role == null ? null : assertText(value.role, `${path}/role`, { min: 1, max: 180 }),
         biography: assertText(value.biography, `${path}/biography`, { min: 1, max: 8000 }),
         credentials: assertTextArray(value.credentials, `${path}/credentials`, { maxItems: 30, itemMax: 300 }),
+        ...validateContentImageFields(type, value, path),
       };
     case 'testimonial':
       assertKeys(value, ['quote', 'attribution', 'consent_reference'], ['quote', 'consent_reference'], path);
@@ -320,19 +382,21 @@ function validateTypedContent(type, value) {
         version_label: assertText(value.version_label, `${path}/version_label`, { min: 1, max: 80 }),
       };
     case 'article':
-      assertKeys(value, ['title', 'excerpt', 'sections'], ['title', 'excerpt', 'sections'], path);
+      assertKeys(value, contentKeysForType(type, ['title', 'excerpt', 'sections']), ['title', 'excerpt', 'sections'], path);
       return {
         title: assertText(value.title, `${path}/title`, { min: 1, max: 180 }),
         excerpt: assertText(value.excerpt, `${path}/excerpt`, { min: 1, max: 500 }),
         sections: validateArticleSections(value.sections),
+        ...validateContentImageFields(type, value, path),
       };
     case 'category':
-      assertKeys(value, ['name', 'description'], ['name'], path);
+      assertKeys(value, contentKeysForType(type, ['name', 'description']), ['name'], path);
       return {
         name: assertText(value.name, `${path}/name`, { min: 1, max: 180 }),
         description: value.description == null
           ? null
           : assertText(value.description, `${path}/description`, { min: 1, max: 1000 }),
+        ...validateContentImageFields(type, value, path),
       };
     default:
       fail('invalid_content_type', 'El tipo de contenido no está permitido.', '/type', { allowed: WEB_CONTENT_TYPES });
@@ -508,6 +572,8 @@ function contentFieldValues(entry) {
     text: content.text || null,
     version_label: content.version_label || null,
     excerpt: content.excerpt || null,
+    image_asset_id: content.image_asset_id || null,
+    alt_text: content.alt_text || null,
   };
 }
 
@@ -586,6 +652,7 @@ module.exports = {
   WEB_CONTENT_TYPES,
   WEB_CONTENT_SCHEMA_PROFILE_BY_TYPE,
   WEB_CONTENT_SCHEMA_PROFILES,
+  WEB_CONTENT_TYPES_WITH_IMAGE,
   WEB_MEDIA_KINDS,
   WEB_MEDIA_STATUSES,
   WEB_RIGHTS_ORIGINS,

@@ -7,6 +7,7 @@ const whatsappService = require('../services/whatsapp.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { canUserAccessFeature } = require('../lib/access-policy');
 const { canUserSelectWhatsappTemplate } = require('../lib/whatsapp-template-ownership');
+const { isReviewWorkflowWhatsappTemplate } = require('../lib/whatsapp-template-workflow');
 const {
   getPendingReplyStatesByConversationIds,
 } = require('../services/conversationPendingReply.service');
@@ -1694,6 +1695,13 @@ exports.postMessage = async (req, res) => {
           return res.status(403).json({
             error: 'whatsapp_template_owner_forbidden',
             message: 'Esta plantilla pertenece a otro usuario.',
+          });
+        }
+        if (isReviewWorkflowWhatsappTemplate(templateJson)) {
+          await transaction.rollback();
+          return res.status(409).json({
+            error: 'whatsapp_template_requires_workflow',
+            message: 'Esta plantilla inicia un flujo de reseñas y debe enviarse desde Campañas.',
           });
         }
         canonicalTemplateName = String(templateJson.name || '').trim();

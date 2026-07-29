@@ -86,6 +86,25 @@ function main() {
     schema_config: { enabled: true, profile: 'Article', include_sources: true },
   });
   assert.deepEqual(schemaConfigured.schema_config, { enabled: true, profile: 'Article', include_sources: true });
+  const articleImageId = '4f94b3a8-3120-48b1-9cb2-98609e93a8bd';
+  const articleWithImage = validateWebContentEntry({
+    type: 'article',
+    locale: 'es-ES',
+    title: 'Artículo con imagen',
+    content: {
+      title: 'Implantes dentales',
+      excerpt: 'Guía clara.',
+      sections: [{ heading: 'Preparación', paragraphs: ['Primer párrafo.'] }],
+      image_asset_id: articleImageId,
+      alt_text: 'Paciente sonriendo tras revisar su tratamiento dental',
+    },
+  });
+  assert.equal(articleWithImage.content.image_asset_id, articleImageId);
+  assert.equal(articleWithImage.content.alt_text, 'Paciente sonriendo tras revisar su tratamiento dental');
+  const imageFields = contentFieldValues({ title: 'Artículo interno', content: articleWithImage.content });
+  assert.equal(imageFields.image_asset_id, articleImageId);
+  assert.equal(imageFields.alt_text, articleWithImage.content.alt_text);
+  assert.match(articleWithImage.hash, /^[a-f0-9]{64}$/);
   assert.notEqual(schemaConfigured.hash, validateWebContentEntry({
     type: 'article',
     locale: 'es-ES',
@@ -105,6 +124,45 @@ function main() {
       schema_config: { enabled: true, profile: 'Article' },
     }),
     (error) => error instanceof WebContentValidationError && error.code === 'invalid_content_schema_profile'
+  );
+  assert.throws(
+    () => validateWebContentEntry({
+      type: 'article',
+      title: 'Artículo con URL manual',
+      content: {
+        title: 'Implantes dentales',
+        excerpt: 'Guía clara.',
+        sections: [{ heading: 'Preparación', paragraphs: ['Primer párrafo.'] }],
+        image_public_url: 'https://example.com/image.webp',
+      },
+    }),
+    (error) => error instanceof WebContentValidationError && error.code === 'invalid_content_field'
+  );
+  assert.throws(
+    () => validateWebContentEntry({
+      type: 'article',
+      title: 'Artículo sin alt',
+      content: {
+        title: 'Implantes dentales',
+        excerpt: 'Guía clara.',
+        sections: [{ heading: 'Preparación', paragraphs: ['Primer párrafo.'] }],
+        image_asset_id: articleImageId,
+      },
+    }),
+    (error) => error instanceof WebContentValidationError && error.code === 'content_image_alt_required'
+  );
+  assert.throws(
+    () => validateWebContentEntry({
+      type: 'faq',
+      title: 'FAQ con imagen',
+      content: {
+        question: 'Pregunta',
+        answer: 'Respuesta',
+        image_asset_id: articleImageId,
+        alt_text: 'Imagen no admitida',
+      },
+    }),
+    (error) => error instanceof WebContentValidationError && error.code === 'invalid_content_field'
   );
 
   const media = validateWebMediaPresentation({

@@ -49,12 +49,57 @@ function galleryNode() {
   };
 }
 
+function sliderNode() {
+  return {
+    id: 'slider_clinic',
+    type: 'slider',
+    version: 1,
+    props: {
+      items: [
+        {
+          asset_id: ASSET_ONE,
+          alt: 'Recepción accesible de la clínica',
+          decorative: false,
+          focal_x: 25,
+          focal_y: 75,
+          caption: 'Recepción & acceso',
+        },
+        {
+          asset_id: ASSET_TWO,
+          alt: '',
+          decorative: true,
+        },
+      ],
+      fit: 'cover',
+      aspect_ratio: '16:9',
+      show_arrows: true,
+      show_dots: true,
+      autoplay: false,
+      interval_seconds: 5,
+    },
+    children: [],
+    style_tokens: {
+      content_width: 'wide',
+      gap: 'sm',
+      radius: 'lg',
+    },
+  };
+}
+
 function addGallery(document) {
   const gallery = galleryNode();
   const section = Object.values(document.nodes).find((node) => node.type === 'section');
   document.nodes[gallery.id] = gallery;
   section.children.splice(1, 0, gallery.id);
   return gallery;
+}
+
+function addSlider(document) {
+  const slider = sliderNode();
+  const section = Object.values(document.nodes).find((node) => node.type === 'section');
+  document.nodes[slider.id] = slider;
+  section.children.splice(1, 0, slider.id);
+  return slider;
 }
 
 function errorKeywords(document) {
@@ -209,7 +254,29 @@ test('gallery es un bloque hoja cerrado con assets únicos y alt semántico', ()
   assert.equal(errorKeywords(binding).has('bindingTarget'), true);
 });
 
-test('gallery compila HTML/CSS responsive, accesible y determinista en renderer 1.8', () => {
+test('slider es un bloque hoja cerrado con assets únicos y opciones seguras', () => {
+  const valid = buildValidWebDocument();
+  addSlider(valid);
+  assert.equal(validateWebDocument(valid).valid, true);
+
+  const child = clone(valid);
+  child.nodes.slider_clinic.children = ['text_intro'];
+  assert.equal(validateWebDocument(child).valid, false);
+
+  const duplicated = clone(valid);
+  duplicated.nodes.slider_clinic.props.items[1].asset_id = ASSET_ONE;
+  assert.equal(validateWebDocument(duplicated).valid, false);
+
+  const markup = clone(valid);
+  markup.nodes.slider_clinic.props.items[0].caption = '<script>alert(1)</script>';
+  assert.equal(validateWebDocument(markup).valid, false);
+
+  const interval = clone(valid);
+  interval.nodes.slider_clinic.props.interval_seconds = 30;
+  assert.equal(validateWebDocument(interval).valid, false);
+});
+
+test('gallery compila HTML/CSS responsive, accesible y determinista en renderer actual', () => {
   const input = compilerFixture();
   const first = compileWebArtifact(input);
   const second = compileWebArtifact(input);
@@ -219,7 +286,7 @@ test('gallery compila HTML/CSS responsive, accesible y determinista en renderer 
 
   assert.equal(first.artifact_hash, second.artifact_hash);
   assert.deepEqual(first.files, second.files);
-  assert.equal(first.manifest.renderer_version, 'clinicaclick-web-renderer/1.8.0');
+  assert.equal(first.manifest.renderer_version, 'clinicaclick-web-renderer/1.14.0');
   assert.match(html, /id="cc-gallery_clinic" class="cc-node cc-gallery cc-gallery-cols-3[^\"]*"/);
   assert.doesNotMatch(html, /aria-label="Galería de imágenes"/);
   assert.match(html, /cc-gallery-item cc-fit-cover cc-aspect-4-3 cc-focal-25-75/);
@@ -229,7 +296,7 @@ test('gallery compila HTML/CSS responsive, accesible y determinista en renderer 
   assert.match(css, /\.cc-gallery-cols-3\{grid-template-columns:repeat\(3,minmax\(0,1fr\)\)\}/);
   assert.match(css, /\.cc-focal-25-75 img\{object-position:25% 75%\}/);
   assert.match(css, /@media\(max-width:767px\)\{/);
-  assert.match(css, /\.cc-layout-grid>\.cc-container,\.cc-gallery\{grid-template-columns:1fr\}/);
+  assert.match(css, /\.cc-layout-grid>\.cc-container,\.cc-gallery,\.cc-location-map\{grid-template-columns:1fr\}/);
   assert.doesNotMatch(html, /<iframe|onclick=|onload=|onerror=/i);
 
   const unresolved = compilerFixture();
@@ -280,4 +347,26 @@ test('resource resolver congela cada asset de gallery con su ruta exacta y scope
   assert.equal(result.snapshot.media_assets[ASSET_ONE].scope.type, 'clinic');
   assert.equal(result.snapshot.media_assets[ASSET_ONE].scope.id, 66);
   assert.equal(result.snapshot.media_assets[ASSET_ONE].public_media.url, 'https://media.clinicaclick.com/web/gallery-one.webp');
+});
+
+test('slider compila scroll-snap seguro sin JavaScript público', () => {
+  const input = compilerFixture();
+  input.document = createBlankWebDocument({ name: 'Clínica Dental Centro', locale: 'es-ES' });
+  addSlider(input.document);
+  const first = compileWebArtifact(input);
+  const second = compileWebArtifact(input);
+  const html = first.files['index.html'];
+  const cssPath = Object.keys(first.files).find((path) => path.endsWith('.css'));
+  const css = first.files[cssPath];
+
+  assert.equal(first.artifact_hash, second.artifact_hash);
+  assert.deepEqual(first.files, second.files);
+  assert.match(html, /id="cc-slider_clinic" class="cc-node cc-slider cc-slider-aspect-16-9[^\"]*"/);
+  assert.match(html, /class="cc-slider-track"/);
+  assert.match(html, /id="cc-slider_clinic-slide-1" class="cc-slider-slide cc-fit-cover cc-aspect-16-9 cc-focal-25-75"/);
+  assert.match(html, /gallery-one\.webp" alt="Recepción accesible de la clínica" loading="lazy" decoding="async" width="1200" height="900"/);
+  assert.match(html, /<span class="cc-slider-arrow cc-slider-prev" aria-hidden="true">‹<\/span>/);
+  assert.match(html, /<div class="cc-slider-dots" aria-hidden="true"><a href="#cc-slider_clinic-slide-1">1<\/a><a href="#cc-slider_clinic-slide-2">2<\/a><\/div>/);
+  assert.match(css, /\.cc-slider-track\{display:flex;gap:var\(--cc-md\);overflow-x:auto;scroll-snap-type:x mandatory/);
+  assert.doesNotMatch(html, /<iframe|onclick=|onload=|onerror=|javascript:/i);
 });

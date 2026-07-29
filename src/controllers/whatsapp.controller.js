@@ -19,6 +19,10 @@ const {
   isWhatsappTemplateOwnedByUser,
 } = require('../lib/whatsapp-template-ownership');
 const {
+  getWhatsappTemplateUsages,
+  isReviewWorkflowWhatsappTemplate,
+} = require('../lib/whatsapp-template-workflow');
+const {
   getAccessibleMarketingClinicIds,
   hasMarketingClinicScopeAccess,
 } = require('../lib/marketingScopeAccess');
@@ -54,22 +58,6 @@ const phoneSyncThrottle = new Map();
 
 function isWhatsappGlobalAdmin(userId) {
   return ADMIN_USER_IDS.includes(Number(userId));
-}
-
-function getWhatsappTemplateUsages(template) {
-  let variables = template?.variables;
-  if (typeof variables === 'string') {
-    try {
-      variables = JSON.parse(variables);
-    } catch (_error) {
-      variables = [];
-    }
-  }
-  return Array.from(new Set(
-    (Array.isArray(variables) ? variables : [])
-      .map((variable) => String(variable?.template_usage || '').trim().toLowerCase())
-      .filter(Boolean)
-  ));
 }
 
 async function assertWhatsappTemplateClinicAccess({ clinicId, userId }) {
@@ -544,12 +532,21 @@ function pickPreferredTemplate(currentTemplate, nextTemplate, clinicId) {
 
   const currentStatusRank = getTemplateStatusRank(currentTemplate);
   const nextStatusRank = getTemplateStatusRank(nextTemplate);
+  const currentBodyRank = getCurrentCatalogBodyMatchRank(currentTemplate);
+  const nextBodyRank = getCurrentCatalogBodyMatchRank(nextTemplate);
+  const reviewCatalogIds = new Set([9, 32, 34]);
+  const currentCatalogId = Number(currentTemplate?.catalog_template_id || currentTemplate?.catalog?.id || 0);
+  const nextCatalogId = Number(nextTemplate?.catalog_template_id || nextTemplate?.catalog?.id || 0);
+  if (
+    (reviewCatalogIds.has(currentCatalogId) || reviewCatalogIds.has(nextCatalogId))
+    && currentBodyRank !== nextBodyRank
+  ) {
+    return nextBodyRank > currentBodyRank ? nextTemplate : currentTemplate;
+  }
   if (currentStatusRank !== nextStatusRank) {
     return nextStatusRank > currentStatusRank ? nextTemplate : currentTemplate;
   }
 
-  const currentBodyRank = getCurrentCatalogBodyMatchRank(currentTemplate);
-  const nextBodyRank = getCurrentCatalogBodyMatchRank(nextTemplate);
   if (currentBodyRank !== nextBodyRank) {
     return nextBodyRank > currentBodyRank ? nextTemplate : currentTemplate;
   }
@@ -1459,6 +1456,7 @@ exports.listTemplatesForClinic = async (req, res) => {
     const clinicId = req.query.clinic_id ? Number(req.query.clinic_id) : null;
     const phoneNumberId = req.query.phone_number_id || null;
     const userId = req.userData?.userId;
+    const templateContext = String(req.query.context || '').trim().toLowerCase();
     const includeAllForAdmin = isWhatsappGlobalAdmin(userId)
       && ['1', 'true', 'yes'].includes(String(req.query.include_all || '').trim().toLowerCase());
 
@@ -1506,6 +1504,7 @@ exports.listTemplatesForClinic = async (req, res) => {
             ...publicJson,
             variables: buildWhatsappTemplateVariableContract(json),
             template_usages: getWhatsappTemplateUsages(json),
+            workflow_scope: isReviewWorkflowWhatsappTemplate(json) ? 'review_campaign' : null,
             usage,
             is_system: isSystem,
             is_owned_by_current_user: isOwnedByCurrentUser,
@@ -1522,10 +1521,14 @@ exports.listTemplatesForClinic = async (req, res) => {
           return item.catalog.is_active !== false && Number(item.catalog.is_active) !== 0;
         });
 
+    const contextPayload = templateContext === 'quick_chat'
+      ? payload.filter((item) => !isReviewWorkflowWhatsappTemplate(item))
+      : payload;
+
     return res.json(
       includeAllForAdmin
-        ? payload
-        : payload.filter((item) => canUserSelectWhatsappTemplate(item, userId))
+        ? contextPayload
+        : contextPayload.filter((item) => canUserSelectWhatsappTemplate(item, userId))
     );
   } catch (err) {
     if (err?.code === 'whatsapp_template_clinic_scope_forbidden') {

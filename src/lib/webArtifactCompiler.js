@@ -13,7 +13,7 @@ const {
   webArtifactBundleFootprintBytes,
 } = require('./webArtifactBudget');
 
-const RENDERER_VERSION = 'clinicaclick-web-renderer/1.8.0';
+const RENDERER_VERSION = 'clinicaclick-web-renderer/1.14.0';
 const SAFE_EXTERNAL_REL = /^(?:\/[A-Za-z0-9_][A-Za-z0-9/_-]*|https:\/\/[^\s]+)$/;
 const SAFE_YOUTUBE_VIDEO_ID = /^[A-Za-z0-9_-]{6,64}$/;
 const SAFE_VIMEO_VIDEO_ID = /^[0-9]{6,12}$/;
@@ -48,6 +48,17 @@ const GOOGLE_WEEKDAYS = Object.freeze([
 const GOOGLE_WEEKDAY_INDEX = new Map(GOOGLE_WEEKDAYS.map(([google, schema], index) => (
   [google, { index, schema }]
 )));
+const WEB_CONTENT_TYPE_LABELS = Object.freeze({
+  value_proposition: 'Propuesta de valor',
+  benefit: 'Beneficio',
+  faq: 'Pregunta frecuente',
+  treatment_copy: 'Tratamiento',
+  professional_bio: 'Profesional',
+  testimonial: 'Testimonio',
+  legal_copy: 'Legal',
+  article: 'Artículo',
+  category: 'Categoría',
+});
 
 class WebArtifactCompilationError extends Error {
   constructor(code, message, details = undefined, status = 422) {
@@ -501,11 +512,18 @@ function safePhoneTarget(value, nodeId) {
 
 function validateBoundDocument(document) {
   for (const node of Object.values(document.nodes || {})) {
-    if (node?.type !== 'button') continue;
-    if (node.props.action === 'external_url') {
-      node.props.target = safePublicButtonUrl(node.props.target, node.id);
-    } else if (node.props.action === 'phone' || node.props.action === 'whatsapp') {
-      node.props.target = safePhoneTarget(node.props.target, node.id);
+    if (node?.type === 'button') {
+      if (node.props.action === 'external_url') {
+        node.props.target = safePublicButtonUrl(node.props.target, node.id);
+      } else if (node.props.action === 'phone' || node.props.action === 'whatsapp') {
+        node.props.target = safePhoneTarget(node.props.target, node.id);
+      }
+    } else if (node?.type === 'link_list') {
+      node.props.items = node.props.items.map((item) => {
+        if (item.action === 'external_url') return { ...item, target: safePublicButtonUrl(item.target, node.id) };
+        if (item.action === 'phone' || item.action === 'whatsapp') return { ...item, target: safePhoneTarget(item.target, node.id) };
+        return item;
+      });
     }
   }
   try {
@@ -712,6 +730,37 @@ function renderGallery(node, snapshot) {
   return `<div id="cc-${escapeHtml(node.id)}" class="cc-node cc-gallery cc-gallery-cols-${Number(node.props.columns)} ${styleClassList(node)}">${figures}</div>`;
 }
 
+function renderSlider(node, snapshot) {
+  const aspect = String(node.props.aspect_ratio || '16:9').replace(':', '-');
+  const slides = node.props.items.map((item, index) => {
+    const { source, dimensions } = resolvedMediaImage(snapshot, item.asset_id, {
+      node_id: node.id,
+      item_index: index,
+    });
+    const classes = imageClassList({
+      props: {
+        fit: node.props.fit,
+        aspect_ratio: node.props.aspect_ratio,
+        focal_x: item.focal_x,
+        focal_y: item.focal_y,
+      },
+    });
+    const alt = item.decorative ? '' : item.alt;
+    const caption = item.caption
+      ? `<figcaption>${escapeHtml(item.caption)}</figcaption>`
+      : '';
+    return `<figure id="cc-${escapeHtml(node.id)}-slide-${index + 1}" class="cc-slider-slide ${classes}"><div class="cc-image-frame"><img src="${escapeHtml(source)}" alt="${escapeHtml(alt)}" loading="lazy" decoding="async"${dimensions}></div>${caption}</figure>`;
+  }).join('');
+  const dots = node.props.show_dots
+    ? `<div class="cc-slider-dots" aria-hidden="true">${node.props.items.map((_, index) => `<a href="#cc-${escapeHtml(node.id)}-slide-${index + 1}">${index + 1}</a>`).join('')}</div>`
+    : '';
+  const arrows = node.props.show_arrows
+    ? '<span class="cc-slider-arrow cc-slider-prev" aria-hidden="true">‹</span><span class="cc-slider-arrow cc-slider-next" aria-hidden="true">›</span>'
+    : '';
+  const autoplayClass = node.props.autoplay ? ' cc-slider-autoplay' : '';
+  return `<div id="cc-${escapeHtml(node.id)}" class="cc-node cc-slider cc-slider-aspect-${escapeHtml(aspect)}${autoplayClass} ${styleClassList(node)}" style="--cc-slider-interval:${Number(node.props.interval_seconds) || 5}s">${arrows}<div class="cc-slider-track">${slides}</div>${dots}</div>`;
+}
+
 function renderVideo(node) {
   const source = videoEmbedUrl(node);
   const loading = node.props.loading === 'eager' ? 'eager' : 'lazy';
@@ -741,6 +790,360 @@ function renderTestimonial(node) {
   return `<figure id="cc-${escapeHtml(node.id)}" class="cc-node cc-testimonial ${styleClassList(node)}">${stars}<blockquote class="cc-testimonial-quote">${escapeHtml(node.props.quote)}</blockquote>${meta}</figure>`;
 }
 
+function renderAccordion(node) {
+  const title = String(node.props.title || '').trim();
+  const heading = title
+    ? `<h2 class="cc-accordion-title">${escapeHtml(title)}</h2>`
+    : '';
+  const sharedName = node.props.allow_multiple_open === false
+    ? ` name="cc-accordion-${escapeHtml(node.id)}"`
+    : '';
+  const items = Array.isArray(node.props.items)
+    ? node.props.items.slice(0, 12).map((item) => (
+      `<details class="cc-accordion-item"${sharedName}${item.open ? ' open' : ''}><summary>${escapeHtml(item.title)}</summary><p>${escapeHtml(item.body)}</p></details>`
+    )).join('')
+    : '';
+  return `<section id="cc-${escapeHtml(node.id)}" class="cc-node cc-accordion ${styleClassList(node)}" aria-label="${escapeHtml(node.props.aria_label)}">${heading}<div class="cc-accordion-items">${items}</div></section>`;
+}
+
+function renderLocationMap(node) {
+  const href = safePublicButtonUrl(node.props.directions_url, node.id);
+  const title = String(node.props.title || '').trim();
+  const address = String(node.props.address || '').trim();
+  const buttonLabel = String(node.props.button_label || 'Cómo llegar').trim();
+  const mapPlaceholder = node.props.show_map_placeholder === false
+    ? ''
+    : '<div class="cc-location-map-visual" aria-hidden="true"><span></span><span></span><strong>Mapa</strong></div>';
+  return `<aside id="cc-${escapeHtml(node.id)}" class="cc-node cc-location-map ${styleClassList(node)}">${mapPlaceholder}<div class="cc-location-map-body"><h2>${escapeHtml(title)}</h2><p>${escapeHtml(address)}</p><a class="cc-button cc-button-outline" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(buttonLabel)}</a></div></aside>`;
+}
+
+function pageHref(page, baseUrl) {
+  return page.slug === 'inicio' ? `${baseUrl}/` : `${baseUrl}/${page.slug}/`;
+}
+
+function renderBreadcrumbs(node, context) {
+  const separator = ['/', '›', '·'].includes(node.props.separator) ? node.props.separator : '›';
+  const currentTitle = String(context.page?.title || '').trim() || 'Página actual';
+  const items = [];
+  items.push(`<li><a href="${escapeHtml(`${context.baseUrl}/`)}">${escapeHtml(node.props.home_label)}</a></li>`);
+  if (node.props.show_current !== false) {
+    items.push(`<li><span aria-current="page">${escapeHtml(currentTitle)}</span></li>`);
+  }
+  return `<nav id="cc-${escapeHtml(node.id)}" class="cc-node cc-breadcrumbs ${styleClassList(node)}" aria-label="${escapeHtml(node.props.aria_label)}"><ol>${items.join(`<li class="cc-breadcrumbs-separator" aria-hidden="true">${escapeHtml(separator)}</li>`)}</ol></nav>`;
+}
+
+function renderPageMenu(node, context) {
+  const currentPageId = context.page?.id || null;
+  const includeHome = node.props.include_home !== false;
+  const pages = Array.isArray(context.pages) ? context.pages : [];
+  const navigationPages = pages
+    .filter((page) => includeHome || page.slug !== 'inicio')
+    .filter((page) => String(page?.title || '').trim());
+  const items = navigationPages.map((page) => {
+    const href = pageHref(page, context.baseUrl);
+    const current = page.id === currentPageId ? ' aria-current="page"' : '';
+    const className = page.id === currentPageId ? ' class="cc-page-menu-current"' : '';
+    return `<li><a href="${escapeHtml(href)}"${className}${current}>${escapeHtml(page.title)}</a></li>`;
+  }).join('');
+  const label = String(node.props.label || '').trim();
+  const title = label ? `<span class="cc-page-menu-label">${escapeHtml(label)}</span>` : '';
+  const layout = node.props.layout === 'vertical' ? 'vertical' : 'horizontal';
+  return `<nav id="cc-${escapeHtml(node.id)}" class="cc-node cc-page-menu cc-page-menu-${layout} ${styleClassList(node)}" aria-label="${escapeHtml(node.props.aria_label)}">${title}<ul>${items}</ul></nav>`;
+}
+
+function linkListItemHref(node, item, context) {
+  if (item.action === 'external_url') return safePublicButtonUrl(item.target, node.id);
+  if (item.action === 'phone') return `tel:${safePhoneTarget(item.target, node.id)}`;
+  if (item.action === 'whatsapp') return `https://wa.me/${safePhoneTarget(item.target, node.id).slice(1)}`;
+  const page = context.pageById.get(item.target);
+  if (!page) fail('web_artifact_internal_page_missing', 'El enlace interno apunta a una página inexistente.', {
+    node_id: node.id,
+    target: item.target,
+  });
+  return pageHref(page, context.baseUrl);
+}
+
+function safeContentEntryHref(entry, context) {
+  const fields = entry?.fields || {};
+  const candidates = [
+    entry?.public_url,
+    entry?.url,
+    entry?.content?.public_url,
+    entry?.content?.url,
+    fields.public_url,
+    fields.url,
+    fields.permalink,
+  ];
+  for (const candidate of candidates) {
+    const raw = String(candidate || '').trim();
+    if (!raw) continue;
+    if (raw.startsWith('/')) {
+      try {
+        const resolved = new URL(raw, context.baseUrl).toString();
+        const safe = publicHttpUrl(resolved, { requireHttps: true });
+        if (safe) return safe;
+      } catch {
+        continue;
+      }
+    }
+    const safe = publicHttpUrl(raw, { requireHttps: true });
+    if (safe) return safe;
+  }
+  return null;
+}
+
+function renderCmsLinkList(node, context, snapshot) {
+  const cmsIndex = node.props.cms_index || {};
+  const acceptedTypes = new Set(Array.isArray(cmsIndex.content_types) ? cmsIndex.content_types : []);
+  const limit = Math.min(12, Math.max(1, Number(cmsIndex.limit) || 6));
+  const entries = Object.values(snapshot.content_entries || {})
+    .filter((entry) => acceptedTypes.has(entry?.type))
+    .slice(0, limit);
+  const layout = ['horizontal', 'cards'].includes(node.props.layout) ? node.props.layout : 'vertical';
+  const title = String(node.props.title || '').trim()
+    ? `<h2 class="cc-link-list-title">${escapeHtml(node.props.title)}</h2>`
+    : '';
+  const items = entries.length
+    ? entries.map((entry) => {
+      const typeLabel = WEB_CONTENT_TYPE_LABELS[entry.type] || 'Contenido';
+      const badge = cmsIndex.show_type === false
+        ? ''
+        : `<span class="cc-link-list-type">${escapeHtml(typeLabel)}</span>`;
+      const label = publicContentTitle(entry);
+      const href = safeContentEntryHref(entry, context);
+      if (href) {
+        return `<li class="cc-link-list-item"><a href="${escapeHtml(href)}">${badge}<span>${escapeHtml(label)}</span></a></li>`;
+      }
+      return `<li class="cc-link-list-item"><span class="cc-link-list-static">${badge}<span>${escapeHtml(label)}</span></span></li>`;
+    }).join('')
+    : `<li class="cc-link-list-empty">${escapeHtml(cmsIndex.empty_message || 'Aún no hay contenido publicado para mostrar.')}</li>`;
+  return `<nav id="cc-${escapeHtml(node.id)}" class="cc-node cc-link-list cc-link-list-${layout} cc-link-list-cms ${styleClassList(node)}" aria-label="${escapeHtml(node.props.aria_label)}">${title}<ul class="cc-link-list-items">${items}</ul></nav>`;
+}
+
+function renderLinkList(node, context, snapshot) {
+  if (node.props.source === 'cms_index') return renderCmsLinkList(node, context, snapshot);
+  const layout = ['horizontal', 'cards'].includes(node.props.layout) ? node.props.layout : 'vertical';
+  const title = String(node.props.title || '').trim()
+    ? `<h2 class="cc-link-list-title">${escapeHtml(node.props.title)}</h2>`
+    : '';
+  const items = node.props.items.slice(0, 8).map((item) => {
+    const href = linkListItemHref(node, item, context);
+    const external = item.action === 'external_url' && item.open_in_new_tab === true
+      ? ' target="_blank" rel="noopener noreferrer"'
+      : '';
+    return `<li class="cc-link-list-item"><a href="${escapeHtml(href)}"${external}>${escapeHtml(item.label)}</a></li>`;
+  }).join('');
+  return `<nav id="cc-${escapeHtml(node.id)}" class="cc-node cc-link-list cc-link-list-${layout} ${styleClassList(node)}" aria-label="${escapeHtml(node.props.aria_label)}">${title}<ul class="cc-link-list-items">${items}</ul></nav>`;
+}
+
+function compactText(value, maximum = 240) {
+  const normalized = String(value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maximum) return normalized;
+  return `${normalized.slice(0, Math.max(0, maximum - 1)).trimEnd()}…`;
+}
+
+function publicContentTitle(entry) {
+  const fields = entry?.fields || {};
+  return compactText(
+    fields.content_title
+    || fields.headline
+    || fields.question
+    || fields.display_name
+    || fields.name
+    || entry?.title
+    || 'Contenido',
+    140
+  );
+}
+
+function publicContentExcerpt(entry) {
+  const fields = entry?.fields || {};
+  return compactText(
+    fields.excerpt
+    || fields.summary
+    || fields.short_description
+    || fields.description
+    || fields.answer
+    || fields.biography
+    || fields.quote
+    || fields.text
+    || '',
+    240
+  );
+}
+
+function publicContentString(entry, candidates, maximum = 120) {
+  const fields = entry?.fields || {};
+  for (const key of candidates) {
+    const value = fields[key] ?? entry?.[key];
+    if (value === null || value === undefined) continue;
+    if (typeof value === 'object') {
+      const nested = value.display_name || value.name || value.title || value.label;
+      if (typeof nested === 'string' && nested.trim()) return compactText(nested, maximum);
+      continue;
+    }
+    const text = compactText(value, maximum);
+    if (text) return text;
+  }
+  return '';
+}
+
+function publicContentAuthor(entry) {
+  return publicContentString(entry, [
+    'author',
+    'author_name',
+    'author_display_name',
+    'display_author',
+    'professional_name',
+    'doctor_name',
+  ], 120);
+}
+
+function publicContentCategory(entry) {
+  const explicit = publicContentString(entry, [
+    'category',
+    'category_name',
+    'primary_category',
+    'content_category',
+    'taxonomy',
+  ], 120);
+  if (explicit) return explicit;
+  if (entry?.type === 'category') return publicContentTitle(entry);
+  return '';
+}
+
+function publicContentDate(entry, format) {
+  const raw = publicContentString(entry, [
+    'published_at',
+    'publish_date',
+    'published_date',
+    'date',
+    'created_at',
+    'updated_at',
+  ], 80);
+  if (!raw) return '';
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return raw;
+  try {
+    return format === 'short'
+      ? new Intl.DateTimeFormat('es-ES', { dateStyle: 'short' }).format(date)
+      : new Intl.DateTimeFormat('es-ES', { day: 'numeric', month: 'long', year: 'numeric' }).format(date);
+  } catch (_error) {
+    return date.toISOString().slice(0, 10);
+  }
+}
+
+function renderPostList(node, snapshot) {
+  const acceptedTypes = new Set(Array.isArray(node.props.content_types) ? node.props.content_types : []);
+  const limit = Math.min(12, Math.max(1, Number(node.props.limit) || 6));
+  const entries = Object.values(snapshot.content_entries || {})
+    .filter((entry) => acceptedTypes.has(entry?.type))
+    .slice(0, limit);
+  const title = String(node.props.title || '').trim();
+  const layout = node.props.layout === 'list' ? 'list' : 'cards';
+  const heading = title ? `<h2 class="cc-post-list-title">${escapeHtml(title)}</h2>` : '';
+  const body = entries.length
+    ? `<div class="cc-post-list-items">${entries.map((entry) => {
+      const typeLabel = WEB_CONTENT_TYPE_LABELS[entry.type] || 'Contenido';
+      const badge = node.props.show_type === false
+        ? ''
+        : `<span class="cc-post-list-type">${escapeHtml(typeLabel)}</span>`;
+      const excerpt = node.props.show_excerpt === false
+        ? ''
+        : publicContentExcerpt(entry);
+      return `<article class="cc-post-list-card">${badge}<h3>${escapeHtml(publicContentTitle(entry))}</h3>${excerpt ? `<p>${escapeHtml(excerpt)}</p>` : ''}</article>`;
+    }).join('')}</div>`
+    : `<p class="cc-post-list-empty">${escapeHtml(node.props.empty_message)}</p>`;
+  return `<section id="cc-${escapeHtml(node.id)}" class="cc-node cc-post-list cc-post-list-${layout} ${styleClassList(node)}" aria-label="${escapeHtml(node.props.aria_label)}">${heading}${body}</section>`;
+}
+
+function renderCategoryList(node, snapshot) {
+  const limit = Math.min(12, Math.max(1, Number(node.props.limit) || 8));
+  const entries = Object.values(snapshot.content_entries || {})
+    .filter((entry) => entry?.type === 'category')
+    .slice(0, limit);
+  const title = String(node.props.title || '').trim();
+  const layout = node.props.layout === 'cards' ? 'cards' : 'chips';
+  const heading = title ? `<h2 class="cc-category-list-title">${escapeHtml(title)}</h2>` : '';
+  const body = entries.length
+    ? `<div class="cc-category-list-items">${entries.map((entry) => {
+      const excerpt = node.props.show_description === false
+        ? ''
+        : publicContentExcerpt(entry);
+      const tag = layout === 'cards' ? 'article' : 'span';
+      return `<${tag} class="cc-category-list-item"><strong>${escapeHtml(publicContentTitle(entry))}</strong>${excerpt ? `<p>${escapeHtml(excerpt)}</p>` : ''}</${tag}>`;
+    }).join('')}</div>`
+    : `<p class="cc-category-list-empty">${escapeHtml(node.props.empty_message)}</p>`;
+  return `<section id="cc-${escapeHtml(node.id)}" class="cc-node cc-category-list cc-category-list-${layout} ${styleClassList(node)}" aria-label="${escapeHtml(node.props.aria_label)}">${heading}${body}</section>`;
+}
+
+function renderContentMeta(node, snapshot) {
+  const acceptedTypes = new Set(Array.isArray(node.props.content_types) ? node.props.content_types : []);
+  const entry = Object.values(snapshot.content_entries || {})
+    .find((candidate) => acceptedTypes.has(candidate?.type));
+  const title = String(node.props.title || '').trim();
+  const layout = ['stacked', 'chips'].includes(node.props.layout) ? node.props.layout : 'inline';
+  const heading = title ? `<h2 class="cc-content-meta-title">${escapeHtml(title)}</h2>` : '';
+  const values = [];
+  if (node.props.show_author !== false) {
+    const value = entry ? publicContentAuthor(entry) : '';
+    if (value) values.push({ label: 'Autor', value });
+  }
+  if (node.props.show_date !== false) {
+    const value = entry ? publicContentDate(entry, node.props.date_format) : '';
+    if (value) values.push({ label: 'Fecha', value });
+  }
+  if (node.props.show_category !== false) {
+    const value = entry ? publicContentCategory(entry) : '';
+    if (value) values.push({ label: 'Categoría', value });
+  }
+  const body = values.length
+    ? `<div class="cc-content-meta-items">${values.map((item) => `<span class="cc-content-meta-item"><span class="cc-content-meta-label">${escapeHtml(item.label)}</span><span class="cc-content-meta-value">${escapeHtml(item.value)}</span></span>`).join('')}</div>`
+    : `<p class="cc-content-meta-empty">${escapeHtml(node.props.empty_message)}</p>`;
+  return `<aside id="cc-${escapeHtml(node.id)}" class="cc-node cc-content-meta cc-content-meta-${layout} ${styleClassList(node)}" aria-label="${escapeHtml(node.props.aria_label)}">${heading}${body}</aside>`;
+}
+
+function collectPageHeadingsForToc(document, page, sourceNode, minLevel, maxLevel) {
+  const headings = [];
+  const visited = new Set();
+  const walk = (nodeId) => {
+    if (!nodeId || visited.has(nodeId)) return;
+    visited.add(nodeId);
+    const node = document.nodes[nodeId];
+    if (!node || node.id === sourceNode.id) return;
+    if (node.type === 'heading') {
+      const level = Math.min(6, Math.max(1, Number(node.props.level) || 2));
+      const text = compactText(node.props.text, 140);
+      if (text && level >= minLevel && level <= maxLevel) {
+        headings.push({ id: node.id, level, text });
+      }
+    }
+    for (const childId of node.children || []) walk(childId);
+  };
+  for (const rootId of page.root_node_ids || []) walk(rootId);
+  return headings;
+}
+
+function renderTableOfContents(node, document, context) {
+  const rawMin = Math.min(6, Math.max(1, Number(node.props.min_level) || 2));
+  const rawMax = Math.min(6, Math.max(1, Number(node.props.max_level) || 3));
+  const minLevel = Math.min(rawMin, rawMax);
+  const maxLevel = Math.max(rawMin, rawMax);
+  const headings = collectPageHeadingsForToc(document, context.page, node, minLevel, maxLevel);
+  const layout = node.props.layout === 'plain' ? 'plain' : 'boxed';
+  const title = String(node.props.title || '').trim();
+  const heading = title ? `<h2 class="cc-toc-title">${escapeHtml(title)}</h2>` : '';
+  const body = headings.length
+    ? `<ol class="cc-toc-list">${headings.map((entry, index) => {
+      const marker = node.props.show_numbers === false
+        ? ''
+        : `<span class="cc-toc-marker" aria-hidden="true">${index + 1}</span>`;
+      return `<li class="cc-toc-item cc-toc-level-${entry.level}">${marker}<a href="#cc-${escapeHtml(entry.id)}">${escapeHtml(entry.text)}</a></li>`;
+    }).join('')}</ol>`
+    : `<p class="cc-toc-empty">${escapeHtml(node.props.empty_message)}</p>`;
+  return `<nav id="cc-${escapeHtml(node.id)}" class="cc-node cc-table-of-contents cc-toc-${layout} ${styleClassList(node)}" aria-label="${escapeHtml(node.props.aria_label)}">${heading}${body}</nav>`;
+}
+
 function buttonHref(node, context) {
   const { action, target } = node.props;
   if (action === 'external_url') return safePublicButtonUrl(target, node.id);
@@ -752,7 +1155,7 @@ function buttonHref(node, context) {
     node_id: node.id,
     target,
   });
-  return page.slug === 'inicio' ? `${context.baseUrl}/` : `${context.baseUrl}/${page.slug}/`;
+  return pageHref(page, context.baseUrl);
 }
 
 function renderIntakeForm(node, context) {
@@ -820,10 +1223,20 @@ function renderNode(nodeId, document, snapshot, context, ancestors = new Set(), 
   if (node.type === 'faq') {
     return `<details id="cc-${escapeHtml(node.id)}" class="cc-node cc-faq ${styleClassList(node)}"><summary>${escapeHtml(node.props.question)}</summary><p>${escapeHtml(node.props.answer)}</p></details>`;
   }
+  if (node.type === 'accordion') return renderAccordion(node);
   if (node.type === 'testimonial') return renderTestimonial(node);
   if (node.type === 'image') return renderImage(node, snapshot);
   if (node.type === 'gallery') return renderGallery(node, snapshot);
+  if (node.type === 'slider') return renderSlider(node, snapshot);
   if (node.type === 'video') return renderVideo(node);
+  if (node.type === 'location_map') return renderLocationMap(node);
+  if (node.type === 'breadcrumbs') return renderBreadcrumbs(node, context);
+  if (node.type === 'page_menu') return renderPageMenu(node, context);
+  if (node.type === 'link_list') return renderLinkList(node, context, snapshot);
+  if (node.type === 'post_list') return renderPostList(node, snapshot);
+  if (node.type === 'category_list') return renderCategoryList(node, snapshot);
+  if (node.type === 'content_meta') return renderContentMeta(node, snapshot);
+  if (node.type === 'table_of_contents') return renderTableOfContents(node, document, context);
   if (node.type === 'button') {
     const href = buttonHref(node, context);
     const external = node.props.action === 'external_url' && node.props.open_in_new_tab === true;
@@ -905,6 +1318,7 @@ function stylesheet(tokens, document = { nodes: {} }) {
     .flatMap((node) => {
       if (node?.type === 'image') return [node.props];
       if (node?.type === 'gallery') return node.props?.items || [];
+      if (node?.type === 'slider') return node.props?.items || [];
       return [];
     })
     .map((item) => `${Number.isInteger(item?.focal_x) ? item.focal_x : 50}-${Number.isInteger(item?.focal_y) ? item.focal_y : 50}`))]
@@ -929,11 +1343,20 @@ function stylesheet(tokens, document = { nodes: {} }) {
     '.cc-divider{width:100%;height:0;margin:0;border:0;border-top-width:1px;border-top-style:solid}.cc-divider-solid{border-top-style:solid}.cc-divider-dashed{border-top-style:dashed}.cc-divider-dotted{border-top-style:dotted}.cc-divider-tone-muted{border-top-color:#dfe3ec}.cc-divider-tone-brand{border-top-color:var(--cc-primary)}.cc-divider-tone-accent{border-top-color:var(--cc-accent)}.cc-spacer{display:block;width:100%;flex:none}.cc-spacer-xs{height:.25rem}.cc-spacer-sm{height:var(--cc-sm)}.cc-spacer-md{height:var(--cc-md)}.cc-spacer-lg{height:var(--cc-lg)}.cc-spacer-xl{height:var(--cc-xl)}.cc-spacer-2xl{height:var(--cc-2xl)}',
     '.cc-button{display:inline-flex;width:fit-content;align-items:center;justify-content:center;min-height:44px;padding:.75rem 1.15rem;border-radius:var(--cc-radius);font-weight:700;text-decoration:none;border:1px solid transparent;cursor:pointer}.cc-button-primary{background:var(--cc-primary);color:#fff}.cc-section.cc-bg-brand .cc-button-primary{background:var(--cc-surface);color:var(--cc-primary)}.cc-button-secondary{background:var(--cc-secondary);color:#fff}.cc-button-outline{border-color:currentColor;color:var(--cc-primary);background:transparent}.cc-button-link{padding-inline:0;color:var(--cc-primary)}',
     '.cc-form{display:grid;gap:var(--cc-md);padding:var(--cc-xl);border:1px solid #dfe3ec;border-radius:var(--cc-radius);background:#fff}.cc-field{display:grid;gap:.35rem}.cc-field input:not([type=checkbox]),.cc-field textarea,.cc-field select{width:100%;min-height:44px;border:1px solid #aab1c2;border-radius:.5rem;padding:.7rem;font:inherit}.cc-checkbox{grid-template-columns:auto 1fr;align-items:start}.cc-honeypot{position:absolute!important;left:-10000px!important;width:1px!important;height:1px!important;overflow:hidden!important}.cc-form-status{display:none;padding:.75rem;border-radius:.5rem}.cc-form-success{background:#e9f8f1;color:#145c3d}.cc-form-error{background:#fff1f1;color:#8b1f1f}.cc-form-status:target{display:block}',
-    '.cc-image{margin:0}.cc-gallery{display:grid}.cc-gallery-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}.cc-gallery-cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}.cc-gallery-cols-4{grid-template-columns:repeat(4,minmax(0,1fr))}.cc-gallery-item{min-width:0;margin:0;border-radius:inherit}.cc-image-frame{overflow:hidden;border-radius:inherit;background:#eef1f6}.cc-image img,.cc-gallery-item img{width:100%;height:100%;object-fit:cover}.cc-fit-contain img{object-fit:contain}.cc-aspect-auto .cc-image-frame img{height:auto}.cc-aspect-1-1 .cc-image-frame{aspect-ratio:1/1}.cc-aspect-4-3 .cc-image-frame{aspect-ratio:4/3}.cc-aspect-3-2 .cc-image-frame{aspect-ratio:3/2}.cc-aspect-16-9 .cc-image-frame{aspect-ratio:16/9}.cc-aspect-21-9 .cc-image-frame{aspect-ratio:21/9}.cc-image figcaption,.cc-gallery-item figcaption,.cc-video figcaption{padding-top:.5rem;color:#5f6b7f;font-size:.8125rem}.cc-video{margin:0}.cc-video-frame{position:relative;overflow:hidden;border-radius:inherit;background:#eef1f6}.cc-video-frame iframe{position:absolute;inset:0;width:100%;height:100%;border:0}.cc-video-aspect-16-9 .cc-video-frame{aspect-ratio:16/9}.cc-video-aspect-4-3 .cc-video-frame{aspect-ratio:4/3}.cc-video-aspect-1-1 .cc-video-frame{aspect-ratio:1/1}',
+    '.cc-image{margin:0}.cc-gallery{display:grid}.cc-gallery-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}.cc-gallery-cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}.cc-gallery-cols-4{grid-template-columns:repeat(4,minmax(0,1fr))}.cc-gallery-item{min-width:0;margin:0;border-radius:inherit}.cc-image-frame{overflow:hidden;border-radius:inherit;background:#eef1f6}.cc-image img,.cc-gallery-item img,.cc-slider-slide img{width:100%;height:100%;object-fit:cover}.cc-fit-contain img{object-fit:contain}.cc-aspect-auto .cc-image-frame img{height:auto}.cc-aspect-1-1 .cc-image-frame img{aspect-ratio:1/1}.cc-aspect-1-1 .cc-image-frame{aspect-ratio:1/1}.cc-aspect-4-3 .cc-image-frame{aspect-ratio:4/3}.cc-aspect-3-2 .cc-image-frame{aspect-ratio:3/2}.cc-aspect-16-9 .cc-image-frame{aspect-ratio:16/9}.cc-aspect-21-9 .cc-image-frame{aspect-ratio:21/9}.cc-image figcaption,.cc-gallery-item figcaption,.cc-slider-slide figcaption,.cc-video figcaption{padding-top:.5rem;color:#5f6b7f;font-size:.8125rem}.cc-slider{position:relative;overflow:hidden}.cc-slider-track{display:flex;gap:var(--cc-md);overflow-x:auto;scroll-snap-type:x mandatory;scroll-behavior:smooth;border-radius:inherit}.cc-slider-slide{min-width:100%;margin:0;scroll-snap-align:start;border-radius:inherit}.cc-slider-dots{display:flex;justify-content:center;gap:.5rem;margin-top:.75rem}.cc-slider-dots a{width:.625rem;height:.625rem;overflow:hidden;border-radius:999px;background:#cbd5e1;text-indent:999px}.cc-slider-arrow{position:absolute;top:50%;z-index:1;display:grid;width:2.25rem;height:2.25rem;place-items:center;border-radius:999px;background:rgba(15,23,42,.72);color:#fff;transform:translateY(-50%)}.cc-slider-prev{left:.75rem}.cc-slider-next{right:.75rem}.cc-slider-autoplay .cc-slider-track{animation:cc-slider-pulse var(--cc-slider-interval,5s) ease-in-out infinite}@keyframes cc-slider-pulse{0%,100%{filter:none}50%{filter:brightness(.96)}}.cc-video{margin:0}.cc-video-frame{position:relative;overflow:hidden;border-radius:inherit;background:#eef1f6}.cc-video-frame iframe{position:absolute;inset:0;width:100%;height:100%;border:0}.cc-video-aspect-16-9 .cc-video-frame{aspect-ratio:16/9}.cc-video-aspect-4-3 .cc-video-frame{aspect-ratio:4/3}.cc-video-aspect-1-1 .cc-video-frame{aspect-ratio:1/1}',
+    '.cc-location-map{display:grid;grid-template-columns:minmax(0,1fr) minmax(16rem,1fr);gap:var(--cc-lg);align-items:stretch;border:1px solid #dfe3ec;background:#fff;padding:var(--cc-lg);border-radius:var(--cc-radius)}.cc-location-map-visual{position:relative;min-height:12rem;overflow:hidden;border-radius:calc(var(--cc-radius) - .25rem);background:linear-gradient(135deg,#eef2ff,#e0f2fe);display:grid;place-items:center;color:var(--cc-primary);font-family:var(--cc-font-heading);font-weight:800}.cc-location-map-visual span{position:absolute;inset:auto 12% 32%;height:2px;background:rgba(79,70,229,.22);transform:rotate(-14deg)}.cc-location-map-visual span+span{inset:34% 18% auto;height:2px;transform:rotate(18deg)}.cc-location-map-body{display:grid;align-content:center;gap:.75rem}.cc-location-map h2,.cc-location-map p{margin:0}.cc-location-map p{color:#5f6b7f;white-space:pre-wrap}',
+    '.cc-breadcrumbs{font-size:.875rem;color:#5f6b7f}.cc-breadcrumbs ol{display:flex;flex-wrap:wrap;align-items:center;gap:.35rem;margin:0;padding:0;list-style:none}.cc-breadcrumbs a{color:var(--cc-primary);text-decoration:none;font-weight:700}.cc-breadcrumbs a:hover{text-decoration:underline}.cc-breadcrumbs [aria-current=page]{color:var(--cc-text);font-weight:700}.cc-breadcrumbs-separator{color:#9aa3b6}',
+    '.cc-page-menu{display:flex;align-items:center;gap:var(--cc-md);font-size:.95rem}.cc-page-menu-label{font-family:var(--cc-font-heading);font-weight:800;color:var(--cc-text)}.cc-page-menu ul{display:flex;flex-wrap:wrap;align-items:center;gap:.35rem .9rem;margin:0;padding:0;list-style:none}.cc-page-menu a{display:inline-flex;align-items:center;min-height:36px;color:#5f6b7f;text-decoration:none;font-weight:700}.cc-page-menu a:hover{color:var(--cc-primary);text-decoration:underline}.cc-page-menu a[aria-current=page],.cc-page-menu-current{color:var(--cc-primary)}.cc-page-menu-vertical{align-items:flex-start;flex-direction:column}.cc-page-menu-vertical ul{align-items:flex-start;flex-direction:column;gap:.25rem}',
+    '.cc-link-list{display:grid;gap:var(--cc-sm)}.cc-link-list-title{margin:0;font-family:var(--cc-font-heading);font-size:1.05rem;line-height:1.2;letter-spacing:-.01em}.cc-link-list-items{display:flex;flex-wrap:wrap;gap:.5rem .75rem;margin:0;padding:0;list-style:none}.cc-link-list-vertical .cc-link-list-items{flex-direction:column;align-items:flex-start;gap:.35rem}.cc-link-list-cards .cc-link-list-items{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--cc-sm)}.cc-link-list-item{min-width:0}.cc-link-list a,.cc-link-list-static{display:inline-flex;align-items:center;min-height:36px;color:var(--cc-primary);text-decoration:none;font-weight:800}.cc-link-list a::after{content:"›";margin-left:.35rem;opacity:.65}.cc-link-list a:hover{text-decoration:underline}.cc-link-list-cards a,.cc-link-list-cards .cc-link-list-static{width:100%;min-height:44px;border:1px solid #dfe3ec;border-radius:var(--cc-radius);background:#fff;padding:.65rem .8rem;box-shadow:0 2px 8px #181d3508}.cc-link-list-cms a,.cc-link-list-cms .cc-link-list-static{gap:.45rem;align-items:flex-start}.cc-link-list-type{width:fit-content;flex:0 0 auto;border-radius:9999px;background:#eef2ff;color:var(--cc-primary);padding:.16rem .45rem;font-size:.68rem;font-weight:800}.cc-link-list-empty{color:#5f6b7f;font-size:.92rem}',
+    '.cc-post-list{display:grid;gap:var(--cc-md)}.cc-post-list-title{margin:0;font-family:var(--cc-font-heading);font-size:clamp(1.35rem,2.5vw,2rem);line-height:1.15;letter-spacing:-.02em}.cc-post-list-items{display:grid;gap:var(--cc-md)}.cc-post-list-cards .cc-post-list-items{grid-template-columns:repeat(3,minmax(0,1fr))}.cc-post-list-card{display:grid;gap:.55rem;min-width:0;padding:var(--cc-md);border:1px solid #dfe3ec;border-radius:var(--cc-radius);background:#fff;box-shadow:0 2px 8px #181d350a}.cc-post-list-card h3{margin:0;font-family:var(--cc-font-heading);font-size:1.05rem;line-height:1.25}.cc-post-list-card p{margin:0;color:#5f6b7f;white-space:pre-wrap}.cc-post-list-type{width:fit-content;border-radius:9999px;background:#eef2ff;color:var(--cc-primary);padding:.18rem .5rem;font-size:.72rem;font-weight:800}.cc-post-list-empty{margin:0;color:#5f6b7f}',
+    '.cc-category-list{display:grid;gap:var(--cc-md)}.cc-category-list-title{margin:0;font-family:var(--cc-font-heading);font-size:clamp(1.25rem,2.2vw,1.8rem);line-height:1.15;letter-spacing:-.02em}.cc-category-list-items{display:flex;flex-wrap:wrap;gap:.65rem}.cc-category-list-item{display:grid;gap:.35rem;min-width:0;margin:0}.cc-category-list-chips .cc-category-list-item{border:1px solid #dfe3ec;border-radius:9999px;background:#fff;padding:.45rem .85rem;box-shadow:0 2px 8px #181d3508}.cc-category-list-cards .cc-category-list-items{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--cc-md)}.cc-category-list-cards .cc-category-list-item{border:1px solid #dfe3ec;border-radius:var(--cc-radius);background:#fff;padding:var(--cc-md);box-shadow:0 2px 8px #181d350a}.cc-category-list-item strong{font-family:var(--cc-font-heading);font-size:.95rem;color:var(--cc-text)}.cc-category-list-item p{margin:0;color:#5f6b7f;white-space:pre-wrap}.cc-category-list-empty{margin:0;color:#5f6b7f}',
+    '.cc-content-meta{display:grid;gap:.65rem;color:#5f6b7f;font-size:.92rem}.cc-content-meta-title{margin:0;font-family:var(--cc-font-heading);color:var(--cc-text);font-size:1.05rem;line-height:1.25}.cc-content-meta-items{display:flex;flex-wrap:wrap;align-items:center;gap:.45rem .9rem}.cc-content-meta-stacked .cc-content-meta-items{align-items:flex-start;flex-direction:column;gap:.35rem}.cc-content-meta-chips .cc-content-meta-items{gap:.5rem}.cc-content-meta-item{display:inline-flex;min-width:0;align-items:center;gap:.35rem}.cc-content-meta-chips .cc-content-meta-item{border:1px solid #dfe3ec;border-radius:9999px;background:#fff;padding:.34rem .7rem;box-shadow:0 2px 8px #181d3508}.cc-content-meta-label{color:#9aa3b6;font-size:.76rem;font-weight:800;letter-spacing:.04em;text-transform:uppercase}.cc-content-meta-value{color:var(--cc-text);font-weight:700}.cc-content-meta-empty{margin:0;color:#5f6b7f}',
+    '.cc-table-of-contents{display:grid;gap:var(--cc-md)}.cc-toc-boxed{padding:var(--cc-md);border:1px solid #dfe3ec;border-radius:var(--cc-radius);background:#fff;box-shadow:0 2px 8px #181d350a}.cc-toc-title{margin:0;font-family:var(--cc-font-heading);font-size:1.1rem;line-height:1.25}.cc-toc-list{display:grid;gap:.45rem;margin:0;padding:0;list-style:none}.cc-toc-item{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:start;gap:.55rem}.cc-toc-item a{color:var(--cc-text);font-weight:700;text-decoration:none}.cc-toc-item a:hover{color:var(--cc-primary);text-decoration:underline}.cc-toc-marker{display:inline-grid;place-items:center;min-width:1.5rem;height:1.5rem;border-radius:9999px;background:#eef2ff;color:var(--cc-primary);font-size:.75rem;font-weight:800}.cc-toc-level-3{padding-left:1rem}.cc-toc-level-4,.cc-toc-level-5,.cc-toc-level-6{padding-left:2rem}.cc-toc-empty{margin:0;color:#5f6b7f}',
     focalRules,
     '.cc-faq{border:1px solid #dfe3ec;background:#fff;padding:var(--cc-md);border-radius:var(--cc-radius)}.cc-faq summary{cursor:pointer;font-family:var(--cc-font-heading);font-weight:700}.cc-faq p{margin:var(--cc-sm) 0 0;white-space:pre-wrap}',
+    '.cc-accordion{display:grid;gap:var(--cc-sm);border:1px solid #dfe3ec;background:#fff;padding:var(--cc-md);border-radius:var(--cc-radius)}.cc-accordion-title{margin:0;font-family:var(--cc-font-heading);font-size:clamp(1.25rem,2.2vw,1.85rem);line-height:1.15;letter-spacing:-.02em}.cc-accordion-items{display:grid;gap:.6rem}.cc-accordion-item{overflow:hidden;border:1px solid #dfe3ec;border-radius:calc(var(--cc-radius) - .25rem);background:#fff}.cc-accordion-item summary{display:flex;align-items:center;justify-content:space-between;gap:1rem;cursor:pointer;padding:.85rem 1rem;font-family:var(--cc-font-heading);font-weight:800;list-style:none}.cc-accordion-item summary::-webkit-details-marker{display:none}.cc-accordion-item summary::after{content:"+";display:inline-grid;width:1.65rem;height:1.65rem;flex:0 0 auto;place-items:center;border-radius:9999px;background:#eef2ff;color:var(--cc-primary);font-family:var(--cc-font-body);font-weight:900}.cc-accordion-item[open] summary::after{content:"−"}.cc-accordion-item p{margin:0;padding:0 1rem 1rem;color:#475569;white-space:pre-wrap}',
     '.cc-testimonial{margin:0;display:grid;gap:.65rem;border:1px solid #dfe3ec;background:#fff;padding:var(--cc-lg);border-radius:var(--cc-radius)}.cc-testimonial-stars{color:#f59e0b;letter-spacing:.08em;font-size:1rem;line-height:1}.cc-testimonial-quote{margin:0;font-family:var(--cc-font-heading);font-size:1.125rem;line-height:1.5;white-space:pre-wrap}.cc-testimonial-meta{display:flex;flex-wrap:wrap;gap:.35rem .65rem;align-items:center;color:#5f6b7f;font-size:.875rem}.cc-testimonial-meta strong{color:var(--cc-text);font-weight:800}.cc-testimonial-source{padding:.16rem .45rem;border-radius:9999px;background:#eef2ff;color:var(--cc-primary);font-size:.75rem;font-weight:700}',
-    `@media(max-width:767px){.cc-layout-row>.cc-container{flex-direction:column}.cc-layout-grid>.cc-container,.cc-gallery{grid-template-columns:1fr}.cc-form{padding:var(--cc-lg)}.cc-button{width:100%}${responsiveRules('mobile')}}`,
+    `@media(max-width:767px){.cc-layout-row>.cc-container{flex-direction:column}.cc-layout-grid>.cc-container,.cc-gallery,.cc-location-map{grid-template-columns:1fr}.cc-post-list-cards .cc-post-list-items,.cc-category-list-cards .cc-category-list-items,.cc-link-list-cards .cc-link-list-items{grid-template-columns:1fr}.cc-form{padding:var(--cc-lg)}.cc-button{width:100%}${responsiveRules('mobile')}}`,
     `@media(min-width:768px) and (max-width:1023px){.cc-gallery{grid-template-columns:repeat(2,minmax(0,1fr))}${responsiveRules('tablet')}}`,
     `@media(min-width:1024px){${responsiveRules('desktop')}}`,
   ].join('');
@@ -1200,6 +1623,7 @@ function compileWebArtifact(input = {}) {
     environment,
     intakeEndpoint,
     pageById,
+    pages: document.pages,
     projectId: project.id,
     revisionId,
     baseUrl,

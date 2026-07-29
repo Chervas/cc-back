@@ -979,6 +979,50 @@ async function loadImportClinicLookup(scope, transaction) {
   return { byId, byName, clinicIds, searchEntries };
 }
 
+async function loadImportGroupClinicContext(scopeClinicIds = [], transaction) {
+  const selectedIds = Array.from(new Set((scopeClinicIds || []).filter(Number.isInteger)));
+  const byId = new Map();
+  if (!selectedIds.length || !Clinica) {
+    return { clinicIds: selectedIds, byId };
+  }
+
+  const selectedClinics = await Clinica.findAll({
+    where: { id_clinica: { [Op.in]: selectedIds } },
+    attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'],
+    raw: true,
+    transaction,
+  });
+  for (const clinic of selectedClinics) {
+    const id = Number(clinic.id_clinica || 0);
+    if (id) byId.set(id, clinic.nombre_clinica || `Clínica ${id}`);
+  }
+
+  const groupIds = Array.from(new Set(
+    selectedClinics
+      .map((clinic) => Number(clinic.grupoClinicaId || 0))
+      .filter((id) => Number.isInteger(id) && id > 0)
+  ));
+  if (!groupIds.length) {
+    return { clinicIds: selectedIds, byId };
+  }
+
+  const groupClinics = await Clinica.findAll({
+    where: { grupoClinicaId: { [Op.in]: groupIds } },
+    attributes: ['id_clinica', 'nombre_clinica'],
+    raw: true,
+    transaction,
+  });
+  const clinicIds = [];
+  for (const clinic of groupClinics) {
+    const id = Number(clinic.id_clinica || 0);
+    if (!id) continue;
+    clinicIds.push(id);
+    byId.set(id, clinic.nombre_clinica || `Clínica ${id}`);
+  }
+
+  return { clinicIds: Array.from(new Set(clinicIds)), byId };
+}
+
 function resolveImportedClinicId(importedClinic, lookup) {
   const normalized = normalizeText(importedClinic);
   if (!normalized) return null;
@@ -1431,6 +1475,8 @@ async function buildImportedItemPayloads(scope, body, transaction) {
   const createMissingTreatments = body.create_missing_treatments !== false
     && body.createMissingTreatments !== false;
   const clinicLookup = await loadImportClinicLookup(scope, transaction);
+  const groupClinicContext = await loadImportGroupClinicContext(clinicIds, transaction);
+  const scopeClinicIdSet = new Set(clinicIds);
   const importTreatments = await loadImportTreatments(scope, defaultClinicId, transaction);
   const treatmentIndex = indexTreatments(importTreatments);
   const treatmentContext = {
@@ -1471,6 +1517,50 @@ async function buildImportedItemPayloads(scope, body, transaction) {
       const byId = new Map(existingPatients.map((patient) => [Number(patient.id_paciente), patient]));
       for (const patient of linkedPatients) {
         const patientId = Number(patient.id_paciente || 0);
+        if (patientId && !byId.has(patientId)) {
+          byId.set(patientId, patient);
+        }
+      }
+      existingPatients = Array.from(byId.values());
+    }
+  }
+  const patientClinicLinksById = new Map();
+  const rememberPatientClinicLink = (patientId, clinicId) => {
+    const safePatientId = Number(patientId || 0);
+    const safeClinicId = Number(clinicId || 0);
+    if (!safePatientId || !safeClinicId) return;
+    if (!patientClinicLinksById.has(safePatientId)) patientClinicLinksById.set(safePatientId, new Set());
+    patientClinicLinksById.get(safePatientId).add(safeClinicId);
+  };
+  for (const patient of existingPatients) {
+    rememberPatientClinicLink(patient.id_paciente, patient.clinica_id);
+  }
+  if (PacienteClinica && groupClinicContext.clinicIds.length) {
+    const groupLinkedRows = await PacienteClinica.findAll({
+      where: { clinica_id: { [Op.in]: groupClinicContext.clinicIds } },
+      attributes: ['paciente_id', 'clinica_id'],
+      raw: true,
+      transaction,
+    });
+    const groupLinkedPatientIds = Array.from(new Set(
+      groupLinkedRows.map((row) => Number(row.paciente_id || 0)).filter(Boolean)
+    ));
+    for (const row of groupLinkedRows) {
+      rememberPatientClinicLink(row.paciente_id, row.clinica_id);
+    }
+    if (groupLinkedPatientIds.length) {
+      const groupPatients = await Paciente.findAll({
+        where: {
+          id_paciente: { [Op.in]: groupLinkedPatientIds },
+          telefono_movil: { [Op.ne]: null },
+        },
+        attributes: ['id_paciente', 'clinica_id', 'nombre', 'apellidos', 'telefono_movil', 'telefono_secundario', 'email'],
+        transaction,
+      });
+      const byId = new Map(existingPatients.map((patient) => [Number(patient.id_paciente), patient]));
+      for (const patient of groupPatients) {
+        const patientId = Number(patient.id_paciente || 0);
+        rememberPatientClinicLink(patientId, patient.clinica_id);
         if (patientId && !byId.has(patientId)) {
           byId.set(patientId, patient);
         }
@@ -1548,18 +1638,29 @@ async function buildImportedItemPayloads(scope, body, transaction) {
     let createdNewPatient = false;
     let completedExistingPatient = false;
     const validPhone = !!phoneDigits && phoneDigits.length >= 8;
+    const patientId = Number(patient?.id_paciente || 0) || null;
+    const linkedClinicIds = new Set(patientId ? Array.from(patientClinicLinksById.get(patientId) || []) : []);
     const patientClinicId = Number(patient?.clinica_id || 0) || null;
-    const scopedPatientClinicId = patientClinicId && (!clinicIds.length || clinicIds.includes(patientClinicId))
-      ? patientClinicId
+    if (patientClinicId) linkedClinicIds.add(patientClinicId);
+    const selectedLinkedClinicId = Array.from(linkedClinicIds).find((clinicId) => scopeClinicIdSet.has(Number(clinicId))) || null;
+    const importedClinicMatchesPatient = importedClinicId && linkedClinicIds.has(Number(importedClinicId));
+    const externalPatientClinicId = patient && !selectedLinkedClinicId && !importedClinicMatchesPatient
+      ? (patientClinicId || Array.from(linkedClinicIds)[0] || null)
       : null;
-    const rowClinicId = scopedPatientClinicId
-      || importedClinicId
-      || (clinicIds.length === 1 ? defaultClinicId : null);
-    const clinicAssignmentError = !scopedPatientClinicId && clinicIds.length > 1 && !rowClinicId
-      ? (importedClinic
-        ? `Sede importada no reconocida dentro del grupo: ${importedClinic}.`
-        : 'No se ha podido asociar este contacto a una clínica del grupo. Añade una columna sede/clinica o revisa el teléfono/email.')
+    const rowClinicId = selectedLinkedClinicId
+      || (importedClinicMatchesPatient ? importedClinicId : null)
+      || (!externalPatientClinicId ? importedClinicId : null)
+      || (!externalPatientClinicId && clinicIds.length === 1 ? defaultClinicId : null);
+    const externalClinicName = externalPatientClinicId
+      ? (groupClinicContext.byId.get(Number(externalPatientClinicId)) || `otra clínica del grupo (${externalPatientClinicId})`)
       : null;
+    const clinicAssignmentError = externalPatientClinicId
+      ? `Este teléfono ya pertenece a ${externalClinicName}. Importa este fichero desde esa clínica o añade una columna sede/clinica correcta.`
+      : (!selectedLinkedClinicId && clinicIds.length > 1 && !rowClinicId
+        ? (importedClinic
+          ? `Sede importada no reconocida dentro del grupo: ${importedClinic}.`
+          : 'No se ha podido asociar este contacto a una clínica del grupo. Añade una columna sede/clinica o revisa el teléfono/email.')
+        : null);
     const rawTreatment = normalizeText(readImportValue(row, columnMapping, 'treatment') || body.treatment || '');
     const resolvedTreatment = rawTreatment
       ? await resolveImportedTreatment(rawTreatment, treatmentContext, {
@@ -1584,7 +1685,7 @@ async function buildImportedItemPayloads(scope, body, transaction) {
       createdNewPatient = true;
     }
 
-    if (patient) {
+    if (patient && !clinicAssignmentError) {
       completedExistingPatient = hadExistingPatient
         ? await completeImportedPatientProfile({
           patient,

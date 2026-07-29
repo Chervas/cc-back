@@ -569,6 +569,82 @@ test('el listado etiqueta una histórica como Anterior, enviable y de solo lectu
   }
 });
 
+test('el contexto QuickChat excluye plantillas reservadas al flujo de resenas', async () => {
+  const originals = {
+    membershipFindAll: db.UsuarioClinica.findAll,
+    clinicFindOne: db.Clinica.findOne,
+    clinicFindAll: db.Clinica.findAll,
+    assetFindOne: db.ClinicMetaAsset.findOne,
+    templateFindAll: db.WhatsappTemplate.findAll,
+    flowFindAll: db.AutomationFlowTemplateV2.findAll,
+    treatmentFindAll: db.Tratamiento.findAll,
+  };
+  let templateQuery = 0;
+  db.UsuarioClinica.findAll = async () => [{ id_clinica: 56, rol_clinica: 'personaldeclinica' }];
+  db.Clinica.findAll = async () => [{ grupoClinicaId: 5 }];
+  db.Clinica.findOne = async () => ({ grupoClinicaId: 5 });
+  db.ClinicMetaAsset.findOne = async () => ({
+    assignmentScope: 'group',
+    grupoClinicaId: 5,
+    phoneNumberId: 'phone-56',
+    wabaId: 'waba-5',
+    waAccessToken: 'scoped-token',
+    metaConnection: { userId: 91 },
+  });
+  db.WhatsappTemplate.findAll = async () => {
+    templateQuery += 1;
+    if (templateQuery === 1) return [];
+    return [
+      {
+        id: 906,
+        waba_id: 'waba-5',
+        clinic_id: 56,
+        name: 'cc_solicitud_de_opinion_tras_visita',
+        language: 'es',
+        status: 'APPROVED',
+        is_active: true,
+        origin: 'external',
+        created_by_user_id: 76,
+        variables: [{ position: 1, template_usage: 'solicitud_resena' }],
+        toJSON() { return { ...this, toJSON: undefined }; },
+      },
+      {
+        id: 907,
+        waba_id: 'waba-5',
+        clinic_id: 56,
+        name: 'cc_seguimiento_manual',
+        language: 'es',
+        status: 'APPROVED',
+        is_active: true,
+        origin: 'custom',
+        created_by_user_id: 76,
+        variables: [{ position: 1, name: 'nombre_paciente' }],
+        toJSON() { return { ...this, toJSON: undefined }; },
+      },
+    ];
+  };
+  db.AutomationFlowTemplateV2.findAll = async () => [];
+  db.Tratamiento.findAll = async () => [];
+
+  try {
+    const res = responseRecorder();
+    await whatsappController.listTemplatesForClinic({
+      query: { clinic_id: '56', for_sending: '1', context: 'quick_chat' },
+      userData: { userId: 76 },
+    }, res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.body.map((template) => template.id), [907]);
+  } finally {
+    db.UsuarioClinica.findAll = originals.membershipFindAll;
+    db.Clinica.findOne = originals.clinicFindOne;
+    db.Clinica.findAll = originals.clinicFindAll;
+    db.ClinicMetaAsset.findOne = originals.assetFindOne;
+    db.WhatsappTemplate.findAll = originals.templateFindAll;
+    db.AutomationFlowTemplateV2.findAll = originals.flowFindAll;
+    db.Tratamiento.findAll = originals.treatmentFindAll;
+  }
+});
+
 test('el envío directo no permite una plantilla personal de otro autor', async () => {
   const whatsappService = require('../../services/whatsapp.service');
   const originals = {
@@ -702,6 +778,82 @@ test('QuickChat solo resuelve plantillas APPROVED al enviar fuera de ventana', a
     assert.equal(res.body?.error, 'whatsapp_template_not_available');
     assert.equal(capturedTemplateWhere.status, 'APPROVED');
     assert.equal(capturedTemplateWhere.is_active, true);
+    assert.equal(transaction.rolledBack, true);
+    assert.equal(transaction.committed, false);
+  } finally {
+    db.sequelize.transaction = originals.transaction;
+    db.Clinica.findAll = originals.clinicFindAll;
+    db.Conversation.findByPk = originals.conversationFindByPk;
+    db.Paciente.findByPk = originals.patientFindByPk;
+    db.WhatsappTemplate.findOne = originals.templateFindOne;
+    whatsappService.normalizePhoneNumber = originals.normalizePhoneNumber;
+    whatsappService.getClinicConfig = originals.getClinicConfig;
+  }
+});
+
+test('QuickChat bloquea una plantilla que requiere iniciar el flujo de resenas', async () => {
+  const conversationController = require('../../controllers/conversation.controller');
+  const whatsappService = require('../../services/whatsapp.service');
+  const originals = {
+    transaction: db.sequelize.transaction,
+    clinicFindAll: db.Clinica.findAll,
+    conversationFindByPk: db.Conversation.findByPk,
+    patientFindByPk: db.Paciente.findByPk,
+    templateFindOne: db.WhatsappTemplate.findOne,
+    normalizePhoneNumber: whatsappService.normalizePhoneNumber,
+    getClinicConfig: whatsappService.getClinicConfig,
+  };
+  const transaction = {
+    committed: false,
+    rolledBack: false,
+    async commit() { this.committed = true; },
+    async rollback() { this.rolledBack = true; },
+  };
+  db.sequelize.transaction = async () => transaction;
+  db.Clinica.findAll = async () => [{ id_clinica: 56 }];
+  db.Conversation.findByPk = async () => ({
+    id: 700,
+    clinic_id: 56,
+    channel: 'whatsapp',
+    contact_id: null,
+    patient_id: 123,
+    lead_id: null,
+    last_inbound_at: null,
+    async save() {},
+  });
+  db.Paciente.findByPk = async () => ({ telefono_movil: '+34600000000' });
+  db.WhatsappTemplate.findOne = async () => ({
+    id: 906,
+    name: 'cc_solicitud_de_opinion_tras_visita',
+    language: 'es',
+    status: 'APPROVED',
+    is_active: true,
+    origin: 'external',
+    created_by_user_id: 1,
+    variables: [{ position: 1, template_usage: 'solicitud_resena' }],
+    get() { return { ...this, get: undefined }; },
+  });
+  whatsappService.normalizePhoneNumber = () => '34600000000';
+  whatsappService.getClinicConfig = async () => ({
+    phoneNumberId: 'phone-56',
+    accessToken: 'scoped-token',
+    wabaId: 'waba-5',
+  });
+
+  try {
+    const res = responseRecorder();
+    await conversationController.postMessage({
+      params: { id: '700' },
+      body: {
+        message: 'Vista previa',
+        message_type: 'template',
+        useTemplate: true,
+        templateId: 906,
+      },
+      userData: { userId: 1 },
+    }, res);
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.body?.error, 'whatsapp_template_requires_workflow');
     assert.equal(transaction.rolledBack, true);
     assert.equal(transaction.committed, false);
   } finally {

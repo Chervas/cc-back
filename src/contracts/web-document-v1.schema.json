@@ -65,10 +65,20 @@
           { "$ref": "#/definitions/dividerNode" },
           { "$ref": "#/definitions/spacerNode" },
           { "$ref": "#/definitions/faqNode" },
+          { "$ref": "#/definitions/accordionNode" },
           { "$ref": "#/definitions/testimonialNode" },
           { "$ref": "#/definitions/imageNode" },
           { "$ref": "#/definitions/galleryNode" },
+          { "$ref": "#/definitions/sliderNode" },
           { "$ref": "#/definitions/videoNode" },
+          { "$ref": "#/definitions/locationMapNode" },
+          { "$ref": "#/definitions/breadcrumbsNode" },
+          { "$ref": "#/definitions/pageMenuNode" },
+          { "$ref": "#/definitions/linkListNode" },
+          { "$ref": "#/definitions/postListNode" },
+          { "$ref": "#/definitions/categoryListNode" },
+          { "$ref": "#/definitions/contentMetaNode" },
+          { "$ref": "#/definitions/tableOfContentsNode" },
           { "$ref": "#/definitions/buttonNode" },
           { "$ref": "#/definitions/intakeFormNode" }
         ]
@@ -645,6 +655,70 @@
         "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
+    "accordionNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "version", "props", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "type": { "const": "accordion" },
+        "version": { "const": 1 },
+        "props": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["title", "items", "allow_multiple_open", "aria_label"],
+          "properties": {
+            "title": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "maxLength": 120 }
+              ]
+            },
+            "items": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 12,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "title", "body", "open"],
+                "properties": {
+                  "id": { "$ref": "#/definitions/safeId" },
+                  "title": {
+                    "allOf": [
+                      { "$ref": "#/definitions/plainText" },
+                      { "minLength": 1, "maxLength": 140 }
+                    ]
+                  },
+                  "body": {
+                    "allOf": [
+                      { "$ref": "#/definitions/plainText" },
+                      { "minLength": 1, "maxLength": 600 }
+                    ]
+                  },
+                  "open": { "type": "boolean" }
+                }
+              }
+            },
+            "allow_multiple_open": { "type": "boolean" },
+            "aria_label": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 120 }
+              ]
+            }
+          }
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "style_tokens": { "$ref": "#/definitions/styleTokens" },
+        "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
+        "binding_ids": { "$ref": "#/definitions/bindingIds" }
+      }
+    },
     "imageNode": {
       "type": "object",
       "additionalProperties": false,
@@ -818,6 +892,47 @@
         }
       }
     },
+    "sliderNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "version", "props", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "type": { "const": "slider" },
+        "version": { "const": 1 },
+        "props": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["items", "fit", "aspect_ratio", "show_arrows", "show_dots", "autoplay", "interval_seconds"],
+          "properties": {
+            "items": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 12,
+              "items": { "$ref": "#/definitions/galleryItem" }
+            },
+            "fit": { "enum": ["cover", "contain"] },
+            "aspect_ratio": { "enum": ["1:1", "4:3", "16:9", "21:9"] },
+            "show_arrows": { "type": "boolean" },
+            "show_dots": { "type": "boolean" },
+            "autoplay": { "type": "boolean" },
+            "interval_seconds": {
+              "type": "integer",
+              "minimum": 3,
+              "maximum": 12
+            }
+          }
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "style_tokens": { "$ref": "#/definitions/styleTokens" },
+        "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
+        "binding_ids": { "$ref": "#/definitions/bindingIds" }
+      }
+    },
     "videoNode": {
       "type": "object",
       "additionalProperties": false,
@@ -862,6 +977,477 @@
               "then": { "properties": { "video_id": { "pattern": "^[0-9]{6,12}$" } } }
             }
           ]
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "style_tokens": { "$ref": "#/definitions/styleTokens" },
+        "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
+        "binding_ids": { "$ref": "#/definitions/bindingIds" }
+      }
+    },
+    "locationMapNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "version", "props", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "type": { "const": "location_map" },
+        "version": { "const": 1 },
+        "props": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["title", "address", "directions_url", "button_label", "show_map_placeholder"],
+          "properties": {
+            "title": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 180 }
+              ]
+            },
+            "address": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 500 }
+              ]
+            },
+            "directions_url": {
+              "type": "string",
+              "minLength": 12,
+              "maxLength": 2048,
+              "pattern": "^https://[^\\s]+$"
+            },
+            "button_label": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 120 }
+              ]
+            },
+            "show_map_placeholder": { "type": "boolean" }
+          }
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "style_tokens": { "$ref": "#/definitions/styleTokens" },
+        "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
+        "binding_ids": { "$ref": "#/definitions/bindingIds" }
+      }
+    },
+    "breadcrumbsNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "version", "props", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "type": { "const": "breadcrumbs" },
+        "version": { "const": 1 },
+        "props": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["home_label", "separator", "show_current", "aria_label"],
+          "properties": {
+            "home_label": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 80 }
+              ]
+            },
+            "separator": {
+              "enum": ["/", "›", "·"]
+            },
+            "show_current": { "type": "boolean" },
+            "aria_label": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 120 }
+              ]
+            }
+          }
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "style_tokens": { "$ref": "#/definitions/styleTokens" },
+        "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
+        "binding_ids": { "$ref": "#/definitions/bindingIds" }
+      }
+    },
+    "pageMenuNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "version", "props", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "type": { "const": "page_menu" },
+        "version": { "const": 1 },
+        "props": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["label", "layout", "include_home", "aria_label"],
+          "properties": {
+            "label": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 80 }
+              ]
+            },
+            "layout": { "enum": ["horizontal", "vertical"] },
+            "include_home": { "type": "boolean" },
+            "aria_label": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 100 }
+              ]
+            }
+          }
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "style_tokens": { "$ref": "#/definitions/styleTokens" },
+        "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
+        "binding_ids": { "$ref": "#/definitions/bindingIds" }
+      }
+    },
+    "linkListNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "version", "props", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "type": { "const": "link_list" },
+        "version": { "const": 1 },
+        "props": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["title", "layout", "items", "aria_label"],
+          "allOf": [
+            {
+              "if": {
+                "required": ["source"],
+                "properties": {
+                  "source": { "const": "cms_index" }
+                }
+              },
+              "then": {
+                "properties": {
+                  "cms_index": { "type": "object" }
+                },
+                "required": ["cms_index"]
+              },
+              "else": {
+                "properties": {
+                  "items": { "minItems": 1 }
+                }
+              }
+            }
+          ],
+          "properties": {
+            "title": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "maxLength": 120 }
+              ]
+            },
+            "layout": { "enum": ["vertical", "horizontal", "cards"] },
+            "source": { "enum": ["manual", "cms_index"] },
+            "items": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 8,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "label", "action", "target"],
+                "properties": {
+                  "id": { "$ref": "#/definitions/safeId" },
+                  "label": {
+                    "allOf": [
+                      { "$ref": "#/definitions/plainText" },
+                      { "minLength": 1, "maxLength": 120 }
+                    ]
+                  },
+                  "action": { "enum": ["internal_page", "external_url", "phone", "whatsapp"] },
+                  "target": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
+                  },
+                  "open_in_new_tab": { "type": "boolean" }
+                }
+              }
+            },
+            "cms_index": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["content_types", "limit", "show_type", "empty_message"],
+              "properties": {
+                "content_types": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 9,
+                  "uniqueItems": true,
+                  "items": {
+                    "enum": ["value_proposition", "benefit", "faq", "treatment_copy", "professional_bio", "testimonial", "legal_copy", "article", "category"]
+                  }
+                },
+                "limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 12
+                },
+                "show_type": { "type": "boolean" },
+                "empty_message": {
+                  "allOf": [
+                    { "$ref": "#/definitions/plainText" },
+                    { "minLength": 1, "maxLength": 200 }
+                  ]
+                }
+              }
+            },
+            "aria_label": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 120 }
+              ]
+            }
+          }
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "style_tokens": { "$ref": "#/definitions/styleTokens" },
+        "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
+        "binding_ids": { "$ref": "#/definitions/bindingIds" }
+      }
+    },
+    "postListNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "version", "props", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "type": { "const": "post_list" },
+        "version": { "const": 1 },
+        "props": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["title", "content_types", "limit", "layout", "show_excerpt", "show_type", "empty_message", "aria_label"],
+          "properties": {
+            "title": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "maxLength": 120 }
+              ]
+            },
+            "content_types": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 9,
+              "uniqueItems": true,
+              "items": {
+                "enum": ["value_proposition", "benefit", "faq", "treatment_copy", "professional_bio", "testimonial", "legal_copy", "article", "category"]
+              }
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 12
+            },
+            "layout": { "enum": ["cards", "list"] },
+            "show_excerpt": { "type": "boolean" },
+            "show_type": { "type": "boolean" },
+            "empty_message": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 200 }
+              ]
+            },
+            "aria_label": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 120 }
+              ]
+            }
+          }
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "style_tokens": { "$ref": "#/definitions/styleTokens" },
+        "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
+        "binding_ids": { "$ref": "#/definitions/bindingIds" }
+      }
+    },
+    "categoryListNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "version", "props", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "type": { "const": "category_list" },
+        "version": { "const": 1 },
+        "props": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["title", "limit", "layout", "show_description", "empty_message", "aria_label"],
+          "properties": {
+            "title": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "maxLength": 120 }
+              ]
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 12
+            },
+            "layout": { "enum": ["chips", "cards"] },
+            "show_description": { "type": "boolean" },
+            "empty_message": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 200 }
+              ]
+            },
+            "aria_label": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 120 }
+              ]
+            }
+          }
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "style_tokens": { "$ref": "#/definitions/styleTokens" },
+        "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
+        "binding_ids": { "$ref": "#/definitions/bindingIds" }
+      }
+    },
+    "contentMetaNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "version", "props", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "type": { "const": "content_meta" },
+        "version": { "const": 1 },
+        "props": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["title", "content_types", "show_author", "show_date", "show_category", "date_format", "layout", "empty_message", "aria_label"],
+          "properties": {
+            "title": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "maxLength": 120 }
+              ]
+            },
+            "content_types": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 9,
+              "uniqueItems": true,
+              "items": {
+                "enum": ["value_proposition", "benefit", "faq", "treatment_copy", "professional_bio", "testimonial", "legal_copy", "article", "category"]
+              }
+            },
+            "show_author": { "type": "boolean" },
+            "show_date": { "type": "boolean" },
+            "show_category": { "type": "boolean" },
+            "date_format": { "enum": ["short", "long"] },
+            "layout": { "enum": ["inline", "stacked", "chips"] },
+            "empty_message": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 200 }
+              ]
+            },
+            "aria_label": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 120 }
+              ]
+            }
+          },
+          "anyOf": [
+            { "properties": { "show_author": { "const": true } } },
+            { "properties": { "show_date": { "const": true } } },
+            { "properties": { "show_category": { "const": true } } }
+          ]
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "style_tokens": { "$ref": "#/definitions/styleTokens" },
+        "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
+        "binding_ids": { "$ref": "#/definitions/bindingIds" }
+      }
+    },
+    "tableOfContentsNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "version", "props", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "type": { "const": "table_of_contents" },
+        "version": { "const": 1 },
+        "props": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["title", "min_level", "max_level", "layout", "show_numbers", "empty_message", "aria_label"],
+          "properties": {
+            "title": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "maxLength": 120 }
+              ]
+            },
+            "min_level": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 6
+            },
+            "max_level": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 6
+            },
+            "layout": { "enum": ["boxed", "plain"] },
+            "show_numbers": { "type": "boolean" },
+            "empty_message": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 200 }
+              ]
+            },
+            "aria_label": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 120 }
+              ]
+            }
+          }
         },
         "children": {
           "type": "array",
@@ -1047,7 +1633,7 @@
       "properties": {
         "target_node_id": { "$ref": "#/definitions/safeId" },
         "target_prop": {
-          "enum": ["text", "label", "title", "description", "question", "answer", "quote", "attribution", "role", "asset_id", "alt", "target"]
+          "enum": ["text", "label", "title", "description", "question", "answer", "quote", "attribution", "role", "asset_id", "alt", "target", "address", "directions_url"]
         },
         "source": {
           "enum": ["clinic", "treatment", "professional", "content_entry"]
