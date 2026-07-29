@@ -55,6 +55,7 @@ const BINDABLE_PROPS = Object.freeze({
   testimonial: new Set(['quote', 'attribution', 'role']),
   image: new Set(['asset_id', 'alt']),
   gallery: new Set(),
+  slider: new Set(),
   video: new Set(['title', 'video_id']),
   location_map: new Set(['title', 'address', 'directions_url']),
   breadcrumbs: new Set(),
@@ -464,7 +465,7 @@ function validateGraph(document) {
 
     const stringValues = Object.values(node.props).filter((value) => typeof value === 'string');
     totalTextCharacters += stringValues.reduce((sum, value) => sum + value.length, 0);
-    if (node.type === 'gallery') {
+    if (node.type === 'gallery' || node.type === 'slider') {
       totalTextCharacters += node.props.items.reduce((sum, item) => (
         sum + item.alt.length + (item.caption?.length || 0)
       ), 0);
@@ -512,29 +513,32 @@ function validateGraph(document) {
       validateSectionColumnWidths(node, nodePath, errors);
     }
 
-    if (node.type === 'gallery') {
+    if (node.type === 'gallery' || node.type === 'slider') {
       const assetIds = new Set();
+      const noun = node.type === 'slider' ? 'un slider' : 'una galería';
+      const uniqueKeyword = node.type === 'slider' ? 'uniqueSliderAsset' : 'uniqueGalleryAsset';
+      const altKeyword = node.type === 'slider' ? 'sliderAlt' : 'galleryAlt';
       for (let index = 0; index < node.props.items.length; index += 1) {
         const item = node.props.items[index];
         const itemPath = `${nodePath}/props/items/${index}`;
         if (assetIds.has(item.asset_id)) {
           errors.push(validationError(
-            'uniqueGalleryAsset',
+            uniqueKeyword,
             `${itemPath}/asset_id`,
-            'una galería no puede repetir la misma imagen'
+            `${noun} no puede repetir la misma imagen`
           ));
         }
         assetIds.add(item.asset_id);
         if (item.decorative && item.alt !== '') {
           errors.push(validationError(
-            'galleryAlt',
+            altKeyword,
             `${itemPath}/alt`,
             'una imagen decorativa debe tener alt vacío'
           ));
         }
         if (!item.decorative && item.alt.trim() === '') {
           errors.push(validationError(
-            'galleryAlt',
+            altKeyword,
             `${itemPath}/alt`,
             'una imagen informativa necesita texto alternativo'
           ));

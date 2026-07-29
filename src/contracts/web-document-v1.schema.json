@@ -68,6 +68,7 @@
           { "$ref": "#/definitions/testimonialNode" },
           { "$ref": "#/definitions/imageNode" },
           { "$ref": "#/definitions/galleryNode" },
+          { "$ref": "#/definitions/sliderNode" },
           { "$ref": "#/definitions/videoNode" },
           { "$ref": "#/definitions/locationMapNode" },
           { "$ref": "#/definitions/breadcrumbsNode" },
@@ -821,6 +822,47 @@
             { "maxLength": 500 }
           ]
         }
+      }
+    },
+    "sliderNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "version", "props", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "type": { "const": "slider" },
+        "version": { "const": 1 },
+        "props": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["items", "fit", "aspect_ratio", "show_arrows", "show_dots", "autoplay", "interval_seconds"],
+          "properties": {
+            "items": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 12,
+              "items": { "$ref": "#/definitions/galleryItem" }
+            },
+            "fit": { "enum": ["cover", "contain"] },
+            "aspect_ratio": { "enum": ["1:1", "4:3", "16:9", "21:9"] },
+            "show_arrows": { "type": "boolean" },
+            "show_dots": { "type": "boolean" },
+            "autoplay": { "type": "boolean" },
+            "interval_seconds": {
+              "type": "integer",
+              "minimum": 3,
+              "maximum": 12
+            }
+          }
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "style_tokens": { "$ref": "#/definitions/styleTokens" },
+        "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
+        "binding_ids": { "$ref": "#/definitions/bindingIds" }
       }
     },
     "videoNode": {
