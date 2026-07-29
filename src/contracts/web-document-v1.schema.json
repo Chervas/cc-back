@@ -73,6 +73,7 @@
           { "$ref": "#/definitions/locationMapNode" },
           { "$ref": "#/definitions/breadcrumbsNode" },
           { "$ref": "#/definitions/pageMenuNode" },
+          { "$ref": "#/definitions/linkListNode" },
           { "$ref": "#/definitions/postListNode" },
           { "$ref": "#/definitions/categoryListNode" },
           { "$ref": "#/definitions/tableOfContentsNode" },
@@ -1037,6 +1038,70 @@
               "allOf": [
                 { "$ref": "#/definitions/plainText" },
                 { "minLength": 1, "maxLength": 100 }
+              ]
+            }
+          }
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "style_tokens": { "$ref": "#/definitions/styleTokens" },
+        "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
+        "binding_ids": { "$ref": "#/definitions/bindingIds" }
+      }
+    },
+    "linkListNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "version", "props", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "type": { "const": "link_list" },
+        "version": { "const": 1 },
+        "props": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["title", "layout", "items", "aria_label"],
+          "properties": {
+            "title": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "maxLength": 120 }
+              ]
+            },
+            "layout": { "enum": ["vertical", "horizontal", "cards"] },
+            "items": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "label", "action", "target"],
+                "properties": {
+                  "id": { "$ref": "#/definitions/safeId" },
+                  "label": {
+                    "allOf": [
+                      { "$ref": "#/definitions/plainText" },
+                      { "minLength": 1, "maxLength": 120 }
+                    ]
+                  },
+                  "action": { "enum": ["internal_page", "external_url", "phone", "whatsapp"] },
+                  "target": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
+                  },
+                  "open_in_new_tab": { "type": "boolean" }
+                }
+              }
+            },
+            "aria_label": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 120 }
               ]
             }
           }

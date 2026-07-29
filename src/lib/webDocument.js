@@ -60,6 +60,7 @@ const BINDABLE_PROPS = Object.freeze({
   location_map: new Set(['title', 'address', 'directions_url']),
   breadcrumbs: new Set(),
   page_menu: new Set(),
+  link_list: new Set(),
   post_list: new Set(),
   category_list: new Set(),
   table_of_contents: new Set(),
