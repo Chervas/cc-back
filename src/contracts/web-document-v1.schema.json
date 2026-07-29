@@ -73,6 +73,7 @@
           { "$ref": "#/definitions/breadcrumbsNode" },
           { "$ref": "#/definitions/pageMenuNode" },
           { "$ref": "#/definitions/postListNode" },
+          { "$ref": "#/definitions/tableOfContentsNode" },
           { "$ref": "#/definitions/buttonNode" },
           { "$ref": "#/definitions/intakeFormNode" }
         ]
@@ -1043,6 +1044,61 @@
             "layout": { "enum": ["cards", "list"] },
             "show_excerpt": { "type": "boolean" },
             "show_type": { "type": "boolean" },
+            "empty_message": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 200 }
+              ]
+            },
+            "aria_label": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 120 }
+              ]
+            }
+          }
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "style_tokens": { "$ref": "#/definitions/styleTokens" },
+        "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
+        "binding_ids": { "$ref": "#/definitions/bindingIds" }
+      }
+    },
+    "tableOfContentsNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "version", "props", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "type": { "const": "table_of_contents" },
+        "version": { "const": 1 },
+        "props": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["title", "min_level", "max_level", "layout", "show_numbers", "empty_message", "aria_label"],
+          "properties": {
+            "title": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "maxLength": 120 }
+              ]
+            },
+            "min_level": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 6
+            },
+            "max_level": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 6
+            },
+            "layout": { "enum": ["boxed", "plain"] },
+            "show_numbers": { "type": "boolean" },
             "empty_message": {
               "allOf": [
                 { "$ref": "#/definitions/plainText" },

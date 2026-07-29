@@ -60,6 +60,7 @@ const BINDABLE_PROPS = Object.freeze({
   breadcrumbs: new Set(),
   page_menu: new Set(),
   post_list: new Set(),
+  table_of_contents: new Set(),
   button: new Set(['label', 'target']),
   intake_form: new Set(['title', 'description']),
   section: new Set(),
