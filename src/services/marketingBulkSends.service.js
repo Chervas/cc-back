@@ -3767,9 +3767,8 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
     if (explicit && explicit.is_active !== false && String(explicit.status || '').toUpperCase() === 'APPROVED' && isPrimaryReviewRequestWhatsappTemplateCandidate(explicit)) {
       const plainExplicit = explicit.get ? explicit.get({ plain: true }) : explicit;
       const explicitMatchesWaba = !targetWabaId || !getTemplateWabaId(explicit) || getTemplateWabaId(explicit) === targetWabaId;
-      const explicitMatchesMedia = preferPhoto
-        ? templateHasImageHeader(explicit)
-        : !templateHasImageHeader(explicit);
+      const explicitHasImageHeader = templateHasImageHeader(explicit);
+      const explicitMatchesMedia = explicitHasImageHeader ? preferPhoto : true;
       const explicitHasAllowedCopy = isAllowedReviewRequestTemplateCopy(explicit);
       if (explicitMatchesWaba && explicitMatchesMedia && explicitHasAllowedCopy) {
         return explicit;
@@ -3789,7 +3788,7 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
           exactReplacement
           && isPrimaryReviewRequestWhatsappTemplateCandidate(exactReplacement)
           && reviewTemplateMatchesCurrentCatalogBody(exactReplacement)
-          && (preferPhoto ? templateHasImageHeader(exactReplacement) : !templateHasImageHeader(exactReplacement))
+          && (explicitHasImageHeader ? (preferPhoto && templateHasImageHeader(exactReplacement)) : !templateHasImageHeader(exactReplacement))
         ) {
           return exactReplacement;
         }
@@ -3809,7 +3808,7 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
           replacement
           && isPrimaryReviewRequestWhatsappTemplateCandidate(replacement)
           && reviewTemplateMatchesCurrentCatalogBody(replacement)
-          && (preferPhoto ? templateHasImageHeader(replacement) : !templateHasImageHeader(replacement))
+          && (explicitHasImageHeader ? (preferPhoto && templateHasImageHeader(replacement)) : !templateHasImageHeader(replacement))
         ) {
           return replacement;
         }
@@ -7256,7 +7255,8 @@ async function sendTest(scope, campaignId, body = {}) {
     err.status = 409;
     throw err;
   }
-  if (isReviewTemplateUsage(templateUsage) && isHttpsUrl(reviewTeamPhotoUrlForSelection) && !templateHasImageHeader(template)) {
+  const explicitReviewTemplateSelected = !!(body.whatsapp_template_id || body.template_id);
+  if (isReviewTemplateUsage(templateUsage) && !explicitReviewTemplateSelected && isHttpsUrl(reviewTeamPhotoUrlForSelection) && !templateHasImageHeader(template)) {
     const err = new Error('La foto está configurada, pero la plantilla de reseñas con imagen todavía no está aprobada por Meta. Cuando se apruebe, la prueba se enviará con foto.');
     err.status = 409;
     throw err;
