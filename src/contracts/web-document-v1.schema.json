@@ -74,6 +74,7 @@
           { "$ref": "#/definitions/breadcrumbsNode" },
           { "$ref": "#/definitions/pageMenuNode" },
           { "$ref": "#/definitions/postListNode" },
+          { "$ref": "#/definitions/categoryListNode" },
           { "$ref": "#/definitions/tableOfContentsNode" },
           { "$ref": "#/definitions/buttonNode" },
           { "$ref": "#/definitions/intakeFormNode" }
@@ -1086,6 +1087,56 @@
             "layout": { "enum": ["cards", "list"] },
             "show_excerpt": { "type": "boolean" },
             "show_type": { "type": "boolean" },
+            "empty_message": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 200 }
+              ]
+            },
+            "aria_label": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 120 }
+              ]
+            }
+          }
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "style_tokens": { "$ref": "#/definitions/styleTokens" },
+        "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
+        "binding_ids": { "$ref": "#/definitions/bindingIds" }
+      }
+    },
+    "categoryListNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "version", "props", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "type": { "const": "category_list" },
+        "version": { "const": 1 },
+        "props": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["title", "limit", "layout", "show_description", "empty_message", "aria_label"],
+          "properties": {
+            "title": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "maxLength": 120 }
+              ]
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 12
+            },
+            "layout": { "enum": ["chips", "cards"] },
+            "show_description": { "type": "boolean" },
             "empty_message": {
               "allOf": [
                 { "$ref": "#/definitions/plainText" },

@@ -47,6 +47,30 @@ function postListNode(overrides = {}) {
   };
 }
 
+function categoryListNode(overrides = {}) {
+  return {
+    id: 'category_list_main',
+    type: 'category_list',
+    version: 1,
+    props: {
+      title: 'Temas principales',
+      limit: 4,
+      layout: 'chips',
+      show_description: true,
+      empty_message: 'Aún no hay categorías publicadas para mostrar.',
+      aria_label: 'Listado de categorías publicadas',
+      ...(overrides.props || {}),
+    },
+    children: [],
+    style_tokens: {
+      spacing_top: 'sm',
+      spacing_bottom: 'sm',
+      ...(overrides.style_tokens || {}),
+    },
+    ...Object.fromEntries(Object.entries(overrides).filter(([key]) => key !== 'props' && key !== 'style_tokens')),
+  };
+}
+
 function addPostList(document, node = postListNode()) {
   const section = Object.values(document.nodes).find((candidate) => candidate.type === 'section');
   document.nodes[node.id] = node;
@@ -99,6 +123,19 @@ function compilerFixture(node = postListNode()) {
           fields: {
             content_title: 'Aviso legal',
             text: 'No debe aparecer porque el bloque filtra tipos.',
+          },
+        },
+        content_category: {
+          id: 'content_category',
+          version: 1,
+          scope: { type: 'clinic', id: 66, inherited: false },
+          type: 'category',
+          locale: 'es-ES',
+          title: 'Categoría interna',
+          content: {},
+          fields: {
+            name: 'Implantes dentales',
+            short_description: 'Opciones de implantología explicadas para pacientes.',
           },
         },
       },
@@ -168,6 +205,45 @@ test('post_list muestra estado vacío cuando no hay contenido congelado', () => 
   input.contentSnapshot.content_entries = {};
   const artifact = compileWebArtifact(input);
   assert.match(artifact.files['index.html'], /<p class="cc-post-list-empty">Aún no hay contenido publicado para mostrar\.<\/p>/);
+});
+
+test('category_list es un bloque hoja cerrado que compila categorías CMS publicadas', () => {
+  const valid = buildValidWebDocument();
+  addPostList(valid, categoryListNode());
+  assert.equal(validateWebDocument(valid).valid, true);
+
+  const child = clone(valid);
+  child.nodes.category_list_main.children = ['text_intro'];
+  assert.equal(validateWebDocument(child).valid, false);
+
+  const markup = clone(valid);
+  markup.nodes.category_list_main.props.title = '<strong>Categorías</strong>';
+  assert.equal(validateWebDocument(markup).valid, false);
+
+  const invalidLayout = clone(valid);
+  invalidLayout.nodes.category_list_main.props.layout = 'carousel';
+  assert.equal(validateWebDocument(invalidLayout).valid, false);
+
+  const input = compilerFixture(categoryListNode());
+  const artifact = compileWebArtifact(input);
+  const html = artifact.files['index.html'];
+  const cssPath = Object.keys(artifact.files).find((filePath) => filePath.endsWith('.css'));
+  const css = artifact.files[cssPath];
+
+  assert.match(html, /id="cc-category_list_main" class="cc-node cc-category-list cc-category-list-chips[^\"]*"/);
+  assert.match(html, /aria-label="Listado de categorías publicadas"/);
+  assert.match(html, /<h2 class="cc-category-list-title">Temas principales<\/h2>/);
+  assert.match(html, /<strong>Implantes dentales<\/strong>/);
+  assert.match(html, /Opciones de implantología explicadas para pacientes\./);
+  assert.doesNotMatch(html, /Aviso legal|onclick=|onload=|javascript:/i);
+  assert.match(css, /\.cc-category-list-chips \.cc-category-list-item/);
+});
+
+test('category_list muestra estado vacío cuando no hay categorías congeladas', () => {
+  const input = compilerFixture(categoryListNode());
+  input.contentSnapshot.content_entries = {};
+  const artifact = compileWebArtifact(input);
+  assert.match(artifact.files['index.html'], /<p class="cc-category-list-empty">Aún no hay categorías publicadas para mostrar\.<\/p>/);
 });
 
 test('resolver congela contenido publicado para post_list desde clínica y grupo heredado', async () => {
@@ -252,4 +328,69 @@ test('resolver congela contenido publicado para post_list desde clínica y grupo
   assert.equal(resolution.snapshot.content_entries.clinic_article.fields.content_title, 'Artículo publicado');
   assert.equal(resolution.snapshot.content_entries.group_faq.fields.question, '¿Primera visita?');
   assert.equal(resolution.unresolved.length, 0);
+});
+
+test('resolver congela categorías publicadas para category_list', async () => {
+  const document = createBlankWebDocument({ name: 'Landing clínica', locale: 'es-ES' });
+  addPostList(document, categoryListNode({ props: { limit: 6 } }));
+  const calls = [];
+  const models = {
+    Clinica: {
+      findByPk: async () => ({ grupoClinicaId: 7 }),
+      findAll: async () => [],
+    },
+    WebMediaAsset: { findAll: async () => [] },
+    PublicMediaAsset: {},
+    WebContentEntry: {
+      findAll: async (query) => {
+        calls.push(query);
+        return [
+          row({
+            id: 'clinic_category',
+            scopeType: 'clinic',
+            clinicaId: 66,
+            grupoClinicaId: null,
+            type: 'category',
+            locale: 'es-ES',
+            title: 'Categoría clínica',
+            content: { name: 'Ortodoncia', short_description: 'Categoría publicada.' },
+            sources: [],
+            schemaConfig: { enabled: true, profile: 'CollectionPage', include_sources: false },
+            contentHash: 'c'.repeat(64),
+            status: 'published',
+            version: 2,
+          }),
+          row({
+            id: 'group_article',
+            scopeType: 'group',
+            clinicaId: null,
+            grupoClinicaId: 7,
+            type: 'article',
+            locale: 'es-ES',
+            title: 'Artículo grupo',
+            content: { title: 'No debe entrar' },
+            sources: [],
+            schemaConfig: { enabled: true, profile: 'Article', include_sources: false },
+            contentHash: 'd'.repeat(64),
+            status: 'published',
+            version: 1,
+          }),
+        ];
+      },
+    },
+  };
+
+  const resolution = await resolveWebDocumentResources({
+    document,
+    scope: { type: 'clinic', id: 66 },
+    models,
+    allowGroupInheritance: true,
+  });
+
+  assert.equal(calls.length, 1);
+  const typeSymbols = Object.getOwnPropertySymbols(calls[0].where.type);
+  assert.equal(typeSymbols.length, 1);
+  assert.deepEqual(calls[0].where.type[typeSymbols[0]], ['category']);
+  assert.equal(resolution.snapshot.content_entries.clinic_category.type, 'category');
+  assert.equal(resolution.snapshot.content_entries.group_article, undefined);
 });

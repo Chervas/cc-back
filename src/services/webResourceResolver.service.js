@@ -96,11 +96,16 @@ function collectPostListContentTypes(document) {
   const types = new Set();
   let requested = 0;
   for (const node of Object.values(document?.nodes || {})) {
-    if (node?.type !== 'post_list') continue;
-    const nodeLimit = Number(node.props?.limit);
-    requested += Number.isSafeInteger(nodeLimit) && nodeLimit > 0 ? Math.min(12, nodeLimit) : 6;
-    for (const type of node.props?.content_types || []) {
-      if (POST_LIST_CONTENT_TYPES.has(type)) types.add(type);
+    if (node?.type === 'post_list') {
+      const nodeLimit = Number(node.props?.limit);
+      requested += Number.isSafeInteger(nodeLimit) && nodeLimit > 0 ? Math.min(12, nodeLimit) : 6;
+      for (const type of node.props?.content_types || []) {
+        if (POST_LIST_CONTENT_TYPES.has(type)) types.add(type);
+      }
+    } else if (node?.type === 'category_list') {
+      const nodeLimit = Number(node.props?.limit);
+      requested += Number.isSafeInteger(nodeLimit) && nodeLimit > 0 ? Math.min(12, nodeLimit) : 8;
+      types.add('category');
     }
   }
   return {
