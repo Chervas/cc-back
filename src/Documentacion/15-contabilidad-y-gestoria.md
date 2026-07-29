@@ -1,6 +1,6 @@
 # Backend de contabilidad y gestoria
 
-> Implementado y repulido en `dev` el 2026-07-25.
+> Implementado y repulido en `dev`; promovido a `staging`.
 > Prefijo API: `/api/accounting`.
 > Migraciones: `20260724203000-create-accounting-domain.js` y ampliacion
 > `20260725090000-expand-clinical-accounting-workflows.js`. La relacion entre
@@ -80,6 +80,12 @@ transferencia, Bizum y otros medios quedan en el snapshot de conciliacion.
 Existe una restriccion unica por clinica y dia.
 El rango diario se convierte desde la zona de `Clinicas.configuracion`, con
 fallback `Europe/Madrid`; no usa medianoche UTC como limite operativo.
+
+El panel principal consulta `AccountingCashSessions` por clínica y fecha
+operativa para devolver `pending`, `open`, `closed` o `mixed`. El resumen
+incluye únicamente las clínicas del scope y solo habilita el enlace de gestión
+para las que superan `accounting.cash.manage`; la operativa completa sigue
+viviendo en `/api/accounting/cash/*`.
 
 ## Acceso
 
@@ -322,4 +328,6 @@ npx sequelize-cli db:migrate:undo --name 20260725090000-expand-clinical-accounti
 npx sequelize-cli db:migrate:undo --name 20260724203000-create-accounting-domain.js
 ```
 
-No se aplico ninguna de estas migraciones en staging durante el corte.
+Estas migraciones están aplicadas en `dev` y `staging`; estado comprobado el
+2026-07-29. Los seeds sintéticos de demostración permanecen exclusivos de
+`dev`.

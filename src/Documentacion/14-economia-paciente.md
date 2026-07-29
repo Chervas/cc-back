@@ -1,6 +1,6 @@
 # Backend de economia del paciente
 
-> Implementado y repulido en `dev` el 2026-07-25.
+> Implementado y repulido en `dev`; promovido a `staging`.
 > Prefijo API: `/api/economics`.
 > Migracion: `20260724183000-create-patient-economics-domain.js`.
 
@@ -170,15 +170,16 @@ Rollback destructivo, solo si no hay datos que conservar:
 npx sequelize-cli db:migrate:undo --name 20260724183000-create-patient-economics-domain.js
 ```
 
-No se ha aplicado nada en `staging` en este corte.
+El código y la migración están aplicados en `dev` y `staging`; estado
+comprobado el 2026-07-29.
 
 ## Ampliacion 2026-07-25
 
 La migracion `20260725090000-expand-clinical-accounting-workflows.js` agrega el
 snapshot PDF fiscal y los contratos transversales de informes de cita,
-gestorias, OCR y SEPA. Se aplico solo en `dev`. Su rollback es destructivo para
-esas entidades nuevas y no debe ejecutarse si ya hay informes, credenciales,
-mandatos, remesas o archivos procesados que deban conservarse.
+gestorias, OCR y SEPA. Está aplicada en `dev` y `staging`. Su rollback es
+destructivo para esas entidades nuevas y no debe ejecutarse si ya hay informes,
+credenciales, mandatos, remesas o archivos procesados que deban conservarse.
 
 La migracion `20260725100000-link-voucher-appointments.js` enlaza cada cita
 planificada con su bono. Al calcular nuevas citas, se restan las sesiones ya
