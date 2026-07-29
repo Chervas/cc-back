@@ -9,6 +9,7 @@ const whatsappService = require('./whatsapp.service');
 const whatsappPaymentStatusService = require('./whatsappPaymentStatus.service');
 const whatsappConnectionStatusService = require('./whatsappConnectionStatus.service');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
+const { matchesReviewTemplateMedia } = require('../lib/review-template-media');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const marketingOptOutService = require('./marketingOptOut.service');
 const jobRequestsService = require('./jobRequests.service');
@@ -3844,7 +3845,10 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
       const plainExplicit = explicit.get ? explicit.get({ plain: true }) : explicit;
       const explicitMatchesWaba = !targetWabaId || !getTemplateWabaId(explicit) || getTemplateWabaId(explicit) === targetWabaId;
       const explicitHasImageHeader = templateHasImageHeader(explicit);
-      const explicitMatchesMedia = explicitHasImageHeader ? preferPhoto : true;
+      const explicitMatchesMedia = matchesReviewTemplateMedia({
+        hasImageHeader: explicitHasImageHeader,
+        hasPhoto: preferPhoto,
+      });
       const explicitIsDefault = isDefaultReviewRequestWhatsappTemplateIdentity(explicit);
       const explicitHasAllowedCopy = explicitIsDefault
         ? reviewTemplateMatchesCurrentCatalogBody(explicit)
@@ -3867,7 +3871,10 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
           exactReplacement
           && isPrimaryReviewRequestWhatsappTemplateCandidate(exactReplacement)
           && reviewTemplateMatchesCurrentCatalogBody(exactReplacement)
-          && (explicitHasImageHeader ? (preferPhoto && templateHasImageHeader(exactReplacement)) : !templateHasImageHeader(exactReplacement))
+          && matchesReviewTemplateMedia({
+            hasImageHeader: templateHasImageHeader(exactReplacement),
+            hasPhoto: preferPhoto,
+          })
         ) {
           return exactReplacement;
         }
@@ -3887,7 +3894,10 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
           replacement
           && isPrimaryReviewRequestWhatsappTemplateCandidate(replacement)
           && reviewTemplateMatchesCurrentCatalogBody(replacement)
-          && (explicitHasImageHeader ? (preferPhoto && templateHasImageHeader(replacement)) : !templateHasImageHeader(replacement))
+          && matchesReviewTemplateMedia({
+            hasImageHeader: templateHasImageHeader(replacement),
+            hasPhoto: preferPhoto,
+          })
         ) {
           return replacement;
         }
@@ -4846,14 +4856,27 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     body.review_team_photo_overlay_color || body.reviewTeamPhotoOverlayColor
   );
   const reviewTeamMembersText = normalizeText(body.review_team_members_text || body.reviewTeamMembersText || '');
+  const reviewTemplateSelectionOptions = {
+    preferPhoto: isHttpsUrl(reviewTeamPhotoUrl),
+  };
 
   let approvedTemplate = null;
   if (whatsappTemplateId) {
-    approvedTemplate = await findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId);
+    approvedTemplate = await findApprovedReviewWhatsappTemplate(
+      scope,
+      whatsappTemplateId,
+      reviewTemplateSelectionOptions
+    );
     if (!approvedTemplate) {
-      const err = new Error('Selecciona una plantilla de reseñas aprobada por Meta.');
+      const err = reviewTemplateSelectionOptions.preferPhoto
+        ? new Error('La foto está configurada, pero la plantilla de reseñas con imagen todavía no está aprobada por Meta.')
+        : new Error('Selecciona una plantilla de reseñas aprobada por Meta.');
       err.status = 409;
-      err.details = { reason: 'review_template_not_approved' };
+      err.details = {
+        reason: reviewTemplateSelectionOptions.preferPhoto
+          ? 'review_photo_template_not_approved'
+          : 'review_template_not_approved',
+      };
       throw err;
     }
   }
@@ -4864,7 +4887,7 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
   });
   if (!enabled && !existing) {
     const [approvedReviewTemplate, approvedReminderTemplate, googleReviewUrlAvailable, whatsappAvailable] = await Promise.all([
-      findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null),
+      findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null, reviewTemplateSelectionOptions),
       findApprovedReviewReminderWhatsappTemplate(scope),
       hasGoogleReviewUrlForScope(scope),
       hasWhatsappConfigForScope(scope),
@@ -4889,7 +4912,7 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
   }
 
   const [readyApprovedTemplate, readyGoogleReviewUrlAvailable, readyWhatsappAvailable] = await Promise.all([
-    findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null),
+    findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null, reviewTemplateSelectionOptions),
     hasGoogleReviewUrlForScope(scope),
     hasWhatsappConfigForScope(scope),
   ]);
@@ -4945,7 +4968,7 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     ? await existing.update(payload)
     : await AutomationFlowTemplateV2.create(payload);
   const [approvedReviewTemplate, approvedReminderTemplate, googleReviewUrlAvailable, whatsappAvailable] = await Promise.all([
-    findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null),
+    findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null, reviewTemplateSelectionOptions),
     findApprovedReviewReminderWhatsappTemplate(scope),
     hasGoogleReviewUrlForScope(scope),
     hasWhatsappConfigForScope(scope),
@@ -7388,8 +7411,10 @@ async function sendTest(scope, campaignId, body = {}) {
     })
     : await resolveWhatsappTemplate(selectedTemplateId, scope);
   if (!template) {
-    const err = new Error('Selecciona una plantilla WhatsApp aprobada para enviar una prueba real.');
-    err.status = 400;
+    const err = isReviewTemplateUsage(templateUsage) && isHttpsUrl(reviewTeamPhotoUrlForSelection)
+      ? new Error('La foto está configurada, pero la plantilla de reseñas con imagen todavía no está aprobada por Meta. Cuando se apruebe, la prueba se enviará con foto.')
+      : new Error('Selecciona una plantilla WhatsApp aprobada para enviar una prueba real.');
+    err.status = isReviewTemplateUsage(templateUsage) && isHttpsUrl(reviewTeamPhotoUrlForSelection) ? 409 : 400;
     throw err;
   }
   if (String(template.status || '').toUpperCase() !== 'APPROVED') {
@@ -7397,8 +7422,13 @@ async function sendTest(scope, campaignId, body = {}) {
     err.status = 409;
     throw err;
   }
-  const explicitReviewTemplateSelected = !!(body.whatsapp_template_id || body.template_id);
-  if (isReviewTemplateUsage(templateUsage) && !explicitReviewTemplateSelected && isHttpsUrl(reviewTeamPhotoUrlForSelection) && !templateHasImageHeader(template)) {
+  if (
+    isReviewTemplateUsage(templateUsage)
+    && !matchesReviewTemplateMedia({
+      hasImageHeader: templateHasImageHeader(template),
+      hasPhoto: isHttpsUrl(reviewTeamPhotoUrlForSelection),
+    })
+  ) {
     const err = new Error('La foto está configurada, pero la plantilla de reseñas con imagen todavía no está aprobada por Meta. Cuando se apruebe, la prueba se enviará con foto.');
     err.status = 409;
     throw err;
