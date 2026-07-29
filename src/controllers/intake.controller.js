@@ -67,6 +67,7 @@ const {
   getAccessibleMarketingClinicIds,
   hasMarketingClinicScopeAccess,
 } = require('../lib/marketingScopeAccess');
+const { resolveLeadCompetitionPeerScope } = require('../lib/leadCompetitionScope');
 const { isGlobalAdmin } = require('../lib/role-helpers');
 const {
   canUserAccessFeature,
@@ -1078,27 +1079,46 @@ const resolveLeadCompetitionScope = async (req, { clinicIdRaw = null, groupIdRaw
     return { ready: false, reason: 'group_without_clinics', groupId, groupName: group?.nombre_grupo || null };
   }
 
-  let accessibleClinicIds = groupClinicIds;
-  if (!isGlobalAdmin(actorId)) {
-    accessibleClinicIds = await getAccessibleMarketingClinicIds({
+  const globalAdmin = isGlobalAdmin(actorId);
+  let directlyAccessibleClinicIds = groupClinicIds;
+  let manageableClinicIds = groupClinicIds;
+  if (!globalAdmin) {
+    directlyAccessibleClinicIds = await getAccessibleMarketingClinicIds({
       userId: actorId,
       clinicIds: groupClinicIds,
       access: 'read',
     });
+    const featureClinicIds = selectedClinicId !== null
+      ? [selectedClinicId]
+      : directlyAccessibleClinicIds;
+    const featureDecisions = await Promise.all(featureClinicIds.map(async (clinicId) => ({
+      clinicId,
+      allowed: await canUserAccessFeature({
+        actorId,
+        featureKey: 'leads.manage',
+        clinicId,
+      }).catch(() => false),
+    })));
+    manageableClinicIds = featureDecisions
+      .filter((decision) => decision.allowed)
+      .map((decision) => decision.clinicId);
   }
 
-  if (selectedClinicId !== null && !accessibleClinicIds.includes(selectedClinicId)) {
-    return { ready: false, reason: 'selected_clinic_forbidden', groupId, groupName: group?.nombre_grupo || null };
-  }
-
-  if (accessibleClinicIds.length < 2) {
+  const peerScope = resolveLeadCompetitionPeerScope({
+    groupClinicIds,
+    directlyAccessibleClinicIds,
+    manageableClinicIds,
+    selectedClinicId,
+    globalAdmin,
+  });
+  if (!peerScope.ready) {
     return {
       ready: false,
-      reason: 'not_enough_peer_clinics',
+      reason: peerScope.reason,
       groupId,
       groupName: group?.nombre_grupo || null,
       selectedClinicId,
-      clinicIds: accessibleClinicIds,
+      clinicIds: peerScope.clinicIds,
     };
   }
 
@@ -1108,7 +1128,7 @@ const resolveLeadCompetitionScope = async (req, { clinicIdRaw = null, groupIdRaw
     groupId,
     groupName: group?.nombre_grupo || null,
     selectedClinicId,
-    clinicIds: accessibleClinicIds,
+    clinicIds: peerScope.clinicIds,
   };
 };
 

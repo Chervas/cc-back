@@ -7231,10 +7231,15 @@ Este corte ajusta el contrato operativo de Leads/QuickChat:
 
 `GET /api/intake/leads/stats` conserva los contadores históricos y añade
 `competition` como bloque opcional reutilizable por otros paneles. El scope por
-defecto compara solo clínicas del mismo grupo que el usuario pueda leer; una
-clínica de BS Medical no se compara con Propdental salvo que se implemente un
-scope global administrativo explícito. Si no hay grupo o no hay al menos dos
-sedes comparables, el bloque devuelve `ready=false` con `reason`.
+defecto compara solo clínicas del mismo grupo. Un usuario no global debe tener
+acceso directo a la clínica seleccionada y permiso efectivo `leads.manage`;
+recepción y administración pueden así consultar la comparativa agregada de las
+sedes del grupo aunque su membresía operativa pertenezca a una sola clínica. El
+endpoint no amplía el acceso a filas de leads ni a PII: únicamente abre nombres
+de sede y métricas agregadas del ranking. Una clínica de BS Medical no se
+compara con Propdental salvo que se implemente un scope global administrativo
+explícito. Si no hay grupo o no hay al menos dos sedes comparables, el bloque
+devuelve `ready=false` con `reason`.
 
 La métrica principal es el tiempo hasta el primer contacto humano. Cuenta
 `LeadContactAttempts` con `usuario_id` no nulo y también mensajes WhatsApp
