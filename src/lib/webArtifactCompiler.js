@@ -13,7 +13,7 @@ const {
   webArtifactBundleFootprintBytes,
 } = require('./webArtifactBudget');
 
-const RENDERER_VERSION = 'clinicaclick-web-renderer/1.12.0';
+const RENDERER_VERSION = 'clinicaclick-web-renderer/1.13.0';
 const SAFE_EXTERNAL_REL = /^(?:\/[A-Za-z0-9_][A-Za-z0-9/_-]*|https:\/\/[^\s]+)$/;
 const SAFE_YOUTUBE_VIDEO_ID = /^[A-Za-z0-9_-]{6,64}$/;
 const SAFE_VIMEO_VIDEO_ID = /^[0-9]{6,12}$/;
@@ -790,6 +790,22 @@ function renderTestimonial(node) {
   return `<figure id="cc-${escapeHtml(node.id)}" class="cc-node cc-testimonial ${styleClassList(node)}">${stars}<blockquote class="cc-testimonial-quote">${escapeHtml(node.props.quote)}</blockquote>${meta}</figure>`;
 }
 
+function renderAccordion(node) {
+  const title = String(node.props.title || '').trim();
+  const heading = title
+    ? `<h2 class="cc-accordion-title">${escapeHtml(title)}</h2>`
+    : '';
+  const sharedName = node.props.allow_multiple_open === false
+    ? ` name="cc-accordion-${escapeHtml(node.id)}"`
+    : '';
+  const items = Array.isArray(node.props.items)
+    ? node.props.items.slice(0, 12).map((item) => (
+      `<details class="cc-accordion-item"${sharedName}${item.open ? ' open' : ''}><summary>${escapeHtml(item.title)}</summary><p>${escapeHtml(item.body)}</p></details>`
+    )).join('')
+    : '';
+  return `<section id="cc-${escapeHtml(node.id)}" class="cc-node cc-accordion ${styleClassList(node)}" aria-label="${escapeHtml(node.props.aria_label)}">${heading}<div class="cc-accordion-items">${items}</div></section>`;
+}
+
 function renderLocationMap(node) {
   const href = safePublicButtonUrl(node.props.directions_url, node.id);
   const title = String(node.props.title || '').trim();
@@ -1120,6 +1136,7 @@ function renderNode(nodeId, document, snapshot, context, ancestors = new Set(), 
   if (node.type === 'faq') {
     return `<details id="cc-${escapeHtml(node.id)}" class="cc-node cc-faq ${styleClassList(node)}"><summary>${escapeHtml(node.props.question)}</summary><p>${escapeHtml(node.props.answer)}</p></details>`;
   }
+  if (node.type === 'accordion') return renderAccordion(node);
   if (node.type === 'testimonial') return renderTestimonial(node);
   if (node.type === 'image') return renderImage(node, snapshot);
   if (node.type === 'gallery') return renderGallery(node, snapshot);
@@ -1248,6 +1265,7 @@ function stylesheet(tokens, document = { nodes: {} }) {
     '.cc-table-of-contents{display:grid;gap:var(--cc-md)}.cc-toc-boxed{padding:var(--cc-md);border:1px solid #dfe3ec;border-radius:var(--cc-radius);background:#fff;box-shadow:0 2px 8px #181d350a}.cc-toc-title{margin:0;font-family:var(--cc-font-heading);font-size:1.1rem;line-height:1.25}.cc-toc-list{display:grid;gap:.45rem;margin:0;padding:0;list-style:none}.cc-toc-item{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:start;gap:.55rem}.cc-toc-item a{color:var(--cc-text);font-weight:700;text-decoration:none}.cc-toc-item a:hover{color:var(--cc-primary);text-decoration:underline}.cc-toc-marker{display:inline-grid;place-items:center;min-width:1.5rem;height:1.5rem;border-radius:9999px;background:#eef2ff;color:var(--cc-primary);font-size:.75rem;font-weight:800}.cc-toc-level-3{padding-left:1rem}.cc-toc-level-4,.cc-toc-level-5,.cc-toc-level-6{padding-left:2rem}.cc-toc-empty{margin:0;color:#5f6b7f}',
     focalRules,
     '.cc-faq{border:1px solid #dfe3ec;background:#fff;padding:var(--cc-md);border-radius:var(--cc-radius)}.cc-faq summary{cursor:pointer;font-family:var(--cc-font-heading);font-weight:700}.cc-faq p{margin:var(--cc-sm) 0 0;white-space:pre-wrap}',
+    '.cc-accordion{display:grid;gap:var(--cc-sm);border:1px solid #dfe3ec;background:#fff;padding:var(--cc-md);border-radius:var(--cc-radius)}.cc-accordion-title{margin:0;font-family:var(--cc-font-heading);font-size:clamp(1.25rem,2.2vw,1.85rem);line-height:1.15;letter-spacing:-.02em}.cc-accordion-items{display:grid;gap:.6rem}.cc-accordion-item{overflow:hidden;border:1px solid #dfe3ec;border-radius:calc(var(--cc-radius) - .25rem);background:#fff}.cc-accordion-item summary{display:flex;align-items:center;justify-content:space-between;gap:1rem;cursor:pointer;padding:.85rem 1rem;font-family:var(--cc-font-heading);font-weight:800;list-style:none}.cc-accordion-item summary::-webkit-details-marker{display:none}.cc-accordion-item summary::after{content:"+";display:inline-grid;width:1.65rem;height:1.65rem;flex:0 0 auto;place-items:center;border-radius:9999px;background:#eef2ff;color:var(--cc-primary);font-family:var(--cc-font-body);font-weight:900}.cc-accordion-item[open] summary::after{content:"−"}.cc-accordion-item p{margin:0;padding:0 1rem 1rem;color:#475569;white-space:pre-wrap}',
     '.cc-testimonial{margin:0;display:grid;gap:.65rem;border:1px solid #dfe3ec;background:#fff;padding:var(--cc-lg);border-radius:var(--cc-radius)}.cc-testimonial-stars{color:#f59e0b;letter-spacing:.08em;font-size:1rem;line-height:1}.cc-testimonial-quote{margin:0;font-family:var(--cc-font-heading);font-size:1.125rem;line-height:1.5;white-space:pre-wrap}.cc-testimonial-meta{display:flex;flex-wrap:wrap;gap:.35rem .65rem;align-items:center;color:#5f6b7f;font-size:.875rem}.cc-testimonial-meta strong{color:var(--cc-text);font-weight:800}.cc-testimonial-source{padding:.16rem .45rem;border-radius:9999px;background:#eef2ff;color:var(--cc-primary);font-size:.75rem;font-weight:700}',
     `@media(max-width:767px){.cc-layout-row>.cc-container{flex-direction:column}.cc-layout-grid>.cc-container,.cc-gallery,.cc-location-map{grid-template-columns:1fr}.cc-post-list-cards .cc-post-list-items,.cc-category-list-cards .cc-category-list-items,.cc-link-list-cards .cc-link-list-items{grid-template-columns:1fr}.cc-form{padding:var(--cc-lg)}.cc-button{width:100%}${responsiveRules('mobile')}}`,
     `@media(min-width:768px) and (max-width:1023px){.cc-gallery{grid-template-columns:repeat(2,minmax(0,1fr))}${responsiveRules('tablet')}}`,
