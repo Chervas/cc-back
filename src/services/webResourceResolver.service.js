@@ -22,6 +22,18 @@ const CLINIC_LIVE_FIELDS = new Set([
 ]);
 const TREATMENT_FIELDS = new Set(['name', 'title', 'description', 'short_description', 'price_from']);
 const PROFESSIONAL_FIELDS = new Set(['name', 'title', 'alt_text']);
+const POST_LIST_CONTENT_TYPES = new Set([
+  'value_proposition',
+  'benefit',
+  'faq',
+  'treatment_copy',
+  'professional_bio',
+  'testimonial',
+  'legal_copy',
+  'article',
+  'category',
+]);
+const MAX_POST_LIST_SNAPSHOT_ENTRIES = 120;
 
 function plain(row) {
   return row?.get ? row.get({ plain: true }) : row;
@@ -78,6 +90,23 @@ function collectWebResourceReferences(document, scope = null) {
     }
   }
   return references;
+}
+
+function collectPostListContentTypes(document) {
+  const types = new Set();
+  let requested = 0;
+  for (const node of Object.values(document?.nodes || {})) {
+    if (node?.type !== 'post_list') continue;
+    const nodeLimit = Number(node.props?.limit);
+    requested += Number.isSafeInteger(nodeLimit) && nodeLimit > 0 ? Math.min(12, nodeLimit) : 6;
+    for (const type of node.props?.content_types || []) {
+      if (POST_LIST_CONTENT_TYPES.has(type)) types.add(type);
+    }
+  }
+  return {
+    types: [...types].sort(),
+    limit: Math.min(MAX_POST_LIST_SNAPSHOT_ENTRIES, Math.max(0, requested)),
+  };
 }
 
 async function groupIdForClinic(scope, models, transaction) {
@@ -305,6 +334,9 @@ async function resolveWebDocumentResources({
     : null;
   const references = collectWebResourceReferences(document, scope)
     .filter((reference) => !allowedKinds || allowedKinds.has(reference.kind));
+  const postListCollection = !allowedKinds || allowedKinds.has('content_entry')
+    ? collectPostListContentTypes(document)
+    : { types: [], limit: 0 };
   const mediaIds = [...new Set(references.filter((item) => item.kind === 'media').map((item) => item.id))];
   const contentIds = [...new Set(references.filter((item) => item.kind === 'content_entry').map((item) => item.id))];
   const treatmentIds = [...new Set(references
@@ -326,6 +358,18 @@ async function resolveWebDocumentResources({
   const inheritedGroupId = allowGroupInheritance
     ? await groupIdForClinic(scope, models, transaction)
     : null;
+  const contentScopes = (() => {
+    if (!scope?.type || !scope?.id) return [];
+    if (scope.type === 'clinic') {
+      const scopes = [{ scopeType: 'clinic', clinicaId: Number(scope.id) }];
+      if (allowGroupInheritance && inheritedGroupId) {
+        scopes.push({ scopeType: 'group', grupoClinicaId: Number(inheritedGroupId) });
+      }
+      return scopes;
+    }
+    if (scope.type === 'group') return [{ scopeType: 'group', grupoClinicaId: Number(scope.id) }];
+    return [];
+  })();
   const mediaRows = mediaIds.length
     ? await models.WebMediaAsset.findAll({
       where: { id: { [Op.in]: mediaIds } },
@@ -349,12 +393,28 @@ async function resolveWebDocumentResources({
       transaction,
     })
     : [];
-  const contentRows = contentIds.length
+  const referencedContentRows = contentIds.length
     ? await models.WebContentEntry.findAll({
       where: { id: { [Op.in]: contentIds } },
       transaction,
     })
     : [];
+  const postListContentRows = postListCollection.types.length && postListCollection.limit > 0 && contentScopes.length
+    ? await models.WebContentEntry.findAll({
+      where: {
+        status: 'published',
+        type: { [Op.in]: postListCollection.types },
+        [Op.or]: contentScopes,
+      },
+      order: [['updatedAt', 'DESC'], ['id', 'ASC']],
+      limit: postListCollection.limit,
+      transaction,
+    })
+    : [];
+  const contentRows = [
+    ...referencedContentRows,
+    ...postListContentRows.filter((row) => !contentIds.includes(String(plain(row).id))),
+  ];
   const treatmentRows = treatmentIds.length && models.Tratamiento
     ? await models.Tratamiento.findAll({
       where: { id_tratamiento: { [Op.in]: treatmentIds } },
@@ -545,6 +605,23 @@ async function resolveWebDocumentResources({
       field: reference.field,
       version: Number(value.version),
       inherited: access.inherited,
+    });
+  }
+
+  for (const row of postListContentRows) {
+    const value = plain(row);
+    const id = String(value?.id || '');
+    if (!id || contentEntries[id]) continue;
+    const access = accessForRow(row, scope, inheritedGroupId, allowGroupInheritance);
+    if (!access.allowed || value.status !== 'published' || !postListCollection.types.includes(value.type)) continue;
+    contentEntries[id] = snapshotContent(row, access.inherited);
+    resolved.push({
+      kind: 'content_entry',
+      id,
+      path: '/nodes/*/props/content_types',
+      version: Number(value.version),
+      inherited: access.inherited,
+      collection: 'post_list',
     });
   }
 
