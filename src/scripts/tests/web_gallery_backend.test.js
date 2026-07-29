@@ -286,7 +286,7 @@ test('gallery compila HTML/CSS responsive, accesible y determinista en renderer 
 
   assert.equal(first.artifact_hash, second.artifact_hash);
   assert.deepEqual(first.files, second.files);
-  assert.equal(first.manifest.renderer_version, 'clinicaclick-web-renderer/1.13.0');
+  assert.equal(first.manifest.renderer_version, 'clinicaclick-web-renderer/1.14.0');
   assert.match(html, /id="cc-gallery_clinic" class="cc-node cc-gallery cc-gallery-cols-3[^\"]*"/);
   assert.doesNotMatch(html, /aria-label="Galería de imágenes"/);
   assert.match(html, /cc-gallery-item cc-fit-cover cc-aspect-4-3 cc-focal-25-75/);

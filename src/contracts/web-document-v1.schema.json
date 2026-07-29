@@ -77,6 +77,7 @@
           { "$ref": "#/definitions/linkListNode" },
           { "$ref": "#/definitions/postListNode" },
           { "$ref": "#/definitions/categoryListNode" },
+          { "$ref": "#/definitions/contentMetaNode" },
           { "$ref": "#/definitions/tableOfContentsNode" },
           { "$ref": "#/definitions/buttonNode" },
           { "$ref": "#/definitions/intakeFormNode" }
@@ -1330,6 +1331,68 @@
               ]
             }
           }
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "style_tokens": { "$ref": "#/definitions/styleTokens" },
+        "responsive": { "$ref": "#/definitions/responsive" },
+        "animation": { "$ref": "#/definitions/animationPreset" },
+        "binding_ids": { "$ref": "#/definitions/bindingIds" }
+      }
+    },
+    "contentMetaNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "version", "props", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "type": { "const": "content_meta" },
+        "version": { "const": 1 },
+        "props": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["title", "content_types", "show_author", "show_date", "show_category", "date_format", "layout", "empty_message", "aria_label"],
+          "properties": {
+            "title": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "maxLength": 120 }
+              ]
+            },
+            "content_types": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 9,
+              "uniqueItems": true,
+              "items": {
+                "enum": ["value_proposition", "benefit", "faq", "treatment_copy", "professional_bio", "testimonial", "legal_copy", "article", "category"]
+              }
+            },
+            "show_author": { "type": "boolean" },
+            "show_date": { "type": "boolean" },
+            "show_category": { "type": "boolean" },
+            "date_format": { "enum": ["short", "long"] },
+            "layout": { "enum": ["inline", "stacked", "chips"] },
+            "empty_message": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 200 }
+              ]
+            },
+            "aria_label": {
+              "allOf": [
+                { "$ref": "#/definitions/plainText" },
+                { "minLength": 1, "maxLength": 120 }
+              ]
+            }
+          },
+          "anyOf": [
+            { "properties": { "show_author": { "const": true } } },
+            { "properties": { "show_date": { "const": true } } },
+            { "properties": { "show_category": { "const": true } } }
+          ]
         },
         "children": {
           "type": "array",
