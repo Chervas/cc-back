@@ -6355,6 +6355,53 @@ function getClinicIdForList(list, fallbackScope = {}) {
   return Number.isInteger(fromScope) && fromScope > 0 ? fromScope : null;
 }
 
+async function getOrCreateReviewTestSampleItem(list, clinicId, listCriteria = {}) {
+  if (!list?.id || !MarketingPatientListItem) return null;
+  const safeClinicId = Number(clinicId || 0) || null;
+  const existing = await MarketingPatientListItem.findOne({
+    where: { list_id: list.id, status: 'test_sample' },
+    order: [['id', 'ASC']],
+  });
+  if (existing) {
+    return existing;
+  }
+
+  const displayClinicName = normalizeText(listCriteria.review_display_clinic_name || listCriteria.reviewDisplayClinicName || '')
+    || 'tu clínica';
+  const senderName = normalizeText(listCriteria.review_sender_name || listCriteria.reviewSenderName || '')
+    || 'Recepción';
+  return MarketingPatientListItem.create({
+    list_id: list.id,
+    paciente_id: null,
+    clinica_id: safeClinicId,
+    name: 'Paciente de ejemplo',
+    phone: null,
+    email: null,
+    treatment: 'Tratamiento de ejemplo',
+    last_visit_at: new Date(),
+    appointment_at: null,
+    treatment_completed: true,
+    status: 'test_sample',
+    selected: false,
+    reason: 'Contacto sintético para prueba interna; nunca entra en la cola real.',
+    exclusion_reason: null,
+    custom_fields: {
+      nombre: 'Paciente de ejemplo',
+      nombre_paciente: 'Paciente de ejemplo',
+      nombre_completo: 'Paciente de ejemplo',
+      clinica: displayClinicName,
+      nombre_clinica: displayClinicName,
+      firma_resenas: senderName,
+      tratamiento: 'Tratamiento de ejemplo',
+      fecha: new Date().toISOString().slice(0, 10),
+      test_sample: true,
+    },
+    missing_variables: [],
+    dispatch_status: 'test_only',
+    notes: 'Contacto sintético generado para enviar una prueba al teléfono del usuario.',
+  });
+}
+
 function getSingleClinicIdForDispatchCalendar(list, fallbackScope = {}) {
   const fromList = Number(list?.clinica_id || 0);
   if (Number.isInteger(fromList) && fromList > 0) return fromList;
@@ -7299,27 +7346,31 @@ async function sendTest(scope, campaignId, body = {}) {
     err.status = 409;
     throw err;
   }
-  const item = body.item_id
+  let item = body.item_id
     ? await MarketingPatientListItem.findOne({ where: { id: body.item_id, list_id: list.id } })
     : await MarketingPatientListItem.findOne({ where: { list_id: list.id, status: 'ready' }, order: [['id', 'ASC']] });
-  if (!item) {
-    const err = new Error('La campaña no tiene contactos listos para generar variables de prueba.');
-    err.status = 400;
-    throw err;
-  }
   const targetPhone = whatsappService.normalizePhoneNumber(body.to || body.phone || '');
   if (!targetPhone) {
     const err = new Error('Número de prueba no válido.');
     err.status = 400;
     throw err;
   }
-  const plainItem = item.get({ plain: true });
-  const clinicId = Number(body.clinic_id || body.clinica_id || plainItem.clinica_id || getClinicIdForList(list, scope) || 0);
+  const initialPlainItem = item?.get ? item.get({ plain: true }) : item;
+  const clinicId = Number(body.clinic_id || body.clinica_id || initialPlainItem?.clinica_id || getClinicIdForList(list, scope) || 0);
   if (!clinicId) {
     const err = new Error('La campaña necesita una clínica concreta para enviar WhatsApp.');
     err.status = 400;
     throw err;
   }
+  if (!item && isReviewTemplateUsage(templateUsage)) {
+    item = await getOrCreateReviewTestSampleItem(list, clinicId, listCriteria);
+  }
+  if (!item) {
+    const err = new Error('La campaña no tiene contactos listos para generar variables de prueba.');
+    err.status = 400;
+    throw err;
+  }
+  const plainItem = item.get({ plain: true });
   const clinic = await loadClinicForTemplateVariables(clinicId);
   const clinicConfig = await whatsappService.getClinicConfig(clinicId);
   if (!clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
