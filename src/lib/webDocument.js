@@ -57,6 +57,7 @@ const BINDABLE_PROPS = Object.freeze({
   gallery: new Set(),
   video: new Set(['title', 'video_id']),
   location_map: new Set(['title', 'address', 'directions_url']),
+  breadcrumbs: new Set(),
   button: new Set(['label', 'target']),
   intake_form: new Set(['title', 'description']),
   section: new Set(),
