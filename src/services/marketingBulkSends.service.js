@@ -406,6 +406,17 @@ function isStarTextReviewBody(value) {
     && /5\s*[⭐★]{5}/.test(text);
 }
 
+function isLegacyStarTextReviewBody(value) {
+  const text = normalizeText(value);
+  const normalized = normalizeKey(text);
+  return normalized.includes('valoracion')
+    && /1\s*[⭐★]/.test(text)
+    && /2\s*[⭐★]{2}/.test(text)
+    && /3\s*[⭐★]{3}/.test(text)
+    && /4\s*[⭐★]{4}/.test(text)
+    && /5\s*[⭐★]{5}/.test(text);
+}
+
 function reviewTemplateBodyHasSender(value) {
   const raw = String(value || '');
   const normalized = normalizeKey(raw);
@@ -3648,6 +3659,27 @@ function isPrimaryReviewRequestWhatsappTemplateCandidate(template) {
     || REVIEW_TEMPLATE_USAGES.has(normalizeTemplateUsage(plain.variables?.template_usage));
 }
 
+function isLegacyReviewRequestWhatsappTemplateCandidate(template) {
+  if (!isReviewWhatsappTemplateCandidate(template)) return false;
+  if (isReviewReminderWhatsappTemplateCandidate(template)) return false;
+  if (templateHasButtonComponents(template)) return false;
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  const catalogTemplateId = Number(plain.catalog_template_id || plain.catalog?.id || 0);
+  const identity = normalizeKey([
+    plain.name,
+    plain.display_name,
+    plain.catalog?.name,
+    plain.catalog?.display_name,
+    JSON.stringify(plain.variables || ''),
+  ].filter(Boolean).join(' '));
+  const isDefaultReviewTemplate = catalogTemplateId === 9
+    || identity.includes('clinicaclick_solicitar_resena')
+    || identity.includes('solicitar_resena');
+  return isDefaultReviewTemplate
+    && getTemplateCategory(plain) === 'MARKETING'
+    && isLegacyStarTextReviewBody(extractBodyText(plain.components));
+}
+
 function reviewTemplateMatchesCurrentCatalogBody(template) {
   const plain = template?.get ? template.get({ plain: true }) : (template || {});
   const currentCatalogBody = normalizeText(plain.catalog?.body_text);
@@ -3764,12 +3796,18 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
 
   if (explicitTemplateId) {
     const explicit = await resolveWhatsappTemplate(explicitTemplateId, scope);
-    if (explicit && explicit.is_active !== false && String(explicit.status || '').toUpperCase() === 'APPROVED' && isPrimaryReviewRequestWhatsappTemplateCandidate(explicit)) {
+    const explicitIsReviewCandidate = explicit
+      && (
+        isPrimaryReviewRequestWhatsappTemplateCandidate(explicit)
+        || isLegacyReviewRequestWhatsappTemplateCandidate(explicit)
+      );
+    if (explicit && explicit.is_active !== false && String(explicit.status || '').toUpperCase() === 'APPROVED' && explicitIsReviewCandidate) {
       const plainExplicit = explicit.get ? explicit.get({ plain: true }) : explicit;
       const explicitMatchesWaba = !targetWabaId || !getTemplateWabaId(explicit) || getTemplateWabaId(explicit) === targetWabaId;
       const explicitHasImageHeader = templateHasImageHeader(explicit);
       const explicitMatchesMedia = explicitHasImageHeader ? preferPhoto : true;
-      const explicitHasAllowedCopy = isAllowedReviewRequestTemplateCopy(explicit);
+      const explicitHasAllowedCopy = isAllowedReviewRequestTemplateCopy(explicit)
+        || isLegacyReviewRequestWhatsappTemplateCandidate(explicit);
       if (explicitMatchesWaba && explicitMatchesMedia && explicitHasAllowedCopy) {
         return explicit;
       }
