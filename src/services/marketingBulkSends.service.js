@@ -25,6 +25,7 @@ const publicMediaPersonalizationService = require('./publicMediaPersonalization.
 const {
   Clinica,
   ClinicaHorario,
+  ClinicBusinessLocation,
   ClinicMetaAsset,
   Conversation,
   MarketingPatientContactEvent,
@@ -6344,6 +6345,100 @@ async function loadDispatchCalendarRowsForClinic(clinicId) {
   }).catch(() => []);
 }
 
+function googleBusinessDayToIsoWeekday(value) {
+  const normalized = normalizeText(value).toUpperCase();
+  const map = {
+    MONDAY: 1,
+    TUESDAY: 2,
+    WEDNESDAY: 3,
+    THURSDAY: 4,
+    FRIDAY: 5,
+    SATURDAY: 6,
+    SUNDAY: 7,
+  };
+  return Object.prototype.hasOwnProperty.call(map, normalized) ? map[normalized] : null;
+}
+
+function googleBusinessTimeToMinutes(value) {
+  if (typeof value === 'string') {
+    const parsed = parseBusinessTimeToMinutes(value, Number.NaN);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  const source = value && typeof value === 'object' ? value : {};
+  const hour = Number(source.hours ?? source.hour ?? 0);
+  const minute = Number(source.minutes ?? source.minute ?? 0);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute) || hour < 0 || hour > 24 || minute < 0 || minute > 59) {
+    return null;
+  }
+  if (hour === 24 && minute > 0) return null;
+  return Math.min(24 * 60, Math.round(hour) * 60 + Math.round(minute));
+}
+
+function normalizeGoogleBusinessPeriods(periods = []) {
+  const byDay = new Map();
+  const push = (weekday, startMin, endMin) => {
+    if (!Number.isInteger(weekday) || weekday < 1 || weekday > 7) return;
+    if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) return;
+    const list = byDay.get(weekday) || [];
+    list.push({ startMin, endMin });
+    byDay.set(weekday, list);
+  };
+
+  for (const period of Array.isArray(periods) ? periods : []) {
+    const openDay = googleBusinessDayToIsoWeekday(period?.openDay || period?.open_day || period?.day);
+    const closeDay = googleBusinessDayToIsoWeekday(period?.closeDay || period?.close_day || period?.openDay || period?.open_day || period?.day);
+    const startMin = googleBusinessTimeToMinutes(period?.openTime || period?.open_time);
+    const endMin = googleBusinessTimeToMinutes(period?.closeTime || period?.close_time);
+    if (openDay === null || closeDay === null || startMin === null || endMin === null) continue;
+    if (openDay === closeDay) {
+      push(openDay, startMin, endMin);
+    } else {
+      push(openDay, startMin, 24 * 60);
+      push(closeDay, 0, endMin);
+    }
+  }
+
+  const rows = [];
+  for (const [weekday, intervals] of byDay.entries()) {
+    const sorted = intervals.sort((left, right) => left.startMin - right.startMin || left.endMin - right.endMin);
+    const merged = [];
+    for (const interval of sorted) {
+      const last = merged[merged.length - 1];
+      if (last && interval.startMin <= last.endMin) {
+        last.endMin = Math.max(last.endMin, interval.endMin);
+      } else {
+        merged.push({ ...interval });
+      }
+    }
+    for (const interval of merged) {
+      rows.push({
+        dia_semana: weekday,
+        activo: true,
+        hora_inicio: formatBusinessTime(interval.startMin),
+        hora_fin: formatBusinessTime(Math.min(interval.endMin, (24 * 60) - 1)),
+      });
+    }
+  }
+  return rows.sort((left, right) => left.dia_semana - right.dia_semana || left.hora_inicio.localeCompare(right.hora_inicio));
+}
+
+async function loadBusinessProfileCalendarRowsForClinic(clinicId) {
+  const safeClinicId = Number(clinicId || 0);
+  if (!safeClinicId || !ClinicBusinessLocation) return [];
+  const location = await ClinicBusinessLocation.findOne({
+    where: { clinica_id: safeClinicId, is_active: true },
+    order: [['last_synced_at', 'DESC'], ['id', 'DESC']],
+  }).catch(() => null);
+  const plain = location?.get ? location.get({ plain: true }) : location;
+  const raw = asPlainObject(plain?.raw_payload);
+  const periods = raw.regularHours?.periods
+    || raw.regular_hours?.periods
+    || raw.openingHours?.periods
+    || raw.opening_hours?.periods
+    || [];
+  return normalizeGoogleBusinessPeriods(periods);
+}
+
 function buildBusinessHoursFromCalendarRows(rows = [], base = {}) {
   const intervalsByWeekday = {};
   let minStart = Number.POSITIVE_INFINITY;
@@ -6378,8 +6473,8 @@ function buildBusinessHoursFromCalendarRows(rows = [], base = {}) {
     end_time: formatBusinessTime(maxEnd),
     allowed_weekdays: allowedWeekdays,
     intervals_by_weekday: intervalsByWeekday,
-    label: `${formatBusinessTime(minStart)}-${formatBusinessTime(maxEnd)} (horario de clínica)`,
-    source: 'clinic_hours',
+    label: base.label || `${formatBusinessTime(minStart)}-${formatBusinessTime(maxEnd)} (horario de clínica)`,
+    source: base.source || 'clinic_hours',
   });
 }
 
@@ -6399,11 +6494,17 @@ async function resolveReviewAliasClinicIdForDispatchCalendar(clinicId) {
 
 async function hydrateDispatchBusinessHoursForList(list, scope = {}, businessHours = null) {
   const normalized = normalizeBusinessHours(businessHours || {});
-  if (!ClinicaHorario) return normalized;
   const clinicId = getSingleClinicIdForDispatchCalendar(list, scope);
   if (!clinicId) return normalized;
   let rows = await loadDispatchCalendarRowsForClinic(clinicId);
   let sourceClinicId = clinicId;
+  let source = rows.length ? 'clinic_hours' : '';
+  if (!rows.length) {
+    rows = await loadBusinessProfileCalendarRowsForClinic(clinicId);
+    if (rows.length) {
+      source = 'business_profile_hours';
+    }
+  }
   if (!rows.length && isReviewRequestList(list)) {
     const aliasClinicId = await resolveReviewAliasClinicIdForDispatchCalendar(clinicId);
     if (aliasClinicId) {
@@ -6411,6 +6512,14 @@ async function hydrateDispatchBusinessHoursForList(list, scope = {}, businessHou
       if (aliasRows.length) {
         rows = aliasRows;
         sourceClinicId = aliasClinicId;
+        source = 'review_alias_clinic_hours';
+      } else {
+        const aliasProfileRows = await loadBusinessProfileCalendarRowsForClinic(aliasClinicId);
+        if (aliasProfileRows.length) {
+          rows = aliasProfileRows;
+          sourceClinicId = aliasClinicId;
+          source = 'review_alias_business_profile_hours';
+        }
       }
     }
   }
@@ -6418,6 +6527,7 @@ async function hydrateDispatchBusinessHoursForList(list, scope = {}, businessHou
     ...normalized,
     timezone: normalized.timezone || DISPATCH_TIMEZONE,
     source_clinic_id: sourceClinicId,
+    source,
   });
   return calendarBusinessHours || normalized;
 }
