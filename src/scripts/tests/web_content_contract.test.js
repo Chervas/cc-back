@@ -105,6 +105,46 @@ function main() {
   assert.equal(imageFields.image_asset_id, articleImageId);
   assert.equal(imageFields.alt_text, articleWithImage.content.alt_text);
   assert.match(articleWithImage.hash, /^[a-f0-9]{64}$/);
+  const articleWithBlocks = validateWebContentEntry({
+    type: 'article',
+    locale: 'es-ES',
+    title: 'Artículo con bloques',
+    content: {
+      title: 'Implantes dentales',
+      excerpt: 'Guía clara.',
+      sections: [{ heading: 'Preparación', paragraphs: ['Primer párrafo.'] }],
+      blocks: [
+        { type: 'text', heading: 'Preparación', content: 'Primer párrafo.\n\nSegundo párrafo.' },
+        {
+          type: 'image',
+          image_asset_id: articleImageId,
+          alt_text: 'Recepción de la clínica dental sin pacientes identificables',
+          caption: 'Recepción de la clínica',
+        },
+        {
+          type: 'video',
+          provider: 'youtube',
+          url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+          title: 'Cómo preparar tu primera visita',
+        },
+      ],
+    },
+  });
+  assert.deepEqual(articleWithBlocks.content.blocks, [
+    { type: 'text', heading: 'Preparación', content: 'Primer párrafo.\n\nSegundo párrafo.' },
+    {
+      type: 'image',
+      image_asset_id: articleImageId,
+      alt_text: 'Recepción de la clínica dental sin pacientes identificables',
+      caption: 'Recepción de la clínica',
+    },
+    {
+      type: 'video',
+      provider: 'youtube',
+      url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+      title: 'Cómo preparar tu primera visita',
+    },
+  ]);
   assert.notEqual(schemaConfigured.hash, validateWebContentEntry({
     type: 'article',
     locale: 'es-ES',
@@ -150,6 +190,45 @@ function main() {
       },
     }),
     (error) => error instanceof WebContentValidationError && error.code === 'content_image_alt_required'
+  );
+  assert.throws(
+    () => validateWebContentEntry({
+      type: 'article',
+      title: 'Artículo con HTML en bloque',
+      content: {
+        title: 'Implantes dentales',
+        excerpt: 'Guía clara.',
+        sections: [{ heading: 'Preparación', paragraphs: ['Primer párrafo.'] }],
+        blocks: [{ type: 'text', content: '<strong>No permitido</strong>' }],
+      },
+    }),
+    (error) => error instanceof WebContentValidationError && error.code === 'content_markup_forbidden'
+  );
+  assert.throws(
+    () => validateWebContentEntry({
+      type: 'article',
+      title: 'Artículo con bloque libre',
+      content: {
+        title: 'Implantes dentales',
+        excerpt: 'Guía clara.',
+        sections: [{ heading: 'Preparación', paragraphs: ['Primer párrafo.'] }],
+        blocks: [{ type: 'image', image_asset_id: articleImageId, alt_text: 'Imagen segura', raw_html: '<img>' }],
+      },
+    }),
+    (error) => error instanceof WebContentValidationError && error.code === 'invalid_content_field'
+  );
+  assert.throws(
+    () => validateWebContentEntry({
+      type: 'article',
+      title: 'Artículo con vídeo externo',
+      content: {
+        title: 'Implantes dentales',
+        excerpt: 'Guía clara.',
+        sections: [{ heading: 'Preparación', paragraphs: ['Primer párrafo.'] }],
+        blocks: [{ type: 'video', provider: 'youtube', url: 'https://example.com/video' }],
+      },
+    }),
+    (error) => error instanceof WebContentValidationError && error.code === 'invalid_article_video_url'
   );
   assert.throws(
     () => validateWebContentEntry({

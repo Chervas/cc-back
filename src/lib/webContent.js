@@ -49,6 +49,8 @@ const WEB_CONTENT_TYPES_WITH_IMAGE = Object.freeze([
   'article',
   'category',
 ]);
+const WEB_CONTENT_ARTICLE_BLOCK_TYPES = Object.freeze(['text', 'image', 'video']);
+const WEB_CONTENT_ARTICLE_VIDEO_PROVIDERS = Object.freeze(['youtube', 'vimeo']);
 
 class WebContentValidationError extends Error {
   constructor(code, message, details = undefined) {
@@ -241,6 +243,18 @@ function contentKeysForType(type, baseKeys) {
   return [...baseKeys, 'image_asset_id', 'alt_text'];
 }
 
+function assertContentImageAssetId(value, path) {
+  const imageAssetId = assertText(value, path, { min: 1, max: 36 });
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,35}$/.test(imageAssetId)) {
+    fail(
+      'invalid_content_image_asset_id',
+      `${path} debe ser un identificador opaco de Medios.`,
+      path
+    );
+  }
+  return imageAssetId;
+}
+
 function validateContentImageFields(type, value, path = '/content') {
   if (!WEB_CONTENT_TYPES_WITH_IMAGE.includes(type)) return {};
   const rawImageAssetId = value?.image_asset_id;
@@ -255,14 +269,7 @@ function validateContentImageFields(type, value, path = '/content') {
       `${path}/image_asset_id`
     );
   }
-  const imageAssetId = assertText(rawImageAssetId, `${path}/image_asset_id`, { min: 1, max: 36 });
-  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,35}$/.test(imageAssetId)) {
-    fail(
-      'invalid_content_image_asset_id',
-      `${path}/image_asset_id debe ser un identificador opaco de Medios.`,
-      `${path}/image_asset_id`
-    );
-  }
+  const imageAssetId = assertContentImageAssetId(rawImageAssetId, `${path}/image_asset_id`);
   if (!hasAlt) {
     fail(
       'content_image_alt_required',
@@ -311,6 +318,69 @@ function validateArticleSections(value) {
         maxItems: 20,
         itemMax: 5000,
       }),
+    };
+  });
+}
+
+function assertArticleVideoUrl(value, path) {
+  const url = assertHttpsUrl(value, path);
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    fail('invalid_article_video_url', `${path} debe ser una URL pública de YouTube o Vimeo.`, path);
+  }
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+  const allowed = host === 'youtube.com'
+    || host === 'youtu.be'
+    || host.endsWith('.youtube.com')
+    || host === 'vimeo.com'
+    || host.endsWith('.vimeo.com');
+  if (!allowed) {
+    fail('invalid_article_video_url', `${path} debe ser una URL pública de YouTube o Vimeo.`, path);
+  }
+  return url;
+}
+
+function validateArticleBlocks(value) {
+  if (value === undefined) return null;
+  if (!Array.isArray(value) || value.length < 1 || value.length > 80) {
+    fail('invalid_article_blocks', 'content.blocks debe tener entre 1 y 80 bloques editoriales.', '/content/blocks');
+  }
+  return value.map((block, index) => {
+    const path = `/content/blocks/${index}`;
+    assertPlainObject(block, path);
+    const type = assertText(block.type, `${path}/type`, { min: 1, max: 20 });
+    if (!WEB_CONTENT_ARTICLE_BLOCK_TYPES.includes(type)) {
+      fail('invalid_article_block_type', `${path}/type no está permitido.`, `${path}/type`, { allowed: WEB_CONTENT_ARTICLE_BLOCK_TYPES });
+    }
+    if (type === 'text') {
+      assertKeys(block, ['type', 'heading', 'content'], ['type', 'content'], path);
+      return {
+        type,
+        heading: block.heading == null ? null : assertText(block.heading, `${path}/heading`, { min: 1, max: 180 }),
+        content: assertText(block.content, `${path}/content`, { min: 1, max: 12000 }),
+      };
+    }
+    if (type === 'image') {
+      assertKeys(block, ['type', 'image_asset_id', 'alt_text', 'caption'], ['type', 'image_asset_id', 'alt_text'], path);
+      return {
+        type,
+        image_asset_id: assertContentImageAssetId(block.image_asset_id, `${path}/image_asset_id`),
+        alt_text: assertText(block.alt_text, `${path}/alt_text`, { min: 1, max: 500 }),
+        caption: block.caption == null ? null : assertText(block.caption, `${path}/caption`, { min: 1, max: 500 }),
+      };
+    }
+    assertKeys(block, ['type', 'provider', 'url', 'title'], ['type', 'provider', 'url'], path);
+    const provider = assertText(block.provider, `${path}/provider`, { min: 1, max: 20 });
+    if (!WEB_CONTENT_ARTICLE_VIDEO_PROVIDERS.includes(provider)) {
+      fail('invalid_article_video_provider', `${path}/provider no está permitido.`, `${path}/provider`, { allowed: WEB_CONTENT_ARTICLE_VIDEO_PROVIDERS });
+    }
+    return {
+      type,
+      provider,
+      url: assertArticleVideoUrl(block.url, `${path}/url`),
+      title: block.title == null ? null : assertText(block.title, `${path}/title`, { min: 1, max: 180 }),
     };
   });
 }
@@ -382,13 +452,17 @@ function validateTypedContent(type, value) {
         version_label: assertText(value.version_label, `${path}/version_label`, { min: 1, max: 80 }),
       };
     case 'article':
-      assertKeys(value, contentKeysForType(type, ['title', 'excerpt', 'sections']), ['title', 'excerpt', 'sections'], path);
-      return {
-        title: assertText(value.title, `${path}/title`, { min: 1, max: 180 }),
-        excerpt: assertText(value.excerpt, `${path}/excerpt`, { min: 1, max: 500 }),
-        sections: validateArticleSections(value.sections),
-        ...validateContentImageFields(type, value, path),
-      };
+      assertKeys(value, contentKeysForType(type, ['title', 'excerpt', 'sections', 'blocks']), ['title', 'excerpt', 'sections'], path);
+      {
+        const blocks = validateArticleBlocks(value.blocks);
+        return {
+          title: assertText(value.title, `${path}/title`, { min: 1, max: 180 }),
+          excerpt: assertText(value.excerpt, `${path}/excerpt`, { min: 1, max: 500 }),
+          sections: validateArticleSections(value.sections),
+          ...(blocks ? { blocks } : {}),
+          ...validateContentImageFields(type, value, path),
+        };
+      }
     case 'category':
       assertKeys(value, contentKeysForType(type, ['name', 'description']), ['name'], path);
       return {
