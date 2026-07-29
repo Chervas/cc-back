@@ -3680,6 +3680,21 @@ function isLegacyReviewRequestWhatsappTemplateCandidate(template) {
     && isLegacyStarTextReviewBody(extractBodyText(plain.components));
 }
 
+function isDefaultReviewRequestWhatsappTemplateIdentity(template) {
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  const catalogTemplateId = Number(plain.catalog_template_id || plain.catalog?.id || 0);
+  const identity = normalizeKey([
+    plain.name,
+    plain.display_name,
+    plain.catalog?.name,
+    plain.catalog?.display_name,
+    JSON.stringify(plain.variables || ''),
+  ].filter(Boolean).join(' '));
+  return catalogTemplateId === 9
+    || identity.includes(REVIEW_TEMPLATE_NAME)
+    || identity.includes('solicitar_resena');
+}
+
 function reviewTemplateMatchesCurrentCatalogBody(template) {
   const plain = template?.get ? template.get({ plain: true }) : (template || {});
   const currentCatalogBody = normalizeText(plain.catalog?.body_text);
@@ -3746,6 +3761,33 @@ function templateMatchesCurrentCatalogBody(template) {
 
 function scoreReviewTemplateFreshness(template) {
   return reviewTemplateMatchesCurrentCatalogBody(template) ? 1 : 0;
+}
+
+function scoreReviewTemplatePreference(template, options = {}) {
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  const category = getTemplateCategory(plain);
+  const identity = normalizeKey([
+    plain.name,
+    plain.display_name,
+    plain.catalog?.name,
+    plain.catalog?.display_name,
+    JSON.stringify(plain.variables || ''),
+  ].filter(Boolean).join(' '));
+  const preferPhoto = options.preferPhoto === true;
+  const hasImageHeader = templateHasImageHeader(plain);
+  let score = 0;
+
+  if (category === 'MARKETING') score += 50;
+  if (category && category !== 'MARKETING') score -= 30;
+  if (isApprovedExternalReviewRequestTemplate(plain)) score += 30;
+  if (isAdminCustomReviewTemplate(plain)) score += 20;
+  if (identity.includes('solicitud_de_opinion') || identity.includes('opinion_tras_visita')) score += 20;
+  if (reviewTemplateMatchesCurrentCatalogBody(plain)) score += 10;
+  if (isDefaultReviewRequestWhatsappTemplateIdentity(plain)) score -= 15;
+  if (isLegacyReviewRequestWhatsappTemplateCandidate(plain)) score -= 10;
+  if (hasImageHeader) score += preferPhoto ? 8 : -25;
+
+  return score;
 }
 
 async function findApprovedReviewReminderWhatsappTemplate(scope) {
@@ -3852,6 +3894,10 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
         }
       }
     }
+    if (explicit && isDefaultReviewRequestWhatsappTemplateIdentity(explicit)) {
+      const fallback = await findApprovedReviewWhatsappTemplate(scope, null, options);
+      if (fallback) return fallback;
+    }
     return null;
   }
 
@@ -3878,6 +3924,9 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
         const aScore = scoreWhatsappTemplateForScope(a, clinicIds, targetWabaId);
         const bScore = scoreWhatsappTemplateForScope(b, clinicIds, targetWabaId);
         if (aScore !== bScore) return bScore - aScore;
+        const aPreference = scoreReviewTemplatePreference(a, { preferPhoto });
+        const bPreference = scoreReviewTemplatePreference(b, { preferPhoto });
+        if (aPreference !== bPreference) return bPreference - aPreference;
         return Number(b.id || 0) - Number(a.id || 0);
       })[0] || null;
     if (photoTemplate) return photoTemplate;
@@ -3918,11 +3967,15 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
   return candidates
     .filter(isPrimaryReviewRequestWhatsappTemplateCandidate)
     .filter(isAllowedReviewRequestTemplateCopy)
+    .filter((template) => (preferPhoto ? templateHasImageHeader(template) : !templateHasImageHeader(template)))
     .filter((template) => scoreWhatsappTemplateForScope(template, clinicIds, targetWabaId) > 0)
     .sort((a, b) => {
       const aScore = scoreWhatsappTemplateForScope(a, clinicIds, targetWabaId);
       const bScore = scoreWhatsappTemplateForScope(b, clinicIds, targetWabaId);
       if (aScore !== bScore) return bScore - aScore;
+      const aPreference = scoreReviewTemplatePreference(a, { preferPhoto });
+      const bPreference = scoreReviewTemplatePreference(b, { preferPhoto });
+      if (aPreference !== bPreference) return bPreference - aPreference;
       const aFresh = scoreReviewTemplateFreshness(a);
       const bFresh = scoreReviewTemplateFreshness(b);
       if (aFresh !== bFresh) return bFresh - aFresh;
