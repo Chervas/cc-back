@@ -130,6 +130,14 @@ test('publica anchos propios de columna con fallback seguro para hermanas hereda
         tablet: 6,
         mobile: 12,
       },
+      column_heights: {
+        desktop: 320,
+        tablet: 240,
+      },
+      column_orders: {
+        desktop: 2,
+        mobile: -1,
+      },
     },
     children: originalChildren,
   };
@@ -152,10 +160,14 @@ test('publica anchos propios de columna con fallback seguro para hermanas hereda
 
   assert.match(html, /cc-role-row cc-layout-grid cc-cols-2 cc-column-widths/);
   assert.doesNotMatch(html, /cc-tracks-6-6/);
-  assert.match(html, new RegExp(`${leftColumnId}[^"]*" class="[^"]*cc-col-span-8[^"]*cc-tablet-col-span-6[^"]*cc-mobile-col-span-12`));
+  assert.match(html, new RegExp(`${leftColumnId}[^"]*" class="[^"]*cc-col-span-8[^"]*cc-tablet-col-span-6[^"]*cc-mobile-col-span-12[^"]*cc-col-min-h-320[^"]*cc-tablet-col-min-h-240[^"]*cc-col-order-2[^"]*cc-mobile-col-order-n1`));
   assert.match(html, new RegExp(`${rightColumnId}[^"]*" class="[^"]*cc-col-span-6[^"]*cc-tablet-col-span-6[^"]*cc-mobile-col-span-12`));
   assert.match(css, /\.cc-role-row\.cc-column-widths>\.cc-container\{display:grid;grid-template-columns:repeat\(12,minmax\(0,1fr\)\)\}/);
   assert.match(css, /\.cc-role-row\.cc-column-widths>\.cc-container>\.cc-role-column\.cc-col-span-8\{grid-column:span 8\/span 8\}/);
+  assert.match(css, /\.cc-role-column\.cc-col-min-h-320\{min-height:320px\}/);
+  assert.match(css, /\.cc-role-column\.cc-tablet-col-min-h-240\{min-height:240px\}/);
+  assert.match(css, /\.cc-role-column\.cc-col-order-2\{order:2\}/);
+  assert.match(css, /\.cc-role-column\.cc-mobile-col-order-n1\{order:-1\}/);
 });
 
 test('publica animaciones tipadas como clases seguras generadas por el renderer', () => {
@@ -169,7 +181,7 @@ test('publica animaciones tipadas como clases seguras generadas por el renderer'
   const css = artifact.files[stylesheetPath];
   const html = artifact.files['index.html'];
 
-  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.14.0');
+  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.16.0');
   assert.match(html, /cc-animate-slide_up/);
   assert.match(css, /\.cc-animate-slide_up\{animation:ccSlideUp \.46s cubic-bezier/);
   assert.match(css, /@media\(prefers-reduced-motion:no-preference\)/);
@@ -1018,7 +1030,7 @@ test('renderer actual honra tokens, responsive, fuentes e imagen focal en CSS de
   const cssPath = Object.keys(artifact.files).find((path) => path.endsWith('.css'));
   const css = artifact.files[cssPath];
   const html = artifact.files['index.html'];
-  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.14.0');
+  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.16.0');
   assert.match(html, /cc-layout-grid cc-cols-4[^"\n]*cc-bg-brand[^"\n]*cc-width-wide[^"\n]*cc-pt-2xl[^"\n]*cc-radius-full[^"\n]*cc-shadow-lg[^"\n]*cc-mobile-cols-1/);
   assert.match(html, /cc-fit-contain cc-aspect-21-9 cc-focal-37-62/);
   assert.match(html, /<div class="cc-image-frame"><img[^>]*width="2100" height="900">/);

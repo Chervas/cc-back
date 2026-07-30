@@ -13,7 +13,7 @@ const {
   webArtifactBundleFootprintBytes,
 } = require('./webArtifactBudget');
 
-const RENDERER_VERSION = 'clinicaclick-web-renderer/1.15.0';
+const RENDERER_VERSION = 'clinicaclick-web-renderer/1.16.0';
 const SAFE_EXTERNAL_REL = /^(?:\/[A-Za-z0-9_][A-Za-z0-9/_-]*|https:\/\/[^\s]+)$/;
 const SAFE_YOUTUBE_VIDEO_ID = /^[A-Za-z0-9_-]{6,64}$/;
 const SAFE_VIMEO_VIDEO_ID = /^[0-9]{6,12}$/;
@@ -582,6 +582,20 @@ function validColumnWidth(node, breakpoint) {
   return Number.isInteger(width) && width >= 1 && width <= 12 ? width : null;
 }
 
+function validColumnHeight(node, breakpoint) {
+  const height = node?.props?.column_heights?.[breakpoint];
+  return Number.isInteger(height) && height >= 0 && height <= 2000 ? height : null;
+}
+
+function validColumnOrder(node, breakpoint) {
+  const order = node?.props?.column_orders?.[breakpoint];
+  return Number.isInteger(order) && order >= -24 && order <= 24 ? order : null;
+}
+
+function columnOrderClassSuffix(order) {
+  return order < 0 ? `n${Math.abs(order)}` : String(order);
+}
+
 function sectionRole(node) {
   return node?.props?.structure_role || 'section';
 }
@@ -605,15 +619,28 @@ function sectionTrackClassList(document, node) {
   }).filter(Boolean).join(' ');
 }
 
-function sectionColumnWidthClassList(document, node, parentRow = null, parentChildIndex = null) {
+function sectionColumnClassList(document, node, parentRow = null, parentChildIndex = null) {
   if (sectionRole(node) !== 'column') return '';
-  return ['desktop', 'tablet', 'mobile'].map((breakpoint) => {
+  const widthClasses = ['desktop', 'tablet', 'mobile'].map((breakpoint) => {
     const width = validColumnWidth(node, breakpoint)
       || fallbackColumnWidthFromParent(document, parentRow, parentChildIndex, breakpoint);
     if (!width) return '';
     const prefix = breakpoint === 'desktop' ? 'cc-col-span' : `cc-${breakpoint}-col-span`;
     return `${prefix}-${width}`;
-  }).filter(Boolean).join(' ');
+  }).filter(Boolean);
+  const heightClasses = ['desktop', 'tablet', 'mobile'].map((breakpoint) => {
+    const height = validColumnHeight(node, breakpoint);
+    if (height === null) return '';
+    const prefix = breakpoint === 'desktop' ? 'cc-col-min-h' : `cc-${breakpoint}-col-min-h`;
+    return `${prefix}-${height}`;
+  }).filter(Boolean);
+  const orderClasses = ['desktop', 'tablet', 'mobile'].map((breakpoint) => {
+    const order = validColumnOrder(node, breakpoint);
+    if (order === null) return '';
+    const prefix = breakpoint === 'desktop' ? 'cc-col-order' : `cc-${breakpoint}-col-order`;
+    return `${prefix}-${columnOrderClassSuffix(order)}`;
+  }).filter(Boolean);
+  return [...widthClasses, ...heightClasses, ...orderClasses].join(' ');
 }
 
 function fallbackColumnWidthFromParent(document, parentRow, parentChildIndex, breakpoint) {
@@ -1230,7 +1257,7 @@ function renderNode(nodeId, document, snapshot, context, ancestors = new Set(), 
     const globalAttribute = globalSlot ? ` data-cc-global="${globalSlot}"` : '';
     const globalClass = globalSlot ? ` cc-site-${globalSlot}` : '';
     const roleClass = `cc-role-${escapeHtml(node.props.structure_role || 'section')}`;
-    return `<${tag} id="cc-${escapeHtml(node.id)}"${globalAttribute} class="cc-node cc-section${globalClass} ${roleClass} cc-layout-${escapeHtml(node.props.layout)} cc-cols-${Number(node.props.columns)} ${sectionTrackClassList(document, node)} ${sectionColumnWidthClassList(document, node, parentSection, parentChildIndex)} ${styleClassList(node)}"><div class="cc-container">${children}</div></${tag}>`;
+    return `<${tag} id="cc-${escapeHtml(node.id)}"${globalAttribute} class="cc-node cc-section${globalClass} ${roleClass} cc-layout-${escapeHtml(node.props.layout)} cc-cols-${Number(node.props.columns)} ${sectionTrackClassList(document, node)} ${sectionColumnClassList(document, node, parentSection, parentChildIndex)} ${styleClassList(node)}"><div class="cc-container">${children}</div></${tag}>`;
   }
   if (node.type === 'heading') {
     const level = Math.min(6, Math.max(1, Number(node.props.level) || 2));
@@ -1319,6 +1346,25 @@ function stylesheet(tokens, document = { nodes: {} }) {
       .map((span) => `.cc-role-row.cc-column-widths>.cc-container>.cc-role-column.cc-${prefix}col-span-${span}{grid-column:span ${span}/span ${span}}`)
       .join('')
   );
+  const distinctColumnNumbers = (prop, breakpoint) => [...new Set(Object.values(document.nodes || {})
+    .filter((node) => node?.type === 'section' && sectionRole(node) === 'column')
+    .map((node) => node.props?.[prop]?.[breakpoint])
+    .filter((value) => Number.isInteger(value)))]
+    .sort((left, right) => left - right);
+  const columnHeightRules = (breakpoint = 'desktop') => {
+    const prefix = breakpoint === 'desktop' ? 'cc-col-min-h' : `cc-${breakpoint}-col-min-h`;
+    return distinctColumnNumbers('column_heights', breakpoint)
+      .filter((height) => height >= 0 && height <= 2000)
+      .map((height) => `.cc-role-column.${prefix}-${height}{min-height:${height}px}`)
+      .join('');
+  };
+  const columnOrderRules = (breakpoint = 'desktop') => {
+    const prefix = breakpoint === 'desktop' ? 'cc-col-order' : `cc-${breakpoint}-col-order`;
+    return distinctColumnNumbers('column_orders', breakpoint)
+      .filter((order) => order >= -24 && order <= 24)
+      .map((order) => `.cc-role-column.${prefix}-${columnOrderClassSuffix(order)}{order:${order}}`)
+      .join('');
+  };
   const columnTrackRules = (breakpoint) => Object.values(document.nodes || {})
     .filter((node) => node.type === 'section')
     .map((node) => validColumnTracks(node, breakpoint))
@@ -1337,6 +1383,8 @@ function stylesheet(tokens, document = { nodes: {} }) {
     + alignRules(`${breakpoint}-`)
     + columnRules(`${breakpoint}-`)
     + columnWidthRules(`${breakpoint}-`)
+    + columnHeightRules(breakpoint)
+    + columnOrderRules(breakpoint)
     + columnTrackRules(breakpoint)
   );
   const focalRules = [...new Set(Object.values(document.nodes || {})
@@ -1358,6 +1406,8 @@ function stylesheet(tokens, document = { nodes: {} }) {
     '.cc-node{min-width:0}.cc-container{margin-inline:auto;display:inherit;flex-direction:inherit;flex-wrap:inherit;gap:inherit}.cc-section{display:flex;width:100%}.cc-role-container>.cc-container,.cc-role-row>.cc-container{align-items:stretch}.cc-role-column{min-width:0}.cc-role-column>.cc-container{width:100%;min-width:0}.cc-layout-stack>.cc-container{display:flex;flex-direction:column}.cc-layout-row>.cc-container{display:flex;flex-direction:row;flex-wrap:wrap}.cc-layout-grid>.cc-container{display:grid}',
     columnRules(),
     columnWidthRules(),
+    columnHeightRules(),
+    columnOrderRules(),
     '.cc-section.cc-width-narrow>.cc-container{width:min(100% - 2rem,48rem)}.cc-section.cc-width-standard>.cc-container{width:min(100% - 2rem,72rem)}.cc-section.cc-width-wide>.cc-container{width:min(100% - 2rem,82.5rem)}.cc-section.cc-width-full>.cc-container{width:100%;padding-inline:1rem}.cc-node.cc-width-narrow:not(.cc-section){width:min(100%,48rem)}.cc-node.cc-width-standard:not(.cc-section){width:min(100%,72rem)}.cc-node.cc-width-wide:not(.cc-section){width:min(100%,82.5rem)}.cc-node.cc-width-full:not(.cc-section){width:100%}',
     spacingRules(),
     alignRules(),

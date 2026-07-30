@@ -399,6 +399,52 @@ function validateSectionColumnWidths(node, path, errors) {
   }
 }
 
+function validateSectionColumnHeights(node, path, errors) {
+  const heights = node.props.column_heights;
+  if (!heights) return;
+  if (node.props.structure_role !== 'column') {
+    errors.push(validationError(
+      'columnHeights',
+      `${path}/props/column_heights`,
+      'solo las columnas pueden guardar altura por breakpoint'
+    ));
+  }
+  for (const breakpoint of ['desktop', 'tablet', 'mobile']) {
+    const height = heights[breakpoint];
+    if (height === undefined) continue;
+    if (!Number.isInteger(height) || height < 0 || height > 2000) {
+      errors.push(validationError(
+        'columnHeights',
+        `${path}/props/column_heights/${breakpoint}`,
+        'debe ser un entero entre 0 y 2000'
+      ));
+    }
+  }
+}
+
+function validateSectionColumnOrders(node, path, errors) {
+  const orders = node.props.column_orders;
+  if (!orders) return;
+  if (node.props.structure_role !== 'column') {
+    errors.push(validationError(
+      'columnOrders',
+      `${path}/props/column_orders`,
+      'solo las columnas pueden guardar orden por breakpoint'
+    ));
+  }
+  for (const breakpoint of ['desktop', 'tablet', 'mobile']) {
+    const order = orders[breakpoint];
+    if (order === undefined) continue;
+    if (!Number.isInteger(order) || order < -24 || order > 24) {
+      errors.push(validationError(
+        'columnOrders',
+        `${path}/props/column_orders/${breakpoint}`,
+        'debe ser un entero entre -24 y 24'
+      ));
+    }
+  }
+}
+
 function validateGraph(document) {
   const errors = [];
   const nodes = document.nodes;
@@ -515,6 +561,8 @@ function validateGraph(document) {
     if (node.type === 'section') {
       validateSectionColumnTracks(node, nodePath, errors);
       validateSectionColumnWidths(node, nodePath, errors);
+      validateSectionColumnHeights(node, nodePath, errors);
+      validateSectionColumnOrders(node, nodePath, errors);
     }
 
     if (node.type === 'gallery' || node.type === 'slider') {

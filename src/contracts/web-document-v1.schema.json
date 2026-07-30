@@ -433,6 +433,48 @@
         }
       }
     },
+    "columnHeights": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "desktop": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2000
+        },
+        "tablet": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2000
+        },
+        "mobile": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2000
+        }
+      }
+    },
+    "columnOrders": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "desktop": {
+          "type": "integer",
+          "minimum": -24,
+          "maximum": 24
+        },
+        "tablet": {
+          "type": "integer",
+          "minimum": -24,
+          "maximum": 24
+        },
+        "mobile": {
+          "type": "integer",
+          "minimum": -24,
+          "maximum": 24
+        }
+      }
+    },
     "bindingIds": {
       "type": "array",
       "maxItems": 20,
@@ -460,6 +502,8 @@
             },
             "column_tracks": { "$ref": "#/definitions/columnTracks" },
             "column_widths": { "$ref": "#/definitions/columnWidths" },
+            "column_heights": { "$ref": "#/definitions/columnHeights" },
+            "column_orders": { "$ref": "#/definitions/columnOrders" },
             "semantic_tag": {
               "enum": ["section", "header", "main", "aside", "footer"]
             },
