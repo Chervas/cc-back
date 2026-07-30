@@ -225,24 +225,69 @@ function dedupeSources(values = []) {
   return result;
 }
 
+function providerLabel(provider) {
+  return provider === 'openai' ? 'ChatGPT' : 'Gemini';
+}
+
+function providerFailureDetails(error) {
+  return {
+    httpStatus: Number(error?.response?.status || 0) || null,
+    code: cleanString(error?.response?.data?.error?.status || error?.response?.data?.error?.code || error?.code, 80),
+    message: cleanString(error?.response?.data?.error?.message || error?.message, 500) || 'El proveedor no respondió.',
+  };
+}
+
+function classifyProviderFailure(provider, details = {}) {
+  const httpStatus = Number(details.httpStatus || details.http_status || details.statusCode || 0) || null;
+  const code = cleanString(details.code || details.error_code, 80);
+  const rawStatus = cleanString(details.status || details.provider_status, 80);
+  const rawMessage = cleanString(details.message, 500);
+  const haystack = [code, rawStatus, rawMessage].filter(Boolean).join(' ').toLocaleLowerCase('es-ES');
+  const label = providerLabel(provider);
+
+  if (httpStatus === 401 || httpStatus === 403 || /api key|credential|unauth|permission|forbidden|denied/i.test(haystack)) {
+    return {
+      status: 'credentials_invalid',
+      message: `La credencial de ${label} no es válida o no tiene permiso para esta función.`,
+    };
+  }
+
+  if (httpStatus === 429 && /insufficient[_\s-]?quota|quota|resource[_\s-]?exhausted|exceeded/i.test(haystack)) {
+    return {
+      status: 'quota_limited',
+      message: `${label} está configurado, pero la API ha devuelto cuota insuficiente o límite de proyecto. Revisa cuota, proyecto u organización antes de reintentar.`,
+    };
+  }
+
+  if (httpStatus === 429 || /rate[_\s-]?limit|too[_\s-]?many[_\s-]?requests|try again later/i.test(haystack)) {
+    return {
+      status: 'rate_limited',
+      message: `${label} está configurado, pero el proveedor ha devuelto límite temporal de peticiones. Se puede reintentar más tarde.`,
+    };
+  }
+
+  if (httpStatus === 402 || /credit|prepaid|billing[_\s-]?required|billing account|saldo|facturaci[oó]n/i.test(haystack)) {
+    return {
+      status: 'billing_required',
+      message: `${label} requiere revisar saldo o facturación antes de ejecutar esta comprobación.`,
+    };
+  }
+
+  return {
+    status: rawStatus && rawStatus !== 'billing_required' ? rawStatus : 'error',
+    message: `No se pudo completar la comprobación con ${label}.`,
+  };
+}
+
 function publicProviderError(provider, error) {
-  const status = Number(error?.response?.status || 0) || null;
-  const code = cleanString(error?.response?.data?.error?.status || error?.response?.data?.error?.code || error?.code, 80);
-  const rawMessage = cleanString(error?.response?.data?.error?.message || error?.message, 500) || 'El proveedor no respondió.';
-  const billing = status === 402
-    || status === 429 && /credit|quota|billing|prepaid|saldo|factur/i.test(rawMessage)
-    || /credit|prepaid|billing account|saldo|facturaci[oó]n/i.test(rawMessage);
-  const auth = status === 401 || status === 403 || /api key|credential|unauth|permission/i.test(rawMessage);
+  const details = providerFailureDetails(error);
+  const classified = classifyProviderFailure(provider, details);
   return {
     provider,
-    status: billing ? 'billing_required' : (auth ? 'credentials_invalid' : 'error'),
+    status: classified.status,
     model: provider === 'openai' ? OPENAI_MODEL : GEMINI_MODEL,
-    message: billing
-      ? 'El proveedor necesita saldo o facturación activa antes de ejecutar esta comprobación.'
-      : (auth
-        ? 'La credencial del proveedor no es válida o no tiene permiso para esta función.'
-        : 'No se pudo completar la comprobación con este proveedor.'),
-    error: { http_status: status, code },
+    message: classified.message,
+    error: { http_status: details.httpStatus, code: details.code, reason: classified.status },
   };
 }
 
@@ -649,6 +694,58 @@ function partialRunIsReusable(run, now = new Date()) {
     && createdAt.getTime() >= now.getTime() - CACHE_HOURS * 60 * 60 * 1000;
 }
 
+function normalizeProviderResult(provider, result) {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return result || null;
+  const status = cleanString(result.status, 80);
+  if (['completed', 'not_configured', 'no_result'].includes(status)) return result;
+  const classified = classifyProviderFailure(provider, {
+    status,
+    http_status: result.error?.http_status,
+    code: result.error?.code,
+    message: result.message,
+  });
+  return {
+    ...result,
+    status: classified.status,
+    message: classified.message || result.message,
+    error: {
+      ...(result.error || {}),
+      reason: classified.status,
+    },
+  };
+}
+
+function normalizeProviderStatusMap(providerStatus = {}, providerResults = {}) {
+  const normalized = {};
+  for (const provider of ['openai', 'gemini']) {
+    const current = providerStatus?.[provider] || null;
+    const result = providerResults?.[provider] || null;
+    if (!current && !result) continue;
+    const classifiedResult = result ? normalizeProviderResult(provider, result) : null;
+    normalized[provider] = {
+      ...(current || {}),
+      configured: current?.configured ?? (classifiedResult?.status !== 'not_configured'),
+      status: classifiedResult?.status || current?.status || 'error',
+      model: current?.model || classifiedResult?.model || null,
+    };
+  }
+  return normalized;
+}
+
+function normalizeErrorSummary(errors = [], providerResults = {}) {
+  if (!Array.isArray(errors)) return [];
+  return errors.map((error) => {
+    const provider = cleanString(error?.provider, 32);
+    if (!provider || !providerResults?.[provider]) return error;
+    const result = normalizeProviderResult(provider, providerResults[provider]);
+    return {
+      ...error,
+      status: result?.status || error?.status,
+      message: result?.message || error?.message,
+    };
+  });
+}
+
 function serializeRun(run, typicalQueries = []) {
   const value = run?.get ? run.get({ plain: true }) : run;
   if (!value) return null;
@@ -656,6 +753,10 @@ function serializeRun(run, typicalQueries = []) {
   const typicalQuery = (typicalQueries || []).find(
     (item) => cleanString(item?.query)?.toLocaleLowerCase('es-ES') === normalizedQuery,
   );
+  const providerResults = {
+    openai: normalizeProviderResult('openai', value.provider_results?.openai),
+    gemini: normalizeProviderResult('gemini', value.provider_results?.gemini),
+  };
   return {
     id: Number(value.id),
     clinic_id: Number(value.clinica_id),
@@ -663,9 +764,9 @@ function serializeRun(run, typicalQueries = []) {
     query_key: typicalQuery?.key || null,
     query_source: typicalQuery ? 'system' : 'legacy',
     status: value.status,
-    provider_status: value.provider_status || {},
-    provider_results: value.provider_results || {},
-    errors: value.error_summary || [],
+    provider_status: normalizeProviderStatusMap(value.provider_status || {}, providerResults),
+    provider_results: providerResults,
+    errors: normalizeErrorSummary(value.error_summary || [], providerResults),
     job_request_id: value.job_request_id ? Number(value.job_request_id) : null,
     started_at: value.started_at || null,
     completed_at: value.completed_at || null,
@@ -815,6 +916,97 @@ async function getRun(runId, clinicId, dependencies = {}) {
   }
   const clinic = await resolver(clinicId);
   return serializeRun(row, buildTypicalQueries(clinic));
+}
+
+function providerHealthMessage(provider, status, diagnostic = null) {
+  const label = providerLabel(provider);
+  const code = cleanString(diagnostic?.error_code, 80);
+  const suffix = code ? ` Código: ${code}.` : '';
+  switch (status) {
+    case 'completed':
+      return `Última comprobación de ${label} completada correctamente.`;
+    case 'ready':
+      return `${label} tiene credencial configurada. No hay errores recientes registrados.`;
+    case 'not_configured':
+      return `${label} está pendiente de configurar en el servidor.`;
+    case 'quota_limited':
+      return `${label} está configurado, pero el proveedor ha devuelto cuota insuficiente o límite de proyecto.${suffix}`;
+    case 'rate_limited':
+      return `${label} está configurado, pero el proveedor ha devuelto un límite temporal de peticiones.${suffix}`;
+    case 'billing_required':
+      return `${label} requiere revisar saldo o facturación.${suffix}`;
+    case 'credentials_invalid':
+      return `${label} tiene una credencial inválida o sin permisos.${suffix}`;
+    case 'no_result':
+      return `${label} respondió sin contenido visible.`;
+    default:
+      return `Última comprobación de ${label} con incidencia.${suffix}`;
+  }
+}
+
+async function getProviderHealthStatus({ limit = 80 } = {}, dependencies = {}) {
+  const RunModel = dependencies.RunModel || MarketingAiVisibilityRun;
+  const providers = providerConfiguration();
+  const rows = await RunModel.findAll({
+    where: {
+      completed_at: { [Op.ne]: null },
+    },
+    order: [['completed_at', 'DESC'], ['created_at', 'DESC']],
+    limit: Math.max(1, Math.min(200, Number(limit) || 80)),
+  });
+  const latestByProvider = {};
+  for (const row of rows) {
+    const run = serializeRun(row);
+    for (const provider of ['openai', 'gemini']) {
+      if (latestByProvider[provider]) continue;
+      const result = run.provider_results?.[provider] || null;
+      const status = run.provider_status?.[provider] || null;
+      if (!result && !status) continue;
+      latestByProvider[provider] = {
+        provider,
+        status: result?.status || status?.status || 'error',
+        model: result?.model || status?.model || providers[provider].model,
+        run_id: run.id,
+        clinic_id: run.clinic_id,
+        query: run.query,
+        checked_at: run.completed_at || run.updated_at || run.created_at,
+        http_status: result?.error?.http_status || null,
+        error_code: result?.error?.code || null,
+        message: result?.message || null,
+      };
+    }
+    if (latestByProvider.openai && latestByProvider.gemini) break;
+  }
+
+  return {
+    success: true,
+    checked_at: new Date().toISOString(),
+    providers: Object.fromEntries(['openai', 'gemini'].map((provider) => {
+      const config = providers[provider];
+      const latest = latestByProvider[provider] || null;
+      const status = !config.configured
+        ? 'not_configured'
+        : (latest?.status || 'ready');
+      const diagnostic = latest ? {
+        run_id: latest.run_id,
+        clinic_id: latest.clinic_id,
+        query: latest.query,
+        checked_at: latest.checked_at,
+        http_status: latest.http_status,
+        error_code: latest.error_code,
+      } : null;
+      return [provider, {
+        provider,
+        label: providerLabel(provider),
+        configured: config.configured,
+        status,
+        model: latest?.model || config.model,
+        storage: config.storage,
+        message: providerHealthMessage(provider, status, diagnostic),
+        last_check: diagnostic,
+      }];
+    })),
+  };
 }
 
 async function enqueueRun({
@@ -1176,6 +1368,7 @@ async function cleanupExpiredRuns(now = new Date()) {
 module.exports = {
   JOB_TYPE,
   getOverview,
+  getProviderHealthStatus,
   getRun,
   enqueueRun,
   enqueueTypicalRun,
@@ -1194,6 +1387,7 @@ module.exports = {
     parseOpenAiResponse,
     openAiCountryCode,
     partialRunIsReusable,
+    classifyProviderFailure,
     publicProviderError,
     queryHash,
     resolveDisciplineCategory,

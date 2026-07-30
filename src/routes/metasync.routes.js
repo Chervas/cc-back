@@ -82,6 +82,7 @@ router.get('/jobs/next-executions', metaJobsController.getNextExecutions);
 // Monitorización de uso de API y logs
 router.get('/jobs/usage/meta', metaJobsController.getMetaUsageStatus);
 router.get('/jobs/usage/google-ads', metaJobsController.getGoogleUsageStatus);
+router.get('/jobs/usage/ai-visibility', metaJobsController.getAiVisibilityUsageStatus);
 router.post('/jobs/usage/google-ads/resume', metaJobsController.resumeGoogleUsage);
 router.get('/jobs/sync-logs/:id/tail', metaJobsController.tailJobLog);
 router.get('/metrics/:clinicaId', metaSyncController.getMetricsByClinica);
