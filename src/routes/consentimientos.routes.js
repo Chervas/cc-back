@@ -11,6 +11,7 @@ router.post('/tablet/login', consentimientosController.loginTabletKiosk);
 router.get('/tablet/session', consentimientosController.getTabletKioskSession);
 router.get('/tablet/packages', consentimientosController.listTabletKioskPackages);
 router.post('/tablet/packages/:id/session', consentimientosController.createTabletKioskPackageSession);
+router.post('/tablet/budget-signatures/:id/session', consentimientosController.createTabletBudgetSignatureSession);
 
 router.use(authMiddleware);
 

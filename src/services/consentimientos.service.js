@@ -2631,10 +2631,17 @@ async function listTabletKioskPackages(tokenRaw, filters = {}) {
             ].filter(Boolean).join(' ').toLowerCase();
             return q.split(/\s+/).filter(Boolean).every((term) => haystack.includes(term));
         });
+    const budgetItems = await require('./patientEconomics.service').listTabletBudgetSignatureRequestsForClinic({
+        clinicId: kiosk.clinic_id,
+        q,
+        limit,
+    });
+    const mergedItems = [...items.map((item) => ({ type: 'consent', ...item })), ...budgetItems]
+        .sort((a, b) => new Date(a.due_at || a.created_at || 0).getTime() - new Date(b.due_at || b.created_at || 0).getTime());
     return {
         clinic_id: kiosk.clinic_id,
-        items,
-        total: items.length,
+        items: mergedItems,
+        total: mergedItems.length,
     };
 }
 
@@ -2652,6 +2659,15 @@ async function createTabletSessionForKiosk(packageIdRaw, tokenRaw, payload = {})
         throw err;
     }
     return createTabletSession(packageRow.id, payload);
+}
+
+async function createTabletBudgetSignatureSessionForKiosk(requestIdRaw, tokenRaw, payload = {}) {
+    const kiosk = await requireKioskSession(tokenRaw);
+    return require('./patientEconomics.service').createTabletBudgetSignatureSession({
+        requestId: requestIdRaw,
+        clinicId: kiosk.clinic_id,
+        payload,
+    });
 }
 
 function serializePublicPackage(packageRow) {
@@ -3109,6 +3125,7 @@ module.exports = {
     getTabletKioskSession,
     listTabletKioskPackages,
     createTabletSessionForKiosk,
+    createTabletBudgetSignatureSessionForKiosk,
     getPublicPackage,
     signPublicPackage,
     getConsentDocument,

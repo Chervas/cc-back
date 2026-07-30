@@ -408,6 +408,18 @@ exports.createTabletKioskPackageSession = asyncHandler(async (req, res) => {
     }
 });
 
+exports.createTabletBudgetSignatureSession = asyncHandler(async (req, res) => {
+    try {
+        const item = await consentimientosService.createTabletBudgetSignatureSessionForKiosk(req.params.id, getBearer(req), {
+            ...(req.body || {}),
+            base_url: req.body?.base_url || req.body?.baseUrl || undefined,
+        });
+        return res.json(item);
+    } catch (error) {
+        return sendError(res, error);
+    }
+});
+
 exports.getPublicPackage = asyncHandler(async (req, res) => {
     try {
         const item = await consentimientosService.getPublicPackage(req.params.token, {

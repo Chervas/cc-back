@@ -5,6 +5,10 @@ const authMiddleware = require('./auth.middleware');
 const controller = require('../controllers/patientEconomics.controller');
 
 const router = express.Router();
+
+router.get('/public/budget-signatures/:token', controller.getPublicBudgetSignatureRequest);
+router.post('/public/budget-signatures/:token/sign', controller.signPublicBudgetSignatureRequest);
+
 router.use(authMiddleware);
 
 router.get('/patients/:patientId/workspace', controller.getWorkspace);
@@ -13,6 +17,7 @@ router.post('/patients/:patientId/budgets', controller.createBudget);
 router.patch('/budgets/:budgetId', controller.updateBudget);
 router.post('/budgets/:budgetId/revise', controller.reviseBudget);
 router.post('/budgets/:budgetId/transition', controller.transitionBudget);
+router.post('/budgets/:budgetId/signature-requests', controller.createBudgetSignatureRequest);
 router.post('/budgets/:budgetId/payments', controller.createPayment);
 router.post('/patients/:patientId/wallet-deposits', controller.createWalletDeposit);
 router.post('/patients/:patientId/fiscal-documents', controller.createPatientFiscalDocument);
