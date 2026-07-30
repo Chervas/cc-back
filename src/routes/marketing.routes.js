@@ -132,6 +132,7 @@ router.post(
   limitWebContentAcceptances,
   webContentGenerationController.acceptGeneration
 );
+router.get('/web-content/:contentId', webContentMediaController.getContent);
 router.patch('/web-content/:contentId', limitWebContentWrites, webContentMediaController.updateContent);
 router.get('/web-content/:contentId/versions', webContentMediaController.listContentVersions);
 router.get('/web-media', webContentMediaController.listMedia);

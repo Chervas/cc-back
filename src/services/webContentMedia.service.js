@@ -370,6 +370,27 @@ async function listContent({ actorId, query = {}, models = db, assertFeatureAcce
   };
 }
 
+async function getContent({ actorId, contentId, models = db, assertFeatureAccess } = {}) {
+  const entry = await models.WebContentEntry.findByPk(String(contentId || ''));
+  if (!entry) throw new WebContentMediaServiceError('content_not_found', 'La entrada no existe.', 404);
+
+  const value = plain(entry);
+  const scope = scopeFromResource(value);
+  await assertResourceScopeAccess(
+    actorId,
+    scope,
+    'marketing.web.view',
+    'content_not_found',
+    'La entrada no existe.',
+    { models, assertFeatureAccess }
+  );
+  const capabilities = await resolveLibraryCapabilities(actorId, scope, { models, assertFeatureAccess });
+  return serializeContentEntry(entry, {
+    requestedScope: scope,
+    canEdit: canEditLibraryResource(entry, actorId, capabilities, scope),
+  });
+}
+
 async function createContent({
   actorId,
   body = {},
@@ -1058,6 +1079,7 @@ module.exports = {
   assertResourceScopeAccess,
   cleanupExpiredQuarantinedMedia,
   createContent,
+  getContent,
   listContent,
   listContentVersions,
   listMedia,

@@ -1,6 +1,8 @@
 'use strict';
 
 process.env.MARKETING_WEB_EDITOR_ENABLED = 'true';
+process.env.MARKETING_WEB_ENABLED_SCOPES = 'clinic:66,group:4';
+delete process.env.MARKETING_WEB_DISABLED_SCOPES;
 
 const assert = require('node:assert/strict');
 const { Op } = require('sequelize');
@@ -12,6 +14,7 @@ const {
   assertResourceScopeAccess,
   cleanupExpiredQuarantinedMedia,
   createContent,
+  getContent,
   listContent,
   listMedia,
   normalizeMediaIdFilter,
@@ -540,14 +543,14 @@ async function testNonAdminOwnershipAndUniformNotFound() {
   );
 }
 
-function contentRow({ id, ownerUserId, scopeType = 'clinic', scopeId = 66 }) {
+function contentRow({ id, ownerUserId, scopeType = 'clinic', scopeId = 66, type = 'faq' }) {
   return row({
     id,
     scopeType,
     clinicaId: scopeType === 'clinic' ? scopeId : null,
     grupoClinicaId: scopeType === 'group' ? scopeId : null,
     ownerUserId,
-    type: 'faq',
+    type,
     locale: 'es-ES',
     title: `FAQ ${id}`,
     content: { question: 'Pregunta', answer: 'Respuesta' },
@@ -630,6 +633,78 @@ async function testListContentMakesEvenOwnedRowsReadOnlyWithoutEditPermission() 
   });
   assert.equal(result.items[0].can_edit, false);
   assert.equal(result.items[0].read_only, true);
+}
+
+async function testGetContentProjectsActorAwareEditability() {
+  const permissionCalls = [];
+  const entry = contentRow({ id: 'content_article_1', type: 'article', ownerUserId: 88 });
+  const models = {
+    ...baseModels(),
+    WebContentEntry: { findByPk: async () => entry },
+  };
+  const assertFeatureAccess = async ({ featureKey }) => {
+    permissionCalls.push(featureKey);
+    return true;
+  };
+
+  const result = await getContent({
+    actorId: 77,
+    contentId: entry.id,
+    models,
+    assertFeatureAccess,
+  });
+
+  assert.equal(result.id, entry.id);
+  assert.equal(result.type, 'article');
+  assert.equal(result.can_edit, true);
+  assert.equal(result.read_only, false);
+  assert.deepEqual(permissionCalls.sort(), [
+    'marketing.web.edit',
+    'marketing.web.review',
+    'marketing.web.view',
+  ]);
+}
+
+async function testGetContentKeepsOtherAuthorReadOnlyWithoutReview() {
+  const entry = contentRow({ id: 'content_article_2', type: 'article', ownerUserId: 88 });
+  const models = {
+    ...baseModels(),
+    WebContentEntry: { findByPk: async () => entry },
+  };
+  const assertFeatureAccess = async ({ featureKey }) => {
+    if (featureKey !== 'marketing.web.review') return true;
+    const error = new Error('forbidden');
+    error.status = 403;
+    throw error;
+  };
+
+  const result = await getContent({
+    actorId: 77,
+    contentId: entry.id,
+    models,
+    assertFeatureAccess,
+  });
+
+  assert.equal(result.can_edit, false);
+  assert.equal(result.read_only, true);
+}
+
+async function testGetContentReturnsUniformNotFound() {
+  const models = {
+    ...baseModels(),
+    WebContentEntry: { findByPk: async () => null },
+  };
+
+  await assert.rejects(
+    () => getContent({
+      actorId: 77,
+      contentId: 'missing',
+      models,
+    }),
+    (error) => error instanceof WebContentMediaServiceError
+      && error.code === 'content_not_found'
+      && error.status === 404
+  );
 }
 
 async function testListMediaLetsReviewerEditNativeResourcesButNeverInheritedOnes() {
@@ -903,6 +978,9 @@ async function main() {
   await testNonAdminOwnershipAndUniformNotFound();
   await testListContentProjectsActorAwareCapabilitiesWithoutPerRowChecks();
   await testListContentMakesEvenOwnedRowsReadOnlyWithoutEditPermission();
+  await testGetContentProjectsActorAwareEditability();
+  await testGetContentKeepsOtherAuthorReadOnlyWithoutReview();
+  await testGetContentReturnsUniformNotFound();
   await testListMediaLetsReviewerEditNativeResourcesButNeverInheritedOnes();
   await testListMediaFiltersReferencedIdsInOneScopedQuery();
   await testMediaIdFilterRejectsMalformedAndOversizedBatches();

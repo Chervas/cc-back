@@ -20,6 +20,14 @@ const createContent = withRequestContext(async (req, res, requestId) => {
   return res.status(201).json({ success: true, content, request_id: requestId });
 }, 'No se ha podido crear el contenido web.');
 
+const getContent = withRequestContext(async (req, res, requestId) => {
+  const content = await webContentMediaService.getContent({
+    actorId: req.userData?.userId,
+    contentId: req.params.contentId,
+  });
+  return res.json({ success: true, content, request_id: requestId });
+}, 'No se ha podido cargar el contenido web.');
+
 const updateContent = withRequestContext(async (req, res, requestId) => {
   const content = await webContentMediaService.updateContent({
     actorId: req.userData?.userId,
@@ -73,6 +81,7 @@ const updateMedia = withRequestContext(async (req, res, requestId) => {
 
 module.exports = {
   createContent,
+  getContent,
   listContent,
   listContentVersions,
   listMedia,

@@ -8,6 +8,7 @@ const controller = require('../../controllers/webContentMedia.controller');
 for (const name of [
   'listContent',
   'createContent',
+  'getContent',
   'updateContent',
   'listContentVersions',
   'listMedia',
@@ -21,6 +22,7 @@ const routes = fs.readFileSync(path.resolve(__dirname, '../../routes/marketing.r
 for (const contract of [
   "router.get('/web-content', webContentMediaController.listContent)",
   "router.post('/web-content', limitWebContentWrites, webContentMediaController.createContent)",
+  "router.get('/web-content/:contentId', webContentMediaController.getContent)",
   "router.patch('/web-content/:contentId', limitWebContentWrites, webContentMediaController.updateContent)",
   "router.get('/web-content/:contentId/versions', webContentMediaController.listContentVersions)",
   "router.get('/web-media', webContentMediaController.listMedia)",
