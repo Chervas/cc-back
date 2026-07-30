@@ -13,6 +13,7 @@ const {
   partialRunIsReusable,
   parseGeminiResponse,
   parseOpenAiResponse,
+  publicProviderError,
   resolveDisciplineCategory,
   resolvedLocalProfileFromClinic,
   runGeminiSearch,
@@ -85,6 +86,23 @@ async function main() {
     }],
   });
   assert.deepEqual(geminiObjectResult.search_suggestions_html, ['<div>resultado único</div>']);
+
+  const openAiQuota = publicProviderError('openai', {
+    response: { status: 429, data: { error: { code: 'insufficient_quota', message: 'You exceeded your current quota.' } } },
+  });
+  assert.equal(openAiQuota.status, 'quota_limited');
+  assert.match(openAiQuota.message, /cuota/i);
+
+  const geminiRateLimit = publicProviderError('gemini', {
+    response: { status: 429, data: { error: { code: 'too_many_requests', message: 'Too many requests.' } } },
+  });
+  assert.equal(geminiRateLimit.status, 'rate_limited');
+  assert.match(geminiRateLimit.message, /límite temporal/i);
+
+  const explicitBilling = publicProviderError('openai', {
+    response: { status: 402, data: { error: { code: 'billing_required', message: 'Billing account required.' } } },
+  });
+  assert.equal(explicitBilling.status, 'billing_required');
 
   assert.equal(normalizeQuery('  mejor clínica dental en Hospitalet  '), 'mejor clínica dental en Hospitalet');
   assert.throws(() => normalizeQuery('contacta paciente@example.com'), /correos de pacientes/);

@@ -41,6 +41,13 @@ La respuesta incluye:
 - `runs`: resultados recientes; cada uno expone `query_key` y
   `query_source=system|legacy`.
 
+`GET /api/metasync/jobs/usage/ai-visibility` es solo monitorización técnica
+para Ajustes > Jobs. No consulta OpenAI ni Gemini: combina la configuración
+backend con el último resultado persistido en `MarketingAiVisibilityRuns`. Los
+errores `429 insufficient_quota` se clasifican como `quota_limited` y los
+`429 too_many_requests` como `rate_limited`; solo un `402` o un mensaje
+explícito de saldo/facturación se muestra como `billing_required`.
+
 Si faltan ambos secretos, el GET responde `200`,
 `status=configuration_required` y
 `automatic.status=waiting_configuration`. No crea filas ni jobs y nunca debe

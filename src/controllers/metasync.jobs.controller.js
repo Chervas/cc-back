@@ -16,6 +16,7 @@
 const { metaSyncJobs } = require('../jobs/sync.jobs');
 const { getUsageStatus } = require('../lib/metaClient');
 const { getGoogleAdsUsageStatus, resumeGoogleAdsUsage } = require('../lib/googleAdsClient');
+const marketingAiVisibilityService = require('../services/marketingAiVisibility.service');
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
 const { SCHEDULED_JOB_DEFINITIONS } = require('../config/scheduledJobCatalog');
@@ -313,6 +314,16 @@ exports.resumeGoogleUsage = async (req, res) => {
   } catch (e) {
     console.error('❌ Error resumeGoogleUsage:', e);
     res.status(500).json({ message: 'Error reactivando Google Ads', error: e.message });
+  }
+};
+
+exports.getAiVisibilityUsageStatus = async (req, res) => {
+  try {
+    const status = await marketingAiVisibilityService.getProviderHealthStatus();
+    res.json(status);
+  } catch (e) {
+    console.error('❌ Error getAiVisibilityUsageStatus:', e);
+    res.status(500).json({ message: 'Error obteniendo estado de ChatGPT/Gemini', error: e.message });
   }
 };
 
