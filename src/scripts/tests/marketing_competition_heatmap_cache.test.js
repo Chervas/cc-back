@@ -757,6 +757,25 @@ function testStrictGeoPointRejectsMissingAndZeroAnchor() {
   assert.match(__testing.LOCAL_HEATMAP_ALGORITHM_VERSION, /v5$/);
 }
 
+function testWeeklySnapshotsExposeComparablePositionDeltas() {
+  const current = [
+    { x_km: -1, y_km: 0, my_position: 2 },
+    { x_km: 0, y_km: 0, my_position: 7 },
+    { x_km: 1, y_km: 0, my_position: null },
+  ];
+  const previous = [
+    { x_km: -1, y_km: 0, my_position: 4 },
+    { x_km: 0, y_km: 0, my_position: 5 },
+    { x_km: 1, y_km: 0, my_position: null },
+  ];
+
+  const compared = __testing.compareLocalHeatmapPoints(current, previous);
+
+  assert.deepEqual(compared.map((point) => point.previous_position), [4, 5, null]);
+  assert.deepEqual(compared.map((point) => point.position_delta), [2, -2, 0]);
+  assert.deepEqual(compared.map((point) => point.position_change), ['+2', '-2', '=']);
+}
+
 async function testHeatmapUsesOneCachedIdentitySearchForNames() {
   const originalPost = axios.post;
   const calls = [];
@@ -823,6 +842,7 @@ async function run() {
   await testExactIdentityFallbackNamesThePlacesAheadOfOwnClinic();
   await testHeatmapUsesOneCachedIdentitySearchForNames();
   testStrictGeoPointRejectsMissingAndZeroAnchor();
+  testWeeklySnapshotsExposeComparablePositionDeltas();
   testCancelledCompliancePurgeCannotRemoveProviderContent();
   console.log('marketing_competition_heatmap_cache.test.js OK');
 }

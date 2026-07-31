@@ -17,6 +17,7 @@ const {
   isPublishableBusinessProfileMediaAsset,
   normalizeSpecialHoursPlan,
   buildGoogleSpecialHourPeriods,
+  preserveSpecialHoursOutsideRange,
 } = require('../../services/businessProfileLocal.service');
 
 function testMetricDeduplicationAndTotals() {
@@ -412,6 +413,23 @@ function testSpecialHoursPlanNormalization() {
   assert.throws(() => normalizeSpecialHoursPlan({
     periods: [{ kind: 'open', startDate: '2026-08-01', endDate: '2026-08-01', openTime: '14:00', closeTime: '09:00' }],
   }), /business_profile_special_hours_times_invalid/);
+
+  const preserved = preserveSpecialHoursOutsideRange({
+    id: 'summer-closure',
+    kind: 'closed',
+    label: 'Vacaciones',
+    startDate: '2026-08-01',
+    endDate: '2026-08-31',
+  }, {
+    id: 'special-opening',
+    kind: 'open',
+    startDate: '2026-08-15',
+    endDate: '2026-08-15',
+  }, '2026-07-31');
+  assert.deepEqual(preserved.map((item) => [item.startDate, item.endDate]), [
+    ['2026-08-01', '2026-08-14'],
+    ['2026-08-16', '2026-08-31'],
+  ], 'an incoming rule must only replace the overlapping dates');
 }
 
 async function testPhotoMutationIncludesEverySharedConsumer() {

@@ -29,6 +29,8 @@ const {
   ClinicBusinessLocation,
   BusinessProfileReview,
   MarketingCompetitionHeatmapCache,
+  MarketingCompetitionHeatmapSearch,
+  MarketingCompetitionHeatmapSnapshot,
 } = db;
 
 const { Op } = db.Sequelize;
@@ -66,6 +68,7 @@ const LOCAL_HEATMAP_MAX_CACHE_ROWS_PER_CLINIC = Math.max(12, Math.min(500, parse
 const LOCAL_HEATMAP_MIN_VALID_POINTS = Math.max(1, Math.min(LOCAL_HEATMAP_MAX_POINTS, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_MIN_VALID_POINTS || '20', 10)));
 const LOCAL_HEATMAP_IDENTITY_DETAILS_MAX = Math.max(1, Math.min(50, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_IDENTITY_DETAILS_MAX || '25', 10)));
 const LOCAL_HEATMAP_VISIBLE_COMPETITOR_LIMIT = 3;
+const LOCAL_HEATMAP_SNAPSHOT_RETENTION_DAYS = 180;
 const LOCAL_HEATMAP_FAILURE_FRESH_TTL_MS = 15 * 60 * 1000;
 const LOCAL_HEATMAP_FAILURE_EXPIRES_TTL_MS = 60 * 60 * 1000;
 const COMPETITION_SUGGESTION_RADIUS_METERS = Math.max(
@@ -2725,6 +2728,193 @@ function normalizeLocalHeatmapTerm(value) {
   return normalized;
 }
 
+function heatmapPointComparisonKey(point = {}) {
+  const x = Number(point.x_km);
+  const y = Number(point.y_km);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return `${x.toFixed(6)}:${y.toFixed(6)}`;
+}
+
+function compareLocalHeatmapPoints(currentPoints = [], previousPoints = []) {
+  const previousByPoint = new Map((Array.isArray(previousPoints) ? previousPoints : [])
+    .map((point) => {
+      const key = heatmapPointComparisonKey(point);
+      return key ? [key, point] : null;
+    })
+    .filter(Boolean));
+
+  return (Array.isArray(currentPoints) ? currentPoints : []).map((point) => {
+    const previous = previousByPoint.get(heatmapPointComparisonKey(point));
+    const currentPosition = toInt(point?.my_position);
+    const previousPosition = toInt(previous?.my_position);
+    let delta = null;
+    if (currentPosition && previousPosition) delta = previousPosition - currentPosition;
+    else if (!currentPosition && !previousPosition && previous) delta = 0;
+    return {
+      ...point,
+      previous_position: previous ? (previousPosition || null) : null,
+      position_delta: delta,
+      position_change: delta === null ? null : (delta > 0 ? `+${delta}` : String(delta || '=')),
+    };
+  });
+}
+
+async function persistLocalHeatmapSnapshot(identity, payload) {
+  if (!MarketingCompetitionHeatmapSnapshot || payload?.success !== true || !payload?.cache?.generated_at) return null;
+  const generatedAt = new Date(payload.cache.generated_at);
+  if (!Number.isFinite(generatedAt.getTime())) return null;
+  const [snapshot] = await MarketingCompetitionHeatmapSnapshot.findOrCreate({
+    where: {
+      cache_key: identity.cache_key,
+      generated_at: generatedAt,
+    },
+    defaults: {
+      cache_key: identity.cache_key,
+      primary_clinic_id: identity.primary_clinic_id,
+      search_term: identity.search_term,
+      zoom_km: identity.zoom_km,
+      grid_size: identity.grid_size,
+      algorithm_version: identity.algorithm_version,
+      payload: {
+        ...payload,
+        points: Array.isArray(payload.points)
+          ? payload.points.map(({ previous_position, position_delta, position_change, ...point }) => point)
+          : [],
+      },
+      generated_at: generatedAt,
+    },
+  });
+  return snapshot;
+}
+
+async function withLocalHeatmapComparison(identity, payload) {
+  if (!MarketingCompetitionHeatmapSnapshot || payload?.success !== true || !Array.isArray(payload?.points)) {
+    return payload;
+  }
+  const generatedAt = payload?.cache?.generated_at ? new Date(payload.cache.generated_at) : null;
+  if (!generatedAt || !Number.isFinite(generatedAt.getTime())) return payload;
+  const previous = await MarketingCompetitionHeatmapSnapshot.findOne({
+    where: {
+      cache_key: identity.cache_key,
+      generated_at: { [Op.lt]: generatedAt },
+    },
+    order: [['generated_at', 'DESC'], ['id', 'DESC']],
+    raw: true,
+  });
+  const previousPayload = previous?.payload && typeof previous.payload === 'object'
+    ? previous.payload
+    : null;
+  return {
+    ...payload,
+    points: compareLocalHeatmapPoints(payload.points, previousPayload?.points || []),
+    comparison: {
+      available: !!previous,
+      current_generated_at: generatedAt.toISOString(),
+      previous_generated_at: previous?.generated_at || null,
+    },
+  };
+}
+
+function mapSavedHeatmapSearch(row, { isDefault = false } = {}) {
+  return {
+    id: isDefault ? 'included' : String(row.id),
+    term: row.search_term,
+    effective_term: row.effective_term,
+    zoom_km: Number(row.zoom_km) || 1,
+    included: isDefault,
+    deletable: !isDefault,
+    requires_search: !isDefault,
+    last_used_at: row.last_used_at || null,
+    created_at: row.created_at || null,
+  };
+}
+
+async function listLocalHeatmapSearches(scope) {
+  const clinic = await resolvePrimaryClinic(scope);
+  if (!clinic) return { success: true, items: [] };
+  const defaultTerm = rankingTermsForClinic(clinic)[0] || null;
+  const saved = MarketingCompetitionHeatmapSearch
+    ? await MarketingCompetitionHeatmapSearch.findAll({
+      where: { primary_clinic_id: clinic.id_clinica },
+      order: [['last_used_at', 'DESC'], ['id', 'DESC']],
+      raw: true,
+    })
+    : [];
+  const items = [];
+  if (defaultTerm) {
+    items.push(mapSavedHeatmapSearch({
+      search_term: defaultTerm,
+      effective_term: heatmapSearchTermForClinic(defaultTerm, clinic) || defaultTerm,
+      zoom_km: 1,
+      last_used_at: null,
+      created_at: null,
+    }, { isDefault: true }));
+  }
+  items.push(...saved.map((row) => mapSavedHeatmapSearch(row)));
+  return { success: true, items };
+}
+
+async function saveLocalHeatmapSearch(scope, { term, zoomKm = 1, userId = null } = {}) {
+  const clinic = await resolvePrimaryClinic(scope);
+  if (!clinic) {
+    const error = new Error('La búsqueda necesita una única clínica seleccionada');
+    error.status = 400;
+    throw error;
+  }
+  const searchTerm = normalizeLocalHeatmapTerm(term);
+  const normalizedTerm = normalizeBusinessName(searchTerm);
+  if (!searchTerm || !normalizedTerm) {
+    const error = new Error('Escribe una búsqueda local');
+    error.status = 400;
+    throw error;
+  }
+  const normalizedZoomKm = clampHeatmapZoom(zoomKm);
+  const now = new Date();
+  const [row, created] = await MarketingCompetitionHeatmapSearch.findOrCreate({
+    where: {
+      primary_clinic_id: clinic.id_clinica,
+      normalized_term: normalizedTerm,
+      zoom_km: normalizedZoomKm,
+    },
+    defaults: {
+      primary_clinic_id: clinic.id_clinica,
+      search_term: searchTerm,
+      normalized_term: normalizedTerm,
+      effective_term: heatmapSearchTermForClinic(searchTerm, clinic) || searchTerm,
+      zoom_km: normalizedZoomKm,
+      created_by: toInt(userId),
+      last_used_at: now,
+    },
+  });
+  if (!created) {
+    await row.update({
+      search_term: searchTerm,
+      effective_term: heatmapSearchTermForClinic(searchTerm, clinic) || searchTerm,
+      last_used_at: now,
+    });
+  }
+  return { success: true, item: mapSavedHeatmapSearch(row) };
+}
+
+async function deleteLocalHeatmapSearch(scope, searchIdRaw) {
+  const clinic = await resolvePrimaryClinic(scope);
+  const searchId = toInt(searchIdRaw);
+  if (!clinic || !searchId) {
+    const error = new Error('Búsqueda local no válida');
+    error.status = 400;
+    throw error;
+  }
+  const deleted = await MarketingCompetitionHeatmapSearch.destroy({
+    where: { id: searchId, primary_clinic_id: clinic.id_clinica },
+  });
+  if (!deleted) {
+    const error = new Error('La búsqueda local ya no existe');
+    error.status = 404;
+    throw error;
+  }
+  return { success: true, deleted: searchId };
+}
+
 async function assertLocalHeatmapGenerationBudget(identity) {
   if (await persistentHeatmapCache.find(identity)) return;
   await db.sequelize.transaction({
@@ -2839,7 +3029,7 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
   });
   await assertLocalHeatmapGenerationBudget(identity);
 
-  return persistentHeatmapCache.resolve({
+  const resolved = await persistentHeatmapCache.resolve({
     identity,
     refreshPayload: {
       scope: {
@@ -2852,6 +3042,17 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
       zoomKm: normalizedZoomKm,
     },
   });
+  if (normalizedTerm && MarketingCompetitionHeatmapSearch) {
+    await MarketingCompetitionHeatmapSearch.update({ last_used_at: new Date() }, {
+      where: {
+        primary_clinic_id: clinic.id_clinica,
+        normalized_term: normalizeBusinessName(normalizedTerm),
+        zoom_km: normalizedZoomKm,
+      },
+    });
+  }
+  await persistLocalHeatmapSnapshot(identity, resolved);
+  return withLocalHeatmapComparison(identity, resolved);
 }
 
 async function executeLocalRankingHeatmapRefresh(payload = {}) {
@@ -2914,6 +3115,7 @@ async function executeLocalRankingHeatmapRefresh(payload = {}) {
       knownCompetitors,
     })
   ));
+  await persistLocalHeatmapSnapshot(identity, result);
   return {
     status: 'completed',
     cacheKey,
@@ -2926,18 +3128,30 @@ async function cleanupLocalHeatmapCache({ retentionDays = 30 } = {}) {
   const safeRetentionDays = Math.max(15, Math.min(180, Number(retentionDays) || 30));
   const now = new Date();
   const retentionCutoff = new Date(now.getTime() - (safeRetentionDays * 24 * 60 * 60 * 1000));
-  return MarketingCompetitionHeatmapCache.destroy({
-    where: {
-      [Op.or]: [
-        { expires_at: { [Op.lt]: retentionCutoff } },
-        {
-          algorithm_version: { [Op.ne]: LOCAL_HEATMAP_CACHE_ALGORITHM_VERSION },
-          expires_at: { [Op.lt]: now },
+  const [cacheRows, snapshotRows] = await Promise.all([
+    MarketingCompetitionHeatmapCache.destroy({
+      where: {
+        [Op.or]: [
+          { expires_at: { [Op.lt]: retentionCutoff } },
+          {
+            algorithm_version: { [Op.ne]: LOCAL_HEATMAP_CACHE_ALGORITHM_VERSION },
+            expires_at: { [Op.lt]: now },
+          },
+          { payload: null, created_at: { [Op.lt]: retentionCutoff } },
+        ],
+      },
+    }),
+    MarketingCompetitionHeatmapSnapshot
+      ? MarketingCompetitionHeatmapSnapshot.destroy({
+        where: {
+          generated_at: {
+            [Op.lt]: new Date(now.getTime() - (LOCAL_HEATMAP_SNAPSHOT_RETENTION_DAYS * 24 * 60 * 60 * 1000)),
+          },
         },
-        { payload: null, created_at: { [Op.lt]: retentionCutoff } },
-      ],
-    },
-  });
+      })
+      : 0,
+  ]);
+  return Number(cacheRows || 0) + Number(snapshotRows || 0);
 }
 
 function buildPlaceHeaders(fieldMask) {
@@ -5304,6 +5518,9 @@ module.exports = {
   deactivateCompetitor,
   refreshCompetition,
   getLocalRankingHeatmap,
+  listLocalHeatmapSearches,
+  saveLocalHeatmapSearch,
+  deleteLocalHeatmapSearch,
   executeLocalRankingHeatmapRefresh,
   cleanupLocalHeatmapCache,
   providerStatus,
@@ -5320,6 +5537,8 @@ module.exports = {
     COMPETITION_SUGGESTION_FIELD_MASK,
     LOCAL_HEATMAP_REFRESH_JOB_TYPE,
     buildLocalHeatmapSearchBody,
+    compareLocalHeatmapPoints,
+    heatmapPointComparisonKey,
     buildMetaIdentitySearchParams,
     adSnapshotPayload,
     applyDiscoveredMetaIdentityPatch,

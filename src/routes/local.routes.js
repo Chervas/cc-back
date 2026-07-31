@@ -9,6 +9,7 @@ const {
   resolveClinicGoogleReviewProfile,
 } = require('../services/googleLocalLinks.service');
 const businessProfileLocal = require('../services/businessProfileLocal.service');
+const googleSpecialHoursAutomation = require('../services/googleSpecialHoursAutomation.service');
 
 const router = express.Router();
 
@@ -237,6 +238,60 @@ router.put(
       ));
     } catch (error) {
       return sendError(res, error, 'business_profile_special_hours_update_failed');
+    }
+  }
+);
+
+router.get('/clinica/:clinicaId/special-hours/automations', async (req, res) => {
+  try {
+    return res.json({
+      success: true,
+      items: await googleSpecialHoursAutomation.listSchedules(req.localClinicId),
+    });
+  } catch (error) {
+    return sendError(res, error, 'business_profile_special_hours_automations_failed');
+  }
+});
+
+router.post(
+  '/clinica/:clinicaId/special-hours/automations',
+  requireClinicBusinessProfileWriteAccess,
+  async (req, res) => {
+    try {
+      const item = await googleSpecialHoursAutomation.createSchedule({
+        clinicId: req.localClinicId,
+        payload: req.body || {},
+        actor: {
+          userId: req.userData?.userId,
+          name: req.userData?.email,
+          role: 'clinic',
+        },
+      });
+      return res.status(201).json({ success: true, item });
+    } catch (error) {
+      return sendError(res, error, 'business_profile_special_hours_automation_create_failed');
+    }
+  }
+);
+
+router.patch(
+  '/clinica/:clinicaId/special-hours/automations/:publicId',
+  requireClinicBusinessProfileWriteAccess,
+  async (req, res) => {
+    try {
+      const item = await googleSpecialHoursAutomation.setScheduleActive({
+        clinicId: req.localClinicId,
+        publicId: req.params.publicId,
+        active: req.body?.active === true,
+        actor: {
+          userId: req.userData?.userId,
+          name: req.userData?.email,
+          role: 'clinic',
+        },
+      });
+      return res.json({ success: true, item });
+    } catch (error) {
+      return sendError(res, error, 'business_profile_special_hours_automation_update_failed');
     }
   }
 );

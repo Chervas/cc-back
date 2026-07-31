@@ -7373,3 +7373,57 @@ permisos `0600` esta en
 `/home/ubuntu/secure-imports/clinicaclick-cleanups/propdental-all-imported-history-2026-07-31T16-55-31-910Z.json`.
 Auditoria: `node src/scripts/cleanup-propdental-future-imported-historical-appointments.js --all-imported-history`.
 Restauracion: el mismo script con `--restore=<ruta>`.
+
+## 2026-07-31 - Horarios Google one-shot y busquedas locales comparables
+
+### Horarios especiales como Automatizaciones V2
+
+Las rutas de lectura/escritura son:
+
+- `GET /api/local/clinica/:clinicaId/special-hours/automations`;
+- `POST /api/local/clinica/:clinicaId/special-hours/automations`;
+- `PATCH /api/local/clinica/:clinicaId/special-hours/automations/:publicId`.
+
+Las escrituras reutilizan la autorizacion de la ficha efectiva/compartida. El
+servicio crea transaccionalmente una plantilla gestionada
+`managed_feature=google_special_hours`, version, ejecucion y `JobRequest`. El
+grafo es `scheduled_once -> delay/wait_until ->
+action/update_google_special_hours -> control/end`; la fecha se convierte desde
+la zona horaria IANA de la clinica y no desde la zona del servidor. Backend
+exige que el inicio sea posterior al dia local actual; un payload directo no
+puede convertir una programacion pasada o del mismo dia en una publicacion
+inmediata accidental.
+
+`action/update_google_special_hours` admite simulacion, rechaza una plantilla
+inactiva y llama al publicador canonico de Perfil Google. La mezcla de periodos
+preserva los futuros no solapados y aplica el nuevo periodo en los dias
+coincidentes. Tras publicar registra `last_executed_at` y desactiva la plantilla.
+Una ejecucion completada no admite reactivacion. Pausar cancela ejecucion/job
+pendientes; reanudar materializa una ejecucion nueva sobre la version existente.
+
+### Busquedas guardadas del mapa de calor
+
+La API anade:
+
+- `GET /api/marketing/reports/competition/local-heatmap/searches`;
+- `POST /api/marketing/reports/competition/local-heatmap/searches`;
+- `DELETE /api/marketing/reports/competition/local-heatmap/searches/:searchId`.
+
+`MarketingCompetitionHeatmapSearches` guarda termino/radio por clinica. Existe
+una opcion incluida no eliminable y las busquedas adicionales son eliminables.
+La API valida scope, normaliza terminos y no ejecuta el proveedor al guardar:
+la medicion se solicita despues mediante el endpoint existente de heatmap.
+
+`MarketingCompetitionHeatmapSnapshots` conserva una instantanea semanal por
+clinica, termino normalizado, radio y semana. El servicio compara una medicion
+con la semana anterior equivalente y expone por punto
+`position_delta = previous_position - current_position` y
+`position_change` (`+N`, `-N` o `=`). Si falta una posicion comparable el
+delta queda nulo. La retencion actual es de 180 dias; los indices unicos evitan
+duplicar tanto busquedas como semanas durante peticiones concurrentes. Una
+lectura de cache valida materializa idempotentemente su instantanea, de modo que
+las caches anteriores al despliegue sirven como primer punto de comparacion.
+
+Migracion: `20260731170000-create-marketing-heatmap-search-history.js`. Pruebas
+de contrato: `google_special_hours_automation.test.js` y
+`marketing_competition_heatmap_cache.test.js`.

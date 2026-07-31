@@ -143,6 +143,9 @@ router.patch('/web-media/:mediaId', limitWebMediaWrites, webContentMediaControll
 router.get('/reports/overview', marketingReportsController.getOverview);
 router.get('/reports/competition', marketingCompetitionController.getCompetition);
 router.get('/reports/competition/suggestions', marketingCompetitionController.suggestCompetitors);
+router.get('/reports/competition/local-heatmap/searches', marketingCompetitionController.listLocalHeatmapSearches);
+router.post('/reports/competition/local-heatmap/searches', marketingCompetitionController.saveLocalHeatmapSearch);
+router.delete('/reports/competition/local-heatmap/searches/:searchId', marketingCompetitionController.deleteLocalHeatmapSearch);
 router.get('/reports/competition/local-heatmap', marketingCompetitionController.getLocalHeatmap);
 router.post('/reports/competition/competitors', marketingCompetitionController.createCompetitor);
 router.patch('/reports/competition/competitors/:competitorId', marketingCompetitionController.updateCompetitor);

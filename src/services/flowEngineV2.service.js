@@ -59,6 +59,7 @@ const whatsappService = require('./whatsapp.service');
 const whatsappConnectionStatusService = require('./whatsappConnectionStatus.service');
 const marketingBulkSendsService = require('./marketingBulkSends.service');
 const appointmentNotificationCleanup = require('./appointmentNotificationCleanup.service');
+const businessProfileLocal = require('./businessProfileLocal.service');
 const { resolveLeadAutoReplyWait } = require('./clinicOpeningHours.service');
 const { evaluatePendingLeadContact } = require('./leadContactState.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
@@ -5466,6 +5467,74 @@ async function processNode(node, context, runtime = {}) {
         };
       }
       return handleSendSystemNotification(node, context, runtime);
+    }
+
+    case 'action/update_google_special_hours': {
+      const period = config?.period && typeof config.period === 'object'
+        ? config.period
+        : null;
+      const timeZone = cleanString(config?.time_zone || config?.timeZone) || 'Europe/Madrid';
+      if (simulation) {
+        return {
+          kind: 'success',
+          output: {
+            status: 'simulated',
+            simulated: true,
+            period,
+            time_zone: timeZone,
+          },
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
+
+      const targets = resolveRuntimeTargets(runtime?.execution, context);
+      const clinicId = toIntOrNull(targets.clinic_id);
+      if (!clinicId || !period) {
+        throw new Error(!clinicId
+          ? 'business_profile_special_hours_clinic_missing'
+          : 'business_profile_special_hours_period_missing');
+      }
+
+      const template = await AutomationFlowTemplateV2.findByPk(runtime?.execution?.template_version_id);
+      if (!template || template.is_active === false) {
+        return {
+          kind: 'success',
+          output: {
+            status: 'skipped',
+            reason: 'automation_inactive',
+          },
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
+
+      const result = await businessProfileLocal.applyScheduledSpecialHoursPeriod(clinicId, {
+        period,
+        timeZone,
+      });
+      if (parseBool(config?.auto_deactivate_after_execution, false)) {
+        const triggerConfig = template.trigger_config && typeof template.trigger_config === 'object'
+          ? template.trigger_config
+          : {};
+        await template.update({
+          is_active: false,
+          trigger_config: {
+            ...triggerConfig,
+            last_executed_at: new Date().toISOString(),
+          },
+        });
+      }
+
+      return {
+        kind: 'success',
+        output: {
+          status: 'synced',
+          clinic_id: clinicId,
+          period,
+          time_zone: result?.timeZone || timeZone,
+          synced_at: result?.syncedAt || new Date().toISOString(),
+        },
+        next_node_id: readOutputTarget(node, 'on_success'),
+      };
     }
 
     case 'action/api_call': {

@@ -1414,6 +1414,76 @@ async function updateSpecialHours(resolved, payload = {}) {
   };
 }
 
+function todayInTimeZone(timeZone = DEFAULT_TIME_ZONE, date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function preserveSpecialHoursOutsideRange(item, incoming, today) {
+  const originalStart = normalizeIsoDate(item?.startDate || item?.start_date);
+  const originalEnd = normalizeIsoDate(item?.endDate || item?.end_date || originalStart);
+  if (!originalStart || !originalEnd || originalEnd < today) return [];
+  const startDate = originalStart < today ? today : originalStart;
+  if (cleanString(item?.id) === incoming.id) return [];
+  if (originalEnd < incoming.startDate || startDate > incoming.endDate) {
+    return [{ ...item, startDate, endDate: originalEnd }];
+  }
+
+  const baseId = (cleanString(item?.id) || 'special-hours').slice(0, 48);
+  const segments = [];
+  if (startDate < incoming.startDate) {
+    const endDate = addIsoDateDays(incoming.startDate, -1);
+    if (endDate && endDate >= startDate) {
+      segments.push({
+        ...item,
+        id: `${baseId}-before-${incoming.startDate}`.slice(0, 80),
+        startDate,
+        endDate,
+      });
+    }
+  }
+  if (originalEnd > incoming.endDate) {
+    const afterStart = addIsoDateDays(incoming.endDate, 1);
+    if (afterStart && afterStart <= originalEnd) {
+      segments.push({
+        ...item,
+        id: `${baseId}-after-${incoming.endDate}`.slice(0, 80),
+        startDate: afterStart,
+        endDate: originalEnd,
+      });
+    }
+  }
+  return segments;
+}
+
+async function applyScheduledSpecialHoursPeriod(clinicIdRaw, payload = {}) {
+  const resolved = await resolveEffectiveLocations(clinicIdRaw);
+  const location = resolved?.locations?.[0] || null;
+  if (!location) throw specialHoursError('business_profile_location_not_configured', 409);
+
+  const requested = normalizeSpecialHoursPlan({
+    timeZone: payload.timeZone || payload.time_zone || resolved.timeZone,
+    periods: [payload.period || payload],
+  }, resolved.timeZone);
+  const incoming = requested.periods[0];
+  const raw = rawPayload(location);
+  const storedPlan = raw.clinicaclick_special_hours_plan;
+  const storedPeriods = Array.isArray(storedPlan?.periods) ? storedPlan.periods : [];
+  const today = todayInTimeZone(requested.timeZone);
+  const preserved = storedPeriods.flatMap((item) => preserveSpecialHoursOutsideRange(item, incoming, today));
+
+  return updateSpecialHours(resolved, {
+    timeZone: requested.timeZone,
+    periods: [...preserved, incoming],
+  });
+}
+
 function googleTimeToHHmm(value) {
   if (!value || typeof value !== 'object') return null;
   const rawHours = value.hours ?? value.hour;
@@ -1566,6 +1636,7 @@ module.exports = {
   buildReviewInsights,
   buildDashboard,
   updateSpecialHours,
+  applyScheduledSpecialHoursPeriod,
   importRegularHoursToClinic,
   publishPhoto,
   serializeLocation,
@@ -1577,4 +1648,5 @@ module.exports = {
   isPublishableBusinessProfileMediaAsset,
   normalizeSpecialHoursPlan,
   buildGoogleSpecialHourPeriods,
+  preserveSpecialHoursOutsideRange,
 };

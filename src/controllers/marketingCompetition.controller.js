@@ -317,3 +317,38 @@ exports.getLocalHeatmap = async (req, res) => {
     return sendError(res, error, 'Error calculando mapa de ranking local');
   }
 };
+
+exports.listLocalHeatmapSearches = async (req, res) => {
+  try {
+    const scope = await resolveScope(req, { allowAll: false });
+    await assertScopeAccess(req, scope, 'read');
+    return res.json(await competitionService.listLocalHeatmapSearches(scope));
+  } catch (error) {
+    return sendError(res, error, 'Error cargando búsquedas locales');
+  }
+};
+
+exports.saveLocalHeatmapSearch = async (req, res) => {
+  try {
+    const scope = await resolveScope(req, { allowAll: false });
+    await assertScopeAccess(req, scope, 'write');
+    const result = await competitionService.saveLocalHeatmapSearch(scope, {
+      term: req.body?.term,
+      zoomKm: req.body?.zoom_km || req.body?.zoomKm,
+      userId: req.userData?.userId,
+    });
+    return res.status(201).json(result);
+  } catch (error) {
+    return sendError(res, error, 'Error guardando búsqueda local');
+  }
+};
+
+exports.deleteLocalHeatmapSearch = async (req, res) => {
+  try {
+    const scope = await resolveScope(req, { allowAll: false });
+    await assertScopeAccess(req, scope, 'write');
+    return res.json(await competitionService.deleteLocalHeatmapSearch(scope, req.params.searchId));
+  } catch (error) {
+    return sendError(res, error, 'Error eliminando búsqueda local');
+  }
+};
