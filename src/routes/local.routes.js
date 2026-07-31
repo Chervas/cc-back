@@ -50,7 +50,7 @@ async function requireClinicMarketingAccess(req, res, next) {
   }
 }
 
-async function requireClinicMarketingWriteAccess(req, res, next) {
+async function requireClinicBusinessProfileWriteAccess(req, res, next) {
   try {
     const allowed = await hasMarketingClinicScopeAccess({
       userId: req.userData?.userId,
@@ -73,7 +73,7 @@ async function requireClinicMarketingWriteAccess(req, res, next) {
         message: 'La ficha también se utiliza en otras clínicas sobre las que no tienes permisos de edición.',
       });
     }
-    req.localPhotoMutationClinicIds = affectedClinicIds;
+    req.localBusinessProfileMutationClinicIds = affectedClinicIds;
     return next();
   } catch (error) {
     return sendError(res, error);
@@ -213,7 +213,7 @@ router.post(
 
 router.post(
   '/clinica/:clinicaId/photos',
-  requireClinicMarketingWriteAccess,
+  requireClinicBusinessProfileWriteAccess,
   async (req, res) => {
     try {
       return res.status(201).json(await businessProfileLocal.publishPhoto(
@@ -222,6 +222,21 @@ router.post(
       ));
     } catch (error) {
       return sendError(res, error, 'business_profile_photo_publish_failed');
+    }
+  }
+);
+
+router.put(
+  '/clinica/:clinicaId/special-hours',
+  requireClinicBusinessProfileWriteAccess,
+  async (req, res) => {
+    try {
+      return res.json(await businessProfileLocal.updateSpecialHours(
+        req.localResolved,
+        req.body || {}
+      ));
+    } catch (error) {
+      return sendError(res, error, 'business_profile_special_hours_update_failed');
     }
   }
 );

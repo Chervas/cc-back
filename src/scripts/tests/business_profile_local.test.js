@@ -15,6 +15,8 @@ const {
   collapseMetricRows,
   metricValueByDate,
   isPublishableBusinessProfileMediaAsset,
+  normalizeSpecialHoursPlan,
+  buildGoogleSpecialHourPeriods,
 } = require('../../services/businessProfileLocal.service');
 
 function testMetricDeduplicationAndTotals() {
@@ -338,6 +340,8 @@ function testSecurityAndSyncContracts() {
   assert.match(routes, /hasMarketingClinicScopeAccess/, 'Local routes must enforce clinic marketing scope');
   assert.match(routes, /resolvePhotoMutationClinicIds/, 'GBP writes must authorize every clinic affected by a shared location');
   assert.match(routes, /business_profile_asset_in_use/, 'shared GBP writes must fail closed when another consumer is not writable');
+  assert.match(routes, /router\.put\(\s*'\/clinica\/:clinicaId\/special-hours',[\s\S]*requireClinicBusinessProfileWriteAccess/,
+    'special-hours writes must use shared-profile write authorization');
   assert.doesNotMatch(routes, /rawPayload:\s*raw/, 'Local status must not expose provider raw payload');
   assert.match(syncJobs, /'serviceItems'/, 'GBP read mask must include service items');
   assert.match(syncJobs, /_syncBusinessProfileMedia/, 'full GBP sync must include media');
@@ -350,6 +354,7 @@ function testSecurityAndSyncContracts() {
   assert.match(localService, /owner_type:\s*'google_business_profile_media'/, 'GBP uploads must select only assets owned by the GBP media flow');
   assert.match(localService, /const mustRefresh = !accessToken/, 'missing token/expiry must enter the refresh path');
   assert.match(localService, /google_access_token_refresh_failed/, 'a refresh without a new token must fail closed');
+  assert.match(localService, /updateMask:\s*'specialHours'/, 'GBP special hours must patch only the specialHours field');
 }
 
 function testDateRange() {
@@ -358,6 +363,55 @@ function testDateRange() {
   assert.equal(range.end, '2026-07-10');
   assert.equal(range.previous.start, '2026-06-21');
   assert.equal(range.previous.end, '2026-06-30');
+}
+
+function testSpecialHoursPlanNormalization() {
+  const plan = normalizeSpecialHoursPlan({
+    timeZone: 'Europe/Madrid',
+    periods: [
+      {
+        id: 'summer-closure',
+        kind: 'closed',
+        label: 'Vacaciones de agosto',
+        startDate: '2026-08-01',
+        endDate: '2026-08-31',
+      },
+      {
+        id: 'christmas-eve',
+        kind: 'open',
+        label: 'Nochebuena',
+        startDate: '2026-12-24',
+        endDate: '2026-12-24',
+        openTime: '09:00',
+        closeTime: '14:00',
+      },
+    ],
+  });
+  assert.equal(plan.timeZone, 'Europe/Madrid');
+  assert.equal(plan.periods.length, 2);
+  const googlePeriods = buildGoogleSpecialHourPeriods(plan);
+  assert.equal(googlePeriods.length, 32, 'month closures must expand to one provider period per local date');
+  assert.deepEqual(googlePeriods[0], {
+    startDate: { year: 2026, month: 8, day: 1 },
+    endDate: { year: 2026, month: 8, day: 1 },
+    closed: true,
+  });
+  assert.deepEqual(googlePeriods.at(-1), {
+    startDate: { year: 2026, month: 12, day: 24 },
+    endDate: { year: 2026, month: 12, day: 24 },
+    openTime: { hours: 9 },
+    closeTime: { hours: 14 },
+  });
+
+  assert.throws(() => normalizeSpecialHoursPlan({
+    periods: [
+      { kind: 'closed', startDate: '2026-08-01', endDate: '2026-08-02' },
+      { kind: 'open', startDate: '2026-08-02', endDate: '2026-08-02', openTime: '10:00', closeTime: '12:00' },
+    ],
+  }), /business_profile_special_hours_overlap/);
+  assert.throws(() => normalizeSpecialHoursPlan({
+    periods: [{ kind: 'open', startDate: '2026-08-01', endDate: '2026-08-01', openTime: '14:00', closeTime: '09:00' }],
+  }), /business_profile_special_hours_times_invalid/);
 }
 
 async function testPhotoMutationIncludesEverySharedConsumer() {
@@ -400,6 +454,7 @@ async function run() {
   testOnlyNonPatientMarketingAssetsCanReachGoogle();
   testSecurityAndSyncContracts();
   testDateRange();
+  testSpecialHoursPlanNormalization();
   await testPhotoMutationIncludesEverySharedConsumer();
   console.log('business_profile_local tests: ok');
 }

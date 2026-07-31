@@ -6,6 +6,10 @@ const db = require('../../models');
 const {
   resolveEffectiveMarketingAssetInventory,
 } = require('./effectiveMarketingAssets.service');
+const {
+  DEFAULT_TIME_ZONE,
+  resolveClinicTimeZone,
+} = require('./clinicOpeningHours.service');
 
 const {
   ClinicBusinessLocation,
@@ -21,7 +25,10 @@ const {
 } = db;
 
 const GOOGLE_MY_BUSINESS_API = 'https://mybusiness.googleapis.com/v4';
+const GOOGLE_BUSINESS_INFORMATION_API = 'https://mybusinessbusinessinformation.googleapis.com/v1';
 const DAY_MS = 86400000;
+const MAX_SPECIAL_HOURS_PLAN_ITEMS = 80;
+const MAX_SPECIAL_HOURS_DAYS = 730;
 const REVIEW_OBJECTIVE_ID = 'mass_sends';
 const BUSINESS_PROFILE_ASSET_TYPE = 'google.business_profile';
 const GBP_MEDIA_CATEGORIES = Object.freeze([
@@ -283,7 +290,7 @@ function serializeVerification(raw, location) {
   };
 }
 
-function serializeLocation(location, { assignmentOrigin = null } = {}) {
+function serializeLocation(location, { assignmentOrigin = null, timeZone = DEFAULT_TIME_ZONE } = {}) {
   const raw = rawPayload(location);
   const suspended = location.is_suspended === true;
   const verification = serializeVerification(raw, location);
@@ -317,6 +324,10 @@ function serializeLocation(location, { assignmentOrigin = null } = {}) {
     mapsUri: raw.metadata?.mapsUri || null,
     newReviewUri: raw.metadata?.newReviewUri || null,
     regularHours: raw.regularHours || null,
+    specialHours: raw.specialHours || null,
+    specialHoursPlan: raw.clinicaclick_special_hours_plan || null,
+    specialHoursSyncedAt: raw.clinicaclick_special_hours_synced_at || null,
+    timeZone: cleanString(raw.clinicaclick_special_hours_plan?.timeZone) || timeZone || DEFAULT_TIME_ZONE,
     moreHours: Array.isArray(raw.moreHours) ? raw.moreHours : [],
     serviceArea: raw.serviceArea || null,
     labels: Array.isArray(raw.labels) ? raw.labels : [],
@@ -339,6 +350,12 @@ async function resolveEffectiveLocations(clinicIdRaw, dependencies = {}) {
   const inventoryResolver = dependencies.resolveEffectiveMarketingAssetInventory
     || resolveEffectiveMarketingAssetInventory;
   const locationModel = dependencies.ClinicBusinessLocation || ClinicBusinessLocation;
+  const clinicModel = dependencies.Clinica || Clinica;
+  const clinic = clinicModel ? await clinicModel.findByPk(clinicId, {
+    attributes: ['id_clinica', 'configuracion'],
+    raw: true,
+  }) : null;
+  const timeZone = resolveClinicTimeZone(clinic);
   const inventory = await inventoryResolver({
     clinicIdRaw: clinicId,
     groupIdRaw: null,
@@ -349,7 +366,7 @@ async function resolveEffectiveLocations(clinicIdRaw, dependencies = {}) {
     : [];
   const mappingIds = assets.map((asset) => toInt(asset.mapping_id)).filter(Boolean);
   if (!mappingIds.length) {
-    return { clinicId, inventory, locations: [], assets: [], primaryLocationId: null };
+    return { clinicId, inventory, locations: [], assets: [], primaryLocationId: null, timeZone };
   }
   const rows = await locationModel.findAll({
     where: { id: { [Op.in]: mappingIds }, is_active: true },
@@ -365,7 +382,7 @@ async function resolveEffectiveLocations(clinicIdRaw, dependencies = {}) {
   const locations = orderedAssets
     .map((asset) => byId.get(toInt(asset.mapping_id)))
     .filter(Boolean);
-  return { clinicId, inventory, locations, assets: orderedAssets, primaryLocationId };
+  return { clinicId, inventory, locations, assets: orderedAssets, primaryLocationId, timeZone };
 }
 
 async function resolvePhotoMutationClinicIds(resolved, dependencies = {}) {
@@ -415,6 +432,7 @@ function buildStatus(resolved) {
     .map((asset) => [toInt(asset.mapping_id), asset.assignment_origin || null]));
   const locations = (resolved.locations || []).map((location) => serializeLocation(location, {
     assignmentOrigin: originById.get(Number(location.id)) || null,
+    timeZone: resolved.timeZone || DEFAULT_TIME_ZONE,
   }));
   return { success: true, hasMappings: locations.length > 0, locations };
 }
@@ -1183,6 +1201,219 @@ async function publishPhoto(resolved, payload = {}) {
   return { success: true, photo: normalizeMediaItem(media, 0) };
 }
 
+function specialHoursError(message, status = 400) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+function normalizeIsoDate(value) {
+  const match = cleanString(value).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+    return null;
+  }
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+function addIsoDateDays(value, days) {
+  const normalized = normalizeIsoDate(value);
+  if (!normalized) return null;
+  const [year, month, day] = normalized.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day + Number(days || 0)));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
+}
+
+function isoDateToGoogleDate(value) {
+  const normalized = normalizeIsoDate(value);
+  if (!normalized) return null;
+  const [year, month, day] = normalized.split('-').map(Number);
+  return { year, month, day };
+}
+
+function normalizeHHmm(value) {
+  const match = cleanString(value).match(/^(\d{2}):(\d{2})$/);
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+}
+
+function hhmmToGoogleTime(value) {
+  const normalized = normalizeHHmm(value);
+  if (!normalized) return null;
+  const [hours, minutes] = normalized.split(':').map(Number);
+  return minutes ? { hours, minutes } : { hours };
+}
+
+function isValidTimeZone(value) {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value }).format(new Date());
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+function normalizeSpecialHoursPlan(payload = {}, fallbackTimeZone = DEFAULT_TIME_ZONE) {
+  const source = Array.isArray(payload?.periods) ? payload.periods : [];
+  if (source.length > MAX_SPECIAL_HOURS_PLAN_ITEMS) {
+    throw specialHoursError('business_profile_special_hours_too_many_items');
+  }
+  const requestedTimeZone = cleanString(payload?.timeZone || payload?.timezone || fallbackTimeZone);
+  const timeZone = isValidTimeZone(requestedTimeZone) ? requestedTimeZone : null;
+  if (!timeZone) throw specialHoursError('business_profile_special_hours_timezone_invalid');
+
+  let expandedDayCount = 0;
+  const rulesByDate = new Map();
+  const periods = source.map((item, index) => {
+    const kind = cleanString(item?.kind || item?.type).toLowerCase();
+    if (kind !== 'closed' && kind !== 'open') {
+      throw specialHoursError('business_profile_special_hours_kind_invalid');
+    }
+    const startDate = normalizeIsoDate(item?.startDate || item?.start_date);
+    const endDate = normalizeIsoDate(item?.endDate || item?.end_date || startDate);
+    if (!startDate || !endDate || endDate < startDate) {
+      throw specialHoursError('business_profile_special_hours_dates_invalid');
+    }
+    const openTime = kind === 'open' ? normalizeHHmm(item?.openTime || item?.open_time) : null;
+    const closeTime = kind === 'open' ? normalizeHHmm(item?.closeTime || item?.close_time) : null;
+    if (kind === 'open' && (!openTime || !closeTime || closeTime <= openTime)) {
+      throw specialHoursError('business_profile_special_hours_times_invalid');
+    }
+
+    let cursor = startDate;
+    while (cursor && cursor <= endDate) {
+      expandedDayCount += 1;
+      if (expandedDayCount > MAX_SPECIAL_HOURS_DAYS) {
+        throw specialHoursError('business_profile_special_hours_range_too_large');
+      }
+      const dayRules = rulesByDate.get(cursor) || [];
+      if (kind === 'closed' && dayRules.length) {
+        throw specialHoursError('business_profile_special_hours_overlap');
+      }
+      if (kind === 'open') {
+        if (dayRules.some((rule) => rule.kind === 'closed')) {
+          throw specialHoursError('business_profile_special_hours_overlap');
+        }
+        const openStart = Number(openTime.slice(0, 2)) * 60 + Number(openTime.slice(3));
+        const openEnd = Number(closeTime.slice(0, 2)) * 60 + Number(closeTime.slice(3));
+        if (dayRules.some((rule) => rule.kind === 'open' && openStart < rule.end && openEnd > rule.start)) {
+          throw specialHoursError('business_profile_special_hours_overlap');
+        }
+        dayRules.push({ kind, start: openStart, end: openEnd });
+      } else {
+        dayRules.push({ kind });
+      }
+      rulesByDate.set(cursor, dayRules);
+      cursor = addIsoDateDays(cursor, 1);
+    }
+
+    return {
+      id: (cleanString(item?.id) || '').slice(0, 80) || `special-hours-${index + 1}`,
+      kind,
+      label: (cleanString(item?.label) || '').slice(0, 120),
+      startDate,
+      endDate,
+      openTime,
+      closeTime,
+    };
+  });
+
+  return { version: 1, timeZone, periods };
+}
+
+function buildGoogleSpecialHourPeriods(plan) {
+  const result = [];
+  for (const item of Array.isArray(plan?.periods) ? plan.periods : []) {
+    let cursor = item.startDate;
+    while (cursor && cursor <= item.endDate) {
+      const startDate = isoDateToGoogleDate(cursor);
+      if (item.kind === 'closed') {
+        result.push({ startDate, endDate: startDate, closed: true });
+      } else {
+        result.push({
+          startDate,
+          endDate: startDate,
+          openTime: hhmmToGoogleTime(item.openTime),
+          closeTime: hhmmToGoogleTime(item.closeTime),
+        });
+      }
+      cursor = addIsoDateDays(cursor, 1);
+    }
+  }
+  return result;
+}
+
+async function updateSpecialHours(resolved, payload = {}) {
+  const location = resolved?.locations?.[0] || null;
+  if (!location) throw specialHoursError('business_profile_location_not_configured', 409);
+  const raw = rawPayload(location);
+  const regularPeriods = raw.regularHours?.periods || location.regularHours?.periods || [];
+  if (!Array.isArray(regularPeriods) || !regularPeriods.length) {
+    throw specialHoursError('business_profile_regular_hours_required', 409);
+  }
+  const locationName = cleanString(location.location_id);
+  if (!/^locations\/[^/]+$/.test(locationName)) {
+    throw specialHoursError('business_profile_location_name_invalid', 409);
+  }
+
+  const plan = normalizeSpecialHoursPlan(payload, resolved?.timeZone || DEFAULT_TIME_ZONE);
+  const specialHours = { specialHourPeriods: buildGoogleSpecialHourPeriods(plan) };
+  const accessToken = await ensureGoogleAccessToken(location.google_connection_id);
+  let response;
+  try {
+    response = await axios.patch(
+      `${GOOGLE_BUSINESS_INFORMATION_API}/${locationName}`,
+      { name: locationName, specialHours },
+      {
+        params: { updateMask: 'specialHours' },
+        headers: { Authorization: `Bearer ${accessToken}` },
+        timeout: 20000,
+      }
+    );
+  } catch (providerError) {
+    const error = specialHoursError('business_profile_special_hours_sync_failed', 502);
+    error.cause = providerError;
+    throw error;
+  }
+
+  const syncedAt = new Date().toISOString();
+  const providerSpecialHours = response?.data?.specialHours || specialHours;
+  const persistedPlan = { ...plan, syncedAt, sourceClinicId: Number(resolved.clinicId) };
+  await sequelize.transaction(async (transaction) => {
+    const locked = await ClinicBusinessLocation.findByPk(toInt(location.id), {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!locked) throw specialHoursError('business_profile_location_not_configured', 409);
+    const currentRaw = rawPayload(locked);
+    await locked.update({
+      raw_payload: {
+        ...currentRaw,
+        specialHours: providerSpecialHours,
+        clinicaclick_special_hours_plan: persistedPlan,
+        clinicaclick_special_hours_synced_at: syncedAt,
+      },
+      sync_status: 'synced',
+      last_synced_at: new Date(syncedAt),
+    }, { transaction });
+  });
+
+  return {
+    success: true,
+    specialHours: providerSpecialHours,
+    plan: persistedPlan,
+    timeZone: plan.timeZone,
+    syncedAt,
+  };
+}
+
 function googleTimeToHHmm(value) {
   if (!value || typeof value !== 'object') return null;
   const rawHours = value.hours ?? value.hour;
@@ -1334,6 +1565,7 @@ module.exports = {
   buildContent,
   buildReviewInsights,
   buildDashboard,
+  updateSpecialHours,
   importRegularHoursToClinic,
   publishPhoto,
   serializeLocation,
@@ -1343,4 +1575,6 @@ module.exports = {
   collapseMetricRows,
   metricValueByDate,
   isPublishableBusinessProfileMediaAsset,
+  normalizeSpecialHoursPlan,
+  buildGoogleSpecialHourPeriods,
 };
