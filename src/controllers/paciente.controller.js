@@ -1,5 +1,20 @@
 'use strict';
-const { Paciente, Clinica, PacienteRelacion, PacienteClinica, PacienteConsentimiento, CitaPaciente, Usuario, Tratamiento, PatientCustomField, PatientNutritionReport, PatientNutritionMeasurement, sequelize } = require('../../models');
+const {
+  Paciente,
+  Clinica,
+  PacienteRelacion,
+  PacienteClinica,
+  PacienteConsentimiento,
+  CitaPaciente,
+  Usuario,
+  Tratamiento,
+  PatientCustomField,
+  PatientNutritionReport,
+  PatientNutritionMeasurement,
+  EconomicBudget,
+  EconomicBudgetSignatureRequest,
+  sequelize,
+} = require('../../models');
 const { Op, literal, QueryTypes } = require('sequelize');
 const crypto = require('crypto');
 const { normalizePhoneDigits } = require('../lib/phone');
@@ -415,6 +430,67 @@ const buildReviewActivityDescription = ({ rating, reason, reviewerName, clinicNa
   return {
     plain: fields.map(({ label, value }) => `${label}: ${value}`).join('\n') || 'Sin detalles',
     html: fields.map(({ label, value }) => `<div><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</div>`).join('') || '<div>Sin detalles</div>',
+  };
+};
+
+const formatMoneyEs = (value) => {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return null;
+  return new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' }).format(amount);
+};
+
+const formatBudgetStatusLabel = (status) => {
+  const labels = {
+    draft: 'Borrador',
+    presented: 'Pendiente de aceptación',
+    accepted: 'Aceptado',
+    partially_accepted: 'Aceptado parcialmente',
+    rejected: 'Rechazado',
+    expired: 'Caducado',
+    superseded: 'Sustituido',
+  };
+  const key = String(status || '').trim().toLowerCase();
+  return labels[key] || key.replace(/_/g, ' ');
+};
+
+const formatBudgetSignatureChannelLabel = (channel) => {
+  const labels = {
+    whatsapp: 'WhatsApp',
+    email: 'Email',
+    custom_email: 'Email',
+    tablet: 'Tablet de clínica',
+  };
+  return labels[String(channel || '').trim().toLowerCase()] || channel || 'Canal no definido';
+};
+
+const formatBudgetSignatureStatusLabel = (status) => {
+  const labels = {
+    pending: 'Pendiente',
+    sent: 'Enviado',
+    viewed: 'Abierto',
+    signed: 'Firmado',
+    failed: 'Fallido',
+    expired: 'Caducado',
+    cancelled: 'Cancelado',
+  };
+  return labels[String(status || '').trim().toLowerCase()] || status || 'Pendiente';
+};
+
+const buildBudgetActivityDescription = ({ budget, request = null, status = null }) => {
+  const fields = [];
+  if (budget?.number) fields.push({ label: 'Presupuesto', value: budget.number });
+  const total = formatMoneyEs(budget?.accepted_amount > 0 ? budget.accepted_amount : budget?.snapshotTotal);
+  if (total) fields.push({ label: 'Importe', value: total });
+  const state = status || budget?.status;
+  if (state) fields.push({ label: 'Estado', value: formatBudgetStatusLabel(state) });
+  if (request) {
+    fields.push({ label: 'Canal', value: formatBudgetSignatureChannelLabel(request.channel) });
+    if (request.recipient) fields.push({ label: 'Destino', value: request.recipient });
+    fields.push({ label: 'Firma', value: formatBudgetSignatureStatusLabel(request.status) });
+  }
+  return {
+    plain: fields.map(({ label, value }) => `${label}: ${value}`).join('\n') || 'Presupuesto',
+    html: fields.map(({ label, value }) => `<div><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</div>`).join('') || '<div>Presupuesto</div>',
   };
 };
 
@@ -1221,6 +1297,135 @@ exports.getPacienteActivity = async (req, res) => {
           estado: cita.estado,
         },
       });
+    }
+
+    if (EconomicBudget && EconomicBudgetSignatureRequest) {
+      const budgets = await EconomicBudget.findAll({
+        where: {
+          patient_id: pacienteId,
+          clinic_id: { [Op.in]: readableClinicIds },
+        },
+        attributes: [
+          'id',
+          'public_id',
+          'number',
+          'status',
+          'accepted_amount',
+          'presented_at',
+          'responded_at',
+          'created_at',
+          'updated_at',
+          'created_by',
+          'updated_by',
+        ],
+        order: [['updated_at', 'DESC'], ['id', 'DESC']],
+        limit: 40,
+      });
+      const budgetPlainRows = budgets.map((budget) => (typeof budget.get === 'function' ? budget.get({ plain: true }) : budget));
+      const budgetIds = budgetPlainRows.map((budget) => Number(budget.id)).filter((id) => Number.isFinite(id) && id > 0);
+      const budgetById = new Map(budgetPlainRows.map((budget) => [Number(budget.id), budget]));
+      const signatureRequests = budgetIds.length
+        ? await EconomicBudgetSignatureRequest.findAll({
+            where: { budget_id: { [Op.in]: budgetIds } },
+            order: [['created_at', 'DESC'], ['id', 'DESC']],
+            limit: 80,
+          })
+        : [];
+
+      for (const budget of budgetPlainRows) {
+        const status = String(budget.status || '').trim().toLowerCase();
+        if (!['presented', 'accepted', 'partially_accepted'].includes(status)) {
+          continue;
+        }
+        const at = status === 'presented'
+          ? (budget.presented_at || budget.updated_at || budget.created_at)
+          : (budget.responded_at || budget.updated_at || budget.created_at);
+        const descriptions = buildBudgetActivityDescription({ budget, status });
+        items.push({
+          id: `economic-budget-${budget.public_id}-${status}`,
+          pacienteId: String(pacienteId),
+          fecha: at,
+          tipo: status === 'presented' ? 'economic_budget_pending_acceptance' : 'economic_budget_accepted',
+          titulo: status === 'presented'
+            ? 'Presupuesto pendiente de aceptación'
+            : (status === 'partially_accepted' ? 'Presupuesto aceptado parcialmente' : 'Presupuesto aceptado'),
+          descripcion: descriptions.plain,
+          descripcion_html: descriptions.html,
+          icono: status === 'presented' ? 'heroicons_outline:document-text' : 'heroicons_outline:document-check',
+          color: status === 'presented' ? 'warning' : 'success',
+          usuarioId: budget.updated_by ? String(budget.updated_by) : (budget.created_by ? String(budget.created_by) : 'system'),
+          usuarioNombre: 'Sistema',
+          detalles: {
+            budgetId: budget.public_id,
+            budgetNumber: budget.number,
+            status,
+          },
+        });
+      }
+
+      for (const requestRow of signatureRequests) {
+        const request = typeof requestRow.get === 'function' ? requestRow.get({ plain: true }) : requestRow;
+        const budget = budgetById.get(Number(request.budget_id)) || {};
+        const descriptions = buildBudgetActivityDescription({ budget, request });
+        const baseDetails = {
+          budgetId: budget.public_id || null,
+          budgetNumber: budget.number || null,
+          signatureRequestId: request.public_id,
+          channel: request.channel,
+          recipient: request.recipient || null,
+          status: request.status,
+          publicUrl: request.public_url || null,
+        };
+        const sentAt = request.sent_at || request.created_at;
+        if (sentAt) {
+          items.push({
+            id: `economic-budget-signature-sent-${request.public_id}`,
+            pacienteId: String(pacienteId),
+            fecha: sentAt,
+            tipo: request.status === 'failed' ? 'economic_budget_signature_failed' : 'economic_budget_signature_sent',
+            titulo: request.status === 'failed' ? 'Envío de presupuesto fallido' : 'Presupuesto enviado a firma',
+            descripcion: descriptions.plain,
+            descripcion_html: descriptions.html,
+            icono: request.status === 'failed' ? 'heroicons_outline:exclamation-triangle' : 'heroicons_outline:paper-airplane',
+            color: request.status === 'failed' ? 'warning' : 'info',
+            usuarioId: request.created_by ? String(request.created_by) : 'system',
+            usuarioNombre: 'Sistema',
+            detalles: baseDetails,
+          });
+        }
+        if (request.viewed_at) {
+          items.push({
+            id: `economic-budget-signature-viewed-${request.public_id}`,
+            pacienteId: String(pacienteId),
+            fecha: request.viewed_at,
+            tipo: 'economic_budget_signature_viewed',
+            titulo: 'Presupuesto abierto por el paciente',
+            descripcion: descriptions.plain,
+            descripcion_html: descriptions.html,
+            icono: 'heroicons_outline:eye',
+            color: 'info',
+            usuarioId: 'system',
+            usuarioNombre: 'Sistema',
+            detalles: baseDetails,
+          });
+        }
+        if (request.signed_at) {
+          items.push({
+            id: `economic-budget-signature-signed-${request.public_id}`,
+            pacienteId: String(pacienteId),
+            fecha: request.signed_at,
+            tipo: 'economic_budget_signature_signed',
+            titulo: 'Presupuesto firmado',
+            descripcion: descriptions.plain,
+            descripcion_html: descriptions.html,
+            icono: 'heroicons_outline:document-check',
+            color: 'success',
+            usuarioId: 'system',
+            usuarioNombre: 'Sistema',
+            detalles: baseDetails,
+          });
+        }
+      }
     }
 
     const reviewEvents = await sequelize.query(

@@ -56,6 +56,26 @@ seleccionar una forma que no exista en la version firmada. Los datos bancarios
 pueden quedar `pending` para que recepcion los complete despues: no bloquean la
 aceptacion economica.
 
+### Envio y actividad de firma de presupuestos
+
+- `POST /budgets/:budgetId/signature-requests` crea una solicitud por canal
+  (`whatsapp`, `email`, `custom_email` o `tablet`) y conserva en
+  `EconomicBudgetSignatureRequests` destino, estado, enlace publico,
+  `sent_at`, `viewed_at`, `signed_at`, snapshot y hash.
+- Las solicitudes por `tablet`, `email` y `custom_email` nacen como `sent`.
+  Email sigue siendo mock; tablet queda disponible para copiar enlace o abrir
+  en el kiosco de la clinica.
+- WhatsApp exige plantilla Meta aprobada. El catalogo base se llama
+  `clinicaclick_envio_presupuesto_firma` y se siembra con la migracion
+  `20260731103000-seed-budget-signature-whatsapp-template.js`. Cada WABA debe
+  tener su variante aprobada antes de poder enviar una prueba real.
+- Abrir el enlace cambia la solicitud a `viewed` si aun estaba pendiente o
+  enviada. Firmar cambia a `signed` y acepta el presupuesto con la forma de
+  pago elegida o la preseleccionada.
+- Cada creacion, envio, fallo, apertura y firma genera un evento economico.
+  La actividad se inyecta tambien en el timeline del paciente para que aparezca
+  en la ficha, QuickChat y conversacion cronologica.
+
 Cobros y saldo:
 
 - `POST /budgets/:budgetId/payments`
@@ -194,6 +214,12 @@ solicitudes que conservar:
 
 ```bash
 npx sequelize-cli db:migrate:undo --name 20260730223000-create-economic-budget-signature-requests.js
+```
+
+Para retirar solo el seed de catalogo WhatsApp de firma de presupuesto:
+
+```bash
+npx sequelize-cli db:migrate:undo --name 20260731103000-seed-budget-signature-whatsapp-template.js
 ```
 
 El corte base de economia del paciente esta aplicado en `dev` y `staging`;

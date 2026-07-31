@@ -12,6 +12,8 @@ const {
   EconomicBudgetVersion,
   EconomicBudgetEvent,
   EconomicBudgetSignatureRequest,
+  WhatsappTemplate,
+  WhatsappTemplateCatalog,
   ClinicEconomicTemplate,
   EconomicPayment,
   PatientWalletEntry,
@@ -58,6 +60,7 @@ const BUDGET_SIGNATURE_STATUSES = new Set(['pending', 'sent', 'viewed', 'signed'
 const BUDGET_SIGNATURE_PAYMENT_MODES = new Set(['patient_choice', ...PAYMENT_OPTION_MODES]);
 const BUDGET_SIGNATURE_TYPES = new Set(['accept_full', 'accept_partial']);
 const BUDGET_SIGNATURE_BANK_POLICIES = new Set(['defer', 'request_now']);
+const BUDGET_SIGNATURE_WHATSAPP_TEMPLATE = 'clinicaclick_envio_presupuesto_firma';
 const TEMPLATE_TYPES = new Set(['budget', 'invoice']);
 const PRODUCT_TYPES = new Set(['treatment', 'voucher', 'pack']);
 const FISCAL_DOCUMENT_TYPES = new Set(['receipt', 'invoice', 'credit_note']);
@@ -1477,6 +1480,110 @@ function publicBudgetSignaturePayload(request) {
   };
 }
 
+function budgetSignatureChannelLabel(channel) {
+  const labels = {
+    whatsapp: 'WhatsApp',
+    email: 'Email',
+    custom_email: 'Email',
+    tablet: 'Tablet de clínica',
+  };
+  return labels[channel] || channel || 'Canal no definido';
+}
+
+function budgetSignatureStatusLabel(status) {
+  const labels = {
+    pending: 'Pendiente',
+    sent: 'Enviado',
+    viewed: 'Abierto',
+    signed: 'Firmado',
+    cancelled: 'Cancelado',
+    expired: 'Caducado',
+    failed: 'Fallido',
+  };
+  return labels[status] || status || 'Pendiente';
+}
+
+function budgetSignatureEventMetadata(request, metadata = {}) {
+  const snapshot = parseJson(request?.snapshot_json, {});
+  return {
+    signature_request_id: request?.public_id || null,
+    budget_id: snapshot.budget?.public_id || null,
+    budget_number: snapshot.budget?.number || null,
+    channel: request?.channel || null,
+    channel_label: budgetSignatureChannelLabel(request?.channel),
+    recipient: request?.recipient || null,
+    request_type: request?.request_type || null,
+    status: request?.status || null,
+    status_label: budgetSignatureStatusLabel(request?.status),
+    public_url: request?.public_url || null,
+    selected_payment_mode: request?.selected_payment_mode || null,
+    selected_financing_months: request?.selected_financing_months || null,
+    collection_method: request?.collection_method || null,
+    signature_channel: request?.signature_channel || null,
+    bank_data_policy: request?.bank_data_policy || null,
+    bank_data_status: request?.bank_data_status || null,
+    accepted_amount: numberValue(request?.accepted_amount),
+    ...metadata,
+  };
+}
+
+async function recordBudgetSignatureEvent(request, eventType, {
+  transaction = null,
+  actorId = undefined,
+  metadata = {},
+  createdAt = new Date(),
+} = {}) {
+  if (!request?.budget_id || !request?.budget_version) return null;
+  return EconomicBudgetEvent.create({
+    budget_id: request.budget_id,
+    version_number: request.budget_version,
+    event_type: eventType,
+    metadata: budgetSignatureEventMetadata(request, metadata),
+    actor_id: actorId === undefined ? (request.created_by || null) : actorId,
+    created_at: createdAt,
+  }, { transaction });
+}
+
+async function findApprovedBudgetSignatureWhatsappTemplate(wabaId) {
+  const normalizedWabaId = cleanString(wabaId, 120);
+  if (!normalizedWabaId || !WhatsappTemplate) return null;
+  if (WhatsappTemplateCatalog) {
+    const catalog = await WhatsappTemplateCatalog.findOne({
+      where: { name: BUDGET_SIGNATURE_WHATSAPP_TEMPLATE },
+      attributes: ['id'],
+    });
+    if (catalog) {
+      const template = await WhatsappTemplate.findOne({
+        where: {
+          catalog_template_id: catalog.id,
+          waba_id: normalizedWabaId,
+          is_active: true,
+          status: { [Op.in]: ['APPROVED', 'approved'] },
+        },
+        order: [['updatedAt', 'DESC'], ['id', 'DESC']],
+      });
+      if (template) return template;
+    }
+  }
+  const rows = await WhatsappTemplate.findAll({
+    where: {
+      waba_id: normalizedWabaId,
+      is_active: true,
+      status: { [Op.in]: ['APPROVED', 'approved'] },
+    },
+    include: WhatsappTemplateCatalog
+      ? [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['name'], required: false }]
+      : [],
+    order: [['updatedAt', 'DESC'], ['id', 'DESC']],
+    limit: 50,
+  });
+  return rows.find((row) => {
+    const plain = row?.toJSON ? row.toJSON() : row;
+    return cleanString(plain?.name, 120) === BUDGET_SIGNATURE_WHATSAPP_TEMPLATE
+      || cleanString(plain?.catalog?.name, 120) === BUDGET_SIGNATURE_WHATSAPP_TEMPLATE;
+  }) || null;
+}
+
 async function sendBudgetSignatureWhatsapp({ request, patient, clinic, publicUrl }) {
   const phone = patient.telefono_movil || patient.telefono || patient.phone || null;
   const normalized = whatsappService.normalizePhoneNumber(phone);
@@ -1487,19 +1594,38 @@ async function sendBudgetSignatureWhatsapp({ request, patient, clinic, publicUrl
   if (!clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
     throw domainError(409, 'whatsapp_config_missing_for_scope', 'La clínica no tiene WhatsApp conectado.');
   }
+  const template = await findApprovedBudgetSignatureWhatsappTemplate(clinicConfig.wabaId);
+  if (!template) {
+    throw domainError(
+      409,
+      'budget_signature_whatsapp_template_missing',
+      'Falta aprobar en Meta la plantilla de envío de presupuesto para firma.',
+    );
+  }
+  const templateJson = template.toJSON ? template.toJSON() : template;
+  const snapshot = parseJson(request.snapshot_json, {});
   const firstName = cleanString(patient.nombre, 80) || 'Hola';
   const clinicName = clinic.nombre_clinica || 'tu clínica';
-  const body = `Hola ${firstName}, te enviamos tu presupuesto ${request.snapshot_json?.budget?.number || ''} de ${clinicName}.\n\nPuedes revisarlo y firmarlo aquí:\n${publicUrl}\n\nSi falta algún dato de pago, lo completaremos contigo en la clínica.`;
   const response = await whatsappService.sendMessage({
     to: normalized,
-    body,
-    previewUrl: true,
-    useTemplate: false,
+    useTemplate: true,
+    templateName: templateJson.name,
+    templateLanguage: templateJson.language || 'es',
+    templateParams: [
+      firstName,
+      snapshot.budget?.number || request.budget_version || '',
+      clinicName,
+      publicUrl,
+    ],
     clinicConfig,
   });
   return {
     to: normalized,
     provider_message_id: response?.messages?.[0]?.id || null,
+    delivery_mode: 'template',
+    template_name: templateJson.name,
+    template_language: templateJson.language || 'es',
+    template_id: templateJson.id || null,
     sent_at: new Date().toISOString(),
   };
 }
@@ -1573,6 +1699,7 @@ async function createBudgetSignatureRequest({ publicId, actorId, payload = {} })
     },
   };
   const request = await sequelize.transaction(async (transaction) => {
+    const startsSent = ['email', 'custom_email', 'tablet'].includes(normalizedChannel);
     const row = await EconomicBudgetSignatureRequest.create({
       public_id: crypto.randomUUID(),
       budget_id: budget.id,
@@ -1580,7 +1707,7 @@ async function createBudgetSignatureRequest({ publicId, actorId, payload = {} })
       patient_id: budget.patient_id,
       budget_version: budget.current_version,
       request_type: requestType,
-      status: normalizedChannel === 'email' || normalizedChannel === 'custom_email' ? 'sent' : 'pending',
+      status: startsSent ? 'sent' : 'pending',
       channel: normalizedChannel,
       recipient: normalizedChannel === 'custom_email'
         ? cleanString(payload.recipient_email || payload.email, 190)
@@ -1600,9 +1727,11 @@ async function createBudgetSignatureRequest({ publicId, actorId, payload = {} })
       snapshot_json: snapshot,
       snapshot_hash: hashSnapshot(snapshot),
       expires_at: addHours(now, ttlHours),
-      sent_at: normalizedChannel === 'email' || normalizedChannel === 'custom_email' ? now : null,
+      sent_at: startsSent ? now : null,
       delivery_result: normalizedChannel === 'email' || normalizedChannel === 'custom_email'
         ? { mocked: true, reason: 'email_delivery_pending' }
+        : normalizedChannel === 'tablet'
+          ? { queued_for_tablet: true }
         : null,
       created_by: actorId || null,
     }, { transaction });
@@ -1617,6 +1746,15 @@ async function createBudgetSignatureRequest({ publicId, actorId, payload = {} })
     );
     await row.update({ public_url: publicUrl }, { transaction });
     row.public_url = publicUrl;
+    await recordBudgetSignatureEvent(row, 'signature_request_created', { transaction });
+    if (startsSent) {
+      await recordBudgetSignatureEvent(row, 'signature_request_sent', {
+        transaction,
+        metadata: {
+          delivery_result: normalizedChannel === 'tablet' ? { queued_for_tablet: true } : { mocked: true },
+        },
+      });
+    }
     return row;
   });
 
@@ -1624,6 +1762,13 @@ async function createBudgetSignatureRequest({ publicId, actorId, payload = {} })
     try {
       const result = await sendBudgetSignatureWhatsapp({ request, patient, clinic, publicUrl: request.public_url });
       await request.update({ status: 'sent', sent_at: new Date(), delivery_result: result });
+      await recordBudgetSignatureEvent(request, 'signature_request_sent', {
+        metadata: {
+          delivery_mode: result.delivery_mode || 'template',
+          template_name: result.template_name || null,
+          provider_message_id: result.provider_message_id || null,
+        },
+      });
     } catch (error) {
       await request.update({
         status: 'failed',
@@ -1631,6 +1776,12 @@ async function createBudgetSignatureRequest({ publicId, actorId, payload = {} })
           error: error.code || 'whatsapp_send_failed',
           message: error.message || 'No se pudo enviar el WhatsApp.',
           raw: error?.response?.data || null,
+        },
+      });
+      await recordBudgetSignatureEvent(request, 'signature_request_failed', {
+        metadata: {
+          error: error.code || 'whatsapp_send_failed',
+          message: error.message || 'No se pudo enviar el WhatsApp.',
         },
       });
       throw error;
@@ -1648,9 +1799,19 @@ async function findBudgetSignatureRequestFromToken(tokenRaw, { markViewed = fals
   if (!request) throw domainError(404, 'budget_signature_request_not_found', 'Solicitud de firma no encontrada.');
   if (request.expires_at && new Date(request.expires_at).getTime() < Date.now() && !['signed', 'expired'].includes(request.status)) {
     await request.update({ status: 'expired' });
+    await recordBudgetSignatureEvent(request, 'signature_request_expired', {
+      actorId: null,
+      metadata: { reason: 'token_expired' },
+    });
   }
-  if (markViewed && ['pending', 'sent'].includes(request.status)) {
-    await request.update({ status: 'viewed', viewed_at: new Date() });
+  if (markViewed && ['pending', 'sent'].includes(request.status) && !request.viewed_at) {
+    const viewedAt = new Date();
+    await request.update({ status: 'viewed', viewed_at: viewedAt });
+    await recordBudgetSignatureEvent(request, 'signature_request_viewed', {
+      actorId: null,
+      createdAt: viewedAt,
+      metadata: { source: 'public_signature_link' },
+    });
   }
   return request;
 }
@@ -1770,6 +1931,18 @@ async function applyBudgetSignatureAcceptance({ request, payload = {}, requestMe
       actor_id: null,
       created_at: now,
     }, { transaction });
+    await recordBudgetSignatureEvent(lockedRequest, 'signature_request_signed', {
+      transaction,
+      actorId: null,
+      createdAt: now,
+      metadata: {
+        selected_payment_mode: selectedPaymentMode,
+        selected_financing_months: selectedFinancingMonths,
+        accepted_line_keys: acceptedLineKeys,
+        accepted_amount: acceptedAmount,
+        bank_data_status: bankDataStatus,
+      },
+    });
     await activateVouchers({ budget, rule: 'on_acceptance', actorId: lockedRequest.created_by, transaction });
     return lockedRequest;
   });
@@ -1878,9 +2051,18 @@ async function createTabletBudgetSignatureSession({ requestId, clinicId, payload
     ttlHours: payload.ttl_hours ?? payload.validez_horas ?? 12,
   });
   const publicUrl = buildPublicBudgetSignatureUrl(token, payload.base_url || payload.baseUrl || null, 'tablet');
+  const sentAt = new Date();
   await request.update({
     public_url: publicUrl,
     status: request.status === 'pending' ? 'sent' : request.status,
+    sent_at: request.sent_at || sentAt,
+  });
+  await recordBudgetSignatureEvent(request, 'signature_request_sent', {
+    createdAt: sentAt,
+    metadata: {
+      reason: 'tablet_session_created',
+      public_url: publicUrl,
+    },
   });
   return {
     request_id: request.public_id,
@@ -3085,7 +3267,7 @@ function serializeEvent(event) {
   };
 }
 
-function serializeBudget(budget, version, events, payments, walletApplied = 0) {
+function serializeBudget(budget, version, events, payments, walletApplied = 0, signatureRequests = []) {
   const paid = roundMoney(payments
     .filter((payment) => payment.status === 'confirmed')
     .reduce((sum, payment) => sum + paymentAppliedToBudget(payment), 0) + walletApplied);
@@ -3110,6 +3292,7 @@ function serializeBudget(budget, version, events, payments, walletApplied = 0) {
     updated_at: budget.updated_at,
     current: serializedVersion,
     events: events.map(serializeEvent),
+    signature_requests: signatureRequests.map((request) => serializeBudgetSignatureRequest(request)),
     financial_summary: {
       payable: roundMoney(payable),
       paid,
@@ -3208,6 +3391,7 @@ async function getWorkspace({ patientIdentifier, clinicId }) {
   const [
     versions,
     events,
+    signatureRequests,
     payments,
     walletEntries,
     vouchers,
@@ -3221,6 +3405,12 @@ async function getWorkspace({ patientIdentifier, clinicId }) {
       ? EconomicBudgetEvent.findAll({
         where: { budget_id: { [Op.in]: budgetIds } },
         order: [['created_at', 'ASC']],
+      })
+      : [],
+    budgetIds.length
+      ? EconomicBudgetSignatureRequest.findAll({
+        where: { budget_id: { [Op.in]: budgetIds } },
+        order: [['created_at', 'DESC'], ['id', 'DESC']],
       })
       : [],
     EconomicPayment.findAll({
@@ -3257,6 +3447,11 @@ async function getWorkspace({ patientIdentifier, clinicId }) {
     const key = String(event.budget_id);
     eventsByBudget.set(key, [...(eventsByBudget.get(key) || []), event]);
   }
+  const signatureRequestsByBudget = new Map();
+  for (const request of signatureRequests) {
+    const key = String(request.budget_id);
+    signatureRequestsByBudget.set(key, [...(signatureRequestsByBudget.get(key) || []), request]);
+  }
   const paymentsByBudget = new Map();
   for (const payment of payments) {
     const key = String(payment.budget_id || '');
@@ -3281,7 +3476,8 @@ async function getWorkspace({ patientIdentifier, clinicId }) {
           version,
           eventsByBudget.get(String(budget.id)) || [],
           paymentsByBudget.get(String(budget.id)) || [],
-          walletAppliedByBudget.get(String(budget.id)) || 0
+          walletAppliedByBudget.get(String(budget.id)) || 0,
+          signatureRequestsByBudget.get(String(budget.id)) || []
         )
         : null;
     })

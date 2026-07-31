@@ -153,14 +153,18 @@ function baseStyles() {
     .invoice-payment p { margin: 5px 0 0; }
     .budget-doc { padding: 4mm 5mm; }
     .budget-doc-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding-top: 14px; border-top: 4px solid #4f46e5; }
+    .budget-brand-name { display: block; max-width: 360px; font-size: 15px; line-height: 1.25; }
     .budget-logo { max-width: 155px; max-height: 40px; object-fit: contain; object-position: left; }
     .budget-ref { text-align: right; }
     .budget-ref span, .budget-ref small { display: block; color: #64748b; font-size: 10px; }
     .budget-ref strong { display: block; margin: 3px 0; font-size: 16px; }
-    .budget-intro { display: grid; grid-template-columns: minmax(0, 1fr) 145px; align-items: center; min-height: 120px; gap: 24px; padding: 20px 0; border-bottom: 1px solid #dfe5ed; }
-    .budget-intro h1 { margin-top: 6px; font-size: 26px; }
-    .budget-intro p { margin: 8px 0 0; color: #475569; font-size: 11px; }
-    .budget-header-image { width: 145px; height: 90px; object-fit: cover; }
+    .budget-intro { position: relative; min-height: 152px; margin-top: 18px; overflow: hidden; border-radius: 8px; background: #172033 center/cover no-repeat; color: white; }
+    .budget-intro-shade { position: absolute; inset: 0; background: linear-gradient(90deg, rgba(15, 23, 42, .86), rgba(15, 23, 42, .48)); }
+    .budget-intro-copy { position: relative; z-index: 1; max-width: 64%; padding: 24px 26px; }
+    .budget-intro h1 { margin: 6px 0 0; font-size: 27px; line-height: 1.12; }
+    .budget-intro p { margin: 8px 0 0; color: rgba(255, 255, 255, .86); font-size: 11px; }
+    .budget-intro .kicker { color: rgba(255, 255, 255, .78); }
+    .budget-hero-logo { max-width: 155px; max-height: 42px; margin-bottom: 15px; object-fit: contain; object-position: left; filter: drop-shadow(0 0 1px rgba(255, 255, 255, .95)); }
     .kicker { display: block; color: #64748b; font-size: 9px; font-weight: bold; text-transform: uppercase; }
     .budget-meta { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 20px; padding: 15px 0; border-bottom: 1px solid #dfe5ed; }
     .budget-meta span { display: block; margin-bottom: 4px; color: #64748b; font-size: 9px; text-transform: uppercase; }
@@ -180,14 +184,32 @@ function baseStyles() {
     .payment-method { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; min-width: 165px; padding: 7px 10px; border: 1px solid #dfe5ed; border-radius: 6px; background: #f8fafc; color: #172033; font-size: 10px; font-weight: bold; }
     .payment-method span { color: #64748b; font-size: 8px; text-transform: uppercase; }
     .payment-method strong { font-size: 11px; }
-    .payment-list { margin-top: 12px; overflow: hidden; border: 1px solid #dfe5ed; border-radius: 6px; }
-    .payment-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 24px; padding: 11px 12px; border-bottom: 1px solid #e8edf3; }
-    .payment-row:last-child { border-bottom: 0; }
-    .payment-row small { display: block; margin-top: 3px; color: #64748b; font-size: 9px; }
-    .payment-row .amount { text-align: right; font-size: 15px; }
-    .payment-detail { margin-top: 7px; padding-top: 7px; border-top: 1px solid #e8edf3; }
-    .payment-detail div { display: flex; justify-content: space-between; gap: 18px; padding: 3px 0; font-size: 10px; }
+    .payment-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+    .payment-list.accepted { grid-template-columns: 1fr; }
+    .payment-card { min-height: 92px; border: 1px solid #dbe3ef; border-radius: 8px; padding: 13px; break-inside: avoid; }
+    .payment-card.full { grid-column: 1 / -1; }
+    .option-label { display: block; margin-bottom: 7px; color: #64748b; font-size: 9px; font-weight: bold; text-transform: uppercase; }
+    .payment-card h3 { margin: 0; font-size: 15px; }
+    .payment-card p { margin: 4px 0 0; color: #64748b; font-size: 10px; line-height: 1.35; }
+    .payment-card .amount { display: block; margin-top: 10px; font-size: 22px; line-height: 1.1; text-align: right; }
+    .phase-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+    .phase-card { border: 1px solid #dfe5ed; border-radius: 6px; background: #f8fafc; padding: 9px; }
+    .phase-card span { display: block; color: #64748b; font-size: 9px; }
+    .phase-card strong { display: block; margin-top: 4px; font-size: 15px; }
+    .financing-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-top: 10px; }
+    .financing-card { position: relative; border: 1px solid #bfdbfe; border-radius: 8px; padding: 12px; }
+    .financing-card.highlight { border-color: #4f46e5; box-shadow: 0 0 0 2px rgba(79, 70, 229, .15); }
+    .recommended-label { display: inline-block; margin-bottom: 7px; border-radius: 999px; background: #eef2ff; color: #4338ca; padding: 3px 7px; font-size: 8px; font-weight: bold; text-transform: uppercase; }
+    .financing-card h4 { margin: 0; font-size: 13px; }
+    .financing-card .monthly { margin-top: 6px; font-size: 25px; font-weight: bold; line-height: 1; }
+    .financing-card .monthly small { font-size: 11px; font-weight: normal; }
+    .financing-card dl { display: grid; gap: 4px; margin: 9px 0 0; padding-top: 8px; border-top: 1px solid #e6ebf2; }
+    .financing-card dl div { display: flex; justify-content: space-between; gap: 10px; font-size: 9px; }
+    .financing-card dt { color: #64748b; }
+    .financing-card dd { margin: 0; font-weight: bold; }
     .budget-conditions { padding: 18px 0; color: #475569; font-size: 10px; line-height: 1.5; white-space: pre-line; }
+    .budget-signatures { display: grid; grid-template-columns: 1fr 1fr; gap: 36px; padding: 34px 0 6px; }
+    .budget-signature-line { padding-top: 10px; border-top: 1px solid #a8b4c5; color: #64748b; font-size: 9px; }
     .budget-footer { display: flex; justify-content: space-between; margin-top: 16px; padding-top: 10px; border-top: 1px solid #dfe5ed; color: #64748b; font-size: 9px; }
   `;
 }
@@ -215,6 +237,22 @@ function collectionMethodLabel(method) {
   }[method] || '';
 }
 
+function financingMonthly(option, total) {
+  const monthly = Number(option?.monthly_amount || 0);
+  if (monthly > 0) return monthly;
+  const financed = Math.max(0, Number(total || 0) - Number(option?.entry || 0));
+  const interest = financed * Number(option?.interest_percent || 0) / 100;
+  return Number(option?.months || 0) > 0 ? (financed + interest) / Number(option.months) : 0;
+}
+
+function financingTotal(option, total) {
+  const stored = Number(option?.total_financed || 0);
+  if (stored > 0) return stored;
+  return Number(option?.entry || 0)
+    + financingMonthly(option, total) * Number(option?.months || 0)
+    + Number(option?.opening_fee_amount || 0);
+}
+
 function paymentRows(budget, proposal, total, acceptance) {
   const included = Array.isArray(proposal.included_modes)
     ? proposal.included_modes
@@ -224,14 +262,15 @@ function paymentRows(budget, proposal, total, acceptance) {
     ? acceptance.selected_payment_mode
     : included.length === 1 ? included[0] : included.includes(proposal.mode) ? proposal.mode : null;
   const modes = accepted ? (selected ? [selected] : []) : included;
-  return modes.map((mode) => {
+  return modes.map((mode, index) => {
+    const optionLabel = accepted ? 'Elegida' : `Opción ${index + 1}`;
     if (mode === 'single') {
       const savings = Number(proposal.single_payment?.savings || 0);
-      return `<div class="payment-row"><div><strong>Pago único</strong><small>Un solo cobro${savings ? ` · ahorro ${escapeHtml(money(savings))}` : ''}</small></div><strong class="amount">${escapeHtml(money(proposal.single_payment?.amount ?? total))}</strong></div>`;
+      return `<article class="payment-card"><span class="option-label">${escapeHtml(optionLabel)} - Pago único</span><h3>Pago único</h3><p>Un solo cobro${savings ? ` · ahorro ${escapeHtml(money(savings))}` : ''}</p><strong class="amount">${escapeHtml(money(proposal.single_payment?.amount ?? total))}</strong></article>`;
     }
     if (mode === 'clinic_installments') {
       const schedule = Array.isArray(proposal.schedule) ? proposal.schedule : [];
-      return `<div class="payment-row"><div><strong>Aplazado en clínica</strong><small>${schedule.length} cobros acordados</small><div class="payment-detail">${schedule.map((phase) => `<div><span>${escapeHtml(phase.label)}${phase.due_date ? ` · ${escapeHtml(date(phase.due_date))}` : ''}</span><strong>${escapeHtml(money(phase.amount))}</strong></div>`).join('')}</div></div></div>`;
+      return `<article class="payment-card full"><span class="option-label">${escapeHtml(optionLabel)} - Aplazado en clínica</span><h3>Aplazado en clínica</h3><p>${schedule.length} cobros acordados</p><div class="phase-grid">${schedule.map((phase) => `<div class="phase-card"><span>${escapeHtml(phase.label)}${phase.due_date ? ` · ${escapeHtml(date(phase.due_date))}` : ''}</span><strong>${escapeHtml(money(phase.amount))}</strong></div>`).join('')}</div></article>`;
     }
     if (mode === 'external_financing') {
       const options = Array.isArray(proposal.financing_options) ? proposal.financing_options : [];
@@ -239,9 +278,13 @@ function paymentRows(budget, proposal, total, acceptance) {
       const visible = accepted
         ? options.filter((option) => Number(option.months) === selectedMonths)
         : options;
-      return visible.map((option) => `<div class="payment-row"><div><strong>Financiación · ${escapeHtml(option.months)} meses</strong><small>Entrada ${escapeHtml(money(option.entry))} · total ${escapeHtml(money(option.total_financed))}</small></div><strong class="amount">${escapeHtml(money(option.monthly_amount))}<small>/mes</small></strong></div>`).join('');
+      return `<article class="payment-card full"><span class="option-label">${escapeHtml(optionLabel)} - Financiación</span><h3>Financiación</h3><p>${accepted ? 'Plazo elegido' : 'El paciente puede comparar los plazos disponibles'}</p><div class="financing-grid">${visible.map((option) => {
+        const highlighted = Boolean(option.highlighted) || (selectedMonths > 0 && Number(option.months) === selectedMonths);
+        const openingFee = Number(option.opening_fee_amount || 0);
+        return `<div class="financing-card${highlighted ? ' highlight' : ''}">${highlighted ? `<span class="recommended-label">${accepted ? 'Elegida' : 'Recomendado'}</span>` : ''}<h4>${escapeHtml(option.months)} meses</h4><div class="monthly">${escapeHtml(money(financingMonthly(option, total)))}<small>/mes</small></div><dl><div><dt>Entrada</dt><dd>${escapeHtml(money(option.entry))}</dd></div><div><dt>Total financiado</dt><dd>${escapeHtml(money(financingTotal(option, total)))}</dd></div><div><dt>Apertura</dt><dd>${escapeHtml(option.opening_fee_percent || 0)}%${openingFee > 0 ? ` · ${escapeHtml(money(openingFee))}` : ''}</dd></div>${option.interest_percent ? `<div><dt>Interés</dt><dd>${escapeHtml(option.interest_percent)}%</dd></div>` : ''}</dl></div>`;
+      }).join('')}</div></article>`;
     }
-    return `<div class="payment-row"><div><strong>Saldo del paciente</strong><small>Importe aplicado al presupuesto</small></div><strong class="amount">${escapeHtml(money(proposal.balance_application?.amount || 0))}</strong></div>`;
+    return `<article class="payment-card"><span class="option-label">${escapeHtml(optionLabel)} - Saldo del paciente</span><h3>Saldo del paciente</h3><p>Importe aplicado al presupuesto</p><strong class="amount">${escapeHtml(money(proposal.balance_application?.amount || 0))}</strong></article>`;
   }).join('');
 }
 
@@ -258,20 +301,22 @@ function budgetHtml(budget, version, events = []) {
   const payments = paymentRows(budget, proposal, totals.total, acceptance);
   const accepted = ['accepted', 'partially_accepted'].includes(budget.status);
   const collectionMethod = collectionMethodLabel(acceptance.collection_method);
+  const introStyle = headerImage ? ` style="background-image:url('${escapeHtml(headerImage)}')"` : '';
   return `<!doctype html><html><head><meta charset="utf-8"><style>${baseStyles()}</style></head><body>
     <main class="page budget-doc">
       <header class="budget-doc-head">
-        <div>${logo ? `<img class="budget-logo" src="${escapeHtml(logo)}" alt="">` : `<strong>${escapeHtml(clinic.legal_name || clinic.name)}</strong>`}</div>
+        <strong class="budget-brand-name">${escapeHtml(clinic.legal_name || clinic.name)}</strong>
         <div class="budget-ref"><span>Presupuesto</span><strong>${escapeHtml(budget.number)}</strong><small>Versión ${escapeHtml(budget.current_version)}</small></div>
       </header>
-      <section class="budget-intro">
-        <div><span class="kicker">Propuesta clínica</span><h1>${escapeHtml(design.custom_title || 'Plan de tratamiento')}</h1>${design.clinic_message ? `<p>${escapeHtml(design.clinic_message)}</p>` : ''}</div>
-        ${headerImage ? `<img class="budget-header-image" src="${escapeHtml(headerImage)}" alt="">` : '<div></div>'}
+      <section class="budget-intro"${introStyle}>
+        <div class="budget-intro-shade"></div>
+        <div class="budget-intro-copy">${logo ? `<img class="budget-hero-logo" src="${escapeHtml(logo)}" alt="">` : ''}<span class="kicker">${escapeHtml(clinic.name || clinic.legal_name || '')}</span><h1>${escapeHtml(design.custom_title || 'Plan de tratamiento')}</h1><p>Preparado para ${escapeHtml(patient.name || '')}</p></div>
       </section>
       <section class="budget-meta"><div><span>Paciente</span><strong>${escapeHtml(patient.name)}</strong></div><div><span>Fecha</span><strong>${escapeHtml(date(budget.created_at))}</strong></div><div><span>Válido hasta</span><strong>${escapeHtml(date(budget.valid_until))}</strong></div></section>
-      <section class="budget-section"><h2>Tratamientos y servicios</h2><div class="budget-table"><table><thead><tr><th>Concepto</th><th class="right">Cantidad</th><th class="right">Precio</th><th class="right">Importe</th></tr></thead><tbody>${lines.map((line) => `<tr><td><strong>${escapeHtml(line.name)}</strong>${line.tooth ? `<small>Pieza ${escapeHtml(line.tooth)}</small>` : ''}${line.discount_percent ? `<small>${escapeHtml(line.discount_percent)}% de descuento</small>` : ''}</td><td class="right">${escapeHtml(line.quantity)}</td><td class="right">${escapeHtml(money(line.unit_price))}</td><td class="right"><strong>${escapeHtml(money(line.total))}</strong></td></tr>`).join('')}</tbody></table></div><div class="budget-grand-total"><span>Total</span><strong>${escapeHtml(money(totals.total))}</strong></div></section>
-      ${payments ? `<section class="budget-section"><div class="payment-head"><div><span class="kicker">${accepted ? 'Decisión del paciente' : 'Propuesta económica'}</span><h2>${accepted ? 'Forma de pago acordada' : 'Alternativas de pago'}</h2></div>${accepted && collectionMethod ? `<span class="payment-method"><span>Cobro previsto</span><strong>${escapeHtml(collectionMethod)}</strong></span>` : ''}</div><div class="payment-list">${payments}</div></section>` : ''}
+      <section class="budget-section"><h2>Tratamientos y servicios</h2><div class="budget-table"><table><thead><tr><th>Concepto</th><th class="right">Cantidad</th><th class="right">Precio</th><th class="right">Importe</th></tr></thead><tbody>${lines.map((line) => `<tr><td><strong>${escapeHtml(line.name)}</strong>${line.tooth ? `<small>Pieza ${escapeHtml(line.tooth)}</small>` : ''}${line.discount_percent ? `<small>${escapeHtml(line.discount_percent)}% de descuento</small>` : ''}</td><td class="right">${escapeHtml(line.quantity)}</td><td class="right">${escapeHtml(money(line.unit_price))}</td><td class="right"><strong>${escapeHtml(money(line.total))}</strong></td></tr>`).join('')}</tbody></table></div><div class="budget-grand-total"><span>Total tratamientos</span><strong>${escapeHtml(money(totals.total))}</strong></div></section>
+      ${payments ? `<section class="budget-section"><div class="payment-head"><div><span class="kicker">${accepted ? 'Forma elegida' : 'Alternativas para el paciente'}</span><h2>${accepted ? 'Forma de pago acordada' : 'Formas de pago'}</h2></div>${accepted && collectionMethod ? `<span class="payment-method"><span>Cobro previsto</span><strong>${escapeHtml(collectionMethod)}</strong></span>` : ''}</div><div class="payment-list${accepted ? ' accepted' : ''}">${payments}</div></section>` : ''}
       ${design.conditions || version.notes ? `<section class="budget-conditions"><strong>Condiciones</strong><br>${escapeHtml(design.conditions || version.notes)}</section>` : ''}
+      <section class="budget-signatures"><div class="budget-signature-line">Firma del paciente</div><div class="budget-signature-line">Firma de la clínica</div></section>
       <footer class="budget-footer"><span>${escapeHtml(clinic.legal_name || clinic.name)}</span><span>${escapeHtml(budget.number)} · ${escapeHtml(date(budget.created_at))}</span></footer>
     </main></body></html>`;
 }
