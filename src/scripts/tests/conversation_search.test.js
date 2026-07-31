@@ -28,6 +28,10 @@ function collectLiteralSql(value, out = []) {
 async function run() {
   assert.equal(__testing.normalizeSearchQuery('  Jose   Miguel  MOD  '), 'Jose Miguel MOD');
   assert.equal(__testing.normalizeTextSearchValue('Iñigo García'), 'inigo garcia');
+  assert.ok(
+    __testing.buildPhoneSearchCandidates('654695552').includes('+34654695552'),
+    'Spanish local mobile searches must include the E.164 candidate used by WhatsApp conversations'
+  );
 
   const clause = __testing.buildConversationSearchClause('Jose Miguel MOD');
   const literalSql = collectLiteralSql(clause).join('\n');
@@ -49,6 +53,21 @@ async function run() {
   );
   assert.match(literalSql, /JSON_EXTRACT\(mpli\.custom_fields, '\$\.nombre'\)/);
   assert.match(literalSql, /JSON_EXTRACT\(mpli\.custom_fields, '\$\.apellidos'\)/);
+
+  const phoneClause = __testing.buildConversationSearchClause('654695552');
+  const phoneLiteralSql = collectLiteralSql(phoneClause).join('\n');
+  assert.match(phoneLiteralSql, /\+34654695552/);
+  assert.match(phoneLiteralSql, /mpli\.phone IN/);
+  assert.doesNotMatch(
+    phoneLiteralSql,
+    /mpli\.phone[\s\S]*LIKE/,
+    'Phone-only QuickChat searches must not scan MarketingPatientListItems with LIKE'
+  );
+  assert.doesNotMatch(
+    phoneLiteralSql,
+    /JSON_EXTRACT\(mpli\.custom_fields/,
+    'Phone-only QuickChat searches must avoid the broad marketing custom_fields fallback'
+  );
 
   assert.equal(
     __testing.getQuickChatConversationCategory({ channel: 'internal', patient_id: 123, contact_id: 'team' }),

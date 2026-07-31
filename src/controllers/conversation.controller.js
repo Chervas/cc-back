@@ -699,6 +699,47 @@ function normalizePhoneDigits(value) {
   return String(value || '').replace(/\D+/g, '').replace(/^00/, '');
 }
 
+function buildPhoneSearchCandidates(value) {
+  const digits = normalizePhoneDigits(value);
+  if (!digits) return [];
+
+  const localDigits = digits.length > 9 && digits.startsWith('34')
+    ? digits.slice(-9)
+    : (digits.length > 9 ? digits.slice(-9) : digits);
+  const candidates = new Set([
+    digits,
+    `+${digits}`,
+    `00${digits}`,
+  ]);
+
+  if (localDigits) {
+    candidates.add(localDigits);
+    candidates.add(`+${localDigits}`);
+    candidates.add(`00${localDigits}`);
+  }
+
+  if (localDigits.length === 9 && /^[6789]/.test(localDigits)) {
+    candidates.add(`34${localDigits}`);
+    candidates.add(`+34${localDigits}`);
+    candidates.add(`0034${localDigits}`);
+  }
+
+  return Array.from(candidates).filter(Boolean);
+}
+
+function buildPhoneDigitCandidates(value) {
+  return Array.from(new Set(
+    buildPhoneSearchCandidates(value)
+      .map((candidate) => normalizePhoneDigits(candidate))
+      .filter(Boolean)
+  ));
+}
+
+function isPhoneOnlySearch(value, digits) {
+  if (!digits || digits.length < 7) return false;
+  return !String(value || '').replace(/[+\d\s().-]/g, '').trim();
+}
+
 function sqlPhoneDigitsExpression(expression) {
   return `REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(${expression}, ''), '+', ''), ' ', ''), '-', ''), '(', ''), ')', ''), '.', '')`;
 }
@@ -711,10 +752,75 @@ function normalizeSearchQuery(value) {
   return String(value || '').trim().replace(/\s+/g, ' ');
 }
 
+function buildPhoneOnlyConversationSearchClause(searchQuery) {
+  const phoneCandidates = buildPhoneSearchCandidates(searchQuery);
+  const digitCandidates = buildPhoneDigitCandidates(searchQuery);
+  const localDigits = normalizePhoneDigits(searchQuery).slice(-9);
+  const phoneValuesSql = phoneCandidates.map((value) => db.sequelize.escape(value)).join(', ');
+  const digitValuesSql = digitCandidates.map((value) => db.sequelize.escape(value)).join(', ');
+  const localDigitsSql = localDigits ? db.sequelize.escape(localDigits) : null;
+  const conversationPhoneDigits = sqlPhoneDigitsExpression('`Conversation`.`contact_id`');
+  const patientPhoneDigits = sqlPhoneDigitsExpression('`paciente`.`telefono_movil`');
+  const leadPhoneDigits = sqlPhoneDigitsExpression('`lead`.`telefono`');
+  const externalConversationSql = '(`Conversation`.`patient_id` IS NULL AND `Conversation`.`lead_id` IS NULL)';
+
+  const digitMatchSql = (expression) => {
+    const clauses = [];
+    if (digitValuesSql) {
+      clauses.push(`${expression} IN (${digitValuesSql})`);
+    }
+    if (localDigitsSql && localDigits.length === 9) {
+      clauses.push(`RIGHT(${expression}, 9) = ${localDigitsSql}`);
+    }
+    return clauses.length ? `(${clauses.join(' OR ')})` : '0 = 1';
+  };
+
+  const clauses = [
+    ...(phoneCandidates.length ? [
+      { contact_id: { [Op.in]: phoneCandidates } },
+      { '$paciente.telefono_movil$': { [Op.in]: phoneCandidates } },
+      { '$lead.telefono$': { [Op.in]: phoneCandidates } },
+    ] : []),
+    db.Sequelize.literal(digitMatchSql(conversationPhoneDigits)),
+    db.Sequelize.literal(digitMatchSql(patientPhoneDigits)),
+    db.Sequelize.literal(digitMatchSql(leadPhoneDigits)),
+  ];
+
+  if (phoneValuesSql) {
+    clauses.push(db.Sequelize.literal(`
+      (
+        ${externalConversationSql}
+        AND (
+          \`Conversation\`.\`id\` IN (
+            SELECT DISTINCT mpli.conversation_id
+            FROM MarketingPatientListItems mpli
+            WHERE mpli.conversation_id IS NOT NULL
+              AND mpli.phone IN (${phoneValuesSql})
+          )
+          OR \`Conversation\`.\`contact_id\` IN (
+            SELECT DISTINCT mpli.phone
+            FROM MarketingPatientListItems mpli
+            WHERE mpli.phone IS NOT NULL
+              AND mpli.phone <> ''
+              AND mpli.phone IN (${phoneValuesSql})
+          )
+        )
+      )
+    `));
+  }
+
+  return { [Op.or]: clauses };
+}
+
 function buildConversationSearchClause(searchQuery) {
   const normalized = normalizeSearchQuery(searchQuery);
   if (!normalized) {
     return null;
+  }
+
+  const normalizedDigits = normalizePhoneDigits(normalized);
+  if (isPhoneOnlySearch(normalized, normalizedDigits)) {
+    return buildPhoneOnlyConversationSearchClause(normalized);
   }
 
   const makeLike = (value) => `%${escapeLikePattern(String(value || '').toLowerCase())}%`;
@@ -829,7 +935,6 @@ function buildConversationSearchClause(searchQuery) {
   ];
 
   const fullLike = makeLike(normalized);
-  const normalizedDigits = normalizePhoneDigits(normalized);
   const fullClauses = [
     ...textFieldClauses(fullLike),
     ...(normalizedDigits.length >= 5 ? digitFieldClauses(normalizedDigits) : []),
@@ -862,15 +967,7 @@ function buildConversationSearchClause(searchQuery) {
 }
 
 function buildMarketingContactPhoneCandidates(value) {
-  const digits = normalizePhoneDigits(value);
-  if (!digits) return [];
-  const local = digits.length > 9 ? digits.slice(-9) : digits;
-  return Array.from(new Set([
-    digits,
-    `+${digits}`,
-    local,
-    `+${local}`,
-  ])).filter(Boolean);
+  return buildPhoneSearchCandidates(value);
 }
 
 function parseCustomFields(value) {
@@ -2092,6 +2189,7 @@ exports.__testing = {
   buildQuickChatCategorySql,
   buildQuickChatCategoryWhere,
   buildConversationSearchClause,
+  buildPhoneSearchCandidates,
   getQuickChatConversationCategory,
   normalizeSearchQuery,
   normalizeTextSearchValue,
