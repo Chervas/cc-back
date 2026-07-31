@@ -134,6 +134,22 @@ function testMissingManualCoordinatesRemainUnknown() {
   assert.equal(__testing.toNumber('41.3874'), 41.3874);
 }
 
+function testHeatmapComparisonKeepsPreviousSnapshotIndependent() {
+  const previous = [
+    { latitude: 41.4, longitude: 2.1, x_km: 0, y_km: 0, my_position: 6, position_change: '+99' },
+  ];
+  const current = [
+    { latitude: 41.4, longitude: 2.1, x_km: 0, y_km: 0, my_position: 3 },
+  ];
+
+  const compared = __testing.compareLocalHeatmapPoints(current, previous);
+
+  assert.equal(compared[0].previous_position, 6);
+  assert.equal(compared[0].position_delta, 3);
+  assert.equal(previous[0].my_position, 6);
+  assert.equal(previous[0].position_change, '+99');
+}
+
 function testBlockedHeatmapCannotOfferRefresh() {
   const result = __testing.withBlockedLocalHeatmapMetadata({
     success: false,
@@ -823,6 +839,7 @@ async function run() {
   testIdentityIncludesEveryRankingDimension();
   testRestrictedProviderPayloadCannotMasqueradeAsManual();
   testMissingManualCoordinatesRemainUnknown();
+  testHeatmapComparisonKeepsPreviousSnapshotIndependent();
   testBlockedHeatmapCannotOfferRefresh();
   await testPassiveCompetitionListNeverCallsPlacesWhenGatesAreEnabled();
   testFreshStaleAndExpiredBoundaries();

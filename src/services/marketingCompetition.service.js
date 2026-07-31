@@ -2804,13 +2804,17 @@ async function withLocalHeatmapComparison(identity, payload) {
   const previousPayload = previous?.payload && typeof previous.payload === 'object'
     ? previous.payload
     : null;
+  const previousPoints = Array.isArray(previousPayload?.points)
+    ? previousPayload.points.map(({ previous_position, position_delta, position_change, ...point }) => point)
+    : [];
   return {
     ...payload,
-    points: compareLocalHeatmapPoints(payload.points, previousPayload?.points || []),
+    points: compareLocalHeatmapPoints(payload.points, previousPoints),
     comparison: {
       available: !!previous,
       current_generated_at: generatedAt.toISOString(),
       previous_generated_at: previous?.generated_at || null,
+      previous_points: previousPoints,
     },
   };
 }

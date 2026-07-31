@@ -1572,6 +1572,54 @@ function normalizeGoogleHoursPeriods(periods) {
   return rows.sort((left, right) => left.dia_semana - right.dia_semana || left.hora_inicio.localeCompare(right.hora_inicio));
 }
 
+function regularHoursPeriodsFromResolved(resolved) {
+  const location = resolved?.locations?.[0] || null;
+  if (!location) return [];
+  const raw = rawPayload(location);
+  return location.regularHours?.periods
+    || location.regular_hours?.periods
+    || raw.regularHours?.periods
+    || raw.regular_hours?.periods
+    || [];
+}
+
+function normalizeStoredClinicHours(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .filter((row) => row?.activo === true || Number(row?.activo) === 1)
+    .map((row) => ({
+      dia_semana: Number(row.dia_semana),
+      activo: true,
+      hora_inicio: String(row.hora_inicio || '').slice(0, 5),
+      hora_fin: String(row.hora_fin || '').slice(0, 5),
+    }))
+    .filter((row) => Number.isInteger(row.dia_semana) && /^\d{2}:\d{2}$/.test(row.hora_inicio) && /^\d{2}:\d{2}$/.test(row.hora_fin))
+    .sort((left, right) => left.dia_semana - right.dia_semana || left.hora_inicio.localeCompare(right.hora_inicio));
+}
+
+async function getRegularHoursImportStatus(resolved, dependencies = {}) {
+  const ClinicaHorarioModel = dependencies.ClinicaHorario || ClinicaHorario;
+  if (!ClinicaHorarioModel) {
+    const error = new Error('clinic_hours_model_unavailable');
+    error.status = 503;
+    throw error;
+  }
+  const googleRows = normalizeGoogleHoursPeriods(regularHoursPeriodsFromResolved(resolved));
+  const storedRows = await ClinicaHorarioModel.findAll({
+    where: { clinica_id: resolved.clinicId },
+    attributes: ['dia_semana', 'activo', 'hora_inicio', 'hora_fin'],
+    order: [['dia_semana', 'ASC'], ['hora_inicio', 'ASC'], ['id', 'ASC']],
+    raw: true,
+  });
+  const clinicRows = normalizeStoredClinicHours(storedRows);
+  return {
+    success: true,
+    matches: googleRows.length > 0 && JSON.stringify(googleRows) === JSON.stringify(clinicRows),
+    importable: googleRows.length > 0,
+    google_segments: googleRows.length,
+    clinic_segments: clinicRows.length,
+  };
+}
+
 async function importRegularHoursToClinic(resolved) {
   if (!ClinicaHorario) {
     const error = new Error('clinic_hours_model_unavailable');
@@ -1584,12 +1632,7 @@ async function importRegularHoursToClinic(resolved) {
     error.status = 409;
     throw error;
   }
-  const raw = rawPayload(location);
-  const periods = location.regularHours?.periods
-    || location.regular_hours?.periods
-    || raw.regularHours?.periods
-    || raw.regular_hours?.periods
-    || [];
+  const periods = regularHoursPeriodsFromResolved(resolved);
   const rows = normalizeGoogleHoursPeriods(periods).map((row) => ({
     ...row,
     clinica_id: resolved.clinicId,
@@ -1638,6 +1681,7 @@ module.exports = {
   updateSpecialHours,
   applyScheduledSpecialHoursPeriod,
   importRegularHoursToClinic,
+  getRegularHoursImportStatus,
   publishPhoto,
   serializeLocation,
   normalizeServiceItem,

@@ -212,6 +212,14 @@ router.post(
   }
 );
 
+router.get('/clinica/:clinicaId/import-hours/status', async (req, res) => {
+  try {
+    return res.json(await businessProfileLocal.getRegularHoursImportStatus(req.localResolved));
+  } catch (error) {
+    return sendError(res, error, 'business_profile_hours_import_status_failed');
+  }
+});
+
 router.post(
   '/clinica/:clinicaId/photos',
   requireClinicBusinessProfileWriteAccess,

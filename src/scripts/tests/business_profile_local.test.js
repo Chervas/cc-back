@@ -18,6 +18,7 @@ const {
   normalizeSpecialHoursPlan,
   buildGoogleSpecialHourPeriods,
   preserveSpecialHoursOutsideRange,
+  getRegularHoursImportStatus,
 } = require('../../services/businessProfileLocal.service');
 
 function testMetricDeduplicationAndTotals() {
@@ -460,6 +461,33 @@ async function testPhotoMutationIncludesEverySharedConsumer() {
   assert.deepEqual(group, [66, 67, 69]);
 }
 
+async function testRegularHoursImportStatusIgnoresInactiveRows() {
+  const resolved = {
+    clinicId: 19,
+    locations: [{
+      regularHours: {
+        periods: [{
+          openDay: 'MONDAY',
+          openTime: { hours: 9 },
+          closeDay: 'MONDAY',
+          closeTime: { hours: 14 },
+        }],
+      },
+    }],
+  };
+  const status = await getRegularHoursImportStatus(resolved, {
+    ClinicaHorario: {
+      findAll: async () => [
+        { dia_semana: 1, activo: 1, hora_inicio: '09:00:00', hora_fin: '14:00:00' },
+        { dia_semana: 2, activo: 0, hora_inicio: '09:00:00', hora_fin: '14:00:00' },
+      ],
+    },
+  });
+  assert.equal(status.matches, true);
+  assert.equal(status.google_segments, 1);
+  assert.equal(status.clinic_segments, 1);
+}
+
 async function run() {
   testMetricDeduplicationAndTotals();
   testMetricTotalsAcrossLocations();
@@ -474,6 +502,7 @@ async function run() {
   testDateRange();
   testSpecialHoursPlanNormalization();
   await testPhotoMutationIncludesEverySharedConsumer();
+  await testRegularHoursImportStatusIgnoresInactiveRows();
   console.log('business_profile_local tests: ok');
 }
 
