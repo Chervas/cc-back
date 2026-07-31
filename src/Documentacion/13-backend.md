@@ -7350,10 +7350,26 @@ global. Los origenes actuales son `patient_list`, `agenda`, `lead_conversion`,
 `header_search` y `quick_chat`.
 
 La familia generica `clinicaclick_abrir_con_saludo` queda separada de resenas y
-automatizaciones. Meta rechazo el cuerpo inicial por exceso de variables para
-su longitud; la version que se propaga tras ese rechazo es
-`¡Hola {{1}}! Soy {{2}} de {{3}} 😊 ¿Te puedo escribir por aquí para ayudarte
-con cualquier duda o consulta que tengas?`. Las tres
+automatizaciones. La version de catalogo vigente es
+`¡Hola {{1}}! Soy {{2}} de {{3}} 😊 ¿Te importa que te escriba por aquí para
+consultarte o prefieres que te llame?`. Las tres
 variables son paciente, usuario y clinica. Las clinicas sin WABA conservan un
 placeholder `SIN_CONECTAR`; las conectadas generan su version tecnica mediante
-la cola durable estandar y nunca envian un mensaje durante la propagacion.
+la cola durable estandar y nunca envian un mensaje durante la propagacion. Una
+copia aprobada anterior sigue utilizable mientras Meta revisa la nueva version.
+
+Las importaciones de resenas/reactivacion tratan fecha y tratamiento como datos
+de segmentacion. `buildImportedItemPayloads` no crea `CitasPacientes` por
+defecto: solo lo haria si un flujo futuro envia el booleano estricto
+`create_historical_appointments=true`; valores ausentes, falsos o la cadena
+`"true"` no activan el comportamiento. La UI actual no envia ese opt-in.
+
+La limpieza correctiva del 2026-07-31 retiro 4.427 citas artificiales del grupo
+Propdental identificadas exclusivamente por `estado=completada`, titulo
+`Historico:*` y motivo `Importacion de pacientes para reactivacion`: 1.095 de
+Sant Marti, 506 de Eixample y 2.826 de Glories. Antes de borrar, el script
+comprobo todas las FK y no encontro dependencias. El backup restaurable con
+permisos `0600` esta en
+`/home/ubuntu/secure-imports/clinicaclick-cleanups/propdental-all-imported-history-2026-07-31T16-55-31-910Z.json`.
+Auditoria: `node src/scripts/cleanup-propdental-future-imported-historical-appointments.js --all-imported-history`.
+Restauracion: el mismo script con `--restore=<ruta>`.

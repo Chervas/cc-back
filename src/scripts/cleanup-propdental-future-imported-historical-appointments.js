@@ -11,13 +11,15 @@ const GROUP_ID = 5;
 const IMPORT_REASON = 'Importación de pacientes para reactivación';
 const DEFAULT_BACKUP_DIR = '/home/ubuntu/secure-imports/clinicaclick-cleanups';
 
-const strictWhereSql = `
-  c.inicio > NOW()
-  AND c.estado = 'completada'
+function strictWhereSql(allImportedHistory = false) {
+  return `
+  ${allImportedHistory ? '' : 'c.inicio > NOW() AND'}
+  c.estado = 'completada'
   AND c.titulo LIKE 'Histórico:%'
   AND c.motivo = :importReason
   AND cl.grupoClinicaId = :groupId
 `;
+}
 
 function safeIdentifier(value) {
   const normalized = String(value || '');
@@ -27,13 +29,13 @@ function safeIdentifier(value) {
   return `\`${normalized}\``;
 }
 
-async function findTargets(transaction = null, lock = false) {
+async function findTargets(transaction = null, lock = false, allImportedHistory = false) {
   return db.sequelize.query(
     `
       SELECT c.*
       FROM CitasPacientes c
       INNER JOIN Clinicas cl ON cl.id_clinica = c.clinica_id
-      WHERE ${strictWhereSql}
+      WHERE ${strictWhereSql(allImportedHistory)}
       ORDER BY c.id_cita
       ${lock ? 'FOR UPDATE' : ''}
     `,
@@ -86,15 +88,17 @@ function ensureBackupDirectory() {
   return directory;
 }
 
-function writeBackup(rows) {
+function writeBackup(rows, allImportedHistory = false) {
   const directory = ensureBackupDirectory();
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const filePath = path.join(directory, `propdental-future-historical-appointments-${stamp}.json`);
+  const scope = allImportedHistory ? 'all-imported-history' : 'future-historical-appointments';
+  const filePath = path.join(directory, `propdental-${scope}-${stamp}.json`);
   const payload = {
     schema_version: 1,
     generated_at: new Date().toISOString(),
     group_id: GROUP_ID,
     import_reason: IMPORT_REASON,
+    cleanup_scope: allImportedHistory ? 'all_imported_history' : 'future_only',
     row_count: rows.length,
     rows,
   };
@@ -129,10 +133,10 @@ async function restoreBackup(filePath) {
   console.log(JSON.stringify({ restored: rows.length, backup: filePath }, null, 2));
 }
 
-async function applyCleanup() {
+async function applyCleanup(allImportedHistory = false) {
   let backupPath = null;
   await db.sequelize.transaction(async (transaction) => {
-    const rows = await findTargets(transaction, true);
+    const rows = await findTargets(transaction, true, allImportedHistory);
     const ids = rows.map((row) => Number(row.id_cita));
     const dependencies = await findDependencies(ids, transaction);
     if (dependencies.length) {
@@ -142,7 +146,7 @@ async function applyCleanup() {
     }
     if (!rows.length) return;
 
-    backupPath = writeBackup(rows);
+    backupPath = writeBackup(rows, allImportedHistory);
     const affectedRows = await db.CitaPaciente.destroy({
       where: { id_cita: ids },
       transaction,
@@ -153,16 +157,17 @@ async function applyCleanup() {
     }
   });
 
-  const remaining = await findTargets();
+  const remaining = await findTargets(null, false, allImportedHistory);
   console.log(JSON.stringify({
     deleted: backupPath ? 'applied' : 'nothing_to_delete',
+    scope: allImportedHistory ? 'all_imported_history' : 'future_only',
     remaining: remaining.length,
     backup: backupPath,
   }, null, 2));
 }
 
-async function dryRun() {
-  const rows = await findTargets();
+async function dryRun(allImportedHistory = false) {
+  const rows = await findTargets(null, false, allImportedHistory);
   const dependencies = await findDependencies(rows.map((row) => Number(row.id_cita)));
   const byClinic = rows.reduce((acc, row) => {
     const key = String(row.clinica_id);
@@ -171,6 +176,7 @@ async function dryRun() {
   }, {});
   console.log(JSON.stringify({
     mode: 'dry-run',
+    scope: allImportedHistory ? 'all_imported_history' : 'future_only',
     candidates: rows.length,
     by_clinic: byClinic,
     dependencies,
@@ -178,16 +184,17 @@ async function dryRun() {
 }
 
 async function main() {
+  const allImportedHistory = process.argv.includes('--all-imported-history');
   const restoreArg = process.argv.find((arg) => arg.startsWith('--restore='));
   if (restoreArg) {
     await restoreBackup(restoreArg.slice('--restore='.length));
     return;
   }
   if (process.argv.includes('--apply')) {
-    await applyCleanup();
+    await applyCleanup(allImportedHistory);
     return;
   }
-  await dryRun();
+  await dryRun(allImportedHistory);
 }
 
 main()

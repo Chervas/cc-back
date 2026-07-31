@@ -7,7 +7,10 @@ const db = require('../../../models');
 const marketingReactivationService = require('../../services/marketingReactivation.service');
 
 async function run() {
-  const { isPastImportedHistoricalVisit } = marketingReactivationService._test;
+  const {
+    isPastImportedHistoricalVisit,
+    shouldCreateImportedHistoricalAppointments,
+  } = marketingReactivationService._test;
   const now = new Date('2026-07-31T12:00:00.000Z');
 
   assert.equal(
@@ -21,6 +24,16 @@ async function run() {
     'Future visits must never be converted into completed historical appointments'
   );
   assert.equal(isPastImportedHistoricalVisit('not-a-date', now), false);
+
+  assert.equal(
+    shouldCreateImportedHistoricalAppointments({}),
+    false,
+    'Imports must not create appointments unless the caller opts in explicitly'
+  );
+  assert.equal(shouldCreateImportedHistoricalAppointments({ create_historical_appointments: false }), false);
+  assert.equal(shouldCreateImportedHistoricalAppointments({ create_historical_appointments: 'true' }), false);
+  assert.equal(shouldCreateImportedHistoricalAppointments({ create_historical_appointments: true }), true);
+  assert.equal(shouldCreateImportedHistoricalAppointments({ createHistoricalAppointments: true }), true);
 
   console.log('marketing_reactivation_historical_import.test.js OK');
 }

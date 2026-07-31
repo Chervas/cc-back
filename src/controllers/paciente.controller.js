@@ -306,7 +306,7 @@ const PATIENT_OPERATIONAL_SOURCE_LABELS = Object.freeze({
   header_search: 'el buscador superior',
   lead_conversion: 'la conversión de lead',
   patient_list: 'el listado de pacientes',
-  patient_modal: 'el alta manual',
+  patient_modal: 'el formulario de alta',
   quick_chat: 'QuickChat',
   tutor_modal: 'el alta de tutor',
 });
@@ -1279,7 +1279,7 @@ exports.getPacienteActivity = async (req, res) => {
         titulo: 'Alta del paciente',
         icono: 'heroicons_outline:user-plus',
         color: 'success',
-        descripcion: (sourceLabel) => `Alta manual desde ${sourceLabel}.`,
+        descripcion: (sourceLabel) => `Paciente creado desde ${sourceLabel}.`,
       },
       [PATIENT_EVENT_TYPES.whatsappAuthorized]: {
         tipo: 'patient_whatsapp_contact_authorized',
