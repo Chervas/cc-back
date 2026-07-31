@@ -13,6 +13,12 @@ const {
   canUserAccessFeature,
   getAccessibleClinicIdsForFeature,
 } = require('../lib/access-policy');
+const {
+  findPatientContactTargets,
+  normalizeOperationalSource,
+  PATIENT_EVENT_TYPES,
+  recordPatientOperationalEvent,
+} = require('../services/patientContact.service');
 
 const normalizePhone = (phone) => {
   return normalizePhoneDigits(phone);
@@ -946,6 +952,37 @@ exports.searchPacientes = async (req, res) => {
   }
 };
 
+exports.searchPatientContactTargets = async (req, res) => {
+  try {
+    const query = String(req.query.q || req.query.query || '').trim().replace(/\s+/g, ' ');
+    const scope = req.query.scope === 'grupo' ? 'grupo' : 'clinica';
+    const clinicaId = Number.parseInt(String(req.query.clinica_id || ''), 10);
+    const limit = Math.min(Math.max(Number.parseInt(String(req.query.limit || '8'), 10) || 8, 1), 12);
+    if (!clinicaId) {
+      return res.status(400).json({ message: 'clinica_id es obligatorio' });
+    }
+    if (query.length < 2) {
+      return res.json({ query, query_type: 'name', normalized_phone: null, items: [] });
+    }
+
+    await accessibleClinicIds(req, 'patients.sensitive.view', [clinicaId], { requireAll: true });
+    const requestedClinicIds = await getClinicaIdsForScope(clinicaId, scope);
+    const readableClinicIds = await accessibleClinicIds(req, 'patients.sensitive.view', requestedClinicIds);
+    const result = await findPatientContactTargets({
+      query,
+      clinicIds: readableClinicIds,
+      selectedClinicId: clinicaId,
+      limit,
+    });
+    return res.json(result);
+  } catch (error) {
+    const handled = sendAccessPolicyError(error, res);
+    if (handled) return handled;
+    console.error('Error searchPatientContactTargets', error);
+    return res.status(500).json({ message: 'Error al buscar contactos de paciente', error: error.message });
+  }
+};
+
 exports.checkDuplicates = async (req, res) => {
   try {
     const { telefono, email, clinica_id, scope = 'grupo' } = req.query;
@@ -1442,6 +1479,7 @@ exports.getPacienteActivity = async (req, res) => {
 };
 
 exports.createPaciente = async (req, res) => {
+  let transaction = null;
   try {
     const { nombre, apellidos, dni, telefono_movil, email, telefono_secundario, foto, fecha_nacimiento, edad, estatura, peso, sexo, profesion, fecha_alta, fecha_baja, alergias, antecedentes, medicacion, idioma_preferido, paciente_conocido, como_nos_conocio, procedencia, clinica_id, tutor } = req.body;
     const normPhone = normalizePhone(telefono_movil);
@@ -1498,6 +1536,7 @@ exports.createPaciente = async (req, res) => {
       }
     }
 
+    transaction = await sequelize.transaction();
     const newPaciente = await Paciente.create({
       public_id: await generateUniquePacientePublicId(),
       nombre: normalizedNombre,
@@ -1523,7 +1562,7 @@ exports.createPaciente = async (req, res) => {
       como_nos_conocio,
       procedencia,
       clinica_id
-    });
+    }, { transaction });
 
     // Crear relación con tutor si aplica
     if (tutorPaciente) {
@@ -1533,14 +1572,31 @@ exports.createPaciente = async (req, res) => {
         tipo_relacion: tutor.tipo_relacion || 'tutor_legal',
         es_contacto_principal: tutor.es_contacto_principal === false ? false : true,
         fecha_inicio: tutor.fecha_inicio || new Date()
-      });
+      }, { transaction });
     }
     // Vincular a la clínica actual como principal
     await PacienteClinica.create({
       paciente_id: newPaciente.id_paciente,
       clinica_id,
       es_principal: true
+    }, { transaction });
+
+    await recordPatientOperationalEvent({
+      patientId: newPaciente.id_paciente,
+      clinicId: clinica_id,
+      actorUserId: req.userData?.userId,
+      eventType: PATIENT_EVENT_TYPES.created,
+      source: normalizeOperationalSource(req.body?.creation_source),
+      channel: req.body?.creation_source === 'quick_chat' ? 'whatsapp' : null,
+      metadata: {
+        lead_id: Number(req.body?.lead_id || 0) || null,
+        minimal_record: false,
+      },
+      transaction,
     });
+
+    await transaction.commit();
+    transaction = null;
 
     res.status(201).json({
       message: 'Paciente creado exitosamente',
@@ -1549,6 +1605,9 @@ exports.createPaciente = async (req, res) => {
       vinculado: true
     });
   } catch (error) {
+    if (transaction && !transaction.finished) {
+      await transaction.rollback();
+    }
     if (error.status === 400 && error.message === 'unsupported_patient_language') {
       return res.status(400).json({
         message: 'idioma_preferido inválido',

@@ -14,6 +14,9 @@ const {
 const {
   resolveWhatsappServiceWindow,
 } = require('../services/whatsappServiceWindow.service');
+const {
+  startPatientWhatsappConversation,
+} = require('../services/patientContact.service');
 
 const {
   Conversation,
@@ -699,6 +702,47 @@ function normalizePhoneDigits(value) {
   return String(value || '').replace(/\D+/g, '').replace(/^00/, '');
 }
 
+function buildPhoneSearchCandidates(value) {
+  const digits = normalizePhoneDigits(value);
+  if (!digits) return [];
+
+  const localDigits = digits.length > 9 && digits.startsWith('34')
+    ? digits.slice(-9)
+    : (digits.length > 9 ? digits.slice(-9) : digits);
+  const candidates = new Set([
+    digits,
+    `+${digits}`,
+    `00${digits}`,
+  ]);
+
+  if (localDigits) {
+    candidates.add(localDigits);
+    candidates.add(`+${localDigits}`);
+    candidates.add(`00${localDigits}`);
+  }
+
+  if (localDigits.length === 9 && /^[6789]/.test(localDigits)) {
+    candidates.add(`34${localDigits}`);
+    candidates.add(`+34${localDigits}`);
+    candidates.add(`0034${localDigits}`);
+  }
+
+  return Array.from(candidates).filter(Boolean);
+}
+
+function buildPhoneDigitCandidates(value) {
+  return Array.from(new Set(
+    buildPhoneSearchCandidates(value)
+      .map((candidate) => normalizePhoneDigits(candidate))
+      .filter(Boolean)
+  ));
+}
+
+function isPhoneOnlySearch(value, digits) {
+  if (!digits || digits.length < 7) return false;
+  return !String(value || '').replace(/[+\d\s().-]/g, '').trim();
+}
+
 function sqlPhoneDigitsExpression(expression) {
   return `REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(${expression}, ''), '+', ''), ' ', ''), '-', ''), '(', ''), ')', ''), '.', '')`;
 }
@@ -711,166 +755,157 @@ function normalizeSearchQuery(value) {
   return String(value || '').trim().replace(/\s+/g, ' ');
 }
 
-function buildConversationSearchClause(searchQuery) {
+function buildPhoneOnlyConversationSearchClause(searchQuery) {
+  const phoneCandidates = buildPhoneSearchCandidates(searchQuery);
+  const digitCandidates = buildPhoneDigitCandidates(searchQuery);
+  const localDigits = normalizePhoneDigits(searchQuery).slice(-9);
+  const phoneValuesSql = phoneCandidates.map((value) => db.sequelize.escape(value)).join(', ');
+  const digitValuesSql = digitCandidates.map((value) => db.sequelize.escape(value)).join(', ');
+  const localDigitsSql = localDigits ? db.sequelize.escape(localDigits) : null;
+  const conversationPhoneDigits = sqlPhoneDigitsExpression('`Conversation`.`contact_id`');
+  const patientPhoneDigits = sqlPhoneDigitsExpression('`paciente`.`telefono_movil`');
+  const leadPhoneDigits = sqlPhoneDigitsExpression('`lead`.`telefono`');
+  const externalConversationSql = '(`Conversation`.`patient_id` IS NULL AND `Conversation`.`lead_id` IS NULL)';
+
+  const digitMatchSql = (expression) => {
+    const clauses = [];
+    if (digitValuesSql) {
+      clauses.push(`${expression} IN (${digitValuesSql})`);
+    }
+    if (localDigitsSql && localDigits.length === 9) {
+      clauses.push(`RIGHT(${expression}, 9) = ${localDigitsSql}`);
+    }
+    return clauses.length ? `(${clauses.join(' OR ')})` : '0 = 1';
+  };
+
+  const clauses = [
+    ...(phoneCandidates.length ? [
+      { contact_id: { [Op.in]: phoneCandidates } },
+      { '$paciente.telefono_movil$': { [Op.in]: phoneCandidates } },
+      { '$lead.telefono$': { [Op.in]: phoneCandidates } },
+    ] : []),
+    db.Sequelize.literal(digitMatchSql(conversationPhoneDigits)),
+    db.Sequelize.literal(digitMatchSql(patientPhoneDigits)),
+    db.Sequelize.literal(digitMatchSql(leadPhoneDigits)),
+  ];
+
+  if (phoneValuesSql) {
+    clauses.push(db.Sequelize.literal(`
+      (
+        ${externalConversationSql}
+        AND (
+          \`Conversation\`.\`id\` IN (
+            SELECT DISTINCT mpli.conversation_id
+            FROM MarketingPatientListItems mpli
+            WHERE mpli.conversation_id IS NOT NULL
+              AND mpli.phone IN (${phoneValuesSql})
+          )
+          OR \`Conversation\`.\`contact_id\` IN (
+            SELECT DISTINCT mpli.phone
+            FROM MarketingPatientListItems mpli
+            WHERE mpli.phone IS NOT NULL
+              AND mpli.phone <> ''
+              AND mpli.phone IN (${phoneValuesSql})
+          )
+        )
+      )
+    `));
+  }
+
+  return { [Op.or]: clauses };
+}
+
+function buildNameTokenPrefixClause(modelAlias, firstNameField, lastNameField, tokens) {
+  if (!tokens.length) return null;
+  return {
+    [Op.and]: tokens.map((token) => ({
+      [Op.or]: [
+        { [`$${modelAlias}.${firstNameField}$`]: { [Op.like]: `${escapeLikePattern(token)}%` } },
+        { [`$${modelAlias}.${lastNameField}$`]: { [Op.like]: `${escapeLikePattern(token)}%` } },
+      ],
+    })),
+  };
+}
+
+async function resolveExternalMarketingConversationMatches(searchQuery, clinicIds) {
+  const normalized = normalizeSearchQuery(searchQuery);
+  const scopedClinicIds = Array.from(new Set(
+    (clinicIds || []).map(Number).filter((id) => Number.isInteger(id) && id > 0)
+  ));
+  if (!normalized || !scopedClinicIds.length) {
+    return { conversationIds: [], phones: [] };
+  }
+
+  const prefix = `${escapeLikePattern(normalized)}%`;
+  const rows = await MarketingPatientListItem.findAll({
+    where: {
+      clinica_id: scopedClinicIds.length === 1 ? scopedClinicIds[0] : { [Op.in]: scopedClinicIds },
+      [Op.or]: [
+        { name: { [Op.like]: prefix } },
+        { email: { [Op.like]: prefix } },
+      ],
+    },
+    attributes: ['conversation_id', 'phone'],
+    limit: 100,
+    raw: true,
+  });
+
+  const conversationIds = new Set();
+  const phones = new Set();
+  rows.forEach((row) => {
+    const conversationId = Number(row.conversation_id);
+    if (Number.isInteger(conversationId) && conversationId > 0) {
+      conversationIds.add(conversationId);
+    }
+    buildPhoneSearchCandidates(row.phone).forEach((phone) => phones.add(phone));
+  });
+  return {
+    conversationIds: Array.from(conversationIds),
+    phones: Array.from(phones),
+  };
+}
+
+async function buildConversationSearchClause(searchQuery, { clinicIds = [] } = {}) {
   const normalized = normalizeSearchQuery(searchQuery);
   if (!normalized) {
     return null;
   }
 
-  const makeLike = (value) => `%${escapeLikePattern(String(value || '').toLowerCase())}%`;
-  const likeSql = (like) => db.sequelize.escape(like);
-  const conversationPhoneDigits = sqlPhoneDigitsExpression('`Conversation`.`contact_id`');
-  const marketingPhoneDigits = sqlPhoneDigitsExpression('mpli.phone');
-  const externalConversationSql = '(`Conversation`.`patient_id` IS NULL AND `Conversation`.`lead_id` IS NULL)';
-  const marketingItemMatchesSearch = (like) => `(
-    LOWER(COALESCE(mpli.name, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-    OR LOWER(COALESCE(mpli.phone, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-    OR LOWER(COALESCE(mpli.email, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-    OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(mpli.custom_fields, '$.nombre_completo')), '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-    OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(mpli.custom_fields, '$.nombre')), '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-    OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(mpli.custom_fields, '$.apellido')), '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-    OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(mpli.custom_fields, '$.apellidos')), '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-  )`;
-  const externalContactClause = (like) => db.Sequelize.literal(`
-    (
-      ${externalConversationSql}
-      AND (
-        \`Conversation\`.\`id\` IN (
-          SELECT DISTINCT mpli.conversation_id
-          FROM MarketingPatientListItems mpli
-          WHERE mpli.conversation_id IS NOT NULL
-            AND ${marketingItemMatchesSearch(like)}
-        )
-        OR ${conversationPhoneDigits} IN (
-          SELECT DISTINCT ${marketingPhoneDigits}
-          FROM MarketingPatientListItems mpli
-          WHERE mpli.phone IS NOT NULL
-            AND mpli.phone <> ''
-            AND ${marketingItemMatchesSearch(like)}
-        )
-        OR RIGHT(${conversationPhoneDigits}, 9) IN (
-          SELECT DISTINCT RIGHT(${marketingPhoneDigits}, 9)
-          FROM MarketingPatientListItems mpli
-          WHERE mpli.phone IS NOT NULL
-            AND mpli.phone <> ''
-            AND ${marketingItemMatchesSearch(like)}
-        )
-      )
-    )
-  `);
-  const digitExternalContactClause = (digits) => {
-    const digitsLike = db.sequelize.escape(`%${escapeLikePattern(digits)}%`);
-    return db.Sequelize.literal(`
-      (
-        ${externalConversationSql}
-        AND (
-          ${conversationPhoneDigits} LIKE ${digitsLike} ESCAPE '\\\\'
-          OR ${conversationPhoneDigits} IN (
-            SELECT DISTINCT ${marketingPhoneDigits}
-            FROM MarketingPatientListItems mpli
-            WHERE mpli.phone IS NOT NULL
-              AND mpli.phone <> ''
-              AND ${marketingPhoneDigits} LIKE ${digitsLike} ESCAPE '\\\\'
-          )
-          OR RIGHT(${conversationPhoneDigits}, 9) IN (
-            SELECT DISTINCT RIGHT(${marketingPhoneDigits}, 9)
-            FROM MarketingPatientListItems mpli
-            WHERE mpli.phone IS NOT NULL
-              AND mpli.phone <> ''
-              AND ${marketingPhoneDigits} LIKE ${digitsLike} ESCAPE '\\\\'
-          )
-        )
-      )
-    `);
-  };
-  const digitFieldClauses = (digits) => {
-    const digitsLike = db.sequelize.escape(`%${escapeLikePattern(digits)}%`);
-    return [
-      db.Sequelize.literal(`${conversationPhoneDigits} LIKE ${digitsLike} ESCAPE '\\\\'`),
-      db.Sequelize.literal(`${sqlPhoneDigitsExpression('`paciente`.`telefono_movil`')} LIKE ${digitsLike} ESCAPE '\\\\'`),
-      db.Sequelize.literal(`${sqlPhoneDigitsExpression('`lead`.`telefono`')} LIKE ${digitsLike} ESCAPE '\\\\'`),
-      digitExternalContactClause(digits),
-    ];
-  };
-  const textFieldClauses = (like) => [
-    { contact_id: { [Op.like]: like } },
-    { '$paciente.nombre$': { [Op.like]: like } },
-    { '$paciente.apellidos$': { [Op.like]: like } },
-    { '$paciente.telefono_movil$': { [Op.like]: like } },
-    { '$paciente.email$': { [Op.like]: like } },
-    { '$lead.nombre$': { [Op.like]: like } },
-    { '$lead.telefono$': { [Op.like]: like } },
-    { '$lead.email$': { [Op.like]: like } },
-    db.Sequelize.where(
-      db.Sequelize.fn(
-        'LOWER',
-        db.Sequelize.fn(
-          'CONCAT_WS',
-          ' ',
-          db.Sequelize.col('paciente.nombre'),
-          db.Sequelize.col('paciente.apellidos')
-        )
-      ),
-      { [Op.like]: like }
-    ),
-    db.Sequelize.where(
-      db.Sequelize.fn(
-        'LOWER',
-        db.Sequelize.fn(
-          'CONCAT_WS',
-          ' ',
-          db.Sequelize.col('paciente.apellidos'),
-          db.Sequelize.col('paciente.nombre')
-        )
-      ),
-      { [Op.like]: like }
-    ),
-    externalContactClause(like),
-  ];
-
-  const fullLike = makeLike(normalized);
   const normalizedDigits = normalizePhoneDigits(normalized);
-  const fullClauses = [
-    ...textFieldClauses(fullLike),
-    ...(normalizedDigits.length >= 5 ? digitFieldClauses(normalizedDigits) : []),
-  ];
-  const fullTextClause = { [Op.or]: fullClauses };
-  const tokenClauses = normalized
-    .split(' ')
-    .map((token) => token.trim())
-    .filter((token) => token.length >= 2)
-    .map((token) => {
-      const tokenDigits = normalizePhoneDigits(token);
-      return {
-        [Op.or]: [
-          ...textFieldClauses(makeLike(token)),
-          ...(tokenDigits.length >= 3 ? digitFieldClauses(tokenDigits) : []),
-        ],
-      };
-    });
-
-  if (!tokenClauses.length) {
-    return fullTextClause;
+  if (isPhoneOnlySearch(normalized, normalizedDigits)) {
+    return buildPhoneOnlyConversationSearchClause(normalized);
   }
 
-  return {
-    [Op.or]: [
-      fullTextClause,
-      { [Op.and]: tokenClauses },
-    ],
-  };
+  const tokens = normalized
+    .split(' ')
+    .map((token) => token.trim().toLowerCase())
+    .filter((token) => token.length >= 2 || /^\d+$/.test(token))
+    .slice(0, 6);
+  const fullPrefix = `${escapeLikePattern(normalized.toLowerCase())}%`;
+  const externalMatches = await resolveExternalMarketingConversationMatches(normalized, clinicIds);
+  const clauses = [
+    { contact_id: { [Op.like]: fullPrefix } },
+    { '$paciente.nombre$': { [Op.like]: fullPrefix } },
+    { '$paciente.apellidos$': { [Op.like]: fullPrefix } },
+    { '$paciente.email$': { [Op.like]: fullPrefix } },
+    { '$lead.nombre$': { [Op.like]: fullPrefix } },
+    { '$lead.email$': { [Op.like]: fullPrefix } },
+  ];
+
+  const patientTokens = buildNameTokenPrefixClause('paciente', 'nombre', 'apellidos', tokens);
+  if (patientTokens) clauses.push(patientTokens);
+  if (externalMatches.conversationIds.length) {
+    clauses.push({ id: { [Op.in]: externalMatches.conversationIds } });
+  }
+  if (externalMatches.phones.length) {
+    clauses.push({ contact_id: { [Op.in]: externalMatches.phones } });
+  }
+
+  return { [Op.or]: clauses };
 }
 
 function buildMarketingContactPhoneCandidates(value) {
-  const digits = normalizePhoneDigits(value);
-  if (!digits) return [];
-  const local = digits.length > 9 ? digits.slice(-9) : digits;
-  return Array.from(new Set([
-    digits,
-    `+${digits}`,
-    local,
-    `+${local}`,
-  ])).filter(Boolean);
+  return buildPhoneSearchCandidates(value);
 }
 
 function parseCustomFields(value) {
@@ -1141,7 +1176,9 @@ exports.listConversations = async (req, res) => {
     }
 
     if (searchQuery) {
-      const searchClause = buildConversationSearchClause(searchQuery);
+      const searchClause = await buildConversationSearchClause(searchQuery, {
+        clinicIds: scope.clinicIds,
+      });
       where[Op.and] = [
         ...(where[Op.and] || []),
         searchClause,
@@ -1506,6 +1543,115 @@ exports.getConversationByLead = async (req, res) => {
   } catch (err) {
     console.error('Error getConversationByLead', err);
     return res.status(500).json({ error: 'Error obteniendo conversación' });
+  }
+};
+
+exports.startPatientContact = async (req, res) => {
+  let transaction = null;
+  try {
+    const userId = Number(req.userData?.userId);
+    const clinicId = Number(req.body?.clinic_id || req.body?.clinicId || 0);
+    const patientId = Number(req.body?.patient_id || req.body?.patientId || 0) || null;
+    if (!Number.isInteger(clinicId) || clinicId <= 0) {
+      return res.status(400).json({ error: 'clinic_id_required' });
+    }
+
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    if (!ensureAccess({ clinicIds, isAggregateAllowed }, clinicId)) {
+      return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+    }
+    const [canReadPatients, canEditPatients] = await Promise.all([
+      canUserAccessFeature({ actorId: userId, featureKey: 'quickchat.read_patients', clinicId }),
+      canUserAccessFeature({ actorId: userId, featureKey: 'patients.edit', clinicId }),
+    ]);
+    if (!canReadPatients || !canEditPatients) {
+      return res.status(403).json({ error: 'patient_contact_forbidden' });
+    }
+
+    const clinic = await Clinica.findByPk(clinicId, {
+      attributes: ['id_clinica', 'grupoClinicaId'],
+      raw: true,
+    });
+    if (!clinic) {
+      return res.status(404).json({ error: 'clinic_not_found' });
+    }
+    const duplicateScopeClinics = clinic.grupoClinicaId
+      ? await Clinica.findAll({
+          where: { grupoClinicaId: clinic.grupoClinicaId },
+          attributes: ['id_clinica'],
+          raw: true,
+        })
+      : [clinic];
+
+    transaction = await db.sequelize.transaction();
+    const result = await startPatientWhatsappConversation({
+      patientId,
+      phone: req.body?.phone || req.body?.telefono,
+      firstName: req.body?.first_name || req.body?.nombre,
+      lastName: req.body?.last_name || req.body?.apellidos,
+      clinicId,
+      duplicateScopeClinicIds: duplicateScopeClinics.map((item) => Number(item.id_clinica)),
+      actorUserId: userId,
+      authorizationConfirmed: req.body?.authorization_confirmed === true,
+      source: 'quick_chat',
+      transaction,
+    });
+
+    const conversation = await Conversation.findByPk(result.conversation.id, {
+      include: [{
+        model: Paciente,
+        as: 'paciente',
+        attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'foto', 'telefono_movil', 'email'],
+      }],
+      transaction,
+    });
+    await ensureQuickChatConversationReadAccess(userId, conversation);
+    await transaction.commit();
+    transaction = null;
+
+    let payload = typeof conversation?.toJSON === 'function'
+      ? conversation.toJSON()
+      : conversation;
+    try {
+      payload = await enrichConversationUnreadForUser(userId, conversation);
+    } catch (enrichmentError) {
+      console.warn('No se pudo enriquecer la conversación recién iniciada', {
+        conversationId: conversation?.id,
+        error: enrichmentError?.message || enrichmentError,
+      });
+    }
+    return res.status(result.conversationCreated ? 201 : 200).json({
+      conversation: payload,
+      messages: [],
+      patient: result.patient,
+      patient_created: result.patientCreated,
+      conversation_created: result.conversationCreated,
+      authorization_recorded: result.authorizationRecorded,
+    });
+  } catch (err) {
+    if (transaction && !transaction.finished) {
+      await transaction.rollback();
+    }
+    const status = Number(err?.status) || 500;
+    const knownErrors = new Set([
+      'patient_not_found',
+      'patient_not_linked_to_clinic',
+      'patient_exists_in_group',
+      'patient_name_required',
+      'patient_phone_required',
+      'valid_phone_required',
+      'whatsapp_contact_authorization_required',
+    ]);
+    if (knownErrors.has(err?.message)) {
+      return res.status(status).json({
+        error: err.message,
+        message: err.message === 'patient_exists_in_group'
+          ? 'Ya existe un paciente con este teléfono en otra clínica del grupo. Usa Crear paciente para revisarlo y asociarlo sin duplicar la ficha.'
+          : undefined,
+      });
+    }
+    console.error('Error startPatientContact', err);
+    return res.status(500).json({ error: 'patient_contact_start_failed' });
   }
 };
 

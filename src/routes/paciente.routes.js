@@ -10,6 +10,7 @@ router.use(authMiddleware);
 
 router.get('/', pacienteController.getAllPacientes);
 router.get('/search', pacienteController.searchPacientes); // Ruta de búsqueda
+router.get('/contact-targets', pacienteController.searchPatientContactTargets);
 router.get('/check-duplicates', pacienteController.checkDuplicates);
 router.get('/:id/consents', pacienteController.getConsents);
 router.get('/:id/consentimientos', consentimientosController.listPatientDocuments);
