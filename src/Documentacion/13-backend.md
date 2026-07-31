@@ -7324,3 +7324,36 @@ por defecto `GROQ_MODEL_FAST`) enviando solo el texto del inbound, sin nombre ni
 telefono. Solo se acepta si devuelve `rating` entero `1..5` con confianza >=
 `REVIEW_RATING_AI_MIN_CONFIDENCE` (0.78 por defecto). El evento conserva
 `inference_source`, `inference_confidence` y `inference_model`.
+
+## 2026-07-31 - Busqueda de pacientes y apertura auditada de WhatsApp
+
+`GET /api/pacientes/contact-targets` resuelve candidatos sin exponer un censo
+completo. Acepta telefono exacto normalizado o prefijos de nombre/apellidos,
+aplica ACL de `patients.sensitive.view` y limita la consulta a clinica o grupo
+autorizado. No usa comodines iniciales. Los indices
+`idx_pacientes_phone`, `idx_pacientes_name_surname` e
+`idx_pacientes_surname_name` sostienen este contrato.
+
+La busqueda existente de conversaciones tambien evita escaneos correlacionados
+de `MarketingPatientListItems`: resuelve una vez las coincidencias externas por
+scope y prefijo, apoyada por los indices `(clinica_id,name)` y
+`(clinica_id,email)`. La QA de desarrollo deja telefono y nombre conocidos en
+decenas de milisegundos; el frontend cancela peticiones anteriores y no hace
+polling con una consulta activa.
+
+`POST /api/conversations/start-patient-contact` crea de forma transaccional la
+ficha minima solo cuando no existe, la autorizacion operativa y la conversacion
+canonica. `PatientOperationalEvents` es un registro append-only del alta y del
+inicio de contacto: conserva usuario, clinica, paciente, origen y metadata sin
+convertir la declaracion puntual del operador en consentimiento comercial
+global. Los origenes actuales son `patient_list`, `agenda`, `lead_conversion`,
+`header_search` y `quick_chat`.
+
+La familia generica `clinicaclick_abrir_con_saludo` queda separada de resenas y
+automatizaciones. Meta rechazo el cuerpo inicial por exceso de variables para
+su longitud; la version que se propaga tras ese rechazo es
+`¡Hola {{1}}! Soy {{2}} de {{3}} 😊 ¿Te puedo escribir por aquí para ayudarte
+con cualquier duda o consulta que tengas?`. Las tres
+variables son paciente, usuario y clinica. Las clinicas sin WABA conservan un
+placeholder `SIN_CONECTAR`; las conectadas generan su version tecnica mediante
+la cola durable estandar y nunca envian un mensaje durante la propagacion.

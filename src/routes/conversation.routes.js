@@ -10,6 +10,7 @@ router.get('/conversations', conversationController.listConversations);
 router.get('/conversations/permissions', conversationController.getConversationPermissions);
 router.get('/conversations/by-patient/:patientId', conversationController.getConversationByPatient);
 router.get('/conversations/by-lead/:leadId', conversationController.getConversationByLead);
+router.post('/conversations/start-patient-contact', conversationController.startPatientContact);
 router.get('/conversations/messages/:messageId/media', conversationController.streamMessageMedia);
 router.post('/conversations/messages/:messageId/send-now', conversationController.sendScheduledMessageNow);
 router.get('/conversations/:id/messages', conversationController.getMessages);
