@@ -1307,10 +1307,18 @@ async function ensurePacienteClinicaLink(patient, clinicId, transaction) {
   });
 }
 
+function isPastImportedHistoricalVisit(value, now = new Date()) {
+  const start = new Date(value);
+  const reference = new Date(now);
+  return Number.isFinite(start.getTime())
+    && Number.isFinite(reference.getTime())
+    && start.getTime() <= reference.getTime();
+}
+
 async function ensureImportedHistoricalAppointment({ patient, clinicId, treatmentId, treatmentName, lastVisit, transaction }) {
   if (!patient?.id_paciente || !clinicId || !treatmentId || !lastVisit) return null;
   const start = new Date(lastVisit);
-  if (!Number.isFinite(start.getTime())) return null;
+  if (!isPastImportedHistoricalVisit(start)) return null;
   const end = new Date(start.getTime() + 30 * 60 * 1000);
   const existing = await CitaPaciente.findOne({
     where: {
@@ -1335,6 +1343,12 @@ async function ensureImportedHistoricalAppointment({ patient, clinicId, treatmen
     inicio: start,
     fin: end,
     es_provisional: false,
+    source_system: 'clinicaclick_reactivation_import',
+    source_reference: `patient:${patient.id_paciente}:treatment:${treatmentId}:${start.toISOString()}`,
+    import_metadata: {
+      kind: 'historical_treatment',
+      imported_as_past_activity: true,
+    },
   }, { transaction });
 }
 
@@ -2815,6 +2829,8 @@ module.exports = {
   rebuildList,
   getEvents,
   _test: {
+    ensureImportedHistoricalAppointment,
+    isPastImportedHistoricalVisit,
     prepareImportedTreatmentValue,
     resolveImportedTreatment,
   },

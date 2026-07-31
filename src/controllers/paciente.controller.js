@@ -11,6 +11,7 @@ const {
   PatientCustomField,
   PatientNutritionReport,
   PatientNutritionMeasurement,
+  PatientOperationalEvent,
   EconomicBudget,
   EconomicBudgetSignatureRequest,
   sequelize,
@@ -299,6 +300,21 @@ const buildActorLabel = (usuario) => {
     || usuario.email_usuario
     || `Usuario ${usuario.id_usuario}`;
 };
+
+const PATIENT_OPERATIONAL_SOURCE_LABELS = Object.freeze({
+  agenda: 'Agenda',
+  header_search: 'el buscador superior',
+  lead_conversion: 'la conversión de lead',
+  patient_list: 'el listado de pacientes',
+  patient_modal: 'el alta manual',
+  quick_chat: 'QuickChat',
+  tutor_modal: 'el alta de tutor',
+});
+
+const patientOperationalSourceLabel = (source) => (
+  PATIENT_OPERATIONAL_SOURCE_LABELS[String(source || '').trim().toLowerCase()]
+  || 'Clinicaclick'
+);
 
 const formatAppointmentStateLabel = (estado) => {
   const normalized = (estado || '').toString().trim().toLowerCase();
@@ -1175,7 +1191,7 @@ exports.getPacienteById = async (req, res) => {
 exports.getPacienteActivity = async (req, res) => {
   try {
     const paciente = await findPacienteByIdentifier(req.params.id, {
-      attributes: ['id_paciente', 'public_id', 'clinica_id'],
+      attributes: ['id_paciente', 'public_id', 'clinica_id', 'fecha_alta', 'createdAt'],
       include: [{ model: PacienteClinica, as: 'clinicasVinculadas', required: false, attributes: ['clinica_id'] }],
     });
     if (!paciente) {
@@ -1190,34 +1206,59 @@ exports.getPacienteActivity = async (req, res) => {
     }
     const pacienteId = Number(paciente.id_paciente);
 
-    const citas = await CitaPaciente.findAll({
-      where: {
-        paciente_id: pacienteId,
-        clinica_id: { [Op.in]: readableClinicIds },
-      },
-      attributes: [
-        'id_cita',
-        'paciente_id',
-        'estado',
-        'inicio',
-        'tipo_cita',
-        'motivo',
-        'nota',
-        'created_at',
-        'updated_at',
-        'created_by',
-        'updated_by',
-      ],
-      include: [
-        { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'telefono_movil'], required: false },
-        { model: Tratamiento, as: 'tratamiento', attributes: ['id_tratamiento', 'nombre'], required: false },
-      ],
-      order: [['inicio', 'DESC']],
-    });
+    const [citas, operationalEvents] = await Promise.all([
+      CitaPaciente.findAll({
+        where: {
+          paciente_id: pacienteId,
+          clinica_id: { [Op.in]: readableClinicIds },
+        },
+        attributes: [
+          'id_cita',
+          'paciente_id',
+          'estado',
+          'inicio',
+          'tipo_cita',
+          'motivo',
+          'nota',
+          'created_at',
+          'updated_at',
+          'created_by',
+          'updated_by',
+        ],
+        include: [
+          { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'telefono_movil'], required: false },
+          { model: Tratamiento, as: 'tratamiento', attributes: ['id_tratamiento', 'nombre'], required: false },
+        ],
+        order: [['inicio', 'DESC']],
+      }),
+      PatientOperationalEvent
+        ? PatientOperationalEvent.findAll({
+            where: {
+              patient_id: pacienteId,
+              clinic_id: { [Op.in]: readableClinicIds },
+              event_type: { [Op.in]: Object.values(PATIENT_EVENT_TYPES) },
+            },
+            attributes: [
+              'id',
+              'clinic_id',
+              'actor_user_id',
+              'event_type',
+              'source',
+              'channel',
+              'metadata',
+              'occurred_at',
+            ],
+            order: [['occurred_at', 'DESC'], ['id', 'DESC']],
+            raw: true,
+          })
+        : Promise.resolve([]),
+    ]);
 
     const actorIds = Array.from(new Set(
-      citas
-        .flatMap((cita) => [Number(cita.created_by), Number(cita.updated_by)])
+      [
+        ...citas.flatMap((cita) => [Number(cita.created_by), Number(cita.updated_by)]),
+        ...operationalEvents.map((event) => Number(event.actor_user_id)),
+      ]
         .filter((id) => Number.isFinite(id) && id > 0)
     ));
 
@@ -1231,6 +1272,74 @@ exports.getPacienteActivity = async (req, res) => {
 
     const usuariosById = new Map(usuarios.map((usuario) => [Number(usuario.id_usuario), usuario]));
     const items = [];
+
+    const operationalEventConfig = {
+      [PATIENT_EVENT_TYPES.created]: {
+        tipo: 'patient_created',
+        titulo: 'Alta del paciente',
+        icono: 'heroicons_outline:user-plus',
+        color: 'success',
+        descripcion: (sourceLabel) => `Alta manual desde ${sourceLabel}.`,
+      },
+      [PATIENT_EVENT_TYPES.whatsappAuthorized]: {
+        tipo: 'patient_whatsapp_contact_authorized',
+        titulo: 'Contacto por WhatsApp autorizado',
+        icono: 'heroicons_outline:shield-check',
+        color: 'info',
+        descripcion: (sourceLabel) => `Autorización registrada desde ${sourceLabel}.`,
+      },
+      [PATIENT_EVENT_TYPES.whatsappConversationStarted]: {
+        tipo: 'patient_whatsapp_conversation_started',
+        titulo: 'Conversación de WhatsApp iniciada',
+        icono: 'heroicons_outline:chat-bubble-left-right',
+        color: 'info',
+        descripcion: (sourceLabel) => `Inicio registrado desde ${sourceLabel}.`,
+      },
+    };
+
+    for (const event of operationalEvents) {
+      const config = operationalEventConfig[event.event_type];
+      if (!config) continue;
+      const actor = usuariosById.get(Number(event.actor_user_id));
+      const sourceLabel = patientOperationalSourceLabel(event.source);
+      items.push({
+        id: `patient-operation-${event.id}`,
+        pacienteId: String(pacienteId),
+        fecha: event.occurred_at,
+        tipo: config.tipo,
+        titulo: config.titulo,
+        descripcion: config.descripcion(sourceLabel),
+        icono: config.icono,
+        color: config.color,
+        usuarioId: actor ? String(actor.id_usuario) : 'system',
+        usuarioNombre: buildActorLabel(actor),
+        detalles: {
+          source: event.source,
+          sourceLabel,
+          channel: event.channel || null,
+          ...(event.metadata && typeof event.metadata === 'object' ? event.metadata : {}),
+        },
+      });
+    }
+
+    if (!operationalEvents.some((event) => event.event_type === PATIENT_EVENT_TYPES.created)) {
+      items.push({
+        id: `patient-created-legacy-${pacienteId}`,
+        pacienteId: String(pacienteId),
+        fecha: paciente.fecha_alta || paciente.createdAt,
+        tipo: 'patient_created_legacy',
+        titulo: 'Alta del paciente',
+        descripcion: 'Registro anterior a la trazabilidad de altas; no consta el usuario ni el modo de creación.',
+        icono: 'heroicons_outline:user-plus',
+        color: 'info',
+        usuarioId: 'legacy',
+        usuarioNombre: null,
+        detalles: {
+          source: 'legacy',
+          sourceLabel: 'No disponible',
+        },
+      });
+    }
 
     for (const citaRow of citas) {
       const cita = typeof citaRow.get === 'function' ? citaRow.get({ plain: true }) : citaRow;

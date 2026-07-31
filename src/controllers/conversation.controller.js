@@ -879,7 +879,7 @@ async function buildConversationSearchClause(searchQuery, { clinicIds = [] } = {
   const tokens = normalized
     .split(' ')
     .map((token) => token.trim().toLowerCase())
-    .filter((token) => token.length >= 2)
+    .filter((token) => token.length >= 2 || /^\d+$/.test(token))
     .slice(0, 6);
   const fullPrefix = `${escapeLikePattern(normalized.toLowerCase())}%`;
   const externalMatches = await resolveExternalMarketingConversationMatches(normalized, clinicIds);
@@ -1593,7 +1593,7 @@ exports.startPatientContact = async (req, res) => {
       duplicateScopeClinicIds: duplicateScopeClinics.map((item) => Number(item.id_clinica)),
       actorUserId: userId,
       authorizationConfirmed: req.body?.authorization_confirmed === true,
-      source: 'quick_chat',
+      source: normalizeOperationalSource(req.body?.source, 'quick_chat'),
       transaction,
     });
 
