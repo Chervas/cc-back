@@ -728,6 +728,139 @@ async function listReviews(resolved, query = {}) {
   return { success: true, items: rows, total, limit, offset };
 }
 
+async function findReviewForMutation(resolved, reviewIdRaw) {
+  const locationIds = (resolved.locations || []).map((location) => Number(location.id)).filter(Boolean);
+  if (!locationIds.length) {
+    const error = new Error('business_profile_location_not_configured');
+    error.status = 409;
+    throw error;
+  }
+  const reviewId = toInt(reviewIdRaw);
+  const reviewName = cleanString(reviewIdRaw);
+  const where = { business_location_id: { [Op.in]: locationIds } };
+  if (reviewId) where.id = reviewId;
+  else if (reviewName) where.review_name = reviewName;
+  else {
+    const error = new Error('business_profile_review_invalid');
+    error.status = 400;
+    throw error;
+  }
+  const review = await BusinessProfileReview.findOne({ where });
+  if (!review) {
+    const error = new Error('business_profile_review_not_found');
+    error.status = 404;
+    throw error;
+  }
+  const location = (resolved.locations || [])
+    .find((item) => Number(item.id) === Number(review.business_location_id)) || null;
+  if (!location) {
+    const error = new Error('business_profile_review_scope_mismatch');
+    error.status = 409;
+    throw error;
+  }
+  return { review, location };
+}
+
+function serializeReviewRow(review) {
+  if (!review) return null;
+  const row = typeof review.get === 'function' ? review.get({ plain: true }) : review;
+  const { raw_payload: _rawPayload, ...safe } = row;
+  return safe;
+}
+
+async function updateReviewReply(resolved, reviewIdRaw, payload = {}) {
+  const comment = cleanString(payload.comment);
+  if (!comment) {
+    const error = new Error('business_profile_review_reply_required');
+    error.status = 400;
+    throw error;
+  }
+  if (comment.length > 4096) {
+    const error = new Error('business_profile_review_reply_too_long');
+    error.status = 400;
+    throw error;
+  }
+  const { review, location } = await findReviewForMutation(resolved, reviewIdRaw);
+  const reviewName = cleanString(review.review_name);
+  if (!reviewName || !reviewName.includes('/reviews/')) {
+    const error = new Error('business_profile_review_name_invalid');
+    error.status = 409;
+    throw error;
+  }
+
+  const accessToken = await ensureGoogleAccessToken(location.google_connection_id);
+  let response;
+  try {
+    response = await axios.put(
+      `${GOOGLE_MY_BUSINESS_API}/${reviewName}/reply`,
+      { comment },
+      { headers: { Authorization: `Bearer ${accessToken}` }, timeout: 20000 }
+    );
+  } catch (providerError) {
+    const error = new Error('business_profile_review_reply_sync_failed');
+    error.status = providerError?.response?.status === 403 ? 403 : 502;
+    error.cause = providerError;
+    throw error;
+  }
+
+  const providerReply = response?.data || {};
+  const replyComment = cleanString(providerReply.comment) || comment;
+  const replyUpdateTime = providerReply.updateTime
+    ? new Date(providerReply.updateTime)
+    : new Date();
+  const raw = review.raw_payload && typeof review.raw_payload === 'object' ? review.raw_payload : {};
+  await review.update({
+    reply_comment: replyComment,
+    reply_update_time: replyUpdateTime,
+    has_reply: true,
+    raw_payload: {
+      ...raw,
+      reviewReply: {
+        ...(raw.reviewReply || {}),
+        ...providerReply,
+        comment: replyComment,
+        updateTime: replyUpdateTime.toISOString(),
+      },
+    },
+  });
+
+  return { success: true, review: serializeReviewRow(review) };
+}
+
+async function deleteReviewReply(resolved, reviewIdRaw) {
+  const { review, location } = await findReviewForMutation(resolved, reviewIdRaw);
+  const reviewName = cleanString(review.review_name);
+  if (!reviewName || !reviewName.includes('/reviews/')) {
+    const error = new Error('business_profile_review_name_invalid');
+    error.status = 409;
+    throw error;
+  }
+
+  const accessToken = await ensureGoogleAccessToken(location.google_connection_id);
+  try {
+    await axios.delete(
+      `${GOOGLE_MY_BUSINESS_API}/${reviewName}/reply`,
+      { headers: { Authorization: `Bearer ${accessToken}` }, timeout: 20000 }
+    );
+  } catch (providerError) {
+    const error = new Error('business_profile_review_reply_delete_failed');
+    error.status = providerError?.response?.status === 403 ? 403 : 502;
+    error.cause = providerError;
+    throw error;
+  }
+
+  const raw = review.raw_payload && typeof review.raw_payload === 'object' ? review.raw_payload : {};
+  const { reviewReply: _removedReply, ...rawWithoutReply } = raw;
+  await review.update({
+    reply_comment: null,
+    reply_update_time: null,
+    has_reply: false,
+    raw_payload: rawWithoutReply,
+  });
+
+  return { success: true, review: serializeReviewRow(review) };
+}
+
 async function listPosts(resolved, query = {}) {
   const locationIds = resolved.locations.map((location) => Number(location.id));
   const limit = Math.max(1, clampPage(query.limit, 10, 50));
@@ -877,6 +1010,52 @@ function buildContent(resolved) {
     services: serviceItems.map(normalizeServiceItem),
     photos: mediaItems.map(normalizeMediaItem).filter((item) => item.url),
     syncedAt: raw.clinicaclick_content_synced_at || null,
+  };
+}
+
+function isBusinessProfileLogoCandidate(photo) {
+  const category = String(photo?.category || '').toUpperCase();
+  return !photo?.isVideo
+    && ['LOGO', 'PROFILE'].includes(category)
+    && /^https?:\/\//i.test(String(photo?.url || ''));
+}
+
+async function importLogoFromBusinessProfile(resolved, payload = {}) {
+  const clinicId = toInt(resolved?.clinicId);
+  if (!clinicId) {
+    const error = new Error('local_clinic_invalid');
+    error.status = 400;
+    throw error;
+  }
+  if (!Clinica) {
+    const error = new Error('clinic_model_unavailable');
+    error.status = 500;
+    throw error;
+  }
+
+  const photoId = cleanString(payload.photoId || payload.photo_id);
+  const content = buildContent(resolved);
+  const logoCandidates = (content.photos || []).filter(isBusinessProfileLogoCandidate);
+  const selected = photoId
+    ? logoCandidates.find((photo) => String(photo.id) === photoId)
+    : logoCandidates[0];
+
+  if (!selected) {
+    const error = new Error('business_profile_logo_not_found');
+    error.status = 404;
+    throw error;
+  }
+
+  await Clinica.update(
+    { url_avatar: selected.url },
+    { where: { id_clinica: clinicId } }
+  );
+
+  return {
+    success: true,
+    clinicId,
+    url_avatar: selected.url,
+    photo: selected,
   };
 }
 
@@ -1674,6 +1853,8 @@ module.exports = {
   buildTimeseries,
   buildSeasonality,
   listReviews,
+  updateReviewReply,
+  deleteReviewReply,
   listPosts,
   buildContent,
   buildReviewInsights,
@@ -1683,6 +1864,7 @@ module.exports = {
   importRegularHoursToClinic,
   getRegularHoursImportStatus,
   publishPhoto,
+  importLogoFromBusinessProfile,
   serializeLocation,
   normalizeServiceItem,
   normalizeMediaItem,

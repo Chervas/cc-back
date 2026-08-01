@@ -176,6 +176,37 @@ router.get('/clinica/:clinicaId/reviews', async (req, res) => {
   }
 });
 
+router.put(
+  '/clinica/:clinicaId/reviews/:reviewId/reply',
+  requireClinicBusinessProfileWriteAccess,
+  async (req, res) => {
+    try {
+      return res.json(await businessProfileLocal.updateReviewReply(
+        req.localResolved,
+        req.params.reviewId,
+        req.body || {}
+      ));
+    } catch (error) {
+      return sendError(res, error, 'business_profile_review_reply_failed');
+    }
+  }
+);
+
+router.delete(
+  '/clinica/:clinicaId/reviews/:reviewId/reply',
+  requireClinicBusinessProfileWriteAccess,
+  async (req, res) => {
+    try {
+      return res.json(await businessProfileLocal.deleteReviewReply(
+        req.localResolved,
+        req.params.reviewId
+      ));
+    } catch (error) {
+      return sendError(res, error, 'business_profile_review_reply_delete_failed');
+    }
+  }
+);
+
 router.get('/clinica/:clinicaId/posts', async (req, res) => {
   try {
     return res.json(await businessProfileLocal.listPosts(req.localResolved, req.query || {}));
@@ -231,6 +262,21 @@ router.post(
       ));
     } catch (error) {
       return sendError(res, error, 'business_profile_photo_publish_failed');
+    }
+  }
+);
+
+router.post(
+  '/clinica/:clinicaId/import-logo',
+  requireClinicMarketingClinicWriteAccess,
+  async (req, res) => {
+    try {
+      return res.json(await businessProfileLocal.importLogoFromBusinessProfile(
+        req.localResolved,
+        req.body || {}
+      ));
+    } catch (error) {
+      return sendError(res, error, 'business_profile_logo_import_failed');
     }
   }
 );

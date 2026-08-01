@@ -7441,3 +7441,27 @@ las caches anteriores al despliegue sirven como primer punto de comparacion.
 Migracion: `20260731170000-create-marketing-heatmap-search-history.js`. Pruebas
 de contrato: `google_special_hours_automation.test.js` y
 `marketing_competition_heatmap_cache.test.js`.
+
+## 2026-08-01 - Respuestas de reseñas y logo desde Perfil Google
+
+`/api/local/clinica/:clinicaId/reviews/:reviewId/reply` permite crear o editar
+la respuesta pública de una reseña usando Google Business Profile
+`reviews.updateReply`. La ruta exige JWT, scope de marketing de escritura y
+permisos sobre la ficha efectiva si está compartida. Tras la confirmación de
+Google actualiza `BusinessProfileReviews.reply_comment`,
+`reply_update_time`, `has_reply` y `raw_payload.reviewReply`; no espera al
+siguiente job de sincronización para que la UI refleje el cambio. Existe
+`DELETE /api/local/clinica/:clinicaId/reviews/:reviewId/reply` como operación
+técnica de corrección.
+
+`POST /api/local/clinica/:clinicaId/import-logo` toma una foto ya sincronizada
+desde la ficha de Google marcada como `LOGO` o `PROFILE` y copia su URL a
+`Clinicas.url_avatar`. No sube datos clínicos ni toca `CLINICAL_STORAGE`; el
+logo de clínica sigue clasificado como asset público/branding. La acción no
+publica nada nuevo en Google.
+
+La futura funcionalidad de revisión de reseñas negativas debe modelarse como
+cola interna de triaje legal/ops, no como borrado automático: el backend puede
+calcular candidatas por baja puntuación, ausencia de texto, posible mención de
+datos personales o señales de incumplimiento, pero la denuncia real depende de
+las políticas de Google y del resultado de cada caso.
