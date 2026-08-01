@@ -4122,6 +4122,7 @@ No debe mezclarse el versionado del flujo fuente con el versionado operativo de 
 - Que una plantilla WhatsApp esté `APPROVED` no crea una versión nueva del flujo. Solo publicar el flujo fuente desde el editor crea una nueva versión del flujo de catálogo.
 - Las copias de clínica propagadas desde catálogo se consideran automatizaciones de sistema operativas. El usuario de clínica puede verlas, pausarlas o duplicarlas para crear una automatización propia, pero no debe editar ni publicar sobre la familia gestionada por catálogo. El admin controla la base desde `automatizaciones-admin` y puede propagar cambios sin pisar desactivaciones locales.
 - En automatizaciones de reseñas, la propagación conserva configuración local de clínica en los nodos de reseñas (`whatsapp_template_id`, premio, nombre visible y foto de equipo). El admin gobierna estructura/nodos; la configuración de producto de cada clínica sigue viniendo de `Marketing > Campañas > Conseguir reseñas`.
+- Reseñas automáticas y respuesta automática a leads son familias gobernadas por `AutomationFlowCatalog`, con copia V2 operativa por clínica. Sus interruptores de producto deben usar los endpoints especializados para conservar readiness y configuración local; en reseñas la única escritura operativa es `PATCH /api/marketing/review-requests/automation`.
 - En listados operativos (`/marketing/automatizaciones`) con scope de clínica o grupo, la plantilla base global del catálogo no debe mostrarse junto a su copia clínica. La base se consulta desde `automatizaciones-admin`; la pantalla cliente trabaja con la copia propagada/operativa para evitar dobles automatizaciones aparentes.
 
 La columna `Propagada` del catálogo de automatizaciones significa:
@@ -7400,6 +7401,14 @@ preserva los futuros no solapados y aplica el nuevo periodo en los dias
 coincidentes. Tras publicar registra `last_executed_at` y desactiva la plantilla.
 Una ejecucion completada no admite reactivacion. Pausar cancela ejecucion/job
 pendientes; reanudar materializa una ejecucion nueva sobre la version existente.
+
+Este flujo es una excepcion gestionada por producto respecto al catalogo admin:
+no hay una fila `AutomationFlowCatalog` de horario especial que deba propagarse
+a todas las clinicas. La plantilla V2 solo se materializa al programar fechas
+concretas; antes de eso la UI puede mostrar un acceso en `Automatizaciones
+disponibles`, pero no existe una instancia operativa. El catalogo admin sigue
+siendo la fuente de las familias reutilizables, como resenas y respuesta a
+leads, no de ejecuciones one-shot con datos fechados.
 
 ### Busquedas guardadas del mapa de calor
 
