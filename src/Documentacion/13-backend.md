@@ -7377,7 +7377,16 @@ Restauracion: el mismo script con `--restore=<ruta>`.
 
 ## 2026-07-31 - Horarios Google one-shot y busquedas locales comparables
 
-### Horarios especiales como Automatizaciones V2
+### Horarios especiales de Google: endpoint directo vigente y rutas V2 legacy
+
+Desde 2026-08-01 el producto ya no crea horarios especiales de Google como
+Automatizaciones V2. La UI de `Perfil Google > Horarios` usa el publicador
+directo `PUT /api/local/clinica/:clinicaId/special-hours`, que valida y publica
+el plan completo `specialHoursPlan` contra Google. No se crean `JobRequest`,
+`FlowExecutionV2` ni tarjeta en `Automatizaciones disponibles` para este caso.
+
+Quedan rutas V2 one-shot como compatibilidad tecnica/legacy, pero no forman
+parte del flujo de producto actual:
 
 Las rutas de lectura/escritura son:
 
@@ -7402,13 +7411,9 @@ coincidentes. Tras publicar registra `last_executed_at` y desactiva la plantilla
 Una ejecucion completada no admite reactivacion. Pausar cancela ejecucion/job
 pendientes; reanudar materializa una ejecucion nueva sobre la version existente.
 
-Este flujo es una excepcion gestionada por producto respecto al catalogo admin:
-no hay una fila `AutomationFlowCatalog` de horario especial que deba propagarse
-a todas las clinicas. La plantilla V2 solo se materializa al programar fechas
-concretas; antes de eso la UI puede mostrar un acceso en `Automatizaciones
-disponibles`, pero no existe una instancia operativa. El catalogo admin sigue
-siendo la fuente de las familias reutilizables, como resenas y respuesta a
-leads, no de ejecuciones one-shot con datos fechados.
+Este flujo queda documentado como legado. El catalogo admin sigue siendo la
+fuente de las familias reutilizables, como resenas y respuesta a leads, no de
+ejecuciones one-shot con datos fechados.
 
 ### Busquedas guardadas del mapa de calor
 
