@@ -378,8 +378,13 @@ function testTypedFaqIsPlainTextAndLeafOnly() {
 
 function testPageSchemaUsesClosedPresets() {
   const document = buildValidWebDocument();
+  document.pages[0].template_type = 'post';
   document.pages[0].seo.schema = { page_type: 'medical_web_page', include_faq: false };
   assert.equal(assertValidWebDocument(document).valid, true);
+
+  const arbitraryTemplate = clone(document);
+  arbitraryTemplate.pages[0].template_type = 'archive';
+  assertInvalid(arbitraryTemplate, 'enum');
 
   const arbitraryType = clone(document);
   arbitraryType.pages[0].seo.schema.page_type = 'local_business';

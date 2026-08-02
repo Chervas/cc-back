@@ -268,6 +268,10 @@
           "maxLength": 160,
           "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
         },
+        "template_type": {
+          "type": "string",
+          "enum": ["standard", "post", "category"]
+        },
         "root_node_ids": {
           "type": "array",
           "minItems": 1,

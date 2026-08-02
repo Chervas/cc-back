@@ -196,6 +196,15 @@ salida determinista, CSP y ausencia de handlers.
 
 ### Schema de página con presets seguros
 
+Desde 2026-08-02, `WebDocument v1` admite además `page.template_type`
+opcional con valores cerrados `standard`, `post` y `category`. Este campo
+persiste la intención de las pestañas del editor web (`Página libre`, `Post`,
+`Categoría`) sin depender del título visible ni del slug. Es aditivo: los
+documentos antiguos sin `template_type` siguen siendo válidos. El siguiente
+paso de publicación/CMS debe usar este campo como fuente de verdad para
+resolver plantillas de artículo/categoría, no heurísticas por `/post` o
+`/categoria`.
+
 `WebDocument v1` admite `page.seo.schema` como configuración editorial cerrada,
 no como JSON-LD libre. El contrato backend valida dos campos:
 
