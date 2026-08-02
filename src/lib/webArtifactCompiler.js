@@ -1333,7 +1333,7 @@ function stylesheet(tokens, document = { nodes: {} }) {
   const alignRules = (prefix = '') => Object.entries(align).map(([name, value]) => (
     `.cc-node.cc-${prefix}align-${name}{align-self:${value}}.cc-section.cc-${prefix}align-${name}>.cc-container{align-items:${value}}`
   )).join('');
-  const columnRules = (prefix = '') => [1, 2, 3, 4].map((count) => {
+  const columnRules = (prefix = '') => Array.from({ length: 12 }, (_value, index) => index + 1).map((count) => {
     const selector = prefix
       ? `.cc-section.cc-${prefix}cols-${count}`
       : `.cc-layout-grid.cc-cols-${count}`;

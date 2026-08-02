@@ -1037,6 +1037,8 @@ test('renderer actual honra tokens, responsive, fuentes e imagen focal en CSS de
   assert.match(css, /--cc-font-heading:ui-sans-serif,system-ui/);
   assert.match(css, /--cc-font-body:ui-sans-serif,system-ui/);
   assert.doesNotMatch(css, /(?:Manrope|Source Sans|Inter),/);
+  assert.match(css, /\.cc-layout-grid\.cc-cols-12>\.cc-container\{display:grid;grid-template-columns:repeat\(12,minmax\(0,1fr\)\)\}/);
+  assert.match(css, /\.cc-section\.cc-tablet-cols-12>\.cc-container\{display:grid;grid-template-columns:repeat\(12,minmax\(0,1fr\)\)\}/);
   assert.match(css, /\.cc-node\.cc-bg-brand\{background:var\(--cc-primary\)\}/);
   assert.match(css, /\.cc-node\.cc-fg-inverse,\.cc-node\.cc-tone-inverse\{color:#fff\}/);
   assert.doesNotMatch(css, /,\.cc-tone-inverse\{color:#fff\}/);

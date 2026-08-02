@@ -582,6 +582,13 @@ hay track válido para ese índice/breakpoint, se apilan con fallback 12/12. Est
 permite que el inspector edite una columna sin reescribir el reparto de las
 demás y mantiene documentos antiguos publicables.
 
+Desde 2026-08-02, las filas estructurales del `WebDocument v1` ya no están
+limitadas a 4 columnas: `section.props.columns`, `responsive.*.columns` y
+`column_tracks.*` aceptan 1..12 elementos/unidades. Esto alinea el contrato con
+la escala de 12 partes del editor ModSuite/Figma. El compilador público emite
+CSS para `cc-cols-1..12` y sus variantes responsive; los widgets con límite
+propio, como galería, conservan sus enums específicos.
+
 Evidencia definitiva del código promovido: backend Marketing Web **354/354**
 contratos Node, contratos WordPress **40/40**, Campañas **81/81**, reviewer
 focal **96/96** con GO explícito y sin hallazgos high/medium, frontend
