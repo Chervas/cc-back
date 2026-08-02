@@ -1580,6 +1580,7 @@ function measurementLoaderTag(measurement, identity = {}) {
 
 function renderPage({ page, document, snapshot, context, project, baseUrl, clinic, cssFile, artifactMarker }) {
   const pageContext = { ...context, page, artifactMarker };
+  const templateType = pageTemplateType(page);
   const headerId = document.globals?.header_node_id || null;
   const footerId = document.globals?.footer_node_id || null;
   const header = headerId
@@ -1638,7 +1639,7 @@ function renderPage({ page, document, snapshot, context, project, baseUrl, clini
   const socialImageTags = safeSocialUrl
     ? `<meta property="og:image" content="${escapeHtml(safeSocialUrl)}"><meta property="og:image:alt" content="${escapeHtml(socialImageAlt)}"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:image" content="${escapeHtml(safeSocialUrl)}"><meta name="twitter:image:alt" content="${escapeHtml(socialImageAlt)}">`
     : '<meta name="twitter:card" content="summary">';
-  const html = `<!doctype html><html lang="${escapeHtml(project.locale)}"><head><meta charset="utf-8"><meta name="clinicaclick-artifact-input" content="${escapeHtml(artifactMarker)}"><meta http-equiv="Content-Security-Policy" content="${escapeHtml(pageCsp)}"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" type="image/svg+xml" href="${escapeHtml(favicon)}"><title>${escapeHtml(title)}</title><meta name="description" content="${escapeHtml(description)}"><meta name="robots" content="${robots}"><link rel="canonical" href="${escapeHtml(canonical)}"><meta property="og:type" content="website"><meta property="og:site_name" content="${escapeHtml(project.name)}"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${escapeHtml(description)}"><meta property="og:url" content="${escapeHtml(canonical)}">${socialImageTags}<meta name="twitter:title" content="${escapeHtml(title)}"><meta name="twitter:description" content="${escapeHtml(description)}"><link rel="stylesheet" href="${escapeHtml(`${baseUrl}/${cssFile}`)}"><script type="application/ld+json">${jsonLdText}</script>${measurementLoaderTag(context.measurement, { projectId: project.id, revisionId: context.revisionId, pageId: page.id, artifactMarker })}</head><body data-cc-web-project-id="${escapeHtml(project.id)}" data-cc-web-revision-id="${escapeHtml(context.revisionId)}" data-cc-web-artifact-input-hash="${escapeHtml(artifactMarker)}" data-cc-web-base-path="${escapeHtml(publicationBasePath)}">${header}${body}${footer}</body></html>`;
+  const html = `<!doctype html><html lang="${escapeHtml(project.locale)}"><head><meta charset="utf-8"><meta name="clinicaclick-artifact-input" content="${escapeHtml(artifactMarker)}"><meta http-equiv="Content-Security-Policy" content="${escapeHtml(pageCsp)}"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" type="image/svg+xml" href="${escapeHtml(favicon)}"><title>${escapeHtml(title)}</title><meta name="description" content="${escapeHtml(description)}"><meta name="robots" content="${robots}"><link rel="canonical" href="${escapeHtml(canonical)}"><meta property="og:type" content="website"><meta property="og:site_name" content="${escapeHtml(project.name)}"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${escapeHtml(description)}"><meta property="og:url" content="${escapeHtml(canonical)}">${socialImageTags}<meta name="twitter:title" content="${escapeHtml(title)}"><meta name="twitter:description" content="${escapeHtml(description)}"><link rel="stylesheet" href="${escapeHtml(`${baseUrl}/${cssFile}`)}"><script type="application/ld+json">${jsonLdText}</script>${measurementLoaderTag(context.measurement, { projectId: project.id, revisionId: context.revisionId, pageId: page.id, artifactMarker })}</head><body data-cc-web-project-id="${escapeHtml(project.id)}" data-cc-web-revision-id="${escapeHtml(context.revisionId)}" data-cc-web-page-template="${escapeHtml(templateType)}" data-cc-web-artifact-input-hash="${escapeHtml(artifactMarker)}" data-cc-web-base-path="${escapeHtml(publicationBasePath)}">${header}${body}${footer}</body></html>`;
   return {
     path: page.slug === 'inicio' ? '/' : `/${page.slug}/`,
     html,
@@ -1649,6 +1650,12 @@ function renderPage({ page, document, snapshot, context, project, baseUrl, clini
     json_ld_csp_hash: jsonLdCspHash,
     seo_audit: pageSeoAudit(page, document),
   };
+}
+
+function pageTemplateType(page) {
+  return ['standard', 'post', 'category'].includes(page?.template_type)
+    ? page.template_type
+    : 'standard';
 }
 
 function sitemapXml(baseUrl, pages) {
@@ -1793,6 +1800,7 @@ function compileWebArtifact(input = {}) {
     artifact_input_hash: artifactMarker,
     page_routes: Object.fromEntries(document.pages.map((page) => [page.id, {
       page_path: page.slug === 'inicio' ? '/' : `/${page.slug}/`,
+      template_type: pageTemplateType(page),
     }])),
     intake_forms: intakeForms,
     site_configuration: siteConfiguration,

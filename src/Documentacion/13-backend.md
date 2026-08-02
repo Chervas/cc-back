@@ -203,7 +203,9 @@ persiste la intención de las pestañas del editor web (`Página libre`, `Post`,
 documentos antiguos sin `template_type` siguen siendo válidos. El siguiente
 paso de publicación/CMS debe usar este campo como fuente de verdad para
 resolver plantillas de artículo/categoría, no heurísticas por `/post` o
-`/categoria`.
+`/categoria`. El compilador ya lo propaga en
+`manifest.page_routes[pageId].template_type` y como
+`data-cc-web-page-template` en el `<body>` público; si falta, usa `standard`.
 
 `WebDocument v1` admite `page.seo.schema` como configuración editorial cerrada,
 no como JSON-LD libre. El contrato backend valida dos campos:

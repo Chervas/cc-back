@@ -1057,10 +1057,11 @@ test('el contrato de formularios queda firmado en manifest y usa fallback no-JS'
   assert.equal(actualFormId, formId);
   assert.equal(artifact.manifest.intake_forms[actualFormId].page_path, '/');
   assert.deepEqual(artifact.manifest.page_routes, {
-    [input.document.pages[0].id]: { page_path: '/' },
+    [input.document.pages[0].id]: { page_path: '/', template_type: 'standard' },
   });
   assert.match(artifact.files['index.html'], new RegExp(`data-cc-web-project-id="${input.project.id}"`));
   assert.match(artifact.files['index.html'], new RegExp(`data-cc-web-revision-id="${input.revisionId}"`));
+  assert.match(artifact.files['index.html'], /data-cc-web-page-template="standard"/);
   assert.match(artifact.files['index.html'], /data-cc-web-base-path="\/"/);
   assert.match(artifact.files['index.html'], /action="\/api\/intake\/web" method="post" enctype="application\/x-www-form-urlencoded"/);
   assert.match(artifact.files['index.html'], /name="_cc_company"/);
@@ -1070,6 +1071,17 @@ test('el contrato de formularios queda firmado en manifest y usa fallback no-JS'
   assert.match(artifact.files['index.html'], new RegExp(`id="cc-${actualFormId}-success"`));
   assert.match(artifact.files['index.html'], new RegExp(`id="cc-${actualFormId}-error"`));
   assert.doesNotMatch(artifact.files['index.html'], /name="external_source"/);
+});
+
+test('el tipo de plantilla de página se propaga al manifest y al HTML público', () => {
+  const input = fixture();
+  input.document.pages[0].template_type = 'post';
+  const artifact = compileWebArtifact(input);
+  assert.deepEqual(artifact.manifest.page_routes[input.document.pages[0].id], {
+    page_path: '/',
+    template_type: 'post',
+  });
+  assert.match(artifact.files['index.html'], /data-cc-web-page-template="post"/);
 });
 
 test('producción bloquea drift entre revisión, IntakeConfig y toggles del runtime', () => {
