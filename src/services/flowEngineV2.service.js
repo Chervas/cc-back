@@ -5875,6 +5875,10 @@ async function resumeWaitingNode(execution, node, context, {
             raw: true,
           })
         : null;
+      const inboundMessageType = cleanString(inboundMessage?.message_type).toLowerCase();
+      const effectiveResponseText = inboundMessageType === 'reaction'
+        ? null
+        : responseText;
       const inboundMetadata = isObject(inboundMessage?.metadata) ? inboundMessage.metadata : {};
       const inboundMedia = isObject(inboundMetadata.media) ? inboundMetadata.media : {};
       const mediaKind = cleanString(
@@ -5906,15 +5910,15 @@ async function resumeWaitingNode(execution, node, context, {
         || listenedOutput?.body
       );
       const respondedAt = new Date().toISOString();
-      const responseRatingDetails = extractReviewRatingDetailsFromResponseText(responseText);
+      const responseRatingDetails = extractReviewRatingDetailsFromResponseText(effectiveResponseText);
       const responseRating = responseRatingDetails.rating || null;
       const responseRatingReason = responseRatingDetails.reason || null;
       nextContext = mergeNodeOutput(nextContext, node.id, {
         status: 'responded',
-        response_text: responseText ?? null,
+        response_text: effectiveResponseText ?? null,
         response_rating: responseRating,
         response_rating_reason: responseRatingReason,
-        response_lines: String(responseText || '')
+        response_lines: String(effectiveResponseText || '')
           .split(/\r?\n/)
           .map((line) => cleanString(line))
           .filter(Boolean),
@@ -5946,10 +5950,10 @@ async function resumeWaitingNode(execution, node, context, {
       // Alias de contexto para simplificar plantillas IA sin depender de IDs de nodos.
       nextContext = {
         ...(nextContext || {}),
-        last_response: responseText ?? null,
+        last_response: effectiveResponseText ?? null,
         last_prompt: listenedMessagePreview || null,
         last_response_context: {
-          response_text: responseText ?? null,
+          response_text: effectiveResponseText ?? null,
           response_rating: responseRating,
           response_rating_reason: responseRatingReason,
           response_message_id: toIntOrNull(inboundMessage?.id),
