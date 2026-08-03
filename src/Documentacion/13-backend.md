@@ -7483,3 +7483,29 @@ cola interna de triaje legal/ops, no como borrado automático: el backend puede
 calcular candidatas por baja puntuación, ausencia de texto, posible mención de
 datos personales o señales de incumplimiento, pero la denuncia real depende de
 las políticas de Google y del resultado de cada caso.
+
+## 2026-08-03 - Orden cronologico y actividad compartida en conversaciones
+
+Los endpoints de conversaciones (`GET /api/conversations`, `/:id/messages`,
+`/by-patient/:patientId` y `/by-lead/:leadId`) ordenan los mensajes por
+`COALESCE(Messages.sent_at, Messages.createdAt)`. `Messages.sent_at` es la hora
+real del proveedor o del eco de WhatsApp móvil; `createdAt` solo indica cuándo
+se materializó en nuestra base de datos. No usar `createdAt` como orden primario
+en chats reales, porque los ecos `smb_message_echoes` y la sincronización de
+historial pueden entrar minutos u horas después y romper el orden visible.
+
+QuickChat y el drawer de Leads deben consumir la misma actividad canónica de
+citas. Los cambios de estado de cita se escriben en `PatientOperationalEvents`
+mediante `appointmentActivity.service.js`; el runtime V2 ya usa
+`recordAppointmentStatusChange`, y las rutas manuales deben hacerlo también. Si
+una cita aparece confirmada pero no hay evento append-only, la UI no debe
+inventarlo: hay que corregir el camino que cambió el estado o backfillear el
+evento con auditoría explícita.
+
+Caso verificado: conversación `6544` / Juan Francisco / Propdental Nou Barris.
+La API devuelve los ecos móviles `70663`, `70647`, `70683` ordenados por
+`sent_at` (`13:24:25`, `13:24:28`, `13:24:34`) aunque sus `createdAt` fueran
+posteriores y desordenados. Los envíos automáticos fallidos de esa cadena fueron
+aceptados inicialmente por Meta y después devueltos con `131026 Message
+undeliverable`; no fue un bloqueo de quiet hours ni ausencia de disparo del
+flujo.

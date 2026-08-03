@@ -43,6 +43,14 @@ const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1,44')
 const STREAMABLE_MEDIA_KINDS = new Set(['audio', 'image', 'video', 'document', 'sticker']);
 const INLINE_MEDIA_KINDS = new Set(['audio', 'image', 'video', 'sticker']);
 
+function messageChronologicalOrder(direction = 'ASC') {
+  const normalizedDirection = String(direction).toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+  return [
+    [db.Sequelize.fn('COALESCE', db.Sequelize.col('sent_at'), db.Sequelize.col('createdAt')), normalizedDirection],
+    ['id', normalizedDirection],
+  ];
+}
+
 function normalizeMediaMimeType(value, fallback = 'application/octet-stream') {
   return String(value || fallback).split(';')[0].trim().toLowerCase() || fallback;
 }
@@ -1198,7 +1206,7 @@ exports.listConversations = async (req, res) => {
           as: 'messages',
           separate: true,
           limit: 6,
-          order: [['createdAt', 'DESC']],
+          order: messageChronologicalOrder('DESC'),
           attributes: ['id', 'direction', 'content', 'message_type', 'status', 'sent_at', 'createdAt', 'metadata'],
         },
       ],
@@ -1341,7 +1349,7 @@ exports.getMessages = async (req, res) => {
 
     const messages = await Message.findAll({
       where: { conversation_id: conversation.id },
-      order: [['createdAt', 'ASC']],
+      order: messageChronologicalOrder('ASC'),
       raw: true,
     });
 
@@ -1463,7 +1471,7 @@ exports.getConversationByPatient = async (req, res) => {
 
     const messages = await Message.findAll({
       where: { conversation_id: conversation.id },
-      order: [['createdAt', 'ASC']],
+      order: messageChronologicalOrder('ASC'),
       raw: true,
     });
 
@@ -1530,7 +1538,7 @@ exports.getConversationByLead = async (req, res) => {
 
     const messages = await Message.findAll({
       where: { conversation_id: conversation.id },
-      order: [['createdAt', 'ASC']],
+      order: messageChronologicalOrder('ASC'),
       raw: true,
     });
 
