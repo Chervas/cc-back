@@ -1806,7 +1806,7 @@ exports.getPacienteActivity = async (req, res) => {
       }
     }
 
-    return res.json(items.sort((a, b) => new Date(b.fecha).getTime() - new Date(a.fecha).getTime()));
+    return res.json(items.sort((a, b) => new Date(a.fecha).getTime() - new Date(b.fecha).getTime()));
   } catch (error) {
     const handled = sendAccessPolicyError(error, res);
     if (handled) return handled;

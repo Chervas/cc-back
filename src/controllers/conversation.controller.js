@@ -835,6 +835,15 @@ function buildNameTokenPrefixClause(modelAlias, firstNameField, lastNameField, t
   };
 }
 
+function buildSingleFieldTokenContainsClause(modelAlias, fieldName, tokens) {
+  if (!tokens.length) return null;
+  return {
+    [Op.and]: tokens.map((token) => ({
+      [`$${modelAlias}.${fieldName}$`]: { [Op.like]: `%${escapeLikePattern(token)}%` },
+    })),
+  };
+}
+
 async function resolveExternalMarketingConversationMatches(searchQuery, clinicIds) {
   const normalized = normalizeSearchQuery(searchQuery);
   const scopedClinicIds = Array.from(new Set(
@@ -902,6 +911,8 @@ async function buildConversationSearchClause(searchQuery, { clinicIds = [] } = {
 
   const patientTokens = buildNameTokenPrefixClause('paciente', 'nombre', 'apellidos', tokens);
   if (patientTokens) clauses.push(patientTokens);
+  const leadTokens = buildSingleFieldTokenContainsClause('lead', 'nombre', tokens);
+  if (leadTokens) clauses.push(leadTokens);
   if (externalMatches.conversationIds.length) {
     clauses.push({ id: { [Op.in]: externalMatches.conversationIds } });
   }

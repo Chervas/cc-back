@@ -7502,10 +7502,17 @@ una cita aparece confirmada pero no hay evento append-only, la UI no debe
 inventarlo: hay que corregir el camino que cambió el estado o backfillear el
 evento con auditoría explícita.
 
+`GET /api/pacientes/:id/activity` devuelve la línea temporal en orden
+cronológico ascendente, igual que el drawer de Leads. Las pantallas pueden
+agruparla visualmente, pero no deben invertirla por defecto: lo más antiguo va
+arriba y lo más reciente abajo.
+
 Caso verificado: conversación `6544` / Juan Francisco / Propdental Nou Barris.
 La API devuelve los ecos móviles `70663`, `70647`, `70683` ordenados por
 `sent_at` (`13:24:25`, `13:24:28`, `13:24:34`) aunque sus `createdAt` fueran
 posteriores y desordenados. Los envíos automáticos fallidos de esa cadena fueron
 aceptados inicialmente por Meta y después devueltos con `131026 Message
 undeliverable`; no fue un bloqueo de quiet hours ni ausencia de disparo del
-flujo.
+flujo. También se backfilleó el evento operativo `appointment.status_changed`
+faltante de la cita `74577` para reflejar el cambio manual a
+`recordatorio_confirmado` hecho el `2026-08-03 15:20:07 UTC`.
