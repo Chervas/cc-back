@@ -1,5 +1,5 @@
 'use strict';
-const { Paciente, Clinica, PacienteRelacion, PacienteClinica, PacienteConsentimiento, CitaPaciente, Usuario, Tratamiento, PatientCustomField, PatientNutritionReport, PatientNutritionMeasurement, sequelize } = require('../../models');
+const { Paciente, Clinica, PacienteRelacion, PacienteClinica, PacienteConsentimiento, CitaPaciente, Usuario, Tratamiento, PatientCustomField, PatientNutritionReport, PatientNutritionMeasurement, PatientOperationalEvent, sequelize } = require('../../models');
 const { Op, literal, QueryTypes } = require('sequelize');
 const crypto = require('crypto');
 const { normalizePhoneDigits } = require('../lib/phone');
@@ -19,6 +19,10 @@ const {
   PATIENT_EVENT_TYPES,
   recordPatientOperationalEvent,
 } = require('../services/patientContact.service');
+const {
+  APPOINTMENT_STATUS_EVENT_TYPE,
+  serializeAppointmentStatusActivity,
+} = require('../services/appointmentActivity.service');
 
 const normalizePhone = (phone) => {
   return normalizePhoneDigits(phone);
@@ -1114,34 +1118,59 @@ exports.getPacienteActivity = async (req, res) => {
     }
     const pacienteId = Number(paciente.id_paciente);
 
-    const citas = await CitaPaciente.findAll({
-      where: {
-        paciente_id: pacienteId,
-        clinica_id: { [Op.in]: readableClinicIds },
-      },
-      attributes: [
-        'id_cita',
-        'paciente_id',
-        'estado',
-        'inicio',
-        'tipo_cita',
-        'motivo',
-        'nota',
-        'created_at',
-        'updated_at',
-        'created_by',
-        'updated_by',
-      ],
-      include: [
-        { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'telefono_movil'], required: false },
-        { model: Tratamiento, as: 'tratamiento', attributes: ['id_tratamiento', 'nombre'], required: false },
-      ],
-      order: [['inicio', 'DESC']],
-    });
+    const [citas, appointmentStatusEvents] = await Promise.all([
+      CitaPaciente.findAll({
+        where: {
+          paciente_id: pacienteId,
+          clinica_id: { [Op.in]: readableClinicIds },
+        },
+        attributes: [
+          'id_cita',
+          'paciente_id',
+          'estado',
+          'inicio',
+          'tipo_cita',
+          'motivo',
+          'nota',
+          'created_at',
+          'updated_at',
+          'created_by',
+          'updated_by',
+        ],
+        include: [
+          { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'telefono_movil'], required: false },
+          { model: Tratamiento, as: 'tratamiento', attributes: ['id_tratamiento', 'nombre'], required: false },
+        ],
+        order: [['inicio', 'DESC']],
+      }),
+      PatientOperationalEvent
+        ? PatientOperationalEvent.findAll({
+            where: {
+              patient_id: pacienteId,
+              clinic_id: { [Op.in]: readableClinicIds },
+              event_type: APPOINTMENT_STATUS_EVENT_TYPE,
+            },
+            attributes: [
+              'id',
+              'clinic_id',
+              'actor_user_id',
+              'event_type',
+              'source',
+              'channel',
+              'metadata',
+              'occurred_at',
+            ],
+            order: [['occurred_at', 'DESC'], ['id', 'DESC']],
+            raw: true,
+          })
+        : Promise.resolve([]),
+    ]);
 
     const actorIds = Array.from(new Set(
-      citas
-        .flatMap((cita) => [Number(cita.created_by), Number(cita.updated_by)])
+      [
+        ...citas.flatMap((cita) => [Number(cita.created_by), Number(cita.updated_by)]),
+        ...appointmentStatusEvents.map((event) => Number(event.actor_user_id)),
+      ]
         .filter((id) => Number.isFinite(id) && id > 0)
     ));
 
@@ -1155,7 +1184,19 @@ exports.getPacienteActivity = async (req, res) => {
 
     const usuariosById = new Map(usuarios.map((usuario) => [Number(usuario.id_usuario), usuario]));
     const items = [];
+    const appointmentsWithStatusHistory = new Set(
+      appointmentStatusEvents
+        .map((event) => Number(event?.metadata?.appointment_id))
+        .filter((id) => Number.isFinite(id) && id > 0)
+    );
 
+    for (const event of appointmentStatusEvents) {
+      const actor = usuariosById.get(Number(event.actor_user_id));
+      items.push(serializeAppointmentStatusActivity(event, {
+        patientId: pacienteId,
+        actorName: buildActorLabel(actor),
+      }));
+    }
     for (const citaRow of citas) {
       const cita = typeof citaRow.get === 'function' ? citaRow.get({ plain: true }) : citaRow;
       const createdByUser = usuariosById.get(Number(cita.created_by));
@@ -1187,6 +1228,10 @@ exports.getPacienteActivity = async (req, res) => {
       });
 
       if (importedHistorical) {
+        continue;
+      }
+
+      if (appointmentsWithStatusHistory.has(Number(cita.id_cita))) {
         continue;
       }
 

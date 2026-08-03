@@ -59,6 +59,7 @@ const whatsappService = require('./whatsapp.service');
 const whatsappConnectionStatusService = require('./whatsappConnectionStatus.service');
 const marketingBulkSendsService = require('./marketingBulkSends.service');
 const appointmentNotificationCleanup = require('./appointmentNotificationCleanup.service');
+const { recordAppointmentStatusChange } = require('./appointmentActivity.service');
 const { resolveLeadAutoReplyWait } = require('./clinicOpeningHours.service');
 const { evaluatePendingLeadContact } = require('./leadContactState.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
@@ -2237,6 +2238,26 @@ async function handleChangeStatus(node, context, runtime) {
     }
 
     await appointment.update({ estado: appointmentStatus });
+    try {
+      const templateVersion = runtime?.execution?.templateVersion || null;
+      await recordAppointmentStatusChange({
+        appointment,
+        previousStatus,
+        newStatus: appointmentStatus,
+        source: 'automation_v2',
+        metadata: {
+          flow_execution_id: toIntOrNull(runtime?.execution?.id),
+          flow_template_version_id: toIntOrNull(runtime?.execution?.template_version_id),
+          flow_public_id: cleanString(templateVersion?.public_id),
+          flow_name: cleanString(templateVersion?.name),
+          flow_version: toIntOrNull(templateVersion?.version),
+          node_id: cleanString(node?.id),
+          trigger_type: cleanString(runtime?.execution?.trigger_type),
+        },
+      });
+    } catch (activityError) {
+      console.warn('[AutomationsV2] No se pudo registrar la transición de cita:', activityError.message || activityError);
+    }
     if (APPOINTMENT_NOTIFICATION_RESOLVED_STATUSES.has(appointmentStatus)) {
       await appointmentNotificationCleanup.markAutomationNotificationsReadForAppointment(appointment.id_cita, {
         reason: `appointment_status_${appointmentStatus}`,
