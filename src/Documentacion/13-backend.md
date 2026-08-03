@@ -10,6 +10,19 @@ simulacion visible y no comunica con AEAT.
 
 Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Data Manager/Conversiones mejoradas, política de goals y E2E/limpieza de intake.
 
+## 2026-08-03 - QuickChat, leads y reacciones WhatsApp
+
+- `/api/conversations` enriquece las conversaciones de leads con
+  `lead.linked_appointment` y `lead.recent_appointment`, usando el mismo
+  contrato que el drawer de Leads para que QuickChat no duplique decisiones de
+  agenda ni muestre `Agendar cita` cuando ya existe una cita activa.
+- Las reacciones WhatsApp entrantes y los ecos de coexistencia se persisten como
+  `message_type='reaction'` con `metadata.kind='whatsapp_reaction'` y el emoji en
+  `metadata.reaction.emoji`. El `content` nuevo es neutro (`Reaccion de
+  WhatsApp`) para evitar que IA/automatizaciones lo lean como respuesta textual.
+  Automatizaciones V2 conserva el emoji por metadata y fuerza `response_text=null`
+  para este tipo de mensaje.
+
 ---
 
 ## 2026-07-20 - Plantillas personales y automatizaciones WhatsApp trilingües operativas

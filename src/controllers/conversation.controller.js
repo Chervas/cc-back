@@ -29,6 +29,7 @@ const {
   Clinica,
   FormSubmissionEvent,
   MarketingPatientListItem,
+  CitaPaciente,
   WhatsappTemplate,
   WhatsappTemplateCatalog,
 } = db;
@@ -42,6 +43,14 @@ const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1,44')
 
 const STREAMABLE_MEDIA_KINDS = new Set(['audio', 'image', 'video', 'document', 'sticker']);
 const INLINE_MEDIA_KINDS = new Set(['audio', 'image', 'video', 'sticker']);
+const LEAD_ACTIVE_APPOINTMENT_STATES = new Set([
+  'pendiente',
+  'info_enviada',
+  'info_confirmada',
+  'recordatorio_enviado',
+  'recordatorio_confirmado',
+  'reprogramada',
+]);
 
 function messageChronologicalOrder(direction = 'ASC') {
   const normalizedDirection = String(direction).toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
@@ -96,6 +105,42 @@ function downloadFailedMediaError(kind) {
 function cleanText(value) {
   if (value === undefined || value === null) return '';
   return String(value).trim();
+}
+
+function toPlain(value) {
+  if (!value) return value;
+  return typeof value.toJSON === 'function' ? value.toJSON() : value;
+}
+
+function parsePositiveInt(value) {
+  const parsed = Number.parseInt(String(value || ''), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function buildQuickChatLeadAppointmentSummary(row) {
+  const appointment = toPlain(row);
+  if (!appointment?.id_cita) return null;
+
+  const start = appointment.inicio ? new Date(appointment.inicio) : null;
+  const patientName = [
+    cleanText(appointment?.paciente?.nombre),
+    cleanText(appointment?.paciente?.apellidos),
+  ].filter(Boolean).join(' ').trim();
+
+  return {
+    id: Number(appointment.id_cita),
+    fecha: start && Number.isFinite(start.getTime()) ? start.toISOString() : appointment.inicio || null,
+    hora: start && Number.isFinite(start.getTime())
+      ? start.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })
+      : null,
+    tipo_cita: cleanText(appointment.tipo_cita),
+    estado: cleanText(appointment.estado),
+    tratamiento: cleanText(appointment?.tratamiento?.nombre || appointment.titulo || appointment.motivo),
+    clinica_id: parsePositiveInt(appointment.clinica_id),
+    clinica_nombre: cleanText(appointment?.clinica?.nombre_clinica),
+    paciente_id: parsePositiveInt(appointment.paciente_id),
+    paciente_nombre: patientName || cleanText(appointment?.paciente?.nombre),
+  };
 }
 
 function cleanScalar(value) {
@@ -702,7 +747,8 @@ async function enrichConversationUnreadForUser(userId, conversationLike) {
       plain.whatsapp_service_window_phone_number_id = null;
     }
   }
-  const [hydrated] = await hydrateMarketingContactFallbacks([plain]);
+  const [withLeadAppointment] = await enrichQuickChatLeadAppointments([plain]);
+  const [hydrated] = await hydrateMarketingContactFallbacks([withLeadAppointment || plain]);
   return hydrated || plain;
 }
 
@@ -1060,6 +1106,88 @@ async function hydrateMarketingContactFallbacks(conversations = [], options = {}
   return plainRows;
 }
 
+async function enrichQuickChatLeadAppointments(conversations = []) {
+  const rows = Array.isArray(conversations)
+    ? conversations.map((conversation) => toPlain(conversation))
+    : [];
+  if (!rows.length || !CitaPaciente) return rows;
+
+  const leadIds = Array.from(new Set(
+    rows
+      .map((row) => parsePositiveInt(row?.lead?.id || row?.lead_id))
+      .filter(Boolean)
+  ));
+  if (!leadIds.length) return rows;
+
+  const explicitAppointmentIds = Array.from(new Set(
+    rows
+      .map((row) => parsePositiveInt(row?.lead?.call_outcome_appointment_id))
+      .filter(Boolean)
+  ));
+
+  const include = [
+    { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'], required: false },
+    { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'nombre', 'apellidos'], required: false },
+    db.Tratamiento
+      ? { model: db.Tratamiento, as: 'tratamiento', attributes: ['id_tratamiento', 'nombre'], required: false }
+      : null,
+  ].filter(Boolean);
+
+  const appointmentWhere = [
+    { lead_intake_id: { [Op.in]: leadIds } },
+  ];
+  if (explicitAppointmentIds.length) {
+    appointmentWhere.push({ id_cita: { [Op.in]: explicitAppointmentIds } });
+  }
+
+  const appointmentRows = await CitaPaciente.findAll({
+    where: { [Op.or]: appointmentWhere },
+    include,
+    order: [['inicio', 'DESC'], ['id_cita', 'DESC']],
+  });
+
+  const explicitById = new Map();
+  const latestActiveByLead = new Map();
+  const latestRecentByLead = new Map();
+
+  for (const appointmentRow of appointmentRows) {
+    const appointment = toPlain(appointmentRow);
+    const summary = buildQuickChatLeadAppointmentSummary(appointment);
+    if (!summary) continue;
+
+    const appointmentId = parsePositiveInt(appointment.id_cita);
+    const leadId = parsePositiveInt(appointment.lead_intake_id);
+    const state = cleanText(appointment.estado).toLowerCase();
+    if (appointmentId && explicitAppointmentIds.includes(appointmentId)) {
+      explicitById.set(appointmentId, summary);
+    }
+    if (leadId && !latestRecentByLead.has(leadId)) {
+      latestRecentByLead.set(leadId, summary);
+    }
+    if (leadId && !latestActiveByLead.has(leadId) && LEAD_ACTIVE_APPOINTMENT_STATES.has(state)) {
+      latestActiveByLead.set(leadId, summary);
+    }
+  }
+
+  return rows.map((row) => {
+    if (!row?.lead) return row;
+    const leadId = parsePositiveInt(row.lead.id || row.lead_id);
+    const explicitAppointmentId = parsePositiveInt(row.lead.call_outcome_appointment_id);
+    const linkedAppointment = (explicitAppointmentId ? explicitById.get(explicitAppointmentId) : null)
+      || (leadId ? latestActiveByLead.get(leadId) : null)
+      || null;
+    const recentAppointment = leadId ? latestRecentByLead.get(leadId) || null : null;
+    return {
+      ...row,
+      lead: {
+        ...row.lead,
+        linked_appointment: linkedAppointment,
+        recent_appointment: recentAppointment,
+      },
+    };
+  });
+}
+
 exports.listConversations = async (req, res) => {
   try {
     const userId = req.userData?.userId;
@@ -1210,7 +1338,7 @@ exports.listConversations = async (req, res) => {
       offset,
       include: [
         { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'foto', 'telefono_movil', 'email'] },
-        { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email', 'status_lead', 'call_initiated'] },
+        { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email', 'status_lead', 'call_initiated', 'call_outcome_appointment_id'] },
         {
           model: Message,
           as: 'messages',
@@ -1245,7 +1373,8 @@ exports.listConversations = async (req, res) => {
         : 0;
       return data;
     }));
-    const payload = await hydrateMarketingContactFallbacks(rawPayload, { searchQuery });
+    const withLeadAppointments = await enrichQuickChatLeadAppointments(rawPayload);
+    const payload = await hydrateMarketingContactFallbacks(withLeadAppointments, { searchQuery });
     const totalUnread = payload.reduce((total, item) => {
       const unread = Number(item?.unread_count || 0);
       const automationPending = item?.pending_automation_attention
@@ -1322,7 +1451,7 @@ exports.getMessages = async (req, res) => {
     let conversation = await Conversation.findByPk(conversationId, {
       include: [
         { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'foto', 'telefono_movil', 'email'] },
-        { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email', 'status_lead', 'call_initiated'] },
+        { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email', 'status_lead', 'call_initiated', 'call_outcome_appointment_id'] },
       ],
     });
     if (!conversation) {
@@ -1341,7 +1470,7 @@ exports.getMessages = async (req, res) => {
         conversation = await Conversation.findByPk(canonical.id, {
           include: [
             { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'foto', 'telefono_movil', 'email'] },
-            { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email', 'status_lead', 'call_initiated'] },
+            { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email', 'status_lead', 'call_initiated', 'call_outcome_appointment_id'] },
           ],
         });
       }

@@ -237,7 +237,7 @@ async function buildInboundMessageDescriptor({ msg, clinicId }) {
         return {
             rawType,
             messageType: normalizedType,
-            content: emoji || 'Reacción',
+            content: 'Reacción de WhatsApp',
             webOriginRef: null,
             resumeText,
             metadataExtra: {
@@ -350,6 +350,9 @@ function getWhatsAppInteractiveText(interactive) {
 
 function getWhatsAppMessageText(message) {
     const rawType = cleanString(message?.type).toLowerCase() || 'text';
+    if (rawType === 'reaction') {
+        return 'Reacción de WhatsApp';
+    }
     const text = cleanString(
         message?.text?.body ||
         message?.button?.text ||
@@ -383,6 +386,49 @@ function getWhatsAppMessageText(message) {
     }
 }
 
+async function buildCoexistenceReactionMetadata({ message, clinicId }) {
+    const emoji = cleanString(message?.reaction?.emoji);
+    const targetWamid = cleanString(message?.reaction?.message_id) || null;
+
+    let targetPreview = null;
+    let targetMessageId = null;
+    let targetDirection = null;
+    let targetType = null;
+
+    if (targetWamid) {
+        const targetRef = await findMessageByWamid(targetWamid);
+        if (targetRef?.id && (!clinicId || Number(targetRef.clinic_id) === Number(clinicId))) {
+            const targetMessage = await Message.findByPk(targetRef.id, {
+                attributes: ['id', 'content', 'direction', 'message_type'],
+                raw: true,
+            });
+            if (targetMessage) {
+                targetMessageId = targetMessage.id;
+                targetDirection = targetMessage.direction || null;
+                targetType = targetMessage.message_type || null;
+                targetPreview = truncateText(targetMessage.content, 120) || null;
+            }
+        }
+    }
+
+    const resumeText = targetPreview
+        ? `Reaccionó ${emoji || 'con un emoji'} al mensaje: ${targetPreview}`
+        : `Reaccionó ${emoji || 'con un emoji'} a un mensaje`;
+
+    return {
+        kind: 'whatsapp_reaction',
+        resume_text: resumeText,
+        reaction: {
+            emoji: emoji || null,
+            message_id: targetWamid,
+            target_message_id: targetMessageId,
+            target_message_preview: targetPreview,
+            target_message_direction: targetDirection,
+            target_message_type: targetType,
+        },
+    };
+}
+
 function getWhatsAppMediaPayload(message) {
     const rawType = cleanString(message?.type).toLowerCase();
     const media = message?.[rawType] || {};
@@ -400,16 +446,20 @@ function getWhatsAppMediaPayload(message) {
     };
 }
 
-function buildCoexistenceMessageDescriptor({ message, origin, sourceEvent, extra = {} }) {
+async function buildCoexistenceMessageDescriptor({ message, origin, sourceEvent, clinicId = null, extra = {} }) {
     const rawType = cleanString(message?.type).toLowerCase() || 'text';
     const messageType = normalizeInboundMessageType(rawType);
     const content = getWhatsAppMessageText(message);
     const media = getWhatsAppMediaPayload(message);
+    const reactionMetadata = rawType === 'reaction'
+        ? await buildCoexistenceReactionMetadata({ message, clinicId })
+        : null;
     return {
         rawType,
         messageType,
         content,
         metadataExtra: {
+            ...(reactionMetadata || {}),
             origin,
             source_event: sourceEvent,
             raw_type: rawType,
@@ -946,9 +996,10 @@ async function handleWhatsappMessageEdit({ msg, clinicId }) {
         return;
     }
     const editedPayload = msg?.edit?.message || {};
-    const descriptor = buildCoexistenceMessageDescriptor({
+    const descriptor = await buildCoexistenceMessageDescriptor({
         message: editedPayload,
         origin: message.metadata?.origin || null,
+        clinicId: clinicId || messageRef.clinic_id || null,
         sourceEvent: 'edit',
     });
     const editedAt = parseWhatsappTimestamp(msg?.timestamp);
@@ -1034,9 +1085,10 @@ async function createCoexistenceConversationMessage({
         return null;
     }
 
-    const descriptor = buildCoexistenceMessageDescriptor({
+    const descriptor = await buildCoexistenceMessageDescriptor({
         message: rawMessage,
         origin,
+        clinicId,
         sourceEvent,
         extra: extraMetadata?.coexistence || {},
     });
