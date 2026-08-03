@@ -36,6 +36,7 @@ const {
 const consentimientosService = require('../services/consentimientos.service');
 const appointmentNotificationCleanup = require('../services/appointmentNotificationCleanup.service');
 const patientEconomics = require('../services/patientEconomics.service');
+const { recordAppointmentStatusChange } = require('../services/appointmentActivity.service');
 const {
     processAppointmentLeadMilestones,
     syncLeadStatusFromAppointments,
@@ -2530,6 +2531,18 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
     cita.estado = estadoRaw;
     cita.updated_by = req.userData?.userId || null;
     await cita.save();
+    try {
+        await recordAppointmentStatusChange({
+            appointment: cita,
+            previousStatus,
+            newStatus: estadoRaw,
+            actorUserId: req.userData?.userId || null,
+            source: 'agenda',
+            metadata: { route: 'updateCitaEstado' },
+        });
+    } catch (activityError) {
+        console.warn('⚠️ [updateCitaEstado] No se pudo registrar la transición:', activityError.message || activityError);
+    }
 
     await processAppointmentLeadMilestones({ cita, previousStatus });
     let voucherConsumptionResult = null;
@@ -2694,6 +2707,21 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     }
     cita.updated_by = req.userData?.userId || null;
     await cita.save();
+    try {
+        await recordAppointmentStatusChange({
+            appointment: cita,
+            previousStatus,
+            newStatus: cita.estado,
+            actorUserId: req.userData?.userId || null,
+            source: 'agenda',
+            metadata: {
+                route: 'reagendarCita',
+                reschedule_reason: rescheduleReason || null,
+            },
+        });
+    } catch (activityError) {
+        console.warn('⚠️ [reagendarCita] No se pudo registrar la transición:', activityError.message || activityError);
+    }
 
     await processAppointmentLeadMilestones({ cita, previousStatus });
 

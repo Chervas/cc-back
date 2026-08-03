@@ -68,6 +68,10 @@ const {
   hasMarketingClinicScopeAccess,
 } = require('../lib/marketingScopeAccess');
 const { resolveLeadCompetitionPeerScope } = require('../lib/leadCompetitionScope');
+const {
+  APPOINTMENT_STATUS_EVENT_TYPE,
+  serializeAppointmentStatusActivity,
+} = require('../services/appointmentActivity.service');
 const { isGlobalAdmin } = require('../lib/role-helpers');
 const {
   canUserAccessFeature,
@@ -6861,11 +6865,34 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
       })
     : [];
 
+  const appointmentIds = new Set(
+    appointments
+      .map((appointment) => Number(toPlain(appointment)?.id_cita))
+      .filter((id) => Number.isFinite(id) && id > 0)
+  );
+  const appointmentPatientIds = Array.from(new Set(
+    appointments
+      .map((appointment) => Number(toPlain(appointment)?.paciente_id))
+      .filter((id) => Number.isFinite(id) && id > 0)
+  ));
+  const appointmentStatusEvents = db.PatientOperationalEvent && appointmentPatientIds.length
+    ? (await db.PatientOperationalEvent.findAll({
+        where: {
+          patient_id: { [Op.in]: appointmentPatientIds },
+          clinic_id: lead.clinica_id,
+          event_type: APPOINTMENT_STATUS_EVENT_TYPE,
+        },
+        order: [['occurred_at', 'ASC'], ['id', 'ASC']],
+        raw: true,
+      })).filter((event) => appointmentIds.has(Number(event?.metadata?.appointment_id)))
+    : [];
+
   const actorIds = Array.from(new Set(
     [
       ...messages.map((message) => Number(message.sender_id)),
       ...appointments.map((appointment) => Number(toPlain(appointment)?.created_by)),
       ...appointments.map((appointment) => Number(toPlain(appointment)?.updated_by)),
+      ...appointmentStatusEvents.map((event) => Number(event.actor_user_id)),
     ]
       .filter((id) => Number.isFinite(id) && id > 0)
   ));
@@ -6880,6 +6907,19 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
   const usuariosById = new Map(usuarios.map((usuario) => [Number(usuario.id_usuario), usuario]));
 
   const items = [];
+  const appointmentsWithStatusHistory = new Set(
+    appointmentStatusEvents
+      .map((event) => Number(event?.metadata?.appointment_id))
+      .filter((id) => Number.isFinite(id) && id > 0)
+  );
+
+  for (const event of appointmentStatusEvents) {
+    const actor = usuariosById.get(Number(event.actor_user_id));
+    items.push(serializeAppointmentStatusActivity(event, {
+      leadId,
+      actorName: buildActorLabel(actor),
+    }));
+  }
 
   for (const event of lead.formSubmissionEvents || []) {
     const detailParts = [];
@@ -6971,6 +7011,10 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
         tipo_cita: plain.tipo_cita || null,
       },
     });
+
+    if (appointmentsWithStatusHistory.has(Number(plain.id_cita))) {
+      continue;
+    }
 
     const updatedAt = plain.updated_at ? new Date(plain.updated_at).getTime() : null;
     const createdAt = plain.created_at ? new Date(plain.created_at).getTime() : null;

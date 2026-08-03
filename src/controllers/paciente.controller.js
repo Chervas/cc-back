@@ -35,6 +35,10 @@ const {
   PATIENT_EVENT_TYPES,
   recordPatientOperationalEvent,
 } = require('../services/patientContact.service');
+const {
+  APPOINTMENT_STATUS_EVENT_TYPE,
+  serializeAppointmentStatusActivity,
+} = require('../services/appointmentActivity.service');
 
 const normalizePhone = (phone) => {
   return normalizePhoneDigits(phone);
@@ -1236,7 +1240,7 @@ exports.getPacienteActivity = async (req, res) => {
             where: {
               patient_id: pacienteId,
               clinic_id: { [Op.in]: readableClinicIds },
-              event_type: { [Op.in]: Object.values(PATIENT_EVENT_TYPES) },
+              event_type: { [Op.in]: [...Object.values(PATIENT_EVENT_TYPES), APPOINTMENT_STATUS_EVENT_TYPE] },
             },
             attributes: [
               'id',
@@ -1272,6 +1276,12 @@ exports.getPacienteActivity = async (req, res) => {
 
     const usuariosById = new Map(usuarios.map((usuario) => [Number(usuario.id_usuario), usuario]));
     const items = [];
+    const appointmentsWithStatusHistory = new Set(
+      operationalEvents
+        .filter((event) => event.event_type === APPOINTMENT_STATUS_EVENT_TYPE)
+        .map((event) => Number(event?.metadata?.appointment_id))
+        .filter((id) => Number.isFinite(id) && id > 0)
+    );
 
     const operationalEventConfig = {
       [PATIENT_EVENT_TYPES.created]: {
@@ -1298,6 +1308,14 @@ exports.getPacienteActivity = async (req, res) => {
     };
 
     for (const event of operationalEvents) {
+      if (event.event_type === APPOINTMENT_STATUS_EVENT_TYPE) {
+        const actor = usuariosById.get(Number(event.actor_user_id));
+        items.push(serializeAppointmentStatusActivity(event, {
+          patientId: pacienteId,
+          actorName: buildActorLabel(actor),
+        }));
+        continue;
+      }
       const config = operationalEventConfig[event.event_type];
       if (!config) continue;
       const actor = usuariosById.get(Number(event.actor_user_id));
@@ -1372,6 +1390,10 @@ exports.getPacienteActivity = async (req, res) => {
       });
 
       if (importedHistorical) {
+        continue;
+      }
+
+      if (appointmentsWithStatusHistory.has(Number(cita.id_cita))) {
         continue;
       }
 
