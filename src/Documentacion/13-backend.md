@@ -7475,6 +7475,13 @@ se materializó en nuestra base de datos. No usar `createdAt` como orden primari
 en chats reales, porque los ecos `smb_message_echoes` y la sincronización de
 historial pueden entrar minutos u horas después y romper el orden visible.
 
+La búsqueda de conversaciones externas también resuelve nombres procedentes de
+`MarketingPatientListItems` aunque el item pertenezca a otra clínica: primero se
+obtiene el teléfono del contacto y después el `GET /api/conversations` mantiene
+el filtro final por las clínicas visibles. Esto permite buscar por el mismo
+nombre que QuickChat ya muestra en una conversación visible, sin abrir
+conversaciones fuera del scope autorizado.
+
 QuickChat y el drawer de Leads deben consumir la misma actividad canónica de
 citas. Los cambios de estado de cita se escriben en `PatientOperationalEvents`
 mediante `appointmentActivity.service.js`; el runtime V2 ya usa
