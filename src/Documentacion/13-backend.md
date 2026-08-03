@@ -7355,4 +7355,138 @@ su longitud; la version que se propaga tras ese rechazo es
 con cualquier duda o consulta que tengas?`. Las tres
 variables son paciente, usuario y clinica. Las clinicas sin WABA conservan un
 placeholder `SIN_CONECTAR`; las conectadas generan su version tecnica mediante
-la cola durable estandar y nunca envian un mensaje durante la propagacion.
+la cola durable estandar y nunca envian un mensaje durante la propagacion. Una
+copia aprobada anterior sigue utilizable mientras Meta revisa la nueva version.
+
+Las importaciones de resenas/reactivacion tratan fecha y tratamiento como datos
+de segmentacion. `buildImportedItemPayloads` no crea `CitasPacientes` por
+defecto: solo lo haria si un flujo futuro envia el booleano estricto
+`create_historical_appointments=true`; valores ausentes, falsos o la cadena
+`"true"` no activan el comportamiento. La UI actual no envia ese opt-in.
+
+La limpieza correctiva del 2026-07-31 retiro 4.427 citas artificiales del grupo
+Propdental identificadas exclusivamente por `estado=completada`, titulo
+`Historico:*` y motivo `Importacion de pacientes para reactivacion`: 1.095 de
+Sant Marti, 506 de Eixample y 2.826 de Glories. Antes de borrar, el script
+comprobo todas las FK y no encontro dependencias. El backup restaurable con
+permisos `0600` esta en
+`/home/ubuntu/secure-imports/clinicaclick-cleanups/propdental-all-imported-history-2026-07-31T16-55-31-910Z.json`.
+Auditoria: `node src/scripts/cleanup-propdental-future-imported-historical-appointments.js --all-imported-history`.
+Restauracion: el mismo script con `--restore=<ruta>`.
+
+## 2026-07-31 - Horarios Google one-shot y busquedas locales comparables
+
+### Horarios especiales de Google: endpoint directo vigente y rutas V2 legacy
+
+Desde 2026-08-01 el producto ya no crea horarios especiales de Google como
+Automatizaciones V2. La UI de `Perfil Google > Horarios` usa el publicador
+directo `PUT /api/local/clinica/:clinicaId/special-hours`, que valida y publica
+el plan completo `specialHoursPlan` contra Google. No se crean `JobRequest`,
+`FlowExecutionV2` ni tarjeta en `Automatizaciones disponibles` para este caso.
+
+Quedan rutas V2 one-shot como compatibilidad tecnica/legacy, pero no forman
+parte del flujo de producto actual:
+
+Las rutas de lectura/escritura son:
+
+- `GET /api/local/clinica/:clinicaId/special-hours/automations`;
+- `POST /api/local/clinica/:clinicaId/special-hours/automations`;
+- `PATCH /api/local/clinica/:clinicaId/special-hours/automations/:publicId`.
+
+Las escrituras reutilizan la autorizacion de la ficha efectiva/compartida. El
+servicio crea transaccionalmente una plantilla gestionada
+`managed_feature=google_special_hours`, version, ejecucion y `JobRequest`. El
+grafo es `scheduled_once -> delay/wait_until ->
+action/update_google_special_hours -> control/end`; la fecha se convierte desde
+la zona horaria IANA de la clinica y no desde la zona del servidor. Backend
+exige que el inicio sea posterior al dia local actual; un payload directo no
+puede convertir una programacion pasada o del mismo dia en una publicacion
+inmediata accidental.
+
+`action/update_google_special_hours` admite simulacion, rechaza una plantilla
+inactiva y llama al publicador canonico de Perfil Google. La mezcla de periodos
+preserva los futuros no solapados y aplica el nuevo periodo en los dias
+coincidentes. Tras publicar registra `last_executed_at` y desactiva la plantilla.
+Una ejecucion completada no admite reactivacion. Pausar cancela ejecucion/job
+pendientes; reanudar materializa una ejecucion nueva sobre la version existente.
+
+Este flujo queda documentado como legado. El catalogo admin sigue siendo la
+fuente de las familias reutilizables, como resenas y respuesta a leads, no de
+ejecuciones one-shot con datos fechados.
+
+### Busquedas guardadas del mapa de calor
+
+La API anade:
+
+- `GET /api/marketing/reports/competition/local-heatmap/searches`;
+- `POST /api/marketing/reports/competition/local-heatmap/searches`;
+- `DELETE /api/marketing/reports/competition/local-heatmap/searches/:searchId`.
+
+`MarketingCompetitionHeatmapSearches` guarda termino/radio por clinica. Existe
+una opcion incluida no eliminable y las busquedas adicionales son eliminables.
+La API valida scope, normaliza terminos y no ejecuta el proveedor al guardar:
+la medicion se solicita despues mediante el endpoint existente de heatmap.
+
+`MarketingCompetitionHeatmapSnapshots` conserva una instantanea semanal por
+clinica, termino normalizado, radio y semana. El servicio compara una medicion
+con la semana anterior equivalente y expone por punto
+`position_delta = previous_position - current_position` y
+`position_change` (`+N`, `-N` o `=`). Si falta una posicion comparable el
+delta queda nulo. La retencion actual es de 180 dias; los indices unicos evitan
+duplicar tanto busquedas como semanas durante peticiones concurrentes. Una
+lectura de cache valida materializa idempotentemente su instantanea, de modo que
+las caches anteriores al despliegue sirven como primer punto de comparacion.
+
+Migracion: `20260731170000-create-marketing-heatmap-search-history.js`. Pruebas
+de contrato: `google_special_hours_automation.test.js` y
+`marketing_competition_heatmap_cache.test.js`.
+
+## 2026-08-01 - Respuestas de reseñas y logo desde Perfil Google
+
+`/api/local/clinica/:clinicaId/reviews/:reviewId/reply` permite crear o editar
+la respuesta pública de una reseña usando Google Business Profile
+`reviews.updateReply`. La ruta exige JWT, scope de marketing de escritura y
+permisos sobre la ficha efectiva si está compartida. Tras la confirmación de
+Google actualiza `BusinessProfileReviews.reply_comment`,
+`reply_update_time`, `has_reply` y `raw_payload.reviewReply`; no espera al
+siguiente job de sincronización para que la UI refleje el cambio. Existe
+`DELETE /api/local/clinica/:clinicaId/reviews/:reviewId/reply` como operación
+técnica de corrección.
+
+`POST /api/local/clinica/:clinicaId/import-logo` toma una foto ya sincronizada
+desde la ficha de Google marcada como `LOGO` o `PROFILE` y copia su URL a
+`Clinicas.url_avatar`. No sube datos clínicos ni toca `CLINICAL_STORAGE`; el
+logo de clínica sigue clasificado como asset público/branding. La acción no
+publica nada nuevo en Google.
+
+La futura funcionalidad de revisión de reseñas negativas debe modelarse como
+cola interna de triaje legal/ops, no como borrado automático: el backend puede
+calcular candidatas por baja puntuación, ausencia de texto, posible mención de
+datos personales o señales de incumplimiento, pero la denuncia real depende de
+las políticas de Google y del resultado de cada caso.
+
+## 2026-08-03 - Orden cronologico y actividad compartida en conversaciones
+
+Los endpoints de conversaciones (`GET /api/conversations`, `/:id/messages`,
+`/by-patient/:patientId` y `/by-lead/:leadId`) ordenan los mensajes por
+`COALESCE(Messages.sent_at, Messages.createdAt)`. `Messages.sent_at` es la hora
+real del proveedor o del eco de WhatsApp móvil; `createdAt` solo indica cuándo
+se materializó en nuestra base de datos. No usar `createdAt` como orden primario
+en chats reales, porque los ecos `smb_message_echoes` y la sincronización de
+historial pueden entrar minutos u horas después y romper el orden visible.
+
+QuickChat y el drawer de Leads deben consumir la misma actividad canónica de
+citas. Los cambios de estado de cita se escriben en `PatientOperationalEvents`
+mediante `appointmentActivity.service.js`; el runtime V2 ya usa
+`recordAppointmentStatusChange`, y las rutas manuales deben hacerlo también. Si
+una cita aparece confirmada pero no hay evento append-only, la UI no debe
+inventarlo: hay que corregir el camino que cambió el estado o backfillear el
+evento con auditoría explícita.
+
+Caso verificado: conversación `6544` / Juan Francisco / Propdental Nou Barris.
+La API devuelve los ecos móviles `70663`, `70647`, `70683` ordenados por
+`sent_at` (`13:24:25`, `13:24:28`, `13:24:34`) aunque sus `createdAt` fueran
+posteriores y desordenados. Los envíos automáticos fallidos de esa cadena fueron
+aceptados inicialmente por Meta y después devueltos con `131026 Message
+undeliverable`; no fue un bloqueo de quiet hours ni ausencia de disparo del
+flujo.
