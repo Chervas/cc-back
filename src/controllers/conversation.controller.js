@@ -856,7 +856,6 @@ async function resolveExternalMarketingConversationMatches(searchQuery, clinicId
   const prefix = `${escapeLikePattern(normalized)}%`;
   const rows = await MarketingPatientListItem.findAll({
     where: {
-      clinica_id: scopedClinicIds.length === 1 ? scopedClinicIds[0] : { [Op.in]: scopedClinicIds },
       [Op.or]: [
         { name: { [Op.like]: prefix } },
         { email: { [Op.like]: prefix } },
