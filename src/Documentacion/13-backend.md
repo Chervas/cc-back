@@ -209,6 +209,17 @@ salida determinista, CSP y ausencia de handlers.
 
 ### Schema de página con presets seguros
 
+Desde 2026-08-02, `WebDocument v1` admite además `page.template_type`
+opcional con valores cerrados `standard`, `post` y `category`. Este campo
+persiste la intención de las pestañas del editor web (`Página libre`, `Post`,
+`Categoría`) sin depender del título visible ni del slug. Es aditivo: los
+documentos antiguos sin `template_type` siguen siendo válidos. El siguiente
+paso de publicación/CMS debe usar este campo como fuente de verdad para
+resolver plantillas de artículo/categoría, no heurísticas por `/post` o
+`/categoria`. El compilador ya lo propaga en
+`manifest.page_routes[pageId].template_type` y como
+`data-cc-web-page-template` en el `<body>` público; si falta, usa `standard`.
+
 `WebDocument v1` admite `page.seo.schema` como configuración editorial cerrada,
 no como JSON-LD libre. El contrato backend valida dos campos:
 
@@ -583,6 +594,13 @@ hermanas sin override heredan su ancho desde `column_tracks` de la fila; si no
 hay track válido para ese índice/breakpoint, se apilan con fallback 12/12. Esto
 permite que el inspector edite una columna sin reescribir el reparto de las
 demás y mantiene documentos antiguos publicables.
+
+Desde 2026-08-02, las filas estructurales del `WebDocument v1` ya no están
+limitadas a 4 columnas: `section.props.columns`, `responsive.*.columns` y
+`column_tracks.*` aceptan 1..12 elementos/unidades. Esto alinea el contrato con
+la escala de 12 partes del editor ModSuite/Figma. El compilador público emite
+CSS para `cc-cols-1..12` y sus variantes responsive; los widgets con límite
+propio, como galería, conservan sus enums específicos.
 
 Evidencia definitiva del código promovido: backend Marketing Web **354/354**
 contratos Node, contratos WordPress **40/40**, Campañas **81/81**, reviewer
@@ -2001,6 +2019,7 @@ Reglas:
 - `GET /api/conversations` pagina por `limit/offset` y devuelve `X-Has-More`/`X-Next-Offset`; QuickChat debe consumirlo con scroll infinito. Tambien devuelve `X-Total-Unread`, calculado sobre todo el scope accesible y no sobre la pagina cargada, para que el badge de pendientes no dependa de la paginacion. Desde 2026-07-21 «pendiente» significa inbound posterior al último outbound real, no lectura por usuario. La pestaña visible `Otros` mantiene `filter=leads` por compatibilidad, pero backend incluye `lead_id` y conversaciones externas de campañas presentes en `MarketingPatientListItems.conversation_id`, excluyendo siempre conversaciones con `patient_id`.
 - `GET /api/conversations` y `X-Total-Unread` aplican ACL por categoría: conversaciones con `patient_id` requieren `quickchat.read_patients`, `channel=internal` requiere `quickchat.read_team` y conversaciones WhatsApp/externas sin paciente requieren `quickchat.read_leads`. La misma categoría se valida en `GET /api/conversations/:id/messages`, media, marcar leído, envío normal y `send-now`.
 - La busqueda de `GET /api/conversations?q=...` debe cubrir pacientes, leads, `contact_id` y contactos externos de listas/campanas (`MarketingPatientListItems.name`, `phone`, `email` y `custom_fields.nombre_completo`). Las busquedas con varias palabras aceptan coincidencia de frase completa o todos los tokens en cualquier campo, para que `Nombre Apellido2` encuentre pacientes con nombre compuesto o dos apellidos. No buscar en todo `Messages.content` desde este endpoint sin un indice/previsualizacion materializada, porque penaliza la bandeja paginada de QuickChat.
+- Las busquedas que son claramente telefono (por ejemplo `654695552`) usan una via exacta/normalizada con candidatos locales y E.164 (`+34...`) y no deben escanear `MarketingPatientListItems` con `LIKE`; solo se permite `phone IN (...)` sobre el indice. Esto mantiene rapido el QuickChat tras importaciones o campañas masivas.
 - Las coincidencias de contactos externos de listas/campanas solo se aplican a conversaciones sin `patient_id` ni `lead_id`. Si una fila historica de `MarketingPatientListItems.conversation_id` queda apuntando a una conversacion que despues se canoniza como paciente, la busqueda debe priorizar el paciente/lead real y no devolver ese chat por el nombre importado antiguo.
 - `POST /campaigns/:id/prepare` y `/test-send` validan todas las variables de la plantilla real contra los items `ready`; si falta algun valor devuelven `409` con `details.missing_variables[]` y no usan ejemplos de plantilla como fallback operativo.
 - `GET /campaigns/:id`, `/campaigns/:id/recipients` y `/campaigns/:id/dispatch` hacen una reconciliacion ligera antes de responder: leen `Messages.metadata.wa_status_history`, materializan `sent/delivered/read/failed/replied` en `MarketingPatientListItems`, refrescan contadores y devuelven `report` agregado. Esto corrige informes atrasados sin cargar toda la lista en frontend.
@@ -4134,6 +4153,7 @@ No debe mezclarse el versionado del flujo fuente con el versionado operativo de 
 - Que una plantilla WhatsApp esté `APPROVED` no crea una versión nueva del flujo. Solo publicar el flujo fuente desde el editor crea una nueva versión del flujo de catálogo.
 - Las copias de clínica propagadas desde catálogo se consideran automatizaciones de sistema operativas. El usuario de clínica puede verlas, pausarlas o duplicarlas para crear una automatización propia, pero no debe editar ni publicar sobre la familia gestionada por catálogo. El admin controla la base desde `automatizaciones-admin` y puede propagar cambios sin pisar desactivaciones locales.
 - En automatizaciones de reseñas, la propagación conserva configuración local de clínica en los nodos de reseñas (`whatsapp_template_id`, premio, nombre visible y foto de equipo). El admin gobierna estructura/nodos; la configuración de producto de cada clínica sigue viniendo de `Marketing > Campañas > Conseguir reseñas`.
+- Reseñas automáticas y respuesta automática a leads son familias gobernadas por `AutomationFlowCatalog`, con copia V2 operativa por clínica. Sus interruptores de producto deben usar los endpoints especializados para conservar readiness y configuración local; en reseñas la única escritura operativa es `PATCH /api/marketing/review-requests/automation`.
 - En listados operativos (`/marketing/automatizaciones`) con scope de clínica o grupo, la plantilla base global del catálogo no debe mostrarse junto a su copia clínica. La base se consulta desde `automatizaciones-admin`; la pantalla cliente trabaja con la copia propagada/operativa para evitar dobles automatizaciones aparentes.
 
 La columna `Propagada` del catálogo de automatizaciones significa:
@@ -7362,10 +7382,9 @@ global. Los origenes actuales son `patient_list`, `agenda`, `lead_conversion`,
 `header_search` y `quick_chat`.
 
 La familia generica `clinicaclick_abrir_con_saludo` queda separada de resenas y
-automatizaciones. Meta rechazo el cuerpo inicial por exceso de variables para
-su longitud; la version que se propaga tras ese rechazo es
-`¡Hola {{1}}! Soy {{2}} de {{3}} 😊 ¿Te puedo escribir por aquí para ayudarte
-con cualquier duda o consulta que tengas?`. Las tres
+automatizaciones. La version de catalogo vigente es
+`¡Hola {{1}}! Soy {{2}} de {{3}} 😊 ¿Te importa que te escriba por aquí para
+consultarte o prefieres que te llame?`. Las tres
 variables son paciente, usuario y clinica. Las clinicas sin WABA conservan un
 placeholder `SIN_CONECTAR`; las conectadas generan su version tecnica mediante
 la cola durable estandar y nunca envian un mensaje durante la propagacion. Una
@@ -7386,6 +7405,38 @@ permisos `0600` esta en
 `/home/ubuntu/secure-imports/clinicaclick-cleanups/propdental-all-imported-history-2026-07-31T16-55-31-910Z.json`.
 Auditoria: `node src/scripts/cleanup-propdental-future-imported-historical-appointments.js --all-imported-history`.
 Restauracion: el mismo script con `--restore=<ruta>`.
+
+## 2026-08-04 - Alta desde lead y atención operativa inconclusa
+
+`GET /api/pacientes/:id/activity` conserva `PatientOperationalEvents` como
+fuente principal del alta. Para fichas anteriores a esa trazabilidad admite una
+única inferencia acotada: una cita con `lead_intake_id` creada con una diferencia
+máxima de diez minutos respecto al alta del paciente. En ese caso devuelve
+`patient_created` con origen `lead_appointment`, lead, cita y actor de
+`CitasPacientes.created_by`. Si no se cumple todo el contrato, mantiene el
+evento `patient_created_legacy` y no inventa usuario ni origen.
+
+Una cita activa no resuelve por sí sola la atención pendiente de una
+conversación. `enrichLeadsWithConversationState` expone
+`pending_whatsapp_reply_count` y `pending_automation_attention` aunque exista
+`linked_appointment`; solo la lectura por usuario o una respuesta válida de la
+clínica pueden limpiar el indicador correspondiente.
+
+Los nodos `action/send_system_notification` dirigidos a recepción resuelven
+alias operativos compatibles: `Recepción / Comercial ventas` incluye también
+`Administrativos` y `Auxiliares y enfermeros`; `Administrativos` incluye
+recepción/comercial; auxiliares incluyen recepción/comercial. La resolución
+sigue limitada a la clínica de la ejecución y deduplica usuarios. Esto evita
+que una respuesta inconclusa quede sin responsable por diferencias de subrol.
+
+Caso validado en dev: la respuesta `Hola, si` de Anali a `Cancelar cita sin
+confirmar la noche anterior` se clasifica como inconclusa, no cambia la cita ni
+reenvía WhatsApp y crea avisos internos para los usuarios operativos. QuickChat
+la expone con `pending_automation_attention=true`.
+
+Regresiones: `automation_operational_assignees.test.js`,
+`patient_activity_lead_origin_contract.test.js` y
+`conversation_pending_reply.test.js`.
 
 ## 2026-07-31 - Horarios Google one-shot y busquedas locales comparables
 

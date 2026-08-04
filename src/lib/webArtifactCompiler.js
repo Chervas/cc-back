@@ -13,7 +13,7 @@ const {
   webArtifactBundleFootprintBytes,
 } = require('./webArtifactBudget');
 
-const RENDERER_VERSION = 'clinicaclick-web-renderer/1.14.0';
+const RENDERER_VERSION = 'clinicaclick-web-renderer/1.16.0';
 const SAFE_EXTERNAL_REL = /^(?:\/[A-Za-z0-9_][A-Za-z0-9/_-]*|https:\/\/[^\s]+)$/;
 const SAFE_YOUTUBE_VIDEO_ID = /^[A-Za-z0-9_-]{6,64}$/;
 const SAFE_VIMEO_VIDEO_ID = /^[0-9]{6,12}$/;
@@ -582,6 +582,20 @@ function validColumnWidth(node, breakpoint) {
   return Number.isInteger(width) && width >= 1 && width <= 12 ? width : null;
 }
 
+function validColumnHeight(node, breakpoint) {
+  const height = node?.props?.column_heights?.[breakpoint];
+  return Number.isInteger(height) && height >= 0 && height <= 2000 ? height : null;
+}
+
+function validColumnOrder(node, breakpoint) {
+  const order = node?.props?.column_orders?.[breakpoint];
+  return Number.isInteger(order) && order >= -24 && order <= 24 ? order : null;
+}
+
+function columnOrderClassSuffix(order) {
+  return order < 0 ? `n${Math.abs(order)}` : String(order);
+}
+
 function sectionRole(node) {
   return node?.props?.structure_role || 'section';
 }
@@ -605,15 +619,28 @@ function sectionTrackClassList(document, node) {
   }).filter(Boolean).join(' ');
 }
 
-function sectionColumnWidthClassList(document, node, parentRow = null, parentChildIndex = null) {
+function sectionColumnClassList(document, node, parentRow = null, parentChildIndex = null) {
   if (sectionRole(node) !== 'column') return '';
-  return ['desktop', 'tablet', 'mobile'].map((breakpoint) => {
+  const widthClasses = ['desktop', 'tablet', 'mobile'].map((breakpoint) => {
     const width = validColumnWidth(node, breakpoint)
       || fallbackColumnWidthFromParent(document, parentRow, parentChildIndex, breakpoint);
     if (!width) return '';
     const prefix = breakpoint === 'desktop' ? 'cc-col-span' : `cc-${breakpoint}-col-span`;
     return `${prefix}-${width}`;
-  }).filter(Boolean).join(' ');
+  }).filter(Boolean);
+  const heightClasses = ['desktop', 'tablet', 'mobile'].map((breakpoint) => {
+    const height = validColumnHeight(node, breakpoint);
+    if (height === null) return '';
+    const prefix = breakpoint === 'desktop' ? 'cc-col-min-h' : `cc-${breakpoint}-col-min-h`;
+    return `${prefix}-${height}`;
+  }).filter(Boolean);
+  const orderClasses = ['desktop', 'tablet', 'mobile'].map((breakpoint) => {
+    const order = validColumnOrder(node, breakpoint);
+    if (order === null) return '';
+    const prefix = breakpoint === 'desktop' ? 'cc-col-order' : `cc-${breakpoint}-col-order`;
+    return `${prefix}-${columnOrderClassSuffix(order)}`;
+  }).filter(Boolean);
+  return [...widthClasses, ...heightClasses, ...orderClasses].join(' ');
 }
 
 function fallbackColumnWidthFromParent(document, parentRow, parentChildIndex, breakpoint) {
@@ -972,6 +999,27 @@ function publicContentExcerpt(entry) {
   );
 }
 
+function publicContentImage(entry, snapshot) {
+  const fields = entry?.fields || {};
+  const content = entry?.content && typeof entry.content === 'object' && !Array.isArray(entry.content)
+    ? entry.content
+    : {};
+  const blocks = Array.isArray(content.blocks) ? content.blocks : [];
+  const imageBlock = blocks.find((block) => block?.type === 'image'
+    && typeof block.image_asset_id === 'string'
+    && typeof block.alt_text === 'string'
+    && block.image_asset_id.trim()
+    && block.alt_text.trim());
+  const assetId = String(imageBlock?.image_asset_id || fields.image_asset_id || content.image_asset_id || '').trim();
+  const alt = compactText(imageBlock?.alt_text || fields.alt_text || content.alt_text || '', 500);
+  if (!assetId || !alt || !snapshot.media_assets?.[assetId]) return null;
+  const { source, dimensions } = resolvedMediaImage(snapshot, assetId, {
+    content_entry_id: entry?.id,
+    field: 'content.blocks.image_asset_id',
+  });
+  return { source, alt, dimensions };
+}
+
 function publicContentString(entry, candidates, maximum = 120) {
   const fields = entry?.fields || {};
   for (const key of candidates) {
@@ -1048,10 +1096,14 @@ function renderPostList(node, snapshot) {
       const badge = node.props.show_type === false
         ? ''
         : `<span class="cc-post-list-type">${escapeHtml(typeLabel)}</span>`;
+      const image = layout === 'cards' ? publicContentImage(entry, snapshot) : null;
+      const imageHtml = image
+        ? `<img class="cc-post-list-image" src="${escapeHtml(image.source)}" alt="${escapeHtml(image.alt)}" loading="lazy" decoding="async"${image.dimensions}>`
+        : '';
       const excerpt = node.props.show_excerpt === false
         ? ''
         : publicContentExcerpt(entry);
-      return `<article class="cc-post-list-card">${badge}<h3>${escapeHtml(publicContentTitle(entry))}</h3>${excerpt ? `<p>${escapeHtml(excerpt)}</p>` : ''}</article>`;
+      return `<article class="cc-post-list-card">${imageHtml}${badge}<h3>${escapeHtml(publicContentTitle(entry))}</h3>${excerpt ? `<p>${escapeHtml(excerpt)}</p>` : ''}</article>`;
     }).join('')}</div>`
     : `<p class="cc-post-list-empty">${escapeHtml(node.props.empty_message)}</p>`;
   return `<section id="cc-${escapeHtml(node.id)}" class="cc-node cc-post-list cc-post-list-${layout} ${styleClassList(node)}" aria-label="${escapeHtml(node.props.aria_label)}">${heading}${body}</section>`;
@@ -1205,7 +1257,7 @@ function renderNode(nodeId, document, snapshot, context, ancestors = new Set(), 
     const globalAttribute = globalSlot ? ` data-cc-global="${globalSlot}"` : '';
     const globalClass = globalSlot ? ` cc-site-${globalSlot}` : '';
     const roleClass = `cc-role-${escapeHtml(node.props.structure_role || 'section')}`;
-    return `<${tag} id="cc-${escapeHtml(node.id)}"${globalAttribute} class="cc-node cc-section${globalClass} ${roleClass} cc-layout-${escapeHtml(node.props.layout)} cc-cols-${Number(node.props.columns)} ${sectionTrackClassList(document, node)} ${sectionColumnWidthClassList(document, node, parentSection, parentChildIndex)} ${styleClassList(node)}"><div class="cc-container">${children}</div></${tag}>`;
+    return `<${tag} id="cc-${escapeHtml(node.id)}"${globalAttribute} class="cc-node cc-section${globalClass} ${roleClass} cc-layout-${escapeHtml(node.props.layout)} cc-cols-${Number(node.props.columns)} ${sectionTrackClassList(document, node)} ${sectionColumnClassList(document, node, parentSection, parentChildIndex)} ${styleClassList(node)}"><div class="cc-container">${children}</div></${tag}>`;
   }
   if (node.type === 'heading') {
     const level = Math.min(6, Math.max(1, Number(node.props.level) || 2));
@@ -1281,7 +1333,7 @@ function stylesheet(tokens, document = { nodes: {} }) {
   const alignRules = (prefix = '') => Object.entries(align).map(([name, value]) => (
     `.cc-node.cc-${prefix}align-${name}{align-self:${value}}.cc-section.cc-${prefix}align-${name}>.cc-container{align-items:${value}}`
   )).join('');
-  const columnRules = (prefix = '') => [1, 2, 3, 4].map((count) => {
+  const columnRules = (prefix = '') => Array.from({ length: 12 }, (_value, index) => index + 1).map((count) => {
     const selector = prefix
       ? `.cc-section.cc-${prefix}cols-${count}`
       : `.cc-layout-grid.cc-cols-${count}`;
@@ -1294,6 +1346,25 @@ function stylesheet(tokens, document = { nodes: {} }) {
       .map((span) => `.cc-role-row.cc-column-widths>.cc-container>.cc-role-column.cc-${prefix}col-span-${span}{grid-column:span ${span}/span ${span}}`)
       .join('')
   );
+  const distinctColumnNumbers = (prop, breakpoint) => [...new Set(Object.values(document.nodes || {})
+    .filter((node) => node?.type === 'section' && sectionRole(node) === 'column')
+    .map((node) => node.props?.[prop]?.[breakpoint])
+    .filter((value) => Number.isInteger(value)))]
+    .sort((left, right) => left - right);
+  const columnHeightRules = (breakpoint = 'desktop') => {
+    const prefix = breakpoint === 'desktop' ? 'cc-col-min-h' : `cc-${breakpoint}-col-min-h`;
+    return distinctColumnNumbers('column_heights', breakpoint)
+      .filter((height) => height >= 0 && height <= 2000)
+      .map((height) => `.cc-role-column.${prefix}-${height}{min-height:${height}px}`)
+      .join('');
+  };
+  const columnOrderRules = (breakpoint = 'desktop') => {
+    const prefix = breakpoint === 'desktop' ? 'cc-col-order' : `cc-${breakpoint}-col-order`;
+    return distinctColumnNumbers('column_orders', breakpoint)
+      .filter((order) => order >= -24 && order <= 24)
+      .map((order) => `.cc-role-column.${prefix}-${columnOrderClassSuffix(order)}{order:${order}}`)
+      .join('');
+  };
   const columnTrackRules = (breakpoint) => Object.values(document.nodes || {})
     .filter((node) => node.type === 'section')
     .map((node) => validColumnTracks(node, breakpoint))
@@ -1312,6 +1383,8 @@ function stylesheet(tokens, document = { nodes: {} }) {
     + alignRules(`${breakpoint}-`)
     + columnRules(`${breakpoint}-`)
     + columnWidthRules(`${breakpoint}-`)
+    + columnHeightRules(breakpoint)
+    + columnOrderRules(breakpoint)
     + columnTrackRules(breakpoint)
   );
   const focalRules = [...new Set(Object.values(document.nodes || {})
@@ -1333,6 +1406,8 @@ function stylesheet(tokens, document = { nodes: {} }) {
     '.cc-node{min-width:0}.cc-container{margin-inline:auto;display:inherit;flex-direction:inherit;flex-wrap:inherit;gap:inherit}.cc-section{display:flex;width:100%}.cc-role-container>.cc-container,.cc-role-row>.cc-container{align-items:stretch}.cc-role-column{min-width:0}.cc-role-column>.cc-container{width:100%;min-width:0}.cc-layout-stack>.cc-container{display:flex;flex-direction:column}.cc-layout-row>.cc-container{display:flex;flex-direction:row;flex-wrap:wrap}.cc-layout-grid>.cc-container{display:grid}',
     columnRules(),
     columnWidthRules(),
+    columnHeightRules(),
+    columnOrderRules(),
     '.cc-section.cc-width-narrow>.cc-container{width:min(100% - 2rem,48rem)}.cc-section.cc-width-standard>.cc-container{width:min(100% - 2rem,72rem)}.cc-section.cc-width-wide>.cc-container{width:min(100% - 2rem,82.5rem)}.cc-section.cc-width-full>.cc-container{width:100%;padding-inline:1rem}.cc-node.cc-width-narrow:not(.cc-section){width:min(100%,48rem)}.cc-node.cc-width-standard:not(.cc-section){width:min(100%,72rem)}.cc-node.cc-width-wide:not(.cc-section){width:min(100%,82.5rem)}.cc-node.cc-width-full:not(.cc-section){width:100%}',
     spacingRules(),
     alignRules(),
@@ -1348,7 +1423,7 @@ function stylesheet(tokens, document = { nodes: {} }) {
     '.cc-breadcrumbs{font-size:.875rem;color:#5f6b7f}.cc-breadcrumbs ol{display:flex;flex-wrap:wrap;align-items:center;gap:.35rem;margin:0;padding:0;list-style:none}.cc-breadcrumbs a{color:var(--cc-primary);text-decoration:none;font-weight:700}.cc-breadcrumbs a:hover{text-decoration:underline}.cc-breadcrumbs [aria-current=page]{color:var(--cc-text);font-weight:700}.cc-breadcrumbs-separator{color:#9aa3b6}',
     '.cc-page-menu{display:flex;align-items:center;gap:var(--cc-md);font-size:.95rem}.cc-page-menu-label{font-family:var(--cc-font-heading);font-weight:800;color:var(--cc-text)}.cc-page-menu ul{display:flex;flex-wrap:wrap;align-items:center;gap:.35rem .9rem;margin:0;padding:0;list-style:none}.cc-page-menu a{display:inline-flex;align-items:center;min-height:36px;color:#5f6b7f;text-decoration:none;font-weight:700}.cc-page-menu a:hover{color:var(--cc-primary);text-decoration:underline}.cc-page-menu a[aria-current=page],.cc-page-menu-current{color:var(--cc-primary)}.cc-page-menu-vertical{align-items:flex-start;flex-direction:column}.cc-page-menu-vertical ul{align-items:flex-start;flex-direction:column;gap:.25rem}',
     '.cc-link-list{display:grid;gap:var(--cc-sm)}.cc-link-list-title{margin:0;font-family:var(--cc-font-heading);font-size:1.05rem;line-height:1.2;letter-spacing:-.01em}.cc-link-list-items{display:flex;flex-wrap:wrap;gap:.5rem .75rem;margin:0;padding:0;list-style:none}.cc-link-list-vertical .cc-link-list-items{flex-direction:column;align-items:flex-start;gap:.35rem}.cc-link-list-cards .cc-link-list-items{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--cc-sm)}.cc-link-list-item{min-width:0}.cc-link-list a,.cc-link-list-static{display:inline-flex;align-items:center;min-height:36px;color:var(--cc-primary);text-decoration:none;font-weight:800}.cc-link-list a::after{content:"›";margin-left:.35rem;opacity:.65}.cc-link-list a:hover{text-decoration:underline}.cc-link-list-cards a,.cc-link-list-cards .cc-link-list-static{width:100%;min-height:44px;border:1px solid #dfe3ec;border-radius:var(--cc-radius);background:#fff;padding:.65rem .8rem;box-shadow:0 2px 8px #181d3508}.cc-link-list-cms a,.cc-link-list-cms .cc-link-list-static{gap:.45rem;align-items:flex-start}.cc-link-list-type{width:fit-content;flex:0 0 auto;border-radius:9999px;background:#eef2ff;color:var(--cc-primary);padding:.16rem .45rem;font-size:.68rem;font-weight:800}.cc-link-list-empty{color:#5f6b7f;font-size:.92rem}',
-    '.cc-post-list{display:grid;gap:var(--cc-md)}.cc-post-list-title{margin:0;font-family:var(--cc-font-heading);font-size:clamp(1.35rem,2.5vw,2rem);line-height:1.15;letter-spacing:-.02em}.cc-post-list-items{display:grid;gap:var(--cc-md)}.cc-post-list-cards .cc-post-list-items{grid-template-columns:repeat(3,minmax(0,1fr))}.cc-post-list-card{display:grid;gap:.55rem;min-width:0;padding:var(--cc-md);border:1px solid #dfe3ec;border-radius:var(--cc-radius);background:#fff;box-shadow:0 2px 8px #181d350a}.cc-post-list-card h3{margin:0;font-family:var(--cc-font-heading);font-size:1.05rem;line-height:1.25}.cc-post-list-card p{margin:0;color:#5f6b7f;white-space:pre-wrap}.cc-post-list-type{width:fit-content;border-radius:9999px;background:#eef2ff;color:var(--cc-primary);padding:.18rem .5rem;font-size:.72rem;font-weight:800}.cc-post-list-empty{margin:0;color:#5f6b7f}',
+    '.cc-post-list{display:grid;gap:var(--cc-md)}.cc-post-list-title{margin:0;font-family:var(--cc-font-heading);font-size:clamp(1.35rem,2.5vw,2rem);line-height:1.15;letter-spacing:-.02em}.cc-post-list-items{display:grid;gap:var(--cc-md)}.cc-post-list-cards .cc-post-list-items{grid-template-columns:repeat(3,minmax(0,1fr))}.cc-post-list-card{display:grid;gap:.55rem;min-width:0;padding:var(--cc-md);border:1px solid #dfe3ec;border-radius:var(--cc-radius);background:#fff;box-shadow:0 2px 8px #181d350a}.cc-post-list-image{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:calc(var(--cc-radius) - .25rem);background:#eef1f6}.cc-post-list-card h3{margin:0;font-family:var(--cc-font-heading);font-size:1.05rem;line-height:1.25}.cc-post-list-card p{margin:0;color:#5f6b7f;white-space:pre-wrap}.cc-post-list-type{width:fit-content;border-radius:9999px;background:#eef2ff;color:var(--cc-primary);padding:.18rem .5rem;font-size:.72rem;font-weight:800}.cc-post-list-empty{margin:0;color:#5f6b7f}',
     '.cc-category-list{display:grid;gap:var(--cc-md)}.cc-category-list-title{margin:0;font-family:var(--cc-font-heading);font-size:clamp(1.25rem,2.2vw,1.8rem);line-height:1.15;letter-spacing:-.02em}.cc-category-list-items{display:flex;flex-wrap:wrap;gap:.65rem}.cc-category-list-item{display:grid;gap:.35rem;min-width:0;margin:0}.cc-category-list-chips .cc-category-list-item{border:1px solid #dfe3ec;border-radius:9999px;background:#fff;padding:.45rem .85rem;box-shadow:0 2px 8px #181d3508}.cc-category-list-cards .cc-category-list-items{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--cc-md)}.cc-category-list-cards .cc-category-list-item{border:1px solid #dfe3ec;border-radius:var(--cc-radius);background:#fff;padding:var(--cc-md);box-shadow:0 2px 8px #181d350a}.cc-category-list-item strong{font-family:var(--cc-font-heading);font-size:.95rem;color:var(--cc-text)}.cc-category-list-item p{margin:0;color:#5f6b7f;white-space:pre-wrap}.cc-category-list-empty{margin:0;color:#5f6b7f}',
     '.cc-content-meta{display:grid;gap:.65rem;color:#5f6b7f;font-size:.92rem}.cc-content-meta-title{margin:0;font-family:var(--cc-font-heading);color:var(--cc-text);font-size:1.05rem;line-height:1.25}.cc-content-meta-items{display:flex;flex-wrap:wrap;align-items:center;gap:.45rem .9rem}.cc-content-meta-stacked .cc-content-meta-items{align-items:flex-start;flex-direction:column;gap:.35rem}.cc-content-meta-chips .cc-content-meta-items{gap:.5rem}.cc-content-meta-item{display:inline-flex;min-width:0;align-items:center;gap:.35rem}.cc-content-meta-chips .cc-content-meta-item{border:1px solid #dfe3ec;border-radius:9999px;background:#fff;padding:.34rem .7rem;box-shadow:0 2px 8px #181d3508}.cc-content-meta-label{color:#9aa3b6;font-size:.76rem;font-weight:800;letter-spacing:.04em;text-transform:uppercase}.cc-content-meta-value{color:var(--cc-text);font-weight:700}.cc-content-meta-empty{margin:0;color:#5f6b7f}',
     '.cc-table-of-contents{display:grid;gap:var(--cc-md)}.cc-toc-boxed{padding:var(--cc-md);border:1px solid #dfe3ec;border-radius:var(--cc-radius);background:#fff;box-shadow:0 2px 8px #181d350a}.cc-toc-title{margin:0;font-family:var(--cc-font-heading);font-size:1.1rem;line-height:1.25}.cc-toc-list{display:grid;gap:.45rem;margin:0;padding:0;list-style:none}.cc-toc-item{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:start;gap:.55rem}.cc-toc-item a{color:var(--cc-text);font-weight:700;text-decoration:none}.cc-toc-item a:hover{color:var(--cc-primary);text-decoration:underline}.cc-toc-marker{display:inline-grid;place-items:center;min-width:1.5rem;height:1.5rem;border-radius:9999px;background:#eef2ff;color:var(--cc-primary);font-size:.75rem;font-weight:800}.cc-toc-level-3{padding-left:1rem}.cc-toc-level-4,.cc-toc-level-5,.cc-toc-level-6{padding-left:2rem}.cc-toc-empty{margin:0;color:#5f6b7f}',
@@ -1505,6 +1580,7 @@ function measurementLoaderTag(measurement, identity = {}) {
 
 function renderPage({ page, document, snapshot, context, project, baseUrl, clinic, cssFile, artifactMarker }) {
   const pageContext = { ...context, page, artifactMarker };
+  const templateType = pageTemplateType(page);
   const headerId = document.globals?.header_node_id || null;
   const footerId = document.globals?.footer_node_id || null;
   const header = headerId
@@ -1563,7 +1639,7 @@ function renderPage({ page, document, snapshot, context, project, baseUrl, clini
   const socialImageTags = safeSocialUrl
     ? `<meta property="og:image" content="${escapeHtml(safeSocialUrl)}"><meta property="og:image:alt" content="${escapeHtml(socialImageAlt)}"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:image" content="${escapeHtml(safeSocialUrl)}"><meta name="twitter:image:alt" content="${escapeHtml(socialImageAlt)}">`
     : '<meta name="twitter:card" content="summary">';
-  const html = `<!doctype html><html lang="${escapeHtml(project.locale)}"><head><meta charset="utf-8"><meta name="clinicaclick-artifact-input" content="${escapeHtml(artifactMarker)}"><meta http-equiv="Content-Security-Policy" content="${escapeHtml(pageCsp)}"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" type="image/svg+xml" href="${escapeHtml(favicon)}"><title>${escapeHtml(title)}</title><meta name="description" content="${escapeHtml(description)}"><meta name="robots" content="${robots}"><link rel="canonical" href="${escapeHtml(canonical)}"><meta property="og:type" content="website"><meta property="og:site_name" content="${escapeHtml(project.name)}"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${escapeHtml(description)}"><meta property="og:url" content="${escapeHtml(canonical)}">${socialImageTags}<meta name="twitter:title" content="${escapeHtml(title)}"><meta name="twitter:description" content="${escapeHtml(description)}"><link rel="stylesheet" href="${escapeHtml(`${baseUrl}/${cssFile}`)}"><script type="application/ld+json">${jsonLdText}</script>${measurementLoaderTag(context.measurement, { projectId: project.id, revisionId: context.revisionId, pageId: page.id, artifactMarker })}</head><body data-cc-web-project-id="${escapeHtml(project.id)}" data-cc-web-revision-id="${escapeHtml(context.revisionId)}" data-cc-web-artifact-input-hash="${escapeHtml(artifactMarker)}" data-cc-web-base-path="${escapeHtml(publicationBasePath)}">${header}${body}${footer}</body></html>`;
+  const html = `<!doctype html><html lang="${escapeHtml(project.locale)}"><head><meta charset="utf-8"><meta name="clinicaclick-artifact-input" content="${escapeHtml(artifactMarker)}"><meta http-equiv="Content-Security-Policy" content="${escapeHtml(pageCsp)}"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" type="image/svg+xml" href="${escapeHtml(favicon)}"><title>${escapeHtml(title)}</title><meta name="description" content="${escapeHtml(description)}"><meta name="robots" content="${robots}"><link rel="canonical" href="${escapeHtml(canonical)}"><meta property="og:type" content="website"><meta property="og:site_name" content="${escapeHtml(project.name)}"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${escapeHtml(description)}"><meta property="og:url" content="${escapeHtml(canonical)}">${socialImageTags}<meta name="twitter:title" content="${escapeHtml(title)}"><meta name="twitter:description" content="${escapeHtml(description)}"><link rel="stylesheet" href="${escapeHtml(`${baseUrl}/${cssFile}`)}"><script type="application/ld+json">${jsonLdText}</script>${measurementLoaderTag(context.measurement, { projectId: project.id, revisionId: context.revisionId, pageId: page.id, artifactMarker })}</head><body data-cc-web-project-id="${escapeHtml(project.id)}" data-cc-web-revision-id="${escapeHtml(context.revisionId)}" data-cc-web-page-template="${escapeHtml(templateType)}" data-cc-web-artifact-input-hash="${escapeHtml(artifactMarker)}" data-cc-web-base-path="${escapeHtml(publicationBasePath)}">${header}${body}${footer}</body></html>`;
   return {
     path: page.slug === 'inicio' ? '/' : `/${page.slug}/`,
     html,
@@ -1574,6 +1650,12 @@ function renderPage({ page, document, snapshot, context, project, baseUrl, clini
     json_ld_csp_hash: jsonLdCspHash,
     seo_audit: pageSeoAudit(page, document),
   };
+}
+
+function pageTemplateType(page) {
+  return ['standard', 'post', 'category'].includes(page?.template_type)
+    ? page.template_type
+    : 'standard';
 }
 
 function sitemapXml(baseUrl, pages) {
@@ -1718,6 +1800,7 @@ function compileWebArtifact(input = {}) {
     artifact_input_hash: artifactMarker,
     page_routes: Object.fromEntries(document.pages.map((page) => [page.id, {
       page_path: page.slug === 'inicio' ? '/' : `/${page.slug}/`,
+      template_type: pageTemplateType(page),
     }])),
     intake_forms: intakeForms,
     site_configuration: siteConfiguration,

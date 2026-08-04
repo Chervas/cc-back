@@ -1,14 +1,19 @@
 'use strict';
 
 const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
 const { Op } = require('sequelize');
 const db = require('../../models');
+const whatsappService = require('./whatsapp.service');
 
 const {
   sequelize,
   EconomicBudget,
   EconomicBudgetVersion,
   EconomicBudgetEvent,
+  EconomicBudgetSignatureRequest,
+  WhatsappTemplate,
+  WhatsappTemplateCatalog,
   ClinicEconomicTemplate,
   EconomicPayment,
   PatientWalletEntry,
@@ -50,6 +55,12 @@ const ACCEPTANCE_SEND_CHANNELS = new Set(['whatsapp', 'email', 'printed', 'none'
 const ACCEPTANCE_SIGNATURE_CHANNELS = new Set(['tablet', 'mobile', 'printed', 'not_required']);
 const ACCEPTANCE_BANK_DATA_STATUSES = new Set(['not_required', 'pending', 'complete']);
 const ACCEPTANCE_FINANCING_STATUSES = new Set(['pending_approval', 'approved', 'rejected', 'paid_by_finance']);
+const BUDGET_SIGNATURE_CHANNELS = new Set(['whatsapp', 'email', 'custom_email', 'tablet']);
+const BUDGET_SIGNATURE_STATUSES = new Set(['pending', 'sent', 'viewed', 'signed', 'cancelled', 'expired', 'failed']);
+const BUDGET_SIGNATURE_PAYMENT_MODES = new Set(['patient_choice', ...PAYMENT_OPTION_MODES]);
+const BUDGET_SIGNATURE_TYPES = new Set(['accept_full', 'accept_partial']);
+const BUDGET_SIGNATURE_BANK_POLICIES = new Set(['defer', 'request_now']);
+const BUDGET_SIGNATURE_WHATSAPP_TEMPLATE = 'clinicaclick_envio_presupuesto_firma';
 const TEMPLATE_TYPES = new Set(['budget', 'invoice']);
 const PRODUCT_TYPES = new Set(['treatment', 'voucher', 'pack']);
 const FISCAL_DOCUMENT_TYPES = new Set(['receipt', 'invoice', 'credit_note']);
@@ -232,6 +243,74 @@ function dateOrNull(value) {
 
 function cloneJson(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function budgetSignatureTokenSecret() {
+  return process.env.BUDGET_SIGNATURE_TOKEN_SECRET
+    || process.env.CONSENT_PUBLIC_TOKEN_SECRET
+    || process.env.JWT_SECRET
+    || 'clinicaclick-dev-budget-signatures';
+}
+
+function getPublicBudgetBaseUrl() {
+  return String(
+    process.env.BUDGET_SIGNATURE_PUBLIC_BASE_URL
+    || process.env.FRONTEND_PUBLIC_URL
+    || process.env.FRONTEND_URL
+    || 'http://localhost:4203'
+  ).trim().replace(/\/+$/, '');
+}
+
+function addHours(date, hours) {
+  const parsed = Number.parseInt(String(hours ?? 168), 10);
+  const safeHours = Number.isFinite(parsed) && parsed > 0 ? parsed : 168;
+  const base = date instanceof Date && Number.isFinite(date.getTime()) ? date : new Date();
+  return new Date(base.getTime() + safeHours * 60 * 60 * 1000);
+}
+
+function signBudgetSignatureToken(request, { channel = null, ttlHours = null } = {}) {
+  const expiresInHours = Number.parseInt(String(ttlHours ?? 168), 10);
+  return jwt.sign({
+    type: 'economic_budget_signature_request',
+    request_public_id: request.public_id,
+    request_id: String(request.id),
+    budget_public_id: request.snapshot_json?.budget?.public_id || null,
+    channel: channel || request.channel,
+  }, budgetSignatureTokenSecret(), {
+    expiresIn: `${Number.isFinite(expiresInHours) && expiresInHours > 0 ? expiresInHours : 168}h`,
+  });
+}
+
+function verifyBudgetSignatureToken(tokenRaw) {
+  const token = cleanString(tokenRaw, 4096);
+  if (!token) throw domainError(400, 'budget_signature_token_required', 'El enlace de firma no es válido.');
+  try {
+    const payload = jwt.verify(token, budgetSignatureTokenSecret());
+    if (payload?.type !== 'economic_budget_signature_request' || !payload?.request_public_id) {
+      throw domainError(401, 'invalid_budget_signature_token', 'El enlace de firma no es válido.');
+    }
+    return payload;
+  } catch (error) {
+    if (error.statusCode) throw error;
+    throw domainError(
+      401,
+      error.name === 'TokenExpiredError' ? 'expired_budget_signature_token' : 'invalid_budget_signature_token',
+      'El enlace de firma no es válido o ha caducado.',
+    );
+  }
+}
+
+function buildPublicBudgetSignatureUrl(token, baseUrl = null, route = 'public') {
+  const resolvedBase = cleanString(baseUrl, 1000) || getPublicBudgetBaseUrl();
+  const path = route === 'tablet' ? '/tablet/presupuestos/' : '/presupuestos/firma/';
+  return `${resolvedBase.replace(/\/+$/, '')}${path}${encodeURIComponent(token)}`;
+}
+
+function hashSnapshot(payload) {
+  return crypto
+    .createHash('sha256')
+    .update(JSON.stringify(payload || {}))
+    .digest('hex');
 }
 
 function normalizeAreaCode(value) {
@@ -1233,6 +1312,764 @@ async function transitionBudget({ publicId, actorId, action, payload = {} }) {
     }
     return serializeBudget(budget, version, [], []);
   });
+}
+
+async function loadBudgetSignatureContext(publicId, transaction = null) {
+  const budget = await loadBudgetByPublicId(publicId, transaction);
+  const [version, patient, clinic] = await Promise.all([
+    EconomicBudgetVersion.findOne({
+      where: { budget_id: budget.id, version_number: budget.current_version },
+      transaction,
+    }),
+    Paciente.findByPk(budget.patient_id, { transaction }),
+    Clinica.findByPk(budget.clinic_id, { transaction }),
+  ]);
+  if (!version) throw domainError(404, 'budget_version_not_found', 'Versión de presupuesto no encontrada.');
+  if (!patient) throw domainError(404, 'patient_not_found', 'Paciente no encontrado.');
+  if (!clinic) throw domainError(404, 'clinic_not_found', 'Clínica no encontrada.');
+  return { budget, version, patient, clinic };
+}
+
+function offeredPaymentModes(version) {
+  const proposal = serializePaymentProposal(version.payment_proposal);
+  return Array.isArray(proposal.included_modes)
+    ? proposal.included_modes.filter((mode) => PAYMENT_OPTION_MODES.has(mode))
+    : [];
+}
+
+function defaultCollectionMethodForPaymentMode(mode) {
+  if (mode === 'external_financing') return 'financing';
+  if (mode === 'patient_balance') return 'patient_balance';
+  return 'pending';
+}
+
+function defaultFinancingMonthsForProposal(proposal) {
+  const months = optionalPositiveInteger(proposal.selected_financing_months);
+  if (months) return months;
+  const highlighted = (Array.isArray(proposal.financing_options) ? proposal.financing_options : [])
+    .find((option) => option?.highlighted);
+  return optionalPositiveInteger(highlighted?.months)
+    || optionalPositiveInteger(proposal.financing_options?.[0]?.months);
+}
+
+function validateSignaturePaymentMode(modeRaw, modes, { allowPatientChoice = true } = {}) {
+  const mode = cleanString(modeRaw || (allowPatientChoice ? 'patient_choice' : ''), 40).toLowerCase();
+  if (!mode && !modes.length) return '';
+  if (!BUDGET_SIGNATURE_PAYMENT_MODES.has(mode)) {
+    throw domainError(400, 'budget_signature_payment_mode_invalid', 'La forma de pago no es válida.');
+  }
+  if (mode !== 'patient_choice' && !modes.includes(mode)) {
+    throw domainError(400, 'budget_signature_payment_mode_not_offered', 'La forma de pago no forma parte del presupuesto.');
+  }
+  return mode;
+}
+
+function resolveSignedPaymentMode({ request, payload, version }) {
+  const modes = offeredPaymentModes(version);
+  if (!modes.length) return null;
+  const requestMode = cleanString(request.selected_payment_mode, 40).toLowerCase();
+  if (requestMode && requestMode !== 'patient_choice') return validateSignaturePaymentMode(requestMode, modes);
+  const payloadMode = cleanString(payload.selected_payment_mode, 40).toLowerCase();
+  if (payloadMode) return validateSignaturePaymentMode(payloadMode, modes, { allowPatientChoice: false });
+  if (modes.length === 1) return modes[0];
+  throw domainError(400, 'budget_signature_payment_choice_required', 'Elige la forma de pago aceptada.');
+}
+
+function acceptedLineKeysForRequest(request, version, payload = {}) {
+  const lines = parseJson(version.lines, []);
+  if (request.request_type === 'accept_partial') {
+    const requested = Array.isArray(payload.accepted_line_keys) && payload.accepted_line_keys.length
+      ? payload.accepted_line_keys
+      : parseJson(request.accepted_line_keys, []);
+    const keys = requested.map((item) => cleanString(item, 80)).filter(Boolean);
+    const lineKeySet = new Set(lines.map((line) => line.key));
+    const accepted = keys.filter((key) => lineKeySet.has(key));
+    if (!accepted.length) {
+      throw domainError(400, 'accepted_lines_required', 'Selecciona las líneas que acepta el paciente.');
+    }
+    return accepted;
+  }
+  return lines.map((line) => line.key);
+}
+
+function amountForAcceptedLineKeys(version, acceptedLineKeys) {
+  const acceptedSet = new Set(acceptedLineKeys);
+  return roundMoney(parseJson(version.lines, [])
+    .filter((line) => acceptedSet.has(line.key))
+    .reduce((sum, line) => sum + numberValue(line.total), 0));
+}
+
+function normalizeBankDataForSignature(value) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const holder = cleanString(source.holder || source.account_holder || source.titular, 180) || null;
+  const iban = String(source.iban || '').replace(/\s+/g, '').toUpperCase();
+  const ibanValue = /^[A-Z]{2}\d{2}[A-Z0-9]{8,30}$/.test(iban) ? iban : null;
+  return {
+    holder,
+    iban: ibanValue,
+    iban_last4: ibanValue ? ibanValue.slice(-4) : null,
+    iban_masked: ibanValue ? `${ibanValue.slice(0, 4)}••••${ibanValue.slice(-4)}` : null,
+  };
+}
+
+function serializeBudgetSignatureRequest(request, { includeInternal = false } = {}) {
+  if (!request) return null;
+  const plain = request.toJSON ? request.toJSON() : request;
+  const snapshot = parseJson(plain.snapshot_json, {});
+  const signedPayload = parseJson(plain.signed_payload, null);
+  return {
+    id: plain.public_id,
+    budget_id: snapshot.budget?.public_id || null,
+    budget_number: snapshot.budget?.number || null,
+    budget_version: Number(plain.budget_version),
+    clinic_id: Number(plain.clinic_id),
+    patient_id: Number(plain.patient_id),
+    request_type: plain.request_type,
+    status: plain.status,
+    channel: plain.channel,
+    recipient: plain.recipient || null,
+    selected_payment_mode: plain.selected_payment_mode,
+    selected_financing_months: plain.selected_financing_months || null,
+    collection_method: plain.collection_method,
+    signature_channel: plain.signature_channel,
+    bank_data_policy: plain.bank_data_policy,
+    bank_data_status: plain.bank_data_status,
+    accepted_amount: numberValue(plain.accepted_amount),
+    accepted_line_keys: parseJson(plain.accepted_line_keys, []),
+    public_url: plain.public_url || null,
+    expires_at: plain.expires_at || null,
+    sent_at: plain.sent_at || null,
+    viewed_at: plain.viewed_at || null,
+    signed_at: plain.signed_at || null,
+    created_at: plain.created_at || null,
+    delivery_result: includeInternal ? parseJson(plain.delivery_result, null) : undefined,
+    signed_payload: includeInternal ? signedPayload : undefined,
+  };
+}
+
+function publicBudgetSignaturePayload(request) {
+  const snapshot = parseJson(request.snapshot_json, {});
+  const proposal = serializePaymentProposal(snapshot.version?.payment_proposal || {});
+  const paymentOptions = (proposal.included_modes || []).map((mode) => ({
+    mode,
+    label: mode === 'single'
+      ? 'Pago único'
+      : mode === 'clinic_installments'
+        ? 'Aplazado en clínica'
+        : mode === 'external_financing'
+          ? 'Financiación'
+          : 'Usar saldo del paciente',
+    description: mode === 'single'
+      ? 'Un único cobro.'
+      : mode === 'clinic_installments'
+        ? 'Importe repartido entre fechas o hitos.'
+        : mode === 'external_financing'
+          ? 'Cuotas con las condiciones ofrecidas.'
+          : 'Se descuenta del saldo disponible.',
+  }));
+  return {
+    request: serializeBudgetSignatureRequest(request),
+    budget: snapshot.budget || null,
+    version: {
+      ...snapshot.version,
+      payment_proposal: proposal,
+    },
+    patient: snapshot.patient || null,
+    clinic: snapshot.clinic || null,
+    payment_options: paymentOptions,
+  };
+}
+
+function budgetSignatureChannelLabel(channel) {
+  const labels = {
+    whatsapp: 'WhatsApp',
+    email: 'Email',
+    custom_email: 'Email',
+    tablet: 'Tablet de clínica',
+  };
+  return labels[channel] || channel || 'Canal no definido';
+}
+
+function budgetSignatureStatusLabel(status) {
+  const labels = {
+    pending: 'Pendiente',
+    sent: 'Enviado',
+    viewed: 'Abierto',
+    signed: 'Firmado',
+    cancelled: 'Cancelado',
+    expired: 'Caducado',
+    failed: 'Fallido',
+  };
+  return labels[status] || status || 'Pendiente';
+}
+
+function budgetSignatureEventMetadata(request, metadata = {}) {
+  const snapshot = parseJson(request?.snapshot_json, {});
+  return {
+    signature_request_id: request?.public_id || null,
+    budget_id: snapshot.budget?.public_id || null,
+    budget_number: snapshot.budget?.number || null,
+    channel: request?.channel || null,
+    channel_label: budgetSignatureChannelLabel(request?.channel),
+    recipient: request?.recipient || null,
+    request_type: request?.request_type || null,
+    status: request?.status || null,
+    status_label: budgetSignatureStatusLabel(request?.status),
+    public_url: request?.public_url || null,
+    selected_payment_mode: request?.selected_payment_mode || null,
+    selected_financing_months: request?.selected_financing_months || null,
+    collection_method: request?.collection_method || null,
+    signature_channel: request?.signature_channel || null,
+    bank_data_policy: request?.bank_data_policy || null,
+    bank_data_status: request?.bank_data_status || null,
+    accepted_amount: numberValue(request?.accepted_amount),
+    ...metadata,
+  };
+}
+
+async function recordBudgetSignatureEvent(request, eventType, {
+  transaction = null,
+  actorId = undefined,
+  metadata = {},
+  createdAt = new Date(),
+} = {}) {
+  if (!request?.budget_id || !request?.budget_version) return null;
+  return EconomicBudgetEvent.create({
+    budget_id: request.budget_id,
+    version_number: request.budget_version,
+    event_type: eventType,
+    metadata: budgetSignatureEventMetadata(request, metadata),
+    actor_id: actorId === undefined ? (request.created_by || null) : actorId,
+    created_at: createdAt,
+  }, { transaction });
+}
+
+async function findApprovedBudgetSignatureWhatsappTemplate(wabaId) {
+  const normalizedWabaId = cleanString(wabaId, 120);
+  if (!normalizedWabaId || !WhatsappTemplate) return null;
+  if (WhatsappTemplateCatalog) {
+    const catalog = await WhatsappTemplateCatalog.findOne({
+      where: { name: BUDGET_SIGNATURE_WHATSAPP_TEMPLATE },
+      attributes: ['id'],
+    });
+    if (catalog) {
+      const template = await WhatsappTemplate.findOne({
+        where: {
+          catalog_template_id: catalog.id,
+          waba_id: normalizedWabaId,
+          is_active: true,
+          status: { [Op.in]: ['APPROVED', 'approved'] },
+        },
+        order: [['updatedAt', 'DESC'], ['id', 'DESC']],
+      });
+      if (template) return template;
+    }
+  }
+  const rows = await WhatsappTemplate.findAll({
+    where: {
+      waba_id: normalizedWabaId,
+      is_active: true,
+      status: { [Op.in]: ['APPROVED', 'approved'] },
+    },
+    include: WhatsappTemplateCatalog
+      ? [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['name'], required: false }]
+      : [],
+    order: [['updatedAt', 'DESC'], ['id', 'DESC']],
+    limit: 50,
+  });
+  return rows.find((row) => {
+    const plain = row?.toJSON ? row.toJSON() : row;
+    return cleanString(plain?.name, 120) === BUDGET_SIGNATURE_WHATSAPP_TEMPLATE
+      || cleanString(plain?.catalog?.name, 120) === BUDGET_SIGNATURE_WHATSAPP_TEMPLATE;
+  }) || null;
+}
+
+async function sendBudgetSignatureWhatsapp({ request, patient, clinic, publicUrl }) {
+  const phone = patient.telefono_movil || patient.telefono || patient.phone || null;
+  const normalized = whatsappService.normalizePhoneNumber(phone);
+  if (!normalized) {
+    throw domainError(400, 'budget_signature_patient_phone_missing', 'El paciente no tiene un teléfono válido.');
+  }
+  const clinicConfig = await whatsappService.getClinicConfig(request.clinic_id);
+  if (!clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
+    throw domainError(409, 'whatsapp_config_missing_for_scope', 'La clínica no tiene WhatsApp conectado.');
+  }
+  const template = await findApprovedBudgetSignatureWhatsappTemplate(clinicConfig.wabaId);
+  if (!template) {
+    throw domainError(
+      409,
+      'budget_signature_whatsapp_template_missing',
+      'Falta aprobar en Meta la plantilla de envío de presupuesto para firma.',
+    );
+  }
+  const templateJson = template.toJSON ? template.toJSON() : template;
+  const snapshot = parseJson(request.snapshot_json, {});
+  const firstName = cleanString(patient.nombre, 80) || 'Hola';
+  const clinicName = clinic.nombre_clinica || 'tu clínica';
+  const response = await whatsappService.sendMessage({
+    to: normalized,
+    useTemplate: true,
+    templateName: templateJson.name,
+    templateLanguage: templateJson.language || 'es',
+    templateParams: [
+      firstName,
+      snapshot.budget?.number || request.budget_version || '',
+      clinicName,
+      publicUrl,
+    ],
+    clinicConfig,
+  });
+  return {
+    to: normalized,
+    provider_message_id: response?.messages?.[0]?.id || null,
+    delivery_mode: 'template',
+    template_name: templateJson.name,
+    template_language: templateJson.language || 'es',
+    template_id: templateJson.id || null,
+    sent_at: new Date().toISOString(),
+  };
+}
+
+async function createBudgetSignatureRequest({ publicId, actorId, payload = {} }) {
+  const ttlHours = Number.parseInt(String(payload.ttl_hours ?? payload.validez_horas ?? 168), 10);
+  const { budget, version, patient, clinic } = await loadBudgetSignatureContext(publicId);
+  if (budget.status !== 'presented') {
+    throw domainError(409, 'budget_signature_requires_presented_budget', 'Solo se puede enviar a firma un presupuesto presentado.');
+  }
+  const channel = cleanString(payload.target || payload.channel || 'patient_whatsapp', 40).toLowerCase();
+  const normalizedChannel = channel === 'patient_whatsapp'
+    ? 'whatsapp'
+    : channel === 'patient_email'
+      ? 'email'
+      : channel === 'custom_email'
+        ? 'custom_email'
+        : channel === 'tablet'
+          ? 'tablet'
+          : channel;
+  if (!BUDGET_SIGNATURE_CHANNELS.has(normalizedChannel)) {
+    throw domainError(400, 'budget_signature_channel_invalid', 'El canal de envío no es válido.');
+  }
+  const requestType = cleanString(payload.request_type || 'accept_full', 30).toLowerCase();
+  if (!BUDGET_SIGNATURE_TYPES.has(requestType)) {
+    throw domainError(400, 'budget_signature_type_invalid', 'El tipo de solicitud no es válido.');
+  }
+  const proposal = serializePaymentProposal(version.payment_proposal);
+  const modes = offeredPaymentModes(version);
+  const selectedPaymentMode = validateSignaturePaymentMode(payload.selected_payment_mode || 'patient_choice', modes);
+  const selectedFinancingMonths = selectedPaymentMode === 'external_financing'
+    ? optionalPositiveInteger(payload.selected_financing_months) || defaultFinancingMonthsForProposal(proposal)
+    : null;
+  const collectionMethod = cleanString(
+    payload.collection_method || defaultCollectionMethodForPaymentMode(selectedPaymentMode),
+    40,
+  ).toLowerCase();
+  if (!ACCEPTANCE_COLLECTION_METHODS.has(collectionMethod)) {
+    throw domainError(400, 'budget_signature_collection_method_invalid', 'El método de cobro previsto no es válido.');
+  }
+  const bankDataPolicy = cleanString(payload.bank_data_policy, 30).toLowerCase()
+    || (payload.request_bank_data_now ? 'request_now' : 'defer');
+  if (!BUDGET_SIGNATURE_BANK_POLICIES.has(bankDataPolicy)) {
+    throw domainError(400, 'budget_signature_bank_policy_invalid', 'La política de datos bancarios no es válida.');
+  }
+  const acceptedLineKeys = requestType === 'accept_partial'
+    ? acceptedLineKeysForRequest({ request_type: requestType, accepted_line_keys: payload.accepted_line_keys }, version, payload)
+    : parseJson(version.lines, []).map((line) => line.key);
+  const acceptedAmount = amountForAcceptedLineKeys(version, acceptedLineKeys);
+  const signatureChannel = normalizedChannel === 'tablet' ? 'tablet' : 'mobile';
+  const now = new Date();
+  const snapshot = {
+    budget: {
+      public_id: budget.public_id,
+      number: budget.number,
+      status: budget.status,
+      valid_until: budget.valid_until,
+    },
+    version: serializeVersion(version),
+    patient: mapPatientSnapshot(patient),
+    clinic: mapClinicSnapshot(clinic),
+    request: {
+      request_type: requestType,
+      selected_payment_mode: selectedPaymentMode,
+      selected_financing_months: selectedFinancingMonths,
+      collection_method: collectionMethod,
+      signature_channel: signatureChannel,
+      bank_data_policy: bankDataPolicy,
+      accepted_amount: acceptedAmount,
+      accepted_line_keys: acceptedLineKeys,
+    },
+  };
+  const request = await sequelize.transaction(async (transaction) => {
+    const startsSent = ['email', 'custom_email', 'tablet'].includes(normalizedChannel);
+    const row = await EconomicBudgetSignatureRequest.create({
+      public_id: crypto.randomUUID(),
+      budget_id: budget.id,
+      clinic_id: budget.clinic_id,
+      patient_id: budget.patient_id,
+      budget_version: budget.current_version,
+      request_type: requestType,
+      status: startsSent ? 'sent' : 'pending',
+      channel: normalizedChannel,
+      recipient: normalizedChannel === 'custom_email'
+        ? cleanString(payload.recipient_email || payload.email, 190)
+        : normalizedChannel === 'email'
+          ? mapPatientSnapshot(patient).email
+          : normalizedChannel === 'whatsapp'
+            ? mapPatientSnapshot(patient).phone
+            : 'tablet_clinica',
+      selected_payment_mode: selectedPaymentMode,
+      selected_financing_months: selectedFinancingMonths,
+      collection_method: collectionMethod,
+      signature_channel: signatureChannel,
+      bank_data_policy: bankDataPolicy,
+      bank_data_status: bankDataPolicy === 'request_now' ? 'pending' : 'not_required',
+      accepted_amount: acceptedAmount,
+      accepted_line_keys: acceptedLineKeys,
+      snapshot_json: snapshot,
+      snapshot_hash: hashSnapshot(snapshot),
+      expires_at: addHours(now, ttlHours),
+      sent_at: startsSent ? now : null,
+      delivery_result: normalizedChannel === 'email' || normalizedChannel === 'custom_email'
+        ? { mocked: true, reason: 'email_delivery_pending' }
+        : normalizedChannel === 'tablet'
+          ? { queued_for_tablet: true }
+        : null,
+      created_by: actorId || null,
+    }, { transaction });
+    const token = signBudgetSignatureToken(row, {
+      channel: signatureChannel,
+      ttlHours: normalizedChannel === 'tablet' ? 12 : ttlHours,
+    });
+    const publicUrl = buildPublicBudgetSignatureUrl(
+      token,
+      payload.base_url || payload.baseUrl || null,
+      normalizedChannel === 'tablet' ? 'tablet' : 'public',
+    );
+    await row.update({ public_url: publicUrl }, { transaction });
+    row.public_url = publicUrl;
+    await recordBudgetSignatureEvent(row, 'signature_request_created', { transaction });
+    if (startsSent) {
+      await recordBudgetSignatureEvent(row, 'signature_request_sent', {
+        transaction,
+        metadata: {
+          delivery_result: normalizedChannel === 'tablet' ? { queued_for_tablet: true } : { mocked: true },
+        },
+      });
+    }
+    return row;
+  });
+
+  if (normalizedChannel === 'whatsapp') {
+    try {
+      const result = await sendBudgetSignatureWhatsapp({ request, patient, clinic, publicUrl: request.public_url });
+      await request.update({ status: 'sent', sent_at: new Date(), delivery_result: result });
+      await recordBudgetSignatureEvent(request, 'signature_request_sent', {
+        metadata: {
+          delivery_mode: result.delivery_mode || 'template',
+          template_name: result.template_name || null,
+          provider_message_id: result.provider_message_id || null,
+        },
+      });
+    } catch (error) {
+      await request.update({
+        status: 'failed',
+        delivery_result: {
+          error: error.code || 'whatsapp_send_failed',
+          message: error.message || 'No se pudo enviar el WhatsApp.',
+          raw: error?.response?.data || null,
+        },
+      });
+      await recordBudgetSignatureEvent(request, 'signature_request_failed', {
+        metadata: {
+          error: error.code || 'whatsapp_send_failed',
+          message: error.message || 'No se pudo enviar el WhatsApp.',
+        },
+      });
+      throw error;
+    }
+  }
+
+  return serializeBudgetSignatureRequest(await EconomicBudgetSignatureRequest.findByPk(request.id), { includeInternal: true });
+}
+
+async function findBudgetSignatureRequestFromToken(tokenRaw, { markViewed = false } = {}) {
+  const token = verifyBudgetSignatureToken(tokenRaw);
+  const request = await EconomicBudgetSignatureRequest.findOne({
+    where: { public_id: cleanString(token.request_public_id, 36) },
+  });
+  if (!request) throw domainError(404, 'budget_signature_request_not_found', 'Solicitud de firma no encontrada.');
+  if (request.expires_at && new Date(request.expires_at).getTime() < Date.now() && !['signed', 'expired'].includes(request.status)) {
+    await request.update({ status: 'expired' });
+    await recordBudgetSignatureEvent(request, 'signature_request_expired', {
+      actorId: null,
+      metadata: { reason: 'token_expired' },
+    });
+  }
+  if (markViewed && ['pending', 'sent'].includes(request.status) && !request.viewed_at) {
+    const viewedAt = new Date();
+    await request.update({ status: 'viewed', viewed_at: viewedAt });
+    await recordBudgetSignatureEvent(request, 'signature_request_viewed', {
+      actorId: null,
+      createdAt: viewedAt,
+      metadata: { source: 'public_signature_link' },
+    });
+  }
+  return request;
+}
+
+async function getPublicBudgetSignatureRequest(tokenRaw) {
+  const request = await findBudgetSignatureRequestFromToken(tokenRaw, { markViewed: true });
+  return publicBudgetSignaturePayload(request);
+}
+
+async function applyBudgetSignatureAcceptance({ request, payload = {}, requestMeta = {} }) {
+  return sequelize.transaction(async (transaction) => {
+    const lockedRequest = await EconomicBudgetSignatureRequest.findOne({
+      where: { id: request.id },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!lockedRequest) throw domainError(404, 'budget_signature_request_not_found', 'Solicitud de firma no encontrada.');
+    if (lockedRequest.status === 'signed') {
+      throw domainError(409, 'budget_signature_already_signed', 'Este presupuesto ya está firmado.');
+    }
+    if (!['pending', 'sent', 'viewed'].includes(lockedRequest.status)) {
+      throw domainError(409, 'budget_signature_not_pending', 'Esta solicitud de firma ya no está pendiente.');
+    }
+    if (lockedRequest.expires_at && new Date(lockedRequest.expires_at).getTime() < Date.now()) {
+      await lockedRequest.update({ status: 'expired' }, { transaction });
+      throw domainError(401, 'expired_budget_signature_token', 'El enlace de firma ha caducado.');
+    }
+    const budget = await EconomicBudget.findOne({
+      where: { id: lockedRequest.budget_id },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!budget) throw domainError(404, 'budget_not_found', 'Presupuesto no encontrado.');
+    if (budget.status !== 'presented') {
+      throw domainError(409, 'budget_signature_budget_not_presented', 'El presupuesto ya no está pendiente de aceptación.');
+    }
+    if (Number(budget.current_version) !== Number(lockedRequest.budget_version)) {
+      throw domainError(409, 'budget_signature_version_superseded', 'El presupuesto tiene una versión más reciente.');
+    }
+    const version = await EconomicBudgetVersion.findOne({
+      where: { budget_id: budget.id, version_number: budget.current_version },
+      transaction,
+    });
+    if (!version) throw domainError(404, 'budget_version_not_found', 'Versión de presupuesto no encontrada.');
+
+    const selectedPaymentMode = resolveSignedPaymentMode({ request: lockedRequest, payload, version });
+    const proposal = serializePaymentProposal(version.payment_proposal);
+    const selectedFinancingMonths = selectedPaymentMode === 'external_financing'
+      ? optionalPositiveInteger(payload.selected_financing_months)
+        || lockedRequest.selected_financing_months
+        || defaultFinancingMonthsForProposal(proposal)
+      : null;
+    if (selectedPaymentMode === 'external_financing'
+      && !(proposal.financing_options || []).some((option) => Number(option.months) === Number(selectedFinancingMonths))) {
+      throw domainError(400, 'accepted_financing_term_invalid', 'Selecciona uno de los plazos de financiación ofrecidos.');
+    }
+    const acceptedLineKeys = acceptedLineKeysForRequest(lockedRequest, version, payload);
+    const acceptedAmount = amountForAcceptedLineKeys(version, acceptedLineKeys);
+    const transitionTo = lockedRequest.request_type === 'accept_partial' ? 'partially_accepted' : 'accepted';
+    const bankData = normalizeBankDataForSignature(payload.bank_data);
+    const bankDataStatus = bankData.iban
+      ? 'complete'
+      : lockedRequest.bank_data_policy === 'request_now' ? 'pending' : lockedRequest.bank_data_status;
+    const signerName = cleanString(payload.signer_name, 180) || parseJson(lockedRequest.snapshot_json, {}).patient?.name || 'Paciente';
+    const signaturePayload = {
+      signer_name: signerName,
+      signer_role: cleanString(payload.signer_role || 'patient', 40) || 'patient',
+      signed_at: new Date().toISOString(),
+      method: lockedRequest.signature_channel === 'tablet' ? 'tablet_signature' : 'mobile_signature',
+      accepted_statement: payload.accepted_statement !== false,
+      signature_data_url: cleanString(payload.signature_data_url, 200000) || null,
+      ip: requestMeta.ip || null,
+      user_agent: requestMeta.user_agent || null,
+      selected_payment_mode: selectedPaymentMode,
+      selected_financing_months: selectedFinancingMonths,
+      bank_data: bankData.iban ? bankData : null,
+    };
+
+    const now = new Date();
+    await lockedRequest.update({
+      status: 'signed',
+      signed_at: now,
+      selected_payment_mode: selectedPaymentMode || lockedRequest.selected_payment_mode,
+      selected_financing_months: selectedFinancingMonths,
+      bank_data_status: bankDataStatus,
+      signed_payload: signaturePayload,
+    }, { transaction });
+    await budget.update({
+      status: transitionTo,
+      responded_at: now,
+      accepted_amount: acceptedAmount,
+      updated_by: lockedRequest.created_by,
+    }, { transaction });
+    await EconomicBudgetEvent.create({
+      budget_id: budget.id,
+      version_number: budget.current_version,
+      event_type: transitionTo === 'accepted' ? 'accepted' : 'partially_accepted',
+      from_status: 'presented',
+      to_status: transitionTo,
+      metadata: {
+        reason: 'budget_signature_request_signed',
+        signature_request_id: lockedRequest.public_id,
+        accepted_line_keys: acceptedLineKeys,
+        accepted_amount: acceptedAmount,
+        selected_payment_mode: selectedPaymentMode,
+        selected_financing_months: selectedFinancingMonths,
+        financing_provider: selectedPaymentMode === 'external_financing'
+          ? cleanString(payload.financing_provider, 120) || null
+          : null,
+        financing_status: selectedPaymentMode === 'external_financing' ? 'pending_approval' : null,
+        financing_fallback_mode: null,
+        collection_method: lockedRequest.collection_method || defaultCollectionMethodForPaymentMode(selectedPaymentMode),
+        send_channel: lockedRequest.channel === 'custom_email' ? 'email' : lockedRequest.channel,
+        signature_channel: lockedRequest.signature_channel,
+        bank_data_status: bankDataStatus,
+      },
+      actor_id: null,
+      created_at: now,
+    }, { transaction });
+    await recordBudgetSignatureEvent(lockedRequest, 'signature_request_signed', {
+      transaction,
+      actorId: null,
+      createdAt: now,
+      metadata: {
+        selected_payment_mode: selectedPaymentMode,
+        selected_financing_months: selectedFinancingMonths,
+        accepted_line_keys: acceptedLineKeys,
+        accepted_amount: acceptedAmount,
+        bank_data_status: bankDataStatus,
+      },
+    });
+    await activateVouchers({ budget, rule: 'on_acceptance', actorId: lockedRequest.created_by, transaction });
+    return lockedRequest;
+  });
+}
+
+async function signPublicBudgetSignatureRequest(tokenRaw, payload = {}, requestMeta = {}) {
+  const request = await findBudgetSignatureRequestFromToken(tokenRaw);
+  if (!payload.accepted_statement) {
+    throw domainError(400, 'budget_signature_statement_required', 'Debes aceptar la declaración de firma.');
+  }
+  if (!cleanString(payload.signature_data_url, 200000)) {
+    throw domainError(400, 'budget_signature_drawn_signature_required', 'Falta la firma manuscrita.');
+  }
+  await applyBudgetSignatureAcceptance({ request, payload, requestMeta });
+  const refreshed = await EconomicBudgetSignatureRequest.findByPk(request.id);
+  return publicBudgetSignaturePayload(refreshed);
+}
+
+async function listTabletBudgetSignatureRequestsForClinic({ clinicId, q = null, limit = 80 }) {
+  const where = {
+    clinic_id: positiveInteger(clinicId, 'clinic_id'),
+    channel: 'tablet',
+    status: { [Op.in]: ['pending', 'sent', 'viewed'] },
+    [Op.or]: [
+      { expires_at: null },
+      { expires_at: { [Op.gt]: new Date() } },
+    ],
+  };
+  const rows = await EconomicBudgetSignatureRequest.findAll({
+    where,
+    order: [['created_at', 'DESC']],
+    limit: Math.min(Number(limit) || 80, 150),
+  });
+  const query = cleanString(q, 180).toLowerCase();
+  const items = rows.map((row) => {
+    const snapshot = parseJson(row.snapshot_json, {});
+    const patient = snapshot.patient || {};
+    const budget = snapshot.budget || {};
+    return {
+      type: 'budget',
+      id: row.public_id,
+      public_id: row.public_id,
+      status: row.status,
+      due_at: row.created_at,
+      expires_at: row.expires_at,
+      required_count: 1,
+      signed_count: 0,
+      pending_count: 1,
+      blocking_pending: 1,
+      paciente: {
+        id_paciente: row.patient_id,
+        public_id: patient.public_id || null,
+        nombre_completo: patient.name || 'Paciente',
+        telefono: patient.phone || null,
+      },
+      tratamiento: {
+        id_tratamiento: null,
+        nombre: `Presupuesto ${budget.number || ''}`.trim(),
+      },
+      cita: {
+        id_cita: null,
+        inicio: null,
+        estado: null,
+      },
+      documents: [{
+        id: row.id,
+        public_id: row.public_id,
+        title: `Presupuesto ${budget.number || ''}`.trim(),
+        purpose: 'financial',
+        status: row.status === 'viewed' ? 'viewed' : 'pending',
+        required: true,
+        blocking_policy: 'hard',
+      }],
+      budget: {
+        number: budget.number || null,
+        total: numberValue(snapshot.version?.totals?.total),
+      },
+    };
+  });
+  return query
+    ? items.filter((item) => {
+      const haystack = [
+        item.paciente.nombre_completo,
+        item.tratamiento.nombre,
+        item.public_id,
+      ].join(' ').toLowerCase();
+      return query.split(/\s+/).filter(Boolean).every((term) => haystack.includes(term));
+    })
+    : items;
+}
+
+async function createTabletBudgetSignatureSession({ requestId, clinicId, payload = {} }) {
+  const request = await EconomicBudgetSignatureRequest.findOne({
+    where: {
+      public_id: cleanString(requestId, 36),
+      clinic_id: positiveInteger(clinicId, 'clinic_id'),
+      channel: 'tablet',
+      status: { [Op.in]: ['pending', 'sent', 'viewed'] },
+    },
+  });
+  if (!request) {
+    throw domainError(404, 'budget_signature_request_not_found', 'Solicitud de firma no encontrada.');
+  }
+  const token = signBudgetSignatureToken(request, {
+    channel: 'tablet',
+    ttlHours: payload.ttl_hours ?? payload.validez_horas ?? 12,
+  });
+  const publicUrl = buildPublicBudgetSignatureUrl(token, payload.base_url || payload.baseUrl || null, 'tablet');
+  const sentAt = new Date();
+  await request.update({
+    public_url: publicUrl,
+    status: request.status === 'pending' ? 'sent' : request.status,
+    sent_at: request.sent_at || sentAt,
+  });
+  await recordBudgetSignatureEvent(request, 'signature_request_sent', {
+    createdAt: sentAt,
+    metadata: {
+      reason: 'tablet_session_created',
+      public_url: publicUrl,
+    },
+  });
+  return {
+    request_id: request.public_id,
+    public_token: token,
+    public_url: publicUrl,
+    expires_at: jwt.decode(token)?.exp ? new Date(jwt.decode(token).exp * 1000).toISOString() : null,
+  };
 }
 
 function paymentAppliedToBudget(payment) {
@@ -2430,7 +3267,7 @@ function serializeEvent(event) {
   };
 }
 
-function serializeBudget(budget, version, events, payments, walletApplied = 0) {
+function serializeBudget(budget, version, events, payments, walletApplied = 0, signatureRequests = []) {
   const paid = roundMoney(payments
     .filter((payment) => payment.status === 'confirmed')
     .reduce((sum, payment) => sum + paymentAppliedToBudget(payment), 0) + walletApplied);
@@ -2455,6 +3292,7 @@ function serializeBudget(budget, version, events, payments, walletApplied = 0) {
     updated_at: budget.updated_at,
     current: serializedVersion,
     events: events.map(serializeEvent),
+    signature_requests: signatureRequests.map((request) => serializeBudgetSignatureRequest(request)),
     financial_summary: {
       payable: roundMoney(payable),
       paid,
@@ -2553,6 +3391,7 @@ async function getWorkspace({ patientIdentifier, clinicId }) {
   const [
     versions,
     events,
+    signatureRequests,
     payments,
     walletEntries,
     vouchers,
@@ -2566,6 +3405,12 @@ async function getWorkspace({ patientIdentifier, clinicId }) {
       ? EconomicBudgetEvent.findAll({
         where: { budget_id: { [Op.in]: budgetIds } },
         order: [['created_at', 'ASC']],
+      })
+      : [],
+    budgetIds.length
+      ? EconomicBudgetSignatureRequest.findAll({
+        where: { budget_id: { [Op.in]: budgetIds } },
+        order: [['created_at', 'DESC'], ['id', 'DESC']],
       })
       : [],
     EconomicPayment.findAll({
@@ -2602,6 +3447,11 @@ async function getWorkspace({ patientIdentifier, clinicId }) {
     const key = String(event.budget_id);
     eventsByBudget.set(key, [...(eventsByBudget.get(key) || []), event]);
   }
+  const signatureRequestsByBudget = new Map();
+  for (const request of signatureRequests) {
+    const key = String(request.budget_id);
+    signatureRequestsByBudget.set(key, [...(signatureRequestsByBudget.get(key) || []), request]);
+  }
   const paymentsByBudget = new Map();
   for (const payment of payments) {
     const key = String(payment.budget_id || '');
@@ -2626,7 +3476,8 @@ async function getWorkspace({ patientIdentifier, clinicId }) {
           version,
           eventsByBudget.get(String(budget.id)) || [],
           paymentsByBudget.get(String(budget.id)) || [],
-          walletAppliedByBudget.get(String(budget.id)) || 0
+          walletAppliedByBudget.get(String(budget.id)) || 0,
+          signatureRequestsByBudget.get(String(budget.id)) || []
         )
         : null;
     })
@@ -2675,6 +3526,11 @@ module.exports = {
   updateDraftBudget,
   reviseBudget,
   transitionBudget,
+  createBudgetSignatureRequest,
+  getPublicBudgetSignatureRequest,
+  signPublicBudgetSignatureRequest,
+  listTabletBudgetSignatureRequestsForClinic,
+  createTabletBudgetSignatureSession,
   createPayment,
   createWalletDeposit,
   voidPayment,

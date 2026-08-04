@@ -1,5 +1,22 @@
 'use strict';
-const { Paciente, Clinica, PacienteRelacion, PacienteClinica, PacienteConsentimiento, CitaPaciente, Usuario, Tratamiento, PatientCustomField, PatientNutritionReport, PatientNutritionMeasurement, PatientOperationalEvent, sequelize } = require('../../models');
+const {
+  Paciente,
+  Clinica,
+  PacienteRelacion,
+  PacienteClinica,
+  PacienteConsentimiento,
+  CitaPaciente,
+  Usuario,
+  Tratamiento,
+  PatientCustomField,
+  PatientNutritionReport,
+  PatientNutritionMeasurement,
+  PatientOperationalEvent,
+  LeadIntake,
+  EconomicBudget,
+  EconomicBudgetSignatureRequest,
+  sequelize,
+} = require('../../models');
 const { Op, literal, QueryTypes } = require('sequelize');
 const crypto = require('crypto');
 const { normalizePhoneDigits } = require('../lib/phone');
@@ -289,6 +306,21 @@ const buildActorLabel = (usuario) => {
     || `Usuario ${usuario.id_usuario}`;
 };
 
+const PATIENT_OPERATIONAL_SOURCE_LABELS = Object.freeze({
+  agenda: 'Agenda',
+  header_search: 'el buscador superior',
+  lead_conversion: 'la conversión de lead',
+  patient_list: 'el listado de pacientes',
+  patient_modal: 'el formulario de alta',
+  quick_chat: 'QuickChat',
+  tutor_modal: 'el alta de tutor',
+});
+
+const patientOperationalSourceLabel = (source) => (
+  PATIENT_OPERATIONAL_SOURCE_LABELS[String(source || '').trim().toLowerCase()]
+  || 'Clinicaclick'
+);
+
 const formatAppointmentStateLabel = (estado) => {
   const normalized = (estado || '').toString().trim().toLowerCase();
   if (!normalized) return null;
@@ -425,6 +457,67 @@ const buildReviewActivityDescription = ({ rating, reason, reviewerName, clinicNa
   return {
     plain: fields.map(({ label, value }) => `${label}: ${value}`).join('\n') || 'Sin detalles',
     html: fields.map(({ label, value }) => `<div><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</div>`).join('') || '<div>Sin detalles</div>',
+  };
+};
+
+const formatMoneyEs = (value) => {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return null;
+  return new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' }).format(amount);
+};
+
+const formatBudgetStatusLabel = (status) => {
+  const labels = {
+    draft: 'Borrador',
+    presented: 'Pendiente de aceptación',
+    accepted: 'Aceptado',
+    partially_accepted: 'Aceptado parcialmente',
+    rejected: 'Rechazado',
+    expired: 'Caducado',
+    superseded: 'Sustituido',
+  };
+  const key = String(status || '').trim().toLowerCase();
+  return labels[key] || key.replace(/_/g, ' ');
+};
+
+const formatBudgetSignatureChannelLabel = (channel) => {
+  const labels = {
+    whatsapp: 'WhatsApp',
+    email: 'Email',
+    custom_email: 'Email',
+    tablet: 'Tablet de clínica',
+  };
+  return labels[String(channel || '').trim().toLowerCase()] || channel || 'Canal no definido';
+};
+
+const formatBudgetSignatureStatusLabel = (status) => {
+  const labels = {
+    pending: 'Pendiente',
+    sent: 'Enviado',
+    viewed: 'Abierto',
+    signed: 'Firmado',
+    failed: 'Fallido',
+    expired: 'Caducado',
+    cancelled: 'Cancelado',
+  };
+  return labels[String(status || '').trim().toLowerCase()] || status || 'Pendiente';
+};
+
+const buildBudgetActivityDescription = ({ budget, request = null, status = null }) => {
+  const fields = [];
+  if (budget?.number) fields.push({ label: 'Presupuesto', value: budget.number });
+  const total = formatMoneyEs(budget?.accepted_amount > 0 ? budget.accepted_amount : budget?.snapshotTotal);
+  if (total) fields.push({ label: 'Importe', value: total });
+  const state = status || budget?.status;
+  if (state) fields.push({ label: 'Estado', value: formatBudgetStatusLabel(state) });
+  if (request) {
+    fields.push({ label: 'Canal', value: formatBudgetSignatureChannelLabel(request.channel) });
+    if (request.recipient) fields.push({ label: 'Destino', value: request.recipient });
+    fields.push({ label: 'Firma', value: formatBudgetSignatureStatusLabel(request.status) });
+  }
+  return {
+    plain: fields.map(({ label, value }) => `${label}: ${value}`).join('\n') || 'Presupuesto',
+    html: fields.map(({ label, value }) => `<div><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</div>`).join('') || '<div>Presupuesto</div>',
   };
 };
 
@@ -1103,7 +1196,7 @@ exports.getPacienteById = async (req, res) => {
 exports.getPacienteActivity = async (req, res) => {
   try {
     const paciente = await findPacienteByIdentifier(req.params.id, {
-      attributes: ['id_paciente', 'public_id', 'clinica_id'],
+      attributes: ['id_paciente', 'public_id', 'clinica_id', 'fecha_alta', 'createdAt'],
       include: [{ model: PacienteClinica, as: 'clinicasVinculadas', required: false, attributes: ['clinica_id'] }],
     });
     if (!paciente) {
@@ -1118,7 +1211,7 @@ exports.getPacienteActivity = async (req, res) => {
     }
     const pacienteId = Number(paciente.id_paciente);
 
-    const [citas, appointmentStatusEvents] = await Promise.all([
+    const [citas, operationalEvents] = await Promise.all([
       CitaPaciente.findAll({
         where: {
           paciente_id: pacienteId,
@@ -1127,6 +1220,8 @@ exports.getPacienteActivity = async (req, res) => {
         attributes: [
           'id_cita',
           'paciente_id',
+          'clinica_id',
+          'lead_intake_id',
           'estado',
           'inicio',
           'tipo_cita',
@@ -1140,6 +1235,12 @@ exports.getPacienteActivity = async (req, res) => {
         include: [
           { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'telefono_movil'], required: false },
           { model: Tratamiento, as: 'tratamiento', attributes: ['id_tratamiento', 'nombre'], required: false },
+          {
+            model: LeadIntake,
+            as: 'lead',
+            attributes: ['id', 'source', 'source_detail', 'page_url'],
+            required: false,
+          },
         ],
         order: [['inicio', 'DESC']],
       }),
@@ -1148,7 +1249,7 @@ exports.getPacienteActivity = async (req, res) => {
             where: {
               patient_id: pacienteId,
               clinic_id: { [Op.in]: readableClinicIds },
-              event_type: APPOINTMENT_STATUS_EVENT_TYPE,
+              event_type: { [Op.in]: [...Object.values(PATIENT_EVENT_TYPES), APPOINTMENT_STATUS_EVENT_TYPE] },
             },
             attributes: [
               'id',
@@ -1169,7 +1270,7 @@ exports.getPacienteActivity = async (req, res) => {
     const actorIds = Array.from(new Set(
       [
         ...citas.flatMap((cita) => [Number(cita.created_by), Number(cita.updated_by)]),
-        ...appointmentStatusEvents.map((event) => Number(event.actor_user_id)),
+        ...operationalEvents.map((event) => Number(event.actor_user_id)),
       ]
         .filter((id) => Number.isFinite(id) && id > 0)
     ));
@@ -1185,17 +1286,127 @@ exports.getPacienteActivity = async (req, res) => {
     const usuariosById = new Map(usuarios.map((usuario) => [Number(usuario.id_usuario), usuario]));
     const items = [];
     const appointmentsWithStatusHistory = new Set(
-      appointmentStatusEvents
+      operationalEvents
+        .filter((event) => event.event_type === APPOINTMENT_STATUS_EVENT_TYPE)
         .map((event) => Number(event?.metadata?.appointment_id))
         .filter((id) => Number.isFinite(id) && id > 0)
     );
 
-    for (const event of appointmentStatusEvents) {
+    const operationalEventConfig = {
+      [PATIENT_EVENT_TYPES.created]: {
+        tipo: 'patient_created',
+        titulo: 'Alta del paciente',
+        icono: 'heroicons_outline:user-plus',
+        color: 'success',
+        descripcion: (sourceLabel) => `Paciente creado desde ${sourceLabel}.`,
+      },
+      [PATIENT_EVENT_TYPES.whatsappAuthorized]: {
+        tipo: 'patient_whatsapp_contact_authorized',
+        titulo: 'Contacto por WhatsApp autorizado',
+        icono: 'heroicons_outline:shield-check',
+        color: 'info',
+        descripcion: (sourceLabel) => `Autorización registrada desde ${sourceLabel}.`,
+      },
+      [PATIENT_EVENT_TYPES.whatsappConversationStarted]: {
+        tipo: 'patient_whatsapp_conversation_started',
+        titulo: 'Conversación de WhatsApp iniciada',
+        icono: 'heroicons_outline:chat-bubble-left-right',
+        color: 'info',
+        descripcion: (sourceLabel) => `Inicio registrado desde ${sourceLabel}.`,
+      },
+    };
+
+    for (const event of operationalEvents) {
+      if (event.event_type === APPOINTMENT_STATUS_EVENT_TYPE) {
+        const actor = usuariosById.get(Number(event.actor_user_id));
+        items.push(serializeAppointmentStatusActivity(event, {
+          patientId: pacienteId,
+          actorName: buildActorLabel(actor),
+        }));
+        continue;
+      }
+      const config = operationalEventConfig[event.event_type];
+      if (!config) continue;
       const actor = usuariosById.get(Number(event.actor_user_id));
-      items.push(serializeAppointmentStatusActivity(event, {
-        patientId: pacienteId,
-        actorName: buildActorLabel(actor),
-      }));
+      const sourceLabel = patientOperationalSourceLabel(event.source);
+      items.push({
+        id: `patient-operation-${event.id}`,
+        pacienteId: String(pacienteId),
+        fecha: event.occurred_at,
+        tipo: config.tipo,
+        titulo: config.titulo,
+        descripcion: config.descripcion(sourceLabel),
+        icono: config.icono,
+        color: config.color,
+        usuarioId: actor ? String(actor.id_usuario) : 'system',
+        usuarioNombre: buildActorLabel(actor),
+        detalles: {
+          source: event.source,
+          sourceLabel,
+          channel: event.channel || null,
+          ...(event.metadata && typeof event.metadata === 'object' ? event.metadata : {}),
+        },
+      });
+    }
+
+    if (!operationalEvents.some((event) => event.event_type === PATIENT_EVENT_TYPES.created)) {
+      const patientCreatedAt = new Date(paciente.fecha_alta || paciente.createdAt);
+      const leadCreationAppointment = citas
+        .map((row) => (typeof row.get === 'function' ? row.get({ plain: true }) : row))
+        .filter((cita) => {
+          if (!cita?.lead_intake_id || !cita?.lead) return false;
+          const appointmentCreatedAt = new Date(cita.created_at || cita.inicio);
+          return Number.isFinite(patientCreatedAt.getTime())
+            && Number.isFinite(appointmentCreatedAt.getTime())
+            && Math.abs(appointmentCreatedAt.getTime() - patientCreatedAt.getTime()) <= 10 * 60 * 1000;
+        })
+        .sort((left, right) => new Date(left.created_at || left.inicio).getTime() - new Date(right.created_at || right.inicio).getTime())[0];
+
+      if (leadCreationAppointment) {
+        const actor = usuariosById.get(Number(leadCreationAppointment.created_by));
+        const sourceDetail = String(leadCreationAppointment.lead?.source_detail || '').trim().toLowerCase();
+        const sourceLabel = sourceDetail.includes('chatbot')
+          ? 'el chatbot de la web'
+          : 'un lead de la web';
+        items.push({
+          id: `patient-created-from-lead-${pacienteId}`,
+          pacienteId: String(pacienteId),
+          fecha: paciente.fecha_alta || paciente.createdAt,
+          tipo: 'patient_created',
+          titulo: 'Alta del paciente',
+          descripcion: `Paciente creado al agendar una cita desde ${sourceLabel}.`,
+          icono: 'heroicons_outline:user-plus',
+          color: 'success',
+          usuarioId: actor ? String(actor.id_usuario) : 'system',
+          usuarioNombre: buildActorLabel(actor),
+          detalles: {
+            source: 'lead_appointment',
+            sourceLabel,
+            mode: 'appointment_from_lead',
+            lead_id: leadCreationAppointment.lead_intake_id,
+            appointment_id: leadCreationAppointment.id_cita,
+            lead_source: leadCreationAppointment.lead?.source || null,
+            lead_source_detail: leadCreationAppointment.lead?.source_detail || null,
+          },
+        });
+      } else {
+        items.push({
+          id: `patient-created-legacy-${pacienteId}`,
+          pacienteId: String(pacienteId),
+          fecha: paciente.fecha_alta || paciente.createdAt,
+          tipo: 'patient_created_legacy',
+          titulo: 'Alta del paciente',
+          descripcion: 'Registro anterior a la trazabilidad de altas; no consta el usuario ni el modo de creación.',
+          icono: 'heroicons_outline:user-plus',
+          color: 'info',
+          usuarioId: 'legacy',
+          usuarioNombre: null,
+          detalles: {
+            source: 'legacy',
+            sourceLabel: 'No disponible',
+          },
+        });
+      }
     }
     for (const citaRow of citas) {
       const cita = typeof citaRow.get === 'function' ? citaRow.get({ plain: true }) : citaRow;
@@ -1303,6 +1514,135 @@ exports.getPacienteActivity = async (req, res) => {
           estado: cita.estado,
         },
       });
+    }
+
+    if (EconomicBudget && EconomicBudgetSignatureRequest) {
+      const budgets = await EconomicBudget.findAll({
+        where: {
+          patient_id: pacienteId,
+          clinic_id: { [Op.in]: readableClinicIds },
+        },
+        attributes: [
+          'id',
+          'public_id',
+          'number',
+          'status',
+          'accepted_amount',
+          'presented_at',
+          'responded_at',
+          'created_at',
+          'updated_at',
+          'created_by',
+          'updated_by',
+        ],
+        order: [['updated_at', 'DESC'], ['id', 'DESC']],
+        limit: 40,
+      });
+      const budgetPlainRows = budgets.map((budget) => (typeof budget.get === 'function' ? budget.get({ plain: true }) : budget));
+      const budgetIds = budgetPlainRows.map((budget) => Number(budget.id)).filter((id) => Number.isFinite(id) && id > 0);
+      const budgetById = new Map(budgetPlainRows.map((budget) => [Number(budget.id), budget]));
+      const signatureRequests = budgetIds.length
+        ? await EconomicBudgetSignatureRequest.findAll({
+            where: { budget_id: { [Op.in]: budgetIds } },
+            order: [['created_at', 'DESC'], ['id', 'DESC']],
+            limit: 80,
+          })
+        : [];
+
+      for (const budget of budgetPlainRows) {
+        const status = String(budget.status || '').trim().toLowerCase();
+        if (!['presented', 'accepted', 'partially_accepted'].includes(status)) {
+          continue;
+        }
+        const at = status === 'presented'
+          ? (budget.presented_at || budget.updated_at || budget.created_at)
+          : (budget.responded_at || budget.updated_at || budget.created_at);
+        const descriptions = buildBudgetActivityDescription({ budget, status });
+        items.push({
+          id: `economic-budget-${budget.public_id}-${status}`,
+          pacienteId: String(pacienteId),
+          fecha: at,
+          tipo: status === 'presented' ? 'economic_budget_pending_acceptance' : 'economic_budget_accepted',
+          titulo: status === 'presented'
+            ? 'Presupuesto pendiente de aceptación'
+            : (status === 'partially_accepted' ? 'Presupuesto aceptado parcialmente' : 'Presupuesto aceptado'),
+          descripcion: descriptions.plain,
+          descripcion_html: descriptions.html,
+          icono: status === 'presented' ? 'heroicons_outline:document-text' : 'heroicons_outline:document-check',
+          color: status === 'presented' ? 'warning' : 'success',
+          usuarioId: budget.updated_by ? String(budget.updated_by) : (budget.created_by ? String(budget.created_by) : 'system'),
+          usuarioNombre: 'Sistema',
+          detalles: {
+            budgetId: budget.public_id,
+            budgetNumber: budget.number,
+            status,
+          },
+        });
+      }
+
+      for (const requestRow of signatureRequests) {
+        const request = typeof requestRow.get === 'function' ? requestRow.get({ plain: true }) : requestRow;
+        const budget = budgetById.get(Number(request.budget_id)) || {};
+        const descriptions = buildBudgetActivityDescription({ budget, request });
+        const baseDetails = {
+          budgetId: budget.public_id || null,
+          budgetNumber: budget.number || null,
+          signatureRequestId: request.public_id,
+          channel: request.channel,
+          recipient: request.recipient || null,
+          status: request.status,
+          publicUrl: request.public_url || null,
+        };
+        const sentAt = request.sent_at || request.created_at;
+        if (sentAt) {
+          items.push({
+            id: `economic-budget-signature-sent-${request.public_id}`,
+            pacienteId: String(pacienteId),
+            fecha: sentAt,
+            tipo: request.status === 'failed' ? 'economic_budget_signature_failed' : 'economic_budget_signature_sent',
+            titulo: request.status === 'failed' ? 'Envío de presupuesto fallido' : 'Presupuesto enviado a firma',
+            descripcion: descriptions.plain,
+            descripcion_html: descriptions.html,
+            icono: request.status === 'failed' ? 'heroicons_outline:exclamation-triangle' : 'heroicons_outline:paper-airplane',
+            color: request.status === 'failed' ? 'warning' : 'info',
+            usuarioId: request.created_by ? String(request.created_by) : 'system',
+            usuarioNombre: 'Sistema',
+            detalles: baseDetails,
+          });
+        }
+        if (request.viewed_at) {
+          items.push({
+            id: `economic-budget-signature-viewed-${request.public_id}`,
+            pacienteId: String(pacienteId),
+            fecha: request.viewed_at,
+            tipo: 'economic_budget_signature_viewed',
+            titulo: 'Presupuesto abierto por el paciente',
+            descripcion: descriptions.plain,
+            descripcion_html: descriptions.html,
+            icono: 'heroicons_outline:eye',
+            color: 'info',
+            usuarioId: 'system',
+            usuarioNombre: 'Sistema',
+            detalles: baseDetails,
+          });
+        }
+        if (request.signed_at) {
+          items.push({
+            id: `economic-budget-signature-signed-${request.public_id}`,
+            pacienteId: String(pacienteId),
+            fecha: request.signed_at,
+            tipo: 'economic_budget_signature_signed',
+            titulo: 'Presupuesto firmado',
+            descripcion: descriptions.plain,
+            descripcion_html: descriptions.html,
+            icono: 'heroicons_outline:document-check',
+            color: 'success',
+            usuarioId: 'system',
+            usuarioNombre: 'Sistema',
+            detalles: baseDetails,
+          });
+        }
+      }
     }
 
     const reviewEvents = await sequelize.query(

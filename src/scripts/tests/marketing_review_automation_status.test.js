@@ -38,13 +38,40 @@ async function main() {
       loaderCalls += 1;
       assert.strictEqual(scope, clinicScope);
       assert.deepEqual(options, { includeInactive: true });
-      return { id: 123, is_active: true };
+      return {
+        id: 123,
+        public_id: 'flw_review_req_clinic_66',
+        template_key: 'review_request_after_completed__clinic_66',
+        version: 2,
+        name: 'Solicitar reseñas automáticamente',
+        is_active: true,
+        nodes: [],
+      };
     },
   });
   assert.deepEqual(active, {
     success: true,
     clinic_id: 66,
     automation_enabled: true,
+    automation_template: {
+      id: 123,
+      public_id: 'flw_review_req_clinic_66',
+      template_key: 'review_request_after_completed__clinic_66',
+      version: 2,
+      name: 'Solicitar reseñas automáticamente',
+      is_active: true,
+      review_source: 'completed_treatment',
+      review_threshold: 5,
+      whatsapp_template_id: null,
+      template_name: 'clinicaclick_solicitar_resena',
+      review_gift_enabled: false,
+      review_gift_description: null,
+      review_display_clinic_name: null,
+      review_sender_name: null,
+      review_team_photo_url: null,
+      review_team_photo_overlay_color: '#4f46e5',
+      review_team_members_text: null,
+    },
   });
   assert.equal(loaderCalls, 1, 'el endpoint ligero solo debe leer la plantilla de automatización');
 

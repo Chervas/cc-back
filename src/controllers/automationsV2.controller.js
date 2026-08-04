@@ -777,6 +777,7 @@ const TRIGGER_TYPES_V2 = [
   { value: 'consent_required', label: 'Consentimiento necesario' },
   { value: 'lead_nuevo', label: 'Lead nuevo' },
   { value: 'patient_reactivation', label: 'Reactivación de pacientes' },
+  { value: 'scheduled_once', label: 'Una fecha programada' },
   { value: 'manual', label: 'Manual' },
 ];
 const TRIGGER_NODE_PREFIX = 'trigger/';
@@ -1088,6 +1089,29 @@ const NODE_TYPES_V2 = [
     default_config: { content: '' },
     config_schema: [
       { key: 'content', label: 'Contenido', input_type: 'text', required: true },
+    ],
+  },
+  {
+    type: 'action/update_google_special_hours',
+    category: 'action',
+    label: 'Actualizar horario especial de Google',
+    description: 'Publica una apertura o cierre especial configurado para la ficha de Google de la clínica.',
+    output_keys: ['on_success', 'on_fail'],
+    runtime_status: 'real',
+    default_config: {
+      period: null,
+      time_zone: 'Europe/Madrid',
+      auto_deactivate_after_execution: true,
+    },
+    config_schema: [
+      { key: 'period', label: 'Apertura o cierre', input_type: 'json', required: true },
+      { key: 'time_zone', label: 'Zona horaria', input_type: 'string', required: true },
+      {
+        key: 'auto_deactivate_after_execution',
+        label: 'Desactivar tras ejecutar',
+        input_type: 'boolean',
+        required: false,
+      },
     ],
   },
   {
@@ -1469,6 +1493,30 @@ function normalizeTriggerConfigForTemplate({ triggerType, entryNodeId, nodes }) 
     };
   }
 
+  if (normalizedTriggerType === 'scheduled_once') {
+    const scheduleAt = cleanString(rawConfig.schedule_at);
+    const scheduleDate = scheduleAt ? new Date(scheduleAt) : null;
+    if (!scheduleDate || !Number.isFinite(scheduleDate.getTime())) {
+      return {
+        ok: false,
+        error: 'invalid_trigger_config',
+        message: 'La automatización programada necesita una fecha válida.',
+      };
+    }
+    return {
+      ok: true,
+      trigger_config: {
+        managed_feature: cleanString(rawConfig.managed_feature) || null,
+        configured: parseBool(rawConfig.configured, false) === true,
+        schedule_at: scheduleDate.toISOString(),
+        time_zone: cleanString(rawConfig.time_zone) || 'Europe/Madrid',
+        period: isObject(rawConfig.period) ? rawConfig.period : null,
+        auto_deactivate_after_execution: parseBool(rawConfig.auto_deactivate_after_execution, true) === true,
+        last_executed_at: rawConfig.last_executed_at || null,
+      },
+    };
+  }
+
   if (
     normalizedTriggerType === 'lead_nuevo'
     && cleanString(rawConfig.managed_feature) === 'lead_auto_reply'
@@ -1664,6 +1712,8 @@ function applyTriggerConfigToNodes({ triggerType, entryNodeId, nodes, triggerCon
     && isObject(triggerConfig)
     && cleanString(triggerConfig.managed_feature) === 'lead_auto_reply'
   ) {
+    sanitizedTriggerConfig = { ...triggerConfig };
+  } else if (normalizedTriggerType === 'scheduled_once' && isObject(triggerConfig)) {
     sanitizedTriggerConfig = { ...triggerConfig };
   }
 

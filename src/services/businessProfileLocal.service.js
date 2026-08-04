@@ -6,6 +6,10 @@ const db = require('../../models');
 const {
   resolveEffectiveMarketingAssetInventory,
 } = require('./effectiveMarketingAssets.service');
+const {
+  DEFAULT_TIME_ZONE,
+  resolveClinicTimeZone,
+} = require('./clinicOpeningHours.service');
 
 const {
   ClinicBusinessLocation,
@@ -21,7 +25,10 @@ const {
 } = db;
 
 const GOOGLE_MY_BUSINESS_API = 'https://mybusiness.googleapis.com/v4';
+const GOOGLE_BUSINESS_INFORMATION_API = 'https://mybusinessbusinessinformation.googleapis.com/v1';
 const DAY_MS = 86400000;
+const MAX_SPECIAL_HOURS_PLAN_ITEMS = 80;
+const MAX_SPECIAL_HOURS_DAYS = 730;
 const REVIEW_OBJECTIVE_ID = 'mass_sends';
 const BUSINESS_PROFILE_ASSET_TYPE = 'google.business_profile';
 const GBP_MEDIA_CATEGORIES = Object.freeze([
@@ -283,7 +290,7 @@ function serializeVerification(raw, location) {
   };
 }
 
-function serializeLocation(location, { assignmentOrigin = null } = {}) {
+function serializeLocation(location, { assignmentOrigin = null, timeZone = DEFAULT_TIME_ZONE } = {}) {
   const raw = rawPayload(location);
   const suspended = location.is_suspended === true;
   const verification = serializeVerification(raw, location);
@@ -317,6 +324,10 @@ function serializeLocation(location, { assignmentOrigin = null } = {}) {
     mapsUri: raw.metadata?.mapsUri || null,
     newReviewUri: raw.metadata?.newReviewUri || null,
     regularHours: raw.regularHours || null,
+    specialHours: raw.specialHours || null,
+    specialHoursPlan: raw.clinicaclick_special_hours_plan || null,
+    specialHoursSyncedAt: raw.clinicaclick_special_hours_synced_at || null,
+    timeZone: cleanString(raw.clinicaclick_special_hours_plan?.timeZone) || timeZone || DEFAULT_TIME_ZONE,
     moreHours: Array.isArray(raw.moreHours) ? raw.moreHours : [],
     serviceArea: raw.serviceArea || null,
     labels: Array.isArray(raw.labels) ? raw.labels : [],
@@ -339,6 +350,12 @@ async function resolveEffectiveLocations(clinicIdRaw, dependencies = {}) {
   const inventoryResolver = dependencies.resolveEffectiveMarketingAssetInventory
     || resolveEffectiveMarketingAssetInventory;
   const locationModel = dependencies.ClinicBusinessLocation || ClinicBusinessLocation;
+  const clinicModel = dependencies.Clinica || Clinica;
+  const clinic = clinicModel ? await clinicModel.findByPk(clinicId, {
+    attributes: ['id_clinica', 'configuracion'],
+    raw: true,
+  }) : null;
+  const timeZone = resolveClinicTimeZone(clinic);
   const inventory = await inventoryResolver({
     clinicIdRaw: clinicId,
     groupIdRaw: null,
@@ -349,7 +366,7 @@ async function resolveEffectiveLocations(clinicIdRaw, dependencies = {}) {
     : [];
   const mappingIds = assets.map((asset) => toInt(asset.mapping_id)).filter(Boolean);
   if (!mappingIds.length) {
-    return { clinicId, inventory, locations: [], assets: [], primaryLocationId: null };
+    return { clinicId, inventory, locations: [], assets: [], primaryLocationId: null, timeZone };
   }
   const rows = await locationModel.findAll({
     where: { id: { [Op.in]: mappingIds }, is_active: true },
@@ -365,7 +382,7 @@ async function resolveEffectiveLocations(clinicIdRaw, dependencies = {}) {
   const locations = orderedAssets
     .map((asset) => byId.get(toInt(asset.mapping_id)))
     .filter(Boolean);
-  return { clinicId, inventory, locations, assets: orderedAssets, primaryLocationId };
+  return { clinicId, inventory, locations, assets: orderedAssets, primaryLocationId, timeZone };
 }
 
 async function resolvePhotoMutationClinicIds(resolved, dependencies = {}) {
@@ -415,6 +432,7 @@ function buildStatus(resolved) {
     .map((asset) => [toInt(asset.mapping_id), asset.assignment_origin || null]));
   const locations = (resolved.locations || []).map((location) => serializeLocation(location, {
     assignmentOrigin: originById.get(Number(location.id)) || null,
+    timeZone: resolved.timeZone || DEFAULT_TIME_ZONE,
   }));
   return { success: true, hasMappings: locations.length > 0, locations };
 }
@@ -710,6 +728,139 @@ async function listReviews(resolved, query = {}) {
   return { success: true, items: rows, total, limit, offset };
 }
 
+async function findReviewForMutation(resolved, reviewIdRaw) {
+  const locationIds = (resolved.locations || []).map((location) => Number(location.id)).filter(Boolean);
+  if (!locationIds.length) {
+    const error = new Error('business_profile_location_not_configured');
+    error.status = 409;
+    throw error;
+  }
+  const reviewId = toInt(reviewIdRaw);
+  const reviewName = cleanString(reviewIdRaw);
+  const where = { business_location_id: { [Op.in]: locationIds } };
+  if (reviewId) where.id = reviewId;
+  else if (reviewName) where.review_name = reviewName;
+  else {
+    const error = new Error('business_profile_review_invalid');
+    error.status = 400;
+    throw error;
+  }
+  const review = await BusinessProfileReview.findOne({ where });
+  if (!review) {
+    const error = new Error('business_profile_review_not_found');
+    error.status = 404;
+    throw error;
+  }
+  const location = (resolved.locations || [])
+    .find((item) => Number(item.id) === Number(review.business_location_id)) || null;
+  if (!location) {
+    const error = new Error('business_profile_review_scope_mismatch');
+    error.status = 409;
+    throw error;
+  }
+  return { review, location };
+}
+
+function serializeReviewRow(review) {
+  if (!review) return null;
+  const row = typeof review.get === 'function' ? review.get({ plain: true }) : review;
+  const { raw_payload: _rawPayload, ...safe } = row;
+  return safe;
+}
+
+async function updateReviewReply(resolved, reviewIdRaw, payload = {}) {
+  const comment = cleanString(payload.comment);
+  if (!comment) {
+    const error = new Error('business_profile_review_reply_required');
+    error.status = 400;
+    throw error;
+  }
+  if (comment.length > 4096) {
+    const error = new Error('business_profile_review_reply_too_long');
+    error.status = 400;
+    throw error;
+  }
+  const { review, location } = await findReviewForMutation(resolved, reviewIdRaw);
+  const reviewName = cleanString(review.review_name);
+  if (!reviewName || !reviewName.includes('/reviews/')) {
+    const error = new Error('business_profile_review_name_invalid');
+    error.status = 409;
+    throw error;
+  }
+
+  const accessToken = await ensureGoogleAccessToken(location.google_connection_id);
+  let response;
+  try {
+    response = await axios.put(
+      `${GOOGLE_MY_BUSINESS_API}/${reviewName}/reply`,
+      { comment },
+      { headers: { Authorization: `Bearer ${accessToken}` }, timeout: 20000 }
+    );
+  } catch (providerError) {
+    const error = new Error('business_profile_review_reply_sync_failed');
+    error.status = providerError?.response?.status === 403 ? 403 : 502;
+    error.cause = providerError;
+    throw error;
+  }
+
+  const providerReply = response?.data || {};
+  const replyComment = cleanString(providerReply.comment) || comment;
+  const replyUpdateTime = providerReply.updateTime
+    ? new Date(providerReply.updateTime)
+    : new Date();
+  const raw = review.raw_payload && typeof review.raw_payload === 'object' ? review.raw_payload : {};
+  await review.update({
+    reply_comment: replyComment,
+    reply_update_time: replyUpdateTime,
+    has_reply: true,
+    raw_payload: {
+      ...raw,
+      reviewReply: {
+        ...(raw.reviewReply || {}),
+        ...providerReply,
+        comment: replyComment,
+        updateTime: replyUpdateTime.toISOString(),
+      },
+    },
+  });
+
+  return { success: true, review: serializeReviewRow(review) };
+}
+
+async function deleteReviewReply(resolved, reviewIdRaw) {
+  const { review, location } = await findReviewForMutation(resolved, reviewIdRaw);
+  const reviewName = cleanString(review.review_name);
+  if (!reviewName || !reviewName.includes('/reviews/')) {
+    const error = new Error('business_profile_review_name_invalid');
+    error.status = 409;
+    throw error;
+  }
+
+  const accessToken = await ensureGoogleAccessToken(location.google_connection_id);
+  try {
+    await axios.delete(
+      `${GOOGLE_MY_BUSINESS_API}/${reviewName}/reply`,
+      { headers: { Authorization: `Bearer ${accessToken}` }, timeout: 20000 }
+    );
+  } catch (providerError) {
+    const error = new Error('business_profile_review_reply_delete_failed');
+    error.status = providerError?.response?.status === 403 ? 403 : 502;
+    error.cause = providerError;
+    throw error;
+  }
+
+  const raw = review.raw_payload && typeof review.raw_payload === 'object' ? review.raw_payload : {};
+  const { reviewReply: _removedReply, ...rawWithoutReply } = raw;
+  await review.update({
+    reply_comment: null,
+    reply_update_time: null,
+    has_reply: false,
+    raw_payload: rawWithoutReply,
+  });
+
+  return { success: true, review: serializeReviewRow(review) };
+}
+
 async function listPosts(resolved, query = {}) {
   const locationIds = resolved.locations.map((location) => Number(location.id));
   const limit = Math.max(1, clampPage(query.limit, 10, 50));
@@ -859,6 +1010,52 @@ function buildContent(resolved) {
     services: serviceItems.map(normalizeServiceItem),
     photos: mediaItems.map(normalizeMediaItem).filter((item) => item.url),
     syncedAt: raw.clinicaclick_content_synced_at || null,
+  };
+}
+
+function isBusinessProfileLogoCandidate(photo) {
+  const category = String(photo?.category || '').toUpperCase();
+  return !photo?.isVideo
+    && ['LOGO', 'PROFILE'].includes(category)
+    && /^https?:\/\//i.test(String(photo?.url || ''));
+}
+
+async function importLogoFromBusinessProfile(resolved, payload = {}) {
+  const clinicId = toInt(resolved?.clinicId);
+  if (!clinicId) {
+    const error = new Error('local_clinic_invalid');
+    error.status = 400;
+    throw error;
+  }
+  if (!Clinica) {
+    const error = new Error('clinic_model_unavailable');
+    error.status = 500;
+    throw error;
+  }
+
+  const photoId = cleanString(payload.photoId || payload.photo_id);
+  const content = buildContent(resolved);
+  const logoCandidates = (content.photos || []).filter(isBusinessProfileLogoCandidate);
+  const selected = photoId
+    ? logoCandidates.find((photo) => String(photo.id) === photoId)
+    : logoCandidates[0];
+
+  if (!selected) {
+    const error = new Error('business_profile_logo_not_found');
+    error.status = 404;
+    throw error;
+  }
+
+  await Clinica.update(
+    { url_avatar: selected.url },
+    { where: { id_clinica: clinicId } }
+  );
+
+  return {
+    success: true,
+    clinicId,
+    url_avatar: selected.url,
+    photo: selected,
   };
 }
 
@@ -1183,6 +1380,289 @@ async function publishPhoto(resolved, payload = {}) {
   return { success: true, photo: normalizeMediaItem(media, 0) };
 }
 
+function specialHoursError(message, status = 400) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+function normalizeIsoDate(value) {
+  const match = cleanString(value).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+    return null;
+  }
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+function addIsoDateDays(value, days) {
+  const normalized = normalizeIsoDate(value);
+  if (!normalized) return null;
+  const [year, month, day] = normalized.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day + Number(days || 0)));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
+}
+
+function isoDateToGoogleDate(value) {
+  const normalized = normalizeIsoDate(value);
+  if (!normalized) return null;
+  const [year, month, day] = normalized.split('-').map(Number);
+  return { year, month, day };
+}
+
+function normalizeHHmm(value) {
+  const match = cleanString(value).match(/^(\d{2}):(\d{2})$/);
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+}
+
+function hhmmToGoogleTime(value) {
+  const normalized = normalizeHHmm(value);
+  if (!normalized) return null;
+  const [hours, minutes] = normalized.split(':').map(Number);
+  return minutes ? { hours, minutes } : { hours };
+}
+
+function isValidTimeZone(value) {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value }).format(new Date());
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+function normalizeSpecialHoursPlan(payload = {}, fallbackTimeZone = DEFAULT_TIME_ZONE) {
+  const source = Array.isArray(payload?.periods) ? payload.periods : [];
+  if (source.length > MAX_SPECIAL_HOURS_PLAN_ITEMS) {
+    throw specialHoursError('business_profile_special_hours_too_many_items');
+  }
+  const requestedTimeZone = cleanString(payload?.timeZone || payload?.timezone || fallbackTimeZone);
+  const timeZone = isValidTimeZone(requestedTimeZone) ? requestedTimeZone : null;
+  if (!timeZone) throw specialHoursError('business_profile_special_hours_timezone_invalid');
+
+  let expandedDayCount = 0;
+  const rulesByDate = new Map();
+  const periods = source.map((item, index) => {
+    const kind = cleanString(item?.kind || item?.type).toLowerCase();
+    if (kind !== 'closed' && kind !== 'open') {
+      throw specialHoursError('business_profile_special_hours_kind_invalid');
+    }
+    const startDate = normalizeIsoDate(item?.startDate || item?.start_date);
+    const endDate = normalizeIsoDate(item?.endDate || item?.end_date || startDate);
+    if (!startDate || !endDate || endDate < startDate) {
+      throw specialHoursError('business_profile_special_hours_dates_invalid');
+    }
+    const openTime = kind === 'open' ? normalizeHHmm(item?.openTime || item?.open_time) : null;
+    const closeTime = kind === 'open' ? normalizeHHmm(item?.closeTime || item?.close_time) : null;
+    if (kind === 'open' && (!openTime || !closeTime || closeTime <= openTime)) {
+      throw specialHoursError('business_profile_special_hours_times_invalid');
+    }
+
+    let cursor = startDate;
+    while (cursor && cursor <= endDate) {
+      expandedDayCount += 1;
+      if (expandedDayCount > MAX_SPECIAL_HOURS_DAYS) {
+        throw specialHoursError('business_profile_special_hours_range_too_large');
+      }
+      const dayRules = rulesByDate.get(cursor) || [];
+      if (kind === 'closed' && dayRules.length) {
+        throw specialHoursError('business_profile_special_hours_overlap');
+      }
+      if (kind === 'open') {
+        if (dayRules.some((rule) => rule.kind === 'closed')) {
+          throw specialHoursError('business_profile_special_hours_overlap');
+        }
+        const openStart = Number(openTime.slice(0, 2)) * 60 + Number(openTime.slice(3));
+        const openEnd = Number(closeTime.slice(0, 2)) * 60 + Number(closeTime.slice(3));
+        if (dayRules.some((rule) => rule.kind === 'open' && openStart < rule.end && openEnd > rule.start)) {
+          throw specialHoursError('business_profile_special_hours_overlap');
+        }
+        dayRules.push({ kind, start: openStart, end: openEnd });
+      } else {
+        dayRules.push({ kind });
+      }
+      rulesByDate.set(cursor, dayRules);
+      cursor = addIsoDateDays(cursor, 1);
+    }
+
+    return {
+      id: (cleanString(item?.id) || '').slice(0, 80) || `special-hours-${index + 1}`,
+      kind,
+      label: (cleanString(item?.label) || '').slice(0, 120),
+      startDate,
+      endDate,
+      openTime,
+      closeTime,
+    };
+  });
+
+  return { version: 1, timeZone, periods };
+}
+
+function buildGoogleSpecialHourPeriods(plan) {
+  const result = [];
+  for (const item of Array.isArray(plan?.periods) ? plan.periods : []) {
+    let cursor = item.startDate;
+    while (cursor && cursor <= item.endDate) {
+      const startDate = isoDateToGoogleDate(cursor);
+      if (item.kind === 'closed') {
+        result.push({ startDate, endDate: startDate, closed: true });
+      } else {
+        result.push({
+          startDate,
+          endDate: startDate,
+          openTime: hhmmToGoogleTime(item.openTime),
+          closeTime: hhmmToGoogleTime(item.closeTime),
+        });
+      }
+      cursor = addIsoDateDays(cursor, 1);
+    }
+  }
+  return result;
+}
+
+async function updateSpecialHours(resolved, payload = {}) {
+  const location = resolved?.locations?.[0] || null;
+  if (!location) throw specialHoursError('business_profile_location_not_configured', 409);
+  const raw = rawPayload(location);
+  const regularPeriods = raw.regularHours?.periods || location.regularHours?.periods || [];
+  if (!Array.isArray(regularPeriods) || !regularPeriods.length) {
+    throw specialHoursError('business_profile_regular_hours_required', 409);
+  }
+  const locationName = cleanString(location.location_id);
+  if (!/^locations\/[^/]+$/.test(locationName)) {
+    throw specialHoursError('business_profile_location_name_invalid', 409);
+  }
+
+  const plan = normalizeSpecialHoursPlan(payload, resolved?.timeZone || DEFAULT_TIME_ZONE);
+  const specialHours = { specialHourPeriods: buildGoogleSpecialHourPeriods(plan) };
+  const accessToken = await ensureGoogleAccessToken(location.google_connection_id);
+  let response;
+  try {
+    response = await axios.patch(
+      `${GOOGLE_BUSINESS_INFORMATION_API}/${locationName}`,
+      { name: locationName, specialHours },
+      {
+        params: { updateMask: 'specialHours' },
+        headers: { Authorization: `Bearer ${accessToken}` },
+        timeout: 20000,
+      }
+    );
+  } catch (providerError) {
+    const error = specialHoursError('business_profile_special_hours_sync_failed', 502);
+    error.cause = providerError;
+    throw error;
+  }
+
+  const syncedAt = new Date().toISOString();
+  const providerSpecialHours = response?.data?.specialHours || specialHours;
+  const persistedPlan = { ...plan, syncedAt, sourceClinicId: Number(resolved.clinicId) };
+  await sequelize.transaction(async (transaction) => {
+    const locked = await ClinicBusinessLocation.findByPk(toInt(location.id), {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!locked) throw specialHoursError('business_profile_location_not_configured', 409);
+    const currentRaw = rawPayload(locked);
+    await locked.update({
+      raw_payload: {
+        ...currentRaw,
+        specialHours: providerSpecialHours,
+        clinicaclick_special_hours_plan: persistedPlan,
+        clinicaclick_special_hours_synced_at: syncedAt,
+      },
+      sync_status: 'synced',
+      last_synced_at: new Date(syncedAt),
+    }, { transaction });
+  });
+
+  return {
+    success: true,
+    specialHours: providerSpecialHours,
+    plan: persistedPlan,
+    timeZone: plan.timeZone,
+    syncedAt,
+  };
+}
+
+function todayInTimeZone(timeZone = DEFAULT_TIME_ZONE, date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function preserveSpecialHoursOutsideRange(item, incoming, today) {
+  const originalStart = normalizeIsoDate(item?.startDate || item?.start_date);
+  const originalEnd = normalizeIsoDate(item?.endDate || item?.end_date || originalStart);
+  if (!originalStart || !originalEnd || originalEnd < today) return [];
+  const startDate = originalStart < today ? today : originalStart;
+  if (cleanString(item?.id) === incoming.id) return [];
+  if (originalEnd < incoming.startDate || startDate > incoming.endDate) {
+    return [{ ...item, startDate, endDate: originalEnd }];
+  }
+
+  const baseId = (cleanString(item?.id) || 'special-hours').slice(0, 48);
+  const segments = [];
+  if (startDate < incoming.startDate) {
+    const endDate = addIsoDateDays(incoming.startDate, -1);
+    if (endDate && endDate >= startDate) {
+      segments.push({
+        ...item,
+        id: `${baseId}-before-${incoming.startDate}`.slice(0, 80),
+        startDate,
+        endDate,
+      });
+    }
+  }
+  if (originalEnd > incoming.endDate) {
+    const afterStart = addIsoDateDays(incoming.endDate, 1);
+    if (afterStart && afterStart <= originalEnd) {
+      segments.push({
+        ...item,
+        id: `${baseId}-after-${incoming.endDate}`.slice(0, 80),
+        startDate: afterStart,
+        endDate: originalEnd,
+      });
+    }
+  }
+  return segments;
+}
+
+async function applyScheduledSpecialHoursPeriod(clinicIdRaw, payload = {}) {
+  const resolved = await resolveEffectiveLocations(clinicIdRaw);
+  const location = resolved?.locations?.[0] || null;
+  if (!location) throw specialHoursError('business_profile_location_not_configured', 409);
+
+  const requested = normalizeSpecialHoursPlan({
+    timeZone: payload.timeZone || payload.time_zone || resolved.timeZone,
+    periods: [payload.period || payload],
+  }, resolved.timeZone);
+  const incoming = requested.periods[0];
+  const raw = rawPayload(location);
+  const storedPlan = raw.clinicaclick_special_hours_plan;
+  const storedPeriods = Array.isArray(storedPlan?.periods) ? storedPlan.periods : [];
+  const today = todayInTimeZone(requested.timeZone);
+  const preserved = storedPeriods.flatMap((item) => preserveSpecialHoursOutsideRange(item, incoming, today));
+
+  return updateSpecialHours(resolved, {
+    timeZone: requested.timeZone,
+    periods: [...preserved, incoming],
+  });
+}
+
 function googleTimeToHHmm(value) {
   if (!value || typeof value !== 'object') return null;
   const rawHours = value.hours ?? value.hour;
@@ -1271,6 +1751,54 @@ function normalizeGoogleHoursPeriods(periods) {
   return rows.sort((left, right) => left.dia_semana - right.dia_semana || left.hora_inicio.localeCompare(right.hora_inicio));
 }
 
+function regularHoursPeriodsFromResolved(resolved) {
+  const location = resolved?.locations?.[0] || null;
+  if (!location) return [];
+  const raw = rawPayload(location);
+  return location.regularHours?.periods
+    || location.regular_hours?.periods
+    || raw.regularHours?.periods
+    || raw.regular_hours?.periods
+    || [];
+}
+
+function normalizeStoredClinicHours(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .filter((row) => row?.activo === true || Number(row?.activo) === 1)
+    .map((row) => ({
+      dia_semana: Number(row.dia_semana),
+      activo: true,
+      hora_inicio: String(row.hora_inicio || '').slice(0, 5),
+      hora_fin: String(row.hora_fin || '').slice(0, 5),
+    }))
+    .filter((row) => Number.isInteger(row.dia_semana) && /^\d{2}:\d{2}$/.test(row.hora_inicio) && /^\d{2}:\d{2}$/.test(row.hora_fin))
+    .sort((left, right) => left.dia_semana - right.dia_semana || left.hora_inicio.localeCompare(right.hora_inicio));
+}
+
+async function getRegularHoursImportStatus(resolved, dependencies = {}) {
+  const ClinicaHorarioModel = dependencies.ClinicaHorario || ClinicaHorario;
+  if (!ClinicaHorarioModel) {
+    const error = new Error('clinic_hours_model_unavailable');
+    error.status = 503;
+    throw error;
+  }
+  const googleRows = normalizeGoogleHoursPeriods(regularHoursPeriodsFromResolved(resolved));
+  const storedRows = await ClinicaHorarioModel.findAll({
+    where: { clinica_id: resolved.clinicId },
+    attributes: ['dia_semana', 'activo', 'hora_inicio', 'hora_fin'],
+    order: [['dia_semana', 'ASC'], ['hora_inicio', 'ASC'], ['id', 'ASC']],
+    raw: true,
+  });
+  const clinicRows = normalizeStoredClinicHours(storedRows);
+  return {
+    success: true,
+    matches: googleRows.length > 0 && JSON.stringify(googleRows) === JSON.stringify(clinicRows),
+    importable: googleRows.length > 0,
+    google_segments: googleRows.length,
+    clinic_segments: clinicRows.length,
+  };
+}
+
 async function importRegularHoursToClinic(resolved) {
   if (!ClinicaHorario) {
     const error = new Error('clinic_hours_model_unavailable');
@@ -1283,12 +1811,7 @@ async function importRegularHoursToClinic(resolved) {
     error.status = 409;
     throw error;
   }
-  const raw = rawPayload(location);
-  const periods = location.regularHours?.periods
-    || location.regular_hours?.periods
-    || raw.regularHours?.periods
-    || raw.regular_hours?.periods
-    || [];
+  const periods = regularHoursPeriodsFromResolved(resolved);
   const rows = normalizeGoogleHoursPeriods(periods).map((row) => ({
     ...row,
     clinica_id: resolved.clinicId,
@@ -1330,12 +1853,18 @@ module.exports = {
   buildTimeseries,
   buildSeasonality,
   listReviews,
+  updateReviewReply,
+  deleteReviewReply,
   listPosts,
   buildContent,
   buildReviewInsights,
   buildDashboard,
+  updateSpecialHours,
+  applyScheduledSpecialHoursPeriod,
   importRegularHoursToClinic,
+  getRegularHoursImportStatus,
   publishPhoto,
+  importLogoFromBusinessProfile,
   serializeLocation,
   normalizeServiceItem,
   normalizeMediaItem,
@@ -1343,4 +1872,7 @@ module.exports = {
   collapseMetricRows,
   metricValueByDate,
   isPublishableBusinessProfileMediaAsset,
+  normalizeSpecialHoursPlan,
+  buildGoogleSpecialHourPeriods,
+  preserveSpecialHoursOutsideRange,
 };

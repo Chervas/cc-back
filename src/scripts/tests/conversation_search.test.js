@@ -25,30 +25,57 @@ function collectLiteralSql(value, out = []) {
   return out;
 }
 
+function collectStringValues(value, out = []) {
+  if (typeof value === 'string') {
+    out.push(value);
+    return out;
+  }
+  if (!value || typeof value !== 'object') return out;
+  for (const key of Reflect.ownKeys(value)) {
+    const child = value[key];
+    if (Array.isArray(child)) {
+      child.forEach((item) => collectStringValues(item, out));
+    } else {
+      collectStringValues(child, out);
+    }
+  }
+  return out;
+}
+
 async function run() {
   assert.equal(__testing.normalizeSearchQuery('  Jose   Miguel  MOD  '), 'Jose Miguel MOD');
   assert.equal(__testing.normalizeTextSearchValue('Iñigo García'), 'inigo garcia');
-
-  const clause = __testing.buildConversationSearchClause('Jose Miguel MOD');
-  const literalSql = collectLiteralSql(clause).join('\n');
-
-  assert.match(
-    literalSql,
-    /SELECT DISTINCT mpli\.conversation_id[\s\S]*WHERE mpli\.conversation_id IS NOT NULL/,
-    'Linked marketing contacts must be searchable by conversation_id'
+  assert.ok(
+    __testing.buildPhoneSearchCandidates('654695552').includes('+34654695552'),
+    'Spanish local mobile searches must include the E.164 candidate used by WhatsApp conversations'
   );
-  assert.match(
-    literalSql,
-    /`Conversation`\.`patient_id` IS NULL AND `Conversation`\.`lead_id` IS NULL[\s\S]*SELECT DISTINCT mpli\.conversation_id/,
-    'Marketing list contact matches must only apply to conversations without patient or lead'
+
+  const clause = await __testing.buildConversationSearchClause('Jose Miguel MOD');
+  assert.ok(
+    collectStringValues(clause).includes('jose%'),
+    'Conversation name searches must preserve prefix matching for every name token'
+  );
+
+  const numericNameClause = await __testing.buildConversationSearchClause('test 3');
+  assert.ok(
+    collectStringValues(numericNameClause).includes('3%'),
+    'Numeric name tokens must not be discarded, otherwise "test 3" matches every "test" conversation'
+  );
+
+  const phoneClause = await __testing.buildConversationSearchClause('654695552');
+  const phoneLiteralSql = collectLiteralSql(phoneClause).join('\n');
+  assert.match(phoneLiteralSql, /\+34654695552/);
+  assert.match(phoneLiteralSql, /mpli\.phone IN/);
+  assert.doesNotMatch(
+    phoneLiteralSql,
+    /mpli\.phone[\s\S]*LIKE/,
+    'Phone-only QuickChat searches must not scan MarketingPatientListItems with LIKE'
   );
   assert.doesNotMatch(
-    literalSql,
-    /mpli\.phone IS NULL OR mpli\.phone = ''/,
-    'Linked marketing contacts must not require an empty phone to match by name'
+    phoneLiteralSql,
+    /JSON_EXTRACT\(mpli\.custom_fields/,
+    'Phone-only QuickChat searches must avoid the broad marketing custom_fields fallback'
   );
-  assert.match(literalSql, /JSON_EXTRACT\(mpli\.custom_fields, '\$\.nombre'\)/);
-  assert.match(literalSql, /JSON_EXTRACT\(mpli\.custom_fields, '\$\.apellidos'\)/);
 
   assert.equal(
     __testing.getQuickChatConversationCategory({ channel: 'internal', patient_id: 123, contact_id: 'team' }),

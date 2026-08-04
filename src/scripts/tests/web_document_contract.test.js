@@ -119,6 +119,20 @@ function testSectionColumnTracksUseSafeTwelveColumnGrid() {
   };
   assert.equal(validateWebDocument(valid).valid, true);
 
+  const twelveColumns = buildValidWebDocument();
+  twelveColumns.nodes.section_hero.props.layout = 'grid';
+  twelveColumns.nodes.section_hero.props.columns = 12;
+  twelveColumns.nodes.section_hero.props.column_tracks = {
+    desktop: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    tablet: [2, 2, 2, 2, 2, 2],
+    mobile: [12],
+  };
+  twelveColumns.nodes.section_hero.responsive = {
+    tablet: { columns: 6 },
+    mobile: { columns: 1 },
+  };
+  assert.equal(validateWebDocument(twelveColumns).valid, true);
+
   const wrongTotal = buildValidWebDocument();
   wrongTotal.nodes.section_hero.props.layout = 'grid';
   wrongTotal.nodes.section_hero.props.columns = 2;
@@ -378,8 +392,13 @@ function testTypedFaqIsPlainTextAndLeafOnly() {
 
 function testPageSchemaUsesClosedPresets() {
   const document = buildValidWebDocument();
+  document.pages[0].template_type = 'post';
   document.pages[0].seo.schema = { page_type: 'medical_web_page', include_faq: false };
   assert.equal(assertValidWebDocument(document).valid, true);
+
+  const arbitraryTemplate = clone(document);
+  arbitraryTemplate.pages[0].template_type = 'archive';
+  assertInvalid(arbitraryTemplate, 'enum');
 
   const arbitraryType = clone(document);
   arbitraryType.pages[0].seo.schema.page_type = 'local_business';

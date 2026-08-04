@@ -268,6 +268,10 @@
           "maxLength": 160,
           "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
         },
+        "template_type": {
+          "type": "string",
+          "enum": ["standard", "post", "category"]
+        },
         "root_node_ids": {
           "type": "array",
           "minItems": 1,
@@ -389,14 +393,14 @@
         "columns": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 4
+          "maximum": 12
         }
       }
     },
     "columnTrackList": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 4,
+      "maxItems": 12,
       "items": {
         "type": "integer",
         "minimum": 1,
@@ -433,6 +437,48 @@
         }
       }
     },
+    "columnHeights": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "desktop": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2000
+        },
+        "tablet": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2000
+        },
+        "mobile": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2000
+        }
+      }
+    },
+    "columnOrders": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "desktop": {
+          "type": "integer",
+          "minimum": -24,
+          "maximum": 24
+        },
+        "tablet": {
+          "type": "integer",
+          "minimum": -24,
+          "maximum": 24
+        },
+        "mobile": {
+          "type": "integer",
+          "minimum": -24,
+          "maximum": 24
+        }
+      }
+    },
     "bindingIds": {
       "type": "array",
       "maxItems": 20,
@@ -456,10 +502,12 @@
             "columns": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 4
+              "maximum": 12
             },
             "column_tracks": { "$ref": "#/definitions/columnTracks" },
             "column_widths": { "$ref": "#/definitions/columnWidths" },
+            "column_heights": { "$ref": "#/definitions/columnHeights" },
+            "column_orders": { "$ref": "#/definitions/columnOrders" },
             "semantic_tag": {
               "enum": ["section", "header", "main", "aside", "footer"]
             },

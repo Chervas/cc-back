@@ -130,6 +130,14 @@ test('publica anchos propios de columna con fallback seguro para hermanas hereda
         tablet: 6,
         mobile: 12,
       },
+      column_heights: {
+        desktop: 320,
+        tablet: 240,
+      },
+      column_orders: {
+        desktop: 2,
+        mobile: -1,
+      },
     },
     children: originalChildren,
   };
@@ -152,10 +160,14 @@ test('publica anchos propios de columna con fallback seguro para hermanas hereda
 
   assert.match(html, /cc-role-row cc-layout-grid cc-cols-2 cc-column-widths/);
   assert.doesNotMatch(html, /cc-tracks-6-6/);
-  assert.match(html, new RegExp(`${leftColumnId}[^"]*" class="[^"]*cc-col-span-8[^"]*cc-tablet-col-span-6[^"]*cc-mobile-col-span-12`));
+  assert.match(html, new RegExp(`${leftColumnId}[^"]*" class="[^"]*cc-col-span-8[^"]*cc-tablet-col-span-6[^"]*cc-mobile-col-span-12[^"]*cc-col-min-h-320[^"]*cc-tablet-col-min-h-240[^"]*cc-col-order-2[^"]*cc-mobile-col-order-n1`));
   assert.match(html, new RegExp(`${rightColumnId}[^"]*" class="[^"]*cc-col-span-6[^"]*cc-tablet-col-span-6[^"]*cc-mobile-col-span-12`));
   assert.match(css, /\.cc-role-row\.cc-column-widths>\.cc-container\{display:grid;grid-template-columns:repeat\(12,minmax\(0,1fr\)\)\}/);
   assert.match(css, /\.cc-role-row\.cc-column-widths>\.cc-container>\.cc-role-column\.cc-col-span-8\{grid-column:span 8\/span 8\}/);
+  assert.match(css, /\.cc-role-column\.cc-col-min-h-320\{min-height:320px\}/);
+  assert.match(css, /\.cc-role-column\.cc-tablet-col-min-h-240\{min-height:240px\}/);
+  assert.match(css, /\.cc-role-column\.cc-col-order-2\{order:2\}/);
+  assert.match(css, /\.cc-role-column\.cc-mobile-col-order-n1\{order:-1\}/);
 });
 
 test('publica animaciones tipadas como clases seguras generadas por el renderer', () => {
@@ -169,7 +181,7 @@ test('publica animaciones tipadas como clases seguras generadas por el renderer'
   const css = artifact.files[stylesheetPath];
   const html = artifact.files['index.html'];
 
-  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.14.0');
+  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.16.0');
   assert.match(html, /cc-animate-slide_up/);
   assert.match(css, /\.cc-animate-slide_up\{animation:ccSlideUp \.46s cubic-bezier/);
   assert.match(css, /@media\(prefers-reduced-motion:no-preference\)/);
@@ -1018,13 +1030,15 @@ test('renderer actual honra tokens, responsive, fuentes e imagen focal en CSS de
   const cssPath = Object.keys(artifact.files).find((path) => path.endsWith('.css'));
   const css = artifact.files[cssPath];
   const html = artifact.files['index.html'];
-  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.14.0');
+  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.16.0');
   assert.match(html, /cc-layout-grid cc-cols-4[^"\n]*cc-bg-brand[^"\n]*cc-width-wide[^"\n]*cc-pt-2xl[^"\n]*cc-radius-full[^"\n]*cc-shadow-lg[^"\n]*cc-mobile-cols-1/);
   assert.match(html, /cc-fit-contain cc-aspect-21-9 cc-focal-37-62/);
   assert.match(html, /<div class="cc-image-frame"><img[^>]*width="2100" height="900">/);
   assert.match(css, /--cc-font-heading:ui-sans-serif,system-ui/);
   assert.match(css, /--cc-font-body:ui-sans-serif,system-ui/);
   assert.doesNotMatch(css, /(?:Manrope|Source Sans|Inter),/);
+  assert.match(css, /\.cc-layout-grid\.cc-cols-12>\.cc-container\{display:grid;grid-template-columns:repeat\(12,minmax\(0,1fr\)\)\}/);
+  assert.match(css, /\.cc-section\.cc-tablet-cols-12>\.cc-container\{display:grid;grid-template-columns:repeat\(12,minmax\(0,1fr\)\)\}/);
   assert.match(css, /\.cc-node\.cc-bg-brand\{background:var\(--cc-primary\)\}/);
   assert.match(css, /\.cc-node\.cc-fg-inverse,\.cc-node\.cc-tone-inverse\{color:#fff\}/);
   assert.doesNotMatch(css, /,\.cc-tone-inverse\{color:#fff\}/);
@@ -1045,10 +1059,11 @@ test('el contrato de formularios queda firmado en manifest y usa fallback no-JS'
   assert.equal(actualFormId, formId);
   assert.equal(artifact.manifest.intake_forms[actualFormId].page_path, '/');
   assert.deepEqual(artifact.manifest.page_routes, {
-    [input.document.pages[0].id]: { page_path: '/' },
+    [input.document.pages[0].id]: { page_path: '/', template_type: 'standard' },
   });
   assert.match(artifact.files['index.html'], new RegExp(`data-cc-web-project-id="${input.project.id}"`));
   assert.match(artifact.files['index.html'], new RegExp(`data-cc-web-revision-id="${input.revisionId}"`));
+  assert.match(artifact.files['index.html'], /data-cc-web-page-template="standard"/);
   assert.match(artifact.files['index.html'], /data-cc-web-base-path="\/"/);
   assert.match(artifact.files['index.html'], /action="\/api\/intake\/web" method="post" enctype="application\/x-www-form-urlencoded"/);
   assert.match(artifact.files['index.html'], /name="_cc_company"/);
@@ -1058,6 +1073,17 @@ test('el contrato de formularios queda firmado en manifest y usa fallback no-JS'
   assert.match(artifact.files['index.html'], new RegExp(`id="cc-${actualFormId}-success"`));
   assert.match(artifact.files['index.html'], new RegExp(`id="cc-${actualFormId}-error"`));
   assert.doesNotMatch(artifact.files['index.html'], /name="external_source"/);
+});
+
+test('el tipo de plantilla de página se propaga al manifest y al HTML público', () => {
+  const input = fixture();
+  input.document.pages[0].template_type = 'post';
+  const artifact = compileWebArtifact(input);
+  assert.deepEqual(artifact.manifest.page_routes[input.document.pages[0].id], {
+    page_path: '/',
+    template_type: 'post',
+  });
+  assert.match(artifact.files['index.html'], /data-cc-web-page-template="post"/);
 });
 
 test('producción bloquea drift entre revisión, IntakeConfig y toggles del runtime', () => {

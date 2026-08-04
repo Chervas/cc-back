@@ -9,6 +9,7 @@ const {
   resolveClinicGoogleReviewProfile,
 } = require('../services/googleLocalLinks.service');
 const businessProfileLocal = require('../services/businessProfileLocal.service');
+const googleSpecialHoursAutomation = require('../services/googleSpecialHoursAutomation.service');
 
 const router = express.Router();
 
@@ -50,7 +51,7 @@ async function requireClinicMarketingAccess(req, res, next) {
   }
 }
 
-async function requireClinicMarketingWriteAccess(req, res, next) {
+async function requireClinicBusinessProfileWriteAccess(req, res, next) {
   try {
     const allowed = await hasMarketingClinicScopeAccess({
       userId: req.userData?.userId,
@@ -73,7 +74,7 @@ async function requireClinicMarketingWriteAccess(req, res, next) {
         message: 'La ficha también se utiliza en otras clínicas sobre las que no tienes permisos de edición.',
       });
     }
-    req.localPhotoMutationClinicIds = affectedClinicIds;
+    req.localBusinessProfileMutationClinicIds = affectedClinicIds;
     return next();
   } catch (error) {
     return sendError(res, error);
@@ -175,6 +176,37 @@ router.get('/clinica/:clinicaId/reviews', async (req, res) => {
   }
 });
 
+router.put(
+  '/clinica/:clinicaId/reviews/:reviewId/reply',
+  requireClinicBusinessProfileWriteAccess,
+  async (req, res) => {
+    try {
+      return res.json(await businessProfileLocal.updateReviewReply(
+        req.localResolved,
+        req.params.reviewId,
+        req.body || {}
+      ));
+    } catch (error) {
+      return sendError(res, error, 'business_profile_review_reply_failed');
+    }
+  }
+);
+
+router.delete(
+  '/clinica/:clinicaId/reviews/:reviewId/reply',
+  requireClinicBusinessProfileWriteAccess,
+  async (req, res) => {
+    try {
+      return res.json(await businessProfileLocal.deleteReviewReply(
+        req.localResolved,
+        req.params.reviewId
+      ));
+    } catch (error) {
+      return sendError(res, error, 'business_profile_review_reply_delete_failed');
+    }
+  }
+);
+
 router.get('/clinica/:clinicaId/posts', async (req, res) => {
   try {
     return res.json(await businessProfileLocal.listPosts(req.localResolved, req.query || {}));
@@ -211,9 +243,17 @@ router.post(
   }
 );
 
+router.get('/clinica/:clinicaId/import-hours/status', async (req, res) => {
+  try {
+    return res.json(await businessProfileLocal.getRegularHoursImportStatus(req.localResolved));
+  } catch (error) {
+    return sendError(res, error, 'business_profile_hours_import_status_failed');
+  }
+});
+
 router.post(
   '/clinica/:clinicaId/photos',
-  requireClinicMarketingWriteAccess,
+  requireClinicBusinessProfileWriteAccess,
   async (req, res) => {
     try {
       return res.status(201).json(await businessProfileLocal.publishPhoto(
@@ -222,6 +262,90 @@ router.post(
       ));
     } catch (error) {
       return sendError(res, error, 'business_profile_photo_publish_failed');
+    }
+  }
+);
+
+router.post(
+  '/clinica/:clinicaId/import-logo',
+  requireClinicMarketingClinicWriteAccess,
+  async (req, res) => {
+    try {
+      return res.json(await businessProfileLocal.importLogoFromBusinessProfile(
+        req.localResolved,
+        req.body || {}
+      ));
+    } catch (error) {
+      return sendError(res, error, 'business_profile_logo_import_failed');
+    }
+  }
+);
+
+router.put(
+  '/clinica/:clinicaId/special-hours',
+  requireClinicBusinessProfileWriteAccess,
+  async (req, res) => {
+    try {
+      return res.json(await businessProfileLocal.updateSpecialHours(
+        req.localResolved,
+        req.body || {}
+      ));
+    } catch (error) {
+      return sendError(res, error, 'business_profile_special_hours_update_failed');
+    }
+  }
+);
+
+router.get('/clinica/:clinicaId/special-hours/automations', async (req, res) => {
+  try {
+    return res.json({
+      success: true,
+      items: await googleSpecialHoursAutomation.listSchedules(req.localClinicId),
+    });
+  } catch (error) {
+    return sendError(res, error, 'business_profile_special_hours_automations_failed');
+  }
+});
+
+router.post(
+  '/clinica/:clinicaId/special-hours/automations',
+  requireClinicBusinessProfileWriteAccess,
+  async (req, res) => {
+    try {
+      const item = await googleSpecialHoursAutomation.createSchedule({
+        clinicId: req.localClinicId,
+        payload: req.body || {},
+        actor: {
+          userId: req.userData?.userId,
+          name: req.userData?.email,
+          role: 'clinic',
+        },
+      });
+      return res.status(201).json({ success: true, item });
+    } catch (error) {
+      return sendError(res, error, 'business_profile_special_hours_automation_create_failed');
+    }
+  }
+);
+
+router.patch(
+  '/clinica/:clinicaId/special-hours/automations/:publicId',
+  requireClinicBusinessProfileWriteAccess,
+  async (req, res) => {
+    try {
+      const item = await googleSpecialHoursAutomation.setScheduleActive({
+        clinicId: req.localClinicId,
+        publicId: req.params.publicId,
+        active: req.body?.active === true,
+        actor: {
+          userId: req.userData?.userId,
+          name: req.userData?.email,
+          role: 'clinic',
+        },
+      });
+      return res.json({ success: true, item });
+    } catch (error) {
+      return sendError(res, error, 'business_profile_special_hours_automation_update_failed');
     }
   }
 );

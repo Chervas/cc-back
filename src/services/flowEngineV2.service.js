@@ -60,6 +60,7 @@ const whatsappConnectionStatusService = require('./whatsappConnectionStatus.serv
 const marketingBulkSendsService = require('./marketingBulkSends.service');
 const appointmentNotificationCleanup = require('./appointmentNotificationCleanup.service');
 const { recordAppointmentStatusChange } = require('./appointmentActivity.service');
+const businessProfileLocal = require('./businessProfileLocal.service');
 const { resolveLeadAutoReplyWait } = require('./clinicOpeningHours.service');
 const { evaluatePendingLeadContact } = require('./leadContactState.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
@@ -2111,6 +2112,24 @@ function normalizeAssigneeRoleCodes(raw) {
   ));
 }
 
+function resolveOperationalSubroleTargets(subrole) {
+  const value = cleanString(subrole);
+  const normalized = normalizeKey(value);
+  if (!normalized) return [];
+
+  if (normalized.includes('recep') || normalized.includes('comercial') || normalized.includes('venta')) {
+    return ['Recepción / Comercial ventas', 'Administrativos', 'Auxiliares y enfermeros'];
+  }
+  if (normalized.includes('admin')) {
+    return ['Administrativos', 'Recepción / Comercial ventas'];
+  }
+  if (normalized.includes('auxiliar') || normalized.includes('enfermer')) {
+    return ['Auxiliares y enfermeros', 'Recepción / Comercial ventas'];
+  }
+
+  return [value];
+}
+
 async function resolveRoleAssigneeUserIds({ clinicId, effectiveRole, subrole }) {
   if (!clinicId) return [];
 
@@ -2140,9 +2159,11 @@ async function resolveRoleAssigneeUserIds({ clinicId, effectiveRole, subrole }) 
     where.rol_clinica = { [Op.in]: ['propietario', 'personaldeclinica'] };
   }
 
-  const normalizedSubrole = cleanString(subrole);
-  if (normalizedSubrole && (!effectiveRole || effectiveRole === 'personaldeclinica')) {
-    where.subrol_clinica = normalizedSubrole;
+  const subroleTargets = resolveOperationalSubroleTargets(subrole);
+  if (subroleTargets.length && (!effectiveRole || effectiveRole === 'personaldeclinica')) {
+    where.subrol_clinica = subroleTargets.length === 1
+      ? subroleTargets[0]
+      : { [Op.in]: subroleTargets };
   }
 
   const rows = await UsuarioClinica.findAll({
@@ -5493,6 +5514,74 @@ async function processNode(node, context, runtime = {}) {
       return handleSendSystemNotification(node, context, runtime);
     }
 
+    case 'action/update_google_special_hours': {
+      const period = config?.period && typeof config.period === 'object'
+        ? config.period
+        : null;
+      const timeZone = cleanString(config?.time_zone || config?.timeZone) || 'Europe/Madrid';
+      if (simulation) {
+        return {
+          kind: 'success',
+          output: {
+            status: 'simulated',
+            simulated: true,
+            period,
+            time_zone: timeZone,
+          },
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
+
+      const targets = resolveRuntimeTargets(runtime?.execution, context);
+      const clinicId = toIntOrNull(targets.clinic_id);
+      if (!clinicId || !period) {
+        throw new Error(!clinicId
+          ? 'business_profile_special_hours_clinic_missing'
+          : 'business_profile_special_hours_period_missing');
+      }
+
+      const template = await AutomationFlowTemplateV2.findByPk(runtime?.execution?.template_version_id);
+      if (!template || template.is_active === false) {
+        return {
+          kind: 'success',
+          output: {
+            status: 'skipped',
+            reason: 'automation_inactive',
+          },
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
+
+      const result = await businessProfileLocal.applyScheduledSpecialHoursPeriod(clinicId, {
+        period,
+        timeZone,
+      });
+      if (parseBool(config?.auto_deactivate_after_execution, false)) {
+        const triggerConfig = template.trigger_config && typeof template.trigger_config === 'object'
+          ? template.trigger_config
+          : {};
+        await template.update({
+          is_active: false,
+          trigger_config: {
+            ...triggerConfig,
+            last_executed_at: new Date().toISOString(),
+          },
+        });
+      }
+
+      return {
+        kind: 'success',
+        output: {
+          status: 'synced',
+          clinic_id: clinicId,
+          period,
+          time_zone: result?.timeZone || timeZone,
+          synced_at: result?.syncedAt || new Date().toISOString(),
+        },
+        next_node_id: readOutputTarget(node, 'on_success'),
+      };
+    }
+
     case 'action/api_call': {
       return {
         kind: 'success',
@@ -6455,4 +6544,5 @@ module.exports = {
   selectBestWhatsappTemplateCandidate,
   buildDeterministicConfirmAppointmentTextOutput,
   buildDeterministicAppointmentUnconfirmedReplyOutput,
+  resolveOperationalSubroleTargets,
 };

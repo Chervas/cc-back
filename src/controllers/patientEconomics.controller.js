@@ -151,6 +151,31 @@ exports.transitionBudget = asyncHandler(async (req, res) => {
   res.json(budget);
 });
 
+exports.createBudgetSignatureRequest = asyncHandler(async (req, res) => {
+  await requireBudgetFeature(req, 'patients.edit');
+  const request = await economics.createBudgetSignatureRequest({
+    publicId: req.params.budgetId,
+    actorId: actorId(req),
+    payload: req.body,
+  });
+  res.status(201).json(request);
+});
+
+exports.getPublicBudgetSignatureRequest = asyncHandler(async (req, res) => {
+  const request = await economics.getPublicBudgetSignatureRequest(req.params.token);
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.json(request);
+});
+
+exports.signPublicBudgetSignatureRequest = asyncHandler(async (req, res) => {
+  const request = await economics.signPublicBudgetSignatureRequest(req.params.token, req.body || {}, {
+    ip: req.ip,
+    user_agent: req.get('user-agent') || null,
+  });
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.json(request);
+});
+
 exports.createPayment = asyncHandler(async (req, res) => {
   await requireBudgetFeature(req, 'patients.edit');
   const payment = await economics.createPayment({

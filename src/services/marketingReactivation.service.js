@@ -1307,10 +1307,23 @@ async function ensurePacienteClinicaLink(patient, clinicId, transaction) {
   });
 }
 
+function isPastImportedHistoricalVisit(value, now = new Date()) {
+  const start = new Date(value);
+  const reference = new Date(now);
+  return Number.isFinite(start.getTime())
+    && Number.isFinite(reference.getTime())
+    && start.getTime() <= reference.getTime();
+}
+
+function shouldCreateImportedHistoricalAppointments(body = {}) {
+  return body.create_historical_appointments === true
+    || body.createHistoricalAppointments === true;
+}
+
 async function ensureImportedHistoricalAppointment({ patient, clinicId, treatmentId, treatmentName, lastVisit, transaction }) {
   if (!patient?.id_paciente || !clinicId || !treatmentId || !lastVisit) return null;
   const start = new Date(lastVisit);
-  if (!Number.isFinite(start.getTime())) return null;
+  if (!isPastImportedHistoricalVisit(start)) return null;
   const end = new Date(start.getTime() + 30 * 60 * 1000);
   const existing = await CitaPaciente.findOne({
     where: {
@@ -1335,6 +1348,12 @@ async function ensureImportedHistoricalAppointment({ patient, clinicId, treatmen
     inicio: start,
     fin: end,
     es_provisional: false,
+    source_system: 'clinicaclick_reactivation_import',
+    source_reference: `patient:${patient.id_paciente}:treatment:${treatmentId}:${start.toISOString()}`,
+    import_metadata: {
+      kind: 'historical_treatment',
+      imported_as_past_activity: true,
+    },
   }, { transaction });
 }
 
@@ -1472,6 +1491,7 @@ async function buildImportedItemPayloads(scope, body, transaction) {
   const nameFormat = normalizeNameFormat(body.name_format || body.nameFormat || 'auto');
   const customFieldsSchema = buildCustomFieldSchema(rows, columnMapping, body.custom_fields_schema || []);
   const treatmentMappings = normalizeTreatmentMappings(body.treatment_mappings || body.treatment_mapping || {});
+  const createHistoricalAppointments = shouldCreateImportedHistoricalAppointments(body);
   const createMissingTreatments = body.create_missing_treatments !== false
     && body.createMissingTreatments !== false;
   const clinicLookup = await loadImportClinicLookup(scope, transaction);
@@ -1698,14 +1718,16 @@ async function buildImportedItemPayloads(scope, body, transaction) {
         : false;
       const effectiveClinicId = Number(rowClinicId || patient.clinica_id || defaultClinicId);
       await ensurePacienteClinicaLink(patient, effectiveClinicId, transaction);
-      await ensureImportedHistoricalAppointment({
-        patient,
-        clinicId: effectiveClinicId,
-        treatmentId,
-        treatmentName: treatment,
-        lastVisit,
-        transaction,
-      });
+      if (createHistoricalAppointments) {
+        await ensureImportedHistoricalAppointment({
+          patient,
+          clinicId: effectiveClinicId,
+          treatmentId,
+          treatmentName: treatment,
+          lastVisit,
+          transaction,
+        });
+      }
       await persistPatientCustomFields({
         patient,
         clinicId: effectiveClinicId,
@@ -2345,6 +2367,9 @@ async function createList(scope, body = {}, userId = null) {
         column_mapping: importResult?.columnMapping || body.column_mapping || null,
         name_format: source === 'import' ? normalizeNameFormat(body.name_format || body.nameFormat || 'auto') : null,
         treatment_mappings: body.treatment_mappings || body.treatment_mapping || null,
+        create_historical_appointments: source === 'import'
+          ? shouldCreateImportedHistoricalAppointments(body)
+          : false,
         rules: body.rules || [],
         exclusions: body.exclusions || [],
       },
@@ -2815,6 +2840,9 @@ module.exports = {
   rebuildList,
   getEvents,
   _test: {
+    ensureImportedHistoricalAppointment,
+    isPastImportedHistoricalVisit,
+    shouldCreateImportedHistoricalAppointments,
     prepareImportedTreatmentValue,
     resolveImportedTreatment,
   },

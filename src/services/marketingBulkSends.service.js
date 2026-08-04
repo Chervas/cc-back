@@ -620,7 +620,50 @@ function shouldMaterializeStatus(item, mappedStatus) {
   return false;
 }
 
+async function reconcileDispatchJobState(list, dependencies = {}) {
+  const JobRequestModel = dependencies.JobRequest || JobRequest;
+  if (!list || !JobRequestModel) return { reconciled: false, reason: 'missing_context' };
+  const dispatch = getDispatchConfig(list);
+  const jobId = Number(dispatch?.job_id || 0);
+  const liveStatuses = new Set(['queued', 'sending', 'scheduled', 'waiting_template_approval', 'paused', 'paused_quality', 'paused_limit', 'paused_template']);
+  const currentStatus = String(dispatch?.status || list?.status || '').toLowerCase();
+  if (!jobId || !liveStatuses.has(currentStatus)) {
+    return { reconciled: false, reason: 'not_live' };
+  }
+
+  const job = await JobRequestModel.findByPk(jobId, {
+    attributes: ['id', 'status', 'error_message', 'completed_at', 'updated_at'],
+  });
+  if (!job || !['failed', 'cancelled'].includes(String(job.status || '').toLowerCase())) {
+    return { reconciled: false, reason: 'job_still_live' };
+  }
+
+  const nextStatus = job.status === 'cancelled' ? 'cancelled' : 'failed';
+  const completedAt = job.completed_at || job.updated_at || new Date();
+  const terminalPatch = {
+    status: nextStatus,
+    job_status: job.status,
+    failed_at: nextStatus === 'failed' ? new Date(completedAt).toISOString() : null,
+    cancelled_at: nextStatus === 'cancelled' ? new Date(completedAt).toISOString() : null,
+    last_error: normalizeText(job.error_message || '') || null,
+    next_allowed_at: null,
+  };
+  const criteria = list.criteria || {};
+  await list.update({
+    status: nextStatus,
+    criteria: mergeCriteria(list, {
+      dispatch: mergeDispatchConfigs(criteria.dispatch || {}, terminalPatch),
+      dispatch_config: mergeDispatchConfigs(criteria.dispatch_config || {}, terminalPatch),
+    }),
+  });
+  return { reconciled: true, status: nextStatus, job_id: jobId };
+}
+
 async function reconcileListMessageState(list, scope = {}) {
+  const jobState = await reconcileDispatchJobState(list);
+  if (jobState.reconciled && list?.reload) {
+    await list.reload();
+  }
   const listId = Number(list?.id || list || 0);
   if (!listId || !Message || !MarketingPatientListItem) return { reconciled: false, reason: 'missing_context' };
   const dispatch = getDispatchConfig(list);
@@ -716,6 +759,7 @@ async function reconcileListMessageState(list, scope = {}) {
     messages: messages.length,
     status_updates: statusUpdates,
     inbound_updates: inboundUpdates,
+    job_state: jobState,
     counters,
   };
 }
@@ -3594,6 +3638,7 @@ async function getReviewRequestAutomationStatus(scope, dependencies = {}) {
     success: true,
     clinic_id: clinicIds[0],
     automation_enabled: template?.is_active === true,
+    automation_template: template ? serializeReviewAutomationTemplate(template) : null,
   };
 }
 
@@ -9148,4 +9193,5 @@ module.exports = {
   getAdminBulkSendSettings,
   upsertAdminBulkSendSettings,
   removeCampaign,
+  reconcileDispatchJobState,
 };

@@ -2176,12 +2176,11 @@ const enrichLeadsWithConversationState = async (leadRows = []) => {
     const conversation = conversationByLead.get(parseInteger(lead?.id));
     const conversationId = parseInteger(conversation?.id) || parseInteger(lead?.conversation_id);
     const pendingState = conversationId !== null ? pendingStates.get(conversationId) : null;
-    const hasActiveAppointment = !!lead?.linked_appointment?.id;
     return {
       ...lead,
       conversation_id: conversationId,
-      pending_whatsapp_reply_count: hasActiveAppointment ? 0 : (pendingState?.count || 0),
-      pending_automation_attention: !hasActiveAppointment && pendingState?.requiresAutomationAttention === true,
+      pending_whatsapp_reply_count: pendingState?.count || 0,
+      pending_automation_attention: pendingState?.requiresAutomationAttention === true,
     };
   });
 };

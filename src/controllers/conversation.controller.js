@@ -1740,7 +1740,7 @@ exports.startPatientContact = async (req, res) => {
       duplicateScopeClinicIds: duplicateScopeClinics.map((item) => Number(item.id_clinica)),
       actorUserId: userId,
       authorizationConfirmed: req.body?.authorization_confirmed === true,
-      source: 'quick_chat',
+      source: normalizeOperationalSource(req.body?.source, 'quick_chat'),
       transaction,
     });
 
@@ -2385,6 +2385,7 @@ exports.__testing = {
   buildQuickChatCategorySql,
   buildQuickChatCategoryWhere,
   buildConversationSearchClause,
+  buildPhoneSearchCandidates,
   getQuickChatConversationCategory,
   normalizeSearchQuery,
   normalizeTextSearchValue,

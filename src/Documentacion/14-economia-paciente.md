@@ -12,6 +12,8 @@ Tablas:
 - `EconomicBudgetVersions`: snapshot inmutable de lineas, totales, forma de
   pago, diseño, paciente y clinica.
 - `EconomicBudgetEvents`: timeline de cambios de estado/version.
+- `EconomicBudgetSignatureRequests`: solicitudes de aceptacion y firma de
+  presupuestos por WhatsApp, enlace publico o tablet.
 - `ClinicEconomicTemplates`: plantillas reutilizables de presupuesto/factura.
 - `EconomicPayments`: dinero recibido y su aplicacion explicita.
 - `PatientWalletEntries`: libro de saldo/anticipos.
@@ -36,6 +38,43 @@ Presupuestos:
 - `PATCH /budgets/:budgetId`
 - `POST /budgets/:budgetId/revise`
 - `POST /budgets/:budgetId/transition`
+- `POST /budgets/:budgetId/signature-requests`
+
+Firma publica de presupuestos:
+
+- `GET /public/budget-signatures/:token`
+- `POST /public/budget-signatures/:token/sign`
+
+Estas rutas viven bajo `/api/economics` y no requieren sesion de usuario porque
+validan un token opaco firmado. La solicitud conserva snapshot, hash, version
+del presupuesto, canal, forma de pago ofrecida/elegida y estado de datos
+bancarios.
+
+La clinica decide las alternativas de pago en el presupuesto. Si hay varias,
+el token puede dejar que el paciente elija entre esas alternativas; nunca puede
+seleccionar una forma que no exista en la version firmada. Los datos bancarios
+pueden quedar `pending` para que recepcion los complete despues: no bloquean la
+aceptacion economica.
+
+### Envio y actividad de firma de presupuestos
+
+- `POST /budgets/:budgetId/signature-requests` crea una solicitud por canal
+  (`whatsapp`, `email`, `custom_email` o `tablet`) y conserva en
+  `EconomicBudgetSignatureRequests` destino, estado, enlace publico,
+  `sent_at`, `viewed_at`, `signed_at`, snapshot y hash.
+- Las solicitudes por `tablet`, `email` y `custom_email` nacen como `sent`.
+  Email sigue siendo mock; tablet queda disponible para copiar enlace o abrir
+  en el kiosco de la clinica.
+- WhatsApp exige plantilla Meta aprobada. El catalogo base se llama
+  `clinicaclick_envio_presupuesto_firma` y se siembra con la migracion
+  `20260731103000-seed-budget-signature-whatsapp-template.js`. Cada WABA debe
+  tener su variante aprobada antes de poder enviar una prueba real.
+- Abrir el enlace cambia la solicitud a `viewed` si aun estaba pendiente o
+  enviada. Firmar cambia a `signed` y acepta el presupuesto con la forma de
+  pago elegida o la preseleccionada.
+- Cada creacion, envio, fallo, apertura y firma genera un evento economico.
+  La actividad se inyecta tambien en el timeline del paciente para que aparezca
+  en la ficha, QuickChat y conversacion cronologica.
 
 Cobros y saldo:
 
@@ -170,8 +209,24 @@ Rollback destructivo, solo si no hay datos que conservar:
 npx sequelize-cli db:migrate:undo --name 20260724183000-create-patient-economics-domain.js
 ```
 
-El código y la migración están aplicados en `dev` y `staging`; estado
-comprobado el 2026-07-29.
+Para retirar solo la ampliacion de firma economica en un entorno sin
+solicitudes que conservar:
+
+```bash
+npx sequelize-cli db:migrate:undo --name 20260730223000-create-economic-budget-signature-requests.js
+```
+
+Para retirar solo el seed de catalogo WhatsApp de firma de presupuesto:
+
+```bash
+npx sequelize-cli db:migrate:undo --name 20260731103000-seed-budget-signature-whatsapp-template.js
+```
+
+El corte base de economia del paciente esta aplicado en `dev` y `staging`;
+estado comprobado el 2026-07-29. La ampliacion de firma economica
+`20260730223000-create-economic-budget-signature-requests.js` queda aplicada en
+`dev`; para promocionarla a `staging` hay que mergear `dev`, ejecutar
+migraciones y reiniciar el runtime de staging.
 
 ## Ampliacion 2026-07-25
 
