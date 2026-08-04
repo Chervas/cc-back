@@ -3460,7 +3460,7 @@ El nodo `condition/ai_analysis` quedó operativo en runtime real sobre Groq, con
 
 ### Política de modelos (no configurable por usuario)
 
-- `llama-3.1-70b-versatile`: tareas complejas (razonamiento clínico-operativo, más contexto, extracción amplia).
+- `llama-3.3-70b-versatile`: tareas complejas (razonamiento clínico-operativo, más contexto, extracción amplia).
 - `llama-3.1-8b-instant`: tareas rápidas de soporte/Q&A simple.
 - El usuario del editor **no selecciona modelo**. Solo define el `analysis_mode` del nodo:
   - `quick_qa`
@@ -3498,7 +3498,7 @@ En `.env` / `.env.example`:
 
 - `GROQ_API_KEY`
 - `GROQ_API_BASE_URL` (default `https://api.groq.com/openai/v1`)
-- `GROQ_MODEL_COMPLEX` (default `llama-3.1-70b-versatile`)
+- `GROQ_MODEL_COMPLEX` (default `llama-3.3-70b-versatile`)
 - `GROQ_MODEL_FAST` (default `llama-3.1-8b-instant`)
 - `GROQ_TIMEOUT_MS` (default `20000`)
 - `GROQ_STT_MODEL` (default `whisper-large-v3-turbo`, para transcripción de audio inbound WhatsApp)
@@ -3541,7 +3541,7 @@ En `.env` / `.env.example`:
 - Objetivo futuro (servidor local):
   - Sustituir la llamada cloud STT por un servicio local de transcripción (p.ej. `faster-whisper`/`whisper.cpp`) detrás de un endpoint interno.
   - Mantener el mismo contrato de salida (`content` + `metadata.audio_transcription`) para no romper QuickChat ni automations.
-  - Llama 3.1 seguirá para razonamiento de texto (`condition/ai_analysis`), y STT quedará desacoplado en el servicio de audio local.
+  - Llama 3.3 seguirá para razonamiento de texto (`condition/ai_analysis`), y STT quedará desacoplado en el servicio de audio local.
 
 ## Leads: actividad operativa y conversación
 
