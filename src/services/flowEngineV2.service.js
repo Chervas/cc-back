@@ -2108,6 +2108,24 @@ function normalizeAssigneeRoleCodes(raw) {
   ));
 }
 
+function resolveOperationalSubroleTargets(subrole) {
+  const value = cleanString(subrole);
+  const normalized = normalizeKey(value);
+  if (!normalized) return [];
+
+  if (normalized.includes('recep') || normalized.includes('comercial') || normalized.includes('venta')) {
+    return ['Recepción / Comercial ventas', 'Administrativos', 'Auxiliares y enfermeros'];
+  }
+  if (normalized.includes('admin')) {
+    return ['Administrativos', 'Recepción / Comercial ventas'];
+  }
+  if (normalized.includes('auxiliar') || normalized.includes('enfermer')) {
+    return ['Auxiliares y enfermeros', 'Recepción / Comercial ventas'];
+  }
+
+  return [value];
+}
+
 async function resolveRoleAssigneeUserIds({ clinicId, effectiveRole, subrole }) {
   if (!clinicId) return [];
 
@@ -2137,9 +2155,11 @@ async function resolveRoleAssigneeUserIds({ clinicId, effectiveRole, subrole }) 
     where.rol_clinica = { [Op.in]: ['propietario', 'personaldeclinica'] };
   }
 
-  const normalizedSubrole = cleanString(subrole);
-  if (normalizedSubrole && (!effectiveRole || effectiveRole === 'personaldeclinica')) {
-    where.subrol_clinica = normalizedSubrole;
+  const subroleTargets = resolveOperationalSubroleTargets(subrole);
+  if (subroleTargets.length && (!effectiveRole || effectiveRole === 'personaldeclinica')) {
+    where.subrol_clinica = subroleTargets.length === 1
+      ? subroleTargets[0]
+      : { [Op.in]: subroleTargets };
   }
 
   const rows = await UsuarioClinica.findAll({
@@ -6520,4 +6540,5 @@ module.exports = {
   selectBestWhatsappTemplateCandidate,
   buildDeterministicConfirmAppointmentTextOutput,
   buildDeterministicAppointmentUnconfirmedReplyOutput,
+  resolveOperationalSubroleTargets,
 };

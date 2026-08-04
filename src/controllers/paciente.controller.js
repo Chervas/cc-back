@@ -12,6 +12,7 @@ const {
   PatientNutritionReport,
   PatientNutritionMeasurement,
   PatientOperationalEvent,
+  LeadIntake,
   EconomicBudget,
   EconomicBudgetSignatureRequest,
   sequelize,
@@ -1219,6 +1220,8 @@ exports.getPacienteActivity = async (req, res) => {
         attributes: [
           'id_cita',
           'paciente_id',
+          'clinica_id',
+          'lead_intake_id',
           'estado',
           'inicio',
           'tipo_cita',
@@ -1232,6 +1235,12 @@ exports.getPacienteActivity = async (req, res) => {
         include: [
           { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'telefono_movil'], required: false },
           { model: Tratamiento, as: 'tratamiento', attributes: ['id_tratamiento', 'nombre'], required: false },
+          {
+            model: LeadIntake,
+            as: 'lead',
+            attributes: ['id', 'source', 'source_detail', 'page_url'],
+            required: false,
+          },
         ],
         order: [['inicio', 'DESC']],
       }),
@@ -1341,22 +1350,63 @@ exports.getPacienteActivity = async (req, res) => {
     }
 
     if (!operationalEvents.some((event) => event.event_type === PATIENT_EVENT_TYPES.created)) {
-      items.push({
-        id: `patient-created-legacy-${pacienteId}`,
-        pacienteId: String(pacienteId),
-        fecha: paciente.fecha_alta || paciente.createdAt,
-        tipo: 'patient_created_legacy',
-        titulo: 'Alta del paciente',
-        descripcion: 'Registro anterior a la trazabilidad de altas; no consta el usuario ni el modo de creación.',
-        icono: 'heroicons_outline:user-plus',
-        color: 'info',
-        usuarioId: 'legacy',
-        usuarioNombre: null,
-        detalles: {
-          source: 'legacy',
-          sourceLabel: 'No disponible',
-        },
-      });
+      const patientCreatedAt = new Date(paciente.fecha_alta || paciente.createdAt);
+      const leadCreationAppointment = citas
+        .map((row) => (typeof row.get === 'function' ? row.get({ plain: true }) : row))
+        .filter((cita) => {
+          if (!cita?.lead_intake_id || !cita?.lead) return false;
+          const appointmentCreatedAt = new Date(cita.created_at || cita.inicio);
+          return Number.isFinite(patientCreatedAt.getTime())
+            && Number.isFinite(appointmentCreatedAt.getTime())
+            && Math.abs(appointmentCreatedAt.getTime() - patientCreatedAt.getTime()) <= 10 * 60 * 1000;
+        })
+        .sort((left, right) => new Date(left.created_at || left.inicio).getTime() - new Date(right.created_at || right.inicio).getTime())[0];
+
+      if (leadCreationAppointment) {
+        const actor = usuariosById.get(Number(leadCreationAppointment.created_by));
+        const sourceDetail = String(leadCreationAppointment.lead?.source_detail || '').trim().toLowerCase();
+        const sourceLabel = sourceDetail.includes('chatbot')
+          ? 'el chatbot de la web'
+          : 'un lead de la web';
+        items.push({
+          id: `patient-created-from-lead-${pacienteId}`,
+          pacienteId: String(pacienteId),
+          fecha: paciente.fecha_alta || paciente.createdAt,
+          tipo: 'patient_created',
+          titulo: 'Alta del paciente',
+          descripcion: `Paciente creado al agendar una cita desde ${sourceLabel}.`,
+          icono: 'heroicons_outline:user-plus',
+          color: 'success',
+          usuarioId: actor ? String(actor.id_usuario) : 'system',
+          usuarioNombre: buildActorLabel(actor),
+          detalles: {
+            source: 'lead_appointment',
+            sourceLabel,
+            mode: 'appointment_from_lead',
+            lead_id: leadCreationAppointment.lead_intake_id,
+            appointment_id: leadCreationAppointment.id_cita,
+            lead_source: leadCreationAppointment.lead?.source || null,
+            lead_source_detail: leadCreationAppointment.lead?.source_detail || null,
+          },
+        });
+      } else {
+        items.push({
+          id: `patient-created-legacy-${pacienteId}`,
+          pacienteId: String(pacienteId),
+          fecha: paciente.fecha_alta || paciente.createdAt,
+          tipo: 'patient_created_legacy',
+          titulo: 'Alta del paciente',
+          descripcion: 'Registro anterior a la trazabilidad de altas; no consta el usuario ni el modo de creación.',
+          icono: 'heroicons_outline:user-plus',
+          color: 'info',
+          usuarioId: 'legacy',
+          usuarioNombre: null,
+          detalles: {
+            source: 'legacy',
+            sourceLabel: 'No disponible',
+          },
+        });
+      }
     }
 
     for (const citaRow of citas) {

@@ -7406,6 +7406,38 @@ permisos `0600` esta en
 Auditoria: `node src/scripts/cleanup-propdental-future-imported-historical-appointments.js --all-imported-history`.
 Restauracion: el mismo script con `--restore=<ruta>`.
 
+## 2026-08-04 - Alta desde lead y atención operativa inconclusa
+
+`GET /api/pacientes/:id/activity` conserva `PatientOperationalEvents` como
+fuente principal del alta. Para fichas anteriores a esa trazabilidad admite una
+única inferencia acotada: una cita con `lead_intake_id` creada con una diferencia
+máxima de diez minutos respecto al alta del paciente. En ese caso devuelve
+`patient_created` con origen `lead_appointment`, lead, cita y actor de
+`CitasPacientes.created_by`. Si no se cumple todo el contrato, mantiene el
+evento `patient_created_legacy` y no inventa usuario ni origen.
+
+Una cita activa no resuelve por sí sola la atención pendiente de una
+conversación. `enrichLeadsWithConversationState` expone
+`pending_whatsapp_reply_count` y `pending_automation_attention` aunque exista
+`linked_appointment`; solo la lectura por usuario o una respuesta válida de la
+clínica pueden limpiar el indicador correspondiente.
+
+Los nodos `action/send_system_notification` dirigidos a recepción resuelven
+alias operativos compatibles: `Recepción / Comercial ventas` incluye también
+`Administrativos` y `Auxiliares y enfermeros`; `Administrativos` incluye
+recepción/comercial; auxiliares incluyen recepción/comercial. La resolución
+sigue limitada a la clínica de la ejecución y deduplica usuarios. Esto evita
+que una respuesta inconclusa quede sin responsable por diferencias de subrol.
+
+Caso validado en dev: la respuesta `Hola, si` de Anali a `Cancelar cita sin
+confirmar la noche anterior` se clasifica como inconclusa, no cambia la cita ni
+reenvía WhatsApp y crea avisos internos para los usuarios operativos. QuickChat
+la expone con `pending_automation_attention=true`.
+
+Regresiones: `automation_operational_assignees.test.js`,
+`patient_activity_lead_origin_contract.test.js` y
+`conversation_pending_reply.test.js`.
+
 ## 2026-07-31 - Horarios Google one-shot y busquedas locales comparables
 
 ### Horarios especiales de Google: endpoint directo vigente y rutas V2 legacy
