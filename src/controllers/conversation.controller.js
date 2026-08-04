@@ -10,6 +10,7 @@ const { canUserSelectWhatsappTemplate } = require('../lib/whatsapp-template-owne
 const { isReviewWorkflowWhatsappTemplate } = require('../lib/whatsapp-template-workflow');
 const {
   getPendingReplyStatesByConversationIds,
+  resolveAutomationAttentionForConversation,
 } = require('../services/conversationPendingReply.service');
 const {
   resolveWhatsappServiceWindow,
@@ -723,7 +724,7 @@ async function enrichConversationUnreadForUser(userId, conversationLike) {
   plain.unread_count = pendingState?.unreadCount ?? 0;
   plain.pending_automation_attention = pendingState?.requiresAutomationAttention === true;
   plain.pending_automation_count = pendingState?.requiresAutomationAttention === true
-    ? (pendingState?.unreadCount ?? 0)
+    ? Math.max(1, Number(pendingState?.automationAttentionCount || 0))
     : 0;
   if (plain.channel === 'whatsapp') {
     plain.last_inbound_at_any_sender = plain.last_inbound_at || null;
@@ -1369,7 +1370,7 @@ exports.listConversations = async (req, res) => {
       data.unread_count = pendingState?.unreadCount ?? 0;
       data.pending_automation_attention = pendingState?.requiresAutomationAttention === true;
       data.pending_automation_count = pendingState?.requiresAutomationAttention === true
-        ? (pendingState?.unreadCount ?? 0)
+        ? Math.max(1, Number(pendingState?.automationAttentionCount || 0))
         : 0;
       return data;
     }));
@@ -1835,13 +1836,44 @@ exports.markAsRead = async (req, res) => {
       });
     }
 
-    // La lectura oculta también el indicador amarillo para este usuario, pero
-    // conserva la notificación de automatización como trazabilidad operativa.
-    // Una respuesta saliente limpia el pendiente para todos.
     return res.json({ success: true });
   } catch (err) {
     console.error('Error markAsRead', err);
     return res.status(500).json({ error: 'Error marcando conversación como leída' });
+  }
+};
+
+exports.resolveAutomationAttention = async (req, res) => {
+  try {
+    const userId = Number(req.userData?.userId);
+    const conversationId = Number(req.params.id);
+    const conversation = await Conversation.findByPk(conversationId);
+    if (!conversation) {
+      return res.status(404).json({ error: 'Conversación no encontrada' });
+    }
+
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
+      return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+    }
+    try {
+      await ensureQuickChatConversationReadAccess(userId, conversation);
+    } catch (accessError) {
+      return sendQuickChatCategoryForbidden(res, accessError);
+    }
+
+    const result = await resolveAutomationAttentionForConversation(conversationId, userId, {
+      reason: 'operator_action_completed',
+    });
+    return res.json({
+      success: true,
+      resolved: Number(result.updated || 0),
+      pending_automation_attention: false,
+      pending_automation_count: 0,
+    });
+  } catch (err) {
+    console.error('Error resolveAutomationAttention', err);
+    return res.status(500).json({ error: 'Error resolviendo la atención manual' });
   }
 };
 

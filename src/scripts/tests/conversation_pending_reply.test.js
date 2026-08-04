@@ -9,6 +9,7 @@ const db = require('../../../models');
 const {
   getPendingReplyStatesByConversationIds,
   normalizeConversationIds,
+  resolveAutomationAttentionForConversation,
 } = require('../../services/conversationPendingReply.service');
 
 test('normaliza conversaciones y combina pendientes con atención de automatización', async (t) => {
@@ -35,14 +36,15 @@ test('normaliza conversaciones y combina pendientes con atención de automatizac
       ];
     }
     assert.match(sql, /automation\.system_notification/);
-    return [{ conversation_id: 8 }];
+    assert.match(sql, /user_id = :userId/);
+    return [{ conversation_id: 8, attention_count: 2 }];
   };
 
   assert.deepEqual(normalizeConversationIds([7, '8', 7, 0, null, 'x']), [7, 8]);
   const states = await getPendingReplyStatesByConversationIds([7, '8', 7], { userId: 44 });
 
-  assert.deepEqual(states.get(7), { count: 2, unreadCount: 1, requiresAutomationAttention: false });
-  assert.deepEqual(states.get(8), { count: 0, unreadCount: 0, requiresAutomationAttention: true });
+  assert.deepEqual(states.get(7), { count: 2, unreadCount: 1, requiresAutomationAttention: false, automationAttentionCount: 0 });
+  assert.deepEqual(states.get(8), { count: 0, unreadCount: 0, requiresAutomationAttention: true, automationAttentionCount: 2 });
   assert.equal(queryIndex, 2);
 });
 
@@ -72,6 +74,38 @@ test('abrir una conversación actualiza solo la lectura del usuario', () => {
   assert.match(block, /ConversationRead\.upsert/);
   assert.match(block, /user:\$\{userId\}.*conversation:read/s);
   assert.doesNotMatch(block, /getPendingReplyStatesByConversationIds|unread:updated/);
-  assert.match(controller, /pending_automation_count = pendingState\?\.requiresAutomationAttention === true\s*\? \(pendingState\?\.unreadCount \?\? 0\)/);
-  assert.doesNotMatch(controller, /pending_automation_count = pendingState\?\.requiresAutomationAttention === true\s*\? \(pendingState\?\.count \?\? 0\)/);
+  assert.match(controller, /pending_automation_count = pendingState\?\.requiresAutomationAttention === true\s*\? Math\.max\(1, Number\(pendingState\?\.automationAttentionCount \|\| 0\)\)/);
+  assert.match(controller, /exports\.resolveAutomationAttention = async/);
+});
+
+test('la resolución manual solo cierra avisos del usuario y conversación indicados', async (t) => {
+  const originalFindAll = db.Notification.findAll;
+  const updated = [];
+  const fakeNotification = {
+    get: (key) => {
+      if (key === 'data') return { quickChatConversationId: 15 };
+      if (key && typeof key === 'object') return { userId: 44, data: { quickChatConversationId: 15 } };
+      return undefined;
+    },
+    update: async (payload) => {
+      updated.push(payload);
+      return fakeNotification;
+    },
+  };
+  t.after(() => {
+    db.Notification.findAll = originalFindAll;
+  });
+  db.Notification.findAll = async ({ where }) => {
+    assert.equal(where.userId, 44);
+    assert.equal(where.event, 'automation.system_notification');
+    assert.equal(where.isRead, false);
+    return [fakeNotification];
+  };
+
+  const result = await resolveAutomationAttentionForConversation(15, 44);
+  assert.deepEqual(result, { success: true, updated: 1 });
+  assert.equal(updated.length, 1);
+  assert.equal(updated[0].isRead, true);
+  assert.equal(updated[0].data.manual_resolution_reason, 'operator_action_completed');
+  assert.equal(updated[0].data.manual_resolved_by_user_id, 44);
 });

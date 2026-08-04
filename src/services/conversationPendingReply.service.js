@@ -1,6 +1,8 @@
 'use strict';
 
+const { Op } = require('sequelize');
 const db = require('../../models');
+const { emitNotificationUpdated } = require('./notificationsRealtime.service');
 
 function normalizeConversationIds(values) {
   return Array.from(new Set(
@@ -16,6 +18,7 @@ async function getPendingReplyStatesByConversationIds(conversationIds, options =
     count: 0,
     unreadCount: 0,
     requiresAutomationAttention: false,
+    automationAttentionCount: 0,
   }]));
 
   if (!ids.length) {
@@ -82,19 +85,23 @@ async function getPendingReplyStatesByConversationIds(conversationIds, options =
 
   if (db.Notification) {
     const attentionRows = await db.sequelize.query(`
-      SELECT DISTINCT
-        CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '$.quickChatConversationId')) AS UNSIGNED) AS conversation_id
+      SELECT
+        CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '$.quickChatConversationId')) AS UNSIGNED) AS conversation_id,
+        COUNT(*) AS attention_count
       FROM Notifications
       WHERE event = 'automation.system_notification'
         AND is_read = 0
+        ${hasUser ? 'AND user_id = :userId' : ''}
         AND CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '$.quickChatConversationId')) AS UNSIGNED)
           IN (:conversationIds)
+      GROUP BY CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '$.quickChatConversationId')) AS UNSIGNED)
     `, queryOptions);
 
     attentionRows.forEach((row) => {
       const state = states.get(Number(row.conversation_id));
       if (state) {
         state.requiresAutomationAttention = true;
+        state.automationAttentionCount = Math.max(1, Number(row.attention_count || 0));
       }
     });
   }
@@ -102,7 +109,59 @@ async function getPendingReplyStatesByConversationIds(conversationIds, options =
   return states;
 }
 
+async function resolveAutomationAttentionForConversation(conversationId, userId, options = {}) {
+  const numericConversationId = Number(conversationId);
+  const numericUserId = Number(userId);
+  if (
+    !Number.isInteger(numericConversationId)
+    || numericConversationId <= 0
+    || !Number.isInteger(numericUserId)
+    || numericUserId <= 0
+    || !db.Notification
+  ) {
+    return { success: false, updated: 0, reason: 'invalid_scope' };
+  }
+
+  const where = {
+    event: 'automation.system_notification',
+    userId: numericUserId,
+    isRead: false,
+    [Op.and]: [
+      db.sequelize.where(
+        db.sequelize.literal("CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '$.quickChatConversationId')) AS UNSIGNED)"),
+        numericConversationId
+      ),
+    ],
+  };
+  const queryOptions = options.transaction ? { transaction: options.transaction } : {};
+  const notifications = await db.Notification.findAll({ where, ...queryOptions });
+  if (!notifications.length) {
+    return { success: true, updated: 0 };
+  }
+
+  const now = new Date();
+  const reason = String(options.reason || 'operator_action_completed');
+  for (const notification of notifications) {
+    const currentData = notification.get('data');
+    const data = currentData && typeof currentData === 'object' ? { ...currentData } : {};
+    await notification.update({
+      isRead: true,
+      readAt: now,
+      data: {
+        ...data,
+        manual_resolution_reason: reason,
+        manual_resolved_at: now.toISOString(),
+        manual_resolved_by_user_id: numericUserId,
+      },
+    }, queryOptions);
+    emitNotificationUpdated(notification);
+  }
+
+  return { success: true, updated: notifications.length };
+}
+
 module.exports = {
   getPendingReplyStatesByConversationIds,
   normalizeConversationIds,
+  resolveAutomationAttentionForConversation,
 };
