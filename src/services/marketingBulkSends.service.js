@@ -1973,6 +1973,11 @@ function parseReviewTreatmentIds(source = {}) {
     .filter((value) => Number.isInteger(value) && value > 0))];
 }
 
+function parseReviewImportListId(source = {}) {
+  const parsed = Number(source.review_import_list_id ?? source.reviewImportListId ?? 0);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
 function parseReviewClinicIds(source = {}) {
   const raw = source.review_group_clinic_ids
     ?? source.reviewGroupClinicIds
@@ -3242,6 +3247,78 @@ async function buildReviewRequestCandidateForAppointment(scope, body = {}) {
   };
 }
 
+function mapReviewItemsFromImportedList(rows, importedList, alreadyRequested, body = {}) {
+  const items = (rows || []).map((row) => {
+    const plain = row?.get ? row.get({ plain: true }) : row;
+    const patientId = Number(plain?.paciente_id || 0) || null;
+    const sourceStatus = normalizeKey(plain?.status || '');
+    const sourceExcluded = sourceStatus.startsWith('excluded_')
+      && sourceStatus !== 'excluded_future_appointment';
+    const requestedBefore = !!patientId && alreadyRequested.has(patientId);
+    const status = requestedBefore
+      ? 'excluded_review_already_requested'
+      : (sourceExcluded ? sourceStatus : 'ready');
+
+    return {
+      paciente_id: patientId,
+      clinica_id: Number(plain?.clinica_id || importedList.clinica_id || 0) || null,
+      name: normalizeText(plain?.name) || 'Paciente',
+      phone: plain?.phone || null,
+      email: plain?.email || null,
+      treatment: plain?.treatment || plain?.custom_fields?.tratamiento || null,
+      treatment_id: Number(plain?.treatment_id || 0) || null,
+      last_visit_at: plain?.last_visit_at || null,
+      appointment_at: plain?.appointment_at || plain?.last_visit_at || null,
+      treatment_completed: !!plain?.treatment_completed,
+      status,
+      reason: requestedBefore
+        ? 'Este paciente ya recibió o tiene preparada una solicitud de reseña.'
+        : (sourceExcluded ? plain?.reason : 'Paciente incluido en el listado importado.'),
+      exclusion_reason: requestedBefore
+        ? 'solicitud_previa'
+        : (sourceExcluded ? plain?.exclusion_reason : null),
+      selected: status === 'ready',
+      custom_fields: plain?.custom_fields || {},
+      missing_variables: plain?.missing_variables || [],
+      notes: plain?.notes || null,
+    };
+  });
+
+  return sortReviewRequestItemsByRecentCare(applyReviewRequestExclusions(items, body));
+}
+
+async function buildReviewItemsFromImportedList(scope, body = {}) {
+  const importedListId = parseReviewImportListId(body);
+  if (!importedListId) return null;
+
+  const importedList = await MarketingPatientList.findOne({
+    where: {
+      id: importedListId,
+      ...scopeToWhere(scope),
+    },
+  });
+  if (
+    !importedList
+    || importedList.objective_id !== 'reactivate_patients'
+    || importedList.source !== 'imported_file'
+  ) {
+    const err = new Error('El listado importado no existe o no pertenece a esta clínica.');
+    err.status = 404;
+    err.details = { reason: 'review_import_list_not_available' };
+    throw err;
+  }
+
+  const [rows, alreadyRequested] = await Promise.all([
+    MarketingPatientListItem.findAll({
+      where: { list_id: importedListId },
+      order: [['id', 'ASC']],
+    }),
+    getReviewRequestedPatientIds(scope),
+  ]);
+
+  return mapReviewItemsFromImportedList(rows, importedList, alreadyRequested, body);
+}
+
 async function buildItemsForReviewRequest(scope, body = {}) {
   const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
   if (!clinicIds.length) return [];
@@ -3252,6 +3329,9 @@ async function buildItemsForReviewRequest(scope, body = {}) {
       ? applyReviewRequestExclusions([candidate.item], body).filter((item) => !String(item.status || '').startsWith('excluded'))
       : [];
   }
+
+  const importedItems = await buildReviewItemsFromImportedList(scope, body);
+  if (importedItems) return importedItems;
 
   const source = normalizeReviewRequestSource(body.review_source || body.reviewRequestSource);
   const limit = clampInteger(body.limit, REVIEW_REQUEST_CANDIDATE_LIMIT, 1, REVIEW_REQUEST_CANDIDATE_LIMIT);
@@ -4265,6 +4345,7 @@ function applyReviewClinicReadinessExclusions(itemPayloads = [], clinicStatuses 
 async function getReviewRequestSummary(scope, options = {}) {
   const reviewSource = normalizeReviewRequestSource(options.review_source || options.reviewSource);
   const treatmentIds = parseReviewTreatmentIds(options);
+  const importedListId = parseReviewImportListId(options);
   const effectiveScope = applyReviewClinicFilter(scope, options);
   const previewLimit = clampInteger(options.preview_limit || options.previewLimit, 8, 1, 1000);
   const [candidates, treatmentOptions] = await Promise.all([
@@ -4275,9 +4356,10 @@ async function getReviewRequestSummary(scope, options = {}) {
       review_treatment_moment: options.review_treatment_moment || options.reviewTreatmentMoment || null,
       excluded_review_patient_ids: options.excluded_review_patient_ids || options.excludedReviewPatientIds || null,
       review_exclusion_rules: options.review_exclusion_rules || options.reviewExclusionRules || null,
+      review_import_list_id: importedListId,
       limit: REVIEW_REQUEST_CANDIDATE_LIMIT,
     }),
-    buildReviewTreatmentOptions(effectiveScope),
+    importedListId ? Promise.resolve([]) : buildReviewTreatmentOptions(effectiveScope),
   ]);
   const clinicIds = Array.isArray(effectiveScope?.clinicIds) ? effectiveScope.clinicIds.filter(Number.isInteger) : [];
   if (!clinicIds.length) {
@@ -5696,6 +5778,7 @@ async function createCampaign(scope, body = {}, userId = null) {
   const isReviewRequest = isReviewRequestBody(body);
   const reviewSource = normalizeReviewRequestSource(body.review_source || body.reviewRequestSource);
   const reviewTreatmentIds = parseReviewTreatmentIds(body);
+  const reviewImportListId = parseReviewImportListId(body);
   const reviewThreshold = 5;
   const effectiveScope = isReviewRequest ? applyReviewClinicFilter(scope, body) : scope;
 
@@ -5760,6 +5843,7 @@ async function createCampaign(scope, body = {}, userId = null) {
         list_source: source,
         review_request: isReviewRequest,
         review_source: isReviewRequest ? reviewSource : null,
+        review_import_list_id: isReviewRequest ? reviewImportListId : null,
         review_send_order: isReviewRequest ? 'recent_care_desc' : null,
         review_send_order_label: isReviewRequest ? 'Se enviará primero a los pacientes con fecha de tratamiento o visita más reciente.' : null,
         review_group_clinic_ids: isReviewRequest ? parseReviewClinicIds(body) : [],
@@ -7167,6 +7251,11 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     review_treatment_ids: body.review_treatment_ids || body.reviewTreatmentIds || list.criteria?.review_treatment_ids,
     review_treatment_id: body.review_treatment_id || body.reviewTreatmentId || list.criteria?.review_treatment_id,
   });
+  const reviewImportListId = parseReviewImportListId({
+    review_import_list_id: body.review_import_list_id
+      || body.reviewImportListId
+      || list.criteria?.review_import_list_id,
+  });
   const effectiveScope = isReviewRequest
     ? applyReviewClinicFilter(scope, {
         review_group_clinic_ids: body.review_group_clinic_ids || body.reviewGroupClinicIds || list.criteria?.review_group_clinic_ids,
@@ -7262,6 +7351,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       consent_acknowledged: !!(body.consent_acknowledged ?? list.criteria?.consent_acknowledged),
       review_request: isReviewRequest,
       review_source: isReviewRequest ? reviewSource : null,
+      review_import_list_id: isReviewRequest ? reviewImportListId : null,
       review_send_order: isReviewRequest ? 'recent_care_desc' : null,
       review_send_order_label: isReviewRequest ? 'Se enviará primero a los pacientes con fecha de tratamiento o visita más reciente.' : null,
       review_treatment_id: isReviewRequest ? (reviewTreatmentIds[0] || null) : null,
@@ -9194,4 +9284,8 @@ module.exports = {
   upsertAdminBulkSendSettings,
   removeCampaign,
   reconcileDispatchJobState,
+  __testing: {
+    mapReviewItemsFromImportedList,
+    parseReviewImportListId,
+  },
 };

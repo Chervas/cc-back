@@ -8,6 +8,19 @@ cobros, saldo, bonos, plantillas y documentos fiscales se documenta en
 [14-economia-paciente](./14-economia-paciente.md). VeriFactu permanece como
 simulacion visible y no comunica con AEAT.
 
+## 2026-08-04 - Audiencias de reseñas desde listado importado
+
+- `GET /api/marketing/review-requests/summary` y la creación de campañas de
+  reseñas aceptan `review_import_list_id`.
+- El ID debe resolver un `MarketingPatientList` de origen `imported_file`,
+  objetivo `reactivate_patients` y perteneciente al scope autenticado. El
+  backend rechaza listados de otra clínica o grupo.
+- Con ese ID, resumen y campaña copian exclusivamente los items del listado;
+  no reconstruyen la audiencia contra todos los pacientes ni consultan el
+  catálogo de tratamientos.
+- Se conservan exclusiones de importación reutilizables. La exclusión de
+  reactivación `excluded_future_appointment` no aplica a reseñas.
+
 Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Data Manager/Conversiones mejoradas, política de goals y E2E/limpieza de intake.
 
 ## 2026-08-03 - QuickChat, leads y reacciones WhatsApp
