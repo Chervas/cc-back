@@ -4487,6 +4487,7 @@ async function handleRequestReview(node, context, runtime) {
   const result = await marketingBulkSendsService.createAndStartReviewRequestForAppointment({
     appointmentId,
     clinicId,
+    automationTemplateId: runtime?.execution?.template_version_id,
     reviewSource: resolveTemplateValue(config?.review_source, context),
     reviewThreshold: resolveTemplateValue(config?.review_threshold, context),
     whatsappTemplateId: resolveTemplateValue(config?.whatsapp_template_id, context),
@@ -4520,6 +4521,7 @@ async function handleRequestReviewReminder(node, context, runtime) {
   const result = await marketingBulkSendsService.sendReviewRequestReminder({
     listId: resolveTemplateValue(config?.list_id, context),
     itemId: resolveTemplateValue(config?.item_id, context),
+    automationTemplateId: runtime?.execution?.template_version_id,
     userId: runtime?.execution?.created_by || runtime?.execution?.user_id || null,
   });
   const nextOutput = result?.skipped || !toIntOrNull(result?.message_id)

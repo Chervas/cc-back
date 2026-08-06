@@ -13,10 +13,13 @@ const FlowExecutionLogV2 = db.FlowExecutionLogV2;
 const JobRequest = db.JobRequest;
 const { getIO } = require('./socket.service');
 const { normalizeWhatsappLocale } = require('../lib/whatsapp-template-locale');
+const {
+  REVIEW_AUTOMATION_TRIGGER,
+  REVIEW_AUTOMATION_ACTION,
+  inspectExplicitReviewAutomation,
+} = require('../lib/review-automation-config');
 const { Op } = db.Sequelize;
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
-const REVIEW_AUTOMATION_TRIGGER = 'appointment_completed';
-const REVIEW_AUTOMATION_ACTION = 'action/request_review';
 const IMPORTED_HISTORICAL_APPOINTMENT_REASON = 'Importación de pacientes para reactivación';
 const SCHEDULED_TRIGGER_FIRE_GRACE_MS = (() => {
   const configured = Number(process.env.APPOINTMENT_AUTOMATION_FIRE_GRACE_MS);
@@ -512,6 +515,16 @@ async function resolveTemplateBoundToTratamiento(cita, eventName) {
   });
   if (!template) return null;
 
+  if (
+    templateHasNodeType(template, REVIEW_AUTOMATION_ACTION)
+    && !inspectExplicitReviewAutomation(template, {
+      clinicId: cita?.clinica_id,
+      requireActive: true,
+    }).configured
+  ) {
+    return null;
+  }
+
   if (normalizedEventName === 'appointment_created') {
     const triggerConfig = getTemplateTriggerConfig(template);
     const clinic = cita?.clinica_id
@@ -726,6 +739,13 @@ async function resolveClinicFallbackTemplate(cita, eventName) {
 
   const scored = candidates
     .filter((template) => {
+      if (templateHasNodeType(template, REVIEW_AUTOMATION_ACTION)) {
+        return inspectExplicitReviewAutomation(template, {
+          clinicId,
+          requireActive: true,
+        }).configured;
+      }
+
       if (
         reviewOverrideState.disabled
         && templateHasNodeType(template, REVIEW_AUTOMATION_ACTION)
@@ -1082,6 +1102,21 @@ async function enqueueExecutionForTemplate(cita, template, options = {}) {
   }
   if (isImportedHistoricalAppointment(cita)) {
     return { success: true, skipped: true, reason: 'imported_historical_appointment' };
+  }
+
+  if (templateHasNodeType(template, REVIEW_AUTOMATION_ACTION)) {
+    const reviewConfiguration = inspectExplicitReviewAutomation(template, {
+      clinicId: cita?.clinica_id,
+      requireActive: true,
+    });
+    if (!reviewConfiguration.configured) {
+      return {
+        success: true,
+        skipped: true,
+        reason: 'review_automation_requires_explicit_configuration',
+        configuration_errors: reviewConfiguration.errors,
+      };
+    }
   }
 
   const eventName = normalizeEventName(options.event_name) || cleanString(template?.trigger_type) || mapEstadoToEvent(cita?.estado) || 'appointment_created';

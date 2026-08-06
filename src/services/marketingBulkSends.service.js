@@ -12,6 +12,15 @@ const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-templ
 const { matchesReviewTemplateMedia } = require('../lib/review-template-media');
 const { usesExplicitDispatchWindow } = require('../lib/marketing-dispatch-window');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
+const {
+  REVIEW_AUTOMATION_TRIGGER,
+  REVIEW_AUTOMATION_ACTION,
+  REVIEW_AUTOMATION_MANAGED_FEATURE,
+  REVIEW_AUTOMATION_CONFIGURATION_VERSION,
+  normalizeReviewDelay,
+  reviewDelayToHours,
+  inspectExplicitReviewAutomation,
+} = require('../lib/review-automation-config');
 const marketingOptOutService = require('./marketingOptOut.service');
 const jobRequestsService = require('./jobRequests.service');
 const { isGlobalAdmin } = require('../lib/role-helpers');
@@ -52,8 +61,6 @@ const CHANNELS = new Set(['whatsapp', 'email', 'managed_calls']);
 const STANDARD_FIELDS = new Set(['name', 'first_name', 'last_name', 'phone', 'email']);
 const COMMERCIAL_TEMPLATE_USAGES = new Set(['marketing', 'comercial', 'promocion', 'promocional', 'reactivacion_pacientes']);
 const REVIEW_TEMPLATE_USAGES = new Set(['solicitud_resena', 'resena', 'review_request', 'reviews']);
-const REVIEW_AUTOMATION_TRIGGER = 'appointment_completed';
-const REVIEW_AUTOMATION_ACTION = 'action/request_review';
 const REVIEW_FOLLOWUP_AUTOMATION_ACTION = 'action/review_followup';
 const REVIEW_NO_RESPONSE_AUTOMATION_ACTION = 'action/review_no_response';
 const REVIEW_RATING_EVENT_TYPES = ['review_rating_received', 'review_request_rating'];
@@ -1948,6 +1955,9 @@ function normalizeReviewRequestSource(value) {
   if (['completed_treatment', 'completed_treatments', 'tratamiento_realizado', 'treatment_completed'].includes(normalized)) {
     return 'completed_treatment';
   }
+  if (['first_completed_appointment', 'primera_cita_completada'].includes(normalized)) {
+    return 'first_completed_appointment';
+  }
   if (['manual_selection', 'manual', 'seleccion_manual'].includes(normalized)) {
     return 'manual_selection';
   }
@@ -3579,14 +3589,22 @@ function serializeReviewAutomationTemplate(template) {
   const actionNode = (Array.isArray(plain.nodes) ? plain.nodes : [])
     .find((node) => normalizeText(node?.type) === REVIEW_AUTOMATION_ACTION);
   const config = actionNode?.config && typeof actionNode.config === 'object' ? actionNode.config : {};
+  const inspection = inspectExplicitReviewAutomation(plain, {
+    clinicId: plain.clinic_id,
+    requireActive: false,
+  });
   return {
     id: plain.id,
     public_id: plain.public_id || null,
     template_key: plain.template_key,
     version: plain.version,
     name: plain.name,
-    is_active: plain.is_active === true,
+    is_active: (plain.is_active === true || plain.is_active === 1) && inspection.configured,
+    configured: inspection.configured,
+    configuration_errors: inspection.errors,
     review_source: normalizeReviewRequestSource(config.review_source),
+    review_delay: inspection.review_delay,
+    initial_delay_hours: inspection.initial_delay_hours,
     review_threshold: normalizeReviewThreshold(config.review_threshold),
     whatsapp_template_id: Number(config.whatsapp_template_id || 0) || null,
     template_name: normalizeText(config.template_name) || REVIEW_TEMPLATE_NAME,
@@ -3701,6 +3719,27 @@ async function getReviewAutomationTemplate(scope, { includeInactive = false } = 
   return rows.find(templateHasReviewRequestAction) || null;
 }
 
+async function loadExplicitReviewAutomationForClinic(templateId, clinicId, { requireActive = true } = {}) {
+  const safeTemplateId = Number(templateId || 0);
+  const safeClinicId = Number(clinicId || 0);
+  if (!safeTemplateId || !safeClinicId) {
+    return {
+      template: null,
+      inspection: {
+        configured: false,
+        errors: ['explicit_review_automation_missing'],
+      },
+    };
+  }
+
+  const template = await AutomationFlowTemplateV2.findByPk(safeTemplateId);
+  const inspection = inspectExplicitReviewAutomation(template, {
+    clinicId: safeClinicId,
+    requireActive,
+  });
+  return { template, inspection };
+}
+
 async function getReviewRequestAutomationStatus(scope, dependencies = {}) {
   const clinicIds = Array.isArray(scope?.clinicIds)
     ? scope.clinicIds.map(Number).filter(Number.isInteger)
@@ -3714,11 +3753,14 @@ async function getReviewRequestAutomationStatus(scope, dependencies = {}) {
 
   const loadTemplate = dependencies.getReviewAutomationTemplate || getReviewAutomationTemplate;
   const template = await loadTemplate(scope, { includeInactive: true });
+  const serializedTemplate = template ? serializeReviewAutomationTemplate(template) : null;
   return {
     success: true,
     clinic_id: clinicIds[0],
-    automation_enabled: template?.is_active === true,
-    automation_template: template ? serializeReviewAutomationTemplate(template) : null,
+    automation_enabled: serializedTemplate?.is_active === true,
+    automation_configured: serializedTemplate?.configured === true,
+    configuration_errors: serializedTemplate?.configuration_errors || [],
+    automation_template: serializedTemplate,
   };
 }
 
@@ -4229,7 +4271,8 @@ async function buildReviewClinicStatuses(scope, options = {}) {
     const templatesReady = !!approvedTemplate;
     const ready = !!googleReviewUrlAvailable && !!whatsappAvailable && templatesReady;
     const serializedAutomation = serializeReviewAutomationTemplate(clinicAutomationTemplate);
-    const automationExcludedByOverride = !!clinicAutomationTemplate && clinicAutomationTemplate.is_active !== true;
+    const automationEnabled = serializedAutomation?.is_active === true;
+    const automationExcludedByOverride = !!clinicAutomationTemplate && !automationEnabled;
     const missing = [
       !googleReviewUrlAvailable ? 'google_review_url' : null,
       !whatsappAvailable ? 'whatsapp_connection' : null,
@@ -4246,10 +4289,10 @@ async function buildReviewClinicStatuses(scope, options = {}) {
           !whatsappAvailable ? 'Conecta WhatsApp para poder enviar la solicitud.' : null,
           !approvedTemplate ? 'ClinicaClick debe tener una plantilla de reseñas aprobada por WhatsApp para esta sede.' : null,
         ].filter(Boolean).join(' ');
-    const automationLabel = clinicAutomationTemplate?.is_active === true
+    const automationLabel = automationEnabled
       ? (ready ? 'Activa' : 'Configurada, sin enviar')
       : (ready ? 'Lista para activar' : 'Pendiente');
-    const automationHint = clinicAutomationTemplate?.is_active === true
+    const automationHint = automationEnabled
       ? (ready
         ? 'La sede pedirá valoraciones automáticamente cuando se cumplan las reglas.'
         : 'La automatización está guardada, pero no enviará reseñas hasta resolver los requisitos pendientes.')
@@ -4273,7 +4316,7 @@ async function buildReviewClinicStatuses(scope, options = {}) {
       approved_photo_template_available: !!approvedPhotoTemplate && templateHasImageHeader(approvedPhotoTemplate),
       approved_photo_template_id: templateHasImageHeader(approvedPhotoTemplate) ? (approvedPhotoTemplate?.id || null) : null,
       template_status_label: templateLabel,
-      clinic_automation_enabled: clinicAutomationTemplate?.is_active === true,
+      clinic_automation_enabled: automationEnabled,
       clinic_automation_has_override: !!clinicAutomationTemplate,
       clinic_automation_excluded_by_override: automationExcludedByOverride,
       clinic_automation_template: serializedAutomation,
@@ -4715,12 +4758,13 @@ async function getReviewRequestSummary(scope, options = {}) {
   const groupAutomationTemplates = clinicStatuses
     .filter((clinic) => clinic.clinic_automation_enabled && clinic.clinic_automation_template)
     .map((clinic) => clinic.clinic_automation_template);
+  const serializedAutomationTemplate = serializeReviewAutomationTemplate(automationTemplate);
   const effectiveAutomationTemplate = scope?.scope === 'group'
     ? (groupAutomationTemplates[0] || null)
-    : serializeReviewAutomationTemplate(automationTemplate);
+    : serializedAutomationTemplate;
   const automationEnabled = scope?.scope === 'group'
     ? groupReadyClinics.length > 0 && groupReadyClinics.every((clinic) => clinic.clinic_automation_enabled === true)
-    : automationTemplate?.is_active === true;
+    : serializedAutomationTemplate?.is_active === true;
   const googleRatingSummary = buildGoogleRatingSummary(googleRatingRow || {});
 
   return {
@@ -4820,6 +4864,7 @@ function buildClinicReviewScopeFromGroup(scope, clinicId) {
 
 function buildReviewAutomationNodes({
   reviewSource,
+  reviewDelay,
   reviewThreshold,
   whatsappTemplateId = null,
   reviewGiftEnabled = false,
@@ -4831,6 +4876,10 @@ function buildReviewAutomationNodes({
   reviewTeamMembersText = '',
 }) {
   const threshold = normalizeReviewThreshold(reviewThreshold);
+  const initialDelayHours = reviewDelayToHours(reviewDelay, null);
+  if (initialDelayHours === null) {
+    throw new Error('review_delay_required');
+  }
   const giftEnabled = reviewGiftEnabled === true || String(reviewGiftEnabled || '').toLowerCase() === 'true';
   return [
     {
@@ -4846,7 +4895,7 @@ function buildReviewAutomationNodes({
       id: 'N2',
       type: 'delay/fixed',
       config: {
-        duration: 24,
+        duration: initialDelayHours,
         unit: 'hours',
       },
       outputs: { on_complete: 'N3' },
@@ -4969,8 +5018,40 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
   }
 
   const enabled = body.enabled === true || body.active === true || body.is_active === true;
+  const saveConfiguration = body.save_configuration === true || body.saveConfiguration === true;
   const identity = buildReviewAutomationTemplateIdentity(scope);
-  const reviewSource = normalizeReviewRequestSource(body.review_source || body.reviewSource || 'completed_treatment');
+  const existing = await AutomationFlowTemplateV2.findOne({
+    where: { template_key: identity.template_key },
+    order: [['version', 'DESC'], ['id', 'DESC']],
+  });
+  if (!enabled && existing && !saveConfiguration) {
+    const row = await existing.update({ is_active: false });
+    const serializedTemplate = serializeReviewAutomationTemplate(row);
+    return {
+      success: true,
+      automation_enabled: false,
+      automation_configured: serializedTemplate.configured === true,
+      configuration_errors: serializedTemplate.configuration_errors || [],
+      automation_template: serializedTemplate,
+      warnings: serializedTemplate.configured === true
+        ? []
+        : ['review_automation_configuration_missing'],
+    };
+  }
+  const existingConfiguration = existing
+    ? inspectExplicitReviewAutomation(existing, {
+      clinicId: scope?.clinicIds?.[0],
+      requireActive: false,
+    })
+    : null;
+  const requestedReviewSource = normalizeText(body.review_source || body.reviewSource || '');
+  const reviewSource = requestedReviewSource
+    ? normalizeReviewRequestSource(requestedReviewSource)
+    : existingConfiguration?.review_source || null;
+  const reviewDelay = normalizeReviewDelay(
+    body.review_delay || body.reviewDelay,
+    existingConfiguration?.review_delay || null
+  );
   const reviewThreshold = 5;
   const whatsappTemplateId = Number(body.whatsapp_template_id || body.template_id || 0) || null;
   const reviewGiftEnabled = body.review_gift_enabled === true
@@ -5009,11 +5090,7 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     }
   }
 
-  const existing = await AutomationFlowTemplateV2.findOne({
-    where: { template_key: identity.template_key },
-    order: [['version', 'DESC'], ['id', 'DESC']],
-  });
-  if (!enabled && !existing) {
+  if (!enabled && !existing && !saveConfiguration) {
     const [approvedReviewTemplate, approvedReminderTemplate, googleReviewUrlAvailable, whatsappAvailable] = await Promise.all([
       findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null, reviewTemplateSelectionOptions),
       findApprovedReviewReminderWhatsappTemplate(scope),
@@ -5044,13 +5121,31 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     hasGoogleReviewUrlForScope(scope),
     hasWhatsappConfigForScope(scope),
   ]);
-  if (enabled && !reviewSenderName) {
+  if ((enabled || saveConfiguration) && (!reviewSource || !reviewDelay)) {
+    const err = new Error('Configura cuándo se solicita la reseña y cuánto debe esperar el sistema antes de activar la automatización.');
+    err.status = 409;
+    err.details = {
+      reason: 'review_automation_configuration_missing',
+      warnings: [
+        !reviewSource ? 'review_source_missing' : null,
+        !reviewDelay ? 'review_delay_missing' : null,
+      ].filter(Boolean),
+    };
+    throw err;
+  }
+  if ((enabled || saveConfiguration) && !reviewSenderName) {
     const err = new Error('Indica el remitente que firma la solicitud de reseña antes de activar la automatización.');
     err.status = 409;
     err.details = { reason: 'review_automation_requirements_missing', warnings: ['sender_name_missing'] };
     throw err;
   }
-  if (enabled && (!readyApprovedTemplate || !readyGoogleReviewUrlAvailable || !readyWhatsappAvailable)) {
+  if ((enabled || saveConfiguration) && !readyApprovedTemplate) {
+    const err = new Error('Selecciona una plantilla de reseñas aprobada por Meta antes de guardar esta automatización.');
+    err.status = 409;
+    err.details = { reason: 'review_automation_configuration_missing', warnings: ['template_not_approved'] };
+    throw err;
+  }
+  if (enabled && (!readyGoogleReviewUrlAvailable || !readyWhatsappAvailable)) {
     const warnings = [
       !readyApprovedTemplate ? 'template_not_approved' : null,
       !readyGoogleReviewUrlAvailable ? 'google_review_url_missing' : null,
@@ -5064,6 +5159,7 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
   const now = new Date();
   const nodes = buildReviewAutomationNodes({
     reviewSource,
+    reviewDelay,
     reviewThreshold,
     whatsappTemplateId: whatsappTemplateId || approvedTemplate?.id || readyApprovedTemplate?.id || null,
     reviewGiftEnabled,
@@ -5080,9 +5176,17 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     version: Math.max(Number(existing?.version || 0), 2),
     engine_version: 'v2',
     name: displayName,
-    description: 'Espera 24h tras finalizar un tratamiento, pide al paciente una valoración con escala 5 a 1 y deriva a Google solo si responde 5/5. Si no responde, intenta mandar un recordatorio 24h después cuando exista plantilla activa y cierra si sigue sin respuesta.',
+    description: `Espera ${reviewDelayToHours(reviewDelay, 0)}h tras el evento configurado, pide al paciente una valoración con escala 5 a 1 y deriva a Google solo si responde 5/5.`,
     trigger_type: REVIEW_AUTOMATION_TRIGGER,
-    trigger_config: { event_name: REVIEW_AUTOMATION_TRIGGER },
+    trigger_config: {
+      event_name: REVIEW_AUTOMATION_TRIGGER,
+      managed_feature: REVIEW_AUTOMATION_MANAGED_FEATURE,
+      configured: true,
+      configuration_version: REVIEW_AUTOMATION_CONFIGURATION_VERSION,
+      review_source: reviewSource,
+      review_delay: reviewDelay,
+      initial_delay_hours: reviewDelayToHours(reviewDelay, 0),
+    },
     is_active: enabled,
     is_system: false,
     entry_node_id: 'N1',
@@ -5095,6 +5199,7 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
   const row = existing
     ? await existing.update(payload)
     : await AutomationFlowTemplateV2.create(payload);
+  const serializedTemplate = serializeReviewAutomationTemplate(row);
   const [approvedReviewTemplate, approvedReminderTemplate, googleReviewUrlAvailable, whatsappAvailable] = await Promise.all([
     findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null, reviewTemplateSelectionOptions),
     findApprovedReviewReminderWhatsappTemplate(scope),
@@ -5104,8 +5209,10 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
   const templatesReady = !!approvedReviewTemplate;
   return {
     success: true,
-    automation_enabled: row.is_active === true,
-    automation_template: serializeReviewAutomationTemplate(row),
+    automation_enabled: row.is_active === true || row.is_active === 1,
+    automation_configured: serializedTemplate.configured === true,
+    configuration_errors: serializedTemplate.configuration_errors || [],
+    automation_template: serializedTemplate,
     approved_template_available: templatesReady,
     approved_template_id: approvedReviewTemplate?.id || null,
     approved_reminder_template_available: !!approvedReminderTemplate,
@@ -5192,14 +5299,36 @@ async function createAndStartReviewRequestForAppointment(options = {}) {
     isAll: false,
     isValid: true,
   };
-  const reviewSource = normalizeReviewRequestSource(options.reviewSource || options.review_source || 'completed_treatment');
+  const automationTemplateId = Number(
+    options.automationTemplateId
+    || options.automation_template_id
+    || options.flowTemplateId
+    || options.flow_template_id
+    || 0
+  );
+  const { inspection: automationConfiguration } = await loadExplicitReviewAutomationForClinic(
+    automationTemplateId,
+    clinicId,
+    { requireActive: true }
+  );
+  if (!automationConfiguration.configured) {
+    return {
+      success: true,
+      sent: false,
+      skipped: true,
+      reason: 'review_automation_requires_explicit_configuration',
+      configuration_errors: automationConfiguration.errors,
+    };
+  }
+
+  const reviewSource = automationConfiguration.review_source;
   const reviewThreshold = 5;
   const reviewGiftEnabled = options.reviewGiftEnabled === true
     || options.review_gift_enabled === true
     || String(options.reviewGiftEnabled ?? options.review_gift_enabled ?? '').toLowerCase() === 'true';
   const reviewGiftDescription = normalizeText(options.reviewGiftDescription || options.review_gift_description || '');
   const reviewDisplayClinicName = normalizeText(options.reviewDisplayClinicName || options.review_display_clinic_name || '');
-  const reviewSenderName = normalizeText(options.reviewSenderName || options.review_sender_name || '');
+  const reviewSenderName = automationConfiguration.review_sender_name;
   const reviewTeamPhotoUrl = normalizeText(options.reviewTeamPhotoUrl || options.review_team_photo_url || '');
   const reviewTeamPhotoOverlayColor = publicMediaPersonalizationService.normalizeHexColor(
     options.reviewTeamPhotoOverlayColor || options.review_team_photo_overlay_color
@@ -5226,7 +5355,7 @@ async function createAndStartReviewRequestForAppointment(options = {}) {
 
   const template = await findApprovedReviewWhatsappTemplate(
     scope,
-    options.whatsappTemplateId || options.whatsapp_template_id || null,
+    automationConfiguration.whatsapp_template_id,
     { preferPhoto: isHttpsUrl(reviewTeamPhotoUrl) }
   );
   if (!template) {
@@ -5246,6 +5375,7 @@ async function createAndStartReviewRequestForAppointment(options = {}) {
       review_source: reviewSource,
       review_threshold: reviewThreshold,
       review_appointment_id: appointmentId,
+      review_automation_template_id: automationTemplateId,
       review_gift_enabled: reviewGiftEnabled,
       review_gift_description: reviewGiftEnabled ? reviewGiftDescription : null,
       review_display_clinic_name: reviewDisplayClinicName || resolveReviewDisplayClinicName({ criteria: {} }, clinic),
@@ -5335,6 +5465,32 @@ async function sendReviewRequestReminder(options = {}) {
     isAll: false,
     isValid: true,
   };
+  const listCriteria = asPlainObject(list.criteria);
+  const automatedReviewAppointmentId = Number(listCriteria.review_appointment_id || 0);
+  if (automatedReviewAppointmentId) {
+    const automationTemplateId = Number(
+      options.automationTemplateId
+      || options.automation_template_id
+      || listCriteria.review_automation_template_id
+      || 0
+    );
+    const { inspection } = await loadExplicitReviewAutomationForClinic(
+      automationTemplateId,
+      clinicId,
+      { requireActive: true }
+    );
+    if (!inspection.configured) {
+      return {
+        success: true,
+        sent: false,
+        skipped: true,
+        reason: 'review_automation_requires_explicit_configuration',
+        configuration_errors: inspection.errors,
+        list_id: listId,
+        item_id: itemId,
+      };
+    }
+  }
   const [clinic, clinicConfig, template] = await Promise.all([
     loadClinicForTemplateVariables(clinicId),
     whatsappService.getClinicConfig(clinicId).catch(() => null),
