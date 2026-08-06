@@ -11,6 +11,7 @@ const whatsappConnectionStatusService = require('./whatsappConnectionStatus.serv
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
 const { matchesReviewTemplateMedia } = require('../lib/review-template-media');
 const { usesExplicitDispatchWindow } = require('../lib/marketing-dispatch-window');
+const { normalizeReviewSenderName, requireReviewSenderName } = require('../lib/review-sender-policy');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const {
   REVIEW_AUTOMATION_TRIGGER,
@@ -5379,7 +5380,7 @@ async function createAndStartReviewRequestForAppointment(options = {}) {
       review_gift_enabled: reviewGiftEnabled,
       review_gift_description: reviewGiftEnabled ? reviewGiftDescription : null,
       review_display_clinic_name: reviewDisplayClinicName || resolveReviewDisplayClinicName({ criteria: {} }, clinic),
-      review_sender_name: reviewSenderName || resolveReviewSenderName({ criteria: {} }),
+      review_sender_name: reviewSenderName,
       review_team_photo_url: reviewTeamPhotoUrl || null,
       review_team_photo_overlay_color: reviewTeamPhotoOverlayColor,
       review_team_members_text: reviewTeamMembersText || null,
@@ -5937,6 +5938,9 @@ async function createCampaign(scope, body = {}, userId = null) {
   const reviewImportListId = parseReviewImportListId(body);
   const reviewThreshold = 5;
   const effectiveScope = isReviewRequest ? applyReviewClinicFilter(scope, body) : scope;
+  const reviewSenderName = isReviewRequest
+    ? requireReviewSenderName(body.review_sender_name || body.reviewSenderName)
+    : null;
 
   return db.sequelize.transaction(async (transaction) => {
     let itemPayloads = [];
@@ -6013,7 +6017,7 @@ async function createCampaign(scope, body = {}, userId = null) {
         review_gift_enabled: isReviewRequest ? (body.review_gift_enabled === true || String(body.review_gift_enabled || '').toLowerCase() === 'true') : false,
         review_gift_description: isReviewRequest ? normalizeText(body.review_gift_description || body.reviewGiftDescription || '') || null : null,
         review_display_clinic_name: isReviewRequest ? normalizeText(body.review_display_clinic_name || body.reviewDisplayClinicName || '') || null : null,
-        review_sender_name: isReviewRequest ? normalizeText(body.review_sender_name || body.reviewSenderName || '') || null : null,
+        review_sender_name: reviewSenderName,
         review_team_photo_url: isReviewRequest ? normalizeText(body.review_team_photo_url || body.reviewTeamPhotoUrl || '') || null : null,
         review_team_photo_overlay_color: isReviewRequest
           ? publicMediaPersonalizationService.normalizeHexColor(body.review_team_photo_overlay_color || body.reviewTeamPhotoOverlayColor)
@@ -6621,12 +6625,12 @@ function resolveReviewDisplayClinicName(list, clinic) {
 
 function resolveReviewSenderName(list) {
   const criteria = asPlainObject(list?.criteria);
-  return normalizeText(
+  return normalizeReviewSenderName(
     criteria.review_sender_name
     || criteria.reviewSenderName
     || criteria.firma_resenas
     || ''
-  ) || 'Recepción';
+  );
 }
 
 function firstTokenFromName(value) {
@@ -6734,8 +6738,9 @@ async function getOrCreateReviewTestSampleItem(list, clinicId, listCriteria = {}
 
   const displayClinicName = normalizeText(listCriteria.review_display_clinic_name || listCriteria.reviewDisplayClinicName || '')
     || 'tu clínica';
-  const senderName = normalizeText(listCriteria.review_sender_name || listCriteria.reviewSenderName || '')
-    || 'Recepción';
+  const senderName = normalizeReviewSenderName(
+    listCriteria.review_sender_name || listCriteria.reviewSenderName || ''
+  );
   return MarketingPatientListItem.create({
     list_id: list.id,
     paciente_id: null,
@@ -7402,6 +7407,18 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
   const templateUsage = resolveTemplateUsageFromMetaCategory(template, requestedTemplateUsage);
   const templateCommercial = resolveTemplateCommercialFromMetaCategory(template, requestedTemplateCommercial);
   const isReviewRequest = isReviewRequestList(list) || isReviewRequestBody(body) || isReviewTemplateUsage(templateUsage);
+  const hasExplicitReviewSender = body.review_sender_name !== undefined || body.reviewSenderName !== undefined;
+  if (isReviewRequest && hasExplicitReviewSender) {
+    requireReviewSenderName(body.review_sender_name ?? body.reviewSenderName);
+  }
+  const reviewSenderName = isReviewRequest
+    ? requireReviewSenderName(
+      body.review_sender_name
+      || body.reviewSenderName
+      || list.criteria?.review_sender_name
+      || list.criteria?.reviewSenderName
+    )
+    : null;
   const reviewSource = normalizeReviewRequestSource(body.review_source || body.reviewRequestSource || list.criteria?.review_source);
   const reviewTreatmentIds = parseReviewTreatmentIds({
     review_treatment_ids: body.review_treatment_ids || body.reviewTreatmentIds || list.criteria?.review_treatment_ids,
@@ -7537,9 +7554,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       review_display_clinic_name: isReviewRequest
         ? normalizeText(body.review_display_clinic_name || body.reviewDisplayClinicName || list.criteria?.review_display_clinic_name || '') || null
         : null,
-      review_sender_name: isReviewRequest
-        ? normalizeText(body.review_sender_name || body.reviewSenderName || list.criteria?.review_sender_name || '') || null
-        : null,
+      review_sender_name: reviewSenderName,
       review_team_photo_url: isReviewRequest
         ? normalizeText(body.review_team_photo_url || body.reviewTeamPhotoUrl || list.criteria?.review_team_photo_url || '') || null
         : null,
@@ -7629,6 +7644,10 @@ async function sendTest(scope, campaignId, body = {}) {
   let listCriteria = asPlainObject(list?.criteria);
   const templateUsage = normalizeTemplateUsage(body.template_usage || listCriteria.template_usage || 'promocion');
   if (isReviewTemplateUsage(templateUsage)) {
+    const hasExplicitSender = body.review_sender_name !== undefined || body.reviewSenderName !== undefined;
+    if (hasExplicitSender) {
+      requireReviewSenderName(body.review_sender_name ?? body.reviewSenderName);
+    }
     const fallbackTemplate = await getLastReviewRequestTemplateForScope(scope).catch(() => null);
     const pickReviewText = (...values) => {
       for (const value of values) {
@@ -7692,6 +7711,7 @@ async function sendTest(scope, campaignId, body = {}) {
       await list.update({ criteria: nextCriteria });
       listCriteria = nextCriteria;
     }
+    requireReviewSenderName(listCriteria.review_sender_name || listCriteria.reviewSenderName);
   }
   const selectedTemplateId =
     body.whatsapp_template_id
@@ -8220,6 +8240,9 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
   const channels = Array.isArray(list.criteria?.channels)
     ? list.criteria.channels
     : normalizeChannels(list.action_mode || list.channel);
+  if (isReviewRequestList(list)) {
+    requireReviewSenderName(list.criteria?.review_sender_name || list.criteria?.reviewSenderName);
+  }
   if (!channels.includes('whatsapp')) {
     const err = new Error('El envío real solo está conectado para WhatsApp en este MVP.');
     err.status = 409;
