@@ -5,6 +5,10 @@ const { Op } = require('sequelize');
 const db = require('../../models');
 const { queues } = require('./queue.service');
 const whatsappTemplatesService = require('./whatsappTemplates.service');
+const {
+  REVIEW_AUTOMATION_ACTION,
+  inspectExplicitReviewAutomation,
+} = require('../lib/review-automation-config');
 
 const {
   Clinica,
@@ -148,6 +152,7 @@ function mergeLocalReviewConfigIntoCatalogNodes(sourceNodes, latestPublishedTemp
 
   const preserveByType = {
     'action/request_review': [
+      'review_source',
       'whatsapp_template_id',
       'template_name',
       'review_gift_enabled',
@@ -156,7 +161,9 @@ function mergeLocalReviewConfigIntoCatalogNodes(sourceNodes, latestPublishedTemp
       'review_sender_name',
       'review_team_photo_url',
       'review_team_photo_overlay_color',
+      'review_team_members_text',
     ],
+    'delay/fixed': ['duration', 'unit'],
   };
   const managedLeadPreserveByNodeId = {
     N1: [
@@ -485,11 +492,24 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
   }
 
   const isManagedLeadAutoReply = catalogFlow.name === 'auto_bienvenida_lead';
-  const targetActive = latestPublished
-    ? latestPublished.is_active !== false
-    : !isManagedLeadAutoReply;
+  const isManagedReviewAutomation = getNodesArray(linkedTemplate)
+    .some((node) => String(node?.type || '') === REVIEW_AUTOMATION_ACTION);
+  const reviewConfiguration = isManagedReviewAutomation && latestPublished
+    ? inspectExplicitReviewAutomation(latestPublished, {
+      clinicId: clinicScope.clinic_id,
+      requireActive: false,
+    })
+    : null;
+  const targetActive = isManagedReviewAutomation
+    ? reviewConfiguration?.configured === true && latestPublished?.is_active === true
+    : latestPublished
+      ? latestPublished.is_active !== false
+      : !isManagedLeadAutoReply;
   const nodes = mergeLocalReviewConfigIntoCatalogNodes(linkedTemplate.nodes, latestPublished);
-  const triggerConfig = isManagedLeadAutoReply && latestPublished?.trigger_config?.managed_feature === 'lead_auto_reply'
+  const triggerConfig = (
+    (isManagedLeadAutoReply && latestPublished?.trigger_config?.managed_feature === 'lead_auto_reply')
+    || (isManagedReviewAutomation && reviewConfiguration?.configured === true)
+  )
     ? cloneJson(latestPublished.trigger_config)
     : linkedTemplate.trigger_config ?? null;
 
