@@ -16,6 +16,12 @@ const {
 } = require('../../models');
 const { emitNotificationCreated } = require('./notificationsRealtime.service');
 
+const ADMIN_ONLY_EVENTS = new Set([
+  'whatsapp.account_compliance_incident',
+  'whatsapp.account_compliance_help_requested',
+  'whatsapp.account_compliance_resolved'
+]);
+
 function getEventDefinition(event) {
   return NOTIFICATION_EVENTS.find((item) => item.event === event) || null;
 }
@@ -134,6 +140,37 @@ function buildNotificationContent(event, payload = {}) {
         level: defaults.level || 'info'
       };
     }
+    case 'whatsapp.account_compliance_incident': {
+      const clinic = payload.clinicName || 'una clínica';
+      const reason = payload.violationLabel || payload.violationType || 'una medida de cumplimiento';
+      const status = String(payload.operationalStatus || '').toLowerCase();
+      const state = ['suspended', 'deleted'].includes(status)
+        ? 'suspendido'
+        : (status === 'warning' ? 'con un aviso' : 'con una restricción');
+      return {
+        title: `WhatsApp ${state} en ${clinic}`,
+        message: `Meta ha comunicado ${reason}. Revisa el alcance y la actividad reciente de la cuenta.`,
+        icon: 'heroicons_outline:shield-exclamation',
+        level: defaults.level || 'error'
+      };
+    }
+    case 'whatsapp.account_compliance_help_requested': {
+      return {
+        title: 'Solicitud de revisión de WhatsApp',
+        message: `La clínica ha solicitado que Clinicaclick revise la suspensión del número ${payload.phoneNumber || 'conectado'}.`,
+        icon: 'heroicons_outline:document-magnifying-glass',
+        level: defaults.level || 'warning'
+      };
+    }
+    case 'whatsapp.account_compliance_resolved': {
+      const clinic = payload.clinicName || 'la clínica';
+      return {
+        title: `WhatsApp restablecido en ${clinic}`,
+        message: 'Meta ha comunicado la restitución de la cuenta. Clinicaclick mantendrá el envío normal y seguirá registrando los estados reales de entrega.',
+        icon: 'heroicons_outline:shield-check',
+        level: defaults.level || 'info'
+      };
+    }
     default:
       return {
         title: defaults.label || 'Notificación',
@@ -199,7 +236,9 @@ async function ensurePreferenceRecord(role, subrole, event) {
     normalizeSubrole(item.subrole) === normalizedSubrole &&
     item.event === event
   );
-  const enabled = defaults ? defaults.enabled : true;
+  const enabled = ADMIN_ONLY_EVENTS.has(event) && role !== 'admin'
+    ? false
+    : (defaults ? defaults.enabled : true);
   const [preference] = await NotificationPreference.findOrCreate({
     where: {
       role,
@@ -243,12 +282,16 @@ async function dispatchEvent({ event, clinicId = null, data = {} }) {
     return;
   }
 
-  const preferences = await NotificationPreference.findAll({
+  let preferences = await NotificationPreference.findAll({
     where: {
       event,
       enabled: true
     }
   });
+
+  if (ADMIN_ONLY_EVENTS.has(event)) {
+    preferences = preferences.filter((preference) => preference.role === 'admin');
+  }
 
   if (!preferences.length) {
     return;
@@ -286,7 +329,12 @@ async function dispatchEvent({ event, clinicId = null, data = {} }) {
   const createPromises = [];
   const today = new Date();
   const startOfDay = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
-  const dedupeDailyEvent = event !== 'jobs.automation_health_issue';
+  const dedupeDailyEvent = ![
+    'jobs.automation_health_issue',
+    'whatsapp.account_compliance_incident',
+    'whatsapp.account_compliance_help_requested',
+    'whatsapp.account_compliance_resolved'
+  ].includes(event);
 
   for (const [userId, meta] of uniqueUsers.entries()) {
     createPromises.push((async () => {

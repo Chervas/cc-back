@@ -13,6 +13,7 @@ const marketingBulkSendsService = require('../services/marketingBulkSends.servic
 const notificationService = require('../services/notifications.service');
 const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.service');
 const whatsappConnectionStatusService = require('../services/whatsappConnectionStatus.service');
+const whatsappAccountComplianceService = require('../services/whatsappAccountCompliance.service');
 const { getIO } = require('../services/socket.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { buildWhatsappOutboundRetryDecision } = require('../lib/whatsapp-outbound-retry');
@@ -1302,11 +1303,11 @@ function normalizeWhatsappAccountEvent(value) {
 }
 
 async function handleWhatsappAccountUpdate({ entry, changes, value, clinicId }) {
-    const field = cleanString(changes?.field).toLowerCase();
     const event = cleanString(value?.event).toUpperCase();
-    if (field !== 'account_update' && !['PARTNER_REMOVED', 'ACCOUNT_OFFBOARDED', 'ACCOUNT_RECONNECTED'].includes(event)) {
+    if (!['PARTNER_REMOVED', 'ACCOUNT_OFFBOARDED', 'ACCOUNT_RECONNECTED'].includes(event)) {
         return;
     }
+    const field = cleanString(changes?.field).toLowerCase();
 
     const phoneId = value?.metadata?.phone_number_id || null;
     const wabaId = entry?.id || value?.waba_id || null;
@@ -1459,7 +1460,29 @@ createWorker('webhook_whatsapp', async (job) => {
         }
     }
 
-    await handleWhatsappAccountUpdate({ entry, changes, value, clinicId });
+    for (const webhookEntry of Array.isArray(payload?.entry) ? payload.entry : []) {
+        for (const webhookChange of Array.isArray(webhookEntry?.changes) ? webhookEntry.changes : []) {
+            const webhookValue = webhookChange?.value || {};
+            await handleWhatsappAccountUpdate({
+                entry: webhookEntry,
+                changes: webhookChange,
+                value: webhookValue,
+                clinicId,
+            });
+            await whatsappAccountComplianceService.handleAccountUpdate({
+                entry: webhookEntry,
+                change: webhookChange,
+                value: webhookValue,
+                clinicId,
+            });
+            await whatsappAccountComplianceService.handleBusinessUsernameUpdate({
+                entry: webhookEntry,
+                change: webhookChange,
+                value: webhookValue,
+                clinicId,
+            });
+        }
+    }
     await handleWhatsappStateSync({ stateSync, value });
     await handleWhatsappHistoryBlocks({ historyBlocks, value, clinicId, patientId, leadId });
     await handleWhatsappCoexistenceEchoes({ echoes, value, clinicId, patientId, leadId });

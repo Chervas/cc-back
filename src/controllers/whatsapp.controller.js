@@ -7,6 +7,7 @@ const whatsappService = require('../services/whatsapp.service');
 const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.service');
 const { enqueueSyncPhonesJob, syncPhonesForWaba } = require('../services/whatsappPhones.service');
 const whatsappCoexistenceService = require('../services/whatsappCoexistence.service');
+const whatsappAccountComplianceService = require('../services/whatsappAccountCompliance.service');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
 const {
   buildWhatsappTemplateCatalogCoverage,
@@ -1037,6 +1038,8 @@ exports.getStatus = async (req, res) => {
       quality_rating: asset.quality_rating || null,
       messaging_limit: asset.messaging_limit || null,
       phoneNumber: asset.metaAssetName || null,
+      compliance: whatsappAccountComplianceService.summarizeCompliance(asset.additionalData || {}),
+      business_username: asset.additionalData?.businessUsername || null,
     });
   } catch (err) {
     console.error('Error getStatus', err);
@@ -1120,6 +1123,8 @@ exports.listAccounts = async (req, res) => {
       quality_rating: a.quality_rating || null,
       messaging_limit: a.messaging_limit || null,
       assignmentScope: a.assignmentScope || 'clinic',
+      compliance: whatsappAccountComplianceService.summarizeCompliance(a.additionalData || {}),
+      business_username: a.additionalData?.businessUsername || null,
     }));
     return res.json(payload);
   } catch (err) {
@@ -2006,6 +2011,8 @@ exports.listPhones = async (req, res) => {
         coexistence_history_sync_last_at: additionalData.coexistence?.history_sync_last_at || null,
         coexistence_history_sync_request_id: additionalData.coexistence?.history_sync_request_id || null,
         coexistence_history_sync_error: additionalData.coexistence?.history_sync_error || null,
+        compliance: whatsappAccountComplianceService.summarizeCompliance(additionalData),
+        business_username: additionalData.businessUsername || null,
         is_preverified: !!additionalData.isPreverified,
         verification_expiry_time: additionalData.verificationExpiryTime || null,
         createdAt: p.createdAt,
@@ -2016,6 +2023,239 @@ exports.listPhones = async (req, res) => {
   } catch (err) {
     console.error('Error listPhones', err);
     return res.status(500).json({ error: 'Error obteniendo números WhatsApp' });
+  }
+};
+
+exports.getComplianceStatus = async (req, res) => {
+  try {
+    const clinicId = Number(req.query.clinic_id);
+    if (!Number.isInteger(clinicId) || clinicId <= 0) {
+      return res.status(400).json({ error: 'clinic_id_required' });
+    }
+    await assertWhatsappTemplateClinicAccess({
+      clinicId,
+      userId: req.userData?.userId,
+    });
+    return res.json(await whatsappAccountComplianceService.getClinicStatus(clinicId));
+  } catch (error) {
+    if (error?.code === 'whatsapp_template_clinic_scope_forbidden') {
+      return res.status(403).json({ error: error.code });
+    }
+    console.error('Error getComplianceStatus', error);
+    return res.status(500).json({ error: 'whatsapp_compliance_status_failed' });
+  }
+};
+
+exports.requestComplianceReview = async (req, res) => {
+  try {
+    const clinicId = Number(req.body?.clinic_id || req.query?.clinic_id);
+    const incidentId = req.body?.incident_id ? Number(req.body.incident_id) : null;
+    if (!Number.isInteger(clinicId) || clinicId <= 0) {
+      return res.status(400).json({ error: 'clinic_id_required' });
+    }
+    await assertWhatsappTemplateClinicAccess({
+      clinicId,
+      userId: req.userData?.userId,
+    });
+    const incident = await whatsappAccountComplianceService.requestClinicClickReview({
+      clinicId,
+      incidentId,
+      userId: req.userData?.userId,
+    });
+    return res.json({ success: true, incident });
+  } catch (error) {
+    if (error?.code === 'whatsapp_template_clinic_scope_forbidden') {
+      return res.status(403).json({ error: error.code });
+    }
+    return res.status(error?.statusCode || 500).json({
+      error: error?.message || 'whatsapp_compliance_review_request_failed',
+    });
+  }
+};
+
+exports.listComplianceIncidents = async (req, res) => {
+  try {
+    const userId = req.userData?.userId;
+    const isAdmin = isWhatsappGlobalAdmin(userId);
+    const clinicId = req.query.clinic_id ? Number(req.query.clinic_id) : null;
+    let clinicIds = null;
+    let groupIds = null;
+    if (!isAdmin) {
+      const scope = await getUserClinics(userId);
+      clinicIds = scope.clinicIds.map(Number);
+      const clinics = await Clinica.findAll({
+        where: { id_clinica: { [Op.in]: clinicIds.length ? clinicIds : [-1] } },
+        attributes: ['grupoClinicaId'],
+        raw: true,
+      });
+      groupIds = [...new Set(clinics.map((clinic) => Number(clinic.grupoClinicaId)).filter(Boolean))];
+    }
+    if (clinicId) {
+      await assertWhatsappTemplateClinicAccess({ clinicId, userId });
+      clinicIds = [clinicId];
+      const clinic = await Clinica.findByPk(clinicId, { attributes: ['grupoClinicaId'], raw: true });
+      groupIds = clinic?.grupoClinicaId ? [Number(clinic.grupoClinicaId)] : [];
+    }
+    const incidents = await whatsappAccountComplianceService.listIncidents({
+      clinicIds,
+      groupIds,
+      status: req.query.status || 'all',
+      limit: req.query.limit || 100,
+      includeActivity: isAdmin && ['1', 'true'].includes(String(req.query.include_activity || '').toLowerCase()),
+    });
+    return res.json({ incidents });
+  } catch (error) {
+    if (error?.code === 'whatsapp_template_clinic_scope_forbidden') {
+      return res.status(403).json({ error: error.code });
+    }
+    console.error('Error listComplianceIncidents', error);
+    return res.status(500).json({ error: 'whatsapp_compliance_incidents_failed' });
+  }
+};
+
+exports.getComplianceAdminOverview = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  try {
+    const [incidents, phones] = await Promise.all([
+      whatsappAccountComplianceService.listIncidents({
+        status: req.query.status || 'all',
+        limit: req.query.limit || 200,
+      }),
+      ClinicMetaAsset.findAll({
+        where: { isActive: true, assetType: 'whatsapp_phone_number' },
+        include: [
+          { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'], required: false },
+          { model: GrupoClinica, as: 'grupoClinica', attributes: ['id_grupo', 'nombre_grupo'], required: false },
+        ],
+        order: [['updatedAt', 'DESC']],
+      }),
+    ]);
+    const accounts = phones.map((phone) => ({
+      id: phone.id,
+      clinic_id: phone.clinicaId || null,
+      clinic_name: phone.clinica?.nombre_clinica || null,
+      group_id: phone.grupoClinicaId || null,
+      group_name: phone.grupoClinica?.nombre_grupo || null,
+      phone_number_id: phone.phoneNumberId || null,
+      phone_number: phone.metaAssetName || null,
+      verified_name: phone.waVerifiedName || null,
+      quality_rating: phone.quality_rating || null,
+      updated_at: phone.updatedAt || null,
+      compliance: whatsappAccountComplianceService.summarizeCompliance(phone.additionalData || {}),
+      business_username: phone.additionalData?.businessUsername || null,
+      last_diagnostic: phone.additionalData?.whatsappDiagnostics || null,
+    }));
+    return res.json({
+      accounts,
+      incidents,
+      summary: {
+        total_accounts: accounts.length,
+        affected_accounts: accounts.filter((account) => account.compliance && account.compliance.status !== 'active').length,
+        suspended_accounts: accounts.filter((account) => ['suspended', 'deleted'].includes(account.compliance?.status)).length,
+        pending_reviews: incidents.filter((incident) => ['clinicaclick_review_requested', 'draft_ready', 'submitted', 'in_review'].includes(incident.status)).length,
+      },
+      source: {
+        enforcement: 'account_update webhook',
+        technical_refresh: 'whatsapp phone sync',
+      },
+    });
+  } catch (error) {
+    console.error('Error getComplianceAdminOverview', error);
+    return res.status(500).json({ error: 'whatsapp_compliance_admin_overview_failed' });
+  }
+};
+
+exports.getComplianceAdminIncident = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  try {
+    const incident = await whatsappAccountComplianceService.getIncidentById(req.params.id, {
+      includeActivity: true,
+    });
+    if (!incident) return res.status(404).json({ error: 'whatsapp_compliance_incident_not_found' });
+    return res.json({ incident });
+  } catch (error) {
+    console.error('Error getComplianceAdminIncident', error);
+    return res.status(500).json({ error: 'whatsapp_compliance_incident_detail_failed' });
+  }
+};
+
+exports.refreshComplianceAdminOverview = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  try {
+    const assets = await ClinicMetaAsset.findAll({
+      where: {
+        isActive: true,
+        assetType: 'whatsapp_phone_number',
+        wabaId: { [Op.ne]: null },
+      },
+      attributes: ['wabaId', 'waAccessToken'],
+      raw: true,
+    });
+    const unique = new Map();
+    assets.forEach((asset) => {
+      if (asset.wabaId && asset.waAccessToken && !unique.has(asset.wabaId)) {
+        unique.set(asset.wabaId, asset.waAccessToken);
+      }
+    });
+    const results = await Promise.allSettled(Array.from(unique.entries()).map(([wabaId, accessToken]) =>
+      enqueueSyncPhonesJob({ wabaId, accessToken })
+    ));
+    return res.json({
+      success: true,
+      queued: results.filter((result) => result.status === 'fulfilled').length,
+      failed: results.filter((result) => result.status === 'rejected').length,
+      enforcement_source: 'account_update webhook',
+    });
+  } catch (error) {
+    console.error('Error refreshComplianceAdminOverview', error);
+    return res.status(500).json({ error: 'whatsapp_compliance_refresh_failed' });
+  }
+};
+
+exports.diagnoseComplianceAccount = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  try {
+    const result = await whatsappAccountComplianceService.diagnoseAccount({
+      assetId: Number(req.params.assetId),
+      userId: req.userData?.userId,
+    });
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      error: error?.message || 'whatsapp_compliance_diagnostic_failed',
+    });
+  }
+};
+
+exports.prepareComplianceAppeal = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  try {
+    const incident = await whatsappAccountComplianceService.prepareAppeal({
+      incidentId: Number(req.params.id),
+      userId: req.userData?.userId,
+      serviceContext: req.body?.service_context,
+      reviewNotes: req.body?.review_notes,
+    });
+    return res.json({ success: true, incident });
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      error: error?.message || 'whatsapp_compliance_appeal_prepare_failed',
+    });
+  }
+};
+
+exports.markComplianceAppealSubmitted = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  try {
+    const incident = await whatsappAccountComplianceService.markAppealSubmitted({
+      incidentId: Number(req.params.id),
+      userId: req.userData?.userId,
+    });
+    return res.json({ success: true, incident });
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      error: error?.message || 'whatsapp_compliance_appeal_submit_failed',
+    });
   }
 };
 

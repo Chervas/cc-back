@@ -347,7 +347,7 @@ async function resolveAccessToken(wabaId) {
   );
 }
 
-async function syncPhonesForWaba({ wabaId, accessToken }) {
+async function syncPhonesForWaba({ wabaId, accessToken, ensureTemplates = true }) {
   if (!wabaId) {
     throw new Error('wabaId_required');
   }
@@ -427,7 +427,9 @@ async function syncPhonesForWaba({ wabaId, accessToken }) {
         source: 'whatsapp_phone_sync_connected',
       });
     }
-    await maybeEnsureTemplatesForOperationalPhone(asset, remote);
+    if (ensureTemplates) {
+      await maybeEnsureTemplatesForOperationalPhone(asset, remote);
+    }
   }
 
   return {
