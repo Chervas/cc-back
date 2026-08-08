@@ -569,7 +569,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
           params: {
             access_token: accessToken,
             fields:
-              'id,display_phone_number,verified_name,quality_rating,messaging_limit_tier,name_status,new_display_name,new_name_status,code_verification_status,status,platform_type,account_mode,is_on_biz_app',
+              'id,display_phone_number,verified_name,quality_rating,whatsapp_business_manager_messaging_limit,name_status,new_display_name,new_name_status,code_verification_status,status,platform_type,account_mode,is_on_biz_app',
           },
         })
         .then((r) => r.data)
@@ -582,7 +582,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
     const displayPhoneNumber = phoneDetails?.display_phone_number || `+00 ${phone_number_id.slice(-6)}`;
     const verifiedName = phoneDetails?.verified_name || wabaName || 'WhatsApp Business';
     const qualityRating = phoneDetails?.quality_rating || null;
-    const messagingLimit = phoneDetails?.messaging_limit_tier || phoneDetails?.messaging_limit || null;
+    const messagingLimit = phoneDetails?.whatsapp_business_manager_messaging_limit || phoneDetails?.messaging_limit || null;
     const nameStatus = phoneDetails?.name_status || null;
     const newDisplayName = phoneDetails?.new_display_name || null;
     const newNameStatus = phoneDetails?.new_name_status || null;

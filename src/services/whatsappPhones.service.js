@@ -5,6 +5,7 @@ const db = require('../../models');
 const { queues } = require('./queue.service');
 const whatsappTemplatesService = require('./whatsappTemplates.service');
 const whatsappConnectionStatusService = require('./whatsappConnectionStatus.service');
+const whatsappDeliveryGovernanceService = require('./whatsappDeliveryGovernance.service');
 const {
   haveSameTemplateComponents,
 } = require('../lib/whatsapp-template-components');
@@ -77,7 +78,7 @@ async function fetchRemotePhones({ wabaId, accessToken }) {
     headers: { Authorization: `Bearer ${accessToken}` },
     params: {
       fields:
-        'id,display_phone_number,verified_name,status,code_verification_status,quality_rating,messaging_limit_tier,name_status,new_display_name,new_name_status,platform_type,account_mode,is_on_biz_app',
+        'id,display_phone_number,verified_name,status,code_verification_status,quality_rating,whatsapp_business_manager_messaging_limit,name_status,new_display_name,new_name_status,platform_type,account_mode,is_on_biz_app',
     },
   });
   return resp.data?.data || [];
@@ -181,7 +182,7 @@ async function upsertRemoteState(asset, remote, profile) {
   asset.metaAssetName = remote?.display_phone_number || asset.metaAssetName;
   asset.waVerifiedName = remote?.verified_name || asset.waVerifiedName;
   asset.quality_rating = remote?.quality_rating || asset.quality_rating;
-  asset.messaging_limit = remote?.messaging_limit_tier || asset.messaging_limit;
+  asset.messaging_limit = remote?.whatsapp_business_manager_messaging_limit || asset.messaging_limit;
 
   // A remote phone can still exist in Meta after the clinic unlinks it.
   // Do not make hidden/unassigned numbers operational again during sync.
@@ -420,6 +421,19 @@ async function syncPhonesForWaba({ wabaId, accessToken, ensureTemplates = true }
     }
     const profileInfo = profileMap.get(remote.id) || null;
     await upsertRemoteState(asset, remote, profileInfo);
+    await whatsappDeliveryGovernanceService.recordCapabilitySnapshot({
+      clinicId: asset.clinicaId || null,
+      wabaId: asset.wabaId || wabaId,
+      phoneNumberId: asset.phoneNumberId || remote.id,
+      value: remote,
+      source: 'whatsapp_phone_sync',
+    }).catch((error) => {
+      console.warn('[whatsapp delivery] No se pudo conservar el límite del portfolio', {
+        wabaId,
+        phoneNumberId: asset.phoneNumberId || remote.id,
+        error: error?.message || error,
+      });
+    });
     if (String(remote?.status || '').toUpperCase() === 'CONNECTED') {
       await whatsappConnectionStatusService.clearDisconnectedAfterSuccess({
         phoneId: asset.phoneNumberId || remote.id,

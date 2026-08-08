@@ -4,6 +4,7 @@ const db = require('../../models');
 
 const { ClinicMetaAsset } = db;
 const PAYMENT_MISSING_ERROR_CODE = 131042;
+const PAYMENT_MISSING_MESSAGE = 'WhatsApp no ha podido cobrar este envío. Añade o revisa el método de pago de la cuenta en WhatsApp Manager antes de volver a intentarlo.';
 
 function cleanString(value) {
   if (value === undefined || value === null) return '';
@@ -35,7 +36,7 @@ function derivePaymentSnapshot(additionalData = {}) {
     status: missing ? 'missing_payment_method' : (rawStatus === 'missing_payment_method' ? 'active' : rawStatus),
     missing,
     last_error_code: missing ? payment.last_error_code || PAYMENT_MISSING_ERROR_CODE : null,
-    last_error_message: missing ? payment.last_error_message || null : null,
+    last_error_message: missing ? PAYMENT_MISSING_MESSAGE : null,
     last_error_href: missing ? payment.last_error_href || null : null,
     last_detected_at: missing ? payment.last_detected_at || null : null,
     last_success_at: payment.last_success_at || null,
@@ -117,9 +118,61 @@ async function clearMissingPaymentAfterSuccessfulStatus({
   return { cleared: true, asset_id: asset.id };
 }
 
+function extractProviderErrorCode(error) {
+  const raw = error?.response?.data || error || {};
+  const nested = raw?.error?.error || raw?.error || raw;
+  return Number(
+    nested?.code
+    || nested?.error_code
+    || nested?.error_subcode
+    || nested?.error_data?.code
+    || 0
+  ) || null;
+}
+
+async function markMissingPaymentFromProviderError({
+  error,
+  clinicId = null,
+  phoneId = null,
+  wabaId = null,
+  messageId = null,
+  wamid = null,
+  source = 'whatsapp_provider_error',
+} = {}) {
+  const errorCode = extractProviderErrorCode(error);
+  if (errorCode !== PAYMENT_MISSING_ERROR_CODE) {
+    return { marked: false, reason: 'not_missing_payment', error_code: errorCode };
+  }
+  const asset = await findWhatsappPhoneAssetForMetadata({ phoneId, wabaId, clinicId });
+  if (!asset) return { marked: false, reason: 'asset_not_found', error_code: errorCode };
+
+  const additionalData = asset.additionalData && typeof asset.additionalData === 'object'
+    ? { ...asset.additionalData }
+    : {};
+  const payment = additionalData.payment && typeof additionalData.payment === 'object'
+    ? { ...additionalData.payment }
+    : {};
+  const now = new Date().toISOString();
+  additionalData.payment = {
+    ...payment,
+    status: 'missing_payment_method',
+    last_error_code: PAYMENT_MISSING_ERROR_CODE,
+    last_error_message: PAYMENT_MISSING_MESSAGE,
+    last_detected_at: now,
+    last_message_id: messageId || null,
+    last_wamid: wamid || null,
+    last_source: source,
+  };
+  asset.additionalData = additionalData;
+  await asset.save();
+  return { marked: true, asset_id: asset.id, error_code: errorCode };
+}
+
 module.exports = {
   PAYMENT_MISSING_ERROR_CODE,
+  PAYMENT_MISSING_MESSAGE,
   clearMissingPaymentAfterSuccessfulStatus,
   derivePaymentSnapshot,
   findWhatsappPhoneAssetForMetadata,
+  markMissingPaymentFromProviderError,
 };

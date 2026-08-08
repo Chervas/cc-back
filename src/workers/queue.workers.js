@@ -14,6 +14,7 @@ const notificationService = require('../services/notifications.service');
 const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.service');
 const whatsappConnectionStatusService = require('../services/whatsappConnectionStatus.service');
 const whatsappAccountComplianceService = require('../services/whatsappAccountCompliance.service');
+const whatsappDeliveryGovernanceService = require('../services/whatsappDeliveryGovernance.service');
 const { getIO } = require('../services/socket.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { buildWhatsappOutboundRetryDecision } = require('../lib/whatsapp-outbound-retry');
@@ -698,9 +699,10 @@ async function notifyWhatsappPaymentMissing({ status, message, clinicId }) {
     const phoneId = metadata.phoneId || metadata.phoneNumberId || null;
     const wabaId = metadata.wabaId || null;
     const href = cleanString(paymentError.href);
-    const errorMessage = cleanString(paymentError?.error_data?.details)
+    const providerErrorMessage = cleanString(paymentError?.error_data?.details)
         || cleanString(paymentError.message)
-        || 'Meta indica que falta un método de pago en WhatsApp Business.';
+        || null;
+    const errorMessage = 'WhatsApp no ha podido cobrar este envío. Añade o revisa el método de pago de la cuenta en WhatsApp Manager antes de volver a intentarlo.';
 
     try {
         const asset = await findWhatsappPhoneAssetForMetadata({
@@ -717,6 +719,7 @@ async function notifyWhatsappPaymentMissing({ status, message, clinicId }) {
                     status: 'missing_payment_method',
                     last_error_code: WHATSAPP_PAYMENT_MISSING_ERROR_CODE,
                     last_error_message: errorMessage,
+                    last_provider_error_message: providerErrorMessage,
                     last_error_href: href || null,
                     last_detected_at: new Date().toISOString(),
                     last_message_id: message.id,
@@ -825,13 +828,43 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
             clinicConfig: effectiveClinicConfig,
         });
         providerAccepted = true;
-        msg.status = 'sent';
+        const immediate = useTemplate
+            ? await whatsappDeliveryGovernanceService.recordImmediateSendResponse({
+                response: waResponse,
+                clinicId: effectiveClinicConfig?.clinicId || clinicId || null,
+                wabaId: effectiveClinicConfig?.wabaId || msg.metadata?.wabaId || null,
+                phoneNumberId: effectiveClinicConfig?.phoneNumberId || msg.metadata?.phoneNumberId || msg.metadata?.phoneId || null,
+                template: {
+                    id: msg.metadata?.template_id || null,
+                    meta_template_id: msg.metadata?.meta_template_id || null,
+                    name: templateName || msg.metadata?.template_name || null,
+                    language: templateLanguage || msg.metadata?.template_language || 'es',
+                },
+                listId: msg.metadata?.list_id || null,
+                itemId: msg.metadata?.item_id || null,
+                messageId: msg.id,
+            }).catch((governanceError) => {
+                console.warn('[whatsapp delivery] No se pudo registrar la aceptación inmediata', {
+                    messageId: msg.id,
+                    error: serializeError(governanceError),
+                });
+                const status = cleanString(waResponse?.messages?.[0]?.message_status) || 'accepted';
+                return {
+                    status,
+                    held: status === 'held_for_quality_assessment',
+                    providerMessageId: waResponse?.messages?.[0]?.id || null,
+                };
+            })
+            : { status: 'accepted', held: false, providerMessageId: waResponse?.messages?.[0]?.id || null };
+        msg.status = 'pending';
         const previousRetry = msg.metadata?.outbound_retry;
         msg.metadata = {
             ...(msg.metadata || {}),
             error: null,
             wa_response: waResponse,
-            wamid: waResponse?.messages?.[0]?.id,
+            wamid: immediate.providerMessageId || waResponse?.messages?.[0]?.id,
+            provider_acceptance_status: immediate.status,
+            provider_acceptance_at: new Date().toISOString(),
             ...(previousRetry
                 ? {
                     outbound_retry: {
@@ -843,7 +876,7 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
                 }
                 : {}),
         };
-        msg.sent_at = new Date();
+        msg.sent_at = null;
         await msg.save();
 
         await whatsappConnectionStatusService.clearDisconnectedAfterSuccess({
@@ -878,7 +911,7 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
                 error: serializeError(err),
             });
             try {
-                msg.status = 'sent';
+                msg.status = 'pending';
                 msg.metadata = {
                     ...(msg.metadata || {}),
                     post_acceptance_error: serializeError(err),
@@ -898,7 +931,7 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
             maxAttempts: job.opts?.attempts,
         });
         msg.status = providerAccepted
-            ? 'sent'
+            ? 'pending'
             : (retryDecision.should_retry ? 'pending' : 'failed');
         msg.metadata = {
             ...(msg.metadata || {}),
@@ -958,6 +991,14 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
                     wabaId: clinicConfig?.wabaId || msg.metadata?.wabaId || null,
                     messageId: msg.id,
                     recipient: to || msg.metadata?.recipient || null,
+                    source: 'outbound_whatsapp_worker',
+                });
+                await whatsappPaymentStatusService.markMissingPaymentFromProviderError({
+                    error: rawError || err,
+                    clinicId: clinicConfig?.clinicId || clinicId || null,
+                    phoneId: clinicConfig?.phoneNumberId || msg.metadata?.phoneNumberId || msg.metadata?.phoneId || null,
+                    wabaId: clinicConfig?.wabaId || msg.metadata?.wabaId || null,
+                    messageId: msg.id,
                     source: 'outbound_whatsapp_worker',
                 });
             } catch (regErr) {
@@ -1481,6 +1522,20 @@ createWorker('webhook_whatsapp', async (job) => {
                 value: webhookValue,
                 clinicId,
             });
+            try {
+                await whatsappDeliveryGovernanceService.handleWebhookChange({
+                    entry: webhookEntry,
+                    change: webhookChange,
+                    value: webhookValue,
+                    clinicId,
+                });
+            } catch (governanceError) {
+                console.warn('[whatsapp delivery] No se pudo materializar el cambio de gobierno', {
+                    clinicId,
+                    field: webhookChange?.field || null,
+                    error: serializeError(governanceError),
+                });
+            }
         }
     }
     await handleWhatsappStateSync({ stateSync, value });
@@ -1818,6 +1873,23 @@ createWorker('webhook_whatsapp', async (job) => {
                 wamid,
                 status: nextStatus,
                 error: serializeError(bulkStatusErr),
+            });
+        }
+
+        try {
+            await whatsappDeliveryGovernanceService.materializeFinalMessageStatus({
+                message,
+                status,
+                mappedStatus: nextStatus,
+                clinicId: messageRef.clinic_id || clinicId,
+            });
+        } catch (governanceStatusError) {
+            console.warn('[whatsapp delivery] No se pudo materializar el estado final', {
+                clinicId: messageRef.clinic_id || clinicId,
+                messageId: message.id,
+                wamid,
+                status: nextStatus,
+                error: serializeError(governanceStatusError),
             });
         }
 

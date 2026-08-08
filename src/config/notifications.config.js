@@ -106,6 +106,12 @@ const NOTIFICATION_EVENTS = [
     category: 'whatsapp',
     label: 'WhatsApp restablecido por Meta',
     level: 'info'
+  },
+  {
+    event: 'whatsapp.delivery_governance_incident',
+    category: 'whatsapp',
+    label: 'Cola o plantilla de WhatsApp detenida',
+    level: 'error'
   }
 ];
 
@@ -172,7 +178,8 @@ const DEFAULT_NOTIFICATION_PREFERENCES = [
   { role: 'personaldeclinica', subrole: 'Recepción / Comercial ventas', event: 'whatsapp.review_photo_template_approved', enabled: true },
   { role: 'admin', subrole: null, event: 'whatsapp.account_compliance_incident', enabled: true },
   { role: 'admin', subrole: null, event: 'whatsapp.account_compliance_help_requested', enabled: true },
-  { role: 'admin', subrole: null, event: 'whatsapp.account_compliance_resolved', enabled: true }
+  { role: 'admin', subrole: null, event: 'whatsapp.account_compliance_resolved', enabled: true },
+  { role: 'admin', subrole: null, event: 'whatsapp.delivery_governance_incident', enabled: true }
 ];
 
 module.exports = {

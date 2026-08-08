@@ -117,6 +117,35 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.DATE,
         allowNull: true,
       },
+      quality_score: {
+        type: DataTypes.STRING(32),
+        allowNull: true,
+      },
+      previous_quality_score: {
+        type: DataTypes.STRING(32),
+        allowNull: true,
+      },
+      quality_updated_at: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
+      provider_status_updated_at: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
+      pause_count: {
+        type: DataTypes.INTEGER.UNSIGNED,
+        allowNull: false,
+        defaultValue: 0,
+      },
+      last_paused_at: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
+      last_unpaused_at: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
     },
     {
       sequelize,

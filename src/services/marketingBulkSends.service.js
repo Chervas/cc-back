@@ -8,6 +8,7 @@ const { normalizePhoneDigits, getPhoneLookupCandidates } = require('../lib/phone
 const whatsappService = require('./whatsapp.service');
 const whatsappPaymentStatusService = require('./whatsappPaymentStatus.service');
 const whatsappConnectionStatusService = require('./whatsappConnectionStatus.service');
+const whatsappDeliveryGovernanceService = require('./whatsappDeliveryGovernance.service');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
 const { matchesReviewTemplateMedia } = require('../lib/review-template-media');
 const { usesExplicitDispatchWindow } = require('../lib/marketing-dispatch-window');
@@ -226,6 +227,18 @@ function isActorGlobalAdmin(actor) {
 function isBlockingQualityPause(dispatch = {}) {
   if (String(dispatch.status || '').toLowerCase() !== 'paused_quality') return false;
   return String(dispatch.paused_reason || '').toLowerCase() !== 'read_rate_low';
+}
+
+function getDeliveryGateBlockedMessage(reason) {
+  const messages = {
+    template_disabled_by_meta: 'WhatsApp ha desactivado esta plantilla. Debe corregirse y aprobarse antes de reanudar la cola.',
+    template_paused_by_meta: 'WhatsApp ha pausado esta plantilla por calidad. La cola seguirá detenida hasta que vuelva a estar activa.',
+    template_quality_red: 'La plantilla tiene calidad baja en WhatsApp. Revisa su contenido y la audiencia antes de continuar.',
+    template_quality_assessment: 'WhatsApp está evaluando la calidad de la plantilla. La cola continuará cuando Meta resuelva la retención.',
+    portfolio_capacity_reached: 'La capacidad de conversaciones iniciadas del portfolio de WhatsApp está agotada temporalmente.',
+  };
+  return messages[String(reason || '').toLowerCase()]
+    || 'WhatsApp no permite reanudar esta cola en su estado actual.';
 }
 
 function buildContactUniqExpression(alias = '') {
@@ -633,7 +646,7 @@ async function reconcileDispatchJobState(list, dependencies = {}) {
   if (!list || !JobRequestModel) return { reconciled: false, reason: 'missing_context' };
   const dispatch = getDispatchConfig(list);
   const jobId = Number(dispatch?.job_id || 0);
-  const liveStatuses = new Set(['queued', 'sending', 'scheduled', 'waiting_template_approval', 'paused', 'paused_quality', 'paused_limit', 'paused_template']);
+  const liveStatuses = new Set(['queued', 'sending', 'scheduled', 'waiting_template_approval', 'paused', 'paused_quality', 'paused_limit', 'paused_template', 'paused_config']);
   const currentStatus = String(dispatch?.status || list?.status || '').toLowerCase();
   if (!jobId || !liveStatuses.has(currentStatus)) {
     return { reconciled: false, reason: 'not_live' };
@@ -676,7 +689,7 @@ async function reconcileListMessageState(list, scope = {}) {
   if (!listId || !Message || !MarketingPatientListItem) return { reconciled: false, reason: 'missing_context' };
   const dispatch = getDispatchConfig(list);
   const dispatchStatus = String(dispatch?.status || list?.status || '').toLowerCase();
-  const liveStatuses = new Set(['queued', 'sending', 'scheduled', 'waiting_template_approval', 'paused', 'paused_quality', 'paused_limit', 'paused_template']);
+  const liveStatuses = new Set(['queued', 'sending', 'scheduled', 'waiting_template_approval', 'paused', 'paused_quality', 'paused_limit', 'paused_template', 'paused_config', 'held_meta', 'paused_review', 'awaiting_delivery']);
   const referenceDate = parseDate(list?.last_sent_at) || parseDate(list?.prepared_at) || parseDate(list?.updated_at) || parseDate(list?.created_at);
   const isWithinReconcileWindow = !referenceDate || (Date.now() - referenceDate.getTime()) <= STATS_RECONCILE_WINDOW_MS;
   if (!liveStatuses.has(dispatchStatus) && !isWithinReconcileWindow) {
@@ -7858,7 +7871,7 @@ async function sendTest(scope, campaignId, body = {}) {
       phoneNumberId: clinicConfig.phoneNumberId || null,
       wabaId: clinicConfig.wabaId || null,
     },
-    sent_at: new Date(),
+    sent_at: null,
   });
   emitQuickChatMessageCreated(conversation, appMessage);
 
@@ -7907,50 +7920,78 @@ async function sendTest(scope, campaignId, body = {}) {
       recipient: targetPhone,
       source: 'mass_campaign_test',
     }).catch(() => null);
+    await whatsappPaymentStatusService.markMissingPaymentFromProviderError({
+      error: providerError,
+      clinicId,
+      phoneId: clinicConfig.phoneNumberId || null,
+      wabaId: clinicConfig.wabaId || null,
+      messageId: appMessage.id,
+      source: 'mass_campaign_test',
+    }).catch(() => null);
     throw sendErr;
   }
 
   const providerMessageId = response?.messages?.[0]?.id || null;
+  const immediate = await whatsappDeliveryGovernanceService.recordImmediateSendResponse({
+    response,
+    clinicId,
+    wabaId: clinicConfig.wabaId,
+    phoneNumberId: clinicConfig.phoneNumberId,
+    template,
+    listId: list.id,
+    itemId: item.id,
+    messageId: appMessage.id,
+  }).catch((governanceError) => {
+    console.warn('[marketing-bulk-sends] No se pudo registrar la aceptación inmediata de la prueba', {
+      list_id: list.id,
+      item_id: item.id,
+      error: governanceError?.message || governanceError,
+    });
+    const status = normalizeText(response?.messages?.[0]?.message_status || 'accepted').toLowerCase();
+    return {
+      status,
+      held: status === 'held_for_quality_assessment',
+      providerMessageId: response?.messages?.[0]?.id || null,
+    };
+  });
   await appMessage.update({
-    status: 'sent',
+    status: 'pending',
     metadata: {
       ...(appMessage.metadata || {}),
       wa_response: response || null,
-      wamid: providerMessageId,
-      phoneId: clinicConfig.phoneNumberId || null,
+        wamid: immediate.providerMessageId || providerMessageId,
+        phoneId: clinicConfig.phoneNumberId || null,
+        provider_acceptance_status: immediate.status,
+        provider_acceptance_at: new Date().toISOString(),
     },
-    sent_at: new Date(),
+    sent_at: null,
   });
   emitQuickChatMessageUpdated(conversation, appMessage);
-  await whatsappConnectionStatusService.clearDisconnectedAfterSuccess({
-    clinicId,
-    phoneId: clinicConfig.phoneNumberId || null,
-    wabaId: clinicConfig.wabaId || null,
-    messageId: appMessage.id,
-    source: 'mass_campaign_test',
-  }).catch(() => null);
   await conversation.update({ last_message_at: new Date() });
   await MarketingPatientContactEvent.create({
     list_id: list.id,
     item_id: item.id,
-    event_type: 'mass_campaign_test_sent',
+    event_type: immediate.held ? 'mass_campaign_test_held' : 'mass_campaign_test_accepted',
     channel: 'whatsapp',
     payload: {
       to: targetPhone,
       template_id: template.id,
       template_name: template.name,
-      message_id: providerMessageId,
-      provider_message_id: providerMessageId,
+      message_id: immediate.providerMessageId || providerMessageId,
+      provider_message_id: immediate.providerMessageId || providerMessageId,
       app_message_id: appMessage.id,
       conversation_id: conversation.id,
+      provider_acceptance_status: immediate.status,
     },
     occurred_at: new Date(),
   });
   return {
     success: true,
+    held: immediate.held,
+    acceptance_status: immediate.status,
     to: targetPhone,
-    message_id: providerMessageId,
-    provider_message_id: providerMessageId,
+    message_id: immediate.providerMessageId || providerMessageId,
+    provider_message_id: immediate.providerMessageId || providerMessageId,
     app_message_id: appMessage.id,
     conversation_id: conversation.id,
   };
@@ -8392,7 +8433,23 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
   ensureScopeAccess(list, scope);
   const dispatch = getDispatchConfig(list);
   const context = normalizeDispatchContext(dispatch.context);
+  const welcomeMessage = list.criteria?.welcome_message && typeof list.criteria.welcome_message === 'object'
+    ? list.criteria.welcome_message
+    : {};
   const filter = getDispatchItemFilter(dispatch);
+  const dispatchStatus = String(dispatch.status || '').toLowerCase();
+  if (['held_meta', 'paused_review', 'awaiting_delivery'].includes(dispatchStatus)) {
+    const err = new Error(
+      dispatchStatus === 'held_meta'
+        ? 'WhatsApp está evaluando la calidad de este envío. La cola continuará cuando Meta resuelva la retención.'
+        : dispatchStatus === 'awaiting_delivery'
+          ? 'La cola está esperando el estado final de mensajes ya aceptados por WhatsApp.'
+          : 'Esta cola requiere revisión antes de poder volver a enviarse.'
+    );
+    err.status = 409;
+    err.details = { dispatch_status: dispatchStatus };
+    throw err;
+  }
   if (isBlockingQualityPause(dispatch) && !isActorGlobalAdmin(actor)) {
     const err = new Error('No se puede reanudar una campaña pausada por baja calidad. Contacta con soporte.');
     err.status = 403;
@@ -8409,6 +8466,35 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     err.status = 409;
     throw err;
   }
+  const template = await resolveWhatsappTemplate(
+    dispatch.whatsapp_template_id
+      || dispatch.template_snapshot?.id
+      || (context === 'welcome' ? welcomeMessage.template_id : null)
+      || list.criteria?.whatsapp_template_id
+      || list.template_snapshot?.id,
+    scope
+  );
+  const clinicId = getClinicIdForList(list, scope);
+  const clinicConfig = clinicId ? await whatsappService.getClinicConfig(clinicId) : null;
+  if (!template || !clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
+    const err = new Error('No se puede reanudar la cola hasta que la plantilla y la cuenta de WhatsApp estén disponibles.');
+    err.status = 409;
+    throw err;
+  }
+  const deliveryGate = await whatsappDeliveryGovernanceService.getDispatchGate({
+    clinicId,
+    wabaId: clinicConfig.wabaId,
+    phoneNumberId: clinicConfig.phoneNumberId,
+    template,
+    requestedBatchSize: dispatch.batch_size || DISPATCH_BATCH_SIZE,
+    requestedDelayMs: dispatch.delay_ms || DISPATCH_BATCH_DELAY_MS,
+  });
+  if (!deliveryGate.allowed) {
+    const err = new Error(getDeliveryGateBlockedMessage(deliveryGate.reason));
+    err.status = 409;
+    err.details = { delivery_governance: deliveryGate };
+    throw err;
+  }
   const dispatchBusinessHours = await resolveDispatchBusinessHoursForList(list, scope, dispatch);
   const nextAllowed = getNextBusinessAllowedAt(new Date(), dispatchBusinessHours);
   const nextRunAt = nextAllowed.getTime() > Date.now() + 1000 ? nextAllowed : null;
@@ -8421,6 +8507,7 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     paused_reason: null,
     resumed_at: new Date().toISOString(),
     next_allowed_at: nextRunAt ? nextRunAt.toISOString() : null,
+    delivery_governance: deliveryGate,
   };
   await list.update({
     status: nextRunAt ? 'scheduled' : 'sending',
@@ -8613,7 +8700,7 @@ async function sendDispatchItem({
       wabaId: clinicConfig.wabaId || null,
       batch_index: batchIndex,
     },
-    sent_at: new Date(),
+    sent_at: null,
   });
   emitQuickChatMessageCreated(conversation, appMessage);
 
@@ -8627,24 +8714,48 @@ async function sendDispatchItem({
       templateComponents,
       clinicConfig,
     });
-    const providerMessageId = response?.messages?.[0]?.id || null;
+    const immediate = await whatsappDeliveryGovernanceService.recordImmediateSendResponse({
+      response,
+      clinicId: clinicConfig.clinicId || getClinicIdForList(list),
+      wabaId: clinicConfig.wabaId,
+      phoneNumberId: clinicConfig.phoneNumberId,
+      template,
+      listId: list.id,
+      itemId: item.id,
+      messageId: appMessage.id,
+    }).catch((governanceError) => {
+      console.warn('[marketing-bulk-sends] No se pudo registrar la aceptación inmediata', {
+        list_id: list.id,
+        item_id: item.id,
+        error: governanceError?.message || governanceError,
+      });
+      const status = normalizeText(response?.messages?.[0]?.message_status || 'accepted').toLowerCase();
+      return {
+        status,
+        held: status === 'held_for_quality_assessment',
+        providerMessageId: response?.messages?.[0]?.id || null,
+      };
+    });
+    const providerMessageId = immediate.providerMessageId;
     await appMessage.update({
-      status: 'sent',
+      status: 'pending',
       metadata: {
         ...(appMessage.metadata || {}),
         wa_response: response || null,
         wamid: providerMessageId,
+        provider_acceptance_status: immediate.status,
+        provider_acceptance_at: new Date().toISOString(),
       },
-      sent_at: new Date(),
+      sent_at: null,
     });
     emitQuickChatMessageUpdated(conversation, appMessage);
     await item.update({
-      dispatch_status: 'sent',
+      dispatch_status: immediate.held ? 'held_quality' : 'accepted',
       provider_message_id: providerMessageId,
       app_message_id: appMessage.id,
       conversation_id: conversation.id,
       send_batch_index: batchIndex,
-      sent_at: new Date(),
+      sent_at: null,
       failed_at: null,
       last_error_code: null,
       last_error_message: null,
@@ -8654,49 +8765,28 @@ async function sendDispatchItem({
       list_id: list.id,
       item_id: item.id,
       paciente_id: item.paciente_id || null,
-      event_type: eventType,
+      event_type: immediate.held
+        ? `${String(eventType || 'mass_campaign_message_sent').replace(/_sent$/, '')}_held`
+        : `${String(eventType || 'mass_campaign_message_sent').replace(/_sent$/, '')}_accepted`,
       channel: 'whatsapp',
       payload: {
         provider_message_id: providerMessageId,
         app_message_id: appMessage.id,
         conversation_id: conversation.id,
         batch_index: batchIndex,
+        provider_acceptance_status: immediate.status,
       },
       occurred_at: new Date(),
     });
-    await whatsappConnectionStatusService.clearDisconnectedAfterSuccess({
-      clinicId: clinicConfig.clinicId || getClinicIdForList(list),
-      phoneId: clinicConfig.phoneNumberId || null,
-      wabaId: clinicConfig.wabaId || null,
-      messageId: appMessage.id,
-      source: connectionSource,
-    }).catch(() => null);
-    if (
-      eventType === 'mass_campaign_message_sent'
-      && isReviewRequestList(list)
-      && isReviewRatingTriggerMessage(appMessage)
-      && dispatchContext !== 'review_reminder'
-    ) {
-      await enqueueReviewReminderJob({
-        list,
-        item,
-        sentAt: appMessage.sent_at || new Date(),
-        triggerMessageId: appMessage.id,
-      }).catch((error) => {
-        console.warn('[marketing-bulk-sends] No se pudo programar recordatorio de reseña', {
-          list_id: list.id,
-          item_id: item.id,
-          error: error?.message || error,
-        });
-      });
-    }
     return {
       sent: true,
+      held: immediate.held,
+      acceptance_status: immediate.status,
       app_message_id: appMessage.id,
       message_id: appMessage.id,
       provider_message_id: providerMessageId,
       conversation_id: conversation.id,
-      sent_at: appMessage.sent_at || new Date(),
+      sent_at: null,
       template_id: template.id,
       template_name: template.name,
     };
@@ -8741,6 +8831,14 @@ async function sendDispatchItem({
       wabaId: clinicConfig.wabaId || null,
       messageId: appMessage.id,
       recipient: item.phone,
+      source: connectionSource,
+    }).catch(() => null);
+    await whatsappPaymentStatusService.markMissingPaymentFromProviderError({
+      error: providerError.raw || error,
+      clinicId: clinicConfig.clinicId || getClinicIdForList(list),
+      phoneId: clinicConfig.phoneNumberId || null,
+      wabaId: clinicConfig.wabaId || null,
+      messageId: appMessage.id,
       source: connectionSource,
     }).catch(() => null);
     return { sent: false, error: providerError };
@@ -8827,22 +8925,6 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
   }
 
   const accountQuality = await getWhatsappAccountQualityForList(list, scope);
-  if (accountQuality.messaging_limit_count && sentBefore >= accountQuality.messaging_limit_count) {
-    await list.update({
-      status: 'paused',
-      criteria: mergeCriteria(list, {
-        dispatch: {
-          ...dispatch,
-          status: 'paused_limit',
-          paused_reason: 'messaging_limit_reached',
-          paused_at: new Date().toISOString(),
-          account_quality: accountQuality,
-        },
-      }),
-    });
-    return { status: 'completed', result: { paused: true, reason: 'messaging_limit_reached', list_id: list.id } };
-  }
-
   const welcomeMessage = list.criteria?.welcome_message && typeof list.criteria.welcome_message === 'object'
     ? list.criteria.welcome_message
     : {};
@@ -8887,9 +8969,40 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
   }
   clinicConfig.clinicId = clinicId;
 
-  const batchLimit = accountQuality.messaging_limit_count
-    ? Math.max(0, Math.min(batchSize, accountQuality.messaging_limit_count - sentBefore))
-    : batchSize;
+  const deliveryGate = await whatsappDeliveryGovernanceService.getDispatchGate({
+    clinicId,
+    wabaId: clinicConfig.wabaId,
+    phoneNumberId: clinicConfig.phoneNumberId,
+    template,
+    requestedBatchSize: batchSize,
+    requestedDelayMs: batchDelayMs,
+  });
+  if (!deliveryGate.allowed) {
+    const gateStatus = deliveryGate.reason === 'portfolio_capacity_reached'
+      ? 'paused_limit'
+      : deliveryGate.reason === 'template_quality_assessment'
+        ? 'held_meta'
+        : deliveryGate.reason === 'template_quality_red'
+          ? 'paused_quality'
+          : 'paused_template';
+    await list.update({
+      status: 'paused',
+      criteria: mergeCriteria(list, {
+        dispatch: {
+          ...dispatch,
+          status: gateStatus,
+          paused_reason: deliveryGate.reason,
+          paused_at: new Date().toISOString(),
+          next_allowed_at: null,
+          delivery_governance: deliveryGate,
+          resume_automatically: gateStatus === 'held_meta',
+        },
+      }),
+    });
+    return { status: 'completed', result: { paused: true, reason: deliveryGate.reason, list_id: list.id } };
+  }
+
+  const batchLimit = Math.max(1, Number(deliveryGate.effective_batch_size || batchSize));
   const batch = batchLimit > 0
     ? await findDispatchCandidateBatch(list.id, filter, batchLimit)
     : [];
@@ -8898,6 +9011,39 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     await refreshListCounters(list.id);
     const finalCounters = await getDispatchScopedCounters(list, filter);
     const completedAt = new Date();
+    const acceptedPending = await MarketingPatientListItem.count({
+      where: { list_id: list.id, dispatch_status: 'accepted' },
+    });
+    const heldPending = await MarketingPatientListItem.count({
+      where: { list_id: list.id, dispatch_status: 'held_quality' },
+    });
+    if (acceptedPending > 0 || heldPending > 0) {
+      const nextStatus = heldPending > 0 ? 'held_meta' : 'awaiting_delivery';
+      await list.update({
+        status: heldPending > 0 ? 'paused' : 'sending',
+        criteria: mergeCriteria(list, {
+          dispatch: {
+            ...dispatch,
+            status: nextStatus,
+            awaiting_delivery: acceptedPending + heldPending,
+            paused_reason: heldPending > 0 ? 'template_quality_assessment' : dispatch.paused_reason || null,
+            paused_at: heldPending > 0 ? (dispatch.paused_at || completedAt.toISOString()) : dispatch.paused_at || null,
+            next_allowed_at: null,
+            resume_automatically: heldPending > 0,
+          },
+        }),
+      });
+      return {
+        status: 'completed',
+        result: {
+          completed: false,
+          held: heldPending > 0,
+          awaiting_delivery: acceptedPending + heldPending,
+          list_id: list.id,
+          counters: finalCounters,
+        },
+      };
+    }
     const followUpCounters = context === 'review_request'
       ? await getReviewDispatchFollowUpCounters(list, filter)
       : null;
@@ -8921,6 +9067,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
         last_batch_started_at: new Date().toISOString(),
         next_allowed_at: null,
         account_quality: accountQuality,
+        delivery_governance: deliveryGate,
       },
     }),
   });
@@ -8940,6 +9087,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
   const batchIndex = Number(dispatch.last_batch_index || 0) + 1;
   let sent = 0;
   let failed = 0;
+  let heldByMeta = false;
   for (const item of filteredFreshBatch) {
     const currentList = await MarketingPatientList.findByPk(list.id);
     if (!currentList || String(currentList.status || '').toLowerCase() === 'archived' || getDispatchConfig(currentList).cancel_requested === true) {
@@ -8997,6 +9145,10 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     });
     if (result.sent) sent += 1;
     else failed += 1;
+    if (result.held) {
+      heldByMeta = true;
+      break;
+    }
   }
 
   await refreshListCounters(list.id);
@@ -9017,9 +9169,52 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     occurred_at: new Date(),
   });
 
+  if (heldByMeta) {
+    await list.reload();
+    return {
+      status: 'completed',
+      result: {
+        paused: true,
+        reason: 'template_quality_assessment',
+        list_id: list.id,
+        counters: countersAfter,
+      },
+    };
+  }
+
   const remaining = await countDispatchRemainingItems(list.id, filter);
   if (remaining <= 0) {
     const completedAt = new Date();
+    const awaitingDelivery = await MarketingPatientListItem.count({
+      where: {
+        list_id: list.id,
+        dispatch_status: { [Op.in]: ['accepted', 'held_quality'] },
+      },
+    });
+    if (awaitingDelivery > 0) {
+      await list.update({
+        status: heldByMeta ? 'paused' : 'sending',
+        criteria: mergeCriteria(list, {
+          dispatch: {
+            ...getDispatchConfig(list),
+            status: heldByMeta ? 'held_meta' : 'awaiting_delivery',
+            awaiting_delivery: awaitingDelivery,
+            last_batch_index: batchIndex,
+            last_batch_completed_at: completedAt.toISOString(),
+            next_allowed_at: null,
+          },
+        }),
+      });
+      return {
+        status: 'completed',
+        result: {
+          awaiting_delivery: awaitingDelivery,
+          held: heldByMeta,
+          list_id: list.id,
+          counters: countersAfter,
+        },
+      };
+    }
     const followUpCounters = context === 'review_request'
       ? await getReviewDispatchFollowUpCounters(list, filter)
       : null;
@@ -9036,7 +9231,10 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     return { status: 'completed', result: { completed: true, list_id: list.id, counters: countersAfter } };
   }
 
-  const nextAllowed = getNextBusinessAllowedAt(new Date(Date.now() + batchDelayMs), dispatch.business_hours);
+  const nextAllowed = getNextBusinessAllowedAt(
+    new Date(Date.now() + Number(deliveryGate.effective_delay_ms || batchDelayMs)),
+    dispatch.business_hours
+  );
   await list.update({
     status: 'sending',
     criteria: mergeCriteria(list, {
@@ -9078,7 +9276,7 @@ async function materializeMessageStatusFromWebhook({ message, status, mappedStat
     app_message_id: message.id || item.app_message_id || null,
   };
   if (mappedStatus === 'sent') {
-    patch.dispatch_status = item.dispatch_status || 'sent';
+    patch.dispatch_status = 'sent';
     patch.sent_at = item.sent_at || eventAt;
   } else if (mappedStatus === 'delivered') {
     patch.dispatch_status = 'delivered';
@@ -9110,7 +9308,56 @@ async function materializeMessageStatusFromWebhook({ message, status, mappedStat
     },
     occurred_at: eventAt,
   });
+  const list = await MarketingPatientList.findByPk(listId);
+  if (mappedStatus === 'sent'
+    && list
+    && isReviewRequestList(list)
+    && isReviewRatingTriggerMessage(message)
+    && normalizeDispatchContext(message?.metadata?.dispatch_context) !== 'review_reminder') {
+    await enqueueReviewReminderJob({
+      list,
+      item,
+      sentAt: patch.sent_at || eventAt,
+      triggerMessageId: message.id,
+    }).catch((error) => {
+      console.warn('[marketing-bulk-sends] No se pudo programar recordatorio tras confirmar envío', {
+        list_id: listId,
+        item_id: itemId,
+        error: error?.message || error,
+      });
+    });
+  }
   await refreshListCounters(listId);
+  if (list) {
+    const dispatch = getDispatchConfig(list);
+    if (String(dispatch.status || '').toLowerCase() === 'awaiting_delivery') {
+      const awaitingDelivery = await MarketingPatientListItem.count({
+        where: {
+          list_id: listId,
+          dispatch_status: { [Op.in]: ['accepted', 'held_quality'] },
+        },
+      });
+      if (awaitingDelivery <= 0) {
+        const completedAt = new Date();
+        const followUpCounters = isReviewRequestList(list)
+          ? await getReviewDispatchFollowUpCounters(list, dispatch.filter || null)
+          : null;
+        await list.update({
+          status: 'completed',
+          last_sent_at: completedAt,
+          criteria: mergeCriteria(list, {
+            dispatch: buildDispatchCompletedPatch(dispatch, followUpCounters, completedAt),
+          }),
+        });
+      } else {
+        await list.update({
+          criteria: mergeCriteria(list, {
+            dispatch: { ...dispatch, awaiting_delivery: awaitingDelivery },
+          }),
+        });
+      }
+    }
+  }
   return { applied: true, list_id: listId, item_id: itemId, status: mappedStatus };
 }
 

@@ -8,6 +8,7 @@ const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.
 const { enqueueSyncPhonesJob, syncPhonesForWaba } = require('../services/whatsappPhones.service');
 const whatsappCoexistenceService = require('../services/whatsappCoexistence.service');
 const whatsappAccountComplianceService = require('../services/whatsappAccountCompliance.service');
+const whatsappDeliveryGovernanceService = require('../services/whatsappDeliveryGovernance.service');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
 const {
   buildWhatsappTemplateCatalogCoverage,
@@ -2116,7 +2117,7 @@ exports.listComplianceIncidents = async (req, res) => {
 exports.getComplianceAdminOverview = async (req, res) => {
   if (!assertAdmin(req, res)) return;
   try {
-    const [incidents, phones] = await Promise.all([
+    const [incidents, phones, deliveryGovernance] = await Promise.all([
       whatsappAccountComplianceService.listIncidents({
         status: req.query.status || 'all',
         limit: req.query.limit || 200,
@@ -2129,8 +2130,11 @@ exports.getComplianceAdminOverview = async (req, res) => {
         ],
         order: [['updatedAt', 'DESC']],
       }),
+      whatsappDeliveryGovernanceService.getAdminOverview({ limit: req.query.limit || 200 }),
     ]);
-    const accounts = phones.map((phone) => ({
+    const accounts = phones.map((phone) => {
+      const payment = whatsappPaymentStatusService.derivePaymentSnapshot(phone.additionalData || {});
+      return ({
       id: phone.id,
       clinic_id: phone.clinicaId || null,
       clinic_name: phone.clinica?.nombre_clinica || null,
@@ -2145,10 +2149,17 @@ exports.getComplianceAdminOverview = async (req, res) => {
       compliance: whatsappAccountComplianceService.summarizeCompliance(phone.additionalData || {}),
       business_username: phone.additionalData?.businessUsername || null,
       last_diagnostic: phone.additionalData?.whatsappDiagnostics || null,
-    }));
+      payment_status: payment.status || null,
+      payment_missing: payment.missing === true,
+      payment_message: payment.last_error_message || null,
+      payment_last_detected_at: payment.last_detected_at || null,
+      payment_last_success_at: payment.last_success_at || null,
+    });
+    });
     return res.json({
       accounts,
       incidents,
+      delivery_governance: deliveryGovernance,
       summary: {
         total_accounts: accounts.length,
         affected_accounts: accounts.filter((account) => account.compliance && account.compliance.status !== 'active').length,

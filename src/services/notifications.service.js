@@ -19,7 +19,8 @@ const { emitNotificationCreated } = require('./notificationsRealtime.service');
 const ADMIN_ONLY_EVENTS = new Set([
   'whatsapp.account_compliance_incident',
   'whatsapp.account_compliance_help_requested',
-  'whatsapp.account_compliance_resolved'
+  'whatsapp.account_compliance_resolved',
+  'whatsapp.delivery_governance_incident'
 ]);
 
 function getEventDefinition(event) {
@@ -169,6 +170,16 @@ function buildNotificationContent(event, payload = {}) {
         message: 'Meta ha comunicado la restitución de la cuenta. Clinicaclick mantendrá el envío normal y seguirá registrando los estados reales de entrega.',
         icon: 'heroicons_outline:shield-check',
         level: defaults.level || 'info'
+      };
+    }
+    case 'whatsapp.delivery_governance_incident': {
+      const clinic = payload.clinicName || 'una clínica';
+      const template = payload.templateName ? ` con la plantilla ${payload.templateName}` : '';
+      return {
+        title: `Envío de WhatsApp detenido en ${clinic}`,
+        message: `${payload.reasonLabel || 'WhatsApp ha comunicado una incidencia de calidad o capacidad'}${template}. La cola permanece detenida y no repetirá mensajes retenidos.`,
+        icon: 'heroicons_outline:shield-exclamation',
+        level: defaults.level || 'error'
       };
     }
     default:

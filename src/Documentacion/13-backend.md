@@ -1172,6 +1172,44 @@ Antes de activar coexistencia sobre un numero real:
 - Un incidente de un activo `assignmentScope=group` se atribuye solo al grupo: `group_id` informado y `clinic_id=NULL`. No se elige una clinica representativa para titular el incidente, porque eso haria parecer que la medida afecta al WhatsApp propio de esa sede.
 - El worker registra un warning estructurado cuando Meta devuelve un estado para un WAMID que no existe en `Messages`. Esto permite diagnosticar pruebas o integraciones que hayan llamado a Meta sin persistir antes el mensaje; el warning no crea una entrega ficticia ni bloquea envios.
 
+### WhatsApp: calidad de entrega, pacing y capacidad
+
+- La migracion `20260808233000-create-whatsapp-delivery-governance.js` crea
+  `WhatsappDeliverySnapshots` y `WhatsappDeliveryEvents`, y amplía
+  `WhatsappTemplates` con calidad, transiciones y contador de pausas.
+- `whatsappDeliveryGovernance.service.js` es la fuente backend para calidad de
+  plantilla, retenciones de pacing, capacidad por portfolio y tamaño efectivo
+  del siguiente lote. Los controladores y workers no reimplementan estas
+  decisiones.
+- La identidad de la via combina portfolio, WABA, telefono, plantilla e idioma.
+  Los eventos son idempotentes por `dedupe_key`.
+- La respuesta inmediata `accepted` mantiene `Messages.status=pending` y guarda
+  el WAMID. Solo los webhooks posteriores materializan `sent`, `delivered`,
+  `read` o `failed`. `held_for_quality_assessment` se guarda como retencion y
+  detiene las colas que comparten la plantilla.
+- Se procesan `message_template_quality_update`,
+  `message_template_status_update`, `business_capability_update` y
+  `account_alerts`. La sincronizacion de 20 minutos solo es fallback para
+  plantillas pendientes o usadas por colas activas; no existe polling por
+  mensaje.
+- Solo se solicita `whatsapp_business_manager_messaging_limit`; el campo
+  deprecado `messaging_limit_tier` no debe reaparecer.
+- El regulador nunca acelera el ritmo pedido: `1/10 min` y `1/dia` permanecen
+  intactos. Cuando hace falta calentamiento limita lotes con progresion
+  `5/10/20/50`, calidad, fallos y capacidad disponible.
+- Estados `held_meta`, `paused_review` y `awaiting_delivery` no admiten
+  reanudacion manual. Para cualquier otro estado, `resumeCampaignDispatch`
+  vuelve a consultar el gate antes de encolar trabajo.
+- La estimacion de capacidad actual cuenta destinatarios unicos de 24 horas de
+  forma conservadora. Mientras el worker de envios masivos tenga propietario
+  unico y ejecucion secuencial, dos colas comparten el remanente sin carrera. Si
+  se habilita paralelismo real, debe añadirse reserva atomica en Redis/SQL antes
+  de aumentar concurrencia.
+- Los webhooks externos llegan por `pm2-gateway`. Toda promocion de esta
+  funcionalidad exige el mismo commit en `back-staging` y `gateway`, migracion,
+  reinicio de ambos y comprobacion de logs. Si cambia `package.json` o lockfile,
+  ejecutar `npm install` en todos los checkouts que cargan este runtime.
+
 ## 2026-04-26 - Intake: verificacion Consent Mode v2 y avisos externos
 
 - `GET /api/intake/verify-snippet` no debe decidir compatibilidad de Consent Mode v2 solo por el query param `?v=` del `<script>`.
