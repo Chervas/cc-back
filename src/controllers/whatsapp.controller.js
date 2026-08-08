@@ -2136,6 +2136,7 @@ exports.getComplianceAdminOverview = async (req, res) => {
       clinic_name: phone.clinica?.nombre_clinica || null,
       group_id: phone.grupoClinicaId || null,
       group_name: phone.grupoClinica?.nombre_grupo || null,
+      waba_id: phone.wabaId || null,
       phone_number_id: phone.phoneNumberId || null,
       phone_number: phone.metaAssetName || null,
       verified_name: phone.waVerifiedName || null,

@@ -1162,6 +1162,16 @@ Antes de activar coexistencia sobre un numero real:
 - hay fixtures de QA en `src/scripts/fixtures/whatsapp-coexistence/`;
 - Propdental se usara como numero de QA, pero no debe relanzarse Embedded Signup ni cambiar el modo de conexion mientras haya mensajes reales de cita pendientes.
 
+### WhatsApp: diagnostico y cumplimiento
+
+- `POST /api/whatsapp/compliance/admin/accounts/:assetId/check` sincroniza el telefono con Meta, comprueba acceso, estado, canal, nombre aprobado, capacidad y calidad, y calcula estados de entrega sobre el total real de los ultimos siete dias.
+- La consulta completa contabiliza `sent`, `delivered`, `read` y `failed` en base de datos. El desglose de origen puede usar una muestra reciente, pero el contrato indica siempre el tamano de esa muestra; no se presenta el limite tecnico como total real.
+- El diagnostico reconcilia el ultimo `account_update` conservado en `additionalData.coexistence.last_account_update`. Si el evento de restriccion o suspension llego antes de existir `WhatsappAccountComplianceIncidents`, crea idempotentemente el incidente y actualiza `additionalData.whatsappCompliance`.
+- Acceso API, calidad y cumplimiento son dimensiones distintas. Un numero puede estar `CONNECTED`, devolver calidad `RED` y tener restricciones activas simultaneamente. Clinicaclick muestra las tres y conserva estados/errores reales, sin imponer un bloqueo local adicional.
+- El borrador de apelacion se construye con identificadores comprobables de la cuenta (telefono, WABA ID y Phone Number ID), evento, fecha, calidad, capacidad, restricciones y actividad exacta de siete dias. Si Meta no envio `violation_type`, el texto debe decirlo; nunca sustituirlo por una causa generica presentada como hecho.
+- Un incidente de un activo `assignmentScope=group` se atribuye solo al grupo: `group_id` informado y `clinic_id=NULL`. No se elige una clinica representativa para titular el incidente, porque eso haria parecer que la medida afecta al WhatsApp propio de esa sede.
+- El worker registra un warning estructurado cuando Meta devuelve un estado para un WAMID que no existe en `Messages`. Esto permite diagnosticar pruebas o integraciones que hayan llamado a Meta sin persistir antes el mensaje; el warning no crea una entrega ficticia ni bloquea envios.
+
 ## 2026-04-26 - Intake: verificacion Consent Mode v2 y avisos externos
 
 - `GET /api/intake/verify-snippet` no debe decidir compatibilidad de Consent Mode v2 solo por el query param `?v=` del `<script>`.

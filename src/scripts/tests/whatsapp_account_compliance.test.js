@@ -6,6 +6,10 @@ const {
   deriveComplianceSnapshot,
   isGroupScopedAsset,
 } = require('../../lib/whatsapp-account-compliance');
+const {
+  buildAppealDraft,
+  getStoredAccountUpdate,
+} = require('../../services/whatsappAccountCompliance.service');
 
 const webhookEntry = { id: 'waba-123', time: 1786140000 };
 const webhookValue = {
@@ -92,4 +96,61 @@ const reinstated = deriveComplianceSnapshot({
 assert.strictEqual(reinstated.status, 'active');
 assert.strictEqual(reinstated.blocks_all_sending, false);
 
+const storedRestriction = getStoredAccountUpdate({
+  wabaId: 'waba-legacy',
+  updatedAt: '2026-08-06T21:37:26.619Z',
+  additionalData: {
+    coexistence: {
+      account_update_last_at: '2026-08-06T21:37:26.617Z',
+      last_account_update: {
+        event: 'ACCOUNT_RESTRICTION',
+        raw: webhookValue,
+      },
+    },
+  },
+});
+assert.strictEqual(storedRestriction.event, 'ACCOUNT_RESTRICTION');
+assert.strictEqual(storedRestriction.entry.id, 'waba-legacy');
+assert.strictEqual(storedRestriction.change.field, 'account_update');
+assert.strictEqual(storedRestriction.value.restriction_info[0].restriction_type, 'RESTRICTED_BIZ_INITIATED_MESSAGING');
+assert.strictEqual(getStoredAccountUpdate({
+  wabaId: 'waba-legacy',
+  additionalData: {
+    coexistence: {
+      last_account_update: { event: 'ACCOUNT_RECONNECTED', raw: { event: 'ACCOUNT_RECONNECTED' } },
+    },
+  },
+}), null);
+
+const appealDraft = buildAppealDraft({
+  incident: {
+    phone_number: '+34 600 00 00 00',
+    waba_id: 'waba-123',
+    phone_number_id: 'phone-456',
+    provider_event: 'ACCOUNT_RESTRICTION',
+    operational_status: 'restricted',
+    occurred_at: '2026-08-06T21:37:26.000Z',
+    restriction_info: restriction.restrictions,
+  },
+  clinicName: 'Clínica QA',
+  groupName: 'Grupo QA',
+  account: {
+    verified_name: 'Atención Grupo QA',
+    quality_rating: 'RED',
+    messaging_limit: 'TIER_1K',
+  },
+  activity: {
+    last_7d: 120,
+    accepted_7d: 116,
+    failed_7d: 4,
+    status_counts: { sent: 80, delivered: 20, read: 16, failed: 4 },
+  },
+});
+assert.match(appealDraft, /WABA ID: waba-123/);
+assert.match(appealDraft, /Phone Number ID: phone-456/);
+assert.match(appealDraft, /Atención Grupo QA/);
+assert.match(appealDraft, /RESTRICTED_BIZ_INITIATED_MESSAGING/);
+assert.match(appealDraft, /120 mensajes registrados, 116 aceptados por Meta y 4 fallidos/);
+
 console.log('whatsapp_account_compliance.test.js OK');
+process.exit(0);

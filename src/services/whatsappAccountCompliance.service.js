@@ -1,6 +1,6 @@
 'use strict';
 
-const { Op } = require('sequelize');
+const { Op, fn, col } = require('sequelize');
 const db = require('../../models');
 const notificationService = require('./notifications.service');
 const { syncPhonesForWaba } = require('./whatsappPhones.service');
@@ -62,6 +62,32 @@ function occurredAtFromEntry(entry) {
     return new Date(raw < 100000000000 ? raw * 1000 : raw);
   }
   return new Date();
+}
+
+function getStoredAccountUpdate(asset) {
+  const additionalData = asset?.additionalData || {};
+  const coexistence = additionalData.coexistence || {};
+  const stored = coexistence.last_account_update || additionalData.last_account_update || null;
+  const value = stored?.raw && typeof stored.raw === 'object' ? stored.raw : null;
+  const event = clean(value?.event || stored?.event).toUpperCase();
+  if (!value || !COMPLIANCE_EVENTS.has(event)) return null;
+
+  const receivedAt = coexistence.account_update_last_at
+    || stored.received_at
+    || stored.updated_at
+    || asset?.updatedAt
+    || new Date();
+  const receivedAtMs = new Date(receivedAt).getTime();
+  return {
+    event,
+    receivedAt: Number.isFinite(receivedAtMs) ? new Date(receivedAtMs) : new Date(),
+    entry: {
+      id: clean(asset?.wabaId) || null,
+      time: Math.floor((Number.isFinite(receivedAtMs) ? receivedAtMs : Date.now()) / 1000),
+    },
+    change: { field: 'account_update' },
+    value,
+  };
 }
 
 function summarizeCompliance(additionalData = {}) {
@@ -145,19 +171,27 @@ async function updateIncidentReviewSnapshot(incident) {
 
 async function resolveClinicContext({ assets, clinicId }) {
   const primary = assets.find((asset) => asset.assetType === 'whatsapp_phone_number') || assets[0] || null;
-  let effectiveClinicId = Number(primary?.clinicaId || clinicId || 0) || null;
-  const groupId = isGroupScopedAsset(primary)
+  const groupScoped = isGroupScopedAsset(primary);
+  const groupId = groupScoped
     ? (Number(primary?.grupoClinicaId || 0) || null)
     : null;
-  if (!effectiveClinicId && groupId) {
-    const clinic = await Clinica.findOne({
-      where: { grupoClinicaId: groupId },
-      attributes: ['id_clinica'],
-      order: [['id_clinica', 'ASC']],
-      raw: true,
-    });
-    effectiveClinicId = clinic?.id_clinica || null;
+  if (groupScoped) {
+    const group = groupId
+      ? await GrupoClinica.findByPk(groupId, {
+          attributes: ['id_grupo', 'nombre_grupo'],
+          raw: true,
+        })
+      : null;
+    return {
+      primary,
+      clinicId: null,
+      clinicName: null,
+      groupId,
+      groupName: group?.nombre_grupo || null,
+    };
   }
+
+  const effectiveClinicId = Number(primary?.clinicaId || clinicId || 0) || null;
   const clinic = effectiveClinicId
     ? await Clinica.findByPk(effectiveClinicId, {
         attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'],
@@ -168,7 +202,8 @@ async function resolveClinicContext({ assets, clinicId }) {
     primary,
     clinicId: effectiveClinicId,
     clinicName: clinic?.nombre_clinica || null,
-    groupId: groupId || clinic?.grupoClinicaId || null,
+    groupId: clinic?.grupoClinicaId || null,
+    groupName: null,
   };
 }
 
@@ -239,6 +274,17 @@ async function handleAccountUpdate({ entry, change, value, clinicId }) {
     where: { dedupe_key: dedupeKey },
     defaults: incidentDefaults,
   });
+  if (!created && (
+    Number(incident.clinic_id || 0) !== Number(context.clinicId || 0)
+    || Number(incident.group_id || 0) !== Number(context.groupId || 0)
+    || Number(incident.asset_id || 0) !== Number(context.primary?.id || 0)
+  )) {
+    await incident.update({
+      clinic_id: context.clinicId,
+      group_id: context.groupId,
+      asset_id: context.primary?.id || null,
+    });
+  }
 
   const storedSnapshot = {
     ...snapshot,
@@ -249,7 +295,7 @@ async function handleAccountUpdate({ entry, change, value, clinicId }) {
   };
   await updateAssetsCompliance(assets, storedSnapshot);
 
-  if (created) {
+  if (created && (!isResolution || isReinstatement)) {
     await notificationService.dispatchEvent({
       event: isReinstatement
         ? 'whatsapp.account_compliance_resolved'
@@ -257,7 +303,8 @@ async function handleAccountUpdate({ entry, change, value, clinicId }) {
       clinicId: context.clinicId,
       data: {
         clinicId: context.clinicId,
-        clinicName: context.clinicName,
+        groupId: context.groupId,
+        clinicName: context.groupName || context.clinicName,
         incidentId: Number(incident.id),
         wabaId,
         phoneNumber: incident.phone_number,
@@ -273,6 +320,26 @@ async function handleAccountUpdate({ entry, change, value, clinicId }) {
   }
 
   return { incident: toPlain(incident), snapshot: storedSnapshot, created };
+}
+
+async function reconcileStoredAccountUpdate(asset) {
+  const storedUpdate = getStoredAccountUpdate(asset);
+  if (!storedUpdate) return null;
+
+  const currentSnapshot = summarizeCompliance(asset.additionalData || {});
+  const currentUpdatedAt = new Date(
+    currentSnapshot?.updated_at || currentSnapshot?.occurred_at || 0
+  ).getTime();
+  if (Number.isFinite(currentUpdatedAt) && currentUpdatedAt >= storedUpdate.receivedAt.getTime()) {
+    return null;
+  }
+
+  return handleAccountUpdate({
+    entry: storedUpdate.entry,
+    change: storedUpdate.change,
+    value: storedUpdate.value,
+    clinicId: asset.clinicaId || null,
+  });
 }
 
 async function handleBusinessUsernameUpdate({ entry, change, value, clinicId }) {
@@ -322,26 +389,50 @@ async function loadActivitySummary({ clinicId, groupId }) {
   }
 
   const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-  const messages = await Message.findAll({
-    where: {
-      direction: 'outbound',
-      createdAt: { [Op.gte]: since7d },
-    },
-    include: [{
+  const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const scopedInclude = [{
       model: Conversation,
       as: 'conversation',
       required: true,
       where: { clinic_id: { [Op.in]: clinicIds } },
       attributes: ['clinic_id'],
-    }],
-    order: [['createdAt', 'DESC']],
-    limit: 500,
-  });
-  const now = Date.now();
+    }];
+  const baseWhere = {
+    direction: 'outbound',
+    createdAt: { [Op.gte]: since7d },
+  };
+  const [last7d, last24h, statusRows, messages, recentFailures] = await Promise.all([
+    Message.count({ where: baseWhere, include: scopedInclude, distinct: true }),
+    Message.count({
+      where: { ...baseWhere, createdAt: { [Op.gte]: since24h } },
+      include: scopedInclude,
+      distinct: true,
+    }),
+    Message.findAll({
+      attributes: ['status', [fn('COUNT', col('Message.id')), 'count']],
+      where: baseWhere,
+      include: scopedInclude.map((include) => ({ ...include, attributes: [] })),
+      group: ['Message.status'],
+      raw: true,
+    }),
+    Message.findAll({
+      where: baseWhere,
+      include: scopedInclude,
+      order: [['createdAt', 'DESC']],
+      limit: 500,
+    }),
+    Message.findAll({
+      where: { ...baseWhere, status: 'failed' },
+      include: scopedInclude,
+      order: [['createdAt', 'DESC']],
+      limit: 500,
+    }),
+  ]);
   const plain = messages.map(toPlain);
-  const statusCounts = plain.reduce((acc, message) => {
-    const status = clean(message.status).toLowerCase() || 'unknown';
-    acc[status] = (acc[status] || 0) + 1;
+  const failurePlain = recentFailures.map(toPlain);
+  const statusCounts = statusRows.reduce((acc, row) => {
+    const status = clean(row.status).toLowerCase() || 'unknown';
+    acc[status] = Number(row.count || 0);
     return acc;
   }, {});
   const sourceOf = (message) => {
@@ -371,26 +462,81 @@ async function loadActivitySummary({ clinicId, groupId }) {
     const localError = clean(metadata.error || metadata.enqueue_error || metadata.last_error);
     return localError ? [{ code: null, title: null, message: localError, details: null, href: null }] : [];
   };
+  const serializeActivityMessage = (message) => ({
+    id: message.id,
+    clinic_id: message.conversation?.clinic_id || null,
+    wamid: clean(message.metadata?.wamid) || null,
+    sent_at: message.sent_at || message.createdAt,
+    type: message.message_type,
+    status: message.status,
+    source: sourceOf(message),
+    errors: errorsOf(message),
+    status_history: Array.isArray(message.metadata?.wa_status_history)
+      ? message.metadata.wa_status_history.slice(-8)
+      : [],
+    excerpt: clean(message.content).slice(0, 180),
+  });
+  const sourceCounts = plain.reduce((acc, message) => {
+    const source = sourceOf(message);
+    acc[source] = (acc[source] || 0) + 1;
+    return acc;
+  }, {});
+  const errorCounts = failurePlain.reduce((acc, message) => {
+    errorsOf(message).forEach((error) => {
+      const key = clean(error.code || error.title || error.message) || 'unknown';
+      acc[key] = (acc[key] || 0) + 1;
+    });
+    return acc;
+  }, {});
   return {
-    last_24h: plain.filter((message) => now - new Date(message.createdAt).getTime() <= 24 * 60 * 60 * 1000).length,
-    last_7d: plain.length,
-    failed_7d: plain.filter((message) => message.status === 'failed').length,
-    accepted_7d: plain.filter((message) => clean(message.metadata?.wamid)).length,
+    last_24h: Number(last24h || 0),
+    last_7d: Number(last7d || 0),
+    failed_7d: Number(statusCounts.failed || 0),
+    accepted_7d: ['sent', 'delivered', 'read'].reduce(
+      (total, status) => total + Number(statusCounts[status] || 0),
+      0
+    ),
     status_counts: statusCounts,
-    recent: plain.slice(0, 20).map((message) => ({
-      id: message.id,
-      clinic_id: message.conversation?.clinic_id || null,
-      wamid: clean(message.metadata?.wamid) || null,
-      sent_at: message.sent_at || message.createdAt,
-      type: message.message_type,
-      status: message.status,
-      source: sourceOf(message),
-      errors: errorsOf(message),
-      status_history: Array.isArray(message.metadata?.wa_status_history)
-        ? message.metadata.wa_status_history.slice(-8)
-        : [],
-      excerpt: clean(message.content).slice(0, 180),
-    })),
+    source_counts: sourceCounts,
+    source_sample_size: plain.length,
+    error_counts: errorCounts,
+    error_sample_size: failurePlain.length,
+    recent: plain.slice(0, 20).map(serializeActivityMessage),
+    recent_failures: failurePlain.slice(0, 10).map(serializeActivityMessage),
+  };
+}
+
+async function loadIncidentAccount(incident) {
+  let asset = incident?.asset_id
+    ? await ClinicMetaAsset.findByPk(incident.asset_id)
+    : null;
+  if (!asset && (incident?.phone_number_id || incident?.waba_id)) {
+    const scope = [];
+    if (incident.phone_number_id) scope.push({ phoneNumberId: String(incident.phone_number_id) });
+    if (incident.waba_id) scope.push({ wabaId: String(incident.waba_id) });
+    asset = await ClinicMetaAsset.findOne({
+      where: {
+        isActive: true,
+        assetType: 'whatsapp_phone_number',
+        [Op.or]: scope,
+      },
+      order: [['updatedAt', 'DESC']],
+    });
+  }
+  if (!asset) return null;
+  const additionalData = asset.additionalData && typeof asset.additionalData === 'object'
+    ? asset.additionalData
+    : {};
+  return {
+    asset_id: Number(asset.id),
+    verified_name: asset.waVerifiedName || null,
+    waba_id: asset.wabaId || null,
+    phone_number_id: asset.phoneNumberId || null,
+    phone_number: asset.metaAssetName || null,
+    quality_rating: asset.quality_rating || null,
+    messaging_limit: asset.messaging_limit || null,
+    account_mode: additionalData.accountMode || null,
+    platform_type: additionalData.platformType || null,
   };
 }
 
@@ -415,10 +561,13 @@ async function serializeIncident(row, { includeActivity = false, includeRaw = tr
     delete payload.appeal_draft;
   }
   if (includeActivity) {
-    payload.activity = await loadActivitySummary({
-      clinicId: incident.clinic_id,
-      groupId: incident.group_id,
-    });
+    [payload.activity, payload.account] = await Promise.all([
+      loadActivitySummary({
+        clinicId: incident.clinic_id,
+        groupId: incident.group_id,
+      }),
+      loadIncidentAccount(incident),
+    ]);
   }
   return payload;
 }
@@ -571,17 +720,59 @@ async function requestClinicClickReview({ clinicId, incidentId, userId }) {
   return serializeIncident(incident);
 }
 
-function buildAppealDraft({ incident, clinicName, serviceContext, reviewNotes }) {
+function buildAppealDraft({ incident, clinicName, groupName, account, activity, serviceContext, reviewNotes }) {
+  const accountName = account?.verified_name || groupName || clinicName || 'la cuenta indicada';
   const violation = incident.violation_type
-    ? (VIOLATION_LABELS[incident.violation_type] || incident.violation_type)
-    : 'la medida indicada por WhatsApp';
+    ? `Motivo comunicado por WhatsApp: ${VIOLATION_LABELS[incident.violation_type] || incident.violation_type}.`
+    : 'WhatsApp no ha comunicado una categoría o motivo adicional; el webhook sí informa de las restricciones detalladas a continuación.';
+  const restrictions = Array.isArray(incident.restriction_info)
+    ? incident.restriction_info.filter(item => item?.active !== false)
+    : [];
+  const restrictionLines = restrictions.length
+    ? restrictions.map((restriction) => {
+        const label = clean(restriction?.restriction_label || restriction?.restriction_type) || 'Restricción sin descripción';
+        const technical = restriction?.restriction_label && restriction?.restriction_type
+          ? ` [${restriction.restriction_type}]`
+          : '';
+        const expiry = restriction?.expiration
+          ? `, vigente hasta ${new Date(restriction.expiration).toISOString()}`
+          : '';
+        return `- ${label}${technical}${expiry}`;
+      }).join('\n')
+    : '- WhatsApp no incluyó un detalle estructurado de restricciones.';
+  const statusCounts = activity?.status_counts || {};
+  const statusSummary = [
+    ['enviados', statusCounts.sent],
+    ['entregados', statusCounts.delivered],
+    ['leídos', statusCounts.read],
+    ['pendientes', statusCounts.pending],
+    ['fallidos', statusCounts.failed],
+  ]
+    .filter(([, value]) => Number(value || 0) > 0)
+    .map(([label, value]) => `${value} ${label}`)
+    .join(', ');
   const context = clean(serviceContext)
     || 'La cuenta se utiliza para comunicaciones asistenciales y administrativas de la clínica. Antes de presentar esta revisión se comprobará la base y autorización aplicables a los envíos analizados.';
   const notes = clean(reviewNotes)
     || 'Clinicaclick ha recopilado la actividad reciente y los estados técnicos disponibles para que Meta pueda revisar el caso.';
   return [
-    `Solicitamos la revisión de la medida aplicada a la cuenta de WhatsApp Business de ${clinicName || 'la clínica'}.`,
-    `Motivo comunicado por WhatsApp: ${violation}.`,
+    `Solicitamos la revisión de la medida aplicada a la cuenta de WhatsApp Business ${accountName}.`,
+    [
+      'Identificación de la cuenta:',
+      `- Alcance en Clinicaclick: ${groupName || clinicName || 'sin identificar'}`,
+      `- Nombre verificado: ${account?.verified_name || 'sin dato'}`,
+      `- Teléfono: ${incident.phone_number || account?.phone_number || 'sin dato'}`,
+      `- WABA ID: ${incident.waba_id || account?.waba_id || 'sin dato'}`,
+      `- Phone Number ID: ${incident.phone_number_id || account?.phone_number_id || 'sin dato'}`,
+      `- Evento recibido: ${incident.provider_event || 'sin dato'}`,
+      `- Fecha del evento: ${incident.occurred_at ? new Date(incident.occurred_at).toISOString() : 'sin dato'}`,
+      `- Estado operativo: ${incident.operational_status || 'sin dato'}`,
+      `- Calidad informada: ${account?.quality_rating || 'sin dato'}`,
+      `- Capacidad informada: ${account?.messaging_limit || 'sin dato'}`,
+    ].join('\n'),
+    violation,
+    `Restricciones comunicadas por WhatsApp:\n${restrictionLines}`,
+    `Actividad disponible al preparar la revisión (últimos 7 días): ${Number(activity?.last_7d || 0)} mensajes registrados, ${Number(activity?.accepted_7d || 0)} aceptados por Meta y ${Number(activity?.failed_7d || 0)} fallidos${statusSummary ? ` (${statusSummary})` : ''}.`,
     `Contexto del servicio: ${context}`,
     `Revisión realizada: ${notes}`,
     'Solicitamos que se reevalúe la medida y, si corresponde, se restablezca la cuenta. Podemos aportar información adicional sobre la operativa y, cuando proceda, las bases y autorizaciones de contacto verificadas.',
@@ -590,7 +781,10 @@ function buildAppealDraft({ incident, clinicName, serviceContext, reviewNotes })
 
 async function prepareAppeal({ incidentId, userId, serviceContext, reviewNotes }) {
   const incident = await WhatsappAccountComplianceIncident.findByPk(incidentId, {
-    include: [{ model: Clinica, as: 'clinic', attributes: ['nombre_clinica'], required: false }],
+    include: [
+      { model: Clinica, as: 'clinic', attributes: ['nombre_clinica'], required: false },
+      { model: GrupoClinica, as: 'group', attributes: ['nombre_grupo'], required: false },
+    ],
   });
   if (!incident) {
     const error = new Error('whatsapp_compliance_incident_not_found');
@@ -602,10 +796,16 @@ async function prepareAppeal({ incidentId, userId, serviceContext, reviewNotes }
     error.statusCode = 409;
     throw error;
   }
-  const activity = await loadActivitySummary({ clinicId: incident.clinic_id, groupId: incident.group_id });
+  const [activity, account] = await Promise.all([
+    loadActivitySummary({ clinicId: incident.clinic_id, groupId: incident.group_id }),
+    loadIncidentAccount(incident),
+  ]);
   incident.appeal_draft = buildAppealDraft({
     incident,
     clinicName: incident.clinic?.nombre_clinica,
+    groupName: incident.group?.nombre_grupo,
+    account,
+    activity,
     serviceContext,
     reviewNotes,
   });
@@ -613,6 +813,7 @@ async function prepareAppeal({ incidentId, userId, serviceContext, reviewNotes }
     service_context: clean(serviceContext) || null,
     review_notes: clean(reviewNotes) || null,
     activity,
+    account,
     prepared_from_provider_payload: true,
   };
   incident.appeal_prepared_at = new Date();
@@ -664,7 +865,11 @@ async function diagnoseAccount({ assetId, userId }) {
     providerError = serializeProviderError(error);
   }
 
-  const current = await ClinicMetaAsset.findByPk(asset.id);
+  let current = await ClinicMetaAsset.findByPk(asset.id);
+  if (current) {
+    await reconcileStoredAccountUpdate(current);
+    current = await ClinicMetaAsset.findByPk(asset.id);
+  }
   const context = await resolveClinicContext({ assets: current ? [current] : [asset], clinicId: asset.clinicaId });
   const activity = await loadActivitySummary({
     clinicId: context.clinicId,
@@ -686,16 +891,25 @@ async function diagnoseAccount({ assetId, userId }) {
     code_verification_status: registration.codeVerificationStatus || null,
     connection_mode: additionalData.whatsappConnectionMode || additionalData.connectionMode || null,
     coexistence_status: coexistence.status || additionalData.coexistenceStatus || null,
+    platform_type: additionalData.platformType || null,
+    account_mode: additionalData.accountMode || null,
+    is_on_biz_app: additionalData.isOnBizApp ?? null,
+    name_status: additionalData.nameStatus || null,
     quality_rating: current?.quality_rating || asset.quality_rating || null,
     messaging_limit: current?.messaging_limit || asset.messaging_limit || null,
     compliance: summarizeCompliance(additionalData),
     compliance_source: 'account_update_webhook',
     recent_delivery: activity.recent[0] || null,
+    recent_failures: activity.recent_failures || [],
     delivery_summary_7d: {
       total: activity.last_7d,
       accepted: activity.accepted_7d,
       failed: activity.failed_7d,
       status_counts: activity.status_counts,
+      source_counts: activity.source_counts,
+      source_sample_size: activity.source_sample_size,
+      error_counts: activity.error_counts,
+      error_sample_size: activity.error_sample_size,
     },
   };
 
@@ -730,6 +944,7 @@ module.exports = {
   getIncidentById,
   handleAccountUpdate,
   handleBusinessUsernameUpdate,
+  getStoredAccountUpdate,
   listIncidents,
   markAppealSubmitted,
   prepareAppeal,

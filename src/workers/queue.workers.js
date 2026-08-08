@@ -1721,6 +1721,18 @@ createWorker('webhook_whatsapp', async (job) => {
 
         const messageRef = await findMessageByWamid(wamid);
         if (!messageRef) {
+            console.warn('[whatsapp] Estado recibido para un WAMID sin mensaje local', {
+                wamid,
+                status: mappedStatus,
+                recipientId: cleanString(status?.recipient_id) || null,
+                errors: Array.isArray(status?.errors)
+                    ? status.errors.map((error) => ({
+                        code: error?.code || null,
+                        title: truncateText(error?.title, 160) || null,
+                        message: truncateText(error?.message, 240) || null,
+                    }))
+                    : [],
+            });
             continue;
         }
 
