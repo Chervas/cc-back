@@ -155,6 +155,35 @@ class WhatsAppService {
         return null;
     }
 
+    async getConfigByAssetId(assetId, { clinicId = null } = {}) {
+        const normalizedAssetId = Number.parseInt(String(assetId || ''), 10);
+        if (!Number.isInteger(normalizedAssetId) || normalizedAssetId <= 0) {
+            return null;
+        }
+        const asset = await ClinicMetaAsset.findOne({
+            where: {
+                id: normalizedAssetId,
+                assetType: 'whatsapp_phone_number',
+                isActive: true,
+            },
+            raw: true,
+        });
+        if (!asset?.waAccessToken || !asset?.phoneNumberId) {
+            return null;
+        }
+        return {
+            originId: asset.id,
+            phoneNumberId: asset.phoneNumberId,
+            accessToken: asset.waAccessToken,
+            wabaId: asset.wabaId || null,
+            assignmentScope: asset.assignmentScope || null,
+            clinicaId: asset.clinicaId || clinicId || null,
+            grupoClinicaId: asset.grupoClinicaId || null,
+            additionalData: asset.additionalData || {},
+            originLabel: asset.metaAssetName || asset.waVerifiedName || null,
+        };
+    }
+
     /**
      * Permite usar credenciales por clínica (si se pasan)
      * @param {*} clinicConfig { phoneNumberId, accessToken }

@@ -36,6 +36,7 @@ const webEventsService = require('../services/webEvents.service');
 const { getIO } = require('../services/socket.service');
 const jobRequestsService = require('../services/jobRequests.service');
 const leadAutoReplyService = require('../services/leadAutoReply.service');
+const patientDirectionService = require('../services/patientDirection.service');
 const {
   localDateTimeToUtc,
   resolveClinicTimeZone,
@@ -7192,6 +7193,15 @@ exports.updateLeadStatus = asyncHandler(async (req, res) => {
   if (motivo_descarte !== undefined) updatePayload.motivo_descarte = motivo_descarte;
 
   await lead.update(updatePayload);
+
+  if (status_lead === 'descartado') {
+    await patientDirectionService.handleLeadDiscarded({
+      lead,
+      actorUserId: req.userData?.userId || null,
+    }).catch((error) => {
+      console.warn('[patient-direction] No se pudo finalizar el lead descartado:', error.message || error);
+    });
+  }
 
   let qualifiedLeadConversion = null;
   if (status_lead === 'cualificado') {

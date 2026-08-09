@@ -45,6 +45,9 @@ const ALLOWED_FEATURE_KEYS = new Set([
   'nutrition.reports.finalize',
   'clinical.reports.view',
   'clinical.reports.manage',
+  'patient_direction.view',
+  'patient_direction.manage',
+  'patient_direction.assign_role',
 ]);
 
 const ALLOWED_ROLE_CODES = new Set([
@@ -55,10 +58,44 @@ const ALLOWED_ROLE_CODES = new Set([
   'reception',
   'admin_staff',
   'accountant',
+  'patient_director',
   'unknown',
 ]);
 
 const DEFAULT_FEATURES = {
+  'patient_direction.view': {
+    propietario: true,
+    agencia: false,
+    doctor: false,
+    assistant: false,
+    reception: true,
+    admin_staff: true,
+    accountant: false,
+    patient_director: true,
+    unknown: false,
+  },
+  'patient_direction.manage': {
+    propietario: true,
+    agencia: false,
+    doctor: false,
+    assistant: false,
+    reception: false,
+    admin_staff: false,
+    accountant: false,
+    patient_director: true,
+    unknown: false,
+  },
+  'patient_direction.assign_role': {
+    propietario: false,
+    agencia: false,
+    doctor: false,
+    assistant: false,
+    reception: false,
+    admin_staff: false,
+    accountant: false,
+    patient_director: true,
+    unknown: false,
+  },
   marketing: {
     propietario: true,
     agencia: true,
@@ -493,6 +530,11 @@ const ROLE_CATALOG = [
     description: 'Administración interna de la clínica.',
   },
   {
+    code: 'patient_director',
+    label: 'Director de pacientes',
+    description: 'Captación, seguimiento y coordinación de primeras citas en las clínicas asignadas.',
+  },
+  {
     code: 'accountant',
     label: 'Gestoría',
     description: 'Acceso externo restringido a documentos y exportaciones contables.',
@@ -825,14 +867,45 @@ const FEATURE_CATALOG = [
     enforcement_status: 'backend',
     sensitive: false,
   },
+  {
+    key: 'patient_direction.view',
+    group: 'marketing_conversations',
+    kind: 'view',
+    label: 'Ver operativa del Director de pacientes',
+    enforcement_status: 'backend',
+    sensitive: true,
+  },
+  {
+    key: 'patient_direction.manage',
+    group: 'marketing_conversations',
+    kind: 'action',
+    label: 'Configurar el servicio Director de pacientes',
+    enforcement_status: 'backend',
+    sensitive: true,
+  },
+  {
+    key: 'patient_direction.assign_role',
+    group: 'administration',
+    kind: 'action',
+    label: 'Asignar el rol Director de pacientes',
+    enforcement_status: 'backend',
+    sensitive: true,
+  },
 ];
 
 function getAccessPolicyCatalog() {
+  const defaults = Object.fromEntries(Object.entries(DEFAULT_FEATURES).map(([featureKey, values]) => [
+    featureKey,
+    {
+      ...values,
+      patient_director: values.patient_director ?? values.propietario ?? false,
+    },
+  ]));
   return {
     version: 1,
     roles: ROLE_CATALOG,
     features: FEATURE_CATALOG,
-    defaults: DEFAULT_FEATURES,
+    defaults,
   };
 }
 
@@ -850,6 +923,7 @@ function roleCodeFromMembership(membership) {
   if (role === 'agencia') return 'agencia';
 
   const subrole = String(membership?.subrol_clinica || '').trim().toLowerCase();
+  if (subrole === 'director de pacientes') return 'patient_director';
   if (subrole === 'doctores' || subrole.includes('doctor')) return 'doctor';
   if (subrole === 'auxiliares y enfermeros' || subrole.includes('auxiliar') || subrole.includes('enfermer')) return 'assistant';
   if (subrole === 'recepción / comercial ventas' || subrole.includes('recep') || subrole.includes('comercial') || subrole.includes('ventas')) return 'reception';
@@ -860,6 +934,9 @@ function roleCodeFromMembership(membership) {
 }
 
 function defaultForFeature(featureKey, roleCode) {
+  if (roleCode === 'patient_director' && DEFAULT_FEATURES[featureKey]?.patient_director === undefined) {
+    return Boolean(DEFAULT_FEATURES[featureKey]?.propietario ?? false);
+  }
   return Boolean(DEFAULT_FEATURES[featureKey]?.[roleCode] ?? false);
 }
 

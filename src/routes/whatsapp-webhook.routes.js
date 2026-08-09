@@ -2,6 +2,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
+const patientDirectionService = require('../services/patientDirection.service');
 const db = require('../../models');
 const { queues } = require('../services/queue.service');
 const { Op } = require('sequelize');
@@ -353,6 +354,9 @@ router.post('/whatsapp/webhook', async (req, res) => {
 
     let clinicId = req.query.clinic_id || req.body?.clinic_id;
     let groupId = null;
+    let webhookAsset = null;
+    let patientDirectionAssignmentId = null;
+    let patientDirectionFormerAssignment = false;
 
     // Si el token viene, priorizamos esa sede/grupo.
     if (webOrigin) {
@@ -360,16 +364,36 @@ router.post('/whatsapp/webhook', async (req, res) => {
       if (webOrigin.group_id) groupId = webOrigin.group_id;
     }
 
-    if (!clinicId) {
-      const asset = await findWhatsappAssetForWebhook(req.body);
-      if (asset) {
-        clinicId = asset.clinicaId;
-        groupId = asset.grupoClinicaId;
+    if (!webOrigin) {
+      webhookAsset = await findWhatsappAssetForWebhook(req.body);
+      if (webhookAsset) {
+        clinicId = clinicId || webhookAsset.clinicaId;
+        groupId = webhookAsset.grupoClinicaId;
+      }
+    }
+
+    const from = extractPrimaryWhatsappContactFromWebhookBody(req.body);
+    if (!webOrigin && webhookAsset?.id && from) {
+      const destination = await patientDirectionService.resolveInboundDestination({
+        assetId: webhookAsset.id,
+        phone: from,
+      });
+      if (destination?.source === 'unassigned') {
+        await patientDirectionService.captureUnassignedInbound({
+          assetId: webhookAsset.id,
+          phone: from,
+          payload: req.body,
+        });
+        return res.sendStatus(200);
+      }
+      if (destination?.clinicId) {
+        clinicId = destination.clinicId;
+        patientDirectionAssignmentId = destination.assignmentId || null;
+        patientDirectionFormerAssignment = destination.source === 'former_assignment';
       }
     }
 
     if (!clinicId && groupId) {
-      const from = extractPrimaryWhatsappContactFromWebhookBody(req.body);
       const resolved = await resolveClinicAndContact({ clinicId: null, groupId, from });
       clinicId = resolved.clinicId;
       req.resolvedContact = resolved;
@@ -379,7 +403,6 @@ router.post('/whatsapp/webhook', async (req, res) => {
       console.warn('Webhook WA sin clinic_id, descartando payload');
       return res.sendStatus(200);
     }
-    const from = extractPrimaryWhatsappContactFromWebhookBody(req.body);
     const resolvedContact =
       req.resolvedContact ||
       (await resolveClinicAndContact({ clinicId, groupId, from }));
@@ -390,6 +413,8 @@ router.post('/whatsapp/webhook', async (req, res) => {
       patient_id: resolvedContact.patientId,
       lead_id: resolvedContact.leadId,
       web_origin_ref: webOriginRef || null,
+      patient_direction_assignment_id: patientDirectionAssignmentId,
+      patient_direction_former_assignment: patientDirectionFormerAssignment,
     });
     return res.sendStatus(200);
   } catch (err) {

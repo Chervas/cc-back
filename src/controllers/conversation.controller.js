@@ -4,6 +4,7 @@ const db = require('../../models');
 const { queues } = require('../services/queue.service');
 const { getIO } = require('../services/socket.service');
 const whatsappService = require('../services/whatsapp.service');
+const patientDirectionService = require('../services/patientDirection.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { canUserAccessFeature } = require('../lib/access-policy');
 const { canUserSelectWhatsappTemplate } = require('../lib/whatsapp-template-ownership');
@@ -1208,6 +1209,46 @@ async function enrichQuickChatLeadAppointments(conversations = []) {
   });
 }
 
+async function enrichPatientDirectionAssignments(conversations = []) {
+  const rows = Array.isArray(conversations) ? conversations.map((row) => toPlain(row)) : [];
+  const conversationIds = rows.map((row) => parsePositiveInt(row?.id)).filter(Boolean);
+  if (!conversationIds.length || !db.PatientDirectionAssignment) return rows;
+  const assignments = await db.PatientDirectionAssignment.findAll({
+    where: {
+      conversation_id: { [Op.in]: conversationIds },
+      status: { [Op.in]: patientDirectionService.ACTIVE_STATUSES },
+    },
+    include: [{
+      model: db.Usuario,
+      as: 'director',
+      attributes: ['id_usuario', 'nombre', 'apellidos', 'avatar'],
+      required: false,
+    }],
+    order: [['updated_at', 'DESC']],
+  });
+  const byConversation = new Map();
+  for (const row of assignments) {
+    if (!byConversation.has(Number(row.conversation_id))) {
+      const plain = row.get({ plain: true });
+      byConversation.set(Number(row.conversation_id), {
+        id: plain.id,
+        status: plain.status,
+        director_user_id: plain.director_user_id,
+        director_name: [plain.director?.nombre, plain.director?.apellidos].filter(Boolean).join(' '),
+        director_avatar: plain.director?.avatar || null,
+        first_appointment_id: plain.first_appointment_id || null,
+        started_at: plain.started_at || null,
+        start_reason: plain.start_reason || null,
+        handoff_state: plain.handoff_state || null,
+      });
+    }
+  }
+  return rows.map((row) => ({
+    ...row,
+    patient_direction: byConversation.get(Number(row.id)) || null,
+  }));
+}
+
 exports.listConversations = async (req, res) => {
   try {
     const userId = req.userData?.userId;
@@ -1395,7 +1436,8 @@ exports.listConversations = async (req, res) => {
     }));
     const withRestrictions = await attachContactRestrictions(rawPayload);
     const withLeadAppointments = await enrichQuickChatLeadAppointments(withRestrictions);
-    const payload = await hydrateMarketingContactFallbacks(withLeadAppointments, { searchQuery });
+    const withPatientDirection = await enrichPatientDirectionAssignments(withLeadAppointments);
+    const payload = await hydrateMarketingContactFallbacks(withPatientDirection, { searchQuery });
     const totalUnread = payload.reduce((total, item) => {
       const unread = Number(item?.unread_count || 0);
       const automationPending = item?.pending_automation_attention
@@ -1448,6 +1490,7 @@ exports.getPermissions = async (req, res) => {
       null;
     const effectiveRole = String(selectedMembership?.rol_clinica || 'unknown').toLowerCase();
     const policyPerms = await getQuickChatPolicyPermissions(userId, clinicIds, selectedClinicId);
+    const patientDirector = await patientDirectionService.isPatientDirector(userId, selectedClinicId);
 
     return res.json({
       selected_clinic_id: selectedClinicId,
@@ -1456,6 +1499,7 @@ exports.getPermissions = async (req, res) => {
       read_leads: policyPerms.read_leads,
       can_use_all_clinics: !!isAggregateAllowed,
       effective_role: effectiveRole,
+      is_patient_director: patientDirector,
     });
   } catch (err) {
     console.error('Error getPermissions', err);
@@ -1514,7 +1558,8 @@ exports.getMessages = async (req, res) => {
     });
 
     const unreadConversationPayload = await enrichConversationUnreadForUser(userId, conversation);
-    const [conversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
+    const [restrictedConversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
+    const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload]);
     const visibleMessages = await hydrateTemplateMessagePreviews(
       filterQuickChatVisibleMessages(messages),
       { clinicId: conversation.clinic_id }
@@ -1637,7 +1682,8 @@ exports.getConversationByPatient = async (req, res) => {
     });
 
     const unreadConversationPayload = await enrichConversationUnreadForUser(userId, conversation);
-    const [conversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
+    const [restrictedConversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
+    const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload]);
     const visibleMessages = await hydrateTemplateMessagePreviews(
       filterQuickChatVisibleMessages(messages),
       { clinicId: conversation.clinic_id }
@@ -1705,7 +1751,8 @@ exports.getConversationByLead = async (req, res) => {
     });
 
     const unreadConversationPayload = await enrichConversationUnreadForUser(userId, conversation);
-    const [conversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
+    const [restrictedConversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
+    const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload]);
     const visibleMessages = await hydrateTemplateMessagePreviews(
       filterQuickChatVisibleMessages(messages),
       { clinicId: conversation.clinic_id }
@@ -1916,6 +1963,7 @@ exports.postMessage = async (req, res) => {
       templateComponents,
       previewUrl = false,
       metadata = {},
+      patientDirectionTakeConfirmed = false,
     } = req.body;
     let outboundJobPayload = null;
 
@@ -1955,6 +2003,7 @@ exports.postMessage = async (req, res) => {
 
     const io = getIO();
     let clinicConfig = null;
+    let senderPolicy = null;
     let limitStatus = null;
     let to = null;
     let resolvedTemplate = null;
@@ -1987,7 +2036,32 @@ exports.postMessage = async (req, res) => {
         conversation.contact_id = to;
         await conversation.save({ transaction });
       }
-      clinicConfig = await whatsappService.getClinicConfig(conversation.clinic_id);
+      senderPolicy = await patientDirectionService.resolveOutboundPolicy({
+        clinicId: conversation.clinic_id,
+        phone: to,
+        conversationId: conversation.id,
+        leadId: conversation.lead_id,
+        patientId: conversation.patient_id,
+        purpose: conversation.lead_id ? 'lead_capture' : 'general',
+        actorUserId: userId,
+        allowTake: patientDirectionTakeConfirmed === true,
+        automation: false,
+      });
+      if (senderPolicy.requiresTakeConfirmation) {
+        await transaction.rollback();
+        return res.status(409).json({
+          error: 'patient_direction_take_confirmation_required',
+          assignment_id: senderPolicy.assignment?.id || null,
+          message: 'El Director de pacientes está atendiendo esta conversación. Confirma que quieres responder en su nombre.',
+        });
+      }
+      if (patientDirectionTakeConfirmed === true && senderPolicy.assignment?.id) {
+        await patientDirectionService.registerTake({
+          assignmentId: senderPolicy.assignment.id,
+          actorUserId: userId,
+        });
+      }
+      clinicConfig = senderPolicy.clinicConfig;
       if (!clinicConfig?.accessToken || !clinicConfig?.phoneNumberId) {
         await transaction.rollback();
         return res.status(500).json({ error: 'whatsapp_config_missing' });
@@ -2072,6 +2146,7 @@ exports.postMessage = async (req, res) => {
         ? { phoneNumberId: clinicConfig.phoneNumberId }
         : {}),
       ...(clinicConfig?.wabaId ? { wabaId: clinicConfig.wabaId } : {}),
+      ...(senderPolicy?.metadata || {}),
       ...(limitStatus?.limitedMode
         ? {
             limitedMode: true,

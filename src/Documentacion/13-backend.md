@@ -7668,3 +7668,53 @@ La migración `20260809113000-version-review-response-classification.js` crea
 versiones inmutables de los flujos de reseñas y conserva el booleano activo de
 cada familia. Se verificaron 18 familias versionadas y 0 activas después de la
 migración.
+
+## 2026-08-09 - Dominio Director de pacientes
+
+`Director de pacientes` es un subrol de `UsuarioClinica`, no un rol global. Un
+administrador global u otro usuario con ese subrol puede asignarlo o retirarlo;
+la comprobación se ejecuta antes de persistir cambios de membresía o invitación.
+En sus clínicas hereda las capacidades operativas de propietario, pero su scope
+sigue limitado a las membresías autorizadas.
+
+La migración `20260809190000-create-patient-direction-domain.js` crea:
+
+- `PatientDirectionSettings`, configuración única por clínica;
+- `PatientDirectionAssignments`, estado de atención, teléfono emisor, lead,
+  conversación, paciente, primera cita y traspaso;
+- `PatientDirectionEvents`, auditoría append-only;
+- la familia `clinicaclick_patient_direction_handoff` del catálogo WhatsApp.
+
+La API autenticada `/api/patient-direction` permite consultar, guardar, activar
+o desactivar la configuración, obtener el panel, tomar una conversación,
+asignar clínica a un inbound ambiguo y reintentar un traspaso. Toda operación
+valida scope. El dashboard devuelve solo el recuento y una previsualización del
+último mensaje ambiguo; nunca expone el payload crudo del webhook.
+
+`patientDirection.service.js` es la única fuente de verdad para el remitente:
+
+- QuickChat y Automatizaciones V2 usan el WhatsApp del director mientras exista
+  una asignación activa;
+- los consentimientos usan siempre el número habitual de la clínica;
+- una respuesta automática previa no cuenta como contacto humano, pero el
+  primer mensaje automático de captación sí puede crear la asignación;
+- solo la primera cita rastreada en estado asistido o completado termina la
+  asignación; cancelación e inasistencia permiten enlazar la siguiente cita;
+- descartar el lead o desactivar el servicio termina la asignación;
+- `active_phone_key` evita duplicidad dentro del activo compartido de un
+  director, sin bloquear el mismo teléfono en redes de directores distintas.
+
+Al desactivar, todas las asignaciones activas de la clínica reciben el sucesor
+seleccionado y quedan en `handoff_pending`. El envío desde la clínica pasa a
+`sent` solo cuando llega un estado real `sent`, `delivered` o `read`; los fallos
+permanecen reintentables. Un inbound al número antiguo recibe un aviso dentro de
+la ventana abierta y vuelve a provocar el traspaso.
+
+Cuando un número de director sirve a varias clínicas y el inbound no se puede
+atribuir, el worker conserva el webhook en la asignación `unassigned`. No crea
+una `Conversation` sin `clinic_id`. La selección manual de clínica reprocesa el
+payload por el worker WhatsApp normal y deja evento auditable.
+
+`GET /api/citas/calendario` expone `created_by` para que Agenda pueda atenuar
+citas ajenas sin recalcular la propiedad en Angular. La preferencia visual es
+local por usuario y no cambia permisos ni disponibilidad.

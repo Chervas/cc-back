@@ -56,6 +56,7 @@ const PublicMediaAsset = db.PublicMediaAsset;
 const WhatsappTemplate = db.WhatsappTemplate;
 const WhatsappTemplateCatalog = db.WhatsappTemplateCatalog;
 const whatsappService = require('./whatsapp.service');
+const patientDirectionService = require('./patientDirection.service');
 const whatsappConnectionStatusService = require('./whatsappConnectionStatus.service');
 const marketingBulkSendsService = require('./marketingBulkSends.service');
 const marketingOptOutService = require('./marketingOptOut.service');
@@ -2648,15 +2649,55 @@ async function resolveWhatsAppSenderConfig({ config, context, clinicId }) {
     };
   }
 
-  const clinicConfig = await whatsappService.getClinicConfig(clinicId);
+  const leadId = toIntOrNull(
+    context?.lead?.id
+    || context?.lead_id
+    || context?.trigger?.data?.lead_id
+    || context?.runtime?.lead_id
+  );
+  const patientId = toIntOrNull(
+    context?.paciente?.id_paciente
+    || context?.patient?.id_paciente
+    || context?.patient?.id
+    || context?.patient_id
+    || context?.trigger?.data?.patient_id
+  );
+  const appointmentId = toIntOrNull(
+    context?.cita?.id_cita
+    || context?.appointment?.id_cita
+    || context?.appointment?.id
+    || context?.trigger?.data?.appointment_id
+  );
+  const phone = cleanString(
+    context?.lead?.telefono
+    || context?.paciente?.telefono_movil
+    || context?.patient?.telefono_movil
+    || context?.patient?.phone
+    || context?.recipient?.phone
+  );
+  const domain = cleanString(config?.domain || context?.runtime?.domain).toLowerCase();
+  const purpose = domain.includes('consent')
+    ? 'consent'
+    : (leadId ? 'lead_automation' : (appointmentId ? 'appointment_automation' : 'automation'));
+  const senderPolicy = await patientDirectionService.resolveOutboundPolicy({
+    clinicId,
+    phone,
+    leadId,
+    patientId,
+    purpose,
+    actorUserId: null,
+    automation: true,
+  });
+  const clinicConfig = senderPolicy.clinicConfig;
   if (!clinicConfig?.accessToken || !clinicConfig?.phoneNumberId) {
     throw new Error('whatsapp_config_missing');
   }
 
   return {
-    sender_mode: 'clinic_default',
-    sender_origin_id: null,
+    sender_mode: senderPolicy.mode || 'clinic_default',
+    sender_origin_id: clinicConfig.originId || null,
     clinic_config: clinicConfig,
+    patient_direction: senderPolicy.metadata || null,
   };
 }
 
@@ -2728,6 +2769,26 @@ async function resolveScheduledWhatsappSenderConfig({ metadata, clinicId }) {
     }
     return config;
   };
+  const patientDirectionAssignmentId = toIntOrNull(metadata?.patient_direction_assignment_id);
+  if (patientDirectionAssignmentId) {
+    const assignment = await patientDirectionService.findAssignment({
+      assignmentId: patientDirectionAssignmentId,
+      statuses: ['active', 'unassigned', 'handoff_pending', 'handed_off', 'ended_attended', 'ended_discarded', 'ended_service_disabled'],
+    });
+    if (!assignment || Number(assignment.clinic_id) !== Number(clinicId)) {
+      throw new Error('patient_direction_sender_assignment_mismatch');
+    }
+    const assetId = assignment.status === 'active'
+      ? assignment.director_phone_asset_id
+      : assignment.clinic_phone_asset_id;
+    const patientDirectionConfig = await whatsappService.getConfigByAssetId(assetId, { clinicId });
+    if (!patientDirectionConfig?.accessToken || !patientDirectionConfig?.phoneNumberId) {
+      throw new Error('patient_direction_sender_unavailable');
+    }
+    return assignment.status === 'active'
+      ? assertSnapshotMatch(patientDirectionConfig)
+      : patientDirectionConfig;
+  }
   const senderOriginId = toIntOrNull(metadata?.sender_origin_id);
   if (senderOriginId) {
     const specific = await resolveSpecificSenderConfig({ senderOriginId, clinicId });
@@ -4013,6 +4074,7 @@ async function handleSendWhatsapp(node, context, runtime) {
     recipient: recipientData.recipient,
     sender_mode: senderData.sender_mode,
     sender_origin_id: senderData.sender_origin_id,
+    ...(senderData.patient_direction || {}),
     phoneNumberId: senderData.clinic_config?.phoneNumberId || null,
     phoneId: senderData.clinic_config?.phoneNumberId || null,
     wabaId: senderData.clinic_config?.wabaId || null,

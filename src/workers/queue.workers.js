@@ -15,6 +15,7 @@ const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.
 const whatsappConnectionStatusService = require('../services/whatsappConnectionStatus.service');
 const whatsappAccountComplianceService = require('../services/whatsappAccountCompliance.service');
 const whatsappDeliveryGovernanceService = require('../services/whatsappDeliveryGovernance.service');
+const patientDirectionService = require('../services/patientDirection.service');
 const { getIO } = require('../services/socket.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { buildWhatsappOutboundRetryDecision } = require('../lib/whatsapp-outbound-retry');
@@ -969,6 +970,7 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
             },
         };
         await msg.save();
+        await patientDirectionService.handleHandoffMessageStatus(msg).catch(() => null);
 
         if (!providerAccepted) {
             // Si Meta indica que el numero no esta registrado, marcamos el
@@ -1493,6 +1495,8 @@ createWorker('webhook_whatsapp', async (job) => {
     const patientId = job.data?.patient_id || null;
     const leadId = job.data?.lead_id || null;
     const webOriginRefFromJob = job.data?.web_origin_ref || null;
+    const patientDirectionAssignmentIdFromJob = job.data?.patient_direction_assignment_id || null;
+    const patientDirectionFormerAssignment = job.data?.patient_direction_former_assignment === true;
 
     if (!payload || !clinicId) {
         throw new Error('Payload o clinic_id ausente en webhook de WhatsApp');
@@ -1612,6 +1616,33 @@ createWorker('webhook_whatsapp', async (job) => {
             lastMessageAt: new Date(),
         });
 
+        let patientDirectionAssignment = null;
+        try {
+            if (!patientDirectionFormerAssignment) {
+                patientDirectionAssignment = await patientDirectionService.ensureAssignment({
+                    clinicId: conv.clinic_id || clinicId,
+                    phone: from,
+                    leadId: conv.lead_id || leadId,
+                    conversationId: conv.id,
+                    patientId: conv.patient_id || patientId,
+                    startReason: 'inbound_to_director_number',
+                    actorUserId: null,
+                    requireNoHumanContact: true,
+                });
+            }
+            if (!patientDirectionAssignment && patientDirectionAssignmentIdFromJob) {
+                patientDirectionAssignment = await patientDirectionService.findAssignment({
+                    assignmentId: patientDirectionAssignmentIdFromJob,
+                });
+            }
+        } catch (patientDirectionError) {
+            console.warn('[patient-direction] No se pudo vincular el inbound:', {
+                clinicId: conv.clinic_id || clinicId,
+                conversationId: conv.id,
+                error: patientDirectionError?.message || patientDirectionError,
+            });
+        }
+
         const inboundMsg = await Message.create({
             conversation_id: conv.id,
             sender_id: null,
@@ -1622,6 +1653,10 @@ createWorker('webhook_whatsapp', async (job) => {
             metadata: {
                 wamid,
                 phoneId,
+                ...(patientDirectionAssignment?.id ? {
+                    patient_direction_assignment_id: patientDirectionAssignment.id,
+                    patient_direction_director_user_id: patientDirectionAssignment.director_user_id,
+                } : {}),
                 ...descriptor.metadataExtra,
                 ...(webOrigin ? { web_origin_ref: webOrigin.ref, web_origin: {
                     id: webOrigin.id || null,
@@ -1645,6 +1680,12 @@ createWorker('webhook_whatsapp', async (job) => {
             },
             sent_at: new Date(),
         });
+
+        if (patientDirectionFormerAssignment && patientDirectionAssignmentIdFromJob) {
+            await patientDirectionService.sendOldNumberNotice(patientDirectionAssignmentIdFromJob).catch((noticeError) => {
+                console.warn('[patient-direction] No se pudo avisar del cambio de número:', noticeError?.message || noticeError);
+            });
+        }
 
         try {
             const optOutResult = await marketingOptOutService.applyInboundOptOutIfNeeded({
@@ -1833,6 +1874,9 @@ createWorker('webhook_whatsapp', async (job) => {
         }
         message.metadata = mergeStatusMetadata(message.metadata, status);
         await message.save();
+        await patientDirectionService.handleHandoffMessageStatus(message).catch((handoffError) => {
+            console.warn('[patient-direction] No se pudo actualizar el traspaso:', handoffError?.message || handoffError);
+        });
 
         if (['sent', 'delivered', 'read'].includes(nextStatus)) {
             try {
