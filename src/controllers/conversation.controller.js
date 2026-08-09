@@ -18,6 +18,9 @@ const {
 const {
   startPatientWhatsappConversation,
 } = require('../services/patientContact.service');
+const {
+  getActiveContactRestrictionsForConversations,
+} = require('../services/marketingOptOut.service');
 
 const {
   Conversation,
@@ -106,6 +109,22 @@ function downloadFailedMediaError(kind) {
 function cleanText(value) {
   if (value === undefined || value === null) return '';
   return String(value).trim();
+}
+
+async function attachContactRestrictions(conversations = []) {
+  const rows = (conversations || []).map((conversation) => (
+    typeof conversation?.toJSON === 'function' ? conversation.toJSON() : conversation
+  ));
+  const restrictions = await getActiveContactRestrictionsForConversations(rows);
+  return rows.map((conversation) => ({
+    ...conversation,
+    contact_restrictions: restrictions.get(Number(conversation?.id)) || {
+      active: false,
+      marketing_opt_out: false,
+      whatsapp_number_invalid: false,
+      items: [],
+    },
+  }));
 }
 
 function toPlain(value) {
@@ -1374,7 +1393,8 @@ exports.listConversations = async (req, res) => {
         : 0;
       return data;
     }));
-    const withLeadAppointments = await enrichQuickChatLeadAppointments(rawPayload);
+    const withRestrictions = await attachContactRestrictions(rawPayload);
+    const withLeadAppointments = await enrichQuickChatLeadAppointments(withRestrictions);
     const payload = await hydrateMarketingContactFallbacks(withLeadAppointments, { searchQuery });
     const totalUnread = payload.reduce((total, item) => {
       const unread = Number(item?.unread_count || 0);
@@ -1493,7 +1513,8 @@ exports.getMessages = async (req, res) => {
       raw: true,
     });
 
-    const conversationPayload = await enrichConversationUnreadForUser(userId, conversation);
+    const unreadConversationPayload = await enrichConversationUnreadForUser(userId, conversation);
+    const [conversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
     const visibleMessages = await hydrateTemplateMessagePreviews(
       filterQuickChatVisibleMessages(messages),
       { clinicId: conversation.clinic_id }
@@ -1615,7 +1636,8 @@ exports.getConversationByPatient = async (req, res) => {
       raw: true,
     });
 
-    const conversationPayload = await enrichConversationUnreadForUser(userId, conversation);
+    const unreadConversationPayload = await enrichConversationUnreadForUser(userId, conversation);
+    const [conversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
     const visibleMessages = await hydrateTemplateMessagePreviews(
       filterQuickChatVisibleMessages(messages),
       { clinicId: conversation.clinic_id }
@@ -1682,7 +1704,8 @@ exports.getConversationByLead = async (req, res) => {
       raw: true,
     });
 
-    const conversationPayload = await enrichConversationUnreadForUser(userId, conversation);
+    const unreadConversationPayload = await enrichConversationUnreadForUser(userId, conversation);
+    const [conversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
     const visibleMessages = await hydrateTemplateMessagePreviews(
       filterQuickChatVisibleMessages(messages),
       { clinicId: conversation.clinic_id }

@@ -7,6 +7,8 @@ const notificationService = require('./notifications.service');
 
 const {
   ClinicMetaAsset,
+  Clinica,
+  GrupoClinica,
   JobRequest,
   MarketingPatientContactEvent,
   MarketingPatientList,
@@ -14,6 +16,8 @@ const {
   WhatsappDeliveryEvent,
   WhatsappDeliverySnapshot,
   WhatsappTemplate,
+  Notification,
+  UsuarioClinica,
 } = db;
 
 const LIVE_LIST_STATUSES = ['prepared', 'queued', 'sending', 'scheduled', 'waiting_template_approval', 'paused'];
@@ -450,6 +454,7 @@ function computeEffectiveDispatchPolicy({
   const requestedBatch = Math.max(1, Number(requestedBatchSize || 1));
   const requestedDelay = Math.max(0, Number(requestedDelayMs || 0));
   const quality = upper(templateQuality);
+  const yellowDelayMs = 3 * 60 * 60 * 1000;
   const needsWarmup = !quality || ['UNKNOWN', 'YELLOW'].includes(quality) || Number(pauseCount || 0) > 0;
   const warmupBatch = quality === 'YELLOW'
     ? 5
@@ -475,7 +480,9 @@ function computeEffectiveDispatchPolicy({
     requestedBatch,
     requestedDelay,
     effectiveBatchSize,
-    effectiveDelayMs: requestedDelay,
+    effectiveDelayMs: quality === 'YELLOW'
+      ? Math.max(requestedDelay, yellowDelayMs)
+      : requestedDelay,
   };
 }
 
@@ -867,13 +874,21 @@ async function getAdminOverview({ limit = 100 } = {}) {
       raw: true,
     }),
   ]);
+  const clinicIds = [...new Set(pausedLists.map((list) => Number(list.clinica_id || 0)).filter(Boolean))];
+  const groupIds = [...new Set(pausedLists.map((list) => Number(list.grupo_clinica_id || 0)).filter(Boolean))];
+  const [clinics, groups] = await Promise.all([
+    clinicIds.length ? Clinica.findAll({ where: { id_clinica: { [Op.in]: clinicIds } }, attributes: ['id_clinica', 'nombre_clinica'], raw: true }) : [],
+    groupIds.length ? GrupoClinica.findAll({ where: { id_grupo: { [Op.in]: groupIds } }, attributes: ['id_grupo', 'nombre_grupo'], raw: true }) : [],
+  ]);
+  const clinicNames = new Map(clinics.map((clinic) => [Number(clinic.id_clinica), clinic.nombre_clinica]));
+  const groupNames = new Map(groups.map((group) => [Number(group.id_grupo), group.nombre_grupo]));
   const queues = pausedLists
     .map((list) => {
       const criteria = safeObject(list.criteria);
       const dispatch = safeObject(criteria.dispatch);
       return { list, dispatch };
     })
-    .filter(({ dispatch }) => (
+    .filter(({ dispatch }) => !clean(safeObject(dispatch.admin_resolution).decision) && (
       PROVIDER_PAUSE_STATUSES.has(clean(dispatch.status).toLowerCase())
       || clean(dispatch.status).toLowerCase() === 'paused_review'
       || dispatch.requires_admin_review === true
@@ -883,6 +898,8 @@ async function getAdminOverview({ limit = 100 } = {}) {
       name: list.name,
       clinic_id: list.clinica_id,
       group_id: list.grupo_clinica_id,
+      clinic_name: clinicNames.get(Number(list.clinica_id)) || null,
+      group_name: groupNames.get(Number(list.grupo_clinica_id)) || null,
       status: dispatch.status || list.status,
       reason: dispatch.paused_reason || null,
       paused_at: dispatch.paused_at || list.updated_at,
@@ -893,8 +910,133 @@ async function getAdminOverview({ limit = 100 } = {}) {
           ? 'Esperar la decisión de WhatsApp'
           : 'Revisar la causa antes de reanudar',
       counters: safeObject(list.counters),
+      template: safeObject(dispatch.template_snapshot),
+      audience: safeObject(safeObject(list.criteria).audience || safeObject(list.criteria).selection),
+      schedule: safeObject(dispatch.business_hours),
+      admin_resolution: safeObject(dispatch.admin_resolution),
+      what_happens_now: dispatch.requires_admin_review === true
+        ? 'La cola seguirá detenida y no se enviarán más mensajes. Un administrador de Clinicaclick revisará la plantilla, los destinatarios y el motivo de la pausa. Te avisaremos si puede continuar o debe cancelarse.'
+        : dispatch.status === 'held_meta'
+          ? 'WhatsApp está comprobando señales iniciales de calidad. Los mensajes retenidos no se reintentan: se enviarán o fallarán cuando Meta termine la evaluación.'
+          : 'La cola permanecerá detenida hasta que desaparezca la causa indicada.',
     }));
   return { snapshots, events, queues };
+}
+
+async function notifyQueueResolution(list, decision, note, adminUserId) {
+  if (!Notification || !UsuarioClinica) return 0;
+  let clinicIds = Number(list.clinica_id || 0) > 0
+    ? [Number(list.clinica_id)]
+    : [];
+  if (!clinicIds.length && Number(list.grupo_clinica_id || 0) > 0) {
+    const clinics = await Clinica.findAll({
+      where: { grupoClinicaId: Number(list.grupo_clinica_id) },
+      attributes: ['id_clinica'],
+      raw: true,
+    });
+    clinicIds = clinics.map((clinic) => Number(clinic.id_clinica)).filter((clinicId) => clinicId > 0);
+  }
+  if (!clinicIds.length) return 0;
+  const memberships = await UsuarioClinica.findAll({
+    where: {
+      id_clinica: { [Op.in]: clinicIds },
+      estado_invitacion: 'aceptada',
+      rol_clinica: { [Op.in]: ['propietario', 'personaldeclinica'] },
+    },
+    raw: true,
+  });
+  let created = 0;
+  const notifiedUsers = new Set();
+  for (const membership of memberships) {
+    const userId = Number(membership.id_usuario || 0);
+    if (!userId || notifiedUsers.has(userId)) continue;
+    notifiedUsers.add(userId);
+    const notification = await Notification.create({
+      userId,
+      role: membership.rol_clinica || '',
+      subrole: membership.subrol_clinica || '',
+      category: 'general',
+      event: 'whatsapp.delivery_governance_incident',
+      title: decision === 'authorized'
+        ? 'Envío revisado: puede continuar'
+        : decision === 'cancelled'
+          ? 'Envío cancelado tras la revisión'
+          : 'El envío necesita cambios',
+      message: note || (decision === 'authorized'
+        ? 'Clinicaclick ha revisado la cola. Ya puede retomarse desde la campaña.'
+        : decision === 'cancelled'
+          ? 'Clinicaclick ha cancelado la cola y no se enviarán los mensajes pendientes.'
+          : 'Clinicaclick ha revisado la cola y debe corregirse antes de continuar.'),
+      icon: 'heroicons_outline:exclamation-triangle',
+      level: decision === 'authorized' ? 'success' : decision === 'cancelled' ? 'error' : 'warning',
+      data: {
+        source: 'whatsapp_delivery_governance',
+        listId: list.id,
+        decision,
+        adminUserId: Number(adminUserId || 0) || null,
+        link: '/marketing/campanas',
+        useRouter: true,
+      },
+      clinicaId: Number(list.clinica_id || membership.id_clinica || 0) || null,
+    });
+    created += 1;
+    try {
+      const { emitNotificationCreated } = require('./notificationsRealtime.service');
+      emitNotificationCreated(notification);
+    } catch (_) {}
+  }
+  return created;
+}
+
+async function resolvePausedQueue({ listId, decision, note = '', adminUserId = null } = {}) {
+  const normalizedDecision = clean(decision).toLowerCase();
+  if (!['authorized', 'cancelled', 'changes_required'].includes(normalizedDecision)) {
+    const error = new Error('invalid_delivery_queue_resolution');
+    error.status = 400;
+    throw error;
+  }
+  const list = await MarketingPatientList.findByPk(Number(listId));
+  if (!list) {
+    const error = new Error('delivery_queue_not_found');
+    error.status = 404;
+    throw error;
+  }
+  const criteria = safeObject(list.criteria);
+  const dispatch = safeObject(criteria.dispatch);
+  if (clean(safeObject(dispatch.admin_resolution).decision)) {
+    const error = new Error('delivery_queue_already_resolved');
+    error.status = 409;
+    throw error;
+  }
+  const resolvedAt = new Date();
+  const adminResolution = {
+    decision: normalizedDecision,
+    note: clean(note) || null,
+    resolved_at: resolvedAt.toISOString(),
+    resolved_by: Number(adminUserId || 0) || null,
+  };
+  const nextDispatch = {
+    ...dispatch,
+    status: normalizedDecision === 'cancelled' ? 'cancelled' : 'paused',
+    requires_admin_review: false,
+    resume_automatically: false,
+    cancel_requested: normalizedDecision === 'cancelled',
+    cancelled_at: normalizedDecision === 'cancelled' ? resolvedAt.toISOString() : dispatch.cancelled_at || null,
+    admin_resolution: adminResolution,
+  };
+  await list.update({
+    status: 'paused',
+    criteria: { ...criteria, dispatch: nextDispatch },
+  });
+  await MarketingPatientContactEvent.create({
+    list_id: list.id,
+    event_type: 'mass_campaign_admin_resolution',
+    channel: 'whatsapp',
+    payload: adminResolution,
+    occurred_at: resolvedAt,
+  });
+  const notified = await notifyQueueResolution(list, normalizedDecision, note, adminUserId);
+  return { success: true, queue_id: list.id, decision: normalizedDecision, notified };
 }
 
 module.exports = {
@@ -902,6 +1044,7 @@ module.exports = {
   buildRouteKey,
   getAdminOverview,
   getDispatchGate,
+  resolvePausedQueue,
   handleWebhookChange,
   materializeFinalMessageStatus,
   parseCapacity,

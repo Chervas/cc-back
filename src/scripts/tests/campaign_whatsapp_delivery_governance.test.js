@@ -14,6 +14,7 @@ const {
   recordImmediateSendResponse,
   __testing,
 } = require('../../services/whatsappDeliveryGovernance.service');
+const marketingBulkSendsService = require('../../services/marketingBulkSends.service');
 
 assert.strictEqual(HOLD_STATUS, 'held_for_quality_assessment');
 assert.strictEqual(parseCapacity('TIER_250'), 250);
@@ -65,7 +66,7 @@ const warmup = __testing.computeEffectiveDispatchPolicy({
   successfulMessages: 200,
 });
 assert.strictEqual(warmup.effectiveBatchSize, 5);
-assert.strictEqual(warmup.effectiveDelayMs, 2 * 60 * 1000);
+assert.strictEqual(warmup.effectiveDelayMs, 3 * 60 * 60 * 1000);
 
 const capacityBound = __testing.computeEffectiveDispatchPolicy({
   requestedBatchSize: 50,
@@ -93,6 +94,14 @@ const secondSharedQueue = __testing.computeEffectiveDispatchPolicy({
 assert.strictEqual(firstSharedQueue.effectiveBatchSize, 5);
 assert.strictEqual(secondSharedQueue.effectiveBatchSize, 3);
 assert.strictEqual(firstSharedQueue.effectiveBatchSize + secondSharedQueue.effectiveBatchSize, 8);
+
+const warmupCounters = marketingBulkSendsService.__testing.computeCounters([
+  { status: 'excluded_opt_out', exclusion_reason: 'opt_out', selected: false },
+  { status: 'ready', dispatch_status: 'sent', sent_at: new Date(), opt_out_at: new Date() },
+  { status: 'ready', dispatch_status: 'sent', sent_at: new Date() },
+]);
+assert.strictEqual(warmupCounters.opt_out, 2, 'el informe conserva exclusiones preventivas y bajas recibidas');
+assert.strictEqual(warmupCounters.sent_opt_out, 1, 'el calentamiento solo cuenta bajas de destinatarios enviados');
 
 const repositoryRoot = path.resolve(__dirname, '../../..');
 const phoneSyncSource = fs.readFileSync(path.join(repositoryRoot, 'src/services/whatsappPhones.service.js'), 'utf8');

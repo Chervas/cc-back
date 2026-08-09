@@ -46,6 +46,7 @@ router.get('/compliance/status', authMiddleware, whatsappController.getComplianc
 router.get('/compliance/incidents', authMiddleware, whatsappController.listComplianceIncidents);
 router.post('/compliance/request-review', authMiddleware, whatsappController.requestComplianceReview);
 router.get('/compliance/admin/overview', authMiddleware, whatsappController.getComplianceAdminOverview);
+router.post('/compliance/admin/queues/:listId/resolve', authMiddleware, whatsappController.resolveCompliancePausedQueue);
 router.get('/compliance/admin/incidents/:id', authMiddleware, whatsappController.getComplianceAdminIncident);
 router.post('/compliance/admin/refresh', authMiddleware, whatsappController.refreshComplianceAdminOverview);
 router.post('/compliance/admin/accounts/:assetId/check', authMiddleware, whatsappController.diagnoseComplianceAccount);

@@ -58,6 +58,8 @@ const WhatsappTemplateCatalog = db.WhatsappTemplateCatalog;
 const whatsappService = require('./whatsapp.service');
 const whatsappConnectionStatusService = require('./whatsappConnectionStatus.service');
 const marketingBulkSendsService = require('./marketingBulkSends.service');
+const marketingOptOutService = require('./marketingOptOut.service');
+const reviewResponseClassification = require('./reviewResponseClassification.service');
 const appointmentNotificationCleanup = require('./appointmentNotificationCleanup.service');
 const { recordAppointmentStatusChange } = require('./appointmentActivity.service');
 const businessProfileLocal = require('./businessProfileLocal.service');
@@ -4606,6 +4608,57 @@ async function handleReviewNoResponse(node, context) {
   };
 }
 
+async function handleReviewResponseClassification(node, context, runtime) {
+  const config = isObject(node?.config) ? node.config : {};
+  const sourceNodeId = cleanString(resolveTemplateValue(config.source_node_id, context));
+  const aiOutput = sourceNodeId ? getByPath(context, `outputs.${sourceNodeId}`) : null;
+  const responseText = cleanString(context?.last_response_context?.response_text || context?.last_response);
+  const classification = {
+    intent: cleanString(aiOutput?.response_intent || aiOutput?.intent) || 'ambiguous',
+    rating: toIntOrNull(aiOutput?.response_rating || aiOutput?.rating),
+    confidence: Number(aiOutput?.confidence || 0),
+    reason: cleanString(aiOutput?.reason),
+    source: cleanString(aiOutput?._ai_provider) ? 'ai' : 'rule',
+    model: cleanString(aiOutput?._ai_model),
+  };
+  if (classification.intent === 'rating' && !classification.rating) {
+    const fallback = reviewResponseClassification.classifyDeterministically(responseText);
+    classification.rating = fallback.rating;
+  }
+  const targets = await backfillRuntimeTargets(runtime?.execution, resolveRuntimeTargets(runtime?.execution, context));
+  const inboundMessageId = toIntOrNull(context?.last_response_context?.response_message_id);
+  const inboundMessage = inboundMessageId ? await Message.findByPk(inboundMessageId) : null;
+  const conversationId = targets.conversation_id || toIntOrNull(inboundMessage?.conversation_id);
+  const conversation = conversationId ? await Conversation.findByPk(conversationId) : null;
+  const effect = classification.intent === 'rating'
+    ? { applied: false, reason: 'rating_continues_flow' }
+    : (!conversation || !inboundMessage
+      ? { applied: false, reason: 'inbound_context_not_found' }
+      : await marketingOptOutService.applyInboundContactClassification({
+      clinicId: targets.clinic_id,
+      conversation,
+      inboundMessage,
+      patientId: targets.patient_id,
+      classification,
+      }));
+  return {
+    kind: 'success',
+    output: {
+      status: 'classified',
+      response_text: responseText,
+      response_intent: classification.intent,
+      response_rating: classification.rating,
+      confidence: classification.confidence,
+      reason: classification.reason,
+      inference_source: classification.source,
+      inference_model: classification.model,
+      effect_applied: effect.applied === true,
+      effect,
+    },
+    next_node_id: readOutputTarget(node, 'on_success'),
+  };
+}
+
 async function handleCreateTask(node, context, runtime) {
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
   const targets = resolveRuntimeTargets(runtime?.execution, context);
@@ -5469,6 +5522,21 @@ async function processNode(node, context, runtime = {}) {
       return handleReviewNoResponse(node, context);
     }
 
+    case 'action/process_review_response_classification': {
+      if (simulation) {
+        return {
+          kind: 'success',
+          output: {
+            status: 'simulated',
+            response_intent: 'ambiguous',
+            response_rating: null,
+          },
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
+      return handleReviewResponseClassification(node, context, runtime);
+    }
+
     case 'action/send_email': {
       return {
         kind: 'success',
@@ -5795,7 +5863,20 @@ async function processNode(node, context, runtime = {}) {
       }
 
       const presetKey = cleanString(config?.preset_key);
-      const deterministicPresetOutput = presetKey === 'confirm_appointment'
+      const deterministicPresetOutput = presetKey === 'review_response_classifier'
+        ? await reviewResponseClassification.classifyReviewResponse({
+          text: cleanString(aiContext?.last_response_context?.response_text || aiContext?.last_response),
+          explicitRating: toIntOrNull(aiContext?.last_response_context?.response_rating),
+          allowAi: true,
+        }).then((result) => ({
+          response_intent: result.intent,
+          response_rating: result.rating,
+          confidence: result.confidence,
+          reason: result.reason || '',
+          _ai_provider: result.source === 'ai' ? 'groq' : result.source,
+          _ai_model: result.model || null,
+        }))
+        : presetKey === 'confirm_appointment'
         ? buildDeterministicConfirmAppointmentOutput(aiContext)
         : (presetKey === 'appointment_unconfirmed_reply'
             ? buildDeterministicAppointmentUnconfirmedReplyOutput(aiContext)

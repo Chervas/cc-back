@@ -24,6 +24,7 @@ const {
   inspectExplicitReviewAutomation,
 } = require('../lib/review-automation-config');
 const marketingOptOutService = require('./marketingOptOut.service');
+const reviewResponseClassification = require('./reviewResponseClassification.service');
 const jobRequestsService = require('./jobRequests.service');
 const { isGlobalAdmin } = require('../lib/role-helpers');
 const { getIO } = require('./socket.service');
@@ -226,6 +227,7 @@ function isActorGlobalAdmin(actor) {
 
 function isBlockingQualityPause(dispatch = {}) {
   if (String(dispatch.status || '').toLowerCase() !== 'paused_quality') return false;
+  if (String(dispatch.admin_resolution?.decision || '').toLowerCase() === 'authorized') return false;
   return String(dispatch.paused_reason || '').toLowerCase() !== 'read_rate_low';
 }
 
@@ -602,6 +604,9 @@ function computeCounters(items) {
   const replied = items.filter((item) => item.replied_at || String(item.dispatch_status || '').toLowerCase() === 'replied').length;
   const failed = items.filter((item) => item.failed_at || String(item.dispatch_status || '').toLowerCase() === 'failed').length;
   const optOut = items.filter((item) => item.opt_out_at || item.exclusion_reason === 'opt_out').length;
+  const sentOptOut = items.filter((item) => (
+    item.sent_at || ['sent', 'delivered', 'read', 'replied'].includes(String(item.dispatch_status || '').toLowerCase())
+  ) && (item.opt_out_at || item.exclusion_reason === 'opt_out')).length;
   const exclusionReasons = {};
   for (const item of items) {
     if (!String(item.status || '').startsWith('excluded')) continue;
@@ -622,6 +627,7 @@ function computeCounters(items) {
     replied,
     failed,
     opt_out: optOut,
+    sent_opt_out: sentOptOut,
     appointments: 0,
     treatments: 0,
   };
@@ -4430,6 +4436,7 @@ async function getReviewRequestSummary(scope, options = {}) {
         review_exclusion_breakdown: [],
         requests_sent: 0,
         active_queue_recipients: 0,
+        marketing_opt_outs: 0,
         ratings_1_to_4: 0,
         ratings_5: 0,
         treatment_options: [],
@@ -4500,6 +4507,26 @@ async function getReviewRequestSummary(scope, options = {}) {
           AND te.item_id = i.id
           AND te.event_type IN ('mass_campaign_test_sent', 'mass_campaign_test_failed')
       )
+    `,
+    { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
+  );
+
+  const [reviewOptOutRow] = await db.sequelize.query(
+    `
+    SELECT COUNT(DISTINCT COALESCE(
+      CASE WHEN i.paciente_id IS NOT NULL THEN CONCAT('p:', i.paciente_id) END,
+      CASE WHEN NULLIF(TRIM(i.phone), '') IS NOT NULL THEN CONCAT('ph:', TRIM(REPLACE(REPLACE(REPLACE(REPLACE(i.phone, '+', ''), ' ', ''), '-', ''), '.', ''))) END,
+      CONCAT('i:', i.id)
+    )) AS total
+    FROM MarketingPatientListItems i
+    INNER JOIN MarketingPatientLists l ON l.id = i.list_id
+    WHERE COALESCE(i.clinica_id, l.clinica_id) IN (:clinicIds)
+      AND l.objective_id = :objectiveId
+      AND (
+        JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
+        OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.template_usage')) = 'solicitud_resena'
+      )
+      AND (i.opt_out_at IS NOT NULL OR i.exclusion_reason = 'opt_out' OR i.status = 'excluded_opt_out')
     `,
     { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
   );
@@ -4795,6 +4822,7 @@ async function getReviewRequestSummary(scope, options = {}) {
       treatment_options: treatmentOptions,
       requests_sent: Number(sentRow?.total || 0),
       active_queue_recipients: Number(activeQueueRow?.total || 0),
+      marketing_opt_outs: Number(reviewOptOutRow?.total || 0),
       ratings_1_to_4: Number(ratingsRow?.ratings_1_to_4 || 0),
       ratings_5: Number(ratingsRow?.ratings_5 || 0),
       google_reviews_matched: Number(googleReviewsMatchedRow?.total || 0),
@@ -4959,11 +4987,28 @@ function buildReviewAutomationNodes({
           value_type: 'number',
           label: 'Valoración del paciente',
         },
+        operator: 'exists',
+        right_value: null,
+      },
+      outputs: { on_true: 'N8', on_false: 'N13' },
+      position: { x: 430, y: 600 },
+    },
+    {
+      id: 'N8',
+      type: 'condition/field_check',
+      config: {
+        mode: 'simple',
+        left_ref: {
+          source: 'context',
+          path: 'last_response_context.response_rating',
+          value_type: 'number',
+          label: 'Valoración del paciente',
+        },
         operator: 'greater_than_or_equals',
         right_value: threshold,
       },
       outputs: { on_true: 'N6', on_false: 'N7' },
-      position: { x: 430, y: 600 },
+      position: { x: 610, y: 500 },
     },
     {
       id: 'N6',
@@ -4984,6 +5029,68 @@ function buildReviewAutomationNodes({
       },
       outputs: { on_success: null },
       position: { x: 720, y: 700 },
+    },
+    {
+      id: 'N13',
+      type: 'condition/ai_analysis',
+      config: {
+        preset_key: 'review_response_classifier',
+        instruction: 'Clasifica la intención de la respuesta del paciente a la solicitud de reseña.',
+        context_sources: [
+          { key: 'respuesta', path: '{{last_response_context.response_text}}' },
+        ],
+        output_fields: [
+          { name: 'response_intent', type: 'string', description: 'rating, marketing_opt_out, wrong_recipient, review_refusal o ambiguous' },
+          { name: 'response_rating', type: 'number', description: 'Valoración de 1 a 5 o 0 si no existe' },
+          { name: 'confidence', type: 'number', description: 'Confianza entre 0 y 1' },
+          { name: 'reason', type: 'string', description: 'Motivo breve de la clasificación' },
+        ],
+        mode: 'quick_qa',
+        max_tokens: 180,
+      },
+      outputs: { on_success: 'N14', on_fail: 'N14' },
+      position: { x: 610, y: 800 },
+    },
+    {
+      id: 'N14',
+      type: 'action/process_review_response_classification',
+      config: { source_node_id: 'N13' },
+      outputs: { on_success: 'N15' },
+      position: { x: 850, y: 800 },
+    },
+    {
+      id: 'N15',
+      type: 'condition/field_check',
+      config: {
+        mode: 'simple',
+        left_ref: {
+          source: 'context',
+          path: 'outputs.N14.response_intent',
+          value_type: 'string',
+          label: 'Intención clasificada',
+        },
+        operator: 'equals',
+        right_value: 'rating',
+      },
+      outputs: { on_true: 'N16', on_false: null },
+      position: { x: 1080, y: 800 },
+    },
+    {
+      id: 'N16',
+      type: 'condition/field_check',
+      config: {
+        mode: 'simple',
+        left_ref: {
+          source: 'context',
+          path: 'outputs.N14.response_rating',
+          value_type: 'number',
+          label: 'Valoración clasificada',
+        },
+        operator: 'greater_than_or_equals',
+        right_value: threshold,
+      },
+      outputs: { on_true: 'N6', on_false: 'N7' },
+      position: { x: 1280, y: 800 },
     },
     {
       id: 'N9',
@@ -5187,7 +5294,7 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
   const displayName = await buildReviewAutomationDisplayName(scope);
   const payload = {
     ...identity,
-    version: Math.max(Number(existing?.version || 0), 2),
+    version: existing ? Number(existing.version || 0) + 1 : 2,
     engine_version: 'v2',
     name: displayName,
     description: `Espera ${reviewDelayToHours(reviewDelay, 0)}h tras el evento configurado, pide al paciente una valoración con escala 5 a 1 y deriva a Google solo si responde 5/5.`,
@@ -5210,9 +5317,12 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     created_by: existing?.created_by || userId || 1,
   };
 
-  const row = existing
-    ? await existing.update(payload)
-    : await AutomationFlowTemplateV2.create(payload);
+  const row = await db.sequelize.transaction(async (transaction) => {
+    if (existing) {
+      await existing.update({ is_active: false }, { transaction });
+    }
+    return AutomationFlowTemplateV2.create(payload, { transaction });
+  });
   const serializedTemplate = serializeReviewAutomationTemplate(row);
   const [approvedReviewTemplate, approvedReminderTemplate, googleReviewUrlAvailable, whatsappAvailable] = await Promise.all([
     findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null, reviewTemplateSelectionOptions),
@@ -8438,6 +8548,15 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     : {};
   const filter = getDispatchItemFilter(dispatch);
   const dispatchStatus = String(dispatch.status || '').toLowerCase();
+  const adminDecision = String(dispatch.admin_resolution?.decision || '').toLowerCase();
+  if (['cancelled', 'changes_required'].includes(adminDecision)) {
+    const err = new Error(adminDecision === 'cancelled'
+      ? 'Clinicaclick ha cancelado esta cola tras revisarla.'
+      : 'Esta cola requiere cambios antes de poder reanudarse.');
+    err.status = 409;
+    err.details = { dispatch_status: dispatchStatus, admin_resolution: dispatch.admin_resolution };
+    throw err;
+  }
   if (['held_meta', 'paused_review', 'awaiting_delivery'].includes(dispatchStatus)) {
     const err = new Error(
       dispatchStatus === 'held_meta'
@@ -8903,25 +9022,36 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
 
   const countersBefore = await getDispatchScopedCounters(list, filter);
   const sentBefore = Number(countersBefore.sent || 0);
+  const optOutCount = Number(countersBefore.sent_opt_out || 0);
   const readRate = sentBefore > 0 ? Number(countersBefore.read || 0) / sentBefore : 1;
-  const optOutRate = sentBefore > 0 ? Number(countersBefore.opt_out || countersBefore.exclusion_reasons?.opt_out || 0) / sentBefore : 0;
+  const optOutRate = sentBefore > 0 ? optOutCount / sentBefore : 0;
   const batchSize = Number(dispatch.batch_size || DISPATCH_BATCH_SIZE) || DISPATCH_BATCH_SIZE;
   const batchDelayMs = Number(dispatch.delay_ms || DISPATCH_BATCH_DELAY_MS) || DISPATCH_BATCH_DELAY_MS;
   const maxOptOutRate = Number(dispatch.max_opt_out_rate || DISPATCH_MAX_OPT_OUT_RATE) || DISPATCH_MAX_OPT_OUT_RATE;
-  if (sentBefore >= batchSize && optOutRate > maxOptOutRate) {
+  const earlyWarmupOptOut = sentBefore > 0 && sentBefore <= 5 && optOutCount > 0;
+  if (earlyWarmupOptOut || (sentBefore >= batchSize && optOutRate > maxOptOutRate)) {
     await list.update({
       status: 'paused',
       criteria: mergeCriteria(list, {
         dispatch: {
           ...dispatch,
           status: 'paused_quality',
-          paused_reason: 'opt_out_rate_high',
+          paused_reason: earlyWarmupOptOut ? 'early_warmup_opt_out' : 'opt_out_rate_high',
           paused_at: new Date().toISOString(),
+          requires_admin_review: true,
+          resume_automatically: false,
           quality_snapshot: { sent: sentBefore, read_rate: readRate, opt_out_rate: optOutRate },
         },
       }),
     });
-    return { status: 'completed', result: { paused: true, reason: 'opt_out_rate_high', list_id: list.id } };
+    return {
+      status: 'completed',
+      result: {
+        paused: true,
+        reason: earlyWarmupOptOut ? 'early_warmup_opt_out' : 'opt_out_rate_high',
+        list_id: list.id,
+      },
+    };
   }
 
   const accountQuality = await getWhatsappAccountQualityForList(list, scope);
@@ -9414,6 +9544,9 @@ async function materializeInboundReply({ conversation, inboundMessage }) {
   const item = await MarketingPatientListItem.findOne({ where: { id: itemId, list_id: listId } });
   if (!item) return { applied: false, reason: 'item_not_found' };
   const repliedAt = inboundMessage.sent_at || inboundMessage.createdAt || new Date();
+  const preclassifiedContactAction = asPlainObject(inboundMessage?.metadata?.marketing_opt_out);
+  const listCriteria = asPlainObject(list.criteria);
+  const delegatesAmbiguousReviewToV2 = Number(listCriteria.review_automation_template_id || 0) > 0;
   const isTestTrigger = normalizeKey(metadata.kind) === 'mass_campaign_test';
   let existingReply = null;
   if (isTestTrigger) {
@@ -9463,7 +9596,120 @@ async function materializeInboundReply({ conversation, inboundMessage }) {
     };
   }
   if (isReviewRequestList(list) && isReviewRatingTriggerMessage(triggerMessage) && !inboundRatingDetails.rating) {
-    inboundRatingDetails = await resolveReviewRatingDetailsFromInboundMessage(inboundMessage, { allowAiFallback: true });
+    if (delegatesAmbiguousReviewToV2) {
+      await item.update({
+        dispatch_status: 'replied',
+        replied_at: item.replied_at || repliedAt,
+        conversation_id: conversation.id,
+      });
+      if (!existingReply) {
+        await MarketingPatientContactEvent.create({
+          list_id: listId,
+          item_id: itemId,
+          paciente_id: item.paciente_id || null,
+          event_type: 'mass_campaign_message_replied',
+          channel: 'whatsapp',
+          payload: {
+            inbound_message_id: inboundMessage.id,
+            trigger_message_id: triggerMessage.id,
+            content_preview: normalizeText(inboundMessage.content).slice(0, 300),
+            classification_delegated_to: 'automations_v2',
+          },
+          occurred_at: repliedAt,
+        });
+      }
+      await refreshListCounters(listId);
+      return {
+        applied: true,
+        list_id: listId,
+        item_id: itemId,
+        classification_delegated_to: 'automations_v2',
+      };
+    }
+    const classification = await reviewResponseClassification.classifyReviewResponse({
+      text: getReviewRatingCandidateTextsFromInboundMessage(inboundMessage)[0] || inboundMessage.content || '',
+      allowAi: true,
+    });
+    if (classification.intent === 'rating' && classification.rating) {
+      inboundRatingDetails = {
+        rating: classification.rating,
+        reason: '',
+        source_text: inboundMessage.content || '',
+        source: classification.source,
+        confidence: classification.confidence,
+        model: classification.model,
+      };
+    } else {
+      await item.update({
+        dispatch_status: 'replied',
+        replied_at: item.replied_at || repliedAt,
+        conversation_id: conversation.id,
+      });
+      if (!existingReply) {
+        await MarketingPatientContactEvent.create({
+          list_id: listId,
+          item_id: itemId,
+          paciente_id: item.paciente_id || null,
+          event_type: 'mass_campaign_message_replied',
+          channel: 'whatsapp',
+          payload: {
+            inbound_message_id: inboundMessage.id,
+            trigger_message_id: triggerMessage.id,
+            content_preview: normalizeText(inboundMessage.content).slice(0, 300),
+            response_intent: classification.intent,
+            inference_source: classification.source,
+            inference_confidence: classification.confidence,
+          },
+          occurred_at: repliedAt,
+        });
+      }
+      const classificationEffect = preclassifiedContactAction.applied
+        ? preclassifiedContactAction
+        : await marketingOptOutService.applyInboundContactClassification({
+          clinicId: item.clinica_id || list.clinica_id || conversation.clinic_id || null,
+          conversation,
+          inboundMessage,
+          patientId: item.paciente_id || conversation.patient_id || null,
+          classification,
+        });
+      const existingClassification = await MarketingPatientContactEvent.findOne({
+        where: {
+          list_id: listId,
+          item_id: itemId,
+          event_type: 'review_response_classified',
+          [Op.and]: [db.sequelize.where(
+            db.sequelize.literal("CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.inbound_message_id')) AS UNSIGNED)"),
+            Number(inboundMessage.id || 0)
+          )],
+        },
+      });
+      if (!existingClassification) {
+        await MarketingPatientContactEvent.create({
+          list_id: listId,
+          item_id: itemId,
+          paciente_id: item.paciente_id || null,
+          event_type: 'review_response_classified',
+          channel: 'whatsapp',
+          payload: {
+            inbound_message_id: inboundMessage.id,
+            trigger_message_id: triggerMessage.id,
+            response_intent: classification.intent,
+            inference_source: classification.source,
+            inference_confidence: classification.confidence,
+            effect_applied: classificationEffect.applied === true,
+          },
+          occurred_at: repliedAt,
+        });
+      }
+      await refreshListCounters(listId);
+      return {
+        applied: true,
+        list_id: listId,
+        item_id: itemId,
+        review_response_intent: classification.intent,
+        classification_effect: classificationEffect,
+      };
+    }
   }
   const reviewRating = isReviewRequestList(list) && isReviewRatingTriggerMessage(triggerMessage)
     ? (inboundRatingDetails.rating || null)
@@ -9711,6 +9957,7 @@ module.exports = {
   removeCampaign,
   reconcileDispatchJobState,
   __testing: {
+    computeCounters,
     mapReviewItemsFromImportedList,
     parseReviewImportListId,
   },

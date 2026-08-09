@@ -455,6 +455,7 @@ async function loadActivitySummary({ clinicId, groupId, account = null }) {
         phone_number_id: activityScope.phoneNumberId,
         exact_7d: 0,
         inferred_7d: 0,
+        unattributed_7d: 0,
         scoped_by_route: activityScope.scopedByRoute,
       },
       recent: [],
@@ -475,20 +476,11 @@ async function loadActivitySummary({ clinicId, groupId, account = null }) {
     createdAt: { [Op.gte]: since7d },
   };
   const routeScopes = activityScope.scopedByRoute
-    ? [
-        {
-          kind: 'exact',
-          clinicIds,
-          routeWhere: buildActivityRouteWhere({ phoneNumberId: activityScope.phoneNumberId, mode: 'exact' }),
-        },
-        ...(activityScope.inferredClinicIds.length
-          ? [{
-              kind: 'inferred',
-              clinicIds: activityScope.inferredClinicIds,
-              routeWhere: buildActivityRouteWhere({ phoneNumberId: activityScope.phoneNumberId, mode: 'missing' }),
-            }]
-          : []),
-      ]
+    ? [{
+        kind: 'exact',
+        clinicIds,
+        routeWhere: buildActivityRouteWhere({ phoneNumberId: activityScope.phoneNumberId, mode: 'exact' }),
+      }]
     : [{ kind: 'legacy', clinicIds, routeWhere: null }];
   const queryScope = async (scope) => {
     const routeWhere = scope.routeWhere ? { [Op.and]: [scope.routeWhere] } : {};
@@ -526,7 +518,19 @@ async function loadActivitySummary({ clinicId, groupId, account = null }) {
     ]);
     return { kind: scope.kind, last7d, last24h, statusRows, messages, recentFailures };
   };
-  const results = await Promise.all(routeScopes.map(queryScope));
+  const [results, unattributed7d] = await Promise.all([
+    Promise.all(routeScopes.map(queryScope)),
+    activityScope.scopedByRoute
+      ? Message.count({
+        where: {
+          ...baseWhere,
+          [Op.and]: [buildActivityRouteWhere({ phoneNumberId: activityScope.phoneNumberId, mode: 'missing' })],
+        },
+        include: scopedInclude(clinicIds),
+        distinct: true,
+      })
+      : 0,
+  ]);
   const last7d = results.reduce((total, result) => total + Number(result.last7d || 0), 0);
   const last24h = results.reduce((total, result) => total + Number(result.last24h || 0), 0);
   const plain = results
@@ -613,7 +617,8 @@ async function loadActivitySummary({ clinicId, groupId, account = null }) {
     attribution: {
       phone_number_id: activityScope.phoneNumberId,
       exact_7d: Number(results.find((result) => result.kind === 'exact')?.last7d || 0),
-      inferred_7d: Number(results.find((result) => result.kind === 'inferred')?.last7d || 0),
+      inferred_7d: 0,
+      unattributed_7d: Number(unattributed7d || 0),
       scoped_by_route: activityScope.scopedByRoute,
     },
     source_counts: sourceCounts,

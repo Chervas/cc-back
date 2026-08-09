@@ -3,6 +3,7 @@ const db = require('../../models');
 const { normalizePhoneE164 } = require('../lib/phone');
 const ClinicMetaAsset = db.ClinicMetaAsset;
 const Clinica = db.Clinica;
+const MarketingContactOptOut = db.MarketingContactOptOut;
 const sequelize = db.sequelize;
 
 const LIMITED_MODE_MAX_OUTBOUND_PER_24H = Number.parseInt(
@@ -190,6 +191,7 @@ class WhatsAppService {
         interactiveCtaText,
         clinicConfig = {},
     }) {
+        await this.assertRecipientCanReceive({ to, clinicConfig });
         this.setClinicCredentials(clinicConfig);
         const shouldUseTemplate =
             useTemplate !== undefined ? useTemplate : this.defaultUseTemplate;
@@ -217,6 +219,32 @@ class WhatsAppService {
         }
 
         return this.sendTextMessage({ to, body, previewUrl, clinicConfig });
+    }
+
+    async assertRecipientCanReceive({ to, clinicConfig = {} }) {
+        if (!MarketingContactOptOut) return;
+        const phoneDigits = String(this.normalizePhoneNumber(to) || to || '').replace(/\D+/g, '');
+        const clinicId = Number(clinicConfig.clinicId || clinicConfig.clinicaId || 0);
+        if (!phoneDigits || !clinicId) return;
+        const restriction = await MarketingContactOptOut.findOne({
+            where: {
+                clinica_id: clinicId,
+                phone_digits: phoneDigits,
+                channel: 'whatsapp',
+                scope: 'whatsapp_number',
+                status: 'active',
+            },
+            order: [['updated_at', 'DESC']],
+        });
+        if (!restriction) return;
+        const error = new Error('whatsapp_recipient_number_restricted');
+        error.code = 'WHATSAPP_RECIPIENT_NUMBER_RESTRICTED';
+        error.status = 409;
+        error.details = {
+            restriction_id: restriction.id,
+            reason: restriction.reason_text || 'Número marcado como erróneo o perteneciente a otra persona',
+        };
+        throw error;
     }
 
     /**

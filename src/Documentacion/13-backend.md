@@ -7639,3 +7639,32 @@ undeliverable`; no fue un bloqueo de quiet hours ni ausencia de disparo del
 flujo. También se backfilleó el evento operativo `appointment.status_changed`
 faltante de la cita `74577` para reflejar el cambio manual a
 `recordatorio_confirmado` hecho el `2026-08-03 15:20:07 UTC`.
+
+## 2026-08-09 - Gobierno WhatsApp y clasificación de respuestas de reseñas
+
+`reviewResponseClassification.service.js` es la única clasificación de
+respuestas para colas manuales y flujos recurrentes de reseñas. Aplica reglas
+deterministas para `wrong_recipient`, `marketing_opt_out`, `review_refusal` y
+`rating`; solo `ambiguous` llama al proveedor Llama/Groq. El preset
+`review_response_classifier` de `condition/ai_analysis` expone el resultado en
+`last_response_context.review_response_classification` y mantiene
+`response_rating` para los nodos `field_check` existentes. Eventos,
+notificaciones y restricciones deduplican por `inbound_message_id`.
+
+Una baja comercial se materializa como opt-out de marketing y excluye items no
+enviados; no bloquea mensajería asistencial. Un número erróneo crea una
+restricción `whatsapp_number`. `paciente.controller` resuelve esa restricción
+solo al guardar un número normalizado realmente distinto y registra
+`patient.whatsapp_number_corrected` con el usuario actor.
+
+`marketingBulkSends.service.js` usa el regulador común de entrega. Calidad
+`YELLOW` impone un máximo de 5 envíos cada 3 horas y nunca acelera una cola más
+lenta. Una baja producida entre los primeros cinco mensajes efectivamente
+enviados pausa como `early_warmup_opt_out`; opt-outs previos no cuentan como
+señal nueva. Las decisiones admin (`authorized`, `changes_required`,
+`cancelled`) son de una sola escritura y gobiernan si la cola puede continuar.
+
+La migración `20260809113000-version-review-response-classification.js` crea
+versiones inmutables de los flujos de reseñas y conserva el booleano activo de
+cada familia. Se verificaron 18 familias versionadas y 0 activas después de la
+migración.

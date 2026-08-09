@@ -2177,6 +2177,24 @@ exports.getComplianceAdminOverview = async (req, res) => {
   }
 };
 
+exports.resolveCompliancePausedQueue = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  try {
+    const result = await whatsappDeliveryGovernanceService.resolvePausedQueue({
+      listId: req.params.listId,
+      decision: req.body?.decision,
+      note: req.body?.note,
+      adminUserId: req.userData?.userId || null,
+    });
+    return res.json(result);
+  } catch (error) {
+    console.error('Error resolveCompliancePausedQueue', error);
+    return res.status(error?.status || 500).json({
+      error: error?.message || 'whatsapp_delivery_queue_resolution_failed',
+    });
+  }
+};
+
 exports.getComplianceAdminIncident = async (req, res) => {
   if (!assertAdmin(req, res)) return;
   try {
