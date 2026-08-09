@@ -7671,11 +7671,13 @@ migración.
 
 ## 2026-08-09 - Dominio Director de pacientes
 
-`Director de pacientes` es un subrol de `UsuarioClinica`, no un rol global. Un
-administrador global u otro usuario con ese subrol puede asignarlo o retirarlo;
-la comprobación se ejecuta antes de persistir cambios de membresía o invitación.
-En sus clínicas hereda las capacidades operativas de propietario, pero su scope
-sigue limitado a las membresías autorizadas.
+`Director de pacientes` es un perfil global de Clinicaclick, no un subrol de
+`UsuarioClinica`. Solo un administrador global puede asignarlo o retirarlo desde
+`Usuarios`. El director puede conectar o cambiar su propio WhatsApp desde
+`Ajustes`, pero no contratar el servicio ni modificar las clínicas cubiertas.
+En las clínicas vinculadas hereda las capacidades operativas de propietario;
+el scope procede de `PatientDirectionSettings`, no de una membresía de Personal.
+Por ello no aparece en Personal, horarios ni Gantt.
 
 La migración `20260809190000-create-patient-direction-domain.js` crea:
 
@@ -7685,8 +7687,15 @@ La migración `20260809190000-create-patient-direction-domain.js` crea:
 - `PatientDirectionEvents`, auditoría append-only;
 - la familia `clinicaclick_patient_direction_handoff` del catálogo WhatsApp.
 
-La API autenticada `/api/patient-direction` permite consultar, guardar, activar
-o desactivar la configuración, obtener el panel, tomar una conversación,
+La migración `20260809213000-create-patient-direction-profiles.js` crea
+`PatientDirectionProfiles`, migra cualquier subrol legacy, elimina esas filas de
+`UsuarioClinica` y retira `Director de pacientes` del enum de Personal. El perfil
+conserva un único `whatsapp_phone_asset_id` sin scope de clínica/grupo; ese mismo
+activo se propaga a todas sus configuraciones de clínica.
+
+La API autenticada `/api/patient-direction` expone `GET/PUT /profiles/:userId`
+para el perfil global y permite consultar, guardar, activar o desactivar la
+configuración de clínica, obtener el panel, tomar una conversación,
 asignar clínica a un inbound ambiguo y reintentar un traspaso. Toda operación
 valida scope. El dashboard devuelve solo el recuento y una previsualización del
 último mensaje ambiguo; nunca expone el payload crudo del webhook.

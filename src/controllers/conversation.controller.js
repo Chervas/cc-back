@@ -471,6 +471,8 @@ async function getUserClinics(userId) {
     return {
       clinicIds: clinics.map((c) => c.id_clinica),
       isAggregateAllowed: true,
+      directorClinicIds: [],
+      isPatientDirector: false,
     };
   }
   const memberships = await UsuarioClinica.findAll({
@@ -478,10 +480,15 @@ async function getUserClinics(userId) {
     attributes: ['id_clinica', 'rol_clinica'],
     raw: true,
   });
-  const clinicIds = memberships.map((m) => m.id_clinica);
+  const directorClinicIds = await patientDirectionService.getAssignedClinicIds(userId);
+  const clinicIds = Array.from(new Set([
+    ...memberships.map((m) => Number(m.id_clinica)),
+    ...directorClinicIds.map(Number),
+  ].filter(Number.isFinite)));
   const roles = memberships.map((m) => m.rol_clinica);
-  const isAggregateAllowed = roles.some((r) => ROLE_AGGREGATE.includes(r));
-  return { clinicIds, isAggregateAllowed };
+  const isPatientDirector = directorClinicIds.length > 0;
+  const isAggregateAllowed = isPatientDirector || roles.some((r) => ROLE_AGGREGATE.includes(r));
+  return { clinicIds, isAggregateAllowed, directorClinicIds, isPatientDirector };
 }
 
 const QUICKCHAT_POLICY_FEATURES = {
@@ -1460,7 +1467,7 @@ exports.getPermissions = async (req, res) => {
   try {
     const userId = req.userData?.userId;
     const requestedClinic = req.query?.clinic_id;
-    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    const { clinicIds, isAggregateAllowed, directorClinicIds, isPatientDirector } = await getUserClinics(userId);
 
     if (!clinicIds.length) {
       return res.status(403).json({
@@ -1488,9 +1495,13 @@ exports.getPermissions = async (req, res) => {
       memberships.find((m) => Number(m.id_clinica) === Number(selectedClinicId)) ||
       memberships[0] ||
       null;
-    const effectiveRole = String(selectedMembership?.rol_clinica || 'unknown').toLowerCase();
+    const selectedClinicBelongsToDirector = selectedClinicId
+      ? directorClinicIds.includes(Number(selectedClinicId))
+      : isPatientDirector;
+    const effectiveRole = selectedClinicBelongsToDirector
+      ? 'patient_director'
+      : String(selectedMembership?.rol_clinica || 'unknown').toLowerCase();
     const policyPerms = await getQuickChatPolicyPermissions(userId, clinicIds, selectedClinicId);
-    const patientDirector = await patientDirectionService.isPatientDirector(userId, selectedClinicId);
 
     return res.json({
       selected_clinic_id: selectedClinicId,
@@ -1499,7 +1510,7 @@ exports.getPermissions = async (req, res) => {
       read_leads: policyPerms.read_leads,
       can_use_all_clinics: !!isAggregateAllowed,
       effective_role: effectiveRole,
-      is_patient_director: patientDirector,
+      is_patient_director: selectedClinicBelongsToDirector,
     });
   } catch (err) {
     console.error('Error getPermissions', err);

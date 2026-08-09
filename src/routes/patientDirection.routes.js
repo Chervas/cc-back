@@ -7,6 +7,9 @@ const controller = require('../controllers/patientDirection.controller');
 const router = express.Router();
 router.use(authMiddleware);
 
+router.get('/profiles/me', controller.getOwnProfile);
+router.get('/profiles/:userId', controller.getProfile);
+router.put('/profiles/:userId', controller.saveProfile);
 router.get('/settings', controller.getSetting);
 router.put('/settings/:clinicId', controller.saveSetting);
 router.post('/settings/:clinicId/enable', controller.enableSetting);

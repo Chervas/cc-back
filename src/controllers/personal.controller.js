@@ -35,7 +35,6 @@ const {
     getAccessibleClinicIdsForFeature,
 } = require('../lib/access-policy');
 const personalPresenceService = require('../services/personalPresence.service');
-const patientDirectionService = require('../services/patientDirection.service');
 const {
     normalizeDateOnly,
     addDays,
@@ -885,10 +884,7 @@ exports.updatePersonalMember = async (req, res) => {
         const actorOwnerClinicRows = await UsuarioClinica.findAll({
             where: {
                 id_usuario: actorId,
-                [Op.or]: [
-                    { rol_clinica: 'propietario' },
-                    { subrol_clinica: patientDirectionService.DIRECTOR_SUBROLE },
-                ],
+                rol_clinica: 'propietario',
                 ...ACTIVE_STAFF_INVITATION_WHERE,
             },
             attributes: ['id_clinica'],
@@ -924,27 +920,12 @@ exports.updatePersonalMember = async (req, res) => {
             }
         }
 
-        if (Array.isArray(req.body.clinicas)) {
-            for (const clinicaData of req.body.clinicas) {
-                const clinicId = Number(clinicaData?.id_clinica);
-                if (!Number.isFinite(clinicId)) continue;
-                const currentMembership = await UsuarioClinica.findOne({
-                    where: { id_usuario: targetUserId, id_clinica: clinicId },
-                    attributes: ['subrol_clinica'],
-                    raw: true,
-                });
-                const nextSubrole = String(clinicaData?.subrol_clinica || '').trim();
-                const touchesPatientDirector = nextSubrole === patientDirectionService.DIRECTOR_SUBROLE
-                    || currentMembership?.subrol_clinica === patientDirectionService.DIRECTOR_SUBROLE;
-                if (touchesPatientDirector
-                    && !isAdmin(actorId)
-                    && !await patientDirectionService.isPatientDirector(actorId, clinicId)) {
-                    return res.status(403).json({
-                        message: 'Solo un administrador o un Director de pacientes puede modificar este rol.',
-                        code: 'patient_direction_role_assignment_forbidden',
-                    });
-                }
-            }
+        if (Array.isArray(req.body.clinicas)
+            && req.body.clinicas.some((row) => String(row?.subrol_clinica || '').trim() === 'Director de pacientes')) {
+            return res.status(400).json({
+                message: 'Director de pacientes se asigna desde Usuarios, no desde Personal.',
+                code: 'patient_direction_is_not_clinic_staff',
+            });
         }
 
         const user = await Usuario.findByPk(targetUserId);
@@ -4714,22 +4695,17 @@ exports.invitarPersonal = async (req, res) => {
 
         // Invitar personal es una acción de gestión: admin global,
         // roles de administración o permiso explicito team.manage en la clínica.
-        const assigningPatientDirector = String(subrol_clinica || '').trim() === patientDirectionService.DIRECTOR_SUBROLE;
-        const canAssignPatientDirector = isAdmin(actorId)
-            || await patientDirectionService.isPatientDirector(actorId, clinicaId);
+        if (String(subrol_clinica || '').trim() === 'Director de pacientes') {
+            return res.status(400).json({
+                message: 'Director de pacientes se asigna desde Usuarios, no desde Personal.',
+                code: 'patient_direction_is_not_clinic_staff',
+            });
+        }
         const canManageClinicPersonal = isAdmin(actorId)
-            || await canManageTeamInClinic(actorId, clinicaId)
-            || (assigningPatientDirector && canAssignPatientDirector);
+            || await canManageTeamInClinic(actorId, clinicaId);
         if (!canManageClinicPersonal) {
             return res.status(403).json({ message: 'Forbidden' });
         }
-        if (assigningPatientDirector && !canAssignPatientDirector) {
-            return res.status(403).json({
-                message: 'Solo un administrador o un Director de pacientes puede asignar este rol.',
-                code: 'patient_direction_role_assignment_forbidden',
-            });
-        }
-
         // Verificar que la clínica existe
         const clinica = await Clinica.findByPk(clinicaId);
         if (!clinica) {

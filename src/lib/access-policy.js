@@ -1,7 +1,13 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { AccessPolicyOverride, UsuarioClinica, Clinica } = require('../../models');
+const {
+  AccessPolicyOverride,
+  UsuarioClinica,
+  Clinica,
+  PatientDirectionProfile,
+  PatientDirectionSetting,
+} = require('../../models');
 const { isGlobalAdmin } = require('./role-helpers');
 
 const ALLOWED_FEATURE_KEYS = new Set([
@@ -75,14 +81,14 @@ const DEFAULT_FEATURES = {
     unknown: false,
   },
   'patient_direction.manage': {
-    propietario: true,
+    propietario: false,
     agencia: false,
     doctor: false,
     assistant: false,
     reception: false,
     admin_staff: false,
     accountant: false,
-    patient_director: true,
+    patient_director: false,
     unknown: false,
   },
   'patient_direction.assign_role': {
@@ -93,7 +99,7 @@ const DEFAULT_FEATURES = {
     reception: false,
     admin_staff: false,
     accountant: false,
-    patient_director: true,
+    patient_director: false,
     unknown: false,
   },
   marketing: {
@@ -923,7 +929,6 @@ function roleCodeFromMembership(membership) {
   if (role === 'agencia') return 'agencia';
 
   const subrole = String(membership?.subrol_clinica || '').trim().toLowerCase();
-  if (subrole === 'director de pacientes') return 'patient_director';
   if (subrole === 'doctores' || subrole.includes('doctor')) return 'doctor';
   if (subrole === 'auxiliares y enfermeros' || subrole.includes('auxiliar') || subrole.includes('enfermer')) return 'assistant';
   if (subrole === 'recepción / comercial ventas' || subrole.includes('recep') || subrole.includes('comercial') || subrole.includes('ventas')) return 'reception';
@@ -985,21 +990,35 @@ async function canUserAccessFeature({ actorId, featureKey, clinicId }) {
   if (isGlobalAdmin(actorId)) return true;
   if (!Number.isFinite(normalizedClinicId)) return false;
 
-  const membership = await UsuarioClinica.findOne({
-    where: {
-      id_usuario: Number(actorId),
-      id_clinica: normalizedClinicId,
-      [Op.or]: [
-        { estado_invitacion: 'aceptada' },
-        { estado_invitacion: null },
-      ],
-    },
-    attributes: ['rol_clinica', 'subrol_clinica'],
-    raw: true,
-  });
-  if (!membership) return false;
+  const [membership, directorProfile] = await Promise.all([
+    UsuarioClinica.findOne({
+      where: {
+        id_usuario: Number(actorId),
+        id_clinica: normalizedClinicId,
+        [Op.or]: [
+          { estado_invitacion: 'aceptada' },
+          { estado_invitacion: null },
+        ],
+      },
+      attributes: ['rol_clinica', 'subrol_clinica'],
+      raw: true,
+    }),
+    PatientDirectionProfile?.findOne({
+      where: { user_id: Number(actorId), is_active: true },
+      include: [{
+        model: PatientDirectionSetting,
+        as: 'clinicSettings',
+        where: { clinic_id: normalizedClinicId },
+        attributes: [],
+        required: true,
+      }],
+      attributes: ['user_id'],
+      raw: true,
+    }),
+  ]);
+  if (!membership && !directorProfile) return false;
 
-  const roleCode = roleCodeFromMembership(membership);
+  const roleCode = directorProfile ? 'patient_director' : roleCodeFromMembership(membership);
   const groupId = await getClinicGroupId(normalizedClinicId);
   const override = await getFeatureOverride({
     featureKey: normalizedFeatureKey,
@@ -1045,12 +1064,28 @@ async function getAccessibleClinicIdsForFeature({ actorId, featureKey, clinicIds
     membershipWhere.id_clinica = { [Op.in]: requestedClinicIds };
   }
 
-  const memberships = await UsuarioClinica.findAll({
-    where: membershipWhere,
-    attributes: ['id_clinica'],
-    raw: true,
-  });
-  const candidateIds = normalizeClinicIds(memberships.map((membership) => membership.id_clinica));
+  const [memberships, directorSettings] = await Promise.all([
+    UsuarioClinica.findAll({
+      where: membershipWhere,
+      attributes: ['id_clinica'],
+      raw: true,
+    }),
+    PatientDirectionProfile?.findOne({
+      where: { user_id: normalizedActorId, is_active: true },
+      include: [{
+        model: PatientDirectionSetting,
+        as: 'clinicSettings',
+        ...(requestedClinicIds ? { where: { clinic_id: { [Op.in]: requestedClinicIds } } } : {}),
+        attributes: ['clinic_id'],
+        required: false,
+      }],
+      attributes: ['user_id'],
+    }),
+  ]);
+  const candidateIds = normalizeClinicIds([
+    ...memberships.map((membership) => membership.id_clinica),
+    ...(directorSettings?.clinicSettings || []).map((setting) => setting.clinic_id),
+  ]);
   const decisions = await Promise.all(candidateIds.map(async (clinicId) => ({
     clinicId,
     allowed: await canUserAccessFeature({

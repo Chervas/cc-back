@@ -17,12 +17,41 @@ const webhook = source('../../routes/whatsapp-webhook.routes.js');
 const workers = source('../../workers/queue.workers.js');
 const personal = source('../../controllers/personal.controller.js');
 const migration = source('../../../migrations/20260809190000-create-patient-direction-domain.js');
+const profileMigration = source('../../../migrations/20260809213000-create-patient-direction-profiles.js');
+const profileModel = source('../../../models/PatientDirectionProfile.js');
+const routes = source('../../routes/patientDirection.routes.js');
+const userClinicsRoutes = source('../../routes/userclinicas.routes.js');
 
 assert.match(migration, /PatientDirectionSettings/);
 assert.match(migration, /PatientDirectionAssignments/);
 assert.match(migration, /PatientDirectionEvents/);
 assert.match(migration, /clinicaclick_patient_direction_handoff/);
 assert.match(migration, /Director de pacientes/);
+assert.match(profileMigration, /PatientDirectionProfiles/);
+assert.match(profileMigration, /DELETE FROM UsuarioClinica[\s\S]*?Director de pacientes/,
+  'the global profile migration must remove legacy staff memberships');
+assert.match(profileMigration, /MODIFY COLUMN subrol_clinica ENUM\([\s\S]*?'Gestoría'[\s\S]*?\) NULL/);
+assert.doesNotMatch(
+  profileMigration.slice(profileMigration.indexOf('MODIFY COLUMN subrol_clinica ENUM('), profileMigration.indexOf('async down')),
+  /'Director de pacientes'/,
+  'the migrated personnel enum must no longer include patient directors',
+);
+assert.match(profileModel, /whatsapp_phone_asset_id[\s\S]*?unique: true/);
+assert.match(profileModel, /hasMany\(models\.PatientDirectionSetting/);
+assert.match(routes, /get\('\/profiles\/:userId'/);
+assert.match(routes, /put\('\/profiles\/:userId'/);
+assert.match(userClinicsRoutes, /userRole: role/);
+assert.match(userClinicsRoutes, /'patient_director'/);
+assert.match(userClinicsRoutes, /PatientDirectionProfile\.findOne/);
+assert.match(userClinicsRoutes, /PatientDirectionSetting/);
+assert.match(conversation, /patientDirectionService\.getAssignedClinicIds\(userId\)/);
+assert.match(conversation, /directorClinicIds:\s*\[\]/);
+assert.match(conversation, /effectiveRole\s*=\s*selectedClinicBelongsToDirector/);
+assert.doesNotMatch(
+  userClinicsRoutes.slice(userClinicsRoutes.indexOf('const directorProfile'), userClinicsRoutes.indexOf('const scopedClinics')),
+  /UsuarioClinica/,
+  'the patient director navigation scope must not create or depend on personnel memberships',
+);
 
 assert.match(service, /patient-direction:\$\{assetId\}:\$\{normalized\.replace/,
   'active assignment uniqueness must be scoped to the director WhatsApp');
@@ -56,10 +85,10 @@ assert.match(appointments, /attributes: \[[\s\S]*?'created_by'/,
   'the lightweight agenda endpoint must expose the appointment creator');
 assert.match(appointments, /handleAppointmentChange/);
 
-const guardIndex = personal.indexOf('patient_direction_role_assignment_forbidden');
+const guardIndex = personal.indexOf('patient_direction_is_not_clinic_staff');
 const saveIndex = personal.indexOf('await user.save()', guardIndex);
 assert.ok(guardIndex >= 0 && saveIndex > guardIndex,
-  'patient director role authorization must happen before personal data is saved');
+  'patient director staff assignment must be rejected before personal data is saved');
 assert.doesNotMatch(
   personal.slice(personal.indexOf('exports.buscarPersonal'), personal.indexOf('exports.invitarPersonal')),
   /assigningPatientDirector/,

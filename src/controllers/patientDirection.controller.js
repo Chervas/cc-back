@@ -37,6 +37,58 @@ async function ensureClinicFeature(req, res, featureKey, clinicId) {
   return true;
 }
 
+function ensureGlobalAdmin(req, res) {
+  if (isGlobalAdmin(req.userData?.userId)) return true;
+  res.status(403).json({ error: 'global_admin_required' });
+  return false;
+}
+
+exports.getProfile = async (req, res) => {
+  try {
+    const userId = positiveInt(req.params.userId);
+    const actorId = positiveInt(req.userData?.userId);
+    if (!userId) return res.status(400).json({ error: 'user_required' });
+    if (!isGlobalAdmin(actorId) && actorId !== userId) {
+      return res.status(403).json({ error: 'patient_direction_profile_forbidden' });
+    }
+    return res.json(await patientDirection.getProfileDetails(userId, { actorUserId: actorId }));
+  } catch (error) {
+    return sendError(res, error);
+  }
+};
+
+exports.getOwnProfile = async (req, res) => {
+  try {
+    const actorId = positiveInt(req.userData?.userId);
+    if (!actorId) return res.status(401).json({ error: 'user_required' });
+    return res.json(await patientDirection.getProfileDetails(actorId, { actorUserId: actorId }));
+  } catch (error) {
+    return sendError(res, error);
+  }
+};
+
+exports.saveProfile = async (req, res) => {
+  try {
+    const userId = positiveInt(req.params.userId);
+    const actorId = positiveInt(req.userData?.userId);
+    if (!userId) return res.status(400).json({ error: 'user_required' });
+    const canManageRole = isGlobalAdmin(actorId);
+    if (!canManageRole && actorId !== userId) {
+      return res.status(403).json({ error: 'patient_direction_profile_forbidden' });
+    }
+    await patientDirection.saveProfile({
+      userId,
+      isActive: req.body?.is_active,
+      whatsappPhoneAssetId: req.body?.whatsapp_phone_asset_id,
+      actorUserId: actorId,
+      canManageRole,
+    });
+    return res.json(await patientDirection.getProfileDetails(userId, { actorUserId: actorId }));
+  } catch (error) {
+    return sendError(res, error);
+  }
+};
+
 exports.getSetting = async (req, res) => {
   try {
     const clinicId = positiveInt(req.query.clinic_id);
@@ -59,7 +111,7 @@ exports.saveSetting = async (req, res) => {
   try {
     const clinicId = positiveInt(req.params.clinicId);
     if (!clinicId) return res.status(400).json({ error: 'clinic_required' });
-    if (!await ensureClinicFeature(req, res, 'patient_direction.manage', clinicId)) return;
+    if (!ensureGlobalAdmin(req, res)) return;
     const setting = await patientDirection.saveSetting({
       clinicId,
       values: req.body || {},
@@ -75,7 +127,7 @@ exports.enableSetting = async (req, res) => {
   try {
     const clinicId = positiveInt(req.params.clinicId);
     if (!clinicId) return res.status(400).json({ error: 'clinic_required' });
-    if (!await ensureClinicFeature(req, res, 'patient_direction.manage', clinicId)) return;
+    if (!ensureGlobalAdmin(req, res)) return;
     const result = await patientDirection.enableSetting({
       clinicId,
       values: req.body || {},
@@ -113,7 +165,7 @@ exports.disableSetting = async (req, res) => {
   try {
     const clinicId = positiveInt(req.params.clinicId);
     if (!clinicId) return res.status(400).json({ error: 'clinic_required' });
-    if (!await ensureClinicFeature(req, res, 'patient_direction.manage', clinicId)) return;
+    if (!ensureGlobalAdmin(req, res)) return;
     const result = await patientDirection.disableSetting({
       clinicId,
       successorUserId: req.body?.successor_user_id,
