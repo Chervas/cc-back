@@ -142,6 +142,8 @@ const appealDraft = buildAppealDraft({
   activity: {
     last_7d: 120,
     accepted_7d: 116,
+    confirmed_7d: 36,
+    without_confirmation_7d: 80,
     failed_7d: 4,
     status_counts: { sent: 80, delivered: 20, read: 16, failed: 4 },
   },
@@ -150,7 +152,7 @@ assert.match(appealDraft, /WABA ID: waba-123/);
 assert.match(appealDraft, /Phone Number ID: phone-456/);
 assert.match(appealDraft, /Atención Grupo QA/);
 assert.match(appealDraft, /RESTRICTED_BIZ_INITIATED_MESSAGING/);
-assert.match(appealDraft, /120 mensajes registrados, 116 aceptados por Meta y 4 fallidos/);
+assert.match(appealDraft, /120 mensajes registrados, 36 con entrega confirmada, 80 sin confirmación posterior y 4 fallidos/);
 
 console.log('whatsapp_account_compliance.test.js OK');
 process.exit(0);

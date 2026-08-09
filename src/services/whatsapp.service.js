@@ -125,6 +125,7 @@ class WhatsAppService {
 
         if (asset?.waAccessToken && asset?.phoneNumberId) {
             return {
+                originId: asset.id || null,
                 phoneNumberId: asset.phoneNumberId,
                 accessToken: asset.waAccessToken,
                 wabaId: asset.wabaId || null,
@@ -139,6 +140,7 @@ class WhatsAppService {
 
         if (waba?.waAccessToken && waba?.phoneNumberId) {
             return {
+                originId: waba.id || null,
                 phoneNumberId: waba.phoneNumberId,
                 accessToken: waba.waAccessToken,
                 wabaId: waba.wabaId || null,

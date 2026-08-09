@@ -1165,12 +1165,16 @@ Antes de activar coexistencia sobre un numero real:
 ### WhatsApp: diagnostico y cumplimiento
 
 - `POST /api/whatsapp/compliance/admin/accounts/:assetId/check` sincroniza el telefono con Meta, comprueba acceso, estado, canal, nombre aprobado, capacidad y calidad, y calcula estados de entrega sobre el total real de los ultimos siete dias.
-- La consulta completa contabiliza `sent`, `delivered`, `read` y `failed` en base de datos. El desglose de origen puede usar una muestra reciente, pero el contrato indica siempre el tamano de esa muestra; no se presenta el limite tecnico como total real.
+- La consulta completa contabiliza `pending`, `sent`, `delivered`, `read` y `failed` en base de datos. El desglose de origen puede usar una muestra reciente, pero el contrato indica siempre el tamano de esa muestra; no se presenta el limite tecnico como total real.
+- Cada trabajo saliente persiste `phoneNumberId`, `wabaId` y el activo remitente antes de llamar a Meta. El diagnostico y las apelaciones filtran por esa ruta exacta, no por toda la actividad de las clinicas del grupo. Los registros legacy sin ruta solo se infieren para clinicas que heredaban el numero y no tenian otro activo directo; la respuesta expone `attribution.exact_7d` e `inferred_7d`.
+- `delivered` y `read` forman `confirmed`; `sent` se presenta como `without_confirmation`, porque solo acredita que WhatsApp registro el envio sin un webhook posterior de entrega/lectura. `pending`/`sending` forman `pending`. No se muestra un agregado ambiguo de aceptados, procesados o enviados como sinonimo de entrega.
+- Los ecos de coexistencia y la sincronizacion de historial pueden crear mensajes enviados desde WhatsApp Business movil. Si conservan WAMID/ruta, los webhooks posteriores actualizan el mismo registro sin polling adicional. El historico antiguo sin WAMID completo puede permanecer sin confirmacion posterior; no se inventa entrega ni se consulta Meta por mensaje.
 - El diagnostico reconcilia el ultimo `account_update` conservado en `additionalData.coexistence.last_account_update`. Si el evento de restriccion o suspension llego antes de existir `WhatsappAccountComplianceIncidents`, crea idempotentemente el incidente y actualiza `additionalData.whatsappCompliance`.
 - Acceso API, calidad y cumplimiento son dimensiones distintas. Un numero puede estar `CONNECTED`, devolver calidad `RED` y tener restricciones activas simultaneamente. Clinicaclick muestra las tres y conserva estados/errores reales, sin imponer un bloqueo local adicional.
 - El borrador de apelacion se construye con identificadores comprobables de la cuenta (telefono, WABA ID y Phone Number ID), evento, fecha, calidad, capacidad, restricciones y actividad exacta de siete dias. Si Meta no envio `violation_type`, el texto debe decirlo; nunca sustituirlo por una causa generica presentada como hecho.
 - Un incidente de un activo `assignmentScope=group` se atribuye solo al grupo: `group_id` informado y `clinic_id=NULL`. No se elige una clinica representativa para titular el incidente, porque eso haria parecer que la medida afecta al WhatsApp propio de esa sede.
 - El worker registra un warning estructurado cuando Meta devuelve un estado para un WAMID que no existe en `Messages`. Esto permite diagnosticar pruebas o integraciones que hayan llamado a Meta sin persistir antes el mensaje; el warning no crea una entrega ficticia ni bloquea envios.
+- La prueba real del activo compartido Propdental (`Phone Number ID 1009118125613058`, `+34 624 31 25 83`) debe salir por ese identificador exacto. En el QA autorizado del 2026-08-09 Meta acepto inicialmente la solicitud y despues emitio `failed` con `131031 Business Account locked`; el mensaje no se entrego. Este resultado no se puede sustituir por actividad exitosa de otra sede del grupo.
 
 ### WhatsApp: calidad de entrega, pacing y capacidad
 
@@ -1197,6 +1201,7 @@ Antes de activar coexistencia sobre un numero real:
 - El regulador nunca acelera el ritmo pedido: `1/10 min` y `1/dia` permanecen
   intactos. Cuando hace falta calentamiento limita lotes con progresion
   `5/10/20/50`, calidad, fallos y capacidad disponible.
+- El calentamiento pertenece a la via `portfolio + WABA + telefono + plantilla + idioma`. Dos colas de la misma via comparten senales; la misma plantilla en otro telefono constituye otra via. El lote efectivo es el menor entre el solicitado, la fase de calentamiento, la capacidad disponible y la reduccion por calidad/fallos. Un ritmo lento nunca se agrupa para alcanzar `5`: cada envio alimenta la observacion manteniendo su cadencia.
 - Estados `held_meta`, `paused_review` y `awaiting_delivery` no admiten
   reanudacion manual. Para cualquier otro estado, `resumeCampaignDispatch`
   vuelve a consultar el gate antes de encolar trabajo.

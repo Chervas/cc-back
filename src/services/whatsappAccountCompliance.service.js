@@ -1,6 +1,6 @@
 'use strict';
 
-const { Op, fn, col } = require('sequelize');
+const { Op, fn, col, literal } = require('sequelize');
 const db = require('../../models');
 const notificationService = require('./notifications.service');
 const { syncPhonesForWaba } = require('./whatsappPhones.service');
@@ -367,74 +367,181 @@ async function handleBusinessUsernameUpdate({ entry, change, value, clinicId }) 
   return usernameSnapshot;
 }
 
-async function loadActivitySummary({ clinicId, groupId }) {
-  let clinicIds = clinicId ? [Number(clinicId)] : [];
-  if (groupId) {
+function messagePhoneRouteExpression() {
+  return [
+    "NULLIF(JSON_UNQUOTE(JSON_EXTRACT(`Message`.`metadata`, '$.phoneNumberId')), '')",
+    "NULLIF(JSON_UNQUOTE(JSON_EXTRACT(`Message`.`metadata`, '$.phoneId')), '')",
+    "NULLIF(JSON_UNQUOTE(JSON_EXTRACT(`Message`.`metadata`, '$.phone_number_id')), '')",
+  ].join(', ');
+}
+
+function buildActivityRouteWhere({ phoneNumberId, mode }) {
+  const target = clean(phoneNumberId);
+  if (!target) return null;
+  const route = `COALESCE(${messagePhoneRouteExpression()})`;
+  return literal(mode === 'missing'
+    ? `${route} IS NULL`
+    : `${route} = ${db.sequelize.escape(target)}`);
+}
+
+async function resolveActivityScope({ clinicId, groupId, account }) {
+  const resolvedGroupId = Number(account?.group_id || groupId || 0) || null;
+  const resolvedClinicId = Number(account?.clinic_id || clinicId || 0) || null;
+  let clinicIds = resolvedClinicId ? [resolvedClinicId] : [];
+  if (resolvedGroupId) {
     const clinics = await Clinica.findAll({
-      where: { grupoClinicaId: Number(groupId) },
+      where: { grupoClinicaId: resolvedGroupId },
       attributes: ['id_clinica'],
       raw: true,
     });
     clinicIds = clinics.map((clinic) => Number(clinic.id_clinica));
   }
+
+  const phoneNumberId = clean(account?.phone_number_id);
+  if (!phoneNumberId || !clinicIds.length) {
+    return {
+      phoneNumberId: phoneNumberId || null,
+      clinicIds,
+      inferredClinicIds: clinicIds,
+      scopedByRoute: false,
+    };
+  }
+
+  let inferredClinicIds = clinicIds;
+  if (resolvedGroupId) {
+    const directAssets = await ClinicMetaAsset.findAll({
+      where: {
+        isActive: true,
+        assetType: 'whatsapp_phone_number',
+        clinicaId: { [Op.in]: clinicIds },
+      },
+      attributes: ['clinicaId', 'phoneNumberId'],
+      raw: true,
+    });
+    const directByClinic = new Map();
+    directAssets.forEach((asset) => {
+      const key = Number(asset.clinicaId);
+      if (!directByClinic.has(key)) directByClinic.set(key, []);
+      directByClinic.get(key).push(clean(asset.phoneNumberId));
+    });
+    inferredClinicIds = clinicIds.filter((id) => {
+      const directPhoneIds = directByClinic.get(Number(id)) || [];
+      return directPhoneIds.length === 0 || directPhoneIds.includes(phoneNumberId);
+    });
+  }
+
+  return {
+    phoneNumberId,
+    clinicIds,
+    inferredClinicIds,
+    scopedByRoute: true,
+  };
+}
+
+async function loadActivitySummary({ clinicId, groupId, account = null }) {
+  const activityScope = await resolveActivityScope({ clinicId, groupId, account });
+  const clinicIds = activityScope.clinicIds;
   if (!clinicIds.length || !Conversation || !Message) {
     return {
       last_24h: 0,
       last_7d: 0,
       failed_7d: 0,
       accepted_7d: 0,
+      confirmed_7d: 0,
+      without_confirmation_7d: 0,
+      pending_7d: 0,
       status_counts: {},
+      attribution: {
+        phone_number_id: activityScope.phoneNumberId,
+        exact_7d: 0,
+        inferred_7d: 0,
+        scoped_by_route: activityScope.scopedByRoute,
+      },
       recent: [],
     };
   }
 
   const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
   const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const scopedInclude = [{
+  const scopedInclude = (scopeClinicIds, includeAttributes = true) => [{
       model: Conversation,
       as: 'conversation',
       required: true,
-      where: { clinic_id: { [Op.in]: clinicIds } },
-      attributes: ['clinic_id'],
+      where: { clinic_id: { [Op.in]: scopeClinicIds } },
+      attributes: includeAttributes ? ['clinic_id'] : [],
     }];
   const baseWhere = {
     direction: 'outbound',
     createdAt: { [Op.gte]: since7d },
   };
-  const [last7d, last24h, statusRows, messages, recentFailures] = await Promise.all([
-    Message.count({ where: baseWhere, include: scopedInclude, distinct: true }),
-    Message.count({
-      where: { ...baseWhere, createdAt: { [Op.gte]: since24h } },
-      include: scopedInclude,
-      distinct: true,
-    }),
-    Message.findAll({
-      attributes: ['status', [fn('COUNT', col('Message.id')), 'count']],
-      where: baseWhere,
-      include: scopedInclude.map((include) => ({ ...include, attributes: [] })),
-      group: ['Message.status'],
-      raw: true,
-    }),
-    Message.findAll({
-      where: baseWhere,
-      include: scopedInclude,
-      order: [['createdAt', 'DESC']],
-      limit: 500,
-    }),
-    Message.findAll({
-      where: { ...baseWhere, status: 'failed' },
-      include: scopedInclude,
-      order: [['createdAt', 'DESC']],
-      limit: 500,
-    }),
-  ]);
-  const plain = messages.map(toPlain);
-  const failurePlain = recentFailures.map(toPlain);
-  const statusCounts = statusRows.reduce((acc, row) => {
-    const status = clean(row.status).toLowerCase() || 'unknown';
-    acc[status] = Number(row.count || 0);
-    return acc;
-  }, {});
+  const routeScopes = activityScope.scopedByRoute
+    ? [
+        {
+          kind: 'exact',
+          clinicIds,
+          routeWhere: buildActivityRouteWhere({ phoneNumberId: activityScope.phoneNumberId, mode: 'exact' }),
+        },
+        ...(activityScope.inferredClinicIds.length
+          ? [{
+              kind: 'inferred',
+              clinicIds: activityScope.inferredClinicIds,
+              routeWhere: buildActivityRouteWhere({ phoneNumberId: activityScope.phoneNumberId, mode: 'missing' }),
+            }]
+          : []),
+      ]
+    : [{ kind: 'legacy', clinicIds, routeWhere: null }];
+  const queryScope = async (scope) => {
+    const routeWhere = scope.routeWhere ? { [Op.and]: [scope.routeWhere] } : {};
+    const where7d = { ...baseWhere, ...routeWhere };
+    const [last7d, last24h, statusRows, messages, recentFailures] = await Promise.all([
+      Message.count({
+        where: where7d,
+        include: scopedInclude(scope.clinicIds),
+        distinct: true,
+      }),
+      Message.count({
+        where: { ...where7d, createdAt: { [Op.gte]: since24h } },
+        include: scopedInclude(scope.clinicIds),
+        distinct: true,
+      }),
+      Message.findAll({
+        attributes: ['status', [fn('COUNT', col('Message.id')), 'count']],
+        where: where7d,
+        include: scopedInclude(scope.clinicIds, false),
+        group: ['Message.status'],
+        raw: true,
+      }),
+      Message.findAll({
+        where: where7d,
+        include: scopedInclude(scope.clinicIds),
+        order: [['createdAt', 'DESC']],
+        limit: 500,
+      }),
+      Message.findAll({
+        where: { ...where7d, status: 'failed' },
+        include: scopedInclude(scope.clinicIds),
+        order: [['createdAt', 'DESC']],
+        limit: 500,
+      }),
+    ]);
+    return { kind: scope.kind, last7d, last24h, statusRows, messages, recentFailures };
+  };
+  const results = await Promise.all(routeScopes.map(queryScope));
+  const last7d = results.reduce((total, result) => total + Number(result.last7d || 0), 0);
+  const last24h = results.reduce((total, result) => total + Number(result.last24h || 0), 0);
+  const plain = results
+    .flatMap((result) => result.messages.map(toPlain))
+    .sort((left, right) => new Date(right.createdAt || right.sent_at || 0) - new Date(left.createdAt || left.sent_at || 0))
+    .slice(0, 500);
+  const failurePlain = results
+    .flatMap((result) => result.recentFailures.map(toPlain))
+    .sort((left, right) => new Date(right.createdAt || right.sent_at || 0) - new Date(left.createdAt || left.sent_at || 0))
+    .slice(0, 500);
+  const statusCounts = results.flatMap((result) => result.statusRows).reduce((acc, row) => {
+      const status = clean(row.status).toLowerCase() || 'unknown';
+      acc[status] = (acc[status] || 0) + Number(row.count || 0);
+      return acc;
+    }, {});
   const sourceOf = (message) => {
     const metadata = message.metadata || {};
     if (metadata.automation_delivery_key || metadata.automation_flow_id || metadata.flow_execution_id) {
@@ -496,7 +603,19 @@ async function loadActivitySummary({ clinicId, groupId }) {
       (total, status) => total + Number(statusCounts[status] || 0),
       0
     ),
+    confirmed_7d: ['delivered', 'read'].reduce(
+      (total, status) => total + Number(statusCounts[status] || 0),
+      0
+    ),
+    without_confirmation_7d: Number(statusCounts.sent || 0),
+    pending_7d: Number(statusCounts.pending || 0) + Number(statusCounts.sending || 0),
     status_counts: statusCounts,
+    attribution: {
+      phone_number_id: activityScope.phoneNumberId,
+      exact_7d: Number(results.find((result) => result.kind === 'exact')?.last7d || 0),
+      inferred_7d: Number(results.find((result) => result.kind === 'inferred')?.last7d || 0),
+      scoped_by_route: activityScope.scopedByRoute,
+    },
     source_counts: sourceCounts,
     source_sample_size: plain.length,
     error_counts: errorCounts,
@@ -529,6 +648,9 @@ async function loadIncidentAccount(incident) {
     : {};
   return {
     asset_id: Number(asset.id),
+    assignment_scope: asset.assignmentScope || null,
+    clinic_id: asset.clinicaId || null,
+    group_id: asset.grupoClinicaId || null,
     verified_name: asset.waVerifiedName || null,
     waba_id: asset.wabaId || null,
     phone_number_id: asset.phoneNumberId || null,
@@ -561,13 +683,12 @@ async function serializeIncident(row, { includeActivity = false, includeRaw = tr
     delete payload.appeal_draft;
   }
   if (includeActivity) {
-    [payload.activity, payload.account] = await Promise.all([
-      loadActivitySummary({
-        clinicId: incident.clinic_id,
-        groupId: incident.group_id,
-      }),
-      loadIncidentAccount(incident),
-    ]);
+    payload.account = await loadIncidentAccount(incident);
+    payload.activity = await loadActivitySummary({
+      clinicId: incident.clinic_id,
+      groupId: incident.group_id,
+      account: payload.account,
+    });
   }
   return payload;
 }
@@ -742,7 +863,7 @@ function buildAppealDraft({ incident, clinicName, groupName, account, activity, 
     : '- WhatsApp no incluyó un detalle estructurado de restricciones.';
   const statusCounts = activity?.status_counts || {};
   const statusSummary = [
-    ['enviados', statusCounts.sent],
+    ['sin confirmación posterior', statusCounts.sent],
     ['entregados', statusCounts.delivered],
     ['leídos', statusCounts.read],
     ['pendientes', statusCounts.pending],
@@ -772,7 +893,7 @@ function buildAppealDraft({ incident, clinicName, groupName, account, activity, 
     ].join('\n'),
     violation,
     `Restricciones comunicadas por WhatsApp:\n${restrictionLines}`,
-    `Actividad disponible al preparar la revisión (últimos 7 días): ${Number(activity?.last_7d || 0)} mensajes registrados, ${Number(activity?.accepted_7d || 0)} aceptados por Meta y ${Number(activity?.failed_7d || 0)} fallidos${statusSummary ? ` (${statusSummary})` : ''}.`,
+    `Actividad atribuida al número afectado al preparar la revisión (últimos 7 días): ${Number(activity?.last_7d || 0)} mensajes registrados, ${Number(activity?.confirmed_7d || 0)} con entrega confirmada, ${Number(activity?.without_confirmation_7d || 0)} sin confirmación posterior y ${Number(activity?.failed_7d || 0)} fallidos${statusSummary ? ` (${statusSummary})` : ''}.`,
     `Contexto del servicio: ${context}`,
     `Revisión realizada: ${notes}`,
     'Solicitamos que se reevalúe la medida y, si corresponde, se restablezca la cuenta. Podemos aportar información adicional sobre la operativa y, cuando proceda, las bases y autorizaciones de contacto verificadas.',
@@ -796,10 +917,12 @@ async function prepareAppeal({ incidentId, userId, serviceContext, reviewNotes }
     error.statusCode = 409;
     throw error;
   }
-  const [activity, account] = await Promise.all([
-    loadActivitySummary({ clinicId: incident.clinic_id, groupId: incident.group_id }),
-    loadIncidentAccount(incident),
-  ]);
+  const account = await loadIncidentAccount(incident);
+  const activity = await loadActivitySummary({
+    clinicId: incident.clinic_id,
+    groupId: incident.group_id,
+    account,
+  });
   incident.appeal_draft = buildAppealDraft({
     incident,
     clinicName: incident.clinic?.nombre_clinica,
@@ -871,9 +994,15 @@ async function diagnoseAccount({ assetId, userId }) {
     current = await ClinicMetaAsset.findByPk(asset.id);
   }
   const context = await resolveClinicContext({ assets: current ? [current] : [asset], clinicId: asset.clinicaId });
+  const activityAccount = current || asset;
   const activity = await loadActivitySummary({
     clinicId: context.clinicId,
     groupId: context.groupId,
+    account: {
+      clinic_id: activityAccount.clinicaId || context.clinicId || null,
+      group_id: activityAccount.grupoClinicaId || context.groupId || null,
+      phone_number_id: activityAccount.phoneNumberId || null,
+    },
   });
   const additionalData = current?.additionalData && typeof current.additionalData === 'object'
     ? { ...current.additionalData }
@@ -904,8 +1033,12 @@ async function diagnoseAccount({ assetId, userId }) {
     delivery_summary_7d: {
       total: activity.last_7d,
       accepted: activity.accepted_7d,
+      confirmed: activity.confirmed_7d,
+      without_confirmation: activity.without_confirmation_7d,
+      pending: activity.pending_7d,
       failed: activity.failed_7d,
       status_counts: activity.status_counts,
+      attribution: activity.attribution,
       source_counts: activity.source_counts,
       source_sample_size: activity.source_sample_size,
       error_counts: activity.error_counts,
@@ -951,4 +1084,9 @@ module.exports = {
   requestClinicClickReview,
   serializeIncident,
   summarizeCompliance,
+  __testing: {
+    buildActivityRouteWhere,
+    loadActivitySummary,
+    resolveActivityScope,
+  },
 };

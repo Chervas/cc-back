@@ -817,6 +817,24 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
                 clinicId: Number(clinicId || 0) || null,
             })
             : clinicConfig;
+        msg.metadata = {
+            ...(msg.metadata || {}),
+            ...(effectiveClinicConfig?.phoneNumberId
+                ? {
+                    phoneNumberId: effectiveClinicConfig.phoneNumberId,
+                    phoneId: effectiveClinicConfig.phoneNumberId,
+                }
+                : {}),
+            ...(effectiveClinicConfig?.wabaId ? { wabaId: effectiveClinicConfig.wabaId } : {}),
+            ...(effectiveClinicConfig?.originId
+                ? {
+                    sender_origin_id: effectiveClinicConfig.originId,
+                    whatsapp_sender_asset_id: effectiveClinicConfig.originId,
+                }
+                : {}),
+            whatsapp_sender_resolved_at: new Date().toISOString(),
+        };
+        await msg.save();
         const waResponse = await whatsappService.sendMessage({
             to,
             body,
