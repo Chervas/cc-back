@@ -13,6 +13,9 @@ const marketingBulkSendsService = require('../services/marketingBulkSends.servic
 const notificationService = require('../services/notifications.service');
 const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.service');
 const whatsappConnectionStatusService = require('../services/whatsappConnectionStatus.service');
+const whatsappAccountComplianceService = require('../services/whatsappAccountCompliance.service');
+const whatsappDeliveryGovernanceService = require('../services/whatsappDeliveryGovernance.service');
+const patientDirectionService = require('../services/patientDirection.service');
 const { getIO } = require('../services/socket.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { buildWhatsappOutboundRetryDecision } = require('../lib/whatsapp-outbound-retry');
@@ -697,9 +700,10 @@ async function notifyWhatsappPaymentMissing({ status, message, clinicId }) {
     const phoneId = metadata.phoneId || metadata.phoneNumberId || null;
     const wabaId = metadata.wabaId || null;
     const href = cleanString(paymentError.href);
-    const errorMessage = cleanString(paymentError?.error_data?.details)
+    const providerErrorMessage = cleanString(paymentError?.error_data?.details)
         || cleanString(paymentError.message)
-        || 'Meta indica que falta un método de pago en WhatsApp Business.';
+        || null;
+    const errorMessage = 'WhatsApp no ha podido cobrar este envío. Añade o revisa el método de pago de la cuenta en WhatsApp Manager antes de volver a intentarlo.';
 
     try {
         const asset = await findWhatsappPhoneAssetForMetadata({
@@ -716,6 +720,7 @@ async function notifyWhatsappPaymentMissing({ status, message, clinicId }) {
                     status: 'missing_payment_method',
                     last_error_code: WHATSAPP_PAYMENT_MISSING_ERROR_CODE,
                     last_error_message: errorMessage,
+                    last_provider_error_message: providerErrorMessage,
                     last_error_href: href || null,
                     last_detected_at: new Date().toISOString(),
                     last_message_id: message.id,
@@ -813,6 +818,24 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
                 clinicId: Number(clinicId || 0) || null,
             })
             : clinicConfig;
+        msg.metadata = {
+            ...(msg.metadata || {}),
+            ...(effectiveClinicConfig?.phoneNumberId
+                ? {
+                    phoneNumberId: effectiveClinicConfig.phoneNumberId,
+                    phoneId: effectiveClinicConfig.phoneNumberId,
+                }
+                : {}),
+            ...(effectiveClinicConfig?.wabaId ? { wabaId: effectiveClinicConfig.wabaId } : {}),
+            ...(effectiveClinicConfig?.originId
+                ? {
+                    sender_origin_id: effectiveClinicConfig.originId,
+                    whatsapp_sender_asset_id: effectiveClinicConfig.originId,
+                }
+                : {}),
+            whatsapp_sender_resolved_at: new Date().toISOString(),
+        };
+        await msg.save();
         const waResponse = await whatsappService.sendMessage({
             to,
             body,
@@ -824,13 +847,43 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
             clinicConfig: effectiveClinicConfig,
         });
         providerAccepted = true;
-        msg.status = 'sent';
+        const immediate = useTemplate
+            ? await whatsappDeliveryGovernanceService.recordImmediateSendResponse({
+                response: waResponse,
+                clinicId: effectiveClinicConfig?.clinicId || clinicId || null,
+                wabaId: effectiveClinicConfig?.wabaId || msg.metadata?.wabaId || null,
+                phoneNumberId: effectiveClinicConfig?.phoneNumberId || msg.metadata?.phoneNumberId || msg.metadata?.phoneId || null,
+                template: {
+                    id: msg.metadata?.template_id || null,
+                    meta_template_id: msg.metadata?.meta_template_id || null,
+                    name: templateName || msg.metadata?.template_name || null,
+                    language: templateLanguage || msg.metadata?.template_language || 'es',
+                },
+                listId: msg.metadata?.list_id || null,
+                itemId: msg.metadata?.item_id || null,
+                messageId: msg.id,
+            }).catch((governanceError) => {
+                console.warn('[whatsapp delivery] No se pudo registrar la aceptación inmediata', {
+                    messageId: msg.id,
+                    error: serializeError(governanceError),
+                });
+                const status = cleanString(waResponse?.messages?.[0]?.message_status) || 'accepted';
+                return {
+                    status,
+                    held: status === 'held_for_quality_assessment',
+                    providerMessageId: waResponse?.messages?.[0]?.id || null,
+                };
+            })
+            : { status: 'accepted', held: false, providerMessageId: waResponse?.messages?.[0]?.id || null };
+        msg.status = 'pending';
         const previousRetry = msg.metadata?.outbound_retry;
         msg.metadata = {
             ...(msg.metadata || {}),
             error: null,
             wa_response: waResponse,
-            wamid: waResponse?.messages?.[0]?.id,
+            wamid: immediate.providerMessageId || waResponse?.messages?.[0]?.id,
+            provider_acceptance_status: immediate.status,
+            provider_acceptance_at: new Date().toISOString(),
             ...(previousRetry
                 ? {
                     outbound_retry: {
@@ -842,7 +895,7 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
                 }
                 : {}),
         };
-        msg.sent_at = new Date();
+        msg.sent_at = null;
         await msg.save();
 
         await whatsappConnectionStatusService.clearDisconnectedAfterSuccess({
@@ -877,7 +930,7 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
                 error: serializeError(err),
             });
             try {
-                msg.status = 'sent';
+                msg.status = 'pending';
                 msg.metadata = {
                     ...(msg.metadata || {}),
                     post_acceptance_error: serializeError(err),
@@ -897,7 +950,7 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
             maxAttempts: job.opts?.attempts,
         });
         msg.status = providerAccepted
-            ? 'sent'
+            ? 'pending'
             : (retryDecision.should_retry ? 'pending' : 'failed');
         msg.metadata = {
             ...(msg.metadata || {}),
@@ -917,6 +970,7 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
             },
         };
         await msg.save();
+        await patientDirectionService.handleHandoffMessageStatus(msg).catch(() => null);
 
         if (!providerAccepted) {
             // Si Meta indica que el numero no esta registrado, marcamos el
@@ -957,6 +1011,14 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
                     wabaId: clinicConfig?.wabaId || msg.metadata?.wabaId || null,
                     messageId: msg.id,
                     recipient: to || msg.metadata?.recipient || null,
+                    source: 'outbound_whatsapp_worker',
+                });
+                await whatsappPaymentStatusService.markMissingPaymentFromProviderError({
+                    error: rawError || err,
+                    clinicId: clinicConfig?.clinicId || clinicId || null,
+                    phoneId: clinicConfig?.phoneNumberId || msg.metadata?.phoneNumberId || msg.metadata?.phoneId || null,
+                    wabaId: clinicConfig?.wabaId || msg.metadata?.wabaId || null,
+                    messageId: msg.id,
                     source: 'outbound_whatsapp_worker',
                 });
             } catch (regErr) {
@@ -1302,11 +1364,11 @@ function normalizeWhatsappAccountEvent(value) {
 }
 
 async function handleWhatsappAccountUpdate({ entry, changes, value, clinicId }) {
-    const field = cleanString(changes?.field).toLowerCase();
     const event = cleanString(value?.event).toUpperCase();
-    if (field !== 'account_update' && !['PARTNER_REMOVED', 'ACCOUNT_OFFBOARDED', 'ACCOUNT_RECONNECTED'].includes(event)) {
+    if (!['PARTNER_REMOVED', 'ACCOUNT_OFFBOARDED', 'ACCOUNT_RECONNECTED'].includes(event)) {
         return;
     }
+    const field = cleanString(changes?.field).toLowerCase();
 
     const phoneId = value?.metadata?.phone_number_id || null;
     const wabaId = entry?.id || value?.waba_id || null;
@@ -1433,6 +1495,8 @@ createWorker('webhook_whatsapp', async (job) => {
     const patientId = job.data?.patient_id || null;
     const leadId = job.data?.lead_id || null;
     const webOriginRefFromJob = job.data?.web_origin_ref || null;
+    const patientDirectionAssignmentIdFromJob = job.data?.patient_direction_assignment_id || null;
+    const patientDirectionFormerAssignment = job.data?.patient_direction_former_assignment === true;
 
     if (!payload || !clinicId) {
         throw new Error('Payload o clinic_id ausente en webhook de WhatsApp');
@@ -1459,7 +1523,43 @@ createWorker('webhook_whatsapp', async (job) => {
         }
     }
 
-    await handleWhatsappAccountUpdate({ entry, changes, value, clinicId });
+    for (const webhookEntry of Array.isArray(payload?.entry) ? payload.entry : []) {
+        for (const webhookChange of Array.isArray(webhookEntry?.changes) ? webhookEntry.changes : []) {
+            const webhookValue = webhookChange?.value || {};
+            await handleWhatsappAccountUpdate({
+                entry: webhookEntry,
+                changes: webhookChange,
+                value: webhookValue,
+                clinicId,
+            });
+            await whatsappAccountComplianceService.handleAccountUpdate({
+                entry: webhookEntry,
+                change: webhookChange,
+                value: webhookValue,
+                clinicId,
+            });
+            await whatsappAccountComplianceService.handleBusinessUsernameUpdate({
+                entry: webhookEntry,
+                change: webhookChange,
+                value: webhookValue,
+                clinicId,
+            });
+            try {
+                await whatsappDeliveryGovernanceService.handleWebhookChange({
+                    entry: webhookEntry,
+                    change: webhookChange,
+                    value: webhookValue,
+                    clinicId,
+                });
+            } catch (governanceError) {
+                console.warn('[whatsapp delivery] No se pudo materializar el cambio de gobierno', {
+                    clinicId,
+                    field: webhookChange?.field || null,
+                    error: serializeError(governanceError),
+                });
+            }
+        }
+    }
     await handleWhatsappStateSync({ stateSync, value });
     await handleWhatsappHistoryBlocks({ historyBlocks, value, clinicId, patientId, leadId });
     await handleWhatsappCoexistenceEchoes({ echoes, value, clinicId, patientId, leadId });
@@ -1516,6 +1616,33 @@ createWorker('webhook_whatsapp', async (job) => {
             lastMessageAt: new Date(),
         });
 
+        let patientDirectionAssignment = null;
+        try {
+            if (!patientDirectionFormerAssignment) {
+                patientDirectionAssignment = await patientDirectionService.ensureAssignment({
+                    clinicId: conv.clinic_id || clinicId,
+                    phone: from,
+                    leadId: conv.lead_id || leadId,
+                    conversationId: conv.id,
+                    patientId: conv.patient_id || patientId,
+                    startReason: 'inbound_to_director_number',
+                    actorUserId: null,
+                    requireNoHumanContact: true,
+                });
+            }
+            if (!patientDirectionAssignment && patientDirectionAssignmentIdFromJob) {
+                patientDirectionAssignment = await patientDirectionService.findAssignment({
+                    assignmentId: patientDirectionAssignmentIdFromJob,
+                });
+            }
+        } catch (patientDirectionError) {
+            console.warn('[patient-direction] No se pudo vincular el inbound:', {
+                clinicId: conv.clinic_id || clinicId,
+                conversationId: conv.id,
+                error: patientDirectionError?.message || patientDirectionError,
+            });
+        }
+
         const inboundMsg = await Message.create({
             conversation_id: conv.id,
             sender_id: null,
@@ -1526,6 +1653,10 @@ createWorker('webhook_whatsapp', async (job) => {
             metadata: {
                 wamid,
                 phoneId,
+                ...(patientDirectionAssignment?.id ? {
+                    patient_direction_assignment_id: patientDirectionAssignment.id,
+                    patient_direction_director_user_id: patientDirectionAssignment.director_user_id,
+                } : {}),
                 ...descriptor.metadataExtra,
                 ...(webOrigin ? { web_origin_ref: webOrigin.ref, web_origin: {
                     id: webOrigin.id || null,
@@ -1549,6 +1680,12 @@ createWorker('webhook_whatsapp', async (job) => {
             },
             sent_at: new Date(),
         });
+
+        if (patientDirectionFormerAssignment && patientDirectionAssignmentIdFromJob) {
+            await patientDirectionService.sendOldNumberNotice(patientDirectionAssignmentIdFromJob).catch((noticeError) => {
+                console.warn('[patient-direction] No se pudo avisar del cambio de número:', noticeError?.message || noticeError);
+            });
+        }
 
         try {
             const optOutResult = await marketingOptOutService.applyInboundOptOutIfNeeded({
@@ -1698,6 +1835,18 @@ createWorker('webhook_whatsapp', async (job) => {
 
         const messageRef = await findMessageByWamid(wamid);
         if (!messageRef) {
+            console.warn('[whatsapp] Estado recibido para un WAMID sin mensaje local', {
+                wamid,
+                status: mappedStatus,
+                recipientId: cleanString(status?.recipient_id) || null,
+                errors: Array.isArray(status?.errors)
+                    ? status.errors.map((error) => ({
+                        code: error?.code || null,
+                        title: truncateText(error?.title, 160) || null,
+                        message: truncateText(error?.message, 240) || null,
+                    }))
+                    : [],
+            });
             continue;
         }
 
@@ -1725,6 +1874,9 @@ createWorker('webhook_whatsapp', async (job) => {
         }
         message.metadata = mergeStatusMetadata(message.metadata, status);
         await message.save();
+        await patientDirectionService.handleHandoffMessageStatus(message).catch((handoffError) => {
+            console.warn('[patient-direction] No se pudo actualizar el traspaso:', handoffError?.message || handoffError);
+        });
 
         if (['sent', 'delivered', 'read'].includes(nextStatus)) {
             try {
@@ -1783,6 +1935,23 @@ createWorker('webhook_whatsapp', async (job) => {
                 wamid,
                 status: nextStatus,
                 error: serializeError(bulkStatusErr),
+            });
+        }
+
+        try {
+            await whatsappDeliveryGovernanceService.materializeFinalMessageStatus({
+                message,
+                status,
+                mappedStatus: nextStatus,
+                clinicId: messageRef.clinic_id || clinicId,
+            });
+        } catch (governanceStatusError) {
+            console.warn('[whatsapp delivery] No se pudo materializar el estado final', {
+                clinicId: messageRef.clinic_id || clinicId,
+                messageId: message.id,
+                wamid,
+                status: nextStatus,
+                error: serializeError(governanceStatusError),
             });
         }
 

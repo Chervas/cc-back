@@ -2,7 +2,14 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const { Op } = require('sequelize');
-const { Clinica, UsuarioClinica, Usuario, GrupoClinica } = require('../../models');
+const {
+    Clinica,
+    UsuarioClinica,
+    Usuario,
+    GrupoClinica,
+    PatientDirectionProfile,
+    PatientDirectionSetting,
+} = require('../../models');
 const { ADMIN_USER_IDS, STAFF_ROLES, isGlobalAdmin } = require('../lib/role-helpers');
 const {
     filterClinicConfigurationForSettingsAccess,
@@ -237,17 +244,47 @@ router.get('/list', async (req, res) => {
                 });
             }
 
-            console.log('🏥 Clínicas asignadas encontradas:', usuario.clinicas?.length || 0);
+            const directorProfile = PatientDirectionProfile
+                ? await PatientDirectionProfile.findOne({
+                    where: { user_id: userId, is_active: true },
+                    attributes: ['user_id'],
+                    include: [{
+                        model: PatientDirectionSetting,
+                        as: 'clinicSettings',
+                        attributes: ['clinic_id', 'is_enabled'],
+                        required: false,
+                        include: [{
+                            model: Clinica,
+                            as: 'clinic',
+                            required: true,
+                            include: [{
+                                model: GrupoClinica,
+                                as: 'grupoClinica',
+                                required: false,
+                                attributes: ['id_grupo', 'nombre_grupo'],
+                            }],
+                        }],
+                    }],
+                })
+                : null;
+            const directorSettings = directorProfile?.clinicSettings || [];
+            const staffClinics = usuario.clinicas || [];
+            const scopedClinics = [
+                ...staffClinics,
+                ...directorSettings.map((setting) => setting.clinic).filter(Boolean),
+            ];
+            console.log('🏥 Clínicas asignadas encontradas:', staffClinics.length);
+            console.log('🧭 Clínicas del Director de pacientes:', directorSettings.length);
 
-            // ✅ EXTRAER ROLES ÚNICOS del usuario
-            const rolesUnicos = [...new Set(usuario.clinicas.map(clinica =>
-                clinica.UsuarioClinica.rol_clinica
-            ))];
+            const rolesUnicos = [...new Set([
+                ...staffClinics.map((clinica) => clinica.UsuarioClinica.rol_clinica),
+                ...(directorProfile ? ['patient_director'] : []),
+            ])];
             console.log('👤 Roles únicos extraídos:', rolesUnicos);
 
             const [canViewSettingsByClinic, canManageSettingsByClinic] = await Promise.all([
                 Promise.all(
-                    (usuario.clinicas || []).map(async (clinica) => [
+                    scopedClinics.map(async (clinica) => [
                         Number(clinica.id_clinica),
                         await canUserAccessFeature({
                             actorId: userId,
@@ -257,7 +294,7 @@ router.get('/list', async (req, res) => {
                     ])
                 ).then((entries) => new Map(entries)),
                 Promise.all(
-                (usuario.clinicas || []).map(async (clinica) => [
+                scopedClinics.map(async (clinica) => [
                     Number(clinica.id_clinica),
                     await canUserAccessFeature({
                         actorId: userId,
@@ -269,7 +306,7 @@ router.get('/list', async (req, res) => {
             ]);
 
             // Formatear respuesta para usuarios normales
-            const clinicas = (usuario.clinicas || []).map(clinica => ({
+            const serializeClinic = (clinica, role, subrole, permissions = {}) => ({
                 id: clinica.id_clinica,
                 name: clinica.nombre_clinica,
                 description: clinica.descripcion || '',
@@ -292,18 +329,39 @@ router.get('/list', async (req, res) => {
                     clinica.configuracion,
                     canViewSettingsByClinic.get(Number(clinica.id_clinica)) === true,
                 ),
-                userRole: clinica.UsuarioClinica.rol_clinica,
-                userSubRole: clinica.UsuarioClinica.subrol_clinica,
-                // Permisos basados en el rol asignado
+                userRole: role,
+                userSubRole: subrole,
                 permissions: {
-                    canMapAssets: STAFF_ROLES.includes(clinica.UsuarioClinica.rol_clinica),
+                    canMapAssets: STAFF_ROLES.includes(role),
                     canViewSettings: canViewSettingsByClinic.get(Number(clinica.id_clinica)) === true,
                     canManageSettings: canViewSettingsByClinic.get(Number(clinica.id_clinica)) === true
                         && canManageSettingsByClinic.get(Number(clinica.id_clinica)) === true,
-                    canViewReports: STAFF_ROLES.includes(clinica.UsuarioClinica.rol_clinica),
-                    isSystemAdmin: false
+                    canViewReports: STAFF_ROLES.includes(role) || role === 'patient_director',
+                    canManagePatients: role === 'patient_director',
+                    canManageAppointments: role === 'patient_director',
+                    isSystemAdmin: false,
+                    ...permissions,
                 }
-            }));
+            });
+            const clinicsById = new Map(staffClinics.map((clinica) => [
+                Number(clinica.id_clinica),
+                serializeClinic(
+                    clinica,
+                    clinica.UsuarioClinica.rol_clinica,
+                    clinica.UsuarioClinica.subrol_clinica,
+                ),
+            ]));
+            for (const setting of directorSettings) {
+                clinicsById.set(Number(setting.clinic_id), serializeClinic(
+                    setting.clinic,
+                    'patient_director',
+                    'Director de pacientes',
+                    {
+                        patientDirectionEnabled: Boolean(setting.is_enabled),
+                    },
+                ));
+            }
+            const clinicas = Array.from(clinicsById.values());
 
             console.log('🏥 Clínicas formateadas para usuario:', clinicas.map(c => ({
                 id: c.id,

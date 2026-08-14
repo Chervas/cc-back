@@ -920,6 +920,14 @@ exports.updatePersonalMember = async (req, res) => {
             }
         }
 
+        if (Array.isArray(req.body.clinicas)
+            && req.body.clinicas.some((row) => String(row?.subrol_clinica || '').trim() === 'Director de pacientes')) {
+            return res.status(400).json({
+                message: 'Director de pacientes se asigna desde Usuarios, no desde Personal.',
+                code: 'patient_direction_is_not_clinic_staff',
+            });
+        }
+
         const user = await Usuario.findByPk(targetUserId);
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
@@ -4579,7 +4587,8 @@ exports.buscarPersonal = async (req, res) => {
 
         // Invitar/buscar personal es una acción de gestión: admin global,
         // roles de administración o permiso explicito team.manage en la clínica.
-        const canManageClinicPersonal = isAdmin(actorId) || await canManageTeamInClinic(actorId, clinicaId);
+        const canManageClinicPersonal = isAdmin(actorId)
+            || await canManageTeamInClinic(actorId, clinicaId);
         if (!canManageClinicPersonal) {
             return res.status(403).json({ message: 'Forbidden' });
         }
@@ -4686,11 +4695,17 @@ exports.invitarPersonal = async (req, res) => {
 
         // Invitar personal es una acción de gestión: admin global,
         // roles de administración o permiso explicito team.manage en la clínica.
-        const canManageClinicPersonal = isAdmin(actorId) || await canManageTeamInClinic(actorId, clinicaId);
+        if (String(subrol_clinica || '').trim() === 'Director de pacientes') {
+            return res.status(400).json({
+                message: 'Director de pacientes se asigna desde Usuarios, no desde Personal.',
+                code: 'patient_direction_is_not_clinic_staff',
+            });
+        }
+        const canManageClinicPersonal = isAdmin(actorId)
+            || await canManageTeamInClinic(actorId, clinicaId);
         if (!canManageClinicPersonal) {
             return res.status(403).json({ message: 'Forbidden' });
         }
-
         // Verificar que la clínica existe
         const clinica = await Clinica.findByPk(clinicaId);
         if (!clinica) {

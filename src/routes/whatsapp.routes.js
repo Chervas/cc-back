@@ -41,6 +41,18 @@ router.get('/templates/summary', authMiddleware, whatsappController.templatesSum
 // Listado de números de WhatsApp (con estado de asignación)
 router.get('/phones', authMiddleware, whatsappController.listPhones);
 
+// Cumplimiento de políticas y suspensiones de WhatsApp
+router.get('/compliance/status', authMiddleware, whatsappController.getComplianceStatus);
+router.get('/compliance/incidents', authMiddleware, whatsappController.listComplianceIncidents);
+router.post('/compliance/request-review', authMiddleware, whatsappController.requestComplianceReview);
+router.get('/compliance/admin/overview', authMiddleware, whatsappController.getComplianceAdminOverview);
+router.post('/compliance/admin/queues/:listId/resolve', authMiddleware, whatsappController.resolveCompliancePausedQueue);
+router.get('/compliance/admin/incidents/:id', authMiddleware, whatsappController.getComplianceAdminIncident);
+router.post('/compliance/admin/refresh', authMiddleware, whatsappController.refreshComplianceAdminOverview);
+router.post('/compliance/admin/accounts/:assetId/check', authMiddleware, whatsappController.diagnoseComplianceAccount);
+router.post('/compliance/incidents/:id/prepare-appeal', authMiddleware, whatsappController.prepareComplianceAppeal);
+router.post('/compliance/incidents/:id/mark-submitted', authMiddleware, whatsappController.markComplianceAppealSubmitted);
+
 // Asignar número a grupo o clínica
 router.post('/phones/:phoneNumberId/assign', authMiddleware, whatsappController.assignPhone);
 

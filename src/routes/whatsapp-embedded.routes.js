@@ -15,6 +15,7 @@ const {
 const {
   hasMarketingClinicScopeAccess,
 } = require('../lib/marketingScopeAccess');
+const { isGlobalAdmin } = require('../lib/role-helpers');
 
 const router = express.Router();
 const ClinicMetaAsset = db.ClinicMetaAsset;
@@ -414,7 +415,18 @@ async function fetchWabaDetailsWithBusinessId({ wabaId, accessToken }) {
 
 router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
   try {
-    const { code, clinic_id, redirect_uri, waba_id, phone_number_id, business_id, assignment_scope, group_id, connection_mode } = req.body;
+    const {
+      code,
+      clinic_id,
+      redirect_uri,
+      waba_id,
+      phone_number_id,
+      business_id,
+      assignment_scope,
+      group_id,
+      connection_mode,
+      patient_direction_user_id,
+    } = req.body;
     if (!code) {
       return res.status(400).json({ success: false, error: 'missing_code' });
     }
@@ -453,30 +465,40 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
       assignmentScope = 'unassigned';
     }
 
+    const patientDirectionUserId = Number.parseInt(String(patient_direction_user_id || ''), 10) || null;
+    let patientDirectionProfile = null;
     if (assignmentScope === 'unassigned') {
-      return res.status(400).json({
-        success: false,
-        error: 'embedded_signup_scope_required',
-      });
+      if (!patientDirectionUserId) {
+        return res.status(400).json({ success: false, error: 'embedded_signup_scope_required' });
+      }
+      patientDirectionProfile = await db.PatientDirectionProfile?.findByPk(patientDirectionUserId);
+      if (!patientDirectionProfile?.is_active) {
+        return res.status(422).json({ success: false, error: 'patient_direction_profile_required' });
+      }
+      if (!isGlobalAdmin(userId) && Number(userId) !== patientDirectionUserId) {
+        return res.status(403).json({ success: false, error: 'patient_direction_profile_forbidden' });
+      }
     }
 
-    const targetClinicIds = assignmentScope === 'clinic'
-      ? [Number(targetClinicId)]
-      : (await db.Clinica.findAll({
-        where: { grupoClinicaId: targetGroupId },
-        attributes: ['id_clinica'],
-        raw: true,
-      })).map((clinic) => Number(clinic.id_clinica)).filter(Number.isInteger);
-    if (!targetClinicIds.length) {
-      return res.status(400).json({ success: false, error: 'embedded_signup_scope_invalid' });
-    }
-    const canManageTarget = await hasMarketingClinicScopeAccess({
-      userId,
-      clinicIds: targetClinicIds,
-      access: 'write',
-    });
-    if (!canManageTarget) {
-      return res.status(403).json({ success: false, error: 'embedded_signup_scope_forbidden' });
+    if (assignmentScope !== 'unassigned') {
+      const targetClinicIds = assignmentScope === 'clinic'
+        ? [Number(targetClinicId)]
+        : (await db.Clinica.findAll({
+          where: { grupoClinicaId: targetGroupId },
+          attributes: ['id_clinica'],
+          raw: true,
+        })).map((clinic) => Number(clinic.id_clinica)).filter(Number.isInteger);
+      if (!targetClinicIds.length) {
+        return res.status(400).json({ success: false, error: 'embedded_signup_scope_invalid' });
+      }
+      const canManageTarget = await hasMarketingClinicScopeAccess({
+        userId,
+        clinicIds: targetClinicIds,
+        access: 'write',
+      });
+      if (!canManageTarget) {
+        return res.status(403).json({ success: false, error: 'embedded_signup_scope_forbidden' });
+      }
     }
 
     const { connection: metaConnection, source: metaConnectionSource } = await resolveMetaConnectionForScope({
@@ -569,7 +591,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
           params: {
             access_token: accessToken,
             fields:
-              'id,display_phone_number,verified_name,quality_rating,messaging_limit_tier,name_status,new_display_name,new_name_status,code_verification_status,status,platform_type,account_mode,is_on_biz_app',
+              'id,display_phone_number,verified_name,quality_rating,whatsapp_business_manager_messaging_limit,name_status,new_display_name,new_name_status,code_verification_status,status,platform_type,account_mode,is_on_biz_app',
           },
         })
         .then((r) => r.data)
@@ -582,7 +604,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
     const displayPhoneNumber = phoneDetails?.display_phone_number || `+00 ${phone_number_id.slice(-6)}`;
     const verifiedName = phoneDetails?.verified_name || wabaName || 'WhatsApp Business';
     const qualityRating = phoneDetails?.quality_rating || null;
-    const messagingLimit = phoneDetails?.messaging_limit_tier || phoneDetails?.messaging_limit || null;
+    const messagingLimit = phoneDetails?.whatsapp_business_manager_messaging_limit || phoneDetails?.messaging_limit || null;
     const nameStatus = phoneDetails?.name_status || null;
     const newDisplayName = phoneDetails?.new_display_name || null;
     const newNameStatus = phoneDetails?.new_name_status || null;
@@ -612,6 +634,28 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
       }
       return ClinicMetaAsset.create({ ...where, ...values });
     };
+
+    if (patientDirectionProfile) {
+      const existingPhoneAsset = await ClinicMetaAsset.findOne({
+        where: { assetType: 'whatsapp_phone_number', phoneNumberId: phone_number_id },
+      });
+      if (existingPhoneAsset && existingPhoneAsset.assignmentScope !== 'unassigned') {
+        return res.status(409).json({ success: false, error: 'patient_direction_whatsapp_already_scoped' });
+      }
+      if (existingPhoneAsset) {
+        const otherProfile = await db.PatientDirectionProfile.findOne({
+          where: {
+            whatsapp_phone_asset_id: existingPhoneAsset.id,
+            user_id: { [Op.ne]: patientDirectionUserId },
+          },
+          attributes: ['user_id'],
+          raw: true,
+        });
+        if (otherProfile) {
+          return res.status(409).json({ success: false, error: 'patient_direction_whatsapp_already_assigned' });
+        }
+      }
+    }
 
     // Guardar WABA
     await upsertAsset(
@@ -659,6 +703,16 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
         },
       }
     );
+    if (patientDirectionProfile) {
+      await patientDirectionProfile.update({
+        whatsapp_phone_asset_id: phoneAsset.id,
+        updated_by: userId,
+      });
+      await db.PatientDirectionSetting.update(
+        { director_phone_asset_id: phoneAsset.id },
+        { where: { director_user_id: patientDirectionUserId } },
+      );
+    }
     const [duplicatePhoneCleanupCount] = await ClinicMetaAsset.update(
       {
         isActive: false,
@@ -822,6 +876,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
       success: true,
       wabaId: waba_id,
       phoneNumberId: phone_number_id,
+      phoneAssetId: phoneAsset.id,
       waVerifiedName: verifiedName,
       connectionMode,
       coexistenceReconnected: connectionMode === 'coexistence',

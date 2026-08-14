@@ -1,7 +1,14 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { AccessPolicyOverride, UsuarioClinica, Clinica, Usuario } = require('../../models');
+const {
+  AccessPolicyOverride,
+  UsuarioClinica,
+  Clinica,
+  Usuario,
+  PatientDirectionProfile,
+  PatientDirectionSetting,
+} = require('../../models');
 const { ADMIN_USER_IDS, STAFF_ROLES } = require('../lib/role-helpers');
 const {
   ALLOWED_FEATURE_KEYS,
@@ -234,17 +241,52 @@ exports.getAssignments = async (req, res) => {
       return res.json({ scope_type: scopeType, scope_id: scopeId, roles: [], total: 0 });
     }
 
-    const memberships = await UsuarioClinica.findAll({
-      where: {
-        id_clinica: { [Op.in]: clinicIds },
-        rol_clinica: { [Op.in]: STAFF_ROLES },
-      },
-      attributes: ['id_usuario', 'id_clinica', 'rol_clinica', 'subrol_clinica', 'estado_invitacion'],
-      order: [['id_clinica', 'ASC'], ['rol_clinica', 'ASC'], ['subrol_clinica', 'ASC']],
-      raw: true,
-    });
+    const [memberships, patientDirectionSettings] = await Promise.all([
+      UsuarioClinica.findAll({
+        where: {
+          id_clinica: { [Op.in]: clinicIds },
+          rol_clinica: { [Op.in]: STAFF_ROLES },
+        },
+        attributes: ['id_usuario', 'id_clinica', 'rol_clinica', 'subrol_clinica', 'estado_invitacion'],
+        order: [['id_clinica', 'ASC'], ['rol_clinica', 'ASC'], ['subrol_clinica', 'ASC']],
+        raw: true,
+      }),
+      PatientDirectionSetting.findAll({
+        where: {
+          clinic_id: { [Op.in]: clinicIds },
+          director_user_id: { [Op.ne]: null },
+        },
+        attributes: ['clinic_id', 'director_user_id', 'is_enabled'],
+        order: [['clinic_id', 'ASC']],
+        raw: true,
+      }),
+    ]);
 
-    const userIds = [...new Set(memberships.map((row) => Number(row.id_usuario)).filter(Number.isFinite))];
+    const candidateDirectorIds = [...new Set(
+      patientDirectionSettings
+        .map((row) => Number(row.director_user_id))
+        .filter(Number.isFinite),
+    )];
+    const activeDirectorProfiles = candidateDirectorIds.length
+      ? await PatientDirectionProfile.findAll({
+          where: {
+            user_id: { [Op.in]: candidateDirectorIds },
+            is_active: true,
+          },
+          attributes: ['user_id'],
+          raw: true,
+        })
+      : [];
+    const activeDirectorIds = new Set(
+      activeDirectorProfiles.map((profile) => Number(profile.user_id)).filter(Number.isFinite),
+    );
+    const directorAssignments = patientDirectionSettings.filter((setting) =>
+      activeDirectorIds.has(Number(setting.director_user_id))
+    );
+    const userIds = [...new Set([
+      ...memberships.map((row) => Number(row.id_usuario)),
+      ...directorAssignments.map((row) => Number(row.director_user_id)),
+    ].filter(Number.isFinite))];
     const users = userIds.length
       ? await Usuario.findAll({
           where: { id_usuario: { [Op.in]: userIds } },
@@ -291,6 +333,40 @@ exports.getAssignments = async (req, res) => {
       });
     }
 
+    for (const assignment of directorAssignments) {
+      const roleCode = 'patient_director';
+      const user = userMap.get(Number(assignment.director_user_id));
+      const clinic = clinicMap.get(Number(assignment.clinic_id));
+      const role = roleMap.get(roleCode);
+      if (!grouped.has(roleCode)) {
+        grouped.set(roleCode, {
+          role_code: roleCode,
+          label: role?.label || 'Director de pacientes',
+          description: role?.description || null,
+          count: 0,
+          users: [],
+        });
+      }
+
+      const bucket = grouped.get(roleCode);
+      bucket.count += 1;
+      bucket.users.push({
+        id: Number(assignment.director_user_id),
+        name: [user?.nombre, user?.apellidos].filter(Boolean).join(' ').trim() || user?.email_usuario || `Usuario ${assignment.director_user_id}`,
+        email: user?.email_usuario || null,
+        avatar: user?.avatar || null,
+        title: user?.cargo_usuario || 'Director de pacientes',
+        account_status: user?.estado_cuenta || null,
+        clinic_id: Number(assignment.clinic_id),
+        clinic_name: clinic?.nombre_clinica || `Clínica ${assignment.clinic_id}`,
+        role: roleCode,
+        subrole: null,
+        invitation_status: null,
+        assignment_source: 'patient_direction',
+        service_enabled: assignment.is_enabled === true || Number(assignment.is_enabled) === 1,
+      });
+    }
+
     const roles = roleCatalog
       .map((role) => grouped.get(role.code) || {
         role_code: role.code,
@@ -299,13 +375,13 @@ exports.getAssignments = async (req, res) => {
         count: 0,
         users: [],
       })
-      .filter((role) => role.count > 0 || ['propietario', 'agencia', 'doctor', 'assistant', 'reception', 'admin_staff'].includes(role.role_code));
+      .filter((role) => role.count > 0 || ['propietario', 'agencia', 'patient_director', 'doctor', 'assistant', 'reception', 'admin_staff'].includes(role.role_code));
 
     return res.json({
       scope_type: scopeType,
       scope_id: scopeId,
       clinic_ids: clinicIds,
-      total: memberships.length,
+      total: memberships.length + directorAssignments.length,
       roles,
     });
   } catch (error) {

@@ -1013,6 +1013,18 @@ const NODE_TYPES_V2 = [
     config_schema: [],
   },
   {
+    type: 'action/process_review_response_classification',
+    category: 'action',
+    label: 'Aplicar clasificación de respuesta',
+    description: 'Registra una baja, un número erróneo, un rechazo de reseña o una revisión manual sin alterar las valoraciones válidas.',
+    output_keys: ['on_success'],
+    runtime_status: 'real',
+    default_config: { source_node_id: '' },
+    config_schema: [
+      { key: 'source_node_id', label: 'Nodo de análisis', input_type: 'string', required: true },
+    ],
+  },
+  {
     type: 'action/send_email',
     category: 'action',
     label: 'Enviar Email',

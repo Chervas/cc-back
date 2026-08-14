@@ -1,7 +1,13 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { AccessPolicyOverride, UsuarioClinica, Clinica } = require('../../models');
+const {
+  AccessPolicyOverride,
+  UsuarioClinica,
+  Clinica,
+  PatientDirectionProfile,
+  PatientDirectionSetting,
+} = require('../../models');
 const { isGlobalAdmin } = require('./role-helpers');
 
 const ALLOWED_FEATURE_KEYS = new Set([
@@ -45,6 +51,9 @@ const ALLOWED_FEATURE_KEYS = new Set([
   'nutrition.reports.finalize',
   'clinical.reports.view',
   'clinical.reports.manage',
+  'patient_direction.view',
+  'patient_direction.manage',
+  'patient_direction.assign_role',
 ]);
 
 const ALLOWED_ROLE_CODES = new Set([
@@ -55,10 +64,44 @@ const ALLOWED_ROLE_CODES = new Set([
   'reception',
   'admin_staff',
   'accountant',
+  'patient_director',
   'unknown',
 ]);
 
 const DEFAULT_FEATURES = {
+  'patient_direction.view': {
+    propietario: true,
+    agencia: false,
+    doctor: false,
+    assistant: false,
+    reception: true,
+    admin_staff: true,
+    accountant: false,
+    patient_director: true,
+    unknown: false,
+  },
+  'patient_direction.manage': {
+    propietario: false,
+    agencia: false,
+    doctor: false,
+    assistant: false,
+    reception: false,
+    admin_staff: false,
+    accountant: false,
+    patient_director: false,
+    unknown: false,
+  },
+  'patient_direction.assign_role': {
+    propietario: false,
+    agencia: true,
+    doctor: false,
+    assistant: false,
+    reception: false,
+    admin_staff: false,
+    accountant: false,
+    patient_director: false,
+    unknown: false,
+  },
   marketing: {
     propietario: true,
     agencia: true,
@@ -461,6 +504,59 @@ const DEFAULT_FEATURES = {
   },
 };
 
+// El Director de pacientes necesita una superficie operativa concreta, no la
+// matriz completa de propietario. Mantenerla explicita evita que una nueva
+// capacidad sensible se herede por accidente al ampliar el catalogo.
+const PATIENT_DIRECTOR_DEFAULTS = Object.freeze({
+  marketing: true,
+  'clinic.settings.view': true,
+  'clinic.settings.edit': false,
+  'team.view': true,
+  'team.manage': true,
+  'team.schedule.self.manage': false,
+  'billing.reports.view': false,
+  'billing.documents.manage': false,
+  'accounting.expenses.manage': false,
+  'accounting.cash.manage': false,
+  'accounting.payroll.view': false,
+  'accounting.payroll.manage': false,
+  'accounting.export': false,
+  'accounting.ocr.manage': false,
+  'accounting.sepa.manage': false,
+  'accounting.firm.manage': false,
+  'patients.view': true,
+  'patients.sensitive.view': true,
+  'patients.edit': true,
+  'leads.sensitive.view': true,
+  'leads.manage': true,
+  'marketing.web.view': false,
+  'marketing.web.edit': false,
+  'marketing.web.advanced_edit': false,
+  'marketing.web.review': false,
+  'marketing.web.publish': false,
+  'marketing.web.domains.manage': false,
+  'marketing.web.templates.manage': false,
+  'appointments.view': true,
+  'appointments.manage': true,
+  'consents.view': false,
+  'consents.manage': false,
+  'quickchat.read_patients': true,
+  'quickchat.read_team': false,
+  'quickchat.read_leads': true,
+  'nutrition.workspace.view': false,
+  'nutrition.measurements.create': false,
+  'nutrition.reports.finalize': false,
+  'clinical.reports.view': false,
+  'clinical.reports.manage': false,
+  'patient_direction.view': true,
+  'patient_direction.manage': false,
+  'patient_direction.assign_role': false,
+});
+
+for (const [featureKey, allowed] of Object.entries(PATIENT_DIRECTOR_DEFAULTS)) {
+  if (DEFAULT_FEATURES[featureKey]) DEFAULT_FEATURES[featureKey].patient_director = allowed;
+}
+
 const ROLE_CATALOG = [
   {
     code: 'propietario',
@@ -491,6 +587,11 @@ const ROLE_CATALOG = [
     code: 'admin_staff',
     label: 'Administración',
     description: 'Administración interna de la clínica.',
+  },
+  {
+    code: 'patient_director',
+    label: 'Director de pacientes',
+    description: 'Captación, seguimiento y coordinación de primeras citas en las clínicas asignadas.',
   },
   {
     code: 'accountant',
@@ -825,14 +926,45 @@ const FEATURE_CATALOG = [
     enforcement_status: 'backend',
     sensitive: false,
   },
+  {
+    key: 'patient_direction.view',
+    group: 'marketing_conversations',
+    kind: 'view',
+    label: 'Ver operativa del Director de pacientes',
+    enforcement_status: 'backend',
+    sensitive: true,
+  },
+  {
+    key: 'patient_direction.manage',
+    group: 'marketing_conversations',
+    kind: 'action',
+    label: 'Configurar el servicio Director de pacientes',
+    enforcement_status: 'backend',
+    sensitive: true,
+  },
+  {
+    key: 'patient_direction.assign_role',
+    group: 'administration',
+    kind: 'action',
+    label: 'Asignar el rol Director de pacientes',
+    enforcement_status: 'backend',
+    sensitive: true,
+  },
 ];
 
 function getAccessPolicyCatalog() {
+  const defaults = Object.fromEntries(Object.entries(DEFAULT_FEATURES).map(([featureKey, values]) => [
+    featureKey,
+    {
+      ...values,
+      patient_director: values.patient_director ?? values.propietario ?? false,
+    },
+  ]));
   return {
     version: 1,
     roles: ROLE_CATALOG,
     features: FEATURE_CATALOG,
-    defaults: DEFAULT_FEATURES,
+    defaults,
   };
 }
 
@@ -860,6 +992,9 @@ function roleCodeFromMembership(membership) {
 }
 
 function defaultForFeature(featureKey, roleCode) {
+  if (roleCode === 'patient_director' && DEFAULT_FEATURES[featureKey]?.patient_director === undefined) {
+    return Boolean(DEFAULT_FEATURES[featureKey]?.propietario ?? false);
+  }
   return Boolean(DEFAULT_FEATURES[featureKey]?.[roleCode] ?? false);
 }
 
@@ -908,21 +1043,35 @@ async function canUserAccessFeature({ actorId, featureKey, clinicId }) {
   if (isGlobalAdmin(actorId)) return true;
   if (!Number.isFinite(normalizedClinicId)) return false;
 
-  const membership = await UsuarioClinica.findOne({
-    where: {
-      id_usuario: Number(actorId),
-      id_clinica: normalizedClinicId,
-      [Op.or]: [
-        { estado_invitacion: 'aceptada' },
-        { estado_invitacion: null },
-      ],
-    },
-    attributes: ['rol_clinica', 'subrol_clinica'],
-    raw: true,
-  });
-  if (!membership) return false;
+  const [membership, directorProfile] = await Promise.all([
+    UsuarioClinica.findOne({
+      where: {
+        id_usuario: Number(actorId),
+        id_clinica: normalizedClinicId,
+        [Op.or]: [
+          { estado_invitacion: 'aceptada' },
+          { estado_invitacion: null },
+        ],
+      },
+      attributes: ['rol_clinica', 'subrol_clinica'],
+      raw: true,
+    }),
+    PatientDirectionProfile?.findOne({
+      where: { user_id: Number(actorId), is_active: true },
+      include: [{
+        model: PatientDirectionSetting,
+        as: 'clinicSettings',
+        where: { clinic_id: normalizedClinicId },
+        attributes: [],
+        required: true,
+      }],
+      attributes: ['user_id'],
+      raw: true,
+    }),
+  ]);
+  if (!membership && !directorProfile) return false;
 
-  const roleCode = roleCodeFromMembership(membership);
+  const roleCode = directorProfile ? 'patient_director' : roleCodeFromMembership(membership);
   const groupId = await getClinicGroupId(normalizedClinicId);
   const override = await getFeatureOverride({
     featureKey: normalizedFeatureKey,
@@ -968,12 +1117,28 @@ async function getAccessibleClinicIdsForFeature({ actorId, featureKey, clinicIds
     membershipWhere.id_clinica = { [Op.in]: requestedClinicIds };
   }
 
-  const memberships = await UsuarioClinica.findAll({
-    where: membershipWhere,
-    attributes: ['id_clinica'],
-    raw: true,
-  });
-  const candidateIds = normalizeClinicIds(memberships.map((membership) => membership.id_clinica));
+  const [memberships, directorSettings] = await Promise.all([
+    UsuarioClinica.findAll({
+      where: membershipWhere,
+      attributes: ['id_clinica'],
+      raw: true,
+    }),
+    PatientDirectionProfile?.findOne({
+      where: { user_id: normalizedActorId, is_active: true },
+      include: [{
+        model: PatientDirectionSetting,
+        as: 'clinicSettings',
+        ...(requestedClinicIds ? { where: { clinic_id: { [Op.in]: requestedClinicIds } } } : {}),
+        attributes: ['clinic_id'],
+        required: false,
+      }],
+      attributes: ['user_id'],
+    }),
+  ]);
+  const candidateIds = normalizeClinicIds([
+    ...memberships.map((membership) => membership.id_clinica),
+    ...(directorSettings?.clinicSettings || []).map((setting) => setting.clinic_id),
+  ]);
   const decisions = await Promise.all(candidateIds.map(async (clinicId) => ({
     clinicId,
     allowed: await canUserAccessFeature({

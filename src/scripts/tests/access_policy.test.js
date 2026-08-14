@@ -29,6 +29,7 @@ function testLeadAutomationAuthorizationContract() {
 async function testClinicSettingsAuthorizationMatrix() {
   const originals = {
     membershipFindOne: db.UsuarioClinica.findOne,
+    directorProfileFindOne: db.PatientDirectionProfile.findOne,
     clinicFindByPk: db.Clinica.findByPk,
     overrideFindAll: db.AccessPolicyOverride.findAll,
   };
@@ -41,6 +42,7 @@ async function testClinicSettingsAuthorizationMatrix() {
     assert.ok(where[db.Sequelize.Op.or], 'active invitation condition must be enforced');
     return membership;
   };
+  db.PatientDirectionProfile.findOne = async () => null;
   db.Clinica.findByPk = async () => ({ id_clinica: 66, grupoClinicaId: 29 });
   db.AccessPolicyOverride.findAll = async () => overrides;
 
@@ -109,6 +111,7 @@ async function testClinicSettingsAuthorizationMatrix() {
     }), true, 'global admins retain the explicit bypass');
   } finally {
     db.UsuarioClinica.findOne = originals.membershipFindOne;
+    db.PatientDirectionProfile.findOne = originals.directorProfileFindOne;
     db.Clinica.findByPk = originals.clinicFindByPk;
     db.AccessPolicyOverride.findAll = originals.overrideFindAll;
   }
@@ -207,6 +210,19 @@ async function run() {
   assert.equal(accessPolicy.defaultForFeature('clinic.settings.edit', 'assistant'), false);
   assert.equal(accessPolicy.defaultForFeature('clinic.settings.edit', 'reception'), true);
   assert.equal(accessPolicy.defaultForFeature('clinic.settings.edit', 'unknown'), false);
+  assert.equal(accessPolicy.ALLOWED_ROLE_CODES.has('patient_director'), true);
+  assert.equal(accessPolicy.defaultForFeature('patient_direction.view', 'patient_director'), true);
+  assert.equal(accessPolicy.defaultForFeature('patient_direction.manage', 'patient_director'), false);
+  assert.equal(accessPolicy.defaultForFeature('patient_direction.assign_role', 'patient_director'), false);
+  assert.equal(accessPolicy.defaultForFeature('patient_direction.assign_role', 'propietario'), false);
+  assert.equal(accessPolicy.defaultForFeature('patient_direction.assign_role', 'agencia'), true);
+  assert.equal(accessPolicy.defaultForFeature('appointments.manage', 'patient_director'), true);
+  assert.equal(accessPolicy.defaultForFeature('leads.sensitive.view', 'patient_director'), true);
+  assert.equal(accessPolicy.defaultForFeature('leads.manage', 'patient_director'), true);
+  assert.equal(accessPolicy.defaultForFeature('team.manage', 'patient_director'), true);
+  assert.equal(accessPolicy.defaultForFeature('team.schedule.self.manage', 'patient_director'), false);
+  assert.equal(accessPolicy.defaultForFeature('billing.reports.view', 'patient_director'), false);
+  assert.equal(accessPolicy.defaultForFeature('consents.view', 'patient_director'), false);
 
   // PUBLIC_MEDIA reutiliza este permiso para review_team_photo: una agencia
   // asignada al scope debe seguir pudiendo gestionar la foto de resenas.
@@ -287,7 +303,10 @@ async function run() {
   for (const [featureKey, roleDefaults] of Object.entries(webPermissionMatrix)) {
     assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has(featureKey), true);
     assert.ok(features.has(featureKey), `${featureKey} must be present in the catalog`);
-    assert.deepEqual(catalog.defaults[featureKey], roleDefaults);
+    assert.deepEqual(catalog.defaults[featureKey], {
+      ...roleDefaults,
+      patient_director: false,
+    });
   }
   assert.equal(features.get('marketing.web.view')?.enforcement_status, 'backend');
   assert.equal(features.get('marketing.web.edit')?.enforcement_status, 'backend');

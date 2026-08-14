@@ -3,6 +3,7 @@ const db = require('../../models');
 const { normalizePhoneE164 } = require('../lib/phone');
 const ClinicMetaAsset = db.ClinicMetaAsset;
 const Clinica = db.Clinica;
+const MarketingContactOptOut = db.MarketingContactOptOut;
 const sequelize = db.sequelize;
 
 const LIMITED_MODE_MAX_OUTBOUND_PER_24H = Number.parseInt(
@@ -125,6 +126,7 @@ class WhatsAppService {
 
         if (asset?.waAccessToken && asset?.phoneNumberId) {
             return {
+                originId: asset.id || null,
                 phoneNumberId: asset.phoneNumberId,
                 accessToken: asset.waAccessToken,
                 wabaId: asset.wabaId || null,
@@ -139,6 +141,7 @@ class WhatsAppService {
 
         if (waba?.waAccessToken && waba?.phoneNumberId) {
             return {
+                originId: waba.id || null,
                 phoneNumberId: waba.phoneNumberId,
                 accessToken: waba.waAccessToken,
                 wabaId: waba.wabaId || null,
@@ -150,6 +153,35 @@ class WhatsAppService {
         }
 
         return null;
+    }
+
+    async getConfigByAssetId(assetId, { clinicId = null } = {}) {
+        const normalizedAssetId = Number.parseInt(String(assetId || ''), 10);
+        if (!Number.isInteger(normalizedAssetId) || normalizedAssetId <= 0) {
+            return null;
+        }
+        const asset = await ClinicMetaAsset.findOne({
+            where: {
+                id: normalizedAssetId,
+                assetType: 'whatsapp_phone_number',
+                isActive: true,
+            },
+            raw: true,
+        });
+        if (!asset?.waAccessToken || !asset?.phoneNumberId) {
+            return null;
+        }
+        return {
+            originId: asset.id,
+            phoneNumberId: asset.phoneNumberId,
+            accessToken: asset.waAccessToken,
+            wabaId: asset.wabaId || null,
+            assignmentScope: asset.assignmentScope || null,
+            clinicaId: asset.clinicaId || clinicId || null,
+            grupoClinicaId: asset.grupoClinicaId || null,
+            additionalData: asset.additionalData || {},
+            originLabel: asset.metaAssetName || asset.waVerifiedName || null,
+        };
     }
 
     /**
@@ -188,6 +220,7 @@ class WhatsAppService {
         interactiveCtaText,
         clinicConfig = {},
     }) {
+        await this.assertRecipientCanReceive({ to, clinicConfig });
         this.setClinicCredentials(clinicConfig);
         const shouldUseTemplate =
             useTemplate !== undefined ? useTemplate : this.defaultUseTemplate;
@@ -215,6 +248,32 @@ class WhatsAppService {
         }
 
         return this.sendTextMessage({ to, body, previewUrl, clinicConfig });
+    }
+
+    async assertRecipientCanReceive({ to, clinicConfig = {} }) {
+        if (!MarketingContactOptOut) return;
+        const phoneDigits = String(this.normalizePhoneNumber(to) || to || '').replace(/\D+/g, '');
+        const clinicId = Number(clinicConfig.clinicId || clinicConfig.clinicaId || 0);
+        if (!phoneDigits || !clinicId) return;
+        const restriction = await MarketingContactOptOut.findOne({
+            where: {
+                clinica_id: clinicId,
+                phone_digits: phoneDigits,
+                channel: 'whatsapp',
+                scope: 'whatsapp_number',
+                status: 'active',
+            },
+            order: [['updated_at', 'DESC']],
+        });
+        if (!restriction) return;
+        const error = new Error('whatsapp_recipient_number_restricted');
+        error.code = 'WHATSAPP_RECIPIENT_NUMBER_RESTRICTED';
+        error.status = 409;
+        error.details = {
+            restriction_id: restriction.id,
+            reason: restriction.reason_text || 'Número marcado como erróneo o perteneciente a otra persona',
+        };
+        throw error;
     }
 
     /**

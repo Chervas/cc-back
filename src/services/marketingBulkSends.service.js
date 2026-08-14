@@ -8,6 +8,7 @@ const { normalizePhoneDigits, getPhoneLookupCandidates } = require('../lib/phone
 const whatsappService = require('./whatsapp.service');
 const whatsappPaymentStatusService = require('./whatsappPaymentStatus.service');
 const whatsappConnectionStatusService = require('./whatsappConnectionStatus.service');
+const whatsappDeliveryGovernanceService = require('./whatsappDeliveryGovernance.service');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
 const { matchesReviewTemplateMedia } = require('../lib/review-template-media');
 const { usesExplicitDispatchWindow } = require('../lib/marketing-dispatch-window');
@@ -23,6 +24,7 @@ const {
   inspectExplicitReviewAutomation,
 } = require('../lib/review-automation-config');
 const marketingOptOutService = require('./marketingOptOut.service');
+const reviewResponseClassification = require('./reviewResponseClassification.service');
 const jobRequestsService = require('./jobRequests.service');
 const { isGlobalAdmin } = require('../lib/role-helpers');
 const { getIO } = require('./socket.service');
@@ -225,7 +227,20 @@ function isActorGlobalAdmin(actor) {
 
 function isBlockingQualityPause(dispatch = {}) {
   if (String(dispatch.status || '').toLowerCase() !== 'paused_quality') return false;
+  if (String(dispatch.admin_resolution?.decision || '').toLowerCase() === 'authorized') return false;
   return String(dispatch.paused_reason || '').toLowerCase() !== 'read_rate_low';
+}
+
+function getDeliveryGateBlockedMessage(reason) {
+  const messages = {
+    template_disabled_by_meta: 'WhatsApp ha desactivado esta plantilla. Debe corregirse y aprobarse antes de reanudar la cola.',
+    template_paused_by_meta: 'WhatsApp ha pausado esta plantilla por calidad. La cola seguirá detenida hasta que vuelva a estar activa.',
+    template_quality_red: 'La plantilla tiene calidad baja en WhatsApp. Revisa su contenido y la audiencia antes de continuar.',
+    template_quality_assessment: 'WhatsApp está evaluando la calidad de la plantilla. La cola continuará cuando Meta resuelva la retención.',
+    portfolio_capacity_reached: 'La capacidad de conversaciones iniciadas del portfolio de WhatsApp está agotada temporalmente.',
+  };
+  return messages[String(reason || '').toLowerCase()]
+    || 'WhatsApp no permite reanudar esta cola en su estado actual.';
 }
 
 function buildContactUniqExpression(alias = '') {
@@ -589,6 +604,9 @@ function computeCounters(items) {
   const replied = items.filter((item) => item.replied_at || String(item.dispatch_status || '').toLowerCase() === 'replied').length;
   const failed = items.filter((item) => item.failed_at || String(item.dispatch_status || '').toLowerCase() === 'failed').length;
   const optOut = items.filter((item) => item.opt_out_at || item.exclusion_reason === 'opt_out').length;
+  const sentOptOut = items.filter((item) => (
+    item.sent_at || ['sent', 'delivered', 'read', 'replied'].includes(String(item.dispatch_status || '').toLowerCase())
+  ) && (item.opt_out_at || item.exclusion_reason === 'opt_out')).length;
   const exclusionReasons = {};
   for (const item of items) {
     if (!String(item.status || '').startsWith('excluded')) continue;
@@ -609,6 +627,7 @@ function computeCounters(items) {
     replied,
     failed,
     opt_out: optOut,
+    sent_opt_out: sentOptOut,
     appointments: 0,
     treatments: 0,
   };
@@ -633,7 +652,7 @@ async function reconcileDispatchJobState(list, dependencies = {}) {
   if (!list || !JobRequestModel) return { reconciled: false, reason: 'missing_context' };
   const dispatch = getDispatchConfig(list);
   const jobId = Number(dispatch?.job_id || 0);
-  const liveStatuses = new Set(['queued', 'sending', 'scheduled', 'waiting_template_approval', 'paused', 'paused_quality', 'paused_limit', 'paused_template']);
+  const liveStatuses = new Set(['queued', 'sending', 'scheduled', 'waiting_template_approval', 'paused', 'paused_quality', 'paused_limit', 'paused_template', 'paused_config']);
   const currentStatus = String(dispatch?.status || list?.status || '').toLowerCase();
   if (!jobId || !liveStatuses.has(currentStatus)) {
     return { reconciled: false, reason: 'not_live' };
@@ -676,7 +695,7 @@ async function reconcileListMessageState(list, scope = {}) {
   if (!listId || !Message || !MarketingPatientListItem) return { reconciled: false, reason: 'missing_context' };
   const dispatch = getDispatchConfig(list);
   const dispatchStatus = String(dispatch?.status || list?.status || '').toLowerCase();
-  const liveStatuses = new Set(['queued', 'sending', 'scheduled', 'waiting_template_approval', 'paused', 'paused_quality', 'paused_limit', 'paused_template']);
+  const liveStatuses = new Set(['queued', 'sending', 'scheduled', 'waiting_template_approval', 'paused', 'paused_quality', 'paused_limit', 'paused_template', 'paused_config', 'held_meta', 'paused_review', 'awaiting_delivery']);
   const referenceDate = parseDate(list?.last_sent_at) || parseDate(list?.prepared_at) || parseDate(list?.updated_at) || parseDate(list?.created_at);
   const isWithinReconcileWindow = !referenceDate || (Date.now() - referenceDate.getTime()) <= STATS_RECONCILE_WINDOW_MS;
   if (!liveStatuses.has(dispatchStatus) && !isWithinReconcileWindow) {
@@ -4417,6 +4436,7 @@ async function getReviewRequestSummary(scope, options = {}) {
         review_exclusion_breakdown: [],
         requests_sent: 0,
         active_queue_recipients: 0,
+        marketing_opt_outs: 0,
         ratings_1_to_4: 0,
         ratings_5: 0,
         treatment_options: [],
@@ -4487,6 +4507,26 @@ async function getReviewRequestSummary(scope, options = {}) {
           AND te.item_id = i.id
           AND te.event_type IN ('mass_campaign_test_sent', 'mass_campaign_test_failed')
       )
+    `,
+    { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
+  );
+
+  const [reviewOptOutRow] = await db.sequelize.query(
+    `
+    SELECT COUNT(DISTINCT COALESCE(
+      CASE WHEN i.paciente_id IS NOT NULL THEN CONCAT('p:', i.paciente_id) END,
+      CASE WHEN NULLIF(TRIM(i.phone), '') IS NOT NULL THEN CONCAT('ph:', TRIM(REPLACE(REPLACE(REPLACE(REPLACE(i.phone, '+', ''), ' ', ''), '-', ''), '.', ''))) END,
+      CONCAT('i:', i.id)
+    )) AS total
+    FROM MarketingPatientListItems i
+    INNER JOIN MarketingPatientLists l ON l.id = i.list_id
+    WHERE COALESCE(i.clinica_id, l.clinica_id) IN (:clinicIds)
+      AND l.objective_id = :objectiveId
+      AND (
+        JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
+        OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.template_usage')) = 'solicitud_resena'
+      )
+      AND (i.opt_out_at IS NOT NULL OR i.exclusion_reason = 'opt_out' OR i.status = 'excluded_opt_out')
     `,
     { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
   );
@@ -4782,6 +4822,7 @@ async function getReviewRequestSummary(scope, options = {}) {
       treatment_options: treatmentOptions,
       requests_sent: Number(sentRow?.total || 0),
       active_queue_recipients: Number(activeQueueRow?.total || 0),
+      marketing_opt_outs: Number(reviewOptOutRow?.total || 0),
       ratings_1_to_4: Number(ratingsRow?.ratings_1_to_4 || 0),
       ratings_5: Number(ratingsRow?.ratings_5 || 0),
       google_reviews_matched: Number(googleReviewsMatchedRow?.total || 0),
@@ -4946,11 +4987,28 @@ function buildReviewAutomationNodes({
           value_type: 'number',
           label: 'Valoración del paciente',
         },
+        operator: 'exists',
+        right_value: null,
+      },
+      outputs: { on_true: 'N8', on_false: 'N13' },
+      position: { x: 430, y: 600 },
+    },
+    {
+      id: 'N8',
+      type: 'condition/field_check',
+      config: {
+        mode: 'simple',
+        left_ref: {
+          source: 'context',
+          path: 'last_response_context.response_rating',
+          value_type: 'number',
+          label: 'Valoración del paciente',
+        },
         operator: 'greater_than_or_equals',
         right_value: threshold,
       },
       outputs: { on_true: 'N6', on_false: 'N7' },
-      position: { x: 430, y: 600 },
+      position: { x: 610, y: 500 },
     },
     {
       id: 'N6',
@@ -4971,6 +5029,68 @@ function buildReviewAutomationNodes({
       },
       outputs: { on_success: null },
       position: { x: 720, y: 700 },
+    },
+    {
+      id: 'N13',
+      type: 'condition/ai_analysis',
+      config: {
+        preset_key: 'review_response_classifier',
+        instruction: 'Clasifica la intención de la respuesta del paciente a la solicitud de reseña.',
+        context_sources: [
+          { key: 'respuesta', path: '{{last_response_context.response_text}}' },
+        ],
+        output_fields: [
+          { name: 'response_intent', type: 'string', description: 'rating, marketing_opt_out, wrong_recipient, review_refusal o ambiguous' },
+          { name: 'response_rating', type: 'number', description: 'Valoración de 1 a 5 o 0 si no existe' },
+          { name: 'confidence', type: 'number', description: 'Confianza entre 0 y 1' },
+          { name: 'reason', type: 'string', description: 'Motivo breve de la clasificación' },
+        ],
+        mode: 'quick_qa',
+        max_tokens: 180,
+      },
+      outputs: { on_success: 'N14', on_fail: 'N14' },
+      position: { x: 610, y: 800 },
+    },
+    {
+      id: 'N14',
+      type: 'action/process_review_response_classification',
+      config: { source_node_id: 'N13' },
+      outputs: { on_success: 'N15' },
+      position: { x: 850, y: 800 },
+    },
+    {
+      id: 'N15',
+      type: 'condition/field_check',
+      config: {
+        mode: 'simple',
+        left_ref: {
+          source: 'context',
+          path: 'outputs.N14.response_intent',
+          value_type: 'string',
+          label: 'Intención clasificada',
+        },
+        operator: 'equals',
+        right_value: 'rating',
+      },
+      outputs: { on_true: 'N16', on_false: null },
+      position: { x: 1080, y: 800 },
+    },
+    {
+      id: 'N16',
+      type: 'condition/field_check',
+      config: {
+        mode: 'simple',
+        left_ref: {
+          source: 'context',
+          path: 'outputs.N14.response_rating',
+          value_type: 'number',
+          label: 'Valoración clasificada',
+        },
+        operator: 'greater_than_or_equals',
+        right_value: threshold,
+      },
+      outputs: { on_true: 'N6', on_false: 'N7' },
+      position: { x: 1280, y: 800 },
     },
     {
       id: 'N9',
@@ -5174,7 +5294,7 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
   const displayName = await buildReviewAutomationDisplayName(scope);
   const payload = {
     ...identity,
-    version: Math.max(Number(existing?.version || 0), 2),
+    version: existing ? Number(existing.version || 0) + 1 : 2,
     engine_version: 'v2',
     name: displayName,
     description: `Espera ${reviewDelayToHours(reviewDelay, 0)}h tras el evento configurado, pide al paciente una valoración con escala 5 a 1 y deriva a Google solo si responde 5/5.`,
@@ -5197,9 +5317,12 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     created_by: existing?.created_by || userId || 1,
   };
 
-  const row = existing
-    ? await existing.update(payload)
-    : await AutomationFlowTemplateV2.create(payload);
+  const row = await db.sequelize.transaction(async (transaction) => {
+    if (existing) {
+      await existing.update({ is_active: false }, { transaction });
+    }
+    return AutomationFlowTemplateV2.create(payload, { transaction });
+  });
   const serializedTemplate = serializeReviewAutomationTemplate(row);
   const [approvedReviewTemplate, approvedReminderTemplate, googleReviewUrlAvailable, whatsappAvailable] = await Promise.all([
     findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null, reviewTemplateSelectionOptions),
@@ -7858,7 +7981,7 @@ async function sendTest(scope, campaignId, body = {}) {
       phoneNumberId: clinicConfig.phoneNumberId || null,
       wabaId: clinicConfig.wabaId || null,
     },
-    sent_at: new Date(),
+    sent_at: null,
   });
   emitQuickChatMessageCreated(conversation, appMessage);
 
@@ -7907,50 +8030,78 @@ async function sendTest(scope, campaignId, body = {}) {
       recipient: targetPhone,
       source: 'mass_campaign_test',
     }).catch(() => null);
+    await whatsappPaymentStatusService.markMissingPaymentFromProviderError({
+      error: providerError,
+      clinicId,
+      phoneId: clinicConfig.phoneNumberId || null,
+      wabaId: clinicConfig.wabaId || null,
+      messageId: appMessage.id,
+      source: 'mass_campaign_test',
+    }).catch(() => null);
     throw sendErr;
   }
 
   const providerMessageId = response?.messages?.[0]?.id || null;
+  const immediate = await whatsappDeliveryGovernanceService.recordImmediateSendResponse({
+    response,
+    clinicId,
+    wabaId: clinicConfig.wabaId,
+    phoneNumberId: clinicConfig.phoneNumberId,
+    template,
+    listId: list.id,
+    itemId: item.id,
+    messageId: appMessage.id,
+  }).catch((governanceError) => {
+    console.warn('[marketing-bulk-sends] No se pudo registrar la aceptación inmediata de la prueba', {
+      list_id: list.id,
+      item_id: item.id,
+      error: governanceError?.message || governanceError,
+    });
+    const status = normalizeText(response?.messages?.[0]?.message_status || 'accepted').toLowerCase();
+    return {
+      status,
+      held: status === 'held_for_quality_assessment',
+      providerMessageId: response?.messages?.[0]?.id || null,
+    };
+  });
   await appMessage.update({
-    status: 'sent',
+    status: 'pending',
     metadata: {
       ...(appMessage.metadata || {}),
       wa_response: response || null,
-      wamid: providerMessageId,
-      phoneId: clinicConfig.phoneNumberId || null,
+        wamid: immediate.providerMessageId || providerMessageId,
+        phoneId: clinicConfig.phoneNumberId || null,
+        provider_acceptance_status: immediate.status,
+        provider_acceptance_at: new Date().toISOString(),
     },
-    sent_at: new Date(),
+    sent_at: null,
   });
   emitQuickChatMessageUpdated(conversation, appMessage);
-  await whatsappConnectionStatusService.clearDisconnectedAfterSuccess({
-    clinicId,
-    phoneId: clinicConfig.phoneNumberId || null,
-    wabaId: clinicConfig.wabaId || null,
-    messageId: appMessage.id,
-    source: 'mass_campaign_test',
-  }).catch(() => null);
   await conversation.update({ last_message_at: new Date() });
   await MarketingPatientContactEvent.create({
     list_id: list.id,
     item_id: item.id,
-    event_type: 'mass_campaign_test_sent',
+    event_type: immediate.held ? 'mass_campaign_test_held' : 'mass_campaign_test_accepted',
     channel: 'whatsapp',
     payload: {
       to: targetPhone,
       template_id: template.id,
       template_name: template.name,
-      message_id: providerMessageId,
-      provider_message_id: providerMessageId,
+      message_id: immediate.providerMessageId || providerMessageId,
+      provider_message_id: immediate.providerMessageId || providerMessageId,
       app_message_id: appMessage.id,
       conversation_id: conversation.id,
+      provider_acceptance_status: immediate.status,
     },
     occurred_at: new Date(),
   });
   return {
     success: true,
+    held: immediate.held,
+    acceptance_status: immediate.status,
     to: targetPhone,
-    message_id: providerMessageId,
-    provider_message_id: providerMessageId,
+    message_id: immediate.providerMessageId || providerMessageId,
+    provider_message_id: immediate.providerMessageId || providerMessageId,
     app_message_id: appMessage.id,
     conversation_id: conversation.id,
   };
@@ -8392,7 +8543,32 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
   ensureScopeAccess(list, scope);
   const dispatch = getDispatchConfig(list);
   const context = normalizeDispatchContext(dispatch.context);
+  const welcomeMessage = list.criteria?.welcome_message && typeof list.criteria.welcome_message === 'object'
+    ? list.criteria.welcome_message
+    : {};
   const filter = getDispatchItemFilter(dispatch);
+  const dispatchStatus = String(dispatch.status || '').toLowerCase();
+  const adminDecision = String(dispatch.admin_resolution?.decision || '').toLowerCase();
+  if (['cancelled', 'changes_required'].includes(adminDecision)) {
+    const err = new Error(adminDecision === 'cancelled'
+      ? 'Clinicaclick ha cancelado esta cola tras revisarla.'
+      : 'Esta cola requiere cambios antes de poder reanudarse.');
+    err.status = 409;
+    err.details = { dispatch_status: dispatchStatus, admin_resolution: dispatch.admin_resolution };
+    throw err;
+  }
+  if (['held_meta', 'paused_review', 'awaiting_delivery'].includes(dispatchStatus)) {
+    const err = new Error(
+      dispatchStatus === 'held_meta'
+        ? 'WhatsApp está evaluando la calidad de este envío. La cola continuará cuando Meta resuelva la retención.'
+        : dispatchStatus === 'awaiting_delivery'
+          ? 'La cola está esperando el estado final de mensajes ya aceptados por WhatsApp.'
+          : 'Esta cola requiere revisión antes de poder volver a enviarse.'
+    );
+    err.status = 409;
+    err.details = { dispatch_status: dispatchStatus };
+    throw err;
+  }
   if (isBlockingQualityPause(dispatch) && !isActorGlobalAdmin(actor)) {
     const err = new Error('No se puede reanudar una campaña pausada por baja calidad. Contacta con soporte.');
     err.status = 403;
@@ -8409,6 +8585,35 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     err.status = 409;
     throw err;
   }
+  const template = await resolveWhatsappTemplate(
+    dispatch.whatsapp_template_id
+      || dispatch.template_snapshot?.id
+      || (context === 'welcome' ? welcomeMessage.template_id : null)
+      || list.criteria?.whatsapp_template_id
+      || list.template_snapshot?.id,
+    scope
+  );
+  const clinicId = getClinicIdForList(list, scope);
+  const clinicConfig = clinicId ? await whatsappService.getClinicConfig(clinicId) : null;
+  if (!template || !clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
+    const err = new Error('No se puede reanudar la cola hasta que la plantilla y la cuenta de WhatsApp estén disponibles.');
+    err.status = 409;
+    throw err;
+  }
+  const deliveryGate = await whatsappDeliveryGovernanceService.getDispatchGate({
+    clinicId,
+    wabaId: clinicConfig.wabaId,
+    phoneNumberId: clinicConfig.phoneNumberId,
+    template,
+    requestedBatchSize: dispatch.batch_size || DISPATCH_BATCH_SIZE,
+    requestedDelayMs: dispatch.delay_ms || DISPATCH_BATCH_DELAY_MS,
+  });
+  if (!deliveryGate.allowed) {
+    const err = new Error(getDeliveryGateBlockedMessage(deliveryGate.reason));
+    err.status = 409;
+    err.details = { delivery_governance: deliveryGate };
+    throw err;
+  }
   const dispatchBusinessHours = await resolveDispatchBusinessHoursForList(list, scope, dispatch);
   const nextAllowed = getNextBusinessAllowedAt(new Date(), dispatchBusinessHours);
   const nextRunAt = nextAllowed.getTime() > Date.now() + 1000 ? nextAllowed : null;
@@ -8421,6 +8626,7 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     paused_reason: null,
     resumed_at: new Date().toISOString(),
     next_allowed_at: nextRunAt ? nextRunAt.toISOString() : null,
+    delivery_governance: deliveryGate,
   };
   await list.update({
     status: nextRunAt ? 'scheduled' : 'sending',
@@ -8613,7 +8819,7 @@ async function sendDispatchItem({
       wabaId: clinicConfig.wabaId || null,
       batch_index: batchIndex,
     },
-    sent_at: new Date(),
+    sent_at: null,
   });
   emitQuickChatMessageCreated(conversation, appMessage);
 
@@ -8627,24 +8833,48 @@ async function sendDispatchItem({
       templateComponents,
       clinicConfig,
     });
-    const providerMessageId = response?.messages?.[0]?.id || null;
+    const immediate = await whatsappDeliveryGovernanceService.recordImmediateSendResponse({
+      response,
+      clinicId: clinicConfig.clinicId || getClinicIdForList(list),
+      wabaId: clinicConfig.wabaId,
+      phoneNumberId: clinicConfig.phoneNumberId,
+      template,
+      listId: list.id,
+      itemId: item.id,
+      messageId: appMessage.id,
+    }).catch((governanceError) => {
+      console.warn('[marketing-bulk-sends] No se pudo registrar la aceptación inmediata', {
+        list_id: list.id,
+        item_id: item.id,
+        error: governanceError?.message || governanceError,
+      });
+      const status = normalizeText(response?.messages?.[0]?.message_status || 'accepted').toLowerCase();
+      return {
+        status,
+        held: status === 'held_for_quality_assessment',
+        providerMessageId: response?.messages?.[0]?.id || null,
+      };
+    });
+    const providerMessageId = immediate.providerMessageId;
     await appMessage.update({
-      status: 'sent',
+      status: 'pending',
       metadata: {
         ...(appMessage.metadata || {}),
         wa_response: response || null,
         wamid: providerMessageId,
+        provider_acceptance_status: immediate.status,
+        provider_acceptance_at: new Date().toISOString(),
       },
-      sent_at: new Date(),
+      sent_at: null,
     });
     emitQuickChatMessageUpdated(conversation, appMessage);
     await item.update({
-      dispatch_status: 'sent',
+      dispatch_status: immediate.held ? 'held_quality' : 'accepted',
       provider_message_id: providerMessageId,
       app_message_id: appMessage.id,
       conversation_id: conversation.id,
       send_batch_index: batchIndex,
-      sent_at: new Date(),
+      sent_at: null,
       failed_at: null,
       last_error_code: null,
       last_error_message: null,
@@ -8654,49 +8884,28 @@ async function sendDispatchItem({
       list_id: list.id,
       item_id: item.id,
       paciente_id: item.paciente_id || null,
-      event_type: eventType,
+      event_type: immediate.held
+        ? `${String(eventType || 'mass_campaign_message_sent').replace(/_sent$/, '')}_held`
+        : `${String(eventType || 'mass_campaign_message_sent').replace(/_sent$/, '')}_accepted`,
       channel: 'whatsapp',
       payload: {
         provider_message_id: providerMessageId,
         app_message_id: appMessage.id,
         conversation_id: conversation.id,
         batch_index: batchIndex,
+        provider_acceptance_status: immediate.status,
       },
       occurred_at: new Date(),
     });
-    await whatsappConnectionStatusService.clearDisconnectedAfterSuccess({
-      clinicId: clinicConfig.clinicId || getClinicIdForList(list),
-      phoneId: clinicConfig.phoneNumberId || null,
-      wabaId: clinicConfig.wabaId || null,
-      messageId: appMessage.id,
-      source: connectionSource,
-    }).catch(() => null);
-    if (
-      eventType === 'mass_campaign_message_sent'
-      && isReviewRequestList(list)
-      && isReviewRatingTriggerMessage(appMessage)
-      && dispatchContext !== 'review_reminder'
-    ) {
-      await enqueueReviewReminderJob({
-        list,
-        item,
-        sentAt: appMessage.sent_at || new Date(),
-        triggerMessageId: appMessage.id,
-      }).catch((error) => {
-        console.warn('[marketing-bulk-sends] No se pudo programar recordatorio de reseña', {
-          list_id: list.id,
-          item_id: item.id,
-          error: error?.message || error,
-        });
-      });
-    }
     return {
       sent: true,
+      held: immediate.held,
+      acceptance_status: immediate.status,
       app_message_id: appMessage.id,
       message_id: appMessage.id,
       provider_message_id: providerMessageId,
       conversation_id: conversation.id,
-      sent_at: appMessage.sent_at || new Date(),
+      sent_at: null,
       template_id: template.id,
       template_name: template.name,
     };
@@ -8741,6 +8950,14 @@ async function sendDispatchItem({
       wabaId: clinicConfig.wabaId || null,
       messageId: appMessage.id,
       recipient: item.phone,
+      source: connectionSource,
+    }).catch(() => null);
+    await whatsappPaymentStatusService.markMissingPaymentFromProviderError({
+      error: providerError.raw || error,
+      clinicId: clinicConfig.clinicId || getClinicIdForList(list),
+      phoneId: clinicConfig.phoneNumberId || null,
+      wabaId: clinicConfig.wabaId || null,
+      messageId: appMessage.id,
       source: connectionSource,
     }).catch(() => null);
     return { sent: false, error: providerError };
@@ -8805,44 +9022,39 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
 
   const countersBefore = await getDispatchScopedCounters(list, filter);
   const sentBefore = Number(countersBefore.sent || 0);
+  const optOutCount = Number(countersBefore.sent_opt_out || 0);
   const readRate = sentBefore > 0 ? Number(countersBefore.read || 0) / sentBefore : 1;
-  const optOutRate = sentBefore > 0 ? Number(countersBefore.opt_out || countersBefore.exclusion_reasons?.opt_out || 0) / sentBefore : 0;
+  const optOutRate = sentBefore > 0 ? optOutCount / sentBefore : 0;
   const batchSize = Number(dispatch.batch_size || DISPATCH_BATCH_SIZE) || DISPATCH_BATCH_SIZE;
   const batchDelayMs = Number(dispatch.delay_ms || DISPATCH_BATCH_DELAY_MS) || DISPATCH_BATCH_DELAY_MS;
   const maxOptOutRate = Number(dispatch.max_opt_out_rate || DISPATCH_MAX_OPT_OUT_RATE) || DISPATCH_MAX_OPT_OUT_RATE;
-  if (sentBefore >= batchSize && optOutRate > maxOptOutRate) {
+  const earlyWarmupOptOut = sentBefore > 0 && sentBefore <= 5 && optOutCount > 0;
+  if (earlyWarmupOptOut || (sentBefore >= batchSize && optOutRate > maxOptOutRate)) {
     await list.update({
       status: 'paused',
       criteria: mergeCriteria(list, {
         dispatch: {
           ...dispatch,
           status: 'paused_quality',
-          paused_reason: 'opt_out_rate_high',
+          paused_reason: earlyWarmupOptOut ? 'early_warmup_opt_out' : 'opt_out_rate_high',
           paused_at: new Date().toISOString(),
+          requires_admin_review: true,
+          resume_automatically: false,
           quality_snapshot: { sent: sentBefore, read_rate: readRate, opt_out_rate: optOutRate },
         },
       }),
     });
-    return { status: 'completed', result: { paused: true, reason: 'opt_out_rate_high', list_id: list.id } };
+    return {
+      status: 'completed',
+      result: {
+        paused: true,
+        reason: earlyWarmupOptOut ? 'early_warmup_opt_out' : 'opt_out_rate_high',
+        list_id: list.id,
+      },
+    };
   }
 
   const accountQuality = await getWhatsappAccountQualityForList(list, scope);
-  if (accountQuality.messaging_limit_count && sentBefore >= accountQuality.messaging_limit_count) {
-    await list.update({
-      status: 'paused',
-      criteria: mergeCriteria(list, {
-        dispatch: {
-          ...dispatch,
-          status: 'paused_limit',
-          paused_reason: 'messaging_limit_reached',
-          paused_at: new Date().toISOString(),
-          account_quality: accountQuality,
-        },
-      }),
-    });
-    return { status: 'completed', result: { paused: true, reason: 'messaging_limit_reached', list_id: list.id } };
-  }
-
   const welcomeMessage = list.criteria?.welcome_message && typeof list.criteria.welcome_message === 'object'
     ? list.criteria.welcome_message
     : {};
@@ -8887,9 +9099,40 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
   }
   clinicConfig.clinicId = clinicId;
 
-  const batchLimit = accountQuality.messaging_limit_count
-    ? Math.max(0, Math.min(batchSize, accountQuality.messaging_limit_count - sentBefore))
-    : batchSize;
+  const deliveryGate = await whatsappDeliveryGovernanceService.getDispatchGate({
+    clinicId,
+    wabaId: clinicConfig.wabaId,
+    phoneNumberId: clinicConfig.phoneNumberId,
+    template,
+    requestedBatchSize: batchSize,
+    requestedDelayMs: batchDelayMs,
+  });
+  if (!deliveryGate.allowed) {
+    const gateStatus = deliveryGate.reason === 'portfolio_capacity_reached'
+      ? 'paused_limit'
+      : deliveryGate.reason === 'template_quality_assessment'
+        ? 'held_meta'
+        : deliveryGate.reason === 'template_quality_red'
+          ? 'paused_quality'
+          : 'paused_template';
+    await list.update({
+      status: 'paused',
+      criteria: mergeCriteria(list, {
+        dispatch: {
+          ...dispatch,
+          status: gateStatus,
+          paused_reason: deliveryGate.reason,
+          paused_at: new Date().toISOString(),
+          next_allowed_at: null,
+          delivery_governance: deliveryGate,
+          resume_automatically: gateStatus === 'held_meta',
+        },
+      }),
+    });
+    return { status: 'completed', result: { paused: true, reason: deliveryGate.reason, list_id: list.id } };
+  }
+
+  const batchLimit = Math.max(1, Number(deliveryGate.effective_batch_size || batchSize));
   const batch = batchLimit > 0
     ? await findDispatchCandidateBatch(list.id, filter, batchLimit)
     : [];
@@ -8898,6 +9141,39 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     await refreshListCounters(list.id);
     const finalCounters = await getDispatchScopedCounters(list, filter);
     const completedAt = new Date();
+    const acceptedPending = await MarketingPatientListItem.count({
+      where: { list_id: list.id, dispatch_status: 'accepted' },
+    });
+    const heldPending = await MarketingPatientListItem.count({
+      where: { list_id: list.id, dispatch_status: 'held_quality' },
+    });
+    if (acceptedPending > 0 || heldPending > 0) {
+      const nextStatus = heldPending > 0 ? 'held_meta' : 'awaiting_delivery';
+      await list.update({
+        status: heldPending > 0 ? 'paused' : 'sending',
+        criteria: mergeCriteria(list, {
+          dispatch: {
+            ...dispatch,
+            status: nextStatus,
+            awaiting_delivery: acceptedPending + heldPending,
+            paused_reason: heldPending > 0 ? 'template_quality_assessment' : dispatch.paused_reason || null,
+            paused_at: heldPending > 0 ? (dispatch.paused_at || completedAt.toISOString()) : dispatch.paused_at || null,
+            next_allowed_at: null,
+            resume_automatically: heldPending > 0,
+          },
+        }),
+      });
+      return {
+        status: 'completed',
+        result: {
+          completed: false,
+          held: heldPending > 0,
+          awaiting_delivery: acceptedPending + heldPending,
+          list_id: list.id,
+          counters: finalCounters,
+        },
+      };
+    }
     const followUpCounters = context === 'review_request'
       ? await getReviewDispatchFollowUpCounters(list, filter)
       : null;
@@ -8921,6 +9197,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
         last_batch_started_at: new Date().toISOString(),
         next_allowed_at: null,
         account_quality: accountQuality,
+        delivery_governance: deliveryGate,
       },
     }),
   });
@@ -8940,6 +9217,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
   const batchIndex = Number(dispatch.last_batch_index || 0) + 1;
   let sent = 0;
   let failed = 0;
+  let heldByMeta = false;
   for (const item of filteredFreshBatch) {
     const currentList = await MarketingPatientList.findByPk(list.id);
     if (!currentList || String(currentList.status || '').toLowerCase() === 'archived' || getDispatchConfig(currentList).cancel_requested === true) {
@@ -8997,6 +9275,10 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     });
     if (result.sent) sent += 1;
     else failed += 1;
+    if (result.held) {
+      heldByMeta = true;
+      break;
+    }
   }
 
   await refreshListCounters(list.id);
@@ -9017,9 +9299,52 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     occurred_at: new Date(),
   });
 
+  if (heldByMeta) {
+    await list.reload();
+    return {
+      status: 'completed',
+      result: {
+        paused: true,
+        reason: 'template_quality_assessment',
+        list_id: list.id,
+        counters: countersAfter,
+      },
+    };
+  }
+
   const remaining = await countDispatchRemainingItems(list.id, filter);
   if (remaining <= 0) {
     const completedAt = new Date();
+    const awaitingDelivery = await MarketingPatientListItem.count({
+      where: {
+        list_id: list.id,
+        dispatch_status: { [Op.in]: ['accepted', 'held_quality'] },
+      },
+    });
+    if (awaitingDelivery > 0) {
+      await list.update({
+        status: heldByMeta ? 'paused' : 'sending',
+        criteria: mergeCriteria(list, {
+          dispatch: {
+            ...getDispatchConfig(list),
+            status: heldByMeta ? 'held_meta' : 'awaiting_delivery',
+            awaiting_delivery: awaitingDelivery,
+            last_batch_index: batchIndex,
+            last_batch_completed_at: completedAt.toISOString(),
+            next_allowed_at: null,
+          },
+        }),
+      });
+      return {
+        status: 'completed',
+        result: {
+          awaiting_delivery: awaitingDelivery,
+          held: heldByMeta,
+          list_id: list.id,
+          counters: countersAfter,
+        },
+      };
+    }
     const followUpCounters = context === 'review_request'
       ? await getReviewDispatchFollowUpCounters(list, filter)
       : null;
@@ -9036,7 +9361,10 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     return { status: 'completed', result: { completed: true, list_id: list.id, counters: countersAfter } };
   }
 
-  const nextAllowed = getNextBusinessAllowedAt(new Date(Date.now() + batchDelayMs), dispatch.business_hours);
+  const nextAllowed = getNextBusinessAllowedAt(
+    new Date(Date.now() + Number(deliveryGate.effective_delay_ms || batchDelayMs)),
+    dispatch.business_hours
+  );
   await list.update({
     status: 'sending',
     criteria: mergeCriteria(list, {
@@ -9078,7 +9406,7 @@ async function materializeMessageStatusFromWebhook({ message, status, mappedStat
     app_message_id: message.id || item.app_message_id || null,
   };
   if (mappedStatus === 'sent') {
-    patch.dispatch_status = item.dispatch_status || 'sent';
+    patch.dispatch_status = 'sent';
     patch.sent_at = item.sent_at || eventAt;
   } else if (mappedStatus === 'delivered') {
     patch.dispatch_status = 'delivered';
@@ -9110,7 +9438,56 @@ async function materializeMessageStatusFromWebhook({ message, status, mappedStat
     },
     occurred_at: eventAt,
   });
+  const list = await MarketingPatientList.findByPk(listId);
+  if (mappedStatus === 'sent'
+    && list
+    && isReviewRequestList(list)
+    && isReviewRatingTriggerMessage(message)
+    && normalizeDispatchContext(message?.metadata?.dispatch_context) !== 'review_reminder') {
+    await enqueueReviewReminderJob({
+      list,
+      item,
+      sentAt: patch.sent_at || eventAt,
+      triggerMessageId: message.id,
+    }).catch((error) => {
+      console.warn('[marketing-bulk-sends] No se pudo programar recordatorio tras confirmar envío', {
+        list_id: listId,
+        item_id: itemId,
+        error: error?.message || error,
+      });
+    });
+  }
   await refreshListCounters(listId);
+  if (list) {
+    const dispatch = getDispatchConfig(list);
+    if (String(dispatch.status || '').toLowerCase() === 'awaiting_delivery') {
+      const awaitingDelivery = await MarketingPatientListItem.count({
+        where: {
+          list_id: listId,
+          dispatch_status: { [Op.in]: ['accepted', 'held_quality'] },
+        },
+      });
+      if (awaitingDelivery <= 0) {
+        const completedAt = new Date();
+        const followUpCounters = isReviewRequestList(list)
+          ? await getReviewDispatchFollowUpCounters(list, dispatch.filter || null)
+          : null;
+        await list.update({
+          status: 'completed',
+          last_sent_at: completedAt,
+          criteria: mergeCriteria(list, {
+            dispatch: buildDispatchCompletedPatch(dispatch, followUpCounters, completedAt),
+          }),
+        });
+      } else {
+        await list.update({
+          criteria: mergeCriteria(list, {
+            dispatch: { ...dispatch, awaiting_delivery: awaitingDelivery },
+          }),
+        });
+      }
+    }
+  }
   return { applied: true, list_id: listId, item_id: itemId, status: mappedStatus };
 }
 
@@ -9167,6 +9544,9 @@ async function materializeInboundReply({ conversation, inboundMessage }) {
   const item = await MarketingPatientListItem.findOne({ where: { id: itemId, list_id: listId } });
   if (!item) return { applied: false, reason: 'item_not_found' };
   const repliedAt = inboundMessage.sent_at || inboundMessage.createdAt || new Date();
+  const preclassifiedContactAction = asPlainObject(inboundMessage?.metadata?.marketing_opt_out);
+  const listCriteria = asPlainObject(list.criteria);
+  const delegatesAmbiguousReviewToV2 = Number(listCriteria.review_automation_template_id || 0) > 0;
   const isTestTrigger = normalizeKey(metadata.kind) === 'mass_campaign_test';
   let existingReply = null;
   if (isTestTrigger) {
@@ -9216,7 +9596,120 @@ async function materializeInboundReply({ conversation, inboundMessage }) {
     };
   }
   if (isReviewRequestList(list) && isReviewRatingTriggerMessage(triggerMessage) && !inboundRatingDetails.rating) {
-    inboundRatingDetails = await resolveReviewRatingDetailsFromInboundMessage(inboundMessage, { allowAiFallback: true });
+    if (delegatesAmbiguousReviewToV2) {
+      await item.update({
+        dispatch_status: 'replied',
+        replied_at: item.replied_at || repliedAt,
+        conversation_id: conversation.id,
+      });
+      if (!existingReply) {
+        await MarketingPatientContactEvent.create({
+          list_id: listId,
+          item_id: itemId,
+          paciente_id: item.paciente_id || null,
+          event_type: 'mass_campaign_message_replied',
+          channel: 'whatsapp',
+          payload: {
+            inbound_message_id: inboundMessage.id,
+            trigger_message_id: triggerMessage.id,
+            content_preview: normalizeText(inboundMessage.content).slice(0, 300),
+            classification_delegated_to: 'automations_v2',
+          },
+          occurred_at: repliedAt,
+        });
+      }
+      await refreshListCounters(listId);
+      return {
+        applied: true,
+        list_id: listId,
+        item_id: itemId,
+        classification_delegated_to: 'automations_v2',
+      };
+    }
+    const classification = await reviewResponseClassification.classifyReviewResponse({
+      text: getReviewRatingCandidateTextsFromInboundMessage(inboundMessage)[0] || inboundMessage.content || '',
+      allowAi: true,
+    });
+    if (classification.intent === 'rating' && classification.rating) {
+      inboundRatingDetails = {
+        rating: classification.rating,
+        reason: '',
+        source_text: inboundMessage.content || '',
+        source: classification.source,
+        confidence: classification.confidence,
+        model: classification.model,
+      };
+    } else {
+      await item.update({
+        dispatch_status: 'replied',
+        replied_at: item.replied_at || repliedAt,
+        conversation_id: conversation.id,
+      });
+      if (!existingReply) {
+        await MarketingPatientContactEvent.create({
+          list_id: listId,
+          item_id: itemId,
+          paciente_id: item.paciente_id || null,
+          event_type: 'mass_campaign_message_replied',
+          channel: 'whatsapp',
+          payload: {
+            inbound_message_id: inboundMessage.id,
+            trigger_message_id: triggerMessage.id,
+            content_preview: normalizeText(inboundMessage.content).slice(0, 300),
+            response_intent: classification.intent,
+            inference_source: classification.source,
+            inference_confidence: classification.confidence,
+          },
+          occurred_at: repliedAt,
+        });
+      }
+      const classificationEffect = preclassifiedContactAction.applied
+        ? preclassifiedContactAction
+        : await marketingOptOutService.applyInboundContactClassification({
+          clinicId: item.clinica_id || list.clinica_id || conversation.clinic_id || null,
+          conversation,
+          inboundMessage,
+          patientId: item.paciente_id || conversation.patient_id || null,
+          classification,
+        });
+      const existingClassification = await MarketingPatientContactEvent.findOne({
+        where: {
+          list_id: listId,
+          item_id: itemId,
+          event_type: 'review_response_classified',
+          [Op.and]: [db.sequelize.where(
+            db.sequelize.literal("CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.inbound_message_id')) AS UNSIGNED)"),
+            Number(inboundMessage.id || 0)
+          )],
+        },
+      });
+      if (!existingClassification) {
+        await MarketingPatientContactEvent.create({
+          list_id: listId,
+          item_id: itemId,
+          paciente_id: item.paciente_id || null,
+          event_type: 'review_response_classified',
+          channel: 'whatsapp',
+          payload: {
+            inbound_message_id: inboundMessage.id,
+            trigger_message_id: triggerMessage.id,
+            response_intent: classification.intent,
+            inference_source: classification.source,
+            inference_confidence: classification.confidence,
+            effect_applied: classificationEffect.applied === true,
+          },
+          occurred_at: repliedAt,
+        });
+      }
+      await refreshListCounters(listId);
+      return {
+        applied: true,
+        list_id: listId,
+        item_id: itemId,
+        review_response_intent: classification.intent,
+        classification_effect: classificationEffect,
+      };
+    }
   }
   const reviewRating = isReviewRequestList(list) && isReviewRatingTriggerMessage(triggerMessage)
     ? (inboundRatingDetails.rating || null)
@@ -9464,6 +9957,7 @@ module.exports = {
   removeCampaign,
   reconcileDispatchJobState,
   __testing: {
+    computeCounters,
     mapReviewItemsFromImportedList,
     parseReviewImportListId,
   },

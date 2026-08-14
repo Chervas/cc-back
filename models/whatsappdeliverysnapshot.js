@@ -1,0 +1,31 @@
+'use strict';
+
+module.exports = (sequelize, DataTypes) => sequelize.define('WhatsappDeliverySnapshot', {
+  id: { type: DataTypes.BIGINT.UNSIGNED, primaryKey: true, autoIncrement: true },
+  route_key: { type: DataTypes.STRING(64), allowNull: false, unique: true },
+  business_portfolio_id: { type: DataTypes.STRING(255), allowNull: true },
+  waba_id: { type: DataTypes.STRING(255), allowNull: true },
+  phone_number_id: { type: DataTypes.STRING(255), allowNull: true },
+  meta_template_id: { type: DataTypes.STRING(255), allowNull: true },
+  template_name: { type: DataTypes.STRING(255), allowNull: true },
+  template_language: { type: DataTypes.STRING(32), allowNull: true },
+  account_quality: { type: DataTypes.STRING(32), allowNull: true },
+  template_quality: { type: DataTypes.STRING(32), allowNull: true },
+  template_status: { type: DataTypes.STRING(64), allowNull: true },
+  capacity_limit: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
+  estimated_unique_24h: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
+  immediate_status: { type: DataTypes.STRING(64), allowNull: true },
+  hold_started_at: { type: DataTypes.DATE, allowNull: true },
+  hold_released_at: { type: DataTypes.DATE, allowNull: true },
+  next_check_at: { type: DataTypes.DATE, allowNull: true },
+  check_attempt: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false, defaultValue: 0 },
+  can_send: { type: DataTypes.BOOLEAN, allowNull: true },
+  source: { type: DataTypes.STRING(96), allowNull: false, defaultValue: 'local' },
+  payload: { type: DataTypes.JSON, allowNull: true },
+  provider_event_at: { type: DataTypes.DATE, allowNull: true },
+  checked_at: { type: DataTypes.DATE, allowNull: true },
+}, {
+  tableName: 'WhatsappDeliverySnapshots',
+  underscored: true,
+  timestamps: true,
+});

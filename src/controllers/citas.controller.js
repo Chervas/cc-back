@@ -36,6 +36,7 @@ const {
 const consentimientosService = require('../services/consentimientos.service');
 const appointmentNotificationCleanup = require('../services/appointmentNotificationCleanup.service');
 const patientEconomics = require('../services/patientEconomics.service');
+const patientDirectionService = require('../services/patientDirection.service');
 const { recordAppointmentStatusChange } = require('../services/appointmentActivity.service');
 const {
     processAppointmentLeadMilestones,
@@ -1128,6 +1129,7 @@ function mapCalendarCitaRow(cita, timeZone = DEFAULT_TIMEZONE) {
     if (!plain) return null;
     return {
         id_cita: plain.id_cita,
+        created_by: plain.created_by || null,
         clinica_id: plain.clinica_id,
         paciente_id: plain.paciente_id,
         lead_intake_id: plain.lead_intake_id,
@@ -2176,6 +2178,13 @@ exports.createCita = asyncHandler(async (req, res) => {
                 previousStatus: null,
             });
         }
+        await patientDirectionService.handleAppointmentChange({
+            appointment: cita,
+            previousStatus: null,
+            actorUserId: req.userData?.userId || null,
+        }).catch((error) => {
+            console.warn('[patient-direction] No se pudo vincular la cita creada:', error.message || error);
+        });
 
         const citaCreada = await CitaPaciente.findByPk(cita.id_cita, {
             include: [
@@ -2320,6 +2329,7 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
         where,
         attributes: [
             'id_cita',
+            'created_by',
             'clinica_id',
             'paciente_id',
             'lead_intake_id',
@@ -2545,6 +2555,13 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
     }
 
     await processAppointmentLeadMilestones({ cita, previousStatus });
+    await patientDirectionService.handleAppointmentChange({
+        appointment: cita,
+        previousStatus,
+        actorUserId: req.userData?.userId || null,
+    }).catch((error) => {
+        console.warn('[patient-direction] No se pudo aplicar el cambio de cita:', error.message || error);
+    });
     let voucherConsumptionResult = null;
     if (estadoRaw === 'completada') {
         try {
@@ -2778,6 +2795,13 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     }
 
     await processAppointmentLeadMilestones({ cita, previousStatus });
+    await patientDirectionService.handleAppointmentChange({
+        appointment: cita,
+        previousStatus,
+        actorUserId: req.userData?.userId || null,
+    }).catch((error) => {
+        console.warn('[patient-direction] No se pudo aplicar la reprogramación:', error.message || error);
+    });
 
     try {
         await appointmentAutomationV2Runtime.cancelActiveExecutionsForCita(cita, {

@@ -40,6 +40,10 @@ const {
   APPOINTMENT_STATUS_EVENT_TYPE,
   serializeAppointmentStatusActivity,
 } = require('../services/appointmentActivity.service');
+const {
+  getActiveContactRestrictionsForPatient,
+  resolveWhatsappNumberRestrictionAfterChange,
+} = require('../services/marketingOptOut.service');
 
 const normalizePhone = (phone) => {
   return normalizePhoneDigits(phone);
@@ -1184,6 +1188,11 @@ exports.getPacienteById = async (req, res) => {
     const payload = {
       ...restrictPacientePayloadToClinics(paciente, readableClinicIds),
       ...await getPacienteAppointmentBounds(paciente.id_paciente, readableClinicIds),
+      contact_restrictions: await getActiveContactRestrictionsForPatient({
+        clinicIds: readableClinicIds,
+        patientId: paciente.id_paciente,
+        phone: paciente.telefono_movil,
+      }),
     };
     res.json(payload);
   } catch (error) {
@@ -2066,6 +2075,7 @@ exports.updatePaciente = async (req, res) => {
       return res.status(404).json({ message: 'Paciente not found' });
     }
     const nextClinicaId = req.body.clinica_id !== undefined ? req.body.clinica_id : paciente.clinica_id;
+    const previousTelefono = paciente.telefono_movil;
     await assertPatientEditAccess(req, paciente.clinica_id);
     if (Number(nextClinicaId) !== Number(paciente.clinica_id)) {
       await assertPatientEditAccess(req, nextClinicaId);
@@ -2119,6 +2129,14 @@ exports.updatePaciente = async (req, res) => {
       }
     });
     await paciente.save();
+    if (req.body.telefono_movil !== undefined) {
+      await resolveWhatsappNumberRestrictionAfterChange({
+        patientId: paciente.id_paciente,
+        previousPhone: previousTelefono,
+        nextPhone: paciente.telefono_movil,
+        actorUserId: req.userData?.userId || null,
+      });
+    }
     res.json({
       message: 'Paciente actualizado exitosamente',
       paciente

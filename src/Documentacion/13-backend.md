@@ -1162,6 +1162,59 @@ Antes de activar coexistencia sobre un numero real:
 - hay fixtures de QA en `src/scripts/fixtures/whatsapp-coexistence/`;
 - Propdental se usara como numero de QA, pero no debe relanzarse Embedded Signup ni cambiar el modo de conexion mientras haya mensajes reales de cita pendientes.
 
+### WhatsApp: diagnostico y cumplimiento
+
+- `POST /api/whatsapp/compliance/admin/accounts/:assetId/check` sincroniza el telefono con Meta, comprueba acceso, estado, canal, nombre aprobado, capacidad y calidad, y calcula estados de entrega sobre el total real de los ultimos siete dias.
+- La consulta completa contabiliza `pending`, `sent`, `delivered`, `read` y `failed` en base de datos. El desglose de origen puede usar una muestra reciente, pero el contrato indica siempre el tamano de esa muestra; no se presenta el limite tecnico como total real.
+- Cada trabajo saliente persiste `phoneNumberId`, `wabaId` y el activo remitente antes de llamar a Meta. El diagnostico y las apelaciones filtran por esa ruta exacta, no por toda la actividad de las clinicas del grupo. Los registros legacy sin ruta solo se infieren para clinicas que heredaban el numero y no tenian otro activo directo; la respuesta expone `attribution.exact_7d` e `inferred_7d`.
+- `delivered` y `read` forman `confirmed`; `sent` se presenta como `without_confirmation`, porque solo acredita que WhatsApp registro el envio sin un webhook posterior de entrega/lectura. `pending`/`sending` forman `pending`. No se muestra un agregado ambiguo de aceptados, procesados o enviados como sinonimo de entrega.
+- Los ecos de coexistencia y la sincronizacion de historial pueden crear mensajes enviados desde WhatsApp Business movil. Si conservan WAMID/ruta, los webhooks posteriores actualizan el mismo registro sin polling adicional. El historico antiguo sin WAMID completo puede permanecer sin confirmacion posterior; no se inventa entrega ni se consulta Meta por mensaje.
+- El diagnostico reconcilia el ultimo `account_update` conservado en `additionalData.coexistence.last_account_update`. Si el evento de restriccion o suspension llego antes de existir `WhatsappAccountComplianceIncidents`, crea idempotentemente el incidente y actualiza `additionalData.whatsappCompliance`.
+- Acceso API, calidad y cumplimiento son dimensiones distintas. Un numero puede estar `CONNECTED`, devolver calidad `RED` y tener restricciones activas simultaneamente. Clinicaclick muestra las tres y conserva estados/errores reales, sin imponer un bloqueo local adicional.
+- El borrador de apelacion se construye con identificadores comprobables de la cuenta (telefono, WABA ID y Phone Number ID), evento, fecha, calidad, capacidad, restricciones y actividad exacta de siete dias. Si Meta no envio `violation_type`, el texto debe decirlo; nunca sustituirlo por una causa generica presentada como hecho.
+- Un incidente de un activo `assignmentScope=group` se atribuye solo al grupo: `group_id` informado y `clinic_id=NULL`. No se elige una clinica representativa para titular el incidente, porque eso haria parecer que la medida afecta al WhatsApp propio de esa sede.
+- El worker registra un warning estructurado cuando Meta devuelve un estado para un WAMID que no existe en `Messages`. Esto permite diagnosticar pruebas o integraciones que hayan llamado a Meta sin persistir antes el mensaje; el warning no crea una entrega ficticia ni bloquea envios.
+- La prueba real del activo compartido Propdental (`Phone Number ID 1009118125613058`, `+34 624 31 25 83`) debe salir por ese identificador exacto. En el QA autorizado del 2026-08-09 Meta acepto inicialmente la solicitud y despues emitio `failed` con `131031 Business Account locked`; el mensaje no se entrego. Este resultado no se puede sustituir por actividad exitosa de otra sede del grupo.
+
+### WhatsApp: calidad de entrega, pacing y capacidad
+
+- La migracion `20260808233000-create-whatsapp-delivery-governance.js` crea
+  `WhatsappDeliverySnapshots` y `WhatsappDeliveryEvents`, y amplía
+  `WhatsappTemplates` con calidad, transiciones y contador de pausas.
+- `whatsappDeliveryGovernance.service.js` es la fuente backend para calidad de
+  plantilla, retenciones de pacing, capacidad por portfolio y tamaño efectivo
+  del siguiente lote. Los controladores y workers no reimplementan estas
+  decisiones.
+- La identidad de la via combina portfolio, WABA, telefono, plantilla e idioma.
+  Los eventos son idempotentes por `dedupe_key`.
+- La respuesta inmediata `accepted` mantiene `Messages.status=pending` y guarda
+  el WAMID. Solo los webhooks posteriores materializan `sent`, `delivered`,
+  `read` o `failed`. `held_for_quality_assessment` se guarda como retencion y
+  detiene las colas que comparten la plantilla.
+- Se procesan `message_template_quality_update`,
+  `message_template_status_update`, `business_capability_update` y
+  `account_alerts`. La sincronizacion de 20 minutos solo es fallback para
+  plantillas pendientes o usadas por colas activas; no existe polling por
+  mensaje.
+- Solo se solicita `whatsapp_business_manager_messaging_limit`; el campo
+  deprecado `messaging_limit_tier` no debe reaparecer.
+- El regulador nunca acelera el ritmo pedido: `1/10 min` y `1/dia` permanecen
+  intactos. Cuando hace falta calentamiento limita lotes con progresion
+  `5/10/20/50`, calidad, fallos y capacidad disponible.
+- El calentamiento pertenece a la via `portfolio + WABA + telefono + plantilla + idioma`. Dos colas de la misma via comparten senales; la misma plantilla en otro telefono constituye otra via. El lote efectivo es el menor entre el solicitado, la fase de calentamiento, la capacidad disponible y la reduccion por calidad/fallos. Un ritmo lento nunca se agrupa para alcanzar `5`: cada envio alimenta la observacion manteniendo su cadencia.
+- Estados `held_meta`, `paused_review` y `awaiting_delivery` no admiten
+  reanudacion manual. Para cualquier otro estado, `resumeCampaignDispatch`
+  vuelve a consultar el gate antes de encolar trabajo.
+- La estimacion de capacidad actual cuenta destinatarios unicos de 24 horas de
+  forma conservadora. Mientras el worker de envios masivos tenga propietario
+  unico y ejecucion secuencial, dos colas comparten el remanente sin carrera. Si
+  se habilita paralelismo real, debe añadirse reserva atomica en Redis/SQL antes
+  de aumentar concurrencia.
+- Los webhooks externos llegan por `pm2-gateway`. Toda promocion de esta
+  funcionalidad exige el mismo commit en `back-staging` y `gateway`, migracion,
+  reinicio de ambos y comprobacion de logs. Si cambia `package.json` o lockfile,
+  ejecutar `npm install` en todos los checkouts que cargan este runtime.
+
 ## 2026-04-26 - Intake: verificacion Consent Mode v2 y avisos externos
 
 - `GET /api/intake/verify-snippet` no debe decidir compatibilidad de Consent Mode v2 solo por el query param `?v=` del `<script>`.
@@ -7586,3 +7639,107 @@ undeliverable`; no fue un bloqueo de quiet hours ni ausencia de disparo del
 flujo. También se backfilleó el evento operativo `appointment.status_changed`
 faltante de la cita `74577` para reflejar el cambio manual a
 `recordatorio_confirmado` hecho el `2026-08-03 15:20:07 UTC`.
+
+## 2026-08-09 - Gobierno WhatsApp y clasificación de respuestas de reseñas
+
+`reviewResponseClassification.service.js` es la única clasificación de
+respuestas para colas manuales y flujos recurrentes de reseñas. Aplica reglas
+deterministas para `wrong_recipient`, `marketing_opt_out`, `review_refusal` y
+`rating`; solo `ambiguous` llama al proveedor Llama/Groq. El preset
+`review_response_classifier` de `condition/ai_analysis` expone el resultado en
+`last_response_context.review_response_classification` y mantiene
+`response_rating` para los nodos `field_check` existentes. Eventos,
+notificaciones y restricciones deduplican por `inbound_message_id`.
+
+Una baja comercial se materializa como opt-out de marketing y excluye items no
+enviados; no bloquea mensajería asistencial. Un número erróneo crea una
+restricción `whatsapp_number`. `paciente.controller` resuelve esa restricción
+solo al guardar un número normalizado realmente distinto y registra
+`patient.whatsapp_number_corrected` con el usuario actor.
+
+`marketingBulkSends.service.js` usa el regulador común de entrega. Calidad
+`YELLOW` impone un máximo de 5 envíos cada 3 horas y nunca acelera una cola más
+lenta. Una baja producida entre los primeros cinco mensajes efectivamente
+enviados pausa como `early_warmup_opt_out`; opt-outs previos no cuentan como
+señal nueva. Las decisiones admin (`authorized`, `changes_required`,
+`cancelled`) son de una sola escritura y gobiernan si la cola puede continuar.
+
+La migración `20260809113000-version-review-response-classification.js` crea
+versiones inmutables de los flujos de reseñas y conserva el booleano activo de
+cada familia. Se verificaron 18 familias versionadas y 0 activas después de la
+migración.
+
+## 2026-08-09 - Dominio Director de pacientes
+
+`Director de pacientes` es un perfil global de Clinicaclick, no un subrol de
+`UsuarioClinica`. Solo un administrador global puede asignarlo o retirarlo desde
+`Usuarios > Clinicas y roles`: la interfaz lo presenta como rol primario por
+clinica, pero `PUT /api/patient-direction/profiles/:userId` persiste
+`clinic_ids` en `PatientDirectionSettings`, nunca como membresia de Personal.
+Cada asignacion nueva nace con `is_enabled=false`; retirar una clinica activa se
+rechaza hasta completar la desactivacion y el relevo. El director puede conectar o cambiar su propio WhatsApp desde
+`Ajustes`, pero no contratar el servicio ni modificar las clínicas cubiertas.
+En las clínicas vinculadas hereda las capacidades operativas de propietario;
+el scope procede de `PatientDirectionSettings`, no de una membresía de Personal.
+Por ello no aparece como miembro o fila propia en Personal, horarios ni Gantt,
+aunque sus capacidades le permiten administrar el personal y los horarios de
+terceros.
+
+La migración `20260809190000-create-patient-direction-domain.js` crea:
+
+- `PatientDirectionSettings`, configuración única por clínica;
+- `PatientDirectionAssignments`, estado de atención, teléfono emisor, lead,
+  conversación, paciente, primera cita y traspaso;
+- `PatientDirectionEvents`, auditoría append-only;
+- la familia `clinicaclick_patient_direction_handoff` del catálogo WhatsApp.
+
+La migración `20260809213000-create-patient-direction-profiles.js` crea
+`PatientDirectionProfiles`, migra cualquier subrol legacy, elimina esas filas de
+`UsuarioClinica` y retira `Director de pacientes` del enum de Personal. El perfil
+conserva un único `whatsapp_phone_asset_id` sin scope de clínica/grupo; ese mismo
+activo se propaga a todas sus configuraciones de clínica.
+
+La API autenticada `/api/patient-direction` expone `GET/PUT /profiles/:userId`
+para el perfil global y permite consultar, guardar, activar o desactivar la
+configuración de clínica, obtener el panel, tomar una conversación,
+asignar clínica a un inbound ambiguo y reintentar un traspaso. Toda operación
+valida scope. El dashboard devuelve solo el recuento y una previsualización del
+último mensaje ambiguo; nunca expone el payload crudo del webhook.
+
+`patientDirection.service.js` es la única fuente de verdad para el remitente:
+
+- QuickChat y Automatizaciones V2 usan el WhatsApp del director mientras exista
+  una asignación activa;
+- los consentimientos usan siempre el número habitual de la clínica;
+- una respuesta automática previa no cuenta como contacto humano, pero el
+  primer mensaje automático de captación sí puede crear la asignación;
+- solo la primera cita rastreada en estado asistido o completado termina la
+  asignación; cancelación e inasistencia permiten enlazar la siguiente cita;
+- descartar el lead o desactivar el servicio termina la asignación;
+- `active_phone_key` evita duplicidad dentro del activo compartido de un
+  director, sin bloquear el mismo teléfono en redes de directores distintas.
+
+Al desactivar, todas las asignaciones activas de la clínica reciben el sucesor
+seleccionado y quedan en `handoff_pending`. El envío desde la clínica pasa a
+`sent` solo cuando llega un estado real `sent`, `delivered` o `read`; los fallos
+permanecen reintentables. Un inbound al número antiguo recibe un aviso dentro de
+la ventana abierta y vuelve a provocar el traspaso.
+
+Cuando un número de director sirve a varias clínicas y el inbound no se puede
+atribuir, el worker conserva el webhook en la asignación `unassigned`. No crea
+una `Conversation` sin `clinic_id`. La selección manual de clínica reprocesa el
+payload por el worker WhatsApp normal y deja evento auditable.
+
+`GET /api/citas/calendario` expone `created_by` para que Agenda pueda atenuar
+citas ajenas sin recalcular la propiedad en Angular. La preferencia visual es
+local por usuario y no cambia permisos ni disponibilidad.
+
+### Horarios de personal
+
+No existe un horario personal global. `ClinicaHorarios` limita la apertura de
+la clinica y los turnos pertenecen a cada relacion profesional-clinica mediante
+`DoctorClinica`/`DoctorHorario`. El backend rechaza solapes activos entre
+clinicas con `STAFF_SCHEDULE_OVERLAP_OTHER_CLINIC`; `recibe_citas` solo controla
+la elegibilidad para Agenda y no crea ni elimina turnos. La interfaz puede
+consultar resumenes desde Personal, pero el Gantt es el unico editor de turnos
+y bloqueos.

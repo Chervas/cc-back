@@ -88,6 +88,30 @@ const NOTIFICATION_EVENTS = [
     category: 'whatsapp',
     label: 'Plantilla de reseñas con foto aprobada',
     level: 'info'
+  },
+  {
+    event: 'whatsapp.account_compliance_incident',
+    category: 'whatsapp',
+    label: 'Restricción o infracción de WhatsApp',
+    level: 'error'
+  },
+  {
+    event: 'whatsapp.account_compliance_help_requested',
+    category: 'whatsapp',
+    label: 'Clínica solicita revisar una suspensión de WhatsApp',
+    level: 'warning'
+  },
+  {
+    event: 'whatsapp.account_compliance_resolved',
+    category: 'whatsapp',
+    label: 'WhatsApp restablecido por Meta',
+    level: 'info'
+  },
+  {
+    event: 'whatsapp.delivery_governance_incident',
+    category: 'whatsapp',
+    label: 'Cola o plantilla de WhatsApp detenida',
+    level: 'error'
   }
 ];
 
@@ -151,7 +175,11 @@ const DEFAULT_NOTIFICATION_PREFERENCES = [
   { role: 'admin', subrole: null, event: 'whatsapp.review_photo_template_approved', enabled: true },
   { role: 'propietario', subrole: null, event: 'whatsapp.review_photo_template_approved', enabled: true },
   { role: 'personaldeclinica', subrole: 'Administrativos', event: 'whatsapp.review_photo_template_approved', enabled: true },
-  { role: 'personaldeclinica', subrole: 'Recepción / Comercial ventas', event: 'whatsapp.review_photo_template_approved', enabled: true }
+  { role: 'personaldeclinica', subrole: 'Recepción / Comercial ventas', event: 'whatsapp.review_photo_template_approved', enabled: true },
+  { role: 'admin', subrole: null, event: 'whatsapp.account_compliance_incident', enabled: true },
+  { role: 'admin', subrole: null, event: 'whatsapp.account_compliance_help_requested', enabled: true },
+  { role: 'admin', subrole: null, event: 'whatsapp.account_compliance_resolved', enabled: true },
+  { role: 'admin', subrole: null, event: 'whatsapp.delivery_governance_incident', enabled: true }
 ];
 
 module.exports = {

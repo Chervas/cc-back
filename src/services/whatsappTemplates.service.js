@@ -2980,6 +2980,11 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
           'Retirada localmente: version antigua de plantilla de resenas.',
         ].filter(Boolean).join(' | ')
       : remoteRejectionReason;
+    const remoteQuality = cleanString(
+      tpl?.quality_score?.score
+      || tpl?.quality_score
+      || tpl?.quality_rating
+    ).toUpperCase() || null;
     const payload = {
       waba_id: wabaId,
       name: tpl.name,
@@ -2998,6 +3003,26 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
       where: { waba_id: wabaId, name: payload.name, language: payload.language },
     });
     const remoteStatus = cleanString(tpl.status).toUpperCase();
+    if (remoteQuality) {
+      payload.quality_score = remoteQuality;
+      if (existing && remoteQuality !== cleanString(existing.quality_score).toUpperCase()) {
+        payload.previous_quality_score = existing.quality_score || null;
+        payload.quality_updated_at = now;
+      } else if (!existing) {
+        payload.quality_updated_at = now;
+      }
+    }
+    if (!existing || remoteStatus !== cleanString(existing.status).toUpperCase()) {
+      payload.provider_status_updated_at = now;
+      if (remoteStatus === 'PAUSED') {
+        payload.pause_count = Number(existing?.pause_count || 0) + 1;
+        payload.last_paused_at = now;
+      }
+      if (['ACTIVE', 'APPROVED'].includes(remoteStatus)
+        && ['PAUSED', 'DISABLED'].includes(cleanString(existing?.status).toUpperCase())) {
+        payload.last_unpaused_at = now;
+      }
+    }
     const remoteIsPending = [WHATSAPP_TEMPLATE_STATUS.PENDING, 'IN_REVIEW'].includes(remoteStatus);
     payload.is_active = shouldKeepRemoteTemplateActive({
       existing,
@@ -3266,9 +3291,38 @@ async function enqueueSyncForAllWabas(options = {}) {
       raw: true,
       group: ['waba_id'],
     });
-    targetWabaIds = pendingRows
+    const pendingWabaIds = pendingRows
       .map((row) => String(row?.waba_id || '').trim())
       .filter(Boolean);
+
+    const liveLists = await MarketingPatientList.findAll({
+      where: {
+        objective_id: 'mass_sends',
+        status: { [Op.in]: ['prepared', 'queued', 'sending', 'scheduled', 'waiting_template_approval', 'paused'] },
+      },
+      attributes: ['criteria', 'template_snapshot'],
+      raw: true,
+    });
+    const liveTemplateIds = Array.from(new Set(liveLists
+      .filter((row) => String(parseMaybeJson(row?.criteria)?.dispatch?.status || '').toLowerCase() !== 'paused_review')
+      .map((row) => Number(
+        parseMaybeJson(row?.criteria)?.dispatch?.whatsapp_template_id
+        || parseMaybeJson(row?.criteria)?.whatsapp_template_id
+        || parseMaybeJson(row?.template_snapshot)?.id
+        || 0
+      ))
+      .filter((id) => Number.isInteger(id) && id > 0)));
+    const liveTemplateRows = liveTemplateIds.length
+      ? await WhatsappTemplate.findAll({
+        where: { id: { [Op.in]: liveTemplateIds }, is_active: true, waba_id: { [Op.ne]: null } },
+        attributes: ['waba_id'],
+        raw: true,
+      })
+      : [];
+    targetWabaIds = Array.from(new Set([
+      ...pendingWabaIds,
+      ...liveTemplateRows.map((row) => String(row?.waba_id || '').trim()).filter(Boolean),
+    ]));
     if (!targetWabaIds.length) {
       return { queued: 0, only_pending: true };
     }
@@ -3300,7 +3354,7 @@ async function enqueueSyncForAllWabas(options = {}) {
     queued += 1;
   }
 
-  return { queued, only_pending: onlyPending };
+  return { queued, only_pending: onlyPending, relevant_wabas: targetWabaIds?.length || null };
 }
 
 module.exports = {

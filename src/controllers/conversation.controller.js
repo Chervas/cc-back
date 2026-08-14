@@ -4,6 +4,7 @@ const db = require('../../models');
 const { queues } = require('../services/queue.service');
 const { getIO } = require('../services/socket.service');
 const whatsappService = require('../services/whatsapp.service');
+const patientDirectionService = require('../services/patientDirection.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { canUserAccessFeature } = require('../lib/access-policy');
 const { canUserSelectWhatsappTemplate } = require('../lib/whatsapp-template-ownership');
@@ -18,6 +19,9 @@ const {
 const {
   startPatientWhatsappConversation,
 } = require('../services/patientContact.service');
+const {
+  getActiveContactRestrictionsForConversations,
+} = require('../services/marketingOptOut.service');
 
 const {
   Conversation,
@@ -106,6 +110,22 @@ function downloadFailedMediaError(kind) {
 function cleanText(value) {
   if (value === undefined || value === null) return '';
   return String(value).trim();
+}
+
+async function attachContactRestrictions(conversations = []) {
+  const rows = (conversations || []).map((conversation) => (
+    typeof conversation?.toJSON === 'function' ? conversation.toJSON() : conversation
+  ));
+  const restrictions = await getActiveContactRestrictionsForConversations(rows);
+  return rows.map((conversation) => ({
+    ...conversation,
+    contact_restrictions: restrictions.get(Number(conversation?.id)) || {
+      active: false,
+      marketing_opt_out: false,
+      whatsapp_number_invalid: false,
+      items: [],
+    },
+  }));
 }
 
 function toPlain(value) {
@@ -451,6 +471,8 @@ async function getUserClinics(userId) {
     return {
       clinicIds: clinics.map((c) => c.id_clinica),
       isAggregateAllowed: true,
+      directorClinicIds: [],
+      isPatientDirector: false,
     };
   }
   const memberships = await UsuarioClinica.findAll({
@@ -458,10 +480,15 @@ async function getUserClinics(userId) {
     attributes: ['id_clinica', 'rol_clinica'],
     raw: true,
   });
-  const clinicIds = memberships.map((m) => m.id_clinica);
+  const directorClinicIds = await patientDirectionService.getAssignedClinicIds(userId);
+  const clinicIds = Array.from(new Set([
+    ...memberships.map((m) => Number(m.id_clinica)),
+    ...directorClinicIds.map(Number),
+  ].filter(Number.isFinite)));
   const roles = memberships.map((m) => m.rol_clinica);
-  const isAggregateAllowed = roles.some((r) => ROLE_AGGREGATE.includes(r));
-  return { clinicIds, isAggregateAllowed };
+  const isPatientDirector = directorClinicIds.length > 0;
+  const isAggregateAllowed = isPatientDirector || roles.some((r) => ROLE_AGGREGATE.includes(r));
+  return { clinicIds, isAggregateAllowed, directorClinicIds, isPatientDirector };
 }
 
 const QUICKCHAT_POLICY_FEATURES = {
@@ -1189,6 +1216,46 @@ async function enrichQuickChatLeadAppointments(conversations = []) {
   });
 }
 
+async function enrichPatientDirectionAssignments(conversations = []) {
+  const rows = Array.isArray(conversations) ? conversations.map((row) => toPlain(row)) : [];
+  const conversationIds = rows.map((row) => parsePositiveInt(row?.id)).filter(Boolean);
+  if (!conversationIds.length || !db.PatientDirectionAssignment) return rows;
+  const assignments = await db.PatientDirectionAssignment.findAll({
+    where: {
+      conversation_id: { [Op.in]: conversationIds },
+      status: { [Op.in]: patientDirectionService.ACTIVE_STATUSES },
+    },
+    include: [{
+      model: db.Usuario,
+      as: 'director',
+      attributes: ['id_usuario', 'nombre', 'apellidos', 'avatar'],
+      required: false,
+    }],
+    order: [['updated_at', 'DESC']],
+  });
+  const byConversation = new Map();
+  for (const row of assignments) {
+    if (!byConversation.has(Number(row.conversation_id))) {
+      const plain = row.get({ plain: true });
+      byConversation.set(Number(row.conversation_id), {
+        id: plain.id,
+        status: plain.status,
+        director_user_id: plain.director_user_id,
+        director_name: [plain.director?.nombre, plain.director?.apellidos].filter(Boolean).join(' '),
+        director_avatar: plain.director?.avatar || null,
+        first_appointment_id: plain.first_appointment_id || null,
+        started_at: plain.started_at || null,
+        start_reason: plain.start_reason || null,
+        handoff_state: plain.handoff_state || null,
+      });
+    }
+  }
+  return rows.map((row) => ({
+    ...row,
+    patient_direction: byConversation.get(Number(row.id)) || null,
+  }));
+}
+
 exports.listConversations = async (req, res) => {
   try {
     const userId = req.userData?.userId;
@@ -1374,8 +1441,10 @@ exports.listConversations = async (req, res) => {
         : 0;
       return data;
     }));
-    const withLeadAppointments = await enrichQuickChatLeadAppointments(rawPayload);
-    const payload = await hydrateMarketingContactFallbacks(withLeadAppointments, { searchQuery });
+    const withRestrictions = await attachContactRestrictions(rawPayload);
+    const withLeadAppointments = await enrichQuickChatLeadAppointments(withRestrictions);
+    const withPatientDirection = await enrichPatientDirectionAssignments(withLeadAppointments);
+    const payload = await hydrateMarketingContactFallbacks(withPatientDirection, { searchQuery });
     const totalUnread = payload.reduce((total, item) => {
       const unread = Number(item?.unread_count || 0);
       const automationPending = item?.pending_automation_attention
@@ -1398,7 +1467,7 @@ exports.getPermissions = async (req, res) => {
   try {
     const userId = req.userData?.userId;
     const requestedClinic = req.query?.clinic_id;
-    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    const { clinicIds, isAggregateAllowed, directorClinicIds, isPatientDirector } = await getUserClinics(userId);
 
     if (!clinicIds.length) {
       return res.status(403).json({
@@ -1426,7 +1495,12 @@ exports.getPermissions = async (req, res) => {
       memberships.find((m) => Number(m.id_clinica) === Number(selectedClinicId)) ||
       memberships[0] ||
       null;
-    const effectiveRole = String(selectedMembership?.rol_clinica || 'unknown').toLowerCase();
+    const selectedClinicBelongsToDirector = selectedClinicId
+      ? directorClinicIds.includes(Number(selectedClinicId))
+      : isPatientDirector;
+    const effectiveRole = selectedClinicBelongsToDirector
+      ? 'patient_director'
+      : String(selectedMembership?.rol_clinica || 'unknown').toLowerCase();
     const policyPerms = await getQuickChatPolicyPermissions(userId, clinicIds, selectedClinicId);
 
     return res.json({
@@ -1436,6 +1510,7 @@ exports.getPermissions = async (req, res) => {
       read_leads: policyPerms.read_leads,
       can_use_all_clinics: !!isAggregateAllowed,
       effective_role: effectiveRole,
+      is_patient_director: selectedClinicBelongsToDirector,
     });
   } catch (err) {
     console.error('Error getPermissions', err);
@@ -1493,7 +1568,9 @@ exports.getMessages = async (req, res) => {
       raw: true,
     });
 
-    const conversationPayload = await enrichConversationUnreadForUser(userId, conversation);
+    const unreadConversationPayload = await enrichConversationUnreadForUser(userId, conversation);
+    const [restrictedConversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
+    const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload]);
     const visibleMessages = await hydrateTemplateMessagePreviews(
       filterQuickChatVisibleMessages(messages),
       { clinicId: conversation.clinic_id }
@@ -1615,7 +1692,9 @@ exports.getConversationByPatient = async (req, res) => {
       raw: true,
     });
 
-    const conversationPayload = await enrichConversationUnreadForUser(userId, conversation);
+    const unreadConversationPayload = await enrichConversationUnreadForUser(userId, conversation);
+    const [restrictedConversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
+    const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload]);
     const visibleMessages = await hydrateTemplateMessagePreviews(
       filterQuickChatVisibleMessages(messages),
       { clinicId: conversation.clinic_id }
@@ -1682,7 +1761,9 @@ exports.getConversationByLead = async (req, res) => {
       raw: true,
     });
 
-    const conversationPayload = await enrichConversationUnreadForUser(userId, conversation);
+    const unreadConversationPayload = await enrichConversationUnreadForUser(userId, conversation);
+    const [restrictedConversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
+    const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload]);
     const visibleMessages = await hydrateTemplateMessagePreviews(
       filterQuickChatVisibleMessages(messages),
       { clinicId: conversation.clinic_id }
@@ -1893,6 +1974,7 @@ exports.postMessage = async (req, res) => {
       templateComponents,
       previewUrl = false,
       metadata = {},
+      patientDirectionTakeConfirmed = false,
     } = req.body;
     let outboundJobPayload = null;
 
@@ -1932,6 +2014,7 @@ exports.postMessage = async (req, res) => {
 
     const io = getIO();
     let clinicConfig = null;
+    let senderPolicy = null;
     let limitStatus = null;
     let to = null;
     let resolvedTemplate = null;
@@ -1964,7 +2047,32 @@ exports.postMessage = async (req, res) => {
         conversation.contact_id = to;
         await conversation.save({ transaction });
       }
-      clinicConfig = await whatsappService.getClinicConfig(conversation.clinic_id);
+      senderPolicy = await patientDirectionService.resolveOutboundPolicy({
+        clinicId: conversation.clinic_id,
+        phone: to,
+        conversationId: conversation.id,
+        leadId: conversation.lead_id,
+        patientId: conversation.patient_id,
+        purpose: conversation.lead_id ? 'lead_capture' : 'general',
+        actorUserId: userId,
+        allowTake: patientDirectionTakeConfirmed === true,
+        automation: false,
+      });
+      if (senderPolicy.requiresTakeConfirmation) {
+        await transaction.rollback();
+        return res.status(409).json({
+          error: 'patient_direction_take_confirmation_required',
+          assignment_id: senderPolicy.assignment?.id || null,
+          message: 'El Director de pacientes está atendiendo esta conversación. Confirma que quieres responder en su nombre.',
+        });
+      }
+      if (patientDirectionTakeConfirmed === true && senderPolicy.assignment?.id) {
+        await patientDirectionService.registerTake({
+          assignmentId: senderPolicy.assignment.id,
+          actorUserId: userId,
+        });
+      }
+      clinicConfig = senderPolicy.clinicConfig;
       if (!clinicConfig?.accessToken || !clinicConfig?.phoneNumberId) {
         await transaction.rollback();
         return res.status(500).json({ error: 'whatsapp_config_missing' });
@@ -2049,6 +2157,7 @@ exports.postMessage = async (req, res) => {
         ? { phoneNumberId: clinicConfig.phoneNumberId }
         : {}),
       ...(clinicConfig?.wabaId ? { wabaId: clinicConfig.wabaId } : {}),
+      ...(senderPolicy?.metadata || {}),
       ...(limitStatus?.limitedMode
         ? {
             limitedMode: true,
