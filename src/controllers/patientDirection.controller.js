@@ -80,6 +80,7 @@ exports.saveProfile = async (req, res) => {
       userId,
       isActive: req.body?.is_active,
       whatsappPhoneAssetId: req.body?.whatsapp_phone_asset_id,
+      clinicIds: req.body?.clinic_ids,
       actorUserId: actorId,
       canManageRole,
     });

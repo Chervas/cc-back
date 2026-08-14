@@ -139,6 +139,37 @@ async function getProfileDetails(userId, { actorUserId = null } = {}) {
     order: [[{ model: Clinica, as: 'clinic' }, 'nombre_clinica', 'ASC']],
   });
 
+  const actorId = positiveInt(actorUserId);
+  const availableClinics = isGlobalAdmin(actorId)
+    ? await Clinica.findAll({
+        where: {
+          [Op.or]: [
+            { estado_clinica: true },
+            { estado_clinica: null },
+          ],
+        },
+        attributes: ['id_clinica', 'nombre_clinica'],
+        order: [['nombre_clinica', 'ASC']],
+        raw: true,
+      })
+    : [];
+  const availableClinicIds = availableClinics.map((clinic) => Number(clinic.id_clinica));
+  const occupiedSettings = availableClinicIds.length
+    ? await PatientDirectionSetting.findAll({
+        where: { clinic_id: { [Op.in]: availableClinicIds } },
+        include: [{
+          model: Usuario,
+          as: 'director',
+          attributes: ['id_usuario', 'nombre', 'apellidos'],
+          required: false,
+        }],
+        attributes: ['clinic_id', 'director_user_id', 'is_enabled'],
+      })
+    : [];
+  const settingByClinicId = new Map(
+    occupiedSettings.map((setting) => [Number(setting.clinic_id), setting]),
+  );
+
   const assetWhere = {
     assetType: 'whatsapp_phone_number',
     isActive: true,
@@ -149,7 +180,6 @@ async function getProfileDetails(userId, { actorUserId = null } = {}) {
         : []),
     ],
   };
-  const actorId = positiveInt(actorUserId);
   const assets = await ClinicMetaAsset.findAll({
     where: assetWhere,
     include: [{
@@ -183,6 +213,21 @@ async function getProfileDetails(userId, { actorUserId = null } = {}) {
       name: row.clinic?.nombre_clinica || `Clínica ${row.clinic_id}`,
       enabled: Boolean(row.is_enabled),
     })),
+    available_clinics: availableClinics.map((clinic) => {
+      const setting = settingByClinicId.get(Number(clinic.id_clinica));
+      const assignedDirectorId = positiveInt(setting?.director_user_id);
+      return {
+        id: Number(clinic.id_clinica),
+        name: clinic.nombre_clinica || `Clínica ${clinic.id_clinica}`,
+        selected: assignedDirectorId === uid,
+        enabled: Boolean(setting?.is_enabled),
+        available: !assignedDirectorId || assignedDirectorId === uid,
+        assigned_director_id: assignedDirectorId,
+        assigned_director_name: assignedDirectorId
+          ? [setting?.director?.nombre, setting?.director?.apellidos].filter(Boolean).join(' ') || null
+          : null,
+      };
+    }),
     whatsapp_assets: assets.map((asset) => ({
       id: asset.id,
       name: asset.metaAssetName || asset.waVerifiedName || `WhatsApp ${asset.id}`,
@@ -192,7 +237,102 @@ async function getProfileDetails(userId, { actorUserId = null } = {}) {
   };
 }
 
-async function saveProfile({ userId, isActive, whatsappPhoneAssetId, actorUserId, canManageRole = false }) {
+async function syncProfileClinics({
+  userId,
+  clinicIds,
+  directorPhoneAssetId,
+  transaction,
+}) {
+  if (!Array.isArray(clinicIds)) return;
+  const uid = positiveInt(userId);
+  const requestedIds = Array.from(new Set(clinicIds.map(positiveInt).filter(Boolean)));
+  const clinics = requestedIds.length
+      ? await Clinica.findAll({
+        where: {
+          id_clinica: { [Op.in]: requestedIds },
+          [Op.or]: [
+            { estado_clinica: true },
+            { estado_clinica: null },
+          ],
+        },
+        attributes: ['id_clinica'],
+        transaction,
+        raw: true,
+      })
+    : [];
+  if (clinics.length !== requestedIds.length) {
+    const error = new Error('patient_direction_clinic_invalid');
+    error.statusCode = 422;
+    throw error;
+  }
+
+  const currentSettings = await PatientDirectionSetting.findAll({
+    where: { director_user_id: uid },
+    transaction,
+    lock: transaction.LOCK.UPDATE,
+  });
+  const currentByClinicId = new Map(
+    currentSettings.map((setting) => [Number(setting.clinic_id), setting]),
+  );
+  const occupied = requestedIds.length
+    ? await PatientDirectionSetting.findAll({
+        where: {
+          clinic_id: { [Op.in]: requestedIds },
+          director_user_id: { [Op.ne]: uid },
+        },
+        attributes: ['clinic_id', 'director_user_id'],
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+        raw: true,
+      })
+    : [];
+  if (occupied.length) {
+    const error = new Error('patient_direction_clinic_already_assigned');
+    error.statusCode = 409;
+    error.details = { clinic_ids: occupied.map((row) => Number(row.clinic_id)) };
+    throw error;
+  }
+
+  const requestedSet = new Set(requestedIds);
+  const activeToRemove = currentSettings
+    .filter((setting) => !requestedSet.has(Number(setting.clinic_id)) && setting.is_enabled)
+    .map((setting) => Number(setting.clinic_id));
+  if (activeToRemove.length) {
+    const error = new Error('patient_direction_active_clinic_cannot_unassign');
+    error.statusCode = 409;
+    error.details = { clinic_ids: activeToRemove };
+    throw error;
+  }
+
+  for (const clinicId of requestedIds) {
+    const setting = currentByClinicId.get(clinicId);
+    if (setting) {
+      await setting.update({ director_phone_asset_id: directorPhoneAssetId }, { transaction });
+      continue;
+    }
+    await PatientDirectionSetting.create({
+      clinic_id: clinicId,
+      is_enabled: false,
+      director_user_id: uid,
+      director_phone_asset_id: directorPhoneAssetId,
+      clinic_phone_asset_id: null,
+      default_successor_user_id: null,
+      config: {},
+    }, { transaction });
+  }
+
+  const removableIds = currentSettings
+    .filter((setting) => !requestedSet.has(Number(setting.clinic_id)) && !setting.is_enabled)
+    .map((setting) => Number(setting.id));
+  if (removableIds.length) {
+    await PatientDirectionSetting.destroy({
+      where: { id: { [Op.in]: removableIds } },
+      transaction,
+    });
+  }
+}
+
+async function saveProfile({ userId, isActive, whatsappPhoneAssetId, clinicIds, actorUserId, canManageRole = false }) {
   const uid = positiveInt(userId);
   const actorId = positiveInt(actorUserId);
   if (!uid || !actorId) throw Object.assign(new Error('user_required'), { statusCode: 400 });
@@ -263,6 +403,17 @@ async function saveProfile({ userId, isActive, whatsappPhoneAssetId, actorUserId
       }, { transaction });
     } else {
       await profile.update(payload, { transaction });
+    }
+    if (clinicIds !== undefined) {
+      if (!canManageRole) {
+        throw Object.assign(new Error('patient_direction_clinics_forbidden'), { statusCode: 403 });
+      }
+      await syncProfileClinics({
+        userId: uid,
+        clinicIds,
+        directorPhoneAssetId: nextAssetId,
+        transaction,
+      });
     }
     await PatientDirectionSetting.update(
       { director_phone_asset_id: nextAssetId },

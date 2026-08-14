@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { Op } = require('sequelize');
 const db = require('../../models');
 const notificationService = require('./notifications.service');
+const whatsappService = require('./whatsapp.service');
 
 const {
   ClinicMetaAsset,
@@ -863,6 +864,117 @@ async function getDispatchGate({ clinicId, wabaId, phoneNumberId, template, requ
   };
 }
 
+function serializeQueueSender(asset, { source = 'unknown', phoneNumberId = null } = {}) {
+  if (!asset && !phoneNumberId) return null;
+  const additionalData = safeObject(asset?.additionalData);
+  const displayPhone = clean(
+    additionalData.display_phone_number
+    || additionalData.displayPhoneNumber
+    || additionalData.phone_number
+    || asset?.metaAssetName,
+  ) || null;
+  return {
+    asset_id: Number(asset?.id || 0) || null,
+    phone_number_id: clean(phoneNumberId || asset?.phoneNumberId) || null,
+    phone: displayPhone,
+    name: clean(asset?.waVerifiedName || asset?.metaAssetName) || displayPhone,
+    source,
+  };
+}
+
+async function cachedLookup(cache, key, loader) {
+  if (!cache || !key) return loader();
+  if (!cache.has(key)) cache.set(key, Promise.resolve().then(loader));
+  return cache.get(key);
+}
+
+async function resolveQueueSender(list, dispatch, cache = {}) {
+  const senderSnapshot = safeObject(dispatch.sender_snapshot);
+  if (clean(senderSnapshot.phone_number_id || senderSnapshot.phoneNumberId || senderSnapshot.phone)) {
+    return {
+      asset_id: Number(senderSnapshot.asset_id || senderSnapshot.assetId || 0) || null,
+      phone_number_id: clean(senderSnapshot.phone_number_id || senderSnapshot.phoneNumberId) || null,
+      phone: clean(senderSnapshot.phone || senderSnapshot.display_phone_number) || null,
+      name: clean(senderSnapshot.name || senderSnapshot.verified_name) || null,
+      source: 'dispatch_snapshot',
+    };
+  }
+
+  const deliveryGovernance = safeObject(dispatch.delivery_governance);
+  const dispatchedPhoneNumberId = clean(
+    deliveryGovernance.phone_number_id
+    || deliveryGovernance.phoneNumberId,
+  );
+  if (dispatchedPhoneNumberId) {
+    const asset = await cachedLookup(
+      cache.assetsByPhone,
+      dispatchedPhoneNumberId,
+      () => ClinicMetaAsset.findOne({
+        where: {
+          assetType: 'whatsapp_phone_number',
+          phoneNumberId: dispatchedPhoneNumberId,
+        },
+        order: [['isActive', 'DESC'], ['updatedAt', 'DESC']],
+      }),
+    );
+    return serializeQueueSender(asset, {
+      source: 'dispatch_route',
+      phoneNumberId: dispatchedPhoneNumberId,
+    });
+  }
+
+  const clinicId = Number(list.clinica_id || 0) || null;
+  if (clinicId) {
+    const clinicConfig = await cachedLookup(
+      cache.clinicConfigs,
+      clinicId,
+      () => whatsappService.getClinicConfig(clinicId).catch(() => null),
+    );
+    if (clinicConfig?.phoneNumberId) {
+      const asset = clinicConfig.originId
+        ? await cachedLookup(
+            cache.assetsById,
+            Number(clinicConfig.originId),
+            () => ClinicMetaAsset.findByPk(clinicConfig.originId),
+          )
+        : await cachedLookup(
+            cache.assetsByPhone,
+            clean(clinicConfig.phoneNumberId),
+            () => ClinicMetaAsset.findOne({
+              where: {
+                assetType: 'whatsapp_phone_number',
+                phoneNumberId: clean(clinicConfig.phoneNumberId),
+              },
+              order: [['isActive', 'DESC'], ['updatedAt', 'DESC']],
+            }),
+          );
+      return serializeQueueSender(asset, {
+        source: 'current_clinic_route',
+        phoneNumberId: clinicConfig.phoneNumberId,
+      });
+    }
+  }
+
+  const groupId = Number(list.grupo_clinica_id || 0) || null;
+  if (groupId) {
+    const asset = await cachedLookup(
+      cache.groupAssets,
+      groupId,
+      () => ClinicMetaAsset.findOne({
+        where: {
+          assetType: 'whatsapp_phone_number',
+          isActive: true,
+          grupoClinicaId: groupId,
+          assignmentScope: 'group',
+        },
+        order: [['updatedAt', 'DESC']],
+      }),
+    );
+    return serializeQueueSender(asset, { source: 'current_group_route' });
+  }
+  return null;
+}
+
 async function getAdminOverview({ limit = 100 } = {}) {
   const [snapshots, events, pausedLists] = await Promise.all([
     WhatsappDeliverySnapshot.findAll({ order: [['updated_at', 'DESC']], limit: Math.min(Number(limit) || 100, 500), raw: true }),
@@ -882,7 +994,7 @@ async function getAdminOverview({ limit = 100 } = {}) {
   ]);
   const clinicNames = new Map(clinics.map((clinic) => [Number(clinic.id_clinica), clinic.nombre_clinica]));
   const groupNames = new Map(groups.map((group) => [Number(group.id_grupo), group.nombre_grupo]));
-  const queues = pausedLists
+  const pausedQueueRows = pausedLists
     .map((list) => {
       const criteria = safeObject(list.criteria);
       const dispatch = safeObject(criteria.dispatch);
@@ -892,8 +1004,14 @@ async function getAdminOverview({ limit = 100 } = {}) {
       PROVIDER_PAUSE_STATUSES.has(clean(dispatch.status).toLowerCase())
       || clean(dispatch.status).toLowerCase() === 'paused_review'
       || dispatch.requires_admin_review === true
-    ))
-    .map(({ list, dispatch }) => ({
+    ));
+  const senderCache = {
+    clinicConfigs: new Map(),
+    assetsById: new Map(),
+    assetsByPhone: new Map(),
+    groupAssets: new Map(),
+  };
+  const queues = await Promise.all(pausedQueueRows.map(async ({ list, dispatch }) => ({
       id: list.id,
       name: list.name,
       clinic_id: list.clinica_id,
@@ -911,6 +1029,7 @@ async function getAdminOverview({ limit = 100 } = {}) {
           : 'Revisar la causa antes de reanudar',
       counters: safeObject(list.counters),
       template: safeObject(dispatch.template_snapshot),
+      sender: await resolveQueueSender(list, dispatch, senderCache),
       audience: safeObject(safeObject(list.criteria).audience || safeObject(list.criteria).selection),
       schedule: safeObject(dispatch.business_hours),
       admin_resolution: safeObject(dispatch.admin_resolution),
@@ -919,7 +1038,7 @@ async function getAdminOverview({ limit = 100 } = {}) {
         : dispatch.status === 'held_meta'
           ? 'WhatsApp está comprobando señales iniciales de calidad. Los mensajes retenidos no se reintentan: se enviarán o fallarán cuando Meta termine la evaluación.'
           : 'La cola permanecerá detenida hasta que desaparezca la causa indicada.',
-    }));
+    })));
   return { snapshots, events, queues };
 }
 

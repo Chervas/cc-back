@@ -7673,11 +7673,17 @@ migración.
 
 `Director de pacientes` es un perfil global de Clinicaclick, no un subrol de
 `UsuarioClinica`. Solo un administrador global puede asignarlo o retirarlo desde
-`Usuarios`. El director puede conectar o cambiar su propio WhatsApp desde
+`Usuarios > Clinicas y roles`: la interfaz lo presenta como rol primario por
+clinica, pero `PUT /api/patient-direction/profiles/:userId` persiste
+`clinic_ids` en `PatientDirectionSettings`, nunca como membresia de Personal.
+Cada asignacion nueva nace con `is_enabled=false`; retirar una clinica activa se
+rechaza hasta completar la desactivacion y el relevo. El director puede conectar o cambiar su propio WhatsApp desde
 `Ajustes`, pero no contratar el servicio ni modificar las clínicas cubiertas.
 En las clínicas vinculadas hereda las capacidades operativas de propietario;
 el scope procede de `PatientDirectionSettings`, no de una membresía de Personal.
-Por ello no aparece en Personal, horarios ni Gantt.
+Por ello no aparece como miembro o fila propia en Personal, horarios ni Gantt,
+aunque sus capacidades le permiten administrar el personal y los horarios de
+terceros.
 
 La migración `20260809190000-create-patient-direction-domain.js` crea:
 
@@ -7727,3 +7733,13 @@ payload por el worker WhatsApp normal y deja evento auditable.
 `GET /api/citas/calendario` expone `created_by` para que Agenda pueda atenuar
 citas ajenas sin recalcular la propiedad en Angular. La preferencia visual es
 local por usuario y no cambia permisos ni disponibilidad.
+
+### Horarios de personal
+
+No existe un horario personal global. `ClinicaHorarios` limita la apertura de
+la clinica y los turnos pertenecen a cada relacion profesional-clinica mediante
+`DoctorClinica`/`DoctorHorario`. El backend rechaza solapes activos entre
+clinicas con `STAFF_SCHEDULE_OVERLAP_OTHER_CLINIC`; `recibe_citas` solo controla
+la elegibilidad para Agenda y no crea ni elimina turnos. La interfaz puede
+consultar resumenes desde Personal, pero el Gantt es el unico editor de turnos
+y bloqueos.

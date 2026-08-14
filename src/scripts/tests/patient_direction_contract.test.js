@@ -68,6 +68,17 @@ assert.match(service, /isConsentPurpose[\s\S]*?mode: 'clinic_default'/,
 assert.match(service, /director_whatsapp_must_be_shared_across_clinics/);
 assert.match(service, /director_and_clinic_whatsapp_must_differ/);
 assert.match(service, /director_whatsapp_out_of_scope/);
+assert.match(service, /async function syncProfileClinics/,
+  'clinic assignments must have an explicit patient-direction sync boundary');
+assert.match(service, /PatientDirectionSetting\.create\([\s\S]*?is_enabled:\s*false/,
+  'assigning the role must not enable clinic routing implicitly');
+assert.match(service, /patient_direction_active_clinic_cannot_unassign/,
+  'an enabled clinic must require a handoff before removing the director');
+assert.doesNotMatch(
+  service.slice(service.indexOf('async function syncProfileClinics'), service.indexOf('async function saveProfile')),
+  /UsuarioClinica|DoctorClinica|DoctorHorario/,
+  'assigning director clinics must not create personnel or schedule memberships',
+);
 
 assert.match(conversation, /patientDirectionTakeConfirmed/);
 assert.match(conversation, /patient_direction_take_confirmation_required/);
