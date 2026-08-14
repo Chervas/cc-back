@@ -1,20 +1,79 @@
-const { Usuario, Clinica, GrupoClinica } = require('../../models');
+const {
+  Usuario,
+  Clinica,
+  GrupoClinica,
+  UsuarioClinica,
+  PatientDirectionProfile,
+} = require('../../models');
 const bcrypt = require('bcryptjs');
 const { Op } = require('sequelize');
 
-// Obtener todos los usuarios con sus clínicas (incluyendo la información de la tabla pivote)
+const SAFE_USER_ATTRIBUTES = [
+  'id_usuario', 'nombre', 'apellidos', 'email_usuario', 'avatar', 'telefono',
+  'cargo_usuario', 'isProfesional', 'fecha_creacion', 'ultimo_login',
+];
+
+function directoryClinicInclude(req, required = false) {
+  const clinicIds = req.userDirectoryAccess?.clinicIds;
+  return {
+    model: Clinica,
+    as: 'Clinicas',
+    ...(Array.isArray(clinicIds) ? { where: { id_clinica: { [Op.in]: clinicIds } } } : {}),
+    required,
+    through: { attributes: ['rol_clinica', 'subrol_clinica'] },
+  };
+}
+
+async function directoryUserWhere(req, query = '') {
+  const clauses = [];
+  const normalizedQuery = String(query || '').trim();
+  if (normalizedQuery) {
+    clauses.push({
+      [Op.or]: [
+        { nombre: { [Op.like]: `%${normalizedQuery}%` } },
+        { apellidos: { [Op.like]: `%${normalizedQuery}%` } },
+        { email_usuario: { [Op.like]: `%${normalizedQuery}%` } },
+      ],
+    });
+  }
+
+  if (req.userDirectoryAccess?.mode === 'agency') {
+    const profiles = await PatientDirectionProfile.findAll({
+      where: { is_active: true },
+      attributes: ['user_id'],
+      raw: true,
+    });
+    clauses.push({ id_usuario: { [Op.in]: profiles.map((profile) => profile.user_id) } });
+  } else if (req.userDirectoryAccess?.mode === 'patient_director') {
+    const memberships = await UsuarioClinica.findAll({
+      where: { id_clinica: { [Op.in]: req.userDirectoryAccess.clinicIds || [] } },
+      attributes: ['id_usuario'],
+      raw: true,
+    });
+    clauses.push({
+      id_usuario: {
+        [Op.in]: Array.from(new Set([
+          Number(req.userData?.userId),
+          ...memberships.map((membership) => Number(membership.id_usuario)),
+        ].filter(Boolean))),
+      },
+    });
+  }
+  return clauses.length > 1 ? { [Op.and]: clauses } : (clauses[0] || {});
+}
+
+async function findDirectoryUsers(req, query = '') {
+  return Usuario.findAll({
+    attributes: SAFE_USER_ATTRIBUTES,
+    where: await directoryUserWhere(req, query),
+    include: directoryClinicInclude(req, false),
+    order: [['nombre', 'ASC'], ['apellidos', 'ASC']],
+  });
+}
+
 exports.getAllUsers = async (req, res) => {
   try {
-    const users = await Usuario.findAll({
-      attributes: { exclude: ['password_usuario'] },
-      include: {
-        model: Clinica,
-        as: 'Clinicas',
-        through: { attributes: ['rol_clinica', 'subrol_clinica'] }
-      },
-      order: [['nombre', 'ASC']]
-    });
-    res.json(users);
+    res.json(await findDirectoryUsers(req));
   } catch (error) {
     res.status(500).json({ message: 'Error retrieving users', error: error.message });
   }
@@ -23,17 +82,7 @@ exports.getAllUsers = async (req, res) => {
 // Buscar usuarios
 exports.searchUsers = async (req, res) => {
   try {
-    const query = req.query.query;
-    const users = await Usuario.findAll({
-      attributes: { exclude: ['password_usuario'] },
-      where: {
-        [Op.or]: [
-          { nombre: { [Op.like]: `%${query}%` } },
-          { apellidos: { [Op.like]: `%${query}%` } }
-        ]
-      },
-      order: [['nombre', 'ASC']]
-    });
+    const users = await findDirectoryUsers(req, req.query.query);
     res.status(200).json(users);
   } catch (error) {
     console.error('Error al buscar usuarios:', error);
@@ -45,12 +94,10 @@ exports.searchUsers = async (req, res) => {
 exports.getUserById = async (req, res) => {
   try {
     const user = await Usuario.findByPk(req.params.id, {
-      attributes: { exclude: ['password_usuario'] },
-      include: {
-        model: Clinica,
-        as: 'Clinicas',
-        through: { attributes: ['rol_clinica', 'subrol_clinica'] }
-      }
+      attributes: req.userDirectoryAccess?.mode === 'admin'
+        ? { exclude: ['password_usuario'] }
+        : SAFE_USER_ATTRIBUTES,
+      include: directoryClinicInclude(req, false),
     });
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
@@ -132,15 +179,23 @@ exports.createUser = async (req, res) => {
 // Actualizar un usuario y sus asignaciones de clínicas  
 exports.updateUser = async (req, res) => {
   try {
+    const isAdmin = req.userDirectoryAccess?.mode === 'admin';
+    const isSelf = Number(req.userData?.userId) === Number(req.params.id);
+    if (!isAdmin && !isSelf) {
+      return res.status(403).json({ message: 'Use patient direction profile assignment for this operation' });
+    }
     const user = await Usuario.findByPk(req.params.id);
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    const fieldsToUpdate = [
+    const fieldsToUpdate = isAdmin ? [
       'nombre', 'apellidos', 'email_usuario', 'email_factura',
       'email_notificacion', 'id_gestor', 'notas_usuario', 'telefono',
       'cargo_usuario', 'cumpleanos', 'isProfesional'
+    ] : [
+      'nombre', 'apellidos', 'email_usuario', 'email_factura',
+      'email_notificacion', 'notas_usuario', 'telefono', 'cumpleanos',
     ];
 
     fieldsToUpdate.forEach(field => {
@@ -156,7 +211,7 @@ exports.updateUser = async (req, res) => {
     await user.save();
 
     // Actualizar las asociaciones de clínicas
-    if (req.body.clinicas && Array.isArray(req.body.clinicas)) {
+    if (isAdmin && req.body.clinicas && Array.isArray(req.body.clinicas)) {
       // Reinicializar las asociaciones actuales
       await user.setClinicas([]);
       for (const clinicaData of req.body.clinicas) {
@@ -173,11 +228,7 @@ exports.updateUser = async (req, res) => {
 
     const updatedUser = await Usuario.findByPk(user.id_usuario, {
       attributes: { exclude: ['password_usuario'] },
-      include: {
-        model: Clinica,
-        as: 'Clinicas',
-        through: { attributes: ['rol_clinica', 'subrol_clinica'] }
-      }
+      include: directoryClinicInclude(req, false),
     });
 
     res.json({
@@ -209,11 +260,14 @@ exports.deleteUser = async (req, res) => {
 // En src/controllers/user.controller.js (método getClinicasByUser)
 exports.getClinicasByUser = async (req, res) => {
   try {
-    console.log("Obteniendo usuario con ID:", req.params.id);
     const user = await Usuario.findByPk(req.params.id, {
       include: [{
         model: Clinica,
         as: 'Clinicas',
+        ...(Array.isArray(req.userDirectoryAccess?.clinicIds)
+          ? { where: { id_clinica: { [Op.in]: req.userDirectoryAccess.clinicIds } } }
+          : {}),
+        required: false,
         include: [{
           model: GrupoClinica, // Asegúrate de que GrupoClinica está definido en db
           as: 'grupoClinica'
@@ -222,12 +276,9 @@ exports.getClinicasByUser = async (req, res) => {
       }]
     });
     if (!user) {
-      console.log("Usuario no encontrado");
       return res.status(404).json({ message: 'User not found' });
     }
-    console.log("Usuario obtenido con clínicas:", JSON.stringify(user, null, 2));
     const clinicas = user.Clinicas || user.clinicas || [];
-    console.log("Clínicas a retornar:", clinicas);
     res.json(clinicas);
   } catch (error) {
     console.error("Error retrieving clinicas:", error);

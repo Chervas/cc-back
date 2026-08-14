@@ -93,7 +93,7 @@ const DEFAULT_FEATURES = {
   },
   'patient_direction.assign_role': {
     propietario: false,
-    agencia: false,
+    agencia: true,
     doctor: false,
     assistant: false,
     reception: false,
@@ -503,6 +503,59 @@ const DEFAULT_FEATURES = {
     unknown: false,
   },
 };
+
+// El Director de pacientes necesita una superficie operativa concreta, no la
+// matriz completa de propietario. Mantenerla explicita evita que una nueva
+// capacidad sensible se herede por accidente al ampliar el catalogo.
+const PATIENT_DIRECTOR_DEFAULTS = Object.freeze({
+  marketing: true,
+  'clinic.settings.view': true,
+  'clinic.settings.edit': false,
+  'team.view': true,
+  'team.manage': true,
+  'team.schedule.self.manage': false,
+  'billing.reports.view': false,
+  'billing.documents.manage': false,
+  'accounting.expenses.manage': false,
+  'accounting.cash.manage': false,
+  'accounting.payroll.view': false,
+  'accounting.payroll.manage': false,
+  'accounting.export': false,
+  'accounting.ocr.manage': false,
+  'accounting.sepa.manage': false,
+  'accounting.firm.manage': false,
+  'patients.view': true,
+  'patients.sensitive.view': true,
+  'patients.edit': true,
+  'leads.sensitive.view': true,
+  'leads.manage': true,
+  'marketing.web.view': false,
+  'marketing.web.edit': false,
+  'marketing.web.advanced_edit': false,
+  'marketing.web.review': false,
+  'marketing.web.publish': false,
+  'marketing.web.domains.manage': false,
+  'marketing.web.templates.manage': false,
+  'appointments.view': true,
+  'appointments.manage': true,
+  'consents.view': false,
+  'consents.manage': false,
+  'quickchat.read_patients': true,
+  'quickchat.read_team': false,
+  'quickchat.read_leads': true,
+  'nutrition.workspace.view': false,
+  'nutrition.measurements.create': false,
+  'nutrition.reports.finalize': false,
+  'clinical.reports.view': false,
+  'clinical.reports.manage': false,
+  'patient_direction.view': true,
+  'patient_direction.manage': false,
+  'patient_direction.assign_role': false,
+});
+
+for (const [featureKey, allowed] of Object.entries(PATIENT_DIRECTOR_DEFAULTS)) {
+  if (DEFAULT_FEATURES[featureKey]) DEFAULT_FEATURES[featureKey].patient_director = allowed;
+}
 
 const ROLE_CATALOG = [
   {

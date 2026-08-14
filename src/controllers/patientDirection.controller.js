@@ -43,15 +43,33 @@ function ensureGlobalAdmin(req, res) {
   return false;
 }
 
+async function getRoleAssignmentClinicIds(actorId) {
+  if (isGlobalAdmin(actorId)) return null;
+  return getAccessibleClinicIdsForFeature({
+    actorId,
+    featureKey: 'patient_direction.assign_role',
+  });
+}
+
 exports.getProfile = async (req, res) => {
   try {
     const userId = positiveInt(req.params.userId);
     const actorId = positiveInt(req.userData?.userId);
     if (!userId) return res.status(400).json({ error: 'user_required' });
-    if (!isGlobalAdmin(actorId) && actorId !== userId) {
+    const manageableClinicIds = actorId === userId
+      ? null
+      : await getRoleAssignmentClinicIds(actorId);
+    if (!isGlobalAdmin(actorId) && actorId !== userId && !manageableClinicIds?.length) {
       return res.status(403).json({ error: 'patient_direction_profile_forbidden' });
     }
-    return res.json(await patientDirection.getProfileDetails(userId, { actorUserId: actorId }));
+    const response = await patientDirection.getProfileDetails(userId, {
+      actorUserId: actorId,
+      manageableClinicIds,
+    });
+    if (!isGlobalAdmin(actorId) && actorId !== userId && !response.profile?.is_active) {
+      return res.status(404).json({ error: 'patient_direction_profile_not_found' });
+    }
+    return res.json(response);
   } catch (error) {
     return sendError(res, error);
   }
@@ -72,19 +90,49 @@ exports.saveProfile = async (req, res) => {
     const userId = positiveInt(req.params.userId);
     const actorId = positiveInt(req.userData?.userId);
     if (!userId) return res.status(400).json({ error: 'user_required' });
-    const canManageRole = isGlobalAdmin(actorId);
+    const globalAdmin = isGlobalAdmin(actorId);
+    const manageableClinicIds = globalAdmin || actorId === userId
+      ? null
+      : await getRoleAssignmentClinicIds(actorId);
+    const canManageRole = globalAdmin || Boolean(manageableClinicIds?.length);
     if (!canManageRole && actorId !== userId) {
       return res.status(403).json({ error: 'patient_direction_profile_forbidden' });
     }
+    let clinicIds = req.body?.clinic_ids;
+    let isActive = req.body?.is_active;
+    let whatsappPhoneAssetId = req.body?.whatsapp_phone_asset_id;
+    if (!globalAdmin && canManageRole) {
+      const profile = await patientDirection.getPatientDirectorProfile(userId);
+      if (!profile?.is_active) {
+        return res.status(422).json({ error: 'patient_direction_agency_requires_existing_director' });
+      }
+      const requestedIds = Array.isArray(clinicIds)
+        ? clinicIds.map(positiveInt).filter(Boolean)
+        : [];
+      const allowed = new Set(manageableClinicIds);
+      if (requestedIds.some((clinicId) => !allowed.has(clinicId))) {
+        return res.status(403).json({ error: 'patient_direction_clinic_out_of_scope' });
+      }
+      const currentIds = await patientDirection.getAssignedClinicIds(userId);
+      clinicIds = [
+        ...currentIds.filter((clinicId) => !allowed.has(Number(clinicId))),
+        ...requestedIds,
+      ];
+      isActive = undefined;
+      whatsappPhoneAssetId = undefined;
+    }
     await patientDirection.saveProfile({
       userId,
-      isActive: req.body?.is_active,
-      whatsappPhoneAssetId: req.body?.whatsapp_phone_asset_id,
-      clinicIds: req.body?.clinic_ids,
+      isActive,
+      whatsappPhoneAssetId,
+      clinicIds,
       actorUserId: actorId,
       canManageRole,
     });
-    return res.json(await patientDirection.getProfileDetails(userId, { actorUserId: actorId }));
+    return res.json(await patientDirection.getProfileDetails(userId, {
+      actorUserId: actorId,
+      manageableClinicIds,
+    }));
   } catch (error) {
     return sendError(res, error);
   }

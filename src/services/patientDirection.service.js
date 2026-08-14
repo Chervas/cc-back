@@ -115,7 +115,7 @@ async function getAssignedClinicIds(userId) {
   ));
 }
 
-async function getProfileDetails(userId, { actorUserId = null } = {}) {
+async function getProfileDetails(userId, { actorUserId = null, manageableClinicIds = null } = {}) {
   const uid = positiveInt(userId);
   if (!uid) throw Object.assign(new Error('user_required'), { statusCode: 400 });
   const user = await Usuario.findByPk(uid, {
@@ -140,9 +140,13 @@ async function getProfileDetails(userId, { actorUserId = null } = {}) {
   });
 
   const actorId = positiveInt(actorUserId);
-  const availableClinics = isGlobalAdmin(actorId)
+  const scopedClinicIds = Array.isArray(manageableClinicIds)
+    ? Array.from(new Set(manageableClinicIds.map(positiveInt).filter(Boolean)))
+    : null;
+  const availableClinics = isGlobalAdmin(actorId) || scopedClinicIds
     ? await Clinica.findAll({
         where: {
+          ...(scopedClinicIds ? { id_clinica: { [Op.in]: scopedClinicIds } } : {}),
           [Op.or]: [
             { estado_clinica: true },
             { estado_clinica: null },
@@ -208,11 +212,13 @@ async function getProfileDetails(userId, { actorUserId = null } = {}) {
         scope: profile.whatsappPhone.assignmentScope || null,
       } : null,
     } : null,
-    clinics: settings.map((row) => ({
+    clinics: settings
+      .filter((row) => !scopedClinicIds || scopedClinicIds.includes(Number(row.clinic_id)))
+      .map((row) => ({
       id: row.clinic_id,
       name: row.clinic?.nombre_clinica || `Clínica ${row.clinic_id}`,
       enabled: Boolean(row.is_enabled),
-    })),
+      })),
     available_clinics: availableClinics.map((clinic) => {
       const setting = settingByClinicId.get(Number(clinic.id_clinica));
       const assignedDirectorId = positiveInt(setting?.director_user_id);

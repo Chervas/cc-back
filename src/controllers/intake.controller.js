@@ -76,6 +76,7 @@ const {
 const { isGlobalAdmin } = require('../lib/role-helpers');
 const {
   canUserAccessFeature,
+  getAccessibleClinicIdsForFeature,
 } = require('../lib/access-policy');
 const { resolveSafeHttpTarget } = require('../lib/safeHttpTarget');
 const {
@@ -424,7 +425,7 @@ const resolveLeadScopeFilter = async (query = {}, userId = null) => {
   }
 
   const targetClinicIds = requestedClinicIds !== null ? requestedClinicIds : await findAllClinicIds();
-  const clinicIds = await getAccessibleMarketingClinicIds({
+  const clinicIds = await getAccessibleLeadClinicIds({
     userId: normalizedUserId,
     clinicIds: targetClinicIds,
     access: 'read',
@@ -441,6 +442,24 @@ const resolveLeadScopeFilter = async (query = {}, userId = null) => {
   }
 
   return { clinicIds, groupIds };
+};
+
+const getAccessibleLeadClinicIds = async ({ userId, clinicIds, access = 'read' } = {}) => {
+  const normalizedClinicIds = Array.from(new Set((Array.isArray(clinicIds) ? clinicIds : [clinicIds])
+    .map((clinicId) => parseInteger(clinicId))
+    .filter((clinicId) => clinicId !== null)));
+  if (!normalizedClinicIds.length) return [];
+
+  const [marketingClinicIds, policyClinicIds] = await Promise.all([
+    getAccessibleMarketingClinicIds({ userId, clinicIds: normalizedClinicIds, access }),
+    getAccessibleClinicIdsForFeature({
+      actorId: userId,
+      featureKey: access === 'write' ? 'leads.manage' : 'leads.sensitive.view',
+      clinicIds: normalizedClinicIds,
+    }),
+  ]);
+  const allowed = new Set([...marketingClinicIds, ...policyClinicIds].map(Number));
+  return normalizedClinicIds.filter((clinicId) => allowed.has(Number(clinicId)));
 };
 
 const applyLeadScopeWhere = async (where, query = {}, userId = null) => {
@@ -473,7 +492,7 @@ const ensureLeadScopeAccess = async (req, res, lead) => {
 
   const clinicId = parseInteger(lead?.clinica_id);
   if (clinicId !== null) {
-    const allowedClinicIds = await getAccessibleMarketingClinicIds({
+    const allowedClinicIds = await getAccessibleLeadClinicIds({
       userId: normalizedUserId,
       clinicIds: [clinicId],
       access: 'read',
@@ -1088,7 +1107,7 @@ const resolveLeadCompetitionScope = async (req, { clinicIdRaw = null, groupIdRaw
   let directlyAccessibleClinicIds = groupClinicIds;
   let manageableClinicIds = groupClinicIds;
   if (!globalAdmin) {
-    directlyAccessibleClinicIds = await getAccessibleMarketingClinicIds({
+    directlyAccessibleClinicIds = await getAccessibleLeadClinicIds({
       userId: actorId,
       clinicIds: groupClinicIds,
       access: 'read',

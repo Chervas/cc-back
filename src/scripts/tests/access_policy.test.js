@@ -215,11 +215,14 @@ async function run() {
   assert.equal(accessPolicy.defaultForFeature('patient_direction.manage', 'patient_director'), false);
   assert.equal(accessPolicy.defaultForFeature('patient_direction.assign_role', 'patient_director'), false);
   assert.equal(accessPolicy.defaultForFeature('patient_direction.assign_role', 'propietario'), false);
-  assert.equal(
-    accessPolicy.defaultForFeature('appointments.manage', 'patient_director'),
-    accessPolicy.defaultForFeature('appointments.manage', 'propietario'),
-    'patient directors inherit the owner operational matrix unless a feature defines a narrower rule',
-  );
+  assert.equal(accessPolicy.defaultForFeature('patient_direction.assign_role', 'agencia'), true);
+  assert.equal(accessPolicy.defaultForFeature('appointments.manage', 'patient_director'), true);
+  assert.equal(accessPolicy.defaultForFeature('leads.sensitive.view', 'patient_director'), true);
+  assert.equal(accessPolicy.defaultForFeature('leads.manage', 'patient_director'), true);
+  assert.equal(accessPolicy.defaultForFeature('team.manage', 'patient_director'), true);
+  assert.equal(accessPolicy.defaultForFeature('team.schedule.self.manage', 'patient_director'), false);
+  assert.equal(accessPolicy.defaultForFeature('billing.reports.view', 'patient_director'), false);
+  assert.equal(accessPolicy.defaultForFeature('consents.view', 'patient_director'), false);
 
   // PUBLIC_MEDIA reutiliza este permiso para review_team_photo: una agencia
   // asignada al scope debe seguir pudiendo gestionar la foto de resenas.
@@ -302,7 +305,7 @@ async function run() {
     assert.ok(features.has(featureKey), `${featureKey} must be present in the catalog`);
     assert.deepEqual(catalog.defaults[featureKey], {
       ...roleDefaults,
-      patient_director: roleDefaults.propietario,
+      patient_director: false,
     });
   }
   assert.equal(features.get('marketing.web.view')?.enforcement_status, 'backend');
