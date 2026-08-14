@@ -1568,6 +1568,28 @@ async function getDashboard({ directorUserId, clinicIds = null }) {
   const scopedClinicIds = Array.isArray(clinicIds)
     ? clinicIds.map(positiveInt).filter(Boolean)
     : [];
+  const coveredSettings = await PatientDirectionSetting.findAll({
+    where: {
+      director_user_id: uid,
+      ...(scopedClinicIds.length ? { clinic_id: { [Op.in]: scopedClinicIds } } : {}),
+    },
+    include: [{
+      model: Clinica,
+      as: 'clinic',
+      attributes: ['id_clinica', 'nombre_clinica'],
+      required: true,
+    }],
+    order: [[{ model: Clinica, as: 'clinic' }, 'nombre_clinica', 'ASC']],
+  });
+  const coveredClinicIds = coveredSettings
+    .map((row) => positiveInt(row.clinic_id))
+    .filter(Boolean);
+  const assignedLeadWhere = coveredClinicIds.length ? {
+    clinica_id: { [Op.in]: coveredClinicIds },
+    asignado_a: uid,
+    status_lead: { [Op.notIn]: TERMINAL_LEAD_STATUSES },
+    archived_at: null,
+  } : null;
   const where = {
     director_user_id: uid,
     ...(scopedClinicIds.length ? {
@@ -1577,18 +1599,56 @@ async function getDashboard({ directorUserId, clinicIds = null }) {
       ],
     } : {}),
   };
-  const assignments = await PatientDirectionAssignment.findAll({
-    where,
-    include: [
-      { model: Clinica, as: 'clinic', attributes: ['id_clinica', 'nombre_clinica'], required: false },
-      { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'status_lead', 'callback_reminder_at'], required: false },
-      { model: Conversation, as: 'conversation', attributes: ['id', 'unread_count', 'last_inbound_at', 'last_message_at'], required: false },
-      { model: CitaPaciente, as: 'firstAppointment', attributes: ['id_cita', 'inicio', 'estado'], required: false },
-    ],
-    order: [['updated_at', 'DESC']],
-    limit: 250,
-  });
+  const [assignments, assignedLeads, groupedLeadCounts, followUpCount] = await Promise.all([
+    PatientDirectionAssignment.findAll({
+      where,
+      include: [
+        { model: Clinica, as: 'clinic', attributes: ['id_clinica', 'nombre_clinica'], required: false },
+        { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'status_lead', 'callback_reminder_at'], required: false },
+        { model: Conversation, as: 'conversation', attributes: ['id', 'unread_count', 'last_inbound_at', 'last_message_at'], required: false },
+        { model: CitaPaciente, as: 'firstAppointment', attributes: ['id_cita', 'inicio', 'estado'], required: false },
+      ],
+      order: [['updated_at', 'DESC']],
+      limit: 250,
+    }),
+    assignedLeadWhere
+      ? LeadIntake.findAll({
+          where: assignedLeadWhere,
+          include: [{
+            model: Clinica,
+            as: 'clinica',
+            attributes: ['id_clinica', 'nombre_clinica'],
+            required: true,
+          }],
+          attributes: [
+            'id',
+            'clinica_id',
+            'nombre',
+            'telefono',
+            'status_lead',
+            'num_contactos',
+            'callback_reminder_at',
+            'created_at',
+            'updated_at',
+          ],
+          order: [['updated_at', 'DESC']],
+          limit: 250,
+        })
+      : Promise.resolve([]),
+    assignedLeadWhere
+      ? LeadIntake.count({ where: assignedLeadWhere, group: ['status_lead'] })
+      : Promise.resolve([]),
+    assignedLeadWhere
+      ? LeadIntake.count({
+          where: {
+            ...assignedLeadWhere,
+            callback_reminder_at: { [Op.ne]: null },
+          },
+        })
+      : Promise.resolve(0),
+  ]);
   const plain = assignments.map((row) => row.get({ plain: true }));
+  const leadPlain = assignedLeads.map((row) => row.get({ plain: true }));
   const conversationIds = plain
     .map((row) => positiveInt(row.conversation_id))
     .filter(Boolean);
@@ -1622,25 +1682,6 @@ async function getDashboard({ directorUserId, clinicIds = null }) {
     return `${bag.year}-${bag.month}-${bag.day}`;
   };
   const todayKey = madridDateKey(new Date());
-  const coveredSettings = await PatientDirectionSetting.findAll({
-    where: {
-      director_user_id: uid,
-      ...(scopedClinicIds.length ? { clinic_id: { [Op.in]: scopedClinicIds } } : {}),
-    },
-    include: [{
-      model: Clinica,
-      as: 'clinic',
-      attributes: ['id_clinica', 'nombre_clinica'],
-      required: true,
-    }],
-    order: [[{ model: Clinica, as: 'clinic' }, 'nombre_clinica', 'ASC']],
-  });
-  const waitingForPatient = (row) => {
-    if (row.status !== 'active' || !row.conversation?.last_message_at) return false;
-    if (!row.conversation.last_inbound_at) return true;
-    return new Date(row.conversation.last_message_at).getTime()
-      > new Date(row.conversation.last_inbound_at).getTime();
-  };
   const dashboardAssignment = (row) => {
     const pendingWebhooks = Array.isArray(row.metadata?.pending_webhooks)
       ? row.metadata.pending_webhooks
@@ -1679,19 +1720,104 @@ async function getDashboard({ directorUserId, clinicIds = null }) {
       unassigned_latest_preview: latestPreview || null,
     };
   };
+  const assignmentLeadIds = new Set(
+    plain.map((row) => positiveInt(row.lead_intake_id)).filter(Boolean)
+  );
+  const leadStatusHint = (status) => ({
+    nuevo: 'Pendiente de primer contacto',
+    contactado: 'Contacto iniciado',
+    esperando_info: 'Esperando información del paciente',
+    info_recibida: 'Información recibida',
+    cualificado: 'Lead cualificado',
+    citado: 'Cita registrada',
+  }[status] || 'Seguimiento pendiente');
+  const appointmentHint = (row) => {
+    if (row.firstAppointment?.inicio) {
+      const date = new Date(row.firstAppointment.inicio);
+      if (Number.isFinite(date.getTime())) {
+        return `Cita ${new Intl.DateTimeFormat('es-ES', {
+          timeZone: 'Europe/Madrid',
+          day: '2-digit',
+          month: 'short',
+          hour: '2-digit',
+          minute: '2-digit',
+        }).format(date)}`;
+      }
+    }
+    if (row.lead?.callback_reminder_at) return 'Llamada de seguimiento pendiente';
+    return leadStatusHint(row.lead?.status_lead);
+  };
+  const statusPriority = (status) => ({
+    nuevo: 10,
+    info_recibida: 20,
+    esperando_info: 30,
+    contactado: 40,
+    cualificado: 50,
+    citado: 60,
+  }[status] || 80);
+  const assignmentPriorityItems = plain
+    .filter((row) => row.status !== 'unassigned')
+    .map((row) => ({
+      key: `assignment:${row.id}`,
+      kind: 'assignment',
+      assignment_id: row.id,
+      lead_id: positiveInt(row.lead_intake_id),
+      conversation_id: positiveInt(row.conversation_id),
+      clinic_id: positiveInt(row.clinic_id),
+      name: row.lead?.nombre || row.phone_e164 || 'Paciente pendiente',
+      clinic_name: row.clinic?.nombre_clinica || 'Clínica pendiente',
+      hint: appointmentHint(row),
+      status: row.status,
+      handoff_state: row.handoff_state,
+      attention: row.handoff_state === 'failed' || row.lead?.status_lead === 'nuevo',
+      _priority: row.handoff_state === 'failed' ? 0 : statusPriority(row.lead?.status_lead),
+      _updated_at: row.updatedAt || row.updated_at || row.started_at,
+    }));
+  const leadPriorityItems = leadPlain
+    .filter((lead) => !assignmentLeadIds.has(positiveInt(lead.id)))
+    .map((lead) => ({
+      key: `lead:${lead.id}`,
+      kind: 'lead',
+      assignment_id: null,
+      lead_id: positiveInt(lead.id),
+      conversation_id: null,
+      clinic_id: positiveInt(lead.clinica_id),
+      name: lead.nombre || lead.telefono || 'Lead pendiente',
+      clinic_name: lead.clinica?.nombre_clinica || 'Clínica pendiente',
+      hint: lead.callback_reminder_at ? 'Llamada de seguimiento pendiente' : leadStatusHint(lead.status_lead),
+      status: lead.status_lead,
+      handoff_state: null,
+      attention: lead.status_lead === 'nuevo' || Boolean(lead.callback_reminder_at),
+      _priority: lead.callback_reminder_at ? 5 : statusPriority(lead.status_lead),
+      _updated_at: lead.updatedAt || lead.updated_at || lead.createdAt || lead.created_at,
+    }));
+  const priorityItems = [...assignmentPriorityItems, ...leadPriorityItems]
+    .sort((left, right) => {
+      if (left._priority !== right._priority) return left._priority - right._priority;
+      return new Date(right._updated_at || 0).getTime() - new Date(left._updated_at || 0).getTime();
+    })
+    .slice(0, 8)
+    .map(({ _priority, _updated_at, ...item }) => item);
+  const leadCounts = Object.fromEntries(
+    (Array.isArray(groupedLeadCounts) ? groupedLeadCounts : []).map((row) => [
+      row.status_lead,
+      Number(row.count || 0),
+    ])
+  );
   return {
     counters: {
-      new_without_contact: plain.filter((row) => row.status === 'active' && row.lead?.status_lead === 'nuevo').length,
-      waiting_reply: plain.filter(waitingForPatient).length,
+      new_without_contact: Number(leadCounts.nuevo || 0),
+      waiting_reply: Number(leadCounts.contactado || 0) + Number(leadCounts.esperando_info || 0),
       pending_confirmation: plain.filter((row) => ['pendiente', 'info_enviada', 'recordatorio_enviado'].includes(row.firstAppointment?.estado)).length,
       first_visits_today: plain.filter((row) => madridDateKey(row.firstAppointment?.inicio) === todayKey).length,
       no_show_managed: plain.filter((row) => row.firstAppointment?.estado === 'no_asistio' && row.status === 'active').length,
-      follow_up_calls: plain.filter((row) => row.lead?.callback_reminder_at).length,
+      follow_up_calls: Number(followUpCount || 0),
       failed_reminders: failedReminderCount,
       unassigned: plain.filter((row) => row.status === 'unassigned').length,
       handoff_pending: plain.filter((row) => row.status === 'handoff_pending').length,
     },
     assignments: plain.map(dashboardAssignment),
+    priority_items: priorityItems,
     clinics: coveredSettings.map((row) => ({
       id: row.clinic.id_clinica,
       name: row.clinic.nombre_clinica,

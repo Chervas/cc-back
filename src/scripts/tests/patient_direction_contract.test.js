@@ -74,6 +74,10 @@ assert.match(service, /PatientDirectionSetting\.create\([\s\S]*?is_enabled:\s*fa
   'assigning the role must not enable clinic routing implicitly');
 assert.match(service, /patient_direction_active_clinic_cannot_unassign/,
   'an enabled clinic must require a handoff before removing the director');
+assert.match(service, /asignado_a:\s*uid[\s\S]*?priority_items:\s*priorityItems/,
+  'the director dashboard must summarize assigned leads in backend before an operational assignment exists');
+assert.match(service, /\.slice\(0,\s*8\)/,
+  'the director dashboard is a bounded summary, not a second lead-management list');
 assert.doesNotMatch(
   service.slice(service.indexOf('async function syncProfileClinics'), service.indexOf('async function saveProfile')),
   /UsuarioClinica|DoctorClinica|DoctorHorario/,
