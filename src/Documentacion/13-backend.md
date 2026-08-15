@@ -706,7 +706,7 @@ generación IA, mutación gestionada o limpieza.
 - El request Express solo crea `JobRequest type=marketing_ai_visibility_run`, prioridad baja, máximo dos intentos y namespace del runtime. Se deduplica por `clinicId + queryHash`; `scheduledJobCatalog` lo clasifica como integración dirigida y `jobExecutor` ejecuta `marketingAiVisibilityService.executeRun()`.
 - OpenAI usa `POST /v1/responses`, modelo configurable (por defecto `gpt-5.6`), herramienta `web_search`, `tool_choice=required`, fuentes completas e `store=false`. Gemini usa `POST /v1beta/interactions`, modelo configurable (por defecto `gemini-3.5-flash`), herramienta `google_search` y `store=false`.
 - `GET /api/metasync/jobs/usage/ai-visibility` expone en Jobs Monitoring el estado de ChatGPT/Gemini sin llamar a proveedores ni consumir cuota: lee configuración y último run persistido. Los `429 insufficient_quota` se muestran como `quota_limited`, los `429 too_many_requests` como `rate_limited`, y solo saldo/facturación explícitos quedan como `billing_required`.
-- `GET /api/metasync/jobs/usage/overview` agrega el consumo de APIs externas para Jobs Monitoring sin llamar a proveedores: lee `ApiUsageCounters`, `getUsageStatus()` de Meta, `getGoogleAdsUsageStatus()` y el estado persistido de IA. El resumen distingue `healthy`, `warning`, `error` y `unknown`, devuelve proveedores normalizados (`meta_ads`, `google_ads`, `openai`, `gemini`, `whatsapp_cloud`), fuentes recientes y errores saneados sin secretos.
+- `GET /api/metasync/jobs/usage/overview` agrega el consumo de APIs externas para Jobs Monitoring sin llamar a proveedores: lee `ApiUsageCounters`, `getUsageStatus()` de Meta, `getGoogleAdsUsageStatus()` y el estado persistido de IA. El resumen distingue `healthy`, `warning`, `error` y `unknown`, devuelve proveedores normalizados (`meta_ads`, `google_ads`, `openai`, `gemini`, `whatsapp_cloud`), fuentes recientes y errores saneados sin secretos. Meta se etiqueta como "Últimas señales Meta": son cabeceras/estado persistidos desde llamadas reales ya ejecutadas; el panel no hace una llamada Graph adicional solo para refrescarlas porque eso tambien consume cuota y puede disparar limites.
 - `src/services/apiUsageTelemetry.service.js` es el punto comun para registrar eventos de API. El cliente Meta (`metaClient`) y el OAuth de Meta registran llamadas interactivas y de jobs en el mismo contador `meta_ads`; por eso un `(#4) Application request limit reached` de OAuth aparece en Jobs Monitoring aunque no proceda de `JobRequest`.
 - Los parsers conservan texto, consultas, `url_citation`, fuentes y el `search_suggestions` de Gemini. Solo se envía contexto público de la clínica; la validación rechaza emails y teléfonos en la consulta. No se imprimen claves, prompts ni respuestas completas en logs.
 - Control de coste y retención: resultados/textos/fuentes/citas se reutilizan siete días, los runs activos se reutilizan 15 min y se admiten cuatro consultas distintas por clínica/7 días, con un único intento por consulta/7 días. El cupo global solo cuenta los hashes del catálogo construido con la categoría/localidad actuales, de modo que corregir esos datos permite medir el nuevo contexto sin que lo bloquee el anterior; el límite individual por hash permanece. `completed`, `completed_with_errors` y los `failed` que sí tienen `job_request_id` o `started_at` bloquean por igual una repetición anticipada. Si falla el encolado antes de crear job/proveedor, se destruye el run; las filas legacy `failed` sin `job_request_id` ni `started_at` tampoco se reutilizan, muestran ni cuentan. Retención local 30 días (nunca inferior al refresco) y timeout por proveedor 90 s. `system_data_cleanup` elimina filas vencidas. Los proveedores se ejecutan en paralelo y degradan por separado. Variables vigentes: `AI_VISIBILITY_REFRESH_INTERVAL_DAYS`, `AI_VISIBILITY_MAX_RUNS_PER_CLINIC_7D`, `AI_VISIBILITY_RETENTION_DAYS` y `AI_VISIBILITY_PROVIDER_TIMEOUT_MS`; se retiran los controles legacy de 24 h. Runbook: `docs/marketing-ai-visibility.md`.
@@ -1167,6 +1167,10 @@ Antes de activar coexistencia sobre un numero real:
 ### WhatsApp: diagnostico y cumplimiento
 
 - `POST /api/whatsapp/compliance/admin/accounts/:assetId/check` sincroniza el telefono con Meta, comprueba acceso, estado, canal, nombre aprobado, capacidad y calidad, y calcula estados de entrega sobre el total real de los ultimos siete dias.
+- En UI, "Sin revision manual" significa que todavia no se ha lanzado este
+  endpoint para ese activo desde Jobs Monitoring. No invalida la calidad,
+  restricciones o estado operativo recibidos por webhooks/sincronizaciones de
+  Meta.
 - La consulta completa contabiliza `pending`, `sent`, `delivered`, `read` y `failed` en base de datos. El desglose de origen puede usar una muestra reciente, pero el contrato indica siempre el tamano de esa muestra; no se presenta el limite tecnico como total real.
 - Cada trabajo saliente persiste `phoneNumberId`, `wabaId` y el activo remitente antes de llamar a Meta. El diagnostico y las apelaciones filtran por esa ruta exacta, no por toda la actividad de las clinicas del grupo. Los registros legacy sin ruta solo se infieren para clinicas que heredaban el numero y no tenian otro activo directo; la respuesta expone `attribution.exact_7d` e `inferred_7d`.
 - `delivered` y `read` forman `confirmed`; `sent` se presenta como `without_confirmation`, porque solo acredita que WhatsApp registro el envio sin un webhook posterior de entrega/lectura. `pending`/`sending` forman `pending`. No se muestra un agregado ambiguo de aceptados, procesados o enviados como sinonimo de entrega.
@@ -1593,6 +1597,18 @@ En esta máquina `dev` y `staging` comparten base de datos. El riesgo real no es
 
 La UI de `Ajustes > Monitoreo del sistema` debe usar estos checks como semáforo visible, no solo los logs de servidor.
 El check de `GROQ_API_KEY` describe siempre el proceso activo en ese instante; si cambia `.env`, hay que reiniciar el backend para que el estado reflejado sea real.
+
+`GET /api/job-requests` filtra en backend. Si no llega `status`, aplica el
+`view`: `queue` limita a `pending,running,waiting`, `history` limita a
+`completed,failed,cancelled` y `all` no limita por estado. Si llega
+`status=failed`, no se interpreta como cola activa: devuelve fallidos
+directamente. La lectura de estados terminales usa el indice
+`idx_job_requests_status_created_at (status, created_at)` para evitar escaneos
+largos al ordenar por fecha desde Jobs Monitoring. `GET /api/job-requests/summary`
+devuelve ademas `recentFailures24h.total` y `recentFailures24h.latest`, calculado
+desde `JobRequests.status=failed` actualizado en las ultimas 24 horas y cubierto
+por `idx_job_requests_status_updated_at (status, updated_at)`, para que el
+estado general no dependa de `SyncLogs` ni contradiga la cola visible.
 
 ## 2026-04-01 - Propagación de plantillas WhatsApp con versionado técnico interno
 

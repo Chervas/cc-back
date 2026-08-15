@@ -87,6 +87,14 @@ module.exports = (sequelize, DataTypes) => {
         fields: ['type', 'status', 'created_at']
       },
       {
+        name: 'idx_job_requests_status_created_at',
+        fields: ['status', 'created_at']
+      },
+      {
+        name: 'idx_job_requests_status_updated_at',
+        fields: ['status', 'updated_at']
+      },
+      {
         fields: ['status', 'priority']
       },
       {

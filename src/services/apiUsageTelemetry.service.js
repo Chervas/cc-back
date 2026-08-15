@@ -8,7 +8,7 @@ const PROVIDERS = {
   meta_ads: {
     label: 'Meta Graph / Marketing',
     category: 'ads',
-    quotaLabel: 'cabeceras Meta',
+    quotaLabel: 'Últimas señales Meta',
   },
   google_ads: {
     label: 'Google Ads',

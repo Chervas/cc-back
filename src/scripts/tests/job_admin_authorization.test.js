@@ -129,6 +129,8 @@ async function testPm2HttpPayloadIsRestrictedToDryRun() {
 async function testGlobalAdminCanReadGenericJobMonitor() {
   const originalList = jobRequestsService.listJobRequests;
   const originalFindAll = db.JobRequest.findAll;
+  const originalCount = db.JobRequest.count;
+  const originalFindOne = db.JobRequest.findOne;
   const originalGetStatus = jobScheduler.getStatus;
   const calls = [];
 
@@ -165,6 +167,28 @@ async function testGlobalAdminCanReadGenericJobMonitor() {
         },
       }];
     };
+    db.JobRequest.count = async () => 1;
+    db.JobRequest.findOne = async () => ({
+      id: 654,
+      type: 'ops_ads_accounts_discovery',
+      priority: 'low',
+      status: 'failed',
+      origin: 'system',
+      payload: {},
+      requested_by: null,
+      requested_by_name: null,
+      requested_by_role: null,
+      attempts: 1,
+      max_attempts: 3,
+      last_attempt_at: new Date('2026-08-15T14:17:00Z'),
+      next_run_at: null,
+      completed_at: new Date('2026-08-15T14:17:00Z'),
+      sync_log_id: null,
+      error_message: 'test failure',
+      result_summary: null,
+      created_at: new Date('2026-08-15T14:17:00Z'),
+      updated_at: new Date('2026-08-15T14:17:00Z'),
+    });
     jobScheduler.getStatus = async () => ({ running: true });
 
     const listResponse = responseHarness();
@@ -175,6 +199,15 @@ async function testGlobalAdminCanReadGenericJobMonitor() {
     assert.equal(listResponse.statusCode, 200);
     assert.equal(listResponse.body.data[0].id, 321);
     assert.equal(calls[0][0], 'list');
+    assert.deepEqual(calls[0][1].statuses, ['pending', 'running', 'waiting']);
+
+    const failedListResponse = responseHarness();
+    await jobRequestsController.list({
+      query: { view: 'queue', status: 'failed', limit: '10' },
+      userData: { userId: 1 },
+    }, failedListResponse);
+    assert.equal(failedListResponse.statusCode, 200);
+    assert.deepEqual(calls[1][1].statuses, ['failed']);
 
     const summaryResponse = responseHarness();
     await jobRequestsController.summary({ userData: { userId: 44 } }, summaryResponse);
@@ -182,6 +215,30 @@ async function testGlobalAdminCanReadGenericJobMonitor() {
     assert.deepEqual(summaryResponse.body, {
       status: [{ status: 'pending', total: 1 }],
       priority: [{ priority: 'normal', total: 1 }],
+      recentFailures24h: {
+        total: 1,
+        latest: {
+          id: 654,
+          type: 'ops_ads_accounts_discovery',
+          priority: 'low',
+          status: 'failed',
+          origin: 'system',
+          payload: {},
+          requestedBy: null,
+          requestedByName: null,
+          requestedByRole: null,
+          attempts: 1,
+          maxAttempts: 3,
+          lastAttemptAt: new Date('2026-08-15T14:17:00Z'),
+          nextRunAt: null,
+          completedAt: new Date('2026-08-15T14:17:00Z'),
+          syncLogId: null,
+          errorMessage: 'test failure',
+          resultSummary: null,
+          createdAt: new Date('2026-08-15T14:17:00Z'),
+          updatedAt: new Date('2026-08-15T14:17:00Z'),
+        }
+      },
     });
 
     const workerResponse = responseHarness();
@@ -191,6 +248,8 @@ async function testGlobalAdminCanReadGenericJobMonitor() {
   } finally {
     jobRequestsService.listJobRequests = originalList;
     db.JobRequest.findAll = originalFindAll;
+    db.JobRequest.count = originalCount;
+    db.JobRequest.findOne = originalFindOne;
     jobScheduler.getStatus = originalGetStatus;
   }
 }

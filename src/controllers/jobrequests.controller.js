@@ -1,3 +1,4 @@
+const { Op } = require('sequelize');
 const { JobRequest, sequelize } = require('../../models');
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
@@ -68,7 +69,8 @@ exports.list = async (req, res) => {
     const limit = parseIntSafe(req.query.limit, 50);
     const offset = parseIntSafe(req.query.offset, 0);
     const priorities = parseArrayParam(req.query.priority);
-    const statuses = parseArrayParam(req.query.status) || VIEW_STATUS_MAP[view] || undefined;
+    const requestedStatuses = parseArrayParam(req.query.status);
+    const statuses = requestedStatuses.length ? requestedStatuses : (VIEW_STATUS_MAP[view] || undefined);
 
     const { rows, count } = await jobRequestsService.listJobRequests({
       statuses,
@@ -95,6 +97,7 @@ exports.list = async (req, res) => {
 exports.summary = async (req, res) => {
   try {
     if (!assertGlobalAdmin(req, res)) return;
+    const recentFailureSince = new Date(Date.now() - 24 * 60 * 60 * 1000);
     const statusSummary = await JobRequest.findAll({
       attributes: [
         'status',
@@ -111,6 +114,22 @@ exports.summary = async (req, res) => {
       group: ['priority']
     });
 
+    const [recentFailedCount, latestFailed] = await Promise.all([
+      JobRequest.count({
+        where: {
+          status: 'failed',
+          updated_at: { [Op.gte]: recentFailureSince }
+        }
+      }),
+      JobRequest.findOne({
+        where: {
+          status: 'failed',
+          updated_at: { [Op.gte]: recentFailureSince }
+        },
+        order: [['updated_at', 'DESC']]
+      })
+    ]);
+
     res.json({
       status: statusSummary.map((row) => ({
         status: row.get('status'),
@@ -119,7 +138,11 @@ exports.summary = async (req, res) => {
       priority: prioritySummary.map((row) => ({
         priority: row.get('priority'),
         total: Number(row.get('total') || 0)
-      }))
+      })),
+      recentFailures24h: {
+        total: Number(recentFailedCount || 0),
+        latest: latestFailed ? serializeJobRequest(latestFailed) : null
+      }
     });
   } catch (error) {
     console.error('❌ Error obteniendo resumen de JobRequests:', error);
