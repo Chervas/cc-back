@@ -103,6 +103,30 @@ const ALLOWED_FRONTEND_ORIGINS = new Set([
     FRONTEND_DEV_INTEGRATION_URL
 ]);
 
+function getMetaGraphError(error) {
+    return error?.response?.data?.error || null;
+}
+
+function isMetaApplicationRateLimit(error) {
+    const graphError = getMetaGraphError(error);
+    return Number(graphError?.code) === 4
+        && /application request limit reached/i.test(String(graphError?.message || ''));
+}
+
+function metaOAuthPublicErrorMessage(error) {
+    if (isMetaApplicationRateLimit(error)) {
+        return 'Meta ha limitado temporalmente la conexión por exceso de solicitudes. Espera unos minutos y vuelve a intentarlo.';
+    }
+    return 'Error en el proceso de autenticación.';
+}
+
+function metaOAuthErrorCode(error) {
+    if (isMetaApplicationRateLimit(error)) {
+        return 'meta_rate_limit';
+    }
+    return 'meta_oauth_failed';
+}
+
 // Configuración Google OAuth (variables de entorno)
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
@@ -1198,7 +1222,12 @@ router.get('/meta/callback', async (req, res) => {
 
     } catch (err) {
         console.error('❌ Error fatal en el proceso de OAuth:', err.response ? err.response.data : err.message);
-        res.redirect(buildFrontendSettingsRedirect(frontendOrigin, `?error=${encodeURIComponent('Error en el proceso de autenticación.')}`));
+        const publicMessage = metaOAuthPublicErrorMessage(err);
+        const publicCode = metaOAuthErrorCode(err);
+        res.redirect(buildFrontendSettingsRedirect(
+            frontendOrigin,
+            `?error=${encodeURIComponent(publicMessage)}&error_code=${encodeURIComponent(publicCode)}`
+        ));
     }
 });
 
