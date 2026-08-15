@@ -5305,6 +5305,7 @@ e incluye, cuando existe:
 - `unassigned_campaigns` expone únicamente proveedor, cuenta, campaña y número de leads, sin PII, para que la UI pueda pedir que se complete el mapeo;
 - el periodo CRM usa días naturales de `Europe/Madrid`: por ejemplo, el 13 de julio comprende `[12/07 22:00 UTC, 13/07 22:00 UTC)`;
 - `rows[].leads` se conserva temporalmente como alias compatible de conversiones del proveedor; cada fila devuelve también `provider_conversions` y `metric_contract.rows_leads_semantics=provider_conversions_legacy`. Ningún consumidor nuevo debe etiquetar ese alias como leads CRM.
+- `GET /api/marketing/strategies/:id/recent-leads` devuelve una muestra acotada de leads recientes atribuidos a campañas vinculadas usando exactamente la misma resolución CRM que las métricas. La respuesta no expone email ni teléfono; solo informa `has_email`/`has_phone`, estado, fecha, proveedor, campaña, target y clínica para el resumen ejecutivo. El detalle con PII sigue en `/marketing/leads`.
 
 Esto permite:
 - modal de creatividad sin llamadas live adicionales
@@ -5339,6 +5340,8 @@ usando campañas externas vinculadas y, cuando hay señal suficiente, atribució
 - `patients_converted`
 
 La atribución CRM usa `LeadIntake` y solo se acepta cuando el match con la campaña externa es no ambiguo. La identidad rica `google_ads_customer_id + google_ads_campaign_id` tiene prioridad y se compara con la identidad canónica `provider + account + campaign`; si apunta a una campaña ajena a la estrategia no se permite que un UTM antiguo la reasigne por nombre. Para registros legacy sin identidad completa se mantiene el fallback no ambiguo por ID/nombre en `utm_campaign` o `source_detail`. Los leads pagados resolubles que no encajan en ninguna campaña vinculada se devuelven como `unassigned_clinic_leads`, en lugar de desaparecer silenciosamente.
+
+La misma resolución alimenta `recent-leads`; si un lead no puede asignarse a una única campaña externa de la estrategia, no aparece en esa muestra y debe revisarse desde los contadores de no asignados o desde Leads.
 
 > **Pendiente real:** ingresos y rentabilidad por target. No están cerrados todavía y no deben documentarse como operativos.
 

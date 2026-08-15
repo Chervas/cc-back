@@ -431,6 +431,12 @@ function formatDate(d) {
   return d.toISOString().slice(0, 10);
 }
 
+function toSafeIsoDate(value) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
 function safeNumber(value) {
   const n = Number(value || 0);
   return Number.isFinite(n) ? n : 0;
@@ -1029,14 +1035,16 @@ async function resolveAnalysisCampaignReference({ strategy, payload, scope, iden
   return enrichSingleMetaCampaignReference({ scope, campaignRef: baseRef });
 }
 
-function buildExternalCampaignAliasIndex(rawTargets) {
+function buildExternalCampaignMatchContext(rawTargets) {
   const targets = normalizeExternalTargets(rawTargets);
   const aliasIndex = new Map();
+  const linkedCampaigns = new Map();
 
   for (const target of targets) {
     for (const campaign of target.campaigns) {
       const campaignKey = externalCampaignIdentityKey(campaign);
       if (!campaignKey) continue;
+      linkedCampaigns.set(campaignKey, { target, campaign });
       const tokens = new Set([
         normalizeLookupToken(campaign.external_campaign_id),
         normalizeLookupToken(campaign.name)
@@ -1052,18 +1060,76 @@ function buildExternalCampaignAliasIndex(rawTargets) {
     }
   }
 
-  return aliasIndex;
+  return {
+    aliasIndex,
+    linkedCampaigns,
+    linkedCampaignKeys: new Set(linkedCampaigns.keys())
+  };
+}
+
+function buildExternalCampaignAliasIndex(rawTargets) {
+  return buildExternalCampaignMatchContext(rawTargets).aliasIndex;
+}
+
+function resolveLeadExternalCampaignMatches(row, matchContext) {
+  const provider = resolveLeadProvider(row);
+  if (!provider) {
+    return {
+      provider: null,
+      matchedCampaigns: new Set(),
+      directIdentity: null
+    };
+  }
+
+  const matchedCampaigns = new Set();
+  const richAccountId = provider === 'google_ads'
+    ? normalizeCustomerId(row?.google_ads_customer_id || '')
+    : '';
+  const richCampaignId = provider === 'google_ads'
+    ? normalizeLookupToken(row?.google_ads_campaign_id)
+    : '';
+  const hasCanonicalRichIdentity = Boolean(richAccountId && richCampaignId);
+  const directIdentity = hasCanonicalRichIdentity
+    ? canonicalExternalCampaignIdentity({
+        provider,
+        account_id: richAccountId,
+        campaign_id: richCampaignId
+      })
+    : null;
+
+  // Rich attribution is authoritative. If account + campaign points outside
+  // this strategy, do not fall back to a stale UTM name that happens to match.
+  if (directIdentity) {
+    const directKey = externalCampaignIdentityKey(directIdentity);
+    if (directKey && matchContext.linkedCampaignKeys.has(directKey)) {
+      matchedCampaigns.add(directKey);
+    }
+  } else {
+    const tokens = [
+      richCampaignId,
+      normalizeLookupToken(row?.utm_campaign),
+      normalizeLookupToken(row?.source_detail)
+    ].filter(Boolean);
+
+    for (const token of tokens) {
+      const aliasKey = `${provider}:${token}`;
+      const campaignKeys = matchContext.aliasIndex.get(aliasKey);
+      if (!campaignKeys || campaignKeys.size !== 1) continue;
+      for (const campaignKey of campaignKeys) {
+        matchedCampaigns.add(campaignKey);
+      }
+    }
+  }
+
+  return {
+    provider,
+    matchedCampaigns,
+    directIdentity
+  };
 }
 
 function buildLeadAttributionMetrics(rows, rawTargets) {
-  const aliasIndex = buildExternalCampaignAliasIndex(rawTargets);
-  const linkedCampaignKeys = new Set();
-  for (const target of normalizeExternalTargets(rawTargets)) {
-    for (const campaign of target.campaigns) {
-      const key = externalCampaignIdentityKey(campaign);
-      if (key) linkedCampaignKeys.add(key);
-    }
-  }
+  const matchContext = buildExternalCampaignMatchContext(rawTargets);
 
   const metricsIndex = new Map();
   const unassignedIndex = new Map();
@@ -1111,49 +1177,9 @@ function buildLeadAttributionMetrics(rows, rawTargets) {
       continue;
     }
 
-    const provider = resolveLeadProvider(row);
+    const { provider, matchedCampaigns, directIdentity } = resolveLeadExternalCampaignMatches(row, matchContext);
     if (!provider) continue;
     aggregate.clinic_paid_leads += 1;
-
-    const matchedCampaigns = new Set();
-    const richAccountId = provider === 'google_ads'
-      ? normalizeCustomerId(row?.google_ads_customer_id || '')
-      : '';
-    const richCampaignId = provider === 'google_ads'
-      ? normalizeLookupToken(row?.google_ads_campaign_id)
-      : '';
-    const hasCanonicalRichIdentity = Boolean(richAccountId && richCampaignId);
-    const directIdentity = hasCanonicalRichIdentity
-      ? canonicalExternalCampaignIdentity({
-          provider,
-          account_id: richAccountId,
-          campaign_id: richCampaignId
-        })
-      : null;
-
-    // Rich attribution is authoritative. If account + campaign points outside
-    // this strategy, do not fall back to a stale UTM name that happens to match.
-    if (directIdentity) {
-      const directKey = externalCampaignIdentityKey(directIdentity);
-      if (directKey && linkedCampaignKeys.has(directKey)) {
-        matchedCampaigns.add(directKey);
-      }
-    } else {
-      const tokens = [
-        richCampaignId,
-        normalizeLookupToken(row?.utm_campaign),
-        normalizeLookupToken(row?.source_detail)
-      ].filter(Boolean);
-
-      for (const token of tokens) {
-        const aliasKey = `${provider}:${token}`;
-        const campaignKeys = aliasIndex.get(aliasKey);
-        if (!campaignKeys || campaignKeys.size !== 1) continue;
-        for (const campaignKey of campaignKeys) {
-          matchedCampaigns.add(campaignKey);
-        }
-      }
-    }
 
     if (matchedCampaigns.size !== 1) {
       incrementUnassigned(row, provider, directIdentity);
@@ -1198,6 +1224,61 @@ function buildLeadAttributionMetrics(rows, rawTargets) {
     unassignedCampaigns: Array.from(unassignedIndex.values())
       .sort((a, b) => safeNumber(b.leads) - safeNumber(a.leads))
   };
+}
+
+function buildStrategyRecentLeadItems(rows, payload, limit = 5) {
+  const matchContext = buildExternalCampaignMatchContext(payload?.external_targets);
+  const items = [];
+  const max = Math.max(1, Math.min(20, parseInteger(limit) || 5));
+
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (items.length >= max) break;
+    if (row?.archived_at || String(row?.status_lead || '').trim().toLowerCase() === 'descartado') {
+      continue;
+    }
+
+    const { provider, matchedCampaigns } = resolveLeadExternalCampaignMatches(row, matchContext);
+    if (!provider || matchedCampaigns.size !== 1) continue;
+
+    const [campaignKey] = Array.from(matchedCampaigns);
+    const linked = matchContext.linkedCampaigns.get(campaignKey);
+    if (!linked?.campaign) continue;
+
+    const target = linked.target || {};
+    const campaign = linked.campaign || {};
+    const identity = canonicalExternalCampaignIdentity(campaign);
+    const createdAt = toSafeIsoDate(row?.created_at);
+
+    items.push({
+      id: row.id,
+      created_at: createdAt,
+      source: provider,
+      source_label: provider === 'meta_ads' ? 'Meta Ads' : 'Google Ads',
+      status_lead: row.status_lead || 'nuevo',
+      patient_name: String(row.nombre || '').trim() || null,
+      has_phone: Boolean(String(row.telefono || '').trim()),
+      has_email: Boolean(String(row.email || '').trim()),
+      clinic_id: parseInteger(row.clinica_id) || null,
+      clinic_name: String(row?.clinica?.nombre_clinica || '').trim() || null,
+      campaign: {
+        provider,
+        account_id: identity?.account_id || null,
+        campaign_id: identity?.campaign_id || campaign.external_campaign_id || null,
+        external_campaign_id: campaign.external_campaign_id || identity?.campaign_id || null,
+        name: campaign.name || campaign.external_campaign_id || null
+      },
+      target: {
+        kind: target.kind === 'generic' ? 'generic' : 'treatment',
+        treatment_id: parseInteger(target.treatment_id) || null,
+        treatment_name: target.treatment_name || null,
+        label: target.kind === 'generic'
+          ? (payload?.campaign_admin_playbook_name || 'Clínica en general')
+          : (target.treatment_name || 'Tratamiento concreto')
+      }
+    });
+  }
+
+  return items;
 }
 
 async function loadCurrentLeadAttributionMetrics({
@@ -1245,6 +1326,68 @@ async function loadCurrentLeadAttributionMetrics({
   });
 
   return buildLeadAttributionMetrics(rows, payload?.external_targets);
+}
+
+async function loadRecentStrategyLeadItems({
+  scope,
+  payload,
+  limit = 5,
+  days = 90
+}) {
+  if (!LeadIntake) return [];
+
+  const max = Math.max(1, Math.min(20, parseInteger(limit) || 5));
+  const safeDays = Math.max(1, Math.min(365, parseInteger(days) || 90));
+  const end = new Date();
+  const start = new Date(end.getTime() - (safeDays * 24 * 60 * 60 * 1000));
+
+  const rows = await LeadIntake.findAll({
+    attributes: [
+      'id',
+      'clinica_id',
+      'grupo_clinica_id',
+      'source',
+      'external_source',
+      'utm_source',
+      'utm_campaign',
+      'source_detail',
+      'status_lead',
+      'google_ads_customer_id',
+      'google_ads_campaign_id',
+      'gclid',
+      'gbraid',
+      'wbraid',
+      'fbclid',
+      'nombre',
+      'email',
+      'telefono',
+      'archived_at',
+      'created_at'
+    ],
+    include: Clinica
+      ? [{
+          model: Clinica,
+          as: 'clinica',
+          attributes: ['id_clinica', 'nombre_clinica'],
+          required: false
+        }]
+      : [],
+    where: {
+      archived_at: null,
+      created_at: { [Op.gte]: start, [Op.lt]: end },
+      status_lead: { [Op.ne]: 'descartado' },
+      ...buildMetricsScopeWhere(scope, { clinicField: 'clinica_id', groupField: 'grupo_clinica_id' })
+    },
+    order: [
+      ['created_at', 'DESC'],
+      ['id', 'DESC']
+    ],
+    limit: Math.min(200, Math.max(50, max * 10)),
+    raw: true,
+    nest: true
+  });
+
+  return buildStrategyRecentLeadItems(rows, payload, max);
 }
 
 async function loadCurrentLeadAttributionMetricsIndex(options) {
@@ -9951,6 +10094,38 @@ exports.getMarketingStrategyMetrics = asyncHandler(async (req, res) => {
   });
 });
 
+exports.getMarketingStrategyRecentLeads = asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, error: 'unauthenticated' });
+
+  const rows = await loadStrategyRowsByIdentifier(req.params.id);
+  if (!rows.length) {
+    return res.status(404).json({ success: false, error: 'not_found', message: 'Estrategia no encontrada' });
+  }
+  if (!(await requireMarketingClinicScope(req, res, clinicIdsFromStrategyRows(rows), 'read'))) return;
+
+  const campaignsById = await loadCampaignsByIds(rows.map((row) => row.campaign_id));
+  const strategy = buildStrategyItemFromRows(rows, campaignsById);
+  if (!strategy) {
+    return res.status(404).json({ success: false, error: 'not_found', message: 'Estrategia no encontrada' });
+  }
+
+  const payload = rows[0]?.solicitud && typeof rows[0].solicitud === 'object' ? rows[0].solicitud : {};
+  const scope = extractStrategyScopeFromPayload(payload, rows);
+  const limit = Math.max(1, Math.min(20, parseInteger(req.query?.limit) || 5));
+  const days = Math.max(1, Math.min(365, parseInteger(req.query?.days) || 90));
+  const items = await loadRecentStrategyLeadItems({ scope, payload, limit, days });
+
+  return res.json({
+    success: true,
+    strategy_id: strategy.id,
+    period: {
+      days
+    },
+    items
+  });
+});
+
 exports.getMarketingStrategyAnalysisCampaign = asyncHandler(async (req, res) => {
   const userId = getUserId(req);
   if (!userId) return res.status(401).json({ success: false, error: 'unauthenticated' });
@@ -10967,6 +11142,7 @@ exports.__test = {
   buildMetaAccountConnectionMap,
   buildEnhancedConversionActivationPlan,
   buildLeadAttributionMetrics,
+  buildStrategyRecentLeadItems,
   buildGoogleAdsCapabilities,
   buildRequiredConversionPlan,
   buildZonedCalendarRange,

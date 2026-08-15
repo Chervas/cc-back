@@ -210,6 +210,7 @@ router.patch('/strategies/:id', campaignOnboardingController.updateMarketingStra
 router.get('/strategies/:id', campaignOnboardingController.getMarketingStrategyDetail);
 router.get('/strategies/:id/analysis/campaign', campaignOnboardingController.getMarketingStrategyAnalysisCampaign);
 router.patch('/strategies/:id/status', campaignOnboardingController.transitionMarketingStrategyStatus);
+router.get('/strategies/:id/recent-leads', campaignOnboardingController.getMarketingStrategyRecentLeads);
 router.get('/strategies/:id/metrics', campaignOnboardingController.getMarketingStrategyMetrics);
 router.get('/strategies/:id/destination-bindings', campaignDestinationBindingsController.listForStrategy);
 router.get('/destination-bindings/:bindingId', campaignDestinationBindingsController.getBinding);
