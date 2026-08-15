@@ -6513,6 +6513,9 @@ function buildStrategyItemFromRows(rows, campaignsById, inventoryIndex = null) {
     promotion_type: payload.promotion_type || 'treatment',
     area_medica_id: payload.area_medica_id ?? payload.summary?.area_medica_id ?? null,
     area_medica_nombre: payload.area_medica_nombre ?? payload.summary?.area_medica_nombre ?? null,
+    campaign_admin_playbook_id: payload.campaign_admin_playbook_id ?? payload.summary?.campaign_admin_playbook_id ?? null,
+    campaign_admin_playbook_name: payload.campaign_admin_playbook_name ?? payload.summary?.campaign_admin_playbook_name ?? null,
+    campaign_admin_family_key: payload.campaign_admin_family_key ?? payload.summary?.campaign_admin_family_key ?? null,
     mode,
     mode_contract: payload.mode_contract && typeof payload.mode_contract === 'object'
       ? payload.mode_contract
@@ -10032,6 +10035,15 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
   const areaMedicaNombre = typeof (req.body?.area_medica_nombre ?? currentPayload.area_medica_nombre ?? currentPayload.summary?.area_medica_nombre) === 'string'
     ? String(req.body?.area_medica_nombre ?? currentPayload.area_medica_nombre ?? currentPayload.summary?.area_medica_nombre).trim() || null
     : null;
+  const campaignAdminPlaybookId = typeof (req.body?.campaign_admin_playbook_id ?? currentPayload.campaign_admin_playbook_id ?? currentPayload.summary?.campaign_admin_playbook_id) === 'string'
+    ? String(req.body?.campaign_admin_playbook_id ?? currentPayload.campaign_admin_playbook_id ?? currentPayload.summary?.campaign_admin_playbook_id).trim() || null
+    : null;
+  const campaignAdminPlaybookName = typeof (req.body?.campaign_admin_playbook_name ?? currentPayload.campaign_admin_playbook_name ?? currentPayload.summary?.campaign_admin_playbook_name) === 'string'
+    ? String(req.body?.campaign_admin_playbook_name ?? currentPayload.campaign_admin_playbook_name ?? currentPayload.summary?.campaign_admin_playbook_name).trim() || null
+    : null;
+  const campaignAdminFamilyKey = typeof (req.body?.campaign_admin_family_key ?? currentPayload.campaign_admin_family_key ?? currentPayload.summary?.campaign_admin_family_key) === 'string'
+    ? String(req.body?.campaign_admin_family_key ?? currentPayload.campaign_admin_family_key ?? currentPayload.summary?.campaign_admin_family_key).trim() || null
+    : null;
   const rawBudgetMonthly = req.body?.budget_monthly ?? currentPayload.summary?.budget_monthly ?? 0;
   const parsedBudgetMonthly = Number(rawBudgetMonthly ?? 0);
   const budgetMonthly = !ownsCampaignOperations(effectiveMode)
@@ -10206,10 +10218,16 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
           name: campaignName,
           budget_monthly: budgetMonthly,
           area_medica_id: areaMedicaId,
-          area_medica_nombre: areaMedicaNombre
+          area_medica_nombre: areaMedicaNombre,
+          campaign_admin_playbook_id: campaignAdminPlaybookId,
+          campaign_admin_playbook_name: campaignAdminPlaybookName,
+          campaign_admin_family_key: campaignAdminFamilyKey
         },
         area_medica_id: areaMedicaId,
         area_medica_nombre: areaMedicaNombre,
+        campaign_admin_playbook_id: campaignAdminPlaybookId,
+        campaign_admin_playbook_name: campaignAdminPlaybookName,
+        campaign_admin_family_key: campaignAdminFamilyKey,
         treatments,
         external_targets: externalTargets,
         target_destinations: targetDestinations,
@@ -10626,6 +10644,15 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
   const areaMedicaNombre = typeof req.body?.area_medica_nombre === 'string'
     ? String(req.body?.area_medica_nombre).trim() || null
     : null;
+  const campaignAdminPlaybookId = typeof req.body?.campaign_admin_playbook_id === 'string'
+    ? String(req.body.campaign_admin_playbook_id).trim() || null
+    : null;
+  const campaignAdminPlaybookName = typeof req.body?.campaign_admin_playbook_name === 'string'
+    ? String(req.body.campaign_admin_playbook_name).trim() || null
+    : null;
+  const campaignAdminFamilyKey = typeof req.body?.campaign_admin_family_key === 'string'
+    ? String(req.body.campaign_admin_family_key).trim() || null
+    : null;
   if (promotionType !== 'generic' && !treatments.length) {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'Selecciona al menos un tratamiento' });
   }
@@ -10796,11 +10823,17 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
           name: campaignName,
           budget_monthly: budgetMonthly,
           area_medica_id: areaMedicaId,
-          area_medica_nombre: areaMedicaNombre
+          area_medica_nombre: areaMedicaNombre,
+          campaign_admin_playbook_id: campaignAdminPlaybookId,
+          campaign_admin_playbook_name: campaignAdminPlaybookName,
+          campaign_admin_family_key: campaignAdminFamilyKey
         },
         promotion_type: promotionType,
         area_medica_id: areaMedicaId,
         area_medica_nombre: areaMedicaNombre,
+        campaign_admin_playbook_id: campaignAdminPlaybookId,
+        campaign_admin_playbook_name: campaignAdminPlaybookName,
+        campaign_admin_family_key: campaignAdminFamilyKey,
         treatments,
         external_targets: externalTargets,
         target_destinations: targetDestinations,
