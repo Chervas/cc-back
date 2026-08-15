@@ -740,7 +740,11 @@ function createEmptyStrategyMetrics() {
   return {
     investment: 0,
     leads: 0,
+    qualified_leads: 0,
+    appointments: 0,
+    attended_appointments: 0,
     conversions: 0,
+    crm_conversions: 0,
     revenue: 0,
     cpl: null,
     cost_per_conversion: null
@@ -1068,6 +1072,7 @@ function buildLeadAttributionMetrics(rows, rawTargets) {
     linked_leads: 0,
     linked_qualified_leads: 0,
     linked_appointments: 0,
+    linked_attended_appointments: 0,
     linked_crm_conversions: 0,
     unassigned_clinic_leads: 0,
     unassigned_by_provider: {
@@ -1160,6 +1165,7 @@ function buildLeadAttributionMetrics(rows, rawTargets) {
       leads: 0,
       qualified_leads: 0,
       appointments: 0,
+      attended_appointments: 0,
       crm_conversions: 0
     };
     const status = String(row?.status_lead || '').trim().toLowerCase();
@@ -1173,6 +1179,10 @@ function buildLeadAttributionMetrics(rows, rawTargets) {
     if (APPOINTMENT_LEAD_STATUSES.has(status)) {
       current.appointments += 1;
       aggregate.linked_appointments += 1;
+    }
+    if (status === 'acudio_cita' || status === 'convertido') {
+      current.attended_appointments += 1;
+      aggregate.linked_attended_appointments += 1;
     }
     if (status === 'convertido') {
       current.crm_conversions += 1;
@@ -1242,7 +1252,7 @@ async function loadCurrentLeadAttributionMetricsIndex(options) {
   return result.metricsIndex;
 }
 
-function buildTargetSummaries(externalTargets, targetDestinations, leadMetricsIndex = new Map()) {
+function buildTargetSummaries(externalTargets, targetDestinations, leadMetricsIndex = new Map(), payloadContext = {}) {
   const targets = normalizeExternalTargets(externalTargets);
   const destinations = normalizeTargetDestinations(targetDestinations);
   const destinationMap = new Map(
@@ -1259,6 +1269,9 @@ function buildTargetSummaries(externalTargets, targetDestinations, leadMetricsIn
     const destinationKinds = new Set();
     let investment = 0;
     let leads = 0;
+    let qualifiedLeads = 0;
+    let appointments = 0;
+    let attendedAppointments = 0;
     let channelConversions = 0;
     let crmConversions = 0;
 
@@ -1276,6 +1289,9 @@ function buildTargetSummaries(externalTargets, targetDestinations, leadMetricsIn
         : null;
       if (leadMetrics) {
         leads += safeNumber(leadMetrics.leads);
+        qualifiedLeads += safeNumber(leadMetrics.qualified_leads);
+        appointments += safeNumber(leadMetrics.appointments);
+        attendedAppointments += safeNumber(leadMetrics.attended_appointments);
         crmConversions += safeNumber(leadMetrics.crm_conversions);
       }
     }
@@ -1296,7 +1312,13 @@ function buildTargetSummaries(externalTargets, targetDestinations, leadMetricsIn
     return {
       kind: target.kind,
       treatment_id: target.treatment_id || null,
-      treatment_name: target.treatment_name || null,
+      treatment_name: target.treatment_name
+        || (target.kind === 'generic'
+          ? String(payloadContext?.campaign_admin_playbook_name || payloadContext?.summary?.campaign_admin_playbook_name || '').trim() || null
+          : null),
+      family_key: target.kind === 'generic'
+        ? String(payloadContext?.campaign_admin_family_key || payloadContext?.summary?.campaign_admin_family_key || '').trim() || null
+        : null,
       campaign_count: target.campaigns.length,
       providers: Array.from(providerSet),
       destination_kind: destinationKind,
@@ -1304,9 +1326,12 @@ function buildTargetSummaries(externalTargets, targetDestinations, leadMetricsIn
       metrics: {
         investment: Number(investment.toFixed(2)),
         leads,
+        qualified_leads: qualifiedLeads,
+        appointments,
+        attended_appointments: attendedAppointments,
         channel_conversions: channelConversions,
         crm_conversions: crmConversions,
-        patients_converted: crmConversions > 0 ? crmConversions : channelConversions
+        patients_converted: crmConversions
       }
     };
   });
@@ -5252,6 +5277,7 @@ function buildCampaignAnalysisMetricContract({ provider, campaignRef, rows, lead
       leads: crmLeads,
       qualified_leads: safeNumber(campaignMetrics?.qualified_leads),
       appointments: safeNumber(campaignMetrics?.appointments),
+      attended_appointments: safeNumber(campaignMetrics?.attended_appointments),
       crm_conversions: safeNumber(campaignMetrics?.crm_conversions),
       cost_per_lead: crmLeads > 0 ? Number((providerSpend / crmLeads).toFixed(2)) : null,
       unassigned_clinic_leads: safeNumber(unassignedByProvider[provider]),
@@ -6358,7 +6384,11 @@ function buildStrategyMetrics(campaign, payload) {
   const externalMetrics = buildExternalCampaignMetrics(payload);
   const investment = asPositiveNumber(payloadMetrics.investment ?? campaign?.gasto ?? externalMetrics.investment ?? 0);
   const leads = asPositiveNumber(payloadMetrics.leads ?? campaign?.total_leads ?? 0);
+  const qualifiedLeads = asPositiveNumber(payloadMetrics.qualified_leads ?? payloadMetrics.qualifiedLeads ?? 0);
+  const appointments = asPositiveNumber(payloadMetrics.appointments ?? 0);
+  const attendedAppointments = asPositiveNumber(payloadMetrics.attended_appointments ?? payloadMetrics.attendedAppointments ?? 0);
   const conversions = asPositiveNumber(payloadMetrics.conversions ?? externalMetrics.conversions ?? 0);
+  const crmConversions = asPositiveNumber(payloadMetrics.crm_conversions ?? payloadMetrics.crmConversions ?? 0);
   const revenue = asPositiveNumber(payloadMetrics.revenue ?? 0);
 
   const cpl = asNullableNumber(
@@ -6375,7 +6405,11 @@ function buildStrategyMetrics(campaign, payload) {
   return {
     investment,
     leads,
+    qualified_leads: qualifiedLeads,
+    appointments,
+    attended_appointments: attendedAppointments,
     conversions,
+    crm_conversions: crmConversions,
     revenue,
     cpl,
     cost_per_conversion: costPerConversion
@@ -6445,6 +6479,9 @@ async function buildLiveStrategyMetrics(rows, campaign, payload) {
   let liveInvestment = 0;
   let liveConversions = 0;
   let liveLeads = 0;
+  let liveQualifiedLeads = 0;
+  let liveAppointments = 0;
+  let liveAttendedAppointments = 0;
   let liveCrmConversions = 0;
 
   for (const key of [
@@ -6464,12 +6501,19 @@ async function buildLiveStrategyMetrics(rows, campaign, payload) {
     const metrics = currentLeadMetrics.get(key);
     if (!metrics) continue;
     liveLeads += safeNumber(metrics.leads);
+    liveQualifiedLeads += safeNumber(metrics.qualified_leads);
+    liveAppointments += safeNumber(metrics.appointments);
+    liveAttendedAppointments += safeNumber(metrics.attended_appointments);
     liveCrmConversions += safeNumber(metrics.crm_conversions);
   }
 
   const resolvedInvestment = liveInvestment > 0 ? liveInvestment : baseMetrics.investment;
   const resolvedLeads = liveLeads > 0 ? liveLeads : baseMetrics.leads;
+  const resolvedQualifiedLeads = liveQualifiedLeads > 0 ? liveQualifiedLeads : baseMetrics.qualified_leads;
+  const resolvedAppointments = liveAppointments > 0 ? liveAppointments : baseMetrics.appointments;
+  const resolvedAttendedAppointments = liveAttendedAppointments > 0 ? liveAttendedAppointments : baseMetrics.attended_appointments;
   const resolvedConversions = liveCrmConversions > 0 ? liveCrmConversions : liveConversions;
+  const resolvedCrmConversions = liveCrmConversions > 0 ? liveCrmConversions : baseMetrics.crm_conversions;
   const cpl = resolvedLeads > 0
     ? Number((resolvedInvestment / resolvedLeads).toFixed(2))
     : baseMetrics.cpl;
@@ -6482,7 +6526,11 @@ async function buildLiveStrategyMetrics(rows, campaign, payload) {
     ...baseMetrics,
     investment: resolvedInvestment,
     leads: resolvedLeads,
+    qualified_leads: resolvedQualifiedLeads,
+    appointments: resolvedAppointments,
+    attended_appointments: resolvedAttendedAppointments,
     conversions: resolvedConversions,
+    crm_conversions: resolvedCrmConversions,
     cpl,
     cost_per_conversion: costPerConversion
   };
@@ -6540,7 +6588,7 @@ function buildStrategyItemFromRows(rows, campaignsById, inventoryIndex = null) {
     addon_calls: payload.addons?.call_leads === true,
     external_targets: externalTargets,
     target_destinations: targetDestinations,
-    target_summaries: buildTargetSummaries(externalTargets, targetDestinations),
+    target_summaries: buildTargetSummaries(externalTargets, targetDestinations, new Map(), payload),
     metrics: buildStrategyMetrics(campaign, payload),
     created_at: representative.created_at,
     updated_at: representative.updated_at || representative.created_at
@@ -9863,7 +9911,7 @@ exports.getMarketingStrategyDetail = asyncHandler(async (req, res) => {
     hydrateExternalTargetsWithMetrics(payload.external_targets, liveExternalMetrics),
     inventoryIndex
   );
-  strategy.target_summaries = buildTargetSummaries(strategy.external_targets, payload.target_destinations, liveLeadMetrics);
+  strategy.target_summaries = buildTargetSummaries(strategy.external_targets, payload.target_destinations, liveLeadMetrics, payload);
 
   return res.json({
     success: true,
@@ -10281,7 +10329,7 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
     payload: refreshedPayload
   });
   strategy.external_targets = hydrateExternalTargetsWithMetrics(refreshedPayload.external_targets, refreshedLiveExternalMetrics);
-  strategy.target_summaries = buildTargetSummaries(strategy.external_targets, refreshedPayload.target_destinations, refreshedLeadMetrics);
+  strategy.target_summaries = buildTargetSummaries(strategy.external_targets, refreshedPayload.target_destinations, refreshedLeadMetrics, refreshedPayload);
 
   return res.json({
     success: true,
