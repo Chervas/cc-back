@@ -41,6 +41,7 @@
 'use strict';
 const axios = require('axios');
 const { ApiUsageCounter } = require('../../models');
+const { recordApiUsage } = require('../services/apiUsageTelemetry.service');
 
 let nextAllowedAt = 0; // epoch ms
 let lastUsagePct = 0; // last observed usage percentage across headers
@@ -66,38 +67,39 @@ function parseUsageHeader(h) {
   }
 }
 
-async function updateMetaUsageCounter(usage) {
+async function updateMetaUsageCounter(usage, {
+  source = 'meta_client',
+  operation = 'graph_request',
+  status = 'ok',
+  pauseUntil = undefined,
+  error = null
+} = {}) {
   if (typeof usage !== 'number' || Number.isNaN(usage)) {
     return;
   }
   const now = new Date();
   const todayStr = now.toISOString().slice(0, 10);
   const hourBucket = new Date(now); hourBucket.setMinutes(0, 0, 0);
-  const [counter] = await ApiUsageCounter.findOrCreate({
-    where: { provider: 'meta_ads' },
-    defaults: {
-      usageDate: todayStr,
-      requestCount: 0,
-      usagePct: usage,
-      pauseUntil: null,
-      metadata: { hourStart: hourBucket.toISOString() }
-    }
-  });
-  const metadata = counter.metadata || {};
-  const storedHour = metadata.hourStart ? new Date(metadata.hourStart).getTime() : null;
-  const newMetadata = { ...metadata, hourStart: hourBucket.toISOString() };
-  const updates = {
-    usageDate: todayStr,
+  await recordApiUsage({
+    provider: 'meta_ads',
+    source,
+    operation,
+    status,
     usagePct: usage,
-    metadata: newMetadata
-  };
-  if (!storedHour || storedHour !== hourBucket.getTime()) {
-    updates.usagePct = usage;
-  }
-  await counter.update(updates);
+    requestCount: 1,
+    pauseUntil,
+    error,
+    metadata: { hourStart: hourBucket.toISOString() }
+  });
 }
 
-async function metaGet(url, { params = {}, accessToken, timeout = 30000 } = {}) {
+async function metaGet(url, {
+  params = {},
+  accessToken,
+  timeout = 30000,
+  source = 'meta_client',
+  operation = null
+} = {}) {
   const META_API_BASE_URL = process.env.META_API_BASE_URL || 'https://graph.facebook.com/v23.0';
   // Retardo suave entre requests (ms). Previene picos de uso.
   const delayMs = parseInt(process.env.METASYNC_REQUEST_DELAY_MS || '300', 10);
@@ -125,6 +127,7 @@ async function metaGet(url, { params = {}, accessToken, timeout = 30000 } = {}) 
       if (attempt === 1 && delayMs > 0) await sleep(delayMs);
 
       const fullUrl = url.startsWith('http') ? url : `${META_API_BASE_URL}/${url.replace(/^\//,'')}`;
+      const telemetryOperation = operation || String(url || 'graph_request').split('?')[0].slice(0, 120);
       const resp = await axios.get(fullUrl, {
         params: accessToken ? { ...params, access_token: accessToken } : params,
         timeout
@@ -138,7 +141,6 @@ async function metaGet(url, { params = {}, accessToken, timeout = 30000 } = {}) 
       const bizUsage = parseUsageHeader(h['x-business-use-case-usage']);
       const usage = Math.max(appUsage, adUsage, pageUsage, bizUsage);
       lastUsagePct = usage;
-      await updateMetaUsageCounter(usage);
       if (usage >= thresh) {
         if (waitNextHour) {
           const d = new Date();
@@ -150,6 +152,12 @@ async function metaGet(url, { params = {}, accessToken, timeout = 30000 } = {}) 
           console.warn(`⚠️ Uso alto (${usage}%). Pausando 60s.`);
         }
       }
+      await updateMetaUsageCounter(usage, {
+        source,
+        operation: telemetryOperation,
+        status: usage >= thresh ? 'rate_limited' : 'ok',
+        pauseUntil: nextAllowedAt ? new Date(nextAllowedAt) : undefined
+      });
 
       return resp;
     } catch (err) {
@@ -181,7 +189,6 @@ async function metaGet(url, { params = {}, accessToken, timeout = 30000 } = {}) 
       }
       const isRatelimit = code === 4 || code === 17 || code === 613; // common RL codes
       if (isRatelimit) {
-        await updateMetaUsageCounter(100);
         if (waitNextHour) {
           const d = new Date(); d.setMinutes(60, 0, 0);
           nextAllowedAt = Math.max(nextAllowedAt, d.getTime());
@@ -191,6 +198,13 @@ async function metaGet(url, { params = {}, accessToken, timeout = 30000 } = {}) 
           console.warn(`⏸️ Rate limit (code ${code}). Reintentando en ${Math.ceil(backoff/1000)}s (intento ${attempt}/${maxRetries})`);
           await sleep(backoff);
         }
+        await updateMetaUsageCounter(100, {
+          source,
+          operation: operation || String(url || 'graph_request').split('?')[0].slice(0, 120),
+          status: 'rate_limited',
+          pauseUntil: nextAllowedAt ? new Date(nextAllowedAt) : undefined,
+          error: err
+        });
         continue;
       }
       if (attempt <= maxRetries) {

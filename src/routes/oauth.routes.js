@@ -73,6 +73,7 @@ const {
     persistGoogleConnection,
     persistMetaConnection
 } = require('../services/oauthConnectionPersistence.service');
+const { recordApiUsage } = require('../services/apiUsageTelemetry.service');
 const {
     deactivateGoogleMappingsForScope,
     deactivateMetaMappingsForScope
@@ -125,6 +126,42 @@ function metaOAuthErrorCode(error) {
         return 'meta_rate_limit';
     }
     return 'meta_oauth_failed';
+}
+
+function metaRateLimitPauseUntil() {
+    const d = new Date();
+    d.setMinutes(60, 0, 0);
+    return d;
+}
+
+async function recordMetaOAuthUsage({ source = 'oauth_meta', operation = 'meta_oauth', status = 'ok', error = null, requestCount = 1 } = {}) {
+    const rateLimited = error && isMetaApplicationRateLimit(error);
+    await recordApiUsage({
+        provider: 'meta_ads',
+        source,
+        operation,
+        status: rateLimited ? 'rate_limited' : status,
+        usagePct: rateLimited ? 100 : null,
+        requestCount,
+        pauseUntil: rateLimited ? metaRateLimitPauseUntil() : undefined,
+        error
+    });
+}
+
+async function instrumentedMetaOauthGet(url, config = {}, { source = 'oauth_meta', operation = 'meta_get' } = {}) {
+    try {
+        const response = await axios.get(url, config);
+        await recordMetaOAuthUsage({ source, operation, status: 'ok' });
+        return response;
+    } catch (error) {
+        await recordMetaOAuthUsage({
+            source,
+            operation,
+            status: isMetaApplicationRateLimit(error) ? 'rate_limited' : 'error',
+            error
+        });
+        throw error;
+    }
 }
 
 // Configuración Google OAuth (variables de entorno)
@@ -691,8 +728,11 @@ async function fetchAllMetaPaginatedData(initialUrl, accessToken) {
                 'Meta devolvió una URL de paginación fuera del dominio autorizado.'
             );
         }
-        const response = await axios.get(parsedNextUrl.toString(), {
+        const response = await instrumentedMetaOauthGet(parsedNextUrl.toString(), {
             headers: { Authorization: `Bearer ${accessToken}` }
+        }, {
+            source: 'oauth_meta_assets',
+            operation: parsedNextUrl.pathname.includes('/adaccounts') ? 'list_ad_accounts' : 'list_pages'
         });
         if (Array.isArray(response.data?.data)) allData.push(...response.data.data);
         nextUrl = response.data?.paging?.next || null;
@@ -1121,7 +1161,10 @@ router.get('/meta/callback', async (req, res) => {
             redirect_uri: REDIRECT_URI,
             code: code,
         };
-        const tokenResponse = await axios.get(tokenUrl, { params: tokenParams });
+        const tokenResponse = await instrumentedMetaOauthGet(tokenUrl, { params: tokenParams }, {
+            source: 'oauth_meta_callback',
+            operation: 'exchange_short_lived_token'
+        });
         const shortLivedAccessToken = tokenResponse.data.access_token;
         
         if (!shortLivedAccessToken) {
@@ -1139,7 +1182,10 @@ router.get('/meta/callback', async (req, res) => {
             client_secret: META_APP_SECRET,
             fb_exchange_token: shortLivedAccessToken,
         };
-        const longLivedTokenResponse = await axios.get(longLivedTokenUrl, { params: longLivedTokenParams });
+        const longLivedTokenResponse = await instrumentedMetaOauthGet(longLivedTokenUrl, { params: longLivedTokenParams }, {
+            source: 'oauth_meta_callback',
+            operation: 'exchange_long_lived_token'
+        });
         const longLivedAccessToken = longLivedTokenResponse.data.access_token;
         const longLivedExpiresIn = longLivedTokenResponse.data.expires_in; // Generalmente 60 días
 
@@ -1152,7 +1198,10 @@ router.get('/meta/callback', async (req, res) => {
         // 3. Obtener información básica del usuario de Meta
         console.log('👤 Obteniendo información del usuario de Meta...');
         const userProfileUrl = `${META_API_BASE_URL.replace(/\/v\d+\.\d+$/, '')}/me?fields=id,name,email&access_token=${longLivedAccessToken}`;
-        const userProfileResponse = await axios.get(userProfileUrl);
+        const userProfileResponse = await instrumentedMetaOauthGet(userProfileUrl, {}, {
+            source: 'oauth_meta_callback',
+            operation: 'load_user_profile'
+        });
         const userData = userProfileResponse.data;
         console.log('👤 Usuario de Meta autenticado:', userData);
 
@@ -1221,6 +1270,13 @@ router.get('/meta/callback', async (req, res) => {
         res.redirect(redirectUrl);
 
     } catch (err) {
+        await recordMetaOAuthUsage({
+            source: 'oauth_meta_callback',
+            operation: 'callback_failed',
+            status: isMetaApplicationRateLimit(err) ? 'rate_limited' : 'error',
+            error: err,
+            requestCount: 0
+        });
         console.error('❌ Error fatal en el proceso de OAuth:', err.response ? err.response.data : err.message);
         const publicMessage = metaOAuthPublicErrorMessage(err);
         const publicCode = metaOAuthErrorCode(err);
@@ -3297,11 +3353,14 @@ router.get('/meta/connection-status', async (req, res) => {
             let missingScopes = [];
             let debugData = null;
             try {
-                const dbg = await axios.get(`${META_API_BASE_URL}/debug_token`, {
+                const dbg = await instrumentedMetaOauthGet(`${META_API_BASE_URL}/debug_token`, {
                     params: {
                         input_token: connection.accessToken,
                         access_token: connection.accessToken
                     }
+                }, {
+                    source: 'oauth_meta_connection_status',
+                    operation: 'debug_token'
                 });
                 debugData = dbg.data?.data || null;
                 scopes = Array.isArray(debugData?.scopes)
