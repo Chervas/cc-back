@@ -994,24 +994,28 @@ async function getAdminOverview({ limit = 100 } = {}) {
   ]);
   const clinicNames = new Map(clinics.map((clinic) => [Number(clinic.id_clinica), clinic.nombre_clinica]));
   const groupNames = new Map(groups.map((group) => [Number(group.id_grupo), group.nombre_grupo]));
-  const pausedQueueRows = pausedLists
+  const allPausedQueueRows = pausedLists
     .map((list) => {
       const criteria = safeObject(list.criteria);
       const dispatch = safeObject(criteria.dispatch);
       return { list, dispatch };
-    })
+    });
+  const pausedQueueRows = allPausedQueueRows
     .filter(({ dispatch }) => !clean(safeObject(dispatch.admin_resolution).decision) && (
       PROVIDER_PAUSE_STATUSES.has(clean(dispatch.status).toLowerCase())
       || clean(dispatch.status).toLowerCase() === 'paused_review'
       || dispatch.requires_admin_review === true
     ));
+  const reviewedQueueRows = allPausedQueueRows
+    .filter(({ dispatch }) => clean(safeObject(dispatch.admin_resolution).decision))
+    .slice(0, 25);
   const senderCache = {
     clinicConfigs: new Map(),
     assetsById: new Map(),
     assetsByPhone: new Map(),
     groupAssets: new Map(),
   };
-  const queues = await Promise.all(pausedQueueRows.map(async ({ list, dispatch }) => ({
+  const serializeQueue = async ({ list, dispatch }) => ({
       id: list.id,
       name: list.name,
       clinic_id: list.clinica_id,
@@ -1033,13 +1037,23 @@ async function getAdminOverview({ limit = 100 } = {}) {
       audience: safeObject(safeObject(list.criteria).audience || safeObject(list.criteria).selection),
       schedule: safeObject(dispatch.business_hours),
       admin_resolution: safeObject(dispatch.admin_resolution),
-      what_happens_now: dispatch.requires_admin_review === true
+      what_happens_now: clean(safeObject(dispatch.admin_resolution).decision) === 'changes_required'
+        ? 'Clinicaclick la marcó como pendiente de cambios. No se podrá reanudar hasta corregir la plantilla, la audiencia o el motivo de pausa indicado.'
+        : clean(safeObject(dispatch.admin_resolution).decision) === 'cancelled'
+          ? 'Clinicaclick canceló esta cola. No se enviarán los mensajes pendientes.'
+          : clean(safeObject(dispatch.admin_resolution).decision) === 'authorized'
+            ? 'Clinicaclick autorizó la continuación. La campaña puede retomarse desde su flujo operativo.'
+            : dispatch.requires_admin_review === true
         ? 'La cola seguirá detenida y no se enviarán más mensajes. Un administrador de Clinicaclick revisará la plantilla, los destinatarios y el motivo de la pausa. Te avisaremos si puede continuar o debe cancelarse.'
         : dispatch.status === 'held_meta'
           ? 'WhatsApp está comprobando señales iniciales de calidad. Los mensajes retenidos no se reintentan: se enviarán o fallarán cuando Meta termine la evaluación.'
           : 'La cola permanecerá detenida hasta que desaparezca la causa indicada.',
-    })));
-  return { snapshots, events, queues };
+    });
+  const [queues, reviewedQueues] = await Promise.all([
+    Promise.all(pausedQueueRows.map(serializeQueue)),
+    Promise.all(reviewedQueueRows.map(serializeQueue)),
+  ]);
+  return { snapshots, events, queues, reviewed_queues: reviewedQueues };
 }
 
 async function notifyQueueResolution(list, decision, note, adminUserId) {
