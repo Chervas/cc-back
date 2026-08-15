@@ -24,6 +24,9 @@ const {
   normalizeMetaAdsConfig,
   resolveEffectiveMarketingState
 } = require('../services/effectiveMarketingAssets.service');
+const {
+  resolveMetaConnectionForScope,
+} = require('../services/scopeConnectionResolver.service');
 const { resolveScopedGoogleAdsRuntime } = require('../services/googleAdsScopedRuntime.service');
 const {
   GOOGLE_DATA_MANAGER_SCOPE,
@@ -8240,13 +8243,24 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
   const metaMappedAccess = selectedMetaAdAccount?.ad_account_id
     ? await resolveMetaCampaignMappingAccess({ scope, adAccountId: selectedMetaAdAccount.ad_account_id })
     : null;
-  metaConnected = Boolean(metaMappedAccess?.connection);
+  const scopedMetaConnection = await resolveMetaConnectionForScope({
+    userId,
+    clinicIdRaw: scope.clinic_id,
+    groupIdRaw: scope.group_id,
+    assignmentScopeRaw: scope.assignment_scope,
+    allowLegacyUserFallback: true
+  });
+  const usableMetaConnection = metaMappedAccess?.connection
+    || marketingState.meta.connection
+    || scopedMetaConnection?.connection
+    || null;
+  metaConnected = Boolean(usableMetaConnection);
   metaReason = metaConnected
     ? null
     : (metaMappedAccess?.reason || (metaAssets.ad_accounts.length ? 'connection_unavailable' : 'no_connection'));
   const metaConnectionSource = selectedMetaAdAccount?.assignment_origin
     ? `mapping_${selectedMetaAdAccount.assignment_origin}`
-    : null;
+    : (marketingState.meta.connection_source || scopedMetaConnection?.source || null);
 
   const capiMissing = [];
   if (!metaAssets.ad_accounts.length) capiMissing.push('ad_account_mapping');

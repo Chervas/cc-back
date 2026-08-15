@@ -229,7 +229,8 @@ function testConsumersWireExactMappingAccess() {
   const bootstrapBody = onboardingSource.slice(bootstrapStart, bootstrapEnd);
   assert.match(bootstrapBody, /summarizeGoogleMappedAccountAccess/);
   assert.match(bootstrapBody, /resolveMetaCampaignMappingAccess/);
-  assert.doesNotMatch(bootstrapBody, /resolveGoogleConnectionForScope|resolveMetaConnectionForScope/);
+  assert.match(bootstrapBody, /resolveMetaConnectionForScope/);
+  assert.doesNotMatch(bootstrapBody, /resolveGoogleConnectionForScope/);
 
   const gateStart = onboardingSource.indexOf('exports.gateEnhancedConversionsActivation');
   const gateEnd = onboardingSource.indexOf('exports.startCampaignOnboarding', gateStart);
