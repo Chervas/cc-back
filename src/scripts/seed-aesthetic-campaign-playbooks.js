@@ -36,6 +36,21 @@ const baseReviewPolicy = {
 
 const aestheticPlaybooks = [
   {
+    catalog_key: 'new_patients_clinica_general',
+    display_name: 'Clínica en general',
+    family_key: null,
+    area_medica: null,
+    channels_supported: ['google_ads', 'meta_ads'],
+    channels_default: ['google_ads', 'meta_ads'],
+    recommended_budget_min: 300,
+    recommended_budget_max: 1200,
+    notes_internal: [
+      'Playbook genérico para campañas de marca, clínica completa o captación global sin una familia/tratamiento dominante.',
+      'Debe mostrarse como “Clínica en general” y permitir vincular campañas externas aunque no exista un tratamiento específico.',
+      'No sustituye a las familias estéticas; se usa cuando la campaña comunica la clínica o una propuesta general.',
+    ].join('\n'),
+  },
+  {
     catalog_key: 'new_patients_estetica_armonizacion_facial',
     display_name: 'Armonización facial',
     family_key: 'facial_harmonization',
@@ -154,8 +169,8 @@ function playbookPayload(playbook) {
     objective_id: 'new_patients',
     promotion_kind: 'generic_campaign',
     treatment_id: null,
-    area_medica: 'estetica',
-    family_key: playbook.family_key,
+    area_medica: playbook.area_medica === undefined ? 'estetica' : playbook.area_medica,
+    family_key: playbook.family_key || null,
     status: 'active',
     channels_supported: playbook.channels_supported,
     channels_default: playbook.channels_default,

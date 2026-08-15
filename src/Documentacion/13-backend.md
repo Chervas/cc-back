@@ -5472,7 +5472,8 @@ Ya existe runtime real para la capa de campañas admin:
 - `automation_strategy.mode` soporta `inherit_recommendation`, `force_template`, `none`
 - `force_template` valida automatización activa con plantilla publicada
 - `generic_campaign` puede convivir varias veces bajo la misma `area_medica`; el frontend debe enviar `campaign_admin_playbook_id`, `campaign_admin_playbook_name` y `campaign_admin_family_key` para persistir la familia concreta elegida.
-- Estética usa playbooks paraguas por familia comercial. Seed operativo: `node src/scripts/seed-aesthetic-campaign-playbooks.js [--dry-run]`. El script archiva los playbooks de prueba `new_patients_campana_admin_test*` y crea/actualiza las familias activas de estética para `new_patients`.
+- `generic_campaign` sin `family_key` representa **Clínica en general**: campaña de marca, clínica completa o captación global. Se puede vincular a campañas externas sin tratamiento/familia concreta.
+- Estética usa playbooks paraguas por familia comercial. Seed operativo: `node src/scripts/seed-aesthetic-campaign-playbooks.js [--dry-run]`. El script archiva los playbooks de prueba `new_patients_campana_admin_test*`, crea/actualiza la opción general `new_patients_clinica_general` y las familias activas de estética para `new_patients`.
 
 ### 9. Conexión real con el wizard
 
