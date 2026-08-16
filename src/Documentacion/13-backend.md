@@ -1904,11 +1904,20 @@ Al importar:
 - conserva `created_at` importado cuando la columna se ha mapeado como fecha de entrada;
 - materializa cita importada en `cita_propuesta` cuando el archivo trae fecha/hora/responsable/dirección.
 - conserva `config.source_detail` aunque no exista `campana_id`.
+- para importaciones históricas de `Mide y mejora`, acepta una campaña externa
+  vinculada sin `Campana` interna legacy mediante
+  `external_campaign_provider`, `external_account_id`,
+  `external_campaign_id` y `external_campaign_name`; en ese caso persiste
+  `source_detail=<external_campaign_id>` para que la atribución de estrategia
+  cruce el lead con `ExternalCampaignAssignments` sin consultar Meta/Google.
 
 Caso operativo:
 
 - si `source_detail=reactivacion_pacientes`, backend añade la nota interna `Origen: reactivación de pacientes.` al lead importado;
 - esto permite reutilizar el importador de `Marketing > Leads` desde `Marketing > Campañas > Reactivar pacientes` sin crear una tabla paralela prematura.
+- si se importa desde `Marketing > Campañas > Captar nuevos pacientes`, el
+  frontend debe enviar la campaña externa seleccionada por el usuario. No debe
+  crear una `Campana` interna artificial solo para satisfacer el importador.
 
 ### Alcance del mapeo actual
 
