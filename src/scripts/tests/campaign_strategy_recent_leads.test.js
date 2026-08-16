@@ -66,6 +66,18 @@ const rows = [
     clinica: { nombre_clinica: 'BS Medical' }
   },
   {
+    id: 4,
+    nombre: 'Paciente Meta importado',
+    email: 'importado@example.com',
+    telefono: '+34633333333',
+    status_lead: 'nuevo',
+    source: 'meta_ads',
+    source_detail: '123123123',
+    created_at: '2026-08-15T08:30:00.000Z',
+    clinica_id: 72,
+    clinica: { nombre_clinica: 'BS Medical' }
+  },
+  {
     id: 3,
     nombre: 'No debe entrar',
     email: 'otro@example.com',
@@ -82,7 +94,7 @@ const rows = [
 
 const items = buildStrategyRecentLeadItems(rows, payload, 5);
 
-assert.equal(items.length, 2);
+assert.equal(items.length, 3);
 assert.equal(items[0].id, 1);
 assert.equal(items[0].source, 'google_ads');
 assert.equal(items[0].target.label, 'Cirugía de pecho');
@@ -96,5 +108,10 @@ assert.equal(items[1].source, 'meta_ads');
 assert.equal(items[1].target.label, 'Armonización facial');
 assert.equal(items[1].has_email, false);
 assert.equal(items[1].has_phone, true);
+
+assert.equal(items[2].id, 4);
+assert.equal(items[2].source, 'meta_ads');
+assert.equal(items[2].campaign.campaign_id, '123123123');
+assert.equal(items[2].target.label, 'Armonización facial');
 
 console.log('campaign_strategy_recent_leads.test.js OK');
