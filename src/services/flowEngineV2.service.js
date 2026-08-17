@@ -2675,7 +2675,7 @@ async function resolveWhatsAppSenderConfig({ config, context, clinicId }) {
     || context?.patient?.phone
     || context?.recipient?.phone
   );
-  const domain = cleanString(config?.domain || context?.runtime?.domain).toLowerCase();
+  const domain = toLowerSafe(config?.domain || context?.runtime?.domain);
   const purpose = domain.includes('consent')
     ? 'consent'
     : (leadId ? 'lead_automation' : (appointmentId ? 'appointment_automation' : 'automation'));

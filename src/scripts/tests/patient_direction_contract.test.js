@@ -91,6 +91,10 @@ assert.match(flowEngine, /resolveOutboundPolicy[\s\S]*?automation: true/,
   'V2 automations must use the same sender policy as QuickChat');
 assert.match(flowEngine, /patient_direction_assignment_id/,
   'scheduled automation jobs must snapshot the assignment');
+assert.match(flowEngine, /const domain = toLowerSafe\(config\?\.domain \|\| context\?\.runtime\?\.domain\)/,
+  'appointment automations must accept send nodes without an optional domain');
+assert.doesNotMatch(flowEngine, /cleanString\(config\?\.domain \|\| context\?\.runtime\?\.domain\)\.toLowerCase\(\)/,
+  'an absent optional domain must not fail before the WhatsApp request reaches Meta');
 assert.match(webhook, /resolveInboundDestination/);
 assert.match(webhook, /captureUnassignedInbound/);
 assert.match(workers, /sendOldNumberNotice/);
