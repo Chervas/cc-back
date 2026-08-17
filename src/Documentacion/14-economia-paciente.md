@@ -56,15 +56,21 @@ seleccionar una forma que no exista en la version firmada. Los datos bancarios
 pueden quedar `pending` para que recepcion los complete despues: no bloquean la
 aceptacion economica.
 
-### Envio y actividad de firma de presupuestos
+### Presentacion, envio y actividad de firma de presupuestos
+
+- Crear o editar desde el asistente guarda siempre un borrador. Ver, descargar
+  o imprimir no cambia su estado. `Presentado` solo se registra al preparar un
+  canal real (`whatsapp` o `tablet`) o cuando la clinica confirma expresamente
+  que ya lo ha mostrado o entregado en persona.
 
 - `POST /budgets/:budgetId/signature-requests` crea una solicitud por canal
   (`whatsapp`, `email`, `custom_email` o `tablet`) y conserva en
   `EconomicBudgetSignatureRequests` destino, estado, enlace publico,
   `sent_at`, `viewed_at`, `signed_at`, snapshot y hash.
 - Las solicitudes por `tablet`, `email` y `custom_email` nacen como `sent`.
-  Email sigue siendo mock; tablet queda disponible para copiar enlace o abrir
-  en el kiosco de la clinica.
+  Email sigue siendo mock y no cambia el presupuesto a `presented`; tablet
+  queda disponible para copiar enlace o abrir en el kiosco de la clinica y si
+  registra la presentacion.
 - WhatsApp exige plantilla Meta aprobada. El catalogo base se llama
   `clinicaclick_envio_presupuesto_firma` y se siembra con la migracion
   `20260731103000-seed-budget-signature-whatsapp-template.js`. Cada WABA debe
@@ -75,6 +81,9 @@ aceptacion economica.
 - Cada creacion, envio, fallo, apertura y firma genera un evento economico.
   La actividad se inyecta tambien en el timeline del paciente para que aparezca
   en la ficha, QuickChat y conversacion cronologica.
+- WhatsApp registra la presentacion solo despues de que Meta acepte el mensaje.
+  Un fallo conserva el presupuesto como borrador. Las presentaciones repetidas
+  generan nuevos eventos, pero `presented_at` conserva la primera fecha.
 
 Cobros y saldo:
 
@@ -159,6 +168,7 @@ Contabilidad transversal y portal:
   `clinic.settings.edit`.
 - Paciente y clinica se validan siempre antes de leer o mutar.
 - Solo un borrador puede editarse directamente.
+- Guardar, ver, descargar o imprimir no equivale a presentar.
 - Cada edicion genera una version nueva.
 - Las transiciones de estado son explicitas.
 - Una aceptacion con varias alternativas exige elegir una; una financiacion
