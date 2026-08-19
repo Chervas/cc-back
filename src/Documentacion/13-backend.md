@@ -3587,7 +3587,7 @@ En `.env` / `.env.example`:
 - `GROQ_STT_MODEL` (default `whisper-large-v3-turbo`, para transcripción de audio inbound WhatsApp)
 - `GROQ_STT_TIMEOUT_MS` (default `30000`; si no existe usa `GROQ_TIMEOUT_MS`)
 - `WHATSAPP_MEDIA_DOWNLOAD_MAX_BYTES` (default `25000000`, límite defensivo para descargar media inbound antes de STT)
-- `GROQ_HEALTH_CACHE_TTL_MS` (default `300000`): caché del check operativo de Groq expuesto en monitorización para no llamar al proveedor en cada refresco.
+- `GROQ_HEALTH_CACHE_TTL_MS` (default `14400000`, 4 horas): caché del check operativo de Groq expuesto en monitorización para no llamar al proveedor en cada refresco. Abrir o refrescar la pantalla usa este valor cacheado; el botón `Actualizar` del bloque de runtime fuerza una comprobación real inmediata.
 - `GROQ_HEALTH_TIMEOUT_MS` (default `5000`): timeout de los checks de `/models` y contrato JSON del modelo principal/fallback.
 
 ### Notas operativas

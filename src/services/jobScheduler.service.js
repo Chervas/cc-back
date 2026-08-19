@@ -16,9 +16,10 @@ const RUNTIME_NAMESPACE_ALIASES = typeof jobRequestsService.getRuntimeNamespaceA
   ? jobRequestsService.getRuntimeNamespaceAliases()
   : [];
 const CLAIM_UNSCOPED_JOBS = jobRequestsService.shouldClaimUnscopedJobs();
+const DEFAULT_GROQ_HEALTH_CACHE_TTL_MS = 4 * 60 * 60 * 1000;
 const GROQ_HEALTH_CACHE_TTL_MS = Math.max(
   60 * 1000,
-  Number.parseInt(String(process.env.GROQ_HEALTH_CACHE_TTL_MS || '300000'), 10) || 300000
+  Number.parseInt(String(process.env.GROQ_HEALTH_CACHE_TTL_MS || String(DEFAULT_GROQ_HEALTH_CACHE_TTL_MS)), 10) || DEFAULT_GROQ_HEALTH_CACHE_TTL_MS
 );
 const GROQ_HEALTH_TIMEOUT_MS = Math.max(
   1000,
@@ -281,12 +282,12 @@ async function checkGroqModel({ apiKey, baseUrl, model, label }) {
   }
 }
 
-async function loadGroqOperationalChecks() {
+async function loadGroqOperationalChecks({ force = false } = {}) {
   const now = Date.now();
-  if (groqHealthCache.value && groqHealthCache.expiresAt > now) {
+  if (!force && groqHealthCache.value && groqHealthCache.expiresAt > now) {
     return groqHealthCache.value;
   }
-  if (groqHealthCache.promise) {
+  if (!force && groqHealthCache.promise) {
     return groqHealthCache.promise;
   }
 
@@ -757,9 +758,11 @@ function setExternalDispatcher(handler) {
   externalDispatcher = handler;
 }
 
-async function getStatus() {
+async function getStatus(options = {}) {
   const latestAutomationIncident = await getLatestAutomationIncident().catch(() => null);
-  const groqOperationalChecks = await loadGroqOperationalChecks().catch((err) => ({
+  const groqOperationalChecks = await loadGroqOperationalChecks({
+    force: Boolean(options.forceGroqHealth),
+  }).catch((err) => ({
     groqApiKey: groqCheck(false, 'GROQ_API_KEY', `No se pudo comprobar Groq (${describeProviderError(err)}).`),
     groqPrimaryModel: groqCheck(false, 'Modelo IA principal', 'No se pudo comprobar el modelo principal.'),
     groqFallbackModel: groqCheck(false, 'Modelo IA fallback', 'No se pudo comprobar el modelo fallback.'),
