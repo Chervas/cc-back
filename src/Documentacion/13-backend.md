@@ -3543,7 +3543,8 @@ El nodo `condition/ai_analysis` quedó operativo en runtime real sobre Groq, con
 
 - `groq/compound-mini`: modelo rápido por defecto para clasificación operativa y respuestas cortas en JSON.
 - `groq/compound`: primer fallback del proveedor si el modelo rápido deja de estar disponible.
-- Los modelos legacy `llama-3.3-70b-versatile` y `llama-3.1-8b-instant` no deben usarse como valor por defecto: el 19/08/2026 la API activa de Groq devolvió 404/decommissioned para esos IDs y cortó nodos `condition/ai_analysis` de confirmación de cita.
+- Los fallbacks automáticos de este nodo no deben usar modelos `openai/gpt-oss-*`; aunque entren por API compatible de Groq, no respetan la intención de producto de mantener esta capa migrable a Llama/Ollama u otro proveedor europeo compatible.
+- Los modelos `llama-3.3-70b-versatile` y `llama-3.1-8b-instant` siguen siendo modelos deseables para esta capa cuando estén disponibles para la cuenta, pero no deben quedar como default ciego: el 19/08/2026 la API activa de Groq devolvió `404 does not exist or you do not have access to it` para esos IDs con la clave del entorno. La documentación pública de Groq no mostraba una deprecación específica de esos dos IDs; por tanto el incidente debe tratarse como pérdida de disponibilidad/permisos/catálogo para nuestra cuenta, no como una deprecación confirmada.
 - El usuario del editor **no selecciona modelo**. Solo define el `analysis_mode` del nodo:
   - `quick_qa`
   - `complex_reasoning`
@@ -3586,10 +3587,16 @@ En `.env` / `.env.example`:
 - `GROQ_STT_MODEL` (default `whisper-large-v3-turbo`, para transcripción de audio inbound WhatsApp)
 - `GROQ_STT_TIMEOUT_MS` (default `30000`; si no existe usa `GROQ_TIMEOUT_MS`)
 - `WHATSAPP_MEDIA_DOWNLOAD_MAX_BYTES` (default `25000000`, límite defensivo para descargar media inbound antes de STT)
+- `GROQ_HEALTH_CACHE_TTL_MS` (default `300000`): caché del check operativo de Groq expuesto en monitorización para no llamar al proveedor en cada refresco.
+- `GROQ_HEALTH_TIMEOUT_MS` (default `5000`): timeout de los checks de `/models` y contrato JSON del modelo principal/fallback.
 
 ### Notas operativas
 
 - La API key de Groq se usa **solo en backend**.
+- `Ajustes > Monitorización > Checks locales` separa tres estados:
+  - `GROQ_API_KEY`: clave presente y autenticada contra `/models`;
+  - `Modelo IA principal`: modelo efectivo de `GROQ_MODEL_FAST`/`GROQ_MODEL_COMPLEX` o default, validado con una llamada JSON mínima;
+  - `Modelo IA fallback`: primer fallback distinto, validado igual. Si este check falla pero el principal está sano, el runtime sigue funcionando, pero el panel permite detectar que no hay continuidad si el principal cae.
 - Si `GROQ_API_KEY` falta, `condition/ai_analysis` falla en runtime con `groq_api_key_not_configured`. No hay fallback silencioso.
 - El output del nodo guarda además metadatos técnicos (`_ai_provider`, `_ai_model`, `_ai_analysis_mode`, `_ai_usage`) para auditoría y depuración.
 - Al arrancar el backend, `src/app.js` deja un warning explícito en logs si `GROQ_API_KEY` no está definida.
