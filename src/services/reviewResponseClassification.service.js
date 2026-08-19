@@ -108,7 +108,7 @@ async function classifyWithAi(text) {
   const apiKey = clean(process.env.GROQ_API_KEY);
   if (!apiKey) return { intent: 'ambiguous', rating: null, confidence: 0, source: 'ai_unavailable' };
   const baseUrl = (clean(process.env.GROQ_API_BASE_URL) || 'https://api.groq.com/openai/v1').replace(/\/+$/, '');
-  const model = clean(process.env.GROQ_MODEL_FAST) || 'llama-3.1-8b-instant';
+  const model = clean(process.env.GROQ_MODEL_FAST) || 'groq/compound-mini';
   try {
     const response = await axios.post(`${baseUrl}/chat/completions`, {
       model,

@@ -3541,8 +3541,9 @@ El nodo `condition/ai_analysis` quedó operativo en runtime real sobre Groq, con
 
 ### Política de modelos (no configurable por usuario)
 
-- `llama-3.3-70b-versatile`: tareas complejas (razonamiento clínico-operativo, más contexto, extracción amplia).
-- `llama-3.1-8b-instant`: tareas rápidas de soporte/Q&A simple.
+- `groq/compound-mini`: modelo rápido por defecto para clasificación operativa y respuestas cortas en JSON.
+- `groq/compound`: primer fallback del proveedor si el modelo rápido deja de estar disponible.
+- Los modelos legacy `llama-3.3-70b-versatile` y `llama-3.1-8b-instant` no deben usarse como valor por defecto: el 19/08/2026 la API activa de Groq devolvió 404/decommissioned para esos IDs y cortó nodos `condition/ai_analysis` de confirmación de cita.
 - El usuario del editor **no selecciona modelo**. Solo define el `analysis_mode` del nodo:
   - `quick_qa`
   - `complex_reasoning`
@@ -3579,8 +3580,8 @@ En `.env` / `.env.example`:
 
 - `GROQ_API_KEY`
 - `GROQ_API_BASE_URL` (default `https://api.groq.com/openai/v1`)
-- `GROQ_MODEL_COMPLEX` (default `llama-3.3-70b-versatile`)
-- `GROQ_MODEL_FAST` (default `llama-3.1-8b-instant`)
+- `GROQ_MODEL_COMPLEX` (default `groq/compound-mini`)
+- `GROQ_MODEL_FAST` (default `groq/compound-mini`)
 - `GROQ_TIMEOUT_MS` (default `20000`)
 - `GROQ_STT_MODEL` (default `whisper-large-v3-turbo`, para transcripción de audio inbound WhatsApp)
 - `GROQ_STT_TIMEOUT_MS` (default `30000`; si no existe usa `GROQ_TIMEOUT_MS`)

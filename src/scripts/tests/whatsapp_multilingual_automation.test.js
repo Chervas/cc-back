@@ -219,7 +219,7 @@ test('una caída tras la respuesta de Meta se recupera por nombre+idioma sin cre
 });
 
 test('clasificadores deterministas entienden confirmación, cancelación y cambio en tres idiomas', () => {
-  for (const response of ['Sí, confirmo', 'D’acord, ens veiem', 'Yes, I confirm']) {
+  for (const response of ['Sí, confirmo', 'D’acord, ens veiem', 'Yes, I confirm', 'Hola, ok', 'Hola\nSi es correcto', 'Hola si gracias']) {
     const output = buildDeterministicConfirmAppointmentTextOutput({
       last_response: response,
     });
