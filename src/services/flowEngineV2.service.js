@@ -1121,8 +1121,8 @@ function coerceAiOutputByFormat(rawOutput, outputFormat) {
 }
 
 function pickGroqModel({ analysisMode, prompt, inputText, outputFormat }) {
-  const fastModel = cleanString(process.env.GROQ_MODEL_FAST) || 'llama-3.1-8b-instant';
-  const complexModel = cleanString(process.env.GROQ_MODEL_COMPLEX) || 'llama-3.3-70b-versatile';
+  const fastModel = cleanString(process.env.GROQ_MODEL_FAST) || 'groq/compound-mini';
+  const complexModel = cleanString(process.env.GROQ_MODEL_COMPLEX) || 'groq/compound-mini';
 
   if (analysisMode === 'quick_qa') return fastModel;
   if (analysisMode === 'complex_reasoning') return complexModel;
@@ -1162,9 +1162,12 @@ function getGroqModelCandidates(primaryModel) {
     : [];
 
   const defaults = [
+    'groq/compound-mini',
+    'groq/compound',
+    'openai/gpt-oss-20b',
+    'openai/gpt-oss-120b',
+    'qwen/qwen3.6-27b',
     'llama-3.3-70b-versatile',
-    'qwen/qwen3-32b',
-    'meta-llama/llama-4-scout-17b-16e-instruct',
     'llama-3.1-8b-instant',
   ];
 
@@ -1748,13 +1751,19 @@ function buildDeterministicConfirmAppointmentTextOutput(context = {}) {
   const strongPositivePatterns = [
     /\b(confirmo|confirmado|confirmada|confirmadisimo|confirmadisima)\b/,
     /\b(nos vemos|alli estare|ahi estare|asistire|acudire)\b/,
+    /\bsi\s+(es\s+)?(correct[ao]|perfecto|vale|ok|gracias)\b/,
+    /\b(correct[ao])\b/,
     /\b(confirmo|confirmat|confirmada|ens\s+veiem|hi\s+sere|vindre|assistire)\b/,
     /\b(i\s+confirm|confirmed|see\s+you|i\s+ll\s+be\s+there|i\s+will\s+be\s+there|i\s+ll\s+attend)\b/,
   ];
   const hasStrongConfirmation = strongPositivePatterns.some((pattern) => pattern.test(text));
+  const textWithoutGreeting = text.replace(/^(hola|buenas|buenos\s+dias|buen\s+dia|bona\s+tarda|bon\s+dia|hello|hi)\s+/, '');
   const shortPositiveTexts = new Set([
     'si',
     'si confirmo',
+    'si correcto',
+    'si es correcto',
+    'si gracias',
     'confirmo',
     'confirmado',
     'confirmada',
@@ -1784,7 +1793,12 @@ function buildDeterministicConfirmAppointmentTextOutput(context = {}) {
   ]);
   const looksLikeQuestion = /[?¿]/.test(rawResponse);
   const tokenCount = text.split(/\s+/).filter(Boolean).length;
-  const hasShortConfirmation = !looksLikeQuestion && tokenCount <= 4 && shortPositiveTexts.has(text);
+  const strippedTokenCount = textWithoutGreeting.split(/\s+/).filter(Boolean).length;
+  const hasShortConfirmation = !looksLikeQuestion
+    && (
+      (tokenCount <= 4 && shortPositiveTexts.has(text))
+      || (strippedTokenCount <= 4 && shortPositiveTexts.has(textWithoutGreeting))
+    );
 
   if (hasStrongConfirmation || hasShortConfirmation) {
     return {

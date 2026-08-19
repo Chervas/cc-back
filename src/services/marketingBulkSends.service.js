@@ -97,7 +97,7 @@ const WHATSAPP_SESSION_WINDOW_MS = 23 * 60 * 60 * 1000 + 50 * 60 * 1000;
 const REVIEW_REMINDER_DELAY_MS = 24 * 60 * 60 * 1000;
 const REVIEW_NO_RESPONSE_DELAY_MS = 24 * 60 * 60 * 1000;
 const REVIEW_RATING_AI_FALLBACK_ENABLED = String(process.env.REVIEW_RATING_AI_FALLBACK_ENABLED || 'true').trim().toLowerCase() !== 'false';
-const REVIEW_RATING_AI_MODEL = String(process.env.REVIEW_RATING_AI_MODEL || process.env.GROQ_MODEL_FAST || 'llama-3.1-8b-instant').trim();
+const REVIEW_RATING_AI_MODEL = String(process.env.REVIEW_RATING_AI_MODEL || process.env.GROQ_MODEL_FAST || 'groq/compound-mini').trim();
 const REVIEW_RATING_AI_MIN_CONFIDENCE = Math.max(0.5, Math.min(0.99, Number(process.env.REVIEW_RATING_AI_MIN_CONFIDENCE || '0.78') || 0.78));
 const testSendCooldowns = new Map();
 
