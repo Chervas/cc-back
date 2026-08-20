@@ -247,8 +247,10 @@ exports.workerStatus = async (req, res) => {
   try {
     if (!assertGlobalAdmin(req, res)) return;
     const query = req.query || {};
-    const forceGroqHealth = ['1', 'true', 'yes'].includes(String(query.force_groq_health || query.forceGroqHealth || '').toLowerCase());
-    const status = await jobScheduler.getStatus({ forceGroqHealth });
+    const forceAiHealth = ['1', 'true', 'yes'].includes(String(
+      query.force_ai_health || query.forceAiHealth || query.force_groq_health || query.forceGroqHealth || ''
+    ).toLowerCase());
+    const status = await jobScheduler.getStatus({ forceAiHealth });
     res.json(status);
   } catch (error) {
     console.error('❌ Error obteniendo estado del worker:', error);

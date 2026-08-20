@@ -1,7 +1,6 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const axios = require('axios');
 const db = require('../../models');
 const { getIO } = require('./socket.service');
 const { emitNotificationCreated } = require('./notificationsRealtime.service');
@@ -61,6 +60,7 @@ const whatsappConnectionStatusService = require('./whatsappConnectionStatus.serv
 const marketingBulkSendsService = require('./marketingBulkSends.service');
 const marketingOptOutService = require('./marketingOptOut.service');
 const reviewResponseClassification = require('./reviewResponseClassification.service');
+const aiOrchestrator = require('./aiOrchestrator.service');
 const appointmentNotificationCleanup = require('./appointmentNotificationCleanup.service');
 const { recordAppointmentStatusChange } = require('./appointmentActivity.service');
 const businessProfileLocal = require('./businessProfileLocal.service');
@@ -1068,111 +1068,6 @@ function normalizeAiOutputFormat(rawFormat) {
   return out;
 }
 
-function parseAiJsonContent(rawContent) {
-  if (rawContent && typeof rawContent === 'object' && !Array.isArray(rawContent)) {
-    return rawContent;
-  }
-  const content = cleanString(rawContent);
-  if (!content) return null;
-
-  const directCandidate = content
-    .replace(/^```json\s*/i, '')
-    .replace(/^```\s*/i, '')
-    .replace(/\s*```$/i, '')
-    .trim();
-
-  try {
-    return JSON.parse(directCandidate);
-  } catch (_err) {
-    // Try extracting the first JSON object block.
-  }
-
-  const firstBrace = directCandidate.indexOf('{');
-  const lastBrace = directCandidate.lastIndexOf('}');
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    const objectCandidate = directCandidate.slice(firstBrace, lastBrace + 1);
-    try {
-      return JSON.parse(objectCandidate);
-    } catch (_err) {
-      return null;
-    }
-  }
-
-  return null;
-}
-
-function coerceAiOutputByFormat(rawOutput, outputFormat) {
-  const output = {};
-  const source = rawOutput && typeof rawOutput === 'object' ? rawOutput : {};
-  for (const [key, type] of Object.entries(outputFormat || {})) {
-    const value = source[key];
-    if (type === 'number') {
-      const parsed = Number(value);
-      output[key] = Number.isFinite(parsed) ? parsed : 0;
-      continue;
-    }
-    if (type === 'boolean') {
-      output[key] = parseBool(value, false);
-      continue;
-    }
-    output[key] = cleanString(value) || '';
-  }
-  return output;
-}
-
-function pickGroqModel({ analysisMode, prompt, inputText, outputFormat }) {
-  const fastModel = cleanString(process.env.GROQ_MODEL_FAST) || 'groq/compound-mini';
-  const complexModel = cleanString(process.env.GROQ_MODEL_COMPLEX) || 'groq/compound-mini';
-
-  if (analysisMode === 'quick_qa') return fastModel;
-  if (analysisMode === 'complex_reasoning') return complexModel;
-
-  const totalChars = String(prompt || '').length + String(inputText || '').length;
-  const outputFields = Object.keys(outputFormat || {}).length;
-  const complexityKeywords = /cita|appointment|historial|database|base de datos|sql|clasifica|analiza|resume|extrae|diagnost/i;
-  const joined = `${prompt || ''} ${inputText || ''}`;
-  const isComplex = totalChars > 900 || outputFields > 3 || complexityKeywords.test(joined);
-  return isComplex ? complexModel : fastModel;
-}
-
-function isGroqModelUnavailableError(err) {
-  const statusCode = err?.response?.status;
-  const providerMessage = cleanString(
-    err?.response?.data?.error?.message
-    || err?.response?.data?.message
-    || err?.message
-  ).toLowerCase();
-
-  if (!providerMessage) return false;
-  if (![400, 404].includes(Number(statusCode))) return false;
-
-  return (
-    providerMessage.includes('decommissioned')
-    || providerMessage.includes('no longer supported')
-    || providerMessage.includes('model_not_found')
-    || providerMessage.includes('model not found')
-    || providerMessage.includes('does not exist')
-  );
-}
-
-function getGroqModelCandidates(primaryModel) {
-  const fallbackEnv = cleanString(process.env.GROQ_MODEL_FALLBACKS);
-  const fallbackFromEnv = fallbackEnv
-    ? fallbackEnv.split(',').map((item) => cleanString(item)).filter(Boolean)
-    : [];
-
-  const defaults = [
-    'groq/compound-mini',
-    'groq/compound',
-    'qwen/qwen3.6-27b',
-    'llama-3.3-70b-versatile',
-    'llama-3.1-8b-instant',
-  ];
-
-  const deduped = new Set([cleanString(primaryModel), ...fallbackFromEnv, ...defaults].filter(Boolean));
-  return Array.from(deduped);
-}
-
 function buildAiSystemPrompt(outputFormat, outputFields = []) {
   const hasFieldDescriptions = Array.isArray(outputFields) && outputFields.length > 0;
   const fields = hasFieldDescriptions
@@ -1200,128 +1095,6 @@ function buildAiSystemPrompt(outputFormat, outputFields = []) {
     'Campos esperados:',
     fields || '- decision: string',
   ].join('\n');
-}
-
-function buildAiSimulatedOutput(outputFormat, analysisMode, model) {
-  const base = {};
-  for (const [key, type] of Object.entries(outputFormat || {})) {
-    if (type === 'number') {
-      base[key] = 0;
-      continue;
-    }
-    if (type === 'boolean') {
-      base[key] = false;
-      continue;
-    }
-    base[key] = key === 'decision' ? 'simulado' : '';
-  }
-  return {
-    ...base,
-    _ai_provider: 'groq',
-    _ai_model: model,
-    _ai_analysis_mode: analysisMode,
-    _ai_simulated: true,
-  };
-}
-
-async function runGroqAiAnalysis({ prompt, inputText, outputFormat, outputFields, analysisMode, maxTokens }) {
-  const apiKey = cleanString(process.env.GROQ_API_KEY);
-  if (!apiKey) {
-    console.error('[ai_analysis] GROQ_API_KEY ausente en runtime activo', {
-      pid: process.pid,
-      cwd: process.cwd(),
-      port: process.env.PORT || null,
-      runtimeNamespace: process.env.JOB_RUNTIME_NAMESPACE || process.env.RUNTIME_NAMESPACE || null,
-      hasBaseUrl: !!cleanString(process.env.GROQ_API_BASE_URL),
-    });
-    throw new Error('groq_api_key_not_configured');
-  }
-
-  const baseUrl = (cleanString(process.env.GROQ_API_BASE_URL) || 'https://api.groq.com/openai/v1').replace(/\/+$/, '');
-  const timeoutMs = Math.max(1000, Number.parseInt(String(process.env.GROQ_TIMEOUT_MS || '20000'), 10) || 20000);
-  const normalizedMode = normalizeAiAnalysisMode(analysisMode);
-  const normalizedFormat = normalizeAiOutputFormat(outputFormat);
-  const normalizedOutputFields = normalizeOutputFieldEntries(outputFields);
-  const preferredModel = pickGroqModel({
-    analysisMode: normalizedMode,
-    prompt,
-    inputText,
-    outputFormat: normalizedFormat,
-  });
-  const modelCandidates = getGroqModelCandidates(preferredModel);
-
-  const resolvedMaxTokens = Number(maxTokens);
-  const finalMaxTokens = Number.isFinite(resolvedMaxTokens) && resolvedMaxTokens > 0
-    ? Math.min(4096, Math.floor(resolvedMaxTokens))
-    : 700;
-
-  let response = null;
-  let usedModel = preferredModel;
-  let lastErr = null;
-
-  for (const candidateModel of modelCandidates) {
-    try {
-      response = await axios.post(
-        `${baseUrl}/chat/completions`,
-        {
-          model: candidateModel,
-          temperature: 0.1,
-          max_tokens: finalMaxTokens,
-          response_format: { type: 'json_object' },
-          messages: [
-            {
-              role: 'system',
-              content: buildAiSystemPrompt(normalizedFormat, normalizedOutputFields),
-            },
-            {
-              role: 'user',
-              content: `Instrucción:\n${prompt}\n\nTexto a analizar:\n${inputText}`,
-            },
-          ],
-        },
-        {
-          timeout: timeoutMs,
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-          },
-        }
-      );
-      usedModel = candidateModel;
-      lastErr = null;
-      break;
-    } catch (err) {
-      lastErr = err;
-      if (!isGroqModelUnavailableError(err)) {
-        break;
-      }
-    }
-  }
-
-  if (!response) {
-    const statusCode = lastErr?.response?.status;
-    const providerMessage = cleanString(
-      lastErr?.response?.data?.error?.message
-      || lastErr?.response?.data?.message
-      || lastErr?.message
-    ) || 'groq_request_failed';
-    throw new Error(`groq_request_failed:${statusCode || 'network'}:${providerMessage}`);
-  }
-
-  const rawContent = response?.data?.choices?.[0]?.message?.content;
-  const parsedJson = parseAiJsonContent(rawContent);
-  if (!parsedJson || typeof parsedJson !== 'object' || Array.isArray(parsedJson)) {
-    throw new Error('groq_invalid_json_response');
-  }
-
-  const coercedOutput = coerceAiOutputByFormat(parsedJson, normalizedFormat);
-  return {
-    ...coercedOutput,
-    _ai_provider: 'groq',
-    _ai_model: usedModel,
-    _ai_analysis_mode: normalizedMode,
-    _ai_usage: response?.data?.usage || null,
-  };
 }
 
 function normalizeKey(value) {
@@ -5947,7 +5720,7 @@ async function processNode(node, context, runtime = {}) {
           response_rating: result.rating,
           confidence: result.confidence,
           reason: result.reason || '',
-          _ai_provider: result.source === 'ai' ? 'groq' : result.source,
+          _ai_provider: result.source === 'ai' ? (result.provider || 'bedrock') : result.source,
           _ai_model: result.model || null,
         }))
         : presetKey === 'confirm_appointment'
@@ -5971,15 +5744,12 @@ async function processNode(node, context, runtime = {}) {
       const outputFormat = normalizeOutputFieldsToFormat(normalizedOutputFields);
       const outputFormatSimple = normalizeAiOutputFormat(outputFormat);
       const analysisMode = normalizeAiAnalysisMode(resolveTemplateValue(config?.mode, context));
-      const selectedModel = pickGroqModel({
-        analysisMode,
-        prompt: resolvedInstruction,
-        inputText,
-        outputFormat: outputFormatSimple,
-      });
-
       if (simulation) {
-        const simulatedOutput = buildAiSimulatedOutput(outputFormatSimple, analysisMode, selectedModel);
+        const simulatedOutput = aiOrchestrator.buildSimulatedOutput(
+          outputFormatSimple,
+          analysisMode,
+          presetKey || 'automation_v2_analysis',
+        );
         const decision = cleanString(simulatedOutput?.decision).toLowerCase();
         return {
           kind: 'success',
@@ -5992,11 +5762,12 @@ async function processNode(node, context, runtime = {}) {
         };
       }
 
-      const aiOutput = await runGroqAiAnalysis({
+      const aiOutput = await aiOrchestrator.analyzeStructured({
+        useCase: presetKey || 'automation_v2_analysis',
+        systemPrompt: buildAiSystemPrompt(outputFormatSimple, normalizedOutputFields),
         prompt: resolvedInstruction,
         inputText,
-        outputFormat,
-        outputFields: normalizedOutputFields,
+        outputFormat: outputFormatSimple,
         analysisMode,
         maxTokens: resolveTemplateValue(config?.max_tokens, context),
       });

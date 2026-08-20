@@ -18,6 +18,7 @@ const { getUsageStatus } = require('../lib/metaClient');
 const { getGoogleAdsUsageStatus, resumeGoogleAdsUsage } = require('../lib/googleAdsClient');
 const marketingAiVisibilityService = require('../services/marketingAiVisibility.service');
 const apiUsageTelemetryService = require('../services/apiUsageTelemetry.service');
+const aiRuntimeMonitoringService = require('../services/aiRuntimeMonitoring.service');
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
 const { SCHEDULED_JOB_DEFINITIONS } = require('../config/scheduledJobCatalog');
@@ -344,6 +345,16 @@ exports.getApiUsageOverview = async (req, res) => {
   } catch (e) {
     console.error('❌ Error getApiUsageOverview:', e);
     res.status(500).json({ message: 'Error obteniendo telemetría de APIs', error: e.message });
+  }
+};
+
+exports.getAiRuntimeOverview = async (req, res) => {
+  try {
+    const force = ['1', 'true', 'yes'].includes(String(req.query?.force || '').toLowerCase());
+    res.json(await aiRuntimeMonitoringService.getOverview({ force }));
+  } catch (e) {
+    console.error('❌ Error getAiRuntimeOverview:', e);
+    res.status(500).json({ message: 'Error obteniendo monitorización de IA', error: e.message });
   }
 };
 
