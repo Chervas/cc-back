@@ -96,12 +96,14 @@ function testRichGoogleIdentityAndLegacyFallback() {
     leads: 2,
     qualified_leads: 1,
     appointments: 0,
+    attended_appointments: 0,
     crm_conversions: 0
   });
   assert.deepEqual(otherAccountMetrics, {
     leads: 1,
     qualified_leads: 1,
     appointments: 1,
+    attended_appointments: 0,
     crm_conversions: 0
   });
   assert.equal(result.aggregate.clinic_paid_leads, 5);

@@ -1,7 +1,7 @@
 const db = require('../../models');
-const axios = require('axios');
 const jobRequestsService = require('./jobRequests.service');
 const jobExecutor = require('./jobExecutor.service');
+const aiRuntimeMonitoring = require('./aiRuntimeMonitoring.service');
 const { BACKGROUND_INTEGRATION_JOB_TYPES } = require('../config/scheduledJobCatalog');
 
 const CRITICAL_INTERVAL_MS = Number(process.env.JOB_SCHEDULER_CRITICAL_INTERVAL_MS || 5000);
@@ -16,15 +16,6 @@ const RUNTIME_NAMESPACE_ALIASES = typeof jobRequestsService.getRuntimeNamespaceA
   ? jobRequestsService.getRuntimeNamespaceAliases()
   : [];
 const CLAIM_UNSCOPED_JOBS = jobRequestsService.shouldClaimUnscopedJobs();
-const GROQ_HEALTH_CACHE_TTL_MS = Math.max(
-  60 * 1000,
-  Number.parseInt(String(process.env.GROQ_HEALTH_CACHE_TTL_MS || '300000'), 10) || 300000
-);
-const GROQ_HEALTH_TIMEOUT_MS = Math.max(
-  1000,
-  Number.parseInt(String(process.env.GROQ_HEALTH_TIMEOUT_MS || '5000'), 10) || 5000
-);
-
 const cleanString = (value) => {
   const normalized = String(value || '').trim();
   return normalized || null;
@@ -180,13 +171,7 @@ async function getLatestAutomationIncident() {
   };
 }
 
-const groqHealthCache = {
-  expiresAt: 0,
-  value: null,
-  promise: null,
-};
-
-function groqCheck(ok, label, detail, extra = {}) {
+function aiCheck(ok, label, detail, extra = {}) {
   return {
     ok: !!ok,
     label,
@@ -195,151 +180,36 @@ function groqCheck(ok, label, detail, extra = {}) {
   };
 }
 
-function describeProviderError(err) {
-  const statusCode = err?.response?.status;
-  const providerMessage = cleanString(
-    err?.response?.data?.error?.message
-    || err?.response?.data?.message
-    || err?.message
-  ) || 'Error desconocido del proveedor';
-
-  const safeMessage = providerMessage
-    .replace(/Bearer\s+[A-Za-z0-9._-]+/g, 'Bearer ***')
-    .slice(0, 220);
-  return statusCode ? `${statusCode}: ${safeMessage}` : safeMessage;
-}
-
-function getGroqHealthModels() {
-  const primary = cleanString(process.env.GROQ_MODEL_FAST)
-    || cleanString(process.env.GROQ_MODEL_COMPLEX)
-    || 'groq/compound-mini';
-  const configuredFallbacks = (cleanString(process.env.GROQ_MODEL_FALLBACKS) || '')
-    .split(',')
-    .map((item) => cleanString(item))
-    .filter(Boolean);
-  const defaults = ['groq/compound', 'groq/compound-mini'];
-  const fallback = [...configuredFallbacks, ...defaults]
-    .find((model) => model && model !== primary) || null;
-  return { primary, fallback };
-}
-
-async function checkGroqModel({ apiKey, baseUrl, model, label }) {
-  if (!model) {
-    return groqCheck(false, label, 'No hay modelo fallback distinto configurado.');
-  }
-
-  try {
-    const response = await axios.post(
-      `${baseUrl}/chat/completions`,
-      {
-        model,
-        temperature: 0,
-        max_tokens: 40,
-        response_format: { type: 'json_object' },
-        messages: [
-          {
-            role: 'system',
-            content: 'Devuelve solo JSON valido. Sin markdown ni explicaciones.',
-          },
-          {
-            role: 'user',
-            content: 'Devuelve exactamente {"ok":true}',
-          },
-        ],
-      },
-      {
-        timeout: GROQ_HEALTH_TIMEOUT_MS,
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-    const content = cleanString(response?.data?.choices?.[0]?.message?.content) || '';
-    let parsed = null;
-    try {
-      parsed = JSON.parse(content);
-    } catch (_err) {
-      parsed = null;
-    }
-    const ok = parsed?.ok === true;
-    return groqCheck(
-      ok,
-      label,
-      ok
-        ? `${model}: responde JSON correctamente.`
-        : `${model}: responde, pero no cumple el contrato JSON del nodo IA.`,
-      { model, checkedAt: new Date().toISOString() }
-    );
-  } catch (err) {
-    return groqCheck(
-      false,
-      label,
-      `${model}: no operativo (${describeProviderError(err)}).`,
-      { model, checkedAt: new Date().toISOString() }
-    );
-  }
-}
-
-async function loadGroqOperationalChecks() {
-  const now = Date.now();
-  if (groqHealthCache.value && groqHealthCache.expiresAt > now) {
-    return groqHealthCache.value;
-  }
-  if (groqHealthCache.promise) {
-    return groqHealthCache.promise;
-  }
-
-  groqHealthCache.promise = (async () => {
-    const apiKey = cleanString(process.env.GROQ_API_KEY);
-    const baseUrl = (cleanString(process.env.GROQ_API_BASE_URL) || 'https://api.groq.com/openai/v1').replace(/\/+$/, '');
-    const { primary, fallback } = getGroqHealthModels();
-    const checkedAt = new Date().toISOString();
-
-    if (!apiKey) {
-      return {
-        groqApiKey: groqCheck(false, 'GROQ_API_KEY', 'Falta en el proceso activo. Los nodos IA fallarán hasta reiniciar con la clave correcta.', { checkedAt }),
-        groqPrimaryModel: groqCheck(false, 'Modelo IA principal', `${primary}: no se puede comprobar sin clave Groq.`, { model: primary, checkedAt }),
-        groqFallbackModel: groqCheck(false, 'Modelo IA fallback', fallback ? `${fallback}: no se puede comprobar sin clave Groq.` : 'No hay modelo fallback configurado.', { model: fallback, checkedAt }),
-      };
-    }
-
-    let apiKeyCheck;
-    try {
-      await axios.get(`${baseUrl}/models`, {
-        timeout: GROQ_HEALTH_TIMEOUT_MS,
-        headers: { Authorization: `Bearer ${apiKey}` },
-      });
-      apiKeyCheck = groqCheck(true, 'GROQ_API_KEY', 'Clave presente y autenticada contra Groq.', { checkedAt });
-    } catch (err) {
-      apiKeyCheck = groqCheck(false, 'GROQ_API_KEY', `Clave presente, pero Groq no la valida (${describeProviderError(err)}).`, { checkedAt });
-      return {
-        groqApiKey: apiKeyCheck,
-        groqPrimaryModel: groqCheck(false, 'Modelo IA principal', `${primary}: no comprobado porque la clave no valida.`, { model: primary, checkedAt }),
-        groqFallbackModel: groqCheck(false, 'Modelo IA fallback', fallback ? `${fallback}: no comprobado porque la clave no valida.` : 'No hay modelo fallback configurado.', { model: fallback, checkedAt }),
-      };
-    }
-
-    const [primaryCheck, fallbackCheck] = await Promise.all([
-      checkGroqModel({ apiKey, baseUrl, model: primary, label: 'Modelo IA principal' }),
-      checkGroqModel({ apiKey, baseUrl, model: fallback, label: 'Modelo IA fallback' }),
-    ]);
-
-    return {
-      groqApiKey: apiKeyCheck,
-      groqPrimaryModel: primaryCheck,
-      groqFallbackModel: fallbackCheck,
-    };
-  })();
-
-  try {
-    const value = await groqHealthCache.promise;
-    groqHealthCache.value = value;
-    groqHealthCache.expiresAt = Date.now() + GROQ_HEALTH_CACHE_TTL_MS;
-    return value;
-  } finally {
-    groqHealthCache.promise = null;
-  }
+async function loadAiOperationalChecks({ force = false } = {}) {
+  const overview = await aiRuntimeMonitoring.getOverview({ force });
+  const find = (key) => overview.models.find((item) => item.key === key);
+  const fast = find('bedrock_fast');
+  const fallback = find('bedrock_fallback');
+  const audio = find('groq_audio');
+  return {
+    bedrockRuntime: aiCheck(
+      fast?.configured && fast?.health?.ok,
+      'Bedrock para texto clínico',
+      fast?.configured
+        ? `${fast.model}: ${fast.health?.detail || 'sin diagnóstico'}`
+        : 'Bedrock está desactivado en este runtime.',
+      { model: fast?.model || null, checkedAt: fast?.health?.checked_at || overview.checked_at },
+    ),
+    bedrockFallbackModel: aiCheck(
+      fallback?.configured && fallback?.health?.ok,
+      'Fallback de texto clínico',
+      fallback?.configured
+        ? `${fallback.model}: ${fallback.health?.detail || 'sin diagnóstico'}`
+        : 'Fallback Bedrock no activo en este runtime.',
+      { model: fallback?.model || null, checkedAt: fallback?.health?.checked_at || overview.checked_at },
+    ),
+    groqAudioModel: aiCheck(
+      audio?.configured && audio?.health?.ok,
+      'Transcripción de audio',
+      `${audio?.model || 'sin modelo'}: ${audio?.health?.detail || 'sin diagnóstico'}`,
+      { model: audio?.model || null, checkedAt: audio?.health?.checked_at || overview.checked_at },
+    ),
+  };
 }
 
 function hasRetryAttemptRemaining(job) {
@@ -757,12 +627,14 @@ function setExternalDispatcher(handler) {
   externalDispatcher = handler;
 }
 
-async function getStatus() {
+async function getStatus(options = {}) {
   const latestAutomationIncident = await getLatestAutomationIncident().catch(() => null);
-  const groqOperationalChecks = await loadGroqOperationalChecks().catch((err) => ({
-    groqApiKey: groqCheck(false, 'GROQ_API_KEY', `No se pudo comprobar Groq (${describeProviderError(err)}).`),
-    groqPrimaryModel: groqCheck(false, 'Modelo IA principal', 'No se pudo comprobar el modelo principal.'),
-    groqFallbackModel: groqCheck(false, 'Modelo IA fallback', 'No se pudo comprobar el modelo fallback.'),
+  const aiOperationalChecks = await loadAiOperationalChecks({
+    force: Boolean(options.forceAiHealth || options.forceGroqHealth),
+  }).catch((err) => ({
+    bedrockRuntime: aiCheck(false, 'Bedrock para texto clínico', `No se pudo comprobar Bedrock (${cleanString(err?.code || err?.name || err?.message) || 'error desconocido'}).`),
+    bedrockFallbackModel: aiCheck(false, 'Fallback de texto clínico', 'No se pudo comprobar el modelo fallback.'),
+    groqAudioModel: aiCheck(false, 'Transcripción de audio', 'No se pudo comprobar el modelo de audio.'),
   }));
   return {
     running: workerState.running,
@@ -790,7 +662,7 @@ async function getStatus() {
     runtimeInfo: CURRENT_RUNTIME_INFO,
     latestAutomationIncident,
     systemChecks: {
-      ...groqOperationalChecks,
+      ...aiOperationalChecks,
       runtimeNamespace: {
         ok: !!CURRENT_RUNTIME_NAMESPACE,
         label: 'Aislamiento de cola',

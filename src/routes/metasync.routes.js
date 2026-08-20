@@ -83,6 +83,8 @@ router.get('/jobs/next-executions', metaJobsController.getNextExecutions);
 router.get('/jobs/usage/meta', metaJobsController.getMetaUsageStatus);
 router.get('/jobs/usage/google-ads', metaJobsController.getGoogleUsageStatus);
 router.get('/jobs/usage/ai-visibility', metaJobsController.getAiVisibilityUsageStatus);
+router.get('/jobs/usage/overview', metaJobsController.getApiUsageOverview);
+router.get('/jobs/usage/ai-runtime', metaJobsController.getAiRuntimeOverview);
 router.post('/jobs/usage/google-ads/resume', metaJobsController.resumeGoogleUsage);
 router.get('/jobs/sync-logs/:id/tail', metaJobsController.tailJobLog);
 router.get('/metrics/:clinicaId', metaSyncController.getMetricsByClinica);

@@ -1,6 +1,6 @@
 'use strict';
 
-const axios = require('axios');
+const aiOrchestrator = require('./aiOrchestrator.service');
 
 const ALLOWED_INTENTS = new Set([
   'rating',
@@ -87,72 +87,56 @@ function classifyDeterministically(text, explicitRating = null) {
   return { intent: 'ambiguous', rating: null, confidence: 0, source: 'rule_none' };
 }
 
-function parseJson(value) {
-  const raw = clean(value);
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw);
-  } catch (_) {
-    const start = raw.indexOf('{');
-    const end = raw.lastIndexOf('}');
-    if (start < 0 || end <= start) return null;
-    try {
-      return JSON.parse(raw.slice(start, end + 1));
-    } catch (_ignored) {
-      return null;
-    }
-  }
-}
-
 async function classifyWithAi(text) {
-  const apiKey = clean(process.env.GROQ_API_KEY);
-  if (!apiKey) return { intent: 'ambiguous', rating: null, confidence: 0, source: 'ai_unavailable' };
-  const baseUrl = (clean(process.env.GROQ_API_BASE_URL) || 'https://api.groq.com/openai/v1').replace(/\/+$/, '');
-  const model = clean(process.env.GROQ_MODEL_FAST) || 'groq/compound-mini';
   try {
-    const response = await axios.post(`${baseUrl}/chat/completions`, {
-      model,
-      temperature: 0,
-      max_tokens: 180,
-      response_format: { type: 'json_object' },
-      messages: [
-        {
-          role: 'system',
-          content: [
-            'Clasifica una respuesta a una solicitud de reseña clínica.',
-            'Devuelve solo JSON con intent, rating, confidence y reason.',
-            'intent solo puede ser rating, marketing_opt_out, wrong_recipient, review_refusal o ambiguous.',
-            'rating es un entero 1-5 solo si el paciente expresa una valoración inequívoca.',
-            'marketing_opt_out significa que no quiere más comunicaciones comerciales.',
-            'wrong_recipient significa número erróneo, nuevo titular o que no es el paciente.',
-            'review_refusal rechaza esta reseña, sin pedir necesariamente la baja general.',
-            'Usa ambiguous si no hay certeza suficiente.',
-          ].join(' '),
-        },
-        { role: 'user', content: clean(text).slice(0, 1200) },
-      ],
-    }, {
-      timeout: Math.max(1000, Number(process.env.GROQ_TIMEOUT_MS || 12000)),
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    const result = await aiOrchestrator.analyzeStructured({
+      useCase: 'review_response_classification',
+      analysisMode: 'quick_qa',
+      systemPrompt: [
+        'Clasifica una respuesta a una solicitud de reseña clínica.',
+        'intent solo puede ser rating, marketing_opt_out, wrong_recipient, review_refusal o ambiguous.',
+        'rating es un entero 1-5 solo si el paciente expresa una valoración inequívoca.',
+        'marketing_opt_out significa que no quiere más comunicaciones comerciales.',
+        'wrong_recipient significa número erróneo, nuevo titular o que no es el paciente.',
+        'review_refusal rechaza esta reseña, sin pedir necesariamente la baja general.',
+        'Usa ambiguous si no hay certeza suficiente.',
+      ].join(' '),
+      prompt: 'Clasifica el texto sin inventar contexto ni usar datos externos.',
+      inputText: clean(text).slice(0, 1200),
+      outputFormat: {
+        intent: 'string',
+        rating: 'number',
+        confidence: 'number',
+        reason: 'string',
+      },
+      maxTokens: 180,
     });
-    const parsed = parseJson(response?.data?.choices?.[0]?.message?.content) || {};
-    const intent = ALLOWED_INTENTS.has(clean(parsed.intent)) ? clean(parsed.intent) : 'ambiguous';
-    const rating = Number(parsed.rating || 0);
-    const confidence = Math.max(0, Math.min(1, Number(parsed.confidence || 0)));
+    const intent = ALLOWED_INTENTS.has(clean(result.intent)) ? clean(result.intent) : 'ambiguous';
+    const rating = Number(result.rating || 0);
+    const confidence = Math.max(0, Math.min(1, Number(result.confidence || 0)));
     if (confidence < 0.78) {
-      return { intent: 'ambiguous', rating: null, confidence, reason: clean(parsed.reason), source: 'ai' };
+      return {
+        intent: 'ambiguous',
+        rating: null,
+        confidence,
+        reason: clean(result.reason),
+        source: 'ai',
+        provider: result._ai_provider,
+        model: result._ai_model,
+      };
     }
     return {
       intent,
       rating: intent === 'rating' && rating >= 1 && rating <= 5 ? rating : null,
       confidence,
-      reason: clean(parsed.reason),
+      reason: clean(result.reason),
       source: 'ai',
-      model: clean(response?.data?.model) || model,
+      provider: result._ai_provider,
+      model: result._ai_model,
     };
   } catch (error) {
     console.warn('[review-response-classification] AI classification failed', {
-      error: error?.response?.data?.error?.message || error?.message || error,
+      error: error?.code || error?.name || error?.message || error,
     });
     return { intent: 'ambiguous', rating: null, confidence: 0, source: 'ai_error' };
   }

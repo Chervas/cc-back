@@ -576,8 +576,18 @@ const normalizeRowPayload = (row, mapping, config, campaignIndex, options = {}) 
       nombre: config.campana_nombre || null,
     }
     : null;
-  const resolvedCampaign = selectedCampaign || null;
-  const effectiveSourceDetail = resolvedCampaign?.nombre || sourceMeta.source_detail || null;
+  const externalCampaign = config.external_campaign?.campaign_id
+    ? {
+      id: null,
+      nombre: config.external_campaign.name || config.external_campaign.campaign_id,
+      external_campaign_id: config.external_campaign.campaign_id,
+    }
+    : null;
+  const resolvedCampaign = selectedCampaign || externalCampaign || null;
+  const effectiveSourceDetail = selectedCampaign?.nombre
+    || externalCampaign?.external_campaign_id
+    || sourceMeta.source_detail
+    || null;
 
   const noteLines = [];
   if (sourceMeta.source_detail === 'reactivacion_pacientes') {
@@ -621,6 +631,7 @@ const normalizeRowPayload = (row, mapping, config, campaignIndex, options = {}) 
       source: sourceMeta.source,
       source_detail: effectiveSourceDetail || '—',
       campaign_name: resolvedCampaign?.nombre || null,
+      campaign_reference: externalCampaign?.external_campaign_id || null,
       created_at: createdAt ? createdAt.toISOString() : null,
       cita: null,
     },
@@ -862,6 +873,31 @@ const validateImportConfig = async (input = {}) => {
   }
 
   if ((source === 'google_ads' || source === 'meta_ads') && !selectedCampaign) {
+    const externalCampaignId = cleanString(input.external_campaign_id);
+    const externalCampaignProvider = cleanString(input.external_campaign_provider) || source;
+    if (
+      externalCampaignId
+      && (externalCampaignProvider === 'google_ads' || externalCampaignProvider === 'meta_ads')
+      && externalCampaignProvider === source
+    ) {
+      return {
+        clinic_id: clinicId,
+        clinic_name: clinic.nombre_clinica || `Clínica ${clinicId}`,
+        group_id: groupId,
+        group_name: group?.nombre_grupo_clinicas || null,
+        source,
+        source_detail: externalCampaignId,
+        campana_id: null,
+        campana_nombre: null,
+        external_campaign: {
+          provider: externalCampaignProvider,
+          account_id: cleanString(input.external_account_id),
+          campaign_id: externalCampaignId,
+          name: cleanString(input.external_campaign_name) || externalCampaignId,
+        },
+      };
+    }
+
     const err = new Error('Debes elegir una campaña concreta para importaciones de Google Ads o Meta Ads.');
     err.status = 400;
     throw err;
@@ -876,6 +912,7 @@ const validateImportConfig = async (input = {}) => {
     source_detail: cleanString(input.source_detail),
     campana_id: selectedCampaign?.id || null,
     campana_nombre: selectedCampaign?.nombre || null,
+    external_campaign: null,
   };
 };
 

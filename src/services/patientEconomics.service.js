@@ -1137,6 +1137,7 @@ async function activateVouchers({ budget, rule, actorId, transaction }) {
 async function transitionBudget({ publicId, actorId, action, payload = {} }) {
   const transitions = {
     present: { from: ['draft'], to: 'presented', event: 'presented' },
+    present_again: { from: ['presented'], to: 'presented', event: 'presented' },
     accept: { from: ['presented'], to: 'accepted', event: 'accepted' },
     accept_partial: { from: ['presented'], to: 'partially_accepted', event: 'partially_accepted' },
     reject: { from: ['presented'], to: 'rejected', event: 'rejected' },
@@ -1159,6 +1160,22 @@ async function transitionBudget({ publicId, actorId, action, payload = {} }) {
     let acceptedAmount = 0;
     let acceptedLineKeys = [];
     let acceptance = {};
+    let presentation = {};
+    if (transition.to === 'presented') {
+      presentation = {
+        presentation_channel: cleanString(
+          payload.presentation_channel || payload.send_channel,
+          40,
+        ).toLowerCase() || null,
+        presentation_recipient: cleanString(
+          payload.presentation_recipient || payload.recipient,
+          190,
+        ) || null,
+        presentation_delivery_status: cleanString(payload.presentation_delivery_status, 40).toLowerCase() || null,
+        signature_request_public_id: cleanString(payload.signature_request_public_id, 36) || null,
+        provider_message_id: cleanString(payload.provider_message_id, 255) || null,
+      };
+    }
     if (transition.to === 'accepted') {
       acceptedAmount = numberValue(totals.total);
       acceptedLineKeys = parseJson(version.lines, []).map((line) => line.key);
@@ -1287,7 +1304,7 @@ async function transitionBudget({ publicId, actorId, action, payload = {} }) {
     const now = new Date();
     await budget.update({
       status: transition.to,
-      presented_at: transition.to === 'presented' ? now : budget.presented_at,
+      presented_at: transition.to === 'presented' ? (budget.presented_at || now) : budget.presented_at,
       responded_at: ['accepted', 'partially_accepted', 'rejected'].includes(transition.to) ? now : budget.responded_at,
       accepted_amount: acceptedAmount,
       updated_by: actorId,
@@ -1302,6 +1319,7 @@ async function transitionBudget({ publicId, actorId, action, payload = {} }) {
         reason: cleanString(payload.reason, 500) || null,
         accepted_line_keys: acceptedLineKeys,
         accepted_amount: acceptedAmount,
+        ...presentation,
         ...acceptance,
       },
       actor_id: actorId,
@@ -1633,8 +1651,12 @@ async function sendBudgetSignatureWhatsapp({ request, patient, clinic, publicUrl
 async function createBudgetSignatureRequest({ publicId, actorId, payload = {} }) {
   const ttlHours = Number.parseInt(String(payload.ttl_hours ?? payload.validez_horas ?? 168), 10);
   const { budget, version, patient, clinic } = await loadBudgetSignatureContext(publicId);
-  if (budget.status !== 'presented') {
-    throw domainError(409, 'budget_signature_requires_presented_budget', 'Solo se puede enviar a firma un presupuesto presentado.');
+  if (!['draft', 'presented'].includes(budget.status)) {
+    throw domainError(
+      409,
+      'budget_signature_requires_presentable_budget',
+      'Solo se puede presentar un presupuesto guardado o ya presentado.',
+    );
   }
   const channel = cleanString(payload.target || payload.channel || 'patient_whatsapp', 40).toLowerCase();
   const normalizedChannel = channel === 'patient_whatsapp'
@@ -1681,7 +1703,7 @@ async function createBudgetSignatureRequest({ publicId, actorId, payload = {} })
     budget: {
       public_id: budget.public_id,
       number: budget.number,
-      status: budget.status,
+      status: 'presented',
       valid_until: budget.valid_until,
     },
     version: serializeVersion(version),
@@ -1759,16 +1781,9 @@ async function createBudgetSignatureRequest({ publicId, actorId, payload = {} })
   });
 
   if (normalizedChannel === 'whatsapp') {
+    let result;
     try {
-      const result = await sendBudgetSignatureWhatsapp({ request, patient, clinic, publicUrl: request.public_url });
-      await request.update({ status: 'sent', sent_at: new Date(), delivery_result: result });
-      await recordBudgetSignatureEvent(request, 'signature_request_sent', {
-        metadata: {
-          delivery_mode: result.delivery_mode || 'template',
-          template_name: result.template_name || null,
-          provider_message_id: result.provider_message_id || null,
-        },
-      });
+      result = await sendBudgetSignatureWhatsapp({ request, patient, clinic, publicUrl: request.public_url });
     } catch (error) {
       await request.update({
         status: 'failed',
@@ -1786,6 +1801,38 @@ async function createBudgetSignatureRequest({ publicId, actorId, payload = {} })
       });
       throw error;
     }
+    await request.update({ status: 'sent', sent_at: new Date(), delivery_result: result });
+    await recordBudgetSignatureEvent(request, 'signature_request_sent', {
+      metadata: {
+        delivery_mode: result.delivery_mode || 'template',
+        template_name: result.template_name || null,
+        provider_message_id: result.provider_message_id || null,
+      },
+    });
+    await transitionBudget({
+      publicId: budget.public_id,
+      actorId,
+      action: budget.status === 'presented' ? 'present_again' : 'present',
+      payload: {
+        presentation_channel: 'whatsapp',
+        presentation_recipient: request.recipient,
+        presentation_delivery_status: 'accepted',
+        signature_request_public_id: request.public_id,
+        provider_message_id: result.provider_message_id || null,
+      },
+    });
+  } else if (normalizedChannel === 'tablet') {
+    await transitionBudget({
+      publicId: budget.public_id,
+      actorId,
+      action: budget.status === 'presented' ? 'present_again' : 'present',
+      payload: {
+        presentation_channel: 'tablet',
+        presentation_recipient: request.recipient,
+        presentation_delivery_status: 'available',
+        signature_request_public_id: request.public_id,
+      },
+    });
   }
 
   return serializeBudgetSignatureRequest(await EconomicBudgetSignatureRequest.findByPk(request.id), { includeInternal: true });

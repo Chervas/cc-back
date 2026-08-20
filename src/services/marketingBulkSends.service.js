@@ -1,6 +1,5 @@
 'use strict';
 
-const axios = require('axios');
 const crypto = require('crypto');
 const { Op, QueryTypes, Sequelize } = require('sequelize');
 const db = require('../../models');
@@ -96,9 +95,6 @@ const LINK_TRACKING_DEFAULT_DOMAIN = process.env.MARKETING_LINK_TRACKING_DEFAULT
 const WHATSAPP_SESSION_WINDOW_MS = 23 * 60 * 60 * 1000 + 50 * 60 * 1000;
 const REVIEW_REMINDER_DELAY_MS = 24 * 60 * 60 * 1000;
 const REVIEW_NO_RESPONSE_DELAY_MS = 24 * 60 * 60 * 1000;
-const REVIEW_RATING_AI_FALLBACK_ENABLED = String(process.env.REVIEW_RATING_AI_FALLBACK_ENABLED || 'true').trim().toLowerCase() !== 'false';
-const REVIEW_RATING_AI_MODEL = String(process.env.REVIEW_RATING_AI_MODEL || process.env.GROQ_MODEL_FAST || 'groq/compound-mini').trim();
-const REVIEW_RATING_AI_MIN_CONFIDENCE = Math.max(0.5, Math.min(0.99, Number(process.env.REVIEW_RATING_AI_MIN_CONFIDENCE || '0.78') || 0.78));
 const testSendCooldowns = new Map();
 
 function sleep(ms) {
@@ -2317,115 +2313,6 @@ function looksLikePotentialReviewRatingResponse(message) {
   if (/(?:os\s+)?(?:doy|damos|pongo|ponemos|valoro|valoramos|puntuo|puntúo|califico|calificamos)\s+(?:con\s+|un\s+|una\s+|de\s+)?[1-5]/i.test(text)) return true;
   if (/(?:mi\s+nota\s+es|nota|valoraci[oó]n|experiencia)\s+(?:de\s+|un\s+|una\s+)?[1-5]/i.test(text)) return true;
   return false;
-}
-
-function parseAiJsonObject(value) {
-  const raw = normalizeText(value || '');
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
-  } catch {
-    const first = raw.indexOf('{');
-    const last = raw.lastIndexOf('}');
-    if (first >= 0 && last > first) {
-      try {
-        const parsed = JSON.parse(raw.slice(first, last + 1));
-        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
-      } catch {
-        return null;
-      }
-    }
-  }
-  return null;
-}
-
-async function inferReviewRatingDetailsWithAi(message) {
-  if (!REVIEW_RATING_AI_FALLBACK_ENABLED) {
-    return { rating: null, reason: 'ai_disabled', source: 'ai_disabled' };
-  }
-
-  const text = getReviewRatingCandidateTextsFromInboundMessage(message)[0] || '';
-  if (!text || text.length > 800) {
-    return { rating: null, reason: 'text_not_suitable', source: 'ai_skipped' };
-  }
-
-  const apiKey = normalizeText(process.env.GROQ_API_KEY || '');
-  if (!apiKey) {
-    return { rating: null, reason: 'groq_not_configured', source: 'ai_not_configured' };
-  }
-
-  const baseUrl = (normalizeText(process.env.GROQ_API_BASE_URL || '') || 'https://api.groq.com/openai/v1').replace(/\/+$/, '');
-  const timeoutMs = Math.max(1000, Number.parseInt(String(process.env.GROQ_TIMEOUT_MS || '12000'), 10) || 12000);
-
-  try {
-    const response = await axios.post(
-      `${baseUrl}/chat/completions`,
-      {
-        model: REVIEW_RATING_AI_MODEL,
-        temperature: 0,
-        max_tokens: 120,
-        response_format: { type: 'json_object' },
-        messages: [
-          {
-            role: 'system',
-            content: [
-              'Eres un clasificador estricto de respuestas a una solicitud de reseña clínica.',
-              'Devuelve solo JSON con rating, confidence y reason.',
-              'rating debe ser un entero de 1 a 5 si el paciente expresa claramente una valoración en esa escala; si no, devuelve null.',
-              'No uses datos externos ni infieras una valoración por sentimiento general sin número o escala clara.',
-            ].join(' '),
-          },
-          {
-            role: 'user',
-            content: `Texto del paciente, sin nombre ni teléfono:\n${text}`,
-          },
-        ],
-      },
-      {
-        timeout: timeoutMs,
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-    const parsed = parseAiJsonObject(response?.data?.choices?.[0]?.message?.content);
-    const rating = Number(parsed?.rating || 0);
-    const confidence = Number(parsed?.confidence || 0);
-    if (Number.isInteger(rating) && rating >= 1 && rating <= 5 && confidence >= REVIEW_RATING_AI_MIN_CONFIDENCE) {
-      return {
-        rating,
-        reason: '',
-        source_text: text,
-        source: 'ai_groq',
-        confidence,
-        model: normalizeText(response?.data?.model || REVIEW_RATING_AI_MODEL),
-      };
-    }
-    return {
-      rating: null,
-      reason: 'ai_low_confidence',
-      source_text: text,
-      source: 'ai_groq',
-      confidence: Number.isFinite(confidence) ? confidence : null,
-      model: normalizeText(response?.data?.model || REVIEW_RATING_AI_MODEL),
-    };
-  } catch (error) {
-    console.warn('[marketing-bulk-sends] No se pudo clasificar la respuesta de reseña con IA', {
-      message_id: message?.id || null,
-      error: error?.response?.data?.error?.message || error?.message || error,
-    });
-    return { rating: null, reason: 'ai_error', source: 'ai_error' };
-  }
-}
-
-async function resolveReviewRatingDetailsFromInboundMessage(message, { allowAiFallback = false } = {}) {
-  const deterministic = extractReviewRatingDetailsFromInboundMessage(message);
-  if (deterministic.rating || !allowAiFallback) {
-    return deterministic;
-  }
-  return inferReviewRatingDetailsWithAi(message);
 }
 
 function buildReviewRatingInferencePayload(details = {}) {

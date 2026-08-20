@@ -706,6 +706,9 @@ generación IA, mutación gestionada o limpieza.
 - El request Express solo crea `JobRequest type=marketing_ai_visibility_run`, prioridad baja, máximo dos intentos y namespace del runtime. Se deduplica por `clinicId + queryHash`; `scheduledJobCatalog` lo clasifica como integración dirigida y `jobExecutor` ejecuta `marketingAiVisibilityService.executeRun()`.
 - OpenAI usa `POST /v1/responses`, modelo configurable (por defecto `gpt-5.6`), herramienta `web_search`, `tool_choice=required`, fuentes completas e `store=false`. Gemini usa `POST /v1beta/interactions`, modelo configurable (por defecto `gemini-3.5-flash`), herramienta `google_search` y `store=false`.
 - `GET /api/metasync/jobs/usage/ai-visibility` expone en Jobs Monitoring el estado de ChatGPT/Gemini sin llamar a proveedores ni consumir cuota: lee configuración y último run persistido. Los `429 insufficient_quota` se muestran como `quota_limited`, los `429 too_many_requests` como `rate_limited`, y solo saldo/facturación explícitos quedan como `billing_required`.
+- `GET /api/metasync/jobs/usage/overview` agrega el consumo de APIs externas para Jobs Monitoring sin llamar a proveedores: lee `ApiUsageCounters`, `getUsageStatus()` de Meta, `getGoogleAdsUsageStatus()` y el estado persistido de IA. El resumen distingue `healthy`, `warning`, `error` y `unknown`, devuelve proveedores normalizados (`meta_ads`, `google_ads`, `openai`, `gemini`, `whatsapp_cloud`), fuentes recientes y errores saneados sin secretos. Meta se etiqueta como "Últimas señales Meta": son cabeceras/estado persistidos desde llamadas reales ya ejecutadas; el panel no hace una llamada Graph adicional solo para refrescarlas porque eso tambien consume cuota y puede disparar limites.
+- `src/services/apiUsageTelemetry.service.js` es el punto comun para registrar eventos de API. El cliente Meta (`metaClient`) y el OAuth de Meta registran llamadas interactivas y de jobs en el mismo contador `meta_ads`; por eso un `(#4) Application request limit reached` de OAuth aparece en Jobs Monitoring aunque no proceda de `JobRequest`.
+- `GET /oauth/meta/connection-status` no puede consultar Graph `debug_token` en cada render o refresco. Debe reutilizar la validación por conexión durante `META_DEBUG_TOKEN_STATUS_CACHE_TTL_MS` (5 min por defecto), deduplicar llamadas concurrentes y respetar `ApiUsageCounters.pause_until` cuando Meta haya devuelto `(#4) Application request limit reached`. Mientras la pausa esté vigente y la conexión local no haya caducado, devuelve `connected=true` con `validationDeferred=true` y no golpea Graph; así el frontend no marca la cuenta como desconectada por una limitación temporal del proveedor.
 - Los parsers conservan texto, consultas, `url_citation`, fuentes y el `search_suggestions` de Gemini. Solo se envía contexto público de la clínica; la validación rechaza emails y teléfonos en la consulta. No se imprimen claves, prompts ni respuestas completas en logs.
 - Control de coste y retención: resultados/textos/fuentes/citas se reutilizan siete días, los runs activos se reutilizan 15 min y se admiten cuatro consultas distintas por clínica/7 días, con un único intento por consulta/7 días. El cupo global solo cuenta los hashes del catálogo construido con la categoría/localidad actuales, de modo que corregir esos datos permite medir el nuevo contexto sin que lo bloquee el anterior; el límite individual por hash permanece. `completed`, `completed_with_errors` y los `failed` que sí tienen `job_request_id` o `started_at` bloquean por igual una repetición anticipada. Si falla el encolado antes de crear job/proveedor, se destruye el run; las filas legacy `failed` sin `job_request_id` ni `started_at` tampoco se reutilizan, muestran ni cuentan. Retención local 30 días (nunca inferior al refresco) y timeout por proveedor 90 s. `system_data_cleanup` elimina filas vencidas. Los proveedores se ejecutan en paralelo y degradan por separado. Variables vigentes: `AI_VISIBILITY_REFRESH_INTERVAL_DAYS`, `AI_VISIBILITY_MAX_RUNS_PER_CLINIC_7D`, `AI_VISIBILITY_RETENTION_DAYS` y `AI_VISIBILITY_PROVIDER_TIMEOUT_MS`; se retiran los controles legacy de 24 h. Runbook: `docs/marketing-ai-visibility.md`.
 - Secretos únicamente en entorno backend: `OPENAI_API_KEY` y `GEMINI_API_KEY`. También se admiten `OPENAI_PROJECT_ID`, `OPENAI_ORGANIZATION_ID`, `GOOGLE_CLOUD_PROJECT` y `GOOGLE_CLOUD_PROJECT_NUMBER`. Ninguno se expone al frontend ni se versiona.
@@ -1165,6 +1168,10 @@ Antes de activar coexistencia sobre un numero real:
 ### WhatsApp: diagnostico y cumplimiento
 
 - `POST /api/whatsapp/compliance/admin/accounts/:assetId/check` sincroniza el telefono con Meta, comprueba acceso, estado, canal, nombre aprobado, capacidad y calidad, y calcula estados de entrega sobre el total real de los ultimos siete dias.
+- En UI, "Sin revision manual" significa que todavia no se ha lanzado este
+  endpoint para ese activo desde Jobs Monitoring. No invalida la calidad,
+  restricciones o estado operativo recibidos por webhooks/sincronizaciones de
+  Meta.
 - La consulta completa contabiliza `pending`, `sent`, `delivered`, `read` y `failed` en base de datos. El desglose de origen puede usar una muestra reciente, pero el contrato indica siempre el tamano de esa muestra; no se presenta el limite tecnico como total real.
 - Cada trabajo saliente persiste `phoneNumberId`, `wabaId` y el activo remitente antes de llamar a Meta. El diagnostico y las apelaciones filtran por esa ruta exacta, no por toda la actividad de las clinicas del grupo. Los registros legacy sin ruta solo se infieren para clinicas que heredaban el numero y no tenian otro activo directo; la respuesta expone `attribution.exact_7d` e `inferred_7d`.
 - `delivered` y `read` forman `confirmed`; `sent` se presenta como `without_confirmation`, porque solo acredita que WhatsApp registro el envio sin un webhook posterior de entrega/lectura. `pending`/`sending` forman `pending`. No se muestra un agregado ambiguo de aceptados, procesados o enviados como sinonimo de entrega.
@@ -1592,6 +1599,18 @@ En esta máquina `dev` y `staging` comparten base de datos. El riesgo real no es
 La UI de `Ajustes > Monitoreo del sistema` debe usar estos checks como semáforo visible, no solo los logs de servidor.
 El check de `GROQ_API_KEY` describe siempre el proceso activo en ese instante; si cambia `.env`, hay que reiniciar el backend para que el estado reflejado sea real.
 
+`GET /api/job-requests` filtra en backend. Si no llega `status`, aplica el
+`view`: `queue` limita a `pending,running,waiting`, `history` limita a
+`completed,failed,cancelled` y `all` no limita por estado. Si llega
+`status=failed`, no se interpreta como cola activa: devuelve fallidos
+directamente. La lectura de estados terminales usa el indice
+`idx_job_requests_status_created_at (status, created_at)` para evitar escaneos
+largos al ordenar por fecha desde Jobs Monitoring. `GET /api/job-requests/summary`
+devuelve ademas `recentFailures24h.total` y `recentFailures24h.latest`, calculado
+desde `JobRequests.status=failed` actualizado en las ultimas 24 horas y cubierto
+por `idx_job_requests_status_updated_at (status, updated_at)`, para que el
+estado general no dependa de `SyncLogs` ni contradiga la cola visible.
+
 ## 2026-04-01 - Propagación de plantillas WhatsApp con versionado técnico interno
 
 ### Problema real detectado
@@ -1885,11 +1904,20 @@ Al importar:
 - conserva `created_at` importado cuando la columna se ha mapeado como fecha de entrada;
 - materializa cita importada en `cita_propuesta` cuando el archivo trae fecha/hora/responsable/dirección.
 - conserva `config.source_detail` aunque no exista `campana_id`.
+- para importaciones históricas de `Mide y mejora`, acepta una campaña externa
+  vinculada sin `Campana` interna legacy mediante
+  `external_campaign_provider`, `external_account_id`,
+  `external_campaign_id` y `external_campaign_name`; en ese caso persiste
+  `source_detail=<external_campaign_id>` para que la atribución de estrategia
+  cruce el lead con `ExternalCampaignAssignments` sin consultar Meta/Google.
 
 Caso operativo:
 
 - si `source_detail=reactivacion_pacientes`, backend añade la nota interna `Origen: reactivación de pacientes.` al lead importado;
 - esto permite reutilizar el importador de `Marketing > Leads` desde `Marketing > Campañas > Reactivar pacientes` sin crear una tabla paralela prematura.
+- si se importa desde `Marketing > Campañas > Captar nuevos pacientes`, el
+  frontend debe enviar la campaña externa seleccionada por el usuario. No debe
+  crear una `Campana` interna artificial solo para satisfacer el importador.
 
 ### Alcance del mapeo actual
 
@@ -3559,7 +3587,7 @@ En `.env` / `.env.example`:
 - `GROQ_STT_MODEL` (default `whisper-large-v3-turbo`, para transcripción de audio inbound WhatsApp)
 - `GROQ_STT_TIMEOUT_MS` (default `30000`; si no existe usa `GROQ_TIMEOUT_MS`)
 - `WHATSAPP_MEDIA_DOWNLOAD_MAX_BYTES` (default `25000000`, límite defensivo para descargar media inbound antes de STT)
-- `GROQ_HEALTH_CACHE_TTL_MS` (default `300000`): caché del check operativo de Groq expuesto en monitorización para no llamar al proveedor en cada refresco.
+- `GROQ_HEALTH_CACHE_TTL_MS` (default `14400000`, 4 horas): caché del check operativo de Groq expuesto en monitorización para no llamar al proveedor en cada refresco. Abrir o refrescar la pantalla usa este valor cacheado; el botón `Actualizar` del bloque de runtime fuerza una comprobación real inmediata.
 - `GROQ_HEALTH_TIMEOUT_MS` (default `5000`): timeout de los checks de `/models` y contrato JSON del modelo principal/fallback.
 
 ### Notas operativas
@@ -5294,6 +5322,7 @@ e incluye, cuando existe:
 - `unassigned_campaigns` expone únicamente proveedor, cuenta, campaña y número de leads, sin PII, para que la UI pueda pedir que se complete el mapeo;
 - el periodo CRM usa días naturales de `Europe/Madrid`: por ejemplo, el 13 de julio comprende `[12/07 22:00 UTC, 13/07 22:00 UTC)`;
 - `rows[].leads` se conserva temporalmente como alias compatible de conversiones del proveedor; cada fila devuelve también `provider_conversions` y `metric_contract.rows_leads_semantics=provider_conversions_legacy`. Ningún consumidor nuevo debe etiquetar ese alias como leads CRM.
+- `GET /api/marketing/strategies/:id/recent-leads` devuelve una muestra acotada de leads recientes atribuidos a campañas vinculadas usando exactamente la misma resolución CRM que las métricas. La respuesta no expone email ni teléfono; solo informa `has_email`/`has_phone`, estado, fecha, proveedor, campaña, target y clínica para el resumen ejecutivo. El detalle con PII sigue en `/marketing/leads`.
 
 Esto permite:
 - modal de creatividad sin llamadas live adicionales
@@ -5328,6 +5357,8 @@ usando campañas externas vinculadas y, cuando hay señal suficiente, atribució
 - `patients_converted`
 
 La atribución CRM usa `LeadIntake` y solo se acepta cuando el match con la campaña externa es no ambiguo. La identidad rica `google_ads_customer_id + google_ads_campaign_id` tiene prioridad y se compara con la identidad canónica `provider + account + campaign`; si apunta a una campaña ajena a la estrategia no se permite que un UTM antiguo la reasigne por nombre. Para registros legacy sin identidad completa se mantiene el fallback no ambiguo por ID/nombre en `utm_campaign` o `source_detail`. Los leads pagados resolubles que no encajan en ninguna campaña vinculada se devuelven como `unassigned_clinic_leads`, en lugar de desaparecer silenciosamente.
+
+La misma resolución alimenta `recent-leads`; si un lead no puede asignarse a una única campaña externa de la estrategia, no aparece en esa muestra y debe revisarse desde los contadores de no asignados o desde Leads.
 
 > **Pendiente real:** ingresos y rentabilidad por target. No están cerrados todavía y no deben documentarse como operativos.
 
@@ -5460,6 +5491,9 @@ Ya existe runtime real para la capa de campañas admin:
 - `measurement_profile` incluye `remarketing` y `ad_calls`
 - `automation_strategy.mode` soporta `inherit_recommendation`, `force_template`, `none`
 - `force_template` valida automatización activa con plantilla publicada
+- `generic_campaign` puede convivir varias veces bajo la misma `area_medica`; el frontend debe enviar `campaign_admin_playbook_id`, `campaign_admin_playbook_name` y `campaign_admin_family_key` para persistir la familia concreta elegida.
+- `generic_campaign` sin `family_key` representa **Clínica en general**: campaña de marca, clínica completa o captación global. Se puede vincular a campañas externas sin tratamiento/familia concreta.
+- Estética usa playbooks paraguas por familia comercial. Seed operativo: `node src/scripts/seed-aesthetic-campaign-playbooks.js [--dry-run]`. El script archiva los playbooks de prueba `new_patients_campana_admin_test*`, crea/actualiza la opción general `new_patients_clinica_general` y las familias activas de estética para `new_patients`.
 
 ### 9. Conexión real con el wizard
 

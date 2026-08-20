@@ -7,6 +7,7 @@ const { Op } = require('sequelize');
 const db = require('../../models'); // <-- Importa el objeto db de models/index.js
 const MetaConnection = db.MetaConnection; // <-- Accede al modelo MetaConnection
 const GoogleConnection = db.GoogleConnection; // <-- Modelo GoogleConnection
+const ApiUsageCounter = db.ApiUsageCounter;
 const MetaConnectionAssignment = db.MetaConnectionAssignment;
 const GoogleConnectionAssignment = db.GoogleConnectionAssignment;
 const ClinicWebAsset = db.ClinicWebAsset; // <-- Modelo de mapeo de sitios web
@@ -73,6 +74,7 @@ const {
     persistGoogleConnection,
     persistMetaConnection
 } = require('../services/oauthConnectionPersistence.service');
+const { recordApiUsage } = require('../services/apiUsageTelemetry.service');
 const {
     deactivateGoogleMappingsForScope,
     deactivateMetaMappingsForScope
@@ -96,6 +98,9 @@ const FRONTEND_DEV_URL = 'http://localhost:4200'; // Para desarrollo local
 const FRONTEND_DEV_INTEGRATION_URL = 'http://localhost:4203';
 const META_API_BASE_URL = process.env.META_API_BASE_URL || 'https://graph.facebook.com/v24.0';
 const META_BUSINESS_ID = process.env.META_BUSINESS_ID || process.env.META_BM_ID || null;
+const META_DEBUG_TOKEN_STATUS_CACHE_TTL_MS = Number(process.env.META_DEBUG_TOKEN_STATUS_CACHE_TTL_MS || 5 * 60 * 1000);
+const metaDebugTokenStatusCache = new Map();
+const metaDebugTokenStatusInflight = new Map();
 const ALLOWED_FRONTEND_ORIGINS = new Set([
     FRONTEND_URL,
     'https://crm.clinicaclick.com',
@@ -113,6 +118,92 @@ function isMetaApplicationRateLimit(error) {
         && /application request limit reached/i.test(String(graphError?.message || ''));
 }
 
+function metaDebugTokenStatusCacheKey(connection) {
+    if (!connection) return null;
+    const id = connection.id || connection.metaUserId || connection.userId;
+    if (!id) return null;
+    const updatedAt = connection.updatedAt || connection.updated_at || '';
+    return `${id}:${updatedAt ? new Date(updatedAt).getTime() : 'na'}`;
+}
+
+function readMetaDebugTokenStatusCache(connection) {
+    const key = metaDebugTokenStatusCacheKey(connection);
+    if (!key) return null;
+    const entry = metaDebugTokenStatusCache.get(key);
+    if (!entry) return null;
+    if (entry.expiresAt <= Date.now()) {
+        metaDebugTokenStatusCache.delete(key);
+        return null;
+    }
+    return entry.debugData || null;
+}
+
+function writeMetaDebugTokenStatusCache(connection, debugData) {
+    const key = metaDebugTokenStatusCacheKey(connection);
+    if (!key || !debugData) return;
+    if (metaDebugTokenStatusCache.size > 500) {
+        for (const [cacheKey, entry] of metaDebugTokenStatusCache.entries()) {
+            if (!entry || entry.expiresAt <= Date.now()) {
+                metaDebugTokenStatusCache.delete(cacheKey);
+            }
+        }
+    }
+    metaDebugTokenStatusCache.set(key, {
+        debugData,
+        expiresAt: Date.now() + META_DEBUG_TOKEN_STATUS_CACHE_TTL_MS
+    });
+}
+
+async function readMetaOAuthPauseUntil() {
+    if (!ApiUsageCounter) return null;
+    try {
+        const counter = await ApiUsageCounter.findByPk('meta_ads');
+        const pauseMs = counter?.pauseUntil ? new Date(counter.pauseUntil).getTime() : null;
+        return pauseMs && pauseMs > Date.now() ? new Date(pauseMs) : null;
+    } catch (error) {
+        console.warn('⚠️ No se pudo leer pausa de telemetría Meta:', error.message);
+        return null;
+    }
+}
+
+async function getMetaDebugTokenStatus(connection) {
+    const cached = readMetaDebugTokenStatusCache(connection);
+    if (cached) {
+        return { debugData: cached, cacheHit: true };
+    }
+
+    const key = metaDebugTokenStatusCacheKey(connection);
+    if (!key) {
+        return { debugData: null, cacheHit: false };
+    }
+
+    if (metaDebugTokenStatusInflight.has(key)) {
+        const debugData = await metaDebugTokenStatusInflight.get(key);
+        return { debugData, cacheHit: true };
+    }
+
+    const request = instrumentedMetaOauthGet(`${META_API_BASE_URL}/debug_token`, {
+        params: {
+            input_token: connection.accessToken,
+            access_token: connection.accessToken
+        }
+    }, {
+        source: 'oauth_meta_connection_status',
+        operation: 'debug_token'
+    })
+        .then((dbg) => {
+            const debugData = dbg.data?.data || null;
+            writeMetaDebugTokenStatusCache(connection, debugData);
+            return debugData;
+        })
+        .finally(() => {
+            metaDebugTokenStatusInflight.delete(key);
+        });
+
+    metaDebugTokenStatusInflight.set(key, request);
+    return { debugData: await request, cacheHit: false };
+}
+
 function metaOAuthPublicErrorMessage(error) {
     if (isMetaApplicationRateLimit(error)) {
         return 'Meta ha limitado temporalmente la conexión por exceso de solicitudes. Espera unos minutos y vuelve a intentarlo.';
@@ -125,6 +216,42 @@ function metaOAuthErrorCode(error) {
         return 'meta_rate_limit';
     }
     return 'meta_oauth_failed';
+}
+
+function metaRateLimitPauseUntil() {
+    const d = new Date();
+    d.setMinutes(60, 0, 0);
+    return d;
+}
+
+async function recordMetaOAuthUsage({ source = 'oauth_meta', operation = 'meta_oauth', status = 'ok', error = null, requestCount = 1 } = {}) {
+    const rateLimited = error && isMetaApplicationRateLimit(error);
+    await recordApiUsage({
+        provider: 'meta_ads',
+        source,
+        operation,
+        status: rateLimited ? 'rate_limited' : status,
+        usagePct: rateLimited ? 100 : null,
+        requestCount,
+        pauseUntil: rateLimited ? metaRateLimitPauseUntil() : undefined,
+        error
+    });
+}
+
+async function instrumentedMetaOauthGet(url, config = {}, { source = 'oauth_meta', operation = 'meta_get' } = {}) {
+    try {
+        const response = await axios.get(url, config);
+        await recordMetaOAuthUsage({ source, operation, status: 'ok' });
+        return response;
+    } catch (error) {
+        await recordMetaOAuthUsage({
+            source,
+            operation,
+            status: isMetaApplicationRateLimit(error) ? 'rate_limited' : 'error',
+            error
+        });
+        throw error;
+    }
 }
 
 // Configuración Google OAuth (variables de entorno)
@@ -691,8 +818,11 @@ async function fetchAllMetaPaginatedData(initialUrl, accessToken) {
                 'Meta devolvió una URL de paginación fuera del dominio autorizado.'
             );
         }
-        const response = await axios.get(parsedNextUrl.toString(), {
+        const response = await instrumentedMetaOauthGet(parsedNextUrl.toString(), {
             headers: { Authorization: `Bearer ${accessToken}` }
+        }, {
+            source: 'oauth_meta_assets',
+            operation: parsedNextUrl.pathname.includes('/adaccounts') ? 'list_ad_accounts' : 'list_pages'
         });
         if (Array.isArray(response.data?.data)) allData.push(...response.data.data);
         nextUrl = response.data?.paging?.next || null;
@@ -1121,7 +1251,10 @@ router.get('/meta/callback', async (req, res) => {
             redirect_uri: REDIRECT_URI,
             code: code,
         };
-        const tokenResponse = await axios.get(tokenUrl, { params: tokenParams });
+        const tokenResponse = await instrumentedMetaOauthGet(tokenUrl, { params: tokenParams }, {
+            source: 'oauth_meta_callback',
+            operation: 'exchange_short_lived_token'
+        });
         const shortLivedAccessToken = tokenResponse.data.access_token;
         
         if (!shortLivedAccessToken) {
@@ -1139,7 +1272,10 @@ router.get('/meta/callback', async (req, res) => {
             client_secret: META_APP_SECRET,
             fb_exchange_token: shortLivedAccessToken,
         };
-        const longLivedTokenResponse = await axios.get(longLivedTokenUrl, { params: longLivedTokenParams });
+        const longLivedTokenResponse = await instrumentedMetaOauthGet(longLivedTokenUrl, { params: longLivedTokenParams }, {
+            source: 'oauth_meta_callback',
+            operation: 'exchange_long_lived_token'
+        });
         const longLivedAccessToken = longLivedTokenResponse.data.access_token;
         const longLivedExpiresIn = longLivedTokenResponse.data.expires_in; // Generalmente 60 días
 
@@ -1152,7 +1288,10 @@ router.get('/meta/callback', async (req, res) => {
         // 3. Obtener información básica del usuario de Meta
         console.log('👤 Obteniendo información del usuario de Meta...');
         const userProfileUrl = `${META_API_BASE_URL.replace(/\/v\d+\.\d+$/, '')}/me?fields=id,name,email&access_token=${longLivedAccessToken}`;
-        const userProfileResponse = await axios.get(userProfileUrl);
+        const userProfileResponse = await instrumentedMetaOauthGet(userProfileUrl, {}, {
+            source: 'oauth_meta_callback',
+            operation: 'load_user_profile'
+        });
         const userData = userProfileResponse.data;
         console.log('👤 Usuario de Meta autenticado:', userData);
 
@@ -1221,6 +1360,13 @@ router.get('/meta/callback', async (req, res) => {
         res.redirect(redirectUrl);
 
     } catch (err) {
+        await recordMetaOAuthUsage({
+            source: 'oauth_meta_callback',
+            operation: 'callback_failed',
+            status: isMetaApplicationRateLimit(err) ? 'rate_limited' : 'error',
+            error: err,
+            requestCount: 0
+        });
         console.error('❌ Error fatal en el proceso de OAuth:', err.response ? err.response.data : err.message);
         const publicMessage = metaOAuthPublicErrorMessage(err);
         const publicCode = metaOAuthErrorCode(err);
@@ -3296,28 +3442,52 @@ router.get('/meta/connection-status', async (req, res) => {
             let scopes = [];
             let missingScopes = [];
             let debugData = null;
-            try {
-                const dbg = await axios.get(`${META_API_BASE_URL}/debug_token`, {
-                    params: {
-                        input_token: connection.accessToken,
-                        access_token: connection.accessToken
-                    }
-                });
-                debugData = dbg.data?.data || null;
-                scopes = Array.isArray(debugData?.scopes)
-                    ? debugData.scopes.map((s) => String(s).toLowerCase())
-                    : [];
-            } catch (err) {
-                console.warn('⚠️ No se pudo obtener scopes de Meta (debug_token):', err.response?.data || err.message);
-                return res.json({
-                    connected: false,
-                    reason: 'token_validation_failed',
-                    reauthorizationRequired: true,
-                    message: 'La conexión Meta necesita volver a autorizarse.',
-                    scope: buildScopeResponse(scope, assignment),
-                    source
-                });
+            let validationCacheHit = false;
+            const cachedDebugData = readMetaDebugTokenStatusCache(connection);
+            if (cachedDebugData) {
+                debugData = cachedDebugData;
+                validationCacheHit = true;
+            } else {
+                const pauseUntil = await readMetaOAuthPauseUntil();
+                if (pauseUntil) {
+                    return res.json({
+                        connected: true,
+                        metaUserId: connection.metaUserId,
+                        userName: connection.userName,
+                        userEmail: connection.userEmail,
+                        authorizedByUserId: assignment?.authorizedByUserId || connection.userId || null,
+                        authorizedByName: assignment?.authorizedByName || connection.userName || null,
+                        authorizedByEmail: assignment?.authorizedByEmail || connection.userEmail || null,
+                        scopes,
+                        missingScopes,
+                        validationDeferred: true,
+                        validationPausedUntil: pauseUntil.toISOString(),
+                        reason: 'meta_validation_rate_limited',
+                        message: 'Conexión Meta activa. La validación en vivo está pausada temporalmente por límite de Meta.',
+                        scope: buildScopeResponse(scope, assignment),
+                        source
+                    });
+                }
+
+                try {
+                    const result = await getMetaDebugTokenStatus(connection);
+                    debugData = result.debugData;
+                    validationCacheHit = !!result.cacheHit;
+                } catch (err) {
+                    console.warn('⚠️ No se pudo obtener scopes de Meta (debug_token):', err.response?.data || err.message);
+                    return res.json({
+                        connected: false,
+                        reason: 'token_validation_failed',
+                        reauthorizationRequired: true,
+                        message: 'La conexión Meta necesita volver a autorizarse.',
+                        scope: buildScopeResponse(scope, assignment),
+                        source
+                    });
+                }
             }
+            scopes = Array.isArray(debugData?.scopes)
+                ? debugData.scopes.map((s) => String(s).toLowerCase())
+                : [];
 
             const health = evaluateMetaConnectionHealth(connection, debugData, {
                 expectedAppId: META_APP_ID
@@ -3344,6 +3514,7 @@ router.get('/meta/connection-status', async (req, res) => {
                 authorizedByEmail: assignment?.authorizedByEmail || connection.userEmail || null,
                 scopes,
                 missingScopes,
+                validationCacheHit,
                 message: 'Conexión Meta activa.',
                 scope: buildScopeResponse(scope, assignment),
                 source
