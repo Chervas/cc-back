@@ -207,6 +207,32 @@ test('agrega costes y solicitudes del monitor sin depender del scope de UI', () 
   assert.equal(monitoring.__testing.daysInclusive('2026-08-01', '2026-08-07'), 7);
 });
 
+test('compara clientes de IA sin mezclar consumo histórico sin atribución', () => {
+  const labels = {
+    clinics: new Map([[66, 'BS Capilar'], [82, 'BS Medical']]),
+    groups: new Map(),
+  };
+  const current = [
+    { scope_key: 'clinic:66', clinic_id: 66, requests: 4, estimated_cost_usd: 0.008 },
+    { scope_key: 'clinic:82', clinic_id: 82, requests: 2, estimated_cost_usd: 0.002 },
+    { scope_key: 'global', requests: 11, estimated_cost_usd: 0.003 },
+  ];
+  const previous = [
+    { scope_key: 'clinic:66', clinic_id: 66, requests: 2, estimated_cost_usd: 0.004 },
+    { scope_key: 'clinic:82', clinic_id: 82, requests: 2, estimated_cost_usd: 0.002 },
+  ];
+  const comparison = monitoring.__testing.buildClientComparison(current, previous, labels);
+  assert.equal(comparison.clients.length, 2);
+  assert.equal(comparison.clients[0].label, 'BS Capilar');
+  assert.equal(comparison.clients[0].rank, 1);
+  assert.equal(comparison.clients[0].cost_share_pct, 80);
+  assert.equal(comparison.clients[0].cost_change_pct, 100);
+  assert.equal(comparison.clients[0].cost_per_request_usd, 0.002);
+  assert.equal(comparison.summary.active_clients, 2);
+  assert.equal(comparison.summary.average_cost_per_client_usd, 0.005);
+  assert.equal(comparison.summary.top_five_cost_share_pct, 100);
+});
+
 test('calcula el coste con la tarifa configurada para Nova Micro', () => {
   assert.equal(
     telemetry.estimateCostUsd('eu.amazon.nova-micro-v1:0', 1_000_000, 1_000_000),

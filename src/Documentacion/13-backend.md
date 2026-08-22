@@ -3600,7 +3600,8 @@ Groq queda desacoplado y limitado al audio:
 - `AiUsageDaily` agrega uso y coste sin guardar prompts, respuestas, pacientes ni teléfonos. `scope_key` separa clínica/grupo cuando el consumidor aporta ese contexto.
 - `/api/metasync/jobs/usage/ai-runtime` alimenta el estado administrativo y reutiliza sus checks durante cuatro horas.
 - `/api/metasync/jobs/usage/ai-runtime/costs` sirve el desglose global por periodo, proveedor, modelo, función y cliente. No aplica el scope seleccionado en frontend. Los nombres de clínica/grupo se resuelven en consultas separadas; no usa `LEFT JOIN`.
-- Los agregados anteriores a `scope_key` se conservan como `Sin atribución histórica` y no se reasignan por inferencia.
+- La comparativa de clientes se calcula en backend y devuelve ranking, cuota de coste, coste por solicitud, variación frente al periodo anterior, media por cliente y concentración del top 5. El frontend no recompone esos agregados.
+- Los agregados anteriores a `scope_key` conservan scope global, no se reasignan por inferencia y quedan fuera del ranking de clientes.
 
 ### Audio inbound (WhatsApp) y hoja de ruta local
 
@@ -3616,6 +3617,10 @@ Groq queda desacoplado y limitado al audio:
   - Para escuchar el audio, `GET /api/conversations/messages/:messageId/media` valida permisos de conversación, solicita a Meta una URL temporal desde `metadata.media.id`, descarga el binario en backend y lo devuelve como stream/buffer autenticado al navegador.
   - Si el mensaje no tiene `metadata.media.id`, si el token ya no puede recuperar el audio o si Meta ya no lo conserva, el endpoint responde `410 audio_unavailable`. La UI muestra snackbar: `El audio ya no está disponible. La transcripción seguirá visible debajo.`
   - Esta reproducción es transicional y depende de la disponibilidad temporal de media en Meta. No debe tratarse como archivo histórico permanente.
+- Protección de datos pendiente:
+  - Groq STT es un proveedor transitorio y no debe presentarse como residencia UE para audios de pacientes.
+  - Antes de cerrar esta deuda se deben verificar DPA/SCC y retención efectiva, completar revisión DPO/EIPD y migrar a Amazon Transcribe en región europea o Whisper autogestionado en infraestructura UE.
+  - La migración debe conservar el contrato `content + metadata.audio_transcription` y verificar minimización, borrado, auditoría y ausencia de almacenamiento público.
 - Reparación de audios huérfanos:
   - Si un worker antiguo guardó un audio como mensaje vacío con `metadata.media.kind = audio` pero sin `metadata.media.id`, no se puede pedir a Meta el audio solo con la fila de `Messages`.
   - Antes de darlo por perdido, se puede intentar recuperar el `media_id` desde el payload original de BullMQ/Redis (`bull:webhook_whatsapp:<jobId>`) si el job aún existe.

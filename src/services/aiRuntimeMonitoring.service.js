@@ -275,6 +275,67 @@ function groupUsage(rows, keyBuilder) {
   }));
 }
 
+function percentageChange(current, previous) {
+  const currentValue = Number(current || 0);
+  const previousValue = Number(previous || 0);
+  if (previousValue <= 0) return null;
+  return Number((((currentValue - previousValue) / previousValue) * 100).toFixed(1));
+}
+
+function buildClientComparison(rows, previousRows, labels) {
+  const attributedRows = rows.filter((row) => row.scope_key && row.scope_key !== 'global');
+  const previousAttributedRows = previousRows.filter((row) => row.scope_key && row.scope_key !== 'global');
+  const previousByScope = new Map(groupUsage(previousAttributedRows, (row) => ({
+    key: row.scope_key,
+  })).map((item) => [item.key, item]));
+  const groupedClients = groupUsage(attributedRows, (row) => {
+    const scopeKey = row.scope_key;
+    let label = 'Cliente sin nombre';
+    if (row.clinic_id) label = labels.clinics.get(row.clinic_id) || `Clínica ${row.clinic_id}`;
+    else if (row.group_id) label = labels.groups.get(row.group_id) || `Grupo ${row.group_id}`;
+    return {
+      key: scopeKey,
+      scope_key: scopeKey,
+      clinic_id: row.clinic_id,
+      group_id: row.group_id,
+      label,
+    };
+  }).sort((a, b) => b.estimated_cost_usd - a.estimated_cost_usd || b.requests - a.requests);
+  const attributedCost = sum(groupedClients, 'estimated_cost_usd');
+  const clients = groupedClients.map((client, index) => {
+    const previous = previousByScope.get(client.scope_key) || aggregateUsage([]);
+    return {
+      ...client,
+      rank: index + 1,
+      cost_share_pct: attributedCost > 0
+        ? Number(((client.estimated_cost_usd / attributedCost) * 100).toFixed(1))
+        : 0,
+      cost_per_request_usd: client.requests > 0
+        ? Number((client.estimated_cost_usd / client.requests).toFixed(6))
+        : 0,
+      previous_estimated_cost_usd: previous.estimated_cost_usd,
+      previous_requests: previous.requests,
+      cost_change_pct: percentageChange(client.estimated_cost_usd, previous.estimated_cost_usd),
+      request_change_pct: percentageChange(client.requests, previous.requests),
+    };
+  });
+  const topFiveCost = sum(clients.slice(0, 5), 'estimated_cost_usd');
+  return {
+    clients,
+    summary: {
+      active_clients: clients.length,
+      attributed_cost_usd: Number(attributedCost.toFixed(6)),
+      average_cost_per_client_usd: clients.length
+        ? Number((attributedCost / clients.length).toFixed(6))
+        : 0,
+      top_client: clients[0] || null,
+      top_five_cost_share_pct: attributedCost > 0
+        ? Number(((topFiveCost / attributedCost) * 100).toFixed(1))
+        : 0,
+    },
+  };
+}
+
 async function resolveScopeLabels(rows) {
   const clinicIds = [...new Set(rows.map((row) => row.clinic_id).filter(Boolean))];
   const groupIds = [...new Set(rows.map((row) => row.group_id).filter(Boolean))];
@@ -330,13 +391,7 @@ async function getCostBreakdown({ from: rawFrom, to: rawTo } = {}) {
   })).sort((a, b) => b.estimated_cost_usd - a.estimated_cost_usd || b.requests - a.requests);
   const useCases = groupUsage(rows, (row) => ({ key: row.use_case, use_case: row.use_case }))
     .sort((a, b) => b.estimated_cost_usd - a.estimated_cost_usd || b.requests - a.requests);
-  const clients = groupUsage(rows, (row) => {
-    const scopeKey = row.scope_key || 'global';
-    let label = 'Sin atribución histórica';
-    if (row.clinic_id) label = labels.clinics.get(row.clinic_id) || `Clínica ${row.clinic_id}`;
-    else if (row.group_id) label = labels.groups.get(row.group_id) || `Grupo ${row.group_id}`;
-    return { key: scopeKey, scope_key: scopeKey, clinic_id: row.clinic_id, group_id: row.group_id, label };
-  }).sort((a, b) => b.estimated_cost_usd - a.estimated_cost_usd || b.requests - a.requests);
+  const clientComparison = buildClientComparison(rows, previousRows, labels);
   const attributedRequests = sum(rows.filter((row) => row.scope_key !== 'global'), 'requests');
 
   return {
@@ -355,12 +410,12 @@ async function getCostBreakdown({ from: rawFrom, to: rawTo } = {}) {
     attribution: {
       attributed_requests: attributedRequests,
       unattributed_requests: Math.max(0, current.requests - attributedRequests),
-      note: 'La atribución por clínica se registra desde esta versión; el consumo anterior permanece como histórico sin atribución.',
     },
     timeseries,
     models,
     use_cases: useCases,
-    clients,
+    clients: clientComparison.clients,
+    client_comparison: clientComparison.summary,
   };
 }
 
@@ -396,5 +451,14 @@ module.exports = {
   getOverview,
   getCostBreakdown,
   loadHealth,
-  __testing: { configuredInventory, loadUsage, parseDateKey, daysInclusive, aggregateUsage, groupUsage },
+  __testing: {
+    configuredInventory,
+    loadUsage,
+    parseDateKey,
+    daysInclusive,
+    aggregateUsage,
+    groupUsage,
+    percentageChange,
+    buildClientComparison,
+  },
 };
