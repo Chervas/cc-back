@@ -67,7 +67,7 @@ function coerceByFormat(value, outputFormat = {}) {
   return output;
 }
 
-async function runCandidate({ candidate, fallbackUsed, route, request }) {
+async function runCandidate({ candidate, fallbackUsed, route, request, tenant }) {
   const startedAt = Date.now();
   try {
     const result = await bedrock.analyzeStructured({ ...request, model: candidate });
@@ -80,6 +80,8 @@ async function runCandidate({ candidate, fallbackUsed, route, request }) {
       outputTokens: result.usage?.output_tokens,
       latencyMs: result.latency_ms,
       fallbackUsed,
+      clinicId: tenant.clinicId,
+      groupId: tenant.groupId,
       metadata: { region: bedrock.getConfig().region, tier: route.tier },
     });
     return result;
@@ -91,6 +93,8 @@ async function runCandidate({ candidate, fallbackUsed, route, request }) {
       status: 'error',
       latencyMs: Date.now() - startedAt,
       fallbackUsed,
+      clinicId: tenant.clinicId,
+      groupId: tenant.groupId,
       error,
       metadata: { region: bedrock.getConfig().region, tier: route.tier },
     });
@@ -106,11 +110,14 @@ async function analyzeStructured({
   outputFormat,
   analysisMode,
   maxTokens,
+  clinicId = null,
+  groupId = null,
 } = {}) {
   const route = routeFor({ useCase, analysisMode, prompt, inputText, outputFormat });
   const request = { systemPrompt, prompt, inputText, outputFormat, maxTokens, temperature: 0 };
+  const tenant = { clinicId, groupId };
   try {
-    const result = await runCandidate({ candidate: route.primary, fallbackUsed: false, route, request });
+    const result = await runCandidate({ candidate: route.primary, fallbackUsed: false, route, request, tenant });
     return {
       ...coerceByFormat(result.value, outputFormat),
       _ai_provider: 'bedrock',
@@ -123,7 +130,7 @@ async function analyzeStructured({
     };
   } catch (primaryError) {
     if (!route.fallback || !bedrock.isRetryableError(primaryError)) throw primaryError;
-    const result = await runCandidate({ candidate: route.fallback, fallbackUsed: true, route, request });
+    const result = await runCandidate({ candidate: route.fallback, fallbackUsed: true, route, request, tenant });
     return {
       ...coerceByFormat(result.value, outputFormat),
       _ai_provider: 'bedrock',

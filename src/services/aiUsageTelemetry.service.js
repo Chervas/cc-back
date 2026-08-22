@@ -34,12 +34,30 @@ function publicErrorCode(error) {
   );
 }
 
+function positiveIntegerOrNull(value) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function normalizeTenantScope({ clinicId = null, groupId = null } = {}) {
+  const normalizedClinicId = positiveIntegerOrNull(clinicId);
+  const normalizedGroupId = positiveIntegerOrNull(groupId);
+  return {
+    clinicId: normalizedClinicId,
+    groupId: normalizedGroupId,
+    scopeKey: normalizedClinicId
+      ? `clinic:${normalizedClinicId}`
+      : (normalizedGroupId ? `group:${normalizedGroupId}` : 'global'),
+  };
+}
+
 async function findOrCreateUsage(defaults) {
   const where = {
     usageDate: defaults.usageDate,
     provider: defaults.provider,
     model: defaults.model,
     useCase: defaults.useCase,
+    scopeKey: defaults.scopeKey,
   };
   try {
     const [row] = await db.AiUsageDaily.findOrCreate({ where, defaults });
@@ -63,6 +81,8 @@ async function recordAiUsage({
   fallbackUsed = false,
   error = null,
   metadata = null,
+  clinicId = null,
+  groupId = null,
 } = {}) {
   if (!db.AiUsageDaily) return null;
   const normalizedProvider = clean(provider, 32).toLowerCase();
@@ -76,6 +96,7 @@ async function recordAiUsage({
   const succeeded = status === 'success';
   const cost = estimateCostUsd(normalizedModel, safeInputTokens, safeOutputTokens);
   const now = new Date();
+  const tenant = normalizeTenantScope({ clinicId, groupId });
 
   try {
     const row = await findOrCreateUsage({
@@ -83,6 +104,9 @@ async function recordAiUsage({
       provider: normalizedProvider,
       model: normalizedModel,
       useCase: normalizedUseCase,
+      scopeKey: tenant.scopeKey,
+      clinicId: tenant.clinicId,
+      groupId: tenant.groupId,
       requestCount: 0,
       successCount: 0,
       errorCount: 0,
@@ -125,5 +149,5 @@ module.exports = {
   PRICE_PER_MILLION_USD,
   estimateCostUsd,
   recordAiUsage,
-  __testing: { publicErrorCode, nonNegativeInteger },
+  __testing: { publicErrorCode, nonNegativeInteger, normalizeTenantScope },
 };

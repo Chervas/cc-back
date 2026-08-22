@@ -5715,6 +5715,8 @@ async function processNode(node, context, runtime = {}) {
           text: cleanString(aiContext?.last_response_context?.response_text || aiContext?.last_response),
           explicitRating: toIntOrNull(aiContext?.last_response_context?.response_rating),
           allowAi: true,
+          clinicId: runtimeTargets.clinic_id,
+          groupId: runtimeTargets.group_id,
         }).then((result) => ({
           response_intent: result.intent,
           response_rating: result.rating,
@@ -5770,6 +5772,8 @@ async function processNode(node, context, runtime = {}) {
         outputFormat: outputFormatSimple,
         analysisMode,
         maxTokens: resolveTemplateValue(config?.max_tokens, context),
+        clinicId: runtimeTargets.clinic_id,
+        groupId: runtimeTargets.group_id,
       });
 
       const normalizedDecision = cleanString(aiOutput?.decision).toLowerCase();

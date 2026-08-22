@@ -358,6 +358,18 @@ exports.getAiRuntimeOverview = async (req, res) => {
   }
 };
 
+exports.getAiRuntimeCostBreakdown = async (req, res) => {
+  try {
+    res.json(await aiRuntimeMonitoringService.getCostBreakdown({
+      from: req.query?.from,
+      to: req.query?.to,
+    }));
+  } catch (e) {
+    console.error('❌ Error getAiRuntimeCostBreakdown:', e);
+    res.status(Number(e?.status) || 500).json({ message: 'Error obteniendo el desglose de costes de IA', error: e.message });
+  }
+};
+
 /**
  * Tail simple del log del proceso (o log asociado a un SyncLog si se provee ruta)
  * GET /jobs/sync-logs/:id/tail?lines=500

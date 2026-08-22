@@ -9516,6 +9516,8 @@ async function materializeInboundReply({ conversation, inboundMessage }) {
     const classification = await reviewResponseClassification.classifyReviewResponse({
       text: getReviewRatingCandidateTextsFromInboundMessage(inboundMessage)[0] || inboundMessage.content || '',
       allowAi: true,
+      clinicId: list.clinic_id,
+      groupId: list.group_id,
     });
     if (classification.intent === 'rating' && classification.rating) {
       inboundRatingDetails = {

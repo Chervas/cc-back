@@ -87,7 +87,7 @@ function classifyDeterministically(text, explicitRating = null) {
   return { intent: 'ambiguous', rating: null, confidence: 0, source: 'rule_none' };
 }
 
-async function classifyWithAi(text) {
+async function classifyWithAi(text, tenant = {}) {
   try {
     const result = await aiOrchestrator.analyzeStructured({
       useCase: 'review_response_classification',
@@ -110,6 +110,8 @@ async function classifyWithAi(text) {
         reason: 'string',
       },
       maxTokens: 180,
+      clinicId: tenant.clinicId,
+      groupId: tenant.groupId,
     });
     const intent = ALLOWED_INTENTS.has(clean(result.intent)) ? clean(result.intent) : 'ambiguous';
     const rating = Number(result.rating || 0);
@@ -142,10 +144,10 @@ async function classifyWithAi(text) {
   }
 }
 
-async function classifyReviewResponse({ text, explicitRating = null, allowAi = true } = {}) {
+async function classifyReviewResponse({ text, explicitRating = null, allowAi = true, clinicId = null, groupId = null } = {}) {
   const deterministic = classifyDeterministically(text, explicitRating);
   if (deterministic.intent !== 'ambiguous' || !allowAi || !clean(text)) return deterministic;
-  return classifyWithAi(text);
+  return classifyWithAi(text, { clinicId, groupId });
 }
 
 module.exports = {

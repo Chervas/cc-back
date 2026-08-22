@@ -8,8 +8,10 @@ const test = require('node:test');
 const bedrock = require('../../services/bedrockAiProvider.service');
 const orchestrator = require('../../services/aiOrchestrator.service');
 const telemetry = require('../../services/aiUsageTelemetry.service');
+const monitoring = require('../../services/aiRuntimeMonitoring.service');
 const classifier = require('../../services/reviewResponseClassification.service');
 const migration = require('../../../migrations/20260820010000-create-ai-usage-daily');
+const scopeMigration = require('../../../migrations/20260822103000-add-scope-to-ai-usage-daily');
 
 const ENV_KEYS = [
   'BEDROCK_ENABLED',
@@ -72,6 +74,8 @@ test('Bedrock fuerza una salida estructurada con el contrato del nodo V2', async
       systemPrompt: 'Clasifica.',
       prompt: 'Confirma la cita.',
       inputText: 'Sí, allí estaré.',
+      clinicId: 66,
+      groupId: 4,
       outputFormat: { decision: 'string', confidence: 'number', reason: 'string' },
     });
     assert.equal(result.decision, 'confirmado');
@@ -85,6 +89,8 @@ test('Bedrock fuerza una salida estructurada con el contrato del nodo V2', async
     );
     assert.equal(usage.length, 1);
     assert.equal(usage[0].inputTokens, 20);
+    assert.equal(usage[0].clinicId, 66);
+    assert.equal(usage[0].groupId, 4);
     assert.equal(Object.prototype.hasOwnProperty.call(usage[0], 'inputText'), false);
   });
 });
@@ -157,10 +163,48 @@ test('las reglas claras no invocan Bedrock', async () => {
 });
 
 test('la migración de telemetría no almacena prompts ni respuestas', () => {
-  const source = migration.up.toString();
+  const source = `${migration.up.toString()}\n${scopeMigration.up.toString()}`;
   assert.match(source, /input_tokens/);
   assert.match(source, /estimated_cost_usd/);
+  assert.match(source, /scope_key/);
   assert.doesNotMatch(source, /prompt|response_text|patient|phone/i);
+});
+
+test('normaliza el scope de telemetría sin mezclar clínicas ni grupos', () => {
+  assert.deepEqual(
+    telemetry.__testing.normalizeTenantScope({ clinicId: 66, groupId: 4 }),
+    { clinicId: 66, groupId: 4, scopeKey: 'clinic:66' },
+  );
+  assert.deepEqual(
+    telemetry.__testing.normalizeTenantScope({ groupId: 4 }),
+    { clinicId: null, groupId: 4, scopeKey: 'group:4' },
+  );
+  assert.deepEqual(
+    telemetry.__testing.normalizeTenantScope({ clinicId: 'invalid' }),
+    { clinicId: null, groupId: null, scopeKey: 'global' },
+  );
+});
+
+test('agrega costes y solicitudes del monitor sin depender del scope de UI', () => {
+  const rows = [
+    { scope_key: 'clinic:66', requests: 2, successes: 2, errors: 0, fallbacks: 0, input_tokens: 100, output_tokens: 20, latency_ms_total: 80, estimated_cost_usd: 0.002 },
+    { scope_key: 'clinic:82', requests: 3, successes: 2, errors: 1, fallbacks: 1, input_tokens: 200, output_tokens: 40, latency_ms_total: 220, estimated_cost_usd: 0.004 },
+  ];
+  assert.deepEqual(monitoring.__testing.aggregateUsage(rows), {
+    requests: 5,
+    successes: 4,
+    errors: 1,
+    fallbacks: 1,
+    input_tokens: 300,
+    output_tokens: 60,
+    latency_ms_total: 300,
+    average_latency_ms: 60,
+    estimated_cost_usd: 0.006,
+  });
+  const grouped = monitoring.__testing.groupUsage(rows, (row) => ({ key: row.scope_key }));
+  assert.equal(grouped.length, 2);
+  assert.equal(grouped.find((row) => row.key === 'clinic:66').requests, 2);
+  assert.equal(monitoring.__testing.daysInclusive('2026-08-01', '2026-08-07'), 7);
 });
 
 test('calcula el coste con la tarifa configurada para Nova Micro', () => {
