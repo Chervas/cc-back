@@ -2978,7 +2978,7 @@ function withBlockedLocalHeatmapMetadata(payload) {
   });
 }
 
-async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
+async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3, cachedOnly = false } = {}) {
   const normalizedTerm = normalizeLocalHeatmapTerm(term) || null;
   const normalizedZoomKm = clampHeatmapZoom(zoomKm);
   const clinic = await resolvePrimaryClinic(scope);
@@ -3031,6 +3031,10 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
     gridSize: LOCAL_HEATMAP_EFFECTIVE_GRID_SIZE,
     algorithmVersion: LOCAL_HEATMAP_CACHE_ALGORITHM_VERSION
   });
+  if (cachedOnly) {
+    const cached = await persistentHeatmapCache.peek(identity);
+    return withLocalHeatmapComparison(identity, cached);
+  }
   await assertLocalHeatmapGenerationBudget(identity);
 
   const resolved = await persistentHeatmapCache.resolve({

@@ -303,6 +303,7 @@ exports.getLocalHeatmap = async (req, res) => {
     const result = await competitionService.getLocalRankingHeatmap(scope, {
       term: req.query.term || null,
       zoomKm: req.query.zoom_km || req.query.zoomKm || null,
+      cachedOnly: ['1', 'true', 'yes'].includes(String(req.query.cached_only || '').trim().toLowerCase()),
     });
     return res.json({
       ...result,

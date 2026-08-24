@@ -74,6 +74,7 @@ async function requireReadAccess(req, scope) {
     error.code = 'scope_forbidden';
     throw error;
   }
+  return clinicIds;
 }
 
 function serializePolicy(row, modeContract = null) {

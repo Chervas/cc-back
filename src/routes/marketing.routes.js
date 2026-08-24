@@ -10,6 +10,7 @@ const marketingReactivationController = require('../controllers/marketingReactiv
 const marketingBulkSendsController = require('../controllers/marketingBulkSends.controller');
 const managedCampaignsController = require('../controllers/managedCampaigns.controller');
 const campaignOptimizationController = require('../controllers/campaignOptimization.controller');
+const marketingObjectivesController = require('../controllers/marketingObjectives.controller');
 const webProjectsController = require('../controllers/webProjects.controller');
 const webContentMediaController = require('../controllers/webContentMedia.controller');
 const webContentGenerationController = require('../controllers/webContentGeneration.controller');
@@ -154,6 +155,10 @@ router.post('/reports/competition/refresh', marketingCompetitionController.refre
 router.get('/reports/competition/ai-visibility', marketingAiVisibilityController.getOverview);
 router.post('/reports/competition/ai-visibility', marketingAiVisibilityController.createRun);
 router.get('/reports/competition/ai-visibility/:runId', marketingAiVisibilityController.getRun);
+
+// Read model del hub de Objetivos. Solo agrega evidencia ya persistida; no
+// sincroniza proveedores ni ejecuta cambios sobre campañas o automatizaciones.
+router.get('/objectives/status', marketingObjectivesController.getStatus);
 
 // Reactivación de pacientes
 router.get('/reactivation/suggestions', marketingReactivationController.getSuggestions);

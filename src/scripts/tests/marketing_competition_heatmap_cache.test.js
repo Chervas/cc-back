@@ -281,6 +281,36 @@ async function testStaleResponseIsImmediateAndRefreshIsDeduplicated() {
   assert.equal(scheduled.length, 1);
 }
 
+async function testCachedOnlyPeekNeverSchedulesOrCreatesWork() {
+  const currentTime = new Date('2026-07-15T10:00:00.000Z');
+  const cacheIdentity = identity();
+  const expired = cachedRow(cacheIdentity, new Date(currentTime.getTime() - (15 * DAY_MS)));
+  const model = createFakeCacheModel([expired]);
+  const scheduled = [];
+  const coordinator = createHeatmapCacheCoordinator({
+    model,
+    now: () => new Date(currentTime),
+    scheduleRefresh: async (job) => scheduled.push(job),
+  });
+
+  const cached = await coordinator.peek(cacheIdentity);
+  assert.equal(cached.success, true);
+  assert.equal(cached.cached_only, true);
+  assert.equal(cached.cache.status, 'expired');
+  assert.equal(cached.cache.refresh_in_progress, false);
+  assert.equal(cached.cache.refresh_available, false);
+  assert.equal(scheduled.length, 0);
+
+  const missingIdentity = identity({ term: 'búsqueda nunca calculada' });
+  const missing = await coordinator.peek(missingIdentity);
+  assert.equal(missing.success, false);
+  assert.equal(missing.cached_only, true);
+  assert.equal(missing.cache_miss, true);
+  assert.equal(missing.cache.status, 'miss');
+  assert.equal(scheduled.length, 0);
+  assert.equal(model.rows.has(missingIdentity.cache_key), false, 'peek must not create an empty cache row');
+}
+
 async function testExpiredSnapshotRefreshesOnceBeforeReturningFreshData() {
   const currentTime = new Date('2026-07-15T10:00:00.000Z');
   const cacheIdentity = identity();
@@ -844,6 +874,7 @@ async function run() {
   await testPassiveCompetitionListNeverCallsPlacesWhenGatesAreEnabled();
   testFreshStaleAndExpiredBoundaries();
   await testStaleResponseIsImmediateAndRefreshIsDeduplicated();
+  await testCachedOnlyPeekNeverSchedulesOrCreatesWork();
   await testExpiredSnapshotRefreshesOnceBeforeReturningFreshData();
   await testProviderFailureUsesShortCacheTtl();
   await testDurableRetryReclaimsLeaseAfterProviderError();

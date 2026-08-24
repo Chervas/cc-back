@@ -224,6 +224,44 @@ function createHeatmapCacheCoordinator({
     }
   }
 
+  /**
+   * Lectura estrictamente pasiva del último valor persistido.
+   *
+   * A diferencia de resolve(), no crea la fila, no adquiere leases y no
+   * programa ningún refresco aunque el valor esté stale o expired. Se usa en
+   * resúmenes compactos donde una visita a la pantalla nunca debe consumir
+   * proveedor ni generar trabajo en segundo plano.
+   */
+  async function peek(identity) {
+    const row = await find(identity);
+    const payload = payloadFromRow(row);
+    const status = heatmapCacheStatus(row, now());
+    if (!payload) {
+      return withHeatmapCacheMetadata({
+        success: false,
+        cached_only: true,
+        cache_miss: true,
+        points: []
+      }, row, {
+        now: now(),
+        status: 'miss',
+        refreshPending: false,
+        refreshAvailable: false,
+        algorithmVersion: identity.algorithm_version
+      });
+    }
+    return withHeatmapCacheMetadata({
+      ...payload,
+      cached_only: true
+    }, row, {
+      now: now(),
+      status,
+      refreshPending: false,
+      refreshAvailable: false,
+      algorithmVersion: identity.algorithm_version
+    });
+  }
+
   async function acquire(identity, observedRow = null) {
     const current = observedRow || await ensure(identity);
     const acquiredAt = now();
@@ -409,7 +447,7 @@ function createHeatmapCacheCoordinator({
     });
   }
 
-  return { resolve, find, ensure, acquire, claimForRefresh, release, generateAndPersist };
+  return { resolve, peek, find, ensure, acquire, claimForRefresh, release, generateAndPersist };
 }
 
 module.exports = {
