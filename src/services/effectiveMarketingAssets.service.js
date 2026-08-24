@@ -1049,7 +1049,8 @@ async function listScopedMetaAssets(scope, dependencies = {}) {
       connection_id: parseInteger(row.metaConnectionId),
       clinic_id: parseInteger(row.clinicaId),
       group_id: parseInteger(row.grupoClinicaId),
-      mapping_id: parseInteger(row.id)
+      mapping_id: parseInteger(row.id),
+      last_checked_at: row.ad_account_refreshed_at || row.adAccountRefreshedAt || null
     })),
     facebook_pages: facebookPages.map((row) => ({
       page_id: cleanString(row.metaAssetId),

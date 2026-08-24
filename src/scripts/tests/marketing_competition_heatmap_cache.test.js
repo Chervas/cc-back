@@ -311,6 +311,39 @@ async function testCachedOnlyPeekNeverSchedulesOrCreatesWork() {
   assert.equal(model.rows.has(missingIdentity.cache_key), false, 'peek must not create an empty cache row');
 }
 
+async function testCachedOnlyPeekPreservesAnExistingRefreshLease() {
+  const currentTime = new Date('2026-07-15T10:00:00.000Z');
+  const cacheIdentity = identity({ term: 'mapa en curso' });
+  const refreshing = {
+    ...cacheIdentity,
+    payload: null,
+    provider_requests: 0,
+    generated_at: null,
+    fresh_until: null,
+    expires_at: null,
+    refresh_state: 'refreshing',
+    refresh_lock_token: 'active-lease',
+    refresh_locked_until: new Date(currentTime.getTime() + (5 * 60 * 1000)),
+  };
+  const model = createFakeCacheModel([refreshing]);
+  const scheduled = [];
+  const coordinator = createHeatmapCacheCoordinator({
+    model,
+    now: () => new Date(currentTime),
+    scheduleRefresh: async (job) => scheduled.push(job),
+  });
+
+  const pending = await coordinator.peek(cacheIdentity);
+
+  assert.equal(pending.success, false);
+  assert.equal(pending.cached_only, true);
+  assert.equal(pending.cache_miss, true);
+  assert.equal(pending.pending, true);
+  assert.equal(pending.cache.refresh_in_progress, true);
+  assert.equal(pending.cache.refresh_available, false);
+  assert.equal(scheduled.length, 0, 'peek must observe the lease without creating another job');
+}
+
 async function testExpiredSnapshotRefreshesOnceBeforeReturningFreshData() {
   const currentTime = new Date('2026-07-15T10:00:00.000Z');
   const cacheIdentity = identity();
@@ -875,6 +908,7 @@ async function run() {
   testFreshStaleAndExpiredBoundaries();
   await testStaleResponseIsImmediateAndRefreshIsDeduplicated();
   await testCachedOnlyPeekNeverSchedulesOrCreatesWork();
+  await testCachedOnlyPeekPreservesAnExistingRefreshLease();
   await testExpiredSnapshotRefreshesOnceBeforeReturningFreshData();
   await testProviderFailureUsesShortCacheTtl();
   await testDurableRetryReclaimsLeaseAfterProviderError();

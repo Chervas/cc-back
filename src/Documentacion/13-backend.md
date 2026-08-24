@@ -784,7 +784,14 @@ La migración `20260715150000-create-marketing-competition-heatmap-cache.js` cre
 
 El refresco stale es `JobRequest.type=marketing_competition_heatmap_refresh`, prioridad baja/background, hasta 4 intentos y namespace del request. `TARGETED_INTEGRATION_JOB_TYPES` y `JOB_HANDLERS` lo registran en el scheduler común. La API obtiene un lease de 30 minutos y usa `enqueueUniqueJobRequest` por `cache_key`; el handler relee identidad/lease y persiste. No se permite `setImmediate`, un cron adicional ni continuar trabajo no auditable después de responder. Reinicios, reintentos, backoff y recuperación pertenecen a `JobRequests`.
 
-`GET /competition` continúa siendo una lectura pasiva de datos persistidos y nunca llama al proveedor. El componente inicia después, de forma separada, el bootstrap autorizado de sugerencias y `local-heatmap`; no debe confundirse con una llamada externa oculta dentro del agregado. Si el heatmap responde `pending`, el frontend hace como máximo cinco comprobaciones con backoff `4/7/12/20/30` segundos; después deja que el job durable continúe y evita polling permanente. `cache.refresh_available` no se deduce solo de que el estado sea distinto de `fresh`: con proveedor/gate contractual bloqueado debe ser `false`, sin `JobRequest`, polling ni llamada externa.
+`GET /competition` continúa siendo una lectura pasiva de datos persistidos y nunca llama al proveedor. El componente inicia después, de forma separada, el bootstrap autorizado de sugerencias y `local-heatmap`; no debe confundirse con una llamada externa oculta dentro del agregado. Si el heatmap responde `pending`, el frontend hace cinco comprobaciones pasivas con backoff `4/7/12/20/30` segundos y después reconsulta únicamente la cache con esperas `60/90/120` segundos, estado de sesión reanudable y tope total de 30 minutos. La primera solicitud explícita es la única que puede iniciar el cálculo: todos los polls usan `cached_only=true`, no crean ni duplican `JobRequest` y no llaman al proveedor. Un fallo HTTP transitorio conserva el estado y reintenta la cache; los errores permanentes terminan el seguimiento. `cache.refresh_available` no se deduce solo de que el estado sea distinto de `fresh`: con proveedor/gate contractual bloqueado debe ser `false`, sin `JobRequest`, polling ni llamada externa.
+
+El `peek` usado por `cached_only` nunca crea una fila, adquiere lease ni
+programa trabajo. Sí debe observar un lease ya existente y devolver
+`pending=true`/`cache.refresh_in_progress=true`; ocultarlo convertiría un cache
+miss temporal en un falso error terminal. Las cuadrículas de `1`, `3` y `5 km`
+usan 25 coordenadas geográficas reales; el autozoom del cliente solo cambia su
+escala visual.
 
 El refresco manual de competidores sigue el mismo principio: `POST /api/marketing/reports/competition/refresh` no llama a Meta/Google ni ejecuta navegador dentro de la petición. Encola/deduplica un `JobRequest.type=competition_refresh` con el scope y los competidores seleccionados, dispara al worker del namespace y responde `202`; el job semanal y el disparo manual comparten handler, auditoría, reintentos y recuperación.
 
@@ -1338,9 +1345,29 @@ Estado de sincronización:
 - Regresión de referencia 2026-07-15: una clínica Propdental heredera recuperaba inversión/campañas Google Ads, pero el estado de fuente quedaba `Pendiente` al contar solo `ClinicGoogleAdsAccount.clinicaId=<clinica>`. El contrato es resolver el mismo activo de grupo que usa Campañas y exponer su origen (`group`) sin duplicar mapping.
 - Estado de implementación 2026-07-15: `marketingReports.controller.js` consume `resolveEffectiveMarketingAssetInventory`, inventario común de solo lectura, para Google Ads, Meta Ads, Facebook, Instagram, Search Console, GA4 y Perfil Google, incluidos `GroupAssetClinicAssignments`. Está cubierto con tests y smoke real para clínica, grupo y multiclínica. Ads mantiene su atribución histórica por scope; las fuentes owner-centric usan un mapping canónico por identidad remota en agregados de grupo/multiclínica para evitar duplicados. Esta garantía corresponde a Informes; jobs y otros lectores de cada vertical conservan su auditoría específica. Código efectivo actual: backend dev `dd08dff`, backend staging/gateway `7f4062e`.
 - La UI que necesita mostrar las conexiones efectivas de Google usa `GET /oauth/google/effective-mappings` con scope explícito y permiso de lectura. El endpoint es DB-only: resuelve una sola vez el inventario común y devuelve `scope`, `descriptors` y `effective_mappings` con `search_console`, `analytics`, `business_profile` y `google_ads`. Cada fila incorpora `assignment_origin`, `inherited`, `read_only=true`, `target_clinic_id`, `owner_clinic_id` y `source_scope`; no consulta Google, no crea asignaciones y no reemplaza los cuatro endpoints físicos `/mappings`, que siguen siendo los editables. En scope clínica, un activo de grupo figura heredado; en scope grupo es nativo, mientras que un activo `shared` permanece heredado y de solo lectura. La UI separa el bloque compartido/read-only de los checkboxes propios y no hace POST sin un diff físico. Regresión canónica: `node src/scripts/tests/oauth_effective_google_mappings.test.js`.
-- `sync.active=true` cuando una fuente conectada tiene `JobRequest` pendiente/en ejecución, registros locales pendientes (`ClinicBusinessLocations.sync_status=pending`) o error.
-- El endpoint considera terminada una sincronización cuando el último `JobRequest` relevante para la clínica está `completed`, aunque la API externa no haya devuelto filas nuevas. Los jobs globales sin `clinicId` no deben contaminar el estado de una clínica concreta.
-- Cuando la clínica consume un activo compartido cuyo mapping físico pertenece a otra sede, el cruce de `JobRequest` amplía el scope con `asset.clinic_id`; así el backfill/error del activo sigue visible para todas sus consumidoras sin considerar globales los jobs sin clínica.
+- `sync.active=true` solo cuando una fuente conectada tiene un `JobRequest`
+  `pending|queued|running|waiting` actualizado en las últimas seis horas, o
+  registros locales realmente pendientes
+  (`ClinicBusinessLocations.sync_status=pending`). Un error es un estado de
+  revisión, no actividad.
+- La relación del job se resuelve primero por clínica y, si el payload no la
+  contiene, por account ID o mapping ID del activo efectivo. Un barrido
+  global/anónimo y un job antiguo no contaminan el estado de una clínica
+  concreta.
+- Cuando la clínica consume un activo compartido cuyo mapping físico pertenece
+  a otra sede, se utilizan las identidades de ese activo efectivo; así su
+  backfill/error sigue visible para las consumidoras sin convertir todo job sin
+  clínica en global.
+- Meta expone `ClinicMetaAssets.ad_account_refreshed_at` como
+  `last_checked_at`, no como fecha de insights. El `lastSync` publicitario
+  procede del último dato agregado real. Si `SocialAdsInsightsDaily` contiene
+  filas de esa cuenta con `clinica_id IS NULL`, la fuente devuelve
+  `state=attribution_pending` y `active=false`: hay datos recibidos pendientes
+  de asignar, no una sincronización infinita. Esta comprobación usa existencia
+  limitada por cuenta efectiva, no un `COUNT/MAX` histórico completo.
+- El endpoint considera terminada una sincronización cuando el último
+  `JobRequest` relevante está `completed`, aunque la API externa no haya
+  devuelto filas nuevas.
 - Si una fuente queda en `state=error`, `sync.message` debe mostrar el mensaje de error de esa fuente, no el texto genérico de "recabando datos".
 - En Perfil de Empresa Google, si el último `JobRequest.result_summary.report.errors[]` indica que `mybusiness.googleapis.com` está deshabilitada, el informe debe indicar que Google está rechazando ese servicio exacto como no habilitado en el proyecto afectado y pedir revisar Google Cloud antes de relanzar el resync.
 - El frontend usa ese estado para mostrar una barra informativa y refrescar cada 60 segundos mientras haya trabajo pendiente.
@@ -1429,7 +1456,11 @@ Principios:
 - Mapa de calor local:
   - Tras abrir los gates contractuales, cada tile estima resultados desde su coordenada usando Google Places Text Search con `locationBias` y `rankPreference=RELEVANCE`; con gates cerrados no se ejecuta. Nunca se presenta como posición exacta o garantizada de Google Search.
   - La matriz por defecto es `5x5` (`COMPETITION_LOCAL_HEATMAP_GRID_SIZE=5`, `COMPETITION_LOCAL_HEATMAP_MAX_POINTS=25`) y se mide hasta Top 20 (`COMPETITION_LOCAL_HEATMAP_RESULT_LIMIT=20`). `null` significa que la clínica no aparece en esa profundidad y debe mostrarse como `>20`; posiciones `1..3` son verde, `4..9` naranja y `10..20` rojo.
-  - El zoom (`1/3/5 km`) solo separa más o menos los puntos alrededor de la clínica. No debe ampliar la ventana de búsqueda de cada tile, porque entonces el punto `Centro` de 3 km/5 km deja de ser comparable con el de 1 km.
+  - Cada radio (`1/3/5 km`) genera 25 coordenadas reales distintas en la misma
+    cuadrícula `5x5`; no añade más burbujas. El cliente puede autoajustar la
+    escala para encajarlas. La ventana de búsqueda de cada tile no se amplía,
+    porque entonces el punto `Centro` de 3 km/5 km dejaría de ser comparable
+    con el de 1 km.
   - No se solicita, descarga, almacena ni reenvía Google Static Maps. Backend tampoco solicita ni sirve teselas OSM: devuelve coordenadas de muestreo y ranking. El navegador carga únicamente las teselas OSM visibles, con atribución, y mantiene separada la atribución del ranking de Google Maps; no superpone nombres ni contenido de fichas Places.
   - La consulta efectiva elimina sufijos geográficos redundantes del término elegido (`"clínica capilar en Alicante"` -> `"clínica capilar"`) y la UI muestra también el término original si cambia.
   - En podología, no usar `"uñas"` como término aislado de ranking/relevancia. Debe ser contexto clínico (`"podólogo uñas encarnadas"`, `"podología"`, `"clínica podológica"`, `"quiropod"`, `"plantilla"`), porque `"uñas"` trae centros de manicura y distorsiona el mapa.
@@ -1461,7 +1492,7 @@ Endpoints:
 |:---|:---|:---|
 | `GET /api/marketing/reports/competition` | Operativo backend V1 | Lista competidores, último snapshot, anuncios activos y estado de proveedores. |
 | `GET /api/marketing/reports/competition/suggestions` | Operativo con gate | Con proveedor autorizado alimenta el bootstrap automático y el refresco manual; reutiliza seis horas. Sin gate devuelve proveedor requerido y mantiene el alta manual. |
-| `GET /api/marketing/reports/competition/local-heatmap` | Operativo con gate | Alimenta la matriz inicial de 1 km y cada cambio explícito de término/radio; sin gate devuelve proveedor requerido. |
+| `GET /api/marketing/reports/competition/local-heatmap` | Operativo con gate | Alimenta la matriz inicial de 1 km y cada cambio explícito de término/radio. `cached_only=true` ejecuta un `peek`: no crea fila, lease, job ni llamada de proveedor, pero puede observar un lease existente y devolver `pending/refresh_in_progress`. Sin gate devuelve proveedor requerido. |
 | `POST /api/marketing/reports/competition/competitors` | Operativo backend V1 | Añade un competidor confirmado por el usuario. |
 | `PATCH /api/marketing/reports/competition/competitors/:competitorId` | Operativo backend V1 | Edita datos, `meta_page_id`, términos de búsqueda o estado. |
 | `DELETE /api/marketing/reports/competition/competitors/:competitorId` | Operativo backend V1 | Desactiva sin borrar histórico. |

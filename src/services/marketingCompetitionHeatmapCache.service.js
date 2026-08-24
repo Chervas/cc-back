@@ -236,16 +236,24 @@ function createHeatmapCacheCoordinator({
     const row = await find(identity);
     const payload = payloadFromRow(row);
     const status = heatmapCacheStatus(row, now());
+    // Una lectura cached-only nunca inicia trabajo, pero debe conservar el
+    // estado del lease existente. Si lo ocultamos, el cliente interpreta el
+    // primer cache miss como terminal aunque el JobRequest siga calculando.
+    const refreshPending = refreshInProgress(row, now());
     if (!payload) {
       return withHeatmapCacheMetadata({
         success: false,
         cached_only: true,
         cache_miss: true,
+        ...(refreshPending ? {
+          pending: true,
+          message: 'El mapa local se está calculando. Vuelve a consultarlo en unos segundos.'
+        } : {}),
         points: []
       }, row, {
         now: now(),
         status: 'miss',
-        refreshPending: false,
+        refreshPending,
         refreshAvailable: false,
         algorithmVersion: identity.algorithm_version
       });
@@ -256,7 +264,7 @@ function createHeatmapCacheCoordinator({
     }, row, {
       now: now(),
       status,
-      refreshPending: false,
+      refreshPending,
       refreshAvailable: false,
       algorithmVersion: identity.algorithm_version
     });

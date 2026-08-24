@@ -133,6 +133,17 @@ async function testExplicitlySharedMetaProfilesAreEffective() {
         metaAssetName: 'Perfil compartido',
         metaConnectionId: 7,
         isActive: true,
+      }, {
+        id: 22,
+        clinicaId: 36,
+        grupoClinicaId: 5,
+        assignmentScope: 'clinic',
+        assetType: 'ad_account',
+        metaAssetId: 'act_123456789',
+        metaAssetName: 'Cuenta de la clínica',
+        metaConnectionId: 7,
+        ad_account_refreshed_at: '2026-08-23T22:17:34.000Z',
+        isActive: true,
       }];
     },
   };
@@ -145,6 +156,9 @@ async function testExplicitlySharedMetaProfilesAreEffective() {
   assert.equal(assets.facebook_pages[0].page_id, 'page-21');
   assert.equal(assets.facebook_pages[0].assignment_origin, 'shared');
   assert.equal(assets.facebook_pages[0].mapping_id, 21);
+  assert.equal(assets.ad_accounts.length, 1);
+  assert.equal(assets.ad_accounts[0].ad_account_id, 'act_123456789');
+  assert.equal(assets.ad_accounts[0].last_checked_at, '2026-08-23T22:17:34.000Z');
 }
 
 async function testGooglePropertiesResolveDirectSharedAndGroupPrimary() {

@@ -1522,6 +1522,8 @@ async function aggregateMetaAds(scope, range, marketingState = null, paidCoverag
     totals,
     campaigns,
     connected: activeAccounts > 0,
+    // La fecha del informe debe proceder de insights, no de la comprobación
+    // del estado administrativo de la cuenta publicitaria.
     lastSync: totalRow?.lastDate || null,
   };
 }
@@ -2164,6 +2166,7 @@ function buildSources({ intakeConfigCount, leadsTotal, seo, googleAds, metaAds, 
 
 const SYNC_ACTIVE_STATUSES = ['pending', 'queued', 'running', 'waiting'];
 const SYNC_RECENT_STATUSES = [...SYNC_ACTIVE_STATUSES, 'completed', 'failed'];
+const SYNC_ACTIVE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 const SOURCE_SYNC_CONFIG = {
   search_console: {
     source: 'Search Console',
@@ -2271,15 +2274,90 @@ function collectClinicIdsFromPayload(value, out = new Set()) {
   return out;
 }
 
-function jobMatchesScope(job, scope) {
+function normalizeSyncRelationId(value) {
+  const normalized = String(value ?? '').trim().replace(/^act_/, '').replace(/\D+/g, '');
+  return normalized || null;
+}
+
+function collectSyncRelationIds(value, keyNames, out = new Set()) {
+  if (!value || typeof value !== 'object') return out;
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectSyncRelationIds(item, keyNames, out));
+    return out;
+  }
+
+  Object.entries(value).forEach(([key, nested]) => {
+    if (keyNames.has(key)) {
+      normalizePayloadArray(nested).forEach((item) => {
+        const assetRelation = /asset|mapping/i.test(key);
+        const candidate = item && typeof item === 'object'
+          ? (assetRelation
+            ? (item.assetId ?? item.asset_id ?? item.mappingId ?? item.mapping_id ?? item.id)
+            : (item.adAccountId ?? item.ad_account_id ?? item.customerId ?? item.customer_id
+              ?? item.accountId ?? item.account_id ?? item.id))
+          : item;
+        const normalized = normalizeSyncRelationId(candidate);
+        if (normalized) out.add(normalized);
+      });
+    }
+    if (nested && typeof nested === 'object') {
+      collectSyncRelationIds(nested, keyNames, out);
+    }
+  });
+  return out;
+}
+
+const SYNC_ACCOUNT_RELATION_KEYS = new Set([
+  'accountId', 'account_id', 'accountIds', 'account_ids',
+  'adAccountId', 'ad_account_id', 'adAccountIds', 'ad_account_ids',
+  'metaAdAccountId', 'meta_ad_account_id', 'metaAdAccountIds', 'meta_ad_account_ids',
+  'customerId', 'customer_id', 'customerIds', 'customer_ids',
+  'accounts',
+]);
+const SYNC_ASSET_RELATION_KEYS = new Set([
+  'assetId', 'asset_id', 'assetIds', 'asset_ids',
+  'mappingId', 'mapping_id', 'mappingIds', 'mapping_ids',
+  'assets', 'mappings',
+]);
+
+function intersectsSyncRelation(jobIds, expectedIds) {
+  const expected = new Set((expectedIds || []).map(normalizeSyncRelationId).filter(Boolean));
+  return expected.size > 0 && Array.from(jobIds).some((id) => expected.has(id));
+}
+
+function jobMatchesScope(job, scope, relation = {}) {
   const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.map(Number).filter(Number.isInteger) : [];
   if (!clinicIds.length || scope?.isAll) return true;
   const payloadClinicIds = Array.from(collectClinicIdsFromPayload(job?.payload));
-  if (!payloadClinicIds.length) return false;
-  return payloadClinicIds.some((id) => clinicIds.includes(id));
+  if (payloadClinicIds.length) {
+    return payloadClinicIds.some((id) => clinicIds.includes(id));
+  }
+
+  const payloadAccountIds = collectSyncRelationIds(job?.payload, SYNC_ACCOUNT_RELATION_KEYS);
+  if (payloadAccountIds.size) {
+    return intersectsSyncRelation(payloadAccountIds, relation.accountIds);
+  }
+
+  const payloadAssetIds = collectSyncRelationIds(job?.payload, SYNC_ASSET_RELATION_KEYS);
+  if (payloadAssetIds.size) {
+    return intersectsSyncRelation(payloadAssetIds, relation.assetIds);
+  }
+
+  // Un barrido global sin identidades no prueba que este activo concreto esté
+  // en curso. El estado del proveedor se resolverá con su última sincronización.
+  return false;
 }
 
-async function recentJobsForSource(config, scope) {
+function isLiveSyncJob(job, now = Date.now()) {
+  if (!job || !SYNC_ACTIVE_STATUSES.includes(job.status)) return false;
+  const timestamp = job.updated_at || job.last_attempt_at || job.created_at;
+  const parsed = timestamp ? new Date(timestamp).getTime() : NaN;
+  if (!Number.isFinite(parsed)) return false;
+  const age = now - parsed;
+  return age >= 0 && age <= SYNC_ACTIVE_MAX_AGE_MS;
+}
+
+async function recentJobsForSource(config, scope, relation = {}) {
   if (!JobRequest || !Array.isArray(config?.jobTypes) || !config.jobTypes.length) {
     return [];
   }
@@ -2291,15 +2369,26 @@ async function recentJobsForSource(config, scope) {
       created_at: { [Op.gte]: since },
     },
     order: [['updated_at', 'DESC'], ['created_at', 'DESC'], ['id', 'DESC']],
-    limit: 100,
+    // Los jobs de otros scopes pueden compartir tipo/ventana. Un margen mayor
+    // evita expulsar el job efectivo antes del filtro relacional en memoria.
+    limit: 500,
     raw: true,
   });
-  return rows.filter((row) => jobMatchesScope(row, scope));
+  return rows.filter((row) => jobMatchesScope(row, scope, relation));
 }
 
-function buildSourceSyncState({ config, mapped, lastSync, jobs = [], pendingRecords = 0, errorRecords = 0 }) {
+function buildSourceSyncState({
+  config,
+  mapped,
+  lastSync,
+  jobs = [],
+  pendingRecords = 0,
+  errorRecords = 0,
+  attributionPending = false,
+  now = Date.now(),
+}) {
   if (!mapped) return null;
-  const activeJob = jobs.find((job) => SYNC_ACTIVE_STATUSES.includes(job.status));
+  const activeJob = jobs.find((job) => isLiveSyncJob(job, now));
 
   if (activeJob) {
     return {
@@ -2320,10 +2409,22 @@ function buildSourceSyncState({ config, mapped, lastSync, jobs = [], pendingReco
       source: config.source,
       label: config.label,
       state: 'error',
-      active: true,
+      active: false,
       message: sourceSyncMessage(config.label, 'error', extractJobSyncError(errorJob)),
       jobId: errorJob?.id || null,
       updatedAt: errorJob?.updated_at || errorJob?.created_at || null,
+    };
+  }
+
+  if (attributionPending) {
+    return {
+      source: config.source,
+      label: config.label,
+      state: 'attribution_pending',
+      active: false,
+      message: `${config.label} ya ha recibido datos, pero todavía hay campañas o métricas sin asignar a esta clínica. Revisa la atribución de campañas.`,
+      jobId: terminalJob?.id || null,
+      updatedAt: lastSync || terminalJob?.completed_at || terminalJob?.updated_at || terminalJob?.created_at || null,
     };
   }
 
@@ -2343,9 +2444,9 @@ function buildSourceSyncState({ config, mapped, lastSync, jobs = [], pendingReco
     return {
       source: config.source,
       label: config.label,
-      state: 'syncing',
-      active: true,
-      message: sourceSyncMessage(config.label, 'syncing'),
+      state: 'pending',
+      active: false,
+      message: `${config.label} está conectado, pero no hay una sincronización activa ni datos disponibles todavía.`,
       jobId: null,
       updatedAt: null,
     };
@@ -2358,6 +2459,37 @@ function buildSourceSyncState({ config, mapped, lastSync, jobs = [], pendingReco
     active: false,
     message: `${config.label} sincronizado.`,
     updatedAt: lastSync || null,
+  };
+}
+
+async function resolveMetaAttributionStatus(scope, marketingState, dependencies = {}) {
+  if (scope?.isAll || scope?.scope !== 'clinic') {
+    return { pending: false, unattributedRows: 0, lastUnattributedAt: null };
+  }
+  const model = dependencies.SocialAdsInsightsDaily || SocialAdsInsightsDaily;
+  if (!model) return { pending: false, unattributedRows: 0, lastUnattributedAt: null };
+
+  const accounts = effectiveMetaAssets(marketingState).adAccounts;
+  const accountIds = normalizedUniqueStrings(accounts.map((account) => account.ad_account_id));
+  if (!accountIds.length) return { pending: false, unattributedRows: 0, lastUnattributedAt: null };
+
+  const where = {
+    ad_account_id: accountIds.length === 1 ? accountIds[0] : { [Op.in]: accountIds },
+    clinica_id: { [Op.is]: null },
+  };
+  // La identidad remota ya procede del inventario efectivo del scope. Buscar
+  // existencia por cuenta evita el COUNT/MAX completo y cubre a la vez activos
+  // propios y heredados con distinto grupo físico.
+  const row = await model.findOne({
+    attributes: ['id', 'date', 'updated_at'],
+    where,
+    order: [['date', 'DESC'], ['id', 'DESC']],
+    raw: true,
+  });
+  return {
+    pending: Boolean(row),
+    unattributedRows: row ? 1 : 0,
+    lastUnattributedAt: row?.updated_at || row?.date || null,
   };
 }
 
@@ -2383,6 +2515,7 @@ async function buildSyncStatus(scope, { seo, googleAds, metaAds, ga, businessPro
     businessProfileJobs,
     googleAdsJobs,
     metaAdsJobs,
+    metaAttribution,
   ] = await Promise.all([
     marketingState
       ? scopedGoogleProperties.searchConsole.length
@@ -2408,8 +2541,15 @@ async function buildSyncStatus(scope, { seo, googleAds, metaAds, ga, businessPro
     recentJobsForSource(SOURCE_SYNC_CONFIG.search_console, searchConsoleJobScope),
     recentJobsForSource(SOURCE_SYNC_CONFIG.analytics, analyticsJobScope),
     recentJobsForSource(SOURCE_SYNC_CONFIG.business_profile, businessProfileJobScope),
-    recentJobsForSource(SOURCE_SYNC_CONFIG.google_ads, googleAdsJobScope),
-    recentJobsForSource(SOURCE_SYNC_CONFIG.meta_ads, metaAdsJobScope),
+    recentJobsForSource(SOURCE_SYNC_CONFIG.google_ads, googleAdsJobScope, {
+      accountIds: scopedGoogleAccounts.map((account) => account.customer_id),
+      assetIds: scopedGoogleAccounts.map((account) => account.mapping_id),
+    }),
+    recentJobsForSource(SOURCE_SYNC_CONFIG.meta_ads, metaAdsJobScope, {
+      accountIds: scopedMetaAssets.adAccounts.map((account) => account.ad_account_id),
+      assetIds: scopedMetaAssets.adAccounts.map((account) => account.mapping_id),
+    }),
+    resolveMetaAttributionStatus(scope, marketingState),
   ]);
 
   const businessPending = businessLocations.filter((row) => row.sync_status === 'pending' || !row.last_synced_at).length;
@@ -2456,6 +2596,7 @@ async function buildSyncStatus(scope, { seo, googleAds, metaAds, ga, businessPro
       mapped: metaAdsMappings > 0,
       lastSync: metaAds.lastSync,
       jobs: metaAdsJobs,
+      attributionPending: metaAttribution.pending,
     }),
   ].filter(Boolean);
 
@@ -2925,4 +3066,10 @@ exports.__testing = {
   buildGoogleAdsDataWhere,
   buildMetaAdsDataWhere,
   latestEffectiveGoogleSync,
+  normalizeSyncRelationId,
+  collectSyncRelationIds,
+  jobMatchesScope,
+  isLiveSyncJob,
+  buildSourceSyncState,
+  resolveMetaAttributionStatus,
 };
