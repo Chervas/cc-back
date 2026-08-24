@@ -178,6 +178,46 @@ function testBusinessProfileCategoryWinsOverSecondaryClinicDiscipline() {
   assert.doesNotMatch(relevance.label, /digestiva|hepatobiliar/);
 }
 
+function testDefaultHeatmapSearchUsesNaturalNearMeLanguage() {
+  const clinic = {
+    business_primary_category: 'Clínica de cirugía plástica',
+    business_location_name: 'BS Medical - Cirugía y Medicina Estética',
+    ciudad: 'Alicante (Alacant)',
+    configuracion: { disciplinas: ['estetica'] },
+  };
+
+  expectNaturalHeatmapSearch(clinic, 'clínica estética cerca de mí', 'clínica estética');
+}
+
+function testLocalizedNearMeLabelsNeverReachTheProvider() {
+  const clinic = { ciudad: 'Alicante (Alacant)', provincia: 'Alicante' };
+  assert.equal(__testing.heatmapSearchTermForClinic('aesthetic clinic near me', clinic), 'aesthetic clinic');
+  assert.equal(__testing.heatmapSearchTermForClinic('clínica estètica a prop meu', clinic), 'clínica estètica');
+}
+
+function testHistoricalSavedHeatmapSearchExposesItsCurrentEffectiveTerm() {
+  const clinic = {
+    ciudad: 'Alicante (Alacant)',
+    provincia: 'Alicante',
+  };
+  const mapped = __testing.mapSavedHeatmapSearchForClinic({
+    id: 91,
+    search_term: 'medicina estética en Alicante (Alacant)',
+    effective_term: 'medicina estética en Alicante (Alacant)',
+    zoom_km: 3,
+  }, clinic);
+
+  assert.equal(mapped.term, 'medicina estética en Alicante (Alacant)');
+  assert.equal(mapped.effective_term, 'medicina estética');
+  assert.equal(mapped.zoom_km, 3);
+}
+
+function expectNaturalHeatmapSearch(clinic, expectedDisplay, expectedProviderTerm) {
+  const displayTerm = __testing.defaultLocalHeatmapTermForClinic(clinic);
+  assert.equal(displayTerm, expectedDisplay);
+  assert.equal(__testing.heatmapSearchTermForClinic(displayTerm, clinic), expectedProviderTerm);
+}
+
 async function testManualGoogleUrlGeneratesPersistedClinicIdentity() {
   const persisted = [];
   const resolved = await __testing.ensureClinicLocalProfileUrlIdentity({
@@ -238,6 +278,9 @@ async function run() {
     await testSuggestionCenterFallsBackToOwnPlaceDetails();
     testAutomaticQueryUsesBusinessProfileLocality();
     testBusinessProfileCategoryWinsOverSecondaryClinicDiscipline();
+    testDefaultHeatmapSearchUsesNaturalNearMeLanguage();
+    testLocalizedNearMeLabelsNeverReachTheProvider();
+    testHistoricalSavedHeatmapSearchExposesItsCurrentEffectiveTerm();
     await testManualGoogleUrlGeneratesPersistedClinicIdentity();
     console.log('marketing_competition_suggestions_efficiency.test.js OK');
   } finally {

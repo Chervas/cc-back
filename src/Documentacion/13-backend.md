@@ -7639,6 +7639,21 @@ una opcion incluida no eliminable y las busquedas adicionales son eliminables.
 La API valida scope, normaliza terminos y no ejecuta el proveedor al guardar:
 la medicion se solicita despues mediante el endpoint existente de heatmap.
 
+La identidad visible y el término técnico están separados. La opción incluida
+se devuelve en lenguaje natural (`<categoria> cerca de mi`) para evitar
+localidades administrativas artificiales como `Alicante (Alacant)`. Antes de
+consultar Places, `heatmapSearchTermForClinic` elimina los sufijos localizados
+`cerca de mi`, `near me` y `a prop meu`, además de cualquier localidad
+redundante; la precisión geográfica procede de `locationBias` y de las
+coordenadas de la ficha. Por tanto, cambiar el idioma o el texto de presentación
+no crea una identidad distinta de proveedor ni invalida las cachés existentes
+del término efectivo.
+
+Al listar búsquedas guardadas, `mapSavedHeatmapSearchForClinic` vuelve a derivar
+`effective_term` también para filas históricas. De este modo la UI puede agrupar
+los radios `1/3/5 km` bajo una sola intención legible sin migrar ni duplicar la
+identidad persistida de cada medición.
+
 `MarketingCompetitionHeatmapSnapshots` conserva una instantanea semanal por
 clinica, termino normalizado, radio y semana. El servicio compara una medicion
 con la semana anterior equivalente y expone por punto

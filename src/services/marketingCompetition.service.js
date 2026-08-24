@@ -2104,7 +2104,9 @@ function heatmapSearchTermForClinic(term, clinic) {
     clinic?.pais
   ].map(normalizeBusinessName).filter(Boolean);
 
-  let stripped = raw;
+  let stripped = raw
+    .replace(/\s+(?:cerca\s+de\s+m[ií]|near\s+me|a\s+prop\s+meu)\s*$/i, '')
+    .trim();
   const normalizedAfterEn = normalizedRaw?.includes(' en ')
     ? normalizedRaw.slice(normalizedRaw.lastIndexOf(' en ') + 4)
     : null;
@@ -2119,6 +2121,12 @@ function heatmapSearchTermForClinic(term, clinic) {
   }
 
   return cleanString(stripped) || raw;
+}
+
+function defaultLocalHeatmapTermForClinic(clinic) {
+  const rankedTerm = rankingTermsForClinic(clinic)[0] || competitionServiceHint(clinic);
+  const effectiveTerm = heatmapSearchTermForClinic(rankedTerm, clinic);
+  return effectiveTerm ? `${effectiveTerm} cerca de mí` : null;
 }
 
 function offsetLatLng(center, xKm, yKm) {
@@ -2833,10 +2841,23 @@ function mapSavedHeatmapSearch(row, { isDefault = false } = {}) {
   };
 }
 
+function mapSavedHeatmapSearchForClinic(row, clinic) {
+  return mapSavedHeatmapSearch({
+    ...row,
+    // Las filas históricas pueden conservar una localidad redundante en
+    // effective_term. La identidad persistida no se altera, pero la API
+    // devuelve siempre el término efectivo que realmente usa el proveedor
+    // junto al sesgo de coordenadas de la clínica.
+    effective_term: heatmapSearchTermForClinic(row.search_term, clinic)
+      || row.effective_term
+      || row.search_term,
+  });
+}
+
 async function listLocalHeatmapSearches(scope) {
   const clinic = await resolvePrimaryClinic(scope);
   if (!clinic) return { success: true, items: [] };
-  const defaultTerm = rankingTermsForClinic(clinic)[0] || null;
+  const defaultTerm = defaultLocalHeatmapTermForClinic(clinic);
   const saved = MarketingCompetitionHeatmapSearch
     ? await MarketingCompetitionHeatmapSearch.findAll({
       where: { primary_clinic_id: clinic.id_clinica },
@@ -2854,7 +2875,7 @@ async function listLocalHeatmapSearches(scope) {
       created_at: null,
     }, { isDefault: true }));
   }
-  items.push(...saved.map((row) => mapSavedHeatmapSearch(row)));
+  items.push(...saved.map((row) => mapSavedHeatmapSearchForClinic(row, clinic)));
   return { success: true, items };
 }
 
@@ -3008,7 +3029,7 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3, cachedOn
   }
 
   const terms = rankingTermsForClinic(clinic);
-  const selectedTerm = normalizedTerm || terms[0];
+  const selectedTerm = normalizedTerm || defaultLocalHeatmapTermForClinic(clinic);
   if (!selectedTerm) {
     return withBlockedLocalHeatmapMetadata({
       success: false,
@@ -5556,6 +5577,9 @@ module.exports = {
     generateLocalRankingHeatmapSnapshot,
     inferCompetitionQuery,
     rankingTermsForClinic,
+    heatmapSearchTermForClinic,
+    defaultLocalHeatmapTermForClinic,
+    mapSavedHeatmapSearchForClinic,
     competitorRelevanceForClinic,
     ensureClinicLocalProfileUrlIdentity,
     enrichClinicWithResolvedLocalProfile,
