@@ -4445,12 +4445,24 @@ async function reconcileOfficialGoogleAdsTransparency(competitors = [], options 
   };
 }
 
-function adSnapshotPayload(snapshot) {
+function isFailedAdSnapshot(snapshot) {
+  const plain = snapshot && typeof snapshot.toJSON === 'function' ? snapshot.toJSON() : snapshot;
+  return ['unavailable', 'error', 'failed'].includes(String(plain?.status || '').toLowerCase());
+}
+
+function adSnapshotPayload(snapshot, latestAttemptSnapshot = snapshot) {
   const ads = snapshot && typeof snapshot.toJSON === 'function' ? snapshot.toJSON() : snapshot;
+  const latestAttempt = latestAttemptSnapshot && typeof latestAttemptSnapshot.toJSON === 'function'
+    ? latestAttemptSnapshot.toJSON()
+    : latestAttemptSnapshot;
   const activeAds = Array.isArray(ads?.active_ads) ? ads.active_ads : [];
   const resolution = ads?.raw_payload?.clinicaclick_resolution;
   const resolvedPage = resolution?.page || null;
   const candidateProfile = resolution?.candidate_profile || null;
+  const dataIsStale = !!ads
+    && !!latestAttempt
+    && String(ads.id || ads.snapshot_date || ads.updated_at || '') !== String(latestAttempt.id || latestAttempt.snapshot_date || latestAttempt.updated_at || '')
+    && isFailedAdSnapshot(latestAttempt);
   const unresolvedLegacyIdentity = ads?.status === 'completed'
     && Number(ads?.ads_count || 0) === 0
     && resolution?.fallback_filtered === true
@@ -4478,11 +4490,22 @@ function adSnapshotPayload(snapshot) {
     api_result_status: cleanString(resolution?.api_result_status),
     library_url: normalizeUrl(resolution?.page_library_url)
       || (cleanString(resolvedPage?.page_id) ? metaAdsLibraryPageUrl(resolvedPage.page_id) : null),
-    last_synced_at: ads?.updated_at || null
+    last_synced_at: ads?.updated_at || null,
+    data_is_stale: dataIsStale,
+    refresh_status: dataIsStale ? (latestAttempt?.status || null) : null,
+    refresh_error_code: dataIsStale ? (latestAttempt?.error_code || null) : null,
+    refresh_error_message: dataIsStale ? (latestAttempt?.error_message || null) : null,
+    refresh_attempted_at: dataIsStale ? (latestAttempt?.updated_at || null) : null,
   };
 }
 
-function mapCompetitorRow(row, latestSnapshot = null, latestAdSnapshot = null, latestGoogleAdSnapshot = null) {
+function mapCompetitorRow(
+  row,
+  latestSnapshot = null,
+  latestAdSnapshot = null,
+  latestGoogleAdSnapshot = null,
+  latestGoogleAdAttemptSnapshot = latestGoogleAdSnapshot,
+) {
   const stored = typeof row.toJSON === 'function' ? row.toJSON() : row;
   const placesContentRestricted = stored?.source === 'google_places'
     && !competitionPlacesFeatureEnabled();
@@ -4506,7 +4529,7 @@ function mapCompetitorRow(row, latestSnapshot = null, latestAdSnapshot = null, l
   const rawSnapshot = latestSnapshot && typeof latestSnapshot.toJSON === 'function' ? latestSnapshot.toJSON() : latestSnapshot;
   const snapshot = placesContentRestricted ? null : rawSnapshot;
   const ads = adSnapshotPayload(latestAdSnapshot);
-  const googleAds = adSnapshotPayload(latestGoogleAdSnapshot);
+  const googleAds = adSnapshotPayload(latestGoogleAdSnapshot, latestGoogleAdAttemptSnapshot);
   const googleAdsIdentity = googleAdsIdentityFromPayload({ raw_place_payload: plain.raw_place_payload });
   return {
     id: plain.id,
@@ -4568,7 +4591,12 @@ function mapCompetitorRow(row, latestSnapshot = null, latestAdSnapshot = null, l
       active_ads: googleAds.active_ads,
       error_code: googleAds.error_code,
       error_message: googleAds.error_message,
-      last_synced_at: googleAds.last_synced_at
+      last_synced_at: googleAds.last_synced_at,
+      data_is_stale: googleAds.data_is_stale,
+      refresh_status: googleAds.refresh_status,
+      refresh_error_code: googleAds.refresh_error_code,
+      refresh_error_message: googleAds.refresh_error_message,
+      refresh_attempted_at: googleAds.refresh_attempted_at,
     },
     social_profiles: socialProfilesFromPayload(plain.raw_place_payload),
     photo_name: placesContentRestricted ? null : (extractPhotoNames(plain.raw_place_payload || [])[0] || null),
@@ -4592,12 +4620,29 @@ function mapCompetitorRow(row, latestSnapshot = null, latestAdSnapshot = null, l
 async function hydrateCompetitors(rows) {
   const hydrated = [];
   for (const row of rows) {
-    const [snapshot, adSnapshot, googleAdSnapshot] = await Promise.all([
+    const [snapshot, adSnapshot, latestGoogleAdAttemptSnapshot] = await Promise.all([
       MarketingCompetitorSnapshot.findOne({ where: { competitor_id: row.id }, order: [['snapshot_date', 'DESC'], ['id', 'DESC']] }),
       MarketingCompetitorAdSnapshot.findOne({ where: { competitor_id: row.id, provider: META_ADS_LIBRARY_PROVIDER }, order: [['snapshot_date', 'DESC'], ['id', 'DESC']] }),
       MarketingCompetitorAdSnapshot.findOne({ where: { competitor_id: row.id, provider: GOOGLE_ADS_TRANSPARENCY_PROVIDER }, order: [['snapshot_date', 'DESC'], ['id', 'DESC']] })
     ]);
-    hydrated.push(await attachPlacePhotoUrl(mapCompetitorRow(row, snapshot, adSnapshot, googleAdSnapshot), { maxWidthPx: 640 }));
+    let googleAdSnapshot = latestGoogleAdAttemptSnapshot;
+    if (isFailedAdSnapshot(latestGoogleAdAttemptSnapshot)) {
+      googleAdSnapshot = await MarketingCompetitorAdSnapshot.findOne({
+        where: {
+          competitor_id: row.id,
+          provider: GOOGLE_ADS_TRANSPARENCY_PROVIDER,
+          status: 'completed',
+        },
+        order: [['snapshot_date', 'DESC'], ['id', 'DESC']],
+      }) || latestGoogleAdAttemptSnapshot;
+    }
+    hydrated.push(await attachPlacePhotoUrl(mapCompetitorRow(
+      row,
+      snapshot,
+      adSnapshot,
+      googleAdSnapshot,
+      latestGoogleAdAttemptSnapshot,
+    ), { maxWidthPx: 640 }));
   }
   return hydrated;
 }

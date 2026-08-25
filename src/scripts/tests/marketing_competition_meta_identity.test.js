@@ -183,6 +183,35 @@ function testManualGoogleAdsIdentityCanBeSavedAndCleared() {
   assert.equal(cleared.source, 'places');
 }
 
+function testFailedGoogleRefreshKeepsLastValidSnapshotVisible() {
+  const payload = __testing.adSnapshotPayload({
+    id: 101,
+    status: 'completed',
+    ads_count: 34,
+    active_ads: [{ id: 'google-ad-1' }],
+    updated_at: '2026-08-17T04:11:37.000Z',
+    raw_payload: {
+      clinicaclick_resolution: { mode: 'domain', domain: 'example.test' },
+    },
+  }, {
+    id: 102,
+    status: 'unavailable',
+    ads_count: 0,
+    active_ads: [],
+    error_code: 'ERR_BAD_REQUEST',
+    error_message: 'Request failed with status code 429',
+    updated_at: '2026-08-24T04:11:37.000Z',
+  });
+
+  assert.equal(payload.ads_status, 'completed');
+  assert.equal(payload.active_ads_count, 34);
+  assert.equal(payload.data_is_stale, true);
+  assert.equal(payload.refresh_status, 'unavailable');
+  assert.equal(payload.refresh_error_code, 'ERR_BAD_REQUEST');
+  assert.match(payload.refresh_error_message, /429/);
+  assert.equal(payload.refresh_attempted_at, '2026-08-24T04:11:37.000Z');
+}
+
 function testLegacyCompletedZeroWithoutPageIsReadAsUnresolved() {
   const payload = __testing.adSnapshotPayload({
     status: 'completed',
@@ -232,6 +261,7 @@ async function run() {
   testResolvedPageWithNoActiveAdsIsAValidZero();
   testResolvedPageWithNoApiRowsKeepsItsCanonicalIdentity();
   testManualGoogleAdsIdentityCanBeSavedAndCleared();
+  testFailedGoogleRefreshKeepsLastValidSnapshotVisible();
   testLegacyCompletedZeroWithoutPageIsReadAsUnresolved();
   testOptionalProviderFailuresStayPartialWhenPlacesSucceeded();
   console.log('marketing_competition_meta_identity.test.js OK');
