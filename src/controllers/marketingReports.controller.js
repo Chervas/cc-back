@@ -1644,6 +1644,29 @@ async function aggregateSeo(scope, range, marketingState = null) {
   };
 }
 
+function normalizeSocialFollowerDeltas(rows = []) {
+  const previousByAsset = new Map();
+  return [...rows]
+    .sort((left, right) => {
+      const dateOrder = String(left.date || '').localeCompare(String(right.date || ''));
+      if (dateOrder) return dateOrder;
+      const typeOrder = String(left.asset_type || '').localeCompare(String(right.asset_type || ''));
+      if (typeOrder) return typeOrder;
+      return String(left.asset_id || '').localeCompare(String(right.asset_id || ''));
+    })
+    .map((row) => {
+      const assetKey = `${row.asset_type || 'unknown'}:${row.asset_id || 'unknown'}`;
+      const followers = toNumber(row.followers);
+      let followersDelta = 0;
+      if (followers > 0) {
+        const previous = previousByAsset.get(assetKey);
+        if (previous != null) followersDelta = followers - previous;
+        previousByAsset.set(assetKey, followers);
+      }
+      return { ...row, normalizedFollowersDelta: followersDelta };
+    });
+}
+
 async function aggregateSocialOrganic(scope, range, marketingState = null) {
   const empty = {
     summary: {
@@ -1658,6 +1681,7 @@ async function aggregateSocialOrganic(scope, range, marketingState = null) {
       { platform: 'Facebook', connected: false, reach: 0, impressions: 0, profileVisits: 0, followers: 0, followersDelta: 0, posts: 0, lastSync: null },
       { platform: 'Instagram', connected: false, reach: 0, impressions: 0, profileVisits: 0, followers: 0, followersDelta: 0, posts: 0, lastSync: null },
     ],
+    trend: [],
     topPosts: [],
     connected: false,
     lastSync: null,
@@ -1689,7 +1713,6 @@ async function aggregateSocialOrganic(scope, range, marketingState = null) {
       [fn('SUM', col('views')), 'views'],
       [fn('SUM', col('profile_visits')), 'profileVisits'],
       [fn('MAX', col('followers')), 'followers'],
-      [fn('SUM', col('followers_day')), 'followersDelta'],
       [fn('MAX', col('date')), 'lastDate'],
     ],
     where: {
@@ -1715,6 +1738,26 @@ async function aggregateSocialOrganic(scope, range, marketingState = null) {
     raw: true,
   });
 
+  const trendRows = await SocialStatsDaily.findAll({
+    attributes: [
+      'date',
+      'asset_type',
+      'asset_id',
+      [literal('SUM(COALESCE(reach_total, reach, 0))'), 'reach'],
+      [literal('SUM(COALESCE(NULLIF(impressions, 0), views, 0))'), 'impressions'],
+      [fn('SUM', col('profile_visits')), 'profileVisits'],
+      [fn('MAX', col('followers')), 'followers'],
+    ],
+    where: {
+      ...socialDataScope,
+      asset_type: { [Op.in]: ['facebook_page', 'instagram_business'] },
+      ...buildDateOnlyWhere('date', range),
+    },
+    group: ['date', 'asset_type', 'asset_id'],
+    order: [['date', 'ASC']],
+    raw: true,
+  });
+
   const postCounts = new Map(postRows.map((row) => [row.asset_type, toNumber(row.posts)]));
   const byPlatform = new Map([
     ['facebook_page', { platform: 'Facebook', connected: facebookMappings > 0, reach: 0, impressions: 0, profileVisits: 0, followers: 0, followersDelta: 0, posts: postCounts.get('facebook_page') || 0, lastSync: null }],
@@ -1730,7 +1773,6 @@ async function aggregateSocialOrganic(scope, range, marketingState = null) {
     entry.impressions += impressions || views;
     entry.profileVisits += toNumber(row.profileVisits);
     entry.followers += toNumber(row.followers);
-    entry.followersDelta += toNumber(row.followersDelta);
     if (row.lastDate && (!entry.lastSync || String(row.lastDate) > String(entry.lastSync))) {
       entry.lastSync = row.lastDate;
     }
@@ -1777,6 +1819,41 @@ async function aggregateSocialOrganic(scope, range, marketingState = null) {
     { replacements, type: QueryTypes.SELECT }
   );
 
+  const trendByDate = new Map();
+  for (const row of normalizeSocialFollowerDeltas(trendRows)) {
+    const date = String(row.date || '').slice(0, 10);
+    if (!date) continue;
+    const point = trendByDate.get(date) || {
+      date,
+      reach: 0,
+      impressions: 0,
+      profileVisits: 0,
+      followersDelta: 0,
+      facebookReach: 0,
+      instagramReach: 0,
+      facebookFollowersDelta: 0,
+      instagramFollowersDelta: 0,
+    };
+    const reach = toNumber(row.reach);
+    point.reach += reach;
+    point.impressions += toNumber(row.impressions);
+    point.profileVisits += toNumber(row.profileVisits);
+    point.followersDelta += toNumber(row.normalizedFollowersDelta);
+    if (row.asset_type === 'facebook_page') point.facebookReach += reach;
+    if (row.asset_type === 'instagram_business') point.instagramReach += reach;
+    if (row.asset_type === 'facebook_page') point.facebookFollowersDelta += toNumber(row.normalizedFollowersDelta);
+    if (row.asset_type === 'instagram_business') point.instagramFollowersDelta += toNumber(row.normalizedFollowersDelta);
+    trendByDate.set(date, point);
+  }
+
+  const followerDeltaByPlatform = { facebook_page: 0, instagram_business: 0 };
+  for (const point of trendByDate.values()) {
+    followerDeltaByPlatform.facebook_page += toNumber(point.facebookFollowersDelta);
+    followerDeltaByPlatform.instagram_business += toNumber(point.instagramFollowersDelta);
+  }
+  byPlatform.get('facebook_page').followersDelta = followerDeltaByPlatform.facebook_page;
+  byPlatform.get('instagram_business').followersDelta = followerDeltaByPlatform.instagram_business;
+
   const platforms = Array.from(byPlatform.values());
   const summary = platforms.reduce((acc, row) => {
     acc.reach += toNumber(row.reach);
@@ -1797,6 +1874,7 @@ async function aggregateSocialOrganic(scope, range, marketingState = null) {
   return {
     summary,
     platforms,
+    trend: Array.from(trendByDate.values()).sort((left, right) => left.date.localeCompare(right.date)),
     topPosts: topPosts.map((row) => ({
       platform: socialPlatformLabel(row.assetType),
       title: truncateText(row.title || row.content),
@@ -2750,6 +2828,7 @@ function buildRecommendations({ businessProfile, adsCampaigns, webPages, intakeC
   if (!businessProfile.connected) {
     recs.push({
       id: 'connect-gbp',
+      section: 'google-profile',
       icon: 'heroicons_outline:map-pin',
       iconColor: 'text-amber-500',
       title: 'Conecta tu Perfil de Empresa de Google',
@@ -2763,6 +2842,7 @@ function buildRecommendations({ businessProfile, adsCampaigns, webPages, intakeC
   if (campaignAlert) {
     recs.push({
       id: 'campaign-no-leads',
+      section: 'campanas',
       icon: 'heroicons_outline:exclamation-triangle',
       iconColor: 'text-red-500',
       title: `Campaña "${campaignAlert.name}" sin leads`,
@@ -2775,6 +2855,7 @@ function buildRecommendations({ businessProfile, adsCampaigns, webPages, intakeC
   if (businessProfile.unansweredReviews > 0) {
     recs.push({
       id: 'respond-reviews',
+      section: 'google-profile',
       icon: 'heroicons_outline:chat-bubble-bottom-center-text',
       iconColor: 'text-blue-500',
       title: `Tienes ${businessProfile.unansweredReviews} reseñas sin responder`,
@@ -2788,6 +2869,7 @@ function buildRecommendations({ businessProfile, adsCampaigns, webPages, intakeC
   if (bestPage && bestPage.leads > 0) {
     recs.push({
       id: 'top-page',
+      section: 'web',
       icon: 'heroicons_outline:arrow-trending-up',
       iconColor: 'text-green-500',
       title: `La página "${bestPage.shortName}" está generando pacientes`,
@@ -2799,6 +2881,7 @@ function buildRecommendations({ businessProfile, adsCampaigns, webPages, intakeC
   if (intakeConfigCount > 0) {
     recs.push({
       id: 'snippet-ok',
+      section: 'web',
       icon: 'heroicons_outline:check-badge',
       iconColor: 'text-green-500',
       title: 'ClinicaClick Analytics tiene configuración activa',
@@ -3072,4 +3155,5 @@ exports.__testing = {
   isLiveSyncJob,
   buildSourceSyncState,
   resolveMetaAttributionStatus,
+  normalizeSocialFollowerDeltas,
 };
