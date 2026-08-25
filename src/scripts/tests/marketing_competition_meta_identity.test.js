@@ -165,6 +165,24 @@ function testResolvedPageWithNoApiRowsKeepsItsCanonicalIdentity() {
   assert.equal(payload.error_code, null);
 }
 
+function testManualGoogleAdsIdentityCanBeSavedAndCleared() {
+  const identity = __testing.googleAdsIdentityFromPayload({
+    google_ads_advertiser_url: 'https://adstransparency.google.com/advertiser/AR-CLINICA-123',
+  });
+  assert.equal(identity.advertiser_id, 'AR-CLINICA-123');
+  const stored = __testing.withGoogleAdsIdentityInRawPayload({ source: 'places' }, identity);
+  assert.equal(stored.clinicaclick_google_ads.advertiser_id, 'AR-CLINICA-123');
+
+  const clearedIdentity = __testing.googleAdsIdentityFromPayload({
+    raw_place_payload: stored,
+    google_ads_advertiser_id: null,
+    google_ads_advertiser_url: null,
+  });
+  const cleared = __testing.withGoogleAdsIdentityInRawPayload(stored, clearedIdentity);
+  assert.equal(Object.hasOwn(cleared, 'clinicaclick_google_ads'), false);
+  assert.equal(cleared.source, 'places');
+}
+
 function testLegacyCompletedZeroWithoutPageIsReadAsUnresolved() {
   const payload = __testing.adSnapshotPayload({
     status: 'completed',
@@ -213,6 +231,7 @@ async function run() {
   testUnresolvedIdentityIsNotReportedAsZeroActiveAds();
   testResolvedPageWithNoActiveAdsIsAValidZero();
   testResolvedPageWithNoApiRowsKeepsItsCanonicalIdentity();
+  testManualGoogleAdsIdentityCanBeSavedAndCleared();
   testLegacyCompletedZeroWithoutPageIsReadAsUnresolved();
   testOptionalProviderFailuresStayPartialWhenPlacesSucceeded();
   console.log('marketing_competition_meta_identity.test.js OK');

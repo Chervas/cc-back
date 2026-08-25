@@ -9,6 +9,7 @@ const DEFAULT_COUNTRY = String(
   process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_COUNTRY || 'ES'
 ).trim().toUpperCase();
 const DEFAULT_GEO_CRITERIA_ID = 2724; // Spain.
+let rateLimitCooldownUntil = 0;
 
 function cleanString(value) {
   const result = value == null ? '' : String(value).trim();
@@ -75,6 +76,31 @@ function candidateTerms(competitor = {}) {
   ].map(cleanString).filter((value) => normalizeName(value).length >= 4))].slice(0, 2);
 }
 
+function advertiserIdFromUrl(value) {
+  const raw = cleanString(value);
+  if (!raw) return null;
+  const match = raw.match(/(?:^|\/)advertiser\/([^/?#]+)/i);
+  return cleanString(match?.[1]);
+}
+
+function manualAdvertiserIdentity(competitor = {}) {
+  const raw = competitor.raw_place_payload || {};
+  const identity = raw.clinicaclick_google_ads || raw.google_ads_transparency || {};
+  const advertiserId = cleanString(
+    competitor.google_ads_advertiser_id
+    || identity.advertiser_id
+    || advertiserIdFromUrl(competitor.google_ads_advertiser_url)
+    || advertiserIdFromUrl(identity.advertiser_url)
+  );
+  if (!advertiserId) return null;
+  return {
+    advertiser_id: advertiserId,
+    advertiser_url: cleanString(competitor.google_ads_advertiser_url)
+      || cleanString(identity.advertiser_url)
+      || advertiserUrl(advertiserId),
+  };
+}
+
 function sharedTokens(left, right) {
   const ignored = new Set(['clinica', 'clinic', 'centro', 'medical', 'medico', 'salud', 'de', 'la', 'el', 'y']);
   const leftTokens = normalizeName(left).split(' ').filter((token) => token.length >= 3 && !ignored.has(token));
@@ -119,19 +145,43 @@ function requestHeaders() {
 }
 
 async function rpc(path, body, http = axios) {
+  if (rateLimitCooldownUntil > Date.now()) {
+    const error = new Error('Google ha limitado temporalmente la comprobación rápida. Conservamos el último dato y la revisión semanal lo actualizará.');
+    error.code = 'GOOGLE_ADS_TRANSPARENCY_FAST_RATE_LIMITED';
+    error.status = 429;
+    error.retryAfterMs = rateLimitCooldownUntil - Date.now();
+    throw error;
+  }
   const timeout = Math.max(2_000, Math.min(20_000, Number(
     process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_TIMEOUT_MS || 12_000
   )));
-  const response = await http.post(
-    `${BASE_URL.replace(/\/$/g, '')}/anji/_/rpc/${path}`,
-    body,
-    {
-      timeout,
-      maxContentLength: 2 * 1024 * 1024,
-      headers: requestHeaders(),
+  try {
+    const response = await http.post(
+      `${BASE_URL.replace(/\/$/g, '')}/anji/_/rpc/${path}`,
+      body,
+      {
+        timeout,
+        maxContentLength: 2 * 1024 * 1024,
+        headers: requestHeaders(),
+      }
+    );
+    return response?.data || {};
+  } catch (error) {
+    const status = Number(error?.response?.status || error?.status || 0);
+    const providerCode = Number(error?.response?.data?.error?.code || error?.code || 0);
+    if (status === 429 || providerCode === 429) {
+      const cooldownMs = Math.max(60_000, Math.min(3_600_000, Number(
+        process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_FAST_COOLDOWN_MS || 900_000
+      )));
+      rateLimitCooldownUntil = Date.now() + cooldownMs;
+      const limited = new Error('Google ha limitado temporalmente la comprobación rápida. Conservamos el último dato y la revisión semanal lo actualizará.');
+      limited.code = 'GOOGLE_ADS_TRANSPARENCY_FAST_RATE_LIMITED';
+      limited.status = 429;
+      limited.retryAfterMs = cooldownMs;
+      throw limited;
     }
-  );
-  return response?.data || {};
+    throw error;
+  }
 }
 
 function timestamp(value) {
@@ -241,6 +291,23 @@ async function fetchForCompetitor(competitor = {}, options = {}) {
   const http = options.http || axios;
   const resolution = { mode: 'not_found', domains_checked: [], suggestions_checked: [] };
 
+  const manualIdentity = manualAdvertiserIdentity(competitor);
+  if (manualIdentity) {
+    const result = await searchCreatives({ 1: manualIdentity.advertiser_id }, http);
+    return {
+      ...result,
+      resolved: { mode: 'manual_advertiser', ...manualIdentity },
+      raw: {
+        ...result.raw,
+        clinicaclick_resolution: {
+          ...resolution,
+          mode: 'manual_advertiser',
+          advertiser: manualIdentity,
+        },
+      },
+    };
+  }
+
   for (const domain of candidateDomains(competitor)) {
     resolution.domains_checked.push(domain);
     const result = await searchCreatives({ 12: { 1: domain, 2: true } }, http);
@@ -303,7 +370,10 @@ module.exports = {
     advertiserMatchScore,
     candidateDomains,
     candidateTerms,
+    manualAdvertiserIdentity,
     normalizeAd,
     normalizeSuggestion,
+    resetRateLimitCircuit: () => { rateLimitCooldownUntil = 0; },
+    rateLimitCooldownUntil: () => rateLimitCooldownUntil,
   },
 };

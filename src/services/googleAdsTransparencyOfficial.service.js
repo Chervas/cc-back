@@ -159,7 +159,24 @@ function candidateNamesForCompetitor(competitor = {}) {
   return [...new Set(values.map(cleanString).filter((value) => normalizeName(value).length >= 4))].slice(0, 5);
 }
 
-function queryParameters(candidateNames, regionCodes, lookbackDays, rowLimit) {
+function advertiserIdFromUrl(value) {
+  const raw = cleanString(value);
+  if (!raw) return null;
+  return cleanString(raw.match(/(?:^|\/)advertiser\/([^/?#]+)/i)?.[1]);
+}
+
+function candidateAdvertiserIdsForCompetitor(competitor = {}) {
+  const raw = competitor.raw_place_payload || {};
+  const identity = raw.clinicaclick_google_ads || raw.google_ads_transparency || {};
+  return [...new Set([
+    competitor.google_ads_advertiser_id,
+    identity.advertiser_id,
+    advertiserIdFromUrl(competitor.google_ads_advertiser_url),
+    advertiserIdFromUrl(identity.advertiser_url),
+  ].map(cleanString).filter(Boolean))].slice(0, 3);
+}
+
+function queryParameters(candidateNames, candidateIds, regionCodes, lookbackDays, rowLimit) {
   const array = (name, values) => ({
     name,
     parameterType: { type: 'ARRAY', arrayType: { type: 'STRING' } },
@@ -167,6 +184,7 @@ function queryParameters(candidateNames, regionCodes, lookbackDays, rowLimit) {
   });
   return [
     array('candidate_names', candidateNames),
+    array('candidate_ids', candidateIds),
     array('region_codes', regionCodes),
     { name: 'lookback_days', parameterType: { type: 'INT64' }, parameterValue: { value: String(lookbackDays) } },
     { name: 'row_limit', parameterType: { type: 'INT64' }, parameterValue: { value: String(rowLimit) } },
@@ -185,13 +203,16 @@ FROM \`${DATASET_TABLE}\` AS creative
 CROSS JOIN UNNEST(creative.region_stats) AS region
 WHERE region.region_code IN UNNEST(@region_codes)
   AND SAFE_CAST(region.last_shown AS DATE) >= DATE_SUB(CURRENT_DATE(), INTERVAL @lookback_days DAY)
-  AND EXISTS (
-    SELECT 1
-    FROM UNNEST(@candidate_names) AS candidate
-    WHERE STRPOS(NORMALIZE_AND_CASEFOLD(COALESCE(creative.advertiser_disclosed_name, '')), NORMALIZE_AND_CASEFOLD(candidate)) > 0
-       OR STRPOS(NORMALIZE_AND_CASEFOLD(COALESCE(creative.advertiser_legal_name, '')), NORMALIZE_AND_CASEFOLD(candidate)) > 0
-       OR STRPOS(NORMALIZE_AND_CASEFOLD(candidate), NORMALIZE_AND_CASEFOLD(COALESCE(creative.advertiser_disclosed_name, ''))) > 0
-       OR STRPOS(NORMALIZE_AND_CASEFOLD(candidate), NORMALIZE_AND_CASEFOLD(COALESCE(creative.advertiser_legal_name, ''))) > 0
+  AND (
+    creative.advertiser_id IN UNNEST(@candidate_ids)
+    OR EXISTS (
+      SELECT 1
+      FROM UNNEST(@candidate_names) AS candidate
+      WHERE STRPOS(NORMALIZE_AND_CASEFOLD(COALESCE(creative.advertiser_disclosed_name, '')), NORMALIZE_AND_CASEFOLD(candidate)) > 0
+         OR STRPOS(NORMALIZE_AND_CASEFOLD(COALESCE(creative.advertiser_legal_name, '')), NORMALIZE_AND_CASEFOLD(candidate)) > 0
+         OR STRPOS(NORMALIZE_AND_CASEFOLD(candidate), NORMALIZE_AND_CASEFOLD(COALESCE(creative.advertiser_disclosed_name, ''))) > 0
+         OR STRPOS(NORMALIZE_AND_CASEFOLD(candidate), NORMALIZE_AND_CASEFOLD(COALESCE(creative.advertiser_legal_name, ''))) > 0
+    )
   )
 GROUP BY creative.advertiser_id
 ORDER BY last_shown DESC
@@ -217,13 +238,14 @@ function requestIdForRun(runKey) {
 function maximumBytesBilled(env = process.env) {
   return Math.max(
     100_000_000,
-    Number(env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_MAX_BYTES_BILLED || 30_000_000_000),
+    Number(env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_MAX_BYTES_BILLED || 25_000_000_000),
   );
 }
 
 async function runQuery({
   config,
   candidateNames,
+  candidateIds,
   regionCodes,
   lookbackDays,
   rowLimit,
@@ -245,7 +267,7 @@ async function runQuery({
     query: buildQuery(),
     useLegacySql: false,
     parameterMode: 'NAMED',
-    queryParameters: queryParameters(candidateNames, regionCodes, lookbackDays, rowLimit),
+    queryParameters: queryParameters(candidateNames, candidateIds, regionCodes, lookbackDays, rowLimit),
     timeoutMs: '30000',
     maxResults: String(rowLimit),
     labels: {
@@ -349,7 +371,10 @@ function normalizeAd(row = {}) {
 
 async function fetchForCompetitors(competitors = [], options = {}) {
   const config = options.config || configuration();
-  const eligible = competitors.filter((competitor) => candidateNamesForCompetitor(competitor).length);
+  const eligible = competitors.filter((competitor) => (
+    candidateNamesForCompetitor(competitor).length
+    || candidateAdvertiserIdsForCompetitor(competitor).length
+  ));
   const result = new Map(eligible.map((competitor) => [String(competitor.id), {
     ads: [], total_ads_count: 0, resolved: null,
     raw: { clinicaclick_resolution: { mode: 'official_bigquery', matched: false } },
@@ -357,6 +382,7 @@ async function fetchForCompetitors(competitors = [], options = {}) {
   if (!eligible.length) return result;
 
   const candidateNames = [...new Set(eligible.flatMap(candidateNamesForCompetitor))].slice(0, 5_000);
+  const candidateIds = [...new Set(eligible.flatMap(candidateAdvertiserIdsForCompetitor))].slice(0, 5_000);
   const lookbackDays = Math.max(7, Math.min(3650, Number(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_LOOKBACK_DAYS || 365)));
   const rowLimit = Math.max(25, Math.min(5_000, Number(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_QUERY_ROW_LIMIT || 2_000)));
   const regionCodes = String(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_REGION_CODES || DEFAULT_REGION_CODES.join(','))
@@ -364,6 +390,7 @@ async function fetchForCompetitors(competitors = [], options = {}) {
   const queryResult = await runQuery({
     config,
     candidateNames,
+    candidateIds,
     regionCodes,
     lookbackDays,
     rowLimit,
@@ -373,6 +400,7 @@ async function fetchForCompetitors(competitors = [], options = {}) {
   result.metadata = {
     run_key: cleanString(options.runKey),
     candidates: candidateNames.length,
+    advertiser_ids: candidateIds.length,
     rows_returned: queryResult.rows.length,
     dry_run_bytes: queryResult.dryRunBytes,
     maximum_bytes_billed: queryResult.maximumBytesBilled,
@@ -380,9 +408,15 @@ async function fetchForCompetitors(competitors = [], options = {}) {
   };
 
   for (const row of queryResult.rows) {
+    const advertiserId = cleanString(row.advertiser_id);
     const advertiserName = cleanString(row.advertiser_disclosed_name) || cleanString(row.advertiser_legal_name);
     const matches = eligible
-      .map((competitor) => ({ competitor, score: matchScore(competitor, advertiserName) }))
+      .map((competitor) => ({
+        competitor,
+        score: candidateAdvertiserIdsForCompetitor(competitor).includes(advertiserId)
+          ? 1000
+          : matchScore(competitor, advertiserName),
+      }))
       .filter((item) => item.score >= 48)
       .sort((left, right) => right.score - left.score);
     if (!matches.length) continue;
@@ -393,7 +427,6 @@ async function fetchForCompetitors(competitors = [], options = {}) {
     for (const match of recipients) {
       const key = String(match.competitor.id);
       const bucket = result.get(key);
-      const advertiserId = cleanString(row.advertiser_id);
       bucket.total_ads_count += Math.max(0, Number(row.ads_count || 0));
       if (!bucket.resolved || match.score > bucket.resolved.match_score) {
         bucket.resolved = {
@@ -431,6 +464,7 @@ module.exports = {
   fetchForCompetitors,
   __testing: {
     buildQuery,
+    candidateAdvertiserIdsForCompetitor,
     candidateNamesForCompetitor,
     matchScore,
     maximumBytesBilled,

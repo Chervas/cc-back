@@ -1070,6 +1070,55 @@ function withSocialProfilesInRawPayload(rawPayload, profiles) {
   };
 }
 
+function googleAdsAdvertiserIdFromUrl(value) {
+  const raw = cleanString(value);
+  if (!raw) return null;
+  return cleanString(raw.match(/(?:^|\/)advertiser\/([^/?#]+)/i)?.[1]);
+}
+
+function googleAdsIdentityFromPayload(payload = {}) {
+  const raw = payload?.raw_place_payload && typeof payload.raw_place_payload === 'object'
+    ? payload.raw_place_payload
+    : {};
+  const stored = raw.clinicaclick_google_ads || raw.google_ads_transparency || {};
+  const advertiserUrlProvided = Object.prototype.hasOwnProperty.call(payload, 'google_ads_advertiser_url')
+    || Object.prototype.hasOwnProperty.call(payload, 'google_ads_transparency_url');
+  const advertiserIdProvided = Object.prototype.hasOwnProperty.call(payload, 'google_ads_advertiser_id');
+  const advertiserUrl = normalizeUrl(
+    advertiserUrlProvided
+      ? (payload.google_ads_advertiser_url ?? payload.google_ads_transparency_url)
+      : stored.advertiser_url
+  );
+  const advertiserId = cleanString(
+    advertiserIdProvided
+      ? payload.google_ads_advertiser_id
+      : (stored.advertiser_id ?? googleAdsAdvertiserIdFromUrl(advertiserUrl))
+  );
+  if (!advertiserId && !advertiserUrl && !advertiserUrlProvided && !advertiserIdProvided) return null;
+  return {
+    advertiser_id: advertiserId || googleAdsAdvertiserIdFromUrl(advertiserUrl),
+    advertiser_url: advertiserUrl,
+    source: cleanString(payload.google_ads_identity_source) || cleanString(stored.source) || 'manual',
+    updated_at: new Date().toISOString(),
+  };
+}
+
+function withGoogleAdsIdentityInRawPayload(rawPayload, identity) {
+  if (!identity) return rawPayload || null;
+  const base = rawPayload && typeof rawPayload === 'object' && !Array.isArray(rawPayload) ? rawPayload : {};
+  if (!identity.advertiser_id && !identity.advertiser_url) {
+    const { clinicaclick_google_ads, ...withoutIdentity } = base;
+    return withoutIdentity;
+  }
+  return {
+    ...base,
+    clinicaclick_google_ads: {
+      ...(base.clinicaclick_google_ads || {}),
+      ...identity,
+    },
+  };
+}
+
 function metaTermsFromCompetitor(competitor, socialProfiles = null) {
   const terms = [
     ...(Array.isArray(competitor?.meta_ads_search_terms) ? competitor.meta_ads_search_terms : []),
@@ -4458,6 +4507,7 @@ function mapCompetitorRow(row, latestSnapshot = null, latestAdSnapshot = null, l
   const snapshot = placesContentRestricted ? null : rawSnapshot;
   const ads = adSnapshotPayload(latestAdSnapshot);
   const googleAds = adSnapshotPayload(latestGoogleAdSnapshot);
+  const googleAdsIdentity = googleAdsIdentityFromPayload({ raw_place_payload: plain.raw_place_payload });
   return {
     id: plain.id,
     name: plain.name,
@@ -4505,6 +4555,12 @@ function mapCompetitorRow(row, latestSnapshot = null, latestAdSnapshot = null, l
     },
     google_ads: {
       provider: GOOGLE_ADS_TRANSPARENCY_PROVIDER,
+      advertiser_id: googleAdsIdentity?.advertiser_id || googleAds.active_ads?.[0]?.advertiser_id || null,
+      advertiser_url: googleAdsIdentity?.advertiser_url
+        || googleAds.active_ads?.[0]?.advertiser_url
+        || googleAds.active_ads?.[0]?.library_url
+        || null,
+      identity_source: googleAdsIdentity?.source || null,
       ads_status: googleAds.ads_status,
       active_ads_count: googleAds.active_ads_count,
       total_ads_count: googleAds.total_ads_count,
@@ -4933,6 +4989,7 @@ async function createCompetitor(scope, payload = {}) {
     ...(socialProfiles.facebook_username ? [socialProfiles.facebook_username] : [])
   ].map(cleanString).filter(Boolean))];
   const submittedMetaIdentity = metaPageIdentityFromPayload(payload);
+  const googleAdsIdentity = googleAdsIdentityFromPayload(payload);
   const metaPageUrl = submittedMetaIdentity.page_url;
   const metaPageId = submittedMetaIdentity.page_id;
   const manualPayload = {
@@ -4978,7 +5035,13 @@ async function createCompetitor(scope, payload = {}) {
     meta_page_name: cleanString(payload.meta_page_name),
     meta_page_url: metaPageUrl,
     meta_ads_search_terms: metaSearchTerms,
-    raw_place_payload: withSocialProfilesInRawPayload(payload.raw_place_payload || normalizedPlace.raw_place_payload || (hasManualPayload ? { manual: manualPayload } : null), socialProfiles),
+    raw_place_payload: withGoogleAdsIdentityInRawPayload(
+      withSocialProfilesInRawPayload(
+        payload.raw_place_payload || normalizedPlace.raw_place_payload || (hasManualPayload ? { manual: manualPayload } : null),
+        socialProfiles
+      ),
+      googleAdsIdentity
+    ),
     is_active: payload.is_active !== false,
     last_sync_status: 'created'
   };
@@ -5027,6 +5090,10 @@ async function updateCompetitor(scope, competitorId, payload = {}) {
   }
 
   const submittedMetaIdentity = metaPageIdentityFromPayload(payload);
+  const submittedGoogleAdsIdentity = googleAdsIdentityFromPayload({
+    raw_place_payload: competitor.raw_place_payload,
+    ...payload,
+  });
   const patch = {};
   for (const field of ['name', 'source', 'google_place_id', 'google_maps_url', 'website_url', 'phone', 'address', 'city', 'primary_category', 'business_status', 'meta_page_id', 'meta_page_name', 'meta_page_url', 'last_sync_status', 'last_sync_error']) {
     if (payload[field] !== undefined) patch[field] = cleanString(payload[field]);
@@ -5066,6 +5133,16 @@ async function updateCompetitor(scope, competitorId, payload = {}) {
     patch.meta_page_id = extractMetaPageIdFromUrl(patch.meta_page_url || payload.facebook_url);
   }
   if (payload.is_active !== undefined) patch.is_active = !!payload.is_active;
+  if (
+    payload.google_ads_advertiser_id !== undefined
+    || payload.google_ads_advertiser_url !== undefined
+    || payload.google_ads_transparency_url !== undefined
+  ) {
+    patch.raw_place_payload = withGoogleAdsIdentityInRawPayload(
+      patch.raw_place_payload || competitor.raw_place_payload,
+      submittedGoogleAdsIdentity
+    );
+  }
 
   await competitor.update(patch);
   clearCompetitionRuntimeCache();
@@ -5395,6 +5472,8 @@ module.exports = {
     hydrateLocalHeatmapPointIdentities,
     fetchPublicHtmlPage,
     generateLocalRankingHeatmapSnapshot,
+    googleAdsIdentityFromPayload,
+    withGoogleAdsIdentityInRawPayload,
     inferCompetitionQuery,
     rankingTermsForClinic,
     heatmapSearchTermForClinic,

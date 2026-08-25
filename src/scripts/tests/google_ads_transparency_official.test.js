@@ -8,6 +8,7 @@ const service = require('../../services/googleAdsTransparencyOfficial.service');
 
 const {
   buildQuery,
+  candidateAdvertiserIdsForCompetitor,
   candidateNamesForCompetitor,
   matchScore,
   maximumBytesBilled,
@@ -50,6 +51,7 @@ function testOfficialQueryIsBoundedAndBatched() {
   const query = buildQuery();
   assert.match(query, /bigquery-public-data\.google_ads_transparency_center\.creative_stats/);
   assert.match(query, /UNNEST\(@candidate_names\)/);
+  assert.match(query, /creative\.advertiser_id IN UNNEST\(@candidate_ids\)/);
   assert.match(query, /UNNEST\(@region_codes\)/);
   assert.match(query, /@lookback_days/);
   assert.match(query, /COUNT\(DISTINCT creative\.creative_id\) AS ads_count/);
@@ -59,6 +61,18 @@ function testOfficialQueryIsBoundedAndBatched() {
   assert.doesNotMatch(query, /SearchService|SearchCreatives|SearchSuggestions|\/anji\//);
 }
 
+function testManualAdvertiserIdentityIsAnExactCandidate() {
+  const competitor = {
+    name: 'Marca difícil de resolver',
+    raw_place_payload: {
+      clinicaclick_google_ads: {
+        advertiser_url: 'https://adstransparency.google.com/advertiser/AR-EXACT-789',
+      },
+    },
+  };
+  assert.deepEqual(candidateAdvertiserIdsForCompetitor(competitor), ['AR-EXACT-789']);
+}
+
 function testWeeklyQueryHasStableIdAndHardBytesLimit() {
   const first = requestIdForRun('google-atc-es:2026-08-24');
   const second = requestIdForRun('google-atc-es:2026-08-24');
@@ -66,7 +80,7 @@ function testWeeklyQueryHasStableIdAndHardBytesLimit() {
   assert.equal(first, second);
   assert.notEqual(first, nextWeek);
   assert.match(first, /^[0-9a-f-]{36}$/);
-  assert.equal(maximumBytesBilled({}), 30_000_000_000);
+  assert.equal(maximumBytesBilled({}), 25_000_000_000);
   assert.equal(maximumBytesBilled({ COMPETITION_GOOGLE_ADS_TRANSPARENCY_MAX_BYTES_BILLED: '25000000000' }), 25_000_000_000);
 }
 
@@ -159,6 +173,7 @@ async function main() {
   testOfficialQueryIsBoundedAndBatched();
   testWeeklyQueryHasStableIdAndHardBytesLimit();
   testCandidateResolutionUsesKnownBusinessIdentities();
+  testManualAdvertiserIdentityIsAnExactCandidate();
   testBigQueryRowsAndAdsAreNormalizedWithoutScraping();
   testScopedRefreshNeverCallsOfficialBigQuery();
   testOfficialCacheReplacesOnlyAfterSuccessfulBatch();

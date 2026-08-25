@@ -8,7 +8,9 @@ const {
   advertiserMatchScore,
   candidateDomains,
   candidateTerms,
+  manualAdvertiserIdentity,
   normalizeAd,
+  resetRateLimitCircuit,
 } = service.__testing;
 
 function testCandidatesStaySmallAndSpecific() {
@@ -39,6 +41,7 @@ function testCreativeNormalizationKeepsPublicLinks() {
 }
 
 async function testFastPathIsBoundedAndSequential() {
+  resetRateLimitCircuit();
   const calls = [];
   const http = {
     post: async (url, body) => {
@@ -72,10 +75,64 @@ async function testFastPathIsBoundedAndSequential() {
   assert.match(calls[2].url, /SearchCreatives$/);
 }
 
+async function testManualAdvertiserIdentitySkipsDiscovery() {
+  resetRateLimitCircuit();
+  const competitor = {
+    id: 2,
+    name: 'Clínica identificada',
+    raw_place_payload: {
+      clinicaclick_google_ads: {
+        advertiser_id: 'AR-MANUAL-123',
+        advertiser_url: 'https://adstransparency.google.com/advertiser/AR-MANUAL-123',
+      },
+    },
+  };
+  assert.equal(manualAdvertiserIdentity(competitor).advertiser_id, 'AR-MANUAL-123');
+  const calls = [];
+  const result = await service.fetchForCompetitor(competitor, {
+    http: {
+      post: async (url, body) => {
+        calls.push({ url, body });
+        return { data: { 1: [], 5: 0 } };
+      },
+    },
+  });
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, /SearchCreatives$/);
+  assert.equal(calls[0].body?.['3']?.['1'], 'AR-MANUAL-123');
+  assert.equal(result.resolved.mode, 'manual_advertiser');
+}
+
+async function testRateLimitCircuitStopsRepeatedProviderCalls() {
+  resetRateLimitCircuit();
+  let calls = 0;
+  const http = {
+    post: async () => {
+      calls += 1;
+      const error = new Error('Too many requests');
+      error.response = { status: 429, data: { error: { code: 429 } } };
+      throw error;
+    },
+  };
+  const competitor = { id: 3, name: 'Clínica limitada', website_url: 'https://limitada.example' };
+  await assert.rejects(
+    service.fetchForCompetitor(competitor, { http }),
+    (error) => error.code === 'GOOGLE_ADS_TRANSPARENCY_FAST_RATE_LIMITED',
+  );
+  await assert.rejects(
+    service.fetchForCompetitor(competitor, { http }),
+    (error) => error.code === 'GOOGLE_ADS_TRANSPARENCY_FAST_RATE_LIMITED',
+  );
+  assert.equal(calls, 1, 'el circuito abierto evita repetir solicitudes al proveedor');
+  resetRateLimitCircuit();
+}
+
 async function main() {
   testCandidatesStaySmallAndSpecific();
   testCreativeNormalizationKeepsPublicLinks();
   await testFastPathIsBoundedAndSequential();
+  await testManualAdvertiserIdentitySkipsDiscovery();
+  await testRateLimitCircuitStopsRepeatedProviderCalls();
   console.log('google_ads_transparency_fast.test.js: OK');
 }
 
