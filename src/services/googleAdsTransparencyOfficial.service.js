@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const axios = require('axios');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -9,7 +10,7 @@ const BIGQUERY_API = 'https://bigquery.googleapis.com/bigquery/v2';
 const BIGQUERY_SCOPE = 'https://www.googleapis.com/auth/bigquery';
 const DATASET_TABLE = 'bigquery-public-data.google_ads_transparency_center.creative_stats';
 const DEFAULT_LOCATION = 'US';
-const DEFAULT_REGION_CODES = ['ES', 'EEA'];
+const DEFAULT_REGION_CODES = ['ES'];
 const tokenCache = new Map();
 
 function cleanString(value) {
@@ -176,24 +177,14 @@ function buildQuery() {
   return `
 SELECT
   creative.advertiser_id,
-  creative.creative_id,
-  creative.creative_page_url,
-  creative.ad_format_type,
-  creative.advertiser_disclosed_name,
-  creative.advertiser_legal_name,
-  creative.advertiser_location,
-  creative.advertiser_verification_status,
-  region.region_code,
-  CAST(region.first_shown AS STRING) AS first_shown,
-  CAST(region.last_shown AS STRING) AS last_shown,
-  region.times_shown_lower_bound,
-  region.times_shown_upper_bound,
-  creative.topic,
-  creative.ad_funded_by
+  ANY_VALUE(creative.advertiser_disclosed_name) AS advertiser_disclosed_name,
+  ANY_VALUE(creative.advertiser_legal_name) AS advertiser_legal_name,
+  COUNT(DISTINCT creative.creative_id) AS ads_count,
+  MAX(region.last_shown) AS last_shown
 FROM \`${DATASET_TABLE}\` AS creative
 CROSS JOIN UNNEST(creative.region_stats) AS region
 WHERE region.region_code IN UNNEST(@region_codes)
-  AND region.last_shown >= DATE_SUB(CURRENT_DATE(), INTERVAL @lookback_days DAY)
+  AND SAFE_CAST(region.last_shown AS DATE) >= DATE_SUB(CURRENT_DATE(), INTERVAL @lookback_days DAY)
   AND EXISTS (
     SELECT 1
     FROM UNNEST(@candidate_names) AS candidate
@@ -202,7 +193,8 @@ WHERE region.region_code IN UNNEST(@region_codes)
        OR STRPOS(NORMALIZE_AND_CASEFOLD(candidate), NORMALIZE_AND_CASEFOLD(COALESCE(creative.advertiser_disclosed_name, ''))) > 0
        OR STRPOS(NORMALIZE_AND_CASEFOLD(candidate), NORMALIZE_AND_CASEFOLD(COALESCE(creative.advertiser_legal_name, ''))) > 0
   )
-ORDER BY region.last_shown DESC
+GROUP BY creative.advertiser_id
+ORDER BY last_shown DESC
 LIMIT @row_limit`;
 }
 
@@ -217,7 +209,27 @@ function simpleRows(payload = {}) {
   });
 }
 
-async function runQuery({ config, candidateNames, regionCodes, lookbackDays, rowLimit, http = axios }) {
+function requestIdForRun(runKey) {
+  const hex = crypto.createHash('sha256').update(String(runKey || 'manual')).digest('hex').slice(0, 32);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20)}`;
+}
+
+function maximumBytesBilled(env = process.env) {
+  return Math.max(
+    100_000_000,
+    Number(env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_MAX_BYTES_BILLED || 30_000_000_000),
+  );
+}
+
+async function runQuery({
+  config,
+  candidateNames,
+  regionCodes,
+  lookbackDays,
+  rowLimit,
+  runKey,
+  http = axios,
+}) {
   if (!config.enabled) throw configurationError('GOOGLE_ATC_BIGQUERY_DISABLED', 'La fuente oficial de transparencia de Google está desactivada.');
   if (!config.credentials || !config.projectId) {
     throw configurationError(
@@ -226,24 +238,50 @@ async function runQuery({ config, candidateNames, regionCodes, lookbackDays, row
     );
   }
   const token = await accessToken(config.credentials, http);
-  const maximumBytesBilled = Math.max(
-    100_000_000,
-    Number(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_MAX_BYTES_BILLED || 10_000_000_000),
-  );
-  const body = {
+  // El dataset oficial no está particionado. Primero se ejecuta un dry-run
+  // gratuito y luego la misma consulta con un techo duro de facturación.
+  const bytesLimit = maximumBytesBilled();
+  const queryBody = {
     query: buildQuery(),
     useLegacySql: false,
     parameterMode: 'NAMED',
     queryParameters: queryParameters(candidateNames, regionCodes, lookbackDays, rowLimit),
-    useQueryCache: true,
     timeoutMs: '30000',
     maxResults: String(rowLimit),
-    maximumBytesBilled: String(maximumBytesBilled),
-    labels: { clinicaclick_module: 'competition' },
+    labels: {
+      clinicaclick_module: 'competition',
+      clinicaclick_cadence: 'weekly',
+    },
     location: config.location,
   };
   const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
-  let response = await http.post(`${BIGQUERY_API}/projects/${encodeURIComponent(config.projectId)}/queries`, body, { timeout: 35_000, headers });
+  const endpoint = `${BIGQUERY_API}/projects/${encodeURIComponent(config.projectId)}/queries`;
+  const dryRunResponse = await http.post(endpoint, {
+    ...queryBody,
+    dryRun: true,
+    useQueryCache: false,
+  }, { timeout: 35_000, headers });
+  const dryRunBytes = Number(
+    dryRunResponse?.data?.totalBytesProcessed
+    || dryRunResponse?.data?.statistics?.query?.totalBytesProcessed
+    || 0
+  );
+  if (dryRunBytes > bytesLimit) {
+    const error = configurationError(
+      'GOOGLE_ATC_BIGQUERY_BYTES_LIMIT',
+      `La consulta oficial procesaría ${dryRunBytes} bytes y supera el límite seguro de ${bytesLimit}.`,
+    );
+    error.estimatedBytes = dryRunBytes;
+    error.maximumBytesBilled = bytesLimit;
+    throw error;
+  }
+
+  let response = await http.post(endpoint, {
+    ...queryBody,
+    requestId: requestIdForRun(runKey),
+    useQueryCache: true,
+    maximumBytesBilled: String(bytesLimit),
+  }, { timeout: 35_000, headers });
   let payload = response?.data || {};
   const jobId = cleanString(payload?.jobReference?.jobId);
   for (let attempt = 0; payload.jobComplete === false && jobId && attempt < 5; attempt += 1) {
@@ -261,7 +299,12 @@ async function runQuery({ config, candidateNames, regionCodes, lookbackDays, row
     error.details = payload.errors.map((item) => ({ reason: item?.reason || null, location: item?.location || null }));
     throw error;
   }
-  return { rows: simpleRows(payload), totalBytesProcessed: cleanString(payload.totalBytesProcessed) };
+  return {
+    rows: simpleRows(payload),
+    dryRunBytes,
+    maximumBytesBilled: bytesLimit,
+    totalBytesProcessed: Number(payload.totalBytesProcessed || 0),
+  };
 }
 
 function advertiserUrl(advertiserId) {
@@ -313,12 +356,28 @@ async function fetchForCompetitors(competitors = [], options = {}) {
   }]));
   if (!eligible.length) return result;
 
-  const candidateNames = [...new Set(eligible.flatMap(candidateNamesForCompetitor))].slice(0, 100);
+  const candidateNames = [...new Set(eligible.flatMap(candidateNamesForCompetitor))].slice(0, 5_000);
   const lookbackDays = Math.max(7, Math.min(3650, Number(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_LOOKBACK_DAYS || 365)));
-  const rowLimit = Math.max(25, Math.min(1000, Number(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_QUERY_ROW_LIMIT || 500)));
+  const rowLimit = Math.max(25, Math.min(5_000, Number(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_QUERY_ROW_LIMIT || 2_000)));
   const regionCodes = String(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_REGION_CODES || DEFAULT_REGION_CODES.join(','))
     .split(',').map((value) => value.trim().toUpperCase()).filter(Boolean);
-  const queryResult = await runQuery({ config, candidateNames, regionCodes, lookbackDays, rowLimit, http: options.http || axios });
+  const queryResult = await runQuery({
+    config,
+    candidateNames,
+    regionCodes,
+    lookbackDays,
+    rowLimit,
+    runKey: options.runKey,
+    http: options.http || axios,
+  });
+  result.metadata = {
+    run_key: cleanString(options.runKey),
+    candidates: candidateNames.length,
+    rows_returned: queryResult.rows.length,
+    dry_run_bytes: queryResult.dryRunBytes,
+    maximum_bytes_billed: queryResult.maximumBytesBilled,
+    total_bytes_processed: queryResult.totalBytesProcessed,
+  };
 
   for (const row of queryResult.rows) {
     const advertiserName = cleanString(row.advertiser_disclosed_name) || cleanString(row.advertiser_legal_name);
@@ -327,31 +386,39 @@ async function fetchForCompetitors(competitors = [], options = {}) {
       .filter((item) => item.score >= 48)
       .sort((left, right) => right.score - left.score);
     if (!matches.length) continue;
-    const best = matches[0];
-    const key = String(best.competitor.id);
-    const bucket = result.get(key);
-    const ad = { ...normalizeAd(row), match_score: best.score };
-    if (!bucket.ads.some((item) => item.creative_id === ad.creative_id)) bucket.ads.push(ad);
-    if (!bucket.resolved || best.score > bucket.resolved.match_score) {
-      bucket.resolved = {
-        mode: 'official_bigquery',
-        advertiser_id: ad.advertiser_id,
-        advertiser_name: ad.advertiser_name,
-        match_score: best.score,
-      };
+    const bestScore = matches[0].score;
+    const recipients = bestScore >= 70
+      ? matches.filter((item) => item.score === bestScore)
+      : [matches[0]];
+    for (const match of recipients) {
+      const key = String(match.competitor.id);
+      const bucket = result.get(key);
+      const advertiserId = cleanString(row.advertiser_id);
+      bucket.total_ads_count += Math.max(0, Number(row.ads_count || 0));
+      if (!bucket.resolved || match.score > bucket.resolved.match_score) {
+        bucket.resolved = {
+          mode: 'official_bigquery',
+          advertiser_id: advertiserId,
+          advertiser_name: advertiserName,
+          advertiser_url: advertiserUrl(advertiserId),
+          last_shown: cleanString(row.last_shown),
+          match_score: match.score,
+        };
+      }
     }
   }
 
   for (const bucket of result.values()) {
-    bucket.ads.sort((left, right) => String(right.delivery_stop_at || '').localeCompare(String(left.delivery_stop_at || '')));
-    bucket.total_ads_count = bucket.ads.length;
     bucket.raw = {
       clinicaclick_resolution: {
         mode: 'official_bigquery',
         matched: !!bucket.resolved,
         advertiser: bucket.resolved,
-        measurement: 'recent_eea_creatives',
+        measurement: 'recent_es_creatives',
         lookback_days: lookbackDays,
+        weekly_run_key: cleanString(options.runKey),
+        dry_run_bytes: queryResult.dryRunBytes,
+        maximum_bytes_billed: queryResult.maximumBytesBilled,
         total_bytes_processed: queryResult.totalBytesProcessed,
       },
     };
@@ -366,8 +433,10 @@ module.exports = {
     buildQuery,
     candidateNamesForCompetitor,
     matchScore,
+    maximumBytesBilled,
     normalizeAd,
     parseJsonCredential,
+    requestIdForRun,
     simpleRows,
   },
 };

@@ -519,6 +519,7 @@ exports.runJob = async (req, res) => {
       : {};
     const payload = sanitizeManualJobPayload(queueType, {
       ...(scheduledDefinition?.payloadDefaults || {}),
+      ...(scheduledDefinition?.scheduledPayloadDefaults || {}),
       ...suppliedPayload,
     });
     const catalogPriority = scheduledDefinition?.priority || null;

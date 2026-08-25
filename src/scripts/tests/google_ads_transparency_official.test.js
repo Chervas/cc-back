@@ -1,6 +1,8 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const service = require('../../services/googleAdsTransparencyOfficial.service');
 
@@ -8,8 +10,10 @@ const {
   buildQuery,
   candidateNamesForCompetitor,
   matchScore,
+  maximumBytesBilled,
   normalizeAd,
   parseJsonCredential,
+  requestIdForRun,
   simpleRows,
 } = service.__testing;
 
@@ -48,9 +52,22 @@ function testOfficialQueryIsBoundedAndBatched() {
   assert.match(query, /UNNEST\(@candidate_names\)/);
   assert.match(query, /UNNEST\(@region_codes\)/);
   assert.match(query, /@lookback_days/);
+  assert.match(query, /COUNT\(DISTINCT creative\.creative_id\) AS ads_count/);
+  assert.match(query, /GROUP BY creative\.advertiser_id/);
   assert.match(query, /LIMIT @row_limit/);
   assert.match(query, /STRPOS\(NORMALIZE_AND_CASEFOLD\(candidate\), NORMALIZE_AND_CASEFOLD\(COALESCE\(creative\.advertiser_disclosed_name/);
   assert.doesNotMatch(query, /SearchService|SearchCreatives|SearchSuggestions|\/anji\//);
+}
+
+function testWeeklyQueryHasStableIdAndHardBytesLimit() {
+  const first = requestIdForRun('google-atc-es:2026-08-24');
+  const second = requestIdForRun('google-atc-es:2026-08-24');
+  const nextWeek = requestIdForRun('google-atc-es:2026-08-31');
+  assert.equal(first, second);
+  assert.notEqual(first, nextWeek);
+  assert.match(first, /^[0-9a-f-]{36}$/);
+  assert.equal(maximumBytesBilled({}), 30_000_000_000);
+  assert.equal(maximumBytesBilled({ COMPETITION_GOOGLE_ADS_TRANSPARENCY_MAX_BYTES_BILLED: '25000000000' }), 25_000_000_000);
 }
 
 function testCandidateResolutionUsesKnownBusinessIdentities() {
@@ -107,12 +124,44 @@ async function testEmptyBatchNeverCallsProvider() {
   assert.equal(calls, 0);
 }
 
+function testScopedRefreshNeverCallsOfficialBigQuery() {
+  const source = fs.readFileSync(
+    path.resolve(__dirname, '../../services/marketingCompetition.service.js'),
+    'utf8'
+  );
+  const refreshStart = source.indexOf('async function refreshCompetition');
+  const moduleStart = source.indexOf('\nmodule.exports', refreshStart);
+  const refreshBody = source.slice(refreshStart, moduleStart);
+  assert.doesNotMatch(refreshBody, /googleAdsTransparencyOfficial\.fetchForCompetitors/);
+  assert.match(refreshBody, /googleTransparencyMode === 'official_global'/);
+  assert.match(refreshBody, /COMPETITION_GOOGLE_ADS_TRANSPARENCY_WEEKLY_ENABLED/);
+}
+
+function testOfficialCacheReplacesOnlyAfterSuccessfulBatch() {
+  const source = fs.readFileSync(
+    path.resolve(__dirname, '../../services/marketingCompetition.service.js'),
+    'utf8'
+  );
+  const reconcileStart = source.indexOf('async function reconcileOfficialGoogleAdsTransparency');
+  const payloadStart = source.indexOf('\nfunction adSnapshotPayload', reconcileStart);
+  const reconcileBody = source.slice(reconcileStart, payloadStart);
+  assert.match(reconcileBody, /snapshot_date:\s*\{\s*\[Op\.ne\]:\s*todayLabel\(\)\s*\}/);
+  assert.match(reconcileBody, /snapshot_strategy:\s*'replace_latest_successful'/);
+  assert.ok(
+    reconcileBody.indexOf('MarketingCompetitorAdSnapshot.destroy') < reconcileBody.indexOf('transaction.commit'),
+    'La sustitucion debe quedar dentro de la misma transaccion del lote oficial.'
+  );
+}
+
 async function main() {
   testConfigurationRequiresServerCredential();
   testCredentialParserRejectsIncompleteSecrets();
   testOfficialQueryIsBoundedAndBatched();
+  testWeeklyQueryHasStableIdAndHardBytesLimit();
   testCandidateResolutionUsesKnownBusinessIdentities();
   testBigQueryRowsAndAdsAreNormalizedWithoutScraping();
+  testScopedRefreshNeverCallsOfficialBigQuery();
+  testOfficialCacheReplacesOnlyAfterSuccessfulBatch();
   await testEmptyBatchNeverCallsProvider();
   console.log('google_ads_transparency_official.test.js: OK');
 }

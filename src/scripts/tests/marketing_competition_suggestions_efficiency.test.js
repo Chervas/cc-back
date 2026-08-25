@@ -212,6 +212,41 @@ function testHistoricalSavedHeatmapSearchExposesItsCurrentEffectiveTerm() {
   assert.equal(mapped.zoom_km, 3);
 }
 
+function testSavedHeatmapSearchIncludesBoundedEvolution() {
+  const items = [{
+    id: '91',
+    term: 'medicina estética cerca de mí',
+    effective_term: 'medicina estética',
+    zoom_km: 3,
+  }];
+  const snapshots = [
+    {
+      search_term: 'Medicina estética',
+      zoom_km: 3,
+      generated_at: '2026-08-25T09:00:00.000Z',
+      payload: { points: [{ my_position: 2 }, { my_position: 4 }, { my_position: null }] },
+    },
+    {
+      search_term: 'medicina estética',
+      zoom_km: 3,
+      generated_at: '2026-08-18T09:00:00.000Z',
+      payload: { points: [{ my_position: 5 }, { my_position: 7 }] },
+    },
+    {
+      search_term: 'medicina estética',
+      zoom_km: 1,
+      generated_at: '2026-08-25T09:00:00.000Z',
+      payload: { points: [{ my_position: 1 }] },
+    },
+  ];
+
+  const [mapped] = __testing.attachLocalHeatmapEvolution(items, snapshots);
+  assert.deepEqual(mapped.evolution, [
+    { measured_at: '2026-08-18T09:00:00.000Z', average_position: 6, visible_points: 2 },
+    { measured_at: '2026-08-25T09:00:00.000Z', average_position: 3, visible_points: 2 },
+  ]);
+}
+
 function expectNaturalHeatmapSearch(clinic, expectedDisplay, expectedProviderTerm) {
   const displayTerm = __testing.defaultLocalHeatmapTermForClinic(clinic);
   assert.equal(displayTerm, expectedDisplay);
@@ -281,6 +316,7 @@ async function run() {
     testDefaultHeatmapSearchUsesNaturalNearMeLanguage();
     testLocalizedNearMeLabelsNeverReachTheProvider();
     testHistoricalSavedHeatmapSearchExposesItsCurrentEffectiveTerm();
+    testSavedHeatmapSearchIncludesBoundedEvolution();
     await testManualGoogleUrlGeneratesPersistedClinicIdentity();
     console.log('marketing_competition_suggestions_efficiency.test.js OK');
   } finally {

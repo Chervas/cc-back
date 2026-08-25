@@ -87,6 +87,10 @@ const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
     priority: 'low',
     executorMethod: 'executeCompetitionSync',
     attachJobRequestId: true,
+    // Solo el disparo periódico/manual del job global debe pedir BigQuery.
+    // Los competition_refresh creados al añadir un competidor conservan el
+    // fast-path puntual y no deben heredar este modo desde el ejecutor.
+    scheduledPayloadDefaults: Object.freeze({ googleTransparencyMode: 'official_global' }),
   }),
   webEventsAggregate: Object.freeze({ type: 'web_events_aggregate', priority: 'normal', executorMethod: 'executeWebEventsAggregate' }),
   whatsappTemplatesSync: Object.freeze({

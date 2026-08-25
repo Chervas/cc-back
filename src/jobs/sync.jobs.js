@@ -606,6 +606,7 @@ class MetaSyncJobs {
       : {};
     const payload = {
       ...(definition.payloadDefaults || {}),
+      ...(definition.scheduledPayloadDefaults || {}),
       ...suppliedPayload,
     };
 
@@ -2277,8 +2278,21 @@ class MetaSyncJobs {
   }
 
   async executeCompetitionSync(options = {}) {
+    const officialGlobalRequested = options.googleTransparencyMode === 'official_global';
+    const officialRunKey = officialGlobalRequested
+      ? (options.googleTransparencyRunKey || marketingCompetitionService.officialWeeklyRunKey())
+      : null;
+    const syncJobType = officialGlobalRequested
+      ? 'competition_google_ads_weekly'
+      : 'competition_sync';
+    const previousOfficialRun = officialGlobalRequested
+      ? await SyncLog.findOne({
+        where: { job_type: syncJobType, status: 'completed' },
+        order: [['id', 'DESC']],
+      })
+      : null;
     const syncLog = await SyncLog.create({
-      job_type: 'competition_sync',
+      job_type: syncJobType,
       status: 'running',
       start_time: new Date(),
       records_processed: 0
@@ -2311,8 +2325,32 @@ class MetaSyncJobs {
           : (explicitClinicIds.length ? explicitClinicIds.join(',') : 'all')
       };
 
+      const previousOfficialReport = previousOfficialRun?.status_report?.provider
+        ?.google_ads_transparency?.official;
+      if (
+        officialGlobalRequested
+        && previousOfficialReport?.status === 'completed'
+        && previousOfficialReport?.run_key === officialRunKey
+      ) {
+        const report = {
+          status: 'skipped',
+          reason: 'official_weekly_run_already_completed',
+          run_key: officialRunKey,
+          previous_sync_log_id: previousOfficialRun.id,
+        };
+        await syncLog.update({
+          status: 'completed',
+          end_time: new Date(),
+          records_processed: 0,
+          status_report: report,
+        });
+        return { status: 'completed', processed: 0, report };
+      }
+
       const result = await marketingCompetitionService.refreshCompetition(scope, {
-        competitorIds: options.competitorIds || options.competitor_ids || null
+        competitorIds: options.competitorIds || options.competitor_ids || null,
+        googleTransparencyMode: options.googleTransparencyMode || 'fast',
+        googleTransparencyRunKey: officialRunKey,
       });
       const report = result.report || {};
       await syncLog.update({

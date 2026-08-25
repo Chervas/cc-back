@@ -53,6 +53,16 @@ function testCatalogCoversEveryCronAndExecutor() {
     'competition refresh jobs must link their SyncLog for observability'
   );
   assert.equal(
+    SCHEDULED_JOB_DEFINITIONS.competitionSync.scheduledPayloadDefaults.googleTransparencyMode,
+    'official_global',
+    'only the global weekly schedule may request the official BigQuery reconciliation'
+  );
+  assert.equal(
+    SCHEDULED_JOB_DEFINITIONS.competitionSync.payloadDefaults,
+    undefined,
+    'per-competitor queue jobs must not inherit the global BigQuery mode'
+  );
+  assert.equal(
     SCHEDULED_JOB_DEFINITIONS.webDomainReconciliation.attachJobRequestId,
     true,
     'domain reconciliation jobs must keep their durable JobRequest trace'
@@ -99,6 +109,17 @@ function testCatalogCoversEveryCronAndExecutor() {
   );
   assert.match(controllerSource, /enqueueUniqueJobRequest/);
   assert.match(controllerSource, /SCHEDULED_JOB_DEFINITIONS/);
+  assert.match(controllerSource, /scheduledPayloadDefaults/);
+
+  const executorSource = fs.readFileSync(
+    path.resolve(__dirname, '../../services/jobExecutor.service.js'),
+    'utf8'
+  );
+  assert.doesNotMatch(
+    executorSource,
+    /definition\.scheduledPayloadDefaults/,
+    'the queue executor must not inject schedule-only payload into ad-hoc jobs'
+  );
 
   const competitionControllerSource = fs.readFileSync(
     path.resolve(__dirname, '../../controllers/marketingCompetition.controller.js'),
@@ -128,6 +149,8 @@ function testCatalogCoversEveryCronAndExecutor() {
   const competitionExecutorBody = syncJobsSource.slice(competitionExecutorStart, diagnosticsExecutorStart);
   assert.match(competitionExecutorBody, /options\.jobRequestId/);
   assert.match(competitionExecutorBody, /jobRequestsService\.setSyncLog/);
+  assert.match(competitionExecutorBody, /officialWeeklyRunKey/);
+  assert.match(competitionExecutorBody, /official_weekly_run_already_completed/);
 
   const targetedWebStart = controllerSource.indexOf('exports.runTargetedWebBackfill');
   const targetedAnalyticsStart = controllerSource.indexOf('exports.runTargetedAnalyticsBackfill');

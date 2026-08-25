@@ -6,6 +6,7 @@ const { metaGet } = require('../lib/metaClient');
 const { publicHttpUrl, resolveSafeHttpTarget } = require('../lib/safeHttpTarget');
 const jobRequestsService = require('./jobRequests.service');
 const googleAdsTransparencyOfficial = require('./googleAdsTransparencyOfficial.service');
+const googleAdsTransparencyFast = require('./googleAdsTransparencyFast.service');
 const {
   resolveEffectiveMarketingAssetInventory,
 } = require('./effectiveMarketingAssets.service');
@@ -65,6 +66,14 @@ const LOCAL_HEATMAP_MIN_VALID_POINTS = Math.max(1, Math.min(LOCAL_HEATMAP_MAX_PO
 const LOCAL_HEATMAP_IDENTITY_DETAILS_MAX = Math.max(1, Math.min(50, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_IDENTITY_DETAILS_MAX || '25', 10)));
 const LOCAL_HEATMAP_VISIBLE_COMPETITOR_LIMIT = 3;
 const LOCAL_HEATMAP_SNAPSHOT_RETENTION_DAYS = 180;
+const LOCAL_HEATMAP_EVOLUTION_POINTS_LIMIT = Math.max(
+  4,
+  Math.min(24, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_EVOLUTION_POINTS_LIMIT || '12', 10))
+);
+const LOCAL_HEATMAP_EVOLUTION_SNAPSHOT_SCAN_LIMIT = Math.max(
+  50,
+  Math.min(1000, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_EVOLUTION_SNAPSHOT_SCAN_LIMIT || '500', 10))
+);
 const LOCAL_HEATMAP_FAILURE_FRESH_TTL_MS = 15 * 60 * 1000;
 const LOCAL_HEATMAP_FAILURE_EXPIRES_TTL_MS = 60 * 60 * 1000;
 const COMPETITION_SUGGESTION_RADIUS_METERS = Math.max(
@@ -306,6 +315,14 @@ const META_AD_FIELDS = [
 
 function todayLabel(date = new Date()) {
   return date.toISOString().slice(0, 10);
+}
+
+function weeklyRunKey(date = new Date()) {
+  const value = new Date(date);
+  value.setUTCHours(0, 0, 0, 0);
+  const day = value.getUTCDay() || 7;
+  value.setUTCDate(value.getUTCDate() - day + 1);
+  return `google-atc-es:${todayLabel(value)}`;
 }
 
 function toInt(value) {
@@ -1267,8 +1284,10 @@ function providerStatus({ googleError = null, metaError = null, metaTokenSource 
     },
     google_ads_transparency: {
       provider: GOOGLE_ADS_TRANSPARENCY_PROVIDER,
-      available: googleAdsTransparencyConfig.configured,
-      configured: googleAdsTransparencyConfig.configured,
+      available: googleAdsTransparencyConfig.configured || googleAdsTransparencyFast.enabled(),
+      configured: googleAdsTransparencyConfig.configured || googleAdsTransparencyFast.enabled(),
+      official_configured: googleAdsTransparencyConfig.configured,
+      fast_path_configured: googleAdsTransparencyFast.enabled(),
       error: googleAdsTransparencyConfig.enabled && !googleAdsTransparencyConfig.configured ? {
         code: 'GOOGLE_ATC_BIGQUERY_CREDENTIALS_MISSING',
         message: 'Falta la credencial server-side de BigQuery para consultar el dataset público oficial de Google Ads Transparency.'
@@ -1276,7 +1295,7 @@ function providerStatus({ googleError = null, metaError = null, metaTokenSource 
       required_env: 'GOOGLE_BIGQUERY_SERVICE_ACCOUNT_JSON',
       fallback_env: ['GOOGLE_BIGQUERY_SERVICE_ACCOUNT_JSON_BASE64', 'GOOGLE_APPLICATION_CREDENTIALS'],
       optional_env: 'COMPETITION_GOOGLE_ADS_TRANSPARENCY_ENABLED=false',
-      note: 'Se consulta en un job encolado y por lotes el dataset público oficial de Google Ads Transparency en BigQuery. La pantalla solo lee snapshots; no ejecuta navegador ni consume la fuente al abrirse.'
+      note: 'Las altas usan una consulta pública acotada y encolada. Un único lote global semanal concilia los competidores activos con el dataset oficial de BigQuery. La pantalla solo lee snapshots.'
     }
   };
 }
@@ -2818,6 +2837,48 @@ function mapSavedHeatmapSearch(row, { isDefault = false } = {}) {
   };
 }
 
+function localHeatmapEvolutionPoint(snapshot) {
+  const payload = snapshot?.payload && typeof snapshot.payload === 'object'
+    ? snapshot.payload
+    : null;
+  const positions = (Array.isArray(payload?.points) ? payload.points : [])
+    .map((point) => toInt(point?.my_position))
+    .filter((position) => position && position > 0);
+  if (!positions.length) return null;
+  const average = positions.reduce((total, position) => total + position, 0) / positions.length;
+  const measuredAt = snapshot?.generated_at instanceof Date
+    ? snapshot.generated_at.toISOString()
+    : new Date(snapshot?.generated_at).toISOString();
+  return {
+    measured_at: measuredAt,
+    average_position: Math.round(average * 10) / 10,
+    visible_points: positions.length,
+  };
+}
+
+function heatmapEvolutionKey(searchTerm, zoomKm) {
+  return `${normalizeBusinessName(searchTerm) || ''}:${clampHeatmapZoom(zoomKm)}`;
+}
+
+function attachLocalHeatmapEvolution(items = [], snapshots = []) {
+  const evolutionBySearch = new Map();
+  for (const snapshot of snapshots) {
+    const key = heatmapEvolutionKey(snapshot?.search_term, snapshot?.zoom_km);
+    const point = localHeatmapEvolutionPoint(snapshot);
+    if (!point) continue;
+    const points = evolutionBySearch.get(key) || [];
+    if (points.length >= LOCAL_HEATMAP_EVOLUTION_POINTS_LIMIT) continue;
+    points.push(point);
+    evolutionBySearch.set(key, points);
+  }
+  return items.map((item) => ({
+    ...item,
+    evolution: (evolutionBySearch.get(heatmapEvolutionKey(item.effective_term || item.term, item.zoom_km)) || [])
+      .slice()
+      .reverse(),
+  }));
+}
+
 function mapSavedHeatmapSearchForClinic(row, clinic) {
   return mapSavedHeatmapSearch({
     ...row,
@@ -2853,7 +2914,22 @@ async function listLocalHeatmapSearches(scope) {
     }, { isDefault: true }));
   }
   items.push(...saved.map((row) => mapSavedHeatmapSearchForClinic(row, clinic)));
-  return { success: true, items };
+  const retentionCutoff = new Date(
+    Date.now() - (LOCAL_HEATMAP_SNAPSHOT_RETENTION_DAYS * 24 * 60 * 60 * 1000)
+  );
+  const snapshots = MarketingCompetitionHeatmapSnapshot && items.length
+    ? await MarketingCompetitionHeatmapSnapshot.findAll({
+      where: {
+        primary_clinic_id: clinic.id_clinica,
+        generated_at: { [Op.gte]: retentionCutoff },
+      },
+      attributes: ['search_term', 'zoom_km', 'payload', 'generated_at'],
+      order: [['generated_at', 'DESC'], ['id', 'DESC']],
+      limit: LOCAL_HEATMAP_EVOLUTION_SNAPSHOT_SCAN_LIMIT,
+      raw: true,
+    })
+    : [];
+  return { success: true, items: attachLocalHeatmapEvolution(items, snapshots) };
 }
 
 async function saveLocalHeatmapSearch(scope, { term, zoomKm = 1, userId = null } = {}) {
@@ -4198,9 +4274,18 @@ async function upsertAdsSnapshot(competitor, result) {
   return upsertProviderAdsSnapshot(competitor, META_ADS_LIBRARY_PROVIDER, result);
 }
 
-async function upsertProviderAdsSnapshot(competitor, provider, result) {
+async function upsertProviderAdsSnapshot(competitor, provider, result, options = {}) {
   const snapshotDate = todayLabel();
-  const visibleAds = Array.isArray(result.ads) ? result.ads.map(stripPrivateAdFields) : [];
+  let visibleAds = Array.isArray(result.ads) ? result.ads.map(stripPrivateAdFields) : [];
+  if (!visibleAds.length && result.preserve_visible_ads) {
+    const previous = await MarketingCompetitorAdSnapshot.findOne({
+      where: { competitor_id: competitor.id, provider },
+      order: [['snapshot_date', 'DESC'], ['id', 'DESC']],
+      transaction: options.transaction,
+    });
+    const previousAds = previous?.active_ads || previous?.get?.('active_ads');
+    if (Array.isArray(previousAds)) visibleAds = previousAds.map(stripPrivateAdFields);
+  }
   const adsCount = result.total_ads_count != null
     ? Math.max(toInt(result.total_ads_count) || 0, visibleAds.length)
     : visibleAds.length;
@@ -4219,10 +4304,96 @@ async function upsertProviderAdsSnapshot(competitor, provider, result) {
   };
   const [snapshot, created] = await MarketingCompetitorAdSnapshot.findOrCreate({
     where: { competitor_id: competitor.id, provider, snapshot_date: snapshotDate },
-    defaults: values
+    defaults: values,
+    transaction: options.transaction,
   });
-  if (!created) await snapshot.update(values);
+  if (!created) await snapshot.update(values, { transaction: options.transaction });
   return snapshot;
+}
+
+async function reconcileOfficialGoogleAdsTransparency(competitors = [], options = {}) {
+  const config = googleAdsTransparencyOfficial.configuration();
+  if (!config.enabled || !config.configured) {
+    const error = new Error('La conciliación oficial de Google Ads Transparency no tiene credenciales activas.');
+    error.code = 'GOOGLE_ATC_BIGQUERY_CREDENTIALS_MISSING';
+    throw error;
+  }
+  const runKey = cleanString(options.runKey) || weeklyRunKey();
+  const plainCompetitors = competitors.map((competitor) => (
+    typeof competitor?.toJSON === 'function' ? competitor.toJSON() : competitor
+  ));
+  const batch = await googleAdsTransparencyOfficial.fetchForCompetitors(plainCompetitors, {
+    config,
+    runKey,
+  });
+  const metadata = batch.metadata || {};
+  const transaction = await db.sequelize.transaction();
+  let matched = 0;
+  let adsCount = 0;
+  try {
+    for (const competitor of competitors) {
+      const result = batch.get(String(competitor.id)) || {
+        ads: [],
+        total_ads_count: 0,
+        resolved: null,
+        raw: {
+          clinicaclick_resolution: {
+            mode: 'official_bigquery',
+            matched: false,
+            weekly_run_key: runKey,
+          },
+        },
+      };
+      const total = Math.max(0, Number(result.total_ads_count || 0));
+      if (result.resolved) matched += 1;
+      adsCount += total;
+      await upsertProviderAdsSnapshot(competitor, GOOGLE_ADS_TRANSPARENCY_PROVIDER, {
+        status: 'completed',
+        ads: result.ads || [],
+        total_ads_count: total,
+        // BigQuery ofrece el recuento y el anunciante, no el creativo. Si la
+        // identidad sigue activa conservamos las previews acotadas del fast-path.
+        preserve_visible_ads: !!result.resolved,
+        raw: {
+          ...(result.raw || {}),
+          clinicaclick_weekly_snapshot: {
+            run_key: runKey,
+            reconciled_at: new Date().toISOString(),
+          },
+        },
+      }, { transaction });
+    }
+
+    // La conciliacion oficial es una cache vigente, no un historico de
+    // creatividades. Solo despues de haber escrito correctamente todo el lote
+    // se retiran snapshots oficiales anteriores. Al compartir transaccion, un
+    // fallo conserva automaticamente el ultimo lote bueno.
+    await MarketingCompetitorAdSnapshot.destroy({
+      where: {
+        provider: GOOGLE_ADS_TRANSPARENCY_PROVIDER,
+        snapshot_date: { [Op.ne]: todayLabel() },
+      },
+      transaction,
+    });
+    await transaction.commit();
+  } catch (error) {
+    await transaction.rollback();
+    throw error;
+  }
+
+  return {
+    status: 'completed',
+    run_key: runKey,
+    competitors: competitors.length,
+    matched,
+    ads_count: adsCount,
+    candidates: Number(metadata.candidates || 0),
+    rows_returned: Number(metadata.rows_returned || 0),
+    dry_run_bytes: Number(metadata.dry_run_bytes || 0),
+    maximum_bytes_billed: Number(metadata.maximum_bytes_billed || 0),
+    total_bytes_processed: Number(metadata.total_bytes_processed || 0),
+    snapshot_strategy: 'replace_latest_successful',
+  };
 }
 
 function adSnapshotPayload(snapshot) {
@@ -4916,8 +5087,7 @@ async function deactivateCompetitor(scope, competitorId) {
 }
 
 async function refreshOneCompetitor(competitor, scope, {
-  googleTransparencyResult = null,
-  googleTransparencyError = null,
+  googleTransparencyMode = 'fast',
 } = {}) {
   const report = {
     competitor_id: competitor.id,
@@ -5037,37 +5207,32 @@ async function refreshOneCompetitor(competitor, scope, {
     patch.last_ads_synced_at = new Date();
   }
 
-  if (isGoogleAdsTransparencyEnabled()) {
+  if (googleTransparencyMode === 'fast' && googleAdsTransparencyFast.enabled()) {
     try {
-      if (googleTransparencyError) throw googleTransparencyError;
-      const googleResult = googleTransparencyResult || {
-        ads: [],
-        total_ads_count: 0,
-        resolved: null,
-        raw: {
-          clinicaclick_resolution: {
-            mode: 'official_bigquery',
-            matched: false,
-            measurement: 'recent_eea_creatives',
-          },
-        },
-      };
+      const googleResult = await googleAdsTransparencyFast.fetchForCompetitor(competitorForAds);
       await upsertProviderAdsSnapshot(competitor, GOOGLE_ADS_TRANSPARENCY_PROVIDER, {
         status: 'completed',
-        ads: googleResult.ads,
-        total_ads_count: googleResult.total_ads_count,
-        raw: googleResult.raw
+        ads: googleResult.ads || [],
+        total_ads_count: googleResult.total_ads_count || 0,
+        raw: {
+          ...(googleResult.raw || {}),
+          clinicaclick_fast_path: {
+            queried_at: new Date().toISOString(),
+            mode: 'bounded_public_rpc',
+          },
+        },
       });
       report.google_ads_transparency = {
         status: 'completed',
-        ads_count: googleResult.total_ads_count || googleResult.ads.length,
-        visible_ads_count: googleResult.ads.length,
-        resolved: googleResult.resolved
+        source: 'bounded_public_rpc',
+        ads_count: googleResult.total_ads_count || googleResult.ads?.length || 0,
+        visible_ads_count: googleResult.ads?.length || 0,
+        resolved: googleResult.resolved,
       };
     } catch (error) {
       const normalizedError = normalizeExternalError(error);
-      // Conserva el último snapshot válido. Un corte temporal de BigQuery o
-      // de credenciales no debe convertir datos conocidos en un falso cero.
+      // Conserva el último snapshot válido. Un corte temporal del endpoint
+      // público no debe convertir datos conocidos en un falso cero.
       report.google_ads_transparency = { status: 'unavailable', error: normalizedError };
       patch.last_sync_status = patch.last_sync_status === 'partial_error' ? 'error' : 'partial_error';
       patch.last_sync_error = normalizedError.message;
@@ -5082,7 +5247,11 @@ async function refreshOneCompetitor(competitor, scope, {
   return report;
 }
 
-async function refreshCompetition(scope, { competitorIds = null } = {}) {
+async function refreshCompetition(scope, {
+  competitorIds = null,
+  googleTransparencyMode = 'fast',
+  googleTransparencyRunKey = null,
+} = {}) {
   resetMetaBrowserBatchMetrics();
   const where = buildCompetitorWhere(scope);
   const ids = Array.isArray(competitorIds) ? competitorIds.map(toInt).filter(Boolean) : [];
@@ -5090,18 +5259,11 @@ async function refreshCompetition(scope, { competitorIds = null } = {}) {
 
   const competitors = await MarketingCompetitor.findAll({ where, order: [['id', 'ASC']] });
   const googleTransparencyConfig = googleAdsTransparencyOfficial.configuration();
-  let googleTransparencyBatch = new Map();
-  let googleTransparencyError = null;
-  if (googleTransparencyConfig.configured) {
-    try {
-      googleTransparencyBatch = await googleAdsTransparencyOfficial.fetchForCompetitors(
-        competitors.map((competitor) => competitor.toJSON()),
-        { config: googleTransparencyConfig },
-      );
-    } catch (error) {
-      googleTransparencyError = error;
-    }
-  }
+  const officialGlobalRequested = googleTransparencyMode === 'official_global';
+  const officialWeeklyEnabled = envFlagEnabled(
+    process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_WEEKLY_ENABLED,
+    false
+  );
 
   const report = {
     provider: {
@@ -5112,8 +5274,12 @@ async function refreshCompetition(scope, { competitorIds = null } = {}) {
       },
       meta_ads_library: { configured: !!getMetaAdLibraryTokenFromEnv() },
       google_ads_transparency: {
-        configured: googleTransparencyConfig.configured,
-        source: 'official_bigquery_public_dataset',
+        configured: googleTransparencyConfig.configured || googleAdsTransparencyFast.enabled(),
+        official_configured: googleTransparencyConfig.configured,
+        fast_path_configured: googleAdsTransparencyFast.enabled(),
+        mode: officialGlobalRequested ? 'official_global_weekly' : 'bounded_public_rpc',
+        source: officialGlobalRequested ? 'official_bigquery_public_dataset' : 'public_rpc_fast_path',
+        weekly_enabled: officialWeeklyEnabled,
       },
       meta_browser_media: cloneMetaBrowserMetrics()
     },
@@ -5126,8 +5292,7 @@ async function refreshCompetition(scope, { competitorIds = null } = {}) {
 
   for (const competitor of competitors) {
     const item = await refreshOneCompetitor(competitor, scope, {
-      googleTransparencyResult: googleTransparencyBatch.get(String(competitor.id)) || null,
-      googleTransparencyError,
+      googleTransparencyMode: officialGlobalRequested ? 'none' : 'fast',
     });
     report.processed += 1;
     if (
@@ -5146,6 +5311,47 @@ async function refreshCompetition(scope, { competitorIds = null } = {}) {
     }
   }
 
+  if (officialGlobalRequested) {
+    const runKey = cleanString(googleTransparencyRunKey) || weeklyRunKey();
+    if (!scope?.isAll || ids.length) {
+      report.provider.google_ads_transparency.official = {
+        status: 'skipped',
+        code: 'GOOGLE_ATC_GLOBAL_SCOPE_REQUIRED',
+        message: 'El lote oficial solo puede ejecutarse una vez para el scope global.',
+        run_key: runKey,
+      };
+    } else if (!officialWeeklyEnabled) {
+      report.provider.google_ads_transparency.official = {
+        status: 'skipped',
+        code: 'GOOGLE_ATC_WEEKLY_DISABLED_IN_RUNTIME',
+        message: 'El lote oficial está desactivado en este runtime. Solo debe habilitarse en el worker líder de producción.',
+        run_key: runKey,
+      };
+    } else if (!competitors.length) {
+      report.provider.google_ads_transparency.official = {
+        status: 'skipped',
+        code: 'GOOGLE_ATC_NO_ACTIVE_COMPETITORS',
+        message: 'No hay competidores activos que conciliar.',
+        run_key: runKey,
+      };
+    } else {
+      try {
+        report.provider.google_ads_transparency.official = await reconcileOfficialGoogleAdsTransparency(
+          competitors,
+          { runKey }
+        );
+      } catch (error) {
+        const normalizedError = normalizeExternalError(error);
+        report.provider.google_ads_transparency.official = {
+          status: 'unavailable',
+          run_key: runKey,
+          error: normalizedError,
+        };
+        report.errors.push({ provider: GOOGLE_ADS_TRANSPARENCY_PROVIDER, error: normalizedError });
+      }
+    }
+  }
+
   report.provider.meta_browser_media = cloneMetaBrowserMetrics();
   clearCompetitionRuntimeCache();
 
@@ -5159,6 +5365,7 @@ module.exports = {
   updateCompetitor,
   deactivateCompetitor,
   refreshCompetition,
+  officialWeeklyRunKey: weeklyRunKey,
   getLocalRankingHeatmap,
   listLocalHeatmapSearches,
   saveLocalHeatmapSearch,
@@ -5193,6 +5400,8 @@ module.exports = {
     heatmapSearchTermForClinic,
     defaultLocalHeatmapTermForClinic,
     mapSavedHeatmapSearchForClinic,
+    attachLocalHeatmapEvolution,
+    localHeatmapEvolutionPoint,
     competitorRelevanceForClinic,
     ensureClinicLocalProfileUrlIdentity,
     enrichClinicWithResolvedLocalProfile,
