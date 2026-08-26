@@ -37,6 +37,7 @@ const {
   SocialStatsDaily,
   SocialPosts,
   SocialPostStatsDaily,
+  PostPromotions,
   WebScDaily,
   WebScDailyAgg,
   WebScQueryDaily,
@@ -2267,7 +2268,22 @@ async function aggregateSocialOrganic(scope, range, marketingState = null) {
   }
 
   const candidatePosts = await SocialPosts.findAll({
-    attributes: ['id', 'asset_type', 'title', 'content', 'permalink_url', 'media_url', 'published_at'],
+    attributes: [
+      'id',
+      'asset_type',
+      'title',
+      'content',
+      'permalink_url',
+      'media_url',
+      'published_at',
+      'post_type',
+      'reactions_and_likes',
+      'comments_count',
+      'shares_count',
+      'views_count',
+      'views_count_fb',
+      'avg_watch_time_ms',
+    ],
     where: {
       ...socialDataScope,
       asset_type: { [Op.in]: ['facebook_page', 'instagram_business'] },
@@ -2285,6 +2301,11 @@ async function aggregateSocialOrganic(scope, range, marketingState = null) {
         [fn('SUM', col('reach')), 'reach'],
         [fn('SUM', col('impressions')), 'impressions'],
         [fn('SUM', col('engagement')), 'engagement'],
+        [fn('SUM', col('likes')), 'likes'],
+        [fn('SUM', col('comments')), 'comments'],
+        [fn('SUM', col('shares')), 'shares'],
+        [fn('SUM', col('video_views')), 'videoViews'],
+        [fn('MAX', col('avg_watch_time')), 'avgWatchTime'],
       ],
       where: {
         post_id: { [Op.in]: candidatePostIds },
@@ -2295,20 +2316,66 @@ async function aggregateSocialOrganic(scope, range, marketingState = null) {
     })
     : [];
   const metricsByPostId = new Map(postMetricRows.map((row) => [Number(row.post_id), row]));
+  const paidReachByPostId = new Map();
+  if (PostPromotions && SocialAdsInsightsDaily && candidatePostIds.length) {
+    const promotions = await PostPromotions.findAll({
+      attributes: ['post_id', 'ad_id'],
+      where: {
+        post_id: { [Op.in]: candidatePostIds },
+        ad_id: { [Op.ne]: null },
+      },
+      raw: true,
+    });
+    const adIds = [...new Set(promotions.map((promotion) => String(promotion.ad_id || '').trim()).filter(Boolean))];
+    if (adIds.length) {
+      const paidRows = await SocialAdsInsightsDaily.findAll({
+        attributes: [
+          'entity_id',
+          [fn('SUM', col('reach')), 'reach'],
+        ],
+        where: {
+          level: 'ad',
+          entity_id: { [Op.in]: adIds },
+          ...buildDateOnlyWhere('date', range),
+        },
+        group: ['entity_id'],
+        raw: true,
+      });
+      const reachByAdId = new Map(paidRows.map((row) => [String(row.entity_id), toNumber(row.reach)]));
+      for (const promotion of promotions) {
+        const postId = Number(promotion.post_id);
+        const reach = reachByAdId.get(String(promotion.ad_id)) || 0;
+        paidReachByPostId.set(postId, (paidReachByPostId.get(postId) || 0) + reach);
+      }
+    }
+  }
   const topPosts = candidatePosts
     .map((post) => {
       const metrics = metricsByPostId.get(Number(post.id)) || {};
+      const lifetimeViews = toNumber(post.views_count) || toNumber(post.views_count_fb);
+      const videoViews = toNumber(metrics.videoViews) || lifetimeViews;
+      const avgWatchTime = metrics.avgWatchTime != null
+        ? Number(metrics.avgWatchTime)
+        : (toNumber(post.avg_watch_time_ms) ? round(toNumber(post.avg_watch_time_ms) / 1000, 0) : 0);
       return {
         id: post.id,
         assetType: post.asset_type,
+        platform: post.asset_type === 'facebook_page' ? 'Facebook' : 'Instagram',
         title: post.title,
         content: post.content,
+        postType: post.post_type,
         permalinkUrl: post.permalink_url,
         mediaUrl: post.media_url,
         publishedAt: post.published_at,
         reach: toNumber(metrics.reach),
         impressions: toNumber(metrics.impressions),
         engagement: toNumber(metrics.engagement),
+        likes: toNumber(metrics.likes) || toNumber(post.reactions_and_likes),
+        comments: toNumber(metrics.comments) || toNumber(post.comments_count),
+        shares: toNumber(metrics.shares) || toNumber(post.shares_count),
+        paidReach: paidReachByPostId.get(Number(post.id)) || 0,
+        views: videoViews,
+        avgWatchTime,
       };
     })
     .sort((left, right) => {
