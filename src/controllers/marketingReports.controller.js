@@ -36,6 +36,7 @@ const {
   ClinicMetaAsset,
   SocialStatsDaily,
   SocialPosts,
+  SocialPostStatsDaily,
   WebScDaily,
   WebScDailyAgg,
   WebScQueryDaily,
@@ -1582,6 +1583,7 @@ function buildSeoEmpty() {
     rankingBuckets: [],
     queryMovements: [],
     pageMovements: [],
+    dailyAggregates: { top3: 0, top10: 0, points: [] },
     technical: emptySeoTechnical(),
     opportunities: [],
     connected: false,
@@ -1952,10 +1954,13 @@ async function aggregateSeo(scope, range, marketingState = null) {
     WebScDailyAgg
       ? WebScDailyAgg.findAll({
         attributes: [
+          'date',
           [fn('SUM', col('queries_top3')), 'top3'],
           [fn('SUM', col('queries_top10')), 'top10'],
         ],
         where,
+        group: ['date'],
+        order: [['date', 'ASC']],
         raw: true,
       })
       : Promise.resolve([]),
@@ -1973,6 +1978,18 @@ async function aggregateSeo(scope, range, marketingState = null) {
   const queryMovements = buildSeoMovements(currentQueryRows, previousQueryRows, 'query', 8);
   const pageMovements = buildSeoMovements(currentPageRows, previousPageRows, 'page', 8);
   const hasSeoTrafficData = clicks > 0 || impressions > 0;
+  const seoDailyPoints = (aggRows || [])
+    .map((row) => ({
+      date: String(row.date || '').slice(0, 10),
+      top3: toNumber(row.top3),
+      top10: toNumber(row.top10),
+    }))
+    .filter((row) => !!row.date);
+  const seoDailyTotals = seoDailyPoints.reduce((acc, row) => {
+    acc.top3 += toNumber(row.top3);
+    acc.top10 += toNumber(row.top10);
+    return acc;
+  }, { top3: 0, top10: 0 });
 
   return {
     summary,
@@ -1995,8 +2012,9 @@ async function aggregateSeo(scope, range, marketingState = null) {
     queryMovements,
     pageMovements,
     dailyAggregates: {
-      top3: toNumber(aggRows?.[0]?.top3),
-      top10: toNumber(aggRows?.[0]?.top10),
+      top3: seoDailyTotals.top3,
+      top10: seoDailyTotals.top10,
+      points: seoDailyPoints,
     },
     technical,
     opportunities: buildSeoOpportunities({
@@ -2145,46 +2163,57 @@ async function aggregateSocialOrganic(scope, range, marketingState = null) {
     }
   }
 
-  const replacements = {
-    startDate: range.startLabel,
-    endDate: range.endLabel,
-    startTs: range.startSql,
-    endTs: range.endExclusiveSql,
-    limit: 5,
-  };
-  const postScopeSql = scopedRawOrEffectiveSql(
-    'p.clinica_id',
-    scope,
-    replacements,
-    'socialPostClinicIds',
-    'p.asset_id',
-    effectiveSocialAssetIds,
-    'socialAssetIds'
-  );
-  const topPosts = await sequelize.query(
-    `SELECT p.id,
-            p.asset_type AS assetType,
-            p.title,
-            p.content,
-            p.permalink_url AS permalinkUrl,
-            p.media_url AS mediaUrl,
-            p.published_at AS publishedAt,
-            COALESCE(SUM(s.reach), 0) AS reach,
-            COALESCE(SUM(s.impressions), 0) AS impressions,
-            COALESCE(SUM(s.engagement), 0) AS engagement
-       FROM SocialPosts p
-       LEFT JOIN SocialPostStatsDaily s
-              ON s.post_id = p.id
-             AND s.date BETWEEN :startDate AND :endDate
-      WHERE p.asset_type IN ('facebook_page', 'instagram_business')
-        AND p.published_at >= :startTs
-        AND p.published_at < :endTs
-        ${postScopeSql}
-      GROUP BY p.id, p.asset_type, p.title, p.content, p.permalink_url, p.media_url, p.published_at
-      ORDER BY COALESCE(SUM(s.reach), 0) DESC, p.published_at DESC
-      LIMIT :limit`,
-    { replacements, type: QueryTypes.SELECT }
-  );
+  const candidatePosts = await SocialPosts.findAll({
+    attributes: ['id', 'asset_type', 'title', 'content', 'permalink_url', 'media_url', 'published_at'],
+    where: {
+      ...socialDataScope,
+      asset_type: { [Op.in]: ['facebook_page', 'instagram_business'] },
+      ...buildSequelizeDateWhere('published_at', range),
+    },
+    order: [['published_at', 'DESC']],
+    limit: 40,
+    raw: true,
+  });
+  const candidatePostIds = normalizedUniqueIntegers(candidatePosts.map((post) => post.id));
+  const postMetricRows = SocialPostStatsDaily && candidatePostIds.length
+    ? await SocialPostStatsDaily.findAll({
+      attributes: [
+        'post_id',
+        [fn('SUM', col('reach')), 'reach'],
+        [fn('SUM', col('impressions')), 'impressions'],
+        [fn('SUM', col('engagement')), 'engagement'],
+      ],
+      where: {
+        post_id: { [Op.in]: candidatePostIds },
+        ...buildDateOnlyWhere('date', range),
+      },
+      group: ['post_id'],
+      raw: true,
+    })
+    : [];
+  const metricsByPostId = new Map(postMetricRows.map((row) => [Number(row.post_id), row]));
+  const topPosts = candidatePosts
+    .map((post) => {
+      const metrics = metricsByPostId.get(Number(post.id)) || {};
+      return {
+        id: post.id,
+        assetType: post.asset_type,
+        title: post.title,
+        content: post.content,
+        permalinkUrl: post.permalink_url,
+        mediaUrl: post.media_url,
+        publishedAt: post.published_at,
+        reach: toNumber(metrics.reach),
+        impressions: toNumber(metrics.impressions),
+        engagement: toNumber(metrics.engagement),
+      };
+    })
+    .sort((left, right) => {
+      const reachDiff = toNumber(right.reach) - toNumber(left.reach);
+      if (reachDiff) return reachDiff;
+      return new Date(right.publishedAt || 0).getTime() - new Date(left.publishedAt || 0).getTime();
+    })
+    .slice(0, 5);
 
   const trendByDate = new Map();
   for (const row of normalizeSocialFollowerDeltas(trendRows)) {
