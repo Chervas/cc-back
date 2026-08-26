@@ -460,6 +460,41 @@ async function testMultiScopeUnionsEffectiveAssetsByIdentity() {
   assert.deepEqual(replacements, { socialAssetIds: [401] });
 }
 
+async function testSeoV15HelpersStayBackendOwned() {
+  const buckets = __testing.buildSeoRankingBuckets([
+    { position: 2 },
+    { position: 7 },
+    { position: 12 },
+    { position: 55 },
+  ]);
+  assert.deepEqual(buckets.map((bucket) => bucket.id), ['top3', 'top10', 'top20', 'top50', 'beyond50']);
+  assert.equal(buckets.find((bucket) => bucket.id === 'top3').share, 25);
+
+  const movements = __testing.buildSeoMovements(
+    [{ value: 'implantes dentales', clicks: 12, impressions: 100, position: 4 }],
+    [{ value: 'implantes dentales', clicks: 8, impressions: 90, position: 7 }],
+    'query',
+    5
+  );
+  assert.equal(movements[0].query, 'implantes dentales');
+  assert.equal(movements[0].trend, 'up');
+  assert.equal(movements[0].clicksDelta, 4);
+  assert.equal(movements[0].positionDelta, 3);
+
+  const opportunities = __testing.buildSeoOpportunities({
+    searchConsoleConnected: true,
+    summary: { clicks: 1, impressions: 300 },
+    queryMovements: [{ query: 'clinica estetica', clicks: 0, impressions: 120, ctr: 0, position: 8 }],
+    pageMovements: [],
+    technical: {
+      checks: [{ label: 'CLS', status: 'warning' }],
+    },
+  });
+  assert.ok(opportunities.some((opportunity) => opportunity.id === 'seo-zero-click-query'));
+  assert.ok(opportunities.some((opportunity) => opportunity.id === 'seo-technical-health'));
+  assert.ok(opportunities.every((opportunity) => opportunity.actionRoute === '/marketing/mi-clinica/seo-ia'));
+}
+
 async function run() {
   await testExplicitlySharedGoogleAccountIsEffective();
   await testExplicitlySharedMetaProfilesAreEffective();
@@ -467,6 +502,7 @@ async function run() {
   await testInventoryResolverIsReadOnly();
   await testReportsResolveReadOnlyAndKeepHistoricalAdsScope();
   await testMultiScopeUnionsEffectiveAssetsByIdentity();
+  await testSeoV15HelpersStayBackendOwned();
   console.log('marketing_report_effective_assets.test.js OK');
 }
 

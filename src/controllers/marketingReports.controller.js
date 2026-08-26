@@ -37,7 +37,10 @@ const {
   SocialStatsDaily,
   SocialPosts,
   WebScDaily,
+  WebScDailyAgg,
   WebScQueryDaily,
+  WebPsiSnapshot,
+  WebIndexCoverageDaily,
   WebGaDaily,
   ClinicBusinessLocation,
   BusinessProfileDailyMetric,
@@ -1559,15 +1562,343 @@ async function aggregateGa(scope, range, marketingState = null) {
   };
 }
 
-async function aggregateSeo(scope, range, marketingState = null) {
-  const empty = {
+function emptySeoTechnical() {
+  return {
+    state: 'missing',
+    score: 0,
+    lastChecked: null,
+    url: null,
+    checks: [],
+    coreWebVitals: [],
+    indexCoverage: null,
+  };
+}
+
+function buildSeoEmpty() {
+  return {
     summary: { clicks: 0, impressions: 0, ctr: 0, avgPosition: 0 },
     queries: [],
     pages: [],
+    rankingBuckets: [],
+    queryMovements: [],
+    pageMovements: [],
+    technical: emptySeoTechnical(),
+    opportunities: [],
     connected: false,
     lastSync: null,
   };
+}
+
+function seoPositionBucket(position) {
+  const value = Number(position);
+  if (!Number.isFinite(value) || value <= 0) return 'unknown';
+  if (value <= 3) return 'top3';
+  if (value <= 10) return 'top10';
+  if (value <= 20) return 'top20';
+  if (value <= 50) return 'top50';
+  return 'beyond50';
+}
+
+function buildSeoRankingBuckets(rows = []) {
+  const config = [
+    { id: 'top3', label: 'Top 3', order: 1 },
+    { id: 'top10', label: '4-10', order: 2 },
+    { id: 'top20', label: '11-20', order: 3 },
+    { id: 'top50', label: '21-50', order: 4 },
+    { id: 'beyond50', label: '50+', order: 5 },
+    { id: 'unknown', label: 'Sin posición', order: 6 },
+  ];
+  const counts = new Map(config.map((item) => [item.id, 0]));
+  rows.forEach((row) => {
+    const bucket = seoPositionBucket(row.position);
+    counts.set(bucket, (counts.get(bucket) || 0) + 1);
+  });
+  const total = rows.length;
+  return config
+    .map((item) => ({
+      id: item.id,
+      label: item.label,
+      count: counts.get(item.id) || 0,
+      share: total ? round(((counts.get(item.id) || 0) / total) * 100, 1) : 0,
+    }))
+    .filter((item) => item.count > 0 || item.id !== 'unknown');
+}
+
+function seoTrend(current, previous) {
+  if (!previous || (!toNumber(previous.clicks) && !toNumber(previous.impressions))) return 'new';
+  const clicksDelta = toNumber(current.clicks) - toNumber(previous.clicks);
+  const positionDelta = Number.isFinite(Number(previous.position)) && Number.isFinite(Number(current.position))
+    ? Number(previous.position) - Number(current.position)
+    : 0;
+  if (positionDelta >= 1 || clicksDelta > 0) return 'up';
+  if (positionDelta <= -1 || clicksDelta < 0) return 'down';
+  return 'flat';
+}
+
+function seoMovementRow(current, previous, dimension) {
+  const clicks = toNumber(current.clicks);
+  const impressions = toNumber(current.impressions);
+  const previousClicks = toNumber(previous?.clicks);
+  const previousPosition = previous?.position != null ? round(previous.position, 1) : null;
+  const position = round(current.position, 1);
+  const positionDelta = previousPosition != null && position
+    ? round(previousPosition - position, 1)
+    : null;
+  const row = {
+    clicks,
+    impressions,
+    ctr: ratioPct(clicks, impressions, 2),
+    position,
+    previousClicks,
+    previousPosition,
+    clicksDelta: clicks - previousClicks,
+    positionDelta,
+    trend: seoTrend(current, previous),
+  };
+  if (dimension === 'page') {
+    return {
+      ...row,
+      page: current.value || 'Sin página',
+      shortName: shortUrl(current.value || 'Sin página'),
+    };
+  }
+  return {
+    ...row,
+    query: current.value || 'Sin query',
+  };
+}
+
+async function fetchSeoDimensionRows(scope, range, marketingState, dimension, limit, keyPrefix) {
+  if (!WebScQueryDaily) return [];
+  const startKey = `${keyPrefix}Start`;
+  const endKey = `${keyPrefix}End`;
+  const limitKey = `${keyPrefix}Limit`;
+  const replacements = {
+    [startKey]: range.startLabel,
+    [endKey]: range.endLabel,
+    [limitKey]: limit,
+  };
+  const scopeSql = searchConsoleRawScopeSql(scope, marketingState, replacements, keyPrefix);
+  const dimensionSql = dimension === 'page'
+    ? "COALESCE(NULLIF(page_url, ''), 'Sin página')"
+    : "COALESCE(NULLIF(query, ''), 'Sin query')";
+
+  const rows = await sequelize.query(
+    `SELECT ${dimensionSql} AS value,
+            SUM(clicks) AS clicks,
+            SUM(impressions) AS impressions,
+            CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions) / SUM(impressions) ELSE AVG(position) END AS position,
+            MAX(date) AS lastDate
+       FROM WebScQueryDaily
+      WHERE date BETWEEN :${startKey} AND :${endKey} ${scopeSql}
+      GROUP BY ${dimensionSql}
+     HAVING SUM(clicks) > 0 OR SUM(impressions) > 0
+      ORDER BY SUM(impressions) DESC, SUM(clicks) DESC
+      LIMIT :${limitKey}`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+
+  return rows.map((row) => ({
+    value: row.value || (dimension === 'page' ? 'Sin página' : 'Sin query'),
+    clicks: toNumber(row.clicks),
+    impressions: toNumber(row.impressions),
+    position: round(row.position, 1),
+    lastDate: row.lastDate || null,
+  }));
+}
+
+function buildSeoMovements(currentRows, previousRows, dimension, limit = 8) {
+  const previousByKey = new Map((previousRows || []).map((row) => [String(row.value || '').toLowerCase(), row]));
+  return (currentRows || [])
+    .map((row) => seoMovementRow(row, previousByKey.get(String(row.value || '').toLowerCase()), dimension))
+    .sort((left, right) => {
+      const leftImpact = Math.abs(toNumber(left.clicksDelta)) + Math.abs(toNumber(left.positionDelta)) * 3;
+      const rightImpact = Math.abs(toNumber(right.clicksDelta)) + Math.abs(toNumber(right.positionDelta)) * 3;
+      return rightImpact - leftImpact;
+    })
+    .slice(0, limit);
+}
+
+function metricStatus(value, goodLimit, warningLimit, lowerIsBetter = true) {
+  if (value == null || value === '') return 'unknown';
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 'unknown';
+  if (lowerIsBetter) {
+    if (numeric <= goodLimit) return 'ok';
+    if (numeric <= warningLimit) return 'warning';
+    return 'critical';
+  }
+  if (numeric >= goodLimit) return 'ok';
+  if (numeric >= warningLimit) return 'warning';
+  return 'critical';
+}
+
+function binaryStatus(value) {
+  if (value === true || value === 1) return 'ok';
+  if (value === false || value === 0) return 'warning';
+  return 'unknown';
+}
+
+function buildSeoCheck(id, label, value, status, helpText = null) {
+  return { id, label, value, status, helpText };
+}
+
+async function aggregateSeoTechnical(scope, marketingState = null) {
+  if (!WebPsiSnapshot) return emptySeoTechnical();
+  const assetOwnerScope = scopeWithEffectiveAssetOwners(
+    scope,
+    effectiveSearchConsoleMetricPairs(marketingState, scope)
+  );
+  const snapshot = await WebPsiSnapshot.findOne({
+    where: scopedWhere('clinica_id', assetOwnerScope),
+    order: [['fetched_at', 'DESC']],
+    raw: true,
+  });
+  if (!snapshot) return emptySeoTechnical();
+
+  const indexCoverage = WebIndexCoverageDaily
+    ? await WebIndexCoverageDaily.findOne({
+      where: scopedWhere('clinica_id', assetOwnerScope),
+      order: [['date', 'DESC']],
+      raw: true,
+    })
+    : null;
+
+  const performance = snapshot.performance == null ? null : toNumber(snapshot.performance);
+  const accessibility = snapshot.accessibility == null ? null : toNumber(snapshot.accessibility);
+  const lcpMs = snapshot.lcp_ms == null ? null : toNumber(snapshot.lcp_ms);
+  const cls = snapshot.cls == null ? null : Number(snapshot.cls);
+  const inpMs = snapshot.inp_ms == null ? null : toNumber(snapshot.inp_ms);
+
+  const coreWebVitals = [
+    buildSeoCheck('lcp', 'LCP', lcpMs == null ? 'Sin dato' : `${round(lcpMs / 1000, 1)} s`, metricStatus(lcpMs, 2500, 4000), 'Carga del contenido principal. Bueno si está por debajo de 2,5 s.'),
+    buildSeoCheck('cls', 'CLS', cls == null ? 'Sin dato' : round(cls, 3), metricStatus(cls, 0.1, 0.25), 'Estabilidad visual. Bueno si está por debajo de 0,1.'),
+    buildSeoCheck('inp', 'INP', inpMs == null ? 'Sin dato' : `${inpMs} ms`, metricStatus(inpMs, 200, 500), 'Respuesta a interacción. Bueno si está por debajo de 200 ms.'),
+  ];
+  const checks = [
+    buildSeoCheck('https', 'SSL activo', snapshot.https_ok === true ? 'Correcto' : 'Revisar', binaryStatus(snapshot.https_ok), snapshot.https_status ? `HTTP ${snapshot.https_status}` : null),
+    buildSeoCheck('sitemap', 'Sitemap', snapshot.sitemap_found === true ? 'Detectado' : 'No detectado', binaryStatus(snapshot.sitemap_found), snapshot.sitemap_url || null),
+    buildSeoCheck('indexed', 'Indexación básica', snapshot.indexed_ok === true ? 'Indexable' : 'Revisar', binaryStatus(snapshot.indexed_ok), 'Comprobación básica de que la URL principal puede aparecer en Google.'),
+    buildSeoCheck('performance', 'Rendimiento móvil', performance == null ? 'Sin dato' : `${performance}/100`, metricStatus(performance, 90, 50, false), 'Puntuación PageSpeed en móvil.'),
+    buildSeoCheck('accessibility', 'Accesibilidad', accessibility == null ? 'Sin dato' : `${accessibility}/100`, metricStatus(accessibility, 90, 70, false), 'Puntuación de accesibilidad PageSpeed.'),
+    ...coreWebVitals,
+  ];
+  const criticalCount = checks.filter((check) => check.status === 'critical').length;
+  const warningCount = checks.filter((check) => check.status === 'warning').length;
+  const okCount = checks.filter((check) => check.status === 'ok').length;
+  const knownCount = checks.filter((check) => check.status !== 'unknown').length;
+  const score = knownCount ? Math.round((okCount / knownCount) * 100) : 0;
+
+  return {
+    state: criticalCount > 0 ? 'critical' : warningCount > 0 ? 'warning' : 'ok',
+    score,
+    lastChecked: snapshot.fetched_at || null,
+    url: snapshot.url || null,
+    checks,
+    coreWebVitals,
+    indexCoverage: indexCoverage ? {
+      date: indexCoverage.date,
+      indexed: toNumber(indexCoverage.indexed_count),
+      nonIndexed: toNumber(indexCoverage.nonindexed_count),
+    } : null,
+  };
+}
+
+function seoOpportunity(id, title, description, impact = 'medium', actionLabel = 'Ver SEO e IA') {
+  return {
+    id,
+    title,
+    description,
+    impact,
+    icon: 'heroicons_outline:sparkles',
+    actionLabel,
+    actionRoute: '/marketing/mi-clinica/seo-ia',
+  };
+}
+
+function buildSeoOpportunities({ searchConsoleConnected, summary, queryMovements, pageMovements, technical }) {
+  const opportunities = [];
+  if (!searchConsoleConnected) {
+    opportunities.push(seoOpportunity(
+      'connect-search-console',
+      'Conecta Search Console',
+      'Sin Search Console no podemos saber qué búsquedas enseñan tu web, qué páginas traen tráfico ni qué URLs conviene proteger.',
+      'high',
+      'Conectar Search Console'
+    ));
+  }
+
+  const zeroClick = (queryMovements || [])
+    .find((query) => toNumber(query.impressions) >= 50 && toNumber(query.clicks) === 0);
+  if (zeroClick) {
+    opportunities.push(seoOpportunity(
+      'seo-zero-click-query',
+      'Google ya te muestra, pero no te están haciendo clic',
+      `"${zeroClick.query}" tuvo ${toNumber(zeroClick.impressions)} impresiones y ningún clic. Revisa título, descripción y promesa de esa página.`,
+      'medium'
+    ));
+  }
+
+  const nearTop = (queryMovements || [])
+    .find((query) => toNumber(query.impressions) >= 30 && toNumber(query.position) > 3 && toNumber(query.position) <= 10);
+  if (nearTop) {
+    opportunities.push(seoOpportunity(
+      'seo-near-top3',
+      'Hay búsquedas cerca del Top 3',
+      `"${nearTop.query}" está en posición media ${round(nearTop.position, 1)}. Mejorar esa URL puede aumentar visitas sin crear una página nueva.`,
+      'medium'
+    ));
+  }
+
+  const lowCtr = (queryMovements || [])
+    .find((query) => toNumber(query.impressions) >= 100 && toNumber(query.ctr) < 2 && toNumber(query.position) <= 20);
+  if (lowCtr) {
+    opportunities.push(seoOpportunity(
+      'seo-low-ctr',
+      'Una búsqueda relevante tiene CTR bajo',
+      `"${lowCtr.query}" aparece ${toNumber(lowCtr.impressions)} veces, pero su CTR es ${round(lowCtr.ctr, 1)}%. Conviene revisar snippet y llamada a la acción.`,
+      'medium'
+    ));
+  }
+
+  const losingPage = (pageMovements || [])
+    .find((page) => toNumber(page.previousClicks) >= 10 && toNumber(page.clicksDelta) <= -Math.max(5, Math.round(toNumber(page.previousClicks) * 0.3)));
+  if (losingPage) {
+    opportunities.push(seoOpportunity(
+      'seo-page-losing-clicks',
+      'Una página está perdiendo tráfico orgánico',
+      `${losingPage.shortName} pierde ${Math.abs(toNumber(losingPage.clicksDelta))} clics frente al periodo anterior. Revísala antes de tocar contenidos que sí funcionan.`,
+      'high'
+    ));
+  }
+
+  const technicalIssues = (technical?.checks || []).filter((check) => ['critical', 'warning'].includes(check.status));
+  if (technicalIssues.length) {
+    opportunities.push(seoOpportunity(
+      'seo-technical-health',
+      'Hay revisiones técnicas que pueden afectar al SEO',
+      `${technicalIssues.slice(0, 3).map((check) => check.label).join(', ')} requieren atención según la última auditoría cacheada.`,
+      technicalIssues.some((check) => check.status === 'critical') ? 'high' : 'medium'
+    ));
+  }
+
+  if (toNumber(summary?.impressions) > 0 && !opportunities.length) {
+    opportunities.push(seoOpportunity(
+      'seo-monitoring-ok',
+      'SEO monitorizado sin alertas prioritarias',
+      'Search Console y la auditoría técnica no muestran incidencias prioritarias en este periodo. Sigue revisando evolución y nuevas oportunidades.',
+      'low'
+    ));
+  }
+
+  return opportunities.slice(0, 6);
+}
+
+async function aggregateSeo(scope, range, marketingState = null) {
+  const empty = buildSeoEmpty();
   if (!WebScDaily || !WebScQueryDaily) return empty;
+  const previousRange = range.previous || range;
+  const searchConsoleMapped = effectiveGoogleProperties(marketingState).searchConsole.length > 0;
 
   const where = {
     ...buildSearchConsoleDataWhere(scope, marketingState),
@@ -1613,6 +1944,24 @@ async function aggregateSeo(scope, range, marketingState = null) {
     { replacements, type: QueryTypes.SELECT }
   );
 
+  const [currentQueryRows, previousQueryRows, currentPageRows, previousPageRows, aggRows, technical] = await Promise.all([
+    fetchSeoDimensionRows(scope, range, marketingState, 'query', 80, 'seoCurrentQuery'),
+    fetchSeoDimensionRows(scope, previousRange, marketingState, 'query', 80, 'seoPreviousQuery'),
+    fetchSeoDimensionRows(scope, range, marketingState, 'page', 40, 'seoCurrentPage'),
+    fetchSeoDimensionRows(scope, previousRange, marketingState, 'page', 40, 'seoPreviousPage'),
+    WebScDailyAgg
+      ? WebScDailyAgg.findAll({
+        attributes: [
+          [fn('SUM', col('queries_top3')), 'top3'],
+          [fn('SUM', col('queries_top10')), 'top10'],
+        ],
+        where,
+        raw: true,
+      })
+      : Promise.resolve([]),
+    aggregateSeoTechnical(scope, marketingState),
+  ]);
+
   const clicks = toNumber(summaryRow?.clicks);
   const impressions = toNumber(summaryRow?.impressions);
   const summary = {
@@ -1621,6 +1970,9 @@ async function aggregateSeo(scope, range, marketingState = null) {
     ctr: ratioPct(clicks, impressions, 2),
     avgPosition: round(summaryRow?.position, 1),
   };
+  const queryMovements = buildSeoMovements(currentQueryRows, previousQueryRows, 'query', 8);
+  const pageMovements = buildSeoMovements(currentPageRows, previousPageRows, 'page', 8);
+  const hasSeoTrafficData = clicks > 0 || impressions > 0;
 
   return {
     summary,
@@ -1639,7 +1991,22 @@ async function aggregateSeo(scope, range, marketingState = null) {
       ctr: ratioPct(row.clicks, row.impressions, 2),
       position: round(row.position, 1),
     })),
-    connected: clicks > 0 || impressions > 0,
+    rankingBuckets: buildSeoRankingBuckets(currentQueryRows),
+    queryMovements,
+    pageMovements,
+    dailyAggregates: {
+      top3: toNumber(aggRows?.[0]?.top3),
+      top10: toNumber(aggRows?.[0]?.top10),
+    },
+    technical,
+    opportunities: buildSeoOpportunities({
+      searchConsoleConnected: searchConsoleMapped || hasSeoTrafficData,
+      summary,
+      queryMovements,
+      pageMovements,
+      technical,
+    }),
+    connected: hasSeoTrafficData,
     lastSync: summaryRow?.lastDate || null,
   };
 }
@@ -3280,6 +3647,12 @@ exports.getOverview = async (req, res) => {
       seoSummary: seo.summary,
       seoQueries: seo.queries,
       seoPages: seo.pages,
+      seoRankingBuckets: seo.rankingBuckets,
+      seoQueryMovements: seo.queryMovements,
+      seoPageMovements: seo.pageMovements,
+      seoDailyAggregates: seo.dailyAggregates,
+      seoTechnical: seo.technical,
+      seoOpportunities: seo.opportunities,
       social,
       adsCampaigns,
       businessProfile: businessProfile.metrics,
@@ -3346,4 +3719,8 @@ exports.__testing = {
   buildSourceSyncState,
   resolveMetaAttributionStatus,
   normalizeSocialFollowerDeltas,
+  buildSeoRankingBuckets,
+  buildSeoMovements,
+  buildSeoOpportunities,
+  emptySeoTechnical,
 };
