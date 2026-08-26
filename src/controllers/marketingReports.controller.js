@@ -1580,6 +1580,8 @@ function buildSeoEmpty() {
     summary: { clicks: 0, impressions: 0, ctr: 0, avgPosition: 0 },
     queries: [],
     pages: [],
+    queryPages: [],
+    queryTrends: [],
     rankingBuckets: [],
     queryMovements: [],
     pageMovements: [],
@@ -1706,6 +1708,98 @@ async function fetchSeoDimensionRows(scope, range, marketingState, dimension, li
     impressions: toNumber(row.impressions),
     position: round(row.position, 1),
     lastDate: row.lastDate || null,
+  }));
+}
+
+async function fetchSeoQueryPageRows(scope, range, marketingState, limit = 250, keyPrefix = 'seoQueryPage') {
+  if (!WebScQueryDaily) return [];
+  const startKey = `${keyPrefix}Start`;
+  const endKey = `${keyPrefix}End`;
+  const limitKey = `${keyPrefix}Limit`;
+  const replacements = {
+    [startKey]: range.startLabel,
+    [endKey]: range.endLabel,
+    [limitKey]: limit,
+  };
+  const scopeSql = searchConsoleRawScopeSql(scope, marketingState, replacements, keyPrefix);
+  const querySql = "COALESCE(NULLIF(query, ''), 'Sin query')";
+  const pageSql = "COALESCE(NULLIF(page_url, ''), 'Sin página')";
+
+  const rows = await sequelize.query(
+    `SELECT ${querySql} AS query,
+            ${pageSql} AS page,
+            SUM(clicks) AS clicks,
+            SUM(impressions) AS impressions,
+            CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions) / SUM(impressions) ELSE AVG(position) END AS position,
+            MAX(date) AS lastDate
+       FROM WebScQueryDaily
+      WHERE date BETWEEN :${startKey} AND :${endKey} ${scopeSql}
+      GROUP BY ${querySql}, ${pageSql}
+     HAVING SUM(clicks) > 0 OR SUM(impressions) > 0
+      ORDER BY SUM(clicks) DESC, SUM(impressions) DESC
+      LIMIT :${limitKey}`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+
+  return rows.map((row) => ({
+    query: row.query || 'Sin query',
+    page: row.page || 'Sin página',
+    shortName: shortUrl(row.page || 'Sin página'),
+    clicks: toNumber(row.clicks),
+    impressions: toNumber(row.impressions),
+    ctr: ratioPct(row.clicks, row.impressions, 2),
+    position: round(row.position, 1),
+    lastDate: row.lastDate || null,
+  }));
+}
+
+async function fetchSeoQueryTrends(scope, range, marketingState, queries = [], keyPrefix = 'seoQueryTrend') {
+  if (!WebScQueryDaily || !queries.length) return [];
+  const normalizedQueries = queries
+    .map((query) => String(query || '').trim())
+    .filter((query) => query && query !== 'Sin query')
+    .slice(0, 8);
+  if (!normalizedQueries.length) return [];
+
+  const startKey = `${keyPrefix}Start`;
+  const endKey = `${keyPrefix}End`;
+  const queryKey = `${keyPrefix}Queries`;
+  const replacements = {
+    [startKey]: range.startLabel,
+    [endKey]: range.endLabel,
+    [queryKey]: normalizedQueries,
+  };
+  const scopeSql = searchConsoleRawScopeSql(scope, marketingState, replacements, keyPrefix);
+  const rows = await sequelize.query(
+    `SELECT date,
+            query,
+            SUM(clicks) AS clicks,
+            SUM(impressions) AS impressions,
+            CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions) / SUM(impressions) ELSE AVG(position) END AS position
+       FROM WebScQueryDaily
+      WHERE date BETWEEN :${startKey} AND :${endKey}
+        AND query IN (:${queryKey})
+        ${scopeSql}
+      GROUP BY date, query
+      ORDER BY date ASC`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+
+  const pointsByQuery = new Map(normalizedQueries.map((query) => [query, []]));
+  rows.forEach((row) => {
+    const query = row.query || '';
+    if (!pointsByQuery.has(query)) return;
+    pointsByQuery.get(query).push({
+      date: String(row.date || '').slice(0, 10),
+      clicks: toNumber(row.clicks),
+      impressions: toNumber(row.impressions),
+      position: round(row.position, 1),
+    });
+  });
+
+  return normalizedQueries.map((query) => ({
+    query,
+    points: pointsByQuery.get(query) || [],
   }));
 }
 
@@ -1946,7 +2040,12 @@ async function aggregateSeo(scope, range, marketingState = null) {
     { replacements, type: QueryTypes.SELECT }
   );
 
-  const [currentQueryRows, previousQueryRows, currentPageRows, previousPageRows, aggRows, technical] = await Promise.all([
+  const topTrendQueries = queryRows
+    .map((row) => row.query)
+    .filter(Boolean)
+    .slice(0, 8);
+
+  const [currentQueryRows, previousQueryRows, currentPageRows, previousPageRows, aggRows, technical, queryPageRows, queryTrendRows] = await Promise.all([
     fetchSeoDimensionRows(scope, range, marketingState, 'query', 80, 'seoCurrentQuery'),
     fetchSeoDimensionRows(scope, previousRange, marketingState, 'query', 80, 'seoPreviousQuery'),
     fetchSeoDimensionRows(scope, range, marketingState, 'page', 40, 'seoCurrentPage'),
@@ -1965,6 +2064,8 @@ async function aggregateSeo(scope, range, marketingState = null) {
       })
       : Promise.resolve([]),
     aggregateSeoTechnical(scope, marketingState),
+    fetchSeoQueryPageRows(scope, range, marketingState, 250, 'seoQueryPage'),
+    fetchSeoQueryTrends(scope, range, marketingState, topTrendQueries, 'seoQueryTrend'),
   ]);
 
   const clicks = toNumber(summaryRow?.clicks);
@@ -2008,6 +2109,8 @@ async function aggregateSeo(scope, range, marketingState = null) {
       ctr: ratioPct(row.clicks, row.impressions, 2),
       position: round(row.position, 1),
     })),
+    queryPages: queryPageRows,
+    queryTrends: queryTrendRows,
     rankingBuckets: buildSeoRankingBuckets(currentQueryRows),
     queryMovements,
     pageMovements,
@@ -3676,6 +3779,8 @@ exports.getOverview = async (req, res) => {
       seoSummary: seo.summary,
       seoQueries: seo.queries,
       seoPages: seo.pages,
+      seoQueryPages: seo.queryPages,
+      seoQueryTrends: seo.queryTrends,
       seoRankingBuckets: seo.rankingBuckets,
       seoQueryMovements: seo.queryMovements,
       seoPageMovements: seo.pageMovements,
