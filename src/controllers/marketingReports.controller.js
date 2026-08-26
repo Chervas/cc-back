@@ -2823,10 +2823,30 @@ function buildKpis(current, previous, series = {}) {
   ];
 }
 
-function buildRecommendations({ businessProfile, adsCampaigns, webPages, intakeConfigCount }) {
+function buildRecommendations({
+  businessProfile = {},
+  adsCampaigns = [],
+  intakeConfigCount = 0,
+  firstParty = {},
+  sources = [],
+  seo = {},
+  social = {},
+  channels = [],
+  range = {},
+  current = {},
+  previous = {},
+  paidCoverageSummary = {},
+} = {}) {
   const recs = [];
-  if (!businessProfile.connected) {
-    recs.push({
+  const sourceConnection = (sourceName, fallback = false) => {
+    const source = (sources || []).find((item) => item?.source === sourceName);
+    return source ? source.connected === true : fallback === true;
+  };
+  const push = (priority, recommendation) => recs.push({ priority, ...recommendation });
+
+  const businessProfileConnected = sourceConnection('Perfil Google', businessProfile.connected);
+  if (!businessProfileConnected) {
+    push(95, {
       id: 'connect-gbp',
       section: 'google-profile',
       icon: 'heroicons_outline:map-pin',
@@ -2834,63 +2854,214 @@ function buildRecommendations({ businessProfile, adsCampaigns, webPages, intakeC
       title: 'Conecta tu Perfil de Empresa de Google',
       description: 'Podrás ver llamadas, reseñas, visitas y acciones generadas por tu ficha de Google Maps.',
       actionLabel: 'Conectar ahora',
+      actionRoute: '/marketing/objetivos/captar-nuevos-pacientes/perfil-google',
       severity: 'warning',
     });
-  }
-
-  const campaignAlert = adsCampaigns.find((campaign) => campaign.alert);
-  if (campaignAlert) {
-    recs.push({
-      id: 'campaign-no-leads',
-      section: 'campanas',
-      icon: 'heroicons_outline:exclamation-triangle',
-      iconColor: 'text-red-500',
-      title: `Campaña "${campaignAlert.name}" sin leads`,
-      description: campaignAlert.alert,
-      actionLabel: 'Ver campaña',
-      severity: 'warning',
-    });
-  }
-
-  if (businessProfile.unansweredReviews > 0) {
-    recs.push({
+  } else if (toNumber(businessProfile.unansweredReviews) > 0) {
+    push(85, {
       id: 'respond-reviews',
       section: 'google-profile',
       icon: 'heroicons_outline:chat-bubble-bottom-center-text',
       iconColor: 'text-blue-500',
-      title: `Tienes ${businessProfile.unansweredReviews} reseñas sin responder`,
-      description: 'Responder reseñas mejora confianza y ayuda al posicionamiento local.',
+      title: `Tienes ${toNumber(businessProfile.unansweredReviews)} reseñas sin responder`,
+      description: 'Responder reseñas mejora la confianza y ayuda al posicionamiento local.',
       actionLabel: 'Ver reseñas',
+      actionRoute: '/marketing/herramientas/perfil-google/resenas',
+      actionQueryParams: { reviews: 'unanswered' },
       severity: 'info',
     });
   }
 
-  const bestPage = [...webPages].sort((a, b) => b.conversionRate - a.conversionRate)[0];
-  if (bestPage && bestPage.leads > 0) {
-    recs.push({
-      id: 'top-page',
+  if (toNumber(intakeConfigCount) === 0 && firstParty.connected !== true) {
+    push(90, {
+      id: 'configure-web-measurement',
       section: 'web',
+      icon: 'heroicons_outline:code-bracket-square',
+      iconColor: 'text-amber-500',
+      title: 'Configura la medición de tu web',
+      description: 'ClinicaClick todavía no tiene una configuración activa ni eventos propios con los que medir formularios, llamadas y WhatsApp.',
+      actionLabel: 'Configurar medición',
+      actionRoute: '/marketing/web',
+      severity: 'warning',
+    });
+  }
+
+  const searchConsoleConnected = sourceConnection('Search Console', seo.connected);
+  if (!searchConsoleConnected) {
+    push(88, {
+      id: 'connect-search-console',
+      section: 'seo-ia',
+      icon: 'brand:google',
+      iconColor: 'text-amber-500',
+      title: 'Conecta Search Console',
+      description: 'Así podremos mostrar qué búsquedas ya enseñan tu web y cuáles todavía no generan visitas.',
+      actionLabel: 'Conectar Search Console',
+      actionRoute: '/ajustes',
+      actionQueryParams: { panel: 'connected-accounts' },
+      severity: 'warning',
+    });
+  } else {
+    const zeroClickQuery = (seo.queries || [])
+      .filter((query) => toNumber(query.impressions) >= 50 && toNumber(query.clicks) === 0)
+      .sort((left, right) => toNumber(right.impressions) - toNumber(left.impressions))[0];
+    const summaryImpressions = toNumber(seo.summary?.impressions);
+    const summaryClicks = toNumber(seo.summary?.clicks);
+    if (zeroClickQuery || (summaryImpressions >= 100 && summaryClicks === 0)) {
+      const evidence = zeroClickQuery
+        ? `La búsqueda "${zeroClickQuery.query}" tuvo ${toNumber(zeroClickQuery.impressions)} impresiones y ningún clic en el periodo.`
+        : `Tu web apareció ${summaryImpressions} veces en Google sin recibir clics en el periodo.`;
+      push(65, {
+        id: 'seo-impressions-no-clicks',
+        section: 'seo-ia',
+        icon: 'heroicons_outline:magnifying-glass',
+        iconColor: 'text-blue-500',
+        title: 'Google muestra tu web, pero no está recibiendo clics',
+        description: `${evidence} Revisa el título y la descripción que ve el paciente en los resultados.`,
+        actionLabel: 'Ver SEO e IA',
+        actionRoute: '/marketing/mi-clinica/seo-ia',
+        severity: 'info',
+      });
+    }
+  }
+
+  const googleAdsConnected = sourceConnection('Google Ads');
+  const metaAdsConnected = sourceConnection('Meta Ads');
+  if (!googleAdsConnected && !metaAdsConnected) {
+    push(100, {
+      id: 'connect-paid-media',
+      section: 'campanas',
+      icon: 'heroicons_outline:megaphone',
+      iconColor: 'text-amber-500',
+      title: 'Conecta una cuenta publicitaria',
+      description: 'Conecta Google Ads o Meta Ads para atribuir pacientes interesados y analizar el rendimiento de tus campañas.',
+      actionLabel: 'Conectar publicidad',
+      actionRoute: '/marketing/objetivos/captar-nuevos-pacientes',
+      severity: 'warning',
+    });
+  } else {
+    const campaignAlert = (adsCampaigns || []).find((campaign) => campaign.alert);
+    if (campaignAlert) {
+      push(100, {
+        id: 'campaign-no-leads',
+        section: 'campanas',
+        icon: 'heroicons_outline:exclamation-triangle',
+        iconColor: 'text-red-500',
+        title: `Campaña "${campaignAlert.name}" sin pacientes interesados`,
+        description: campaignAlert.alert,
+        actionLabel: 'Ver campaña',
+        actionRoute: '/marketing/objetivos/captar-nuevos-pacientes',
+        severity: 'warning',
+      });
+    }
+  }
+
+  const currentPaidLeads = toNumber(current.paidLeads);
+  const previousPaidLeads = toNumber(previous.paidLeads);
+  const currentPaidSpend = toNumber(current.spend);
+  const previousPaidSpend = toNumber(previous.spend);
+  const currentPaidCpl = currentPaidLeads ? currentPaidSpend / currentPaidLeads : 0;
+  const previousPaidCpl = previousPaidLeads ? previousPaidSpend / previousPaidLeads : 0;
+  if (
+    paidCoverageSummary.hasComparableData !== false
+    && currentPaidLeads >= 5
+    && previousPaidLeads >= 5
+    && currentPaidSpend > 0
+    && previousPaidSpend > 0
+    && previousPaidCpl > 0
+    && currentPaidCpl >= previousPaidCpl * 1.25
+  ) {
+    push(70, {
+      id: 'paid-cpl-increase',
+      section: 'costes',
       icon: 'heroicons_outline:arrow-trending-up',
-      iconColor: 'text-green-500',
-      title: `La página "${bestPage.shortName}" está generando pacientes`,
-      description: `Ha generado ${bestPage.leads} leads en el periodo. Puede ser buen destino para campañas o contenidos.`,
-      severity: 'success',
+      iconColor: 'text-blue-500',
+      title: 'Ha aumentado el coste por paciente interesado',
+      description: `Ha pasado de ${money(previousPaidCpl)} € a ${money(currentPaidCpl)} € frente al periodo anterior, con al menos 5 pacientes interesados en cada periodo.`,
+      actionLabel: 'Ver costes y resultados',
+      actionRoute: '/marketing/mi-clinica/costes-resultados',
+      severity: 'info',
     });
   }
 
-  if (intakeConfigCount > 0) {
-    recs.push({
-      id: 'snippet-ok',
-      section: 'web',
-      icon: 'heroicons_outline:check-badge',
-      iconColor: 'text-green-500',
-      title: 'ClinicaClick Analytics tiene configuración activa',
-      description: 'Los formularios, llamadas, WhatsApp y pageviews propios se agregan en backend cuando WebEvents está activo.',
-      severity: 'success',
+  const currentLeads = toNumber(current.leads);
+  const previousLeads = toNumber(previous.leads);
+  const currentAppointmentRate = currentLeads
+    ? Math.min(100, ratioPct(current.leadAppointments, currentLeads, 1))
+    : 0;
+  const previousAppointmentRate = previousLeads
+    ? Math.min(100, ratioPct(previous.leadAppointments, previousLeads, 1))
+    : 0;
+  if (
+    currentLeads >= 10
+    && previousLeads >= 10
+    && previousAppointmentRate - currentAppointmentRate >= 10
+  ) {
+    push(68, {
+      id: 'funnel-lead-to-appointment-drop',
+      section: 'embudo',
+      icon: 'heroicons_outline:funnel',
+      iconColor: 'text-blue-500',
+      title: 'Menos pacientes interesados están llegando a cita',
+      description: `La conversión a cita ha bajado del ${previousAppointmentRate}% al ${currentAppointmentRate}% frente al periodo anterior.`,
+      actionLabel: 'Ver embudo',
+      actionRoute: '/marketing/mi-clinica/embudo',
+      severity: 'info',
     });
   }
 
-  return recs.slice(0, 6);
+  const paidChannels = (channels || [])
+    .filter((channel) => ['Google Ads', 'Meta Ads'].includes(channel.source))
+    .filter((channel) => toNumber(channel.inversion) > 0 && toNumber(channel.leads) >= 3 && toNumber(channel.cpl) > 0)
+    .sort((left, right) => toNumber(left.cpl) - toNumber(right.cpl));
+  if (paidChannels.length === 2 && toNumber(paidChannels[1].cpl) >= toNumber(paidChannels[0].cpl) * 1.5) {
+    const best = paidChannels[0];
+    const worst = paidChannels[1];
+    push(62, {
+      id: 'paid-channel-cpl-gap',
+      section: 'canales',
+      icon: 'heroicons_outline:chart-bar-square',
+      iconColor: 'text-blue-500',
+      title: `${worst.name} está captando pacientes interesados a mayor coste`,
+      description: `Su coste es ${money(worst.cpl)} € por paciente interesado, frente a ${money(best.cpl)} € en ${best.name}. La comparación usa al menos 3 pacientes por canal.`,
+      actionLabel: 'Comparar canales',
+      actionRoute: '/marketing/mi-clinica/canales',
+      severity: 'info',
+    });
+  }
+
+  const facebookConnected = sourceConnection('Facebook');
+  const instagramConnected = sourceConnection('Instagram');
+  if (!facebookConnected && !instagramConnected) {
+    push(87, {
+      id: 'connect-social',
+      section: 'redes',
+      icon: 'heroicons_outline:share',
+      iconColor: 'text-amber-500',
+      title: 'Conecta tus redes sociales',
+      description: 'Conecta Facebook o Instagram para medir publicaciones, alcance, seguidores y visitas al perfil.',
+      actionLabel: 'Conectar redes',
+      actionRoute: '/ajustes',
+      actionQueryParams: { panel: 'connected-accounts' },
+      severity: 'warning',
+    });
+  } else if (toNumber(range.spanDays) >= 14 && toNumber(social.summary?.posts) === 0) {
+    push(58, {
+      id: 'social-no-posts',
+      section: 'redes',
+      icon: 'heroicons_outline:calendar-days',
+      iconColor: 'text-blue-500',
+      title: 'No hay publicaciones recientes en tus redes conectadas',
+      description: `No hemos encontrado publicaciones en los ${toNumber(range.spanDays)} días seleccionados.`,
+      actionLabel: 'Ver redes sociales',
+      actionRoute: '/marketing/mi-clinica/redes',
+      severity: 'info',
+    });
+  }
+
+  return recs
+    .sort((left, right) => right.priority - left.priority || left.id.localeCompare(right.id))
+    .slice(0, 12)
+    .map(({ priority: _priority, ...recommendation }) => recommendation);
 }
 
 exports.getOverview = async (req, res) => {
@@ -3065,8 +3236,26 @@ exports.getOverview = async (req, res) => {
     const recommendations = buildRecommendations({
       businessProfile,
       adsCampaigns,
-      webPages,
       intakeConfigCount,
+      firstParty,
+      sources,
+      seo,
+      social,
+      channels,
+      range,
+      current: {
+        leads: leads.totals.leads,
+        leadAppointments: leads.totals.citas,
+        paidLeads,
+        spend: currentSpend,
+      },
+      previous: {
+        leads: previousLeads.totals.leads,
+        leadAppointments: previousLeads.totals.citas,
+        paidLeads: previousPaidLeads,
+        spend: previousSpend,
+      },
+      paidCoverageSummary,
     });
 
     return res.json({
@@ -3116,6 +3305,7 @@ exports.getOverview = async (req, res) => {
 };
 
 exports.__testing = {
+  buildRecommendations,
   deriveChannelKey,
   leadAcquisitionChannelSql: LEAD_ACQUISITION_CHANNEL_SQL,
   normalizeDateOnly,
