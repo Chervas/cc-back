@@ -1322,7 +1322,7 @@ Fuentes que cruza:
 - `CitasPacientes` para citas vinculadas a leads y asistencia.
 - `GoogleAdsInsightsDaily` y `ClinicGoogleAdsAccount` para Google Ads.
 - `SocialAdsInsightsDaily`, `SocialAdsActionsDaily`, `SocialAdsAdsetDailyAgg` y `SocialAdsEntity` para Meta Ads.
-- `ClinicMetaAssets`, `SocialStatsDaily`, `SocialPosts` y `SocialPostStatsDaily` para Facebook/Instagram orgánico.
+- `ClinicMetaAssets`, `SocialStatsDaily`, `SocialPosts` y `SocialPostStatsDaily` para Facebook/Instagram orgánico; el resumen entrega hasta 40 publicaciones destacadas para que `Mi clínica > Redes` pueda paginar/ampliar sin recalcular en frontend.
 - `WebScDaily` y `WebScQueryDaily` para SEO/Search Console.
 - `WebGaDaily` para GA4 opcional.
 - `ClinicBusinessLocation`, `BusinessProfileDailyMetric` y `BusinessProfileReview` para Perfil Empresa Google.

@@ -2487,7 +2487,7 @@ async function aggregateSocialOrganic(scope, range, marketingState = null) {
       if (reachDiff) return reachDiff;
       return new Date(right.publishedAt || 0).getTime() - new Date(left.publishedAt || 0).getTime();
     })
-    .slice(0, 5);
+    .slice(0, 40);
 
   const trendByDate = new Map();
   for (const row of normalizeSocialFollowerDeltas(trendRows)) {
@@ -2846,7 +2846,7 @@ function buildSources({ intakeConfigCount, leadsTotal, seo, googleAds, metaAds, 
       connected: clinicaClickConnected,
       label: clinicaClickConnected ? 'Activo' : 'Pendiente',
       tooltip: firstParty?.connected
-        ? 'ClinicaClick Analytics está capturando visitas y acciones propias con WebEvents.'
+        ? 'ClinicaClick Analytics está capturando visitas y acciones propias con consentimiento.'
         : clinicaClickConnected
         ? 'Hay configuración de medición o leads capturados por ClinicaClick.'
         : 'Aún no hay configuración o datos capturados por el snippet de ClinicaClick.',
