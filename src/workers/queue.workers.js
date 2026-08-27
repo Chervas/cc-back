@@ -16,6 +16,9 @@ const whatsappConnectionStatusService = require('../services/whatsappConnectionS
 const whatsappAccountComplianceService = require('../services/whatsappAccountCompliance.service');
 const whatsappDeliveryGovernanceService = require('../services/whatsappDeliveryGovernance.service');
 const patientDirectionService = require('../services/patientDirection.service');
+const {
+    resolveAutomationAttentionForConversation,
+} = require('../services/conversationPendingReply.service');
 const { getIO } = require('../services/socket.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { buildWhatsappOutboundRetryDecision } = require('../lib/whatsapp-outbound-retry');
@@ -1198,6 +1201,33 @@ async function createCoexistenceConversationMessage({
         content: descriptor.content,
         messageType: descriptor.messageType,
     });
+
+    if (direction === 'outbound' && sourceEvent === 'smb_message_echoes') {
+        try {
+            const resolution = await resolveAutomationAttentionForConversation(conv.id, null, {
+                allUsers: true,
+                reason: 'mobile_reply_sent',
+            });
+            if (resolution.updated > 0) {
+                const io = getIO();
+                io?.to(`clinic:${clinicId}`).emit('conversation:updated', {
+                    id: String(conv.id),
+                    unread_count: 0,
+                    pending_automation_attention: false,
+                    pending_automation_count: 0,
+                    pending_automation_message_id: null,
+                    last_message: descriptor.content,
+                    last_message_at: sentAt,
+                });
+            }
+        } catch (error) {
+            console.warn('[whatsapp coexistence] No se pudo cerrar la atención manual tras responder', {
+                conversationId: conv.id,
+                messageId: message.id,
+                error: error?.message || error,
+            });
+        }
+    }
 
     return { message, conversation: conv };
 }

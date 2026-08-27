@@ -15,8 +15,9 @@ const {
   buildAutomationWhatsappDeliveryKey,
   resolveWhatsappLanguageRouting,
   selectBestWhatsappTemplateCandidate,
-  buildDeterministicConfirmAppointmentTextOutput,
+  buildDeterministicConfirmAppointmentOutput,
   buildDeterministicAppointmentUnconfirmedReplyOutput,
+  buildSafeAppointmentAiFailureOutput,
   formatAppointmentLocalDateTime,
   readStoredWhatsappReplaySelection,
 } = require('../../services/flowEngineV2.service');
@@ -218,30 +219,50 @@ test('una caída tras la respuesta de Meta se recupera por nombre+idioma sin cre
   assert.equal(whatsappTemplates.buildMetaTemplateCheckpointPendingError(new Error('duplicate')).retryable, true);
 });
 
-test('clasificadores deterministas entienden confirmación, cancelación y cambio en tres idiomas', () => {
-  for (const response of ['Sí, confirmo', 'D’acord, ens veiem', 'Yes, I confirm', 'Hola, ok', 'Hola\nSi es correcto', 'Hola si gracias', 'Es correcto 👍🏻']) {
-    const output = buildDeterministicConfirmAppointmentTextOutput({
+test('las respuestas textuales de citas se delegan siempre a la IA estructurada', () => {
+  const responses = [
+    'Sí, confirmo',
+    'No voy, cancela',
+    'Me viene mal, otra hora',
+    'Hola luego td confirmo pq no lose',
+    'Si todo está bien y el precio es adecuado, acudiré a la clínica',
+  ];
+
+  for (const response of responses) {
+    const context = {
       last_response: response,
-    });
-    assert.equal(output.decision, 'confirmado', response);
-  }
-  for (const response of ['No voy, cancela', 'No hi aniré, cancel·la', 'I will not attend, cancel it']) {
-    const output = buildDeterministicAppointmentUnconfirmedReplyOutput({
-      last_response: response,
-    });
-    assert.equal(output.decision, 'cancelar', response);
-  }
-  for (const response of ['Me viene mal, otra hora', 'No em va bé, una altra hora', 'Can we reschedule?']) {
-    const output = buildDeterministicAppointmentUnconfirmedReplyOutput({
-      last_response: response,
-    });
-    assert.equal(output.decision, 'reprogramar', response);
+      last_response_context: {
+        response_text: response,
+        response_message_type: 'text',
+      },
+    };
+    assert.equal(buildDeterministicConfirmAppointmentOutput(context), null, response);
+    assert.equal(buildDeterministicAppointmentUnconfirmedReplyOutput(context), null, response);
   }
 });
 
 test('confirm_appointment no falla cuando no hay texto de respuesta', () => {
-  assert.equal(buildDeterministicConfirmAppointmentTextOutput({ last_response: null }), null);
-  assert.equal(buildDeterministicConfirmAppointmentTextOutput({ last_response_context: {} }), null);
+  assert.equal(buildDeterministicConfirmAppointmentOutput({ last_response: null }), null);
+  assert.equal(buildDeterministicConfirmAppointmentOutput({ last_response_context: {} }), null);
+});
+
+test('si Bedrock falla, los presets de cita derivan a revisión manual sin cambiar estado', () => {
+  assert.deepEqual(
+    buildSafeAppointmentAiFailureOutput('confirm_appointment', { code: 'bedrock_timeout' }),
+    {
+      decision: 'dudas',
+      confianza: 0,
+      motivo: 'No se pudo interpretar la respuesta automáticamente. Requiere revisión manual.',
+      _ai_provider: 'unavailable',
+      _ai_model: null,
+      _ai_error_code: 'bedrock_timeout',
+    },
+  );
+  assert.equal(
+    buildSafeAppointmentAiFailureOutput('appointment_unconfirmed_reply', new Error('offline')).decision,
+    'duda',
+  );
+  assert.equal(buildSafeAppointmentAiFailureOutput('review_response_classifier', new Error('offline')), null);
 });
 
 test('las nueve respuestas manuales reales tienen traducción ca/en', () => {

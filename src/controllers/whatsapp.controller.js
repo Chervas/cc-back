@@ -8,6 +8,7 @@ const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.
 const { enqueueSyncPhonesJob, syncPhonesForWaba } = require('../services/whatsappPhones.service');
 const whatsappCoexistenceService = require('../services/whatsappCoexistence.service');
 const whatsappAccountComplianceService = require('../services/whatsappAccountCompliance.service');
+const { filterEffectiveWhatsappPhoneAssets } = require('../lib/effective-whatsapp-phone');
 const whatsappDeliveryGovernanceService = require('../services/whatsappDeliveryGovernance.service');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
 const {
@@ -1781,6 +1782,9 @@ exports.listPhones = async (req, res) => {
     const userGroupIds = await getUserGroupIds({ clinicIds, isAggregateAllowed });
     const clinicIdFilter = req.query.clinic_id ? Number(req.query.clinic_id) : null;
     const groupIdFilter = req.query.group_id ? Number(req.query.group_id) : null;
+    const effectiveOnly = ['1', 'true', 'yes'].includes(
+      String(req.query.effective_only || '').trim().toLowerCase()
+    );
     if (groupIdFilter && !isAggregateAllowed) {
       return res.status(403).json({ error: 'group_scope_not_allowed' });
     }
@@ -1819,7 +1823,7 @@ exports.listPhones = async (req, res) => {
       ];
     }
 
-    const phones = await ClinicMetaAsset.findAll({
+    let phones = await ClinicMetaAsset.findAll({
       where,
       include: [
         { 
@@ -1842,6 +1846,11 @@ exports.listPhones = async (req, res) => {
       ],
       order: [['createdAt', 'DESC']],
     });
+
+    if (clinicIdFilter && effectiveOnly) {
+      const effectiveConfig = await whatsappService.getClinicConfig(clinicIdFilter);
+      phones = filterEffectiveWhatsappPhoneAssets(phones, effectiveConfig);
+    }
 
     const wabaIds = Array.from(
       new Set(

@@ -37,14 +37,29 @@ test('normaliza conversaciones y combina pendientes con atención de automatizac
     }
     assert.match(sql, /automation\.system_notification/);
     assert.match(sql, /user_id = :userId/);
-    return [{ conversation_id: 8, attention_count: 2 }];
+    assert.match(sql, /quickChatResponseMessageId/);
+    assert.match(sql, /FlowExecutionsV2 execution/);
+    assert.match(sql, /last_response_context\.response_message_id/);
+    return [{ conversation_id: 8, attention_count: 2, response_message_id: 913 }];
   };
 
   assert.deepEqual(normalizeConversationIds([7, '8', 7, 0, null, 'x']), [7, 8]);
   const states = await getPendingReplyStatesByConversationIds([7, '8', 7], { userId: 44 });
 
-  assert.deepEqual(states.get(7), { count: 2, unreadCount: 1, requiresAutomationAttention: false, automationAttentionCount: 0 });
-  assert.deepEqual(states.get(8), { count: 0, unreadCount: 0, requiresAutomationAttention: true, automationAttentionCount: 2 });
+  assert.deepEqual(states.get(7), {
+    count: 2,
+    unreadCount: 1,
+    requiresAutomationAttention: false,
+    automationAttentionCount: 0,
+    automationAttentionMessageId: null,
+  });
+  assert.deepEqual(states.get(8), {
+    count: 0,
+    unreadCount: 0,
+    requiresAutomationAttention: true,
+    automationAttentionCount: 2,
+    automationAttentionMessageId: 913,
+  });
   assert.equal(queryIndex, 2);
 });
 
@@ -108,4 +123,56 @@ test('la resolución manual solo cierra avisos del usuario y conversación indic
   assert.equal(updated[0].isRead, true);
   assert.equal(updated[0].data.manual_resolution_reason, 'operator_action_completed');
   assert.equal(updated[0].data.manual_resolved_by_user_id, 44);
+});
+
+test('una respuesta manual cierra el aviso para todos los usuarios de la conversación', async (t) => {
+  const originalFindAll = db.Notification.findAll;
+  const updated = [];
+  const fakeNotification = {
+    get: (key) => {
+      if (key === 'data') return { quickChatConversationId: 15, quickChatResponseMessageId: 913 };
+      if (key && typeof key === 'object') {
+        return { userId: 44, data: { quickChatConversationId: 15, quickChatResponseMessageId: 913 } };
+      }
+      return undefined;
+    },
+    update: async (payload) => {
+      updated.push(payload);
+      return fakeNotification;
+    },
+  };
+  t.after(() => {
+    db.Notification.findAll = originalFindAll;
+  });
+  db.Notification.findAll = async ({ where }) => {
+    assert.equal(where.userId, undefined);
+    assert.equal(where.event, 'automation.system_notification');
+    assert.equal(where.isRead, false);
+    return [fakeNotification];
+  };
+
+  const result = await resolveAutomationAttentionForConversation(15, null, {
+    allUsers: true,
+    reason: 'manual_reply_sent',
+  });
+  assert.deepEqual(result, { success: true, updated: 1 });
+  assert.equal(updated[0].isRead, true);
+  assert.equal(updated[0].data.manual_resolution_reason, 'manual_reply_sent');
+  assert.equal(updated[0].data.manual_resolved_by_user_id, null);
+});
+
+test('el envío manual y el eco móvil resuelven la atención sin alterar los automatismos', () => {
+  const controller = fs.readFileSync(
+    path.resolve(__dirname, '../../controllers/conversation.controller.js'),
+    'utf8',
+  );
+  const workers = fs.readFileSync(
+    path.resolve(__dirname, '../../workers/queue.workers.js'),
+    'utf8',
+  );
+
+  assert.match(controller, /reason:\s*'manual_reply_sent'/);
+  assert.match(controller, /pending_automation_message_id:\s*null/);
+  assert.match(workers, /sourceEvent === 'smb_message_echoes'/);
+  assert.match(workers, /reason:\s*'mobile_reply_sent'/);
 });

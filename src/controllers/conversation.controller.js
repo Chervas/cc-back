@@ -753,6 +753,9 @@ async function enrichConversationUnreadForUser(userId, conversationLike) {
   plain.pending_automation_count = pendingState?.requiresAutomationAttention === true
     ? Math.max(1, Number(pendingState?.automationAttentionCount || 0))
     : 0;
+  plain.pending_automation_message_id = pendingState?.requiresAutomationAttention === true
+    ? (Number(pendingState?.automationAttentionMessageId || 0) || null)
+    : null;
   if (plain.channel === 'whatsapp') {
     plain.last_inbound_at_any_sender = plain.last_inbound_at || null;
     try {
@@ -1439,6 +1442,9 @@ exports.listConversations = async (req, res) => {
       data.pending_automation_count = pendingState?.requiresAutomationAttention === true
         ? Math.max(1, Number(pendingState?.automationAttentionCount || 0))
         : 0;
+      data.pending_automation_message_id = pendingState?.requiresAutomationAttention === true
+        ? (Number(pendingState?.automationAttentionMessageId || 0) || null)
+        : null;
       return data;
     }));
     const withRestrictions = await attachContactRestrictions(rawPayload);
@@ -2333,6 +2339,37 @@ exports.postMessage = async (req, res) => {
           leadId: conversation.lead_id,
           conversationId: conversation.id,
           error: leadContactErr?.message || leadContactErr,
+        });
+      }
+    }
+
+    const manualReplyAccepted = conversation.channel !== 'whatsapp' || outboundWhatsappQueued;
+    if (manualReplyAccepted && msg.message_type !== 'event' && msg.status !== 'failed') {
+      try {
+        const attentionResolution = await resolveAutomationAttentionForConversation(
+          conversation.id,
+          userId,
+          {
+            allUsers: true,
+            reason: 'manual_reply_sent',
+          }
+        );
+        if (attentionResolution.updated > 0 && io) {
+          io.to(`clinic:${conversation.clinic_id}`).emit('conversation:updated', {
+            id: String(conversation.id),
+            unread_count: 0,
+            pending_automation_attention: false,
+            pending_automation_count: 0,
+            pending_automation_message_id: null,
+            last_message: msg.content,
+            last_message_at: conversation.last_message_at,
+          });
+        }
+      } catch (attentionError) {
+        console.warn('No se pudo cerrar la atención manual tras responder', {
+          conversationId: conversation.id,
+          messageId: msg.id,
+          error: attentionError?.message || attentionError,
         });
       }
     }

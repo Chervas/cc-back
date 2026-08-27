@@ -1441,154 +1441,7 @@ function isPositiveConfirmationEmojiText(value) {
   return consumedAny && remaining.length === 0;
 }
 
-function buildDeterministicConfirmAppointmentTextOutput(context = {}) {
-  const rawResponse = cleanString(
-    context?.last_response_context?.response_text
-    || context?.last_response
-  );
-  if (isPositiveConfirmationEmojiText(rawResponse)) {
-    return {
-      decision: 'confirmado',
-      confianza: 0.99,
-      motivo: `El paciente respondió con ${rawResponse}, interpretado como confirmación positiva.`,
-      _ai_provider: 'deterministic_rule',
-      _ai_model: 'confirm_appointment_positive_text',
-      _ai_analysis_mode: 'rule',
-    };
-  }
-
-  const text = normalizeIntentText(rawResponse);
-  if (!text) return null;
-
-  const hardNegativePatterns = [
-    /\bno\s+(puedo|podre|podria|voy|ire|asistire|acudire|llego|llegare)\b/,
-    /\bno\s+me\s+(va|viene)\s+(bien|genial|perfecto)\b/,
-    /\bme\s+(va|viene)\s+mal\b/,
-    /\bme\s+va\s+ma\b/,
-    /\bno\s+tengo\s+disponibilidad\b/,
-    /\bno\s+me\s+encaja\b/,
-    /\bme\s+es\s+imposible\b/,
-    /\bimposible\b/,
-    /\bno\s+puede\s+ser\b/,
-    /\bese\s+dia\s+no\b/,
-    /\botro\s+dia\b/,
-    /\bcambiar\b.*\b(cita|hora|dia|fecha)\b/,
-    /\b(reprogramar|reprogramad[ao]s?|posponer|cancelar|anular)\b/,
-    // Català
-    /\bno\s+(puc|podre|podria|anire|vindre|assistire|arribare)\b/,
-    /\bno\s+em\s+(va|ve)\s+be\b/,
-    /\bem\s+(va|ve)\s+mal\b/,
-    /\b(canviar|reprogramar|ajornar|cancel\s*la(?:r)?|anul\s*la(?:r)?)\b.*\b(cita|hora|dia|data)\b/,
-    // English
-    /\b(i\s+)?(can\s*t|cannot|won\s*t|will\s+not)\s+(make\s+it|come|attend|arrive|be\s+there)\b/,
-    /\b(that|the)\s+(day|time)\s+(doesn\s*t|does\s+not)\s+work\b/,
-    /\b(reschedule|postpone|cancel|move)\b.*\b(appointment|time|day|date)\b/,
-  ];
-
-  if (hardNegativePatterns.some((pattern) => pattern.test(text))) {
-    return {
-      decision: 'no_confirmado',
-      confianza: 0.99,
-      motivo: `La última respuesta del paciente indica que no tiene disponibilidad o pide cambiar la cita: "${rawResponse}".`,
-      _ai_provider: 'deterministic_rule',
-      _ai_model: 'confirm_appointment_negative_text',
-      _ai_analysis_mode: 'rule',
-    };
-  }
-
-  const doubtPatterns = [
-    /\b(no\s+se|no\s+lo\s+se|no\s+estoy\s+segur[oa])\b/,
-    /\bquizas\b/,
-    /\bdepende\b/,
-    /\btengo\s+dudas?\b/,
-    /\bpuede\s+ser\b/,
-    /\blo\s+miro\b/,
-    /\bconfirmo\s+luego\b/,
-    /\b(no\s+ho\s+se|no\s+n\s+estic\s+segur[ae]?|potser|dep[eè]n|tinc\s+dubtes?|ja\s+confirmare)\b/,
-    /\b(i\s+don\s*t\s+know|not\s+sure|maybe|it\s+depends|i\s+ll\s+confirm\s+later)\b/,
-  ];
-
-  if (doubtPatterns.some((pattern) => pattern.test(text))) {
-    return {
-      decision: 'dudas',
-      confianza: 0.9,
-      motivo: `La última respuesta del paciente no confirma claramente la disponibilidad: "${rawResponse}".`,
-      _ai_provider: 'deterministic_rule',
-      _ai_model: 'confirm_appointment_doubt_text',
-      _ai_analysis_mode: 'rule',
-    };
-  }
-
-  const strongPositivePatterns = [
-    /\b(confirmo|confirmado|confirmada|confirmadisimo|confirmadisima)\b/,
-    /\b(nos vemos|alli estare|ahi estare|asistire|acudire)\b/,
-    /\bsi\s+(es\s+)?(correct[ao]|perfecto|vale|ok|gracias)\b/,
-    /\b(correct[ao])\b/,
-    /\b(confirmo|confirmat|confirmada|ens\s+veiem|hi\s+sere|vindre|assistire)\b/,
-    /\b(i\s+confirm|confirmed|see\s+you|i\s+ll\s+be\s+there|i\s+will\s+be\s+there|i\s+ll\s+attend)\b/,
-  ];
-  const hasStrongConfirmation = strongPositivePatterns.some((pattern) => pattern.test(text));
-  const textWithoutGreeting = text.replace(/^(hola|buenas|buenos\s+dias|buen\s+dia|bona\s+tarda|bon\s+dia|hello|hi)\s+/, '');
-  const shortPositiveTexts = new Set([
-    'si',
-    'si confirmo',
-    'si correcto',
-    'si es correcto',
-    'si gracias',
-    'confirmo',
-    'confirmado',
-    'confirmada',
-    'ok',
-    'okay',
-    'vale',
-    'perfecto',
-    'genial',
-    'de acuerdo',
-    'recibido',
-    'entendido',
-    'nos vemos',
-    'alli estare',
-    'ahi estare',
-    'd acord',
-    'perfecte',
-    'molt be',
-    'ens veiem',
-    'hi sere',
-    'yes',
-    'yes i confirm',
-    'confirmed',
-    'sure',
-    'sounds good',
-    'see you',
-    'i ll be there',
-  ]);
-  const looksLikeQuestion = /[?¿]/.test(rawResponse);
-  const tokenCount = text.split(/\s+/).filter(Boolean).length;
-  const strippedTokenCount = textWithoutGreeting.split(/\s+/).filter(Boolean).length;
-  const hasShortConfirmation = !looksLikeQuestion
-    && (
-      (tokenCount <= 4 && shortPositiveTexts.has(text))
-      || (strippedTokenCount <= 4 && shortPositiveTexts.has(textWithoutGreeting))
-    );
-
-  if (hasStrongConfirmation || hasShortConfirmation) {
-    return {
-      decision: 'confirmado',
-      confianza: 0.95,
-      motivo: `La última respuesta del paciente confirma la cita: "${rawResponse}".`,
-      _ai_provider: 'deterministic_rule',
-      _ai_model: 'confirm_appointment_positive_text',
-      _ai_analysis_mode: 'rule',
-    };
-  }
-
-  return null;
-}
-
 function buildDeterministicConfirmAppointmentOutput(context = {}) {
-  const textDecision = buildDeterministicConfirmAppointmentTextOutput(context);
-  if (textDecision) return textDecision;
-
   const responseContext = isObject(context?.last_response_context) ? context.last_response_context : {};
   const responseMediaKind = normalizeKey(responseContext.response_media_kind);
   if (responseMediaKind === 'sticker') {
@@ -1640,18 +1493,6 @@ function buildDeterministicAppointmentUnconfirmedReplyOutput(context = {}) {
     || context?.last_response
   );
 
-  const positive = buildDeterministicConfirmAppointmentTextOutput(context);
-  if (positive && cleanString(positive.decision).toLowerCase() === 'confirmado') {
-    return {
-      decision: 'confirmar',
-      confianza: positive.confianza || 0.95,
-      motivo: positive.motivo || 'El paciente confirma que acudirá a la cita.',
-      _ai_provider: positive._ai_provider || 'deterministic_rule',
-      _ai_model: 'appointment_unconfirmed_reply_confirm',
-      _ai_analysis_mode: 'rule',
-    };
-  }
-
   const text = normalizeIntentText(rawResponse);
   const responseContext = isObject(context?.last_response_context) ? context.last_response_context : {};
   const responseMediaKind = normalizeKey(responseContext.response_media_kind);
@@ -1689,52 +1530,34 @@ function buildDeterministicAppointmentUnconfirmedReplyOutput(context = {}) {
     };
   }
 
-  const cancelPatterns = [
-    /\b(cancelar|cancela|cancelad[ao]s?|anular|anula|dar\s+de\s+baja)\b/,
-    /\b(no\s+voy|no\s+ire|no\s+asistire|no\s+acudire)\b/,
-    /\b(la\s+perdemos|no\s+la\s+quiero|mejor\s+no)\b/,
-    /\b(cancel\s*la(?:r)?|anul\s*la(?:r)?|donar\s+de\s+baixa)\b/,
-    /\b(no\s+(hi\s+anire|vindre|assistire))\b/,
-    /\b(cancel|cancel\s+it|i\s+won\s*t\s+(come|attend)|i\s+will\s+not\s+(come|attend))\b/,
-  ];
-  if (cancelPatterns.some((pattern) => pattern.test(text))) {
+  // Las respuestas textuales pueden contener condiciones, negaciones o faltas de
+  // ortografía. Se delegan siempre al modelo estructurado para evitar que una
+  // palabra aislada como "confirmo" o "acudiré" cambie el estado de la cita.
+  return null;
+}
+
+function buildSafeAppointmentAiFailureOutput(presetKey, error) {
+  const errorCode = cleanString(error?.code || error?.name || 'ai_provider_unavailable');
+  if (presetKey === 'confirm_appointment') {
     return {
-      decision: 'cancelar',
-      confianza: 0.95,
-      motivo: `La respuesta del paciente indica cancelación: "${rawResponse}".`,
-      _ai_provider: 'deterministic_rule',
-      _ai_model: 'appointment_unconfirmed_reply_cancel',
-      _ai_analysis_mode: 'rule',
+      decision: 'dudas',
+      confianza: 0,
+      motivo: 'No se pudo interpretar la respuesta automáticamente. Requiere revisión manual.',
+      _ai_provider: 'unavailable',
+      _ai_model: null,
+      _ai_error_code: errorCode,
     };
   }
-
-  const reschedulePatterns = [
-    /\b(reprogramar|reprograma|cambiar|cambio|mover|mueve|posponer|aplazar|otra\s+hora|otro\s+dia|otro\s+d[ií]a|mas\s+tarde|más\s+tarde)\b/,
-    /\b(no\s+puedo|me\s+viene\s+mal|me\s+va\s+mal|no\s+me\s+encaja|imposible)\b/,
-    /\b(reprogramar|canviar|moure|ajornar|una\s+altra\s+hora|un\s+altre\s+dia|mes\s+tard)\b/,
-    /\b(no\s+puc|em\s+(va|ve)\s+mal|no\s+em\s+va\s+be)\b/,
-    /\b(reschedule|change|move|postpone|another\s+time|another\s+day|later)\b/,
-    /\b(can\s*t\s+make\s+it|cannot\s+make\s+it|doesn\s*t\s+work)\b/,
-  ];
-  if (reschedulePatterns.some((pattern) => pattern.test(text))) {
+  if (presetKey === 'appointment_unconfirmed_reply') {
     return {
-      decision: 'reprogramar',
-      confianza: 0.92,
-      motivo: `La respuesta del paciente pide cambiar la cita: "${rawResponse}".`,
-      _ai_provider: 'deterministic_rule',
-      _ai_model: 'appointment_unconfirmed_reply_reschedule',
-      _ai_analysis_mode: 'rule',
+      decision: 'duda',
+      motivo: 'No se pudo interpretar la respuesta automáticamente. Requiere revisión manual.',
+      _ai_provider: 'unavailable',
+      _ai_model: null,
+      _ai_error_code: errorCode,
     };
   }
-
-  return {
-    decision: 'duda',
-    confianza: 0.35,
-    motivo: `La respuesta no confirma ni pide reprogramar con claridad: "${rawResponse}".`,
-    _ai_provider: 'deterministic_rule',
-    _ai_model: 'appointment_unconfirmed_reply_unclear',
-    _ai_analysis_mode: 'rule',
-  };
+  return null;
 }
 
 function isTemplateBlockedForSend(statusValue) {
@@ -4631,6 +4454,9 @@ async function handleSendSystemNotification(node, context, runtime) {
   const conversationLink = cleanString(getByPath(notificationContext, 'system.patient_conversation_link'));
   const patientDetailLink = cleanString(getByPath(notificationContext, 'system.patient_detail_link'));
   const quickChatConversationId = toIntOrNull(getByPath(notificationContext, 'conversation.id')) || null;
+  const quickChatResponseMessageId = toIntOrNull(
+    getByPath(notificationContext, 'last_response_context.response_message_id')
+  ) || null;
   const primaryLink = conversationLink || patientDetailLink || null;
   const createdNotifications = [];
 
@@ -4655,6 +4481,7 @@ async function handleSendSystemNotification(node, context, runtime) {
         link: primaryLink,
         useRouter: !!primaryLink,
         quickChatConversationId,
+        quickChatResponseMessageId,
         patientConversationLink: conversationLink,
         patientDetailLink: patientDetailLink,
         clinicId,
@@ -5764,17 +5591,23 @@ async function processNode(node, context, runtime = {}) {
         };
       }
 
-      const aiOutput = await aiOrchestrator.analyzeStructured({
-        useCase: presetKey || 'automation_v2_analysis',
-        systemPrompt: buildAiSystemPrompt(outputFormatSimple, normalizedOutputFields),
-        prompt: resolvedInstruction,
-        inputText,
-        outputFormat: outputFormatSimple,
-        analysisMode,
-        maxTokens: resolveTemplateValue(config?.max_tokens, context),
-        clinicId: runtimeTargets.clinic_id,
-        groupId: runtimeTargets.group_id,
-      });
+      let aiOutput;
+      try {
+        aiOutput = await aiOrchestrator.analyzeStructured({
+          useCase: presetKey || 'automation_v2_analysis',
+          systemPrompt: buildAiSystemPrompt(outputFormatSimple, normalizedOutputFields),
+          prompt: resolvedInstruction,
+          inputText,
+          outputFormat: outputFormatSimple,
+          analysisMode,
+          maxTokens: resolveTemplateValue(config?.max_tokens, context),
+          clinicId: runtimeTargets.clinic_id,
+          groupId: runtimeTargets.group_id,
+        });
+      } catch (error) {
+        aiOutput = buildSafeAppointmentAiFailureOutput(presetKey, error);
+        if (!aiOutput) throw error;
+      }
 
       const normalizedDecision = cleanString(aiOutput?.decision).toLowerCase();
       const nextNodeId = presetKey === 'confirm_appointment'
@@ -6470,7 +6303,8 @@ module.exports = {
   resolveWhatsappLanguageRouting,
   scoreWhatsappTemplateCandidate,
   selectBestWhatsappTemplateCandidate,
-  buildDeterministicConfirmAppointmentTextOutput,
+  buildDeterministicConfirmAppointmentOutput,
   buildDeterministicAppointmentUnconfirmedReplyOutput,
+  buildSafeAppointmentAiFailureOutput,
   resolveOperationalSubroleTargets,
 };
