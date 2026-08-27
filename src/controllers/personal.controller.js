@@ -2771,7 +2771,7 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
                 activo: true,
             },
             include: [
-                { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', 'url_avatar'] },
+                { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', 'url_avatar', 'grupoClinicaId'] },
                 {
                     model: DoctorHorario,
                     as: 'horarios',
@@ -2796,7 +2796,7 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
             },
             attributes: ['id_clinica', 'rol_clinica', 'subrol_clinica'],
             include: [
-                { model: Clinica, as: 'Clinica', attributes: ['id_clinica', 'nombre_clinica', 'url_avatar'] },
+                { model: Clinica, as: 'Clinica', attributes: ['id_clinica', 'nombre_clinica', 'url_avatar', 'grupoClinicaId'] },
             ],
             order: [['id_clinica', 'ASC']],
         })
@@ -2812,6 +2812,7 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
             clinica_id: clinicId,
             nombre_clinica: row.clinica?.nombre_clinica || '',
             url_avatar: row.clinica?.url_avatar || null,
+            grupo_clinica_id: row.clinica?.grupoClinicaId ?? null,
             activo: !!row.activo,
             recibe_citas: normalizeRecibeCitas(row.recibe_citas, false),
             horarios: row.horarios || [],
@@ -2842,6 +2843,9 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
             if (!existing.url_avatar) {
                 existing.url_avatar = pivot.Clinica?.url_avatar || null;
             }
+            if (existing.grupo_clinica_id == null) {
+                existing.grupo_clinica_id = pivot.Clinica?.grupoClinicaId ?? null;
+            }
             continue;
         }
 
@@ -2849,6 +2853,7 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
             clinica_id: clinicId,
             nombre_clinica: pivot.Clinica?.nombre_clinica || '',
             url_avatar: pivot.Clinica?.url_avatar || null,
+            grupo_clinica_id: pivot.Clinica?.grupoClinicaId ?? null,
             activo: true,
             recibe_citas: defaultConfig.recibe_citas,
             horarios: [],
