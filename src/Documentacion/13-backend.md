@@ -3721,7 +3721,7 @@ Groq queda desacoplado y limitado al audio:
 - En integración, las colas `BullMQ` deben ir aisladas con `QUEUE_PREFIX=integracion`. Si el proceso comparte prefijo con `staging` u otro backend, los workers pueden consumir webhooks/mensajes en el proceso equivocado y el socket del entorno activo deja de emitir a su propia UI.
 - Además, el realtime ya no depende solo del `ioInstance` local del proceso. `src/services/socket.service.js` publica y suscribe eventos por Redis (`clinicaclick:socket:events:<db>`), de forma que si el webhook real entra por `clinicaclick-auth` o cualquier otro backend PM2, `clinicaclick-integracion` recibe el evento y lo reemite a sus sockets conectados.
 - Ese bus también cubre runtime V2. Cuando integración recibe por Redis un `message:created` inbound originado en otro backend, `src/app.js` reejecuta `enqueueInboundResponseResume(...)` con la conversación canónica. Sin este paso, el mensaje entra en BD y se ve en QuickChat, pero el flujo se queda en `wait_response` porque el backend que procesó el webhook no tiene por qué tener el runtime V2 activo.
-- `Conversations.unread_count` se mantiene por compatibilidad. La UI calcula en lote y sin N+1 los inbound visibles posteriores a la lectura de ese usuario y al último outbound válido. `pending_automation_attention` cambia el indicador a amarillo cuando existe una `Notifications.event=automation.system_notification` abierta para ese `user_id` y `data.quickChatConversationId`; `pending_automation_count` cuenta esos avisos, no mensajes. Abrir hace `ConversationReads.upsert`, limpia solo el indicador azul y emite `conversation:read` a `user:{id}` sin agregado global. Ni un outbound desde CRM ni su eco móvil resuelven una intención inconclusa. La alerta amarilla se cierra explícitamente mediante `PATCH /api/conversations/:id/automation-attention/resolve`, que marca únicamente las notificaciones del usuario/conversación y conserva actor, fecha y motivo en `data`. La migración `20260721143000-index-notification-automation-attention.js` indexa `event + is_read`.
+- `Conversations.unread_count` se mantiene por compatibilidad. La UI calcula en lote y sin N+1 los inbound visibles posteriores a la lectura de ese usuario y al último outbound válido. `pending_automation_attention` cambia el indicador a amarillo cuando existe una `Notifications.event=automation.system_notification` abierta para la conversación; `pending_automation_count` cuenta esos avisos, no mensajes. Abrir hace `ConversationReads.upsert`, limpia solo el indicador azul y emite `conversation:read` a `user:{id}` sin agregado global. Un outbound humano desde CRM o su eco móvil cierra el aviso para todos los responsables de la conversación. Si el operador responde mientras la IA aún clasifica, `action/send_system_notification` comprueba primero si existe esa respuesta posterior y no crea un aviso tardío. La alerta también puede cerrarse explícitamente mediante `PATCH /api/conversations/:id/automation-attention/resolve`; conserva actor, fecha y motivo en `data`. Mientras una ejecución reanudada analiza un inbound, la API y `conversation:updated` exponen `automation_response_processing` y el id exacto del mensaje para mostrar el estado transitorio junto a su bubble; el estado se limpia al terminar o fallar la ejecución. La migración `20260721143000-index-notification-automation-attention.js` indexa `event + is_read`.
 - El fallback que completa nombre y datos de contactos externos consulta `MarketingPatientListItems` por `conversation_id` o `phone`. La migración `20260722093000-index-marketing-list-quickchat-lookups.js` indexa ambas columnas: en desarrollo, con unas 279.000 filas, la carga de 50 conversaciones de Propdental pasó de aproximadamente `600-670 ms` a `41-73 ms`. No retirar estos índices mientras `hydrateMarketingContactFallbacks` conserve esas búsquedas.
 - El evento `message:created` ya no puede limitarse a `{ content, message_type }`. Debe incluir `metadata` y, cuando el inbound no es texto plano, un `resume_text` explícito para que el runtime V2 no dependa de reconstruir semántica desde la UI.
 - Estados WhatsApp outbound:
@@ -7571,11 +7571,17 @@ Una cita activa no resuelve por sí sola la atención pendiente de una
 conversación. `enrichLeadsWithConversationState` expone
 `pending_whatsapp_reply_count` y `pending_automation_attention` aunque exista
 `linked_appointment`. La lectura individual limpia el no leído normal, pero no
-la atención inconclusa. Esta última se resuelve explícitamente con
-`PATCH /api/conversations/:id/automation-attention/resolve`; el endpoint valida
-scope y permisos de QuickChat, limita el cierre a `user_id + conversation_id`
-y audita `manual_resolution_reason`, `manual_resolved_at` y
-`manual_resolved_by_user_id` en los datos de la notificación.
+la atención inconclusa. Esta última se resuelve al contestar un operador desde
+CRM, al recibir el eco de una respuesta enviada desde el móvil o explícitamente
+con `PATCH /api/conversations/:id/automation-attention/resolve`; el endpoint
+valida scope y permisos de QuickChat, cierra los avisos abiertos de todos los
+responsables de esa conversación y audita `manual_resolution_reason`,
+`manual_resolved_at` y `manual_resolved_by_user_id` en los datos de la
+notificación. Si el humano se adelanta al final de la clasificación, el nodo de
+aviso detecta su outbound posterior al mensaje origen y evita crear una alerta
+tardía. QuickChat mantiene además la acción `Ya he realizado la acción` como
+cierre manual y muestra `Procesando respuesta con IA` junto al bubble exacto
+mientras la ejecución está en curso.
 
 Los nodos `action/send_system_notification` dirigidos a recepción resuelven
 alias operativos compatibles: `Recepción / Comercial ventas` incluye también

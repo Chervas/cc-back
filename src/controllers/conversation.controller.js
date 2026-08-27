@@ -756,6 +756,10 @@ async function enrichConversationUnreadForUser(userId, conversationLike) {
   plain.pending_automation_message_id = pendingState?.requiresAutomationAttention === true
     ? (Number(pendingState?.automationAttentionMessageId || 0) || null)
     : null;
+  plain.automation_response_processing = pendingState?.isAutomationResponseProcessing === true;
+  plain.automation_response_processing_message_id = pendingState?.isAutomationResponseProcessing === true
+    ? (Number(pendingState?.automationResponseProcessingMessageId || 0) || null)
+    : null;
   if (plain.channel === 'whatsapp') {
     plain.last_inbound_at_any_sender = plain.last_inbound_at || null;
     try {
@@ -1445,6 +1449,10 @@ exports.listConversations = async (req, res) => {
       data.pending_automation_message_id = pendingState?.requiresAutomationAttention === true
         ? (Number(pendingState?.automationAttentionMessageId || 0) || null)
         : null;
+      data.automation_response_processing = pendingState?.isAutomationResponseProcessing === true;
+      data.automation_response_processing_message_id = pendingState?.isAutomationResponseProcessing === true
+        ? (Number(pendingState?.automationResponseProcessingMessageId || 0) || null)
+        : null;
       return data;
     }));
     const withRestrictions = await attachContactRestrictions(rawPayload);
@@ -1950,8 +1958,18 @@ exports.resolveAutomationAttention = async (req, res) => {
     }
 
     const result = await resolveAutomationAttentionForConversation(conversationId, userId, {
+      allUsers: true,
       reason: 'operator_action_completed',
     });
+    const io = getIO();
+    if (result.updated > 0 && io) {
+      io.to(`clinic:${conversation.clinic_id}`).emit('conversation:updated', {
+        id: String(conversation.id),
+        pending_automation_attention: false,
+        pending_automation_count: 0,
+        pending_automation_message_id: null,
+      });
+    }
     return res.json({
       success: true,
       resolved: Number(result.updated || 0),

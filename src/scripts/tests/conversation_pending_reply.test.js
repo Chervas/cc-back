@@ -7,10 +7,42 @@ const test = require('node:test');
 
 const db = require('../../../models');
 const {
+  findHumanReplyAfterMessage,
   getPendingReplyStatesByConversationIds,
   normalizeConversationIds,
   resolveAutomationAttentionForConversation,
 } = require('../../services/conversationPendingReply.service');
+
+test('detecta una respuesta humana posterior aunque la IA termine después', async (t) => {
+  const originalQuery = db.sequelize.query;
+  t.after(() => {
+    db.sequelize.query = originalQuery;
+  });
+
+  db.sequelize.query = async (sql, options) => {
+    assert.match(sql, /id > :responseMessageId/);
+    assert.match(sql, /sender_id IS NOT NULL/);
+    assert.match(sql, /smb_message_echoes/);
+    assert.deepEqual(options.replacements, {
+      conversationId: 8629,
+      responseMessageId: 91002,
+    });
+    return [{ id: 91007 }];
+  };
+
+  assert.deepEqual(await findHumanReplyAfterMessage(8629, 91002), { id: 91007 });
+});
+
+test('no inventa una respuesta humana cuando no hay mensajes posteriores', async (t) => {
+  const originalQuery = db.sequelize.query;
+  t.after(() => {
+    db.sequelize.query = originalQuery;
+  });
+  db.sequelize.query = async () => [];
+
+  assert.equal(await findHumanReplyAfterMessage(8629, 91002), null);
+  assert.equal(await findHumanReplyAfterMessage(null, 91002), null);
+});
 
 test('normaliza conversaciones y combina pendientes con atención de automatización', async (t) => {
   const originalQuery = db.sequelize.query;
@@ -35,12 +67,18 @@ test('normaliza conversaciones y combina pendientes con atención de automatizac
         { conversation_id: 8, pending_count: 0, unread_count: 0 },
       ];
     }
-    assert.match(sql, /automation\.system_notification/);
-    assert.match(sql, /user_id = :userId/);
-    assert.match(sql, /quickChatResponseMessageId/);
-    assert.match(sql, /FlowExecutionsV2 execution/);
-    assert.match(sql, /last_response_context\.response_message_id/);
-    return [{ conversation_id: 8, attention_count: 2, response_message_id: 913 }];
+    if (queryIndex === 2) {
+      assert.match(sql, /automation\.system_notification/);
+      assert.match(sql, /user_id = :userId/);
+      assert.match(sql, /quickChatResponseMessageId/);
+      assert.match(sql, /FlowExecutionsV2 execution/);
+      assert.match(sql, /last_response_context\.response_message_id/);
+      return [{ conversation_id: 8, attention_count: 2, response_message_id: 913 }];
+    }
+    assert.match(sql, /execution\.status = 'running'/);
+    assert.match(sql, /resume_mode.*response/s);
+    assert.match(sql, /last_inbound_message_id/);
+    return [{ conversation_id: 7, response_message_id: 912 }];
   };
 
   assert.deepEqual(normalizeConversationIds([7, '8', 7, 0, null, 'x']), [7, 8]);
@@ -52,6 +90,8 @@ test('normaliza conversaciones y combina pendientes con atención de automatizac
     requiresAutomationAttention: false,
     automationAttentionCount: 0,
     automationAttentionMessageId: null,
+    isAutomationResponseProcessing: true,
+    automationResponseProcessingMessageId: 912,
   });
   assert.deepEqual(states.get(8), {
     count: 0,
@@ -59,8 +99,10 @@ test('normaliza conversaciones y combina pendientes con atención de automatizac
     requiresAutomationAttention: true,
     automationAttentionCount: 2,
     automationAttentionMessageId: 913,
+    isAutomationResponseProcessing: false,
+    automationResponseProcessingMessageId: null,
   });
-  assert.equal(queryIndex, 2);
+  assert.equal(queryIndex, 3);
 });
 
 test('un conjunto vacío no consulta la base de datos', async (t) => {
@@ -91,9 +133,10 @@ test('abrir una conversación actualiza solo la lectura del usuario', () => {
   assert.doesNotMatch(block, /getPendingReplyStatesByConversationIds|unread:updated/);
   assert.match(controller, /pending_automation_count = pendingState\?\.requiresAutomationAttention === true\s*\? Math\.max\(1, Number\(pendingState\?\.automationAttentionCount \|\| 0\)\)/);
   assert.match(controller, /exports\.resolveAutomationAttention = async/);
+  assert.match(controller, /allUsers:\s*true/);
 });
 
-test('la resolución manual solo cierra avisos del usuario y conversación indicados', async (t) => {
+test('la resolución del servicio puede cerrar avisos del usuario y conversación indicados', async (t) => {
   const originalFindAll = db.Notification.findAll;
   const updated = [];
   const fakeNotification = {
@@ -175,4 +218,14 @@ test('el envío manual y el eco móvil resuelven la atención sin alterar los au
   assert.match(controller, /pending_automation_message_id:\s*null/);
   assert.match(workers, /sourceEvent === 'smb_message_echoes'/);
   assert.match(workers, /reason:\s*'mobile_reply_sent'/);
+});
+
+test('el flujo evita crear un aviso tardío si el operador ya respondió', () => {
+  const flowEngine = fs.readFileSync(
+    path.resolve(__dirname, '../../services/flowEngineV2.service.js'),
+    'utf8',
+  );
+  assert.match(flowEngine, /findHumanReplyAfterMessage\(quickChatConversationId, quickChatResponseMessageId\)/);
+  assert.match(flowEngine, /status:\s*'resolved_before_notification'/);
+  assert.match(flowEngine, /notifications_created:\s*0/);
 });

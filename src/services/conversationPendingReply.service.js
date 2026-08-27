@@ -2,6 +2,7 @@
 
 const { Op } = require('sequelize');
 const db = require('../../models');
+const { getIO } = require('./socket.service');
 const { emitNotificationUpdated } = require('./notificationsRealtime.service');
 
 function normalizeConversationIds(values) {
@@ -12,6 +13,46 @@ function normalizeConversationIds(values) {
   ));
 }
 
+async function findHumanReplyAfterMessage(conversationId, responseMessageId, options = {}) {
+  const numericConversationId = Number(conversationId);
+  const numericResponseMessageId = Number(responseMessageId);
+  if (
+    !Number.isInteger(numericConversationId)
+    || numericConversationId <= 0
+    || !Number.isInteger(numericResponseMessageId)
+    || numericResponseMessageId <= 0
+  ) {
+    return null;
+  }
+
+  const rows = await db.sequelize.query(`
+    SELECT id
+    FROM Messages
+    WHERE conversation_id = :conversationId
+      AND id > :responseMessageId
+      AND direction = 'outbound'
+      AND message_type <> 'event'
+      AND status <> 'failed'
+      AND (
+        sender_id IS NOT NULL
+        OR COALESCE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.source_event')), '') = 'smb_message_echoes'
+        OR COALESCE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.coexistence.source_event')), '') = 'smb_message_echoes'
+      )
+    ORDER BY id ASC
+    LIMIT 1
+  `, {
+    replacements: {
+      conversationId: numericConversationId,
+      responseMessageId: numericResponseMessageId,
+    },
+    type: db.Sequelize.QueryTypes.SELECT,
+    ...(options.transaction ? { transaction: options.transaction } : {}),
+  });
+
+  const messageId = Number(rows?.[0]?.id || 0);
+  return Number.isInteger(messageId) && messageId > 0 ? { id: messageId } : null;
+}
+
 async function getPendingReplyStatesByConversationIds(conversationIds, options = {}) {
   const ids = normalizeConversationIds(conversationIds);
   const states = new Map(ids.map((id) => [id, {
@@ -20,6 +61,8 @@ async function getPendingReplyStatesByConversationIds(conversationIds, options =
     requiresAutomationAttention: false,
     automationAttentionCount: 0,
     automationAttentionMessageId: null,
+    isAutomationResponseProcessing: false,
+    automationResponseProcessingMessageId: null,
   }]));
 
   if (!ids.length) {
@@ -115,7 +158,69 @@ async function getPendingReplyStatesByConversationIds(conversationIds, options =
     });
   }
 
+  const processingRows = await db.sequelize.query(`
+    SELECT
+      CAST(JSON_UNQUOTE(JSON_EXTRACT(execution.context, '$.conversation.id')) AS UNSIGNED) AS conversation_id,
+      MAX(CASE
+        WHEN execution.status = 'running'
+          THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(execution.context, '$.last_response_context.response_message_id')) AS UNSIGNED)
+        ELSE CAST(JSON_UNQUOTE(JSON_EXTRACT(execution.waiting_meta, '$.last_inbound_message_id')) AS UNSIGNED)
+      END) AS response_message_id
+    FROM FlowExecutionsV2 execution
+    WHERE execution.updated_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 15 MINUTE)
+      AND (
+        (
+          execution.status = 'running'
+          AND CAST(JSON_UNQUOTE(JSON_EXTRACT(execution.context, '$.last_response_context.response_message_id')) AS UNSIGNED) IS NOT NULL
+        )
+        OR (
+          execution.status = 'waiting'
+          AND JSON_UNQUOTE(JSON_EXTRACT(execution.waiting_meta, '$.resume_mode')) = 'response'
+          AND CAST(JSON_UNQUOTE(JSON_EXTRACT(execution.waiting_meta, '$.last_inbound_message_id')) AS UNSIGNED) IS NOT NULL
+        )
+      )
+      AND CAST(JSON_UNQUOTE(JSON_EXTRACT(execution.context, '$.conversation.id')) AS UNSIGNED)
+        IN (:conversationIds)
+    GROUP BY CAST(JSON_UNQUOTE(JSON_EXTRACT(execution.context, '$.conversation.id')) AS UNSIGNED)
+  `, queryOptions);
+
+  processingRows.forEach((row) => {
+    const state = states.get(Number(row.conversation_id));
+    if (state) {
+      state.isAutomationResponseProcessing = true;
+      state.automationResponseProcessingMessageId = Number(row.response_message_id || 0) || null;
+    }
+  });
+
   return states;
+}
+
+function emitAutomationResponseProcessing({ clinicId, conversationId, responseMessageId, processing }) {
+  const numericClinicId = Number(clinicId);
+  const numericConversationId = Number(conversationId);
+  const numericResponseMessageId = Number(responseMessageId);
+  if (
+    !Number.isInteger(numericClinicId)
+    || numericClinicId <= 0
+    || !Number.isInteger(numericConversationId)
+    || numericConversationId <= 0
+  ) {
+    return false;
+  }
+
+  const io = getIO();
+  if (!io) return false;
+
+  io.to(`clinic:${numericClinicId}`).emit('conversation:updated', {
+    id: String(numericConversationId),
+    automation_response_processing: processing === true,
+    automation_response_processing_message_id: processing === true
+      && Number.isInteger(numericResponseMessageId)
+      && numericResponseMessageId > 0
+      ? numericResponseMessageId
+      : null,
+  });
+  return true;
 }
 
 async function resolveAutomationAttentionForConversation(conversationId, userId, options = {}) {
@@ -172,6 +277,8 @@ async function resolveAutomationAttentionForConversation(conversationId, userId,
 }
 
 module.exports = {
+  emitAutomationResponseProcessing,
+  findHumanReplyAfterMessage,
   getPendingReplyStatesByConversationIds,
   normalizeConversationIds,
   resolveAutomationAttentionForConversation,

@@ -4,6 +4,7 @@ const db = require('../../models');
 const jobRequestsService = require('./jobRequests.service');
 const jobScheduler = require('./jobScheduler.service');
 const { normalizePhoneDigits } = require('../lib/phone');
+const { emitAutomationResponseProcessing } = require('./conversationPendingReply.service');
 
 const FlowExecutionV2 = db.FlowExecutionV2;
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
@@ -755,6 +756,7 @@ async function enqueueInboundResponseResume({
   }
 
   let enqueued = 0;
+  let responseProcessingScheduled = false;
   const executionIds = [];
   const errors = [];
 
@@ -842,6 +844,7 @@ async function enqueueInboundResponseResume({
             },
             { where: { id: queuedResumeJob.id } }
           );
+          responseProcessingScheduled = true;
         } else {
           await jobRequestsService.enqueueJobRequest({
             type: 'automations_v2_execute',
@@ -852,6 +855,7 @@ async function enqueueInboundResponseResume({
             payload: responsePayload,
           });
           enqueued += 1;
+          responseProcessingScheduled = true;
         }
       } else {
         const job = await jobRequestsService.enqueueJobRequest({
@@ -880,6 +884,7 @@ async function enqueueInboundResponseResume({
           jobScheduler.triggerImmediate(job.id).catch(() => {});
         }
         enqueued += 1;
+        responseProcessingScheduled = true;
       }
     } catch (error) {
       errors.push({
@@ -887,6 +892,15 @@ async function enqueueInboundResponseResume({
         message: cleanString(error?.message) || 'enqueue_failed',
       });
     }
+  }
+
+  if (responseProcessingScheduled && normalizedConversationId && inboundMessageId) {
+    emitAutomationResponseProcessing({
+      clinicId,
+      conversationId: normalizedConversationId,
+      responseMessageId: inboundMessageId,
+      processing: true,
+    });
   }
 
   return {

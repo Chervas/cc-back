@@ -68,6 +68,10 @@ const { resolveLeadAutoReplyWait } = require('./clinicOpeningHours.service');
 const { evaluatePendingLeadContact } = require('./leadContactState.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { buildConversationContext } = require('../lib/automation-conversation-context');
+const {
+  emitAutomationResponseProcessing,
+  findHumanReplyAfterMessage,
+} = require('./conversationPendingReply.service');
 const UPDATE_LEAD_INFO_MODES = new Set([
   'set_required',
   'set_received',
@@ -4460,6 +4464,28 @@ async function handleSendSystemNotification(node, context, runtime) {
   const primaryLink = conversationLink || patientDetailLink || null;
   const createdNotifications = [];
 
+  const humanReply = quickChatConversationId && quickChatResponseMessageId
+    ? await findHumanReplyAfterMessage(quickChatConversationId, quickChatResponseMessageId)
+    : null;
+  if (humanReply) {
+    return {
+      kind: 'success',
+      output: {
+        notification_id: null,
+        notification_ids: [],
+        assignee_user_ids: userIds,
+        notifications_created: 0,
+        primary_link: primaryLink,
+        quick_chat_conversation_id: quickChatConversationId,
+        patient_conversation_link: conversationLink,
+        patient_detail_link: patientDetailLink,
+        resolved_by_message_id: humanReply.id,
+        status: 'resolved_before_notification',
+      },
+      next_node_id: readOutputTarget(node, 'on_success'),
+    };
+  }
+
   for (const userId of userIds) {
     const notification = await Notification.create({
       userId,
@@ -5973,6 +5999,24 @@ async function runExecution(executionId, options = {}) {
     throw new Error('execution_not_found');
   }
 
+  const clearResponseProcessingState = () => {
+    const conversationId = toIntOrNull(getByPath(execution.context, 'conversation.id'));
+    const responseMessageId = toIntOrNull(
+      options.inboundMessageId
+      || getByPath(execution.context, 'last_response_context.response_message_id')
+      || getByPath(execution.waiting_meta, 'last_inbound_message_id')
+    );
+    if (conversationId && responseMessageId) {
+      emitAutomationResponseProcessing({
+        clinicId: execution.clinic_id,
+        conversationId,
+        responseMessageId,
+        processing: false,
+      });
+    }
+  };
+
+  try {
   emitExecutionEvent(execution, 'flow_execution:engine_start');
 
   const template = execution.templateVersion;
@@ -6283,6 +6327,9 @@ async function runExecution(executionId, options = {}) {
 
   await execution.reload();
   return execution;
+  } finally {
+    clearResponseProcessingState();
+  }
 }
 
 module.exports = {
