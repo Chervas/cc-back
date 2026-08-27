@@ -481,6 +481,23 @@ async function testSeoV15HelpersStayBackendOwned() {
   assert.equal(movements[0].clicksDelta, 4);
   assert.equal(movements[0].positionDelta, 3);
 
+  const brandSplit = __testing.buildSeoBrandSplit([
+    { value: 'bs medical alicante', clicks: 6, impressions: 60 },
+    { value: 'clinica estetica alicante', clicks: 3, impressions: 90 },
+  ], {
+    descriptors: { clinic_name: 'BS Medical', group_name: 'Grupo prueba' },
+    google: {
+      available_assets: {
+        search_console: [{ site_url: 'https://www.bsmedical.es/' }],
+      },
+    },
+  });
+  assert.equal(brandSplit.brand.clicks, 6);
+  assert.equal(brandSplit.nonBrand.clicks, 3);
+  assert.equal(brandSplit.brand.share, 66.7);
+  assert.ok(brandSplit.terms.includes('bs medical'));
+  assert.ok(brandSplit.terms.includes('bsmedical'));
+
   const opportunities = __testing.buildSeoOpportunities({
     searchConsoleConnected: true,
     summary: { clicks: 1, impressions: 300 },

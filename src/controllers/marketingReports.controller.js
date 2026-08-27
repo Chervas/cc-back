@@ -1579,6 +1579,11 @@ function emptySeoTechnical() {
 function buildSeoEmpty() {
   return {
     summary: { clicks: 0, impressions: 0, ctr: 0, avgPosition: 0 },
+    brandSplit: {
+      brand: { clicks: 0, impressions: 0, queries: 0, share: 0 },
+      nonBrand: { clicks: 0, impressions: 0, queries: 0, share: 0 },
+      terms: [],
+    },
     queries: [],
     pages: [],
     queryPages: [],
@@ -1627,6 +1632,103 @@ function buildSeoRankingBuckets(rows = []) {
       share: total ? round(((counts.get(item.id) || 0) / total) * 100, 1) : 0,
     }))
     .filter((item) => item.count > 0 || item.id !== 'unknown');
+}
+
+const SEO_BRAND_STOPWORDS = new Set([
+  'clinica', 'clinic', 'clinical', 'centro', 'centre', 'medical', 'medicina',
+  'dental', 'dentista', 'odontologia', 'estetica', 'estetico', 'estetica',
+  'salud', 'doctor', 'doctora', 'dra', 'dr', 'hospital', 'barcelona', 'madrid',
+  'alicante', 'alacant', 'hospitalet', 'badalona', 'bilbao', 'valencia',
+  'sant', 'sants', 'marti', 'nou', 'barris', 'glories', 'eixample',
+]);
+
+function normalizeSeoText(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function seoDomainTokens(marketingState) {
+  return effectiveSearchConsoleSiteUrls(marketingState)
+    .flatMap((siteUrl) => {
+      const raw = String(siteUrl || '').trim();
+      if (!raw) return [];
+      try {
+        const parsed = new URL(raw.startsWith('http') ? raw : `https://${raw}`);
+        return parsed.hostname
+          .replace(/^www\./i, '')
+          .split('.')
+          .filter((token) => token && token.length >= 4);
+      } catch (_err) {
+        return raw
+          .replace(/^https?:\/\//i, '')
+          .replace(/^www\./i, '')
+          .split(/[./-]+/)
+          .filter((token) => token && token.length >= 4);
+      }
+    })
+    .map(normalizeSeoText)
+    .filter((token) => token && !SEO_BRAND_STOPWORDS.has(token));
+}
+
+function buildSeoBrandTerms(marketingState) {
+  const descriptors = marketingState?.descriptors || {};
+  const rawNames = [
+    descriptors.clinic_name,
+    descriptors.group_name,
+  ].filter(Boolean);
+  const phrases = rawNames
+    .map(normalizeSeoText)
+    .filter((value) => {
+      const tokens = value.split(' ').filter(Boolean);
+      return tokens.length
+        && tokens.some((token) => !SEO_BRAND_STOPWORDS.has(token));
+    });
+  const tokens = rawNames
+    .flatMap((value) => normalizeSeoText(value).split(' '))
+    .filter((token) => token && (token.length >= 5 || /^[a-z]{2,4}$/.test(token)) && !SEO_BRAND_STOPWORDS.has(token));
+  return normalizedUniqueStrings([
+    ...seoDomainTokens(marketingState),
+    ...phrases,
+    ...tokens,
+  ]).slice(0, 12);
+}
+
+function buildSeoBrandSplit(rows = [], marketingState = null) {
+  const terms = buildSeoBrandTerms(marketingState);
+  const emptyBucket = () => ({ clicks: 0, impressions: 0, queries: 0, share: 0 });
+  const brand = emptyBucket();
+  const nonBrand = emptyBucket();
+  const matchesBrand = (query) => {
+    if (!terms.length) return false;
+    const normalized = ` ${normalizeSeoText(query)} `;
+    return terms.some((term) => {
+      const value = normalizeSeoText(term);
+      if (!value) return false;
+      return normalized.includes(` ${value} `);
+    });
+  };
+
+  (rows || []).forEach((row) => {
+    const bucket = matchesBrand(row.value || row.query) ? brand : nonBrand;
+    bucket.clicks += toNumber(row.clicks);
+    bucket.impressions += toNumber(row.impressions);
+    bucket.queries += 1;
+  });
+
+  const totalClicks = brand.clicks + nonBrand.clicks;
+  const totalImpressions = brand.impressions + nonBrand.impressions;
+  const denominator = totalClicks || totalImpressions;
+  brand.clicks = round(brand.clicks, 0);
+  brand.impressions = round(brand.impressions, 0);
+  nonBrand.clicks = round(nonBrand.clicks, 0);
+  nonBrand.impressions = round(nonBrand.impressions, 0);
+  brand.share = denominator ? ratioPct(totalClicks ? brand.clicks : brand.impressions, denominator, 1) : 0;
+  nonBrand.share = denominator ? ratioPct(totalClicks ? nonBrand.clicks : nonBrand.impressions, denominator, 1) : 0;
+  return { brand, nonBrand, terms };
 }
 
 function seoTrend(current, previous) {
@@ -2080,6 +2182,7 @@ async function aggregateSeo(scope, range, marketingState = null) {
   const queryMovements = buildSeoMovements(currentQueryRows, previousQueryRows, 'query', 8);
   const pageMovements = buildSeoMovements(currentPageRows, previousPageRows, 'page', 8);
   const hasSeoTrafficData = clicks > 0 || impressions > 0;
+  const brandSplit = buildSeoBrandSplit(currentQueryRows, marketingState);
   const seoDailyPoints = (aggRows || [])
     .map((row) => ({
       date: String(row.date || '').slice(0, 10),
@@ -2095,6 +2198,7 @@ async function aggregateSeo(scope, range, marketingState = null) {
 
   return {
     summary,
+    brandSplit,
     queries: queryRows.map((row) => ({
       query: row.query || 'Sin query',
       clicks: toNumber(row.clicks),
@@ -3856,6 +3960,7 @@ exports.getOverview = async (req, res) => {
       seoQueryPages: seo.queryPages,
       seoQueryTrends: seo.queryTrends,
       seoRankingBuckets: seo.rankingBuckets,
+      seoBrandSplit: seo.brandSplit,
       seoQueryMovements: seo.queryMovements,
       seoPageMovements: seo.pageMovements,
       seoDailyAggregates: seo.dailyAggregates,
@@ -3869,8 +3974,8 @@ exports.getOverview = async (req, res) => {
         firstPartyPageviews: firstParty.connected,
         paidAttributionCoverage: paidCoverageSummary,
         note: firstParty.connected
-          ? 'V1 usa WebEvents propios agregados en backend, además de leads, formularios, citas y fuentes externas.'
-          : 'V1 usa leads, formularios, citas y agregados externos existentes. Pageviews propios aparecerán cuando WebEvents tenga datos agregados.',
+          ? 'ClinicaClick Analytics está aportando eventos propios agregados al informe.'
+          : 'El informe usa leads, formularios, citas y agregados externos existentes. Las visitas propias aparecerán cuando ClinicaClick Analytics tenga datos agregados.',
       },
     });
   } catch (error) {
@@ -3928,6 +4033,7 @@ exports.__testing = {
   resolveMetaAttributionStatus,
   normalizeSocialFollowerDeltas,
   buildSeoRankingBuckets,
+  buildSeoBrandSplit,
   buildSeoMovements,
   buildSeoOpportunities,
   emptySeoTechnical,
