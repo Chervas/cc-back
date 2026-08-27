@@ -15,18 +15,18 @@ const OBJECTIVE_POLICY = Object.freeze([
   Object.freeze({
     id: 'new_patients',
     subobjectives: Object.freeze([
-      Object.freeze({ id: 'paid_media', weight: 30, availability: 'available', route: '/marketing/campanas' }),
-      Object.freeze({ id: 'google_maps', weight: 20, availability: 'available', route: '/marketing/perfil-google' }),
-      Object.freeze({ id: 'web', weight: 20, availability: 'unknown', route: '/marketing/web' }),
+      Object.freeze({ id: 'paid_media', weight: 30, availability: 'available', route: '/marketing/objetivos/captar-nuevos-pacientes' }),
+      Object.freeze({ id: 'google_maps', weight: 20, availability: 'available', route: '/marketing/objetivos/captar-nuevos-pacientes/perfil-google' }),
+      Object.freeze({ id: 'web', weight: 20, availability: 'unknown', route: '/marketing/objetivos/captar-nuevos-pacientes' }),
       Object.freeze({ id: 'seo_ai', weight: 15, availability: 'available', route: '/marketing/mi-clinica/seo-ia' }),
-      Object.freeze({ id: 'social_content_comments', weight: 15, availability: 'coming_soon', route: '/marketing/redes-sociales' }),
+      Object.freeze({ id: 'social_content_comments', weight: 15, availability: 'coming_soon', route: '/marketing/objetivos/captar-nuevos-pacientes' }),
     ]),
   }),
   Object.freeze({
     id: 'reputation',
     subobjectives: Object.freeze([
-      Object.freeze({ id: 'reviews', weight: 35, availability: 'available', route: '/marketing/campanas' }),
-      Object.freeze({ id: 'followers', weight: 20, availability: 'coming_soon', route: '/marketing/redes-sociales' }),
+      Object.freeze({ id: 'reviews', weight: 35, availability: 'available', route: '/marketing/objetivos/aumentar-reputacion' }),
+      Object.freeze({ id: 'followers', weight: 20, availability: 'coming_soon', route: '/marketing/objetivos/aumentar-reputacion' }),
       Object.freeze({ id: 'local_national_media', weight: 25, availability: 'coming_soon', route: null }),
       Object.freeze({ id: 'professional_report', weight: 20, availability: 'coming_soon', route: null }),
     ]),
@@ -34,10 +34,10 @@ const OBJECTIVE_POLICY = Object.freeze([
   Object.freeze({
     id: 'profitability',
     subobjectives: Object.freeze([
-      Object.freeze({ id: 'brand_protection', weight: 20, availability: 'coming_soon', route: '/marketing/campanas' }),
-      Object.freeze({ id: 'reduce_no_shows', weight: 30, availability: 'unknown', route: '/marketing/automatizaciones' }),
-      Object.freeze({ id: 'reactivation', weight: 25, availability: 'available', route: '/marketing/campanas' }),
-      Object.freeze({ id: 'accept_budgets', weight: 25, availability: 'coming_soon', route: '/marketing/campanas' }),
+      Object.freeze({ id: 'brand_protection', weight: 20, availability: 'coming_soon', route: '/marketing/objetivos/aumentar-rentabilidad' }),
+      Object.freeze({ id: 'reduce_no_shows', weight: 30, availability: 'unknown', route: '/marketing/objetivos/aumentar-rentabilidad' }),
+      Object.freeze({ id: 'reactivation', weight: 25, availability: 'available', route: '/marketing/objetivos/aumentar-rentabilidad' }),
+      Object.freeze({ id: 'accept_budgets', weight: 25, availability: 'coming_soon', route: '/marketing/objetivos/aumentar-rentabilidad' }),
     ]),
   }),
 ]);
