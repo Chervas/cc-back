@@ -17,6 +17,10 @@ const {
 const {
   diagnoseGoogleCampaignMeasurement,
 } = require('../lib/googleAdsCampaignMeasurementDiagnosis');
+const {
+  buildOverviewCacheIdentity,
+  overviewCache,
+} = require('../services/marketingReportOverviewCache.service');
 
 const {
   LeadIntake,
@@ -3741,6 +3745,234 @@ function buildRecommendations({
     .map(({ priority: _priority, ...recommendation }) => recommendation);
 }
 
+async function buildOverviewPayload({ scope, range }) {
+  const marketingState = await resolveReportMarketingState(scope);
+  const paidAttributionCoverage = await resolvePaidAttributionCoverage(scope);
+  const paidCoverageSummary = buildPaidAttributionCoverageSummary(range, paidAttributionCoverage);
+
+  const [
+    leads,
+    previousLeads,
+    leadSeries,
+    appointments,
+    previousAppointments,
+    appointmentSeries,
+    spendSeries,
+    formsCount,
+    whatsappWeb,
+    intakeConfigCount,
+    googleAds,
+    previousGoogleAds,
+    metaAds,
+    previousMetaAds,
+    ga,
+    seo,
+    social,
+    businessProfile,
+    firstParty,
+  ] = await Promise.all([
+    aggregateLeads(scope, range),
+    aggregateLeads(scope, range.previous),
+    aggregateLeadSeries(scope, range),
+    countAppointments(scope, range),
+    countAppointments(scope, range.previous),
+    aggregateAppointmentSeries(scope, range),
+    aggregateSpendSeries(scope, range, marketingState, paidAttributionCoverage.start),
+    aggregateForms(scope, range),
+    aggregateWhatsappWebOrigins(scope, range),
+    getIntakeConfigCount(scope),
+    aggregateGoogleAds(scope, range, marketingState, paidAttributionCoverage.start),
+    aggregateGoogleAds(scope, range.previous, marketingState, paidAttributionCoverage.start),
+    aggregateMetaAds(scope, range, marketingState, paidAttributionCoverage.start),
+    aggregateMetaAds(scope, range.previous, marketingState, paidAttributionCoverage.start),
+    aggregateGa(scope, range, marketingState),
+    aggregateSeo(scope, range, marketingState),
+    aggregateSocialOrganic(scope, range, marketingState),
+    aggregateBusinessProfile(scope, range, marketingState),
+    webEventsService.getFirstPartySummary(scope, range),
+  ]);
+
+  const webPages = await aggregateWebPages(scope, range, seo.pages);
+
+  const currentSpend = money(googleAds.totals.spend + metaAds.totals.spend);
+  const previousSpend = money(previousGoogleAds.totals.spend + previousMetaAds.totals.spend);
+
+  const citas = Math.max(leads.totals.citas, appointments.creadas);
+  const acudieron = Math.max(leads.totals.acudieron, appointments.completadas);
+  const convertidos = leads.totals.convertidos;
+  const previousCitas = Math.max(previousLeads.totals.citas, previousAppointments.creadas);
+  const previousAcudieron = Math.max(previousLeads.totals.acudieron, previousAppointments.completadas);
+  const previousConvertidos = previousLeads.totals.convertidos;
+  const paidLeads = sumChannelStats(leads.channels, ['google_ads', 'meta_ads'], 'leads');
+  const previousPaidLeads = sumChannelStats(previousLeads.channels, ['google_ads', 'meta_ads'], 'leads');
+
+  const channels = buildChannels(leads.channels, {
+    google_ads: googleAds.totals.spend,
+    meta_ads: metaAds.totals.spend,
+  });
+
+  const googleCampaigns = distributeCampaignAppointments(googleAds.campaigns, leads.channels.get('google_ads'));
+  const metaCampaigns = distributeCampaignAppointments(metaAds.campaigns, leads.channels.get('meta_ads'));
+  const adsCampaigns = [...googleCampaigns, ...metaCampaigns]
+    .sort((a, b) => b.inversion - a.inversion)
+    .slice(0, 8);
+
+  const visitsOrClicks = Math.max(
+    firstParty.pageviews,
+    firstParty.sessions,
+    ga.sessions,
+    googleAds.totals.clicks + metaAds.totals.clicks + seo.summary.clicks,
+    leads.totals.leads,
+    1
+  );
+
+  const kpis = buildKpis(
+    { leads: leads.totals.leads, paidLeads, citas, acudieron, convertidos, spend: currentSpend },
+    { leads: previousLeads.totals.leads, paidLeads: previousPaidLeads, citas: previousCitas, acudieron: previousAcudieron, convertidos: previousConvertidos, spend: previousSpend },
+    {
+      leads: leadSeries.leads,
+      paidLeads: leadSeries.paidLeads,
+      citas: leadSeries.citas.map((value, index) => Math.max(value, appointmentSeries.citas[index] || 0)),
+      acudieron: leadSeries.acudieron.map((value, index) => Math.max(value, appointmentSeries.acudieron[index] || 0)),
+      convertidos: leadSeries.convertidos,
+      spend: spendSeries,
+    }
+  );
+
+  const funnelBase = [
+    { id: 'visitas', label: firstParty.pageviews ? 'Visitas web propias' : (ga.sessions ? 'Sesiones / visitas' : 'Visitas / clicks'), value: visitsOrClicks, color: '#6366f1', helpText: firstParty.pageviews ? 'Pageviews capturados por ClinicaClick Analytics con consentimiento.' : 'Sesiones GA4 si existen; si no, clicks medidos desde SEO y Ads.' },
+    { id: 'leads', label: 'Leads', value: leads.totals.leads, color: '#8b5cf6', helpText: 'Personas que dejaron sus datos.' },
+    { id: 'contacto', label: 'Contactados', value: leads.totals.contactados, color: '#a78bfa', helpText: 'Leads con contacto o avance comercial.' },
+    { id: 'citas', label: 'Cita creada', value: citas, color: '#c4b5fd', helpText: 'Leads que agendaron cita.' },
+    { id: 'acudio', label: 'Acudió', value: acudieron, color: '#22c55e', helpText: 'Pacientes que acudieron a consulta.' },
+    { id: 'tratamiento', label: 'Realiza tratamiento', value: convertidos, color: '#15803d', helpText: 'Pacientes marcados como convertidos porque realizan tratamiento.' },
+  ];
+  const funnel = funnelBase.map((step, index) => ({
+    ...step,
+    ratioFromPrevious: index > 0 ? ratioPct(step.value, funnelBase[index - 1].value, 0) : null,
+  }));
+
+  const legacyWhatsappLeads = leads.channels.get('whatsapp')?.leads || 0;
+  const whatsappWebClicks = Math.max(whatsappWeb.clicks, legacyWhatsappLeads);
+  const webConvertedPatients = sumChannelStats(
+    leads.channels,
+    ['web', 'direct', 'call_click', 'whatsapp'],
+    'convertidos'
+  );
+
+  const webSummary = {
+    totalVisitas: visitsOrClicks,
+    sessions: firstParty.sessions,
+    visitors: firstParty.visitors,
+    firstPartyPageviews: firstParty.pageviews,
+    clicksTelefono: Math.max(firstParty.telClicks, leads.channels.get('call_click')?.leads || 0),
+    clicksWhatsApp: Math.max(firstParty.whatsappClicks, whatsappWebClicks),
+    whatsappWebClicks,
+    whatsappWebConfirmed: whatsappWeb.confirmed,
+    webConvertedPatients,
+    formularios: Math.max(firstParty.formSubmits, formsCount),
+  };
+
+  const sync = await buildSyncStatus(scope, {
+    seo,
+    googleAds,
+    metaAds,
+    ga,
+    businessProfile,
+  }, marketingState);
+
+  const syncBySource = new Map((sync.allSources || []).map((item) => [item.source, item]));
+  const sources = buildSources({
+    intakeConfigCount,
+    leadsTotal: leads.totals.leads,
+    seo,
+    googleAds,
+    metaAds,
+    ga,
+    businessProfile,
+    social,
+    firstParty,
+    mappingCounts: sync.mappingCounts,
+  }).map((source) => ({
+    ...source,
+    sync: syncBySource.get(source.source) || null,
+  }));
+
+  const recommendations = buildRecommendations({
+    businessProfile,
+    adsCampaigns,
+    intakeConfigCount,
+    firstParty,
+    sources,
+    seo,
+    social,
+    channels,
+    range,
+    current: {
+      leads: leads.totals.leads,
+      leadAppointments: leads.totals.citas,
+      paidLeads,
+      spend: currentSpend,
+    },
+    previous: {
+      leads: previousLeads.totals.leads,
+      leadAppointments: previousLeads.totals.citas,
+      paidLeads: previousPaidLeads,
+      spend: previousSpend,
+    },
+    paidCoverageSummary,
+  });
+
+  return {
+    success: true,
+    mode: 'real_v1',
+    scope: {
+      type: scope.scope,
+      clinicIds: scope.clinicIds || [],
+      groupId: scope.groupId || null,
+      original: scope.original || null,
+    },
+    period: { start: range.startLabel, end: range.endLabel, label: dateLabel(range.startLabel, range.endLabel) },
+    comparison: { start: range.previous.startLabel, end: range.previous.endLabel, label: dateLabel(range.previous.startLabel, range.previous.endLabel) },
+    lastUpdated: new Date().toISOString(),
+    sources,
+    sync,
+    kpis,
+    funnel,
+    channels,
+    webSummary,
+    webPages,
+    seoSummary: seo.summary,
+    seoQueries: seo.queries,
+    seoPages: seo.pages,
+    seoQueryPages: seo.queryPages,
+    seoQueryTrends: seo.queryTrends,
+    seoRankingBuckets: seo.rankingBuckets,
+    seoBrandSplit: seo.brandSplit,
+    seoQueryMovements: seo.queryMovements,
+    seoPageMovements: seo.pageMovements,
+    seoDailyAggregates: seo.dailyAggregates,
+    seoTechnical: seo.technical,
+    seoOpportunities: seo.opportunities,
+    social,
+    adsCampaigns,
+    businessProfile: businessProfile.metrics,
+    recommendations,
+    dataQuality: {
+      firstPartyPageviews: firstParty.connected,
+      paidAttributionCoverage: paidCoverageSummary,
+      note: firstParty.connected
+        ? 'ClinicaClick Analytics está aportando eventos propios agregados al informe.'
+        : 'El informe usa leads, formularios, citas y agregados externos existentes. Las visitas propias aparecerán cuando ClinicaClick Analytics tenga datos agregados.',
+    },
+  };
+}
+
+function forceRefreshRequested(req) {
+  const value = req.query.forceRefresh ?? req.query.force_refresh ?? req.query.refresh;
+  return ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
+}
+
 exports.getOverview = async (req, res) => {
   try {
     const scope = await resolveReportScope(req);
@@ -3758,226 +3990,18 @@ exports.getOverview = async (req, res) => {
       throw error;
     }
     const range = buildRange(req.query.startDate, req.query.endDate, 30);
-    const marketingState = await resolveReportMarketingState(scope);
-    const paidAttributionCoverage = await resolvePaidAttributionCoverage(scope);
-    const paidCoverageSummary = buildPaidAttributionCoverageSummary(range, paidAttributionCoverage);
+    if (!overviewCache) {
+      return res.json(await buildOverviewPayload({ scope, range }));
+    }
 
-    const [
-      leads,
-      previousLeads,
-      leadSeries,
-      appointments,
-      previousAppointments,
-      appointmentSeries,
-      spendSeries,
-      formsCount,
-      whatsappWeb,
-      intakeConfigCount,
-      googleAds,
-      previousGoogleAds,
-      metaAds,
-      previousMetaAds,
-      ga,
-      seo,
-      social,
-      businessProfile,
-      firstParty,
-    ] = await Promise.all([
-      aggregateLeads(scope, range),
-      aggregateLeads(scope, range.previous),
-      aggregateLeadSeries(scope, range),
-      countAppointments(scope, range),
-      countAppointments(scope, range.previous),
-      aggregateAppointmentSeries(scope, range),
-      aggregateSpendSeries(scope, range, marketingState, paidAttributionCoverage.start),
-      aggregateForms(scope, range),
-      aggregateWhatsappWebOrigins(scope, range),
-      getIntakeConfigCount(scope),
-      aggregateGoogleAds(scope, range, marketingState, paidAttributionCoverage.start),
-      aggregateGoogleAds(scope, range.previous, marketingState, paidAttributionCoverage.start),
-      aggregateMetaAds(scope, range, marketingState, paidAttributionCoverage.start),
-      aggregateMetaAds(scope, range.previous, marketingState, paidAttributionCoverage.start),
-      aggregateGa(scope, range, marketingState),
-      aggregateSeo(scope, range, marketingState),
-      aggregateSocialOrganic(scope, range, marketingState),
-      aggregateBusinessProfile(scope, range, marketingState),
-      webEventsService.getFirstPartySummary(scope, range),
-    ]);
-
-    const webPages = await aggregateWebPages(scope, range, seo.pages);
-
-    const currentSpend = money(googleAds.totals.spend + metaAds.totals.spend);
-    const previousSpend = money(previousGoogleAds.totals.spend + previousMetaAds.totals.spend);
-
-    const citas = Math.max(leads.totals.citas, appointments.creadas);
-    const acudieron = Math.max(leads.totals.acudieron, appointments.completadas);
-    const convertidos = leads.totals.convertidos;
-    const previousCitas = Math.max(previousLeads.totals.citas, previousAppointments.creadas);
-    const previousAcudieron = Math.max(previousLeads.totals.acudieron, previousAppointments.completadas);
-    const previousConvertidos = previousLeads.totals.convertidos;
-    const paidLeads = sumChannelStats(leads.channels, ['google_ads', 'meta_ads'], 'leads');
-    const previousPaidLeads = sumChannelStats(previousLeads.channels, ['google_ads', 'meta_ads'], 'leads');
-
-    const channels = buildChannels(leads.channels, {
-      google_ads: googleAds.totals.spend,
-      meta_ads: metaAds.totals.spend,
+    const identity = buildOverviewCacheIdentity({ scope, range });
+    const response = await overviewCache.readOrGenerate({
+      identity,
+      forceRefresh: forceRefreshRequested(req),
+      staleWhileRefresh: true,
+      generate: () => buildOverviewPayload({ scope, range }),
     });
-
-    const googleCampaigns = distributeCampaignAppointments(googleAds.campaigns, leads.channels.get('google_ads'));
-    const metaCampaigns = distributeCampaignAppointments(metaAds.campaigns, leads.channels.get('meta_ads'));
-    const adsCampaigns = [...googleCampaigns, ...metaCampaigns]
-      .sort((a, b) => b.inversion - a.inversion)
-      .slice(0, 8);
-
-    const visitsOrClicks = Math.max(
-      firstParty.pageviews,
-      firstParty.sessions,
-      ga.sessions,
-      googleAds.totals.clicks + metaAds.totals.clicks + seo.summary.clicks,
-      leads.totals.leads,
-      1
-    );
-
-    const kpis = buildKpis(
-      { leads: leads.totals.leads, paidLeads, citas, acudieron, convertidos, spend: currentSpend },
-      { leads: previousLeads.totals.leads, paidLeads: previousPaidLeads, citas: previousCitas, acudieron: previousAcudieron, convertidos: previousConvertidos, spend: previousSpend },
-      {
-        leads: leadSeries.leads,
-        paidLeads: leadSeries.paidLeads,
-        citas: leadSeries.citas.map((value, index) => Math.max(value, appointmentSeries.citas[index] || 0)),
-        acudieron: leadSeries.acudieron.map((value, index) => Math.max(value, appointmentSeries.acudieron[index] || 0)),
-        convertidos: leadSeries.convertidos,
-        spend: spendSeries,
-      }
-    );
-
-    const funnelBase = [
-      { id: 'visitas', label: firstParty.pageviews ? 'Visitas web propias' : (ga.sessions ? 'Sesiones / visitas' : 'Visitas / clicks'), value: visitsOrClicks, color: '#6366f1', helpText: firstParty.pageviews ? 'Pageviews capturados por ClinicaClick Analytics con consentimiento.' : 'Sesiones GA4 si existen; si no, clicks medidos desde SEO y Ads.' },
-      { id: 'leads', label: 'Leads', value: leads.totals.leads, color: '#8b5cf6', helpText: 'Personas que dejaron sus datos.' },
-      { id: 'contacto', label: 'Contactados', value: leads.totals.contactados, color: '#a78bfa', helpText: 'Leads con contacto o avance comercial.' },
-      { id: 'citas', label: 'Cita creada', value: citas, color: '#c4b5fd', helpText: 'Leads que agendaron cita.' },
-      { id: 'acudio', label: 'Acudió', value: acudieron, color: '#22c55e', helpText: 'Pacientes que acudieron a consulta.' },
-      { id: 'tratamiento', label: 'Realiza tratamiento', value: convertidos, color: '#15803d', helpText: 'Pacientes marcados como convertidos porque realizan tratamiento.' },
-    ];
-    const funnel = funnelBase.map((step, index) => ({
-      ...step,
-      ratioFromPrevious: index > 0 ? ratioPct(step.value, funnelBase[index - 1].value, 0) : null,
-    }));
-
-    const legacyWhatsappLeads = leads.channels.get('whatsapp')?.leads || 0;
-    const whatsappWebClicks = Math.max(whatsappWeb.clicks, legacyWhatsappLeads);
-    const webConvertedPatients = sumChannelStats(
-      leads.channels,
-      ['web', 'direct', 'call_click', 'whatsapp'],
-      'convertidos'
-    );
-
-    const webSummary = {
-      totalVisitas: visitsOrClicks,
-      sessions: firstParty.sessions,
-      visitors: firstParty.visitors,
-      firstPartyPageviews: firstParty.pageviews,
-      clicksTelefono: Math.max(firstParty.telClicks, leads.channels.get('call_click')?.leads || 0),
-      clicksWhatsApp: Math.max(firstParty.whatsappClicks, whatsappWebClicks),
-      whatsappWebClicks,
-      whatsappWebConfirmed: whatsappWeb.confirmed,
-      webConvertedPatients,
-      formularios: Math.max(firstParty.formSubmits, formsCount),
-    };
-
-    const sync = await buildSyncStatus(scope, {
-      seo,
-      googleAds,
-      metaAds,
-      ga,
-      businessProfile,
-    }, marketingState);
-
-    const syncBySource = new Map((sync.allSources || []).map((item) => [item.source, item]));
-    const sources = buildSources({
-      intakeConfigCount,
-      leadsTotal: leads.totals.leads,
-      seo,
-      googleAds,
-      metaAds,
-      ga,
-      businessProfile,
-      social,
-      firstParty,
-      mappingCounts: sync.mappingCounts,
-    }).map((source) => ({
-      ...source,
-      sync: syncBySource.get(source.source) || null,
-    }));
-
-    const recommendations = buildRecommendations({
-      businessProfile,
-      adsCampaigns,
-      intakeConfigCount,
-      firstParty,
-      sources,
-      seo,
-      social,
-      channels,
-      range,
-      current: {
-        leads: leads.totals.leads,
-        leadAppointments: leads.totals.citas,
-        paidLeads,
-        spend: currentSpend,
-      },
-      previous: {
-        leads: previousLeads.totals.leads,
-        leadAppointments: previousLeads.totals.citas,
-        paidLeads: previousPaidLeads,
-        spend: previousSpend,
-      },
-      paidCoverageSummary,
-    });
-
-    return res.json({
-      success: true,
-      mode: 'real_v1',
-      scope: {
-        type: scope.scope,
-        clinicIds: scope.clinicIds || [],
-        groupId: scope.groupId || null,
-        original: scope.original || null,
-      },
-      period: { start: range.startLabel, end: range.endLabel, label: dateLabel(range.startLabel, range.endLabel) },
-      comparison: { start: range.previous.startLabel, end: range.previous.endLabel, label: dateLabel(range.previous.startLabel, range.previous.endLabel) },
-      lastUpdated: new Date().toISOString(),
-      sources,
-      sync,
-      kpis,
-      funnel,
-      channels,
-      webSummary,
-      webPages,
-      seoSummary: seo.summary,
-      seoQueries: seo.queries,
-      seoPages: seo.pages,
-      seoQueryPages: seo.queryPages,
-      seoQueryTrends: seo.queryTrends,
-      seoRankingBuckets: seo.rankingBuckets,
-      seoBrandSplit: seo.brandSplit,
-      seoQueryMovements: seo.queryMovements,
-      seoPageMovements: seo.pageMovements,
-      seoDailyAggregates: seo.dailyAggregates,
-      seoTechnical: seo.technical,
-      seoOpportunities: seo.opportunities,
-      social,
-      adsCampaigns,
-      businessProfile: businessProfile.metrics,
-      recommendations,
-      dataQuality: {
-        firstPartyPageviews: firstParty.connected,
-        paidAttributionCoverage: paidCoverageSummary,
-        note: firstParty.connected
-          ? 'ClinicaClick Analytics está aportando eventos propios agregados al informe.'
-          : 'El informe usa leads, formularios, citas y agregados externos existentes. Las visitas propias aparecerán cuando ClinicaClick Analytics tenga datos agregados.',
-      },
-    });
+    return res.json(response);
   } catch (error) {
     const status = error.status || 500;
     if (status >= 500) {
@@ -3996,6 +4020,7 @@ exports.__testing = {
   leadAcquisitionChannelSql: LEAD_ACQUISITION_CHANNEL_SQL,
   normalizeDateOnly,
   buildRange,
+  buildOverviewPayload,
   comparablePaidRangeStart,
   buildComparablePaidDateWhere,
   resolvePaidAttributionCoverage,

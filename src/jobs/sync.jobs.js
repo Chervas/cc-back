@@ -49,6 +49,7 @@ const { enqueueSyncForAllWabas } = require('../services/whatsappTemplates.servic
 const { enqueueSyncPhonesForAllWabas } = require('../services/whatsappPhones.service');
 const marketingCompetitionService = require('../services/marketingCompetition.service');
 const marketingAiVisibilityService = require('../services/marketingAiVisibility.service');
+const marketingReportOverviewCacheService = require('../services/marketingReportOverviewCache.service');
 const webEventsService = require('../services/webEvents.service');
 const webContentMediaService = require('../services/webContentMedia.service');
 const webContentGenerationService = require('../services/webContentGeneration.service');
@@ -391,6 +392,7 @@ class MetaSyncJobs {
       businessProfileSync: 'Sincroniza Perfil de Empresa Google: rendimiento local, reseñas y publicaciones.',
       businessProfileReviewsSync: 'Refresca solo reseñas recientes de Perfil de Empresa Google y lanza conciliación con campañas.',
       businessProfileBackfill: 'Backfill de Perfil de Empresa Google para nuevas fichas o reprocesos.',
+      marketingReportsCacheRefresh: 'Materializa cada noche los snapshots persistentes de Mi clínica para que los reloads sirvan caché backend fresca durante 24 h. Excluye el mapa local, que conserva refresco semanal y bajo demanda al entrar en Competencia.',
       competitionSync: 'Actualiza semanalmente los competidores introducidos manualmente y sus anuncios públicos; el descubrimiento y ranking local solo se ejecutan si existe un proveedor con licencia y los gates contractuales están activos.',
       webEventsAggregate: 'Agrega WebEvents propios en tablas diarias para informes sin recalcular desde el front.',
       whatsappTemplatesSync: 'Sincroniza estados de plantillas WhatsApp para todos los WABA activos.',
@@ -433,6 +435,7 @@ class MetaSyncJobs {
         businessProfileSync: process.env.JOBS_BUSINESS_PROFILE_SCHEDULE || '10 5 * * *',
         businessProfileReviewsSync: process.env.JOBS_BUSINESS_PROFILE_REVIEWS_SCHEDULE || '*/15 * * * *',
         businessProfileBackfill: process.env.JOBS_BUSINESS_PROFILE_BACKFILL_SCHEDULE || '20 5 * * 0',
+        marketingReportsCacheRefresh: process.env.JOBS_MARKETING_REPORTS_CACHE_SCHEDULE || '30 6 * * *',
         competitionSync: process.env.JOBS_COMPETITION_SCHEDULE || '0 6 * * 1',
         webEventsAggregate: process.env.JOBS_WEB_EVENTS_AGGREGATE_SCHEDULE || '*/15 * * * *',
         whatsappTemplatesSync: process.env.JOBS_WHATSAPP_TEMPLATES_SCHEDULE || '*/20 * * * *',
@@ -3612,6 +3615,12 @@ async syncFacebookPageMetrics(asset) {
       const aiVisibilityRunsDeleted = await marketingAiVisibilityService.cleanupExpiredRuns();
       totalDeleted += aiVisibilityRunsDeleted;
 
+      // Snapshots materializados de Mi clínica: se regeneran a diario tras las
+      // sincronizaciones nocturnas. La limpieza retira periodos antiguos o
+      // versiones de informe ya sustituidas, pero no toca el mapa local.
+      const marketingReportSnapshotsDeleted = await marketingReportOverviewCacheService.cleanupOverviewCache();
+      totalDeleted += marketingReportSnapshotsDeleted;
+
       // Los borradores generados no aceptados conservan su procedencia durante
       // una ventana finita. La aceptación crea una entrada CMS independiente;
       // nunca se borra contenido aceptado desde esta limpieza.
@@ -3649,6 +3658,7 @@ async syncFacebookPageMetrics(asset) {
           socialStats: socialStatsDeleted,
           competitionHeatmaps: competitionHeatmapsDeleted,
           aiVisibilityRuns: aiVisibilityRunsDeleted,
+          marketingReportSnapshots: marketingReportSnapshotsDeleted,
           webContentGenerations: webContentGenerationsDeleted,
           webEditorMedia: webEditorMediaCleanup.archived,
           webEditorMediaFailed: webEditorMediaCleanup.failed.length
@@ -3730,6 +3740,15 @@ async syncFacebookPageMetrics(asset) {
 
   async executeCompetitionHeatmapRefresh(payload = {}) {
     return marketingCompetitionService.executeLocalRankingHeatmapRefresh(payload);
+  }
+
+  async executeMarketingReportsCacheRefresh(payload = {}) {
+    const { __testing: reportsTesting } = require('../controllers/marketingReports.controller');
+    return marketingReportOverviewCacheService.refreshOverviewSnapshots({
+      ...payload,
+      buildOverviewPayload: reportsTesting.buildOverviewPayload,
+      buildRange: reportsTesting.buildRange,
+    });
   }
 
   /**

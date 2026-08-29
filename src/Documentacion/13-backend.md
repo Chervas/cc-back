@@ -684,9 +684,11 @@ responden `404`. El E2E público de dos rutas, la rotación HMAC y el readback
 ETag terminaron y se detallan más abajo. Cloudflare y origen devuelven `304`
 con `If-None-Match` exacto después de retirar el magic-quotes de WordPress.
 
-El inventario canónico del runtime vigente es **33 tareas
-periódicas**, **14 integraciones dirigidas/background**, **47 tipos background**
-en total y **63 handlers**. `web_content_generation` y las operaciones
+El inventario canónico del runtime vigente es **34 tareas
+periódicas**, **14 integraciones dirigidas/background**, **48 tipos background**
+en total y **64 handlers**. `marketing_reports_cache_refresh` materializa los
+snapshots persistentes de `Mi clínica` sin refrescar el mapa local.
+`web_content_generation` y las operaciones
 `managed_campaign.google_search_create.v1`,
 `managed_campaign.google_search_activate.v1` y
 `managed_campaign.google_search_rollback.v1` comparten el carril durable de
@@ -838,8 +840,8 @@ Release funcional staging: backend `9b82958`, promovido desde dev `ac994a0`; fro
 
 > **Nota de inventario vigente 2026-07-19:** los conteos `30/6/48` de esta
 > sección se conservan como evidencia del cutover del 14 de julio. El runtime
-> vigente registra **33 tareas periódicas**, **14 integraciones
-> dirigidas/background**, **47 tipos background** y **63 handlers**, incluidos
+> vigente registra **34 tareas periódicas**, **14 integraciones
+> dirigidas/background**, **48 tipos background** y **64 handlers**, incluidos
 > `marketing_web_publication_health_monitor` y
 > `web_intake_runtime_reconcile`; todos siguen materializados en
 > `JobRequest`, sin cron de negocio lateral.
@@ -2561,7 +2563,7 @@ El monitor de `node-cron` muestra `enqueued`/`already_queued`, `lastEnqueuedAt` 
 
 BullMQ sigue siendo la cola especializada de WhatsApp y otros transportes inmediatos. En tareas como `whatsapp_templates_sync`, el flujo completo es `cron -> JobRequest durable -> execute* -> BullMQ por WABA`; no existe una ejecución de negocio lateral desde el callback cron. Los envíos por horario silencioso y las resincronizaciones diferidas de plantillas no usan `delay` de BullMQ: esperan en `JobRequests` y solo despachan el transporte cuando vencen.
 
-Regresión canónica: `node src/scripts/tests/scheduled_jobs_orchestration.test.js`. Comprueba cobertura exacta de los 33 horarios vigentes, mappings dirigidos —incluidos `marketing_competition_heatmap_refresh`, generación IA, operaciones gestionadas y la reconciliación Web—, alcance de deduplicación, índice/migración, `queued`, separación y exclusión mutua de carriles, advisory lease, monitor de enqueue, clasificación total/parcial, timeouts HTTP, `sync_log_id`, enum de `SyncLogs`, backoff, agotamiento, startup gate/retry/stop y settlements CAS con conflicto. `durable_whatsapp_scheduling.test.js` cubre las dos programaciones puntuales, la ausencia de PII/tokens en sus payloads, el inventario exacto de 63 handlers y el despacho idempotente del transporte. `intake_quickchat_outbox.test.js` añade atomicidad, rollback, idempotencia y reintento del outbox de intake. Los bridges y la retención tienen además `ops_bridge_runner.test.js` y `pm2_log_retention.test.js`.
+Regresión canónica: `node src/scripts/tests/scheduled_jobs_orchestration.test.js`. Comprueba cobertura exacta de los 34 horarios vigentes, mappings dirigidos —incluidos `marketing_reports_cache_refresh`, `marketing_competition_heatmap_refresh`, generación IA, operaciones gestionadas y la reconciliación Web—, alcance de deduplicación, índice/migración, `queued`, separación y exclusión mutua de carriles, advisory lease, monitor de enqueue, clasificación total/parcial, timeouts HTTP, `sync_log_id`, enum de `SyncLogs`, backoff, agotamiento, startup gate/retry/stop y settlements CAS con conflicto. `durable_whatsapp_scheduling.test.js` cubre las dos programaciones puntuales, la ausencia de PII/tokens en sus payloads, el inventario exacto de 64 handlers y el despacho idempotente del transporte. `intake_quickchat_outbox.test.js` añade atomicidad, rollback, idempotencia y reintento del outbox de intake. Los bridges y la retención tienen además `ops_bridge_runner.test.js` y `pm2_log_retention.test.js`.
 
 Importante:
 
@@ -3697,7 +3699,7 @@ Groq queda desacoplado y limitado al audio:
 - El handler registrado en `JOB_HANDLERS` exige el par `audit_id + lead_id`, comprueba que el audit pertenece a ese lead y acepta audits de ambos `source_detail`. Antes de reutilizar `materializeIntakeQuickChatSummary`, normaliza internamente el source a `chatbot_quickchat` y pasa el `audit_id` como orden durable. La materialización bloquea el lead y consulta bajo la misma transacción todos sus resúmenes: `Messages.metadata.intake_audit_id` mayor gana. Si un outbox antiguo corre después, completa `skipped/stale`, no emite socket, no cambia contenido/metadata, no consolida y no toca `Conversations.last_message_at`. El watermark forma parte de `needsUpdate`: un audit posterior avanza el marcador aunque hash y contenido sean idénticos; del mismo modo, un mensaje legacy idéntico adopta el primer marcador. Reejecutar el mismo audit o recibir ambos POST no crea un segundo mensaje.
 - El handler no llama a Meta CAPI, Google Ads/Data Manager, BullMQ ni a un envío real de WhatsApp. Solo persiste el evento interno y emite el socket de interfaz como best effort. Para audits actuales extrae y valida `resolved_clinic_id` y lo pasa al materializador: si el lead pertenece a otra sede, termina sin retry con `409 quickchat_summary_clinic_mismatch`, cero Message/socket. Solo audits legacy sin `resolved_clinic_id` pueden recuperar usando la clínica persistida en el lead; nunca aceptan una sede del payload crudo. Los `4xx` guardan en `result_summary` únicamente `http_status`, `error_code` y un mensaje de allowlist, además de IDs/flags sin contenido/PII, para que el fast path conserve el `409` en vez de degradarlo a `500`. Errores técnicos se reintentan; payload incompleto o mismatch audit/lead quedan terminales no reintentables. Si el lead/audit ya fue limpiado de forma controlada, el job termina como `skipped/audit_not_found`.
 - `scripts/cleanup-intake-e2e-run.js` carga y bloquea los outbox por `payload.lead_id`, exige que cada `payload.audit_id` sea el audit exacto del lead y rechaza jobs `running`. En `simulate/apply` borra el JobRequest antes del lead dentro de la transacción y el postcheck exige `quickchat_outbox_jobs=0`, evitando que un job huérfano reconstruya la conversación tras la limpieza.
-- Regresión: `node src/scripts/tests/intake_quickchat_outbox.test.js` cubre lead nuevo y deduplicado guardando IDs resueltos, rechazo cross-clinic `409` sin materialización/socket, fallback legacy a la clínica del lead, lectura compatible del wrapper de `JobExecutor` y del formato directo de fixtures, commit atómico, rollback si falla el enqueue, `14725`/email inválido con cero lead-audit-job, unión real de `enqueueJobRequest` a la transacción, par audit/lead, fallo transitorio/reintento para ambos contratos, audit stale sin socket, duplicado idempotente, relectura tras error del trigger, outcome `unknown_durable`, fast path `completed/202 queued` sin falsos positivos, ausencia de proveedores y el inventario de 63 handlers. `intake_quickchat_summary.test.js` protege el orden inverso/doble POST, compatibilidad legacy, contenido y `last_message_at` del ganador, el `422` antes de crear, la ausencia de materialización lateral y los retornos `chatbot` deduplicado anteriores a Meta/Google conservando `409` para el resto; `cleanup_intake_e2e_run.test.js` cubre outbox exacto/running.
+- Regresión: `node src/scripts/tests/intake_quickchat_outbox.test.js` cubre lead nuevo y deduplicado guardando IDs resueltos, rechazo cross-clinic `409` sin materialización/socket, fallback legacy a la clínica del lead, lectura compatible del wrapper de `JobExecutor` y del formato directo de fixtures, commit atómico, rollback si falla el enqueue, `14725`/email inválido con cero lead-audit-job, unión real de `enqueueJobRequest` a la transacción, par audit/lead, fallo transitorio/reintento para ambos contratos, audit stale sin socket, duplicado idempotente, relectura tras error del trigger, outcome `unknown_durable`, fast path `completed/202 queued` sin falsos positivos, ausencia de proveedores y el inventario de 64 handlers. `intake_quickchat_summary.test.js` protege el orden inverso/doble POST, compatibilidad legacy, contenido y `last_message_at` del ganador, el `422` antes de crear, la ausencia de materialización lateral y los retornos `chatbot` deduplicado anteriores a Meta/Google conservando `409` para el resto; `cleanup_intake_e2e_run.test.js` cubre outbox exacto/running.
 
 **Evidencia live postdeploy:** el chat móvil controlado `CC-E2E-QUICKCHAT-20260713-0110`, con Marketing rechazado y sin click IDs, eligió Sant Martí `56`. El único lead `#7213` produjo audits `#7400/#7401`, jobs `#23818/#23819` completados al primer intento y una sola conversación/mensaje (`#3574/#43072`) cuyo watermark quedó en `7401`; hubo cero intentos Google. El procedimiento `dry-run -> simulate -> apply` retiró después exclusivamente el marcador y devolvió cero en cada postcheck comprometido. Los chats reales huérfanos `#7185/#7195/#7196` se revalidaron y recuperaron por el mismo orquestador mediante `#23820-#23822`, una conversación/resumen Sants `19` por lead; los intentos de proveedor permanecieron `3 -> 3`.
 
@@ -7468,6 +7470,34 @@ usuario, grupo, clínica seleccionada y filtros ligeros. Las lecturas devuelven
 valor cacheado si está fresco; si está obsoleto se devuelve stale y se refresca
 en segundo plano. La UI puede repedir una vez cuando `refreshing=true`, pero no
 debe hacer polling permanente.
+
+## 2026-08-29 - Caché persistente de Informes Marketing
+
+`GET /api/marketing/reports/overview` conserva el contrato JSON de `Mi clínica`,
+pero ahora consulta primero `MarketingReportOverviewCaches`. La identidad del
+snapshot incluye versión de informe, scope efectivo, sección y rango
+actual/comparativo. Si el snapshot está `fresh`, el backend responde desde
+cache; si está `stale`, devuelve el último payload y encola un único
+`JobRequest type=marketing_reports_cache_refresh` con dedupe por `cache_key`; si
+hay miss/expired o `forceRefresh=true`, recalcula desde las tablas persistidas,
+guarda y responde. La respuesta añade `cache.status`, `generated_at`,
+`fresh_until`, `expires_at`, `data_cutoff_at` y `refresh_in_progress`.
+
+El job periódico `marketingReportsCacheRefresh` corre por defecto a las
+`06:30 Europe/Madrid`, después de Google Ads, Meta Ads, Search Console/PSI, GA4
+y Perfil Google. Materializa los últimos 30 días por clínica activa y limpia
+snapshots antiguos, filas vacías y versiones de informe reemplazadas. Los
+rangos personalizados y grupos se materializan bajo demanda al primer acceso y
+quedan sujetos al mismo TTL: 24 h `fresh`, 72 h `stale` por defecto.
+
+El mapa local de Competencia queda explícitamente fuera de este refresco diario.
+Su caché sigue en `MarketingCompetitionHeatmapCaches`: `fresh` 7 días,
+`stale` hasta 14 y refresh durable solo al entrar en Competencia o al solicitar
+esa medición. Las lecturas compactas con `cached_only=true` siguen siendo
+pasivas: no crean fila, no adquieren lease, no encolan jobs y no llaman a
+Places.
+
+Runbook operativo: `docs/marketing-reports-cache.md`.
 
 ## 2026-07-27 - Resumen ligero del calendario
 

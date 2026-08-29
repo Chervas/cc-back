@@ -82,6 +82,11 @@ const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
     priority: 'low',
     executorMethod: 'executeBusinessProfileBackfill',
   }),
+  marketingReportsCacheRefresh: Object.freeze({
+    type: 'marketing_reports_cache_refresh',
+    priority: 'low',
+    executorMethod: 'executeMarketingReportsCacheRefresh',
+  }),
   competitionSync: Object.freeze({
     type: 'competition_refresh',
     priority: 'low',

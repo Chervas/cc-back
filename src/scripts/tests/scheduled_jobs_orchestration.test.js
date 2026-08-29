@@ -31,7 +31,7 @@ function testCatalogCoversEveryCronAndExecutor() {
   const catalogNames = definitions.map(([name]) => name).sort();
   const types = definitions.map(([, definition]) => definition.type);
 
-  assert.equal(definitions.length, 33, 'the canonical scheduler must retain web and campaign periodic jobs');
+  assert.equal(definitions.length, 34, 'the canonical scheduler must retain web, report cache and campaign periodic jobs');
   assert.deepEqual(catalogNames, configuredNames);
   assert.equal(new Set(types).size, types.length, 'scheduled job types must be unique');
   for (const jobName of [
@@ -80,6 +80,25 @@ function testCatalogCoversEveryCronAndExecutor() {
   assert.equal(
     metaSyncJobs.config.schedules.webPublicationHealthMonitor,
     process.env.JOBS_MARKETING_WEB_PUBLICATION_HEALTH_SCHEDULE || '11 * * * *'
+  );
+  assert.equal(
+    metaSyncJobs.config.schedules.marketingReportsCacheRefresh,
+    process.env.JOBS_MARKETING_REPORTS_CACHE_SCHEDULE || '30 6 * * *'
+  );
+  assert.equal(
+    metaSyncJobs.config.timezone,
+    process.env.JOBS_TIMEZONE || 'Europe/Madrid',
+    'scheduled jobs must default to Spain local time'
+  );
+  assert.equal(
+    SCHEDULED_JOB_DEFINITIONS.marketingReportsCacheRefresh.timezone,
+    undefined,
+    'Mi clínica report cache refresh must use the scheduler timezone, not a UTC override'
+  );
+  assert.equal(
+    SCHEDULED_JOB_DEFINITIONS.marketingReportsCacheRefresh.type,
+    'marketing_reports_cache_refresh',
+    'Mi clínica snapshots must be refreshed by a durable scheduled job'
   );
 
   for (const [jobName, definition] of definitions) {
@@ -246,6 +265,7 @@ async function testTargetedHandlersKeepTheirExactMappings() {
     assert.deepEqual(received.analytics, analyticsMappings);
     assert.deepEqual(received.business, businessMappings);
     assert.deepEqual(received.heatmap, { cacheKey: 'heatmap-cache' });
+    assert.equal(typeof jobExecutor.JOB_HANDLERS.marketing_reports_cache_refresh, 'function');
     await assert.rejects(
       () => jobExecutor.JOB_HANDLERS.meta_ads_backfill_for_sites({}),
       /requires mappings or clinicIds/
