@@ -35,6 +35,8 @@ const webRoutes = require('./routes/web.routes');
 const localRoutes = require('./routes/local.routes');
 const googleAdsRoutes = require('./routes/googleads.routes');
 const jobRequestsRoutes = require('./routes/jobrequests.routes');
+const emailRoutes = require('./routes/email.routes');
+const systemMonitoringRoutes = require('./routes/system-monitoring.routes');
 const intakeRoutes = require('./routes/intake.routes');
 const { landingIntakeHandlers } = require('./routes/webLandingIntake.handlers');
 const { landingEventBridgeHandlers } = require('./routes/webLandingEventBridge.handlers');
@@ -267,6 +269,10 @@ app.use('/api/googleads', googleAdsRoutes);
 console.log('Ruta /api/googleads configurada');
 app.use('/api/job-requests', jobRequestsRoutes);
 console.log('Ruta /api/job-requests configurada');
+app.use('/api/email', emailRoutes);
+console.log('Ruta /api/email configurada');
+app.use('/api/system-monitoring', systemMonitoringRoutes);
+console.log('Ruta /api/system-monitoring configurada');
 app.use('/api/whatsapp', whatsappRoutes);
 console.log('Ruta /api/whatsapp configurada');
 app.use('/api/intake', intakeRoutes);
@@ -556,6 +562,11 @@ server.listen(PORT, () => {
 const isCronLeader = process.env.JOBS_CRON_LEADER === 'true';
 const shouldStartWorker = process.env.JOBS_WORKER_ENABLED !== 'false';
 const shouldStartCron = isCronLeader && (process.env.NODE_ENV === 'production' || process.env.JOBS_AUTO_START === 'true');
+const notificationCronOwner = process.env.SYSTEM_NOTIFICATIONS_CRON_LEADER;
+const shouldStartNotificationCron = !shouldStartCron && (
+    notificationCronOwner === 'true'
+    || (notificationCronOwner === undefined && process.env.JOB_RUNTIME_NAMESPACE === 'dev')
+);
 if (shouldStartWorker) {
     jobScheduler.start()
       .then((report) => {
@@ -588,6 +599,16 @@ if (!IS_GATEWAY_RUNTIME && shouldStartCron) {
       console.log('✅ Sistema de jobs iniciado automáticamente');
     } catch (error) {
       console.error('❌ Error al iniciar jobs automáticamente:', error);
+    }
+  }, 5000);
+} else if (!IS_GATEWAY_RUNTIME && shouldStartNotificationCron) {
+  setTimeout(async () => {
+    try {
+      await metaSyncJobs.initialize();
+      const report = metaSyncJobs.startSelected(['systemNotificationCheck']);
+      console.log(`✅ Cron selectivo de alertas iniciado (${report.startedJobsCount} job)`);
+    } catch (error) {
+      console.error('❌ No se pudo iniciar el cron selectivo de alertas:', error.message);
     }
   }, 5000);
 } else if (!IS_GATEWAY_RUNTIME) {

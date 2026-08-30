@@ -1,0 +1,765 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Clinicaclick email operations alarms. Monitors existing SES, EventBridge and SQS resources without modifying the sending path.",
+  "Parameters": {
+    "NotificationEmail": {
+      "Type": "String",
+      "Default": "",
+      "Description": "External operational email subscribed to SNS. Confirmation is required.",
+      "AllowedPattern": "^$|^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$",
+      "ConstraintDescription": "Must be empty or a valid email address."
+    },
+    "DlqAgeThresholdSeconds": {
+      "Type": "Number",
+      "Default": 900,
+      "MinValue": 60,
+      "Description": "Maximum accepted age for the oldest SES event in the DLQ."
+    }
+  },
+  "Conditions": {
+    "HasNotificationEmail": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "NotificationEmail"
+            },
+            ""
+          ]
+        }
+      ]
+    }
+  },
+  "Resources": {
+    "EmailOpsAlertsTopic": {
+      "Type": "AWS::SNS::Topic",
+      "Properties": {
+        "TopicName": "clinicaclick-email-ops-alerts",
+        "DisplayName": "Clinicaclick email operations",
+        "Tags": [
+          {
+            "Key": "System",
+            "Value": "clinicaclick-email"
+          },
+          {
+            "Key": "ManagedBy",
+            "Value": "cloudformation"
+          }
+        ]
+      }
+    },
+    "EmailOpsEmailSubscription": {
+      "Type": "AWS::SNS::Subscription",
+      "Condition": "HasNotificationEmail",
+      "Properties": {
+        "Endpoint": {
+          "Ref": "NotificationEmail"
+        },
+        "Protocol": "email",
+        "TopicArn": {
+          "Ref": "EmailOpsAlertsTopic"
+        }
+      }
+    },
+    "SesQuotaCollectorRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "clinicaclick-email-quota-read-and-metrics",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "ReadSesQuota",
+                  "Effect": "Allow",
+                  "Action": "ses:GetSendQuota",
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "PublishEmailOpsMetrics",
+                  "Effect": "Allow",
+                  "Action": "cloudwatch:PutMetricData",
+                  "Resource": "*",
+                  "Condition": {
+                    "StringEquals": {
+                      "cloudwatch:namespace": "Clinicaclick/EmailOps"
+                    }
+                  }
+                },
+                {
+                  "Sid": "WriteOwnLambdaLogs",
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/clinicaclick-email-quota-collector:*"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "System",
+            "Value": "clinicaclick-email"
+          },
+          {
+            "Key": "ManagedBy",
+            "Value": "cloudformation"
+          }
+        ]
+      }
+    },
+    "SesQuotaCollector": {
+      "Type": "AWS::Lambda::Function",
+      "DependsOn": "SesQuotaCollectorLogGroup",
+      "Properties": {
+        "FunctionName": "clinicaclick-email-quota-collector",
+        "Description": "Publishes SES rolling 24-hour quota usage without message or recipient data.",
+        "Runtime": "python3.12",
+        "Handler": "index.handler",
+        "MemorySize": 128,
+        "Timeout": 15,
+        "ReservedConcurrentExecutions": 1,
+        "Role": {
+          "Fn::GetAtt": [
+            "SesQuotaCollectorRole",
+            "Arn"
+          ]
+        },
+        "Environment": {
+          "Variables": {
+            "METRIC_NAMESPACE": "Clinicaclick/EmailOps",
+            "METRIC_STREAM": "transactional"
+          }
+        },
+        "Code": {
+          "ZipFile": "import os\nimport boto3\n\nses = boto3.client('ses')\ncloudwatch = boto3.client('cloudwatch')\n\ndef handler(event, context):\n    quota = ses.get_send_quota()\n    maximum = float(quota.get('Max24HourSend') or 0)\n    sent = float(quota.get('SentLast24Hours') or 0)\n    usage = (sent / maximum * 100.0) if maximum > 0 else 0.0\n    dimensions = [{'Name': 'Stream', 'Value': os.environ['METRIC_STREAM']}]\n    cloudwatch.put_metric_data(\n        Namespace=os.environ['METRIC_NAMESPACE'],\n        MetricData=[\n            {'MetricName': 'DailyQuotaUsagePercent', 'Dimensions': dimensions, 'Value': usage, 'Unit': 'Percent'},\n            {'MetricName': 'CollectorHeartbeat', 'Dimensions': dimensions, 'Value': 1, 'Unit': 'Count'}\n        ]\n    )\n    return {'published': True}\n"
+        },
+        "Tags": [
+          {
+            "Key": "System",
+            "Value": "clinicaclick-email"
+          },
+          {
+            "Key": "ManagedBy",
+            "Value": "cloudformation"
+          }
+        ]
+      }
+    },
+    "SesQuotaCollectorLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": "/aws/lambda/clinicaclick-email-quota-collector",
+        "RetentionInDays": 30,
+        "Tags": [
+          {
+            "Key": "System",
+            "Value": "clinicaclick-email"
+          },
+          {
+            "Key": "ManagedBy",
+            "Value": "cloudformation"
+          }
+        ]
+      }
+    },
+    "SesQuotaCollectorSchedule": {
+      "Type": "AWS::Events::Rule",
+      "Properties": {
+        "Name": "clinicaclick-email-quota-collector",
+        "Description": "Reads SES rolling quota every five minutes.",
+        "ScheduleExpression": "rate(5 minutes)",
+        "State": "ENABLED",
+        "Targets": [
+          {
+            "Arn": {
+              "Fn::GetAtt": [
+                "SesQuotaCollector",
+                "Arn"
+              ]
+            },
+            "Id": "SesQuotaCollector"
+          }
+        ]
+      }
+    },
+    "SesQuotaCollectorPermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Ref": "SesQuotaCollector"
+        },
+        "Principal": "events.amazonaws.com",
+        "SourceArn": {
+          "Fn::GetAtt": [
+            "SesQuotaCollectorSchedule",
+            "Arn"
+          ]
+        }
+      }
+    },
+    "EventBridgeFailedInvocationsAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": "clinicaclick-email-critical-eventbridge-failed-invocations",
+        "AlarmDescription": "EventBridge exhausted delivery attempts for the SES gateway rule.",
+        "Namespace": "AWS/Events",
+        "MetricName": "FailedInvocations",
+        "Dimensions": [
+          {
+            "Name": "RuleName",
+            "Value": "clinicaclick-ses-to-gateway"
+          }
+        ],
+        "Statistic": "Sum",
+        "Period": 300,
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "Threshold": 0,
+        "ComparisonOperator": "GreaterThanThreshold",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "OKActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Severity",
+            "Value": "critical"
+          },
+          {
+            "Key": "System",
+            "Value": "clinicaclick-email"
+          }
+        ]
+      }
+    },
+    "EventBridgeInvocationsSentToDlqAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": "clinicaclick-email-critical-eventbridge-sent-to-dlq",
+        "AlarmDescription": "EventBridge moved one or more SES events to the DLQ.",
+        "Namespace": "AWS/Events",
+        "MetricName": "InvocationsSentToDlq",
+        "Dimensions": [
+          {
+            "Name": "RuleName",
+            "Value": "clinicaclick-ses-to-gateway"
+          }
+        ],
+        "Statistic": "Sum",
+        "Period": 300,
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "Threshold": 0,
+        "ComparisonOperator": "GreaterThanThreshold",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "OKActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Severity",
+            "Value": "critical"
+          },
+          {
+            "Key": "System",
+            "Value": "clinicaclick-email"
+          }
+        ]
+      }
+    },
+    "EventBridgeInvocationsFailedToBeSentToDlqAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": "clinicaclick-email-critical-eventbridge-dlq-write-failed",
+        "AlarmDescription": "EventBridge could not write an exhausted SES event to the DLQ.",
+        "Namespace": "AWS/Events",
+        "MetricName": "InvocationsFailedToBeSentToDlq",
+        "Dimensions": [
+          {
+            "Name": "RuleName",
+            "Value": "clinicaclick-ses-to-gateway"
+          }
+        ],
+        "Statistic": "Sum",
+        "Period": 300,
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "Threshold": 0,
+        "ComparisonOperator": "GreaterThanThreshold",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "OKActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Severity",
+            "Value": "critical"
+          },
+          {
+            "Key": "System",
+            "Value": "clinicaclick-email"
+          }
+        ]
+      }
+    },
+    "EventBridgeThrottledRulesAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": "clinicaclick-email-critical-eventbridge-throttled",
+        "AlarmDescription": "EventBridge throttled the SES gateway rule.",
+        "Namespace": "AWS/Events",
+        "MetricName": "ThrottledRules",
+        "Dimensions": [
+          {
+            "Name": "RuleName",
+            "Value": "clinicaclick-ses-to-gateway"
+          }
+        ],
+        "Statistic": "Sum",
+        "Period": 300,
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "Threshold": 0,
+        "ComparisonOperator": "GreaterThanThreshold",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "OKActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Severity",
+            "Value": "critical"
+          },
+          {
+            "Key": "System",
+            "Value": "clinicaclick-email"
+          }
+        ]
+      }
+    },
+    "DlqVisibleMessagesAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": "clinicaclick-email-critical-dlq-visible-messages",
+        "AlarmDescription": "The SES event DLQ contains unprocessed messages.",
+        "Namespace": "AWS/SQS",
+        "MetricName": "ApproximateNumberOfMessagesVisible",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": "clinicaclick-ses-events-dlq"
+          }
+        ],
+        "Statistic": "Maximum",
+        "Period": 300,
+        "EvaluationPeriods": 2,
+        "DatapointsToAlarm": 2,
+        "Threshold": 0,
+        "ComparisonOperator": "GreaterThanThreshold",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "OKActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Severity",
+            "Value": "critical"
+          },
+          {
+            "Key": "System",
+            "Value": "clinicaclick-email"
+          }
+        ]
+      }
+    },
+    "DlqOldestMessageAgeAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": "clinicaclick-email-critical-dlq-oldest-message-age",
+        "AlarmDescription": "The oldest SES event in the DLQ exceeds the operational SLA.",
+        "Namespace": "AWS/SQS",
+        "MetricName": "ApproximateAgeOfOldestMessage",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": "clinicaclick-ses-events-dlq"
+          }
+        ],
+        "Statistic": "Maximum",
+        "Period": 300,
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "Threshold": {
+          "Ref": "DlqAgeThresholdSeconds"
+        },
+        "ComparisonOperator": "GreaterThanThreshold",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "OKActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Severity",
+            "Value": "critical"
+          },
+          {
+            "Key": "System",
+            "Value": "clinicaclick-email"
+          }
+        ]
+      }
+    },
+    "SesBounceRateWarningAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": "clinicaclick-email-warning-ses-bounce-rate",
+        "AlarmDescription": "SES account bounce rate reached the early warning threshold of 2 percent.",
+        "Namespace": "AWS/SES",
+        "MetricName": "Reputation.BounceRate",
+        "Statistic": "Average",
+        "Period": 300,
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "Threshold": 0.02,
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "TreatMissingData": "ignore",
+        "AlarmActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "OKActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Severity",
+            "Value": "warning"
+          },
+          {
+            "Key": "System",
+            "Value": "clinicaclick-email"
+          }
+        ]
+      }
+    },
+    "SesBounceRateCriticalAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": "clinicaclick-email-critical-ses-bounce-rate",
+        "AlarmDescription": "SES account bounce rate reached 5 percent.",
+        "Namespace": "AWS/SES",
+        "MetricName": "Reputation.BounceRate",
+        "Statistic": "Average",
+        "Period": 300,
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "Threshold": 0.05,
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "TreatMissingData": "ignore",
+        "AlarmActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "OKActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Severity",
+            "Value": "critical"
+          },
+          {
+            "Key": "System",
+            "Value": "clinicaclick-email"
+          }
+        ]
+      }
+    },
+    "SesComplaintRateCriticalAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": "clinicaclick-email-critical-ses-complaint-rate",
+        "AlarmDescription": "SES account complaint rate reached 0.1 percent.",
+        "Namespace": "AWS/SES",
+        "MetricName": "Reputation.ComplaintRate",
+        "Statistic": "Average",
+        "Period": 300,
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "Threshold": 0.001,
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "TreatMissingData": "ignore",
+        "AlarmActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "OKActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Severity",
+            "Value": "critical"
+          },
+          {
+            "Key": "System",
+            "Value": "clinicaclick-email"
+          }
+        ]
+      }
+    },
+    "SesRejectsAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": "clinicaclick-email-warning-ses-rejects",
+        "AlarmDescription": "SES reported one or more rejected messages.",
+        "Namespace": "AWS/SES",
+        "MetricName": "Reject",
+        "Statistic": "Sum",
+        "Period": 300,
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "Threshold": 0,
+        "ComparisonOperator": "GreaterThanThreshold",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "OKActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Severity",
+            "Value": "warning"
+          },
+          {
+            "Key": "System",
+            "Value": "clinicaclick-email"
+          }
+        ]
+      }
+    },
+    "SesDailyQuotaUsageAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": "clinicaclick-email-warning-ses-daily-quota-80pct",
+        "AlarmDescription": "SES rolling 24-hour sending usage reached 80 percent of the current quota.",
+        "Namespace": "Clinicaclick/EmailOps",
+        "MetricName": "DailyQuotaUsagePercent",
+        "Dimensions": [
+          {
+            "Name": "Stream",
+            "Value": "transactional"
+          }
+        ],
+        "Statistic": "Maximum",
+        "Period": 300,
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "Threshold": 80,
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "TreatMissingData": "ignore",
+        "AlarmActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "OKActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Severity",
+            "Value": "warning"
+          },
+          {
+            "Key": "System",
+            "Value": "clinicaclick-email"
+          }
+        ]
+      }
+    },
+    "SesQuotaCollectorHeartbeatAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": "clinicaclick-email-critical-quota-collector-heartbeat",
+        "AlarmDescription": "The SES quota collector stopped publishing its five-minute heartbeat.",
+        "Namespace": "Clinicaclick/EmailOps",
+        "MetricName": "CollectorHeartbeat",
+        "Dimensions": [
+          {
+            "Name": "Stream",
+            "Value": "transactional"
+          }
+        ],
+        "Statistic": "Minimum",
+        "Period": 300,
+        "EvaluationPeriods": 2,
+        "DatapointsToAlarm": 2,
+        "Threshold": 1,
+        "ComparisonOperator": "LessThanThreshold",
+        "TreatMissingData": "breaching",
+        "AlarmActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "OKActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Severity",
+            "Value": "critical"
+          },
+          {
+            "Key": "System",
+            "Value": "clinicaclick-email"
+          }
+        ]
+      }
+    },
+    "SesQuotaCollectorErrorsAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": "clinicaclick-email-critical-quota-collector-errors",
+        "AlarmDescription": "The SES quota collector Lambda returned an error.",
+        "Namespace": "AWS/Lambda",
+        "MetricName": "Errors",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": {
+              "Ref": "SesQuotaCollector"
+            }
+          }
+        ],
+        "Statistic": "Sum",
+        "Period": 300,
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "Threshold": 0,
+        "ComparisonOperator": "GreaterThanThreshold",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "OKActions": [
+          {
+            "Ref": "EmailOpsAlertsTopic"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Severity",
+            "Value": "critical"
+          },
+          {
+            "Key": "System",
+            "Value": "clinicaclick-email"
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "AlertsTopicArn": {
+      "Description": "SNS topic used by every email operations alarm.",
+      "Value": {
+        "Ref": "EmailOpsAlertsTopic"
+      }
+    },
+    "QuotaCollectorFunctionName": {
+      "Description": "Lambda function that publishes rolling SES quota metrics.",
+      "Value": {
+        "Ref": "SesQuotaCollector"
+      }
+    },
+    "AlarmNamePrefix": {
+      "Description": "Prefix used by the alarms created by this stack.",
+      "Value": "clinicaclick-email-"
+    }
+  }
+}

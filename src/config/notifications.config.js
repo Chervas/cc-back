@@ -17,6 +17,16 @@ const NOTIFICATION_CATEGORIES = [
     icon: 'heroicons_outline:cpu-chip'
   },
   {
+    id: 'system',
+    label: 'Sistema',
+    icon: 'heroicons_outline:bell-alert'
+  },
+  {
+    id: 'users',
+    label: 'Usuarios',
+    icon: 'heroicons_outline:user-plus'
+  },
+  {
     id: 'crm',
     label: 'CRM y seguimiento',
     icon: 'heroicons_outline:phone-arrow-up-right'
@@ -58,6 +68,84 @@ const NOTIFICATION_EVENTS = [
     category: 'jobs',
     label: 'Barrido de automatizaciones con incidencias',
     level: 'error'
+  },
+  {
+    event: 'system.notification_test',
+    category: 'system',
+    label: 'Prueba de notificación de sistema',
+    level: 'info'
+  },
+  {
+    event: 'users.new_registration',
+    category: 'users',
+    label: 'Nuevo registro de usuario',
+    level: 'info'
+  },
+  {
+    event: 'email_provider_disabled',
+    category: 'system',
+    label: 'Email: proveedor desactivado',
+    level: 'error'
+  },
+  {
+    event: 'email_from_missing',
+    category: 'system',
+    label: 'Email: remitente ausente',
+    level: 'error'
+  },
+  {
+    event: 'email_encryption_missing',
+    category: 'system',
+    label: 'Email: cifrado ausente',
+    level: 'error'
+  },
+  {
+    event: 'email_ses_credentials_missing',
+    category: 'system',
+    label: 'Email: credenciales SES incompletas',
+    level: 'error'
+  },
+  {
+    event: 'email_webhook_token_missing',
+    category: 'system',
+    label: 'Email: token webhook ausente',
+    level: 'warning'
+  },
+  {
+    event: 'email_failures_24h',
+    category: 'system',
+    label: 'Email: fallos recientes',
+    level: 'warning'
+  },
+  {
+    event: 'email_queue_stuck',
+    category: 'system',
+    label: 'Email: cola atascada',
+    level: 'warning'
+  },
+  {
+    event: 'email_sent_without_events',
+    category: 'system',
+    label: 'Email: sin eventos SES',
+    level: 'warning'
+  },
+  {
+    event: 'email_complaints_7d',
+    category: 'system',
+    label: 'Email: quejas SES',
+    level: 'error'
+  },
+  {
+    event: 'email_bounces_7d',
+    category: 'system',
+    label: 'Email: rebotes SES',
+    level: 'warning'
+  },
+  {
+    event: 'email_active_suppressions',
+    category: 'system',
+    label: 'Email: supresiones activas',
+    level: 'warning'
   },
   {
     event: 'crm.call_back_reminder',
@@ -156,6 +244,19 @@ const DEFAULT_NOTIFICATION_PREFERENCES = [
   { role: 'propietario', subrole: null, event: 'ads.health_issue', enabled: true },
   { role: 'admin', subrole: null, event: 'jobs.failed', enabled: true },
   { role: 'admin', subrole: null, event: 'jobs.automation_health_issue', enabled: true },
+  { role: 'admin', subrole: null, event: 'system.notification_test', enabled: true },
+  { role: 'admin', subrole: null, event: 'users.new_registration', enabled: true },
+  { role: 'admin', subrole: null, event: 'email_provider_disabled', enabled: true },
+  { role: 'admin', subrole: null, event: 'email_from_missing', enabled: true },
+  { role: 'admin', subrole: null, event: 'email_encryption_missing', enabled: true },
+  { role: 'admin', subrole: null, event: 'email_ses_credentials_missing', enabled: true },
+  { role: 'admin', subrole: null, event: 'email_webhook_token_missing', enabled: true },
+  { role: 'admin', subrole: null, event: 'email_failures_24h', enabled: true },
+  { role: 'admin', subrole: null, event: 'email_queue_stuck', enabled: true },
+  { role: 'admin', subrole: null, event: 'email_sent_without_events', enabled: true },
+  { role: 'admin', subrole: null, event: 'email_complaints_7d', enabled: true },
+  { role: 'admin', subrole: null, event: 'email_bounces_7d', enabled: true },
+  { role: 'admin', subrole: null, event: 'email_active_suppressions', enabled: true },
   { role: 'admin', subrole: null, event: 'ads.sync_error', enabled: true },
   { role: 'admin', subrole: null, event: 'ads.new_lead', enabled: true },
   { role: 'admin', subrole: null, event: 'ads.health_issue', enabled: true },

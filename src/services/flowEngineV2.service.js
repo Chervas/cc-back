@@ -59,6 +59,7 @@ const patientDirectionService = require('./patientDirection.service');
 const whatsappConnectionStatusService = require('./whatsappConnectionStatus.service');
 const marketingBulkSendsService = require('./marketingBulkSends.service');
 const marketingOptOutService = require('./marketingOptOut.service');
+const emailDeliveryService = require('./emailDelivery.service');
 const reviewResponseClassification = require('./reviewResponseClassification.service');
 const aiOrchestrator = require('./aiOrchestrator.service');
 const appointmentNotificationCleanup = require('./appointmentNotificationCleanup.service');
@@ -5020,6 +5021,131 @@ function isSimulationRuntime(runtime = {}, context = {}) {
   return false;
 }
 
+function resolveAutomationEmailRecipient(config = {}, context = {}) {
+  const mode = toLowerSafe(resolveTemplateValue(config?.recipient_mode, context)) || 'context_patient';
+  let rawEmail = null;
+  let recipientKind = 'external';
+
+  if (mode === 'manual_email' || mode === 'manual') {
+    rawEmail = resolveTemplateValue(config?.recipient_to, context)
+      || resolveTemplateValue(config?.to, context)
+      || resolveTemplateValue(config?.email, context);
+    recipientKind = 'external';
+  } else if (mode === 'context_lead') {
+    rawEmail = resolveTemplateValue('{{lead.email}}', context)
+      || resolveTemplateValue(config?.email_field, context);
+    recipientKind = 'lead';
+  } else if (mode === 'context_user' || mode === 'context_usuario') {
+    rawEmail = resolveTemplateValue('{{usuario.email}}', context)
+      || resolveTemplateValue('{{usuario_email}}', context)
+      || resolveTemplateValue(config?.email_field, context);
+    recipientKind = 'user';
+  } else {
+    rawEmail = resolveTemplateValue('{{paciente.email}}', context)
+      || resolveTemplateValue('{{patient.email}}', context)
+      || resolveTemplateValue(config?.email_field, context);
+    recipientKind = 'patient';
+  }
+
+  return {
+    recipient_mode: mode,
+    recipient_kind: recipientKind,
+    email: emailDeliveryService.normalizeEmail(rawEmail),
+  };
+}
+
+function resolveAutomationTemplateContext(config = {}, context = {}) {
+  const templateContext = {};
+  const configured = config?.template_context && typeof config.template_context === 'object'
+    ? config.template_context
+    : {};
+  Object.entries(configured).forEach(([key, value]) => {
+    if (/email|phone|telefono|dni|notas|historia|diagnostico|diagn[oó]stico/i.test(key)) return;
+    const resolved = resolveTemplateValue(value, context);
+    if (resolved === undefined || resolved === null || typeof resolved === 'object') return;
+    templateContext[key] = resolved;
+  });
+  return templateContext;
+}
+
+async function handleSendEmail(node, context, runtime = {}) {
+  const config = node?.config && typeof node.config === 'object' ? node.config : {};
+  const requestedStream = toLowerSafe(resolveTemplateValue(config?.stream, context)) || 'automation';
+  if (requestedStream === 'marketing') {
+    throw new Error('automation_email_marketing_disabled');
+  }
+
+  const recipient = resolveAutomationEmailRecipient(config, context);
+  let templateKey = cleanString(
+    resolveTemplateValue(config?.template_key, context)
+    || resolveTemplateValue(config?.template, context)
+    || resolveTemplateValue(config?.template_id, context)
+  );
+  const genericRequested = !templateKey && (
+    cleanString(config?.subject)
+    || cleanString(config?.body_html)
+    || cleanString(config?.body_text)
+  );
+  if (genericRequested) {
+    if (!parseBool(process.env.EMAIL_AUTOMATION_GENERIC_ENABLED, false)) {
+      throw new Error('automation_email_generic_disabled');
+    }
+    templateKey = 'automation.generic';
+  }
+  if (!templateKey) {
+    throw new Error('automation_email_template_not_configured');
+  }
+
+  const executionId = toIntOrNull(runtime?.execution?.id)
+    || toIntOrNull(context?.flow_execution_id)
+    || toIntOrNull(context?.execution_id);
+  const nodeId = cleanString(node?.id) || cleanString(config?.node_id) || 'send_email';
+  const templateContext = resolveAutomationTemplateContext(config, context);
+  if (templateKey === 'automation.generic') {
+    templateContext.subject = resolveTemplateValue(config?.subject, context);
+    templateContext.body_html = resolveTemplateValue(config?.body_html, context);
+    templateContext.body_text = resolveTemplateValue(config?.body_text, context);
+  }
+
+  const result = await emailDeliveryService.queueEmail({
+    stream: 'automation',
+    templateKey,
+    templateVersion: cleanString(resolveTemplateValue(config?.template_version, context)) || 'v1',
+    subjectKey: templateKey,
+    recipientEmail: recipient.email,
+    recipientKind: recipient.recipient_kind,
+    clinicaId: toIntOrNull(runtime?.execution?.clinic_id)
+      || toIntOrNull(context?.clinica_id)
+      || toIntOrNull(context?.clinic?.id_clinica)
+      || toIntOrNull(context?.clinica?.id_clinica),
+    pacienteId: toIntOrNull(context?.paciente?.id_paciente) || toIntOrNull(context?.patient?.id_paciente),
+    usuarioId: toIntOrNull(context?.usuario?.id_usuario),
+    relatedType: executionId ? 'flow_execution_v2' : 'automation_flow_v2',
+    relatedId: executionId ? String(executionId) : nodeId,
+    dedupeKey: `automation.email:${executionId || 'no_execution'}:${nodeId}:${emailDeliveryService.hashEmail(recipient.email)}`,
+    priority: cleanString(resolveTemplateValue(config?.priority, context)) || 'normal',
+    origin: 'automations_v2.action_send_email',
+    templateContext,
+    metadata: {
+      contains_clinical_data: false,
+      node_id: nodeId,
+      recipient_mode: recipient.recipient_mode,
+    },
+  });
+
+  return {
+    kind: 'success',
+    output: {
+      status: result.created ? 'queued' : 'already_queued',
+      email_message_id: result.emailMessage.id,
+      job_request_id: result.job?.id || result.emailMessage.job_request_id || null,
+      template_key: templateKey,
+      recipient_domain: result.emailMessage.recipient_domain || null,
+    },
+    next_node_id: readOutputTarget(node, 'on_success'),
+  };
+}
+
 async function processNode(node, context, runtime = {}) {
   const nodeType = cleanString(node?.type) || 'unknown';
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
@@ -5238,16 +5364,18 @@ async function processNode(node, context, runtime = {}) {
     }
 
     case 'action/send_email': {
-      return {
-        kind: 'success',
-        output: {
-          message_id: `stub_mail_${Date.now()}`,
-          status: 'queued_stub',
-          template_id: config?.template_id || null,
-          subject: resolveTemplateValue(config?.subject, context) || null,
-        },
-        next_node_id: readOutputTarget(node, 'on_success'),
-      };
+      if (simulation) {
+        return {
+          kind: 'success',
+          output: {
+            status: 'simulated',
+            simulated: true,
+            template_key: cleanString(resolveTemplateValue(config?.template_key || config?.template || config?.template_id, context)) || null,
+          },
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
+      return handleSendEmail(node, context, runtime);
     }
 
     case 'action/create_task': {

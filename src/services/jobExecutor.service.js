@@ -9,6 +9,8 @@ const googleReviewMatchService = require('./googleReviewMatch.service');
 const intakeQuickChatOutboxService = require('./intakeQuickChatOutbox.service');
 const marketingAiVisibilityService = require('./marketingAiVisibility.service');
 const webContentGenerationService = require('./webContentGeneration.service');
+const emailDeliveryService = require('./emailDelivery.service');
+const systemNotificationsService = require('./systemNotifications.service');
 const { buildNotificationContent } = require('./notifications.service');
 const { emitNotificationCreated } = require('./notificationsRealtime.service');
 const {
@@ -384,6 +386,12 @@ function buildScheduledJobHandlers() {
 
 const JOB_HANDLERS = {
   ...buildScheduledJobHandlers(),
+  email_send: async (payload = {}, jobRequest = null) => (
+    emailDeliveryService.runEmailSendJob(payload, jobRequest)
+  ),
+  system_notification_dispatch: async (payload = {}, jobRequest = null) => (
+    systemNotificationsService.runDispatchJob(payload, jobRequest)
+  ),
   meta_ads_backfill_for_sites: async (payload = {}) => {
     const mappings = Array.isArray(payload.mappings) ? payload.mappings : [];
     const clinicIds = Array.from(new Set([

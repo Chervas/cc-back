@@ -12,6 +12,7 @@ const {
   canUserAccessWhatsappTemplateAsset,
   canUserSelectWhatsappTemplate,
   filterWhatsappTemplatesForUser,
+  isAdminOnlyWhatsappTemplate,
   isLegacyUnassignedWhatsappTemplate,
   isSystemWhatsappTemplate,
   isWhatsappTemplateOwnedByUser,
@@ -89,6 +90,23 @@ test('las filas históricas sin autor se conservan como anteriores, sin atribuir
   assert.equal(isLegacyUnassignedWhatsappTemplate(rows[3]), true);
   assert.equal(isWhatsappTemplateOwnedByUser(rows[3], 76), false);
   assert.equal(isLegacyUnassignedWhatsappTemplate(rows[1]), false);
+});
+
+test('las plantillas admin-only no son seleccionables en playbooks o conversaciones', () => {
+  const adminAlert = {
+    id: 8,
+    origin: 'custom',
+    created_by_user_id: 44,
+    variables: [{ position: 1, template_usage: 'system_admin_alert' }],
+  };
+  const rows = [
+    { id: 1, catalog_template_id: 9, origin: 'catalog' },
+    adminAlert,
+  ];
+
+  assert.equal(isAdminOnlyWhatsappTemplate(adminAlert), true);
+  assert.equal(canUserSelectWhatsappTemplate(adminAlert, 44), false);
+  assert.deepEqual(filterWhatsappTemplatesForUser(rows, 44).map((row) => row.id), [1]);
 });
 
 test('ser propietario local no convierte un activo ajeno en acceso global', () => {

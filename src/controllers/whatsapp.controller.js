@@ -23,6 +23,7 @@ const {
 } = require('../lib/whatsapp-template-ownership');
 const {
   getWhatsappTemplateUsages,
+  isAdminOnlyWhatsappTemplate,
   isReviewWorkflowWhatsappTemplate,
 } = require('../lib/whatsapp-template-workflow');
 const {
@@ -1528,9 +1529,24 @@ exports.listTemplatesForClinic = async (req, res) => {
           return item.catalog.is_active !== false && Number(item.catalog.is_active) !== 0;
         });
 
-    const contextPayload = templateContext === 'quick_chat'
-      ? payload.filter((item) => !isReviewWorkflowWhatsappTemplate(item))
-      : payload;
+    const contextPayload = (() => {
+      if (templateContext === 'system_monitoring') {
+        return isWhatsappGlobalAdmin(userId)
+          ? payload.filter((item) => isAdminOnlyWhatsappTemplate(item))
+          : [];
+      }
+      if (templateContext === 'quick_chat') {
+        return payload.filter((item) => (
+          !isReviewWorkflowWhatsappTemplate(item)
+          && !isAdminOnlyWhatsappTemplate(item)
+        ));
+      }
+      return payload.filter((item) => !isAdminOnlyWhatsappTemplate(item));
+    })();
+
+    if (templateContext === 'system_monitoring') {
+      return res.json(contextPayload);
+    }
 
     return res.json(
       includeAllForAdmin

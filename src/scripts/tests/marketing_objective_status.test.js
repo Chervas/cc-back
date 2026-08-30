@@ -165,6 +165,28 @@ async function testCompletedEvidenceReachesOneHundredWithoutFutureFeatures() {
   assert.equal(profitability.subobjectives.find((item) => item.id === 'reduce_no_shows').availability, 'unknown');
 }
 
+async function testObjectiveRoutesUseCanonicalMarketingArchitecture() {
+  const result = await getMarketingObjectiveStatus({
+    scopeType: 'clinic',
+    scopeId: 66,
+    clinicIds: [66],
+  }, fullDependencies());
+
+  const routesBySubobjective = new Map(result.families.flatMap((family) => (
+    family.subobjectives.map((item) => [item.id, item.route])
+  )));
+  const returnedRoutes = [...routesBySubobjective.values()].filter(Boolean);
+
+  assert.equal(routesBySubobjective.get('paid_media'), '/marketing/objetivos/captar-nuevos-pacientes');
+  assert.equal(routesBySubobjective.get('google_maps'), '/marketing/objetivos/captar-nuevos-pacientes/perfil-google');
+  assert.equal(routesBySubobjective.get('web'), '/marketing/objetivos/captar-nuevos-pacientes');
+  assert.equal(routesBySubobjective.get('reviews'), '/marketing/objetivos/aumentar-reputacion');
+  assert.equal(routesBySubobjective.get('reactivation'), '/marketing/objetivos/aumentar-rentabilidad');
+  assert.ok(!returnedRoutes.includes('/marketing/campanas'));
+  assert.ok(!returnedRoutes.includes('/marketing/perfil-google'));
+  assert.ok(!returnedRoutes.includes('/marketing/web'));
+}
+
 async function testMissingEvidenceProducesActionableStatesWithoutExternalCalls() {
   let inventoryCalls = 0;
   const deps = fullDependencies();
@@ -391,6 +413,7 @@ async function testReviewErrorsAreSanitizedAndReactivationReadIsBounded() {
 
 async function main() {
   await testCompletedEvidenceReachesOneHundredWithoutFutureFeatures();
+  await testObjectiveRoutesUseCanonicalMarketingArchitecture();
   await testMissingEvidenceProducesActionableStatesWithoutExternalCalls();
   await testGroupScopeDoesNotMixClinics();
   testPaidMediaDoesNotCombineDifferentStrategies();

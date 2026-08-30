@@ -61,6 +61,7 @@ usa `team.manage`, pero `owner_membership_manage_forbidden` y
 | [Diagnóstico de medición por campaña](./google-ads-campaign-measurement.md) | Diferencia conversiones principales, todas las conversiones y leads CRM; comprueba destinos/cobertura sin modificar campañas. |
 | [E2E controlado de intake y limpieza](./intake-e2e-cleanup.md) | Formulario/chat/teléfono, routing estricto, datos sintéticos y limpieza segura. |
 | [Activos compartidos de grupo y asignaciones clínicas](./group-asset-mapping.md) | Contrato de conexión única por scope, activo efectivo propio/heredado/asignado, consumo común entre módulos y excepción de alias de ficha solo para reseñas. |
+| [Caché persistente de Informes Marketing](./marketing-reports-cache.md) | Snapshots backend de `Mi clínica`, job nocturno, TTL, stale-while-refresh y excepción semanal/on-demand del mapa local. |
 | [Visibilidad local en ChatGPT y Gemini](./marketing-ai-visibility.md) | Consultas locales canónicas, autoejecución desde Informes, caché/deduplicación, estados sin secretos y contrato server-side de OpenAI/Gemini. |
 | [Adaptador offline ModSuite](./modsuite-offline-adapter.md) | Migración allowlisted de exports legacy a WebDocument v1, informe de revisión, límites y ejecución local sin runtime legacy. |
 
@@ -444,9 +445,11 @@ diagnósticos/recomendaciones. No cambia campañas, custom goals, URLs, pujas,
 presupuesto ni estados. Las referencias posteriores a **Conecta y mejora** son
 el nombre visible del corte histórico de julio previo a esta integración.
 
-Estado de arquitectura del runtime vigente (2026-07-19): registra
-**33 tareas periódicas**, **14 integraciones dirigidas/background**, **47 tipos
-background** en total y **63 handlers**. Los nuevos tipos dirigidos
+Estado de arquitectura del runtime vigente (actualizado 2026-08-29): registra
+**34 tareas periódicas**, **14 integraciones dirigidas/background**, **48 tipos
+background** en total y **64 handlers**. `marketing_reports_cache_refresh`
+materializa cada noche snapshots persistentes de `Mi clínica` y no refresca el
+mapa local. Los tipos dirigidos
 `web_content_generation`, `managed_campaign.google_search_create.v1`,
 `managed_campaign.google_search_activate.v1` y
 `managed_campaign.google_search_rollback.v1` pertenecen al mismo carril durable

@@ -29,13 +29,14 @@ const normalizeClinicConfig = normalizeClinicConfigurationForRead;
 
 const serializeUserSummary = (usuario) => {
     const plain = usuario?.get ? usuario.get({ plain: true }) : (usuario || {});
+    const userId = Number(plain.id_usuario);
     return {
         id_usuario: plain.id_usuario,
         nombre: plain.nombre || null,
         apellidos: plain.apellidos || null,
         email_usuario: plain.email_usuario || null,
         url_avatar: plain.url_avatar || null,
-        isAdmin: plain.isAdmin === true,
+        isAdmin: plain.isAdmin === true || isGlobalAdmin(userId),
     };
 };
 

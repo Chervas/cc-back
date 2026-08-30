@@ -67,12 +67,39 @@ function parseUsageHeader(h) {
   }
 }
 
+function rateLimitCooldownMs() {
+  return Math.max(
+    60 * 60 * 1000,
+    Number(process.env.METASYNC_RATE_LIMIT_COOLDOWN_MS || 2 * 60 * 60 * 1000) || 2 * 60 * 60 * 1000
+  );
+}
+
+async function persistedPauseUntil() {
+  try {
+    const counter = await ApiUsageCounter.findOne({ where: { provider: 'meta_ads' } });
+    const pauseMs = counter?.pauseUntil ? new Date(counter.pauseUntil).getTime() : 0;
+    return Number.isFinite(pauseMs) && pauseMs > Date.now() ? pauseMs : 0;
+  } catch (error) {
+    console.warn('⚠️ MetaClient: no se pudo leer la pausa compartida:', error.message);
+    return 0;
+  }
+}
+
+function pausedError(pauseUntilMs) {
+  const error = new Error(`Meta requests paused until ${new Date(pauseUntilMs).toISOString()}`);
+  error.code = 'META_RATE_LIMIT_PAUSED';
+  error.retryable = false;
+  error.pauseUntil = new Date(pauseUntilMs);
+  return error;
+}
+
 async function updateMetaUsageCounter(usage, {
   source = 'meta_client',
   operation = 'graph_request',
   status = 'ok',
   pauseUntil = undefined,
-  error = null
+    error = null,
+    requestCount = 1
 } = {}) {
   if (typeof usage !== 'number' || Number.isNaN(usage)) {
     return;
@@ -86,7 +113,7 @@ async function updateMetaUsageCounter(usage, {
     operation,
     status,
     usagePct: usage,
-    requestCount: 1,
+    requestCount,
     pauseUntil,
     error,
     metadata: { hourStart: hourBucket.toISOString() }
@@ -110,12 +137,12 @@ async function metaGet(url, {
   // En rate limit, esperar hasta la siguiente hora (true) o hacer backoff corto (false)
   const waitNextHour = String(process.env.METASYNC_WAIT_NEXT_HOUR_ON_LIMIT || 'true') === 'true';
 
-  // Respect global gate
-  const now = Date.now();
-  if (now < nextAllowedAt) {
-    const toWait = nextAllowedAt - now;
-    console.log(`⏸️ MetaClient: esperando ${Math.ceil(toWait/1000)}s por rate-limit`);
-    await sleep(toWait);
+  // El gate compartido falla rápido: nunca bloquea el carril de jobs durante
+  // horas ni vuelve a golpear Graph desde otro proceso tras un reinicio.
+  const sharedPauseUntil = await persistedPauseUntil();
+  nextAllowedAt = Math.max(nextAllowedAt, sharedPauseUntil);
+  if (Date.now() < nextAllowedAt) {
+    throw pausedError(nextAllowedAt);
   }
 
   let attempt = 0;
@@ -142,15 +169,8 @@ async function metaGet(url, {
       const usage = Math.max(appUsage, adUsage, pageUsage, bizUsage);
       lastUsagePct = usage;
       if (usage >= thresh) {
-        if (waitNextHour) {
-          const d = new Date();
-          d.setMinutes(60, 0, 0); // top of next hour
-          nextAllowedAt = Math.max(nextAllowedAt, d.getTime());
-          console.warn(`⚠️ Uso alto (${usage}%). Pausando hasta la próxima hora.`);
-        } else {
-          nextAllowedAt = Math.max(nextAllowedAt, Date.now() + 60_000);
-          console.warn(`⚠️ Uso alto (${usage}%). Pausando 60s.`);
-        }
+        nextAllowedAt = Math.max(nextAllowedAt, Date.now() + rateLimitCooldownMs());
+        console.warn(`⚠️ Uso alto (${usage}%). Pausando nuevas llamadas Meta.`);
       }
       await updateMetaUsageCounter(usage, {
         source,
@@ -183,21 +203,14 @@ async function metaGet(url, {
         });
       } catch {}
 
-      // 400 (Bad Request): no reintentar, devolver error tal cual
-      if (status === 400) {
-        throw err;
-      }
       const isRatelimit = code === 4 || code === 17 || code === 613; // common RL codes
       if (isRatelimit) {
-        if (waitNextHour) {
-          const d = new Date(); d.setMinutes(60, 0, 0);
-          nextAllowedAt = Math.max(nextAllowedAt, d.getTime());
-          console.warn(`⏸️ Rate limit (code ${code}). Esperando hasta la próxima hora.`);
-        } else {
-          const backoff = Math.min(30_000 * attempt, 120_000); // up to 2m
-          console.warn(`⏸️ Rate limit (code ${code}). Reintentando en ${Math.ceil(backoff/1000)}s (intento ${attempt}/${maxRetries})`);
-          await sleep(backoff);
-        }
+        nextAllowedAt = Math.max(nextAllowedAt, Date.now() + rateLimitCooldownMs());
+        console.warn(`⏸️ Rate limit Meta (code ${code}). Se corta el lote hasta ${new Date(nextAllowedAt).toISOString()}.`);
+        err.code = 'META_RATE_LIMITED';
+        err.retryable = false;
+        err.pauseUntil = new Date(nextAllowedAt);
+        err.metaRateLimited = true;
         await updateMetaUsageCounter(100, {
           source,
           operation: operation || String(url || 'graph_request').split('?')[0].slice(0, 120),
@@ -205,7 +218,11 @@ async function metaGet(url, {
           pauseUntil: nextAllowedAt ? new Date(nextAllowedAt) : undefined,
           error: err
         });
-        continue;
+        throw err;
+      }
+      // El rate limit de Graph también llega como HTTP 400 y debe tratarse antes.
+      if (status === 400) {
+        throw err;
       }
       if (attempt <= maxRetries) {
         const backoff = 1000 * attempt;
@@ -230,11 +247,12 @@ module.exports.getUsageStatus = async function getUsageStatus() {
       return { usagePct: lastUsagePct, nextAllowedAt, now };
     }
     const metadata = counter.metadata || {};
+    const persistedPause = counter.pauseUntil ? new Date(counter.pauseUntil).getTime() : 0;
+    nextAllowedAt = Math.max(nextAllowedAt, Number.isFinite(persistedPause) ? persistedPause : 0);
     const hourStart = metadata.hourStart ? new Date(metadata.hourStart) : null;
     if (!hourStart || now - hourStart.getTime() >= 3600000) {
       const newHour = new Date(); newHour.setMinutes(0, 0, 0);
-      await counter.update({ usagePct: 0, usageDate: new Date().toISOString().slice(0,10), metadata: { ...metadata, hourStart: newHour.toISOString() } });
-      return { usagePct: 0, nextAllowedAt, now };
+      return { usagePct: nextAllowedAt > now ? (counter.usagePct || 0) : 0, nextAllowedAt, now, waiting: nextAllowedAt > now };
     }
     return {
       usagePct: counter.usagePct || 0,
@@ -246,4 +264,13 @@ module.exports.getUsageStatus = async function getUsageStatus() {
     console.error('⚠️ Error obteniendo uso Meta:', err.message);
     return { usagePct: lastUsagePct, nextAllowedAt, now: Date.now(), waiting: nextAllowedAt > Date.now() };
   }
+};
+
+module.exports._test = {
+  pausedError,
+  persistedPauseUntil,
+  resetState() {
+    nextAllowedAt = 0;
+    lastUsagePct = 0;
+  },
 };

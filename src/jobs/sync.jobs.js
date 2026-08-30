@@ -49,6 +49,7 @@ const { enqueueSyncForAllWabas } = require('../services/whatsappTemplates.servic
 const { enqueueSyncPhonesForAllWabas } = require('../services/whatsappPhones.service');
 const marketingCompetitionService = require('../services/marketingCompetition.service');
 const marketingAiVisibilityService = require('../services/marketingAiVisibility.service');
+const marketingReportOverviewCacheService = require('../services/marketingReportOverviewCache.service');
 const webEventsService = require('../services/webEvents.service');
 const webContentMediaService = require('../services/webContentMedia.service');
 const webContentGenerationService = require('../services/webContentGeneration.service');
@@ -56,6 +57,7 @@ const webDomainsService = require('../services/webDomains.service');
 const webPublicationHealthMonitorService = require('../services/webPublicationHealthMonitor.service');
 const googleReviewMatchService = require('../services/googleReviewMatch.service');
 const jobRequestsService = require('../services/jobRequests.service');
+const systemNotificationsService = require('../services/systemNotifications.service');
 const {
   SCHEDULED_JOB_DEFINITIONS,
   getScheduledJobDefinition,
@@ -391,6 +393,7 @@ class MetaSyncJobs {
       businessProfileSync: 'Sincroniza Perfil de Empresa Google: rendimiento local, reseñas y publicaciones.',
       businessProfileReviewsSync: 'Refresca solo reseñas recientes de Perfil de Empresa Google y lanza conciliación con campañas.',
       businessProfileBackfill: 'Backfill de Perfil de Empresa Google para nuevas fichas o reprocesos.',
+      marketingReportsCacheRefresh: 'Materializa cada noche los snapshots persistentes de Mi clínica para que los reloads sirvan caché backend fresca durante 24 h. Excluye el mapa local, que conserva refresco semanal y bajo demanda al entrar en Competencia.',
       competitionSync: 'Actualiza semanalmente los competidores introducidos manualmente y sus anuncios públicos; el descubrimiento y ranking local solo se ejecutan si existe un proveedor con licencia y los gates contractuales están activos.',
       webEventsAggregate: 'Agrega WebEvents propios en tablas diarias para informes sin recalcular desde el front.',
       whatsappTemplatesSync: 'Sincroniza estados de plantillas WhatsApp para todos los WABA activos.',
@@ -404,7 +407,8 @@ class MetaSyncJobs {
       tokenValidation: 'Valida tokens (usuario/página) y registra estado/errores recientes.',
       dataCleanup: 'Limpia registros antiguos según retenciones configuradas (logs, validaciones, métricas).',
       pm2LogRetention: 'Rota los logs PM2 activos y elimina ficheros técnicos que superan la retención configurada.',
-      healthCheck: 'Comprueba salud de BD, disponibilidad de Meta API y actividad reciente.'
+      healthCheck: 'Comprueba salud de BD, disponibilidad de Meta API y actividad reciente.',
+      systemNotificationCheck: 'Evalúa alertas operativas y encola sus canales configurados mediante JobRequests durables.'
     };
 
     // Configuración desde variables de entorno
@@ -415,6 +419,7 @@ class MetaSyncJobs {
         dataCleanup: process.env.JOBS_CLEANUP_SCHEDULE || '0 3 * * 0',
         pm2LogRetention: process.env.JOBS_PM2_LOG_RETENTION_SCHEDULE || '17 3 * * *',
         healthCheck: process.env.JOBS_HEALTH_CHECK_SCHEDULE || '0 * * * *',
+        systemNotificationCheck: process.env.JOBS_SYSTEM_NOTIFICATION_CHECK_SCHEDULE || '*/5 * * * *',
         adsSync: process.env.JOBS_ADS_SCHEDULE || '30 0 * * *',
         adsSyncMidday: process.env.JOBS_ADS_MIDDAY_SCHEDULE || '0 12 * * *',
         adsBackfill: process.env.JOBS_ADS_BACKFILL_SCHEDULE || '0 4 * * 0',
@@ -433,6 +438,7 @@ class MetaSyncJobs {
         businessProfileSync: process.env.JOBS_BUSINESS_PROFILE_SCHEDULE || '10 5 * * *',
         businessProfileReviewsSync: process.env.JOBS_BUSINESS_PROFILE_REVIEWS_SCHEDULE || '*/15 * * * *',
         businessProfileBackfill: process.env.JOBS_BUSINESS_PROFILE_BACKFILL_SCHEDULE || '20 5 * * 0',
+        marketingReportsCacheRefresh: process.env.JOBS_MARKETING_REPORTS_CACHE_SCHEDULE || '30 6 * * *',
         competitionSync: process.env.JOBS_COMPETITION_SCHEDULE || '0 6 * * 1',
         webEventsAggregate: process.env.JOBS_WEB_EVENTS_AGGREGATE_SCHEDULE || '*/15 * * * *',
         whatsappTemplatesSync: process.env.JOBS_WHATSAPP_TEMPLATES_SCHEDULE || '*/20 * * * *',
@@ -661,6 +667,38 @@ class MetaSyncJobs {
     return {
       status: 'started',
       jobsCount: this.jobs.size
+    };
+  }
+
+  /**
+   * Inicia solo los cron cuyo ownership pertenece a este runtime.
+   */
+  startSelected(jobNames = []) {
+    if (!this.isInitialized) {
+      throw new Error('Sistema de jobs no está inicializado');
+    }
+
+    const selected = [...new Set(jobNames.map((name) => String(name || '').trim()).filter(Boolean))];
+    const unknown = selected.filter((name) => !this.jobs.has(name));
+    if (unknown.length) {
+      throw new Error(`Jobs cron desconocidos: ${unknown.join(', ')}`);
+    }
+
+    let started = 0;
+    for (const name of selected) {
+      const jobData = this.jobs.get(name);
+      if (jobData.status === 'running') continue;
+      jobData.job.start();
+      jobData.status = 'running';
+      started += 1;
+      console.log(`▶️ Job selectivo '${name}' iniciado`);
+    }
+    this.isRunning = [...this.jobs.values()].some((jobData) => jobData.status === 'running');
+    return {
+      status: started > 0 ? 'started' : 'already_running',
+      jobsCount: selected.length,
+      startedJobsCount: started,
+      jobs: selected,
     };
   }
 
@@ -3296,15 +3334,12 @@ async syncFacebookPageMetrics(asset) {
 
   try {
     // Obtener número total de seguidores actuales
-    const response = await syncHttp.get(
-      `${process.env.META_API_BASE_URL}/${asset.metaAssetId}`,
-      {
-        params: {
-          fields: 'fan_count',
-          access_token: asset.pageAccessToken
-        }
-      }
-    );
+    const response = await metaGet(`${asset.metaAssetId}`, {
+      params: { fields: 'fan_count' },
+      accessToken: asset.pageAccessToken,
+      source: 'scheduled_metrics',
+      operation: 'facebook_page_fan_count',
+    });
 
     const fanCount = response.data?.fan_count;
     if (fanCount === undefined) {
@@ -3360,18 +3395,12 @@ async syncFacebookPageMetrics(asset) {
     const since = until - 30 * 24 * 60 * 60; // últimos 30 días
 
     // Variación diaria de seguidores
-    const followersDayResp = await syncHttp.get(
-      `${process.env.META_API_BASE_URL}/${asset.metaAssetId}/insights`,
-      {
-        params: {
-          metric: 'follower_count',
-          period: 'day',
-          since,
-          until,
-          access_token: asset.pageAccessToken
-        }
-      }
-    );
+    const followersDayResp = await metaGet(`${asset.metaAssetId}/insights`, {
+      params: { metric: 'follower_count', period: 'day', since, until },
+      accessToken: asset.pageAccessToken,
+      source: 'scheduled_metrics',
+      operation: 'instagram_follower_count',
+    });
 
     const statsByDate = {};
     const followerValues = followersDayResp.data?.data?.[0]?.values || [];
@@ -3390,15 +3419,12 @@ async syncFacebookPageMetrics(asset) {
     }
 
     // Total actual de seguidores
-    const followersTotalResp = await syncHttp.get(
-      `${process.env.META_API_BASE_URL}/${asset.metaAssetId}`,
-      {
-        params: {
-          fields: 'followers_count',
-          access_token: asset.pageAccessToken
-        }
-      }
-    );
+    const followersTotalResp = await metaGet(`${asset.metaAssetId}`, {
+      params: { fields: 'followers_count' },
+      accessToken: asset.pageAccessToken,
+      source: 'scheduled_metrics',
+      operation: 'instagram_followers_total',
+    });
 
     const currentFollowers = followersTotalResp.data?.followers_count || 0;
 
@@ -3415,18 +3441,12 @@ async syncFacebookPageMetrics(asset) {
 
     // Alcance diario a nivel de cuenta (IG User Insights)
     try {
-      const reachResp = await syncHttp.get(
-        `${process.env.META_API_BASE_URL}/${asset.metaAssetId}/insights`,
-        {
-          params: {
-            metric: 'reach',
-            period: 'day',
-            since,
-            until,
-            access_token: asset.pageAccessToken
-          }
-        }
-      );
+      const reachResp = await metaGet(`${asset.metaAssetId}/insights`, {
+        params: { metric: 'reach', period: 'day', since, until },
+        accessToken: asset.pageAccessToken,
+        source: 'scheduled_metrics',
+        operation: 'instagram_reach',
+      });
       const reachValues = reachResp.data?.data?.[0]?.values || [];
       for (const r of reachValues) {
         const d = new Date(r.end_time);
@@ -3444,6 +3464,7 @@ async syncFacebookPageMetrics(asset) {
       }
       console.log(`✅ Instagram ${asset.metaAssetName}: reach diario obtenido (${reachValues.length} días)`);
     } catch (e) {
+      if (e?.code === 'META_RATE_LIMIT_PAUSED' || e?.metaRateLimited) throw e;
       console.warn(`⚠️ IG reach (user insights) no disponible:`, e.response?.data || e.message);
     }
 
@@ -3516,6 +3537,7 @@ async syncFacebookPageMetrics(asset) {
           await new Promise(resolve => setTimeout(resolve, 1000));
           
         } catch (error) {
+          if (error?.code === 'META_RATE_LIMIT_PAUSED' || error?.metaRateLimited) throw error;
           console.error(`❌ Error validando token para asset ${asset.id}:`, error.message);
           invalidCount++;
         }
@@ -3553,20 +3575,18 @@ async syncFacebookPageMetrics(asset) {
    */
   async validateToken(token, assetId) {
     try {
-      const response = await syncHttp.get(
-        `${META_API_BASE_URL}/${assetId}`,
-        {
-          params: {
-            fields: 'id,name',
-            access_token: token
-          },
-          timeout: 10000
-        }
-      );
+      const response = await metaGet(`${assetId}`, {
+        params: { fields: 'id,name' },
+        accessToken: token,
+        timeout: 10000,
+        source: 'scheduled_token_validation',
+        operation: 'validate_asset_token',
+      });
 
       return response.status === 200 && response.data.id;
       
     } catch (error) {
+      if (error?.code === 'META_RATE_LIMIT_PAUSED' || error?.metaRateLimited) throw error;
       console.error(`❌ Token inválido para asset ${assetId}:`, error.message);
       return false;
     }
@@ -3612,6 +3632,12 @@ async syncFacebookPageMetrics(asset) {
       const aiVisibilityRunsDeleted = await marketingAiVisibilityService.cleanupExpiredRuns();
       totalDeleted += aiVisibilityRunsDeleted;
 
+      // Snapshots materializados de Mi clínica: se regeneran a diario tras las
+      // sincronizaciones nocturnas. La limpieza retira periodos antiguos o
+      // versiones de informe ya sustituidas, pero no toca el mapa local.
+      const marketingReportSnapshotsDeleted = await marketingReportOverviewCacheService.cleanupOverviewCache();
+      totalDeleted += marketingReportSnapshotsDeleted;
+
       // Los borradores generados no aceptados conservan su procedencia durante
       // una ventana finita. La aceptación crea una entrada CMS independiente;
       // nunca se borra contenido aceptado desde esta limpieza.
@@ -3649,6 +3675,7 @@ async syncFacebookPageMetrics(asset) {
           socialStats: socialStatsDeleted,
           competitionHeatmaps: competitionHeatmapsDeleted,
           aiVisibilityRuns: aiVisibilityRunsDeleted,
+          marketingReportSnapshots: marketingReportSnapshotsDeleted,
           webContentGenerations: webContentGenerationsDeleted,
           webEditorMedia: webEditorMediaCleanup.archived,
           webEditorMediaFailed: webEditorMediaCleanup.failed.length
@@ -3730,6 +3757,15 @@ async syncFacebookPageMetrics(asset) {
 
   async executeCompetitionHeatmapRefresh(payload = {}) {
     return marketingCompetitionService.executeLocalRankingHeatmapRefresh(payload);
+  }
+
+  async executeMarketingReportsCacheRefresh(payload = {}) {
+    const { __testing: reportsTesting } = require('../controllers/marketingReports.controller');
+    return marketingReportOverviewCacheService.refreshOverviewSnapshots({
+      ...payload,
+      buildOverviewPayload: reportsTesting.buildOverviewPayload,
+      buildRange: reportsTesting.buildRange,
+    });
   }
 
   /**
@@ -4159,7 +4195,7 @@ async executeHealthCheck() {
     // Verificar disponibilidad de Meta API (prueba simple)
     // ✅ CORRECTO (usar token real):
     try {
-      const connections = await MetaConnection.findAll({
+      const connection = await MetaConnection.findOne({
         where: {
           accessToken: { [Op.ne]: null },
           expiresAt: { [Op.gt]: new Date() }
@@ -4167,29 +4203,31 @@ async executeHealthCheck() {
         order: [['updatedAt', 'DESC'], ['id', 'DESC']]
       });
 
-      if (connections.length) {
-        let lastProviderError = null;
-        for (const connection of connections) {
-          try {
-            const testResponse = await syncHttp.get(`${META_API_BASE_URL}/me`, {
-              params: { access_token: connection.accessToken },
-              timeout: 5000
-            });
-            if (testResponse.status === 200) {
-              healthStatus.metaApi = true;
-              break;
-            }
-          } catch (providerError) {
-            lastProviderError = providerError;
+      if (connection) {
+        try {
+          const testResponse = await metaGet('me', {
+            accessToken: connection.accessToken,
+            timeout: 5000,
+            source: 'system_health_check',
+            operation: 'meta_me',
+          });
+          if (testResponse.status === 200) {
+            healthStatus.metaApi = true;
+          }
+        } catch (providerError) {
+          if (providerError?.code === 'META_RATE_LIMIT_PAUSED' || providerError?.metaRateLimited) {
+            healthStatus.metaApiDeferred = true;
+            healthStatus.metaApiPauseUntil = providerError.pauseUntil || null;
+          } else {
+            console.warn('⚠️ Error Meta health:', providerError.message);
           }
         }
-        if (healthStatus.metaApi) {
+        if (healthStatus.metaApiDeferred) {
+          console.log('⏸️ Meta API: health aplazado por cooldown compartido');
+        } else if (healthStatus.metaApi) {
           console.log('✅ Meta API: Disponible');
         } else {
-          console.log('❌ Meta API: Ninguna conexión activa respondió correctamente');
-          if (lastProviderError) {
-            console.warn('⚠️ Último error Meta health:', lastProviderError.message);
-          }
+          console.log('❌ Meta API: La conexión activa no respondió correctamente');
         }
       } else {
         healthStatus.metaApi = false;
@@ -4271,6 +4309,10 @@ try {
     throw error;
   }
 }
+
+  async executeSystemNotificationCheck(payload = {}) {
+    return systemNotificationsService.runActiveChecks({ force: payload.force === true });
+  }
 
   
 

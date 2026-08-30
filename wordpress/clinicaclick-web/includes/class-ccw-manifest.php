@@ -118,12 +118,19 @@ final class CCW_Manifest
             }
             $keys = array_keys($metadata);
             sort($keys, SORT_STRING);
-            if ($keys !== array('page_path')) {
+            $allowed_keys = array_key_exists('template_type', $metadata)
+                ? array('page_path', 'template_type')
+                : array('page_path');
+            if ($keys !== $allowed_keys) {
                 throw new CCW_Error('ccw_manifest_page_route_invalid', 'El contrato de una página contiene campos no permitidos.');
             }
             $page_path = (string) $metadata['page_path'];
             if ($page_path !== '/' && !preg_match('#^/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/$#', $page_path)) {
                 throw new CCW_Error('ccw_manifest_page_path_invalid', 'La ruta firmada de una página no es válida.');
+            }
+            $template_type = (string) ($metadata['template_type'] ?? '');
+            if ($template_type !== '' && !in_array($template_type, array('standard', 'post', 'category'), true)) {
+                throw new CCW_Error('ccw_manifest_page_route_invalid', 'El tipo de plantilla de una página no es válido.');
             }
             $html_path = $page_path === '/' ? 'index.html' : substr($page_path, 1) . 'index.html';
             if (!isset($files[$html_path]) || isset($html_paths[$html_path])) {
@@ -131,6 +138,9 @@ final class CCW_Manifest
             }
             $html_paths[$html_path] = true;
             $normalized[$page_id] = array('page_path' => $page_path);
+            if ($template_type !== '') {
+                $normalized[$page_id]['template_type'] = $template_type;
+            }
         }
         foreach ($files as $file_path => $_metadata) {
             if (substr((string) $file_path, -5) === '.html' && !isset($html_paths[$file_path])) {

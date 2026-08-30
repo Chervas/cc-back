@@ -1,5 +1,7 @@
 'use strict';
 
+const { isAdminOnlyWhatsappTemplate } = require('./whatsapp-template-workflow');
+
 function positiveInteger(value) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
@@ -36,6 +38,9 @@ function isLegacyUnassignedWhatsappTemplate(template) {
 }
 
 function canUserSelectWhatsappTemplate(template, userId) {
+  if (isAdminOnlyWhatsappTemplate(template)) {
+    return false;
+  }
   return isSystemWhatsappTemplate(template)
     || isWhatsappTemplateOwnedByUser(template, userId)
     // Las plantillas anteriores a la captura de autoría siguen disponibles
@@ -85,6 +90,7 @@ module.exports = {
   canUserAccessWhatsappTemplateAsset,
   canUserSelectWhatsappTemplate,
   filterWhatsappTemplatesForUser,
+  isAdminOnlyWhatsappTemplate,
   isLegacyUnassignedWhatsappTemplate,
   isSystemWhatsappTemplate,
   isWhatsappTemplateOwnedByUser,
