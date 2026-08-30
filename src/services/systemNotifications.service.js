@@ -705,7 +705,20 @@ async function updateSettings(payload = {}) {
   const nextRules = normalizeEventRules(payload.eventRules || payload.event_rules || currentRules);
   const adminPhone = cleanString(payload.adminPhone ?? payload.admin_phone ?? setting.admin_phone);
   const normalizedAdminPhone = adminPhone ? (normalizePhoneE164(adminPhone) || adminPhone) : null;
-  const senderAssetId = Number(payload.whatsappSenderAssetId ?? payload.whatsapp_sender_asset_id ?? setting.whatsapp_sender_asset_id ?? 0) || null;
+  const hasCamelSender = Object.prototype.hasOwnProperty.call(payload, 'whatsappSenderAssetId');
+  const hasSnakeSender = Object.prototype.hasOwnProperty.call(payload, 'whatsapp_sender_asset_id');
+  const rawSenderAssetId = hasCamelSender
+    ? payload.whatsappSenderAssetId
+    : (hasSnakeSender ? payload.whatsapp_sender_asset_id : setting.whatsapp_sender_asset_id);
+  const senderAssetId = rawSenderAssetId === null || rawSenderAssetId === '' || Number(rawSenderAssetId) === 0
+    ? null
+    : Number(rawSenderAssetId);
+  if (senderAssetId !== null && (!Number.isInteger(senderAssetId) || senderAssetId <= 0)) {
+    const error = new Error('whatsapp_sender_invalid');
+    error.code = 'whatsapp_sender_invalid';
+    error.status = 400;
+    throw error;
+  }
   if (senderAssetId) {
     const sender = await resolveSenderAsset(senderAssetId);
     if (!sender) {

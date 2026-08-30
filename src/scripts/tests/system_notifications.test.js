@@ -57,6 +57,29 @@ test('normaliza reglas y declara la plantilla admin-only de WhatsApp', () => {
   assert.match(payload.components[0].text, /Revisa Monitorizacion del sistema\./);
 });
 
+test('updateSettings permite desactivar WhatsApp y borrar explicitamente el remitente', async () => {
+  const setting = settingStub();
+  const restores = [
+    patchProperty(db.SystemNotificationSetting, 'findOrCreate', async () => [setting, false]),
+    patchProperty(db.ClinicMetaAsset, 'findAll', async () => []),
+    patchProperty(db.SystemNotificationDelivery, 'findAll', async () => []),
+  ];
+
+  try {
+    const overview = await systemNotifications.updateSettings({
+      whatsappEnabled: false,
+      whatsappSenderAssetId: null,
+    });
+
+    assert.equal(setting.whatsapp_enabled, false);
+    assert.equal(setting.whatsapp_sender_asset_id, null);
+    assert.equal(overview.settings.whatsappEnabled, false);
+    assert.equal(overview.settings.whatsappSenderAssetId, null);
+  } finally {
+    restores.reverse().forEach((restore) => restore());
+  }
+});
+
 test('consulta el estado de plantilla mediante el cliente Meta protegido', async () => {
   let request = null;
   const restore = patchProperty(metaClient, 'metaGet', async (url, options) => {
