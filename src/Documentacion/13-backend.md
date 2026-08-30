@@ -101,8 +101,10 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
   `Message` local contra `SystemNotificationDeliveries.provider_message_id`,
   actualiza el terminal y registra `WhatsappDeliveryEvent`; la migracion
   `20260830163000-index-system-notification-provider-message.js` indexa la
-  busqueda. El worker publico sigue en `pm2-gateway` y no se modifico: este
-  cambio requiere promocion posterior para callbacks futuros.
+  busqueda. El codigo se fusiono posteriormente en `staging` y el checkout de
+  gateway quedo alineado con backend `c0aece6`; `pm2-gateway` no se reinicio ni
+  se aplicaron migraciones, por lo que el cambio requiere todavia un cutover
+  controlado para callbacks futuros.
 - Contrato completo:
   [33-sistema-email](../../../front-dev/src/Documentacion/33-sistema-email.md#notificaciones-de-administracion).
 
@@ -820,8 +822,10 @@ con `If-None-Match` exacto después de retirar el magic-quotes de WordPress.
 
 El inventario canónico del runtime DEV vigente es **35 tareas
 periódicas**, **14 integraciones dirigidas/background**, **48 tipos background**
-en total y **69 handlers**. Staging conserva 33 tareas y 47 tipos background
-hasta una promoción aprobada. `email_send` procesa el outbox de email como job
+en total y **69 handlers**. El codigo esta fusionado en `staging`, pero no se
+aplicaron migraciones ni se reinicio su runtime; el inventario desplegado
+conserva 33 tareas y 47 tipos background hasta ese cutover. `email_send`
+procesa el outbox de email como job
 estandar durable; `marketing_reports_cache_refresh` materializa los snapshots persistentes de
 `Mi clínica` sin refrescar el mapa local.
 `web_content_generation` y las operaciones
