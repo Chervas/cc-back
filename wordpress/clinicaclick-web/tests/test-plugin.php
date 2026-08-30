@@ -419,6 +419,37 @@ $tests['manifest requires an exact signed route for every HTML page and form'] =
         CCW_Manifest::validate($extra_key['manifest'], $extra_key['hash']);
     });
 
+    $template_type = ccw_test_artifact('route-template-type');
+    $template_type['manifest']['page_routes'][$template_type['identity']['page_id']]['template_type'] = 'post';
+    update_option(CCW_Config::OPTION_API_BASE, 'https://api.example.test');
+    $runtime = array(
+        'schema_version' => 1,
+        'measurement' => array(
+            'enabled' => true,
+            'scope_type' => 'clinic',
+            'scope_id' => 56,
+            'api_url' => 'https://api.example.test',
+            'loader_url' => 'https://api.example.test/assets/loader.js',
+            'hmac_key' => str_repeat('h', 40),
+            'consent_mode_enabled' => true,
+            'consent_provider' => 'external_cmp',
+            'chat_enabled' => false,
+            'whatsapp_enabled' => false,
+            'phone_enabled' => false,
+        ),
+    );
+    $validated_template = CCW_Manifest::validate($template_type['manifest'], $template_type['hash'], $runtime);
+    ccw_test_assert(
+        ($validated_template['page_routes'][$template_type['identity']['page_id']]['template_type'] ?? '') === 'post',
+        'signed page template type was not preserved'
+    );
+
+    $invalid_template = ccw_test_artifact('route-template-invalid');
+    $invalid_template['manifest']['page_routes'][$invalid_template['identity']['page_id']]['template_type'] = 'archive';
+    ccw_test_throws('ccw_manifest_page_route_invalid', static function () use ($invalid_template, $runtime) {
+        CCW_Manifest::validate($invalid_template['manifest'], $invalid_template['hash'], $runtime);
+    });
+
     $form_mismatch = ccw_test_artifact('route-form');
     $form_id = $form_mismatch['identity']['form_id'];
     $form_mismatch['manifest']['intake_forms'][$form_id]['page_id'] = $form_mismatch['identity']['info_page_id'];

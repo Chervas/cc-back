@@ -4,65 +4,76 @@ const bcrypt = require('bcryptjs');
 const secret = process.env.JWT_SECRET; 
 const { Usuario } = require('../../models'); 
 const { isBlockedAuthEmail } = require('../lib/blocked-auth-emails');
+const { isGlobalAdmin } = require('../lib/role-helpers');
+const passwordResetService = require('../services/passwordReset.service');
+const systemNotificationsService = require('../services/systemNotifications.service');
 const ACCESS_TOKEN_TTL_SECONDS = Math.max(300, Number(process.env.AUTH_ACCESS_TOKEN_TTL_SECONDS || (12 * 60 * 60)));
 const ACCESS_TOKEN_TTL = `${ACCESS_TOKEN_TTL_SECONDS}s`;
 
 function buildAccessToken(user) {
+    const userId = Number(user.id_usuario);
     return jwt.sign(
-        { userId: user.id_usuario, email: user.email_usuario },
+        { userId, email: user.email_usuario, isAdmin: isGlobalAdmin(userId) },
         secret,
         { expiresIn: ACCESS_TOKEN_TTL }
     );
 }
 
 function buildAuthResponse(user) {
+    const plainUser = user?.get ? user.get({ plain: true }) : { ...user };
+    plainUser.isAdmin = isGlobalAdmin(plainUser.id_usuario);
     return {
-        token: buildAccessToken(user),
+        token: buildAccessToken(plainUser),
         expiresIn: ACCESS_TOKEN_TTL_SECONDS,
-        user,
+        user: plainUser,
     };
 }
 
-exports.forgotPassword = (req, res) => {
-    // Tu lógica para olvidar contraseña aquí
+exports.forgotPassword = async (req, res) => {
+    try {
+        const email = String(req.body?.email || '').trim().toLowerCase();
+        if (!email) {
+            return res.status(400).json({ message: 'Email is required.' });
+        }
+        if (!isBlockedAuthEmail(email)) {
+            await passwordResetService.requestPasswordReset({
+                email,
+                requestIp: req.ip,
+                userAgent: req.get('user-agent') || null,
+            }).catch((error) => {
+                console.error('[Auth] No se pudo encolar password reset:', error?.code || error?.message || error);
+            });
+        }
+        return res.status(202).json({
+            message: 'If the account exists, a recovery email will be sent.',
+        });
+    } catch (error) {
+        console.error('[Auth] Error en forgotPassword:', error?.code || error?.message || error);
+        return res.status(202).json({
+            message: 'If the account exists, a recovery email will be sent.',
+        });
+    }
 };
 
 exports.resetPassword = async (req, res) => {
     try {
-        console.log('Datos recibidos en resetPassword:', req.body);
-        const { email, password } = req.body;
-        if (!email || !password) {
-            return res.status(400).json({ message: "Email and password are required." });
-        }
-
-        // Aseguramos que se obtenga la instancia completa (raw: false)
-        const user = await Usuario.findOne({ where: { email_usuario: email }, raw: false });
-        if (!user) {
-            return res.status(404).json({ message: "User not found." });
-        }
-
-        const hashedPassword = await bcrypt.hash(password, 8);
-        console.log('Nuevo hash generado:', hashedPassword);
-
-        // Forzamos la actualización del campo password_usuario
-        user.setDataValue('password_usuario', hashedPassword);
-        await user.save({ fields: ['password_usuario'] });
-        console.log('Hash actualizado en DB:', user.password_usuario);
-
+        const { token, password } = req.body || {};
+        await passwordResetService.consumePasswordResetToken({ token, password });
         return res.status(200).json({
-            message: "Password reset successful.",
-            newPassword: password
+            message: 'Password reset successful.'
         });
     } catch (error) {
-        console.error("Error in resetPassword:", error);
-        return res.status(500).json({ message: "Server error", error: error.message });
+        const status = Number(error?.status || 500);
+        if (status >= 500) {
+            console.error('[Auth] Error in resetPassword:', error?.code || error?.message || error);
+        }
+        return res.status(status).json({ message: status >= 500 ? 'Server error' : error.message });
     }
 };
 
 
 exports.signIn = async (req, res) => {
     try {
-        console.log('Credenciales recibidas:', req.body);
         const email = String(req.body?.email || '').trim().toLowerCase();
 
         if (isBlockedAuthEmail(email)) {
@@ -71,21 +82,16 @@ exports.signIn = async (req, res) => {
         }
 
         const user = await Usuario.findOne({ where: { email_usuario: email } });
-        console.log('Datos del usuario:', user);
 
         if (!user) {
-            console.log('Usuario no encontrado.');
             return res.status(401).json({ message: 'Wrong email or password.' });
         }
 
         if (!user.password_usuario) {
-            console.log('No password set for the user.');
             return res.status(401).json({ message: 'Wrong email or password.' });
         }
         const validPassword = await bcrypt.compare(req.body.password, user.password_usuario);
-        console.log('Resultado de bcrypt.compare:', validPassword);
         if (!validPassword) {
-            console.log('Contraseña no válida.');
             return res.status(401).json({ message: 'Wrong email or password.' });
         }
 
@@ -141,6 +147,13 @@ exports.signUp = async (req, res) => {
             email_notificacion: email_notificacion,
             password_usuario: hashedPassword,
             fecha_creacion: fecha_creacion || new Date(),
+        });
+
+        systemNotificationsService.notifyUserRegistration({
+            user: newUser,
+            origin: 'auth.sign_up',
+        }).catch((error) => {
+            console.warn('[Auth] No se pudo encolar notificación de nuevo registro:', error?.code || error?.message || error);
         });
         
         res.status(201).json({

@@ -113,9 +113,12 @@ function buildAuthorizedBy(connection, fallbackUserId = null) {
 async function findSingleUserConnection(Model, userId) {
   const parsedUserId = parseInteger(userId);
   if (!parsedUserId) return { connection: null, ambiguous: false };
+  const updatedAttribute = Model.rawAttributes?.updatedAt
+    ? 'updatedAt'
+    : (Model.rawAttributes?.updated_at ? 'updated_at' : null);
   const connections = await Model.findAll({
     where: { userId: parsedUserId },
-    order: [['updatedAt', 'DESC'], ['id', 'DESC']],
+    order: [...(updatedAttribute ? [[updatedAttribute, 'DESC']] : []), ['id', 'DESC']],
     limit: 2,
   });
   if (connections.length === 1) {

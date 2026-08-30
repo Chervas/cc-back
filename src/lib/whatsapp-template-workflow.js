@@ -8,6 +8,9 @@ const REVIEW_WORKFLOW_USAGES = new Set([
 ]);
 
 const REVIEW_CATALOG_TEMPLATE_IDS = new Set([9, 32, 34]);
+const ADMIN_ONLY_TEMPLATE_USAGES = new Set([
+  'system_admin_alert',
+]);
 
 function cleanKey(value) {
   return String(value || '')
@@ -60,7 +63,24 @@ function isReviewWorkflowWhatsappTemplate(template) {
   ));
 }
 
+function isAdminOnlyWhatsappTemplate(template) {
+  if (!template || typeof template !== 'object') return false;
+  if (getWhatsappTemplateUsages(template).some((usage) => ADMIN_ONLY_TEMPLATE_USAGES.has(usage))) {
+    return true;
+  }
+
+  const technicalNames = [
+    template?.name,
+    template?.catalog?.name,
+  ].map(cleanKey).filter(Boolean);
+  return technicalNames.some((name) => (
+    name === 'clinicaclick_admin_alerta_sistema'
+    || name.startsWith('clinicaclick_admin_alerta_sistema_v')
+  ));
+}
+
 module.exports = {
   getWhatsappTemplateUsages,
+  isAdminOnlyWhatsappTemplate,
   isReviewWorkflowWhatsappTemplate,
 };

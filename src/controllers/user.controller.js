@@ -7,6 +7,7 @@ const {
 } = require('../../models');
 const bcrypt = require('bcryptjs');
 const { Op } = require('sequelize');
+const systemNotificationsService = require('../services/systemNotifications.service');
 
 const SAFE_USER_ATTRIBUTES = [
   'id_usuario', 'nombre', 'apellidos', 'email_usuario', 'avatar', 'telefono',
@@ -159,6 +160,13 @@ exports.createUser = async (req, res) => {
         }
       });
     }
+
+    systemNotificationsService.notifyUserRegistration({
+      user: newUser,
+      origin: 'users.admin_create',
+    }).catch((error) => {
+      console.warn('[users] No se pudo encolar notificación de nuevo registro:', error?.code || error?.message || error);
+    });
 
     res.status(201).json({
       message: 'Usuario creado exitosamente',

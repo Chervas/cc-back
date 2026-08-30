@@ -224,8 +224,9 @@ async function testAmbiguousLegacyUserFailsClosed() {
     db.ClinicWebAsset.findOne = async () => null;
     db.ClinicAnalyticsProperty.findOne = async () => null;
     db.ClinicBusinessLocation.findOne = async () => null;
-    db.GoogleConnection.findAll = async ({ where, limit }) => {
+    db.GoogleConnection.findAll = async ({ where, order, limit }) => {
       assert.deepEqual(where, { userId: 7 });
+      assert.deepEqual(order, [['updated_at', 'DESC'], ['id', 'DESC']]);
       assert.equal(limit, 2);
       return [{ id: 101 }, { id: 202 }];
     };

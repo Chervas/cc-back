@@ -17,6 +17,19 @@ const {
 const { emitNotificationCreated } = require('./notificationsRealtime.service');
 
 const ADMIN_ONLY_EVENTS = new Set([
+  'system.notification_test',
+  'users.new_registration',
+  'email_provider_disabled',
+  'email_from_missing',
+  'email_encryption_missing',
+  'email_ses_credentials_missing',
+  'email_webhook_token_missing',
+  'email_failures_24h',
+  'email_queue_stuck',
+  'email_sent_without_events',
+  'email_complaints_7d',
+  'email_bounces_7d',
+  'email_active_suppressions',
   'whatsapp.account_compliance_incident',
   'whatsapp.account_compliance_help_requested',
   'whatsapp.account_compliance_resolved',

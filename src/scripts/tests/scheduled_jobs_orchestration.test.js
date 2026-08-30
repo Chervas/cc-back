@@ -31,7 +31,7 @@ function testCatalogCoversEveryCronAndExecutor() {
   const catalogNames = definitions.map(([name]) => name).sort();
   const types = definitions.map(([, definition]) => definition.type);
 
-  assert.equal(definitions.length, 34, 'the canonical scheduler must retain web, report cache and campaign periodic jobs');
+  assert.equal(definitions.length, 35, 'the canonical scheduler must retain email, web, report cache and campaign periodic jobs');
   assert.deepEqual(catalogNames, configuredNames);
   assert.equal(new Set(types).size, types.length, 'scheduled job types must be unique');
   for (const jobName of [
@@ -100,6 +100,21 @@ function testCatalogCoversEveryCronAndExecutor() {
     'marketing_reports_cache_refresh',
     'Mi clínica snapshots must be refreshed by a durable scheduled job'
   );
+  assert.equal(
+    SCHEDULED_JOB_DEFINITIONS.systemNotificationCheck.type,
+    'system_notification_check',
+    'system alerts must be evaluated by a durable scheduled job'
+  );
+  assert.equal(
+    metaSyncJobs.config.schedules.systemNotificationCheck,
+    process.env.JOBS_SYSTEM_NOTIFICATION_CHECK_SCHEDULE || '*/5 * * * *'
+  );
+  assert.equal(
+    BACKGROUND_INTEGRATION_JOB_TYPES.includes('system_notification_check'),
+    false,
+    'database-only alert checks must not wait for the external-provider lane'
+  );
+  assert.equal(typeof metaSyncJobs.startSelected, 'function');
 
   for (const [jobName, definition] of definitions) {
     assert.equal(typeof metaSyncJobs[definition.executorMethod], 'function', `${jobName} executor missing`);

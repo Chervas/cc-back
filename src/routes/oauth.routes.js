@@ -98,7 +98,14 @@ const FRONTEND_DEV_URL = 'http://localhost:4200'; // Para desarrollo local
 const FRONTEND_DEV_INTEGRATION_URL = 'http://localhost:4203';
 const META_API_BASE_URL = process.env.META_API_BASE_URL || 'https://graph.facebook.com/v24.0';
 const META_BUSINESS_ID = process.env.META_BUSINESS_ID || process.env.META_BM_ID || null;
-const META_DEBUG_TOKEN_STATUS_CACHE_TTL_MS = Number(process.env.META_DEBUG_TOKEN_STATUS_CACHE_TTL_MS || 5 * 60 * 1000);
+const META_DEBUG_TOKEN_STATUS_CACHE_TTL_MS = Math.max(
+    5 * 60 * 1000,
+    Number(process.env.META_DEBUG_TOKEN_STATUS_CACHE_TTL_MS || 30 * 60 * 1000)
+);
+const META_OAUTH_RATE_LIMIT_COOLDOWN_MS = Math.max(
+    60 * 60 * 1000,
+    Number(process.env.META_OAUTH_RATE_LIMIT_COOLDOWN_MS || process.env.METASYNC_RATE_LIMIT_COOLDOWN_MS || 2 * 60 * 60 * 1000)
+);
 const metaDebugTokenStatusCache = new Map();
 const metaDebugTokenStatusInflight = new Map();
 const ALLOWED_FRONTEND_ORIGINS = new Set([
@@ -113,9 +120,21 @@ function getMetaGraphError(error) {
 }
 
 function isMetaApplicationRateLimit(error) {
+    if (error?.code === 'META_RATE_LIMIT_PAUSED') {
+        return true;
+    }
     const graphError = getMetaGraphError(error);
-    return Number(graphError?.code) === 4
-        && /application request limit reached/i.test(String(graphError?.message || ''));
+    const graphCode = Number(graphError?.code);
+    return graphCode === 4
+        ? /application request limit reached/i.test(String(graphError?.message || ''))
+        : [17, 613].includes(graphCode);
+}
+
+function metaRateLimitPausedError(pauseUntil) {
+    const error = new Error(`Meta OAuth paused until ${pauseUntil.toISOString()}`);
+    error.code = 'META_RATE_LIMIT_PAUSED';
+    error.pauseUntil = pauseUntil;
+    return error;
 }
 
 function metaDebugTokenStatusCacheKey(connection) {
@@ -219,9 +238,7 @@ function metaOAuthErrorCode(error) {
 }
 
 function metaRateLimitPauseUntil() {
-    const d = new Date();
-    d.setMinutes(60, 0, 0);
-    return d;
+    return new Date(Date.now() + META_OAUTH_RATE_LIMIT_COOLDOWN_MS);
 }
 
 async function recordMetaOAuthUsage({ source = 'oauth_meta', operation = 'meta_oauth', status = 'ok', error = null, requestCount = 1 } = {}) {
@@ -233,22 +250,30 @@ async function recordMetaOAuthUsage({ source = 'oauth_meta', operation = 'meta_o
         status: rateLimited ? 'rate_limited' : status,
         usagePct: rateLimited ? 100 : null,
         requestCount,
-        pauseUntil: rateLimited ? metaRateLimitPauseUntil() : undefined,
+        pauseUntil: rateLimited ? (error.pauseUntil || metaRateLimitPauseUntil()) : undefined,
         error
     });
 }
 
 async function instrumentedMetaOauthGet(url, config = {}, { source = 'oauth_meta', operation = 'meta_get' } = {}) {
     try {
+        const pauseUntil = await readMetaOAuthPauseUntil();
+        if (pauseUntil) {
+            throw metaRateLimitPausedError(pauseUntil);
+        }
         const response = await axios.get(url, config);
         await recordMetaOAuthUsage({ source, operation, status: 'ok' });
         return response;
     } catch (error) {
+        if (isMetaApplicationRateLimit(error) && !error.pauseUntil) {
+            error.pauseUntil = metaRateLimitPauseUntil();
+        }
         await recordMetaOAuthUsage({
             source,
             operation,
             status: isMetaApplicationRateLimit(error) ? 'rate_limited' : 'error',
-            error
+            error,
+            requestCount: error?.code === 'META_RATE_LIMIT_PAUSED' ? 0 : 1
         });
         throw error;
     }
@@ -3474,6 +3499,26 @@ router.get('/meta/connection-status', async (req, res) => {
                     debugData = result.debugData;
                     validationCacheHit = !!result.cacheHit;
                 } catch (err) {
+                    if (isMetaApplicationRateLimit(err)) {
+                        const pauseUntil = err.pauseUntil || await readMetaOAuthPauseUntil() || metaRateLimitPauseUntil();
+                        return res.json({
+                            connected: true,
+                            metaUserId: connection.metaUserId,
+                            userName: connection.userName,
+                            userEmail: connection.userEmail,
+                            authorizedByUserId: assignment?.authorizedByUserId || connection.userId || null,
+                            authorizedByName: assignment?.authorizedByName || connection.userName || null,
+                            authorizedByEmail: assignment?.authorizedByEmail || connection.userEmail || null,
+                            scopes,
+                            missingScopes,
+                            validationDeferred: true,
+                            validationPausedUntil: pauseUntil.toISOString(),
+                            reason: 'meta_validation_rate_limited',
+                            message: 'Conexión Meta activa. La validación en vivo está pausada temporalmente por límite de Meta.',
+                            scope: buildScopeResponse(scope, assignment),
+                            source
+                        });
+                    }
                     console.warn('⚠️ No se pudo obtener scopes de Meta (debug_token):', err.response?.data || err.message);
                     return res.json({
                         connected: false,

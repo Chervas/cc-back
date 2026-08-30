@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const {
   getWhatsappTemplateUsages,
+  isAdminOnlyWhatsappTemplate,
   isReviewWorkflowWhatsappTemplate,
 } = require('../../lib/whatsapp-template-workflow');
 
@@ -37,5 +38,22 @@ test('mantiene disponibles las plantillas manuales normales', () => {
     name: 'cc_seguimiento_personal',
     origin: 'custom',
     variables: [{ position: 1, name: 'nombre_paciente' }],
+  }), false);
+});
+
+test('detecta plantillas admin-only por contrato de uso o nombre reservado', () => {
+  assert.equal(isAdminOnlyWhatsappTemplate({
+    name: 'cc_alerta_operativa',
+    origin: 'custom',
+    variables: [{ position: 1, template_usage: 'system_admin_alert' }],
+  }), true);
+  assert.equal(isAdminOnlyWhatsappTemplate({
+    name: 'clinicaclick_admin_alerta_sistema',
+    origin: 'custom',
+  }), true);
+  assert.equal(isAdminOnlyWhatsappTemplate({
+    name: 'cc_recordatorio_paciente',
+    origin: 'custom',
+    variables: [{ position: 1, template_usage: 'cita_recordatorio' }],
   }), false);
 });

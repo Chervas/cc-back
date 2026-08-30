@@ -1,5 +1,5 @@
 > **Módulo:** Arquitectura del Backend
-> **Última actualización:** 2026-07-20
+> **Última actualización:** 2026-08-30
 > **Relacionado con:** `cc-front/src/Documentacion/20.1-motor-flujos-v2.md` | documento operativo `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`
 > **Fuente canónica:** este archivo del repositorio backend. `cc-front/src/Documentacion/13-backend.md` es un espejo completo para conservar los enlaces internos del manual frontend; cualquier cambio se hace aquí primero y después se sincroniza el espejo.
 
@@ -22,6 +22,140 @@ simulacion visible y no comunica con AEAT.
   reactivación `excluded_future_appointment` no aplica a reseñas.
 
 Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Data Manager/Conversiones mejoradas, política de goals y E2E/limpieza de intake.
+
+## 2026-08-30 - Cierre operativo email, reset y limites Meta
+
+- `system_notification_check` forma parte del catalogo durable con horario
+  por defecto `*/5 * * * *`. El callback solo crea un `JobRequest`; el worker
+  evalua alertas y encola `system_notification_dispatch`. En DEV el ownership
+  selectivo se activa con `SYSTEM_NOTIFICATIONS_CRON_LEADER=true` o, si la
+  variable no existe, por `JOB_RUNTIME_NAMESPACE=dev`. Un cron leader completo
+  ya incluye este job y gateway no registra cron.
+- La ejecucion automatica `JobRequest #62915` quedo `completed` en un intento y
+  actualizo `last_checked_at`, acreditando que las alertas no dependen de abrir
+  la pantalla ni de una peticion HTTP.
+- `reconcile_email_delivery_state.js` compara eventos SES, estados de
+  `EmailMessages` y entregas admin sin imprimir destinatarios o contenidos. Se
+  ejecuto primero en dry-run, despues con `--apply` transaccional y un segundo
+  dry-run devolvio cero diferencias.
+- Password reset en DEV aplica respuesta no enumerable, token de un solo uso,
+  enlace cifrado y limites por intervalo, usuario e IP. Los controladores
+  legacy de `back-staging` y `gateway` se dejaron fail-closed con `503
+  password_recovery_not_available`; no deben reactivarse hasta promover el
+  flujo seguro completo con migraciones, variables y QA.
+- Meta OAuth y los clientes Graph cortan en el primer codigo `4`, `17` o `613`,
+  persisten cooldown compartido y no reintentan como error generico HTTP 400.
+  `connection-status` devuelve conexion activa con `validationDeferred=true`
+  durante la pausa, deduplica llamadas en vuelo y cachea `debug_token` 30
+  minutos por defecto. El mismo hardening minimo se aplico a `back-dev`,
+  `back-staging` y `gateway`.
+- La resolucion legacy de una unica conexion selecciona el atributo temporal
+  real del modelo (`updatedAt` o `updated_at`), evitando el error SQL de Google.
+  El deep-link de Monitorizacion selecciona su panel antes de construir
+  Cuentas conectadas: abrir Email/Notificaciones no llama a Meta ni Google.
+- Las alarmas externas quedan definidas de forma reproducible en
+  `infrastructure/aws/email-monitoring.cloudformation.json`: 13 alarmas, SNS y
+  un colector de cuota SES de solo lectura. El contrato tiene cinco pruebas
+  base y pasa 6/6 contra la especificacion CloudFormation oficial. El stack esta
+  `CREATE_COMPLETE`; SNS, la recepcion controlada `ALARM`/`OK`, el colector y
+  las 13 alarmas `OK` estan acreditados. Nunca se amplian los permisos de
+  `clinicaclick-ses-sender` para operar esta monitorizacion.
+- SES usa un unico intento del SDK por ejecucion. Timeout, transporte, 5xx o
+  respuesta sin `MessageId` quedan como resultado ambiguo no reintentable para
+  evitar duplicados; throttling/429 conserva el backoff durable y maximo de tres
+  intentos por defecto. La etiqueta opaca `cc_outbox` permite que un evento SES
+  posterior reconcilie el mensaje sin destinatarios ni datos clinicos.
+
+## 2026-08-30 - Notificaciones administrativas en Monitorizacion
+
+- Se anaden `SystemNotificationSettings` y `SystemNotificationDeliveries` para
+  configurar canales admin y auditar entregas sin guardar destinatarios en
+  claro dentro de `JobRequests`.
+- Rutas admin nuevas: `GET /api/system-monitoring/notifications/overview`,
+  `PATCH /settings`, `POST /whatsapp-template/prepare`, `POST /test` y
+  `POST /check`.
+- `JobExecutor` registra `system_notification_dispatch`; el payload durable
+  contiene solo `system_notification_delivery_id`. El handler entrega por panel
+  interno, email outbox (`ops.system_alert`) o WhatsApp Cloud API.
+- La plantilla WhatsApp de sistema es `clinicaclick_admin_alerta_sistema`,
+  uso `system_admin_alert`, y queda excluida de QuickChat, playbooks y
+  selectores habituales. Solo aparece en contexto `system_monitoring` para
+  admin global.
+- Eventos iniciales: prueba de sistema, `users.new_registration` y alertas de
+  email (`email_provider_disabled`, `email_queue_stuck`, rebotes, quejas,
+  supresiones, credenciales/configuracion y ausencia de eventos SES).
+- En dev estan activos panel, email admin y WhatsApp admin. La plantilla quedo
+  aprobada por Meta. Las pruebas controladas de panel, email SES, WhatsApp
+  dry-run y nuevo registro sintetico terminaron con el estado esperado. Las
+  siete entregas WhatsApp reales (`#3/#8/#11/#12/#16/#20/#22`) fueron
+  aceptadas inicialmente por la API y fallaron despues por webhook con `131031
+  Business Account locked`; cinco corresponden a pruebas manuales y dos a
+  alertas automaticas. El activo Propdental `#358` tiene una restriccion de
+  mensajeria empresarial vigente hasta `2026-09-05 21:21:20 UTC`, aunque figure
+  `GREEN` y `TIER_10K`.
+- `systemNotifications.service.js` comprueba ahora esa incidencia antes de
+  encolar: registra `skipped`, respeta el throttle y no crea `JobRequest`. El
+  dispatcher repite el preflight como defensa, falla cerrado sin llamar a Meta
+  y publica bloqueo/caducidad en el overview. `queue.workers.js` puede
+  correlacionar estados de WAMID sin
+  `Message` local contra `SystemNotificationDeliveries.provider_message_id`,
+  actualiza el terminal y registra `WhatsappDeliveryEvent`; la migracion
+  `20260830163000-index-system-notification-provider-message.js` indexa la
+  busqueda. El worker publico sigue en `pm2-gateway` y no se modifico: este
+  cambio requiere promocion posterior para callbacks futuros.
+- Contrato completo:
+  [33-sistema-email](../../../front-dev/src/Documentacion/33-sistema-email.md#notificaciones-de-administracion).
+
+## 2026-08-30 - SES y EventBridge validados en dev
+
+- `back-dev` opera email transaccional con `EMAIL_PROVIDER=ses` en `eu-west-3`
+  y configuration set `clinicaclick-transactional`, con allowlist obligatoria.
+- Tras corregir IAM, `EmailMessage #3` quedo `sent` con `SES MessageId`.
+- Con la regla EventBridge `clinicaclick-ses-to-gateway` activa hacia
+  `pm2-gateway`, `EmailMessage #4` quedo `delivered` y concilio eventos reales
+  `send` y `delivery` en `EmailProviderEvents`.
+- El contrato comun preserva el hardening del gateway: health autenticado y
+  `no-store`, payload maximo de 80 KiB y dry-run por query o cabecera sin
+  persistencia.
+- `auth.password_reset` conserva el enlace de reset cifrado en
+  `template_context.reset_url_envelope`; no guarda `reset_url` en claro y el
+  worker lo descifra solo en memoria al renderizar.
+- `GET /api/email/admin/overview` devuelve `alerts[]` para la pestaña Email:
+  proveedor/configuracion, cola atascada, fallos, rebotes, quejas y
+  supresiones.
+- Marketing masivo sigue deshabilitado y los eventos externos de SES no deben
+  apuntar a `back-dev`; entran por
+  `https://autenticacion.clinicaclick.com/api/email/events/provider`.
+
+## 2026-08-29 - Sistema de email transaccional en dev
+
+- Se incorpora el contrato de email saliente con AWS SES v2 API como proveedor
+  gestionado y `mock` local. No se instala ni opera Postfix/Dovecot ni buzones
+  SMTP/IMAP propios.
+- Migracion `20260829120000-create-email-system.js`: crea `EmailMessages`,
+  `EmailProviderEvents`, `EmailSuppressions` y `PasswordResetTokens`.
+- Modelos nuevos: `EmailMessage`, `EmailProviderEvent`, `EmailSuppression` y
+  `PasswordResetToken`.
+- Servicios nuevos: `emailDelivery.service.js`, `emailProvider.service.js`,
+  `emailEvents.service.js`, `emailMonitoring.service.js`,
+  `passwordReset.service.js` y `emailTemplates.service.js`.
+- Rutas admin: `GET /api/email/admin/overview`, `/messages`, `/events`,
+  `/suppressions` y `POST /api/email/admin/test-message`.
+- Ruta de eventos: `POST /api/email/events/provider`, protegida por
+  `EMAIL_EVENT_WEBHOOK_TOKEN`.
+- `JobExecutor` registra `email_send`; el payload durable contiene solo
+  `email_message_id`. El handler relee `EmailMessage`, descifra el destinatario,
+  renderiza plantilla y llama al proveedor fuera de la peticion HTTP.
+- `forgotPassword` queda conectado al outbox y responde siempre de forma
+  generica. `resetPassword` exige token, no email, no devuelve contrasena y
+  consume el token una sola vez.
+- `action/send_email` en Automatizaciones V2 deja de ser stub: encola
+  `EmailMessage`/`JobRequest`. El contenido generico queda bloqueado salvo
+  `EMAIL_AUTOMATION_GENERIC_ENABLED=true` y marketing masivo sigue cerrado.
+- La monitorizacion administrativa queda en
+  `/ajustes?panel=jobs-monitoring&tab=email`, sin mostrar direcciones completas
+  ni cuerpos.
+- Contrato completo: [33-sistema-email](../../../front-dev/src/Documentacion/33-sistema-email.md).
 
 ## 2026-08-03 - QuickChat, leads y reacciones WhatsApp
 
@@ -684,10 +818,12 @@ responden `404`. El E2E público de dos rutas, la rotación HMAC y el readback
 ETag terminaron y se detallan más abajo. Cloudflare y origen devuelven `304`
 con `If-None-Match` exacto después de retirar el magic-quotes de WordPress.
 
-El inventario canónico del runtime vigente es **34 tareas
+El inventario canónico del runtime DEV vigente es **35 tareas
 periódicas**, **14 integraciones dirigidas/background**, **48 tipos background**
-en total y **64 handlers**. `marketing_reports_cache_refresh` materializa los
-snapshots persistentes de `Mi clínica` sin refrescar el mapa local.
+en total y **69 handlers**. Staging conserva 33 tareas y 47 tipos background
+hasta una promoción aprobada. `email_send` procesa el outbox de email como job
+estandar durable; `marketing_reports_cache_refresh` materializa los snapshots persistentes de
+`Mi clínica` sin refrescar el mapa local.
 `web_content_generation` y las operaciones
 `managed_campaign.google_search_create.v1`,
 `managed_campaign.google_search_activate.v1` y
@@ -838,11 +974,12 @@ Regresiones mínimas: `business_profile_local.test.js`, `marketing_competition_h
 
 Release funcional staging: backend `9b82958`, promovido desde dev `ac994a0`; frontend `3c4593ae`, promovido desde dev `667c6a73` —cambio funcional `f9266f0a`—, build `8ca8e450c563e9ee`. Propdental continúa en `connect_only`; Piloto automático no está activo.
 
-> **Nota de inventario vigente 2026-07-19:** los conteos `30/6/48` de esta
+> **Nota de inventario vigente 2026-08-30:** los conteos `30/6/48` de esta
 > sección se conservan como evidencia del cutover del 14 de julio. El runtime
-> vigente registra **34 tareas periódicas**, **14 integraciones
-> dirigidas/background**, **48 tipos background** y **64 handlers**, incluidos
-> `marketing_web_publication_health_monitor` y
+> DEV registra **35 tareas periódicas**, **14 integraciones
+> dirigidas/background**, **48 tipos background** y **69 handlers**; staging
+> conserva 33 tareas y 47 tipos hasta una promoción aprobada. El inventario DEV incluye
+> `email_send`, `marketing_web_publication_health_monitor` y
 > `web_intake_runtime_reconcile`; todos siguen materializados en
 > `JobRequest`, sin cron de negocio lateral.
 
@@ -850,8 +987,8 @@ Release funcional staging: backend `9b82958`, promovido desde dev `ac994a0`; fro
 
 `SCHEDULED_JOB_DEFINITIONS` contiene 30 tareas periódicas. Las seis nuevas son `system_pm2_log_retention` y cinco bridges OPS (`ops_global_discovery`, `ops_summary`, `ops_google_business_profile_daily`, `ops_search_console_daily`, `ops_google_business_profile_requested`). `node-cron` solo crea `JobRequest`; el worker durable ejecuta, reintenta, recupera y audita. Los bridges conservan `UTC`. `OPS_INTERNAL_API_TOKEN` es obligatorio y nunca se registra.
 
-El inventario de aquel cutover contenía 48 handlers. El runtime vigente tiene
-63; la nota superior es la fuente vigente. Las 6 integraciones
+El inventario de aquel cutover contenía 48 handlers. DEV tiene ahora
+69; la nota superior es la fuente vigente. Las 6 integraciones
 dirigidas/background de aquel corte eran `meta_ads_backfill_for_sites`,
 `web_backfill_for_sites`, `analytics_backfill_properties`,
 `business_profile_backfill_locations`, `whatsapp_template_sync_delayed` y
@@ -2563,7 +2700,7 @@ El monitor de `node-cron` muestra `enqueued`/`already_queued`, `lastEnqueuedAt` 
 
 BullMQ sigue siendo la cola especializada de WhatsApp y otros transportes inmediatos. En tareas como `whatsapp_templates_sync`, el flujo completo es `cron -> JobRequest durable -> execute* -> BullMQ por WABA`; no existe una ejecución de negocio lateral desde el callback cron. Los envíos por horario silencioso y las resincronizaciones diferidas de plantillas no usan `delay` de BullMQ: esperan en `JobRequests` y solo despachan el transporte cuando vencen.
 
-Regresión canónica: `node src/scripts/tests/scheduled_jobs_orchestration.test.js`. Comprueba cobertura exacta de los 34 horarios vigentes, mappings dirigidos —incluidos `marketing_reports_cache_refresh`, `marketing_competition_heatmap_refresh`, generación IA, operaciones gestionadas y la reconciliación Web—, alcance de deduplicación, índice/migración, `queued`, separación y exclusión mutua de carriles, advisory lease, monitor de enqueue, clasificación total/parcial, timeouts HTTP, `sync_log_id`, enum de `SyncLogs`, backoff, agotamiento, startup gate/retry/stop y settlements CAS con conflicto. `durable_whatsapp_scheduling.test.js` cubre las dos programaciones puntuales, la ausencia de PII/tokens en sus payloads, el inventario exacto de 64 handlers y el despacho idempotente del transporte. `intake_quickchat_outbox.test.js` añade atomicidad, rollback, idempotencia y reintento del outbox de intake. Los bridges y la retención tienen además `ops_bridge_runner.test.js` y `pm2_log_retention.test.js`.
+Regresión canónica: `node src/scripts/tests/scheduled_jobs_orchestration.test.js`. Comprueba cobertura exacta de los 35 horarios DEV vigentes, mappings dirigidos —incluidos `marketing_reports_cache_refresh`, `marketing_competition_heatmap_refresh`, generación IA, operaciones gestionadas y la reconciliación Web—, alcance de deduplicación, índice/migración, `queued`, separación y exclusión mutua de carriles, advisory lease, monitor de enqueue, clasificación total/parcial, timeouts HTTP, `sync_log_id`, enum de `SyncLogs`, backoff, agotamiento, startup gate/retry/stop y settlements CAS con conflicto. `durable_whatsapp_scheduling.test.js` cubre las dos programaciones puntuales, la ausencia de PII/tokens en sus payloads, el inventario exacto de 69 handlers y el despacho idempotente del transporte. `email_system.test.js` cubre `email_send`, outbox, proveedor mock/SES deshabilitado, eventos y supresiones. `intake_quickchat_outbox.test.js` añade atomicidad, rollback, idempotencia y reintento del outbox de intake. Los bridges y la retención tienen además `ops_bridge_runner.test.js` y `pm2_log_retention.test.js`.
 
 Importante:
 
@@ -3699,7 +3836,7 @@ Groq queda desacoplado y limitado al audio:
 - El handler registrado en `JOB_HANDLERS` exige el par `audit_id + lead_id`, comprueba que el audit pertenece a ese lead y acepta audits de ambos `source_detail`. Antes de reutilizar `materializeIntakeQuickChatSummary`, normaliza internamente el source a `chatbot_quickchat` y pasa el `audit_id` como orden durable. La materialización bloquea el lead y consulta bajo la misma transacción todos sus resúmenes: `Messages.metadata.intake_audit_id` mayor gana. Si un outbox antiguo corre después, completa `skipped/stale`, no emite socket, no cambia contenido/metadata, no consolida y no toca `Conversations.last_message_at`. El watermark forma parte de `needsUpdate`: un audit posterior avanza el marcador aunque hash y contenido sean idénticos; del mismo modo, un mensaje legacy idéntico adopta el primer marcador. Reejecutar el mismo audit o recibir ambos POST no crea un segundo mensaje.
 - El handler no llama a Meta CAPI, Google Ads/Data Manager, BullMQ ni a un envío real de WhatsApp. Solo persiste el evento interno y emite el socket de interfaz como best effort. Para audits actuales extrae y valida `resolved_clinic_id` y lo pasa al materializador: si el lead pertenece a otra sede, termina sin retry con `409 quickchat_summary_clinic_mismatch`, cero Message/socket. Solo audits legacy sin `resolved_clinic_id` pueden recuperar usando la clínica persistida en el lead; nunca aceptan una sede del payload crudo. Los `4xx` guardan en `result_summary` únicamente `http_status`, `error_code` y un mensaje de allowlist, además de IDs/flags sin contenido/PII, para que el fast path conserve el `409` en vez de degradarlo a `500`. Errores técnicos se reintentan; payload incompleto o mismatch audit/lead quedan terminales no reintentables. Si el lead/audit ya fue limpiado de forma controlada, el job termina como `skipped/audit_not_found`.
 - `scripts/cleanup-intake-e2e-run.js` carga y bloquea los outbox por `payload.lead_id`, exige que cada `payload.audit_id` sea el audit exacto del lead y rechaza jobs `running`. En `simulate/apply` borra el JobRequest antes del lead dentro de la transacción y el postcheck exige `quickchat_outbox_jobs=0`, evitando que un job huérfano reconstruya la conversación tras la limpieza.
-- Regresión: `node src/scripts/tests/intake_quickchat_outbox.test.js` cubre lead nuevo y deduplicado guardando IDs resueltos, rechazo cross-clinic `409` sin materialización/socket, fallback legacy a la clínica del lead, lectura compatible del wrapper de `JobExecutor` y del formato directo de fixtures, commit atómico, rollback si falla el enqueue, `14725`/email inválido con cero lead-audit-job, unión real de `enqueueJobRequest` a la transacción, par audit/lead, fallo transitorio/reintento para ambos contratos, audit stale sin socket, duplicado idempotente, relectura tras error del trigger, outcome `unknown_durable`, fast path `completed/202 queued` sin falsos positivos, ausencia de proveedores y el inventario de 64 handlers. `intake_quickchat_summary.test.js` protege el orden inverso/doble POST, compatibilidad legacy, contenido y `last_message_at` del ganador, el `422` antes de crear, la ausencia de materialización lateral y los retornos `chatbot` deduplicado anteriores a Meta/Google conservando `409` para el resto; `cleanup_intake_e2e_run.test.js` cubre outbox exacto/running.
+- Regresión: `node src/scripts/tests/intake_quickchat_outbox.test.js` cubre lead nuevo y deduplicado guardando IDs resueltos, rechazo cross-clinic `409` sin materialización/socket, fallback legacy a la clínica del lead, lectura compatible del wrapper de `JobExecutor` y del formato directo de fixtures, commit atómico, rollback si falla el enqueue, `14725`/email inválido con cero lead-audit-job, unión real de `enqueueJobRequest` a la transacción, par audit/lead, fallo transitorio/reintento para ambos contratos, audit stale sin socket, duplicado idempotente, relectura tras error del trigger, outcome `unknown_durable`, fast path `completed/202 queued` sin falsos positivos, ausencia de proveedores y el inventario DEV de 69 handlers. `intake_quickchat_summary.test.js` protege el orden inverso/doble POST, compatibilidad legacy, contenido y `last_message_at` del ganador, el `422` antes de crear, la ausencia de materialización lateral y los retornos `chatbot` deduplicado anteriores a Meta/Google conservando `409` para el resto; `cleanup_intake_e2e_run.test.js` cubre outbox exacto/running.
 
 **Evidencia live postdeploy:** el chat móvil controlado `CC-E2E-QUICKCHAT-20260713-0110`, con Marketing rechazado y sin click IDs, eligió Sant Martí `56`. El único lead `#7213` produjo audits `#7400/#7401`, jobs `#23818/#23819` completados al primer intento y una sola conversación/mensaje (`#3574/#43072`) cuyo watermark quedó en `7401`; hubo cero intentos Google. El procedimiento `dry-run -> simulate -> apply` retiró después exclusivamente el marcador y devolvió cero en cada postcheck comprometido. Los chats reales huérfanos `#7185/#7195/#7196` se revalidaron y recuperaron por el mismo orquestador mediante `#23820-#23822`, una conversación/resumen Sants `19` por lead; los intentos de proveedor permanecieron `3 -> 3`.
 
@@ -4584,7 +4721,7 @@ Nombre UI: `Consentimiento necesario`.
 Estado actual:
 
 - trigger disponible para construir automatizaciones;
-- `action/send_email` sigue stub, por lo que envío por email real queda documentado como mock;
+- `action/send_email` encola `EmailMessage` + `JobRequest.email_send`; los cuerpos genericos requieren `EMAIL_AUTOMATION_GENERIC_ENABLED=true` y el canal de consentimientos debe validar plantilla/caso de uso antes de enviar a pacientes;
 - WhatsApp dispone de plantilla admin para enlace de consentimiento, pero el envío real depende de WABA conectado, plantilla aprobada y resolución de `consentimiento.enlace_publico`;
 - al crear/reprogramar cita con documentos pendientes, backend crea/reutiliza paquete y dispara `consent_required` con idempotencia por paquete.
 

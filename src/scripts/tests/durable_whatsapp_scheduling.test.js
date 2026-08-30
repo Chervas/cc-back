@@ -573,7 +573,9 @@ async function testRuntimeRevalidatesClinicAccessPublicMediaAsset() {
 }
 
 async function testHandlersAndLaneInventory() {
-  assert.equal(Object.keys(jobExecutor.JOB_HANDLERS).length, 65);
+  assert.equal(Object.keys(jobExecutor.JOB_HANDLERS).length, 69);
+  assert.equal(typeof jobExecutor.JOB_HANDLERS.email_send, 'function');
+  assert.equal(typeof jobExecutor.JOB_HANDLERS.system_notification_check, 'function');
   assert.equal(typeof jobExecutor.JOB_HANDLERS.lead_auto_reply_backfill, 'function');
   assert.equal(typeof jobExecutor.JOB_HANDLERS.automation_whatsapp_quiet_send, 'function');
   assert.equal(typeof jobExecutor.JOB_HANDLERS.whatsapp_template_sync_delayed, 'function');

@@ -14,6 +14,7 @@ if (process.env.OPS_VERBOSE_MODEL_LOAD !== 'true') {
 const db = require(path.resolve(process.cwd(), 'models'));
 console.log = originalConsoleLog;
 db.sequelize.options.logging = false;
+const { recordApiUsage } = require('../services/apiUsageTelemetry.service');
 
 const apiUrl = (process.env.OPS_API_URL || 'https://ops.conmigas.com').replace(/\/$/, '');
 const apiToken = process.env.OPS_INTERNAL_API_TOKEN;
@@ -24,6 +25,14 @@ const metaMaxAccounts = Number(process.env.OPS_META_MAX_ACCOUNTS_PER_RUN || 80);
 const metaMaxAdsetsPerAccount = Number(process.env.OPS_META_MAX_ADSETS_PER_ACCOUNT || 250);
 const metaMaxAdsPerAccount = Number(process.env.OPS_META_MAX_ADS_PER_ACCOUNT || 25);
 const metaMaxVideoInsightCalls = Number(process.env.OPS_META_MAX_VIDEO_INSIGHT_CALLS || 80);
+const metaRateLimitCooldownMs = Math.max(
+  60 * 60 * 1000,
+  Number(process.env.OPS_META_RATE_LIMIT_COOLDOWN_MS || process.env.METASYNC_RATE_LIMIT_COOLDOWN_MS || 2 * 60 * 60 * 1000)
+);
+const metaUsageThreshold = Math.max(
+  1,
+  Math.min(100, Number(process.env.METASYNC_RATE_LIMIT_THRESHOLD || 90))
+);
 const googleMaxAccounts = Number(process.env.OPS_GOOGLE_MAX_ACCOUNTS_PER_RUN || 120);
 const googleMaxAdGroupsPerAccount = Number(process.env.OPS_GOOGLE_MAX_AD_GROUPS_PER_ACCOUNT || 500);
 const googleMaxAssetGroupsPerAccount = Number(process.env.OPS_GOOGLE_MAX_ASSET_GROUPS_PER_ACCOUNT || 300);
@@ -129,6 +138,101 @@ function shouldRetryOpsRequest(error) {
   return !status || status === 429 || status >= 500;
 }
 
+function parseUsageHeader(headerValue) {
+  try {
+    if (!headerValue) {
+      return 0;
+    }
+    const parsed = typeof headerValue === 'string' ? JSON.parse(headerValue) : headerValue;
+    if (parsed.call_count != null) {
+      return Math.max(
+        Number(parsed.call_count) || 0,
+        Number(parsed.total_cputime) || 0,
+        Number(parsed.total_time) || 0
+      );
+    }
+    const values = Object.values(parsed);
+    if (values.length && Array.isArray(values[0])) {
+      return values[0].reduce((max, entry) => Math.max(max, Number(entry?.usage) || 0), 0);
+    }
+  } catch {}
+  return 0;
+}
+
+function metaGraphError(error) {
+  return error?.response?.data?.error || null;
+}
+
+function isMetaRateLimitError(error) {
+  if (error?.code === 'META_RATE_LIMIT_PAUSED' || error?.code === 'META_RATE_LIMITED') {
+    return true;
+  }
+  const graphError = metaGraphError(error);
+  return [4, 17, 613].includes(Number(graphError?.code));
+}
+
+function metaPauseUntilFromNow() {
+  return new Date(Date.now() + metaRateLimitCooldownMs);
+}
+
+function metaPausedError(pauseUntil) {
+  const error = new Error(`Meta discovery paused until ${pauseUntil.toISOString()}`);
+  error.code = 'META_RATE_LIMIT_PAUSED';
+  error.pauseUntil = pauseUntil;
+  return error;
+}
+
+function metaLimitedError(error, pauseUntil) {
+  error.code = 'META_RATE_LIMITED';
+  error.pauseUntil = pauseUntil;
+  return error;
+}
+
+function compactMetaOperation(pathOrUrl) {
+  return String(pathOrUrl || 'graph_request')
+    .replace(/^https:\/\/graph\.facebook\.com\/v\d+\.\d+\//, '')
+    .split('?')[0]
+    .slice(0, 120);
+}
+
+function publicMetaErrorMessage(error) {
+  return metaGraphError(error)?.message || error?.message || 'Meta rate limit';
+}
+
+async function readMetaUsagePauseUntil() {
+  try {
+    const counter = db.ApiUsageCounter
+      ? await db.ApiUsageCounter.findByPk('meta_ads')
+      : null;
+    const pauseMs = counter?.pauseUntil ? new Date(counter.pauseUntil).getTime() : 0;
+    return pauseMs > Date.now() ? new Date(pauseMs) : null;
+  } catch (error) {
+    console.warn(`[global-discovery] Meta pause read skipped: ${error.message}`);
+    return null;
+  }
+}
+
+async function recordMetaDiscoveryUsage({
+  operation,
+  status = 'ok',
+  usagePct = null,
+  pauseUntil = undefined,
+  error = null,
+  requestCount = 1
+} = {}) {
+  await recordApiUsage({
+    provider: 'meta_ads',
+    source: 'ops_global_discovery',
+    operation: compactMetaOperation(operation),
+    status,
+    usagePct,
+    pauseUntil,
+    error,
+    requestCount,
+    metadata: { runner: 'push_ops_global_discovery' }
+  });
+}
+
 async function requestOps(method, endpoint, payload) {
   if (!apiToken) {
     throw new Error('OPS_INTERNAL_API_TOKEN is required');
@@ -208,14 +312,57 @@ async function paginatedMetaGet(pathOrUrl, accessToken, params = {}) {
   const items = [];
   let url = pathOrUrl.startsWith('http') ? pathOrUrl : `${metaBaseUrl}/${pathOrUrl.replace(/^\//, '')}`;
   let page = 0;
+  const operation = compactMetaOperation(pathOrUrl);
 
   while (url && page < 80) {
     page += 1;
+    const pauseUntil = await readMetaUsagePauseUntil();
+    if (pauseUntil) {
+      throw metaPausedError(pauseUntil);
+    }
     await sleep(requestDelayMs);
 
-    const response = await axios.get(url, {
-      params: page === 1 ? { ...params, access_token: accessToken } : { access_token: accessToken },
-      timeout: 45000
+    let response;
+    try {
+      response = await axios.get(url, {
+        params: page === 1 ? { ...params, access_token: accessToken } : { access_token: accessToken },
+        timeout: 45000
+      });
+    } catch (error) {
+      if (isMetaRateLimitError(error)) {
+        const pauseUntil = metaPauseUntilFromNow();
+        await recordMetaDiscoveryUsage({
+          operation,
+          status: 'rate_limited',
+          usagePct: 100,
+          pauseUntil,
+          error
+        });
+        throw metaLimitedError(error, pauseUntil);
+      }
+      throw error;
+    }
+
+    const headers = response.headers || {};
+    const usagePct = Math.max(
+      parseUsageHeader(headers['x-app-usage']),
+      parseUsageHeader(headers['x-ad-account-usage']),
+      parseUsageHeader(headers['x-page-usage']),
+      parseUsageHeader(headers['x-business-use-case-usage'])
+    );
+    if (usagePct >= metaUsageThreshold) {
+      const pauseUntil = metaPauseUntilFromNow();
+      await recordMetaDiscoveryUsage({
+        operation,
+        status: 'rate_limited',
+        usagePct,
+        pauseUntil
+      });
+      throw metaPausedError(pauseUntil);
+    }
+    await recordMetaDiscoveryUsage({
+      operation,
+      usagePct: usagePct || null
     });
 
     if (Array.isArray(response.data?.data)) {
@@ -301,6 +448,9 @@ async function discoverMetaAdAccounts(connection) {
           }
         }
       } catch (error) {
+        if (isMetaRateLimitError(error)) {
+          throw error;
+        }
         console.warn(`[global-discovery] Meta ${edge} skipped: ${error.response?.data?.error?.message || error.message}`);
       }
     }
@@ -329,6 +479,9 @@ async function discoverMetaCampaigns(connection, account) {
       limit: 200
     });
   } catch (error) {
+    if (isMetaRateLimitError(error)) {
+      throw error;
+    }
     console.warn(`[global-discovery] Meta campaigns skipped for ${accountId}: ${error.response?.data?.error?.message || error.message}`);
     return [];
   }
@@ -452,6 +605,8 @@ function parseMetaVideoInsights(rows = []) {
   return result;
 }
 
+const unsupportedMetaVideoInsightEdges = new Set();
+
 async function discoverMetaVideoInsights(connection, videoId) {
   if (!videoId) {
     return null;
@@ -462,7 +617,11 @@ async function discoverMetaVideoInsights(connection, videoId) {
     'post_video_retention_graph,post_video_avg_time_watched,post_video_views'
   ];
 
-  for (const edge of [`${videoId}/video_insights`, `${videoId}/insights`]) {
+  for (const edgeName of ['video_insights', 'insights']) {
+    if (unsupportedMetaVideoInsightEdges.has(edgeName)) {
+      continue;
+    }
+    const edge = `${videoId}/${edgeName}`;
     for (const metric of metricGroups) {
       try {
         const rows = await paginatedMetaGet(edge, connection.accessToken, {
@@ -475,7 +634,15 @@ async function discoverMetaVideoInsights(connection, videoId) {
           return parsed;
         }
       } catch (error) {
+        if (isMetaRateLimitError(error)) {
+          throw error;
+        }
         const message = error.response?.data?.error?.message || error.message;
+        const graphCode = Number(error.response?.data?.error?.code);
+        if (graphCode === 100 && /nonexisting field/i.test(message)) {
+          unsupportedMetaVideoInsightEdges.add(edgeName);
+          break;
+        }
         console.warn(`[global-discovery] Meta video insights skipped for ${videoId}: ${message}`);
       }
     }
@@ -504,6 +671,9 @@ async function discoverMetaAdStructure(connection, account) {
     });
     return ads.slice(0, metaMaxAdsPerAccount);
   } catch (error) {
+    if (isMetaRateLimitError(error)) {
+      throw error;
+    }
     console.warn(`[global-discovery] Meta ads skipped for ${accountId}: ${error.response?.data?.error?.message || error.message}`);
     return [];
   }
@@ -527,6 +697,9 @@ async function discoverMetaAdsets(connection, account) {
     });
     return adsets.slice(0, metaMaxAdsetsPerAccount);
   } catch (error) {
+    if (isMetaRateLimitError(error)) {
+      throw error;
+    }
     console.warn(`[global-discovery] Meta adsets skipped for ${accountId}: ${error.response?.data?.error?.message || error.message}`);
     return [];
   }
@@ -546,12 +719,30 @@ async function discoverMetaInsights(connection, account) {
       limit: 200
     });
   } catch (error) {
+    if (isMetaRateLimitError(error)) {
+      throw error;
+    }
     console.warn(`[global-discovery] Meta insights skipped for ${accountId}: ${error.response?.data?.error?.message || error.message}`);
     return [];
   }
 }
 
 async function syncMetaGlobal() {
+  const initialPauseUntil = await readMetaUsagePauseUntil();
+  if (initialPauseUntil) {
+    console.warn(`[global-discovery] Meta discovery deferred until ${initialPauseUntil.toISOString()}`);
+    return {
+      accountsCount: 0,
+      campaignsCount: 0,
+      statsCount: 0,
+      profilesCount: 0,
+      structureCount: 0,
+      deferred: true,
+      rateLimited: true,
+      pauseUntil: initialPauseUntil.toISOString()
+    };
+  }
+
   const connections = await getMetaConnections();
   let accountsCount = 0;
   let campaignsCount = 0;
@@ -560,178 +751,199 @@ async function syncMetaGlobal() {
   let structureCount = 0;
   let videoInsightCalls = 0;
 
-  for (const connection of connections) {
-    const accounts = await discoverMetaAdAccounts(connection);
-    accountsCount += accounts.length;
+  try {
+    for (const connection of connections) {
+      const accounts = await discoverMetaAdAccounts(connection);
+      accountsCount += accounts.length;
 
-    if (accounts.length) {
-      await postOps('/api/internal/ad-account-discovery', {
-        platform: 'meta',
-        business_unit: 'unknown',
-        sync_interval_hours: 4,
-        accounts: accounts.map(metaAdAccountPayload)
-      });
-    }
-
-    try {
-      const pages = await paginatedMetaGet('me/accounts', connection.accessToken, {
-        fields: 'id,name,category,followers_count,picture.width(128).height(128){url},instagram_business_account{id,name,username,profile_picture_url,followers_count,media_count}',
-        limit: 200
-      });
-      for (const page of pages) {
-        profilesCount += 1;
-        await postOps('/api/internal/social-profiles', {
-          platform: 'facebook',
-          external_profile_id: page.id,
-          name: page.name || page.id,
-          avatar_url: page.picture?.data?.url || page.picture?.url || null,
+      if (accounts.length) {
+        await postOps('/api/internal/ad-account-discovery', {
+          platform: 'meta',
           business_unit: 'unknown',
-          status: 'active',
-          last_sync_status: 'ok',
-          raw_payload: {
-            source: 'ops_global_meta',
-            category: page.category || null,
-            followers_count: page.followers_count || null
-          }
+          sync_interval_hours: 4,
+          accounts: accounts.map(metaAdAccountPayload)
         });
+      }
 
-        if (page.instagram_business_account?.id) {
+      try {
+        const pages = await paginatedMetaGet('me/accounts', connection.accessToken, {
+          fields: 'id,name,category,followers_count,picture.width(128).height(128){url},instagram_business_account{id,name,username,profile_picture_url,followers_count,media_count}',
+          limit: 200
+        });
+        for (const page of pages) {
           profilesCount += 1;
           await postOps('/api/internal/social-profiles', {
-            platform: 'instagram',
-            external_profile_id: page.instagram_business_account.id,
-            name: page.instagram_business_account.name || page.instagram_business_account.username || page.instagram_business_account.id,
-            handle: page.instagram_business_account.username || null,
-            avatar_url: page.instagram_business_account.profile_picture_url || null,
+            platform: 'facebook',
+            external_profile_id: page.id,
+            name: page.name || page.id,
+            avatar_url: page.picture?.data?.url || page.picture?.url || null,
             business_unit: 'unknown',
             status: 'active',
             last_sync_status: 'ok',
             raw_payload: {
               source: 'ops_global_meta',
-              facebook_page_id: page.id,
-              followers_count: page.instagram_business_account.followers_count || null,
-              media_count: page.instagram_business_account.media_count || null
+              category: page.category || null,
+              followers_count: page.followers_count || null
+            }
+          });
+
+          if (page.instagram_business_account?.id) {
+            profilesCount += 1;
+            await postOps('/api/internal/social-profiles', {
+              platform: 'instagram',
+              external_profile_id: page.instagram_business_account.id,
+              name: page.instagram_business_account.name || page.instagram_business_account.username || page.instagram_business_account.id,
+              handle: page.instagram_business_account.username || null,
+              avatar_url: page.instagram_business_account.profile_picture_url || null,
+              business_unit: 'unknown',
+              status: 'active',
+              last_sync_status: 'ok',
+              raw_payload: {
+                source: 'ops_global_meta',
+                facebook_page_id: page.id,
+                followers_count: page.instagram_business_account.followers_count || null,
+                media_count: page.instagram_business_account.media_count || null
+              }
+            });
+          }
+        }
+      } catch (error) {
+        if (isMetaRateLimitError(error)) {
+          throw error;
+        }
+        console.warn(`[global-discovery] Meta pages skipped: ${error.response?.data?.error?.message || error.message}`);
+      }
+
+      for (const account of accounts) {
+        const accountId = normalizeMetaAccountId(account.id || account.account_id);
+        const accountPayload = metaAdAccountPayload(account);
+        const campaigns = await discoverMetaCampaigns(connection, account);
+        campaignsCount += campaigns.length;
+
+        if (campaigns.length) {
+          await postOps('/api/internal/campaign-discovery', {
+            platform: 'meta',
+            business_unit: 'unknown',
+            ad_account: accountPayload,
+            campaigns: campaigns.map((campaign) => ({
+              platform_campaign_id: `${accountId}:${campaign.id}`,
+              external_campaign_id: `${accountId}:${campaign.id}`,
+              name: campaign.name || campaign.id,
+              status: statusFromMeta(campaign.effective_status || campaign.status),
+              objective: campaign.objective || null,
+              daily_budget: campaign.daily_budget ? toNumber(campaign.daily_budget) / 100 : null,
+              currency: account.currency || 'EUR'
+            }))
+          });
+        }
+
+        const insights = await discoverMetaInsights(connection, account);
+        for (const insight of insights) {
+          statsCount += 1;
+          await postOps('/api/internal/campaign-daily-stats', {
+            campaign: {
+              ad_account: accountPayload,
+              platform_campaign_id: `${accountId}:${insight.campaign_id}`,
+              name: insight.campaign_name || insight.campaign_id,
+              channel: 'meta',
+              campaign_status: 'active',
+              currency: account.currency || 'EUR'
+            },
+            stat_date: insight.date_start,
+            spend: toNumber(insight.spend),
+            impressions: toInteger(insight.impressions),
+            clicks: toInteger(insight.clicks),
+            leads: toInteger(leadCountFromMetaActions(insight.actions)),
+            currency: account.currency || 'EUR',
+            source_platform: 'ops_global_meta',
+            raw_payload: {
+              account_id: accountId,
+              campaign_id: insight.campaign_id
+            }
+          });
+        }
+
+        const adsets = await discoverMetaAdsets(connection, account);
+        for (const adset of adsets) {
+          structureCount += 1;
+          await postOps('/api/internal/campaign-structure-items', {
+            platform: 'meta',
+            item_type: 'adset',
+            external_item_id: adset.id,
+            platform_campaign_id: `${accountId}:${adset.campaign_id}`,
+            ad_account: accountPayload,
+            name: adset.name || adset.id,
+            status: statusFromMeta(adset.status),
+            effective_status: statusFromMeta(adset.effective_status || adset.status),
+            raw_payload: {
+              account_id: accountId,
+              campaign_id: adset.campaign_id,
+              adset_id: adset.id
+            }
+          });
+        }
+
+        const ads = await discoverMetaAdStructure(connection, account);
+        for (const ad of ads) {
+          const creative = ad.creative || {};
+          const videoId = extractMetaCreativeVideoId(creative);
+          let videoInsights = null;
+          if (videoId && videoInsightCalls < metaMaxVideoInsightCalls) {
+            videoInsightCalls += 1;
+            videoInsights = await discoverMetaVideoInsights(connection, videoId);
+          }
+          structureCount += 1;
+
+          await postOps('/api/internal/campaign-structure-items', {
+            platform: 'meta',
+            item_type: 'ad',
+            external_item_id: ad.id,
+            parent_external_id: ad.adset_id || null,
+            platform_campaign_id: `${accountId}:${ad.campaign_id}`,
+            ad_account: accountPayload,
+            name: ad.name || creative.name || ad.id,
+            status: statusFromMeta(ad.status),
+            effective_status: statusFromMeta(ad.effective_status || ad.status),
+            preview_title: extractMetaCreativeTitle(creative),
+            preview_body: extractMetaCreativeBody(creative),
+            thumbnail_url: creative.thumbnail_url || creative.image_url || null,
+            media_url: creative.image_url || creative.thumbnail_url || null,
+            destination_url: extractMetaCreativeDestination(creative),
+            cta_type: creative.call_to_action_type || null,
+            video_views: videoInsights?.video_views || null,
+            video_avg_watch_time_seconds: videoInsights?.video_avg_watch_time_seconds || null,
+            video_retention_granularity: videoInsights?.video_retention_granularity || null,
+            video_retention_points: videoInsights?.video_retention_points || null,
+            source_platform: 'ops_global_meta',
+            raw_payload: {
+              source: 'ops_global_meta',
+              account_id: accountId,
+              campaign_id: ad.campaign_id || null,
+              adset_id: ad.adset_id || null,
+              creative_id: creative.id || null,
+              video_id: videoId,
+              video_insights: videoInsights?.raw || null
             }
           });
         }
       }
-    } catch (error) {
-      console.warn(`[global-discovery] Meta pages skipped: ${error.response?.data?.error?.message || error.message}`);
     }
-
-    for (const account of accounts) {
-      const accountId = normalizeMetaAccountId(account.id || account.account_id);
-      const accountPayload = metaAdAccountPayload(account);
-      const campaigns = await discoverMetaCampaigns(connection, account);
-      campaignsCount += campaigns.length;
-
-      if (campaigns.length) {
-        await postOps('/api/internal/campaign-discovery', {
-          platform: 'meta',
-          business_unit: 'unknown',
-          ad_account: accountPayload,
-          campaigns: campaigns.map((campaign) => ({
-            platform_campaign_id: `${accountId}:${campaign.id}`,
-            external_campaign_id: `${accountId}:${campaign.id}`,
-            name: campaign.name || campaign.id,
-            status: statusFromMeta(campaign.effective_status || campaign.status),
-            objective: campaign.objective || null,
-            daily_budget: campaign.daily_budget ? toNumber(campaign.daily_budget) / 100 : null,
-            currency: account.currency || 'EUR'
-          }))
-        });
-      }
-
-      const insights = await discoverMetaInsights(connection, account);
-      for (const insight of insights) {
-        statsCount += 1;
-        await postOps('/api/internal/campaign-daily-stats', {
-          campaign: {
-            ad_account: accountPayload,
-            platform_campaign_id: `${accountId}:${insight.campaign_id}`,
-            name: insight.campaign_name || insight.campaign_id,
-            channel: 'meta',
-            campaign_status: 'active',
-            currency: account.currency || 'EUR'
-          },
-          stat_date: insight.date_start,
-          spend: toNumber(insight.spend),
-          impressions: toInteger(insight.impressions),
-          clicks: toInteger(insight.clicks),
-          leads: toInteger(leadCountFromMetaActions(insight.actions)),
-          currency: account.currency || 'EUR',
-          source_platform: 'ops_global_meta',
-          raw_payload: {
-            account_id: accountId,
-            campaign_id: insight.campaign_id
-          }
-        });
-      }
-
-      const adsets = await discoverMetaAdsets(connection, account);
-      for (const adset of adsets) {
-        structureCount += 1;
-        await postOps('/api/internal/campaign-structure-items', {
-          platform: 'meta',
-          item_type: 'adset',
-          external_item_id: adset.id,
-          platform_campaign_id: `${accountId}:${adset.campaign_id}`,
-          ad_account: accountPayload,
-          name: adset.name || adset.id,
-          status: statusFromMeta(adset.status),
-          effective_status: statusFromMeta(adset.effective_status || adset.status),
-          raw_payload: {
-            account_id: accountId,
-            campaign_id: adset.campaign_id,
-            adset_id: adset.id
-          }
-        });
-      }
-
-      const ads = await discoverMetaAdStructure(connection, account);
-      for (const ad of ads) {
-        const creative = ad.creative || {};
-        const videoId = extractMetaCreativeVideoId(creative);
-        let videoInsights = null;
-        if (videoId && videoInsightCalls < metaMaxVideoInsightCalls) {
-          videoInsightCalls += 1;
-          videoInsights = await discoverMetaVideoInsights(connection, videoId);
-        }
-        structureCount += 1;
-
-        await postOps('/api/internal/campaign-structure-items', {
-          platform: 'meta',
-          item_type: 'ad',
-          external_item_id: ad.id,
-          parent_external_id: ad.adset_id || null,
-          platform_campaign_id: `${accountId}:${ad.campaign_id}`,
-          ad_account: accountPayload,
-          name: ad.name || creative.name || ad.id,
-          status: statusFromMeta(ad.status),
-          effective_status: statusFromMeta(ad.effective_status || ad.status),
-          preview_title: extractMetaCreativeTitle(creative),
-          preview_body: extractMetaCreativeBody(creative),
-          thumbnail_url: creative.thumbnail_url || creative.image_url || null,
-          media_url: creative.image_url || creative.thumbnail_url || null,
-          destination_url: extractMetaCreativeDestination(creative),
-          cta_type: creative.call_to_action_type || null,
-          video_views: videoInsights?.video_views || null,
-          video_avg_watch_time_seconds: videoInsights?.video_avg_watch_time_seconds || null,
-          video_retention_granularity: videoInsights?.video_retention_granularity || null,
-          video_retention_points: videoInsights?.video_retention_points || null,
-          source_platform: 'ops_global_meta',
-          raw_payload: {
-            source: 'ops_global_meta',
-            account_id: accountId,
-            campaign_id: ad.campaign_id || null,
-            adset_id: ad.adset_id || null,
-            creative_id: creative.id || null,
-            video_id: videoId,
-            video_insights: videoInsights?.raw || null
-          }
-        });
-      }
+  } catch (error) {
+    if (!isMetaRateLimitError(error)) {
+      throw error;
     }
+    const pauseUntil = error.pauseUntil || await readMetaUsagePauseUntil() || metaPauseUntilFromNow();
+    console.warn(`[global-discovery] Meta discovery stopped by rate-limit until ${pauseUntil.toISOString()}: ${publicMetaErrorMessage(error)}`);
+    return {
+      accountsCount,
+      campaignsCount,
+      statsCount,
+      profilesCount,
+      structureCount,
+      deferred: true,
+      rateLimited: true,
+      pauseUntil: pauseUntil.toISOString()
+    };
   }
 
   return { accountsCount, campaignsCount, statsCount, profilesCount, structureCount };
@@ -1536,6 +1748,9 @@ async function main() {
     meta_stats: meta.statsCount,
     meta_profiles: meta.profilesCount,
     meta_structure_items: meta.structureCount,
+    meta_deferred: meta.deferred === true,
+    meta_rate_limited: meta.rateLimited === true,
+    meta_pause_until: meta.pauseUntil || null,
     google_accounts: google.accountsCount,
     google_campaigns: google.campaignsCount,
     google_stats: google.statsCount,

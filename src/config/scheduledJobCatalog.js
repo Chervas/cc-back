@@ -16,6 +16,12 @@ const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
     executorMethod: 'executePm2LogRetention',
   }),
   healthCheck: Object.freeze({ type: 'system_health_check', priority: 'low', executorMethod: 'executeHealthCheck' }),
+  systemNotificationCheck: Object.freeze({
+    type: 'system_notification_check',
+    priority: 'low',
+    executorMethod: 'executeSystemNotificationCheck',
+    usesIntegrationLease: false,
+  }),
   adsSync: Object.freeze({ type: 'meta_ads_recent', priority: 'normal', executorMethod: 'executeAdsSync' }),
   adsSyncMidday: Object.freeze({
     type: 'meta_ads_midday',
@@ -181,7 +187,9 @@ const TARGETED_INTEGRATION_JOB_TYPES = Object.freeze([
 ]);
 
 const BACKGROUND_INTEGRATION_JOB_TYPES = Object.freeze([
-  ...Object.values(SCHEDULED_JOB_DEFINITIONS).map((definition) => definition.type),
+  ...Object.values(SCHEDULED_JOB_DEFINITIONS)
+    .filter((definition) => definition.usesIntegrationLease !== false)
+    .map((definition) => definition.type),
   ...TARGETED_INTEGRATION_JOB_TYPES,
 ]);
 

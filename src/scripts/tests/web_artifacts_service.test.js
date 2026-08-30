@@ -247,7 +247,7 @@ test('completa SEO/Schema con la ficha verificada única sin pisar datos canóni
   assert.equal(schemaClinic.image, undefined);
   assert.doesNotMatch(html, /<meta property="og:image"/);
   assert.doesNotMatch(html, /customer-cover|tiny-exterior|interior\.webp|additional\.webp|video-cover/);
-  assert.equal(result.renderer_version, 'clinicaclick-web-renderer/1.14.0');
+  assert.equal(result.renderer_version, 'clinicaclick-web-renderer/1.16.0');
 });
 
 test('los campos canónicos explícitos prevalecen y un horario textual solo usa periodos Google verificados para Schema', () => {

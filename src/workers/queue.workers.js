@@ -15,6 +15,7 @@ const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.
 const whatsappConnectionStatusService = require('../services/whatsappConnectionStatus.service');
 const whatsappAccountComplianceService = require('../services/whatsappAccountCompliance.service');
 const whatsappDeliveryGovernanceService = require('../services/whatsappDeliveryGovernance.service');
+const systemNotificationsService = require('../services/systemNotifications.service');
 const patientDirectionService = require('../services/patientDirection.service');
 const {
     resolveAutomationAttentionForConversation,
@@ -1865,18 +1866,26 @@ createWorker('webhook_whatsapp', async (job) => {
 
         const messageRef = await findMessageByWamid(wamid);
         if (!messageRef) {
-            console.warn('[whatsapp] Estado recibido para un WAMID sin mensaje local', {
-                wamid,
-                status: mappedStatus,
-                recipientId: cleanString(status?.recipient_id) || null,
-                errors: Array.isArray(status?.errors)
-                    ? status.errors.map((error) => ({
-                        code: error?.code || null,
-                        title: truncateText(error?.title, 160) || null,
-                        message: truncateText(error?.message, 240) || null,
-                    }))
-                    : [],
+            const systemNotificationStatus = await systemNotificationsService.materializeWhatsappProviderStatus({
+                providerMessageId: wamid,
+                providerStatus: mappedStatus,
+                providerTimestamp: status?.timestamp || null,
+                errors: status?.errors || [],
             });
+            if (!systemNotificationStatus?.matched) {
+                console.warn('[whatsapp] Estado recibido para un WAMID sin mensaje local', {
+                    wamid,
+                    status: mappedStatus,
+                    recipientId: cleanString(status?.recipient_id) || null,
+                    errors: Array.isArray(status?.errors)
+                        ? status.errors.map((error) => ({
+                            code: error?.code || null,
+                            title: truncateText(error?.title, 160) || null,
+                            message: truncateText(error?.message, 240) || null,
+                        }))
+                        : [],
+                });
+            }
             continue;
         }
 
