@@ -23,6 +23,32 @@ simulacion visible y no comunica con AEAT.
 
 Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Data Manager/Conversiones mejoradas, política de goals y E2E/limpieza de intake.
 
+## 2026-08-31 - Hardening externo de correo validado
+
+- Sin cambios de aplicacion, Plesk asigno un certificado Let's Encrypt con SAN
+  `alderaan.modhosting.net`, valido hasta el 2026-11-20. La verificacion externa
+  y local devuelve `0/ok` en 25/465/587/993; solo hubo reload gestionado.
+- El SPF raiz unico quedo
+  `v=spf1 ip4:35.181.96.89 include:spf.dondominio.com ~all`, despues de
+  demostrar salida Plesk por esa IP. SES conserva SPF/MX separado en
+  `bounce.clinicaclick.com`; DKIM, MX raiz y restantes registros no cambiaron.
+- El alias forwarding-only `dmarc@clinicaclick.com` recibe los informes en el
+  contacto corporativo. DMARC sigue sin enforcement:
+  `v=DMARC1; p=none; rua=mailto:dmarc@clinicaclick.com; pct=100; ri=86400; adkim=r; aspf=r`.
+  No se habilito `ruf`, Email Routing ni DMARC Management.
+- Una unica prueba SES externa llego a Recibidos. Alderaan registro SPF/DKIM
+  `PASS`; EventBridge creo `EmailProviderEvent #36 send` y `#37 delivery` sin
+  `email_message_id`, correcto al no existir outbox interno. No se envio otra
+  prueba desde la aplicacion.
+- Estado posterior: SES activo, marketing apagado, cero supresiones, cero jobs
+  email pendientes, cero cola atascada y cero mensajes sin evento. Los avisos
+  del rebote anterior permanecen solo por ventana historica.
+- No endurecer antes del 2026-09-13 23:48:20 CEST ni solo por fecha. Primero se
+  revisan RUA, cabeceras finales, emisores, MFA/retencion de 90 dias y la
+  siguiente renovacion Plesk. `quarantine`, `reject` y SPF `-all` requieren
+  evidencia y autorizacion expresa. Rollback exacto en el contrato
+  `33-sistema-email.md` del frontend.
+
 ## 2026-08-30 - Recepcion e IAM staging cerrados
 
 - La recepcion administrativa permanece fuera del backend: Cloudflare publica
@@ -46,9 +72,8 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
   revoco despues de comprobar el transporte, sin exponer su valor.
 - El overview final quedo con cero supresiones activas, cero colas atascadas y
   cero mensajes SES sin evento. Los avisos por el rebote historico caducan por
-  ventana. Pendientes externos: certificado STARTTLS publico en Alderaan,
-  reporting/endurecimiento DMARC y auditoria del SPF raiz. WhatsApp Propdental
-  no forma parte de este cierre.
+  ventana. Los pendientes STARTTLS, RUA y SPF de ese corte quedaron aplicados
+  en la entrada posterior. WhatsApp Propdental no forma parte de este cierre.
 
 ## 2026-08-30 - Email transaccional desplegado en staging
 
