@@ -419,16 +419,16 @@ function pickPreferredExecution(rows) {
 }
 
 async function resolveTemplateForCitaEvent(cita, eventName) {
+  if (await isTreatmentAutomationDisabledForEvent(cita, eventName)) {
+    return null;
+  }
+
   const boundTemplate = await resolveTemplateBoundToTratamiento(cita, eventName);
   if (boundTemplate && (
     eventName !== 'appointment_rescheduled'
     || isRescheduleTemplateEligible(boundTemplate, cita)
   )) {
     return boundTemplate;
-  }
-
-  if (await isBeforeAppointmentFallbackDisabledForTratamiento(cita, eventName)) {
-    return null;
   }
 
   return resolveClinicFallbackTemplate(cita, eventName);
@@ -442,21 +442,6 @@ function parseTreatmentAutomationBindings(value) {
   } catch {
     return {};
   }
-}
-
-async function isBeforeAppointmentFallbackDisabledForTratamiento(cita, eventName) {
-  if (!BEFORE_APPOINTMENT_FALLBACK_TRIGGER_TYPES.has(eventName)) return false;
-  const tratamientoId = toIntOrNull(cita?.tratamiento_id);
-  if (!tratamientoId) return false;
-
-  const tratamiento = await Tratamiento.findByPk(tratamientoId, {
-    attributes: ['id_tratamiento', 'automation_template_bindings'],
-    raw: true,
-  });
-  if (!tratamiento) return false;
-
-  const bindings = parseTreatmentAutomationBindings(tratamiento.automation_template_bindings);
-  return bindings?.appointment_before?.disabled === true;
 }
 
 function treatmentBindingKeyForAppointmentEvent(eventName) {
@@ -474,6 +459,31 @@ function treatmentBindingKeyForAppointmentEvent(eventName) {
     default:
       return null;
   }
+}
+
+function treatmentAutomationSlotKeyForEvent(eventName) {
+  const normalized = cleanString(eventName).toLowerCase();
+  if (BEFORE_APPOINTMENT_FALLBACK_TRIGGER_TYPES.has(normalized)) {
+    return 'appointment_before';
+  }
+  return treatmentBindingKeyForAppointmentEvent(normalized);
+}
+
+async function isTreatmentAutomationDisabledForEvent(cita, eventName) {
+  const bindingKey = treatmentAutomationSlotKeyForEvent(eventName);
+  if (!bindingKey) return false;
+
+  const tratamientoId = toIntOrNull(cita?.tratamiento_id);
+  if (!tratamientoId) return false;
+
+  const tratamiento = await Tratamiento.findByPk(tratamientoId, {
+    attributes: ['id_tratamiento', 'automation_template_bindings'],
+    raw: true,
+  });
+  if (!tratamiento) return false;
+
+  const bindings = parseTreatmentAutomationBindings(tratamiento.automation_template_bindings);
+  return bindings?.[bindingKey]?.disabled === true;
 }
 
 async function resolveTemplateBoundToTratamiento(cita, eventName) {
@@ -951,6 +961,9 @@ function buildScheduledWindowIdentifier({ triggerType, triggerConfig, scheduledF
 
 async function resolveScheduledTemplatesForCita(cita, eventName) {
   if (!SCHEDULED_APPOINTMENT_TRIGGER_TYPES.has(cleanString(eventName))) {
+    return [];
+  }
+  if (await isTreatmentAutomationDisabledForEvent(cita, eventName)) {
     return [];
   }
 

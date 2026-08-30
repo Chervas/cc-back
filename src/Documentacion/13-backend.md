@@ -4209,6 +4209,7 @@ Contratos temporales adicionales:
 `appointmentAutomationV2Runtime` usa esta precedencia:
 
 1. **Flujo asignado al tratamiento**
+   - Si `automation_template_bindings.<slot>.disabled=true`, el runtime corta ese slot y no resuelve ni asignación ni fallback.
    - Si la cita tiene `tratamiento_id` y ese tratamiento tiene `appointment_automation_template_key/version`, ese flujo gana para `appointment_created`.
    - Para eventos complementarios, el runtime lee `Tratamientos.automation_template_bindings` y resuelve el slot compatible: `appointment_after_completed`, `appointment_after_no_show`, `appointment_after_next_session`, `appointment_during_rescheduled` o `appointment_during_cancelled`.
 2. **Fallback clinic/group/system**
@@ -4229,11 +4230,12 @@ Consecuencias:
 - No debe dispararse más de un flujo V2 por el mismo `appointment_created`.
 - Un template `without_treatment` no debe asignarse desde `PUT /api/tratamientos/:id/automation-template`.
 - `Tratamientos.automation_template_bindings` guarda bindings auxiliares por bloque de cita:
-  - `appointment_before.disabled=true`: el tratamiento no usa la automatizacion general por defecto si no tiene una especifica hasta la cita.
+  - `<slot>.source=default`: la UI muestra que el tratamiento eligió explícitamente usar la automatización por defecto compatible.
+  - `<slot>.disabled=true`: el tratamiento no usa automatización para ese caso aunque exista fallback clinic/group/system.
   - `appointment_after_completed`, `appointment_after_no_show`, `appointment_after_next_session`: slots post-cita seleccionados desde la UI de tratamientos.
   - `appointment_during_rescheduled`, `appointment_during_cancelled`: slots durante la cita para reprogramaciones y cancelaciones.
   Este JSON permite que la UI seleccione automatizaciones complementarias sin alterar el contrato principal `appointment_automation_template_key/version`.
-- El runtime resuelve primero el binding del tratamiento y después el fallback clinic/group/system. Los slots solo son compatibles con su `trigger_type`: `appointment_completed`, `appointment_no_show`, `appointment_after`, `appointment_rescheduled` o `appointment_cancelled`.
+- El runtime evalúa primero `disabled=true`; si no está bloqueado, resuelve el binding del tratamiento y después el fallback clinic/group/system. Los slots solo son compatibles con su `trigger_type`: `appointment_completed`, `appointment_no_show`, `appointment_after`, `appointment_rescheduled` o `appointment_cancelled`.
 - Para `appointment_created` con `with_treatment + treatment_filter=specific`, `publish` bloquea otra automatización activa del mismo scope si ya cubre alguno de esos tratamientos.
 - Si una cita pasa a `cancelada`, `reprogramada`, `completada` o `no_asistio`, las ejecuciones V2 activas/pendientes de esa cita se cancelan antes de lanzar el evento correspondiente. `reprogramada` cancela automatizaciones de la hora anterior, pero la cita sigue siendo accionable manualmente desde UI. Un nodo `action/change_status` no puede resucitar citas realmente cerradas (`cancelada`, `completada`, `no_asistio`); el nodo se marca como `skipped` y el flujo termina.
 - Las notificaciones operativas creadas por `action/send_system_notification` para una cita se marcan automáticamente como leídas cuando esa cita queda resuelta (`info_confirmada`, `recordatorio_confirmado`, `cancelada`, `reprogramada`, `completada`, `no_asistio`). El backend emite `notification:updated` para que la campana no mantenga avisos obsoletos si la resolución ocurre en tiempo real.
