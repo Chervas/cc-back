@@ -23,6 +23,33 @@ simulacion visible y no comunica con AEAT.
 
 Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Data Manager/Conversiones mejoradas, política de goals y E2E/limpieza de intake.
 
+## 2026-08-30 - Recepcion e IAM staging cerrados
+
+- La recepcion administrativa permanece fuera del backend: Cloudflare publica
+  un MX DNS-only a `alderaan.modhosting.net` y Plesk mantiene el alias
+  forwarding-only `carlos@clinicaclick.com` hacia
+  `carlos.hervas@modmarketing.net`. Una prueba externa termino con respuesta
+  SMTP final `250 2.0.0`; no se instalo MTA/IMAP en Clinicaclick.
+- Staging usa el usuario IAM exclusivo `clinicaclick-ses-sender-staging`, sin
+  consola y limitado a envio transaccional en `eu-west-3`. La clave vive solo
+  en `back-staging/.env`, modo `0600`, y es distinta de DEV. Produccion debera
+  usar otra identidad.
+- Tras verificar STS, solo `pm2-back-staging` se reinicio con `--update-env`.
+  SES quedo activo con allowlist, configuration set
+  `clinicaclick-transactional` y marketing apagado.
+- La supresion local del rebote anterior (`EmailSuppression #1`) se conservo
+  como historico con `status=released`; la supresion de cuenta SES ya habia
+  sido retirada despues de validar el alias.
+- Una unica solicitud publica de password reset creo `EmailMessage #20` y
+  `JobRequest #63237`. El job completo al primer intento, el mensaje quedo
+  `delivered` y EventBridge concilio `send` y `delivery`. El token QA `#5` se
+  revoco despues de comprobar el transporte, sin exponer su valor.
+- El overview final quedo con cero supresiones activas, cero colas atascadas y
+  cero mensajes SES sin evento. Los avisos por el rebote historico caducan por
+  ventana. Pendientes externos: certificado STARTTLS publico en Alderaan,
+  reporting/endurecimiento DMARC y auditoria del SPF raiz. WhatsApp Propdental
+  no forma parte de este cierre.
+
 ## 2026-08-30 - Email transaccional desplegado en staging
 
 - Corte operativo: backend `dev` `30c2ad0`, backend `staging` y gateway
