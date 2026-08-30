@@ -2,6 +2,7 @@
 
 const { Op } = require('sequelize');
 const db = require('../../models');
+const { revokePendingPasswordResetToken } = require('./emailRelatedState.service');
 
 const EVENT_PRECEDENCE = Object.freeze({
   unknown: 0,
@@ -353,6 +354,11 @@ async function reconcileSystemNotificationDelivery(message, event, { transaction
   return delivery;
 }
 
+async function reconcileTerminalRelatedState(message, event, { transaction = null } = {}) {
+  if (!['bounce', 'complaint', 'reject', 'rendering_failure'].includes(event.eventType)) return null;
+  return revokePendingPasswordResetToken(message, { transaction });
+}
+
 async function recordProviderEvent(rawPayload = {}) {
   const event = assertValidEvent(normalizeSesEvent(rawPayload));
   return db.sequelize.transaction(async (transaction) => {
@@ -395,6 +401,7 @@ async function recordProviderEvent(rawPayload = {}) {
     await applyEventToMessage(message, event, { transaction });
     const suppression = await suppressRecipientFromEvent(message, event, row, { transaction });
     await reconcileSystemNotificationDelivery(message, event, { transaction });
+    await reconcileTerminalRelatedState(message, event, { transaction });
     return {
       created: true,
       event: row,
