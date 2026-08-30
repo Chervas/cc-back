@@ -23,14 +23,63 @@ simulacion visible y no comunica con AEAT.
 
 Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Data Manager/Conversiones mejoradas, política de goals y E2E/limpieza de intake.
 
+## 2026-08-30 - Email transaccional desplegado en staging
+
+- Corte operativo: backend `dev` `30c2ad0`, backend `staging` y gateway
+  `c76423f`; frontend staging `3e2d85c` con bundle publico
+  `main.3e91e2f0df25638a.js`.
+- `pm2-back-staging`, `pm2-back-dev` y `pm2-gateway` se reiniciaron con el
+  codigo promovido. Gateway conserva workers y cron deshabilitados; staging es
+  el unico propietario de `system_notification_check` desde las 18:40 UTC y
+  DEV dejo de registrarlo. Los jobs observados completaron en un intento con
+  namespace `staging`.
+- Las cuatro migraciones del bloque email/notificaciones ya figuraban `up` en
+  el esquema antes del corte; no se ejecuto DDL. Se instalaron las dependencias
+  del lockfile en staging/gateway y se verifico `@aws-sdk/client-sesv2@3.600.0`.
+- SES transaccional esta activo en staging con allowlist obligatoria, region
+  `eu-west-3`, configuration set `clinicaclick-transactional` y marketing y
+  email generico de automatizaciones deshabilitados. Los secretos solo viven
+  en `.env` server-side y no se imprimieron. Antes de produccion se debe separar
+  la credencial IAM por entorno.
+- Health autenticado local, gateway y publico devolvio `200` con `no-store`; sin
+  token devolvio `401`. Los siete formatos EventBridge SES devolvieron `200` en
+  `dry_run` y `EmailProviderEvents` permanecio 23 -> 23.
+- La prueba controlada de `forgot-password` respondio `202`, creo outbox/job
+  durable y SES emitio `send` seguido de `bounce` permanente para el buzon de
+  prueba. Se creo la supresion correspondiente y el cron genero dos avisos
+  distintos, `email_bounces_7d` y `email_active_suppressions`; ambos emails
+  administrativos quedaron `delivered`. No se uso ningun paciente real.
+- Un fallo terminal de entrega (`bounce`, `complaint`, `reject`,
+  `rendering_failure`, rechazo local definitivo o supresion previa) revoca
+  ahora de forma idempotente el `PasswordResetToken` pendiente vinculado por
+  `email_message_id`. Los resultados ambiguos de transporte/timeout no lo
+  revocan hasta que llegue un evento concluyente. El unico token previo de la
+  prueba rebotada se reconcilio a `revoked`, sin leer ni registrar su valor.
+- La configuracion admin de staging conserva email
+  `carlos.hervas@modmarketing.net`, WhatsApp `+34617560236` y emisor `#358`.
+  La plantilla esta aprobada, pero Meta mantiene el emisor restringido: una
+  prueba real de preflight quedo `skipped/whatsapp_sender_account_restricted`,
+  sin job ni llamada a Meta. El `PATCH` distingue ahora campo omitido de
+  `whatsappSenderAssetId=null`; se valido el ciclo
+  `activo/#358 -> desactivado/null -> restaurado activo/#358` sin envios.
+- QA: `email_system` 28/28, suite backend 103/103 y
+  `system_notifications` 14/14 tras la ultima correccion; `node --check` y
+  `git diff --check` verdes. La ruta publica de Monitorizacion devolvio `200`
+  y cargo el bundle esperado. El build mantiene un aviso de presupuesto inicial
+  de 1.49 MB y `npm audit` conserva 48 vulnerabilidades heredadas; no se uso
+  `--force`.
+- Backup previo en
+  `/home/ubuntu/.codex-backups/email-staging-deploy-20260830-183246Z`. No se
+  modificaron Nginx, DNS, Cloudflare, firewall, systemd, IAM, SES o EventBridge.
+
 ## 2026-08-30 - Cierre operativo email, reset y limites Meta
 
 - `system_notification_check` forma parte del catalogo durable con horario
   por defecto `*/5 * * * *`. El callback solo crea un `JobRequest`; el worker
-  evalua alertas y encola `system_notification_dispatch`. En DEV el ownership
-  selectivo se activa con `SYSTEM_NOTIFICATIONS_CRON_LEADER=true` o, si la
-  variable no existe, por `JOB_RUNTIME_NAMESPACE=dev`. Un cron leader completo
-  ya incluye este job y gateway no registra cron.
+  evalua alertas y encola `system_notification_dispatch`. Staging es el
+  propietario actual como cron leader global y DEV fija el ownership selectivo
+  a `false`; `SYSTEM_NOTIFICATIONS_CRON_LEADER=true` queda como contingencia
+  para un runtime sin cron global. Gateway no registra cron.
 - La ejecucion automatica `JobRequest #62915` quedo `completed` en un intento y
   actualizo `last_checked_at`, acreditando que las alertas no dependen de abrir
   la pantalla ni de una peticion HTTP.
@@ -38,11 +87,11 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
   `EmailMessages` y entregas admin sin imprimir destinatarios o contenidos. Se
   ejecuto primero en dry-run, despues con `--apply` transaccional y un segundo
   dry-run devolvio cero diferencias.
-- Password reset en DEV aplica respuesta no enumerable, token de un solo uso,
-  enlace cifrado y limites por intervalo, usuario e IP. Los controladores
-  legacy de `back-staging` y `gateway` se dejaron fail-closed con `503
-  password_recovery_not_available`; no deben reactivarse hasta promover el
-  flujo seguro completo con migraciones, variables y QA.
+- Password reset en DEV y staging aplica respuesta no enumerable, token de un
+  solo uso, enlace cifrado y limites por intervalo, usuario e IP. El estado
+  fail-closed legacy de `back-staging`/gateway fue el corte previo; quedo
+  sustituido por el flujo seguro tras migraciones, variables y QA del
+  despliegue documentado arriba.
 - Meta OAuth y los clientes Graph cortan en el primer codigo `4`, `17` o `613`,
   persisten cooldown compartido y no reintentan como error generico HTTP 400.
   `connection-status` devuelve conexion activa con `validationDeferred=true`
@@ -84,7 +133,7 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
 - Eventos iniciales: prueba de sistema, `users.new_registration` y alertas de
   email (`email_provider_disabled`, `email_queue_stuck`, rebotes, quejas,
   supresiones, credenciales/configuracion y ausencia de eventos SES).
-- En dev estan activos panel, email admin y WhatsApp admin. La plantilla quedo
+- En dev/staging estan activos panel, email admin y WhatsApp admin. La plantilla quedo
   aprobada por Meta. Las pruebas controladas de panel, email SES, WhatsApp
   dry-run y nuevo registro sintetico terminaron con el estado esperado. Las
   siete entregas WhatsApp reales (`#3/#8/#11/#12/#16/#20/#22`) fueron
@@ -101,10 +150,10 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
   `Message` local contra `SystemNotificationDeliveries.provider_message_id`,
   actualiza el terminal y registra `WhatsappDeliveryEvent`; la migracion
   `20260830163000-index-system-notification-provider-message.js` indexa la
-  busqueda. El codigo se fusiono posteriormente en `staging` y el checkout de
-  gateway quedo alineado con backend `c0aece6`; `pm2-gateway` no se reinicio ni
-  se aplicaron migraciones, por lo que el cambio requiere todavia un cutover
-  controlado para callbacks futuros.
+  busqueda. Backend staging y gateway ejecutan ya el mismo corte `c76423f`; la
+  migracion estaba aplicada antes del despliegue y `pm2-gateway` se reinicio y
+  valido con workers/cron de negocio deshabilitados. La correlacion queda activa
+  para callbacks futuros.
 - Contrato completo:
   [33-sistema-email](../../../front-dev/src/Documentacion/33-sistema-email.md#notificaciones-de-administracion).
 
