@@ -159,6 +159,51 @@ test('runEmailSendJob envía por mock de forma idempotente y sin proveedor real'
   });
 });
 
+test('runEmailSendJob revoca el token si una supresión impide enviar el reset', async () => {
+  await withEnv({
+    EMAIL_DATA_ENCRYPTION_KEY: TEST_KEY,
+    EMAIL_PROVIDER: 'mock',
+    EMAIL_ENABLED: 'true',
+  }, async () => {
+    const recipientHash = emailDelivery.hashEmail('persona@example.test');
+    const message = {
+      id: 304,
+      public_id: 'em-suppressed-reset',
+      stream: 'transactional',
+      related_type: 'password_reset_token',
+      status: 'queued',
+      recipient_hash: recipientHash,
+      async update(patch) {
+        Object.assign(this, patch);
+        return this;
+      },
+    };
+    let revokedTokens = 0;
+    const restores = [
+      patchProperty(db.EmailMessage, 'findByPk', async () => message),
+      patchProperty(db.EmailSuppression, 'findOne', async () => ({ id: 1 })),
+      patchProperty(db.PasswordResetToken, 'update', async ({ status }, { where }) => {
+        assert.equal(status, 'revoked');
+        assert.deepEqual(where, { email_message_id: 304, status: 'pending' });
+        revokedTokens += 1;
+        return [1];
+      }),
+      patchProperty(emailProvider, 'sendEmail', async () => {
+        throw new Error('provider must not be called for suppressed recipient');
+      }),
+    ];
+    try {
+      const result = await emailDelivery.runEmailSendJob({ email_message_id: 304 });
+      assert.equal(result.status, 'completed');
+      assert.equal(result.result.reason, 'recipient_suppressed');
+      assert.equal(message.status, 'suppressed');
+      assert.equal(revokedTokens, 1);
+    } finally {
+      restores.reverse().forEach((restore) => restore());
+    }
+  });
+});
+
 test('runEmailSendJob falla sin reintento cuando SES está desactivado', async () => {
   await withEnv({
     EMAIL_DATA_ENCRYPTION_KEY: TEST_KEY,
@@ -284,6 +329,7 @@ test('timeout SES de resultado ambiguo falla sin reenvío automático', async ()
       id: 405,
       public_id: 'em_timeout',
       stream: 'transactional',
+      related_type: 'password_reset_token',
       status: 'queued',
       template_key: 'ops.email_test',
       template_context: {},
@@ -295,10 +341,15 @@ test('timeout SES de resultado ambiguo falla sin reenvío automático', async ()
         return this;
       },
     };
+    let revokedTokens = 0;
     const restores = [
       patchProperty(db.EmailMessage, 'findByPk', async () => message),
       patchConditionalEmailMessageUpdate(message),
       patchProperty(db.EmailSuppression, 'findOne', async () => null),
+      patchProperty(db.PasswordResetToken, 'update', async () => {
+        revokedTokens += 1;
+        return [1];
+      }),
       patchProperty(emailProvider, 'sendEmail', async () => {
         const error = new Error('request timed out');
         error.name = 'AbortError';
@@ -313,6 +364,7 @@ test('timeout SES de resultado ambiguo falla sin reenvío automático', async ()
       assert.equal(message.status, 'failed');
       assert.equal(message.last_error_code, 'email_provider_timeout_unknown_outcome');
       assert.equal(message.rejected_at, null);
+      assert.equal(revokedTokens, 0);
     } finally {
       restores.reverse().forEach((restore) => restore());
     }
@@ -537,6 +589,7 @@ test('rechazo explícito SES es terminal y no se reintenta', async () => {
       id: 407,
       public_id: 'em_rejected',
       stream: 'transactional',
+      related_type: 'password_reset_token',
       status: 'queued',
       template_key: 'ops.email_test',
       template_context: {},
@@ -548,10 +601,17 @@ test('rechazo explícito SES es terminal y no se reintenta', async () => {
         return this;
       },
     };
+    let revokedTokens = 0;
     const restores = [
       patchProperty(db.EmailMessage, 'findByPk', async () => message),
       patchConditionalEmailMessageUpdate(message),
       patchProperty(db.EmailSuppression, 'findOne', async () => null),
+      patchProperty(db.PasswordResetToken, 'update', async ({ status }, { where }) => {
+        assert.equal(status, 'revoked');
+        assert.deepEqual(where, { email_message_id: 407, status: 'pending' });
+        revokedTokens += 1;
+        return [1];
+      }),
       patchProperty(emailProvider, 'sendEmail', async () => {
         const error = new Error('message rejected');
         error.name = 'MessageRejected';
@@ -566,6 +626,7 @@ test('rechazo explícito SES es terminal y no se reintenta', async () => {
       assert.equal(result.result.code, 'MessageRejected');
       assert.equal(message.status, 'failed');
       assert.ok(message.rejected_at instanceof Date);
+      assert.equal(revokedTokens, 1);
     } finally {
       restores.reverse().forEach((restore) => restore());
     }
@@ -656,6 +717,7 @@ test('recordProviderEvent concilia rebote y crea supresión sin persistir destin
     id: 505,
     provider_message_id: 'ses-message-1',
     stream: 'transactional',
+    related_type: 'password_reset_token',
     clinica_id: 66,
     recipient_hash: emailDelivery.hashEmail('persona@example.test'),
     recipient_domain: 'example.test',
@@ -667,6 +729,7 @@ test('recordProviderEvent concilia rebote y crea supresión sin persistir destin
     },
   };
   let suppressionRequest = null;
+  let passwordResetUpdate = null;
   const restores = [
     patchProperty(db.sequelize, 'transaction', async (fn) => fn({ LOCK: { UPDATE: 'UPDATE' } })),
     patchProperty(db.EmailMessage, 'findOne', async () => message),
@@ -679,6 +742,10 @@ test('recordProviderEvent concilia rebote y crea supresión sin persistir destin
       return [{ id: 707, ...request.where, ...request.defaults }, true];
     }),
     patchProperty(db.SystemNotificationDelivery, 'findOne', async () => null),
+    patchProperty(db.PasswordResetToken, 'update', async (patch, options) => {
+      passwordResetUpdate = { patch, options };
+      return [1];
+    }),
   ];
   try {
     const result = await emailEvents.recordProviderEvent({
@@ -698,6 +765,11 @@ test('recordProviderEvent concilia rebote y crea supresión sin persistir destin
     assert.equal(result.suppression_id, 707);
     assert.equal(message.status, 'bounced');
     assert.equal(suppressionRequest.where.scope, 'clinic:66');
+    assert.deepEqual(passwordResetUpdate.patch, { status: 'revoked' });
+    assert.deepEqual(passwordResetUpdate.options.where, {
+      email_message_id: 505,
+      status: 'pending',
+    });
     assert.doesNotMatch(JSON.stringify(result), /persona@example\.test/i);
   } finally {
     restores.reverse().forEach((restore) => restore());
@@ -711,7 +783,7 @@ test('evento SES recupera un timeout ambiguo correlacionando por tag de outbox',
     public_id: outboxPublicId,
     provider_message_id: null,
     stream: 'transactional',
-    related_type: null,
+    related_type: 'password_reset_token',
     event_count: 0,
     status: 'failed',
     last_error_code: 'email_provider_timeout_unknown_outcome',
@@ -723,6 +795,7 @@ test('evento SES recupera un timeout ambiguo correlacionando por tag de outbox',
     },
   };
   const lookups = [];
+  let revokedTokens = 0;
   const restores = [
     patchProperty(db.sequelize, 'transaction', async (fn) => fn({ LOCK: { UPDATE: 'UPDATE' } })),
     patchProperty(db.EmailMessage, 'findOne', async ({ where }) => {
@@ -734,6 +807,10 @@ test('evento SES recupera un timeout ambiguo correlacionando por tag de outbox',
       { id: 607, ...defaults },
       true,
     ])),
+    patchProperty(db.PasswordResetToken, 'update', async () => {
+      revokedTokens += 1;
+      return [1];
+    }),
   ];
   try {
     const result = await emailEvents.recordProviderEvent({
@@ -760,6 +837,7 @@ test('evento SES recupera un timeout ambiguo correlacionando por tag de outbox',
     assert.equal(message.provider_message_id, 'ses-message-after-timeout');
     assert.equal(message.last_error_code, null);
     assert.equal(message.last_error_message, null);
+    assert.equal(revokedTokens, 0);
     assert.equal(result.event.payload_summary.outbox_public_id, outboxPublicId);
     assert.doesNotMatch(JSON.stringify(result.event.payload_summary), /persona@example\.test/i);
   } finally {

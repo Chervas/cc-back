@@ -6,6 +6,10 @@ const db = require('../../models');
 const jobRequestsService = require('./jobRequests.service');
 const emailProvider = require('./emailProvider.service');
 const emailTemplates = require('./emailTemplates.service');
+const {
+  isAmbiguousProviderOutcome,
+  revokePendingPasswordResetToken,
+} = require('./emailRelatedState.service');
 const { encryptEmailValue, decryptEmailValue } = require('../lib/emailSensitiveEnvelope');
 
 const EMAIL_SEND_JOB_TYPE = 'email_send';
@@ -255,6 +259,9 @@ async function markMessageFailure(message, providerError, { retryable } = {}) {
       },
     });
   }
+  if (settlement.updated && !retryable && !isAmbiguousProviderOutcome(providerError.code)) {
+    await revokePendingPasswordResetToken(message);
+  }
   return settlement;
 }
 
@@ -311,6 +318,7 @@ async function runEmailSendJob(payload = {}, jobRequest = null) {
       last_error_code: 'email_recipient_suppressed',
       last_error_message: 'El destinatario está en lista de supresión.',
     });
+    await revokePendingPasswordResetToken(message);
     return {
       status: 'completed',
       result: {
