@@ -579,6 +579,150 @@ async function listEventsForAssets(assetIds = [], { limit = 500, perAsset = 20 }
   return byAsset;
 }
 
+function summarizeEventHistory(rows = []) {
+  const summary = {
+    event_count: 0,
+    block_count: 0,
+    recovery_count: 0,
+    blocked_send_count: 0,
+    recurrence_detected: false,
+    history_started_at: null,
+    first_blocked_at: null,
+    last_blocked_at: null,
+    last_recovered_at: null,
+  };
+  const validDates = [];
+  const blockDates = [];
+  const recoveryDates = [];
+
+  rows.forEach((row) => {
+    const eventType = clean(row?.event_type).toLowerCase();
+    const state = clean(row?.state).toLowerCase();
+    const previousState = clean(row?.previous_state).toLowerCase();
+    const observedAt = row?.observed_at ? new Date(row.observed_at) : null;
+    const validObservedAt = observedAt && !Number.isNaN(observedAt.getTime()) ? observedAt : null;
+    const isBlocked = isBlockingState(state);
+    const wasBlocked = isBlockingState(previousState);
+    const isBlockEntry = isBlocked
+      && !wasBlocked
+      && ['state_observed', 'state_transition'].includes(eventType);
+    const isRecovery = wasBlocked
+      && !isBlocked
+      && eventType === 'state_transition';
+
+    summary.event_count += 1;
+    if (validObservedAt) validDates.push(validObservedAt);
+    if (isBlockEntry) {
+      summary.block_count += 1;
+      if (validObservedAt) blockDates.push(validObservedAt);
+    }
+    if (isRecovery) {
+      summary.recovery_count += 1;
+      if (validObservedAt) recoveryDates.push(validObservedAt);
+    }
+    if (eventType === 'send_blocked') summary.blocked_send_count += 1;
+  });
+
+  const toIso = (date) => date ? date.toISOString() : null;
+  const oldest = (dates) => dates.length
+    ? new Date(Math.min(...dates.map((date) => date.getTime())))
+    : null;
+  const newest = (dates) => dates.length
+    ? new Date(Math.max(...dates.map((date) => date.getTime())))
+    : null;
+  summary.recurrence_detected = summary.block_count > 1;
+  summary.history_started_at = toIso(oldest(validDates));
+  summary.first_blocked_at = toIso(oldest(blockDates));
+  summary.last_blocked_at = toIso(newest(blockDates));
+  summary.last_recovered_at = toIso(newest(recoveryDates));
+  return summary;
+}
+
+async function listAccountEventHistory({
+  assetId,
+  limit = 25,
+  beforeObservedAt = null,
+  beforeId = null,
+} = {}) {
+  const parsedAssetId = Number(assetId || 0);
+  if (!Number.isInteger(parsedAssetId) || parsedAssetId <= 0) {
+    const error = new Error('whatsapp_health_asset_not_found');
+    error.statusCode = 404;
+    throw error;
+  }
+  const asset = await ClinicMetaAsset.findByPk(parsedAssetId, {
+    attributes: ['id', 'assetType'],
+  });
+  if (!asset || asset.assetType !== 'whatsapp_phone_number') {
+    const error = new Error('whatsapp_health_asset_not_found');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const parsedLimit = Math.min(Math.max(Number(limit) || 25, 1), 100);
+  const where = { asset_id: parsedAssetId };
+  if (beforeObservedAt || beforeId) {
+    const cursorDate = beforeObservedAt ? new Date(beforeObservedAt) : null;
+    const parsedBeforeId = Number(beforeId || 0);
+    if (!cursorDate || Number.isNaN(cursorDate.getTime()) || !Number.isInteger(parsedBeforeId) || parsedBeforeId <= 0) {
+      const error = new Error('whatsapp_health_history_cursor_invalid');
+      error.statusCode = 400;
+      throw error;
+    }
+    where[Op.or] = [
+      { observed_at: { [Op.lt]: cursorDate } },
+      { observed_at: cursorDate, id: { [Op.lt]: parsedBeforeId } },
+    ];
+  }
+
+  const [summaryRows, pageRows] = await Promise.all([
+    WhatsappAccountHealthEvent.findAll({
+      where: { asset_id: parsedAssetId },
+      attributes: ['event_type', 'previous_state', 'state', 'observed_at'],
+      raw: true,
+    }),
+    WhatsappAccountHealthEvent.findAll({
+      where,
+      attributes: [
+        'id',
+        'event_type',
+        'source',
+        'previous_state',
+        'state',
+        'severity',
+        'can_send',
+        'reason_code',
+        'provider_status',
+        'provider_error_code',
+        'details',
+        'observed_at',
+      ],
+      order: [['observed_at', 'DESC'], ['id', 'DESC']],
+      limit: parsedLimit + 1,
+      raw: true,
+    }),
+  ]);
+  const hasMore = pageRows.length > parsedLimit;
+  const events = pageRows.slice(0, parsedLimit);
+  const lastEvent = events[events.length - 1] || null;
+  const cursorDate = lastEvent?.observed_at ? new Date(lastEvent.observed_at) : null;
+
+  return {
+    account_id: parsedAssetId,
+    events,
+    summary: summarizeEventHistory(summaryRows),
+    pagination: {
+      has_more: hasMore,
+      next_cursor: hasMore && lastEvent && cursorDate && !Number.isNaN(cursorDate.getTime())
+        ? {
+            before_observed_at: cursorDate.toISOString(),
+            before_id: Number(lastEvent.id),
+          }
+        : null,
+    },
+  };
+}
+
 async function getRouteHealth({ assetId = null, phoneNumberId = null, wabaId = null, clinicId = null } = {}) {
   const asset = assetId
     ? await ClinicMetaAsset.findByPk(Number(assetId))
@@ -611,6 +755,7 @@ module.exports = {
   assertCanSend,
   findRelevantAssets,
   getRouteHealth,
+  listAccountEventHistory,
   listEventsForAssets,
   recordAccountUpdate,
   recordAccountReviewUpdate,
@@ -624,5 +769,6 @@ module.exports = {
     healthEventDetails,
     normalizeBusinessVerificationStatus,
     parseDate,
+    summarizeEventHistory,
   },
 };

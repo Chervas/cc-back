@@ -343,3 +343,63 @@ test('sendMessage registra 131031 antes de propagar el error', async () => {
     restores.reverse().forEach((restore) => restore());
   }
 });
+
+test('resume episodios de bloqueo sin contar señales repetidas como reincidencia', () => {
+  const summary = whatsappAccountHealthService.__testing.summarizeEventHistory([
+    { event_type: 'state_observed', previous_state: null, state: 'healthy', observed_at: '2026-08-31T10:00:00.000Z' },
+    { event_type: 'state_transition', previous_state: 'healthy', state: 'blocked', observed_at: '2026-08-31T11:00:00.000Z' },
+    { event_type: 'state_signal', previous_state: 'blocked', state: 'blocked', observed_at: '2026-08-31T11:10:00.000Z' },
+    { event_type: 'recovery_observed', previous_state: 'blocked', state: 'blocked', observed_at: '2026-08-31T12:00:00.000Z' },
+    { event_type: 'state_transition', previous_state: 'blocked', state: 'healthy', observed_at: '2026-08-31T13:00:00.000Z' },
+    { event_type: 'state_transition', previous_state: 'healthy', state: 'disconnected', observed_at: '2026-08-31T14:00:00.000Z' },
+    { event_type: 'send_blocked', previous_state: 'disconnected', state: 'disconnected', observed_at: '2026-08-31T14:05:00.000Z' },
+  ]);
+
+  assert.deepEqual(summary, {
+    event_count: 7,
+    block_count: 2,
+    recovery_count: 1,
+    blocked_send_count: 1,
+    recurrence_detected: true,
+    history_started_at: '2026-08-31T10:00:00.000Z',
+    first_blocked_at: '2026-08-31T11:00:00.000Z',
+    last_blocked_at: '2026-08-31T14:00:00.000Z',
+    last_recovered_at: '2026-08-31T13:00:00.000Z',
+  });
+});
+
+test('pagina el historial por fecha e id y devuelve el resumen completo', async () => {
+  const pageRows = [
+    { id: 7, event_type: 'state_transition', source: 'whatsapp_phone_sync', previous_state: 'blocked', state: 'healthy', observed_at: new Date('2026-08-31T13:00:00.000Z') },
+    { id: 6, event_type: 'recovery_observed', source: 'whatsapp_phone_sync', previous_state: 'blocked', state: 'blocked', observed_at: new Date('2026-08-31T12:00:00.000Z') },
+    { id: 5, event_type: 'state_transition', source: 'whatsapp_phone_sync', previous_state: 'healthy', state: 'blocked', observed_at: new Date('2026-08-31T11:00:00.000Z') },
+  ];
+  const summaryRows = pageRows.map(({ event_type, previous_state, state, observed_at }) => ({
+    event_type,
+    previous_state,
+    state,
+    observed_at,
+  }));
+  const restores = [
+    patchProperty(db.ClinicMetaAsset, 'findByPk', async () => ({ id: 374, assetType: 'whatsapp_phone_number' })),
+    patchProperty(db.WhatsappAccountHealthEvent, 'findAll', async (options) => (
+      options.attributes.includes('details') ? pageRows : summaryRows
+    )),
+  ];
+  try {
+    const result = await whatsappAccountHealthService.listAccountEventHistory({
+      assetId: 374,
+      limit: 2,
+    });
+    assert.equal(result.events.length, 2);
+    assert.equal(result.pagination.has_more, true);
+    assert.deepEqual(result.pagination.next_cursor, {
+      before_observed_at: '2026-08-31T12:00:00.000Z',
+      before_id: 6,
+    });
+    assert.equal(result.summary.block_count, 1);
+    assert.equal(result.summary.recovery_count, 1);
+  } finally {
+    restores.reverse().forEach((restore) => restore());
+  }
+});
