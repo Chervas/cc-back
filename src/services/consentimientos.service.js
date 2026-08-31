@@ -1750,6 +1750,102 @@ async function listPatientDocuments(identifier, filters = {}) {
     };
 }
 
+async function listPatientExternalAttestations(identifier, filters = {}) {
+    const paciente = await findPacienteByIdentifier(identifier);
+    if (!paciente) {
+        const err = new Error('patient_not_found');
+        err.statusCode = 404;
+        throw err;
+    }
+    if (!db.PatientConsentExternalAttestation) return [];
+
+    const where = { paciente_id: paciente.id_paciente };
+    const clinicId = toIntOrNull(filters.clinic_id ?? filters.clinica_id);
+    if (clinicId) where.clinica_id = clinicId;
+    const status = toCleanString(filters.status ?? filters.estado);
+    if (status && status !== 'all') where.status = status;
+
+    return db.PatientConsentExternalAttestation.findAll({
+        where,
+        include: [
+            { model: db.Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica'] },
+            { model: db.Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre', 'disciplina'] },
+            db.Usuario ? { model: db.Usuario, as: 'attestedByUser', required: false, attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'] } : null,
+            db.Usuario ? { model: db.Usuario, as: 'revokedByUser', required: false, attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'] } : null,
+        ].filter(Boolean),
+        order: [['attested_at', 'DESC'], ['id', 'DESC']],
+    });
+}
+
+async function createPatientExternalAttestation(identifier, payload = {}, actorId = null) {
+    const paciente = await findPacienteByIdentifier(identifier);
+    if (!paciente) {
+        const err = new Error('patient_not_found');
+        err.statusCode = 404;
+        throw err;
+    }
+    if (!db.PatientConsentExternalAttestation) {
+        const err = new Error('external_consent_attestation_unavailable');
+        err.statusCode = 500;
+        throw err;
+    }
+
+    const clinicId = toIntOrNull(payload.clinic_id ?? payload.clinica_id) || toIntOrNull(paciente.clinica_id);
+    if (!clinicId) {
+        const err = new Error('clinic_id_required');
+        err.statusCode = 400;
+        throw err;
+    }
+
+    const purpose = normalizeEnum(payload.purpose ?? payload.tipo, PURPOSE_VALUES, 'clinical');
+    const title = toCleanString(payload.title ?? payload.nombre)
+        || (purpose === 'data_protection'
+            ? 'Consentimiento externo de protección de datos'
+            : 'Consentimiento escrito externo');
+    return db.PatientConsentExternalAttestation.create({
+        public_id: await generateUniquePublicId(db.PatientConsentExternalAttestation, 'cext'),
+        paciente_id: paciente.id_paciente,
+        clinica_id: clinicId,
+        tratamiento_id: toIntOrNull(payload.tratamiento_id),
+        purpose,
+        title,
+        note: toCleanString(payload.note ?? payload.descripcion),
+        source: toCleanString(payload.source ?? payload.origen) || 'external_written',
+        status: 'active',
+        attested_by: toIntOrNull(actorId),
+        attested_at: new Date(),
+    });
+}
+
+async function revokePatientExternalAttestation(identifier, payload = {}, actorId = null) {
+    if (!db.PatientConsentExternalAttestation) {
+        const err = new Error('external_consent_attestation_unavailable');
+        err.statusCode = 500;
+        throw err;
+    }
+
+    const value = toCleanString(identifier);
+    const where = /^\d+$/.test(value || '') ? { id: Number(value) } : { public_id: value };
+    const attestation = await db.PatientConsentExternalAttestation.findOne({ where });
+    if (!attestation) {
+        const err = new Error('external_consent_attestation_not_found');
+        err.statusCode = 404;
+        throw err;
+    }
+
+    if (attestation.status === 'revoked') return attestation;
+    const reason = toCleanString(payload.reason ?? payload.motivo);
+    await attestation.update({
+        status: 'revoked',
+        revoked_by: toIntOrNull(actorId),
+        revoked_at: new Date(),
+        note: reason
+            ? `${attestation.note || ''}\n\nRetirada: ${reason}`.trim()
+            : attestation.note,
+    });
+    return attestation;
+}
+
 function serializeAppointmentLite(citaLike) {
     const cita = getPlain(citaLike);
     if (!cita?.id_cita) return null;
@@ -3110,6 +3206,9 @@ module.exports = {
     getTreatmentRequirements,
     saveTreatmentRequirements,
     listPatientDocuments,
+    listPatientExternalAttestations,
+    createPatientExternalAttestation,
+    revokePatientExternalAttestation,
     listPatientTreatmentsWithoutConsentRequirements,
     getConsentSummaryForAppointment,
     attachConsentSummaryToCitas,

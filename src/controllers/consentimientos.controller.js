@@ -99,6 +99,14 @@ async function resolveDocumentClinicId(identifier) {
     return toIntOrNull(document?.clinica_id);
 }
 
+async function resolveExternalAttestationClinicId(identifier) {
+    const value = String(identifier || '').trim();
+    if (!value || !db.PatientConsentExternalAttestation) return null;
+    const where = /^\d+$/.test(value) ? { id: Number(value) } : { public_id: value };
+    const item = await db.PatientConsentExternalAttestation.findOne({ where, attributes: ['id', 'clinica_id'], raw: true });
+    return toIntOrNull(item?.clinica_id);
+}
+
 function withClinicFilter(filters = {}, clinicId) {
     return {
         ...(filters || {}),
@@ -252,6 +260,47 @@ exports.listPatientDocuments = asyncHandler(async (req, res) => {
         );
         const result = await consentimientosService.listPatientDocuments(req.params.id, withClinicFilter(req.query || {}, clinicId));
         return res.json(result);
+    } catch (error) {
+        return sendError(res, error);
+    }
+});
+
+exports.listPatientExternalAttestations = asyncHandler(async (req, res) => {
+    try {
+        const clinicId = await requireConsentFeature(
+            req,
+            'consents.view',
+            await resolvePatientClinicId(req.params.id, req.query?.clinic_id ?? req.query?.clinica_id)
+        );
+        const items = await consentimientosService.listPatientExternalAttestations(req.params.id, withClinicFilter(req.query || {}, clinicId));
+        return res.json(items);
+    } catch (error) {
+        return sendError(res, error);
+    }
+});
+
+exports.createPatientExternalAttestation = asyncHandler(async (req, res) => {
+    try {
+        const clinicId = await requireConsentFeature(
+            req,
+            'consents.manage',
+            await resolvePatientClinicId(req.params.id)
+        );
+        const item = await consentimientosService.createPatientExternalAttestation(req.params.id, {
+            ...(req.body || {}),
+            clinica_id: clinicId,
+        }, getUserId(req));
+        return res.status(201).json(item);
+    } catch (error) {
+        return sendError(res, error);
+    }
+});
+
+exports.revokePatientExternalAttestation = asyncHandler(async (req, res) => {
+    try {
+        await requireConsentFeature(req, 'consents.manage', await resolveExternalAttestationClinicId(req.params.id));
+        const item = await consentimientosService.revokePatientExternalAttestation(req.params.id, req.body || {}, getUserId(req));
+        return res.json(item);
     } catch (error) {
         return sendError(res, error);
     }
