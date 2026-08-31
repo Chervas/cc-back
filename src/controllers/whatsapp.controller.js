@@ -2348,6 +2348,23 @@ exports.getComplianceAdminIncident = async (req, res) => {
   }
 };
 
+exports.getComplianceAdminAccountHealthHistory = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  try {
+    const result = await whatsappAccountHealthService.listAccountEventHistory({
+      assetId: Number(req.params.assetId),
+      limit: req.query.limit,
+      beforeObservedAt: req.query.before_observed_at,
+      beforeId: req.query.before_id,
+    });
+    return res.json(result);
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      error: error?.message || 'whatsapp_health_history_failed',
+    });
+  }
+};
+
 exports.refreshComplianceAdminOverview = async (req, res) => {
   if (!assertAdmin(req, res)) return;
   try {
