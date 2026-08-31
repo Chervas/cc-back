@@ -116,6 +116,7 @@ function deriveHealthCandidate(input = {}) {
   const accountReviewStatus = upper(input.accountReviewStatus);
   const wabaCanSendMessage = upper(input.wabaCanSendMessage);
   const businessVerificationStatus = upper(input.businessVerificationStatus);
+  const webhookSubscriptionStatus = lower(input.webhookSubscriptionStatus);
   const providerErrorCode = Number(input.providerErrorCode || 0) || null;
 
   if (providerErrorCode === 131031) {
@@ -258,7 +259,8 @@ function deriveHealthCandidate(input = {}) {
       || providerEvent === 'ACCOUNT_VIOLATION'
       || wabaCanSendMessage === 'LIMITED'
       || DEGRADED_ACCOUNT_REVIEW_STATUSES.has(accountReviewStatus)
-      || DEGRADED_BUSINESS_VERIFICATION_STATUSES.has(businessVerificationStatus);
+      || DEGRADED_BUSINESS_VERIFICATION_STATUSES.has(businessVerificationStatus)
+      || webhookSubscriptionStatus === 'missing';
     return {
       state: degraded ? 'degraded' : 'healthy',
       can_send: true,
@@ -267,6 +269,8 @@ function deriveHealthCandidate(input = {}) {
         ? 'waba_health_limited'
         : DEGRADED_ACCOUNT_REVIEW_STATUSES.has(accountReviewStatus)
           ? `waba_account_review_${accountReviewStatus.toLowerCase()}`
+          : webhookSubscriptionStatus === 'missing'
+            ? 'webhook_subscription_missing'
           : DEGRADED_BUSINESS_VERIFICATION_STATUSES.has(businessVerificationStatus)
             ? `business_verification_${businessVerificationStatus.toLowerCase()}`
             : qualityRating === 'RED'
@@ -296,6 +300,7 @@ function deriveAssetSignal(asset = {}, overrides = {}) {
   const registration = safeObject(additionalData.registration);
   const compliance = safeObject(additionalData.whatsappCompliance);
   const businessHealth = safeObject(additionalData.whatsappBusinessHealth);
+  const webhookSubscription = safeObject(additionalData.whatsappWebhookSubscription);
   return {
     assetActive: overrides.assetActive ?? asset.isActive,
     providerStatus: overrides.providerStatus ?? registration.phoneStatus,
@@ -309,6 +314,8 @@ function deriveAssetSignal(asset = {}, overrides = {}) {
     businessVerificationStatus: overrides.businessVerificationStatus
       ?? businessHealth.business_verification_status
       ?? additionalData.businessVerificationStatus,
+    webhookSubscriptionStatus: overrides.webhookSubscriptionStatus
+      ?? webhookSubscription.status,
   };
 }
 

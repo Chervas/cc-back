@@ -25,6 +25,13 @@ const PHONE_FULL_SYNC_INTERVAL_MS = Math.max(
   15,
   Number(process.env.WHATSAPP_PHONE_FULL_SYNC_INTERVAL_MINUTES || 60) || 60
 ) * 60 * 1000;
+const META_APP_ID = process.env.META_APP_ID || process.env.FACEBOOK_APP_ID || '1807844546609897';
+const REQUIRED_WEBHOOK_FIELDS = Object.freeze([
+  'account_review_update',
+  'account_update',
+  'messages',
+]);
+let appWebhookConfigurationCache = null;
 
 function getMetaBaseUrl() {
   return `https://graph.facebook.com/${META_API_VERSION}`;
@@ -125,6 +132,158 @@ async function fetchWabaOperationalStatus({ wabaId, accessToken }) {
   return normalizeWabaOperationalSnapshot(resp.data, new Date());
 }
 
+function providerErrorSummary(error) {
+  const provider = error?.response?.data?.error || {};
+  return {
+    code: provider.code || error?.code || null,
+    type: provider.type || null,
+    http_status: error?.response?.status || null,
+  };
+}
+
+async function fetchAppWebhookConfiguration({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && appWebhookConfigurationCache?.expires_at > now) {
+    return appWebhookConfigurationCache.value;
+  }
+  const appSecret = process.env.META_APP_SECRET;
+  if (!META_APP_ID || !appSecret) {
+    return {
+      available: false,
+      active: null,
+      callback_host: null,
+      fields: [],
+      missing_fields: [...REQUIRED_WEBHOOK_FIELDS],
+      error: { code: 'meta_app_credentials_missing', type: null, http_status: null },
+    };
+  }
+
+  try {
+    const response = await axios.get(`${getMetaBaseUrl()}/${META_APP_ID}/subscriptions`, {
+      params: { access_token: `${META_APP_ID}|${appSecret}` },
+      timeout: 15000,
+    });
+    const subscription = (response.data?.data || []).find((item) => (
+      String(item?.object || '').toLowerCase() === 'whatsapp_business_account'
+    )) || null;
+    const fields = (subscription?.fields || [])
+      .map((field) => String(typeof field === 'string' ? field : field?.name || '').toLowerCase())
+      .filter(Boolean)
+      .sort();
+    const value = {
+      available: true,
+      active: subscription?.active !== false && Boolean(subscription),
+      callback_host: (() => {
+        try { return new URL(subscription?.callback_url).host; } catch { return null; }
+      })(),
+      fields,
+      missing_fields: REQUIRED_WEBHOOK_FIELDS.filter((field) => !fields.includes(field)),
+      error: null,
+    };
+    appWebhookConfigurationCache = {
+      expires_at: now + PHONE_FULL_SYNC_INTERVAL_MS,
+      value,
+    };
+    return value;
+  } catch (error) {
+    const value = {
+      available: false,
+      active: null,
+      callback_host: null,
+      fields: [],
+      missing_fields: [...REQUIRED_WEBHOOK_FIELDS],
+      error: providerErrorSummary(error),
+    };
+    appWebhookConfigurationCache = {
+      expires_at: now + Math.min(PHONE_FULL_SYNC_INTERVAL_MS, 5 * 60 * 1000),
+      value,
+    };
+    return value;
+  }
+}
+
+async function fetchWebhookSubscriptionStatus({ wabaId, accessToken }) {
+  const checkedAt = new Date().toISOString();
+  let wabaSubscription = null;
+  let wabaError = null;
+  try {
+    const response = await axios.get(`${getMetaBaseUrl()}/${wabaId}/subscribed_apps`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      timeout: 15000,
+    });
+    const apps = (response.data?.data || []).map((item) => ({
+      id: String(item?.whatsapp_business_api_data?.id || item?.id || ''),
+      override_callback_host: (() => {
+        try { return new URL(item?.override_callback_uri).host; } catch { return null; }
+      })(),
+    }));
+    wabaSubscription = apps.find((app) => app.id === String(META_APP_ID)) || null;
+  } catch (error) {
+    wabaError = providerErrorSummary(error);
+  }
+
+  const appConfiguration = await fetchAppWebhookConfiguration();
+  const missingFields = appConfiguration.missing_fields || [];
+  const definitivelyMissing = (!wabaError && !wabaSubscription)
+    || (appConfiguration.available && (!appConfiguration.active || missingFields.length > 0));
+  const subscribed = Boolean(
+    wabaSubscription
+    && appConfiguration.available
+    && appConfiguration.active
+    && missingFields.length === 0
+  );
+
+  return {
+    status: subscribed ? 'subscribed' : definitivelyMissing ? 'missing' : 'unknown',
+    waba_subscribed: wabaError ? null : Boolean(wabaSubscription),
+    app_configuration_active: appConfiguration.active,
+    expected_app_id: META_APP_ID || null,
+    callback_host: wabaSubscription?.override_callback_host || appConfiguration.callback_host || null,
+    required_fields: [...REQUIRED_WEBHOOK_FIELDS],
+    missing_fields: missingFields,
+    checked_at: checkedAt,
+    source: 'meta_graph_subscription_audit',
+    error: wabaError || appConfiguration.error || null,
+  };
+}
+
+async function queueWebhookSubscriptionTransition({ localPhones, previousStatuses, snapshot }) {
+  const first = localPhones[0] || null;
+  if (!first || !snapshot || snapshot.status === 'unknown') return null;
+  const hadMissing = previousStatuses.has('missing');
+  const becameMissing = snapshot.status === 'missing' && !hadMissing;
+  const recovered = snapshot.status === 'subscribed' && hadMissing;
+  if (!becameMissing && !recovered) return null;
+
+  const systemNotifications = require('./systemNotifications.service');
+  return systemNotifications.queueNotification({
+    eventKey: becameMissing
+      ? 'whatsapp.webhook_subscription_missing'
+      : 'whatsapp.webhook_subscription_recovered',
+    payload: becameMissing
+      ? {
+          severity: 'critical',
+          title: `Webhook de WhatsApp sin cobertura para ${first.waVerifiedName || first.metaAssetName || 'una cuenta'}`,
+          detail: 'La app o alguno de los campos obligatorios ya no figura suscrito en Meta. El envío sigue bajo control del cortacircuitos, pero podrían no llegar cambios en tiempo real.',
+          action: 'Revisar la suscripción en Monitorización > WhatsApp.',
+        }
+      : {
+          severity: 'info',
+          title: `Webhook de WhatsApp restablecido para ${first.waVerifiedName || first.metaAssetName || 'una cuenta'}`,
+          detail: 'Meta vuelve a confirmar la app y los campos de webhook obligatorios.',
+          action: 'Comprobar el historial de la cuenta en Monitorización > WhatsApp.',
+        },
+    force: true,
+    metadata: {
+      source: 'whatsapp_webhook_subscription_audit',
+      asset_id: Number(first.id),
+      waba_id: String(first.wabaId || ''),
+      subscription_status: snapshot.status,
+      missing_fields: snapshot.missing_fields || [],
+    },
+  });
+}
+
 async function disableDeletedPhone(asset) {
   const additionalData = { ...(asset.additionalData || {}) };
   const registration = additionalData.registration || {};
@@ -145,7 +304,12 @@ async function disableDeletedPhone(asset) {
   await asset.save();
 }
 
-async function upsertRemoteState(asset, remote, profile, { fullSync = false, wabaSnapshot = null } = {}) {
+async function upsertRemoteState(
+  asset,
+  remote,
+  profile,
+  { fullSync = false, wabaSnapshot = null, webhookSubscription = null } = {}
+) {
   const nowIso = new Date().toISOString();
   const additionalData = { ...(asset.additionalData || {}) };
   const registration = additionalData.registration || {};
@@ -191,6 +355,9 @@ async function upsertRemoteState(asset, remote, profile, { fullSync = false, wab
       || additionalData.businessVerificationStatus
       || null;
     additionalData.businessId = wabaSnapshot.business_id || additionalData.businessId || null;
+  }
+  if (webhookSubscription) {
+    additionalData.whatsappWebhookSubscription = webhookSubscription;
   }
 
   if (remote?.status === 'CONNECTED') {
@@ -456,13 +623,37 @@ async function syncPhonesForWaba({ wabaId, accessToken, ensureTemplates = true, 
   const performFullSync = normalizedMode === 'full'
     || (normalizedMode === 'auto' && (!mostRecentFullSync || Date.now() - mostRecentFullSync >= PHONE_FULL_SYNC_INTERVAL_MS));
   let wabaSnapshot = null;
+  let webhookSubscription = null;
+  const previousWebhookSubscriptionStatuses = new Set(
+    localPhones
+      .map((asset) => String(asset.additionalData?.whatsappWebhookSubscription?.status || '').toLowerCase())
+      .filter(Boolean)
+  );
   if (performFullSync) {
-    try {
-      wabaSnapshot = await fetchWabaOperationalStatus({ wabaId, accessToken: token });
-    } catch (error) {
+    const [wabaResult, subscriptionResult] = await Promise.allSettled([
+      fetchWabaOperationalStatus({ wabaId, accessToken: token }),
+      fetchWebhookSubscriptionStatus({ wabaId, accessToken: token }),
+    ]);
+    if (wabaResult.status === 'fulfilled') {
+      wabaSnapshot = wabaResult.value;
+    } else {
       console.warn('[whatsapp] No se pudo obtener la salud general del WABA', {
         wabaId,
-        error: error?.response?.data?.error?.code || error?.code || error?.message || 'waba_status_failed',
+        error: wabaResult.reason?.response?.data?.error?.code
+          || wabaResult.reason?.code
+          || wabaResult.reason?.message
+          || 'waba_status_failed',
+      });
+    }
+    if (subscriptionResult.status === 'fulfilled') {
+      webhookSubscription = subscriptionResult.value;
+    } else {
+      console.warn('[whatsapp] No se pudo auditar la suscripción del webhook', {
+        wabaId,
+        error: subscriptionResult.reason?.response?.data?.error?.code
+          || subscriptionResult.reason?.code
+          || subscriptionResult.reason?.message
+          || 'webhook_subscription_audit_failed',
       });
     }
   }
@@ -531,6 +722,7 @@ async function syncPhonesForWaba({ wabaId, accessToken, ensureTemplates = true, 
     await upsertRemoteState(asset, remote, profileInfo, {
       fullSync: performFullSync,
       wabaSnapshot,
+      webhookSubscription,
     });
     const healthResult = await whatsappAccountHealthService.recordObservationForAsset({
       assetId: asset.id,
@@ -541,6 +733,7 @@ async function syncPhonesForWaba({ wabaId, accessToken, ensureTemplates = true, 
         accountReviewStatus: wabaSnapshot?.account_review_status,
         wabaCanSendMessage: wabaSnapshot?.can_send_message,
         businessVerificationStatus: wabaSnapshot?.business_verification_status,
+        webhookSubscriptionStatus: webhookSubscription?.status,
       },
       source: 'whatsapp_phone_sync',
       previousHealth,
@@ -586,6 +779,19 @@ async function syncPhonesForWaba({ wabaId, accessToken, ensureTemplates = true, 
     }
   }
 
+  if (webhookSubscription) {
+    await queueWebhookSubscriptionTransition({
+      localPhones,
+      previousStatuses: previousWebhookSubscriptionStatuses,
+      snapshot: webhookSubscription,
+    }).catch((error) => {
+      console.warn('[whatsapp] No se pudo encolar el aviso de suscripción webhook', {
+        wabaId,
+        error: error?.code || error?.message || 'webhook_subscription_notification_failed',
+      });
+    });
+  }
+
   return {
     wabaId,
     remoteCount: remotePhones.length,
@@ -594,6 +800,7 @@ async function syncPhonesForWaba({ wabaId, accessToken, ensureTemplates = true, 
     accountReviewStatus: wabaSnapshot?.account_review_status || null,
     businessVerificationStatus: wabaSnapshot?.business_verification_status || null,
     wabaCanSendMessage: wabaSnapshot?.can_send_message || null,
+    webhookSubscriptionStatus: webhookSubscription?.status || null,
   };
 }
 
@@ -638,6 +845,8 @@ async function enqueueSyncPhonesForAllWabas({ mode = 'auto' } = {}) {
 
 module.exports = {
   PHONE_FULL_SYNC_INTERVAL_MS,
+  fetchAppWebhookConfiguration,
+  fetchWebhookSubscriptionStatus,
   fetchWabaOperationalStatus,
   normalizeWabaOperationalSnapshot,
   syncPhonesForWaba,

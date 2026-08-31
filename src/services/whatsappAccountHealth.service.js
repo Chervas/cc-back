@@ -80,7 +80,27 @@ function healthEventDetails(input = {}) {
     quality_rating: clean(input.qualityRating).toUpperCase() || null,
     recovery_observation: Number(input.recoveryObservation || 0) || null,
     recovery_required: Number(input.recoveryRequired || 0) || null,
+    review_decision: clean(input.reviewDecision).toUpperCase() || null,
+    rejection_reason: clean(input.rejectionReason).slice(0, 500) || null,
+    business_verification_status: clean(input.businessVerificationStatus).toLowerCase() || null,
   };
+}
+
+function normalizeBusinessVerificationStatus(value) {
+  const normalized = clean(value).toUpperCase().replace(/^BUSINESS_/, '');
+  const aliases = {
+    APPROVED: 'verified',
+    VERIFIED: 'verified',
+    REJECTED: 'rejected',
+    FAILED: 'failed',
+    REVOKED: 'revoked',
+    EXPIRED: 'expired',
+    NOT_VERIFIED: 'not_verified',
+    PENDING: 'pending',
+    PENDING_SUBMISSION: 'pending_submission',
+    PENDING_NEED_MORE_INFO: 'pending_need_more_info',
+  };
+  return aliases[normalized] || normalized.toLowerCase() || null;
 }
 
 async function createEvent({ asset, eventType, source, previousState, health, observedAt, details, dedupeIdentity }, transaction) {
@@ -162,6 +182,28 @@ async function queueTransitionNotification({ asset, previousState, health }) {
       group_id: Number(asset.grupoClinicaId || 0) || null,
       health_state: health.state,
       reason_code: health.reason_code || null,
+    },
+  });
+}
+
+async function queueBusinessVerificationNotification({ asset, status }) {
+  if (!['rejected', 'failed', 'revoked'].includes(clean(status).toLowerCase())) return null;
+  const systemNotifications = require('./systemNotifications.service');
+  return systemNotifications.queueNotification({
+    eventKey: 'whatsapp.business_verification_rejected',
+    payload: {
+      severity: 'warning',
+      title: `Verificación empresarial de WhatsApp rechazada en ${asset.waVerifiedName || asset.metaAssetName || 'una cuenta'}`,
+      detail: 'Meta ha comunicado que el negocio no ha superado o ha perdido la verificación empresarial.',
+      action: 'Revisar el motivo técnico y la verificación en Monitorización > WhatsApp.',
+    },
+    force: true,
+    metadata: {
+      source: 'whatsapp_account_update',
+      asset_id: Number(asset.id),
+      clinic_id: Number(asset.clinicaId || 0) || null,
+      group_id: Number(asset.grupoClinicaId || 0) || null,
+      business_verification_status: status,
     },
   });
 }
@@ -428,20 +470,96 @@ async function recordAccountUpdate({ entry = {}, change = {}, value = {}, clinic
   const wabaId = clean(entry.id || value.waba_id) || null;
   const assets = await findRelevantAssets({ wabaId, phoneNumberId, clinicId });
   const observedAt = parseDate(entry.time || value.timestamp);
+  const businessVerificationStatus = providerEvent === 'BUSINESS_VERIFICATION_STATUS_UPDATE'
+    ? normalizeBusinessVerificationStatus(value.business_verification_status || value.status)
+    : null;
   const explicitRecovery = providerEvent === 'ACCOUNT_RECONNECTED'
     || (providerEvent === 'DISABLED_UPDATE' && complianceStatusForEvent(value) === 'active');
-  return Promise.all(assets.map((asset) => recordObservationForAsset({
-    assetId: asset.id,
-    signal: {
-      providerEvent,
-      complianceStatus: complianceStatusForEvent(value),
-      providerStatus: explicitRecovery ? 'CONNECTED' : undefined,
-    },
-    source: 'account_update_webhook',
-    observedAt,
-    explicitRecovery,
-    dedupeIdentity: `${clean(entry.id)}:${clean(entry.time || value.timestamp)}:${providerEvent}`,
-  })));
+  return Promise.all(assets.map(async (asset) => {
+    if (businessVerificationStatus) {
+      const additionalData = { ...safeObject(asset.additionalData) };
+      const businessHealth = { ...safeObject(additionalData.whatsappBusinessHealth) };
+      businessHealth.business_verification_status = businessVerificationStatus;
+      businessHealth.observed_at = observedAt.toISOString();
+      additionalData.whatsappBusinessHealth = businessHealth;
+      additionalData.businessVerificationStatus = businessVerificationStatus;
+      additionalData.whatsappBusinessVerificationWebhook = {
+        event: providerEvent,
+        status: businessVerificationStatus,
+        received_at: observedAt.toISOString(),
+      };
+      asset.additionalData = additionalData;
+      asset.changed('additionalData', true);
+      await asset.save();
+    }
+
+    const result = await recordObservationForAsset({
+      assetId: asset.id,
+      signal: {
+        providerEvent,
+        complianceStatus: complianceStatusForEvent(value),
+        providerStatus: explicitRecovery ? 'CONNECTED' : undefined,
+        businessVerificationStatus: businessVerificationStatus || undefined,
+      },
+      source: 'account_update_webhook',
+      observedAt,
+      explicitRecovery,
+      dedupeIdentity: `${clean(entry.id)}:${clean(entry.time || value.timestamp)}:${providerEvent}`,
+      details: { businessVerificationStatus },
+    });
+    if (businessVerificationStatus && result?.event_created) {
+      await queueBusinessVerificationNotification({ asset, status: businessVerificationStatus }).catch((error) => {
+        console.warn('[whatsapp health] No se pudo encolar el aviso de verificación empresarial', {
+          assetId: asset.id,
+          error: error?.code || error?.message || 'business_verification_notification_failed',
+        });
+      });
+    }
+    return result;
+  }));
+}
+
+async function recordAccountReviewUpdate({ entry = {}, change = {}, value = {}, clinicId = null } = {}) {
+  if (clean(change.field).toLowerCase() !== 'account_review_update') return [];
+  const decision = clean(value.decision).toUpperCase();
+  if (!['APPROVED', 'REJECTED'].includes(decision)) return [];
+  const phoneNumberId = clean(value?.metadata?.phone_number_id) || null;
+  const wabaId = clean(entry.id || value.waba_id) || null;
+  const rejectionReason = clean(value.rejection_reason).slice(0, 500) || null;
+  const assets = await findRelevantAssets({ wabaId, phoneNumberId, clinicId });
+  const observedAt = parseDate(entry.time || value.timestamp);
+
+  return Promise.all(assets.map(async (asset) => {
+    const additionalData = { ...safeObject(asset.additionalData) };
+    const businessHealth = { ...safeObject(additionalData.whatsappBusinessHealth) };
+    businessHealth.account_review_status = decision;
+    businessHealth.account_review_rejection_reason = decision === 'REJECTED' ? rejectionReason : null;
+    businessHealth.observed_at = observedAt.toISOString();
+    additionalData.whatsappBusinessHealth = businessHealth;
+    additionalData.whatsappAccountReviewWebhook = {
+      decision,
+      rejection_reason: decision === 'REJECTED' ? rejectionReason : null,
+      received_at: observedAt.toISOString(),
+    };
+    asset.additionalData = additionalData;
+    asset.changed('additionalData', true);
+    await asset.save();
+
+    return recordObservationForAsset({
+      assetId: asset.id,
+      signal: {
+        providerEvent: `ACCOUNT_REVIEW_${decision}`,
+        accountReviewStatus: decision,
+        providerStatus: asset.additionalData?.registration?.phoneStatus,
+        wabaCanSendMessage: businessHealth.can_send_message,
+      },
+      source: 'account_review_update_webhook',
+      observedAt,
+      explicitRecovery: decision === 'APPROVED',
+      dedupeIdentity: `${clean(entry.id)}:${clean(entry.time || value.timestamp)}:ACCOUNT_REVIEW_${decision}`,
+      details: { reviewDecision: decision, rejectionReason },
+    });
+  }));
 }
 
 async function listEventsForAssets(assetIds = [], { limit = 500, perAsset = 20 } = {}) {
@@ -495,6 +613,7 @@ module.exports = {
   getRouteHealth,
   listEventsForAssets,
   recordAccountUpdate,
+  recordAccountReviewUpdate,
   recordObservationForAsset,
   recordProviderFailure,
   reconcileStoredHealth,
@@ -503,6 +622,7 @@ module.exports = {
     blockedError,
     complianceStatusForEvent,
     healthEventDetails,
+    normalizeBusinessVerificationStatus,
     parseDate,
   },
 };

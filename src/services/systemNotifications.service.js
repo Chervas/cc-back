@@ -147,6 +147,30 @@ const SYSTEM_NOTIFICATION_EVENTS = Object.freeze([
     description: 'La recuperación del número se ha confirmado sin realizar un envío de prueba.',
     defaults: { panel: true, email: true, whatsapp: false },
   },
+  {
+    key: 'whatsapp.webhook_subscription_missing',
+    category: 'whatsapp',
+    severity: 'critical',
+    label: 'WhatsApp: webhook sin cobertura',
+    description: 'Meta ya no confirma la app o alguno de los campos de webhook obligatorios.',
+    defaults: { panel: true, email: true, whatsapp: true },
+  },
+  {
+    key: 'whatsapp.webhook_subscription_recovered',
+    category: 'whatsapp',
+    severity: 'info',
+    label: 'WhatsApp: webhook restablecido',
+    description: 'Meta vuelve a confirmar la app y los campos de webhook obligatorios.',
+    defaults: { panel: true, email: true, whatsapp: false },
+  },
+  {
+    key: 'whatsapp.business_verification_rejected',
+    category: 'whatsapp',
+    severity: 'warning',
+    label: 'WhatsApp: verificación empresarial rechazada',
+    description: 'Meta ha comunicado que el negocio no ha superado la verificación empresarial.',
+    defaults: { panel: true, email: true, whatsapp: false },
+  },
 ]);
 
 function cleanString(value) {

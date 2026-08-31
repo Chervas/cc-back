@@ -82,6 +82,29 @@ test('la verificación empresarial pendiente degrada sin bloquear el número', (
   assert.equal(health.reason_code, 'business_verification_pending');
 });
 
+test('una suscripción webhook ausente degrada la monitorización sin bloquear envíos', () => {
+  const health = deriveHealthCandidate({
+    providerStatus: 'CONNECTED',
+    registrationStatus: 'registered',
+    qualityRating: 'GREEN',
+    webhookSubscriptionStatus: 'missing',
+  });
+  assert.equal(health.state, 'degraded');
+  assert.equal(health.can_send, true);
+  assert.equal(health.reason_code, 'webhook_subscription_missing');
+});
+
+test('normaliza los estados de verificación empresarial recibidos por webhook', () => {
+  assert.equal(
+    whatsappAccountHealthService.__testing.normalizeBusinessVerificationStatus('BUSINESS_REJECTED'),
+    'rejected'
+  );
+  assert.equal(
+    whatsappAccountHealthService.__testing.normalizeBusinessVerificationStatus('BUSINESS_VERIFIED'),
+    'verified'
+  );
+});
+
 test('el snapshot WABA conserva solo estado operativo saneado', () => {
   const snapshot = normalizeWabaOperationalSnapshot({
     name: 'Cuenta de prueba',
