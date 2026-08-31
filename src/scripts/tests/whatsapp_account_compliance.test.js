@@ -9,6 +9,12 @@ const {
 const {
   buildAppealDraft,
   getStoredAccountUpdate,
+  __testing: {
+    buildAccountReviewSnapshot,
+    buildManualReviewIncidentSpec,
+    sanitizeAppealActivity,
+    buildTechnicalRestrictions,
+  },
 } = require('../../services/whatsappAccountCompliance.service');
 
 const webhookEntry = { id: 'waba-123', time: 1786140000 };
@@ -121,6 +127,105 @@ assert.strictEqual(getStoredAccountUpdate({
     },
   },
 }), null);
+
+const rejectedReview = buildAccountReviewSnapshot({
+  decision: 'REJECTED',
+  rejection_reason: 'Business details could not be confirmed',
+});
+assert.strictEqual(rejectedReview.event, 'ACCOUNT_REVIEW_REJECTED');
+assert.strictEqual(rejectedReview.status, 'restricted');
+assert.strictEqual(rejectedReview.blocks_all_sending, true);
+assert.match(rejectedReview.violation_label, /could not be confirmed/);
+assert.strictEqual(buildAccountReviewSnapshot({ decision: 'UNKNOWN' }), null);
+
+const technicalRestrictions = buildTechnicalRestrictions({
+  business_id: 'business-1',
+  business_verification_status: 'rejected',
+  entities: [
+    {
+      id: 'waba-123',
+      entity_type: 'WABA',
+      errors: [{
+        error_code: 141006,
+        error_description: 'There is an error with the payment method.',
+        possible_solution: 'Add a new payment method.',
+      }],
+    },
+    {
+      id: 'business-1',
+      entity_type: 'BUSINESS',
+      errors: [{
+        error_code: 141010,
+        error_description: 'The Business has not passed business verification.',
+        possible_solution: 'Resolve business verification.',
+      }],
+    },
+  ],
+});
+assert.deepStrictEqual(technicalRestrictions.map((row) => row.error_code), [141006, 141010]);
+assert.match(technicalRestrictions[0].remediation, /payment method/i);
+
+const manualSpec = buildManualReviewIncidentSpec({
+  asset: {
+    id: 367,
+    assetType: 'whatsapp_phone_number',
+    wabaId: 'waba-123',
+    phoneNumberId: 'phone-456',
+    metaAssetName: '+34 600 00 00 00',
+    additionalData: {
+      whatsappBusinessHealth: {
+        can_send_message: 'BLOCKED',
+        business_verification_status: 'rejected',
+        entities: [{
+          id: 'waba-123',
+          entity_type: 'WABA',
+          errors: [{ error_code: 141006, error_description: 'Payment error' }],
+        }],
+      },
+      whatsappWebhookSubscription: {
+        status: 'subscribed',
+        callback_host: 'autenticacion.clinicaclick.com',
+      },
+      secret_token: 'must-not-be-copied',
+    },
+  },
+  context: { clinicId: 67, groupId: null },
+  health: {
+    state: 'blocked',
+    can_send: false,
+    reason_code: 'waba_health_blocked',
+    observed_at: '2026-08-31T16:06:09.000Z',
+    last_blocked_at: '2026-08-31T16:06:09.000Z',
+  },
+  now: new Date('2026-08-31T18:00:00.000Z'),
+  userId: 1,
+});
+assert.strictEqual(manualSpec.provider_event, 'WABA_HEALTH_BLOCKED');
+assert.strictEqual(manualSpec.webhook_field, 'manual_health_review');
+assert.strictEqual(manualSpec.restriction_info[0].error_code, 141006);
+assert.strictEqual(JSON.stringify(manualSpec.raw_payload).includes('must-not-be-copied'), false);
+
+const sanitizedActivity = sanitizeAppealActivity({
+  last_7d: 3,
+  failed_7d: 1,
+  status_counts: { delivered: 2, failed: 1 },
+  source_counts: { automation: 3 },
+  error_counts: { 131031: 1 },
+  attribution: { phone_number_id: 'sender-phone-id', exact_7d: 3, scoped_by_route: true },
+  recent: [{
+    id: 99,
+    excerpt: 'Contenido de paciente',
+    status_history: [{ recipient_id: '34600000000', status: 'failed' }],
+  }],
+  recent_failures: [{ recipient_id: '34600000000' }],
+});
+assert.strictEqual(sanitizedActivity.last_7d, 3);
+assert.strictEqual(sanitizedActivity.error_counts['131031'], 1);
+assert.strictEqual(sanitizedActivity.attribution.phone_number_id, 'sender-phone-id');
+assert.strictEqual(Object.hasOwn(sanitizedActivity, 'recent'), false);
+assert.strictEqual(Object.hasOwn(sanitizedActivity, 'recent_failures'), false);
+assert.strictEqual(JSON.stringify(sanitizedActivity).includes('34600000000'), false);
+assert.strictEqual(JSON.stringify(sanitizedActivity).includes('Contenido de paciente'), false);
 
 const appealDraft = buildAppealDraft({
   incident: {

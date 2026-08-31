@@ -2058,8 +2058,13 @@ exports.listPhones = async (req, res) => {
         manager_business_id: managerBusinessId,
         business_verification_status: businessVerificationStatus,
         waba_account_review_status: additionalData.whatsappBusinessHealth?.account_review_status || null,
+        waba_account_review_rejection_reason: additionalData.whatsappBusinessHealth?.account_review_rejection_reason || null,
         waba_health_can_send_message: additionalData.whatsappBusinessHealth?.can_send_message || null,
         waba_health_observed_at: additionalData.whatsappBusinessHealth?.observed_at || null,
+        waba_health_entities: Array.isArray(additionalData.whatsappBusinessHealth?.entities)
+          ? additionalData.whatsappBusinessHealth.entities
+          : [],
+        webhook_subscription: additionalData.whatsappWebhookSubscription || null,
         name_status: additionalData.nameStatus || null,
         name_status_reason: additionalData.nameStatusReason || null,
         requested_display_name: additionalData.requestedDisplayName || null,
@@ -2254,8 +2259,11 @@ exports.getComplianceAdminOverview = async (req, res) => {
           || additionalData.businessVerificationStatus
           || null,
         waba_account_review_status: businessHealth.account_review_status || null,
+        waba_account_review_rejection_reason: businessHealth.account_review_rejection_reason || null,
         waba_health_can_send_message: businessHealth.can_send_message || null,
         waba_health_observed_at: businessHealth.observed_at || null,
+        waba_health_entities: Array.isArray(businessHealth.entities) ? businessHealth.entities : [],
+        webhook_subscription: additionalData.whatsappWebhookSubscription || null,
         name_status: additionalData.nameStatus || null,
         new_name_status: additionalData.newNameStatus || additionalData.new_name_status || null,
         requested_display_name: additionalData.newDisplayName
@@ -2298,8 +2306,8 @@ exports.getComplianceAdminOverview = async (req, res) => {
         pending_reviews: incidents.filter((incident) => ['clinicaclick_review_requested', 'draft_ready', 'submitted', 'in_review'].includes(incident.status)).length,
       },
       source: {
-        enforcement: 'webhooks, provider failures and sender preflight',
-        technical_refresh: 'lightweight status sync every cycle; full enrichment at most hourly',
+        enforcement: 'account_update/account_review_update webhooks, provider failures and sender preflight',
+        technical_refresh: 'lightweight status sync every cycle; WABA health and webhook subscription audit at most hourly',
       },
     });
   } catch (error) {
@@ -2384,6 +2392,21 @@ exports.diagnoseComplianceAccount = async (req, res) => {
   } catch (error) {
     return res.status(error?.statusCode || 500).json({
       error: error?.message || 'whatsapp_compliance_diagnostic_failed',
+    });
+  }
+};
+
+exports.prepareManualComplianceAppeal = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  try {
+    const incident = await whatsappAccountComplianceService.prepareManualAccountReview({
+      assetId: Number(req.params.assetId),
+      userId: req.userData?.userId,
+    });
+    return res.json({ success: true, incident });
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      error: error?.message || 'whatsapp_manual_review_prepare_failed',
     });
   }
 };

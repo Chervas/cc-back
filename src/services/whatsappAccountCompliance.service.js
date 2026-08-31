@@ -35,9 +35,31 @@ const OPEN_STATUSES = [
   'submitted',
   'in_review',
 ];
+const TECHNICAL_EVENT_LABELS = Object.freeze({
+  ACCOUNT_REVIEW_REJECTED: 'Meta ha rechazado la revisión de la cuenta WABA',
+  BUSINESS_VERIFICATION_REJECTED: 'Meta ha rechazado la verificación empresarial',
+  PHONE_NUMBER_BANNED: 'Meta informa que el número está baneado',
+  WABA_HEALTH_BLOCKED: 'Meta informa que la salud del WABA bloquea los envíos',
+  WHATSAPP_ACCOUNT_HEALTH_REVIEW: 'El estado técnico de la cuenta requiere revisión',
+});
+const TECHNICAL_EVENT_DESCRIPTIONS = Object.freeze({
+  ACCOUNT_REVIEW_REJECTED: 'El webhook o la consulta de estado de Meta informa de una decisión REJECTED. La causa adicional solo se muestra cuando Meta la facilita.',
+  BUSINESS_VERIFICATION_REJECTED: 'La empresa no ha superado la verificación de Meta. Este estado no demuestra por sí solo la causa de cualquier otro bloqueo simultáneo.',
+  PHONE_NUMBER_BANNED: 'El estado operativo del número informado por Meta es BANNED.',
+  WABA_HEALTH_BLOCKED: 'El objeto health_status del WABA informa can_send_message=BLOCKED. Los errores por entidad se detallan por separado.',
+  WHATSAPP_ACCOUNT_HEALTH_REVIEW: 'Clinicaclick ha creado el expediente desde el último estado técnico saneado disponible.',
+});
+const MANUAL_REVIEW_INCIDENT_EVENTS = Object.freeze([
+  ...COMPLIANCE_EVENTS,
+  ...Object.keys(TECHNICAL_EVENT_LABELS),
+]);
 
 function clean(value) {
   return value === undefined || value === null ? '' : String(value).trim();
+}
+
+function safeObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
 
 function toPlain(row) {
@@ -94,9 +116,10 @@ function getStoredAccountUpdate(asset) {
 function summarizeCompliance(additionalData = {}) {
   const stored = additionalData?.whatsappCompliance || null;
   if (!stored) return null;
-  const snapshot = stored.event
+  const storedEvent = clean(stored.event).toUpperCase();
+  const snapshot = storedEvent && COMPLIANCE_EVENTS.has(storedEvent)
     ? deriveComplianceSnapshot({
-        event: stored.event,
+        event: storedEvent,
         violation_info: stored.violation_type ? { violation_type: stored.violation_type } : null,
         ban_info: stored.ban_state ? {
           waba_ban_state: stored.ban_state,
@@ -105,7 +128,7 @@ function summarizeCompliance(additionalData = {}) {
         restriction_info: stored.restrictions || [],
         appealable: typeof stored.appealable === 'boolean' ? stored.appealable : undefined,
       })
-    : stored;
+    : {};
   return {
     ...stored,
     ...snapshot,
@@ -208,7 +231,7 @@ async function resolveClinicContext({ assets, clinicId }) {
   };
 }
 
-async function resolveOpenIncidents({ wabaId, providerResolution, occurredAt }) {
+async function resolveOpenIncidents({ wabaId, providerResolution, occurredAt, providerEvents = null }) {
   if (!WhatsappAccountComplianceIncident || !wabaId) return 0;
   const [count] = await WhatsappAccountComplianceIncident.update({
     status: 'resolved',
@@ -218,6 +241,9 @@ async function resolveOpenIncidents({ wabaId, providerResolution, occurredAt }) 
     where: {
       waba_id: String(wabaId),
       status: { [Op.in]: OPEN_STATUSES },
+      ...(Array.isArray(providerEvents) && providerEvents.length
+        ? { provider_event: { [Op.in]: providerEvents } }
+        : {}),
     },
   });
   return count;
@@ -321,6 +347,149 @@ async function handleAccountUpdate({ entry, change, value, clinicId }) {
   }
 
   return { incident: toPlain(incident), snapshot: storedSnapshot, created };
+}
+
+function buildAccountReviewSnapshot(value = {}) {
+  const decision = clean(value.decision).toUpperCase();
+  if (!['APPROVED', 'REJECTED'].includes(decision)) return null;
+  const rejectionReason = clean(value.rejection_reason).slice(0, 500) || null;
+  const rejected = decision === 'REJECTED';
+  return {
+    event: `ACCOUNT_REVIEW_${decision}`,
+    status: rejected ? 'restricted' : 'active',
+    severity: rejected ? 'error' : 'info',
+    violation_type: null,
+    violation_label: rejected
+      ? (rejectionReason || TECHNICAL_EVENT_LABELS.ACCOUNT_REVIEW_REJECTED)
+      : null,
+    violation_description: rejected
+      ? TECHNICAL_EVENT_DESCRIPTIONS.ACCOUNT_REVIEW_REJECTED
+      : null,
+    ban_state: null,
+    ban_date: null,
+    restrictions: rejected && rejectionReason
+      ? [{
+          restriction_type: 'ACCOUNT_REVIEW_REJECTED',
+          restriction_label: rejectionReason,
+          expiration: null,
+          remediation: 'Revisar el caso en Meta Business Support Home y aportar la documentación solicitada.',
+          active: true,
+        }]
+      : [],
+    remediation: rejected
+      ? 'Revisar el caso en Meta Business Support Home y aportar la documentación solicitada.'
+      : null,
+    appealable: rejected ? null : false,
+    blocks_all_sending: rejected,
+    blocks_business_initiated: rejected,
+    blocks_customer_replies: rejected,
+    blocks_phone_changes: false,
+    blocks_calling: false,
+    review_decision: decision,
+    rejection_reason: rejectionReason,
+  };
+}
+
+async function handleAccountReviewUpdate({ entry, change, value, clinicId }) {
+  const field = clean(change?.field).toLowerCase();
+  if (field !== 'account_review_update') return null;
+  const snapshot = buildAccountReviewSnapshot(value);
+  if (!snapshot) return null;
+
+  const wabaId = clean(entry?.id || value?.waba_id) || null;
+  const phoneNumberId = clean(value?.metadata?.phone_number_id) || null;
+  const phoneNumber = clean(value?.display_phone_number || value?.metadata?.display_phone_number) || null;
+  const occurredAt = occurredAtFromEntry(entry);
+  const assets = await findRelevantAssets({ wabaId, phoneNumberId, clinicId });
+  const context = await resolveClinicContext({ assets, clinicId });
+  const isResolution = snapshot.review_decision === 'APPROVED';
+
+  if (isResolution) {
+    await resolveOpenIncidents({
+      wabaId,
+      providerResolution: 'ACCOUNT_REVIEW_APPROVED',
+      occurredAt,
+      providerEvents: ['ACCOUNT_REVIEW_REJECTED'],
+    });
+  }
+
+  const dedupeKey = buildDedupeKey({ wabaId, field, entry, value });
+  const [incident, created] = await WhatsappAccountComplianceIncident.findOrCreate({
+    where: { dedupe_key: dedupeKey },
+    defaults: {
+      dedupe_key: dedupeKey,
+      clinic_id: context.clinicId,
+      group_id: context.groupId,
+      asset_id: context.primary?.id || null,
+      waba_id: wabaId,
+      phone_number_id: phoneNumberId || context.primary?.phoneNumberId || null,
+      phone_number: phoneNumber || context.primary?.metaAssetName || null,
+      webhook_field: field,
+      provider_event: snapshot.event,
+      severity: snapshot.severity,
+      operational_status: snapshot.status,
+      violation_type: null,
+      ban_state: null,
+      ban_date: null,
+      restriction_info: snapshot.restrictions,
+      remediation: snapshot.remediation,
+      raw_payload: { entry, change },
+      occurred_at: occurredAt,
+      status: isResolution ? 'resolved' : 'open',
+      appealable: snapshot.appealable,
+      provider_resolution: isResolution ? 'ACCOUNT_REVIEW_APPROVED' : null,
+      resolved_at: isResolution ? occurredAt : null,
+    },
+  });
+
+  if (!created && (
+    Number(incident.clinic_id || 0) !== Number(context.clinicId || 0)
+    || Number(incident.group_id || 0) !== Number(context.groupId || 0)
+    || Number(incident.asset_id || 0) !== Number(context.primary?.id || 0)
+  )) {
+    await incident.update({
+      clinic_id: context.clinicId,
+      group_id: context.groupId,
+      asset_id: context.primary?.id || null,
+    });
+  }
+
+  const currentReviewEvent = clean(context.primary?.additionalData?.whatsappCompliance?.event).toUpperCase();
+  if (!isResolution || currentReviewEvent === 'ACCOUNT_REVIEW_REJECTED') {
+    const storedSnapshot = {
+      ...snapshot,
+      incident_id: Number(incident.id),
+      review_status: incident.status,
+      occurred_at: occurredAt.toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    await updateAssetsCompliance(assets, storedSnapshot);
+  }
+
+  if (created) {
+    await notificationService.dispatchEvent({
+      event: isResolution
+        ? 'whatsapp.account_compliance_resolved'
+        : 'whatsapp.account_compliance_incident',
+      clinicId: context.clinicId,
+      data: {
+        clinicId: context.clinicId,
+        groupId: context.groupId,
+        clinicName: context.groupName || context.clinicName,
+        incidentId: Number(incident.id),
+        wabaId,
+        phoneNumber: incident.phone_number,
+        operationalStatus: snapshot.status,
+        violationLabel: snapshot.violation_label,
+        link: `/ajustes?panel=jobs-monitoring&tab=whatsapp&whatsapp_section=incidents&incident_id=${Number(incident.id)}`,
+        useRouter: true,
+        actionLabel: 'Revisar WhatsApp',
+        actionIcon: 'heroicons_outline:shield-exclamation',
+      },
+    });
+  }
+
+  return { incident: toPlain(incident), snapshot, created };
 }
 
 async function reconcileStoredAccountUpdate(asset) {
@@ -670,18 +839,20 @@ async function loadIncidentAccount(incident) {
 
 async function serializeIncident(row, { includeActivity = false, includeRaw = true } = {}) {
   const incident = toPlain(row);
+  const technicalEvent = clean(incident.provider_event).toUpperCase();
   const payload = {
     ...incident,
     violation_label: incident.violation_type
       ? (VIOLATION_LABELS[incident.violation_type] || incident.violation_type)
-      : null,
+      : (TECHNICAL_EVENT_LABELS[technicalEvent] || null),
     violation_description: deriveComplianceSnapshot({
       event: incident.provider_event,
       violation_info: incident.violation_type ? { violation_type: incident.violation_type } : null,
       restriction_info: incident.restriction_info || [],
       ban_info: incident.ban_state ? { waba_ban_state: incident.ban_state, waba_ban_date: incident.ban_date } : null,
-    }).violation_description,
+    }).violation_description || TECHNICAL_EVENT_DESCRIPTIONS[technicalEvent] || null,
     business_support_url: BUSINESS_SUPPORT_HOME_URL,
+    source_type: incident.webhook_field === 'manual_health_review' ? 'manual_health_review' : 'meta_webhook',
   };
   if (!includeRaw) {
     delete payload.raw_payload;
@@ -847,11 +1018,210 @@ async function requestClinicClickReview({ clinicId, incidentId, userId }) {
   return serializeIncident(incident);
 }
 
+function buildTechnicalRestrictions(businessHealth = {}) {
+  const rows = [];
+  for (const entity of Array.isArray(businessHealth.entities) ? businessHealth.entities : []) {
+    const entityType = clean(entity?.entity_type).toUpperCase() || 'ACCOUNT';
+    for (const error of Array.isArray(entity?.errors) ? entity.errors : []) {
+      const code = Number(error?.error_code || 0) || null;
+      const description = clean(error?.error_description).slice(0, 500) || 'Meta ha comunicado un error técnico sin descripción.';
+      rows.push({
+        restriction_type: code ? `META_${entityType}_ERROR_${code}` : `META_${entityType}_ERROR`,
+        restriction_label: description,
+        expiration: null,
+        remediation: clean(error?.possible_solution).slice(0, 500) || null,
+        active: true,
+        entity_type: entityType,
+        entity_id: clean(entity?.id).slice(0, 255) || null,
+        error_code: code,
+      });
+    }
+  }
+
+  const accountReviewStatus = clean(businessHealth.account_review_status).toUpperCase();
+  const reviewReason = clean(businessHealth.account_review_rejection_reason).slice(0, 500);
+  if (accountReviewStatus === 'REJECTED' && !rows.some((row) => row.restriction_type === 'ACCOUNT_REVIEW_REJECTED')) {
+    rows.push({
+      restriction_type: 'ACCOUNT_REVIEW_REJECTED',
+      restriction_label: reviewReason || TECHNICAL_EVENT_LABELS.ACCOUNT_REVIEW_REJECTED,
+      expiration: null,
+      remediation: 'Abrir Meta Business Support Home y revisar el expediente de la cuenta WABA.',
+      active: true,
+      entity_type: 'WABA',
+      entity_id: null,
+      error_code: null,
+    });
+  }
+
+  const verificationStatus = clean(businessHealth.business_verification_status).toLowerCase();
+  if (['rejected', 'failed', 'revoked'].includes(verificationStatus)
+    && !rows.some((row) => Number(row.error_code) === 141010)) {
+    rows.push({
+      restriction_type: 'BUSINESS_VERIFICATION_REJECTED',
+      restriction_label: TECHNICAL_EVENT_LABELS.BUSINESS_VERIFICATION_REJECTED,
+      expiration: null,
+      remediation: 'Abrir la configuración del portfolio empresarial y resolver la verificación solicitada por Meta.',
+      active: true,
+      entity_type: 'BUSINESS',
+      entity_id: clean(businessHealth.business_id).slice(0, 255) || null,
+      error_code: null,
+    });
+  }
+  return rows;
+}
+
+function buildManualReviewIncidentSpec({ asset, context, health, now = new Date(), userId = null }) {
+  const additionalData = safeObject(asset?.additionalData);
+  const businessHealth = safeObject(additionalData.whatsappBusinessHealth);
+  const webhookSubscription = safeObject(additionalData.whatsappWebhookSubscription);
+  const reasonCode = clean(health?.reason_code).toLowerCase();
+  const accountReviewStatus = clean(businessHealth.account_review_status).toUpperCase();
+  const businessVerificationStatus = clean(businessHealth.business_verification_status).toLowerCase();
+  const hasReviewableState = health?.can_send === false
+    || accountReviewStatus === 'REJECTED'
+    || ['rejected', 'failed', 'revoked'].includes(businessVerificationStatus);
+  if (!hasReviewableState) return null;
+
+  let providerEvent = 'WHATSAPP_ACCOUNT_HEALTH_REVIEW';
+  if (reasonCode === 'waba_health_blocked') providerEvent = 'WABA_HEALTH_BLOCKED';
+  else if (reasonCode === 'waba_account_review_rejected' || accountReviewStatus === 'REJECTED') providerEvent = 'ACCOUNT_REVIEW_REJECTED';
+  else if (reasonCode === 'provider_status_banned') providerEvent = 'PHONE_NUMBER_BANNED';
+  else if (['rejected', 'failed', 'revoked'].includes(businessVerificationStatus)) providerEvent = 'BUSINESS_VERIFICATION_REJECTED';
+
+  const occurredAt = new Date(
+    health?.last_blocked_at
+    || health?.last_transition_at
+    || health?.observed_at
+    || businessHealth.observed_at
+    || now
+  );
+  const safeOccurredAt = Number.isNaN(occurredAt.getTime()) ? now : occurredAt;
+  const restrictions = buildTechnicalRestrictions(businessHealth);
+  const remediation = restrictions.map((item) => item.remediation).filter(Boolean).join('\n') || null;
+  const rawPayload = {
+    source: 'clinicaclick_manual_health_review',
+    generated_at: now.toISOString(),
+    health: {
+      state: health?.state || null,
+      can_send: health?.can_send ?? null,
+      reason_code: health?.reason_code || null,
+      provider_status: health?.provider_status || null,
+      provider_error_code: health?.provider_error_code || null,
+      observed_at: health?.observed_at || null,
+      last_transition_at: health?.last_transition_at || null,
+      last_blocked_at: health?.last_blocked_at || null,
+    },
+    waba_health: {
+      can_send_message: businessHealth.can_send_message || null,
+      account_review_status: businessHealth.account_review_status || null,
+      account_review_rejection_reason: businessHealth.account_review_rejection_reason || null,
+      business_verification_status: businessHealth.business_verification_status || null,
+      business_id: businessHealth.business_id || null,
+      entities: Array.isArray(businessHealth.entities) ? businessHealth.entities : [],
+      observed_at: businessHealth.observed_at || null,
+    },
+    webhook_subscription: {
+      status: webhookSubscription.status || null,
+      callback_host: webhookSubscription.callback_host || null,
+      missing_fields: Array.isArray(webhookSubscription.missing_fields)
+        ? webhookSubscription.missing_fields
+        : [],
+      checked_at: webhookSubscription.checked_at || null,
+    },
+  };
+  const dedupeKey = buildDedupeKey({
+    wabaId: asset.wabaId,
+    field: 'manual_health_review',
+    entry: { time: safeOccurredAt.toISOString() },
+    value: { asset_id: Number(asset.id), provider_event: providerEvent, reason_code: reasonCode },
+  });
+
+  return {
+    dedupe_key: dedupeKey,
+    clinic_id: context.clinicId,
+    group_id: context.groupId,
+    asset_id: Number(asset.id),
+    waba_id: asset.wabaId || null,
+    phone_number_id: asset.phoneNumberId || null,
+    phone_number: asset.metaAssetName || null,
+    webhook_field: 'manual_health_review',
+    provider_event: providerEvent,
+    severity: health?.can_send === false ? 'error' : 'warning',
+    operational_status: health?.can_send === false ? 'restricted' : 'warning',
+    violation_type: null,
+    ban_state: null,
+    ban_date: null,
+    restriction_info: restrictions,
+    remediation,
+    raw_payload: rawPayload,
+    occurred_at: safeOccurredAt,
+    status: 'open',
+    appealable: null,
+    client_requested_at: now,
+    client_requested_by: userId || null,
+  };
+}
+
+async function prepareManualAccountReview({ assetId, userId }) {
+  const asset = await ClinicMetaAsset.findByPk(Number(assetId));
+  if (!asset || asset.assetType !== 'whatsapp_phone_number') {
+    const error = new Error('whatsapp_compliance_asset_not_found');
+    error.statusCode = 404;
+    throw error;
+  }
+  const context = await resolveClinicContext({ assets: [asset], clinicId: asset.clinicaId });
+  const health = whatsappAccountHealthService.summarizeAssetHealth(asset);
+  const spec = buildManualReviewIncidentSpec({ asset, context, health, userId });
+  if (!spec) {
+    const error = new Error('whatsapp_manual_review_not_required');
+    error.statusCode = 409;
+    throw error;
+  }
+
+  let incident = await WhatsappAccountComplianceIncident.findOne({
+    where: {
+      status: { [Op.in]: OPEN_STATUSES },
+      provider_event: { [Op.in]: MANUAL_REVIEW_INCIDENT_EVENTS },
+      [Op.or]: [
+        { asset_id: Number(asset.id) },
+        {
+          waba_id: String(asset.wabaId || ''),
+          phone_number_id: String(asset.phoneNumberId || ''),
+        },
+      ],
+    },
+    order: [['occurred_at', 'DESC'], ['id', 'DESC']],
+  });
+  if (incident?.appealable === false) incident = null;
+  if (!incident) {
+    [incident] = await WhatsappAccountComplianceIncident.findOrCreate({
+      where: { dedupe_key: spec.dedupe_key },
+      defaults: spec,
+    });
+  }
+  if (!incident.client_requested_at || !incident.client_requested_by) {
+    await incident.update({
+      client_requested_at: incident.client_requested_at || new Date(),
+      client_requested_by: incident.client_requested_by || userId || null,
+    });
+  }
+
+  return prepareAppeal({
+    incidentId: Number(incident.id),
+    userId,
+    serviceContext: null,
+    reviewNotes: 'Expediente iniciado manualmente desde Clinicaclick con el último estado técnico saneado de Meta.',
+  });
+}
+
 function buildAppealDraft({ incident, clinicName, groupName, account, activity, serviceContext, reviewNotes }) {
   const accountName = account?.verified_name || groupName || clinicName || 'la cuenta indicada';
+  const technicalLabel = TECHNICAL_EVENT_LABELS[clean(incident.provider_event).toUpperCase()] || null;
   const violation = incident.violation_type
     ? `Motivo comunicado por WhatsApp: ${VIOLATION_LABELS[incident.violation_type] || incident.violation_type}.`
-    : 'WhatsApp no ha comunicado una categoría o motivo adicional; el webhook sí informa de las restricciones detalladas a continuación.';
+    : technicalLabel
+      ? `Motivo técnico disponible: ${technicalLabel}. Meta no ha facilitado una categoría de infracción adicional.`
+      : 'WhatsApp no ha comunicado una categoría o motivo adicional; el webhook sí informa de las restricciones detalladas a continuación.';
   const restrictions = Array.isArray(incident.restriction_info)
     ? incident.restriction_info.filter(item => item?.active !== false)
     : [];
@@ -906,6 +1276,36 @@ function buildAppealDraft({ incident, clinicName, groupName, account, activity, 
   ].join('\n\n');
 }
 
+function sanitizeAppealActivity(activity = {}) {
+  const numericMap = (value) => Object.fromEntries(
+    Object.entries(safeObject(value))
+      .map(([key, count]) => [clean(key).slice(0, 120), Number(count || 0)])
+      .filter(([key, count]) => key && Number.isFinite(count))
+  );
+  const attribution = safeObject(activity.attribution);
+  return {
+    last_24h: Number(activity.last_24h || 0),
+    last_7d: Number(activity.last_7d || 0),
+    failed_7d: Number(activity.failed_7d || 0),
+    accepted_7d: Number(activity.accepted_7d || 0),
+    confirmed_7d: Number(activity.confirmed_7d || 0),
+    without_confirmation_7d: Number(activity.without_confirmation_7d || 0),
+    pending_7d: Number(activity.pending_7d || 0),
+    status_counts: numericMap(activity.status_counts),
+    source_counts: numericMap(activity.source_counts),
+    source_sample_size: Number(activity.source_sample_size || 0),
+    error_counts: numericMap(activity.error_counts),
+    error_sample_size: Number(activity.error_sample_size || 0),
+    attribution: {
+      phone_number_id: clean(attribution.phone_number_id) || null,
+      exact_7d: Number(attribution.exact_7d || 0),
+      inferred_7d: Number(attribution.inferred_7d || 0),
+      unattributed_7d: Number(attribution.unattributed_7d || 0),
+      scoped_by_route: attribution.scoped_by_route === true,
+    },
+  };
+}
+
 async function prepareAppeal({ incidentId, userId, serviceContext, reviewNotes }) {
   const incident = await WhatsappAccountComplianceIncident.findByPk(incidentId, {
     include: [
@@ -941,9 +1341,12 @@ async function prepareAppeal({ incidentId, userId, serviceContext, reviewNotes }
   incident.appeal_context = {
     service_context: clean(serviceContext) || null,
     review_notes: clean(reviewNotes) || null,
-    activity,
+    activity: sanitizeAppealActivity(activity),
     account,
-    prepared_from_provider_payload: true,
+    prepared_from_provider_payload: incident.webhook_field !== 'manual_health_review',
+    source_type: incident.webhook_field === 'manual_health_review'
+      ? 'manual_health_review'
+      : 'meta_webhook',
   };
   incident.appeal_prepared_at = new Date();
   incident.appeal_prepared_by = userId || null;
@@ -1017,6 +1420,7 @@ async function diagnoseAccount({ assetId, userId }) {
   const registration = additionalData.registration || {};
   const coexistence = additionalData.coexistence || {};
   const businessHealth = additionalData.whatsappBusinessHealth || {};
+  const webhookSubscription = additionalData.whatsappWebhookSubscription || {};
   const health = whatsappAccountHealthService.summarizeAssetHealth(current || asset);
   const healthHistory = current
     ? (await whatsappAccountHealthService.listEventsForAssets([current.id], { perAsset: 20 })).get(Number(current.id)) || []
@@ -1046,8 +1450,20 @@ async function diagnoseAccount({ assetId, userId }) {
       || additionalData.businessVerificationStatus
       || null,
     waba_account_review_status: businessHealth.account_review_status || null,
+    waba_account_review_rejection_reason: businessHealth.account_review_rejection_reason || null,
     waba_health_can_send_message: businessHealth.can_send_message || null,
     waba_health_observed_at: businessHealth.observed_at || null,
+    waba_health_entities: Array.isArray(businessHealth.entities) ? businessHealth.entities : [],
+    webhook_subscription: {
+      status: webhookSubscription.status || null,
+      waba_subscribed: webhookSubscription.waba_subscribed ?? null,
+      app_configuration_active: webhookSubscription.app_configuration_active ?? null,
+      callback_host: webhookSubscription.callback_host || null,
+      required_fields: Array.isArray(webhookSubscription.required_fields) ? webhookSubscription.required_fields : [],
+      missing_fields: Array.isArray(webhookSubscription.missing_fields) ? webhookSubscription.missing_fields : [],
+      checked_at: webhookSubscription.checked_at || null,
+      error: webhookSubscription.error || null,
+    },
     quality_rating: current?.quality_rating || asset.quality_rating || null,
     messaging_limit: current?.messaging_limit || asset.messaging_limit || null,
     compliance: summarizeCompliance(additionalData),
@@ -1104,16 +1520,22 @@ module.exports = {
   getClinicStatus,
   getIncidentById,
   handleAccountUpdate,
+  handleAccountReviewUpdate,
   handleBusinessUsernameUpdate,
   getStoredAccountUpdate,
   listIncidents,
   markAppealSubmitted,
   prepareAppeal,
+  prepareManualAccountReview,
   requestClinicClickReview,
   serializeIncident,
   summarizeCompliance,
   __testing: {
+    buildAccountReviewSnapshot,
     buildActivityRouteWhere,
+    buildManualReviewIncidentSpec,
+    sanitizeAppealActivity,
+    buildTechnicalRestrictions,
     loadActivitySummary,
     resolveActivityScope,
   },

@@ -1581,7 +1581,19 @@ createWorker('webhook_whatsapp', async (job) => {
                 value: webhookValue,
                 clinicId,
             });
+            await whatsappAccountComplianceService.handleAccountReviewUpdate({
+                entry: webhookEntry,
+                change: webhookChange,
+                value: webhookValue,
+                clinicId,
+            });
             await whatsappAccountHealthService.recordAccountUpdate({
+                entry: webhookEntry,
+                change: webhookChange,
+                value: webhookValue,
+                clinicId,
+            });
+            await whatsappAccountHealthService.recordAccountReviewUpdate({
                 entry: webhookEntry,
                 change: webhookChange,
                 value: webhookValue,

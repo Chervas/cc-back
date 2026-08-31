@@ -52,6 +52,10 @@ test('normaliza reglas y declara la plantilla admin-only de WhatsApp', () => {
   assert.equal(rules['whatsapp.account_health_blocked'].whatsapp, true);
   assert.equal(rules['whatsapp.account_health_recovered'].email, true);
   assert.equal(rules['whatsapp.account_health_recovered'].whatsapp, false);
+  assert.equal(rules['whatsapp.webhook_subscription_missing'].severity, 'critical');
+  assert.equal(rules['whatsapp.webhook_subscription_missing'].email, true);
+  assert.equal(rules['whatsapp.webhook_subscription_recovered'].whatsapp, false);
+  assert.equal(rules['whatsapp.business_verification_rejected'].severity, 'warning');
 
   const payload = systemNotifications._test.systemWhatsappTemplatePayload({
     name: 'clinicaclick_admin_alerta_sistema',
