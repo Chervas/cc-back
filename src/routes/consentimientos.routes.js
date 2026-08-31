@@ -33,10 +33,13 @@ router.get('/treatments/:id/requirements', consentimientosController.getTreatmen
 router.put('/treatments/:id/requirements', consentimientosController.saveTreatmentRequirements);
 
 router.get('/patients/:id/documents', consentimientosController.listPatientDocuments);
+router.get('/patients/:id/external-attestations', consentimientosController.listPatientExternalAttestations);
+router.post('/patients/:id/external-attestations', consentimientosController.createPatientExternalAttestation);
 router.get('/patients/:id/treatments-without-consent', consentimientosController.listPatientTreatmentsWithoutConsentRequirements);
 router.get('/patients/:id/audit', consentimientosController.exportPatientAudit);
 router.get('/clinic/pending-documents', consentimientosController.listClinicPendingPatientDocuments);
 router.get('/professional/pending', consentimientosController.listProfessionalPendingDocuments);
+router.post('/external-attestations/:id/revoke', consentimientosController.revokePatientExternalAttestation);
 router.get('/appointments/:id/summary', consentimientosController.getAppointmentSummary);
 router.post('/appointments/:id/package', consentimientosController.createAppointmentPackage);
 router.post('/packages/:id/send-mock', consentimientosController.sendPackageMock);

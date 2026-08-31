@@ -1,5 +1,5 @@
 > **Módulo:** Arquitectura del Backend
-> **Última actualización:** 2026-08-30
+> **Última actualización:** 2026-08-31
 > **Relacionado con:** `cc-front/src/Documentacion/20.1-motor-flujos-v2.md` | documento operativo `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`
 > **Fuente canónica:** este archivo del repositorio backend. `cc-front/src/Documentacion/13-backend.md` es un espejo completo para conservar los enlaces internos del manual frontend; cualquier cambio se hace aquí primero y después se sincroniza el espejo.
 
@@ -22,6 +22,57 @@ simulacion visible y no comunica con AEAT.
   reactivación `excluded_future_appointment` no aplica a reseñas.
 
 Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Data Manager/Conversiones mejoradas, política de goals y E2E/limpieza de intake.
+
+## 2026-08-31 - Salud operativa y cortacircuitos WhatsApp
+
+- `whatsappAccountHealth.service.js` compone una señal canónica por
+  `ClinicMetaAsset` a partir de estado del número, registro, cumplimiento,
+  `account_update`, calidad y errores de proveedor. `BANNED`, suspensión,
+  desconexión, activo inactivo, restricción explícita y `131031` prevalecen
+  sobre `registered`/`GREEN` y producen `can_send=false`.
+- El snapshot vive en `additionalData.whatsappHealth`. La migración
+  `20260831130000-create-whatsapp-account-health-events.js` añade
+  `WhatsappAccountHealthEvents`, historial append-only e idempotente que no
+  contiene destinatarios, cuerpos ni payload clínico. En un esquema nuevo se
+  usa `node src/scripts/reconcile_whatsapp_account_health.js` y después
+  `--apply`; la salida contiene solo recuentos por estado.
+- `whatsapp.service.sendMessage` ejecuta el preflight común antes de resolver el
+  destinatario o llamar a Cloud API. El bloqueo devuelve
+  `WHATSAPP_SENDER_HEALTH_BLOCKED`, `retryable=false`, registra `send_blocked` y
+  evita que mensajes manuales, automatizaciones, campañas, consentimientos,
+  presupuestos o alertas intenten el proveedor. No existe fallback silencioso a
+  otro número.
+- Un error inmediato o asíncrono `131031` abre el circuito. Un `wamid` aceptado
+  espera su terminal y no se reenvía. La recuperación por sondeo exige dos
+  `CONNECTED` consecutivos; `ACCOUNT_RECONNECTED`/`REINSTATE` puede confirmarla
+  explícitamente si no queda otra restricción. Recuperar no reencola fallidos ni
+  reactiva campañas.
+- `whatsapp_phones_sync` mantiene una lectura completa de estado por WABA cada
+  hora. Las recuperaciones bajo demanda desde el listado son ligeras y se
+  omiten si existe una lectura persistida en los últimos 60 minutos. El snapshot WABA
+  conserva revisión de cuenta, verificación empresarial y salud agregada
+  saneadas. La observación se marca `stale` tras
+  `WHATSAPP_HEALTH_STALE_MINUTES=90` sin bloquear por sí sola; una lectura Meta
+  reciente avanza también el reloj de la proyección para evitar estados y fechas
+  contradictorios.
+- `GET /api/whatsapp/admin/compliance` y el diagnóstico incorporan `health` e
+  `health_history`, revisión WABA, verificación empresarial y estado del nombre
+  mostrado como conceptos separados; Cuentas conectadas y QuickChat reciben
+  `health`. QuickChat presenta el bloqueo del activo efectivo aunque coexistencia
+  todavía figure activa. Las transiciones encolan `whatsapp.account_health_blocked` o
+  `whatsapp.account_health_recovered` mediante notificaciones durables.
+- Desde `back-dev` se aplicó la migración sobre el esquema actualmente compartido
+  con staging y se conciliaron 13 activos: 11 `healthy` y 2
+  `blocked`. Una única lectura de estado, sin envío, confirmó `BANNED` para el
+  activo `#374`. Una conciliación posterior leyó una vez cada uno de los 13 WABA
+  activos: 12 revisiones `APPROVED`, una `REJECTED`, 12 verificaciones de negocio
+  `verified` y cero fallos. En Propdental, Sant Martí es el único WABA observado
+  con revisión rechazada; el negocio compartido está verificado y el volumen
+  previo no fue singular frente a otros emisores del grupo. El código se promueve
+  coordinadamente a las ramas de staging, pero el despliegue de procesos backend
+  y gateway debe hacerse en la misma ventana para materializar webhooks públicos.
+- Contrato y runbook completos en
+  `cc-front/src/Documentacion/14.7-whatsapp-salud-cuentas-cortacircuitos.md`.
 
 ## 2026-08-31 - Hardening externo de correo validado
 
@@ -1393,7 +1444,7 @@ Antes de activar coexistencia sobre un numero real:
 - si el WABA esta asignado a grupo, `createTemplatesFromCatalog(...)` debe resolver todas las clinicas del grupo como objetivo efectivo. Las plantillas aprobadas existen en Meta a nivel de WABA, asi que una clinica nueva del grupo debe enlazar sus overrides locales a esas aprobaciones antes de intentar abrir revisiones nuevas;
 - para WABA compartido, si ya existe una plantilla aprobada compatible por `catalog_template_id`/familia en ese WABA, el job debe dejar la copia local de cada clinica en `APPROVED` con el `meta_template_id` existente. No se debe enviar una revision nueva a Meta solo porque una clinica del grupo tuviera placeholders `SIN_CONECTAR`;
 - desde 2026-07-28, `createTemplatesFromCatalog(...)` serializa por WABA con un advisory lock MySQL y sincroniza Meta antes de calcular la siguiente version tecnica. Esto evita que dos runtimes creen a la vez la misma traduccion `name + language`, situacion que puede dejar una copia aprobada y otra pendiente con el mismo nombre y provocar `132001` al enviar. Si otro proceso ya tiene el lock, la segunda ejecucion se omite porque la primera recorre el catalogo completo;
-- `whatsapp_phones_sync` (cada 15 minutos) actua como red de seguridad: si detecta que un numero ya esta `CONNECTED`/`registered` y quedan plantillas de catalogo sin `meta_template_id` o en `SIN_CONECTAR`/`LOCAL_PENDING`, encola `whatsapp_template_create` con cooldown de 1 hora (`WHATSAPP_TEMPLATE_CREATE_ENSURE_COOLDOWN_MS`). En WABA asignado a grupo debe revisar las plantillas de todas las clinicas del grupo, no solo la clinica principal del activo. Tambien compara cada WABA contra todas las plantillas de catalogo genericas activas (`is_generic=true`): si una plantilla generica nueva no tiene copia remota con `catalog_template_id` y `meta_template_id`, o si la copia remota apunta al mismo catalogo pero su `category/components` ya no coinciden con el contenido Meta-facing actual, se vuelve a encolar la creacion aunque el WABA ya tuviera plantillas anteriores. Esta comparacion normaliza `components` e ignora cualquier `example` de Meta, incluido `HEADER/IMAGE.example.header_handle`, porque Meta sustituye los ejemplos por handles/URLs `scontent.whatsapp.net` y no forman parte del contrato que ve el paciente. Esta ruta salta el cooldown cuando el catalogo esta incompleto/desactualizado para que se abra una nueva version tecnica en Meta. Esto cubre coexistencia cuando Meta termina de habilitar el numero despues del callback inicial, nuevas plantillas admin añadidas a posteriori, cambios de copy en plantillas genericas ya propagadas y clinicas nuevas que heredan WABA de grupo;
+- `whatsapp_phones_sync` (cada hora) actua como red de seguridad: si detecta que un numero ya esta `CONNECTED`/`registered` y quedan plantillas de catalogo sin `meta_template_id` o en `SIN_CONECTAR`/`LOCAL_PENDING`, encola `whatsapp_template_create` con cooldown de 1 hora (`WHATSAPP_TEMPLATE_CREATE_ENSURE_COOLDOWN_MS`). En WABA asignado a grupo debe revisar las plantillas de todas las clinicas del grupo, no solo la clinica principal del activo. Tambien compara cada WABA contra todas las plantillas de catalogo genericas activas (`is_generic=true`): si una plantilla generica nueva no tiene copia remota con `catalog_template_id` y `meta_template_id`, o si la copia remota apunta al mismo catalogo pero su `category/components` ya no coinciden con el contenido Meta-facing actual, se vuelve a encolar la creacion aunque el WABA ya tuviera plantillas anteriores. Esta comparacion normaliza `components` e ignora cualquier `example` de Meta, incluido `HEADER/IMAGE.example.header_handle`, porque Meta sustituye los ejemplos por handles/URLs `scontent.whatsapp.net` y no forman parte del contrato que ve el paciente. Esta ruta salta el cooldown cuando el catalogo esta incompleto/desactualizado para que se abra una nueva version tecnica en Meta. Esto cubre coexistencia cuando Meta termina de habilitar el numero despues del callback inicial, nuevas plantillas admin añadidas a posteriori, cambios de copy en plantillas genericas ya propagadas y clinicas nuevas que heredan WABA de grupo;
 - `whatsapp_phones_sync` no debe reintentar automaticamente `PENDING_LOCAL` o `REJECTED`: esos estados significan cambio local no aprobable o rechazo de Meta y requieren accion correctiva sobre el contenido;
 - las plantillas de reseñas tienen dos familias genericas: `clinicaclick_solicitar_resena` (solo texto) y `clinicaclick_solicitar_resena_foto` (cabecera `HEADER/IMAGE`). Si `review_team_photo_url` es HTTPS, el producto debe usar la variante con foto; si esa variante no esta `APPROVED`, la UI bloquea prueba/envio con motivo claro en vez de enviar silenciosamente la version sin foto. Para que Meta acepte la revision de cabecera de imagen, el ejemplo debe ser un media handle de Meta, no una URL publica. El backend lo genera automaticamente con la Resumable Upload API usando la URL publica de ejemplo del catalogo (`templates/reviews/team-example.jpg`) y el token del WABA; `WHATSAPP_REVIEW_TEMPLATE_HEADER_HANDLE`/`WHATSAPP_TEMPLATE_IMAGE_HEADER_HANDLE` quedan como fallback operativo. Si no puede generar ni resolver el handle, deja la version tecnica en `PENDING_LOCAL` con motivo claro. Si Meta devuelve despues otro handle/URL de ejemplo para la misma cabecera, la plantilla sigue siendo equivalente mientras coincidan formato de cabecera, body, botones y categoria. Cuando `whatsapp_templates_sync` detecta que una copia local de reseñas con foto pasa a `APPROVED`, emite `whatsapp.review_photo_template_approved` con enlace interno a `/marketing/campanas?objective=get_reviews&review_step=summary` para retomar el borrador;
 - `GET /api/automations/v2/templates` oculta la base de sistema de reseñas en listados con scope (`review_request_after_completed` / `flw_review_request_system`). Esa base es catálogo; la automatización operativa de reseñas siempre debe ser una copia scoped de clínica/grupo creada desde Campañas > Reseñas. Las copias publicadas e inactivas se tratan como deprecadas y no reactivan visualmente la base global;
@@ -2687,7 +2738,9 @@ Defaults actuales de interés:
 - `JOBS_BUSINESS_PROFILE_BACKFILL_SCHEDULE`: `20 5 * * 0`
 - `JOBS_WEB_EVENTS_AGGREGATE_SCHEDULE`: `*/15 * * * *`
 - `JOBS_ADS_MIDDAY_SCHEDULE`: `0 12 * * *`
-- `JOBS_WHATSAPP_PHONES_SCHEDULE`: `*/15 * * * *`
+- `JOBS_WHATSAPP_PHONES_SCHEDULE`: `0 * * * *`
+- `WHATSAPP_PHONE_FULL_SYNC_INTERVAL_MINUTES`: `60`
+- `WHATSAPP_HEALTH_STALE_MINUTES`: `90`
 - `JOBS_WHATSAPP_TEMPLATES_SCHEDULE`: `*/20 * * * *`
 - `JOBS_AUTOMATION_HEALTH_CHECK_SCHEDULE`: `0 10,16 * * *`
 - `WHATSAPP_PROPAGATE_RESYNC_DELAY_MINUTES`: `12`
@@ -4209,6 +4262,7 @@ Contratos temporales adicionales:
 `appointmentAutomationV2Runtime` usa esta precedencia:
 
 1. **Flujo asignado al tratamiento**
+   - Si `automation_template_bindings.<slot>.disabled=true`, el runtime corta ese slot y no resuelve ni asignación ni fallback.
    - Si la cita tiene `tratamiento_id` y ese tratamiento tiene `appointment_automation_template_key/version`, ese flujo gana para `appointment_created`.
    - Para eventos complementarios, el runtime lee `Tratamientos.automation_template_bindings` y resuelve el slot compatible: `appointment_after_completed`, `appointment_after_no_show`, `appointment_after_next_session`, `appointment_during_rescheduled` o `appointment_during_cancelled`.
 2. **Fallback clinic/group/system**
@@ -4229,11 +4283,12 @@ Consecuencias:
 - No debe dispararse más de un flujo V2 por el mismo `appointment_created`.
 - Un template `without_treatment` no debe asignarse desde `PUT /api/tratamientos/:id/automation-template`.
 - `Tratamientos.automation_template_bindings` guarda bindings auxiliares por bloque de cita:
-  - `appointment_before.disabled=true`: el tratamiento no usa la automatizacion general por defecto si no tiene una especifica hasta la cita.
+  - `<slot>.source=default`: la UI muestra que el tratamiento eligió explícitamente usar la automatización por defecto compatible.
+  - `<slot>.disabled=true`: el tratamiento no usa automatización para ese caso aunque exista fallback clinic/group/system.
   - `appointment_after_completed`, `appointment_after_no_show`, `appointment_after_next_session`: slots post-cita seleccionados desde la UI de tratamientos.
   - `appointment_during_rescheduled`, `appointment_during_cancelled`: slots durante la cita para reprogramaciones y cancelaciones.
   Este JSON permite que la UI seleccione automatizaciones complementarias sin alterar el contrato principal `appointment_automation_template_key/version`.
-- El runtime resuelve primero el binding del tratamiento y después el fallback clinic/group/system. Los slots solo son compatibles con su `trigger_type`: `appointment_completed`, `appointment_no_show`, `appointment_after`, `appointment_rescheduled` o `appointment_cancelled`.
+- El runtime evalúa primero `disabled=true`; si no está bloqueado, resuelve el binding del tratamiento y después el fallback clinic/group/system. Los slots solo son compatibles con su `trigger_type`: `appointment_completed`, `appointment_no_show`, `appointment_after`, `appointment_rescheduled` o `appointment_cancelled`.
 - Para `appointment_created` con `with_treatment + treatment_filter=specific`, `publish` bloquea otra automatización activa del mismo scope si ya cubre alguno de esos tratamientos.
 - Si una cita pasa a `cancelada`, `reprogramada`, `completada` o `no_asistio`, las ejecuciones V2 activas/pendientes de esa cita se cancelan antes de lanzar el evento correspondiente. `reprogramada` cancela automatizaciones de la hora anterior, pero la cita sigue siendo accionable manualmente desde UI. Un nodo `action/change_status` no puede resucitar citas realmente cerradas (`cancelada`, `completada`, `no_asistio`); el nodo se marca como `skipped` y el flujo termina.
 - Las notificaciones operativas creadas por `action/send_system_notification` para una cita se marcan automáticamente como leídas cuando esa cita queda resuelta (`info_confirmada`, `recordatorio_confirmado`, `cancelada`, `reprogramada`, `completada`, `no_asistio`). El backend emite `notification:updated` para que la campana no mantenga avisos obsoletos si la resolución ocurre en tiempo real.

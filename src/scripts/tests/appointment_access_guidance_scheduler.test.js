@@ -178,6 +178,74 @@ test('enqueueExecutionForTemplate deduplica por cita, versión y ventana', async
   }
 });
 
+test('disabled=true en bindings de tratamiento corta automatizaciones inmediatas y programadas', async () => {
+  const originals = {
+    treatmentFind: db.Tratamiento.findByPk,
+    clinicFind: db.Clinica.findByPk,
+    templateFind: db.AutomationFlowTemplateV2.findOne,
+    templateFindAll: db.AutomationFlowTemplateV2.findAll,
+    jobFindAll: db.JobRequest.findAll,
+    enqueue: jobRequestsService.enqueueJobRequest,
+  };
+  let templateFindCalls = 0;
+  let templateFindAllCalls = 0;
+
+  try {
+    db.Tratamiento.findByPk = async () => ({
+      id_tratamiento: 44101,
+      automation_template_bindings: {
+        appointment_before: { disabled: true, source: 'tratamiento' },
+        appointment_after_completed: { disabled: true, source: 'tratamiento' },
+        appointment_after_next_session: { disabled: true, source: 'tratamiento' },
+      },
+    });
+    db.Clinica.findByPk = async () => ({
+      id_clinica: 66,
+      configuracion: { timezone: 'UTC' },
+    });
+    db.AutomationFlowTemplateV2.findOne = async () => {
+      templateFindCalls += 1;
+      throw new Error('should_not_lookup_immediate_template_when_slot_disabled');
+    };
+    db.AutomationFlowTemplateV2.findAll = async () => {
+      templateFindAllCalls += 1;
+      throw new Error('should_not_lookup_scheduled_templates_when_slots_disabled');
+    };
+    db.JobRequest.findAll = async () => [];
+    jobRequestsService.enqueueJobRequest = async () => {
+      throw new Error('should_not_enqueue_job_when_slots_disabled');
+    };
+
+    const cita = {
+      ...futureAppointment(),
+      tratamiento_id: 44101,
+      estado: 'completada',
+    };
+    const immediate = await appointmentRuntime.enqueueExecutionForCita(cita, {
+      event_name: 'appointment_completed',
+    });
+    assert.equal(immediate.skipped, true);
+    assert.equal(immediate.reason, 'no_template_for_event');
+
+    const scheduled = await appointmentRuntime.syncScheduledTriggersForCita({
+      ...futureAppointment(),
+      tratamiento_id: 44101,
+      estado: 'info_confirmada',
+    });
+    assert.deepEqual(scheduled.scheduled_jobs, []);
+    assert.deepEqual(scheduled.cancelled_jobs, []);
+    assert.equal(templateFindCalls, 0);
+    assert.equal(templateFindAllCalls, 0);
+  } finally {
+    db.Tratamiento.findByPk = originals.treatmentFind;
+    db.Clinica.findByPk = originals.clinicFind;
+    db.AutomationFlowTemplateV2.findOne = originals.templateFind;
+    db.AutomationFlowTemplateV2.findAll = originals.templateFindAll;
+    db.JobRequest.findAll = originals.jobFindAll;
+    jobRequestsService.enqueueJobRequest = originals.enqueue;
+  }
+});
+
 test('la resincronización conserva el job idéntico, sustituye el reprogramado y cancela la cita', async () => {
   const originals = {
     clinicFind: db.Clinica.findByPk,

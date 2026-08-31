@@ -5,6 +5,7 @@ const { Op } = require('sequelize');
 const db = require('../../models');
 const notificationService = require('./notifications.service');
 const whatsappService = require('./whatsapp.service');
+const whatsappAccountHealthService = require('./whatsappAccountHealth.service');
 
 const {
   ClinicMetaAsset,
@@ -491,6 +492,7 @@ async function recordCapabilitySnapshot({ clinicId = null, wabaId = null, phoneN
   const capacityLimit = extractCapacity(value);
   if (capacityLimit === null) return { recorded: false, reason: 'capacity_missing' };
   const route = await resolveRouteContext({ clinicId, wabaId, phoneNumberId });
+  const senderHealth = whatsappAccountHealthService.summarizeAssetHealth(route.asset);
   const routeKey = buildRouteKey(route);
   const snapshot = await upsertSnapshot({
     ...route,
@@ -500,6 +502,7 @@ async function recordCapabilitySnapshot({ clinicId = null, wabaId = null, phoneN
     source,
     checkedAt: new Date(),
     payload: value,
+    canSend: senderHealth.can_send === false ? false : undefined,
   });
   return { recorded: true, snapshot };
 }
@@ -789,6 +792,7 @@ async function materializeFinalMessageStatus({ message, status, mappedStatus, cl
 
 async function getDispatchGate({ clinicId, wabaId, phoneNumberId, template, requestedBatchSize, requestedDelayMs } = {}) {
   const route = await resolveRouteContext({ clinicId, wabaId, phoneNumberId });
+  const senderHealth = whatsappAccountHealthService.summarizeAssetHealth(route.asset);
   const routeKey = buildRouteKey({
     ...route,
     metaTemplateId: template?.meta_template_id,
@@ -812,8 +816,10 @@ async function getDispatchGate({ clinicId, wabaId, phoneNumberId, template, requ
     ? null
     : Math.max(0, Number(capacityLimit) - estimatedUnique24h);
   const blockedByCapacity = availableCapacity !== null && availableCapacity <= 0;
-  const blockedReason = TERMINAL_TEMPLATE_STATUSES.has(templateStatus)
-    ? (templateStatus === 'DISABLED' ? 'template_disabled_by_meta' : 'template_paused_by_meta')
+  const blockedReason = senderHealth.can_send === false
+    ? `sender_${senderHealth.reason_code || senderHealth.state || 'blocked'}`
+    : TERMINAL_TEMPLATE_STATUSES.has(templateStatus)
+      ? (templateStatus === 'DISABLED' ? 'template_disabled_by_meta' : 'template_paused_by_meta')
     : templateQuality === 'RED'
       ? 'template_quality_red'
       : snapshot?.immediate_status === HOLD_STATUS
@@ -857,6 +863,8 @@ async function getDispatchGate({ clinicId, wabaId, phoneNumberId, template, requ
     warmup: policy.needsWarmup,
     warmup_successful_messages: deliverySignals.successful,
     warmup_failed_messages: deliverySignals.failed,
+    sender_health_state: senderHealth.state,
+    sender_health_reason: senderHealth.reason_code,
     requested_batch_size: policy.requestedBatch,
     effective_batch_size: policy.effectiveBatchSize,
     requested_delay_ms: policy.requestedDelay,

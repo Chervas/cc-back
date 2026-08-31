@@ -442,7 +442,7 @@ class MetaSyncJobs {
         competitionSync: process.env.JOBS_COMPETITION_SCHEDULE || '0 6 * * 1',
         webEventsAggregate: process.env.JOBS_WEB_EVENTS_AGGREGATE_SCHEDULE || '*/15 * * * *',
         whatsappTemplatesSync: process.env.JOBS_WHATSAPP_TEMPLATES_SCHEDULE || '*/20 * * * *',
-        whatsappPhonesSync: process.env.JOBS_WHATSAPP_PHONES_SCHEDULE || '*/15 * * * *',
+        whatsappPhonesSync: process.env.JOBS_WHATSAPP_PHONES_SCHEDULE || '0 * * * *',
         automationHealthCheck: process.env.JOBS_AUTOMATION_HEALTH_CHECK_SCHEDULE || '0 10,16 * * *',
         opsGlobalDiscovery: process.env.JOBS_OPS_GLOBAL_DISCOVERY_SCHEDULE || '17 */4 * * *',
         opsSummary: process.env.JOBS_OPS_SUMMARY_SCHEDULE || '31 */6 * * *',
@@ -1848,7 +1848,7 @@ class MetaSyncJobs {
     });
 
     try {
-      const result = await enqueueSyncPhonesForAllWabas();
+      const result = await enqueueSyncPhonesForAllWabas({ mode: 'full' });
       await syncLog.update({
         status: 'completed',
         end_time: new Date(),

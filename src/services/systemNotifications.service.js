@@ -9,6 +9,7 @@ const { normalizePhoneE164 } = require('../lib/phone');
 const emailDelivery = require('./emailDelivery.service');
 const jobRequestsService = require('./jobRequests.service');
 const whatsappService = require('./whatsapp.service');
+const whatsappAccountHealthService = require('./whatsappAccountHealth.service');
 const { emitNotificationCreated } = require('./notificationsRealtime.service');
 const metaClient = require('../lib/metaClient');
 
@@ -128,6 +129,22 @@ const SYSTEM_NOTIFICATION_EVENTS = Object.freeze([
     severity: 'warning',
     label: 'Email: supresiones activas',
     description: 'Hay destinatarios suprimidos por rebote, queja o baja.',
+    defaults: { panel: true, email: true, whatsapp: false },
+  },
+  {
+    key: 'whatsapp.account_health_blocked',
+    category: 'whatsapp',
+    severity: 'critical',
+    label: 'WhatsApp: cuenta bloqueada o desconectada',
+    description: 'Meta impide enviar y el cortacircuitos ha detenido nuevos intentos.',
+    defaults: { panel: true, email: true, whatsapp: true },
+  },
+  {
+    key: 'whatsapp.account_health_recovered',
+    category: 'whatsapp',
+    severity: 'info',
+    label: 'WhatsApp: cuenta restablecida',
+    description: 'La recuperación del número se ha confirmado sin realizar un envío de prueba.',
     defaults: { panel: true, email: true, whatsapp: false },
   },
 ]);
@@ -312,6 +329,7 @@ function normalizeEventRules(value = {}) {
 function publicSender(asset, compliance = senderComplianceState(null)) {
   if (!asset) return null;
   const plain = asset.toJSON ? asset.toJSON() : asset;
+  const health = whatsappAccountHealthService.summarizeAssetHealth(plain);
   const clinic = plain.clinica?.nombre_clinica || plain.clinicName || null;
   const group = plain.grupoClinica?.nombre_grupo || plain.groupName || null;
   return {
@@ -327,9 +345,9 @@ function publicSender(asset, compliance = senderComplianceState(null)) {
     hasWaba: Boolean(plain.wabaId),
     quality: plain.quality_rating || null,
     messagingLimit: plain.messaging_limit || null,
-    blocked: Boolean(compliance.blocked),
-    operationalStatus: compliance.operationalStatus,
-    blockReason: compliance.blockReason,
+    blocked: Boolean(compliance.blocked || health.can_send === false),
+    operationalStatus: health.can_send === false ? health.state : compliance.operationalStatus,
+    blockReason: health.can_send === false ? health.reason_code : compliance.blockReason,
     restrictionExpiresAt: compliance.restrictionExpiresAt,
     complianceIncidentId: compliance.complianceIncidentId,
     complianceReviewStatus: compliance.complianceReviewStatus,
@@ -434,6 +452,7 @@ async function listWhatsappSenders() {
       'phoneNumberId',
       'quality_rating',
       'messaging_limit',
+      'additionalData',
       [
         db.sequelize.literal(
           "CASE WHEN waAccessToken IS NOT NULL AND TRIM(waAccessToken) <> '' THEN 1 ELSE 0 END"
@@ -1077,6 +1096,10 @@ async function sendWhatsappDelivery(delivery) {
       clinicaId: sender.clinicaId || null,
       grupoClinicaId: sender.grupoClinicaId || null,
       additionalData: sender.additionalData || {},
+    },
+    healthContext: {
+      source: 'system_notification_dispatch',
+      jobId: `system-notification:${delivery.id}`,
     },
   });
   return response;
