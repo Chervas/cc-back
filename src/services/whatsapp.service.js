@@ -1,6 +1,7 @@
 const axios = require('axios');
 const db = require('../../models');
 const { normalizePhoneE164 } = require('../lib/phone');
+const whatsappAccountHealthService = require('./whatsappAccountHealth.service');
 const ClinicMetaAsset = db.ClinicMetaAsset;
 const Clinica = db.Clinica;
 const MarketingContactOptOut = db.MarketingContactOptOut;
@@ -219,35 +220,53 @@ class WhatsAppService {
         interactiveCtaUrl,
         interactiveCtaText,
         clinicConfig = {},
+        healthContext = {},
     }) {
+        await whatsappAccountHealthService.assertCanSend({
+            clinicConfig,
+            source: healthContext.source || 'whatsapp_service_preflight',
+            messageId: healthContext.messageId || null,
+            jobId: healthContext.jobId || null,
+        });
         await this.assertRecipientCanReceive({ to, clinicConfig });
         this.setClinicCredentials(clinicConfig);
         const shouldUseTemplate =
             useTemplate !== undefined ? useTemplate : this.defaultUseTemplate;
 
-        if (shouldUseTemplate) {
-            return this.sendTemplateMessage({
-                to,
-                templateName: templateName || this.defaultTemplateName,
-                templateLanguage:
-                    templateLanguage || this.defaultTemplateLanguage,
-                templateParams,
-                templateComponents,
-                clinicConfig,
-            });
-        }
+        try {
+            if (shouldUseTemplate) {
+                return await this.sendTemplateMessage({
+                    to,
+                    templateName: templateName || this.defaultTemplateName,
+                    templateLanguage:
+                        templateLanguage || this.defaultTemplateLanguage,
+                    templateParams,
+                    templateComponents,
+                    clinicConfig,
+                });
+            }
 
-        if (interactiveCtaUrl) {
-            return this.sendCtaUrlMessage({
-                to,
-                body,
-                displayText: interactiveCtaText,
-                url: interactiveCtaUrl,
-                clinicConfig,
-            });
-        }
+            if (interactiveCtaUrl) {
+                return await this.sendCtaUrlMessage({
+                    to,
+                    body,
+                    displayText: interactiveCtaText,
+                    url: interactiveCtaUrl,
+                    clinicConfig,
+                });
+            }
 
-        return this.sendTextMessage({ to, body, previewUrl, clinicConfig });
+            return await this.sendTextMessage({ to, body, previewUrl, clinicConfig });
+        } catch (error) {
+            await whatsappAccountHealthService.recordProviderFailure({
+                clinicConfig,
+                error,
+                source: healthContext.source || 'whatsapp_messages_api',
+                messageId: healthContext.messageId || null,
+                jobId: healthContext.jobId || null,
+            }).catch(() => null);
+            throw error;
+        }
     }
 
     async assertRecipientCanReceive({ to, clinicConfig = {} }) {

@@ -8,6 +8,7 @@ const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.
 const { enqueueSyncPhonesJob, syncPhonesForWaba } = require('../services/whatsappPhones.service');
 const whatsappCoexistenceService = require('../services/whatsappCoexistence.service');
 const whatsappAccountComplianceService = require('../services/whatsappAccountCompliance.service');
+const whatsappAccountHealthService = require('../services/whatsappAccountHealth.service');
 const { filterEffectiveWhatsappPhoneAssets } = require('../lib/effective-whatsapp-phone');
 const whatsappDeliveryGovernanceService = require('../services/whatsappDeliveryGovernance.service');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
@@ -57,8 +58,10 @@ const META_API_VERSION = process.env.META_API_VERSION || 'v22.0';
 const META_GRAPH_TOKEN = process.env.META_GRAPH_TOKEN || process.env.META_SYSTEM_USER_TOKEN || null;
 const META_BUSINESS_ID = process.env.META_BUSINESS_ID || process.env.META_BM_ID || null;
 const PREVERIFIED_ENABLED = String(process.env.WHATSAPP_PREVERIFIED_ENABLED || 'false').toLowerCase() === 'true';
-const PHONE_SYNC_THROTTLE_MS = 5 * 60 * 1000;
+const PHONE_SYNC_THROTTLE_MS = 60 * 60 * 1000;
+const BUSINESS_VERIFICATION_CACHE_TTL_MS = 60 * 60 * 1000;
 const phoneSyncThrottle = new Map();
+const businessVerificationCache = new Map();
 
 function isWhatsappGlobalAdmin(userId) {
   return ADMIN_USER_IDS.includes(Number(userId));
@@ -319,13 +322,20 @@ function normalizeWhatsappBusinessProfile(payload) {
 
 async function fetchBusinessVerificationStatus({ businessId }) {
   if (!businessId || !META_GRAPH_TOKEN) return null;
+  const cached = businessVerificationCache.get(String(businessId));
+  if (cached && Date.now() - cached.checkedAt < BUSINESS_VERIFICATION_CACHE_TTL_MS) {
+    return cached.status;
+  }
   try {
     const resp = await axios.get(`https://graph.facebook.com/${META_API_VERSION}/${businessId}` , {
       headers: { Authorization: `Bearer ${META_GRAPH_TOKEN}` },
       params: { fields: 'verification_status' },
     });
-    return resp.data?.verification_status || null;
+    const status = resp.data?.verification_status || null;
+    businessVerificationCache.set(String(businessId), { status, checkedAt: Date.now() });
+    return status;
   } catch (err) {
+    businessVerificationCache.set(String(businessId), { status: null, checkedAt: Date.now() });
     return null;
   }
 }
@@ -1895,9 +1905,11 @@ exports.listPhones = async (req, res) => {
     // Resolver estado de verificación de empresas (si hay token disponible)
     const businessIds = new Set();
     for (const p of phones) {
-      if (p.additionalData?.businessId) {
-        businessIds.add(p.additionalData.businessId);
-      }
+      const storedBusinessStatus = p.additionalData?.whatsappBusinessHealth?.business_verification_status
+        || p.additionalData?.businessVerificationStatus
+        || null;
+      if (storedBusinessStatus) continue;
+      if (p.additionalData?.businessId) businessIds.add(p.additionalData.businessId);
       const mapped = p.wabaId ? wabaBusinessMap.get(p.wabaId) : null;
       if (mapped) businessIds.add(mapped);
     }
@@ -1911,21 +1923,33 @@ exports.listPhones = async (req, res) => {
       }
     }
 
-    // Disparar sync on-demand con throttling para reducir estados stale
+    // La lectura del panel solo recupera una sync horaria perdida. El instante
+    // persistido evita duplicar llamadas tras reinicios o entre procesos.
     const now = Date.now();
     const wabaTokens = new Map();
+    const wabaLastCheckedAt = new Map();
     for (const p of phones) {
       if (p.wabaId && p.waAccessToken && !wabaTokens.has(p.wabaId)) {
         wabaTokens.set(p.wabaId, p.waAccessToken);
       }
+      const checkedAt = new Date(
+        p.additionalData?.whatsappPhoneSync?.status_checked_at || 0
+      ).getTime();
+      if (p.wabaId && Number.isFinite(checkedAt)) {
+        wabaLastCheckedAt.set(
+          p.wabaId,
+          Math.max(wabaLastCheckedAt.get(p.wabaId) || 0, checkedAt)
+        );
+      }
     }
     for (const [wabaId, accessToken] of wabaTokens.entries()) {
       const lastTriggered = phoneSyncThrottle.get(wabaId) || 0;
-      if (now - lastTriggered < PHONE_SYNC_THROTTLE_MS) {
+      const lastChecked = wabaLastCheckedAt.get(wabaId) || 0;
+      if (now - Math.max(lastTriggered, lastChecked) < PHONE_SYNC_THROTTLE_MS) {
         continue;
       }
       phoneSyncThrottle.set(wabaId, now);
-      enqueueSyncPhonesJob({ wabaId, accessToken }).catch((err) => {
+      enqueueSyncPhonesJob({ wabaId, accessToken, mode: 'health', ensureTemplates: false }).catch((err) => {
         console.warn('[whatsapp] No se pudo encolar sync de phones', err?.message || err);
       });
     }
@@ -2001,8 +2025,12 @@ exports.listPhones = async (req, res) => {
       });
 
       const managerBusinessId =
-        p.additionalData?.businessId || wabaBusinessMap.get(p.wabaId) || null;
+        additionalData.whatsappBusinessHealth?.business_id
+        || p.additionalData?.businessId
+        || wabaBusinessMap.get(p.wabaId)
+        || null;
       const businessVerificationStatus =
+        additionalData.whatsappBusinessHealth?.business_verification_status ||
         p.additionalData?.businessVerificationStatus ||
         (managerBusinessId ? businessStatusMap.get(managerBusinessId) : null) ||
         null;
@@ -2029,6 +2057,9 @@ exports.listPhones = async (req, res) => {
         group_name: grupo.nombre_grupo || null,
         manager_business_id: managerBusinessId,
         business_verification_status: businessVerificationStatus,
+        waba_account_review_status: additionalData.whatsappBusinessHealth?.account_review_status || null,
+        waba_health_can_send_message: additionalData.whatsappBusinessHealth?.can_send_message || null,
+        waba_health_observed_at: additionalData.whatsappBusinessHealth?.observed_at || null,
         name_status: additionalData.nameStatus || null,
         name_status_reason: additionalData.nameStatusReason || null,
         requested_display_name: additionalData.requestedDisplayName || null,
@@ -2073,6 +2104,7 @@ exports.listPhones = async (req, res) => {
         coexistence_history_sync_request_id: additionalData.coexistence?.history_sync_request_id || null,
         coexistence_history_sync_error: additionalData.coexistence?.history_sync_error || null,
         compliance: whatsappAccountComplianceService.summarizeCompliance(additionalData),
+        health: whatsappAccountHealthService.summarizeAssetHealth(p),
         business_username: additionalData.businessUsername || null,
         is_preverified: !!additionalData.isPreverified,
         verification_expiry_time: additionalData.verificationExpiryTime || null,
@@ -2192,43 +2224,82 @@ exports.getComplianceAdminOverview = async (req, res) => {
       }),
       whatsappDeliveryGovernanceService.getAdminOverview({ limit: req.query.limit || 200 }),
     ]);
+    const healthHistoryByAsset = await whatsappAccountHealthService.listEventsForAssets(
+      phones.map((phone) => Number(phone.id)),
+      { perAsset: 20 }
+    );
     const accounts = phones.map((phone) => {
-      const payment = whatsappPaymentStatusService.derivePaymentSnapshot(phone.additionalData || {});
-      return ({
-      id: phone.id,
-      clinic_id: phone.clinicaId || null,
-      clinic_name: phone.clinica?.nombre_clinica || null,
-      group_id: phone.grupoClinicaId || null,
-      group_name: phone.grupoClinica?.nombre_grupo || null,
-      waba_id: phone.wabaId || null,
-      phone_number_id: phone.phoneNumberId || null,
-      phone_number: phone.metaAssetName || null,
-      verified_name: phone.waVerifiedName || null,
-      quality_rating: phone.quality_rating || null,
-      updated_at: phone.updatedAt || null,
-      compliance: whatsappAccountComplianceService.summarizeCompliance(phone.additionalData || {}),
-      business_username: phone.additionalData?.businessUsername || null,
-      last_diagnostic: phone.additionalData?.whatsappDiagnostics || null,
-      payment_status: payment.status || null,
-      payment_missing: payment.missing === true,
-      payment_message: payment.last_error_message || null,
-      payment_last_detected_at: payment.last_detected_at || null,
-      payment_last_success_at: payment.last_success_at || null,
+      const additionalData = phone.additionalData || {};
+      const businessHealth = additionalData.whatsappBusinessHealth || {};
+      const payment = whatsappPaymentStatusService.derivePaymentSnapshot(additionalData);
+      const health = whatsappAccountHealthService.summarizeAssetHealth(phone);
+      return {
+        id: phone.id,
+        clinic_id: phone.clinicaId || null,
+        clinic_name: phone.clinica?.nombre_clinica || null,
+        group_id: phone.grupoClinicaId || null,
+        group_name: phone.grupoClinica?.nombre_grupo || null,
+        waba_id: phone.wabaId || null,
+        phone_number_id: phone.phoneNumberId || null,
+        phone_number: phone.metaAssetName || null,
+        verified_name: phone.waVerifiedName || null,
+        quality_rating: phone.quality_rating || null,
+        updated_at: phone.updatedAt || null,
+        health,
+        health_history: healthHistoryByAsset.get(Number(phone.id)) || [],
+        compliance: whatsappAccountComplianceService.summarizeCompliance(additionalData),
+        business_username: additionalData.businessUsername || null,
+        business_id: businessHealth.business_id || additionalData.businessId || null,
+        business_verification_status: businessHealth.business_verification_status
+          || additionalData.businessVerificationStatus
+          || null,
+        waba_account_review_status: businessHealth.account_review_status || null,
+        waba_health_can_send_message: businessHealth.can_send_message || null,
+        waba_health_observed_at: businessHealth.observed_at || null,
+        name_status: additionalData.nameStatus || null,
+        new_name_status: additionalData.newNameStatus || additionalData.new_name_status || null,
+        requested_display_name: additionalData.newDisplayName
+          || additionalData.new_display_name
+          || additionalData.requestedDisplayName
+          || null,
+        last_diagnostic: additionalData.whatsappDiagnostics || null,
+        payment_status: payment.status || null,
+        payment_missing: payment.missing === true,
+        payment_message: payment.last_error_message || null,
+        payment_last_detected_at: payment.last_detected_at || null,
+        payment_last_success_at: payment.last_success_at || null,
+      };
     });
-    });
+    const blockedAccounts = accounts.filter((account) => account.health?.can_send === false).length;
+    const staleAccounts = accounts.filter((account) => account.health?.state === 'stale').length;
+    const degradedAccounts = accounts.filter((account) => account.health?.state === 'degraded').length;
+    const operationalAccounts = accounts.filter((account) => (
+      account.health?.can_send === true && !account.health?.is_stale
+    )).length;
     return res.json({
       accounts,
       incidents,
       delivery_governance: deliveryGovernance,
       summary: {
         total_accounts: accounts.length,
-        affected_accounts: accounts.filter((account) => account.compliance && account.compliance.status !== 'active').length,
-        suspended_accounts: accounts.filter((account) => ['suspended', 'deleted'].includes(account.compliance?.status)).length,
+        operational_accounts: operationalAccounts,
+        affected_accounts: accounts.filter((account) => (
+          account.health?.can_send === false
+          || account.health?.state === 'stale'
+          || account.health?.state === 'degraded'
+          || (account.compliance && account.compliance.status !== 'active')
+        )).length,
+        blocked_accounts: blockedAccounts,
+        stale_accounts: staleAccounts,
+        degraded_accounts: degradedAccounts,
+        suspended_accounts: accounts.filter((account) => (
+          ['suspended', 'deleted'].includes(account.compliance?.status)
+        )).length,
         pending_reviews: incidents.filter((incident) => ['clinicaclick_review_requested', 'draft_ready', 'submitted', 'in_review'].includes(incident.status)).length,
       },
       source: {
-        enforcement: 'account_update webhook',
-        technical_refresh: 'whatsapp phone sync',
+        enforcement: 'webhooks, provider failures and sender preflight',
+        technical_refresh: 'lightweight status sync every cycle; full enrichment at most hourly',
       },
     });
   } catch (error) {
@@ -2288,7 +2359,7 @@ exports.refreshComplianceAdminOverview = async (req, res) => {
       }
     });
     const results = await Promise.allSettled(Array.from(unique.entries()).map(([wabaId, accessToken]) =>
-      enqueueSyncPhonesJob({ wabaId, accessToken })
+      enqueueSyncPhonesJob({ wabaId, accessToken, mode: 'full', ensureTemplates: false })
     ));
     return res.json({
       success: true,
@@ -3345,7 +3416,12 @@ exports.refreshPhoneStatus = async (req, res) => {
       return res.status(400).json({ success: false, error: 'missing_waba_or_token' });
     }
 
-    await syncPhonesForWaba({ wabaId: phone.wabaId, accessToken: phone.waAccessToken });
+    await syncPhonesForWaba({
+      wabaId: phone.wabaId,
+      accessToken: phone.waAccessToken,
+      mode: 'full',
+      ensureTemplates: false,
+    });
 
     return res.json({ success: true });
   } catch (err) {

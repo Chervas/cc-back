@@ -14,6 +14,7 @@ const notificationService = require('../services/notifications.service');
 const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.service');
 const whatsappConnectionStatusService = require('../services/whatsappConnectionStatus.service');
 const whatsappAccountComplianceService = require('../services/whatsappAccountCompliance.service');
+const whatsappAccountHealthService = require('../services/whatsappAccountHealth.service');
 const whatsappDeliveryGovernanceService = require('../services/whatsappDeliveryGovernance.service');
 const systemNotificationsService = require('../services/systemNotifications.service');
 const patientDirectionService = require('../services/patientDirection.service');
@@ -849,6 +850,11 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
             templateParams,
             templateComponents,
             clinicConfig: effectiveClinicConfig,
+            healthContext: {
+                source: 'outbound_whatsapp_worker',
+                messageId: msg.id,
+                jobId: job.id,
+            },
         });
         providerAccepted = true;
         const immediate = useTemplate
@@ -959,6 +965,12 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
         msg.metadata = {
             ...(msg.metadata || {}),
             error: err?.response?.data || err.message,
+            ...(err?.code === 'WHATSAPP_SENDER_HEALTH_BLOCKED'
+                ? {
+                    sender_health_blocked: true,
+                    sender_health: err.health || null,
+                }
+                : {}),
             outbound_retry: {
                 enabled: retryDecision.retry_enabled,
                 retryable: retryDecision.retryable,
@@ -1569,6 +1581,12 @@ createWorker('webhook_whatsapp', async (job) => {
                 value: webhookValue,
                 clinicId,
             });
+            await whatsappAccountHealthService.recordAccountUpdate({
+                entry: webhookEntry,
+                change: webhookChange,
+                value: webhookValue,
+                clinicId,
+            });
             await whatsappAccountComplianceService.handleBusinessUsernameUpdate({
                 entry: webhookEntry,
                 change: webhookChange,
@@ -1958,6 +1976,22 @@ createWorker('webhook_whatsapp', async (job) => {
                 status,
                 message,
                 clinicId: messageRef.clinic_id || clinicId,
+            });
+            await whatsappAccountHealthService.recordProviderFailure({
+                clinicConfig: {
+                    originId: message.metadata?.sender_origin_id || message.metadata?.whatsapp_sender_asset_id || null,
+                    phoneNumberId: message.metadata?.phoneNumberId || message.metadata?.phoneId || null,
+                    wabaId: message.metadata?.wabaId || null,
+                    clinicaId: messageRef.clinic_id || clinicId || null,
+                },
+                error: status,
+                source: 'message_status_webhook',
+                messageId: message.id,
+            }).catch((healthError) => {
+                console.warn('[whatsapp health] No se pudo registrar el fallo de cuenta', {
+                    messageId: message.id,
+                    error: serializeError(healthError),
+                });
             });
         }
 

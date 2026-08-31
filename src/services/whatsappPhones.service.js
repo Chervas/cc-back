@@ -6,9 +6,13 @@ const { queues } = require('./queue.service');
 const whatsappTemplatesService = require('./whatsappTemplates.service');
 const whatsappConnectionStatusService = require('./whatsappConnectionStatus.service');
 const whatsappDeliveryGovernanceService = require('./whatsappDeliveryGovernance.service');
+const whatsappAccountHealthService = require('./whatsappAccountHealth.service');
 const {
   haveSameTemplateComponents,
 } = require('../lib/whatsapp-template-components');
+const {
+  normalizeWabaOperationalSnapshot,
+} = require('../lib/whatsapp-account-health');
 
 const { ClinicMetaAsset, Clinica, WhatsappTemplate, WhatsappTemplateCatalog, Sequelize } = db;
 const { Op } = Sequelize;
@@ -17,6 +21,10 @@ const META_API_VERSION = process.env.META_API_VERSION || 'v24.0';
 const TEMPLATE_CREATE_ENSURE_COOLDOWN_MS = Number(
   process.env.WHATSAPP_TEMPLATE_CREATE_ENSURE_COOLDOWN_MS || 60 * 60 * 1000
 );
+const PHONE_FULL_SYNC_INTERVAL_MS = Math.max(
+  15,
+  Number(process.env.WHATSAPP_PHONE_FULL_SYNC_INTERVAL_MINUTES || 60) || 60
+) * 60 * 1000;
 
 function getMetaBaseUrl() {
   return `https://graph.facebook.com/${META_API_VERSION}`;
@@ -106,12 +114,24 @@ async function fetchNameStatus({ phoneNumberId, accessToken }) {
   return resp.data || null;
 }
 
+async function fetchWabaOperationalStatus({ wabaId, accessToken }) {
+  if (!wabaId || !accessToken) return null;
+  const resp = await axios.get(`${getMetaBaseUrl()}/${wabaId}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    params: {
+      fields: 'id,name,account_review_status,business_verification_status,health_status',
+    },
+  });
+  return normalizeWabaOperationalSnapshot(resp.data, new Date());
+}
+
 async function disableDeletedPhone(asset) {
   const additionalData = { ...(asset.additionalData || {}) };
   const registration = additionalData.registration || {};
   additionalData.registration = {
     ...registration,
     status: 'deleted',
+    phoneStatus: 'DELETED',
     requiresPin: false,
     lastAttemptAt: new Date().toISOString(),
     lastErrorCode: 33,
@@ -125,7 +145,8 @@ async function disableDeletedPhone(asset) {
   await asset.save();
 }
 
-async function upsertRemoteState(asset, remote, profile) {
+async function upsertRemoteState(asset, remote, profile, { fullSync = false, wabaSnapshot = null } = {}) {
+  const nowIso = new Date().toISOString();
   const additionalData = { ...(asset.additionalData || {}) };
   const registration = additionalData.registration || {};
   const testNumber = isTestDisplayNumber(remote?.display_phone_number);
@@ -164,6 +185,13 @@ async function upsertRemoteState(asset, remote, profile) {
     additionalData.profileWebsite = profile.websites?.[0] || additionalData.profileWebsite || null;
     additionalData.profileAddress = profile.address || additionalData.profileAddress || null;
   }
+  if (wabaSnapshot) {
+    additionalData.whatsappBusinessHealth = wabaSnapshot;
+    additionalData.businessVerificationStatus = wabaSnapshot.business_verification_status
+      || additionalData.businessVerificationStatus
+      || null;
+    additionalData.businessId = wabaSnapshot.business_id || additionalData.businessId || null;
+  }
 
   if (remote?.status === 'CONNECTED') {
     additionalData.registration = buildRegisteredSnapshot(remote, registration, isCoexistence);
@@ -172,10 +200,16 @@ async function upsertRemoteState(asset, remote, profile) {
       ...registration,
       phoneStatus: remote?.status || null,
       codeVerificationStatus: remote?.code_verification_status || null,
+      lastAttemptAt: nowIso,
       lastErrorCode: registration?.lastErrorCode || null,
       lastErrorMessage: registration?.lastErrorMessage || null,
     };
   }
+  additionalData.whatsappPhoneSync = {
+    ...(additionalData.whatsappPhoneSync || {}),
+    status_checked_at: nowIso,
+    ...(fullSync ? { last_full_sync_at: nowIso } : {}),
+  };
 
   asset.additionalData = { ...additionalData };
   asset.metaAssetId = remote?.id || asset.metaAssetId;
@@ -391,7 +425,7 @@ async function resolveAccessToken(wabaId) {
   );
 }
 
-async function syncPhonesForWaba({ wabaId, accessToken, ensureTemplates = true }) {
+async function syncPhonesForWaba({ wabaId, accessToken, ensureTemplates = true, mode = 'auto' }) {
   if (!wabaId) {
     throw new Error('wabaId_required');
   }
@@ -404,10 +438,40 @@ async function syncPhonesForWaba({ wabaId, accessToken, ensureTemplates = true }
   const remotePhones = await fetchRemotePhones({ wabaId, accessToken: token });
   const remoteMap = new Map(remotePhones.map((p) => [p.id, p]));
 
-  // Obtener name_status por phone_number_id (más fiable que el listado)
+  const localPhones = await ClinicMetaAsset.findAll({
+    where: {
+      wabaId,
+      assetType: 'whatsapp_phone_number',
+    },
+    order: [['updatedAt', 'DESC']],
+  });
+  const normalizedMode = ['auto', 'full', 'health'].includes(String(mode || '').toLowerCase())
+    ? String(mode).toLowerCase()
+    : 'auto';
+  const mostRecentFullSync = localPhones.reduce((latest, asset) => {
+    const value = asset.additionalData?.whatsappPhoneSync?.last_full_sync_at;
+    const timestamp = value ? new Date(value).getTime() : 0;
+    return Number.isFinite(timestamp) ? Math.max(latest, timestamp) : latest;
+  }, 0);
+  const performFullSync = normalizedMode === 'full'
+    || (normalizedMode === 'auto' && (!mostRecentFullSync || Date.now() - mostRecentFullSync >= PHONE_FULL_SYNC_INTERVAL_MS));
+  let wabaSnapshot = null;
+  if (performFullSync) {
+    try {
+      wabaSnapshot = await fetchWabaOperationalStatus({ wabaId, accessToken: token });
+    } catch (error) {
+      console.warn('[whatsapp] No se pudo obtener la salud general del WABA', {
+        wabaId,
+        error: error?.response?.data?.error?.code || error?.code || error?.message || 'waba_status_failed',
+      });
+    }
+  }
+
+  // El estado del número se consulta en cada ciclo. WABA, nombre y perfil se
+  // enriquecen como máximo una vez por hora.
   const nameStatusMap = new Map();
   const profileMap = new Map();
-  for (const remote of remotePhones) {
+  for (const remote of performFullSync ? remotePhones : []) {
     try {
       const statusInfo = await fetchNameStatus({
         phoneNumberId: remote.id,
@@ -438,17 +502,17 @@ async function syncPhonesForWaba({ wabaId, accessToken, ensureTemplates = true }
     }
   }
 
-  const localPhones = await ClinicMetaAsset.findAll({
-    where: {
-      wabaId,
-      assetType: 'whatsapp_phone_number',
-    },
-    order: [['updatedAt', 'DESC']],
-  });
-
   for (const asset of localPhones) {
     const remote = remoteMap.get(asset.phoneNumberId);
     if (!remote) {
+      const previousHealth = whatsappAccountHealthService.summarizeAssetHealth(asset);
+      await whatsappAccountHealthService.recordObservationForAsset({
+        assetId: asset.id,
+        signal: { providerStatus: 'DELETED', registrationStatus: 'deleted' },
+        source: 'whatsapp_phone_sync',
+        previousHealth,
+      }).catch(() => null);
+      await asset.reload();
       await disableDeletedPhone(asset);
       continue;
     }
@@ -463,7 +527,37 @@ async function syncPhonesForWaba({ wabaId, accessToken, ensureTemplates = true }
       asset.additionalData = { ...additionalData };
     }
     const profileInfo = profileMap.get(remote.id) || null;
-    await upsertRemoteState(asset, remote, profileInfo);
+    const previousHealth = whatsappAccountHealthService.summarizeAssetHealth(asset);
+    await upsertRemoteState(asset, remote, profileInfo, {
+      fullSync: performFullSync,
+      wabaSnapshot,
+    });
+    const healthResult = await whatsappAccountHealthService.recordObservationForAsset({
+      assetId: asset.id,
+      signal: {
+        providerStatus: remote?.status,
+        registrationStatus: asset.additionalData?.registration?.status,
+        qualityRating: remote?.quality_rating || asset.quality_rating,
+        accountReviewStatus: wabaSnapshot?.account_review_status,
+        wabaCanSendMessage: wabaSnapshot?.can_send_message,
+        businessVerificationStatus: wabaSnapshot?.business_verification_status,
+      },
+      source: 'whatsapp_phone_sync',
+      previousHealth,
+    }).catch((error) => {
+      console.warn('[whatsapp health] No se pudo materializar el estado del número', {
+        wabaId,
+        phoneNumberId: asset.phoneNumberId || remote.id,
+        error: error?.message || error,
+      });
+      return null;
+    });
+    if (healthResult?.health) {
+      asset.additionalData = {
+        ...(asset.additionalData || {}),
+        whatsappHealth: healthResult.health,
+      };
+    }
     await whatsappDeliveryGovernanceService.recordCapabilitySnapshot({
       clinicId: asset.clinicaId || null,
       wabaId: asset.wabaId || wabaId,
@@ -477,14 +571,17 @@ async function syncPhonesForWaba({ wabaId, accessToken, ensureTemplates = true }
         error: error?.message || error,
       });
     });
-    if (String(remote?.status || '').toUpperCase() === 'CONNECTED') {
+    if (
+      String(remote?.status || '').toUpperCase() === 'CONNECTED'
+      && healthResult?.health?.can_send !== false
+    ) {
       await whatsappConnectionStatusService.clearDisconnectedAfterSuccess({
         phoneId: asset.phoneNumberId || remote.id,
         wabaId: asset.wabaId || wabaId,
         source: 'whatsapp_phone_sync_connected',
       });
     }
-    if (ensureTemplates) {
+    if (ensureTemplates && performFullSync && healthResult?.health?.can_send !== false) {
       await maybeEnsureTemplatesForOperationalPhone(asset, remote);
     }
   }
@@ -493,6 +590,10 @@ async function syncPhonesForWaba({ wabaId, accessToken, ensureTemplates = true }
     wabaId,
     remoteCount: remotePhones.length,
     localCount: localPhones.length,
+    mode: performFullSync ? 'full' : 'health',
+    accountReviewStatus: wabaSnapshot?.account_review_status || null,
+    businessVerificationStatus: wabaSnapshot?.business_verification_status || null,
+    wabaCanSendMessage: wabaSnapshot?.can_send_message || null,
   };
 }
 
@@ -504,7 +605,7 @@ async function enqueueSyncPhonesJob(data) {
   });
 }
 
-async function enqueueSyncPhonesForAllWabas() {
+async function enqueueSyncPhonesForAllWabas({ mode = 'auto' } = {}) {
   const wabas = await ClinicMetaAsset.findAll({
     where: {
       wabaId: { [db.Sequelize.Op.ne]: null },
@@ -524,13 +625,21 @@ async function enqueueSyncPhonesForAllWabas() {
   for (const row of wabas) {
     if (!row.wabaId || seen.has(row.wabaId)) continue;
     seen.add(row.wabaId);
-    await enqueueSyncPhonesJob({ wabaId: row.wabaId, accessToken: row.waAccessToken });
+    await enqueueSyncPhonesJob({
+      wabaId: row.wabaId,
+      accessToken: row.waAccessToken,
+      mode,
+      ensureTemplates: mode !== 'health',
+    });
   }
 
   return { queued: seen.size };
 }
 
 module.exports = {
+  PHONE_FULL_SYNC_INTERVAL_MS,
+  fetchWabaOperationalStatus,
+  normalizeWabaOperationalSnapshot,
   syncPhonesForWaba,
   enqueueSyncPhonesJob,
   enqueueSyncPhonesForAllWabas,

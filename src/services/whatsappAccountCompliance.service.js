@@ -4,6 +4,7 @@ const { Op, fn, col, literal } = require('sequelize');
 const db = require('../../models');
 const notificationService = require('./notifications.service');
 const { syncPhonesForWaba } = require('./whatsappPhones.service');
+const whatsappAccountHealthService = require('./whatsappAccountHealth.service');
 const {
   buildDedupeKey,
   deriveComplianceSnapshot,
@@ -988,6 +989,7 @@ async function diagnoseAccount({ assetId, userId }) {
       wabaId: asset.wabaId,
       accessToken: asset.waAccessToken,
       ensureTemplates: false,
+      mode: 'full',
     });
   } catch (error) {
     providerError = serializeProviderError(error);
@@ -1014,6 +1016,11 @@ async function diagnoseAccount({ assetId, userId }) {
     : {};
   const registration = additionalData.registration || {};
   const coexistence = additionalData.coexistence || {};
+  const businessHealth = additionalData.whatsappBusinessHealth || {};
+  const health = whatsappAccountHealthService.summarizeAssetHealth(current || asset);
+  const healthHistory = current
+    ? (await whatsappAccountHealthService.listEventsForAssets([current.id], { perAsset: 20 })).get(Number(current.id)) || []
+    : [];
   const diagnostic = {
     checked_at: checkedAt.toISOString(),
     checked_by: userId || null,
@@ -1029,10 +1036,24 @@ async function diagnoseAccount({ assetId, userId }) {
     account_mode: additionalData.accountMode || null,
     is_on_biz_app: additionalData.isOnBizApp ?? null,
     name_status: additionalData.nameStatus || null,
+    new_name_status: additionalData.newNameStatus || additionalData.new_name_status || null,
+    requested_display_name: additionalData.newDisplayName
+      || additionalData.new_display_name
+      || additionalData.requestedDisplayName
+      || null,
+    business_id: businessHealth.business_id || additionalData.businessId || null,
+    business_verification_status: businessHealth.business_verification_status
+      || additionalData.businessVerificationStatus
+      || null,
+    waba_account_review_status: businessHealth.account_review_status || null,
+    waba_health_can_send_message: businessHealth.can_send_message || null,
+    waba_health_observed_at: businessHealth.observed_at || null,
     quality_rating: current?.quality_rating || asset.quality_rating || null,
     messaging_limit: current?.messaging_limit || asset.messaging_limit || null,
     compliance: summarizeCompliance(additionalData),
     compliance_source: 'account_update_webhook',
+    health,
+    health_history: healthHistory,
     recent_delivery: activity.recent[0] || null,
     recent_failures: activity.recent_failures || [],
     delivery_summary_7d: {
@@ -1066,6 +1087,8 @@ async function diagnoseAccount({ assetId, userId }) {
       phone_number_id: current?.phoneNumberId || asset.phoneNumberId || null,
       phone_number: current?.metaAssetName || asset.metaAssetName || null,
       verified_name: current?.waVerifiedName || asset.waVerifiedName || null,
+      health,
+      health_history: healthHistory,
     },
     diagnostic,
     activity,

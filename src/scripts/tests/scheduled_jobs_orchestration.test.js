@@ -110,6 +110,11 @@ function testCatalogCoversEveryCronAndExecutor() {
     process.env.JOBS_SYSTEM_NOTIFICATION_CHECK_SCHEDULE || '*/5 * * * *'
   );
   assert.equal(
+    metaSyncJobs.config.schedules.whatsappPhonesSync,
+    process.env.JOBS_WHATSAPP_PHONES_SCHEDULE || '0 * * * *',
+    'WhatsApp account health polling must default to one full check per hour'
+  );
+  assert.equal(
     BACKGROUND_INTEGRATION_JOB_TYPES.includes('system_notification_check'),
     false,
     'database-only alert checks must not wait for the external-provider lane'
@@ -122,6 +127,11 @@ function testCatalogCoversEveryCronAndExecutor() {
   }
 
   const syncJobsSource = fs.readFileSync(path.resolve(__dirname, '../../jobs/sync.jobs.js'), 'utf8');
+  assert.match(
+    syncJobsSource,
+    /enqueueSyncPhonesForAllWabas\(\{ mode: 'full' \}\)/,
+    'the hourly WhatsApp job must refresh WABA and phone health in the same cycle'
+  );
   for (const opsScript of [
     '../push_ops_global_discovery.js',
     '../push_ops_summary.js',
