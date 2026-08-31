@@ -256,9 +256,22 @@ function formatDateTime(value) {
     });
 }
 
+function formatDateOnly(value) {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return date.toLocaleDateString('es-ES', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+    });
+}
+
 function buildTemplateContext({ paciente, clinica, tratamiento, cita, profesional } = {}) {
     const patientName = [paciente?.nombre, paciente?.apellidos].filter(Boolean).join(' ').trim();
     const professionalName = [profesional?.nombre, profesional?.apellidos].filter(Boolean).join(' ').trim();
+    const fiscal = parseJsonObject(clinica?.datos_fiscales_clinica);
+    const now = new Date();
     return {
         paciente: {
             id: paciente?.id_paciente || paciente?.id || null,
@@ -270,14 +283,24 @@ function buildTemplateContext({ paciente, clinica, tratamiento, cita, profesiona
             documento: paciente?.dni || '',
             email: paciente?.email || '',
             telefono: paciente?.telefono_movil || paciente?.telefono || '',
-            fecha_nacimiento: paciente?.fecha_nacimiento || null,
+            fecha_nacimiento: formatDateOnly(paciente?.fecha_nacimiento),
+            direccion: paciente?.direccion || paciente?.domicilio || '',
+            codigo_postal: paciente?.codigo_postal || paciente?.cp || '',
+            ciudad: paciente?.ciudad || paciente?.poblacion || paciente?.localidad || '',
+            provincia: paciente?.provincia || '',
         },
         clinica: {
             id: clinica?.id_clinica || clinica?.id || null,
             nombre: clinica?.nombre_clinica || clinica?.nombre || '',
+            razon_social: fiscal.razon_social || fiscal.razonSocial || fiscal.nombre_fiscal || clinica?.nombre_clinica || clinica?.nombre || '',
+            cif: fiscal.cif || fiscal.nif || fiscal.documento || '',
             email: clinica?.email || '',
             telefono: clinica?.telefono_whatsapp || clinica?.telefono_movil || clinica?.telefono || '',
             direccion: clinica?.direccion || '',
+            codigo_postal: clinica?.codigo_postal || '',
+            ciudad: clinica?.ciudad || '',
+            provincia: clinica?.provincia || '',
+            pais: clinica?.pais || '',
         },
         tratamiento: {
             id: tratamiento?.id_tratamiento || tratamiento?.id || null,
@@ -295,6 +318,10 @@ function buildTemplateContext({ paciente, clinica, tratamiento, cita, profesiona
             id: profesional?.id_usuario || profesional?.id || null,
             nombre: professionalName || profesional?.nombre || '',
             email: profesional?.email_usuario || profesional?.email || '',
+        },
+        fecha: {
+            firma: formatDateOnly(now),
+            generacion: formatDateTime(now),
         },
     };
 }
