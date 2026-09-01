@@ -20,6 +20,7 @@ const attachmentSource = fs.readFileSync(
 );
 const {
   buildLeadSearchConditions,
+  isLeadClosedForPendingSignals,
   redactLeadForPrivacy,
 } = intakeController.__leadPrivacyContract;
 
@@ -163,6 +164,45 @@ const publicSourceSearch = buildLeadSearchConditions('google_ads', { canSearchSe
 assert.ok(publicSourceSearch.some((condition) => condition.source === 'google_ads'));
 const sensitiveSearch = buildLeadSearchConditions('medical-query-secret', { canSearchSensitive: true });
 assert.ok(sensitiveSearch.some((condition) => Object.hasOwn(condition, 'source_detail')));
+
+for (const status of ['citado', 'acudio_cita', 'convertido', 'descartado']) {
+  assert.equal(
+    isLeadClosedForPendingSignals({ status_lead: status }),
+    true,
+    `${status} must suppress pending lead signals`,
+  );
+}
+assert.equal(
+  isLeadClosedForPendingSignals({ status_lead: 'info_recibida', linked_appointment: { id: 88 } }),
+  true,
+  'active linked appointments must suppress pending lead signals',
+);
+assert.equal(
+  isLeadClosedForPendingSignals({
+    status_lead: 'info_recibida',
+    linked_appointment: null,
+    recent_appointment: { estado: 'cancelada' },
+  }),
+  true,
+  'cancelled appointment display status must suppress stale pending lead signals',
+);
+assert.equal(
+  isLeadClosedForPendingSignals({ status_lead: 'info_recibida', pending_whatsapp_reply_count: 2 }),
+  false,
+  'open leads must preserve pending lead signals',
+);
+for (const callOutcome of ['citado', 'informacion']) {
+  assert.equal(
+    isLeadClosedForPendingSignals({ status_lead: 'info_recibida', call_outcome: callOutcome }),
+    true,
+    `${callOutcome} call outcome must suppress pending lead signals`,
+  );
+}
+assert.equal(
+  isLeadClosedForPendingSignals({ status_lead: 'contactado', call_outcome: 'no_contactado' }),
+  false,
+  'failed contact call outcome must keep pending lead signals open',
+);
 
 for (const protectedAction of [
   'updateLeadStatus',

@@ -179,6 +179,12 @@ const LEAD_ACTIVE_APPOINTMENT_STATES = new Set([
   'cambio_solicitado',
   'reprogramada',
 ]);
+const LEAD_STATUSES_CLOSED_FOR_PENDING_SIGNALS = new Set([
+  'citado',
+  'acudio_cita',
+  'convertido',
+  'descartado',
+]);
 
 const SIGNATURE_HEADER = 'x-cc-signature';
 const SIGNATURE_HEADER_SHA = 'x-cc-signature-sha256';
@@ -2197,6 +2203,14 @@ const enrichLeadsWithConversationState = async (leadRows = []) => {
   return leads.map((lead) => {
     const conversation = conversationByLead.get(parseInteger(lead?.id));
     const conversationId = parseInteger(conversation?.id) || parseInteger(lead?.conversation_id);
+    if (isLeadClosedForPendingSignals(lead)) {
+      return {
+        ...lead,
+        conversation_id: conversationId,
+        pending_whatsapp_reply_count: 0,
+        pending_automation_attention: false,
+      };
+    }
     const pendingState = conversationId !== null ? pendingStates.get(conversationId) : null;
     return {
       ...lead,
@@ -2205,6 +2219,16 @@ const enrichLeadsWithConversationState = async (leadRows = []) => {
       pending_automation_attention: pendingState?.requiresAutomationAttention === true,
     };
   });
+};
+
+const isLeadClosedForPendingSignals = (lead) => {
+  const status = String(cleanString(lead?.status_lead) || '').toLowerCase();
+  if (LEAD_STATUSES_CLOSED_FOR_PENDING_SIGNALS.has(status)) return true;
+  const callOutcome = String(cleanString(lead?.call_outcome) || '').toLowerCase();
+  if (['citado', 'informacion'].includes(callOutcome)) return true;
+  if (parseInteger(lead?.linked_appointment?.id) !== null) return true;
+  const recentAppointmentStatus = String(cleanString(lead?.recent_appointment?.estado) || '').toLowerCase();
+  return !lead?.linked_appointment?.id && recentAppointmentStatus === 'cancelada';
 };
 
 const buildLinkedAppointmentSummary = (appointmentRow) => {
@@ -7518,6 +7542,7 @@ exports.__leadPrivacyContract = Object.freeze({
   buildLeadSearchConditions,
   ensureLeadScopeAccess,
   hasFullGroupMarketingAccess,
+  isLeadClosedForPendingSignals,
   redactLeadForPrivacy,
   resolveLeadScopeFilter,
 });
