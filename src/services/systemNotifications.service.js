@@ -178,6 +178,18 @@ function cleanString(value) {
   return normalized || null;
 }
 
+function resolveDispatchRuntimeNamespace(explicitNamespace = null) {
+  const explicit = cleanString(explicitNamespace)
+    || cleanString(process.env.SYSTEM_NOTIFICATIONS_JOB_RUNTIME_NAMESPACE);
+  if (explicit) return explicit;
+
+  const runtimeRole = cleanString(process.env.RUNTIME_ROLE)?.toLowerCase();
+  if (runtimeRole === 'gateway') {
+    return cleanString(process.env.AUTOMATIONS_V2_FALLBACK_RUNTIME_NAMESPACE) || 'staging';
+  }
+  return jobRequestsService.getCurrentRuntimeNamespace();
+}
+
 function parseBoolean(value, fallback = false) {
   if (value === undefined || value === null || value === '') return fallback;
   const normalized = String(value).trim().toLowerCase();
@@ -844,7 +856,15 @@ async function createSkippedDelivery({ setting, eventKey, severity, channel, con
   });
 }
 
-async function createQueuedDelivery({ setting, eventKey, severity, channel, content, metadata }) {
+async function createQueuedDelivery({
+  setting,
+  eventKey,
+  severity,
+  channel,
+  content,
+  metadata,
+  runtimeNamespace,
+}) {
   return db.sequelize.transaction(async (transaction) => {
     const recipient = channel === 'email' ? setting.admin_email : (channel === 'whatsapp' ? setting.admin_phone : 'panel');
     const delivery = await db.SystemNotificationDelivery.create({
@@ -864,7 +884,10 @@ async function createQueuedDelivery({ setting, eventKey, severity, channel, cont
     }, { transaction });
     const job = await jobRequestsService.enqueueJobRequest({
       type: 'system_notification_dispatch',
-      payload: { system_notification_delivery_id: delivery.id },
+      payload: {
+        system_notification_delivery_id: delivery.id,
+        __runtime_namespace: runtimeNamespace,
+      },
       priority: severity === 'critical' ? 'critical' : 'normal',
       origin: 'system_notifications',
       maxAttempts: channel === 'panel' ? 1 : 3,
@@ -910,6 +933,7 @@ async function queueNotification({
   force = false,
   channelsOverride = null,
   metadata = {},
+  runtimeNamespace = null,
 } = {}) {
   const definition = eventDefinition(eventKey);
   if (!definition) {
@@ -922,6 +946,7 @@ async function queueNotification({
   const channels = enabledChannelsForEvent(setting, eventKey, channelsOverride);
   const created = [];
   const skipped = [];
+  const dispatchRuntimeNamespace = resolveDispatchRuntimeNamespace(runtimeNamespace);
   const enrichedMetadata = {
     ...(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}),
     source: metadata?.source || 'system_monitoring',
@@ -991,6 +1016,7 @@ async function queueNotification({
       channel,
       content,
       metadata: enrichedMetadata,
+      runtimeNamespace: dispatchRuntimeNamespace,
     }));
   }
 
@@ -1417,6 +1443,7 @@ module.exports = {
     maskPhone,
     normalizeEventRules,
     publicTemplateStatus,
+    resolveDispatchRuntimeNamespace,
     safeText,
     senderComplianceState,
     shouldRefreshRemoteTemplate,

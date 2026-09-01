@@ -178,6 +178,29 @@ test('nuevo registro usa contenido mínimo y no expone email completo', () => {
   assert.doesNotMatch(content.message, /persona/i);
 });
 
+test('las alertas creadas por gateway se dirigen a un namespace con worker', () => {
+  const previousRole = process.env.RUNTIME_ROLE;
+  const previousTarget = process.env.SYSTEM_NOTIFICATIONS_JOB_RUNTIME_NAMESPACE;
+  const previousFallback = process.env.AUTOMATIONS_V2_FALLBACK_RUNTIME_NAMESPACE;
+  try {
+    process.env.RUNTIME_ROLE = 'gateway';
+    delete process.env.SYSTEM_NOTIFICATIONS_JOB_RUNTIME_NAMESPACE;
+    process.env.AUTOMATIONS_V2_FALLBACK_RUNTIME_NAMESPACE = 'staging';
+    assert.equal(systemNotifications._test.resolveDispatchRuntimeNamespace(), 'staging');
+
+    process.env.SYSTEM_NOTIFICATIONS_JOB_RUNTIME_NAMESPACE = 'notifications-worker';
+    assert.equal(systemNotifications._test.resolveDispatchRuntimeNamespace(), 'notifications-worker');
+    assert.equal(systemNotifications._test.resolveDispatchRuntimeNamespace('dev'), 'dev');
+  } finally {
+    if (previousRole === undefined) delete process.env.RUNTIME_ROLE;
+    else process.env.RUNTIME_ROLE = previousRole;
+    if (previousTarget === undefined) delete process.env.SYSTEM_NOTIFICATIONS_JOB_RUNTIME_NAMESPACE;
+    else process.env.SYSTEM_NOTIFICATIONS_JOB_RUNTIME_NAMESPACE = previousTarget;
+    if (previousFallback === undefined) delete process.env.AUTOMATIONS_V2_FALLBACK_RUNTIME_NAMESPACE;
+    else process.env.AUTOMATIONS_V2_FALLBACK_RUNTIME_NAMESPACE = previousFallback;
+  }
+});
+
 test('queueNotification crea delivery y JobRequest con payload mínimo', async () => {
   let capturedDelivery = null;
   let capturedJob = null;
@@ -217,7 +240,10 @@ test('queueNotification crea delivery y JobRequest con payload mínimo', async (
     assert.equal(capturedDelivery.recipient_label, '***1111');
     assert.equal(capturedDelivery.recipient_hash.length, 64);
     assert.equal(capturedJob.type, 'system_notification_dispatch');
-    assert.deepEqual(capturedJob.payload, { system_notification_delivery_id: 901 });
+    assert.deepEqual(capturedJob.payload, {
+      system_notification_delivery_id: 901,
+      __runtime_namespace: jobRequestsService.getCurrentRuntimeNamespace(),
+    });
     assert.doesNotMatch(JSON.stringify(capturedJob), /persona@example\.test|\+34111111111/i);
   } finally {
     restores.reverse().forEach((restore) => restore());
