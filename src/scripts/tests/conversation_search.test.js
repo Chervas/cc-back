@@ -45,6 +45,16 @@ function collectStringValues(value, out = []) {
 async function run() {
   assert.equal(__testing.normalizeSearchQuery('  Jose   Miguel  MOD  '), 'Jose Miguel MOD');
   assert.equal(__testing.normalizeTextSearchValue('Iñigo García'), 'inigo garcia');
+  assert.deepEqual(
+    __testing.resolveMessagePageRequest({ limit: '500', before_message_id: '34' }),
+    { limit: 50, beforeMessageId: 34 },
+    'QuickChat message pages must clamp large limits and keep the backward cursor'
+  );
+  assert.deepEqual(
+    __testing.resolveMessagePageRequest({ limit: '0', before_message_id: 'bad' }),
+    { limit: 20, beforeMessageId: null },
+    'QuickChat message pages default to the last 20 messages without a valid cursor'
+  );
   assert.ok(
     __testing.buildPhoneSearchCandidates('654695552').includes('+34654695552'),
     'Spanish local mobile searches must include the E.164 candidate used by WhatsApp conversations'

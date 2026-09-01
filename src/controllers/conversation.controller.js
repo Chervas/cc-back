@@ -57,6 +57,8 @@ const LEAD_ACTIVE_APPOINTMENT_STATES = new Set([
   'cambio_solicitado',
   'reprogramada',
 ]);
+const DEFAULT_MESSAGE_PAGE_LIMIT = 20;
+const MAX_MESSAGE_PAGE_LIMIT = 50;
 
 function messageChronologicalOrder(direction = 'ASC') {
   const normalizedDirection = String(direction).toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
@@ -328,6 +330,51 @@ function filterQuickChatVisibleMessages(messages) {
   return Array.isArray(messages)
     ? messages.filter((message) => !isQuickChatHiddenMessage(message))
     : [];
+}
+
+function parsePositiveInteger(value, fallback = null) {
+  const parsed = Number.parseInt(String(value ?? '').trim(), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function resolveMessagePageRequest(query = {}) {
+  const requestedLimit = parsePositiveInteger(query.limit, DEFAULT_MESSAGE_PAGE_LIMIT);
+  const limit = Math.min(Math.max(requestedLimit || DEFAULT_MESSAGE_PAGE_LIMIT, 1), MAX_MESSAGE_PAGE_LIMIT);
+  return {
+    limit,
+    beforeMessageId: parsePositiveInteger(query.before_message_id || query.beforeMessageId, null),
+  };
+}
+
+async function getConversationMessagePage(conversation, query = {}) {
+  const { limit, beforeMessageId } = resolveMessagePageRequest(query);
+  const where = { conversation_id: conversation.id };
+  if (beforeMessageId) {
+    where.id = { [Op.lt]: beforeMessageId };
+  }
+
+  const rawMessages = await Message.findAll({
+    where,
+    order: [['id', 'DESC']],
+    limit: limit + 1,
+    raw: true,
+  });
+  const hasMoreBefore = rawMessages.length > limit;
+  const pageRowsDesc = hasMoreBefore ? rawMessages.slice(0, limit) : rawMessages;
+  const oldestRawMessage = pageRowsDesc[pageRowsDesc.length - 1] || null;
+  const visibleMessages = await hydrateTemplateMessagePreviews(
+    filterQuickChatVisibleMessages(pageRowsDesc).reverse(),
+    { clinicId: conversation.clinic_id }
+  );
+
+  return {
+    messages: visibleMessages,
+    messagesPage: {
+      limit,
+      has_more_before: hasMoreBefore,
+      next_before_message_id: hasMoreBefore && oldestRawMessage?.id ? Number(oldestRawMessage.id) : null,
+    },
+  };
 }
 
 function parseJsonValue(value, fallback = {}) {
@@ -1587,20 +1634,11 @@ exports.getMessages = async (req, res) => {
       return sendQuickChatCategoryForbidden(res, accessError);
     }
 
-    const messages = await Message.findAll({
-      where: { conversation_id: conversation.id },
-      order: messageChronologicalOrder('ASC'),
-      raw: true,
-    });
-
     const unreadConversationPayload = await enrichConversationUnreadForUser(userId, conversation);
     const [restrictedConversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
     const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload]);
-    const visibleMessages = await hydrateTemplateMessagePreviews(
-      filterQuickChatVisibleMessages(messages),
-      { clinicId: conversation.clinic_id }
-    );
-    return res.json({ conversation: conversationPayload, messages: visibleMessages });
+    const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
+    return res.json({ conversation: conversationPayload, messages, messages_page: messagesPage });
   } catch (err) {
     console.error('Error getMessages', err);
     return res.status(500).json({ error: 'Error obteniendo mensajes' });
@@ -1711,20 +1749,11 @@ exports.getConversationByPatient = async (req, res) => {
       return sendQuickChatCategoryForbidden(res, accessError);
     }
 
-    const messages = await Message.findAll({
-      where: { conversation_id: conversation.id },
-      order: messageChronologicalOrder('ASC'),
-      raw: true,
-    });
-
     const unreadConversationPayload = await enrichConversationUnreadForUser(userId, conversation);
     const [restrictedConversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
     const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload]);
-    const visibleMessages = await hydrateTemplateMessagePreviews(
-      filterQuickChatVisibleMessages(messages),
-      { clinicId: conversation.clinic_id }
-    );
-    return res.json({ conversation: conversationPayload, messages: visibleMessages });
+    const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
+    return res.json({ conversation: conversationPayload, messages, messages_page: messagesPage });
   } catch (err) {
     console.error('Error getConversationByPatient', err);
     return res.status(500).json({ error: 'Error obteniendo conversación' });
@@ -1780,20 +1809,11 @@ exports.getConversationByLead = async (req, res) => {
       return sendQuickChatCategoryForbidden(res, accessError);
     }
 
-    const messages = await Message.findAll({
-      where: { conversation_id: conversation.id },
-      order: messageChronologicalOrder('ASC'),
-      raw: true,
-    });
-
     const unreadConversationPayload = await enrichConversationUnreadForUser(userId, conversation);
     const [restrictedConversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
     const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload]);
-    const visibleMessages = await hydrateTemplateMessagePreviews(
-      filterQuickChatVisibleMessages(messages),
-      { clinicId: conversation.clinic_id }
-    );
-    return res.json({ conversation: conversationPayload, messages: visibleMessages });
+    const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
+    return res.json({ conversation: conversationPayload, messages, messages_page: messagesPage });
   } catch (err) {
     console.error('Error getConversationByLead', err);
     return res.status(500).json({ error: 'Error obteniendo conversación' });
@@ -2594,6 +2614,7 @@ exports.__testing = {
   buildConversationSearchClause,
   buildPhoneSearchCandidates,
   getQuickChatConversationCategory,
+  resolveMessagePageRequest,
   normalizeSearchQuery,
   normalizeTextSearchValue,
 };
