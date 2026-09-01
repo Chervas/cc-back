@@ -9,6 +9,7 @@ const { enqueueSyncPhonesJob, syncPhonesForWaba } = require('../services/whatsap
 const whatsappCoexistenceService = require('../services/whatsappCoexistence.service');
 const whatsappAccountComplianceService = require('../services/whatsappAccountCompliance.service');
 const whatsappAccountHealthService = require('../services/whatsappAccountHealth.service');
+const { buildWhatsappProfileAlignment } = require('../lib/whatsapp-profile-alignment');
 const { filterEffectiveWhatsappPhoneAssets } = require('../lib/effective-whatsapp-phone');
 const whatsappDeliveryGovernanceService = require('../services/whatsappDeliveryGovernance.service');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
@@ -2222,7 +2223,20 @@ exports.getComplianceAdminOverview = async (req, res) => {
       ClinicMetaAsset.findAll({
         where: { isActive: true, assetType: 'whatsapp_phone_number' },
         include: [
-          { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'], required: false },
+          {
+            model: Clinica,
+            as: 'clinica',
+            attributes: [
+              'id_clinica',
+              'nombre_clinica',
+              'direccion',
+              'codigo_postal',
+              'ciudad',
+              'provincia',
+              'pais',
+            ],
+            required: false,
+          },
           { model: GrupoClinica, as: 'grupoClinica', attributes: ['id_grupo', 'nombre_grupo'], required: false },
         ],
         order: [['updatedAt', 'DESC']],
@@ -2238,6 +2252,11 @@ exports.getComplianceAdminOverview = async (req, res) => {
       const businessHealth = additionalData.whatsappBusinessHealth || {};
       const payment = whatsappPaymentStatusService.derivePaymentSnapshot(additionalData);
       const health = whatsappAccountHealthService.summarizeAssetHealth(phone);
+      const profileAlignment = buildWhatsappProfileAlignment({
+        clinic: phone.clinica,
+        verifiedName: phone.waVerifiedName,
+        additionalData,
+      });
       return {
         id: phone.id,
         clinic_id: phone.clinicaId || null,
@@ -2270,6 +2289,7 @@ exports.getComplianceAdminOverview = async (req, res) => {
           || additionalData.new_display_name
           || additionalData.requestedDisplayName
           || null,
+        profile_alignment: profileAlignment,
         last_diagnostic: additionalData.whatsappDiagnostics || null,
         payment_status: payment.status || null,
         payment_missing: payment.missing === true,
@@ -2284,6 +2304,9 @@ exports.getComplianceAdminOverview = async (req, res) => {
     const operationalAccounts = accounts.filter((account) => (
       account.health?.can_send === true && !account.health?.is_stale
     )).length;
+    const identityRiskAccounts = accounts.filter((account) => (
+      ['warning', 'review'].includes(account.profile_alignment?.risk_level)
+    )).length;
     return res.json({
       accounts,
       incidents,
@@ -2296,10 +2319,12 @@ exports.getComplianceAdminOverview = async (req, res) => {
           || account.health?.state === 'stale'
           || account.health?.state === 'degraded'
           || (account.compliance && account.compliance.status !== 'active')
+          || ['warning', 'review'].includes(account.profile_alignment?.risk_level)
         )).length,
         blocked_accounts: blockedAccounts,
         stale_accounts: staleAccounts,
         degraded_accounts: degradedAccounts,
+        identity_risk_accounts: identityRiskAccounts,
         suspended_accounts: accounts.filter((account) => (
           ['suspended', 'deleted'].includes(account.compliance?.status)
         )).length,
