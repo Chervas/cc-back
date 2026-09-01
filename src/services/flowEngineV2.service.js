@@ -62,6 +62,7 @@ const marketingOptOutService = require('./marketingOptOut.service');
 const emailDeliveryService = require('./emailDelivery.service');
 const reviewResponseClassification = require('./reviewResponseClassification.service');
 const aiOrchestrator = require('./aiOrchestrator.service');
+const conversationAutomationState = require('./conversationAutomationState.service');
 const appointmentNotificationCleanup = require('./appointmentNotificationCleanup.service');
 const { recordAppointmentStatusChange } = require('./appointmentActivity.service');
 const businessProfileLocal = require('./businessProfileLocal.service');
@@ -69,6 +70,11 @@ const { resolveLeadAutoReplyWait } = require('./clinicOpeningHours.service');
 const { evaluatePendingLeadContact } = require('./leadContactState.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { buildConversationContext } = require('../lib/automation-conversation-context');
+const {
+  AUTO_APPLY_CONFIDENCE_THRESHOLD,
+  LEGACY_INTENT_PRESET_KEYS,
+} = require('../lib/automation-intent-contract');
+const { LEGACY_EXECUTION_ALLOWLIST_KEY } = require('../lib/automation-intent-migration');
 const {
   emitAutomationResponseProcessing,
   findHumanReplyAfterMessage,
@@ -89,6 +95,7 @@ const FIELD_CHECK_VALUE_TYPES = new Set(['string', 'number', 'boolean']);
 const FIELD_CHECK_MODE_VALUES = new Set(['simple', 'appointment_booking_timing', 'lead_contact_state']);
 const FIELD_CHECK_SWITCH_TYPE_VALUES = new Set(['appointment_booking']);
 const FIELD_CHECK_APPOINTMENT_WINDOW_VALUES = new Set(['same_day', 'day_before', 'more_than_day_before']);
+const LEGACY_INTENT_PRESETS = new Set(LEGACY_INTENT_PRESET_KEYS);
 const PROTECTED_APPOINTMENT_STATUSES = new Set(['cancelada', 'completada', 'no_asistio']);
 const APPOINTMENT_NOTIFICATION_RESOLVED_STATUSES = new Set([
   'info_confirmada',
@@ -1292,7 +1299,7 @@ async function enrichConversationContext(context, targets = {}) {
     return baseContext;
   }
 
-  return mergeContextPatch(baseContext, {
+  let enriched = mergeContextPatch(baseContext, {
     conversation: {
       ...(baseContext?.conversation && typeof baseContext.conversation === 'object' ? baseContext.conversation : {}),
       ...conversationContext.conversation,
@@ -1301,6 +1308,68 @@ async function enrichConversationContext(context, targets = {}) {
     conversation_this_year: conversationContext.conversation_this_year || null,
     conversation_all_time: conversationContext.conversation_all_time || null,
   });
+
+  if (cleanString(baseContext?.trigger?.type) !== 'message_received') {
+    return enriched;
+  }
+  const conversationId = toIntOrNull(
+    targets.conversation_id
+    || baseContext?.conversation?.id
+    || baseContext?.trigger?.data?.conversation_id
+  );
+  const messageIds = Array.from(new Set(
+    (Array.isArray(baseContext?.trigger?.data?.inbound_message_ids)
+      ? baseContext.trigger.data.inbound_message_ids
+      : [])
+      .map(toIntOrNull)
+      .filter(Boolean)
+  ));
+  if (!conversationId || !messageIds.length) {
+    throw new Error('message_received_batch_context_missing');
+  }
+  const messages = await Message.findAll({
+    where: {
+      id: { [Op.in]: messageIds },
+      conversation_id: conversationId,
+      direction: 'inbound',
+    },
+    attributes: ['id', 'content', 'message_type', 'metadata', 'sent_at', 'createdAt'],
+    order: [['sent_at', 'ASC'], ['createdAt', 'ASC'], ['id', 'ASC']],
+    raw: true,
+  });
+  if (messages.length !== messageIds.length) {
+    throw new Error('message_received_batch_scope_mismatch');
+  }
+  const responseText = messages
+    .filter((message) => cleanString(message.message_type)?.toLowerCase() !== 'reaction')
+    .map((message) => cleanString(message.content))
+    .filter(Boolean)
+    .join('\n');
+  const latest = messages[messages.length - 1];
+  const latestMetadata = isObject(latest?.metadata) ? latest.metadata : {};
+  const reaction = isObject(latestMetadata.reaction) ? latestMetadata.reaction : {};
+  const media = isObject(latestMetadata.media) ? latestMetadata.media : {};
+  const respondedAt = latest?.sent_at || latest?.createdAt || null;
+  enriched = mergeContextPatch(enriched, {
+    last_response: responseText || null,
+    last_response_context: {
+      response_text: responseText || null,
+      response_lines: responseText ? responseText.split(/\r?\n/).filter(Boolean) : [],
+      response_message_id: toIntOrNull(latest?.id),
+      response_message_type: cleanString(latest?.message_type),
+      response_message_preview: cleanString(latest?.content),
+      response_media_kind: cleanString(media.kind),
+      response_media_id: cleanString(media.id),
+      response_media_mime_type: cleanString(media.mime_type),
+      reaction_emoji: cleanString(reaction.emoji),
+      reaction_target_message_id: cleanString(reaction.target_message_id || reaction.message_id),
+      reaction_target_message_type: cleanString(reaction.target_message_type),
+      reaction_target_message_preview: cleanString(reaction.target_message_preview),
+      responded_at: respondedAt,
+      inbound_message_ids: messageIds,
+    },
+  });
+  return enriched;
 }
 
 function findFirstConversationIdInOutputs(context = {}) {
@@ -1562,7 +1631,274 @@ function buildSafeAppointmentAiFailureOutput(presetKey, error) {
       _ai_error_code: errorCode,
     };
   }
+  if (presetKey === 'classify_intent') {
+    return {
+      intencion_principal: 'otra',
+      intencion_secundaria: '',
+      confianza: 0,
+      accion_inequivoca: false,
+      posible_urgencia: false,
+      necesita_respuesta: true,
+      motivo: 'No se pudo interpretar el mensaje automáticamente. Requiere revisión manual.',
+      _ai_provider: 'unavailable',
+      _ai_model: null,
+      _ai_error_code: errorCode,
+    };
+  }
   return null;
+}
+
+function isLegacyIntentExecutionAllowed(execution, context = {}) {
+  const compatibility = isObject(context?.__legacy_automation_compatibility)
+    ? context.__legacy_automation_compatibility
+    : {};
+  const marker = isObject(compatibility[LEGACY_EXECUTION_ALLOWLIST_KEY])
+    ? compatibility[LEGACY_EXECUTION_ALLOWLIST_KEY]
+    : null;
+  if (!marker || marker.allowed !== true) return false;
+  const markerTemplateId = toIntOrNull(marker.template_version_id);
+  const executionTemplateId = toIntOrNull(execution?.template_version_id);
+  return !!markerTemplateId && markerTemplateId === executionTemplateId;
+}
+
+const CANONICAL_MESSAGE_INTENTS = new Set([
+  'confirmar_cita',
+  'cancelar_cita',
+  'solicitar_cambio_cita',
+  'pregunta',
+  'agradecimiento',
+  'urgencia_posible',
+  'otra',
+]);
+
+function normalizeCanonicalIntent(value) {
+  const key = normalizeKey(value);
+  const aliases = {
+    confirmar: 'confirmar_cita',
+    confirmado: 'confirmar_cita',
+    confirmacion: 'confirmar_cita',
+    cancelar: 'cancelar_cita',
+    cancelacion: 'cancelar_cita',
+    reagendar: 'solicitar_cambio_cita',
+    reprogramar: 'solicitar_cambio_cita',
+    cambiar_cita: 'solicitar_cambio_cita',
+    cambio_cita: 'solicitar_cambio_cita',
+    duda: 'pregunta',
+    dudas: 'pregunta',
+    gracias: 'agradecimiento',
+    urgencia: 'urgencia_posible',
+  };
+  const normalized = aliases[key] || key;
+  return CANONICAL_MESSAGE_INTENTS.has(normalized) ? normalized : 'otra';
+}
+
+function coerceAiBoolean(value) {
+  if (value === true || value === 1) return true;
+  return ['true', '1', 'yes', 'si', 'sí'].includes(String(value ?? '').trim().toLowerCase());
+}
+
+function normalizeClassifyIntentOutput(value = {}, context = {}) {
+  const output = value && typeof value === 'object' ? value : {};
+  const primary = normalizeCanonicalIntent(output.intencion_principal);
+  const rawSecondary = cleanString(output.intencion_secundaria);
+  const secondary = rawSecondary ? normalizeCanonicalIntent(rawSecondary) : '';
+  const confidence = Math.max(0, Math.min(1, Number(output.confianza) || 0));
+  const candidateCount = Number(context?.trigger?.data?.appointment_candidate_count ?? 0);
+  const appointmentIntents = new Set(['confirmar_cita', 'cancelar_cita', 'solicitar_cambio_cita']);
+  const appointmentIntent = appointmentIntents.has(primary);
+  const hasUniqueAppointment = candidateCount === 1 || !!toIntOrNull(
+    context?.appointment?.id
+    || context?.appointment?.id_cita
+    || context?.trigger?.data?.appointment_id
+  );
+  const requestedUnambiguous = coerceAiBoolean(output.accion_inequivoca);
+  const possibleUrgency = coerceAiBoolean(output.posible_urgencia) || primary === 'urgencia_posible';
+  const contradictoryAppointmentIntent = appointmentIntent
+    && appointmentIntents.has(secondary)
+    && secondary !== primary;
+  const actionUnambiguous = requestedUnambiguous
+    && confidence >= AUTO_APPLY_CONFIDENCE_THRESHOLD
+    && (!appointmentIntent || hasUniqueAppointment)
+    && !possibleUrgency
+    && !contradictoryAppointmentIntent;
+  const needsResponse = coerceAiBoolean(output.necesita_respuesta)
+    || primary === 'pregunta'
+    || secondary === 'pregunta'
+    || possibleUrgency
+    || contradictoryAppointmentIntent
+    || (appointmentIntent && !hasUniqueAppointment);
+  let reason = cleanString(output.motivo) || 'Clasificación de intención sin motivo adicional.';
+  if (appointmentIntent && !hasUniqueAppointment) {
+    reason = candidateCount > 1
+      ? `${reason} Hay varias citas próximas y recepción debe elegir la correcta.`
+      : `${reason} No existe una única cita próxima sobre la que aplicar la acción.`;
+  }
+  if (contradictoryAppointmentIntent) {
+    reason = `${reason} La respuesta contiene acciones incompatibles y requiere revisión de recepción.`;
+  }
+  return {
+    ...output,
+    intencion_principal: primary,
+    intencion_secundaria: secondary === 'otra' ? '' : secondary,
+    confianza: confidence,
+    accion_inequivoca: actionUnambiguous,
+    posible_urgencia: possibleUrgency,
+    necesita_respuesta: needsResponse,
+    motivo: reason,
+  };
+}
+
+function recentPatientTextFromConversation(context = {}) {
+  const explicit = cleanString(
+    context?.last_response_context?.response_text
+    || context?.last_response
+  );
+  if (explicit) return explicit;
+  const lines = String(context?.conversation_today || '').split(/\r?\n/);
+  const lastClinicIndex = lines.reduce(
+    (found, line, index) => line.includes('] Clínica:') ? index : found,
+    -1,
+  );
+  return lines
+    .slice(Math.max(0, lastClinicIndex + 1))
+    .filter((line) => line.includes('] Paciente:'))
+    .map((line) => line.split('] Paciente:').slice(1).join('] Paciente:').trim())
+    .filter(Boolean)
+    .join('\n');
+}
+
+function buildDeterministicClassifyIntentOutput(context = {}) {
+  const rawText = recentPatientTextFromConversation(context);
+  const text = normalizeIntentText(rawText);
+  const responseContext = isObject(context?.last_response_context) ? context.last_response_context : {};
+  const positiveReaction = isPositiveConfirmationEmojiText(responseContext.reaction_emoji);
+  if (!text && !positiveReaction) return null;
+  const conversationLines = String(context?.conversation_today || '').split(/\r?\n/);
+  const lastClinicLine = [...conversationLines].reverse().find((line) => line.includes('] Clínica:')) || '';
+  const asksForConfirmation = /confirm|asist|acudir/.test(normalizeIntentText([
+    lastClinicLine,
+    responseContext.reaction_target_message_preview,
+    context?.last_prompt,
+  ].filter(Boolean).join(' ')));
+  const asksQuestion = /[?¿]/.test(rawText)
+    || /\b(donde|direccion|direccio|ubicacion|cuando|como|cual|cuanto|a que hora|que hora|que dia)\b/.test(text)
+    || /\b(?:me|nos) (?:puedes|podeis|podrias|podriais)\b/.test(text);
+  const possibleUrgency = /\b(urgente|urgencia|dolor intenso|sangrado|hemorragia|no puedo respirar|dificultad para respirar)\b/.test(text);
+  const negatedCancellation = /\b(?:no (?:quiero|puedo|necesito|hace falta|voy|vamos) (?:a )?(?:que )?(?:me )?(?:cancel\w*|anul\w*)|no (?:cancel\w*|anul\w*)|sin (?:cancel\w*|anul\w*))\b/.test(text);
+  const cancellationRequest = /\b(?:(?:quiero|necesito|deseo|quisiera|querria|solicito|pido) (?:que )?(?:me )?(?:cancel\w*|anul\w*)|(?:podeis|puedes|podrias|podriais) (?:cancel\w*|anul\w*)|(?:cancelad|anulad|cancelo|anulo) (?:la |mi )?cita)\b/.test(text);
+  const bareCancellation = !asksQuestion && /\b(?:cancelar|anular) (?:la |mi )?cita\b/.test(text);
+  const cannotAttend = /\b(?:no (?:voy|podre|puedo) (?:a )?(?:ir|asistir|acudir)|no (?:asistire|acudire|ire))\b/.test(text);
+  const explicitCancellation = !negatedCancellation && (cancellationRequest || bareCancellation || cannotAttend);
+  const negatedReschedule = /\b(?:no (?:quiero|puedo|necesito|hace falta|voy) (?:reagend\w*|reprogram\w*|cambiar(?:la)? (?:la )?cita)|sin (?:reagend\w*|reprogram\w*|cambiar (?:la )?cita))\b/.test(text);
+  const directReschedule = /\b(?:(?:quiero|necesito|deseo|quisiera|querria|solicito|pido|podemos|podeis|puedes|podria|podriais) (?:que )?(?:me )?(?:reagend\w*|reprogram\w*|cambiar(?:la)?(?: (?:la )?cita)?)|(?:reagendad|reprogramad|cambiad) (?:la |mi )?cita)\b/.test(text);
+  const scheduleConflict = /\b(?:otro dia|otra hora|me va mal|no me viene bien)\b/.test(text);
+  const reschedule = !negatedReschedule && (directReschedule || scheduleConflict);
+  const negatedConfirmation = /\b(?:no (?:puedo|quiero|voy a|he podido )?(?:confirmar|confirmo|confirmado|confirmada)|no (?:asistire|acudire|ire|voy a ir)|todavia no (?:confirmo|puedo confirmar))\b/.test(text);
+  const explicitConfirmation = !negatedConfirmation
+    && /\b(confirmado|confirmo|confirmada|si asistire|voy a ir|alli estare|ahi estare)\b/.test(text);
+  const contextualShortConfirmation = asksForConfirmation
+    && /^(si|ok|okay|vale|gracias|muchas gracias|entendido|correcto|de acuerdo|perfecto)$/.test(text);
+
+  let primary = 'otra';
+  let actionUnambiguous = false;
+  let confidence = 0.75;
+  if (possibleUrgency) {
+    primary = 'urgencia_posible';
+    confidence = 0.95;
+  } else if (reschedule) {
+    primary = 'solicitar_cambio_cita';
+    actionUnambiguous = true;
+    confidence = 0.95;
+  } else if (explicitCancellation) {
+    primary = 'cancelar_cita';
+    actionUnambiguous = true;
+    confidence = 0.96;
+  } else if (explicitConfirmation || contextualShortConfirmation || (positiveReaction && asksForConfirmation)) {
+    primary = 'confirmar_cita';
+    actionUnambiguous = true;
+    confidence = positiveReaction ? 0.99 : (contextualShortConfirmation ? 0.9 : 0.97);
+  } else if (asksQuestion) {
+    primary = 'pregunta';
+    confidence = 0.92;
+  } else if (/\b(gracias|muchas gracias|agradezco)\b/.test(text)) {
+    primary = 'agradecimiento';
+    confidence = 0.88;
+  } else {
+    return null;
+  }
+
+  const secondary = [
+    'confirmar_cita',
+    'cancelar_cita',
+    'solicitar_cambio_cita',
+  ].includes(primary) && asksQuestion ? 'pregunta' : '';
+  const intentReason = {
+    confirmar_cita: 'una confirmación inequívoca de asistencia',
+    cancelar_cita: 'una cancelación inequívoca de la cita',
+    solicitar_cambio_cita: 'una solicitud de cambio de fecha u hora',
+    pregunta: 'una pregunta que necesita respuesta',
+    agradecimiento: 'un agradecimiento sin una nueva acción sobre la cita',
+    urgencia_posible: 'una posible urgencia que requiere revisión prioritaria',
+  }[primary] || 'una intención que requiere revisión';
+  return normalizeClassifyIntentOutput({
+    intencion_principal: primary,
+    intencion_secundaria: secondary,
+    confianza: confidence,
+    accion_inequivoca: actionUnambiguous,
+    posible_urgencia: possibleUrgency,
+    necesita_respuesta: asksQuestion || possibleUrgency || primary === 'solicitar_cambio_cita',
+    motivo: secondary
+      ? `El paciente expresa ${intentReason} y formula además una pregunta que debe conservarse.`
+      : (positiveReaction
+          ? 'El paciente reaccionó de forma positiva a la petición de confirmación.'
+          : `La respuesta contiene ${intentReason}.`),
+    _ai_provider: 'deterministic_rule',
+    _ai_model: 'classify_intent_clear_signal',
+    _ai_analysis_mode: 'rule',
+  }, context);
+}
+
+async function persistClassifyIntentState(execution, targets, output) {
+  const conversationId = toIntOrNull(
+    targets?.conversation_id
+    || (execution?.trigger_entity_type === 'conversation' ? execution?.trigger_entity_id : null)
+  );
+  if (!conversationId || !execution?.clinic_id || !db.ConversationAutomationState) return;
+  const existing = await db.ConversationAutomationState.findOne({
+    where: { conversation_id: conversationId },
+    attributes: ['id', 'execution_id'],
+    raw: true,
+  });
+  if (!existing || Number(existing.execution_id) !== Number(execution.id)) return;
+  const normalized = normalizeClassifyIntentOutput(output, execution?.context || {});
+  const appointmentStatus = cleanString(
+    execution?.context?.appointment?.estado
+    || execution?.context?.appointment?.status
+  );
+  const manualActionRequired = normalized.posible_urgencia
+    || normalized.necesita_respuesta
+    || normalized.intencion_principal === 'otra'
+    || (
+      ['confirmar_cita', 'cancelar_cita', 'solicitar_cambio_cita'].includes(normalized.intencion_principal)
+      && !normalized.accion_inequivoca
+    );
+  await conversationAutomationState.updateOwnedState({
+    clinicId: execution.clinic_id,
+    conversationId,
+    stage: 'applying',
+    status: 'active',
+    executionId: execution.id,
+    appointmentId: targets?.appointment_id || null,
+    appointmentStatus: appointmentStatus || null,
+    intent: normalized.intencion_principal,
+    possibleUrgency: normalized.posible_urgencia,
+    needsResponse: normalized.necesita_respuesta,
+    manualActionRequired,
+    failureCode: null,
+    completedAt: null,
+  }, {
+    expectedExecutionId: execution.id,
+  });
 }
 
 function isTemplateBlockedForSend(statusValue) {
@@ -1844,16 +2180,78 @@ async function handleChangeStatus(node, context, runtime) {
     if (!targets.appointment_id) {
       throw new Error('change_status_target_not_found:appointment');
     }
-    const appointment = await CitaPaciente.findByPk(targets.appointment_id);
-    if (!appointment) {
-      throw new Error(`appointment_not_found:${targets.appointment_id}`);
-    }
     if (!appointmentStatus) {
       throw new Error(`invalid_appointment_status:${rawStatus}`);
     }
+    const contextAppointmentStatus = cleanString(
+      context?.appointment?.estado
+      || context?.appointment?.status
+    );
+    const responseDriven = !!toIntOrNull(context?.last_response_context?.response_message_id);
+    let appointment = null;
+    let previousStatus = null;
+    let skippedReason = null;
+    await db.sequelize.transaction(async (transaction) => {
+      appointment = await CitaPaciente.findByPk(targets.appointment_id, {
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+      if (!appointment) {
+        throw new Error(`appointment_not_found:${targets.appointment_id}`);
+      }
+      previousStatus = cleanString(appointment.estado);
+      if (
+        responseDriven
+        && contextAppointmentStatus
+        && previousStatus !== contextAppointmentStatus
+        && previousStatus !== appointmentStatus
+      ) {
+        skippedReason = 'appointment_changed_during_analysis';
+        return;
+      }
+      if (PROTECTED_APPOINTMENT_STATUSES.has(previousStatus) && previousStatus !== appointmentStatus) {
+        skippedReason = 'appointment_status_protected';
+        return;
+      }
 
-    const previousStatus = cleanString(appointment.estado);
-    if (PROTECTED_APPOINTMENT_STATUSES.has(previousStatus) && previousStatus !== appointmentStatus) {
+      if (previousStatus !== appointmentStatus) {
+        await appointment.update({ estado: appointmentStatus }, { transaction });
+        const templateVersion = runtime?.execution?.templateVersion || null;
+        await recordAppointmentStatusChange({
+          appointment,
+          previousStatus,
+          newStatus: appointmentStatus,
+          source: 'automation_v2',
+          metadata: {
+            flow_execution_id: toIntOrNull(runtime?.execution?.id),
+            flow_template_version_id: toIntOrNull(runtime?.execution?.template_version_id),
+            flow_public_id: cleanString(templateVersion?.public_id),
+            flow_name: cleanString(templateVersion?.name),
+            flow_version: toIntOrNull(templateVersion?.version),
+            node_id: cleanString(node?.id),
+            trigger_type: cleanString(runtime?.execution?.trigger_type),
+          },
+          transaction,
+        });
+      }
+    });
+
+    if (skippedReason) {
+      const conversationId = toIntOrNull(targets.conversation_id);
+      if (conversationId && runtime?.execution?.id) {
+        await conversationAutomationState.updateOwnedState({
+          clinicId: runtime.execution.clinic_id,
+          conversationId,
+          stage: 'applying',
+          status: 'active',
+          executionId: runtime.execution.id,
+          appointmentId: appointment.id_cita,
+          appointmentStatus: previousStatus,
+          manualActionRequired: true,
+        }, {
+          expectedExecutionId: runtime.execution.id,
+        });
+      }
       return {
         kind: 'success',
         output: {
@@ -1864,37 +2262,36 @@ async function handleChangeStatus(node, context, runtime) {
           requested_status: appointmentStatus,
           new_status: previousStatus,
           skipped: true,
-          reason: 'appointment_status_protected',
+          reason: skippedReason,
         },
-        next_node_id: readOutputTarget(node, 'on_success'),
+        next_node_id: readOutputTarget(node, 'on_fail'),
       };
     }
-
-    await appointment.update({ estado: appointmentStatus });
-    try {
-      const templateVersion = runtime?.execution?.templateVersion || null;
-      await recordAppointmentStatusChange({
-        appointment,
-        previousStatus,
-        newStatus: appointmentStatus,
-        source: 'automation_v2',
-        metadata: {
-          flow_execution_id: toIntOrNull(runtime?.execution?.id),
-          flow_template_version_id: toIntOrNull(runtime?.execution?.template_version_id),
-          flow_public_id: cleanString(templateVersion?.public_id),
-          flow_name: cleanString(templateVersion?.name),
-          flow_version: toIntOrNull(templateVersion?.version),
-          node_id: cleanString(node?.id),
-          trigger_type: cleanString(runtime?.execution?.trigger_type),
-        },
-      });
-    } catch (activityError) {
-      console.warn('[AutomationsV2] No se pudo registrar la transición de cita:', activityError.message || activityError);
+    if (context?.appointment && typeof context.appointment === 'object') {
+      context.appointment.estado = appointmentStatus;
+      context.appointment.status = appointmentStatus;
     }
     if (APPOINTMENT_NOTIFICATION_RESOLVED_STATUSES.has(appointmentStatus)) {
       await appointmentNotificationCleanup.markAutomationNotificationsReadForAppointment(appointment.id_cita, {
         reason: `appointment_status_${appointmentStatus}`,
       });
+    }
+    if (appointmentStatus === 'cambio_solicitado' || appointmentStatus === 'cancelada') {
+      const appointmentRuntime = require('./appointmentAutomationV2Runtime.service');
+      await appointmentRuntime.cancelActiveExecutionsForCita(appointment, {
+        exclude_execution_ids: [runtime?.execution?.id],
+        reason: appointmentStatus === 'cambio_solicitado'
+          ? 'appointment_change_requested_suspended_automation'
+          : 'appointment_cancelled_suspended_automation',
+      });
+      await appointmentRuntime.syncScheduledTriggersForCita(
+        appointment.toJSON ? appointment.toJSON() : appointment,
+        {
+          reason: appointmentStatus === 'cambio_solicitado'
+            ? 'appointment_change_requested'
+            : 'appointment_cancelled',
+        },
+      );
     }
     emitAppointmentSocketEvent(appointment, 'appointment:updated');
 
@@ -3073,6 +3470,34 @@ async function handleSendWhatsapp(node, context, runtime) {
       return reuseExistingAutomationWhatsappMessage({ existingMessage, node });
     }
   }
+  if (parseBool(resolveTemplateValue(config?.suppress_if_human_replied, context), false)) {
+    const sourceMessageId = toIntOrNull(
+      context?.last_response_context?.response_message_id
+      || context?.trigger?.data?.latest_inbound_message_id
+      || context?.trigger?.data?.first_inbound_message_id
+    );
+    const conversationId = toIntOrNull(
+      context?.conversation?.id
+      || context?.trigger?.data?.conversation_id
+      || (cleanString(execution?.trigger_entity_type) === 'conversation' ? execution?.trigger_entity_id : null)
+    );
+    const humanReply = sourceMessageId && conversationId
+      ? await findHumanReplyAfterMessage(conversationId, sourceMessageId)
+      : null;
+    if (humanReply) {
+      return {
+        kind: 'success',
+        output: {
+          status: 'suppressed_human_reply',
+          suppressed: true,
+          source_message_id: sourceMessageId,
+          human_message_id: humanReply.id,
+          conversation_id: conversationId,
+        },
+        next_node_id: readOutputTarget(node, 'on_success'),
+      };
+    }
+  }
   let targets = resolveRuntimeTargets(execution, context);
   targets = await backfillRuntimeTargets(execution, targets);
   const clinicId = toIntOrNull(targets.clinic_id);
@@ -3598,51 +4023,54 @@ async function handleSendWhatsapp(node, context, runtime) {
   const eventMessageContent = `Mensaje preparado automáticamente por activarse el flujo ${flowName ? `"${flowName}"` : ''}. El paciente no ve este texto, solo el mensaje a continuación.${accessGuidanceEventDetail}`;
   const nowIso = new Date().toISOString();
 
-  const eventMaterialization = await findOrCreateAutomationWhatsappMessage({
-    deliveryKey: automationDeliveryKey,
-    messageType: 'event',
-    values: {
-      conversation_id: conversation.id,
-      sender_id: null,
-      direction: 'outbound',
-      content: eventMessageContent,
-      message_type: 'event',
-      status: 'sent',
-      sent_at: new Date(),
-      metadata: {
-      source: 'automations_v2',
-      kind: 'automation_flow_event',
-      reason: 'flow_send_whatsapp',
-      execution_id: runtime?.execution?.id || null,
-      node_id: cleanString(node?.id),
-      flow_name: flowName || null,
-      message_mode: originalMessageMode,
-      delivery_mode: effectiveMessageMode,
-      action_source: cleanString(config.source) || null,
-      flow_domain: cleanString(config.domain) || cleanString(runtime?.execution?.domain) || null,
-      template_usage: cleanString(config.template_usage) || null,
-      template_commercial: config.template_commercial === true,
-      template_id: template?.id || null,
-      template_name: template?.name || null,
-      patient_language: languageSelection.patient_language,
-      selected_language: expectedTemplateLocale || normalizeWhatsappLocale(templateLanguage, { fallback: 'es' }),
-      language_routing_enabled: languageSelection.enabled,
-      template_family_key: resolveCatalogFamilyKey(template?.catalog) || null,
-      fallback_used: !!fallbackTriggeredReason,
-      fallback_reason: fallbackTriggeredReason,
-      fallback_template_id: fallbackTriggeredReason ? template?.id || null : null,
-      fallback_template_name: fallbackTriggeredReason ? template?.name || null : null,
-      template_branch: accessGuidanceDecision.branch,
-      access_guidance_variant_requested: accessGuidanceDecision.variant_requested,
-      access_guidance_variant_used: accessGuidanceDecision.variant_used,
-      access_guidance_fallback_used: accessGuidanceDecision.fallback_used,
-      access_guidance_fallback_reason: accessGuidanceDecision.fallback_reason,
-      automation_delivery_key: automationDeliveryKey,
-        generated_at: nowIso,
+  let eventMsg = null;
+  if (!parseBool(config.suppress_flow_event, false)) {
+    const eventMaterialization = await findOrCreateAutomationWhatsappMessage({
+      deliveryKey: automationDeliveryKey,
+      messageType: 'event',
+      values: {
+        conversation_id: conversation.id,
+        sender_id: null,
+        direction: 'outbound',
+        content: eventMessageContent,
+        message_type: 'event',
+        status: 'sent',
+        sent_at: new Date(),
+        metadata: {
+          source: 'automations_v2',
+          kind: 'automation_flow_event',
+          reason: 'flow_send_whatsapp',
+          execution_id: runtime?.execution?.id || null,
+          node_id: cleanString(node?.id),
+          flow_name: flowName || null,
+          message_mode: originalMessageMode,
+          delivery_mode: effectiveMessageMode,
+          action_source: cleanString(config.source) || null,
+          flow_domain: cleanString(config.domain) || cleanString(runtime?.execution?.domain) || null,
+          template_usage: cleanString(config.template_usage) || null,
+          template_commercial: config.template_commercial === true,
+          template_id: template?.id || null,
+          template_name: template?.name || null,
+          patient_language: languageSelection.patient_language,
+          selected_language: expectedTemplateLocale || normalizeWhatsappLocale(templateLanguage, { fallback: 'es' }),
+          language_routing_enabled: languageSelection.enabled,
+          template_family_key: resolveCatalogFamilyKey(template?.catalog) || null,
+          fallback_used: !!fallbackTriggeredReason,
+          fallback_reason: fallbackTriggeredReason,
+          fallback_template_id: fallbackTriggeredReason ? template?.id || null : null,
+          fallback_template_name: fallbackTriggeredReason ? template?.name || null : null,
+          template_branch: accessGuidanceDecision.branch,
+          access_guidance_variant_requested: accessGuidanceDecision.variant_requested,
+          access_guidance_variant_used: accessGuidanceDecision.variant_used,
+          access_guidance_fallback_used: accessGuidanceDecision.fallback_used,
+          access_guidance_fallback_reason: accessGuidanceDecision.fallback_reason,
+          automation_delivery_key: automationDeliveryKey,
+          generated_at: nowIso,
+        },
       },
-    },
-  });
-  const eventMsg = eventMaterialization.message;
+    });
+    eventMsg = eventMaterialization.message;
+  }
 
   const metadata = {
     source: 'automations_v2',
@@ -3724,7 +4152,7 @@ async function handleSendWhatsapp(node, context, runtime) {
   if (!messageMaterialization.created) {
     return reuseExistingAutomationWhatsappMessage({ existingMessage: msg, node });
   }
-  emitMessageCreatedToConversationRooms(conversation, eventMsg);
+  if (eventMsg) emitMessageCreatedToConversationRooms(conversation, eventMsg);
   emitMessageCreatedToConversationRooms(conversation, msg);
 
   if (quietWindow.delayMs > 0) {
@@ -3792,7 +4220,7 @@ async function handleSendWhatsapp(node, context, runtime) {
       kind: 'success',
       output: {
         message_id: msg.id,
-        event_message_id: eventMsg.id,
+        event_message_id: eventMsg?.id || null,
         status: 'scheduled',
         message_mode: originalMessageMode,
         delivery_mode: effectiveMessageMode,
@@ -3967,7 +4395,7 @@ async function handleSendWhatsapp(node, context, runtime) {
     kind: 'success',
     output: {
       message_id: msg.id,
-      event_message_id: eventMsg.id,
+      event_message_id: eventMsg?.id || null,
       status: immediateTransportJobId ? 'queued' : 'sent',
       message_mode: originalMessageMode,
       delivery_mode: effectiveMessageMode,
@@ -3998,6 +4426,75 @@ async function handleSendWhatsapp(node, context, runtime) {
       recipient_patient_name: recipientPatientName,
     },
     next_node_id: readOutputTarget(node, 'on_success'),
+  };
+}
+
+async function handleReplyMessage(node, context, runtime) {
+  const config = node?.config && typeof node.config === 'object' ? node.config : {};
+  const execution = runtime?.execution || null;
+  const conversationId = toIntOrNull(
+    context?.trigger?.data?.conversation_id
+    || context?.conversation?.id
+    || execution?.trigger_entity_id
+  );
+  const sourceMessageId = toIntOrNull(
+    context?.trigger?.data?.latest_inbound_message_id
+    || context?.last_response_context?.response_message_id
+    || context?.trigger?.data?.first_inbound_message_id
+  );
+  if (!conversationId || !sourceMessageId) {
+    throw new Error('reply_message_source_not_found');
+  }
+  const conversation = await Conversation.findByPk(conversationId, {
+    attributes: ['id', 'clinic_id', 'channel', 'contact_id', 'patient_id', 'lead_id'],
+  });
+  if (!conversation || Number(conversation.clinic_id) !== Number(execution?.clinic_id)) {
+    throw new Error('reply_message_conversation_scope_mismatch');
+  }
+  if (cleanString(conversation.channel).toLowerCase() !== 'whatsapp') {
+    throw new Error('reply_message_channel_not_supported');
+  }
+  if (parseBool(resolveTemplateValue(config.suppress_if_human_replied, context), true)) {
+    const humanReply = await findHumanReplyAfterMessage(conversationId, sourceMessageId);
+    if (humanReply) {
+      return {
+        kind: 'success',
+        output: {
+          status: 'suppressed_human_reply',
+          suppressed: true,
+          source_message_id: sourceMessageId,
+          human_message_id: humanReply.id,
+          conversation_id: conversationId,
+        },
+        next_node_id: readOutputTarget(node, 'on_success'),
+      };
+    }
+  }
+
+  const replyNode = {
+    ...node,
+    config: {
+      message_mode: 'manual',
+      manual_message_text: config.message_text,
+      recipient_mode: 'manual_number',
+      recipient_to: conversation.contact_id,
+      sender_mode: 'clinic_default',
+      quiet_hours_enabled: false,
+      outside_send_window_policy: 'discard',
+      suppress_flow_event: true,
+      source: 'message_received_reply',
+      domain: 'appointment',
+      delivery_slot: `reply_${sourceMessageId}`,
+    },
+  };
+  const result = await handleSendWhatsapp(replyNode, context, runtime);
+  return {
+    ...result,
+    output: {
+      ...(result.output || {}),
+      source_message_id: sourceMessageId,
+      human_reply_suppressed: false,
+    },
   };
 }
 
@@ -5278,6 +5775,29 @@ async function processNode(node, context, runtime = {}) {
       return handleSendWhatsapp(node, context, runtime);
     }
 
+    case 'action/reply_message': {
+      if (simulation) {
+        return {
+          kind: 'success',
+          output: {
+            status: 'simulated',
+            simulated: true,
+            message_preview: cleanString(resolveTemplateValue(config?.message_text, context)) || null,
+            source_message_id: toIntOrNull(
+              context?.trigger?.data?.latest_inbound_message_id
+              || context?.last_response_context?.response_message_id
+            ),
+            suppress_if_human_replied: parseBool(
+              resolveTemplateValue(config?.suppress_if_human_replied, context),
+              true
+            ),
+          },
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
+      return handleReplyMessage(node, context, runtime);
+    }
+
     case 'action/request_review': {
       if (simulation) {
         return {
@@ -5691,6 +6211,12 @@ async function processNode(node, context, runtime = {}) {
       }
 
       const presetKey = cleanString(config?.preset_key);
+      if (
+        LEGACY_INTENT_PRESETS.has(presetKey)
+        && !isLegacyIntentExecutionAllowed(runtime?.execution, aiContext)
+      ) {
+        throw new Error(`legacy_ai_preset_not_allowed:${presetKey}`);
+      }
       const deterministicPresetOutput = presetKey === 'review_response_classifier'
         ? await reviewResponseClassification.classifyReviewResponse({
           text: cleanString(aiContext?.last_response_context?.response_text || aiContext?.last_response),
@@ -5706,16 +6232,24 @@ async function processNode(node, context, runtime = {}) {
           _ai_provider: result.source === 'ai' ? (result.provider || 'bedrock') : result.source,
           _ai_model: result.model || null,
         }))
+        : presetKey === 'classify_intent'
+        ? buildDeterministicClassifyIntentOutput(aiContext)
         : presetKey === 'confirm_appointment'
         ? buildDeterministicConfirmAppointmentOutput(aiContext)
         : (presetKey === 'appointment_unconfirmed_reply'
             ? buildDeterministicAppointmentUnconfirmedReplyOutput(aiContext)
             : null);
       if (deterministicPresetOutput) {
-        const deterministicDecision = cleanString(deterministicPresetOutput?.decision).toLowerCase();
+        const normalizedDeterministicOutput = presetKey === 'classify_intent'
+          ? normalizeClassifyIntentOutput(deterministicPresetOutput, aiContext)
+          : deterministicPresetOutput;
+        if (presetKey === 'classify_intent' && !simulation) {
+          await persistClassifyIntentState(runtime?.execution, runtimeTargets, normalizedDeterministicOutput);
+        }
+        const deterministicDecision = cleanString(normalizedDeterministicOutput?.decision).toLowerCase();
         return {
           kind: 'success',
-          output: deterministicPresetOutput,
+          output: normalizedDeterministicOutput,
           next_node_id: presetKey === 'confirm_appointment'
             ? (deterministicDecision === 'confirmado'
                 ? readOutputTarget(node, 'on_success')
@@ -5728,11 +6262,23 @@ async function processNode(node, context, runtime = {}) {
       const outputFormatSimple = normalizeAiOutputFormat(outputFormat);
       const analysisMode = normalizeAiAnalysisMode(resolveTemplateValue(config?.mode, context));
       if (simulation) {
-        const simulatedOutput = aiOrchestrator.buildSimulatedOutput(
+        let simulatedOutput = aiOrchestrator.buildSimulatedOutput(
           outputFormatSimple,
           analysisMode,
           presetKey || 'automation_v2_analysis',
         );
+        if (presetKey === 'classify_intent') {
+          simulatedOutput = normalizeClassifyIntentOutput({
+            ...simulatedOutput,
+            intencion_principal: 'otra',
+            intencion_secundaria: '',
+            confianza: 0,
+            accion_inequivoca: false,
+            posible_urgencia: false,
+            necesita_respuesta: true,
+            motivo: 'Simulación sin una señal determinista suficiente.',
+          }, aiContext);
+        }
         const decision = cleanString(simulatedOutput?.decision).toLowerCase();
         return {
           kind: 'success',
@@ -5761,6 +6307,11 @@ async function processNode(node, context, runtime = {}) {
       } catch (error) {
         aiOutput = buildSafeAppointmentAiFailureOutput(presetKey, error);
         if (!aiOutput) throw error;
+      }
+
+      if (presetKey === 'classify_intent') {
+        aiOutput = normalizeClassifyIntentOutput(aiOutput, aiContext);
+        await persistClassifyIntentState(runtime?.execution, runtimeTargets, aiOutput);
       }
 
       const normalizedDecision = cleanString(aiOutput?.decision).toLowerCase();
@@ -5879,10 +6430,7 @@ async function resumeWaitingNode(execution, node, context, {
             raw: true,
           })
         : null;
-      const inboundMessageType = cleanString(inboundMessage?.message_type).toLowerCase();
-      const effectiveResponseText = inboundMessageType === 'reaction'
-        ? null
-        : responseText;
+      const effectiveResponseText = cleanString(responseText) || null;
       const inboundMetadata = isObject(inboundMessage?.metadata) ? inboundMessage.metadata : {};
       const inboundMedia = isObject(inboundMetadata.media) ? inboundMetadata.media : {};
       const mediaKind = cleanString(
@@ -6110,6 +6658,119 @@ async function resumeWaitingNode(execution, node, context, {
   }, 'flow_execution:resumed', { resume_mode: mode || 'timeout' });
 
   return { resumed: true, context };
+}
+
+function findClassifyIntentOutput(context = {}) {
+  const outputs = context?.outputs && typeof context.outputs === 'object'
+    ? Object.values(context.outputs)
+    : [];
+  return [...outputs].reverse().find((output) => (
+    output && typeof output === 'object' && cleanString(output.intencion_principal)
+  )) || null;
+}
+
+async function syncConversationAutomationStateAfterExecution(execution) {
+  if (!execution || !db.ConversationAutomationState) return;
+  const context = execution.context && typeof execution.context === 'object' ? execution.context : {};
+  const conversationId = toIntOrNull(
+    context?.conversation?.id
+    || context?.trigger?.data?.conversation_id
+    || (cleanString(execution.trigger_entity_type) === 'conversation' ? execution.trigger_entity_id : null)
+  );
+  if (!conversationId) return;
+  const state = await db.ConversationAutomationState.findOne({
+    where: { conversation_id: conversationId },
+  });
+  if (!state || Number(state.execution_id) !== Number(execution.id)) return;
+
+  const executionStatus = cleanString(execution.status)?.toLowerCase();
+  if (executionStatus === 'waiting') {
+    if (cleanString(execution?.waiting_meta?.resume_mode) === 'response') {
+      await conversationAutomationState.updateOwnedState({
+        clinicId: execution.clinic_id,
+        conversationId,
+        stage: 'collecting',
+        status: 'active',
+        executionId: execution.id,
+        deadlineAt: execution.wait_until || null,
+      }, {
+        expectedExecutionId: execution.id,
+      });
+    }
+    return;
+  }
+  if (['failed', 'dead_letter'].includes(executionStatus)) {
+    await conversationAutomationState.failState({
+      clinicId: execution.clinic_id,
+      conversationId,
+      failureCode: `flow_${executionStatus}`,
+    }, {
+      expectedExecutionId: execution.id,
+    });
+    return;
+  }
+  if (!['completed', 'cancelled'].includes(executionStatus)) return;
+
+  const classification = findClassifyIntentOutput(context);
+  const normalized = classification
+    ? normalizeClassifyIntentOutput(classification, context)
+    : null;
+  const appointmentId = toIntOrNull(
+    context?.appointment?.id
+    || context?.appointment?.id_cita
+    || context?.trigger?.data?.appointment_id
+    || state.appointment_id
+  );
+  const appointment = appointmentId
+    ? await CitaPaciente.findByPk(appointmentId, { attributes: ['id_cita', 'estado'], raw: true })
+    : null;
+  const appointmentStatus = cleanString(appointment?.estado || context?.appointment?.estado || state.appointment_status);
+  const sourceMessageId = toIntOrNull(
+    state.source_message_id
+    || context?.last_response_context?.response_message_id
+    || context?.trigger?.data?.latest_inbound_message_id
+  );
+  const humanReply = normalized?.necesita_respuesta === true && sourceMessageId
+    ? await findHumanReplyAfterMessage(conversationId, sourceMessageId)
+    : null;
+  const pendingResponse = normalized?.necesita_respuesta === true && !humanReply;
+  const persistedManualReason = state.manual_action_required === true
+    && state.needs_response !== true;
+  const manualActionRequired = appointmentStatus === 'cambio_solicitado'
+    || persistedManualReason
+    || normalized?.posible_urgencia === true
+    || pendingResponse
+    || normalized?.intencion_principal === 'otra'
+    || (
+      normalized
+      && ['confirmar_cita', 'cancelar_cita', 'solicitar_cambio_cita'].includes(normalized.intencion_principal)
+      && normalized.accion_inequivoca !== true
+    );
+  if (manualActionRequired) {
+    await conversationAutomationState.updateOwnedState({
+      clinicId: execution.clinic_id,
+      conversationId,
+      stage: 'review',
+      status: 'review',
+      executionId: execution.id,
+      appointmentId,
+      appointmentStatus,
+      intent: normalized?.intencion_principal || state.intent,
+      possibleUrgency: normalized?.posible_urgencia ?? state.possible_urgency,
+      needsResponse: pendingResponse,
+      manualActionRequired: true,
+      completedAt: new Date(),
+    }, {
+      expectedExecutionId: execution.id,
+    });
+    return;
+  }
+  await conversationAutomationState.completeState({
+    clinicId: execution.clinic_id,
+    conversationId,
+  }, {
+    expectedExecutionId: execution.id,
+  });
 }
 
 async function runExecution(executionId, options = {}) {
@@ -6457,6 +7118,15 @@ async function runExecution(executionId, options = {}) {
   return execution;
   } finally {
     clearResponseProcessingState();
+    const freshExecution = await FlowExecutionV2.findByPk(execution.id).catch(() => execution);
+    try {
+      await syncConversationAutomationStateAfterExecution(freshExecution || execution);
+    } catch (error) {
+      console.warn('[automations-v2] No se pudo sincronizar el estado conversacional', {
+        executionId: execution.id,
+        errorCode: cleanString(error?.code) || cleanString(error?.name) || 'conversation_state_sync_failed',
+      });
+    }
   }
 }
 
@@ -6480,6 +7150,10 @@ module.exports = {
   selectBestWhatsappTemplateCandidate,
   buildDeterministicConfirmAppointmentOutput,
   buildDeterministicAppointmentUnconfirmedReplyOutput,
+  buildDeterministicClassifyIntentOutput,
+  normalizeClassifyIntentOutput,
   buildSafeAppointmentAiFailureOutput,
+  isLegacyIntentExecutionAllowed,
+  _handleChangeStatus: handleChangeStatus,
   resolveOperationalSubroleTargets,
 };

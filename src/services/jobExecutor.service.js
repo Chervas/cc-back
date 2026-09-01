@@ -1,5 +1,4 @@
 const { metaSyncJobs } = require('../jobs/sync.jobs');
-const fs = require('fs');
 const db = require('../../models');
 const flowEngineV2Service = require('./flowEngineV2.service');
 const whatsappCoexistenceService = require('./whatsappCoexistence.service');
@@ -31,24 +30,67 @@ const LeadIntake = db.LeadIntake;
 const Notification = db.Notification;
 const Clinica = db.Clinica;
 
+function inboundResponseMessageIds(payload = {}, waitingMeta = {}) {
+  return Array.from(new Set([
+    ...(Array.isArray(payload.inbound_message_ids) ? payload.inbound_message_ids : []),
+    ...(Array.isArray(waitingMeta.pending_response_message_ids) ? waitingMeta.pending_response_message_ids : []),
+    payload.inbound_message_id,
+    waitingMeta.last_inbound_message_id,
+  ].map(Number).filter((id) => Number.isInteger(id) && id > 0)));
+}
+
+function resolveInboundResponseConversationId(execution, payload = {}, waitingMeta = {}) {
+  const candidates = [
+    execution?.context?.conversation?.id,
+    execution?.context?.trigger?.data?.conversation_id,
+    execution?.trigger_entity_type === 'conversation' ? execution?.trigger_entity_id : null,
+    waitingMeta.inbound_conversation_id,
+    payload.inbound_conversation_id,
+  ].map(Number).filter((id) => Number.isInteger(id) && id > 0);
+  const unique = Array.from(new Set(candidates));
+  if (unique.length > 1) {
+    throw new Error('inbound_response_conversation_scope_mismatch');
+  }
+  return unique[0] || null;
+}
+
+async function loadInboundResponseFromMessageIds(payload = {}, waitingMeta = {}, expectedConversationId = null) {
+  const conversationId = Number(expectedConversationId);
+  if (!Number.isInteger(conversationId) || conversationId <= 0) return null;
+  const ids = inboundResponseMessageIds(payload, waitingMeta);
+  if (!ids.length || !db.Message) return null;
+  const rows = await db.Message.findAll({
+    where: {
+      id: { [db.Sequelize.Op.in]: ids },
+      conversation_id: conversationId,
+      direction: 'inbound',
+    },
+    attributes: ['id', 'content', 'message_type', 'metadata', 'sent_at', 'createdAt'],
+    order: [['sent_at', 'ASC'], ['createdAt', 'ASC'], ['id', 'ASC']],
+    raw: true,
+  });
+  if (!rows.length) return null;
+  const responseText = rows
+    .filter((row) => String(row.message_type || '').toLowerCase() !== 'reaction')
+    .map((row) => String(row.content || '').trim())
+    .filter(Boolean)
+    .join('\n');
+  const last = rows[rows.length - 1];
+  const media = last?.metadata?.media && typeof last.metadata.media === 'object'
+    ? last.metadata.media
+    : {};
+  return {
+    responseText,
+    inboundMessageId: last.id,
+    loadedMessageIds: rows.map((row) => Number(row.id)),
+    responseMediaKind: media.kind || null,
+    responseMediaId: media.id || null,
+    responseMediaMimeType: media.mime_type || null,
+  };
+}
+
 async function runAutomationFlowV2Job(payload = {}) {
   const executionId = Number(payload.execution_id || payload.executionId || 0);
-  try {
-    fs.appendFileSync('/tmp/cc-job-debug.log', `${JSON.stringify({
-      ts: new Date().toISOString(),
-      source: 'back-integracion',
-      stage: 'runAutomationFlowV2Job:start',
-      pid: process.pid,
-      cwd: process.cwd(),
-      port: process.env.PORT || null,
-      runtimeNamespace: process.env.JOB_RUNTIME_NAMESPACE || process.env.RUNTIME_NAMESPACE || null,
-      hasGroqKey: !!String(process.env.GROQ_API_KEY || '').trim(),
-      executionId,
-      payload,
-    })}\n`);
-  } catch (_) {
-    // no-op debug fallback
-  }
   if (!Number.isInteger(executionId) || executionId <= 0) {
     throw new Error('automations_v2_execute requires payload.execution_id');
   }
@@ -99,23 +141,48 @@ async function runAutomationFlowV2Job(payload = {}) {
     }
   }
 
+  const expectedConversationId = resolveInboundResponseConversationId(execution, payload, waitingMeta);
+  const expectedInboundMessageIds = inboundResponseMessageIds(payload, waitingMeta);
+  const bufferedInbound = options.resumeMode === 'response'
+    ? await loadInboundResponseFromMessageIds(payload, waitingMeta, expectedConversationId)
+    : null;
+  if (
+    options.resumeMode === 'response'
+    && expectedInboundMessageIds.length
+    && (
+      !bufferedInbound
+      || bufferedInbound.loadedMessageIds.length !== expectedInboundMessageIds.length
+    )
+  ) {
+    throw new Error('inbound_response_message_scope_mismatch');
+  }
   if (payload.response_text !== undefined) {
     options.responseText = payload.response_text;
+  } else if (bufferedInbound) {
+    options.responseText = bufferedInbound.responseText;
   } else if (options.resumeMode === 'response' && waitingMeta.pending_response_text !== undefined) {
     options.responseText = waitingMeta.pending_response_text;
   }
 
   if (payload.inbound_message_id !== undefined) {
     options.inboundMessageId = payload.inbound_message_id;
+  } else if (bufferedInbound?.inboundMessageId) {
+    options.inboundMessageId = bufferedInbound.inboundMessageId;
   }
   if (payload.response_media_kind !== undefined) {
     options.responseMediaKind = payload.response_media_kind;
+  } else if (bufferedInbound?.responseMediaKind) {
+    options.responseMediaKind = bufferedInbound.responseMediaKind;
   }
   if (payload.response_media_id !== undefined) {
     options.responseMediaId = payload.response_media_id;
+  } else if (bufferedInbound?.responseMediaId) {
+    options.responseMediaId = bufferedInbound.responseMediaId;
   }
   if (payload.response_media_mime_type !== undefined) {
     options.responseMediaMimeType = payload.response_media_mime_type;
+  } else if (bufferedInbound?.responseMediaMimeType) {
+    options.responseMediaMimeType = bufferedInbound.responseMediaMimeType;
   }
 
   if (payload.form_submission !== undefined) {
@@ -447,6 +514,12 @@ const JOB_HANDLERS = {
   marketing_bulk_send_dispatch: async (payload = {}, jobRequest) => marketingBulkSendsService.runDispatchJob(payload, jobRequest),
   marketing_review_request_reminder: async (payload = {}, jobRequest) => marketingBulkSendsService.runReviewRequestReminderJob(payload, jobRequest),
   marketing_review_request_no_response: async (payload = {}, jobRequest) => marketingBulkSendsService.runReviewNoResponseJob(payload, jobRequest),
+  automation_inbound_dispatch: async (payload = {}, jobRequest = null) => (
+    require('./automationInboundMessage.service').runInboundDispatchJob(payload, jobRequest)
+  ),
+  automation_message_received_fire: async (payload = {}, jobRequest = null) => (
+    require('./automationInboundMessage.service').runMessageReceivedFireJob(payload, jobRequest)
+  ),
   automations_v2_execute: async (payload = {}) => runAutomationFlowV2Job(payload),
   automation_whatsapp_quiet_send: async (payload = {}) => flowEngineV2Service.runScheduledWhatsappSendJob(payload),
   appointment_automation_schedule_fire: async (payload = {}) => runAppointmentAutomationScheduleJob(payload),
@@ -654,6 +727,9 @@ async function runJob(jobRequest) {
 module.exports = {
   runJob,
   JOB_HANDLERS,
+  _inboundResponseMessageIds: inboundResponseMessageIds,
+  _loadInboundResponseFromMessageIds: loadInboundResponseFromMessageIds,
+  _resolveInboundResponseConversationId: resolveInboundResponseConversationId,
   _shouldUseExecutionTimeout: shouldUseExecutionTimeout,
   _buildTimeoutFailureResult: buildTimeoutFailureResult,
   _normalizeScheduledExecutionResult: normalizeScheduledExecutionResult,

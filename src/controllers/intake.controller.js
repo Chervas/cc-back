@@ -39,6 +39,7 @@ const leadAutoReplyService = require('../services/leadAutoReply.service');
 const patientDirectionService = require('../services/patientDirection.service');
 const {
   localDateTimeToUtc,
+  resolveClinicOpenState: resolveSharedClinicOpenState,
   resolveClinicTimeZone,
 } = require('../services/clinicOpeningHours.service');
 const {
@@ -175,6 +176,7 @@ const LEAD_ACTIVE_APPOINTMENT_STATES = new Set([
   'info_confirmada',
   'recordatorio_enviado',
   'recordatorio_confirmado',
+  'cambio_solicitado',
   'reprogramada',
 ]);
 
@@ -3969,8 +3971,6 @@ const DEFAULT_META_ADS = {
   pixel_id: null
 };
 
-const DEFAULT_CLINIC_TIMEZONE = 'Europe/Madrid';
-
 const parseClinicConfigForSchedule = (value) => {
   if (!value) return null;
   if (typeof value === 'object' && !Array.isArray(value)) return value;
@@ -3983,65 +3983,6 @@ const parseClinicConfigForSchedule = (value) => {
     }
   }
   return null;
-};
-
-const isValidTimeZone = (value) => {
-  if (!value || typeof value !== 'string') return false;
-  try {
-    Intl.DateTimeFormat('en-US', { timeZone: value }).format(new Date());
-    return true;
-  } catch (_error) {
-    return false;
-  }
-};
-
-const resolveClinicTimezoneForSchedule = (clinica) => {
-  const cfg = parseClinicConfigForSchedule(clinica?.configuracion);
-  const candidate = cfg?.timezone || cfg?.timeZone || cfg?.tz;
-  return isValidTimeZone(candidate) ? candidate : DEFAULT_CLINIC_TIMEZONE;
-};
-
-const formatPartsInTimeZone = (date, timeZone) => {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone,
-    hour12: false,
-    hourCycle: 'h23',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  }).formatToParts(date);
-
-  const bag = {};
-  for (const part of parts) {
-    if (part.type !== 'literal') bag[part.type] = part.value;
-  }
-
-  return {
-    year: Number(bag.year),
-    month: Number(bag.month),
-    day: Number(bag.day),
-    hour: Number(bag.hour),
-    minute: Number(bag.minute),
-    second: Number(bag.second),
-  };
-};
-
-const pad2 = (value) => String(value).padStart(2, '0');
-
-const formatLocalDateFromParts = (parts) => `${parts.year}-${pad2(parts.month)}-${pad2(parts.day)}`;
-const formatLocalTimeFromParts = (parts) => `${pad2(parts.hour)}:${pad2(parts.minute)}`;
-const dayIndexFromLocalDate = (fechaLocal) => new Date(`${fechaLocal}T12:00:00Z`).getUTCDay();
-
-const minutesFromHm = (value) => {
-  const match = String(value || '').trim().match(/^(\d{2}):(\d{2})$/);
-  if (!match) return null;
-  const hour = Number(match[1]);
-  const minute = Number(match[2]);
-  if (!Number.isFinite(hour) || !Number.isFinite(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
-  return hour * 60 + minute;
 };
 
 const normalizeDisciplinesFromClinicConfigForFlow = (configuracion) => {
@@ -4177,57 +4118,7 @@ const buildOpeningHoursTextByClinicId = async (clinicIds) => {
 
 const resolveClinicOpenState = async (clinicId) => {
   const normalizedClinicId = parseInteger(clinicId);
-  if (!normalizedClinicId || !ClinicaHorario) {
-    return { open_now: null, has_schedule: false, checked_at: new Date().toISOString() };
-  }
-
-  const clinica = await Clinica.findOne({
-    where: { id_clinica: normalizedClinicId },
-    attributes: ['id_clinica', 'configuracion'],
-    raw: true,
-  });
-  const timeZone = resolveClinicTimezoneForSchedule(clinica);
-  const now = new Date();
-  const parts = formatPartsInTimeZone(now, timeZone);
-  const localDate = formatLocalDateFromParts(parts);
-  const localTime = formatLocalTimeFromParts(parts);
-  const currentMinutes = parts.hour * 60 + parts.minute;
-  const dow = dayIndexFromLocalDate(localDate);
-
-  const horarios = await ClinicaHorario.findAll({
-    where: { clinica_id: normalizedClinicId, activo: true },
-    attributes: ['dia_semana', 'hora_inicio', 'hora_fin'],
-    raw: true,
-  });
-
-  if (!Array.isArray(horarios) || horarios.length === 0) {
-    return {
-      open_now: null,
-      has_schedule: false,
-      timezone: timeZone,
-      local_date: localDate,
-      local_time: localTime,
-      checked_at: now.toISOString(),
-    };
-  }
-
-  const todaysWindows = horarios
-    .filter((h) => Number(h.dia_semana) === dow)
-    .map((h) => ({
-      start: minutesFromHm(h.hora_inicio),
-      end: minutesFromHm(h.hora_fin),
-    }))
-    .filter((w) => w.start !== null && w.end !== null && w.start < w.end);
-
-  const openNow = todaysWindows.some((w) => currentMinutes >= w.start && currentMinutes < w.end);
-  return {
-    open_now: openNow,
-    has_schedule: true,
-    timezone: timeZone,
-    local_date: localDate,
-    local_time: localTime,
-    checked_at: now.toISOString(),
-  };
+  return resolveSharedClinicOpenState({ clinicId: normalizedClinicId });
 };
 
 const extractClosedClinicFlowRules = (template) => {

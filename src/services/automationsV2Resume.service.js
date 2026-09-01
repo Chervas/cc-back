@@ -5,6 +5,7 @@ const jobRequestsService = require('./jobRequests.service');
 const jobScheduler = require('./jobScheduler.service');
 const { normalizePhoneDigits } = require('../lib/phone');
 const { emitAutomationResponseProcessing } = require('./conversationPendingReply.service');
+const conversationAutomationState = require('./conversationAutomationState.service');
 
 const FlowExecutionV2 = db.FlowExecutionV2;
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
@@ -220,14 +221,6 @@ function getWaitFormSubmissionNode(execution) {
   return currentNode;
 }
 
-function appendMultilineText(baseText, nextText) {
-  const base = cleanString(baseText);
-  const next = cleanString(nextText);
-  if (!next) return base || '';
-  if (!base) return next;
-  return `${base}\n${next}`;
-}
-
 async function getInboundMessageMediaContext(inboundMessageId) {
   const messageId = toIntOrNull(inboundMessageId);
   if (!messageId) return null;
@@ -317,20 +310,20 @@ function getResponseBufferConfig(waitNode) {
     ?? (explicitDelaySeconds !== null ? explicitDelaySeconds * 1000 : null)
     ?? envDelayMs
     ?? (envDelaySeconds !== null ? envDelaySeconds * 1000 : null)
-    ?? 180 * 1000;
+    ?? 90 * 1000;
   return {
     enabled: parseBool(cfg.response_buffer_enabled, true),
     delayMs: resolvedDelayMs,
   };
 }
 
-async function findQueuedResumeJob(executionId, resumeMode) {
+async function findQueuedResumeJob(executionId, resumeMode, options = {}) {
   const execution = toIntOrNull(executionId);
   const normalizedMode = cleanString(resumeMode);
   if (!execution || !normalizedMode) return null;
   const rows = await db.sequelize.query(
     `
-    SELECT id, status, next_run_at
+    SELECT id, status, next_run_at, payload
     FROM JobRequests
     WHERE type = 'automations_v2_execute'
       AND status IN ('pending', 'waiting', 'running')
@@ -341,20 +334,22 @@ async function findQueuedResumeJob(executionId, resumeMode) {
       AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.resume_mode')) = :resumeMode
     ORDER BY id DESC
     LIMIT 1
+    ${options.transaction && options.lock ? 'FOR UPDATE' : ''}
     `,
     {
       replacements: { executionId: execution, resumeMode: normalizedMode },
       type: db.sequelize.QueryTypes.SELECT,
+      ...(options.transaction ? { transaction: options.transaction } : {}),
     }
   );
   return rows?.[0] || null;
 }
 
-async function findQueuedResponseResumeJob(executionId) {
-  return findQueuedResumeJob(executionId, 'response');
+async function findQueuedResponseResumeJob(executionId, options = {}) {
+  return findQueuedResumeJob(executionId, 'response', options);
 }
 
-async function findQueuedExecutionJob(executionId) {
+async function findQueuedExecutionJob(executionId, options = {}) {
   const execution = toIntOrNull(executionId);
   if (!execution) return null;
   const rows = await db.sequelize.query(
@@ -369,10 +364,12 @@ async function findQueuedExecutionJob(executionId) {
       )
     ORDER BY id DESC
     LIMIT 1
+    ${options.transaction && options.lock ? 'FOR UPDATE' : ''}
     `,
     {
       replacements: { executionId: execution },
       type: db.sequelize.QueryTypes.SELECT,
+      ...(options.transaction ? { transaction: options.transaction } : {}),
     }
   );
   return rows?.[0] || null;
@@ -659,6 +656,175 @@ function matchesFormSubmissionRule(execution, waitNode, submission) {
   }
 }
 
+async function scheduleBufferedInboundResponse({
+  execution,
+  waitNode,
+  normalizedClinicId,
+  normalizedConversationId,
+  normalizedPatientId,
+  normalizedLeadId,
+  inboundMessageId,
+  inboundMedia,
+  channel,
+  buffer,
+}) {
+  let outcome = null;
+  await db.sequelize.transaction(async (transaction) => {
+    const lockedExecution = await FlowExecutionV2.findByPk(execution.id, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (
+      !lockedExecution
+      || cleanString(lockedExecution.status) !== 'waiting'
+      || cleanString(lockedExecution.current_node_id) !== cleanString(waitNode?.id)
+    ) {
+      outcome = { scheduled: false, reason: 'execution_no_longer_waiting' };
+      return;
+    }
+
+    const queuedExecutionJob = await findQueuedExecutionJob(lockedExecution.id, {
+      transaction,
+      lock: true,
+    });
+    const ownerRuntime = getExecutionRuntimeNamespace(lockedExecution, queuedExecutionJob)
+      || CURRENT_RUNTIME_NAMESPACE;
+    if (!IS_GATEWAY_RUNTIME && ownerRuntime !== CURRENT_RUNTIME_NAMESPACE) {
+      outcome = { scheduled: false, reason: `owned_by_other_runtime:${ownerRuntime}` };
+      return;
+    }
+
+    const queuedResumeJob = await findQueuedResponseResumeJob(lockedExecution.id, {
+      transaction,
+      lock: true,
+    });
+    if (cleanString(queuedResumeJob?.status) === 'running') {
+      outcome = { scheduled: false, reason: 'response_resume_already_running' };
+      return;
+    }
+
+    const existingWaitingMeta = lockedExecution.waiting_meta
+      && typeof lockedExecution.waiting_meta === 'object'
+      ? lockedExecution.waiting_meta
+      : {};
+    const normalizedInboundMessageId = toIntOrNull(inboundMessageId);
+    const lastInboundMessageId = toIntOrNull(existingWaitingMeta.last_inbound_message_id);
+    const sameInboundMessage = normalizedInboundMessageId
+      && lastInboundMessageId
+      && normalizedInboundMessageId === lastInboundMessageId;
+    const previousMessageIds = Array.isArray(existingWaitingMeta.pending_response_message_ids)
+      ? existingWaitingMeta.pending_response_message_ids.map(toIntOrNull).filter(Boolean)
+      : [];
+    const pendingMessageIds = normalizedInboundMessageId
+      ? Array.from(new Set([...previousMessageIds, normalizedInboundMessageId]))
+      : previousMessageIds;
+    const pendingCount = pendingMessageIds.length
+      || (sameInboundMessage
+        ? Math.max(1, Number(existingWaitingMeta.pending_response_count || 1))
+        : Number(existingWaitingMeta.pending_response_count || 0) + 1);
+    const now = new Date();
+    const firstInboundAt = parseDateOrNull(existingWaitingMeta.first_inbound_message_at) || now;
+    const waitUntil = new Date(Math.min(
+      now.getTime() + buffer.delayMs,
+      firstInboundAt.getTime() + (5 * 60 * 1000),
+    ));
+
+    await lockedExecution.update({
+      status: 'waiting',
+      wait_until: waitUntil,
+      waiting_meta: {
+        ...existingWaitingMeta,
+        runtime_namespace: ownerRuntime,
+        resume_mode: 'response',
+        pending_response_message_ids: pendingMessageIds,
+        pending_response_count: pendingCount,
+        first_inbound_message_at: firstInboundAt.toISOString(),
+        last_inbound_message_at: now.toISOString(),
+        last_inbound_message_id: normalizedInboundMessageId,
+        last_inbound_media_kind: inboundMedia?.kind || null,
+        last_inbound_media_id: inboundMedia?.id || null,
+        last_inbound_media_mime_type: inboundMedia?.mime_type || null,
+        inbound_channel: channel,
+        inbound_conversation_id: normalizedConversationId,
+      },
+    }, { transaction });
+
+    const queuedPayload = queuedResumeJob?.payload && typeof queuedResumeJob.payload === 'object'
+      ? queuedResumeJob.payload
+      : (queuedExecutionJob?.payload && typeof queuedExecutionJob.payload === 'object'
+          ? queuedExecutionJob.payload
+          : {});
+    const responsePayload = {
+      ...queuedPayload,
+      execution_id: lockedExecution.id,
+      executionId: lockedExecution.id,
+      resume_mode: 'response',
+      inbound_channel: channel,
+      inbound_conversation_id: normalizedConversationId,
+      inbound_message_id: normalizedInboundMessageId,
+      inbound_message_ids: pendingMessageIds,
+      inbound_patient_id: normalizedPatientId,
+      inbound_lead_id: normalizedLeadId,
+      __runtime_namespace: ownerRuntime,
+    };
+
+    let scheduledResumeJob = queuedResumeJob;
+    let created = false;
+    if (queuedResumeJob) {
+      await JobRequest.update({
+        status: 'waiting',
+        next_run_at: waitUntil,
+        payload: responsePayload,
+        error_message: null,
+        result_summary: null,
+        updated_at: new Date(),
+      }, {
+        where: { id: queuedResumeJob.id, status: { [Op.in]: ['pending', 'waiting'] } },
+        transaction,
+      });
+    } else {
+      const enqueued = await jobRequestsService.enqueueUniqueJobRequest({
+        type: 'automations_v2_execute',
+        priority: 'critical',
+        status: 'waiting',
+        origin: 'automations_v2_inbound',
+        nextRunAt: waitUntil,
+        dedupeScope: `flow-response:${lockedExecution.id}`,
+        payload: responsePayload,
+      }, { transaction });
+      scheduledResumeJob = enqueued.job;
+      created = enqueued.created;
+    }
+
+    const state = await conversationAutomationState.setState({
+      clinicId: normalizedClinicId,
+      conversationId: normalizedConversationId,
+      stage: 'collecting',
+      status: 'active',
+      sourceMessageId: normalizedInboundMessageId,
+      firstMessageAt: firstInboundAt,
+      deadlineAt: waitUntil,
+      executionId: lockedExecution.id,
+      jobRequestId: scheduledResumeJob?.id || null,
+      manualActionRequired: false,
+      failureCode: null,
+      completedAt: null,
+    }, { transaction, emit: false });
+
+    outcome = {
+      scheduled: true,
+      created,
+      state,
+      job: scheduledResumeJob,
+      ownerRuntime,
+      pendingMessageIds,
+    };
+  });
+
+  if (outcome?.state) conversationAutomationState.emitState(outcome.state);
+  return outcome;
+}
+
 async function enqueueInboundResponseResume({
   clinicId,
   conversationId,
@@ -761,7 +927,6 @@ async function enqueueInboundResponseResume({
   const errors = [];
 
   for (const execution of effectiveMatches) {
-    executionIds.push(execution.id);
     try {
       const queuedJob = await findQueuedExecutionJob(execution.id);
       const waitNode = getWaitResponseNode(execution);
@@ -776,115 +941,69 @@ async function enqueueInboundResponseResume({
       }
 
       if (buffer.enabled) {
-        const waitUntil = new Date(Date.now() + buffer.delayMs);
-        const existingWaitingMeta = execution.waiting_meta && typeof execution.waiting_meta === 'object'
-          ? execution.waiting_meta
-          : {};
-        const normalizedInboundMessageId = toIntOrNull(inboundMessageId);
-        const lastInboundMessageId = toIntOrNull(existingWaitingMeta.last_inbound_message_id);
-        const sameInboundMessage = normalizedInboundMessageId
-          && lastInboundMessageId
-          && normalizedInboundMessageId === lastInboundMessageId;
-        const mergedText = sameInboundMessage
-          ? (cleanString(existingWaitingMeta.pending_response_text) || text)
-          : appendMultilineText(existingWaitingMeta.pending_response_text, text);
-        const pendingCount = sameInboundMessage
-          ? Math.max(1, Number(existingWaitingMeta.pending_response_count || 1))
-          : Number(existingWaitingMeta.pending_response_count || 0) + 1;
-
-        await execution.update({
-          status: 'waiting',
-          wait_until: waitUntil,
-          waiting_meta: {
-            ...existingWaitingMeta,
-            runtime_namespace: ownerRuntime,
-            resume_mode: 'response',
-            pending_response_text: mergedText,
-            pending_response_count: pendingCount,
-            last_inbound_message_at: new Date().toISOString(),
-            last_inbound_message_id: inboundMessageId || null,
-            last_inbound_media_kind: inboundMedia?.kind || null,
-            last_inbound_media_id: inboundMedia?.id || null,
-            last_inbound_media_mime_type: inboundMedia?.mime_type || null,
-            inbound_channel: channel,
-          },
+        const buffered = await scheduleBufferedInboundResponse({
+          execution,
+          waitNode,
+          normalizedClinicId,
+          normalizedConversationId,
+          normalizedPatientId,
+          normalizedLeadId,
+          inboundMessageId,
+          inboundMedia,
+          channel,
+          buffer,
         });
-
-        const queuedPayload = queuedJob?.payload && typeof queuedJob.payload === 'object'
-          ? queuedJob.payload
-          : {};
-        const responsePayload = {
-          ...queuedPayload,
-          execution_id: execution.id,
-          executionId: execution.id,
-          resume_mode: 'response',
-          response_text: mergedText,
-          response_media_kind: inboundMedia?.kind || null,
-          response_media_id: inboundMedia?.id || null,
-          response_media_mime_type: inboundMedia?.mime_type || null,
-          inbound_channel: channel,
-          inbound_conversation_id: normalizedConversationId,
-          inbound_message_id: inboundMessageId || null,
-          inbound_patient_id: normalizedPatientId || null,
-          inbound_lead_id: normalizedLeadId || null,
-          __runtime_namespace: ownerRuntime,
-        };
-        const queuedResumeJob = await findQueuedResponseResumeJob(execution.id);
-        const queuedResumeStatus = cleanString(queuedResumeJob?.status);
-
-        if (queuedResumeJob && (queuedResumeStatus === 'waiting' || queuedResumeStatus === 'pending' || queuedResumeStatus === 'running')) {
-          await JobRequest.update(
-            {
-              status: 'waiting',
-              next_run_at: waitUntil,
-              payload: responsePayload,
-              error_message: null,
-              result_summary: null,
-              updated_at: new Date(),
-            },
-            { where: { id: queuedResumeJob.id } }
-          );
-          responseProcessingScheduled = true;
-        } else {
-          await jobRequestsService.enqueueJobRequest({
-            type: 'automations_v2_execute',
-            priority: 'critical',
-            status: 'waiting',
-            origin: 'automations_v2_inbound',
-            nextRunAt: waitUntil,
-            payload: responsePayload,
-          });
-          enqueued += 1;
-          responseProcessingScheduled = true;
+        if (!buffered?.scheduled) {
+          if (cleanString(buffered?.reason)?.startsWith('owned_by_other_runtime:')) {
+            errors.push({ execution_id: execution.id, message: buffered.reason });
+          }
+          continue;
         }
+        executionIds.push(execution.id);
+        if (buffered.created) enqueued += 1;
+        responseProcessingScheduled = true;
       } else {
-        const job = await jobRequestsService.enqueueJobRequest({
+        const enqueuedJob = await jobRequestsService.enqueueUniqueJobRequest({
           type: 'automations_v2_execute',
           priority: 'critical',
           origin: 'automations_v2_inbound',
+          dedupeScope: `flow-response:${execution.id}:message:${toIntOrNull(inboundMessageId) || 'none'}`,
           payload: {
             execution_id: execution.id,
             executionId: execution.id,
             resume_mode: 'response',
-            response_text: text,
-            response_media_kind: inboundMedia?.kind || null,
-            response_media_id: inboundMedia?.id || null,
-            response_media_mime_type: inboundMedia?.mime_type || null,
             inbound_channel: channel,
             inbound_conversation_id: normalizedConversationId,
             inbound_message_id: inboundMessageId || null,
+            inbound_message_ids: inboundMessageId ? [inboundMessageId] : [],
             inbound_patient_id: normalizedPatientId || null,
             inbound_lead_id: normalizedLeadId || null,
             __runtime_namespace: ownerRuntime,
           },
         });
+        const job = enqueuedJob.job;
 
         // Menor latencia: intentamos disparo inmediato además del scheduler periódico.
         if (ownerRuntime === CURRENT_RUNTIME_NAMESPACE) {
           jobScheduler.triggerImmediate(job.id).catch(() => {});
         }
-        enqueued += 1;
+        executionIds.push(execution.id);
+        if (enqueuedJob.created) enqueued += 1;
         responseProcessingScheduled = true;
+        await conversationAutomationState.setState({
+          clinicId: normalizedClinicId,
+          conversationId: normalizedConversationId,
+          stage: 'analyzing',
+          status: 'active',
+          sourceMessageId: inboundMessageId,
+          firstMessageAt: new Date(),
+          deadlineAt: null,
+          executionId: execution.id,
+          jobRequestId: job.id,
+          manualActionRequired: false,
+          failureCode: null,
+          completedAt: null,
+        });
       }
     } catch (error) {
       errors.push({
@@ -905,7 +1024,7 @@ async function enqueueInboundResponseResume({
 
   return {
     enabled: true,
-    matched: effectiveMatches.length,
+    matched: executionIds.length,
     enqueued,
     execution_ids: executionIds,
     superseded_execution_ids: supersededExecutionIds,

@@ -58,6 +58,7 @@ module.exports = (sequelize, DataTypes) => {
         'info_confirmada',
         'recordatorio_enviado',
         'recordatorio_confirmado',
+        'cambio_solicitado',
         'completada',
         'no_asistio',
         'cancelada',

@@ -54,6 +54,7 @@ const LEAD_ACTIVE_APPOINTMENT_STATES = new Set([
   'info_confirmada',
   'recordatorio_enviado',
   'recordatorio_confirmado',
+  'cambio_solicitado',
   'reprogramada',
 ]);
 
@@ -731,6 +732,22 @@ function ensureAccess({ clinicIds, isAggregateAllowed }, requestedClinicId) {
   return parsed.every((id) => clinicIds.includes(id));
 }
 
+function applyAutomationProcessingState(target, pendingState) {
+  target.automation_response_processing = pendingState?.isAutomationResponseProcessing === true;
+  target.automation_response_processing_message_id = pendingState?.automationResponseProcessingMessageId || null;
+  target.automation_processing_stage = pendingState?.automationProcessingStage || null;
+  target.automation_processing_status = pendingState?.automationProcessingStatus || null;
+  target.automation_processing_started_at = pendingState?.automationProcessingStartedAt || null;
+  target.automation_processing_deadline_at = pendingState?.automationProcessingDeadlineAt || null;
+  target.automation_action_appointment_id = pendingState?.automationActionAppointmentId || null;
+  target.automation_action_appointment_status = pendingState?.automationActionAppointmentStatus || null;
+  target.automation_intent = pendingState?.automationIntent || null;
+  target.automation_possible_urgency = pendingState?.automationPossibleUrgency === true;
+  target.automation_needs_response = pendingState?.automationNeedsResponse === true;
+  target.automation_manual_action_required = pendingState?.automationManualActionRequired === true;
+  return target;
+}
+
 async function enrichConversationUnreadForUser(userId, conversationLike) {
   if (!conversationLike) {
     return conversationLike;
@@ -756,10 +773,7 @@ async function enrichConversationUnreadForUser(userId, conversationLike) {
   plain.pending_automation_message_id = pendingState?.requiresAutomationAttention === true
     ? (Number(pendingState?.automationAttentionMessageId || 0) || null)
     : null;
-  plain.automation_response_processing = pendingState?.isAutomationResponseProcessing === true;
-  plain.automation_response_processing_message_id = pendingState?.isAutomationResponseProcessing === true
-    ? (Number(pendingState?.automationResponseProcessingMessageId || 0) || null)
-    : null;
+  applyAutomationProcessingState(plain, pendingState);
   if (plain.channel === 'whatsapp') {
     plain.last_inbound_at_any_sender = plain.last_inbound_at || null;
     try {
@@ -1449,10 +1463,7 @@ exports.listConversations = async (req, res) => {
       data.pending_automation_message_id = pendingState?.requiresAutomationAttention === true
         ? (Number(pendingState?.automationAttentionMessageId || 0) || null)
         : null;
-      data.automation_response_processing = pendingState?.isAutomationResponseProcessing === true;
-      data.automation_response_processing_message_id = pendingState?.isAutomationResponseProcessing === true
-        ? (Number(pendingState?.automationResponseProcessingMessageId || 0) || null)
-        : null;
+      applyAutomationProcessingState(data, pendingState);
       return data;
     }));
     const withRestrictions = await attachContactRestrictions(rawPayload);

@@ -98,17 +98,16 @@ function localDateTimeToUtc(dateValue, timeValue, timeZone) {
   return new Date(timestamp);
 }
 
-function isoWeekday(dateValue) {
+function weekdayIndex(dateValue) {
   const match = cleanString(dateValue).match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!match) return null;
-  const day = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))).getUTCDay();
-  return day === 0 ? 7 : day;
+  return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))).getUTCDay();
 }
 
 function normalizeScheduleRows(rows) {
   return (Array.isArray(rows) ? rows : [])
     .map((row) => row?.get ? row.get({ plain: true }) : row)
-    .filter((row) => row?.activo !== false && Number(row?.dia_semana) >= 1 && Number(row?.dia_semana) <= 7)
+    .filter((row) => row?.activo !== false && Number(row?.dia_semana) >= 0 && Number(row?.dia_semana) <= 6)
     .map((row) => ({
       weekday: Number(row.dia_semana),
       start: cleanString(row.hora_inicio),
@@ -126,7 +125,7 @@ function computeNextClinicOpening({ now = new Date(), timeZone = DEFAULT_TIME_ZO
   const firstDate = nextDay ? addLocalDays(currentLocalDate, 1) : currentLocalDate;
   for (let dayOffset = 0; dayOffset < 21; dayOffset += 1) {
     const dateValue = addLocalDays(firstDate, dayOffset);
-    const intervals = schedule.filter((row) => row.weekday === isoWeekday(dateValue));
+    const intervals = schedule.filter((row) => row.weekday === weekdayIndex(dateValue));
     for (const interval of intervals) {
       const start = localDateTimeToUtc(dateValue, interval.start, timeZone);
       const end = localDateTimeToUtc(dateValue, interval.end, timeZone);
@@ -140,6 +139,60 @@ function computeNextClinicOpening({ now = new Date(), timeZone = DEFAULT_TIME_ZO
     }
   }
   return { available: false, reason: 'clinic_opening_not_found', waitUntil: null };
+}
+
+function computeClinicOpenState({ now = new Date(), timeZone = DEFAULT_TIME_ZONE, rows = [] }) {
+  const checkedAt = now instanceof Date && !Number.isNaN(now.getTime()) ? now : new Date();
+  const normalizedTimeZone = isValidTimeZone(timeZone) ? timeZone : DEFAULT_TIME_ZONE;
+  const parts = partsInTimeZone(checkedAt, normalizedTimeZone);
+  const dateValue = `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`;
+  const timeValue = `${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}`;
+  const schedule = normalizeScheduleRows(rows);
+
+  if (!schedule.length) {
+    return {
+      open_now: null,
+      has_schedule: false,
+      timezone: normalizedTimeZone,
+      local_date: dateValue,
+      local_time: timeValue,
+      checked_at: checkedAt.toISOString(),
+    };
+  }
+
+  const today = weekdayIndex(dateValue);
+  const openNow = schedule.some((interval) => (
+    interval.weekday === today
+    && timeValue >= interval.start
+    && timeValue < interval.end
+  ));
+  return {
+    open_now: openNow,
+    has_schedule: true,
+    timezone: normalizedTimeZone,
+    local_date: dateValue,
+    local_time: timeValue,
+    checked_at: checkedAt.toISOString(),
+  };
+}
+
+async function resolveClinicOpenState({ clinicId, now = new Date(), models = db }) {
+  const normalizedClinicId = Number(clinicId);
+  if (!Number.isInteger(normalizedClinicId) || normalizedClinicId <= 0 || !models?.ClinicaHorario) {
+    return computeClinicOpenState({ now, rows: [] });
+  }
+
+  const clinic = await models.Clinica.findByPk(normalizedClinicId, {
+    attributes: ['id_clinica', 'configuracion'],
+    raw: true,
+  });
+  const timeZone = resolveClinicTimeZone(clinic);
+  const rows = await models.ClinicaHorario.findAll({
+    where: { clinica_id: normalizedClinicId, activo: true },
+    attributes: ['dia_semana', 'hora_inicio', 'hora_fin', 'activo'],
+    raw: true,
+  });
+  return computeClinicOpenState({ now, timeZone, rows });
 }
 
 async function resolveLeadAutoReplyWait({ clinicId, scheduleScope, timing, now = new Date(), models = db }) {
@@ -173,9 +226,12 @@ module.exports = {
   DEFAULT_NEXT_DAY_TIME,
   DEFAULT_TIME_ZONE,
   addLocalDays,
+  computeClinicOpenState,
   computeNextClinicOpening,
   localDateTimeToUtc,
   normalizeScheduleRows,
+  resolveClinicOpenState,
   resolveClinicTimeZone,
   resolveLeadAutoReplyWait,
+  weekdayIndex,
 };

@@ -127,6 +127,52 @@ function cloneJson(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function stableJson(value) {
+  if (Array.isArray(value)) return value.map(stableJson);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.keys(value).sort().map((key) => [key, stableJson(value[key])]),
+    );
+  }
+  return value;
+}
+
+function jsonEquivalent(left, right) {
+  return JSON.stringify(stableJson(left ?? null)) === JSON.stringify(stableJson(right ?? null));
+}
+
+function catalogTemplateMatchesDesired(row, payload, isActive) {
+  if (!row) return false;
+  const bool = (value) => value === true || Number(value) === 1;
+  const int = (value) => parseIntOrNull(value);
+  return String(row.engine_version || '') === String(payload.engine_version || '')
+    && String(row.name || '') === String(payload.name || '')
+    && String(row.description || '') === String(payload.description || '')
+    && String(row.trigger_type || '') === String(payload.trigger_type || '')
+    && bool(row.is_active) === (isActive === true)
+    && bool(row.is_system) === (payload.is_system === true)
+    && int(row.clinic_id) === int(payload.clinic_id)
+    && int(row.group_id) === int(payload.group_id)
+    && String(row.entry_node_id || '') === String(payload.entry_node_id || '')
+    && jsonEquivalent(row.nodes, payload.nodes)
+    && jsonEquivalent(row.trigger_config, payload.trigger_config);
+}
+
+function mergeLocalMessageReceivedTriggerConfig(sourceConfig, localConfig) {
+  const source = cloneJson(sourceConfig) || {};
+  const local = localConfig && typeof localConfig === 'object' ? localConfig : {};
+  const customizableKeys = ['channel_scope', 'channels', 'timing'];
+  customizableKeys.forEach((key) => {
+    if (local[key] !== undefined) source[key] = cloneJson(local[key]);
+  });
+  return {
+    ...source,
+    only_unclaimed: true,
+    response_buffer_seconds: 90,
+    runtime_fallback_enabled: false,
+  };
+}
+
 function getNodesArray(templateOrNodes) {
   const raw = Array.isArray(templateOrNodes)
     ? templateOrNodes
@@ -307,14 +353,12 @@ async function resolveLinkedTemplateForCatalog(catalogFlow) {
     ? { public_id: normalizedRef }
     : { template_key: sanitizeTemplateKey(normalizedRef) };
 
-  const version = parseIntOrNull(catalogFlow?.template_version);
-  const where = { ...familyWhere };
-  if (version) {
-    where.version = version;
-  }
-
   const candidates = await AutomationFlowTemplateV2.findAll({
-    where,
+    where: {
+      ...familyWhere,
+      is_active: true,
+      published_at: { [Op.ne]: null },
+    },
     order: [['version', 'DESC'], ['id', 'DESC']],
   });
 
@@ -492,6 +536,7 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
   }
 
   const isManagedLeadAutoReply = catalogFlow.name === 'auto_bienvenida_lead';
+  const isMessageReceivedAutomation = String(linkedTemplate.trigger_type || '') === 'message_received';
   const isManagedReviewAutomation = getNodesArray(linkedTemplate)
     .some((node) => String(node?.type || '') === REVIEW_AUTOMATION_ACTION);
   const reviewConfiguration = isManagedReviewAutomation && latestPublished
@@ -504,14 +549,23 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
     ? reviewConfiguration?.configured === true && latestPublished?.is_active === true
     : latestPublished
       ? latestPublished.is_active !== false
-      : !isManagedLeadAutoReply;
+      : (
+          !isManagedLeadAutoReply
+          && (!isMessageReceivedAutomation || catalogFlow.is_default_for_trigger === true)
+        );
   const nodes = mergeLocalReviewConfigIntoCatalogNodes(linkedTemplate.nodes, latestPublished);
-  const triggerConfig = (
+  let triggerConfig = (
     (isManagedLeadAutoReply && latestPublished?.trigger_config?.managed_feature === 'lead_auto_reply')
     || (isManagedReviewAutomation && reviewConfiguration?.configured === true)
   )
     ? cloneJson(latestPublished.trigger_config)
     : linkedTemplate.trigger_config ?? null;
+  if (isMessageReceivedAutomation) {
+    triggerConfig = mergeLocalMessageReceivedTriggerConfig(
+      linkedTemplate.trigger_config,
+      latestPublished?.trigger_config,
+    );
+  }
 
   const payload = {
     engine_version: 'v2',
@@ -529,6 +583,19 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
     published_by: null,
     created_by: actorUserId || linkedTemplate.created_by || 1,
   };
+
+  if (
+    !existingDraft
+    && latestPublished
+    && catalogTemplateMatchesDesired(latestPublished, payload, targetActive)
+  ) {
+    return {
+      status: 'unchanged',
+      template_key: latestPublished.template_key,
+      version: latestPublished.version,
+      scheduled_backfill: null,
+    };
+  }
 
   if (existingDraft) {
     await db.sequelize.transaction(async (transaction) => {
@@ -585,10 +652,12 @@ async function createDefaultAutomationsForClinic({ clinicId }) {
 
   let createdCount = 0;
   let updatedCount = 0;
+  let unchangedCount = 0;
   for (const flow of catalogFlows) {
     const result = await ensureCatalogTemplateForClinic({ clinicId, catalogFlow: flow });
     if (result.status === 'created') createdCount += 1;
     if (result.status === 'updated') updatedCount += 1;
+    if (result.status === 'unchanged') unchangedCount += 1;
   }
 
   // Crear placeholders de plantillas (SIN_CONECTAR)
@@ -598,7 +667,12 @@ async function createDefaultAutomationsForClinic({ clinicId }) {
     groupId: null,
   });
 
-  return { automations: createdCount, updated_automations: updatedCount, templates: placeholders.length };
+  return {
+    automations: createdCount,
+    updated_automations: updatedCount,
+    unchanged_automations: unchangedCount,
+    templates: placeholders.length,
+  };
 }
 
 async function propagateCatalogAutomationToClinics({ catalogId, actorUserId = null }) {
@@ -626,6 +700,7 @@ async function propagateCatalogAutomationToClinics({ catalogId, actorUserId = nu
 
   let created = 0;
   let updated = 0;
+  let unchanged = 0;
   let failed = 0;
 
   for (const clinic of eligibleClinics) {
@@ -636,6 +711,7 @@ async function propagateCatalogAutomationToClinics({ catalogId, actorUserId = nu
     });
     if (result.status === 'created') created += 1;
     else if (result.status === 'updated') updated += 1;
+    else if (result.status === 'unchanged') unchanged += 1;
     else if (result.status === 'failed') failed += 1;
   }
 
@@ -644,6 +720,7 @@ async function propagateCatalogAutomationToClinics({ catalogId, actorUserId = nu
     catalog_id: item.id,
     created,
     updated,
+    unchanged,
     failed,
     clinics_total: eligibleClinics.length,
   };
@@ -659,6 +736,7 @@ async function enqueueDefaultAutomations(data) {
 }
 
 module.exports = {
+  catalogTemplateMatchesDesired,
   createDefaultAutomationsForClinic,
   ensureCatalogTemplateForClinic,
   enqueueDefaultAutomations,

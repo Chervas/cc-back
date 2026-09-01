@@ -1271,6 +1271,9 @@ async function cancelActiveExecutionsForCita(cita, options = {}) {
   }
 
   const excludeTriggerTypes = normalizeStringArray(options.exclude_trigger_types || options.excludeTriggerTypes);
+  const excludeExecutionIds = normalizeStringArray(
+    options.exclude_execution_ids || options.excludeExecutionIds
+  ).map(toIntOrNull).filter(Boolean);
   const where = {
     trigger_entity_type: 'appointment',
     trigger_entity_id: citaId,
@@ -1278,6 +1281,9 @@ async function cancelActiveExecutionsForCita(cita, options = {}) {
   };
   if (excludeTriggerTypes.length) {
     where.trigger_type = { [Op.notIn]: excludeTriggerTypes };
+  }
+  if (excludeExecutionIds.length) {
+    where.id = { [Op.notIn]: excludeExecutionIds };
   }
 
   const executions = await FlowExecutionV2.findAll({
@@ -1627,7 +1633,7 @@ async function fireScheduledTrigger(payload = {}) {
     return { success: true, skipped: true, reason: 'imported_historical_appointment' };
   }
   const normalizedStatus = cleanString(cita?.estado).toLowerCase();
-  if (['cancelada', 'no_asistio'].includes(normalizedStatus)) {
+  if (['cambio_solicitado', 'cancelada', 'no_asistio'].includes(normalizedStatus)) {
     return { success: true, skipped: true, reason: `appointment_${normalizedStatus}` };
   }
 
