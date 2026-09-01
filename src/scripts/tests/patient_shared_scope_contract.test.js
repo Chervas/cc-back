@@ -46,7 +46,12 @@ async function main() {
   );
   assert.match(
     source,
-    /const citas = await CitaPaciente\.findAll\(\{[\s\S]*?clinica_id: \{ \[Op\.in\]: readableClinicIds \}/,
+    /citas_pasadas_count: Number\(pastCount \|\| 0\)/,
+    'el resumen del paciente debe exponer un contador de citas pasadas para la ficha compacta',
+  );
+  assert.match(
+    source,
+    /CitaPaciente\.findAll\(\{[\s\S]*?clinica_id: \{ \[Op\.in\]: readableClinicIds \}/,
     'la actividad de citas debe quedar filtrada por las clínicas visibles',
   );
   const patientListBlock = source.slice(

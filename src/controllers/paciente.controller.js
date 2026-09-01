@@ -369,6 +369,7 @@ const serializePacienteAppointmentSummary = (cita) => {
     inicio: plain.inicio,
     fin: plain.fin,
     titulo: plain.titulo || plain.motivo || null,
+    nota: plain.nota || null,
     clinica: plain.clinica ? {
       id_clinica: plain.clinica.id_clinica,
       nombre_clinica: plain.clinica.nombre_clinica,
@@ -397,7 +398,7 @@ const getPacienteAppointmentBounds = async (pacienteId, clinicIds) => {
     estado: { [Op.notIn]: ACTIVE_APPOINTMENT_EXCLUDED_STATES },
   };
   const include = buildPacienteAppointmentInclude();
-  const [proxima, ultima] = await Promise.all([
+  const [proxima, ultima, pastCount] = await Promise.all([
     CitaPaciente.findOne({
       where: {
         ...baseWhere,
@@ -417,10 +418,17 @@ const getPacienteAppointmentBounds = async (pacienteId, clinicIds) => {
       include,
       order: [['inicio', 'DESC']],
     }),
+    CitaPaciente.count({
+      where: {
+        ...baseWhere,
+        inicio: { [Op.lt]: now },
+      },
+    }),
   ]);
   return {
     proxima_cita: serializePacienteAppointmentSummary(proxima),
     ultima_cita: serializePacienteAppointmentSummary(ultima),
+    citas_pasadas_count: Number(pastCount || 0),
   };
 };
 
