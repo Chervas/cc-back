@@ -19,6 +19,11 @@ const resolveDirectoryAccess = async (req, res, next) => {
     if (!Number.isInteger(actorId) || actorId <= 0) {
       return res.status(401).json({ message: 'Unauthorized' });
     }
+    const targetId = Number(req.params?.id);
+    if (req.method === 'GET' && Number.isInteger(targetId) && actorId === targetId) {
+      req.userDirectoryAccess = { mode: 'self', clinicIds: null };
+      return next();
+    }
     if (isGlobalAdmin(actorId)) {
       req.userDirectoryAccess = { mode: 'admin', clinicIds: null };
       return next();
