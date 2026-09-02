@@ -1338,6 +1338,43 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
 }
 
 const parseBool = (v) => v === true || v === 'true' || v === '1';
+const cleanOptionalString = (value, maxLength = null) => {
+    if (value === undefined || value === null) return null;
+    const normalized = String(value).trim();
+    if (!normalized) return null;
+    return maxLength && normalized.length > maxLength ? normalized.slice(0, maxLength) : normalized;
+};
+const parsePlainObject = (value) => {
+    if (!value) return {};
+    if (typeof value === 'object' && !Array.isArray(value)) return value;
+    if (typeof value !== 'string') return {};
+    try {
+        const parsed = JSON.parse(value);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch (_error) {
+        return {};
+    }
+};
+const normalizeAppointmentNotificationSuppression = (value, { historicalRegistration = false } = {}) => {
+    const raw = parsePlainObject(value);
+    const appointmentDetails = historicalRegistration
+        || parseBool(raw.appointment_details)
+        || parseBool(raw.appointmentDetails)
+        || parseBool(raw.appointment_created);
+    const dayBefore = historicalRegistration || parseBool(raw.day_before) || parseBool(raw.dayBefore);
+    const sameDay = historicalRegistration || parseBool(raw.same_day) || parseBool(raw.sameDay);
+    if (!appointmentDetails && !dayBefore && !sameDay && !historicalRegistration) return null;
+    return {
+        appointment_details: appointmentDetails,
+        day_before: dayBefore,
+        same_day: sameDay,
+        locked: historicalRegistration || parseBool(raw.locked),
+        reason: historicalRegistration
+            ? 'lead_resolution_historical'
+            : (cleanOptionalString(raw.reason, 80) || 'manual_selection'),
+        manual_confirmation_required: appointmentDetails || dayBefore || sameDay,
+    };
+};
 const overlap = (startA, endA, startB, endB) => startA < endB && startB < endA;
 const dayIndexFromLocalDate = (fechaLocal) => new Date(`${fechaLocal}T12:00:00Z`).getUTCDay();
 
@@ -1955,6 +1992,11 @@ exports.createCita = asyncHandler(async (req, res) => {
             instalacion_id = null,
             tratamiento_id = null,
             campana_id = null,
+            historical_registration = false,
+            source_system = null,
+            source_reference = null,
+            import_metadata = null,
+            notification_suppression = null,
             force = false,
             paciente: datosPaciente
         } = req.body || {};
@@ -2050,6 +2092,23 @@ exports.createCita = asyncHandler(async (req, res) => {
         if (!duracionEfectiva) duracionEfectiva = 30;
         if (!finDate) finDate = new Date(inicioDate.getTime() + duracionEfectiva * 60000);
 
+        const isHistoricalRegistration = parseBool(historical_registration)
+            || cleanOptionalString(source_system, 40)?.toLowerCase() === 'lead_resolution_historical';
+        const notificationSuppression = normalizeAppointmentNotificationSuppression(notification_suppression, {
+            historicalRegistration: isHistoricalRegistration,
+        });
+        const baseImportMetadata = parsePlainObject(import_metadata);
+        const appointmentImportMetadata = {
+            ...baseImportMetadata,
+            ...(isHistoricalRegistration ? {
+                kind: baseImportMetadata.kind || 'lead_resolution_historical',
+                historical_registration: true,
+            } : {}),
+            ...(notificationSuppression ? {
+                notification_suppression: notificationSuppression,
+            } : {}),
+        };
+
         // Chequear disponibilidad si hay doctor/instalación (canónico + legacy)
         const { resourceConflicts, legacyConflicts, canForce } = await checkDisponibilidadCanonica({
             clinica_id,
@@ -2119,11 +2178,16 @@ exports.createCita = asyncHandler(async (req, res) => {
                 updated_by: req.userData?.userId || null,
                 titulo: datosPaciente.titulo || null,
                 nota: nota || null,
-                motivo: motivo || null,
+                motivo: motivo || (isHistoricalRegistration ? 'Cita pasada registrada manualmente desde Leads' : null),
                 tipo_cita,
                 estado: estadoRaw,
                 inicio: inicioDate,
-                fin: finDate
+                fin: finDate,
+                source_system: isHistoricalRegistration
+                    ? 'lead_resolution_historical'
+                    : cleanOptionalString(source_system, 40),
+                source_reference: cleanOptionalString(source_reference, 120),
+                import_metadata: Object.keys(appointmentImportMetadata).length ? appointmentImportMetadata : null,
             },
             patient: paciente,
             requestedLanguage: datosPaciente.idioma_preferido,

@@ -185,6 +185,13 @@ const LEAD_STATUSES_CLOSED_FOR_PENDING_SIGNALS = new Set([
   'convertido',
   'descartado',
 ]);
+const LEAD_CONTACT_CHANNELS = new Set(['llamada', 'whatsapp', 'email', 'dm', 'otro']);
+const LEAD_NOTICE_RESOLUTIONS = new Set([
+  'appointment_scheduled',
+  'information_sent',
+  'no_answer',
+  'close_notice',
+]);
 
 const SIGNATURE_HEADER = 'x-cc-signature';
 const SIGNATURE_HEADER_SHA = 'x-cc-signature-sha256';
@@ -285,6 +292,16 @@ const truncateString = (value, maxLength) => {
   const normalized = cleanString(value);
   if (!normalized) return null;
   return normalized.length > maxLength ? normalized.slice(0, maxLength) : normalized;
+};
+const normalizeLeadContactChannel = (value, fallback = 'llamada') => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (LEAD_CONTACT_CHANNELS.has(normalized)) return normalized;
+  return LEAD_CONTACT_CHANNELS.has(fallback) ? fallback : 'llamada';
+};
+const inferLeadContactChannel = (motivo, explicitChannel = null) => {
+  const motive = String(motivo || '').trim().toLowerCase();
+  const fallback = motive.startsWith('whatsapp') ? 'whatsapp' : 'llamada';
+  return normalizeLeadContactChannel(explicitChannel, fallback);
 };
 const escapeHtml = (value) => String(value ?? '')
   .replace(/&/g, '&amp;')
@@ -2160,6 +2177,17 @@ const enrichLeadsWithPatientMatches = async (leadRows = []) => {
   });
 };
 
+const latestManualContactDateFromLeadHistory = (lead) => {
+  const rows = parseJsonArrayForCompetition(lead?.historial_contactos);
+  const candidates = rows
+    .filter((row) => row && row.usuario_id !== null && row.usuario_id !== undefined)
+    .filter((row) => !String(row.motivo || '').toLowerCase().startsWith('lead_auto_reply'))
+    .map((row) => toFiniteDate(row.fecha))
+    .filter(Boolean)
+    .sort((a, b) => b.getTime() - a.getTime());
+  return candidates[0] || null;
+};
+
 const enrichLeadsWithConversationState = async (leadRows = []) => {
   const leads = leadRows.map((lead) => toPlain(lead));
   const leadIds = Array.from(new Set(
@@ -2200,8 +2228,68 @@ const enrichLeadsWithConversationState = async (leadRows = []) => {
     ...leads.map((lead) => lead?.conversation_id),
   ]);
 
+  const conversationIds = Array.from(new Set(
+    [
+      ...Array.from(conversationByLead.values()).map((conversation) => parseInteger(conversation.id)),
+      ...leads.map((lead) => parseInteger(lead?.conversation_id)),
+    ].filter((id) => id !== null)
+  ));
+  const latestInboundAtByConversation = new Map();
+  if (conversationIds.length && Message) {
+    const latestInboundRows = await db.sequelize.query(`
+      SELECT
+        conversation_id,
+        MAX(COALESCE(sent_at, createdAt)) AS latest_inbound_at
+      FROM Messages
+      WHERE conversation_id IN (:conversationIds)
+        AND direction = 'inbound'
+        AND message_type <> 'event'
+        AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.qa_cleanup')), 'false') <> 'true'
+        AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.hide_from_quickchat')), 'false') <> 'true'
+      GROUP BY conversation_id
+    `, {
+      replacements: { conversationIds },
+      type: db.Sequelize.QueryTypes.SELECT,
+    });
+    latestInboundRows.forEach((row) => {
+      const conversationId = parseInteger(row.conversation_id);
+      const latestInboundAt = toFiniteDate(row.latest_inbound_at);
+      if (conversationId !== null && latestInboundAt) {
+        latestInboundAtByConversation.set(conversationId, latestInboundAt);
+      }
+    });
+  }
+
+  const latestManualContactAtByLead = new Map();
+  if (leadIds.length && LeadContactAttempt) {
+    const attemptRows = await LeadContactAttempt.findAll({
+      attributes: [
+        'lead_intake_id',
+        [db.Sequelize.fn('MAX', db.Sequelize.col('created_at')), 'latest_contact_at'],
+      ],
+      where: {
+        lead_intake_id: { [Op.in]: leadIds },
+        usuario_id: { [Op.not]: null },
+        [Op.or]: [
+          { motivo: null },
+          { motivo: { [Op.notLike]: 'lead_auto_reply%' } },
+        ],
+      },
+      group: ['lead_intake_id'],
+      raw: true,
+    });
+    attemptRows.forEach((row) => {
+      const leadId = parseInteger(row.lead_intake_id);
+      const latestContactAt = toFiniteDate(row.latest_contact_at);
+      if (leadId !== null && latestContactAt) {
+        latestManualContactAtByLead.set(leadId, latestContactAt);
+      }
+    });
+  }
+
   return leads.map((lead) => {
-    const conversation = conversationByLead.get(parseInteger(lead?.id));
+    const leadId = parseInteger(lead?.id);
+    const conversation = conversationByLead.get(leadId);
     const conversationId = parseInteger(conversation?.id) || parseInteger(lead?.conversation_id);
     if (isLeadClosedForPendingSignals(lead)) {
       return {
@@ -2212,11 +2300,26 @@ const enrichLeadsWithConversationState = async (leadRows = []) => {
       };
     }
     const pendingState = conversationId !== null ? pendingStates.get(conversationId) : null;
+    let pendingReplyCount = pendingState?.count || 0;
+    let pendingAutomationAttention = pendingState?.requiresAutomationAttention === true;
+    if (pendingReplyCount > 0 && leadId !== null && conversationId !== null) {
+      const latestInboundAt = latestInboundAtByConversation.get(conversationId);
+      const latestManualContactAt = [
+        latestManualContactAtByLead.get(leadId),
+        latestManualContactDateFromLeadHistory(lead),
+      ]
+        .filter(Boolean)
+        .sort((a, b) => b.getTime() - a.getTime())[0] || null;
+      if (latestInboundAt && latestManualContactAt && latestManualContactAt.getTime() > latestInboundAt.getTime()) {
+        pendingReplyCount = 0;
+        pendingAutomationAttention = false;
+      }
+    }
     return {
       ...lead,
       conversation_id: conversationId,
-      pending_whatsapp_reply_count: pendingState?.count || 0,
-      pending_automation_attention: pendingState?.requiresAutomationAttention === true,
+      pending_whatsapp_reply_count: pendingReplyCount,
+      pending_automation_attention: pendingAutomationAttention,
     };
   });
 };
@@ -7175,7 +7278,7 @@ exports.updateLeadStatus = asyncHandler(async (req, res) => {
 
 exports.registrarContacto = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { motivo, notas } = req.body || {};
+  const { motivo, notas, canal } = req.body || {};
   const reminderAtRaw = req.body?.callback_reminder_at;
   const reminderReason = cleanString(req.body?.callback_reminder_reason) || formatLeadContactReason(motivo) || 'Volver a llamar';
   const reminderNotes = cleanString(req.body?.callback_reminder_notes) || cleanString(notas);
@@ -7200,11 +7303,12 @@ exports.registrarContacto = asyncHandler(async (req, res) => {
   
   // Añadir nuevo registro de contacto
   const contactedAt = new Date();
+  const contactChannel = inferLeadContactChannel(motivo, canal);
   const nuevoContacto = {
     fecha: contactedAt.toISOString(),
     motivo: motivo || 'no_contesta',
     notas: notas || null,
-    canal: 'llamada',
+    canal: contactChannel,
     usuario_id: req.userData?.userId || null
   };
   
@@ -7275,7 +7379,7 @@ exports.registrarContacto = asyncHandler(async (req, res) => {
       await LeadContactAttempt.create({
         lead_intake_id: lead.id,
         usuario_id: req.userData?.userId || null,
-        canal: 'llamada',
+        canal: contactChannel,
         motivo: motivo || 'no_contesta',
         notas: notas || null,
         created_at: contactedAt,
@@ -7296,6 +7400,7 @@ exports.registrarContacto = asyncHandler(async (req, res) => {
         action: 'registrar_contacto',
         motivo,
         notas,
+        canal: contactChannel,
         callback_reminder_at: reminderAt ? reminderAt.toISOString() : null,
         callback_reminder_reason: reminderAt ? reminderReason : null,
       },
@@ -7306,6 +7411,211 @@ exports.registrarContacto = asyncHandler(async (req, res) => {
   }
 
   res.status(200).json(lead);
+});
+
+exports.resolveLeadNotice = asyncHandler(async (req, res) => {
+  const leadId = parseInteger(req.params.id);
+  const resolution = cleanString(req.body?.resolution);
+  const appointmentId = parseInteger(req.body?.appointment_id);
+  const notes = cleanString(req.body?.notes);
+
+  if (leadId === null) {
+    return res.status(400).json({ message: 'Lead inválido' });
+  }
+  if (!LEAD_NOTICE_RESOLUTIONS.has(resolution)) {
+    return res.status(400).json({ message: 'resolution inválida' });
+  }
+  if (appointmentId !== null && resolution !== 'appointment_scheduled') {
+    return res.status(400).json({ message: 'appointment_id solo es válido para appointment_scheduled' });
+  }
+
+  const lead = await LeadIntake.findByPk(leadId);
+  if (!lead) {
+    return res.status(404).json({ message: 'Lead no encontrado' });
+  }
+  if (!(await ensureLeadFeatureAccess(req, res, lead, 'leads.manage'))) return;
+
+  let linkedAppointment = null;
+  let qualifiedLeadConversion = null;
+  let scheduleConversion = null;
+  const now = new Date();
+
+  if (resolution === 'appointment_scheduled') {
+    if (appointmentId === null) {
+      return res.status(400).json({ message: 'appointment_id es obligatorio para vincular una cita' });
+    }
+    linkedAppointment = await CitaPaciente.findByPk(appointmentId);
+    if (!linkedAppointment) {
+      return res.status(404).json({ message: 'Cita no encontrada' });
+    }
+    if (parseInteger(linkedAppointment.clinica_id) !== parseInteger(lead.clinica_id)) {
+      return res.status(409).json({ message: 'La cita no pertenece a la clínica del lead' });
+    }
+    const linkedLeadId = parseInteger(linkedAppointment.lead_intake_id);
+    if (linkedLeadId !== null && linkedLeadId !== leadId) {
+      return res.status(409).json({ message: 'La cita ya está vinculada a otro lead' });
+    }
+    if (!LEAD_ACTIVE_APPOINTMENT_STATES.has(String(linkedAppointment.estado || '').trim().toLowerCase())) {
+      return res.status(409).json({ message: 'La cita no está activa y no puede cerrar este lead' });
+    }
+
+    if (linkedLeadId !== leadId) {
+      await linkedAppointment.update({
+        lead_intake_id: leadId,
+        ...(lead.campana_id && !linkedAppointment.campana_id ? { campana_id: lead.campana_id } : {}),
+      });
+    }
+
+    qualifiedLeadConversion = await ensureQualifiedLeadConversion({
+      lead,
+      occurredAt: linkedAppointment.created_at || now,
+      logger: console,
+    });
+
+    const updatePayload = {
+      status_lead: 'citado',
+      call_outcome_appointment_id: appointmentId,
+      callback_reminder_at: null,
+      callback_reminder_reason: null,
+      callback_reminder_notes: null,
+      callback_reminder_created_by: null,
+      callback_reminder_job_id: null,
+      callback_reminder_notified_at: null,
+    };
+    if (lead.call_initiated && !lead.call_outcome) {
+      updatePayload.call_outcome = 'citado';
+      updatePayload.call_outcome_at = now;
+      updatePayload.call_outcome_notes = notes || 'Cita vinculada desde la resolución del aviso del lead.';
+    }
+
+    if (lead.callback_reminder_job_id) {
+      try {
+        await jobRequestsService.markCancelled(lead.callback_reminder_job_id, {
+          errorMessage: 'Recordatorio cancelado por resolución del aviso del lead',
+        });
+      } catch (_err) {
+        // no bloqueamos el guardado de la resolución
+      }
+    }
+
+    await lead.update(updatePayload);
+
+    scheduleConversion = await uploadScheduleForLinkedAppointment({
+      lead,
+      appointment: linkedAppointment,
+      logger: console,
+    });
+  } else {
+    const resolutionContact = {
+      information_sent: {
+        motivo: 'whatsapp_message_sent',
+        canal: 'whatsapp',
+        notas: notes || 'Información enviada al lead.',
+      },
+      no_answer: {
+        motivo: 'no_contesta',
+        canal: 'llamada',
+        notas: notes || 'Se intentó contactar, no contesta.',
+      },
+      close_notice: {
+        motivo: 'otro',
+        canal: 'otro',
+        notas: notes || 'Aviso operativo cerrado sin cambiar estado.',
+      },
+    }[resolution];
+
+    const historial = Array.isArray(lead.historial_contactos) ? [...lead.historial_contactos] : [];
+    const contactChannel = normalizeLeadContactChannel(resolutionContact.canal);
+    historial.push({
+      fecha: now.toISOString(),
+      motivo: resolutionContact.motivo,
+      notas: resolutionContact.notas,
+      canal: contactChannel,
+      usuario_id: req.userData?.userId || null,
+    });
+
+    const currentStatus = String(lead.status_lead || '').trim().toLowerCase();
+    const updatePayload = {
+      historial_contactos: historial,
+      num_contactos: (lead.num_contactos || 0) + 1,
+      ultimo_contacto: now,
+    };
+    if (resolution !== 'close_notice' && !['cualificado', 'citado', 'acudio_cita', 'convertido', 'descartado'].includes(currentStatus)) {
+      updatePayload.status_lead = 'contactado';
+    }
+    if (resolution === 'information_sent' && lead.call_initiated && !lead.call_outcome) {
+      updatePayload.call_outcome = 'informacion';
+      updatePayload.call_outcome_at = now;
+      updatePayload.call_outcome_notes = resolutionContact.notas;
+    }
+    if (resolution === 'no_answer' && lead.call_initiated && !lead.call_outcome) {
+      updatePayload.call_outcome = 'no_contactado';
+      updatePayload.call_outcome_at = now;
+      updatePayload.call_outcome_notes = resolutionContact.notas;
+    }
+    await lead.update(updatePayload);
+
+    if (LeadContactAttempt) {
+      try {
+        await LeadContactAttempt.create({
+          lead_intake_id: lead.id,
+          usuario_id: req.userData?.userId || null,
+          canal: contactChannel,
+          motivo: resolutionContact.motivo,
+          notas: resolutionContact.notas,
+          created_at: now,
+          updated_at: now,
+        });
+      } catch (attemptErr) {
+        console.warn('⚠️ No se pudo normalizar la resolución del aviso:', attemptErr.message || attemptErr);
+      }
+    }
+  }
+
+  try {
+    await LeadAttributionAudit.create({
+      lead_intake_id: lead.id,
+      raw_payload: {
+        action: 'resolve_notice',
+        resolution,
+        appointment_id: appointmentId,
+        notes,
+      },
+      attribution_steps: {
+        action: 'resolve_notice',
+        userId: req.userData?.userId || null,
+        appointment_linked: Boolean(linkedAppointment),
+        qualified_lead_event_id: linkedAppointment ? `lead-${lead.id}-qualified` : null,
+        schedule_event_id: linkedAppointment ? `appointment-${linkedAppointment.id_cita}` : null,
+        qualified_lead_conversion: qualifiedLeadConversion
+          ? { sent: qualifiedLeadConversion.sent === true, accepted: qualifiedLeadConversion.accepted === true, reason: qualifiedLeadConversion.reason || null }
+          : null,
+        schedule_conversion: scheduleConversion
+          ? { sent: scheduleConversion.sent === true, accepted: scheduleConversion.accepted === true, reason: scheduleConversion.reason || null }
+          : null,
+      },
+    });
+  } catch (auditErr) {
+    console.warn('⚠️ No se pudo registrar auditoría de resolución de aviso:', auditErr.message || auditErr);
+  }
+
+  if (lead.call_outcome) {
+    try {
+      await emitLeadSocketEvent(
+        'lead:call_outcome',
+        buildLeadCallOutcomeSocketPayload({
+          lead,
+          clinicId: lead.clinica_id,
+          groupId: lead.grupo_clinica_id,
+        }),
+        { clinicId: lead.clinica_id, groupId: lead.grupo_clinica_id }
+      );
+    } catch (emitErr) {
+      console.warn('⚠️ No se pudo emitir lead:call_outcome:', emitErr.message || emitErr);
+    }
+  }
+
+  return res.status(200).json({ lead });
 });
 
 exports.getCandidateAppointments = asyncHandler(async (req, res) => {
