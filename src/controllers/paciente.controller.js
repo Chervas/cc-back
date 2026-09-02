@@ -334,6 +334,7 @@ const formatAppointmentStateLabel = (estado) => {
     info_confirmada: 'Cita confirmada',
     recordatorio_enviado: 'Recordatorio enviado',
     recordatorio_confirmado: 'Cita confirmada',
+    cambio_solicitado: 'Cambio solicitado',
     completada: 'Completada',
     no_asistio: 'No asistió',
     cancelada: 'Cancelada',
@@ -368,6 +369,7 @@ const serializePacienteAppointmentSummary = (cita) => {
     inicio: plain.inicio,
     fin: plain.fin,
     titulo: plain.titulo || plain.motivo || null,
+    nota: plain.nota || null,
     clinica: plain.clinica ? {
       id_clinica: plain.clinica.id_clinica,
       nombre_clinica: plain.clinica.nombre_clinica,
@@ -396,7 +398,7 @@ const getPacienteAppointmentBounds = async (pacienteId, clinicIds) => {
     estado: { [Op.notIn]: ACTIVE_APPOINTMENT_EXCLUDED_STATES },
   };
   const include = buildPacienteAppointmentInclude();
-  const [proxima, ultima] = await Promise.all([
+  const [proxima, ultima, pastCount] = await Promise.all([
     CitaPaciente.findOne({
       where: {
         ...baseWhere,
@@ -416,10 +418,17 @@ const getPacienteAppointmentBounds = async (pacienteId, clinicIds) => {
       include,
       order: [['inicio', 'DESC']],
     }),
+    CitaPaciente.count({
+      where: {
+        ...baseWhere,
+        inicio: { [Op.lt]: now },
+      },
+    }),
   ]);
   return {
     proxima_cita: serializePacienteAppointmentSummary(proxima),
     ultima_cita: serializePacienteAppointmentSummary(ultima),
+    citas_pasadas_count: Number(pastCount || 0),
   };
 };
 
@@ -1467,6 +1476,7 @@ exports.getPacienteActivity = async (req, res) => {
         info_confirmada: 'appointment_confirmed',
         recordatorio_enviado: 'appointment_reminder_sent',
         recordatorio_confirmado: 'appointment_confirmed',
+        cambio_solicitado: 'appointment_change_requested',
         completada: 'appointment_completed',
         cancelada: 'appointment_cancelled',
         no_asistio: 'appointment_no_show',
@@ -1477,6 +1487,7 @@ exports.getPacienteActivity = async (req, res) => {
         info_confirmada: 'Cita confirmada',
         recordatorio_enviado: 'Recordatorio enviado',
         recordatorio_confirmado: 'Cita confirmada por el paciente',
+        cambio_solicitado: 'Cambio de cita solicitado',
         completada: 'Cita completada',
         cancelada: 'Cita cancelada',
         no_asistio: 'Paciente no acude',
@@ -1487,6 +1498,7 @@ exports.getPacienteActivity = async (req, res) => {
         info_confirmada: 'heroicons_outline:check-badge',
         recordatorio_enviado: 'heroicons_outline:bell-alert',
         recordatorio_confirmado: 'heroicons_outline:hand-thumb-up',
+        cambio_solicitado: 'heroicons_outline:arrow-path-rounded-square',
         completada: 'heroicons_outline:check',
         cancelada: 'heroicons_outline:x-circle',
         no_asistio: 'heroicons_outline:hand-thumb-down',
@@ -1513,7 +1525,7 @@ exports.getPacienteActivity = async (req, res) => {
         descripcion: updatedDescriptions.plain,
         descripcion_html: updatedDescriptions.html,
         icono: iconByStatus[cita.estado] || 'heroicons_outline:check-badge',
-        color: ['cancelada', 'no_asistio'].includes(cita.estado)
+        color: ['cambio_solicitado', 'cancelada', 'no_asistio'].includes(cita.estado)
           ? 'warning'
           : (['info_enviada', 'recordatorio_enviado', 'reprogramada'].includes(cita.estado) ? 'info' : 'success'),
         citaId: String(cita.id_cita),

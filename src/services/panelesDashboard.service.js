@@ -46,6 +46,7 @@ const ATTENDANCE_OPEN_STATUSES = new Set([
   'info_confirmada',
   'recordatorio_enviado',
   'recordatorio_confirmado',
+  'cambio_solicitado',
 ]);
 const CANCELLED_STATUSES = new Set(['cancelada', 'reprogramada']);
 const CLOSED_ATTENDANCE_STATUSES = new Set(['completada', 'no_asistio']);
@@ -187,6 +188,8 @@ function statusUi(rawStatus) {
       return { status: 'reminder-sent', label: 'Recordatorio' };
     case 'recordatorio_confirmado':
       return { status: 'reminder-confirmed', label: 'Confirmada' };
+    case 'cambio_solicitado':
+      return { status: 'change-requested', label: 'Cambio solicitado' };
     case 'completada':
       return { status: 'attended', label: 'Acudió' };
     case 'no_asistio':

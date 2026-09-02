@@ -5,6 +5,7 @@ const db = require('../../models');
 const notificationService = require('./notifications.service');
 const { syncPhonesForWaba } = require('./whatsappPhones.service');
 const whatsappAccountHealthService = require('./whatsappAccountHealth.service');
+const { buildWhatsappProfileAlignment } = require('../lib/whatsapp-profile-alignment');
 const {
   buildDedupeKey,
   deriveComplianceSnapshot,
@@ -208,6 +209,7 @@ async function resolveClinicContext({ assets, clinicId }) {
       : null;
     return {
       primary,
+      clinic: null,
       clinicId: null,
       clinicName: null,
       groupId,
@@ -218,12 +220,22 @@ async function resolveClinicContext({ assets, clinicId }) {
   const effectiveClinicId = Number(primary?.clinicaId || clinicId || 0) || null;
   const clinic = effectiveClinicId
     ? await Clinica.findByPk(effectiveClinicId, {
-        attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'],
+        attributes: [
+          'id_clinica',
+          'nombre_clinica',
+          'grupoClinicaId',
+          'direccion',
+          'codigo_postal',
+          'ciudad',
+          'provincia',
+          'pais',
+        ],
         raw: true,
       })
     : null;
   return {
     primary,
+    clinic,
     clinicId: effectiveClinicId,
     clinicName: clinic?.nombre_clinica || null,
     groupId: clinic?.grupoClinicaId || null,
@@ -1422,6 +1434,11 @@ async function diagnoseAccount({ assetId, userId }) {
   const businessHealth = additionalData.whatsappBusinessHealth || {};
   const webhookSubscription = additionalData.whatsappWebhookSubscription || {};
   const health = whatsappAccountHealthService.summarizeAssetHealth(current || asset);
+  const profileAlignment = buildWhatsappProfileAlignment({
+    clinic: context.clinic,
+    verifiedName: current?.waVerifiedName || asset.waVerifiedName,
+    additionalData,
+  });
   const healthHistory = current
     ? (await whatsappAccountHealthService.listEventsForAssets([current.id], { perAsset: 20 })).get(Number(current.id)) || []
     : [];
@@ -1503,6 +1520,7 @@ async function diagnoseAccount({ assetId, userId }) {
       phone_number_id: current?.phoneNumberId || asset.phoneNumberId || null,
       phone_number: current?.metaAssetName || asset.metaAssetName || null,
       verified_name: current?.waVerifiedName || asset.waVerifiedName || null,
+      profile_alignment: profileAlignment,
       health,
       health_history: healthHistory,
     },

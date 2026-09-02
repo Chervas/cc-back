@@ -10,6 +10,7 @@ const LEAD_ACTIVE_APPOINTMENT_STATES = new Set([
   'info_confirmada',
   'recordatorio_enviado',
   'recordatorio_confirmado',
+  'cambio_solicitado',
   'reprogramada',
 ]);
 

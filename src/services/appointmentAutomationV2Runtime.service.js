@@ -106,10 +106,52 @@ function isImportedHistoricalAppointment(cita) {
   const sourceSystem = cleanString(cita?.source_system).toLowerCase();
   const reason = cleanString(cita?.motivo).toLowerCase();
   const title = cleanString(cita?.titulo).toLowerCase();
+  const metadata = parsePlainObject(cita?.import_metadata);
   return sourceSystem === 'cliniccloud'
+    || sourceSystem === 'lead_resolution_historical'
+    || parseBool(metadata?.historical_registration, false) === true
+    || cleanString(metadata?.kind).toLowerCase() === 'lead_resolution_historical'
     || reason === IMPORTED_HISTORICAL_APPOINTMENT_REASON.toLowerCase()
     || reason.startsWith('importación de pacientes')
     || title.startsWith('histórico:');
+}
+
+function parsePlainObject(value) {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value !== 'string') return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_error) {
+    return {};
+  }
+}
+
+function getAppointmentNotificationSuppression(cita) {
+  const metadata = parsePlainObject(cita?.import_metadata);
+  const raw = parsePlainObject(metadata.notification_suppression || metadata.notificationSuppression);
+  return {
+    appointment_details: parseBool(raw.appointment_details ?? raw.appointmentDetails ?? raw.appointment_created, false),
+    day_before: parseBool(raw.day_before ?? raw.dayBefore, false),
+    same_day: parseBool(raw.same_day ?? raw.sameDay, false),
+  };
+}
+
+function shouldSuppressAppointmentTrigger(cita, triggerType, triggerConfig = null) {
+  const normalizedTriggerType = cleanString(triggerType).toLowerCase();
+  const suppression = getAppointmentNotificationSuppression(cita);
+  if (normalizedTriggerType === 'appointment_created') {
+    return suppression.appointment_details === true;
+  }
+  if (normalizedTriggerType !== 'appointment_reminder_window') {
+    return false;
+  }
+  const config = triggerConfig || {};
+  const scheduleMoment = cleanString(config.schedule_moment || 'day_before').toLowerCase() || 'day_before';
+  if (scheduleMoment === 'same_day') return suppression.same_day === true;
+  if (scheduleMoment === 'day_before') return suppression.day_before === true;
+  return false;
 }
 
 function stripCatalogClinicScopeSuffixes(rawTemplateKey) {
@@ -1136,6 +1178,9 @@ async function enqueueExecutionForTemplate(cita, template, options = {}) {
   if (!APPOINTMENT_TRIGGER_TYPES.has(cleanString(template.trigger_type))) {
     return { success: false, skipped: true, reason: 'no_template_for_event' };
   }
+  if (shouldSuppressAppointmentTrigger(cita, eventName)) {
+    return { success: true, skipped: true, reason: 'appointment_notification_suppressed' };
+  }
 
   const idempotencyKey = cleanString(options.idempotency_key) || buildIdempotencyKey({
     triggerType: eventName,
@@ -1251,6 +1296,9 @@ async function enqueueExecutionForCita(cita, options = {}) {
   }
 
   const eventName = normalizeEventName(options.event_name) || mapEstadoToEvent(cita?.estado) || 'appointment_created';
+  if (shouldSuppressAppointmentTrigger(cita, eventName)) {
+    return { success: true, skipped: true, reason: 'appointment_notification_suppressed' };
+  }
   const template = await resolveTemplateForCitaEvent(cita, eventName);
   if (!template || !APPOINTMENT_TRIGGER_TYPES.has(cleanString(template.trigger_type))) {
     return { success: false, skipped: true, reason: 'no_template_for_event' };
@@ -1271,6 +1319,9 @@ async function cancelActiveExecutionsForCita(cita, options = {}) {
   }
 
   const excludeTriggerTypes = normalizeStringArray(options.exclude_trigger_types || options.excludeTriggerTypes);
+  const excludeExecutionIds = normalizeStringArray(
+    options.exclude_execution_ids || options.excludeExecutionIds
+  ).map(toIntOrNull).filter(Boolean);
   const where = {
     trigger_entity_type: 'appointment',
     trigger_entity_id: citaId,
@@ -1278,6 +1329,9 @@ async function cancelActiveExecutionsForCita(cita, options = {}) {
   };
   if (excludeTriggerTypes.length) {
     where.trigger_type = { [Op.notIn]: excludeTriggerTypes };
+  }
+  if (excludeExecutionIds.length) {
+    where.id = { [Op.notIn]: excludeExecutionIds };
   }
 
   const executions = await FlowExecutionV2.findAll({
@@ -1387,6 +1441,7 @@ async function syncScheduledTriggersForCita(cita, options = {}) {
     const templates = await resolveScheduledTemplatesForCita(cita, triggerType);
     templates.forEach((template) => {
       const triggerConfig = getTemplateTriggerConfig(template);
+      if (shouldSuppressAppointmentTrigger(cita, triggerType, triggerConfig)) return;
       const scheduledFor = computeScheduledRunAt({
         cita,
         triggerType,
@@ -1627,7 +1682,7 @@ async function fireScheduledTrigger(payload = {}) {
     return { success: true, skipped: true, reason: 'imported_historical_appointment' };
   }
   const normalizedStatus = cleanString(cita?.estado).toLowerCase();
-  if (['cancelada', 'no_asistio'].includes(normalizedStatus)) {
+  if (['cambio_solicitado', 'cancelada', 'no_asistio'].includes(normalizedStatus)) {
     return { success: true, skipped: true, reason: `appointment_${normalizedStatus}` };
   }
 
@@ -1653,6 +1708,9 @@ async function fireScheduledTrigger(payload = {}) {
   }
 
   const triggerConfig = getTemplateTriggerConfig(template);
+  if (shouldSuppressAppointmentTrigger(cita, triggerType, triggerConfig)) {
+    return { success: true, skipped: true, reason: 'appointment_notification_suppressed' };
+  }
   if (
     triggerType === 'appointment_reminder_window' &&
     triggerConfig?.exclude_if_not_confirmed === true &&

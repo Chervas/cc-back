@@ -12,6 +12,7 @@ const APPOINTMENT_STATUS_LABELS = Object.freeze({
   info_confirmada: 'Datos de la cita confirmados',
   recordatorio_enviado: 'Recordatorio enviado',
   recordatorio_confirmado: 'Asistencia confirmada',
+  cambio_solicitado: 'Cambio solicitado',
   completada: 'Cita completada',
   cancelada: 'Cita cancelada',
   no_asistio: 'Paciente no acude',
@@ -23,6 +24,7 @@ const APPOINTMENT_STATUS_TITLES = Object.freeze({
   info_confirmada: 'Datos de la cita confirmados',
   recordatorio_enviado: 'Recordatorio enviado',
   recordatorio_confirmado: 'Asistencia confirmada por el paciente',
+  cambio_solicitado: 'Cambio de cita solicitado',
   completada: 'Cita completada',
   cancelada: 'Cita cancelada',
   no_asistio: 'Paciente no acude',
@@ -34,6 +36,7 @@ const APPOINTMENT_STATUS_ICONS = Object.freeze({
   info_confirmada: 'heroicons_outline:check-badge',
   recordatorio_enviado: 'heroicons_outline:bell-alert',
   recordatorio_confirmado: 'heroicons_outline:hand-thumb-up',
+  cambio_solicitado: 'heroicons_outline:arrow-path-rounded-square',
   completada: 'heroicons_outline:check',
   cancelada: 'heroicons_outline:x-circle',
   no_asistio: 'heroicons_outline:hand-thumb-down',
@@ -69,6 +72,7 @@ function appointmentStatusIcon(status) {
 function appointmentStatusColor(status) {
   const normalized = cleanString(status)?.toLowerCase() || null;
   if (['cancelada', 'no_asistio'].includes(normalized)) return 'warning';
+  if (normalized === 'cambio_solicitado') return 'warning';
   if (['info_enviada', 'recordatorio_enviado', 'reprogramada'].includes(normalized)) return 'info';
   return 'success';
 }
@@ -103,6 +107,7 @@ function serializeAppointmentStatusActivity(event, { patientId = null, leadId = 
     info_confirmada: 'appointment_confirmed',
     recordatorio_enviado: 'appointment_reminder_sent',
     recordatorio_confirmado: 'appointment_confirmed',
+    cambio_solicitado: 'appointment_change_requested',
     completada: 'appointment_completed',
     cancelada: 'appointment_cancelled',
     no_asistio: 'appointment_no_show',

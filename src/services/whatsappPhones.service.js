@@ -348,6 +348,7 @@ async function upsertRemoteState(
     additionalData.profileEmail = profile.email || additionalData.profileEmail || null;
     additionalData.profileWebsite = profile.websites?.[0] || additionalData.profileWebsite || null;
     additionalData.profileAddress = profile.address || additionalData.profileAddress || null;
+    additionalData.profileObservedAt = nowIso;
   }
   if (wabaSnapshot) {
     additionalData.whatsappBusinessHealth = wabaSnapshot;

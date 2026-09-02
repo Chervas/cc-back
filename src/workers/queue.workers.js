@@ -7,9 +7,7 @@ const groqAudioService = require('../services/groqAudio.service');
 const whatsappTemplatesService = require('../services/whatsappTemplates.service');
 const whatsappPhonesService = require('../services/whatsappPhones.service');
 const automationDefaultsService = require('../services/automationDefaults.service');
-const automationsV2ResumeService = require('../services/automationsV2Resume.service');
-const marketingOptOutService = require('../services/marketingOptOut.service');
-const marketingBulkSendsService = require('../services/marketingBulkSends.service');
+const automationInboundMessageService = require('../services/automationInboundMessage.service');
 const notificationService = require('../services/notifications.service');
 const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.service');
 const whatsappConnectionStatusService = require('../services/whatsappConnectionStatus.service');
@@ -1648,6 +1646,18 @@ createWorker('webhook_whatsapp', async (job) => {
         }
         const existingMessage = await findMessageByWamid(wamid);
         if (existingMessage) {
+            const existingClaim = db.AutomationInboundMessageClaim
+                ? await db.AutomationInboundMessageClaim.findOne({ where: { message_id: existingMessage.id } })
+                : null;
+            if (existingClaim) {
+                await automationInboundMessageService.enqueueInboundDispatch({
+                    inboundMessage: existingMessage.id,
+                    conversation: existingMessage.conversation_id,
+                    clinicId: existingClaim.clinic_id,
+                    channel: existingClaim.channel,
+                    providerMessageId: existingClaim.provider_message_id || wamid,
+                });
+            }
             continue;
         }
 
@@ -1704,42 +1714,60 @@ createWorker('webhook_whatsapp', async (job) => {
             });
         }
 
-        const inboundMsg = await Message.create({
-            conversation_id: conv.id,
-            sender_id: null,
-            direction: 'inbound',
-            content,
-            message_type: descriptor.messageType,
-            status: 'sent',
-            metadata: {
-                wamid,
-                phoneId,
-                ...(patientDirectionAssignment?.id ? {
-                    patient_direction_assignment_id: patientDirectionAssignment.id,
-                    patient_direction_director_user_id: patientDirectionAssignment.director_user_id,
-                } : {}),
-                ...descriptor.metadataExtra,
-                ...(webOrigin ? { web_origin_ref: webOrigin.ref, web_origin: {
-                    id: webOrigin.id || null,
-                    clinic_id: webOrigin.clinic_id || null,
-                    group_id: webOrigin.group_id || null,
-                    domain: webOrigin.domain || null,
-                    page_url: webOrigin.page_url || null,
-                    referrer: webOrigin.referrer || null,
-                    utm_source: webOrigin.utm_source || null,
-                    utm_medium: webOrigin.utm_medium || null,
-                    utm_campaign: webOrigin.utm_campaign || null,
-                    gclid: webOrigin.gclid || null,
-                    gbraid: webOrigin.gbraid || null,
-                    wbraid: webOrigin.wbraid || null,
-                    ga_client_id: webOrigin.ga_client_id || null,
-                    google_ads_customer_id: webOrigin.google_ads_customer_id || null,
-                    google_ads_campaign_id: webOrigin.google_ads_campaign_id || null,
-                    fbclid: webOrigin.fbclid || null,
-                    ttclid: webOrigin.ttclid || null,
-                } } : {}),
-            },
-            sent_at: new Date(),
+        let inboundMsg = null;
+        await db.sequelize.transaction(async (transaction) => {
+            inboundMsg = await Message.create({
+                conversation_id: conv.id,
+                sender_id: null,
+                direction: 'inbound',
+                content,
+                message_type: descriptor.messageType,
+                status: 'sent',
+                metadata: {
+                    wamid,
+                    phoneId,
+                    ...(patientDirectionAssignment?.id ? {
+                        patient_direction_assignment_id: patientDirectionAssignment.id,
+                        patient_direction_director_user_id: patientDirectionAssignment.director_user_id,
+                    } : {}),
+                    ...descriptor.metadataExtra,
+                    ...(webOrigin ? { web_origin_ref: webOrigin.ref, web_origin: {
+                        id: webOrigin.id || null,
+                        clinic_id: webOrigin.clinic_id || null,
+                        group_id: webOrigin.group_id || null,
+                        domain: webOrigin.domain || null,
+                        page_url: webOrigin.page_url || null,
+                        referrer: webOrigin.referrer || null,
+                        utm_source: webOrigin.utm_source || null,
+                        utm_medium: webOrigin.utm_medium || null,
+                        utm_campaign: webOrigin.utm_campaign || null,
+                        gclid: webOrigin.gclid || null,
+                        gbraid: webOrigin.gbraid || null,
+                        wbraid: webOrigin.wbraid || null,
+                        ga_client_id: webOrigin.ga_client_id || null,
+                        google_ads_customer_id: webOrigin.google_ads_customer_id || null,
+                        google_ads_campaign_id: webOrigin.google_ads_campaign_id || null,
+                        fbclid: webOrigin.fbclid || null,
+                        ttclid: webOrigin.ttclid || null,
+                    } } : {}),
+                },
+                sent_at: new Date(),
+            }, { transaction });
+
+            // Mensaje, contador y outbox forman una sola frontera durable.
+            conv.last_message_at = new Date();
+            conv.last_inbound_at = new Date();
+            conv.unread_count = (conv.unread_count || 0) + 1;
+            await conv.save({ transaction });
+
+            await automationInboundMessageService.enqueueInboundDispatch({
+                inboundMessage: inboundMsg,
+                conversation: conv,
+                clinicId: conv.clinic_id || clinicId,
+                channel: 'whatsapp',
+                providerMessageId: wamid,
+            }, { transaction });
+
         });
 
         if (patientDirectionFormerAssignment && patientDirectionAssignmentIdFromJob) {
@@ -1748,45 +1776,7 @@ createWorker('webhook_whatsapp', async (job) => {
             });
         }
 
-        try {
-            const optOutResult = await marketingOptOutService.applyInboundOptOutIfNeeded({
-                clinicId: conv.clinic_id || clinicId,
-                conversation: conv,
-                inboundMessage: inboundMsg,
-                rawText: resumeText || content,
-                patientId: conv.patient_id || patientId || null,
-            });
-            if (optOutResult?.applied) {
-                inboundMsg.metadata = {
-                    ...(inboundMsg.metadata || {}),
-                    marketing_opt_out: optOutResult,
-                };
-                await inboundMsg.save();
-            }
-        } catch (optOutErr) {
-            console.warn('[marketing opt-out] No se pudo procesar baja por WhatsApp', {
-                clinicId: conv.clinic_id || clinicId,
-                conversationId: conv.id,
-                inboundMessageId: inboundMsg.id,
-                error: serializeError(optOutErr),
-            });
-        }
-
-        try {
-            await marketingBulkSendsService.materializeInboundReply({
-                conversation: conv,
-                inboundMessage: inboundMsg,
-            });
-        } catch (bulkReplyErr) {
-            console.warn('[marketing bulk sends] No se pudo materializar respuesta inbound', {
-                clinicId: conv.clinic_id || clinicId,
-                conversationId: conv.id,
-                inboundMessageId: inboundMsg.id,
-                error: serializeError(bulkReplyErr),
-            });
-        }
-
-        // Marcar el origen como "usado" para depuración/dedupe. No bloqueamos si falla.
+        // El origen web es trazabilidad auxiliar; nunca compromete mensaje + outbox.
         if (webOrigin && WhatsAppWebOrigin && !webOrigin.used_at) {
             try {
                 await WhatsAppWebOrigin.update(
@@ -1801,58 +1791,8 @@ createWorker('webhook_whatsapp', async (job) => {
                 );
                 webOrigin.used_at = new Date();
             } catch (e) {
-                // ignore
+                // La atribución se puede reconciliar sin duplicar el mensaje.
             }
-        }
-
-        conv.last_message_at = new Date();
-        conv.last_inbound_at = new Date();
-        conv.unread_count = (conv.unread_count || 0) + 1;
-        await conv.save();
-
-        try {
-            let resumeResult = await automationsV2ResumeService.enqueueInboundResponseResume({
-                clinicId: conv.clinic_id || clinicId,
-                conversationId: conv.id,
-                patientId: conv.patient_id || null,
-                leadId: conv.lead_id || null,
-                messageText: resumeText,
-                inboundMessageId: inboundMsg.id,
-                channel: 'whatsapp',
-            });
-
-            if ((!resumeResult?.matched || resumeResult?.errors?.length) && conv?.id) {
-                await new Promise((resolve) => setTimeout(resolve, 250));
-                const retryResult = await automationsV2ResumeService.enqueueInboundResponseResume({
-                    clinicId: conv.clinic_id || clinicId,
-                    conversationId: conv.id,
-                    patientId: conv.patient_id || null,
-                    leadId: conv.lead_id || null,
-                    messageText: resumeText,
-                    inboundMessageId: inboundMsg.id,
-                    channel: 'whatsapp',
-                });
-                resumeResult = retryResult;
-            }
-
-            dlog('Automations v2 inbound auto-resume', {
-                conversationId: conv.id,
-                clinicId: conv.clinic_id || clinicId,
-                ...resumeResult,
-            });
-
-            if (!resumeResult?.matched || resumeResult?.errors?.length) {
-                console.warn('[automations-v2] Inbound auto-resume without effective match', {
-                    conversationId: conv.id,
-                    clinicId: conv.clinic_id || clinicId,
-                    patientId: conv.patient_id || null,
-                    leadId: conv.lead_id || null,
-                    matched: resumeResult?.matched || 0,
-                    errors: resumeResult?.errors || [],
-                });
-            }
-        } catch (resumeErr) {
-            console.error('[automations-v2] Error en auto-resume inbound', resumeErr?.message || resumeErr);
         }
 
         const io = getIO();

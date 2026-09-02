@@ -28,6 +28,10 @@ const {
 } = require('../services/googleLocalLinks.service');
 const { getIO } = require('../services/socket.service');
 const { CITA_STATUS_VALUES, LEAD_STATUS_VALUES } = require('../lib/status-catalog');
+const {
+  CLASSIFY_INTENT_PRESET_CONFIG,
+  LEGACY_INTENT_PRESET_KEYS,
+} = require('../lib/automation-intent-contract');
 const { buildConversationContext } = require('../lib/automation-conversation-context');
 const { SUBROLES_CLINICA } = require('../lib/role-helpers');
 const {
@@ -766,6 +770,40 @@ function isObject(value) {
 }
 
 const TRIGGER_TYPES_V2 = [
+  {
+    value: 'message_received',
+    label: 'Mensaje recibido',
+    description: 'Activa el flujo cuando llega un mensaje que no pertenece a otra automatización.',
+    default_config: {
+      channel_scope: 'all_connected',
+      channels: [],
+      timing: 'always',
+      only_unclaimed: true,
+      response_buffer_seconds: 90,
+    },
+    config_schema: [
+      {
+        key: 'channel_scope',
+        label: 'Canales',
+        input_type: 'select',
+        required: true,
+        options: ['all_connected', 'selected'],
+      },
+      {
+        key: 'channels',
+        label: 'Canales seleccionados',
+        input_type: 'json',
+        required: false,
+      },
+      {
+        key: 'timing',
+        label: 'Cuándo se activa',
+        input_type: 'select',
+        required: true,
+        options: ['always', 'clinic_closed'],
+      },
+    ],
+  },
   { value: 'appointment_created', label: 'Cita creada (manual o desde lead)' },
   { value: 'appointment_reminder_window', label: 'Antes de la cita' },
   { value: 'appointment_after', label: 'Después de la cita' },
@@ -785,11 +823,11 @@ const TRIGGER_NODE_TYPES_V2 = TRIGGER_TYPES_V2.map((trigger) => ({
   type: `${TRIGGER_NODE_PREFIX}${trigger.value}`,
   category: 'trigger',
   label: trigger.label,
-  description: `Activa el flujo con evento '${trigger.value}'.`,
+  description: trigger.description || `Activa el flujo con evento '${trigger.value}'.`,
   output_keys: ['on_success'],
   runtime_status: 'real',
-  default_config: {},
-  config_schema: [],
+  default_config: trigger.default_config || {},
+  config_schema: trigger.config_schema || [],
 }));
 
 const APPOINTMENT_TRIGGER_TYPES = new Set([
@@ -914,6 +952,7 @@ const NODE_TYPES_V2 = [
       sender_mode: 'clinic_default',
       sender_origin_id: null,
       quiet_hours_enabled: true,
+      suppress_if_human_replied: false,
       outside_send_window_policy: 'schedule_next_window',
       variables: {},
       fallback_variables: {},
@@ -942,6 +981,12 @@ const NODE_TYPES_V2 = [
       { key: 'sender_origin_id', label: 'Origen específico (ID phone)', input_type: 'number', required: false },
       { key: 'quiet_hours_enabled', label: 'No enviar entre las 22 y las 7h', input_type: 'boolean', required: false },
       {
+        key: 'suppress_if_human_replied',
+        label: 'No responder si recepción ya ha contestado',
+        input_type: 'boolean',
+        required: false,
+      },
+      {
         key: 'outside_send_window_policy',
         label: 'Si cae fuera de ventana',
         input_type: 'select',
@@ -950,6 +995,27 @@ const NODE_TYPES_V2 = [
       },
       { key: 'variables', label: 'Variables', input_type: 'json', required: false },
       { key: 'fallback_variables', label: 'Variables fallback', input_type: 'json', required: false },
+    ],
+  },
+  {
+    type: 'action/reply_message',
+    category: 'action',
+    label: 'Responder al mensaje',
+    description: 'Responde por el mismo canal al mensaje que activó el flujo y evita duplicar una respuesta humana.',
+    output_keys: ['on_success', 'on_fail'],
+    runtime_status: 'real',
+    default_config: {
+      message_text: '',
+      suppress_if_human_replied: true,
+    },
+    config_schema: [
+      { key: 'message_text', label: 'Mensaje', input_type: 'text', required: true },
+      {
+        key: 'suppress_if_human_replied',
+        label: 'No responder si recepción ya ha contestado',
+        input_type: 'boolean',
+        required: false,
+      },
     ],
   },
   {
@@ -1191,7 +1257,7 @@ const NODE_TYPES_V2 = [
       timeout_unit: 'hours',
       listens_to_node_id: null,
       response_buffer_enabled: true,
-      response_buffer_delay_seconds: 180,
+      response_buffer_delay_seconds: 90,
     },
     config_schema: [
       { key: 'timeout_duration', label: 'Tiempo de espera', input_type: 'number', required: true },
@@ -1398,6 +1464,54 @@ function normalizeTriggerConfigForTemplate({ triggerType, entryNodeId, nodes }) 
 
   if (isTriggerSelectionPendingConfig(rawConfig)) {
     return { ok: true, trigger_config: null };
+  }
+
+  if (normalizedTriggerType === 'message_received') {
+    const channelScope = cleanString(rawConfig.channel_scope || 'all_connected').toLowerCase();
+    if (!['all_connected', 'selected'].includes(channelScope)) {
+      return {
+        ok: false,
+        error: 'invalid_trigger_config',
+        message: 'Selecciona todos los canales conectados o canales concretos.',
+      };
+    }
+    const channels = Array.from(new Set(
+      (Array.isArray(rawConfig.channels) ? rawConfig.channels : [])
+        .map((value) => cleanString(value).toLowerCase())
+        .filter((value) => ['whatsapp', 'instagram'].includes(value))
+    ));
+    if (channelScope === 'selected' && !channels.length) {
+      return {
+        ok: false,
+        error: 'invalid_trigger_config',
+        message: 'Selecciona al menos un canal para esta automatización.',
+      };
+    }
+    if (channels.includes('instagram')) {
+      return {
+        ok: false,
+        error: 'invalid_trigger_config',
+        message: 'Instagram Direct todavía no está disponible como canal de ejecución.',
+      };
+    }
+    const timing = cleanString(rawConfig.timing || 'always').toLowerCase();
+    if (!['always', 'clinic_closed'].includes(timing)) {
+      return {
+        ok: false,
+        error: 'invalid_trigger_config',
+        message: 'Selecciona si se activa siempre o solo cuando la clínica está cerrada.',
+      };
+    }
+    return {
+      ok: true,
+      trigger_config: {
+        channel_scope: channelScope,
+        channels: channelScope === 'selected' ? channels : [],
+        timing,
+        only_unclaimed: true,
+        response_buffer_seconds: 90,
+      },
+    };
   }
 
   if (normalizedTriggerType === 'appointment_reminder_window') {
@@ -1687,6 +1801,52 @@ async function findAppointmentCreatedTreatmentConflict(row, triggerConfig) {
   }) || null;
 }
 
+function messageReceivedConfigChannels(triggerConfig) {
+  const config = isObject(triggerConfig) ? triggerConfig : {};
+  if (cleanString(config.channel_scope).toLowerCase() !== 'selected') {
+    return new Set(['whatsapp']);
+  }
+  return new Set(
+    (Array.isArray(config.channels) ? config.channels : [])
+      .map((value) => cleanString(value).toLowerCase())
+      .filter((value) => value === 'whatsapp')
+  );
+}
+
+function messageReceivedConfigsOverlap(left, right) {
+  const leftTiming = cleanString(left?.timing || 'always').toLowerCase();
+  const rightTiming = cleanString(right?.timing || 'always').toLowerCase();
+  const timingOverlaps = leftTiming === 'always'
+    || rightTiming === 'always'
+    || leftTiming === rightTiming;
+  if (!timingOverlaps) return false;
+  const leftChannels = messageReceivedConfigChannels(left);
+  const rightChannels = messageReceivedConfigChannels(right);
+  return [...leftChannels].some((channel) => rightChannels.has(channel));
+}
+
+async function findMessageReceivedTriggerConflict(row, triggerConfig) {
+  if (cleanString(row?.trigger_type) !== 'message_received') return null;
+  const publicId = cleanString(row?.public_id);
+  const templateKey = cleanString(row?.template_key);
+  const candidates = await AutomationFlowTemplateV2.findAll({
+    where: {
+      trigger_type: 'message_received',
+      is_active: true,
+      published_at: { [Op.ne]: null },
+      id: { [Op.ne]: row.id },
+    },
+    attributes: ['id', 'name', 'template_key', 'public_id', 'clinic_id', 'group_id', 'is_system', 'trigger_config'],
+    raw: true,
+  });
+  return (candidates || []).find((candidate) => {
+    if (publicId && cleanString(candidate.public_id) === publicId) return false;
+    if (!publicId && templateKey && cleanString(candidate.template_key) === templateKey) return false;
+    return isSameAutomationScope(candidate, row)
+      && messageReceivedConfigsOverlap(candidate.trigger_config, triggerConfig);
+  }) || null;
+}
+
 function applyTriggerConfigToNodes({ triggerType, entryNodeId, nodes, triggerConfig }) {
   if (!Array.isArray(nodes)) return [];
   const normalizedTriggerType = cleanString(triggerType);
@@ -1705,6 +1865,14 @@ function applyTriggerConfigToNodes({ triggerType, entryNodeId, nodes, triggerCon
         triggerConfig.day_proximity_filter,
         triggerConfig.min_hours_before_start,
       ),
+    };
+  } else if (normalizedTriggerType === 'message_received' && isObject(triggerConfig)) {
+    sanitizedTriggerConfig = {
+      channel_scope: cleanString(triggerConfig.channel_scope || 'all_connected').toLowerCase() || 'all_connected',
+      channels: Array.isArray(triggerConfig.channels) ? triggerConfig.channels : [],
+      timing: cleanString(triggerConfig.timing || 'always').toLowerCase() || 'always',
+      only_unclaimed: true,
+      response_buffer_seconds: 90,
     };
   } else if (normalizedTriggerType === 'appointment_reminder_window' && isObject(triggerConfig)) {
     sanitizedTriggerConfig = {
@@ -1755,6 +1923,11 @@ function collectUnsupportedNodeTypes(nodes) {
 }
 
 const AI_PRESET_CANONICAL_CONFIG = {
+  classify_intent: {
+    ...CLASSIFY_INTENT_PRESET_CONFIG,
+    legacy_instructions: [],
+    legacy_source_sets: [],
+  },
   confirm_appointment: {
     instruction: 'Analiza la conversación de hoy entre clínica y paciente. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Ten en cuenta quién escribe cada mensaje y la hora. Si el paciente responde afirmativamente o usa una reacción positiva al último mensaje de la clínica, por ejemplo 👍, ✅, ok, vale, entendido o equivalente sin contradicción explícita, clasifica como confirmado. Si expresa dudas, clasifica como dudas. Si rechaza, no puede acudir, pide cambiar la cita o indica mala disponibilidad, por ejemplo "me va mal", "no puedo", "no me viene bien", "otro día" o una errata evidente como "me va ma ese día", clasifica como no_confirmado. Si no confirma claramente, clasifica como no_confirmado. Devuelve también confianza (0-1) y motivo breve.',
     context_sources: [
@@ -1790,6 +1963,7 @@ const AI_PRESET_CANONICAL_CONFIG = {
     ],
   },
 };
+const LEGACY_INFLIGHT_AI_PRESET_KEYS = new Set(LEGACY_INTENT_PRESET_KEYS);
 
 function normalizeContextSourcePath(raw) {
   if (typeof raw === 'string') return normalizeLegacyContextAliasInString(raw);
@@ -3308,10 +3482,12 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
     if (messageMode === 'template' && hasTemplateReference) {
       const templateId = parseIntOrNull(config.template_id);
       const catalogTemplateId = parseIntOrNull(config.catalog_template_id);
-      const templateRow = (templateId && templateLookup.byId instanceof Map ? templateLookup.byId.get(templateId) : null)
-        || (templateName && templateLookup.byName instanceof Map ? templateLookup.byName.get(templateName) : null)
-        || (catalogTemplateId && templateLookup.byCatalogId instanceof Map ? templateLookup.byCatalogId.get(catalogTemplateId) : null)
-        || null;
+      const templateRow = resolveWhatsappTemplateLookupRow(templateLookup, {
+        templateId,
+        templateName,
+        catalogTemplateId,
+        locale: config.language_code,
+      });
 
       if (!templateRow) {
         errors.push(
@@ -3342,16 +3518,12 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
     if ((messageMode === 'manual' || isAccessGuidanceVariantNode) && hasFallbackTemplate) {
       const fallbackTemplateId = parseIntOrNull(config.fallback_template_id);
       const fallbackCatalogTemplateId = parseIntOrNull(config.fallback_catalog_template_id);
-      const fallbackRow = (fallbackTemplateId && templateLookup.byId instanceof Map
-        ? templateLookup.byId.get(fallbackTemplateId)
-        : null)
-        || (fallbackTemplateName && templateLookup.byName instanceof Map
-          ? templateLookup.byName.get(fallbackTemplateName)
-          : null)
-        || (fallbackCatalogTemplateId && templateLookup.byCatalogId instanceof Map
-          ? templateLookup.byCatalogId.get(fallbackCatalogTemplateId)
-          : null)
-        || null;
+      const fallbackRow = resolveWhatsappTemplateLookupRow(templateLookup, {
+        templateId: fallbackTemplateId,
+        templateName: fallbackTemplateName,
+        catalogTemplateId: fallbackCatalogTemplateId,
+        locale: config.language_code,
+      });
 
       if (!fallbackRow) {
         errors.push(
@@ -3388,10 +3560,12 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
         const templateId = parseIntOrNull(candidateConfig?.[`${prefix}template_id`]);
         const templateNameValue = cleanString(candidateConfig?.[`${prefix}template_name`]);
         const catalogId = parseIntOrNull(candidateConfig?.[`${prefix}catalog_template_id`]);
-        return (templateId && templateLookup.byId instanceof Map ? templateLookup.byId.get(templateId) : null)
-          || (templateNameValue && templateLookup.byName instanceof Map ? templateLookup.byName.get(templateNameValue) : null)
-          || (catalogId && templateLookup.byCatalogId instanceof Map ? templateLookup.byCatalogId.get(catalogId) : null)
-          || null;
+        return resolveWhatsappTemplateLookupRow(templateLookup, {
+          templateId,
+          templateName: templateNameValue,
+          catalogTemplateId: catalogId,
+          locale: candidateConfig?.language_code,
+        });
       };
       const getRowLocale = (row) => normalizeWhatsappLocale(
         row?.language || row?.catalog?.locale || row?.locale,
@@ -3463,7 +3637,7 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
               { node_id: nodeId, node_type: nodeType, locale, expected_family: baseFamily, template_family: rowFamily }
             ));
           }
-          if (cleanString(variantRow.status).toUpperCase() !== 'APPROVED') {
+          if ((cleanString(variantRow.status) || '').toUpperCase() !== 'APPROVED') {
             errors.push(buildValidationError(
               'whatsapp_language_template_not_approved',
               `La plantilla ${locale} debe estar aprobada por Meta antes de activar el flujo`,
@@ -3502,7 +3676,7 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
               }
             ));
           }
-          if (cleanString(variantFallbackRow.status).toUpperCase() !== 'APPROVED') {
+          if ((cleanString(variantFallbackRow.status) || '').toUpperCase() !== 'APPROVED') {
             errors.push(buildValidationError(
               'whatsapp_language_fallback_not_approved',
               `La plantilla de respaldo ${locale} debe estar aprobada por Meta`,
@@ -3587,7 +3761,7 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
                 }
               ));
             }
-            if (cleanString(localizedAccessRow.status).toUpperCase() !== 'APPROVED') {
+            if ((cleanString(localizedAccessRow.status) || '').toUpperCase() !== 'APPROVED') {
               errors.push(buildValidationError(
                 'whatsapp_language_access_guidance_not_approved',
                 `La plantilla de acceso ${locale} debe estar aprobada por Meta`,
@@ -3611,6 +3785,16 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
         }
       }
     }
+  }
+
+  if (nodeType === 'action/reply_message' && !cleanString(config.message_text)) {
+    errors.push(
+      buildValidationError(
+        'node_config_required',
+        `El nodo ${nodeId} requiere 'message_text'`,
+        { node_id: nodeId, node_type: nodeType, key: 'message_text' }
+      )
+    );
   }
 
   if (nodeType === 'delay/fixed') {
@@ -4003,6 +4187,16 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
   }
 
   if (nodeType === 'condition/ai_analysis') {
+    const presetKey = cleanString(config.preset_key);
+    if (LEGACY_INFLIGHT_AI_PRESET_KEYS.has(presetKey)) {
+      errors.push(
+        buildValidationError(
+          'node_config_legacy_preset',
+          `El nodo ${nodeId} usa una receta sustituida. Selecciona 'Clasificar intención'.`,
+          { node_id: nodeId, node_type: nodeType, key: 'preset_key', value: presetKey }
+        )
+      );
+    }
     if (!cleanString(config.instruction)) {
       errors.push(
         buildValidationError(
@@ -4097,6 +4291,43 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
   return errors;
 }
 
+function whatsappTemplateLookupScore(row) {
+  const status = cleanString(row?.status)?.toUpperCase() || '';
+  const active = row?.is_active !== false && row?.is_active !== 0;
+  return (status === 'APPROVED' ? 100 : 0)
+    + (active ? 10 : 0)
+    + (row?.last_synced_at ? 1 : 0);
+}
+
+function setPreferredWhatsappTemplate(map, key, row) {
+  if (!key || !row) return;
+  const current = map.get(key);
+  if (!current || whatsappTemplateLookupScore(row) > whatsappTemplateLookupScore(current)) {
+    map.set(key, row);
+  }
+}
+
+function resolveWhatsappTemplateLookupRow(templateLookup, {
+  templateId = null,
+  templateName = null,
+  catalogTemplateId = null,
+  locale = null,
+} = {}) {
+  const normalizedLocale = normalizeWhatsappLocale(locale, { fallback: null });
+  const localizedNameKey = templateName && normalizedLocale
+    ? `${templateName}:${normalizedLocale}`
+    : null;
+  return (templateId && templateLookup.byId instanceof Map ? templateLookup.byId.get(templateId) : null)
+    || (catalogTemplateId && templateLookup.byCatalogId instanceof Map
+      ? templateLookup.byCatalogId.get(catalogTemplateId)
+      : null)
+    || (localizedNameKey && templateLookup.byNameLocale instanceof Map
+      ? templateLookup.byNameLocale.get(localizedNameKey)
+      : null)
+    || (templateName && templateLookup.byName instanceof Map ? templateLookup.byName.get(templateName) : null)
+    || null;
+}
+
 async function loadWhatsappTemplateLookup(nodes) {
   const safeNodes = Array.isArray(nodes) ? nodes : [];
   const templateIds = new Set();
@@ -4136,7 +4367,12 @@ async function loadWhatsappTemplateLookup(nodes) {
   }
 
   if (!templateIds.size && !templateNames.size && !catalogTemplateIds.size) {
-    return { byId: new Map(), byName: new Map(), byCatalogId: new Map() };
+    return {
+      byId: new Map(),
+      byName: new Map(),
+      byNameLocale: new Map(),
+      byCatalogId: new Map(),
+    };
   }
 
   const where = {};
@@ -4163,13 +4399,18 @@ async function loadWhatsappTemplateLookup(nodes) {
 
   const byId = new Map();
   const byName = new Map();
+  const byNameLocale = new Map();
   const byCatalogId = new Map();
   for (const row of rows) {
     byId.set(Number(row.id), row);
     const name = cleanString(row.name);
-    if (name) byName.set(name, row);
+    const locale = normalizeWhatsappLocale(row.language || row.catalog?.locale, { fallback: null });
+    if (name) {
+      setPreferredWhatsappTemplate(byName, name, row);
+      if (locale) setPreferredWhatsappTemplate(byNameLocale, `${name}:${locale}`, row);
+    }
     const catalogId = parseIntOrNull(row.catalog_template_id);
-    if (catalogId && !byCatalogId.has(catalogId)) byCatalogId.set(catalogId, row);
+    if (catalogId) setPreferredWhatsappTemplate(byCatalogId, catalogId, row);
   }
   if (catalogTemplateIds.size || templateNames.size) {
     const missingCatalogIds = Array.from(catalogTemplateIds).filter((id) => !byCatalogId.has(id));
@@ -4188,13 +4429,17 @@ async function loadWhatsappTemplateLookup(nodes) {
       for (const catalogRow of catalogRows) {
         const catalogId = parseIntOrNull(catalogRow.id);
         if (!catalogId) continue;
-        byCatalogId.set(catalogId, catalogRow);
+        setPreferredWhatsappTemplate(byCatalogId, catalogId, catalogRow);
         const name = cleanString(catalogRow.name);
-        if (name && !byName.has(name)) byName.set(name, catalogRow);
+        const locale = normalizeWhatsappLocale(catalogRow.locale, { fallback: null });
+        if (name) {
+          setPreferredWhatsappTemplate(byName, name, catalogRow);
+          if (locale) setPreferredWhatsappTemplate(byNameLocale, `${name}:${locale}`, catalogRow);
+        }
       }
     }
   }
-  return { byId, byName, byCatalogId };
+  return { byId, byName, byNameLocale, byCatalogId };
 }
 
 async function validateNodeConfigs(nodes) {
@@ -5357,6 +5602,19 @@ exports.updateTemplateDraft = async (req, res) => {
             details: readiness.reasons || [],
           });
         }
+        const messageConflict = await findMessageReceivedTriggerConflict(row, row.trigger_config);
+        if (messageConflict) {
+          return res.status(409).json({
+            success: false,
+            error: 'message_received_trigger_conflict',
+            message: `Ya existe otra automatización activa que recibe esos mensajes: ${messageConflict.name || messageConflict.template_key}. Desactívala o separa sus canales antes de activar esta.`,
+            conflict: {
+              id: messageConflict.id,
+              template_key: messageConflict.template_key,
+              name: messageConflict.name,
+            },
+          });
+        }
       }
 
       await row.update({
@@ -5592,6 +5850,23 @@ exports.publishTemplateVersion = async (req, res) => {
           id: treatmentConflict.id,
           template_key: treatmentConflict.template_key,
           name: treatmentConflict.name,
+        },
+      });
+    }
+
+    const messageConflict = await findMessageReceivedTriggerConflict({
+      ...(row.get ? row.get({ plain: true }) : row),
+      trigger_type: triggerResolution.trigger_type,
+    }, triggerConfigResolution.trigger_config);
+    if (messageConflict) {
+      return res.status(409).json({
+        success: false,
+        error: 'message_received_trigger_conflict',
+        message: `Ya existe otra automatización activa que recibe esos mensajes: ${messageConflict.name || messageConflict.template_key}. Desactívala o separa sus canales antes de publicar esta.`,
+        conflict: {
+          id: messageConflict.id,
+          template_key: messageConflict.template_key,
+          name: messageConflict.name,
         },
       });
     }
@@ -6327,3 +6602,5 @@ exports.getMessageDeliveryStatus = async (req, res) => {
     return res.status(500).json({ success: false, error: 'get_message_status_failed', message: err.message });
   }
 };
+
+exports.__messageReceivedConfigsOverlap = messageReceivedConfigsOverlap;

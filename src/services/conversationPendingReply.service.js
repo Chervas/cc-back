@@ -4,6 +4,11 @@ const { Op } = require('sequelize');
 const db = require('../../models');
 const { getIO } = require('./socket.service');
 const { emitNotificationUpdated } = require('./notificationsRealtime.service');
+const { serializeState: serializeAutomationState } = require('./conversationAutomationState.service');
+const { LEGACY_EXECUTION_ALLOWLIST_KEY } = require('../lib/automation-intent-migration');
+
+const LEGACY_EXECUTION_ALLOWED_PATH = `$.__legacy_automation_compatibility.${LEGACY_EXECUTION_ALLOWLIST_KEY}.allowed`;
+const LEGACY_EXECUTION_TEMPLATE_PATH = `$.__legacy_automation_compatibility.${LEGACY_EXECUTION_ALLOWLIST_KEY}.template_version_id`;
 
 function normalizeConversationIds(values) {
   return Array.from(new Set(
@@ -63,6 +68,16 @@ async function getPendingReplyStatesByConversationIds(conversationIds, options =
     automationAttentionMessageId: null,
     isAutomationResponseProcessing: false,
     automationResponseProcessingMessageId: null,
+    automationProcessingStage: null,
+    automationProcessingStatus: null,
+    automationProcessingStartedAt: null,
+    automationProcessingDeadlineAt: null,
+    automationActionAppointmentId: null,
+    automationActionAppointmentStatus: null,
+    automationIntent: null,
+    automationPossibleUrgency: false,
+    automationNeedsResponse: false,
+    automationManualActionRequired: false,
   }]));
 
   if (!ids.length) {
@@ -168,6 +183,9 @@ async function getPendingReplyStatesByConversationIds(conversationIds, options =
       END) AS response_message_id
     FROM FlowExecutionsV2 execution
     WHERE execution.updated_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 15 MINUTE)
+      AND JSON_UNQUOTE(JSON_EXTRACT(execution.context, :legacyAllowedPath)) = 'true'
+      AND CAST(JSON_UNQUOTE(JSON_EXTRACT(execution.context, :legacyTemplatePath)) AS UNSIGNED)
+        = execution.template_version_id
       AND (
         (
           execution.status = 'running'
@@ -182,7 +200,14 @@ async function getPendingReplyStatesByConversationIds(conversationIds, options =
       AND CAST(JSON_UNQUOTE(JSON_EXTRACT(execution.context, '$.conversation.id')) AS UNSIGNED)
         IN (:conversationIds)
     GROUP BY CAST(JSON_UNQUOTE(JSON_EXTRACT(execution.context, '$.conversation.id')) AS UNSIGNED)
-  `, queryOptions);
+  `, {
+    ...queryOptions,
+    replacements: {
+      ...queryOptions.replacements,
+      legacyAllowedPath: LEGACY_EXECUTION_ALLOWED_PATH,
+      legacyTemplatePath: LEGACY_EXECUTION_TEMPLATE_PATH,
+    },
+  });
 
   processingRows.forEach((row) => {
     const state = states.get(Number(row.conversation_id));
@@ -191,6 +216,33 @@ async function getPendingReplyStatesByConversationIds(conversationIds, options =
       state.automationResponseProcessingMessageId = Number(row.response_message_id || 0) || null;
     }
   });
+
+  // Fuente canónica nueva. La consulta anterior queda limitada a la lista
+  // exacta del corte y se retirará al finalizar esas ejecuciones.
+  if (db.ConversationAutomationState) {
+    const persistedRows = await db.ConversationAutomationState.findAll({
+      where: { conversation_id: { [Op.in]: ids } },
+      raw: true,
+      ...(options.transaction ? { transaction: options.transaction } : {}),
+    });
+    persistedRows.forEach((row) => {
+      const state = states.get(Number(row.conversation_id));
+      if (!state) return;
+      const serialized = serializeAutomationState(row);
+      state.isAutomationResponseProcessing = serialized.processing;
+      state.automationResponseProcessingMessageId = serialized.source_message_id;
+      state.automationProcessingStage = serialized.stage;
+      state.automationProcessingStatus = serialized.status;
+      state.automationProcessingStartedAt = serialized.first_message_at;
+      state.automationProcessingDeadlineAt = serialized.deadline_at;
+      state.automationActionAppointmentId = serialized.appointment_id;
+      state.automationActionAppointmentStatus = serialized.appointment_status;
+      state.automationIntent = serialized.intent;
+      state.automationPossibleUrgency = serialized.possible_urgency;
+      state.automationNeedsResponse = serialized.needs_response;
+      state.automationManualActionRequired = serialized.manual_action_required;
+    });
+  }
 
   return states;
 }

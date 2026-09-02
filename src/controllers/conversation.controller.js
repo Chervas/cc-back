@@ -54,8 +54,11 @@ const LEAD_ACTIVE_APPOINTMENT_STATES = new Set([
   'info_confirmada',
   'recordatorio_enviado',
   'recordatorio_confirmado',
+  'cambio_solicitado',
   'reprogramada',
 ]);
+const DEFAULT_MESSAGE_PAGE_LIMIT = 20;
+const MAX_MESSAGE_PAGE_LIMIT = 50;
 
 function messageChronologicalOrder(direction = 'ASC') {
   const normalizedDirection = String(direction).toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
@@ -327,6 +330,51 @@ function filterQuickChatVisibleMessages(messages) {
   return Array.isArray(messages)
     ? messages.filter((message) => !isQuickChatHiddenMessage(message))
     : [];
+}
+
+function parsePositiveInteger(value, fallback = null) {
+  const parsed = Number.parseInt(String(value ?? '').trim(), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function resolveMessagePageRequest(query = {}) {
+  const requestedLimit = parsePositiveInteger(query.limit, DEFAULT_MESSAGE_PAGE_LIMIT);
+  const limit = Math.min(Math.max(requestedLimit || DEFAULT_MESSAGE_PAGE_LIMIT, 1), MAX_MESSAGE_PAGE_LIMIT);
+  return {
+    limit,
+    beforeMessageId: parsePositiveInteger(query.before_message_id || query.beforeMessageId, null),
+  };
+}
+
+async function getConversationMessagePage(conversation, query = {}) {
+  const { limit, beforeMessageId } = resolveMessagePageRequest(query);
+  const where = { conversation_id: conversation.id };
+  if (beforeMessageId) {
+    where.id = { [Op.lt]: beforeMessageId };
+  }
+
+  const rawMessages = await Message.findAll({
+    where,
+    order: [['id', 'DESC']],
+    limit: limit + 1,
+    raw: true,
+  });
+  const hasMoreBefore = rawMessages.length > limit;
+  const pageRowsDesc = hasMoreBefore ? rawMessages.slice(0, limit) : rawMessages;
+  const oldestRawMessage = pageRowsDesc[pageRowsDesc.length - 1] || null;
+  const visibleMessages = await hydrateTemplateMessagePreviews(
+    filterQuickChatVisibleMessages(pageRowsDesc).reverse(),
+    { clinicId: conversation.clinic_id }
+  );
+
+  return {
+    messages: visibleMessages,
+    messagesPage: {
+      limit,
+      has_more_before: hasMoreBefore,
+      next_before_message_id: hasMoreBefore && oldestRawMessage?.id ? Number(oldestRawMessage.id) : null,
+    },
+  };
 }
 
 function parseJsonValue(value, fallback = {}) {
@@ -731,6 +779,22 @@ function ensureAccess({ clinicIds, isAggregateAllowed }, requestedClinicId) {
   return parsed.every((id) => clinicIds.includes(id));
 }
 
+function applyAutomationProcessingState(target, pendingState) {
+  target.automation_response_processing = pendingState?.isAutomationResponseProcessing === true;
+  target.automation_response_processing_message_id = pendingState?.automationResponseProcessingMessageId || null;
+  target.automation_processing_stage = pendingState?.automationProcessingStage || null;
+  target.automation_processing_status = pendingState?.automationProcessingStatus || null;
+  target.automation_processing_started_at = pendingState?.automationProcessingStartedAt || null;
+  target.automation_processing_deadline_at = pendingState?.automationProcessingDeadlineAt || null;
+  target.automation_action_appointment_id = pendingState?.automationActionAppointmentId || null;
+  target.automation_action_appointment_status = pendingState?.automationActionAppointmentStatus || null;
+  target.automation_intent = pendingState?.automationIntent || null;
+  target.automation_possible_urgency = pendingState?.automationPossibleUrgency === true;
+  target.automation_needs_response = pendingState?.automationNeedsResponse === true;
+  target.automation_manual_action_required = pendingState?.automationManualActionRequired === true;
+  return target;
+}
+
 async function enrichConversationUnreadForUser(userId, conversationLike) {
   if (!conversationLike) {
     return conversationLike;
@@ -756,10 +820,7 @@ async function enrichConversationUnreadForUser(userId, conversationLike) {
   plain.pending_automation_message_id = pendingState?.requiresAutomationAttention === true
     ? (Number(pendingState?.automationAttentionMessageId || 0) || null)
     : null;
-  plain.automation_response_processing = pendingState?.isAutomationResponseProcessing === true;
-  plain.automation_response_processing_message_id = pendingState?.isAutomationResponseProcessing === true
-    ? (Number(pendingState?.automationResponseProcessingMessageId || 0) || null)
-    : null;
+  applyAutomationProcessingState(plain, pendingState);
   if (plain.channel === 'whatsapp') {
     plain.last_inbound_at_any_sender = plain.last_inbound_at || null;
     try {
@@ -1449,10 +1510,7 @@ exports.listConversations = async (req, res) => {
       data.pending_automation_message_id = pendingState?.requiresAutomationAttention === true
         ? (Number(pendingState?.automationAttentionMessageId || 0) || null)
         : null;
-      data.automation_response_processing = pendingState?.isAutomationResponseProcessing === true;
-      data.automation_response_processing_message_id = pendingState?.isAutomationResponseProcessing === true
-        ? (Number(pendingState?.automationResponseProcessingMessageId || 0) || null)
-        : null;
+      applyAutomationProcessingState(data, pendingState);
       return data;
     }));
     const withRestrictions = await attachContactRestrictions(rawPayload);
@@ -1576,20 +1634,11 @@ exports.getMessages = async (req, res) => {
       return sendQuickChatCategoryForbidden(res, accessError);
     }
 
-    const messages = await Message.findAll({
-      where: { conversation_id: conversation.id },
-      order: messageChronologicalOrder('ASC'),
-      raw: true,
-    });
-
     const unreadConversationPayload = await enrichConversationUnreadForUser(userId, conversation);
     const [restrictedConversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
     const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload]);
-    const visibleMessages = await hydrateTemplateMessagePreviews(
-      filterQuickChatVisibleMessages(messages),
-      { clinicId: conversation.clinic_id }
-    );
-    return res.json({ conversation: conversationPayload, messages: visibleMessages });
+    const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
+    return res.json({ conversation: conversationPayload, messages, messages_page: messagesPage });
   } catch (err) {
     console.error('Error getMessages', err);
     return res.status(500).json({ error: 'Error obteniendo mensajes' });
@@ -1700,20 +1749,11 @@ exports.getConversationByPatient = async (req, res) => {
       return sendQuickChatCategoryForbidden(res, accessError);
     }
 
-    const messages = await Message.findAll({
-      where: { conversation_id: conversation.id },
-      order: messageChronologicalOrder('ASC'),
-      raw: true,
-    });
-
     const unreadConversationPayload = await enrichConversationUnreadForUser(userId, conversation);
     const [restrictedConversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
     const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload]);
-    const visibleMessages = await hydrateTemplateMessagePreviews(
-      filterQuickChatVisibleMessages(messages),
-      { clinicId: conversation.clinic_id }
-    );
-    return res.json({ conversation: conversationPayload, messages: visibleMessages });
+    const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
+    return res.json({ conversation: conversationPayload, messages, messages_page: messagesPage });
   } catch (err) {
     console.error('Error getConversationByPatient', err);
     return res.status(500).json({ error: 'Error obteniendo conversación' });
@@ -1769,20 +1809,11 @@ exports.getConversationByLead = async (req, res) => {
       return sendQuickChatCategoryForbidden(res, accessError);
     }
 
-    const messages = await Message.findAll({
-      where: { conversation_id: conversation.id },
-      order: messageChronologicalOrder('ASC'),
-      raw: true,
-    });
-
     const unreadConversationPayload = await enrichConversationUnreadForUser(userId, conversation);
     const [restrictedConversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
     const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload]);
-    const visibleMessages = await hydrateTemplateMessagePreviews(
-      filterQuickChatVisibleMessages(messages),
-      { clinicId: conversation.clinic_id }
-    );
-    return res.json({ conversation: conversationPayload, messages: visibleMessages });
+    const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
+    return res.json({ conversation: conversationPayload, messages, messages_page: messagesPage });
   } catch (err) {
     console.error('Error getConversationByLead', err);
     return res.status(500).json({ error: 'Error obteniendo conversación' });
@@ -2583,6 +2614,7 @@ exports.__testing = {
   buildConversationSearchClause,
   buildPhoneSearchCandidates,
   getQuickChatConversationCategory,
+  resolveMessagePageRequest,
   normalizeSearchQuery,
   normalizeTextSearchValue,
 };

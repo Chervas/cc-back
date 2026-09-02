@@ -37,6 +37,7 @@ const consentimientosService = require('../services/consentimientos.service');
 const appointmentNotificationCleanup = require('../services/appointmentNotificationCleanup.service');
 const patientEconomics = require('../services/patientEconomics.service');
 const patientDirectionService = require('../services/patientDirection.service');
+const conversationAutomationState = require('../services/conversationAutomationState.service');
 const { recordAppointmentStatusChange } = require('../services/appointmentActivity.service');
 const {
     processAppointmentLeadMilestones,
@@ -54,7 +55,13 @@ const {
 
 const CITA_ESTADOS_VALIDOS = new Set(CITA_STATUS_VALUES);
 const ACTIVE_APPOINTMENT_WHERE = { estado: { [Op.ne]: 'cancelada' } };
-const CITA_ESTADOS_TERMINALES_AUTOMATION = new Set(['cancelada', 'reprogramada', 'completada', 'no_asistio']);
+const CITA_ESTADOS_TERMINALES_AUTOMATION = new Set([
+    'cambio_solicitado',
+    'cancelada',
+    'reprogramada',
+    'completada',
+    'no_asistio',
+]);
 const CITA_ESTADOS_RESUELVEN_NOTIFICACIONES = new Set([
     'info_confirmada',
     'recordatorio_confirmado',
@@ -64,6 +71,29 @@ const CITA_ESTADOS_RESUELVEN_NOTIFICACIONES = new Set([
     'no_asistio'
 ]);
 const generatePacientePublicId = () => `pac_${crypto.randomBytes(10).toString('hex')}`;
+
+async function completeAppointmentAutomationReviews(appointmentId) {
+    const normalizedAppointmentId = Number(appointmentId);
+    if (
+        !db.ConversationAutomationState
+        || !Number.isInteger(normalizedAppointmentId)
+        || normalizedAppointmentId <= 0
+    ) {
+        return 0;
+    }
+
+    const states = await db.ConversationAutomationState.findAll({
+        where: {
+            appointment_id: normalizedAppointmentId,
+            status: { [Op.in]: ['review', 'failed'] },
+        },
+    });
+    await Promise.all(states.map((state) => conversationAutomationState.completeState({
+        clinicId: state.clinic_id,
+        conversationId: state.conversation_id,
+    })));
+    return states.length;
+}
 
 function appointmentPatientPseudonym(patientLike) {
     const plain = patientLike?.toJSON ? patientLike.toJSON() : (patientLike || {});
@@ -1308,6 +1338,43 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
 }
 
 const parseBool = (v) => v === true || v === 'true' || v === '1';
+const cleanOptionalString = (value, maxLength = null) => {
+    if (value === undefined || value === null) return null;
+    const normalized = String(value).trim();
+    if (!normalized) return null;
+    return maxLength && normalized.length > maxLength ? normalized.slice(0, maxLength) : normalized;
+};
+const parsePlainObject = (value) => {
+    if (!value) return {};
+    if (typeof value === 'object' && !Array.isArray(value)) return value;
+    if (typeof value !== 'string') return {};
+    try {
+        const parsed = JSON.parse(value);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch (_error) {
+        return {};
+    }
+};
+const normalizeAppointmentNotificationSuppression = (value, { historicalRegistration = false } = {}) => {
+    const raw = parsePlainObject(value);
+    const appointmentDetails = historicalRegistration
+        || parseBool(raw.appointment_details)
+        || parseBool(raw.appointmentDetails)
+        || parseBool(raw.appointment_created);
+    const dayBefore = historicalRegistration || parseBool(raw.day_before) || parseBool(raw.dayBefore);
+    const sameDay = historicalRegistration || parseBool(raw.same_day) || parseBool(raw.sameDay);
+    if (!appointmentDetails && !dayBefore && !sameDay && !historicalRegistration) return null;
+    return {
+        appointment_details: appointmentDetails,
+        day_before: dayBefore,
+        same_day: sameDay,
+        locked: historicalRegistration || parseBool(raw.locked),
+        reason: historicalRegistration
+            ? 'lead_resolution_historical'
+            : (cleanOptionalString(raw.reason, 80) || 'manual_selection'),
+        manual_confirmation_required: appointmentDetails || dayBefore || sameDay,
+    };
+};
 const overlap = (startA, endA, startB, endB) => startA < endB && startB < endA;
 const dayIndexFromLocalDate = (fechaLocal) => new Date(`${fechaLocal}T12:00:00Z`).getUTCDay();
 
@@ -1925,6 +1992,11 @@ exports.createCita = asyncHandler(async (req, res) => {
             instalacion_id = null,
             tratamiento_id = null,
             campana_id = null,
+            historical_registration = false,
+            source_system = null,
+            source_reference = null,
+            import_metadata = null,
+            notification_suppression = null,
             force = false,
             paciente: datosPaciente
         } = req.body || {};
@@ -2020,6 +2092,23 @@ exports.createCita = asyncHandler(async (req, res) => {
         if (!duracionEfectiva) duracionEfectiva = 30;
         if (!finDate) finDate = new Date(inicioDate.getTime() + duracionEfectiva * 60000);
 
+        const isHistoricalRegistration = parseBool(historical_registration)
+            || cleanOptionalString(source_system, 40)?.toLowerCase() === 'lead_resolution_historical';
+        const notificationSuppression = normalizeAppointmentNotificationSuppression(notification_suppression, {
+            historicalRegistration: isHistoricalRegistration,
+        });
+        const baseImportMetadata = parsePlainObject(import_metadata);
+        const appointmentImportMetadata = {
+            ...baseImportMetadata,
+            ...(isHistoricalRegistration ? {
+                kind: baseImportMetadata.kind || 'lead_resolution_historical',
+                historical_registration: true,
+            } : {}),
+            ...(notificationSuppression ? {
+                notification_suppression: notificationSuppression,
+            } : {}),
+        };
+
         // Chequear disponibilidad si hay doctor/instalación (canónico + legacy)
         const { resourceConflicts, legacyConflicts, canForce } = await checkDisponibilidadCanonica({
             clinica_id,
@@ -2089,11 +2178,16 @@ exports.createCita = asyncHandler(async (req, res) => {
                 updated_by: req.userData?.userId || null,
                 titulo: datosPaciente.titulo || null,
                 nota: nota || null,
-                motivo: motivo || null,
+                motivo: motivo || (isHistoricalRegistration ? 'Cita pasada registrada manualmente desde Leads' : null),
                 tipo_cita,
                 estado: estadoRaw,
                 inicio: inicioDate,
-                fin: finDate
+                fin: finDate,
+                source_system: isHistoricalRegistration
+                    ? 'lead_resolution_historical'
+                    : cleanOptionalString(source_system, 40),
+                source_reference: cleanOptionalString(source_reference, 120),
+                import_metadata: Object.keys(appointmentImportMetadata).length ? appointmentImportMetadata : null,
             },
             patient: paciente,
             requestedLanguage: datosPaciente.idioma_preferido,
@@ -2609,6 +2703,12 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
         console.error('⚠️ [updateCitaEstado] Error disparando automation v2:', automationErr.message);
     }
 
+    if (estadoRaw !== 'cambio_solicitado') {
+        await completeAppointmentAutomationReviews(citaId).catch((error) => {
+            console.warn('[updateCitaEstado] No se pudo cerrar la revisión de automatización:', error.message || error);
+        });
+    }
+
     const citaActualizada = await CitaPaciente.findByPk(citaId, {
         include: [
             { model: Paciente, as: 'paciente' },
@@ -2628,6 +2728,122 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
     }
     emitAppointmentSocketEvent('appointment:updated', citaActualizada?.toJSON ? citaActualizada.toJSON() : citaActualizada);
     return res.json(await protectAppointmentsForRequest(req, citaActualizada));
+});
+
+/**
+ * Resuelve la acción pendiente creada por `cambio_solicitado` sin perder la
+ * transición anterior que queda registrada en PatientOperationalEvents.
+ */
+exports.resolveRequestedAppointmentChange = asyncHandler(async (req, res) => {
+    const citaId = Number(req.params?.id);
+    const action = String(req.body?.action || '').trim().toLowerCase();
+    if (!Number.isInteger(citaId) || citaId <= 0) {
+        return res.status(400).json({ message: 'id inválido' });
+    }
+    if (!['keep', 'cancel'].includes(action)) {
+        return res.status(400).json({ message: 'action inválida', allowed: ['keep', 'cancel'] });
+    }
+
+    const current = await CitaPaciente.findByPk(citaId);
+    if (!current) return res.status(404).json({ message: 'Cita no encontrada' });
+    if (await denyAppointmentManageAccessIfNeeded(req, res, current.clinica_id)) return;
+    if (String(current.estado || '').toLowerCase() !== 'cambio_solicitado') {
+        return res.status(409).json({
+            message: 'La cita ya no tiene un cambio pendiente.',
+            current_status: current.estado,
+        });
+    }
+
+    let previousStatus = 'pendiente';
+    if (action === 'keep' && db.PatientOperationalEvent) {
+        const events = await db.PatientOperationalEvent.findAll({
+            where: {
+                clinic_id: current.clinica_id,
+                patient_id: current.paciente_id,
+                event_type: 'appointment.status_changed',
+            },
+            order: [['occurred_at', 'DESC'], ['id', 'DESC']],
+            limit: 100,
+            raw: true,
+        });
+        const transition = events.find((event) => (
+            Number(event?.metadata?.appointment_id) === citaId
+            && String(event?.metadata?.new_status || '').toLowerCase() === 'cambio_solicitado'
+        ));
+        const candidate = String(transition?.metadata?.previous_status || '').toLowerCase();
+        if (CITA_ESTADOS_VALIDOS.has(candidate) && candidate !== 'cambio_solicitado') {
+            previousStatus = candidate;
+        }
+    }
+    const nextStatus = action === 'cancel' ? 'cancelada' : previousStatus;
+    const actorUserId = req.userData?.userId || null;
+
+    const cita = await db.sequelize.transaction(async (transaction) => {
+        const locked = await CitaPaciente.findByPk(citaId, {
+            transaction,
+            lock: transaction.LOCK.UPDATE,
+        });
+        if (!locked || String(locked.estado || '').toLowerCase() !== 'cambio_solicitado') {
+            const error = new Error('appointment_change_already_resolved');
+            error.statusCode = 409;
+            throw error;
+        }
+        const oldStatus = locked.estado;
+        await locked.update({ estado: nextStatus, updated_by: actorUserId }, { transaction });
+        await recordAppointmentStatusChange({
+            appointment: locked,
+            previousStatus: oldStatus,
+            newStatus: nextStatus,
+            actorUserId,
+            source: 'agenda',
+            metadata: {
+                route: 'resolveRequestedAppointmentChange',
+                resolution: action,
+            },
+            transaction,
+        });
+        return locked;
+    }).catch((error) => {
+        if (error?.statusCode === 409) return null;
+        throw error;
+    });
+    if (!cita) {
+        return res.status(409).json({ message: 'La cita ya no tiene un cambio pendiente.' });
+    }
+
+    await processAppointmentLeadMilestones({ cita, previousStatus: 'cambio_solicitado' });
+    await patientDirectionService.handleAppointmentChange({
+        appointment: cita,
+        previousStatus: 'cambio_solicitado',
+        actorUserId,
+    }).catch(() => null);
+    if (nextStatus === 'cancelada') {
+        await appointmentAutomationV2Runtime.cancelActiveExecutionsForCita(cita, {
+            reason: 'appointment_change_request_cancelled',
+        });
+    }
+    await appointmentAutomationV2Runtime.syncScheduledTriggersForCita(cita, {
+        user_id: actorUserId,
+        user_name: req.userData?.name || req.userData?.nombre || req.userData?.email || null,
+        user_role: req.userData?.role || req.userData?.rol || 'admin',
+    });
+    await appointmentNotificationCleanup.markAutomationNotificationsReadForAppointment(cita.id_cita, {
+        reason: `appointment_change_request_${action}`,
+    });
+
+    await completeAppointmentAutomationReviews(citaId);
+
+    const updated = await CitaPaciente.findByPk(citaId, {
+        include: [
+            { model: Paciente, as: 'paciente' },
+            { model: LeadIntake, as: 'lead' },
+            { model: Clinica, as: 'clinica' },
+            { model: Instalacion, as: 'instalacion', required: false },
+            { model: Tratamiento, as: 'tratamiento', required: false },
+        ],
+    });
+    emitAppointmentSocketEvent('appointment:updated', updated?.toJSON ? updated.toJSON() : updated);
+    return res.json(await protectAppointmentsForRequest(req, updated));
 });
 
 /**
@@ -2826,6 +3042,10 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     } catch (automationErr) {
         console.error('⚠️ [reagendarCita] Error disparando automation v2:', automationErr.message);
     }
+
+    await completeAppointmentAutomationReviews(citaId).catch((error) => {
+        console.warn('[reagendarCita] No se pudo cerrar la revisión de automatización:', error.message || error);
+    });
 
     await ensureConsentPackageAndAutomation(cita, req, 'appointment_rescheduled');
 
