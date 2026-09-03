@@ -18,7 +18,9 @@ const {
 const automationDefaults = require('../../services/automationDefaults.service');
 const automationsController = require('../../controllers/automationsV2.controller');
 const {
+  BENIGN_ACKNOWLEDGEMENT_EXIT_KEY,
   buildMessageReceivedTemplateNodes,
+  markCanonicalBenignAcknowledgementExit,
   markCanonicalConfirmationReplySuppression,
   transformLegacyIntentNodes,
 } = require('../../lib/automation-intent-migration');
@@ -122,6 +124,13 @@ function testThanksOnlyConfirmsInConfirmationContext() {
   );
   assert.equal(afterDirections.intencion_principal, 'agradecimiento');
   assert.equal(afterDirections.accion_inequivoca, false);
+
+  const explicitDirectionsAcknowledgement = flowEngine.buildDeterministicClassifyIntentOutput(
+    contextWithConversation('Sí, sé llegar, gracias', '¿Sabes llegar a la clínica para tu cita de hoy?')
+  );
+  assert.equal(explicitDirectionsAcknowledgement.intencion_principal, 'agradecimiento');
+  assert.equal(explicitDirectionsAcknowledgement.accion_inequivoca, false);
+  assert.equal(explicitDirectionsAcknowledgement.necesita_respuesta, false);
 }
 
 function testBufferedAcknowledgementUsesTheListenedPromptOnly() {
@@ -900,9 +909,97 @@ function testLegacyGraphMigrationPublishesCanonicalRoutes() {
     transformed.nodes.some((node) => node.type === 'action/change_status' && node.config?.new_status === 'cambio_solicitado'),
     true,
   );
+  const acknowledgementExit = transformed.nodes.find((node) => (
+    node.type === 'condition/field_check'
+    && node.config?.migration_key === BENIGN_ACKNOWLEDGEMENT_EXIT_KEY
+  ));
+  assert.ok(acknowledgementExit);
+  assert.equal(acknowledgementExit.config.right_value, 'agradecimiento');
+  assert.equal(acknowledgementExit.outputs.on_false, 'N7');
+  const pendingResponseCheck = transformed.nodes.find((node) => (
+    node.id === acknowledgementExit.outputs.on_true
+    && node.config?.migration_key === BENIGN_ACKNOWLEDGEMENT_EXIT_KEY
+    && node.config?.left_ref?.path === 'necesita_respuesta'
+  ));
+  assert.ok(pendingResponseCheck);
+  assert.equal(pendingResponseCheck.config.right_value, false);
+  assert.equal(pendingResponseCheck.outputs.on_true, null);
+  assert.equal(pendingResponseCheck.outputs.on_false, 'N7');
   const secondPass = transformLegacyIntentNodes(transformed.nodes);
   assert.equal(secondPass.changed, false, 'migration must be idempotent');
   assert.deepEqual(secondPass.nodes, transformed.nodes);
+}
+
+function testCanonicalBenignAcknowledgementExitMigration() {
+  const legacy = [
+    { id: 'N1', type: 'trigger/appointment_reminder_window', config: {}, outputs: { on_success: 'N2' } },
+    {
+      id: 'N2',
+      type: 'condition/ai_analysis',
+      config: {
+        preset_key: 'classify_intent',
+        migration_key: 'canonical_appointment_intent_v1',
+      },
+      outputs: { on_success: 'N3', on_fail: 'N6' },
+    },
+    {
+      id: 'N3',
+      type: 'condition/field_check',
+      config: {
+        left_ref: { source: 'node_output', node_id: 'N2', path: 'intencion_principal' },
+        operator: 'equals',
+        right_value: 'solicitar_cambio_cita',
+      },
+      outputs: { on_true: 'N5', on_false: 'N6' },
+    },
+    { id: 'N5', type: 'action/change_status', config: { new_status: 'cambio_solicitado' }, outputs: { on_success: null } },
+    { id: 'N6', type: 'action/send_system_notification', config: { title: 'Revisar', message: 'Revisar' }, outputs: { on_success: null } },
+  ];
+
+  const migrated = markCanonicalBenignAcknowledgementExit(legacy);
+  assert.equal(migrated.changed, true);
+  assert.equal(migrated.patched, 1);
+  assertGraphIsClosed(migrated.nodes);
+  const acknowledgementExit = migrated.nodes.find((node) => (
+    node.config?.migration_key === BENIGN_ACKNOWLEDGEMENT_EXIT_KEY
+  ));
+  assert.ok(acknowledgementExit);
+  assert.equal(migrated.nodes.find((node) => node.id === 'N3').outputs.on_false, acknowledgementExit.id);
+  assert.equal(acknowledgementExit.outputs.on_false, 'N6');
+  const pendingResponseCheck = migrated.nodes.find((node) => (
+    node.id === acknowledgementExit.outputs.on_true
+    && node.config?.left_ref?.path === 'necesita_respuesta'
+  ));
+  assert.ok(pendingResponseCheck);
+  assert.equal(pendingResponseCheck.config.right_value, false);
+  assert.equal(pendingResponseCheck.outputs.on_true, null);
+  assert.equal(pendingResponseCheck.outputs.on_false, 'N6');
+
+  const acknowledgementOnly = JSON.parse(JSON.stringify(migrated.nodes))
+    .filter((node) => node.id !== pendingResponseCheck.id);
+  const acknowledgementOnlyCheck = acknowledgementOnly.find((node) => (
+    node.config?.migration_key === BENIGN_ACKNOWLEDGEMENT_EXIT_KEY
+    && node.config?.left_ref?.path === 'intencion_principal'
+  ));
+  acknowledgementOnlyCheck.outputs.on_true = null;
+  const hardened = markCanonicalBenignAcknowledgementExit(acknowledgementOnly);
+  assert.equal(hardened.changed, true);
+  assert.equal(hardened.patched, 1);
+  assertGraphIsClosed(hardened.nodes);
+  const hardenedAcknowledgementCheck = hardened.nodes.find((node) => (
+    node.config?.migration_key === BENIGN_ACKNOWLEDGEMENT_EXIT_KEY
+    && node.config?.left_ref?.path === 'intencion_principal'
+  ));
+  const hardenedPendingResponseCheck = hardened.nodes.find((node) => (
+    node.id === hardenedAcknowledgementCheck.outputs.on_true
+    && node.config?.left_ref?.path === 'necesita_respuesta'
+  ));
+  assert.ok(hardenedPendingResponseCheck);
+  assert.equal(hardenedPendingResponseCheck.outputs.on_false, 'N6');
+
+  const secondPass = markCanonicalBenignAcknowledgementExit(migrated.nodes);
+  assert.equal(secondPass.changed, false);
+  assert.deepEqual(secondPass.nodes, migrated.nodes);
 }
 
 async function testPendingQuestionSuppressesGenericConfirmationReply() {
@@ -1003,6 +1100,16 @@ function testDefaultAfterHoursGraphIsClosedAndSafeByDefault() {
     true,
   );
   assert.equal(nodes.some((node) => node.config?.preset_key === 'confirm_appointment'), false);
+  const acknowledgementExit = nodes.find((node) => (
+    node.config?.migration_key === BENIGN_ACKNOWLEDGEMENT_EXIT_KEY
+  ));
+  assert.ok(acknowledgementExit);
+  const pendingResponseCheck = nodes.find((node) => (
+    node.id === acknowledgementExit.outputs.on_true
+    && node.config?.left_ref?.path === 'necesita_respuesta'
+  ));
+  assert.ok(pendingResponseCheck);
+  assert.equal(pendingResponseCheck.outputs.on_true, null);
   assertGraphHasNoCycleAndFitsRuntime(nodes, 'N1');
 }
 
@@ -1055,6 +1162,25 @@ function testAfterHoursConversationMatrix() {
   assert.match(replyTexts(contextualThanks)[0], /confirmacion de tu cita/i);
   assert.equal(notifications(contextualThanks).length, 0);
 
+  const benignThanks = simulateAfterHoursGraph(flowEngine.buildDeterministicClassifyIntentOutput(
+    contextWithConversation('Sí, sé llegar, gracias', '¿Sabes llegar a la clínica para tu cita de hoy?')
+  ));
+  assert.deepEqual(statusChanges(benignThanks), []);
+  assert.deepEqual(replyTexts(benignThanks), []);
+  assert.equal(notifications(benignThanks).length, 0);
+
+  const thanksWithPendingResponse = simulateAfterHoursGraph({
+    intencion_principal: 'agradecimiento',
+    intencion_secundaria: 'pregunta',
+    confianza: 0.9,
+    accion_inequivoca: false,
+    posible_urgencia: false,
+    necesita_respuesta: true,
+    motivo: 'Agradecimiento con una pregunta pendiente.',
+  });
+  assert.deepEqual(statusChanges(thanksWithPendingResponse), []);
+  assert.equal(notifications(thanksWithPendingResponse).length, 1);
+
   const cancellation = simulateAfterHoursGraph(flowEngine.buildDeterministicClassifyIntentOutput(
     contextWithConversation('No puedo asistir, cancelad la cita por favor.')
   ));
@@ -1086,7 +1212,7 @@ function testAfterHoursConversationMatrix() {
   assert.match(replyTexts(ambiguous)[0], /pendiente para recepcion/i);
   assert.equal(notifications(ambiguous).length, 1);
 
-  const allReplies = [confirmationWithQuestion, contextualThanks, cancellation, reschedule, urgency, ambiguous]
+  const allReplies = [confirmationWithQuestion, contextualThanks, benignThanks, thanksWithPendingResponse, cancellation, reschedule, urgency, ambiguous]
     .flat()
     .filter((node) => node.type === 'action/reply_message');
   assert.equal(allReplies.every((node) => node.config.suppress_if_human_replied === true), true);
@@ -1150,6 +1276,7 @@ async function run() {
   testInboundResponseScopeIsStrict();
   await testBufferedTextSurvivesATrailingReaction();
   testLegacyGraphMigrationPublishesCanonicalRoutes();
+  testCanonicalBenignAcknowledgementExitMigration();
   await testPendingQuestionSuppressesGenericConfirmationReply();
   testCanonicalConfirmationReplySuppressionMigration();
   testNightlyLegacyDecisionChecksAreRemoved();

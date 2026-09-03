@@ -5,6 +5,7 @@ const {
 } = require('./automation-intent-contract');
 
 const INTENT_MIGRATION_KEY = 'canonical_appointment_intent_v1';
+const BENIGN_ACKNOWLEDGEMENT_EXIT_KEY = 'canonical_benign_acknowledgement_exit_v1';
 const LEGACY_EXECUTION_ALLOWLIST_KEY = 'legacy_appointment_intent_v1';
 const HISTORICAL_INTENT_PRESETS = new Set([
   'confirm_appointment',
@@ -184,6 +185,142 @@ function markCanonicalConfirmationReplySuppression(rawNodes) {
   return markedNodeIds.size
     ? { changed: true, marked: markedNodeIds.size, nodes }
     : { changed: false, marked: 0, nodes: rawNodes };
+}
+
+function markCanonicalBenignAcknowledgementExit(rawNodes, options = {}) {
+  const nodes = clone(Array.isArray(rawNodes) ? rawNodes : []);
+  const nextId = buildNodeIdFactory(nodes);
+  const additions = [];
+  let patched = 0;
+
+  const isIntentCheck = (node, aiNodeId, intent) => {
+    const ref = node?.config?.left_ref || {};
+    return node?.type === 'condition/field_check'
+      && cleanString(ref.source) === 'node_output'
+      && cleanString(ref.node_id) === cleanString(aiNodeId)
+      && cleanString(ref.path) === 'intencion_principal'
+      && cleanString(node?.config?.operator || 'equals') === 'equals'
+      && cleanString(node?.config?.right_value) === intent;
+  };
+  const isPendingResponseCheck = (node, aiNodeId) => {
+    const ref = node?.config?.left_ref || {};
+    return node?.type === 'condition/field_check'
+      && cleanString(ref.source) === 'node_output'
+      && cleanString(ref.node_id) === cleanString(aiNodeId)
+      && cleanString(ref.path) === 'necesita_respuesta'
+      && cleanString(node?.config?.operator || 'equals') === 'equals'
+      && node?.config?.right_value === false
+      && cleanString(node?.config?.migration_key) === BENIGN_ACKNOWLEDGEMENT_EXIT_KEY;
+  };
+
+  const buildPendingResponseCheck = ({ id, aiNodeId, reviewTarget, position }) => ({
+    id,
+    type: 'condition/field_check',
+    config: {
+      mode: 'simple',
+      left_ref: {
+        source: 'node_output',
+        node_id: aiNodeId,
+        path: 'necesita_respuesta',
+        value_type: 'boolean',
+        label: 'Necesita respuesta de la clinica',
+      },
+      operator: 'equals',
+      right_value: false,
+      migration_key: BENIGN_ACKNOWLEDGEMENT_EXIT_KEY,
+    },
+    outputs: {
+      on_true: null,
+      on_false: reviewTarget,
+    },
+    position,
+  });
+
+  const canonicalAiNodes = nodes.filter((node) => (
+    node?.type === 'condition/ai_analysis'
+    && cleanString(node?.config?.preset_key) === 'classify_intent'
+    && (
+      cleanString(node?.config?.migration_key) === INTENT_MIGRATION_KEY
+      || options.includeUnmarked === true
+    )
+  ));
+
+  for (const aiNode of canonicalAiNodes) {
+    const existingAcknowledgementCheck = [...nodes, ...additions].find((node) => (
+      isIntentCheck(node, aiNode.id, 'agradecimiento')
+      && cleanString(node?.config?.migration_key) === BENIGN_ACKNOWLEDGEMENT_EXIT_KEY
+    ));
+    if (existingAcknowledgementCheck) {
+      const existingPendingResponseCheck = [...nodes, ...additions].find((node) => (
+        isPendingResponseCheck(node, aiNode.id)
+        && cleanString(node.id) === cleanString(existingAcknowledgementCheck?.outputs?.on_true)
+      ));
+      if (existingPendingResponseCheck) continue;
+
+      const reviewTarget = cleanString(existingAcknowledgementCheck?.outputs?.on_false) || null;
+      if (!reviewTarget) continue;
+      const pendingResponseCheckId = nextId();
+      existingAcknowledgementCheck.outputs = {
+        ...(existingAcknowledgementCheck.outputs || {}),
+        on_true: pendingResponseCheckId,
+      };
+      additions.push(buildPendingResponseCheck({
+        id: pendingResponseCheckId,
+        aiNodeId: aiNode.id,
+        reviewTarget,
+        position: positionNear(existingAcknowledgementCheck, 1, 1),
+      }));
+      patched += 1;
+      continue;
+    }
+
+    const changeChecks = nodes.filter((node) => (
+      isIntentCheck(node, aiNode.id, 'solicitar_cambio_cita')
+    ));
+    for (const changeCheck of changeChecks) {
+      const reviewTarget = cleanString(changeCheck?.outputs?.on_false) || null;
+      if (!reviewTarget) continue;
+      const acknowledgementCheckId = nextId();
+      const pendingResponseCheckId = nextId();
+      changeCheck.outputs = {
+        ...(changeCheck.outputs || {}),
+        on_false: acknowledgementCheckId,
+      };
+      additions.push({
+        id: acknowledgementCheckId,
+        type: 'condition/field_check',
+        config: {
+          mode: 'simple',
+          left_ref: {
+            source: 'node_output',
+            node_id: aiNode.id,
+            path: 'intencion_principal',
+            value_type: 'string',
+            label: 'Intencion del paciente',
+          },
+          operator: 'equals',
+          right_value: 'agradecimiento',
+          migration_key: BENIGN_ACKNOWLEDGEMENT_EXIT_KEY,
+        },
+        outputs: {
+          on_true: pendingResponseCheckId,
+          on_false: reviewTarget,
+        },
+        position: positionNear(changeCheck, 1, 1),
+      });
+      additions.push(buildPendingResponseCheck({
+        id: pendingResponseCheckId,
+        aiNodeId: aiNode.id,
+        reviewTarget,
+        position: positionNear(changeCheck, 2, 1),
+      }));
+      patched += 1;
+    }
+  }
+
+  return patched
+    ? { changed: true, patched, nodes: pruneUnreachableNodes([...nodes, ...additions]) }
+    : { changed: false, patched: 0, nodes: rawNodes };
 }
 
 function pruneUnreachableNodes(nodes) {
@@ -382,7 +519,12 @@ function transformLegacyIntentNodes(rawNodes) {
       },
     };
   });
-  return { changed: true, replaced, nodes: migrated };
+  const acknowledgementExit = markCanonicalBenignAcknowledgementExit(migrated);
+  return {
+    changed: true,
+    replaced,
+    nodes: acknowledgementExit.changed ? acknowledgementExit.nodes : migrated,
+  };
 }
 
 function hasCanonicalIntentMigration(rawNodes) {
@@ -409,7 +551,7 @@ function buildMessageReceivedTemplateNodes() {
     onFalse,
     position: { x, y },
   });
-  return [
+  const nodes = [
     {
       id: 'N1',
       type: 'trigger/message_received',
@@ -574,13 +716,19 @@ function buildMessageReceivedTemplateNodes() {
       position: { x: 1780, y: 280 },
     },
   ];
+  const acknowledgementExit = markCanonicalBenignAcknowledgementExit(nodes, {
+    includeUnmarked: true,
+  });
+  return acknowledgementExit.changed ? acknowledgementExit.nodes : nodes;
 }
 
 module.exports = {
+  BENIGN_ACKNOWLEDGEMENT_EXIT_KEY,
   INTENT_MIGRATION_KEY,
   LEGACY_EXECUTION_ALLOWLIST_KEY,
   buildMessageReceivedTemplateNodes,
   hasCanonicalIntentMigration,
+  markCanonicalBenignAcknowledgementExit,
   markCanonicalConfirmationReplySuppression,
   transformLegacyIntentNodes,
 };

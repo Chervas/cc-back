@@ -184,6 +184,7 @@ async function assertResponseMatrix(template, contextOptions, waitModes, expecte
       expectedStatus: options.shortAcknowledgementStatus || expectedConfirmationStatus,
       expectAcknowledgement: options.shortAcknowledgementAcknowledgement !== false,
       expectNoAutomaticReply: options.shortAcknowledgementAcknowledgement === false,
+      expectNoNotification: options.shortAcknowledgementNotification === false,
     },
     {
       key: 'short_vale',
@@ -192,6 +193,7 @@ async function assertResponseMatrix(template, contextOptions, waitModes, expecte
       expectedStatus: options.shortAcknowledgementStatus || expectedConfirmationStatus,
       expectAcknowledgement: options.shortAcknowledgementAcknowledgement !== false,
       expectNoAutomaticReply: options.shortAcknowledgementAcknowledgement === false,
+      expectNoNotification: options.shortAcknowledgementNotification === false,
     },
     {
       key: 'buffered_final_acknowledgement',
@@ -204,6 +206,7 @@ async function assertResponseMatrix(template, contextOptions, waitModes, expecte
       expectedStatus: options.shortAcknowledgementStatus || expectedConfirmationStatus,
       expectAcknowledgement: options.shortAcknowledgementAcknowledgement !== false,
       expectNoAutomaticReply: options.shortAcknowledgementAcknowledgement === false,
+      expectNoNotification: options.shortAcknowledgementNotification === false,
     },
     {
       key: 'written_positive_emoji',
@@ -212,6 +215,7 @@ async function assertResponseMatrix(template, contextOptions, waitModes, expecte
       expectedStatus: options.shortAcknowledgementStatus || expectedConfirmationStatus,
       expectAcknowledgement: options.shortAcknowledgementAcknowledgement !== false,
       expectNoAutomaticReply: options.shortAcknowledgementAcknowledgement === false,
+      expectNoNotification: options.shortAcknowledgementNotification === false,
     },
     {
       key: 'positive_reaction',
@@ -227,6 +231,7 @@ async function assertResponseMatrix(template, contextOptions, waitModes, expecte
       expectedStatus: options.shortAcknowledgementStatus || expectedConfirmationStatus,
       expectAcknowledgement: options.shortAcknowledgementAcknowledgement !== false,
       expectNoAutomaticReply: options.shortAcknowledgementAcknowledgement === false,
+      expectNoNotification: options.shortAcknowledgementNotification === false,
     },
     {
       key: 'confirmation_with_question',
@@ -237,11 +242,12 @@ async function assertResponseMatrix(template, contextOptions, waitModes, expecte
     },
     {
       key: 'contextual_thanks',
-      text: 'Gracias',
+      text: options.thanksText || 'Gracias',
       expectedIntent: options.thanksIntent || 'confirmar_cita',
       expectedStatus: options.thanksStatus || expectedConfirmationStatus,
       expectAcknowledgement: options.thanksAcknowledgement !== false,
       expectNoAutomaticReply: options.thanksAcknowledgement === false,
+      expectNoNotification: options.thanksNotification === false,
     },
     {
       key: 'cancellation',
@@ -378,6 +384,13 @@ async function assertResponseMatrix(template, contextOptions, waitModes, expecte
         responseEvents(run, ['action/send_system_notification']).length >= 1,
         true,
         `${template.public_id}:${options.pathName}:${scenario.key}: operator notification`,
+      );
+    }
+    if (scenario.expectNoNotification) {
+      assert.equal(
+        responseEvents(run, ['action/send_system_notification']).length,
+        0,
+        `${template.public_id}:${options.pathName}:${scenario.key}: no operator notification expected`,
       );
     }
   }
@@ -827,12 +840,15 @@ async function testEveryPublishedAppointmentWorkflowPath() {
           clinicText: '¿Sabes llegar a la clínica para tu cita de hoy?',
           confirmationText: 'Sí, confirmo que sé llegar',
           baselineStatus: 'recordatorio_confirmado',
+          thanksText: 'Sí, sé llegar, gracias',
           thanksIntent: 'agradecimiento',
           thanksStatus: 'recordatorio_confirmado',
           thanksAcknowledgement: false,
+          thanksNotification: false,
           shortAcknowledgementIntent: 'agradecimiento',
           shortAcknowledgementStatus: 'recordatorio_confirmado',
           shortAcknowledgementAcknowledgement: false,
+          shortAcknowledgementNotification: false,
         },
       );
       responsePathCount += 1;
