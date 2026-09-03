@@ -74,12 +74,12 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
 - `20260903110000-hard-cut-retired-appointment-intent-runtime.js` reancla en
   otros entornos únicamente ejecuciones abiertas cuyo nodo actual y destinos
   de espera mantengan ID y tipo en la última versión canónica. Si no puede
-  demostrarlo, aborta toda la transacción. En DEV: `rebound=0` y ciclo
-  `down/up` correcto.
+  demostrarlo, aborta toda la transacción. En el esquema compartido por DEV y
+  staging: `rebound=0`; el ciclo controlado `down/up` también fue correcto.
 - La auditoría exacta inspecciona `config.preset_key`. No debe usarse una
   búsqueda textual global porque `migrated_from_preset` conserva evidencia y
   genera falsos positivos.
-- QA DEV: cero presets retirados abiertos/publicados; 188 workflows, 575 rutas
+- QA DEV y staging: cero presets retirados abiertos/publicados; 188 workflows, 575 rutas
   con respuesta, quince escenarios por ruta (8.625 recorridos), 294 rutas sin
   respuesta y 210 límites horarios en `Europe/Madrid`. Se cubren alta y reprogramación para cita hoy, mañana y futura,
   respuesta inicial y al reaviso, recordatorio del día anterior, aviso de
@@ -90,6 +90,10 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
   el aviso nocturno sin respuesta cancela. `ok`, `vale`, emojis y reacciones
   positivas se resuelven según el mensaje al que responden; cancelación, cambio, pregunta,
   urgencia y confirmación con pregunta conservan sus guardas canónicas.
+- Promoción verificada: backend staging y gateway `2a5f6fa`; ambos runtimes y
+  `pm2-back-dev` se reiniciaron de forma coordinada. Los smokes locales y
+  públicos devolvieron los códigos esperados, gateway quedó sin cron/workers y
+  staging conservó `JOB_RUNTIME_NAMESPACE=staging`.
 
 ## 2026-08-31 - Salud operativa y cortacircuitos WhatsApp
 
