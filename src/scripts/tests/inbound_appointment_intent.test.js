@@ -59,6 +59,50 @@ function testThanksOnlyConfirmsInConfirmationContext() {
   assert.equal(afterDirections.accion_inequivoca, false);
 }
 
+async function testCanonicalIntentRunsThroughTheRealAiNode() {
+  const aiNode = buildMessageReceivedTemplateNodes()
+    .find((node) => node.type === 'condition/ai_analysis');
+  assert.ok(aiNode, 'the canonical graph must contain an AI analysis node');
+
+  const deterministic = await flowEngine._processNode(
+    aiNode,
+    contextWithConversation('Buenos dias, si confirmo la asistencia'),
+    { simulation: true }
+  );
+  assert.equal(deterministic.kind, 'success');
+  assert.equal(deterministic.output.intencion_principal, 'confirmar_cita');
+  assert.equal(deterministic.output.accion_inequivoca, true);
+  assert.equal(deterministic.next_node_id, aiNode.outputs.on_success);
+
+  const contextual = await flowEngine._processNode(
+    aiNode,
+    contextWithConversation('Hola, gracias por el recordatorio. Mañana estaré allí.'),
+    { simulation: true }
+  );
+  assert.equal(contextual.kind, 'success');
+  assert.equal(contextual.output.intencion_principal, 'confirmar_cita');
+  assert.equal(contextual.output.accion_inequivoca, true);
+  assert.equal(contextual.next_node_id, aiNode.outputs.on_success);
+}
+
+function testAiRoutingSupportsCanonicalAndLegacyContracts() {
+  const node = { outputs: { on_success: 'N-success', on_fail: 'N-fail' } };
+  assert.equal(
+    flowEngine._resolveAiAnalysisNextNode(node, 'classify_intent', {
+      intencion_principal: 'confirmar_cita',
+    }),
+    'N-success'
+  );
+  assert.equal(
+    flowEngine._resolveAiAnalysisNextNode(node, 'confirm_appointment', { decision: 'confirmado' }),
+    'N-success'
+  );
+  assert.equal(
+    flowEngine._resolveAiAnalysisNextNode(node, 'confirm_appointment', { decision: null }),
+    'N-fail'
+  );
+}
+
 function testRescheduleBecomesOperatorPendingAction() {
   const output = flowEngine.buildDeterministicClassifyIntentOutput(
     contextWithConversation('Me va mal ese día, quiero cambiar la cita')
@@ -751,6 +795,8 @@ function testUnchangedCatalogPropagationDoesNotCreateAnotherVersion() {
 async function run() {
   testConfirmationKeepsSecondaryQuestion();
   testThanksOnlyConfirmsInConfirmationContext();
+  await testCanonicalIntentRunsThroughTheRealAiNode();
+  testAiRoutingSupportsCanonicalAndLegacyContracts();
   testRescheduleBecomesOperatorPendingAction();
   testRescheduleWinsOverGenericCannotAttend();
   testContradictorySignalsNeverApplyTheWrongAction();

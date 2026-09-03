@@ -46,11 +46,15 @@ test('no inventa una respuesta humana cuando no hay mensajes posteriores', async
 
 test('normaliza conversaciones y combina pendientes con atención de automatización', async (t) => {
   const originalQuery = db.sequelize.query;
+  const originalAutomationStateFindAll = db.ConversationAutomationState.findAll;
   let queryIndex = 0;
 
   t.after(() => {
     db.sequelize.query = originalQuery;
+    db.ConversationAutomationState.findAll = originalAutomationStateFindAll;
   });
+
+  db.ConversationAutomationState.findAll = async () => [];
 
   db.sequelize.query = async (sql, options) => {
     queryIndex += 1;
@@ -92,6 +96,16 @@ test('normaliza conversaciones y combina pendientes con atención de automatizac
     automationAttentionMessageId: null,
     isAutomationResponseProcessing: true,
     automationResponseProcessingMessageId: 912,
+    automationProcessingStage: null,
+    automationProcessingStatus: null,
+    automationProcessingStartedAt: null,
+    automationProcessingDeadlineAt: null,
+    automationActionAppointmentId: null,
+    automationActionAppointmentStatus: null,
+    automationIntent: null,
+    automationPossibleUrgency: false,
+    automationNeedsResponse: false,
+    automationManualActionRequired: false,
   });
   assert.deepEqual(states.get(8), {
     count: 0,
@@ -101,6 +115,16 @@ test('normaliza conversaciones y combina pendientes con atención de automatizac
     automationAttentionMessageId: 913,
     isAutomationResponseProcessing: false,
     automationResponseProcessingMessageId: null,
+    automationProcessingStage: null,
+    automationProcessingStatus: null,
+    automationProcessingStartedAt: null,
+    automationProcessingDeadlineAt: null,
+    automationActionAppointmentId: null,
+    automationActionAppointmentStatus: null,
+    automationIntent: null,
+    automationPossibleUrgency: false,
+    automationNeedsResponse: false,
+    automationManualActionRequired: false,
   });
   assert.equal(queryIndex, 3);
 });
