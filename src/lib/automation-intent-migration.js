@@ -1,13 +1,15 @@
 'use strict';
 
 const {
-  LEGACY_INTENT_PRESET_KEYS,
   cloneClassifyIntentPresetConfig,
 } = require('./automation-intent-contract');
 
 const INTENT_MIGRATION_KEY = 'canonical_appointment_intent_v1';
 const LEGACY_EXECUTION_ALLOWLIST_KEY = 'legacy_appointment_intent_v1';
-const LEGACY_PRESETS = new Set(LEGACY_INTENT_PRESET_KEYS);
+const HISTORICAL_INTENT_PRESETS = new Set([
+  'confirm_appointment',
+  'appointment_unconfirmed_reply',
+]);
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value ?? null));
@@ -213,7 +215,7 @@ function transformLegacyIntentNodes(rawNodes) {
   for (const aiNode of nodes) {
     if (aiNode?.type !== 'condition/ai_analysis') continue;
     const legacyPreset = cleanString(aiNode?.config?.preset_key);
-    if (!LEGACY_PRESETS.has(legacyPreset)) continue;
+    if (!HISTORICAL_INTENT_PRESETS.has(legacyPreset)) continue;
 
     const oldSuccess = cleanString(aiNode.outputs?.on_success) || null;
     const oldFailure = cleanString(aiNode.outputs?.on_fail) || null;

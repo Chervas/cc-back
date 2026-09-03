@@ -17,11 +17,11 @@ const {
 const automationDefaults = require('../../services/automationDefaults.service');
 const automationsController = require('../../controllers/automationsV2.controller');
 const {
-  LEGACY_EXECUTION_ALLOWLIST_KEY,
   buildMessageReceivedTemplateNodes,
   markCanonicalConfirmationReplySuppression,
   transformLegacyIntentNodes,
 } = require('../../lib/automation-intent-migration');
+const hardCutMigration = require('../../../migrations/20260903110000-hard-cut-retired-appointment-intent-runtime')._test;
 
 function contextWithConversation(patientText, clinicText = '¿Nos confirmas tu cita?') {
   return {
@@ -149,7 +149,7 @@ async function testCanonicalIntentRunsThroughTheRealAiNode() {
   assert.equal(contextual.next_node_id, aiNode.outputs.on_success);
 }
 
-function testAiRoutingSupportsCanonicalAndLegacyContracts() {
+function testAiRoutingUsesCanonicalContract() {
   const node = { outputs: { on_success: 'N-success', on_fail: 'N-fail' } };
   assert.equal(
     flowEngine._resolveAiAnalysisNextNode(node, 'classify_intent', {
@@ -157,13 +157,85 @@ function testAiRoutingSupportsCanonicalAndLegacyContracts() {
     }),
     'N-success'
   );
-  assert.equal(
-    flowEngine._resolveAiAnalysisNextNode(node, 'confirm_appointment', { decision: 'confirmado' }),
-    'N-success'
+}
+
+async function testRetiredAppointmentPresetsAreNeverExecutable() {
+  const canonicalNode = buildMessageReceivedTemplateNodes()
+    .find((node) => node.type === 'condition/ai_analysis');
+  for (const presetKey of ['confirm_appointment', 'appointment_unconfirmed_reply']) {
+    const retiredNode = {
+      ...canonicalNode,
+      config: { ...canonicalNode.config, preset_key: presetKey },
+    };
+    await assert.rejects(
+      flowEngine._processNode(
+        retiredNode,
+        contextWithConversation('Confirmado'),
+        { simulation: true },
+      ),
+      new RegExp(`retired_ai_preset_not_supported:${presetKey}`),
+    );
+  }
+}
+
+async function testRetiredAppointmentPresetsCannotBePublished() {
+  for (const presetKey of ['confirm_appointment', 'appointment_unconfirmed_reply']) {
+    const nodes = buildMessageReceivedTemplateNodes();
+    const aiNode = nodes.find((node) => node.type === 'condition/ai_analysis');
+    aiNode.config = { ...aiNode.config, preset_key: presetKey };
+    const validation = await automationsController.validateFlowPayloadForInternalUse({
+      entry_node_id: 'N1',
+      trigger_type: 'message_received',
+      nodes,
+    });
+    assert.equal(validation.ok, false);
+    assert.equal(
+      validation.errors.some((error) => (
+        error.code === 'node_config_retired_preset'
+        && error.details?.value === presetKey
+      )),
+      true,
+      presetKey,
+    );
+  }
+}
+
+function testHardCutOnlyRebindsStructurallyCompatibleExecutions() {
+  const sourceNodes = [
+    { id: 'N1', type: 'delay/wait_response' },
+    { id: 'N2', type: 'condition/ai_analysis', config: { preset_key: 'confirm_appointment' } },
+  ];
+  const targetNodes = [
+    { id: 'N1', type: 'delay/wait_response' },
+    {
+      id: 'N2',
+      type: 'condition/ai_analysis',
+      config: { preset_key: 'classify_intent', migrated_from_preset: 'confirm_appointment' },
+    },
+  ];
+  const execution = {
+    id: 77,
+    current_node_id: 'N1',
+    waiting_meta: { on_response: 'N2', on_timeout: null },
+  };
+
+  assert.equal(hardCutMigration.containsRetiredPreset(sourceNodes), true);
+  assert.equal(hardCutMigration.containsRetiredPreset(targetNodes), false);
+  assert.equal(hardCutMigration.containsCanonicalPreset(targetNodes), true);
+  assert.doesNotThrow(() => (
+    hardCutMigration.validateExecutionRebind(execution, sourceNodes, targetNodes)
+  ));
+  assert.throws(
+    () => hardCutMigration.validateExecutionRebind(execution, sourceNodes, [targetNodes[0]]),
+    /appointment_intent_hard_cut_node_missing:77:N2/,
   );
-  assert.equal(
-    flowEngine._resolveAiAnalysisNextNode(node, 'confirm_appointment', { decision: null }),
-    'N-fail'
+  assert.throws(
+    () => hardCutMigration.validateExecutionRebind(
+      execution,
+      sourceNodes,
+      [targetNodes[0], { ...targetNodes[1], type: 'action/change_status' }],
+    ),
+    /appointment_intent_hard_cut_node_type_changed:77:N2/,
   );
 }
 
@@ -194,12 +266,16 @@ function testContradictorySignalsNeverApplyTheWrongAction() {
   const noCancellation = flowEngine.buildDeterministicClassifyIntentOutput(
     contextWithConversation('No voy a cancelar la cita.')
   );
-  assert.equal(noCancellation, null);
+  assert.equal(noCancellation.intencion_principal, 'otra');
+  assert.equal(noCancellation.accion_inequivoca, false);
+  assert.equal(noCancellation.necesita_respuesta, true);
 
   const noConfirmation = flowEngine.buildDeterministicClassifyIntentOutput(
     contextWithConversation('Todavía no puedo confirmar.')
   );
-  assert.equal(noConfirmation, null);
+  assert.equal(noConfirmation.intencion_principal, 'otra');
+  assert.equal(noConfirmation.accion_inequivoca, false);
+  assert.equal(noConfirmation.necesita_respuesta, true);
 }
 
 function testCancellationQuestionIsReviewOnly() {
@@ -279,15 +355,62 @@ function testAiSafetySignalsOverrideRequestedMutation() {
 }
 
 function testPositiveReactionConfirmsOnlyInConfirmationContext() {
+  for (const response of ['ok', 'vale', 'perfecto', 'entendido', '👍', '👍🏽', '✅', '✔️', '👌🏿', '🙌']) {
+    const output = flowEngine.buildDeterministicClassifyIntentOutput(
+      contextWithConversation(response)
+    );
+    assert.equal(output.intencion_principal, 'confirmar_cita', response);
+    assert.equal(output.accion_inequivoca, true, response);
+  }
+
   const context = contextWithConversation('');
-  context.last_response_context = { reaction_emoji: '👍' };
+  context.last_response_context = {
+    reaction_emoji: '👍',
+    reaction_target_message_preview: '¿Nos confirmas tu cita?',
+  };
   const output = flowEngine.buildDeterministicClassifyIntentOutput(context);
   assert.equal(output.intencion_principal, 'confirmar_cita');
   assert.equal(output.accion_inequivoca, true);
 
-  const unrelated = contextWithConversation('', 'Estamos en la calle Mayor 10.');
-  unrelated.last_response_context = { reaction_emoji: '👍' };
-  assert.equal(flowEngine.buildDeterministicClassifyIntentOutput(unrelated), null);
+  const unrelated = contextWithConversation('', '¿Nos confirmas tu cita?');
+  unrelated.last_response_context = {
+    reaction_emoji: '👍',
+    reaction_target_message_preview: 'Estamos en la calle Mayor 10.',
+  };
+  const unrelatedOutput = flowEngine.buildDeterministicClassifyIntentOutput(unrelated);
+  assert.equal(unrelatedOutput.intencion_principal, 'agradecimiento');
+  assert.equal(unrelatedOutput.accion_inequivoca, false);
+
+  const writtenEmojiAfterDirections = flowEngine.buildDeterministicClassifyIntentOutput(
+    contextWithConversation('👍', 'Estamos en la calle Mayor 10.')
+  );
+  assert.equal(writtenEmojiAfterDirections.intencion_principal, 'agradecimiento');
+  assert.equal(writtenEmojiAfterDirections.accion_inequivoca, false);
+
+  const questionedOk = flowEngine.buildDeterministicClassifyIntentOutput(
+    contextWithConversation('ok?')
+  );
+  assert.equal(questionedOk.intencion_principal, 'pregunta');
+  assert.equal(questionedOk.accion_inequivoca, false);
+
+  const negativeReaction = contextWithConversation('');
+  negativeReaction.last_response_context = { reaction_emoji: '👎' };
+  const negativeOutput = flowEngine.buildDeterministicClassifyIntentOutput(negativeReaction);
+  assert.equal(negativeOutput.intencion_principal, 'otra');
+  assert.equal(negativeOutput.accion_inequivoca, false);
+  assert.equal(negativeOutput.necesita_respuesta, true);
+
+  const sticker = contextWithConversation('');
+  sticker.last_response_context = { response_media_kind: 'sticker' };
+  const stickerOutput = flowEngine.buildDeterministicClassifyIntentOutput(sticker);
+  assert.equal(stickerOutput.intencion_principal, 'otra');
+  assert.equal(stickerOutput.accion_inequivoca, false);
+
+  const mixedNegative = flowEngine.buildDeterministicClassifyIntentOutput(
+    contextWithConversation('👍 No puedo asistir.')
+  );
+  assert.equal(mixedNegative.intencion_principal, 'cancelar_cita');
+  assert.equal(mixedNegative.accion_inequivoca, true);
 }
 
 function testAmbiguousAppointmentNeverMutates() {
@@ -594,21 +717,6 @@ async function testBufferedTextSurvivesATrailingReaction() {
   } finally {
     db.Message.findAll = originalFindAll;
   }
-}
-
-function testLegacyPresetRequiresExactCutoverMarker() {
-  const execution = { template_version_id: 88 };
-  assert.equal(flowEngine.isLegacyIntentExecutionAllowed(execution, {}), false);
-  assert.equal(flowEngine.isLegacyIntentExecutionAllowed(execution, {
-    __legacy_automation_compatibility: {
-      [LEGACY_EXECUTION_ALLOWLIST_KEY]: { allowed: true, template_version_id: 87 },
-    },
-  }), false);
-  assert.equal(flowEngine.isLegacyIntentExecutionAllowed(execution, {
-    __legacy_automation_compatibility: {
-      [LEGACY_EXECUTION_ALLOWLIST_KEY]: { allowed: true, template_version_id: 88 },
-    },
-  }), true);
 }
 
 function assertGraphIsClosed(nodes) {
@@ -923,7 +1031,10 @@ async function run() {
   await testManualReplyOnlyCompletesResolvedPendingQuestion();
   testThanksOnlyConfirmsInConfirmationContext();
   await testCanonicalIntentRunsThroughTheRealAiNode();
-  testAiRoutingSupportsCanonicalAndLegacyContracts();
+  testAiRoutingUsesCanonicalContract();
+  await testRetiredAppointmentPresetsAreNeverExecutable();
+  await testRetiredAppointmentPresetsCannotBePublished();
+  testHardCutOnlyRebindsStructurallyCompatibleExecutions();
   testRescheduleBecomesOperatorPendingAction();
   testRescheduleWinsOverGenericCannotAttend();
   testContradictorySignalsNeverApplyTheWrongAction();
@@ -944,7 +1055,6 @@ async function run() {
   await testHumanAppointmentChangeWinsWhileAiIsAnalyzing();
   testInboundResponseScopeIsStrict();
   await testBufferedTextSurvivesATrailingReaction();
-  testLegacyPresetRequiresExactCutoverMarker();
   testLegacyGraphMigrationPublishesCanonicalRoutes();
   await testPendingQuestionSuppressesGenericConfirmationReply();
   testCanonicalConfirmationReplySuppressionMigration();

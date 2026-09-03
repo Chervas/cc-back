@@ -54,7 +54,12 @@ test('normaliza conversaciones y combina pendientes con atención de automatizac
     db.ConversationAutomationState.findAll = originalAutomationStateFindAll;
   });
 
-  db.ConversationAutomationState.findAll = async () => [];
+  db.ConversationAutomationState.findAll = async () => [{
+    conversation_id: 7,
+    source_message_id: 912,
+    stage: 'collecting',
+    status: 'active',
+  }];
 
   db.sequelize.query = async (sql, options) => {
     queryIndex += 1;
@@ -79,10 +84,7 @@ test('normaliza conversaciones y combina pendientes con atención de automatizac
       assert.match(sql, /last_response_context\.response_message_id/);
       return [{ conversation_id: 8, attention_count: 2, response_message_id: 913 }];
     }
-    assert.match(sql, /execution\.status = 'running'/);
-    assert.match(sql, /resume_mode.*response/s);
-    assert.match(sql, /last_inbound_message_id/);
-    return [{ conversation_id: 7, response_message_id: 912 }];
+    throw new Error('unexpected_legacy_runtime_query');
   };
 
   assert.deepEqual(normalizeConversationIds([7, '8', 7, 0, null, 'x']), [7, 8]);
@@ -96,8 +98,8 @@ test('normaliza conversaciones y combina pendientes con atención de automatizac
     automationAttentionMessageId: null,
     isAutomationResponseProcessing: true,
     automationResponseProcessingMessageId: 912,
-    automationProcessingStage: null,
-    automationProcessingStatus: null,
+    automationProcessingStage: 'collecting',
+    automationProcessingStatus: 'active',
     automationProcessingStartedAt: null,
     automationProcessingDeadlineAt: null,
     automationActionAppointmentId: null,
@@ -126,7 +128,7 @@ test('normaliza conversaciones y combina pendientes con atención de automatizac
     automationNeedsResponse: false,
     automationManualActionRequired: false,
   });
-  assert.equal(queryIndex, 3);
+  assert.equal(queryIndex, 2);
 });
 
 test('un conjunto vacío no consulta la base de datos', async (t) => {

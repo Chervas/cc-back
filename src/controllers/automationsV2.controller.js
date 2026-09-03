@@ -28,10 +28,7 @@ const {
 } = require('../services/googleLocalLinks.service');
 const { getIO } = require('../services/socket.service');
 const { CITA_STATUS_VALUES, LEAD_STATUS_VALUES } = require('../lib/status-catalog');
-const {
-  CLASSIFY_INTENT_PRESET_CONFIG,
-  LEGACY_INTENT_PRESET_KEYS,
-} = require('../lib/automation-intent-contract');
+const { CLASSIFY_INTENT_PRESET_CONFIG } = require('../lib/automation-intent-contract');
 const { buildConversationContext } = require('../lib/automation-conversation-context');
 const { SUBROLES_CLINICA } = require('../lib/role-helpers');
 const {
@@ -1928,26 +1925,6 @@ const AI_PRESET_CANONICAL_CONFIG = {
     legacy_instructions: [],
     legacy_source_sets: [],
   },
-  confirm_appointment: {
-    instruction: 'Analiza la conversación de hoy entre clínica y paciente. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Ten en cuenta quién escribe cada mensaje y la hora. Si el paciente responde afirmativamente o usa una reacción positiva al último mensaje de la clínica, por ejemplo 👍, ✅, ok, vale, entendido o equivalente sin contradicción explícita, clasifica como confirmado. Si expresa dudas, clasifica como dudas. Si rechaza, no puede acudir, pide cambiar la cita o indica mala disponibilidad, por ejemplo "me va mal", "no puedo", "no me viene bien", "otro día" o una errata evidente como "me va ma ese día", clasifica como no_confirmado. Si no confirma claramente, clasifica como no_confirmado. Devuelve también confianza (0-1) y motivo breve.',
-    context_sources: [
-      { key: 'conversation_today', path: '{{conversation_today}}' },
-      { key: 'responded_at', path: '{{last_response_context.responded_at}}' },
-    ],
-    output_fields: [
-      { name: 'decision', type: 'string', description: 'confirmado, no_confirmado o dudas' },
-      { name: 'confianza', type: 'number', description: 'Nivel de confianza de 0 a 1' },
-      { name: 'motivo', type: 'string', description: 'Razón breve de la decisión' },
-    ],
-    legacy_instructions: [
-      'Analiza la respuesta del paciente teniendo en cuenta el último mensaje enviado por la clínica. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Devuelve también confianza (0-1) y motivo breve.',
-      'Analiza la conversación de hoy entre clínica y paciente. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Ten en cuenta quién escribe cada mensaje y la hora. Devuelve también confianza (0-1) y motivo breve.',
-      'Analiza la conversación de hoy entre clínica y paciente. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Ten en cuenta quién escribe cada mensaje y la hora. Si el paciente responde afirmativamente o usa una reacción positiva al último mensaje de la clínica, por ejemplo 👍, ✅, ok, vale, entendido o equivalente sin contradicción explícita, clasifica como confirmado. Si expresa dudas, clasifica como dudas. Si rechaza, no puede acudir o no confirma claramente, clasifica como no_confirmado. Devuelve también confianza (0-1) y motivo breve.',
-    ],
-    legacy_source_sets: [
-      ['{{last_prompt}}', '{{last_response}}'],
-    ],
-  },
   summarize_conversation: {
     instruction: 'Resume la conversación de hoy entre clínica y paciente en máximo 2 frases. Identifica el tema principal y si quedó alguna acción pendiente.',
     context_sources: [
@@ -1963,7 +1940,10 @@ const AI_PRESET_CANONICAL_CONFIG = {
     ],
   },
 };
-const LEGACY_INFLIGHT_AI_PRESET_KEYS = new Set(LEGACY_INTENT_PRESET_KEYS);
+const RETIRED_APPOINTMENT_AI_PRESET_KEYS = new Set([
+  'confirm_appointment',
+  'appointment_unconfirmed_reply',
+]);
 
 function normalizeContextSourcePath(raw) {
   if (typeof raw === 'string') return normalizeLegacyContextAliasInString(raw);
@@ -4188,10 +4168,10 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
 
   if (nodeType === 'condition/ai_analysis') {
     const presetKey = cleanString(config.preset_key);
-    if (LEGACY_INFLIGHT_AI_PRESET_KEYS.has(presetKey)) {
+    if (RETIRED_APPOINTMENT_AI_PRESET_KEYS.has(presetKey)) {
       errors.push(
         buildValidationError(
-          'node_config_legacy_preset',
+          'node_config_retired_preset',
           `El nodo ${nodeId} usa una receta sustituida. Selecciona 'Clasificar intención'.`,
           { node_id: nodeId, node_type: nodeType, key: 'preset_key', value: presetKey }
         )

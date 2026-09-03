@@ -70,11 +70,7 @@ const { resolveLeadAutoReplyWait } = require('./clinicOpeningHours.service');
 const { evaluatePendingLeadContact } = require('./leadContactState.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { buildConversationContext } = require('../lib/automation-conversation-context');
-const {
-  AUTO_APPLY_CONFIDENCE_THRESHOLD,
-  LEGACY_INTENT_PRESET_KEYS,
-} = require('../lib/automation-intent-contract');
-const { LEGACY_EXECUTION_ALLOWLIST_KEY } = require('../lib/automation-intent-migration');
+const { AUTO_APPLY_CONFIDENCE_THRESHOLD } = require('../lib/automation-intent-contract');
 const {
   emitAutomationResponseProcessing,
   findHumanReplyAfterMessage,
@@ -95,7 +91,10 @@ const FIELD_CHECK_VALUE_TYPES = new Set(['string', 'number', 'boolean']);
 const FIELD_CHECK_MODE_VALUES = new Set(['simple', 'appointment_booking_timing', 'lead_contact_state']);
 const FIELD_CHECK_SWITCH_TYPE_VALUES = new Set(['appointment_booking']);
 const FIELD_CHECK_APPOINTMENT_WINDOW_VALUES = new Set(['same_day', 'day_before', 'more_than_day_before']);
-const LEGACY_INTENT_PRESETS = new Set(LEGACY_INTENT_PRESET_KEYS);
+const RETIRED_APPOINTMENT_INTENT_PRESETS = new Set([
+  'confirm_appointment',
+  'appointment_unconfirmed_reply',
+]);
 const PROTECTED_APPOINTMENT_STATUSES = new Set(['cancelada', 'completada', 'no_asistio']);
 const APPOINTMENT_NOTIFICATION_RESOLVED_STATUSES = new Set([
   'info_confirmada',
@@ -1515,122 +1514,8 @@ function isPositiveConfirmationEmojiText(value) {
   return consumedAny && remaining.length === 0;
 }
 
-function buildDeterministicConfirmAppointmentOutput(context = {}) {
-  const responseContext = isObject(context?.last_response_context) ? context.last_response_context : {};
-  const responseMediaKind = normalizeKey(responseContext.response_media_kind);
-  if (responseMediaKind === 'sticker') {
-    return {
-      decision: 'incongruente',
-      confianza: 0.2,
-      motivo: 'El paciente respondió con un sticker. El modelo actual no analiza el contenido visual del sticker, por lo que no se puede confirmar la intención automáticamente.',
-      _ai_provider: 'deterministic_rule',
-      _ai_model: 'confirm_appointment_unreadable_sticker',
-      _ai_analysis_mode: 'rule',
-    };
-  }
-
-  const responseMessageType = normalizeKey(
-    responseContext.response_message_type
-    || responseContext.message_type
-  );
-
-  if (responseMessageType !== 'reaction') {
-    return null;
-  }
-
-  const reactionEmoji = cleanString(responseContext.reaction_emoji);
-  if (!reactionEmoji || !isPositiveConfirmationEmojiText(reactionEmoji)) {
-    return null;
-  }
-
-  const targetPreview = cleanString(
-    responseContext.reaction_target_message_preview
-    || responseContext.listened_message_preview
-    || context?.last_prompt
-  );
-
-  return {
-    decision: 'confirmado',
-    confianza: 0.99,
-    motivo: targetPreview
-      ? `Paciente reaccionó ${reactionEmoji} de forma positiva al mensaje "${targetPreview}".`
-      : `Paciente reaccionó ${reactionEmoji} de forma positiva al último mensaje de la clínica.`,
-    _ai_provider: 'deterministic_rule',
-    _ai_model: 'confirm_appointment_positive_reaction',
-    _ai_analysis_mode: 'rule',
-  };
-}
-
-function buildDeterministicAppointmentUnconfirmedReplyOutput(context = {}) {
-  const rawResponse = cleanString(
-    context?.last_response_context?.response_text
-    || context?.last_response
-  );
-
-  const text = normalizeIntentText(rawResponse);
-  const responseContext = isObject(context?.last_response_context) ? context.last_response_context : {};
-  const responseMediaKind = normalizeKey(responseContext.response_media_kind);
-  const reactionEmoji = cleanString(responseContext.reaction_emoji);
-  if (!text && isPositiveConfirmationEmojiText(reactionEmoji)) {
-    return {
-      decision: 'confirmar',
-      confianza: 0.99,
-      motivo: `El paciente reaccionó ${reactionEmoji} de forma positiva al aviso.`,
-      _ai_provider: 'deterministic_rule',
-      _ai_model: 'appointment_unconfirmed_reply_reaction_confirm',
-      _ai_analysis_mode: 'rule',
-    };
-  }
-
-  if (!text && responseMediaKind === 'sticker') {
-    return {
-      decision: 'duda',
-      confianza: 0.2,
-      motivo: 'El paciente respondió con un sticker. El modelo actual no analiza el contenido visual del sticker, por lo que recepción debe revisarlo.',
-      _ai_provider: 'deterministic_rule',
-      _ai_model: 'appointment_unconfirmed_reply_unreadable_sticker',
-      _ai_analysis_mode: 'rule',
-    };
-  }
-
-  if (!text) {
-    return {
-      decision: 'duda',
-      confianza: 0.2,
-      motivo: 'No hay texto suficiente para confirmar o reprogramar.',
-      _ai_provider: 'deterministic_rule',
-      _ai_model: 'appointment_unconfirmed_reply_empty',
-      _ai_analysis_mode: 'rule',
-    };
-  }
-
-  // Las respuestas textuales pueden contener condiciones, negaciones o faltas de
-  // ortografía. Se delegan siempre al modelo estructurado para evitar que una
-  // palabra aislada como "confirmo" o "acudiré" cambie el estado de la cita.
-  return null;
-}
-
 function buildSafeAppointmentAiFailureOutput(presetKey, error) {
   const errorCode = cleanString(error?.code || error?.name || 'ai_provider_unavailable');
-  if (presetKey === 'confirm_appointment') {
-    return {
-      decision: 'dudas',
-      confianza: 0,
-      motivo: 'No se pudo interpretar la respuesta automáticamente. Requiere revisión manual.',
-      _ai_provider: 'unavailable',
-      _ai_model: null,
-      _ai_error_code: errorCode,
-    };
-  }
-  if (presetKey === 'appointment_unconfirmed_reply') {
-    return {
-      decision: 'duda',
-      motivo: 'No se pudo interpretar la respuesta automáticamente. Requiere revisión manual.',
-      _ai_provider: 'unavailable',
-      _ai_model: null,
-      _ai_error_code: errorCode,
-    };
-  }
   if (presetKey === 'classify_intent') {
     return {
       intencion_principal: 'otra',
@@ -1646,19 +1531,6 @@ function buildSafeAppointmentAiFailureOutput(presetKey, error) {
     };
   }
   return null;
-}
-
-function isLegacyIntentExecutionAllowed(execution, context = {}) {
-  const compatibility = isObject(context?.__legacy_automation_compatibility)
-    ? context.__legacy_automation_compatibility
-    : {};
-  const marker = isObject(compatibility[LEGACY_EXECUTION_ALLOWLIST_KEY])
-    ? compatibility[LEGACY_EXECUTION_ALLOWLIST_KEY]
-    : null;
-  if (!marker || marker.allowed !== true) return false;
-  const markerTemplateId = toIntOrNull(marker.template_version_id);
-  const executionTemplateId = toIntOrNull(execution?.template_version_id);
-  return !!markerTemplateId && markerTemplateId === executionTemplateId;
 }
 
 const CANONICAL_MESSAGE_INTENTS = new Set([
@@ -1792,17 +1664,43 @@ function buildDeterministicClassifyIntentOutput(context = {}) {
   const text = normalizeIntentText(rawText);
   const responseContext = isObject(context?.last_response_context) ? context.last_response_context : {};
   const positiveReaction = isPositiveConfirmationEmojiText(responseContext.reaction_emoji);
-  if (!text && !positiveReaction) return null;
+  const positiveEmojiText = isPositiveConfirmationEmojiText(rawText);
+  const responseMediaKind = normalizeKey(responseContext.response_media_kind);
+  const reactionEmoji = cleanString(responseContext.reaction_emoji);
+  if (!text && !positiveReaction && !positiveEmojiText && !responseMediaKind && !reactionEmoji && !cleanString(rawText)) {
+    return null;
+  }
   const conversationLines = String(context?.conversation_today || '').split(/\r?\n/);
   const lastClinicLine = [...conversationLines].reverse().find((line) => line.includes('] Clínica:')) || '';
-  const asksForConfirmation = /confirm|asist|acudir/.test(normalizeIntentText([
-    lastClinicLine,
-    responseContext.reaction_target_message_preview,
-    context?.last_prompt,
-  ].filter(Boolean).join(' ')));
+  const reactionTargetPrompt = cleanString(
+    responseContext.reaction_target_message_preview
+    || responseContext.listened_message_preview
+  );
+  const promptText = positiveReaction
+    ? (reactionTargetPrompt || cleanString(context?.last_prompt) || lastClinicLine)
+    : [lastClinicLine, context?.last_prompt].filter(Boolean).join(' ');
+  const asksForConfirmation = /confirm|asist|acudir/.test(normalizeIntentText(promptText));
   const asksQuestion = /[?¿]/.test(rawText)
     || /\b(donde|direccion|direccio|ubicacion|cuando|como|cual|cuanto|a que hora|que hora|que dia)\b/.test(text)
     || /\b(?:me|nos) (?:puedes|podeis|podrias|podriais)\b/.test(text);
+  if (
+    (!text && responseMediaKind)
+    || (!text && reactionEmoji && !positiveReaction)
+    || (!text && cleanString(rawText) && !positiveEmojiText)
+  ) {
+    return normalizeClassifyIntentOutput({
+      intencion_principal: 'otra',
+      intencion_secundaria: '',
+      confianza: 0.99,
+      accion_inequivoca: false,
+      posible_urgencia: false,
+      necesita_respuesta: true,
+      motivo: 'La respuesta no contiene texto interpretable suficiente y requiere revisión de recepción.',
+      _ai_provider: 'deterministic_rule',
+      _ai_model: 'classify_intent_non_text_review',
+      _ai_analysis_mode: 'rule',
+    }, context);
+  }
   const possibleUrgency = /\b(urgente|urgencia|dolor intenso|sangrado|hemorragia|no puedo respirar|dificultad para respirar)\b/.test(text);
   const negatedCancellation = /\b(?:no (?:quiero|puedo|necesito|hace falta|voy|vamos) (?:a )?(?:que )?(?:me )?(?:cancel\w*|anul\w*)|no (?:cancel\w*|anul\w*)|sin (?:cancel\w*|anul\w*))\b/.test(text);
   const cancellationRequest = /\b(?:(?:quiero|necesito|deseo|quisiera|querria|solicito|pido) (?:que )?(?:me )?(?:cancel\w*|anul\w*)|(?:podeis|puedes|podrias|podriais) (?:cancel\w*|anul\w*)|(?:cancelad|anulad|cancelo|anulo) (?:la |mi )?cita)\b/.test(text);
@@ -1816,12 +1714,15 @@ function buildDeterministicClassifyIntentOutput(context = {}) {
   const negatedConfirmation = /\b(?:no (?:puedo|quiero|voy a|he podido )?(?:confirmar|confirmo|confirmado|confirmada)|no (?:asistire|acudire|ire|voy a ir)|todavia no (?:confirmo|puedo confirmar))\b/.test(text);
   const explicitConfirmation = !negatedConfirmation
     && /\b(confirmado|confirmo|confirmada|si asistire|voy a ir|alli estare|ahi estare|estare alli|estare ahi)\b/.test(text);
+  const shortAcknowledgement = /^(si|ok|okay|vale|gracias|muchas gracias|entendido|correcto|de acuerdo|perfecto)$/.test(text);
   const contextualShortConfirmation = asksForConfirmation
-    && /^(si|ok|okay|vale|gracias|muchas gracias|entendido|correcto|de acuerdo|perfecto)$/.test(text);
+    && !asksQuestion
+    && shortAcknowledgement;
 
   let primary = 'otra';
   let actionUnambiguous = false;
   let confidence = 0.75;
+  let requiresReview = false;
   if (possibleUrgency) {
     primary = 'urgencia_posible';
     confidence = 0.95;
@@ -1833,14 +1734,27 @@ function buildDeterministicClassifyIntentOutput(context = {}) {
     primary = 'cancelar_cita';
     actionUnambiguous = true;
     confidence = 0.96;
-  } else if (explicitConfirmation || contextualShortConfirmation || (positiveReaction && asksForConfirmation)) {
+  } else if (
+    explicitConfirmation
+    || contextualShortConfirmation
+    || ((positiveReaction || (positiveEmojiText && !asksQuestion)) && asksForConfirmation)
+  ) {
     primary = 'confirmar_cita';
     actionUnambiguous = true;
-    confidence = positiveReaction ? 0.99 : (contextualShortConfirmation ? 0.9 : 0.97);
+    confidence = positiveReaction || positiveEmojiText ? 0.99 : (contextualShortConfirmation ? 0.9 : 0.97);
+  } else if (negatedConfirmation || negatedCancellation || negatedReschedule) {
+    primary = 'otra';
+    confidence = 0.95;
+    requiresReview = true;
   } else if (asksQuestion) {
     primary = 'pregunta';
     confidence = 0.92;
-  } else if (/\b(gracias|muchas gracias|agradezco)\b/.test(text)) {
+  } else if (
+    shortAcknowledgement
+    || positiveReaction
+    || positiveEmojiText
+    || /\b(gracias|muchas gracias|agradezco)\b/.test(text)
+  ) {
     primary = 'agradecimiento';
     confidence = 0.88;
   } else {
@@ -1866,11 +1780,11 @@ function buildDeterministicClassifyIntentOutput(context = {}) {
     confianza: confidence,
     accion_inequivoca: actionUnambiguous,
     posible_urgencia: possibleUrgency,
-    necesita_respuesta: asksQuestion || possibleUrgency || primary === 'solicitar_cambio_cita',
+    necesita_respuesta: asksQuestion || possibleUrgency || requiresReview || primary === 'solicitar_cambio_cita',
     motivo: secondary
       ? `El paciente expresa ${intentReason} y formula además una pregunta que debe conservarse.`
-      : (positiveReaction
-          ? 'El paciente reaccionó de forma positiva a la petición de confirmación.'
+      : (positiveReaction || positiveEmojiText
+          ? `El paciente ${positiveReaction ? 'reaccionó' : 'respondió con un emoji'} de forma positiva a la petición de confirmación.`
           : `La respuesta contiene ${intentReason}.`),
     _ai_provider: 'deterministic_rule',
     _ai_model: 'classify_intent_clear_signal',
@@ -5135,13 +5049,8 @@ function readOutputTarget(node, key) {
   return target || null;
 }
 
-function resolveAiAnalysisNextNode(node, presetKey, output) {
-  if (presetKey !== 'confirm_appointment') {
-    return readOutputTarget(node, 'on_success');
-  }
-  return toLowerSafe(output?.decision) === 'confirmado'
-    ? readOutputTarget(node, 'on_success')
-    : readOutputTarget(node, 'on_fail');
+function resolveAiAnalysisNextNode(node) {
+  return readOutputTarget(node, 'on_success');
 }
 
 function resolveDurationMs(duration, unit) {
@@ -6265,11 +6174,8 @@ async function processNode(node, context, runtime = {}) {
       }
 
       const presetKey = cleanString(config?.preset_key);
-      if (
-        LEGACY_INTENT_PRESETS.has(presetKey)
-        && !isLegacyIntentExecutionAllowed(runtime?.execution, aiContext)
-      ) {
-        throw new Error(`legacy_ai_preset_not_allowed:${presetKey}`);
+      if (RETIRED_APPOINTMENT_INTENT_PRESETS.has(presetKey)) {
+        throw new Error(`retired_ai_preset_not_supported:${presetKey}`);
       }
       const deterministicPresetOutput = presetKey === 'review_response_classifier'
         ? await reviewResponseClassification.classifyReviewResponse({
@@ -6288,11 +6194,7 @@ async function processNode(node, context, runtime = {}) {
         }))
         : presetKey === 'classify_intent'
         ? buildDeterministicClassifyIntentOutput(aiContext)
-        : presetKey === 'confirm_appointment'
-        ? buildDeterministicConfirmAppointmentOutput(aiContext)
-        : (presetKey === 'appointment_unconfirmed_reply'
-            ? buildDeterministicAppointmentUnconfirmedReplyOutput(aiContext)
-            : null);
+        : null;
       if (deterministicPresetOutput) {
         const normalizedDeterministicOutput = presetKey === 'classify_intent'
           ? normalizeClassifyIntentOutput(deterministicPresetOutput, aiContext)
@@ -6303,7 +6205,7 @@ async function processNode(node, context, runtime = {}) {
         return {
           kind: 'success',
           output: normalizedDeterministicOutput,
-          next_node_id: resolveAiAnalysisNextNode(node, presetKey, normalizedDeterministicOutput),
+          next_node_id: resolveAiAnalysisNextNode(node),
         };
       }
 
@@ -6331,7 +6233,7 @@ async function processNode(node, context, runtime = {}) {
         return {
           kind: 'success',
           output: simulatedOutput,
-          next_node_id: resolveAiAnalysisNextNode(node, presetKey, simulatedOutput),
+          next_node_id: resolveAiAnalysisNextNode(node),
         };
       }
 
@@ -6361,7 +6263,7 @@ async function processNode(node, context, runtime = {}) {
       return {
         kind: 'success',
         output: aiOutput,
-        next_node_id: resolveAiAnalysisNextNode(node, presetKey, aiOutput),
+        next_node_id: resolveAiAnalysisNextNode(node),
       };
     }
 
@@ -7185,12 +7087,9 @@ module.exports = {
   resolveWhatsappLanguageRouting,
   scoreWhatsappTemplateCandidate,
   selectBestWhatsappTemplateCandidate,
-  buildDeterministicConfirmAppointmentOutput,
-  buildDeterministicAppointmentUnconfirmedReplyOutput,
   buildDeterministicClassifyIntentOutput,
   normalizeClassifyIntentOutput,
   buildSafeAppointmentAiFailureOutput,
-  isLegacyIntentExecutionAllowed,
   _processNode: processNode,
   _resolveAiAnalysisNextNode: resolveAiAnalysisNextNode,
   _handleChangeStatus: handleChangeStatus,

@@ -2,10 +2,6 @@
 
 const CLASSIFY_INTENT_PRESET_KEY = 'classify_intent';
 const AUTO_APPLY_CONFIDENCE_THRESHOLD = 0.85;
-const LEGACY_INTENT_PRESET_KEYS = Object.freeze([
-  'confirm_appointment',
-  'appointment_unconfirmed_reply',
-]);
 
 const CLASSIFY_INTENT_PRESET_CONFIG = Object.freeze({
   instruction: 'Clasifica exclusivamente el lote de mensajes de patient_message_batch como la nueva respuesta del paciente; usa conversation_today solo para entender a que pregunta o cita responde. No atribuyas al lote mensajes posteriores ni mensajes de la clinica. Identifica la intencion principal y, si existe, una intencion secundaria. Para una cita distingue confirmar, cancelar, solicitar un cambio, hacer una pregunta o no existir una accion inequivoca. Un agradecimiento confirma solo cuando responde de forma contextual a una peticion clara de confirmacion y no contiene una contradiccion. Si confirma y ademas pregunta, conserva ambas intenciones. Marca posible urgencia solo como senal operativa para revision humana; no diagnostiques. Devuelve exactamente los campos solicitados y un motivo breve.',
@@ -40,6 +36,5 @@ module.exports = {
   AUTO_APPLY_CONFIDENCE_THRESHOLD,
   CLASSIFY_INTENT_PRESET_CONFIG,
   CLASSIFY_INTENT_PRESET_KEY,
-  LEGACY_INTENT_PRESET_KEYS,
   cloneClassifyIntentPresetConfig,
 };

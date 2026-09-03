@@ -54,9 +54,42 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
   revisión hasta una respuesta humana posterior.
 - QA: `node --check`, tests unitarios e integración en DEV/staging, recorrido
   de 575 nodos canónicos y matriz de seis escenarios sobre tres
-  configuraciones representativas. El gate legacy terminó con cero
-  ejecuciones `running|waiting`; retirar sus adaptadores sigue siendo un cambio
-  aislado descrito en `35-roadmap-mensajes-entrantes-ia-y-citas.md`.
+  configuraciones representativas. El corte posterior amplía esta cobertura y
+  se documenta en el siguiente apartado.
+
+## 2026-09-03 - Hard cut de intención de citas y matriz temporal
+
+- `flowEngineV2.service.js` ya no contiene el gate por contexto, builders,
+  routing ni fallbacks de las dos recetas sustituidas. El único contrato
+  ejecutable para estas respuestas es `classify_intent`.
+- El editor elimina la configuración normalizable anterior y rechaza los
+  nombres retirados con `node_config_retired_preset`; el motor aplica además
+  `retired_ai_preset_not_supported` como defensa ante snapshots inválidos.
+- `ConversationAutomationStates` es la única fuente del progreso mostrado en
+  QuickChat. Se eliminó el fallback SQL temporal que inspeccionaba ejecuciones
+  marcadas.
+- `automation-intent-contract.js` deja de exportar claves retiradas. El helper
+  de la migración histórica conserva su lista de forma autocontenida y no es
+  importado por runtime.
+- `20260903110000-hard-cut-retired-appointment-intent-runtime.js` reancla en
+  otros entornos únicamente ejecuciones abiertas cuyo nodo actual y destinos
+  de espera mantengan ID y tipo en la última versión canónica. Si no puede
+  demostrarlo, aborta toda la transacción. En DEV: `rebound=0` y ciclo
+  `down/up` correcto.
+- La auditoría exacta inspecciona `config.preset_key`. No debe usarse una
+  búsqueda textual global porque `migrated_from_preset` conserva evidencia y
+  genera falsos positivos.
+- QA DEV: cero presets retirados abiertos/publicados; 188 workflows, 575 rutas
+  con respuesta, quince escenarios por ruta (8.625 recorridos), 294 rutas sin
+  respuesta y 210 límites horarios en `Europe/Madrid`. Se cubren alta y reprogramación para cita hoy, mañana y futura,
+  respuesta inicial y al reaviso, recordatorio del día anterior, aviso de
+  acceso del mismo día y cancelación nocturna.
+- Contrato de estado: hoy/mañana confirma asistencia como
+  `recordatorio_confirmado`; con más antelación confirma recepción de datos
+  como `info_confirmada`; el aviso de acceso no muta una cita ya confirmada;
+  el aviso nocturno sin respuesta cancela. `ok`, `vale`, emojis y reacciones
+  positivas se resuelven según el mensaje al que responden; cancelación, cambio, pregunta,
+  urgencia y confirmación con pregunta conservan sus guardas canónicas.
 
 ## 2026-08-31 - Salud operativa y cortacircuitos WhatsApp
 
@@ -4099,31 +4132,37 @@ Esto evita dos regresiones:
 2. que el nodo IA reciba texto vacío al analizar la confirmación.
 3. que una misma respuesta reactive varias ejecuciones pendientes en la misma conversación. Si hay varias `wait_response` abiertas para el mismo chat, el backend reanuda solo la más reciente y cancela las anteriores con `cancelled_reason = superseded_by_newer_waiting_execution`.
 
-Regla funcional validada en QA para `condition/ai_analysis` con `preset_key = confirm_appointment`:
+Registro histórico de la regla que originó el contrato actual. Desde el corte del
+2026-09-03 no se ejecuta `confirm_appointment`: toda respuesta pasa por
+`condition/ai_analysis` con `preset_key = classify_intent`:
 
 - reacción positiva explícita (`👍`, `✅`, `👌`, `🙌` y variantes cercanas) sobre el mensaje escuchado:
-  - se trata como `confirmado` de forma determinista;
+  - se trata como `intencion_principal=confirmar_cita` y
+    `accion_inequivoca=true` de forma determinista;
   - no depende del LLM;
-  - enruta por `on_success`.
+  - continúa por `on_success` hacia comprobaciones estructuradas.
 - respuesta escrita con emoji positivo equivalente (`👍`, `👌`, etc.) o texto afirmativo inequívoco:
-  - también se trata como `confirmado` de forma determinista;
+  - también se trata como `confirmar_cita` de forma determinista;
   - para respuestas cortas tipo `sí`, `ok`, `vale`, `perfecto` se exige que sean respuestas breves y sin interrogación; frases largas ambiguas siguen pasando por el análisis normal;
   - esto aplica en ejecución real y en simulación para que el test-run no caiga falsamente por la rama inconclusa.
 - reacción negativa o neutra (`👎`, `🤔`, etc.):
-  - no se fuerza como éxito;
-  - se analiza como respuesta no confirmatoria y debe terminar en `on_fail` salvo que el preset futuro decida otra semántica explícita.
+  - no se convierte en confirmación, cancelación ni cambio;
+  - si no contiene texto interpretable, queda como `otra`, requiere respuesta y pasa a revisión.
 - emoji escrito como texto normal:
   - no se trata como `reaction`;
   - entra como `text`;
-  - lo analiza la IA/preset igual que cualquier otra respuesta escrita;
-  - si el texto completo es un emoji positivo soportado, se considera confirmación determinista; si llega como sticker sin texto, no.
+  - si el texto completo es un emoji positivo soportado, se considera confirmación
+    determinista solo cuando responde a una petición de confirmación; tras un aviso
+    informativo se considera un acuse sin acción sobre la cita;
+  - `ok`, `vale`, `perfecto`, `entendido` y equivalentes breves siguen la misma
+    regla contextual y una interrogación como `ok?` no confirma.
 - sticker recibido como media (`Messages.metadata.media.kind = sticker`):
   - se muestra en QuickChat como miniatura autenticada mediante `GET /api/conversations/messages/:messageId/media`;
   - el `delay/wait_response` puede reanudar la automatización aunque no haya texto y guarda `response_media_kind`, `response_media_id` y `response_media_mime_type` en el contexto;
-  - `confirm_appointment` devuelve `decision=incongruente` de forma determinista porque el modelo actual no analiza el contenido visual del sticker;
-  - `appointment_unconfirmed_reply` devuelve `decision=duda` para que recepción lo revise;
+  - `classify_intent` devuelve `intencion_principal=otra`,
+    `accion_inequivoca=false` y `necesita_respuesta=true`;
   - no se confirma, cancela ni reprograma una cita solo por recibir un sticker. Si se añade IA multimodal real, deberá cambiarse esta regla de forma explícita y auditable.
-- Corrección operativa 2026-07-21: `confirm_appointment` no debe ejecutarse pegado a `action/send_whatsapp` ni a `control/join`. El patrón válido es `send_whatsapp` -> `delay/wait_response` -> `condition/ai_analysis`; si hay un `join` tras ramas alternativas de WhatsApp, el `wait_response` queda entre el `join` y la IA y el runtime reancla la escucha al último outbound real con `conversation_id`/`message_id`. La migración `20260721101000-add-wait-response-before-confirm-ai` publica una versión nueva de las plantillas activas afectadas y añade un `wait_response` de 12h, sin salida de timeout, antes de la IA.
+- Corrección histórica 2026-07-21: la migración `20260721101000-add-wait-response-before-confirm-ai` fijó el patrón `send_whatsapp` -> `delay/wait_response` -> `condition/ai_analysis`. El patrón sigue vigente, pero desde 2026-09-03 el nodo IA usa exclusivamente `classify_intent`.
 
 Checklist obligatorio al pasar a `staging` y luego a `main`:
 
@@ -4527,7 +4566,7 @@ Corrección aplicada en `feat/integracion` el `2026-03-27`:
 - el runtime acepta que el nodo conserve variables adicionales semánticas aunque la plantilla activa todavía no las exponga posicionalmente;
 - al propagar una plantilla, backend recompone automáticamente las automatizaciones V2 que la usan.
 
-#### Estado actual de los flujos de cita
+#### Registro histórico de los flujos de cita (sustituido el 2026-09-03)
 
 Tras el saneado del 2026-03-28, los flujos activos de cita quedan con esta semántica:
 
@@ -4537,7 +4576,7 @@ Tras el saneado del 2026-03-28, los flujos activos de cita quedan con esta semá
    - si no puede inferirse un outbound anterior, la validación bloquea el flujo con error de configuración en vez de publicar un listener semánticamente roto
    - si una plantilla antigua apunta por error a un nodo no outbound, el runtime usa como fallback el último output outbound real con `conversation_id` y `message_id`, y persiste ese nodo efectivo en `waiting_meta.listens_to_node_id`
 
-2. `condition/ai_analysis` en preset `confirm_appointment`
+2. `condition/ai_analysis` usaba el preset histórico `confirm_appointment`
    - `on_success` significa `decision = confirmado`
    - `on_fail` significa cualquier otro caso (`no_confirmado`, `dudas` o fallo técnico)
    - esta regla aplica tanto a respuestas de Groq como a reglas deterministas previas; una negativa textual detectada por regla (`_ai_provider = deterministic_rule`) no puede seguir `on_success`
@@ -4557,7 +4596,7 @@ Tras el saneado del 2026-03-28, los flujos activos de cita quedan con esta semá
 Corrección aplicada en los flujos activos de cita el `2026-03-28`:
 
 - `wait_response` escucha al nodo outbound correcto (`N2`);
-- `condition/ai_analysis` para `confirm_appointment` enruta directamente `confirmado` por `on_success` y el resto por `on_fail`;
+- el preset histórico enrutaba `confirmado` por `on_success`; el contrato vigente usa `classify_intent` y comprobaciones estructuradas posteriores;
 - el monitor de ejecuciones ordena por última actividad.
 
 ### Preview de atribución en cita manual
@@ -6098,10 +6137,10 @@ Actualización 2026-05-06:
 - `GET /api/marketing/bulk-sends/campaigns` acepta `context=mass_sends|reviews|all`. Como las solicitudes de reseña reutilizan `MarketingPatientLists.objective_id=mass_sends`, `context=mass_sends` excluye desde SQL listas con `criteria.review_request=true`, `template_usage=solicitud_resena` o `dispatch.context=review_request`; `context=reviews` devuelve solo esas colas para `Marketing > Campañas > Conseguir reseñas`. No borrar estas listas históricas para limpiar la UI: deben quedar medibles desde reseñas, pero no contaminar `Envíos masivos`.
 - Los mensajes WhatsApp encolados por horario silencioso (`metadata.queued_by_quiet_hours=true`) se muestran en QuickChat como programados y pueden forzarse con `POST /api/conversations/messages/:messageId/send-now`. La espera vive en `JobRequests.type=automation_whatsapp_quiet_send`; al vencer relee mensaje, conversación y credenciales activas y encola un transporte BullMQ inmediato con ID estable por mensaje. Si el mensaje ya quedó `sent/delivered/read`, lo omite para evitar duplicados.
 - La automatización admin de reseñas debe resolver siempre a la plantilla global `public_id=flw_review_request_system`, `template_key=review_request_after_completed`, versión 2. Las clínicas tienen copias operativas con `template_key=review_request_after_completed__clinic_<id>` y `public_id=flw_review_req_clinic_<id>`. El catálogo admin enlaza contra el `public_id` global para poder editar e inspeccionar el flujo base sin mezclarlo con las copias de clínica.
-- La automatización admin `Cancelar cita sin confirmar la noche anterior` queda registrada como `public_id=flw_cancel_unconfirmed_appt_night_before`, `template_key=system_cancel_unconfirmed_appointment_night_before`, `trigger_type=appointment_reminder_window` y `trigger_config={ schedule_moment: day_before, schedule_time_mode: custom, custom_time: 21:00, only_if_not_confirmed: true }`. Envía la plantilla de catálogo `clinicaclick_aviso_cita_sin_confirmar_noche` con copy natural, sin opciones rígidas tipo "responde confirmo/reprogramar/cancelar"; espera 1h y clasifica la intención con `preset_key=appointment_unconfirmed_reply`. Si confirma, marca `recordatorio_confirmado`; si pide reprogramar, cancela la cita para liberar el hueco y crea una notificación interna para recepción; si cancela o no responde, cambia a `cancelada`; si la respuesta es inconclusa, crea una notificación interna y no cierra la cita automáticamente. El runtime evalúa `only_if_not_confirmed` en la hora real del job para no avisar a citas que se confirmaron después de programar el disparo.
+- La automatización admin `Cancelar cita sin confirmar la noche anterior` queda registrada como `public_id=flw_cancel_unconfirmed_appt_night_before`, `template_key=system_cancel_unconfirmed_appointment_night_before`, `trigger_type=appointment_reminder_window` y `trigger_config={ schedule_moment: day_before, schedule_time_mode: custom, custom_time: 21:00, only_if_not_confirmed: true }`. Envía la plantilla de catálogo `clinicaclick_aviso_cita_sin_confirmar_noche`, espera 1h y clasifica con `preset_key=classify_intent`. Una confirmación marca `recordatorio_confirmado`; una cancelación inequívoca o la ausencia de respuesta marca `cancelada`; una petición de cambio marca `cambio_solicitado` y avisa a recepción sin liberar el hueco hasta resolución humana; una respuesta dudosa no modifica la cita. El runtime evalúa `only_if_not_confirmed` al ejecutar el job para no avisar a citas confirmadas después de programar el disparo.
 - El nodo de WhatsApp de ese flujo usa `require_current_catalog_body=true`: cuando se actualiza la copia del catálogo, el motor no reutiliza una versión antigua aprobada por Meta con texto obsoleto. Si la versión nueva aún está `PENDING`, el envío queda bloqueado hasta aprobación en lugar de mandar un mensaje rígido al paciente.
 - Auditoría dev 2026-06-30: la automatización `Cancelar cita sin confirmar la noche anterior` está activa y encola `appointment_automation_schedule_fire` con `payload.__runtime_namespace=staging` para citas futuras. En BS Capilar existen ejecuciones reales recientes (`FlowExecutionsV2.id=693/694`) completadas; no se observaron disparos vencidos posteriores sin procesar en la muestra revisada.
-- QA dev 2026-06-27: se lanzó la automatización real contra BS Capilar para el paciente QA Carlos BS (`CitasPacientes.id_cita=435`, `FlowExecutionsV2.id=692`, `Messages.id=31732`, conversación `2142`). El envío usó la plantilla aprobada `clinicaclick_aviso_cita_sin_confirmar_noche_v10` del WABA `825171709863569` y dejó el flujo esperando en `delay/wait_response` (`N3`) para validar que el webhook inbound reanuda con `preset_key=appointment_unconfirmed_reply`.
+- QA histórica 2026-06-27: se lanzó la automatización real contra BS Capilar para el paciente QA Carlos BS (`CitasPacientes.id_cita=435`, `FlowExecutionsV2.id=692`, `Messages.id=31732`, conversación `2142`). El envío usó la plantilla aprobada `clinicaclick_aviso_cita_sin_confirmar_noche_v10` del WABA `825171709863569`; en aquel momento el flujo aún esperaba en la receta posteriormente retirada. Esta línea conserva evidencia, no describe el runtime vigente.
 - QA dev 2026-06-22: `review-requests/summary` validado para `first_completed_appointment`, `completed_treatment` y `manual_selection`; `PATCH /review-requests/automation` activó la plantilla clínica `review_request_after_completed__clinic_66`; `action/request_review` se probó con cita completada y devolvió `approved_review_template_missing` sin enviar mensajes cuando no hay plantilla WABA aprobada.
 - QA Meta 2026-06-22: el payload con botones `1⭐`-`5⭐` fue rechazado por Meta con `code=100`, `error_subcode=2388060`, `Button Format is Incorrect` y mensaje `Buttons can't have any variables, newlines, emojis, or formatting characters.`. Tras cambiar los botones a `1`-`5`, Meta aceptó y aprobó la revisión de `clinicaclick_solicitar_resena` para BS Capilar (`meta_template_id=2747631985622377`, estado `APPROVED`).
 - QA Meta 2026-06-24: se actualizó el catálogo `clinicaclick_solicitar_resena` con copy más humano (`¡Hola {{1}}! Nos encantaría conocer tu opinión...`) y se propagó a WABAs conectados. Para BS Capilar quedó creada y aprobada la versión técnica `clinicaclick_solicitar_resena_v9` (`meta_template_id=1678832034252619`). Durante cambios de copy, `findApprovedReviewWhatsappTemplate` puede aceptar versiones aprobadas sin botones y con escala visible de estrellas aunque el BODY exacto sea anterior; esto mantiene el envío operativo hasta que Meta apruebe la nueva copia.

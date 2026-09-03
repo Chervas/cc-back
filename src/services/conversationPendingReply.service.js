@@ -6,10 +6,6 @@ const { getIO } = require('./socket.service');
 const { emitNotificationUpdated } = require('./notificationsRealtime.service');
 const conversationAutomationState = require('./conversationAutomationState.service');
 const { serializeState: serializeAutomationState } = conversationAutomationState;
-const { LEGACY_EXECUTION_ALLOWLIST_KEY } = require('../lib/automation-intent-migration');
-
-const LEGACY_EXECUTION_ALLOWED_PATH = `$.__legacy_automation_compatibility.${LEGACY_EXECUTION_ALLOWLIST_KEY}.allowed`;
-const LEGACY_EXECUTION_TEMPLATE_PATH = `$.__legacy_automation_compatibility.${LEGACY_EXECUTION_ALLOWLIST_KEY}.template_version_id`;
 
 function normalizeConversationIds(values) {
   return Array.from(new Set(
@@ -174,52 +170,6 @@ async function getPendingReplyStatesByConversationIds(conversationIds, options =
     });
   }
 
-  const processingRows = await db.sequelize.query(`
-    SELECT
-      CAST(JSON_UNQUOTE(JSON_EXTRACT(execution.context, '$.conversation.id')) AS UNSIGNED) AS conversation_id,
-      MAX(CASE
-        WHEN execution.status = 'running'
-          THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(execution.context, '$.last_response_context.response_message_id')) AS UNSIGNED)
-        ELSE CAST(JSON_UNQUOTE(JSON_EXTRACT(execution.waiting_meta, '$.last_inbound_message_id')) AS UNSIGNED)
-      END) AS response_message_id
-    FROM FlowExecutionsV2 execution
-    WHERE execution.updated_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 15 MINUTE)
-      AND JSON_UNQUOTE(JSON_EXTRACT(execution.context, :legacyAllowedPath)) = 'true'
-      AND CAST(JSON_UNQUOTE(JSON_EXTRACT(execution.context, :legacyTemplatePath)) AS UNSIGNED)
-        = execution.template_version_id
-      AND (
-        (
-          execution.status = 'running'
-          AND CAST(JSON_UNQUOTE(JSON_EXTRACT(execution.context, '$.last_response_context.response_message_id')) AS UNSIGNED) IS NOT NULL
-        )
-        OR (
-          execution.status = 'waiting'
-          AND JSON_UNQUOTE(JSON_EXTRACT(execution.waiting_meta, '$.resume_mode')) = 'response'
-          AND CAST(JSON_UNQUOTE(JSON_EXTRACT(execution.waiting_meta, '$.last_inbound_message_id')) AS UNSIGNED) IS NOT NULL
-        )
-      )
-      AND CAST(JSON_UNQUOTE(JSON_EXTRACT(execution.context, '$.conversation.id')) AS UNSIGNED)
-        IN (:conversationIds)
-    GROUP BY CAST(JSON_UNQUOTE(JSON_EXTRACT(execution.context, '$.conversation.id')) AS UNSIGNED)
-  `, {
-    ...queryOptions,
-    replacements: {
-      ...queryOptions.replacements,
-      legacyAllowedPath: LEGACY_EXECUTION_ALLOWED_PATH,
-      legacyTemplatePath: LEGACY_EXECUTION_TEMPLATE_PATH,
-    },
-  });
-
-  processingRows.forEach((row) => {
-    const state = states.get(Number(row.conversation_id));
-    if (state) {
-      state.isAutomationResponseProcessing = true;
-      state.automationResponseProcessingMessageId = Number(row.response_message_id || 0) || null;
-    }
-  });
-
-  // Fuente canónica nueva. La consulta anterior queda limitada a la lista
-  // exacta del corte y se retirará al finalizar esas ejecuciones.
   if (db.ConversationAutomationState) {
     const persistedRows = await db.ConversationAutomationState.findAll({
       where: { conversation_id: { [Op.in]: ids } },
