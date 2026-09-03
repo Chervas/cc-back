@@ -12,7 +12,7 @@ const {
   markCanonicalConfirmationReplySuppression,
 } = require('../../lib/automation-intent-migration');
 
-const RESPONSE_MATRIX_SCENARIO_COUNT = 15;
+const RESPONSE_MATRIX_SCENARIO_COUNT = 16;
 
 function appointmentReplyContext(patientText) {
   return {
@@ -188,6 +188,18 @@ async function assertResponseMatrix(template, contextOptions, waitModes, expecte
     {
       key: 'short_vale',
       text: 'vale',
+      expectedIntent: options.shortAcknowledgementIntent || 'confirmar_cita',
+      expectedStatus: options.shortAcknowledgementStatus || expectedConfirmationStatus,
+      expectAcknowledgement: options.shortAcknowledgementAcknowledgement !== false,
+      expectNoAutomaticReply: options.shortAcknowledgementAcknowledgement === false,
+    },
+    {
+      key: 'buffered_final_acknowledgement',
+      text: 'espera un segundo\nok',
+      responseContextPatch: {
+        response_lines: ['espera un segundo', 'ok'],
+        listened_message_preview: prompt,
+      },
       expectedIntent: options.shortAcknowledgementIntent || 'confirmar_cita',
       expectedStatus: options.shortAcknowledgementStatus || expectedConfirmationStatus,
       expectAcknowledgement: options.shortAcknowledgementAcknowledgement !== false,
