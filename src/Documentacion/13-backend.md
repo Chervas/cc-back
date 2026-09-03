@@ -120,6 +120,16 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
   orquestador sin texto histórico y matriz completa de 9.200 recorridos con
   respuesta; todas las comprobaciones pasan.
 
+## 2026-09-03 - Materialización de estados WhatsApp de campañas
+
+- La validación posterior al despliegue detectó en el gateway el error activo
+  `marketingBulkSendsService is not defined` al conciliar estados
+  `delivered/read`. El mensaje y su estado base sí se persistían, pero no se
+  actualizaba el detalle del destinatario de campaña.
+- `queue.workers.js` importa ahora explícitamente el servicio que ya invocaba.
+  El contrato de gobernanza de entrega exige esa importación para impedir que
+  vuelva a quedar como referencia global inexistente.
+
 ## 2026-08-31 - Salud operativa y cortacircuitos WhatsApp
 
 - `whatsappAccountHealth.service.js` compone una señal canónica por

@@ -8,6 +8,7 @@ const whatsappTemplatesService = require('../services/whatsappTemplates.service'
 const whatsappPhonesService = require('../services/whatsappPhones.service');
 const automationDefaultsService = require('../services/automationDefaults.service');
 const automationInboundMessageService = require('../services/automationInboundMessage.service');
+const marketingBulkSendsService = require('../services/marketingBulkSends.service');
 const notificationService = require('../services/notifications.service');
 const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.service');
 const whatsappConnectionStatusService = require('../services/whatsappConnectionStatus.service');
