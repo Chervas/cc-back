@@ -115,6 +115,11 @@ assert.doesNotMatch(phoneSyncSource, /messaging_limit_tier/);
 assert.doesNotMatch(embeddedSource, /messaging_limit_tier/);
 assert.match(workerSource, /provider_acceptance_status/);
 assert.match(workerSource, /msg\.status = 'pending'/);
+assert.match(
+  workerSource,
+  /const marketingBulkSendsService = require\('\.\.\/services\/marketingBulkSends\.service'\);/,
+  'el worker debe importar el servicio que materializa los estados de campañas',
+);
 assert.match(bulkSource, /held_for_quality_assessment/);
 assert.match(bulkSource, /dispatch_status: immediate\.held \? 'held_quality' : 'accepted'/);
 assert.match(bulkSource, /\['held_meta', 'paused_review', 'awaiting_delivery'\]\.includes\(dispatchStatus\)/);
