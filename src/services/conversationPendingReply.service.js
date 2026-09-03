@@ -4,7 +4,8 @@ const { Op } = require('sequelize');
 const db = require('../../models');
 const { getIO } = require('./socket.service');
 const { emitNotificationUpdated } = require('./notificationsRealtime.service');
-const { serializeState: serializeAutomationState } = require('./conversationAutomationState.service');
+const conversationAutomationState = require('./conversationAutomationState.service');
+const { serializeState: serializeAutomationState } = conversationAutomationState;
 const { LEGACY_EXECUTION_ALLOWLIST_KEY } = require('../lib/automation-intent-migration');
 
 const LEGACY_EXECUTION_ALLOWED_PATH = `$.__legacy_automation_compatibility.${LEGACY_EXECUTION_ALLOWLIST_KEY}.allowed`;
@@ -328,7 +329,46 @@ async function resolveAutomationAttentionForConversation(conversationId, userId,
   return { success: true, updated: notifications.length };
 }
 
+async function completeAnsweredAutomationStateForConversation(conversationId, options = {}) {
+  const numericConversationId = Number(conversationId);
+  if (!Number.isInteger(numericConversationId) || numericConversationId <= 0 || !db.ConversationAutomationState) {
+    return { completed: false, reason: 'invalid_scope' };
+  }
+  const state = await db.ConversationAutomationState.findOne({
+    where: { conversation_id: numericConversationId },
+    ...(options.transaction ? { transaction: options.transaction } : {}),
+  });
+  if (!state) return { completed: false, reason: 'state_not_found' };
+
+  const intent = String(state.intent || '').trim().toLowerCase();
+  const appointmentStatus = String(state.appointment_status || '').trim().toLowerCase();
+  const resolvedAppointmentStates = new Set([
+    'recordatorio_confirmado',
+    'confirmada',
+    'confirmado',
+    'info_confirmada',
+    'cancelada',
+  ]);
+  const canComplete = state.status === 'review'
+    && state.manual_action_required === true
+    && state.needs_response === true
+    && state.possible_urgency !== true
+    && ['confirmar_cita', 'cancelar_cita'].includes(intent)
+    && resolvedAppointmentStates.has(appointmentStatus);
+  if (!canComplete) return { completed: false, reason: 'operator_action_still_required' };
+
+  const completed = await conversationAutomationState.completeState({
+    clinicId: state.clinic_id,
+    conversationId: numericConversationId,
+  }, {
+    ...(options.transaction ? { transaction: options.transaction } : {}),
+    ...(options.emit === false ? { emit: false } : {}),
+  });
+  return { completed: !!completed, reason: completed ? null : 'state_changed' };
+}
+
 module.exports = {
+  completeAnsweredAutomationStateForConversation,
   emitAutomationResponseProcessing,
   findHumanReplyAfterMessage,
   getPendingReplyStatesByConversationIds,
