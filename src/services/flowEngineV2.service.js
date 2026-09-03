@@ -1748,6 +1748,26 @@ function normalizeClassifyIntentOutput(value = {}, context = {}) {
   };
 }
 
+function getPendingResponseSuppression(config = {}, context = {}) {
+  if (!parseBool(resolveTemplateValue(config?.suppress_if_response_needed, context), false)) {
+    return null;
+  }
+  const classification = findClassifyIntentOutput(context);
+  if (!classification) return null;
+  const normalized = normalizeClassifyIntentOutput(classification, context);
+  return normalized.necesita_respuesta === true ? normalized : null;
+}
+
+function buildPendingResponseSuppressionOutput(classification) {
+  return {
+    status: 'suppressed_pending_response',
+    suppressed: true,
+    intent: classification?.intencion_principal || null,
+    secondary_intent: classification?.intencion_secundaria || null,
+    needs_response: true,
+  };
+}
+
 function recentPatientTextFromConversation(context = {}) {
   const explicit = cleanString(
     context?.last_response_context?.response_text
@@ -3470,6 +3490,14 @@ async function handleSendWhatsapp(node, context, runtime) {
       return reuseExistingAutomationWhatsappMessage({ existingMessage, node });
     }
   }
+  const pendingResponseSuppression = getPendingResponseSuppression(config, context);
+  if (pendingResponseSuppression) {
+    return {
+      kind: 'success',
+      output: buildPendingResponseSuppressionOutput(pendingResponseSuppression),
+      next_node_id: readOutputTarget(node, 'on_success'),
+    };
+  }
   if (parseBool(resolveTemplateValue(config?.suppress_if_human_replied, context), false)) {
     const sourceMessageId = toIntOrNull(
       context?.last_response_context?.response_message_id
@@ -4482,6 +4510,7 @@ async function handleReplyMessage(node, context, runtime) {
       quiet_hours_enabled: false,
       outside_send_window_policy: 'discard',
       suppress_flow_event: true,
+      suppress_if_response_needed: config.suppress_if_response_needed,
       source: 'message_received_reply',
       domain: 'appointment',
       delivery_slot: `reply_${sourceMessageId}`,
@@ -5758,6 +5787,14 @@ async function processNode(node, context, runtime = {}) {
 
     case 'action/send_whatsapp': {
       if (simulation) {
+        const pendingResponseSuppression = getPendingResponseSuppression(config, context);
+        if (pendingResponseSuppression) {
+          return {
+            kind: 'success',
+            output: buildPendingResponseSuppressionOutput(pendingResponseSuppression),
+            next_node_id: readOutputTarget(node, 'on_success'),
+          };
+        }
         const recipientMode = normalizeRecipientMode(resolveTemplateValue(config?.recipient_mode, context));
         const senderMode = toLowerSafe(resolveTemplateValue(config?.sender_mode, context)) || 'clinic_default';
         const messageMode = normalizeWhatsappMessageMode(resolveTemplateValue(config?.message_mode, context));
@@ -5786,6 +5823,14 @@ async function processNode(node, context, runtime = {}) {
 
     case 'action/reply_message': {
       if (simulation) {
+        const pendingResponseSuppression = getPendingResponseSuppression(config, context);
+        if (pendingResponseSuppression) {
+          return {
+            kind: 'success',
+            output: buildPendingResponseSuppressionOutput(pendingResponseSuppression),
+            next_node_id: readOutputTarget(node, 'on_success'),
+          };
+        }
         return {
           kind: 'success',
           output: {

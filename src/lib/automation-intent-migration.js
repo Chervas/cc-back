@@ -99,6 +99,7 @@ function markFirstPostClassificationWhatsapp(nodes, startNodeId) {
       node.config = {
         ...(node.config || {}),
         suppress_if_human_replied: true,
+        suppress_if_response_needed: true,
       };
       return true;
     }
@@ -106,6 +107,81 @@ function markFirstPostClassificationWhatsapp(nodes, startNodeId) {
     queue.push({ id: cleanString(node.outputs?.on_success), depth: current.depth + 1 });
   }
   return false;
+}
+
+function markCanonicalConfirmationReplySuppression(rawNodes) {
+  const nodes = clone(Array.isArray(rawNodes) ? rawNodes : []);
+  const nodeMap = new Map(nodes.map((node) => [cleanString(node?.id), node]));
+  const canonicalAiNodes = nodes.filter((node) => (
+    node?.type === 'condition/ai_analysis'
+    && cleanString(node?.config?.preset_key) === 'classify_intent'
+  ));
+  const markedNodeIds = new Set();
+
+  const outputCheck = (node, aiNodeId, path) => {
+    const ref = node?.config?.left_ref || {};
+    return node?.type === 'condition/field_check'
+      && cleanString(ref.source) === 'node_output'
+      && cleanString(ref.node_id) === cleanString(aiNodeId)
+      && cleanString(ref.path) === path;
+  };
+  const booleanBranch = (node, expected) => {
+    const rightValue = node?.config?.right_value;
+    const rightBoolean = rightValue === true
+      || rightValue === 1
+      || ['true', '1', 'yes', 'si', 'sí'].includes(cleanString(rightValue).toLowerCase());
+    return cleanString(expected === rightBoolean ? node?.outputs?.on_true : node?.outputs?.on_false);
+  };
+
+  for (const aiNode of canonicalAiNodes) {
+    const confirmationChecks = nodes.filter((node) => (
+      outputCheck(node, aiNode.id, 'intencion_principal')
+      && cleanString(node?.config?.operator || 'equals') === 'equals'
+      && cleanString(node?.config?.right_value) === 'confirmar_cita'
+    ));
+    for (const confirmationCheck of confirmationChecks) {
+      const queue = [{ id: cleanString(confirmationCheck?.outputs?.on_true), depth: 0 }];
+      const visited = new Set();
+      while (queue.length) {
+        const current = queue.shift();
+        if (!current.id || current.depth > 20 || visited.has(current.id)) continue;
+        visited.add(current.id);
+        const node = nodeMap.get(current.id);
+        if (!node) continue;
+
+        if (['action/send_whatsapp', 'action/reply_message'].includes(cleanString(node.type))) {
+          if (node?.config?.suppress_if_response_needed !== true) {
+            node.config = {
+              ...(node.config || {}),
+              suppress_if_response_needed: true,
+            };
+            markedNodeIds.add(cleanString(node.id));
+          }
+          continue;
+        }
+
+        if (outputCheck(node, aiNode.id, 'accion_inequivoca')) {
+          queue.push({ id: booleanBranch(node, true), depth: current.depth + 1 });
+          continue;
+        }
+        if (outputCheck(node, aiNode.id, 'necesita_respuesta')) {
+          queue.push({ id: booleanBranch(node, false), depth: current.depth + 1 });
+          continue;
+        }
+        if (cleanString(node.type).startsWith('condition/')) {
+          Object.values(node.outputs || {}).forEach((target) => {
+            queue.push({ id: cleanString(target), depth: current.depth + 1 });
+          });
+          continue;
+        }
+        queue.push({ id: cleanString(node?.outputs?.on_success), depth: current.depth + 1 });
+      }
+    }
+  }
+
+  return markedNodeIds.size
+    ? { changed: true, marked: markedNodeIds.size, nodes }
+    : { changed: false, marked: 0, nodes: rawNodes };
 }
 
 function pruneUnreachableNodes(nodes) {
@@ -490,6 +566,7 @@ function buildMessageReceivedTemplateNodes() {
       config: {
         message_text: 'Gracias. Hemos registrado la confirmacion de tu cita.',
         suppress_if_human_replied: true,
+        suppress_if_response_needed: true,
       },
       outputs: { on_success: null, on_fail: 'N20' },
       position: { x: 1780, y: 280 },
@@ -502,5 +579,6 @@ module.exports = {
   LEGACY_EXECUTION_ALLOWLIST_KEY,
   buildMessageReceivedTemplateNodes,
   hasCanonicalIntentMigration,
+  markCanonicalConfirmationReplySuppression,
   transformLegacyIntentNodes,
 };

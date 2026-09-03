@@ -10,6 +10,7 @@ const { canUserAccessFeature } = require('../lib/access-policy');
 const { canUserSelectWhatsappTemplate } = require('../lib/whatsapp-template-ownership');
 const { isReviewWorkflowWhatsappTemplate } = require('../lib/whatsapp-template-workflow');
 const {
+  completeAnsweredAutomationStateForConversation,
   getPendingReplyStatesByConversationIds,
   resolveAutomationAttentionForConversation,
 } = require('../services/conversationPendingReply.service');
@@ -2403,6 +2404,7 @@ exports.postMessage = async (req, res) => {
             reason: 'manual_reply_sent',
           }
         );
+        await completeAnsweredAutomationStateForConversation(conversation.id);
         if (attentionResolution.updated > 0 && io) {
           io.to(`clinic:${conversation.clinic_id}`).emit('conversation:updated', {
             id: String(conversation.id),

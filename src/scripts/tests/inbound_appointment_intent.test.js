@@ -11,11 +11,15 @@ const inbound = require('../../services/automationInboundMessage.service');
 const jobExecutor = require('../../services/jobExecutor.service');
 const resumeService = require('../../services/automationsV2Resume.service');
 const conversationAutomationState = require('../../services/conversationAutomationState.service');
+const {
+  completeAnsweredAutomationStateForConversation,
+} = require('../../services/conversationPendingReply.service');
 const automationDefaults = require('../../services/automationDefaults.service');
 const automationsController = require('../../controllers/automationsV2.controller');
 const {
   LEGACY_EXECUTION_ALLOWLIST_KEY,
   buildMessageReceivedTemplateNodes,
+  markCanonicalConfirmationReplySuppression,
   transformLegacyIntentNodes,
 } = require('../../lib/automation-intent-migration');
 
@@ -43,6 +47,66 @@ function testConfirmationKeepsSecondaryQuestion() {
   assert.equal(output.intencion_secundaria, 'pregunta');
   assert.equal(output.accion_inequivoca, true);
   assert.equal(output.necesita_respuesta, true);
+}
+
+async function testManualReplyOnlyCompletesResolvedPendingQuestion() {
+  const clinic = await db.Clinica.findOne({
+    attributes: ['id_clinica'],
+    order: [['id_clinica', 'ASC']],
+    raw: true,
+  });
+  assert.ok(clinic?.id_clinica);
+  const transaction = await db.sequelize.transaction();
+  try {
+    const conversation = await db.Conversation.create({
+      clinic_id: clinic.id_clinica,
+      channel: 'whatsapp',
+      contact_id: `qa-pending-response-${Date.now()}`,
+      last_message_at: new Date(),
+      last_inbound_at: new Date(),
+      unread_count: 0,
+    }, { transaction });
+    const state = await db.ConversationAutomationState.create({
+      conversation_id: conversation.id,
+      clinic_id: clinic.id_clinica,
+      status: 'review',
+      stage: 'review',
+      appointment_status: 'recordatorio_confirmado',
+      intent: 'confirmar_cita',
+      possible_urgency: false,
+      needs_response: true,
+      manual_action_required: true,
+    }, { transaction });
+
+    const completed = await completeAnsweredAutomationStateForConversation(conversation.id, {
+      transaction,
+      emit: false,
+    });
+    assert.equal(completed.completed, true);
+    await state.reload({ transaction });
+    assert.equal(state.status, 'completed');
+    assert.equal(state.manual_action_required, false);
+
+    await state.update({
+      status: 'review',
+      stage: 'review',
+      appointment_status: 'cambio_solicitado',
+      intent: 'solicitar_cambio_cita',
+      needs_response: true,
+      manual_action_required: true,
+    }, { transaction });
+    const stillPending = await completeAnsweredAutomationStateForConversation(conversation.id, {
+      transaction,
+      emit: false,
+    });
+    assert.equal(stillPending.completed, false);
+    assert.equal(stillPending.reason, 'operator_action_still_required');
+    await state.reload({ transaction });
+    assert.equal(state.status, 'review');
+    assert.equal(state.manual_action_required, true);
+  } finally {
+    await transaction.rollback();
+  }
 }
 
 function testThanksOnlyConfirmsInConfirmationContext() {
@@ -626,6 +690,7 @@ function testLegacyGraphMigrationPublishesCanonicalRoutes() {
   );
   assert.equal(transformed.nodes.find((node) => node.id === 'N4').config.preset_key, 'classify_intent');
   assert.equal(transformed.nodes.find((node) => node.id === 'N5').config.suppress_if_human_replied, true);
+  assert.equal(transformed.nodes.find((node) => node.id === 'N5').config.suppress_if_response_needed, true);
   assert.equal(transformed.nodes.find((node) => node.id === 'N3').config.response_buffer_delay_seconds, 90);
   assert.equal(
     transformed.nodes.some((node) => node.type === 'action/change_status' && node.config?.new_status === 'cancelada'),
@@ -638,6 +703,67 @@ function testLegacyGraphMigrationPublishesCanonicalRoutes() {
   const secondPass = transformLegacyIntentNodes(transformed.nodes);
   assert.equal(secondPass.changed, false, 'migration must be idempotent');
   assert.deepEqual(secondPass.nodes, transformed.nodes);
+}
+
+async function testPendingQuestionSuppressesGenericConfirmationReply() {
+  const confirmationWithQuestion = flowEngine.buildDeterministicClassifyIntentOutput(
+    contextWithConversation('Confirmado. ¿Podéis darme la dirección?')
+  );
+  const context = {
+    ...contextWithConversation('Confirmado. ¿Podéis darme la dirección?'),
+    outputs: { N3: confirmationWithQuestion },
+  };
+  const sendNode = {
+    id: 'N4',
+    type: 'action/send_whatsapp',
+    config: {
+      message_mode: 'manual',
+      manual_message_text: 'Gracias por confirmar.',
+      suppress_if_response_needed: true,
+    },
+    outputs: { on_success: 'N5' },
+  };
+  const suppressed = await flowEngine._processNode(sendNode, context, { simulation: true });
+  assert.equal(suppressed.kind, 'success');
+  assert.equal(suppressed.output.status, 'suppressed_pending_response');
+  assert.equal(suppressed.output.suppressed, true);
+  assert.equal(suppressed.output.intent, 'confirmar_cita');
+  assert.equal(suppressed.output.secondary_intent, 'pregunta');
+  assert.equal(suppressed.next_node_id, 'N5');
+
+  const plainConfirmation = flowEngine.buildDeterministicClassifyIntentOutput(
+    contextWithConversation('Confirmado')
+  );
+  const delivered = await flowEngine._processNode(sendNode, {
+    ...contextWithConversation('Confirmado'),
+    outputs: { N3: plainConfirmation },
+  }, { simulation: true });
+  assert.equal(delivered.output.status, 'simulated');
+  assert.equal(delivered.output.suppressed, undefined);
+}
+
+function testCanonicalConfirmationReplySuppressionMigration() {
+  const sourceNodes = buildMessageReceivedTemplateNodes();
+  const sourceConfirmationWithQuestion = sourceNodes.find((node) => node.id === 'N8');
+  const sourcePlainConfirmation = sourceNodes.find((node) => node.id === 'N24');
+  assert.equal(sourceConfirmationWithQuestion.config.suppress_if_response_needed, undefined);
+  assert.equal(sourcePlainConfirmation.config.suppress_if_response_needed, true);
+
+  const canonical = [
+    { id: 'N1', type: 'trigger/appointment_created', config: {}, outputs: { on_success: 'N2' } },
+    { id: 'N2', type: 'condition/ai_analysis', config: { preset_key: 'classify_intent' }, outputs: { on_success: 'N3' } },
+    { id: 'N3', type: 'condition/field_check', config: { left_ref: { source: 'node_output', node_id: 'N2', path: 'intencion_principal' }, operator: 'equals', right_value: 'confirmar_cita' }, outputs: { on_true: 'N4', on_false: null } },
+    { id: 'N4', type: 'condition/field_check', config: { left_ref: { source: 'node_output', node_id: 'N2', path: 'accion_inequivoca' }, operator: 'equals', right_value: true }, outputs: { on_true: 'N5', on_false: null } },
+    { id: 'N5', type: 'action/send_whatsapp', config: { manual_message_text: 'Gracias' }, outputs: { on_success: 'N6' } },
+    { id: 'N6', type: 'action/change_status', config: { target_entity: 'appointment', new_status: 'recordatorio_confirmado' }, outputs: { on_success: null } },
+  ];
+  const migrated = markCanonicalConfirmationReplySuppression(canonical);
+  assert.equal(migrated.changed, true);
+  assert.equal(migrated.marked, 1);
+  assert.equal(migrated.nodes.find((node) => node.id === 'N5').config.suppress_if_response_needed, true);
+  const secondPass = markCanonicalConfirmationReplySuppression(migrated.nodes);
+  assert.equal(secondPass.changed, false);
+  assert.deepEqual(secondPass.nodes, migrated.nodes);
 }
 
 function testNightlyLegacyDecisionChecksAreRemoved() {
@@ -794,6 +920,7 @@ function testUnchangedCatalogPropagationDoesNotCreateAnotherVersion() {
 
 async function run() {
   testConfirmationKeepsSecondaryQuestion();
+  await testManualReplyOnlyCompletesResolvedPendingQuestion();
   testThanksOnlyConfirmsInConfirmationContext();
   await testCanonicalIntentRunsThroughTheRealAiNode();
   testAiRoutingSupportsCanonicalAndLegacyContracts();
@@ -819,6 +946,8 @@ async function run() {
   await testBufferedTextSurvivesATrailingReaction();
   testLegacyPresetRequiresExactCutoverMarker();
   testLegacyGraphMigrationPublishesCanonicalRoutes();
+  await testPendingQuestionSuppressesGenericConfirmationReply();
+  testCanonicalConfirmationReplySuppressionMigration();
   testNightlyLegacyDecisionChecksAreRemoved();
   testDefaultAfterHoursGraphIsClosedAndSafeByDefault();
   testAfterHoursConversationMatrix();
