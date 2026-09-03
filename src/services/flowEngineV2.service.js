@@ -1795,7 +1795,7 @@ function buildDeterministicClassifyIntentOutput(context = {}) {
   const reschedule = !negatedReschedule && (directReschedule || scheduleConflict);
   const negatedConfirmation = /\b(?:no (?:puedo|quiero|voy a|he podido )?(?:confirmar|confirmo|confirmado|confirmada)|no (?:asistire|acudire|ire|voy a ir)|todavia no (?:confirmo|puedo confirmar))\b/.test(text);
   const explicitConfirmation = !negatedConfirmation
-    && /\b(confirmado|confirmo|confirmada|si asistire|voy a ir|alli estare|ahi estare)\b/.test(text);
+    && /\b(confirmado|confirmo|confirmada|si asistire|voy a ir|alli estare|ahi estare|estare alli|estare ahi)\b/.test(text);
   const contextualShortConfirmation = asksForConfirmation
     && /^(si|ok|okay|vale|gracias|muchas gracias|entendido|correcto|de acuerdo|perfecto)$/.test(text);
 
@@ -5106,6 +5106,15 @@ function readOutputTarget(node, key) {
   return target || null;
 }
 
+function resolveAiAnalysisNextNode(node, presetKey, output) {
+  if (presetKey !== 'confirm_appointment') {
+    return readOutputTarget(node, 'on_success');
+  }
+  return toLowerSafe(output?.decision) === 'confirmado'
+    ? readOutputTarget(node, 'on_success')
+    : readOutputTarget(node, 'on_fail');
+}
+
 function resolveDurationMs(duration, unit) {
   const qty = Number(duration);
   if (!Number.isFinite(qty) || qty < 0) return 0;
@@ -6246,15 +6255,10 @@ async function processNode(node, context, runtime = {}) {
         if (presetKey === 'classify_intent' && !simulation) {
           await persistClassifyIntentState(runtime?.execution, runtimeTargets, normalizedDeterministicOutput);
         }
-        const deterministicDecision = cleanString(normalizedDeterministicOutput?.decision).toLowerCase();
         return {
           kind: 'success',
           output: normalizedDeterministicOutput,
-          next_node_id: presetKey === 'confirm_appointment'
-            ? (deterministicDecision === 'confirmado'
-                ? readOutputTarget(node, 'on_success')
-                : readOutputTarget(node, 'on_fail'))
-            : readOutputTarget(node, 'on_success'),
+          next_node_id: resolveAiAnalysisNextNode(node, presetKey, normalizedDeterministicOutput),
         };
       }
 
@@ -6279,15 +6283,10 @@ async function processNode(node, context, runtime = {}) {
             motivo: 'Simulación sin una señal determinista suficiente.',
           }, aiContext);
         }
-        const decision = cleanString(simulatedOutput?.decision).toLowerCase();
         return {
           kind: 'success',
           output: simulatedOutput,
-          next_node_id: presetKey === 'confirm_appointment'
-            ? (decision === 'confirmado'
-                ? readOutputTarget(node, 'on_success')
-                : readOutputTarget(node, 'on_fail'))
-            : readOutputTarget(node, 'on_success'),
+          next_node_id: resolveAiAnalysisNextNode(node, presetKey, simulatedOutput),
         };
       }
 
@@ -6314,17 +6313,10 @@ async function processNode(node, context, runtime = {}) {
         await persistClassifyIntentState(runtime?.execution, runtimeTargets, aiOutput);
       }
 
-      const normalizedDecision = cleanString(aiOutput?.decision).toLowerCase();
-      const nextNodeId = presetKey === 'confirm_appointment'
-        ? (normalizedDecision === 'confirmado'
-            ? readOutputTarget(node, 'on_success')
-            : readOutputTarget(node, 'on_fail'))
-        : readOutputTarget(node, 'on_success');
-
       return {
         kind: 'success',
         output: aiOutput,
-        next_node_id: nextNodeId,
+        next_node_id: resolveAiAnalysisNextNode(node, presetKey, aiOutput),
       };
     }
 
@@ -7154,6 +7146,8 @@ module.exports = {
   normalizeClassifyIntentOutput,
   buildSafeAppointmentAiFailureOutput,
   isLegacyIntentExecutionAllowed,
+  _processNode: processNode,
+  _resolveAiAnalysisNextNode: resolveAiAnalysisNextNode,
   _handleChangeStatus: handleChangeStatus,
   resolveOperationalSubroleTargets,
 };

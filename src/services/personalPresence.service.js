@@ -522,7 +522,12 @@ async function createPresenceEvent({ actorId, payload = {} }) {
   });
 }
 
-async function getDashboardPresenceSummary({ clinicIds = [], clinicMap = new Map(), businessDate = null }) {
+async function getDashboardPresenceSummary({
+  clinicIds = [],
+  clinicMap = new Map(),
+  businessDate = null,
+  actorId = null,
+}) {
   const ids = [...new Set((clinicIds || []).map(toInt).filter(Boolean))];
   if (!ids.length || !PersonalPresenceEvent) return null;
 
@@ -533,25 +538,38 @@ async function getDashboardPresenceSummary({ clinicIds = [], clinicMap = new Map
   }
   const rows = perClinic.flatMap((item) => item.rows);
   const summary = summarizeRows(rows);
+  const safeActorId = toInt(actorId);
+  const me = safeActorId
+    ? rows.find((row) => Number(row.userId) === Number(safeActorId)) || null
+    : null;
+  const serializeDashboardRow = (row) => ({
+    id: `${row.clinicId}:${row.userId}`,
+    userId: row.userId,
+    clinicId: row.clinicId,
+    clinicName: row.clinicName,
+    name: row.name,
+    avatar: row.avatar || null,
+    role: row.role,
+    expected: row.expected,
+    expected_minutes: row.expected_minutes,
+    worked: row.worked,
+    worked_minutes: row.worked_minutes,
+    difference: row.difference,
+    difference_minutes: row.difference_minutes,
+    status: row.status,
+    statusLabel: row.statusLabel,
+    lastEventType: row.lastEventType,
+    lastEventLabel: row.lastEventLabel,
+    firstInLabel: row.firstInLabel,
+    issue: row.issue,
+  });
+
   return {
     businessDate: normalizeDateOnly(businessDate) || perClinic[0]?.business_date || dateOnly(new Date()),
     generatedAt: new Date().toISOString(),
     ...summary,
-    rows: rows.slice(0, 12).map((row) => ({
-      id: `${row.clinicId}:${row.userId}`,
-      userId: row.userId,
-      clinicId: row.clinicId,
-      clinicName: row.clinicName,
-      name: row.name,
-      role: row.role,
-      expected: row.expected,
-      worked: row.worked,
-      status: row.status,
-      statusLabel: row.statusLabel,
-      firstInLabel: row.firstInLabel,
-      lastEventLabel: row.lastEventLabel,
-      issue: row.issue,
-    })),
+    me: me ? serializeDashboardRow(me) : null,
+    rows: rows.slice(0, 12).map(serializeDashboardRow),
   };
 }
 

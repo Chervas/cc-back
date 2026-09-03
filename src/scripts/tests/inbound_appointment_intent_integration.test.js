@@ -7,6 +7,27 @@ process.env.RUNTIME_ROLE = 'gateway';
 
 const db = require('../../../models');
 const inbound = require('../../services/automationInboundMessage.service');
+const flowEngine = require('../../services/flowEngineV2.service');
+
+function appointmentReplyContext(patientText) {
+  return {
+    conversation_today: [
+      '[03/09/2026, 09:00] Clínica: ¿Me confirmas tu asistencia mañana?',
+      `[03/09/2026, 09:10] Paciente: ${patientText}`,
+    ].join('\n'),
+    last_response: patientText,
+    last_response_context: {
+      response_text: patientText,
+      response_lines: [patientText],
+      response_message_type: 'text',
+    },
+    trigger: {
+      type: 'appointment_reminder_window',
+      data: { appointment_candidate_count: 1 },
+    },
+    appointment: { estado: 'recordatorio_enviado' },
+  };
+}
 
 async function testAtomicOutboxAndDuplicateClaim() {
   const clinic = await db.Clinica.findOne({
@@ -80,9 +101,60 @@ async function testAtomicOutboxAndDuplicateClaim() {
   }
 }
 
-testAtomicOutboxAndDuplicateClaim()
-  .then(async () => {
-    console.log('inbound_appointment_intent_integration.test.js OK');
+async function testEveryPublishedCanonicalAiNodeRunsRealPatientRegressions() {
+  const published = await db.AutomationFlowTemplateV2.findAll({
+    where: { published_at: { [db.Sequelize.Op.ne]: null } },
+    attributes: ['id', 'public_id', 'version', 'nodes'],
+    order: [['public_id', 'ASC'], ['version', 'DESC'], ['id', 'DESC']],
+    raw: true,
+  });
+  const latest = new Map();
+  for (const template of published) {
+    if (!latest.has(template.public_id)) latest.set(template.public_id, template);
+  }
+
+  const canonicalNodes = [];
+  for (const template of latest.values()) {
+    const nodes = Array.isArray(template.nodes)
+      ? template.nodes
+      : JSON.parse(template.nodes || '[]');
+    assert.equal(
+      nodes.some((node) => ['confirm_appointment', 'appointment_unconfirmed_reply'].includes(node?.config?.preset_key)),
+      false,
+      `latest published template ${template.public_id} still uses a legacy appointment preset`
+    );
+    nodes
+      .filter((node) => node?.type === 'condition/ai_analysis' && node?.config?.preset_key === 'classify_intent')
+      .forEach((node) => canonicalNodes.push({ template, node }));
+  }
+  assert.ok(canonicalNodes.length > 0, 'DEV must expose published canonical appointment AI nodes');
+
+  const regressions = [
+    'Buenos dias, si confirmo la asistencia',
+    'Hola! No es molestia, gracias por el recordatorio. Mañana estaré allí. Gracias!',
+  ];
+  for (const { template, node } of canonicalNodes) {
+    for (const text of regressions) {
+      const result = await flowEngine._processNode(
+        node,
+        appointmentReplyContext(text),
+        { simulation: true }
+      );
+      assert.equal(result.kind, 'success', `template ${template.public_id} did not complete its AI node`);
+      assert.equal(result.next_node_id, node.outputs?.on_success || null);
+      assert.equal(result.output?.intencion_principal, 'confirmar_cita');
+      assert.equal(result.output?.accion_inequivoca, true);
+    }
+  }
+  return canonicalNodes.length;
+}
+
+Promise.all([
+  testAtomicOutboxAndDuplicateClaim(),
+  testEveryPublishedCanonicalAiNodeRunsRealPatientRegressions(),
+])
+  .then(async ([, canonicalNodeCount]) => {
+    console.log(`inbound_appointment_intent_integration.test.js OK (${canonicalNodeCount} canonical nodes)`);
     await db.sequelize.close();
     process.exit(0);
   })

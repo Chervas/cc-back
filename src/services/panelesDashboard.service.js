@@ -1431,6 +1431,7 @@ async function getMainDashboard({ userId, query = {} }) {
       clinicIds: scope.clinicIds,
       clinicMap: scope.clinicMap,
       businessDate: today.date,
+      actorId: userId,
     }).catch((error) => {
       console.warn('[panelesDashboard] staff presence unavailable:', error?.message || error);
       return null;
