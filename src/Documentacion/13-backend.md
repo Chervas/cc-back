@@ -1,5 +1,5 @@
 > **Módulo:** Arquitectura del Backend
-> **Última actualización:** 2026-08-31
+> **Última actualización:** 2026-09-03
 > **Relacionado con:** `cc-front/src/Documentacion/20.1-motor-flujos-v2.md` | documento operativo `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`
 > **Fuente canónica:** este archivo del repositorio backend. `cc-front/src/Documentacion/13-backend.md` es un espejo completo para conservar los enlaces internos del manual frontend; cualquier cambio se hace aquí primero y después se sincroniza el espejo.
 
@@ -22,6 +22,41 @@ simulacion visible y no comunica con AEAT.
   reactivación `excluded_future_appointment` no aplica a reseñas.
 
 Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Data Manager/Conversiones mejoradas, política de goals y E2E/limpieza de intake.
+
+## 2026-09-03 - Respuestas mixtas de confirmación de cita
+
+- Una clasificación canónica `confirmar_cita` con
+  `necesita_respuesta=true` aplica primero la transición segura de la cita y
+  no envía después el agradecimiento genérico. Los nodos
+  `action/send_whatsapp`, el passthrough `action/reply_message` y la simulación
+  respetan `suppress_if_response_needed=true` antes de invocar al proveedor.
+- La guarda se alimenta del resultado estructurado de `classify_intent`; no
+  inspecciona texto libre, no consume el cuerpo desde el job y conserva en la
+  salida saneada `suppressed`, intención principal, intención secundaria y
+  necesidad de respuesta.
+- `markCanonicalConfirmationReplySuppression` marca solo respuestas genéricas
+  alcanzables por la ruta de confirmación. Una rama explícita configurada para
+  responder una pregunta no se reescribe.
+- La migración
+  `20260903100000-suppress-confirmation-reply-with-pending-question.js`
+  publicó nuevas versiones para 188 familias y marcó 575 nodos. Conservó el
+  estado activo de 154 familias, dejó las demás pausadas/inactivas y no cambió
+  ejecuciones ni versiones históricas. El snapshot
+  `suppress_confirmation_reply_with_pending_question_v1` permite rollback
+  selectivo y no pisa una versión activa posterior.
+- Una respuesta humana cierra `ConversationAutomationStates` únicamente si la
+  revisión corresponde a una confirmación/cancelación ya aplicada, requiere
+  respuesta y no conserva urgencia. Cambios solicitados, ambigüedad y urgencia
+  continúan abiertos.
+- El canary controlado de BS Capilar confirmó una cita QA y conservó una
+  pregunta secundaria sin crear un segundo envío a Meta. Agenda y QuickChat
+  consumieron el estado `recordatorio_confirmado`; la conversación quedó en
+  revisión hasta una respuesta humana posterior.
+- QA: `node --check`, tests unitarios e integración en DEV/staging, recorrido
+  de 575 nodos canónicos y matriz de seis escenarios sobre tres
+  configuraciones representativas. El gate legacy terminó con cero
+  ejecuciones `running|waiting`; retirar sus adaptadores sigue siendo un cambio
+  aislado descrito en `35-roadmap-mensajes-entrantes-ia-y-citas.md`.
 
 ## 2026-08-31 - Salud operativa y cortacircuitos WhatsApp
 
