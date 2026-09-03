@@ -114,8 +114,10 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
 - QuickChat usa el fallback genérico `Respuesta pendiente` y explica que el
   paciente ha comentado algo más. No afirma que exista una pregunta si el
   contrato persistido solo garantiza `necesita_respuesta=true`.
-- La revisión falsa del canary se cerró de forma selectiva, conservando la
-  ejecución y los mensajes como evidencia. No se alteraron citas reales.
+- La revisión falsa del canary se cerró de forma selectiva. Tras validar el
+  resultado, la cita QA quedó `cancelada` con evento `qa_cleanup`, cero
+  ejecuciones activas y cero jobs pendientes; ejecución y mensajes se
+  conservaron como evidencia. No se alteraron citas reales.
 - QA: unit test del lote partido, intercepción de la entrada real al
   orquestador sin texto histórico y matriz completa de 9.200 recorridos con
   respuesta; todas las comprobaciones pasan.
