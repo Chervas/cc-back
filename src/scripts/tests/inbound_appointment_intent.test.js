@@ -11,6 +11,7 @@ const inbound = require('../../services/automationInboundMessage.service');
 const jobExecutor = require('../../services/jobExecutor.service');
 const resumeService = require('../../services/automationsV2Resume.service');
 const conversationAutomationState = require('../../services/conversationAutomationState.service');
+const aiOrchestrator = require('../../services/aiOrchestrator.service');
 const {
   completeAnsweredAutomationStateForConversation,
 } = require('../../services/conversationPendingReply.service');
@@ -121,6 +122,97 @@ function testThanksOnlyConfirmsInConfirmationContext() {
   );
   assert.equal(afterDirections.intencion_principal, 'agradecimiento');
   assert.equal(afterDirections.accion_inequivoca, false);
+}
+
+function testBufferedAcknowledgementUsesTheListenedPromptOnly() {
+  const context = contextWithConversation('mensaje actual', 'ok');
+  context.conversation_today = [
+    '[03/09/2026, 09:31] Clínica: ¿Nos confirmas tu cita de mañana?',
+    '[03/09/2026, 09:32] Paciente: ¿Me puedes dar la dirección?',
+    '[03/09/2026, 09:33] Clínica: Estamos en la calle Antigua 10.',
+    '[03/09/2026, 09:34] Clínica: ok',
+    '[03/09/2026, 09:35] Paciente: espera un segundo',
+    '[03/09/2026, 09:36] Paciente: ok',
+  ].join('\n');
+  context.last_prompt = '¿Nos confirmas tu cita de mañana?';
+  context.last_response = 'espera un segundo\nok';
+  context.last_response_context = {
+    response_text: 'espera un segundo\nok',
+    response_lines: ['espera un segundo', 'ok'],
+    listened_message_preview: '¿Nos confirmas tu cita de mañana?',
+  };
+
+  const output = flowEngine.buildDeterministicClassifyIntentOutput(context);
+  assert.equal(output.intencion_principal, 'confirmar_cita');
+  assert.equal(output.intencion_secundaria, '');
+  assert.equal(output.accion_inequivoca, true);
+  assert.equal(output.necesita_respuesta, false);
+
+  const scopedConversation = flowEngine.buildScopedClassifyIntentConversation(context);
+  assert.equal(scopedConversation.clinic_message_replied_to, '¿Nos confirmas tu cita de mañana?');
+  assert.equal(scopedConversation.patient_message_batch, 'espera un segundo\nok');
+  assert.doesNotMatch(JSON.stringify(scopedConversation), /dirección|calle Antigua/);
+
+  for (const unsafeBatch of ['llego diez minutos tarde\nok', 'no\nok']) {
+    const unsafeContext = {
+      ...context,
+      last_response: unsafeBatch,
+      last_response_context: {
+        ...context.last_response_context,
+        response_text: unsafeBatch,
+        response_lines: unsafeBatch.split('\n'),
+      },
+    };
+    assert.equal(
+      flowEngine.buildDeterministicClassifyIntentOutput(unsafeContext),
+      null,
+      unsafeBatch,
+    );
+  }
+}
+
+async function testAiFallbackNeverReceivesHistoricalPatientMessages() {
+  const aiNode = buildMessageReceivedTemplateNodes()
+    .find((node) => node.type === 'condition/ai_analysis');
+  const context = contextWithConversation('mensaje actual', 'ok');
+  context.conversation_today = [
+    '[03/09/2026, 09:31] Clínica: ¿Nos confirmas tu cita de mañana?',
+    '[03/09/2026, 09:32] Paciente: ¿Me puedes dar la dirección antigua?',
+    '[03/09/2026, 09:33] Clínica: Estamos en la calle Antigua 10.',
+    '[03/09/2026, 09:34] Clínica: Cuéntanos qué necesitas.',
+    '[03/09/2026, 09:35] Paciente: necesito que me llaméis',
+  ].join('\n');
+  context.last_prompt = 'Cuéntanos qué necesitas.';
+  context.last_response = 'necesito que me llaméis';
+  context.last_response_context = {
+    response_text: 'necesito que me llaméis',
+    response_lines: ['necesito que me llaméis'],
+    listened_message_preview: 'Cuéntanos qué necesitas.',
+  };
+
+  let capturedInput = null;
+  const originalAnalyzeStructured = aiOrchestrator.analyzeStructured;
+  aiOrchestrator.analyzeStructured = async (options) => {
+    capturedInput = options.inputText;
+    return {
+      intencion_principal: 'otra',
+      intencion_secundaria: '',
+      confianza: 0.95,
+      accion_inequivoca: false,
+      posible_urgencia: false,
+      necesita_respuesta: true,
+      motivo: 'El paciente solicita contacto humano.',
+    };
+  };
+  try {
+    await flowEngine._processNode(aiNode, context, { simulation: false });
+  } finally {
+    aiOrchestrator.analyzeStructured = originalAnalyzeStructured;
+  }
+
+  assert.match(capturedInput, /Cuéntanos qué necesitas/);
+  assert.match(capturedInput, /necesito que me llaméis/);
+  assert.doesNotMatch(capturedInput, /dirección antigua|calle Antigua/);
 }
 
 async function testCanonicalIntentRunsThroughTheRealAiNode() {
@@ -1030,6 +1122,8 @@ async function run() {
   testConfirmationKeepsSecondaryQuestion();
   await testManualReplyOnlyCompletesResolvedPendingQuestion();
   testThanksOnlyConfirmsInConfirmationContext();
+  testBufferedAcknowledgementUsesTheListenedPromptOnly();
+  await testAiFallbackNeverReceivesHistoricalPatientMessages();
   await testCanonicalIntentRunsThroughTheRealAiNode();
   testAiRoutingUsesCanonicalContract();
   await testRetiredAppointmentPresetsAreNeverExecutable();

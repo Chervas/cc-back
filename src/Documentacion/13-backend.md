@@ -80,7 +80,7 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
   búsqueda textual global porque `migrated_from_preset` conserva evidencia y
   genera falsos positivos.
 - QA DEV y staging: cero presets retirados abiertos/publicados; 188 workflows, 575 rutas
-  con respuesta, quince escenarios por ruta (8.625 recorridos), 294 rutas sin
+  con respuesta, dieciseis escenarios por ruta (9.200 recorridos), 294 rutas sin
   respuesta y 210 límites horarios en `Europe/Madrid`. Se cubren alta y reprogramación para cita hoy, mañana y futura,
   respuesta inicial y al reaviso, recordatorio del día anterior, aviso de
   acceso del mismo día y cancelación nocturna.
@@ -94,6 +94,31 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
   `pm2-back-dev` se reiniciaron de forma coordinada. Los smokes locales y
   públicos devolvieron los códigos esperados, gateway quedó sin cron/workers y
   staging conservó `JOB_RUNTIME_NAMESPACE=staging`.
+
+## 2026-09-03 - Aislamiento del lote actual en `classify_intent`
+
+- El canary interactivo de BS Capilar agrupó `espera un segundo` y `ok`. La
+  cita pasó correctamente a `recordatorio_confirmado`, pero el fallback IA
+  interpretó como actual una pregunta de dirección anterior del mismo día y
+  dejó una revisión falsa.
+- `classify_intent` ya no entrega el histórico diario completo al proveedor.
+  Aunque el nodo declare `conversation_today`, el runtime lo reduce al mensaje
+  de clínica al que responde el paciente y al lote inbound actual. El objeto
+  `patient_message_batch` conserva solo los IDs y mensajes reclamados por esa
+  reanudación.
+- La guarda determinista reconoce un acuse breve en la última línea de un lote
+  partido cuando el prompt escuchado pedía confirmar y las líneas anteriores
+  solo son saludos o pausas neutras. Pregunta, comentario, urgencia,
+  cancelación, cambio o negación presentes en el mismo lote mantienen
+  precedencia y evitan una confirmación insegura.
+- QuickChat usa el fallback genérico `Respuesta pendiente` y explica que el
+  paciente ha comentado algo más. No afirma que exista una pregunta si el
+  contrato persistido solo garantiza `necesita_respuesta=true`.
+- La revisión falsa del canary se cerró de forma selectiva, conservando la
+  ejecución y los mensajes como evidencia. No se alteraron citas reales.
+- QA: unit test del lote partido, intercepción de la entrada real al
+  orquestador sin texto histórico y matriz completa de 9.200 recorridos con
+  respuesta; todas las comprobaciones pasan.
 
 ## 2026-08-31 - Salud operativa y cortacircuitos WhatsApp
 

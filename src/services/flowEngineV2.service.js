@@ -1659,6 +1659,31 @@ function recentPatientTextFromConversation(context = {}) {
     .join('\n');
 }
 
+function latestClinicPromptFromConversation(context = {}) {
+  const line = String(context?.conversation_today || '')
+    .split(/\r?\n/)
+    .reverse()
+    .find((entry) => entry.includes('] Clínica:')) || '';
+  return cleanString(line.split('] Clínica:').slice(1).join('] Clínica:'));
+}
+
+function resolveClassifyIntentPrompt(context = {}) {
+  const responseContext = isObject(context?.last_response_context) ? context.last_response_context : {};
+  return cleanString(
+    responseContext.reaction_target_message_preview
+    || responseContext.listened_message_preview
+    || context?.last_prompt
+    || latestClinicPromptFromConversation(context)
+  );
+}
+
+function buildScopedClassifyIntentConversation(context = {}) {
+  return {
+    clinic_message_replied_to: resolveClassifyIntentPrompt(context),
+    patient_message_batch: cleanString(recentPatientTextFromConversation(context)),
+  };
+}
+
 function buildDeterministicClassifyIntentOutput(context = {}) {
   const rawText = recentPatientTextFromConversation(context);
   const text = normalizeIntentText(rawText);
@@ -1670,15 +1695,7 @@ function buildDeterministicClassifyIntentOutput(context = {}) {
   if (!text && !positiveReaction && !positiveEmojiText && !responseMediaKind && !reactionEmoji && !cleanString(rawText)) {
     return null;
   }
-  const conversationLines = String(context?.conversation_today || '').split(/\r?\n/);
-  const lastClinicLine = [...conversationLines].reverse().find((line) => line.includes('] Clínica:')) || '';
-  const reactionTargetPrompt = cleanString(
-    responseContext.reaction_target_message_preview
-    || responseContext.listened_message_preview
-  );
-  const promptText = positiveReaction
-    ? (reactionTargetPrompt || cleanString(context?.last_prompt) || lastClinicLine)
-    : [lastClinicLine, context?.last_prompt].filter(Boolean).join(' ');
+  const promptText = resolveClassifyIntentPrompt(context);
   const asksForConfirmation = /confirm|asist|acudir/.test(normalizeIntentText(promptText));
   const asksQuestion = /[?¿]/.test(rawText)
     || /\b(donde|direccion|direccio|ubicacion|cuando|como|cual|cuanto|a que hora|que hora|que dia)\b/.test(text)
@@ -1714,10 +1731,26 @@ function buildDeterministicClassifyIntentOutput(context = {}) {
   const negatedConfirmation = /\b(?:no (?:puedo|quiero|voy a|he podido )?(?:confirmar|confirmo|confirmado|confirmada)|no (?:asistire|acudire|ire|voy a ir)|todavia no (?:confirmo|puedo confirmar))\b/.test(text);
   const explicitConfirmation = !negatedConfirmation
     && /\b(confirmado|confirmo|confirmada|si asistire|voy a ir|alli estare|ahi estare|estare alli|estare ahi)\b/.test(text);
-  const shortAcknowledgement = /^(si|ok|okay|vale|gracias|muchas gracias|entendido|correcto|de acuerdo|perfecto)$/.test(text);
+  const shortAcknowledgementPattern = /^(si|ok|okay|vale|gracias|muchas gracias|entendido|correcto|de acuerdo|perfecto)$/;
+  const shortAcknowledgement = shortAcknowledgementPattern.test(text);
+  const responseLines = (
+    Array.isArray(responseContext.response_lines)
+      ? responseContext.response_lines
+      : String(rawText || '').split(/\r?\n/)
+  )
+    .map((line) => normalizeIntentText(line))
+    .filter(Boolean);
+  const finalShortAcknowledgement = shortAcknowledgementPattern.test(responseLines.at(-1) || '');
+  const neutralLeadInPattern = /^(?:hola|buenos dias|buenas tardes|buenas noches|espera(?: un momento| un segundo)?|un momento|un segundo|ahora te digo|dejame (?:mirar|comprobarlo)|lo (?:miro|compruebo))$/;
+  const bufferedFinalAcknowledgement = responseLines.length > 1
+    && finalShortAcknowledgement
+    && responseLines.slice(0, -1).every((line) => neutralLeadInPattern.test(line));
   const contextualShortConfirmation = asksForConfirmation
     && !asksQuestion
-    && shortAcknowledgement;
+    && (shortAcknowledgement || bufferedFinalAcknowledgement)
+    && !negatedConfirmation
+    && !negatedCancellation
+    && !negatedReschedule;
 
   let primary = 'otra';
   let actionUnambiguous = false;
@@ -1751,6 +1784,7 @@ function buildDeterministicClassifyIntentOutput(context = {}) {
     confidence = 0.92;
   } else if (
     shortAcknowledgement
+    || bufferedFinalAcknowledgement
     || positiveReaction
     || positiveEmojiText
     || /\b(gracias|muchas gracias|agradezco)\b/.test(text)
@@ -6139,6 +6173,11 @@ async function processNode(node, context, runtime = {}) {
         throw new Error('ai_analysis_context_sources_required');
       }
 
+      const presetKey = cleanString(config?.preset_key);
+      if (RETIRED_APPOINTMENT_INTENT_PRESETS.has(presetKey)) {
+        throw new Error(`retired_ai_preset_not_supported:${presetKey}`);
+      }
+
       const resolvedSources = sourceEntries
         .map((source) => {
           const key = cleanString(source?.key) || 'input';
@@ -6146,7 +6185,10 @@ async function processNode(node, context, runtime = {}) {
           if (!path) return null;
           return {
             key,
-            value: resolveTemplateValue(path, aiContext),
+            value: presetKey === 'classify_intent'
+              && (key === 'conversation_today' || path.replace(/\s+/g, '') === '{{conversation_today}}')
+              ? buildScopedClassifyIntentConversation(aiContext)
+              : resolveTemplateValue(path, aiContext),
           };
         })
         .filter((source) => source && source.value !== undefined && source.value !== null);
@@ -6173,10 +6215,6 @@ async function processNode(node, context, runtime = {}) {
         throw new Error('ai_analysis_output_fields_required');
       }
 
-      const presetKey = cleanString(config?.preset_key);
-      if (RETIRED_APPOINTMENT_INTENT_PRESETS.has(presetKey)) {
-        throw new Error(`retired_ai_preset_not_supported:${presetKey}`);
-      }
       const deterministicPresetOutput = presetKey === 'review_response_classifier'
         ? await reviewResponseClassification.classifyReviewResponse({
           text: cleanString(aiContext?.last_response_context?.response_text || aiContext?.last_response),
@@ -7088,6 +7126,7 @@ module.exports = {
   scoreWhatsappTemplateCandidate,
   selectBestWhatsappTemplateCandidate,
   buildDeterministicClassifyIntentOutput,
+  buildScopedClassifyIntentConversation,
   normalizeClassifyIntentOutput,
   buildSafeAppointmentAiFailureOutput,
   _processNode: processNode,
