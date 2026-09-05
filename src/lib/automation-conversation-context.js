@@ -92,6 +92,25 @@ function extractMessageText(message) {
   return null;
 }
 
+function formatInboundAnalysisText(message) {
+  if (cleanString(message?.message_type)?.toLowerCase() === 'reaction') {
+    const reaction = message?.metadata?.reaction || {};
+    const emoji = cleanString(reaction.emoji);
+    if (!emoji) return null;
+    return `[Reaccion de WhatsApp: ${JSON.stringify({
+      emoji,
+      target_message_id: cleanString(reaction.target_message_id || reaction.message_id),
+      target_message_preview: cleanString(reaction.target_message_preview),
+    })}]`;
+  }
+  const text = cleanString(message?.content);
+  const kind = cleanString(message?.metadata?.media?.kind)?.toLowerCase();
+  if (!kind) return text;
+  const mediaType = ['image', 'video', 'audio', 'document', 'sticker', 'gif'].includes(kind) ? kind : 'archivo';
+  // The text-only analyzer receives metadata, never the attachment's binary content.
+  return [text, `[Adjunto de tipo ${mediaType}: contenido no disponible para este analisis]`].filter(Boolean).join('\n');
+}
+
 function formatConversationLine(message) {
   const text = extractMessageText(message);
   if (!text) return null;
@@ -251,4 +270,5 @@ async function buildConversationContext({
 
 module.exports = {
   buildConversationContext,
+  formatInboundAnalysisText,
 };

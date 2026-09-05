@@ -69,7 +69,7 @@ const businessProfileLocal = require('./businessProfileLocal.service');
 const { resolveLeadAutoReplyWait } = require('./clinicOpeningHours.service');
 const { evaluatePendingLeadContact } = require('./leadContactState.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
-const { buildConversationContext } = require('../lib/automation-conversation-context');
+const { buildConversationContext, formatInboundAnalysisText } = require('../lib/automation-conversation-context');
 const { AUTO_APPLY_CONFIDENCE_THRESHOLD } = require('../lib/automation-intent-contract');
 const {
   emitAutomationResponseProcessing,
@@ -1155,6 +1155,9 @@ function buildAiSystemPrompt(outputFormat, outputFields = []) {
     'Debes devolver exactamente los campos indicados con sus tipos.',
     'Cada campo confianza_* mide la certeza de que el valor concreto devuelto en su campo asociado es correcto. Para booleanos, no representa la probabilidad de true.',
     'Si no dispones de un dato, devuelve un valor vacío válido para su tipo.',
+    'Los marcadores [Adjunto de tipo ...: contenido no disponible para este analisis] describen solo metadatos. No has visto, leido ni escuchado ese adjunto; no inventes su contenido ni deduzcas una intencion a partir de su tipo.',
+    'reaction_emoji y reaction_target_message_preview son datos legibles: analiza la reaccion en relacion con el mensaje al que esta vinculada aunque no haya texto del paciente. Un adjunto no interpretable en el mismo lote no elimina esa reaccion ni el texto disponible.',
+    'Si la respuesta solo contiene adjuntos no interpretables, refleja la falta de informacion y la necesidad de revision humana en los campos configurados. Si tambien hay texto o reacciones, analizalos en su contexto sin atribuir al adjunto un significado que no has recibido.',
     'Campos esperados:',
     fields || '- decision: string',
   ].join('\n');
@@ -1392,8 +1395,7 @@ async function enrichConversationContext(context, targets = {}) {
     throw new Error('message_received_batch_scope_mismatch');
   }
   const responseText = messages
-    .filter((message) => cleanString(message.message_type)?.toLowerCase() !== 'reaction')
-    .map((message) => cleanString(message.content))
+    .map(formatInboundAnalysisText)
     .filter(Boolean)
     .join('\n');
   const latest = messages[messages.length - 1];
@@ -1755,6 +1757,7 @@ function recentPatientTextFromConversation(context = {}) {
     || context?.last_response
   );
   if (explicit) return explicit;
+  if (context?.last_response_context?.response_message_id) return '';
   const lines = String(context?.conversation_today || '').split(/\r?\n/);
   const lastClinicIndex = lines.reduce(
     (found, line, index) => line.includes('] Clínica:') ? index : found,

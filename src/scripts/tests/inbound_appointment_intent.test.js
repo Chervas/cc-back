@@ -985,7 +985,8 @@ async function testBufferedTextSurvivesATrailingReaction() {
       {},
       41,
     );
-    assert.equal(loaded.responseText, 'Confirmado');
+    assert.match(loaded.responseText, /^Confirmado\n\[Reaccion de WhatsApp:/);
+    assert.match(loaded.responseText, /"emoji":"👍"/);
     assert.equal(loaded.inboundMessageId, 8);
     assert.deepEqual(loaded.loadedMessageIds, [7, 8]);
   } finally {

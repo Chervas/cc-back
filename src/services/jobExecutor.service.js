@@ -1,6 +1,7 @@
 const { metaSyncJobs } = require('../jobs/sync.jobs');
 const db = require('../../models');
 const flowEngineV2Service = require('./flowEngineV2.service');
+const { formatInboundAnalysisText } = require('../lib/automation-conversation-context');
 const whatsappCoexistenceService = require('./whatsappCoexistence.service');
 const whatsappTemplatesService = require('./whatsappTemplates.service');
 const marketingBulkSendsService = require('./marketingBulkSends.service');
@@ -71,8 +72,7 @@ async function loadInboundResponseFromMessageIds(payload = {}, waitingMeta = {},
   });
   if (!rows.length) return null;
   const responseText = rows
-    .filter((row) => String(row.message_type || '').toLowerCase() !== 'reaction')
-    .map((row) => String(row.content || '').trim())
+    .map(formatInboundAnalysisText)
     .filter(Boolean)
     .join('\n');
   const last = rows[rows.length - 1];
