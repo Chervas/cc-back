@@ -150,6 +150,24 @@ async function main() {
   assert.equal(acknowledgement.next_node_id, null);
   assert.equal(acknowledgement.output.matched_rule_id, 'branch_ack');
 
+  const followupRouter = byId.get('N25');
+  const declinedRebooking = await flowEngine._processNode(
+    followupRouter,
+    {
+      outputs: {
+        N24: {
+          quiere_nueva_cita: false,
+          confianza_quiere_nueva_cita: 0.95,
+          motivo: 'El paciente rechaza concertar otra cita.',
+        },
+      },
+    },
+    { simulation: true },
+  );
+  assert.equal(declinedRebooking.next_node_id, 'N27');
+  assert.equal(declinedRebooking.output.matched_rule_id, 'branch_no');
+  assert.match(byId.get('N27').config.manual_message_text, /más adelante necesitas una nueva cita/i);
+
   const lowConfidence = await evaluateRouter(router, {
     ...common,
     intencion_principal: 'confirmar_cita',
