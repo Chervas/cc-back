@@ -1,7 +1,10 @@
 const { metaSyncJobs } = require('../jobs/sync.jobs');
 const db = require('../../models');
 const flowEngineV2Service = require('./flowEngineV2.service');
-const { formatInboundAnalysisText } = require('../lib/automation-conversation-context');
+const {
+  formatInboundAnalysisItem,
+  formatInboundResponseText,
+} = require('../lib/automation-conversation-context');
 const whatsappCoexistenceService = require('./whatsappCoexistence.service');
 const whatsappTemplatesService = require('./whatsappTemplates.service');
 const marketingBulkSendsService = require('./marketingBulkSends.service');
@@ -72,15 +75,20 @@ async function loadInboundResponseFromMessageIds(payload = {}, waitingMeta = {},
   });
   if (!rows.length) return null;
   const responseText = rows
-    .map(formatInboundAnalysisText)
+    .map(formatInboundResponseText)
     .filter(Boolean)
     .join('\n');
+  const responseItems = rows
+    .map(formatInboundAnalysisItem)
+    .filter(Boolean);
   const last = rows[rows.length - 1];
-  const media = last?.metadata?.media && typeof last.metadata.media === 'object'
-    ? last.metadata.media
+  const lastMediaMessage = [...rows].reverse().find((row) => row?.metadata?.media?.kind);
+  const media = lastMediaMessage?.metadata?.media && typeof lastMediaMessage.metadata.media === 'object'
+    ? lastMediaMessage.metadata.media
     : {};
   return {
     responseText,
+    responseItems,
     inboundMessageId: last.id,
     loadedMessageIds: rows.map((row) => Number(row.id)),
     responseMediaKind: media.kind || null,
@@ -162,6 +170,11 @@ async function runAutomationFlowV2Job(payload = {}) {
     options.responseText = bufferedInbound.responseText;
   } else if (options.resumeMode === 'response' && waitingMeta.pending_response_text !== undefined) {
     options.responseText = waitingMeta.pending_response_text;
+  }
+  if (Array.isArray(payload.response_items)) {
+    options.responseItems = payload.response_items;
+  } else if (bufferedInbound) {
+    options.responseItems = bufferedInbound.responseItems;
   }
 
   if (payload.inbound_message_id !== undefined) {

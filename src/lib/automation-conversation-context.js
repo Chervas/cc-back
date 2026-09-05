@@ -111,6 +111,54 @@ function formatInboundAnalysisText(message) {
   return [text, `[Adjunto de tipo ${mediaType}: contenido no disponible para este analisis]`].filter(Boolean).join('\n');
 }
 
+function formatInboundResponseText(message) {
+  if (cleanString(message?.message_type)?.toLowerCase() === 'reaction') return null;
+  return cleanString(message?.content);
+}
+
+function formatInboundAnalysisItem(message) {
+  const messageId = toIntOrNull(message?.id);
+  const messageType = cleanString(message?.message_type)?.toLowerCase();
+  const metadata = message?.metadata && typeof message.metadata === 'object'
+    ? message.metadata
+    : {};
+  const reaction = metadata.reaction && typeof metadata.reaction === 'object'
+    ? metadata.reaction
+    : {};
+  const reactionEmoji = cleanString(reaction.emoji);
+  if (messageType === 'reaction') {
+    if (!reactionEmoji) return null;
+    return {
+      message_id: messageId,
+      content_type: 'reaction',
+      emoji: reactionEmoji,
+      target_message_id: cleanString(reaction.target_message_id || reaction.message_id),
+      target_message_preview: cleanString(reaction.target_message_preview),
+    };
+  }
+
+  const text = cleanString(message?.content);
+  const media = metadata.media && typeof metadata.media === 'object' ? metadata.media : {};
+  const mediaKind = cleanString(media.kind)?.toLowerCase();
+  if (mediaKind) {
+    return {
+      message_id: messageId,
+      content_type: 'attachment',
+      attachment_type: ['image', 'video', 'audio', 'document', 'sticker', 'gif'].includes(mediaKind)
+        ? mediaKind
+        : 'file',
+      content_available: false,
+      caption: text,
+    };
+  }
+  if (!text) return null;
+  return {
+    message_id: messageId,
+    content_type: 'text',
+    text,
+  };
+}
+
 function formatConversationLine(message) {
   const text = extractMessageText(message);
   if (!text) return null;
@@ -270,5 +318,7 @@ async function buildConversationContext({
 
 module.exports = {
   buildConversationContext,
+  formatInboundAnalysisItem,
   formatInboundAnalysisText,
+  formatInboundResponseText,
 };

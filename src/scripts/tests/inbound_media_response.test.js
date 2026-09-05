@@ -84,7 +84,10 @@ async function testAdmission() {
 }
 
 async function testAnalysisInput() {
-  const { formatInboundAnalysisText } = require('../../lib/automation-conversation-context');
+  const {
+    formatInboundAnalysisItem,
+    formatInboundResponseText,
+  } = require('../../lib/automation-conversation-context');
   const executor = require('../../services/jobExecutor.service');
   const flow = require('../../services/flowEngineV2.service');
   const originalFindAll = db.Message.findAll;
@@ -94,23 +97,40 @@ async function testAnalysisInput() {
   db.Message.findAll = async () => rows;
   try {
     const loaded = await executor._loadInboundResponseFromMessageIds({ inbound_message_ids: [71, 72, 73] }, {}, 900002);
-    assert.match(loaded.responseText, /^\[Adjunto de tipo video: contenido no disponible para este analisis\]\nConfirmo\n\[Reaccion de WhatsApp:/);
+    assert.equal(loaded.responseText, 'Confirmo');
+    assert.deepEqual(loaded.responseItems, [
+      { message_id: 71, content_type: 'attachment', attachment_type: 'video', content_available: false, caption: null },
+      { message_id: 72, content_type: 'text', text: 'Confirmo' },
+      { message_id: 73, content_type: 'reaction', emoji: 'thumbs_up', target_message_id: null, target_message_preview: null },
+    ]);
     assert.deepEqual(loaded.loadedMessageIds, [71, 72, 73]);
     assert.equal(loaded.inboundMessageId, 73);
-    assert.match(formatInboundAnalysisText(rows[2]), /"emoji":"thumbs_up"/, 'each reaction remains in its ordered batch');
-    assert.equal(formatInboundAnalysisText({ message_type: 'reaction', metadata: { reaction: { emoji: '' } } }), null);
-    assert.match(formatInboundAnalysisText({ ...rows[2], metadata: { reaction: {
+    assert.equal(formatInboundResponseText(rows[2]), null, 'reaction metadata is not presented as patient text');
+    assert.equal(formatInboundAnalysisItem({ message_type: 'reaction', metadata: { reaction: { emoji: '' } } }), null);
+    assert.deepEqual(formatInboundAnalysisItem({ ...rows[2], metadata: { reaction: {
       emoji: 'thumbs_up', target_message_id: 'template_1', target_message_preview: 'Me confirmas?',
-    } } }), /"target_message_preview":"Me confirmas\?"/);
-    assert.match(formatInboundAnalysisText({ ...rows[0], content: 'Mira esto' }), /^Mira esto\n\[Adjunto/);
-    assert.equal(flow.buildScopedClassifyIntentConversation({
+    } } }), {
+      message_id: 73,
+      content_type: 'reaction',
+      emoji: 'thumbs_up',
+      target_message_id: 'template_1',
+      target_message_preview: 'Me confirmas?',
+    });
+    assert.deepEqual(formatInboundAnalysisItem({ ...rows[0], content: 'Mira esto' }), {
+      message_id: 71,
+      content_type: 'attachment',
+      attachment_type: 'video',
+      content_available: false,
+      caption: 'Mira esto',
+    });
+    assert.deepEqual(flow.buildScopedClassifyIntentConversation({
       last_response_context: { response_message_id: 73, response_text: null },
       conversation_today: '[05/09/2026, 09:00] Paciente: Confirmo una cita anterior',
-    }).patient_message_batch, null, 'an empty current response must not borrow historical confirmations');
+    }).patient_message_batch, { text: null, items: [] }, 'an empty current response must not borrow historical confirmations');
     assert.match(flow.buildAiSystemPrompt({ motivo: 'string' }), /no inventes su contenido/);
     assert.match(flow.buildAiSystemPrompt({ motivo: 'string' }), /reaction_emoji=null/);
     assert.match(flow.buildAiSystemPrompt({ motivo: 'string' }), /Los ejemplos de las instrucciones nunca forman parte/);
-    console.log('Inbound media analysis input: unreadable marker, captions, trailing reaction and batch isolation passed');
+    console.log('Inbound media analysis input: structured attachments, captions, trailing reaction and batch isolation passed');
   } finally { db.Message.findAll = originalFindAll; }
 }
 

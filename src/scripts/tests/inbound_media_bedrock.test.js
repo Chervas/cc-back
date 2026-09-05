@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 process.env.JOBS_AUTO_START = 'false';
 const db = require('../../../models');
 const flow = require('../../services/flowEngineV2.service');
-const { formatInboundAnalysisText } = require('../../lib/automation-conversation-context');
+const { formatInboundAnalysisItem } = require('../../lib/automation-conversation-context');
 const { cloneConfirmAppointmentPresetConfig } = require('../../lib/automation-intent-contract');
 
 async function main() {
@@ -22,18 +22,25 @@ async function main() {
     { reaction: '\u{1f44d}', expected: 'confirm' },
   ];
   for (const item of cases) {
-    const batch = [item.kind ? formatInboundAnalysisText({ content: item.text,
-      metadata: { media: { kind: item.kind } } }) : item.text,
-    item.reaction ? formatInboundAnalysisText({ message_type: 'reaction', metadata: { reaction: {
+    const messages = [item.kind ? { id: 900000001, content: item.text,
+      metadata: { media: { kind: item.kind } } } : (item.text ? { id: 900000001, content: item.text } : null),
+    item.reaction ? { id: 900000002, message_type: 'reaction', metadata: { reaction: {
       emoji: item.reaction, target_message_id: '900000000', target_message_preview: clinicText,
-    } } }) : null].filter(Boolean).join('\n') || null;
+    } } } : null].filter(Boolean);
+    const responseText = messages
+      .filter(message => message.message_type !== 'reaction')
+      .map(message => String(message.content || '').trim())
+      .filter(Boolean)
+      .join('\n') || null;
+    const responseItems = messages.map(formatInboundAnalysisItem).filter(Boolean);
     const context = {
       appointment: { estado: 'recordatorio_enviado', inicio: '2026-09-06T15:00:00Z' },
       trigger: { type: 'appointment_reminder_window', data: { qa_case: 'non_text_media', appointment_candidate_count: 1 } },
       conversation_today: '[05/09/2026, 09:00] Paciente: Confirmo una cita anterior',
-      last_response: batch,
-      last_response_context: { response_message_id: 900000001, response_text: batch,
-        response_lines: batch ? batch.split('\n') : [], response_message_type: item.reaction ? 'reaction' : 'text',
+      last_response: responseText,
+      last_response_context: { response_message_id: 900000001, response_text: responseText,
+        response_lines: responseText ? responseText.split('\n') : [], response_items: responseItems,
+        response_message_type: item.reaction ? 'reaction' : 'text',
         response_media_kind: item.reaction ? null : item.kind || null,
         reaction_emoji: item.reaction || null, reaction_target_message_id: item.reaction ? '900000000' : null,
         reaction_target_message_type: item.reaction ? 'template' : null,
@@ -60,13 +67,13 @@ async function main() {
   const receiptNode = { id: 'QA_RECEIPT', type: 'condition/ai_analysis',
     config: cloneConfirmAppointmentPresetConfig({ mode: 'auto', max_tokens: 700 }), outputs: {} };
   for (const kind of ['video', 'image']) {
-    const batch = formatInboundAnalysisText({ metadata: { media: { kind } } });
+    const responseItems = [formatInboundAnalysisItem({ id: 900000001, metadata: { media: { kind } } })];
     const result = await flow._processNode(receiptNode, {
       appointment: { estado: 'info_enviada', inicio: '2026-09-11T18:00:00Z' },
       trigger: { type: 'appointment_created', data: { qa_case: 'non_text_receipt' } },
-      last_response: batch,
-      last_response_context: { response_message_id: 900000001, response_text: batch,
-        response_lines: [batch], reaction_emoji: null, reaction_target_message_id: null,
+      last_response: null,
+      last_response_context: { response_message_id: 900000001, response_text: null,
+        response_lines: [], response_items: responseItems, reaction_emoji: null, reaction_target_message_id: null,
         reaction_target_message_type: null, reaction_target_message_preview: null,
         response_message_type: 'text', response_media_kind: kind,
         listened_message_preview: 'Te enviamos los datos de tu cita para el 11 de septiembre. Me confirmas que recibes este mensaje?' },

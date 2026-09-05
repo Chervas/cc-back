@@ -189,7 +189,10 @@ function testBufferedAcknowledgementUsesTheListenedPromptOnly() {
 
   const scopedConversation = flowEngine.buildScopedClassifyIntentConversation(context);
   assert.equal(scopedConversation.clinic_message_replied_to, '¿Nos confirmas tu cita de mañana?');
-  assert.equal(scopedConversation.patient_message_batch, 'espera un segundo\nok');
+  assert.deepEqual(scopedConversation.patient_message_batch, {
+    text: 'espera un segundo\nok',
+    items: [],
+  });
   assert.doesNotMatch(JSON.stringify(scopedConversation), /dirección|calle Antigua/);
 
   for (const unsafeBatch of ['llego diez minutos tarde\nok', 'no\nok']) {
@@ -985,8 +988,9 @@ async function testBufferedTextSurvivesATrailingReaction() {
       {},
       41,
     );
-    assert.match(loaded.responseText, /^Confirmado\n\[Reaccion de WhatsApp:/);
-    assert.match(loaded.responseText, /"emoji":"👍"/);
+    assert.equal(loaded.responseText, 'Confirmado');
+    assert.deepEqual(loaded.responseItems.map((item) => item.content_type), ['text', 'reaction']);
+    assert.equal(loaded.responseItems[1].emoji, '👍');
     assert.equal(loaded.inboundMessageId, 8);
     assert.deepEqual(loaded.loadedMessageIds, [7, 8]);
   } finally {

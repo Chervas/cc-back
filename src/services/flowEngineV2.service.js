@@ -69,7 +69,11 @@ const businessProfileLocal = require('./businessProfileLocal.service');
 const { resolveLeadAutoReplyWait } = require('./clinicOpeningHours.service');
 const { evaluatePendingLeadContact } = require('./leadContactState.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
-const { buildConversationContext, formatInboundAnalysisText } = require('../lib/automation-conversation-context');
+const {
+  buildConversationContext,
+  formatInboundAnalysisItem,
+  formatInboundResponseText,
+} = require('../lib/automation-conversation-context');
 const { AUTO_APPLY_CONFIDENCE_THRESHOLD } = require('../lib/automation-intent-contract');
 const {
   emitAutomationResponseProcessing,
@@ -1156,10 +1160,12 @@ function buildAiSystemPrompt(outputFormat, outputFields = []) {
     'Cada campo confianza_* mide la certeza de que el valor concreto devuelto en su campo asociado es correcto. Para booleanos, no representa la probabilidad de true.',
     'Por ejemplo: si un campo vale false y estas seguro de ese false, su confianza puede ser 0.95, no 0.05.',
     'Si no dispones de un dato, devuelve un valor vacío válido para su tipo.',
-    'Los marcadores [Adjunto de tipo ...: contenido no disponible para este analisis] describen solo metadatos. No has visto, leido ni escuchado ese adjunto; no inventes su contenido ni deduzcas una intencion a partir de su tipo.',
+    'patient_message_batch.text contiene exclusivamente el texto escrito por el paciente. patient_message_batch.items conserva en orden cada texto, adjunto o reaccion del lote nuevo.',
+    'Un item con content_type=attachment y content_available=false describe solo metadatos. No has visto, leido ni escuchado ese adjunto; no inventes su contenido ni deduzcas una intencion a partir de su tipo.',
+    'Los marcadores heredados [Adjunto de tipo ...: contenido no disponible para este analisis], si aparecen, tienen el mismo significado de metadato no interpretable.',
     'reaction_emoji y reaction_target_message_preview son datos legibles: analiza la reaccion en relacion con el mensaje al que esta vinculada aunque no haya texto del paciente. Un adjunto no interpretable en el mismo lote no elimina esa reaccion ni el texto disponible.',
     'listened_message_preview y reaction_target_message_preview son mensajes de referencia: sus emojis y preguntas NO forman parte del lote nuevo del paciente. reaction_emoji=null significa que ese mensaje del paciente no contiene una reaccion; no la deduzcas del mensaje de referencia.',
-    'Si la respuesta solo contiene adjuntos no interpretables, refleja la falta de informacion y la necesidad de revision humana en los campos configurados. Si tambien hay texto o reacciones, analizalos en su contexto sin atribuir al adjunto un significado que no has recibido.',
+    'Si el lote solo contiene adjuntos no interpretables, el motivo debe decir unicamente que el contenido del adjunto no esta disponible y requiere revision; no atribuyas al paciente preguntas, decisiones, peticiones ni necesidad de tiempo. Si tambien hay texto o reacciones, analizalos en su contexto sin atribuir al adjunto un significado que no has recibido.',
     'Los ejemplos de las instrucciones nunca forman parte de la respuesta del paciente. El motivo debe justificar el resultado con los datos recibidos, no con esos ejemplos.',
     'Campos esperados:',
     fields || '- decision: string',
@@ -1398,9 +1404,12 @@ async function enrichConversationContext(context, targets = {}) {
     throw new Error('message_received_batch_scope_mismatch');
   }
   const responseText = messages
-    .map(formatInboundAnalysisText)
+    .map(formatInboundResponseText)
     .filter(Boolean)
     .join('\n');
+  const responseItems = messages
+    .map(formatInboundAnalysisItem)
+    .filter(Boolean);
   const latest = messages[messages.length - 1];
   const latestMetadata = isObject(latest?.metadata) ? latest.metadata : {};
   const reaction = isObject(latestMetadata.reaction) ? latestMetadata.reaction : {};
@@ -1411,6 +1420,7 @@ async function enrichConversationContext(context, targets = {}) {
     last_response_context: {
       response_text: responseText || null,
       response_lines: responseText ? responseText.split(/\r?\n/).filter(Boolean) : [],
+      response_items: responseItems,
       response_message_id: toIntOrNull(latest?.id),
       response_message_type: cleanString(latest?.message_type),
       response_message_preview: cleanString(latest?.content),
@@ -1793,9 +1803,13 @@ function resolveClassifyIntentPrompt(context = {}) {
 }
 
 function buildScopedClassifyIntentConversation(context = {}) {
+  const responseContext = isObject(context?.last_response_context) ? context.last_response_context : {};
   return {
     clinic_message_replied_to: resolveClassifyIntentPrompt(context),
-    patient_message_batch: cleanString(recentPatientTextFromConversation(context)),
+    patient_message_batch: {
+      text: cleanString(recentPatientTextFromConversation(context)),
+      items: Array.isArray(responseContext.response_items) ? responseContext.response_items : [],
+    },
   };
 }
 
@@ -6710,6 +6724,7 @@ async function processNode(node, context, runtime = {}) {
 async function resumeWaitingNode(execution, node, context, {
   mode,
   responseText,
+  responseItems = [],
   formSubmission,
   inboundMessageId: inboundMessageIdOption = null,
   responseMediaKind = null,
@@ -6739,6 +6754,7 @@ async function resumeWaitingNode(execution, node, context, {
           })
         : null;
       const effectiveResponseText = cleanString(responseText) || null;
+      const effectiveResponseItems = Array.isArray(responseItems) ? responseItems : [];
       const inboundMetadata = isObject(inboundMessage?.metadata) ? inboundMessage.metadata : {};
       const inboundMedia = isObject(inboundMetadata.media) ? inboundMetadata.media : {};
       const mediaKind = cleanString(
@@ -6782,6 +6798,7 @@ async function resumeWaitingNode(execution, node, context, {
           .split(/\r?\n/)
           .map((line) => cleanString(line))
           .filter(Boolean),
+        response_items: effectiveResponseItems,
         response_message_id: toIntOrNull(inboundMessage?.id),
         response_message_type: cleanString(inboundMessage?.message_type) || null,
         response_message_preview: cleanString(inboundMessage?.content) || null,
@@ -6814,6 +6831,7 @@ async function resumeWaitingNode(execution, node, context, {
         last_prompt: listenedMessagePreview || null,
         last_response_context: {
           response_text: effectiveResponseText ?? null,
+          response_items: effectiveResponseItems,
           response_rating: responseRating,
           response_rating_reason: responseRatingReason,
           response_message_id: toIntOrNull(inboundMessage?.id),
@@ -7290,6 +7308,7 @@ async function runExecution(executionId, options = {}) {
       const resumeInfo = await resumeWaitingNode(execution, waitingNode, context, {
         mode: resumeMode,
         responseText,
+        responseItems: options.responseItems,
         formSubmission,
         inboundMessageId: options.inboundMessageId,
         responseMediaKind: options.responseMediaKind,

@@ -81,6 +81,7 @@ assert.equal(
 );
 assert.match(CLASSIFY_INTENT_PRESET_CONFIG.instruction, /todavia no puede confirmar/);
 assert.match(CLASSIFY_INTENT_PRESET_CONFIG.instruction, /solicitar_cambio_cita solo cuando/);
+assert.match(CLASSIFY_INTENT_PRESET_CONFIG.instruction, /reaccion positiva/);
 
 assert.equal(CONFIRM_APPOINTMENT_PRESET_CONFIG.preset_contract_version, 2);
 assert.deepEqual(
