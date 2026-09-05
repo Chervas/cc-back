@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const { Op } = require('sequelize');
 const db = require('../../../models');
 const jobRequestsService = require('../../services/jobRequests.service');
 const emailDelivery = require('../../services/emailDelivery.service');
@@ -47,6 +48,10 @@ test('normaliza reglas y declara la plantilla admin-only de WhatsApp', () => {
   assert.equal(rules.email_queue_stuck.enabled, true);
   assert.equal(rules.email_queue_stuck.whatsapp, false);
   assert.equal(rules.email_queue_stuck.email, true);
+  assert.equal(rules.email_bounces_7d.panel, true);
+  assert.equal(rules.email_bounces_7d.email, false);
+  assert.equal(rules.email_active_suppressions.panel, true);
+  assert.equal(rules.email_active_suppressions.email, false);
   assert.equal(rules['users.new_registration'].whatsapp, true);
   assert.equal(rules['whatsapp.account_health_blocked'].severity, 'critical');
   assert.equal(rules['whatsapp.account_health_blocked'].whatsapp, true);
@@ -63,6 +68,38 @@ test('normaliza reglas y declara la plantilla admin-only de WhatsApp', () => {
   assert.equal(payload.category, 'UTILITY');
   assert.match(payload.components[0].text, /Alerta operativa de Clinicaclick: \{\{1\}\}/);
   assert.match(payload.components[0].text, /Revisa Monitorizacion del sistema\./);
+});
+
+test('los indicadores SES semanales permanecen en panel y no se repiten cada hora', async () => {
+  let throttleSince = null;
+  const setting = settingStub({
+    email_enabled: true,
+    whatsapp_enabled: false,
+  });
+  const restores = [
+    patchProperty(db.SystemNotificationSetting, 'findOrCreate', async () => [setting, false]),
+    patchProperty(db.SystemNotificationDelivery, 'count', async ({ where }) => {
+      throttleSince = where.created_at?.[Op.gte] || null;
+      return 1;
+    }),
+  ];
+
+  try {
+    const result = await systemNotifications.queueNotification({
+      eventKey: 'email_bounces_7d',
+      metadata: { source: 'unit_test' },
+    });
+
+    assert.deepEqual(result.channels, ['panel']);
+    assert.deepEqual(result.created, []);
+    assert.deepEqual(result.skipped, [{ channel: 'panel', reason: 'throttled', deliveryId: null }]);
+    assert(throttleSince instanceof Date);
+    const ageMinutes = Math.round((Date.now() - throttleSince.getTime()) / 60000);
+    assert(ageMinutes >= (24 * 60) - 1 && ageMinutes <= (24 * 60) + 1);
+    assert.equal(systemNotifications._test.throttleMinutesForEvent(setting, 'email_bounces_7d'), 24 * 60);
+  } finally {
+    restores.reverse().forEach((restore) => restore());
+  }
 });
 
 test('updateSettings permite desactivar WhatsApp y borrar explicitamente el remitente', async () => {

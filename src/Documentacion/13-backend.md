@@ -23,6 +23,99 @@ simulacion visible y no comunica con AEAT.
 
 Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Data Manager/Conversiones mejoradas, política de goals y E2E/limpieza de intake.
 
+## 2026-09-03 - Contrato modular de salida del nodo IA en DEV
+
+- `output_fields` admite `allowed_values` solo para campos de texto e
+  `include_confidence` para cualquier tipo. El formato enviado al orquestador
+  añade `confianza_<campo>` cuando corresponde.
+- El runtime valida valores cerrados, limita cada confianza a `0..1` y registra
+  `_ai_contract_invalid_fields` sin aceptar valores inventados. En
+  `classify_intent`, la salida global `confianza` se conserva como proyección de
+  la intención principal para no romper condiciones publicadas.
+- La receta canónica nueva de `classify_intent` contiene seis campos semánticos
+  con confianza individual. `intencion_secundaria=ninguna` se normaliza a
+  ausencia de secundaria y no se marca como error.
+- Controlador y motor validan duplicados, colisiones con nombres de confianza,
+  tipos, límites y valores permitidos. Las copias del preset clonan también los
+  arrays internos para que una edición no pueda mutar el catálogo global.
+- No existe migración automática de versiones publicadas a este contrato. Las
+  configuraciones históricas siguen ejecutándose y las ejecuciones abiertas
+  permanecen ancladas a su versión.
+
+## 2026-09-04 - Confirmación de asistencia estructurada, revisión por familia
+
+- `confirm_appointment` dispone de contrato v2 explícito mediante
+  `preset_contract_version=2`: devuelve `confirma_asistencia`,
+  `requiere_respuesta` y `motivo`, con una confianza individual por campo.
+- El lote reclamado `patient_message_batch` es la respuesta analizada;
+  `conversation_today`, `appointment` y `trigger` solo aportan contexto. Una
+  confirmación con pregunta puede devolver `true/true` sin perder ninguna de
+  las dos señales.
+- En contrato v2, `on_success` significa análisis completado y `on_fail`, fallo
+  técnico. La decisión de negocio debe configurarse en un IF posterior. No se
+  aplica el atajo determinista de reacciones ni el fallback binario histórico.
+- La compatibilidad antigua permanece acotada a nodos sin versión de contrato:
+  siguen interpretando `decision=confirmado` mientras se migran familia a
+  familia. El normalizador no convierte versiones publicadas al abrirlas.
+- La migración DEV
+  `20260904162000-prepare-appointment-data-confirmation-ai-v16.js` creó la v16
+  borrador global de `flw_fc01d1d9647df069` desde la v15. Actualizó solo N18,
+  N14, N28, N24, N40 y N35. La v14 continúa activa y la v15 no cambió.
+- La plantilla canónica `confirm_appointment_v2` empaqueta el esquema de salida
+  y una configuración de decisión reutilizable. El editor crea o restablece de
+  forma idempotente un `condition/field_check` conectado al nodo IA, con tres
+  ramas editables y fallback de revisión. La IA no devuelve nombres de ramas:
+  el IF decide exclusivamente a partir de campos estructurados y confianzas.
+- `20260904170000-route-appointment-data-confirmation-v16.js` aplicó esa
+  plantilla a las seis IA del borrador: 65 nodos, grafo válido, cero ejecuciones,
+  `is_active=0` y `published_at=null`. Confirmación simple conserva la respuesta
+  y el cambio de estado anteriores; confirmación con comentario cambia el estado
+  y notifica a recepción sin respuesta automática; negativa y baja confianza
+  quedan en revisión. El `down` solo restaura el snapshot si la versión sigue
+  siendo un borrador inactivo y sin ejecuciones.
+
+## 2026-09-03 - Restauración binaria de confirmación preparada en DEV
+
+- La revisión funcional posterior al hard cut concluyó que no se deben migrar
+  todas las automatizaciones de cita a grafos extensos de `classify_intent` en
+  una sola operación. Se conserva ese estado desplegado mientras cada familia
+  se revisa y valida por separado.
+- El worktree DEV vuelve a soportar `confirm_appointment` en
+  `condition/ai_analysis`. Solo `decision=confirmado` recorre `on_success`;
+  `no_confirmado`, `dudas`, contenido no interpretable y fallo del proveedor
+  recorren `on_fail`. Un fallo técnico queda marcado como
+  `_ai_provider=unavailable` y nunca confirma ni cambia la cita por sí solo.
+- La receta mantiene sus tres outputs históricos (`decision`, `confianza`,
+  `motivo`) y la regla determinista para una reacción positiva inequívoca. El
+  texto libre continúa en Bedrock. `appointment_unconfirmed_reply` permanece
+  retirado en publicación y runtime.
+- La migración
+  `20260903130000-restore-bs-capilar-binary-confirmation-flow.js` está preparada
+  pero no aplicada. Toma como baseline inmutable la versión 5 (`id=669`) de la
+  familia `flw_0b8af554f77d0f0f`, clínica 66, y publicará una versión nueva sin
+  editar filas históricas ni reanclar ejecuciones.
+- Estado de lectura: la versión activa sigue siendo la 9 (`id=1324`) y usa
+  `classify_intent`; `FlowExecutionsV2.id=1983` continúa `waiting` en `N9`,
+  vinculado a la versión 6 (`id=793`). No se creó snapshot y la migración figura
+  `down`.
+- La familia piloto es el aviso de acceso del mismo día y conserva
+  `exclude_if_not_confirmed=true`: solo procesa citas ya confirmadas y no sirve
+  para validar una transición desde pendiente.
+- DEV y staging comparten estas tablas. Antes de aplicar la migración es
+  obligatorio desplegar el soporte de `confirm_appointment` en todos los
+  runtimes consumidores, verificar staging y aplicar la migración una sola vez.
+  El 2026-09-03 se reinició únicamente `pm2-back-dev` para cargar el soporte y
+  se sincronizó el build con `localhost:4203`; la base no se modificó y
+  staging/gateway permanecieron intactos.
+- El `down` desactiva únicamente la versión insertada y solo restaura la activa
+  anterior cuando no existe otra versión activa. Nunca cambia
+  `template_version_id` de una ejecución iniciada.
+- QA sin escritura: `inbound_appointment_intent.test.js`,
+  `restore_bs_capilar_binary_confirmation.test.js`, la matriz de integración de
+  575 rutas y las suites colindantes pasan; la compilación frontend DEV también
+  pasa con heap Node de 4 GB. El procedimiento completo y el gate de despliegue
+  están en `35-roadmap-mensajes-entrantes-ia-y-citas.md`.
+
 ## 2026-09-03 - Respuestas mixtas de confirmación de cita
 
 - Una clasificación canónica `confirmar_cita` con
@@ -4175,34 +4268,19 @@ Esto evita dos regresiones:
 
 Registro histórico de la regla que originó el contrato actual. Desde el corte del
 2026-09-03 no se ejecuta `confirm_appointment`: toda respuesta pasa por
-`condition/ai_analysis` con `preset_key = classify_intent`:
+`condition/ai_analysis` con `preset_key = classify_intent`. Desde la corrección
+del 2026-09-03, ese preset no ejecuta un clasificador determinista previo:
 
-- reacción positiva explícita (`👍`, `✅`, `👌`, `🙌` y variantes cercanas) sobre el mensaje escuchado:
-  - se trata como `intencion_principal=confirmar_cita` y
-    `accion_inequivoca=true` de forma determinista;
-  - no depende del LLM;
-  - continúa por `on_success` hacia comprobaciones estructuradas.
-- respuesta escrita con emoji positivo equivalente (`👍`, `👌`, etc.) o texto afirmativo inequívoco:
-  - también se trata como `confirmar_cita` de forma determinista;
-  - para respuestas cortas tipo `sí`, `ok`, `vale`, `perfecto` se exige que sean respuestas breves y sin interrogación; frases largas ambiguas siguen pasando por el análisis normal;
-  - esto aplica en ejecución real y en simulación para que el test-run no caiga falsamente por la rama inconclusa.
-- reacción negativa o neutra (`👎`, `🤔`, etc.):
-  - no se convierte en confirmación, cancelación ni cambio;
-  - si no contiene texto interpretable, queda como `otra`, requiere respuesta y pasa a revisión.
-- emoji escrito como texto normal:
-  - no se trata como `reaction`;
-  - entra como `text`;
-  - si el texto completo es un emoji positivo soportado, se considera confirmación
-    determinista solo cuando responde a una petición de confirmación; tras un aviso
-    informativo se considera un acuse sin acción sobre la cita;
-  - `ok`, `vale`, `perfecto`, `entendido` y equivalentes breves siguen la misma
-    regla contextual y una interrogación como `ok?` no confirma.
-- sticker recibido como media (`Messages.metadata.media.kind = sticker`):
-  - se muestra en QuickChat como miniatura autenticada mediante `GET /api/conversations/messages/:messageId/media`;
-  - el `delay/wait_response` puede reanudar la automatización aunque no haya texto y guarda `response_media_kind`, `response_media_id` y `response_media_mime_type` en el contexto;
-  - `classify_intent` devuelve `intencion_principal=otra`,
-    `accion_inequivoca=false` y `necesita_respuesta=true`;
-  - no se confirma, cancela ni reprograma una cita solo por recibir un sticker. Si se añade IA multimodal real, deberá cambiarse esta regla de forma explícita y auditable.
+- texto, lotes consecutivos, emojis, reacciones y metadata de contenido no
+  textual se envían al proveedor IA como contexto estructurado;
+- el normalizador posterior comprueba tipos, valores permitidos, cita única y
+  umbral de confianza, pero no crea una intención funcional;
+- si el proveedor no responde, el nodo recorre `on_fail`, deja la cita intacta
+  y deriva a revisión humana;
+- `action/change_status` publica inmediatamente el nuevo estado en
+  `ConversationAutomationStates` y la finalización conserva ese estado. Así
+  QuickChat puede mostrar `Cita cancelada` o `Cita confirmada` aunque la
+  ejecución ya esté completada.
 - Corrección histórica 2026-07-21: la migración `20260721101000-add-wait-response-before-confirm-ai` fijó el patrón `send_whatsapp` -> `delay/wait_response` -> `condition/ai_analysis`. El patrón sigue vigente, pero desde 2026-09-03 el nodo IA usa exclusivamente `classify_intent`.
 
 Checklist obligatorio al pasar a `staging` y luego a `main`:
@@ -4413,9 +4491,18 @@ Consecuencias:
 El nodo `condition/field_check` admite ahora dos contratos:
 
 1. `simple`
-   - comparador clásico `left_ref + operator + right_value`
+   - una regla conserva el comparador clásico `left_ref + operator + right_value`
+   - varias reglas usan `comparison_rules[]` con `connector = and|or`
 2. `appointment_booking_timing`
    - switch temporal específico de cita creada
+
+En `simple`, el runtime admite hasta 12 reglas. Los `and` se agrupan antes de
+resolver los `or`: `A and B or C` equivale a `(A and B) or C`. La salida es
+`on_true` si algún grupo completo coincide y `on_false` en cualquier otro caso.
+El output auditable registra solo `id`, conector y booleano de cada regla; no
+repite los valores comparados. Si `comparison_rules` no existe, se evalúa el
+contrato clásico. La primera regla se mantiene sincronizada con
+`left_ref/operator/right_value` para lectura compatible.
 
 Contrato del modo temporal:
 
@@ -5700,6 +5787,18 @@ En los chats de scope grupo, la sede elegida viaja en `chat_state.data.location`
 La acción `send_quickchat_summary` se reconoce exclusivamente por `source_detail=chatbot_quickchat`. Tanto si crea lead como si reutiliza un `LeadIntake` deduplicado, conserva audit actual + outbox y solo el handler crea o revincula su conversación canónica y guarda un único `Message` interno de tipo `event`, idempotente y oculto al paciente. Este camino retorna antes de FormSubmission, Meta CAPI y Google Ads y no contiene ninguna salida WhatsApp. Si el fast path queda esperando responde `202 queued`; los reintentos actualizan/consolidan el mismo resumen en lugar de duplicar mensajes.
 
 `save_lead` encola también el resumen interno cuando recibe el estado final del chatbot, incluso si deduplica contra un lead anterior. En ese dedupe específico responde con el outcome del outbox (`200 saved`, `202 queued/unknown_durable` o `500` terminal) **antes** de Meta CAPI/Data Manager para no contar dos veces la misma conversión; cualquier otro dedupe conserva el `409` general. La acción pública posterior `send_quickchat_summary` pasa por el mismo mecanismo durable como reintento idempotente, no como una materialización alternativa. Esta separación evita el fallo observado en `LeadIntake #7184`: el navegador agotó el margen de navegación, Nginx registró `499`, el lead sobrevivió porque ya estaba creado y la segunda solicitud nunca llegó a ejecutarse. En un lead nuevo, la respuesta de `save_lead` permanece después del tracking best-effort; lo que deja de depender de esa respuesta es la aparición del lead en QuickChat.
+
+### Clasificación de intención sin atajo y resultado visible (2026-09-03)
+
+- `condition/ai_analysis` no llama al clasificador determinista para
+  `preset_key=classify_intent`; texto, emojis, reacciones y lotes consecutivos
+  pasan por el proveedor IA con las entradas y salidas configuradas.
+- La normalización solo valida el contrato. Un fallo técnico recorre `on_fail`
+  y nunca se convierte en confirmación, cancelación o cambio de cita.
+- `action/change_status` actualiza también
+  `ConversationAutomationStates.appointment_status` y lo publica por socket.
+  La finalización conserva el valor para que QuickChat muestre una tarjeta
+  estable de `Cita confirmada` o `Cita cancelada`.
 
 ### 3. Reglas de negocio activas hoy
 
@@ -8290,3 +8389,242 @@ clinicas con `STAFF_SCHEDULE_OVERLAP_OTHER_CLINIC`; `recibe_citas` solo controla
 la elegibilidad para Agenda y no crea ni elimina turnos. La interfaz puede
 consultar resumenes desde Personal, pero el Gantt es el unico editor de turnos
 y bloqueos.
+
+## Runtime de `field_check` por columnas (2026-09-03)
+
+El modo `multi_branch` de `condition/field_check` recibe `branch_rules` con un
+máximo de siete ramas. Cada rama contiene entre una y doce
+`comparison_rules`, combinables mediante `and`/`or`; conserva además la primera
+comparación proyectada en `left_ref`, `operator` y `right_value` para lectura
+compatible. Sus salidas son los IDs de rama y `on_else`. El motor evalúa en
+orden, devuelve `matched_rule_id`, `rule_results` sin valores comparados y
+`next_output_key`, y continúa solo por la primera coincidencia. Una referencia
+ausente no satisface una comparación numérica y no impide probar las ramas
+siguientes. La validación rechaza reglas incompletas, referencias a nodos
+inexistentes, operadores incompatibles, más de siete ramas, más de doce
+condiciones por rama o salidas ausentes.
+
+## Alertas operativas persistentes de Automation V2 (2026-09-03)
+
+`action/send_system_notification` acepta `display_mode=inbox|persistent_alert`
+y `alert_level=warning|error`. El modo persistente guarda
+`data.requiresAcknowledgement=true`; el frontend lo mantiene visible hasta un
+`PATCH` de lectura explícito. Abrir QuickChat no lo resuelve.
+
+`Notifications.dedupe_key` es nullable y único. El runtime usa
+`automation:{execution_id}:{node_id}:{user_id}` y `findOrCreate`, por lo que un
+reintento del mismo nodo no duplica la alerta. El payload conserva IDs y enlaces
+operativos, pero el título, logs y métricas no deben incluir contenido clínico.
+La migración es `20260903131000-add-notification-dedupe-key.js`.
+
+La migración `20260903132000-publish-bs-capilar-same-day-intent-routing.js`
+prepara de forma idempotente la versión 10 del piloto, pero la deja inactiva.
+Si detecta esa versión por `migration_key`, reutiliza su ID y registra el
+snapshot sin crear otra. Esta separación es obligatoria mientras staging no
+ejecute el mismo runtime; activar la versión es una operación explícita de
+rollout, no un efecto de `db:migrate`. En esta versión, una respuesta que solo
+acuse las indicaciones de acceso recorre `branch_ack` y responde
+`Perfecto ¡hasta ahora!` sin modificar el estado de la cita. El nodo conserva
+`suppress_if_human_replied=true` para no duplicar una intervención de
+recepción.
+
+### QA ampliada del piloto e incertidumbre (2026-09-04)
+
+- La v10 `id=1472` continúa inactiva y la v9 `id=1324` continúa activa.
+- `human_interruption_90s.test.js` prueba el orden paciente-operador-paciente:
+  una respuesta humana posterior al mensaje reclamado suprime el acuse, pero no
+  revierte el estado seguro ya aplicado; un inbound posterior vuelve a ser
+  procesable.
+- La matriz canónica cubre 188 workflows, 575 rutas por 16 entradas, 294 rutas
+  sin respuesta y 210 límites `Europe/Madrid`.
+- Doce llamadas reales, sintéticas y sin datos clínicos a Nova Lite detectaron
+  una clasificación insegura: `Todavía no puedo confirmar` se interpretaba como
+  `solicitar_cambio_cita`. El contrato exige ahora `otra` y revisión humana salvo
+  que exista una petición explícita de mover, reagendar o buscar otra fecha.
+- `20260903234500-harden-bs-capilar-uncertain-confirmation.js` guarda snapshot,
+  exige que el target esté inactivo y actualiza únicamente la receta de la v10;
+  su `down` restaura solo esa versión mientras continúe inactiva.
+- `appointment_intent_bedrock_matrix.test.js` conserva la batería real para QA
+  manual; las aserciones unitarias del contrato evitan convertir una llamada de
+  proveedor en requisito habitual de CI.
+
+### Simplificación del piloto y notificaciones internas (2026-09-04)
+
+`action/send_system_notification` declara únicamente `on_success`. La
+validación sigue exigiendo mensaje y destinatario configurado. En ejecución, si
+el usuario o rol válido no tiene miembros, `resolveTaskAssigneeUserIds` repite la
+resolución para `admin`; la salida auditable incluye
+`used_admin_fallback=true`. Si el fallback tampoco existe o `Notification` no se
+puede persistir, el nodo lanza error y `runExecution` deja la ejecución
+`failed`/monitorizable. No se encadena otra notificación para explicar que el
+sistema de notificaciones falló.
+
+`20260904090000-simplify-bs-capilar-same-day-v10.js` guarda snapshot y exige que
+la versión objetivo siga inactiva. En la v10 `id=1472` elimina N29/N30, conecta
+N3 con N10, retira la señal de urgencia del contrato local, elimina `on_fail` de
+todas las notificaciones internas y añade N74 para contestar al paciente que no
+quiere una nueva cita. La v9 `id=1324` sigue activa. El grafo migrado tiene 31
+nodos y valida sin errores.
+
+`20260904110000-remove-bs-capilar-technical-notification-nodes.js` retira después
+N70-N73 y vacía las salidas que los apuntaban. Esos nodos convertían fallos del
+runtime en pasos visibles del negocio que el cliente no debía mantener. El
+grafo final tiene 27 nodos; cualquier error de análisis, cambio de estado o
+respuesta sin destino `on_fail` deja la ejecución `failed` y trazable en
+monitorización.
+
+### Cierre explícito de una revisión sin mutar la cita (2026-09-04)
+
+`PATCH /conversations/:id/automation-attention/resolve` resuelve para todos los
+usuarios los avisos de automatización de esa conversación y completa el
+`ConversationAutomationState` que siga en `review` o `failed` con
+`manual_action_required=true`. No cambia el estado de `CitaPaciente`.
+
+Una respuesta humana aceptada sigue resolviendo los avisos y ahora también
+completa una revisión de intención `pregunta` cuando `needs_response=true`, no
+hay urgencia pendiente y la cita ya está confirmada o cancelada. Una petición
+de cambio continúa abierta hasta que se aplique o descarte expresamente; un
+nuevo mensaje inbound del paciente tampoco completa por sí solo la revisión.
+
+### Estado final después de `action/change_status` (2026-09-04)
+
+La resincronización final contrasta la intención normalizada con las salidas
+reales y no omitidas de `action/change_status`. Una transición compatible ya
+aplicada cierra la acción automática aunque `accion_inequivoca=false`; ese campo
+no puede deshacer una decisión que el propio grafo aceptó. Se conserva revisión
+para `needs_response`, `posible_urgencia`, `cambio_solicitado` o cuando no existe
+una transición compatible. Una espera activa se identifica por
+`waiting_meta.type=delay/wait_response`, no por un `resume_mode` inexistente.
+
+Una petición de cambio tiene una resolución concurrente válida cuando el nodo
+iba a aplicar `cambio_solicitado`, el contexto procede de una respuesta y la
+cita viva ya está `reprogramada`. El nodo no sobrescribe el estado: devuelve
+`skipped=true`, `resolved_externally=true` y termina la rama sin aviso técnico
+ni revisión obsoleta. Otros cambios concurrentes siguen requiriendo revisión;
+crear otra cita sin resolver la original no se infiere como reprogramación.
+
+`20260904123000-resolve-bs-capilar-human-reschedule-race.js` actualiza solo la
+v10 inactiva y guarda rollback de sus nodos. N51 responde `Gracias por
+avisarnos. Revisamos la agenda y te decimos la disponibilidad cuanto antes.`
+
+### Avisos humanos en la confirmación de datos de cita (2026-09-04)
+
+La v16 en DEV de `Envío de datos de la cita tras agendar` presenta como
+`persistent_alert` únicamente las ramas que dejan trabajo humano: respuesta
+sin confirmación clara y confirmación acompañada de una pregunta o petición.
+La confirmación limpia, incluidos `ok`, agradecimientos y reacciones positivas
+contextuales, no crea aviso. La baja confianza conserva `display_mode=inbox`
+para que sea auditable sin convertir cada incertidumbre en un aviso lateral.
+`20260904203000-persist-appointment-data-human-response-alerts-v16.js` aplica
+este contrato sobre el borrador y conserva snapshot de rollback.
+
+### Preferencias personales y cierre de QA de la v16 (2026-09-05)
+
+Las dos alertas laterales de esta familia declaran una clave de presentación
+independiente: `automation.appointment_data.confirmed_with_reply` para una
+confirmación acompañada de pregunta o comentario y
+`automation.appointment_data.response_needs_human` para una respuesta que
+requiere intervención sin confirmar la recepción. La notificación se persiste
+siempre en `Notifications`; desactivar la preferencia personal solo evita que
+el frontend la proyecte como aviso lateral. Por tanto, continúa disponible y
+contabilizada en la campanita.
+
+`UserNotificationPresentationPreferences` guarda por usuario y clave el estado
+del interruptor. `GET|PATCH /common/notifications/preferences/presentation`
+solo opera sobre `req.userData.userId`; el cliente no puede elegir otro usuario.
+Las dos preferencias son opt-out y están activadas por defecto. Las migraciones
+son `20260905080000-create-user-notification-presentation-preferences.js` y
+`20260905081000-label-appointment-data-persistent-alerts-v16.js`.
+
+Los seis agradecimientos de v16 usan además
+`suppress_if_human_replied=true`. Si recepción escribe después de la respuesta
+reclamada y antes de que termine el buffer, el estado seguro de la cita se
+aplica, pero no se envía un agradecimiento automático duplicado. La migración
+`20260905082000-suppress-appointment-data-replies-after-human-intervention-v16.js`
+modifica únicamente el borrador inactivo y conserva snapshot.
+
+Las ramas `No confirma` presentan el trabajo con un título operativo que
+incluye al paciente (`{{paciente.nombre}} necesita respuesta`) y explican que
+existe una pregunta o petición sin confirmación de recepción. No se inserta
+HTML en el mensaje: la jerarquía en negrita procede del título estructurado de
+la notificación. `20260905083000-refine-appointment-data-review-alerts-v16.js`
+actualiza los seis nodos del borrador y también las notificaciones abiertas de
+sus ejecuciones, conservando snapshot para rollback.
+
+`appointment_data_v16_completion_matrix.test.js` valida las rutas de alta el
+mismo día, el día anterior y con mayor antelación. La simulación de reloj
+recorre en cada caso el mensaje inicial, el cambio a `info_enviada`, la primera
+espera de 2 horas, el recordatorio correspondiente y la espera final: 2 horas
+para citas creadas el mismo día y 12 horas para las otras dos rutas. El segundo
+timeout termina el flujo sin ejecutar IA, crear notificaciones ni confirmar la
+cita. La misma matriz cubre los seis fallbacks de baja confianza, fallo técnico
+del proveedor sin decisión de negocio e intervención humana durante el buffer.
+La matriz real contra Nova Lite cubre confirmación limpia, confirmación con
+pregunta, no recepción, pregunta aislada, agradecimiento y reacción positiva.
+
+La prueba real controlada `FlowExecutionV2 #2185` confirmó también la
+intervención humana durante el buffer. `N34` agrupó los mensajes `105208` y
+`105209`; Nova Lite devolvió confirmación `0,95` y necesidad de respuesta
+`0,90`. La ruta `N66 -> N67` dejó la cita QA `74974` en `info_confirmada` y
+`N68` detectó la respuesta humana `105210`: creó cero notificaciones y no se
+ejecutó ningún agradecimiento automático. El estado conversacional terminó
+sin acción manual ni respuesta pendiente.
+
+### Higiene de campanita y avisos rutinarios de SES (2026-09-05)
+
+`DELETE /api/common/notifications/all` elimina todas las notificaciones del
+usuario autenticado y no acepta un `userId` del cliente. El borrado individual
+y el marcado como leído mantienen su contrato anterior.
+
+Los indicadores agregados `email_bounces_7d` y
+`email_active_suppressions` continúan activos en panel, pero dejan de usar el
+canal email. Además, aplican un mínimo de 24 horas entre avisos aunque el
+throttle global sea menor. El detalle actualizado permanece disponible en
+Monitorización del sistema; incidencias que comprometen la entrega, como
+`email_queue_stuck`, conservan sus canales anteriores. La migración
+`20260905101500-panel-only-routine-ses-warnings.js` actualiza la configuración
+global existente y guarda snapshot reversible.
+
+La interfaz ya no expone los términos internos `rebote SES` ni `supresión` en
+estos dos avisos. Presenta `Correo no entregado` o `Correos no entregados` y
+`Dirección bloqueada para nuevos envíos`, explicando que el destino rechazó el
+correo o que Clinicaclick detuvo nuevos envíos tras un rechazo, queja o baja.
+`20260905114000-explain-email-delivery-notifications.js` actualiza también las
+notificaciones todavía no leídas y conserva su contenido anterior para `down`.
+
+### Borrador v10 de recordatorio del día anterior (2026-09-05)
+
+`20260905113000-prepare-day-before-confirmation-v10.js` creó en DEV la versión
+global v10 de `Recordatorio y confirmación día de antes` desde la versión
+histórica v5. El resultado tiene 29 nodos, permanece inactivo y sin publicar;
+la v9 sigue siendo la única activa. No se actualizaron catálogo, copias de
+clínica ni el flujo activo de BS Capilar.
+
+Las respuestas a la primera espera de 2 horas y a la segunda de 16 horas
+convergen en N3, con buffer de 90 segundos en ambas. N3 usa el contrato estándar
+`classify_intent`, presentado como `Interpretar la respuesta sobre una cita`,
+que devuelve `intencion_principal`, `intencion_secundaria`,
+`posible_urgencia`, `necesita_respuesta` y `motivo`, con confianza individual.
+N16 consume solo las salidas necesarias y las compara en seis columnas: confirmación con
+respuesta pendiente, confirmación limpia, cancelación, solicitud de cambio,
+respuesta humana pendiente y acuse sin acción; la baja confianza va al fallback
+sin modificar la cita.
+
+La cancelación pregunta si el paciente quiere otra fecha y analiza esa segunda
+respuesta después de otro buffer de 90 segundos. El cambio deja la cita en
+`cambio_solicitado` y usa el mensaje aprobado de disponibilidad. Los fallos de
+IA o de cambio de estado son rutas técnicas independientes; las notificaciones
+de negocio no declaran `on_fail`. Las respuestas automáticas declaran
+`suppress_if_human_replied=true`.
+
+`20260905115000-mark-day-before-v10-ai-as-custom.js` conserva el paso histórico
+intermedio y no actúa en instalaciones nuevas cuando N3 ya nace con la receta
+estándar. `20260905120000-use-standard-day-before-intent-recipe.js` sustituyó
+en DEV aquel contrato personalizado por el `classify_intent` canónico. Exige
+que la v10 siga inactiva, no publicada y sin ejecuciones, guarda snapshot y es
+reversible.
+
+`day_before_confirmation_v10.test.js` cubre las seis decisiones y el fallback,
+los umbrales de confianza, los estados, los buffers, el contrato estándar con
+`posible_urgencia` y que N16 no convierta ese campo en una rama específica.
+También valida el grafo completo.

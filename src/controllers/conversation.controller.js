@@ -11,6 +11,7 @@ const { canUserSelectWhatsappTemplate } = require('../lib/whatsapp-template-owne
 const { isReviewWorkflowWhatsappTemplate } = require('../lib/whatsapp-template-workflow');
 const {
   completeAnsweredAutomationStateForConversation,
+  completeManualAutomationStateForConversation,
   getPendingReplyStatesByConversationIds,
   resolveAutomationAttentionForConversation,
 } = require('../services/conversationPendingReply.service');
@@ -1993,8 +1994,9 @@ exports.resolveAutomationAttention = async (req, res) => {
       allUsers: true,
       reason: 'operator_action_completed',
     });
+    const automationState = await completeManualAutomationStateForConversation(conversationId);
     const io = getIO();
-    if (result.updated > 0 && io) {
+    if ((result.updated > 0 || automationState.completed) && io) {
       io.to(`clinic:${conversation.clinic_id}`).emit('conversation:updated', {
         id: String(conversation.id),
         pending_automation_attention: false,
@@ -2005,6 +2007,8 @@ exports.resolveAutomationAttention = async (req, res) => {
     return res.json({
       success: true,
       resolved: Number(result.updated || 0),
+      automation_state_completed: automationState.completed,
+      automation_state_reason: automationState.reason || null,
       pending_automation_attention: false,
       pending_automation_count: 0,
     });

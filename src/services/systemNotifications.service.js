@@ -119,17 +119,19 @@ const SYSTEM_NOTIFICATION_EVENTS = Object.freeze([
     key: 'email_bounces_7d',
     category: 'email',
     severity: 'warning',
-    label: 'Email: rebotes SES',
-    description: 'SES ha registrado rebotes en los últimos 7 días.',
-    defaults: { panel: true, email: true, whatsapp: false },
+    label: 'Email: correos no entregados',
+    description: 'Algunos correos fueron rechazados por la dirección o por el servidor destinatario durante los últimos 7 días.',
+    minimumThrottleMinutes: 24 * 60,
+    defaults: { panel: true, email: false, whatsapp: false },
   },
   {
     key: 'email_active_suppressions',
     category: 'email',
     severity: 'warning',
-    label: 'Email: supresiones activas',
-    description: 'Hay destinatarios suprimidos por rebote, queja o baja.',
-    defaults: { panel: true, email: true, whatsapp: false },
+    label: 'Email: direcciones bloqueadas',
+    description: 'Clinicaclick ha detenido los envíos a estas direcciones tras un rechazo, una queja o una baja.',
+    minimumThrottleMinutes: 24 * 60,
+    defaults: { panel: true, email: false, whatsapp: false },
   },
   {
     key: 'whatsapp.account_health_blocked',
@@ -814,6 +816,12 @@ function enabledChannelsForEvent(setting, eventKey, channelsOverride = null) {
   return ['panel', 'email', 'whatsapp'].filter((channel) => Boolean(candidates[channel]));
 }
 
+function throttleMinutesForEvent(setting, eventKey) {
+  const configured = Math.max(0, Number(setting?.throttle_minutes || 0) || 0);
+  const minimum = Math.max(0, Number(eventDefinition(eventKey)?.minimumThrottleMinutes || 0) || 0);
+  return Math.max(configured, minimum);
+}
+
 async function recentlyQueued(
   eventKey,
   channel,
@@ -980,7 +988,7 @@ async function queueNotification({
         if (!force && await recentlyQueued(
           eventKey,
           channel,
-          Number(setting.throttle_minutes || 60),
+          throttleMinutesForEvent(setting, eventKey),
           restrictionStatuses
         )) {
           skipped.push({ channel, reason: 'throttled_sender_restriction' });
@@ -1005,7 +1013,7 @@ async function queueNotification({
         continue;
       }
     }
-    if (!force && await recentlyQueued(eventKey, channel, Number(setting.throttle_minutes || 60))) {
+    if (!force && await recentlyQueued(eventKey, channel, throttleMinutesForEvent(setting, eventKey))) {
       skipped.push({ channel, reason: 'throttled' });
       continue;
     }
@@ -1448,5 +1456,6 @@ module.exports = {
     senderComplianceState,
     shouldRefreshRemoteTemplate,
     systemWhatsappTemplatePayload,
+    throttleMinutesForEvent,
   },
 };

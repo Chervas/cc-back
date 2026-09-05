@@ -72,7 +72,7 @@ const CITA_ESTADOS_RESUELVEN_NOTIFICACIONES = new Set([
 ]);
 const generatePacientePublicId = () => `pac_${crypto.randomBytes(10).toString('hex')}`;
 
-async function completeAppointmentAutomationReviews(appointmentId) {
+async function completeAppointmentAutomationReviews(appointmentId, appointmentStatus = undefined) {
     const normalizedAppointmentId = Number(appointmentId);
     if (
         !db.ConversationAutomationState
@@ -91,6 +91,7 @@ async function completeAppointmentAutomationReviews(appointmentId) {
     await Promise.all(states.map((state) => conversationAutomationState.completeState({
         clinicId: state.clinic_id,
         conversationId: state.conversation_id,
+        appointmentStatus,
     })));
     return states.length;
 }
@@ -2704,7 +2705,7 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
     }
 
     if (estadoRaw !== 'cambio_solicitado') {
-        await completeAppointmentAutomationReviews(citaId).catch((error) => {
+        await completeAppointmentAutomationReviews(citaId, estadoRaw).catch((error) => {
             console.warn('[updateCitaEstado] No se pudo cerrar la revisión de automatización:', error.message || error);
         });
     }
@@ -2831,7 +2832,7 @@ exports.resolveRequestedAppointmentChange = asyncHandler(async (req, res) => {
         reason: `appointment_change_request_${action}`,
     });
 
-    await completeAppointmentAutomationReviews(citaId);
+    await completeAppointmentAutomationReviews(citaId, nextStatus);
 
     const updated = await CitaPaciente.findByPk(citaId, {
         include: [
@@ -3043,7 +3044,7 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
         console.error('⚠️ [reagendarCita] Error disparando automation v2:', automationErr.message);
     }
 
-    await completeAppointmentAutomationReviews(citaId).catch((error) => {
+    await completeAppointmentAutomationReviews(citaId, cita.estado).catch((error) => {
         console.warn('[reagendarCita] No se pudo cerrar la revisión de automatización:', error.message || error);
     });
 

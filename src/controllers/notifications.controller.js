@@ -91,6 +91,17 @@ exports.remove = async (req, res) => {
   }
 };
 
+exports.removeAll = async (req, res) => {
+  try {
+    const userId = req.userData.userId;
+    const deleted = await Notification.destroy({ where: { userId } });
+    res.json({ deleted });
+  } catch (error) {
+    console.error('Error deleting all notifications:', error);
+    res.status(500).json({ message: 'No se pudieron eliminar las notificaciones' });
+  }
+};
+
 exports.markAllAsRead = async (req, res) => {
   try {
     const userId = req.userData.userId;

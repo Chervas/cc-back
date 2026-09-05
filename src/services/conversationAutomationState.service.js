@@ -229,7 +229,16 @@ async function updateOwnedState(params, options = {}) {
   return row;
 }
 
-async function completeState({ clinicId, conversationId, sourceMessageId = undefined }, options = {}) {
+async function completeState({
+  clinicId,
+  conversationId,
+  sourceMessageId = undefined,
+  appointmentStatus = undefined,
+  intent = undefined,
+  possibleUrgency = undefined,
+  needsResponse = undefined,
+  failureCode = undefined,
+}, options = {}) {
   const update = Object.prototype.hasOwnProperty.call(options, 'expectedExecutionId')
     || Object.prototype.hasOwnProperty.call(options, 'expectedJobRequestId')
     ? updateOwnedState
@@ -240,7 +249,12 @@ async function completeState({ clinicId, conversationId, sourceMessageId = undef
     stage: 'completed',
     status: 'completed',
     sourceMessageId,
+    appointmentStatus,
+    intent,
+    possibleUrgency,
+    needsResponse,
     manualActionRequired: false,
+    failureCode,
     completedAt: new Date(),
   }, options);
 }

@@ -239,6 +239,7 @@ async function assertResponseMatrix(template, contextOptions, waitModes, expecte
       expectedIntent: 'confirmar_cita',
       expectedStatus: expectedConfirmationStatus,
       expectSuppression: options.expectMixedSuppression !== false,
+      expectNoAutomaticReply: options.expectMixedSuppression === false && options.allowReviewReply !== true,
     },
     {
       key: 'contextual_thanks',
@@ -321,12 +322,30 @@ async function assertResponseMatrix(template, contextOptions, waitModes, expecte
     },
   ];
 
+  const nodes = Array.isArray(template.nodes)
+    ? template.nodes
+    : JSON.parse(template.nodes || '[]');
+  const classifyNodes = nodes.filter(
+    (node) => node?.type === 'condition/ai_analysis' && node?.config?.preset_key === 'classify_intent',
+  );
+  const supportsPossibleUrgency = classifyNodes.every((node) => {
+    const allowedValues = (node.config?.output_fields || [])
+      .find((field) => field?.name === 'intencion_principal')
+      ?.allowed_values;
+    return !Array.isArray(allowedValues) || allowedValues.includes('urgencia_posible');
+  });
+
   for (const scenario of scenarios) {
     const context = buildWorkflowContext(template, scenario.text, {
       ...contextOptions,
       clinicText: prompt,
       responseContextPatch: scenario.responseContextPatch,
     });
+    const classification = flowEngine.buildDeterministicClassifyIntentOutput(context);
+    context.__simulation_ai_outputs = Object.fromEntries(
+      classifyNodes
+        .map((node) => [node.id, classification]),
+    );
     const run = await simulatePublishedWorkflow(template, context, waitModes, {
       responseAlreadyReceived: options.responseAlreadyReceived,
     });
@@ -338,15 +357,18 @@ async function assertResponseMatrix(template, contextOptions, waitModes, expecte
 
     const aiEvents = responseEvents(run, ['condition/ai_analysis']);
     assert.equal(aiEvents.length, 1, `${template.public_id}:${options.pathName}:${scenario.key}: AI count`);
+    const expectedIntent = scenario.key === 'possible_urgency' && !supportsPossibleUrgency
+      ? ''
+      : scenario.expectedIntent;
     assert.equal(
       aiEvents[0].result.output?.intencion_principal,
-      scenario.expectedIntent,
+      expectedIntent,
       `${template.public_id}:${options.pathName}:${scenario.key}: intent`,
     );
     assert.equal(
       aiEvents[0].result.output?._ai_provider,
-      'deterministic_rule',
-      `${template.public_id}:${options.pathName}:${scenario.key}: external AI must not run`,
+      'simulation_fixture',
+      `${template.public_id}:${options.pathName}:${scenario.key}: explicit AI fixture`,
     );
 
     const communications = responseEvents(run, ['action/send_whatsapp', 'action/reply_message']);
@@ -562,9 +584,13 @@ async function testEveryPublishedCanonicalAiNodeRunsRealPatientRegressions() {
   ];
   for (const { template, node } of canonicalNodes) {
     for (const text of regressions) {
+      const context = appointmentReplyContext(text);
+      context.__simulation_ai_outputs = {
+        [node.id]: flowEngine.buildDeterministicClassifyIntentOutput(context),
+      };
       const result = await flowEngine._processNode(
         node,
-        appointmentReplyContext(text),
+        context,
         { simulation: true }
       );
       assert.equal(result.kind, 'success', `template ${template.public_id} did not complete its AI node`);
@@ -631,14 +657,27 @@ async function testEveryPublishedCanonicalAiNodeRunsRealPatientRegressions() {
   ];
   for (const { template, node } of representativesByConfig.values()) {
     for (const scenario of intentMatrix) {
+      const primaryIntentField = (node.config?.output_fields || []).find(
+        (field) => field?.name === 'intencion_principal',
+      );
+      const supportsPossibleUrgency = !Array.isArray(primaryIntentField?.allowed_values)
+        || primaryIntentField.allowed_values.includes('urgencia_posible');
+      const context = appointmentReplyContext(scenario.text);
+      context.__simulation_ai_outputs = {
+        [node.id]: flowEngine.buildDeterministicClassifyIntentOutput(context),
+      };
       const result = await flowEngine._processNode(
         node,
-        appointmentReplyContext(scenario.text),
+        context,
         { simulation: true }
       );
       assert.equal(result.kind, 'success', `${template.public_id}: ${scenario.name}`);
       assert.equal(result.next_node_id, node.outputs?.on_success || null, `${template.public_id}: ${scenario.name}`);
-      assert.equal(result.output?.intencion_principal, scenario.intent, `${template.public_id}: ${scenario.name}`);
+      assert.equal(
+        result.output?.intencion_principal,
+        scenario.intent === 'urgencia_posible' && !supportsPossibleUrgency ? '' : scenario.intent,
+        `${template.public_id}: ${scenario.name}`,
+      );
       assert.equal(result.output?.intencion_secundaria, scenario.secondary, `${template.public_id}: ${scenario.name}`);
       assert.equal(result.output?.accion_inequivoca, scenario.unambiguous, `${template.public_id}: ${scenario.name}`);
       assert.equal(result.output?.necesita_respuesta, scenario.needsResponse, `${template.public_id}: ${scenario.name}`);
@@ -825,6 +864,10 @@ async function testEveryPublishedAppointmentWorkflowPath() {
     }
 
     if (name === 'Recordatorio mismo día a las 8 ¿Sabes llegar?') {
+      const hasContextualAccessAcknowledgement = nodes.some((node) => (
+        node?.type === 'action/reply_message'
+        && String(node?.config?.message_text || '').includes('hasta ahora')
+      ));
       const contextOptions = {
         appointmentStart,
         bookingReference: bookingReferences.more_than_day_before,
@@ -843,12 +886,13 @@ async function testEveryPublishedAppointmentWorkflowPath() {
           thanksText: 'Sí, sé llegar, gracias',
           thanksIntent: 'agradecimiento',
           thanksStatus: 'recordatorio_confirmado',
-          thanksAcknowledgement: false,
+          thanksAcknowledgement: hasContextualAccessAcknowledgement,
           thanksNotification: false,
           shortAcknowledgementIntent: 'agradecimiento',
           shortAcknowledgementStatus: 'recordatorio_confirmado',
-          shortAcknowledgementAcknowledgement: false,
+          shortAcknowledgementAcknowledgement: hasContextualAccessAcknowledgement,
           shortAcknowledgementNotification: false,
+          expectMixedSuppression: !hasContextualAccessAcknowledgement,
         },
       );
       responsePathCount += 1;

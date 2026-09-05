@@ -484,7 +484,7 @@ function transformLegacyIntentNodes(rawNodes) {
         id: changeReplyId,
         type: 'action/reply_message',
         config: {
-          message_text: 'Gracias por avisarnos. Hemos anotado que quieres cambiar tu cita. No recibiras mas recordatorios mientras recepcion revisa tu solicitud. Te contactaremos para ofrecerte otra hora.',
+          message_text: 'Gracias por avisarnos. Revisamos la agenda y te decimos la disponibilidad cuanto antes.',
           suppress_if_human_replied: true,
         },
         outputs: { on_success: changeNotifyId, on_fail: changeNotifyId },
@@ -626,7 +626,7 @@ function buildMessageReceivedTemplateNodes() {
       id: 'N16',
       type: 'action/reply_message',
       config: {
-        message_text: 'Gracias por avisarnos. Hemos anotado que quieres cambiar tu cita. No recibiras mas recordatorios mientras recepcion revisa tu solicitud. La clinica esta cerrada ahora; te contactaremos cuando vuelva a abrir para ofrecerte otra hora.',
+        message_text: 'Gracias por avisarnos. Revisamos la agenda y te decimos la disponibilidad cuanto antes.',
         suppress_if_human_replied: true,
       },
       outputs: { on_success: 'N17', on_fail: 'N17' },

@@ -152,7 +152,7 @@ async function getPendingReplyStatesByConversationIds(conversationIds, options =
       FROM Notifications notification
       LEFT JOIN FlowExecutionsV2 execution
         ON execution.id = CAST(JSON_UNQUOTE(JSON_EXTRACT(notification.data, '$.execution_id')) AS UNSIGNED)
-      WHERE notification.event = 'automation.system_notification'
+      WHERE notification.event IN ('automation.system_notification', 'automation.persistent_alert')
         AND notification.is_read = 0
         ${hasUser ? 'AND notification.user_id = :userId' : ''}
         AND CAST(JSON_UNQUOTE(JSON_EXTRACT(notification.data, '$.quickChatConversationId')) AS UNSIGNED)
@@ -193,6 +193,31 @@ async function getPendingReplyStatesByConversationIds(conversationIds, options =
       state.automationNeedsResponse = serialized.needs_response;
       state.automationManualActionRequired = serialized.manual_action_required;
     });
+
+    const appointmentIds = Array.from(new Set(
+      persistedRows
+        .map((row) => Number(row.appointment_id))
+        .filter((id) => Number.isInteger(id) && id > 0)
+    ));
+    if (appointmentIds.length && db.CitaPaciente) {
+      const appointments = await db.CitaPaciente.findAll({
+        where: { id_cita: { [Op.in]: appointmentIds } },
+        attributes: ['id_cita', 'estado'],
+        raw: true,
+        ...(options.transaction ? { transaction: options.transaction } : {}),
+      });
+      const statuses = new Map(appointments.map((appointment) => [
+        Number(appointment.id_cita),
+        String(appointment.estado || '').trim() || null,
+      ]));
+      persistedRows.forEach((row) => {
+        const state = states.get(Number(row.conversation_id));
+        const currentStatus = statuses.get(Number(row.appointment_id));
+        if (state && currentStatus) {
+          state.automationActionAppointmentStatus = currentStatus;
+        }
+      });
+    }
   }
 
   return states;
@@ -240,7 +265,7 @@ async function resolveAutomationAttentionForConversation(conversationId, userId,
   }
 
   const where = {
-    event: 'automation.system_notification',
+    event: { [Op.in]: ['automation.system_notification', 'automation.persistent_alert'] },
     isRead: false,
     ...(!allUsers ? { userId: numericUserId } : {}),
     [Op.and]: [
@@ -290,8 +315,9 @@ async function completeAnsweredAutomationStateForConversation(conversationId, op
   });
   if (!state) return { completed: false, reason: 'state_not_found' };
 
-  const intent = String(state.intent || '').trim().toLowerCase();
-  const appointmentStatus = String(state.appointment_status || '').trim().toLowerCase();
+  const serialized = serializeAutomationState(state);
+  const intent = String(serialized.intent || '').trim().toLowerCase();
+  const appointmentStatus = String(serialized.appointment_status || '').trim().toLowerCase();
   const resolvedAppointmentStates = new Set([
     'recordatorio_confirmado',
     'confirmada',
@@ -299,26 +325,60 @@ async function completeAnsweredAutomationStateForConversation(conversationId, op
     'info_confirmada',
     'cancelada',
   ]);
-  const canComplete = state.status === 'review'
-    && state.manual_action_required === true
-    && state.needs_response === true
-    && state.possible_urgency !== true
-    && ['confirmar_cita', 'cancelar_cita'].includes(intent)
+  const canComplete = serialized.status === 'review'
+    && serialized.manual_action_required === true
+    && serialized.needs_response === true
+    && serialized.possible_urgency !== true
+    && ['confirmar_cita', 'cancelar_cita', 'pregunta'].includes(intent)
     && resolvedAppointmentStates.has(appointmentStatus);
   if (!canComplete) return { completed: false, reason: 'operator_action_still_required' };
 
+  const ownership = serialized.execution_id
+    ? { expectedExecutionId: serialized.execution_id }
+    : (serialized.job_request_id ? { expectedJobRequestId: serialized.job_request_id } : {});
   const completed = await conversationAutomationState.completeState({
     clinicId: state.clinic_id,
     conversationId: numericConversationId,
   }, {
     ...(options.transaction ? { transaction: options.transaction } : {}),
     ...(options.emit === false ? { emit: false } : {}),
+    ...ownership,
+  });
+  return { completed: !!completed, reason: completed ? null : 'state_changed' };
+}
+
+async function completeManualAutomationStateForConversation(conversationId, options = {}) {
+  const numericConversationId = Number(conversationId);
+  if (!Number.isInteger(numericConversationId) || numericConversationId <= 0 || !db.ConversationAutomationState) {
+    return { completed: false, reason: 'invalid_scope' };
+  }
+  const state = await db.ConversationAutomationState.findOne({
+    where: { conversation_id: numericConversationId },
+    ...(options.transaction ? { transaction: options.transaction } : {}),
+  });
+  if (!state) return { completed: false, reason: 'state_not_found' };
+  const serialized = serializeAutomationState(state);
+  if (!serialized.manual_action_required || !['review', 'failed'].includes(serialized.status)) {
+    return { completed: false, reason: 'manual_action_not_pending' };
+  }
+
+  const ownership = serialized.execution_id
+    ? { expectedExecutionId: serialized.execution_id }
+    : (serialized.job_request_id ? { expectedJobRequestId: serialized.job_request_id } : {});
+  const completed = await conversationAutomationState.completeState({
+    clinicId: state.clinic_id,
+    conversationId: numericConversationId,
+  }, {
+    ...(options.transaction ? { transaction: options.transaction } : {}),
+    ...(options.emit === false ? { emit: false } : {}),
+    ...ownership,
   });
   return { completed: !!completed, reason: completed ? null : 'state_changed' };
 }
 
 module.exports = {
   completeAnsweredAutomationStateForConversation,
+  completeManualAutomationStateForConversation,
   emitAutomationResponseProcessing,
   findHumanReplyAfterMessage,
   getPendingReplyStatesByConversationIds,

@@ -78,6 +78,7 @@ test('normaliza conversaciones y combina pendientes con atención de automatizac
     }
     if (queryIndex === 2) {
       assert.match(sql, /automation\.system_notification/);
+      assert.match(sql, /automation\.persistent_alert/);
       assert.match(sql, /user_id = :userId/);
       assert.match(sql, /quickChatResponseMessageId/);
       assert.match(sql, /FlowExecutionsV2 execution/);
@@ -160,6 +161,7 @@ test('abrir una conversación actualiza solo la lectura del usuario', () => {
   assert.match(controller, /pending_automation_count = pendingState\?\.requiresAutomationAttention === true\s*\? Math\.max\(1, Number\(pendingState\?\.automationAttentionCount \|\| 0\)\)/);
   assert.match(controller, /exports\.resolveAutomationAttention = async/);
   assert.match(controller, /allUsers:\s*true/);
+  assert.match(controller, /completeManualAutomationStateForConversation\(conversationId\)/);
 });
 
 test('la resolución del servicio puede cerrar avisos del usuario y conversación indicados', async (t) => {
@@ -181,7 +183,10 @@ test('la resolución del servicio puede cerrar avisos del usuario y conversació
   });
   db.Notification.findAll = async ({ where }) => {
     assert.equal(where.userId, 44);
-    assert.equal(where.event, 'automation.system_notification');
+    assert.deepEqual(where.event[db.Sequelize.Op.in], [
+      'automation.system_notification',
+      'automation.persistent_alert',
+    ]);
     assert.equal(where.isRead, false);
     return [fakeNotification];
   };
@@ -215,7 +220,10 @@ test('una respuesta manual cierra el aviso para todos los usuarios de la convers
   });
   db.Notification.findAll = async ({ where }) => {
     assert.equal(where.userId, undefined);
-    assert.equal(where.event, 'automation.system_notification');
+    assert.deepEqual(where.event[db.Sequelize.Op.in], [
+      'automation.system_notification',
+      'automation.persistent_alert',
+    ]);
     assert.equal(where.isRead, false);
     return [fakeNotification];
   };

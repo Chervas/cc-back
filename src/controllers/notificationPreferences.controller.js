@@ -1,6 +1,12 @@
 'use strict';
 
-const { NotificationPreference } = require('../../models');
+const {
+  NotificationPreference,
+  UserNotificationPresentationPreference,
+} = require('../../models');
+const {
+  USER_NOTIFICATION_PRESENTATION_PREFERENCES,
+} = require('../config/notifications.config');
 const {
   NOTIFICATION_CATEGORIES,
   NOTIFICATION_EVENTS,
@@ -115,4 +121,56 @@ exports.updatePreferences = async (req, res) => {
     console.error('Error updating notification preferences:', error);
     res.status(500).json({ message: 'No se pudieron actualizar las preferencias' });
   }
+};
+
+function buildPresentationPreferences(rows) {
+  const values = new Map(rows.map((row) => [row.preferenceKey, Boolean(row.enabled)]));
+  return USER_NOTIFICATION_PRESENTATION_PREFERENCES.map((definition) => ({
+    key: definition.key,
+    label: definition.label,
+    description: definition.description,
+    enabled: values.has(definition.key)
+      ? values.get(definition.key)
+      : definition.defaultEnabled,
+  }));
+}
+
+exports.getPresentationPreferences = async (req, res) => {
+  try {
+    const userId = Number(req.userData?.userId);
+    const rows = await UserNotificationPresentationPreference.findAll({ where: { userId } });
+    res.json({ preferences: buildPresentationPreferences(rows) });
+  } catch (error) {
+    console.error('Error fetching notification presentation preferences:', error);
+    res.status(500).json({ message: 'No se pudieron obtener las preferencias de avisos laterales' });
+  }
+};
+
+exports.updatePresentationPreferences = async (req, res) => {
+  try {
+    const userId = Number(req.userData?.userId);
+    const { key, enabled } = req.body || {};
+    const definition = USER_NOTIFICATION_PRESENTATION_PREFERENCES.find((item) => item.key === key);
+    if (!definition || typeof enabled !== 'boolean') {
+      return res.status(400).json({ message: 'Preferencia de aviso lateral no válida' });
+    }
+
+    const [preference] = await UserNotificationPresentationPreference.findOrCreate({
+      where: { userId, preferenceKey: key },
+      defaults: { enabled },
+    });
+    if (Boolean(preference.enabled) !== enabled) {
+      await preference.update({ enabled });
+    }
+
+    const rows = await UserNotificationPresentationPreference.findAll({ where: { userId } });
+    return res.json({ preferences: buildPresentationPreferences(rows) });
+  } catch (error) {
+    console.error('Error updating notification presentation preferences:', error);
+    return res.status(500).json({ message: 'No se pudo actualizar la preferencia de aviso lateral' });
+  }
+};
+
+exports._test = {
+  buildPresentationPreferences,
 };

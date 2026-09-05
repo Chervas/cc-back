@@ -193,6 +193,25 @@ function collectContextIds(execution) {
   return ids;
 }
 
+function buildInboundAutomationStateReset(execution) {
+  const context = execution?.context && typeof execution.context === 'object'
+    ? execution.context
+    : {};
+  return {
+    appointmentId: collectContextIds(execution).appointment_id,
+    appointmentStatus: cleanString(
+      getByPath(context, 'appointment.estado')
+      || getByPath(context, 'appointment.status')
+    ),
+    intent: null,
+    possibleUrgency: false,
+    needsResponse: false,
+    manualActionRequired: false,
+    failureCode: null,
+    completedAt: null,
+  };
+}
+
 function getWaitResponseNode(execution) {
   const nodeId = cleanString(execution?.current_node_id);
   if (!nodeId) return null;
@@ -806,9 +825,7 @@ async function scheduleBufferedInboundResponse({
       deadlineAt: waitUntil,
       executionId: lockedExecution.id,
       jobRequestId: scheduledResumeJob?.id || null,
-      manualActionRequired: false,
-      failureCode: null,
-      completedAt: null,
+      ...buildInboundAutomationStateReset(lockedExecution),
     }, { transaction, emit: false });
 
     outcome = {
@@ -1000,9 +1017,7 @@ async function enqueueInboundResponseResume({
           deadlineAt: null,
           executionId: execution.id,
           jobRequestId: job.id,
-          manualActionRequired: false,
-          failureCode: null,
-          completedAt: null,
+          ...buildInboundAutomationStateReset(execution),
         });
       }
     } catch (error) {
@@ -1195,4 +1210,5 @@ async function enqueueInboundFormSubmissionResume({
 module.exports = {
   enqueueInboundResponseResume,
   enqueueInboundFormSubmissionResume,
+  _buildInboundAutomationStateReset: buildInboundAutomationStateReset,
 };

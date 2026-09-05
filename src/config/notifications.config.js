@@ -138,13 +138,13 @@ const NOTIFICATION_EVENTS = [
   {
     event: 'email_bounces_7d',
     category: 'system',
-    label: 'Email: rebotes SES',
+    label: 'Email: correos no entregados',
     level: 'warning'
   },
   {
     event: 'email_active_suppressions',
     category: 'system',
-    label: 'Email: supresiones activas',
+    label: 'Email: direcciones bloqueadas',
     level: 'warning'
   },
   {
@@ -226,6 +226,21 @@ const NOTIFICATION_ROLE_GROUPS = [
   }
 ];
 
+const USER_NOTIFICATION_PRESENTATION_PREFERENCES = Object.freeze([
+  {
+    key: 'automation.appointment_data.confirmed_with_reply',
+    label: 'Confirmación con pregunta o comentario',
+    description: 'Muestra un aviso lateral cuando el paciente confirma lo solicitado por una automatización de cita y añade algo que debe revisar la clínica.',
+    defaultEnabled: true,
+  },
+  {
+    key: 'automation.appointment_data.response_needs_human',
+    label: 'Respuesta que necesita atención',
+    description: 'Muestra un aviso lateral cuando el mensaje requiere intervención humana y no contiene una confirmación clara.',
+    defaultEnabled: true,
+  },
+]);
+
 const DEFAULT_NOTIFICATION_PREFERENCES = [
   { role: 'personaldeclinica', subrole: 'Doctores', event: 'ads.sync_error', enabled: true },
   { role: 'personaldeclinica', subrole: 'Doctores', event: 'ads.new_lead', enabled: true },
@@ -288,5 +303,6 @@ module.exports = {
   NOTIFICATION_CATEGORIES,
   NOTIFICATION_EVENTS,
   NOTIFICATION_ROLE_GROUPS,
-  DEFAULT_NOTIFICATION_PREFERENCES
+  DEFAULT_NOTIFICATION_PREFERENCES,
+  USER_NOTIFICATION_PRESENTATION_PREFERENCES,
 };

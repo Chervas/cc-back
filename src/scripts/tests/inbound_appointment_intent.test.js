@@ -14,9 +14,13 @@ const conversationAutomationState = require('../../services/conversationAutomati
 const aiOrchestrator = require('../../services/aiOrchestrator.service');
 const {
   completeAnsweredAutomationStateForConversation,
+  completeManualAutomationStateForConversation,
 } = require('../../services/conversationPendingReply.service');
 const automationDefaults = require('../../services/automationDefaults.service');
 const automationsController = require('../../controllers/automationsV2.controller');
+const {
+  cloneConfirmAppointmentPresetConfig,
+} = require('../../lib/automation-intent-contract');
 const {
   BENIGN_ACKNOWLEDGEMENT_EXIT_KEY,
   buildMessageReceivedTemplateNodes,
@@ -93,6 +97,23 @@ async function testManualReplyOnlyCompletesResolvedPendingQuestion() {
     await state.update({
       status: 'review',
       stage: 'review',
+      appointment_status: 'recordatorio_confirmado',
+      intent: 'pregunta',
+      needs_response: true,
+      manual_action_required: true,
+    }, { transaction });
+    const answeredQuestion = await completeAnsweredAutomationStateForConversation(conversation.id, {
+      transaction,
+      emit: false,
+    });
+    assert.equal(answeredQuestion.completed, true);
+    await state.reload({ transaction });
+    assert.equal(state.status, 'completed');
+    assert.equal(state.manual_action_required, false);
+
+    await state.update({
+      status: 'review',
+      stage: 'review',
       appointment_status: 'cambio_solicitado',
       intent: 'solicitar_cambio_cita',
       needs_response: true,
@@ -107,6 +128,15 @@ async function testManualReplyOnlyCompletesResolvedPendingQuestion() {
     await state.reload({ transaction });
     assert.equal(state.status, 'review');
     assert.equal(state.manual_action_required, true);
+
+    const explicitlyResolved = await completeManualAutomationStateForConversation(conversation.id, {
+      transaction,
+      emit: false,
+    });
+    assert.equal(explicitlyResolved.completed, true);
+    await state.reload({ transaction });
+    assert.equal(state.status, 'completed');
+    assert.equal(state.manual_action_required, false);
   } finally {
     await transaction.rollback();
   }
@@ -228,29 +258,44 @@ async function testCanonicalIntentRunsThroughTheRealAiNode() {
   const aiNode = buildMessageReceivedTemplateNodes()
     .find((node) => node.type === 'condition/ai_analysis');
   assert.ok(aiNode, 'the canonical graph must contain an AI analysis node');
-
-  const deterministic = await flowEngine._processNode(
-    aiNode,
-    contextWithConversation('Buenos dias, si confirmo la asistencia'),
-    { simulation: true }
-  );
-  assert.equal(deterministic.kind, 'success');
-  assert.equal(deterministic.output.intencion_principal, 'confirmar_cita');
-  assert.equal(deterministic.output.accion_inequivoca, true);
-  assert.equal(deterministic.next_node_id, aiNode.outputs.on_success);
-
-  const contextual = await flowEngine._processNode(
-    aiNode,
-    contextWithConversation('Hola, gracias por el recordatorio. Mañana estaré allí.'),
-    { simulation: true }
-  );
-  assert.equal(contextual.kind, 'success');
-  assert.equal(contextual.output.intencion_principal, 'confirmar_cita');
-  assert.equal(contextual.output.accion_inequivoca, true);
-  assert.equal(contextual.next_node_id, aiNode.outputs.on_success);
+  let calls = 0;
+  const originalAnalyzeStructured = aiOrchestrator.analyzeStructured;
+  aiOrchestrator.analyzeStructured = async () => {
+    calls += 1;
+    return {
+      intencion_principal: 'confirmar_cita',
+      intencion_secundaria: 'ninguna',
+      confianza_intencion_principal: 0.97,
+      posible_urgencia: false,
+      confianza_posible_urgencia: 0.98,
+      necesita_respuesta: false,
+      confianza_necesita_respuesta: 0.96,
+      motivo: 'El paciente confirma la asistencia.',
+      _ai_provider: 'bedrock_test',
+    };
+  };
+  try {
+    for (const reply of [
+      'Buenos dias, si confirmo la asistencia',
+      'Hola, gracias por el recordatorio. Mañana estaré allí.',
+    ]) {
+      const result = await flowEngine._processNode(
+        aiNode,
+        contextWithConversation(reply),
+        { simulation: false }
+      );
+      assert.equal(result.kind, 'success');
+      assert.equal(result.output.intencion_principal, 'confirmar_cita');
+      assert.equal(result.output._ai_provider, 'bedrock_test');
+      assert.equal(result.next_node_id, aiNode.outputs.on_success);
+    }
+  } finally {
+    aiOrchestrator.analyzeStructured = originalAnalyzeStructured;
+  }
+  assert.equal(calls, 2);
 }
 
-function testAiRoutingUsesCanonicalContract() {
+function testAiRoutingKeepsPresetSemantics() {
   const node = { outputs: { on_success: 'N-success', on_fail: 'N-fail' } };
   assert.equal(
     flowEngine._resolveAiAnalysisNextNode(node, 'classify_intent', {
@@ -258,47 +303,173 @@ function testAiRoutingUsesCanonicalContract() {
     }),
     'N-success'
   );
+  assert.equal(
+    flowEngine._resolveAiAnalysisNextNode(node, 'confirm_appointment', {
+      decision: 'confirmado',
+    }),
+    'N-success'
+  );
+  for (const decision of ['no_confirmado', 'dudas', 'incongruente', null]) {
+    assert.equal(
+      flowEngine._resolveAiAnalysisNextNode(node, 'confirm_appointment', { decision }),
+      'N-fail',
+      String(decision),
+    );
+  }
+  const structuredNode = {
+    ...node,
+    config: {
+      preset_key: 'confirm_appointment',
+      preset_contract_version: 2,
+    },
+  };
+  assert.equal(
+    flowEngine._resolveAiAnalysisNextNode(structuredNode, 'confirm_appointment', {
+      confirma_asistencia: false,
+      requiere_respuesta: true,
+    }),
+    'N-success',
+  );
 }
 
-async function testRetiredAppointmentPresetsAreNeverExecutable() {
+async function testBinaryConfirmationPresetIsExecutable() {
   const canonicalNode = buildMessageReceivedTemplateNodes()
     .find((node) => node.type === 'condition/ai_analysis');
-  for (const presetKey of ['confirm_appointment', 'appointment_unconfirmed_reply']) {
-    const retiredNode = {
-      ...canonicalNode,
-      config: { ...canonicalNode.config, preset_key: presetKey },
+  const node = {
+    ...canonicalNode,
+    config: cloneConfirmAppointmentPresetConfig({ mode: 'auto', max_tokens: 700 }),
+    outputs: { on_success: 'N-success', on_fail: 'N-fail' },
+  };
+  const originalAnalyzeStructured = aiOrchestrator.analyzeStructured;
+  try {
+    aiOrchestrator.analyzeStructured = async () => ({
+      confirma_asistencia: true,
+      confianza_confirma_asistencia: 0.97,
+      requiere_respuesta: false,
+      confianza_requiere_respuesta: 0.96,
+      motivo: 'Confirmación expresa.',
+      confianza_motivo: 0.95,
+    });
+    const confirmed = await flowEngine._processNode(
+      node,
+      contextWithConversation('Sí, confirmo.'),
+      { simulation: false },
+    );
+    assert.equal(confirmed.next_node_id, 'N-success');
+    assert.equal(confirmed.output.confirma_asistencia, true);
+    assert.equal(confirmed.output.requiere_respuesta, false);
+
+    aiOrchestrator.analyzeStructured = async () => ({
+      confirma_asistencia: false,
+      confianza_confirma_asistencia: 0.91,
+      requiere_respuesta: true,
+      confianza_requiere_respuesta: 0.94,
+      motivo: 'El paciente pregunta sin confirmar.',
+      confianza_motivo: 0.9,
+    });
+    const doubts = await flowEngine._processNode(
+      node,
+      contextWithConversation('¿A qué hora era?'),
+      { simulation: false },
+    );
+    assert.equal(doubts.next_node_id, 'N-success');
+    assert.equal(doubts.output.confirma_asistencia, false);
+    assert.equal(doubts.output.requiere_respuesta, true);
+
+    aiOrchestrator.analyzeStructured = async () => {
+      const error = new Error('provider timeout');
+      error.code = 'bedrock_timeout';
+      throw error;
     };
     await assert.rejects(
       flowEngine._processNode(
-        retiredNode,
-        contextWithConversation('Confirmado'),
-        { simulation: true },
+        node,
+        contextWithConversation('No sé todavía.'),
+        { simulation: false },
       ),
-      new RegExp(`retired_ai_preset_not_supported:${presetKey}`),
+      /provider timeout/,
     );
+  } finally {
+    aiOrchestrator.analyzeStructured = originalAnalyzeStructured;
   }
+
+  const legacyNode = {
+    ...node,
+    config: {
+      preset_key: 'confirm_appointment',
+      instruction: 'Contrato binario histórico',
+      context_sources: [{ key: 'conversation_today', path: '{{conversation_today}}' }],
+      output_fields: [
+        { name: 'decision', type: 'string', description: 'Decisión histórica' },
+        { name: 'confianza', type: 'number', description: 'Confianza histórica' },
+        { name: 'motivo', type: 'string', description: 'Motivo histórico' },
+      ],
+    },
+  };
+  let providerCalled = false;
+  aiOrchestrator.analyzeStructured = async () => {
+    providerCalled = true;
+    throw new Error('provider must not be called for a positive reaction');
+  };
+  const reactionContext = contextWithConversation('');
+  reactionContext.last_response_context = {
+    response_message_type: 'reaction',
+    reaction_emoji: '👍',
+    listened_message_preview: '¿Nos confirmas tu cita?',
+  };
+  try {
+    const reaction = await flowEngine._processNode(legacyNode, reactionContext, { simulation: false });
+    assert.equal(reaction.next_node_id, 'N-success');
+    assert.equal(reaction.output.decision, 'confirmado');
+    assert.equal(providerCalled, false);
+  } finally {
+    aiOrchestrator.analyzeStructured = originalAnalyzeStructured;
+  }
+
+  const retiredNode = {
+    ...legacyNode,
+    config: { ...legacyNode.config, preset_key: 'appointment_unconfirmed_reply' },
+  };
+  await assert.rejects(
+    flowEngine._processNode(
+      retiredNode,
+      contextWithConversation('Confirmado'),
+      { simulation: true },
+    ),
+    /retired_ai_preset_not_supported:appointment_unconfirmed_reply/,
+  );
 }
 
-async function testRetiredAppointmentPresetsCannotBePublished() {
-  for (const presetKey of ['confirm_appointment', 'appointment_unconfirmed_reply']) {
-    const nodes = buildMessageReceivedTemplateNodes();
-    const aiNode = nodes.find((node) => node.type === 'condition/ai_analysis');
-    aiNode.config = { ...aiNode.config, preset_key: presetKey };
-    const validation = await automationsController.validateFlowPayloadForInternalUse({
-      entry_node_id: 'N1',
-      trigger_type: 'message_received',
-      nodes,
-    });
-    assert.equal(validation.ok, false);
-    assert.equal(
-      validation.errors.some((error) => (
-        error.code === 'node_config_retired_preset'
-        && error.details?.value === presetKey
-      )),
-      true,
-      presetKey,
-    );
-  }
+async function testOnlyObsoleteAppointmentPresetIsRejectedOnPublish() {
+  const supportedNodes = buildMessageReceivedTemplateNodes();
+  const supportedAiNode = supportedNodes.find((node) => node.type === 'condition/ai_analysis');
+  supportedAiNode.config = cloneConfirmAppointmentPresetConfig({ mode: 'auto', max_tokens: 700 });
+  const supported = await automationsController.validateFlowPayloadForInternalUse({
+    entry_node_id: 'N1',
+    trigger_type: 'message_received',
+    nodes: supportedNodes,
+  });
+  assert.equal(supported.ok, true, JSON.stringify(supported.errors));
+
+  const retiredNodes = buildMessageReceivedTemplateNodes();
+  const retiredAiNode = retiredNodes.find((node) => node.type === 'condition/ai_analysis');
+  retiredAiNode.config = {
+    ...retiredAiNode.config,
+    preset_key: 'appointment_unconfirmed_reply',
+  };
+  const retired = await automationsController.validateFlowPayloadForInternalUse({
+    entry_node_id: 'N1',
+    trigger_type: 'message_received',
+    nodes: retiredNodes,
+  });
+  assert.equal(retired.ok, false);
+  assert.equal(
+    retired.errors.some((error) => (
+      error.code === 'node_config_retired_preset'
+      && error.details?.value === 'appointment_unconfirmed_reply'
+    )),
+    true,
+  );
 }
 
 function testHardCutOnlyRebindsStructurallyCompatibleExecutions() {
@@ -732,7 +903,7 @@ async function testHumanAppointmentChangeWinsWhileAiIsAnalyzing() {
     };
     const result = await flowEngine._handleChangeStatus({
       id: 'N-change',
-      config: { target_entity: 'appointment', new_status: 'cancelada' },
+      config: { target_entity: 'appointment', new_status: 'cambio_solicitado' },
       outputs: { on_success: 'N-auto-reply', on_fail: 'N-human-review' },
     }, context, {
       execution: {
@@ -747,8 +918,10 @@ async function testHumanAppointmentChangeWinsWhileAiIsAnalyzing() {
     assert.equal(result.output.skipped, true);
     assert.equal(result.output.reason, 'appointment_changed_during_analysis');
     assert.equal(result.output.new_status, 'reprogramada');
-    assert.equal(result.next_node_id, 'N-human-review');
-    assert.equal(automationStatePatch.manualActionRequired, true);
+    assert.equal(result.output.resolved_externally, true);
+    assert.equal(result.next_node_id, null);
+    assert.equal(automationStatePatch.manualActionRequired, false);
+    assert.equal(automationStatePatch.needsResponse, false);
     assert.equal(automationStatePatch.appointmentStatus, 'reprogramada');
   } finally {
     db.CitaPaciente.findByPk = originalFindByPk;
@@ -1191,7 +1364,10 @@ function testAfterHoursConversationMatrix() {
     contextWithConversation('Quiero cambiar la cita al martes.')
   ));
   assert.deepEqual(statusChanges(reschedule), ['cambio_solicitado']);
-  assert.match(replyTexts(reschedule)[0], /no recibiras mas recordatorios/i);
+  assert.equal(
+    replyTexts(reschedule)[0],
+    'Gracias por avisarnos. Revisamos la agenda y te decimos la disponibilidad cuanto antes.',
+  );
   assert.equal(notifications(reschedule).length, 1);
 
   const urgency = simulateAfterHoursGraph(flowEngine.buildDeterministicClassifyIntentOutput(
@@ -1244,6 +1420,81 @@ function testUnchangedCatalogPropagationDoesNotCreateAnotherVersion() {
   }, desired, false), false);
 }
 
+function testAppliedAppointmentIntentClosesTheAutomaticAction() {
+  const cancelled = {
+    intencion_principal: 'cancelar_cita',
+  };
+  const appliedContext = {
+    outputs: {
+      N40: {
+        status: 'success',
+        target_type: 'appointment',
+        new_status: 'cancelada',
+      },
+    },
+  };
+  assert.equal(flowEngine.hasAppliedAppointmentIntent(appliedContext, cancelled), true);
+  assert.equal(flowEngine.hasAppliedAppointmentIntent({
+    outputs: {
+      N40: {
+        status: 'success',
+        target_type: 'appointment',
+        new_status: 'recordatorio_confirmado',
+      },
+    },
+  }, cancelled), false);
+  assert.equal(flowEngine.hasAppliedAppointmentIntent({
+    outputs: {
+      N40: {
+        status: 'success',
+        target_type: 'appointment',
+        new_status: 'cancelada',
+        skipped: true,
+      },
+    },
+  }, cancelled), false);
+}
+
+function testExternallyResolvedChangeRequestClosesTheAutomaticAction() {
+  const changeRequest = { intencion_principal: 'solicitar_cambio_cita' };
+  const externallyResolvedContext = {
+    outputs: {
+      N50: {
+        status: 'success',
+        target_type: 'appointment',
+        requested_status: 'cambio_solicitado',
+        new_status: 'reprogramada',
+        skipped: true,
+        resolved_externally: true,
+      },
+    },
+  };
+  assert.equal(
+    flowEngine.hasExternallyResolvedAppointmentIntent(externallyResolvedContext, changeRequest),
+    true,
+  );
+  assert.equal(
+    flowEngine.hasExternallyResolvedAppointmentIntent(externallyResolvedContext, { intencion_principal: 'cancelar_cita' }),
+    false,
+  );
+  assert.equal(
+    flowEngine.isAppointmentIntentResolvedByConcurrentChange({
+      skippedReason: 'appointment_changed_during_analysis',
+      requestedStatus: 'cambio_solicitado',
+      currentStatus: 'reprogramada',
+    }),
+    true,
+  );
+  assert.equal(
+    flowEngine.isAppointmentIntentResolvedByConcurrentChange({
+      skippedReason: 'appointment_changed_during_analysis',
+      requestedStatus: 'cancelada',
+      currentStatus: 'reprogramada',
+    }),
+    false,
+  );
+}
+
 async function run() {
   testConfirmationKeepsSecondaryQuestion();
   await testManualReplyOnlyCompletesResolvedPendingQuestion();
@@ -1251,9 +1502,9 @@ async function run() {
   testBufferedAcknowledgementUsesTheListenedPromptOnly();
   await testAiFallbackNeverReceivesHistoricalPatientMessages();
   await testCanonicalIntentRunsThroughTheRealAiNode();
-  testAiRoutingUsesCanonicalContract();
-  await testRetiredAppointmentPresetsAreNeverExecutable();
-  await testRetiredAppointmentPresetsCannotBePublished();
+  testAiRoutingKeepsPresetSemantics();
+  await testBinaryConfirmationPresetIsExecutable();
+  await testOnlyObsoleteAppointmentPresetIsRejectedOnPublish();
   testHardCutOnlyRebindsStructurallyCompatibleExecutions();
   testRescheduleBecomesOperatorPendingAction();
   testRescheduleWinsOverGenericCannotAttend();
@@ -1283,6 +1534,8 @@ async function run() {
   testDefaultAfterHoursGraphIsClosedAndSafeByDefault();
   testAfterHoursConversationMatrix();
   testUnchangedCatalogPropagationDoesNotCreateAnotherVersion();
+  testAppliedAppointmentIntentClosesTheAutomaticAction();
+  testExternallyResolvedChangeRequestClosesTheAutomaticAction();
   console.log('inbound_appointment_intent.test.js OK');
 }
 

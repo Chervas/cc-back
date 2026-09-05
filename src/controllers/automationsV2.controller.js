@@ -28,7 +28,10 @@ const {
 } = require('../services/googleLocalLinks.service');
 const { getIO } = require('../services/socket.service');
 const { CITA_STATUS_VALUES, LEAD_STATUS_VALUES } = require('../lib/status-catalog');
-const { CLASSIFY_INTENT_PRESET_CONFIG } = require('../lib/automation-intent-contract');
+const {
+  CLASSIFY_INTENT_PRESET_CONFIG,
+  CONFIRM_APPOINTMENT_PRESET_CONFIG,
+} = require('../lib/automation-intent-contract');
 const { buildConversationContext } = require('../lib/automation-conversation-context');
 const { SUBROLES_CLINICA } = require('../lib/role-helpers');
 const {
@@ -77,9 +80,10 @@ const FORM_MATCH_MODE_OPTIONS = ['url_contains', 'url_equals', 'form_id', 'selec
 const FIELD_CHECK_LEFT_REF_SOURCES = ['node_output', 'trigger_data', 'context', 'manual'];
 const FIELD_CHECK_VALUE_TYPES = ['string', 'number', 'boolean'];
 const FIELD_CHECK_OPERATOR_OPTIONS = ['equals', 'not_equals', 'contains', 'greater_than', 'greater_than_or_equals', 'less_than', 'exists'];
-const FIELD_CHECK_MODE_OPTIONS = ['simple', 'appointment_booking_timing', 'lead_contact_state'];
+const FIELD_CHECK_MODE_OPTIONS = ['simple', 'multi_branch', 'appointment_booking_timing', 'lead_contact_state'];
 const FIELD_CHECK_SWITCH_TYPE_OPTIONS = ['appointment_booking'];
 const FIELD_CHECK_APPOINTMENT_WINDOW_OPTIONS = ['same_day', 'day_before', 'more_than_day_before'];
+const FIELD_CHECK_LOGIC_CONNECTORS = ['and', 'or'];
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
 const FIELD_CHECK_OPERATOR_TYPE_COMPAT = {
   string: ['equals', 'not_equals', 'contains', 'exists'],
@@ -321,22 +325,106 @@ function normalizeFieldCheckSwitchRules(rawRules) {
   return normalized;
 }
 
+function normalizeFieldCheckComparisonRules(config) {
+  const legacyRule = {
+    id: 'rule_1',
+    connector: null,
+    left_ref: isObject(config?.left_ref) ? config.left_ref : {},
+    operator: cleanString(config?.operator) || 'equals',
+    right_value: config?.right_value,
+  };
+  const rawRules = Array.isArray(config?.comparison_rules) && config.comparison_rules.length
+    ? config.comparison_rules
+    : [legacyRule];
+  const seen = new Set();
+  return rawRules.map((rawRule, index) => {
+    const source = isObject(rawRule) ? rawRule : {};
+    let id = cleanString(source.id) || `rule_${index + 1}`;
+    if (!/^rule_[a-zA-Z0-9_-]+$/.test(id) || seen.has(id)) id = `rule_${index + 1}`;
+    while (seen.has(id)) id = `${id}_${index + 1}`;
+    seen.add(id);
+    const connector = cleanString(source.connector)?.toLowerCase();
+    return {
+      id,
+      connector: index === 0 ? null : (connector || 'and'),
+      left_ref: isObject(source.left_ref) ? source.left_ref : (index === 0 ? legacyRule.left_ref : {}),
+      operator: cleanString(source.operator) || 'equals',
+      right_value: source.right_value,
+    };
+  });
+}
+
+function normalizeFieldCheckBranchRules(config) {
+  const fallbackRule = normalizeFieldCheckComparisonRules(config)[0] || {
+    left_ref: {},
+    operator: 'equals',
+    right_value: '',
+  };
+  const rawRules = Array.isArray(config?.branch_rules) && config.branch_rules.length
+    ? config.branch_rules
+    : [fallbackRule];
+  const seen = new Set();
+  return rawRules.map((rawRule, index) => {
+    const source = isObject(rawRule) ? rawRule : {};
+    let id = cleanString(source.id) || `branch_${index + 1}`;
+    if (!/^branch_[a-zA-Z0-9_-]+$/.test(id) || seen.has(id)) id = `branch_${index + 1}`;
+    while (seen.has(id)) id = `${id}_${index + 1}`;
+    seen.add(id);
+    const comparisonRules = normalizeFieldCheckComparisonRules({
+      comparison_rules: Array.isArray(source.comparison_rules) && source.comparison_rules.length
+        ? source.comparison_rules
+        : [{
+            id: 'rule_1',
+            connector: null,
+            left_ref: isObject(source.left_ref)
+              ? source.left_ref
+              : (index === 0 ? fallbackRule.left_ref : {}),
+            operator: cleanString(source.operator) || 'equals',
+            right_value: source.right_value,
+          }],
+    });
+    const primaryRule = comparisonRules[0] || fallbackRule;
+    return {
+      id,
+      label: cleanString(source.label),
+      comparison_rules: comparisonRules,
+      // Proyección de lectura para clientes anteriores a las ramas compuestas.
+      left_ref: primaryRule.left_ref,
+      operator: primaryRule.operator,
+      right_value: primaryRule.right_value,
+    };
+  });
+}
+
 function normalizeFieldCheckNode(rawNode) {
   if (!rawNode || cleanString(rawNode.type) !== 'condition/field_check') return rawNode;
   const config = isObject(rawNode.config) ? { ...rawNode.config } : {};
   const mode = cleanString(config.mode);
-  const normalizedMode = mode === 'appointment_booking_timing' ? 'appointment_booking_timing' : 'simple';
+  const normalizedMode = FIELD_CHECK_MODE_OPTIONS.includes(mode) ? mode : 'simple';
   const normalizedConfig = {
     ...config,
     mode: normalizedMode,
     switch_type: 'appointment_booking',
     switch_rules: normalizeFieldCheckSwitchRules(config.switch_rules),
   };
+  normalizedConfig.comparison_rules = normalizeFieldCheckComparisonRules(normalizedConfig);
+  normalizedConfig.branch_rules = normalizeFieldCheckBranchRules(normalizedConfig);
+  if (normalizedConfig.comparison_rules.length) {
+    const primaryRule = normalizedConfig.comparison_rules[0];
+    normalizedConfig.left_ref = primaryRule.left_ref;
+    normalizedConfig.operator = primaryRule.operator;
+    normalizedConfig.right_value = primaryRule.right_value;
+  }
 
   const sourceOutputs = isObject(rawNode.outputs) ? { ...rawNode.outputs } : {};
   const outputs = {};
   if (normalizedMode === 'appointment_booking_timing') {
     normalizedConfig.switch_rules.forEach((rule) => {
+      outputs[rule.id] = sourceOutputs[rule.id] ?? null;
+    });
+    outputs.on_else = sourceOutputs.on_else ?? null;
+  } else if (normalizedMode === 'multi_branch') {
+    normalizedConfig.branch_rules.forEach((rule) => {
       outputs[rule.id] = sourceOutputs[rule.id] ?? null;
     });
     outputs.on_else = sourceOutputs.on_else ?? null;
@@ -350,6 +438,16 @@ function normalizeFieldCheckNode(rawNode) {
         ...normalizedConfig.switch_rules.map((rule) => [rule.id, { label: rule.match_window }]),
         ['on_else', { label: 'Resto' }],
       ])
+    : normalizedMode === 'multi_branch'
+      ? Object.fromEntries([
+          ...normalizedConfig.branch_rules.map((rule) => [rule.id, {
+            label: cleanString(rule.label)
+              || cleanString(rule.right_value)
+              || cleanString(rule.left_ref?.label)
+              || rule.id,
+          }]),
+          ['on_else', { label: cleanString(normalizedConfig.fallback_label) || 'Ninguna coincide' }],
+        ])
     : undefined;
 
   return {
@@ -1140,7 +1238,7 @@ const NODE_TYPES_V2 = [
     category: 'action',
     label: 'Notificación del sistema',
     description: 'Envía una notificación interna a un usuario concreto o a un rol interno como clínica, admin o agencia.',
-    output_keys: ['on_success', 'on_fail'],
+    output_keys: ['on_success'],
     runtime_status: 'real',
     default_config: {
       title: '',
@@ -1148,6 +1246,8 @@ const NODE_TYPES_V2 = [
       assignee_type: 'role',
       assignee_id: null,
       subrole: null,
+      display_mode: 'inbox',
+      alert_level: 'warning',
     },
     config_schema: [
       { key: 'title', label: 'Título', input_type: 'string', required: false },
@@ -1155,6 +1255,8 @@ const NODE_TYPES_V2 = [
       { key: 'assignee_type', label: 'Enviar a', input_type: 'select', required: true, options: ['user', 'role'] },
       { key: 'assignee_id', label: 'Usuario / rol', input_type: 'select', required: true },
       { key: 'subrole', label: 'Subrol (opcional)', input_type: 'select', required: false, options: [] },
+      { key: 'display_mode', label: 'Presentación', input_type: 'select', required: true, options: ['inbox', 'persistent_alert'] },
+      { key: 'alert_level', label: 'Severidad', input_type: 'select', required: true, options: ['warning', 'error'] },
     ],
   },
   {
@@ -1318,6 +1420,8 @@ const NODE_TYPES_V2 = [
       left_ref: { source: '', node_id: null, path: '', value_type: 'string', label: '' },
       operator: 'equals',
       right_value: '',
+      comparison_rules: [],
+      branch_rules: [],
       switch_type: 'appointment_booking',
       switch_rules: [],
     },
@@ -1920,6 +2024,17 @@ function collectUnsupportedNodeTypes(nodes) {
 }
 
 const AI_PRESET_CANONICAL_CONFIG = {
+  confirm_appointment: {
+    ...CONFIRM_APPOINTMENT_PRESET_CONFIG,
+    automatic_upgrade: false,
+    legacy_instructions: [
+      'Analiza la respuesta del paciente teniendo en cuenta el último mensaje enviado por la clínica. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Devuelve también confianza (0-1) y motivo breve.',
+      'Analiza la conversación de hoy entre clínica y paciente. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Ten en cuenta quién escribe cada mensaje y la hora. Devuelve también confianza (0-1) y motivo breve.',
+    ],
+    legacy_source_sets: [
+      ['{{last_prompt}}', '{{last_response}}'],
+    ],
+  },
   classify_intent: {
     ...CLASSIFY_INTENT_PRESET_CONFIG,
     legacy_instructions: [],
@@ -1941,7 +2056,6 @@ const AI_PRESET_CANONICAL_CONFIG = {
   },
 };
 const RETIRED_APPOINTMENT_AI_PRESET_KEYS = new Set([
-  'confirm_appointment',
   'appointment_unconfirmed_reply',
 ]);
 
@@ -1953,6 +2067,7 @@ function normalizeContextSourcePath(raw) {
 
 function shouldUpgradeAiPresetConfig(config, canonical) {
   if (!isObject(config) || !canonical) return false;
+  if (canonical.automatic_upgrade === false) return false;
 
   const instruction = cleanString(config.instruction);
   if (instruction && canonical.legacy_instructions.includes(instruction)) return true;
@@ -1983,12 +2098,18 @@ function normalizeAiPresetConfig(config) {
     preset_key: presetKey,
     instruction: canonical.instruction,
     context_sources: canonical.context_sources.map((source) => ({ ...source })),
-    output_fields: canonical.output_fields.map((field) => ({ ...field })),
+    output_fields: canonical.output_fields.map((field) => ({
+      ...field,
+      ...(Array.isArray(field.allowed_values)
+        ? { allowed_values: [...field.allowed_values] }
+        : {}),
+    })),
   };
 }
 
 const WAIT_RESPONSE_LISTENER_NODE_TYPES = new Set([
   'action/send_whatsapp',
+  'action/reply_message',
   'action/send_email',
   'action/request_review',
 ]);
@@ -3272,6 +3393,22 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
         )
       );
     }
+    const displayMode = cleanString(config.display_mode) || 'inbox';
+    if (!['inbox', 'persistent_alert'].includes(displayMode)) {
+      errors.push(buildValidationError(
+        'node_config_invalid',
+        `El nodo ${nodeId} requiere un modo de presentación válido`,
+        { node_id: nodeId, node_type: nodeType, key: 'display_mode', value: displayMode }
+      ));
+    }
+    const alertLevel = cleanString(config.alert_level) || 'warning';
+    if (!['warning', 'error'].includes(alertLevel)) {
+      errors.push(buildValidationError(
+        'node_config_invalid',
+        `El nodo ${nodeId} requiere una severidad válida`,
+        { node_id: nodeId, node_type: nodeType, key: 'alert_level', value: alertLevel }
+      ));
+    }
   }
 
   if (nodeType === 'action/send_whatsapp') {
@@ -3935,6 +4072,119 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
           }
         )
       );
+    } else if (mode === 'multi_branch') {
+      const branchRules = normalizeFieldCheckBranchRules(config);
+      const outputs = isObject(node.outputs) ? node.outputs : {};
+
+      if (!branchRules.length) {
+        errors.push(buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere al menos una opción`,
+          { node_id: nodeId, node_type: nodeType, key: 'branch_rules' }
+        ));
+      }
+      if (branchRules.length > 7) {
+        errors.push(buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} no puede contener más de 7 opciones`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'branch_rules',
+            value: branchRules.length,
+            max: 7,
+          }
+        ));
+      }
+
+      branchRules.forEach((rule, index) => {
+        const keyPrefix = `branch_rules[${index}]`;
+        const comparisonRules = Array.isArray(rule.comparison_rules)
+          ? rule.comparison_rules
+          : [];
+        if (!comparisonRules.length) {
+          errors.push(buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} requiere al menos una condición en la opción ${index + 1}`,
+            { node_id: nodeId, node_type: nodeType, key: `${keyPrefix}.comparison_rules` }
+          ));
+        }
+        if (comparisonRules.length > 12) {
+          errors.push(buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} no puede contener más de 12 condiciones en la opción ${index + 1}`,
+            { node_id: nodeId, node_type: nodeType, key: `${keyPrefix}.comparison_rules`, max: 12 }
+          ));
+        }
+
+        comparisonRules.forEach((comparisonRule, comparisonIndex) => {
+          const comparisonKey = `${keyPrefix}.comparison_rules[${comparisonIndex}]`;
+          const leftRef = isObject(comparisonRule.left_ref) ? comparisonRule.left_ref : null;
+          const source = cleanString(leftRef?.source);
+          const valueType = cleanString(leftRef?.value_type) || 'string';
+          const operator = cleanString(comparisonRule.operator) || 'equals';
+
+          if (comparisonIndex > 0 && !FIELD_CHECK_LOGIC_CONNECTORS.includes(comparisonRule.connector)) {
+            errors.push(buildValidationError(
+              'node_config_invalid',
+              `El nodo ${nodeId} requiere un conector Y/O válido en la condición ${comparisonIndex + 1} de la opción ${index + 1}`,
+              { node_id: nodeId, node_type: nodeType, key: `${comparisonKey}.connector` }
+            ));
+          }
+          if (!leftRef || !FIELD_CHECK_LEFT_REF_SOURCES.includes(source) || !cleanString(leftRef?.path)) {
+            errors.push(buildValidationError(
+              'node_config_invalid',
+              `El nodo ${nodeId} requiere un campo válido en la condición ${comparisonIndex + 1} de la opción ${index + 1}`,
+              { node_id: nodeId, node_type: nodeType, key: `${comparisonKey}.left_ref` }
+            ));
+          } else if (source === 'node_output') {
+            const refNodeId = cleanString(leftRef.node_id);
+            if (!refNodeId || !nodeMap.has(refNodeId)) {
+              errors.push(buildValidationError(
+                'node_config_invalid',
+                `El nodo ${nodeId} referencia un nodo inexistente en la condición ${comparisonIndex + 1} de la opción ${index + 1}`,
+                { node_id: nodeId, node_type: nodeType, key: `${comparisonKey}.left_ref.node_id`, value: refNodeId || null }
+              ));
+            }
+          }
+          if (!FIELD_CHECK_VALUE_TYPES.includes(valueType)) {
+            errors.push(buildValidationError(
+              'node_config_invalid',
+              `El nodo ${nodeId} usa un tipo de campo inválido en la condición ${comparisonIndex + 1} de la opción ${index + 1}`,
+              { node_id: nodeId, node_type: nodeType, key: `${comparisonKey}.left_ref.value_type`, value: valueType }
+            ));
+          }
+          if (!FIELD_CHECK_OPERATOR_OPTIONS.includes(operator) || !isOperatorCompatible(operator, valueType)) {
+            errors.push(buildValidationError(
+              'node_config_invalid',
+              `El nodo ${nodeId} usa un operador inválido en la condición ${comparisonIndex + 1} de la opción ${index + 1}`,
+              { node_id: nodeId, node_type: nodeType, key: `${comparisonKey}.operator`, value: operator }
+            ));
+          }
+          if (operator !== 'exists' && (comparisonRule.right_value === undefined || comparisonRule.right_value === null || comparisonRule.right_value === '')) {
+            errors.push(buildValidationError(
+              'node_config_invalid',
+              `El nodo ${nodeId} requiere un valor en la condición ${comparisonIndex + 1} de la opción ${index + 1}`,
+              { node_id: nodeId, node_type: nodeType, key: `${comparisonKey}.right_value` }
+            ));
+          }
+        });
+        if (!(rule.id in outputs)) {
+          errors.push(buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} no tiene salida para la opción ${index + 1}`,
+            { node_id: nodeId, node_type: nodeType, key: `outputs.${rule.id}` }
+          ));
+        }
+      });
+
+      if (!('on_else' in outputs)) {
+        errors.push(buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere la salida 'Ninguna coincide'`,
+          { node_id: nodeId, node_type: nodeType, key: 'outputs.on_else' }
+        ));
+      }
     } else if (mode === 'appointment_booking_timing') {
       const switchType = cleanString(config?.switch_type) || 'appointment_booking';
       const switchRules = normalizeFieldCheckSwitchRules(config?.switch_rules);
@@ -4154,6 +4404,74 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
         }
       }
 
+      const comparisonRules = normalizeFieldCheckComparisonRules(config);
+      if (comparisonRules.length > 12) {
+        errors.push(buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} no puede contener más de 12 condiciones`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'comparison_rules',
+            value: comparisonRules.length,
+            max: 12,
+          }
+        ));
+      }
+      comparisonRules.slice(1).forEach((rule, index) => {
+        const ruleIndex = index + 1;
+        const keyPrefix = `comparison_rules[${ruleIndex}]`;
+        const leftRef = isObject(rule.left_ref) ? rule.left_ref : null;
+        const source = cleanString(leftRef?.source);
+        const valueType = cleanString(leftRef?.value_type) || 'string';
+        const operator = cleanString(rule.operator) || 'equals';
+
+        if (!FIELD_CHECK_LOGIC_CONNECTORS.includes(rule.connector)) {
+          errors.push(buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} requiere un conector Y/O válido en la regla ${ruleIndex + 1}`,
+            { node_id: nodeId, node_type: nodeType, key: `${keyPrefix}.connector` }
+          ));
+        }
+        if (!leftRef || !FIELD_CHECK_LEFT_REF_SOURCES.includes(source) || !cleanString(leftRef?.path)) {
+          errors.push(buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} requiere un campo válido en la regla ${ruleIndex + 1}`,
+            { node_id: nodeId, node_type: nodeType, key: `${keyPrefix}.left_ref` }
+          ));
+        } else if (source === 'node_output') {
+          const refNodeId = cleanString(leftRef.node_id);
+          if (!refNodeId || !nodeMap.has(refNodeId)) {
+            errors.push(buildValidationError(
+              'node_config_invalid',
+              `El nodo ${nodeId} referencia un nodo inexistente en la regla ${ruleIndex + 1}`,
+              { node_id: nodeId, node_type: nodeType, key: `${keyPrefix}.left_ref.node_id`, value: refNodeId || null }
+            ));
+          }
+        }
+        if (!FIELD_CHECK_VALUE_TYPES.includes(valueType)) {
+          errors.push(buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} usa un tipo de campo inválido en la regla ${ruleIndex + 1}`,
+            { node_id: nodeId, node_type: nodeType, key: `${keyPrefix}.left_ref.value_type`, value: valueType }
+          ));
+        }
+        if (!FIELD_CHECK_OPERATOR_OPTIONS.includes(operator) || !isOperatorCompatible(operator, valueType)) {
+          errors.push(buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} usa un operador inválido en la regla ${ruleIndex + 1}`,
+            { node_id: nodeId, node_type: nodeType, key: `${keyPrefix}.operator`, value: operator }
+          ));
+        }
+        if (operator !== 'exists' && (rule.right_value === undefined || rule.right_value === null || rule.right_value === '')) {
+          errors.push(buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} requiere un valor en la regla ${ruleIndex + 1}`,
+            { node_id: nodeId, node_type: nodeType, key: `${keyPrefix}.right_value` }
+          ));
+        }
+      });
+
       if (config.field !== undefined || config.value !== undefined) {
         errors.push(
           buildValidationError(
@@ -4216,6 +4534,49 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
           'node_config_invalid',
           `El nodo ${nodeId} requiere al menos un campo de salida válido (name, type, description)`,
           { node_id: nodeId, node_type: nodeType, key: 'output_fields' }
+        )
+      );
+    }
+    const outputNames = outputFields
+      .map((field) => cleanString(field?.name))
+      .filter(Boolean);
+    const duplicateOutputNames = outputNames.filter(
+      (name, index) => outputNames.indexOf(name) !== index
+    );
+    const invalidAllowedValues = outputFields.some((field) => {
+      if (field?.allowed_values === undefined) return false;
+      return !Array.isArray(field.allowed_values)
+        || field.allowed_values.length > 50
+        || field.allowed_values.some((value) => !cleanString(value) || cleanString(value).length > 80)
+        || (cleanString(field.type) !== 'string' && field.allowed_values.length > 0);
+    });
+    const invalidConfidenceFlags = outputFields.some(
+      (field) => field?.include_confidence !== undefined
+        && typeof field.include_confidence !== 'boolean'
+    );
+    const confidenceNameCollisions = outputFields
+      .filter((field) => field?.include_confidence === true && cleanString(field?.name))
+      .map((field) => `confianza_${cleanString(field.name)}`)
+      .filter((name) => outputNames.includes(name));
+    if (
+      duplicateOutputNames.length
+      || invalidAllowedValues
+      || invalidConfidenceFlags
+      || confidenceNameCollisions.length
+    ) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} contiene un contrato de salida IA inválido`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'output_fields',
+            duplicate_names: Array.from(new Set(duplicateOutputNames)),
+            confidence_name_collisions: confidenceNameCollisions,
+            invalid_allowed_values: invalidAllowedValues,
+            invalid_confidence_flags: invalidConfidenceFlags,
+          }
         )
       );
     }
