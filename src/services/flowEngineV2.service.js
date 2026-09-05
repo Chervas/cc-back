@@ -3,7 +3,7 @@
 const { Op } = require('sequelize');
 const db = require('../../models');
 const { getIO } = require('./socket.service');
-const { emitNotificationCreated } = require('./notificationsRealtime.service');
+const { emitNotificationCreated, emitNotificationUpdated } = require('./notificationsRealtime.service');
 const { queues } = require('./queue.service');
 const jobRequestsService = require('./jobRequests.service');
 const {
@@ -5120,6 +5120,8 @@ async function handleSendSystemNotification(node, context, runtime) {
   const presentationPreferenceKey = cleanString(
     resolveTemplateValue(config?.presentation_preference_key, notificationContext)
   ) || null;
+  const replacePreviousPersistentAlerts = displayMode === 'persistent_alert'
+    && resolveTemplateValue(config?.replace_previous_persistent_alerts, notificationContext) === true;
 
   const humanReply = quickChatConversationId && quickChatResponseMessageId
     ? await findHumanReplyAfterMessage(quickChatConversationId, quickChatResponseMessageId)
@@ -5148,6 +5150,35 @@ async function handleSendSystemNotification(node, context, runtime) {
     const dedupeKey = runtime?.execution?.id
       ? `automation:${runtime.execution.id}:${cleanString(node?.id)}:${userId}`
       : null;
+    let notificationsSuperseded = 0;
+    if (replacePreviousPersistentAlerts && dedupeKey) {
+      const previousAlerts = await Notification.findAll({
+        where: {
+          userId,
+          event: 'automation.persistent_alert',
+          isRead: false,
+          dedupeKey: {
+            [Op.like]: `automation:${runtime.execution.id}:%:${userId}`,
+            [Op.ne]: dedupeKey,
+          },
+        },
+      });
+      const supersededAt = new Date();
+      for (const previousAlert of previousAlerts) {
+        const previousData = previousAlert.get('data');
+        await previousAlert.update({
+          isRead: true,
+          readAt: supersededAt,
+          data: {
+            ...(previousData && typeof previousData === 'object' ? previousData : {}),
+            superseded_by_node_id: cleanString(node?.id),
+            superseded_at: supersededAt.toISOString(),
+          },
+        });
+        emitNotificationUpdated(previousAlert);
+        notificationsSuperseded += 1;
+      }
+    }
     const payload = {
       userId,
       role: roleCodes.length ? roleCodes.join(',') : '',
@@ -5198,6 +5229,9 @@ async function handleSendSystemNotification(node, context, runtime) {
       createdNotifications.push(notification);
     }
     resolvedNotifications.push(notification);
+    if (notificationsSuperseded) {
+      notification.setDataValue('_notificationsSuperseded', notificationsSuperseded);
+    }
   }
 
   return {
@@ -5208,6 +5242,10 @@ async function handleSendSystemNotification(node, context, runtime) {
       assignee_user_ids: userIds,
       notifications_created: createdNotifications.length,
       notifications_reused: resolvedNotifications.length - createdNotifications.length,
+      notifications_superseded: resolvedNotifications.reduce(
+        (total, notification) => total + Number(notification.getDataValue('_notificationsSuperseded') || 0),
+        0,
+      ),
       used_admin_fallback: usedAdminFallback,
       primary_link: primaryLink,
       quick_chat_conversation_id: quickChatConversationId,

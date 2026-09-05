@@ -53,6 +53,26 @@ async function main() {
     );
     assert.equal(rows[0].data?.requiresAcknowledgement, true);
 
+    const replacementNode = {
+      ...node,
+      id: 'QA_ALERT_REPLACEMENT',
+      config: {
+        ...node.config,
+        title: 'QA alerta persistente sustituta',
+        replace_previous_persistent_alerts: true,
+      },
+    };
+    const replacement = await flowEngine._processNode(replacementNode, context, runtime);
+    const superseded = await db.Notification.findOne({ where: { dedupeKey }, raw: true });
+    const replacementRow = await db.Notification.findOne({
+      where: { dedupeKey: `automation:${executionId}:QA_ALERT_REPLACEMENT:${userId}` },
+      raw: true,
+    });
+    assert.equal(replacement.output.notifications_superseded, 1);
+    assert.equal(superseded.isRead, 1);
+    assert.equal(superseded.data?.superseded_by_node_id, 'QA_ALERT_REPLACEMENT');
+    assert.equal(replacementRow.isRead, 0);
+
     const fallback = await flowEngine._processNode({
       ...node,
       id: 'QA_ALERT_FALLBACK',
@@ -96,7 +116,9 @@ async function main() {
     }
     console.log('system_notification_idempotency.test.js OK');
   } finally {
-    await db.Notification.destroy({ where: { dedupeKey } });
+    await db.Notification.destroy({
+      where: { dedupeKey: { [Op.like]: `automation:${executionId}:%` } },
+    });
     await db.Notification.destroy({
       where: { dedupeKey: { [Op.like]: `${fallbackDedupePrefix}%` } },
     });

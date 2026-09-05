@@ -175,6 +175,8 @@ async function main() {
     byId.get('N33').config.presentation_preference_key,
     'automation.appointment_data.response_needs_human',
   );
+  assert.equal(byId.get('N26').config.replace_previous_persistent_alerts, true);
+  assert.equal(byId.get('N28').config.replace_previous_persistent_alerts, true);
   assert.equal(
     nodes.filter((node) => node.type === 'action/send_system_notification')
       .every((node) => !Object.prototype.hasOwnProperty.call(node.outputs || {}, 'on_fail')),

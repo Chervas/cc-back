@@ -1248,6 +1248,7 @@ const NODE_TYPES_V2 = [
       subrole: null,
       display_mode: 'inbox',
       alert_level: 'warning',
+      replace_previous_persistent_alerts: false,
     },
     config_schema: [
       { key: 'title', label: 'Título', input_type: 'string', required: false },
@@ -1256,6 +1257,7 @@ const NODE_TYPES_V2 = [
       { key: 'assignee_id', label: 'Usuario / rol', input_type: 'select', required: true },
       { key: 'subrole', label: 'Subrol (opcional)', input_type: 'select', required: false, options: [] },
       { key: 'display_mode', label: 'Presentación', input_type: 'select', required: true, options: ['inbox', 'persistent_alert'] },
+      { key: 'replace_previous_persistent_alerts', label: 'Sustituir avisos persistentes anteriores del flujo', input_type: 'boolean', required: false },
       { key: 'alert_level', label: 'Severidad', input_type: 'select', required: true, options: ['warning', 'error'] },
     ],
   },

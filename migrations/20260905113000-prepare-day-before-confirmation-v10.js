@@ -82,6 +82,9 @@ function notificationConfig(title, message, options = {}) {
     ...(options.preferenceKey
       ? { presentation_preference_key: options.preferenceKey }
       : {}),
+    ...(options.replacePreviousPersistentAlerts
+      ? { replace_previous_persistent_alerts: true }
+      : {}),
   };
 }
 
@@ -354,7 +357,7 @@ function buildTargetNodes(source) {
     node('N26', 'action/send_system_notification', notificationConfig(
       '{{paciente.nombre}} quiere una nueva cita',
       'Ha cancelado su cita anterior y quiere que recepción le ayude a concertar una nueva fecha. Abre la conversación para gestionarla.',
-      { persistent: true },
+      { persistent: true, replacePreviousPersistentAlerts: true },
     ), { on_success: null }, -500, 2280),
     node('N27', 'action/send_whatsapp', manualWhatsappConfig(
       'De acuerdo. Si más adelante necesitas una nueva cita, estaremos encantados de ayudarte.',
@@ -367,6 +370,7 @@ function buildTargetNodes(source) {
       {
         persistent: true,
         preferenceKey: 'automation.appointment_data.response_needs_human',
+        replacePreviousPersistentAlerts: true,
       },
     ), { on_success: null }, -20, 2280),
 
