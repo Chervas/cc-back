@@ -6,6 +6,7 @@ process.env.JOBS_AUTO_START = 'false';
 
 const db = require('../../../models');
 const flowEngine = require('../../services/flowEngineV2.service');
+const aiOrchestrator = require('../../services/aiOrchestrator.service');
 const automationsController = require('../../controllers/automationsV2.controller');
 const migration = require('../../../migrations/20260905113000-prepare-day-before-confirmation-v10');
 
@@ -158,6 +159,37 @@ async function main() {
   });
   assert.equal(lowConfidence.next_node_id, 'N6');
   assert.equal(lowConfidence.output.matched_rule_id, null);
+  assert.equal(byId.get('N6').config.display_mode, 'inbox');
+  assert.match(byId.get('N6').config.message, /no se ha modificado la cita/i);
+
+  const originalAnalyzeStructured = aiOrchestrator.analyzeStructured;
+  aiOrchestrator.analyzeStructured = async () => {
+    throw new Error('qa_day_before_provider_failure');
+  };
+  try {
+    await assert.rejects(
+      flowEngine._processNode(byId.get('N3'), {
+        patient: { id: 121, nombre: 'Paciente QA' },
+        appointment: { id: 75006, estado: 'recordatorio_enviado' },
+        last_response_context: {
+          response_text: 'Mensaje de prueba',
+          response_items: [{ message_id: 990010, content_type: 'text', text: 'Mensaje de prueba' }],
+          response_message_id: 990010,
+          response_message_type: 'text',
+        },
+        conversation_today: [],
+        trigger: { data: { appointment_id: 75006 } },
+        outputs: {},
+      }, { simulation: false }),
+      /qa_day_before_provider_failure/,
+    );
+  } finally {
+    aiOrchestrator.analyzeStructured = originalAnalyzeStructured;
+  }
+  assert.equal(byId.get('N3').outputs.on_fail, 'N35');
+  assert.equal(byId.get('N35').config.display_mode, 'inbox');
+  assert.equal(byId.get('N35').config.assignee_id, 'admin');
+  assert.match(byId.get('N35').config.message, /cita no se ha modificado/i);
 
   assert.equal(byId.get('N13').config.new_status, 'recordatorio_confirmado');
   assert.equal(byId.get('N17').config.new_status, 'recordatorio_confirmado');
@@ -167,6 +199,46 @@ async function main() {
   assert.equal(byId.get('N14').config.suppress_if_human_replied, true);
   assert.equal(byId.get('N22').config.suppress_if_human_replied, true);
   assert.equal(byId.get('N31').config.suppress_if_human_replied, true);
+
+  const timeoutContext = {
+    patient: { id: 121, nombre: 'Paciente QA' },
+    appointment: { id: 75006, estado: 'recordatorio_enviado' },
+    outputs: {
+      N2: {
+        message_id: 990001,
+        at: '2026-09-05T08:00:00.000Z',
+      },
+      N7: {
+        message_id: 990002,
+        at: '2026-09-05T10:00:00.000Z',
+      },
+      N22: {
+        message_id: 990003,
+        at: '2026-09-05T12:00:00.000Z',
+      },
+    },
+  };
+  const firstWait = await flowEngine._processNode(byId.get('N5'), timeoutContext, { simulation: true });
+  assert.equal(firstWait.kind, 'waiting');
+  assert.equal(firstWait.waiting_meta.on_timeout, 'N7');
+  assert.equal(
+    new Date(firstWait.output.timeout_at).getTime() - new Date(firstWait.output.wait_starts_at).getTime(),
+    2 * 60 * 60 * 1000,
+  );
+  const reminderWait = await flowEngine._processNode(byId.get('N8'), timeoutContext, { simulation: true });
+  assert.equal(reminderWait.kind, 'waiting');
+  assert.equal(reminderWait.waiting_meta.on_timeout, null);
+  assert.equal(
+    new Date(reminderWait.output.timeout_at).getTime() - new Date(reminderWait.output.wait_starts_at).getTime(),
+    16 * 60 * 60 * 1000,
+  );
+  const rebookingWait = await flowEngine._processNode(byId.get('N23'), timeoutContext, { simulation: true });
+  assert.equal(rebookingWait.kind, 'waiting');
+  assert.equal(rebookingWait.waiting_meta.on_timeout, null);
+  assert.equal(
+    new Date(rebookingWait.output.timeout_at).getTime() - new Date(rebookingWait.output.wait_starts_at).getTime(),
+    12 * 60 * 60 * 1000,
+  );
   assert.equal(
     byId.get('N18').config.presentation_preference_key,
     'automation.appointment_data.confirmed_with_reply',

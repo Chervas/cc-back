@@ -6668,6 +6668,7 @@ async function processNode(node, context, runtime = {}) {
         });
       } catch (error) {
         aiOutput = usesStructuredConfirmAppointmentContract(config)
+          || !!readOutputTarget(node, 'on_fail')
           ? null
           : buildSafeAppointmentAiFailureOutput(presetKey, error);
         if (!aiOutput) throw error;
