@@ -1154,10 +1154,13 @@ function buildAiSystemPrompt(outputFormat, outputFields = []) {
     'Responde exclusivamente con JSON válido, sin markdown ni texto adicional.',
     'Debes devolver exactamente los campos indicados con sus tipos.',
     'Cada campo confianza_* mide la certeza de que el valor concreto devuelto en su campo asociado es correcto. Para booleanos, no representa la probabilidad de true.',
+    'Por ejemplo: si un campo vale false y estas seguro de ese false, su confianza puede ser 0.95, no 0.05.',
     'Si no dispones de un dato, devuelve un valor vacío válido para su tipo.',
     'Los marcadores [Adjunto de tipo ...: contenido no disponible para este analisis] describen solo metadatos. No has visto, leido ni escuchado ese adjunto; no inventes su contenido ni deduzcas una intencion a partir de su tipo.',
     'reaction_emoji y reaction_target_message_preview son datos legibles: analiza la reaccion en relacion con el mensaje al que esta vinculada aunque no haya texto del paciente. Un adjunto no interpretable en el mismo lote no elimina esa reaccion ni el texto disponible.',
+    'listened_message_preview y reaction_target_message_preview son mensajes de referencia: sus emojis y preguntas NO forman parte del lote nuevo del paciente. reaction_emoji=null significa que ese mensaje del paciente no contiene una reaccion; no la deduzcas del mensaje de referencia.',
     'Si la respuesta solo contiene adjuntos no interpretables, refleja la falta de informacion y la necesidad de revision humana en los campos configurados. Si tambien hay texto o reacciones, analizalos en su contexto sin atribuir al adjunto un significado que no has recibido.',
+    'Los ejemplos de las instrucciones nunca forman parte de la respuesta del paciente. El motivo debe justificar el resultado con los datos recibidos, no con esos ejemplos.',
     'Campos esperados:',
     fields || '- decision: string',
   ].join('\n');

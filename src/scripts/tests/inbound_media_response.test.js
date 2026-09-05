@@ -108,6 +108,8 @@ async function testAnalysisInput() {
       conversation_today: '[05/09/2026, 09:00] Paciente: Confirmo una cita anterior',
     }).patient_message_batch, null, 'an empty current response must not borrow historical confirmations');
     assert.match(flow.buildAiSystemPrompt({ motivo: 'string' }), /no inventes su contenido/);
+    assert.match(flow.buildAiSystemPrompt({ motivo: 'string' }), /reaction_emoji=null/);
+    assert.match(flow.buildAiSystemPrompt({ motivo: 'string' }), /Los ejemplos de las instrucciones nunca forman parte/);
     console.log('Inbound media analysis input: unreadable marker, captions, trailing reaction and batch isolation passed');
   } finally { db.Message.findAll = originalFindAll; }
 }
