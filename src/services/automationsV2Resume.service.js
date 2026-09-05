@@ -845,7 +845,10 @@ async function enqueueInboundResponseResume({
   const normalizedLeadId = toIntOrNull(leadId);
   const text = cleanString(messageText);
   const inboundMedia = await getInboundMessageMediaContext(inboundMessageId);
-  const hasResumableMedia = inboundMedia?.kind === 'sticker';
+  const hasResumableMedia = Boolean(inboundMedia?.kind);
+  const requiresMediaSupport = !text && hasResumableMedia && inboundMedia.kind !== 'sticker';
+  const mediaResponseRuntimes = new Set(String(process.env.AUTOMATIONS_V2_MEDIA_RESPONSE_RUNTIMES || '')
+    .split(',').map(value => value.trim()).filter(Boolean));
 
   if (!normalizedClinicId || !normalizedConversationId || (!text && !hasResumableMedia)) {
     return { enabled: true, matched: 0, enqueued: 0, execution_ids: [] };
@@ -866,6 +869,8 @@ async function enqueueInboundResponseResume({
   });
 
   const matched = candidates.filter((execution) => {
+    if (requiresMediaSupport && IS_GATEWAY_RUNTIME
+      && !mediaResponseRuntimes.has(getExecutionRuntimeNamespace(execution))) return false;
     if (!getWaitResponseNode(execution)) return false;
     return matchesExecutionTarget(execution, {
       conversationId: normalizedConversationId,
@@ -874,7 +879,8 @@ async function enqueueInboundResponseResume({
     });
   });
 
-  const recoveredLateMatches = matched.length
+  // New media support is opt-in per owning runtime until its text-only analyzer is updated.
+  const recoveredLateMatches = matched.length || requiresMediaSupport
     ? []
     : await recoverLateTimedOutResponseMatches({
         clinicId: normalizedClinicId,
