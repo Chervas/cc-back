@@ -3249,19 +3249,28 @@ async function loadConfiguredWhatsappTemplate(
     return null;
   }
 
-  const where = {};
-  if (templateId && templateName) {
-    where[Op.or] = [{ id: templateId }, { name: templateName }];
-  } else if (templateId) {
-    where.id = templateId;
-  } else {
-    where.name = templateName;
-  }
+  // El ID es la referencia canónica. El nombre se conserva como respaldo para
+  // configuraciones antiguas, pero puede quedar obsoleto al versionar en Meta.
+  let requested = templateId
+    ? await WhatsappTemplate.findOne({
+        ...baseQuery,
+        where: { id: templateId },
+      })
+    : null;
 
-  const requested = await WhatsappTemplate.findOne({
-    ...baseQuery,
-    where,
-  });
+  if (!requested && templateName) {
+    const namedCandidates = await WhatsappTemplate.findAll({
+      ...baseQuery,
+      where: { name: templateName },
+    });
+    requested = selectBestWhatsappTemplateCandidate(namedCandidates, {
+      clinicId,
+      targetWabaId,
+      requireCurrentCatalogBody: false,
+      expectedLocale,
+      expectedFamilyKey,
+    }) || namedCandidates[0] || null;
+  }
   if (!requested) return null;
   if (scoreWhatsappTemplateCandidate(requested, {
     clinicId,
@@ -7849,4 +7858,5 @@ module.exports = {
   _buildReplyWhatsappConfig: buildReplyWhatsappConfig,
   _resolveLatestResponseMessageId: resolveLatestResponseMessageId,
   _resolveAutomationCommunicationScope: resolveAutomationCommunicationScope,
+  _loadConfiguredWhatsappTemplate: loadConfiguredWhatsappTemplate,
 };
