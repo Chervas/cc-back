@@ -16,6 +16,12 @@ function cleanString(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function normalizeTemplateId(value) {
+  if (value === undefined || value === null) return '';
+  const normalized = String(value).trim();
+  return /^\d+$/.test(normalized) ? normalized : '';
+}
+
 function isObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -23,16 +29,16 @@ function isObject(value) {
 function nodeUsesTemplate(node, { templateId, templateName, catalogTemplateId }) {
   if (!node || String(node.type || '').toLowerCase() !== 'action/send_whatsapp') return false;
   const config = isObject(node.config) ? node.config : {};
-  const nodeTemplateId = cleanString(config.template_id);
+  const nodeTemplateId = normalizeTemplateId(config.template_id);
   const nodeTemplateName = cleanString(config.template_name).toLowerCase();
   const nodeCatalogTemplateId = Number(config.catalog_template_id);
-  const nodeFallbackTemplateId = cleanString(config.fallback_template_id);
+  const nodeFallbackTemplateId = normalizeTemplateId(config.fallback_template_id);
   const nodeFallbackTemplateName = cleanString(config.fallback_template_name).toLowerCase();
   const nodeFallbackCatalogTemplateId = Number(config.fallback_catalog_template_id);
   const accessVariant = isObject(config.access_guidance_variant)
     ? config.access_guidance_variant
     : {};
-  const variantTemplateId = cleanString(accessVariant.template_id);
+  const variantTemplateId = normalizeTemplateId(accessVariant.template_id);
   const variantTemplateName = cleanString(accessVariant.template_name).toLowerCase();
   const variantCatalogTemplateId = Number(accessVariant.catalog_template_id);
   return (
@@ -101,12 +107,12 @@ async function recomposeAutomationsUsingTemplate({ templateInstance, logger = co
 
       const config = isObject(node.config) ? node.config : {};
       const usesPrimaryTemplate = (
-        (templateId && cleanString(config.template_id) === String(templateId))
+        (templateId && normalizeTemplateId(config.template_id) === String(templateId))
         || (!!templateName && cleanString(config.template_name).toLowerCase() === String(templateName).trim().toLowerCase())
         || (Number.isFinite(Number(config.catalog_template_id)) && Number(config.catalog_template_id) === Number(catalogTemplateId))
       );
       const usesFallbackTemplate = (
-        (templateId && cleanString(config.fallback_template_id) === String(templateId))
+        (templateId && normalizeTemplateId(config.fallback_template_id) === String(templateId))
         || (!!templateName && cleanString(config.fallback_template_name).toLowerCase() === String(templateName).trim().toLowerCase())
         || (Number.isFinite(Number(config.fallback_catalog_template_id)) && Number(config.fallback_catalog_template_id) === Number(catalogTemplateId))
       );
@@ -114,7 +120,7 @@ async function recomposeAutomationsUsingTemplate({ templateInstance, logger = co
         ? config.access_guidance_variant
         : null;
       const usesAccessGuidanceVariant = !!accessGuidanceVariant && (
-        (templateId && cleanString(accessGuidanceVariant.template_id) === String(templateId))
+        (templateId && normalizeTemplateId(accessGuidanceVariant.template_id) === String(templateId))
         || (!!templateName && cleanString(accessGuidanceVariant.template_name).toLowerCase() === String(templateName).trim().toLowerCase())
         || (Number.isFinite(Number(accessGuidanceVariant.catalog_template_id))
           && Number(accessGuidanceVariant.catalog_template_id) === Number(catalogTemplateId))

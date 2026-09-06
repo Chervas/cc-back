@@ -16,6 +16,7 @@ const {
   normalizeConfig,
 } = require('../../services/leadAutoReply.service');
 const flowEngine = require('../../services/flowEngineV2.service');
+const templateAutomationSync = require('../../services/whatsappTemplateAutomationSync.service');
 const commercialMigration = require('../../../migrations/20260906220000-mark-lead-outreach-commercial');
 
 function madridDate(value) {
@@ -178,6 +179,54 @@ async function run() {
   ]);
   assert.equal(commercialNodes[0].config.communication_scope, 'marketing');
   assert.equal(commercialNodes[1].config.communication_scope, undefined);
+  assert.equal(templateAutomationSync.nodeUsesTemplate({
+    type: 'action/send_whatsapp',
+    config: { template_id: 1945 },
+  }, {
+    templateId: 1945,
+    templateName: 'clinicaclick_lead_primera_visita_con_llamada_v23',
+    catalogTemplateId: 109,
+  }), true);
+
+  const originalTemplateFindOne = db.WhatsappTemplate.findOne;
+  const originalTemplateFindAll = db.WhatsappTemplate.findAll;
+  const templateLookupCalls = [];
+  try {
+    db.WhatsappTemplate.findOne = async ({ where }) => {
+      templateLookupCalls.push(where);
+      return {
+        id: 1945,
+        name: 'clinicaclick_lead_primera_visita_con_llamada_v23',
+        language: 'es',
+        status: 'APPROVED',
+        catalog_template_id: 109,
+        clinic_id: 19,
+        waba_id: null,
+        catalog: {
+          id: 109,
+          family_key: 'clinicaclick_lead_primera_visita_con_llamada',
+          locale: 'es',
+        },
+      };
+    };
+    db.WhatsappTemplate.findAll = async () => {
+      throw new Error('name_fallback_must_not_run_when_template_id_exists');
+    };
+    const canonicalTemplate = await flowEngine._loadConfiguredWhatsappTemplate({
+      template_id: 1945,
+      template_name: 'clinicaclick_lead_primera_visita_con_llamada_v2',
+    }, {
+      clinic_id: 19,
+    }, {
+      targetWabaId: '1024525056749708',
+    });
+    assert.equal(canonicalTemplate.id, 1945);
+    assert.equal(canonicalTemplate.name, 'clinicaclick_lead_primera_visita_con_llamada_v23');
+    assert.deepEqual(templateLookupCalls, [{ id: 1945 }]);
+  } finally {
+    db.WhatsappTemplate.findOne = originalTemplateFindOne;
+    db.WhatsappTemplate.findAll = originalTemplateFindAll;
+  }
   assert.deepEqual(getUnsupportedLeadTemplateVariables({
     variables: [{ name: 'nombre_paciente' }, { name: 'nombre_clinica' }],
   }), []);
