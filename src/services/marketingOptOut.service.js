@@ -24,7 +24,15 @@ const OPT_OUT_WINDOW_DAYS = Number.parseInt(process.env.MARKETING_OPT_OUT_WINDOW
 const MARKETING_MESSAGE_SOURCES = new Set(['marketing_bulk_sends', 'marketing_reactivation']);
 const MARKETING_MESSAGE_KINDS = new Set(['mass_campaign_test', 'mass_campaign_send', 'marketing_bulk_send', 'marketing_reactivation']);
 const MARKETING_OBJECTIVES = new Set(['mass_sends', 'reactivate_patients']);
-const COMMERCIAL_TEMPLATE_USAGES = new Set(['marketing', 'comercial', 'promocion', 'promocional', 'reactivacion_pacientes']);
+const COMMERCIAL_TEMPLATE_USAGES = new Set([
+  'marketing',
+  'comercial',
+  'promocion',
+  'promocional',
+  'reactivacion_pacientes',
+  'lead_auto_reply',
+  'lead_primera_visita',
+]);
 const COMMERCIAL_TEMPLATE_CATEGORIES = new Set(['marketing']);
 const REVIEW_TEMPLATE_USAGES = new Set(['solicitud_resena', 'resena', 'review_request', 'reviews']);
 
@@ -80,7 +88,9 @@ function isMarketingOutboundMessage(message) {
   const objectiveId = cleanString(metadata.objective_id || metadata.trigger_objective_id);
   const templateUsage = normalizeText(metadata.template_usage || metadata.template_uso || metadata.uso);
   const templateCategory = normalizeText(metadata.template_category || metadata.category);
+  const communicationScope = normalizeText(metadata.communication_scope);
   const templateCommercial = metadata.template_commercial === true
+    || communicationScope === 'marketing'
     || COMMERCIAL_TEMPLATE_USAGES.has(templateUsage)
     || COMMERCIAL_TEMPLATE_CATEGORIES.has(templateCategory);
 
@@ -667,6 +677,153 @@ async function applyInboundContactClassification({
   };
 }
 
+async function applyCommunicationOptOut({
+  clinicId,
+  conversation,
+  inboundMessage,
+  patientId = null,
+  scope = 'marketing',
+  source = 'automation_flow',
+}) {
+  const normalizedScope = cleanString(scope).toLowerCase();
+  if (!['marketing', 'care', 'all'].includes(normalizedScope)) {
+    return { applied: false, reason: 'invalid_communication_scope' };
+  }
+  if (!MarketingContactOptOut || !clinicId || !conversation || !inboundMessage) {
+    return { applied: false, reason: 'missing_context' };
+  }
+
+  const normalized = normalizePhone(conversation?.contact_id || inboundMessage?.metadata?.from || '');
+  if (!normalized.phoneDigits) return { applied: false, reason: 'phone_not_found' };
+
+  const effectivePatientId = patientId || conversation?.patient_id || null;
+  const targetClinicIds = await getClinicIdsForMarketingOptOut(clinicId);
+  const scopes = normalizedScope === 'all' ? ['marketing', 'care'] : [normalizedScope];
+  const triggerMessage = await findRecentMarketingOutboundMessage({
+    conversationId: conversation.id,
+    inboundCreatedAt: inboundMessage.sent_at || inboundMessage.createdAt || new Date(),
+  });
+
+  const result = await db.sequelize.transaction(async (transaction) => {
+    const records = [];
+    for (const itemScope of scopes) {
+      records.push(await upsertOptOutRecord({
+        clinicId,
+        clinicIds: targetClinicIds,
+        patientId: effectivePatientId,
+        phone: normalized.phone,
+        phoneDigits: normalized.phoneDigits,
+        inboundMessage,
+        triggerMessage,
+        scope: itemScope,
+        source,
+        transaction,
+      }));
+    }
+
+    let updatedItems = [];
+    if (scopes.includes('marketing')) {
+      await createRejectedCommunicationConsent({
+        patientId: effectivePatientId,
+        inboundMessage,
+        triggerMessage,
+        transaction,
+      });
+      updatedItems = await excludeMatchingListItems({
+        clinicId,
+        clinicIds: targetClinicIds,
+        patientId: effectivePatientId,
+        phoneCandidates: normalized.candidates,
+        inboundMessage,
+        triggerMessage,
+        exclusionReason: 'opt_out',
+        reason: 'Baja de comunicaciones comerciales aplicada por una automatización',
+        transaction,
+      });
+    }
+
+    for (const targetClinicId of targetClinicIds) {
+      if (!PatientOperationalEvent || !effectivePatientId) continue;
+      const eventType = 'patient.communication_opt_out';
+      const existingEvent = inboundMessage.id ? await PatientOperationalEvent.findOne({
+        where: {
+          patient_id: Number(effectivePatientId),
+          clinic_id: Number(targetClinicId),
+          event_type: eventType,
+          [Op.and]: [db.sequelize.where(
+            db.sequelize.literal("CAST(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.inbound_message_id')) AS UNSIGNED)"),
+            Number(inboundMessage.id)
+          )],
+        },
+        transaction,
+      }) : null;
+      if (existingEvent) continue;
+      await PatientOperationalEvent.create({
+        patient_id: Number(effectivePatientId),
+        clinic_id: Number(targetClinicId),
+        actor_user_id: null,
+        event_type: eventType,
+        source,
+        channel: 'whatsapp',
+        metadata: {
+          scope: normalizedScope,
+          scopes,
+          inbound_message_id: inboundMessage.id || null,
+          trigger_message_id: triggerMessage?.id || null,
+          reason_text: cleanString(inboundMessage.content) || null,
+        },
+        occurred_at: inboundMessage.sent_at || inboundMessage.createdAt || new Date(),
+      }, { transaction });
+    }
+
+    const noticeResult = await createQuickChatOptOutNotice({
+      conversation,
+      inboundMessage,
+      triggerMessage,
+      updatedItems,
+      clinicIds: targetClinicIds,
+      transaction,
+    });
+    const noticeMessage = noticeResult?.message || null;
+    if (noticeMessage && normalizedScope !== 'marketing') {
+      const content = normalizedScope === 'all'
+        ? 'El paciente ha solicitado no recibir más comunicaciones automáticas. Se han bloqueado los mensajes comerciales, médicos y de citas.'
+        : 'El paciente ha solicitado no recibir más comunicaciones médicas ni de citas automáticas. Recepción todavía puede responder manualmente.';
+      await noticeMessage.update({
+        content,
+        metadata: {
+          ...(noticeMessage.metadata || {}),
+          reason: 'communication_opt_out',
+          scope: normalizedScope,
+          scopes,
+          hidden_from_patient: true,
+        },
+      }, { transaction });
+    }
+
+    return {
+      records,
+      updatedItems,
+      noticeMessage,
+      noticeCreated: noticeResult?.created === true,
+    };
+  });
+
+  if (result.noticeMessage && result.noticeCreated) {
+    emitQuickChatInternalNotice(conversation, result.noticeMessage);
+  }
+
+  return {
+    applied: true,
+    scope: normalizedScope,
+    scopes,
+    record_ids: result.records.map((record) => record?.id).filter(Boolean),
+    clinic_ids: targetClinicIds,
+    updated_items: result.updatedItems.length,
+    trigger_message_id: triggerMessage?.id || null,
+  };
+}
+
 async function applyInboundOptOutIfNeeded({ clinicId, conversation, inboundMessage, rawText, patientId = null }) {
   if (!MarketingContactOptOut || !clinicId || !conversation || !inboundMessage) {
     return { applied: false, reason: 'missing_context' };
@@ -711,6 +868,36 @@ async function getActiveOptOutSetsForScope(scope, transaction = null) {
   };
 }
 
+async function assertAutomationCommunicationAllowed({ clinicId, patientId = null, phone, scope = 'care' }) {
+  if (!MarketingContactOptOut) return;
+  const normalizedClinicId = Number(clinicId || 0);
+  const phoneDigits = normalizePhoneDigits(phone);
+  const normalizedPatientId = Number(patientId || 0);
+  if (!normalizedClinicId || (!phoneDigits && !normalizedPatientId)) return;
+
+  const normalizedScope = cleanString(scope).toLowerCase() === 'marketing' ? 'marketing' : 'care';
+  const identityWhere = [];
+  if (normalizedPatientId > 0) identityWhere.push({ paciente_id: normalizedPatientId });
+  if (phoneDigits) identityWhere.push({ phone_digits: phoneDigits });
+  const restriction = await MarketingContactOptOut.findOne({
+    where: {
+      clinica_id: normalizedClinicId,
+      channel: 'whatsapp',
+      scope: normalizedScope,
+      status: 'active',
+      [Op.or]: identityWhere,
+    },
+    order: [['updated_at', 'DESC']],
+  });
+  if (!restriction) return;
+
+  const error = new Error(`automation_${normalizedScope}_communications_restricted`);
+  error.code = 'AUTOMATION_COMMUNICATIONS_RESTRICTED';
+  error.status = 409;
+  error.details = { restriction_id: restriction.id, scope: normalizedScope };
+  throw error;
+}
+
 function isContactOptedOut({ patientId = null, phone = null, optOutSets }) {
   if (!optOutSets) return false;
   const normalizedDigits = normalizePhoneDigits(phone);
@@ -722,6 +909,7 @@ function emptyContactRestrictions() {
   return {
     active: false,
     marketing_opt_out: false,
+    care_communications_opt_out: false,
     whatsapp_number_invalid: false,
     items: [],
   };
@@ -738,6 +926,7 @@ function serializeContactRestrictions(rows = []) {
   return {
     active: items.length > 0,
     marketing_opt_out: items.some((item) => item.scope === 'marketing'),
+    care_communications_opt_out: items.some((item) => item.scope === 'care'),
     whatsapp_number_invalid: items.some((item) => item.scope === 'whatsapp_number'),
     items,
   };
@@ -779,7 +968,7 @@ async function getActiveContactRestrictionsForConversations(conversations = [], 
     where: {
       clinica_id: { [Op.in]: clinicIds },
       channel: 'whatsapp',
-      scope: { [Op.in]: ['marketing', 'whatsapp_number'] },
+      scope: { [Op.in]: ['marketing', 'care', 'whatsapp_number'] },
       status: 'active',
       [Op.or]: identityWhere,
     },
@@ -821,7 +1010,7 @@ async function getActiveContactRestrictionsForPatient({ clinicIds = [], patientI
     where: {
       clinica_id: { [Op.in]: normalizedClinicIds },
       channel: 'whatsapp',
-      scope: { [Op.in]: ['marketing', 'whatsapp_number'] },
+      scope: { [Op.in]: ['marketing', 'care', 'whatsapp_number'] },
       status: 'active',
       [Op.or]: identityWhere,
     },
@@ -877,12 +1066,17 @@ async function resolveWhatsappNumberRestrictionAfterChange({ patientId, previous
 }
 
 module.exports = {
+  applyCommunicationOptOut,
   applyInboundContactClassification,
   applyInboundOptOutIfNeeded,
+  assertAutomationCommunicationAllowed,
   getActiveContactRestrictionsForConversations,
   getActiveContactRestrictionsForPatient,
   getActiveOptOutSetsForScope,
   includesOptOutKeyword,
   isContactOptedOut,
   resolveWhatsappNumberRestrictionAfterChange,
+  __testing: {
+    isMarketingOutboundMessage,
+  },
 };

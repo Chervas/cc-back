@@ -2616,7 +2616,67 @@ Reglas:
 - En dev se elimino la automatizacion legacy `qa-reactivation-patient-followup-v1` porque usaba `trigger_type=patient_inactive` y nodos obsoletos (`start`, `wait`) incompatibles con V2.
 - Sigue pendiente el evaluador periodico de reactivaciones antes de envio real: debe recorrer listas activas por scope con predicados indexables, watermark incremental, lotes, clave idempotente por lista/paciente/condicion y gates justo antes de encolar (opt-out, cuarentena, capping, plantilla aprobada, ventana horaria, cola cancelable). Para reglas con fecha conocida, como presupuesto no aceptado en 7 dias, preferir `JobRequest` programado al crear el presupuesto y cancelarlo al aceptar; el barrido diario queda como red de seguridad, no como scan global.
 
-### 1.1. Envios masivos por listas
+### 1.1. Bajas y cuarentenas de comunicaciones
+
+Las bajas y las cuarentenas participan en el mismo gobierno previo al envío,
+pero no representan lo mismo y no comparten ciclo de vida:
+
+- **Baja voluntaria:** restricción persistente solicitada por el paciente. Se
+  guarda en `MarketingContactOptOuts`, se resuelve por paciente o teléfono y se
+  replica a las clínicas del grupo. No puede levantarse desde una campaña.
+- **Baja comercial (`scope=marketing`):** bloquea campañas, reactivaciones y
+  solicitudes de reseña. No impide recordatorios ni respuestas asistenciales.
+- **Baja médica y de citas (`scope=care`):** bloquea mensajes automáticos
+  asistenciales de los flujos V2, pero no bloquea una respuesta manual de
+  recepción en QuickChat.
+- **Baja de todas las comunicaciones:** se materializa como dos restricciones,
+  `marketing` y `care`, para reutilizar los mismos gates y conservar
+  compatibilidad con las bajas comerciales existentes.
+- **Número erróneo (`scope=whatsapp_number`):** es una restricción de canal, no
+  una preferencia comercial. Bloquea cualquier envío al número hasta que se
+  guarde un teléfono realmente distinto en la ficha del paciente.
+- **Cuarentena:** exclusión reversible y local a un item de una lista. Se
+  representa mediante `MarketingPatientListItems.status=excluded_*` y
+  `exclusion_reason`, sin modificar el consentimiento global del paciente. El
+  usuario puede sacarlo de cuarentena después de revisar la causa, salvo que el
+  item también tenga una baja comercial.
+
+Orden de los gates antes de enviar:
+
+1. Restricción del número de WhatsApp.
+2. Baja persistente correspondiente al tipo de comunicación.
+3. Cuarentena o exclusión del item de campaña.
+4. Variables, capping, plantilla aprobada, ventana horaria y cola cancelable.
+
+El editor V2 expone `action/unsubscribe_communications` como **Dar de baja
+comunicaciones**, con alcance `marketing`, `care` o `all`. En el flujo de
+reseñas se usa `marketing`; la clasificación IA no aplica esa baja de forma
+oculta. El comparador conecta cada salida con su acción visible.
+`action/process_review_response_classification` se coloca solo en las ramas de
+número equivocado y rechazo de reseña, y limita sus efectos mediante
+`effect_intents` para conservar compatibilidad con flujos anteriores.
+`action/send_whatsapp` usa `communication_scope=care` por
+defecto y permite marcar explícitamente un envío como `marketing`. El gate se
+evalúa al ejecutar el nodo y vuelve a evaluarse en `outbound_whatsapp` justo
+antes del envío, para cubrir bajas registradas mientras un mensaje esperaba por
+horario o en cola.
+
+La captación inicial de un lead es siempre una comunicación comercial, aunque
+la respuesta posterior la gestione una automatización asistida. Los flujos
+gestionados de `lead_auto_reply` y `lead_primera_visita` fuerzan
+`communication_scope=marketing`; el runtime conserva además ese criterio para
+versiones históricas que todavía no lo declarasen. Las plantillas iniciales
+ofrecen las respuestas rápidas **Quiero una cita** y **Ya no estoy interesado**.
+Esta última se procesa como una baja `marketing` solo cuando existe un envío
+comercial reciente en la conversación. No crea una baja `care` ni impide
+recordatorios, cambios de cita o respuestas manuales de recepción.
+
+Una salida sin nodo posterior significa fin de ejecución, no cuarentena ni
+fallo. Los flujos nuevos deben añadir `control/end` cuando convenga hacerlo
+visible en el diagrama. Los fallos técnicos usan `on_fail`; nunca deben
+convertirse en una baja o cuarentena.
+
+### 1.2. Envios masivos por listas
 
 Rutas bajo `/api/marketing/bulk-sends`:
 
@@ -2658,7 +2718,7 @@ Reglas:
 - `criteria.link_tracking.enabled=true` solo transforma variables cuyo valor final sea URL `http/https`. URLs fijas dentro de una plantilla aprobada no se reescriben sin nueva aprobación de Meta.
 - Meta Cloud API no documenta un webhook por destinatario para reporte de spam. El backend expone `spam_reports_supported=false`; la calidad se calcula con bajas, lecturas y calidad/limites WABA cuando estén disponibles.
 
-### 1.2. Automatizaciones basadas en listas
+### 1.3. Automatizaciones basadas en listas
 
 Rutas bajo `/api/marketing/list-automations`:
 
@@ -8298,10 +8358,13 @@ deterministas para `wrong_recipient`, `marketing_opt_out`, `review_refusal` y
 notificaciones y restricciones deduplican por `inbound_message_id`.
 
 Una baja comercial se materializa como opt-out de marketing y excluye items no
-enviados; no bloquea mensajería asistencial. Un número erróneo crea una
-restricción `whatsapp_number`. `paciente.controller` resuelve esa restricción
-solo al guardar un número normalizado realmente distinto y registra
-`patient.whatsapp_number_corrected` con el usuario actor.
+enviados; no bloquea mensajería asistencial. Las bajas médicas y de citas se
+materializan con `scope=care`; el alcance `all` crea ambas restricciones. Un
+número erróneo crea una restricción `whatsapp_number`. `paciente.controller`
+resuelve esta última solo al guardar un número normalizado realmente distinto
+y registra `patient.whatsapp_number_corrected` con el usuario actor. La sección
+«Bajas y cuarentenas de comunicaciones» define el contrato común y diferencia
+estas restricciones persistentes de las exclusiones reversibles de cada lista.
 
 `marketingBulkSends.service.js` usa el regulador común de entrega. Calidad
 `YELLOW` impone un máximo de 5 envíos cada 3 horas y nunca acelera una cola más

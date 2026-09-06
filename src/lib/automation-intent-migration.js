@@ -588,7 +588,7 @@ function buildMessageReceivedTemplateNodes() {
       id: 'N8',
       type: 'action/reply_message',
       config: {
-        message_text: 'Gracias. Hemos registrado la confirmacion de tu cita y dejamos tu pregunta pendiente para recepcion.',
+        message_text: 'Gracias. Hemos registrado la confirmación de tu cita y dejamos tu pregunta pendiente para recepción.',
         suppress_if_human_replied: true,
       },
       outputs: { on_success: 'N20', on_fail: 'N20' },
@@ -649,7 +649,7 @@ function buildMessageReceivedTemplateNodes() {
       id: 'N19',
       type: 'action/reply_message',
       config: {
-        message_text: 'Gracias por escribirnos. La clinica esta cerrada ahora. Hemos dejado tu mensaje pendiente para recepcion y te responderemos cuando vuelva a abrir.',
+        message_text: '¡Hola! La clínica no está abierta ahora mismo y no te puedo responder, pero te contestaremos cuanto antes.',
         suppress_if_human_replied: true,
       },
       outputs: { on_success: 'N20', on_fail: 'N20' },
@@ -660,7 +660,7 @@ function buildMessageReceivedTemplateNodes() {
       type: 'action/send_system_notification',
       config: {
         title: 'Mensaje pendiente de revision',
-        message: '{{paciente.nombre}} ha escrito fuera de horario y necesita revision de recepcion.',
+        message: '{{paciente.nombre}} ha escrito fuera de horario y necesita revisión de recepción.',
         assignee_type: 'role',
         assignee_id: 'personaldeclinica',
         subrole: 'Recepcion / Comercial ventas',
@@ -672,7 +672,7 @@ function buildMessageReceivedTemplateNodes() {
       id: 'N21',
       type: 'action/reply_message',
       config: {
-        message_text: 'Gracias por escribirnos. Tu mensaje queda marcado para revision prioritaria cuando el equipo este disponible. Si se trata de una urgencia, contacta con los servicios de emergencia.',
+        message_text: '¡Hola! La clínica no está abierta ahora mismo. Hemos marcado tu mensaje para revisión prioritaria y te responderemos cuanto antes.',
         suppress_if_human_replied: true,
       },
       outputs: { on_success: 'N22', on_fail: 'N22' },
@@ -682,8 +682,8 @@ function buildMessageReceivedTemplateNodes() {
       id: 'N22',
       type: 'action/send_system_notification',
       config: {
-        title: 'Posible mensaje urgente fuera de horario',
-        message: 'La IA ha marcado una conversacion para revision prioritaria. Abre el chat y valida el contexto; no se ha realizado ningun diagnostico.',
+        title: '{{paciente.nombre}} necesita respuesta urgente',
+        message: 'Ha enviado un mensaje relacionado con una situación que está ocurriendo ahora. Abre la conversación y respóndele cuanto antes.',
         assignee_type: 'role',
         assignee_id: 'personaldeclinica',
         subrole: 'Recepcion / Comercial ventas',
@@ -708,7 +708,7 @@ function buildMessageReceivedTemplateNodes() {
       id: 'N24',
       type: 'action/reply_message',
       config: {
-        message_text: 'Gracias. Hemos registrado la confirmacion de tu cita.',
+        message_text: 'Gracias. Hemos registrado la confirmación de tu cita.',
         suppress_if_human_replied: true,
         suppress_if_response_needed: true,
       },

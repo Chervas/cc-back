@@ -9,6 +9,7 @@ const whatsappPhonesService = require('../services/whatsappPhones.service');
 const automationDefaultsService = require('../services/automationDefaults.service');
 const automationInboundMessageService = require('../services/automationInboundMessage.service');
 const marketingBulkSendsService = require('../services/marketingBulkSends.service');
+const marketingOptOutService = require('../services/marketingOptOut.service');
 const notificationService = require('../services/notifications.service');
 const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.service');
 const whatsappConnectionStatusService = require('../services/whatsappConnectionStatus.service');
@@ -20,6 +21,9 @@ const patientDirectionService = require('../services/patientDirection.service');
 const {
     resolveAutomationAttentionForConversation,
 } = require('../services/conversationPendingReply.service');
+const {
+    markBufferedResponseExecutionsForHumanReply,
+} = require('../services/automationHumanIntervention.service');
 const { getIO } = require('../services/socket.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { buildWhatsappOutboundRetryDecision } = require('../lib/whatsapp-outbound-retry');
@@ -262,10 +266,24 @@ async function buildInboundMessageDescriptor({ msg, clinicId }) {
         };
     }
 
-    const rawContent = msg?.text?.body || msg?.button?.text || msg?.interactive?.text || msg?.image?.caption || msg?.document?.caption || msg?.video?.caption || '';
+    const rawContent = msg?.text?.body || msg?.button?.text || getWhatsAppInteractiveText(msg?.interactive) || msg?.image?.caption || msg?.document?.caption || msg?.video?.caption || '';
     const stripped = extractAndStripWebOriginRef(rawContent);
     const content = stripped.content;
-    const metadataExtra = {};
+    const metadataExtra = rawType === 'interactive' && msg?.interactive
+        ? {
+            interactive: {
+                type: cleanString(msg.interactive.type) || null,
+                button_reply: msg.interactive.button_reply ? {
+                    id: cleanString(msg.interactive.button_reply.id) || null,
+                    title: cleanString(msg.interactive.button_reply.title) || null,
+                } : null,
+                list_reply: msg.interactive.list_reply ? {
+                    id: cleanString(msg.interactive.list_reply.id) || null,
+                    title: cleanString(msg.interactive.list_reply.title) || null,
+                } : null,
+            },
+        }
+        : {};
     const mediaPayload = getWhatsAppMediaPayload(msg);
 
     if (mediaPayload) {
@@ -816,6 +834,15 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
 
     let providerAccepted = false;
     try {
+        const messageMetadata = msg.metadata && typeof msg.metadata === 'object' ? msg.metadata : {};
+        if (messageMetadata.communication_scope) {
+            await marketingOptOutService.assertAutomationCommunicationAllowed({
+                clinicId: Number(clinicId || msg?.conversation?.clinic_id || 0) || null,
+                patientId: Number(messageMetadata.recipient_patient_id || 0) || null,
+                phone: to,
+                scope: messageMetadata.communication_scope,
+            });
+        }
         const effectiveClinicConfig = resolveClinicConfigAtSend === true
             ? await require('../services/flowEngineV2.service').resolveScheduledWhatsappSenderConfig({
                 metadata: msg.metadata || {},
@@ -1216,6 +1243,12 @@ async function createCoexistenceConversationMessage({
 
     if (direction === 'outbound' && sourceEvent === 'smb_message_echoes') {
         try {
+            await markBufferedResponseExecutionsForHumanReply({
+                clinicId,
+                conversationId: conv.id,
+                humanMessageId: message.id,
+                reason: 'mobile_reply_sent_during_response_buffer',
+            });
             const resolution = await resolveAutomationAttentionForConversation(conv.id, null, {
                 allUsers: true,
                 reason: 'mobile_reply_sent',

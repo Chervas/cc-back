@@ -59,6 +59,7 @@ function buildNodes(catalogTemplateId) {
         recipient_mode: 'context_lead',
         sender_mode: 'clinic_default',
         quiet_hours_enabled: false,
+        communication_scope: 'marketing',
         variables_named: {
           nombre_paciente: '{{lead.nombre}}',
           nombre_clinica: '{{clinica.nombre}}',

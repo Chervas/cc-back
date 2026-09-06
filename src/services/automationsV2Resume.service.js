@@ -815,6 +815,31 @@ async function scheduleBufferedInboundResponse({
       created = enqueued.created;
     }
 
+    if (
+      queuedExecutionJob
+      && Number(queuedExecutionJob.id) !== Number(scheduledResumeJob?.id)
+      && ['pending', 'waiting'].includes(cleanString(queuedExecutionJob.status))
+    ) {
+      await JobRequest.update({
+        status: 'cancelled',
+        next_run_at: null,
+        completed_at: new Date(),
+        error_message: 'Sustituido por una respuesta del paciente',
+        result_summary: {
+          status: 'cancelled',
+          reason: 'superseded_by_response_resume',
+          replacement_job_id: toIntOrNull(scheduledResumeJob?.id),
+        },
+        updated_at: new Date(),
+      }, {
+        where: {
+          id: queuedExecutionJob.id,
+          status: { [Op.in]: ['pending', 'waiting'] },
+        },
+        transaction,
+      });
+    }
+
     const state = await conversationAutomationState.setState({
       clinicId: normalizedClinicId,
       conversationId: normalizedConversationId,

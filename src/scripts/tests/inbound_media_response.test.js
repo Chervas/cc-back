@@ -20,6 +20,7 @@ async function testAdmission() {
   let rows = [];
   let execution;
   const queued = [];
+  const jobUpdates = [];
   patch(db.Message, 'findByPk', async id => rows.find(row => row.id === id));
   patch(db.FlowExecutionV2, 'findAll', async () => [execution]);
   patch(db.FlowExecutionV2, 'findByPk', async () => execution);
@@ -27,6 +28,10 @@ async function testAdmission() {
   patch(db.sequelize, 'transaction', async callback => callback({ LOCK: { UPDATE: 'UPDATE' } }));
   patch(jobs, 'enqueueUniqueJobRequest', async options => {
     queued.push(options); return { job: { id: 999, ...options }, created: true };
+  });
+  patch(db.JobRequest, 'update', async (values, options) => {
+    jobUpdates.push({ values, options });
+    return [1];
   });
   patch(states, 'setState', async options => options);
   patch(states, 'emitState', () => {});
@@ -75,6 +80,20 @@ async function testAdmission() {
     reset();
     rows = [{ id: 73, content: '', metadata: {} }];
     assert.equal((await send(73)).matched, 0, 'a truly empty event must not resume a flow');
+
+    reset();
+    rows = [{ id: 74, content: 'Sí', metadata: {} }];
+    db.sequelize.query = async sql => (
+      String(sql).includes("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.resume_mode'))")
+        ? []
+        : [{ id: 800, status: 'waiting', payload: { execution_id: execution.id, __runtime_namespace: 'dev' } }]
+    );
+    await send(74, rows[0].content);
+    const cancelledTimeout = jobUpdates.find((entry) => (
+      entry.values.status === 'cancelled' && entry.options.where.id === 800
+    ));
+    assert(cancelledTimeout, 'the original timeout job is cancelled when a buffered response takes ownership');
+    assert.equal(cancelledTimeout.values.result_summary.replacement_job_id, 999);
     console.log('Inbound media admission: media types, buffering, duplicate, mixed batch and runtime isolation passed');
   } finally {
     originals.reverse().forEach(restore => restore());
@@ -93,20 +112,33 @@ async function testAnalysisInput() {
   const originalFindAll = db.Message.findAll;
   const rows = [{ id: 71, content: '', message_type: 'text', metadata: { media: { kind: 'video', id: 'fixture' } } },
     { id: 72, content: 'Confirmo', message_type: 'text', metadata: {} },
-    { id: 73, content: 'Reaccion de WhatsApp', message_type: 'reaction', metadata: { reaction: { emoji: 'thumbs_up' } } }];
+    { id: 73, content: 'Reaccion de WhatsApp', message_type: 'reaction', metadata: { reaction: { emoji: 'thumbs_up' } } },
+    { id: 74, content: 'No', message_type: 'text', metadata: { revoked_at: '2026-09-05T09:01:00.000Z', revoke: { original_message_id: 'wamid.74' } } }];
   db.Message.findAll = async () => rows;
   try {
-    const loaded = await executor._loadInboundResponseFromMessageIds({ inbound_message_ids: [71, 72, 73] }, {}, 900002);
+    const loaded = await executor._loadInboundResponseFromMessageIds({ inbound_message_ids: [71, 72, 73, 74] }, {}, 900002);
     assert.equal(loaded.responseText, 'Confirmo');
     assert.deepEqual(loaded.responseItems, [
       { message_id: 71, content_type: 'attachment', attachment_type: 'video', content_available: false, caption: null },
       { message_id: 72, content_type: 'text', text: 'Confirmo' },
       { message_id: 73, content_type: 'reaction', emoji: 'thumbs_up', target_message_id: null, target_message_preview: null },
     ]);
-    assert.deepEqual(loaded.loadedMessageIds, [71, 72, 73]);
+    assert.deepEqual(loaded.loadedMessageIds, [71, 72, 73, 74]);
+    assert.deepEqual(loaded.analyzedMessageIds, [71, 72, 73]);
+    assert.deepEqual(loaded.revokedMessageIds, [74]);
     assert.equal(loaded.inboundMessageId, 73);
     assert.equal(formatInboundResponseText(rows[2]), null, 'reaction metadata is not presented as patient text');
     assert.equal(formatInboundAnalysisItem({ message_type: 'reaction', metadata: { reaction: { emoji: '' } } }), null);
+    assert.equal(formatInboundResponseText(rows[3]), null, 'revoked text is excluded from patient_message_batch');
+    assert.equal(formatInboundAnalysisItem(rows[3]), null, 'revoked items are excluded from patient_message_batch');
+    db.Message.findAll = async () => [rows[3]];
+    const revokedOnly = await executor._loadInboundResponseFromMessageIds({ inbound_message_ids: [74] }, {}, 900002);
+    assert.equal(revokedOnly.responseText, '');
+    assert.deepEqual(revokedOnly.responseItems, []);
+    assert.equal(revokedOnly.inboundMessageId, null, 'a revoked message cannot remain as the active response reference');
+    assert.deepEqual(revokedOnly.analyzedMessageIds, []);
+    assert.deepEqual(revokedOnly.revokedMessageIds, [74]);
+    assert.equal(revokedOnly.responseMediaKind, null);
     assert.deepEqual(formatInboundAnalysisItem({ ...rows[2], metadata: { reaction: {
       emoji: 'thumbs_up', target_message_id: 'template_1', target_message_preview: 'Me confirmas?',
     } } }), {

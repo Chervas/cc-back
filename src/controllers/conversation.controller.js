@@ -22,6 +22,9 @@ const {
   startPatientWhatsappConversation,
 } = require('../services/patientContact.service');
 const {
+  markBufferedResponseExecutionsForHumanReply,
+} = require('../services/automationHumanIntervention.service');
+const {
   getActiveContactRestrictionsForConversations,
 } = require('../services/marketingOptOut.service');
 
@@ -127,6 +130,7 @@ async function attachContactRestrictions(conversations = []) {
     contact_restrictions: restrictions.get(Number(conversation?.id)) || {
       active: false,
       marketing_opt_out: false,
+      care_communications_opt_out: false,
       whatsapp_number_invalid: false,
       items: [],
     },
@@ -2400,6 +2404,12 @@ exports.postMessage = async (req, res) => {
     const manualReplyAccepted = conversation.channel !== 'whatsapp' || outboundWhatsappQueued;
     if (manualReplyAccepted && msg.message_type !== 'event' && msg.status !== 'failed') {
       try {
+        await markBufferedResponseExecutionsForHumanReply({
+          clinicId: conversation.clinic_id,
+          conversationId: conversation.id,
+          humanMessageId: msg.id,
+          reason: 'manual_reply_sent_during_response_buffer',
+        });
         const attentionResolution = await resolveAutomationAttentionForConversation(
           conversation.id,
           userId,

@@ -3023,7 +3023,6 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     try {
         await appointmentAutomationV2Runtime.cancelActiveExecutionsForCita(cita, {
             reason: 'appointment_rescheduled_cancelled_previous_active_flow',
-            exclude_trigger_types: ['appointment_rescheduled'],
         });
         await appointmentNotificationCleanup.markAutomationNotificationsReadForAppointment(cita.id_cita, {
             reason: 'appointment_rescheduled',

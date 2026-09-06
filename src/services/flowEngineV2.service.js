@@ -73,6 +73,7 @@ const {
   buildConversationContext,
   formatInboundAnalysisItem,
   formatInboundResponseText,
+  isRevokedMessage,
 } = require('../lib/automation-conversation-context');
 const { AUTO_APPLY_CONFIDENCE_THRESHOLD } = require('../lib/automation-intent-contract');
 const {
@@ -1375,6 +1376,12 @@ async function enrichConversationContext(context, targets = {}) {
   if (cleanString(baseContext?.trigger?.type) !== 'message_received') {
     return enriched;
   }
+  if (
+    cleanString(baseContext?.last_response_context?.wait_node_id)
+    && toIntOrNull(baseContext?.last_response_context?.response_message_id)
+  ) {
+    return enriched;
+  }
   const conversationId = toIntOrNull(
     targets.conversation_id
     || baseContext?.conversation?.id
@@ -1403,14 +1410,15 @@ async function enrichConversationContext(context, targets = {}) {
   if (messages.length !== messageIds.length) {
     throw new Error('message_received_batch_scope_mismatch');
   }
-  const responseText = messages
+  const activeMessages = messages.filter((message) => !isRevokedMessage(message));
+  const responseText = activeMessages
     .map(formatInboundResponseText)
     .filter(Boolean)
     .join('\n');
-  const responseItems = messages
+  const responseItems = activeMessages
     .map(formatInboundAnalysisItem)
     .filter(Boolean);
-  const latest = messages[messages.length - 1];
+  const latest = activeMessages[activeMessages.length - 1] || null;
   const latestMetadata = isObject(latest?.metadata) ? latest.metadata : {};
   const reaction = isObject(latestMetadata.reaction) ? latestMetadata.reaction : {};
   const media = isObject(latestMetadata.media) ? latestMetadata.media : {};
@@ -1432,7 +1440,11 @@ async function enrichConversationContext(context, targets = {}) {
       reaction_target_message_type: cleanString(reaction.target_message_type),
       reaction_target_message_preview: cleanString(reaction.target_message_preview),
       responded_at: respondedAt,
-      inbound_message_ids: messageIds,
+      inbound_message_ids: activeMessages.map((message) => toIntOrNull(message.id)).filter(Boolean),
+      revoked_message_ids: messages
+        .filter(isRevokedMessage)
+        .map((message) => toIntOrNull(message.id))
+        .filter(Boolean),
     },
   });
   return enriched;
@@ -1447,6 +1459,23 @@ function findFirstConversationIdInOutputs(context = {}) {
     }
   }
   return null;
+}
+
+function resolveLatestResponseMessageId(context = {}) {
+  const explicit = toIntOrNull(context?.last_response_context?.response_message_id);
+  if (explicit) return explicit;
+  const outputs = Object.values(context?.outputs || {});
+  for (let index = outputs.length - 1; index >= 0; index -= 1) {
+    const output = outputs[index];
+    const responseMessageId = toIntOrNull(output?.response_message_id);
+    if (responseMessageId && cleanString(output?.status)?.toLowerCase() === 'responded') {
+      return responseMessageId;
+    }
+  }
+  return toIntOrNull(
+    context?.trigger?.data?.latest_inbound_message_id
+    || context?.trigger?.data?.first_inbound_message_id
+  );
 }
 
 function buildSystemNavigationContext(context = {}, targets = {}) {
@@ -2001,6 +2030,19 @@ async function persistClassifyIntentState(execution, targets, output) {
 function isTemplateBlockedForSend(statusValue) {
   const status = toLowerSafe(statusValue);
   return status !== 'approved';
+}
+
+function resolveAutomationCommunicationScope(config, context) {
+  const explicitScope = (cleanString(resolveTemplateValue(config?.communication_scope, context)) || '').toLowerCase();
+  const templateUsage = (cleanString(resolveTemplateValue(config?.template_usage, context)) || '').toLowerCase();
+  if (
+    explicitScope === 'marketing'
+    || templateUsage === 'lead_auto_reply'
+    || templateUsage === 'lead_primera_visita'
+  ) {
+    return 'marketing';
+  }
+  return 'care';
 }
 
 function getWhatsappTemplateWabaId(template) {
@@ -3674,6 +3716,13 @@ async function handleSendWhatsapp(node, context, runtime) {
     ? languageSelection.selected_language
     : null;
   const recipientData = await resolveWhatsAppRecipient({ node, config, context: templateContext, targets });
+  const communicationScope = resolveAutomationCommunicationScope(config, templateContext);
+  await marketingOptOutService.assertAutomationCommunicationAllowed({
+    clinicId,
+    patientId: targets.patient_id,
+    phone: recipientData.recipient,
+    scope: communicationScope,
+  });
 
   const originalMessageMode = messageMode;
   let effectiveMessageMode = messageMode;
@@ -4219,6 +4268,7 @@ async function handleSendWhatsapp(node, context, runtime) {
     flow_domain: cleanString(config.domain) || cleanString(runtime?.execution?.domain) || null,
     template_usage: cleanString(config.template_usage) || null,
     template_commercial: config.template_commercial === true,
+    communication_scope: communicationScope,
     message_mode: originalMessageMode,
     delivery_mode: effectiveMessageMode,
     template_id: template?.id || null,
@@ -4565,6 +4615,38 @@ async function handleSendWhatsapp(node, context, runtime) {
   };
 }
 
+function buildReplyWhatsappConfig(config, conversation) {
+  const routing = isObject(config.language_routing) ? config.language_routing : null;
+  const routingVariants = routing && isObject(routing.variants)
+    ? Object.fromEntries(Object.entries(routing.variants).map(([locale, variant]) => {
+      const normalizedVariant = isObject(variant) ? variant : {};
+      return [locale, {
+        ...normalizedVariant,
+        manual_message_text: normalizedVariant.manual_message_text || normalizedVariant.message_text,
+      }];
+    }))
+    : null;
+  return {
+    message_mode: 'manual',
+    manual_message_text: config.message_text,
+    ...(routing ? {
+      language_routing: {
+        ...routing,
+        variants: routingVariants || {},
+      },
+    } : {}),
+    recipient_mode: 'manual_number',
+    recipient_to: conversation.contact_id,
+    sender_mode: 'clinic_default',
+    quiet_hours_enabled: false,
+    outside_send_window_policy: 'discard',
+    suppress_flow_event: true,
+    suppress_if_response_needed: config.suppress_if_response_needed,
+    source: 'message_received_reply',
+    domain: 'appointment',
+  };
+}
+
 async function handleReplyMessage(node, context, runtime) {
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
   const execution = runtime?.execution || null;
@@ -4574,9 +4656,7 @@ async function handleReplyMessage(node, context, runtime) {
     || execution?.trigger_entity_id
   );
   const sourceMessageId = toIntOrNull(
-    context?.trigger?.data?.latest_inbound_message_id
-    || context?.last_response_context?.response_message_id
-    || context?.trigger?.data?.first_inbound_message_id
+    resolveLatestResponseMessageId(context)
   );
   if (!conversationId || !sourceMessageId) {
     throw new Error('reply_message_source_not_found');
@@ -4610,17 +4690,7 @@ async function handleReplyMessage(node, context, runtime) {
   const replyNode = {
     ...node,
     config: {
-      message_mode: 'manual',
-      manual_message_text: config.message_text,
-      recipient_mode: 'manual_number',
-      recipient_to: conversation.contact_id,
-      sender_mode: 'clinic_default',
-      quiet_hours_enabled: false,
-      outside_send_window_policy: 'discard',
-      suppress_flow_event: true,
-      suppress_if_response_needed: config.suppress_if_response_needed,
-      source: 'message_received_reply',
-      domain: 'appointment',
+      ...buildReplyWhatsappConfig(config, conversation),
       delivery_slot: `reply_${sourceMessageId}`,
     },
   };
@@ -4939,8 +5009,13 @@ async function handleReviewResponseClassification(node, context, runtime) {
   const inboundMessage = inboundMessageId ? await Message.findByPk(inboundMessageId) : null;
   const conversationId = targets.conversation_id || toIntOrNull(inboundMessage?.conversation_id);
   const conversation = conversationId ? await Conversation.findByPk(conversationId) : null;
-  const effect = classification.intent === 'rating'
-    ? { applied: false, reason: 'rating_continues_flow' }
+  const configuredEffectIntents = Array.isArray(config.effect_intents)
+    ? new Set(config.effect_intents.map((value) => cleanString(value)).filter(Boolean))
+    : null;
+  const shouldApplyEffect = classification.intent !== 'rating'
+    && (!configuredEffectIntents || configuredEffectIntents.has(classification.intent));
+  const effect = !shouldApplyEffect
+    ? { applied: false, reason: classification.intent === 'rating' ? 'rating_continues_flow' : 'effect_not_selected' }
     : (!conversation || !inboundMessage
       ? { applied: false, reason: 'inbound_context_not_found' }
       : await marketingOptOutService.applyInboundContactClassification({
@@ -4964,6 +5039,32 @@ async function handleReviewResponseClassification(node, context, runtime) {
       effect_applied: effect.applied === true,
       effect,
     },
+    next_node_id: readOutputTarget(node, 'on_success'),
+  };
+}
+
+async function handleUnsubscribeCommunications(node, context, runtime) {
+  const config = isObject(node?.config) ? node.config : {};
+  const targets = await backfillRuntimeTargets(runtime?.execution, resolveRuntimeTargets(runtime?.execution, context));
+  const inboundMessageId = toIntOrNull(context?.last_response_context?.response_message_id);
+  const inboundMessage = inboundMessageId ? await Message.findByPk(inboundMessageId) : null;
+  const conversationId = targets.conversation_id || toIntOrNull(inboundMessage?.conversation_id);
+  const conversation = conversationId ? await Conversation.findByPk(conversationId) : null;
+  const scope = cleanString(resolveTemplateValue(config.communication_scope, context)) || 'marketing';
+  const result = await marketingOptOutService.applyCommunicationOptOut({
+    clinicId: targets.clinic_id,
+    conversation,
+    inboundMessage,
+    patientId: targets.patient_id,
+    scope,
+    source: 'automation_flow',
+  });
+  if (!result.applied) {
+    throw new Error(`communication_opt_out_not_applied:${result.reason || 'unknown'}`);
+  }
+  return {
+    kind: 'success',
+    output: { status: 'communications_unsubscribed', ...result },
     next_node_id: readOutputTarget(node, 'on_success'),
   };
 }
@@ -5105,9 +5206,7 @@ async function handleSendSystemNotification(node, context, runtime) {
   const conversationLink = cleanString(getByPath(notificationContext, 'system.patient_conversation_link'));
   const patientDetailLink = cleanString(getByPath(notificationContext, 'system.patient_detail_link'));
   const quickChatConversationId = toIntOrNull(getByPath(notificationContext, 'conversation.id')) || null;
-  const quickChatResponseMessageId = toIntOrNull(
-    getByPath(notificationContext, 'last_response_context.response_message_id')
-  ) || null;
+  const quickChatResponseMessageId = resolveLatestResponseMessageId(notificationContext) || null;
   const primaryLink = conversationLink || patientDetailLink || null;
   const createdNotifications = [];
   const resolvedNotifications = [];
@@ -5122,6 +5221,12 @@ async function handleSendSystemNotification(node, context, runtime) {
   ) || null;
   const replacePreviousPersistentAlerts = displayMode === 'persistent_alert'
     && resolveTemplateValue(config?.replace_previous_persistent_alerts, notificationContext) === true;
+  const conversationActionValue = cleanString(
+    resolveTemplateValue(config?.conversation_action, notificationContext)
+  );
+  const conversationAction = ['schedule_new_appointment'].includes(conversationActionValue)
+    ? conversationActionValue
+    : null;
 
   const humanReply = quickChatConversationId && quickChatResponseMessageId
     ? await findHumanReplyAfterMessage(quickChatConversationId, quickChatResponseMessageId)
@@ -5210,6 +5315,7 @@ async function handleSendSystemNotification(node, context, runtime) {
         clinicId,
         displayMode,
         presentationPreferenceKey,
+        conversationAction,
         requiresAcknowledgement: displayMode === 'persistent_alert',
       },
       clinicaId: clinicId,
@@ -5251,6 +5357,7 @@ async function handleSendSystemNotification(node, context, runtime) {
       quick_chat_conversation_id: quickChatConversationId,
       patient_conversation_link: conversationLink,
       patient_detail_link: patientDetailLink,
+      conversation_action: conversationAction,
       status: 'created',
     },
     next_node_id: readOutputTarget(node, 'on_success'),
@@ -6110,6 +6217,7 @@ async function processNode(node, context, runtime = {}) {
               : null,
             recipient_mode: recipientMode,
             sender_mode: senderMode,
+            communication_scope: resolveAutomationCommunicationScope(config, context),
             sender_origin_id: senderMode === 'specific_origin'
               ? (toIntOrNull(resolveTemplateValue(config?.sender_origin_id, context)) || null)
               : null,
@@ -6136,10 +6244,7 @@ async function processNode(node, context, runtime = {}) {
             status: 'simulated',
             simulated: true,
             message_preview: cleanString(resolveTemplateValue(config?.message_text, context)) || null,
-            source_message_id: toIntOrNull(
-              context?.trigger?.data?.latest_inbound_message_id
-              || context?.last_response_context?.response_message_id
-            ),
+            source_message_id: resolveLatestResponseMessageId(context),
             suppress_if_human_replied: parseBool(
               resolveTemplateValue(config?.suppress_if_human_replied, context),
               true
@@ -6223,17 +6328,36 @@ async function processNode(node, context, runtime = {}) {
 
     case 'action/process_review_response_classification': {
       if (simulation) {
+        const sourceNodeId = cleanString(resolveTemplateValue(config?.source_node_id, context));
+        const sourceOutput = sourceNodeId ? getByPath(context, `outputs.${sourceNodeId}`) : null;
         return {
           kind: 'success',
           output: {
             status: 'simulated',
-            response_intent: 'ambiguous',
-            response_rating: null,
+            response_intent: cleanString(sourceOutput?.response_intent || sourceOutput?.intent) || 'ambiguous',
+            response_rating: toIntOrNull(sourceOutput?.response_rating || sourceOutput?.rating),
+            confidence: Number(sourceOutput?.confidence || 0),
+            reason: cleanString(sourceOutput?.reason),
           },
           next_node_id: readOutputTarget(node, 'on_success'),
         };
       }
       return handleReviewResponseClassification(node, context, runtime);
+    }
+
+    case 'action/unsubscribe_communications': {
+      if (simulation) {
+        return {
+          kind: 'success',
+          output: {
+            status: 'simulated',
+            simulated: true,
+            communication_scope: cleanString(resolveTemplateValue(config?.communication_scope, context)) || 'marketing',
+          },
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
+      return handleUnsubscribeCommunications(node, context, runtime);
     }
 
     case 'action/send_email': {
@@ -6769,6 +6893,7 @@ async function resumeWaitingNode(execution, node, context, {
   responseMediaKind = null,
   responseMediaId = null,
   responseMediaMimeType = null,
+  responseBatchLoaded = false,
 }) {
   const nodeType = cleanString(node?.type) || '';
 
@@ -6784,8 +6909,12 @@ async function resumeWaitingNode(execution, node, context, {
       const waitingMeta = execution?.waiting_meta && typeof execution.waiting_meta === 'object'
         ? execution.waiting_meta
         : {};
-      const inboundMessageId = toIntOrNull(waitingMeta.last_inbound_message_id)
-        || toIntOrNull(inboundMessageIdOption);
+      const inboundMessageId = responseBatchLoaded
+        ? toIntOrNull(inboundMessageIdOption)
+        : (
+          toIntOrNull(inboundMessageIdOption)
+          || toIntOrNull(waitingMeta.last_inbound_message_id)
+        );
       const inboundMessage = inboundMessageId
         ? await Message.findByPk(inboundMessageId, {
             attributes: ['id', 'message_type', 'content', 'metadata', 'sent_at', 'createdAt'],
@@ -6796,21 +6925,15 @@ async function resumeWaitingNode(execution, node, context, {
       const effectiveResponseItems = Array.isArray(responseItems) ? responseItems : [];
       const inboundMetadata = isObject(inboundMessage?.metadata) ? inboundMessage.metadata : {};
       const inboundMedia = isObject(inboundMetadata.media) ? inboundMetadata.media : {};
-      const mediaKind = cleanString(
-        waitingMeta.last_inbound_media_kind
-        || responseMediaKind
-        || inboundMedia.kind
-      );
-      const mediaId = cleanString(
-        waitingMeta.last_inbound_media_id
-        || responseMediaId
-        || inboundMedia.id
-      );
-      const mediaMimeType = cleanString(
-        waitingMeta.last_inbound_media_mime_type
-        || responseMediaMimeType
-        || inboundMedia.mime_type
-      );
+      const mediaKind = cleanString(responseBatchLoaded
+        ? (responseMediaKind || inboundMedia.kind)
+        : (responseMediaKind || waitingMeta.last_inbound_media_kind || inboundMedia.kind));
+      const mediaId = cleanString(responseBatchLoaded
+        ? (responseMediaId || inboundMedia.id)
+        : (responseMediaId || waitingMeta.last_inbound_media_id || inboundMedia.id));
+      const mediaMimeType = cleanString(responseBatchLoaded
+        ? (responseMediaMimeType || inboundMedia.mime_type)
+        : (responseMediaMimeType || waitingMeta.last_inbound_media_mime_type || inboundMedia.mime_type));
       const inboundReaction = isObject(inboundMetadata.reaction) ? inboundMetadata.reaction : {};
       const listensTo = cleanString(waitingMeta.listens_to_node_id)
         || cleanString(node?.config?.listens_to_node_id);
@@ -7034,6 +7157,30 @@ function findClassifyIntentOutput(context = {}) {
   )) || null;
 }
 
+function findConversationActionOutput(context = {}) {
+  const outputs = context?.outputs && typeof context.outputs === 'object'
+    ? Object.values(context.outputs)
+    : [];
+  return [...outputs].reverse().find((output) => (
+    output && typeof output === 'object' && cleanString(output.conversation_action)
+  )) || null;
+}
+
+function findRebookingDecisionOutput(context = {}) {
+  const outputs = context?.outputs && typeof context.outputs === 'object'
+    ? Object.values(context.outputs)
+    : [];
+  const output = [...outputs].reverse().find((candidate) => (
+    candidate
+    && typeof candidate === 'object'
+    && Object.prototype.hasOwnProperty.call(candidate, 'quiere_nueva_cita')
+  ));
+  if (!output) return null;
+  return {
+    wantsNewAppointment: coerceAiBoolean(output.quiere_nueva_cita),
+  };
+}
+
 const CONFIRM_APPOINTMENT_BRANCHES = new Set([
   'branch_confirm_without_reply',
   'branch_confirm_needs_reply',
@@ -7129,13 +7276,35 @@ async function syncConversationAutomationStateAfterExecution(execution) {
   const executionStatus = cleanString(execution.status)?.toLowerCase();
   if (executionStatus === 'waiting') {
     if (cleanString(execution?.waiting_meta?.type) === 'delay/wait_response') {
+      const classification = findClassifyIntentOutput(context);
+      const normalized = classification
+        ? normalizeClassifyIntentOutput(classification, context)
+        : null;
+      const appointmentId = toIntOrNull(
+        context?.appointment?.id
+        || context?.appointment?.id_cita
+        || context?.trigger?.data?.appointment_id
+        || state.appointment_id
+      );
+      const appointment = appointmentId
+        ? await CitaPaciente.findByPk(appointmentId, { attributes: ['id_cita', 'estado'], raw: true })
+        : null;
       await conversationAutomationState.updateOwnedState({
         clinicId: execution.clinic_id,
         conversationId,
-        stage: 'collecting',
-        status: 'active',
+        stage: 'completed',
+        status: 'completed',
         executionId: execution.id,
-        deadlineAt: execution.wait_until || null,
+        deadlineAt: null,
+        appointmentId,
+        appointmentStatus: cleanString(
+          appointment?.estado || context?.appointment?.estado || state.appointment_status
+        ),
+        intent: normalized?.intencion_principal || state.intent,
+        possibleUrgency: normalized?.posible_urgencia ?? state.possible_urgency,
+        needsResponse: false,
+        manualActionRequired: false,
+        completedAt: new Date(),
       }, {
         expectedExecutionId: execution.id,
       });
@@ -7159,9 +7328,13 @@ async function syncConversationAutomationStateAfterExecution(execution) {
     ? normalizeClassifyIntentOutput(classification, context)
     : null;
   const confirmationOutcome = resolveConfirmAppointmentConversationOutcome(context);
+  const rebookingOutcome = findRebookingDecisionOutput(context);
+  const conversationAction = cleanString(findConversationActionOutput(context)?.conversation_action);
   const effectiveIntent = normalized || (confirmationOutcome
     ? { intencion_principal: confirmationOutcome.intent }
-    : null);
+    : (rebookingOutcome?.wantsNewAppointment === true
+      ? { intencion_principal: 'solicitar_nueva_cita' }
+      : null));
   const appointmentId = toIntOrNull(
     context?.appointment?.id
     || context?.appointment?.id_cita
@@ -7192,14 +7365,22 @@ async function syncConversationAutomationStateAfterExecution(execution) {
     && !appointmentIntentApplied
     && !appointmentIntentResolvedExternally;
   const manualActionRequired = appointmentStatus === 'cambio_solicitado'
+    || conversationAction === 'schedule_new_appointment'
     || persistedManualReason
     || (confirmationOutcome?.manualActionRequired === true && !humanReply)
     || normalized?.posible_urgencia === true
     || pendingResponse
     || normalized?.intencion_principal === 'otra'
+    || rebookingOutcome?.wantsNewAppointment === true
     || (
-      normalized
-      && ['confirmar_cita', 'cancelar_cita', 'solicitar_cambio_cita'].includes(normalized.intencion_principal)
+      context?.human_takeover?.active === true
+      && !normalized
+      && !confirmationOutcome
+      && !rebookingOutcome
+    )
+    || (
+      effectiveIntent
+      && ['confirmar_cita', 'cancelar_cita', 'solicitar_cambio_cita'].includes(effectiveIntent.intencion_principal)
       && !appointmentIntentApplied
       && !appointmentIntentResolvedExternally
     );
@@ -7212,7 +7393,14 @@ async function syncConversationAutomationStateAfterExecution(execution) {
       executionId: execution.id,
       appointmentId,
       appointmentStatus,
-      intent: normalized?.intencion_principal || confirmationOutcome?.intent || state.intent,
+      intent: conversationAction === 'schedule_new_appointment'
+        ? 'solicitar_nueva_cita'
+        : (
+          normalized?.intencion_principal
+          || confirmationOutcome?.intent
+          || (rebookingOutcome?.wantsNewAppointment === true ? 'solicitar_nueva_cita' : null)
+          || state.intent
+        ),
       possibleUrgency: normalized?.posible_urgencia ?? (confirmationOutcome ? false : state.possible_urgency),
       needsResponse: pendingResponse,
       manualActionRequired: true,
@@ -7226,10 +7414,14 @@ async function syncConversationAutomationStateAfterExecution(execution) {
     clinicId: execution.clinic_id,
     conversationId,
     appointmentStatus,
-    intent: normalized?.intencion_principal || confirmationOutcome?.intent || undefined,
-    possibleUrgency: normalized ? normalized.posible_urgencia : (confirmationOutcome ? false : undefined),
-    needsResponse: normalized || confirmationOutcome ? false : undefined,
-    failureCode: normalized || confirmationOutcome ? null : undefined,
+    intent: normalized?.intencion_principal
+      || confirmationOutcome?.intent
+      || (rebookingOutcome ? (rebookingOutcome.wantsNewAppointment ? 'solicitar_nueva_cita' : 'otra') : undefined),
+    possibleUrgency: normalized
+      ? normalized.posible_urgencia
+      : (confirmationOutcome || rebookingOutcome ? false : undefined),
+    needsResponse: normalized || confirmationOutcome || rebookingOutcome ? false : undefined,
+    failureCode: normalized || confirmationOutcome || rebookingOutcome ? null : undefined,
   }, {
     expectedExecutionId: execution.id,
   });
@@ -7238,6 +7430,7 @@ async function syncConversationAutomationStateAfterExecution(execution) {
 async function runExecution(executionId, options = {}) {
   const maxSteps = Number.isInteger(options.maxSteps) ? options.maxSteps : 100;
   const resumeMode = cleanString(options.resumeMode) || null;
+  const stopBeforeSideEffects = options.stopBeforeSideEffects === true;
 
   const execution = await FlowExecutionV2.findByPk(executionId, {
     include: [{
@@ -7292,6 +7485,13 @@ async function runExecution(executionId, options = {}) {
   }
   if (!context.outputs || typeof context.outputs !== 'object') {
     context.outputs = {};
+  }
+  if (stopBeforeSideEffects) {
+    context.human_takeover = {
+      active: true,
+      human_message_id: toIntOrNull(options.humanTakeoverMessageId),
+      detected_at: new Date().toISOString(),
+    };
   }
 
   if (execution.status === 'waiting' && resumeMode) {
@@ -7353,6 +7553,7 @@ async function runExecution(executionId, options = {}) {
         responseMediaKind: options.responseMediaKind,
         responseMediaId: options.responseMediaId,
         responseMediaMimeType: options.responseMediaMimeType,
+        responseBatchLoaded: options.responseBatchLoaded === true,
       });
 
       context = resumeInfo.context;
@@ -7390,6 +7591,22 @@ async function runExecution(executionId, options = {}) {
         last_error: `node_not_found:${currentNodeId}`,
       }, 'flow_execution:updated');
       localStatus = 'failed';
+      break;
+    }
+
+    if (
+      stopBeforeSideEffects
+      && !['condition/ai_analysis', 'condition/field_check'].includes(cleanString(node.type))
+    ) {
+      await updateExecutionAndEmit(execution, {
+        status: 'cancelled',
+        current_node_id: null,
+        context,
+        wait_until: null,
+        waiting_meta: null,
+        last_error: 'human_reply_before_automation_side_effects',
+      }, 'flow_execution:cancelled');
+      localStatus = 'cancelled';
       break;
     }
 
@@ -7629,4 +7846,7 @@ module.exports = {
   _resolveAiAnalysisNextNode: resolveAiAnalysisNextNode,
   _handleChangeStatus: handleChangeStatus,
   resolveOperationalSubroleTargets,
+  _buildReplyWhatsappConfig: buildReplyWhatsappConfig,
+  _resolveLatestResponseMessageId: resolveLatestResponseMessageId,
+  _resolveAutomationCommunicationScope: resolveAutomationCommunicationScope,
 };

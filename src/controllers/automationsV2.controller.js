@@ -512,7 +512,7 @@ async function buildHydratedExecutionContext({
           attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica', 'direccion', 'telefono', 'url_web', 'url_ficha_local', 'configuracion'],
         },
       ],
-      attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'created_by', 'doctor_id', 'estado', 'inicio', 'fin', 'titulo', 'motivo', 'tipo_cita', 'created_at'],
+      attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'created_by', 'doctor_id', 'estado', 'inicio', 'fin', 'titulo', 'motivo', 'tipo_cita', 'reschedule_reason', 'created_at', 'updated_at'],
     });
 
     if (cita) {
@@ -533,6 +533,8 @@ async function buildHydratedExecutionContext({
         inicio: citaJson.inicio || null,
         fin: citaJson.fin || null,
         created_at: citaJson.created_at || null,
+        updated_at: citaJson.updated_at || null,
+        reschedule_reason: cleanString(citaJson.reschedule_reason),
         fecha: formatDateEs(citaJson.inicio),
         hora: formatTimeEs(citaJson.inicio),
         titulo: cleanString(citaJson.titulo),
@@ -788,6 +790,20 @@ async function buildHydratedExecutionContext({
     cita_id: parseIntOrNull(out?.appointment?.id_cita) || parseIntOrNull(out?.cita?.id_cita) || null,
     appointment_created_at: out?.appointment?.created_at || out?.cita?.created_at || null,
     created_at: out?.appointment?.created_at || out?.cita?.created_at || out?.trigger?.data?.created_at || null,
+    appointment_updated_at: out?.trigger?.data?.appointment_updated_at
+      || out?.trigger?.data?.updated_at
+      || out?.appointment?.updated_at
+      || out?.cita?.updated_at
+      || null,
+    updated_at: out?.trigger?.data?.updated_at
+      || out?.trigger?.data?.appointment_updated_at
+      || out?.appointment?.updated_at
+      || out?.cita?.updated_at
+      || null,
+    reschedule_reason: cleanString(out?.trigger?.data?.reschedule_reason)
+      || cleanString(out?.appointment?.reschedule_reason)
+      || cleanString(out?.cita?.reschedule_reason)
+      || null,
     patient_id: parseIntOrNull(out?.patient?.id_paciente) || parseIntOrNull(out?.paciente?.id_paciente) || null,
     paciente_id: parseIntOrNull(out?.patient?.id_paciente) || parseIntOrNull(out?.paciente?.id_paciente) || null,
     clinic_id: parseIntOrNull(out?.clinic?.id_clinica) || parseIntOrNull(out?.clinica?.id_clinica) || null,
@@ -1046,6 +1062,7 @@ const NODE_TYPES_V2 = [
       recipient_to: '',
       sender_mode: 'clinic_default',
       sender_origin_id: null,
+      communication_scope: 'care',
       quiet_hours_enabled: true,
       suppress_if_human_replied: false,
       outside_send_window_policy: 'schedule_next_window',
@@ -1074,6 +1091,7 @@ const NODE_TYPES_V2 = [
         options: ['clinic_default', 'specific_origin'],
       },
       { key: 'sender_origin_id', label: 'Origen específico (ID phone)', input_type: 'number', required: false },
+      { key: 'communication_scope', label: 'Tipo de comunicación', input_type: 'select', required: true, options: ['care', 'marketing'] },
       { key: 'quiet_hours_enabled', label: 'No enviar entre las 22 y las 7h', input_type: 'boolean', required: false },
       {
         key: 'suppress_if_human_replied',
@@ -1153,7 +1171,7 @@ const NODE_TYPES_V2 = [
     category: 'action',
     label: 'Responder según valoración',
     description: 'Responde dentro de la ventana de WhatsApp: si valora 5/5 envía Google; si valora 1-4 pide el motivo en privado.',
-    output_keys: ['on_success'],
+    output_keys: ['on_success', 'on_fail'],
     runtime_status: 'real',
     default_config: {
       followup_kind: 'google_review',
@@ -1177,12 +1195,25 @@ const NODE_TYPES_V2 = [
     type: 'action/process_review_response_classification',
     category: 'action',
     label: 'Aplicar clasificación de respuesta',
-    description: 'Registra una baja, un número erróneo, un rechazo de reseña o una revisión manual sin alterar las valoraciones válidas.',
-    output_keys: ['on_success'],
+    description: 'Registra los efectos seleccionados de la clasificación, como número erróneo o rechazo de reseña. Las bajas se aplican con su nodo específico.',
+    output_keys: ['on_success', 'on_fail'],
     runtime_status: 'real',
-    default_config: { source_node_id: '' },
+    default_config: { source_node_id: '', effect_intents: ['marketing_opt_out', 'wrong_recipient', 'review_refusal', 'ambiguous'] },
     config_schema: [
       { key: 'source_node_id', label: 'Nodo de análisis', input_type: 'string', required: true },
+      { key: 'effect_intents', label: 'Efectos que debe aplicar', input_type: 'json', required: false },
+    ],
+  },
+  {
+    type: 'action/unsubscribe_communications',
+    category: 'action',
+    label: 'Dar de baja comunicaciones',
+    description: 'Registra la petición del paciente y bloquea futuras comunicaciones automáticas del alcance seleccionado.',
+    output_keys: ['on_success', 'on_fail'],
+    runtime_status: 'real',
+    default_config: { communication_scope: 'marketing' },
+    config_schema: [
+      { key: 'communication_scope', label: 'Comunicaciones que se dan de baja', input_type: 'select', required: true, options: ['marketing', 'care', 'all'] },
     ],
   },
   {
@@ -2041,6 +2072,42 @@ const AI_PRESET_CANONICAL_CONFIG = {
     ...CLASSIFY_INTENT_PRESET_CONFIG,
     legacy_instructions: [],
     legacy_source_sets: [],
+  },
+  review_response_classifier: {
+    preset_contract_version: 1,
+    instruction: 'Interpreta exclusivamente patient_message_batch como respuesta a una solicitud de valoración de la clínica. Distingue una valoración de 1 a 5, una solicitud de baja comercial, un número equivocado, el rechazo a dejar una reseña o una respuesta no concluyente. No inventes una puntuación ni uses mensajes anteriores como si fueran la respuesta actual. Devuelve exactamente los campos solicitados y un motivo breve.',
+    context_sources: [
+      { key: 'patient_message_batch', path: '{{last_response_context}}' },
+    ],
+    output_fields: [
+      {
+        name: 'response_intent',
+        type: 'string',
+        description: 'Tipo de respuesta del paciente a la solicitud de valoración.',
+        allowed_values: ['rating', 'marketing_opt_out', 'wrong_recipient', 'review_refusal', 'ambiguous'],
+      },
+      {
+        name: 'response_rating',
+        type: 'number',
+        description: 'Valoración entera de 1 a 5; devuelve 0 cuando no exista una valoración clara.',
+      },
+      {
+        name: 'confidence',
+        type: 'number',
+        description: 'Confianza de la clasificación entre 0 y 1.',
+      },
+      {
+        name: 'reason',
+        type: 'string',
+        description: 'Motivo breve de la clasificación sin información clínica innecesaria.',
+      },
+    ],
+    legacy_instructions: [
+      'Clasifica la intención de la respuesta del paciente a la solicitud de reseña.',
+    ],
+    legacy_source_sets: [
+      ['{{last_response_context.response_text}}'],
+    ],
   },
   summarize_conversation: {
     instruction: 'Resume la conversación de hoy entre clínica y paciente en máximo 2 frases. Identifica el tema principal y si quedó alguna acción pendiente.',
@@ -3409,6 +3476,14 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
         'node_config_invalid',
         `El nodo ${nodeId} requiere una severidad válida`,
         { node_id: nodeId, node_type: nodeType, key: 'alert_level', value: alertLevel }
+      ));
+    }
+    const conversationAction = cleanString(config.conversation_action) || 'none';
+    if (!['none', 'schedule_new_appointment'].includes(conversationAction)) {
+      errors.push(buildValidationError(
+        'node_config_invalid',
+        `El nodo ${nodeId} requiere una acción de conversación válida`,
+        { node_id: nodeId, node_type: nodeType, key: 'conversation_action', value: conversationAction }
       ));
     }
   }

@@ -2385,6 +2385,16 @@ function isReviewRatingTriggerMessage(triggerMessage) {
   return normalizeKey(metadata.dispatch_context) === 'review_request' && isReviewTemplateUsage(metadata.template_usage);
 }
 
+function shouldScheduleReviewReminder({ message, list, mappedStatus }) {
+  const metadata = asPlainObject(message?.metadata);
+  return mappedStatus === 'sent'
+    && !!list
+    && isReviewRequestList(list)
+    && isReviewRatingTriggerMessage(message)
+    && normalizeKey(metadata.kind) !== 'mass_campaign_test'
+    && normalizeDispatchContext(metadata.dispatch_context) !== 'review_reminder';
+}
+
 async function storeReviewPrivateFeedbackEvent({ list, item, inboundMessage, triggerMessage, occurredAt, rating, content, source = 'private_feedback_reply' }) {
   const normalizedContent = normalizeText(content);
   if (!isReviewRequestList(list) || !normalizedContent) return { applied: false, reason: 'not_review_feedback' };
@@ -9326,11 +9336,7 @@ async function materializeMessageStatusFromWebhook({ message, status, mappedStat
     occurred_at: eventAt,
   });
   const list = await MarketingPatientList.findByPk(listId);
-  if (mappedStatus === 'sent'
-    && list
-    && isReviewRequestList(list)
-    && isReviewRatingTriggerMessage(message)
-    && normalizeDispatchContext(message?.metadata?.dispatch_context) !== 'review_reminder') {
+  if (shouldScheduleReviewReminder({ message, list, mappedStatus })) {
     await enqueueReviewReminderJob({
       list,
       item,
@@ -9849,5 +9855,6 @@ module.exports = {
     computeCounters,
     mapReviewItemsFromImportedList,
     parseReviewImportListId,
+    shouldScheduleReviewReminder,
   },
 };

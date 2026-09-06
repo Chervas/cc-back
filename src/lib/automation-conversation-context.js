@@ -72,7 +72,23 @@ function resolveMessageAuthor(message) {
   return 'Sistema';
 }
 
+function isRevokedMessage(message) {
+  const metadata = message?.metadata && typeof message.metadata === 'object'
+    ? message.metadata
+    : {};
+  const coexistence = metadata.coexistence && typeof metadata.coexistence === 'object'
+    ? metadata.coexistence
+    : {};
+  return Boolean(
+    cleanString(metadata.revoked_at)
+    || (metadata.revoke && typeof metadata.revoke === 'object')
+    || cleanString(coexistence.revoked_at)
+    || cleanString(coexistence.last_event)?.toLowerCase() === 'revoke'
+  );
+}
+
 function extractMessageText(message) {
+  if (isRevokedMessage(message)) return null;
   const content = cleanString(message?.content);
   if (content) return content;
 
@@ -93,6 +109,7 @@ function extractMessageText(message) {
 }
 
 function formatInboundAnalysisText(message) {
+  if (isRevokedMessage(message)) return null;
   if (cleanString(message?.message_type)?.toLowerCase() === 'reaction') {
     const reaction = message?.metadata?.reaction || {};
     const emoji = cleanString(reaction.emoji);
@@ -112,11 +129,13 @@ function formatInboundAnalysisText(message) {
 }
 
 function formatInboundResponseText(message) {
+  if (isRevokedMessage(message)) return null;
   if (cleanString(message?.message_type)?.toLowerCase() === 'reaction') return null;
   return cleanString(message?.content);
 }
 
 function formatInboundAnalysisItem(message) {
+  if (isRevokedMessage(message)) return null;
   const messageId = toIntOrNull(message?.id);
   const messageType = cleanString(message?.message_type)?.toLowerCase();
   const metadata = message?.metadata && typeof message.metadata === 'object'
@@ -321,4 +340,5 @@ module.exports = {
   formatInboundAnalysisItem,
   formatInboundAnalysisText,
   formatInboundResponseText,
+  isRevokedMessage,
 };
