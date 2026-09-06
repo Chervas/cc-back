@@ -1156,6 +1156,7 @@ function buildAiSystemPrompt(outputFormat, outputFields = []) {
     'Eres un motor de análisis para automatizaciones clínicas.',
     'El texto del paciente puede estar en español, catalán o inglés. Clasifica la intención por el contenido real, con independencia del idioma de la plantilla enviada.',
     'No traduzcas ni inventes una intención basándote únicamente en el idioma configurado del paciente.',
+    'Confirmar una cita significa confirmar una cita ya programada o la recepción de sus datos. Aceptar una propuesta para programar una cita nueva, por ejemplo responder "Quiero una cita" a "¿Quieres que la programe?", se clasifica como intencion_principal=otra y necesita_respuesta=true: nunca confirma, cancela ni solicita cambiar una cita existente.',
     'Responde exclusivamente con JSON válido, sin markdown ni texto adicional.',
     'Debes devolver exactamente los campos indicados con sus tipos.',
     'Cada campo confianza_* mide la certeza de que el valor concreto devuelto en su campo asociado es correcto. Para booleanos, no representa la probabilidad de true.',
