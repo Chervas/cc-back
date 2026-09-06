@@ -227,6 +227,51 @@ async function run() {
     db.WhatsappTemplate.findOne = originalTemplateFindOne;
     db.WhatsappTemplate.findAll = originalTemplateFindAll;
   }
+
+  const originalFlowTemplateFindAll = db.AutomationFlowTemplateV2.findAll;
+  const flowTemplate = {
+    id: 1503,
+    public_id: 'flw_lead_auto_reply_clinic_19',
+    version: 2,
+    nodes: [{
+      id: 'N7',
+      type: 'action/send_whatsapp',
+      config: {
+        template_id: 1945,
+        template_name: 'clinicaclick_lead_primera_visita_con_llamada_v23',
+        catalog_template_id: 109,
+        variables: { 1: '{{lead.nombre}}', 2: '{{clinic.nombre}}' },
+      },
+    }],
+    async save() {},
+  };
+  try {
+    db.AutomationFlowTemplateV2.findAll = async () => [flowTemplate];
+    await templateAutomationSync.recomposeAutomationsUsingTemplate({
+      templateInstance: {
+        id: 1949,
+        name: 'clinicaclick_lead_primera_visita_con_llamada_v24',
+        language: 'es',
+        catalog_template_id: 109,
+        clinic_id: 35,
+        catalog: {
+          id: 109,
+          locale: 'es',
+          variables: [
+            { name: 'nombre_paciente', position: 1 },
+            { name: 'nombre_clinica', position: 2 },
+          ],
+        },
+      },
+      logger: { info() {} },
+    });
+    const preservedConfig = flowTemplate.nodes[0].config;
+    assert.equal(preservedConfig.template_id, 1945);
+    assert.equal(preservedConfig.template_name, 'clinicaclick_lead_primera_visita_con_llamada_v23');
+    assert.equal(preservedConfig.catalog_template_id, 109);
+  } finally {
+    db.AutomationFlowTemplateV2.findAll = originalFlowTemplateFindAll;
+  }
   assert.deepEqual(getUnsupportedLeadTemplateVariables({
     variables: [{ name: 'nombre_paciente' }, { name: 'nombre_clinica' }],
   }), []);

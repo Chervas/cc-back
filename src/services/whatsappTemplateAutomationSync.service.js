@@ -106,25 +106,35 @@ async function recomposeAutomationsUsingTemplate({ templateInstance, logger = co
       }
 
       const config = isObject(node.config) ? node.config : {};
-      const usesPrimaryTemplate = (
+      const primaryMatchesReference = (
         (templateId && normalizeTemplateId(config.template_id) === String(templateId))
         || (!!templateName && cleanString(config.template_name).toLowerCase() === String(templateName).trim().toLowerCase())
-        || (Number.isFinite(Number(config.catalog_template_id)) && Number(config.catalog_template_id) === Number(catalogTemplateId))
       );
-      const usesFallbackTemplate = (
+      const primaryMatchesCatalog = Number.isFinite(catalogTemplateId) && catalogTemplateId > 0
+        && Number.isFinite(Number(config.catalog_template_id))
+        && Number(config.catalog_template_id) === Number(catalogTemplateId);
+      const usesPrimaryTemplate = primaryMatchesReference || primaryMatchesCatalog;
+      const fallbackMatchesReference = (
         (templateId && normalizeTemplateId(config.fallback_template_id) === String(templateId))
         || (!!templateName && cleanString(config.fallback_template_name).toLowerCase() === String(templateName).trim().toLowerCase())
-        || (Number.isFinite(Number(config.fallback_catalog_template_id)) && Number(config.fallback_catalog_template_id) === Number(catalogTemplateId))
       );
+      const fallbackMatchesCatalog = Number.isFinite(catalogTemplateId) && catalogTemplateId > 0
+        && Number.isFinite(Number(config.fallback_catalog_template_id))
+        && Number(config.fallback_catalog_template_id) === Number(catalogTemplateId);
+      const usesFallbackTemplate = fallbackMatchesReference || fallbackMatchesCatalog;
       const accessGuidanceVariant = isObject(config.access_guidance_variant)
         ? config.access_guidance_variant
         : null;
-      const usesAccessGuidanceVariant = !!accessGuidanceVariant && (
+      const accessGuidanceMatchesReference = !!accessGuidanceVariant && (
         (templateId && normalizeTemplateId(accessGuidanceVariant.template_id) === String(templateId))
         || (!!templateName && cleanString(accessGuidanceVariant.template_name).toLowerCase() === String(templateName).trim().toLowerCase())
-        || (Number.isFinite(Number(accessGuidanceVariant.catalog_template_id))
-          && Number(accessGuidanceVariant.catalog_template_id) === Number(catalogTemplateId))
       );
+      const accessGuidanceMatchesCatalog = !!accessGuidanceVariant
+        && Number.isFinite(catalogTemplateId)
+        && catalogTemplateId > 0
+        && Number.isFinite(Number(accessGuidanceVariant.catalog_template_id))
+        && Number(accessGuidanceVariant.catalog_template_id) === Number(catalogTemplateId);
+      const usesAccessGuidanceVariant = accessGuidanceMatchesReference || accessGuidanceMatchesCatalog;
 
       const namedBindings = usesPrimaryTemplate
         ? buildEffectiveNamedBindings(
@@ -167,10 +177,10 @@ async function recomposeAutomationsUsingTemplate({ templateInstance, logger = co
       const nextAccessGuidanceVariant = accessGuidanceVariant
         ? {
             ...accessGuidanceVariant,
-            template_id: usesAccessGuidanceVariant && Number.isFinite(templateId) && templateId > 0
+            template_id: accessGuidanceMatchesReference && Number.isFinite(templateId) && templateId > 0
               ? String(templateId)
               : (accessGuidanceVariant.template_id || ''),
-            template_name: usesAccessGuidanceVariant
+            template_name: accessGuidanceMatchesReference
               ? (templateName || accessGuidanceVariant.template_name || '')
               : (accessGuidanceVariant.template_name || ''),
             catalog_template_id: usesAccessGuidanceVariant && Number.isFinite(catalogTemplateId) && catalogTemplateId > 0
@@ -183,10 +193,10 @@ async function recomposeAutomationsUsingTemplate({ templateInstance, logger = co
 
       const nextConfig = {
         ...config,
-        template_id: usesPrimaryTemplate && Number.isFinite(templateId) && templateId > 0
+        template_id: primaryMatchesReference && Number.isFinite(templateId) && templateId > 0
           ? String(templateId)
           : config.template_id,
-        template_name: usesPrimaryTemplate
+        template_name: primaryMatchesReference
           ? (templateName || config.template_name || '')
           : (config.template_name || ''),
         catalog_template_id: usesPrimaryTemplate && Number.isFinite(catalogTemplateId) && catalogTemplateId > 0
@@ -194,10 +204,10 @@ async function recomposeAutomationsUsingTemplate({ templateInstance, logger = co
           : (config.catalog_template_id || null),
         variables_named: namedBindings,
         variables: positionalBindings,
-        fallback_template_id: usesFallbackTemplate && Number.isFinite(templateId) && templateId > 0
+        fallback_template_id: fallbackMatchesReference && Number.isFinite(templateId) && templateId > 0
           ? String(templateId)
           : (config.fallback_template_id || ''),
-        fallback_template_name: usesFallbackTemplate
+        fallback_template_name: fallbackMatchesReference
           ? (templateName || config.fallback_template_name || '')
           : (config.fallback_template_name || ''),
         fallback_catalog_template_id: usesFallbackTemplate && Number.isFinite(catalogTemplateId) && catalogTemplateId > 0
