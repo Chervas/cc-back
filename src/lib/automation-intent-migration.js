@@ -5,6 +5,7 @@ const {
 } = require('./automation-intent-contract');
 
 const INTENT_MIGRATION_KEY = 'canonical_appointment_intent_v1';
+const BENIGN_ACKNOWLEDGEMENT_EXIT_KEY = 'canonical_benign_acknowledgement_exit_v1';
 const LEGACY_EXECUTION_ALLOWLIST_KEY = 'legacy_appointment_intent_v1';
 const HISTORICAL_INTENT_PRESETS = new Set([
   'confirm_appointment',
@@ -186,6 +187,142 @@ function markCanonicalConfirmationReplySuppression(rawNodes) {
     : { changed: false, marked: 0, nodes: rawNodes };
 }
 
+function markCanonicalBenignAcknowledgementExit(rawNodes, options = {}) {
+  const nodes = clone(Array.isArray(rawNodes) ? rawNodes : []);
+  const nextId = buildNodeIdFactory(nodes);
+  const additions = [];
+  let patched = 0;
+
+  const isIntentCheck = (node, aiNodeId, intent) => {
+    const ref = node?.config?.left_ref || {};
+    return node?.type === 'condition/field_check'
+      && cleanString(ref.source) === 'node_output'
+      && cleanString(ref.node_id) === cleanString(aiNodeId)
+      && cleanString(ref.path) === 'intencion_principal'
+      && cleanString(node?.config?.operator || 'equals') === 'equals'
+      && cleanString(node?.config?.right_value) === intent;
+  };
+  const isPendingResponseCheck = (node, aiNodeId) => {
+    const ref = node?.config?.left_ref || {};
+    return node?.type === 'condition/field_check'
+      && cleanString(ref.source) === 'node_output'
+      && cleanString(ref.node_id) === cleanString(aiNodeId)
+      && cleanString(ref.path) === 'necesita_respuesta'
+      && cleanString(node?.config?.operator || 'equals') === 'equals'
+      && node?.config?.right_value === false
+      && cleanString(node?.config?.migration_key) === BENIGN_ACKNOWLEDGEMENT_EXIT_KEY;
+  };
+
+  const buildPendingResponseCheck = ({ id, aiNodeId, reviewTarget, position }) => ({
+    id,
+    type: 'condition/field_check',
+    config: {
+      mode: 'simple',
+      left_ref: {
+        source: 'node_output',
+        node_id: aiNodeId,
+        path: 'necesita_respuesta',
+        value_type: 'boolean',
+        label: 'Necesita respuesta de la clinica',
+      },
+      operator: 'equals',
+      right_value: false,
+      migration_key: BENIGN_ACKNOWLEDGEMENT_EXIT_KEY,
+    },
+    outputs: {
+      on_true: null,
+      on_false: reviewTarget,
+    },
+    position,
+  });
+
+  const canonicalAiNodes = nodes.filter((node) => (
+    node?.type === 'condition/ai_analysis'
+    && cleanString(node?.config?.preset_key) === 'classify_intent'
+    && (
+      cleanString(node?.config?.migration_key) === INTENT_MIGRATION_KEY
+      || options.includeUnmarked === true
+    )
+  ));
+
+  for (const aiNode of canonicalAiNodes) {
+    const existingAcknowledgementCheck = [...nodes, ...additions].find((node) => (
+      isIntentCheck(node, aiNode.id, 'agradecimiento')
+      && cleanString(node?.config?.migration_key) === BENIGN_ACKNOWLEDGEMENT_EXIT_KEY
+    ));
+    if (existingAcknowledgementCheck) {
+      const existingPendingResponseCheck = [...nodes, ...additions].find((node) => (
+        isPendingResponseCheck(node, aiNode.id)
+        && cleanString(node.id) === cleanString(existingAcknowledgementCheck?.outputs?.on_true)
+      ));
+      if (existingPendingResponseCheck) continue;
+
+      const reviewTarget = cleanString(existingAcknowledgementCheck?.outputs?.on_false) || null;
+      if (!reviewTarget) continue;
+      const pendingResponseCheckId = nextId();
+      existingAcknowledgementCheck.outputs = {
+        ...(existingAcknowledgementCheck.outputs || {}),
+        on_true: pendingResponseCheckId,
+      };
+      additions.push(buildPendingResponseCheck({
+        id: pendingResponseCheckId,
+        aiNodeId: aiNode.id,
+        reviewTarget,
+        position: positionNear(existingAcknowledgementCheck, 1, 1),
+      }));
+      patched += 1;
+      continue;
+    }
+
+    const changeChecks = nodes.filter((node) => (
+      isIntentCheck(node, aiNode.id, 'solicitar_cambio_cita')
+    ));
+    for (const changeCheck of changeChecks) {
+      const reviewTarget = cleanString(changeCheck?.outputs?.on_false) || null;
+      if (!reviewTarget) continue;
+      const acknowledgementCheckId = nextId();
+      const pendingResponseCheckId = nextId();
+      changeCheck.outputs = {
+        ...(changeCheck.outputs || {}),
+        on_false: acknowledgementCheckId,
+      };
+      additions.push({
+        id: acknowledgementCheckId,
+        type: 'condition/field_check',
+        config: {
+          mode: 'simple',
+          left_ref: {
+            source: 'node_output',
+            node_id: aiNode.id,
+            path: 'intencion_principal',
+            value_type: 'string',
+            label: 'Intencion del paciente',
+          },
+          operator: 'equals',
+          right_value: 'agradecimiento',
+          migration_key: BENIGN_ACKNOWLEDGEMENT_EXIT_KEY,
+        },
+        outputs: {
+          on_true: pendingResponseCheckId,
+          on_false: reviewTarget,
+        },
+        position: positionNear(changeCheck, 1, 1),
+      });
+      additions.push(buildPendingResponseCheck({
+        id: pendingResponseCheckId,
+        aiNodeId: aiNode.id,
+        reviewTarget,
+        position: positionNear(changeCheck, 2, 1),
+      }));
+      patched += 1;
+    }
+  }
+
+  return patched
+    ? { changed: true, patched, nodes: pruneUnreachableNodes([...nodes, ...additions]) }
+    : { changed: false, patched: 0, nodes: rawNodes };
+}
+
 function pruneUnreachableNodes(nodes) {
   const nodeMap = new Map(nodes.map((node) => [cleanString(node?.id), node]));
   const roots = nodes.filter((node) => cleanString(node?.type).startsWith('trigger/')).map((node) => cleanString(node.id));
@@ -347,7 +484,7 @@ function transformLegacyIntentNodes(rawNodes) {
         id: changeReplyId,
         type: 'action/reply_message',
         config: {
-          message_text: 'Gracias por avisarnos. Hemos anotado que quieres cambiar tu cita. No recibiras mas recordatorios mientras recepcion revisa tu solicitud. Te contactaremos para ofrecerte otra hora.',
+          message_text: 'Gracias por avisarnos. Revisamos la agenda y te decimos la disponibilidad cuanto antes.',
           suppress_if_human_replied: true,
         },
         outputs: { on_success: changeNotifyId, on_fail: changeNotifyId },
@@ -382,7 +519,12 @@ function transformLegacyIntentNodes(rawNodes) {
       },
     };
   });
-  return { changed: true, replaced, nodes: migrated };
+  const acknowledgementExit = markCanonicalBenignAcknowledgementExit(migrated);
+  return {
+    changed: true,
+    replaced,
+    nodes: acknowledgementExit.changed ? acknowledgementExit.nodes : migrated,
+  };
 }
 
 function hasCanonicalIntentMigration(rawNodes) {
@@ -409,7 +551,7 @@ function buildMessageReceivedTemplateNodes() {
     onFalse,
     position: { x, y },
   });
-  return [
+  const nodes = [
     {
       id: 'N1',
       type: 'trigger/message_received',
@@ -446,7 +588,7 @@ function buildMessageReceivedTemplateNodes() {
       id: 'N8',
       type: 'action/reply_message',
       config: {
-        message_text: 'Gracias. Hemos registrado la confirmacion de tu cita y dejamos tu pregunta pendiente para recepcion.',
+        message_text: 'Gracias. Hemos registrado la confirmación de tu cita y dejamos tu pregunta pendiente para recepción.',
         suppress_if_human_replied: true,
       },
       outputs: { on_success: 'N20', on_fail: 'N20' },
@@ -484,7 +626,7 @@ function buildMessageReceivedTemplateNodes() {
       id: 'N16',
       type: 'action/reply_message',
       config: {
-        message_text: 'Gracias por avisarnos. Hemos anotado que quieres cambiar tu cita. No recibiras mas recordatorios mientras recepcion revisa tu solicitud. La clinica esta cerrada ahora; te contactaremos cuando vuelva a abrir para ofrecerte otra hora.',
+        message_text: 'Gracias por avisarnos. Revisamos la agenda y te decimos la disponibilidad cuanto antes.',
         suppress_if_human_replied: true,
       },
       outputs: { on_success: 'N17', on_fail: 'N17' },
@@ -507,7 +649,7 @@ function buildMessageReceivedTemplateNodes() {
       id: 'N19',
       type: 'action/reply_message',
       config: {
-        message_text: 'Gracias por escribirnos. La clinica esta cerrada ahora. Hemos dejado tu mensaje pendiente para recepcion y te responderemos cuando vuelva a abrir.',
+        message_text: '¡Hola! La clínica no está abierta ahora mismo y no te puedo responder, pero te contestaremos cuanto antes.',
         suppress_if_human_replied: true,
       },
       outputs: { on_success: 'N20', on_fail: 'N20' },
@@ -518,7 +660,7 @@ function buildMessageReceivedTemplateNodes() {
       type: 'action/send_system_notification',
       config: {
         title: 'Mensaje pendiente de revision',
-        message: '{{paciente.nombre}} ha escrito fuera de horario y necesita revision de recepcion.',
+        message: '{{paciente.nombre}} ha escrito fuera de horario y necesita revisión de recepción.',
         assignee_type: 'role',
         assignee_id: 'personaldeclinica',
         subrole: 'Recepcion / Comercial ventas',
@@ -530,7 +672,7 @@ function buildMessageReceivedTemplateNodes() {
       id: 'N21',
       type: 'action/reply_message',
       config: {
-        message_text: 'Gracias por escribirnos. Tu mensaje queda marcado para revision prioritaria cuando el equipo este disponible. Si se trata de una urgencia, contacta con los servicios de emergencia.',
+        message_text: '¡Hola! La clínica no está abierta ahora mismo. Hemos marcado tu mensaje para revisión prioritaria y te responderemos cuanto antes.',
         suppress_if_human_replied: true,
       },
       outputs: { on_success: 'N22', on_fail: 'N22' },
@@ -540,8 +682,8 @@ function buildMessageReceivedTemplateNodes() {
       id: 'N22',
       type: 'action/send_system_notification',
       config: {
-        title: 'Posible mensaje urgente fuera de horario',
-        message: 'La IA ha marcado una conversacion para revision prioritaria. Abre el chat y valida el contexto; no se ha realizado ningun diagnostico.',
+        title: '{{paciente.nombre}} necesita respuesta urgente',
+        message: 'Ha enviado un mensaje relacionado con una situación que está ocurriendo ahora. Abre la conversación y respóndele cuanto antes.',
         assignee_type: 'role',
         assignee_id: 'personaldeclinica',
         subrole: 'Recepcion / Comercial ventas',
@@ -566,7 +708,7 @@ function buildMessageReceivedTemplateNodes() {
       id: 'N24',
       type: 'action/reply_message',
       config: {
-        message_text: 'Gracias. Hemos registrado la confirmacion de tu cita.',
+        message_text: 'Gracias. Hemos registrado la confirmación de tu cita.',
         suppress_if_human_replied: true,
         suppress_if_response_needed: true,
       },
@@ -574,13 +716,19 @@ function buildMessageReceivedTemplateNodes() {
       position: { x: 1780, y: 280 },
     },
   ];
+  const acknowledgementExit = markCanonicalBenignAcknowledgementExit(nodes, {
+    includeUnmarked: true,
+  });
+  return acknowledgementExit.changed ? acknowledgementExit.nodes : nodes;
 }
 
 module.exports = {
+  BENIGN_ACKNOWLEDGEMENT_EXIT_KEY,
   INTENT_MIGRATION_KEY,
   LEGACY_EXECUTION_ALLOWLIST_KEY,
   buildMessageReceivedTemplateNodes,
   hasCanonicalIntentMigration,
+  markCanonicalBenignAcknowledgementExit,
   markCanonicalConfirmationReplySuppression,
   transformLegacyIntentNodes,
 };

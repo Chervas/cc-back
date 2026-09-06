@@ -28,6 +28,28 @@ function cleanString(value) {
   return normalized || null;
 }
 
+function resolveMessageReceivedRuntimeNamespace(template, options = {}) {
+  const triggerConfig = template?.trigger_config && typeof template.trigger_config === 'object'
+    ? template.trigger_config
+    : {};
+  const configuredNamespace = cleanString(triggerConfig.runtime_namespace);
+  if (configuredNamespace) return configuredNamespace;
+
+  const runtimeRole = cleanString(options.runtimeRole ?? process.env.RUNTIME_ROLE)?.toLowerCase();
+  const currentNamespace = cleanString(
+    options.currentRuntimeNamespace
+      ?? jobRequestsService.getCurrentRuntimeNamespace?.()
+      ?? process.env.JOB_RUNTIME_NAMESPACE
+      ?? process.env.RUNTIME_NAMESPACE
+  );
+  if (runtimeRole !== 'gateway') return currentNamespace;
+
+  return cleanString(
+    options.fallbackRuntimeNamespace
+      ?? process.env.AUTOMATIONS_V2_FALLBACK_RUNTIME_NAMESPACE
+  ) || 'staging';
+}
+
 function positiveInt(value) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
@@ -414,6 +436,7 @@ async function queueGenericMessageBatch({ claim, message, conversation, channel 
     });
     return { queued: false, reason: 'no_active_message_received_automation' };
   }
+  const ownerRuntimeNamespace = resolveMessageReceivedRuntimeNamespace(resolved.template);
 
   let scheduled = null;
   await db.sequelize.transaction(async (transaction) => {
@@ -450,6 +473,7 @@ async function queueGenericMessageBatch({ claim, message, conversation, channel 
           ...(job.payload || {}),
           latest_message_id: positiveInt(message.id),
           clinic_open_state: resolved.clinicOpenState?.open_now === true ? 'open' : 'closed',
+          ...(ownerRuntimeNamespace ? { __runtime_namespace: ownerRuntimeNamespace } : {}),
         },
         error_message: null,
       }, { transaction });
@@ -469,6 +493,7 @@ async function queueGenericMessageBatch({ claim, message, conversation, channel 
           first_message_id: positiveInt(message.id),
           latest_message_id: positiveInt(message.id),
           clinic_open_state: resolved.clinicOpenState?.open_now === true ? 'open' : 'closed',
+          ...(ownerRuntimeNamespace ? { __runtime_namespace: ownerRuntimeNamespace } : {}),
         },
       }, { transaction });
     }
@@ -962,6 +987,7 @@ module.exports = {
   normalizeMessageReceivedTriggerConfig,
   queueGenericMessageBatch,
   reassignBufferedClaimsToWaitingExecution,
+  resolveMessageReceivedRuntimeNamespace,
   runInboundDispatchJob,
   runMessageReceivedFireJob,
   triggerConfigMatches,

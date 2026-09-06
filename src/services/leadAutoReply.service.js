@@ -24,6 +24,7 @@ const LEAD_TEMPLATE_VARIABLES = new Set([
   'nombre_clinica', 'clinic_name', 'telefono_clinica', 'direccion_clinica',
 ]);
 const LEAD_TEMPLATE_USAGES = new Set(['lead_auto_reply', 'lead_primera_visita']);
+const COMMUNICATION_SCOPE = 'marketing';
 
 function toIntOrNull(value) {
   const parsed = Number.parseInt(String(value ?? ''), 10);
@@ -57,6 +58,7 @@ function normalizeConfig(raw = {}) {
     whatsapp_template_id: toIntOrNull(raw.whatsapp_template_id || raw.template_id),
     whatsapp_template_name: cleanString(raw.whatsapp_template_name || raw.template_name) || null,
     whatsapp_template_language: cleanString(raw.whatsapp_template_language || raw.language_code) || null,
+    communication_scope: COMMUNICATION_SCOPE,
     updated_at: raw.updated_at || null,
     updated_by: toIntOrNull(raw.updated_by),
   };
@@ -173,6 +175,7 @@ function buildManagedNodes(config) {
         recipient_mode: 'context_lead',
         sender_mode: 'clinic_default',
         quiet_hours_enabled: false,
+        communication_scope: COMMUNICATION_SCOPE,
         variables_named: leadTemplateBindings(),
         template_usage: FEATURE_KEY,
       },

@@ -1,6 +1,17 @@
 const { metaSyncJobs } = require('../jobs/sync.jobs');
 const db = require('../../models');
 const flowEngineV2Service = require('./flowEngineV2.service');
+const {
+  formatInboundAnalysisItem,
+  formatInboundResponseText,
+  isRevokedMessage,
+} = require('../lib/automation-conversation-context');
+const {
+  findHumanReplyAfterMessage,
+} = require('./conversationPendingReply.service');
+const {
+  markBufferedResponseExecutionsForHumanReply,
+} = require('./automationHumanIntervention.service');
 const whatsappCoexistenceService = require('./whatsappCoexistence.service');
 const whatsappTemplatesService = require('./whatsappTemplates.service');
 const marketingBulkSendsService = require('./marketingBulkSends.service');
@@ -70,19 +81,26 @@ async function loadInboundResponseFromMessageIds(payload = {}, waitingMeta = {},
     raw: true,
   });
   if (!rows.length) return null;
-  const responseText = rows
-    .filter((row) => String(row.message_type || '').toLowerCase() !== 'reaction')
-    .map((row) => String(row.content || '').trim())
+  const activeRows = rows.filter((row) => !isRevokedMessage(row));
+  const responseText = activeRows
+    .map(formatInboundResponseText)
     .filter(Boolean)
     .join('\n');
-  const last = rows[rows.length - 1];
-  const media = last?.metadata?.media && typeof last.metadata.media === 'object'
-    ? last.metadata.media
+  const responseItems = activeRows
+    .map(formatInboundAnalysisItem)
+    .filter(Boolean);
+  const last = activeRows[activeRows.length - 1] || null;
+  const lastMediaMessage = [...activeRows].reverse().find((row) => row?.metadata?.media?.kind);
+  const media = lastMediaMessage?.metadata?.media && typeof lastMediaMessage.metadata.media === 'object'
+    ? lastMediaMessage.metadata.media
     : {};
   return {
     responseText,
-    inboundMessageId: last.id,
+    responseItems,
+    inboundMessageId: last?.id || null,
     loadedMessageIds: rows.map((row) => Number(row.id)),
+    analyzedMessageIds: activeRows.map((row) => Number(row.id)),
+    revokedMessageIds: rows.filter(isRevokedMessage).map((row) => Number(row.id)),
     responseMediaKind: media.kind || null,
     responseMediaId: media.id || null,
     responseMediaMimeType: media.mime_type || null,
@@ -146,6 +164,7 @@ async function runAutomationFlowV2Job(payload = {}) {
   const bufferedInbound = options.resumeMode === 'response'
     ? await loadInboundResponseFromMessageIds(payload, waitingMeta, expectedConversationId)
     : null;
+  options.responseBatchLoaded = Boolean(bufferedInbound);
   if (
     options.resumeMode === 'response'
     && expectedInboundMessageIds.length
@@ -156,6 +175,21 @@ async function runAutomationFlowV2Job(payload = {}) {
   ) {
     throw new Error('inbound_response_message_scope_mismatch');
   }
+  if (options.resumeMode === 'response' && bufferedInbound?.loadedMessageIds?.length) {
+    const firstInboundMessageId = bufferedInbound.loadedMessageIds[0];
+    const humanReply = await findHumanReplyAfterMessage(expectedConversationId, firstInboundMessageId);
+    if (humanReply) {
+      await markBufferedResponseExecutionsForHumanReply({
+        clinicId: execution.clinic_id,
+        conversationId: expectedConversationId,
+        humanMessageId: humanReply.id,
+        executionId: execution.id,
+        reason: 'human_reply_detected_before_response_resume',
+      });
+      options.stopBeforeSideEffects = true;
+      options.humanTakeoverMessageId = humanReply.id;
+    }
+  }
   if (payload.response_text !== undefined) {
     options.responseText = payload.response_text;
   } else if (bufferedInbound) {
@@ -163,26 +197,31 @@ async function runAutomationFlowV2Job(payload = {}) {
   } else if (options.resumeMode === 'response' && waitingMeta.pending_response_text !== undefined) {
     options.responseText = waitingMeta.pending_response_text;
   }
+  if (Array.isArray(payload.response_items)) {
+    options.responseItems = payload.response_items;
+  } else if (bufferedInbound) {
+    options.responseItems = bufferedInbound.responseItems;
+  }
 
-  if (payload.inbound_message_id !== undefined) {
-    options.inboundMessageId = payload.inbound_message_id;
-  } else if (bufferedInbound?.inboundMessageId) {
+  if (bufferedInbound) {
     options.inboundMessageId = bufferedInbound.inboundMessageId;
+  } else if (payload.inbound_message_id !== undefined) {
+    options.inboundMessageId = payload.inbound_message_id;
   }
-  if (payload.response_media_kind !== undefined) {
-    options.responseMediaKind = payload.response_media_kind;
-  } else if (bufferedInbound?.responseMediaKind) {
+  if (bufferedInbound) {
     options.responseMediaKind = bufferedInbound.responseMediaKind;
+  } else if (payload.response_media_kind !== undefined) {
+    options.responseMediaKind = payload.response_media_kind;
   }
-  if (payload.response_media_id !== undefined) {
-    options.responseMediaId = payload.response_media_id;
-  } else if (bufferedInbound?.responseMediaId) {
+  if (bufferedInbound) {
     options.responseMediaId = bufferedInbound.responseMediaId;
+  } else if (payload.response_media_id !== undefined) {
+    options.responseMediaId = payload.response_media_id;
   }
-  if (payload.response_media_mime_type !== undefined) {
-    options.responseMediaMimeType = payload.response_media_mime_type;
-  } else if (bufferedInbound?.responseMediaMimeType) {
+  if (bufferedInbound) {
     options.responseMediaMimeType = bufferedInbound.responseMediaMimeType;
+  } else if (payload.response_media_mime_type !== undefined) {
+    options.responseMediaMimeType = payload.response_media_mime_type;
   }
 
   if (payload.form_submission !== undefined) {

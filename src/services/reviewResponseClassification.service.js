@@ -69,6 +69,10 @@ function classifyDeterministically(text, explicitRating = null) {
     /elimin(?:a|ad|en) mi (?:telefono|numero|contacto)/,
     /no uso whatsapp para (?:empresas|publicidad)/,
     /dejad de (?:escribirme|contactarme|enviarme)/,
+    /^(?:ya )?no estoy interesad[oa](?:\s*[,.-]?\s*(?:gracias|muchas gracias))?[.!]*$/,
+    /^(?:ya )?no me interesa(?:\s*[,.-]?\s*(?:gracias|muchas gracias))?[.!]*$/,
+    /^(?:ja )?no (?:estic interessat|estic interessada|m'interessa)(?:\s*[,.-]?\s*gracies)?[.!]*$/,
+    /^(?:i am |i'm )?(?:no longer |not )interested(?:\s*[,.-]?\s*(?:thanks|thank you))?[.!]*$/,
   ].some((pattern) => pattern.test(value));
   if (marketingOptOut) {
     return { intent: 'marketing_opt_out', rating: null, confidence: 0.99, source: 'rule' };

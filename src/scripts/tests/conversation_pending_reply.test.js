@@ -12,6 +12,10 @@ const {
   normalizeConversationIds,
   resolveAutomationAttentionForConversation,
 } = require('../../services/conversationPendingReply.service');
+const {
+  markBufferedResponseExecutionsForHumanReply,
+} = require('../../services/automationHumanIntervention.service');
+const conversationAutomationState = require('../../services/conversationAutomationState.service');
 
 test('detecta una respuesta humana posterior aunque la IA termine después', async (t) => {
   const originalQuery = db.sequelize.query;
@@ -42,6 +46,65 @@ test('no inventa una respuesta humana cuando no hay mensajes posteriores', async
 
   assert.equal(await findHumanReplyAfterMessage(8629, 91002), null);
   assert.equal(await findHumanReplyAfterMessage(null, 91002), null);
+});
+
+test('una respuesta humana marca solo la ejecución que ya acumula respuesta del paciente', async (t) => {
+  const originals = {
+    findAll: db.FlowExecutionV2.findAll,
+    update: db.FlowExecutionV2.update,
+    completeState: conversationAutomationState.completeState,
+  };
+  t.after(() => {
+    db.FlowExecutionV2.findAll = originals.findAll;
+    db.FlowExecutionV2.update = originals.update;
+    conversationAutomationState.completeState = originals.completeState;
+  });
+
+  db.FlowExecutionV2.findAll = async () => [
+    {
+      id: 81,
+      current_node_id: 'N3',
+      waiting_meta: {
+        type: 'delay/wait_response',
+        inbound_conversation_id: 15,
+        last_inbound_message_id: 91002,
+        pending_response_message_ids: [91002],
+      },
+      context: { conversation: { id: 15 } },
+    },
+    {
+      id: 82,
+      current_node_id: 'N3',
+      waiting_meta: { type: 'delay/wait_response', inbound_conversation_id: 15 },
+      context: { conversation: { id: 15 } },
+    },
+  ];
+  const updated = [];
+  db.FlowExecutionV2.update = async (patch, options) => {
+    updated.push({ patch, where: options.where });
+    return [1];
+  };
+  const completedStates = [];
+  conversationAutomationState.completeState = async (params, options) => {
+    completedStates.push({ params, options });
+    return params;
+  };
+
+  const result = await markBufferedResponseExecutionsForHumanReply({
+    clinicId: 66,
+    conversationId: 15,
+    humanMessageId: 91007,
+  });
+
+  assert.deepEqual(result, { marked: 1, execution_ids: [81] });
+  assert.equal(updated.length, 1);
+  assert.deepEqual(updated[0].where, { id: 81, status: 'waiting' });
+  assert.equal(updated[0].patch.waiting_meta.human_takeover, true);
+  assert.equal(updated[0].patch.waiting_meta.human_message_id, 91007);
+  assert.deepEqual(completedStates, [{
+    params: { clinicId: 66, conversationId: 15, sourceMessageId: 91002 },
+    options: { expectedExecutionId: 81 },
+  }]);
 });
 
 test('normaliza conversaciones y combina pendientes con atención de automatización', async (t) => {
@@ -78,6 +141,7 @@ test('normaliza conversaciones y combina pendientes con atención de automatizac
     }
     if (queryIndex === 2) {
       assert.match(sql, /automation\.system_notification/);
+      assert.match(sql, /automation\.persistent_alert/);
       assert.match(sql, /user_id = :userId/);
       assert.match(sql, /quickChatResponseMessageId/);
       assert.match(sql, /FlowExecutionsV2 execution/);
@@ -160,6 +224,7 @@ test('abrir una conversación actualiza solo la lectura del usuario', () => {
   assert.match(controller, /pending_automation_count = pendingState\?\.requiresAutomationAttention === true\s*\? Math\.max\(1, Number\(pendingState\?\.automationAttentionCount \|\| 0\)\)/);
   assert.match(controller, /exports\.resolveAutomationAttention = async/);
   assert.match(controller, /allUsers:\s*true/);
+  assert.match(controller, /completeManualAutomationStateForConversation\(conversationId\)/);
 });
 
 test('la resolución del servicio puede cerrar avisos del usuario y conversación indicados', async (t) => {
@@ -181,7 +246,10 @@ test('la resolución del servicio puede cerrar avisos del usuario y conversació
   });
   db.Notification.findAll = async ({ where }) => {
     assert.equal(where.userId, 44);
-    assert.equal(where.event, 'automation.system_notification');
+    assert.deepEqual(where.event[db.Sequelize.Op.in], [
+      'automation.system_notification',
+      'automation.persistent_alert',
+    ]);
     assert.equal(where.isRead, false);
     return [fakeNotification];
   };
@@ -215,7 +283,10 @@ test('una respuesta manual cierra el aviso para todos los usuarios de la convers
   });
   db.Notification.findAll = async ({ where }) => {
     assert.equal(where.userId, undefined);
-    assert.equal(where.event, 'automation.system_notification');
+    assert.deepEqual(where.event[db.Sequelize.Op.in], [
+      'automation.system_notification',
+      'automation.persistent_alert',
+    ]);
     assert.equal(where.isRead, false);
     return [fakeNotification];
   };
@@ -230,7 +301,7 @@ test('una respuesta manual cierra el aviso para todos los usuarios de la convers
   assert.equal(updated[0].data.manual_resolved_by_user_id, null);
 });
 
-test('el envío manual y el eco móvil resuelven la atención sin alterar los automatismos', () => {
+test('el envío manual y el eco móvil detienen el análisis pendiente y resuelven la atención', () => {
   const controller = fs.readFileSync(
     path.resolve(__dirname, '../../controllers/conversation.controller.js'),
     'utf8',
@@ -241,8 +312,10 @@ test('el envío manual y el eco móvil resuelven la atención sin alterar los au
   );
 
   assert.match(controller, /reason:\s*'manual_reply_sent'/);
+  assert.match(controller, /manual_reply_sent_during_response_buffer/);
   assert.match(controller, /pending_automation_message_id:\s*null/);
   assert.match(workers, /sourceEvent === 'smb_message_echoes'/);
+  assert.match(workers, /mobile_reply_sent_during_response_buffer/);
   assert.match(workers, /reason:\s*'mobile_reply_sent'/);
 });
 

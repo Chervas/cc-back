@@ -167,10 +167,28 @@ function buildAlerts({ provider, summary, stuckQueueCount }) {
     push('critical', 'email_complaints_7d', 'Quejas SES', `${complaints7d} queja(s) registradas en 7 dias.`, 'Pausar casos dudosos y revisar consentimiento.');
   }
   if (bounces7d > 0) {
-    push('warning', 'email_bounces_7d', 'Rebotes SES', `${bounces7d} rebote(s) registrado(s) en 7 dias.`, 'Revisar destinatarios y supresiones.');
+    push(
+      'warning',
+      'email_bounces_7d',
+      bounces7d === 1 ? 'Correo no entregado' : 'Correos no entregados',
+      bounces7d === 1
+        ? 'Un correo no pudo entregarse durante los últimos 7 días.'
+        : `${bounces7d} correos no pudieron entregarse durante los últimos 7 días.`,
+      'Comprueba que las direcciones sean correctas antes de volver a enviar.',
+    );
   }
   if (summary.activeSuppressions > 0) {
-    push('warning', 'email_active_suppressions', 'Supresiones activas', `${summary.activeSuppressions} destinatario(s) suprimidos.`, 'No forzar reenvios sin resolver causa.');
+    push(
+      'warning',
+      'email_active_suppressions',
+      summary.activeSuppressions === 1
+        ? 'Dirección bloqueada para nuevos envíos'
+        : 'Direcciones bloqueadas para nuevos envíos',
+      summary.activeSuppressions === 1
+        ? 'Clinicaclick ha detenido los envíos a una dirección tras un rechazo, una queja o una baja.'
+        : `Clinicaclick ha detenido los envíos a ${summary.activeSuppressions} direcciones tras rechazos, quejas o bajas.`,
+      'Corrige o confirma la dirección antes de reactivar sus envíos.',
+    );
   }
 
   return alerts;

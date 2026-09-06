@@ -11,6 +11,7 @@ const { canUserSelectWhatsappTemplate } = require('../lib/whatsapp-template-owne
 const { isReviewWorkflowWhatsappTemplate } = require('../lib/whatsapp-template-workflow');
 const {
   completeAnsweredAutomationStateForConversation,
+  completeManualAutomationStateForConversation,
   getPendingReplyStatesByConversationIds,
   resolveAutomationAttentionForConversation,
 } = require('../services/conversationPendingReply.service');
@@ -20,6 +21,9 @@ const {
 const {
   startPatientWhatsappConversation,
 } = require('../services/patientContact.service');
+const {
+  markBufferedResponseExecutionsForHumanReply,
+} = require('../services/automationHumanIntervention.service');
 const {
   getActiveContactRestrictionsForConversations,
 } = require('../services/marketingOptOut.service');
@@ -126,6 +130,7 @@ async function attachContactRestrictions(conversations = []) {
     contact_restrictions: restrictions.get(Number(conversation?.id)) || {
       active: false,
       marketing_opt_out: false,
+      care_communications_opt_out: false,
       whatsapp_number_invalid: false,
       items: [],
     },
@@ -1993,8 +1998,9 @@ exports.resolveAutomationAttention = async (req, res) => {
       allUsers: true,
       reason: 'operator_action_completed',
     });
+    const automationState = await completeManualAutomationStateForConversation(conversationId);
     const io = getIO();
-    if (result.updated > 0 && io) {
+    if ((result.updated > 0 || automationState.completed) && io) {
       io.to(`clinic:${conversation.clinic_id}`).emit('conversation:updated', {
         id: String(conversation.id),
         pending_automation_attention: false,
@@ -2005,6 +2011,8 @@ exports.resolveAutomationAttention = async (req, res) => {
     return res.json({
       success: true,
       resolved: Number(result.updated || 0),
+      automation_state_completed: automationState.completed,
+      automation_state_reason: automationState.reason || null,
       pending_automation_attention: false,
       pending_automation_count: 0,
     });
@@ -2396,6 +2404,12 @@ exports.postMessage = async (req, res) => {
     const manualReplyAccepted = conversation.channel !== 'whatsapp' || outboundWhatsappQueued;
     if (manualReplyAccepted && msg.message_type !== 'event' && msg.status !== 'failed') {
       try {
+        await markBufferedResponseExecutionsForHumanReply({
+          clinicId: conversation.clinic_id,
+          conversationId: conversation.id,
+          humanMessageId: msg.id,
+          reason: 'manual_reply_sent_during_response_buffer',
+        });
         const attentionResolution = await resolveAutomationAttentionForConversation(
           conversation.id,
           userId,

@@ -11,6 +11,7 @@ module.exports = (sequelize, DataTypes) => {
     message: { type: DataTypes.TEXT, allowNull: true },
     icon: { type: DataTypes.STRING(128), allowNull: true },
     level: { type: DataTypes.STRING(32), allowNull: true },
+    dedupeKey: { type: DataTypes.STRING(191), allowNull: true, unique: true, field: 'dedupe_key' },
     data: { type: DataTypes.JSON, allowNull: true },
     clinicaId: { type: DataTypes.INTEGER, allowNull: true, field: 'clinica_id' },
     isRead: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false, field: 'is_read' },

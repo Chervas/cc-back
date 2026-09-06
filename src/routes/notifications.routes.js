@@ -11,10 +11,13 @@ router.use(authMiddleware);
 router.get('/', notificationsController.list);
 router.post('/', notificationsController.create);
 router.patch('/', notificationsController.update);
+router.delete('/all', notificationsController.removeAll);
 router.delete('/', notificationsController.remove);
 router.get('/mark-all-as-read', notificationsController.markAllAsRead);
 
 router.get('/preferences/meta', preferencesController.getMeta);
+router.get('/preferences/presentation', preferencesController.getPresentationPreferences);
+router.patch('/preferences/presentation', preferencesController.updatePresentationPreferences);
 router.get('/preferences', preferencesController.getPreferences);
 router.patch('/preferences', preferencesController.updatePreferences);
 

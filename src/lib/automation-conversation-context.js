@@ -72,7 +72,23 @@ function resolveMessageAuthor(message) {
   return 'Sistema';
 }
 
+function isRevokedMessage(message) {
+  const metadata = message?.metadata && typeof message.metadata === 'object'
+    ? message.metadata
+    : {};
+  const coexistence = metadata.coexistence && typeof metadata.coexistence === 'object'
+    ? metadata.coexistence
+    : {};
+  return Boolean(
+    cleanString(metadata.revoked_at)
+    || (metadata.revoke && typeof metadata.revoke === 'object')
+    || cleanString(coexistence.revoked_at)
+    || cleanString(coexistence.last_event)?.toLowerCase() === 'revoke'
+  );
+}
+
 function extractMessageText(message) {
+  if (isRevokedMessage(message)) return null;
   const content = cleanString(message?.content);
   if (content) return content;
 
@@ -90,6 +106,76 @@ function extractMessageText(message) {
   }
 
   return null;
+}
+
+function formatInboundAnalysisText(message) {
+  if (isRevokedMessage(message)) return null;
+  if (cleanString(message?.message_type)?.toLowerCase() === 'reaction') {
+    const reaction = message?.metadata?.reaction || {};
+    const emoji = cleanString(reaction.emoji);
+    if (!emoji) return null;
+    return `[Reaccion de WhatsApp: ${JSON.stringify({
+      emoji,
+      target_message_id: cleanString(reaction.target_message_id || reaction.message_id),
+      target_message_preview: cleanString(reaction.target_message_preview),
+    })}]`;
+  }
+  const text = cleanString(message?.content);
+  const kind = cleanString(message?.metadata?.media?.kind)?.toLowerCase();
+  if (!kind) return text;
+  const mediaType = ['image', 'video', 'audio', 'document', 'sticker', 'gif'].includes(kind) ? kind : 'archivo';
+  // The text-only analyzer receives metadata, never the attachment's binary content.
+  return [text, `[Adjunto de tipo ${mediaType}: contenido no disponible para este analisis]`].filter(Boolean).join('\n');
+}
+
+function formatInboundResponseText(message) {
+  if (isRevokedMessage(message)) return null;
+  if (cleanString(message?.message_type)?.toLowerCase() === 'reaction') return null;
+  return cleanString(message?.content);
+}
+
+function formatInboundAnalysisItem(message) {
+  if (isRevokedMessage(message)) return null;
+  const messageId = toIntOrNull(message?.id);
+  const messageType = cleanString(message?.message_type)?.toLowerCase();
+  const metadata = message?.metadata && typeof message.metadata === 'object'
+    ? message.metadata
+    : {};
+  const reaction = metadata.reaction && typeof metadata.reaction === 'object'
+    ? metadata.reaction
+    : {};
+  const reactionEmoji = cleanString(reaction.emoji);
+  if (messageType === 'reaction') {
+    if (!reactionEmoji) return null;
+    return {
+      message_id: messageId,
+      content_type: 'reaction',
+      emoji: reactionEmoji,
+      target_message_id: cleanString(reaction.target_message_id || reaction.message_id),
+      target_message_preview: cleanString(reaction.target_message_preview),
+    };
+  }
+
+  const text = cleanString(message?.content);
+  const media = metadata.media && typeof metadata.media === 'object' ? metadata.media : {};
+  const mediaKind = cleanString(media.kind)?.toLowerCase();
+  if (mediaKind) {
+    return {
+      message_id: messageId,
+      content_type: 'attachment',
+      attachment_type: ['image', 'video', 'audio', 'document', 'sticker', 'gif'].includes(mediaKind)
+        ? mediaKind
+        : 'file',
+      content_available: false,
+      caption: text,
+    };
+  }
+  if (!text) return null;
+  return {
+    message_id: messageId,
+    content_type: 'text',
+    text,
+  };
 }
 
 function formatConversationLine(message) {
@@ -251,4 +337,8 @@ async function buildConversationContext({
 
 module.exports = {
   buildConversationContext,
+  formatInboundAnalysisItem,
+  formatInboundAnalysisText,
+  formatInboundResponseText,
+  isRevokedMessage,
 };

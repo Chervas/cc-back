@@ -193,6 +193,25 @@ function collectContextIds(execution) {
   return ids;
 }
 
+function buildInboundAutomationStateReset(execution) {
+  const context = execution?.context && typeof execution.context === 'object'
+    ? execution.context
+    : {};
+  return {
+    appointmentId: collectContextIds(execution).appointment_id,
+    appointmentStatus: cleanString(
+      getByPath(context, 'appointment.estado')
+      || getByPath(context, 'appointment.status')
+    ),
+    intent: null,
+    possibleUrgency: false,
+    needsResponse: false,
+    manualActionRequired: false,
+    failureCode: null,
+    completedAt: null,
+  };
+}
+
 function getWaitResponseNode(execution) {
   const nodeId = cleanString(execution?.current_node_id);
   if (!nodeId) return null;
@@ -796,6 +815,31 @@ async function scheduleBufferedInboundResponse({
       created = enqueued.created;
     }
 
+    if (
+      queuedExecutionJob
+      && Number(queuedExecutionJob.id) !== Number(scheduledResumeJob?.id)
+      && ['pending', 'waiting'].includes(cleanString(queuedExecutionJob.status))
+    ) {
+      await JobRequest.update({
+        status: 'cancelled',
+        next_run_at: null,
+        completed_at: new Date(),
+        error_message: 'Sustituido por una respuesta del paciente',
+        result_summary: {
+          status: 'cancelled',
+          reason: 'superseded_by_response_resume',
+          replacement_job_id: toIntOrNull(scheduledResumeJob?.id),
+        },
+        updated_at: new Date(),
+      }, {
+        where: {
+          id: queuedExecutionJob.id,
+          status: { [Op.in]: ['pending', 'waiting'] },
+        },
+        transaction,
+      });
+    }
+
     const state = await conversationAutomationState.setState({
       clinicId: normalizedClinicId,
       conversationId: normalizedConversationId,
@@ -806,9 +850,7 @@ async function scheduleBufferedInboundResponse({
       deadlineAt: waitUntil,
       executionId: lockedExecution.id,
       jobRequestId: scheduledResumeJob?.id || null,
-      manualActionRequired: false,
-      failureCode: null,
-      completedAt: null,
+      ...buildInboundAutomationStateReset(lockedExecution),
     }, { transaction, emit: false });
 
     outcome = {
@@ -1006,9 +1048,7 @@ async function enqueueInboundResponseResume({
           deadlineAt: null,
           executionId: execution.id,
           jobRequestId: job.id,
-          manualActionRequired: false,
-          failureCode: null,
-          completedAt: null,
+          ...buildInboundAutomationStateReset(execution),
         });
       }
     } catch (error) {
@@ -1201,4 +1241,5 @@ async function enqueueInboundFormSubmissionResume({
 module.exports = {
   enqueueInboundResponseResume,
   enqueueInboundFormSubmissionResume,
+  _buildInboundAutomationStateReset: buildInboundAutomationStateReset,
 };

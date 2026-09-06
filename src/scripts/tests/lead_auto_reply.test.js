@@ -15,6 +15,8 @@ const {
   isLeadAutoReplyTemplate,
   normalizeConfig,
 } = require('../../services/leadAutoReply.service');
+const flowEngine = require('../../services/flowEngineV2.service');
+const commercialMigration = require('../../../migrations/20260906220000-mark-lead-outreach-commercial');
 
 function madridDate(value) {
   return new Date(value);
@@ -148,6 +150,34 @@ async function run() {
   assert.equal(nodes.find((node) => node.id === 'N6').config.mode, 'lead_contact_state');
   assert.equal(nodes.find((node) => node.id === 'N7').config.recipient_mode, 'context_lead');
   assert.equal(nodes.find((node) => node.id === 'N7').config.language_code, 'es');
+  assert.equal(nodes.find((node) => node.id === 'N7').config.communication_scope, 'marketing');
+  assert.equal(config.communication_scope, 'marketing');
+  assert.equal(flowEngine._resolveAutomationCommunicationScope({
+    template_usage: 'lead_auto_reply',
+  }, {}), 'marketing');
+  assert.equal(flowEngine._resolveAutomationCommunicationScope({
+    communication_scope: 'care',
+    template_usage: 'lead_primera_visita',
+  }, {}), 'marketing');
+  assert.equal(flowEngine._resolveAutomationCommunicationScope({
+    communication_scope: 'care',
+    template_usage: 'recordatorio_cita',
+  }, {}), 'care');
+  const migratedComponents = commercialMigration.__testing.withLeadButtons([
+    { type: 'BODY', text: 'Hola {{1}}' },
+  ]);
+  assert.deepEqual(migratedComponents[1].buttons.map((button) => button.text), [
+    'Quiero una cita',
+    'Ya no estoy interesado',
+  ]);
+  const remigratedComponents = commercialMigration.__testing.withLeadButtons(migratedComponents);
+  assert.equal(remigratedComponents.filter((component) => component.type === 'BUTTONS').length, 1);
+  const commercialNodes = commercialMigration.__testing.markLeadNodesCommercial([
+    { id: 'lead', type: 'action/send_whatsapp', config: { template_usage: 'lead_auto_reply' } },
+    { id: 'care', type: 'action/send_whatsapp', config: { template_usage: 'recordatorio_cita' } },
+  ]);
+  assert.equal(commercialNodes[0].config.communication_scope, 'marketing');
+  assert.equal(commercialNodes[1].config.communication_scope, undefined);
   assert.deepEqual(getUnsupportedLeadTemplateVariables({
     variables: [{ name: 'nombre_paciente' }, { name: 'nombre_clinica' }],
   }), []);

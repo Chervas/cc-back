@@ -19,7 +19,7 @@ async function markAutomationNotificationsReadForAppointment(appointmentId, opti
   }
 
   const where = {
-    event: 'automation.system_notification',
+    event: { [Op.in]: ['automation.system_notification', 'automation.persistent_alert'] },
     isRead: false,
     [Op.and]: [
       db.sequelize.where(

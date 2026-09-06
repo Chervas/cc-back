@@ -2,10 +2,12 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const { Op } = require('sequelize');
 
 const classifier = require('../../services/reviewResponseClassification.service');
 const db = require('../../../models');
 const marketingOptOut = require('../../services/marketingOptOut.service');
+const marketingBulkSends = require('../../services/marketingBulkSends.service');
 const migration = require('../../../migrations/20260809113000-version-review-response-classification');
 
 test('clasifica respuestas inequívocas sin consumir IA', () => {
@@ -18,7 +20,23 @@ test('clasifica respuestas inequívocas sin consumir IA', () => {
     'marketing_opt_out',
   );
   assert.equal(
+    classifier.classifyDeterministically('Ya no estoy interesado').intent,
+    'marketing_opt_out',
+  );
+  assert.equal(
+    classifier.classifyDeterministically('No me interesa, gracias').intent,
+    'marketing_opt_out',
+  );
+  assert.equal(
     classifier.classifyDeterministically('Este número ya no pertenece a Luis Felipe').intent,
+    'wrong_recipient',
+  );
+  assert.equal(
+    classifier.classifyDeterministically('Ya no es el número de Carlos').intent,
+    'wrong_recipient',
+  );
+  assert.equal(
+    classifier.classifyDeterministically('Este numero no es del paciente').intent,
     'wrong_recipient',
   );
   assert.equal(
@@ -31,10 +49,47 @@ test('clasifica respuestas inequívocas sin consumir IA', () => {
   );
 });
 
+test('reconoce como comercial la captación inicial de leads', () => {
+  const isMarketing = marketingOptOut.__testing.isMarketingOutboundMessage;
+  assert.equal(isMarketing({ metadata: {
+    source: 'automations_v2',
+    communication_scope: 'marketing',
+    template_usage: 'lead_auto_reply',
+  } }), true);
+  assert.equal(isMarketing({ metadata: {
+    source: 'automations_v2',
+    template_usage: 'lead_primera_visita',
+  } }), true);
+  assert.equal(isMarketing({ metadata: {
+    source: 'automations_v2',
+    communication_scope: 'care',
+    template_usage: 'recordatorio_cita',
+  } }), false);
+});
+
 test('deja las respuestas no concluyentes para la revisión común de IA', () => {
   const result = classifier.classifyDeterministically('Gracias, luego os cuento');
   assert.equal(result.intent, 'ambiguous');
   assert.equal(result.source, 'rule_none');
+});
+
+test('los envíos de prueba no programan recordatorios para el teléfono original de la lista', () => {
+  const list = { criteria: { review_request: true, template_usage: 'solicitud_resena' } };
+  const baseMetadata = {
+    source: 'marketing_bulk_sends',
+    template_usage: 'solicitud_resena',
+    dispatch_context: 'review_request',
+  };
+  assert.equal(marketingBulkSends.__testing.shouldScheduleReviewReminder({
+    list,
+    mappedStatus: 'sent',
+    message: { metadata: { ...baseMetadata, kind: 'mass_campaign_test' } },
+  }), false);
+  assert.equal(marketingBulkSends.__testing.shouldScheduleReviewReminder({
+    list,
+    mappedStatus: 'sent',
+    message: { metadata: { ...baseMetadata, kind: 'mass_campaign_send' } },
+  }), true);
 });
 
 test('versiona el flujo de reseñas sin duplicar el umbral existente', () => {
@@ -96,9 +151,11 @@ test('resolver un número erróneo exige un teléfono realmente distinto y deja 
 test('adjunta restricciones sin consultar timestamps virtuales como columnas reales', async () => {
   const originalFindAll = db.MarketingContactOptOut.findAll;
   let selectedAttributes = [];
+  let selectedScopes = [];
   try {
     db.MarketingContactOptOut.findAll = async (options) => {
       selectedAttributes = options.attributes;
+      selectedScopes = options.where.scope[Op.in];
       return [{
         id: 44,
         clinica_id: 35,
@@ -108,6 +165,15 @@ test('adjunta restricciones sin consultar timestamps virtuales como columnas rea
         reason_text: 'Baja solicitada',
         source: 'whatsapp_inbound',
         opted_out_at: new Date('2026-08-09T10:00:00.000Z'),
+      }, {
+        id: 45,
+        clinica_id: 35,
+        paciente_id: 12,
+        phone_digits: '34600111222',
+        scope: 'care',
+        reason_text: 'No desea mensajes automáticos de citas',
+        source: 'automation_flow',
+        opted_out_at: new Date('2026-08-09T10:01:00.000Z'),
       }];
     };
 
@@ -119,7 +185,9 @@ test('adjunta restricciones sin consultar timestamps virtuales como columnas rea
     }]);
 
     assert.equal(selectedAttributes.includes('createdAt'), false);
+    assert.equal(selectedScopes.includes('care'), true);
     assert.equal(restrictions.get(91).marketing_opt_out, true);
+    assert.equal(restrictions.get(91).care_communications_opt_out, true);
   } finally {
     db.MarketingContactOptOut.findAll = originalFindAll;
   }
