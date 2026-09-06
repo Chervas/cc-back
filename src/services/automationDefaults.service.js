@@ -9,6 +9,9 @@ const {
   REVIEW_AUTOMATION_ACTION,
   inspectExplicitReviewAutomation,
 } = require('../lib/review-automation-config');
+const {
+  selectCatalogSourceCandidates,
+} = require('../lib/automation-catalog-source-selection');
 
 const {
   Clinica,
@@ -353,14 +356,14 @@ async function resolveLinkedTemplateForCatalog(catalogFlow) {
     ? { public_id: normalizedRef }
     : { template_key: sanitizeTemplateKey(normalizedRef) };
 
-  const candidates = await AutomationFlowTemplateV2.findAll({
+  const publishedCandidates = await AutomationFlowTemplateV2.findAll({
     where: {
       ...familyWhere,
-      is_active: true,
       published_at: { [Op.ne]: null },
     },
     order: [['version', 'DESC'], ['id', 'DESC']],
   });
+  const candidates = selectCatalogSourceCandidates(publishedCandidates);
 
   if (!Array.isArray(candidates) || !candidates.length) {
     return null;
