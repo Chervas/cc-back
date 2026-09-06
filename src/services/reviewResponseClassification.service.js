@@ -53,6 +53,8 @@ function classifyDeterministically(text, explicitRating = null) {
     /cambio de (?:dueno|propietario|titular)/,
     /ha cambiado de (?:dueno|propietario|titular)/,
     /ya no (?:pertenece|corresponde) a/,
+    /(?:este )?numero (?:ya )?no es (?:de|del)\b/,
+    /ya no es (?:el )?numero (?:de|del)\b/,
   ].some((pattern) => pattern.test(value));
   if (wrongRecipient) {
     return { intent: 'wrong_recipient', rating: null, confidence: 0.99, source: 'rule' };
