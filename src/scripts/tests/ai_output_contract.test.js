@@ -62,6 +62,12 @@ const prompt = flowEngine.buildAiSystemPrompt(
   { intencion: 'string', confianza_intencion: 'number' },
   normalizedFields,
 );
+
+assert.match(
+  prompt,
+  /Aceptar una propuesta para programar una cita nueva[\s\S]*intencion_principal=otra[\s\S]*nunca confirma, cancela ni solicita cambiar una cita existente/,
+  'the shared AI contract must not turn a lead scheduling request into an appointment confirmation',
+);
 assert.match(prompt, /valores de respuesta exactos: confirmar, cancelar/);
 assert.match(prompt, /confianza_intencion como número entre 0 y 1/);
 assert.match(prompt, /no representa la probabilidad de true/);
