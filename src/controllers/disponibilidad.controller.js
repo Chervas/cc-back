@@ -1,10 +1,49 @@
 const asyncHandler = require('express-async-handler');
 const db = require('../../models');
 const { Op } = db.Sequelize;
-const { buildHorarioExceptionMap, expandHorariosForDate } = require('../lib/personal-schedule-recurring');
+const { assertUserCanAccessFeature } = require('../lib/access-policy');
+const { searchTreatmentSlots, loadBookingContext, solutionsForCalendar } = require('../services/appointmentBookingAvailability.service');
+const { addDays } = require('../lib/personal-schedule-recurring');
+const { resolveLocalInstant } = require('../lib/voucher-schedule-calendar');
+const { solveBookingProfile } = require('../lib/booking-profile-solver');
+const { requiresMultiResourceBooking } = require('../lib/booking-profile');
+const { bookingCapabilities, loadScopedTreatment, requireOperationalProfile } = require('../services/treatmentBookingProfile.service');
+const {
+  parseClinicConfig,
+  isValidTimeZone,
+  resolveClinicTimezone,
+  formatPartsInTimeZone,
+  offsetMinutesForTimeZone,
+  normalizeHms,
+  localDateTimeToUtc,
+  formatDateLocal,
+  parseDateTime,
+  formatLocal,
+  buildWindowsFromHorarios,
+  buildDoctorBloqueoRowsForDate,
+  hasActiveSchedule,
+  normalizeRecibeCitas,
+  mergeWindows,
+  buildDoctorAvailabilityContext,
+  inAnyWindow,
+} = require('../lib/availability-calendar');
 
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
 const ACTIVE_APPOINTMENT_WHERE = { estado: { [Op.ne]: 'cancelada' } };
+
+exports.bookingCapabilities = asyncHandler(async (req, res) => res.json(bookingCapabilities()));
+
+exports.treatmentSlots = asyncHandler(async (req, res) => {
+  const clinicId = Number(req.query?.clinica_id);
+  if (!Number.isSafeInteger(clinicId) || clinicId <= 0) return res.status(400).json({ message: 'clinica_id requerido' });
+  await assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.view', clinicId });
+  const clinic = await db.Clinica.findByPk(clinicId);
+  if (!clinic) return res.status(404).json({ message: 'Clínica no encontrada' });
+  return res.json(await searchTreatmentSlots({ db, clinic, treatmentId: req.query?.tratamiento_id,
+    date: req.query?.fecha_local, days: Number(req.query?.days || 1), stepMinutes: Number(req.query?.granularity_min || 15),
+    limit: Number(req.query?.limit || 100), doctorId: req.query?.doctor_id ? Number(req.query.doctor_id) : null,
+    installationId: req.query?.instalacion_id ? Number(req.query.instalacion_id) : null }));
+});
 
 const parseBool = (v) => v === true || v === 'true' || v === '1';
 
@@ -88,19 +127,6 @@ const responseHasAnySlots = (payload) => {
 
 const isIsoLike = (value) => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(value);
 
-const parseClinicConfig = (value) => {
-  if (!value) return null;
-  if (typeof value === 'object') return value;
-  if (typeof value === 'string') {
-    try {
-      const parsed = JSON.parse(value);
-      return parsed && typeof parsed === 'object' ? parsed : null;
-    } catch (err) {
-      return null;
-    }
-  }
-  return null;
-};
 
 const isMissingClinicScheduleTableError = (error) => {
   if (!error) return false;
@@ -111,198 +137,21 @@ const isMissingClinicScheduleTableError = (error) => {
 };
 
 
-const isValidTimeZone = (value) => {
-  if (!value || typeof value !== 'string') return false;
-  try {
-    Intl.DateTimeFormat('en-US', { timeZone: value }).format(new Date());
-    return true;
-  } catch (err) {
-    return false;
-  }
-};
 
-const resolveClinicTimezone = (clinica) => {
-  const cfg = parseClinicConfig(clinica && clinica.configuracion);
-  const candidates = [
-    cfg && (cfg.timezone || cfg.timeZone || cfg.tz),
-    clinica && (clinica.timezone || clinica.time_zone || clinica.tz)
-  ];
 
-  for (const candidate of candidates) {
-    if (isValidTimeZone(candidate)) return candidate;
-  }
-  return DEFAULT_TIMEZONE;
-};
 
-const formatPartsInTimeZone = (date, timeZone) => {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone,
-    hour12: false,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit'
-  }).formatToParts(date);
 
-  const bag = {};
-  parts.forEach((p) => {
-    if (p.type !== 'literal') bag[p.type] = p.value;
-  });
 
-  return {
-    year: Number(bag.year),
-    month: Number(bag.month),
-    day: Number(bag.day),
-    hour: Number(bag.hour) === 24 ? 0 : Number(bag.hour),
-    minute: Number(bag.minute),
-    second: Number(bag.second)
-  };
-};
 
-const offsetMinutesForTimeZone = (date, timeZone) => {
-  const p = formatPartsInTimeZone(date, timeZone);
-  const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
-  return Math.round((asUtc - date.getTime()) / 60000);
-};
-
-const normalizeHms = (value, fallback = '00:00:00') => {
-  const raw = String(value || fallback).trim();
-  const m = raw.match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
-  if (!m) return null;
-  return `${m[1]}:${m[2]}:${m[3] || '00'}`;
-};
-
-const localDateTimeToUtc = (fechaLocal, timeValue, timeZone) => {
-  if (!fechaLocal || typeof fechaLocal !== 'string') return null;
-  const d = fechaLocal.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!d) return null;
-
-  const hms = normalizeHms(timeValue);
-  if (!hms) return null;
-  const t = hms.match(/^(\d{2}):(\d{2}):(\d{2})$/);
-  if (!t) return null;
-
-  const year = Number(d[1]);
-  const month = Number(d[2]);
-  const day = Number(d[3]);
-  const hour = Number(t[1]);
-  const minute = Number(t[2]);
-  const second = Number(t[3]);
-
-  const naiveUtc = Date.UTC(year, month - 1, day, hour, minute, second);
-  let ts = naiveUtc;
-
-  // Dos iteraciones son suficientes para converger en cambios de DST.
-  for (let i = 0; i < 2; i++) {
-    const offsetMin = offsetMinutesForTimeZone(new Date(ts), timeZone);
-    ts = naiveUtc - offsetMin * 60000;
-  }
-
-  return new Date(ts);
-};
-
-const formatDateLocal = (date, timeZone) => {
-  const p = formatPartsInTimeZone(date, timeZone);
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${p.year}-${pad(p.month)}-${pad(p.day)}`;
-};
 
 /**
  * Parse "YYYY-MM-DDTHH:mm" sin offset como hora local de clínica.
  * Si el string incluye zona (Z o +/-hh:mm), se respeta.
  */
-const parseDateTime = (value, timeZone) => {
-  if (!value || typeof value !== 'string') return null;
 
-  // Con timezone explícita (Z o +/-hh:mm)
-  if (/[Zz]$/.test(value) || /[+-]\d{2}:\d{2}$/.test(value)) {
-    const d = new Date(value);
-    return Number.isNaN(d.getTime()) ? null : d;
-  }
 
-  // "YYYY-MM-DDTHH:mm" o "YYYY-MM-DDTHH:mm:ss" sin timezone -> hora local de la clínica.
-  const m = value.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}(?::\d{2})?)$/);
-  if (m) {
-    return localDateTimeToUtc(m[1], m[2], timeZone);
-  }
 
-  // Fallback: intentar parse nativo
-  const d = new Date(value);
-  return Number.isNaN(d.getTime()) ? null : d;
-};
 
-const formatLocal = (date, timeZone) => {
-  const p = formatPartsInTimeZone(date, timeZone);
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${p.year}-${pad(p.month)}-${pad(p.day)}T${pad(p.hour)}:${pad(p.minute)}`;
-};
-
-const buildWindowsFromHorarios = (horarios, dow, fechaLocal, timeZone) => {
-  const exceptionMap = buildHorarioExceptionMap(
-    (horarios || []).flatMap((h) => Array.isArray(h?.excepciones) ? h.excepciones : [])
-  );
-  const expanded = expandHorariosForDate(horarios || [], fechaLocal, exceptionMap)
-    .filter((h) => h.dia_semana === dow && h.activo);
-  const base = expanded
-    .map((h) => {
-      const start = localDateTimeToUtc(fechaLocal, h.hora_inicio, timeZone);
-      const end = localDateTimeToUtc(fechaLocal, h.hora_fin, timeZone);
-      return { start, end };
-    })
-    .filter((w) => w.start && w.end && Number.isFinite(w.start.getTime()) && Number.isFinite(w.end.getTime()) && w.start < w.end);
-  return base;
-};
-
-const buildDoctorBloqueoRowsForDate = (bloqueos, fechaLocal, timeZone) => {
-  const targetDow = dayIndexFromLocalDate(fechaLocal);
-  return (bloqueos || []).flatMap((bloqueo) => {
-    const exceptions = Array.isArray(bloqueo?.excepciones) ? bloqueo.excepciones : [];
-    const canceled = exceptions.some((row) => String(row?.fecha || '') === fechaLocal && row?.cancelado !== false);
-    if (canceled) return [];
-
-    const startDay = formatDateLocal(bloqueo.fecha_inicio, timeZone);
-    const endDay = formatDateLocal(bloqueo.fecha_fin, timeZone);
-    const startParts = formatPartsInTimeZone(bloqueo.fecha_inicio, timeZone);
-    const endParts = formatPartsInTimeZone(bloqueo.fecha_fin, timeZone);
-    const startHm = `${String(startParts.hour).padStart(2, '0')}:${String(startParts.minute).padStart(2, '0')}`;
-    const endHm = `${String(endParts.hour).padStart(2, '0')}:${String(endParts.minute).padStart(2, '0')}`;
-    const recurrente = String(bloqueo.recurrente || 'none');
-
-    let applies = false;
-    if (recurrente === 'none') {
-      applies = fechaLocal >= startDay && fechaLocal <= endDay;
-    } else if (recurrente === 'daily') {
-      applies = fechaLocal >= startDay;
-    } else if (recurrente === 'weekly') {
-      applies = fechaLocal >= startDay && targetDow === dayIndexFromLocalDate(startDay);
-    } else if (recurrente === 'monthly') {
-      applies = fechaLocal >= startDay && Number(fechaLocal.slice(8, 10)) === Number(startDay.slice(8, 10));
-    }
-    if (!applies) return [];
-
-    const occStartHm = recurrente === 'none'
-      ? (fechaLocal === startDay ? startHm : '00:00')
-      : startHm;
-    const occEndHm = recurrente === 'none'
-      ? (fechaLocal === endDay ? endHm : '23:59')
-      : endHm;
-    const start = localDateTimeToUtc(fechaLocal, occStartHm, timeZone);
-    const end = localDateTimeToUtc(fechaLocal, occEndHm, timeZone);
-    if (!start || !end || start >= end) return [];
-
-    return [{
-      ...bloqueo.toJSON?.() || bloqueo,
-      fecha_inicio: start,
-      fecha_fin: end,
-    }];
-  });
-};
-
-const hasActiveSchedule = (horarios) => {
-  return Array.isArray(horarios) && horarios.some((h) => !!h.activo);
-};
 
 const fetchClinicHorarios = async (clinicaId) => {
   if (!db.ClinicaHorario) return [];
@@ -346,79 +195,8 @@ const intersectWindows = (a, b) => {
     .filter((w) => w.start < w.end);
 };
 
-const normalizeRecibeCitas = (value) => {
-  if (typeof value === 'boolean') return value;
-  const normalized = String(value || '').trim().toLowerCase();
-  if (['1', 'true', 'si', 'sí', 'yes'].includes(normalized)) return true;
-  if (['0', 'false', 'no'].includes(normalized)) return false;
-  return false;
-};
 
-const mergeWindows = (windows) => {
-  const sorted = (windows || [])
-    .filter((w) => w?.start && w?.end && w.start < w.end)
-    .sort((a, b) => a.start - b.start);
 
-  if (!sorted.length) return [];
-
-  const merged = [sorted[0]];
-  for (let i = 1; i < sorted.length; i++) {
-    const curr = sorted[i];
-    const last = merged[merged.length - 1];
-    if (curr.start <= last.end) {
-      last.end = new Date(Math.max(last.end.getTime(), curr.end.getTime()));
-      continue;
-    }
-    merged.push({ start: curr.start, end: curr.end });
-  }
-  return merged;
-};
-
-const buildDoctorAvailabilityContext = ({
-  doctorId,
-  clinicaId,
-  dc,
-  dow,
-  fechaLocal,
-  timeZone
-}) => {
-  if (!doctorId) {
-      return {
-        docWins: [],
-        dcMissing: false,
-        outOfHoursMessage: 'Doctor fuera de horario'
-      };
-    }
-
-  if (dc === null) {
-      return {
-        docWins: [],
-        dcMissing: true,
-        outOfHoursMessage: 'Doctor no asignado a la clínica'
-      };
-    }
-
-  const receiveAppointments = normalizeRecibeCitas(dc?.recibe_citas);
-  const clinicWins = buildWindowsFromHorarios(dc?.horarios || [], dow, fechaLocal, timeZone);
-
-  if (!receiveAppointments) {
-    return {
-      docWins: [],
-      dcMissing: false,
-      outOfHoursMessage: 'Profesional en modo sin citas (no aparece en agenda de citas)'
-    };
-  }
-
-  const message = clinicWins.length
-    ? 'Profesional fuera de su horario en esta clínica'
-    : 'Profesional sin horario configurado en esta clínica';
-
-  return {
-    docWins: mergeWindows(clinicWins),
-    dcMissing: false,
-    outOfHoursMessage: message
-  };
-};
 
 const build409 = ({ message, conflicts }) => {
   const canForce = conflicts.length > 0 && conflicts.every((c) => !!c.can_force);
@@ -431,10 +209,6 @@ const build409 = ({ message, conflicts }) => {
   };
 };
 
-const inAnyWindow = (windows, start, end) => {
-  if (!Array.isArray(windows) || windows.length === 0) return false;
-  return windows.some((w) => start >= w.start && end <= w.end);
-};
 
 const normalizeTimeRangeRows = (rows, startKey, endKey) => {
   return (rows || [])
@@ -744,8 +518,15 @@ exports.check = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'inicio_local requerido (YYYY-MM-DDTHH:mm)' });
   }
 
-  const clinica = await db.Clinica.findByPk(clinicaId, { attributes: ['id_clinica', 'nombre_clinica', 'configuracion'] });
+  const clinica = await db.Clinica.findByPk(clinicaId, { attributes: ['id_clinica', 'nombre_clinica', 'configuracion', 'grupoClinicaId'] });
   if (!clinica) return res.status(404).json({ message: 'Clínica no encontrada' });
+
+  let bookingProfile = null;
+  if (req.query?.tratamiento_id) {
+    await assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.view', clinicId: clinicaId });
+    const treatment = await loadScopedTreatment({ db, treatmentId: req.query.tratamiento_id, clinic: clinica });
+    bookingProfile = requireOperationalProfile(treatment);
+  }
 
   const clinicTimezone = resolveClinicTimezone(clinica);
 
@@ -766,6 +547,26 @@ exports.check = asyncHandler(async (req, res) => {
 
   if (end <= start) {
     return res.status(400).json({ message: 'rango inválido (fin <= inicio)' });
+  }
+
+  if (bookingProfile) {
+    if (ignore_cita_id) {
+      const ignored = await db.CitaPaciente.findByPk(Number(ignore_cita_id), { attributes: ['id_cita', 'clinica_id'] });
+      if (!ignored || Number(ignored.clinica_id) !== clinicaId) return res.status(404).json({ message: 'Cita no encontrada' });
+    }
+    const context = await loadBookingContext({ db, clinic: clinica, profile: bookingProfile, start, end,
+      ignoreAppointmentId: ignore_cita_id ? Number(ignore_cita_id) : null, occupancyEnabled: true });
+    const selections = bookingProfile.phases.length === 1 && bookingProfile.phases[0].professionals.mode === 'any'
+      ? { [bookingProfile.phases[0].key]: { doctor_id, installation_id: instalacion_id } } : {};
+    const solution = solveBookingProfile({ profile: bookingProfile, start, ...context, selections });
+    if (!solution || new Date(solution.end_at).getTime() !== end.getTime()) return res.status(409).json({ available: false,
+      reason: 'blocked', message: 'No hay disponibilidad para el perfil del tratamiento.', can_force: false,
+      resource_conflicts: [{ resource_type: 'staff_pool', code: 'BOOKING_UNAVAILABLE', can_force: false,
+        details: { message: 'El rango no cumple el perfil de cabinas y profesionales del tratamiento.' } }] });
+    return res.json({ available: true, clinica: { clinica_id: clinicaId, timezone: clinicTimezone },
+      resources: { doctor_id: solution.phases[0].doctor_ids[0], instalacion_id: solution.phases[0].installation_id },
+      warnings: solution.warnings, booking: solution,
+      range: { inicio_local: formatLocal(start, clinicTimezone), fin_local: formatLocal(end, clinicTimezone), inicio_utc: start.toISOString(), fin_utc: end.toISOString() } });
   }
 
   const conflicts = [];
@@ -1043,8 +844,40 @@ exports.slots = asyncHandler(async (req, res) => {
   const requestedLimit = parseIntSafe(limit);
   const includeUnavailable = parseBool(include_unavailable);
 
-  const clinica = await db.Clinica.findByPk(clinicaId, { attributes: ['id_clinica', 'nombre_clinica', 'configuracion'] });
+  const clinica = await db.Clinica.findByPk(clinicaId, { attributes: ['id_clinica', 'nombre_clinica', 'configuracion', 'grupoClinicaId'] });
   if (!clinica) return res.status(404).json({ message: 'Clínica no encontrada' });
+  if (req.query?.tratamiento_id) {
+    await assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.view', clinicId: clinicaId });
+    const treatment = await loadScopedTreatment({ db, treatmentId: req.query.tratamiento_id, clinic: clinica });
+    const profile = requireOperationalProfile(treatment);
+    if (profile) {
+      if (requiresMultiResourceBooking(profile)) {
+        return res.status(409).json({ code: 'booking_profile_use_treatment_slots', can_force: false,
+          message: 'Este tratamiento usa disponibilidad por fases o equipo. Utiliza la búsqueda de huecos del tratamiento.' });
+      }
+      if (stepMin < 5 || stepMin > 120) return res.status(400).json({ message: 'granularity_min debe estar entre 5 y 120' });
+      const installationIds = parseIntArray(instalacion_ids || req.query['instalacion_ids[]']);
+      const professionalIds = parseIntArray(doctor_ids || req.query['doctor_ids[]']);
+      if (installationIds.length > 50 || professionalIds.length > 50 || (installationIds.length && professionalIds.length)
+        || (installationIds.length && (!doctor_id || instalacion_id)) || (professionalIds.length && (!instalacion_id || doctor_id))) {
+        return res.status(400).json({ message: 'Batch de cabinas/profesionales inválido' });
+      }
+      const timezone = resolveClinicTimezone(clinica);
+      const context = await loadBookingContext({ db, clinic: clinica, profile,
+        start: resolveLocalInstant(fecha_local, '00:00:00', timezone),
+        end: resolveLocalInstant(addDays(fecha_local, 1), '00:00:00', timezone), occupancyEnabled: true });
+      const getSolutions = (doctor, installation) => solutionsForCalendar({ profile, context, date: fecha_local,
+        stepMinutes: stepMin, limit: Math.min(requestedLimit > 0 ? requestedLimit : 500, 500),
+        selections: { [profile.phases[0].key]: { doctor_id: doctor, installation_id: installation } },
+        fromLocal: typeof from_local === 'string' ? from_local : '00:00', toLocal: typeof to_local === 'string' ? to_local : null });
+      const response = { timezone, clinica_id: clinicaId, fecha_local, duracion_min: profile.phases[0].duration_minutes, granularity_min: stepMin };
+      if (installationIds.length) return res.json({ ...response, doctor_id: Number(doctor_id), instalacion_ids: installationIds,
+        slots_by_instalacion: Object.fromEntries(installationIds.map((id) => [id, getSolutions(Number(doctor_id), id)])), unavailable_by_instalacion: {} });
+      if (professionalIds.length) return res.json({ ...response, instalacion_id: Number(instalacion_id), doctor_ids: professionalIds,
+        slots_by_doctor: Object.fromEntries(professionalIds.map((id) => [id, getSolutions(id, Number(instalacion_id))])), unavailable_by_doctor: {} });
+      return res.json({ ...response, slots: getSolutions(doctor_id ? Number(doctor_id) : null, instalacion_id ? Number(instalacion_id) : null), unavailable_intervals: [] });
+    }
+  }
   const clinicTimezone = resolveClinicTimezone(clinica);
 
   // Base window: día local completo de clínica + recorte opcional from/to.
@@ -1536,8 +1369,8 @@ exports.slots = asyncHandler(async (req, res) => {
   });
 });
 
-const invokeSlotsForSummary = (query) => new Promise((resolve, reject) => {
-  const req = { query };
+const invokeSlotsForSummary = (query, userData) => new Promise((resolve, reject) => {
+  const req = { query, userData };
   const res = {
     statusCode: 200,
     status(code) {
@@ -1647,7 +1480,7 @@ exports.grid = asyncHandler(async (req, res) => {
     }
 
     try {
-      const payload = await invokeSlotsForSummary(query);
+      const payload = await invokeSlotsForSummary(query, req.userData);
       return {
         day_id: dateIso,
         column_id: String(columnId),
@@ -1713,7 +1546,7 @@ exports.summary = asyncHandler(async (req, res) => {
         ...baseQuery,
         fecha_local: dateIso,
         limit: '1',
-      });
+      }, req.userData);
       return {
         date: dateIso,
         has_availability: responseHasAnySlots(payload),

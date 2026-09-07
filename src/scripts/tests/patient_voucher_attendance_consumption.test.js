@@ -5,9 +5,12 @@ require('dotenv').config();
 
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
+const test = require('node:test');
 
-const db = require('../../../models');
-const patientEconomics = require('../../services/patientEconomics.service');
+// This is a mutating integration test, not an offline contract test. Loading it
+// in a broad node --test invocation must not write to the shared clinic database.
+let db;
+let patientEconomics;
 
 async function run() {
   const token = crypto.randomUUID();
@@ -113,12 +116,12 @@ async function run() {
   }
 }
 
-run()
-  .catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await db.sequelize.close();
-    process.exit(process.exitCode || 0);
-  });
+test('voucher attendance consumption (explicit shared-DB integration)', {
+  skip: process.env.CLINICACLICK_ALLOW_SHARED_DB_QA !== 'true'
+    ? 'Requires explicit CLINICACLICK_ALLOW_SHARED_DB_QA=true; creates and removes synthetic QA entities.' : false,
+}, async () => {
+  db = require('../../../models');
+  patientEconomics = require('../../services/patientEconomics.service');
+  try { await run(); }
+  finally { await db.sequelize.close(); }
+});

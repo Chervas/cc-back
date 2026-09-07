@@ -2,6 +2,10 @@
 const asyncHandler = require('express-async-handler');
 const db = require('../../models');
 const { Op } = db.Sequelize;
+const { mergeClinicalConfig, assertCatalogEditable } = require('../lib/treatment-catalog-contract');
+const { validateCatalogResources } = require('../lib/treatment-catalog-resources');
+const { createTreatmentAutomationScope } = require('../lib/treatment-automation-scope');
+const treatmentAutomationScope = createTreatmentAutomationScope(db);
 
 const Tratamiento = db.Tratamiento;
 const Clinica = db.Clinica;
@@ -135,21 +139,6 @@ function extractTriggerConfig(template) {
     const entryNodeId = toCleanString(template?.entry_node_id);
     const entryNode = nodes.find((node) => toCleanString(node?.id) === entryNodeId);
     return entryNode?.config && typeof entryNode.config === 'object' ? entryNode.config : null;
-}
-
-async function resolveEffectiveGroupId(tratamiento) {
-    const directGroupId = toIntOrNull(tratamiento?.grupo_clinica_id);
-    if (directGroupId) return directGroupId;
-
-    const clinicId = toIntOrNull(tratamiento?.clinica_id);
-    if (!clinicId) return null;
-
-    const clinica = await Clinica.findOne({
-        where: { id_clinica: clinicId },
-        attributes: ['grupoClinicaId'],
-        raw: true,
-    });
-    return toIntOrNull(clinica?.grupoClinicaId);
 }
 
 async function resolveGroupIdForClinicId(clinicId) {
@@ -291,6 +280,9 @@ exports.createTratamiento = asyncHandler(async (req, res) => {
         ? normalizeInstallationIds(instalaciones_habilitadas)
         : null;
 
+    const normalizedClinicalConfig = mergeClinicalConfig(null, clinical_config);
+    await validateCatalogResources({ origen, clinica_id: clinicaIdNum, grupo_clinica_id, clinical_config: normalizedClinicalConfig }, db);
+    await treatmentAutomationScope.assertReferenceScope({ origen, clinica_id: clinicaIdNum, grupo_clinica_id, appointment_automation_template_key });
     const tratamiento = await Tratamiento.create({
         nombre,
         codigo: codigo || null,
@@ -308,15 +300,13 @@ exports.createTratamiento = asyncHandler(async (req, res) => {
         sesiones_defecto: sesiones_defecto ?? 1,
         requiere_pieza: !!requiere_pieza,
         requiere_zona: !!requiere_zona,
-        activo: activo !== false,
+        activo: activo !== false && !['draft', 'obsolete'].includes(normalizedClinicalConfig?.catalog_status),
         appointment_automation_template_key: appointment_automation_template_key || null,
         appointment_automation_template_version: null,
         automation_template_bindings: automation_template_bindings && typeof automation_template_bindings === 'object'
             ? automation_template_bindings
             : null,
-        clinical_config: clinical_config && typeof clinical_config === 'object'
-            ? clinical_config
-            : null,
+        clinical_config: normalizedClinicalConfig,
         asignacion_instalacion_tipo: installationAssignmentType,
         tipo_instalacion_requerida: requiredInstallationType,
         instalaciones_habilitadas: enabledInstallationIds,
@@ -334,6 +324,7 @@ exports.updateTratamiento = asyncHandler(async (req, res) => {
     if (!tratamiento) {
         return res.status(404).json({ message: 'Tratamiento no encontrado' });
     }
+    assertCatalogEditable(tratamiento);
     const updatableFields = [
         'nombre',
         'codigo',
@@ -369,9 +360,7 @@ exports.updateTratamiento = asyncHandler(async (req, res) => {
                 return;
             }
             if (field === 'clinical_config') {
-                tratamiento[field] = req.body[field] && typeof req.body[field] === 'object'
-                    ? req.body[field]
-                    : null;
+                tratamiento[field] = mergeClinicalConfig(tratamiento[field], req.body[field]);
                 return;
             }
             if (field === 'asignacion_instalacion_tipo') {
@@ -408,6 +397,11 @@ exports.updateTratamiento = asyncHandler(async (req, res) => {
         if (effectiveType === 'especificas') {
             tratamiento.tipo_instalacion_requerida = null;
         }
+    }
+    if (['draft', 'obsolete'].includes(tratamiento.clinical_config?.catalog_status)) tratamiento.activo = false;
+    await validateCatalogResources(tratamiento, db);
+    if (['appointment_automation_template_key', 'origen', 'clinica_id', 'grupo_clinica_id'].some(field => req.body[field] !== undefined)) {
+        await treatmentAutomationScope.assertReferenceScope(tratamiento);
     }
     await tratamiento.save();
     res.json(tratamiento);
@@ -464,6 +458,7 @@ exports.personalizarTratamiento = asyncHandler(async (req, res) => {
 
     const tratamientoBase = await Tratamiento.findByPk(id);
     if (!tratamientoBase) return res.status(404).json({ message: 'Tratamiento no encontrado' });
+    assertCatalogEditable(tratamientoBase);
 
     // No personalizar uno ya propio
     if (tratamientoBase.origen === 'clinica' && Number(tratamientoBase.clinica_id) === clinicaIdNum) {
@@ -483,12 +478,16 @@ exports.personalizarTratamiento = asyncHandler(async (req, res) => {
     datosCopia.clinica_id = clinicaIdNum;
     datosCopia.grupo_clinica_id = null;
     datosCopia.eliminado_por_clinica = null;
+    datosCopia.clinical_config = mergeClinicalConfig(tratamientoBase.clinical_config, cambios.clinical_config);
+    if (['draft', 'obsolete'].includes(datosCopia.clinical_config?.catalog_status)) datosCopia.activo = false;
     delete datosCopia.createdAt;
     delete datosCopia.updatedAt;
 
     const nuevoCodigo = tratamientoBase.codigo ? `${tratamientoBase.codigo}-C${clinica_id}` : null;
     datosCopia.codigo = nuevoCodigo;
 
+    await validateCatalogResources(datosCopia, db);
+    await treatmentAutomationScope.assertReferenceScope(datosCopia);
     const copia = await Tratamiento.create(datosCopia);
 
     if (tratamientoBase.origen !== 'clinica') {
@@ -555,7 +554,8 @@ exports.getTratamientoAutomationTemplate = asyncHandler(async (req, res) => {
         raw: true,
     });
 
-    if (!template || !APPOINTMENT_TRIGGER_TYPES.has(template.trigger_type)) {
+    if (!template || !APPOINTMENT_TRIGGER_TYPES.has(template.trigger_type)
+        || !await treatmentAutomationScope.canUseTemplate(tratamiento, template)) {
         return res.json({
             success: true,
             data: {
@@ -592,6 +592,7 @@ exports.setTratamientoAutomationTemplate = asyncHandler(async (req, res) => {
     if (!tratamiento) {
         return res.status(404).json({ success: false, message: 'Tratamiento no encontrado' });
     }
+    assertCatalogEditable(tratamiento);
 
     const templateKeyRaw = req.body?.template_key;
     if (templateKeyRaw === undefined) {
@@ -650,25 +651,11 @@ exports.setTratamientoAutomationTemplate = asyncHandler(async (req, res) => {
         });
     }
 
-    if (!template.is_system) {
-        const tratamientoClinicId = toIntOrNull(tratamiento.clinica_id);
-        const effectiveGroupId = await resolveEffectiveGroupId(tratamiento);
-        const templateClinicId = toIntOrNull(template.clinic_id);
-        const templateGroupId = toIntOrNull(template.group_id);
-        const templateClinicGroupId = templateClinicId
-            ? await resolveGroupIdForClinicId(templateClinicId)
-            : null;
-
-        const isSameClinic = !!templateClinicId && !!tratamientoClinicId && templateClinicId === tratamientoClinicId;
-        const isSameGroup = !!templateGroupId && !!effectiveGroupId && templateGroupId === effectiveGroupId;
-        const isClinicFromSameGroup =
-            !!templateClinicGroupId && !!effectiveGroupId && templateClinicGroupId === effectiveGroupId;
-        if (!isSameClinic && !isSameGroup && !isClinicFromSameGroup) {
-            return res.status(403).json({
-                success: false,
-                message: 'La plantilla v2 no pertenece al mismo alcance (clínica/grupo) del tratamiento',
-            });
-        }
+    if (!await treatmentAutomationScope.canUseTemplate(tratamiento, template)) {
+        return res.status(403).json({
+            success: false,
+            message: 'La plantilla v2 no pertenece al mismo alcance (clínica/grupo) del tratamiento',
+        });
     }
 
     tratamiento.appointment_automation_template_key = template.template_key;

@@ -24,12 +24,16 @@ const Conversation = db.Conversation;
 const Message = db.Message;
 const ConversationRead = db.ConversationRead;
 const appointmentAutomationV2Runtime = require('../services/appointmentAutomationV2Runtime.service');
+const { bookingCapabilities, loadScopedTreatment, requireOperationalProfile } = require('../services/treatmentBookingProfile.service');
+const { mutateAppointmentBooking } = require('../services/appointmentBookingCommand.service');
+const { bookingSegments } = require('../lib/appointment-booking-segments');
 const { CITA_STATUS_VALUES } = require('../lib/status-catalog');
 const { getIO } = require('../services/socket.service');
 const { normalizePhoneDigits, getPhoneLookupCandidates } = require('../lib/phone');
 const { normalizeHumanName } = require('../lib/name');
 const {
     createAppointmentWithPatientLanguage,
+    applyExplicitPatientLanguage,
     normalizePatientLanguage,
     preferredLanguagePayload,
 } = require('../lib/patient-language');
@@ -159,11 +163,17 @@ function protectAppointmentPayload(citaLike, capabilities = {}) {
     if (!citaLike) return citaLike;
     const plain = citaLike?.toJSON ? citaLike.toJSON() : { ...citaLike };
     const protectedPayload = { ...plain };
+    if (bookingCapabilities().simple) {
+        protectedPayload.booking_segments = (plain.booking_segments || bookingSegments(plain)).map((segment) => ({
+            ...segment, label: capabilities.patientSensitive ? segment.label : '',
+        }));
+    }
     if (!capabilities.patientSensitive) {
         protectedPayload.paciente = redactAppointmentPatient(plain.paciente);
         protectedPayload.titulo = null;
         protectedPayload.nota = null;
         protectedPayload.motivo = null;
+        protectedPayload.import_metadata = null;
         protectedPayload.tratamiento_id = null;
         protectedPayload.tratamiento = null;
         protectedPayload.conversation_id = null;
@@ -1177,6 +1187,8 @@ function mapCalendarCitaRow(cita, timeZone = DEFAULT_TIMEZONE) {
         inicio_local: formatDateTimeLocal(plain.inicio, timeZone),
         fin_local: formatDateTimeLocal(plain.fin, timeZone),
         time_zone: timeZone,
+        ...(bookingCapabilities().simple ? { booking_segments: bookingSegments(plain).map((segment) => ({ ...segment,
+            start_local: formatDateTimeLocal(segment.start_at, timeZone), end_local: formatDateTimeLocal(segment.end_at, timeZone) })) } : {}),
         precio_cita_resuelto: resolveCitaAppointmentPrice(plain),
         conversation_id: plain.conversation_id || null,
         unread_count: Number(plain.unread_count || 0) || 0,
@@ -2095,10 +2107,20 @@ exports.createCita = asyncHandler(async (req, res) => {
 
         const isHistoricalRegistration = parseBool(historical_registration)
             || cleanOptionalString(source_system, 40)?.toLowerCase() === 'lead_resolution_historical';
+        const bookingEnabled = bookingCapabilities().simple;
+        // A historical label alone cannot bypass the booking gate for future work.
+        const pastHistoryOnly = isHistoricalRegistration && finDate <= new Date();
+        if (!pastHistoryOnly && tratamiento_id) {
+            const bookingTreatment = await loadScopedTreatment({ db, treatmentId: tratamiento_id, clinic: clinica });
+            requireOperationalProfile(bookingTreatment);
+        }
         const notificationSuppression = normalizeAppointmentNotificationSuppression(notification_suppression, {
             historicalRegistration: isHistoricalRegistration,
         });
-        const baseImportMetadata = parsePlainObject(import_metadata);
+        const baseImportMetadata = { ...parsePlainObject(import_metadata) };
+        // HTTP callers cannot author a reservation snapshot, even while the new
+        // booking runtime is disabled or when recording past clinical activity.
+        delete baseImportMetadata.booking;
         const appointmentImportMetadata = {
             ...baseImportMetadata,
             ...(isHistoricalRegistration ? {
@@ -2111,7 +2133,9 @@ exports.createCita = asyncHandler(async (req, res) => {
         };
 
         // Chequear disponibilidad si hay doctor/instalación (canónico + legacy)
-        const { resourceConflicts, legacyConflicts, canForce } = await checkDisponibilidadCanonica({
+        const { resourceConflicts, legacyConflicts, canForce } = bookingEnabled && !pastHistoryOnly
+            ? { resourceConflicts: [], legacyConflicts: [], canForce: false }
+            : await checkDisponibilidadCanonica({
             clinica_id,
             inicio: inicioDate,
             fin: finDate,
@@ -2164,7 +2188,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         // La cita y un cambio explícito de idioma forman una única unidad. Si
         // falla la actualización del paciente, la transacción elimina también
         // la cita y ningún flujo puede arrancar con el idioma anterior.
-        const cita = await createAppointmentWithPatientLanguage({
+        const createOptions = {
             sequelize: db.sequelize,
             AppointmentModel: CitaPaciente,
             appointmentValues: {
@@ -2192,7 +2216,20 @@ exports.createCita = asyncHandler(async (req, res) => {
             },
             patient: paciente,
             requestedLanguage: datosPaciente.idioma_preferido,
-        });
+        };
+        const cita = bookingEnabled && !pastHistoryOnly
+            ? await mutateAppointmentBooking({
+                db,
+                appointmentValues: createOptions.appointmentValues,
+                selections: req.body?.booking_selection || {},
+                priorityAcknowledged: req.body?.booking_priority_acknowledged === true,
+                persist: async ({ values, transaction }) => {
+                    const created = await CitaPaciente.create(values, { transaction });
+                    await applyExplicitPatientLanguage(paciente, datosPaciente.idioma_preferido, { transaction });
+                    return created;
+                },
+            })
+            : await createAppointmentWithPatientLanguage(createOptions);
 
         // Disparar motor v2 de automatizaciones de cita (si el tratamiento tiene plantilla v2 asignada).
         try {
@@ -2301,6 +2338,9 @@ exports.createCita = asyncHandler(async (req, res) => {
 
         return res.status(201).json(await protectAppointmentsForRequest(req, citaCreada));
     } catch (err) {
+        if (/^(booking_|treatment_not_)/.test(String(err?.code || ''))) {
+            return res.status(err.statusCode || 409).json({ code: err.code, message: err.message, details: err.details || null, can_force: false });
+        }
         if (err.status === 400 && err.message === 'unsupported_patient_language') {
             return res.status(400).json({
                 message: 'idioma_preferido inválido',
@@ -2403,19 +2443,25 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
     if (summaryOnly) {
         const citas = await CitaPaciente.findAll({
             where,
-            attributes: ['clinica_id', 'doctor_id', 'instalacion_id', 'inicio'],
+            attributes: ['clinica_id', 'doctor_id', 'instalacion_id', 'inicio',
+                ...(bookingCapabilities().simple ? ['id_cita', 'fin', 'import_metadata'] : [])],
             order: [['inicio', 'ASC']],
         });
         res.set('X-Agenda-Endpoint', 'calendar-summary');
         return res.json(citas.map((cita) => {
             const plain = plainCita(cita);
             const timeZone = calendarScope.timeZones.get(Number(plain.clinica_id)) || DEFAULT_TIMEZONE;
+            const segments = bookingCapabilities().simple ? bookingSegments(plain) : [];
             return {
                 clinica_id: plain.clinica_id,
                 doctor_id: plain.doctor_id,
                 instalacion_id: plain.instalacion_id,
                 inicio: plain.inicio,
                 inicio_local: formatDateTimeLocal(plain.inicio, timeZone),
+                ...(segments.length ? { booking_resource_ids: {
+                    doctor_ids: [...new Set(segments.flatMap((segment) => segment.doctor_ids))],
+                    installation_ids: [...new Set(segments.map((segment) => segment.installation_id))],
+                } } : {}),
             };
         }));
     }
@@ -2438,6 +2484,7 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
             'estado',
             'inicio',
             'fin',
+            ...(bookingCapabilities().simple ? ['import_metadata'] : []),
             'created_at',
             'updated_at',
         ],
@@ -2626,16 +2673,32 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
         });
     }
 
-    const cita = await CitaPaciente.findByPk(citaId);
+    let cita = await CitaPaciente.findByPk(citaId);
     if (!cita) {
         return res.status(404).json({ message: 'Cita no encontrada' });
     }
     if (await denyAppointmentManageAccessIfNeeded(req, res, cita.clinica_id)) return;
 
-    const previousStatus = cita.estado;
+    let previousStatus = cita.estado;
     cita.estado = estadoRaw;
     cita.updated_by = req.userData?.userId || null;
-    await cita.save();
+    if (bookingCapabilities().simple) {
+        cita = await mutateAppointmentBooking({ db, existingAppointmentId: citaId,
+            appointmentValues: { estado: estadoRaw, updated_by: cita.updated_by }, allowObsolete: true, stateOnly: true,
+            priorityAcknowledged: req.body?.booking_priority_acknowledged === true,
+            persist: async ({ values, existing, transaction }) => {
+                previousStatus = existing.estado;
+                return existing.update(values, { transaction });
+            },
+        });
+    } else {
+        if (previousStatus === 'cancelada' && estadoRaw !== 'cancelada' && cita.tratamiento_id) {
+            const clinic = await Clinica.findByPk(cita.clinica_id);
+            const treatment = await loadScopedTreatment({ db, treatmentId: cita.tratamiento_id, clinic });
+            requireOperationalProfile(treatment, { allowObsolete: true });
+        }
+        await cita.save();
+    }
     try {
         await recordAppointmentStatusChange({
             appointment: cita,
@@ -2911,13 +2974,13 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
         return res.status(400).json({ message: 'id inválido' });
     }
 
-    const cita = await CitaPaciente.findByPk(citaId);
+    let cita = await CitaPaciente.findByPk(citaId);
     if (!cita) {
         return res.status(404).json({ message: 'Cita no encontrada' });
     }
     if (await denyAppointmentManageAccessIfNeeded(req, res, cita.clinica_id)) return;
 
-    const previousStatus = cita.estado;
+    let previousStatus = cita.estado;
     const rescheduleReason = String(req.body?.reschedule_reason || 'clinic_schedule').trim().toLowerCase();
     if (!['patient_request', 'clinic_schedule'].includes(rescheduleReason)) {
         return res.status(400).json({
@@ -2948,7 +3011,15 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
         return res.status(400).json({ message: 'instalacion_id inválido' });
     }
 
-    const { resourceConflicts, legacyConflicts, canForce } = await checkDisponibilidadCanonica({
+    const bookingEnabled = bookingCapabilities().simple;
+    if (!bookingEnabled && cita.tratamiento_id) {
+        const clinic = await Clinica.findByPk(cita.clinica_id);
+        const treatment = await loadScopedTreatment({ db, treatmentId: cita.tratamiento_id, clinic });
+        requireOperationalProfile(treatment, { allowObsolete: true });
+    }
+    const { resourceConflicts, legacyConflicts, canForce } = bookingEnabled
+        ? { resourceConflicts: [], legacyConflicts: [], canForce: false }
+        : await checkDisponibilidadCanonica({
         clinica_id: cita.clinica_id,
         inicio,
         fin,
@@ -2994,7 +3065,23 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
         cita.estado = 'reprogramada';
     }
     cita.updated_by = req.userData?.userId || null;
-    await cita.save();
+    if (bookingEnabled) {
+        cita = await mutateAppointmentBooking({
+            db, existingAppointmentId: cita.id_cita,
+            appointmentValues: { inicio, fin,
+                ...(nextDoctorIdRaw !== undefined ? { doctor_id: nextDoctorId } : {}),
+                ...(nextInstalacionIdRaw !== undefined ? { instalacion_id: nextInstalacionId } : {}),
+                estado: cita.estado, reschedule_reason: rescheduleReason, updated_by: cita.updated_by },
+            selections: req.body?.booking_selection || {}, priorityAcknowledged: req.body?.booking_priority_acknowledged === true,
+            allowObsolete: true,
+            persist: async ({ values, existing, transaction }) => {
+                previousStatus = existing.estado;
+                return existing.update(values, { transaction });
+            },
+        });
+    } else {
+        await cita.save();
+    }
     try {
         await recordAppointmentStatusChange({
             appointment: cita,
