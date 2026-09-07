@@ -13,7 +13,7 @@ const {
   extractWhatsappTemplateDisplayButtons,
 } = require('../lib/whatsapp-template-display');
 const {
-  completeAnsweredAutomationStateForConversation,
+  completeAutomationStateAfterHumanReplyForConversation,
   completeManualAutomationStateForConversation,
   getPendingReplyStatesByConversationIds,
   resolveAutomationAttentionForConversation,
@@ -2439,8 +2439,10 @@ exports.postMessage = async (req, res) => {
             reason: 'manual_reply_sent',
           }
         );
-        await completeAnsweredAutomationStateForConversation(conversation.id);
-        if (attentionResolution.updated > 0 && io) {
+        const automationState = await completeAutomationStateAfterHumanReplyForConversation(
+          conversation.id
+        );
+        if ((attentionResolution.updated > 0 || automationState.completed) && io) {
           io.to(`clinic:${conversation.clinic_id}`).emit('conversation:updated', {
             id: String(conversation.id),
             unread_count: 0,

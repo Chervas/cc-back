@@ -347,6 +347,60 @@ async function completeAnsweredAutomationStateForConversation(conversationId, op
   return { completed: !!completed, reason: completed ? null : 'state_changed' };
 }
 
+async function completeAutomationStateAfterHumanReplyForConversation(conversationId, options = {}) {
+  const numericConversationId = Number(conversationId);
+  if (!Number.isInteger(numericConversationId) || numericConversationId <= 0 || !db.ConversationAutomationState) {
+    return { completed: false, reason: 'invalid_scope' };
+  }
+  const state = await db.ConversationAutomationState.findOne({
+    where: { conversation_id: numericConversationId },
+    ...(options.transaction ? { transaction: options.transaction } : {}),
+  });
+  if (!state) return { completed: false, reason: 'state_not_found' };
+
+  const serialized = serializeAutomationState(state);
+  if (
+    serialized.status !== 'review'
+    || serialized.manual_action_required !== true
+    || serialized.possible_urgency === true
+  ) {
+    return { completed: false, reason: 'manual_action_not_answerable' };
+  }
+
+  if (serialized.appointment_id) {
+    return completeAnsweredAutomationStateForConversation(numericConversationId, options);
+  }
+
+  const execution = serialized.execution_id && db.FlowExecutionV2
+    ? await db.FlowExecutionV2.findByPk(serialized.execution_id, {
+        attributes: ['id', 'trigger_type', 'trigger_entity_type'],
+        raw: true,
+        ...(options.transaction ? { transaction: options.transaction } : {}),
+      })
+    : null;
+  const conversationDriven = execution
+    && (
+      String(execution.trigger_type || '').trim() === 'message_received'
+      || String(execution.trigger_entity_type || '').trim() === 'conversation'
+    );
+  if (!conversationDriven) {
+    return { completed: false, reason: 'operator_action_still_required' };
+  }
+
+  const ownership = serialized.execution_id
+    ? { expectedExecutionId: serialized.execution_id }
+    : (serialized.job_request_id ? { expectedJobRequestId: serialized.job_request_id } : {});
+  const completed = await conversationAutomationState.completeState({
+    clinicId: state.clinic_id,
+    conversationId: numericConversationId,
+  }, {
+    ...(options.transaction ? { transaction: options.transaction } : {}),
+    ...(options.emit === false ? { emit: false } : {}),
+    ...ownership,
+  });
+  return { completed: !!completed, reason: completed ? null : 'state_changed' };
+}
+
 async function completeManualAutomationStateForConversation(conversationId, options = {}) {
   const numericConversationId = Number(conversationId);
   if (!Number.isInteger(numericConversationId) || numericConversationId <= 0 || !db.ConversationAutomationState) {
@@ -377,6 +431,7 @@ async function completeManualAutomationStateForConversation(conversationId, opti
 }
 
 module.exports = {
+  completeAutomationStateAfterHumanReplyForConversation,
   completeAnsweredAutomationStateForConversation,
   completeManualAutomationStateForConversation,
   emitAutomationResponseProcessing,
