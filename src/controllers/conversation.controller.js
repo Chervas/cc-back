@@ -1746,13 +1746,19 @@ exports.getConversationByPatient = async (req, res) => {
   try {
     const userId = req.userData?.userId;
     const patientId = req.params.patientId || req.params.patient_id;
+    const requestedClinicId = Number(req.query.clinic_id || req.query.clinicId || 0) || null;
     const patient = await Paciente.findByPk(patientId, {
       attributes: ['id_paciente', 'clinica_id', 'telefono_movil'],
       raw: true,
     });
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    if (requestedClinicId && !ensureAccess({ clinicIds, isAggregateAllowed }, requestedClinicId)) {
+      return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+    }
+    const conversationClinicId = requestedClinicId || patient?.clinica_id || null;
     const conversation = patient
       ? await findCanonicalWhatsappConversation({
-          clinicId: patient.clinica_id,
+          clinicId: conversationClinicId,
           contactId: patient.telefono_movil,
           patientId: Number(patientId),
           createIfMissing: false,
@@ -1763,7 +1769,6 @@ exports.getConversationByPatient = async (req, res) => {
       return res.status(404).json({ error: 'Conversación no encontrada' });
     }
 
-    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
     if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
       return res.status(403).json({ error: 'Acceso denegado a la clínica' });
     }

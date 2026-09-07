@@ -657,7 +657,7 @@ async function runInboundDispatchJob(payload = {}, jobRequest = null) {
       conversation,
       message,
     });
-    if (attentionReconciliation.resolved) {
+    if (attentionReconciliation.handled) {
       await markClaimCompleted(
         claim,
         'attention_reconciliation',
@@ -673,7 +673,8 @@ async function runInboundDispatchJob(payload = {}, jobRequest = null) {
         result: {
           claim_id: claim.id,
           owner: 'attention_reconciliation',
-          resolved: true,
+          resolved: attentionReconciliation.resolved === true,
+          decision: attentionReconciliation.classification?.decision || null,
         },
       };
     }

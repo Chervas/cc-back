@@ -3,6 +3,7 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const patientDirectionService = require('../services/patientDirection.service');
+const { resolveWhatsappChannelRole } = require('../lib/whatsapp-channel-role');
 const db = require('../../models');
 const { queues } = require('../services/queue.service');
 const { Op } = require('sequelize');
@@ -372,6 +373,12 @@ router.post('/whatsapp/webhook', async (req, res) => {
       }
     }
 
+    // El token web decide la sede, pero el activo receptor sigue siendo necesario
+    // para conservar el canal físico por el que entró el mensaje.
+    if (!webhookAsset) {
+      webhookAsset = await findWhatsappAssetForWebhook(req.body);
+    }
+
     const from = extractPrimaryWhatsappContactFromWebhookBody(req.body);
     if (!webOrigin && webhookAsset?.id && from) {
       const destination = await patientDirectionService.resolveInboundDestination({
@@ -415,6 +422,8 @@ router.post('/whatsapp/webhook', async (req, res) => {
       web_origin_ref: webOriginRef || null,
       patient_direction_assignment_id: patientDirectionAssignmentId,
       patient_direction_former_assignment: patientDirectionFormerAssignment,
+      whatsapp_origin_asset_id: webhookAsset?.id || null,
+      whatsapp_channel_role: resolveWhatsappChannelRole(webhookAsset),
     });
     return res.sendStatus(200);
   } catch (err) {

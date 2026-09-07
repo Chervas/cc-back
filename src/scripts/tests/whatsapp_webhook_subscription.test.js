@@ -1,6 +1,10 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const {
+  normalizeWhatsappChannelRole,
+  resolveWhatsappChannelRole,
+} = require('../../lib/whatsapp-channel-role');
 
 const originalMetaAppSecret = process.env.META_APP_SECRET;
 process.env.META_APP_SECRET = 'test-app-secret';
@@ -11,6 +15,12 @@ const whatsappPhonesService = require('../../services/whatsappPhones.service');
 const originalGet = axios.get;
 
 (async () => {
+  assert.equal(normalizeWhatsappChannelRole(' Secondary '), 'secondary');
+  assert.equal(normalizeWhatsappChannelRole('unknown'), null);
+  assert.equal(resolveWhatsappChannelRole({
+    additionalData: { routing: { role: 'secondary' } },
+  }), 'secondary');
+
   const requests = [];
   axios.get = async (url, options = {}) => {
     requests.push({ url, options });
