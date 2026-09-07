@@ -1455,8 +1455,11 @@ async function handleWhatsappAccountUpdate({ entry, changes, value, clinicId }) 
     const patch = {
         account_update_last_at: new Date().toISOString(),
         account_update_last_event: normalized.event,
+        status: normalized.status,
         coexistence_status: normalized.status,
+        canSendApi: normalized.canSendApi,
         can_send_api: normalized.canSendApi,
+        requiresReconnect: normalized.status === 'disconnected',
         last_account_update: {
             event: normalized.event,
             field: field || null,

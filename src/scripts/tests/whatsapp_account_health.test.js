@@ -187,6 +187,34 @@ test('la recuperación por sondeo exige dos CONNECTED consecutivos', () => {
   assert.equal(webhook.health.state, 'healthy');
 });
 
+test('ACCOUNT_OFFBOARDED no se recupera mediante sondeos CONNECTED', () => {
+  const connected = deriveHealthCandidate({
+    providerStatus: 'CONNECTED',
+    registrationStatus: 'registered',
+    qualityRating: 'GREEN',
+  });
+  const polled = applyRecoveryPolicy({
+    previousState: 'disconnected',
+    previousRecoveryCount: 1,
+    previousReason: 'account_event_account_offboarded',
+    candidate: connected,
+  });
+  assert.equal(polled.explicit_recovery_required, true);
+  assert.equal(polled.recovery_pending, false);
+  assert.equal(polled.health.state, 'disconnected');
+  assert.equal(polled.health.can_send, false);
+  assert.equal(polled.health.reason_code, 'account_event_account_offboarded');
+
+  const reconnected = applyRecoveryPolicy({
+    previousState: 'disconnected',
+    previousReason: 'account_event_account_offboarded',
+    candidate: connected,
+    explicitRecovery: true,
+  });
+  assert.equal(reconnected.health.state, 'healthy');
+  assert.equal(reconnected.health.can_send, true);
+});
+
 test('una proyección saludable antigua no oculta un BANNED persistido', () => {
   const now = new Date('2026-08-31T12:00:00.000Z');
   const health = effectiveStoredHealth({
