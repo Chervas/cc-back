@@ -37,6 +37,13 @@ const {
   requireWhatsappLocale,
   resolveCatalogFamilyKey,
 } = require('../lib/whatsapp-template-locale');
+const {
+  buildWhatsappRoutingAdditionalData,
+  normalizeWhatsappChannelRole,
+  normalizeWhatsappSecondaryPurposes,
+  normalizeWhatsappSecondaryUnavailableAction,
+  resolveWhatsappRouting,
+} = require('../lib/whatsapp-channel-role');
 
 const {
   ClinicMetaAsset,
@@ -66,6 +73,101 @@ const businessVerificationCache = new Map();
 
 function isWhatsappGlobalAdmin(userId) {
   return ADMIN_USER_IDS.includes(Number(userId));
+}
+
+function whatsappPhoneScopeWhere({ assignmentScope, clinicId, groupId }) {
+  if (assignmentScope === 'clinic' && clinicId) {
+    return { assignmentScope: 'clinic', clinicaId: clinicId };
+  }
+  if (assignmentScope === 'group' && groupId) {
+    return { assignmentScope: 'group', grupoClinicaId: groupId };
+  }
+  return { assignmentScope: 'unassigned' };
+}
+
+async function clearWhatsappPhoneRoleCollision({
+  assignmentScope,
+  clinicId,
+  groupId,
+  role,
+  exceptPhoneNumberId,
+}) {
+  if (!['clinic', 'group'].includes(assignmentScope)) return;
+  const scoped = await ClinicMetaAsset.findAll({
+    where: {
+      assetType: 'whatsapp_phone_number',
+      isActive: true,
+      ...whatsappPhoneScopeWhere({ assignmentScope, clinicId, groupId }),
+      phoneNumberId: { [Op.ne]: exceptPhoneNumberId },
+    },
+  });
+  const conflicts = scoped.filter((asset) => resolveWhatsappRouting(asset).role === role);
+  for (const conflict of conflicts) {
+    await unassignWhatsappPhoneAsset(conflict);
+  }
+}
+
+async function releaseWhatsappWabaScopeIfUnused({ wabaId, assignmentScope, clinicId, groupId }) {
+  if (!wabaId || !['clinic', 'group'].includes(assignmentScope)) return;
+  const scopeWhere = whatsappPhoneScopeWhere({ assignmentScope, clinicId, groupId });
+  const assignedPhoneCount = await ClinicMetaAsset.count({
+    where: {
+      assetType: 'whatsapp_phone_number',
+      isActive: true,
+      wabaId,
+      ...scopeWhere,
+    },
+  });
+  if (assignedPhoneCount > 0) return;
+
+  await ClinicMetaAsset.update(
+    {
+      assignmentScope: 'unassigned',
+      clinicaId: null,
+      grupoClinicaId: null,
+    },
+    {
+      where: {
+        assetType: 'whatsapp_business_account',
+        isActive: true,
+        wabaId,
+        ...scopeWhere,
+      },
+    }
+  );
+}
+
+async function unassignWhatsappPhoneAsset(phone) {
+  const previousScope = phone.assignmentScope || null;
+  const previousClinicId = phone.clinicaId || null;
+  const previousGroupId = phone.grupoClinicaId || null;
+  await phone.update({
+    assignmentScope: 'unassigned',
+    clinicaId: null,
+    grupoClinicaId: null,
+  });
+  await releaseWhatsappWabaScopeIfUnused({
+    wabaId: phone.wabaId,
+    assignmentScope: previousScope,
+    clinicId: previousClinicId,
+    groupId: previousGroupId,
+  });
+}
+
+async function hasWhatsappPrimaryForScope({ assignmentScope, clinicId, groupId, exceptPhoneNumberId = null }) {
+  const scopeClauses = [whatsappPhoneScopeWhere({ assignmentScope, clinicId, groupId })];
+  if (assignmentScope === 'clinic' && groupId) {
+    scopeClauses.push(whatsappPhoneScopeWhere({ assignmentScope: 'group', groupId }));
+  }
+  const assets = await ClinicMetaAsset.findAll({
+    where: {
+      assetType: 'whatsapp_phone_number',
+      isActive: true,
+      ...(exceptPhoneNumberId ? { phoneNumberId: { [Op.ne]: exceptPhoneNumberId } } : {}),
+      [Op.or]: scopeClauses,
+    },
+  });
+  return assets.some((asset) => resolveWhatsappRouting(asset).role === 'primary');
 }
 
 async function assertWhatsappTemplateClinicAccess({ clinicId, userId }) {
@@ -2024,6 +2126,7 @@ exports.listPhones = async (req, res) => {
         },
         displayPhoneNumber: p.metaAssetName || null,
       });
+      const channelRouting = resolveWhatsappRouting(p);
 
       const managerBusinessId =
         additionalData.whatsappBusinessHealth?.business_id
@@ -2051,6 +2154,9 @@ exports.listPhones = async (req, res) => {
         quality_rating: p.quality_rating || null,
         messaging_limit: p.messaging_limit || null,
         assignmentScope: p.assignmentScope,
+        whatsapp_channel_role: channelRouting.role,
+        routing_purposes: channelRouting.purposes,
+        secondary_unavailable_action: channelRouting.unavailableAction,
         clinic_id: p.clinicaId || null,
         clinic_name: clinica.nombre_clinica || null,
         clinic_avatar: clinica.url_avatar || null,
@@ -3061,6 +3167,7 @@ exports.assignPhone = async (req, res) => {
     const userId = req.userData?.userId;
     const phoneNumberId = req.params.phoneNumberId;
     const { assignmentScope, clinic_id, group_id, grupo_clinica_id } = req.body || {};
+    const channelRole = normalizeWhatsappChannelRole(req.body?.channel_role) || 'primary';
     const registerAfterAssign = Boolean(req.body?.register_after_assign);
 
     if (!['group', 'clinic'].includes(assignmentScope)) {
@@ -3153,79 +3260,40 @@ exports.assignPhone = async (req, res) => {
       }
     }
 
-    if (assignmentScope === 'clinic' && targetClinicId) {
-      await ClinicMetaAsset.update(
-        {
-          assignmentScope: 'unassigned',
-          clinicaId: null,
-          grupoClinicaId: null,
-        },
-        {
-          where: {
-            assetType: 'whatsapp_phone_number',
-            isActive: true,
-            clinicaId: targetClinicId,
-            phoneNumberId: { [Op.ne]: phoneNumberId },
-          },
-        }
-      );
-      await ClinicMetaAsset.update(
-        {
-          assignmentScope: 'unassigned',
-          clinicaId: null,
-          grupoClinicaId: null,
-        },
-        {
-          where: {
-            assetType: 'whatsapp_business_account',
-            isActive: true,
-            clinicaId: targetClinicId,
-            ...(phone.wabaId ? { wabaId: { [Op.ne]: phone.wabaId } } : {}),
-          },
-        }
-      );
-    } else if (assignmentScope === 'group' && targetGroupId) {
-      await ClinicMetaAsset.update(
-        {
-          assignmentScope: 'unassigned',
-          clinicaId: null,
-          grupoClinicaId: null,
-        },
-        {
-          where: {
-            assetType: 'whatsapp_phone_number',
-            isActive: true,
-            assignmentScope: 'group',
-            grupoClinicaId: targetGroupId,
-            phoneNumberId: { [Op.ne]: phoneNumberId },
-          },
-        }
-      );
-      await ClinicMetaAsset.update(
-        {
-          assignmentScope: 'unassigned',
-          clinicaId: null,
-          grupoClinicaId: null,
-        },
-        {
-          where: {
-            assetType: 'whatsapp_business_account',
-            isActive: true,
-            assignmentScope: 'group',
-            grupoClinicaId: targetGroupId,
-            ...(phone.wabaId ? { wabaId: { [Op.ne]: phone.wabaId } } : {}),
-          },
-        }
-      );
+    if (channelRole === 'secondary') {
+      const hasPrimary = await hasWhatsappPrimaryForScope({
+        assignmentScope,
+        clinicId: targetClinicId,
+        groupId: targetGroupId,
+        exceptPhoneNumberId: phoneNumberId,
+      });
+      if (!hasPrimary) {
+        return res.status(409).json({ success: false, error: 'primary_whatsapp_required' });
+      }
     }
+
+    await clearWhatsappPhoneRoleCollision({
+      assignmentScope,
+      clinicId: targetClinicId,
+      groupId: targetGroupId,
+      role: channelRole,
+      exceptPhoneNumberId: phoneNumberId,
+    });
 
     await phone.update({
       assignmentScope,
       clinicaId: targetClinicId,
       grupoClinicaId: targetGroupId,
+      additionalData: buildWhatsappRoutingAdditionalData(phone.additionalData, {
+        role: channelRole,
+        purposes: channelRole === 'secondary'
+          ? normalizeWhatsappSecondaryPurposes(req.body?.routing_purposes)
+          : [],
+        unavailableAction: req.body?.secondary_unavailable_action,
+      }),
     });
 
-    if (phone.wabaId) {
+    if (phone.wabaId && channelRole === 'primary') {
       await ClinicMetaAsset.update(
         {
           assignmentScope,
@@ -3269,6 +3337,7 @@ exports.assignPhone = async (req, res) => {
       success: true,
       phoneNumberId,
       assignmentScope,
+      whatsapp_channel_role: channelRole,
       clinic_id: targetClinicId,
       clinic_name: phone.clinica?.nombre_clinica || null,
       registration,
@@ -3276,6 +3345,92 @@ exports.assignPhone = async (req, res) => {
   } catch (err) {
     console.error('Error assignPhone', err);
     return res.status(500).json({ success: false, error: 'assign_failed' });
+  }
+};
+
+exports.updatePhoneRouting = async (req, res) => {
+  try {
+    const userId = Number(req.userData?.userId || 0);
+    const phoneNumberId = String(req.params.phoneNumberId || '').trim();
+    const role = normalizeWhatsappChannelRole(req.body?.channel_role);
+    if (!phoneNumberId || !role) {
+      return res.status(400).json({ success: false, error: 'invalid_whatsapp_routing' });
+    }
+
+    const phone = await ClinicMetaAsset.findOne({
+      where: {
+        assetType: 'whatsapp_phone_number',
+        phoneNumberId,
+        isActive: true,
+      },
+      include: [{ model: MetaConnection, as: 'metaConnection', attributes: ['userId'] }],
+    });
+    if (!phone) {
+      return res.status(404).json({ success: false, error: 'phone_not_found' });
+    }
+
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    const ownsConnection = Number(phone.metaConnection?.userId) === userId;
+    const allowedGroupIds = await getUserGroupIds({ clinicIds, isAggregateAllowed });
+    const canManage = ownsConnection
+      || isAggregateAllowed
+      || (phone.clinicaId && clinicIds.includes(Number(phone.clinicaId)))
+      || (phone.grupoClinicaId && allowedGroupIds.includes(Number(phone.grupoClinicaId)));
+    if (!canManage) {
+      return res.status(403).json({ success: false, error: 'forbidden' });
+    }
+    if (!['clinic', 'group'].includes(phone.assignmentScope)) {
+      return res.status(409).json({ success: false, error: 'phone_must_be_assigned_before_routing' });
+    }
+
+    const currentRole = resolveWhatsappRouting(phone).role;
+    if (currentRole === 'primary' && role === 'secondary') {
+      const scoped = await ClinicMetaAsset.findAll({
+        where: {
+          assetType: 'whatsapp_phone_number',
+          isActive: true,
+          ...whatsappPhoneScopeWhere({
+            assignmentScope: phone.assignmentScope,
+            clinicId: phone.clinicaId,
+            groupId: phone.grupoClinicaId,
+          }),
+          phoneNumberId: { [Op.ne]: phoneNumberId },
+        },
+      });
+      if (!scoped.some((asset) => resolveWhatsappRouting(asset).role === 'primary')) {
+        return res.status(409).json({ success: false, error: 'primary_whatsapp_required' });
+      }
+    }
+
+    await clearWhatsappPhoneRoleCollision({
+      assignmentScope: phone.assignmentScope,
+      clinicId: phone.clinicaId,
+      groupId: phone.grupoClinicaId,
+      role,
+      exceptPhoneNumberId: phoneNumberId,
+    });
+    const additionalData = buildWhatsappRoutingAdditionalData(phone.additionalData, {
+      role,
+      purposes: req.body?.routing_purposes,
+      unavailableAction: normalizeWhatsappSecondaryUnavailableAction(
+        req.body?.secondary_unavailable_action
+      ),
+    });
+    await phone.update({ additionalData });
+
+    return res.json({
+      success: true,
+      phoneNumberId,
+      assignmentScope: phone.assignmentScope,
+      clinic_id: phone.clinicaId || null,
+      group_id: phone.grupoClinicaId || null,
+      whatsapp_channel_role: role,
+      routing_purposes: resolveWhatsappRouting({ additionalData }).purposes,
+      secondary_unavailable_action: resolveWhatsappRouting({ additionalData }).unavailableAction,
+    });
+  } catch (err) {
+    console.error('Error updatePhoneRouting', err);
+    return res.status(500).json({ success: false, error: 'routing_update_failed' });
   }
 };
 
@@ -3321,38 +3476,7 @@ exports.unassignPhone = async (req, res) => {
     const previousClinicId = phone.clinicaId || null;
     const previousGroupId = phone.grupoClinicaId || phone.clinica?.grupoClinicaId || null;
 
-    await phone.update({
-      assignmentScope: 'unassigned',
-      clinicaId: null,
-      grupoClinicaId: null,
-    });
-
-    if (phone.wabaId && (previousClinicId || previousGroupId)) {
-      const wabaScopeWhere =
-        previousScope === 'clinic' && previousClinicId
-          ? [{ clinicaId: previousClinicId }]
-          : previousScope === 'group' && previousGroupId
-            ? [{ assignmentScope: 'group', grupoClinicaId: previousGroupId }]
-            : [];
-
-      if (wabaScopeWhere.length) {
-        await ClinicMetaAsset.update(
-          {
-            assignmentScope: 'unassigned',
-            clinicaId: null,
-            grupoClinicaId: null,
-          },
-          {
-            where: {
-              assetType: 'whatsapp_business_account',
-              wabaId: phone.wabaId,
-              isActive: true,
-              [Op.or]: wabaScopeWhere,
-            },
-          }
-        );
-      }
-    }
+    await unassignWhatsappPhoneAsset(phone);
 
     return res.json({
       success: true,

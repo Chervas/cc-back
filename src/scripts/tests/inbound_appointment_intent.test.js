@@ -1337,7 +1337,7 @@ function testAfterHoursConversationMatrix() {
     contextWithConversation('Gracias')
   ));
   assert.deepEqual(statusChanges(contextualThanks), ['recordatorio_confirmado']);
-  assert.match(replyTexts(contextualThanks)[0], /confirmacion de tu cita/i);
+  assert.match(replyTexts(contextualThanks)[0], /te esperamos/i);
   assert.equal(notifications(contextualThanks).length, 0);
 
   const benignThanks = simulateAfterHoursGraph(flowEngine.buildDeterministicClassifyIntentOutput(
@@ -1379,7 +1379,7 @@ function testAfterHoursConversationMatrix() {
     contextWithConversation('Tengo un sangrado intenso y quiero cancelar la cita.')
   ));
   assert.deepEqual(statusChanges(urgency), []);
-  assert.match(replyTexts(urgency)[0], /servicios de emergencia/i);
+  assert.match(replyTexts(urgency)[0], /revisión prioritaria/i);
   assert.equal(notifications(urgency).length, 1);
 
   const ambiguousContext = contextWithConversation('Confirmado');
@@ -1390,7 +1390,7 @@ function testAfterHoursConversationMatrix() {
     flowEngine.buildDeterministicClassifyIntentOutput(ambiguousContext)
   );
   assert.deepEqual(statusChanges(ambiguous), []);
-  assert.match(replyTexts(ambiguous)[0], /pendiente para recepcion/i);
+  assert.match(replyTexts(ambiguous)[0], /no está abierta ahora mismo/i);
   assert.equal(notifications(ambiguous).length, 1);
 
   const allReplies = [confirmationWithQuestion, contextualThanks, benignThanks, thanksWithPendingResponse, cancellation, reschedule, urgency, ambiguous]

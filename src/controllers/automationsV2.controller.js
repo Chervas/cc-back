@@ -45,6 +45,9 @@ const {
   resolveCatalogFamilyKey,
   captureExecutionCommunicationLanguage,
 } = require('../lib/whatsapp-template-locale');
+const {
+  appointmentReminderConfigsOverlap,
+} = require('../lib/automation-trigger-conflict');
 
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1,44')
   .split(',')
@@ -1935,6 +1938,28 @@ async function findAppointmentCreatedTreatmentConflict(row, triggerConfig) {
   }) || null;
 }
 
+async function findAppointmentReminderTriggerConflict(row, triggerConfig) {
+  if (cleanString(row?.trigger_type) !== 'appointment_reminder_window') return null;
+  const publicId = cleanString(row?.public_id);
+  const templateKey = cleanString(row?.template_key);
+  const candidates = await AutomationFlowTemplateV2.findAll({
+    where: {
+      trigger_type: 'appointment_reminder_window',
+      is_active: true,
+      published_at: { [Op.ne]: null },
+      id: { [Op.ne]: row.id },
+    },
+    attributes: ['id', 'name', 'template_key', 'public_id', 'clinic_id', 'group_id', 'is_system', 'trigger_config'],
+    raw: true,
+  });
+  return (candidates || []).find((candidate) => {
+    if (publicId && cleanString(candidate.public_id) === publicId) return false;
+    if (!publicId && templateKey && cleanString(candidate.template_key) === templateKey) return false;
+    return isSameAutomationScope(candidate, row)
+      && appointmentReminderConfigsOverlap(candidate.trigger_config, triggerConfig);
+  }) || null;
+}
+
 function messageReceivedConfigChannels(triggerConfig) {
   const config = isObject(triggerConfig) ? triggerConfig : {};
   if (cleanString(config.channel_scope).toLowerCase() !== 'selected') {
@@ -2588,17 +2613,14 @@ function collapseCatalogManagedRowsForScopedList(rows, shouldCollapse) {
 
   const hiddenIds = new Set();
   groups.forEach((groupRows, familyKey) => {
-    const scopedRows = groupRows.filter((row) => hasTemplateOperationalScope(row));
     const isReviewRequestFamily = familyKey === 'catalog:review_request_system';
     const isLeadAutoReplyFamily = familyKey === 'catalog:lead_auto_reply_system';
-    const hasScopedCopy = scopedRows.length > 0;
 
     groupRows.forEach((row) => {
       const isSystemBase = !hasTemplateOperationalScope(row) && row?.is_system;
-      // La automatización de reseñas solo es operativa cuando existe una copia
-      // configurada para la clínica/grupo desde Campañas > Reseñas. La base de
-      // sistema es catálogo y no debe aparecer como "activa" en scope de cliente.
-      if ((isReviewRequestFamily || isLeadAutoReplyFamily || hasScopedCopy) && isSystemBase) {
+      // En un ámbito de cliente solo se muestran sus copias operativas. La
+      // definición global es la fuente del catálogo, no otra automatización.
+      if (isSystemBase) {
         hiddenIds.add(Number(row.id));
       }
       if (isReviewRequestFamily && hasTemplateOperationalScope(row) && isPublishedTemplate(row) && !isActiveTemplate(row)) {
@@ -6037,6 +6059,19 @@ exports.updateTemplateDraft = async (req, res) => {
             },
           });
         }
+        const reminderConflict = await findAppointmentReminderTriggerConflict(row, row.trigger_config);
+        if (reminderConflict) {
+          return res.status(409).json({
+            success: false,
+            error: 'appointment_reminder_trigger_conflict',
+            message: `Ya existe otro recordatorio activo para ese momento: ${reminderConflict.name || reminderConflict.template_key}. Desactívalo antes de activar este.`,
+            conflict: {
+              id: reminderConflict.id,
+              template_key: reminderConflict.template_key,
+              name: reminderConflict.name,
+            },
+          });
+        }
       }
 
       await row.update({
@@ -6289,6 +6324,23 @@ exports.publishTemplateVersion = async (req, res) => {
           id: messageConflict.id,
           template_key: messageConflict.template_key,
           name: messageConflict.name,
+        },
+      });
+    }
+
+    const reminderConflict = await findAppointmentReminderTriggerConflict({
+      ...(row.get ? row.get({ plain: true }) : row),
+      trigger_type: triggerResolution.trigger_type,
+    }, triggerConfigResolution.trigger_config);
+    if (reminderConflict) {
+      return res.status(409).json({
+        success: false,
+        error: 'appointment_reminder_trigger_conflict',
+        message: `Ya existe otro recordatorio activo para ese momento: ${reminderConflict.name || reminderConflict.template_key}. Desactívalo antes de publicar este.`,
+        conflict: {
+          id: reminderConflict.id,
+          template_key: reminderConflict.template_key,
+          name: reminderConflict.name,
         },
       });
     }

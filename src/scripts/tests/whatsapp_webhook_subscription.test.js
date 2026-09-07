@@ -2,8 +2,11 @@
 
 const assert = require('node:assert/strict');
 const {
+  buildWhatsappRoutingAdditionalData,
   normalizeWhatsappChannelRole,
+  resolveWhatsappRouting,
   resolveWhatsappChannelRole,
+  selectWhatsappPhoneAsset,
 } = require('../../lib/whatsapp-channel-role');
 
 const originalMetaAppSecret = process.env.META_APP_SECRET;
@@ -20,6 +23,85 @@ const originalGet = axios.get;
   assert.equal(resolveWhatsappChannelRole({
     additionalData: { routing: { role: 'secondary' } },
   }), 'secondary');
+  const routingData = buildWhatsappRoutingAdditionalData(
+    { registration: { status: 'registered' } },
+    {
+      role: 'secondary',
+      purposes: ['review_requests', 'invalid', 'review_requests'],
+      unavailableAction: 'fallback_primary',
+    }
+  );
+  assert.equal(routingData.registration.status, 'registered');
+  assert.deepEqual(resolveWhatsappRouting({ additionalData: routingData }), {
+    role: 'secondary',
+    purposes: ['review_requests'],
+    unavailableAction: 'fallback_primary',
+  });
+  assert.deepEqual(resolveWhatsappRouting({}), {
+    role: 'primary',
+    purposes: [],
+    unavailableAction: 'pause',
+  });
+
+  const clinicPrimary = { id: 1, phoneNumberId: 'primary', waAccessToken: 'token', additionalData: {} };
+  const groupPrimary = { id: 2, phoneNumberId: 'group-primary', waAccessToken: 'token', additionalData: {} };
+  const clinicSecondary = {
+    id: 3,
+    phoneNumberId: 'secondary',
+    waAccessToken: 'token',
+    additionalData: buildWhatsappRoutingAdditionalData({}, {
+      role: 'secondary',
+      purposes: ['review_requests'],
+      unavailableAction: 'pause',
+    }),
+  };
+  assert.equal(selectWhatsappPhoneAsset({
+    clinicAssets: [clinicPrimary, clinicSecondary],
+    groupAssets: [groupPrimary],
+  }).id, clinicPrimary.id);
+  assert.equal(selectWhatsappPhoneAsset({
+    clinicAssets: [clinicPrimary, clinicSecondary],
+    groupAssets: [groupPrimary],
+    purpose: 'review_requests',
+  }).id, clinicSecondary.id);
+  assert.equal(selectWhatsappPhoneAsset({
+    clinicAssets: [clinicPrimary, clinicSecondary],
+    groupAssets: [groupPrimary],
+    purpose: 'lead_first_contact',
+  }).id, clinicPrimary.id);
+  assert.equal(selectWhatsappPhoneAsset({
+    clinicAssets: [],
+    groupAssets: [groupPrimary],
+  }).id, groupPrimary.id);
+
+  const unavailableSecondary = {
+    ...clinicSecondary,
+    additionalData: buildWhatsappRoutingAdditionalData({}, {
+      role: 'secondary',
+      purposes: ['review_requests'],
+      unavailableAction: 'fallback_primary',
+    }),
+  };
+  assert.equal(selectWhatsappPhoneAsset({
+    clinicAssets: [clinicPrimary, unavailableSecondary],
+    purpose: 'review_requests',
+    summarizeHealth: () => ({ can_send: false }),
+  }).id, clinicPrimary.id);
+  const pausedSecondary = {
+    ...unavailableSecondary,
+    additionalData: buildWhatsappRoutingAdditionalData({}, {
+      role: 'secondary',
+      purposes: ['review_requests'],
+      unavailableAction: 'pause',
+    }),
+  };
+  const unavailableSelection = selectWhatsappPhoneAsset({
+    clinicAssets: [clinicPrimary, pausedSecondary],
+    purpose: 'review_requests',
+    summarizeHealth: () => ({ can_send: false }),
+  });
+  assert.equal(unavailableSelection.id, pausedSecondary.id);
+  assert.equal(unavailableSelection.routing_unavailable, true);
 
   const requests = [];
   axios.get = async (url, options = {}) => {

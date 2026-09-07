@@ -708,7 +708,7 @@ function buildMessageReceivedTemplateNodes() {
       id: 'N24',
       type: 'action/reply_message',
       config: {
-        message_text: 'Gracias. Hemos registrado la confirmación de tu cita.',
+        message_text: '¡Gracias! Te esperamos 😊',
         suppress_if_human_replied: true,
         suppress_if_response_needed: true,
       },

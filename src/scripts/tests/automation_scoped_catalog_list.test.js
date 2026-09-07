@@ -44,7 +44,7 @@ async function run() {
 
   assert.deepEqual(
     collapse(rows, true).map((row) => row.id),
-    [2, 3],
+    [2],
   );
   assert.deepEqual(
     collapse(rows, false).map((row) => row.id),

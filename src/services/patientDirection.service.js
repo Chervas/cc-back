@@ -1126,11 +1126,19 @@ async function resolveOutboundPolicy({
       requireNoHumanContact: true,
     });
   }
+  if (['bulk_campaigns', 'review_requests', 'lead_first_contact'].includes(cleanText(purpose).toLowerCase())) {
+    return {
+      mode: 'clinic_default',
+      clinicConfig: await whatsappService.getClinicConfig(cid, { purpose }),
+      assignment,
+      requiresTakeConfirmation: false,
+    };
+  }
   if (!assignment || assignment.status === 'handoff_pending') {
     const setting = await getSetting(cid);
     const clinicConfig = setting?.clinic_phone_asset_id
       ? await whatsappService.getConfigByAssetId(setting.clinic_phone_asset_id, { clinicId: cid })
-      : await whatsappService.getClinicConfig(cid);
+      : await whatsappService.getClinicConfig(cid, { purpose });
     return { mode: 'clinic_default', clinicConfig, assignment, requiresTakeConfirmation: false };
   }
 
