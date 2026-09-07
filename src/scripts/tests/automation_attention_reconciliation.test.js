@@ -396,6 +396,65 @@ test('deja pasar una acción nueva de cita para que la evalúe la automatizació
   assert.equal(result.reason, 'new_automation_required');
 });
 
+test('un resultado incierto conserva la revisión y no relanza una respuesta automática', async (t) => {
+  const originals = {
+    stateFindOne: db.ConversationAutomationState.findOne,
+    messageFindAll: db.Message.findAll,
+    executionFindByPk: db.FlowExecutionV2.findByPk,
+  };
+  t.after(() => {
+    db.ConversationAutomationState.findOne = originals.stateFindOne;
+    db.Message.findAll = originals.messageFindAll;
+    db.FlowExecutionV2.findByPk = originals.executionFindByPk;
+  });
+  db.ConversationAutomationState.findOne = async () => ({
+    clinic_id: 66,
+    conversation_id: 9698,
+    stage: 'review',
+    status: 'review',
+    source_message_id: 107415,
+    execution_id: 2331,
+    appointment_id: null,
+    intent: 'otra',
+    possible_urgency: false,
+    needs_response: true,
+    manual_action_required: true,
+  });
+  db.Message.findAll = async () => [
+    { id: 107415, direction: 'inbound', content: 'Adjunto', message_type: 'text', metadata: {} },
+    { id: 107417, direction: 'inbound', content: 'No sé', message_type: 'text', metadata: {} },
+  ];
+  db.FlowExecutionV2.findByPk = async () => ({
+    id: 2331,
+    trigger_type: 'message_received',
+    trigger_entity_type: 'conversation',
+  });
+  const updates = [];
+
+  const result = await reconcilePendingAutomationAttentionForInboundMessage({
+    conversation: { id: 9698, clinic_id: 66 },
+    message: {
+      id: 107417,
+      conversation_id: 9698,
+      direction: 'inbound',
+      message_type: 'text',
+      content: 'No sé',
+      metadata: {},
+      update: async (patch) => updates.push(patch),
+    },
+    classifier: async () => ({
+      decision: 'unclear',
+      confidence: 0.2,
+      reason: 'No hay certeza suficiente.',
+    }),
+  });
+
+  assert.equal(result.handled, true);
+  assert.equal(result.resolved, false);
+  assert.equal(result.classification.decision, 'continues_pending');
+  assert.equal(updates[0].metadata.automation_attention_reconciliation.original_decision, 'unclear');
+});
+
 test('un retry reutiliza la conciliación aplicada sin repetir IA ni efectos', async (t) => {
   const originalStateFindOne = db.ConversationAutomationState.findOne;
   t.after(() => {
