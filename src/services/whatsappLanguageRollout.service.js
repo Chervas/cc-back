@@ -54,9 +54,9 @@ const MANUAL_TRANSLATION_ROWS = Object.freeze([
     en: 'First of all, sorry for insisting 🙏 {{paciente.nombre}}. I know I have written to you many times, but it is important that we finalize the medical schedule in advance.\n\nCould you confirm your attendance tomorrow?',
   },
   {
-    es: 'Perdona por escribirte de nuevo {{paciente.nombre}} 😅, sé que acabamos de hablar, pero mandamos este mensaje para confirmar que el teléfono de contacto es correcto. ¿Nos confirmas tu cita si no es mucha molestia?🙏🙏',
-    ca: 'Perdona per escriure’t de nou {{paciente.nombre}} 😅, sé que acabem de parlar, però enviem aquest missatge per confirmar que el telèfon de contacte és correcte. Ens confirmes la cita si no és molta molèstia?🙏🙏',
-    en: 'Sorry to write to you again {{paciente.nombre}} 😅, I know we just spoke, but we send this message to confirm that the contact phone number is correct. Could you confirm your appointment if it is not too much trouble?🙏🙏',
+    es: 'Perdona por escribirte de nuevo {{paciente.nombre}} 😅, sé que acabamos de hablar, pero mandamos este mensaje para confirmar que el teléfono de contacto es correcto. ¿Nos confirmas que lo es? Así luego podemos recordarte tu cita el día de antes 🙏🙏',
+    ca: 'Perdona per escriure’t de nou {{paciente.nombre}} 😅, sé que acabem de parlar, però enviem aquest missatge per confirmar que el telèfon de contacte és correcte. Ens confirmes que ho és? Així després et podrem recordar la cita el dia abans 🙏🙏',
+    en: 'Sorry to write to you again {{paciente.nombre}} 😅. I know we just spoke, but we are sending this message to confirm that the contact phone number is correct. Could you confirm that it is? That way we can remind you about your appointment the day before 🙏🙏',
   },
   {
     es: '¡Gracias {{paciente.nombre}}! Hasta mañana',
