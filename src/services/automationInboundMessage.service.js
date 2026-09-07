@@ -6,6 +6,9 @@ const automationsV2ResumeService = require('./automationsV2Resume.service');
 const marketingOptOutService = require('./marketingOptOut.service');
 const marketingBulkSendsService = require('./marketingBulkSends.service');
 const conversationAutomationState = require('./conversationAutomationState.service');
+const {
+  reconcilePendingAutomationAttentionForInboundMessage,
+} = require('./automationAttentionReconciliation.service');
 const { resolveClinicOpenState } = require('./clinicOpeningHours.service');
 const { getIO } = require('./socket.service');
 
@@ -648,6 +651,31 @@ async function runInboundDispatchJob(payload = {}, jobRequest = null) {
         list_id: positiveInt(bulkResult.list_id),
       });
       return { status: 'completed', result: { claim_id: claim.id, owner: 'marketing_bulk_reply' } };
+    }
+
+    const attentionReconciliation = await reconcilePendingAutomationAttentionForInboundMessage({
+      conversation,
+      message,
+    });
+    if (attentionReconciliation.resolved) {
+      await markClaimCompleted(
+        claim,
+        'attention_reconciliation',
+        attentionReconciliation.execution_id,
+        {
+          reason: attentionReconciliation.reason,
+          decision: attentionReconciliation.classification?.decision,
+          confidence: attentionReconciliation.classification?.confidence,
+        }
+      );
+      return {
+        status: 'completed',
+        result: {
+          claim_id: claim.id,
+          owner: 'attention_reconciliation',
+          resolved: true,
+        },
+      };
     }
 
     const generic = await queueGenericMessageBatch({ claim, message, conversation, channel });

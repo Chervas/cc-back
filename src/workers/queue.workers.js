@@ -20,6 +20,7 @@ const leadAutoReplyContactStatusService = require('../services/leadAutoReplyCont
 const systemNotificationsService = require('../services/systemNotifications.service');
 const patientDirectionService = require('../services/patientDirection.service');
 const {
+    completeAutomationStateAfterHumanReplyForConversation,
     resolveAutomationAttentionForConversation,
 } = require('../services/conversationPendingReply.service');
 const {
@@ -1254,7 +1255,8 @@ async function createCoexistenceConversationMessage({
                 allUsers: true,
                 reason: 'mobile_reply_sent',
             });
-            if (resolution.updated > 0) {
+            const automationState = await completeAutomationStateAfterHumanReplyForConversation(conv.id);
+            if (resolution.updated > 0 || automationState.completed) {
                 const io = getIO();
                 io?.to(`clinic:${clinicId}`).emit('conversation:updated', {
                     id: String(conv.id),

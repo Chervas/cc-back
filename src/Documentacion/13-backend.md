@@ -137,9 +137,11 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
   ejecuciones ni versiones históricas. El snapshot
   `suppress_confirmation_reply_with_pending_question_v1` permite rollback
   selectivo y no pisa una versión activa posterior.
-- Una respuesta humana cierra `ConversationAutomationStates` únicamente si la
-  revisión corresponde a una confirmación/cancelación ya aplicada, requiere
-  respuesta y no conserva urgencia. Cambios solicitados, ambigüedad y urgencia
+- Una respuesta humana cierra `ConversationAutomationStates` de una cita
+  únicamente si la revisión corresponde a una confirmación/cancelación ya
+  aplicada, requiere respuesta y no conserva urgencia. Las revisiones de un
+  flujo puramente conversacional también se completan al responder desde
+  QuickChat o desde WhatsApp móvil. Cambios solicitados, ambigüedad y urgencia
   continúan abiertos.
 - El canary controlado de BS Capilar confirmó una cita QA y conservó una
   pregunta secundaria sin crear un segundo envío a Meta. Agenda y QuickChat
@@ -8546,8 +8548,31 @@ usuarios los avisos de automatización de esa conversación y completa el
 Una respuesta humana aceptada sigue resolviendo los avisos y ahora también
 completa una revisión de intención `pregunta` cuando `needs_response=true`, no
 hay urgencia pendiente y la cita ya está confirmada o cancelada. Una petición
-de cambio continúa abierta hasta que se aplique o descarte expresamente; un
-nuevo mensaje inbound del paciente tampoco completa por sí solo la revisión.
+de cambio continúa abierta hasta que se aplique o descarte expresamente. Un
+nuevo mensaje inbound tampoco completa la revisión por defecto: el
+reconciliador tardío descrito a continuación solo puede hacerlo cuando prueba
+una resolución explícita del propio paciente.
+
+### Conciliación de atención tras el lote de respuesta (2026-09-07)
+
+`automationAttentionReconciliation.service.js` se ejecuta en el despacho
+central de un inbound posterior a un estado `review`. No reanuda la ejecución,
+no cambia citas y no envía mensajes: únicamente puede completar la atención
+manual si una clasificación estructurada concluye `resolved_by_patient` con
+confianza mínima `0.92`. Un agradecimiento, un `vale`, un emoji, una pregunta o
+una petición de acción permanecen abiertos; urgencias, fallos técnicos y un
+`cambio_solicitado` tampoco son conciliables por esta vía.
+
+Estado y marca de auditoría en el mensaje se escriben en una misma transacción.
+La marca hace idempotente un retry del job y después se resuelven los avisos de
+todos los usuarios. Así, un seguimiento tardío como `Ya tengo la dirección`
+puede retirar la revisión anterior sin volver a ejecutar la automatización ni
+producir una respuesta duplicada.
+
+Las respuestas humanas de QuickChat y los ecos `smb_message_echoes` completan
+además cualquier revisión de un flujo puramente conversacional. Si existe una
+cita, se conserva la regla más restrictiva: escribir al paciente no sustituye
+la actualización necesaria en agenda.
 
 ### Estado final después de `action/change_status` (2026-09-04)
 

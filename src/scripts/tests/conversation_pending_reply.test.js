@@ -7,6 +7,7 @@ const test = require('node:test');
 
 const db = require('../../../models');
 const {
+  completeAutomationStateAfterHumanReplyForConversation,
   findHumanReplyAfterMessage,
   getPendingReplyStatesByConversationIds,
   normalizeConversationIds,
@@ -301,6 +302,87 @@ test('una respuesta manual cierra el aviso para todos los usuarios de la convers
   assert.equal(updated[0].data.manual_resolved_by_user_id, null);
 });
 
+test('una respuesta humana completa la revisión de un flujo puramente conversacional', async (t) => {
+  const originals = {
+    stateFindOne: db.ConversationAutomationState.findOne,
+    executionFindByPk: db.FlowExecutionV2.findByPk,
+    completeState: conversationAutomationState.completeState,
+  };
+  t.after(() => {
+    db.ConversationAutomationState.findOne = originals.stateFindOne;
+    db.FlowExecutionV2.findByPk = originals.executionFindByPk;
+    conversationAutomationState.completeState = originals.completeState;
+  });
+
+  db.ConversationAutomationState.findOne = async () => ({
+    clinic_id: 66,
+    conversation_id: 9616,
+    stage: 'review',
+    status: 'review',
+    execution_id: 2291,
+    appointment_id: null,
+    possible_urgency: false,
+    manual_action_required: true,
+  });
+  db.FlowExecutionV2.findByPk = async (id) => {
+    assert.equal(id, 2291);
+    return {
+      id,
+      trigger_type: 'message_received',
+      trigger_entity_type: 'conversation',
+    };
+  };
+  const completed = [];
+  conversationAutomationState.completeState = async (params, options) => {
+    completed.push({ params, options });
+    return params;
+  };
+
+  const result = await completeAutomationStateAfterHumanReplyForConversation(9616);
+
+  assert.deepEqual(result, { completed: true, reason: null });
+  assert.deepEqual(completed, [{
+    params: { clinicId: 66, conversationId: 9616 },
+    options: { expectedExecutionId: 2291 },
+  }]);
+});
+
+test('una respuesta escrita no completa una gestión de cita sin resolver', async (t) => {
+  const originals = {
+    stateFindOne: db.ConversationAutomationState.findOne,
+    executionFindByPk: db.FlowExecutionV2.findByPk,
+    completeState: conversationAutomationState.completeState,
+  };
+  t.after(() => {
+    db.ConversationAutomationState.findOne = originals.stateFindOne;
+    db.FlowExecutionV2.findByPk = originals.executionFindByPk;
+    conversationAutomationState.completeState = originals.completeState;
+  });
+
+  db.ConversationAutomationState.findOne = async () => ({
+    clinic_id: 66,
+    conversation_id: 9001,
+    stage: 'review',
+    status: 'review',
+    execution_id: 3001,
+    appointment_id: null,
+    possible_urgency: false,
+    manual_action_required: true,
+  });
+  db.FlowExecutionV2.findByPk = async () => ({
+    id: 3001,
+    trigger_type: 'appointment_updated',
+    trigger_entity_type: 'appointment',
+  });
+  conversationAutomationState.completeState = async () => {
+    throw new Error('appointment_state_must_not_complete');
+  };
+
+  const result = await completeAutomationStateAfterHumanReplyForConversation(9001);
+
+  assert.deepEqual(result, { completed: false, reason: 'operator_action_still_required' });
+});
+
 test('el envío manual y el eco móvil detienen el análisis pendiente y resuelven la atención', () => {
   const controller = fs.readFileSync(
     path.resolve(__dirname, '../../controllers/conversation.controller.js'),
@@ -317,6 +399,8 @@ test('el envío manual y el eco móvil detienen el análisis pendiente y resuelv
   assert.match(workers, /sourceEvent === 'smb_message_echoes'/);
   assert.match(workers, /mobile_reply_sent_during_response_buffer/);
   assert.match(workers, /reason:\s*'mobile_reply_sent'/);
+  assert.match(controller, /completeAutomationStateAfterHumanReplyForConversation/);
+  assert.match(workers, /completeAutomationStateAfterHumanReplyForConversation/);
 });
 
 test('el flujo evita crear un aviso tardío si el operador ya respondió', () => {
