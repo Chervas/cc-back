@@ -42,10 +42,14 @@ function planContacts(contacts, historical, patients) {
       const local = targets[0];
       // No known baseline => propose review, never overwrite a local field.
       const baseline = local.last_imported_fields || oldById.get(contact.source_contact_id)?.[0]?.fields;
+      // Source and persisted representation may differ (name casing, phone
+      // formatting). Preserve both baselines: formatting is not a source edit,
+      // and a subsequent genuine source edit must not erase a local correction.
+      const localBaseline = local.last_imported_local_fields || baseline;
       for (const [field, value] of Object.entries(contact.fields)) {
         const current = local.fields?.[field];
         if (!value || value === current || value === baseline?.[field]) continue;
-        if (current === undefined || !baseline || (current !== baseline[field] && current !== value)) action.reasons.push(`LOCAL_FIELD_CONFLICT:${field}`);
+        if (current === undefined || !baseline || (current !== localBaseline[field] && current !== value)) action.reasons.push(`LOCAL_FIELD_CONFLICT:${field}`);
         else action.fields_patch[field] = value;
       }
       if (action.reasons.length) action.action = 'review';

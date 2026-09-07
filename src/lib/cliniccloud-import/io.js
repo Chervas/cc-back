@@ -9,6 +9,10 @@ const { hash } = require('./adapter');
 
 const PRIVATE_ROOT = '/home/ubuntu/secure-imports';
 const MAX_BYTES = 64 * 1024 * 1024;
+function syncDirectory(directory) {
+  const descriptor = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
+  try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
+}
 function readBytes(filename) {
   if (!fs.statSync(filename).isFile() || fs.statSync(filename).size > MAX_BYTES) throw new Error('INPUT_FILE_SIZE_OR_TYPE_INVALID');
   return fs.readFileSync(filename);
@@ -36,6 +40,8 @@ function writePrivateJson(filename, value) {
   // Exclusive creation + no symlink traversal: never overwrite an earlier plan.
   const descriptor = fs.openSync(destination, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
   try { fs.writeFileSync(descriptor, `${JSON.stringify(value, null, 2)}\n`); fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
+  // A durable intent also needs its directory entry persisted before a DB commit.
+  syncDirectory(parent);
 }
 function parseArgs(args, allowed) {
   const result = {};
@@ -46,4 +52,4 @@ function parseArgs(args, allowed) {
   }
   return result;
 }
-module.exports = { readBytes, readCsv, readAlerts, writePrivateJson, parseArgs, PRIVATE_ROOT };
+module.exports = { readBytes, readCsv, readAlerts, writePrivateJson, parseArgs, PRIVATE_ROOT, syncDirectory };

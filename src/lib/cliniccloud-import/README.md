@@ -1,8 +1,14 @@
 # ClinicCloud: reconciliación offline y revisión
 
-Este adaptador **no importa en la base ni activa mensajes**. Lee fuentes, captura
+El adaptador de planificación **no importa en la base ni activa mensajes**. Lee fuentes, captura
 opcionalmente un snapshot local en transacción READ ONLY, calcula diferencias y
 prepara comandos revisados. No carga modelos, Express, Redis ni workers.
+
+Desde el corte del 2026-09-07 hay ejecutores **separados y acotados**, no un
+`apply` genérico del plan. Contactos existentes, adscripción/seguimientos,
+altas nuevas, HOLD de citas y manual corporal tienen preparación, aprobación por huella,
+backup y diario privado. Ninguno activa recordatorios, publica protocolos,
+vende programas ni resuelve automáticamente los candidatos ambiguos.
 
 ## Ejecutar
 
@@ -33,8 +39,50 @@ node src/scripts/cliniccloud-import-plan.js \
 No se sobrescriben artefactos existentes. Los resultados completos solo se
 escriben bajo `/home/ubuntu/secure-imports` (raíz 0700, archivos 0600). stdout
 contiene únicamente hashes y agregados; no copiar fuentes/planes al repositorio,
-temp del frontend, almacenamiento público ni logs de aplicación. No existe flag
-`--execute`, `--apply` o `--activate`.
+temp del frontend, almacenamiento público ni logs de aplicación. El planificador
+no acepta `--execute`, `--apply` ni `--activate`; los ejecutores inferiores sí
+requieren un modo de aplicación explícito y su propio paquete validado.
+
+## Ejecutores acotados
+
+- `cliniccloud-import-contacts-apply.js`: solo parches no vacíos de contactos
+  enlazados inequívocamente y sin conflictos de comparación a tres versiones.
+  `--mode prepare --plan … --snapshot … --private-output …` captura antes e
+  identidad; `--mode apply --package … --approved-sha256 … --backup-manifest …
+  --private-output …` aplica una transacción de hasta 200 registros, compara
+  todas las columnas antes/después y no crea ni fusiona pacientes. Diario
+  persistido antes de SQL; ausencia de resultado tras un crash exige revisión
+  manual, no replay ciego. Los campos permitidos son nombre, apellidos, email,
+  teléfono, DNI y nacimiento. WhatsApp y clínica principal quedan excluidos.
+- Adscripción/membresías y seguimientos: [PRIMARY_FOLLOWUPS_APPLY](./PRIMARY_FOLLOWUPS_APPLY.md).
+  Revisiones canónicas importadas y actor técnico `NULL`, nunca un usuario
+  humano inventado; estados históricos y fechas administrativas conservados.
+- Altas nuevas: [NEW_PATIENTS_APPLY](./NEW_PATIENTS_APPLY.md). Solo identidades
+  revisadas sin colisión en el grupo, fuentes nuevas ni histórico; número de
+  historia independiente, fechas válidas y evidencia de clínica principal.
+  Una transacción para ficha, membresías y trazabilidad; ninguna cita ni mensaje.
+  Conserva por separado la línea base original y los valores normalizados
+  almacenados: reimportar el mismo CSV no propone cambios por mayúsculas,
+  formato de teléfono o email, y no sobrescribe ediciones locales posteriores.
+- Citas: [APPOINTMENTS_APPLY](./APPOINTMENTS_APPLY.md). Únicamente metadata HOLD
+  y trazabilidad de citas ya coincidentes. No crea ni mueve citas, no cancela
+  ni completa estados; no equivale a haber actualizado la agenda.
+- `cliniccloud-import-protocol-draft.js`: manual aportado íntegro como un único
+  borrador no asociado. Requiere la migración específica de actores técnicos;
+  fuente y paquete inmutables, revisión canónica y reintento por huella.
+
+Secuenciar los ejecutores y re-preparar si cambia el snapshot de sus guardas.
+No ejecutar en paralelo el importador antiguo/manual ni seeds. Los locks de
+filas y del propio importador no constituyen una garantía de unicidad frente
+a escritores ajenos que no respeten la identidad externa. Los runtimes normales
+no crean identidades `source=cliniccloud`; el importador marketing conserva los
+valores existentes y crea sus campos nuevos con `source=import`. Verificar esta
+precondición de nuevo en otro corte, no convertirla en garantía permanente.
+
+Un rollback de datos debe cotejar antes/después y conservar actuaciones
+posteriores. Nunca restaurar toda la base compartida ni borrar historia para
+retirar este código. Los archivos privados usan creación exclusiva y `fsync`
+tanto del contenido como del directorio.
 
 ## Invariantes efectivas
 

@@ -209,9 +209,17 @@ function createTreatmentDocumentationService(db = require('../../models')) {
       }
       return { item: (await hydrateProtocols([item], clinicId))[0] };
     },
-    async save({ clinicId, actorId, id = null, payload }) {
+    async save({ clinicId, actorId, id = null, payload, transaction: externalTransaction = null, importedSource = null }) {
+      if (actorId == null) {
+        const validSystemImport = !id && positive(clinicId) && externalTransaction && importedSource?.actor_kind === 'system_import'
+          && importedSource.source_system === 'cliniccloud' && /^[a-f0-9]{64}$/.test(importedSource.source_sha256 || '')
+          && typeof payload?.source === 'string' && payload.source.startsWith(`cliniccloud:manual-corporal:sha256:${importedSource.source_sha256};`)
+          && payload?.kind === 'protocol' && payload?.status === 'draft'
+          && Array.isArray(payload?.treatment_ids) && payload.treatment_ids.length === 0;
+        if (!validSystemImport) throw fail(400, 'protocol_import_actor_required', 'La importación técnica necesita procedencia verificable y un borrador sin asociaciones.');
+      }
       await requireSchema();
-      return db.sequelize.transaction(async transaction => {
+      const persist = async transaction => {
         const previous = id ? await db.TreatmentProtocol.findOne({ where: { id, clinic_id: clinicId }, transaction, lock: transaction.LOCK.UPDATE }) : null;
         if (id && !previous) throw fail(404, 'protocol_not_found', 'Documento no encontrado.');
         if (previous && Number(payload.expected_version) !== Number(previous.version)) throw fail(409, 'protocol_version_conflict', 'El documento ha cambiado. Recárgalo antes de guardar.');
@@ -225,7 +233,10 @@ function createTreatmentDocumentationService(db = require('../../models')) {
         const item = previous ? await previous.update(values, { transaction }) : await db.TreatmentProtocol.create({ ...values, created_by: actorId }, { transaction });
         await db.TreatmentProtocolRevision.create({ protocol_id: item.id, version: item.version, snapshot: plain(item), actor_id: actorId }, { transaction });
         return { item: (await hydrateProtocols([item], clinicId))[0] };
-      });
+      };
+      // Internal commands may supply their existing transaction. HTTP routes pass
+      // only the authenticated context/id/payload, never a client transaction.
+      return externalTransaction ? persist(externalTransaction) : db.sequelize.transaction(persist);
     },
   };
 }

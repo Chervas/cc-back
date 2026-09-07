@@ -16,6 +16,7 @@ const ALLOWED = [
   '20260907001500-create-treatment-protocols.js',
   '20260907003000-create-treatment-programs.js',
   '20260907010000-create-appointment-booking-occupancy.js',
+  '20260907020000-allow-system-import-protocol-actors.js',
 ];
 async function digest(file) {
   const hash = crypto.createHash('sha256');
