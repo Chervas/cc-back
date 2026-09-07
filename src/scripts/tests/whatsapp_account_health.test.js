@@ -215,6 +215,62 @@ test('ACCOUNT_OFFBOARDED no se recupera mediante sondeos CONNECTED', () => {
   assert.equal(reconnected.health.can_send, true);
 });
 
+test('una baja explícita reemplaza causas bloqueantes antiguas en la proyección', async () => {
+  const asset = {
+    id: 374,
+    assetType: 'whatsapp_phone_number',
+    isActive: true,
+    quality_rating: 'GREEN',
+    additionalData: {
+      registration: { status: 'registered', phoneStatus: 'CONNECTED' },
+      whatsappHealth: {
+        state: 'healthy',
+        can_send: true,
+        reason_code: 'provider_connected',
+        blocking_reason_code: 'waba_account_review_rejected',
+        observed_at: '2026-09-07T09:03:26.000Z',
+        recovery_connected_observations: 0,
+      },
+    },
+    changed() {},
+    async save() {},
+  };
+  const restores = [
+    patchProperty(db.ClinicMetaAsset, 'findByPk', async () => asset),
+    patchProperty(db.WhatsappAccountHealthEvent, 'findOrCreate', async () => [null, false]),
+    patchProperty(db.sequelize, 'transaction', async (callback) => callback({ LOCK: { UPDATE: 'UPDATE' } })),
+  ];
+
+  try {
+    await whatsappAccountHealthService.recordObservationForAsset({
+      assetId: asset.id,
+      signal: { providerEvent: 'ACCOUNT_OFFBOARDED' },
+      source: 'unit_test_webhook',
+      observedAt: new Date('2026-09-07T09:06:48.000Z'),
+    });
+    assert.equal(
+      asset.additionalData.whatsappHealth.blocking_reason_code,
+      'account_event_account_offboarded'
+    );
+
+    const polled = await whatsappAccountHealthService.recordObservationForAsset({
+      assetId: asset.id,
+      signal: {
+        providerStatus: 'CONNECTED',
+        registrationStatus: 'registered',
+        qualityRating: 'GREEN',
+      },
+      source: 'unit_test_poll',
+      observedAt: new Date('2026-09-07T09:13:09.000Z'),
+    });
+    assert.equal(polled.health.state, 'disconnected');
+    assert.equal(polled.health.can_send, false);
+    assert.equal(polled.health.reason_code, 'account_event_account_offboarded');
+  } finally {
+    restores.reverse().forEach((restore) => restore());
+  }
+});
+
 test('una proyección saludable antigua no oculta un BANNED persistido', () => {
   const now = new Date('2026-08-31T12:00:00.000Z');
   const health = effectiveStoredHealth({

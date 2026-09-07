@@ -265,6 +265,9 @@ async function recordObservationForAsset({
     const projection = {
       ...stored,
       ...next,
+      blocking_reason_code: isBlockingState(next.state)
+        ? (next.blocking_reason_code || next.reason_code || stored.blocking_reason_code || null)
+        : null,
       source: clean(source) || 'local_observation',
       observed_at: nowIso,
       last_transition_at: transitioned ? nowIso : (stored.last_transition_at || null),
