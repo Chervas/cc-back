@@ -9,6 +9,20 @@ function pagination(query) {
   if (!Number.isSafeInteger(page) || page < 0 || page > 10000 || !Number.isSafeInteger(size) || size < 1 || size > 50) throw fail(400, 'invalid_documentation_page', 'Página de documentos no válida.');
   return { page, size };
 }
+function sorting(query, kind) {
+  const columns = kind === 'coverage' ? { name: 'nombre', discipline: 'disciplina' }
+    : { title: 'title', version: 'version', status: 'status', updated_at: 'updated_at' };
+  const key = query.sort_by || (kind === 'coverage' ? 'name' : 'title');
+  const direction = String(query.sort_direction || 'asc').toLowerCase();
+  if (!Object.hasOwn(columns, key) || !['asc', 'desc'].includes(direction)) throw fail(400, 'invalid_documentation_sort', 'Orden documental no válido.');
+  return [[columns[key], direction.toUpperCase()], [kind === 'coverage' ? 'id_tratamiento' : 'id', 'ASC']];
+}
+function choice(value, allowed, code) {
+  if (value == null || value === '' || value === 'all') return null;
+  if (!allowed.includes(value)) throw fail(400, code, 'Filtro documental no válido.');
+  return value;
+}
+const array = value => Array.isArray(value) ? value : [];
 function normalizeProtocol(payload, previous = null) {
   const title = String(payload.title ?? previous?.title ?? '').trim();
   const kind = payload.kind ?? previous?.kind ?? 'protocol';
@@ -26,6 +40,7 @@ function normalizeProtocol(payload, previous = null) {
 function createTreatmentDocumentationService(db = require('../../models')) {
   const { Op } = db.Sequelize;
   async function scope(clinicId) {
+    if (!positive(clinicId)) throw fail(400, 'invalid_clinic', 'Selecciona una clínica válida.');
     const clinic = await db.Clinica.findByPk(clinicId, { attributes: ['id_clinica', 'grupoClinicaId'], raw: true });
     if (!clinic) throw fail(404, 'clinic_not_found', 'Clínica no encontrada.');
     const branches = [{ origen: 'clinica', clinica_id: clinicId }, { origen: 'sistema' }];
@@ -52,7 +67,8 @@ function createTreatmentDocumentationService(db = require('../../models')) {
     const ids = [...new Set(rows.flatMap(row => plain(row).treatment_ids || []))];
     const treatments = ids.length ? await db.Tratamiento.findAll({ where: { ...(await scope(clinicId)), id_tratamiento: { [Op.in]: ids } }, attributes: ['id_tratamiento', 'nombre'], raw: true }) : [];
     const names = new Map(treatments.map(row => [Number(row.id_tratamiento), row.nombre]));
-    return rows.map(row => { const item = plain(row); return { ...item, treatments: item.treatment_ids.map(id => ({ id, name: names.get(Number(id)) || 'Tratamiento no disponible' })) }; });
+    return rows.map(row => { const item = plain(row); const treatments = array(item.treatment_ids).map(id => ({ id, name: names.get(Number(id)) || 'Tratamiento no disponible', available: names.has(Number(id)) }));
+      return { ...item, treatments, treatment_count: treatments.length, treatments_preview: treatments.slice(0, 3), treatments_more_count: Math.max(0, treatments.length - 3) }; });
   }
   return {
     async forAppointment({ clinicId, appointmentId, query = {} }) {
@@ -122,15 +138,30 @@ function createTreatmentDocumentationService(db = require('../../models')) {
     },
     async coverage({ clinicId, query = {} }) {
       const { page, size } = pagination(query);
+      const order = sorting(query, 'coverage');
+      const missing = choice(query.missing, ['clinical_consent', 'protocol', 'aftercare'], 'invalid_documentation_filter');
       const where = { ...(await scope(clinicId)), activo: true };
       if (query.q) where.nombre = { [Op.like]: `%${String(query.q).slice(0, 120)}%` };
-      const { rows, count } = await db.Tratamiento.findAndCountAll({ where, attributes: ['id_tratamiento', 'nombre', 'disciplina', 'clinical_config', 'activo'], order: [['nombre', 'ASC'], ['id_tratamiento', 'ASC']], limit: size, offset: page * size, raw: true });
+      if (missing === 'clinical_consent') {
+        // Both scope IDs are validated integers; every SQL identifier is static.
+        // Filter BEFORE count/pagination, not only within the visible page.
+        const id = Number(clinicId);
+        where[Op.and].push(db.Sequelize.literal(`NOT EXISTS (SELECT 1 FROM TreatmentConsentRequirements r WHERE r.tratamiento_id = Tratamiento.id_tratamiento AND (r.clinica_id = ${id} OR r.clinica_id IS NULL) AND ((r.clinic_template_id IS NOT NULL AND EXISTS (SELECT 1 FROM ClinicConsentTemplates c WHERE c.id = r.clinic_template_id AND c.clinic_id = ${id} AND c.purpose = 'clinical' AND c.status = 'active')) OR (r.clinic_template_id IS NULL AND EXISTS (SELECT 1 FROM ConsentTemplateCatalogs c WHERE c.id = r.catalog_template_id AND c.purpose = 'clinical' AND c.status = 'active'))))`));
+      } else if (missing) {
+        await requireSchema();
+        where[Op.and].push(db.Sequelize.literal(`NOT EXISTS (SELECT 1 FROM TreatmentProtocols p WHERE p.clinic_id = ${Number(clinicId)} AND p.kind = '${missing}' AND p.status <> 'archived' AND JSON_CONTAINS(p.treatment_ids, JSON_ARRAY(Tratamiento.id_tratamiento)))`));
+      }
+      const { rows, count } = await db.Tratamiento.findAndCountAll({ where, attributes: ['id_tratamiento', 'nombre', 'disciplina', 'clinical_config', 'activo'], order, limit: size, offset: page * size, raw: true });
       const ids = rows.map(row => row.id_tratamiento);
-      const requirements = ids.length ? await db.TreatmentConsentRequirement.findAll({ where: { tratamiento_id: { [Op.in]: ids }, [Op.or]: [{ clinica_id: clinicId }, { clinica_id: null }] },
-        include: [
-          { model: db.ClinicConsentTemplate, as: 'clinicTemplate', attributes: ['id', 'name', 'purpose', 'status', 'clinic_id'], required: false },
-          { model: db.ConsentTemplateCatalog, as: 'catalogTemplate', attributes: ['id', 'name', 'purpose', 'status'], required: false },
-        ], order: [['sort_order', 'ASC']] }) : [];
+      const requirements = ids.length ? await db.TreatmentConsentRequirement.findAll({ where: { tratamiento_id: { [Op.in]: ids }, [Op.or]: [{ clinica_id: clinicId }, { clinica_id: null }] }, order: [['sort_order', 'ASC']], raw: true }) : [];
+      const clinicTemplateIds = [...new Set(requirements.map(r => r.clinic_template_id).filter(Boolean))];
+      const catalogTemplateIds = [...new Set(requirements.filter(r => !r.clinic_template_id).map(r => r.catalog_template_id).filter(Boolean))];
+      const [clinicTemplates, catalogTemplates] = await Promise.all([
+        clinicTemplateIds.length ? db.ClinicConsentTemplate.findAll({ where: { id: { [Op.in]: clinicTemplateIds }, clinic_id: clinicId }, attributes: ['id', 'name', 'purpose', 'status'], raw: true }) : [],
+        catalogTemplateIds.length ? db.ConsentTemplateCatalog.findAll({ where: { id: { [Op.in]: catalogTemplateIds } }, attributes: ['id', 'name', 'purpose', 'status'], raw: true }) : [],
+      ]);
+      const clinicConsentById = new Map(clinicTemplates.map(row => [Number(row.id), row]));
+      const catalogConsentById = new Map(catalogTemplates.map(row => [Number(row.id), row]));
       let protocols = [], protocolsAvailable = true;
       try { protocols = ids.length ? await db.TreatmentProtocol.findAll({ where: { clinic_id: clinicId, status: { [Op.ne]: 'archived' },
         [Op.or]: ids.map(id => db.Sequelize.where(db.Sequelize.fn('JSON_CONTAINS', db.Sequelize.col('treatment_ids'), JSON.stringify(Number(id))), 1)),
@@ -138,24 +169,33 @@ function createTreatmentDocumentationService(db = require('../../models')) {
       catch (error) { if (['ER_NO_SUCH_TABLE', '42P01'].includes(error.original?.code || error.parent?.code)) protocolsAvailable = false; else throw error; }
       const items = rows.map(row => {
         const consents = requirements.filter(req => Number(req.tratamiento_id) === Number(row.id_tratamiento)).map(req => {
-          const template = req.clinicTemplate || req.catalogTemplate;
-          if (!template || (req.clinicTemplate && Number(template.clinic_id) !== clinicId)) return null;
-          return { id: template.id, name: template.name, purpose: template.purpose, status: template.status, source: req.clinicTemplate ? 'clinic' : 'catalog', required: req.required, blocking_policy: req.blocking_policy };
+          const template = req.clinic_template_id ? clinicConsentById.get(Number(req.clinic_template_id)) : catalogConsentById.get(Number(req.catalog_template_id));
+          if (!template) return null;
+          return { id: template.id, name: template.name, purpose: template.purpose, status: template.status, source: req.clinic_template_id ? 'clinic' : 'catalog', required: req.required, blocking_policy: req.blocking_policy };
         }).filter(Boolean);
         const linked = protocols.filter(doc => (doc.treatment_ids || []).map(Number).includes(Number(row.id_tratamiento))).map(({ treatment_ids, ...doc }) => doc);
+        const protocolDocs = linked.filter(p => p.kind === 'protocol'), aftercare = linked.filter(p => p.kind === 'aftercare');
         return { id: row.id_tratamiento, name: row.nombre, discipline: row.disciplina, ...catalogState(row), consents,
           has_active_clinical_consent: consents.some(c => c.purpose === 'clinical' && c.status === 'active'),
-          protocols: linked.filter(p => p.kind === 'protocol'), aftercare: linked.filter(p => p.kind === 'aftercare') };
+          protocols: protocolDocs, aftercare, consents_preview: consents.slice(0, 3), consents_more_count: Math.max(0, consents.length - 3),
+          protocols_preview: protocolDocs.slice(0, 3), protocols_more_count: Math.max(0, protocolDocs.length - 3),
+          aftercare_preview: aftercare.slice(0, 3), aftercare_more_count: Math.max(0, aftercare.length - 3) };
       });
       return { items, page, page_size: size, total: count, protocols_available: protocolsAvailable, scope_note: 'Asociaciones explícitas al tratamiento; no acredita la firma del paciente ni sustituye la evaluación de requisitos al citar.' };
     },
     async list({ clinicId, query = {} }) {
-      await requireSchema();
       const { page, size } = pagination(query);
+      const order = sorting(query, 'library');
+      const status = choice(query.status, ['draft', 'approved', 'archived'], 'invalid_documentation_status');
+      const assignment = choice(query.assignment, ['assigned', 'unassigned'], 'invalid_documentation_assignment');
+      const kind = choice(query.kind, ['protocol', 'aftercare'], 'invalid_documentation_kind');
+      await requireSchema();
       const where = { clinic_id: clinicId };
-      if (query.kind && ['protocol', 'aftercare'].includes(query.kind)) where.kind = query.kind;
+      if (kind) where.kind = kind;
+      if (status) where.status = status;
+      if (assignment) where[Op.and] = [db.Sequelize.where(db.Sequelize.fn('JSON_LENGTH', db.Sequelize.col('treatment_ids')), assignment === 'unassigned' ? 0 : { [Op.gt]: 0 })];
       if (query.q) where.title = { [Op.like]: `%${String(query.q).slice(0, 120)}%` };
-      const { rows, count } = await db.TreatmentProtocol.findAndCountAll({ where, attributes: { exclude: ['content'] }, order: [['title', 'ASC'], ['id', 'ASC']], limit: size, offset: page * size });
+      const { rows, count } = await db.TreatmentProtocol.findAndCountAll({ where, attributes: { exclude: ['content'] }, order, limit: size, offset: page * size });
       return { items: await hydrateProtocols(rows, clinicId), page, page_size: size, total: count };
     },
     async get({ clinicId, id, version }) {
@@ -189,4 +229,4 @@ function createTreatmentDocumentationService(db = require('../../models')) {
     },
   };
 }
-module.exports = { createTreatmentDocumentationService, normalizeProtocol, pagination, fail };
+module.exports = { createTreatmentDocumentationService, normalizeProtocol, pagination, sorting, fail };
