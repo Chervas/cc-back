@@ -27,6 +27,10 @@ const BLOCKED_COMPLIANCE_STATUSES = new Set([
   'suspended',
 ]);
 const DISCONNECTED_EVENTS = new Set(['ACCOUNT_OFFBOARDED', 'PARTNER_REMOVED']);
+const EXPLICIT_RECOVERY_REASON_CODES = new Set([
+  'account_event_account_offboarded',
+  'account_event_partner_removed',
+]);
 const BLOCKED_ACCOUNT_REVIEW_STATUSES = new Set(['REJECTED']);
 const DEGRADED_ACCOUNT_REVIEW_STATUSES = new Set([
   'IN_REVIEW',
@@ -336,6 +340,23 @@ function applyRecoveryPolicy({
     && isBlockingState(previousState)
     && !isBlockingState(safeCandidate.state)
     && safeCandidate.provider_status === 'CONNECTED';
+  const explicitRecoveryRequired = pollingRecovery
+    && EXPLICIT_RECOVERY_REASON_CODES.has(lower(previousReason));
+  if (explicitRecoveryRequired) {
+    return {
+      health: {
+        ...safeCandidate,
+        state: lower(previousState) || 'disconnected',
+        can_send: false,
+        severity: 'critical',
+        reason_code: lower(previousReason),
+        blocking_reason_code: lower(previousReason),
+      },
+      recovery_count: 0,
+      recovery_pending: false,
+      explicit_recovery_required: true,
+    };
+  }
   const recoveryCount = pollingRecovery ? Number(previousRecoveryCount || 0) + 1 : 0;
   const recoveryPending = pollingRecovery && recoveryCount < Math.max(1, Number(observationsRequired || 2));
   return {
@@ -427,6 +448,7 @@ module.exports = {
   DEGRADED_BUSINESS_VERIFICATION_STATUSES,
   DISCONNECTED_EVENTS,
   DISCONNECTED_PROVIDER_STATUSES,
+  EXPLICIT_RECOVERY_REASON_CODES,
   applyRecoveryPolicy,
   deriveAssetSignal,
   deriveHealthCandidate,

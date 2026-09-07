@@ -151,6 +151,7 @@ async function markDisconnectedAfterProviderError({
   const resolvedClinicId = Number(clinicId || 0) || null;
   const asset = await findWhatsappPhoneAsset({ clinicId: resolvedClinicId, phoneId, wabaId });
   const now = new Date().toISOString();
+  let wasDisconnected = false;
 
   if (asset) {
     const additionalData = asset.additionalData && typeof asset.additionalData === 'object'
@@ -159,6 +160,11 @@ async function markDisconnectedAfterProviderError({
     const coexistence = additionalData.coexistence && typeof additionalData.coexistence === 'object'
       ? { ...additionalData.coexistence }
       : {};
+    wasDisconnected = coexistence.status === 'disconnected'
+      || coexistence.coexistence_status === 'disconnected'
+      || coexistence.canSendApi === false
+      || coexistence.can_send_api === false
+      || coexistence.requiresReconnect === true;
     const registration = additionalData.registration && typeof additionalData.registration === 'object'
       ? { ...additionalData.registration }
       : {};
@@ -168,7 +174,9 @@ async function markDisconnectedAfterProviderError({
       coexistence: {
         ...coexistence,
         status: 'disconnected',
+        coexistence_status: 'disconnected',
         canSendApi: false,
+        can_send_api: false,
         requiresReconnect: true,
         disconnectReason: 'meta_object_access_lost',
         last_error_code: normalized.code,
@@ -190,46 +198,48 @@ async function markDisconnectedAfterProviderError({
     await asset.save();
   }
 
-  try {
-    const clinic = resolvedClinicId && Clinica
-      ? await Clinica.findByPk(resolvedClinicId, {
-          attributes: ['id_clinica', 'nombre_clinica'],
-          raw: true,
-        })
-      : null;
+  if (!wasDisconnected) {
+    try {
+      const clinic = resolvedClinicId && Clinica
+        ? await Clinica.findByPk(resolvedClinicId, {
+            attributes: ['id_clinica', 'nombre_clinica'],
+            raw: true,
+          })
+        : null;
 
-    const phoneNumberId = phoneId || asset?.phoneNumberId || null;
-    const resolvedWabaId = wabaId || asset?.wabaId || null;
+      const phoneNumberId = phoneId || asset?.phoneNumberId || null;
+      const resolvedWabaId = wabaId || asset?.wabaId || null;
 
-    await notificationService.dispatchEvent({
-      event: 'whatsapp.coexistence_disconnected',
-      clinicId: resolvedClinicId,
-      data: {
+      await notificationService.dispatchEvent({
+        event: 'whatsapp.coexistence_disconnected',
         clinicId: resolvedClinicId,
-        clinicName: cleanString(clinic?.nombre_clinica),
-        phoneNumberId,
-        wabaId: resolvedWabaId,
-        phoneNumber: cleanString(asset?.displayPhoneNumber || asset?.display_phone_number),
-        messageId: messageId || null,
-        recipient: cleanString(recipient) || null,
-        errorCode: normalized.code,
-        errorSubcode: normalized.subcode,
-        errorMessage: normalized.message,
-        source: cleanString(source) || null,
-        link: buildReconnectLink({ phoneNumberId, wabaId: resolvedWabaId }),
-        useRouter: true,
-        actionLabel: 'Reconectar WhatsApp',
-        actionIcon: 'heroicons_outline:arrow-path',
-      },
-    });
-  } catch (notificationError) {
-    console.warn('[whatsapp] No se pudo crear notificación de desconexión coexistence', {
-      clinicId: resolvedClinicId,
-      phoneId,
-      wabaId,
-      messageId,
-      error: notificationError?.message || notificationError,
-    });
+        data: {
+          clinicId: resolvedClinicId,
+          clinicName: cleanString(clinic?.nombre_clinica),
+          phoneNumberId,
+          wabaId: resolvedWabaId,
+          phoneNumber: cleanString(asset?.displayPhoneNumber || asset?.display_phone_number),
+          messageId: messageId || null,
+          recipient: cleanString(recipient) || null,
+          errorCode: normalized.code,
+          errorSubcode: normalized.subcode,
+          errorMessage: normalized.message,
+          source: cleanString(source) || null,
+          link: buildReconnectLink({ phoneNumberId, wabaId: resolvedWabaId }),
+          useRouter: true,
+          actionLabel: 'Reconectar WhatsApp',
+          actionIcon: 'heroicons_outline:arrow-path',
+        },
+      });
+    } catch (notificationError) {
+      console.warn('[whatsapp] No se pudo crear notificación de desconexión coexistence', {
+        clinicId: resolvedClinicId,
+        phoneId,
+        wabaId,
+        messageId,
+        error: notificationError?.message || notificationError,
+      });
+    }
   }
 
   return {
@@ -255,7 +265,11 @@ async function clearDisconnectedAfterSuccess({
   const coexistence = additionalData.coexistence && typeof additionalData.coexistence === 'object'
     ? { ...additionalData.coexistence }
     : {};
-  if (coexistence.status !== 'disconnected' && coexistence.requiresReconnect !== true) {
+  if (
+    coexistence.status !== 'disconnected'
+    && coexistence.coexistence_status !== 'disconnected'
+    && coexistence.requiresReconnect !== true
+  ) {
     return { cleared: false, reason: 'no_disconnect_marker' };
   }
 
@@ -264,7 +278,9 @@ async function clearDisconnectedAfterSuccess({
     coexistence: {
       ...coexistence,
       status: 'active',
+      coexistence_status: 'active',
       canSendApi: true,
+      can_send_api: true,
       requiresReconnect: false,
       last_success_at: new Date().toISOString(),
       last_success_message_id: messageId || null,

@@ -603,9 +603,6 @@ async function syncPhonesForWaba({ wabaId, accessToken, ensureTemplates = true, 
     throw new Error('access_token_missing');
   }
 
-  const remotePhones = await fetchRemotePhones({ wabaId, accessToken: token });
-  const remoteMap = new Map(remotePhones.map((p) => [p.id, p]));
-
   const localPhones = await ClinicMetaAsset.findAll({
     where: {
       wabaId,
@@ -613,6 +610,37 @@ async function syncPhonesForWaba({ wabaId, accessToken, ensureTemplates = true, 
     },
     order: [['updatedAt', 'DESC']],
   });
+  let remotePhones;
+  try {
+    remotePhones = await fetchRemotePhones({ wabaId, accessToken: token });
+  } catch (error) {
+    if (whatsappConnectionStatusService.isGraphObjectAccessError(error)) {
+      for (const asset of localPhones) {
+        const latestAccountEvent = String(
+          asset.additionalData?.coexistence?.account_update_last_event || ''
+        ).trim().toUpperCase();
+        const providerEvent = ['ACCOUNT_OFFBOARDED', 'PARTNER_REMOVED'].includes(latestAccountEvent)
+          ? latestAccountEvent
+          : null;
+        await whatsappConnectionStatusService.markDisconnectedAfterProviderError({
+          error,
+          clinicId: asset.clinicaId || null,
+          phoneId: asset.phoneNumberId || null,
+          wabaId: asset.wabaId || wabaId,
+          source: 'whatsapp_phone_sync',
+        }).catch(() => null);
+        await whatsappAccountHealthService.recordObservationForAsset({
+          assetId: asset.id,
+          signal: providerEvent
+            ? { providerEvent }
+            : { providerStatus: 'DISCONNECTED', registrationStatus: 'not_registered' },
+          source: 'whatsapp_phone_sync_error',
+        }).catch(() => null);
+      }
+    }
+    throw error;
+  }
+  const remoteMap = new Map(remotePhones.map((p) => [p.id, p]));
   const normalizedMode = ['auto', 'full', 'health'].includes(String(mode || '').toLowerCase())
     ? String(mode).toLowerCase()
     : 'auto';
