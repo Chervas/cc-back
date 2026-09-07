@@ -20,6 +20,23 @@ async function run() {
       conversation: { id: conversationId },
       trigger: { data: { conversation_id: conversationId, latest_inbound_message_id: patientMessageId } },
     };
+    assert.equal(flowEngine._canRunNodeAfterHumanTakeover({
+      type: 'condition/ai_analysis',
+    }, context), true);
+    assert.equal(flowEngine._canRunNodeAfterHumanTakeover({
+      type: 'action/change_status',
+    }, context), true);
+    assert.equal(flowEngine._canRunNodeAfterHumanTakeover({
+      type: 'action/reply_message',
+      config: { suppress_if_human_replied: true },
+    }, context), true);
+    assert.equal(flowEngine._canRunNodeAfterHumanTakeover({
+      type: 'action/send_system_notification',
+    }, context), false);
+    assert.equal(flowEngine._canRunNodeAfterHumanTakeover({
+      type: 'action/send_whatsapp',
+      config: { suppress_if_human_replied: false },
+    }, context), false);
     const statusResult = await flowEngine._processNode({
       id: 'N-status',
       type: 'action/change_status',

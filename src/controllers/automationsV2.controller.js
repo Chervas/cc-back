@@ -2554,6 +2554,10 @@ function getCatalogManagedListFamilyKey(item) {
     return 'catalog:lead_auto_reply_system';
   }
 
+  if (strippedKey && (item?.is_system || strippedKey !== templateKey)) {
+    return `template:${strippedKey}`;
+  }
+
   return null;
 }
 
@@ -7022,3 +7026,4 @@ exports.getMessageDeliveryStatus = async (req, res) => {
 };
 
 exports.__messageReceivedConfigsOverlap = messageReceivedConfigsOverlap;
+exports.__collapseCatalogManagedRowsForScopedList = collapseCatalogManagedRowsForScopedList;

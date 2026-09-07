@@ -7555,7 +7555,7 @@ async function runExecution(executionId, options = {}) {
 
     if (
       stopBeforeSideEffects
-      && !['condition/ai_analysis', 'condition/field_check'].includes(cleanString(node.type))
+      && !canRunNodeAfterHumanTakeover(node, context)
     ) {
       await updateExecutionAndEmit(execution, {
         status: 'cancelled',
@@ -7769,6 +7769,21 @@ async function runExecution(executionId, options = {}) {
   }
 }
 
+function canRunNodeAfterHumanTakeover(node, context = {}) {
+  const nodeType = cleanString(node?.type);
+  if (['condition/ai_analysis', 'condition/field_check', 'action/change_status'].includes(nodeType)) {
+    return true;
+  }
+  if (nodeType === 'action/send_whatsapp' || nodeType === 'action/reply_message') {
+    const defaultSuppression = nodeType === 'action/reply_message';
+    return parseBool(
+      resolveTemplateValue(node?.config?.suppress_if_human_replied, context),
+      defaultSuppression,
+    );
+  }
+  return false;
+}
+
 module.exports = {
   runExecution,
   buildAutomationWhatsappDeliveryKey,
@@ -7809,4 +7824,5 @@ module.exports = {
   _resolveLatestResponseMessageId: resolveLatestResponseMessageId,
   _resolveAutomationCommunicationScope: resolveAutomationCommunicationScope,
   _loadConfiguredWhatsappTemplate: loadConfiguredWhatsappTemplate,
+  _canRunNodeAfterHumanTakeover: canRunNodeAfterHumanTakeover,
 };
