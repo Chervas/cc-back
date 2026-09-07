@@ -250,9 +250,19 @@ async function reconcilePendingAutomationAttentionForInboundMessage({
     clinicId,
     classifier,
   });
-  const pendingDecision = classification.decision === 'continues_pending'
-    || classification.decision === 'still_requires_human';
-  if (pendingDecision && classification.confidence >= RESOLUTION_CONFIDENCE) {
+  const shouldRunNewAutomation = classification.decision === 'new_automation_required'
+    && classification.confidence >= RESOLUTION_CONFIDENCE;
+  if (shouldRunNewAutomation) {
+    return {
+      resolved: false,
+      reason: 'new_automation_required',
+      classification,
+    };
+  }
+
+  const canResolve = classification.decision === 'resolved_by_patient'
+    && classification.confidence >= RESOLUTION_CONFIDENCE;
+  if (!canResolve) {
     const execution = state.execution_id && db.FlowExecutionV2
       ? await db.FlowExecutionV2.findByPk(state.execution_id, {
           attributes: ['id', 'trigger_type', 'trigger_entity_type'],
@@ -272,6 +282,7 @@ async function reconcilePendingAutomationAttentionForInboundMessage({
       decision: 'continues_pending',
       confidence: classification.confidence,
       reason: classification.reason,
+      original_decision: classification.decision,
       execution_id: state.execution_id,
       applied: true,
       reconciled_at: new Date().toISOString(),
@@ -300,16 +311,6 @@ async function reconcilePendingAutomationAttentionForInboundMessage({
         ...classification,
         decision: 'continues_pending',
       },
-    };
-  }
-  if (
-    classification.decision !== 'resolved_by_patient'
-    || classification.confidence < RESOLUTION_CONFIDENCE
-  ) {
-    return {
-      resolved: false,
-      reason: classification.decision,
-      classification,
     };
   }
 
