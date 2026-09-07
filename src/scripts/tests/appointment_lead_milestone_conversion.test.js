@@ -297,10 +297,10 @@ function testControllerUsesCommonHelperForEveryCompletionWritePath() {
     controller.indexOf('exports.updateCitaEstado ='),
     controller.indexOf('exports.reagendarCita =')
   );
-  assert.match(updateSection, /const previousStatus = cita\.estado;[\s\S]*await cita\.save\(\);[\s\S]*processAppointmentLeadMilestones\(\{ cita, previousStatus \}\)/);
+  assert.match(updateSection, /(?:const|let) previousStatus = cita\.estado;[\s\S]*await cita\.save\(\);[\s\S]*processAppointmentLeadMilestones\(\{ cita, previousStatus \}\)/);
 
   const rescheduleSection = controller.slice(controller.indexOf('exports.reagendarCita ='));
-  assert.match(rescheduleSection, /const previousStatus = cita\.estado;[\s\S]*await cita\.save\(\);[\s\S]*processAppointmentLeadMilestones\(\{ cita, previousStatus \}\)/);
+  assert.match(rescheduleSection, /(?:const|let) previousStatus = cita\.estado;[\s\S]*await cita\.save\(\);[\s\S]*processAppointmentLeadMilestones\(\{ cita, previousStatus \}\)/);
 }
 
 async function run() {
