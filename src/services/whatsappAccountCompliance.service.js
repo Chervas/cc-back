@@ -36,6 +36,11 @@ const OPEN_STATUSES = [
   'submitted',
   'in_review',
 ];
+const TECHNICAL_RECOVERY_INCIDENT_EVENTS = [
+  'PHONE_NUMBER_BANNED',
+  'WABA_HEALTH_BLOCKED',
+  'WHATSAPP_ACCOUNT_HEALTH_REVIEW',
+];
 const TECHNICAL_EVENT_LABELS = Object.freeze({
   ACCOUNT_REVIEW_REJECTED: 'Meta ha rechazado la revisión de la cuenta WABA',
   BUSINESS_VERIFICATION_REJECTED: 'Meta ha rechazado la verificación empresarial',
@@ -259,6 +264,106 @@ async function resolveOpenIncidents({ wabaId, providerResolution, occurredAt, pr
     },
   });
   return count;
+}
+
+function hasHealthyRecoveryObservation(healthResults) {
+  const rows = Array.isArray(healthResults) ? healthResults : [];
+  return rows.some((row) => {
+    const health = row?.health || {};
+    return health.can_send === true
+      && ['healthy', 'active'].includes(clean(health.state).toLowerCase());
+  });
+}
+
+async function reconcileTechnicalRecovery({
+  entry = {},
+  change = {},
+  value = {},
+  clinicId = null,
+  healthResults = [],
+} = {}) {
+  const field = clean(change.field).toLowerCase();
+  const event = clean(value.event).toUpperCase();
+  if (field !== 'account_update' || event !== 'ACCOUNT_RECONNECTED') {
+    return { resolved: 0, reason: 'not_explicit_recovery' };
+  }
+  if (!hasHealthyRecoveryObservation(healthResults)) {
+    return { resolved: 0, reason: 'health_not_confirmed' };
+  }
+
+  const wabaId = clean(entry.id || value.waba_id) || null;
+  if (!wabaId || !WhatsappAccountComplianceIncident) {
+    return { resolved: 0, reason: 'waba_not_found' };
+  }
+  const incidents = await WhatsappAccountComplianceIncident.findAll({
+    where: {
+      waba_id: wabaId,
+      status: { [Op.in]: OPEN_STATUSES },
+      provider_event: { [Op.in]: TECHNICAL_RECOVERY_INCIDENT_EVENTS },
+    },
+  });
+  if (!incidents.length) return { resolved: 0, reason: 'no_open_technical_incident' };
+
+  const occurredAt = occurredAtFromEntry(entry);
+  const providerResolution = 'ACCOUNT_RECONNECTED:HEALTHY';
+  const resolved = await resolveOpenIncidents({
+    wabaId,
+    providerResolution,
+    occurredAt,
+    providerEvents: TECHNICAL_RECOVERY_INCIDENT_EVENTS,
+  });
+  const incidentIds = new Set(incidents.map((incident) => Number(incident.id)));
+  const assets = await findRelevantAssets({
+    wabaId,
+    phoneNumberId: clean(value?.metadata?.phone_number_id) || null,
+    clinicId,
+  });
+  await Promise.all(assets.map(async (asset) => {
+    const additionalData = { ...safeObject(asset.additionalData) };
+    const compliance = { ...safeObject(additionalData.whatsappCompliance) };
+    if (!incidentIds.has(Number(compliance.incident_id))) return;
+    additionalData.whatsappCompliance = {
+      ...compliance,
+      event,
+      operational_status: 'active',
+      severity: 'info',
+      review_status: 'resolved',
+      provider_resolution: providerResolution,
+      resolved_at: occurredAt.toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    asset.additionalData = additionalData;
+    asset.changed('additionalData', true);
+    await asset.save();
+  }));
+
+  for (const incident of incidents) {
+    const clinic = incident.clinic_id
+      ? await Clinica.findByPk(incident.clinic_id, {
+          attributes: ['nombre_clinica'],
+          raw: true,
+        })
+      : null;
+    await notificationService.dispatchEvent({
+      event: 'whatsapp.account_compliance_resolved',
+      clinicId: incident.clinic_id || clinicId || null,
+      data: {
+        clinicId: incident.clinic_id || clinicId || null,
+        groupId: incident.group_id || null,
+        clinicName: clinic?.nombre_clinica || null,
+        incidentId: Number(incident.id),
+        wabaId,
+        phoneNumber: incident.phone_number || null,
+        operationalStatus: 'active',
+        link: '/ajustes?panel=jobs-monitoring&tab=whatsapp',
+        useRouter: true,
+        actionLabel: 'Revisar WhatsApp',
+        actionIcon: 'heroicons_outline:shield-check',
+      },
+    });
+  }
+
+  return { resolved: Number(resolved || 0), reason: 'explicit_healthy_recovery' };
 }
 
 async function handleAccountUpdate({ entry, change, value, clinicId }) {
@@ -1546,6 +1651,7 @@ module.exports = {
   prepareAppeal,
   prepareManualAccountReview,
   requestClinicClickReview,
+  reconcileTechnicalRecovery,
   serializeIncident,
   summarizeCompliance,
   __testing: {
@@ -1554,6 +1660,7 @@ module.exports = {
     buildManualReviewIncidentSpec,
     sanitizeAppealActivity,
     buildTechnicalRestrictions,
+    hasHealthyRecoveryObservation,
     loadActivitySummary,
     resolveActivityScope,
   },

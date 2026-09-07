@@ -37,13 +37,15 @@ const {
   resolveCatalogFamilyKey,
   resolveExecutionCommunicationLanguage,
 } = require('../lib/whatsapp-template-locale');
+const {
+  extractWhatsappTemplateDisplayButtons,
+} = require('../lib/whatsapp-template-display');
 
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const FlowExecutionV2 = db.FlowExecutionV2;
 const FlowExecutionLogV2 = db.FlowExecutionLogV2;
 const CitaPaciente = db.CitaPaciente;
 const LeadIntake = db.LeadIntake;
-const LeadContactAttempt = db.LeadContactAttempt;
 const Conversation = db.Conversation;
 const Message = db.Message;
 const Notification = db.Notification;
@@ -3581,56 +3583,6 @@ function buildFallbackWhatsappTemplateConfig(config) {
   };
 }
 
-async function registerLeadAutoReplyContactAttempt({ execution, context, node, message }) {
-  if (cleanString(node?.config?.template_usage) !== 'lead_auto_reply') return null;
-  const targets = resolveRuntimeTargets(execution, context);
-  const leadId = toIntOrNull(targets.lead_intake_id);
-  const messageId = toIntOrNull(message?.id);
-  if (!leadId || !messageId || !LeadContactAttempt) return null;
-
-  const motivo = `lead_auto_reply:${messageId}`;
-  return db.sequelize.transaction(async (transaction) => {
-    const lead = await LeadIntake.findByPk(leadId, {
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
-    if (!lead) return null;
-
-    const existing = await LeadContactAttempt.findOne({
-      where: { lead_intake_id: leadId, canal: 'whatsapp', motivo },
-      transaction,
-    });
-    if (existing) return existing;
-
-    const now = new Date();
-    const historial = Array.isArray(lead.historial_contactos) ? [...lead.historial_contactos] : [];
-    historial.push({
-      fecha: now.toISOString(),
-      motivo: 'lead_auto_reply',
-      notas: 'Respuesta automática de WhatsApp',
-      canal: 'whatsapp',
-      usuario_id: null,
-      message_id: messageId,
-    });
-    const protectedStatuses = new Set(['citado', 'acudio_cita', 'convertido', 'descartado']);
-    await lead.update({
-      historial_contactos: historial,
-      num_contactos: (Number(lead.num_contactos || 0) || 0) + 1,
-      ultimo_contacto: now,
-      status_lead: protectedStatuses.has(cleanString(lead.status_lead).toLowerCase())
-        ? lead.status_lead
-        : 'contactado',
-    }, { transaction });
-    return LeadContactAttempt.create({
-      lead_intake_id: leadId,
-      usuario_id: null,
-      canal: 'whatsapp',
-      motivo,
-      notas: cleanString(message?.content).slice(0, 500) || 'Respuesta automática de WhatsApp',
-    }, { transaction });
-  });
-}
-
 async function handleSendWhatsapp(node, context, runtime) {
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
   const execution = runtime?.execution || null;
@@ -3641,12 +3593,6 @@ async function handleSendWhatsapp(node, context, runtime) {
       messageType: ['template', 'text'],
     });
     if (existingMessage) {
-      await registerLeadAutoReplyContactAttempt({
-        execution,
-        context,
-        node,
-        message: existingMessage,
-      });
       return reuseExistingAutomationWhatsappMessage({ existingMessage, node });
     }
   }
@@ -4294,6 +4240,10 @@ async function handleSendWhatsapp(node, context, runtime) {
     template_language: templateLanguage || template?.language || 'es_ES',
     template_params: templateParams,
     template_components: templateComponents,
+    template_buttons: messageType === 'template'
+      ? extractWhatsappTemplateDisplayButtons(template)
+      : [],
+    lead_intake_id: toIntOrNull(targets.lead_intake_id),
     template_branch: accessGuidanceDecision.branch,
     access_guidance_variant_requested: accessGuidanceDecision.variant_requested,
     access_guidance_variant_used: accessGuidanceDecision.variant_used,
@@ -4409,8 +4359,6 @@ async function handleSendWhatsapp(node, context, runtime) {
       },
     });
     await conversation.update({ last_message_at: new Date() });
-
-    await registerLeadAutoReplyContactAttempt({ execution, context, node, message: msg });
 
     return {
       kind: 'success',
@@ -4584,8 +4532,6 @@ async function handleSendWhatsapp(node, context, runtime) {
       throw new Error(`whatsapp_send_failed:${providerMessage}`);
     }
   }
-
-  await registerLeadAutoReplyContactAttempt({ execution, context, node, message: msg });
 
   return {
     kind: 'success',

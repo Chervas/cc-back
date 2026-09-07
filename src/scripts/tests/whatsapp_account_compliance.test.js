@@ -14,6 +14,7 @@ const {
     buildManualReviewIncidentSpec,
     sanitizeAppealActivity,
     buildTechnicalRestrictions,
+    hasHealthyRecoveryObservation,
   },
 } = require('../../services/whatsappAccountCompliance.service');
 
@@ -127,6 +128,12 @@ assert.strictEqual(getStoredAccountUpdate({
     },
   },
 }), null);
+assert.strictEqual(hasHealthyRecoveryObservation([
+  { health: { state: 'healthy', can_send: true } },
+]), true);
+assert.strictEqual(hasHealthyRecoveryObservation([
+  { health: { state: 'blocked', can_send: false } },
+]), false);
 
 const rejectedReview = buildAccountReviewSnapshot({
   decision: 'REJECTED',

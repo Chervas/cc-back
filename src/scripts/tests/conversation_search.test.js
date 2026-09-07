@@ -55,6 +55,47 @@ async function run() {
     { limit: 20, beforeMessageId: null },
     'QuickChat message pages default to the last 20 messages without a valid cursor'
   );
+
+  const originalTemplateFindAll = db.WhatsappTemplate.findAll;
+  try {
+    db.WhatsappTemplate.findAll = async () => [{
+      id: 3150,
+      name: 'clinicaclick_lead_primera_visita_programar_v20',
+      language: 'es',
+      clinic_id: null,
+      is_active: true,
+      components: [
+        { type: 'BODY', text: 'Hola {{1}}' },
+        {
+          type: 'BUTTONS',
+          buttons: [
+            { type: 'QUICK_REPLY', text: 'Quiero una cita' },
+            { type: 'QUICK_REPLY', text: 'Ya no estoy interesado' },
+          ],
+        },
+      ],
+      catalog: null,
+      toJSON() { return { ...this }; },
+    }];
+    const [hydratedTemplateMessage] = await __testing.hydrateTemplateMessagePreviews([{
+      id: 50,
+      message_type: 'template',
+      content: 'Hola Lucía',
+      metadata: {
+        template_id: 3150,
+        template_name: 'clinicaclick_lead_primera_visita_programar_v20',
+        template_language: 'es',
+      },
+    }], { clinicId: 56 });
+    assert.deepEqual(
+      hydratedTemplateMessage.metadata.template_buttons.map((button) => button.text),
+      ['Quiero una cita', 'Ya no estoy interesado'],
+      'QuickChat must hydrate the actual template buttons even when the body was already stored'
+    );
+  } finally {
+    db.WhatsappTemplate.findAll = originalTemplateFindAll;
+  }
+
   assert.ok(
     __testing.buildPhoneSearchCandidates('654695552').includes('+34654695552'),
     'Spanish local mobile searches must include the E.164 candidate used by WhatsApp conversations'

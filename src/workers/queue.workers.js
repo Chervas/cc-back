@@ -16,6 +16,7 @@ const whatsappConnectionStatusService = require('../services/whatsappConnectionS
 const whatsappAccountComplianceService = require('../services/whatsappAccountCompliance.service');
 const whatsappAccountHealthService = require('../services/whatsappAccountHealth.service');
 const whatsappDeliveryGovernanceService = require('../services/whatsappDeliveryGovernance.service');
+const leadAutoReplyContactStatusService = require('../services/leadAutoReplyContactStatus.service');
 const systemNotificationsService = require('../services/systemNotifications.service');
 const patientDirectionService = require('../services/patientDirection.service');
 const {
@@ -1619,11 +1620,18 @@ createWorker('webhook_whatsapp', async (job) => {
                 value: webhookValue,
                 clinicId,
             });
-            await whatsappAccountHealthService.recordAccountUpdate({
+            const accountHealthResults = await whatsappAccountHealthService.recordAccountUpdate({
                 entry: webhookEntry,
                 change: webhookChange,
                 value: webhookValue,
                 clinicId,
+            });
+            await whatsappAccountComplianceService.reconcileTechnicalRecovery({
+                entry: webhookEntry,
+                change: webhookChange,
+                value: webhookValue,
+                clinicId,
+                healthResults: accountHealthResults,
             });
             await whatsappAccountHealthService.recordAccountReviewUpdate({
                 entry: webhookEntry,
@@ -1917,6 +1925,19 @@ createWorker('webhook_whatsapp', async (job) => {
         }
         message.metadata = mergeStatusMetadata(message.metadata, status);
         await message.save();
+        try {
+            await leadAutoReplyContactStatusService.materializeLeadAutoReplyProviderStatus({
+                message,
+                providerStatus: nextStatus,
+                providerTimestamp: status?.timestamp || null,
+            });
+        } catch (leadContactError) {
+            console.warn('[lead auto reply] No se pudo conciliar el contacto con el estado de Meta', {
+                messageId: message.id,
+                status: nextStatus,
+                error: serializeError(leadContactError),
+            });
+        }
         await patientDirectionService.handleHandoffMessageStatus(message).catch((handoffError) => {
             console.warn('[patient-direction] No se pudo actualizar el traspaso:', handoffError?.message || handoffError);
         });
