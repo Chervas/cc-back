@@ -2,6 +2,10 @@ const axios = require('axios');
 const db = require('../../models');
 const { normalizePhoneE164 } = require('../lib/phone');
 const whatsappAccountHealthService = require('./whatsappAccountHealth.service');
+const {
+    resolveWhatsappRouting,
+    selectWhatsappPhoneAsset,
+} = require('../lib/whatsapp-channel-role');
 const ClinicMetaAsset = db.ClinicMetaAsset;
 const Clinica = db.Clinica;
 const MarketingContactOptOut = db.MarketingContactOptOut;
@@ -33,41 +37,44 @@ class WhatsAppService {
                 : false;
     }
 
-    async resolvePhoneAssetByClinic(clinicId) {
+    async resolvePhoneAssetByClinic(clinicId, { purpose = null } = {}) {
         if (!clinicId) {
             return null;
         }
 
-        const clinicAsset = await ClinicMetaAsset.findOne({
+        const clinicAssets = await ClinicMetaAsset.findAll({
             where: {
                 clinicaId: clinicId,
+                assignmentScope: 'clinic',
                 isActive: true,
                 assetType: 'whatsapp_phone_number',
             },
             order: [['updatedAt', 'DESC']],
             raw: true,
         });
-        if (clinicAsset) {
-            return clinicAsset;
-        }
 
         const clinic = await Clinica.findByPk(clinicId, {
             attributes: ['grupoClinicaId'],
             raw: true,
         });
-        if (!clinic?.grupoClinicaId) {
-            return null;
-        }
+        const groupAssets = clinic?.grupoClinicaId
+            ? await ClinicMetaAsset.findAll({
+                where: {
+                    grupoClinicaId: clinic.grupoClinicaId,
+                    assignmentScope: 'group',
+                    isActive: true,
+                    assetType: 'whatsapp_phone_number',
+                },
+                order: [['updatedAt', 'DESC']],
+                raw: true,
+            })
+            : [];
 
-        return ClinicMetaAsset.findOne({
-            where: {
-                grupoClinicaId: clinic.grupoClinicaId,
-                assignmentScope: 'group',
-                isActive: true,
-                assetType: 'whatsapp_phone_number',
-            },
-            order: [['updatedAt', 'DESC']],
-            raw: true,
+        return selectWhatsappPhoneAsset({
+            clinicAssets,
+            groupAssets,
+            purpose,
+            summarizeHealth: (asset) => whatsappAccountHealthService.summarizeAssetHealth(asset),
         });
     }
 
@@ -122,10 +129,10 @@ class WhatsAppService {
     /**
      * Obtiene credenciales y phoneNumberId por clínica desde ClinicMetaAssets
      */
-    async getClinicConfig(clinicId) {
-        const asset = await this.resolvePhoneAssetByClinic(clinicId);
+    async getClinicConfig(clinicId, options = {}) {
+        const asset = await this.resolvePhoneAssetByClinic(clinicId, options);
 
-        if (asset?.waAccessToken && asset?.phoneNumberId) {
+        if (asset && (asset.routing_unavailable === true || (asset.waAccessToken && asset.phoneNumberId))) {
             return {
                 originId: asset.id || null,
                 phoneNumberId: asset.phoneNumberId,
@@ -135,6 +142,8 @@ class WhatsAppService {
                 clinicaId: asset.clinicaId || clinicId,
                 grupoClinicaId: asset.grupoClinicaId || null,
                 additionalData: asset.additionalData || {},
+                routingUnavailable: asset.routing_unavailable === true,
+                routingPurpose: asset.routing_purpose || null,
             };
         }
 

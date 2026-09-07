@@ -58,6 +58,9 @@ router.post('/compliance/incidents/:id/mark-submitted', authMiddleware, whatsapp
 // Asignar número a grupo o clínica
 router.post('/phones/:phoneNumberId/assign', authMiddleware, whatsappController.assignPhone);
 
+// Configurar el rol operativo y los usos del número secundario
+router.put('/phones/:phoneNumberId/routing', authMiddleware, whatsappController.updatePhoneRouting);
+
 // Desasignar número sin desconectarlo de Meta
 router.post('/phones/:phoneNumberId/unassign', authMiddleware, whatsappController.unassignPhone);
 

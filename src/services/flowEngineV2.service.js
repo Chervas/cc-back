@@ -2049,6 +2049,17 @@ function resolveAutomationCommunicationScope(config, context) {
   return 'care';
 }
 
+function resolveWhatsappRoutingPurpose(config, context, { leadId = null } = {}) {
+  const templateUsage = (cleanString(resolveTemplateValue(config?.template_usage, context)) || '').toLowerCase();
+  if (['solicitud_resena', 'resena', 'review_request', 'reviews'].includes(templateUsage)) {
+    return 'review_requests';
+  }
+  if (leadId || ['lead_auto_reply', 'lead_primera_visita'].includes(templateUsage)) {
+    return 'lead_first_contact';
+  }
+  return null;
+}
+
 function getWhatsappTemplateWabaId(template) {
   const plain = template?.get ? template.get({ plain: true }) : (template || {});
   return cleanString(plain.waba_id || plain.wabaId);
@@ -2860,9 +2871,10 @@ async function resolveWhatsAppSenderConfig({ config, context, clinicId }) {
     || context?.recipient?.phone
   );
   const domain = toLowerSafe(config?.domain || context?.runtime?.domain);
+  const routingPurpose = resolveWhatsappRoutingPurpose(config, context, { leadId });
   const purpose = domain.includes('consent')
     ? 'consent'
-    : (leadId ? 'lead_automation' : (appointmentId ? 'appointment_automation' : 'automation'));
+    : (routingPurpose || (appointmentId ? 'appointment_automation' : 'automation'));
   const senderPolicy = await patientDirectionService.resolveOutboundPolicy({
     clinicId,
     phone,
@@ -2873,6 +2885,9 @@ async function resolveWhatsAppSenderConfig({ config, context, clinicId }) {
     automation: true,
   });
   const clinicConfig = senderPolicy.clinicConfig;
+  if (clinicConfig?.routingUnavailable === true) {
+    throw new Error('whatsapp_routing_unavailable');
+  }
   if (!clinicConfig?.accessToken || !clinicConfig?.phoneNumberId) {
     throw new Error('whatsapp_config_missing');
   }

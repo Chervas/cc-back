@@ -12,6 +12,7 @@ const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-templ
 const { matchesReviewTemplateMedia } = require('../lib/review-template-media');
 const { usesExplicitDispatchWindow } = require('../lib/marketing-dispatch-window');
 const { normalizeReviewSenderName, requireReviewSenderName } = require('../lib/review-sender-policy');
+const { resolveWhatsappChannelRole } = require('../lib/whatsapp-channel-role');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const {
   REVIEW_AUTOMATION_TRIGGER,
@@ -2188,6 +2189,16 @@ function isReviewRequestList(list) {
   return criteria.review_request === true || isReviewTemplateUsage(criteria.template_usage);
 }
 
+function getWhatsappRoutingPurposeForList(list) {
+  return isReviewRequestList(list) ? 'review_requests' : 'bulk_campaigns';
+}
+
+function isWhatsappRoutingConfigAvailable(config) {
+  return config?.routingUnavailable !== true
+    && !!config?.phoneNumberId
+    && !!config?.accessToken;
+}
+
 function normalizeCampaignListContext(value) {
   const key = normalizeKey(value || '');
   if (['review', 'reviews', 'review_request', 'resena', 'resenas', 'solicitud_resena'].includes(key)) {
@@ -2511,6 +2522,9 @@ async function sendReviewPrivateFeedbackAcknowledgement({ list, item, conversati
         inbound_message_id: inboundMessage.id,
         trigger_message_id: triggerMessage?.id || null,
         recipient,
+        phoneNumberId: clinicConfig.phoneNumberId || null,
+        wabaId: clinicConfig.wabaId || null,
+        whatsapp_channel_role: resolveWhatsappChannelRole(clinicConfig),
       },
       occurred_at: new Date(),
     });
@@ -2523,8 +2537,10 @@ async function sendReviewPrivateFeedbackAcknowledgement({ list, item, conversati
   let clinicConfig = null;
 
   try {
-    clinicConfig = await whatsappService.getClinicConfig(clinicId);
-    if (!clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
+    clinicConfig = await whatsappService.getClinicConfig(clinicId, {
+      purpose: getWhatsappRoutingPurposeForList(list),
+    });
+    if (!isWhatsappRoutingConfigAvailable(clinicConfig)) {
       throw new Error('whatsapp_config_missing_for_review_private_feedback_ack');
     }
 
@@ -2763,6 +2779,9 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
         trigger_message_id: triggerMessage?.id || null,
         recipient: followUpRecipient,
         test_send: isTestSend,
+        phoneNumberId: clinicConfig.phoneNumberId || null,
+        wabaId: clinicConfig.wabaId || null,
+        whatsapp_channel_role: resolveWhatsappChannelRole(clinicConfig),
         google_review_url_available: isPositive && !!googleReviewUrl,
       },
       occurred_at: new Date(),
@@ -2775,8 +2794,10 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
   let errorPayload = null;
 
   try {
-    const clinicConfig = await whatsappService.getClinicConfig(clinicId);
-    if (!clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
+    const clinicConfig = await whatsappService.getClinicConfig(clinicId, {
+      purpose: getWhatsappRoutingPurposeForList(list),
+    });
+    if (!isWhatsappRoutingConfigAvailable(clinicConfig)) {
       throw new Error('whatsapp_config_missing_for_review_followup');
     }
 
@@ -5514,11 +5535,14 @@ async function sendReviewRequestReminder(options = {}) {
   }
   const [clinic, clinicConfig, template] = await Promise.all([
     loadClinicForTemplateVariables(clinicId),
-    whatsappService.getClinicConfig(clinicId).catch(() => null),
+    whatsappService.getClinicConfig(clinicId, { purpose: 'review_requests' }).catch(() => null),
     findApprovedReviewReminderWhatsappTemplate(scope),
   ]);
-  if (!clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
-    return { success: true, sent: false, skipped: true, reason: 'whatsapp_connection_missing', list_id: listId, item_id: itemId };
+  if (!isWhatsappRoutingConfigAvailable(clinicConfig)) {
+    const reason = clinicConfig?.routingUnavailable === true
+      ? 'whatsapp_secondary_unavailable'
+      : 'whatsapp_connection_missing';
+    return { success: true, sent: false, skipped: true, reason, list_id: listId, item_id: itemId };
   }
   clinicConfig.clinicId = clinicId;
   if (!template) {
@@ -7047,7 +7071,9 @@ async function getWhatsappAccountQualityForList(list, scope = {}) {
 
   let clinicConfig = null;
   try {
-    clinicConfig = await whatsappService.getClinicConfig(clinicId);
+    clinicConfig = await whatsappService.getClinicConfig(clinicId, {
+      purpose: getWhatsappRoutingPurposeForList(list),
+    });
   } catch (_) {
     clinicConfig = null;
   }
@@ -7799,9 +7825,13 @@ async function sendTest(scope, campaignId, body = {}) {
   }
   const plainItem = item.get({ plain: true });
   const clinic = await loadClinicForTemplateVariables(clinicId);
-  const clinicConfig = await whatsappService.getClinicConfig(clinicId);
-  if (!clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
-    const err = new Error('whatsapp_config_missing_for_scope');
+  const clinicConfig = await whatsappService.getClinicConfig(clinicId, {
+    purpose: getWhatsappRoutingPurposeForList(list),
+  });
+  if (!isWhatsappRoutingConfigAvailable(clinicConfig)) {
+    const err = new Error(clinicConfig?.routingUnavailable === true
+      ? 'whatsapp_secondary_unavailable'
+      : 'whatsapp_config_missing_for_scope');
     err.status = 409;
     throw err;
   }
@@ -7877,6 +7907,7 @@ async function sendTest(scope, campaignId, body = {}) {
       recipient: targetPhone,
       phoneNumberId: clinicConfig.phoneNumberId || null,
       wabaId: clinicConfig.wabaId || null,
+      whatsapp_channel_role: resolveWhatsappChannelRole(clinicConfig),
     },
     sent_at: null,
   });
@@ -8491,9 +8522,13 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     scope
   );
   const clinicId = getClinicIdForList(list, scope);
-  const clinicConfig = clinicId ? await whatsappService.getClinicConfig(clinicId) : null;
-  if (!template || !clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
-    const err = new Error('No se puede reanudar la cola hasta que la plantilla y la cuenta de WhatsApp estén disponibles.');
+  const clinicConfig = clinicId
+    ? await whatsappService.getClinicConfig(clinicId, { purpose: getWhatsappRoutingPurposeForList(list) })
+    : null;
+  if (!template || !isWhatsappRoutingConfigAvailable(clinicConfig)) {
+    const err = new Error(clinicConfig?.routingUnavailable === true
+      ? 'No se puede reanudar la cola porque el WhatsApp secundario configurado no está disponible.'
+      : 'No se puede reanudar la cola hasta que la plantilla y la cuenta de WhatsApp estén disponibles.');
     err.status = 409;
     throw err;
   }
@@ -8715,6 +8750,7 @@ async function sendDispatchItem({
       phoneId: clinicConfig.phoneNumberId || null,
       wabaId: clinicConfig.wabaId || null,
       batch_index: batchIndex,
+      whatsapp_channel_role: resolveWhatsappChannelRole(clinicConfig),
     },
     sent_at: null,
   });
@@ -8979,20 +9015,25 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
   }
   const clinicId = getClinicIdForList(list, scope);
   const clinic = await loadClinicForTemplateVariables(clinicId);
-  const clinicConfig = clinicId ? await whatsappService.getClinicConfig(clinicId) : null;
-  if (!clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
+  const clinicConfig = clinicId
+    ? await whatsappService.getClinicConfig(clinicId, { purpose: getWhatsappRoutingPurposeForList(list) })
+    : null;
+  if (!isWhatsappRoutingConfigAvailable(clinicConfig)) {
+    const pausedReason = clinicConfig?.routingUnavailable === true
+      ? 'whatsapp_secondary_unavailable'
+      : 'whatsapp_config_missing';
     await list.update({
       status: 'paused',
       criteria: mergeCriteria(list, {
         dispatch: {
           ...dispatch,
           status: 'paused_config',
-          paused_reason: 'whatsapp_config_missing',
+          paused_reason: pausedReason,
           paused_at: new Date().toISOString(),
         },
       }),
     });
-    return { status: 'completed', result: { paused: true, reason: 'whatsapp_config_missing', list_id: list.id } };
+    return { status: 'completed', result: { paused: true, reason: pausedReason, list_id: list.id } };
   }
   clinicConfig.clinicId = clinicId;
 
@@ -9127,17 +9168,22 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     let itemTemplate = template;
     if (itemClinicId && itemClinicId !== Number(clinicId || 0)) {
       itemClinic = await loadClinicForTemplateVariables(itemClinicId);
-      itemClinicConfig = await whatsappService.getClinicConfig(itemClinicId).catch(() => null);
+      itemClinicConfig = await whatsappService.getClinicConfig(itemClinicId, {
+        purpose: getWhatsappRoutingPurposeForList(list),
+      }).catch(() => null);
       if (itemClinicConfig) itemClinicConfig.clinicId = itemClinicId;
       itemTemplate = await resolveWhatsappTemplateForClinic(template, itemClinicId, itemClinicConfig);
     }
-    if (!itemClinicConfig?.phoneNumberId || !itemClinicConfig?.accessToken) {
+    if (!isWhatsappRoutingConfigAvailable(itemClinicConfig)) {
+      const unavailableSecondary = itemClinicConfig?.routingUnavailable === true;
       failed += 1;
       await item.update({
         dispatch_status: 'failed',
         failed_at: new Date(),
-        last_error_code: 'whatsapp_config_missing',
-        last_error_message: 'La clínica del contacto no tiene WhatsApp conectado.',
+        last_error_code: unavailableSecondary ? 'whatsapp_secondary_unavailable' : 'whatsapp_config_missing',
+        last_error_message: unavailableSecondary
+          ? 'El WhatsApp secundario configurado para este envío no está disponible.'
+          : 'La clínica del contacto no tiene WhatsApp conectado.',
       });
       continue;
     }
