@@ -40,6 +40,7 @@ const {
 const {
   extractWhatsappTemplateDisplayButtons,
 } = require('../lib/whatsapp-template-display');
+const { resolveWhatsappChannelRole } = require('../lib/whatsapp-channel-role');
 
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const FlowExecutionV2 = db.FlowExecutionV2;
@@ -4213,6 +4214,7 @@ async function handleSendWhatsapp(node, context, runtime) {
     eventMsg = eventMaterialization.message;
   }
 
+  const whatsappChannelRole = resolveWhatsappChannelRole(senderData.clinic_config);
   const metadata = {
     source: 'automations_v2',
     kind: 'flow_send_whatsapp',
@@ -4261,6 +4263,7 @@ async function handleSendWhatsapp(node, context, runtime) {
     recipient: recipientData.recipient,
     sender_mode: senderData.sender_mode,
     sender_origin_id: senderData.sender_origin_id,
+    ...(whatsappChannelRole ? { whatsapp_channel_role: whatsappChannelRole } : {}),
     ...(senderData.patient_direction || {}),
     phoneNumberId: senderData.clinic_config?.phoneNumberId || null,
     phoneId: senderData.clinic_config?.phoneNumberId || null,

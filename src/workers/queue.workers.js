@@ -29,6 +29,7 @@ const {
 const { getIO } = require('../services/socket.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { buildWhatsappOutboundRetryDecision } = require('../lib/whatsapp-outbound-retry');
+const { resolveWhatsappChannelRole } = require('../lib/whatsapp-channel-role');
 const db = require('../../models');
 
 const { Conversation, Message, ClinicMetaAsset, Clinica, WhatsAppWebOrigin } = db;
@@ -851,6 +852,7 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
                 clinicId: Number(clinicId || 0) || null,
             })
             : clinicConfig;
+        const whatsappChannelRole = resolveWhatsappChannelRole(effectiveClinicConfig);
         msg.metadata = {
             ...(msg.metadata || {}),
             ...(effectiveClinicConfig?.phoneNumberId
@@ -866,6 +868,7 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
                     whatsapp_sender_asset_id: effectiveClinicConfig.originId,
                 }
                 : {}),
+            ...(whatsappChannelRole ? { whatsapp_channel_role: whatsappChannelRole } : {}),
             whatsapp_sender_resolved_at: new Date().toISOString(),
         };
         await msg.save();
@@ -1280,7 +1283,15 @@ async function createCoexistenceConversationMessage({
     return { message, conversation: conv };
 }
 
-async function handleWhatsappCoexistenceEchoes({ echoes, value, clinicId, patientId, leadId }) {
+async function handleWhatsappCoexistenceEchoes({
+    echoes,
+    value,
+    clinicId,
+    patientId,
+    leadId,
+    whatsappOriginAssetId = null,
+    whatsappChannelRole = null,
+}) {
     if (!Array.isArray(echoes) || !echoes.length) {
         return;
     }
@@ -1300,6 +1311,8 @@ async function handleWhatsappCoexistenceEchoes({ echoes, value, clinicId, patien
             sentAt,
             phoneId,
             extraMetadata: {
+                ...(whatsappOriginAssetId ? { whatsapp_origin_asset_id: whatsappOriginAssetId } : {}),
+                ...(whatsappChannelRole ? { whatsapp_channel_role: whatsappChannelRole } : {}),
                 coexistence: {
                     from_business_phone: echo?.from || null,
                 },
@@ -1320,7 +1333,15 @@ async function handleWhatsappCoexistenceEchoes({ echoes, value, clinicId, patien
     });
 }
 
-async function handleWhatsappHistoryBlocks({ historyBlocks, value, clinicId, patientId, leadId }) {
+async function handleWhatsappHistoryBlocks({
+    historyBlocks,
+    value,
+    clinicId,
+    patientId,
+    leadId,
+    whatsappOriginAssetId = null,
+    whatsappChannelRole = null,
+}) {
     if (!Array.isArray(historyBlocks) || !historyBlocks.length) {
         return;
     }
@@ -1364,6 +1385,8 @@ async function handleWhatsappHistoryBlocks({ historyBlocks, value, clinicId, pat
                     sentAt,
                     phoneId,
                     extraMetadata: {
+                        ...(whatsappOriginAssetId ? { whatsapp_origin_asset_id: whatsappOriginAssetId } : {}),
+                        ...(whatsappChannelRole ? { whatsapp_channel_role: whatsappChannelRole } : {}),
                         history_context: historyMessage?.history_context || null,
                         coexistence: {
                             history_phase: metadata?.phase ?? null,
@@ -1582,6 +1605,8 @@ createWorker('webhook_whatsapp', async (job) => {
     const webOriginRefFromJob = job.data?.web_origin_ref || null;
     const patientDirectionAssignmentIdFromJob = job.data?.patient_direction_assignment_id || null;
     const patientDirectionFormerAssignment = job.data?.patient_direction_former_assignment === true;
+    const whatsappOriginAssetId = Number(job.data?.whatsapp_origin_asset_id || 0) || null;
+    const whatsappChannelRole = cleanString(job.data?.whatsapp_channel_role).toLowerCase();
 
     if (!payload || !clinicId) {
         throw new Error('Payload o clinic_id ausente en webhook de WhatsApp');
@@ -1671,8 +1696,24 @@ createWorker('webhook_whatsapp', async (job) => {
         }
     }
     await handleWhatsappStateSync({ stateSync, value });
-    await handleWhatsappHistoryBlocks({ historyBlocks, value, clinicId, patientId, leadId });
-    await handleWhatsappCoexistenceEchoes({ echoes, value, clinicId, patientId, leadId });
+    await handleWhatsappHistoryBlocks({
+        historyBlocks,
+        value,
+        clinicId,
+        patientId,
+        leadId,
+        whatsappOriginAssetId,
+        whatsappChannelRole,
+    });
+    await handleWhatsappCoexistenceEchoes({
+        echoes,
+        value,
+        clinicId,
+        patientId,
+        leadId,
+        whatsappOriginAssetId,
+        whatsappChannelRole,
+    });
 
     for (const msg of messages) {
         const phoneId = value?.metadata?.phone_number_id;
@@ -1777,6 +1818,10 @@ createWorker('webhook_whatsapp', async (job) => {
                 metadata: {
                     wamid,
                     phoneId,
+                    ...(whatsappOriginAssetId ? { whatsapp_origin_asset_id: whatsappOriginAssetId } : {}),
+                    ...(whatsappChannelRole === 'secondary' || whatsappChannelRole === 'primary'
+                        ? { whatsapp_channel_role: whatsappChannelRole }
+                        : {}),
                     ...(patientDirectionAssignment?.id ? {
                         patient_direction_assignment_id: patientDirectionAssignment.id,
                         patient_direction_director_user_id: patientDirectionAssignment.director_user_id,
