@@ -1507,6 +1507,10 @@ async function handleWhatsappAccountUpdate({ entry, changes, value, clinicId }) 
         clinicId,
         patch,
     });
+    await whatsappConnectionStatusService.mirrorWabaCoexistenceStatus({
+        wabaId,
+        patch,
+    });
 
     if (normalized.status === 'disconnected') {
         try {

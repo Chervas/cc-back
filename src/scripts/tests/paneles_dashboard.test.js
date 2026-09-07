@@ -100,6 +100,43 @@ async function run() {
   assert.equal(__testing.roleSections('agencia', 'admin_staff').operations, false,
     'an agency cannot inherit clinic operations from a stray subrole label');
 
+  assert.equal(__testing.isWhatsappAssetOperationallyConnected({
+    assetType: 'whatsapp_phone_number',
+    phoneNumberId: 'phone-1',
+    wabaId: 'waba-1',
+    additionalData: {
+      registration: { status: 'registered', phoneStatus: 'CONNECTED' },
+      coexistence: { status: 'disconnected', canSendApi: false, requiresReconnect: true },
+      whatsappHealth: { state: 'disconnected', can_send: false },
+    },
+  }), false, 'an explicit disconnect must override stale CONNECTED registration data');
+  assert.equal(__testing.isWhatsappAssetOperationallyConnected({
+    assetType: 'whatsapp_phone_number',
+    phoneNumberId: 'phone-2',
+    additionalData: {
+      registration: { status: 'registered', phoneStatus: 'CONNECTED' },
+      coexistence: { status: 'active', canSendApi: true },
+      whatsappHealth: { state: 'healthy', can_send: true },
+    },
+  }), true);
+  assert.equal(__testing.hasOperationalWhatsappConnection([
+    {
+      assetType: 'whatsapp_business_account',
+      wabaId: 'waba-1',
+      additionalData: { coexistence: { status: 'active', canSendApi: true } },
+    },
+    {
+      assetType: 'whatsapp_phone_number',
+      phoneNumberId: 'phone-1',
+      wabaId: 'waba-1',
+      additionalData: {
+        registration: { status: 'registered', phoneStatus: 'CONNECTED' },
+        coexistence: { status: 'disconnected', canSendApi: false, requiresReconnect: true },
+        whatsappHealth: { state: 'disconnected', can_send: false },
+      },
+    },
+  ]), false, 'a stale WABA row must not override the operational phone state');
+
   const guardedAgencyDashboard = __testing.applyDashboardAccessGuard({
     todayAppointments: [{ patientName: 'Paciente Secreto', patientAvatar: 'secret-photo.jpg' }],
     inactiveTodayAppointments: [{ patientName: 'Paciente Inactivo' }],

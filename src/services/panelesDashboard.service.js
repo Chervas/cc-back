@@ -880,6 +880,58 @@ function hasMissingPaymentSignal(additional) {
   return status.includes('missing') || status.includes('required') || errorCode === '131042';
 }
 
+function isFalseSignal(value) {
+  return value === false || String(value || '').toLowerCase() === 'false';
+}
+
+function isWhatsappAssetExplicitlyDisconnected(asset) {
+  const additional = parseJsonObject(asset?.additionalData);
+  const health = parseJsonObject(additional.whatsappHealth);
+  const coexistence = parseJsonObject(additional.coexistence);
+  const registration = parseJsonObject(additional.registration);
+  const healthState = String(health.state || '').toLowerCase();
+  const coexistenceStatus = String(
+    coexistence.status || coexistence.coexistence_status || ''
+  ).toLowerCase();
+  const registrationStatus = String(registration.status || '').toLowerCase();
+  const phoneStatus = String(registration.phoneStatus || '').toUpperCase();
+
+  return ['blocked', 'disconnected'].includes(healthState)
+    || isFalseSignal(health.can_send)
+    || coexistenceStatus === 'disconnected'
+    || isFalseSignal(coexistence.canSendApi)
+    || isFalseSignal(coexistence.can_send_api)
+    || coexistence.requiresReconnect === true
+    || ['blocked', 'deleted', 'failed', 'not_registered'].includes(registrationStatus)
+    || ['BANNED', 'BLOCKED', 'DELETED', 'DISCONNECTED', 'SUSPENDED'].includes(phoneStatus);
+}
+
+function isWhatsappAssetOperationallyConnected(asset) {
+  if (isWhatsappAssetExplicitlyDisconnected(asset)) return false;
+  const additional = parseJsonObject(asset?.additionalData);
+  const health = parseJsonObject(additional.whatsappHealth);
+  const coexistence = parseJsonObject(additional.coexistence);
+  const registration = parseJsonObject(additional.registration);
+  const status = String(
+    additional.status || additional.whatsapp_status || additional.connection_status || ''
+  ).toLowerCase();
+
+  return health.can_send === true
+    || String(health.can_send || '').toLowerCase() === 'true'
+    || String(registration.phoneStatus || '').toUpperCase() === 'CONNECTED'
+    || String(registration.status || '').toLowerCase() === 'registered'
+    || String(coexistence.status || '').toLowerCase() === 'active'
+    || ['connected', 'live', 'active'].includes(status)
+    // Conserva compatibilidad con activos antiguos que no tenían proyección de salud.
+    || Boolean(asset?.phoneNumberId || asset?.wabaId);
+}
+
+function hasOperationalWhatsappConnection(assets = []) {
+  const phoneAssets = assets.filter((asset) => asset.assetType === 'whatsapp_phone_number');
+  const operationalCandidates = phoneAssets.length ? phoneAssets : assets;
+  return operationalCandidates.some(isWhatsappAssetOperationallyConnected);
+}
+
 async function loadWhatsappStatus({ clinicIds, groupIds }) {
   if (!ClinicMetaAsset || (!clinicIds.length && !groupIds.length)) {
     return { connected: null, paymentReady: null, paymentMissing: false };
@@ -903,17 +955,7 @@ async function loadWhatsappStatus({ clinicIds, groupIds }) {
     raw: true,
   });
 
-  const connected = assets.some((asset) => {
-    const additional = parseJsonObject(asset.additionalData);
-    const status = String(
-      additional.status ||
-      additional.whatsapp_status ||
-      additional.connection_status ||
-      additional.coexistence?.status ||
-      ''
-    ).toLowerCase();
-    return Boolean(asset.phoneNumberId || asset.wabaId || ['connected', 'live', 'active'].includes(status));
-  });
+  const connected = hasOperationalWhatsappConnection(assets);
   const paymentMissing = assets.some((asset) => hasMissingPaymentSignal(parseJsonObject(asset.additionalData)));
 
   return {
@@ -1551,5 +1593,8 @@ module.exports = {
     dayRange,
     mapAppointment,
     timeLabel,
+    isWhatsappAssetExplicitlyDisconnected,
+    isWhatsappAssetOperationallyConnected,
+    hasOperationalWhatsappConnection,
   },
 };

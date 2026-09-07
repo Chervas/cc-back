@@ -9,6 +9,15 @@ const { ClinicMetaAsset, Clinica, Notification } = db;
 
 const GRAPH_OBJECT_ACCESS_ERROR_CODE = 100;
 const GRAPH_OBJECT_ACCESS_ERROR_SUBCODE = 33;
+const COEXISTENCE_ERROR_FIELDS = [
+  'last_error_code',
+  'last_error_subcode',
+  'last_error_message',
+  'last_error_at',
+  'last_message_id',
+  'last_recipient',
+  'last_source',
+];
 
 function cleanString(value) {
   if (value === undefined || value === null) return '';
@@ -60,6 +69,70 @@ function buildReconnectLink({ phoneNumberId = null, wabaId = null } = {}) {
     params.set('wabaId', String(wabaId));
   }
   return `/ajustes?${params.toString()}`;
+}
+
+function isDisconnectedCoexistence(coexistence = {}) {
+  return coexistence.status === 'disconnected'
+    || coexistence.coexistence_status === 'disconnected'
+    || coexistence.canSendApi === false
+    || coexistence.can_send_api === false
+    || coexistence.requiresReconnect === true;
+}
+
+async function applyCoexistencePatch(asset, patch = {}, { clearErrorFields = false } = {}) {
+  const additionalData = asset?.additionalData && typeof asset.additionalData === 'object'
+    ? { ...asset.additionalData }
+    : {};
+  const previous = additionalData.coexistence && typeof additionalData.coexistence === 'object'
+    ? { ...additionalData.coexistence }
+    : {};
+  const coexistence = {
+    ...previous,
+    ...patch,
+    updated_at: patch.updated_at || new Date().toISOString(),
+  };
+  if (clearErrorFields) {
+    COEXISTENCE_ERROR_FIELDS.forEach((field) => delete coexistence[field]);
+  }
+  asset.additionalData = { ...additionalData, coexistence };
+  asset.changed?.('additionalData', true);
+  await asset.save();
+  return { was_disconnected: isDisconnectedCoexistence(previous) };
+}
+
+async function mirrorWabaCoexistenceStatus({
+  wabaId = null,
+  patch = {},
+  clearErrorFields = false,
+} = {}) {
+  const normalizedWabaId = cleanString(wabaId);
+  if (!ClinicMetaAsset || !normalizedWabaId) {
+    return { updated: 0, was_disconnected: false };
+  }
+  try {
+    const assets = await ClinicMetaAsset.findAll({
+      where: {
+        assetType: 'whatsapp_business_account',
+        isActive: true,
+        [Op.or]: [
+          { wabaId: normalizedWabaId },
+          { metaAssetId: normalizedWabaId },
+        ],
+      },
+    });
+    let wasDisconnected = false;
+    for (const asset of assets) {
+      const result = await applyCoexistencePatch(asset, patch, { clearErrorFields });
+      wasDisconnected = wasDisconnected || result.was_disconnected;
+    }
+    return { updated: assets.length, was_disconnected: wasDisconnected };
+  } catch (error) {
+    console.warn('[whatsapp] No se pudo sincronizar el estado de la WABA relacionada', {
+      wabaId: normalizedWabaId,
+      error: error?.message || error,
+    });
+    return { updated: 0, was_disconnected: false, error: error?.message || String(error) };
+  }
 }
 
 async function markCoexistenceNotificationsRead({ phoneNumberId = null, wabaId = null } = {}) {
@@ -152,6 +225,21 @@ async function markDisconnectedAfterProviderError({
   const asset = await findWhatsappPhoneAsset({ clinicId: resolvedClinicId, phoneId, wabaId });
   const now = new Date().toISOString();
   let wasDisconnected = false;
+  const disconnectProjection = {
+    status: 'disconnected',
+    coexistence_status: 'disconnected',
+    canSendApi: false,
+    can_send_api: false,
+    requiresReconnect: true,
+    disconnectReason: 'meta_object_access_lost',
+    last_error_code: normalized.code,
+    last_error_subcode: normalized.subcode,
+    last_error_message: normalized.message,
+    last_error_at: now,
+    last_message_id: messageId || null,
+    last_recipient: cleanString(recipient) || null,
+    last_source: cleanString(source) || null,
+  };
 
   if (asset) {
     const additionalData = asset.additionalData && typeof asset.additionalData === 'object'
@@ -160,11 +248,7 @@ async function markDisconnectedAfterProviderError({
     const coexistence = additionalData.coexistence && typeof additionalData.coexistence === 'object'
       ? { ...additionalData.coexistence }
       : {};
-    wasDisconnected = coexistence.status === 'disconnected'
-      || coexistence.coexistence_status === 'disconnected'
-      || coexistence.canSendApi === false
-      || coexistence.can_send_api === false
-      || coexistence.requiresReconnect === true;
+    wasDisconnected = isDisconnectedCoexistence(coexistence);
     const registration = additionalData.registration && typeof additionalData.registration === 'object'
       ? { ...additionalData.registration }
       : {};
@@ -173,19 +257,7 @@ async function markDisconnectedAfterProviderError({
       ...additionalData,
       coexistence: {
         ...coexistence,
-        status: 'disconnected',
-        coexistence_status: 'disconnected',
-        canSendApi: false,
-        can_send_api: false,
-        requiresReconnect: true,
-        disconnectReason: 'meta_object_access_lost',
-        last_error_code: normalized.code,
-        last_error_subcode: normalized.subcode,
-        last_error_message: normalized.message,
-        last_error_at: now,
-        last_message_id: messageId || null,
-        last_recipient: cleanString(recipient) || null,
-        last_source: cleanString(source) || null,
+        ...disconnectProjection,
       },
       registration: {
         ...registration,
@@ -198,6 +270,13 @@ async function markDisconnectedAfterProviderError({
     await asset.save();
   }
 
+  const resolvedWabaId = wabaId || asset?.wabaId || null;
+  const mirrored = await mirrorWabaCoexistenceStatus({
+    wabaId: resolvedWabaId,
+    patch: disconnectProjection,
+  });
+  wasDisconnected = wasDisconnected || mirrored.was_disconnected;
+
   if (!wasDisconnected) {
     try {
       const clinic = resolvedClinicId && Clinica
@@ -208,8 +287,6 @@ async function markDisconnectedAfterProviderError({
         : null;
 
       const phoneNumberId = phoneId || asset?.phoneNumberId || null;
-      const resolvedWabaId = wabaId || asset?.wabaId || null;
-
       await notificationService.dispatchEvent({
         event: 'whatsapp.coexistence_disconnected',
         clinicId: resolvedClinicId,
@@ -265,41 +342,39 @@ async function clearDisconnectedAfterSuccess({
   const coexistence = additionalData.coexistence && typeof additionalData.coexistence === 'object'
     ? { ...additionalData.coexistence }
     : {};
-  if (
-    coexistence.status !== 'disconnected'
-    && coexistence.coexistence_status !== 'disconnected'
-    && coexistence.requiresReconnect !== true
-  ) {
+  if (!isDisconnectedCoexistence(coexistence)) {
     return { cleared: false, reason: 'no_disconnect_marker' };
   }
 
+  const successProjection = {
+    status: 'active',
+    coexistence_status: 'active',
+    canSendApi: true,
+    can_send_api: true,
+    requiresReconnect: false,
+    last_success_at: new Date().toISOString(),
+    last_success_message_id: messageId || null,
+    last_success_source: cleanString(source) || null,
+    previous_disconnect_reason: coexistence.disconnectReason || null,
+    previous_disconnect_at: coexistence.last_error_at || null,
+  };
   asset.additionalData = {
     ...additionalData,
     coexistence: {
       ...coexistence,
-      status: 'active',
-      coexistence_status: 'active',
-      canSendApi: true,
-      can_send_api: true,
-      requiresReconnect: false,
-      last_success_at: new Date().toISOString(),
-      last_success_message_id: messageId || null,
-      last_success_source: cleanString(source) || null,
-      previous_disconnect_reason: coexistence.disconnectReason || null,
-      previous_disconnect_at: coexistence.last_error_at || null,
+      ...successProjection,
     },
   };
-  delete asset.additionalData.coexistence.last_error_code;
-  delete asset.additionalData.coexistence.last_error_subcode;
-  delete asset.additionalData.coexistence.last_error_message;
-  delete asset.additionalData.coexistence.last_error_at;
-  delete asset.additionalData.coexistence.last_message_id;
-  delete asset.additionalData.coexistence.last_recipient;
-  delete asset.additionalData.coexistence.last_source;
+  COEXISTENCE_ERROR_FIELDS.forEach((field) => delete asset.additionalData.coexistence[field]);
   await asset.save();
 
   const phoneNumberId = phoneId || asset.phoneNumberId || null;
   const resolvedWabaId = wabaId || asset.wabaId || null;
+  await mirrorWabaCoexistenceStatus({
+    wabaId: resolvedWabaId,
+    patch: successProjection,
+    clearErrorFields: true,
+  });
   const notifications = await markCoexistenceNotificationsRead({
     phoneNumberId,
     wabaId: resolvedWabaId,
@@ -347,6 +422,8 @@ module.exports = {
   GRAPH_OBJECT_ACCESS_ERROR_SUBCODE: GRAPH_OBJECT_ACCESS_ERROR_SUBCODE,
   normalizeProviderError,
   isGraphObjectAccessError,
+  isDisconnectedCoexistence,
+  mirrorWabaCoexistenceStatus,
   markCoexistenceNotificationsRead,
   markDisconnectedAfterProviderError,
   clearDisconnectedAfterSuccess,
