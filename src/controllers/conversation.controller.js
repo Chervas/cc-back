@@ -10,6 +10,9 @@ const { canUserAccessFeature } = require('../lib/access-policy');
 const { canUserSelectWhatsappTemplate } = require('../lib/whatsapp-template-ownership');
 const { isReviewWorkflowWhatsappTemplate } = require('../lib/whatsapp-template-workflow');
 const {
+  extractWhatsappTemplateDisplayButtons,
+} = require('../lib/whatsapp-template-display');
+const {
   completeAnsweredAutomationStateForConversation,
   completeManualAutomationStateForConversation,
   getPendingReplyStatesByConversationIds,
@@ -434,28 +437,30 @@ async function hydrateTemplateMessagePreviews(messages, { clinicId = null } = {}
   const templateRefs = [];
   for (const message of messages) {
     const type = cleanText(message?.message_type).toLowerCase();
-    if (type !== 'template' || cleanText(message?.content)) {
-      continue;
-    }
+    if (type !== 'template') continue;
     const metadata = parseJsonValue(message?.metadata, {});
     const existingPreview = cleanText(metadata.preview_text)
       || cleanText(metadata.previewText)
       || cleanText(metadata.message_preview)
       || cleanText(metadata.template_preview);
-    if (existingPreview) {
+    const needsPreview = !cleanText(message?.content) && !existingPreview;
+    const hasDisplayButtons = Array.isArray(metadata.template_buttons)
+      || Array.isArray(metadata.templateButtons);
+    if (!needsPreview && hasDisplayButtons) continue;
+    if (!cleanText(message?.content) && existingPreview) {
       message.content = existingPreview;
       message.metadata = { ...metadata, preview_text: existingPreview };
-      continue;
     }
+    const templateId = parsePositiveInteger(metadata.template_id || metadata.templateId, null);
     const templateName = cleanText(metadata.template_name || metadata.templateName);
-    if (!templateName) {
-      continue;
-    }
+    if (!templateId && !templateName) continue;
     templateRefs.push({
       message,
       metadata,
+      templateId,
       templateName,
       templateLanguage: cleanText(metadata.template_language || metadata.templateLanguage).toLowerCase(),
+      needsPreview,
     });
   }
 
@@ -463,7 +468,8 @@ async function hydrateTemplateMessagePreviews(messages, { clinicId = null } = {}
     return messages;
   }
 
-  const names = [...new Set(templateRefs.map((item) => item.templateName))];
+  const ids = [...new Set(templateRefs.map((item) => item.templateId).filter(Boolean))];
+  const names = [...new Set(templateRefs.map((item) => item.templateName).filter(Boolean))];
   const scopeWhere = [];
   const numericClinicId = Number(clinicId);
   if (Number.isInteger(numericClinicId) && numericClinicId > 0) {
@@ -473,16 +479,22 @@ async function hydrateTemplateMessagePreviews(messages, { clinicId = null } = {}
 
   const templates = await WhatsappTemplate.findAll({
     where: {
-      name: { [Op.in]: names },
-      is_active: true,
-      [Op.or]: scopeWhere,
+      [Op.or]: [
+        ...(ids.length ? [{ id: { [Op.in]: ids } }] : []),
+        ...(names.length ? [{
+          name: { [Op.in]: names },
+          [Op.or]: scopeWhere,
+        }] : []),
+      ],
     },
-    attributes: ['id', 'name', 'language', 'clinic_id', 'components', 'catalog_template_id'],
+    attributes: ['id', 'name', 'language', 'clinic_id', 'components', 'catalog_template_id', 'is_active'],
     include: WhatsappTemplateCatalog
       ? [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'body_text', 'components'], required: false }]
       : [],
+    order: [['is_active', 'DESC'], ['id', 'DESC']],
   });
 
+  const byId = new Map();
   const byNameLanguage = new Map();
   const byName = new Map();
   for (const templateRow of templates) {
@@ -494,25 +506,31 @@ async function hydrateTemplateMessagePreviews(messages, { clinicId = null } = {}
     };
     const name = cleanText(plain.name);
     const language = cleanText(plain.language).toLowerCase();
+    byId.set(Number(plain.id), plain);
     if (!name) continue;
     if (!byName.has(name)) byName.set(name, plain);
     if (language) byNameLanguage.set(`${name}:${language}`, plain);
   }
 
   for (const ref of templateRefs) {
-    const template = (ref.templateLanguage && byNameLanguage.get(`${ref.templateName}:${ref.templateLanguage}`))
+    const template = byId.get(Number(ref.templateId))
+      || (ref.templateLanguage && byNameLanguage.get(`${ref.templateName}:${ref.templateLanguage}`))
       || byName.get(ref.templateName);
-    const body = getTemplateBodyFromTemplate(template);
-    const preview = renderTemplatePreview(body, ref.metadata.templateParams || ref.metadata.template_params);
-    if (!preview) {
-      continue;
-    }
-    ref.message.content = preview;
-    ref.message.metadata = {
+    if (!template) continue;
+    const nextMetadata = {
       ...ref.metadata,
-      preview_text: preview,
-      template_body: body,
+      template_buttons: extractWhatsappTemplateDisplayButtons(template),
     };
+    if (ref.needsPreview) {
+      const body = getTemplateBodyFromTemplate(template);
+      const preview = renderTemplatePreview(body, ref.metadata.templateParams || ref.metadata.template_params);
+      if (preview) {
+        ref.message.content = preview;
+        nextMetadata.preview_text = preview;
+        nextMetadata.template_body = body;
+      }
+    }
+    ref.message.metadata = nextMetadata;
   }
 
   return messages;
@@ -2215,6 +2233,9 @@ exports.postMessage = async (req, res) => {
       ...(templateParams ? { templateParams } : {}),
       ...(templateComponents ? { templateComponents } : {}),
       ...(resolvedTemplate?.id ? { template_id: Number(resolvedTemplate.id) } : {}),
+      ...(resolvedTemplate ? {
+        template_buttons: extractWhatsappTemplateDisplayButtons(resolvedTemplate),
+      } : {}),
       ...(canonicalTemplateName ? { template_name: canonicalTemplateName } : {}),
       ...(canonicalTemplateLanguage ? { template_language: canonicalTemplateLanguage } : {}),
       ...(clinicConfig?.phoneNumberId
@@ -2630,6 +2651,7 @@ exports.__testing = {
   buildConversationSearchClause,
   buildPhoneSearchCandidates,
   getQuickChatConversationCategory,
+  hydrateTemplateMessagePreviews,
   resolveMessagePageRequest,
   normalizeSearchQuery,
   normalizeTextSearchValue,
