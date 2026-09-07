@@ -46,7 +46,7 @@ const {
   captureExecutionCommunicationLanguage,
 } = require('../lib/whatsapp-template-locale');
 const {
-  appointmentReminderConfigsOverlap,
+  appointmentReminderConfigsMatchExactly,
 } = require('../lib/automation-trigger-conflict');
 
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1,44')
@@ -1956,7 +1956,7 @@ async function findAppointmentReminderTriggerConflict(row, triggerConfig) {
     if (publicId && cleanString(candidate.public_id) === publicId) return false;
     if (!publicId && templateKey && cleanString(candidate.template_key) === templateKey) return false;
     return isSameAutomationScope(candidate, row)
-      && appointmentReminderConfigsOverlap(candidate.trigger_config, triggerConfig);
+      && appointmentReminderConfigsMatchExactly(candidate.trigger_config, triggerConfig);
   }) || null;
 }
 
@@ -6064,7 +6064,7 @@ exports.updateTemplateDraft = async (req, res) => {
           return res.status(409).json({
             success: false,
             error: 'appointment_reminder_trigger_conflict',
-            message: `Ya existe otro recordatorio activo para ese momento: ${reminderConflict.name || reminderConflict.template_key}. Desactívalo antes de activar este.`,
+            message: `Ya existe otro recordatorio activo con el mismo activador: ${reminderConflict.name || reminderConflict.template_key}. Desactívalo antes de activar este.`,
             conflict: {
               id: reminderConflict.id,
               template_key: reminderConflict.template_key,
@@ -6336,7 +6336,7 @@ exports.publishTemplateVersion = async (req, res) => {
       return res.status(409).json({
         success: false,
         error: 'appointment_reminder_trigger_conflict',
-        message: `Ya existe otro recordatorio activo para ese momento: ${reminderConflict.name || reminderConflict.template_key}. Desactívalo antes de publicar este.`,
+        message: `Ya existe otro recordatorio activo con el mismo activador: ${reminderConflict.name || reminderConflict.template_key}. Desactívalo antes de publicar este.`,
         conflict: {
           id: reminderConflict.id,
           template_key: reminderConflict.template_key,
