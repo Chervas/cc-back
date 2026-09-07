@@ -4,25 +4,25 @@ function clean(value) {
   return String(value ?? '').trim();
 }
 
-function appointmentReminderConfigsOverlap(left, right) {
-  const leftConfig = left && typeof left === 'object' && !Array.isArray(left) ? left : {};
-  const rightConfig = right && typeof right === 'object' && !Array.isArray(right) ? right : {};
-  const leftMoment = clean(leftConfig.schedule_moment || 'day_before').toLowerCase();
-  const rightMoment = clean(rightConfig.schedule_moment || 'day_before').toLowerCase();
-  if (leftMoment !== rightMoment) return false;
+function normalizeAppointmentReminderConfig(value) {
+  const config = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  return {
+    schedule_moment: clean(config.schedule_moment || 'day_before').toLowerCase(),
+    schedule_time_mode: clean(config.schedule_time_mode || 'custom').toLowerCase(),
+    custom_time: clean(config.custom_time || '09:00'),
+    exclude_if_booked_day_before: config.exclude_if_booked_day_before === true,
+    exclude_if_booked_same_day: config.exclude_if_booked_same_day === true,
+    exclude_if_not_confirmed: config.exclude_if_not_confirmed === true,
+    only_if_not_confirmed: config.only_if_not_confirmed === true,
+  };
+}
 
-  const leftMode = clean(leftConfig.schedule_time_mode || 'custom').toLowerCase();
-  const rightMode = clean(rightConfig.schedule_time_mode || 'custom').toLowerCase();
-  if (leftMode !== rightMode) return false;
-  if (leftMode === 'custom') {
-    const leftTime = clean(leftConfig.custom_time);
-    const rightTime = clean(rightConfig.custom_time);
-    if (leftTime && rightTime && leftTime !== rightTime) return false;
-  }
-  return true;
+function appointmentReminderConfigsMatchExactly(left, right) {
+  return JSON.stringify(normalizeAppointmentReminderConfig(left))
+    === JSON.stringify(normalizeAppointmentReminderConfig(right));
 }
 
 module.exports = {
-  appointmentReminderConfigsOverlap,
+  appointmentReminderConfigsMatchExactly,
+  normalizeAppointmentReminderConfig,
 };
-
