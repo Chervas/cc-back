@@ -8465,6 +8465,85 @@ async function cancelCampaignDispatch(scope, campaignId, body = {}, userId = nul
   };
 }
 
+async function pauseCampaignDispatch(scope, campaignId, body = {}, userId = null) {
+  const list = await MarketingPatientList.findByPk(campaignId);
+  ensureScopeAccess(list, scope);
+  const dispatch = getDispatchConfig(list);
+  const normalizedStatus = String(dispatch.status || list.status || '').toLowerCase();
+  if (['completed', 'cancelled', 'archived', 'failed'].includes(normalizedStatus)) {
+    const err = new Error('Esta cola ya no está en curso y no se puede pausar.');
+    err.status = 409;
+    throw err;
+  }
+  if (
+    normalizedStatus === 'pause_requested'
+    || normalizedStatus.startsWith('paused')
+    || String(list.status || '').toLowerCase() === 'paused'
+  ) {
+    const counters = await refreshListCounters(list.id);
+    return {
+      success: true,
+      already_paused: true,
+      campaign: serializeCampaign(list),
+      dispatch: getDispatchProgress(list, counters, await getWhatsappAccountQualityForList(list, scope)),
+    };
+  }
+  let cancelledPendingJob = false;
+  let runningJob = false;
+  if (dispatch.job_id && JobRequest) {
+    const dispatchJob = await JobRequest.findByPk(dispatch.job_id, { attributes: ['id', 'status'] });
+    runningJob = String(dispatchJob?.status || '').toLowerCase() === 'running';
+    if (dispatchJob) {
+      const [cancelledCount] = await JobRequest.update(
+        {
+          status: 'cancelled',
+          next_run_at: null,
+          error_message: 'Cola pausada manualmente',
+        },
+        {
+          where: {
+            id: dispatch.job_id,
+            status: { [Op.in]: ['pending', 'queued', 'waiting'] },
+          },
+        },
+      );
+      cancelledPendingJob = cancelledCount > 0;
+    }
+  }
+  const waitForRunningJob = runningJob && !cancelledPendingJob;
+  const nextDispatch = {
+    ...dispatch,
+    status: waitForRunningJob ? 'pause_requested' : 'paused',
+    cancel_requested: waitForRunningJob,
+    stop_action: 'pause',
+    paused_at: new Date().toISOString(),
+    paused_by: userId || null,
+    paused_reason: normalizeText(body.reason) || 'paused_by_user',
+  };
+  await list.update({
+    status: 'paused',
+    criteria: mergeCriteria(list, { dispatch: nextDispatch }),
+  });
+  await MarketingPatientContactEvent.create({
+    list_id: list.id,
+    event_type: 'mass_campaign_dispatch_pause_requested',
+    channel: 'whatsapp',
+    payload: {
+      user_id: userId || null,
+      reason: nextDispatch.paused_reason,
+      pending_job_cancelled: cancelledPendingJob,
+    },
+    occurred_at: new Date(),
+  });
+  const counters = await refreshListCounters(list.id);
+  const reloaded = await MarketingPatientList.findByPk(list.id);
+  return {
+    success: true,
+    campaign: serializeCampaign(reloaded),
+    dispatch: getDispatchProgress(reloaded, counters, await getWhatsappAccountQualityForList(reloaded, scope)),
+  };
+}
+
 async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null) {
   const userId = getActorUserId(actor);
   const list = await MarketingPatientList.findByPk(campaignId);
@@ -8477,6 +8556,18 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
   const filter = getDispatchItemFilter(dispatch);
   const dispatchStatus = String(dispatch.status || '').toLowerCase();
   const adminDecision = String(dispatch.admin_resolution?.decision || '').toLowerCase();
+  if (
+    ['queued', 'sending', 'waiting_next_batch', 'scheduled'].includes(dispatchStatus)
+    && dispatch.cancel_requested !== true
+  ) {
+    const counters = await getDispatchScopedCounters(list, filter);
+    return {
+      success: true,
+      already_running: true,
+      campaign: serializeCampaign(list),
+      dispatch: getDispatchProgress(list, counters, await getWhatsappAccountQualityForList(list, scope)),
+    };
+  }
   if (['cancelled', 'changes_required'].includes(adminDecision)) {
     const err = new Error(adminDecision === 'cancelled'
       ? 'Clinicaclick ha cancelado esta cola tras revisarla.'
@@ -8555,6 +8646,7 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     status: nextRunAt ? 'scheduled' : 'queued',
     job_id: null,
     cancel_requested: false,
+    stop_action: null,
     paused_reason: null,
     resumed_at: new Date().toISOString(),
     next_allowed_at: nextRunAt ? nextRunAt.toISOString() : null,
@@ -8919,18 +9011,26 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
   const filter = payloadFilter || getDispatchItemFilter(dispatch);
   const context = normalizeDispatchContext(payload.context || dispatch.context);
   if (dispatch.cancel_requested === true) {
+    const pausedByUser = String(dispatch.stop_action || '').toLowerCase() === 'pause';
     await list.update({
       status: 'paused',
       criteria: mergeCriteria(list, {
         dispatch: {
           ...dispatch,
-          status: 'cancelled',
-          paused_reason: 'cancelled_by_user',
+          status: pausedByUser ? 'paused' : 'cancelled',
+          paused_reason: pausedByUser ? 'paused_by_user' : 'cancelled_by_user',
           stopped_at: new Date().toISOString(),
         },
       }),
     });
-    return { status: 'completed', result: { cancelled: true, list_id: list.id } };
+    return {
+      status: 'completed',
+      result: {
+        cancelled: !pausedByUser,
+        paused: pausedByUser,
+        list_id: list.id,
+      },
+    };
   }
   if (!isWithinBusinessHours(new Date(), dispatch.business_hours)) {
     const nextAllowed = getNextBusinessAllowedAt(new Date(), dispatch.business_hours);
@@ -9222,6 +9322,31 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
       heldByMeta = true;
       break;
     }
+  }
+
+  const stoppedList = await MarketingPatientList.findByPk(list.id);
+  const stoppedDispatch = getDispatchConfig(stoppedList);
+  if (stoppedDispatch.cancel_requested === true) {
+    const pausedByUser = String(stoppedDispatch.stop_action || '').toLowerCase() === 'pause';
+    await stoppedList.update({
+      status: 'paused',
+      criteria: mergeCriteria(stoppedList, {
+        dispatch: {
+          ...stoppedDispatch,
+          status: pausedByUser ? 'paused' : 'cancelled',
+          paused_reason: pausedByUser ? 'paused_by_user' : 'cancelled_by_user',
+          stopped_at: new Date().toISOString(),
+        },
+      }),
+    });
+    return {
+      status: 'completed',
+      result: {
+        cancelled: !pausedByUser,
+        paused: pausedByUser,
+        list_id: list.id,
+      },
+    };
   }
 
   await refreshListCounters(list.id);
@@ -9887,6 +10012,7 @@ module.exports = {
   sendTest,
   getDispatchStatus,
   startCampaignDispatch,
+  pauseCampaignDispatch,
   cancelCampaignDispatch,
   resumeCampaignDispatch,
   enqueueAutoDispatchForApprovedTemplate,

@@ -2517,15 +2517,16 @@ async function createTemplatesFromCatalogWithLease({
         metaTemplateId: null,
         rejectionReason,
       });
-      if (clinicId) {
+      for (const targetClinicId of targetClinicIds) {
         await upsertClinicOverrideTemplateForClinic({
-          clinicId,
+          clinicId: targetClinicId,
           template,
           technicalName,
           status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING,
           metaTemplateId: null,
           rejectionReason,
         });
+        result.localPending += 1;
       }
       console.warn('Plantilla WhatsApp con cabecera de imagen no enviada a Meta por falta de media handle de ejemplo', {
         wabaId,
