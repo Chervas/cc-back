@@ -18,6 +18,7 @@ const {
 const flowEngine = require('../../services/flowEngineV2.service');
 const templateAutomationSync = require('../../services/whatsappTemplateAutomationSync.service');
 const commercialMigration = require('../../../migrations/20260906220000-mark-lead-outreach-commercial');
+const copyMigration = require('../../../migrations/20260908150000-update-lead-first-contact-copy');
 
 function madridDate(value) {
   return new Date(value);
@@ -144,14 +145,38 @@ async function run() {
     whatsapp_template_id: 1849,
     whatsapp_template_name: 'clinicaclick_lead_primera_visita_programar_v2',
     whatsapp_template_language: 'es',
+    sender_display_name: 'Marta',
   });
   const nodes = buildManagedNodes(config);
   assert.equal(nodes.find((node) => node.id === 'N4').config.duration, 1);
-  assert.equal(nodes.find((node) => node.id === 'N5').config.mode, 'clinic_schedule');
+  assert.equal(nodes.find((node) => node.id === 'N3').config.mode, 'clinic_schedule');
   assert.equal(nodes.find((node) => node.id === 'N6').config.mode, 'lead_contact_state');
-  assert.equal(nodes.find((node) => node.id === 'N7').config.recipient_mode, 'context_lead');
-  assert.equal(nodes.find((node) => node.id === 'N7').config.language_code, 'es');
-  assert.equal(nodes.find((node) => node.id === 'N7').config.communication_scope, 'marketing');
+  assert.equal(nodes.find((node) => node.id === 'N7').config.left_ref.path, 'historical_pending');
+  assert.equal(nodes.find((node) => node.id === 'N8').type, 'control/rate_limit');
+  assert.equal(nodes.find((node) => node.id === 'N8').config.interval_duration, 30);
+  assert.equal(nodes.find((node) => node.id === 'N8').outputs.on_complete, 'N9');
+  assert.equal(nodes.find((node) => node.id === 'N9').config.recipient_mode, 'context_lead');
+  assert.equal(nodes.find((node) => node.id === 'N9').config.language_code, 'es');
+  assert.equal(nodes.find((node) => node.id === 'N9').config.communication_scope, 'marketing');
+  assert.equal(nodes.find((node) => node.id === 'N9').config.variables_named.nombre_remitente, 'Marta');
+  const simulatedRateLimit = await flowEngine._processNode(
+    nodes.find((node) => node.id === 'N8'),
+    { __simulation: true },
+    { simulation: true },
+  );
+  assert.equal(simulatedRateLimit.kind, 'success');
+  assert.equal(simulatedRateLimit.output.simulated, true);
+  assert.equal(simulatedRateLimit.next_node_id, 'N9');
+  assert.match(copyMigration.__testing.BODY, /Soy \{\{2\}\}\. Te escribo desde \{\{3\}\}/);
+  assert.deepEqual(copyMigration.__testing.VARIABLES.map((variable) => variable.name), [
+    'nombre_paciente',
+    'nombre_remitente',
+    'nombre_clinica',
+  ]);
+  assert.deepEqual(copyMigration.__testing.COMPONENTS[1].buttons.map((button) => button.text), [
+    'Sí, dame más información',
+    'Ya no estoy interesado',
+  ]);
   assert.equal(config.communication_scope, 'marketing');
   assert.equal(flowEngine._resolveAutomationCommunicationScope({
     template_usage: 'lead_auto_reply',
@@ -269,6 +294,68 @@ async function run() {
     assert.equal(preservedConfig.template_id, 1945);
     assert.equal(preservedConfig.template_name, 'clinicaclick_lead_primera_visita_con_llamada_v23');
     assert.equal(preservedConfig.catalog_template_id, 109);
+  } finally {
+    db.AutomationFlowTemplateV2.findAll = originalFlowTemplateFindAll;
+  }
+
+  const semanticFlowTemplate = {
+    id: 1505,
+    public_id: 'flw_lead_auto_reply_clinic_56',
+    version: 2,
+    nodes: [{
+      id: 'N9',
+      type: 'action/send_whatsapp',
+      config: {
+        template_id: 1858,
+        template_name: 'clinicaclick_lead_primera_visita_programar_v20',
+        catalog_template_id: 108,
+        variables: { 1: '{{lead.nombre}}', 2: '{{clinica.nombre}}' },
+        variables_named: {
+          nombre_paciente: '{{lead.nombre}}',
+          nombre_clinica: '{{clinica.nombre}}',
+        },
+      },
+    }],
+    async save() {},
+  };
+  try {
+    db.AutomationFlowTemplateV2.findAll = async () => [semanticFlowTemplate];
+    await templateAutomationSync.recomposeAutomationsUsingTemplate({
+      templateInstance: {
+        id: 1858,
+        name: 'clinicaclick_lead_primera_visita_programar_v21',
+        language: 'es',
+        catalog_template_id: 108,
+        clinic_id: 56,
+        components: [{
+          type: 'BODY',
+          text: 'Hola {{1}}. Soy {{2}} y te escribo desde {{3}}.',
+        }],
+        variables: [
+          { name: 'nombre_paciente', position: 1 },
+          { name: 'nombre_remitente', position: 2 },
+          { name: 'nombre_clinica', position: 3 },
+        ],
+        catalog: {
+          id: 108,
+          locale: 'es',
+          variables: [
+            { name: 'nombre_paciente', position: 1 },
+            { name: 'nombre_remitente', position: 2 },
+            { name: 'nombre_clinica', position: 3 },
+          ],
+        },
+      },
+      logger: { info() {} },
+    });
+    const recomposedConfig = semanticFlowTemplate.nodes[0].config;
+    assert.equal(recomposedConfig.variables_named.nombre_paciente, '{{lead.nombre}}');
+    assert.equal(recomposedConfig.variables_named.nombre_clinica, '{{clinica.nombre}}');
+    assert.equal(recomposedConfig.variables_named.nombre_remitente, undefined);
+    assert.deepEqual(recomposedConfig.variables, {
+      1: '{{lead.nombre}}',
+      3: '{{clinica.nombre}}',
+    });
   } finally {
     db.AutomationFlowTemplateV2.findAll = originalFlowTemplateFindAll;
   }

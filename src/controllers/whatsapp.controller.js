@@ -13,6 +13,7 @@ const {
 const whatsappCoexistenceService = require('../services/whatsappCoexistence.service');
 const whatsappAccountComplianceService = require('../services/whatsappAccountCompliance.service');
 const whatsappAccountHealthService = require('../services/whatsappAccountHealth.service');
+const whatsappChannelBindingsService = require('../services/whatsappChannelBindings.service');
 const { buildWhatsappProfileAlignment } = require('../lib/whatsapp-profile-alignment');
 const { filterEffectiveWhatsappPhoneAssets } = require('../lib/effective-whatsapp-phone');
 const whatsappDeliveryGovernanceService = require('../services/whatsappDeliveryGovernance.service');
@@ -1821,6 +1822,13 @@ exports.listPhones = async (req, res) => {
     const effectiveOnly = ['1', 'true', 'yes'].includes(
       String(req.query.effective_only || '').trim().toLowerCase()
     );
+    const routingScopeClinicId = Number(req.query.routing_scope_clinic_id || 0) || null;
+    if (routingScopeClinicId) {
+      await assertWhatsappTemplateClinicAccess({
+        clinicId: routingScopeClinicId,
+        userId,
+      });
+    }
     if (groupIdFilter && !isAggregateAllowed) {
       return res.status(403).json({ error: 'group_scope_not_allowed' });
     }
@@ -1964,6 +1972,12 @@ exports.listPhones = async (req, res) => {
       });
     }
 
+    const routingBindings = routingScopeClinicId
+      ? await whatsappChannelBindingsService.listClinicBindings(routingScopeClinicId)
+      : [];
+    const routingBindingByAssetId = new Map(
+      routingBindings.map((binding) => [Number(binding.asset_id), binding])
+    );
     const payload = [];
 
     for (const p of phones) {
@@ -2006,7 +2020,12 @@ exports.listPhones = async (req, res) => {
         },
         displayPhoneNumber: p.metaAssetName || null,
       });
-      const channelRouting = resolveWhatsappRouting(p);
+      const baseChannelRouting = resolveWhatsappRouting(p);
+      const scopeBinding = routingBindingByAssetId.get(Number(p.id)) || null;
+      const effectiveRoutingAsset = scopeBinding
+        ? whatsappChannelBindingsService.applyBindingToAsset(p, scopeBinding)
+        : p;
+      const channelRouting = resolveWhatsappRouting(effectiveRoutingAsset);
 
       const managerBusinessId =
         additionalData.whatsappBusinessHealth?.business_id
@@ -2034,9 +2053,15 @@ exports.listPhones = async (req, res) => {
         quality_rating: p.quality_rating || null,
         messaging_limit: p.messaging_limit || null,
         assignmentScope: p.assignmentScope,
+        base_whatsapp_channel_role: baseChannelRouting.role,
         whatsapp_channel_role: channelRouting.role,
         routing_purposes: channelRouting.purposes,
         secondary_unavailable_action: channelRouting.unavailableAction,
+        routing_binding: scopeBinding ? {
+          id: scopeBinding.id,
+          clinic_id: scopeBinding.clinic_id,
+          role: channelRouting.role,
+        } : null,
         clinic_id: p.clinicaId || null,
         clinic_name: clinica.nombre_clinica || null,
         clinic_avatar: clinica.url_avatar || null,
@@ -2107,7 +2132,71 @@ exports.listPhones = async (req, res) => {
     return res.json({ phones: payload, preverified_enabled: PREVERIFIED_ENABLED });
   } catch (err) {
     console.error('Error listPhones', err);
-    return res.status(500).json({ error: 'Error obteniendo números WhatsApp' });
+    return res.status(err?.status || 500).json({
+      error: err?.message || 'Error obteniendo números WhatsApp',
+    });
+  }
+};
+
+exports.updateClinicPhoneRoutingBinding = async (req, res) => {
+  try {
+    const clinicId = Number(req.body?.clinic_id || 0);
+    const phoneNumberId = String(req.params.phoneNumberId || '').trim();
+    if (!clinicId || !phoneNumberId) {
+      return res.status(400).json({ success: false, error: 'invalid_whatsapp_scope_binding' });
+    }
+    await assertWhatsappTemplateClinicAccess({
+      clinicId,
+      userId: req.userData?.userId,
+    });
+    const phone = await ClinicMetaAsset.findOne({
+      where: { assetType: 'whatsapp_phone_number', phoneNumberId, isActive: true },
+      attributes: ['id'],
+      raw: true,
+    });
+    if (!phone) return res.status(404).json({ success: false, error: 'phone_not_found' });
+
+    const binding = await whatsappChannelBindingsService.upsertClinicBinding({
+      clinicId,
+      assetId: phone.id,
+      role: req.body?.channel_role,
+      purposes: req.body?.routing_purposes,
+      unavailableAction: req.body?.secondary_unavailable_action,
+      actorUserId: req.userData?.userId,
+    });
+    return res.json({ success: true, binding });
+  } catch (error) {
+    console.error('Error updateClinicPhoneRoutingBinding', error);
+    return res.status(error?.status || 500).json({
+      success: false,
+      error: error?.message || 'whatsapp_scope_binding_update_failed',
+    });
+  }
+};
+
+exports.deleteClinicPhoneRoutingBinding = async (req, res) => {
+  try {
+    const clinicId = Number(req.query?.clinic_id || req.body?.clinic_id || 0);
+    const role = String(req.query?.channel_role || req.body?.channel_role || '').trim();
+    if (!clinicId || !role) {
+      return res.status(400).json({ success: false, error: 'invalid_whatsapp_scope_binding' });
+    }
+    await assertWhatsappTemplateClinicAccess({
+      clinicId,
+      userId: req.userData?.userId,
+    });
+    const removed = await whatsappChannelBindingsService.removeClinicBinding({
+      clinicId,
+      role,
+      actorUserId: req.userData?.userId,
+    });
+    return res.json({ success: true, removed });
+  } catch (error) {
+    console.error('Error deleteClinicPhoneRoutingBinding', error);
+    return res.status(error?.status || 500).json({
+      success: false,
+      error: error?.message || 'whatsapp_scope_binding_delete_failed',
+    });
   }
 };
 

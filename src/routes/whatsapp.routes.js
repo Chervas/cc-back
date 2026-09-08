@@ -60,6 +60,8 @@ router.post('/phones/:phoneNumberId/assign', authMiddleware, whatsappController.
 
 // Configurar el rol operativo y los usos del número secundario
 router.put('/phones/:phoneNumberId/routing', authMiddleware, whatsappController.updatePhoneRouting);
+router.put('/phones/:phoneNumberId/clinic-routing', authMiddleware, whatsappController.updateClinicPhoneRoutingBinding);
+router.delete('/phones/scope/clinic-routing', authMiddleware, whatsappController.deleteClinicPhoneRoutingBinding);
 
 // Desasignar número sin desconectarlo de Meta
 router.post('/phones/:phoneNumberId/unassign', authMiddleware, whatsappController.unassignPhone);

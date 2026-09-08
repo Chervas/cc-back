@@ -22,6 +22,7 @@ const LEAD_TEMPLATE_VARIABLES = new Set([
   'nombre', 'nombre_paciente', 'patient_name', 'first_name',
   'telefono', 'telefono_paciente', 'email', 'email_paciente',
   'nombre_clinica', 'clinic_name', 'telefono_clinica', 'direccion_clinica',
+  'nombre_remitente', 'sender_name', 'nombre_persona_contacto',
 ]);
 const LEAD_TEMPLATE_USAGES = new Set(['lead_auto_reply', 'lead_primera_visita']);
 const COMMUNICATION_SCOPE = 'marketing';
@@ -58,13 +59,15 @@ function normalizeConfig(raw = {}) {
     whatsapp_template_id: toIntOrNull(raw.whatsapp_template_id || raw.template_id),
     whatsapp_template_name: cleanString(raw.whatsapp_template_name || raw.template_name) || null,
     whatsapp_template_language: cleanString(raw.whatsapp_template_language || raw.language_code) || null,
+    sender_display_name: cleanString(raw.sender_display_name || raw.contact_person_name) || null,
     communication_scope: COMMUNICATION_SCOPE,
     updated_at: raw.updated_at || null,
     updated_by: toIntOrNull(raw.updated_by),
   };
 }
 
-function leadTemplateBindings() {
+function leadTemplateBindings(config = {}) {
+  const senderName = cleanString(config.sender_display_name);
   return {
     nombre: '{{lead.nombre}}',
     nombre_paciente: '{{lead.nombre}}',
@@ -78,6 +81,9 @@ function leadTemplateBindings() {
     clinic_name: '{{clinica.nombre}}',
     telefono_clinica: '{{clinica.telefono}}',
     direccion_clinica: '{{clinica.direccion}}',
+    nombre_remitente: senderName,
+    sender_name: senderName,
+    nombre_persona_contacto: senderName,
   };
 }
 
@@ -130,31 +136,15 @@ function buildManagedNodes(config) {
     schedule_scope: config.schedule_scope,
     datetime_expression: '{{trigger.data.event_at}}',
   };
-  return [
+  const nodes = [
     {
       id: 'N1', type: 'trigger/lead_nuevo', config: cloneJson(config),
-      outputs: { on_success: 'N2' }, position: { x: 120, y: 120 },
-    },
-    {
-      id: 'N2', type: 'condition/field_check',
-      config: {
-        mode: 'simple',
-        left_ref: { source: 'trigger_data', path: 'event_kind', value_type: 'string', label: 'Canal de entrada' },
-        operator: 'equals', right_value: 'write',
-      },
-      outputs: { on_true: 'N3', on_false: 'N4' }, position: { x: 120, y: 280 },
+      outputs: { on_success: config.sources.length === 2 ? 'N2' : (config.sources[0] === 'call' ? 'N4' : 'N3') },
+      position: { x: 320, y: 120 },
     },
     {
       id: 'N3', type: 'delay/wait_until', config: scheduleConfig,
-      outputs: { on_complete: 'N6' }, position: { x: 0, y: 440 },
-    },
-    {
-      id: 'N4', type: 'delay/fixed', config: callDelay,
-      outputs: { on_complete: 'N5' }, position: { x: 280, y: 440 },
-    },
-    {
-      id: 'N5', type: 'delay/wait_until', config: scheduleConfig,
-      outputs: { on_complete: 'N6' }, position: { x: 280, y: 600 },
+      outputs: { on_complete: 'N6' }, position: { x: 320, y: 520 },
     },
     {
       id: 'N6', type: 'condition/field_check',
@@ -163,10 +153,43 @@ function buildManagedNodes(config) {
         left_ref: { source: 'context', path: 'lead.id', value_type: 'number', label: 'Lead actual' },
         operator: 'exists',
       },
-      outputs: { on_true: 'N7', on_false: 'N8' }, position: { x: 120, y: 760 },
+      outputs: { on_true: 'N7', on_false: 'N10' }, position: { x: 320, y: 700 },
     },
     {
-      id: 'N7', type: 'action/send_whatsapp',
+      id: 'N7', type: 'condition/field_check',
+      config: {
+        mode: 'simple',
+        left_ref: {
+          source: 'trigger_data',
+          path: 'historical_pending',
+          value_type: 'boolean',
+          label: '¿Es un lead nuevo?',
+        },
+        operator: 'equals',
+        right_value: false,
+        true_label: 'Sí, acaba de llegar',
+        false_label: 'No, ya estaba pendiente',
+      },
+      outputs: { on_true: 'N9', on_false: 'N8' }, position: { x: 320, y: 880 },
+    },
+    {
+      id: 'N8', type: 'control/rate_limit',
+      config: {
+        target_node_id: 'N9',
+        target_node_label: 'Enviar WhatsApp',
+        interval_duration: 30,
+        interval_unit: 'minutes',
+        bucket_prefix: FEATURE_KEY,
+        respect_clinic_schedule: config.schedule_scope === 'clinic_hours',
+        schedule_scope: config.schedule_scope,
+        sender_mode: 'clinic_default',
+        template_usage: FEATURE_KEY,
+        communication_scope: COMMUNICATION_SCOPE,
+      },
+      outputs: { on_complete: 'N9' }, position: { x: 620, y: 1060 },
+    },
+    {
+      id: 'N9', type: 'action/send_whatsapp',
       config: {
         message_mode: 'template',
         template_id: config.whatsapp_template_id,
@@ -176,16 +199,35 @@ function buildManagedNodes(config) {
         sender_mode: 'clinic_default',
         quiet_hours_enabled: false,
         communication_scope: COMMUNICATION_SCOPE,
-        variables_named: leadTemplateBindings(),
+        variables_named: leadTemplateBindings(config),
         template_usage: FEATURE_KEY,
       },
-      outputs: { on_success: 'N8', on_fail: 'N8' }, position: { x: 120, y: 920 },
+      outputs: { on_success: 'N10', on_fail: 'N10' }, position: { x: 320, y: 1240 },
     },
     {
-      id: 'N8', type: 'control/join', config: { mode: 'any' },
-      outputs: { on_joined: null }, position: { x: 120, y: 1080 },
+      id: 'N10', type: 'control/end', config: {},
+      outputs: {}, position: { x: 320, y: 1420 },
     },
   ];
+  if (config.sources.length === 2) {
+    nodes.push({
+      id: 'N2', type: 'condition/field_check',
+      config: {
+        mode: 'simple',
+        left_ref: { source: 'trigger_data', path: 'event_kind', value_type: 'string', label: '¿Cómo ha contactado?' },
+        operator: 'equals', right_value: 'write',
+        true_label: 'Ha escrito', false_label: 'Ha solicitado una llamada',
+      },
+      outputs: { on_true: 'N3', on_false: 'N4' }, position: { x: 320, y: 280 },
+    });
+  }
+  if (config.sources.includes('call')) {
+    nodes.push({
+      id: 'N4', type: 'delay/fixed', config: callDelay,
+      outputs: { on_complete: 'N3' }, position: { x: 620, y: 420 },
+    });
+  }
+  return nodes;
 }
 
 async function findLatestClinicFlow(clinicId, options = {}) {
@@ -213,6 +255,7 @@ async function loadSelectedTemplate(config, clinicId) {
 async function buildReadiness(config, clinicId) {
   const reasons = [];
   if (!config.configured || !config.sources.length) reasons.push('configuration_incomplete');
+  if (!config.sender_display_name) reasons.push('sender_display_name_required');
   const template = await loadSelectedTemplate(config, clinicId);
   if (!template) reasons.push('whatsapp_template_not_found');
   else {
@@ -269,8 +312,8 @@ async function saveConfig({ clinicId, actorUserId, input }) {
     updated_at: new Date().toISOString(),
     updated_by: actorUserId,
   });
-  if (!config.sources.length || !config.whatsapp_template_id) {
-    const error = new Error('Selecciona el origen de los leads y una plantilla de WhatsApp.');
+  if (!config.sources.length || !config.whatsapp_template_id || !config.sender_display_name) {
+    const error = new Error('Selecciona el origen, una plantilla y el nombre de la persona que contactará con los leads.');
     error.status = 400;
     error.code = 'lead_auto_reply_configuration_incomplete';
     throw error;
@@ -400,6 +443,7 @@ function buildExecutionContext(lead, eventKind, eventAt, triggerData = {}) {
         clinica_id: lead.clinica_id,
         event_kind: eventKind,
         event_at: eventAt.toISOString(),
+        historical_pending: false,
         ...triggerData,
       },
     },
@@ -609,6 +653,7 @@ async function runPendingBatchJob(payload = {}, jobRequest = null) {
         idempotencyScope: 'backfill',
         triggerData: {
           backfill: true,
+          historical_pending: true,
           backfill_job_id: jobRequest?.id || null,
         },
       });
@@ -656,7 +701,7 @@ async function getPendingBatchProgress({ clinicId, jobId }) {
   let pending = 0;
   for (const execution of executions) {
     const status = cleanString(execution.status).toLowerCase();
-    const sendOutput = execution.context?.outputs?.N7 || {};
+    const sendOutput = execution.context?.outputs?.N9 || execution.context?.outputs?.N7 || {};
     if (sendOutput.message_id && ['sent', 'queued'].includes(cleanString(sendOutput.status).toLowerCase())) sent += 1;
     else if (cleanString(sendOutput.status).toLowerCase() === 'error' || ['failed', 'dead_letter'].includes(status)) failed += 1;
     else if (['completed', 'cancelled'].includes(status)) summary.skipped = Number(summary.skipped || 0) + 1;

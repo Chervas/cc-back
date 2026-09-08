@@ -31,6 +31,7 @@ const oauthRoutes = require('./routes/oauth.routes');
 // NUEVA RUTA: Sistema de métricas de redes sociales
 const metaSyncRoutes = require('./routes/metasync.routes');
 const whatsappRoutes = require('./routes/whatsapp.routes');
+const sendQueuesRoutes = require('./routes/sendQueues.routes');
 const webRoutes = require('./routes/web.routes');
 const localRoutes = require('./routes/local.routes');
 const googleAdsRoutes = require('./routes/googleads.routes');
@@ -269,6 +270,8 @@ app.use('/api/googleads', googleAdsRoutes);
 console.log('Ruta /api/googleads configurada');
 app.use('/api/job-requests', jobRequestsRoutes);
 console.log('Ruta /api/job-requests configurada');
+app.use('/api/send-queues', sendQueuesRoutes);
+console.log('Ruta /api/send-queues configurada');
 app.use('/api/email', emailRoutes);
 console.log('Ruta /api/email configurada');
 app.use('/api/system-monitoring', systemMonitoringRoutes);
