@@ -136,41 +136,57 @@ async function recomposeAutomationsUsingTemplate({ templateInstance, logger = co
         && Number(accessGuidanceVariant.catalog_template_id) === Number(catalogTemplateId);
       const usesAccessGuidanceVariant = accessGuidanceMatchesReference || accessGuidanceMatchesCatalog;
 
+      // Once semantic bindings exist, they are the source of truth. Reusing
+      // legacy positions after a catalog contract adds or reorders variables
+      // can silently bind an old value to a different meaning.
+      const primaryNamedSource = normalizeNamedBindings(config.variables_named);
+      const primaryLegacySource = Object.keys(primaryNamedSource).length
+        ? {}
+        : config.variables;
+      const fallbackNamedSource = normalizeNamedBindings(config.fallback_variables_named);
+      const fallbackLegacySource = Object.keys(fallbackNamedSource).length
+        ? {}
+        : config.fallback_variables;
+      const accessGuidanceNamedSource = normalizeNamedBindings(accessGuidanceVariant?.variables_named);
+      const accessGuidanceLegacySource = Object.keys(accessGuidanceNamedSource).length
+        ? {}
+        : accessGuidanceVariant?.variables;
+
       const namedBindings = usesPrimaryTemplate
         ? buildEffectiveNamedBindings(
-          normalizeNamedBindings(config.variables_named),
-          normalizePositionalBindings(config.variables),
+          primaryNamedSource,
+          primaryLegacySource,
           templateVariables
         )
-        : normalizeNamedBindings(config.variables_named);
+        : primaryNamedSource;
       const positionalBindings = usesPrimaryTemplate
-        ? buildPositionalBindingsFromNamed(namedBindings, config.variables, templateVariables)
+        ? buildPositionalBindingsFromNamed(namedBindings, primaryLegacySource, templateVariables)
         : normalizePositionalBindings(config.variables);
       const fallbackNamedBindings = usesFallbackTemplate
         ? buildEffectiveNamedBindings(
-          normalizeNamedBindings(config.fallback_variables_named),
-          normalizePositionalBindings(config.fallback_variables),
+          fallbackNamedSource,
+          fallbackLegacySource,
           templateVariables
         )
-        : normalizeNamedBindings(config.fallback_variables_named);
+        : fallbackNamedSource;
       const fallbackPositionalBindings = usesFallbackTemplate
         ? buildPositionalBindingsFromNamed(
           fallbackNamedBindings,
-          config.fallback_variables,
+          fallbackLegacySource,
           templateVariables
         )
         : normalizePositionalBindings(config.fallback_variables);
       const accessGuidanceNamedBindings = usesAccessGuidanceVariant
         ? buildEffectiveNamedBindings(
-          normalizeNamedBindings(accessGuidanceVariant.variables_named),
-          normalizePositionalBindings(accessGuidanceVariant.variables),
+          accessGuidanceNamedSource,
+          accessGuidanceLegacySource,
           templateVariables
         )
-        : normalizeNamedBindings(accessGuidanceVariant?.variables_named);
+        : accessGuidanceNamedSource;
       const accessGuidancePositionalBindings = usesAccessGuidanceVariant
         ? buildPositionalBindingsFromNamed(
           accessGuidanceNamedBindings,
-          accessGuidanceVariant?.variables,
+          accessGuidanceLegacySource,
           templateVariables
         )
         : normalizePositionalBindings(accessGuidanceVariant?.variables);

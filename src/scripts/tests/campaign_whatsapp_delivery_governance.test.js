@@ -111,6 +111,9 @@ const bulkSource = fs.readFileSync(path.join(repositoryRoot, 'src/services/marke
 
 assert.match(phoneSyncSource, /whatsapp_business_manager_messaging_limit/);
 assert.match(embeddedSource, /whatsapp_business_manager_messaging_limit/);
+assert.match(embeddedSource, /source:\s*'embedded_signup_reconnect'/);
+assert.match(embeddedSource, /explicitRecovery:\s*true/,
+  'an explicit Embedded Signup reconnect must clear a stale offboarded health block');
 assert.doesNotMatch(phoneSyncSource, /messaging_limit_tier/);
 assert.doesNotMatch(embeddedSource, /messaging_limit_tier/);
 assert.match(workerSource, /provider_acceptance_status/);

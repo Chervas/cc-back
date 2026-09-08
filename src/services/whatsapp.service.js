@@ -2,6 +2,7 @@ const axios = require('axios');
 const db = require('../../models');
 const { normalizePhoneE164 } = require('../lib/phone');
 const whatsappAccountHealthService = require('./whatsappAccountHealth.service');
+const whatsappChannelBindingsService = require('./whatsappChannelBindings.service');
 const {
     resolveWhatsappRouting,
     selectWhatsappPhoneAsset,
@@ -70,9 +71,14 @@ class WhatsAppService {
             })
             : [];
 
+        const [routedClinicAssets, routedGroupAssets] = await Promise.all([
+            whatsappChannelBindingsService.applyClinicBindings(clinicId, clinicAssets),
+            whatsappChannelBindingsService.applyClinicBindings(clinicId, groupAssets),
+        ]);
+
         return selectWhatsappPhoneAsset({
-            clinicAssets,
-            groupAssets,
+            clinicAssets: routedClinicAssets,
+            groupAssets: routedGroupAssets,
             purpose,
             summarizeHealth: (asset) => whatsappAccountHealthService.summarizeAssetHealth(asset),
         });

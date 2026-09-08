@@ -8,6 +8,7 @@ const whatsappService = require('../services/whatsapp.service');
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
 const notificationService = require('../services/notifications.service');
+const whatsappAccountHealthService = require('../services/whatsappAccountHealth.service');
 const { emitNotificationUpdated } = require('../services/notificationsRealtime.service');
 const {
   resolveMetaConnectionForScope,
@@ -879,6 +880,24 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
       } catch (regErr) {
         console.warn('[EmbeddedSignup] No se pudo registrar el numero automaticamente', regErr?.message || regErr);
       }
+    }
+
+    if (
+      registrationResult?.success === true
+      && String(registrationResult?.registration?.phoneStatus || phoneStatus || '').toUpperCase() === 'CONNECTED'
+    ) {
+      await whatsappAccountHealthService.recordObservationForAsset({
+        assetId: phoneAsset.id,
+        signal: {
+          providerStatus: 'CONNECTED',
+          registrationStatus: 'registered',
+          qualityRating: qualityRating || phoneAsset.quality_rating || null,
+        },
+        source: 'embedded_signup_reconnect',
+        explicitRecovery: true,
+        dedupeIdentity: `embedded-signup:${phone_number_id}:${connectedNowIso}`,
+      });
+      await phoneAsset.reload();
     }
 
     // Suscribir la app para recibir webhooks de mensajes y estados

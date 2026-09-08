@@ -1358,6 +1358,28 @@ const NODE_TYPES_V2 = [
     ],
   },
   {
+    type: 'control/rate_limit',
+    category: 'control',
+    label: 'Dosificar envíos',
+    description: 'Reserva turnos de envío para evitar concentrar un lote en el mismo número de WhatsApp.',
+    output_keys: ['on_complete'],
+    runtime_status: 'real',
+    default_config: {
+      target_node_id: null,
+      interval_duration: 30,
+      interval_unit: 'minutes',
+      bucket_prefix: 'automation',
+      respect_clinic_schedule: true,
+      schedule_scope: 'clinic_hours',
+    },
+    config_schema: [
+      { key: 'target_node_id', label: 'Envío que se va a dosificar', input_type: 'string', required: true },
+      { key: 'interval_duration', label: 'Separación entre envíos', input_type: 'number', required: true },
+      { key: 'interval_unit', label: 'Unidad', input_type: 'select', required: true, options: ['minutes', 'hours'] },
+      { key: 'respect_clinic_schedule', label: 'Respetar el horario de la clínica', input_type: 'boolean', required: false },
+    ],
+  },
+  {
     type: 'control/end',
     category: 'control',
     label: 'Fin del flujo',
@@ -4037,6 +4059,34 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
           { node_id: nodeId, node_type: nodeType, key: 'unit' }
         )
       );
+    }
+  }
+
+  if (nodeType === 'control/rate_limit') {
+    const intervalDuration = Number(config.interval_duration);
+    const intervalUnit = cleanString(config.interval_unit);
+    const targetNodeId = cleanString(config.target_node_id);
+    const targetNode = targetNodeId ? nodeMap.get(targetNodeId) : null;
+    if (!Number.isFinite(intervalDuration) || intervalDuration <= 0) {
+      errors.push(buildValidationError(
+        'node_config_invalid',
+        `El nodo ${nodeId} requiere una separación mayor que cero`,
+        { node_id: nodeId, node_type: nodeType, key: 'interval_duration' }
+      ));
+    }
+    if (!['minutes', 'hours'].includes(intervalUnit)) {
+      errors.push(buildValidationError(
+        'node_config_invalid',
+        `El nodo ${nodeId} requiere una unidad válida`,
+        { node_id: nodeId, node_type: nodeType, key: 'interval_unit' }
+      ));
+    }
+    if (!targetNode || cleanString(targetNode.type) !== 'action/send_whatsapp') {
+      errors.push(buildValidationError(
+        'node_config_invalid',
+        `El nodo ${nodeId} debe apuntar al envío de WhatsApp que dosifica`,
+        { node_id: nodeId, node_type: nodeType, key: 'target_node_id', value: targetNodeId || null }
+      ));
     }
   }
 

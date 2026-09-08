@@ -45,6 +45,7 @@ const { resolveWhatsappChannelRole } = require('../lib/whatsapp-channel-role');
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const FlowExecutionV2 = db.FlowExecutionV2;
 const FlowExecutionLogV2 = db.FlowExecutionLogV2;
+const AutomationRateLimitBucket = db.AutomationRateLimitBucket;
 const CitaPaciente = db.CitaPaciente;
 const LeadIntake = db.LeadIntake;
 const Conversation = db.Conversation;
@@ -6078,6 +6079,116 @@ async function processNode(node, context, runtime = {}) {
   }
 
   switch (nodeType) {
+    case 'control/rate_limit': {
+      if (simulation) {
+        return {
+          kind: 'success',
+          output: { status: 'simulated', simulated: true, waited: false },
+          next_node_id: readOutputTarget(node, 'on_complete'),
+        };
+      }
+      if (!AutomationRateLimitBucket) throw new Error('automation_rate_limit_storage_unavailable');
+
+      const execution = runtime?.execution;
+      const targets = resolveRuntimeTargets(execution, context);
+      const clinicId = toIntOrNull(targets.clinic_id);
+      if (!clinicId) throw new Error('automation_rate_limit_clinic_required');
+      const intervalMs = resolveDurationMs(
+        config?.interval_duration ?? 30,
+        config?.interval_unit || 'minutes',
+      );
+      if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+        throw new Error('automation_rate_limit_interval_invalid');
+      }
+
+      const senderData = await resolveWhatsAppSenderConfig({
+        config: {
+          sender_mode: config?.sender_mode || 'clinic_default',
+          sender_origin_id: config?.sender_origin_id || null,
+          template_usage: config?.template_usage || 'lead_auto_reply',
+          communication_scope: config?.communication_scope || 'marketing',
+        },
+        context,
+        clinicId,
+      });
+      const senderOriginId = toIntOrNull(senderData?.clinic_config?.originId);
+      const senderPhoneId = cleanString(senderData?.clinic_config?.phoneNumberId);
+      if (!senderOriginId || !senderPhoneId) throw new Error('automation_rate_limit_sender_required');
+
+      const bucketPrefix = cleanString(config?.bucket_prefix) || 'automation';
+      const bucketKey = `${bucketPrefix}:whatsapp_sender:${senderOriginId}`;
+      await AutomationRateLimitBucket.findOrCreate({
+        where: { bucket_key: bucketKey },
+        defaults: { bucket_key: bucketKey, metadata: { sender_origin_id: senderOriginId } },
+      });
+
+      const reservation = await db.sequelize.transaction(async (transaction) => {
+        const bucket = await AutomationRateLimitBucket.findOne({
+          where: { bucket_key: bucketKey },
+          transaction,
+          lock: transaction.LOCK.UPDATE,
+        });
+        if (!bucket) throw new Error('automation_rate_limit_bucket_missing');
+
+        const now = new Date();
+        const storedNext = bucket.next_available_at ? new Date(bucket.next_available_at) : null;
+        let slot = storedNext && storedNext.getTime() > now.getTime() ? storedNext : now;
+        let scheduleReason = 'rate_limit_slot';
+        if (config?.respect_clinic_schedule !== false) {
+          const schedule = await resolveLeadAutoReplyWait({
+            clinicId,
+            scheduleScope: cleanString(config?.schedule_scope) || 'clinic_hours',
+            timing: 'immediate',
+            now: slot,
+          });
+          if (!schedule.available || !schedule.waitUntil) {
+            throw new Error(schedule.reason || 'clinic_opening_not_found');
+          }
+          slot = schedule.waitUntil;
+          scheduleReason = schedule.reason || scheduleReason;
+        }
+        const nextAvailableAt = new Date(slot.getTime() + intervalMs);
+        await bucket.update({
+          next_available_at: nextAvailableAt,
+          last_reserved_at: slot,
+          last_execution_id: toIntOrNull(execution?.id),
+          metadata: {
+            ...(bucket.metadata && typeof bucket.metadata === 'object' ? bucket.metadata : {}),
+            sender_origin_id: senderOriginId,
+            sender_phone_number_id: senderPhoneId,
+            clinic_id: clinicId,
+            interval_ms: intervalMs,
+          },
+        }, { transaction });
+        return { slot, nextAvailableAt, scheduleReason };
+      });
+
+      const output = {
+        bucket_key: bucketKey,
+        sender_origin_id: senderOriginId,
+        reserved_for: reservation.slot.toISOString(),
+        next_available_at: reservation.nextAvailableAt.toISOString(),
+        interval_minutes: Math.round(intervalMs / 60000),
+        reason: reservation.scheduleReason,
+      };
+      if (reservation.slot.getTime() <= Date.now() + 1000) {
+        return {
+          kind: 'success',
+          output: { ...output, waited: false },
+          next_node_id: readOutputTarget(node, 'on_complete'),
+        };
+      }
+      return {
+        kind: 'waiting',
+        output,
+        waiting_meta: {
+          type: nodeType,
+          next_node_id: readOutputTarget(node, 'on_complete'),
+        },
+        wait_until: reservation.slot,
+      };
+    }
+
     case 'action/write_note': {
       if (simulation) {
         return {
@@ -7092,8 +7203,9 @@ async function resumeWaitingNode(execution, node, context, {
     return { resumed: true, context: nextContext };
   }
 
-  if (nodeType === 'delay/fixed' || nodeType === 'delay/wait_until') {
-    const nextNode = readOutputTarget(node, 'on_complete');
+  if (nodeType === 'delay/fixed' || nodeType === 'delay/wait_until' || nodeType === 'control/rate_limit') {
+    const nextNode = cleanString(execution?.waiting_meta?.next_node_id)
+      || readOutputTarget(node, 'on_complete');
     const completedAt = new Date().toISOString();
     const nextContext = mergeNodeOutput(context, node.id, {
       status: 'completed',
