@@ -31,6 +31,193 @@ function statusGroup(status) {
   return 'active';
 }
 
+function statusPresentation(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  const presentations = {
+    queued: {
+      label: 'En cola',
+      explanation: 'La cola está preparada y comenzará cuando le corresponda según su horario y dosificación.',
+    },
+    sending: {
+      label: 'Enviando',
+      explanation: 'Clinicaclick está enviando la tanda actual.',
+    },
+    scheduled: {
+      label: 'Programada',
+      explanation: 'La cola comenzará en la fecha indicada.',
+    },
+    waiting: {
+      label: 'En espera',
+      explanation: 'La cola espera a que llegue el momento del siguiente envío.',
+    },
+    waiting_next_batch: {
+      label: 'Esperando siguiente tanda',
+      explanation: 'La tanda actual ha terminado y la cola espera el intervalo configurado antes de continuar.',
+    },
+    waiting_template_approval: {
+      label: 'Esperando aprobación de WhatsApp',
+      explanation: 'La cola no enviará hasta que WhatsApp apruebe la plantilla necesaria.',
+    },
+    waiting_approval: {
+      label: 'Pendiente de aprobación',
+      explanation: 'La cola necesita una aprobación antes de poder comenzar.',
+    },
+    awaiting_delivery: {
+      label: 'Esperando confirmación de WhatsApp',
+      explanation: 'WhatsApp ha aceptado los mensajes. Clinicaclick espera sus confirmaciones de entrega o error antes de cerrar la cola.',
+    },
+    held_meta: {
+      label: 'En revisión por WhatsApp',
+      explanation: 'WhatsApp ha detenido temporalmente el envío mientras revisa la plantilla o la calidad del número.',
+    },
+    pause_requested: {
+      label: 'Pausando',
+      explanation: 'La pausa está solicitada y se aplicará antes de iniciar una nueva tanda.',
+    },
+    paused: {
+      label: 'Pausada',
+      explanation: 'La cola está pausada y no realizará nuevos envíos.',
+    },
+    paused_quality: {
+      label: 'Pausada por calidad',
+      explanation: 'La cola está pausada para proteger la calidad del número de WhatsApp.',
+    },
+    paused_limit: {
+      label: 'Pausada por límite',
+      explanation: 'La cola está pausada porque se ha alcanzado un límite de envío.',
+    },
+    paused_template: {
+      label: 'Pausada por plantilla',
+      explanation: 'La cola necesita una plantilla válida y aprobada antes de continuar.',
+    },
+    paused_config: {
+      label: 'Pausada por configuración',
+      explanation: 'La cola necesita completar su configuración antes de continuar.',
+    },
+    paused_review: {
+      label: 'Pendiente de revisión',
+      explanation: 'La cola necesita una revisión manual antes de poder continuar.',
+    },
+    blocked: {
+      label: 'Bloqueada',
+      explanation: 'La cola no puede continuar hasta que se resuelva el motivo indicado.',
+    },
+    failed: {
+      label: 'Error',
+      explanation: 'La cola se ha detenido por un error. Revisa el detalle antes de reanudarla.',
+    },
+    rejected: {
+      label: 'Rechazado',
+      explanation: 'El proveedor ha rechazado este envío.',
+    },
+    bounced: {
+      label: 'Correo devuelto',
+      explanation: 'El servidor de destino ha devuelto el correo.',
+    },
+    complained: {
+      label: 'Marcado como no deseado',
+      explanation: 'La persona destinataria ha marcado el correo como no deseado.',
+    },
+    suppressed: {
+      label: 'Suprimido',
+      explanation: 'El envío se ha detenido para proteger la reputación del remitente.',
+    },
+    dead_letter: {
+      label: 'Error definitivo',
+      explanation: 'El envío agotó sus reintentos y necesita revisión manual.',
+    },
+    completed: {
+      label: 'Finalizada',
+      explanation: 'La cola ha terminado y no quedan mensajes pendientes.',
+    },
+    delivered: {
+      label: 'Entregado',
+      explanation: 'El proveedor ha confirmado la entrega del mensaje.',
+    },
+    sent: {
+      label: 'Enviado',
+      explanation: 'El mensaje fue enviado correctamente.',
+    },
+    cancelled: {
+      label: 'Cancelada',
+      explanation: 'La cola fue cancelada y no realizará más envíos.',
+    },
+    archived: {
+      label: 'Archivada',
+      explanation: 'La cola está cerrada y archivada.',
+    },
+  };
+  return presentations[normalized] || {
+    label: normalized ? normalized.replace(/_/g, ' ') : 'Sin estado',
+    explanation: null,
+  };
+}
+
+function normalizeSearchText(...values) {
+  return values
+    .filter((value) => value !== null && value !== undefined)
+    .join(' ')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function marketingQueuePresentation(row = {}, dispatch = {}) {
+  const criteria = row.criteria || {};
+  const objectiveId = String(row.objective_id || '').trim().toLowerCase();
+  const searchable = normalizeSearchText(
+    dispatch.context,
+    dispatch.label,
+    row.name,
+    row.source,
+  );
+  const isReviewRequest = [true, 1, '1', 'true'].includes(criteria.review_request)
+    || searchable.includes('review_request')
+    || searchable.includes('resena');
+
+  if (isReviewRequest) {
+    return {
+      type: 'review_request',
+      type_label: 'Solicitud de reseña',
+      configuration_url: '/marketing/objetivos?objective=get_reviews',
+      configuration_label: 'Abrir reseñas',
+    };
+  }
+  if (objectiveId === 'mass_sends') {
+    return {
+      type: 'mass_send',
+      type_label: 'Envío masivo',
+      configuration_url: '/marketing/objetivos?objective=mass_sends&mass_send_view=campaigns',
+      configuration_label: 'Abrir envíos masivos',
+    };
+  }
+  if (objectiveId === 'reactivate_patients') {
+    return {
+      type: 'patient_reactivation',
+      type_label: 'Reactivación de pacientes',
+      configuration_url: '/marketing/objetivos?objective=reactivate_patients',
+      configuration_label: 'Abrir reactivación',
+    };
+  }
+  return {
+    type: 'marketing_campaign',
+    type_label: 'Campaña',
+    configuration_url: objectiveId
+      ? `/marketing/objetivos?objective=${encodeURIComponent(objectiveId)}`
+      : '/marketing/objetivos',
+    configuration_label: 'Abrir campaña',
+  };
+}
+
+function latestDate(...values) {
+  const dates = values
+    .filter(Boolean)
+    .map((value) => new Date(value))
+    .filter((value) => Number.isFinite(value.getTime()))
+    .sort((left, right) => right.getTime() - left.getTime());
+  return dates[0]?.toISOString() || null;
+}
+
 function formatDuration(milliseconds) {
   const minutes = Math.max(1, Math.round(numberValue(milliseconds) / 60000));
   if (minutes % (24 * 60) === 0) {
@@ -127,7 +314,8 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId }) 
             SUM(CASE WHEN selected = 1 AND status = 'ready' THEN 1 ELSE 0 END) AS eligible,
             SUM(CASE WHEN dispatch_status IN ('sent','delivered','read','replied','failed') THEN 1 ELSE 0 END) AS processed,
             SUM(CASE WHEN selected = 1 AND status = 'ready' AND (dispatch_status IS NULL OR dispatch_status IN ('pending','queued','sending','accepted','held_quality')) THEN 1 ELSE 0 END) AS pending,
-            SUM(CASE WHEN dispatch_status = 'failed' OR failed_at IS NOT NULL THEN 1 ELSE 0 END) AS failed
+            SUM(CASE WHEN dispatch_status = 'failed' OR failed_at IS NOT NULL THEN 1 ELSE 0 END) AS failed,
+            MAX(sent_at) AS last_sent_at
           FROM MarketingPatientListItems
           WHERE list_id IN (:rowIds)
           GROUP BY list_id
@@ -158,7 +346,9 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId }) 
     const failed = numberValue(stats.failed, counters.failed ?? counters.errors);
     const pending = numberValue(stats.pending, Math.max(0, total - processed));
     const group = statusGroup(effectiveStatus);
+    const statusCopy = statusPresentation(effectiveStatus);
     const cadence = describeDispatchCadence(dispatch);
+    const presentation = marketingQueuePresentation(row, dispatch);
     const templateSnapshot = dispatch.template_snapshot || row.template_snapshot || {};
     const businessHours = dispatch.business_hours || {};
     const actionScope = toInt(row.grupo_clinica_id)
@@ -171,10 +361,13 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId }) 
       id: `marketing:${row.id}`,
       source_id: row.id,
       source_type: 'marketing_list',
+      ...presentation,
       title: dispatch.label || row.name || 'Envío de marketing',
       channel: String(row.channel || row.criteria?.channels?.[0] || 'whatsapp').toLowerCase(),
       status: effectiveStatus,
       status_group: group,
+      status_label: statusCopy.label,
+      status_explanation: statusCopy.explanation,
       clinic_ids: scopedClinicIds,
       clinic_name: scopedClinicIds.length === 1 ? clinicNameById.get(scopedClinicIds[0]) : `${scopedClinicIds.length} clínicas`,
       total,
@@ -198,6 +391,8 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId }) 
       can_pause: group === 'active' && pending > 0,
       can_resume: group === 'paused' && pending > 0 && !cannotResume,
       action_scope: actionScope,
+      created_at: row.created_at,
+      last_sent_at: latestDate(row.last_sent_at, stats.last_sent_at),
       updated_at: row.updated_at,
     }];
   });
@@ -219,7 +414,7 @@ async function leadBackfillQueues({ clinicIds, clinicNameById }) {
   const executions = executionIds.length
     ? await db.FlowExecutionV2.findAll({
         where: { id: { [Op.in]: executionIds } },
-        attributes: ['id', 'status', 'wait_until', 'context', 'last_error'],
+        attributes: ['id', 'status', 'wait_until', 'context', 'last_error', 'created_at', 'updated_at'],
         raw: true,
       })
     : [];
@@ -242,15 +437,26 @@ async function leadBackfillQueues({ clinicIds, clinicNameById }) {
         ? 'waiting'
         : String(job.status || 'completed');
     const group = statusGroup(effectiveStatus);
+    const statusCopy = statusPresentation(effectiveStatus);
     const clinicId = toInt(job.payload?.clinic_id);
+    const lastSentAt = latestDate(...related.flatMap((execution) => [
+      execution.context?.outputs?.N9?.at,
+      execution.context?.outputs?.N7?.at,
+    ]));
     return {
       id: `lead:${job.id}`,
       source_id: job.id,
       source_type: 'lead_backfill',
+      type: 'lead_first_contact',
+      type_label: 'Primer contacto con leads',
+      configuration_url: '/marketing/leads',
+      configuration_label: 'Abrir configuración de leads',
       title: 'Primer contacto con leads que ya estaban pendientes',
       channel: 'whatsapp',
       status: effectiveStatus,
       status_group: group,
+      status_label: statusCopy.label,
+      status_explanation: statusCopy.explanation,
       clinic_ids: clinicId ? [clinicId] : [],
       clinic_name: clinicNameById.get(clinicId) || null,
       total,
@@ -268,6 +474,8 @@ async function leadBackfillQueues({ clinicIds, clinicNameById }) {
       action_scope: clinicId ? String(clinicId) : null,
       sender: null,
       error: job.error_message || related.find((execution) => execution.last_error)?.last_error || null,
+      created_at: job.created_at,
+      last_sent_at: lastSentAt,
       updated_at: job.updated_at,
     };
   });
@@ -284,33 +492,46 @@ async function emailQueues({ clinicIds, clinicNameById }) {
     limit: 100,
     raw: true,
   });
-  return rows.map((row) => ({
-    id: `email:${row.id}`,
-    source_id: row.id,
-    source_type: 'email',
-    title: row.subject_key || row.template_key || 'Correo electrónico',
-    channel: 'email',
-    status: row.status,
-    status_group: statusGroup(row.status),
-    clinic_ids: [Number(row.clinica_id)],
-    clinic_name: clinicNameById.get(Number(row.clinica_id)) || null,
-    total: 1,
-    processed: ['queued', 'sending'].includes(String(row.status)) ? 0 : 1,
-    pending: ['queued', 'sending'].includes(String(row.status)) ? 1 : 0,
-    failed: statusGroup(row.status) === 'error' ? 1 : 0,
-    next_at: row.queued_at || null,
-    cadence: null,
-    cadence_note: null,
-    message_preview: row.subject_key || row.template_key || null,
-    template_name: row.template_key || null,
-    schedule: null,
-    can_pause: false,
-    can_resume: false,
-    action_scope: String(row.clinica_id),
-    sender: row.from_email || null,
-    error: row.last_error_message || row.last_error_code || null,
-    updated_at: row.updated_at,
-  }));
+  return rows.map((row) => {
+    const group = statusGroup(row.status);
+    const statusCopy = statusPresentation(row.status);
+    const isMarketing = String(row.stream || '').toLowerCase() === 'marketing';
+    return {
+      id: `email:${row.id}`,
+      source_id: row.id,
+      source_type: 'email',
+      type: isMarketing ? 'marketing_email' : 'transactional_email',
+      type_label: isMarketing ? 'Correo comercial' : 'Correo transaccional',
+      configuration_url: null,
+      configuration_label: null,
+      title: row.subject_key || row.template_key || 'Correo electrónico',
+      channel: 'email',
+      status: row.status,
+      status_group: group,
+      status_label: statusCopy.label,
+      status_explanation: statusCopy.explanation,
+      clinic_ids: [Number(row.clinica_id)],
+      clinic_name: clinicNameById.get(Number(row.clinica_id)) || null,
+      total: 1,
+      processed: ['queued', 'sending'].includes(String(row.status)) ? 0 : 1,
+      pending: ['queued', 'sending'].includes(String(row.status)) ? 1 : 0,
+      failed: group === 'error' ? 1 : 0,
+      next_at: row.queued_at || null,
+      cadence: null,
+      cadence_note: null,
+      message_preview: row.subject_key || row.template_key || null,
+      template_name: row.template_key || null,
+      schedule: null,
+      can_pause: false,
+      can_resume: false,
+      action_scope: String(row.clinica_id),
+      sender: row.from_email || null,
+      error: row.last_error_message || row.last_error_code || null,
+      created_at: row.created_at,
+      last_sent_at: row.sent_at || null,
+      updated_at: row.updated_at,
+    };
+  });
 }
 
 async function resolveScopedClinics({ userId, scopeRaw }) {
@@ -422,6 +643,8 @@ module.exports = {
   listSendQueues,
   mutateSendQueue,
   statusGroup,
+  statusPresentation,
   describeDispatchCadence,
   humanizeQueueReason,
+  marketingQueuePresentation,
 };
