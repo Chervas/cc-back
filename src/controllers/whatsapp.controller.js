@@ -5,7 +5,11 @@ const axios = require('axios');
 const crypto = require('crypto');
 const whatsappService = require('../services/whatsapp.service');
 const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.service');
-const { enqueueSyncPhonesJob, syncPhonesForWaba } = require('../services/whatsappPhones.service');
+const {
+  buildRegisteredSnapshot,
+  enqueueSyncPhonesJob,
+  syncPhonesForWaba,
+} = require('../services/whatsappPhones.service');
 const whatsappCoexistenceService = require('../services/whatsappCoexistence.service');
 const whatsappAccountComplianceService = require('../services/whatsappAccountCompliance.service');
 const whatsappAccountHealthService = require('../services/whatsappAccountHealth.service');
@@ -897,17 +901,9 @@ async function attemptPhoneRegistration({ asset, pin, useAutoPin = false }) {
       phoneNumberId,
       accessToken,
     });
-    const codeStatus = String(currentStatus?.code_verification_status || '').toUpperCase();
-    if (currentStatus?.status === 'CONNECTED' && codeStatus === 'VERIFIED') {
+    if (currentStatus?.status === 'CONNECTED') {
       const registration = {
-        status: 'registered',
-        requiresPin: false,
-        lastAttemptAt: nowIso,
-        registeredAt: nowIso,
-        phoneStatus: currentStatus.status,
-        codeVerificationStatus: currentStatus.code_verification_status || null,
-        lastErrorCode: null,
-        lastErrorMessage: null,
+        ...buildRegisteredSnapshot(currentStatus, asset.additionalData?.registration || null),
         autoPin: explicitPin || autoPin,
       };
       await updateRegistrationOnAsset(asset, registration);
@@ -1995,35 +1991,8 @@ exports.listPhones = async (req, res) => {
           phoneNumberId: p.phoneNumberId,
           accessToken: p.waAccessToken,
         });
-        const codeStatus = String(liveStatus?.code_verification_status || '').toUpperCase();
-        if (liveStatus?.status === 'CONNECTED' && (codeStatus === 'VERIFIED' || isCoexistenceAsset)) {
-          const nowIso = new Date().toISOString();
-          registration = {
-            status: 'registered',
-            requiresPin: false,
-            lastAttemptAt: nowIso,
-            registeredAt: registration?.registeredAt || nowIso,
-            phoneStatus: liveStatus.status,
-            codeVerificationStatus: liveStatus.code_verification_status || null,
-            lastErrorCode: null,
-            lastErrorMessage: null,
-            skipRegisterReason: isCoexistenceAsset
-              ? (registration?.skipRegisterReason || 'whatsapp_business_app_coexistence')
-              : registration?.skipRegisterReason,
-          };
-          await updateRegistrationOnAsset(p, registration);
-        } else if (!isCoexistenceAsset && liveStatus?.status === 'CONNECTED' && codeStatus && registration?.status !== 'registered') {
-          const nowIso = new Date().toISOString();
-          registration = {
-            status: 'not_registered',
-            requiresPin: true,
-            lastAttemptAt: nowIso,
-            registeredAt: registration?.registeredAt || null,
-            phoneStatus: liveStatus.status,
-            codeVerificationStatus: liveStatus.code_verification_status || null,
-            lastErrorCode: null,
-            lastErrorMessage: registration?.lastErrorMessage || null,
-          };
+        if (liveStatus?.status === 'CONNECTED') {
+          registration = buildRegisteredSnapshot(liveStatus, registration, isCoexistenceAsset);
           await updateRegistrationOnAsset(p, registration);
         }
       }

@@ -59,18 +59,15 @@ function normalizeWhatsappBusinessProfile(payload) {
 
 function buildRegisteredSnapshot(remote, existingRegistration, isCoexistence = false) {
   const nowIso = new Date().toISOString();
-  const codeStatus = String(remote?.code_verification_status || '').toUpperCase();
-  const isVerified = codeStatus === 'VERIFIED';
   const isConnected = remote?.status === 'CONNECTED';
   let status = existingRegistration?.status || null;
   let requiresPin = existingRegistration?.requiresPin || false;
 
-  if (isConnected && (isVerified || isCoexistence)) {
+  // Meta's CONNECTED phone status is the operational registration signal.
+  // code_verification_status=EXPIRED only refers to the onboarding code.
+  if (isConnected) {
     status = 'registered';
     requiresPin = false;
-  } else if (isConnected && !isVerified) {
-    status = 'not_registered';
-    requiresPin = true;
   }
 
   return {
@@ -874,6 +871,7 @@ async function enqueueSyncPhonesForAllWabas({ mode = 'auto' } = {}) {
 
 module.exports = {
   PHONE_FULL_SYNC_INTERVAL_MS,
+  buildRegisteredSnapshot,
   fetchAppWebhookConfiguration,
   fetchWebhookSubscriptionStatus,
   fetchWabaOperationalStatus,
