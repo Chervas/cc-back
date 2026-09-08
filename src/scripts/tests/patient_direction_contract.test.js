@@ -97,6 +97,8 @@ assert.doesNotMatch(flowEngine, /cleanString\(config\?\.domain \|\| context\?\.r
   'an absent optional domain must not fail before the WhatsApp request reaches Meta');
 assert.match(webhook, /resolveInboundDestination/);
 assert.match(webhook, /captureUnassignedInbound/);
+assert.match(service, /directorPhoneAssetId:\s*directorAssetId/,
+  'shared director numbers must resolve inbound assignments with their actual asset id');
 assert.match(workers, /sendOldNumberNotice/);
 assert.match(workers, /handleHandoffMessageStatus/);
 

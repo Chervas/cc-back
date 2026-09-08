@@ -8,7 +8,7 @@ const db = require('../../models');
 const { queues } = require('../services/queue.service');
 const { Op } = require('sequelize');
 
-const { ClinicMetaAsset, Clinica, Paciente, Conversation, LeadIntake, WhatsAppWebOrigin } = db;
+const { ClinicMetaAsset, Clinica, Paciente, Conversation, Message, LeadIntake, WhatsAppWebOrigin } = db;
 const APP_SECRET = process.env.FACEBOOK_APP_SECRET || process.env.APP_SECRET;
 
 function buildPhoneCandidates(raw) {
@@ -165,7 +165,74 @@ async function findWhatsappAssetForWebhook(body) {
   return null;
 }
 
-async function resolveClinicAndContact({ clinicId, groupId, from }) {
+function messageWhatsappAssetId(message) {
+  let metadata = message?.metadata;
+  if (typeof metadata === 'string') {
+    try {
+      metadata = JSON.parse(metadata);
+    } catch (_) {
+      metadata = {};
+    }
+  }
+  if (!metadata || typeof metadata !== 'object') metadata = {};
+  return Number(
+    metadata.whatsapp_sender_asset_id
+    || metadata.sender_origin_id
+    || metadata.whatsapp_origin_asset_id
+    || 0
+  ) || null;
+}
+
+async function findGroupConversation({ clinicIds, from, assetId = null }) {
+  const contactIdCandidates = buildContactIdCandidates(from);
+  if (!Conversation || !contactIdCandidates.length) return null;
+
+  const conversations = await Conversation.findAll({
+    where: {
+      clinic_id: { [Op.in]: clinicIds },
+      channel: 'whatsapp',
+      contact_id: { [Op.in]: contactIdCandidates },
+    },
+    attributes: ['id', 'clinic_id', 'patient_id', 'lead_id', 'last_message_at', 'updatedAt'],
+    order: [
+      ['last_message_at', 'DESC'],
+      ['updatedAt', 'DESC'],
+    ],
+    raw: true,
+  });
+  if (!conversations.length) return null;
+
+  const normalizedAssetId = Number(assetId || 0) || null;
+  if (normalizedAssetId && Message) {
+    const outboundMessages = await Message.findAll({
+      where: {
+        conversation_id: { [Op.in]: conversations.map((conversation) => conversation.id) },
+        direction: 'outbound',
+        status: { [Op.in]: ['sent', 'delivered', 'read'] },
+      },
+      attributes: ['conversation_id', 'metadata', 'sent_at', 'createdAt'],
+      order: [
+        ['sent_at', 'DESC'],
+        ['createdAt', 'DESC'],
+      ],
+      limit: 100,
+      raw: true,
+    });
+    const originMatch = outboundMessages.find(
+      (message) => messageWhatsappAssetId(message) === normalizedAssetId
+    );
+    if (originMatch) {
+      const conversation = conversations.find(
+        (candidate) => Number(candidate.id) === Number(originMatch.conversation_id)
+      );
+      if (conversation) return conversation;
+    }
+  }
+
+  return conversations[0];
+}
+
+async function resolveClinicAndContact({ clinicId, groupId, from, assetId = null }) {
   const candidates = buildPhoneCandidates(from);
   if (!candidates.length) {
     if (groupId) {
@@ -224,21 +291,8 @@ async function resolveClinicAndContact({ clinicId, groupId, from }) {
 
     // 1) Evitar duplicados: si ya existe una conversación de WhatsApp para este contacto en alguna clínica del grupo,
     // reutilizamos esa clínica como destino.
-    const contactIdCandidates = buildContactIdCandidates(from);
-    if (Conversation && contactIdCandidates.length) {
-      const conv = await Conversation.findOne({
-        where: {
-          clinic_id: { [Op.in]: clinicIds },
-          channel: 'whatsapp',
-          contact_id: { [Op.in]: contactIdCandidates },
-        },
-        attributes: ['id', 'clinic_id', 'patient_id', 'lead_id', 'last_message_at', 'updatedAt'],
-        order: [
-          ['last_message_at', 'DESC'],
-          ['updatedAt', 'DESC'],
-        ],
-        raw: true,
-      });
+    if (Conversation) {
+      const conv = await findGroupConversation({ clinicIds, from, assetId });
       if (conv) {
         return { clinicId: conv.clinic_id, patientId: conv.patient_id || null, leadId: conv.lead_id || null };
       }
@@ -401,7 +455,12 @@ router.post('/whatsapp/webhook', async (req, res) => {
     }
 
     if (!clinicId && groupId) {
-      const resolved = await resolveClinicAndContact({ clinicId: null, groupId, from });
+      const resolved = await resolveClinicAndContact({
+        clinicId: null,
+        groupId,
+        from,
+        assetId: webhookAsset?.id,
+      });
       clinicId = resolved.clinicId;
       req.resolvedContact = resolved;
     }
