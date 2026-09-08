@@ -36,7 +36,7 @@ const originalGet = axios.get;
   assert.equal(connectedWithExpiredCode.registeredAt, '2026-03-24T10:31:55.841Z');
   assert.equal(connectedWithExpiredCode.phoneStatus, 'CONNECTED');
   assert.equal(connectedWithExpiredCode.codeVerificationStatus, 'EXPIRED');
-  assert.match(connectedWithExpiredCode.lastAttemptAt, /^2026-/);
+  assert.equal(Number.isNaN(new Date(connectedWithExpiredCode.lastAttemptAt).getTime()), false);
   assert.equal(normalizeWhatsappChannelRole(' Secondary '), 'secondary');
   assert.equal(normalizeWhatsappChannelRole('unknown'), null);
   assert.equal(resolveWhatsappChannelRole({
