@@ -51,6 +51,23 @@ async function run() {
     [1, 2, 3],
   );
 
+  const templateModel = db.AutomationFlowTemplateV2;
+  const originalFindOne = templateModel.findOne;
+  const lookups = [];
+  templateModel.findOne = async (options) => {
+    lookups.push(options.where);
+    return options.where.public_id === 'flw_clinic_after_hours' ? { id: 2 } : null;
+  };
+  try {
+    assert.deepEqual(
+      await controller.__resolveTemplateFamilyWhere('flw_clinic_after_hours'),
+      { public_id: 'flw_clinic_after_hours' },
+    );
+    assert.deepEqual(lookups, [{ public_id: 'flw_clinic_after_hours' }]);
+  } finally {
+    templateModel.findOne = originalFindOne;
+  }
+
   console.log('automation_scoped_catalog_list.test.js OK');
 }
 

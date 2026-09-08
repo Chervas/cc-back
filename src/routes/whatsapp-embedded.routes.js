@@ -16,6 +16,14 @@ const {
   hasMarketingClinicScopeAccess,
 } = require('../lib/marketingScopeAccess');
 const { isGlobalAdmin } = require('../lib/role-helpers');
+const {
+  buildWhatsappRoutingAdditionalData,
+  normalizeWhatsappChannelRole,
+} = require('../lib/whatsapp-channel-role');
+const {
+  clearWhatsappPhoneRoleCollision,
+  hasWhatsappPrimaryForScope,
+} = require('../services/whatsappPhoneAssignment.service');
 
 const router = express.Router();
 const ClinicMetaAsset = db.ClinicMetaAsset;
@@ -426,6 +434,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
       group_id,
       connection_mode,
       patient_direction_user_id,
+      channel_role,
     } = req.body;
     if (!code) {
       return res.status(400).json({ success: false, error: 'missing_code' });
@@ -434,6 +443,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
       return res.status(400).json({ success: false, error: 'missing_waba_or_phone_number_id' });
     }
     const connectionMode = connection_mode === 'coexistence' ? 'coexistence' : 'cloud_api';
+    const channelRole = normalizeWhatsappChannelRole(channel_role) || 'primary';
 
     const userId = req.userData?.userId;
 
@@ -463,6 +473,9 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
 
     if (assignmentScope === 'group' && !targetGroupId) {
       assignmentScope = 'unassigned';
+    }
+    if (channelRole === 'secondary' && assignmentScope === 'unassigned') {
+      return res.status(400).json({ success: false, error: 'secondary_whatsapp_scope_required' });
     }
 
     const patientDirectionUserId = Number.parseInt(String(patient_direction_user_id || ''), 10) || null;
@@ -498,6 +511,18 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
       });
       if (!canManageTarget) {
         return res.status(403).json({ success: false, error: 'embedded_signup_scope_forbidden' });
+      }
+    }
+
+    if (channelRole === 'secondary') {
+      const hasPrimary = await hasWhatsappPrimaryForScope({
+        assignmentScope,
+        clinicId: targetClinicId,
+        groupId: targetGroupId,
+        exceptPhoneNumberId: phone_number_id,
+      });
+      if (!hasPrimary) {
+        return res.status(409).json({ success: false, error: 'primary_whatsapp_required' });
       }
     }
 
@@ -703,6 +728,20 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
         },
       }
     );
+    await clearWhatsappPhoneRoleCollision({
+      assignmentScope,
+      clinicId: targetClinicId,
+      groupId: targetGroupId,
+      role: channelRole,
+      exceptPhoneNumberId: phone_number_id,
+    });
+    phoneAsset.additionalData = buildWhatsappRoutingAdditionalData(phoneAsset.additionalData, {
+      role: channelRole,
+      purposes: [],
+      unavailableAction: 'pause',
+    });
+    phoneAsset.changed('additionalData', true);
+    await phoneAsset.save();
     if (patientDirectionProfile) {
       await patientDirectionProfile.update({
         whatsapp_phone_asset_id: phoneAsset.id,
@@ -879,6 +918,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
       phoneAssetId: phoneAsset.id,
       waVerifiedName: verifiedName,
       connectionMode,
+      whatsappChannelRole: channelRole,
       coexistenceReconnected: connectionMode === 'coexistence',
       reconnectCleanup: connectionMode === 'coexistence'
         ? {

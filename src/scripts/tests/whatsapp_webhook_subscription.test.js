@@ -14,6 +14,11 @@ process.env.META_APP_SECRET = 'test-app-secret';
 
 const axios = require('axios');
 const whatsappPhonesService = require('../../services/whatsappPhones.service');
+const {
+  hasWhatsappPrimaryForScope,
+  whatsappPhoneScopeWhere,
+} = require('../../services/whatsappPhoneAssignment.service');
+const db = require('../../../models');
 
 const originalGet = axios.get;
 
@@ -42,6 +47,32 @@ const originalGet = axios.get;
     purposes: [],
     unavailableAction: 'pause',
   });
+  assert.deepEqual(
+    whatsappPhoneScopeWhere({ assignmentScope: 'clinic', clinicId: 66, groupId: 29 }),
+    { assignmentScope: 'clinic', clinicaId: 66 },
+  );
+
+  const originalFindAll = db.ClinicMetaAsset.findAll;
+  let capturedPrimaryLookup = null;
+  db.ClinicMetaAsset.findAll = async (options) => {
+    capturedPrimaryLookup = options.where;
+    return [{ additionalData: buildWhatsappRoutingAdditionalData({}, { role: 'primary' }) }];
+  };
+  try {
+    assert.equal(await hasWhatsappPrimaryForScope({
+      assignmentScope: 'clinic',
+      clinicId: 66,
+      groupId: 29,
+      exceptPhoneNumberId: 'new-secondary',
+    }), true);
+    assert.equal(capturedPrimaryLookup.assetType, 'whatsapp_phone_number');
+    assert.equal(capturedPrimaryLookup.isActive, true);
+    assert.ok(capturedPrimaryLookup[db.Sequelize.Op.or].some((scope) =>
+      scope.assignmentScope === 'group' && scope.grupoClinicaId === 29
+    ));
+  } finally {
+    db.ClinicMetaAsset.findAll = originalFindAll;
+  }
 
   const clinicPrimary = { id: 1, phoneNumberId: 'primary', waAccessToken: 'token', additionalData: {} };
   const groupPrimary = { id: 2, phoneNumberId: 'group-primary', waAccessToken: 'token', additionalData: {} };
