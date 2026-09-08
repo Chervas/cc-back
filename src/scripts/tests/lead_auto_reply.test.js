@@ -143,6 +143,7 @@ async function run() {
     timing: 'immediate',
     schedule_scope: 'clinic_hours',
     whatsapp_template_id: 1849,
+    whatsapp_catalog_template_id: 108,
     whatsapp_template_name: 'clinicaclick_lead_primera_visita_programar_v2',
     whatsapp_template_language: 'es',
     sender_display_name: 'Marta',
@@ -156,6 +157,7 @@ async function run() {
   assert.equal(nodes.find((node) => node.id === 'N8').config.interval_duration, 30);
   assert.equal(nodes.find((node) => node.id === 'N8').outputs.on_complete, 'N9');
   assert.equal(nodes.find((node) => node.id === 'N9').config.recipient_mode, 'context_lead');
+  assert.equal(nodes.find((node) => node.id === 'N9').config.catalog_template_id, 108);
   assert.equal(nodes.find((node) => node.id === 'N9').config.language_code, 'es');
   assert.equal(nodes.find((node) => node.id === 'N9').config.communication_scope, 'marketing');
   assert.equal(nodes.find((node) => node.id === 'N9').config.variables_named.nombre_remitente, 'Marta');
@@ -234,8 +236,22 @@ async function run() {
         },
       };
     };
-    db.WhatsappTemplate.findAll = async () => {
-      throw new Error('name_fallback_must_not_run_when_template_id_exists');
+    db.WhatsappTemplate.findAll = async ({ where }) => {
+      templateLookupCalls.push(where);
+      return [{
+        id: 2945,
+        name: 'clinicaclick_lead_primera_visita_con_llamada_v24',
+        language: 'es',
+        status: 'APPROVED',
+        catalog_template_id: 109,
+        clinic_id: null,
+        waba_id: '1024525056749708',
+        catalog: {
+          id: 109,
+          family_key: 'clinicaclick_lead_primera_visita_con_llamada',
+          locale: 'es',
+        },
+      }];
     };
     const canonicalTemplate = await flowEngine._loadConfiguredWhatsappTemplate({
       template_id: 1945,
@@ -245,9 +261,12 @@ async function run() {
     }, {
       targetWabaId: '1024525056749708',
     });
-    assert.equal(canonicalTemplate.id, 1945);
-    assert.equal(canonicalTemplate.name, 'clinicaclick_lead_primera_visita_con_llamada_v23');
-    assert.deepEqual(templateLookupCalls, [{ id: 1945 }]);
+    assert.equal(canonicalTemplate.id, 2945);
+    assert.equal(canonicalTemplate.name, 'clinicaclick_lead_primera_visita_con_llamada_v24');
+    assert.deepEqual(templateLookupCalls, [
+      { id: 1945 },
+      { catalog_template_id: 109, is_active: true },
+    ]);
   } finally {
     db.WhatsappTemplate.findOne = originalTemplateFindOne;
     db.WhatsappTemplate.findAll = originalTemplateFindAll;

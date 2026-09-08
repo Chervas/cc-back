@@ -4884,7 +4884,8 @@ Regla vigente:
 
 - si el nodo tiene `catalog_template_id`, el runtime busca la plantilla activa para la clínica de ejecución;
 - dentro de esa familia, prioriza una plantilla no bloqueada (`APPROVED`) frente a estados no enviables;
-- si la clinica hereda un WABA de grupo y su override local esta bloqueado (`SIN_CONECTAR`, `PENDING_LOCAL` o `REJECTED`), pero existe una plantilla aprobada de la misma familia en el WABA efectivo, el runtime debe usar la aprobada del WABA;
+- cuando se conoce el WABA emisor, la plantilla seleccionada debe tener ese `waba_id` exacto; una copia local sin `waba_id` no prueba que la plantilla exista en el número de salida;
+- si la clinica hereda o selecciona un WABA de grupo y existe una plantilla aprobada de la misma familia en ese WABA efectivo, el runtime usa esa copia aunque el nodo conserve un `template_id` histórico de la clínica;
 - solo si no hay `catalog_template_id`, cae a `template_id` o `template_name`;
 - por tanto, la UI de diagnóstico debe mostrar la plantilla efectiva resuelta para la clínica, no únicamente el `template_id` persistido en el JSON del nodo.
 

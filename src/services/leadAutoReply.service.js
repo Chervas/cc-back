@@ -57,6 +57,7 @@ function normalizeConfig(raw = {}) {
     timing: TIMING_VALUES.has(cleanString(raw.timing)) ? cleanString(raw.timing) : 'immediate',
     schedule_scope: SCHEDULE_VALUES.has(cleanString(raw.schedule_scope)) ? cleanString(raw.schedule_scope) : 'clinic_hours',
     whatsapp_template_id: toIntOrNull(raw.whatsapp_template_id || raw.template_id),
+    whatsapp_catalog_template_id: toIntOrNull(raw.whatsapp_catalog_template_id || raw.catalog_template_id),
     whatsapp_template_name: cleanString(raw.whatsapp_template_name || raw.template_name) || null,
     whatsapp_template_language: cleanString(raw.whatsapp_template_language || raw.language_code) || null,
     sender_display_name: cleanString(raw.sender_display_name || raw.contact_person_name) || null,
@@ -193,6 +194,7 @@ function buildManagedNodes(config) {
       config: {
         message_mode: 'template',
         template_id: config.whatsapp_template_id,
+        catalog_template_id: config.whatsapp_catalog_template_id,
         template_name: config.whatsapp_template_name,
         language_code: config.whatsapp_template_language || 'es',
         recipient_mode: 'context_lead',
@@ -347,6 +349,7 @@ async function saveConfig({ clinicId, actorUserId, input }) {
     throw error;
   }
   config.whatsapp_template_name = selectedTemplate.name;
+  config.whatsapp_catalog_template_id = toIntOrNull(selectedTemplate.catalog_template_id);
   config.whatsapp_template_language = cleanString(selectedTemplate.language) || 'es';
   const readiness = await buildReadiness(config, clinicId);
   const requestedActive = input.active === true || (input.active === undefined && previous?.is_active === true);

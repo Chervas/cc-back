@@ -2098,7 +2098,7 @@ function scoreWhatsappTemplateCandidate(
     return 0;
   }
 
-  if (safeTargetWabaId && wabaId && wabaId !== safeTargetWabaId) {
+  if (safeTargetWabaId && wabaId !== safeTargetWabaId) {
     return 0;
   }
 
