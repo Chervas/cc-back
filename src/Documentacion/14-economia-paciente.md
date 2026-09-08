@@ -164,6 +164,75 @@ Contabilidad transversal y portal:
 
 ## Invariantes
 
+### Programas y bonos versionados (corte dev 2026-09-07)
+
+El catálogo de presupuestos admite `include_programs=1`, pero la integración
+económica está **cerrada por defecto** mediante
+`TREATMENT_PROGRAM_ECONOMICS_ENABLED` (solo el valor literal `true` la habilita).
+No se activa en este corte. Con el gate cerrado no devuelve ofertas de programas
+seleccionables y comunica `program_catalog=false`,
+`program_definitions_preparation_only=true` y
+`shared_runtime_compatibility_pending`. Crear, resolver, editar o revisar líneas
+de programas y generar sus bonos se rechaza antes de escribir en las tablas
+económicas compartidas.
+
+La BD es compartida y los runtimes antiguos de staging/gateway no conocen estos
+guards. Por eso **ni siquiera se permite guardar un presupuesto borrador con
+programas desde dev** hasta promocionar código compatible a todos los lectores
+y escritores de economía. No basta con aplicar el esquema. Las definiciones y
+su preview sí pueden prepararse en las nuevas tablas de `TreatmentPrograms`.
+Habilitar el gate exige revisar esa promoción y los contratos de todos los
+consumidores; no modifica automáticamente permisos de venta o reserva.
+
+El código preparado para una futura habilitación solo incorpora definiciones
+activas y completas de `TreatmentPrograms`; el selector histórico
+de venta/importación directa de bonos continúa usando tratamientos numéricos.
+Las definiciones requieren la migración aditiva
+`20260907003000-create-treatment-programs.js`. Si aún falta, el catálogo
+económico habitual sigue disponible y comunica `program_catalog=false`.
+
+Una selección nueva envía `program_id`, `program_version`, `key` estable y
+`quantity=1`. El precio corresponde al programa/bono completo, no se multiplica
+por sus citas. El backend resuelve y congela composición, nombres, duración y
+perfil en `EconomicBudgetVersion.lines[].program_snapshot` (schema 1 + SHA256),
+sin aceptar snapshots enviados por el cliente. Una edición posterior del
+catálogo no modifica presupuestos ni firmas existentes. Un borrador conserva
+su snapshot salvo sustitución explícita de referencia/versión.
+
+Incluso tras habilitar la integración económica, el código preparado permite
+únicamente borradores con programas. Backend y UI bloquean su presentación,
+solicitud de firma y aceptación mientras reserva
+conjunta y consumo por unidad no sean operativos. Los borradores no admiten
+cobros ni saldo por las reglas económicas existentes. No se puede vender un
+programa que luego no pueda consumirse. `purchase_enabled=false` sigue vigente.
+
+El presupuesto usa su idempotencia existente `source_reference` y una huella
+de solicitud: reintentos idénticos producen un solo presupuesto; otra persona,
+otro paciente o una solicitud distinta no pueden reaprovechar silenciosamente
+la referencia. `expected_version` protege las ediciones concurrentes.
+
+`PatientVouchers` sigue siendo el único libro de unidades: una línea genera N
+citas/unidades y conserva el importe global, con `source_system=treatment_program`.
+La lógica preparatoria de aceptación activa solo las líneas aceptadas y
+**no registra ningún cobro**, pero continúa detrás del bloqueo anterior.
+Retirar una línea del borrador cancela su derecho pendiente conservando la fila.
+
+El workspace devuelve `program_plans` con la composición congelada y el estado
+de aceptación. La UI ofrece `Ver citas incluidas`. **Reserva conjunta y consumo
+por unidad aún no están habilitados**: `can_schedule=false`; el planificador de
+bonos anterior rechaza estas ventas, igual que su consumo manual/por asistencia,
+hasta disponer de un ledger de citas del programa con unicidad por unidad y
+writer compatible. No hay promesa de huecos reservados ni mensajes encolados.
+
+El precio del catálogo nuevo es IVA incluido. La emisión fiscal de un
+presupuesto que contiene `program_snapshot` queda explícitamente bloqueada hasta
+configurar el desglose aprobado; no se añade un 21% supuesto ni se cambia el
+normalizador fiscal del resto de conceptos. Se permite conservar un borrador
+fiscal sin añadir IVA al precio final.
+
+Pruebas sin DB:
+`node --test src/scripts/tests/economic_program_snapshot.test.js`.
+
 - Las mutaciones de presupuesto/cobro requieren `patients.edit`; plantillas,
   `clinic.settings.edit`.
 - Paciente y clinica se validan siempre antes de leer o mutar.

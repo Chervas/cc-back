@@ -20,5 +20,6 @@ router.patch('/:id/reagendar', authMiddleware, citasController.reagendarCita);
 router.delete('/:id', authMiddleware, citasController.deleteCita);
 router.get('/:id', authMiddleware, citasController.getCitaById);
 router.get('/', authMiddleware, citasController.getCitas);
+router.use(require('../services/treatmentBookingProfile.service').bookingErrorMiddleware);
 
 module.exports = router;
