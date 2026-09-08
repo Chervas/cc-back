@@ -20,6 +20,7 @@ const explicitContracts = new Set([
   'job_request_transactional_outbox.test.js',
   'public_media_clinic_access.test.js',
   'scheduled_jobs_orchestration.test.js',
+  'whatsapp_group_sender_routing.test.js',
 ]);
 
 function selectedTest(fileName) {

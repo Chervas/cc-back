@@ -1269,7 +1269,7 @@ async function resolveInboundDestination({ assetId, phone }) {
   if (!settings.length) return null;
   const assignment = await findAssignment({
     phone: normalizedPhone,
-    directorPhoneAssetId,
+    directorPhoneAssetId: directorAssetId,
   });
   if (assignment?.clinic_id) {
     return {
