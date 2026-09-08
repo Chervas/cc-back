@@ -7079,3 +7079,4 @@ exports.getMessageDeliveryStatus = async (req, res) => {
 
 exports.__messageReceivedConfigsOverlap = messageReceivedConfigsOverlap;
 exports.__collapseCatalogManagedRowsForScopedList = collapseCatalogManagedRowsForScopedList;
+exports.__resolveTemplateFamilyWhere = resolveTemplateFamilyWhere;
