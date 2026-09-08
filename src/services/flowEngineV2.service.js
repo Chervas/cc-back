@@ -7190,13 +7190,21 @@ function resolveConfirmAppointmentConversationOutcome(context = {}) {
   };
 }
 
+const APPOINTMENT_INTENT_RESOLVED_STATUSES = {
+  confirmar_cita: new Set(['info_confirmada', 'recordatorio_confirmado', 'confirmada', 'confirmado']),
+  cancelar_cita: new Set(['cancelada']),
+  solicitar_cambio_cita: new Set(['cambio_solicitado']),
+};
+
+function isAppointmentIntentAlreadyResolved(appointmentStatus, normalizedIntent = null) {
+  const intent = cleanString(normalizedIntent?.intencion_principal)?.toLowerCase();
+  const resolvedStatuses = APPOINTMENT_INTENT_RESOLVED_STATUSES[intent];
+  return Boolean(resolvedStatuses?.has(cleanString(appointmentStatus)?.toLowerCase()));
+}
+
 function hasAppliedAppointmentIntent(context = {}, normalizedIntent = null) {
   const intent = cleanString(normalizedIntent?.intencion_principal)?.toLowerCase();
-  const expectedStatuses = {
-    confirmar_cita: new Set(['info_confirmada', 'recordatorio_confirmado']),
-    cancelar_cita: new Set(['cancelada']),
-    solicitar_cambio_cita: new Set(['cambio_solicitado']),
-  }[intent];
+  const expectedStatuses = APPOINTMENT_INTENT_RESOLVED_STATUSES[intent];
   if (!expectedStatuses) return false;
 
   return Object.values(context?.outputs || {}).some((output) => {
@@ -7331,13 +7339,15 @@ async function syncConversationAutomationStateAfterExecution(execution) {
     : null;
   const appointmentIntentApplied = hasAppliedAppointmentIntent(context, effectiveIntent);
   const appointmentIntentResolvedExternally = hasExternallyResolvedAppointmentIntent(context, effectiveIntent);
+  const appointmentIntentAlreadyResolved = isAppointmentIntentAlreadyResolved(appointmentStatus, effectiveIntent);
   const pendingResponse = expectsResponse
     && !humanReply
     && !appointmentIntentResolvedExternally;
   const persistedManualReason = state.manual_action_required === true
     && state.needs_response !== true
     && !appointmentIntentApplied
-    && !appointmentIntentResolvedExternally;
+    && !appointmentIntentResolvedExternally
+    && !appointmentIntentAlreadyResolved;
   const manualActionRequired = appointmentStatus === 'cambio_solicitado'
     || conversationAction === 'schedule_new_appointment'
     || persistedManualReason
@@ -7357,6 +7367,7 @@ async function syncConversationAutomationStateAfterExecution(execution) {
       && ['confirmar_cita', 'cancelar_cita', 'solicitar_cambio_cita'].includes(effectiveIntent.intencion_principal)
       && !appointmentIntentApplied
       && !appointmentIntentResolvedExternally
+      && !appointmentIntentAlreadyResolved
     );
   if (manualActionRequired) {
     await conversationAutomationState.updateOwnedState({
@@ -7370,9 +7381,9 @@ async function syncConversationAutomationStateAfterExecution(execution) {
       intent: conversationAction === 'schedule_new_appointment'
         ? 'solicitar_nueva_cita'
         : (
-          normalized?.intencion_principal
+          (rebookingOutcome?.wantsNewAppointment === true ? 'solicitar_nueva_cita' : null)
+          || normalized?.intencion_principal
           || confirmationOutcome?.intent
-          || (rebookingOutcome?.wantsNewAppointment === true ? 'solicitar_nueva_cita' : null)
           || state.intent
         ),
       possibleUrgency: normalized?.posible_urgencia ?? (confirmationOutcome ? false : state.possible_urgency),
@@ -7821,6 +7832,7 @@ module.exports = {
   buildDeterministicClassifyIntentOutput,
   buildScopedClassifyIntentConversation,
   hasAppliedAppointmentIntent,
+  isAppointmentIntentAlreadyResolved,
   hasExternallyResolvedAppointmentIntent,
   isAppointmentIntentResolvedByConcurrentChange,
   resolveConfirmAppointmentConversationOutcome,

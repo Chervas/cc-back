@@ -309,9 +309,78 @@ async function verifyConversationStateSync() {
   }
 }
 
+async function verifyAlreadyConfirmedStateClearsStaleReview() {
+  const originalStateFindOne = db.ConversationAutomationState.findOne;
+  const originalAppointmentFindByPk = db.CitaPaciente.findByPk;
+  const originalUpdateOwnedState = conversationAutomationState.updateOwnedState;
+  const originalCompleteState = conversationAutomationState.completeState;
+  let reviewPatch = null;
+  let completedPatch = null;
+
+  db.ConversationAutomationState.findOne = async () => ({
+    conversation_id: 3093,
+    clinic_id: 74,
+    execution_id: 2406,
+    appointment_id: 74962,
+    appointment_status: 'recordatorio_confirmado',
+    intent: 'confirmar_cita',
+    possible_urgency: false,
+    needs_response: false,
+    manual_action_required: true,
+    source_message_id: 109012,
+  });
+  db.CitaPaciente.findByPk = async () => ({
+    id_cita: 74962,
+    estado: 'recordatorio_confirmado',
+  });
+  conversationAutomationState.updateOwnedState = async (patch) => {
+    reviewPatch = patch;
+    return patch;
+  };
+  conversationAutomationState.completeState = async (patch) => {
+    completedPatch = patch;
+    return patch;
+  };
+
+  try {
+    await flowEngine._syncConversationAutomationStateAfterExecution({
+      id: 2406,
+      clinic_id: 74,
+      status: 'completed',
+      trigger_entity_type: 'appointment',
+      trigger_entity_id: 74962,
+      context: {
+        conversation: { id: 3093 },
+        appointment: { id: 74962, estado: 'recordatorio_confirmado' },
+        outputs: {
+          N3: {
+            intencion_principal: 'confirmar_cita',
+            confianza_intencion_principal: 0.9,
+            necesita_respuesta: false,
+            confianza_necesita_respuesta: 0.95,
+          },
+          N12: { matched_rule_id: 'on_true', next_output_key: 'on_true' },
+          N4: { status: 'success', message_id: 109015 },
+        },
+      },
+    });
+
+    assert.equal(reviewPatch, null);
+    assert.equal(completedPatch.intent, 'confirmar_cita');
+    assert.equal(completedPatch.needsResponse, false);
+    assert.equal(completedPatch.possibleUrgency, false);
+  } finally {
+    db.ConversationAutomationState.findOne = originalStateFindOne;
+    db.CitaPaciente.findByPk = originalAppointmentFindByPk;
+    conversationAutomationState.updateOwnedState = originalUpdateOwnedState;
+    conversationAutomationState.completeState = originalCompleteState;
+  }
+}
+
 async function run() {
   await verifyRuntimeRoutes();
   await verifyConversationStateSync();
+  await verifyAlreadyConfirmedStateClearsStaleReview();
   console.log('Appointment data confirmation v16 decision routing: ok');
 }
 

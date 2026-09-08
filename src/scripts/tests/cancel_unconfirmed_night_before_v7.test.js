@@ -173,6 +173,14 @@ async function verifyHumanTakeoverRebookingDecision() {
       appointment: { id: 75006, estado: 'cancelada' },
       human_takeover: { active: true, human_message_id: 105537 },
       outputs: {
+        ...(wantsNewAppointment ? {
+          N4: {
+            intencion_principal: 'cancelar_cita',
+            confianza_intencion_principal: 0.95,
+            necesita_respuesta: true,
+            confianza_necesita_respuesta: 0.95,
+          },
+        } : {}),
         N25: { quiere_nueva_cita: wantsNewAppointment, motivo: 'Respuesta contextual.' },
         N26: {
           matched_rule_id: wantsNewAppointment ? 'branch_yes' : 'branch_no',
