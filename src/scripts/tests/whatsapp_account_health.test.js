@@ -5,6 +5,8 @@ const test = require('node:test');
 const {
   applyRecoveryPolicy,
   deriveHealthCandidate,
+  deriveAssetSignal,
+  effectiveComplianceStatus,
   effectiveStoredHealth,
   extractProviderErrorCode,
   normalizeWabaOperationalSnapshot,
@@ -39,6 +41,18 @@ test('BANNED y 131031 prevalecen sobre registro y calidad GREEN', () => {
   assert.equal(locked.state, 'blocked');
   assert.equal(locked.reason_code, 'meta_error_131031_account_locked');
   assert.equal(extractProviderErrorCode({ errors: [{ code: 131031 }] }), 131031);
+});
+
+test('CONNECTED prevalece sobre un estado local not_registered obsoleto', () => {
+  const connected = deriveHealthCandidate({
+    providerStatus: 'CONNECTED',
+    registrationStatus: 'not_registered',
+    complianceStatus: 'active',
+    qualityRating: 'GREEN',
+  });
+  assert.equal(connected.state, 'healthy');
+  assert.equal(connected.can_send, true);
+  assert.equal(connected.reason_code, 'provider_connected');
 });
 
 test('calidad RED degrada pero no bloquea por sí sola', () => {
@@ -152,6 +166,47 @@ test('una restricción explícita y una desconexión abren el cortacircuitos', (
   assert.equal(inactive.state, 'disconnected');
   assert.equal(inactive.can_send, false);
   assert.equal(inactive.reason_code, 'asset_inactive');
+});
+
+test('las restricciones temporales vencidas dejan de bloquear sin borrar su historial', () => {
+  const compliance = {
+    event: 'ACCOUNT_RESTRICTION',
+    status: 'restricted',
+    restrictions: [{
+      restriction_type: 'RESTRICTED_BIZ_INITIATED_MESSAGING',
+      expiration: '2026-09-05T21:21:20.000Z',
+      active: true,
+    }],
+  };
+  const now = new Date('2026-09-08T08:00:00.000Z');
+  assert.equal(effectiveComplianceStatus(compliance, now), 'active');
+
+  const signal = deriveAssetSignal({
+    isActive: true,
+    quality_rating: 'GREEN',
+    additionalData: {
+      registration: { status: 'registered', phoneStatus: 'CONNECTED' },
+      whatsappCompliance: compliance,
+    },
+  }, { now });
+  assert.equal(signal.complianceStatus, 'active');
+  assert.equal(deriveHealthCandidate(signal).state, 'healthy');
+});
+
+test('una restricción temporal vigente continúa bloqueando', () => {
+  const compliance = {
+    event: 'ACCOUNT_RESTRICTION',
+    status: 'restricted',
+    restrictions: [{
+      restriction_type: 'RESTRICTED_BIZ_INITIATED_MESSAGING',
+      expiration: '2026-09-09T21:21:20.000Z',
+      active: true,
+    }],
+  };
+  assert.equal(
+    effectiveComplianceStatus(compliance, new Date('2026-09-08T08:00:00.000Z')),
+    'restricted'
+  );
 });
 
 test('la recuperación por sondeo exige dos CONNECTED consecutivos', () => {

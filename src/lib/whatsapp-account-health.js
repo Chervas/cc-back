@@ -1,5 +1,7 @@
 'use strict';
 
+const { deriveComplianceSnapshot } = require('./whatsapp-account-compliance');
+
 const BLOCKED_STATES = new Set(['blocked', 'disconnected']);
 const BLOCKED_PROVIDER_STATUSES = new Set([
   'BANNED',
@@ -63,6 +65,16 @@ function lower(value) {
 
 function safeObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function effectiveComplianceStatus(compliance = {}, now = new Date()) {
+  const storedStatus = lower(compliance.status) || null;
+  if (upper(compliance.event) !== 'ACCOUNT_RESTRICTION') return storedStatus;
+
+  return deriveComplianceSnapshot({
+    event: compliance.event,
+    restriction_info: Array.isArray(compliance.restrictions) ? compliance.restrictions : [],
+  }, now).status;
 }
 
 function cleanLimitedText(value, maxLength = 255) {
@@ -244,7 +256,10 @@ function deriveHealthCandidate(input = {}) {
     };
   }
 
-  if (['blocked', 'deleted', 'failed', 'not_registered'].includes(registrationStatus)) {
+  if (
+    providerStatus !== 'CONNECTED'
+    && ['blocked', 'deleted', 'failed', 'not_registered'].includes(registrationStatus)
+  ) {
     return {
       state: 'disconnected',
       can_send: false,
@@ -309,7 +324,8 @@ function deriveAssetSignal(asset = {}, overrides = {}) {
     assetActive: overrides.assetActive ?? asset.isActive,
     providerStatus: overrides.providerStatus ?? registration.phoneStatus,
     registrationStatus: overrides.registrationStatus ?? registration.status,
-    complianceStatus: overrides.complianceStatus ?? compliance.status,
+    complianceStatus: overrides.complianceStatus
+      ?? effectiveComplianceStatus(compliance, overrides.now || new Date()),
     providerEvent: overrides.providerEvent,
     providerErrorCode: overrides.providerErrorCode,
     qualityRating: overrides.qualityRating ?? asset.quality_rating,
@@ -453,6 +469,7 @@ module.exports = {
   deriveAssetSignal,
   deriveHealthCandidate,
   effectiveStoredHealth,
+  effectiveComplianceStatus,
   extractProviderErrorCode,
   isBlockingState,
   normalizeWabaOperationalSnapshot,

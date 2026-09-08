@@ -23,6 +23,20 @@ const db = require('../../../models');
 const originalGet = axios.get;
 
 (async () => {
+  const connectedWithExpiredCode = whatsappPhonesService.buildRegisteredSnapshot({
+    status: 'CONNECTED',
+    code_verification_status: 'EXPIRED',
+  }, {
+    status: 'not_registered',
+    requiresPin: true,
+    registeredAt: '2026-03-24T10:31:55.841Z',
+  });
+  assert.equal(connectedWithExpiredCode.status, 'registered');
+  assert.equal(connectedWithExpiredCode.requiresPin, false);
+  assert.equal(connectedWithExpiredCode.registeredAt, '2026-03-24T10:31:55.841Z');
+  assert.equal(connectedWithExpiredCode.phoneStatus, 'CONNECTED');
+  assert.equal(connectedWithExpiredCode.codeVerificationStatus, 'EXPIRED');
+  assert.match(connectedWithExpiredCode.lastAttemptAt, /^2026-/);
   assert.equal(normalizeWhatsappChannelRole(' Secondary '), 'secondary');
   assert.equal(normalizeWhatsappChannelRole('unknown'), null);
   assert.equal(resolveWhatsappChannelRole({
