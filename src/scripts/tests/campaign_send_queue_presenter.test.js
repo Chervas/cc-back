@@ -8,6 +8,7 @@ const {
   marketingQueuePresentation,
   statusGroup,
   statusPresentation,
+  summarizeLeadBackfillQueue,
 } = require('../../services/sendQueues.service');
 
 test('describeDispatchCadence presents batches instead of treating delay as per-message cadence', () => {
@@ -70,4 +71,63 @@ test('review and mass-send queues expose their type and canonical configuration 
     configuration_url: '/marketing/objetivos?objective=mass_sends&mass_send_view=campaigns',
     configuration_label: 'Abrir envíos masivos',
   });
+});
+
+test('lead queues distinguish candidates skipped before enqueue from actual scheduled sends', () => {
+  const summary = summarizeLeadBackfillQueue({
+    summary: { total: 8, queued: 3, skipped: 5 },
+    related: [
+      { id: 1, status: 'waiting', wait_until: '2026-09-09T08:00:00.000Z', context: { outputs: {} } },
+      { id: 2, status: 'waiting', wait_until: '2026-09-09T08:30:00.000Z', context: { outputs: {} } },
+      { id: 3, status: 'waiting', wait_until: '2026-09-09T09:00:00.000Z', context: { outputs: {} } },
+    ],
+    jobStatus: 'completed',
+    now: new Date('2026-09-09T07:00:00.000Z'),
+  });
+
+  assert.equal(summary.candidateTotal, 8);
+  assert.equal(summary.total, 3);
+  assert.equal(summary.skipped, 5);
+  assert.equal(summary.sent, 0);
+  assert.equal(summary.pending, 3);
+  assert.equal(summary.processed, 0);
+  assert.equal(summary.effectiveStatus, 'waiting');
+  assert.equal(summary.nextAt, '2026-09-09T08:00:00.000Z');
+});
+
+test('lead queues preserve optional calls as context without adding them to send progress', () => {
+  const summary = summarizeLeadBackfillQueue({
+    summary: {
+      total: 3,
+      queued: 3,
+      candidate_total: 8,
+      excluded_call_total: 5,
+    },
+    related: [
+      { id: 1, status: 'waiting', context: { outputs: {} } },
+      { id: 2, status: 'waiting', context: { outputs: {} } },
+      { id: 3, status: 'waiting', context: { outputs: {} } },
+    ],
+  });
+
+  assert.equal(summary.total, 3);
+  assert.equal(summary.candidateTotal, 8);
+  assert.equal(summary.excludedCall, 5);
+  assert.equal(summary.skipped, 0);
+  assert.equal(summary.pending, 3);
+});
+
+test('lead queues derive the last send date from a completed execution', () => {
+  const summary = summarizeLeadBackfillQueue({
+    summary: { total: 1, queued: 1 },
+    related: [{
+      id: 1,
+      status: 'completed',
+      updated_at: '2026-09-09T08:00:04.000Z',
+      context: { outputs: { N9: { message_id: 101, status: 'sent' } } },
+    }],
+  });
+
+  assert.equal(summary.sent, 1);
+  assert.equal(summary.lastSentAt, '2026-09-09T08:00:04.000Z');
 });

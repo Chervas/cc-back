@@ -14,6 +14,8 @@ const {
   getUnsupportedLeadTemplateVariables,
   isLeadAutoReplyTemplate,
   normalizeConfig,
+  resolvePendingBatchSources,
+  resolveLeadEventKind,
 } = require('../../services/leadAutoReply.service');
 const flowEngine = require('../../services/flowEngineV2.service');
 const templateAutomationSync = require('../../services/whatsappTemplateAutomationSync.service');
@@ -136,6 +138,17 @@ async function run() {
     lead: { id: 10, status_lead: 'descartado', call_outcome: 'informacion', archived_at: null },
   });
   assert.equal(informationOnly.decision, false);
+
+  assert.equal(resolveLeadEventKind({ source: 'web', call_initiated: true }), 'call');
+  assert.equal(resolveLeadEventKind({ source: 'web', call_initiated: 1 }), 'call');
+  assert.equal(resolveLeadEventKind({ source: 'web', call_initiated: '1' }), 'call');
+  assert.equal(resolveLeadEventKind({ source: 'call_click', call_initiated: false }), 'call');
+  assert.equal(resolveLeadEventKind({ source: 'web', call_initiated: 0 }), 'write');
+
+  const writeOnlyConfig = normalizeConfig({ configured: true, sources: ['write'] });
+  assert.deepEqual(resolvePendingBatchSources(writeOnlyConfig, false), ['write']);
+  assert.deepEqual(resolvePendingBatchSources(writeOnlyConfig, true), ['write', 'call']);
+  assert.deepEqual(writeOnlyConfig.sources, ['write']);
 
   const config = normalizeConfig({
     configured: true,
