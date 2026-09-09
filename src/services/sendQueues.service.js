@@ -398,6 +398,64 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId }) 
   });
 }
 
+function summarizeLeadBackfillQueue({ summary = {}, related = [], jobStatus = 'completed', now = new Date() } = {}) {
+  let sent = 0;
+  let failed = 0;
+  let terminalSkipped = 0;
+  let waiting = 0;
+  const sentDates = [];
+  const nextDates = [];
+
+  for (const execution of related) {
+    const status = String(execution?.status || '').toLowerCase();
+    const sendOutput = execution?.context?.outputs?.N9 || execution?.context?.outputs?.N7 || {};
+    if (sendOutput.message_id) {
+      sent += 1;
+      const sentAt = sendOutput.at || sendOutput.sent_at || execution?.updated_at || execution?.updatedAt;
+      if (sentAt) sentDates.push(sentAt);
+    } else if (['failed', 'dead_letter'].includes(status) || execution?.last_error || String(sendOutput.status || '').toLowerCase() === 'error') {
+      failed += 1;
+    } else if (['completed', 'cancelled'].includes(status)) {
+      terminalSkipped += 1;
+    } else {
+      waiting += 1;
+    }
+    if (execution?.wait_until) {
+      const candidate = new Date(execution.wait_until);
+      if (Number.isFinite(candidate.getTime()) && candidate.getTime() >= now.getTime()) nextDates.push(candidate);
+    }
+  }
+
+  nextDates.sort((left, right) => left.getTime() - right.getTime());
+  const declaredQueued = numberValue(summary.queued, 0);
+  const total = Math.max(related.length, declaredQueued);
+  const processed = Math.min(total, sent + failed + terminalSkipped);
+  const pending = Math.max(waiting, total - processed);
+  const candidateTotal = Math.max(total, numberValue(summary.candidate_total, numberValue(summary.total, total)));
+  const skipped = Math.max(0, numberValue(summary.skipped, 0)) + terminalSkipped;
+  const effectiveStatus = pending > 0
+    ? 'waiting'
+    : failed > 0 && sent === 0
+      ? 'failed'
+      : String(jobStatus || 'completed');
+
+  return {
+    candidateTotal,
+    effectiveStatus,
+    failed,
+    lastSentAt: latestDate(...sentDates),
+    nextAt: nextDates[0]?.toISOString() || null,
+    pending,
+    processed,
+    sent,
+    skipped,
+    excludedCall: Math.max(0, numberValue(summary.excluded_call_total, 0)),
+    terminalSkipped,
+    total,
+    waiting,
+  };
+}
+
 async function leadBackfillQueues({ clinicIds, clinicNameById }) {
   if (!clinicIds.length) return [];
   const jobs = await db.JobRequest.findAll({
@@ -424,25 +482,11 @@ async function leadBackfillQueues({ clinicIds, clinicNameById }) {
     const summary = job.result_summary?.result || job.result_summary || {};
     const ids = Array.isArray(summary.execution_ids) ? summary.execution_ids.map(toInt).filter(Boolean) : [];
     const related = ids.map((id) => executionById.get(id)).filter(Boolean);
-    const sent = related.filter((execution) => execution.context?.outputs?.N9?.message_id || execution.context?.outputs?.N7?.message_id).length;
-    const failed = related.filter((execution) => ['failed', 'dead_letter'].includes(String(execution.status)) || execution.last_error).length;
-    const waiting = related.filter((execution) => ['waiting', 'running'].includes(String(execution.status))).length;
-    const nextDates = related.map((execution) => execution.wait_until ? new Date(execution.wait_until) : null)
-      .filter((date) => date && Number.isFinite(date.getTime()) && date.getTime() >= Date.now())
-      .sort((left, right) => left.getTime() - right.getTime());
-    const total = numberValue(summary.total, ids.length);
-    const effectiveStatus = failed > 0 && waiting === 0
-      ? 'failed'
-      : waiting > 0
-        ? 'waiting'
-        : String(job.status || 'completed');
+    const queue = summarizeLeadBackfillQueue({ summary, related, jobStatus: job.status });
+    const effectiveStatus = queue.effectiveStatus;
     const group = statusGroup(effectiveStatus);
     const statusCopy = statusPresentation(effectiveStatus);
     const clinicId = toInt(job.payload?.clinic_id);
-    const lastSentAt = latestDate(...related.flatMap((execution) => [
-      execution.context?.outputs?.N9?.at,
-      execution.context?.outputs?.N7?.at,
-    ]));
     return {
       id: `lead:${job.id}`,
       source_id: job.id,
@@ -459,11 +503,17 @@ async function leadBackfillQueues({ clinicIds, clinicNameById }) {
       status_explanation: statusCopy.explanation,
       clinic_ids: clinicId ? [clinicId] : [],
       clinic_name: clinicNameById.get(clinicId) || null,
-      total,
-      processed: group === 'history' ? total : sent + failed,
-      pending: group === 'history' ? 0 : Math.max(waiting, total - sent - failed),
-      failed,
-      next_at: nextDates[0]?.toISOString() || null,
+      total: queue.total,
+      candidate_total: queue.candidateTotal,
+      queued: queue.total,
+      sent: queue.sent,
+      skipped: queue.skipped,
+      excluded_call_count: queue.excludedCall,
+      skipped_reasons: summary.skipped_reasons || {},
+      processed: group === 'history' ? queue.total : queue.processed,
+      pending: group === 'history' ? 0 : queue.pending,
+      failed: queue.failed,
+      next_at: queue.nextAt,
       cadence: 'Un envío cada 30 minutos por número emisor',
       cadence_note: 'Solo se dosifican así los leads que ya estaban pendientes al activar la automatización.',
       message_preview: 'Primer mensaje automático de contacto configurado en la automatización de leads.',
@@ -475,7 +525,7 @@ async function leadBackfillQueues({ clinicIds, clinicNameById }) {
       sender: null,
       error: job.error_message || related.find((execution) => execution.last_error)?.last_error || null,
       created_at: job.created_at,
-      last_sent_at: lastSentAt,
+      last_sent_at: queue.lastSentAt,
       updated_at: job.updated_at,
     };
   });
@@ -647,4 +697,5 @@ module.exports = {
   describeDispatchCadence,
   humanizeQueueReason,
   marketingQueuePresentation,
+  summarizeLeadBackfillQueue,
 };

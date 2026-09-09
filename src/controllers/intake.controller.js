@@ -6704,6 +6704,7 @@ exports.startLeadAutoReplyPendingSend = asyncHandler(async (req, res) => {
     const batch = await leadAutoReplyService.startPendingBatch({
       clinicId,
       actorUserId: parseInteger(req.userData?.userId) || 1,
+      includeCallPending: req.body?.include_call_pending === true,
     });
     return res.status(202).json({ success: true, data: batch });
   } catch (error) {

@@ -36,6 +36,10 @@ function cleanString(value) {
   return value === undefined || value === null ? '' : String(value).trim();
 }
 
+function isTrue(value) {
+  return value === true || value === 1 || ['1', 'true'].includes(cleanString(value).toLowerCase());
+}
+
 function cloneJson(value) {
   return value === undefined || value === null ? value : JSON.parse(JSON.stringify(value));
 }
@@ -527,12 +531,28 @@ async function enqueueForLead({
 }
 
 function resolveLeadEventKind(lead) {
-  return lead?.call_initiated === true || cleanString(lead?.source).toLowerCase() === 'call_click'
+  return isTrue(lead?.call_initiated) || cleanString(lead?.source).toLowerCase() === 'call_click'
     ? 'call'
     : 'write';
 }
 
-async function listPendingLeadIds(clinicId, config) {
+function addSkipReason(summary, reason) {
+  const normalized = cleanString(reason) || 'unknown';
+  summary.skipped_reasons = {
+    ...(summary.skipped_reasons || {}),
+    [normalized]: Number(summary.skipped_reasons?.[normalized] || 0) + 1,
+  };
+}
+
+function resolvePendingBatchSources(config, includeCallPending = false) {
+  const sources = normalizeSources(config?.sources);
+  if (includeCallPending && !sources.includes('call')) sources.push('call');
+  return sources;
+}
+
+async function listPendingLeadIds(clinicId, config, { sources = config?.sources } = {}) {
+  const enabledSources = new Set(normalizeSources(sources));
+  if (!enabledSources.size) return [];
   const ids = [];
   let cursor = 0;
   while (true) {
@@ -557,7 +577,7 @@ async function listPendingLeadIds(clinicId, config) {
       cursor = Math.max(cursor, Number(lead.id) || cursor);
       if (!cleanString(lead.telefono)) continue;
       const eventKind = resolveLeadEventKind(lead);
-      if (!config.sources.includes(eventKind)) continue;
+      if (!enabledSources.has(eventKind)) continue;
       const contactState = await evaluatePendingLeadContact({
         leadId: lead.id,
         triggeredAt: lead.created_at || new Date(),
@@ -573,13 +593,21 @@ async function getPendingPreview(clinicId) {
   const flow = await findLatestClinicFlow(clinicId);
   const config = normalizeConfig(flow?.trigger_config || {});
   if (!flow || !config.configured || !config.sources.length) {
-    return { clinic_id: clinicId, count: 0, configured: false };
+    return { clinic_id: clinicId, count: 0, optional_call_count: 0, configured: false };
   }
   const leadIds = await listPendingLeadIds(clinicId, config);
-  return { clinic_id: clinicId, count: leadIds.length, configured: true };
+  const optionalCallIds = config.sources.includes('call')
+    ? []
+    : await listPendingLeadIds(clinicId, config, { sources: ['call'] });
+  return {
+    clinic_id: clinicId,
+    count: leadIds.length,
+    optional_call_count: optionalCallIds.length,
+    configured: true,
+  };
 }
 
-async function startPendingBatch({ clinicId, actorUserId }) {
+async function startPendingBatch({ clinicId, actorUserId, includeCallPending = false }) {
   const flow = await findLatestClinicFlow(clinicId, { activeOnly: true });
   if (!flow) {
     const error = new Error('Activa la automatización antes de enviar a los leads pendientes.');
@@ -588,16 +616,29 @@ async function startPendingBatch({ clinicId, actorUserId }) {
     throw error;
   }
   const config = normalizeConfig(flow.trigger_config || {});
-  const leadIds = await listPendingLeadIds(clinicId, config);
+  const batchSources = resolvePendingBatchSources(config, includeCallPending);
+  const configuredLeadIds = await listPendingLeadIds(clinicId, config);
+  const optionalCallIds = !config.sources.includes('call')
+    ? await listPendingLeadIds(clinicId, config, { sources: ['call'] })
+    : [];
+  const leadIds = Array.from(new Set([
+    ...configuredLeadIds,
+    ...(batchSources.includes('call') && !config.sources.includes('call') ? optionalCallIds : []),
+  ]));
   if (!leadIds.length) {
     return { job_id: null, total: 0, status: 'completed' };
   }
   const initialSummary = {
     clinic_id: clinicId,
     total: leadIds.length,
+    candidate_total: configuredLeadIds.length + optionalCallIds.length,
+    configured_source_total: configuredLeadIds.length,
+    included_call_total: includeCallPending ? optionalCallIds.length : 0,
+    excluded_call_total: includeCallPending ? 0 : optionalCallIds.length,
     processed: 0,
     queued: 0,
     skipped: 0,
+    skipped_reasons: {},
     execution_ids: [],
   };
   const { job } = await jobRequestsService.enqueueUniqueJobRequest({
@@ -608,6 +649,11 @@ async function startPendingBatch({ clinicId, actorUserId }) {
       clinic_id: clinicId,
       flow_id: flow.id,
       lead_ids: leadIds,
+      include_call_pending: includeCallPending === true,
+      candidate_total: initialSummary.candidate_total,
+      configured_source_total: initialSummary.configured_source_total,
+      included_call_total: initialSummary.included_call_total,
+      excluded_call_total: initialSummary.excluded_call_total,
     },
     resultSummary: initialSummary,
     dedupeScope: `${BACKFILL_JOB_TYPE}:clinic:${clinicId}`,
@@ -629,15 +675,21 @@ async function runPendingBatchJob(payload = {}, jobRequest = null) {
   const summary = {
     clinic_id: clinicId,
     total: leadIds.length,
+    candidate_total: Number(payload.candidate_total || leadIds.length),
+    configured_source_total: Number(payload.configured_source_total || leadIds.length),
+    included_call_total: Number(payload.included_call_total || 0),
+    excluded_call_total: Number(payload.excluded_call_total || 0),
     processed: 0,
     queued: 0,
     skipped: 0,
+    skipped_reasons: {},
     execution_ids: [],
   };
   for (const leadId of leadIds) {
     const lead = await db.LeadIntake.findOne({ where: { id: leadId, clinica_id: clinicId } });
     if (!lead) {
       summary.skipped += 1;
+      addSkipReason(summary, 'lead_not_available');
       summary.processed += 1;
       continue;
     }
@@ -647,24 +699,28 @@ async function runPendingBatchJob(payload = {}, jobRequest = null) {
     });
     if (!contactState.decision) {
       summary.skipped += 1;
+      addSkipReason(summary, contactState.reason);
       summary.processed += 1;
     } else {
+      const eventKind = resolveLeadEventKind(lead);
       const result = await enqueueForLead({
         lead,
-        eventKind: resolveLeadEventKind(lead),
+        eventKind,
         eventAt: new Date(),
         idempotencyScope: 'backfill',
+        bypassSourceFilter: payload.include_call_pending === true && eventKind === 'call',
         triggerData: {
           backfill: true,
           historical_pending: true,
           backfill_job_id: jobRequest?.id || null,
         },
       });
-      if (result.execution_id) {
+      if (!result.skipped && result.execution_id) {
         summary.execution_ids.push(result.execution_id);
         summary.queued += 1;
       } else {
         summary.skipped += 1;
+        addSkipReason(summary, result.reason);
       }
       summary.processed += 1;
     }
@@ -745,6 +801,8 @@ module.exports = {
   isEffectiveContactAttempt,
   isLeadAutoReplyTemplate,
   normalizeConfig,
+  resolvePendingBatchSources,
+  resolveLeadEventKind,
   runPendingBatchJob,
   saveConfig,
   startPendingBatch,
