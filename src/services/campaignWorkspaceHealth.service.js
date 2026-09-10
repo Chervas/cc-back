@@ -75,8 +75,9 @@ function buildWorkspaceHealth(report, evidence = new Map(), now = new Date()) {
     }
     if (observed.signals?.checked) {
       coverage.get('signals').evaluated.add(row.campaign.id);
-      if (row.campaign.provider === 'meta_ads' && Number.isSafeInteger(observed.signals.received)) {
-        coverage.get('signals').checks.push({ received: observed.signals.received,
+      if (Number.isSafeInteger(observed.signals.received)) {
+        coverage.get('signals').checks.push({ provider: row.campaign.provider, received: observed.signals.received,
+          processed: observed.signals.processed || 0, processing: observed.signals.processing || 0,
           pending: observed.signals.pending || 0, warnings: observed.signals.warnings || 0 });
       }
       if (!observed.signals.ready) add(row, 'signals', 'Hay señales pendientes de entrega', observed.signals.detail,
@@ -98,9 +99,15 @@ function buildWorkspaceHealth(report, evidence = new Map(), now = new Date()) {
       summary: issues[0]?.title || (!total.size ? 'No hay campañas aplicables a este indicador.'
         : missing ? `Faltan comprobaciones actuales de ${missing} ${missing === 1 ? 'campaña' : 'campañas'}.` : 'Sin incidencias en las campañas comprobadas.'),
       coverage: `Comprobadas: ${evaluated.size} de ${total.size} campañas`,
-      checks: [{ label: 'Cobertura', value: `${evaluated.size} de ${total.size}`, tone: missing ? 'neutral' : 'good' },
+      checks: [{ label: 'Cobertura', value: `${evaluated.size} de ${total.size}`, tone: missing || !total.size ? 'neutral' : 'good' },
         ...(id === 'signals' && checks.length ? [
-          { label: 'Recibidos por Meta', value: String(checks.reduce((sum, row) => sum + row.received, 0)), tone: 'neutral' },
+          ...[['meta_ads', 'Meta'], ['google_ads', 'Google']].filter(([provider]) => checks.some(row => row.provider === provider))
+            .map(([provider, label]) => ({ label: `Recibidos por ${label}`,
+              value: String(checks.filter(row => row.provider === provider).reduce((sum, row) => sum + row.received, 0)), tone: 'neutral' })),
+          ...(checks.some(row => row.provider === 'google_ads') ? [
+            { label: 'Procesados sin avisos por Google', value: String(checks.reduce((sum, row) => sum + row.processed, 0)), tone: 'neutral' },
+            { label: 'Procesando en Google', value: String(checks.reduce((sum, row) => sum + row.processing, 0)), tone: checks.some(row => row.processing) ? 'warning' : 'neutral' },
+          ] : []),
           { label: 'Con avisos', value: String(checks.reduce((sum, row) => sum + row.warnings, 0)), tone: checks.some(row => row.warnings) ? 'warning' : 'neutral' },
           { label: 'Sin confirmar', value: String(checks.reduce((sum, row) => sum + row.pending, 0)), tone: checks.some(row => row.pending) ? 'warning' : 'neutral' },
         ] : []),

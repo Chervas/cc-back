@@ -27,10 +27,10 @@ las pruebas de permisos y el QA autenticado. Referencia UX canonica en front:
 - Citas: `CitaPaciente.lead_intake_id`, misma clinica, fecha de creacion de la cita;
   excluye canceladas, reprogramadas y reservas provisionales. No se prorratean
   citas del canal ni se interpreta `status_lead=citado` como una cita real.
-- Presupuestos aceptados: `null` hasta disponer de una relacion canonica y
-  verificable presupuesto -> paciente -> interesado -> campana. `EconomicBudget`
-  tiene importe aceptado real, pero no la atribucion publicitaria. No usar precios
-  del catalogo, facturas, cobros ni repartos estimados.
+- Presupuestos aceptados: `EconomicBudget.accepted_amount` mediante el enlace
+  verificable presupuesto -> paciente/clinica -> cita -> interesado -> campana.
+  Una atribucion ambigua se excluye; no usar precios del catalogo, facturas,
+  cobros ni repartos estimados. Ver "Presupuestos Aceptados: Fuente Y Limites".
 - Leads/citas por anuncio: `null` mientras no exista identidad CRM a nivel de
   anuncio. No etiquetar conversiones de plataforma como leads ni inventar ganador.
 - Importes agregados: no sumar monedas distintas ni presentar moneda desconocida
@@ -974,3 +974,68 @@ Frontend sin cambios de UI/build (`f47f72d30ee68e28`). DEV PID `1173603`,
 reinicios `8535`; staging/gateway/preview mantienen PID. Auditoria SQL antes y
 despues: gate cerrado, settings=0, entregas=0, jobs CRM Meta=0. Sin migraciones,
 llamadas publicitarias, cobros ni promocion de codigo a staging.
+
+## Entregas Google En Salud (2026-09-10)
+
+- Se reutiliza `GoogleAdsConversionUploadAttempts`, sin otra tabla o cola.
+  El emisor anade a los nuevos intentos autorizados del workspace una referencia
+  de campana y una huella del contexto efectivo: configuracion web/publicitaria,
+  todas las versiones de politica, mapping, grant y cuenta de acceso. No guarda
+  tokens, contactos ni propiedades clinicas en esa referencia; tampoco la envia
+  a Google. Rotar un access token no invalida una entrega, cambiar el grant si.
+- El informe consulta las ultimas 24 h por clinica/cuenta y limita la lectura a
+  10.000 filas. Un resultado truncado, una campana sin asignar o un historial sin
+  referencia verificable no produce OK. No se reconstruye la campana de un
+  intento antiguo a partir del nombre, del total de la cuenta o de otro lead.
+- Antes de contar, relee configuracion efectiva, accion/destino por evento,
+  cuenta/grant, asignacion activa y autorizaciones actuales. La configuracion
+  de grupo solo cubre las sedes explicitas. Una reconexion posterior al intento,
+  una revocacion, cambio de conversion, clinica o version invalida esa evidencia.
+  No cambia ni sustituye los gates de emision; su integracion completa con la
+  prueba tecnica por destino sigue pendiente y la activacion permanece cerrada.
+- `accepted` significa recibido pero aun procesandose; no se cuenta como
+  procesado sin avisos. Un terminal exige requestId y diagnostico de la misma
+  cuenta/accion para el unico evento enviado por ese intento. Se distinguen
+  procesamiento correcto, avisos/parcial, rechazo y falta de confirmacion.
+  Incluso SUCCESS puede contener avisos, segun la
+  [referencia oficial de Diagnostics](https://developers.google.com/data-manager/api/reference/rest/v1/requestStatus/retrieve).
+  Ningun estado confirma atribucion o incremento de conversiones en Ads.
+- Salud conserva seis bloques y su unico detalle. Suma recibidos por proveedor,
+  procesados sin avisos/procesando en Google y avisos/sin confirmar, sin prestar
+  el estado entre campanas o inventar cobertura donde faltan datos. `0 de 0`
+  tampoco lleva el indicador verde de una comprobacion real.
+- El job `googleDataManagerDiagnostics` existente sigue reconciliando los
+  estados; no se crea otro cron ni se altera su horario. El GET de Salud es
+  `private, no-store`, usa registros persistentes y no consulta al proveedor,
+  refresca tokens ni escribe diagnosticos. La ventana de entregas de 24 h es
+  independiente del periodo de resultados seleccionado y del refresco nocturno.
+
+Pruebas: emisor real con transporte aislado, resolvedor scoped Google real con
+modelos aislados, herencia web/anunciante con dos politicas, multiples destinos,
+revocacion/reconexion, ausencia de historial, limite de filas y diagnosticos
+incompletos. Arriaga no tiene inventario Google visible en el scope de grupo
+actual; la lectura MySQL valida ademas el SQL/atributos con una cuenta inexistente
+y cero filas. No se presenta esa lectura como una entrega real a Google.
+
+Verificacion: 459 pruebas backend correctas, sin fallos ni omitidas. Incluye
+el recorrido emisor -> intento -> reconciliador Diagnostics -> Salud, con
+modelos/transporte aislados, y retirada posterior de autorizacion. Chromium:
+71 comprobaciones generales con lecturas reales y 29 capturas en
+`/home/ubuntu/qa-evidence/campaign-google-delivery-20260910-real-final`;
+33 adicionales y nueve capturas de Salud Google/Meta en
+`/home/ubuntu/qa-evidence/campaign-google-delivery-20260910-complete`.
+Este segundo recorrido parte de sesion/GET real y sustituye solo el GET del
+informe con casos de entregas; no crea recibos o configuraciones de clientes.
+Inspeccion manual del detalle desktop/movil y del scroll hacia Google. El
+regreso desde campañas de ambos proveedores conserva Salud como origen.
+Cero errores JS/servidor y cero escrituras de negocio; el caso de caida temporal
+Google de la regresion general tambien es un GET simulado. El primer intento
+general en `...-real` termino con 143 tras las comprobaciones; no se usa como
+evidencia de aprobacion, se repitio y termino correctamente en `...-real-final`.
+
+Solo reinicios backend DEV, PID final `1176755`, reinicios `8538`. Frontend
+sin cambios de UI/build (`f47f72d30ee68e28`); staging/gateway/preview conservan
+PID. Auditoria SQL antes/despues: gate cerrado, settings=0, entregas Meta=0 y
+jobs CRM Meta=0. Sin migraciones, emisiones publicitarias, cobros ni promocion.
+El objetivo completo sigue EN CURSO: este lector no completa la autorizacion
+por destino, Meta web, Optimiza Google/Meta ni el cambio de ruta canonica.

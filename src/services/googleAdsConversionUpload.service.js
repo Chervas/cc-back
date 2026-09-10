@@ -14,6 +14,7 @@ const {
 const { resolveScopedGoogleAdsRuntime } = require('./googleAdsScopedRuntime.service');
 const { extractGoogleLeadIdentity } = require('../lib/google-lead-routing');
 const { resolveWorkspaceSignalPolicy } = require('./campaignWorkspaceSignalPolicy.service');
+const { googleDeliveryContext } = require('./googleWorkspaceDeliveryContext.service');
 
 const GOOGLE_DATETIME_REGEX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/;
 
@@ -1077,6 +1078,12 @@ async function uploadGoogleConversionDestination({
     connectionSource: runtime.connectionSource || null,
     loginCustomerId: runtime.loginCustomerId || null
   };
+  if (workspacePolicy.applicable && workspacePolicy.allowed) {
+    // A receipt without this server-built binding cannot prove campaign health.
+    values.requestMetadata.workspace_delivery = googleDeliveryContext({ cfgRecord,
+      signalPolicyRecord: signalPolicyRecord || cfgRecord, runtime, policy: workspacePolicy,
+      campaignId: extractGoogleLeadIdentity(customData).campaignId });
+  }
   const prepared = await prepareAuditRow({ auditModel, values, status: 'pending' });
   if (prepared.duplicate) {
     return destinationResult({
