@@ -341,3 +341,27 @@ de la web compartida sin seleccionar/autorizar el grupo.
   Un primer arranque inmediatamente posterior al reinicio agoto el timeout
   antes de cargar la vista; quedo capturado en el directorio sin `-retry`.
   La repeticion completa y los reloads posteriores pasaron, sin ocultar ese fallo.
+
+## Siguiente Tramo: Recepcion Nativa Meta
+
+- Auditoria del receptor actual en `intake.controller.js`: valida la firma, pero
+  consulta la primera pagina mapeada con cache de cinco minutos y obtiene el lead
+  con `META_GRAPH_TOKEN` global. Si falla esa lectura, continua creando un lead
+  vacio; el vinculo a campana depende de AdCache/Campana. Estos puntos deben
+  sustituirse antes de considerar terminado el recorrido nativo.
+- `ClinicMetaAsset.pageAccessToken`, `metaConnectionId` y las asignaciones OAuth
+  ya permiten resolver credenciales acotadas. No debe elegirse arbitrariamente
+  una clinica cuando la pagina o cuenta publicitaria pertenezca a un grupo.
+- `oauth.routes.js` ya suscribe paginas a `leadgen`, pero solo registra el
+  resultado en logs y traga errores. La preparacion necesita prueba persistida
+  de acceso/suscripcion, distinta de haber recibido efectivamente un formulario.
+- El [SDK oficial de Meta](https://github.com/facebook/facebook-nodejs-business-sdk/blob/main/src/objects/lead.js)
+  confirma campos `ad_id`, `adset_id`, `campaign_id`, `form_id`, `is_organic` y
+  `created_time` en Lead. La guia web de recuperacion devolvio 429 en esta sesion;
+  no se han usado articulos de terceros como contrato tecnico.
+- Reutilizar la identidad externa en recepcion, informe por anuncio y KPI de
+  presupuestos Meta; no inventar UTMs ni crear una Campaign local. Las escrituras
+  de LeadIntake tienen indices unicos para event_id y external_source/external_id.
+  Existe `intakeQuickChatOutbox.service.js` para persistir lead, auditoria y outbox
+  atomicamente, y JobRequests para entregas/reintentos con namespace de runtime.
+- Aun no se ha modificado la recepcion nativa ni llamado a Meta en este avance.
