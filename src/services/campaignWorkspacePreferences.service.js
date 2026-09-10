@@ -60,7 +60,7 @@ async function saveWorkspacePreferences({ models, scope, actorId, input, loadInv
     const previous = setting.preferences || null;
     const version = Number(setting.version) + 1;
     // Saving a draft cannot alter live senders, conversion targets, optimization policies or advertising.
-    await setting.update({ preferences, version, updated_by_user_id: actorId }, { transaction });
+    await setting.update({ preferences, version, signal_preparation: null, updated_by_user_id: actorId }, { transaction });
     await models.CampaignWorkspaceEvent.create({ id: crypto.randomUUID(), setting_id: setting.id, version, actor_user_id: actorId,
       event_type: 'preferences_saved', changes: { preferences: { before: previous, after: preferences } }, created_at: now() }, { transaction });
     return { success: true, changed: true, configuration: publicSettings(setting, scope) };

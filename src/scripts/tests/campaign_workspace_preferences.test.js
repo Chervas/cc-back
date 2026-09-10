@@ -43,7 +43,8 @@ test('saving changes only the draft, version and authenticated audit, never live
   const result = await h.run();
   assert.equal(result.configuration.preferences.mode, 'measurement'); assert.equal(result.configuration.version, 2);
   assert.deepEqual(h.state.row.activation, activation);
-  assert.deepEqual(Object.keys(h.state.writes[0]).sort(), ['preferences', 'updated_by_user_id', 'version']);
+  assert.deepEqual(Object.keys(h.state.writes[0]).sort(), ['preferences', 'signal_preparation', 'updated_by_user_id', 'version']);
+  assert.equal(h.state.row.signal_preparation, null);
   assert.equal(h.state.audits[0].actor_user_id, 7); assert.equal(h.state.audits[0].event_type, 'preferences_saved');
   assert.equal(workspaceSignalDecision({ setting: h.state.row, provider: 'google_ads', accountId: '20', campaignId: '30',
     eventName: 'QualifiedLead', crmEventSource: CRM_MILESTONE_SOURCE }).allowed, true);

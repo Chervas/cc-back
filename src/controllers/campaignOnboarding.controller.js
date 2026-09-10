@@ -14,7 +14,6 @@ const {
   GOOGLE_ADS_CONVERSIONS_API_VERSION
 } = require('../lib/googleAdsClient');
 const { metaGet } = require('../lib/metaClient');
-const { googleAdsSearchRows } = require('../lib/googleAdsSearchRows');
 const { assertGoogleConversionMutationAccess } = require('../lib/googleConversionMutationAccess');
 const {
   overlayNormalizedGoogleAdsConfig,
@@ -254,7 +253,8 @@ function stableHttpsDestination(rawValue) {
   return { valid: true, url: parsed.toString() };
 }
 const VALID_PROVIDERS = new Set(['google_ads', 'meta_ads']);
-const VALID_EVENTS = ['lead', 'contact', 'qualified_lead', 'schedule', 'purchase'];
+const { VALID_EVENTS, EVENT_CATALOG, buildClinicaclickManagedMapping, listConversionActions: listConversionActionsInternal,
+  inspectCanonicalConversion, successfulValidationResponse } = require('../services/googleAdsConversionPreparation.service');
 // Raw lead/contact measure acquisition. Qualified Lead and Schedule are the
 // offline CRM milestones that make Mide y entiende useful for diagnosis, so a
 // fresh onboarding must provision both instead of waiting for a manual patch.
@@ -274,34 +274,6 @@ const STRATEGY_REQUEST_STATE_MAP = {
   active: 'activa',
   paused: 'pausada',
   completed: 'finalizada'
-};
-
-const EVENT_CATALOG = {
-  lead: {
-    name: 'Lead - ClinicaClick',
-    category: 'SUBMIT_LEAD_FORM',
-    detect: ['lead', 'leads', 'formulario']
-  },
-  contact: {
-    name: 'Contact - ClinicaClick',
-    category: 'CONTACT',
-    detect: ['contact', 'llamada', 'call']
-  },
-  qualified_lead: {
-    name: 'Qualified Lead - ClinicaClick',
-    category: 'QUALIFIED_LEAD',
-    detect: ['qualified lead', 'lead válido', 'lead valido', 'cualificado']
-  },
-  schedule: {
-    name: 'Schedule - ClinicaClick',
-    category: 'BOOK_APPOINTMENT',
-    detect: ['schedule', 'appointment', 'cita', 'agenda']
-  },
-  purchase: {
-    name: 'Purchase - ClinicaClick',
-    category: 'PURCHASE',
-    detect: ['purchase', 'venta', 'tratamiento', 'pago']
-  }
 };
 
 function parseInteger(raw) {
@@ -2958,68 +2930,6 @@ async function upsertIntakeMetaAdsForScope(scope, metaAdsPatch) {
     }, { transaction });
     return mergedMeta;
   });
-}
-
-function extractSendToFromTagSnippets(tagSnippets) {
-  if (!Array.isArray(tagSnippets) || !tagSnippets.length) return null;
-  const asText = JSON.stringify(tagSnippets);
-  const match = asText.match(/AW-\d+\/[A-Za-z0-9\-_]+/);
-  return match ? match[0] : null;
-}
-
-function mapConversionActionRow(row) {
-  const conversion = row?.conversionAction || {};
-  const id = conversion.id ? String(conversion.id) : null;
-  const resourceName = conversion.resourceName || null;
-  return {
-    id,
-    resource_name: resourceName,
-    name: conversion.name || null,
-    category: conversion.category || null,
-    type: conversion.type || null,
-    status: conversion.status || null,
-    counting_type: conversion.countingType || null,
-    include_in_conversions_metric: conversion.includeInConversionsMetric !== false,
-    primary_for_goal: conversion.primaryForGoal !== false,
-    send_to: extractSendToFromTagSnippets(conversion.tagSnippets || [])
-  };
-}
-
-function buildSuggestedMapping(actions) {
-  const mapping = {
-    lead: null,
-    contact: null,
-    qualified_lead: null,
-    schedule: null,
-    purchase: null
-  };
-
-  for (const action of actions) {
-    const name = String(action.name || '').toLowerCase();
-    for (const key of VALID_EVENTS) {
-      if (mapping[key]) continue;
-      const detectTerms = EVENT_CATALOG[key].detect;
-      if (detectTerms.some((term) => name.includes(term))) {
-        mapping[key] = action.id;
-      }
-    }
-  }
-
-  if (!mapping.lead && actions.length > 0) {
-    mapping.lead = actions[0].id;
-  }
-
-  return mapping;
-}
-
-function buildClinicaclickManagedMapping(actions) {
-  const mapping = { lead: null, contact: null, qualified_lead: null, schedule: null, purchase: null };
-  for (const key of VALID_EVENTS) {
-    const matches = (Array.isArray(actions) ? actions : []).filter(action =>
-      String(action?.name || '').trim().toLowerCase() === EVENT_CATALOG[key].name.toLowerCase());
-    if (matches.length === 1 && matches[0]?.id) mapping[key] = String(matches[0].id);
-  }
-  return mapping;
 }
 
 function buildClinicaclickConversionActionCreate(eventKey, currency) {
@@ -6400,47 +6310,6 @@ async function resolveLoginCustomerId(connectionId, customerId, scope) {
   }
 }
 
-async function listConversionActionsInternal({ accessToken, customerId, loginCustomerId, includeAllTypes = false }) {
-  const cleanCustomer = normalizeCustomerId(customerId);
-  if (!cleanCustomer) {
-    const err = new Error('customer_id requerido');
-    err.httpStatus = 400;
-    throw err;
-  }
-
-  const query = [
-    'SELECT',
-    '  conversion_action.id,',
-    '  conversion_action.resource_name,',
-    '  conversion_action.name,',
-    '  conversion_action.category,',
-    '  conversion_action.type,',
-    '  conversion_action.status,',
-    '  conversion_action.counting_type,',
-    '  conversion_action.include_in_conversions_metric,',
-    '  conversion_action.primary_for_goal,',
-    '  conversion_action.tag_snippets',
-    'FROM conversion_action',
-    ...(includeAllTypes ? [] : ["WHERE conversion_action.type = 'UPLOAD_CLICKS'"])
-  ].join('\n');
-
-  const rows = await googleAdsSearchRows({ customerId: cleanCustomer, accessToken, loginCustomerId, query, apiVersion: GOOGLE_ADS_CONVERSIONS_API_VERSION });
-  const actions = rows
-    .map(mapConversionActionRow)
-    .filter((item) => !!item.id && item.status !== 'REMOVED')
-    .sort((a, b) => {
-      const aEnabled = a.status === 'ENABLED' ? 1 : 0;
-      const bEnabled = b.status === 'ENABLED' ? 1 : 0;
-      return bEnabled - aEnabled;
-    });
-
-  return {
-    actions,
-    suggested_mapping: buildSuggestedMapping(actions),
-    clinicaclick_mapping: buildClinicaclickManagedMapping(actions)
-  };
-}
-
 async function ensureConversionActionsInternal({
   accessToken,
   customerId,
@@ -8672,7 +8541,8 @@ exports.validateGoogleDataManagerConversion = asyncHandler(async (req, res) => {
   }
   const canonicalMapping = listed.clinicaclick_mapping || {};
   const canonicalEvent = eventKey || VALID_EVENTS.find((key) => canonicalMapping[key] === conversionActionId) || null;
-  if (!canonicalEvent || canonicalMapping[canonicalEvent] !== conversionActionId) {
+  const canonicalProblem = inspectCanonicalConversion({ listed, customerId, conversionActionId, event: canonicalEvent });
+  if (canonicalProblem === 'canonical_conversion_action_required') {
     return res.status(409).json({
       success: false,
       validated: false,
@@ -8682,13 +8552,12 @@ exports.validateGoogleDataManagerConversion = asyncHandler(async (req, res) => {
     });
   }
   const canonicalAction = listed.actions.find((action) => String(action?.id || '') === conversionActionId);
-  if (canonicalAction?.resource_name !== `customers/${customerId}/conversionActions/${conversionActionId}`
-    || canonicalAction?.type !== 'UPLOAD_CLICKS' || canonicalAction?.category !== EVENT_CATALOG[canonicalEvent].category) {
+  if (canonicalProblem === 'canonical_action_type_incompatible') {
     return res.status(409).json({ success: false, validated: false, validate_only: true,
       error: 'canonical_action_type_incompatible',
       message: 'Revisa el propietario, tipo y evento de la accion antes de validar.' });
   }
-  if (String(canonicalAction?.status || '').toUpperCase() !== 'ENABLED') {
+  if (canonicalProblem === 'canonical_conversion_action_not_enabled') {
     return res.status(409).json({
       success: false,
       validated: false,
@@ -8697,7 +8566,7 @@ exports.validateGoogleDataManagerConversion = asyncHandler(async (req, res) => {
       message: 'La acción canónica de ClinicaClick no está habilitada en Google Ads.'
     });
   }
-  if (String(canonicalAction?.counting_type || '').toUpperCase() !== 'MANY_PER_CLICK') {
+  if (canonicalProblem === 'braid_incompatible_counting_type') {
     return res.status(409).json({
       success: false,
       validated: false,
@@ -8712,7 +8581,7 @@ exports.validateGoogleDataManagerConversion = asyncHandler(async (req, res) => {
       required_counting_type: 'MANY_PER_CLICK'
     });
   }
-  if (canonicalAction?.primary_for_goal !== false) {
+  if (canonicalProblem === 'canonical_action_primary_for_goal') {
     return res.status(409).json({
       success: false,
       validated: false,
@@ -8728,7 +8597,7 @@ exports.validateGoogleDataManagerConversion = asyncHandler(async (req, res) => {
   }
 
   try {
-    await uploadGoogleDataManagerConversion({
+    const validation = await uploadGoogleDataManagerConversion({
       customerId,
       conversionAction: `customers/${customerId}/conversionActions/${conversionActionId}`,
       conversionDateTime: new Date(),
@@ -8744,6 +8613,9 @@ exports.validateGoogleDataManagerConversion = asyncHandler(async (req, res) => {
       loginCustomerId: runtime.loginCustomerId,
       validateOnly: true
     });
+    if (!successfulValidationResponse(validation)) {
+      throw Object.assign(new Error('Google no ha confirmado una validacion completa sin avisos.'), { code: 'DATA_MANAGER_VALIDATION_UNCONFIRMED' });
+    }
   } catch (error) {
     const providerError = error?.response?.data?.error || null;
     return res.status(Number(error?.response?.status) || 409).json({

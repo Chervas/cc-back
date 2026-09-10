@@ -484,8 +484,12 @@ async function uploadConversionEvent({
       'x-goog-user-project': resolvedQuotaProjectId,
       'Content-Type': 'application/json'
     },
-    timeout: timeoutMs
+    timeout: timeoutMs,
+    ...(input.validateOnly === true ? { maxRedirects: 0 } : {})
   });
+  if (input.validateOnly === true && (!response?.data || typeof response.data !== 'object' || Array.isArray(response.data))) {
+    throw Object.assign(new Error('Google devolvio una respuesta de validacion no reconocida'), { code: 'DATA_MANAGER_VALIDATION_UNCONFIRMED' });
+  }
   return response?.data || {};
 }
 

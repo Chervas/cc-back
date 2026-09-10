@@ -72,7 +72,7 @@ async function saveWorkspaceAccounts({ models, scope, actorId, input, loadInvent
     }
     const previous = current?.accounts || [];
     const version = Number(current?.version || 0) + 1;
-    const row = current ? await current.update({ accounts, version, updated_by_user_id: actorId }, { transaction })
+    const row = current ? await current.update({ accounts, version, signal_preparation: null, updated_by_user_id: actorId }, { transaction })
       : await models.CampaignWorkspaceSetting.create({ id: crypto.randomUUID(), ...where, version, accounts,
         activation: null, updated_by_user_id: actorId }, { transaction });
     await models.CampaignWorkspaceEvent.create({ id: crypto.randomUUID(), setting_id: row.id, version,

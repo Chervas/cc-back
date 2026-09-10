@@ -707,3 +707,75 @@ de la web compartida sin seleccionar/autorizar el grupo.
   seleccion/borrador, altas y validaciones del escenario interceptadas por el
   navegador, sin crear conversiones ni enviar pacientes. Evidencia:
   `/home/ubuntu/qa-evidence/campaign-google-conversions-v24-20260910`.
+
+## Comprobacion Google persistente (2026-09-10)
+
+- `GET /marketing/campaign-workspace/google-preparation` lee la comprobacion
+  del ambito/cuenta; `POST .../google-preparation/check` acepta solamente
+  `account_id` y `expected_version`. Los hitos proceden del borrador guardado,
+  no del navegador. Solo lead/contact/qualified_lead/schedule, nunca Purchase
+  por la presencia del KPI de presupuestos aceptados.
+- Ambos endpoints requieren sesion y acceso al ambito completo. La escritura
+  exige permiso write, cuenta seleccionada, mapping activo y assignment activo
+  del mismo grant Google, con scopes Ads y Data Manager. Grants o MCC ambiguos
+  no seleccionan el primero. Se revalidan membresias, ACL, contexto y run ID
+  antes de persistir el resultado de una consulta remota.
+- JSON nullable `CampaignWorkspaceSettings.signal_preparation`, version de
+  esquema 1. Migracion individual `20260910200000-add-campaign-workspace-signal-preparation.js`,
+  aditiva e idempotente, aplicada y registrada sobre la BD compartida. No se
+  ejecutan otras migraciones ni se rellenan configuraciones de clientes para QA.
+  El down exige archivo explicito si existen comprobaciones guardadas.
+- Se guarda un marcador `checking` en una transaccion corta antes de llamar
+  al proveedor. Una segunda transaccion publica el resultado; cada una aumenta
+  la version y audita actor/cuenta/hitos/estado, sin tokens ni pacientes.
+  No se mantienen bloqueos SQL durante las peticiones externas. Un fallo o
+  interrupcion nunca conserva el verde anterior. El marcador vence a los dos
+  minutos; un resultado tardio no pisa un nuevo intento o una configuracion nueva.
+- Validez de 24 h, con huella de owner, miembros, cuentas/campañas seleccionadas,
+  preferencias, mappings, assignment conectado y scopes del grant. La rotacion
+  ordinaria del access token no invalida la prueba. Cambiar cuentas/preferencias
+  borra la evidencia, incluso si mas tarde se vuelve a la seleccion anterior.
+  Expirar invalida al leer; no es necesario un job nocturno por comprobacion.
+  El registro actual queda acotado por la seleccion y el historial en auditoria.
+- Reutiliza el listado Google paginado y la inspeccion de acciones canonicas:
+  propietario, categoria, UPLOAD_CLICKS, ENABLED, MANY_PER_CLICK y secundaria.
+  La prueba Data Manager utiliza validateOnly y GCLID_1, sin datos de pacientes,
+  eventos ingeridos ni cambios en pujas. Presupuesto interactivo de 55 s,
+  hasta 15 s de inventario y 8 s por validacion; UI espera hasta 65 s.
+  Un cuerpo vacio JSON puede ser correcto; avisos, errores, campos inesperados,
+  HTML o respuestas no JSON no confirman la validacion. No sigue redirecciones.
+  Referencia: [events.ingest](https://developers.google.com/data-manager/api/reference/rest/v1/events/ingest).
+- El dialogo recupera el resultado guardado y comprueba tambien la accion
+  actual antes de mostrar verde. Mantiene el detalle tecnico plegado, muestra
+  fecha/caducidad/avisos y conserva el paso al cerrar. Refresca la version local
+  de configuracion para no guardar despues con una version anterior.
+- Esta prueba no es consentimiento ni permiso comercial, no acredita la
+  autorizacion documentada de conversiones mejoradas de una clinica y NO
+  habilita ningun emisor. Antes de activar se deberan revalidar acciones/grants
+  y guardar el mandato por cuenta/hito. Gate de activacion permanece cerrado.
+  La recepcion existente de formularios, señales actuales y los jobs no cambian.
+- Verificacion de este tramo: 327 pruebas backend principales, ocho suites
+  Google/OAuth adicionales y 49 frontend. Lectura real del contexto Google de
+  Arriaga (dos clinicas, mapping/assignment/grant), sustituyendo solo en memoria
+  la seleccion aun no guardada: sin escritura ni llamada a Google. SQL posterior:
+  cero settings, borradores y pruebas de clientes poblados.
+- Build DEV `d5da323ba434b8f3`, 10/09/2026 18:30:19 UTC, 145357 ms. Mantiene
+  el aviso previo de bundle inicial 4.58 MB frente a 3 MB. Chromium autenticado:
+  44 comprobaciones y 11 capturas del dialogo, cero errores JS/escrituras reales.
+  Listado real de 27 acciones Google; borrador, persistencia, alta y validacion
+  del escenario interceptados en navegador. No acredita una ingesta real ni
+  una autorizacion de hitos de un cliente. Evidencia:
+  `/home/ubuntu/qa-evidence/campaign-google-proof-20260910-verified`.
+- QA detecto un aviso operativo real sobre el modal movil. Los dialogos de este
+  workspace quedan por encima sin marcarlo como atendido; el aviso sigue pendiente
+  al cerrar. Tambien se conserva una edicion local ante respuestas tardias de
+  preparacion. Pruebas de hit target y de respuesta retrasada incluidas.
+  Se conserva el pase fallido `campaign-google-proof-20260910-final`.
+- Reiniciado solo DEV (PID 1161535, contador 8529). Staging, gateway y proceso
+  preview no reiniciados. No promocion ni cambios publicitarios o de cobro.
+  La implementacion completa continua EN CURSO; no cambiar aun la ruta canonica.
+- Regresion general sobre el mismo build: 71 comprobaciones y 29 capturas en
+  1440/1024/390 px, con APIs reales de inventario, informe, Salud y preparacion.
+  Sin errores JS, errores de servidor en el workspace ni escrituras de negocio.
+  Revisadas manualmente Salud desktop y grafica movil a ras, ademas del dialogo.
+  Evidencia: `/home/ubuntu/qa-evidence/campaign-workspace-google-proof-20260910`.

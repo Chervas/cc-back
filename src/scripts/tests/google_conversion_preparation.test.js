@@ -9,6 +9,7 @@ const db = require('../../../models');
 const { googleAdsSearchRows } = require('../../lib/googleAdsSearchRows');
 const { assertGoogleConversionMutationAccess } = require('../../lib/googleConversionMutationAccess');
 const { buildBaseUrls, GOOGLE_ADS_CONVERSIONS_API_VERSION } = require('../../lib/googleAdsClient');
+const { inspectCanonicalConversion, successfulValidationResponse } = require('../../services/googleAdsConversionPreparation.service');
 const { __test: { buildClinicaclickManagedMapping, ensureConversionActionsInternal } } = require('../../controllers/campaignOnboarding.controller');
 after(() => db.sequelize.close());
 
@@ -105,6 +106,7 @@ test('the validation endpoint checks the provider action and never trusts a clie
     { resource_name: 'customers/9999999999/conversionActions/1' }, { primary_for_goal: true },
     { status: 'HIDDEN' }, { counting_type: 'ONE_PER_CLICK' }, { queryError: true }]) {
     const calls = []; const context = { exports: {}, asyncHandler: fn => fn, getUserId: () => 7,
+      inspectCanonicalConversion, successfulValidationResponse,
       normalizeCustomerId: value => value, VALID_EVENTS: ['lead'], EVENT_CATALOG: { lead: { category: 'SUBMIT_LEAD_FORM' } },
       GOOGLE_ADS_SCOPE: 'ads', GOOGLE_DATA_MANAGER_SCOPE: 'data-manager',
       resolveScopeFromInput: async () => ({ clinic_ids: [2], clinic_id: 2 }),
@@ -114,7 +116,7 @@ test('the validation endpoint checks the provider action and never trusts a clie
         assert.equal(options.includeAllTypes, true);
         if (patch?.queryError) throw new Error('provider unavailable');
         return { clinicaclick_mapping: { lead: '1' }, actions: [{ ...action, ...patch }] };
-      }, uploadGoogleDataManagerConversion: async options => { calls.push(options); } };
+      }, uploadGoogleDataManagerConversion: async options => { calls.push(options); return {}; } };
     vm.runInNewContext(source.slice(start, end), context);
     let status = 200; let body;
     const res = { status: value => { status = value; return res; }, json: value => { body = value; return res; } };

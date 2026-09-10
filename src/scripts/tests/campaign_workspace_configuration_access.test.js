@@ -18,9 +18,17 @@ function harness(options = {}) {
 }
 
 test('configuration queries and commands require an authenticated session', async () => {
-  for (const method of ['get', 'put', 'preparation', 'activate', 'assign', 'metaPreparation', 'refreshMeta', 'requestMetaPage', 'metaPageJob', 'preferences']) {
+  for (const method of ['get', 'put', 'preparation', 'activate', 'assign', 'metaPreparation', 'refreshMeta', 'requestMetaPage', 'metaPageJob', 'preferences', 'googlePreparation', 'checkGoogle']) {
     const h = harness(); await h.run(method, { userData: null });
     assert.equal(h.res.statusCode, 401); assert.equal(h.calls.length, 0);
+  }
+});
+test('Google proof writes require full-scope write access and do not accept aggregate owners', async () => {
+  const forbidden = harness({ hasAccess: async input => input.access === 'read', checkGoogle: () => assert.fail('cannot check') });
+  await forbidden.run('checkGoogle'); assert.equal(forbidden.res.statusCode, 403);
+  for (const scope of ['all', '1,2', 'group:0']) {
+    const h = harness({ checkGoogle: () => assert.fail('cannot check an aggregate') });
+    await h.run('checkGoogle', { query: { scope } }); assert.equal(h.res.statusCode, 400); assert.equal(h.calls.length, 0);
   }
 });
 test('preferences require full-scope write access and use the authenticated actor', async () => {

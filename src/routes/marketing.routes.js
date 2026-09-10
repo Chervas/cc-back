@@ -214,6 +214,8 @@ router.get('/campaign-workspace/meta-preparation', campaignWorkspaceController.g
 router.post('/campaign-workspace/meta-preparation/check', campaignWorkspaceController.refreshMetaPreparation);
 router.post('/campaign-workspace/meta-preparation/page', campaignWorkspaceController.requestMetaPageReception);
 router.put('/campaign-workspace/preferences', campaignWorkspaceController.savePreferences);
+router.get('/campaign-workspace/google-preparation', campaignWorkspaceController.getGooglePreparation);
+router.post('/campaign-workspace/google-preparation/check', campaignWorkspaceController.checkGooglePreparation);
 router.get('/campaign-workspace/meta-preparation/jobs/:jobId', campaignWorkspaceController.getMetaPageReceptionJob);
 router.get('/campaign-onboarding/meta-pixels', campaignOnboardingController.listMetaPixels);
 router.get('/campaign-onboarding/external-campaigns', campaignOnboardingController.listExternalCampaigns);

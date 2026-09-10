@@ -72,3 +72,9 @@ test('saving an unchanged selection is idempotent and does not create audit nois
 test('no selected accounts excludes campaigns without changing provider configurations', () => {
   assert.equal(campaignIncluded(campaign, { accounts: [] }), false);
 });
+test('changing the saved selection invalidates technical conversion evidence', async () => {
+  const current = { id: '1', version: 3, accounts: [account], signal_preparation: { google_ads: {} },
+    async update(values) { Object.assign(this, values); return this; } };
+  const h = harness(current); await h.save({ expected_version: 3, accounts: [{ ...account, include_future: false }] });
+  assert.equal(current.signal_preparation, null);
+});

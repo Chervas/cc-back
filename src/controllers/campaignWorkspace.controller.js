@@ -13,6 +13,7 @@ const { campaignReference, metaCampaignContext, refreshMetaCampaignDestinations 
 const { loadNativeFormEvidence } = require('../services/campaignWorkspaceNativeReception.service');
 const { requestPageReception, getPageReceptionJob } = require('../services/campaignWorkspaceMetaPage.service');
 const { saveWorkspacePreferences } = require('../services/campaignWorkspacePreferences.service');
+const { loadGooglePreparation, checkGooglePreparation } = require('../services/campaignWorkspaceGooglePreparation.service');
 
 function createWorkspaceHandler({ models = db, resolveScope = resolveClinicScope,
   accessibleClinics = getAccessibleMarketingClinicIds, hasAccess = hasMarketingClinicScopeAccess,
@@ -43,7 +44,8 @@ function createWorkspaceConfigurationHandlers({ models = db, resolveScope = reso
   hasAccess = hasMarketingClinicScopeAccess, loadInventory = loadWorkspaceInventory, save = saveWorkspaceAccounts,
   prepare = loadWorkspacePreparation, activate = activateWorkspaceMeasurement, assign = assignWorkspaceCampaign,
   metaContext = metaCampaignContext, refreshMeta = refreshMetaCampaignDestinations, nativeEvidence = loadNativeFormEvidence,
-  requestMetaPage = requestPageReception, metaPageJob = getPageReceptionJob, savePreferences = saveWorkspacePreferences } = {}) {
+  requestMetaPage = requestPageReception, metaPageJob = getPageReceptionJob, savePreferences = saveWorkspacePreferences,
+  googlePreparation = loadGooglePreparation, checkGoogle = checkGooglePreparation } = {}) {
   async function authorize(req, res, access) {
     const actorId = Number(req.userData?.userId);
     if (!Number.isSafeInteger(actorId) || actorId <= 0) { res.status(401).json({ success: false, error: 'unauthenticated' }); return null; }
@@ -59,6 +61,24 @@ function createWorkspaceConfigurationHandlers({ models = db, resolveScope = reso
     return { scope, actorId };
   }
   return {
+    googlePreparation: async (req, res) => {
+      const context = await authorize(req, res, 'read');
+      if (!context) return;
+      try { return res.json(await googlePreparation({ models, ...context, input: { account_id: req.query.account_id } })); }
+      catch (error) {
+        if (error.status >= 400 && error.status < 500) return res.status(error.status).json({ success: false, error: error.code });
+        throw error;
+      }
+    },
+    checkGoogle: async (req, res) => {
+      const context = await authorize(req, res, 'write');
+      if (!context) return;
+      try { return res.json(await checkGoogle({ models, ...context, input: req.body, hasAccess })); }
+      catch (error) {
+        if (error.status >= 400 && error.status < 500) return res.status(error.status).json({ success: false, error: error.code });
+        throw error;
+      }
+    },
     preferences: async (req, res) => {
       const context = await authorize(req, res, 'write');
       if (!context) return;
@@ -172,4 +192,6 @@ exports.refreshMetaPreparation = asyncHandler(configurationHandlers.refreshMeta)
 exports.requestMetaPageReception = asyncHandler(configurationHandlers.requestMetaPage);
 exports.getMetaPageReceptionJob = asyncHandler(configurationHandlers.metaPageJob);
 exports.savePreferences = asyncHandler(configurationHandlers.preferences);
+exports.getGooglePreparation = asyncHandler(configurationHandlers.googlePreparation);
+exports.checkGooglePreparation = asyncHandler(configurationHandlers.checkGoogle);
 exports.createWorkspaceConfigurationHandlers = createWorkspaceConfigurationHandlers;
