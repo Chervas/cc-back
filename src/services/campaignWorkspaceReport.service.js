@@ -3,6 +3,7 @@
 const { formatDateLocal, localDateTimeToUtc } = require('../lib/availability-calendar');
 const { canonicalExternalCampaignIdentity, externalCampaignIdentityKey } = require('./externalCampaignAssignmentTargets.service');
 const { canonicalLeadAdvertisingIdentity } = require('./leadAdvertisingIdentity.service');
+const { nativeForms } = require('./campaignWorkspaceNativeReception.service');
 
 const TIME_ZONE = 'Europe/Madrid';
 const DAY = 86400000;
@@ -71,6 +72,9 @@ function visibleCampaigns({ scope, mappings, assignments, inventory }) {
       provider: identity.provider, status: item.status || 'UNKNOWN',
       paused: /PAUSED|REMOVED|DELETED|ARCHIVED/i.test(item.status || ''),
       destination: item.destination_detection?.kind === 'web' ? 'web' : item.destination_detection?.kind === 'lead_form' ? 'native' : 'unknown',
+      ...(identity.provider === 'meta_ads' ? { nativeForms: nativeForms(item.destination_detection),
+        destinationCheckedAt: item.destination_detection?.source === 'workspace_meta_graph' ? item.destination_detection.checked_at : null,
+        destinationComplete: item.destination_detection?.source === 'workspace_meta_graph' && item.destination_detection.complete === true } : {}),
       urls: (item.destination_detection?.urls || []).filter(url => {
         try { return ['https:', 'http:'].includes(new URL(url).protocol); } catch (_) { return false; }
       }),

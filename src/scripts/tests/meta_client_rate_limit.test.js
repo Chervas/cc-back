@@ -77,3 +77,22 @@ test('metaGet corta el lote en el primer rate limit y persiste cooldown', async 
     metaClient._test.resetState();
   }
 });
+
+test('interactive Meta checks can disable retries without bypassing the shared client', async () => {
+  metaClient._test.resetState();
+  let calls = 0;
+  const restores = [
+    patchProperty(db.ApiUsageCounter, 'findOne', async () => null),
+    patchProperty(axios, 'get', async () => { calls++; throw Object.assign(new Error('provider unavailable'), { response: { status: 503 } }); }),
+  ];
+  const previousDelay = process.env.METASYNC_REQUEST_DELAY_MS;
+  process.env.METASYNC_REQUEST_DELAY_MS = '0';
+  try {
+    await assert.rejects(metaClient.metaGet('30/ads', { accessToken: 'test-token', maxRetries: 0 }), /provider unavailable/);
+    assert.equal(calls, 1);
+  } finally {
+    if (previousDelay === undefined) delete process.env.METASYNC_REQUEST_DELAY_MS;
+    else process.env.METASYNC_REQUEST_DELAY_MS = previousDelay;
+    restores.reverse().forEach(restore => restore()); metaClient._test.resetState();
+  }
+});

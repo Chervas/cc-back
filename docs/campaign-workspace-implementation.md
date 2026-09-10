@@ -428,3 +428,63 @@ de la web compartida sin seleccionar/autorizar el grupo.
   `-fixed` registro los 502 de arranque antes de la barrera de disponibilidad.
   Las pruebas del receptor usan proveedor y persistencia aislados: no son una
   importacion ni una prueba de permisos reales de Meta.
+
+## Comprobacion de Destinos y Formularios Meta
+
+- El dialogo real de preparacion consulta `GET /campaign-workspace/meta-preparation`.
+  Abrirlo solo lee inventario y evidencia local; no consulta Graph ni escribe.
+  `POST /campaign-workspace/meta-preparation/check` hace una comprobacion
+  explicita del inventario publicitario y actualiza exclusivamente su cache.
+  No modifica anuncios, paginas, suscripciones, conversiones ni presupuestos.
+- Requiere campana visible y asignada, cuenta seleccionada y una conexion OAuth
+  vigente del ambito. Revalida todo despues del I/O y serializa el guardado;
+  la revision impide sobrescribir una comprobacion concurrente. No acepta tokens,
+  clinica o actor suministrados por el navegador. La cuenta compartida conserva
+  su asignacion revisada; nunca se crea una segunda Campaign/Campana.
+- Lectura paginada de anuncios, hasta 20 paginas de 100, usando cursores sobre
+  el endpoint fijo, no las URLs `next`. Comprueba cuenta/campana/anuncio y
+  pagina/formulario. No basta el objetivo publicitario ni el primer anuncio.
+  Paginacion incompleta, creatividades desconocidas y destinos mixtos quedan
+  pendientes. CTA de formulario con un enlace a la web no cuenta como un
+  segundo destino de recepcion. Los metadatos del formulario se limitan a
+  ID, nombre, pagina y estado: no se piden respuestas, contactos o test leads.
+- Usa el cliente Meta y su pausa/cuota compartidas, con timeout total de 45 s
+  para Graph y sin reintentos interactivos en cada llamada. El limite temporal
+  y de paginas no equivale a una comprobacion completa. Para inventarios que lo
+  superen sigue pendiente pasar el mismo detector a un job de fondo y conectar
+  la renovacion nocturna; no se ha añadido un cron paralelo ni un bucle al abrir
+  el informe. Una comprobacion de destinos caduca para readiness en 24 h.
+- Evidencia nativa: proyeccion JSON de la identidad verificada del receptor,
+  join obligatorio al LeadIntake de la misma clinica y recepcion en los ultimos
+  siete dias para CADA formulario de la misma cuenta/campana/pagina. Una
+  recepcion de otra campana que reutilice el formulario no vale. Se comprueban
+  de nuevo asignaciones OAuth y caducidad de cuentas y paginas. Un error
+  explicito de acceso a un formulario invalida la recepcion preparada aunque
+  exista una recepcion anterior. No se lee PII para este informe.
+- El estado nativo usa por ahora las paginas ya conectadas en ClinicMetaAsset.
+  NO se reutiliza `oauth/meta/map-assets` para añadir paginas de recepcion:
+  ese endpoint sustituye la pagina social principal. Sigue pendiente el
+  almacenamiento independiente de varias paginas, su accion de conexion,
+  verificacion persistida de `leadgen` y reintento contextual de jobs fallidos.
+  El dialogo detecta e informa de esas faltas; no debe darse por cerrado el
+  recorrido nativo completo ni promoverse la ruta canonica todavia.
+- Campos contrastados con el SDK oficial:
+  [AdCreative](https://github.com/facebook/facebook-nodejs-business-sdk/blob/main/src/objects/ad-creative.js),
+  [CTA](https://github.com/facebook/facebook-nodejs-business-sdk/blob/main/src/objects/ad-creative-link-data-call-to-action-value.js)
+  y [LeadgenForm](https://github.com/facebook/facebook-nodejs-business-sdk/blob/main/src/objects/leadgen-form.js).
+- La cache de destinos conserva el estado/nombre mas reciente de SocialAdsEntity;
+  no congela campanas activas cuando la sincronizacion nocturna las ve pausadas.
+  Identidades contradictorias de un mismo lead no prueban dos formularios.
+- Verificacion: 313 pruebas de Campanas y 3 del cliente Meta OK; consulta SQL
+  real de la proyeccion/join nativos OK, sin escribir. Build publicado DEV
+  `f23a68b436c7d2cc` (aviso previo de bundle inicial 4.58 MB).
+  Regresion Chromium autenticada: 58 comprobaciones, 25 capturas, cero errores
+  JS/escrituras. Evidencia `campaign-workspace-meta-destination-20260910` bajo
+  `/home/ubuntu/qa-evidence/`. QA del dialogo: 14 comprobaciones, 6 capturas,
+  `campaign-meta-preparation-20260910-passed`. La apertura inicial usa la API
+  real del grupo BS Medical; las cuatro capturas `fixture` prueban listas largas
+  y permisos mediante respuestas GET aisladas del navegador, no datos reales.
+  No se ejecuto Graph ni se guardo inventario de clientes en este QA.
+  Se corrigio un fallo real de retorno: cerrar sin comprobar no recarga ni
+  pliega la campana abierta. Los intentos anteriores conservan el fallo de
+  retorno y los ajustes del runner para la zona tactil MDC y el hover del menu.

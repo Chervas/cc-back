@@ -8,6 +8,7 @@ const { campaignIncluded } = require('./campaignWorkspaceSettings.service');
 const { loadFormReceiptEvidence } = require('./campaignWorkspaceReception.service');
 const { loadBudgetCampaignAttribution } = require('./campaignEconomicAttribution.service');
 const { attachLeadAdvertisingIdentities } = require('./leadAdvertisingIdentity.service');
+const { loadNativeFormEvidence } = require('./campaignWorkspaceNativeReception.service');
 
 const LEAD_FIELDS = ['id', 'clinica_id', 'source', 'channel', 'utm_source', 'utm_campaign', 'source_detail', 'google_ads_customer_id', 'google_ads_campaign_id', 'created_at'];
 const GOOGLE_MAPPING_FIELDS = ['id', 'customerId', 'descriptiveName', 'currencyCode', 'clinicaId', 'grupoClinicaId', 'assignmentScope', 'lastSyncedAt'];
@@ -47,9 +48,15 @@ async function loadWorkspaceInventory({ models, scope, transaction = null }) {
   if (metaStoredIds.length) {
     const metaInventory = await models.SocialAdsEntity.findAll({ where: { level: 'campaign', ad_account_id: { [Op.in]: metaStoredIds } },
       attributes: ['ad_account_id', 'entity_id', 'name', 'effective_status', 'status', 'updated_at'], raw: true, transaction });
-    for (const row of metaInventory) inventory.push({ provider: 'meta_ads', customer_id: row.ad_account_id,
-      campaign_id: row.entity_id, campaign_name: row.name, status: row.effective_status || row.status,
-      last_seen_at: row.updated_at });
+    for (const row of metaInventory) {
+      const cached = inventory.find(item => item.provider === 'meta_ads' && accountId(item.customer_id) === accountId(row.ad_account_id)
+        && item.campaign_id === row.entity_id);
+      const snapshot = { campaign_name: row.name, status: row.effective_status || row.status, last_seen_at: row.updated_at };
+      // Destination checks must not freeze status/name ahead of the nightly entity synchronizer.
+      if (cached) {
+        if (+new Date(row.updated_at) >= +new Date(cached.last_seen_at || 0)) Object.assign(cached, snapshot);
+      } else inventory.push({ provider: 'meta_ads', customer_id: row.ad_account_id, campaign_id: row.entity_id, ...snapshot });
+    }
   }
   const assignments = refs.length ? await models.ExternalCampaignAssignment.findAll({ where: { [Op.or]: refs },
     attributes: ['provider', 'customer_id', 'campaign_id', 'clinica_id', 'status'], raw: true, transaction }) : [];
@@ -151,7 +158,7 @@ async function loadWebEvidence({ models, campaigns, selectedClinics, groups, now
     } });
     byClinic.set(Number(clinic.id_clinica), { state, readiness: assessConsentMeasurementReadiness(state.marketingState) });
   }
-  const evidence = new Map();
+  const evidence = await loadNativeFormEvidence({ models, campaigns, selectedClinics, now, transaction });
   for (const campaign of campaigns) {
     if (!campaign.assigned || campaign.destination !== 'web') continue;
     const { state, readiness } = byClinic.get(campaign.clinicId) || {};

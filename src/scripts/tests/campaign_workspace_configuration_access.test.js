@@ -18,10 +18,22 @@ function harness(options = {}) {
 }
 
 test('configuration queries and commands require an authenticated session', async () => {
-  for (const method of ['get', 'put', 'preparation', 'activate', 'assign']) {
+  for (const method of ['get', 'put', 'preparation', 'activate', 'assign', 'metaPreparation', 'refreshMeta']) {
     const h = harness(); await h.run(method, { userData: null });
     assert.equal(h.res.statusCode, 401); assert.equal(h.calls.length, 0);
   }
+});
+test('Meta checks require full-scope write access; opening the dialog only reads cached proof', async () => {
+  const forbidden = harness({ hasAccess: async input => input.access === 'read', refreshMeta: () => assert.fail('forbidden check') });
+  await forbidden.run('refreshMeta'); assert.equal(forbidden.res.statusCode, 403);
+  const cached = harness({
+    metaContext: async ({ reference }) => { assert.equal(reference.campaign_id, '30'); return { campaign: { id: 'meta_ads:20:30' }, revision: 'cached', connection: { accessToken: 'private' } }; },
+    nativeEvidence: async () => new Map(),
+  });
+  await cached.run('metaPreparation', { query: { scope: 'group:5', account_id: '20', campaign_id: '30' } });
+  assert.equal(cached.res.statusCode, 200); assert.equal(cached.res.body.revision, 'cached');
+  assert.equal(JSON.stringify(cached.res.body).includes('private'), false);
+  assert.equal(cached.res.headers['Cache-Control'], 'private, no-store');
 });
 test('ambiguous aggregates cannot become writable workspaces', async () => {
   for (const scope of ['all', '1,2', 'group:0', '1x', '']) {

@@ -125,7 +125,8 @@ async function metaGet(url, {
   accessToken,
   timeout = 30000,
   source = 'meta_client',
-  operation = null
+  operation = null,
+  maxRetries: requestedRetries = null
 } = {}) {
   const META_API_BASE_URL = process.env.META_API_BASE_URL || 'https://graph.facebook.com/v23.0';
   // Retardo suave entre requests (ms). Previene picos de uso.
@@ -133,7 +134,8 @@ async function metaGet(url, {
   // Umbral de uso (%) a partir del cual activamos backoff
   const thresh = parseInt(process.env.METASYNC_RATE_LIMIT_THRESHOLD || '90', 10);
   // Reintentos máximos para errores no RL
-  const maxRetries = parseInt(process.env.METASYNC_MAX_RETRIES || '3', 10);
+  const maxRetries = requestedRetries === null ? parseInt(process.env.METASYNC_MAX_RETRIES || '3', 10)
+    : Math.max(0, Math.min(3, Number.isInteger(requestedRetries) ? requestedRetries : 0));
   // En rate limit, esperar hasta la siguiente hora (true) o hacer backoff corto (false)
   const waitNextHour = String(process.env.METASYNC_WAIT_NEXT_HOUR_ON_LIMIT || 'true') === 'true';
 
