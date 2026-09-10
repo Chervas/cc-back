@@ -7,23 +7,27 @@ const db = require('../../../models');
 const { metaSyncJobs } = require('../../jobs/sync.jobs');
 const marketingCompetitionService = require('../../services/marketingCompetition.service');
 const marketingAiVisibilityService = require('../../services/marketingAiVisibility.service');
+const marketingReportOverviewCacheService = require('../../services/marketingReportOverviewCache.service');
 const webContentMediaService = require('../../services/webContentMedia.service');
 const webContentGenerationService = require('../../services/webContentGeneration.service');
 const { queues } = require('../../services/queue.service');
 
 async function main() {
   const originals = {
+    query: db.sequelize.query,
     syncLogCreate: db.SyncLog.create,
     cleanupSyncLogs: metaSyncJobs.cleanupSyncLogs,
     cleanupTokenValidations: metaSyncJobs.cleanupTokenValidations,
     cleanupOldSocialStats: metaSyncJobs.cleanupOldSocialStats,
     cleanupHeatmaps: marketingCompetitionService.cleanupLocalHeatmapCache,
     cleanupAi: marketingAiVisibilityService.cleanupExpiredRuns,
+    cleanupReports: marketingReportOverviewCacheService.cleanupOverviewCache,
     cleanupWebGenerations: webContentGenerationService.cleanupExpiredGenerations,
     cleanupWebMedia: webContentMediaService.cleanupExpiredQuarantinedMedia,
   };
   const updates = [];
   try {
+    db.sequelize.query = async () => { throw new Error('unexpected_database_access_in_cleanup_test'); };
     db.SyncLog.create = async () => ({
       update: async (values) => { updates.push(values); },
     });
@@ -32,6 +36,7 @@ async function main() {
     metaSyncJobs.cleanupOldSocialStats = async () => 3;
     marketingCompetitionService.cleanupLocalHeatmapCache = async () => 4;
     marketingAiVisibilityService.cleanupExpiredRuns = async () => 5;
+    marketingReportOverviewCacheService.cleanupOverviewCache = async () => 7;
     webContentGenerationService.cleanupExpiredGenerations = async () => 6;
     webContentMediaService.cleanupExpiredQuarantinedMedia = async () => ({
       inspected: 2,
@@ -41,7 +46,8 @@ async function main() {
 
     const result = await metaSyncJobs.executeDataCleanup();
     assert.equal(result.status, 'completed');
-    assert.equal(result.deleted, 23);
+    assert.equal(result.deleted, 30);
+    assert.equal(result.breakdown.marketingReportSnapshots, 7);
     assert.equal(result.breakdown.webContentGenerations, 6);
     assert.equal(result.breakdown.webEditorMedia, 2);
     assert.equal(result.breakdown.webEditorMediaFailed, 0);
@@ -58,12 +64,14 @@ async function main() {
     );
     assert.equal(updates.at(-1).status, 'failed');
   } finally {
+    db.sequelize.query = originals.query;
     db.SyncLog.create = originals.syncLogCreate;
     metaSyncJobs.cleanupSyncLogs = originals.cleanupSyncLogs;
     metaSyncJobs.cleanupTokenValidations = originals.cleanupTokenValidations;
     metaSyncJobs.cleanupOldSocialStats = originals.cleanupOldSocialStats;
     marketingCompetitionService.cleanupLocalHeatmapCache = originals.cleanupHeatmaps;
     marketingAiVisibilityService.cleanupExpiredRuns = originals.cleanupAi;
+    marketingReportOverviewCacheService.cleanupOverviewCache = originals.cleanupReports;
     webContentGenerationService.cleanupExpiredGenerations = originals.cleanupWebGenerations;
     webContentMediaService.cleanupExpiredQuarantinedMedia = originals.cleanupWebMedia;
   }
