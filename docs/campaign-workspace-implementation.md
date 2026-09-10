@@ -1364,3 +1364,66 @@ conservan PID. Sin cambio de UI ni nuevo build (`b05bce92b41f1b82`). Sin migraci
 cron nuevo, activacion, cambios publicitarios o cobros.
 Auditoria SQL antes/despues: gate cerrado, settings=0, entregas Meta=0 y jobs
 CRM Meta=0. El ambito Arriaga se resuelve y no tiene un mandato nuevo.
+
+## Confirmacion Atomica De Medicion (2026-09-10)
+
+`PUT campaign-workspace/activation` admite ahora Medicion con o sin señales.
+Mantiene `CAMPAIGN_WORKSPACE_ACTIVATION_ENABLED=false`: implementar el comando
+no autoriza activaciones de clientes en la BD compartida ni abrir los emisores.
+
+La recepcion de formularios ya existe: se reutilizan `ingestLead`, `LeadIntake`
+y las integraciones previas. No se condiciona su entrada a activar este mandato
+ni a poder atribuir el lead a una campaña. Comprobar recepcion, resolver atribucion
+y autorizar hitos publicitarios son responsabilidades distintas; el nuevo recorrido
+no debe pedir reinstalar lo que ya esta preparado y comprobado.
+
+- Exige un borrador guardado, confirmacion explicita, version y revision exactas.
+  Los hitos proceden de preferencias; los destinos, de las pruebas privadas de
+  cada cuenta. El navegador solo confirma `signals.enabled`, no aporta hitos,
+  acciones de conversion, datasets, grants ni optimizacion.
+- La revision incluye la autorizacion privada en su huella, pero no la expone.
+  Cambiar el grant o la prueba invalida la pantalla aunque los IDs visibles
+  sigan iguales. Caducidad y completitud se revisan en servidor al confirmar.
+- Bloquea propietario, miembros y setting, comprueba que el grupo mantiene
+  exactamente sus clinicas activas y relee el permiso de escritura al entrar,
+  antes de guardar y antes de completar. Version/recepcion/destinos vigentes y
+  ausencia de gestion u optimizacion incompatibles siguen siendo obligatorios.
+- Guarda mandato schema 2, modo y auditoria en una transaccion. Comprueba la
+  interseccion efectiva de clinica/grupo para las campañas e hitos antes del
+  commit. Un conflicto, permiso retirado o fallo de auditoria revierte la unidad.
+  Las lecturas de ambito/grant se reutilizan solo dentro de esa transaccion.
+- Conserva ajustes de Web y el historial de onboarding al actualizar un registro
+  existente. Si el caso nativo no tiene web, no crea `IntakeConfig` vacio:
+  el modo activo se obtiene del mandato, conservando visibles posibles conflictos
+  con una gestion anterior. No cambia conversiones, anuncios, pujas ni presupuesto.
+- Confirmar sin señales guarda eventos vacios y desautoriza su envio; guardar
+  ese borrador no cambia el permiso activo. Una seleccion incluye futuras
+  campañas solo cuando se autorizo `include_future`; el emisor sigue exigiendo
+  identidad, clinica y consentimiento para cada evento.
+- El front usa la misma seleccion revisada, no fuerza `signals.enabled=false`.
+  Comprueba vigencia antes de enviar y retira la confirmacion ante cambios o
+  conflictos. Tras guardar vuelve al resumen y muestra "Envio de hitos autorizado"
+  o "Sin envio de hitos", sin afirmar que Google/Meta hayan recibido nada.
+
+Las cadenas de prueba Google y Meta consumen ahora este comando real con modelos
+y proveedores aislados, en lugar de construir manualmente el mandato del emisor.
+Las evidencias de recepcion previas son fixtures explicitos. No son activaciones
+reales de clientes ni acreditan por si solas el recorrido productivo completo.
+Siguen pendientes Google nativo sin web, multipagina/mixto, Optimiza Google/Meta,
+preparacion de parametros publicitarios, metricas CRM por anuncio y ruta canonica.
+
+Verificacion: 389 pruebas backend y 61 frontend correctas, ngc, sintaxis y
+diff-check sin errores. Build `5b7db07c9dcf100e` publicado en preview DEV;
+se mantiene el aviso previo de bundle inicial (4.58 MB frente a 3 MB).
+Chromium autenticado: 57 comprobaciones/20 capturas de preferencias y confirmacion
+y 71/29 de regresion general. Evidencias en
+`/home/ubuntu/qa-evidence/campaign-activation-v2-20260910-polished` y
+`...-20260910-final-regression`. Incluye 320/390/1024/1440 px, conflicto de version,
+caducidad, recarga y retorno al resumen; cero errores JS y escrituras de negocio.
+Datos iniciales reales; guardado y activacion mediante fixtures interceptados.
+Inspeccion manual de controles desktop/movil, preparacion web y grafica movil.
+Los avisos operativos permanecen pendientes, sin atender ni ocultar.
+
+Un reinicio solo DEV: PID `1192223`, contador `8545`; staging, gateway y preview
+sin reinicios. No se abre el gate, ni hay migracion, cron nuevo, señales,
+mutaciones publicitarias, cobros o promocion. Objetivo global EN CURSO.

@@ -13,6 +13,7 @@ const { CRM_MILESTONE_SOURCE } = require('../../services/campaignWorkspaceSignal
 const { attachLeadAdvertisingIdentities, resolveMetaWebLeadIdentity, resolveNativeMetaLeadIdentity } = require('../../services/leadAdvertisingIdentity.service');
 const { loadMetaSignalEvidence } = require('../../services/campaignWorkspaceSignalEvidence.service');
 const { leadCampaign } = require('../../services/campaignWorkspaceReport.service');
+const { activateWorkspaceMeasurement } = require('../../services/campaignWorkspaceActivation.service');
 
 mock.method(require('../../../models').sequelize, 'query', async () => assert.fail('No real database access in this suite'));
 
@@ -50,6 +51,7 @@ async function harness(group = false) {
       accounts: [{ provider: 'meta_ads', account_id: '20', include_future: true, campaign_ids: [] }],
       preferences: { mode: 'measurement', signals: { enabled: true, events: ['lead', 'contact', 'qualified_lead', 'schedule'] } } },
   };
+  const campaign = { id: 'meta_ads:20:30', provider: 'meta_ads', account_id: '20', campaign_id: '30', clinicId: 1, assigned: true, destination: 'web' };
   Object.defineProperty(state.setting, 'update', { value: async values => Object.assign(state.setting, values) });
   const all = (name, getter) => async ({ where } = {}) => { state.calls.push(name); return structuredClone(getter().filter(row => matches(row, where))); };
   const models = {
@@ -61,7 +63,8 @@ async function harness(group = false) {
       findOne: async ({ where }) => matches(state.setting, where) ? state.setting : null,
       findByPk: async () => structuredClone(state.setting) },
     CampaignWorkspaceEvent: { create: async () => {} },
-    IntakeConfig: { findOne: async ({ where }) => matches(state.record, where) ? structuredClone(state.record) : null,
+    IntakeConfig: { findOne: async ({ where }) => matches(state.record, where) ? { ...structuredClone(state.record),
+      update: async patch => Object.assign(state.record, structuredClone(patch)) } : null,
       findAll: all('web_records', () => [state.record]) },
     ExternalCampaignInventory: { findAll: all('inventory', () => state.inventory) },
     SocialAdsEntity: { findAll: all('social', () => state.social) },
@@ -72,6 +75,7 @@ async function harness(group = false) {
     LeadIntake: { findByPk: async id => id === 100 ? structuredClone(state.lead) : null },
     LeadAttributionAudit: { findAll: all('audits', () => state.audits) },
     CitaPaciente: { findAll: all('appointments', () => state.appointments) },
+    CampaignOptimizationPolicy: { findAll: async () => [] },
     MetaSignalDelivery: {
       findAll: async ({ where }) => state.deliveries.filter(row => matches(row, where)),
       findOne: async ({ where }) => state.deliveries.find(row => matches(row, where)) || null,
@@ -91,9 +95,12 @@ async function harness(group = false) {
     } });
   const review = await loadSignalAuthorizationReview({ models, scope, setting: state.setting, now: state.now });
   assert.equal(review.review.ready, true);
-  // Only isolated fixture models are activated. The actual customer gate is never changed.
-  state.setting.activation = { schema_version: 2, status: 'active', mode: 'measurement',
-    account_authorizations: structuredClone(state.setting.accounts), signals: { ...state.setting.preferences.signals, authorization: review.authorization } };
+  // Exercise the real activator with isolated models and prepared receipt evidence, never the customer gate.
+  await activateWorkspaceMeasurement({ models, scope, actorId: 2, now, deploymentReady: true, hasAccess: async () => true,
+    input: { expected_version: state.setting.version, preparation_revision: 'a'.repeat(64), mode: 'measurement', signals: { enabled: true }, confirmed: true },
+    loadPreparation: async () => ({ revision: 'a'.repeat(64), selectionConfirmed: true, receptionReady: true, signals: review.review,
+      campaigns: [{ campaign, ready: true, configurationScope: { scope_type: state.setting.scope_type, scope_id: state.setting.scope_id } }] }),
+    loadInventory: async () => ({ google: [], meta: state.assets, campaigns: [campaign], groups: group ? [8] : [] }) });
   const identify = (extra = {}) => resolveMetaWebAdvertisingIdentity({ models, clinicId: 1, recordId: 10,
     attribution: { account_id: '20', campaign_id: '30' }, eventSourceUrl: 'https://example.com/private-path?secret=value', ...extra });
   const identity = await identify(); assert.ok(identity);
@@ -113,7 +120,6 @@ async function harness(group = false) {
   const enqueue = (extra = {}) => enqueueMetaLeadLifecycleSignal({ leadId: 100, clinicId: 1, eventName: 'qualified_lead',
     eventId: 'lead-100-qualified', occurredAt: state.now, crmEventSource: CRM_MILESTONE_SOURCE, ...extra }, deps);
   const run = (index = 0) => runMetaLeadLifecycleSignalJob(state.jobs[index].payload, state.jobs[index], deps);
-  const campaign = { id: 'meta_ads:20:30', provider: 'meta_ads', account_id: '20', campaign_id: '30', clinicId: 1, assigned: true };
   const health = extra => loadMetaSignalEvidence({ models, campaigns: [campaign], selectedClinics: [state.clinic], now: state.now, ...extra });
   return { state, models, identity, identify, send, enqueue, run, health, campaign };
 }

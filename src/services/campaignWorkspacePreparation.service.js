@@ -49,6 +49,9 @@ async function loadWorkspacePreparation({ models, scope, now = new Date(), trans
   const existingMode = await resolveMode(legacyScope, {
     IntakeConfig: models.IntakeConfig, CampaignRequest: models.CampaignRequest, Clinica: models.Clinica, operators: Op, transaction,
   });
+  const workspaceMode = setting?.activation?.schema_version === 2 && setting.activation.status === 'active'
+    ? { measurement: 'connect_only', optimize: 'guided_improvement' }[setting.activation.mode] : null;
+  const currentMode = existingMode?.mode || workspaceMode;
   const checks = campaigns.map(campaign => ({ ...assessCampaignPreparation(campaign, evidence.get(campaign.id)),
     configurationScope: evidence.get(campaign.id)?.configurationScope || null }));
   const assigned = checks.filter(row => row.campaign.assigned);
@@ -56,7 +59,7 @@ async function loadWorkspacePreparation({ models, scope, now = new Date(), trans
   const signalReview = await loadSignalReview({ models, scope, setting, now, transaction });
   const body = {
     configuration: publicSettings(setting, scope),
-    existing: existingMode ? { mode: existingMode.mode, label: MODE_LABELS[existingMode.mode] } : null,
+    existing: currentMode ? { mode: currentMode, label: MODE_LABELS[currentMode] } : null,
     selectionConfirmed: !!setting?.accounts?.length,
     activationAvailable: process.env.CAMPAIGN_WORKSPACE_ACTIVATION_ENABLED === 'true',
     signals: signalReview.review,
@@ -66,7 +69,7 @@ async function loadWorkspacePreparation({ models, scope, now = new Date(), trans
     receptionReady: assigned.length > 0 && assigned.every(row => row.ready),
   };
   // Bind review screens to the settings and evidence they actually displayed, not browser flags.
-  const revision = crypto.createHash('sha256').update(JSON.stringify([body, intakeRecord || null])).digest('hex');
+  const revision = crypto.createHash('sha256').update(JSON.stringify([body, intakeRecord || null, signalReview.authorization || null])).digest('hex');
   return { success: true, revision, checkedAt: now.toISOString(), ...body };
 }
 

@@ -15,6 +15,7 @@ const { maybeUploadCampaignGoogleConversion } = require('../../services/campaign
 const { loadGoogleSignalEvidence } = require('../../services/campaignWorkspaceGoogleSignalEvidence.service');
 const { maybeUploadLeadLifecycleConversion } = require('../../services/googleLeadLifecycleConversion.service');
 const { reconcileGoogleDataManagerDiagnostics } = require('../../services/googleDataManagerDiagnostics.service');
+const { activateWorkspaceMeasurement } = require('../../services/campaignWorkspaceActivation.service');
 
 mock.method(require('../../../models').sequelize, 'query', async () => assert.fail('This suite must not access the real database'));
 
@@ -36,6 +37,7 @@ function harness() {
   const record = { id: 1, assignment_scope: 'clinic', clinic_id: 1, config: { features: { consent_mode_enabled: true },
     meta_ads: { enabled: true, connection_id: 7, ad_account_id: '20', pixel_id: '301' },
     campaigns: { workspace_policy: { schema_version: 1, setting_id: 'setting', scope_type: 'clinic', scope_id: 1 } } } };
+  Object.defineProperty(record, 'update', { value: async patch => Object.assign(record, patch) });
   const models = {
     sequelize: { transaction: async fn => fn({ LOCK: { UPDATE: 'UPDATE' } }) },
     Clinica: { findByPk: async () => state.clinic },
@@ -48,6 +50,7 @@ function harness() {
       findOne: async () => state.metaAssignment.status === 'active' ? state.metaAssignment : null },
     GoogleConnection: { findByPk: async () => state.google }, MetaConnection: { findByPk: async () => state.meta },
     IntakeConfig: { findOne: async () => record, findAll: async () => [record] },
+    CampaignOptimizationPolicy: { findAll: async () => [] },
     MetaSignalDelivery: {
       findOne: async ({ where }) => state.deliveries.find(row => row.dedupe_key === where.dedupe_key),
       create: async values => { if (state.onReserve) state.onReserve(); const row = { ...values, created_at: state.date }; state.deliveries.push(row); return row; },
@@ -74,9 +77,14 @@ function harness() {
   const review = () => loadSignalAuthorizationReview({ models, scope, setting: state.setting, now: state.date });
   const authorize = async () => {
     const result = await review(); assert.equal(result.review.ready, true);
-    // Simulate the future explicit activation transaction, not an API or customer write.
-    state.setting.activation = { schema_version: 2, mode: 'measurement', status: 'active', account_authorizations: structuredClone(accounts),
-      signals: { enabled: true, events: ['lead', 'schedule'], authorization: result.authorization } };
+    const campaigns = accounts.map(account => ({ id: `${account.provider}:${account.account_id}:40`, provider: account.provider,
+      account_id: account.account_id, campaign_id: '40', clinicId: 1, assigned: true, destination: 'web' }));
+    // The real command consumes prepared evidence inside isolated models; no customer is activated.
+    await activateWorkspaceMeasurement({ models, scope, actorId: 2, now, hasAccess: async () => true, deploymentReady: true,
+      input: { expected_version: state.setting.version, preparation_revision: 'a'.repeat(64), mode: 'measurement', signals: { enabled: true }, confirmed: true },
+      loadPreparation: async () => ({ revision: 'a'.repeat(64), selectionConfirmed: true, receptionReady: true, signals: result.review,
+        campaigns: campaigns.map(campaign => ({ campaign, ready: true, configurationScope: null })) }),
+      loadInventory: async () => ({ campaigns, google: [{ customerId: '10' }], meta: [{ metaAssetId: '20' }], groups: scope.groupId ? [scope.groupId] : [] }) });
     return result;
   };
   const policy = input => resolveWorkspaceSignalPolicy({ ...input, models, now: state.date, loadSetting: async () => state.setting });

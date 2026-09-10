@@ -167,7 +167,7 @@ function createWorkspaceConfigurationHandlers({ models = db, resolveScope = reso
     activate: async (req, res) => {
       const context = await authorize(req, res, 'write');
       if (!context) return;
-      try { return res.json(await activate({ models, ...context, input: req.body })); }
+      try { return res.json(await activate({ models, ...context, input: req.body, hasAccess })); }
       catch (error) {
         if (error.status >= 400 && error.status < 500) return res.status(error.status).json({ success: false, error: error.code });
         throw error;

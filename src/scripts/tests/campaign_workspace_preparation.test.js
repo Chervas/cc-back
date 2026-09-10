@@ -53,6 +53,13 @@ test('native evidence receives the same authorized group scope as the preparatio
   await f.read({ scope, loadEvidence: async options => { observed = options.scope; return f.state.evidence; } });
   assert.deepEqual(observed, scope);
 });
+test('a native workspace can report its active mode without inventing a website config', async () => {
+  const f = fixture(); f.state.setting.activation = { schema_version: 2, mode: 'measurement', status: 'active' };
+  const result = await f.read({ resolveMode: async () => null });
+  assert.deepEqual(result.existing, { mode: 'connect_only', label: 'Medición de interesados (leads)' });
+  assert.equal(f.state.clinicConfig, null);
+  assert.equal((await f.read()).existing.mode, 'guided_improvement');
+});
 test('a review revision changes with settings or readiness but not with polling time', async () => {
   const f = fixture(); const first = await f.read();
   assert.equal((await f.read({ now: new Date('2026-09-10T15:00:00Z') })).revision, first.revision);
@@ -92,6 +99,10 @@ test('signal readiness participates in the review revision without publishing th
   const first = await f.read(options); assert.deepEqual(first.signals, review);
   assert.doesNotMatch(JSON.stringify(first), /private-grant|grant_fingerprint/);
   const firstRevision = first.revision;
+  const changedGrant = await f.read({ ...options, loadSignalReview: async () => ({ review,
+    authorization: { grant_fingerprint: 'changed-private-grant', destinations: [] } }) });
+  assert.notEqual(changedGrant.revision, firstRevision);
+  assert.doesNotMatch(JSON.stringify(changedGrant), /changed-private-grant/);
   review.ready = false; review.accounts[0].status = 'stale';
   assert.notEqual((await f.read(options)).revision, firstRevision);
   assert.equal(f.state.setting.activation, null);
