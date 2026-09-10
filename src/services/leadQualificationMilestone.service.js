@@ -23,7 +23,7 @@ async function nonBlockingLifecycleUpload({
   logger = console,
 }) {
   const upload = dependencies.maybeUploadLeadLifecycleConversion
-    || require('./googleLeadLifecycleConversion.service').maybeUploadLeadLifecycleConversion;
+    || require('./leadLifecycleConversion.service').maybeUploadLeadLifecycleConversion;
   try {
     return await upload({
       lead,

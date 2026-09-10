@@ -35,7 +35,7 @@ function harness() {
       findOne: async ({ where }) => state.rows.find(row => row.dedupe_key === where.dedupe_key) || null,
       create: async values => {
         if (state.onCreate) await state.onCreate();
-        const row = { ...values, update: async patch => { Object.assign(row, patch); return row; } };
+        const row = { ...values, created_at: values.attempted_at, update: async patch => { Object.assign(row, patch); return row; } };
         state.rows.push(row); return row;
       },
       update: async (values, { where }) => {

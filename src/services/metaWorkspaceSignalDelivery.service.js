@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const { resolveWorkspaceSignalPolicy, CRM_MILESTONE_SOURCE } = require('./campaignWorkspaceSignalPolicy.service');
 
 const LEASE_MS = 90000;
+const RETRY_WINDOW_MS = 24 * 3600000;
 const eventNames = { lead: 'Lead', contact: 'Contact', qualifiedlead: 'QualifiedLead', schedule: 'Schedule' };
 const id = value => typeof value === 'string' && /^[0-9]{1,64}$/.test(value) ? value : null;
 const hash = value => crypto.createHash('sha256').update(String(value)).digest('hex');
@@ -62,7 +63,7 @@ function failure(error) {
   const code = Number(error?.response?.data?.error?.code);
   const status = error?.response?.status;
   return { status: Number.isInteger(status) && status >= 400 && status < 500 ? 'failed' : 'unknown',
-    reason: /^META_RATE_LIMIT/.test(error?.code || '') || [4, 17, 613].includes(code) ? 'meta_rate_limited'
+    reason: status === 429 || /^META_RATE_LIMIT/.test(error?.code || '') || [4, 17, 613].includes(code) ? 'meta_rate_limited'
       : [10, 190, 200].includes(code) || [401, 403].includes(status) ? 'meta_permissions_required' : 'meta_delivery_failed',
     events_received: null, warning_count: null, trace_id: null };
 }
@@ -82,6 +83,7 @@ async function sendWorkspaceMetaSignal(input, dependencies = {}) {
   const policy = dependencies.policy || resolveWorkspaceSignalPolicy;
   const context = dependencies.context || require('./metaWorkspaceSignalContext.service').resolveMetaSignalContext;
   const check = async () => {
+    await dependencies.validateSource?.(input);
     const current = await context({ models, input, now: now() });
     const authorization = await policy({ records: [current.webPolicyRecord, current.signalPolicyRecord], provider: 'meta_ads',
       loadSetting: settingId => models.CampaignWorkspaceSetting.findByPk(settingId, { raw: true }),
@@ -115,6 +117,9 @@ async function sendWorkspaceMetaSignal(input, dependencies = {}) {
         || +new Date(existing.occurred_at) !== event.event_time * 1000)) return { conflict: true };
       if (existing && (['accepted', 'warning'].includes(existing.status)
         || existing.status === 'pending' && +new Date(existing.attempted_at) + LEASE_MS > +now())) return { duplicate: true, value: existing };
+      // An ambiguous receipt is not permission to replay indefinitely after a long outage or a manual retry.
+      if (existing && (!existing.created_at || !Number.isFinite(+new Date(existing.created_at))
+        || +new Date(existing.created_at) + RETRY_WINDOW_MS <= +now())) return { expired: true, value: existing };
       const values = { status: 'pending', lease_id: leaseId, attempted_at: now(), completed_at: null,
         attempt_count: Number(existing?.attempt_count || 0) + 1, policy_version: authorization.version, policy_refs: refs,
         reason: null, events_received: null, warning_count: null, trace_id: null };
@@ -130,6 +135,7 @@ async function sendWorkspaceMetaSignal(input, dependencies = {}) {
     throw error;
   }
   if (row.conflict) return { sent: false, reason: 'meta_event_identity_conflict' };
+  if (row.expired) return { sent: false, reason: 'meta_delivery_retry_expired', deliveryId: row.value.id };
   if (row.duplicate) return { sent: false, reason: ['accepted', 'warning'].includes(row.value.status) ? 'meta_event_already_received' : 'meta_event_in_progress', deliveryId: row.value.id };
   let result;
   try {
@@ -148,4 +154,4 @@ async function sendWorkspaceMetaSignal(input, dependencies = {}) {
     deliveryId: row.value.id, eventsReceived: result.events_received };
 }
 
-module.exports = { LEASE_MS, minimalEvent, receipt, failure, sendWorkspaceMetaSignal };
+module.exports = { LEASE_MS, RETRY_WINDOW_MS, minimalEvent, receipt, failure, sendWorkspaceMetaSignal };

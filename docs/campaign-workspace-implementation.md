@@ -806,8 +806,8 @@ ni completa todavia todos los emisores CRM del objetivo.
 - Consentimiento publicitario expreso por evento, seleccion vigente, activacion
   y hito autorizado siguen siendo requisitos separados. QualifiedLead/Schedule
   requieren la capacidad privada del CRM: un JSON publico no puede generarla.
-  El contrato admite el identificador nativo verificado internamente; su llamada
-  desde el ciclo de vida nativo queda pendiente de integracion.
+  El contrato admite el identificador nativo verificado internamente; el job de
+  ciclo de vida descrito debajo ya usa esa llamada, sin activar clientes.
 - Payload nuevo de lista cerrada: datos de matching hashed, sin metadatos
   clinicos/economicos arbitrarios. Los hitos CRM no llevan URL ni datos del
   navegador. Los eventos web conservan solo el origen HTTPS y el agente del
@@ -822,14 +822,16 @@ ni completa todavia todos los emisores CRM del objetivo.
   8 s. No bloquea SQL durante la red. Actualizacion final condicionada por lease.
   Una entrega confirmada no se repite; colisiones de campana, fecha o destino
   no cambian silenciosamente el evento. Una peticion repetida puede recuperar
-  un lease vencido usando la identidad original. El cliente comparte cuota y
+  un lease vencido usando la identidad original, dentro de las 24 h siguientes
+  a la primera reserva. Pasado ese limite interno no se repite un resultado
+  ambiguo, tampoco al crear otro job o pedir un reintento manual. Una entrega
+  confirmada mantiene su deduplicacion. El cliente comparte cuota y
   pausa persistente, rechaza redirecciones y no hace reintentos HTTP ocultos.
-- **No hay aun un job nuevo de reintento CRM Meta**: esta tabla es registro de
-  entrega, no una cola completa. Falta encolar referencias al hito canonico y
-  reconstruir sus datos/autorizaciones en cada intento, sin guardar contactos
-  en el job. El receptor nativo existente conserva su propia cola. No hay un
-  cron nocturno que envie estos hitos ni se debe confundir con el refresco diario
-  de informes. Ese refresco no autoriza conversiones.
+- La tabla sigue siendo registro de entrega, no la cola. El nuevo job
+  `campaign_meta_crm_signal` descrito debajo reutiliza `JobRequest` para los
+  hitos CRM nativos. El receptor de formularios conserva su propia cola. No hay
+  un cron nocturno que envie estos hitos ni se debe confundir con el refresco
+  diario de informes. Ese refresco no autoriza conversiones.
 - Salud consulta registros de las ultimas 24 h, sin llamadas al proveedor ni
   escrituras. Solo cuenta la misma clinica/cuenta/campana/dataset y el grant y
   politicas vigentes. Expone recibidos, avisos y sin confirmar en el detalle
@@ -854,3 +856,67 @@ version durante el envio, tokens/destinos globales, colisiones, lease perdido,
 timeouts, respuestas ambiguas, privacidad del payload/telemetria y migracion
 reentrante. Tras el QA de lectura, settings, pruebas y entregas nuevas siguen
 a cero en la BD compartida. No se envio ningun evento publicitario real.
+
+## Hitos CRM Meta En La Cola Existente (2026-09-10)
+
+- `leadQualificationMilestone` usa ahora el dispatcher `leadLifecycleConversion`:
+  encola Meta antes del upload Google sin modificar el payload ni las reglas
+  anteriores de Google. Un fallo de un proveedor no impide intentar el otro ni
+  deshace una cita/lead. Purchase conserva su carril Google anterior y no entra
+  en Meta. No se modifica ninguno de los receptores de formularios.
+- `campaign_meta_crm_signal`: job por evento, prioridad normal, ocho intentos,
+  backoff/namespace/recuperacion del scheduler existente. No crea un cron ni
+  modifica el catalogo de refresco nocturno. Guarda IDs locales, hito, fecha y
+  una huella de identidad/destino/politicas; no guarda identificadores Meta,
+  contactos, tokens, respuestas de formularios ni payload CAPI. La huella es
+  seudonima, no anonima.
+- Encolado requiere la capacidad interna del CRM, gate de despliegue abierto y
+  autorizacion actual del workspace. El worker exige origen interno, tipo
+  correcto y ausencia de solicitante HTTP; los jobs creados manualmente por el
+  endpoint administrativo no fabrican hitos. Reintentar un job existente vuelve
+  a comprobar todo. Con el gate actual cerrado no consulta leads ni crea jobs.
+- Relee el lead y la identidad guardada por el receptor Meta: `meta_graph`,
+  misma clinica, cuenta, campana, anuncio, pagina, formulario y lead nativo.
+  Identidades ambiguas o datos aportados por formularios no sirven. Reutiliza el
+  resolvedor de recepcion para validar acceso actual y asignacion de campana;
+  una cuenta de grupo exige una asignacion explicita de clinica.
+- QualifiedLead requiere cualificacion vigente o cita real enlazada. Schedule
+  requiere la cita enlazada de la misma clinica, no cancelada ni provisional.
+  Lead descartado/archivado/eliminado o movido cancela el envio. No selecciona
+  nombre, email, telefono, notas, tratamiento ni precio: el matching nativo usa
+  exclusivamente el identificador verificado de Meta.
+- No interpreta consentimiento de contacto/WhatsApp/analitica como publicitario.
+  Los formularios nativos recibidos sin consentimiento publicitario explicito
+  siguen en el CRM, pero no generan este envio. La procedencia Meta por si sola
+  no es consentimiento. No se rellena retroactivamente ningun permiso.
+- Congela mediante huella la identidad, destino/grant y vector de versiones al
+  encolar; no adopta la nueva cuenta/dataset/politica si cambian mientras espera.
+  Revalida tambien el origen/consentimiento despues de reservar la entrega y
+  antes del POST. Recibos aceptados/con aviso no se repiten; fallos temporales y
+  429 reintentan, permisos/rechazos definitivos no. Errores se guardan saneados.
+  Eventos fuera de siete dias se descartan. La ventana interna de reintento de
+  entregas sin confirmar es 24 h desde la primera reserva, no se renueva con
+  cada intento. No es una afirmacion de deduplicacion indefinida del proveedor.
+- **Limites pendientes antes de abrir activacion:** vincular prueba tecnica y
+  autorizacion completa por destino, cubrir atribucion Meta web y configuracion
+  nativa independiente de la web, y hacer atomico el alta del job con todos los
+  escritores del hito. Los hooks existentes se ejecutan despues de guardar el
+  CRM: el job es durable una vez encolado, pero un cierre entre el guardado y el
+  encolado aun requiere reconciliacion. No presentar esto como outbox atomico
+  completo ni activar un barrido retroactivo de clientes.
+
+Pruebas nuevas ejecutan el recorrido real de resolucion, politica, emisor y
+registro con modelos/proveedor aislados: identidad nativa, grupos, cambios de
+destino, consentimiento retirado durante reserva, duplicados, reintentos,
+limite de 24 h, citas canceladas/provisionales y aislamiento de Google. No se
+realiza ningun POST publicitario real. El objetivo global sigue EN CURSO.
+
+Verificacion del corte: 387 pruebas backend correctas (23 nuevas del job,
+ademas de la regresion de Campanas, receptores, Google y ciclo de vida).
+Chromium autenticado tras reiniciar solo DEV: 71 comprobaciones, 29 capturas,
+cero errores JS/servidor y cero escrituras de negocio. Lecturas reales de
+informes/conexiones; solo el caso de caida temporal Google sustituye su GET.
+Evidencia: `/home/ubuntu/qa-evidence/campaign-meta-crm-20260910-final`.
+Inspeccion manual de Salud desktop, dialogo movil y grafica movil con tooltip.
+Auditoria SQL antes/despues: gate cerrado, settings=0, entregas=0 y jobs de este
+tipo=0. Sin migraciones, cambios de configuracion, cobros ni promocion a staging.

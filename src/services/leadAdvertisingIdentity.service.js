@@ -45,4 +45,23 @@ async function attachLeadAdvertisingIdentities({ models, leads, transaction = nu
   return leads;
 }
 
-module.exports = { metaAdvertisingIdentity, canonicalLeadAdvertisingIdentity, attachLeadAdvertisingIdentities };
+async function resolveNativeMetaLeadIdentity({ models, lead }) {
+  if (lead?.source !== 'meta_ads' || lead.external_source !== 'meta_leadgen' || !id(lead.external_id)) return null;
+  const rows = await models.LeadAttributionAudit.findAll({ where: { lead_intake_id: lead.id },
+    attributes: [[json('attribution_steps.advertising_identity'), 'identity'],
+      [json('raw_payload.lead_id'), 'native_lead_id']], raw: true });
+  const matches = new Map();
+  for (const row of rows) {
+    const identity = metaAdvertisingIdentity(row.identity, lead.clinica_id);
+    if (!identity) continue;
+    let nativeLeadId = row.native_lead_id;
+    if (typeof nativeLeadId === 'string' && nativeLeadId.startsWith('"')) {
+      try { nativeLeadId = JSON.parse(nativeLeadId); } catch { return null; }
+    }
+    if (nativeLeadId !== lead.external_id) return null;
+    matches.set(JSON.stringify(identity), identity);
+  }
+  return matches.size === 1 ? { ...[...matches.values()][0], native_lead_id: lead.external_id } : null;
+}
+
+module.exports = { metaAdvertisingIdentity, canonicalLeadAdvertisingIdentity, attachLeadAdvertisingIdentities, resolveNativeMetaLeadIdentity };
