@@ -137,7 +137,7 @@ test('modelo, migración y endpoints mantienen el contrato extremo a extremo', (
   assert.match(appointments, /normalizePatientLanguage\(datosPaciente\.idioma_preferido, \{ optional: true \}\)/);
   assert.match(appointments, /idioma_preferido: 'es'/);
 
-  assert.match(appointments, /createAppointmentWithPatientLanguage\(\{/);
+  assert.match(appointments, /createAppointmentWithPatientLanguage\(createOptions\)/);
   assert.match(appointments, /sequelize: db\.sequelize/);
   assert.match(appointments, /AppointmentModel: CitaPaciente/);
   assert.match(appointments, /requestedLanguage: datosPaciente\.idioma_preferido/);

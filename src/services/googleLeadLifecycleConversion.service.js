@@ -32,6 +32,7 @@ function groupConfigCoversClinic(configRecord, clinicId) {
 async function resolveLeadIntakeConfig({ lead, clinicId, dependencies = {} }) {
   const IntakeConfig = dependencies.IntakeConfig || db.IntakeConfig;
   const Clinica = dependencies.Clinica || db.Clinica;
+  const query = dependencies.transaction ? { transaction: dependencies.transaction } : {};
   const normalizedClinicId = positiveInt(clinicId ?? lead?.clinica_id);
   let groupId = positiveInt(lead?.grupo_clinica_id);
 
@@ -40,6 +41,7 @@ async function resolveLeadIntakeConfig({ lead, clinicId, dependencies = {} }) {
       where: { id_clinica: normalizedClinicId },
       attributes: ['grupoClinicaId'],
       raw: true,
+      ...query,
     });
     groupId = positiveInt(clinic?.grupoClinicaId);
   }
@@ -49,6 +51,7 @@ async function resolveLeadIntakeConfig({ lead, clinicId, dependencies = {} }) {
     groupConfig = await IntakeConfig.findOne({
       where: { group_id: groupId, assignment_scope: 'group' },
       raw: true,
+      ...query,
     });
   }
   let clinicConfig = null;
@@ -56,6 +59,7 @@ async function resolveLeadIntakeConfig({ lead, clinicId, dependencies = {} }) {
     clinicConfig = await IntakeConfig.findOne({
       where: { clinic_id: normalizedClinicId, assignment_scope: 'clinic' },
       raw: true,
+      ...query,
     });
   }
 

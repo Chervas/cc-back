@@ -899,11 +899,10 @@ a cero en la BD compartida. No se envio ningun evento publicitario real.
   cada intento. No es una afirmacion de deduplicacion indefinida del proveedor.
 - **Limites pendientes antes de abrir activacion:** vincular prueba tecnica y
   autorizacion completa por destino, cubrir atribucion Meta web y configuracion
-  nativa independiente de la web, y hacer atomico el alta del job con todos los
-  escritores del hito. Los hooks existentes se ejecutan despues de guardar el
-  CRM: el job es durable una vez encolado, pero un cierre entre el guardado y el
-  encolado aun requiere reconciliacion. No presentar esto como outbox atomico
-  completo ni activar un barrido retroactivo de clientes.
+  nativa independiente de la web. El guardado atomico de los escritores CRM
+  existentes queda implementado en el apartado siguiente. Esto no convierte
+  los emisores anteriores de Google o entradas futuras en outbox automaticamente
+  ni autoriza un barrido retroactivo de clientes.
 
 Pruebas nuevas ejecutan el recorrido real de resolucion, politica, emisor y
 registro con modelos/proveedor aislados: identidad nativa, grupos, cambios de
@@ -920,3 +919,58 @@ Evidencia: `/home/ubuntu/qa-evidence/campaign-meta-crm-20260910-final`.
 Inspeccion manual de Salud desktop, dialogo movil y grafica movil con tooltip.
 Auditoria SQL antes/despues: gate cerrado, settings=0, entregas=0 y jobs de este
 tipo=0. Sin migraciones, cambios de configuracion, cobros ni promocion a staging.
+
+## Guardado Atomico Del Hito Y Job Meta (2026-09-10)
+
+- `leadCrmSignalPersistence` guarda los hitos Meta en la misma transaccion que
+  cualifica el lead o enlaza su cita. Los puntos existentes cubiertos son
+  `updateLeadStatus`, `resolveLeadNotice`, `saveCallOutcome` y `createCita`.
+  La creacion integra el callback dentro de la transaccion ya existente de
+  cita/idioma y tambien de la nueva reserva por perfiles, sin ejecutar red.
+- Un error de persistencia/BD durante el encolado aborta toda la unidad; no se
+  devuelve silenciosamente `queued:false` dejando un hito sin job. La ausencia
+  de consentimiento, seleccion o autorizacion es distinta: se guarda el CRM
+  sin enviar señales. Con el gate cerrado o para otros origenes se conserva la
+  ruta de persistencia anterior, sin abrir nuevas transacciones de marketing.
+- Los resolvedores de identidad, configuracion, acceso y politica reciben la
+  misma transaccion; ven el cambio CRM aun no confirmado, no otro snapshot del
+  pool. JobRequest hereda esa transaccion, sin una transaccion anidada. Se
+  bloquean y revalidan cita/lead antes de enlazar: otro propietario, otra sede
+  o una cita ya cancelada produce conflicto, no una reasignacion silenciosa.
+- Los resultados se recuerdan en memoria solo tras commit mediante una clave
+  privada en el objeto del lead. El dispatcher posterior reutiliza ese resultado
+  sin volver a encolar. Si hay rollback no se publica la marca. Google mantiene
+  su emision existente fuera de la transaccion; consentimientos, automatizaciones
+  y sockets tambien permanecen fuera. No se cambia el receptor de formularios.
+- Los otros escritores de citas auditados (importacion historica de reactivacion
+  y sesiones de bonos) no asignan `lead_intake_id` ni emitian estos hitos; no se
+  convierten en fuentes publicitarias. Una futura entrada CRM debe usar este
+  contrato, no escribir una cita y confiar en un hook posterior no durable.
+- Prueba SQL opt-in `CC_QA_MYSQL_ATOMIC=true node -r dotenv/config
+  src/scripts/tests/crm_signal_atomic_mysql_qa.js`: tres tablas TEMPORARY de
+  sesion, clones de esquema sin datos de clientes. Usa los modelos de persistencia
+  y `enqueueUniqueJobRequest` reales; el resolvedor publicitario es un fixture y
+  no llama a Meta. Verifica commit, rollback del segundo job, deduplicacion y
+  rollback de creacion de cita. DROP TEMPORARY y cierre de la conexion al salir.
+  Ningun worker puede ver esas tablas o jobs; no crea tablas permanentes.
+- La prueba unitaria del resolvedor comprueba que todas sus lecturas y el alta
+  del job usan la transaccion suministrada. La bateria de comandos incluye
+  consentimiento denegado, ambito cambiado, doble cualificacion, fallo de commit,
+  conservacion de la campana existente y rollback de idioma/cita.
+
+La activacion sigue cerrada. No promocionar ni habilitar señales porque este
+contrato este completo: faltan las autorizaciones por destino y el resto de la
+integracion descrito arriba. El objetivo global permanece EN CURSO.
+
+Verificacion final: 442 pruebas backend correctas, sin fallos ni omitidas;
+cuatro comprobaciones MySQL sobre tres tablas temporales de sesion. Chromium
+autenticado tras el ultimo reinicio exclusivo de DEV: 71 comprobaciones,
+29 capturas a 1440/1024/390, cero errores JS/servidor y cero escrituras de
+negocio. Lecturas reales salvo el GET de caida temporal Google simulado.
+Evidencia: `/home/ubuntu/qa-evidence/campaign-meta-atomic-20260910-final`.
+Dialogo de Salud y grafica/tooltip movil inspeccionados manualmente. Los avisos
+operativos reales siguen pendientes; no se cierran ni se marcan atendidos.
+Frontend sin cambios de UI/build (`f47f72d30ee68e28`). DEV PID `1173603`,
+reinicios `8535`; staging/gateway/preview mantienen PID. Auditoria SQL antes y
+despues: gate cerrado, settings=0, entregas=0, jobs CRM Meta=0. Sin migraciones,
+llamadas publicitarias, cobros ni promocion de codigo a staging.

@@ -40,47 +40,49 @@ function milestone({ leadId, clinicId, eventName, eventId, occurredAt }, now) {
 
 async function resolveLifecycleSignal(input, dependencies = {}) {
   const models = dependencies.models || require('../../models');
+  const transaction = dependencies.transaction || null;
+  const query = transaction ? { transaction } : {};
   const now = (dependencies.now || (() => new Date()))();
   const lead = await models.LeadIntake.findByPk(input.lead_id, { raw: true, attributes: ['id', 'clinica_id',
-    'source', 'external_source', 'external_id', 'consentimiento_canal', 'status_lead', 'archived_at'] });
+    'source', 'external_source', 'external_id', 'consentimiento_canal', 'status_lead', 'archived_at'], ...query });
   if (!lead || Number(lead.clinica_id) !== input.clinic_id || lead.archived_at || lead.status_lead === 'descartado') fail('meta_crm_lead_unavailable');
   const consent = lead.consentimiento_canal;
   if (!consent || typeof consent !== 'object' || Array.isArray(consent)
     || normalizeGoogleConsent(consent) !== 'GRANTED') fail('meta_crm_consent_required');
-  const identity = await resolveNativeMetaLeadIdentity({ models, lead });
+  const identity = await resolveNativeMetaLeadIdentity({ models, lead, transaction });
   if (!identity) fail('meta_crm_verified_native_lead_required');
   const appointments = await models.CitaPaciente.findAll({ where: { lead_intake_id: input.lead_id, clinica_id: input.clinic_id,
     ...(input.appointment_id ? { id_cita: input.appointment_id } : {}),
     [Op.or]: [{ es_provisional: false }, { es_provisional: null }],
     estado: { [Op.in]: ['pendiente', 'info_enviada', 'info_confirmada', 'recordatorio_enviado',
       'recordatorio_confirmado', 'cambio_solicitado', 'reprogramada', 'completada'] } },
-    attributes: ['id_cita'], limit: 1, raw: true });
+    attributes: ['id_cita'], limit: 1, raw: true, ...query });
   if (input.appointment_id ? !appointments.length : lead.status_lead !== 'cualificado' && !appointments.length) fail('meta_crm_milestone_not_current');
-  const clinic = await models.Clinica.findByPk(input.clinic_id, { raw: true });
+  const clinic = await models.Clinica.findByPk(input.clinic_id, { raw: true, ...query });
   if (!clinic || ![true, 1, '1'].includes(clinic.estado_clinica)) fail('meta_crm_clinic_unavailable');
 
   // Reuse native reception's current campaign/page/account routing, not a historical clinic label.
   const pages = await models.ClinicMetaAsset.findAll({ where: { assetType: 'facebook_page', isActive: true,
     metaAssetId: identity.page_id, [Op.or]: [{ assignmentScope: 'clinic', clinicaId: input.clinic_id },
       ...(clinic.grupoClinicaId ? [{ assignmentScope: 'group', grupoClinicaId: clinic.grupoClinicaId }] : [])] },
-    attributes: ['id', 'metaConnectionId'], raw: true });
+    attributes: ['id', 'metaConnectionId'], raw: true, ...query });
   let routed = false;
   for (const page of pages) {
     try {
       const current = await resolveMetaLeadClinic({ models, identity, event: { page_id: identity.page_id },
-        pageAssetId: page.id, connectionId: page.metaConnectionId });
+        pageAssetId: page.id, connectionId: page.metaConnectionId, transaction });
       if (Number(current.id_clinica) === input.clinic_id) routed = true;
     } catch (error) { if (!/^meta_lead_/.test(error.code || '')) throw error; }
   }
   if (!routed) fail('meta_crm_campaign_scope_changed');
 
-  const configDependencies = { IntakeConfig: models.IntakeConfig, Clinica: models.Clinica };
+  const configDependencies = { IntakeConfig: models.IntakeConfig, Clinica: models.Clinica, transaction };
   const { config: webPolicyRecord } = await resolveLeadIntakeConfig({ lead: { clinica_id: input.clinic_id,
     grupo_clinica_id: clinic.grupoClinicaId }, dependencies: configDependencies });
   if (!webPolicyRecord) fail('meta_crm_configuration_required');
-  const clinicRecord = await models.IntakeConfig.findOne({ where: { assignment_scope: 'clinic', clinic_id: input.clinic_id }, raw: true });
+  const clinicRecord = await models.IntakeConfig.findOne({ where: { assignment_scope: 'clinic', clinic_id: input.clinic_id }, raw: true, ...query });
   const groupRecord = clinic.grupoClinicaId ? await models.IntakeConfig.findOne({ where: {
-    assignment_scope: 'group', group_id: clinic.grupoClinicaId }, raw: true }) : null;
+    assignment_scope: 'group', group_id: clinic.grupoClinicaId }, raw: true, ...query }) : null;
   const tracking = resolveEffectiveTrackingConfig({ assignment_scope: webPolicyRecord.assignment_scope,
     clinic_id: input.clinic_id, group_id: clinic.grupoClinicaId }, { clinicRecord, groupRecord }).meta_ads;
   const signalPolicyRecord = tracking.config_source === 'group' ? groupRecord : clinicRecord;
@@ -88,10 +90,10 @@ async function resolveLifecycleSignal(input, dependencies = {}) {
     clinicId: input.clinic_id, campaignId: identity.campaign_id, adAccountId: identity.account_id,
     pixelId: tracking.pixel_id, webPolicyRecord, signalPolicyRecord, advertisingConsent: true,
     verifiedNativeLeadId: identity.native_lead_id, crmEventSource: CRM_MILESTONE_SOURCE };
-  const context = await resolveMetaSignalContext({ models, input: signal, now });
+  const context = await resolveMetaSignalContext({ models, input: signal, now, transaction });
   const policy = await resolveWorkspaceSignalPolicy({ records: [context.webPolicyRecord, context.signalPolicyRecord],
     provider: 'meta_ads', accountId: signal.adAccountId, campaignId: signal.campaignId, eventName: signal.eventName,
-    crmEventSource: CRM_MILESTONE_SOURCE, loadSetting: id => models.CampaignWorkspaceSetting.findByPk(id, { raw: true }) });
+    crmEventSource: CRM_MILESTONE_SOURCE, loadSetting: id => models.CampaignWorkspaceSetting.findByPk(id, { raw: true, ...query }) });
   if (!policy.applicable || !policy.allowed) fail(policy.applicable ? policy.reason : 'meta_crm_workspace_required');
   return { signal, authorizationKey: hash([identity, context.destinationKey, policy.policyRefs]) };
 }
@@ -106,9 +108,15 @@ async function enqueueMetaLeadLifecycleSignal(input, dependencies = {}) {
     const enqueue = dependencies.enqueue || require('./jobRequests.service').enqueueUniqueJobRequest;
     const result = await enqueue({ type: JOB_TYPE, origin: ORIGIN, priority: 'normal', maxAttempts: 8,
       payload: { schema_version: 1, ...payload, authorization_key: resolved.authorizationKey },
-      dedupeScope: `meta_crm:${hash([payload.clinic_id, payload.lead_id, payload.event_id])}` });
+      dedupeScope: `meta_crm:${hash([payload.clinic_id, payload.lead_id, payload.event_id])}` },
+    dependencies.transaction ? { transaction: dependencies.transaction } : {});
     return { queued: true, created: result.created, jobId: result.job.id };
-  } catch (error) { return { queued: false, reason: reason(error) }; }
+  } catch (error) {
+    if (dependencies.transaction && reason(error) === 'meta_crm_unavailable') {
+      fail('meta_crm_outbox_persistence_failed');
+    }
+    return { queued: false, reason: reason(error) };
+  }
 }
 
 async function runMetaLeadLifecycleSignalJob(payload, job, dependencies = {}) {

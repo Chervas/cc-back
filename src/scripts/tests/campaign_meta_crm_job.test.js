@@ -337,3 +337,31 @@ test('canonical qualification and booking hooks use the dispatcher; Purchase and
   assert.match(service('jobExecutor.service.js'), /campaign_meta_crm_signal:[\s\S]*runMetaLeadLifecycleSignalJob\(payload, jobRequest\)/);
   assert.doesNotMatch(service('metaLeadReception.service.js'), /sendWorkspaceMetaSignal|enqueueMetaLeadLifecycleSignal/);
 });
+
+test('every authorization and source read, plus JobRequest insertion, uses the domain transaction', async () => {
+  const h = harness(); const transaction = { LOCK: { UPDATE: 'UPDATE' } };
+  let reads = 0; let writes = 0;
+  for (const model of Object.values(h.models)) for (const [key, fn] of Object.entries(model)) {
+    if (!key.startsWith('find')) continue;
+    model[key] = async (...args) => {
+      assert.equal(args.at(-1).transaction, transaction, `${key} must see the uncommitted CRM mutation`);
+      reads++; return fn(...args);
+    };
+  }
+  const enqueue = h.deps.enqueue;
+  h.deps.transaction = transaction;
+  h.deps.enqueue = async (input, options) => { assert.equal(options.transaction, transaction); writes++; return enqueue(input); };
+  const result = await h.enqueue();
+  assert.equal(result.queued, true); assert.equal(writes, 1); assert.ok(reads >= 20); assert.equal(h.state.posts.length, 0);
+});
+
+test('transactional queue/database errors propagate to roll back the CRM mutation, but policy denials do not', async () => {
+  const h = harness(); h.deps.transaction = { LOCK: { UPDATE: 'UPDATE' } };
+  h.deps.enqueue = async () => { throw new Error('SQL with private data'); };
+  await assert.rejects(h.enqueue(), { code: 'meta_crm_outbox_persistence_failed' });
+  h.state.lead.consentimiento_canal = { marketing: false };
+  assert.equal((await h.enqueue()).reason, 'meta_crm_consent_required');
+  h.models.LeadIntake.findByPk = () => { throw new Error('database disconnected'); };
+  await assert.rejects(h.enqueue(), { code: 'meta_crm_outbox_persistence_failed' });
+  assert.equal(h.state.posts.length, 0);
+});

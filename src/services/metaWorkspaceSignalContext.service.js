@@ -8,15 +8,16 @@ const fail = code => { throw Object.assign(new Error(code), { code }); };
 const cleanAccount = value => String(value || '').replace(/^act_/, '');
 const scopeKey = row => `${row.assignment_scope}:${Number(row.assignment_scope === 'group' ? row.group_id : row.clinic_id)}`;
 
-async function resolveMetaSignalContext({ models, input, now = new Date() }) {
+async function resolveMetaSignalContext({ models, input, now = new Date(), transaction = null }) {
+  const query = transaction ? { transaction } : {};
   if (!Number.isSafeInteger(input.clinicId) || input.clinicId < 1) fail('workspace_clinic_required');
   const clinic = await models.Clinica.findByPk(input.clinicId, {
-    attributes: ['id_clinica', 'grupoClinicaId', 'estado_clinica'], raw: true,
+    attributes: ['id_clinica', 'grupoClinicaId', 'estado_clinica'], raw: true, ...query,
   });
   if (!clinic || ![true, 1, '1'].includes(clinic.estado_clinica)) fail('workspace_clinic_inactive');
-  const clinicRecord = await models.IntakeConfig.findOne({ where: { assignment_scope: 'clinic', clinic_id: input.clinicId }, raw: true });
+  const clinicRecord = await models.IntakeConfig.findOne({ where: { assignment_scope: 'clinic', clinic_id: input.clinicId }, raw: true, ...query });
   const groupRecord = clinic.grupoClinicaId ? await models.IntakeConfig.findOne({
-    where: { assignment_scope: 'group', group_id: clinic.grupoClinicaId }, raw: true,
+    where: { assignment_scope: 'group', group_id: clinic.grupoClinicaId }, raw: true, ...query,
   }) : null;
   const records = [clinicRecord, groupRecord].filter(Boolean);
   // Reload by current ownership, not by an arbitrary record ID supplied to the emitter.
@@ -39,7 +40,7 @@ async function resolveMetaSignalContext({ models, input, now = new Date() }) {
   }
   const ownerKey = scopeKey(signalPolicyRecord);
   const assignment = await models.MetaConnectionAssignment.findOne({ where: { scopeKey: ownerKey, status: 'active',
-    metaConnectionId: tracking.connection_id }, raw: true });
+    metaConnectionId: tracking.connection_id }, raw: true, ...query });
   if (!assignment || assignment.assignmentScope !== signalPolicyRecord.assignment_scope
     || Number(assignment.assignmentScope === 'group' ? assignment.grupoClinicaId : assignment.clinicaId)
       !== Number(signalPolicyRecord.assignment_scope === 'group' ? signalPolicyRecord.group_id : signalPolicyRecord.clinic_id)) fail('workspace_meta_permissions_required');
@@ -48,10 +49,10 @@ async function resolveMetaSignalContext({ models, input, now = new Date() }) {
     metaAssetId: { [Op.in]: [cleanAccount(input.adAccountId), `act_${cleanAccount(input.adAccountId)}`] },
     assignmentScope: signalPolicyRecord.assignment_scope,
     ...(signalPolicyRecord.assignment_scope === 'group' ? { grupoClinicaId: signalPolicyRecord.group_id } : { clinicaId: input.clinicId }),
-  }, attributes: ['id', 'metaAssetId'], raw: true });
+  }, attributes: ['id', 'metaAssetId'], raw: true, ...query });
   if (mappings.length !== 1) fail('workspace_meta_account_mapping_required');
   const connection = await models.MetaConnection.findByPk(tracking.connection_id, {
-    attributes: ['id', 'accessToken', 'expiresAt'], raw: true,
+    attributes: ['id', 'accessToken', 'expiresAt'], raw: true, ...query,
   });
   if (!connection?.accessToken || connection.expiresAt && (!Number.isFinite(+new Date(connection.expiresAt))
     || +new Date(connection.expiresAt) <= +now)) fail('workspace_meta_permissions_required');

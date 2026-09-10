@@ -38,6 +38,7 @@ const { getIO } = require('../services/socket.service');
 const jobRequestsService = require('../services/jobRequests.service');
 const leadAutoReplyService = require('../services/leadAutoReply.service');
 const patientDirectionService = require('../services/patientDirection.service');
+const { persistLeadWithCrmSignals } = require('../services/leadCrmSignalPersistence.service');
 const {
   localDateTimeToUtc,
   resolveClinicOpenState: resolveSharedClinicOpenState,
@@ -7119,14 +7120,15 @@ exports.updateLeadStatus = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'motivo_descarte es obligatorio al descartar' });
   }
 
-  const previousStatus = String(lead.status_lead || '').trim().toLowerCase();
+  let previousStatus = String(lead.status_lead || '').trim().toLowerCase();
   const updatePayload = {};
   if (status_lead) updatePayload.status_lead = status_lead;
   if (notas_internas !== undefined) updatePayload.notas_internas = notas_internas;
   if (asignado_a !== undefined) updatePayload.asignado_a = asignado_a;
   if (motivo_descarte !== undefined) updatePayload.motivo_descarte = motivo_descarte;
 
-  await lead.update(updatePayload);
+  const persisted = await persistLeadWithCrmSignals({ lead, changes: updatePayload });
+  previousStatus = String(persisted.previousStatus || '').trim().toLowerCase();
 
   if (status_lead === 'descartado') {
     await patientDirectionService.handleLeadDiscarded({
@@ -7356,19 +7358,6 @@ exports.resolveLeadNotice = asyncHandler(async (req, res) => {
       return res.status(409).json({ message: 'La cita no está activa y no puede cerrar este lead' });
     }
 
-    if (linkedLeadId !== leadId) {
-      await linkedAppointment.update({
-        lead_intake_id: leadId,
-        ...(lead.campana_id && !linkedAppointment.campana_id ? { campana_id: lead.campana_id } : {}),
-      });
-    }
-
-    qualifiedLeadConversion = await ensureQualifiedLeadConversion({
-      lead,
-      occurredAt: linkedAppointment.created_at || now,
-      logger: console,
-    });
-
     const updatePayload = {
       status_lead: 'citado',
       call_outcome_appointment_id: appointmentId,
@@ -7395,7 +7384,12 @@ exports.resolveLeadNotice = asyncHandler(async (req, res) => {
       }
     }
 
-    await lead.update(updatePayload);
+    await persistLeadWithCrmSignals({ lead, changes: updatePayload, appointment: linkedAppointment });
+    qualifiedLeadConversion = await ensureQualifiedLeadConversion({
+      lead,
+      occurredAt: linkedAppointment.created_at || now,
+      logger: console,
+    });
 
     scheduleConversion = await uploadScheduleForLinkedAppointment({
       lead,
@@ -7653,13 +7647,7 @@ exports.saveCallOutcome = asyncHandler(async (req, res) => {
     updatePayload.motivo_descarte = 'solo_pidio_informacion';
   }
 
-  if (linkedAppointment && parseInteger(linkedAppointment.lead_intake_id) !== leadId) {
-    await linkedAppointment.update({
-      lead_intake_id: leadId,
-      ...(lead.campana_id && !linkedAppointment.campana_id ? { campana_id: lead.campana_id } : {}),
-    });
-  }
-
+  await persistLeadWithCrmSignals({ lead, changes: updatePayload, appointment: linkedAppointment });
   let qualifiedLeadConversion = null;
   if (outcome === 'citado' && linkedAppointment) {
     qualifiedLeadConversion = await ensureQualifiedLeadConversion({
@@ -7668,8 +7656,6 @@ exports.saveCallOutcome = asyncHandler(async (req, res) => {
       logger: console,
     });
   }
-
-  await lead.update(updatePayload);
 
   let scheduleConversion = null;
   if (outcome === 'citado' && linkedAppointment) {

@@ -160,7 +160,9 @@ async function testControllerAndMigrationContracts() {
   assert.match(intakeController, /status_lead === 'cualificado'/);
   assert.match(intakeController, /lead-\$\{lead\.id\}-qualified/);
   assert.match(intakeController, /\['cualificado', 'citado', 'acudio_cita', 'convertido', 'descartado'\][\s\S]*\? lead\.status_lead[\s\S]*: 'contactado'/);
-  assert.match(intakeController, /linkedAppointment\.update\(\{[\s\S]*lead_intake_id: leadId/);
+  assert.match(intakeController, /persistLeadWithCrmSignals\(\{ lead, changes: updatePayload, appointment: linkedAppointment \}\)/);
+  const persistence = fs.readFileSync(path.resolve(__dirname, '../../services/leadCrmSignalPersistence.service.js'), 'utf8');
+  assert.match(persistence, /appointment\.update\(\{ lead_intake_id: lead\.id/);
   assert.match(intakeController, /uploadScheduleForLinkedAppointment\(\{/);
 
   const appointmentController = fs.readFileSync(

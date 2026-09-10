@@ -1,6 +1,14 @@
 'use strict';
 
 const { CRM_MILESTONE_SOURCE } = require('./campaignWorkspaceSignalPolicy.service');
+const COMMITTED_META_SIGNALS = Symbol('committed_meta_signals');
+
+function rememberCommittedMetaSignals(lead, results) {
+  if (!lead || !results.length) return;
+  const remembered = lead[COMMITTED_META_SIGNALS] || new Map();
+  for (const { eventId, result } of results) remembered.set(eventId, result);
+  lead[COMMITTED_META_SIGNALS] = remembered;
+}
 
 async function maybeUploadLeadLifecycleConversion(input = {}) {
   const dependencies = input.dependencies || {};
@@ -11,9 +19,15 @@ async function maybeUploadLeadLifecycleConversion(input = {}) {
   let meta;
   // Enqueue before the synchronous legacy Google upload, so its timeout cannot lose Meta's job.
   try {
-    meta = await enqueueMeta({ leadId: lead?.id, clinicId: input.clinicId ?? lead?.clinica_id,
-      eventName: input.eventName, eventId: input.eventId, occurredAt: input.occurredAt,
-      crmEventSource: CRM_MILESTONE_SOURCE });
+    const committed = input.lead?.[COMMITTED_META_SIGNALS];
+    if (committed?.has(input.eventId)) {
+      meta = committed.get(input.eventId);
+      committed.delete(input.eventId);
+    } else {
+      meta = await enqueueMeta({ leadId: lead?.id, clinicId: input.clinicId ?? lead?.clinica_id,
+        eventName: input.eventName, eventId: input.eventId, occurredAt: input.occurredAt,
+        crmEventSource: CRM_MILESTONE_SOURCE });
+    }
   } catch { meta = { queued: false, reason: 'meta_crm_unavailable' }; }
   if (meta.reason === 'meta_crm_unavailable') logger.warn?.('CRM signal queue unavailable: meta_crm_unavailable');
   try { return { ...await google(input), meta }; }
@@ -23,4 +37,4 @@ async function maybeUploadLeadLifecycleConversion(input = {}) {
   }
 }
 
-module.exports = { maybeUploadLeadLifecycleConversion };
+module.exports = { maybeUploadLeadLifecycleConversion, rememberCommittedMetaSignals };

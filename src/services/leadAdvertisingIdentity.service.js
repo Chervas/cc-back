@@ -45,11 +45,11 @@ async function attachLeadAdvertisingIdentities({ models, leads, transaction = nu
   return leads;
 }
 
-async function resolveNativeMetaLeadIdentity({ models, lead }) {
+async function resolveNativeMetaLeadIdentity({ models, lead, transaction = null }) {
   if (lead?.source !== 'meta_ads' || lead.external_source !== 'meta_leadgen' || !id(lead.external_id)) return null;
   const rows = await models.LeadAttributionAudit.findAll({ where: { lead_intake_id: lead.id },
     attributes: [[json('attribution_steps.advertising_identity'), 'identity'],
-      [json('raw_payload.lead_id'), 'native_lead_id']], raw: true });
+      [json('raw_payload.lead_id'), 'native_lead_id']], raw: true, ...(transaction ? { transaction } : {}) });
   const matches = new Map();
   for (const row of rows) {
     const identity = metaAdvertisingIdentity(row.identity, lead.clinica_id);

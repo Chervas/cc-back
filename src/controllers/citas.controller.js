@@ -51,6 +51,7 @@ const {
     ensureQualifiedLeadConversion,
     uploadScheduleForLinkedAppointment,
 } = require('../services/leadQualificationMilestone.service');
+const { enqueueCreatedAppointmentCrmSignals } = require('../services/leadCrmSignalPersistence.service');
 const {
     assertUserCanAccessFeature,
     canUserAccessFeature,
@@ -2216,6 +2217,7 @@ exports.createCita = asyncHandler(async (req, res) => {
             },
             patient: paciente,
             requestedLanguage: datosPaciente.idioma_preferido,
+            afterPersist: (appointment, transaction) => enqueueCreatedAppointmentCrmSignals({ lead, appointment, transaction }),
         };
         const cita = bookingEnabled && !pastHistoryOnly
             ? await mutateAppointmentBooking({
@@ -2226,6 +2228,7 @@ exports.createCita = asyncHandler(async (req, res) => {
                 persist: async ({ values, transaction }) => {
                     const created = await CitaPaciente.create(values, { transaction });
                     await applyExplicitPatientLanguage(paciente, datosPaciente.idioma_preferido, { transaction });
+                    await createOptions.afterPersist(created, transaction);
                     return created;
                 },
             })
