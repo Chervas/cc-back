@@ -1108,3 +1108,61 @@ entregas Meta=0, jobs CRM Meta=0. Sin migraciones, emisiones, cobros o promocion
 El objetivo global sigue EN CURSO: autorizacion completa y consumo por emisores,
 Meta web/configuracion nativa, Optimiza de ambos proveedores, metricas por anuncio
 y ruta canonica siguen pendientes. No habilitar señales por esta preparacion.
+
+## Revision De Senales Y Contrato Por Destino (2026-09-10)
+
+`campaignWorkspaceSignalAuthorization.service` enlaza las pruebas tecnicas
+Google/Meta con los destinos que podra autorizar el usuario. La preparacion
+expone `signals.accounts`: estado por cuenta seleccionada, caducidad, hitos y
+destinos. Es una lectura local `private, no-store`: no consulta al proveedor,
+refresca tokens, emite eventos o escribe autorizaciones. La revision completa
+incluye ese resultado en su huella para invalidar una confirmacion antigua.
+
+- Todas las cuentas e hitos seleccionados necesitan una prueba completa,
+  sin avisos, de la configuracion y grant actuales, con TTL exacto de 24 h.
+  Una prueba parcial, caducada, futura, fallida o en curso no autoriza nada.
+- Se separa la huella del grant de la huella del borrador. Preferencias o
+  seleccion invalidan la prueba que se va a confirmar, pero editar un borrador
+  no cambia silenciosamente los destinos de una autorizacion ya concedida.
+  El nuevo formato invalida pruebas guardadas con la huella anterior; no hay
+  configuraciones de clientes que migrar en esta verificacion.
+- El contrato privado contiene clinicas, cuenta, conexion y login Google,
+  huella del grant, referencia de la prueba e IDs de destinos por hito.
+  No contiene tokens ni contactos. `publicSettings` no publica ese contrato;
+  la UI solo recibe el resumen de revision.
+- La politica entiende autorizaciones schema 2 y exige destino exacto por
+  cuenta/hito, clinica activa en el ambito y el mismo grant actual. La accion
+  Google incluye el customer y el action ID; Meta exige el dataset ID exacto.
+  Seleccion y autorizacion originales siguen acotando las campañas permitidas.
+- Google y Meta vuelven a leer la autorizacion despues de resolver conexion
+  y reservar el intento, inmediatamente antes del transporte. Una revocacion
+  o cambio deja el intento omitido, no pendiente ni enviado. Salud comprueba
+  tambien destino/conexion actuales; Google separa su cache local por accion.
+- El vencimiento de la prueba tecnica inicial no revoca por si mismo una
+  autorizacion concedida. La conexion vigente, la seleccion y la revocacion
+  explicita siguen comprobadas en cada envio; no hay cache de permisos.
+
+La revision FUSE muestra una fila por cuenta, con «Hitos y destinos» desplegable
+y acceso al dialogo existente. Cerrar el dialogo vuelve al mismo paso. El reloj
+de la UI retira el OK cuando vence la prueba, incluso sin recargar. No añade
+pestañas ni vuelve a crear la recepcion de formularios.
+
+**Limite de este cambio:** el servicio construye el futuro contrato y los
+emisores ya verifican su version 2, pero la activacion real todavia NO lo
+persiste. El activador rechaza señales y mantiene cerrado el gate de despliegue.
+Las pruebas montan esa autorizacion explicitamente en modelos aislados, nunca
+en clientes. Schema 1 conserva compatibilidad con los consumidores anteriores;
+ninguna API permite crear ahora una autorizacion schema 1 con señales activas.
+Antes de habilitar clientes deben completarse la persistencia atomica del
+mandato, el enrutado por destino y la configuracion Meta nativa/web, retirando
+esa compatibilidad del nuevo recorrido. Optimiza de ambos proveedores y el
+cambio de ruta canonica siguen pendientes. El objetivo completo NO esta cerrado.
+
+Verificacion backend: 304 pruebas correctas, sin fallos ni omitidas, incluidas
+las regresiones del emisor Google, Data Manager y los hitos CRM. Los casos nuevos
+usan las preparaciones reales con modelos/transporte aislados: destino distinto,
+clinica desactivada, grant cambiado, revocacion durante reserva, borrador editado,
+prueba caducada y contrato privado no publicado. Sintaxis y `git diff --check` OK.
+Un reinicio solo de DEV, PID `1182884`, contador `8540`; staging, gateway y
+preview conservan PID. SQL antes/despues: gate cerrado, settings=0, entregas
+Meta=0 y jobs CRM Meta=0. Sin migracion, nueva tarea nocturna, envio o cobro.

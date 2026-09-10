@@ -1034,7 +1034,7 @@ async function uploadGoogleConversionDestination({
   const workspacePolicy = await (dependencies.resolveWorkspaceSignalPolicy || resolveWorkspaceSignalPolicy)({
     records: [cfgRecord, signalPolicyRecord], provider: 'google_ads', accountId: eventConfig.customer_id,
     campaignId: extractGoogleLeadIdentity(customData).campaignId, eventName: eventConfig.event_name,
-    crmEventSource,
+    crmEventSource, clinicId: scope.clinicId, destinationId: conversionAction,
   });
   if (workspacePolicy.applicable) {
     auditBase.requestMetadata.workspace_policy_version = workspacePolicy.version;
@@ -1103,6 +1103,21 @@ async function uploadGoogleConversionDestination({
   const value = Number.isFinite(Number(valueRaw)) ? Number(valueRaw) : 0;
   const currency = String(coalesce(customData.currency, eventConfig.currency, 'EUR') || 'EUR').toUpperCase();
   const conversionDateTime = toGoogleAdsDateTime(customData.conversion_time || customData.conversionDateTime || new Date());
+
+  // Recheck after both OAuth resolution and audit reservation, immediately before transport.
+  if (workspacePolicy.authorizationSchema === 2) {
+    const fresh = await (dependencies.resolveWorkspaceSignalPolicy || resolveWorkspaceSignalPolicy)({
+      records: [cfgRecord, signalPolicyRecord], provider: 'google_ads', accountId: eventConfig.customer_id,
+      campaignId: extractGoogleLeadIdentity(customData).campaignId, eventName: eventConfig.event_name,
+      crmEventSource, clinicId: scope.clinicId, destinationId: conversionAction,
+      connectionId: runtime.connection?.id || 0, loginCustomerId: runtime.loginCustomerId || null,
+    });
+    if (!fresh.allowed || fresh.authorizationSchema !== 2 || JSON.stringify(fresh.policyRefs) !== JSON.stringify(workspacePolicy.policyRefs)) {
+      const reason = fresh.allowed ? 'workspace_signal_connection_changed' : fresh.reason;
+      await prepared.row.update({ status: 'skipped', reason, completedAt: new Date() });
+      return destinationResult({ sent: false, reason, audit_id: prepared.row?.id || null });
+    }
+  }
 
   let result;
   try {

@@ -81,3 +81,18 @@ test('a changed runtime invalidates the review without exposing its tokens', asy
   const second = await f.read();
   assert.notEqual(first.revision, second.revision); assert.equal(JSON.stringify(second).includes('private-key'), false);
 });
+test('signal readiness participates in the review revision without publishing the private mandate', async () => {
+  const f = fixture(); const transaction = { id: 'read-transaction' };
+  const review = { enabled: true, ready: true, accounts: [{ provider: 'google_ads', account_id: '123', status: 'ready' }] };
+  const options = { transaction, loadSignalReview: async input => {
+    assert.equal(input.transaction, transaction); assert.equal(input.setting, f.state.setting);
+    assert.deepEqual(input.scope.clinicIds, [1]);
+    return { review, authorization: { grant_fingerprint: 'private-grant', destinations: [] } };
+  } };
+  const first = await f.read(options); assert.deepEqual(first.signals, review);
+  assert.doesNotMatch(JSON.stringify(first), /private-grant|grant_fingerprint/);
+  const firstRevision = first.revision;
+  review.ready = false; review.accounts[0].status = 'stale';
+  assert.notEqual((await f.read(options)).revision, firstRevision);
+  assert.equal(f.state.setting.activation, null);
+});

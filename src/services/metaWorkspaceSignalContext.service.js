@@ -62,7 +62,7 @@ async function resolveMetaSignalContext({ models, input, now = new Date(), trans
     assignment: assignment.id, connectedAt: assignment.connectedAt || null, owner: ownerKey,
     web: webPolicyRecord.id, advertiser: signalPolicyRecord.id,
   })).digest('hex');
-  return { destinationKey, accessToken: connection.accessToken, webPolicyRecord, signalPolicyRecord };
+  return { destinationKey, accessToken: connection.accessToken, connectionId: Number(connection.id), webPolicyRecord, signalPolicyRecord };
 }
 
 module.exports = { resolveMetaSignalContext };

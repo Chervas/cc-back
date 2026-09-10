@@ -85,6 +85,7 @@ async function sendMetaEvent({
   advertisingConsent = null
 }) {
   const workspacePolicy = await resolveWorkspaceSignalPolicy({ records: [webPolicyRecord, signalPolicyRecord], provider: 'meta_ads',
+    clinicId, destinationId: pixelId,
     accountId: adAccountId, campaignId, eventName, crmEventSource });
   const workspaceDestination = [webPolicyRecord, signalPolicyRecord].some(record => Object.prototype.hasOwnProperty.call(record?.config?.campaigns || {}, 'workspace_policy'));
   if (workspacePolicy.applicable) {

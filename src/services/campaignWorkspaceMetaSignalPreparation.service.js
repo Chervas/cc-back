@@ -24,7 +24,7 @@ function checkInput(input, write = false) {
   return input;
 }
 
-async function metaSignalPreparationContext({ models, scope, accountId, now = new Date(), transaction = null }) {
+async function metaSignalPreparationContext({ models, scope, accountId, now = new Date(), transaction = null, signalEvents = null }) {
   const owner = settingScope(scope); const query = options(transaction);
   const ownerRow = await (scope.groupId ? models.GrupoClinica : models.Clinica).findByPk(owner.scope_id, query);
   if (!ownerRow) fail('scope_not_found', 404);
@@ -33,7 +33,7 @@ async function metaSignalPreparationContext({ models, scope, accountId, now = ne
   if (JSON.stringify(clinicIds) !== JSON.stringify([...scope.clinicIds].sort((a, b) => a - b))) fail('workspace_scope_changed');
   const setting = await models.CampaignWorkspaceSetting.findOne({ where: owner, ...query });
   if (setting?.accounts?.filter(row => row.provider === 'meta_ads' && row.account_id === accountId).length !== 1) fail('workspace_account_not_selected', 403);
-  const signals = setting.preferences?.signals;
+  const signals = signalEvents ? { enabled: true, events: signalEvents } : setting.preferences?.signals;
   if (!signals?.enabled || !Array.isArray(signals.events) || !signals.events.length || signals.events.some(event => !EVENTS.includes(event))) {
     fail('workspace_signal_preferences_required');
   }
@@ -58,12 +58,13 @@ async function metaSignalPreparationContext({ models, scope, accountId, now = ne
     || +new Date(connection.expiresAt) <= +now)) fail('workspace_meta_permissions_required');
   const grants = assignments.filter(assignment => eligible.some(row => assignment.scopeKey === scopeKey(row)
     && Number(assignment.metaConnectionId) === Number(row.metaConnectionId)));
-  const fingerprint = revision([owner, clinicIds, setting.preferences,
-    sorted(setting.accounts.map(row => ({ ...row, campaign_ids: [...row.campaign_ids].sort() }))),
+  const grantFingerprint = revision([owner, clinicIds,
     sorted(eligible.map(row => [row.id, scopeKey(row), row.metaConnectionId, row.metaAssetId])),
     sorted(grants.map(row => [row.id, row.scopeKey, row.metaConnectionId, row.status, row.connectedAt])),
     connection.id, connection.metaUserId]);
-  return { setting, accountId, connection, fingerprint, events: [...new Set(signals.events)].sort() };
+  const fingerprint = revision([grantFingerprint, setting.preferences,
+    sorted(setting.accounts.map(row => ({ ...row, campaign_ids: [...row.campaign_ids].sort() })))]);
+  return { setting, accountId, connection, fingerprint, grantFingerprint, events: [...new Set(signals.events)].sort() };
 }
 
 function publicProof(context, now = new Date()) {

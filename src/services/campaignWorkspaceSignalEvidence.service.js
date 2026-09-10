@@ -85,6 +85,7 @@ async function loadMetaSignalEvidence({ models, campaigns, selectedClinics, now 
       const eventKey = `${campaign.id}:${row.event_name}`;
       if (!decisions.has(eventKey)) decisions.set(eventKey, await resolveWorkspaceSignalPolicy({
         records: [current.webPolicyRecord, current.signalPolicyRecord], provider: 'meta_ads',
+        models, now, clinicId: campaign.clinicId, destinationId: row.dataset_id, connectionId: current.connectionId || 0,
         accountId: campaign.account_id, campaignId: campaign.campaign_id, eventName: row.event_name,
         crmEventSource: CRM_MILESTONE_SOURCE,
         loadSetting: settingId => models.CampaignWorkspaceSetting.findByPk(settingId, { raw: true }),

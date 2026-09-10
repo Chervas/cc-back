@@ -27,7 +27,7 @@ function checkInput(input, write = false) {
   return input.account_id;
 }
 
-async function googlePreparationContext({ models, scope, accountId, transaction = null }) {
+async function googlePreparationContext({ models, scope, accountId, transaction = null, signalEvents = null }) {
   const owner = settingScope(scope); const options = query(transaction);
   const ownerRow = await (scope.groupId ? models.GrupoClinica : models.Clinica).findByPk(owner.scope_id, options);
   if (!ownerRow) fail('scope_not_found', 404);
@@ -37,7 +37,7 @@ async function googlePreparationContext({ models, scope, accountId, transaction 
   const setting = await models.CampaignWorkspaceSetting.findOne({ where: owner, ...options });
   const selected = setting?.accounts?.find(row => row.provider === 'google_ads' && row.account_id === accountId);
   if (!selected) fail('workspace_account_not_selected', 403);
-  const signals = setting.preferences?.signals;
+  const signals = signalEvents ? { enabled: true, events: signalEvents } : setting.preferences?.signals;
   if (!signals?.enabled || !Array.isArray(signals.events) || !signals.events.length
     || signals.events.some(event => !EVENTS.includes(event))) fail('workspace_signal_preferences_required');
   const events = [...new Set(signals.events)].sort();
@@ -61,12 +61,13 @@ async function googlePreparationContext({ models, scope, accountId, transaction 
   const relevantAssignments = assignments.filter(assignment => eligible.some(row => assignment.scopeKey === key(row)
     && Number(assignment.googleConnectionId) === Number(row.googleConnectionId)));
   // Tokens rotate routinely. Bind evidence to the grant/assignment, not to its access token or refresh timestamp.
-  const fingerprint = hash([owner, clinicIds, setting.preferences,
-    sorted(setting.accounts.map(row => ({ ...row, campaign_ids: [...row.campaign_ids].sort() }))),
+  const grantFingerprint = hash([owner, clinicIds,
     sorted(eligible.map(row => [row.id, key(row), row.googleConnectionId, row.loginCustomerId || row.managerCustomerId || null])),
     sorted(relevantAssignments.map(row => [row.id, row.scopeKey, row.googleConnectionId, row.status, row.connectedAt])),
     connection.id, connection.googleUserId, String(connection.scopes || '').split(/[\s,]+/).filter(Boolean).sort()]);
-  return { setting, connection, fingerprint, events, accountId, loginCustomerId: [...loginIds][0] || null };
+  const fingerprint = hash([grantFingerprint, setting.preferences,
+    sorted(setting.accounts.map(row => ({ ...row, campaign_ids: [...row.campaign_ids].sort() })))]);
+  return { setting, connection, fingerprint, grantFingerprint, events, accountId, loginCustomerId: [...loginIds][0] || null };
 }
 
 function publicProof(context, now = new Date()) {

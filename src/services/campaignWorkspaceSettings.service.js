@@ -25,8 +25,10 @@ function settingScope(scope) {
 }
 function publicSettings(row, scope) {
   const value = row?.get ? row.get({ plain: true }) : row;
+  const activation = value?.activation ? { ...value.activation, signals: value.activation.signals
+    ? { enabled: value.activation.signals.enabled, events: value.activation.signals.events } : undefined } : null;
   return { scope: settingScope(scope), version: value?.version || 0, accounts: value?.accounts || [],
-    activation: value?.activation || null, preferences: value?.preferences || null, updatedAt: value?.updated_at || null };
+    activation, preferences: value?.preferences || null, updatedAt: value?.updated_at || null };
 }
 function canonicalAccounts(accounts) {
   return accounts.map(account => ({ ...account, campaign_ids: [...account.campaign_ids].sort() }))

@@ -6,6 +6,7 @@ const { loadWorkspaceInventory, loadWebEvidence } = require('./campaignWorkspace
 const { settingScope, campaignIncluded, publicSettings } = require('./campaignWorkspaceSettings.service');
 const { resolveModeStateForScope } = require('./campaignMode.service');
 const { assignmentClinics } = require('./campaignWorkspaceAssignment.service');
+const { loadSignalAuthorizationReview } = require('./campaignWorkspaceSignalAuthorization.service');
 
 const MODE_LABELS = {
   connect_only: 'Medición de interesados (leads)',
@@ -33,7 +34,8 @@ function assessCampaignPreparation(campaign, evidence = {}) {
 }
 
 async function loadWorkspacePreparation({ models, scope, now = new Date(), transaction = null,
-  loadInventory = loadWorkspaceInventory, loadEvidence = loadWebEvidence, resolveMode = resolveModeStateForScope }) {
+  loadInventory = loadWorkspaceInventory, loadEvidence = loadWebEvidence, resolveMode = resolveModeStateForScope,
+  loadSignalReview = loadSignalAuthorizationReview }) {
   const where = settingScope(scope);
   const setting = await models.CampaignWorkspaceSetting.findOne({ where, raw: true, transaction });
   const intakeRecord = await models.IntakeConfig.findOne({ where: { assignment_scope: where.scope_type,
@@ -51,11 +53,13 @@ async function loadWorkspacePreparation({ models, scope, now = new Date(), trans
     configurationScope: evidence.get(campaign.id)?.configurationScope || null }));
   const assigned = checks.filter(row => row.campaign.assigned);
   const ready = assigned.filter(row => row.ready);
+  const signalReview = await loadSignalReview({ models, scope, setting, now, transaction });
   const body = {
     configuration: publicSettings(setting, scope),
     existing: existingMode ? { mode: existingMode.mode, label: MODE_LABELS[existingMode.mode] } : null,
     selectionConfirmed: !!setting?.accounts?.length,
     activationAvailable: process.env.CAMPAIGN_WORKSPACE_ACTIVATION_ENABLED === 'true',
+    signals: signalReview.review,
     assignmentClinics: scope.groupId ? assignmentClinics(inventory.selectedClinics) : [],
     campaigns: checks,
     counts: { total: checks.length, assigned: assigned.length, ready: ready.length, unassigned: checks.length - assigned.length },

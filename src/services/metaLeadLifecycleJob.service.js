@@ -92,6 +92,7 @@ async function resolveLifecycleSignal(input, dependencies = {}) {
     verifiedNativeLeadId: identity.native_lead_id, crmEventSource: CRM_MILESTONE_SOURCE };
   const context = await resolveMetaSignalContext({ models, input: signal, now, transaction });
   const policy = await resolveWorkspaceSignalPolicy({ records: [context.webPolicyRecord, context.signalPolicyRecord],
+    models, transaction, now, clinicId: input.clinic_id, destinationId: signal.pixelId, connectionId: context.connectionId || 0,
     provider: 'meta_ads', accountId: signal.adAccountId, campaignId: signal.campaignId, eventName: signal.eventName,
     crmEventSource: CRM_MILESTONE_SOURCE, loadSetting: id => models.CampaignWorkspaceSetting.findByPk(id, { raw: true, ...query }) });
   if (!policy.applicable || !policy.allowed) fail(policy.applicable ? policy.reason : 'meta_crm_workspace_required');

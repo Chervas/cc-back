@@ -17,7 +17,7 @@ function accountIncludes(account, campaignId) {
 function workspaceSignalDecision({ setting, provider, accountId, campaignId = null, eventName, crmEventSource = null }) {
   if (!CRM_EVENTS.has(normalizedEvent(eventName))) return legacy();
   const activation = setting?.activation;
-  if (!activation || activation.schema_version !== 1 || !['measurement', 'optimize'].includes(activation.mode)) {
+  if (!activation || ![1, 2].includes(activation.schema_version) || !['measurement', 'optimize'].includes(activation.mode)) {
     return denied('workspace_activation_invalid', setting?.version);
   }
   if (activation.status !== 'active') return denied('workspace_activation_inactive', setting.version);
@@ -43,7 +43,9 @@ function workspaceSignalDecision({ setting, provider, accountId, campaignId = nu
 }
 
 async function resolveWorkspaceSignalPolicy({ records = [], provider, accountId, campaignId, eventName, crmEventSource = null,
-  loadSetting = id => require('../../models').CampaignWorkspaceSetting.findByPk(id, { raw: true }) }) {
+  clinicId, destinationId, connectionId, loginCustomerId, models, now = new Date(), transaction = null,
+  verifyDestination = args => require('./campaignWorkspaceSignalAuthorization.service').verifySignalDestination(args),
+  loadSetting = null }) {
   if (!CRM_EVENTS.has(normalizedEvent(eventName))) return legacy();
   const references = records.filter(record => record?.config?.campaigns
     && Object.prototype.hasOwnProperty.call(record.config.campaigns, 'workspace_policy'));
@@ -51,6 +53,7 @@ async function resolveWorkspaceSignalPolicy({ records = [], provider, accountId,
   let result = legacy();
   const checked = new Set();
   const policyRefs = [];
+  let authorizationSchema = 1;
   for (const record of references) {
     const reference = record.config.campaigns.workspace_policy;
     const scopeType = record.assignment_scope === 'group' ? 'group' : 'clinic';
@@ -63,14 +66,25 @@ async function resolveWorkspaceSignalPolicy({ records = [], provider, accountId,
     if (checked.has(key)) continue;
     checked.add(key);
     // No authorization cache: revocation must be visible to the next upload.
-    const setting = await loadSetting(reference.setting_id);
+    const setting = loadSetting ? await loadSetting(reference.setting_id)
+      : await (models || require('../../models')).CampaignWorkspaceSetting.findByPk(reference.setting_id, { raw: true, transaction });
     if (!setting || setting.scope_type !== scopeType || Number(setting.scope_id) !== scopeId) return denied('workspace_policy_scope_mismatch');
     result = workspaceSignalDecision({ setting, provider, accountId, campaignId, eventName, crmEventSource });
     if (!result.allowed) return result;
+    if (setting.activation.schema_version === 2) {
+      try {
+        await verifyDestination({ models: models || require('../../models'), setting, provider,
+          accountId: String(accountId || '').replace(/^act_/i, '').replace(/-/g, ''), clinicId, eventName,
+          destinationId, connectionId, loginCustomerId, now, transaction });
+      } catch (error) {
+        return denied(/^workspace_[a-z_]+$/.test(error.code || '') ? error.code : 'workspace_signal_authorization_unavailable', setting.version);
+      }
+      authorizationSchema = 2;
+    }
     if (!Number.isSafeInteger(setting.version) || setting.version < 1) return denied('workspace_policy_version_invalid');
     policyRefs.push({ setting_id: reference.setting_id, scope_type: scopeType, scope_id: scopeId, version: setting.version });
   }
-  return { ...result, policyRefs: policyRefs.sort((a, b) => a.setting_id.localeCompare(b.setting_id)) };
+  return { ...result, authorizationSchema, policyRefs: policyRefs.sort((a, b) => a.setting_id.localeCompare(b.setting_id)) };
 }
 
 module.exports = { workspaceSignalDecision, resolveWorkspaceSignalPolicy, CRM_MILESTONE_SOURCE };

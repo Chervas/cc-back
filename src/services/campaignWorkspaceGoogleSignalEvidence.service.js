@@ -131,9 +131,11 @@ async function loadGoogleSignalEvidence({ models, campaigns, selectedClinics, no
         && config.destination_key === row.destinationKey && buildConversionActionResource({ customerId: config.customer_id,
           conversionAction: config.conversion_action, conversionActionId: config.conversion_action_id, sendTo: config.send_to }) === row.conversionAction);
       if (matching.length !== 1) continue;
-      const policyKey = `${campaign.id}:${row.eventName}`;
+      const policyKey = `${campaign.id}:${row.eventName}:${row.conversionAction}`;
       if (!policies.has(policyKey)) policies.set(policyKey, await resolveWorkspaceSignalPolicy({
         records: [state.record, advertiser], provider: 'google_ads', accountId: campaign.account_id,
+        models, now, clinicId: campaign.clinicId, destinationId: row.conversionAction,
+        connectionId: current.runtime.connection.id, loginCustomerId: current.runtime.loginCustomerId || null,
         campaignId: campaign.campaign_id, eventName: row.eventName, crmEventSource: CRM_MILESTONE_SOURCE,
         loadSetting: id => models.CampaignWorkspaceSetting.findByPk(id, { raw: true }),
       }));
