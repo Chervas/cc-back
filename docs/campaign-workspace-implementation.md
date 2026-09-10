@@ -584,3 +584,63 @@ de la web compartida sin seleccionar/autorizar el grupo.
   Revisadas manualmente capturas de seleccion/limites, revision movil y Salud.
   El runner distingue el area tactil expandida de Material de un desbordamiento
   de texto; no se recorta el control para satisfacer una medicion incorrecta.
+
+## Preparacion De Conversiones Google
+
+- El segundo paso abre un dialogo de la cuenta usando las APIs existentes de
+  conversiones. Recibir formularios ya estaba implementado: NO se crea otro
+  receptor. Crear una accion de conversion o validar el acceso de envio son
+  operaciones distintas de recibir un formulario y de autorizar hitos del CRM.
+- La apertura consulta todos los tipos de acciones para detectar conflictos,
+  no solo UPLOAD_CLICKS. Pagina Google Search con la misma consulta y token;
+  no acepta resultados parciales, ciclos o respuestas incompletas. Limites:
+  20 paginas, 45 segundos totales, 10 segundos por llamada, sin reintentos
+  interactivos. No se envia pageSize: Google fija paginas de 10.000 filas.
+- Reutiliza solo nombres canonicos inequivocos. Duplicados, tipos incompatibles,
+  propietarios distintos, estado no habilitado, acciones principales o recuento
+  incompatible requieren revision. La validacion del servidor comprueba tambien
+  propietario/tipo/categoria; no acepta un indicador ready del navegador.
+- Preparar pide una confirmacion separada y crea SOLO los hitos que faltan como
+  secundarios, sin normalizar acciones actuales ni tocar anuncios, pujas o
+  presupuesto. Revalida scope, actor, conexion y todas las clinicas que usan la
+  cuenta justo antes de crear. La autorizacion sobre una sola asignacion no
+  permite cambiar una cuenta compartida con otras clinicas.
+- Comprobar acceso reutiliza Data Manager con validateOnly y GCLID_1, sin PII
+  ni ingestión de conversiones. Un resultado de otra cuenta/accion/evento no
+  aparece como valido. La prueba visual no persiste una autorizacion. Tras una
+  creacion incierta no se reintenta automaticamente: se exige consultar otra
+  vez y cerrar invalida la preparacion anterior aunque el POST haya fallado.
+- Incidencia detectada con Chromium: DEV sigue configurado en Google Ads v21,
+  retirada por Google el 05/08/2026. La consulta real devolvia 404 HTML. El
+  cliente compartido admite ahora una version explicita por operacion; las
+  consultas, altas y normalizacion de conversiones usan v24. No se cambia .env,
+  el endpoint configurado, los fallbacks o la version de los demas jobs. Las
+  respuestas de error de consulta/validacion son JSON controlado, no el error
+  Axios crudo. La nueva consulta de Arriaga devolvio 200 y 27 acciones.
+- Pendiente imprescindible antes de cerrar TODA la integracion: migrar y probar
+  los demas consumidores Google Ads que aun usan v21. No se ha acreditado que
+  OAuth/discovery, inventario, informes o ejecucion general funcionen sobre esa
+  version retirada. Tambien faltan prueba persistente de destinos, autorizacion
+  por cuenta/evento, emisores completos y tratamiento UX de acciones actuales
+  incompatibles. El gate de activacion permanece cerrado y la ruta es temporal.
+- Contratos primarios: [paginacion Search](https://developers.google.com/google-ads/api/docs/reporting/paging),
+  [ConversionAction v24](https://developers.google.com/google-ads/api/reference/rpc/v24/ConversionAction),
+  [retirada v21](https://ads-developers.googleblog.com/2026/06/google-ads-api-v21-sunset-reminder.html)
+  y [versiones disponibles](https://developers.google.com/google-ads/api/docs/sunset-dates).
+- Verificacion: 303 pruebas principales backend y cuatro suites adicionales
+  Google correctas; 46 pruebas frontend. Compilacion Angular DEV publicada
+  `45b80fe8e47463cd`, 10/09/2026 17:13:55 UTC, con el aviso previo de bundle
+  inicial 4.58 MB frente a 3 MB. Solo se reinicio `pm2-back-dev`; staging,
+  gateway y preview mantienen sus procesos. Sin migraciones ni cambios en .env.
+- Chromium autenticado: dialogo 26 comprobaciones y 9 capturas; workspace real
+  58 y 25, en 1440/1024/390 px. Cero errores JS y cero escrituras reales de
+  negocio. La consulta Google real devuelve 27 acciones (200 en el primer pase,
+  304 con ETag revalidado despues). Los dos POST de creacion y cuatro de validacion
+  son fixtures interceptadas en el navegador: NO se crearon acciones de clientes
+  ni se llamo a Data Manager real. La seleccion/borrador del escenario tambien
+  se simula solo en GET; SQL confirma cero filas preferences pobladas.
+- Evidencias: `/home/ubuntu/qa-evidence/campaign-google-conversions-20260910-complete`
+  y `campaign-workspace-google-conversions-20260910`. Revisadas manualmente las
+  capturas de conversiones, confirmacion, reautorizacion, Salud y grafica movil.
+  Los intentos previos se conservan: error real v21, espera del reinicio DEV,
+  area tactil MDC y 304 correctamente tratado como revalidacion, no error.

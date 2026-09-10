@@ -1,7 +1,8 @@
 'use strict';
 
 const crypto = require('node:crypto');
-const { googleAdsRequest, normalizeCustomerId } = require('../lib/googleAdsClient');
+const { googleAdsRequest, normalizeCustomerId, GOOGLE_ADS_CONVERSIONS_API_VERSION } = require('../lib/googleAdsClient');
+const { googleAdsSearchRows } = require('../lib/googleAdsSearchRows');
 const {
   GOOGLE_ADS_SCOPE,
   resolveScopedGoogleAdsRuntime,
@@ -170,14 +171,8 @@ async function fetchConversionActions({
     '  conversion_action.primary_for_goal',
     'FROM conversion_action',
   ].join('\n');
-  const response = await request('POST', `customers/${normalizedCustomerId}/googleAds:search`, {
-    accessToken,
-    loginCustomerId: loginCustomerId || undefined,
-    data: { query },
-    singleAttempt: true,
-    timeoutMs: 15_000,
-  });
-  return (Array.isArray(response?.results) ? response.results : [])
+  const rows = await googleAdsSearchRows({ customerId: normalizedCustomerId, accessToken, loginCustomerId, query, request, apiVersion: GOOGLE_ADS_CONVERSIONS_API_VERSION });
+  return rows
     .map(actionFromGoogleRow)
     .filter((action) => action.id);
 }
@@ -444,6 +439,7 @@ async function sendNormalizationMutations({
   assertSafeOperations(customerId, operations);
   return request('POST', `customers/${customerId}/conversionActions:mutate`, {
     accessToken: runtime.accessToken,
+    apiVersion: GOOGLE_ADS_CONVERSIONS_API_VERSION,
     loginCustomerId: runtime.loginCustomerId || undefined,
     singleAttempt: true,
     timeoutMs: 15_000,

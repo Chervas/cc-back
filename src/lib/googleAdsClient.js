@@ -128,7 +128,10 @@ function ensureGoogleAdsConfig() {
   return { developerToken, managerId };
 }
 
-function buildBaseUrls() {
+function buildBaseUrls(apiVersion) {
+  if (apiVersion !== undefined && !/^v[1-9]\d*(?:\.\d+)?$/.test(apiVersion)) {
+    throw Object.assign(new Error('Invalid Google Ads API version'), { code: 'ADS_API_VERSION_INVALID' });
+  }
   const endpoint = (process.env.GOOGLE_ADS_API_ENDPOINT || 'https://googleads.googleapis.com').replace(/\/+$/, '');
   const mainVersion = (process.env.GOOGLE_ADS_API_VERSION || 'v21').replace(/^\/+/, '');
   const fallbacks = (process.env.GOOGLE_ADS_API_VERSION_FALLBACKS || '')
@@ -139,8 +142,15 @@ function buildBaseUrls() {
 
   const configured = process.env.GOOGLE_ADS_API_BASE_URL ? process.env.GOOGLE_ADS_API_BASE_URL.replace(/\/+$/, '') : null;
   if (configured) {
+    if (apiVersion !== undefined) {
+      if (!/\/v\d+(?:\.\d+)?$/.test(configured)) {
+        throw Object.assign(new Error('Configured Google Ads base URL has no version'), { code: 'ADS_API_VERSION_INVALID' });
+      }
+      return [configured.replace(/\/v\d+(?:\.\d+)?$/, `/${apiVersion}`)];
+    }
     return [configured];
   }
+  if (apiVersion !== undefined) return [`${endpoint}/${apiVersion}`];
   const versions = [mainVersion, ...fallbacks];
   const bases = [];
   for (const version of versions) {
@@ -153,6 +163,7 @@ function buildBaseUrls() {
 
 async function googleAdsRequest(method = 'GET', path, {
   accessToken,
+  apiVersion,
   loginCustomerId,
   params,
   data,
@@ -188,7 +199,7 @@ async function googleAdsRequest(method = 'GET', path, {
     throw err;
   }
 
-  const baseUrls = buildBaseUrls();
+  const baseUrls = buildBaseUrls(apiVersion);
   if (!baseUrls.length) {
     const err = new Error('No hay endpoints configurados para Google Ads');
     err.code = 'ADS_ENDPOINT_MISSING';
@@ -293,6 +304,7 @@ async function resumeGoogleAdsUsage() {
 }
 
 module.exports = {
+  GOOGLE_ADS_CONVERSIONS_API_VERSION: 'v24',
   buildBaseUrls,
   googleAdsRequest,
   normalizeCustomerId,

@@ -10,9 +10,12 @@ const {
   googleAdsRequest,
   normalizeCustomerId,
   formatCustomerId,
-  ensureGoogleAdsConfig
+  ensureGoogleAdsConfig,
+  GOOGLE_ADS_CONVERSIONS_API_VERSION
 } = require('../lib/googleAdsClient');
 const { metaGet } = require('../lib/metaClient');
+const { googleAdsSearchRows } = require('../lib/googleAdsSearchRows');
+const { assertGoogleConversionMutationAccess } = require('../lib/googleConversionMutationAccess');
 const {
   overlayNormalizedGoogleAdsConfig,
 } = require('../lib/intake-config-write-merge');
@@ -3011,12 +3014,10 @@ function buildSuggestedMapping(actions) {
 
 function buildClinicaclickManagedMapping(actions) {
   const mapping = { lead: null, contact: null, qualified_lead: null, schedule: null, purchase: null };
-  const canonicalNames = new Map(
-    VALID_EVENTS.map((key) => [String(EVENT_CATALOG[key].name || '').trim().toLowerCase(), key])
-  );
-  for (const action of Array.isArray(actions) ? actions : []) {
-    const key = canonicalNames.get(String(action?.name || '').trim().toLowerCase());
-    if (key && !mapping[key] && action?.id) mapping[key] = String(action.id);
+  for (const key of VALID_EVENTS) {
+    const matches = (Array.isArray(actions) ? actions : []).filter(action =>
+      String(action?.name || '').trim().toLowerCase() === EVENT_CATALOG[key].name.toLowerCase());
+    if (matches.length === 1 && matches[0]?.id) mapping[key] = String(matches[0].id);
   }
   return mapping;
 }
@@ -6399,7 +6400,7 @@ async function resolveLoginCustomerId(connectionId, customerId, scope) {
   }
 }
 
-async function listConversionActionsInternal({ accessToken, customerId, loginCustomerId }) {
+async function listConversionActionsInternal({ accessToken, customerId, loginCustomerId, includeAllTypes = false }) {
   const cleanCustomer = normalizeCustomerId(customerId);
   if (!cleanCustomer) {
     const err = new Error('customer_id requerido');
@@ -6420,16 +6421,10 @@ async function listConversionActionsInternal({ accessToken, customerId, loginCus
     '  conversion_action.primary_for_goal,',
     '  conversion_action.tag_snippets',
     'FROM conversion_action',
-    "WHERE conversion_action.type = 'UPLOAD_CLICKS'"
+    ...(includeAllTypes ? [] : ["WHERE conversion_action.type = 'UPLOAD_CLICKS'"])
   ].join('\n');
 
-  const data = await googleAdsRequest('POST', `customers/${cleanCustomer}/googleAds:search`, {
-    accessToken,
-    loginCustomerId: loginCustomerId || undefined,
-    data: { query }
-  });
-
-  const rows = Array.isArray(data?.results) ? data.results : [];
+  const rows = await googleAdsSearchRows({ customerId: cleanCustomer, accessToken, loginCustomerId, query, apiVersion: GOOGLE_ADS_CONVERSIONS_API_VERSION });
   const actions = rows
     .map(mapConversionActionRow)
     .filter((item) => !!item.id && item.status !== 'REMOVED')
@@ -6452,19 +6447,31 @@ async function ensureConversionActionsInternal({
   loginCustomerId,
   currency,
   events,
-  createMissing
+  createMissing,
+  beforeCreate = null,
+  listActions = listConversionActionsInternal,
+  request = googleAdsRequest
 }) {
   const requestedEvents = listToUniqueArray(
     (Array.isArray(events) && events.length ? events : DEFAULT_ENABLED_CONVERSION_EVENTS)
       .filter((key) => VALID_EVENTS.includes(key))
   );
-  const current = await listConversionActionsInternal({ accessToken, customerId, loginCustomerId });
+  const current = await listActions({ accessToken, customerId, loginCustomerId, includeAllTypes: true });
   // Provisioning no adopta acciones del cliente por coincidencias vagas. Solo
   // reutiliza nombres canónicos de ClinicaClick y nunca modifica ni elimina el
   // resto de acciones existentes en la cuenta.
   const existingMapping = current.clinicaclick_mapping || {};
   const created = [];
   const existing = [];
+
+  for (const event of requestedEvents) {
+    const matches = current.actions.filter(action => String(action.name || '').trim().toLowerCase() === EVENT_CATALOG[event].name.toLowerCase());
+    if (matches.length > 1 || matches.some(action => action.type !== 'UPLOAD_CLICKS')) {
+      throw Object.assign(new Error('Revisa las acciones existentes antes de preparar conversiones'), {
+        code: matches.length > 1 ? 'canonical_action_ambiguous' : 'canonical_action_type_incompatible', httpStatus: 409,
+      });
+    }
+  }
 
   for (const key of requestedEvents) {
     if (existingMapping[key]) {
@@ -6491,8 +6498,13 @@ async function ensureConversionActionsInternal({
     }
 
     if (operations.length > 0) {
-      const mutate = await googleAdsRequest('POST', `customers/${normalizeCustomerId(customerId)}/conversionActions:mutate`, {
+      if (beforeCreate) {
+        const checkedRuntime = await beforeCreate();
+        accessToken = checkedRuntime.accessToken; loginCustomerId = checkedRuntime.loginCustomerId;
+      }
+      const mutate = await request('POST', `customers/${normalizeCustomerId(customerId)}/conversionActions:mutate`, {
         accessToken,
+        apiVersion: GOOGLE_ADS_CONVERSIONS_API_VERSION,
         loginCustomerId: loginCustomerId || undefined,
         singleAttempt: true,
         timeoutMs: 15000,
@@ -8579,11 +8591,19 @@ exports.listGoogleAdsConversionActions = asyncHandler(async (req, res) => {
     });
   }
 
-  const result = await listConversionActionsInternal({
-    accessToken: runtime.accessToken,
-    customerId,
-    loginCustomerId: runtime.loginCustomerId
-  });
+  let result;
+  try {
+    result = await listConversionActionsInternal({
+      accessToken: runtime.accessToken,
+      customerId,
+      loginCustomerId: runtime.loginCustomerId,
+      includeAllTypes: req.query.all_types === 'true'
+    });
+  } catch (error) {
+    return res.status(error.httpStatus || 502).json({ success: false,
+      error: String(error.code || 'google_ads_query_failed').toLowerCase(),
+      message: 'No se han podido consultar las conversiones de Google. No se ha cambiado ninguna accion.' });
+  }
   return res.json({
     success: true,
     customer_id: customerId,
@@ -8637,11 +8657,19 @@ exports.validateGoogleDataManagerConversion = asyncHandler(async (req, res) => {
     });
   }
 
-  const listed = await listConversionActionsInternal({
-    accessToken: runtime.accessToken,
-    customerId,
-    loginCustomerId: runtime.loginCustomerId
-  });
+  let listed;
+  try {
+    listed = await listConversionActionsInternal({
+      accessToken: runtime.accessToken,
+      customerId,
+      loginCustomerId: runtime.loginCustomerId,
+      includeAllTypes: true
+    });
+  } catch (error) {
+    return res.status(error.httpStatus || 502).json({ success: false, validated: false, validate_only: true,
+      error: String(error.code || 'google_ads_query_failed').toLowerCase(),
+      message: 'No se han podido comprobar las conversiones de Google. No se ha enviado ninguna conversion.' });
+  }
   const canonicalMapping = listed.clinicaclick_mapping || {};
   const canonicalEvent = eventKey || VALID_EVENTS.find((key) => canonicalMapping[key] === conversionActionId) || null;
   if (!canonicalEvent || canonicalMapping[canonicalEvent] !== conversionActionId) {
@@ -8654,6 +8682,12 @@ exports.validateGoogleDataManagerConversion = asyncHandler(async (req, res) => {
     });
   }
   const canonicalAction = listed.actions.find((action) => String(action?.id || '') === conversionActionId);
+  if (canonicalAction?.resource_name !== `customers/${customerId}/conversionActions/${conversionActionId}`
+    || canonicalAction?.type !== 'UPLOAD_CLICKS' || canonicalAction?.category !== EVENT_CATALOG[canonicalEvent].category) {
+    return res.status(409).json({ success: false, validated: false, validate_only: true,
+      error: 'canonical_action_type_incompatible',
+      message: 'Revisa el propietario, tipo y evento de la accion antes de validar.' });
+  }
   if (String(canonicalAction?.status || '').toUpperCase() !== 'ENABLED') {
     return res.status(409).json({
       success: false,
@@ -8790,20 +8824,39 @@ exports.ensureGoogleAdsConversionActions = asyncHandler(async (req, res) => {
   }
 
   let ensured;
+  const recheckMutationAccess = async () => {
+    const currentScope = await resolveScopeFromInput({ clinicIdRaw: req.body?.clinic_id, groupIdRaw: req.body?.group_id,
+      assignmentScopeRaw: req.body?.assignment_scope });
+    if (JSON.stringify([...currentScope.clinic_ids].sort()) !== JSON.stringify([...scope.clinic_ids].sort())
+      || !await hasMarketingClinicScopeAccess({ userId, clinicIds: currentScope.clinic_ids, access: 'write' })) {
+      throw Object.assign(new Error('El acceso al ámbito ha cambiado'), { code: 'scope_forbidden', httpStatus: 403 });
+    }
+    const checked = await resolveScopedGoogleAdsRuntime({ userId, clinicId: currentScope.clinic_id,
+      groupId: currentScope.group_id, assignmentScope: currentScope.assignment_scope, customerId });
+    if (checked.account.id !== runtime.account.id || checked.connection.id !== runtime.connection.id) {
+      throw Object.assign(new Error('La conexión ha cambiado'), { code: 'google_ads_account_mapping_changed', httpStatus: 409 });
+    }
+    await assertGoogleConversionMutationAccess({ userId, customerId, runtimeAccountId: checked.account.id });
+    return checked;
+  };
   try {
+    if (createMissing || normalizeExisting && !normalizationValidateOnly && req.body?.confirm_external_mutation === true) {
+      await assertGoogleConversionMutationAccess({ userId, customerId, runtimeAccountId: runtime.account.id });
+    }
     ensured = await ensureConversionActionsInternal({
       accessToken: runtime.accessToken,
       customerId,
       loginCustomerId: runtime.loginCustomerId,
       currency,
       events,
-      createMissing
+      createMissing,
+      beforeCreate: recheckMutationAccess
     });
   } catch (error) {
     const providerError = error?.response?.data?.error || null;
-    return res.status(Number(error?.response?.status) || 409).json({
+    return res.status(Number(error.httpStatus) || Number(error?.response?.status) || 409).json({
       success: false,
-      error: 'canonical_action_provisioning_failed',
+      error: error.code || 'canonical_action_provisioning_failed',
       message: providerError?.message || error.message || 'Google no pudo crear las acciones canónicas de ClinicaClick.',
       details: Array.isArray(providerError?.details) ? providerError.details : []
     });
@@ -8813,6 +8866,10 @@ exports.ensureGoogleAdsConversionActions = asyncHandler(async (req, res) => {
   let normalized = [];
   let normalizationValidation = null;
   if (normalizeExisting) {
+    if (!normalizationValidateOnly && req.body?.confirm_external_mutation === true) {
+      try { await recheckMutationAccess(); }
+      catch (error) { return res.status(error.httpStatus || 409).json({ success: false, error: error.code || 'scope_forbidden' }); }
+    }
     const expectedActions = listToUniqueArray(events)
       .filter((eventKey) => VALID_EVENTS.includes(eventKey))
       .map((eventKey) => ({
@@ -10515,6 +10572,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
 });
 
 exports.__test = {
+  ensureConversionActionsInternal,
   CAMPAIGN_MODES,
   IMPROVEMENT_AUTHORIZATION_SCOPES,
   IMPROVEMENT_AUTHORIZATION_VERSION,
