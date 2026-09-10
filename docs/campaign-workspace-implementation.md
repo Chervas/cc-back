@@ -1299,3 +1299,68 @@ conservan PID. Sin cambio de UI ni nuevo build (`b05bce92b41f1b82`). La lectura
 MySQL en un ambito Arriaga resuelve el scope sin mandato: no hay autorizaciones
 reales que probar. Gate cerrado, settings=0, entregas Meta=0, jobs CRM Meta=0 y
 cero auditorias Google con los event IDs de las pruebas. Sin migracion ni cron.
+
+## Meta Web Y CRM Desde El Mandato (2026-09-10)
+
+`campaignWorkspaceMetaWeb.service` conecta la ingesta web existente y el job
+`campaign_meta_crm_signal` con el destino preparado schema 2. No crea otro
+receptor, tabla, cola o cron. Sin mandato nuevo conserva el emisor anterior.
+
+- La identidad se resuelve contra el inventario persistido, propietarios de
+  cuenta y decisiones revisadas. Acepta IDs explicitos `cc_meta_campaign_id`
+  o `meta_ads_campaign_id`, tambien en la URL de llegada que ya conserva el
+  snippet. La cuenta, si se aporta, debe coincidir. No deduce campañas por nombre,
+  UTM ambiguas, placeholders ni pruebas enviadas por el navegador. No añade
+  parametros ni modifica anuncios: su preparacion autorizada sigue pendiente.
+- Se valida la instalacion efectiva, dominio, clinica activa, pertenencia
+  explicita en una web de grupo y consentimiento configurado. Una cuenta
+  compartida exige una decision de clinica; no utiliza la sede representativa.
+  La auditoria existente guarda solo la identidad construida por el servidor,
+  con huellas de instalacion y asignacion. El informe reutiliza esa identidad
+  para leads y sus resultados, sin exigir otra campaña local ni simular anuncios.
+- Recepcion y atribucion son independientes: si no se puede resolver la
+  campaña, el formulario sigue entrando. La recepcion no requiere activar
+  señales. Las señales iniciales de una ingesta exigen la identidad persistida
+  del lead, evitando reatribuir una reentrega con el contenido de otra peticion.
+- El destino publicitario procede del mandato, no del pixel/token guardado en
+  Web. Se conservan widgets y ajustes previos. Lead/Contact requieren origen
+  web y consentimiento explicito; QualifiedLead/Schedule solo aceptan el hito
+  privado del CRM. No habilita ViewContent ni permite citas desde eventos publicos.
+- El job de hitos existente admite la identidad web verificada. Guarda IDs y
+  huella de autorizacion, no contactos. Relee lead, consentimiento, cita, cuenta,
+  instalacion y permiso antes de enviar y despues de reservar. Se mantienen
+  deduplicacion, backoff y caducidad. La persistencia atomica existente incluye
+  los origenes web: un permiso denegado guarda el CRM sin señal; un fallo al
+  guardar el job revierte la unidad. El emisor Google permanece independiente.
+- Las entregas web usan un sobre versionado en `MetaSignalDelivery.policy_refs`,
+  sin migracion. Salud distingue web y nativo: verifica instalacion/asignacion
+  actual solo para web; no exige una web al formulario nativo. Reutiliza lecturas
+  en bloque y cache dentro de una consulta, nunca entre envios o consultas.
+  Recibido por Meta sigue sin significar conversion atribuida.
+
+Verificacion backend: 383 pruebas correctas, sin fallos ni omitidas; 11
+comprobaciones de sintaxis y diff-check. La nueva suite prohíbe SQL real y usa
+preparacion, mandato aislado, ingesta, job, recibo y Salud para clinica/grupo.
+Incluye revocacion tras reserva, cuenta compartida, auditorias contradictorias,
+dominio ajeno, ausencia de atribucion y conservacion de la configuracion Web.
+Lectura MySQL adicional comprueba las consultas de inventario y propietarios,
+sin imprimir datos ni crear pruebas de recepcion.
+
+El mandato real sigue sin activarse. Faltan guardado atomico y confirmacion de
+activacion, Google nativo sin web, configuracion multipagina/mixta, Optimiza de
+ambos proveedores, metricas CRM por anuncio y sustitucion de la ruta canonica.
+Objetivo global EN CURSO; este avance no es una entrega real a Meta.
+
+Chromium autenticado: 33 comprobaciones/nueve capturas de Salud y 71/29 de
+regresion general, en `/home/ubuntu/qa-evidence/campaign-meta-web-20260910-health`
+y `...-20260910-regression`. Resoluciones 1440/1024/390 px, cero errores JS y
+escrituras de negocio. Sesion e informes iniciales reales; estados de entrega
+mediante fixtures GET construidos con el backend. Inspeccion manual del dialogo
+desktop/movil, retorno desde campaña y grafica movil con tooltip. Los avisos
+operativos quedan pendientes, sin cerrar ni ocultar.
+
+Un reinicio solo DEV: PID `1189960`, contador `8544`. Staging, gateway y preview
+conservan PID. Sin cambio de UI ni nuevo build (`b05bce92b41f1b82`). Sin migracion,
+cron nuevo, activacion, cambios publicitarios o cobros.
+Auditoria SQL antes/despues: gate cerrado, settings=0, entregas Meta=0 y jobs
+CRM Meta=0. El ambito Arriaga se resuelve y no tiene un mandato nuevo.

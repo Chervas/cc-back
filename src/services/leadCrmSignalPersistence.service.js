@@ -3,10 +3,11 @@
 const { CRM_MILESTONE_SOURCE } = require('./campaignWorkspaceSignalPolicy.service');
 const { enqueueMetaLeadLifecycleSignal } = require('./metaLeadLifecycleJob.service');
 const { rememberCommittedMetaSignals } = require('./leadLifecycleConversion.service');
+const { WEB_LEAD_SOURCES } = require('../lib/meta-web-attribution');
 
 const ACTIVE_APPOINTMENTS = new Set(['pendiente', 'info_enviada', 'info_confirmada',
   'recordatorio_enviado', 'recordatorio_confirmado', 'cambio_solicitado', 'reprogramada']);
-const enabled = (lead, dependencies) => lead?.source === 'meta_ads'
+const enabled = (lead, dependencies) => WEB_LEAD_SOURCES.includes(lead?.source)
   && (dependencies.env || process.env).CAMPAIGN_WORKSPACE_ACTIVATION_ENABLED === 'true';
 const scopeChanged = () => { throw Object.assign(new Error('La cita o el interesado han cambiado. Actualiza la vista.'),
   { status: 409, code: 'meta_crm_scope_changed' }); };

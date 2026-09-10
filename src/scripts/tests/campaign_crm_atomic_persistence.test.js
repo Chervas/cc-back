@@ -74,6 +74,26 @@ test('qualification and its job commit together; the Google hook reuses the comm
   assert.equal(delivery.meta.queued, true); assert.deepEqual(h.state.external, ['google']);
 });
 
+test('existing web lead sources reuse the atomic qualification and appointment queue', async () => {
+  for (const source of ['web', 'call_click', 'seo', 'direct']) {
+    const h = harness(); h.lead.source = source; h.state.committed.lead.source = source;
+    await h.link();
+    assert.equal(h.state.transactions, 1);
+    assert.equal(h.state.committed.lead.source, source);
+    assert.equal(h.state.committed.jobs.length, 2);
+    assert.equal((await h.googleHook('appointment-3')).meta.queued, true);
+    assert.deepEqual(h.state.external, ['google']);
+    const denied = harness(); denied.lead.source = source; denied.state.committed.lead.source = source;
+    denied.state.denied = true; await denied.link();
+    assert.equal(denied.state.committed.lead.status_lead, 'citado');
+    assert.equal(denied.state.committed.jobs.length, 0);
+    const failed = harness(); failed.lead.source = source; failed.state.committed.lead.source = source;
+    failed.state.failEvent = 'schedule'; await assert.rejects(failed.link(), /queue unavailable/);
+    assert.equal(failed.state.committed.lead.status_lead, 'contactado');
+    assert.equal(failed.state.committed.jobs.length, 0);
+  }
+});
+
 test('a queue failure rolls back qualification and does not publish a committed-result marker', async () => {
   const h = harness(); h.state.failEvent = 'qualified_lead';
   await assert.rejects(h.run(), /queue unavailable/);

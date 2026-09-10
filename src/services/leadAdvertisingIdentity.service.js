@@ -1,6 +1,7 @@
 'use strict';
 
 const { Op, json } = require('sequelize');
+const { metaWebAdvertisingIdentity, WEB_LEAD_SOURCES } = require('../lib/meta-web-attribution');
 const id = value => typeof value === 'string' && /^[0-9]{1,64}$/.test(value) ? value : null;
 
 function metaAdvertisingIdentity(value, clinicId) {
@@ -13,6 +14,8 @@ function metaAdvertisingIdentity(value, clinicId) {
 }
 
 function canonicalLeadAdvertisingIdentity(lead) {
+  const web = metaWebAdvertisingIdentity(lead.advertising_identity, lead.clinica_id);
+  if (web && WEB_LEAD_SOURCES.includes(lead.source)) return web;
   if (lead.source === 'google_ads' && id(lead.google_ads_customer_id) && id(lead.google_ads_campaign_id)) {
     return { provider: 'google_ads', account_id: lead.google_ads_customer_id, campaign_id: lead.google_ads_campaign_id };
   }
@@ -20,7 +23,7 @@ function canonicalLeadAdvertisingIdentity(lead) {
 }
 
 async function attachLeadAdvertisingIdentities({ models, leads, transaction = null }) {
-  const eligible = leads.filter(lead => lead.source === 'meta_ads');
+  const eligible = leads.filter(lead => WEB_LEAD_SOURCES.includes(lead.source));
   if (!eligible.length) return leads;
   const byId = new Map(eligible.map(lead => [String(lead.id), lead]));
   // Select only server-written attribution, never raw form data or patient contact fields.
@@ -31,10 +34,11 @@ async function attachLeadAdvertisingIdentities({ models, leads, transaction = nu
   for (const row of rows) {
     const lead = byId.get(String(row.lead_intake_id));
     if (!lead) continue;
-    const value = metaAdvertisingIdentity(row.identity, lead.clinica_id);
+    const web = metaWebAdvertisingIdentity(row.identity, lead.clinica_id);
+    const value = web || (lead.source === 'meta_ads' ? metaAdvertisingIdentity(row.identity, lead.clinica_id) : null);
     if (!value) continue;
     if (!identities.has(String(lead.id))) identities.set(String(lead.id), new Map());
-    identities.get(String(lead.id)).set(JSON.stringify(value), { version: 1, verified_by: 'meta_graph',
+    identities.get(String(lead.id)).set(JSON.stringify(value), web || { version: 1, verified_by: 'meta_graph',
       clinic_id: Number(lead.clinica_id), ...value });
   }
   for (const lead of eligible) {
@@ -64,4 +68,17 @@ async function resolveNativeMetaLeadIdentity({ models, lead, transaction = null 
   return matches.size === 1 ? { ...[...matches.values()][0], native_lead_id: lead.external_id } : null;
 }
 
-module.exports = { metaAdvertisingIdentity, canonicalLeadAdvertisingIdentity, attachLeadAdvertisingIdentities, resolveNativeMetaLeadIdentity };
+async function resolveMetaWebLeadIdentity({ models, lead, transaction = null }) {
+  if (!WEB_LEAD_SOURCES.includes(lead?.source) || lead.external_source === 'meta_leadgen') return null;
+  const rows = await models.LeadAttributionAudit.findAll({ where: { lead_intake_id: lead.id },
+    attributes: [[json('attribution_steps.advertising_identity'), 'identity']], raw: true, transaction });
+  const identities = new Map();
+  for (const row of rows) {
+    const identity = metaWebAdvertisingIdentity(row.identity, lead.clinica_id);
+    if (identity) identities.set(JSON.stringify(identity), identity);
+  }
+  return identities.size === 1 ? [...identities.values()][0] : null;
+}
+
+module.exports = { metaAdvertisingIdentity, canonicalLeadAdvertisingIdentity, attachLeadAdvertisingIdentities,
+  resolveNativeMetaLeadIdentity, resolveMetaWebLeadIdentity };

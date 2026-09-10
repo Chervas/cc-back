@@ -13,6 +13,10 @@ const scopeKey = row => `${row.assignment_scope}:${Number(row.assignment_scope =
 async function resolveMetaSignalContext({ models, input, now = new Date(), transaction = null }) {
   const query = transaction ? { transaction } : {};
   if (!Number.isSafeInteger(input.clinicId) || input.clinicId < 1) fail('workspace_clinic_required');
+  if (input.webIdentity) {
+    if (input.verifiedNativeLeadId) fail('workspace_meta_web_source_changed');
+    return require('./campaignWorkspaceMetaWeb.service').resolveMetaWebSignalContext({ models, input, now, transaction });
+  }
   if (input.crmEventSource === CRM_MILESTONE_SOURCE && /^[0-9]{1,64}$/.test(input.verifiedNativeLeadId || '')) {
     if (!['qualifiedlead', 'schedule'].includes(String(input.eventName || '').replace(/[_\s-]/g, '').toLowerCase())) {
       fail('workspace_meta_native_event_required');

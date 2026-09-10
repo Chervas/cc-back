@@ -28,7 +28,10 @@ const ChatFlowTemplate = db.ChatFlowTemplate;
 const ClinicaHorario = db.ClinicaHorario;
 const WhatsAppWebOrigin = db.WhatsAppWebOrigin;
 const { enqueueInboundFormSubmissionResume } = require('../services/automationsV2Resume.service');
-const { sendMetaEvent, buildUserData: buildMetaUserData } = require('../services/metaCapi.service');
+const { buildUserData: buildMetaUserData } = require('../services/metaCapi.service');
+const { sendCampaignMetaWebEvent: sendMetaEvent, resolveMetaWebAdvertisingIdentity } = require('../services/campaignWorkspaceMetaWeb.service');
+const { extractMetaWebAttribution, WEB_LEAD_SOURCES } = require('../lib/meta-web-attribution');
+const { resolveMetaWebLeadIdentity } = require('../services/leadAdvertisingIdentity.service');
 const {
   normalizeGoogleConsent,
 } = require('../services/googleAdsConversionUpload.service');
@@ -3515,12 +3518,22 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     });
   }
 
+  let metaWebIdentity = null;
+  if (WEB_LEAD_SOURCES.includes(normalizedSource) && externalSource !== 'meta_leadgen' && clinicaIdParsed && !isDirectQuickChatSummary) {
+    try {
+      metaWebIdentity = await resolveMetaWebAdvertisingIdentity({ models: db, clinicId: clinicaIdParsed, recordId: cfg?.id,
+        attribution: extractMetaWebAttribution(body), eventSourceUrl: pageUrlValue || landingUrlValue });
+    } catch (error) {
+      // Attribution is optional for reception. Never drop a form because its advertising context is unresolved.
+      console.warn('Meta web attribution unavailable:', /^workspace_/.test(error.code || '') ? error.code : 'workspace_meta_attribution_unavailable');
+    }
+  }
   const leadPayload = {
     event_id: eventId,
     clinica_id: clinicaIdParsed,
     grupo_clinica_id: grupoClinicaIdParsed,
     campana_id: campanaIdParsed,
-    channel: normalizedChannel,
+    channel: metaWebIdentity ? 'paid' : normalizedChannel,
     source: normalizedSource,
     source_detail: source_detail || null,
     clinic_match_source: clinicMatchSource,
@@ -3571,6 +3584,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   let dedupeConflict = null;
   let shouldEmitLeadCreated = false;
   const leadAttributionSteps = buildWebLandingAttributionSteps(webLandingAttribution, {
+    ...(metaWebIdentity ? { advertising_identity: metaWebIdentity } : {}),
     clinic_match_source: clinicMatchSource || null,
     clinic_match_value: clinicMatchValue || null,
     resolved_clinic_id: clinicaIdParsed,
@@ -3901,8 +3915,10 @@ exports.ingestLead = asyncHandler(async (req, res) => {
       ua: coalesce(user_agent, req.headers['user-agent']),
       externalId: lead.id
     });
-    if (allowLeadAdPlatformEvents) {
+    if (allowLeadAdPlatformEvents && Number(lead?.clinica_id) === clinicaIdParsed) {
       await sendMetaEvent({
+        webIdentity: await resolveMetaWebLeadIdentity({ models: db, lead }),
+        requirePersistedIdentity: true, leadId: lead.id,
         eventName: normalizedEventNameForCapi,
         eventTime: Math.floor(Date.now() / 1000),
         eventId: lead.event_id || `lead-${lead.id}`,
@@ -6326,7 +6342,8 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
       webPolicyRecord: metaRuntime.webPolicyRecord,
       adAccountId: metaRuntime.adAccountId,
       campaignId: custom_data.meta_ads_campaign_id || null,
-      advertisingConsent: marketingConsent
+      advertisingConsent: marketingConsent,
+      attribution: { ...body, custom_data }
     });
   }
 

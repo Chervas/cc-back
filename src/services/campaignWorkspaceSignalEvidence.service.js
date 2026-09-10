@@ -9,10 +9,14 @@ const { loadSignalRoutingScope, resolveWorkspaceSignalRoute } = require('./campa
 
 const FRESH_MS = 24 * 3600000;
 const MAX_ROWS = 10000;
-const canonicalRefs = refs => !Array.isArray(refs) || !refs.length || refs.some(ref => !ref || typeof ref.setting_id !== 'string'
+const canonicalRefs = value => {
+  const refs = value?.schema_version === 2 && value.source === 'web'
+    && Number.isSafeInteger(value.intake_config_id) && value.intake_config_id > 0 ? value.references : value;
+  return !Array.isArray(refs) || !refs.length || refs.some(ref => !ref || typeof ref.setting_id !== 'string'
   || !['clinic', 'group'].includes(ref.scope_type) || !Number.isSafeInteger(ref.scope_id) || !Number.isSafeInteger(ref.version))
   ? null : JSON.stringify(refs.map(ref => ({ setting_id: ref.setting_id, scope_type: ref.scope_type, scope_id: ref.scope_id, version: ref.version }))
     .sort((a, b) => a.setting_id.localeCompare(b.setting_id)));
+};
 
 function deliveryEvidence(rows, now = new Date()) {
   if (!rows.length) return { checked: false };
@@ -48,6 +52,15 @@ async function loadMetaSignalEvidence({ models, campaigns, selectedClinics, now 
   const clinics = [...new Set(eligible.map(row => row.clinicId))];
   const groups = [...new Set(selectedClinics.filter(row => clinics.includes(Number(row.id_clinica))).map(row => row.grupoClinicaId).filter(Boolean))];
   let records = null;
+  const loadRecords = async () => {
+    if (!records) records = await models.IntakeConfig.findAll({ where: { [Op.or]: [
+      { assignment_scope: 'clinic', clinic_id: { [Op.in]: clinics } },
+      ...(groups.length ? [{ assignment_scope: 'group', group_id: { [Op.in]: groups } }] : []),
+    ] }, raw: true });
+    return records;
+  };
+  let webInventory = null;
+  const webIdentities = new Map();
   const contexts = new Map(); const decisions = new Map();
   // Report-local snapshots avoid re-reading the same scope/grant for every receipt.
   // Senders deliberately do not use these caches.
@@ -82,7 +95,35 @@ async function loadMetaSignalEvidence({ models, campaigns, selectedClinics, now 
       const route = contexts.get(routeKey);
       if (!route) continue;
       hasWorkspaceRoute = true;
-      if (!route.denied && row.dataset_id === route.destinationId && row.destination_key === route.destinationKey
+      const isWeb = row.policy_refs?.schema_version === 2 && row.policy_refs.source === 'web';
+      let destinationMatches = !isWeb && !route.denied && row.destination_key === route.destinationKey
+        && ['qualifiedlead', 'schedule'].includes(String(row.event_name).replace(/[_\s-]/g, '').toLowerCase());
+      if (!route.denied && isWeb) {
+        if (!webIdentities.has(campaign.id)) {
+          try {
+            const web = require('./campaignWorkspaceMetaWeb.service');
+            await loadRecords();
+            if (!webInventory) webInventory = await web.readMetaWebInventory({ models,
+              accountIds: [...new Set(eligible.map(item => item.account_id))], campaignIds: [...new Set(eligible.map(item => item.campaign_id))] });
+            const configRecords = {
+              clinicRecord: records.find(record => record.assignment_scope === 'clinic' && Number(record.clinic_id) === campaign.clinicId),
+              groupRecord: records.find(record => record.assignment_scope === 'group' && Number(record.group_id) === Number(clinic.grupoClinicaId)),
+            };
+            const state = resolveWebMeasurementMarketingState({ assignment_scope: 'clinic', clinic_id: campaign.clinicId,
+              group_id: clinic.grupoClinicaId }, { records: configRecords });
+            webIdentities.set(campaign.id, await web.resolveMetaWebAdvertisingIdentity({ models, clinicId: campaign.clinicId,
+              clinic, recordId: state.record?.id, webRecords: configRecords, snapshot: webInventory,
+              attribution: { account_id: campaign.account_id, campaign_id: campaign.campaign_id } }));
+          } catch (error) {
+            if (!/^workspace_/.test(error.code || '')) throw error;
+            webIdentities.set(campaign.id, null);
+          }
+        }
+        const identity = webIdentities.get(campaign.id);
+        destinationMatches = !!identity && row.policy_refs.intake_config_id === identity.intake_config_id
+          && row.destination_key === require('./campaignWorkspaceMetaWeb.service').metaWebDestinationKey(route, identity);
+      }
+      if (!route.denied && row.dataset_id === route.destinationId && destinationMatches
         && canonicalRefs(row.policy_refs) === canonicalRefs(route.authorization.policyRefs)
         && (row.status === 'pending' || row.completed_at && Number.isFinite(+new Date(row.completed_at))
           && +new Date(row.completed_at) <= +now && +new Date(row.completed_at) >= +new Date(row.attempted_at))) routed.push(row);
@@ -91,10 +132,7 @@ async function loadMetaSignalEvidence({ models, campaigns, selectedClinics, now 
       evidence.set(campaign.id, { ...deliveryEvidence(routed, now), key: campaign.id });
       continue;
     }
-    if (!records) records = await models.IntakeConfig.findAll({ where: { [Op.or]: [
-      { assignment_scope: 'clinic', clinic_id: { [Op.in]: clinics } },
-      ...(groups.length ? [{ assignment_scope: 'group', group_id: { [Op.in]: groups } }] : []),
-    ] }, raw: true });
+    await loadRecords();
     const scope = { assignment_scope: 'clinic', clinic_id: campaign.clinicId, group_id: clinic.grupoClinicaId };
     const configRecords = {
       clinicRecord: records.find(row => row.assignment_scope === 'clinic' && Number(row.clinic_id) === campaign.clinicId),

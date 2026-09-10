@@ -3,7 +3,7 @@
 const crypto = require('node:crypto');
 const { Op } = require('sequelize');
 const { CRM_MILESTONE_SOURCE, resolveWorkspaceSignalPolicy } = require('./campaignWorkspaceSignalPolicy.service');
-const { resolveNativeMetaLeadIdentity } = require('./leadAdvertisingIdentity.service');
+const { resolveNativeMetaLeadIdentity, resolveMetaWebLeadIdentity } = require('./leadAdvertisingIdentity.service');
 const { resolveMetaLeadClinic } = require('./metaLeadReception.service');
 const { resolveMetaSignalContext } = require('./metaWorkspaceSignalContext.service');
 const { resolveEffectiveTrackingConfig } = require('./effectiveMarketingAssets.service');
@@ -51,7 +51,8 @@ async function resolveLifecycleSignal(input, dependencies = {}) {
   if (!consent || typeof consent !== 'object' || Array.isArray(consent)
     || normalizeGoogleConsent(consent) !== 'GRANTED') fail('meta_crm_consent_required');
   const identity = await resolveNativeMetaLeadIdentity({ models, lead, transaction });
-  if (!identity) fail('meta_crm_verified_native_lead_required');
+  const webIdentity = identity ? null : await resolveMetaWebLeadIdentity({ models, lead, transaction });
+  if (!identity && !webIdentity) fail('meta_crm_verified_native_lead_required');
   const appointments = await models.CitaPaciente.findAll({ where: { lead_intake_id: input.lead_id, clinica_id: input.clinic_id,
     ...(input.appointment_id ? { id_cita: input.appointment_id } : {}),
     [Op.or]: [{ es_provisional: false }, { es_provisional: null }],
@@ -61,6 +62,20 @@ async function resolveLifecycleSignal(input, dependencies = {}) {
   if (input.appointment_id ? !appointments.length : lead.status_lead !== 'cualificado' && !appointments.length) fail('meta_crm_milestone_not_current');
   const clinic = await models.Clinica.findByPk(input.clinic_id, { raw: true, ...query });
   if (!clinic || ![true, 1, '1'].includes(clinic.estado_clinica)) fail('meta_crm_clinic_unavailable');
+
+  if (webIdentity) {
+    const route = await resolveWorkspaceSignalRoute({ models, provider: 'meta_ads', accountId: webIdentity.account_id,
+      campaignId: webIdentity.campaign_id, clinicId: input.clinic_id, eventName: input.event_name,
+      crmEventSource: CRM_MILESTONE_SOURCE, now, transaction });
+    if (!route) fail('meta_crm_workspace_required');
+    const contact = await models.LeadIntake.findByPk(input.lead_id, { attributes: ['id', 'email', 'telefono'], raw: true, ...query });
+    const userData = require('./metaCapi.service').buildUserData({ email: contact?.email, phone: contact?.telefono, externalId: input.lead_id });
+    const signal = { eventName: input.event_name, eventId: input.event_id, eventTime: +new Date(input.occurred_at) / 1000,
+      clinicId: input.clinic_id, campaignId: webIdentity.campaign_id, adAccountId: webIdentity.account_id,
+      pixelId: route.destinationId, advertisingConsent: true, webIdentity, userData, crmEventSource: CRM_MILESTONE_SOURCE };
+    const context = await resolveMetaSignalContext({ models, input: signal, now, transaction });
+    return { signal, authorizationKey: hash([webIdentity, context.destinationKey, route.authorization.policyRefs, userData]) };
+  }
 
   // Reuse native reception's current campaign/page/account routing, not a historical clinic label.
   const pages = await models.ClinicMetaAsset.findAll({ where: { assetType: 'facebook_page', isActive: true,

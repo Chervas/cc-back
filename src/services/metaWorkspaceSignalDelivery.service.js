@@ -122,7 +122,9 @@ async function sendWorkspaceMetaSignal(input, dependencies = {}) {
       if (existing && (!existing.created_at || !Number.isFinite(+new Date(existing.created_at))
         || +new Date(existing.created_at) + RETRY_WINDOW_MS <= +now())) return { expired: true, value: existing };
       const values = { status: 'pending', lease_id: leaseId, attempted_at: now(), completed_at: null,
-        attempt_count: Number(existing?.attempt_count || 0) + 1, policy_version: authorization.version, policy_refs: refs,
+        attempt_count: Number(existing?.attempt_count || 0) + 1, policy_version: authorization.version,
+        policy_refs: input.webIdentity ? { schema_version: 2, source: 'web', intake_config_id: input.webIdentity.intake_config_id,
+          references: refs } : refs,
         reason: null, events_received: null, warning_count: null, trace_id: null };
       const value = existing ? await existing.update(values, { transaction }) : await models.MetaSignalDelivery.create({ ...values,
         id: crypto.randomUUID(), dedupe_key: dedupeKey, clinic_id: input.clinicId, account_id: accountId,
