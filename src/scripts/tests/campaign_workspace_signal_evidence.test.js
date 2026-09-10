@@ -23,7 +23,8 @@ function harness() {
     status: 'accepted', attempted_at: new Date(+date - 10000), completed_at: new Date(+date - 9000) }] };
   const campaign = { id: 'meta_ads:20:30', provider: 'meta_ads', account_id: '20', campaign_id: '30', assigned: true, clinicId: 1 };
   const models = { MetaSignalDelivery: { findAll: async query => { state.queries.push(query); return state.rows; } },
-    IntakeConfig: { findAll: async () => [record] }, CampaignWorkspaceSetting: { findByPk: async () => state.setting } };
+    Clinica: { findByPk: async () => ({ id_clinica: 1, grupoClinicaId: null, estado_clinica: true }) },
+    IntakeConfig: { findAll: async () => [record] }, CampaignWorkspaceSetting: { findAll: async () => state.setting ? [state.setting] : [], findByPk: async () => state.setting } };
   const context = async () => ({ destinationKey: 'current', webPolicyRecord: record, signalPolicyRecord: record });
   const run = extra => loadMetaSignalEvidence({ models, campaigns: [campaign], selectedClinics: [{ id_clinica: 1, grupoClinicaId: null }],
     now: state.date, context, ...extra });

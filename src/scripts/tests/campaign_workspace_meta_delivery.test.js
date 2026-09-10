@@ -30,7 +30,8 @@ function harness() {
     MetaConnectionAssignment: { findOne: async ({ where }) => state.assignment && Object.keys(where).every(key => state.assignment[key] === where[key]) ? state.assignment : null },
     ClinicMetaAsset: { findAll: async () => state.mappings },
     MetaConnection: { findByPk: async () => state.connection },
-    CampaignWorkspaceSetting: { findByPk: async id => state.setting?.id === id ? state.setting : null },
+    CampaignWorkspaceSetting: { findAll: async () => state.setting ? [state.setting] : [],
+      findByPk: async id => state.setting?.id === id ? state.setting : null },
     MetaSignalDelivery: {
       findOne: async ({ where }) => state.rows.find(row => row.dedupe_key === where.dedupe_key) || null,
       create: async values => {

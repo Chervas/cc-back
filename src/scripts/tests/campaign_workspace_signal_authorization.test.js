@@ -8,6 +8,7 @@ const { buildClinicaclickManagedMapping } = require('../../services/googleAdsCon
 const { loadSignalAuthorizationReview, verifySignalDestination } = require('../../services/campaignWorkspaceSignalAuthorization.service');
 const { resolveWorkspaceSignalPolicy } = require('../../services/campaignWorkspaceSignalPolicy.service');
 const { publicSettings } = require('../../services/campaignWorkspaceSettings.service');
+const { resolveWorkspaceSignalRoute } = require('../../services/campaignWorkspaceSignalRouting.service');
 const { maybeUploadGoogleConversion } = require('../../services/googleAdsConversionUpload.service');
 const { sendWorkspaceMetaSignal } = require('../../services/metaWorkspaceSignalDelivery.service');
 
@@ -32,7 +33,7 @@ function harness() {
   const models = {
     sequelize: { transaction: async fn => fn({ LOCK: { UPDATE: 'UPDATE' } }) },
     Clinica: { findByPk: async () => state.clinic },
-    CampaignWorkspaceSetting: { findOne: async () => state.setting, findByPk: async () => state.setting },
+    CampaignWorkspaceSetting: { findAll: async () => [state.setting], findOne: async () => state.setting, findByPk: async () => state.setting },
     CampaignWorkspaceEvent: { create: async row => state.audits.push(row) },
     ClinicGoogleAdsAccount: { findAll: async () => [{ id: 5, customerId: '10', assignmentScope: 'clinic', clinicaId: 1, googleConnectionId: 8 }] },
     ClinicMetaAsset: { findAll: async () => [{ id: 4, metaAssetId: '20', assignmentScope: 'clinic', clinicaId: 1, metaConnectionId: 7 }] },
@@ -205,4 +206,45 @@ test('Google rechecks permission after audit reservation and records a terminal 
     assert.equal(h.state.attempts[0].reason, result.reason);
     assert.ok(h.state.attempts[0].completedAt);
   }
+});
+test('the route resolves the prepared Google and Meta destinations without using website settings or remote APIs', async () => {
+  const h = harness(); await h.prepare(); await h.authorize(); const count = h.state.calls.length;
+  h.models.IntakeConfig = { findOne: () => assert.fail('no website lookup'), findAll: () => assert.fail('no website lookup') };
+  for (const provider of ['google_ads', 'meta_ads']) {
+    const result = await resolveWorkspaceSignalRoute({ models: h.models, clinicId: 1, provider,
+      accountId: provider === 'google_ads' ? '10' : '20', campaignId: '40', eventName: 'Lead', now: h.state.date });
+    assert.equal(result.destinationId, provider === 'google_ads' ? '101' : '301');
+    assert.equal(result.authorization.authorizationSchema, 2); assert.equal(result.authorization.policyRefs.length, 1);
+    assert.equal(result.connectionId, provider === 'google_ads' ? 8 : 7); assert.match(result.destinationKey, /^[a-f0-9]{64}$/);
+  }
+  assert.equal(h.state.calls.length, count); assert.equal(h.state.uploads.length, 0);
+});
+test('a revoked or incomplete v2 route cannot fall back to an old web target', async () => {
+  for (const mutate of [s => { s.setting.accounts = []; }, s => { s.setting.activation.signals.enabled = false; },
+    s => { s.setting.activation.signals.authorization = null; }, s => { s.setting.activation.schema_version = 3; },
+    s => { s.meta.metaUserId = 'replacement'; }]) {
+    const h = harness(); await h.prepare(); await h.authorize(); mutate(h.state);
+    await assert.rejects(resolveWorkspaceSignalRoute({ models: h.models, clinicId: 1, provider: 'meta_ads', accountId: '20',
+      campaignId: '40', eventName: 'Lead', now: h.state.date }), /workspace_/);
+  }
+});
+test('clinic and group mandates intersect; conflicting destinations or a mixed schema require review', async () => {
+  const clinic = harness(); clinic.state.clinic.grupoClinicaId = 8;
+  await clinic.prepare(); await clinic.authorize();
+  const group = harness(); group.scope.groupId = 8; group.state.clinic.grupoClinicaId = 8;
+  Object.assign(group.state.setting, { id: 'group-setting', scope_type: 'group', scope_id: 8 });
+  for (const h of [clinic, group]) {
+    h.models.GrupoClinica = { findByPk: async () => ({ id: 8 }) };
+    h.models.Clinica.findAll = async () => [h.state.clinic];
+  }
+  await group.prepare(); await group.authorize();
+  clinic.models.CampaignWorkspaceSetting.findAll = async () => [clinic.state.setting, group.state.setting];
+  clinic.models.CampaignWorkspaceSetting.findOne = async ({ where }) => where.scope_type === 'group' ? group.state.setting : clinic.state.setting;
+  const route = () => resolveWorkspaceSignalRoute({ models: clinic.models, clinicId: 1, provider: 'meta_ads', accountId: '20',
+    campaignId: '40', eventName: 'Lead', now: clinic.state.date });
+  assert.equal((await route()).authorization.policyRefs.length, 2);
+  group.state.setting.activation.signals.authorization.destinations[1].events[0].destination_id = '999';
+  await assert.rejects(route(), /workspace_signal_routes_conflict/);
+  group.state.setting.activation.schema_version = 1;
+  await assert.rejects(route(), /workspace_signal_scope_migration_required/);
 });

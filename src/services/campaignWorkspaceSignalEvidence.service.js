@@ -5,6 +5,7 @@ const { resolveWorkspaceSignalPolicy, CRM_MILESTONE_SOURCE } = require('./campai
 const { resolveMetaSignalContext } = require('./metaWorkspaceSignalContext.service');
 const { resolveWebMeasurementMarketingState } = require('./campaignMeasurementReadiness.service');
 const { resolveEffectiveTrackingConfig } = require('./effectiveMarketingAssets.service');
+const { loadSignalRoutingScope, resolveWorkspaceSignalRoute } = require('./campaignWorkspaceSignalRouting.service');
 
 const FRESH_MS = 24 * 3600000;
 const MAX_ROWS = 10000;
@@ -46,17 +47,54 @@ async function loadMetaSignalEvidence({ models, campaigns, selectedClinics, now 
   if (!rows.length || rows.length > MAX_ROWS) return evidence;
   const clinics = [...new Set(eligible.map(row => row.clinicId))];
   const groups = [...new Set(selectedClinics.filter(row => clinics.includes(Number(row.id_clinica))).map(row => row.grupoClinicaId).filter(Boolean))];
-  const records = await models.IntakeConfig.findAll({ where: { [Op.or]: [
-    { assignment_scope: 'clinic', clinic_id: { [Op.in]: clinics } },
-    ...(groups.length ? [{ assignment_scope: 'group', group_id: { [Op.in]: groups } }] : []),
-  ] }, raw: true });
+  let records = null;
   const contexts = new Map(); const decisions = new Map();
+  // Report-local snapshots avoid re-reading the same scope/grant for every receipt.
+  // Senders deliberately do not use these caches.
+  const routeScopes = new Map(); const routeGrants = new Map();
+  const loadRouteScope = input => {
+    if (!routeScopes.has(input.clinicId)) routeScopes.set(input.clinicId, loadSignalRoutingScope(input));
+    return routeScopes.get(input.clinicId);
+  };
+  const verifyRoute = input => {
+    const key = JSON.stringify([input.clinicId, input.provider, input.accountId, input.setting.id, input.setting.version, input.eventName, input.destinationId]);
+    if (!routeGrants.has(key)) routeGrants.set(key, require('./campaignWorkspaceSignalAuthorization.service').verifySignalDestination(input));
+    return routeGrants.get(key);
+  };
   for (const campaign of eligible) {
+    const clinic = selectedClinics.find(row => Number(row.id_clinica) === campaign.clinicId);
+    if (!clinic) continue;
     const history = rows.filter(row => Number(row.clinic_id) === campaign.clinicId && row.account_id === campaign.account_id
       && row.campaign_id === campaign.campaign_id);
     if (!history.length) continue;
-    const clinic = selectedClinics.find(row => Number(row.id_clinica) === campaign.clinicId);
-    if (!clinic) continue;
+    const routed = []; let hasWorkspaceRoute = false;
+    for (const row of history) {
+      const routeKey = `route:${campaign.id}:${row.event_name}`;
+      if (!contexts.has(routeKey)) {
+        try { contexts.set(routeKey, await resolveWorkspaceSignalRoute({ models, provider: 'meta_ads', clinicId: campaign.clinicId,
+          accountId: campaign.account_id, campaignId: campaign.campaign_id, eventName: row.event_name, crmEventSource: CRM_MILESTONE_SOURCE,
+          now, loadScope: loadRouteScope, verify: verifyRoute })); }
+        catch (error) {
+          if (!/^workspace_/.test(error.code || '')) throw error;
+          contexts.set(routeKey, { denied: true });
+        }
+      }
+      const route = contexts.get(routeKey);
+      if (!route) continue;
+      hasWorkspaceRoute = true;
+      if (!route.denied && row.dataset_id === route.destinationId && row.destination_key === route.destinationKey
+        && canonicalRefs(row.policy_refs) === canonicalRefs(route.authorization.policyRefs)
+        && (row.status === 'pending' || row.completed_at && Number.isFinite(+new Date(row.completed_at))
+          && +new Date(row.completed_at) <= +now && +new Date(row.completed_at) >= +new Date(row.attempted_at))) routed.push(row);
+    }
+    if (hasWorkspaceRoute) {
+      evidence.set(campaign.id, { ...deliveryEvidence(routed, now), key: campaign.id });
+      continue;
+    }
+    if (!records) records = await models.IntakeConfig.findAll({ where: { [Op.or]: [
+      { assignment_scope: 'clinic', clinic_id: { [Op.in]: clinics } },
+      ...(groups.length ? [{ assignment_scope: 'group', group_id: { [Op.in]: groups } }] : []),
+    ] }, raw: true });
     const scope = { assignment_scope: 'clinic', clinic_id: campaign.clinicId, group_id: clinic.grupoClinicaId };
     const configRecords = {
       clinicRecord: records.find(row => row.assignment_scope === 'clinic' && Number(row.clinic_id) === campaign.clinicId),

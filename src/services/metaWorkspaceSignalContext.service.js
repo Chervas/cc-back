@@ -3,6 +3,8 @@
 const crypto = require('node:crypto');
 const { Op } = require('sequelize');
 const { resolveEffectiveTrackingConfig, normalizeMetaAdsConfig } = require('./effectiveMarketingAssets.service');
+const { CRM_MILESTONE_SOURCE } = require('./campaignWorkspaceSignalPolicy.service');
+const { resolveWorkspaceSignalRoute } = require('./campaignWorkspaceSignalRouting.service');
 
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 const cleanAccount = value => String(value || '').replace(/^act_/, '');
@@ -11,6 +13,18 @@ const scopeKey = row => `${row.assignment_scope}:${Number(row.assignment_scope =
 async function resolveMetaSignalContext({ models, input, now = new Date(), transaction = null }) {
   const query = transaction ? { transaction } : {};
   if (!Number.isSafeInteger(input.clinicId) || input.clinicId < 1) fail('workspace_clinic_required');
+  if (input.crmEventSource === CRM_MILESTONE_SOURCE && /^[0-9]{1,64}$/.test(input.verifiedNativeLeadId || '')) {
+    if (!['qualifiedlead', 'schedule'].includes(String(input.eventName || '').replace(/[_\s-]/g, '').toLowerCase())) {
+      fail('workspace_meta_native_event_required');
+    }
+    const route = await resolveWorkspaceSignalRoute({ models, provider: 'meta_ads', accountId: cleanAccount(input.adAccountId),
+      campaignId: input.campaignId, clinicId: input.clinicId, eventName: input.eventName, crmEventSource: input.crmEventSource, now, transaction });
+    if (route) {
+      if (route.destinationId !== input.pixelId) fail('workspace_meta_destination_changed');
+      return { destinationKey: route.destinationKey, accessToken: route.accessToken, connectionId: route.connectionId,
+        workspaceAuthorization: route.authorization, webPolicyRecord: null, signalPolicyRecord: null };
+    }
+  }
   const clinic = await models.Clinica.findByPk(input.clinicId, {
     attributes: ['id_clinica', 'grupoClinicaId', 'estado_clinica'], raw: true, ...query,
   });

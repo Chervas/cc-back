@@ -10,6 +10,7 @@ const { resolveEffectiveTrackingConfig } = require('./effectiveMarketingAssets.s
 const { resolveLeadIntakeConfig } = require('./googleLeadLifecycleConversion.service');
 const { normalizeGoogleConsent } = require('./googleAdsConversionUpload.service');
 const { sendWorkspaceMetaSignal } = require('./metaWorkspaceSignalDelivery.service');
+const { resolveWorkspaceSignalRoute } = require('./campaignWorkspaceSignalRouting.service');
 
 const JOB_TYPE = 'campaign_meta_crm_signal';
 const ORIGIN = 'campaign_crm_milestone';
@@ -75,6 +76,16 @@ async function resolveLifecycleSignal(input, dependencies = {}) {
     } catch (error) { if (!/^meta_lead_/.test(error.code || '')) throw error; }
   }
   if (!routed) fail('meta_crm_campaign_scope_changed');
+
+  const workspaceRoute = await resolveWorkspaceSignalRoute({ models, provider: 'meta_ads', accountId: identity.account_id,
+    campaignId: identity.campaign_id, clinicId: input.clinic_id, eventName: input.event_name,
+    crmEventSource: CRM_MILESTONE_SOURCE, now, transaction });
+  if (workspaceRoute) return { signal: {
+    eventName: input.event_name, eventId: input.event_id, eventTime: +new Date(input.occurred_at) / 1000,
+    clinicId: input.clinic_id, campaignId: identity.campaign_id, adAccountId: identity.account_id,
+    pixelId: workspaceRoute.destinationId, advertisingConsent: true, verifiedNativeLeadId: identity.native_lead_id,
+    crmEventSource: CRM_MILESTONE_SOURCE,
+  }, authorizationKey: hash([identity, workspaceRoute.destinationKey, workspaceRoute.authorization.policyRefs]) };
 
   const configDependencies = { IntakeConfig: models.IntakeConfig, Clinica: models.Clinica, transaction };
   const { config: webPolicyRecord } = await resolveLeadIntakeConfig({ lead: { clinica_id: input.clinic_id,

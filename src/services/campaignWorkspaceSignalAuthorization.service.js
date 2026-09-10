@@ -91,7 +91,7 @@ async function loadSignalAuthorizationReview({ models, scope, setting, now = new
 }
 
 async function verifySignalDestination({ models, setting, provider, accountId, clinicId, eventName, destinationId,
-  connectionId, loginCustomerId, now = new Date(), transaction = null, resolveGrant = currentGrant }) {
+  connectionId, loginCustomerId, now = new Date(), transaction = null, resolveGrant = currentGrant, includeGrant = false }) {
   if (!['google_ads', 'meta_ads'].includes(provider) || !id(accountId)) fail('workspace_signal_account_invalid');
   const authorization = setting.activation?.signals?.authorization;
   if (!authorization || authorization.schema_version !== 1 || !Array.isArray(authorization.clinic_ids)
@@ -121,7 +121,7 @@ async function verifySignalDestination({ models, setting, provider, accountId, c
     || (current.loginCustomerId || null) !== (destination.login_customer_id || null)
     || connectionId !== undefined && (Number(connectionId) !== destination.connection_id
       || provider === 'google_ads' && (loginCustomerId || null) !== (destination.login_customer_id || null))) fail('workspace_signal_connection_changed');
-  return { destinationId: event.destination_id, connectionId: destination.connection_id };
+  return { destinationId: event.destination_id, connectionId: destination.connection_id, ...(includeGrant ? { grant: current } : {}) };
 }
 
 module.exports = { currentGrant, checkedProof, preparedAccount, loadSignalAuthorizationReview, verifySignalDestination };

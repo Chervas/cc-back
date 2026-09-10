@@ -85,7 +85,7 @@ async function sendWorkspaceMetaSignal(input, dependencies = {}) {
   const check = async () => {
     await dependencies.validateSource?.(input);
     const current = await context({ models, input, now: now() });
-    const authorization = await policy({ records: [current.webPolicyRecord, current.signalPolicyRecord], provider: 'meta_ads',
+    const authorization = current.workspaceAuthorization || await policy({ records: [current.webPolicyRecord, current.signalPolicyRecord], provider: 'meta_ads',
       models, now: now(), clinicId: input.clinicId, destinationId: input.pixelId, connectionId: current.connectionId || 0,
       loadSetting: settingId => models.CampaignWorkspaceSetting.findByPk(settingId, { raw: true }),
       accountId: input.adAccountId, campaignId: input.campaignId, eventName: input.eventName, crmEventSource: input.crmEventSource });

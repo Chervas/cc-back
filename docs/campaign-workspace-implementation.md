@@ -1166,3 +1166,65 @@ prueba caducada y contrato privado no publicado. Sintaxis y `git diff --check` O
 Un reinicio solo de DEV, PID `1182884`, contador `8540`; staging, gateway y
 preview conservan PID. SQL antes/despues: gate cerrado, settings=0, entregas
 Meta=0 y jobs CRM Meta=0. Sin migracion, nueva tarea nocturna, envio o cobro.
+
+## Hitos Nativos Sin Dependencia De La Web (2026-09-10)
+
+`campaignWorkspaceSignalRouting.service` resuelve cuenta, destino y grant desde
+el mandato schema 2, no desde los widgets ni el pixel de una instalacion web.
+Reutiliza el verificador de destinos y la seleccion original/actual. El contrato
+sirve para Google y Meta; en este cambio se conecta al ejecutor nativo Meta de
+`QualifiedLead` y `Schedule`. El enrutado de los emisores Google y Meta web debe
+completarse antes de habilitar la activacion con señales.
+
+- La clinica debe seguir activa. Si hay mandatos de clinica y grupo, ambos
+  limitan el permiso; deben coincidir en destino y conexion. Una mezcla de
+  schema 1 y 2 exige migracion, no una eleccion automatica del permiso mas amplio.
+  Schema 2 incompleto, revocado o incompatible no cae en el pixel antiguo de
+  la web. Si no hay mandatos schema 2 se conserva el recorrido anterior.
+- El job existente `campaign_meta_crm_signal` mantiene los controles de lead,
+  consentimiento publicitario, cita/cualificacion actuales, identidad verificada
+  por Meta y asignacion actual de pagina/cuenta/campaña. Despues resuelve el
+  destino autorizado. No necesita `IntakeConfig`, dominios, `locations`, CMP
+  web ni un perfil social para emitir esos hitos nativos.
+- El emisor repite la resolucion despues de reservar la entrega. Conserva
+  deduplicacion, lease, ventana de reintento y el registro de recibos. El token
+  procede de la conexion actual; una rotacion normal no duplica el evento.
+  Un cambio de grant o revocacion corta el envio, incluso tras la reserva.
+- Solo la capacidad interna del CRM y un identificador nativo verificado
+  habilitan esta via. No convierte eventos web `Lead`, `Contact` o `ViewContent`
+  en hitos nativos ni permite que el navegador evite la preparacion web. No
+  añade otro receptor ni emite al recibir el webhook de formulario.
+- Salud coteja cuenta, campaña, destino, grant y versiones con las entregas
+  persistidas. Puede mostrar estos recibos aunque no exista configuracion web.
+  No acredita otra campaña con la misma conexion, ni conserva el OK tras una
+  revocacion. Recibido por Meta sigue sin significar atribuido como conversion.
+- Las lecturas de ambito/grant se reutilizan solo dentro de una consulta de
+  Salud para evitar repetir SQL por cada recibo. La seleccion por campaña se
+  evalua siempre. No es una cache persistente de permisos ni la utiliza el
+  emisor: la siguiente consulta/envio vuelve a leer los datos actuales.
+
+No se crea tabla, migracion, cron o job nuevo, ni se cambia el horario del job
+existente. Las autorizaciones schema 2 de las pruebas siguen siendo fixtures
+aislados; el activador real permanece cerrado. Este avance no completa la
+activacion atomica, Meta web, el enrutado Google, Optimiza, multipagina,
+metricas CRM por anuncio o la sustitucion de la ruta canonica.
+
+Verificacion: 356 pruebas backend correctas, sin fallos ni omitidas. Incluyen
+preparacion real con proveedor aislado -> mandato de prueba -> job -> emisor ->
+recibo -> Salud, para clinica y grupo sin leer `IntakeConfig`; tambien revocacion
+durante reserva, scopes en conflicto, aislamiento por campaña, cache local y
+rotacion de token. La lectura MySQL de un ambito Arriaga confirma la consulta
+scoped y la ausencia de mandato, no una entrega real a Meta.
+
+Chromium autenticado: 33 comprobaciones y nueve capturas en
+`/home/ubuntu/qa-evidence/campaign-native-routing-20260910-health`, a
+1440/1024/390 px. La sesion y la lectura inicial son reales; los casos de
+recibos se generan con los constructores de evidencia del backend y se
+interceptan solo en GET. Se inspeccionaron los detalles desktop/movil, scroll,
+contadores y retorno a Salud. Cero escrituras de negocio y errores JS. Los
+avisos operativos permanecen pendientes; no se cierran ni ocultan durante QA.
+
+Dos reinicios solo de DEV, PID final `1185873`, contador `8542`; staging,
+gateway y preview conservan PID. Frontend sin cambios de UI ni nuevo build
+(`b05bce92b41f1b82`). Auditoria SQL antes/despues: gate cerrado, settings=0,
+entregas Meta=0 y jobs CRM Meta=0. Objetivo global EN CURSO.

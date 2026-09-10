@@ -11,6 +11,10 @@ const { CRM_MILESTONE_SOURCE } = require('../../services/campaignWorkspaceSignal
 const { sendWorkspaceMetaSignal } = require('../../services/metaWorkspaceSignalDelivery.service');
 const { maybeUploadLeadLifecycleConversion } = require('../../services/leadLifecycleConversion.service');
 const { resolveNativeMetaLeadIdentity } = require('../../services/leadAdvertisingIdentity.service');
+const { checkMetaSignalPreparation } = require('../../services/campaignWorkspaceMetaSignalPreparation.service');
+const { loadSignalAuthorizationReview } = require('../../services/campaignWorkspaceSignalAuthorization.service');
+const { loadMetaSignalEvidence } = require('../../services/campaignWorkspaceSignalEvidence.service');
+const { resolveMetaSignalContext } = require('../../services/metaWorkspaceSignalContext.service');
 
 const copy = value => structuredClone(value);
 function matches(row, where) {
@@ -19,6 +23,7 @@ function matches(row, where) {
     if (key === Op.or) return value.some(branch => matches(row, branch));
     if (value && typeof value === 'object') {
       if (value[Op.in]) return value[Op.in].includes(row[key]);
+      if (value[Op.between]) return +new Date(row[key]) >= +value[Op.between][0] && +new Date(row[key]) <= +value[Op.between][1];
       assert.fail(`Unhandled query for ${String(key)}`);
     }
     return row[key] === value;
@@ -93,6 +98,113 @@ function harness() {
     run: (patch = {}, overrides = {}) => runMetaLeadLifecycleSignalJob({ ...state.jobs[0]?.payload, ...patch }, state.jobs[0], { ...deps, ...overrides }),
   };
 }
+
+async function nativeWorkspace(group = false) {
+  const h = harness(); const scope = { clinicIds: [1], groupId: group ? 8 : null };
+  h.state.connection.metaUserId = 'qa-meta-principal';
+  h.state.setting.preferences = { mode: 'measurement', signals: { enabled: true, events: ['qualified_lead', 'schedule'] } };
+  if (group) Object.assign(h.state.setting, { scope_type: 'group', scope_id: 8 });
+  Object.defineProperty(h.state.setting, 'update', { value: async values => Object.assign(h.state.setting, values) });
+  h.models.GrupoClinica = { findByPk: async id => id === 8 ? { id } : null };
+  h.models.Clinica.findAll = async ({ where }) => matches(h.state.clinic, where) ? [copy(h.state.clinic)] : [];
+  h.models.CampaignWorkspaceSetting.findOne = async ({ where }) => matches(h.state.setting, where) ? h.state.setting : null;
+  h.models.CampaignWorkspaceEvent = { create: async () => {} };
+  await checkMetaSignalPreparation({ models: h.models, scope, actorId: 2, hasAccess: async () => true, now: () => h.state.now,
+    input: { account_id: '20', dataset_id: '50', expected_version: h.state.setting.version }, read: async path => {
+      if (path === 'me/permissions') return { data: { data: [{ permission: 'ads_management', status: 'granted' }] } };
+      if (path === 'act_20') return { data: { id: 'act_20', account_id: '20' } };
+      return { data: { data: [{ id: '50', name: 'Destino de leads nativos' }] } };
+    } });
+  const prepared = await loadSignalAuthorizationReview({ models: h.models, scope, setting: h.state.setting, now: h.state.now });
+  assert.equal(prepared.review.ready, true);
+  // Isolated activation fixture: the customer API remains closed until all senders are migrated.
+  h.state.setting.activation = { ...h.state.setting.activation, schema_version: 2,
+    signals: { ...h.state.setting.preferences.signals, authorization: prepared.authorization } };
+  h.state.clinicRecord = null; h.state.groupRecord = null;
+  h.models.IntakeConfig.findOne = () => assert.fail('Native workspace must not read web configuration');
+  h.models.IntakeConfig.findAll = () => assert.fail('Native workspace Health must not read web configuration');
+  h.models.MetaSignalDelivery.findAll = async ({ where }) => h.state.deliveries.filter(row => matches(row, where))
+    .map(({ update, ...row }) => copy(row));
+  const campaign = { id: 'meta_ads:20:30', provider: 'meta_ads', account_id: '20', campaign_id: '30', assigned: true, clinicId: 1 };
+  return { ...h, health: (additional = []) => loadMetaSignalEvidence({ models: h.models, campaigns: [campaign, ...additional], selectedClinics: [h.state.clinic], now: h.state.now }) };
+}
+
+test('v2 native milestones reach the authorized dataset and Health without any website configuration', async () => {
+  for (const group of [false, true]) {
+    const h = await nativeWorkspace(group);
+    assert.equal((await h.enqueue()).queued, true); assert.equal(h.state.posts.length, 0);
+    assert.equal((await h.run()).status, 'completed'); assert.equal(h.state.posts.length, 1);
+    assert.equal(h.state.posts[0][0], '50');
+    assert.deepEqual(h.state.posts[0][1].data[0].user_data, { lead_id: '777' });
+    assert.equal(h.state.posts[0][1].data[0].event_source_url, undefined);
+    const evidence = (await h.health()).get('meta_ads:20:30');
+    assert.equal(evidence.checked, true); assert.equal(evidence.ready, true); assert.equal(evidence.received, 1);
+    assert.doesNotMatch(JSON.stringify(evidence), /secret-token|qa-meta-principal|777|grant_fingerprint/);
+    assert.equal(h.state.clinicRecord, null); assert.equal(h.state.groupRecord, null);
+  }
+});
+test('native workspace ignores unrelated web widgets and pixels instead of overwriting them', async () => {
+  const h = await nativeWorkspace();
+  h.state.clinicRecord = { config: { widgets: { chat: true }, meta_ads: { enabled: false, pixel_id: '999' } } };
+  const before = copy(h.state.clinicRecord);
+  await h.enqueue(); assert.equal((await h.run()).status, 'completed');
+  assert.equal(h.state.posts[0][0], '50'); assert.deepEqual(h.state.clinicRecord, before);
+});
+test('native identity cannot bypass web preparation for a browser Lead or Contact event', async () => {
+  const h = await nativeWorkspace();
+  for (const eventName of ['Lead', 'Contact', 'ViewContent']) await assert.rejects(resolveMetaSignalContext({ models: h.models,
+    now: h.state.now, input: { clinicId: 1, adAccountId: '20', campaignId: '30', pixelId: '50', eventName,
+      crmEventSource: CRM_MILESTONE_SOURCE, verifiedNativeLeadId: '777' } }), /workspace_meta_native_event_required/);
+  assert.equal(h.state.posts.length, 0); assert.equal(h.state.deliveries.length, 0);
+});
+test('v2 native queued jobs recheck account, page, grant and permission before delivery', async () => {
+  for (const mutate of [s => { s.setting.accounts = []; }, s => { s.setting.activation.signals.enabled = false; },
+    s => { s.connection.metaUserId = 'replacement'; }, s => { s.connection.expiresAt = '2020-01-01'; },
+    s => { s.assets.find(asset => asset.assetType === 'facebook_page').isActive = false; }]) {
+    const h = await nativeWorkspace(); assert.equal((await h.enqueue()).queued, true); mutate(h.state);
+    const result = await h.run(); assert.equal(result.status, 'failed'); assert.equal(result.retryable, false);
+    assert.equal(h.state.posts.length, 0); assert.equal(h.state.deliveries.length, 0);
+  }
+});
+test('revocation during native v2 reservation records a skipped delivery and never calls Meta', async () => {
+  const h = await nativeWorkspace(); await h.enqueue();
+  h.state.afterReserve = () => { h.state.setting.activation.signals.enabled = false; };
+  assert.equal((await h.run()).status, 'failed'); assert.equal(h.state.posts.length, 0);
+  assert.equal(h.state.deliveries[0].status, 'skipped');
+  assert.notEqual((await h.health()).get('meta_ads:20:30')?.ready, true);
+});
+test('native v2 token rotation preserves deduplication while reconnection invalidates Health', async () => {
+  const h = await nativeWorkspace(); await h.enqueue(); h.state.connection.accessToken = 'rotated-token';
+  assert.equal((await h.run()).status, 'completed'); assert.equal(h.state.posts[0][2].accessToken, 'rotated-token');
+  assert.equal((await h.run()).status, 'completed'); assert.equal(h.state.posts.length, 1);
+  assert.equal((await h.health()).get('meta_ads:20:30').ready, true);
+  h.state.connection.metaUserId = 'replacement';
+  assert.notEqual((await h.health()).get('meta_ads:20:30')?.ready, true);
+});
+test('native v2 Health never credits another dataset or campaign with this delivery', async () => {
+  const h = await nativeWorkspace(); await h.enqueue(); await h.run();
+  h.state.deliveries[0].dataset_id = '999';
+  assert.notEqual((await h.health()).get('meta_ads:20:30')?.ready, true);
+  h.state.deliveries[0].dataset_id = '50'; h.state.deliveries[0].campaign_id = '31';
+  assert.equal((await h.health()).size, 0);
+});
+test('Health shares scope reads only within one report and never lends campaign permission from its grant cache', async () => {
+  const h = await nativeWorkspace();
+  h.state.setting.accounts[0].include_future = false; h.state.setting.accounts[0].campaign_ids = ['30'];
+  await h.enqueue(); await h.run();
+  h.state.deliveries.push({ ...h.state.deliveries[0], campaign_id: '31' });
+  let scopeReads = 0; let grantReads = 0;
+  const findAll = h.models.CampaignWorkspaceSetting.findAll; const findOne = h.models.CampaignWorkspaceSetting.findOne;
+  h.models.CampaignWorkspaceSetting.findAll = async options => { scopeReads++; return findAll(options); };
+  h.models.CampaignWorkspaceSetting.findOne = async options => { grantReads++; return findOne(options); };
+  const second = { id: 'meta_ads:20:31', provider: 'meta_ads', account_id: '20', campaign_id: '31', assigned: true, clinicId: 1 };
+  const result = await h.health([second]);
+  assert.equal(result.get('meta_ads:20:30').ready, true); assert.notEqual(result.get(second.id)?.ready, true);
+  assert.equal(scopeReads, 1); assert.equal(grantReads, 1);
+  h.state.setting.activation.signals.enabled = false;
+  assert.notEqual((await h.health([second])).get('meta_ads:20:30')?.ready, true);
+  assert.equal(scopeReads, 2);
+});
 
 test('canonical native lead -> durable job -> minimal Meta event -> receipt, without a second receiver', async () => {
   const h = harness(); const queued = await h.enqueue();
