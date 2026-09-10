@@ -2,6 +2,7 @@
 
 const { Op } = require('sequelize');
 const { leadCampaign } = require('./campaignWorkspaceReport.service');
+const { canonicalLeadAdvertisingIdentity, attachLeadAdvertisingIdentities } = require('./leadAdvertisingIdentity.service');
 
 const id = value => /^\d+$/.test(String(value || '')) ? String(value) : null;
 const time = value => value && Number.isFinite(new Date(value).getTime()) ? new Date(value).getTime() : null;
@@ -36,7 +37,7 @@ function budgetCampaignAttribution({ campaigns, budgets, appointments, leads, pe
     for (const link of links) {
       const lead = byLead.get(id(link.lead_intake_id));
       const leadAt = time(lead?.created_at);
-      const valid = lead && lead.source === 'google_ads' && id(lead.google_ads_customer_id) && id(lead.google_ads_campaign_id)
+      const valid = lead && canonicalLeadAdvertisingIdentity(lead)
         && Number(lead.clinica_id) === Number(budget.clinic_id) && leadAt !== null && leadAt <= time(link.created_at);
       candidates.add(valid ? leadCampaign(lead, campaigns) : null);
     }
@@ -45,7 +46,7 @@ function budgetCampaignAttribution({ campaigns, budgets, appointments, leads, pe
     allocations.push({ campaignId: [...candidates][0], acceptedAt: budget.responded_at, amountCents: Math.round(amount * 100) });
     coverage.attributed++;
   }
-  return { currency: 'EUR', supportedProviders: ['google_ads'], method: 'accepted_budget_single_campaign_via_linked_appointment', allocations, coverage };
+  return { currency: 'EUR', supportedProviders: ['google_ads', 'meta_ads'], method: 'accepted_budget_single_campaign_via_linked_appointment', allocations, coverage };
 }
 
 async function loadBudgetCampaignAttribution({ models, campaigns, period }) {
@@ -63,6 +64,7 @@ async function loadBudgetCampaignAttribution({ models, campaigns, period }) {
   const leads = leadIds.length ? await models.LeadIntake.findAll({ where: { id: { [Op.in]: leadIds }, clinica_id: { [Op.in]: clinicIds } },
     attributes: ['id', 'clinica_id', 'source', 'channel', 'utm_source', 'utm_campaign', 'source_detail',
       'google_ads_customer_id', 'google_ads_campaign_id', 'created_at'], raw: true }) : [];
+  await attachLeadAdvertisingIdentities({ models, leads });
   return budgetCampaignAttribution({ campaigns, budgets, appointments, leads, period });
 }
 

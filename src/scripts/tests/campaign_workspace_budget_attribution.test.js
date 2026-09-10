@@ -52,12 +52,20 @@ test('acceptance dates use the report window and Madrid calendar, with equal pre
   assert.equal(report.current.accepted, 123.45); assert.equal(report.previous.accepted, 100);
   assert.equal(report.rows[0].current.accepted, 123.45); assert.equal(report.budgetAttribution.attributed, 2);
 });
-test('missing measurement remains null and unsupported Meta attribution cannot become a false aggregate zero', () => {
+test('missing measurement remains null and a provider not supported by the evidence cannot become a false aggregate zero', () => {
   assert.equal(aggregateReport({ campaigns, period }).current.accepted, null);
   const meta = { ...campaigns[0], id: 'm1', provider: 'meta_ads' };
-  const report = aggregateReport({ campaigns: [...campaigns, meta], period, budgetAttribution: calculate() });
+  const report = aggregateReport({ campaigns: [...campaigns, meta], period, budgetAttribution: { ...calculate(), supportedProviders: ['google_ads'] } });
   assert.equal(report.current.accepted, null); assert.equal(report.rows[1].current.accepted, null);
   assert.equal(report.rows[0].current.accepted, 123.45);
+});
+test('Meta accepted budgets require the server-verified account and campaign identity, never just the campaign name', () => {
+  const meta = { ...campaigns[0], id: 'm1', provider: 'meta_ads' };
+  const metaLead = { ...lead, source: 'meta_ads', advertising_identity: { version: 1, verified_by: 'meta_graph',
+    provider: 'meta_ads', clinic_id: 1, account_id: '123', campaign_id: '456', ad_id: '789', page_id: '800', form_id: '900' } };
+  const result = calculate({ campaigns: [meta], leads: [metaLead] });
+  assert.equal(result.allocations[0].campaignId, 'm1'); assert.equal(result.allocations[0].amountCents, 12345);
+  assert.equal(calculate({ campaigns: [meta], leads: [{ ...metaLead, advertising_identity: null, utm_campaign: '456' }] }).coverage.ambiguous, 1);
 });
 test('budget amounts are EUR even when advertising spend uses another or mixed currency', () => {
   const report = aggregateReport({ campaigns: [{ ...campaigns[0], currency: 'USD' }], period, budgetAttribution: calculate() });

@@ -327,10 +327,12 @@ de la web compartida sin seleccionar/autorizar el grupo.
   independientemente de la moneda de inversion publicitaria. Son presupuestos,
   no ingresos cobrados. Se usa la aceptacion vigente, no una reconstruccion de
   todas las versiones historicas que hayan sido anuladas o reemplazadas.
-- De momento solo Google tiene los campos canonicos en LeadIntake. Meta y los
-  agregados que la incluyan conservan `null`, no cero. Esto no cierra la tarea de
-  atribucion: faltan la identidad Meta y el nivel anuncio. El servidor devuelve
-  cobertura agregada, nunca datos de pacientes ni lineas de tratamientos.
+- Google utiliza sus campos canonicos de LeadIntake. La recepcion nativa Meta
+  incorpora una identidad verificada en LeadAttributionAudit, que el informe y
+  el calculo economico leen mediante `leadAdvertisingIdentity.service.js`.
+  Los registros Meta antiguos sin esa prueba no se atribuyen por nombres/UTM.
+  El servidor devuelve cobertura agregada, nunca datos de pacientes ni lineas
+  de tratamientos. El nivel anuncio sigue pendiente de conectar al informe.
 - Contratos: 10 casos nuevos mas 21 del informe OK; frontend comprueba moneda
   independiente, comparacion real y explicacion cuando falta atribucion.
 - Verificacion integrada final de este avance: Campanas 268 pruebas OK;
@@ -342,7 +344,7 @@ de la web compartida sin seleccionar/autorizar el grupo.
   antes de cargar la vista; quedo capturado en el directorio sin `-retry`.
   La repeticion completa y los reloads posteriores pasaron, sin ocultar ese fallo.
 
-## Siguiente Tramo: Recepcion Nativa Meta
+## Auditoria Inicial: Recepcion Nativa Meta
 
 - Auditoria del receptor actual en `intake.controller.js`: valida la firma, pero
   consulta la primera pagina mapeada con cache de cinco minutos y obtiene el lead
@@ -365,3 +367,64 @@ de la web compartida sin seleccionar/autorizar el grupo.
   Existe `intakeQuickChatOutbox.service.js` para persistir lead, auditoria y outbox
   atomicamente, y JobRequests para entregas/reintentos con namespace de runtime.
 - Aun no se ha modificado la recepcion nativa ni llamado a Meta en este avance.
+
+## Recepcion Nativa Meta: Implementacion Posterior
+
+- Se sustituye el receptor sincrono por un acuse durable: primero valida HMAC,
+  despues persiste `campaign_meta_lead_receive` en JobRequests y solo entonces
+  devuelve 200. Una caida de la cola devuelve 503 para permitir la reentrega.
+  Las paginas no conectadas se ignoran. Payload: IDs firmados de lead, pagina,
+  formulario y anuncio; sin contactos, tokens ni runtime indicado por el emisor.
+- El job usa el namespace del runtime API; desde gateway se dirige al worker
+  `META_LEAD_JOB_RUNTIME_NAMESPACE`, o al fallback operativo de automatizaciones
+  (staging por defecto), nunca a un namespace elegido por el webhook. Usa
+  el scheduler existente con
+  ocho intentos y su backoff habitual. No es un cron ni un barrido nocturno.
+  El job queda registrado como fallido al agotar intentos, no como un interesado
+  vacio. Los errores de proveedor se reducen a codigos seguros, sin Axios config.
+- Credenciales de la pagina/conexion asignada y activa; sin META_GRAPH_TOKEN
+  global. Se revalida la asignacion OAuth, caducidad y propiedad antes de escribir.
+  Meta Lead se consulta con el token de pagina y Ad con el token de conexion;
+  sus IDs deben coincidir con el aviso firmado. Campos contrastados con
+  [Ad del SDK oficial](https://github.com/facebook/facebook-nodejs-business-sdk/blob/main/src/objects/ad.js).
+- En cuentas compartidas manda ExternalCampaignAssignment. Sin decision unica,
+  activa y dentro de la clinica autorizada, no se crea ni mueve el lead. Una
+  cuenta exclusiva de clinica puede incorporar campanas nuevas; se respeta la
+  seleccion guardada y `include_future`. No se crea una segunda Campaign/Campana.
+- Lead y auditoria se guardan en una transaccion. La identidad publicitaria
+  (cuenta, campana, anuncio, pagina, formulario y clinica) se escribe solo desde
+  la respuesta verificada del proveedor. Se guardan email/telefono normalizados,
+  pero no se copian respuestas personalizadas de salud a la auditoria analitica.
+  Una reentrega reutiliza el ID externo; no deduplica contactos entre clinicas.
+  El autorreply existente se encola despues del commit y se puede reintentar.
+- El informe consulta exclusivamente la proyeccion JSON de identidad y los IDs
+  de leads de su ambito. Pruebas contradictorias quedan sin atribucion; nunca
+  se vuelven a resolver por el nombre de la campana.
+- Despliegue: actualizar primero el worker que procesa JobRequests y despues
+  los receptores API/gateway, con el mismo namespace previsto. No enviar nuevos
+  jobs a un worker que todavia no registre este tipo. DEV no es leader del cron,
+  pero su worker puede consumir JobRequests del namespace dev; son controles
+  independientes. Esta tarea no encola formularios reales, activa permisos ni
+  reinicia staging.
+- Pendiente para cerrar el recorrido nativo completo: inventario de todos los
+  formularios/destinos, dialogo de paginas/permisos, prueba persistida de
+  suscripcion y visibilidad/reintento contextual de recepciones fallidas.
+  Recibir un formulario no demuestra que todos los formularios de una campana
+  esten preparados. No se ha puesto ese estado artificialmente en verde.
+- QA detecto y corrigio una incompatibilidad de Sequelize con el argumento
+  string de JSON_EXTRACT (duplicaba el signo dolar). La proyeccion utiliza ahora
+  `Sequelize.json`, con contrato del SQL MySQL generado y comprobacion SQL real
+  de lectura. No se oculta el error devolviendo listas o importes vacios.
+- La primera navegacion inmediatamente tras PM2 podia recibir 502 del proxy
+  antes de que escuchara la API. El runner comprueba ahora la disponibilidad del
+  listener antes de navegar y conserva tiempos/errores de red; no altera la
+  autenticacion ni reintenta de forma encubierta errores del workspace.
+- Verificacion de este tramo: 290 pruebas de Campanas OK, suite completa Web
+  OK (incluido contrato PHP/Ed25519/compilador/provisionador), y proyeccion SQL
+  real de solo lectura OK. Chromium autenticado: 58 comprobaciones, 25 capturas,
+  25 respuestas workspace 200, cero errores JS y cero escrituras de negocio.
+  Evidencia `/home/ubuntu/qa-evidence/campaign-workspace-meta-reception-20260910-verified/`.
+  Se conservan los intentos anteriores: `-observed` detecto el 500 del agregado;
+  `-fixed` registro los 502 de arranque antes de la barrera de disponibilidad.
+  Las pruebas del receptor usan proveedor y persistencia aislados: no son una
+  importacion ni una prueba de permisos reales de Meta.

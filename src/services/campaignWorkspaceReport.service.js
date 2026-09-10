@@ -2,6 +2,7 @@
 
 const { formatDateLocal, localDateTimeToUtc } = require('../lib/availability-calendar');
 const { canonicalExternalCampaignIdentity, externalCampaignIdentityKey } = require('./externalCampaignAssignmentTargets.service');
+const { canonicalLeadAdvertisingIdentity } = require('./leadAdvertisingIdentity.service');
 
 const TIME_ZONE = 'Europe/Madrid';
 const DAY = 86400000;
@@ -80,6 +81,11 @@ function visibleCampaigns({ scope, mappings, assignments, inventory }) {
 }
 
 function leadCampaign(lead, campaigns) {
+  if (lead.advertising_identity_conflict === true) return null;
+  const identity = canonicalLeadAdvertisingIdentity(lead);
+  if (identity && ['paid', null, undefined].includes(lead.channel)) return campaigns.find(campaign =>
+    campaign.provider === identity.provider && campaign.clinicId === number(lead.clinica_id)
+    && campaign.account_id === identity.account_id && campaign.campaign_id === identity.campaign_id)?.id || null;
   const provider = lead.source === 'google_ads' || /google/i.test(lead.utm_source || '') ? 'google_ads'
     : lead.source === 'meta_ads' || /^(facebook|instagram|meta|fb|ig)$/i.test(lead.utm_source || '') ? 'meta_ads' : null;
   if (!provider || !['paid', null, undefined].includes(lead.channel)) return null;

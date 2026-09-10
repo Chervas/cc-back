@@ -569,6 +569,9 @@ const JOB_HANDLERS = {
   intake_quickchat_summary_materialize: async (payload = {}) => (
     intakeQuickChatOutboxService.runIntakeQuickChatSummaryMaterializeJob(payload)
   ),
+  campaign_meta_lead_receive: async (payload = {}, jobRequest = null) => (
+    require('./metaLeadReception.service').runMetaLeadReceptionJob(payload, jobRequest)
+  ),
   // Carga diferida: publicación importa compilador/modelos Web y no debe
   // introducir un ciclo durante el arranque del worker global.
   web_publication_deploy: async (payload = {}, jobRequest = null) => (

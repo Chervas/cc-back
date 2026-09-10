@@ -2930,8 +2930,6 @@ const isConsentModeEnabledForRecord = (record) => {
 };
 
 const META_VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN || process.env.META_VERIFY_TOKEN;
-const META_GRAPH_TOKEN = process.env.META_GRAPH_TOKEN || process.env.META_PAGE_ACCESS_TOKEN;
-const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || 'v24.0';
 const validateMetaSignature = createMetaSignatureValidator({
   appSecret: process.env.META_APP_SECRET,
 });
@@ -6461,168 +6459,18 @@ exports.verifyMetaWebhook = asyncHandler(async (req, res) => {
   return res.sendStatus(403);
 });
 
-const mapMetaField = (fieldData = [], name) => {
-  const item = fieldData.find((f) => f.name === name);
-  if (!item || !Array.isArray(item.values)) return null;
-  return item.values[0] ?? null;
-};
-
-const META_UNMAPPED_PAGE_LOG_TTL_MS = Number(process.env.META_UNMAPPED_PAGE_LOG_TTL_MS || 60 * 60 * 1000);
-const META_PAGE_MAPPING_CACHE_TTL_MS = Number(process.env.META_PAGE_MAPPING_CACHE_TTL_MS || 5 * 60 * 1000);
-const metaUnmappedPageLogCache = new Map();
-const metaPageMappingCache = new Map();
-const shouldLogUnmappedMetaLeadgen = (pageId, formId) => {
-  const key = `${pageId || 'unknown'}|${formId || 'unknown'}`;
-  const now = Date.now();
-  const last = metaUnmappedPageLogCache.get(key) || 0;
-  if (now - last < META_UNMAPPED_PAGE_LOG_TTL_MS) {
-    return false;
-  }
-  metaUnmappedPageLogCache.set(key, now);
-  return true;
-};
-const resolveActiveMetaLeadPage = async (pageId) => {
-  const normalizedPageId = cleanString(pageId);
-  if (!normalizedPageId || !ClinicMetaAsset) return null;
-
-  const cached = metaPageMappingCache.get(normalizedPageId);
-  const now = Date.now();
-  if (cached && cached.expiresAt > now) {
-    return cached.value;
-  }
-
-  const value = await ClinicMetaAsset.findOne({
-    where: { metaAssetId: String(normalizedPageId), assetType: 'facebook_page', isActive: true },
-    raw: true,
-  });
-  metaPageMappingCache.set(normalizedPageId, {
-    value: value || null,
-    expiresAt: now + META_PAGE_MAPPING_CACHE_TTL_MS,
-  });
-  return value || null;
-};
-
 exports.receiveMetaWebhook = asyncHandler(async (req, res) => {
   if (!validateMetaSignature(req)) {
     return res.status(401).json({ message: 'Firma Meta inválida' });
   }
-
-  const { object, entry } = req.body || {};
-  if (object !== 'page' || !Array.isArray(entry)) {
+  try {
+    await require('../services/metaLeadReception.service').enqueueMetaLeadNotifications(req.body);
     return res.status(200).json({ success: true });
+  } catch (error) {
+    // Acknowledge only durable receipts. Meta can redeliver a notification after a queue failure.
+    console.error('Meta lead receipt could not be queued:', error.code?.startsWith('meta_lead_') ? error.code : 'queue_unavailable');
+    return res.status(503).json({ success: false, code: 'meta_lead_receipt_unavailable' });
   }
-
-  for (const pageEntry of entry) {
-    if (!Array.isArray(pageEntry.changes)) continue;
-    for (const change of pageEntry.changes) {
-      if (change.field !== 'leadgen' || !change.value) continue;
-      const changeValue = change.value;
-      const leadId = changeValue.leadgen_id || changeValue.lead_id;
-      const formId = changeValue.form_id || null;
-      const adId = changeValue.ad_id || null;
-      const pageId = changeValue.page_id || pageEntry.id || null;
-      if (!leadId) continue;
-
-      let mappedPage = null;
-      try {
-        mappedPage = await resolveActiveMetaLeadPage(pageId);
-      } catch (mapClinicErr) {
-        console.warn('⚠️ No se pudo mapear clínica desde page_id:', mapClinicErr.message || mapClinicErr);
-      }
-
-      if (!mappedPage) {
-        if (shouldLogUnmappedMetaLeadgen(pageId, formId)) {
-          console.info(`Lead Meta ignorado por página no conectada a ClinicaClick: page_id=${pageId || 'unknown'} form_id=${formId || 'unknown'} lead_id=${leadId}`);
-        }
-        continue;
-      }
-
-      let leadData = {};
-      try {
-        if (!META_GRAPH_TOKEN) throw new Error('META_GRAPH_TOKEN no configurado');
-        const fields = 'field_data,ad_id,form_id,created_time';
-        const { data } = await axios.get(`https://graph.facebook.com/${META_GRAPH_VERSION}/${leadId}`, {
-          params: { access_token: META_GRAPH_TOKEN, fields }
-        });
-        const fd = data?.field_data || [];
-        leadData = {
-          nombre: mapMetaField(fd, 'full_name') || mapMetaField(fd, 'first_name'),
-          email: mapMetaField(fd, 'email'),
-          telefono: mapMetaField(fd, 'phone_number'),
-          ref: data
-        };
-      } catch (fetchErr) {
-        console.warn('⚠️ No se pudo obtener datos del lead de Meta:', fetchErr.message || fetchErr);
-      }
-
-      // Buscar campaña por ad_id si es posible
-      let campanaId = null;
-      try {
-        if (adId && AdCache) {
-          const adCache = await AdCache.findOne({ where: { ad_id: adId } });
-          if (adCache) {
-            const camp = await Campana.findOne({ where: { campaign_id: adCache.campaign_id } });
-            if (camp) campanaId = camp.id;
-          }
-        }
-      } catch (mapErr) {
-        console.warn('⚠️ No se pudo mapear campana desde ad_id:', mapErr.message || mapErr);
-      }
-
-      const leadPayload = {
-        clinica_id: mappedPage.clinicaId || null,
-        grupo_clinica_id: mappedPage.grupoClinicaId || null,
-        event_id: leadId,
-        campana_id: campanaId,
-        channel: 'paid',
-        source: 'meta_ads',
-        source_detail: `leadgen_form:${formId || 'unknown'}`,
-        utm_campaign: changeValue.campaign_name || null,
-        utm_source: 'meta',
-        utm_medium: 'leadgen',
-        nombre: leadData.nombre || null,
-        email: leadData.email || null,
-        telefono: leadData.telefono || null,
-        status_lead: 'nuevo',
-        external_source: 'meta_leadgen',
-        external_id: leadId,
-        intake_payload_hash: hashValue(stableStringify(changeValue)),
-        clinic_match_source: 'meta_page_id',
-        clinic_match_value: pageId || null
-      };
-
-      try {
-        const createdLead = await dedupeAndCreateLead(
-          leadPayload,
-          { change: changeValue, meta_lead_data: leadData },
-          { meta_page_id: pageId }
-        );
-        await leadAutoReplyService.enqueueForLead({
-          lead: createdLead,
-          eventKind: 'write',
-          eventAt: createdLead.created_at || createdLead.createdAt || new Date(),
-        });
-      } catch (err) {
-        if (err.status === 409) {
-          console.info(`Lead Meta duplicado (${err.message}) -> ${err.existingId}`);
-          const existingLead = err.existingId
-            ? await LeadIntake.findByPk(err.existingId)
-            : null;
-          if (existingLead) {
-            await leadAutoReplyService.enqueueForLead({
-              lead: existingLead,
-              eventKind: 'write',
-              eventAt: existingLead.created_at || existingLead.createdAt || new Date(),
-            });
-          }
-          continue;
-        }
-        console.error('Error creando LeadIntake desde Meta webhook:', err.message || err);
-      }
-    }
-  }
-
-  return res.status(200).json({ success: true });
 });
 
 const LEAD_LIST_SORT_FIELDS = new Set(['created_at', 'channel', 'source', 'status_lead', 'campana_id']);
