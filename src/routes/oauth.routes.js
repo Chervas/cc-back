@@ -75,6 +75,7 @@ const {
     persistMetaConnection
 } = require('../services/oauthConnectionPersistence.service');
 const { recordApiUsage } = require('../services/apiUsageTelemetry.service');
+const { resolveWorkspaceGroupAccountScope } = require('../lib/campaignWorkspaceAccountScope');
 const {
     deactivateGoogleMappingsForScope,
     deactivateMetaMappingsForScope
@@ -2769,7 +2770,13 @@ router.post('/google/ads/map-accounts', async (req, res) => {
             `${Number.parseInt(String(mapping.clinicaId), 10)}|${normalizeCustomerId(mapping.customerId)}`,
             mapping
         ])).values());
-        const { connection: conn } = await resolveAuthorizedDestinationGoogleConnection({
+        const workspaceGroup = await resolveWorkspaceGroupAccountScope({ body: req.body,
+            clinicIds: clinicIdsFromAssetMappings(mappings), userId,
+            findGroupClinics: getClinicIdsForGroup, hasAccess: hasMarketingClinicScopeAccess });
+        const { connection: conn } = workspaceGroup ? await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: false,
+            scopeInput: { clinicIdRaw: null, groupIdRaw: workspaceGroup.grupoClinicaId, assignmentScopeRaw: 'group' }
+        }) : await resolveAuthorizedDestinationGoogleConnection({
             userId,
             mappings,
             authorizeDestinations: hasMarketingClinicScopeAccess,
@@ -2778,6 +2785,7 @@ router.post('/google/ads/map-accounts', async (req, res) => {
                 scopeInput: { clinicIdRaw: clinicId, groupIdRaw: null, assignmentScopeRaw: 'clinic' }
             })
         });
+        if (!conn) throw inaccessibleAssetError('workspace_google_connection_required', 'Conecta Google para el ámbito seleccionado antes de elegir una cuenta.');
         const authorizedAccounts = await loadAuthorizedGoogleAdsAccounts(conn);
         for (const mapping of mappings) {
             const customerId = normalizeCustomerId(mapping?.customerId);
@@ -2803,10 +2811,11 @@ router.post('/google/ads/map-accounts', async (req, res) => {
 
         const transaction = await db.sequelize.transaction();
         const results = [];
-        const clinicsToSync = new Set();
+        const clinicsToSync = new Set(workspaceGroup?.clinicIds || []);
         const clinicAssignmentCache = new Map();
 
         async function resolveAssignment(clinicaId) {
+            if (workspaceGroup) return { assignmentScope: workspaceGroup.assignmentScope, grupoClinicaId: workspaceGroup.grupoClinicaId };
             if (!clinicaId) {
                 return { assignmentScope: 'clinic', grupoClinicaId: null };
             }
@@ -3688,10 +3697,17 @@ router.post('/meta/map-assets', async (req, res) => {
             return res.status(400).json({ success: false, error: 'asset_mapping_clinic_required' });
         }
         if (!await requireAssetMappingClinicAccess(res, userId, [{ clinicaId }], 'write')) return;
+        const workspaceGroup = await resolveWorkspaceGroupAccountScope({ body: req.body, clinicIds: [clinicaId], userId,
+            findGroupClinics: getClinicIdsForGroup, hasAccess: hasMarketingClinicScopeAccess });
+        if (workspaceGroup && (requestedAssets.length !== 1 || requestedAssets.some(asset => asset.type !== 'ad_account'))) {
+            return res.status(400).json({ success: false, error: 'workspace_ad_account_required' });
+        }
 
         const { connection: metaConnection } = await resolveMetaRequestConnection(req, {
-            allowLegacyUserFallback: true,
-            scopeInput: {
+            allowLegacyUserFallback: !workspaceGroup,
+            scopeInput: workspaceGroup ? {
+                clinicIdRaw: null, groupIdRaw: workspaceGroup.grupoClinicaId, assignmentScopeRaw: 'group'
+            } : {
                 clinicIdRaw: clinicaId,
                 groupIdRaw: null,
                 assignmentScopeRaw: 'clinic'
@@ -3719,10 +3735,11 @@ router.post('/meta/map-assets', async (req, res) => {
         const createdOrUpdated = [];
         const selectedKeySet = new Set(selectedAssets.map((asset) => `${asset.type}|${asset.id}`));
         const selectedTypes = new Set(selectedAssets.map((asset) => asset?.type).filter(Boolean));
-        const clinicsToSync = new Set();
+        const clinicsToSync = new Set(workspaceGroup?.clinicIds || []);
         const clinicAssignmentCache = new Map();
 
         async function resolveAssignment(clinicId) {
+            if (workspaceGroup) return { assignmentScope: workspaceGroup.assignmentScope, grupoClinicaId: workspaceGroup.grupoClinicaId };
             if (!clinicId) {
                 return { assignmentScope: 'clinic', grupoClinicaId: null };
             }

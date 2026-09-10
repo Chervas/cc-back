@@ -4,56 +4,91 @@ const { Op } = require('sequelize');
 const { accountId, mappingIdentity, reportPeriod, visibleCampaigns, aggregateReport } = require('./campaignWorkspaceReport.service');
 const { assessConsentMeasurementReadiness, resolveWebMeasurementMarketingState } = require('./campaignMeasurementReadiness.service');
 const { buildWorkspaceHealth } = require('./campaignWorkspaceHealth.service');
+const { campaignIncluded } = require('./campaignWorkspaceSettings.service');
 
 const LEAD_FIELDS = ['id', 'clinica_id', 'source', 'channel', 'utm_source', 'utm_campaign', 'source_detail', 'google_ads_customer_id', 'google_ads_campaign_id', 'created_at'];
 const GOOGLE_MAPPING_FIELDS = ['id', 'customerId', 'descriptiveName', 'currencyCode', 'clinicaId', 'grupoClinicaId', 'assignmentScope', 'lastSyncedAt'];
 const META_MAPPING_FIELDS = ['id', 'metaAssetId', 'metaAssetName', 'clinicaId', 'grupoClinicaId', 'assignmentScope', 'ad_account_refreshed_at', 'additionalData'];
 
-async function loadCampaignWorkspace({ models, scope, days, now = new Date() }) {
-  const period = reportPeriod(days, now);
+async function loadWorkspaceInventory({ models, scope, transaction = null }) {
   if (!scope.clinicIds?.length) throw Object.assign(new Error('empty_scope'), { status: 400 });
   const selectedClinics = await models.Clinica.findAll({ where: { id_clinica: { [Op.in]: scope.clinicIds } },
-    attributes: ['id_clinica', 'grupoClinicaId'], raw: true });
+    attributes: ['id_clinica', 'grupoClinicaId'], raw: true, transaction });
   const groups = [...new Set(selectedClinics.map(row => row.grupoClinicaId).filter(Boolean))];
   const groupMembers = groups.length ? await models.Clinica.findAll({ where: { grupoClinicaId: { [Op.in]: groups } },
-    attributes: ['id_clinica', 'grupoClinicaId'], raw: true }) : [];
+    attributes: ['id_clinica', 'grupoClinicaId'], raw: true, transaction }) : [];
   const authorizedGroups = groups.filter(id => groupMembers.filter(row => row.grupoClinicaId === id)
     .every(row => scope.clinicIds.includes(Number(row.id_clinica))));
   const assetScope = { isActive: true, [Op.or]: [
     { assignmentScope: 'clinic', clinicaId: { [Op.in]: scope.clinicIds } },
     ...(groups.length ? [{ assignmentScope: 'group', grupoClinicaId: { [Op.in]: groups } }] : []),
   ] };
-  const google = await models.ClinicGoogleAdsAccount.findAll({ where: assetScope, attributes: GOOGLE_MAPPING_FIELDS, raw: true });
-  const meta = await models.ClinicMetaAsset.findAll({ where: { ...assetScope, assetType: 'ad_account' }, attributes: META_MAPPING_FIELDS, raw: true });
+  const google = await models.ClinicGoogleAdsAccount.findAll({ where: assetScope, attributes: GOOGLE_MAPPING_FIELDS, raw: true, transaction });
+  const meta = await models.ClinicMetaAsset.findAll({ where: { ...assetScope, assetType: 'ad_account' }, attributes: META_MAPPING_FIELDS, raw: true, transaction });
   const googleStoredIds = [...new Set(google.flatMap(row => [row.customerId, accountId(row.customerId)]))];
   const metaStoredIds = [...new Set(meta.flatMap(row => [row.metaAssetId, accountId(row.metaAssetId), `act_${accountId(row.metaAssetId)}`]))];
   // Read all owners of these accounts; no names, tokens or data from those other clinics leave this service.
   const googleOwners = googleStoredIds.length ? await models.ClinicGoogleAdsAccount.findAll({
-    where: { isActive: true, customerId: { [Op.in]: googleStoredIds } }, attributes: GOOGLE_MAPPING_FIELDS, raw: true,
+    where: { isActive: true, customerId: { [Op.in]: googleStoredIds } }, attributes: GOOGLE_MAPPING_FIELDS, raw: true, transaction,
   }) : [];
   const metaOwners = metaStoredIds.length ? await models.ClinicMetaAsset.findAll({
-    where: { isActive: true, assetType: 'ad_account', metaAssetId: { [Op.in]: metaStoredIds } }, attributes: META_MAPPING_FIELDS, raw: true,
+    where: { isActive: true, assetType: 'ad_account', metaAssetId: { [Op.in]: metaStoredIds } }, attributes: META_MAPPING_FIELDS, raw: true, transaction,
   }) : [];
   const mappings = [...googleOwners.map(row => mappingIdentity(row, 'google_ads')), ...metaOwners.map(row => mappingIdentity(row, 'meta_ads'))];
   const refs = [
     ...(googleStoredIds.length ? [{ provider: 'google_ads', customer_id: { [Op.in]: googleStoredIds } }] : []),
     ...(metaStoredIds.length ? [{ provider: 'meta_ads', customer_id: { [Op.in]: metaStoredIds } }] : []),
   ];
-  const inventory = refs.length ? await models.ExternalCampaignInventory.findAll({ where: { [Op.or]: refs }, raw: true }) : [];
+  const inventory = refs.length ? await models.ExternalCampaignInventory.findAll({ where: { [Op.or]: refs }, raw: true, transaction }) : [];
   // Meta's existing synchronizer persists entities, not ExternalCampaignInventory.
   if (metaStoredIds.length) {
     const metaInventory = await models.SocialAdsEntity.findAll({ where: { level: 'campaign', ad_account_id: { [Op.in]: metaStoredIds } },
-      attributes: ['ad_account_id', 'entity_id', 'name', 'effective_status', 'status', 'updated_time'], raw: true });
+      attributes: ['ad_account_id', 'entity_id', 'name', 'effective_status', 'status', 'updated_time'], raw: true, transaction });
     for (const row of metaInventory) inventory.push({ provider: 'meta_ads', customer_id: row.ad_account_id,
       campaign_id: row.entity_id, campaign_name: row.name, status: row.effective_status || row.status,
       last_seen_at: row.updated_time });
   }
   const assignments = refs.length ? await models.ExternalCampaignAssignment.findAll({ where: { [Op.or]: refs },
-    attributes: ['provider', 'customer_id', 'campaign_id', 'clinica_id', 'status'], raw: true }) : [];
+    attributes: ['provider', 'customer_id', 'campaign_id', 'clinica_id', 'status'], raw: true, transaction }) : [];
   const campaigns = visibleCampaigns({ scope: { ...scope, memberGroupIds: groups, authorizedGroupIds: authorizedGroups }, inventory, assignments, mappings });
   for (const campaign of campaigns) campaign.currency = campaign.provider === 'google_ads'
     ? google.find(row => accountId(row.customerId) === campaign.account_id)?.currencyCode || null
     : meta.find(row => accountId(row.metaAssetId) === campaign.account_id)?.additionalData?.currency || null;
+  return { selectedClinics, groups, authorizedGroups, google, meta, campaigns, accounts: workspaceAccounts(google, meta) };
+}
+
+function workspaceAccounts(google, meta) {
+  return [
+    ...google.map(row => ({ provider: 'google_ads', id: accountId(row.customerId), name: row.descriptiveName || row.customerId,
+      currency: row.currencyCode || null, lastSyncedAt: row.lastSyncedAt || null })),
+    ...meta.map(row => ({ provider: 'meta_ads', id: accountId(row.metaAssetId), name: row.metaAssetName || row.metaAssetId,
+      currency: row.additionalData?.currency || null, lastSyncedAt: row.ad_account_refreshed_at || null })),
+  ].filter((row, index, list) => list.findIndex(other => row.provider === other.provider && row.id === other.id) === index);
+}
+
+function selectedByWorkspace(campaign, inventory, settings, scope) {
+  const clinicSetting = settings.find(row => row.scope_type === 'clinic' && Number(row.scope_id) === campaign.clinicId);
+  if (clinicSetting) return campaignIncluded(campaign, clinicSetting);
+  const clinicGroup = inventory.selectedClinics.find(clinic => Number(clinic.id_clinica) === campaign.clinicId)?.grupoClinicaId;
+  const accountMappings = campaign.provider === 'google_ads' ? inventory.google : inventory.meta;
+  const accountGroups = accountMappings.filter(row => row.assignmentScope === 'group'
+    && accountId(row.customerId || row.metaAssetId) === campaign.account_id
+    && inventory.authorizedGroups.includes(row.grupoClinicaId)).map(row => Number(row.grupoClinicaId));
+  const candidates = clinicGroup ? [Number(clinicGroup)] : scope.groupId ? [Number(scope.groupId)] : accountGroups;
+  // Aggregates retain the same account selections as each constituent workspace.
+  return !candidates.length || candidates.some(id => campaignIncluded(campaign,
+    settings.find(row => row.scope_type === 'group' && Number(row.scope_id) === id)));
+}
+
+async function loadCampaignWorkspace({ models, scope, days, now = new Date() }) {
+  const period = reportPeriod(days, now);
+  const inventory = await loadWorkspaceInventory({ models, scope });
+  const { selectedClinics, groups, campaigns: availableCampaigns } = inventory;
+  const settings = await models.CampaignWorkspaceSetting.findAll({ where: { [Op.or]: [
+    { scope_type: 'clinic', scope_id: { [Op.in]: scope.clinicIds } },
+    ...(groups.length ? [{ scope_type: 'group', scope_id: { [Op.in]: groups } }] : []),
+  ] }, raw: true });
+  const campaigns = availableCampaigns.filter(campaign => selectedByWorkspace(campaign, inventory, settings, scope));
   const googleCampaigns = campaigns.filter(c => c.provider === 'google_ads');
   const metaCampaigns = campaigns.filter(c => c.provider === 'meta_ads');
   const dateWhere = { [Op.between]: [period.previousStart, period.end] };
@@ -91,12 +126,7 @@ async function loadCampaignWorkspace({ models, scope, days, now = new Date() }) 
   const report = buildWorkspaceHealth(metrics, evidence, now);
   return { success: true, version: 1, scope: { clinicIds: scope.clinicIds, groupId: scope.groupId || null },
     generatedAt: now.toISOString(), report,
-    accounts: [
-      ...google.map(row => ({ provider: 'google_ads', id: accountId(row.customerId), name: row.descriptiveName || row.customerId,
-        currency: row.currencyCode || null, lastSyncedAt: row.lastSyncedAt })),
-      ...meta.map(row => ({ provider: 'meta_ads', id: accountId(row.metaAssetId), name: row.metaAssetName || row.metaAssetId,
-        currency: row.additionalData?.currency || null, lastSyncedAt: row.ad_account_refreshed_at })),
-    ].filter((row, index, list) => list.findIndex(other => row.provider === other.provider && row.id === other.id) === index),
+    accounts: inventory.accounts,
   };
 }
 
@@ -173,4 +203,4 @@ async function loadWorkspaceAds({ models, googleWhere, metaCampaigns, dateWhere 
   return ads;
 }
 
-module.exports = { loadCampaignWorkspace };
+module.exports = { loadCampaignWorkspace, loadWorkspaceInventory, selectedByWorkspace, workspaceAccounts };
