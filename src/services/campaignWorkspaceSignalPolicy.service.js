@@ -50,6 +50,7 @@ async function resolveWorkspaceSignalPolicy({ records = [], provider, accountId,
   if (!references.length) return legacy();
   let result = legacy();
   const checked = new Set();
+  const policyRefs = [];
   for (const record of references) {
     const reference = record.config.campaigns.workspace_policy;
     const scopeType = record.assignment_scope === 'group' ? 'group' : 'clinic';
@@ -66,8 +67,10 @@ async function resolveWorkspaceSignalPolicy({ records = [], provider, accountId,
     if (!setting || setting.scope_type !== scopeType || Number(setting.scope_id) !== scopeId) return denied('workspace_policy_scope_mismatch');
     result = workspaceSignalDecision({ setting, provider, accountId, campaignId, eventName, crmEventSource });
     if (!result.allowed) return result;
+    if (!Number.isSafeInteger(setting.version) || setting.version < 1) return denied('workspace_policy_version_invalid');
+    policyRefs.push({ setting_id: reference.setting_id, scope_type: scopeType, scope_id: scopeId, version: setting.version });
   }
-  return result;
+  return { ...result, policyRefs: policyRefs.sort((a, b) => a.setting_id.localeCompare(b.setting_id)) };
 }
 
 module.exports = { workspaceSignalDecision, resolveWorkspaceSignalPolicy, CRM_MILESTONE_SOURCE };

@@ -127,7 +127,8 @@ async function metaRequest(method, url, {
   source = 'meta_client',
   operation = null,
   maxRetries: requestedRetries = null,
-  body = undefined
+  body = undefined,
+  sensitivePayload = false
 } = {}) {
   const META_API_BASE_URL = process.env.META_API_BASE_URL || 'https://graph.facebook.com/v23.0';
   // Retardo suave entre requests (ms). Previene picos de uso.
@@ -197,11 +198,11 @@ async function metaRequest(method, url, {
         const safeUrl = (typeof url === 'string') ? url : '';
         console.error('❌ Meta API error', {
           status,
-          code,
-          subcode,
-          type: eobj?.type,
-          message: eobj?.message,
-          fbtrace_id: eobj?.fbtrace_id,
+          code: sensitivePayload ? (Number.isInteger(code) ? code : undefined) : code,
+          subcode: sensitivePayload ? (Number.isInteger(subcode) ? subcode : undefined) : subcode,
+          type: sensitivePayload ? undefined : eobj?.type,
+          message: sensitivePayload ? undefined : eobj?.message,
+          fbtrace_id: sensitivePayload ? undefined : eobj?.fbtrace_id,
           url: safeUrl,
           attempt,
           maxRetries
@@ -221,7 +222,9 @@ async function metaRequest(method, url, {
           operation: operation || String(url || 'graph_request').split('?')[0].slice(0, 120),
           status: 'rate_limited',
           pauseUntil: nextAllowedAt ? new Date(nextAllowedAt) : undefined,
-          error: err
+          error: sensitivePayload ? Object.assign(new Error('Meta conversion request failed'), {
+            code: err.code, response: { status, data: { error: { code, error_subcode: subcode } } }
+          }) : err
         });
         throw err;
       }
@@ -249,7 +252,13 @@ const metaSubscribePage = (pageId, fields, options = {}) => {
   return metaRequest('post', `${pageId}/subscribed_apps`, { ...options, maxRetries: 0,
     body: { subscribed_fields: fields.join(',') } });
 };
-module.exports = { metaGet, metaSubscribePage };
+const metaSendConversion = (datasetId, payload, options = {}) => {
+  if (!/^[0-9]{1,64}$/.test(datasetId) || !options.accessToken || !Array.isArray(payload?.data) || payload.data.length !== 1) {
+    throw new Error('invalid_meta_conversion_request');
+  }
+  return metaRequest('post', `${datasetId}/events`, { ...options, maxRetries: 0, body: payload, sensitivePayload: true });
+};
+module.exports = { metaGet, metaSubscribePage, metaSendConversion };
 
 // Exponer estado de uso/limit para monitorización
 module.exports.getUsageStatus = async function getUsageStatus() {

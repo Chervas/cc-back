@@ -8,7 +8,7 @@ const INDICATORS = [
   ['delivery', 'Anuncios que no se publican', 'megaphone', 'Último estado sincronizado'],
   ['reception', 'Conexiones y recepción', 'link', 'Última comprobación del destino'],
   ['privacy', 'Privacidad y consentimiento', 'shield-check', 'Comprobación firmada de la web'],
-  ['signals', 'Señales a Google y Meta', 'arrow-path', 'Últimos registros de entrega'],
+  ['signals', 'Señales a Google y Meta', 'arrow-path', 'Entregas de las últimas 24 horas'],
 ];
 const money = (value, currency) => new Intl.NumberFormat('es-ES', {
   ...(currency ? { style: 'currency', currency } : {}), maximumFractionDigits: 2,
@@ -75,13 +75,17 @@ function buildWorkspaceHealth(report, evidence = new Map(), now = new Date()) {
     }
     if (observed.signals?.checked) {
       coverage.get('signals').evaluated.add(row.campaign.id);
+      if (row.campaign.provider === 'meta_ads' && Number.isSafeInteger(observed.signals.received)) {
+        coverage.get('signals').checks.push({ received: observed.signals.received,
+          pending: observed.signals.pending || 0, warnings: observed.signals.warnings || 0 });
+      }
       if (!observed.signals.ready) add(row, 'signals', 'Hay señales pendientes de entrega', observed.signals.detail,
         'Revisa los registros de entrega antes de cambiar las conversiones.', observed.signals.key);
     }
   }
   findings.sort((a, b) => Number(b.technical) - Number(a.technical) || Number(a.severity !== 'critical') - Number(b.severity !== 'critical'));
   const blocks = INDICATORS.map(([id, title, icon, window]) => {
-    const { evaluated, total } = coverage.get(id);
+    const { evaluated, total, checks } = coverage.get(id);
     const issues = findings.filter(finding => finding.category === id);
     const campaignIds = [...new Set(issues.flatMap(finding => finding.campaignIds))];
     const missing = total.size - evaluated.size;
@@ -94,7 +98,13 @@ function buildWorkspaceHealth(report, evidence = new Map(), now = new Date()) {
       summary: issues[0]?.title || (!total.size ? 'No hay campañas aplicables a este indicador.'
         : missing ? `Faltan comprobaciones actuales de ${missing} ${missing === 1 ? 'campaña' : 'campañas'}.` : 'Sin incidencias en las campañas comprobadas.'),
       coverage: `Comprobadas: ${evaluated.size} de ${total.size} campañas`,
-      checks: [{ label: 'Cobertura', value: `${evaluated.size} de ${total.size}`, tone: missing ? 'neutral' : 'good' }],
+      checks: [{ label: 'Cobertura', value: `${evaluated.size} de ${total.size}`, tone: missing ? 'neutral' : 'good' },
+        ...(id === 'signals' && checks.length ? [
+          { label: 'Recibidos por Meta', value: String(checks.reduce((sum, row) => sum + row.received, 0)), tone: 'neutral' },
+          { label: 'Con avisos', value: String(checks.reduce((sum, row) => sum + row.warnings, 0)), tone: checks.some(row => row.warnings) ? 'warning' : 'neutral' },
+          { label: 'Sin confirmar', value: String(checks.reduce((sum, row) => sum + row.pending, 0)), tone: checks.some(row => row.pending) ? 'warning' : 'neutral' },
+        ] : []),
+      ],
     };
   });
   return { ...report, findings, healthBlocks: blocks, technicalCount: findings.filter(finding => finding.technical).length,

@@ -91,6 +91,10 @@ async function sendMetaEvent({
     if (!workspacePolicy.allowed) return { sent: false, reason: workspacePolicy.reason };
     if (advertisingConsent !== true) return { sent: false, reason: 'consent_not_granted' };
     if (!pixelId || !accessToken) return { sent: false, reason: 'workspace_meta_destination_required' };
+    return require('./metaWorkspaceSignalDelivery.service').sendWorkspaceMetaSignal({
+      eventName, eventTime, eventId, actionSource, eventSourceUrl, clinicId, userData, pixelId, accessToken,
+      signalPolicyRecord, webPolicyRecord, crmEventSource, adAccountId, campaignId, advertisingConsent,
+    });
   }
   if (workspaceDestination && (!pixelId || !accessToken)) return { sent: false, reason: 'workspace_meta_destination_required' };
   if (!(pixelId || DEFAULT_PIXEL_ID) || !(accessToken || DEFAULT_CAPI_TOKEN)) return;

@@ -80,3 +80,17 @@ test('revocation is read on every request, not cached for a browser or job sessi
   row.activation.signals.enabled = false;
   assert.equal((await resolveWorkspaceSignalPolicy(input)).allowed, false); assert.equal(reads, 2);
 });
+test('every authorizing scope retains its own revision, even when the last scope is unchanged', async () => {
+  const clinic = setting();
+  const group = { ...setting(), id: 'setting-group', scope_type: 'group', scope_id: 8, version: 10 };
+  const groupRecord = { assignment_scope: 'group', group_id: 8, config: { campaigns: { workspace_policy: {
+    schema_version: 1, setting_id: group.id, scope_type: 'group', scope_id: 8,
+  } } } };
+  const input = { records: [record, groupRecord, groupRecord], provider: 'google_ads', accountId: '123', campaignId: '7', eventName: 'Lead',
+    loadSetting: async id => id === clinic.id ? clinic : group };
+  const before = await resolveWorkspaceSignalPolicy(input); assert.equal(before.policyRefs.length, 2);
+  clinic.version++;
+  const after = await resolveWorkspaceSignalPolicy(input); assert.equal(after.version, before.version);
+  assert.notDeepEqual(after.policyRefs, before.policyRefs);
+  clinic.version = NaN; assert.equal((await resolveWorkspaceSignalPolicy(input)).reason, 'workspace_policy_version_invalid');
+});

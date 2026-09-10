@@ -15,6 +15,10 @@ function fixture(decision) {
     process: { env: { META_PIXEL_ID: 'global-pixel', META_CAPI_TOKEN: 'global-token' } }, require: name => {
       if (name === 'axios') return { post: async (...args) => { posts.push(args); return { data: { events_received: 1 } }; } };
       if (name === './campaignWorkspaceSignalPolicy.service') return { resolveWorkspaceSignalPolicy: async input => { checks.push(input); return decision; } };
+      if (name === './metaWorkspaceSignalDelivery.service') return { sendWorkspaceMetaSignal: async input => {
+        posts.push([`scoped/${input.pixelId}/events`, input, { params: { access_token: input.accessToken } }]);
+        return { sent: true, status: 'accepted' };
+      } };
       return realRequire(name);
     } }, { filename });
   return { ...output.exports, posts, checks };

@@ -9,6 +9,7 @@ const { loadFormReceiptEvidence } = require('./campaignWorkspaceReception.servic
 const { loadBudgetCampaignAttribution } = require('./campaignEconomicAttribution.service');
 const { attachLeadAdvertisingIdentities } = require('./leadAdvertisingIdentity.service');
 const { loadNativeFormEvidence } = require('./campaignWorkspaceNativeReception.service');
+const { loadMetaSignalEvidence } = require('./campaignWorkspaceSignalEvidence.service');
 
 const LEAD_FIELDS = ['id', 'clinica_id', 'source', 'channel', 'utm_source', 'utm_campaign', 'source_detail', 'google_ads_customer_id', 'google_ads_campaign_id', 'created_at'];
 const GOOGLE_MAPPING_FIELDS = ['id', 'customerId', 'descriptiveName', 'currencyCode', 'clinicaId', 'grupoClinicaId', 'assignmentScope', 'lastSyncedAt'];
@@ -135,6 +136,8 @@ async function loadCampaignWorkspace({ models, scope, days, now = new Date() }) 
   const budgetAttribution = await loadBudgetCampaignAttribution({ models, campaigns, period });
   const metrics = aggregateReport({ campaigns, facts, leads, appointments, ads, budgetAttribution, period, now });
   const evidence = await loadWebEvidence({ models, campaigns, selectedClinics, groups, scope, now });
+  const signals = await loadMetaSignalEvidence({ models, campaigns, selectedClinics, now });
+  for (const [campaignId, delivery] of signals) evidence.set(campaignId, { ...evidence.get(campaignId), signals: delivery });
   const report = buildWorkspaceHealth(metrics, evidence, now);
   return { success: true, version: 1, scope: { clinicIds: scope.clinicIds, groupId: scope.groupId || null },
     generatedAt: now.toISOString(), report,

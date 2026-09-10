@@ -779,3 +779,78 @@ de la web compartida sin seleccionar/autorizar el grupo.
   Sin errores JS, errores de servidor en el workspace ni escrituras de negocio.
   Revisadas manualmente Salud desktop y grafica movil a ras, ademas del dialogo.
   Evidencia: `/home/ubuntu/qa-evidence/campaign-workspace-google-proof-20260910`.
+## Entregas Meta Del Workspace (2026-09-10)
+
+La recepcion de formularios existente se conserva. Esta ampliacion registra la
+entrega posterior de un evento autorizado; no constituye otro receptor de leads
+ni completa todavia todos los emisores CRM del objetivo.
+
+- `MetaSignalDeliveries`: tabla aditiva, migracion individual
+  `20260910210000-create-meta-signal-deliveries.js`, aplicada y registrada en la
+  BD compartida sin poblar configuraciones ni eventos de clientes. Incluye
+  identidad acotada, clave de deduplicacion, versiones de todas las politicas,
+  destino/grant, lease y respuesta resumida. No almacena payload, token, email,
+  telefono, IP, URL, valor economico, nombre de clinica o tratamiento. Las claves
+  de evento son hashes de identificadores, no datos anonimos. No borrar una
+  tabla poblada mediante rollback sin archivo explicito.
+- La rama nueva de `metaCapi.service` usa `metaWorkspaceSignalDelivery` y el
+  cliente Meta compartido. Mantiene el contrato anterior de las instalaciones
+  no migradas. Los eventos web independientes como ViewContent siguen fuera
+  de esta migracion y no se presentan como entregas CRM comprobadas.
+- Antes de reservar y antes de enviar se recargan clinica, configuraciones,
+  asignacion OAuth, cuenta y credencial. Una web de grupo requiere una sede
+  explicitamente incluida en `locations`. El destino debe estar definido en la
+  configuracion del anunciante; no se admite disfrazar el pixel/token global ni
+  completar una configuracion parcial con otro anunciante. Se preserva la
+  version de cada autorizacion web/grupo, no solamente la ultima consultada.
+- Consentimiento publicitario expreso por evento, seleccion vigente, activacion
+  y hito autorizado siguen siendo requisitos separados. QualifiedLead/Schedule
+  requieren la capacidad privada del CRM: un JSON publico no puede generarla.
+  El contrato admite el identificador nativo verificado internamente; su llamada
+  desde el ciclo de vida nativo queda pendiente de integracion.
+- Payload nuevo de lista cerrada: datos de matching hashed, sin metadatos
+  clinicos/economicos arbitrarios. Los hitos CRM no llevan URL ni datos del
+  navegador. Los eventos web conservan solo el origen HTTPS y el agente del
+  navegador, eliminando ruta y parametros; no se registran esos campos en la
+  tabla. El seguimiento propio no cambia. Esto es minimizacion tecnica, no una
+  certificacion de elegibilidad de una clinica/categoria ante Meta.
+- `accepted` significa `events_received: 1`, nunca conversion atribuida. Los
+  avisos son `warning`; rechazo, timeout/respuesta desconocida, proceso en curso
+  y cancelacion permanecen diferenciados. Mensajes crudos del proveedor se
+  descartan tambien en la telemetria del cliente CAPI.
+- Reserva transaccional corta antes del POST, lease de 90 s y timeout HTTP de
+  8 s. No bloquea SQL durante la red. Actualizacion final condicionada por lease.
+  Una entrega confirmada no se repite; colisiones de campana, fecha o destino
+  no cambian silenciosamente el evento. Una peticion repetida puede recuperar
+  un lease vencido usando la identidad original. El cliente comparte cuota y
+  pausa persistente, rechaza redirecciones y no hace reintentos HTTP ocultos.
+- **No hay aun un job nuevo de reintento CRM Meta**: esta tabla es registro de
+  entrega, no una cola completa. Falta encolar referencias al hito canonico y
+  reconstruir sus datos/autorizaciones en cada intento, sin guardar contactos
+  en el job. El receptor nativo existente conserva su propia cola. No hay un
+  cron nocturno que envie estos hitos ni se debe confundir con el refresco diario
+  de informes. Ese refresco no autoriza conversiones.
+- Salud consulta registros de las ultimas 24 h, sin llamadas al proveedor ni
+  escrituras. Solo cuenta la misma clinica/cuenta/campana/dataset y el grant y
+  politicas vigentes. Expone recibidos, avisos y sin confirmar en el detalle
+  existente. Una prueba de una campana no valida todo el grupo; sin entregas,
+  con otro grant o historia truncada no muestra OK. Limite conservador de
+  10000 registros por ambito; superar el limite conserva cobertura desconocida.
+  Google sigue pendiente de conectar a su propia evidencia de entrega.
+
+Referencias de contrato: [ServerEvent del SDK oficial](https://github.com/facebook/facebook-nodejs-business-sdk/blob/main/src/objects/serverside/server-event.js),
+[EventResponse](https://github.com/facebook/facebook-nodejs-business-sdk/blob/main/src/objects/serverside/event-response.js)
+y [ejemplo CRM oficial de Meta](https://github.com/facebook/Conversion-Leads-Salesforce-APEX).
+
+La activacion de clientes permanece cerrada. Antes del cierre global siguen
+pendientes las pruebas/autorizaciones ligadas a cada destino real, emisores y
+jobs CRM completos (incluida atribucion Meta web), Optimiza Google/Meta,
+configuracion independiente de paginas, metricas por anuncio y cambio de ruta
+canonica. Este avance no reduce ese alcance ni habilita cobros/publicidad.
+
+Verificacion backend: 360 pruebas de Campanas, conversiones Google y cliente
+Meta correctas. Incluyen rechazo de permisos revocados, cambios de ambito y
+version durante el envio, tokens/destinos globales, colisiones, lease perdido,
+timeouts, respuestas ambiguas, privacidad del payload/telemetria y migracion
+reentrante. Tras el QA de lectura, settings, pruebas y entregas nuevas siguen
+a cero en la BD compartida. No se envio ningun evento publicitario real.

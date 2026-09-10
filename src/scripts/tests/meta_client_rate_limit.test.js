@@ -119,3 +119,32 @@ test('page subscription writes respect the shared quota and never retry an ambig
     restores.reverse().forEach(restore => restore()); metaClient._test.resetState();
   }
 });
+
+test('conversion writes use the shared pause, reject redirects and redact provider messages', async () => {
+  metaClient._test.resetState(); let calls = 0; let paused = true; const logs = [];
+  const counter = { usageDate: new Date().toISOString().slice(0, 10), requestCount: 0, usagePct: 0, pauseUntil: null, metadata: {},
+    async update(patch) { Object.assign(this, patch); return this; }, async reload() { return this; } };
+  const restores = [
+    patchProperty(db.ApiUsageCounter, 'findOne', async () => paused ? { pauseUntil: new Date(Date.now() + 60000) } : null),
+    patchProperty(db.ApiUsageCounter, 'findOrCreate', async () => [counter, false]),
+    patchProperty(console, 'error', (...args) => logs.push(args)),
+    patchProperty(axios, 'post', async (url, body, options) => {
+      calls++; assert.ok(url.endsWith('/50/events')); assert.equal(options.maxRedirects, 0); assert.equal(body.data.length, 1);
+      throw Object.assign(new Error('private contact in provider error'), { response: { status: 400,
+        data: { error: { code: 4, type: 'private-type', fbtrace_id: 'private-trace', message: 'private-email' } } } });
+    }),
+  ];
+  const delay = process.env.METASYNC_REQUEST_DELAY_MS; process.env.METASYNC_REQUEST_DELAY_MS = '0';
+  try {
+    const send = () => metaClient.metaSendConversion('50', { data: [{ event_name: 'Lead' }] }, { accessToken: 'private-token', maxRetries: 3 });
+    await assert.rejects(send(), { code: 'META_RATE_LIMIT_PAUSED' }); assert.equal(calls, 0);
+    paused = false; metaClient._test.resetState();
+    await assert.rejects(send(), { code: 'META_RATE_LIMITED' }); assert.equal(calls, 1);
+    assert.doesNotMatch(JSON.stringify([logs, counter]), /private/);
+    assert.throws(() => metaClient.metaSendConversion('../me', { data: [{}] }, { accessToken: 'private' }), /invalid_meta_conversion_request/);
+    assert.throws(() => metaClient.metaSendConversion('50', { data: [{}, {}] }, { accessToken: 'private' }), /invalid_meta_conversion_request/);
+  } finally {
+    if (delay === undefined) delete process.env.METASYNC_REQUEST_DELAY_MS; else process.env.METASYNC_REQUEST_DELAY_MS = delay;
+    restores.reverse().forEach(restore => restore()); metaClient._test.resetState();
+  }
+});
