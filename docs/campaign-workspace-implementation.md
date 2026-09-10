@@ -538,3 +538,49 @@ de la web compartida sin seleccionar/autorizar el grupo.
   `campaign-workspace-meta-page-20260910` y `campaign-meta-page-20260910-verified`.
   La inspeccion manual corrigio el pie de confirmacion movil antes del pase final.
   No se han ejecutado cambios de suscripcion reales ni activado publicidad/senales.
+
+## Borrador De Servicio Y Hitos Del CRM
+
+- `PUT /campaign-workspace/preferences` guarda la eleccion de Medicion u Optimiza,
+  los hitos solicitados (`lead`, `contact`, `qualified_lead`, `schedule`) y los
+  limites propuestos de optimizacion. Es un BORRADOR, no una autorizacion activa.
+  No toca `IntakeConfig`, conversiones, recepcion, emisores, politicas ni anuncios.
+  Los presupuestos aceptados continuan como KPI: este borrador no habilita Purchase.
+- La migracion aditiva `20260910170000-add-campaign-workspace-preferences.js`
+  incorpora `CampaignWorkspaceSettings.preferences` JSON nullable. Aplicada
+  individualmente en la BD compartida y registrada en SequelizeMeta, sin ejecutar
+  otras migraciones ni actualizar configuraciones de clientes. El rollback rechaza
+  perder borradores poblados sin un archivo explicito previo.
+- Exige escritura sobre todo el ambito, actor autenticado, cuentas confirmadas,
+  version vigente y asignaciones OAuth aun validas. Bloquea propietario y setting
+  en transaccion; una nueva clinica del grupo requiere revisar la autorizacion.
+  Valida campos/eventos/limites conocidos y rechaza negative_keywords sin Google.
+  Audita `preferences_saved` en la misma transaccion. Guardado identico idempotente.
+- La UX permanece en el segundo paso. Elegir hitos o limites invalida la revision;
+  guardar actualiza solo configuracion/preparacion, sin recargar ni plegar el informe.
+  El tercer paso muestra el servicio elegido y requiere la misma version comprobada.
+  Ni frontend ni backend degradan silenciosamente un borrador con senales/Optimiza
+  a la activacion parcial de Medicion sin senales. El gate de despliegue sigue cerrado.
+- Los limites son preferencias solicitadas, no evidencia de un executor implementado.
+  Sigue pendiente comprobar compatibilidad/currency por cuenta, preparar y autorizar
+  los destinos Google/Meta, conectar los emisores y ejecutar Optimiza con esas guardas.
+  La autorizacion documentada de conversiones mejoradas es especifica por cuenta y
+  evento; OAuth o este borrador no la reemplazan. Se reutilizaran las APIs existentes
+  de conversiones, sin crear ni normalizar acciones publicitarias al guardar.
+- Correccion adicional: `loadWorkspacePreparation` pasa el scope autorizado al
+  resolvedor de evidencia nativa, igual que el informe. No cambia el receptor existente.
+- Verificacion: 292 pruebas backend `campaign_*.test.js`, 38 de frontend y
+  compilacion Angular completa correctas. Build DEV `7de02b12ae69ed49`,
+  10/09/2026 16:26:43 UTC; aviso previo de bundle inicial 4.58 MB frente a 3 MB.
+  Se reinicio solo `pm2-back-dev`; staging, gateway y preview conservan proceso.
+- Chromium autenticado: workspace real 58 comprobaciones/25 capturas; borradores
+  27/7; recepcion Meta 26/12. Cero errores JS y cero escrituras reales de negocio.
+  Las pruebas de guardar borrador/conflicto (tres PUT) y habilitar pagina (un POST)
+  se interceptan por completo en el navegador; NO son operaciones reales sobre
+  clientes/proveedores ni sustituyen una prueba autorizada de entrega. La lectura
+  SQL posterior confirma cero filas con preferences pobladas.
+  Evidencia en `/home/ubuntu/qa-evidence/`: `campaign-workspace-preferences-20260910`,
+  `campaign-preferences-20260910-final` y `campaign-meta-preferences-regression-20260910`.
+  Revisadas manualmente capturas de seleccion/limites, revision movil y Salud.
+  El runner distingue el area tactil expandida de Material de un desbordamiento
+  de texto; no se recorta el control para satisfacer una medicion incorrecta.

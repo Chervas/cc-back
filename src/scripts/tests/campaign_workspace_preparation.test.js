@@ -47,6 +47,12 @@ test('real mode inheritance is reused without exposing runtime credentials or ex
   assert.equal(result.receptionReady, true);
   assert.equal(JSON.stringify(result).includes('mode_contract'), false);
 });
+test('native evidence receives the same authorized group scope as the preparation request', async () => {
+  const f = fixture(); const scope = { groupId: 28, clinicIds: [1] };
+  let observed = null;
+  await f.read({ scope, loadEvidence: async options => { observed = options.scope; return f.state.evidence; } });
+  assert.deepEqual(observed, scope);
+});
 test('a review revision changes with settings or readiness but not with polling time', async () => {
   const f = fixture(); const first = await f.read();
   assert.equal((await f.read({ now: new Date('2026-09-10T15:00:00Z') })).revision, first.revision);

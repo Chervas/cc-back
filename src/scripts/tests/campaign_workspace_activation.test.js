@@ -71,6 +71,13 @@ test('signals cannot be activated before their own provider preparation is imple
   const f = fixture(); f.input.signals.enabled = true;
   await assert.rejects(f.run(), /workspace_signal_preparation_required/); assert.deepEqual(f.calls, []);
 });
+test('a saved request for optimization or signals cannot silently become measurement without signals', async () => {
+  for (const preferences of [{ mode: 'optimize', signals: { enabled: false } }, { mode: 'measurement', signals: { enabled: true } }]) {
+    const f = fixture(); f.setting.preferences = preferences;
+    await assert.rejects(f.run(), /workspace_preferences_mismatch/);
+    assert.deepEqual(f.calls, ['owner']); assert.equal(f.setting.activation, null);
+  }
+});
 test('stale version and stale review evidence fail before any write', async () => {
   const f = fixture(); f.input.expected_version = 1;
   await assert.rejects(f.run(), /workspace_version_conflict/); assert.deepEqual(f.calls, ['owner']);

@@ -41,7 +41,7 @@ async function loadWorkspacePreparation({ models, scope, now = new Date(), trans
   const inventory = await loadInventory({ models, scope, transaction });
   const campaigns = inventory.campaigns.filter(campaign => campaignIncluded(campaign, setting))
     .sort((a, b) => a.id.localeCompare(b.id));
-  const evidence = await loadEvidence({ models, campaigns, selectedClinics: inventory.selectedClinics, groups: inventory.groups, now, transaction });
+  const evidence = await loadEvidence({ models, campaigns, selectedClinics: inventory.selectedClinics, groups: inventory.groups, scope, now, transaction });
   const legacyScope = { assignment_scope: where.scope_type, clinic_id: where.scope_type === 'clinic' ? where.scope_id : null,
     group_id: scope.groupId || inventory.selectedClinics[0]?.grupoClinicaId || null, clinic_ids: scope.clinicIds };
   const existingMode = await resolveMode(legacyScope, {

@@ -34,6 +34,8 @@ async function activateWorkspaceMeasurement({ models, scope, actorId, input, now
     if (!await ownerModel.findByPk(where.scope_id, { transaction, lock: transaction.LOCK.UPDATE })) fail('scope_not_found', 404);
     const setting = await models.CampaignWorkspaceSetting.findOne({ where, transaction, lock: transaction.LOCK.UPDATE });
     if (!setting || Number(setting.version) !== input.expected_version) fail('workspace_version_conflict');
+    if (setting.preferences && (setting.preferences.mode !== input.mode
+      || setting.preferences.signals.enabled !== input.signals.enabled)) fail('workspace_preferences_mismatch');
     const intakeWhere = where.scope_type === 'group'
       ? { assignment_scope: 'group', group_id: where.scope_id }
       : { assignment_scope: 'clinic', clinic_id: where.scope_id };

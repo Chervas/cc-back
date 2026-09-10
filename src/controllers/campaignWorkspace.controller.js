@@ -12,6 +12,7 @@ const { assignWorkspaceCampaign } = require('../services/campaignWorkspaceAssign
 const { campaignReference, metaCampaignContext, refreshMetaCampaignDestinations } = require('../services/campaignWorkspaceMetaDestination.service');
 const { loadNativeFormEvidence } = require('../services/campaignWorkspaceNativeReception.service');
 const { requestPageReception, getPageReceptionJob } = require('../services/campaignWorkspaceMetaPage.service');
+const { saveWorkspacePreferences } = require('../services/campaignWorkspacePreferences.service');
 
 function createWorkspaceHandler({ models = db, resolveScope = resolveClinicScope,
   accessibleClinics = getAccessibleMarketingClinicIds, hasAccess = hasMarketingClinicScopeAccess,
@@ -42,7 +43,7 @@ function createWorkspaceConfigurationHandlers({ models = db, resolveScope = reso
   hasAccess = hasMarketingClinicScopeAccess, loadInventory = loadWorkspaceInventory, save = saveWorkspaceAccounts,
   prepare = loadWorkspacePreparation, activate = activateWorkspaceMeasurement, assign = assignWorkspaceCampaign,
   metaContext = metaCampaignContext, refreshMeta = refreshMetaCampaignDestinations, nativeEvidence = loadNativeFormEvidence,
-  requestMetaPage = requestPageReception, metaPageJob = getPageReceptionJob } = {}) {
+  requestMetaPage = requestPageReception, metaPageJob = getPageReceptionJob, savePreferences = saveWorkspacePreferences } = {}) {
   async function authorize(req, res, access) {
     const actorId = Number(req.userData?.userId);
     if (!Number.isSafeInteger(actorId) || actorId <= 0) { res.status(401).json({ success: false, error: 'unauthenticated' }); return null; }
@@ -58,6 +59,15 @@ function createWorkspaceConfigurationHandlers({ models = db, resolveScope = reso
     return { scope, actorId };
   }
   return {
+    preferences: async (req, res) => {
+      const context = await authorize(req, res, 'write');
+      if (!context) return;
+      try { return res.json(await savePreferences({ models, ...context, input: req.body, loadInventory })); }
+      catch (error) {
+        if (error.status >= 400 && error.status < 500) return res.status(error.status).json({ success: false, error: error.code });
+        throw error;
+      }
+    },
     requestMetaPage: async (req, res) => {
       const context = await authorize(req, res, 'write');
       if (!context) return;
@@ -161,4 +171,5 @@ exports.getMetaPreparation = asyncHandler(configurationHandlers.metaPreparation)
 exports.refreshMetaPreparation = asyncHandler(configurationHandlers.refreshMeta);
 exports.requestMetaPageReception = asyncHandler(configurationHandlers.requestMetaPage);
 exports.getMetaPageReceptionJob = asyncHandler(configurationHandlers.metaPageJob);
+exports.savePreferences = asyncHandler(configurationHandlers.preferences);
 exports.createWorkspaceConfigurationHandlers = createWorkspaceConfigurationHandlers;

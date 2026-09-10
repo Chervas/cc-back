@@ -26,7 +26,7 @@ function settingScope(scope) {
 function publicSettings(row, scope) {
   const value = row?.get ? row.get({ plain: true }) : row;
   return { scope: settingScope(scope), version: value?.version || 0, accounts: value?.accounts || [],
-    activation: value?.activation || null, updatedAt: value?.updated_at || null };
+    activation: value?.activation || null, preferences: value?.preferences || null, updatedAt: value?.updated_at || null };
 }
 function canonicalAccounts(accounts) {
   return accounts.map(account => ({ ...account, campaign_ids: [...account.campaign_ids].sort() }))

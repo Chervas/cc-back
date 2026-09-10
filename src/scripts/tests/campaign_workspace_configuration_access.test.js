@@ -18,10 +18,18 @@ function harness(options = {}) {
 }
 
 test('configuration queries and commands require an authenticated session', async () => {
-  for (const method of ['get', 'put', 'preparation', 'activate', 'assign', 'metaPreparation', 'refreshMeta', 'requestMetaPage', 'metaPageJob']) {
+  for (const method of ['get', 'put', 'preparation', 'activate', 'assign', 'metaPreparation', 'refreshMeta', 'requestMetaPage', 'metaPageJob', 'preferences']) {
     const h = harness(); await h.run(method, { userData: null });
     assert.equal(h.res.statusCode, 401); assert.equal(h.calls.length, 0);
   }
+});
+test('preferences require full-scope write access and use the authenticated actor', async () => {
+  const forbidden = harness({ hasAccess: async input => input.access === 'read', savePreferences: () => assert.fail('cannot save') });
+  await forbidden.run('preferences'); assert.equal(forbidden.res.statusCode, 403);
+  const allowed = harness({ savePreferences: async input => {
+    assert.equal(input.actorId, 7); assert.deepEqual(input.scope.clinicIds, [1, 2]); return { success: true };
+  } });
+  await allowed.run('preferences', { body: { actorId: 99 } }); assert.equal(allowed.res.statusCode, 200);
 });
 test('page reception commands require full write scope, status only needs read scope', async () => {
   const forbidden = harness({ hasAccess: async input => input.access === 'read', requestMetaPage: () => assert.fail('forbidden command') });

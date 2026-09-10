@@ -213,6 +213,7 @@ router.put('/campaign-workspace/assignment', campaignWorkspaceController.assignC
 router.get('/campaign-workspace/meta-preparation', campaignWorkspaceController.getMetaPreparation);
 router.post('/campaign-workspace/meta-preparation/check', campaignWorkspaceController.refreshMetaPreparation);
 router.post('/campaign-workspace/meta-preparation/page', campaignWorkspaceController.requestMetaPageReception);
+router.put('/campaign-workspace/preferences', campaignWorkspaceController.savePreferences);
 router.get('/campaign-workspace/meta-preparation/jobs/:jobId', campaignWorkspaceController.getMetaPageReceptionJob);
 router.get('/campaign-onboarding/meta-pixels', campaignOnboardingController.listMetaPixels);
 router.get('/campaign-onboarding/external-campaigns', campaignOnboardingController.listExternalCampaigns);

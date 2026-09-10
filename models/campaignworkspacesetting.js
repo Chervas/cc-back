@@ -7,6 +7,7 @@ module.exports = (sequelize, DataTypes) => sequelize.define('CampaignWorkspaceSe
   version: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false, defaultValue: 1 },
   accounts: { type: DataTypes.JSON, allowNull: false },
   activation: { type: DataTypes.JSON, allowNull: true },
+  preferences: { type: DataTypes.JSON, allowNull: true },
   updated_by_user_id: { type: DataTypes.INTEGER, allowNull: false },
 }, {
   tableName: 'CampaignWorkspaceSettings', createdAt: 'created_at', updatedAt: 'updated_at',
