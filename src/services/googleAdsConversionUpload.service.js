@@ -13,6 +13,7 @@ const {
 } = require('./googleDataManagerConversion.service');
 const { resolveScopedGoogleAdsRuntime } = require('./googleAdsScopedRuntime.service');
 const { extractGoogleLeadIdentity } = require('../lib/google-lead-routing');
+const { resolveWorkspaceSignalPolicy } = require('./campaignWorkspaceSignalPolicy.service');
 
 const GOOGLE_DATETIME_REGEX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/;
 
@@ -825,6 +826,8 @@ function resolveUserDataPolicy(googleConfig = {}, eventConfig = {}, options = {}
 
 async function uploadGoogleConversionDestination({
   cfgRecord,
+  signalPolicyRecord = null,
+  crmEventSource = null,
   googleAdsConfig,
   eventConfig: suppliedEventConfig = null,
   eventName,
@@ -1026,6 +1029,17 @@ async function uploadGoogleConversionDestination({
     || (requiresExplicitAdvertisingConsent && consentStatus !== 'GRANTED')
   ) return skip('consent_not_granted');
   if (!scope.clinicId && !scope.groupId) return skip('scope_required');
+
+  const workspacePolicy = await (dependencies.resolveWorkspaceSignalPolicy || resolveWorkspaceSignalPolicy)({
+    records: [cfgRecord, signalPolicyRecord], provider: 'google_ads', accountId: eventConfig.customer_id,
+    campaignId: extractGoogleLeadIdentity(customData).campaignId, eventName: eventConfig.event_name,
+    crmEventSource,
+  });
+  if (workspacePolicy.applicable) {
+    auditBase.requestMetadata.workspace_policy_version = workspacePolicy.version;
+    auditBase.requestMetadata.workspace_policy_reason = workspacePolicy.reason;
+    if (!workspacePolicy.allowed) return skip(workspacePolicy.reason);
+  }
 
   const existingAudit = await auditModel.findOne({ where: { dedupeKey } });
   if (['accepted', 'succeeded', 'partial_success'].includes(existingAudit?.status)) {

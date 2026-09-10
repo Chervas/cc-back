@@ -6,6 +6,7 @@ const { assessConsentMeasurementReadiness, resolveWebMeasurementMarketingState }
 const { buildWorkspaceHealth } = require('./campaignWorkspaceHealth.service');
 const { campaignIncluded } = require('./campaignWorkspaceSettings.service');
 const { loadFormReceiptEvidence } = require('./campaignWorkspaceReception.service');
+const { loadBudgetCampaignAttribution } = require('./campaignEconomicAttribution.service');
 
 const LEAD_FIELDS = ['id', 'clinica_id', 'source', 'channel', 'utm_source', 'utm_campaign', 'source_detail', 'google_ads_customer_id', 'google_ads_campaign_id', 'created_at'];
 const GOOGLE_MAPPING_FIELDS = ['id', 'customerId', 'descriptiveName', 'currencyCode', 'clinicaId', 'grupoClinicaId', 'assignmentScope', 'lastSyncedAt'];
@@ -14,7 +15,7 @@ const META_MAPPING_FIELDS = ['id', 'metaAssetId', 'metaAssetName', 'clinicaId', 
 async function loadWorkspaceInventory({ models, scope, transaction = null }) {
   if (!scope.clinicIds?.length) throw Object.assign(new Error('empty_scope'), { status: 400 });
   const selectedClinics = await models.Clinica.findAll({ where: { id_clinica: { [Op.in]: scope.clinicIds } },
-    attributes: ['id_clinica', 'grupoClinicaId'], raw: true, transaction });
+    attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica', 'estado_clinica'], raw: true, transaction });
   const groups = [...new Set(selectedClinics.map(row => row.grupoClinicaId).filter(Boolean))];
   const groupMembers = groups.length ? await models.Clinica.findAll({ where: { grupoClinicaId: { [Op.in]: groups } },
     attributes: ['id_clinica', 'grupoClinicaId'], raw: true, transaction }) : [];
@@ -122,7 +123,8 @@ async function loadCampaignWorkspace({ models, scope, days, now = new Date() }) 
   if (olderLeadIds.length) leads.push(...await models.LeadIntake.findAll({ where: { id: { [Op.in]: olderLeadIds },
     clinica_id: { [Op.in]: scope.clinicIds } }, attributes: LEAD_FIELDS, raw: true }));
   const ads = await loadWorkspaceAds({ models, googleWhere, metaCampaigns, dateWhere });
-  const metrics = aggregateReport({ campaigns, facts, leads, appointments, ads, period, now });
+  const budgetAttribution = await loadBudgetCampaignAttribution({ models, campaigns, period });
+  const metrics = aggregateReport({ campaigns, facts, leads, appointments, ads, budgetAttribution, period, now });
   const evidence = await loadWebEvidence({ models, campaigns, selectedClinics, groups, now });
   const report = buildWorkspaceHealth(metrics, evidence, now);
   return { success: true, version: 1, scope: { clinicIds: scope.clinicIds, groupId: scope.groupId || null },
@@ -131,13 +133,13 @@ async function loadCampaignWorkspace({ models, scope, days, now = new Date() }) 
   };
 }
 
-async function loadWebEvidence({ models, campaigns, selectedClinics, groups, now }) {
-  const receipts = await loadFormReceiptEvidence({ models, campaigns, now });
+async function loadWebEvidence({ models, campaigns, selectedClinics, groups, now, transaction = null }) {
+  const receipts = await loadFormReceiptEvidence({ models, campaigns, now, transaction });
   const ids = selectedClinics.map(row => row.id_clinica);
   const records = await models.IntakeConfig.findAll({ where: { [Op.or]: [
     { assignment_scope: 'clinic', clinic_id: { [Op.in]: ids } },
     ...(groups.length ? [{ assignment_scope: 'group', group_id: { [Op.in]: groups } }] : []),
-  ] }, raw: true });
+  ] }, raw: true, transaction });
   const byClinic = new Map();
   for (const clinic of selectedClinics) {
     const scope = { assignment_scope: 'clinic', clinic_id: clinic.id_clinica, group_id: clinic.grupoClinicaId };
@@ -162,6 +164,7 @@ async function loadWebEvidence({ models, campaigns, selectedClinics, groups, now
       : 'Falta completar la comprobación del aviso, las páginas legales o las señales de consentimiento.';
     const key = destinationsCovered ? `intake:${state.record?.id || campaign.clinicId}` : campaign.id;
     evidence.set(campaign.id, {
+      configurationScope: state.record ? { scope_type: state.record.assignment_scope, scope_id: Number(state.record.assignment_scope === 'group' ? state.record.group_id : state.record.clinic_id) } : null,
       privacy: { checked: true, ready, detail, key },
       // An installed snippet is not a successful reception test. Never promote it to reception-ready here.
       reception: !ready || state.record?.config?.features?.form_intercept_enabled !== true
@@ -209,4 +212,4 @@ async function loadWorkspaceAds({ models, googleWhere, metaCampaigns, dateWhere 
   return ads;
 }
 
-module.exports = { loadCampaignWorkspace, loadWorkspaceInventory, loadWorkspaceAds, selectedByWorkspace, workspaceAccounts };
+module.exports = { loadCampaignWorkspace, loadWorkspaceInventory, loadWorkspaceAds, loadWebEvidence, selectedByWorkspace, workspaceAccounts };

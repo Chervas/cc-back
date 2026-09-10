@@ -207,6 +207,9 @@ router.get('/campaign-onboarding/bootstrap', campaignOnboardingController.getCam
 router.get('/campaign-workspace', campaignWorkspaceController.getWorkspace);
 router.get('/campaign-workspace/configuration', campaignWorkspaceController.getConfiguration);
 router.put('/campaign-workspace/configuration', campaignWorkspaceController.saveAccounts);
+router.get('/campaign-workspace/preparation', campaignWorkspaceController.getPreparation);
+router.put('/campaign-workspace/activation', campaignWorkspaceController.activateMeasurement);
+router.put('/campaign-workspace/assignment', campaignWorkspaceController.assignCampaign);
 router.get('/campaign-onboarding/meta-pixels', campaignOnboardingController.listMetaPixels);
 router.get('/campaign-onboarding/external-campaigns', campaignOnboardingController.listExternalCampaigns);
 router.get('/strategies/catalog', campaignOnboardingController.listStrategyCatalog);

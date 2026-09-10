@@ -153,7 +153,114 @@ de la web compartida sin seleccionar/autorizar el grupo.
 - QA responsive y navegacion real en Chromium, estados inicial/configurado,
   comparativa temporal, cambio de clinica/grupo, permisos y errores recuperables.
 
+## Integracion Y Guardas De Senales
+
+- Ruta temporal de QA en DEV: `/marketing/objetivos/integracion-campanas`.
+  No esta enlazada en el menu ni sustituye la ruta canonica. Usa APIs reales,
+  incluido el calculo gestionado, la seleccion de cuentas y la preparacion web.
+- El contenedor usa el inventario de clinicas de `RoleService` y el selector
+  global. `filteredClinics` del selector no sirve como inventario inicial: solo
+  se rellena al elegir un grupo. Esto se detecto con un reload real en Chromium.
+- La grafica aprobada es ahora un componente compartido, sin depender de datos
+  del mock. Admite las fechas ISO reales y las numericas de la referencia.
+  Leads/citas sin campana asignada permanecen `null`, tambien en los KPI, y no
+  producen una grafica falsa a cero. Los anuncios se paginan de diez en diez.
+- La preparacion web conserva URLs legales relativas a raiz, compatibles con
+  el editor y con varios dominios compartidos. Rechaza hosts relativos `//`,
+  barras inversas, controles, esquemas ejecutables y credenciales en las URLs.
+- `campaignWorkspaceSignalPolicy.service` consulta la autorizacion vigente en
+  cada envio, sin cache de sesion. La seleccion actual de cuentas Y el snapshot
+  autorizado limitan cuentas, campanas, incorporacion futura e hitos. Ampliar la
+  seleccion no amplifica una autorizacion anterior; la revocacion es inmediata.
+- Solo se aplica a configuraciones que tengan una referencia explicita
+  `config.campaigns.workspace_policy`, ligada al setting y su scope. Una
+  referencia invalida, inexistente o ajena bloquea el envio. Las configuraciones
+  anteriores conservan su comportamiento y no generan consultas adicionales.
+- Google registra el motivo/version en su auditoria existente. Meta requiere
+  consentimiento explicito para los eventos CRM del workspace y no usa pixel ni
+  token global como respaldo de un workspace migrado, tampoco en ViewContent.
+- Hay un comando inicial de medicion, descrito abajo, pero permanece bloqueado en
+  el despliegue y NO habilita senales ni Optimiza. La base es compartida con
+  staging: no basta con que solo el runtime nuevo entienda un flag.
+- Los hitos QualifiedLead, Schedule y Purchase del workspace exigen una capacidad
+  interna del lifecycle CRM. Un JSON publico no puede fabricarla. Lead/Contact
+  conservan la recepcion web; el tracking de visitas es independiente. Tanto la
+  politica del registro web como la del anunciante limitan un envio cuando son
+  registros distintos. Quedan pendientes la identidad Meta canonica, payload minimo,
+  elegibilidad del destino y auditoria durable de entrega Meta. El sender legacy
+  no prueba entrega por ausencia de excepcion. Estas guardas no se presentan
+  como una implementacion completa de Medicion ni de Optimiza.
+
+## Preparacion Y Activacion Inicial
+
+- `campaignMode.service.js` extrae, sin reinventar sus reglas, la resolucion de
+  modo anterior: IntakeConfig de clinica/grupo, onboarding completado y fallback
+  de estrategias activas con readiness verificada. El controller anterior usa el
+  mismo servicio; se conserva su contrato de tests y el historial no se borra.
+- `GET /api/marketing/campaign-workspace/preparation` solo lee el scope permitido.
+  Distingue seleccion confirmada, clinica pendiente, destino desconocido,
+  instalacion/consentimiento y recepcion real. OAuth por si solo no verifica los
+  formularios nativos. Un SHA-256 liga la pantalla de revision a las cuentas,
+  comprobaciones y registro Intake vigentes; no expone HMAC ni credenciales.
+- El contenedor de integracion tiene los tres pasos y conserva el paso en la URL.
+  No cambia los interiores de los hubs ni sustituye aun la ruta canonica.
+- `PUT /api/marketing/campaign-workspace/activation` es una base limitada a
+  `mode=measurement`, `signals.enabled=false` y confirmacion expresa. Exige
+  version/revision vigente, recepcion comprobada, permiso sobre todo el grupo y
+  ausencia de modos/politicas de optimizacion incompatibles. Una web compartida
+  no puede migrarse desde una clinica individual.
+- La transaccion bloquea propietario, setting e Intake, escribe la referencia
+  de politica, el contrato connect_only sin autorizacion de uploads y la
+  auditoria. Conserva los ajustes de proveedor/visitas y las demas funciones web:
+  el permiso CRM se controla en un punto, no apagando toda la integracion.
+  El onboarding anterior rechaza scopes ya migrados para no borrar sus permisos.
+- `CAMPAIGN_WORKSPACE_ACTIVATION_ENABLED` debe permanecer ausente/false hasta
+  cerrar y verificar TODOS los emisores y workers que comparten la base. No se
+  ha habilitado en DEV ni en staging. El guard se evalua en servidor antes de
+  cualquier escritura; no es un parametro que pueda mandar el navegador.
+- No esta terminado el objetivo: faltan incorporacion/asignacion nativa completa,
+  preparacion y autorizacion de conversiones Google/Meta, entrega auditable Meta,
+  Optimiza real en ambos proveedores y atribucion economica/anuncio. Esta base
+  no debe publicitarse como un flujo completo ni activarse para clientes todavia.
+- Regresion de Web: 400 pruebas OK, mas contratos WordPress/Ed25519/provisionador.
+  Se corrigio un test antiguo que no aislaba `cleanupOverviewCache`: ahora simula
+  tambien ese paso y prohibe cualquier consulta SQL durante la prueba de limpieza.
+
 ## Verificacion Inicial 2026-09-10
+
+- Preparacion y activacion limitada: regresion completa `npm run test:marketing`
+  con 400 pruebas Web y 248 de Campanas OK. Build `bedd4440106b05d2`:
+  Chromium autenticado, 51 comprobaciones y 23 capturas, cero errores JS y
+  cero escrituras de negocio. Evidencia:
+  `/home/ubuntu/qa-evidence/campaign-workspace-preparation-20260910/`.
+
+## Confirmacion De Clinica En Cuenta Compartida
+
+- `PUT /api/marketing/campaign-workspace/assignment` confirma SOLO la primera
+  asignacion de una campana externa visible a una clinica activa del grupo.
+  No crea Campaign, Campana, CampaignRequest ni targets internos obligatorios.
+- Requiere permiso de escritura en todas las clinicas del grupo, version de
+  seleccion vigente, cuenta OAuth autorizada y campana incluida en el inventario
+  autorizado. Revalida los miembros del grupo y bloquea filas en la transaccion.
+- Reutiliza `saveAssignmentWithinScope` y la auditoria canonica
+  `ExternalCampaignAssignmentAudit`. Una decision existente, archivada,
+  concurrente o de otro grupo nunca se mueve/reactiva implicitamente. Tambien
+  detecta identificadores de cuenta antiguos con formato.
+- El dialogo muestra solo clinicas elegibles del alcance. Elegir no guarda:
+  requiere `Confirmar clinica`. Cerrar vuelve al mismo paso y recarga evidencia.
+- Asignar no equivale a recepcion lista. Google ya consume las asignaciones
+  revisadas en su enrutamiento; completar el enrutamiento nativo Meta, el acceso
+  a los formularios y la prueba de recepcion sigue siendo trabajo pendiente.
+- Contratos aislados: 27 pruebas entre asignacion, permisos y preparacion OK;
+  ninguna asignacion de clientes guardada durante el QA.
+
+## Historial De Verificacion
+
+- Confirmacion de clinica: build `dc8934c8caea70e6`, 57 comprobaciones y
+  25 capturas Chromium, 25 respuestas API 200, cero errores JS y escrituras.
+  Dialogo verificado en 1440 y 390 px, seleccion explicita y retorno al mismo
+  paso. Evidencia `/home/ubuntu/qa-evidence/campaign-workspace-assignment-20260910/`.
+  Regresion de campanas tras la asignacion: 258 pruebas OK.
 
 - Bateria existente `npm run test:marketing-campaigns`: 141 pruebas OK despues
   de extraer la validacion de consentimiento (antes de los ultimos tests nuevos).
@@ -184,3 +291,53 @@ de la web compartida sin seleccionar/autorizar el grupo.
 - Inventario Meta: los anuncios sin insights siguen visibles, sin inventar gasto.
   La frescura usa `updated_at` de sincronizacion, no `updated_time` de edicion en
   Meta. Tests de inventario/metricas comprueban la fusion y estados rechazados.
+- Primer build completo publicado solo en DEV y backend DEV reiniciado para
+  integrar las APIs nuevas. Staging y gateway no se han reiniciado ni promovido.
+- Chromium autenticado con el login real: 41 comprobaciones, 20 capturas,
+  respuestas workspace 200, cero errores JS y cero escrituras de negocio.
+  Incluye grupo Arriaga, agregado total tras reload, navegacion con origen,
+  dialogos web/cuentas/gestionado y grafica real a 1440/1024/390 px, cuadricula
+  a ras y tooltip visible DD/mes/YYYY. Evidencia:
+  `/home/ubuntu/qa-evidence/campaign-workspace-live-20260910-final/`.
+- Regresion de campanas: 220 pruebas OK antes de los ajustes finales. Contratos
+  posteriores de recepcion/URLs y Meta: 19 OK; informe/Salud: 29 OK. Front:
+  27 tests, 15 comprobaciones de presentacion y tres contratos de ciclo de vida
+  del dialogo/paginacion OK. Compilacion Angular aislada y build completo OK.
+- Revalidacion del build DEV `e07e8b383f638f6e`: 44 comprobaciones, 21 capturas,
+  cero errores JS y cero escrituras en
+  `/home/ubuntu/qa-evidence/campaign-workspace-live-20260910-verified/`.
+  Incluye estados de anuncio en castellano y tabla movil. El caso real tenia ocho
+  anuncios; la navegacion de mas de diez se cubre en el contrato de paginacion.
+
+## Presupuestos Aceptados: Fuente Y Limites
+
+- `campaignEconomicAttribution.service.js` es el unico punto de enlace del
+  informe con `EconomicBudget.accepted_amount`. Lee presupuestos actualmente
+  `accepted` o `partially_accepted`, por `responded_at` en los dos periodos
+  comparados, sin consultar precios de tratamientos ni importes cobrados.
+- Enlace real: presupuesto -> (clinica, paciente) -> cita con `lead_intake_id`
+  -> interesado con cuenta/campana canonica. La cita y el lead deben preceder
+  la aceptacion; se excluyen citas canceladas, reprogramadas o provisionales.
+  La cita puede ser anterior al periodo del informe.
+- Un presupuesto se cuenta una vez por su ID, aunque existan varias citas o
+  varios leads de esa misma campana. Dos campanas, un origen desconocido o
+  identidades contradictorias se excluyen; no se decide por ultimo contacto,
+  nombre/UTM, precio del catalogo ni reparto proporcional.
+- Se suma en centimos y se presenta en EUR, moneda del dominio economico actual,
+  independientemente de la moneda de inversion publicitaria. Son presupuestos,
+  no ingresos cobrados. Se usa la aceptacion vigente, no una reconstruccion de
+  todas las versiones historicas que hayan sido anuladas o reemplazadas.
+- De momento solo Google tiene los campos canonicos en LeadIntake. Meta y los
+  agregados que la incluyan conservan `null`, no cero. Esto no cierra la tarea de
+  atribucion: faltan la identidad Meta y el nivel anuncio. El servidor devuelve
+  cobertura agregada, nunca datos de pacientes ni lineas de tratamientos.
+- Contratos: 10 casos nuevos mas 21 del informe OK; frontend comprueba moneda
+  independiente, comparacion real y explicacion cuando falta atribucion.
+- Verificacion integrada final de este avance: Campanas 268 pruebas OK;
+  frontend 35 tests (incluyen 15 comprobaciones de presentacion), ngc y build
+  `f8e9afaa76387f39` OK. Chromium autenticado: 58 comprobaciones, 25 capturas,
+  25 respuestas workspace 200, cero errores JS y cero escrituras de negocio.
+  Evidencia `/home/ubuntu/qa-evidence/campaign-workspace-budget-20260910-retry/`.
+  Un primer arranque inmediatamente posterior al reinicio agoto el timeout
+  antes de cargar la vista; quedo capturado en el directorio sin `-retry`.
+  La repeticion completa y los reloads posteriores pasaron, sin ocultar ese fallo.

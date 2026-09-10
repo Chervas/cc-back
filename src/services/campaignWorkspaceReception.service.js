@@ -18,7 +18,7 @@ function destinationKey(value) {
   } catch { return null; }
 }
 
-async function loadFormReceiptEvidence({ models, campaigns, now = new Date() }) {
+async function loadFormReceiptEvidence({ models, campaigns, now = new Date(), transaction = null }) {
   const eligible = campaigns.filter(campaign => campaign.assigned && campaign.destination === 'web');
   if (!eligible.length) return new Map();
   const clinicIds = [...new Set(eligible.map(campaign => campaign.clinicId))];
@@ -29,7 +29,7 @@ async function loadFormReceiptEvidence({ models, campaigns, now = new Date() }) 
     } },
     attributes: ['clinic_id', 'page_url', 'created_at'],
     include: [{ model: models.LeadIntake, as: 'leadIntake', required: true, attributes: ['clinica_id'],
-      where: { clinica_id: { [Op.in]: clinicIds } } }], raw: true,
+      where: { clinica_id: { [Op.in]: clinicIds } } }], raw: true, transaction,
   });
   const receipts = new Map();
   for (const row of rows) {

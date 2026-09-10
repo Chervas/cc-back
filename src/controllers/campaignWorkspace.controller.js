@@ -6,6 +6,9 @@ const { resolveClinicScope } = require('../lib/clinicScope');
 const { getAccessibleMarketingClinicIds, hasMarketingClinicScopeAccess } = require('../lib/marketingScopeAccess');
 const { loadCampaignWorkspace, loadWorkspaceInventory } = require('../services/campaignWorkspace.service');
 const { settingScope, publicSettings, saveWorkspaceAccounts } = require('../services/campaignWorkspaceSettings.service');
+const { loadWorkspacePreparation } = require('../services/campaignWorkspacePreparation.service');
+const { activateWorkspaceMeasurement } = require('../services/campaignWorkspaceActivation.service');
+const { assignWorkspaceCampaign } = require('../services/campaignWorkspaceAssignment.service');
 
 function createWorkspaceHandler({ models = db, resolveScope = resolveClinicScope,
   accessibleClinics = getAccessibleMarketingClinicIds, hasAccess = hasMarketingClinicScopeAccess,
@@ -33,7 +36,8 @@ exports.getWorkspace = asyncHandler(createWorkspaceHandler());
 exports.createWorkspaceHandler = createWorkspaceHandler;
 
 function createWorkspaceConfigurationHandlers({ models = db, resolveScope = resolveClinicScope,
-  hasAccess = hasMarketingClinicScopeAccess, loadInventory = loadWorkspaceInventory, save = saveWorkspaceAccounts } = {}) {
+  hasAccess = hasMarketingClinicScopeAccess, loadInventory = loadWorkspaceInventory, save = saveWorkspaceAccounts,
+  prepare = loadWorkspacePreparation, activate = activateWorkspaceMeasurement, assign = assignWorkspaceCampaign } = {}) {
   async function authorize(req, res, access) {
     const actorId = Number(req.userData?.userId);
     if (!Number.isSafeInteger(actorId) || actorId <= 0) { res.status(401).json({ success: false, error: 'unauthenticated' }); return null; }
@@ -49,6 +53,30 @@ function createWorkspaceConfigurationHandlers({ models = db, resolveScope = reso
     return { scope, actorId };
   }
   return {
+    assign: async (req, res) => {
+      const context = await authorize(req, res, 'write');
+      if (!context) return;
+      try { return res.json(await assign({ models, ...context, input: req.body })); }
+      catch (error) {
+        const status = error.status || error.httpStatus;
+        if (status >= 400 && status < 500) return res.status(status).json({ success: false, error: error.code });
+        throw error;
+      }
+    },
+    activate: async (req, res) => {
+      const context = await authorize(req, res, 'write');
+      if (!context) return;
+      try { return res.json(await activate({ models, ...context, input: req.body })); }
+      catch (error) {
+        if (error.status >= 400 && error.status < 500) return res.status(error.status).json({ success: false, error: error.code });
+        throw error;
+      }
+    },
+    preparation: async (req, res) => {
+      const context = await authorize(req, res, 'read');
+      if (!context) return;
+      return res.json(await prepare({ models, scope: context.scope, loadInventory }));
+    },
     get: async (req, res) => {
       const context = await authorize(req, res, 'read');
       if (!context) return;
@@ -75,4 +103,7 @@ function createWorkspaceConfigurationHandlers({ models = db, resolveScope = reso
 const configurationHandlers = createWorkspaceConfigurationHandlers();
 exports.getConfiguration = asyncHandler(configurationHandlers.get);
 exports.saveAccounts = asyncHandler(configurationHandlers.put);
+exports.getPreparation = asyncHandler(configurationHandlers.preparation);
+exports.activateMeasurement = asyncHandler(configurationHandlers.activate);
+exports.assignCampaign = asyncHandler(configurationHandlers.assign);
 exports.createWorkspaceConfigurationHandlers = createWorkspaceConfigurationHandlers;

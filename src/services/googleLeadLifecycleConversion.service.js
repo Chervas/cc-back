@@ -1,6 +1,7 @@
 'use strict';
 
 const db = require('../../models');
+const { CRM_MILESTONE_SOURCE } = require('./campaignWorkspaceSignalPolicy.service');
 const {
   maybeUploadGoogleConversion,
   normalizeGoogleConsent,
@@ -152,6 +153,7 @@ async function maybeUploadLeadLifecycleConversion({
     cfgRecord: resolved.config,
     googleAdsConfig,
     ...payload,
+    crmEventSource: CRM_MILESTONE_SOURCE,
     clinicId: resolved.clinicId,
     groupId: resolved.groupId,
     assignmentScope: resolved.config.assignment_scope === 'group' ? 'group' : 'clinic',

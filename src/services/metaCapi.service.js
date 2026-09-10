@@ -2,6 +2,7 @@
 const axios = require('axios');
 const crypto = require('crypto');
 const { normalizePhoneDigits } = require('../lib/phone');
+const { resolveWorkspaceSignalPolicy } = require('./campaignWorkspaceSignalPolicy.service');
 
 const DEFAULT_PIXEL_ID = process.env.META_PIXEL_ID;
 const DEFAULT_CAPI_TOKEN = process.env.META_CAPI_TOKEN;
@@ -75,8 +76,23 @@ async function sendMetaEvent({
   currency = 'EUR',
   userData,
   pixelId = null,
-  accessToken = null
+  accessToken = null,
+  signalPolicyRecord = null,
+  webPolicyRecord = null,
+  crmEventSource = null,
+  adAccountId = null,
+  campaignId = null,
+  advertisingConsent = null
 }) {
+  const workspacePolicy = await resolveWorkspaceSignalPolicy({ records: [webPolicyRecord, signalPolicyRecord], provider: 'meta_ads',
+    accountId: adAccountId, campaignId, eventName, crmEventSource });
+  const workspaceDestination = [webPolicyRecord, signalPolicyRecord].some(record => Object.prototype.hasOwnProperty.call(record?.config?.campaigns || {}, 'workspace_policy'));
+  if (workspacePolicy.applicable) {
+    if (!workspacePolicy.allowed) return { sent: false, reason: workspacePolicy.reason };
+    if (advertisingConsent !== true) return { sent: false, reason: 'consent_not_granted' };
+    if (!pixelId || !accessToken) return { sent: false, reason: 'workspace_meta_destination_required' };
+  }
+  if (workspaceDestination && (!pixelId || !accessToken)) return { sent: false, reason: 'workspace_meta_destination_required' };
   if (!(pixelId || DEFAULT_PIXEL_ID) || !(accessToken || DEFAULT_CAPI_TOKEN)) return;
 
   const data = [{

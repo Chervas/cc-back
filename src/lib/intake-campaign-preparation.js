@@ -37,6 +37,8 @@ function validatePreparation(body) {
   if (!validate(body)) throw error('intake_preparation_invalid');
   if (body.consent_provider === 'external_cmp' && !body.external_cmp_provider) throw error('intake_external_cmp_required');
   for (const value of Object.values(body.legal_urls)) {
+    // Root-relative legal pages are shared across domains by the existing web editor.
+    if (/^\/(?![\/\\])[^\\\x00-\x20]*$/.test(value.trim())) continue;
     let url;
     try { url = new URL(value); } catch { throw error('intake_legal_url_invalid'); }
     if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) throw error('intake_legal_url_invalid');

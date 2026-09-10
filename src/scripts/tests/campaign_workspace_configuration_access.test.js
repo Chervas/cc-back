@@ -18,7 +18,7 @@ function harness(options = {}) {
 }
 
 test('configuration queries and commands require an authenticated session', async () => {
-  for (const method of ['get', 'put']) {
+  for (const method of ['get', 'put', 'preparation', 'activate', 'assign']) {
     const h = harness(); await h.run(method, { userData: null });
     assert.equal(h.res.statusCode, 401); assert.equal(h.calls.length, 0);
   }
@@ -54,4 +54,32 @@ test('save uses the authenticated actor and resolved scope, never body-supplied 
   const h = harness(); await h.run('put', { body: { actorId: 999, scope: '9' } });
   const command = h.calls.find(([type]) => type === 'save')[1];
   assert.equal(command.actorId, 7); assert.deepEqual(command.scope.clinicIds, [1, 2]);
+});
+test('preparation is read-only and protected by the full resolved scope', async () => {
+  const reads = [];
+  const h = harness({ prepare: async input => { reads.push(input); return { success: true, receptionReady: false }; } });
+  await h.run('preparation'); assert.equal(h.res.statusCode, 200);
+  assert.deepEqual(reads[0].scope.clinicIds, [1, 2]); assert.equal(h.res.headers['Cache-Control'], 'private, no-store');
+});
+test('activation requires every group member to be writable before invoking the command', async () => {
+  const h = harness({ hasAccess: async input => input.access === 'read', activate: () => assert.fail('forbidden command') });
+  await h.run('activate'); assert.equal(h.res.statusCode, 403);
+});
+test('campaign assignment requires full-group write access and authenticated ownership', async () => {
+  const forbidden = harness({ hasAccess: async () => false, assign: () => assert.fail('forbidden command') });
+  await forbidden.run('assign'); assert.equal(forbidden.res.statusCode, 403);
+  const allowed = harness({ assign: async input => {
+    assert.equal(input.actorId, 7); assert.deepEqual(input.scope.clinicIds, [1, 2]);
+    throw Object.assign(new Error('changed'), { httpStatus: 409, code: 'workspace_assignment_already_reviewed' });
+  } });
+  await allowed.run('assign', { body: { actorId: 999, scope: '9' } });
+  assert.equal(allowed.res.statusCode, 409); assert.equal(allowed.res.body.error, 'workspace_assignment_already_reviewed');
+});
+test('activation uses authenticated ownership and returns deployment/readiness conflicts as conflicts', async () => {
+  const h = harness({ activate: async input => {
+    assert.equal(input.actorId, 7); assert.deepEqual(input.scope.clinicIds, [1, 2]);
+    throw Object.assign(new Error('pending'), { status: 409, code: 'workspace_reception_pending' });
+  } });
+  await h.run('activate', { body: { actorId: 999, scope: '9' } });
+  assert.equal(h.res.statusCode, 409); assert.equal(h.res.body.error, 'workspace_reception_pending');
 });

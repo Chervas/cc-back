@@ -2673,7 +2673,9 @@ const resolveEffectiveTrackingFromRecords = ({ clinicId, groupId, selectedRecord
 
 const resolveMetaCapiRuntimeConfig = async ({ clinicId, groupId, selectedRecord, clinicCfg, groupCfg }) => {
   const tracking = resolveEffectiveTrackingFromRecords({ clinicId, groupId, selectedRecord, clinicCfg, groupCfg });
-  let accessToken = cleanString(process.env.META_CAPI_TOKEN);
+  const signalPolicyRecord = tracking?.meta_ads?.config_source === 'group' ? groupCfg : clinicCfg || selectedRecord;
+  const usesWorkspacePolicy = [selectedRecord, signalPolicyRecord].some(record => Object.prototype.hasOwnProperty.call(record?.config?.campaigns || {}, 'workspace_policy'));
+  let accessToken = usesWorkspacePolicy ? null : cleanString(process.env.META_CAPI_TOKEN);
   const connectionId = parseInteger(tracking?.meta_ads?.connection_id);
 
   if (connectionId) {
@@ -2688,6 +2690,9 @@ const resolveMetaCapiRuntimeConfig = async ({ clinicId, groupId, selectedRecord,
 
   return {
     tracking,
+    signalPolicyRecord,
+    webPolicyRecord: selectedRecord,
+    adAccountId: cleanString(tracking?.meta_ads?.ad_account_id),
     pixelId: cleanString(tracking?.meta_ads?.pixel_id),
     accessToken: accessToken || null
   };
@@ -3910,7 +3915,12 @@ exports.ingestLead = asyncHandler(async (req, res) => {
         utmCampaign: utmCampaign || null,
         userData,
         pixelId: metaRuntime.pixelId,
-        accessToken: metaRuntime.accessToken
+        accessToken: metaRuntime.accessToken,
+        signalPolicyRecord: metaRuntime.signalPolicyRecord,
+        webPolicyRecord: metaRuntime.webPolicyRecord,
+        adAccountId: metaRuntime.adAccountId,
+        campaignId: body.meta_ads_campaign_id || null,
+        advertisingConsent: leadMarketingConsent
       });
     }
   } catch (e) {
@@ -3940,6 +3950,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     };
     await maybeUploadGoogleConversion({
       cfgRecord: cfg,
+      signalPolicyRecord: effectiveTracking.google_ads?.config_source === 'group' ? finalGroupCfg : finalClinicCfg,
       googleAdsConfig: effectiveTracking.google_ads,
       eventName: normalizedEventNameForCapi,
       customData: googleCustomData,
@@ -6311,7 +6322,12 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
       currency: custom_data.currency || 'EUR',
       userData,
       pixelId: metaRuntime.pixelId,
-      accessToken: metaRuntime.accessToken
+      accessToken: metaRuntime.accessToken,
+      signalPolicyRecord: metaRuntime.signalPolicyRecord,
+      webPolicyRecord: metaRuntime.webPolicyRecord,
+      adAccountId: metaRuntime.adAccountId,
+      campaignId: custom_data.meta_ads_campaign_id || null,
+      advertisingConsent: marketingConsent
     });
   }
 
@@ -6323,6 +6339,7 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
   try {
     await maybeUploadGoogleConversion({
       cfgRecord: cfg,
+      signalPolicyRecord: effectiveTracking.google_ads?.config_source === 'group' ? finalGroupCfg : finalClinicCfg,
       googleAdsConfig: effectiveTracking.google_ads,
       eventName: eventName || 'ViewContent',
       customData: {

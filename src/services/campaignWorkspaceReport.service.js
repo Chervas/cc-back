@@ -95,7 +95,7 @@ function leadCampaign(lead, campaigns) {
   return matches.length === 1 ? matches[0].id : null;
 }
 
-function aggregateReport({ campaigns, facts = [], leads = [], appointments = [], ads = [], period, now = new Date() }) {
+function aggregateReport({ campaigns, facts = [], leads = [], appointments = [], ads = [], budgetAttribution = null, period, now = new Date() }) {
   const rows = campaigns.map(campaign => ({ campaign, current: empty(), previous: empty(),
     daily: Array.from({ length: period.days }, (_, i) => ({ date: dateShift(period.start, i), leads: 0, appointments: 0 })),
     ads: [], receptionReady: false, performance: campaign.paused ? 'paused' : 'insufficient',
@@ -103,6 +103,19 @@ function aggregateReport({ campaigns, facts = [], leads = [], appointments = [],
   }));
   const index = new Map(rows.map(row => [row.campaign.id, row]));
   const periodKey = day => !day || day < period.previousStart || day > period.end ? null : day < period.start ? 'previous' : 'current';
+  if (budgetAttribution) {
+    const amounts = new Map(rows.filter(row => row.campaign.assigned && budgetAttribution.supportedProviders.includes(row.campaign.provider))
+      .map(row => [row.campaign.id, { current: 0, previous: 0 }]));
+    for (const allocation of budgetAttribution.allocations) {
+      const target = periodKey(dayOf(allocation.acceptedAt));
+      const totals = amounts.get(allocation.campaignId);
+      if (target && totals) totals[target] += allocation.amountCents;
+    }
+    for (const row of rows) {
+      const totals = amounts.get(row.campaign.id);
+      if (totals) { row.current.accepted = totals.current / 100; row.previous.accepted = totals.previous / 100; }
+    }
+  }
   const seenFacts = new Set();
   const recentStart = dateShift(period.end, -1);
   for (const fact of facts) {
@@ -181,6 +194,10 @@ function aggregateReport({ campaigns, facts = [], leads = [], appointments = [],
     }
   }
   for (const row of rows) {
+    if (!row.campaign.assigned) {
+      row.current.leads = row.previous.leads = null;
+      row.current.appointments = row.previous.appointments = null;
+    }
     for (const ad of row.ads) {
       if (!ad.periods?.current) ad.current.spend = null;
       if (!ad.periods?.previous) ad.previous.spend = null;
@@ -199,8 +216,11 @@ function aggregateReport({ campaigns, facts = [], leads = [], appointments = [],
   const sum = key => included.reduce((total, row) => ({
     spend: total.spend === null || row[key].spend === null ? null : total.spend + row[key].spend,
     leads: total.leads + row[key].leads, appointments: total.appointments + row[key].appointments,
-    accepted: null, providerConversions: total.providerConversions === null || row[key].providerConversions === null ? null : total.providerConversions + row[key].providerConversions,
-  }), { ...empty(), spend: included.length ? 0 : null, providerConversions: included.length ? 0 : null });
+    accepted: total.accepted === null || row[key].accepted === null ? null : Math.round((total.accepted + row[key].accepted) * 100) / 100,
+    providerConversions: total.providerConversions === null || row[key].providerConversions === null ? null : total.providerConversions + row[key].providerConversions,
+  }), { ...empty(), spend: included.length ? 0 : null, leads: included.length ? 0 : null,
+    appointments: included.length ? 0 : null, accepted: included.length && budgetAttribution ? 0 : null,
+    providerConversions: included.length ? 0 : null });
   return {
     days: period.days, period, currency, rows,
     current: { ...sum('current'), ...(currency ? {} : { spend: null }) },
@@ -210,8 +230,9 @@ function aggregateReport({ campaigns, facts = [], leads = [], appointments = [],
       appointments: included.reduce((total, row) => total + row.daily[i].appointments, 0) })),
     unattributedLeads, attribution: {
       leads: 'unique_lead_intake_id', appointments: 'linked_appointment_created_at_excluding_cancelled',
-      accepted: 'pending_budget_campaign_attribution', adLeads: 'pending_ad_level_crm_attribution',
+      accepted: budgetAttribution?.method || 'pending_budget_campaign_attribution', adLeads: 'pending_ad_level_crm_attribution',
     },
+    budgetAttribution: budgetAttribution ? { currency: budgetAttribution.currency, supportedProviders: budgetAttribution.supportedProviders, ...budgetAttribution.coverage } : null,
   };
 }
 

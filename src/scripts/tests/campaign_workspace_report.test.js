@@ -47,6 +47,9 @@ test('conflicting duplicate assignments fail closed', () => {
 test('full group can inspect unassigned campaigns without attributing them to every clinic', () => {
   const rows = visible({ scope: { clinicIds: [1, 2], groupId: 5 }, mappings: [{ ...owner, clinicId: null, groupId: 5 }] });
   assert.equal(rows[0].assigned, false); assert.equal(rows[0].clinicId, null);
+  const result = report({ campaigns: rows });
+  assert.equal(result.rows[0].current.leads, null); assert.equal(result.rows[0].current.appointments, null);
+  assert.equal(result.current.leads, null); assert.equal(result.previous.leads, null);
 });
 test('clinic can see reviewed campaigns from its group account but not unassigned siblings', () => {
   const input = { scope: { clinicIds: [1], groupId: null, memberGroupIds: [5] }, mappings: [{ ...owner, clinicId: null, groupId: 5 }] };

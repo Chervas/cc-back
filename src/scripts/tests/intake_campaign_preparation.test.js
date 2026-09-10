@@ -64,10 +64,15 @@ test('external consent requires the named CMP and never grants visitor consent',
   assert.equal(next.config.features.consent_provider, 'external_cmp');
   assert.equal(JSON.stringify(next).includes('granted'), false);
 });
-test('legal links must be HTTP(S) URLs without credentials', () => {
-  for (const privacy of ['javascript:alert(1)', '/privacy', 'https://user:secret@clinic.example/privacy']) {
+test('legal links reject credentials, protocol-relative hosts and executable URLs', () => {
+  for (const privacy of ['javascript:alert(1)', '//other.example/privacy', '/\\other.example/privacy', '/bad\npath', 'https://user:secret@clinic.example/privacy']) {
     assert.throws(() => validatePreparation({ ...body, legal_urls: { ...body.legal_urls, privacy } }), /intake_legal_url_invalid/);
   }
+});
+test('shared root-relative legal pages keep the web editor contract', () => {
+  const next = applyCampaignPreparation(null, { ...body, legal_urls: { legal: '/aviso-legal/', privacy: '/privacidad', cookies: '/cookies/' } });
+  assert.equal(next.config.texts.legal_url, '/aviso-legal/');
+  assert.equal(next.config.texts.privacy_url, '/privacidad');
 });
 test('preparation revision does not expose HMAC secrets and is scope-bound', () => {
   assert.match(preparationRevision(record), /^[a-f0-9]{64}$/);
