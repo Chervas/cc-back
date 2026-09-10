@@ -14,6 +14,7 @@ const { loadNativeFormEvidence } = require('../services/campaignWorkspaceNativeR
 const { requestPageReception, getPageReceptionJob } = require('../services/campaignWorkspaceMetaPage.service');
 const { saveWorkspacePreferences } = require('../services/campaignWorkspacePreferences.service');
 const { loadGooglePreparation, checkGooglePreparation } = require('../services/campaignWorkspaceGooglePreparation.service');
+const { loadMetaSignalPreparation, checkMetaSignalPreparation } = require('../services/campaignWorkspaceMetaSignalPreparation.service');
 
 function createWorkspaceHandler({ models = db, resolveScope = resolveClinicScope,
   accessibleClinics = getAccessibleMarketingClinicIds, hasAccess = hasMarketingClinicScopeAccess,
@@ -45,7 +46,8 @@ function createWorkspaceConfigurationHandlers({ models = db, resolveScope = reso
   prepare = loadWorkspacePreparation, activate = activateWorkspaceMeasurement, assign = assignWorkspaceCampaign,
   metaContext = metaCampaignContext, refreshMeta = refreshMetaCampaignDestinations, nativeEvidence = loadNativeFormEvidence,
   requestMetaPage = requestPageReception, metaPageJob = getPageReceptionJob, savePreferences = saveWorkspacePreferences,
-  googlePreparation = loadGooglePreparation, checkGoogle = checkGooglePreparation } = {}) {
+  googlePreparation = loadGooglePreparation, checkGoogle = checkGooglePreparation,
+  metaSignals = loadMetaSignalPreparation, checkMetaSignals = checkMetaSignalPreparation } = {}) {
   async function authorize(req, res, access) {
     const actorId = Number(req.userData?.userId);
     if (!Number.isSafeInteger(actorId) || actorId <= 0) { res.status(401).json({ success: false, error: 'unauthenticated' }); return null; }
@@ -61,6 +63,24 @@ function createWorkspaceConfigurationHandlers({ models = db, resolveScope = reso
     return { scope, actorId };
   }
   return {
+    metaSignals: async (req, res) => {
+      const context = await authorize(req, res, 'read');
+      if (!context) return;
+      try { return res.json(await metaSignals({ models, ...context, input: { account_id: req.query.account_id }, hasAccess })); }
+      catch (error) {
+        if (error.status >= 400 && error.status < 500) return res.status(error.status).json({ success: false, error: error.code });
+        throw error;
+      }
+    },
+    checkMetaSignals: async (req, res) => {
+      const context = await authorize(req, res, 'write');
+      if (!context) return;
+      try { return res.json(await checkMetaSignals({ models, ...context, input: req.body, hasAccess })); }
+      catch (error) {
+        if (error.status >= 400 && error.status < 500) return res.status(error.status).json({ success: false, error: error.code });
+        throw error;
+      }
+    },
     googlePreparation: async (req, res) => {
       const context = await authorize(req, res, 'read');
       if (!context) return;
@@ -194,4 +214,6 @@ exports.getMetaPageReceptionJob = asyncHandler(configurationHandlers.metaPageJob
 exports.savePreferences = asyncHandler(configurationHandlers.preferences);
 exports.getGooglePreparation = asyncHandler(configurationHandlers.googlePreparation);
 exports.checkGooglePreparation = asyncHandler(configurationHandlers.checkGoogle);
+exports.getMetaSignalPreparation = asyncHandler(configurationHandlers.metaSignals);
+exports.checkMetaSignalPreparation = asyncHandler(configurationHandlers.checkMetaSignals);
 exports.createWorkspaceConfigurationHandlers = createWorkspaceConfigurationHandlers;

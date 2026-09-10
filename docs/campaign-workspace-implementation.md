@@ -1039,3 +1039,72 @@ PID. Auditoria SQL antes/despues: gate cerrado, settings=0, entregas Meta=0 y
 jobs CRM Meta=0. Sin migraciones, emisiones publicitarias, cobros ni promocion.
 El objetivo completo sigue EN CURSO: este lector no completa la autorizacion
 por destino, Meta web, Optimiza Google/Meta ni el cambio de ruta canonica.
+
+## Preparacion Del Destino Meta Por Cuenta (2026-09-10)
+
+`campaignWorkspaceMetaSignalPreparation.service` prepara el destino de las
+senales sin utilizar `IntakeConfig`, una instalacion web o el perfil social.
+Reutiliza las cuentas seleccionadas, `ClinicMetaAsset`, el grant scoped actual
+y la columna JSON `CampaignWorkspaceSettings.signal_preparation`. No crea otro
+receptor de formularios, tabla, migracion, cron ni job.
+
+- GET `campaign-workspace/meta-signals?scope=...&account_id=...`: ACL de lectura,
+  configuracion guardada e inventario actual de destinos. Solo se consulta al
+  abrir/actualizar este dialogo, nunca desde Salud o desde una carga del informe.
+- POST `campaign-workspace/meta-signals/check`: ACL de escritura, cuerpo cerrado
+  `{ account_id, dataset_id, expected_version }`. Los hitos proceden exclusivamente
+  de las preferencias guardadas. No acepta scopes, eventos o permisos del cliente.
+- La comprobacion lee `me/permissions`, la identidad `act_<id>` y la lista
+  `act_<id>/adspixels`. Exige `ads_management` concedido e inventario completo.
+  Pagina con cursor sobre el endpoint original; no sigue URLs `next`. Maximo
+  cinco paginas de destinos y tres de permisos, presupuesto temporal 40 s,
+  timeout por peticion <= 8 s y sin reintentos. Usa cliente/cuotas/pausa comunes
+  y logging sensible para no registrar respuestas crudas o credenciales.
+- No escribe en Meta, no crea pixels, no modifica anuncios, no suscribe paginas,
+  no emite eventos reales/de prueba ni cambia `activation`. Un destino accesible
+  NO demuestra que CAPI vaya a aceptar un evento. Por eso el resultado es
+  `access_verified`, no `delivered`, ni una autorizacion de envio.
+- Antes de consultar persiste `checking` con version y auditoria dentro de una
+  transaccion. Retira la prueba verde anterior inmediatamente. Al finalizar
+  relee ACL, miembros del grupo, seleccion, mapping/grant y huella, bloqueando el
+  resultado tardio si cambian. Guarda exito o fallo sanitizado con otra version
+  y auditoria atomica. El fallo de persistencia revierte esa transaccion.
+- Una prueba comprobada caduca exactamente en 24 h; `checking` tiene lease
+  de dos minutos. Seleccion, preferencias o reconexion invalidan la huella;
+  una rotacion rutinaria del token no. Fechas futuras, formatos inesperados,
+  inventario truncado o destino desaparecido nunca se presentan como OK.
+  Se preservan las pruebas de otras cuentas y las de Google. Las respuestas son
+  `private, no-store`; el navegador no persiste pruebas ni tokens adicionales.
+- El dialogo FUSE muestra un selector y el estado. Preselecciona el destino
+  guardado si sigue disponible, o el unico destino existente; con varios sin
+  seleccion guardada exige elegir. Los hitos/ID quedan en detalle desplegable.
+  Guardar requiere clic explicito; error o resultado incierto nunca se reintenta
+  automaticamente. Cerrar/reabrir y recargar consultan la evidencia de servidor.
+
+Este paso prepara la futura autorizacion por destino; NO completa esa autorizacion
+ni habilita el gate. La recepcion de formularios ya existente se mantiene intacta.
+
+Verificacion: 288 pruebas backend (12 nuevas especificas) y 21 frontend, sin
+fallos ni omitidas. Incluye reapertura, inventario paginado/incompleto, errores
+sanitizados, CAS, rollback de prueba/auditoria, revocacion y cambios de grupo/grant.
+Chromium autenticado: 45 comprobaciones y 11 capturas finales en
+`/home/ubuntu/qa-evidence/campaign-meta-preparation-20260910-layout`, a
+1440x1080, 390x844, 320x667 y 844x390. Se corrigio el pie recortado en horizontal;
+cabecera/acciones quedan fijas y el contenido se desplaza con la rueda real.
+Inspeccion manual desktop, movil estrecho y horizontal con scroll. El intento
+previo `...-verified` detecto ese fallo y no es evidencia de aprobacion.
+Sesion y workspace/configuracion base reales; el endpoint real rechaza la cuenta
+no seleccionada. El borrador, inventario Meta y sus cinco comandos son fixtures
+interceptados: no prueba un acceso CAPI real ni escribe ajustes de clientes.
+Regresion general adicional: 71 comprobaciones y 29 capturas en `...-regression`,
+sin cambios en los avisos operativos persistentes. Cero escrituras de negocio y
+cero errores JS en ambos recorridos. El login se renovo tras caducar la sesion.
+
+Build final `1ab3968657134dce`, sincronizado con el preview 4203; persiste el aviso
+previo de presupuesto del bundle inicial (4,58 MB frente a 3 MB). Un reinicio
+solo de backend DEV, PID `1178732`, contador `8539`; staging/gateway/preview
+conservan PID. Auditoria SQL antes/despues: gate cerrado, settings=0,
+entregas Meta=0, jobs CRM Meta=0. Sin migraciones, emisiones, cobros o promocion.
+El objetivo global sigue EN CURSO: autorizacion completa y consumo por emisores,
+Meta web/configuracion nativa, Optimiza de ambos proveedores, metricas por anuncio
+y ruta canonica siguen pendientes. No habilitar señales por esta preparacion.
