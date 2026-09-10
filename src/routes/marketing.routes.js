@@ -3,6 +3,7 @@ const router = express.Router();
 const authMiddleware = require('./auth.middleware');
 const chatFlowTemplatesController = require('../controllers/chatFlowTemplates.controller');
 const campaignOnboardingController = require('../controllers/campaignOnboarding.controller');
+const campaignWorkspaceController = require('../controllers/campaignWorkspace.controller');
 const marketingReportsController = require('../controllers/marketingReports.controller');
 const marketingCompetitionController = require('../controllers/marketingCompetition.controller');
 const marketingAiVisibilityController = require('../controllers/marketingAiVisibility.controller');
@@ -203,6 +204,7 @@ router.post('/chat-flow-templates/:id/duplicate', chatFlowTemplatesController.du
 
 // Onboarding unificado campañas (Google Ads + Meta Ads)
 router.get('/campaign-onboarding/bootstrap', campaignOnboardingController.getCampaignOnboardingBootstrap);
+router.get('/campaign-workspace', campaignWorkspaceController.getWorkspace);
 router.get('/campaign-onboarding/meta-pixels', campaignOnboardingController.listMetaPixels);
 router.get('/campaign-onboarding/external-campaigns', campaignOnboardingController.listExternalCampaigns);
 router.get('/strategies/catalog', campaignOnboardingController.listStrategyCatalog);

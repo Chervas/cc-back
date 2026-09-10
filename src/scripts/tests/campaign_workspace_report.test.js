@@ -1,0 +1,104 @@
+'use strict';
+
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const { reportPeriod, visibleCampaigns, leadCampaign, aggregateReport } = require('../../services/campaignWorkspaceReport.service');
+const { externalCampaignIdentityKey } = require('../../services/externalCampaignAssignmentTargets.service');
+
+const now = new Date('2026-09-10T10:00:00Z');
+const period = reportPeriod(7, now);
+const identity = { provider: 'google_ads', customer_id: '1234567890', campaign_id: '100' };
+const inventory = [{ ...identity, campaign_name: 'Primera visita', status: 'ENABLED' }];
+const owner = { provider: 'google_ads', accountId: '1234567890', clinicId: 1, groupId: null };
+const visible = (overrides = {}) => visibleCampaigns({ scope: { clinicIds: [1], groupId: null }, mappings: [owner], assignments: [], inventory, ...overrides });
+const campaign = () => visible()[0];
+const lead = (id, more = {}) => ({ id, clinica_id: 1, source: 'google_ads', channel: 'paid',
+  google_ads_customer_id: '1234567890', google_ads_campaign_id: '100', created_at: '2026-09-08T10:00:00Z', ...more });
+const fact = (more = {}) => ({ ...identity, date: '2026-09-09', spend: 10, segment: ['1', 'SEARCH', 'MOBILE'], providerConversions: 999, updatedAt: now, ...more });
+const report = (more = {}) => aggregateReport({ campaigns: visible().map(c => ({ ...c, currency: 'EUR' })), period, now, ...more });
+
+test('period uses complete Madrid days with an equal previous window', () => {
+  assert.equal(period.start, '2026-09-03'); assert.equal(period.end, '2026-09-09');
+  assert.equal(period.previousStart, '2026-08-27'); assert.equal(period.previousEnd, '2026-09-02');
+  assert.equal(period.from.toISOString(), '2026-08-26T22:00:00.000Z');
+  assert.equal(period.until.toISOString(), '2026-09-09T22:00:00.000Z');
+  assert.throws(() => reportPeriod(180, now), /invalid_period/);
+});
+test('period crosses DST by calendar day, not a fixed UTC midnight', () => {
+  const spring = reportPeriod(7, new Date('2026-03-30T10:00:00Z'));
+  assert.equal(spring.until.toISOString(), '2026-03-29T22:00:00.000Z');
+  assert.equal(spring.from.toISOString(), '2026-03-15T23:00:00.000Z');
+  const autumn = reportPeriod(7, new Date('2026-10-26T10:00:00Z'));
+  assert.equal(autumn.until.toISOString(), '2026-10-25T23:00:00.000Z');
+});
+test('exclusive account includes a new campaign without a second local campaign', () => {
+  assert.equal(campaign().assigned, true); assert.equal(campaign().clinicId, 1);
+});
+test('shared account without a reviewed assignment cannot leak into a clinic', () => {
+  assert.deepEqual(visible({ mappings: [owner, { ...owner, clinicId: 2 }] }), []);
+});
+test('reviewed owner beats an exclusive account mapping and archival hides the campaign', () => {
+  assert.deepEqual(visible({ assignments: [{ ...identity, clinica_id: 2, status: 'active' }] }), []);
+  assert.deepEqual(visible({ assignments: [{ ...identity, clinica_id: 1, status: 'archived' }] }), []);
+});
+test('conflicting duplicate assignments fail closed', () => {
+  assert.deepEqual(visible({ assignments: [{ ...identity, clinica_id: 1, status: 'active' }, { ...identity, clinica_id: 2, status: 'active' }] }), []);
+});
+test('full group can inspect unassigned campaigns without attributing them to every clinic', () => {
+  const rows = visible({ scope: { clinicIds: [1, 2], groupId: 5 }, mappings: [{ ...owner, clinicId: null, groupId: 5 }] });
+  assert.equal(rows[0].assigned, false); assert.equal(rows[0].clinicId, null);
+});
+test('clinic can see reviewed campaigns from its group account but not unassigned siblings', () => {
+  const input = { scope: { clinicIds: [1], groupId: null, memberGroupIds: [5] }, mappings: [{ ...owner, clinicId: null, groupId: 5 }] };
+  assert.deepEqual(visible(input), []);
+  assert.equal(visible({ ...input, assignments: [{ ...identity, clinica_id: 1, status: 'active' }] }).length, 1);
+});
+test('canonical account identity defeats misleading UTMs', () => {
+  assert.equal(leadCampaign(lead(1, { google_ads_customer_id: '999', utm_campaign: 'Primera visita' }), visible()), null);
+  assert.equal(leadCampaign(lead(1, { google_ads_customer_id: '123-456-7890' }), visible()), campaign().id);
+});
+test('same campaign id in two accounts does not merge attribution', () => {
+  const second = { ...campaign(), account_id: '999', customer_id: '999', id: externalCampaignIdentityKey({ ...identity, customer_id: '999' }) };
+  assert.equal(leadCampaign(lead(1), [campaign(), second]), campaign().id);
+  assert.equal(leadCampaign(lead(1, { google_ads_customer_id: null, utm_campaign: '100' }), [campaign(), second]), null);
+});
+test('scope rejects a lead belonging to another clinic', () => assert.equal(leadCampaign(lead(1, { clinica_id: 2 }), visible()), null));
+test('spend deduplicates account snapshots but retains actual device segments', () => {
+  const result = report({ facts: [fact(), fact(), fact({ segment: ['1', 'SEARCH', 'DESKTOP'], spend: 20 })] });
+  assert.equal(result.current.spend, 30);
+});
+test('CRM leads do not come from platform conversions and count each intake once', () => {
+  const result = report({ facts: [fact()], leads: [lead(1), lead(1), lead(2)] });
+  assert.equal(result.current.leads, 2); assert.equal(result.current.providerConversions, 999);
+  assert.equal(result.daily.reduce((total, day) => total + day.leads, 0), 2);
+});
+test('appointment status on a lead never fabricates a real appointment', () => {
+  assert.equal(report({ leads: [lead(1, { status_lead: 'citado' })] }).current.appointments, 0);
+});
+test('linked appointments are dated by booking, deduplicated, clinic safe and exclude cancellations', () => {
+  const appointment = { id_cita: 1, clinica_id: 1, lead_intake_id: 1, created_at: '2026-09-08T10:00:00Z', estado: 'pendiente' };
+  const result = report({ leads: [lead(1, { created_at: '2026-01-01T12:00:00Z' })], appointments: [appointment, appointment,
+    { ...appointment, id_cita: 2, estado: 'cancelada' }, { ...appointment, id_cita: 3, clinica_id: 2 },
+    { ...appointment, id_cita: 4, es_provisional: true }] });
+  assert.equal(result.current.leads, 0); assert.equal(result.current.appointments, 1);
+});
+test('missing spend and missing budget attribution remain null, never plausible zeroes', () => {
+  const result = report(); assert.equal(result.current.spend, null); assert.equal(result.current.accepted, null);
+  assert.equal(result.previous.accepted, null);
+});
+test('missing ad-level CRM identity does not become platform conversions', () => {
+  const result = report({ ads: [{ ...fact(), id: '1', title: 'Anuncio', status: 'ENABLED' }] });
+  assert.equal(result.rows[0].ads[0].current.leads, null);
+  assert.equal(result.rows[0].ads[0].lowestCost, false);
+});
+test('stale performance cannot be green despite enough leads', () => {
+  const leads = Array.from({ length: 20 }, (_, i) => lead(i, { created_at: i < 10 ? '2026-09-01T10:00:00Z' : '2026-09-09T10:00:00Z' }));
+  const result = report({ leads, facts: [fact({ updatedAt: '2026-08-01' }), fact({ date: '2026-09-01', updatedAt: '2026-08-01' })] });
+  assert.equal(result.rows[0].performance, 'insufficient');
+});
+test('different or unknown currencies never produce a misleading combined investment', () => {
+  const second = { ...campaign(), currency: 'USD', id: externalCampaignIdentityKey({ ...identity, campaign_id: '101' }), campaign_id: '101' };
+  const result = report({ campaigns: [{ ...campaign(), currency: 'EUR' }, second], facts: [fact(), fact({ campaign_id: '101' })] });
+  assert.equal(result.currency, null); assert.equal(result.current.spend, null);
+  assert.equal(result.rows[0].current.spend, 10);
+});
