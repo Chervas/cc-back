@@ -1228,3 +1228,74 @@ Dos reinicios solo de DEV, PID final `1185873`, contador `8542`; staging,
 gateway y preview conservan PID. Frontend sin cambios de UI ni nuevo build
 (`b05bce92b41f1b82`). Auditoria SQL antes/despues: gate cerrado, settings=0,
 entregas Meta=0 y jobs CRM Meta=0. Objetivo global EN CURSO.
+
+## Google Web Y CRM Desde El Mandato (2026-09-10)
+
+`campaignWorkspaceGoogleConversion.service` conecta los dos puntos de ingesta
+web existentes y el emisor de hitos CRM con el mandato schema 2. Reutiliza
+`googleAdsConversionUpload`, su deduplicacion, auditoria y el job Diagnostics;
+no crea otro receptor, cola, tabla o cron. El recorrido anterior se conserva
+cuando el ambito no tiene un mandato nuevo.
+
+- La cuenta y accion de conversion proceden del mandato preparado, no de
+  `IntakeConfig.google_ads`. La configuracion publicitaria de Web puede faltar
+  o apuntar a otro destino sin reescribirla. No se copia el fan-out anterior.
+  La identidad de cuenta/campaña usa el parser canonico; sin cuenta solo se
+  admite una seleccion inequivoca compatible con la campaña. Con varias
+  posibilidades se devuelve un pendiente, nunca un envio a todas ellas.
+- `campaignWorkspaceWebSignalContext` relee la instalacion efectiva y exige
+  clinica activa, pertenencia explicita en `locations` para web de grupo y
+  Consent Mode habilitado. Rechaza el fallback de grupo, otro registro o un
+  contexto agregado sin clinica. Conserva intactos widgets, dominios y ajustes.
+- El consentimiento explicito del visitante, los identificadores permitidos,
+  la autorizacion documentada de datos mejorados y la capacidad privada CRM
+  siguen siendo controles independientes. Una autorizacion del workspace no
+  permite inventar una cita desde el navegador ni habilita datos personales
+  mejorados para cuentas/eventos no autorizados. No se modifica su alcance.
+- La ruta construye solo en memoria el destino del evento. Se releen mandato,
+  cuenta, grant, instalacion y politica de datos antes del transporte, despues
+  de resolver/refrescar OAuth y reservar la auditoria. Revocacion o cambio
+  cancela el intento. La politica se clona para detectar tambien una retirada
+  anidada durante la reserva. La rotacion habitual del token no duplica eventos.
+- Los intentos guardan `workspace_delivery` schema 2 y una huella de campaña,
+  ruta, instalacion y politica, sin token ni contactos. Salud coteja esa huella
+  y los Diagnostics persistidos; recibido/procesando no significa procesado ni
+  atribuido. No refresca credenciales ni llama a Google desde un GET.
+- Salud carga instalaciones en bloque y reutiliza lecturas de ambito/grant
+  dentro de la consulta. Cada campaña mantiene su comprobacion de seleccion.
+  La siguiente consulta relee permisos; el emisor no comparte esta cache.
+
+Verificacion backend: 369 pruebas correctas, sin fallos ni omitidas. Incluyen
+preparacion real con proveedor aislado -> mandato de prueba -> ingesta Google
+o hito CRM -> auditoria -> Diagnostics -> Salud, tambien para web de grupo,
+revocacion tras reserva, varias cuentas y conservacion del recorrido anterior.
+Ocho comprobaciones de sintaxis y `git diff --check` correctos.
+
+Una primera prueba de compatibilidad tenia una dependencia de auditoria sin
+aislar: intento insertar su registro ficticio en MySQL y fue rechazada por FK,
+antes del transporte. Se corrigio la propagacion del modelo de auditoria y se
+añadio una prohibicion de consultas SQL reales en esa suite. La lectura posterior
+confirma cero intentos con sus event IDs de QA, cero mandatos/entregas/jobs Meta
+y gate cerrado. Las pasadas fallidas no se contabilizan como verificacion.
+
+Este avance completa el enrutado Google para una instalacion web y sus hitos
+CRM; no completa Google nativo sin web, Meta web, la configuracion nativa
+multipagina, la activacion atomica, Optimiza de ambos proveedores ni las metricas
+CRM por anuncio. Las autorizaciones siguen siendo fixtures aislados: ninguna
+activacion de cliente ni cambio de ruta canonica. Objetivo global EN CURSO.
+
+Chromium autenticado: 33 comprobaciones y nueve capturas especificas de Salud
+en `/home/ubuntu/qa-evidence/campaign-google-web-routing-20260910-health`, mas
+71 comprobaciones y 29 capturas de regresion general en
+`/home/ubuntu/qa-evidence/campaign-google-web-routing-20260910-regression`.
+Ambas a 1440/1024/390 px, sin errores JS ni escrituras de negocio. La sesion y
+las lecturas de informes son reales; los casos especificos de recibos son GET
+interceptados construidos con el backend. No acreditan una entrega real a Google.
+Inspeccion manual de detalle Google desktop, contadores movil, preparacion web
+y grafica movil con tooltip. Los avisos operativos siguen pendientes e intactos.
+
+Un reinicio solo de DEV: PID `1187614`, contador `8543`; staging/gateway/preview
+conservan PID. Sin cambio de UI ni nuevo build (`b05bce92b41f1b82`). La lectura
+MySQL en un ambito Arriaga resuelve el scope sin mandato: no hay autorizaciones
+reales que probar. Gate cerrado, settings=0, entregas Meta=0, jobs CRM Meta=0 y
+cero auditorias Google con los event IDs de las pruebas. Sin migracion ni cron.

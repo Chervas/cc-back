@@ -30,9 +30,9 @@ const WhatsAppWebOrigin = db.WhatsAppWebOrigin;
 const { enqueueInboundFormSubmissionResume } = require('../services/automationsV2Resume.service');
 const { sendMetaEvent, buildUserData: buildMetaUserData } = require('../services/metaCapi.service');
 const {
-  maybeUploadGoogleConversion,
   normalizeGoogleConsent,
 } = require('../services/googleAdsConversionUpload.service');
+const { maybeUploadCampaignGoogleConversion: maybeUploadGoogleConversion } = require('../services/campaignWorkspaceGoogleConversion.service');
 const webEventsService = require('../services/webEvents.service');
 const { getIO } = require('../services/socket.service');
 const jobRequestsService = require('../services/jobRequests.service');

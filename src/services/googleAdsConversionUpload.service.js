@@ -1080,7 +1080,7 @@ async function uploadGoogleConversionDestination({
   };
   if (workspacePolicy.applicable && workspacePolicy.allowed) {
     // A receipt without this server-built binding cannot prove campaign health.
-    values.requestMetadata.workspace_delivery = googleDeliveryContext({ cfgRecord,
+    values.requestMetadata.workspace_delivery = (dependencies.googleDeliveryContext || googleDeliveryContext)({ cfgRecord,
       signalPolicyRecord: signalPolicyRecord || cfgRecord, runtime, policy: workspacePolicy,
       campaignId: extractGoogleLeadIdentity(customData).campaignId });
   }

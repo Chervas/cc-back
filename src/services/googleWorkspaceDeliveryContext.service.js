@@ -36,4 +36,14 @@ function googleDeliveryContext({ cfgRecord, signalPolicyRecord = cfgRecord, runt
     }) };
 }
 
-module.exports = { googleDeliveryContext };
+function googleWorkspaceRouteDeliveryContext({ context, campaignId }) {
+  const { route, web } = context || {};
+  if (!/^[0-9]{1,64}$/.test(campaignId || '') || !route?.authorization?.allowed
+    || route.authorization.authorizationSchema !== 2 || !/^[a-f0-9]{64}$/.test(route.destinationKey || '')
+    || !/^[a-f0-9]{64}$/.test(web?.fingerprint || '')) return null;
+  return { schema_version: 2, campaign_id: campaignId,
+    fingerprint: hash({ route: route.destinationKey, web: web.fingerprint, policies: route.authorization.policyRefs,
+      userPolicy: context.config }) };
+}
+
+module.exports = { googleDeliveryContext, googleWorkspaceRouteDeliveryContext };

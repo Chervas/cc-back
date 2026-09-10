@@ -1,12 +1,13 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { googleDeliveryContext } = require('./googleWorkspaceDeliveryContext.service');
+const { googleDeliveryContext, googleWorkspaceRouteDeliveryContext } = require('./googleWorkspaceDeliveryContext.service');
 const { resolveWorkspaceSignalPolicy, CRM_MILESTONE_SOURCE } = require('./campaignWorkspaceSignalPolicy.service');
 const { resolveWebMeasurementMarketingState } = require('./campaignMeasurementReadiness.service');
 const { resolveEffectiveTrackingConfig } = require('./effectiveMarketingAssets.service');
 const { getGoogleAdsEventConfigs, selectConfiguredEventConfigs, buildConversionActionResource } = require('./googleAdsConversionUpload.service');
 const { resolveScopedGoogleAdsRuntime, missingGoogleScopes, GOOGLE_DATA_MANAGER_SCOPE } = require('./googleAdsScopedRuntime.service');
+const { loadSignalRoutingScope } = require('./campaignWorkspaceSignalRouting.service');
 
 const FRESH_MS = 24 * 3600000;
 const MAX_ROWS = 10000;
@@ -68,7 +69,57 @@ async function loadGoogleSignalEvidence({ models, campaigns, selectedClinics, no
     ...(groups.length ? [{ assignment_scope: 'group', group_id: { [Op.in]: groups } }] : []),
   ] }, raw: true });
   const runtimes = new Map(); const policies = new Map();
+  const routeContexts = new Map();
+  const routeScopes = new Map(); const routeGrants = new Map(); const routeConnections = new Map();
+  const verifyRoute = input => {
+    const key = JSON.stringify([input.clinicId, input.accountId, input.setting.id, input.setting.version, input.eventName, input.destinationId]);
+    if (!routeGrants.has(key)) routeGrants.set(key, require('./campaignWorkspaceSignalAuthorization.service').verifySignalDestination(input));
+    return routeGrants.get(key);
+  };
+  const readConnection = id => {
+    if (!routeConnections.has(id)) routeConnections.set(id, models.GoogleConnection.findByPk(id));
+    return routeConnections.get(id);
+  };
   for (const campaign of eligible) {
+    const routeHistory = rows.filter(row => Number(row.clinicaId) === campaign.clinicId && row.customerId === campaign.account_id
+      && row.requestMetadata?.workspace_delivery?.schema_version === 2
+      && row.requestMetadata.workspace_delivery.campaign_id === campaign.campaign_id
+      && timestamp(row.attemptedAt) <= +now && timestamp(row.attemptedAt) >= +now - FRESH_MS);
+    if (routeHistory.length && selectedClinics.some(row => Number(row.id_clinica) === campaign.clinicId)) {
+      const verified = [];
+      for (const row of routeHistory) {
+        const key = `${campaign.id}:${row.eventName}:${row.intakeConfigId}`;
+        if (!routeContexts.has(key)) {
+          try {
+            // Report-only memoization. No token refresh, provider call or permission cache across requests.
+            if (!routeScopes.has(campaign.clinicId)) routeScopes.set(campaign.clinicId, loadSignalRoutingScope({ models, clinicId: campaign.clinicId }));
+            const routingScope = await routeScopes.get(campaign.clinicId);
+            const context = await require('./campaignWorkspaceGoogleConversion.service').resolveWorkspaceGoogleWebContext({
+              models, clinicId: campaign.clinicId, recordId: row.intakeConfigId, eventName: row.eventName,
+              customData: { customer_id: campaign.account_id, campaign_id: campaign.campaign_id }, crmEventSource: CRM_MILESTONE_SOURCE, now,
+              routingScope, verifyRoute, readConnection, webRecords: {
+                clinicRecord: records.find(record => record.assignment_scope === 'clinic' && Number(record.clinic_id) === campaign.clinicId),
+                groupRecord: records.find(record => record.assignment_scope === 'group' && Number(record.group_id) === Number(routingScope.clinic.grupoClinicaId)),
+              },
+            });
+            routeContexts.set(key, context);
+          } catch (error) {
+            if (!/^workspace_/.test(error.code || '')) throw error;
+            routeContexts.set(key, null);
+          }
+        }
+        const context = routeContexts.get(key);
+        if (!context || row.connectionSource !== 'workspace_mandate' || row.assignmentScope !== context.web.record.assignment_scope
+          || Number(row.grupoClinicaId || 0) !== Number(context.web.groupId || 0)
+          || Number(row.googleConnectionId) !== context.route.connectionId
+          || (row.loginCustomerId || null) !== (context.route.loginCustomerId || null)
+          || row.conversionAction !== `customers/${campaign.account_id}/conversionActions/${context.route.destinationId}`) continue;
+        const proof = googleWorkspaceRouteDeliveryContext({ context, campaignId: campaign.campaign_id });
+        if (proof?.fingerprint === row.requestMetadata.workspace_delivery.fingerprint) verified.push(row);
+      }
+      evidence.set(campaign.id, { ...googleDeliveryEvidence(verified, now), key: campaign.id });
+      continue;
+    }
     const history = rows.filter(row => Number(row.clinicaId) === campaign.clinicId && row.customerId === campaign.account_id
       && row.requestMetadata?.workspace_delivery?.schema_version === 1
       && row.requestMetadata.workspace_delivery.campaign_id === campaign.campaign_id

@@ -3,9 +3,9 @@
 const db = require('../../models');
 const { CRM_MILESTONE_SOURCE } = require('./campaignWorkspaceSignalPolicy.service');
 const {
-  maybeUploadGoogleConversion,
   normalizeGoogleConsent,
 } = require('./googleAdsConversionUpload.service');
+const { maybeUploadCampaignGoogleConversion: maybeUploadGoogleConversion } = require('./campaignWorkspaceGoogleConversion.service');
 
 function positiveInt(value) {
   const parsed = Number.parseInt(String(value ?? '').trim(), 10);
@@ -134,7 +134,7 @@ async function maybeUploadLeadLifecycleConversion({
     ? resolved.config.config
     : {};
   const googleAdsConfig = configObject.google_ads || null;
-  if (!resolved.config || !googleAdsConfig) {
+  if (!resolved.config) {
     return { sent: false, reason: 'intake_google_config_missing' };
   }
 
