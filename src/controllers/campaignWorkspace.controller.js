@@ -11,6 +11,7 @@ const { activateWorkspaceMeasurement } = require('../services/campaignWorkspaceA
 const { assignWorkspaceCampaign } = require('../services/campaignWorkspaceAssignment.service');
 const { campaignReference, metaCampaignContext, refreshMetaCampaignDestinations } = require('../services/campaignWorkspaceMetaDestination.service');
 const { loadNativeFormEvidence } = require('../services/campaignWorkspaceNativeReception.service');
+const { requestPageReception, getPageReceptionJob } = require('../services/campaignWorkspaceMetaPage.service');
 
 function createWorkspaceHandler({ models = db, resolveScope = resolveClinicScope,
   accessibleClinics = getAccessibleMarketingClinicIds, hasAccess = hasMarketingClinicScopeAccess,
@@ -40,7 +41,8 @@ exports.createWorkspaceHandler = createWorkspaceHandler;
 function createWorkspaceConfigurationHandlers({ models = db, resolveScope = resolveClinicScope,
   hasAccess = hasMarketingClinicScopeAccess, loadInventory = loadWorkspaceInventory, save = saveWorkspaceAccounts,
   prepare = loadWorkspacePreparation, activate = activateWorkspaceMeasurement, assign = assignWorkspaceCampaign,
-  metaContext = metaCampaignContext, refreshMeta = refreshMetaCampaignDestinations, nativeEvidence = loadNativeFormEvidence } = {}) {
+  metaContext = metaCampaignContext, refreshMeta = refreshMetaCampaignDestinations, nativeEvidence = loadNativeFormEvidence,
+  requestMetaPage = requestPageReception, metaPageJob = getPageReceptionJob } = {}) {
   async function authorize(req, res, access) {
     const actorId = Number(req.userData?.userId);
     if (!Number.isSafeInteger(actorId) || actorId <= 0) { res.status(401).json({ success: false, error: 'unauthenticated' }); return null; }
@@ -56,6 +58,26 @@ function createWorkspaceConfigurationHandlers({ models = db, resolveScope = reso
     return { scope, actorId };
   }
   return {
+    requestMetaPage: async (req, res) => {
+      const context = await authorize(req, res, 'write');
+      if (!context) return;
+      try { return res.status(202).json(await requestMetaPage({ models, ...context, input: req.body, loadInventory })); }
+      catch (error) {
+        if (error.status >= 400 && error.status < 500) return res.status(error.status).json({ success: false, error: error.code });
+        throw error;
+      }
+    },
+    metaPageJob: async (req, res) => {
+      const context = await authorize(req, res, 'read');
+      if (!context) return;
+      try {
+        const input = campaignReference({ account_id: req.query.account_id, campaign_id: req.query.campaign_id });
+        return res.json(await metaPageJob({ models, ...context, input, jobId: Number(req.params.jobId), loadInventory }));
+      } catch (error) {
+        if (error.status >= 400 && error.status < 500) return res.status(error.status).json({ success: false, error: error.code });
+        throw error;
+      }
+    },
     metaPreparation: async (req, res) => {
       const context = await authorize(req, res, 'read');
       if (!context) return;
@@ -63,8 +85,9 @@ function createWorkspaceConfigurationHandlers({ models = db, resolveScope = reso
         const reference = campaignReference({ account_id: req.query.account_id, campaign_id: req.query.campaign_id });
         const result = await metaContext({ models, scope: context.scope, reference, loadInventory });
         const inventory = await loadInventory({ models, scope: context.scope });
-        const evidence = await nativeEvidence({ models, campaigns: [result.campaign], selectedClinics: inventory.selectedClinics });
+        const evidence = await nativeEvidence({ models, campaigns: [result.campaign], selectedClinics: inventory.selectedClinics, scope: context.scope });
         return res.json({ success: true, revision: result.revision, campaign: result.campaign,
+          canWrite: await hasAccess({ userId: context.actorId, clinicIds: context.scope.clinicIds, access: 'write' }),
           forms: evidence.get(result.campaign.id)?.forms || [],
           reception: evidence.get(result.campaign.id)?.reception || null });
       } catch (error) {
@@ -136,4 +159,6 @@ exports.activateMeasurement = asyncHandler(configurationHandlers.activate);
 exports.assignCampaign = asyncHandler(configurationHandlers.assign);
 exports.getMetaPreparation = asyncHandler(configurationHandlers.metaPreparation);
 exports.refreshMetaPreparation = asyncHandler(configurationHandlers.refreshMeta);
+exports.requestMetaPageReception = asyncHandler(configurationHandlers.requestMetaPage);
+exports.getMetaPageReceptionJob = asyncHandler(configurationHandlers.metaPageJob);
 exports.createWorkspaceConfigurationHandlers = createWorkspaceConfigurationHandlers;

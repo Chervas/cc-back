@@ -120,13 +120,14 @@ async function updateMetaUsageCounter(usage, {
   });
 }
 
-async function metaGet(url, {
+async function metaRequest(method, url, {
   params = {},
   accessToken,
   timeout = 30000,
   source = 'meta_client',
   operation = null,
-  maxRetries: requestedRetries = null
+  maxRetries: requestedRetries = null,
+  body = undefined
 } = {}) {
   const META_API_BASE_URL = process.env.META_API_BASE_URL || 'https://graph.facebook.com/v23.0';
   // Retardo suave entre requests (ms). Previene picos de uso.
@@ -157,10 +158,12 @@ async function metaGet(url, {
 
       const fullUrl = url.startsWith('http') ? url : `${META_API_BASE_URL}/${url.replace(/^\//,'')}`;
       const telemetryOperation = operation || String(url || 'graph_request').split('?')[0].slice(0, 120);
-      const resp = await axios.get(fullUrl, {
+      const options = {
         params: accessToken ? { ...params, access_token: accessToken } : params,
-        timeout
-      });
+        timeout,
+        ...(method === 'post' ? { maxRedirects: 0 } : {})
+      };
+      const resp = method === 'post' ? await axios.post(fullUrl, body, options) : await axios.get(fullUrl, options);
 
       // Parse usage headers to update nextAllowedAt if needed
       const h = resp.headers || {};
@@ -238,7 +241,15 @@ async function metaGet(url, {
   throw lastErr;
 }
 
-module.exports = { metaGet };
+const metaGet = (url, options) => metaRequest('get', url, options);
+// Only idempotent page subscriptions use this helper. Other advertising writes keep their own authorization contracts.
+const metaSubscribePage = (pageId, fields, options = {}) => {
+  if (!/^[0-9]{1,64}$/.test(pageId) || !Array.isArray(fields) || !fields.includes('leadgen')
+    || fields.some(field => typeof field !== 'string' || !/^[a-z_]+$/.test(field))) throw new Error('invalid_page_subscription');
+  return metaRequest('post', `${pageId}/subscribed_apps`, { ...options, maxRetries: 0,
+    body: { subscribed_fields: fields.join(',') } });
+};
+module.exports = { metaGet, metaSubscribePage };
 
 // Exponer estado de uso/limit para monitorización
 module.exports.getUsageStatus = async function getUsageStatus() {

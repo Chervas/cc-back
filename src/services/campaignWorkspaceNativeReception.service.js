@@ -3,6 +3,7 @@
 const { Op, Sequelize } = require('sequelize');
 const { metaAdvertisingIdentity } = require('./leadAdvertisingIdentity.service');
 const { graphId } = require('./campaignWorkspaceMetaDestination.service');
+const { pageProof } = require('./campaignWorkspaceMetaPage.service');
 
 const RECEIPT_WINDOW = 7 * 86400000;
 const DESTINATION_WINDOW = 86400000;
@@ -18,13 +19,14 @@ function nativeForms(detection) {
   }));
 }
 
-async function loadNativeFormEvidence({ models, campaigns, selectedClinics, now = new Date(), transaction = null }) {
+async function loadNativeFormEvidence({ models, campaigns, selectedClinics, scope = null, now = new Date(), transaction = null }) {
   const eligible = campaigns.filter(campaign => campaign.provider === 'meta_ads' && campaign.assigned && campaign.nativeForms?.length);
   if (!eligible.length) return new Map();
   const clinicIds = [...new Set(eligible.map(campaign => campaign.clinicId))];
   const pages = await models.ClinicMetaAsset.findAll({ where: { isActive: true, assetType: 'facebook_page',
     metaAssetId: { [Op.in]: [...new Set(eligible.flatMap(campaign => campaign.nativeForms.map(form => form.pageId).filter(Boolean)))] },
-  }, attributes: ['id', 'metaAssetId', 'metaAssetName', 'metaConnectionId', 'assignmentScope', 'clinicaId', 'grupoClinicaId'], raw: true, transaction });
+  }, attributes: ['id', 'metaAssetId', 'metaAssetName', 'metaConnectionId', 'assignmentScope', 'clinicaId', 'grupoClinicaId',
+    'pageAccessToken', 'additionalData'], raw: true, transaction });
   const accounts = await models.ClinicMetaAsset.findAll({ where: { isActive: true, assetType: 'ad_account',
     metaAssetId: { [Op.in]: [...new Set(eligible.flatMap(campaign => [campaign.account_id, `act_${campaign.account_id}`]))] } },
   attributes: ['metaAssetId', 'metaConnectionId', 'assignmentScope', 'clinicaId', 'grupoClinicaId'], raw: true, transaction });
@@ -69,10 +71,18 @@ async function loadNativeFormEvidence({ models, campaigns, selectedClinics, now 
   return new Map(eligible.map(campaign => {
     const clinic = selectedClinics.find(row => Number(row.id_clinica) === campaign.clinicId);
     const forms = campaign.nativeForms.map(form => {
-      const page = clinic && activePages.find(row => row.metaAssetId === form.pageId && covers(row, clinic));
+      const matches = clinic ? activePages.filter(row => row.metaAssetId === form.pageId && covers(row, clinic)) : [];
+      const ownerKey = scope?.groupId ? `group:${scope.groupId}` : `clinic:${campaign.clinicId}`;
+      const preferred = matches.filter(row => scopeKey(row) === ownerKey);
+      const candidates = preferred.length ? preferred : matches;
+      const page = candidates.length === 1 ? candidates[0] : null;
+      const proof = page && pageProof(page, now);
       const received = receipts.get([campaign.clinicId, campaign.account_id, campaign.campaign_id, form.pageId, form.id].join(':'));
       return { ...form, pageName: page?.metaAssetName || null, connected: !!page, receivedAt: received ? new Date(received).toISOString() : null,
-        state: !form.metadataAccessible ? 'access_required' : !form.pageId ? 'page_unknown' : !page ? 'page_required' : !received ? 'waiting' : 'receiving' };
+        pageScope: page ? scopeKey(page) : null, canCheckPage: !!page?.pageAccessToken, subscription: proof,
+        state: !form.metadataAccessible || proof?.state === 'access_required' ? 'access_required'
+          : !form.pageId ? 'page_unknown' : !page ? 'page_required' : proof?.state === 'subscription_required' ? 'subscription_required'
+          : received ? 'receiving' : proof?.state === 'verified' ? 'prepared' : 'waiting' };
     });
     const age = +now - +new Date(campaign.destinationCheckedAt);
     const fresh = campaign.destinationComplete === true && Number.isFinite(age) && age >= 0 && age < DESTINATION_WINDOW;
@@ -84,6 +94,8 @@ async function loadNativeFormEvidence({ models, campaigns, selectedClinics, now 
         : !fresh ? 'Falta actualizar la comprobación de los destinos de esta campaña.'
         : forms.some(form => form.state === 'access_required') ? 'Meta no ha permitido comprobar todos los formularios. Revisa los permisos de la conexión.'
         : forms.some(form => !form.connected) ? 'Hay formularios cuya página no está conectada para recibir interesados.'
+        : forms.some(form => form.state === 'subscription_required') ? 'Falta habilitar el envío de formularios de esta página a ClinicaClick.'
+        : forms.every(form => ['prepared', 'receiving'].includes(form.state)) && !ready ? 'La conexión está preparada. La recepción se confirmará cuando llegue un interesado de cada formulario.'
         : !ready ? 'Falta confirmar una recepción reciente de cada formulario en Interesados (leads).'
         : 'Se han recibido interesados de todos los formularios anunciados durante los últimos siete días.',
     } }];

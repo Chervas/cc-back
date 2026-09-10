@@ -96,3 +96,26 @@ test('interactive Meta checks can disable retries without bypassing the shared c
     restores.reverse().forEach(restore => restore()); metaClient._test.resetState();
   }
 });
+
+test('page subscription writes respect the shared quota and never retry an ambiguous provider response', async () => {
+  metaClient._test.resetState(); let calls = 0; let paused = true;
+  const restores = [
+    patchProperty(db.ApiUsageCounter, 'findOne', async () => paused ? { pauseUntil: new Date(Date.now() + 60000) } : null),
+    patchProperty(axios, 'post', async (url, body, options) => {
+      calls++; assert.ok(url.endsWith('/40/subscribed_apps'));
+      assert.deepEqual(body, { subscribed_fields: 'messages,leadgen' }); assert.equal(options.maxRedirects, 0);
+      throw Object.assign(new Error('ambiguous provider response'), { response: { status: 503 } });
+    }),
+  ];
+  const delay = process.env.METASYNC_REQUEST_DELAY_MS; process.env.METASYNC_REQUEST_DELAY_MS = '0';
+  try {
+    await assert.rejects(metaClient.metaSubscribePage('40', ['messages', 'leadgen'], { accessToken: 'private' }), { code: 'META_RATE_LIMIT_PAUSED' });
+    assert.equal(calls, 0); paused = false; metaClient._test.resetState();
+    await assert.rejects(metaClient.metaSubscribePage('40', ['messages', 'leadgen'], { accessToken: 'private', maxRetries: 3 }), /ambiguous provider response/);
+    assert.equal(calls, 1);
+    assert.throws(() => metaClient.metaSubscribePage('../me', ['leadgen']), /invalid_page_subscription/);
+  } finally {
+    if (delay === undefined) delete process.env.METASYNC_REQUEST_DELAY_MS; else process.env.METASYNC_REQUEST_DELAY_MS = delay;
+    restores.reverse().forEach(restore => restore()); metaClient._test.resetState();
+  }
+});

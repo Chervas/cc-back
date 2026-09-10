@@ -488,3 +488,53 @@ de la web compartida sin seleccionar/autorizar el grupo.
   Se corrigio un fallo real de retorno: cerrar sin comprobar no recarga ni
   pliega la campana abierta. Los intentos anteriores conservan el fallo de
   retorno y los ajustes del runner para la zona tactil MDC y el hover del menu.
+
+## Reutilizacion De La Recepcion Meta Existente
+
+- La recepcion de formularios Meta ya existia. Este avance no crea otro receptor,
+  otra tabla de conexiones ni otro flujo de leads. Reutiliza `ClinicMetaAsset`,
+  las asignaciones OAuth y la cola `JobRequests` para comprobar o reparar la
+  suscripcion de una pagina ya conectada. No modifica `oauth/meta/map-assets` ni
+  sustituye el perfil de Redes sociales. Multipagina independiente sigue pendiente.
+- Comando `POST /campaign-workspace/meta-preparation/page`: cuenta, campana,
+  pagina detectada, revision y accion `check` o `enable`. Solo `enable` acepta y
+  exige `confirmed: true`. Autenticacion y escritura sobre todo el scope;
+  el actor procede de la sesion, nunca del payload. El resultado HTTP 202 es
+  una tarea pendiente, no una recepcion habilitada.
+- Job `campaign_meta_page_reception`: tres intentos con el backoff/namespace
+  existentes, sin nuevo cron. Guarda IDs, revision, accion y huella, nunca tokens
+  ni respuestas de formularios. Revalida usuario, seleccion, clinica, OAuth y
+  credencial antes de consultar, antes de habilitar y antes de persistir.
+  Conserva la guarda compartida `assertSharedMarketingAssetMutationAccess`:
+  habilitar exige acceso a todas las clinicas que usan el activo; una clinica
+  aislada no cambia una pagina propiedad del grupo.
+- `check` consulta `has_lead_access` y `subscribed_apps`; no crea test leads ni
+  descarga contactos. `enable` agrega `leadgen` solo si falta y conserva los
+  demas campos de suscripcion (Messenger/social). Si no puede leer el conjunto
+  completo, no lo reemplaza. Un POST exitoso no basta: otro GET debe verificarlo.
+  El helper acotado `metaSubscribePage` comparte cuotas/pausas/telemetria con
+  `metaGet`, no sigue redirecciones y no reintenta POST ambiguos dentro de HTTP.
+- La prueba se guarda en `additionalData.campaign_lead_reception`, preservando
+  metadatos ajenos, con ID del job, app, fecha y huella de pagina/scope/conexion/
+  credencial. Caduca en 24 h o al cambiar la conexion. `prepared` significa acceso
+  y suscripcion comprobados; NO inventa una recepcion ni convierte el indicador
+  `ready` en verde sin el correspondiente formulario recibido en CRM.
+- El dialogo muestra las conexiones existentes y una accion por pagina. Se puede
+  cancelar la confirmacion sin escribir; tras encolar consulta solo el estado
+  publico del job. La espera visual se limita a 60 s, permite cerrar y volver a
+  consultar sin repetir la autorizacion. El estado no devuelve payload, tokens
+  ni contactos. El comprobador de destinos conserva su accion separada.
+- Contratos primarios: [ejemplo oficial de suscripcion](https://github.com/facebook/facebook-java-business-sdk/blob/main/examples/PageSubscribedAppsPost.java),
+  [muestra oficial de webhooks](https://github.com/fbsamples/lead-ads-webhook-sample/blob/main/postman/FB%20Lead%20Ads%20%28Part%201%20-%20The%20Webhook%29.postman_collection.json)
+  y [campos de Page del SDK](https://github.com/facebook/facebook-nodejs-business-sdk/blob/main/src/objects/page.js).
+  La referencia web de Meta devolvio 429; no se usaron fuentes secundarias como
+  contrato. Sigue pendiente verificar la operacion con una autorizacion real de
+  cliente: las pruebas de comandos usan proveedores aislados, no Graph de clientes.
+- Verificacion de este avance: 330 pruebas de Campanas y 4 del cliente Meta OK;
+  build DEV `9350470e251b696b` publicado. Chromium autenticado: 58 comprobaciones
+  y 25 capturas del workspace con APIs reales; dialogo 26 comprobaciones y 12
+  capturas, apertura real mas fixtures de confirmacion/resultado en navegador.
+  Sin errores JS ni escrituras reales. Evidencias bajo `/home/ubuntu/qa-evidence/`:
+  `campaign-workspace-meta-page-20260910` y `campaign-meta-page-20260910-verified`.
+  La inspeccion manual corrigio el pie de confirmacion movil antes del pase final.
+  No se han ejecutado cambios de suscripcion reales ni activado publicidad/senales.

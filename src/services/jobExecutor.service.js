@@ -572,6 +572,9 @@ const JOB_HANDLERS = {
   campaign_meta_lead_receive: async (payload = {}, jobRequest = null) => (
     require('./metaLeadReception.service').runMetaLeadReceptionJob(payload, jobRequest)
   ),
+  campaign_meta_page_reception: async (payload = {}, jobRequest = null) => (
+    require('./campaignWorkspaceMetaPage.service').runPageReceptionJob(payload, jobRequest)
+  ),
   // Carga diferida: publicación importa compilador/modelos Web y no debe
   // introducir un ciclo durante el arranque del worker global.
   web_publication_deploy: async (payload = {}, jobRequest = null) => (

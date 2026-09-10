@@ -3,6 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { nativeForms, loadNativeFormEvidence } = require('../../services/campaignWorkspaceNativeReception.service');
+const { pageFingerprint } = require('../../services/campaignWorkspaceMetaPage.service');
 
 const now = new Date('2026-09-10T15:00:00Z');
 const receipt = (form = '50', patch = {}) => ({ lead_intake_id: Number(form), 'leadIntake.clinica_id': 1, received_at: '2026-09-10T12:00:00Z',
@@ -72,4 +73,23 @@ test('an explicit form permission failure supersedes an older successful receipt
 test('native checks never query form evidence for unassigned or non-native campaigns', async () => {
   const h = harness(); h.state.campaign.assigned = false;
   assert.equal((await h.read()).size, 0); assert.equal(h.state.queries.length, 0);
+});
+test('duplicate effective page connections are not resolved arbitrarily', async () => {
+  const h = harness(); h.state.pages.push({ ...h.state.pages[0] });
+  assert.equal((await h.read()).get(h.state.campaign.id).reception.ready, false);
+});
+test('verified setup does not invent a received lead, and missing subscription overrides earlier receipts', async () => {
+  const previous = process.env.META_APP_ID; process.env.META_APP_ID = '9';
+  try {
+    const h = harness(); h.state.pages[0].pageAccessToken = 'private'; h.state.audits = [];
+    const page = h.state.pages[0];
+    page.additionalData = { campaign_lead_reception: { version: 1, fingerprint: pageFingerprint(page), app_id: '9',
+      checked_at: '2026-09-10T14:59:00Z', state: 'verified' } };
+    let result = (await h.read()).get(h.state.campaign.id);
+    assert.equal(result.reception.ready, false); assert.ok(result.forms.every(form => form.state === 'prepared'));
+    assert.ok(result.forms.every(form => form.receivedAt === null)); assert.ok(!JSON.stringify(result).includes('private'));
+    h.state.audits = [receipt(), receipt('51')]; page.additionalData.campaign_lead_reception.state = 'subscription_required';
+    result = (await h.read()).get(h.state.campaign.id);
+    assert.equal(result.reception.ready, false); assert.ok(result.forms.every(form => form.state === 'subscription_required'));
+  } finally { if (previous === undefined) delete process.env.META_APP_ID; else process.env.META_APP_ID = previous; }
 });

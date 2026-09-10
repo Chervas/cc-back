@@ -18,10 +18,23 @@ function harness(options = {}) {
 }
 
 test('configuration queries and commands require an authenticated session', async () => {
-  for (const method of ['get', 'put', 'preparation', 'activate', 'assign', 'metaPreparation', 'refreshMeta']) {
+  for (const method of ['get', 'put', 'preparation', 'activate', 'assign', 'metaPreparation', 'refreshMeta', 'requestMetaPage', 'metaPageJob']) {
     const h = harness(); await h.run(method, { userData: null });
     assert.equal(h.res.statusCode, 401); assert.equal(h.calls.length, 0);
   }
+});
+test('page reception commands require full write scope, status only needs read scope', async () => {
+  const forbidden = harness({ hasAccess: async input => input.access === 'read', requestMetaPage: () => assert.fail('forbidden command') });
+  await forbidden.run('requestMetaPage'); assert.equal(forbidden.res.statusCode, 403);
+  const allowed = harness({ requestMetaPage: async input => {
+    assert.equal(input.actorId, 7); assert.deepEqual(input.scope.clinicIds, [1, 2]); return { success: true, job: { id: 1 } };
+  } });
+  await allowed.run('requestMetaPage'); assert.equal(allowed.res.statusCode, 202);
+  const status = harness({ hasAccess: async input => input.access === 'read', metaPageJob: async input => {
+    assert.equal(input.jobId, 1); assert.deepEqual(input.scope.clinicIds, [1, 2]); return { success: true };
+  } });
+  await status.run('metaPageJob', { query: { scope: 'group:5', account_id: '20', campaign_id: '30' }, params: { jobId: '1' } });
+  assert.equal(status.res.statusCode, 200);
 });
 test('Meta checks require full-scope write access; opening the dialog only reads cached proof', async () => {
   const forbidden = harness({ hasAccess: async input => input.access === 'read', refreshMeta: () => assert.fail('forbidden check') });

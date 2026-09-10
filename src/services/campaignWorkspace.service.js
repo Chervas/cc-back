@@ -134,7 +134,7 @@ async function loadCampaignWorkspace({ models, scope, days, now = new Date() }) 
   await attachLeadAdvertisingIdentities({ models, leads });
   const budgetAttribution = await loadBudgetCampaignAttribution({ models, campaigns, period });
   const metrics = aggregateReport({ campaigns, facts, leads, appointments, ads, budgetAttribution, period, now });
-  const evidence = await loadWebEvidence({ models, campaigns, selectedClinics, groups, now });
+  const evidence = await loadWebEvidence({ models, campaigns, selectedClinics, groups, scope, now });
   const report = buildWorkspaceHealth(metrics, evidence, now);
   return { success: true, version: 1, scope: { clinicIds: scope.clinicIds, groupId: scope.groupId || null },
     generatedAt: now.toISOString(), report,
@@ -142,7 +142,7 @@ async function loadCampaignWorkspace({ models, scope, days, now = new Date() }) 
   };
 }
 
-async function loadWebEvidence({ models, campaigns, selectedClinics, groups, now, transaction = null }) {
+async function loadWebEvidence({ models, campaigns, selectedClinics, groups, scope = null, now, transaction = null }) {
   const receipts = await loadFormReceiptEvidence({ models, campaigns, now, transaction });
   const ids = selectedClinics.map(row => row.id_clinica);
   const records = await models.IntakeConfig.findAll({ where: { [Op.or]: [
@@ -158,7 +158,7 @@ async function loadWebEvidence({ models, campaigns, selectedClinics, groups, now
     } });
     byClinic.set(Number(clinic.id_clinica), { state, readiness: assessConsentMeasurementReadiness(state.marketingState) });
   }
-  const evidence = await loadNativeFormEvidence({ models, campaigns, selectedClinics, now, transaction });
+  const evidence = await loadNativeFormEvidence({ models, campaigns, selectedClinics, scope, now, transaction });
   for (const campaign of campaigns) {
     if (!campaign.assigned || campaign.destination !== 'web') continue;
     const { state, readiness } = byClinic.get(campaign.clinicId) || {};
