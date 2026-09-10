@@ -13,6 +13,7 @@ const Message = db.Message;
 const Usuario = db.Usuario;
 const Clinica = db.Clinica;
 const GrupoClinica = db.GrupoClinica;
+const { preparationRevision, validatePreparation, applyCampaignPreparation } = require('../lib/intake-campaign-preparation');
 const Paciente = db.Paciente;
 const PacienteClinica = db.PacienteClinica;
 const CitaPaciente = db.CitaPaciente;
@@ -4529,6 +4530,7 @@ const getIntakeConfig = async (
   });
 
   const payload = defaultConfigPayload(record?.clinic_id || clinicIdParsed, record?.group_id || groupIdParsed);
+  if (includeAllLocations) payload.preparation_revision = preparationRevision(record);
   if (effectiveClinicId && !effectiveClinicRow) {
     effectiveClinicRow = await Clinica.findOne({
       where: { id_clinica: effectiveClinicId },
@@ -5072,6 +5074,11 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const verificationOnlyMutation = body.mutation_kind === 'snippet_verification';
   const domainAddMutation = body.mutation_kind === 'domain_add';
+  const preparationMutation = body.mutation_kind === 'campaign_preparation';
+  if (preparationMutation) {
+    try { validatePreparation(body); }
+    catch (error) { return res.status(error.status || 400).json({ success: false, error: error.code }); }
+  }
   const partialMutation = verificationOnlyMutation || domainAddMutation;
   let groupId = requestedGroupId;
   let scope = groupId ? 'group' : 'clinic';
@@ -5104,7 +5111,7 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
   const hasHmacKeyField = Object.prototype.hasOwnProperty.call(body, 'hmac_key');
   const requestedHmacKey = body.hmac_key;
   let allowedLocationClinicIds = [];
-  if (!partialMutation) {
+  if (!partialMutation && !preparationMutation) {
     const candidateLocationClinicIds = await resolveIntakeCandidateClinicIds({
       clinicId: scope === 'clinic' ? clinicId : null,
       groupId: scope === 'group' ? groupId : null,
@@ -5130,6 +5137,11 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
     : { clinic_id: clinicId };
 
   const persistence = await db.sequelize.transaction(async (transaction) => {
+    if (preparationMutation) {
+      const ownerModel = scope === 'group' ? GrupoClinica : Clinica;
+      const owner = await ownerModel.findByPk(scope === 'group' ? groupId : clinicId, { transaction, lock: transaction.LOCK.UPDATE });
+      if (!owner) return { error: { status: 404, body: { success: false, error: 'intake_scope_not_found' } } };
+    }
     // Serialize editor writes with the automatic gate/reconciliation jobs. The
     // merge must use the latest committed server-owned state, not the snapshot
     // that happened to be returned when the editor screen was opened.
@@ -5152,12 +5164,17 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
       };
     }
     const existingDomains = canonicalizeIntakeDomains(Array.isArray(existing?.domains) ? existing.domains : []);
-    const domains = verificationOnlyMutation
+    let preparation = null;
+    if (preparationMutation) {
+      try { preparation = applyCampaignPreparation(existing, body); }
+      catch (error) { return { error: { status: error.status || 400, body: { success: false, error: error.code } } }; }
+    }
+    const domains = preparation ? preparation.domains : verificationOnlyMutation
       ? existingDomains
       : domainAddMutation
         ? canonicalizeIntakeDomains([...existingDomains, domainToAdd])
         : submittedDomains;
-    const config = partialMutation
+    const config = preparation ? preparation.config : partialMutation
       ? { ...existingConfig }
       : mergeIntakeConfigForEditorWrite(
           existingConfig,
@@ -5166,13 +5183,13 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
           normalizeMetaAdsConfig,
         );
 
-    if (!partialMutation
+    if (!partialMutation && !preparationMutation
       && Object.prototype.hasOwnProperty.call(config, 'locations')
       && !Array.isArray(config.locations)) {
       return { error: { status: 400, body: { success: false, error: 'locations_invalid' } } };
     }
     const configuredLocations = Array.isArray(config.locations) ? config.locations : [];
-    if (!partialMutation
+    if (!partialMutation && !preparationMutation
       && !configuredLocationsWithinAllowedScope(configuredLocations, allowedLocationClinicIds)) {
       return { error: { status: 403, body: { success: false, error: 'location_scope_forbidden' } } };
     }
@@ -5249,7 +5266,9 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
         ? 'marketing:web_measurement_verified'
         : domainAddMutation
           ? 'marketing:web_measurement_domain_added'
-          : 'marketing:web_measurement_configured',
+          : preparationMutation
+            ? 'marketing:campaign_web_preparation'
+            : 'marketing:web_measurement_configured',
       requestedBy: req.userData?.userId || null,
       requestedByName: req.userData?.name
         || req.userData?.nombre

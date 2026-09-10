@@ -77,6 +77,25 @@ individualmente en DEV el 2026-09-10 mediante `sequelize-cli db:migrate --name`.
 Valida columnas, indices unicos y FK; es reanudable. No se ejecutaron otras
 migraciones ni se guardaron selecciones de clientes durante la verificacion.
 
+## Preparacion Web Acotada
+
+El endpoint existente `PUT /api/intake/config/:clinicId` admite
+`mutation_kind=campaign_preparation`. Requiere la misma autorizacion de escritura
+efectiva que el editor completo: una clinica no puede cambiar el consentimiento
+de la web compartida sin seleccionar/autorizare el grupo.
+
+- Solo admite dominio, recepcion de formularios, proveedor CMP y tres URLs legales.
+  Rechaza conversiones, HMAC, pruebas firmadas y cualquier otro campo del editor.
+- `GET /api/intake/config/admin` devuelve `preparation_revision`. El nuevo comando
+  comprueba esa revision bajo bloqueo y agrega el dominio sin borrar otros.
+- Conserva chatbot, llamadas, flujos, sedes y politicas Google/Meta ya guardadas.
+  Una instalacion inicial no habilita widgets ni senales publicitarias.
+- Reutiliza reconstruccion de pruebas firmadas y hooks de reconciliacion actuales.
+  Cambiar el consentimiento no fabrica una verificacion positiva. El job recibe
+  el origen `marketing:campaign_web_preparation`.
+- El modal real y la comprobacion de recepcion siguen pendientes de integrar;
+  no se debe copiar el paso de verificacion simulada del mock.
+
 ## Pendientes Antes De Sustituir La Ruta
 
 - Contenedor y navegacion productivos con la UI aprobada. Mantener los interiores
@@ -118,3 +137,6 @@ migraciones ni se guardaron selecciones de clientes durante la verificacion.
   181 pruebas OK; `campaign_workspace_*.test.js` 63 pruebas OK; regresiones OAuth
   incluidas. Front: 6 contratos de seleccion/OAuth, TypeScript y compilacion
   Angular aislada OK. Ninguna autorizacion operativa guardada en clientes reales.
+- Preparacion web: 9 contratos nuevos, junto con verificacion firmada, merge,
+  configuracion efectiva y hooks del runtime (22 pruebas OK). No se ha probado
+  este guardado sobre ninguna web real ni se ha reiniciado el backend.
