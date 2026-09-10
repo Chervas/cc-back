@@ -6,6 +6,7 @@ const { Op } = require('sequelize');
 const db = require('../../models');
 const { hasMarketingClinicScopeAccess } = require('../lib/marketingScopeAccess');
 const { publicHttpUrl } = require('../lib/safeHttpTarget');
+const { globalManagedQuote, globalManagedRequest, publicRequestedQuote } = require('../services/managedCampaignQuote.service');
 
 const {
   Clinica,
@@ -256,6 +257,7 @@ function publicBudgetConfig(value) {
     currency: (clean(budget.currency, 3) || 'EUR').toUpperCase(),
     period: clean(budget.period, 32) || 'monthly',
     leads: budget.leads === null ? null : Math.max(0, Number(budget.leads) || 0),
+    requested_quote: publicRequestedQuote(budget.requested_quote),
   };
 }
 
@@ -667,6 +669,19 @@ exports.getClientCampaign = asyncHandler(async (req, res) => {
   return res.json({ success: true, campaign: publicCampaign(row) });
 });
 
+exports.getGlobalManagedQuote = asyncHandler(async (req, res) => {
+  const clinicId = Number(req.query.clinica_id);
+  if (!userId(req)) return res.status(401).json({ success: false, error: 'unauthenticated' });
+  if (!Number.isSafeInteger(clinicId) || clinicId <= 0) return res.status(400).json({ success: false, error: 'clinic_id_required' });
+  if (!(await requireScope(req, res, [clinicId], 'read'))) return;
+  res.set('Cache-Control', 'private, no-store');
+  try { return res.json({ success: true, quote: globalManagedQuote(Number(req.query.investment)) }); }
+  catch (error) {
+    if (error.httpStatus) return res.status(error.httpStatus).json({ success: false, error: error.code });
+    throw error;
+  }
+});
+
 exports.requestAutopilot = asyncHandler(async (req, res) => {
   const actorId = userId(req);
   const clinicId = positiveInt(req.body?.clinica_id);
@@ -678,7 +693,12 @@ exports.requestAutopilot = asyncHandler(async (req, res) => {
     : (['google_search', 'google_pmax', 'google_smart_observe'].includes(req.body?.family) ? req.body.family : 'google_smart_observe');
   const id = crypto.randomUUID();
   const fundingId = crypto.randomUUID();
-  const budget = safeObject(req.body?.budget);
+  let globalPlan = null;
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, 'global_plan')) {
+    try { globalPlan = globalManagedRequest(req.body.global_plan); }
+    catch (error) { return res.status(error.httpStatus || 400).json({ success: false, error: error.code || 'invalid_global_managed_request' }); }
+  }
+  const budget = globalPlan ? { amount: globalPlan.quote.total, currency: 'EUR', period: 'monthly' } : safeObject(req.body?.budget);
   const requestedBudgetAmount = money(budget.amount);
   if (requestedBudgetAmount < 100 || requestedBudgetAmount > 1000000) {
     return res.status(400).json({
@@ -726,7 +746,7 @@ exports.requestAutopilot = asyncHandler(async (req, res) => {
       const transition = references.transition;
       const requestedTarget = safeObject(req.body?.target);
       const requestedDestination = safeObject(req.body?.destination);
-      const name = clean(req.body?.name) || `Piloto automático · ${clinic.nombre_clinica}`;
+      const name = globalPlan ? `Plan gestionado · ${clinic.nombre_clinica}` : clean(req.body?.name) || `Piloto automático · ${clinic.nombre_clinica}`;
 
       await ManagedCampaign.create({
         id,
@@ -745,6 +765,7 @@ exports.requestAutopilot = asyncHandler(async (req, res) => {
         target_config: {
           ...(transition?.targetConfig || {}),
           ...requestedTarget,
+          ...(globalPlan ? { source: 'campaign_workspace', service: 'global_managed', proposal_summary: globalPlan.goal } : {}),
         },
         budget_config: {
           ...(transition?.budgetConfig || {}),
@@ -752,6 +773,7 @@ exports.requestAutopilot = asyncHandler(async (req, res) => {
           currency: (clean(budget.currency, 3) || 'EUR').toUpperCase(),
           period: clean(budget.period, 16) || 'monthly',
           leads: null,
+          ...(globalPlan ? { requested_quote: globalPlan.quote } : {}),
         },
         schedule_config: safeObject(req.body?.schedule),
         destination_config: {
@@ -821,11 +843,19 @@ exports.approveClientProposal = asyncHandler(async (req, res) => {
       message: 'La propuesta cambió. Recarga antes de aprobarla.',
     });
   }
+  if (row.target_config?.service === 'global_managed' && (
+    req.body?.content_approved !== true || row.creative_config?.assets_ready !== true
+      || !publicHttpUrl(row.creative_config?.client_preview_url, { requireHttps: true })
+  )) {
+    return res.status(409).json({ success: false, error: 'managed_content_review_required',
+      message: 'El contenido debe estar disponible y revisado antes de aprobar la propuesta.' });
+  }
   const review = {
     ...currentReview,
     proposal_revision: expectedRevision,
     client_approved_at: new Date().toISOString(),
     client_approved_by_user_id: actorId,
+    ...(row.target_config?.service === 'global_managed' ? { client_content_approved_revision: expectedRevision } : {}),
     client_next_action: 'Pendiente de revisión y preparación técnica por ClinicaClick',
   };
   const [updated] = await ManagedCampaign.update(

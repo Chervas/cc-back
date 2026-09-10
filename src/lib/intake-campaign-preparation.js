@@ -66,4 +66,12 @@ function applyCampaignPreparation(record, body) {
   };
 }
 
-module.exports = { preparationRevision, validatePreparation, applyCampaignPreparation };
+function mergeVerifiedDomains(existingVerification, incomingVerification, rebuild) {
+  const incoming = rebuild(incomingVerification, true);
+  const existing = rebuild(existingVerification, false);
+  return rebuild({ attestations_by_domain: {
+    ...existing.attestations_by_domain, ...incoming.attestations_by_domain,
+  } }, false);
+}
+
+module.exports = { preparationRevision, validatePreparation, applyCampaignPreparation, mergeVerifiedDomains };

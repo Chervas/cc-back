@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { preparationRevision, validatePreparation, applyCampaignPreparation } = require('../../lib/intake-campaign-preparation');
+const { preparationRevision, validatePreparation, applyCampaignPreparation, mergeVerifiedDomains } = require('../../lib/intake-campaign-preparation');
 
 const body = { mutation_kind: 'campaign_preparation', expected_revision: null, domain: 'https://clinic.example/landing',
   form_intercept_enabled: true, consent_provider: 'clinicaclick', legal_urls: {
@@ -73,4 +73,22 @@ test('preparation revision does not expose HMAC secrets and is scope-bound', () 
   assert.match(preparationRevision(record), /^[a-f0-9]{64}$/);
   assert.notEqual(preparationRevision(record), preparationRevision({ ...record, clinic_id: 2 }));
   assert.equal(preparationRevision(null), null);
+});
+test('renewing one domain keeps only server-revalidated proofs of the other domains', () => {
+  const calls = [];
+  const result = mergeVerifiedDomains({ attestations_by_domain: { old: 'valid-persisted', expired: 'expired' } },
+    { attestations_by_domain: { current: 'fresh' }, verified: true }, (input, strict) => {
+      calls.push(strict);
+      return { attestations_by_domain: Object.fromEntries(Object.entries(input.attestations_by_domain).filter(([, token]) => token !== 'expired')) };
+    });
+  assert.deepEqual(calls, [true, false, false]);
+  assert.deepEqual(result.attestations_by_domain, { old: 'valid-persisted', current: 'fresh' });
+  assert.equal(result.verified, undefined);
+});
+test('incoming proof is checked strictly before accepting or merging any existing state', () => {
+  let count = 0;
+  assert.throws(() => mergeVerifiedDomains({}, { verified: true }, (_value, strict) => {
+    count++; assert.equal(strict, true); throw new Error('attestation_missing');
+  }), /attestation_missing/);
+  assert.equal(count, 1);
 });

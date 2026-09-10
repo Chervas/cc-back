@@ -5,6 +5,7 @@ const { accountId, mappingIdentity, reportPeriod, visibleCampaigns, aggregateRep
 const { assessConsentMeasurementReadiness, resolveWebMeasurementMarketingState } = require('./campaignMeasurementReadiness.service');
 const { buildWorkspaceHealth } = require('./campaignWorkspaceHealth.service');
 const { campaignIncluded } = require('./campaignWorkspaceSettings.service');
+const { loadFormReceiptEvidence } = require('./campaignWorkspaceReception.service');
 
 const LEAD_FIELDS = ['id', 'clinica_id', 'source', 'channel', 'utm_source', 'utm_campaign', 'source_detail', 'google_ads_customer_id', 'google_ads_campaign_id', 'created_at'];
 const GOOGLE_MAPPING_FIELDS = ['id', 'customerId', 'descriptiveName', 'currencyCode', 'clinicaId', 'grupoClinicaId', 'assignmentScope', 'lastSyncedAt'];
@@ -43,10 +44,10 @@ async function loadWorkspaceInventory({ models, scope, transaction = null }) {
   // Meta's existing synchronizer persists entities, not ExternalCampaignInventory.
   if (metaStoredIds.length) {
     const metaInventory = await models.SocialAdsEntity.findAll({ where: { level: 'campaign', ad_account_id: { [Op.in]: metaStoredIds } },
-      attributes: ['ad_account_id', 'entity_id', 'name', 'effective_status', 'status', 'updated_time'], raw: true, transaction });
+      attributes: ['ad_account_id', 'entity_id', 'name', 'effective_status', 'status', 'updated_at'], raw: true, transaction });
     for (const row of metaInventory) inventory.push({ provider: 'meta_ads', customer_id: row.ad_account_id,
       campaign_id: row.entity_id, campaign_name: row.name, status: row.effective_status || row.status,
-      last_seen_at: row.updated_time });
+      last_seen_at: row.updated_at });
   }
   const assignments = refs.length ? await models.ExternalCampaignAssignment.findAll({ where: { [Op.or]: refs },
     attributes: ['provider', 'customer_id', 'campaign_id', 'clinica_id', 'status'], raw: true, transaction }) : [];
@@ -122,7 +123,7 @@ async function loadCampaignWorkspace({ models, scope, days, now = new Date() }) 
     clinica_id: { [Op.in]: scope.clinicIds } }, attributes: LEAD_FIELDS, raw: true }));
   const ads = await loadWorkspaceAds({ models, googleWhere, metaCampaigns, dateWhere });
   const metrics = aggregateReport({ campaigns, facts, leads, appointments, ads, period, now });
-  const evidence = await loadWebEvidence({ models, campaigns, selectedClinics, groups });
+  const evidence = await loadWebEvidence({ models, campaigns, selectedClinics, groups, now });
   const report = buildWorkspaceHealth(metrics, evidence, now);
   return { success: true, version: 1, scope: { clinicIds: scope.clinicIds, groupId: scope.groupId || null },
     generatedAt: now.toISOString(), report,
@@ -130,7 +131,8 @@ async function loadCampaignWorkspace({ models, scope, days, now = new Date() }) 
   };
 }
 
-async function loadWebEvidence({ models, campaigns, selectedClinics, groups }) {
+async function loadWebEvidence({ models, campaigns, selectedClinics, groups, now }) {
+  const receipts = await loadFormReceiptEvidence({ models, campaigns, now });
   const ids = selectedClinics.map(row => row.id_clinica);
   const records = await models.IntakeConfig.findAll({ where: { [Op.or]: [
     { assignment_scope: 'clinic', clinic_id: { [Op.in]: ids } },
@@ -163,7 +165,8 @@ async function loadWebEvidence({ models, campaigns, selectedClinics, groups }) {
       privacy: { checked: true, ready, detail, key },
       // An installed snippet is not a successful reception test. Never promote it to reception-ready here.
       reception: !ready || state.record?.config?.features?.form_intercept_enabled !== true
-        ? { checked: true, ready: false, detail: !ready ? detail : 'La captura de formularios está desactivada.', key } : { checked: false },
+        ? { checked: true, ready: false, detail: !ready ? detail : 'La captura de formularios está desactivada.', key }
+        : receipts.get(campaign.id) || { checked: false },
     });
   }
   return evidence;
@@ -186,9 +189,12 @@ async function loadWorkspaceAds({ models, googleWhere, metaCampaigns, dateWhere 
   if (!adsets.length) return ads;
   const entities = await models.SocialAdsEntity.findAll({ where: { level: 'ad', [Op.or]: adsets.map(row => ({
     ad_account_id: row.ad_account_id, parent_id: row.entity_id,
-  })) }, attributes: ['entity_id', 'parent_id', 'name', 'ad_account_id', 'effective_status', 'status', 'updated_time'], raw: true });
+  })) }, attributes: ['entity_id', 'parent_id', 'name', 'ad_account_id', 'effective_status', 'status', 'updated_at'], raw: true });
   const byId = new Map(entities.map(row => [`${accountId(row.ad_account_id)}:${row.entity_id}`, row]));
   const byAdset = new Map(adsets.map(row => [`${accountId(row.ad_account_id)}:${row.entity_id}`, row.parent_id]));
+  for (const entity of entities) ads.push({ provider: 'meta_ads', account_id: entity.ad_account_id,
+    campaign_id: byAdset.get(`${accountId(entity.ad_account_id)}:${entity.parent_id}`), id: entity.entity_id,
+    title: entity.name, status: entity.effective_status || entity.status, updatedAt: entity.updated_at, inventory: true });
   const rows = entities.length ? await models.SocialAdsInsightsDaily.findAll({ where: { level: 'ad', date: dateWhere,
     [Op.or]: entities.map(row => ({ entity_id: row.entity_id, ad_account_id: row.ad_account_id })) },
     attributes: ['ad_account_id', 'entity_id', 'date', 'publisher_platform', 'platform_position', 'spend', 'updated_at'],
@@ -198,9 +204,9 @@ async function loadWorkspaceAds({ models, googleWhere, metaCampaigns, dateWhere 
     ads.push({ provider: 'meta_ads', account_id: row.ad_account_id,
       campaign_id: byAdset.get(`${accountId(row.ad_account_id)}:${entity.parent_id}`), id: entity.entity_id,
       title: entity.name, status: entity.effective_status || entity.status, date: row.date,
-      segment: [row.publisher_platform || '', row.platform_position || ''], spend: Number(row.spend), updatedAt: entity.updated_time });
+      segment: [row.publisher_platform || '', row.platform_position || ''], spend: Number(row.spend), updatedAt: entity.updated_at });
   }
   return ads;
 }
 
-module.exports = { loadCampaignWorkspace, loadWorkspaceInventory, selectedByWorkspace, workspaceAccounts };
+module.exports = { loadCampaignWorkspace, loadWorkspaceInventory, loadWorkspaceAds, selectedByWorkspace, workspaceAccounts };

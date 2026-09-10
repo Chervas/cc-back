@@ -13,7 +13,7 @@ const Message = db.Message;
 const Usuario = db.Usuario;
 const Clinica = db.Clinica;
 const GrupoClinica = db.GrupoClinica;
-const { preparationRevision, validatePreparation, applyCampaignPreparation } = require('../lib/intake-campaign-preparation');
+const { preparationRevision, validatePreparation, applyCampaignPreparation, mergeVerifiedDomains } = require('../lib/intake-campaign-preparation');
 const Paciente = db.Paciente;
 const PacienteClinica = db.PacienteClinica;
 const CitaPaciente = db.CitaPaciente;
@@ -4485,7 +4485,7 @@ const getIntakeConfig = async (
   if (!record && groupIdParsed !== null) {
     record = await IntakeConfig.findOne({ where: { group_id: groupIdParsed, assignment_scope: 'group' }, raw: true });
   }
-  if (!record && domain) {
+  if (!record && domain && !includeAllLocations) {
     record = await IntakeConfig.findOne({
       where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain}\"') AND assignment_scope='clinic'`)
     });
@@ -4495,7 +4495,7 @@ const getIntakeConfig = async (
       record = sharedWebContext?.record || record;
     }
   }
-  if (!record && domain) {
+  if (!record && domain && !includeAllLocations) {
     record = await IntakeConfig.findOne({
       where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain}\"') AND assignment_scope='group'`)
     });
@@ -4530,7 +4530,16 @@ const getIntakeConfig = async (
   });
 
   const payload = defaultConfigPayload(record?.clinic_id || clinicIdParsed, record?.group_id || groupIdParsed);
-  if (includeAllLocations) payload.preparation_revision = preparationRevision(record);
+  if (includeAllLocations) {
+    payload.preparation_revision = preparationRevision(record);
+    const preparationGroup = record?.assignment_scope === 'group' ? record.group_id : !record ? groupIdParsed : null;
+    const preparationClinics = preparationGroup
+      ? await resolveIntakeCandidateClinicIds({ groupId: preparationGroup })
+      : [record?.clinic_id || clinicIdParsed].filter(Boolean);
+    payload.preparation_can_write = preparationClinics.length > 0 && await hasMarketingClinicScopeAccess({
+      userId: req.userData?.userId, clinicIds: preparationClinics, access: 'write',
+    });
+  }
   if (effectiveClinicId && !effectiveClinicRow) {
     effectiveClinicRow = await Clinica.findOne({
       where: { id_clinica: effectiveClinicId },
@@ -5219,15 +5228,18 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
       };
     }
     try {
-      config.snippet_verification = rebuildTrustedSnippetVerification({
-        rawVerification: verificationSource,
+      const rebuild = (rawVerification, rejectInvalid) => rebuildTrustedSnippetVerification({
+        rawVerification,
         scopeType: scope,
         scopeId: scope === 'group' ? groupId : clinicId,
         domains,
         config,
         hmacKey: nextHmacKey,
-        rejectInvalid: hasRootVerification || hasNestedVerification,
+        rejectInvalid,
       });
+      config.snippet_verification = verificationOnlyMutation && body.merge_verified_domains === true
+        ? mergeVerifiedDomains(existingConfig.snippet_verification, verificationSource, rebuild)
+        : rebuild(verificationSource, hasRootVerification || hasNestedVerification);
     } catch (error) {
       if (error?.code === 'snippet_verification_attestation_invalid') {
         return {

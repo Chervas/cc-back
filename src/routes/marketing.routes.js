@@ -233,6 +233,7 @@ router.get('/campaign-optimization/status', campaignOptimizationController.getOp
 // Piloto automático: la proyección cliente nunca expone comisión, coste neto ni cuentas internas.
 router.get('/managed-campaigns', managedCampaignsController.listClientCampaigns);
 router.post('/managed-campaigns/request', managedCampaignsController.requestAutopilot);
+router.get('/managed-campaigns/quote', managedCampaignsController.getGlobalManagedQuote);
 router.get('/managed-campaigns/:id', managedCampaignsController.getClientCampaign);
 router.post('/managed-campaigns/:id/approve', managedCampaignsController.approveClientProposal);
 router.post('/managed-campaigns/:id/request-changes', managedCampaignsController.requestClientProposalChanges);

@@ -91,6 +91,21 @@ test('missing ad-level CRM identity does not become platform conversions', () =>
   assert.equal(result.rows[0].ads[0].current.leads, null);
   assert.equal(result.rows[0].ads[0].lowestCost, false);
 });
+test('inventory-only ads remain visible without inventing spend or conversions', () => {
+  const result = report({ ads: [{ ...identity, id: '1', title: 'Rechazado', status: 'DISAPPROVED', updatedAt: now, inventory: true }] });
+  assert.equal(result.rows[0].ads.length, 1);
+  assert.equal(result.rows[0].ads[0].rejected, true);
+  assert.equal(result.rows[0].ads[0].current.spend, null);
+  assert.equal(result.rows[0].ads[0].previous.spend, null);
+});
+test('inventory and metric rows merge once and retain the freshest ad status', () => {
+  const result = report({ ads: [
+    { ...identity, id: '1', title: 'Rechazado', status: 'DISAPPROVED', updatedAt: now, inventory: true },
+    { ...fact(), id: '1', title: 'Anuncio', status: 'ENABLED', updatedAt: '2026-09-08', spend: 12 },
+  ] });
+  assert.equal(result.rows[0].ads.length, 1); assert.equal(result.rows[0].ads[0].current.spend, 12);
+  assert.equal(result.rows[0].ads[0].rejected, true); assert.equal(result.rows[0].ads[0].active, false);
+});
 test('stale performance cannot be green despite enough leads', () => {
   const leads = Array.from({ length: 20 }, (_, i) => lead(i, { created_at: i < 10 ? '2026-09-01T10:00:00Z' : '2026-09-09T10:00:00Z' }));
   const result = report({ leads, facts: [fact({ updatedAt: '2026-08-01' }), fact({ date: '2026-09-01', updatedAt: '2026-08-01' })] });

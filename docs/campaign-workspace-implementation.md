@@ -82,7 +82,7 @@ migraciones ni se guardaron selecciones de clientes durante la verificacion.
 El endpoint existente `PUT /api/intake/config/:clinicId` admite
 `mutation_kind=campaign_preparation`. Requiere la misma autorizacion de escritura
 efectiva que el editor completo: una clinica no puede cambiar el consentimiento
-de la web compartida sin seleccionar/autorizare el grupo.
+de la web compartida sin seleccionar/autorizar el grupo.
 
 - Solo admite dominio, recepcion de formularios, proveedor CMP y tres URLs legales.
   Rechaza conversiones, HMAC, pruebas firmadas y cualquier otro campo del editor.
@@ -93,8 +93,42 @@ de la web compartida sin seleccionar/autorizare el grupo.
 - Reutiliza reconstruccion de pruebas firmadas y hooks de reconciliacion actuales.
   Cambiar el consentimiento no fabrica una verificacion positiva. El job recibe
   el origen `marketing:campaign_web_preparation`.
-- El modal real y la comprobacion de recepcion siguen pendientes de integrar;
-  no se debe copiar el paso de verificacion simulada del mock.
+- El modal compartido real ya tiene Preparar / Instalar / Comprobar. Descarga el
+  plugin WordPress o genera el snippet con el HMAC real del scope. Reutiliza el
+  verificador firmado; no fabrica un formulario de prueba ni activa senales Ads.
+- GET admin devuelve tambien `preparation_can_write`, calculado sobre el scope
+  efectivo completo. Una consulta admin por dominio no puede caer en otra
+  configuracion ajena cuando no existe la del scope solicitado.
+- `merge_verified_domains=true`, solo en la mutacion de verificacion, valida
+  estrictamente la prueba entrante y conserva las pruebas operativas vigentes
+  de otros dominios. No confunde TTL de emision con TTL operativo.
+- Salud consulta `FormSubmissionEvents` de los ultimos siete dias por fecha de
+  recepcion del servidor, con join obligatorio al lead de la misma clinica. Cada
+  destino web debe tener recepcion; se ignoran parametros publicitarios, pero no
+  rutas ni parametros funcionales. La consulta no proyecta campos del formulario
+  ni identificadores del paciente. Sin recibo reciente queda sin comprobar, no
+  declara un fallo solo porque aun no haya envios.
+
+## Plan Gestionado
+
+- `GET /api/marketing/managed-campaigns/quote?clinica_id=1&investment=650`
+  requiere sesion y acceso a la clinica. Devuelve un calculo orientativo versionado
+  `global-managed-v1`: maximo de 999 EUR y 149 + inversion + 20% + 50%. No calcula
+  impuestos ni crea contratos, pagos, facturas o instrucciones de reparto Stripe.
+- El POST existente `/managed-campaigns/request` admite `global_plan` con
+  `quote_version`, `investment` y `goal`. Recalcula el importe en servidor, guarda
+  el desglose solicitado, y crea el registro gestionado draft/observe y su cuenta
+  unfunded. El contrato anterior de presupuesto total se conserva para otros
+  consumidores. Una segunda solicitud vigente devuelve 409 con el registro real.
+- El dialogo usa solicitudes, estados, propuesta, enlace de contenido y revision
+  reales. En un grupo identifica la clinica de cada propuesta; no reparte un
+  presupuesto arbitrariamente entre sedes. No necesita cuentas Ads para solicitar.
+- Para las nuevas solicitudes Global, aprobar exige contenido disponible y
+  aceptacion explicita de la revision vigente. La aprobacion pasa a revision del
+  equipo, no a activa. Pedir cambios reutiliza el comando versionado existente.
+- El selector de clinica/grupo cancela lecturas y cierra los dialogos del scope
+  anterior. Plan gestionado carga por separado del informe: su fallo no impide
+  ver los resultados. El contenedor nuevo aun NO sustituye la ruta productiva.
 
 ## Pendientes Antes De Sustituir La Ruta
 
@@ -112,8 +146,8 @@ de la web compartida sin seleccionar/autorizare el grupo.
 - Optimiza: auditar y conectar capacidades efectivas de ambos proveedores. El
   onboarding actual solo admite Google para guided_improvement. Nunca anunciar
   ajustes Meta como activos si el ejecutor no los soporta.
-- Solicitud gestionada y aprobaciones con servicios existentes; sin cobros ni
-  publicacion de prueba en cuentas reales.
+- Solicitud gestionada y aprobaciones preparadas con servicios existentes;
+  pendientes de QA visual integrado, sin cobros ni publicacion en cuentas reales.
 - Completar frescura/cobertura del inventario de anuncios sin insights, registros
   de recepcion, tipos de destino desconocido y divisa de cuentas Meta antiguas.
 - QA responsive y navegacion real en Chromium, estados inicial/configurado,
@@ -140,3 +174,13 @@ de la web compartida sin seleccionar/autorizare el grupo.
 - Preparacion web: 9 contratos nuevos, junto con verificacion firmada, merge,
   configuracion efectiva y hooks del runtime (22 pruebas OK). No se ha probado
   este guardado sobre ninguna web real ni se ha reiniciado el backend.
+- Ampliacion: contratos reales de solicitud gestionada (permisos, importe,
+  draft/unfunded y revision/contenido) probados con modelos aislados. Regresion
+  `managed_campaign_finance.test.js` OK. Recepcion web: 6 pruebas, sin datos
+  personales ni escrituras a leads reales. Contenedor y dialogos compilan con ngc.
+- Regresion posterior: `npm run test:marketing-campaigns` 196 pruebas OK (57
+  contratos). Front: 22 tests y 12 comprobaciones de presentacion OK; ngc del
+  contenedor, cuentas, preparacion web y plan gestionado OK.
+- Inventario Meta: los anuncios sin insights siguen visibles, sin inventar gasto.
+  La frescura usa `updated_at` de sincronizacion, no `updated_time` de edicion en
+  Meta. Tests de inventario/metricas comprueban la fusion y estados rechazados.

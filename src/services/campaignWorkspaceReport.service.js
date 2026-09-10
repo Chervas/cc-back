@@ -156,7 +156,7 @@ function aggregateReport({ campaigns, facts = [], leads = [], appointments = [],
   for (const ad of ads) {
     const row = index.get(externalCampaignIdentityKey(ad));
     const target = periodKey(ad.date);
-    if (!row || !target) continue;
+    if (!row || !target && ad.inventory !== true) continue;
     const key = `${row.campaign.id}:${ad.id}`;
     const dedupe = JSON.stringify([key, ad.date, ad.segment]);
     if (seenAds.has(dedupe)) continue;
@@ -169,9 +169,11 @@ function aggregateReport({ campaigns, facts = [], leads = [], appointments = [],
       adIndex.set(key, value); row.ads.push(value);
     }
     const value = adIndex.get(key);
-    value[target].spend += number(ad.spend);
-    value.periods = { ...(value.periods || {}), [target]: true };
-    if (ad.providerConversions != null) value[target].providerConversions = (value[target].providerConversions || 0) + number(ad.providerConversions);
+    if (target && ad.inventory !== true) {
+      value[target].spend += number(ad.spend);
+      value.periods = { ...(value.periods || {}), [target]: true };
+      if (ad.providerConversions != null) value[target].providerConversions = (value[target].providerConversions || 0) + number(ad.providerConversions);
+    }
     if (ad.updatedAt && new Date(ad.updatedAt) > new Date(value.lastSeenAt || 0)) {
       value.lastSeenAt = ad.updatedAt; value.status = ad.status || 'UNKNOWN';
       value.rejected = /DISAPPROVED|REJECTED/i.test(value.status);
