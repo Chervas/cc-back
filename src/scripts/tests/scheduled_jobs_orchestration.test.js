@@ -31,7 +31,7 @@ function testCatalogCoversEveryCronAndExecutor() {
   const catalogNames = definitions.map(([name]) => name).sort();
   const types = definitions.map(([, definition]) => definition.type);
 
-  assert.equal(definitions.length, 35, 'the canonical scheduler must retain email, web, report cache and campaign periodic jobs');
+  assert.equal(definitions.length, 36, 'the canonical scheduler must retain email, web, report cache and campaign periodic jobs');
   assert.deepEqual(catalogNames, configuredNames);
   assert.equal(new Set(types).size, types.length, 'scheduled job types must be unique');
   for (const jobName of [
@@ -95,6 +95,16 @@ function testCatalogCoversEveryCronAndExecutor() {
     undefined,
     'Mi clínica report cache refresh must use the scheduler timezone, not a UTC override'
   );
+  assert.equal(metaSyncJobs.config.schedules.googleNativeLeadSync,
+    process.env.JOBS_GOOGLE_NATIVE_LEADS_SCHEDULE || '*/5 * * * *');
+  assert.equal(SCHEDULED_JOB_DEFINITIONS.googleNativeLeadSync.timezone, undefined,
+    'native lead polling must follow the scheduler Spain timezone');
+  assert.equal(SCHEDULED_JOB_DEFINITIONS.googleNativeLeadSync.enabledEnv, 'CAMPAIGN_GOOGLE_LEAD_SYNC_ENABLED');
+  assert.equal(BACKGROUND_INTEGRATION_JOB_TYPES.includes('campaign_google_leads_poll'), false,
+    'the dispatcher only enqueues IDs and must not hold the provider lease');
+  assert.equal(BACKGROUND_INTEGRATION_JOB_TYPES.includes('campaign_google_leads_sync'), true,
+    'the actual Google request must use the serialized provider lane');
+  assert.equal(typeof jobExecutor.JOB_HANDLERS.campaign_google_leads_sync, 'function');
   assert.equal(
     SCHEDULED_JOB_DEFINITIONS.marketingReportsCacheRefresh.type,
     'marketing_reports_cache_refresh',
@@ -439,6 +449,35 @@ async function testScheduledEnqueueMergesCatalogPayloadDefaults() {
     });
     assert.deepEqual(calls[3].payload, { windowLabel: 'manual-window' });
   } finally {
+    jobRequestsService.enqueueUniqueJobRequest = originalEnqueue;
+  }
+}
+
+async function testGoogleLeadPollingGateAndDurableEnqueue() {
+  const jobs = new MetaSyncJobs();
+  const previousGate = process.env.CAMPAIGN_GOOGLE_LEAD_SYNC_ENABLED;
+  const originalEnqueue = jobRequestsService.enqueueUniqueJobRequest;
+  const calls = [];
+  jobRequestsService.enqueueUniqueJobRequest = async args => {
+    calls.push(args);
+    return { created: true, job: { id: 990, payload: args.payload } };
+  };
+  try {
+    delete process.env.CAMPAIGN_GOOGLE_LEAD_SYNC_ENABLED;
+    assert.deepEqual(await jobs.enqueueScheduledJob('googleNativeLeadSync'), {
+      status: 'disabled', queued: false, job_type: 'campaign_google_leads_poll',
+    });
+    assert.deepEqual(await jobs.executeGoogleNativeLeadSync(), { status: 'completed', disabled: true, queued: 0 });
+    assert.equal(calls.length, 0, 'a closed gate must not even enqueue the dispatcher');
+    process.env.CAMPAIGN_GOOGLE_LEAD_SYNC_ENABLED = 'true';
+    await jobs.enqueueScheduledJob('googleNativeLeadSync');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].type, 'campaign_google_leads_poll');
+    assert.deepEqual(calls[0].payload, {});
+    assert.equal(calls[0].priority, 'high');
+  } finally {
+    if (previousGate === undefined) delete process.env.CAMPAIGN_GOOGLE_LEAD_SYNC_ENABLED;
+    else process.env.CAMPAIGN_GOOGLE_LEAD_SYNC_ENABLED = previousGate;
     jobRequestsService.enqueueUniqueJobRequest = originalEnqueue;
   }
 }
@@ -1269,6 +1308,7 @@ async function run() {
   await testQueuedStatusAndSchedulerIndexContract();
   await testCronMonitorReportsEnqueueNotBusinessCompletion();
   await testScheduledEnqueueMergesCatalogPayloadDefaults();
+  await testGoogleLeadPollingGateAndDurableEnqueue();
   await testBackgroundLaneIsSeparateAndSequential();
   await testBackgroundLaneUsesDurableMysqlLease();
   await testImmediateBackgroundTriggerJoinsBackgroundDrain();

@@ -572,6 +572,9 @@ const JOB_HANDLERS = {
   campaign_meta_lead_receive: async (payload = {}, jobRequest = null) => (
     require('./metaLeadReception.service').runMetaLeadReceptionJob(payload, jobRequest)
   ),
+  campaign_google_leads_sync: async (payload = {}, jobRequest = null) => (
+    require('./googleLeadReception.service').runGoogleLeadSync(payload, jobRequest)
+  ),
   campaign_meta_crm_signal: async (payload = {}, jobRequest = null) => (
     require('./metaLeadLifecycleJob.service').runMetaLeadLifecycleSignalJob(payload, jobRequest)
   ),

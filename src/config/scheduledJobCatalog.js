@@ -32,6 +32,10 @@ const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
   adsBackfill: Object.freeze({ type: 'meta_ads_backfill', priority: 'low', executorMethod: 'executeAdsBackfill' }),
   googleAdsSync: Object.freeze({ type: 'google_ads_recent', priority: 'normal', executorMethod: 'executeGoogleAdsSync' }),
   googleAdsBackfill: Object.freeze({ type: 'google_ads_backfill', priority: 'low', executorMethod: 'executeGoogleAdsBackfill' }),
+  googleNativeLeadSync: Object.freeze({
+    type: 'campaign_google_leads_poll', priority: 'high', executorMethod: 'executeGoogleNativeLeadSync',
+    enabledEnv: 'CAMPAIGN_GOOGLE_LEAD_SYNC_ENABLED', usesIntegrationLease: false,
+  }),
   googleDataManagerDiagnostics: Object.freeze({
     type: 'google_data_manager_diagnostics',
     priority: 'normal',
@@ -184,6 +188,7 @@ const TARGETED_INTEGRATION_JOB_TYPES = Object.freeze([
   'managed_campaign.google_search_activate.v1',
   'managed_campaign.google_search_rollback.v1',
   'whatsapp_template_sync_delayed',
+  'campaign_google_leads_sync',
 ]);
 
 const BACKGROUND_INTEGRATION_JOB_TYPES = Object.freeze([

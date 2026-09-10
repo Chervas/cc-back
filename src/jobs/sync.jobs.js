@@ -379,6 +379,7 @@ class MetaSyncJobs {
       adsSyncMidday: 'Refrescado parcial de Ads al mediodía para capturar datos en curso (48 h).',
       adsBackfill: 'Backfill semanal de Ads con ventana extendida para consolidar atribución y cierres.',
       googleAdsSync: 'Sincroniza campañas y métricas diarias de Google Ads para cuentas vinculadas.',
+      googleNativeLeadSync: 'Recupera por API los formularios nativos de Google de las cuentas seleccionadas cada cinco minutos, con siete días de solapamiento y deduplicación. No modifica webhooks, anuncios ni conversiones; no depende de la caché nocturna de informes.',
       googleAdsBackfill: 'Backfill de Google Ads para nuevas cuentas o rangos extendidos.',
       googleDataManagerDiagnostics: 'Concilia Data Manager, la capacidad visitor_choice de todas las webs y el gate interno de Conversiones mejoradas.',
       googleConversionGoalPolicyAudit: 'Audita sin autoreparar la medición de Mide y entiende y la policy de goals/campañas opt-in de ClinicaClick.',
@@ -424,6 +425,7 @@ class MetaSyncJobs {
         adsSyncMidday: process.env.JOBS_ADS_MIDDAY_SCHEDULE || '0 12 * * *',
         adsBackfill: process.env.JOBS_ADS_BACKFILL_SCHEDULE || '0 4 * * 0',
         googleAdsSync: process.env.JOBS_GOOGLE_ADS_SCHEDULE || '20 0 * * *',
+        googleNativeLeadSync: process.env.JOBS_GOOGLE_NATIVE_LEADS_SCHEDULE || '*/5 * * * *',
         googleAdsBackfill: process.env.JOBS_GOOGLE_ADS_BACKFILL_SCHEDULE || '30 5 * * 0',
         googleDataManagerDiagnostics: process.env.JOBS_GOOGLE_DATA_MANAGER_DIAGNOSTICS_SCHEDULE || '*/30 * * * *',
         googleConversionGoalPolicyAudit: process.env.JOBS_GOOGLE_CONVERSION_GOAL_POLICY_AUDIT_SCHEDULE || '17 2 * * *',
@@ -603,6 +605,9 @@ class MetaSyncJobs {
     const definition = getScheduledJobDefinition(jobName);
     if (!definition) {
       throw new Error(`Job periódico '${jobName}' no definido en el catálogo`);
+    }
+    if (definition.enabledEnv && process.env[definition.enabledEnv] !== 'true') {
+      return { status: 'disabled', queued: false, job_type: definition.type };
     }
 
     const suppliedPayload = options.payload
@@ -4397,6 +4402,10 @@ try {
       ...waitingReport,
       nextAllowedAt,
     };
+  }
+
+  async executeGoogleNativeLeadSync() {
+    return require('../services/googleLeadReception.service').enqueueGoogleLeadSyncs();
   }
 
   /**

@@ -1427,3 +1427,74 @@ Los avisos operativos permanecen pendientes, sin atender ni ocultar.
 Un reinicio solo DEV: PID `1192223`, contador `8545`; staging, gateway y preview
 sin reinicios. No se abre el gate, ni hay migracion, cron nuevo, señales,
 mutaciones publicitarias, cobros o promocion. Objetivo global EN CURSO.
+
+## Recepcion Nativa Google Por API (2026-09-10)
+
+La recepcion de formularios web ya existia y permanece intacta. Este avance
+completa una entrada distinta: los formularios enviados dentro de Google Ads.
+No crea otro CRM ni exige instalar una web o sustituir el webhook de otro CRM.
+El recurso oficial `lead_form_submission_data` de Google Ads v24 permite leer
+IDs de cuenta/campaña/formulario/anuncio, fecha y campos basicos. Se consultaron:
+
+- https://developers.google.com/google-ads/api/fields/v24/lead_form_submission_data
+- https://developers.google.com/google-ads/api/reference/rpc/v24/LeadFormSubmissionData
+
+`googleLeadReception.service` incorpora esa lectura a `LeadIntake` y
+`LeadAttributionAudit`, en una transaccion. Guarda contacto basico e identidad
+verificada por el servidor, no respuestas clinicas, tokens ni consentimiento
+inventado. Conserva la fecha original del envio para los informes; la auditoria
+mantiene aparte la fecha de recepcion. La automatizacion existente conserva su
+idempotencia. No se emite otra conversion por recibir el formulario.
+
+- Gate independiente `CAMPAIGN_GOOGLE_LEAD_SYNC_ENABLED`, cerrado por defecto.
+  El catalogo añade `googleNativeLeadSync`, cron `*/5 * * * *`, configurable con
+  `JOBS_GOOGLE_NATIVE_LEADS_SCHEDULE`, zona heredada `Europe/Madrid`. No se mezcla
+  con el refresco nocturno de informes. DEV añade 36 callbacks/15 integraciones
+  dirigidas/49 tipos background; staging conserva su inventario anterior.
+- El dispatcher `campaign_google_leads_poll` solo encola setting y cuenta, sin
+  PII ni credenciales. El hijo `campaign_google_leads_sync` exige origen interno
+  y usa namespace, deduplicacion, cinco intentos y lease de proveedores existentes.
+  El gate cerrado impide incluso encolar el dispatcher del cron.
+- Siete dias de solapamiento, paginacion y deadline de 45 s, limite de 10.000
+  filas. Truncacion/fallo de proveedor no producen un falso vacio correcto.
+  No implementa un backfill historico completo ni llama a Google desde un GET.
+- Relee seleccion, grant y miembros despues de la llamada y antes de guardar.
+  Rotar el access token conserva el grant; revocarlo o cambiar el principal
+  invalida la lectura. Campañas futuras solo entran si `include_future` lo
+  autoriza. Una cuenta compartida exige clinica explicitamente asignada; no usa
+  nombres ni la sede representativa del grupo. Respeta exclusiones mas estrechas.
+- El ID opaco del envio se guarda como hash estable en las columnas historicas,
+  sin truncar. Una reentrega no duplica ni mueve un lead entre clinicas/campañas.
+  Lead y auditoria confirman juntos; fallo de auditoria revierte ambos. Un fallo
+  posterior de automatizacion puede reintentarse sin duplicar la recepcion.
+- Valida identidades antes de escribir. Un contacto incompleto no impide recibir
+  los otros: queda contado como pendiente y el job no afirma exito total. Una
+  asignacion ambigua conserva reintento; los datos de contacto invalidos no
+  consumen todos los reintentos, aunque el siguiente sondeo vuelva a comprobarlos.
+
+Verificacion backend: 409 pruebas de campañas/jobs mas 22 de receptores previos,
+consentimiento, routing y snippet; todas correctas. Las 18 nuevas de recepcion
+Google usan modelos/proveedor aislados y prohiben SQL real. Sintaxis y diff-check
+correctos. No hay migracion ni modificacion de los receptores web/Meta.
+
+El gate real permanece cerrado. No se han recuperado ni importado leads de
+clientes. Google nativo completo sigue pendiente: identidad para señales CRM,
+transporte sin web, comprobacion de todos los destinos y cobertura en Salud.
+Tambien siguen abiertos multipagina/mixto, Optimiza Google/Meta, preparacion
+autorizada de parametros publicitarios, metricas CRM por anuncio y ruta canonica.
+Objetivo global EN CURSO; no confundir este receptor probado con la entrega
+completa del mock o una activacion de clientes.
+
+Chromium autenticado: 71 comprobaciones y 29 capturas en
+`/home/ubuntu/qa-evidence/campaign-google-native-20260910-regression`, a
+1440/1024/390 px. APIs/reportes iniciales reales; pruebas de fallos de proveedor
+con fixtures GET, sin escrituras de negocio. Sin errores JS ni del workspace.
+Se verifican navegacion/retorno, los seis bloques de Salud sin tabs internas,
+preparacion web existente y graficas a ras con tooltip sin recorte. Los avisos
+operativos permanecen pendientes, sin cerrar ni ocultar.
+
+Reinicio solo DEV: PID `1195691`, contador `8546`; staging, gateway y preview
+conservan sus PID. Sin cambios de UI ni nuevo build: `5b7db07c9dcf100e` sigue en
+preview. Auditoria SQL antes/despues: gates cerrados, settings=0, leads nativos
+Google=0, jobs nuevos=0 y entregas Meta=0. No hay importaciones, señales,
+mutaciones publicitarias, cobros ni promocion. Commits locales en DEV.
