@@ -995,23 +995,7 @@ async function refreshGoogleConnection(connection) {
 }
 
 function googleAdsBaseUrls() {
-  const endpoint = (process.env.GOOGLE_ADS_API_ENDPOINT || 'https://googleads.googleapis.com').replace(/\/$/, '');
-  const version = (process.env.GOOGLE_ADS_API_VERSION || 'v21').replace(/^\//, '');
-  const fallbacks = (process.env.GOOGLE_ADS_API_VERSION_FALLBACKS || '')
-    .split(',')
-    .map((item) => item.trim().replace(/^\//, ''))
-    .filter(Boolean);
-  const configured = process.env.GOOGLE_ADS_API_BASE_URL
-    ? [process.env.GOOGLE_ADS_API_BASE_URL.replace(/\/$/, '')]
-    : [];
-  const urls = [...configured];
-
-  for (const item of [version, ...fallbacks]) {
-    urls.push(`${endpoint}/googleads/${item}`);
-    urls.push(`${endpoint}/${item}`);
-  }
-
-  return [...new Set(urls)];
+  return require('../lib/googleAdsClient').buildBaseUrls();
 }
 
 async function googleAdsSearch(customerId, accessToken, query, { loginCustomerId } = {}) {

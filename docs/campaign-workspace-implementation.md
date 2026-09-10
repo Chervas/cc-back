@@ -644,3 +644,66 @@ de la web compartida sin seleccionar/autorizar el grupo.
   capturas de conversiones, confirmacion, reautorizacion, Salud y grafica movil.
   Los intentos previos se conservan: error real v21, espera del reinicio DEV,
   area tactil MDC y 304 correctamente tratado como revalidacion, no error.
+
+## Google Ads v24 Y Descubrimiento De Cuentas
+
+- El cliente compartido usa v24 por defecto y DEV fija esa version en su .env.
+  Las consultas de inventario, resultados y servicios existentes ya no apuntan
+  por defecto a v21. La configuracion explicita de endpoint/base URL se conserva.
+  `GOOGLE_ADS_API_VERSION_FALLBACKS` deja de utilizarse: una llamada no se repite
+  contra otra version, el prefijo historico /googleads/ ni otro metodo HTTP.
+  Tampoco sigue redirecciones con credenciales. El script operativo de discovery
+  reutiliza la misma resolucion de URL; no se ha ejecutado ese script.
+- El selector pide `GET /oauth/google/ads/accounts?view=selection` con el scope
+  de clinica/grupo. Conserva autenticacion, ACL de inventario y grant existentes.
+  Solo lee identidades/nombres/moneda/tipo: no consultas de manager_link por cada
+  cuenta ni mappings de otras clinicas. La vista administrativa completa conserva
+  su contrato. No crea cuentas, invitaciones, assignments ni campañas al abrir.
+- CustomerClient incluye descendientes directos e indirectos. Se consulta una
+  vez por jerarquia accesible, con paginacion, deduplicacion y validacion de IDs.
+  Limites interactivos: 40 segundos en total, hasta 8 segundos por llamada,
+  100 peticiones, 20 paginas por Search y 5.000 cuentas. Ciclos, identidades
+  incompatibles, respuestas parciales, timeout o errores de permisos no devuelven
+  una lista supuestamente completa. No se inicia un job por abrir el selector.
+- Chromium encontro CUSTOMER_NOT_ENABLED en una cuenta incluida por Google en
+  listAccessibleCustomers. Se excluye SOLO ese rechazo explicito y las cuentas
+  CLOSED/CANCELED de la jerarquia, indicando unavailableAccountCount. No se
+  confunden USER_PERMISSION_DENIED, permisos del developer token o caidas con
+  cuentas inactivas. La lectura real posterior devolvio 37 cuentas accesibles y
+  19 no habilitadas en 5,27 s; sin cambiar mappings de clientes.
+- Una caida temporal conserva el paso y seleccion actuales. Reintentar repite
+  discovery, no recarga destructivamente el borrador ni inicia OAuth. Tokens
+  caducados o permisos insuficientes si abren la autorizacion existente.
+  Mas de seis cuentas habilitan busqueda local por nombre/numero, sin peticiones
+  adicionales. Se aceptan acentos y numeros con guiones; al cambiar la busqueda
+  se limpia la eleccion pendiente para no conectar una cuenta que quedo oculta.
+- El cron leader de DEV permanece false y la auditoria previa no encontro jobs
+  Google/campaign pendientes o activos del namespace dev. No se ha lanzado sync,
+  backfill, ejecucion de campañas, creacion de conversiones ni ingesta de pacientes
+  para la QA. Las escrituras de transporte se prueban con proveedores simulados.
+  Los contadores de uso y renovacion de credenciales conservan su funcionamiento.
+- Staging, gateway y sus .env no cambian; staging sigue configurado en v21 y
+  necesita una promocion/migracion propia. Solo se reinicia backend DEV.
+  Este cambio NO completa los contratos de activacion, prueba persistente de
+  destinos, autorizacion de hitos, emisores, Optimiza ni integracion canonica.
+  Tampoco acredita una ejecucion real end-to-end de todos los jobs/mutaciones.
+- Fuentes primarias: [CustomerClient v24](https://developers.google.com/google-ads/api/reference/rpc/v24/CustomerClient),
+  [notas de version](https://developers.google.com/google-ads/api/docs/release-notes),
+  [retirada v21](https://ads-developers.googleblog.com/2026/06/google-ads-api-v21-sunset-reminder.html).
+- Verificacion: 311 pruebas backend principales, ocho suites de regresion
+  Google/OAuth y 48 pruebas frontend correctas. Build DEV `b1d43bdb8abd93e7`,
+  10/09/2026 17:50:36 UTC, 140998 ms; aviso previo de bundle 4.58 MB frente a 3 MB.
+  Chromium autenticado: 71 comprobaciones y 29 capturas en 1440/1024/390 px,
+  sin errores JS ni escrituras de negocio. Las dos lecturas reales de cuentas
+  tardan 5,01 y 4,64 s (304 con cuerpo revalidado). Solo el error transitorio
+  de connection-status se simula mediante un GET interceptado; no hay POST
+  ni asignaciones reales en esta prueba. Se comprueban filtro, cuenta elegida,
+  limpieza de seleccion oculta, reintento y regresion de navegacion/graficas.
+  Evidencia: `/home/ubuntu/qa-evidence/campaign-workspace-google-v24-20260910-search`.
+  Se conservan los pases anteriores, incluido el rechazo CUSTOMER_NOT_ENABLED.
+  Las capturas del selector, busqueda movil y Salud se revisaron manualmente.
+- Regresion Chromium de conversiones sobre el mismo build: 26 comprobaciones,
+  nueve capturas, cero errores JS y cero escrituras reales. Consulta Google real;
+  seleccion/borrador, altas y validaciones del escenario interceptadas por el
+  navegador, sin crear conversiones ni enviar pacientes. Evidencia:
+  `/home/ubuntu/qa-evidence/campaign-google-conversions-v24-20260910`.

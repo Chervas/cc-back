@@ -29,6 +29,7 @@ const {
     getGoogleAdsUsageStatus,
     resumeGoogleAdsUsage
 } = require('../lib/googleAdsClient');
+const { discoverGoogleAdsAccountSelection } = require('../services/googleAdsAccountDiscovery.service');
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
 const {
@@ -2382,7 +2383,7 @@ router.get('/google/ads/connection-status', async (req, res) => {
             customers = await listAccessibleAdsCustomers(accessToken);
         } catch (adsErr) {
             console.error('❌ Error consultando cuentas Ads accesibles:', adsErr.details || adsErr.message);
-            return res.json({ connected: false, reason: 'api_error', details: adsErr.details || adsErr.message });
+            return res.json({ connected: false, reason: 'api_error' });
         }
 
         return res.json({
@@ -2425,6 +2426,11 @@ router.get('/google/ads/accounts', async (req, res) => {
         } catch (tokenErr) {
             const reason = tokenErr.code === 'INSUFFICIENT_SCOPE' ? 'insufficient_scope' : tokenErr.code === 'TOKEN_EXPIRED' ? 'token_expired' : tokenErr.code === 'ADS_CONFIG_MISSING' ? 'config_missing' : 'token_error';
             return res.status(400).json({ success: false, error: reason });
+        }
+
+        if (req.query.view === 'selection') {
+            const selection = await discoverGoogleAdsAccountSelection({ accessToken });
+            return res.json({ success: true, ...selection });
         }
 
         const baseCustomers = await listAccessibleAdsCustomers(accessToken);
@@ -2594,8 +2600,9 @@ router.get('/google/ads/accounts', async (req, res) => {
         if (err.code === 'ADS_CONFIG_MISSING') {
             return res.status(500).json({ success: false, error: 'config_missing' });
         }
-        console.error('❌ Error en /oauth/google/ads/accounts:', err.details || err.message);
-        return res.status(500).json({ success: false, error: 'internal_error' });
+        console.error('❌ Error en /oauth/google/ads/accounts:', err.message, err.discoveryCodes || []);
+        return res.status(req.query.view === 'selection' ? 502 : 500).json({ success: false,
+            error: req.query.view === 'selection' ? 'google_ads_discovery_incomplete' : 'internal_error' });
     }
 });
 

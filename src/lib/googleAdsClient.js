@@ -8,6 +8,7 @@ let googleAdsQuota = null;
 let googleAdsUsageResetAt = 0;
 let googleAdsPauseUntil = 0;
 let lastGoogleUsagePct = 0;
+const GOOGLE_ADS_API_VERSION = 'v24';
 
 function startOfNextDay() {
   const d = new Date();
@@ -133,12 +134,10 @@ function buildBaseUrls(apiVersion) {
     throw Object.assign(new Error('Invalid Google Ads API version'), { code: 'ADS_API_VERSION_INVALID' });
   }
   const endpoint = (process.env.GOOGLE_ADS_API_ENDPOINT || 'https://googleads.googleapis.com').replace(/\/+$/, '');
-  const mainVersion = (process.env.GOOGLE_ADS_API_VERSION || 'v21').replace(/^\/+/, '');
-  const fallbacks = (process.env.GOOGLE_ADS_API_VERSION_FALLBACKS || '')
-    .split(',')
-    .map(v => v.trim())
-    .filter(Boolean)
-    .map(v => v.replace(/^\/+/, ''));
+  const mainVersion = (process.env.GOOGLE_ADS_API_VERSION || GOOGLE_ADS_API_VERSION).replace(/^\/+/, '');
+  if (!/^v[1-9]\d*(?:\.\d+)?$/.test(mainVersion)) {
+    throw Object.assign(new Error('Invalid Google Ads API version'), { code: 'ADS_API_VERSION_INVALID' });
+  }
 
   const configured = process.env.GOOGLE_ADS_API_BASE_URL ? process.env.GOOGLE_ADS_API_BASE_URL.replace(/\/+$/, '') : null;
   if (configured) {
@@ -150,15 +149,7 @@ function buildBaseUrls(apiVersion) {
     }
     return [configured];
   }
-  if (apiVersion !== undefined) return [`${endpoint}/${apiVersion}`];
-  const versions = [mainVersion, ...fallbacks];
-  const bases = [];
-  for (const version of versions) {
-    bases.push(`${endpoint}/${version}`);
-    // Compatibilidad con proxies históricos que montaban /googleads/<version>.
-    bases.push(`${endpoint}/googleads/${version}`);
-  }
-  return bases;
+  return [`${endpoint}/${apiVersion || mainVersion}`];
 }
 
 async function googleAdsRequest(method = 'GET', path, {
@@ -167,7 +158,6 @@ async function googleAdsRequest(method = 'GET', path, {
   loginCustomerId,
   params,
   data,
-  singleAttempt = false,
   waitNextHour = false,
   timeoutMs = Math.max(
     1000,
@@ -175,6 +165,10 @@ async function googleAdsRequest(method = 'GET', path, {
   )
 } = {}) {
   const { developerToken } = ensureGoogleAdsConfig();
+  const [baseUrl] = buildBaseUrls(apiVersion);
+  if (typeof method !== 'string' || !/^(GET|POST|PUT|PATCH|DELETE)$/.test(method)) {
+    throw Object.assign(new Error('Invalid Google Ads HTTP method'), { code: 'ADS_HTTP_METHOD_INVALID' });
+  }
   const quotaLimit = parseInt(process.env.GOOGLE_ADS_DAILY_QUOTA || '1500', 10);
   await ensureDailyWindow(quotaLimit);
   const thresh = parseInt(process.env.GOOGLE_ADS_USAGE_THRESHOLD || '90', 10);
@@ -199,13 +193,6 @@ async function googleAdsRequest(method = 'GET', path, {
     throw err;
   }
 
-  const baseUrls = buildBaseUrls(apiVersion);
-  if (!baseUrls.length) {
-    const err = new Error('No hay endpoints configurados para Google Ads');
-    err.code = 'ADS_ENDPOINT_MISSING';
-    throw err;
-  }
-
   const headersBase = {
     Authorization: `Bearer ${accessToken}`,
     'developer-token': developerToken,
@@ -220,68 +207,31 @@ async function googleAdsRequest(method = 'GET', path, {
     queryParams.alt = 'json';
   }
 
-  const preferredMethods = Array.isArray(method) ? [...method] : [method];
-  if (!singleAttempt && !preferredMethods.includes('POST')) {
-    preferredMethods.push('POST');
-  }
-  const requestBaseUrls = singleAttempt ? baseUrls.slice(0, 1) : baseUrls;
-
-  let lastError = null;
-  for (const httpMethod of preferredMethods) {
-    for (let i = 0; i < requestBaseUrls.length; i += 1) {
-      const base = requestBaseUrls[i];
-      const isLastAttempt = httpMethod === preferredMethods[preferredMethods.length - 1] && i === requestBaseUrls.length - 1;
-      const requestUrl = `${base}/${path}`;
-      try {
-        const headers = (httpMethod === 'POST')
-          ? { ...headersBase, 'Content-Type': 'application/json' }
-          : headersBase;
-        const resp = await axios({
-          method: httpMethod,
-          url: requestUrl,
-          params: queryParams,
-          data: typeof data === 'undefined' ? (httpMethod === 'POST' ? {} : undefined) : data,
-          headers,
-          timeout: timeoutMs
-        });
-        const h = resp.headers || {};
-        const appUsage = parseUsageHeader(h['x-app-usage']);
-        const adUsage = parseUsageHeader(h['x-ad-account-usage']);
-        const pageUsage = parseUsageHeader(h['x-page-usage']);
-        const bizUsage = parseUsageHeader(h['x-business-use-case-usage']);
-        const usage = Math.max(appUsage, adUsage, pageUsage, bizUsage);
-        if (usage) {
-          lastGoogleUsagePct = usage;
-        }
-        if (usage >= thresh) {
-          if (waitNextHour) {
-            const d = new Date();
-            d.setMinutes(60, 0, 0); // top of next hour
-            googleAdsPauseUntil = Math.max(googleAdsPauseUntil, d.getTime());
-            console.warn(`⚠️ Uso alto (${usage}%). Pausando hasta la próxima hora.`);
-          } else {
-            googleAdsPauseUntil = Math.max(googleAdsPauseUntil, Date.now() + 60_000);
-            console.warn(`⚠️ Uso alto (${usage}%). Pausando 60s.`);
-          }
-        }
-        await updateGoogleUsageCounter({ usagePct: lastGoogleUsagePct, pauseUntil: googleAdsPauseUntil ? new Date(googleAdsPauseUntil) : null, quota: quotaLimit });
-        return resp.data;
-      } catch (err) {
-        const status = err.response?.status;
-        if ((status === 404 || status === 405) && !isLastAttempt) {
-          lastError = err;
-          if (status === 405) break; // probar con POST
-          continue;
-        }
-        await updateGoogleUsageCounter({ usagePct: lastGoogleUsagePct, pauseUntil: googleAdsPauseUntil ? new Date(googleAdsPauseUntil) : null, quota: quotaLimit });
-        throw err;
+  // Never retry a provider command against another API version, route or HTTP method.
+  try {
+    const headers = method === 'POST' ? { ...headersBase, 'Content-Type': 'application/json' } : headersBase;
+    const resp = await axios({
+      method, url: `${baseUrl}/${path}`, params: queryParams,
+      data: typeof data === 'undefined' ? (method === 'POST' ? {} : undefined) : data,
+      headers, timeout: timeoutMs, maxRedirects: 0
+    });
+    const h = resp.headers || {};
+    const usage = Math.max(...['x-app-usage', 'x-ad-account-usage', 'x-page-usage', 'x-business-use-case-usage']
+      .map(header => parseUsageHeader(h[header])));
+    if (usage) lastGoogleUsagePct = usage;
+    if (usage >= thresh) {
+      if (waitNextHour) {
+        const d = new Date();
+        d.setMinutes(60, 0, 0);
+        googleAdsPauseUntil = Math.max(googleAdsPauseUntil, d.getTime());
+      } else {
+        googleAdsPauseUntil = Math.max(googleAdsPauseUntil, Date.now() + 60_000);
       }
     }
+    return resp.data;
+  } finally {
+    await updateGoogleUsageCounter({ usagePct: lastGoogleUsagePct, pauseUntil: googleAdsPauseUntil ? new Date(googleAdsPauseUntil) : null, quota: quotaLimit });
   }
-  if (lastError) throw lastError;
-  const fallbackError = new Error('No se pudo contactar con Google Ads API');
-  fallbackError.code = 'ADS_API_UNREACHABLE';
-  throw fallbackError;
 }
 
 async function getGoogleAdsUsageStatus() {
@@ -304,7 +254,8 @@ async function resumeGoogleAdsUsage() {
 }
 
 module.exports = {
-  GOOGLE_ADS_CONVERSIONS_API_VERSION: 'v24',
+  GOOGLE_ADS_API_VERSION,
+  GOOGLE_ADS_CONVERSIONS_API_VERSION: GOOGLE_ADS_API_VERSION,
   buildBaseUrls,
   googleAdsRequest,
   normalizeCustomerId,
