@@ -2232,7 +2232,19 @@ ceros para ocultar el fallo. Falta integrar refresco nocturno por anuncio,
 separar inventario de rendimiento diario y resolver el indice historico que
 omite `adGroupId` antes de ampliar los escritores.
 
+El inventario debe consultarse sin segmentacion de fechas, separado de las
+metricas diarias: Google omite filas cuyos indicadores seleccionados son todos
+cero al segmentar. Ver [Zero metrics](https://developers.google.com/google-ads/api/docs/reporting/zero-metrics)
+y el [recurso ad_group_ad de v24](https://developers.google.com/google-ads/api/fields/v24/ad_group_ad).
+Una respuesta completa sin filas de rendimiento no significa que no existan
+anuncios; una respuesta incompleta tampoco autoriza borrar el inventario anterior.
+
 Meta estaba en pausa compartida hasta 2026-09-11 08:45:38 Europe/Madrid durante
 la prueba. Se respeta el limite; una captura con el estado de pausa no acredita
 que haya cargado una imagen real. Los estados de contenido y variantes se
 validan ademas con respuestas aisladas de QA, sin modificar datos de clientes.
+Tras caducar la pausa, la lectura autorizada del anuncio de Arriaga devolvio
+Graph `190/460`: sesion invalidada por Meta. No se sustituyo la credencial por
+otro token administrativo ni se alteraron las asignaciones. La creatividad
+real de esa cuenta queda sin verificar hasta renovar su conexion; el dialogo
+muestra el fallo de acceso y conserva los resultados del informe.
