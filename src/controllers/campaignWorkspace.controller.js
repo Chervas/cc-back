@@ -17,6 +17,7 @@ const { loadGooglePreparation, checkGooglePreparation } = require('../services/c
 const { loadMetaSignalPreparation, checkMetaSignalPreparation } = require('../services/campaignWorkspaceMetaSignalPreparation.service');
 const { googleCampaignReference, googleDestinationContext, refreshGoogleDestinations } = require('../services/campaignWorkspaceGoogleDestination.service');
 const { loadGoogleNativeEvidence } = require('../services/campaignWorkspaceGoogleReception.service');
+const { loadSharedAccountReview, assignSharedAccountCampaigns } = require('../services/campaignWorkspaceSharedAccount.service');
 
 function createWorkspaceHandler({ models = db, resolveScope = resolveClinicScope,
   accessibleClinics = getAccessibleMarketingClinicIds, hasAccess = hasMarketingClinicScopeAccess,
@@ -50,6 +51,7 @@ function createWorkspaceConfigurationHandlers({ models = db, resolveScope = reso
   requestMetaPage = requestPageReception, metaPageJob = getPageReceptionJob, savePreferences = saveWorkspacePreferences,
   googlePreparation = loadGooglePreparation, checkGoogle = checkGooglePreparation,
   googleDestinations = googleDestinationContext, refreshGoogle = refreshGoogleDestinations, googleReception = loadGoogleNativeEvidence,
+  sharedAccount = loadSharedAccountReview, assignSharedAccount = assignSharedAccountCampaigns,
   metaSignals = loadMetaSignalPreparation, checkMetaSignals = checkMetaSignalPreparation } = {}) {
   async function authorize(req, res, access) {
     const actorId = Number(req.userData?.userId);
@@ -66,6 +68,26 @@ function createWorkspaceConfigurationHandlers({ models = db, resolveScope = reso
     return { scope, actorId };
   }
   return {
+    sharedAccount: async (req, res) => {
+      const context = await authorize(req, res, 'read');
+      if (!context) return;
+      try { return res.json(await sharedAccount({ models, ...context, hasAccess,
+        input: { provider: req.query.provider, account_id: req.query.account_id }, page: req.query.page, search: req.query.search })); }
+      catch (error) {
+        if (error.status >= 400 && error.status < 500) return res.status(error.status).json({ success: false, error: error.code });
+        throw error;
+      }
+    },
+    assignSharedAccount: async (req, res) => {
+      const context = await authorize(req, res, 'write');
+      if (!context) return;
+      try { return res.json(await assignSharedAccount({ models, ...context, hasAccess, input: req.body })); }
+      catch (error) {
+        const status = error.status || error.httpStatus;
+        if (status >= 400 && status < 500) return res.status(status).json({ success: false, error: error.code });
+        throw error;
+      }
+    },
     googleDestinations: async (req, res) => {
       const context = await authorize(req, res, 'read');
       if (!context) return;
@@ -245,6 +267,8 @@ exports.getMetaPageReceptionJob = asyncHandler(configurationHandlers.metaPageJob
 exports.savePreferences = asyncHandler(configurationHandlers.preferences);
 exports.getGooglePreparation = asyncHandler(configurationHandlers.googlePreparation);
 exports.getGoogleDestinations = asyncHandler(configurationHandlers.googleDestinations);
+exports.getSharedAccountReview = asyncHandler(configurationHandlers.sharedAccount);
+exports.assignSharedAccountCampaigns = asyncHandler(configurationHandlers.assignSharedAccount);
 exports.refreshGoogleDestinations = asyncHandler(configurationHandlers.refreshGoogle);
 exports.checkGooglePreparation = asyncHandler(configurationHandlers.checkGoogle);
 exports.getMetaSignalPreparation = asyncHandler(configurationHandlers.metaSignals);

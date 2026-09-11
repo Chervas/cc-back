@@ -1696,3 +1696,68 @@ Meta a cero. Ambos gates cerrados; sin migraciones ni promociones.
 
 El objetivo global sigue EN CURSO, incluida la excepcion anterior, Optimiza en
 ambos proveedores, metricas CRM por anuncio y sustitucion de la ruta canonica.
+
+## Revision De Cuentas Compartidas (2026-09-11)
+
+La excepcion de cuenta compartida anterior dispone de un recorrido explicito.
+No se relaja `visibleCampaigns`: un grupo parcial sigue sin ver las campanas
+no asignadas de una cuenta con propietarios externos.
+
+- `GET /campaign-workspace/shared-account?scope=...&provider=...&account_id=...`
+  lee exclusivamente inventario persistido de la cuenta solicitada. Requiere
+  permiso de escritura sobre todas las clinicas propietarias, incluidos los
+  miembros inactivos de grupos propietarios. Comprueba permisos antes y despues
+  de ampliar esa lectura. No consulta Google/Meta ni renueva OAuth.
+- Devuelve solo nombre, identificador, estado y revision de campanas pendientes,
+  con busqueda sobre toda la cuenta y diez resultados por pagina. Las clinicas
+  destino se limitan al ambito solicitado; no expone propietarios externos,
+  URLs, contactos, conexiones ni credenciales. Propietarios o grants sin resolver
+  fallan cerrados. Los identificadores Google con guiones no ocultan propietarios.
+- `POST /campaign-workspace/shared-account/assignment` exige confirmacion,
+  revision de cuenta y de cada una de las campanas elegidas, hasta diez por lote.
+  Relee y bloquea ambito, permisos, propietarios y configuracion. Cambios de
+  conexion, seleccion, miembros o identidad invalidan la confirmacion. Una
+  campana nueva no elegida no invalida las identidades ya revisadas.
+- Reutiliza `ExternalCampaignAssignment` y su auditoria en una transaccion.
+  Nunca sustituye ni mueve una asignacion previa, incluidos aliases historicos;
+  un conflicto o fallo de auditoria revierte el lote entero. No crea una segunda
+  campana interna ni habilita publicidad, importacion o señales. Asignar una
+  campana excluida no la incluye en la configuracion activa.
+- La UI mantiene un dialogo con lista y confirmacion de clinica, sin nuevas
+  pestañas. No preselecciona campanas; cambiar pagina/busqueda elimina selecciones
+  ocultas. Un error de confirmacion elimina la seleccion y pide revisar de nuevo.
+  Paginador y acciones permanecen visibles en movil. Un exito recarga solo si
+  el usuario sigue en el mismo ambito.
+
+La recepcion de formularios web sigue reutilizando el receptor existente. Esta
+asignacion resuelve pertenencia/atribucion en cuentas compartidas; no instala un
+receptor nuevo, no es prueba de recepcion ni autoriza señales CRM.
+
+El objetivo global permanece EN CURSO: cobertura completa de URLs/destinos,
+refresco nocturno del nuevo inventario, Optimiza Google/Meta, metricas CRM por
+anuncio y ruta canonica. No hay nuevos jobs, cron, migraciones ni promociones.
+
+Verificacion de este avance: 394 pruebas backend, tres contratos adicionales de
+asignacion/auditoria y 33 frontend, sin fallos. Los tests de escritura usan
+modelos aislados y comprueban permisos, rollback del lote y revision de ambos
+proveedores; no se escriben asignaciones reales. Build DEV `8ca1f16dcb23f107`,
+publicado en el preview, solo aviso CommonJS conocido.
+
+Chromium autenticado, 1440/1024/390 px: cuenta compartida 26 comprobaciones y
+11 capturas; Salud 36/9. La lectura de las nueve campanas Google de Arriaga es
+real y exige autorizacion completa. La paginacion extensa y los POST de
+conflicto/exito usan fixtures HTTP, no decisiones de clientes. Sin errores JS
+ni escrituras de negocio. Evidencias en
+`/home/ubuntu/qa-evidence/campaign-shared-account-20260911-confirmed` y
+`/home/ubuntu/qa-evidence/campaign-shared-health-20260911-confirmed`.
+Revisados manualmente lista y confirmacion movil/escritorio y detalle de Salud.
+Las notificaciones operativas no se cierran ni se ocultan para estas pruebas.
+
+Regresion final del mismo build: 71 comprobaciones/29 capturas de navegacion,
+preparacion web y graficas reales responsive, sin errores JS ni escrituras, en
+`/home/ubuntu/qa-evidence/campaign-shared-regression-20260911-confirmed`.
+Un reinicio exclusivamente DEV en este avance: PID `1209539`, contador `8551`
+(desde `8550`). Staging `1074087/46`, gateway `1039243/37` y preview `1054768/40`
+sin cambios. Auditoria SQL antes/despues: 44 asignaciones, 48 auditorias, cero
+settings y cero leads Google nativos. Ambos gates de activacion/importacion
+siguen cerrados. No se ha hecho ninguna asignacion real para facilitar el QA.

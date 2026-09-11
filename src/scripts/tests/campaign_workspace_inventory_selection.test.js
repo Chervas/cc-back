@@ -2,6 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { Op } = require('sequelize');
 const { selectedByWorkspace, workspaceAccounts, loadWorkspaceInventory } = require('../../services/campaignWorkspace.service');
 
 const campaign = { provider: 'google_ads', account_id: '123', campaign_id: '42', clinicId: null };
@@ -27,6 +28,26 @@ test('public account summaries deduplicate mappings and never return tokens or c
   const result = workspaceAccounts([...google, ...google], [{ metaAssetId: 'act_456', metaAssetName: 'Meta', pageAccessToken: 'secret' }]);
   assert.equal(result.length, 2); assert.equal(result[1].id, '456'); assert.equal(result[1].currency, null);
   assert.equal(JSON.stringify(result).includes('secret'), false); assert.equal(JSON.stringify(result).includes('Connection'), false);
+});
+test('a formatted owner outside scope produces an account notice, never campaign metadata or implicit clinic ownership', async () => {
+  const local = { id: 1, customerId: '1234567890', descriptiveName: 'Connected account', assignmentScope: 'clinic', clinicaId: 1 };
+  const outside = { id: 2, customerId: '123-456-7890', descriptiveName: 'Private other owner', assignmentScope: 'clinic', clinicaId: 3 };
+  let ownerQuery = null;
+  const models = {
+    Clinica: { findAll: async () => [{ id_clinica: 1, estado_clinica: 1 }] },
+    ClinicGoogleAdsAccount: { findAll: async options => {
+      if (options.where[Op.or]) return [local];
+      ownerQuery = options; return [local, outside].filter(row => options.where.customerId[Op.in].includes(row.customerId));
+    } },
+    ClinicMetaAsset: { findAll: () => assert.fail('a Google account review must not read Meta accounts') },
+    ExternalCampaignAssignment: { findAll: async () => [] },
+    ExternalCampaignInventory: { findAll: async () => [{ provider: 'google_ads', customer_id: '1234567890', campaign_id: '42',
+      campaign_name: 'Private campaign', destination_detection: { urls: ['https://private.example/'] } }] },
+  };
+  const result = await loadWorkspaceInventory({ models, scope: { clinicIds: [1] }, accountReference: { provider: 'google_ads', account_id: '1234567890' } });
+  assert.ok(ownerQuery.where.customerId[Op.in].includes('123-456-7890'));
+  assert.equal(result.accounts[0].sharedOutsideScope, true); assert.deepEqual(result.campaigns, []);
+  assert.doesNotMatch(JSON.stringify({ accounts: result.accounts, campaigns: result.campaigns }), /Private|private.example/);
 });
 
 test('a Meta destination cache preserves the newer nightly entity status instead of freezing an active campaign', async () => {

@@ -1,7 +1,7 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { accountId, mappingIdentity, reportPeriod, visibleCampaigns, aggregateReport } = require('./campaignWorkspaceReport.service');
+const { accountId, accountAliases, ownsCampaignAccount, mappingIdentity, reportPeriod, visibleCampaigns, aggregateReport } = require('./campaignWorkspaceReport.service');
 const { assessConsentMeasurementReadiness, resolveWebMeasurementMarketingState } = require('./campaignMeasurementReadiness.service');
 const { buildWorkspaceHealth } = require('./campaignWorkspaceHealth.service');
 const { campaignIncluded } = require('./campaignWorkspaceSettings.service');
@@ -17,7 +17,7 @@ const LEAD_FIELDS = ['id', 'clinica_id', 'source', 'channel', 'utm_source', 'utm
 const GOOGLE_MAPPING_FIELDS = ['id', 'customerId', 'descriptiveName', 'currencyCode', 'clinicaId', 'grupoClinicaId', 'assignmentScope', 'lastSyncedAt'];
 const META_MAPPING_FIELDS = ['id', 'metaAssetId', 'metaAssetName', 'clinicaId', 'grupoClinicaId', 'assignmentScope', 'ad_account_refreshed_at', 'additionalData'];
 
-async function loadWorkspaceInventory({ models, scope, transaction = null }) {
+async function loadWorkspaceInventory({ models, scope, transaction = null, accountReference = null }) {
   if (!scope.clinicIds?.length) throw Object.assign(new Error('empty_scope'), { status: 400 });
   const selectedClinics = await models.Clinica.findAll({ where: { id_clinica: { [Op.in]: scope.clinicIds } },
     attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica', 'estado_clinica'], raw: true, transaction });
@@ -30,9 +30,12 @@ async function loadWorkspaceInventory({ models, scope, transaction = null }) {
     { assignmentScope: 'clinic', clinicaId: { [Op.in]: scope.clinicIds } },
     ...(groups.length ? [{ assignmentScope: 'group', grupoClinicaId: { [Op.in]: groups } }] : []),
   ] };
-  const google = await models.ClinicGoogleAdsAccount.findAll({ where: assetScope, attributes: GOOGLE_MAPPING_FIELDS, raw: true, transaction });
-  const meta = await models.ClinicMetaAsset.findAll({ where: { ...assetScope, assetType: 'ad_account' }, attributes: META_MAPPING_FIELDS, raw: true, transaction });
-  const googleStoredIds = [...new Set(google.flatMap(row => [row.customerId, accountId(row.customerId)]))];
+  const aliases = accountReference ? accountAliases(accountReference.provider, accountReference.account_id) : null;
+  const google = accountReference?.provider === 'meta_ads' ? [] : await models.ClinicGoogleAdsAccount.findAll({
+    where: { ...assetScope, ...(aliases ? { customerId: { [Op.in]: aliases } } : {}) }, attributes: GOOGLE_MAPPING_FIELDS, raw: true, transaction });
+  const meta = accountReference?.provider === 'google_ads' ? [] : await models.ClinicMetaAsset.findAll({
+    where: { ...assetScope, assetType: 'ad_account', ...(aliases ? { metaAssetId: { [Op.in]: aliases } } : {}) }, attributes: META_MAPPING_FIELDS, raw: true, transaction });
+  const googleStoredIds = [...new Set(google.flatMap(row => accountAliases('google_ads', row.customerId)))];
   const metaStoredIds = [...new Set(meta.flatMap(row => [row.metaAssetId, accountId(row.metaAssetId), `act_${accountId(row.metaAssetId)}`]))];
   // Read all owners of these accounts; no names, tokens or data from those other clinics leave this service.
   const googleOwners = googleStoredIds.length ? await models.ClinicGoogleAdsAccount.findAll({
@@ -67,7 +70,11 @@ async function loadWorkspaceInventory({ models, scope, transaction = null }) {
   for (const campaign of campaigns) campaign.currency = campaign.provider === 'google_ads'
     ? google.find(row => accountId(row.customerId) === campaign.account_id)?.currencyCode || null
     : meta.find(row => accountId(row.metaAssetId) === campaign.account_id)?.additionalData?.currency || null;
-  return { selectedClinics, groups, authorizedGroups, google, meta, campaigns, accounts: workspaceAccounts(google, meta) };
+  const accounts = workspaceAccounts(google, meta).map(account => ({ ...account,
+    sharedOutsideScope: !ownsCampaignAccount({ ...scope, authorizedGroupIds: authorizedGroups },
+      mappings.filter(mapping => mapping.provider === account.provider && mapping.accountId === account.id)),
+  }));
+  return { selectedClinics, groups, authorizedGroups, google, meta, campaigns, accounts };
 }
 
 function workspaceAccounts(google, meta) {

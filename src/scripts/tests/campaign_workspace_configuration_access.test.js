@@ -18,9 +18,22 @@ function harness(options = {}) {
 }
 
 test('configuration queries and commands require an authenticated session', async () => {
-  for (const method of ['get', 'put', 'preparation', 'activate', 'assign', 'metaPreparation', 'refreshMeta', 'requestMetaPage', 'metaPageJob', 'preferences', 'googlePreparation', 'checkGoogle', 'googleDestinations', 'refreshGoogle']) {
+  for (const method of ['get', 'put', 'preparation', 'activate', 'assign', 'metaPreparation', 'refreshMeta', 'requestMetaPage', 'metaPageJob', 'preferences', 'googlePreparation', 'checkGoogle', 'googleDestinations', 'refreshGoogle', 'sharedAccount', 'assignSharedAccount']) {
     const h = harness(); await h.run(method, { userData: null });
     assert.equal(h.res.statusCode, 401); assert.equal(h.calls.length, 0);
+  }
+});
+test('shared-account routes retain scope guards and pass the session actor to the wider account check', async () => {
+  const forbidden = harness({ hasAccess: async input => input.access === 'read', assignSharedAccount: () => assert.fail('no write') });
+  await forbidden.run('assignSharedAccount'); assert.equal(forbidden.res.statusCode, 403);
+  const allowed = harness({ sharedAccount: async input => {
+    assert.equal(input.actorId, 7); assert.deepEqual(input.scope.clinicIds, [1, 2]); assert.equal(typeof input.hasAccess, 'function');
+    return { success: true, campaigns: [] };
+  } });
+  await allowed.run('sharedAccount', { query: { scope: 'group:5', provider: 'google_ads', account_id: '20', actorId: 999 } });
+  assert.equal(allowed.res.statusCode, 200); assert.equal(allowed.res.headers['Cache-Control'], 'private, no-store');
+  for (const method of ['sharedAccount', 'assignSharedAccount']) {
+    const h = harness(); await h.run(method, { query: { scope: 'all' } }); assert.equal(h.res.statusCode, 400);
   }
 });
 test('Google destination check enforces write scope and cached reads expose no private grant', async () => {

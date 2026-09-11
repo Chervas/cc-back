@@ -34,6 +34,17 @@ function mappingIdentity(row, provider) {
     groupId: row.assignmentScope === 'group' ? number(row.grupoClinicaId) || null : null };
 }
 
+function accountAliases(provider, value) {
+  const id = accountId(value);
+  return [...new Set([id, `act_${id}`,
+    ...(provider === 'google_ads' && id.length === 10 ? [`${id.slice(0, 3)}-${id.slice(3, 6)}-${id.slice(6)}`] : [])])];
+}
+
+function ownsCampaignAccount(scope, owners) {
+  return owners.length > 0 && owners.every(owner => scope.clinicIds.includes(owner.clinicId)
+    || scope.groupId && owner.groupId === scope.groupId || scope.authorizedGroupIds?.includes(owner.groupId));
+}
+
 // Reviewed assignments win. A shared account never implicitly belongs to every clinic mapped to it.
 function visibleCampaigns({ scope, mappings, assignments, inventory }) {
   const clinics = new Set(scope.clinicIds.map(Number));
@@ -64,8 +75,7 @@ function visibleCampaigns({ scope, mappings, assignments, inventory }) {
     if (reviews.length > 1 || reviews.some(row => row.status !== 'active' || !clinics.has(number(row.clinica_id)))) continue;
     const exclusive = owners.length > 0 && owners.every(owner => owner.clinicId && owner.clinicId === owners[0].clinicId);
     const assignedClinic = reviews[0] ? number(reviews[0].clinica_id) : exclusive ? owners[0].clinicId : null;
-    const ownsGroup = owners.length > 0 && owners.every(owner => clinics.has(owner.clinicId)
-      || scope.groupId && owner.groupId === scope.groupId || scope.authorizedGroupIds?.includes(owner.groupId));
+    const ownsGroup = ownsCampaignAccount(scope, owners);
     if (!assignedClinic && !ownsGroup) continue;
     if (assignedClinic && !clinics.has(assignedClinic)) continue;
     const detection = (identity.provider === 'google_ads' && googleDestinationDetection(item.destination_detection)) || item.destination_detection;
@@ -250,4 +260,4 @@ function aggregateReport({ campaigns, facts = [], leads = [], appointments = [],
   };
 }
 
-module.exports = { TIME_ZONE, accountId, mappingIdentity, reportPeriod, visibleCampaigns, leadCampaign, aggregateReport, cpl };
+module.exports = { TIME_ZONE, accountId, accountAliases, ownsCampaignAccount, mappingIdentity, reportPeriod, visibleCampaigns, leadCampaign, aggregateReport, cpl };

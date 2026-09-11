@@ -6,6 +6,7 @@ const { loadWorkspaceInventory } = require('./campaignWorkspace.service');
 const { settingScope, campaignIncluded } = require('./campaignWorkspaceSettings.service');
 const { findAssociationAccountScope, saveAssignmentWithinScope } = require('./managedCampaignAssociationScopes.service');
 const { appendAssignmentAudit, buildChanges, AUDIT_EVENT_TYPES } = require('./externalCampaignAssignmentTargets.service');
+const { accountAliases } = require('./campaignWorkspaceReport.service');
 
 const validate = new Ajv().compile({
   type: 'object', additionalProperties: false,
@@ -46,26 +47,30 @@ async function assignWorkspaceCampaign({ models, scope, actorId, input, loadInve
       && row.account_id === input.account_id && row.campaign_id === input.campaign_id && campaignIncluded(row, setting));
     if (!campaign) fail('workspace_assignment_campaign_unavailable', 404);
     if (campaign.assigned) fail('workspace_assignment_already_reviewed');
-    // Older mappings can retain a formatted account ID. Never create a second decision beside one of those.
-    const aliases = new Set([input.account_id, `act_${input.account_id}`]);
-    if (input.provider === 'google_ads' && input.account_id.length === 10) aliases.add(`${input.account_id.slice(0, 3)}-${input.account_id.slice(3, 6)}-${input.account_id.slice(6)}`);
-    const prior = await models.ExternalCampaignAssignment.findAll({ where: { provider: input.provider,
-      customer_id: { [Op.in]: [...aliases] }, campaign_id: input.campaign_id }, transaction, lock: transaction.LOCK.UPDATE });
-    if (prior.length) fail('workspace_assignment_already_reviewed');
-    const values = { provider: input.provider, customer_id: input.account_id, campaign_id: input.campaign_id,
-      campaign_name_snapshot: campaign.name, grupo_clinica_id: scope.groupId, clinica_id: input.clinic_id,
-      match_kind: 'manual', match_confidence: null, match_explanation: 'Clínica confirmada desde la preparación de campañas.',
-      status: 'active', version: 1, approved_by_user_id: actorId, approved_at: now() };
-    const result = await saveAssignmentWithinScope({ assignmentModel: models.ExternalCampaignAssignment, values,
-      groupId: scope.groupId, groupClinicIds: members, transaction, returnMetadata: true,
-      prepareValues: (current, next) => { if (current) fail('workspace_assignment_already_reviewed'); return next; },
-    });
-    await appendAssignmentAudit({ auditModel: models.ExternalCampaignAssignmentAudit, assignmentId: result.row.id,
-      eventType: AUDIT_EVENT_TYPES.CLINIC_ASSIGNED, actorUserId: actorId, fromVersion: 0, toVersion: 1,
-      changes: buildChanges({}, values, Object.keys(values)), transaction });
+    await createReviewedAssignment({ models, actorId, campaign, clinicId: input.clinic_id,
+      groupId: scope.groupId, groupClinicIds: members, transaction, now });
     return { success: true, assignment: { provider: input.provider, account_id: input.account_id,
       campaign_id: input.campaign_id, clinic_id: input.clinic_id, version: 1 } };
   });
 }
 
-module.exports = { assignWorkspaceCampaign, assignmentClinics };
+async function createReviewedAssignment({ models, actorId, campaign, clinicId, groupId, groupClinicIds, transaction, now = () => new Date() }) {
+    // A prior decision, including a formatted alias, is never implicitly replaced.
+    const prior = await models.ExternalCampaignAssignment.findAll({ where: { provider: campaign.provider,
+      customer_id: { [Op.in]: accountAliases(campaign.provider, campaign.account_id) }, campaign_id: campaign.campaign_id }, transaction, lock: transaction.LOCK.UPDATE });
+    if (prior.length) fail('workspace_assignment_already_reviewed');
+    const values = { provider: campaign.provider, customer_id: campaign.account_id, campaign_id: campaign.campaign_id,
+      campaign_name_snapshot: campaign.name, grupo_clinica_id: groupId || null, clinica_id: clinicId,
+      match_kind: 'manual', match_confidence: null, match_explanation: 'Clínica confirmada desde la preparación de campañas.',
+      status: 'active', version: 1, approved_by_user_id: actorId, approved_at: now() };
+    const result = await saveAssignmentWithinScope({ assignmentModel: models.ExternalCampaignAssignment, values,
+      groupId, groupClinicIds, transaction, returnMetadata: true,
+      prepareValues: (current, next) => { if (current) fail('workspace_assignment_already_reviewed'); return next; },
+    });
+    await appendAssignmentAudit({ auditModel: models.ExternalCampaignAssignmentAudit, assignmentId: result.row.id,
+      eventType: AUDIT_EVENT_TYPES.CLINIC_ASSIGNED, actorUserId: actorId, fromVersion: 0, toVersion: 1,
+      changes: buildChanges({}, values, Object.keys(values)), transaction });
+    return result.row;
+}
+
+module.exports = { assignWorkspaceCampaign, assignmentClinics, createReviewedAssignment };

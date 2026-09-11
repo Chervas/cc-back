@@ -216,6 +216,8 @@ router.post('/campaign-workspace/meta-preparation/page', campaignWorkspaceContro
 router.put('/campaign-workspace/preferences', campaignWorkspaceController.savePreferences);
 router.get('/campaign-workspace/google-preparation', campaignWorkspaceController.getGooglePreparation);
 router.get('/campaign-workspace/google-destinations', campaignWorkspaceController.getGoogleDestinations);
+router.get('/campaign-workspace/shared-account', campaignWorkspaceController.getSharedAccountReview);
+router.post('/campaign-workspace/shared-account/assignment', campaignWorkspaceController.assignSharedAccountCampaigns);
 router.post('/campaign-workspace/google-destinations/check', campaignWorkspaceController.refreshGoogleDestinations);
 router.post('/campaign-workspace/google-preparation/check', campaignWorkspaceController.checkGooglePreparation);
 router.get('/campaign-workspace/meta-signals', campaignWorkspaceController.getMetaSignalPreparation);
