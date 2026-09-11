@@ -21,10 +21,11 @@ const { loadSharedAccountReview, assignSharedAccountCampaigns } = require('../se
 const { loadOptimizationPreparation, checkOptimizationPreparation } = require('../services/campaignWorkspaceOptimizationPreparation.service');
 const { pauseWorkspaceOptimization } = require('../services/campaignWorkspaceOptimizationAuthorization.service');
 const { loadOptimizationHistory, resolveOptimizationReview } = require('../services/campaignWorkspaceOptimizationHistory.service');
+const { loadWorkspaceAdCreative } = require('../services/campaignAdCreative.service');
 
 function createWorkspaceHandler({ models = db, resolveScope = resolveClinicScope,
   accessibleClinics = getAccessibleMarketingClinicIds, hasAccess = hasMarketingClinicScopeAccess,
-  load = loadCampaignWorkspace, history = false } = {}) {
+  load = loadCampaignWorkspace, history = false, adCreative = false } = {}) {
   return async (req, res) => {
     const userId = Number(req.userData?.userId);
     if (!Number.isSafeInteger(userId) || userId <= 0) return res.status(401).json({ success: false, error: 'unauthenticated' });
@@ -40,6 +41,16 @@ function createWorkspaceHandler({ models = db, resolveScope = resolveClinicScope
       return res.status(403).json({ success: false, error: 'marketing_scope_forbidden' });
     }
     res.set('Cache-Control', 'private, no-store');
+    if (adCreative) {
+      try {
+        const result = await load({ models, scope, input: Object.fromEntries(['provider', 'account_id', 'campaign_id', 'ad_id', 'group_id'].map(key => [key, req.query[key]])) });
+        if (!await hasAccess({ userId, clinicIds: scope.clinicIds, access: 'read' })) return res.status(403).json({ success: false, error: 'marketing_scope_forbidden' });
+        return res.json(result);
+      } catch (error) {
+        if (error.status >= 400 && error.status < 500) return res.status(error.status).json({ success: false, error: error.code });
+        throw error;
+      }
+    }
     if (history) {
       try { return res.json(await load({ models, scope, actorId: userId, hasAccess, input: { page: req.query.page, campaignId: req.query.campaign_id } })); }
       catch (error) {
@@ -53,6 +64,7 @@ function createWorkspaceHandler({ models = db, resolveScope = resolveClinicScope
 
 exports.getWorkspace = asyncHandler(createWorkspaceHandler());
 exports.getOptimizationHistory = asyncHandler(createWorkspaceHandler({ load: loadOptimizationHistory, history: true }));
+exports.getAdCreative = asyncHandler(createWorkspaceHandler({ load: loadWorkspaceAdCreative, adCreative: true }));
 exports.createWorkspaceHandler = createWorkspaceHandler;
 
 function createWorkspaceConfigurationHandlers({ models = db, resolveScope = resolveClinicScope,

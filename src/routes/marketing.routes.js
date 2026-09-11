@@ -205,6 +205,7 @@ router.post('/chat-flow-templates/:id/duplicate', chatFlowTemplatesController.du
 // Onboarding unificado campañas (Google Ads + Meta Ads)
 router.get('/campaign-onboarding/bootstrap', campaignOnboardingController.getCampaignOnboardingBootstrap);
 router.get('/campaign-workspace', campaignWorkspaceController.getWorkspace);
+router.get('/campaign-workspace/ad-creative', campaignWorkspaceController.getAdCreative);
 router.get('/campaign-workspace/configuration', campaignWorkspaceController.getConfiguration);
 router.put('/campaign-workspace/configuration', campaignWorkspaceController.saveAccounts);
 router.get('/campaign-workspace/preparation', campaignWorkspaceController.getPreparation);

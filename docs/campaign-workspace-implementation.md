@@ -2151,8 +2151,9 @@ No se han reescrito sufijos de Google ni parametros Meta. Una campana sin estos
 identificadores seguira contando en su nivel disponible, sin rellenar datos
 historicos por nombre. El soporte de cada parametro publicitario y la preparacion
 autorizada de URLs siguen siendo un contrato distinto de recibir formularios.
-La colision historica del indice Google sin grupo y las creatividades reales
-siguen abiertas. Esta ampliacion no cierra la implementacion global del mock.
+La colision historica del indice Google sin grupo sigue abierta. El detalle de
+contenido real se incorpora en el apartado siguiente. Esta ampliacion no cierra
+la implementacion global del mock.
 
 Verificacion: 531 pruebas backend workspace/landings/paquete WordPress y 43 PHP
 pasan. Chromium recorre seis escenarios con el SDK completo (1366/390 px,
@@ -2161,3 +2162,49 @@ aislado, sin escribir leads de clientes. Tambien pasa la regresion de Consent
 Mode/Complianz. La suite ampliada frontend tiene 82/83 pruebas correctas: el
 fallo preexistente de `intake_chat_admin_contract` busca textos literales en un
 panel ya traducido; ni ese test ni el panel se modifican en esta ampliacion.
+
+## Contenido Real Por Anuncio (2026-09-11)
+
+`GET /api/marketing/campaign-workspace/ad-creative` recibe scope y la tupla
+proveedor/cuenta/campana/grupo/anuncio. Comparte la autorizacion de lectura del
+workspace (incluidos agregados intersectados con las clinicas autorizadas),
+revalida inclusion y pertenencia y no devuelve tokens, formularios ni contactos.
+La carga ocurre al abrir el anuncio, separada de los KPI y la salud.
+
+- Google: textos, variantes y URL de `GoogleAdsAdInsightsDaily`, consulta exacta
+  por cuenta/campana/grupo/anuncio y snapshot mas reciente. No usa la creatividad
+  de otro anuncio o del conjunto ni llama a Google al abrir el dialogo.
+- Meta: una lectura de `ad_id` con cuenta, campana y adset, comprobadas contra
+  inventario y contra la respuesta Graph. Conexion y grants activos vuelven a
+  comprobarse tras la lectura/cache. Se permite inspeccionar una campana sin
+  clinica asignada cuando el ambito es dueno autorizado de la cuenta completa;
+  no se asigna la campana ni se habilitan permisos de escritura por inspeccionarla.
+- El normalizador conserva textos, imagenes/miniaturas, variantes y enlaces
+  disponibles. No reconstruye una impresion supuestamente exacta ni usa HTML
+  de proveedor/iframes. Un video se identifica como miniatura, no como reproductor.
+  Si el contenido no se recupera, los resultados siguen visibles con un estado
+  explicito. Las imagenes fallidas no se sustituyen por fotografias genericas.
+- URLs HTTPS publicas sin credenciales/puertos/secretos; imagenes exclusivamente
+  en los CDN `fbcdn.net`/`cdninstagram.com`, sin referrer. El cliente usa bindings
+  normales, enlaces con noopener/noreferrer y textos escapados, no innerHTML.
+- Cache Redis con namespace de entorno y clave derivada de referencia, ambito,
+  asignaciones, conexion y revision del anuncio. Persiste entre recargas y
+  procesos API, TTL 24h; errores se conservan 60s. Se valida autorizacion antes
+  de leerlo, incluso en hit. No se almacena token ni datos de pacientes. Las
+  llamadas simultaneas al mismo recurso en el proceso comparten la promesa.
+  Si Redis falla, la creatividad queda no disponible, sin provocar un aluvion
+  de llamadas Graph ni impedir consultar resultados.
+- Este cache de contenido se renueva bajo demanda al caducar: no sustituye el
+  job nocturno del informe ni dispara un recorrido de todas las creatividades
+  al entrar en Resumen. Google sigue usando su sincronizacion existente.
+
+Referencias de campos: SDK oficial Meta para
+[Ad](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/ad.py)
+y [AdCreative](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/adcreative.py).
+No se usa la antigua aproximacion de creatividad por adset del detalle de estrategia.
+
+Verificacion del contrato: 507 tests workspace, incluidos doce nuevos de acceso,
+pertenencia, normalizacion, cache y revocacion durante lectura. Cache Redis real
+verificada entre dos procesos con claves de QA aisladas y borradas al terminar.
+80 tests frontend, incluidos carga/cancelacion/variantes/errores del componente.
+No hay migraciones ni cambios en anuncios, conversiones, senales o cobros.
