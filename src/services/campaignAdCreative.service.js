@@ -142,11 +142,15 @@ async function loadWorkspaceAdCreative({ models, scope, input, now = new Date(),
   const reference = creativeReference(input);
   const context = await inventoryContext({ models, scope, reference, loadInventory });
   if (reference.provider === 'google_ads') {
-    const row = await models.GoogleAdsAdInsightsDaily.findOne({ where: { customerId: { [Op.in]: accountAliases(reference.provider, reference.account_id) },
+    const where = { customerId: { [Op.in]: accountAliases(reference.provider, reference.account_id) },
+      campaignId: reference.campaign_id, adGroupId: reference.group_id, adId: reference.ad_id };
+    const cached = await models.GoogleAdsAdInventory.findOne({ where,
+      attributes: ['headlines', 'descriptions', 'finalUrl', 'observedAt'], order: [['observedAt', 'DESC'], ['id', 'DESC']], raw: true });
+    const row = cached || await models.GoogleAdsAdInsightsDaily.findOne({ where: { customerId: { [Op.in]: accountAliases(reference.provider, reference.account_id) },
       campaignId: reference.campaign_id, adGroupId: reference.group_id, adId: reference.ad_id },
       attributes: ['headlines', 'descriptions', 'finalUrl', 'updated_at'], order: [['updated_at', 'DESC'], ['id', 'DESC']], raw: true });
     if (!row) fail('workspace_ad_not_in_scope', 404);
-    return { success: true, reference, preview: normalizeCreative('google_ads', row, row.updated_at), error: null };
+    return { success: true, reference, preview: normalizeCreative('google_ads', row, row.observedAt || row.updated_at), error: null };
   }
   const auth = await metaCreativeContext({ models, scope, reference, ...context, now });
   const key = `${process.env.RUNTIME_NAMESPACE || process.env.JOB_RUNTIME_NAMESPACE || 'dev'}:campaign-ad-creative:v1:${auth.fingerprint}`;

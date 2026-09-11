@@ -16,6 +16,7 @@ function fixture(provider = 'meta_ads') {
   const connection = { id: 10, accessToken: 'private-token', expiresAt: '2030-01-01' };
   const models = {
     CampaignWorkspaceSetting: { findAll: async () => [] },
+    GoogleAdsAdInventory: { findOne: async () => null },
     GoogleAdsAdInsightsDaily: { findOne: async options => { calls.push(options); return { headlines: ['Titular real'], descriptions: ['Descripcion real'], finalUrl: 'https://clinica.example.com/', updated_at: now }; } },
     SocialAdsEntity: { findOne: async options => { calls.push(options); return { id: 1, updated_time: now }; } },
     ClinicMetaAsset: { findAll: async options => { calls.push(options); return mappings; } },

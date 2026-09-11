@@ -45,6 +45,7 @@ const {
   buildGoogleDestinationDetections,
 } = require('../lib/googleAdsCampaignMeasurementDiagnosis');
 const { saveObservedGoogleDestination } = require('../services/campaignWorkspaceGoogleDestination.service');
+const { syncGoogleAdCache } = require('../services/googleAdCache.service');
 const notificationService = require('../services/notifications.service');
 const { enqueueSyncForAllWabas } = require('../services/whatsappTemplates.service');
 const { enqueueSyncPhonesForAllWabas } = require('../services/whatsappPhones.service');
@@ -379,7 +380,7 @@ class MetaSyncJobs {
       adsSync: 'Sincroniza Ads (Marketing API) con ventana reciente: entidades, insights diarios y actions.',
       adsSyncMidday: 'Refrescado parcial de Ads al mediodía para capturar datos en curso (48 h).',
       adsBackfill: 'Backfill semanal de Ads con ventana extendida para consolidar atribución y cierres.',
-      googleAdsSync: 'Sincroniza campañas y métricas diarias de Google Ads para cuentas vinculadas.',
+      googleAdsSync: 'Sincroniza campañas, inventario de anuncios y métricas diarias de Google Ads. El inventario no depende de actividad; las fechas completas, incluso sin resultados, quedan registradas en caché. No modifica anuncios ni conversiones.',
       googleNativeLeadSync: 'Recupera por API los formularios nativos de Google de las cuentas seleccionadas cada cinco minutos, con siete días de solapamiento y deduplicación. No modifica webhooks, anuncios ni conversiones; no depende de la caché nocturna de informes.',
       googleAdsBackfill: 'Backfill de Google Ads para nuevas cuentas o rangos extendidos.',
       googleDataManagerDiagnostics: 'Concilia Data Manager, la capacidad visitor_choice de todas las webs y el gate interno de Conversiones mejoradas.',
@@ -4993,10 +4994,14 @@ try {
       cursor = new Date(chunkEnd.getTime() + dayMs);
     }
 
+    const adCache = await syncGoogleAdCache({ models: require('../../models'), account, accessToken,
+      loginCustomerId: effectiveLoginCustomerId, start, end, chunkDays, ensureHistory: true });
+    report?.notes?.push?.(`Google Ads anuncios: ${adCache.inventoryRows} inventariados, ${adCache.metricRows} filas diarias, ${adCache.days || 0} fechas completas${adCache.skipped ? ' (otra captura mas reciente)' : ''}.`);
     return {
-      rows: persistedMetricsRows,
+      rows: persistedMetricsRows + adCache.metricRows,
       persistedMetricsRows,
       persistedInventoryRows,
+      adCache,
       metricVariant: metricVariants[variantIndex]?.name
     };
   }

@@ -24,6 +24,8 @@ test('Meta ads without insights keep inventory and synchronization freshness, no
 test('Google ad loading retains group identity and queries only authorized campaign/date pairs', async () => {
   const googleWhere = [{ customerId: '123', campaignId: '456' }]; const dateWhere = {};
   const ads = await loadWorkspaceAds({ googleWhere, dateWhere, metaCampaigns: [], models: {
+    GoogleAdsAdInventory: { findAll: async () => [] },
+    GoogleAdsAdSyncDay: { findAll: async () => [] },
     GoogleAdsAdInsightsDaily: { findAll: async options => {
       assert.equal(options.where.date, dateWhere);
       assert.equal(options.where[require('sequelize').Op.or], googleWhere);

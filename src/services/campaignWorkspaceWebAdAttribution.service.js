@@ -33,7 +33,9 @@ async function resolveWorkspaceWebAdIdentity({ models, body, clinicId, recordId,
   const aliases = accountAliases(candidate.provider, candidate.account_id);
   let groups;
   if (candidate.provider === 'google_ads') {
-    const rows = await models.GoogleAdsAdInsightsDaily.findAll({ where: { customerId: { [Op.in]: aliases }, campaignId: candidate.campaign_id,
+    const cached = await models.GoogleAdsAdInventory.findAll({ where: { customerId: { [Op.in]: aliases }, campaignId: candidate.campaign_id,
+      adId: candidate.ad_id }, attributes: ['adGroupId'], group: ['adGroupId'], raw: true, transaction });
+    const rows = cached.length ? cached : await models.GoogleAdsAdInsightsDaily.findAll({ where: { customerId: { [Op.in]: aliases }, campaignId: candidate.campaign_id,
       adId: candidate.ad_id }, attributes: ['adGroupId'], group: ['adGroupId'], raw: true, transaction });
     groups = rows.map(row => row.adGroupId);
   } else {

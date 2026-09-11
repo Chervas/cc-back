@@ -218,12 +218,7 @@ async function loadWebEvidence({ models, campaigns, selectedClinics, groups, sco
 async function loadWorkspaceAds({ models, googleWhere, metaCampaigns, dateWhere }) {
   const ads = [];
   if (googleWhere.length) {
-    const rows = await models.GoogleAdsAdInsightsDaily.findAll({ where: { [Op.or]: googleWhere, date: dateWhere },
-      attributes: ['customerId', 'campaignId', 'adGroupId', 'adGroupName', 'adId', 'adName', 'adStatus', 'date', 'network', 'device', 'costMicros', 'conversions', 'updated_at'],
-      order: [['updated_at', 'DESC']], raw: true });
-    for (const row of rows) ads.push({ provider: 'google_ads', account_id: row.customerId, campaign_id: row.campaignId,
-      id: row.adId, groupId: row.adGroupId, groupName: row.adGroupName, title: row.adName, status: row.adStatus, date: row.date, segment: [row.network || '', row.device || ''],
-      spend: Number(row.costMicros) / 1e6, providerConversions: Number(row.conversions), updatedAt: row.updated_at });
+    ads.push(...await require('./googleAdWorkspaceRead.service').loadGoogleWorkspaceAds({ models, googleWhere, dateWhere }));
   }
   if (!metaCampaigns.length) return ads;
   const adsets = await models.SocialAdsEntity.findAll({ where: { level: 'adset', [Op.or]: metaCampaigns.map(c => ({

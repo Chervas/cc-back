@@ -27,7 +27,8 @@ module.exports = (sequelize, DataTypes) => {
     finalUrl: { type: DataTypes.STRING(1024), allowNull: true, field: 'finalUrl' },
     displayUrl: { type: DataTypes.STRING(512), allowNull: true, field: 'displayUrl' },
     headlines: { type: DataTypes.JSON, allowNull: true, field: 'headlines' },
-    descriptions: { type: DataTypes.JSON, allowNull: true, field: 'descriptions' }
+    descriptions: { type: DataTypes.JSON, allowNull: true, field: 'descriptions' },
+    observedAt: { type: DataTypes.DATE(3), allowNull: true, field: 'observedAt' }
   }, {
     tableName: 'GoogleAdsAdInsightsDaily',
     underscored: true,
@@ -35,9 +36,9 @@ module.exports = (sequelize, DataTypes) => {
     updatedAt: 'updated_at',
     indexes: [
       {
-        name: 'uniq_google_ads_ad_date_account',
+        name: 'uniq_google_ads_ad_group_date_account',
         unique: true,
-        fields: ['clinicGoogleAdsAccountId', 'date', 'adId', 'network', 'device']
+        fields: ['clinicGoogleAdsAccountId', 'date', 'campaignId', 'adGroupId', 'adId', 'network', 'device']
       },
       { name: 'idx_google_ads_ad_campaign_date', fields: ['campaignId', 'date'] },
       { name: 'idx_google_ads_ad_clinic_date', fields: ['clinicaId', 'date'] }

@@ -2108,6 +2108,56 @@ La comprobacion funcional por anuncio usa datos aislados, nunca inserta leads,
 citas o presupuestos de prueba en la base compartida. La bitacora frontend recoge
 build, QA autenticado y limites de las lecturas reales frente a fixtures.
 
+## Cache Nocturna De Anuncios Google (2026-09-11)
+
+`googleAdsSync` y `googleAdsBackfill` reutilizan `googleAdCache.service`, igual
+que el refresco manual de analisis. No hay otro cron ni consultas a Google al
+abrir el informe. Se mantienen los horarios existentes, `Europe/Madrid`:
+`20 0 * * *` diario y `30 5 * * 0` para backfill, configurables por las variables
+actuales. El primer refresco de anuncios completa 60 dias para comparar dos
+periodos de 30; despues refresca la ventana reciente, salvo huecos de cobertura.
+
+- `GoogleAdsAdInventory`: inventario independiente de las metricas, con identidad
+  cuenta/campana/grupo/anuncio, estado y contenido real. La consulta no incluye
+  segmentos ni metricas. Los anuncios sin actividad tambien aparecen.
+- `GoogleAdsAdSyncDays`: fechas consultadas completamente, por cuenta o campana.
+  Google [omite las filas con metricas cero al segmentar por fecha](https://developers.google.com/google-ads/api/docs/reporting/zero-metrics).
+  Solo una respuesta completa permite interpretar la ausencia de filas como
+  cero. Un inventario recien actualizado, por si solo, nunca prueba gasto cero.
+- `GoogleAdsAdInsightsDaily`: sigue siendo la cache historica de metricas.
+  El indice ahora incluye campana y grupo; `observedAt` conserva milisegundos.
+  No se crean registros diarios ficticios para anuncios sin actividad.
+- Se completan todas las paginas y todos los tramos antes de escribir. Error de
+  proveedor, cuota, paginacion circular, identidad incorrecta o datos invalidos
+  conserva el snapshot anterior. No se degrada una consulta incompleta a exito.
+- Inventario, reemplazo del rango exacto y cobertura se guardan en una sola
+  transaccion con bloqueo de la cuenta. Una respuesta mas antigua no puede
+  sobreescribir otra mas reciente, tampoco entre refresco manual y job. Una
+  consulta de campana no elimina otras campanas; cero resultados si limpia el
+  rango consultado, sin borrar historia fuera de el.
+- Se mantienen las asignaciones existentes: decisiones revisadas prevalecen;
+  las cuentas de grupo no se asignan al usuario que solicita un informe.
+  No se crean asignaciones ni leads, ni se habilitan conversiones u optimizacion.
+- Detalle creativo y atribucion web consultan este inventario. Se conserva la
+  lectura historica anterior cuando aun no existe inventario para un anuncio.
+  Performance Max conserva su contrato de grupos de recursos; no se inventan
+  anuncios `ad_group_ad` para representar recursos de PMAX.
+
+Migracion aplicada individualmente y revalidada:
+`20260911190000-create-google-ad-inventory-cache.js`. Conserva los 143 registros
+anteriores y admite el escritor previo de staging (grupo y observedAt nullable).
+El rollback rechaza colisiones entre grupos antes de retirar el indice nuevo.
+Backup privado previo: `/home/ubuntu/backups/campaign-google-ad-cache-20260911/`.
+No ejecutar migraciones pendientes ajenas ni promocionar staging por este cambio.
+
+Verificacion real inicial: las consultas de Google devolvieron 19 anuncios y
+50 filas de metricas para dos dias, sin escribir cache. El refresco posterior de
+esa cuenta guardo 19 anuncios, 694 filas y cobertura completa de 60 dias, sin
+mutaciones publicitarias. Esto prueba esa cuenta, no todas las conexiones.
+Pruebas MySQL en servidor temporal aislado: migracion idempotente, grupos con
+el mismo ID de anuncio, rollback por colision, rollback transaccional, ventanas
+vacias, aislamiento por campana, dos refrescos concurrentes y escritor antiguo.
+
 ## Atribucion Opcional De Anuncios Web (2026-09-11)
 
 Se reutiliza `/api/intake/leads`, su validacion de instalacion/dominio, deduplicado

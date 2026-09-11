@@ -24,7 +24,8 @@ const fixture = () => {
   const calls = [];
   const inventory = { selectedClinics: [{ id_clinica: 1, estado_clinica: 1 }], campaigns: [{ ...campaign }] };
   const groups = [{ adGroupId: '800' }];
-  const models = { GoogleAdsAdInsightsDaily: { findAll: async options => { calls.push(options); return groups; } } };
+  const models = { GoogleAdsAdInventory: { findAll: async () => [] },
+    GoogleAdsAdInsightsDaily: { findAll: async options => { calls.push(options); return groups; } } };
   const dependencies = { loadInventory: async options => { assert.deepEqual(options.scope.clinicIds, [1]); return inventory; },
     resolveWeb: async () => ({ record: { id: 10, domains: ['landing.example.test'] }, fingerprint: proof.web_fingerprint }) };
   const args = { models, body, clinicId: 1, recordId: 10, source: 'web', externalSource: 'web',
