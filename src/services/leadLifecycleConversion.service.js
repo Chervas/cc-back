@@ -2,6 +2,14 @@
 
 const { CRM_MILESTONE_SOURCE } = require('./campaignWorkspaceSignalPolicy.service');
 const COMMITTED_META_SIGNALS = Symbol('committed_meta_signals');
+const COMMITTED_GOOGLE_SIGNALS = Symbol('committed_google_signals');
+
+function rememberCommittedGoogleSignals(lead, results) {
+  if (!lead || !results.length) return;
+  const remembered = lead[COMMITTED_GOOGLE_SIGNALS] || new Map();
+  for (const { eventId, result } of results) remembered.set(eventId, result);
+  lead[COMMITTED_GOOGLE_SIGNALS] = remembered;
+}
 
 function rememberCommittedMetaSignals(lead, results) {
   if (!lead || !results.length) return;
@@ -16,6 +24,23 @@ async function maybeUploadLeadLifecycleConversion(input = {}) {
   const enqueueMeta = dependencies.enqueueMeta || require('./metaLeadLifecycleJob.service').enqueueMetaLeadLifecycleSignal;
   const lead = input.lead?.get ? input.lead.get({ plain: true }) : input.lead;
   const logger = dependencies.logger || console;
+  if (lead?.source === 'google_ads' && lead.external_source === 'google_lead_form') {
+    const committed = input.lead?.[COMMITTED_GOOGLE_SIGNALS];
+    if (committed?.has(input.eventId)) {
+      const result = committed.get(input.eventId);
+      committed.delete(input.eventId);
+      return { sent: false, ...result };
+    }
+    try {
+      const enqueueGoogle = dependencies.enqueueGoogle || require('./googleLeadLifecycleJob.service').enqueueGoogleLeadLifecycleSignal;
+      return { sent: false, ...await enqueueGoogle({ leadId: lead.id, clinicId: input.clinicId ?? lead.clinica_id,
+        eventName: input.eventName, eventId: input.eventId, occurredAt: input.occurredAt,
+        crmEventSource: CRM_MILESTONE_SOURCE }) };
+    } catch {
+      logger.warn?.('CRM signal queue unavailable: google_crm_unavailable');
+      return { sent: false, queued: false, reason: 'google_crm_unavailable' };
+    }
+  }
   let meta;
   // Enqueue before the synchronous legacy Google upload, so its timeout cannot lose Meta's job.
   try {
@@ -37,4 +62,4 @@ async function maybeUploadLeadLifecycleConversion(input = {}) {
   }
 }
 
-module.exports = { maybeUploadLeadLifecycleConversion, rememberCommittedMetaSignals };
+module.exports = { maybeUploadLeadLifecycleConversion, rememberCommittedMetaSignals, rememberCommittedGoogleSignals };

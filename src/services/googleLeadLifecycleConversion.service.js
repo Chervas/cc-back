@@ -129,6 +129,13 @@ async function maybeUploadLeadLifecycleConversion({
     return { sent: false, reason: 'lead_event_required' };
   }
 
+  if (lead.external_source === 'google_lead_form') {
+    const native = dependencies.nativeGoogleUpload
+      || require('./campaignWorkspaceGoogleNative.service').maybeUploadNativeGoogleLifecycleConversion;
+    return native({ leadId: lead.id, clinicId: clinicId ?? lead.clinica_id, eventName, eventId, occurredAt,
+      crmEventSource: CRM_MILESTONE_SOURCE }, dependencies);
+  }
+
   const resolved = await resolveLeadIntakeConfig({ lead, clinicId, dependencies });
   const configObject = resolved.config?.config && typeof resolved.config.config === 'object'
     ? resolved.config.config

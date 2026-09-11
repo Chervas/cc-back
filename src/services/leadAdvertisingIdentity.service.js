@@ -1,8 +1,41 @@
 'use strict';
 
 const { Op, json } = require('sequelize');
+const crypto = require('node:crypto');
 const { metaWebAdvertisingIdentity, WEB_LEAD_SOURCES } = require('../lib/meta-web-attribution');
 const id = value => typeof value === 'string' && /^[0-9]{1,64}$/.test(value) ? value : null;
+
+function googleNativeAdvertisingIdentity(value, clinicId) {
+  if (typeof value === 'string') { try { value = JSON.parse(value); } catch { return null; } }
+  if (!value || value.version !== 1 || value.verified_by !== 'google_ads_api' || value.provider !== 'google_ads'
+    || Number(value.clinic_id) !== Number(clinicId) || !id(value.account_id) || !id(value.campaign_id)
+    || !id(value.form_id) || value.ad_id != null && !id(value.ad_id) || value.adgroup_id != null && !id(value.adgroup_id)) return null;
+  return { provider: 'google_ads', account_id: value.account_id, campaign_id: value.campaign_id,
+    form_id: value.form_id, ad_id: value.ad_id || null, adgroup_id: value.adgroup_id || null };
+}
+
+async function resolveNativeGoogleLeadIdentity({ models, lead, transaction = null }) {
+  if (lead?.source !== 'google_ads' || lead.external_source !== 'google_lead_form'
+    || !/^[a-f0-9]{64}$/.test(lead.external_id || '')) return null;
+  const rows = await models.LeadAttributionAudit.findAll({ where: { lead_intake_id: lead.id },
+    attributes: [[json('attribution_steps.advertising_identity'), 'identity'],
+      [json('raw_payload.lead_id'), 'native_lead_id']], raw: true, transaction });
+  const matches = new Map();
+  for (const row of rows) {
+    const identity = googleNativeAdvertisingIdentity(row.identity, lead.clinica_id);
+    if (!identity) return null;
+    let nativeId = row.native_lead_id;
+    if (typeof nativeId === 'string' && nativeId.startsWith('"')) {
+      try { nativeId = JSON.parse(nativeId); } catch { return null; }
+    }
+    if (typeof nativeId !== 'string' || !nativeId || nativeId.length > 1024
+      || crypto.createHash('sha256').update(nativeId).digest('hex') !== lead.external_id
+      || identity.account_id !== lead.google_ads_customer_id || identity.campaign_id !== lead.google_ads_campaign_id
+      || lead.source_detail !== `leadgen_form:${identity.form_id}`) return null;
+    matches.set(JSON.stringify(identity), identity);
+  }
+  return matches.size === 1 ? [...matches.values()][0] : null;
+}
 
 function metaAdvertisingIdentity(value, clinicId) {
   if (typeof value === 'string') { try { value = JSON.parse(value); } catch { return null; } }
@@ -80,5 +113,6 @@ async function resolveMetaWebLeadIdentity({ models, lead, transaction = null }) 
   return identities.size === 1 ? [...identities.values()][0] : null;
 }
 
-module.exports = { metaAdvertisingIdentity, canonicalLeadAdvertisingIdentity, attachLeadAdvertisingIdentities,
+module.exports = { googleNativeAdvertisingIdentity, resolveNativeGoogleLeadIdentity,
+  metaAdvertisingIdentity, canonicalLeadAdvertisingIdentity, attachLeadAdvertisingIdentities,
   resolveNativeMetaLeadIdentity, resolveMetaWebLeadIdentity };

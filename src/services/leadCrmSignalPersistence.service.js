@@ -2,18 +2,22 @@
 
 const { CRM_MILESTONE_SOURCE } = require('./campaignWorkspaceSignalPolicy.service');
 const { enqueueMetaLeadLifecycleSignal } = require('./metaLeadLifecycleJob.service');
-const { rememberCommittedMetaSignals } = require('./leadLifecycleConversion.service');
+const { rememberCommittedMetaSignals, rememberCommittedGoogleSignals } = require('./leadLifecycleConversion.service');
 const { WEB_LEAD_SOURCES } = require('../lib/meta-web-attribution');
 
 const ACTIVE_APPOINTMENTS = new Set(['pendiente', 'info_enviada', 'info_confirmada',
   'recordatorio_enviado', 'recordatorio_confirmado', 'cambio_solicitado', 'reprogramada']);
-const enabled = (lead, dependencies) => WEB_LEAD_SOURCES.includes(lead?.source)
+const nativeGoogle = lead => lead?.source === 'google_ads' && lead.external_source === 'google_lead_form';
+const enabled = (lead, dependencies) => (WEB_LEAD_SOURCES.includes(lead?.source) || nativeGoogle(lead))
   && (dependencies.env || process.env).CAMPAIGN_WORKSPACE_ACTIVATION_ENABLED === 'true';
 const scopeChanged = () => { throw Object.assign(new Error('La cita o el interesado han cambiado. Actualiza la vista.'),
   { status: 409, code: 'meta_crm_scope_changed' }); };
 
 async function enqueueMilestones({ lead, appointment, qualified, transaction, dependencies }) {
-  const enqueue = dependencies.enqueue || enqueueMetaLeadLifecycleSignal;
+  const google = nativeGoogle(lead);
+  const enqueue = google
+    ? dependencies.enqueueGoogle || require('./googleLeadLifecycleJob.service').enqueueGoogleLeadLifecycleSignal
+    : dependencies.enqueue || enqueueMetaLeadLifecycleSignal;
   const results = [];
   const occurredAt = appointment?.created_at || lead.updated_at || (dependencies.now || (() => new Date()))();
   const events = [
@@ -25,8 +29,8 @@ async function enqueueMilestones({ lead, appointment, qualified, transaction, de
       ...event, occurredAt, crmEventSource: CRM_MILESTONE_SOURCE }, { ...dependencies, transaction });
     results.push({ eventId: event.eventId, result });
   }
-  // Google and other post-commit hooks reuse these results without enqueuing again.
-  transaction.afterCommit(() => rememberCommittedMetaSignals(lead, results));
+  // Post-commit hooks reuse the durable result without another enqueue or provider call.
+  transaction.afterCommit(() => (google ? rememberCommittedGoogleSignals : rememberCommittedMetaSignals)(lead, results));
   return results;
 }
 

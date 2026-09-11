@@ -1,7 +1,8 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { googleDeliveryContext, googleWorkspaceRouteDeliveryContext } = require('./googleWorkspaceDeliveryContext.service');
+const { googleDeliveryContext, googleWorkspaceRouteDeliveryContext, googleWorkspaceNativeDeliveryContext } = require('./googleWorkspaceDeliveryContext.service');
+const { googleNativeAdvertisingIdentity } = require('./leadAdvertisingIdentity.service');
 const { resolveWorkspaceSignalPolicy, CRM_MILESTONE_SOURCE } = require('./campaignWorkspaceSignalPolicy.service');
 const { resolveWebMeasurementMarketingState } = require('./campaignMeasurementReadiness.service');
 const { resolveEffectiveTrackingConfig } = require('./effectiveMarketingAssets.service');
@@ -71,6 +72,12 @@ async function loadGoogleSignalEvidence({ models, campaigns, selectedClinics, no
   const runtimes = new Map(); const policies = new Map();
   const routeContexts = new Map();
   const routeScopes = new Map(); const routeGrants = new Map(); const routeConnections = new Map();
+  const nativeAccounts = new Map();
+  const readReceptionAccount = input => {
+    const key = `${input.settingId}:${input.accountId}`;
+    if (!nativeAccounts.has(key)) nativeAccounts.set(key, require('./googleLeadReception.service').receptionAccount(input));
+    return nativeAccounts.get(key);
+  };
   const verifyRoute = input => {
     const key = JSON.stringify([input.clinicId, input.accountId, input.setting.id, input.setting.version, input.eventName, input.destinationId]);
     if (!routeGrants.has(key)) routeGrants.set(key, require('./campaignWorkspaceSignalAuthorization.service').verifySignalDestination(input));
@@ -82,19 +89,27 @@ async function loadGoogleSignalEvidence({ models, campaigns, selectedClinics, no
   };
   for (const campaign of eligible) {
     const routeHistory = rows.filter(row => Number(row.clinicaId) === campaign.clinicId && row.customerId === campaign.account_id
-      && row.requestMetadata?.workspace_delivery?.schema_version === 2
+      && [2, 3].includes(row.requestMetadata?.workspace_delivery?.schema_version)
       && row.requestMetadata.workspace_delivery.campaign_id === campaign.campaign_id
       && timestamp(row.attemptedAt) <= +now && timestamp(row.attemptedAt) >= +now - FRESH_MS);
     if (routeHistory.length && selectedClinics.some(row => Number(row.id_clinica) === campaign.clinicId)) {
       const verified = [];
       for (const row of routeHistory) {
-        const key = `${campaign.id}:${row.eventName}:${row.intakeConfigId}`;
+        const native = row.requestMetadata.workspace_delivery.schema_version === 3;
+        const identity = native && googleNativeAdvertisingIdentity({ ...row.requestMetadata.workspace_delivery.native_identity,
+          version: 1, verified_by: 'google_ads_api', clinic_id: campaign.clinicId }, campaign.clinicId);
+        if (native && (!identity || identity.account_id !== campaign.account_id || identity.campaign_id !== campaign.campaign_id
+          || row.intakeConfigId != null || row.requestMetadata.consent_source !== 'google_ads_native_crm')) continue;
+        const key = `${campaign.id}:${row.eventName}:${row.intakeConfigId}:${native ? JSON.stringify(identity) : 'web'}`;
         if (!routeContexts.has(key)) {
           try {
             // Report-only memoization. No token refresh, provider call or permission cache across requests.
             if (!routeScopes.has(campaign.clinicId)) routeScopes.set(campaign.clinicId, loadSignalRoutingScope({ models, clinicId: campaign.clinicId }));
             const routingScope = await routeScopes.get(campaign.clinicId);
-            const context = await require('./campaignWorkspaceGoogleConversion.service').resolveWorkspaceGoogleWebContext({
+            const context = native ? await require('./campaignWorkspaceGoogleNative.service').resolveWorkspaceGoogleNativeRoute({
+              models, clinicId: campaign.clinicId, identity, eventName: row.eventName, now, routingScope, verifyRoute,
+              trackingRecords: records, readReceptionAccount,
+            }) : await require('./campaignWorkspaceGoogleConversion.service').resolveWorkspaceGoogleWebContext({
               models, clinicId: campaign.clinicId, recordId: row.intakeConfigId, eventName: row.eventName,
               customData: { customer_id: campaign.account_id, campaign_id: campaign.campaign_id }, crmEventSource: CRM_MILESTONE_SOURCE, now,
               routingScope, verifyRoute, readConnection, webRecords: {
@@ -104,17 +119,19 @@ async function loadGoogleSignalEvidence({ models, campaigns, selectedClinics, no
             });
             routeContexts.set(key, context);
           } catch (error) {
-            if (!/^workspace_/.test(error.code || '')) throw error;
+            if (!/^(workspace_|google_lead_)/.test(error.code || '')) throw error;
             routeContexts.set(key, null);
           }
         }
         const context = routeContexts.get(key);
-        if (!context || row.connectionSource !== 'workspace_mandate' || row.assignmentScope !== context.web.record.assignment_scope
-          || Number(row.grupoClinicaId || 0) !== Number(context.web.groupId || 0)
+        if (!context || row.connectionSource !== (native ? 'workspace_native_mandate' : 'workspace_mandate')
+          || row.assignmentScope !== (native ? context.assignmentScope : context.web.record.assignment_scope)
+          || Number(row.grupoClinicaId || 0) !== Number((native ? context.groupId : context.web.groupId) || 0)
           || Number(row.googleConnectionId) !== context.route.connectionId
           || (row.loginCustomerId || null) !== (context.route.loginCustomerId || null)
           || row.conversionAction !== `customers/${campaign.account_id}/conversionActions/${context.route.destinationId}`) continue;
-        const proof = googleWorkspaceRouteDeliveryContext({ context, campaignId: campaign.campaign_id });
+        const proof = native ? googleWorkspaceNativeDeliveryContext({ context })
+          : googleWorkspaceRouteDeliveryContext({ context, campaignId: campaign.campaign_id });
         if (proof?.fingerprint === row.requestMetadata.workspace_delivery.fingerprint) verified.push(row);
       }
       evidence.set(campaign.id, { ...googleDeliveryEvidence(verified, now), key: campaign.id });

@@ -13,7 +13,7 @@ const {
 } = require('./googleDataManagerConversion.service');
 const { resolveScopedGoogleAdsRuntime } = require('./googleAdsScopedRuntime.service');
 const { extractGoogleLeadIdentity } = require('../lib/google-lead-routing');
-const { resolveWorkspaceSignalPolicy } = require('./campaignWorkspaceSignalPolicy.service');
+const { resolveWorkspaceSignalPolicy, CRM_MILESTONE_SOURCE } = require('./campaignWorkspaceSignalPolicy.service');
 const { googleDeliveryContext } = require('./googleWorkspaceDeliveryContext.service');
 
 const GOOGLE_DATETIME_REGEX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/;
@@ -873,23 +873,27 @@ async function uploadGoogleConversionDestination({
     || process.env.GOOGLE_DATA_MANAGER_DEFAULT_PHONE_COUNTRY_CODE
     || null;
   const configuredConsentModeEnabled = cfgObject.features?.consent_mode_enabled === true;
+  // Native CRM sources have no website CMP. Only an internal resolver can supply their persisted consent.
+  const nativeConsent = !cfgRecord && crmEventSource === CRM_MILESTONE_SOURCE
+    && ['qualified_lead', 'schedule'].includes(eventConfig.event_name) && typeof dependencies.resolveNativeConsent === 'function'
+    ? await dependencies.resolveNativeConsent() : null;
+  const verifiedNativeConsent = nativeConsent?.source === 'google_ads_native_crm';
+  const consentInputs = verifiedNativeConsent ? [nativeConsent.consent] : [customData.consent, consent];
+  const consentSourceReady = verifiedNativeConsent || configuredConsentModeEnabled && consentModeEnabled !== false;
   // Advertising conversions always require an explicit, per-visitor grant.
-  // A disabled/missing Consent Mode configuration is a blocker, never a
+  // For web sources, a disabled/missing Consent Mode configuration is a blocker, never a
   // legacy permission or an invitation to infer consent from analytics/contact.
   const requiresExplicitAdvertisingConsent = true;
-  const requestConsentStatus = mergeExplicitGoogleAdvertisingConsent(customData.consent, consent);
-  const requestedAdUserDataConsentStatus = normalizeExplicitAdUserDataConsent(customData.consent, consent);
-  const requestedAdPersonalizationConsentStatus = normalizeExplicitAdPersonalizationConsent(
-    customData.consent,
-    consent
-  );
-  const consentStatus = configuredConsentModeEnabled && consentModeEnabled !== false
+  const requestConsentStatus = mergeExplicitGoogleAdvertisingConsent(...consentInputs);
+  const requestedAdUserDataConsentStatus = normalizeExplicitAdUserDataConsent(...consentInputs);
+  const requestedAdPersonalizationConsentStatus = normalizeExplicitAdPersonalizationConsent(...consentInputs);
+  const consentStatus = consentSourceReady
     ? requestConsentStatus
     : (requestConsentStatus === 'DENIED' ? 'DENIED' : null);
-  const adUserDataConsentStatus = configuredConsentModeEnabled && consentModeEnabled !== false
+  const adUserDataConsentStatus = consentSourceReady
     ? requestedAdUserDataConsentStatus
     : (requestedAdUserDataConsentStatus === 'DENIED' ? 'DENIED' : null);
-  const adPersonalizationConsentStatus = configuredConsentModeEnabled && consentModeEnabled !== false
+  const adPersonalizationConsentStatus = consentSourceReady
     ? requestedAdPersonalizationConsentStatus
     : (requestedAdPersonalizationConsentStatus === 'DENIED' ? 'DENIED' : null);
   const authorizationCheckNow = typeof dependencies.now === 'function'
@@ -997,6 +1001,7 @@ async function uploadGoogleConversionDestination({
         userDataPolicy.authorization?.adPersonalizationSource || null,
       visitor_ad_personalization_consent_status: adPersonalizationConsentStatus || 'UNSPECIFIED',
       consent_mode_configured: configuredConsentModeEnabled,
+      ...(verifiedNativeConsent ? { consent_source: 'google_ads_native_crm' } : {}),
       explicit_advertising_consent_required: requiresExplicitAdvertisingConsent,
       explicit_ad_user_data_consent_status: adUserDataConsentStatus || 'UNSPECIFIED'
     }
@@ -1036,6 +1041,9 @@ async function uploadGoogleConversionDestination({
     campaignId: extractGoogleLeadIdentity(customData).campaignId, eventName: eventConfig.event_name,
     crmEventSource, clinicId: scope.clinicId, destinationId: conversionAction,
   });
+  if (verifiedNativeConsent && (!workspacePolicy.allowed || workspacePolicy.authorizationSchema !== 2)) {
+    return skip(!workspacePolicy.allowed ? workspacePolicy.reason : 'workspace_google_native_mandate_required');
+  }
   if (workspacePolicy.applicable) {
     auditBase.requestMetadata.workspace_policy_version = workspacePolicy.version;
     auditBase.requestMetadata.workspace_policy_reason = workspacePolicy.reason;
@@ -1124,6 +1132,7 @@ async function uploadGoogleConversionDestination({
     result = await uploadConversion({
       customerId: eventConfig.customer_id,
       conversionAction,
+      ...(verifiedNativeConsent ? { eventSource: 'OTHER' } : {}),
       ...(clickId ? { [clickId.type]: clickId.value } : {}),
       value,
       currency,

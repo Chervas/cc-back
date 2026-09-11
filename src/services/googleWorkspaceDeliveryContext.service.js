@@ -46,4 +46,15 @@ function googleWorkspaceRouteDeliveryContext({ context, campaignId }) {
       userPolicy: context.config }) };
 }
 
-module.exports = { googleDeliveryContext, googleWorkspaceRouteDeliveryContext };
+function googleWorkspaceNativeDeliveryContext({ context }) {
+  const { route, identity, clinicId, groupId } = context || {};
+  if (!positiveId(clinicId) || identity?.provider !== 'google_ads'
+    || !/^[0-9]{1,64}$/.test(identity.campaign_id || '') || !/^[0-9]{1,64}$/.test(identity.form_id || '')
+    || !route?.authorization?.allowed || route.authorization.authorizationSchema !== 2
+    || !/^[a-f0-9]{64}$/.test(route.destinationKey || '')) return null;
+  return { schema_version: 3, campaign_id: identity.campaign_id, native_identity: identity,
+    fingerprint: hash({ route: route.destinationKey, identity, clinic: clinicId, group: groupId,
+      policies: route.authorization.policyRefs, userPolicy: context.config }) };
+}
+
+module.exports = { googleDeliveryContext, googleWorkspaceRouteDeliveryContext, googleWorkspaceNativeDeliveryContext };

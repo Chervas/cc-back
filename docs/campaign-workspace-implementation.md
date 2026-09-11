@@ -1498,3 +1498,125 @@ conservan sus PID. Sin cambios de UI ni nuevo build: `5b7db07c9dcf100e` sigue en
 preview. Auditoria SQL antes/despues: gates cerrados, settings=0, leads nativos
 Google=0, jobs nuevos=0 y entregas Meta=0. No hay importaciones, señales,
 mutaciones publicitarias, cobros ni promocion. Commits locales en DEV.
+
+## Hitos Google Nativos Sin Web (2026-09-11)
+
+El receptor nativo anterior alimenta ahora el recorrido canonico de cualificacion
+y cita del CRM. `googleLeadLifecycleConversion` distingue `google_lead_form`
+antes de buscar una instalacion y llama a `campaignWorkspaceGoogleNative`.
+El transporte, la auditoria, deduplicacion y Diagnostics Google son los existentes;
+no crea otra web, otro CRM ni conversiones al recibir el formulario.
+
+- Resuelve identidad desde la auditoria escrita por el receptor Google. Comprueba
+  hash del ID opaco y coincidencia de cuenta, campaña, formulario y clinica.
+  Auditorias contradictorias o atribucion procedente del navegador no son validas.
+- Cualificacion requiere el estado/hito vigente; Schedule, una cita no provisional
+  ni cancelada de ese mismo lead/clinica. IDs canonicos `lead-ID-qualified` y
+  `appointment-ID`, fechas no futuras ni de mas de siete dias. Los hooks existentes
+  de cambio de estado y enlace de cita llegan al nuevo recorrido sin duplicarlo.
+- Reutiliza la asignacion actual de cuentas/campañas del receptor y el mandato
+  schema 2. Una cuenta compartida nunca hereda por su nombre ni por la sede
+  representativa. Se aplican restricciones simultaneas de clinica/grupo.
+- El origen nativo no necesita CMP, pero sigue necesitando consentimiento
+  publicitario explicito persistido. Un callback interno, junto a la capacidad
+  no serializable del CRM, proporciona ese consentimiento al uploader. Campos
+  JSON, flags publicos o un formulario recibido no pueden fabricarlo. La auditoria
+  declara `consent_mode_configured=false` y `consent_source=google_ads_native_crm`.
+- Las autorizaciones opcionales de datos mejorados ya guardadas se reutilizan
+  como politica, sin tratarlas como una instalacion. No se amplian allowlist,
+  cuentas/eventos autorizados ni las restricciones documentadas. Sin esa
+  autorizacion no envia email/telefono; sin identificadores permitidos no envia.
+  No hay audiencias, remarketing, tratamientos ni paginas en el payload.
+- Relee lead, contacto, consentimiento, hito, permiso y politica antes del envio
+  y despues de OAuth/reserva. Cualquier cambio cancela el transporte. Un recibo
+  aceptado se deduplica con el mecanismo existente; no se convierte en atribucion.
+- Usa `eventSource=OTHER` para el hito privado del CRM, sin inventar navegador,
+  llamada o transaccion en tienda. Fuente:
+  https://developers.google.com/data-manager/api/reference/rest/v1/events/ingest#EventSource
+- Los intentos guardan `workspace_delivery` schema 3 en el JSON existente, con
+  identidad publicitaria y huella de mandato/politica, sin contacto. Salud valida
+  clinica, asignacion, grant, destino y politica actuales; no exige web al nativo.
+  Los recibos web schema 1/2 siguen su camino anterior. Las lecturas se reutilizan
+  solo dentro de cada consulta, nunca entre envios; Salud no lee contactos ni
+  refresca tokens. Mantiene recibido/procesando separado de procesado y atribuido.
+
+La nueva suite usa el receptor, preparacion y comando de activacion reales con
+modelos/proveedores aislados. La evidencia inicial de recepcion para el comando
+es un fixture explicito; no acredita una activacion de cliente. Incluye clinica,
+grupo, hooks canonicos, deduplicacion, consentimiento, datos mejorados y revocacion
+tras OAuth/reserva. Las pruebas prohiben SQL real. No hay llamadas de envio a Google.
+
+Los hitos nativos usan ahora el outbox descrito debajo. Falta la comprobacion
+completa de recepcion/destinos nativos y configuracion mixta/multipagina. Siguen abiertos
+Optimiza Google/Meta, parametros publicitarios autorizados, metricas CRM por anuncio
+y sustitucion de la ruta canonica. Ambos gates reales permanecen cerrados.
+Objetivo global EN CURSO; este avance no habilita señales ni importaciones de clientes.
+
+## Outbox De Hitos Google Nativos (2026-09-11)
+
+`googleLeadLifecycleJob.service` incorpora `campaign_google_crm_signal` al
+executor existente. Es un job por hito, no un cron; prioridad normal, ocho
+intentos y ventana de siete dias desde el evento. `JobRequest` aporta namespace,
+deduplicacion de jobs activos, backoff y recuperacion tras reinicio. No hay nueva
+tabla, migracion, calendario paralelo ni receptor de formularios.
+
+- Cualificacion, creacion de cita y enlaces desde aviso/resultado de llamada
+  reutilizan `leadCrmSignalPersistence`. El cambio CRM y el job se guardan juntos.
+  Las lecturas de origen, identidad, cuenta, clinica, mandato y autorizacion usan
+  esa misma transaccion. El hook posterior consume el resultado del commit sin
+  duplicar jobs ni llamar a Google. La emision Google web anterior no cambia.
+- Fallar SQL revierte el cambio y su job; una denegacion de consentimiento o
+  mandato permite guardar el CRM sin emision. El payload conserva solo IDs
+  locales, evento, fecha normalizada y huella; nunca contactos, tokens, IDs
+  nativos, respuestas de formulario ni payload de conversion.
+- El executor exige tipo/origen internos y ausencia de solicitante HTTP. Relee
+  el hito, cita, identidad, datos, consentimiento, clinica y mandato. Los cambios
+  de fuente/autorizacion invalidan el trabajo; no lo redirigen. Se comprueba
+  tambien la huella entre validacion del worker, entrada al uploader, OAuth y
+  reserva. El gate cerrado impide tanto encolar como enviar.
+- Cuota/timeout/5xx y errores de persistencia reintentan; permisos retirados,
+  expiracion, falta de identificadores autorizados y errores permanentes paran.
+  Una aceptacion con recibo persistido completa el job; Diagnostics sigue
+  comprobando el procesamiento. Salud no confunde job completado con conversion
+  atribuida ni exige una web al recibo nativo.
+- Si Google acepta pero no se guarda su recibo, el uploader mantiene la reserva
+  de cinco minutos. El reintento conserva destino, fecha y `transactionId`.
+  Este ultimo deduplica eventos dentro de la misma accion segun el
+  [contrato de Google](https://developers.google.com/data-manager/api/devguides/events/send-events).
+  No se ofrece garantia de exactly-once de red; se preservan reserva local e
+  identidad de conversion en ambos lados.
+
+Verificacion de dominio: pruebas aisladas del receptor y preparacion/mandato
+reales, seguida de hooks CRM, `enqueueUniqueJobRequest`, worker, uploader y Salud.
+Incluye clinica/grupo, reinicio simulado perdiendo estado de proceso, duplicados,
+fallo transitorio/permanente, recibo perdido tras aceptacion, revocacion durante
+envio y propagacion de la transaccion a todas las lecturas. Los tests de
+persistencia comprueban commit/rollback conjunto para los tres escritores.
+No son importaciones, permisos, señales o citas de clientes reales.
+
+El objetivo global permanece abierto: cobertura completa de recepcion/destinos,
+configuracion mixta/multipagina, Optimiza Google/Meta, parametros publicitarios
+autorizados, metricas CRM por anuncio y ruta canonica. Ambos gates siguen
+cerrados; no se activan anuncios, señales, cobros ni se promueve staging/gateway.
+
+Verificacion final de este avance: 454 pruebas backend de campañas, receptores,
+autorizacion, persistencia y jobs; tres contratos adicionales de outbox,
+Diagnostics y cita/tratamiento. Cero fallos. La suite nativa contiene 24 pruebas,
+incluida perdida del recibo tras aceptacion. Sintaxis y diff-check correctos.
+El test general del executor crea y elimina unicamente sus jobs de prueba en
+namespace propio; no ejecuta integraciones reales.
+
+Chromium autenticado: 71 comprobaciones/29 capturas del recorrido y 36/9 de
+Salud, en 1440/1024/390 px. Evidencias:
+`/home/ubuntu/qa-evidence/campaign-google-crm-queue-20260911-regression` y
+`/home/ubuntu/qa-evidence/campaign-google-crm-queue-20260911-health`.
+Los datos iniciales son reales; los estados de proveedor de Salud se prueban
+con fixtures GET, no entregas externas. Sin errores JS, escrituras de negocio
+ni desbordamientos detectados. Revisados manualmente dialogos de Salud,
+preparacion web y grafica movil; los avisos operativos no se cierran ni ocultan.
+
+Un reinicio DEV en este avance: PID `1199799`, contador `8548` (desde `8547`).
+Staging `1074087/46`, gateway `1039243/37` y preview `1054768/40` sin cambios.
+No se recompila UI: sigue `5b7db07c9dcf100e`. Auditoria SQL antes/despues:
+settings, leads Google nativos, jobs Google nativos, señales Google nativas y
+entregas Meta a cero; ambos gates cerrados. Sin migraciones ni promocion.

@@ -9,11 +9,12 @@ const { maybeUploadLeadLifecycleConversion } = require('../../services/leadLifec
 const { CRM_MILESTONE_SOURCE } = require('../../services/campaignWorkspaceSignalPolicy.service');
 const { createAppointmentWithPatientLanguage } = require('../../lib/patient-language');
 
-function harness() {
+function harness({ googleNative = false } = {}) {
   const now = new Date('2026-09-10T21:00:00Z');
   const state = { transactions: 0, reloads: [], queueCalls: [], external: [], rollback: false,
     committed: {
-      lead: { id: 1, clinica_id: 2, source: 'meta_ads', status_lead: 'contactado', updated_at: now, campana_id: 42 },
+      lead: { id: 1, clinica_id: 2, source: googleNative ? 'google_ads' : 'meta_ads',
+        ...(googleNative ? { external_source: 'google_lead_form' } : {}), status_lead: 'contactado', updated_at: now, campana_id: 42 },
       appointment: { id_cita: 3, clinica_id: 2, lead_intake_id: null, estado: 'pendiente', campana_id: null, created_at: now },
       jobs: [], patient: { idioma_preferido: 'es' },
     } };
@@ -50,16 +51,21 @@ function harness() {
       assert.ok(options.transaction); assert.equal(input.crmEventSource, CRM_MILESTONE_SOURCE);
       state.queueCalls.push(input);
       if (state.failEvent === input.eventName) throw new Error('queue unavailable');
-      if (state.denied) return { queued: false, reason: 'meta_crm_consent_required' };
+      if (state.denied) return { queued: false, reason: googleNative ? 'google_crm_consent_required' : 'meta_crm_consent_required' };
       const jobs = options.transaction.staged.jobs;
       jobs.push({ eventId: input.eventId, eventName: input.eventName });
       return { queued: true, jobId: jobs.length };
     } };
+  if (googleNative) {
+    dependencies.enqueueGoogle = dependencies.enqueue;
+    dependencies.enqueue = () => assert.fail('Google must not queue Meta');
+  }
   const run = changes => persistLeadWithCrmSignals({ lead, changes: changes || { status_lead: 'cualificado' }, dependencies });
   const link = () => persistLeadWithCrmSignals({ lead, appointment, changes: { status_lead: 'citado', call_outcome_appointment_id: 3 }, dependencies });
   const googleHook = eventId => maybeUploadLeadLifecycleConversion({ lead, eventId,
     eventName: eventId.startsWith('appointment') ? 'schedule' : 'qualified_lead', occurredAt: now,
-    dependencies: { enqueueMeta: async () => { state.external.push('unexpected enqueue'); return { queued: false }; },
+    dependencies: { enqueueGoogle: async () => { state.external.push('unexpected Google enqueue'); return { queued: false }; },
+      enqueueMeta: async () => { state.external.push('unexpected enqueue'); return { queued: false }; },
       google: async () => { state.external.push('google'); return { sent: true }; } } });
   return { state, lead, appointment, dependencies, sequelize, run, link, googleHook, now };
 }
@@ -72,6 +78,55 @@ test('qualification and its job commit together; the Google hook reuses the comm
   assert.equal(h.state.external.length, 0);
   const delivery = await h.googleHook('lead-1-qualified'); assert.equal(delivery.sent, true);
   assert.equal(delivery.meta.queued, true); assert.deepEqual(h.state.external, ['google']);
+});
+
+test('Google native qualification and appointment jobs use the same atomic CRM persistence', async () => {
+  for (const method of ['run', 'link']) {
+    const h = harness({ googleNative: true }); await h[method]();
+    assert.equal(h.state.transactions, 1); assert.equal(h.state.external.length, 0);
+    assert.equal(h.state.committed.jobs.length, method === 'run' ? 1 : 2);
+    const result = await h.googleHook('lead-1-qualified'); assert.equal(result.queued, true); assert.equal(result.sent, false);
+    if (method === 'link') assert.equal((await h.googleHook('appointment-3')).queued, true);
+    assert.equal(h.state.external.length, 0);
+  }
+});
+
+test('Google native queue or commit failures roll back the CRM state and do not remember jobs', async () => {
+  for (const failure of ['qualified_lead', 'schedule', 'commit']) {
+    const h = harness({ googleNative: true });
+    if (failure === 'commit') h.state.failCommit = true; else h.state.failEvent = failure;
+    await assert.rejects(h.link(), /queue unavailable|commit rejected/);
+    assert.equal(h.state.committed.lead.status_lead, 'contactado');
+    assert.equal(h.state.committed.appointment.lead_intake_id, null); assert.equal(h.state.committed.jobs.length, 0);
+    await h.googleHook('lead-1-qualified'); assert.deepEqual(h.state.external, ['unexpected Google enqueue']);
+  }
+});
+
+test('native Google consent denial persists CRM changes without sending or retrying from post-commit', async () => {
+  const h = harness({ googleNative: true }); h.state.denied = true; await h.link();
+  assert.equal(h.state.committed.lead.status_lead, 'citado'); assert.equal(h.state.committed.jobs.length, 0);
+  for (const id of ['lead-1-qualified', 'appointment-3']) assert.equal((await h.googleHook(id)).reason, 'google_crm_consent_required');
+  assert.equal(h.state.external.length, 0);
+});
+
+test('creating a Google native appointment includes both jobs in the existing creation transaction', async () => {
+  for (const fails of [false, true]) {
+    const h = harness({ googleNative: true }); if (fails) h.state.failEvent = 'schedule';
+    const create = () => createAppointmentWithPatientLanguage({ sequelize: h.sequelize,
+      AppointmentModel: { create: async (values, { transaction }) => {
+        transaction.staged.appointment = { ...values, id_cita: 3, created_at: h.now }; return transaction.staged.appointment;
+      } }, appointmentValues: { clinica_id: 2, lead_intake_id: 1, estado: 'pendiente' },
+      patient: { idioma_preferido: 'es', update: async (values, { transaction }) => Object.assign(transaction.staged.patient, values) },
+      requestedLanguage: 'ca', afterPersist: (appointment, transaction) => enqueueCreatedAppointmentCrmSignals({
+        lead: h.lead, appointment, transaction, dependencies: h.dependencies }) });
+    if (fails) {
+      await assert.rejects(create(), /queue unavailable/); assert.equal(h.state.committed.appointment.lead_intake_id, null);
+      assert.equal(h.state.committed.patient.idioma_preferido, 'es'); assert.equal(h.state.committed.jobs.length, 0);
+    } else {
+      await create(); assert.equal(h.state.committed.jobs.length, 2);
+      assert.equal((await h.googleHook('appointment-3')).queued, true); assert.equal(h.state.external.length, 0);
+    }
+  }
 });
 
 test('existing web lead sources reuse the atomic qualification and appointment queue', async () => {
