@@ -2135,6 +2135,15 @@ periodos de 30; despues refresca la ventana reciente, salvo huecos de cobertura.
   sobreescribir otra mas reciente, tampoco entre refresco manual y job. Una
   consulta de campana no elimina otras campanas; cero resultados si limpia el
   rango consultado, sin borrar historia fuera de el.
+- La lectura usa el titular real cuando Google no define nombre del anuncio y
+  muestra el estado efectivo considerando campana y grupo. No presenta anuncios
+  como activos cuando estan detenidos por un padre pausado o retirado.
+- El inventario de anuncios tambien observa nombre/estado de su campana. El
+  workspace utiliza esa observacion cuando es mas reciente que la cache general,
+  conserva el destino y aplica las mismas reglas de acceso/asignacion/seleccion.
+  Asi no mezcla una campana pausada en agosto con sus anuncios actuales activos.
+  Si la cache general es mas reciente, prevalece esta. Una campana nueva vista
+  en el inventario se incorpora solo dentro del ambito y seleccion autorizados.
 - Se mantienen las asignaciones existentes: decisiones revisadas prevalecen;
   las cuentas de grupo no se asignan al usuario que solicita un informe.
   No se crean asignaciones ni leads, ni se habilitan conversiones u optimizacion.
@@ -2157,6 +2166,12 @@ mutaciones publicitarias. Esto prueba esa cuenta, no todas las conexiones.
 Pruebas MySQL en servidor temporal aislado: migracion idempotente, grupos con
 el mismo ID de anuncio, rollback por colision, rollback transaccional, ventanas
 vacias, aislamiento por campana, dos refrescos concurrentes y escritor antiguo.
+529 tests backend pasan. Chromium real (1440/1024/390): 25 comprobaciones y
+seis capturas en `/home/ubuntu/qa-evidence/campaign-google-ad-cache-current-20260911`.
+El agregado autorizado muestra 19 anuncios entre 88 campanas Google, con
+contenido real y retorno al resumen. Ver bitacora frontend para regresion
+completa y primeros intentos fallidos durante el reinicio de API.
+No se da por cerrada la integracion global ni la cobertura de todas las cuentas.
 
 ## Atribucion Opcional De Anuncios Web (2026-09-11)
 
