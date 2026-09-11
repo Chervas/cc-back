@@ -60,7 +60,7 @@ function fixture(provider = 'google_ads') {
     return result;
   };
   const executeContext = extra => resolveOptimizationAuthorization({ models, scope, setting, campaign, action: 'adjust_bids',
-    now, hasAccess: async input => { assert.equal(input.userId, 7); return state.permitted; }, resolveContext, ...extra });
+    now, hasAccess: async input => { assert.equal(input.userId, 7); return state.permitted; }, resolveContext, checkOwnership: async () => {}, ...extra });
   const pause = extra => pauseWorkspaceOptimization({ models, scope, actorId: 7,
     input: { expected_version: setting.version, confirmed: true }, hasAccess: async () => state.permitted, now: () => now, ...extra });
   return { state, setting, scope, campaign, context, inspection, transaction, models, review, activate, executeContext, pause };
@@ -140,6 +140,18 @@ test('worker authorization locks current memberships during transactional permis
     assert.ok(input.membershipModel); return (await input.membershipModel.findAll({ attributes: ['id_clinica'] })).length === 2;
   } });
   assert.equal(reads, 2);
+});
+test('read-only recovery permits a paused mandate but still requires the current actor and grant', async () => {
+  const f = fixture(); await f.activate(); let ownershipChecks = 0;
+  const checkOwnership = async () => { ownershipChecks++; };
+  await f.executeContext({ checkOwnership }); assert.equal(ownershipChecks, 1);
+  f.setting.activation.optimization.status = 'paused';
+  await f.executeContext({ readOnly: true, checkOwnership }); assert.equal(ownershipChecks, 1);
+  await assert.rejects(f.executeContext({ checkOwnership }));
+  f.state.grant = 'c'.repeat(64);
+  await assert.rejects(f.executeContext({ readOnly: true }), /workspace_optimization_connection_changed/);
+  f.state.grant = 'a'.repeat(64); f.state.permitted = false;
+  await assert.rejects(f.executeContext({ readOnly: true }), /workspace_optimization_permissions_required/);
 });
 test('only one workspace can authorize advertising changes to the same campaign', async () => {
   for (const provider of ['google_ads', 'meta_ads']) {

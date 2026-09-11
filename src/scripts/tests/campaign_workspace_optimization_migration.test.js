@@ -31,7 +31,7 @@ function fixture() {
   return { state, qi, up: () => migration.up(qi, Sequelize) };
 }
 test('optimization ledger migration is additive and repeatable with exact cooldown and dedupe indexes', async () => {
-  const f = fixture(); await f.up(); await f.up(); assert.equal(f.state.created, 1); assert.equal(f.state.indexes.length, 4);
+  const f = fixture(); await f.up(); await f.up(); assert.equal(f.state.created, 1); assert.equal(f.state.indexes.length, 5);
   assert.deepEqual(f.state.indexes[0].fields.map(field => field.attribute), ['setting_id', 'plan_key']);
   assert.equal(f.state.indexes[0].unique, true);
   assert.equal(f.state.columns.setting_id.onDelete, 'RESTRICT'); assert.equal(f.state.columns.job_request_id.onDelete, 'SET NULL');

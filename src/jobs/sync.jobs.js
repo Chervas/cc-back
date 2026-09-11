@@ -385,6 +385,7 @@ class MetaSyncJobs {
       googleDataManagerDiagnostics: 'Concilia Data Manager, la capacidad visitor_choice de todas las webs y el gate interno de Conversiones mejoradas.',
       googleConversionGoalPolicyAudit: 'Audita sin autoreparar la medición de Mide y entiende y la policy de goals/campañas opt-in de ClinicaClick.',
       campaignOptimizationEvaluation: 'Evalúa diariamente las políticas persistidas y, en Mejora, encola las transiciones ya autorizadas para que un worker separado las aplique con preflight y readback.',
+      campaignWorkspaceOptimizationRecovery: 'Recupera intentos de Optimiza cada quince minutos. Los cambios ya reservados solo se vuelven a consultar, nunca a enviar. Reintentos acotados, permisos actuales y revisión manual de resultados inciertos; no modifica la recepción de formularios.',
       webDomainReconciliation: 'Revalida DNS, alta SaaS y TLS de dominios web pendientes; los dominios listos se revisan a diario.',
       webPublicationHealthMonitor: 'Comprueba por lotes que cada publicación activa sigue sirviendo por HTTPS el marcador exacto de su artefacto, sin autoreparar.',
       campaignDestinationDriftAudit: 'Relee diariamente los destinos activos aprobados y avisa si Google Ads ya no apunta a la landing esperada, sin autoreparar.',
@@ -431,6 +432,7 @@ class MetaSyncJobs {
         googleDataManagerDiagnostics: process.env.JOBS_GOOGLE_DATA_MANAGER_DIAGNOSTICS_SCHEDULE || '*/30 * * * *',
         googleConversionGoalPolicyAudit: process.env.JOBS_GOOGLE_CONVERSION_GOAL_POLICY_AUDIT_SCHEDULE || '17 2 * * *',
         campaignOptimizationEvaluation: process.env.JOBS_CAMPAIGN_OPTIMIZATION_EVALUATION_SCHEDULE || '35 2 * * *',
+        campaignWorkspaceOptimizationRecovery: process.env.JOBS_CAMPAIGN_WORKSPACE_OPTIMIZATION_RECOVERY_SCHEDULE || '*/15 * * * *',
         webDomainReconciliation: process.env.JOBS_MARKETING_WEB_DOMAIN_RECONCILIATION_SCHEDULE || '7,22,37,52 * * * *',
         webPublicationHealthMonitor: process.env.JOBS_MARKETING_WEB_PUBLICATION_HEALTH_SCHEDULE || '11 * * * *',
         campaignDestinationDriftAudit: process.env.JOBS_CAMPAIGN_DESTINATION_DRIFT_AUDIT_SCHEDULE || '5 3 * * *',
@@ -2594,6 +2596,10 @@ class MetaSyncJobs {
       // JobRequest duradero y cada worker exige preview+readback saludable.
       provider_mutation: null,
     };
+  }
+
+  async executeCampaignWorkspaceOptimizationRecovery() {
+    return require('../services/campaignWorkspaceOptimizationExecution.service').recoverOptimizationRuns();
   }
 
   async executeWebDomainReconciliation(options = {}) {

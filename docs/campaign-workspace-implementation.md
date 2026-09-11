@@ -1922,14 +1922,16 @@ web y Meta existente permanece independiente e intacta.
   cuenta/estado, recurso/fecha y recuperacion. FK a workspace con RESTRICT y a
   job con SET NULL: archivar jobs no borra recibos ni bloquea su retencion normal.
   La migracion es repetible y rechaza esquemas incompatibles; su rollback exige
-  tabla vacia. **No aplicada** a la base compartida en esta fase. Tipos de las
-  claves padre comprobados mediante lectura real; no se crean registros QA.
+  tabla vacia. Aplicada individualmente a la base compartida el 2026-09-11,
+  registrada en SequelizeMeta y revalidada. Tabla vacia, sin registros QA ni
+  ejecuciones publicitarias; no se ejecuta la cola general de migraciones.
 - Productor interno `enqueueOptimizationAdjustment`: valida evidencia agregada
   reciente y relacionada con la accion; guarda el plan y `JobRequest` en una
   transaccion. Payload solo con ID de ejecucion y namespace. No hay endpoint
   para enviar operaciones arbitrarias ni recomendador conectado a este productor.
 - Handler `campaign_workspace_optimization_apply` en el ejecutor existente,
-  con el mismo carril serializado y lease de integraciones, sin cron nuevo.
+  con el mismo carril serializado y lease de integraciones. La recuperacion
+  periodica se describe en la siguiente seccion.
   Reserva por workspace/cuenta; vuelve a revisar el mandato y permisos,
   incluyendo membresias bajo bloqueo. Recursos nuevos, cuentas ajenas, cambio
   de grant/clinica y mandatos pausados se rechazan. Cooldown de 24 h por recurso,
@@ -1939,7 +1941,7 @@ web y Meta existente permanece independiente e intacta.
   confirmacion de commit perdida tampoco borra ese marcador. El lease limita
   workers simultaneos y un trabajador antiguo no puede confirmar otro comando.
 - Estados: `queued`, `leased`, `submitted`, `verified`, `observed`, `skipped`,
-  `uncertain`. `observed` acredita el estado leido, no que esta ejecucion causara
+  `uncertain`, `resolved`. `observed` acredita el estado leido, no que esta ejecucion causara
   el cambio. `uncertain` conserva el intento y bloquea otros ajustes de la
   cuenta/workspace. Errores anteriores al envio pueden reintentarse; los recibos
   solo guardan codigos permitidos, no mensajes/payloads privados del proveedor.
@@ -1950,19 +1952,63 @@ Pendiente antes de abrir gates, no resuelto por estos adaptadores:
 2. Contabilidad del limite mensual conjunto. `adjust_budget` se bloquea con
    `workspace_optimization_budget_accounting_required` mientras no se conecte
    esa comprobacion. Una prueba inyectada no acredita control de presupuesto real.
-3. Reconciliador periodico y resolucion operativa de recibos inciertos, visible
-   en Salud/historial. Recuperar jobs agotados o consumidos con gate cerrado sin
-   reejecutar un comando ya reservado. No existe aun ese barrido automatico.
-4. Revalidacion de conflictos con contratos guided/managed nuevos durante la
-   vida del mandato, no solo al activarlo. Prueba real de concurrencia MySQL y
-   migracion controlada antes de cualquier ejecucion autorizada.
-5. Integracion final del flujo, cobertura/refresco nocturno y CRM por anuncio,
+3. Prueba real de concurrencia MySQL antes de cualquier ejecucion autorizada.
+   Los tests de recuperacion/bloqueos usan modelos transaccionales aislados;
+   la comprobacion del esquema/consulta en MySQL no sustituye esa prueba.
+4. Integracion final del flujo, cobertura/refresco nocturno y CRM por anuncio,
    que siguen formando parte del objetivo global abierto.
 
 Referencias de transporte:
 [mutaciones REST de Google Ads](https://developers.google.com/google-ads/api/rest/common/mutate),
 [Ad del SDK oficial Meta](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/ad.py)
 y [AdSet del SDK oficial Meta](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/adset.py).
+
+## Recuperacion, Historial Y Salud De Optimiza (2026-09-11)
+
+- `campaign_workspace_optimization_recover` se incorpora al catalogo existente,
+  desactivado mientras este cerrado el gate de Optimiza. Cron por defecto
+  `*/15 * * * *`, configurable mediante
+  `JOBS_CAMPAIGN_WORKSPACE_OPTIMIZATION_RECOVERY_SCHEDULE`; hereda Europe/Madrid.
+  El gestor solo lee/actualiza registros y encola: no consulta proveedores.
+  No se ha activado ni promovido el scheduler de staging.
+- Examina hasta 100 registros vencidos del namespace actual por pasada. Respeta
+  jobs pendientes/en cola/en ejecucion/en espera y leases vigentes; no supone
+  que una llamada haya terminado por haber vencido un temporizador local.
+  Seis recuperaciones como maximo, con esperas de 15, 30, 60, 240, 720 y 1440
+  minutos. El ultimo intento agotado queda visible para revision manual.
+- Sin marcador de envio puede reencolar `optimization_apply`, tras comprobar
+  de nuevo evidencia y permiso. Con marcador usa exclusivamente
+  `campaign_workspace_optimization_check`, de solo lectura, en el carril de
+  integraciones. Nunca borra el marcador ni reenvia el ajuste. El chequeo admite
+  el mismo mandato pausado, pero exige permisos, asignacion y grant vigentes.
+  Un mandato sustituido o acceso revocado no permite usar credenciales antiguas.
+- Antes de cada escritura se comprueban tambien conflictos sobrevenidos:
+  politicas guided/managed de clinica/grupo, herencia de IntakeConfig y solicitudes
+  nativas, y otros mandatos sobre la misma campana. No se cambia el contrato de
+  recepcion `connect_only` ni se reclama control de campanas ajenas.
+- Historial GET `/marketing/campaign-workspace/optimization/history`, paginado
+  en servidor a diez filas, con incidentes pendientes primero. Filtra por
+  namespace, asignacion actual, clinica, proveedor/cuenta/campana y permisos.
+  Admite agregados en lectura; expone valores antes/despues, fechas y estado,
+  nunca tokens, grants, evidencia privada ni comandos publicitarios.
+- Salud mantiene los seis bloques aprobados. Pausas inciertas se muestran en
+  publicacion; pujas/presupuesto/negativas en coste. Los pendientes no se pintan
+  como OK, tampoco al pausar la campana. El detalle abre el historial en un
+  dialogo, sin nuevas pestañas y conservando el contexto de navegacion.
+- POST `/marketing/campaign-workspace/optimization/history/:runId/resolve`
+  exige ambito unico con escritura, `confirmed: true` y `expected_revision`.
+  Solo cierra registros inciertos ya enviados, sin worker/lease activo, del
+  workspace y namespace actuales. Bloquea scope, setting, registro y job;
+  revalida asignacion y permisos. Version y evento `optimization_resolved` se
+  guardan atomicos con la resolucion; un fallo de auditoria revierte todo.
+- `resolved` significa revision humana cerrada, **no** confirmacion del proveedor
+  ni aplicacion del ajuste. La confirmacion explica que se libera el bloqueo de
+  ajustes previamente autorizados; no cambia publicidad, recepcion ni senales.
+  `observed` tampoco atribuye causalidad a ClinicaClick. Un conflicto exige volver
+  a consultar; no se envia otra mutacion como consecuencia de un error de lectura.
+- Gates de activacion, Optimiza y descarga de leads Google cerrados. Esquema
+  y consultas vacias comprobados en MySQL; escrituras funcionales y fallos se
+  prueban con modelos/HTTP aislados, no con clientes ni anuncios reales.
 Se conserva la version v24 del cliente Google de DEV.
 
 Verificacion de codigo: 469 tests backend y 68 frontend, sin fallos. Modelos y

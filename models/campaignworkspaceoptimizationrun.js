@@ -9,16 +9,20 @@ module.exports = (sequelize, DataTypes) => sequelize.define('CampaignWorkspaceOp
   provider: { type: DataTypes.STRING(16), allowNull: false },
   account_id: { type: DataTypes.STRING(64), allowNull: false },
   campaign_id: { type: DataTypes.STRING(64), allowNull: false },
+  clinic_id: { type: DataTypes.INTEGER, allowNull: false },
   resource_key: { type: DataTypes.STRING(64), allowNull: false },
   change: { type: DataTypes.JSON, allowNull: false },
   evidence: { type: DataTypes.JSON, allowNull: false },
-  status: { type: DataTypes.ENUM('queued', 'leased', 'submitted', 'verified', 'observed', 'skipped', 'uncertain'), allowNull: false, defaultValue: 'queued' },
+  status: { type: DataTypes.ENUM('queued', 'leased', 'submitted', 'verified', 'observed', 'skipped', 'uncertain', 'resolved'), allowNull: false, defaultValue: 'queued' },
   job_request_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
   lease_token: { type: DataTypes.STRING(36), allowNull: true },
   lease_until: { type: DataTypes.DATE, allowNull: true },
   submitted_at: { type: DataTypes.DATE, allowNull: true },
   completed_at: { type: DataTypes.DATE, allowNull: true },
   outcome: { type: DataTypes.JSON, allowNull: true },
+  recovery_attempts: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false, defaultValue: 0 },
+  next_check_at: { type: DataTypes.DATE, allowNull: true },
+  resolution: { type: DataTypes.JSON, allowNull: true },
 }, {
   tableName: 'CampaignWorkspaceOptimizationRuns', createdAt: 'created_at', updatedAt: 'updated_at',
   indexes: [
@@ -26,5 +30,6 @@ module.exports = (sequelize, DataTypes) => sequelize.define('CampaignWorkspaceOp
     { name: 'idx_workspace_optimization_account', fields: ['provider', 'account_id', 'status'] },
     { name: 'idx_workspace_optimization_resource', fields: ['resource_key', 'submitted_at'] },
     { name: 'idx_workspace_optimization_pending', fields: ['runtime_namespace', 'status', 'updated_at'] },
+    { name: 'idx_workspace_optimization_recovery', fields: ['runtime_namespace', 'next_check_at'] },
   ],
 });

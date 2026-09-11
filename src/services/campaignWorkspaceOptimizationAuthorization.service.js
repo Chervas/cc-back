@@ -6,6 +6,7 @@ const { settingScope, publicSettings, campaignIncluded } = require('./campaignWo
 const { accountAliases } = require('./campaignWorkspaceReport.service');
 const { optimizationContext, publicOptimizationProof } = require('./campaignWorkspaceOptimizationPreparation.service');
 const { ACTIONS, digest, optimizationReference } = require('./campaignWorkspaceOptimizationCapabilities.service');
+const { resolveModeStateForScope, CAMPAIGN_MODES } = require('./campaignMode.service');
 
 const LIMITS = Object.freeze({ max_bid_change_pct: 10, max_budget_change_pct: 10, cooldown_hours: 24,
   preserve_last_active_ad: true, new_campaigns: 'review_required', new_resources: 'review_required' });
@@ -142,6 +143,39 @@ function createOptimizationMandate({ authorization, actorId, now = new Date() })
     authorized_by_user_id: actorId, authorization: structuredClone(authorization) };
 }
 
+async function assertOptimizationExecutionOwnership({ models, setting, scope, campaign, transaction = null,
+  resolveMode = resolveModeStateForScope }) {
+  const options = { transaction, ...(transaction ? { lock: transaction.LOCK.UPDATE } : {}) };
+  const clinics = await models.Clinica.findAll({ where: { id_clinica: { [Op.in]: scope.clinicIds } },
+    attributes: ['id_clinica', 'grupoClinicaId'], ...options });
+  if (JSON.stringify(clinics.map(row => Number(row.id_clinica)).sort((a, b) => a - b))
+    !== JSON.stringify([...scope.clinicIds].sort((a, b) => a - b))) fail('workspace_optimization_scope_changed');
+  const groups = [...new Set([scope.groupId, ...clinics.map(row => Number(row.grupoClinicaId))].filter(positive))];
+  const policies = await models.CampaignOptimizationPolicy.findAll({ where: {
+    [Op.or]: [{ scopeType: 'clinic', scopeId: { [Op.in]: scope.clinicIds } },
+      ...(groups.length ? [{ scopeType: 'group', scopeId: { [Op.in]: groups } }] : [])],
+    status: { [Op.in]: ['active', 'paused'] },
+  }, attributes: ['id'], ...options });
+  if (policies.length) fail('workspace_optimization_contract_conflict');
+  const dependencies = { transaction };
+  for (const name of ['IntakeConfig', 'Clinica', 'CampaignRequest']) {
+    if (!models[name]) fail('workspace_optimization_unavailable');
+    dependencies[name] = Object.fromEntries(['findOne', 'findAll'].map(method => [method,
+      input => models[name][method]({ ...input, ...options })]));
+  }
+  // Use the existing clinic/group inheritance, including native-only onboarding fallbacks.
+  for (const clinic of clinics) {
+    const mode = await resolveMode({ assignment_scope: 'clinic', clinic_id: Number(clinic.id_clinica),
+      group_id: Number(clinic.grupoClinicaId) || null }, dependencies);
+    if (mode && mode.mode !== CAMPAIGN_MODES.MEASURE) fail('workspace_optimization_contract_conflict');
+  }
+  const others = await models.CampaignWorkspaceSetting.findAll({ where: { id: { [Op.ne]: setting.id },
+    'activation.mode': 'optimize', 'activation.status': 'active', 'activation.optimization.status': 'active' },
+    attributes: ['id', 'activation'], ...options });
+  if (others.some(row => !Array.isArray(row.activation?.optimization?.authorization?.campaigns)
+    || row.activation.optimization.authorization.campaigns.some(other => key(other) === key(campaign)))) fail('workspace_optimization_contract_conflict');
+}
+
 async function pauseWorkspaceOptimization({ models, scope, actorId, input, hasAccess, now = () => new Date() }) {
   if (!input || Object.keys(input).sort().join(',') !== 'confirmed,expected_version' || input.confirmed !== true || !positive(input.expected_version)) fail('invalid_workspace_optimization_pause', 400);
   if (!positive(actorId)) fail('unauthenticated', 401);
@@ -174,10 +208,11 @@ async function pauseWorkspaceOptimization({ models, scope, actorId, input, hasAc
 }
 
 async function resolveOptimizationAuthorization({ models, setting, scope, campaign, action, now = new Date(), transaction = null,
-  hasAccess, resolveContext = optimizationContext, loadInventory }) {
+  hasAccess, resolveContext = optimizationContext, loadInventory, readOnly = false,
+  checkOwnership = assertOptimizationExecutionOwnership }) {
   const mandate = setting?.activation?.optimization;
   if (setting?.activation?.schema_version !== 2 || setting.activation.mode !== 'optimize' || setting.activation.status !== 'active'
-    || mandate?.schema_version !== 1 || mandate.status !== 'active' || !positive(mandate.authorized_by_user_id)
+    || mandate?.schema_version !== 1 || !(readOnly ? ['active', 'paused'] : ['active']).includes(mandate.status) || !positive(mandate.authorized_by_user_id)
     || !/^[a-f0-9-]{36}$/.test(mandate.id || '') || !Number.isFinite(Date.parse(mandate.authorized_at)) || +new Date(mandate.authorized_at) > +now
     || !mandate.authorization || mandate.authorization.schema_version !== 1
     || !Array.isArray(mandate.authorization.campaigns) || !ACTIONS.includes(action)) fail('workspace_optimization_authorization_required');
@@ -202,9 +237,11 @@ async function resolveOptimizationAuthorization({ models, setting, scope, campai
   if (context.setting.id !== setting.id || context.setting.version !== setting.version || context.campaign.clinicId !== entry.clinic_id
     || grantHash(context) !== entry.grant_fingerprint || Number(context.grant.connection.id) !== entry.connection_id
     || (context.grant.loginCustomerId || null) !== entry.login_customer_id) fail('workspace_optimization_connection_changed');
+  if (!readOnly) await checkOwnership({ models, setting, scope, campaign, transaction });
   if (!await permitted()) fail('workspace_optimization_permissions_required', 403);
   return { mandate, limits, entry, context };
 }
 
 module.exports = { LIMITS, optimizationLimits, loadOptimizationAuthorizationReview, assertNoOptimizationOverlap,
-  createOptimizationMandate, pauseWorkspaceOptimization, resolveOptimizationAuthorization, scopedTarget, lockOptimizationAccounts };
+  createOptimizationMandate, pauseWorkspaceOptimization, resolveOptimizationAuthorization, scopedTarget, lockOptimizationAccounts,
+  assertOptimizationExecutionOwnership };

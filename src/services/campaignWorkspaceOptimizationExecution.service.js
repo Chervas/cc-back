@@ -9,9 +9,12 @@ const { hasMarketingClinicScopeAccess } = require('../lib/marketingScopeAccess')
 const { ensureGoogleConnectionAccessToken, GOOGLE_ADS_SCOPE } = require('./googleAdsScopedRuntime.service');
 
 const JOB_TYPE = 'campaign_workspace_optimization_apply';
+const CHECK_JOB_TYPE = 'campaign_workspace_optimization_check';
 const ORIGIN = 'campaign_workspace_optimization';
 const LEASE_MS = 120000;
-const TERMINAL = ['verified', 'observed', 'skipped'];
+const TERMINAL = ['verified', 'observed', 'skipped', 'resolved'];
+const ACTIVE_JOBS = ['pending', 'queued', 'running', 'waiting'];
+const RECOVERY_DELAYS = [15, 30, 60, 240, 720, 1440];
 const RETRYABLE = ['workspace_optimization_busy', 'workspace_optimization_account_busy', 'workspace_optimization_unavailable'];
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value);
 const fail = code => { throw Object.assign(new Error(code), { code }); };
@@ -22,6 +25,8 @@ const namespace = deps => deps.namespace || require('./jobRequests.service').get
 const model = deps => deps.models || require('../../models');
 const query = transaction => ({ transaction, ...(transaction ? { lock: transaction.LOCK.UPDATE } : {}) });
 const resourceKey = change => digest([change.reference.provider, change.reference.account_id, change.target.resource]);
+const nextCheck = (attempts, instant) => Number.isSafeInteger(attempts) && attempts >= 0 && attempts < RECOVERY_DELAYS.length
+  ? new Date(+instant + RECOVERY_DELAYS[attempts] * 60000) : null;
 
 function evidenceSnapshot(evidence, instant, action) {
   const allowed = ['schema_version', 'rule', 'observed_at', 'window_start', 'window_end', 'metrics'];
@@ -54,7 +59,7 @@ function validateRun(run) {
 
 function samePlan(run, previous) {
   validateRun(run);
-  const identity = row => [row.id, row.setting_id, row.mandate_id, row.runtime_namespace, row.plan_key, row.job_request_id];
+  const identity = row => [row.id, row.setting_id, row.mandate_id, row.runtime_namespace, row.plan_key, row.job_request_id, row.clinic_id];
   if (digest(identity(run)) !== digest(identity(previous))) fail('workspace_optimization_plan_changed');
 }
 
@@ -66,7 +71,9 @@ async function authorize(run, deps, transaction = null) {
   if (!Array.isArray(clinicIds) || !clinicIds.length) fail('workspace_optimization_mandate_changed');
   const scope = { groupId: setting.scope_type === 'group' ? setting.scope_id : null, clinicIds };
   const source = await (deps.authorize || resolveOptimizationAuthorization)({ models, setting, scope, campaign: change.reference,
-    action: change.target.action, transaction, now: now(deps), hasAccess: deps.hasAccess || hasMarketingClinicScopeAccess });
+    action: change.target.action, transaction, now: now(deps), readOnly: deps.readOnly === true,
+    hasAccess: deps.hasAccess || hasMarketingClinicScopeAccess });
+  if (run.clinic_id != null && run.clinic_id !== source.entry.clinic_id) fail('workspace_optimization_scope_changed');
   const targets = source.entry.targets.filter(target => Object.keys(target).length === Object.keys(change.target).length
     && Object.entries(change.target).every(([key, value]) => target[key] === value));
   if (targets.length !== 1) fail('workspace_optimization_target_not_authorized');
@@ -80,11 +87,18 @@ async function enqueueOptimizationAdjustment({ settingId, mandateId, change, evi
   const row = { id: crypto.randomUUID(), runtime_namespace: namespace(deps), setting_id: settingId, mandate_id: mandateId,
     plan_key: digest([mandateId, command.fingerprint, proof]), provider: command.reference.provider, account_id: command.reference.account_id,
     campaign_id: command.reference.campaign_id, resource_key: resourceKey(command), change: command, evidence: proof,
-    status: 'queued', job_request_id: null, lease_token: null, lease_until: null, submitted_at: null, completed_at: null, outcome: null };
+    status: 'queued', job_request_id: null, lease_token: null, lease_until: null, submitted_at: null, completed_at: null, outcome: null,
+    recovery_attempts: 0, next_check_at: nextCheck(0, now(deps)), resolution: null };
   return models.sequelize.transaction(async transaction => {
-    await authorize(row, deps, transaction);
+    const source = await authorize(row, deps, transaction);
+    if (!Number.isSafeInteger(source.entry.clinic_id) || source.entry.clinic_id <= 0) fail('workspace_optimization_scope_changed');
+    row.clinic_id = source.entry.clinic_id;
     const existing = await models.CampaignWorkspaceOptimizationRun.findOne({ where: { setting_id: settingId, plan_key: row.plan_key }, ...query(transaction) });
-    if (existing) return { queued: !TERMINAL.includes(existing.status), created: false, runId: existing.id, jobId: existing.job_request_id };
+    if (existing) {
+      const job = existing.job_request_id ? await models.JobRequest.findByPk(existing.job_request_id, query(transaction)) : null;
+      return { queued: ACTIVE_JOBS.includes(job?.status), created: false, runId: existing.id, jobId: existing.job_request_id,
+        recoveryPending: !TERMINAL.includes(existing.status) && !!existing.next_check_at };
+    }
     const run = await models.CampaignWorkspaceOptimizationRun.create(row, { transaction });
     const queued = await (deps.enqueue || require('./jobRequests.service').enqueueUniqueJobRequest)({ type: JOB_TYPE, origin: ORIGIN,
       priority: 'low', maxAttempts: 5, payload: { schema_version: 1, run_id: run.id, __runtime_namespace: row.runtime_namespace },
@@ -96,7 +110,7 @@ async function enqueueOptimizationAdjustment({ settingId, mandateId, change, evi
 
 function jobMatches(run, payload, job, deps) {
   return run && run.id === payload.run_id && run.job_request_id === Number(job?.id) && run.runtime_namespace === namespace(deps)
-    && payload.__runtime_namespace === run.runtime_namespace && job?.type === JOB_TYPE && job.origin === ORIGIN
+    && payload.__runtime_namespace === run.runtime_namespace && job?.type === (deps.readOnly ? CHECK_JOB_TYPE : JOB_TYPE) && job.origin === ORIGIN
     && job.payload?.schema_version === 1 && job.payload.run_id === run.id && job.payload.__runtime_namespace === run.runtime_namespace;
 }
 
@@ -106,6 +120,7 @@ async function reserve(payload, job, deps) {
     const original = await models.CampaignWorkspaceOptimizationRun.findByPk(payload.run_id, { transaction });
     if (!jobMatches(original, payload, job, deps)) fail('workspace_optimization_job_mismatch');
     validateRun(original);
+    if (!Number.isSafeInteger(original.clinic_id) || original.clinic_id <= 0 || deps.readOnly && !original.submitted_at) fail('workspace_optimization_job_mismatch');
     if (TERMINAL.includes(original.status)) return { terminal: true, run: plain(original) };
     const authorization = await authorize(original, deps, transaction);
     await (deps.lockAccounts || lockOptimizationAccounts)({ models, campaigns: [original.change.reference], transaction });
@@ -115,7 +130,7 @@ async function reserve(payload, job, deps) {
     if (run.lease_token && +new Date(run.lease_until) > +now(deps)) fail('workspace_optimization_busy');
     const pending = await models.CampaignWorkspaceOptimizationRun.findAll({ where: { id: { [Op.ne]: run.id },
       status: { [Op.in]: ['leased', 'submitted', 'uncertain'] }, [Op.or]: [{ setting_id: run.setting_id }, { provider: run.provider, account_id: run.account_id }] }, ...query(transaction) });
-    if (pending.length) fail('workspace_optimization_account_busy');
+    if (pending.length && !deps.readOnly) fail('workspace_optimization_account_busy');
     if (!run.submitted_at) {
       evidenceSnapshot(run.evidence, now(deps), run.change.target.action);
       const recent = await models.CampaignWorkspaceOptimizationRun.findOne({ where: { id: { [Op.ne]: run.id }, resource_key: run.resource_key,
@@ -140,7 +155,8 @@ async function finish(run, token, state, outcome, deps) {
       outcome = { ...outcome, submission_reserved: true };
     }
     await row.update({ status: state, outcome, lease_token: null, lease_until: null,
-      completed_at: TERMINAL.includes(state) ? now(deps) : null }, { transaction });
+      completed_at: TERMINAL.includes(state) ? now(deps) : null,
+      next_check_at: TERMINAL.includes(state) ? null : nextCheck(row.recovery_attempts, now(deps)) }, { transaction });
     return { status: 'completed', result: { run_id: row.id, state, ...outcome } };
   });
 }
@@ -169,7 +185,7 @@ async function skipUnreserved(payload, job, code, deps) {
     const row = await model(deps).CampaignWorkspaceOptimizationRun.findByPk(payload.run_id, query(transaction));
     if (!jobMatches(row, payload, job, deps) || row.status !== 'queued' || row.lease_token || row.submitted_at) return;
     validateRun(row);
-    await row.update({ status: 'skipped', completed_at: now(deps), outcome: { reason: code, provider_mutation: false } }, { transaction });
+    await row.update({ status: 'skipped', completed_at: now(deps), next_check_at: null, outcome: { reason: code, provider_mutation: false } }, { transaction });
   });
 }
 
@@ -193,6 +209,7 @@ async function runOptimizationAdjustmentJob(payload, job, deps = {}) {
     }
     // A submitted marker survives a crash before/after HTTP. Never replay that write.
     if (submitted) return await finish(run, token, 'uncertain', { reason: 'workspace_optimization_manual_review_required', provider_mutation: false }, deps);
+    if (deps.readOnly) fail('workspace_optimization_job_mismatch');
     await (deps.inspect || inspectOptimizationChange)(run.change, credentials, deps.providerDependencies);
     if (run.change.target.action === 'adjust_budget') {
       // The global monthly envelope must be collected by the budget accounting service, not inferred per campaign.
@@ -230,4 +247,66 @@ async function runOptimizationAdjustmentJob(payload, job, deps = {}) {
   }
 }
 
-module.exports = { JOB_TYPE, ORIGIN, LEASE_MS, evidenceSnapshot, enqueueOptimizationAdjustment, runOptimizationAdjustmentJob };
+async function recoverOptimizationRun(runId, deps = {}) {
+  const models = model(deps);
+  return models.sequelize.transaction(async transaction => {
+    const original = await models.CampaignWorkspaceOptimizationRun.findByPk(runId, { transaction });
+    if (!original || original.runtime_namespace !== namespace(deps)) return 'ignored';
+    // Match the setting -> run lock order used by the worker. The scheduler owns JobRequest leases.
+    await models.CampaignWorkspaceSetting.findByPk(original.setting_id, query(transaction));
+    const run = await models.CampaignWorkspaceOptimizationRun.findByPk(runId, query(transaction));
+    samePlan(run, original);
+    if (TERMINAL.includes(run.status) || !run.next_check_at || +new Date(run.next_check_at) > +now(deps)
+      || run.lease_token && +new Date(run.lease_until) > +now(deps)) return 'waiting';
+    validateRun(run);
+    const job = run.job_request_id ? await models.JobRequest.findByPk(run.job_request_id, query(transaction)) : null;
+    if (ACTIVE_JOBS.includes(job?.status)) {
+      await run.update({ next_check_at: nextCheck(0, now(deps)) }, { transaction });
+      return 'waiting';
+    }
+    if (job && (job.origin !== ORIGIN || ![JOB_TYPE, CHECK_JOB_TYPE].includes(job.type)
+      || job.payload?.run_id !== run.id || job.payload.__runtime_namespace !== run.runtime_namespace)) fail('workspace_optimization_job_mismatch');
+    let denied;
+    try {
+      if (run.recovery_attempts >= RECOVERY_DELAYS.length || job?.status === 'cancelled' && !run.submitted_at) fail('workspace_optimization_recovery_exhausted');
+      await authorize(run, { ...deps, readOnly: !!run.submitted_at }, transaction);
+      if (!run.submitted_at) evidenceSnapshot(run.evidence, now(deps), run.change.target.action);
+    } catch (error) { denied = reason(error); }
+    const attempts = run.recovery_attempts + 1;
+    if (denied) {
+      const retry = RETRYABLE.includes(denied) && attempts < RECOVERY_DELAYS.length;
+      await run.update({ status: run.submitted_at ? 'uncertain' : retry ? 'queued' : 'skipped',
+        outcome: { reason: denied, provider_mutation: false, submission_reserved: !!run.submitted_at },
+        lease_token: null, lease_until: null, recovery_attempts: attempts,
+        next_check_at: retry ? nextCheck(attempts, now(deps)) : null,
+        completed_at: !run.submitted_at && !retry ? now(deps) : null }, { transaction });
+      return retry ? 'waiting' : run.submitted_at ? 'review_required' : 'skipped';
+    }
+    const queued = await (deps.enqueue || require('./jobRequests.service').enqueueUniqueJobRequest)({
+      type: run.submitted_at ? CHECK_JOB_TYPE : JOB_TYPE, origin: ORIGIN, priority: 'low', maxAttempts: 3,
+      payload: { schema_version: 1, run_id: run.id, __runtime_namespace: run.runtime_namespace },
+      dedupeScope: `workspace_optimization:${run.id}`,
+    }, { transaction });
+    await run.update({ job_request_id: queued.job.id, status: run.submitted_at ? 'uncertain' : 'queued',
+      lease_token: null, lease_until: null, recovery_attempts: attempts,
+      next_check_at: nextCheck(Math.min(attempts, RECOVERY_DELAYS.length - 1), now(deps)) }, { transaction });
+    return run.submitted_at ? 'check_queued' : 'apply_queued';
+  });
+}
+
+async function recoverOptimizationRuns(deps = {}) {
+  if (!enabled(deps.env || process.env)) return { status: 'completed', report: { disabled: true, scanned: 0 } };
+  const runs = await model(deps).CampaignWorkspaceOptimizationRun.findAll({ where: {
+    runtime_namespace: namespace(deps), status: { [Op.in]: ['queued', 'leased', 'submitted', 'uncertain'] },
+    next_check_at: { [Op.lte]: now(deps) },
+  }, attributes: ['id'], order: [['next_check_at', 'ASC'], ['id', 'ASC']], limit: 100 });
+  const report = { scanned: runs.length, apply_queued: 0, check_queued: 0, skipped: 0, review_required: 0, waiting: 0, ignored: 0, failed: 0 };
+  for (const run of runs) {
+    try { report[await recoverOptimizationRun(run.id, deps)]++; }
+    catch { report.failed++; }
+  }
+  return { status: report.failed ? 'failed' : 'completed', report };
+}
+
+module.exports = { JOB_TYPE, CHECK_JOB_TYPE, ORIGIN, LEASE_MS, TERMINAL, ACTIVE_JOBS, RECOVERY_DELAYS,
+  evidenceSnapshot, enqueueOptimizationAdjustment, runOptimizationAdjustmentJob, recoverOptimizationRuns, validateRun };

@@ -54,6 +54,10 @@ const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
     priority: 'low',
     executorMethod: 'executeCampaignOptimizationEvaluation',
   }),
+  campaignWorkspaceOptimizationRecovery: Object.freeze({
+    type: 'campaign_workspace_optimization_recover', priority: 'low', executorMethod: 'executeCampaignWorkspaceOptimizationRecovery',
+    enabledEnv: 'CAMPAIGN_WORKSPACE_OPTIMIZATION_ENABLED', usesIntegrationLease: false,
+  }),
   webDomainReconciliation: Object.freeze({
     type: 'marketing_web_domain_reconciliation',
     priority: 'low',
@@ -179,6 +183,7 @@ const TARGETED_INTEGRATION_JOB_TYPES = Object.freeze([
   'guided_campaign_goal_policy_apply',
   // Existing-account adjustments share the provider lane; their own mandate and gates remain mandatory.
   'campaign_workspace_optimization_apply',
+  'campaign_workspace_optimization_check',
   // Provider destination mutations and their compensating rollback must use
   // the same distributed integration lease as Google Ads sync/mutations.
   'marketing_campaign.destination_apply.v1',

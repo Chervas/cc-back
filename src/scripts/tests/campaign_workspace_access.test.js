@@ -40,3 +40,13 @@ test('successful workspace response is not stored in browser or shared HTTP cach
   assert.equal(h.response.headers['Cache-Control'], 'private, no-store');
   assert.equal(h.calls.find(([kind]) => kind === 'load')[1].days, 7);
 });
+test('history inherits authorized aggregate scope and passes pagination without trusting an input actor', async () => {
+  const h = harness({ history: true, resolveScope: async () => ({ isAll: true, isValid: true, clinicIds: [1, 2], groupId: null }) });
+  await h.run({ scope: 'all', page: '2', campaign_id: 'campaign-1', actorId: 99 });
+  const input = h.calls.find(([kind]) => kind === 'load')[1];
+  assert.equal(input.actorId, 7); assert.deepEqual(input.scope.clinicIds, [1]);
+  assert.deepEqual(input.input, { page: '2', campaignId: 'campaign-1' });
+  assert.equal(h.response.headers['Cache-Control'], 'private, no-store');
+  const changed = harness({ history: true, load: async () => { throw Object.assign(Error('changed'), { status: 404, code: 'workspace_campaign_not_in_scope' }); } });
+  await changed.run({ scope: '1' }); assert.equal(changed.response.code, 404);
+});

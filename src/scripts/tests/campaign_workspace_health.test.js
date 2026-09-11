@@ -11,6 +11,17 @@ const health = (rows, evidence = new Map()) => buildWorkspaceHealth({ rows, peri
 test('health always exposes the six approved blocks in the same order', () => {
   assert.deepEqual(health([]).healthBlocks.map(block => block.id), ['no-leads', 'cost', 'delivery', 'reception', 'privacy', 'signals']);
 });
+test('uncertain adjustments stay in existing health blocks, even after a campaign pauses', () => {
+  const result = health([row('1', { campaign: { ...row('1').campaign, paused: true } }), row('2')], new Map([
+    ['1', { optimization: [{ id: 'run-1', action: 'pause_underperforming_ads', actionLabel: 'Pausa de anuncio' }] }],
+    ['2', { optimization: [{ id: 'run-2', action: 'adjust_bids', actionLabel: 'Ajuste de puja' }] }],
+  ]));
+  assert.equal(result.healthBlocks.length, 6); assert.equal(result.affectedCount, 2);
+  assert.equal(result.healthBlocks.find(block => block.id === 'delivery').tone, 'warning');
+  assert.equal(result.healthBlocks.find(block => block.id === 'cost').tone, 'warning');
+  assert.deepEqual(result.findings.map(finding => finding.optimizationRunId), ['run-1', 'run-2']);
+  assert.ok(result.findings.every(finding => finding.technical && finding.source.includes('Optimiza')));
+});
 test('unknown checks and mere authorization never become green', () => {
   const result = health([row('1')], new Map([['1', { signals: { authorized: true } }]]));
   assert.ok(result.healthBlocks.every(block => block.tone === 'neutral'));

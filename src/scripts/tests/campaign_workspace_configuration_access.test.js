@@ -42,6 +42,17 @@ test('pausing optimization requires write permission before loading a mandate', 
   const unauthenticated = harness(); await unauthenticated.run('pauseOptimization', { userData: null });
   assert.equal(unauthenticated.res.statusCode, 401);
 });
+test('closing optimization reviews requires single-scope write access and uses the authenticated actor', async () => {
+  const denied = harness({ hasAccess: async input => input.access === 'read', resolveOptimization: () => assert.fail('no write') });
+  await denied.run('resolveOptimization'); assert.equal(denied.res.statusCode, 403);
+  const aggregate = harness(); await aggregate.run('resolveOptimization', { query: { scope: 'all' } }); assert.equal(aggregate.res.statusCode, 400);
+  const anonymous = harness(); await anonymous.run('resolveOptimization', { userData: null }); assert.equal(anonymous.res.statusCode, 401);
+  const allowed = harness({ resolveOptimization: async input => {
+    assert.equal(input.actorId, 7); assert.equal(input.runId, 'run-1'); assert.deepEqual(input.scope.clinicIds, [1, 2]); return { success: true };
+  } });
+  await allowed.run('resolveOptimization', { params: { runId: 'run-1' }, body: { actorId: 99 } });
+  assert.equal(allowed.res.statusCode, 200); assert.equal(allowed.res.headers['Cache-Control'], 'private, no-store');
+});
 test('shared-account routes retain scope guards and pass the session actor to the wider account check', async () => {
   const forbidden = harness({ hasAccess: async input => input.access === 'read', assignSharedAccount: () => assert.fail('no write') });
   await forbidden.run('assignSharedAccount'); assert.equal(forbidden.res.statusCode, 403);

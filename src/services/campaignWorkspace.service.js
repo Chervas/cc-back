@@ -149,6 +149,8 @@ async function loadCampaignWorkspace({ models, scope, days, now = new Date() }) 
   for (const [campaignId, delivery] of signals) evidence.set(campaignId, { ...evidence.get(campaignId), signals: delivery });
   const googleSignals = await loadGoogleSignalEvidence({ models, campaigns, selectedClinics, now });
   for (const [campaignId, delivery] of googleSignals) evidence.set(campaignId, { ...evidence.get(campaignId), signals: delivery });
+  const optimization = await require('./campaignWorkspaceOptimizationHistory.service').loadOptimizationIncidentEvidence({ models, campaigns });
+  for (const [campaignId, pending] of optimization) evidence.set(campaignId, { ...evidence.get(campaignId), optimization: pending });
   const report = buildWorkspaceHealth(metrics, evidence, now);
   return { success: true, version: 1, scope: { clinicIds: scope.clinicIds, groupId: scope.groupId || null },
     generatedAt: now.toISOString(), report,

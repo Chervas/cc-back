@@ -20,10 +20,11 @@ const { loadGoogleNativeEvidence } = require('../services/campaignWorkspaceGoogl
 const { loadSharedAccountReview, assignSharedAccountCampaigns } = require('../services/campaignWorkspaceSharedAccount.service');
 const { loadOptimizationPreparation, checkOptimizationPreparation } = require('../services/campaignWorkspaceOptimizationPreparation.service');
 const { pauseWorkspaceOptimization } = require('../services/campaignWorkspaceOptimizationAuthorization.service');
+const { loadOptimizationHistory, resolveOptimizationReview } = require('../services/campaignWorkspaceOptimizationHistory.service');
 
 function createWorkspaceHandler({ models = db, resolveScope = resolveClinicScope,
   accessibleClinics = getAccessibleMarketingClinicIds, hasAccess = hasMarketingClinicScopeAccess,
-  load = loadCampaignWorkspace } = {}) {
+  load = loadCampaignWorkspace, history = false } = {}) {
   return async (req, res) => {
     const userId = Number(req.userData?.userId);
     if (!Number.isSafeInteger(userId) || userId <= 0) return res.status(401).json({ success: false, error: 'unauthenticated' });
@@ -39,11 +40,19 @@ function createWorkspaceHandler({ models = db, resolveScope = resolveClinicScope
       return res.status(403).json({ success: false, error: 'marketing_scope_forbidden' });
     }
     res.set('Cache-Control', 'private, no-store');
+    if (history) {
+      try { return res.json(await load({ models, scope, actorId: userId, hasAccess, input: { page: req.query.page, campaignId: req.query.campaign_id } })); }
+      catch (error) {
+        if (error.status >= 400 && error.status < 500) return res.status(error.status).json({ success: false, error: error.code });
+        throw error;
+      }
+    }
     return res.json(await load({ models, scope, days }));
   };
 }
 
 exports.getWorkspace = asyncHandler(createWorkspaceHandler());
+exports.getOptimizationHistory = asyncHandler(createWorkspaceHandler({ load: loadOptimizationHistory, history: true }));
 exports.createWorkspaceHandler = createWorkspaceHandler;
 
 function createWorkspaceConfigurationHandlers({ models = db, resolveScope = resolveClinicScope,
@@ -56,6 +65,7 @@ function createWorkspaceConfigurationHandlers({ models = db, resolveScope = reso
   sharedAccount = loadSharedAccountReview, assignSharedAccount = assignSharedAccountCampaigns,
   optimization = loadOptimizationPreparation, checkOptimization = checkOptimizationPreparation,
   pauseOptimization = pauseWorkspaceOptimization,
+  resolveOptimization = resolveOptimizationReview,
   metaSignals = loadMetaSignalPreparation, checkMetaSignals = checkMetaSignalPreparation } = {}) {
   async function authorize(req, res, access) {
     const actorId = Number(req.userData?.userId);
@@ -72,6 +82,15 @@ function createWorkspaceConfigurationHandlers({ models = db, resolveScope = reso
     return { scope, actorId };
   }
   return {
+    resolveOptimization: async (req, res) => {
+      const context = await authorize(req, res, 'write');
+      if (!context) return;
+      try { return res.json(await resolveOptimization({ models, ...context, hasAccess, loadInventory, runId: req.params.runId, input: req.body })); }
+      catch (error) {
+        if (error.status >= 400 && error.status < 500) return res.status(error.status).json({ success: false, error: error.code });
+        throw error;
+      }
+    },
     pauseOptimization: async (req, res) => {
       const context = await authorize(req, res, 'write');
       if (!context) return;
@@ -301,6 +320,7 @@ exports.getGooglePreparation = asyncHandler(configurationHandlers.googlePreparat
 exports.getGoogleDestinations = asyncHandler(configurationHandlers.googleDestinations);
 exports.getSharedAccountReview = asyncHandler(configurationHandlers.sharedAccount);
 exports.getOptimizationPreparation = asyncHandler(configurationHandlers.optimization);
+exports.resolveOptimizationReview = asyncHandler(configurationHandlers.resolveOptimization);
 exports.checkOptimizationPreparation = asyncHandler(configurationHandlers.checkOptimization);
 exports.pauseOptimization = asyncHandler(configurationHandlers.pauseOptimization);
 exports.assignSharedAccountCampaigns = asyncHandler(configurationHandlers.assignSharedAccount);

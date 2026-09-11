@@ -17,7 +17,7 @@ const money = (value, currency) => new Intl.NumberFormat('es-ES', {
 function buildWorkspaceHealth(report, evidence = new Map(), now = new Date()) {
   const findings = [];
   const coverage = new Map(INDICATORS.map(([id]) => [id, { evaluated: new Set(), total: new Set(), pending: new Set(), checks: [] }]));
-  const add = (row, category, title, detail, nextStep, key, severity = 'warning') => {
+  const add = (row, category, title, detail, nextStep, key, severity = 'warning', extra = {}) => {
     const id = `${category}:${key || row.campaign.id}`;
     const existing = findings.find(finding => finding.id === id);
     if (existing) {
@@ -28,10 +28,15 @@ function buildWorkspaceHealth(report, evidence = new Map(), now = new Date()) {
       technical: ['reception', 'privacy', 'signals'].includes(category),
       window: INDICATORS.find(([key]) => key === category)[3],
       source: ['cost', 'no-leads'].includes(category) ? 'Inversión sincronizada y registros del CRM' : 'Comprobaciones persistidas',
+      ...extra,
     });
   };
   for (const row of report.rows) {
     const observed = evidence.get(row.campaign.id) || {};
+    for (const pending of observed.optimization || []) add(row, pending.action === 'pause_underperforming_ads' ? 'delivery' : 'cost',
+      'Hay un ajuste sin confirmar', `${pending.actionLabel}. Todavía no se ha confirmado el resultado en la plataforma.`,
+      'Revisa el historial del ajuste. No se repetirá el envío; otros ajustes esperan esta revisión.', `optimization:${pending.id}`, 'warning',
+      { technical: true, optimizationRunId: pending.id, source: 'Registro de ajustes de Optimiza', window: 'Última comprobación del ajuste' });
     const fresh = row.coverage.updatedAt && new Date(now) - new Date(row.coverage.updatedAt) < 36 * 3600000
       && row.coverage.latestMetricDate === report.period.end;
     const eligible = !row.campaign.paused && row.campaign.assigned;

@@ -13,10 +13,11 @@ module.exports = {
       provider: { type: Sequelize.STRING(16), allowNull: false },
       account_id: { type: Sequelize.STRING(64), allowNull: false },
       campaign_id: { type: Sequelize.STRING(64), allowNull: false },
+      clinic_id: { type: Sequelize.INTEGER, allowNull: false },
       resource_key: { type: Sequelize.STRING(64), allowNull: false },
       change: { type: Sequelize.JSON, allowNull: false },
       evidence: { type: Sequelize.JSON, allowNull: false },
-      status: { type: Sequelize.ENUM('queued', 'leased', 'submitted', 'verified', 'observed', 'skipped', 'uncertain'), allowNull: false, defaultValue: 'queued' },
+      status: { type: Sequelize.ENUM('queued', 'leased', 'submitted', 'verified', 'observed', 'skipped', 'uncertain', 'resolved'), allowNull: false, defaultValue: 'queued' },
       job_request_id: { type: Sequelize.INTEGER.UNSIGNED, allowNull: true,
         references: { model: 'JobRequests', key: 'id' }, onDelete: 'SET NULL', onUpdate: 'CASCADE' },
       lease_token: { type: Sequelize.STRING(36), allowNull: true },
@@ -24,6 +25,9 @@ module.exports = {
       submitted_at: { type: Sequelize.DATE, allowNull: true },
       completed_at: { type: Sequelize.DATE, allowNull: true },
       outcome: { type: Sequelize.JSON, allowNull: true },
+      recovery_attempts: { type: Sequelize.INTEGER.UNSIGNED, allowNull: false, defaultValue: 0 },
+      next_check_at: { type: Sequelize.DATE, allowNull: true },
+      resolution: { type: Sequelize.JSON, allowNull: true },
       created_at: { type: Sequelize.DATE, allowNull: false },
       updated_at: { type: Sequelize.DATE, allowNull: false },
     };
@@ -44,6 +48,7 @@ module.exports = {
       ['idx_workspace_optimization_account', ['provider', 'account_id', 'status'], false],
       ['idx_workspace_optimization_resource', ['resource_key', 'submitted_at'], false],
       ['idx_workspace_optimization_pending', ['runtime_namespace', 'status', 'updated_at'], false],
+      ['idx_workspace_optimization_recovery', ['runtime_namespace', 'next_check_at'], false],
     ];
     for (const [name, fields, unique] of definitions) {
       const index = (await queryInterface.showIndex(table)).find(index => index.name === name);
