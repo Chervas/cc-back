@@ -2184,7 +2184,8 @@ La carga ocurre al abrir el anuncio, separada de los KPI y la salud.
   de proveedor/iframes. Un video se identifica como miniatura, no como reproductor.
   Si el contenido no se recupera, los resultados siguen visibles con un estado
   explicito. Las imagenes fallidas no se sustituyen por fotografias genericas.
-- URLs HTTPS publicas sin credenciales/puertos/secretos; imagenes exclusivamente
+- URLs HTTPS sin IPs literales (incluidas IPv6), credenciales/puertos/secretos;
+  se filtra el hostname, pero no se certifica su resolucion DNS. Imagenes exclusivamente
   en los CDN `fbcdn.net`/`cdninstagram.com`, sin referrer. El cliente usa bindings
   normales, enlaces con noopener/noreferrer y textos escapados, no innerHTML.
 - Cache Redis con namespace de entorno y clave derivada de referencia, ambito,
@@ -2193,6 +2194,8 @@ La carga ocurre al abrir el anuncio, separada de los KPI y la salud.
   se conserva hasta su `retryAt` (maximo 24h). Se valida autorizacion antes
   de leerlo, incluso en hit. No se almacena token ni datos de pacientes. Las
   llamadas simultaneas al mismo recurso en el proceso comparten la promesa.
+  Peticiones de recursos distintos esperan tambien la misma conexion inicial
+  de Redis; no fallan por estar conectandose otra consulta.
   Si Redis falla, la creatividad queda no disponible, sin provocar un aluvion
   de llamadas Graph ni impedir consultar resultados.
 - Este cache de contenido se renueva bajo demanda al caducar: no sustituye el
@@ -2209,10 +2212,10 @@ Referencias de campos: SDK oficial Meta para
 y [AdCreative](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/adcreative.py).
 No se usa la antigua aproximacion de creatividad por adset del detalle de estrategia.
 
-Verificacion del contrato: 508 tests workspace, incluidos trece nuevos de acceso,
+Verificacion del contrato: 509 tests workspace, incluidos catorce de acceso,
 pertenencia, normalizacion, cache y revocacion durante lectura. Cache Redis real
 verificada entre dos procesos con claves de QA aisladas y borradas al terminar.
-La prueba frontend tambien cubre pausa, reintento manual y cancelacion del
+81 tests frontend; la prueba del componente tambien cubre pausa, reintento manual y cancelacion del
 temporizador al cambiar de contexto o cerrar el dialogo.
 No hay migraciones ni cambios en anuncios, conversiones, senales o cobros.
 

@@ -36,7 +36,8 @@ test('creative reference is exact and never accepts composite IDs or provider pa
 });
 test('only public HTTPS links and official CDN image URLs leave the normalizer', () => {
   for (const value of ['javascript:alert(1)', 'data:image/png;base64,x', 'https://user:pass@example.com', 'https://127.0.0.1',
-    'https://[::1]', 'https://example.local', 'https://example.com:8443', 'https://example.com/?access_token=secret']) assert.equal(publicUrl(value), null);
+    'https://[::1]', 'https://[::ffff:127.0.0.1]', 'https://[2001:db8::192.0.2.1]',
+    'https://example.local', 'https://example.com:8443', 'https://example.com/?access_token=secret']) assert.equal(publicUrl(value), null);
   assert.equal(publicUrl('https://scontent.fbcdn.net/image.jpg?oh=signed', true), 'https://scontent.fbcdn.net/image.jpg?oh=signed');
   assert.equal(publicUrl('https://fbcdn.net.attacker.com/image.jpg', true), null);
   assert.equal(publicUrl('https://arbitrary.example.com/image.jpg', true), null);
@@ -129,6 +130,17 @@ test('Meta quota pause has a sanitized retry time and cache avoids rechecking un
   await cachedCreative('qa-creative-paused', load, { store, now: new Date(+now + 90000) }); assert.equal(reads, 1);
   await cachedCreative('qa-creative-paused', load, { store, now: new Date(+now + 120001) }); assert.equal(reads, 2);
   assert.equal(ttl, 60);
+});
+test('different ads share Redis startup instead of failing while another request connects', async () => {
+  let resolve; let connects = 0;
+  const store = { status: 'wait', connect() {
+    connects++; this.status = 'connecting'; return new Promise(done => { resolve = () => { this.status = 'ready'; done(); }; });
+  }, get: async () => { assert.equal(store.status, 'ready'); return null; }, set: async () => {} };
+  const load = async () => ({ preview: { available: true }, error: null });
+  const first = cachedCreative('qa-start-first', load, { store, now });
+  const second = cachedCreative('qa-start-second', load, { store, now });
+  assert.equal(connects, 1); resolve();
+  assert.equal((await first).preview.available, true); assert.equal((await second).preview.available, true);
 });
 test('creative HTTP handler intersects aggregate scopes and rechecks access after asynchronous reads', async () => {
   let calls = 0; let observed;

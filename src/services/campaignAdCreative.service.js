@@ -14,7 +14,7 @@ const object = value => value && typeof value === 'object' && !Array.isArray(val
 const list = value => { if (typeof value === 'string') { try { value = JSON.parse(value); } catch { return []; } } return Array.isArray(value) ? value : []; };
 const strings = values => [...new Set(values.map(value => text(typeof value === 'object' ? value?.text : value)).filter(Boolean))].slice(0, 20);
 const TTL = 86400;
-let redis; const inflight = new Map();
+let redis; const inflight = new Map(); const connecting = new WeakMap();
 
 function creativeReference(input) {
   const fields = ['provider', 'account_id', 'campaign_id', 'ad_id', 'group_id'];
@@ -27,7 +27,8 @@ function publicUrl(value, media = false) {
   if (typeof value !== 'string' || value.length > 4096) return null;
   try {
     const url = new URL(value);
-    if (url.protocol !== 'https:' || url.username || url.password || url.port || net.isIP(url.hostname)
+    const hostname = url.hostname.startsWith('[') ? url.hostname.slice(1, -1) : url.hostname;
+    if (url.protocol !== 'https:' || url.username || url.password || url.port || net.isIP(hostname)
       || !url.hostname.includes('.') || /(^|\.)(localhost|local|internal|test)$/.test(url.hostname)
       || [...url.searchParams.keys()].some(key => /^(access_token|authorization|password|secret)$/i.test(key))) return null;
     if (media && !/(^|\.)(fbcdn\.net|cdninstagram\.com)$/.test(url.hostname)) return null;
@@ -114,7 +115,11 @@ function cacheClient() {
 async function cachedCreative(key, load, { store = cacheClient(), now = new Date() } = {}) {
   if (inflight.has(key)) return inflight.get(key);
   const pending = (async () => {
-    if (store.status === 'wait') await store.connect();
+    if (store.status === 'wait' && !connecting.has(store)) connecting.set(store, store.connect());
+    const connection = connecting.get(store);
+    if (connection) {
+      try { await connection; } finally { if (connecting.get(store) === connection) connecting.delete(store); }
+    }
     const stored = await store.get(key);
     if (stored) {
       try {
