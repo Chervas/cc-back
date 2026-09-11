@@ -140,6 +140,10 @@ test('fresh inventory without any complete metric query is not zero-activity evi
   const f = readFixture(); const ads = await loadGoogleWorkspaceAds(f.args);
   assert.equal(ads.length, 1); assert.equal(ads[0].inventory, true); assert.equal(ads[0].spend, undefined);
 });
+test('unnamed search ads use their real first headline, never a simulated creative', async () => {
+  const f = readFixture(); f.inventory[0].adName = null;
+  assert.equal((await loadGoogleWorkspaceAds(f.args))[0].title, 'Primera visita');
+});
 test('only checked dates become zero metrics; current inventory never refreshes old metrics', async () => {
   const f = readFixture(); f.coverage.push({ customerId: '1234567890', campaignId: '', date: '2026-09-10', observedAt });
   f.rows.push({ ...f.inventory[0], date: '2026-09-09', observedAt: null, costMicros: 2500000, updated_at: '2026-09-01' });

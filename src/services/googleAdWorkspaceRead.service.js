@@ -7,7 +7,7 @@ const dayKey = (row, date = row.date) => JSON.stringify([key(row), date]);
 async function loadGoogleWorkspaceAds({ models, googleWhere, dateWhere }) {
   const inventory = await models.GoogleAdsAdInventory.findAll({ where: { [Op.or]: googleWhere },
     attributes: ['clinicGoogleAdsAccountId', 'customerId', 'campaignId', 'adGroupId', 'adGroupName', 'adGroupStatus',
-      'adId', 'adName', 'adStatus', 'present', 'observedAt'], order: [['observedAt', 'DESC']], raw: true });
+      'adId', 'adName', 'headlines', 'adStatus', 'present', 'observedAt'], order: [['observedAt', 'DESC']], raw: true });
   const rows = await models.GoogleAdsAdInsightsDaily.findAll({ where: { [Op.or]: googleWhere, date: dateWhere },
     attributes: ['clinicGoogleAdsAccountId', 'customerId', 'campaignId', 'adGroupId', 'adGroupName', 'adId', 'adName',
       'adStatus', 'date', 'network', 'device', 'costMicros', 'conversions', 'observedAt', 'updated_at'], order: [['observedAt', 'DESC'], ['updated_at', 'DESC']], raw: true });
@@ -29,7 +29,7 @@ async function loadGoogleWorkspaceAds({ models, googleWhere, dateWhere }) {
     const status = item.present === false ? 'UNKNOWN' : item.adGroupStatus && item.adGroupStatus !== 'ENABLED'
       && item.adStatus === 'ENABLED' ? item.adGroupStatus : item.adStatus;
     return { provider: 'google_ads', account_id: row.customerId, campaign_id: row.campaignId, id: row.adId,
-      groupId: row.adGroupId, groupName: item.adGroupName, title: item.adName, status,
+      groupId: row.adGroupId, groupName: item.adGroupName, title: item.adName || (Array.isArray(item.headlines) ? item.headlines[0] : null), status,
       updatedAt: item.observedAt || row.updated_at };
   }
   const ads = [...byId.values()].map(row => ({ ...identity(row), inventory: true }));
