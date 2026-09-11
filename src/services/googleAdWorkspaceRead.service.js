@@ -6,7 +6,7 @@ const dayKey = (row, date = row.date) => JSON.stringify([key(row), date]);
 
 async function loadGoogleWorkspaceAds({ models, googleWhere, dateWhere }) {
   const inventory = await models.GoogleAdsAdInventory.findAll({ where: { [Op.or]: googleWhere },
-    attributes: ['clinicGoogleAdsAccountId', 'customerId', 'campaignId', 'adGroupId', 'adGroupName', 'adGroupStatus',
+    attributes: ['clinicGoogleAdsAccountId', 'customerId', 'campaignId', 'campaignStatus', 'adGroupId', 'adGroupName', 'adGroupStatus',
       'adId', 'adName', 'headlines', 'adStatus', 'present', 'observedAt'], order: [['observedAt', 'DESC']], raw: true });
   const rows = await models.GoogleAdsAdInsightsDaily.findAll({ where: { [Op.or]: googleWhere, date: dateWhere },
     attributes: ['clinicGoogleAdsAccountId', 'customerId', 'campaignId', 'adGroupId', 'adGroupName', 'adId', 'adName',
@@ -26,8 +26,9 @@ async function loadGoogleWorkspaceAds({ models, googleWhere, dateWhere }) {
   }
   function identity(row) {
     const item = byId.get(key(row)) || row;
-    const status = item.present === false ? 'UNKNOWN' : item.adGroupStatus && item.adGroupStatus !== 'ENABLED'
-      && item.adStatus === 'ENABLED' ? item.adGroupStatus : item.adStatus;
+    const statuses = [item.campaignStatus, item.adGroupStatus, item.adStatus];
+    const status = item.present === false ? 'UNKNOWN' : statuses.includes('REMOVED') ? 'REMOVED'
+      : statuses.includes('PAUSED') ? 'PAUSED' : item.adStatus;
     return { provider: 'google_ads', account_id: row.customerId, campaign_id: row.campaignId, id: row.adId,
       groupId: row.adGroupId, groupName: item.adGroupName, title: item.adName || (Array.isArray(item.headlines) ? item.headlines[0] : null), status,
       updatedAt: item.observedAt || row.updated_at };
