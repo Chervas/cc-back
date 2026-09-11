@@ -143,9 +143,10 @@ de la web compartida sin seleccionar/autorizar el grupo.
   para casos nativos; no reutilizarlo ciegamente ni relajar gates de conversiones.
   Una configuracion nueva con `activation=null` no demuestra que la medicion
   anterior este desactivada: hidratar y conservar los contratos existentes.
-- Optimiza: auditar y conectar capacidades efectivas de ambos proveedores. El
-  onboarding actual solo admite Google para guided_improvement. Nunca anunciar
-  ajustes Meta como activos si el ejecutor no los soporta.
+- Optimiza: comprobacion persistente de compatibilidad Google/Meta disponible;
+  faltan mandato, recomendaciones y ejecucion acotada con jobs. El onboarding
+  guided anterior no representa los nuevos permisos. Nunca anunciar ajustes
+  como activos a partir de una comprobacion de compatibilidad.
 - Solicitud gestionada y aprobaciones preparadas con servicios existentes;
   pendientes de QA visual integrado, sin cobros ni publicacion en cuentas reales.
 - Completar frescura/cobertura del inventario de anuncios sin insights, registros
@@ -1761,3 +1762,75 @@ Un reinicio exclusivamente DEV en este avance: PID `1209539`, contador `8551`
 sin cambios. Auditoria SQL antes/despues: 44 asignaciones, 48 auditorias, cero
 settings y cero leads Google nativos. Ambos gates de activacion/importacion
 siguen cerrados. No se ha hecho ninguna asignacion real para facilitar el QA.
+
+## Compatibilidad De Optimiza (2026-09-11)
+
+La preparacion permite revisar que ajustes admite cada campana seleccionada y
+asignada, con Google y Meta. No autoriza ajustes ni activa un ejecutor. Tampoco
+cambia recepcion de formularios o senales CRM, que conservan sus contratos.
+
+- `GET /campaign-workspace/optimization` acepta proveedor, cuenta y campana,
+  bajo un scope de clinica/grupo. Lee evidencia persistente, sin consultas a
+  proveedores ni refresco OAuth. Exige preferencias Optimiza guardadas, cuenta
+  elegida, asignacion explicita y acceso actual. Los agregados son de lectura
+  de informes, no un scope valido de configuracion.
+- `POST /campaign-workspace/optimization/check` exige escritura en todo el
+  ambito y `expected_version`. Reserva una comprobacion por 120 segundos,
+  consulta solo metadatos y revalida permisos, miembros, seleccion, asignacion
+  y grant antes/despues del I/O. No mantiene transacciones abiertas durante la
+  consulta externa. Los conflictos no se convierten en autorizaciones.
+- Guarda eventos inmutables `optimization_check` en `CampaignWorkspaceEvents`;
+  inicio y resultado avanzan la version del workspace. TTL operativo de 24 h,
+  ligado a la configuracion y al grant actuales. No necesita migracion ni
+  almacenamiento de navegador. Una comprobacion fallida retira el resultado
+  positivo anterior; un cambio de cuenta, permiso o limites lo invalida.
+- La respuesta solo incluye acciones, conteos, motivos y fechas. Nunca expone
+  tokens, huellas privadas ni la lista tecnica de recursos. `authorized` es
+  siempre `false`. El detalle interno solo guarda metadatos permitidos, no
+  contenido de anuncios, audiencias o datos de pacientes.
+- Google admite Search y Performance Max activas y fuera de experimentos.
+  Detecta pujas manuales y objetivos CPA/ROAS ya existentes, sin convertir
+  estrategias ni inventar objetivos. Excluye estrategias de cartera. La pausa
+  individual solo es compatible con grupos Search con otro anuncio activo;
+  no representa los grupos de recursos PMax como anuncios individuales.
+- Las exclusiones de busquedas se limitan a negativas EXACT de campana, tambien
+  para PMax. Los presupuestos Google requieren periodo diario, propietario
+  confirmado y no compartido. No se infiere exclusividad de una referencia
+  incompleta. No se consultan formularios o respuestas al revisar ajustes.
+- Meta exige permiso `ads_management`, cuenta/campana verificadas, estado
+  ACTIVE/AUCTION y paginacion completa de anuncios y conjuntos. Reconoce
+  COST_CAP, LOWEST_COST_WITH_BID_CAP y MIN_ROAS existentes; mantiene estrategias
+  sin limite. Reconoce al propietario real del presupuesto diario (campana o
+  conjunto), excluye presupuestos de duracion total y protege el ultimo anuncio.
+- El limite mensual actual esta expresado en EUR: una cuenta con otra divisa
+  no tiene ajuste presupuestario compatible. Estos limites son decisiones del
+  producto, no una afirmacion de que los proveedores no ofrezcan otras opciones.
+- El dialogo muestra esta informacion bajo la campana del paso de preparacion,
+  sin nuevas pestañas. Permite comprobar de nuevo, elimina estados anteriores
+  ante error y conserva el paso al cerrar. La comprobacion y la autorizacion
+  se mantienen distintas; el gate de activacion de Optimiza sigue cerrado.
+
+El contrato guided anterior permite `landing_publish`, `campaign_destination`
+y `conversion_goal`: no se reutiliza como si autorizara pujas/presupuestos/pausas.
+Faltan mandato explicito, recomendaciones con evidencia, ejecutor Google/Meta,
+limite global mensual, controles de frecuencia y jobs con recibos/idempotencia.
+Antes de cada futura mutacion habra que releer estado y permisos; una lista de
+anuncios compatibles no autoriza pausarlos todos ni consumir el ultimo activo.
+El TTL de esta comprobacion no sustituye el refresco nocturno de los informes.
+Este avance no anade cron ni modifica el horario Europe/Madrid.
+
+Referencias primarias usadas para delimitar los campos existentes:
+[Campaign v24](https://developers.google.com/google-ads/api/reference/rpc/v24/Campaign),
+[CampaignBudget v24](https://developers.google.com/google-ads/api/reference/rpc/v24/CampaignBudget),
+[criterios PMax](https://developers.google.com/google-ads/api/performance-max/create-campaign-criteria)
+y [AdSet del SDK oficial Meta](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/adset.py).
+
+Verificacion backend: 415 pruebas de workspace, Google y diagnostico, sin fallos.
+La suite nueva usa modelos/proveedores aislados y prueba expiracion, conflictos,
+revocacion durante el I/O, fallo de auditoria y ausencia de cambios de activacion.
+Consulta JSON de eventos verificada contra MySQL real, sin crear registros.
+Lectura real de una campana PMax de Arriaga, tras verificar acceso a todas las
+clinicas propietarias y grant vigente: negativa y presupuesto compatibles;
+sin anuncio individual ni objetivo de puja existente. Solo token vigente, sin
+renovarlo ni guardar la comprobacion. Search y Meta se prueban con fixtures,
+no se presentan como ejecuciones reales. Sigue pendiente el QA del ejecutor.

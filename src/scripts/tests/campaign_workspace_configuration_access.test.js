@@ -18,9 +18,22 @@ function harness(options = {}) {
 }
 
 test('configuration queries and commands require an authenticated session', async () => {
-  for (const method of ['get', 'put', 'preparation', 'activate', 'assign', 'metaPreparation', 'refreshMeta', 'requestMetaPage', 'metaPageJob', 'preferences', 'googlePreparation', 'checkGoogle', 'googleDestinations', 'refreshGoogle', 'sharedAccount', 'assignSharedAccount']) {
+  for (const method of ['get', 'put', 'preparation', 'activate', 'assign', 'metaPreparation', 'refreshMeta', 'requestMetaPage', 'metaPageJob', 'preferences', 'googlePreparation', 'checkGoogle', 'googleDestinations', 'refreshGoogle', 'sharedAccount', 'assignSharedAccount', 'optimization', 'checkOptimization']) {
     const h = harness(); await h.run(method, { userData: null });
     assert.equal(h.res.statusCode, 401); assert.equal(h.calls.length, 0);
+  }
+});
+test('optimization metadata checks keep read/write and single-scope guards without enabling activation', async () => {
+  const forbidden = harness({ hasAccess: async input => input.access === 'read', checkOptimization: () => assert.fail('no write') });
+  await forbidden.run('checkOptimization'); assert.equal(forbidden.res.statusCode, 403);
+  const allowed = harness({ optimization: async input => {
+    assert.equal(input.actorId, 7); assert.deepEqual(input.scope.clinicIds, [1, 2]);
+    assert.equal(typeof input.hasAccess, 'function'); return { success: true, preparation: { authorized: false } };
+  } });
+  await allowed.run('optimization', { query: { scope: 'group:5', provider: 'google_ads', account_id: '20', campaign_id: '30' } });
+  assert.equal(allowed.res.statusCode, 200); assert.equal(allowed.res.headers['Cache-Control'], 'private, no-store');
+  for (const method of ['optimization', 'checkOptimization']) {
+    const h = harness(); await h.run(method, { query: { scope: 'all' } }); assert.equal(h.res.statusCode, 400);
   }
 });
 test('shared-account routes retain scope guards and pass the session actor to the wider account check', async () => {
