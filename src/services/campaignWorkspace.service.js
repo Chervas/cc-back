@@ -13,7 +13,7 @@ const { loadGoogleNativeEvidence } = require('./campaignWorkspaceGoogleReception
 const { loadMetaSignalEvidence } = require('./campaignWorkspaceSignalEvidence.service');
 const { loadGoogleSignalEvidence } = require('./campaignWorkspaceGoogleSignalEvidence.service');
 
-const LEAD_FIELDS = ['id', 'clinica_id', 'source', 'channel', 'utm_source', 'utm_campaign', 'source_detail', 'google_ads_customer_id', 'google_ads_campaign_id', 'created_at'];
+const LEAD_FIELDS = ['id', 'clinica_id', 'source', 'channel', 'utm_source', 'utm_campaign', 'source_detail', 'google_ads_customer_id', 'google_ads_campaign_id', 'external_source', 'external_id', 'created_at'];
 const GOOGLE_MAPPING_FIELDS = ['id', 'customerId', 'descriptiveName', 'currencyCode', 'clinicaId', 'grupoClinicaId', 'assignmentScope', 'lastSyncedAt'];
 const META_MAPPING_FIELDS = ['id', 'metaAssetId', 'metaAssetName', 'clinicaId', 'grupoClinicaId', 'assignmentScope', 'ad_account_refreshed_at', 'additionalData'];
 
@@ -142,7 +142,7 @@ async function loadCampaignWorkspace({ models, scope, days, now = new Date() }) 
     clinica_id: { [Op.in]: scope.clinicIds } }, attributes: LEAD_FIELDS, raw: true }));
   const ads = await loadWorkspaceAds({ models, googleWhere, metaCampaigns, dateWhere });
   await attachLeadAdvertisingIdentities({ models, leads });
-  const budgetAttribution = await loadBudgetCampaignAttribution({ models, campaigns, period });
+  const budgetAttribution = await loadBudgetCampaignAttribution({ models, campaigns, ads, period });
   const metrics = aggregateReport({ campaigns, facts, leads, appointments, ads, budgetAttribution, period, now });
   const evidence = await loadWebEvidence({ models, campaigns, selectedClinics, groups, scope, now });
   const signals = await loadMetaSignalEvidence({ models, campaigns, selectedClinics, now });
@@ -219,10 +219,10 @@ async function loadWorkspaceAds({ models, googleWhere, metaCampaigns, dateWhere 
   const ads = [];
   if (googleWhere.length) {
     const rows = await models.GoogleAdsAdInsightsDaily.findAll({ where: { [Op.or]: googleWhere, date: dateWhere },
-      attributes: ['customerId', 'campaignId', 'adId', 'adName', 'adStatus', 'date', 'network', 'device', 'costMicros', 'conversions', 'updated_at'],
+      attributes: ['customerId', 'campaignId', 'adGroupId', 'adGroupName', 'adId', 'adName', 'adStatus', 'date', 'network', 'device', 'costMicros', 'conversions', 'updated_at'],
       order: [['updated_at', 'DESC']], raw: true });
     for (const row of rows) ads.push({ provider: 'google_ads', account_id: row.customerId, campaign_id: row.campaignId,
-      id: row.adId, title: row.adName, status: row.adStatus, date: row.date, segment: [row.network || '', row.device || ''],
+      id: row.adId, groupId: row.adGroupId, groupName: row.adGroupName, title: row.adName, status: row.adStatus, date: row.date, segment: [row.network || '', row.device || ''],
       spend: Number(row.costMicros) / 1e6, providerConversions: Number(row.conversions), updatedAt: row.updated_at });
   }
   if (!metaCampaigns.length) return ads;
@@ -236,7 +236,7 @@ async function loadWorkspaceAds({ models, googleWhere, metaCampaigns, dateWhere 
   const byId = new Map(entities.map(row => [`${accountId(row.ad_account_id)}:${row.entity_id}`, row]));
   const byAdset = new Map(adsets.map(row => [`${accountId(row.ad_account_id)}:${row.entity_id}`, row.parent_id]));
   for (const entity of entities) ads.push({ provider: 'meta_ads', account_id: entity.ad_account_id,
-    campaign_id: byAdset.get(`${accountId(entity.ad_account_id)}:${entity.parent_id}`), id: entity.entity_id,
+    campaign_id: byAdset.get(`${accountId(entity.ad_account_id)}:${entity.parent_id}`), id: entity.entity_id, groupId: entity.parent_id,
     title: entity.name, status: entity.effective_status || entity.status, updatedAt: entity.updated_at, inventory: true });
   const rows = entities.length ? await models.SocialAdsInsightsDaily.findAll({ where: { level: 'ad', date: dateWhere,
     [Op.or]: entities.map(row => ({ entity_id: row.entity_id, ad_account_id: row.ad_account_id })) },
@@ -246,8 +246,8 @@ async function loadWorkspaceAds({ models, googleWhere, metaCampaigns, dateWhere 
     const entity = byId.get(`${accountId(row.ad_account_id)}:${row.entity_id}`);
     ads.push({ provider: 'meta_ads', account_id: row.ad_account_id,
       campaign_id: byAdset.get(`${accountId(row.ad_account_id)}:${entity.parent_id}`), id: entity.entity_id,
-      title: entity.name, status: entity.effective_status || entity.status, date: row.date,
-      segment: [row.publisher_platform || '', row.platform_position || ''], spend: Number(row.spend), updatedAt: entity.updated_at });
+      groupId: entity.parent_id, title: entity.name, status: entity.effective_status || entity.status, date: row.date,
+      segment: [row.publisher_platform || '', row.platform_position || ''], spend: Number(row.spend), updatedAt: entity.updated_at, metricsUpdatedAt: row.updated_at });
   }
   return ads;
 }

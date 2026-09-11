@@ -6,6 +6,7 @@ const { canonicalLeadAdvertisingIdentity } = require('./leadAdvertisingIdentity.
 const { nativeForms } = require('./campaignWorkspaceNativeReception.service');
 const { googleNativeForms } = require('./campaignWorkspaceGoogleReception.service');
 const { googleDestinationDetection } = require('./campaignWorkspaceGoogleDestination.service');
+const { adKey, createLeadAdMatcher, evaluateAdComparison } = require('./campaignAdAttribution.service');
 
 const TIME_ZONE = 'Europe/Madrid';
 const DAY = 86400000;
@@ -164,7 +165,7 @@ function aggregateReport({ campaigns, facts = [], leads = [], appointments = [],
     if (seenLeads.has(String(lead.id))) continue;
     seenLeads.add(String(lead.id));
     const key = leadCampaign(lead, campaigns);
-    if (key) leadRows.set(String(lead.id), { row: index.get(key), clinicId: number(lead.clinica_id) });
+    if (key) leadRows.set(String(lead.id), { row: index.get(key), clinicId: number(lead.clinica_id), lead });
     const day = dayOf(lead.created_at);
     const target = periodKey(day);
     if (!target) continue;
@@ -176,14 +177,17 @@ function aggregateReport({ campaigns, facts = [], leads = [], appointments = [],
     if (day >= recentStart) row.coverage.recentLeads++;
   }
   const seenAppointments = new Set();
+  const booked = [];
   for (const appointment of appointments) {
     if (seenAppointments.has(String(appointment.id_cita)) || ['cancelada', 'reprogramada'].includes(appointment.estado) || appointment.es_provisional) continue;
     seenAppointments.add(String(appointment.id_cita));
     const match = leadRows.get(String(appointment.lead_intake_id));
-    if (!match || match.clinicId !== number(appointment.clinica_id)) continue;
+    if (!match || match.clinicId !== number(appointment.clinica_id)
+      || !dayOf(match.lead.created_at) || +new Date(match.lead.created_at) > +new Date(appointment.created_at)) continue;
     const day = dayOf(appointment.created_at);
     const target = periodKey(day);
     if (!target) continue;
+    booked.push({ ...match, target });
     match.row[target].appointments++;
     const daily = match.row.daily.find(point => point.date === day);
     if (daily) daily.appointments++;
@@ -194,13 +198,15 @@ function aggregateReport({ campaigns, facts = [], leads = [], appointments = [],
     const row = index.get(externalCampaignIdentityKey(ad));
     const target = periodKey(ad.date);
     if (!row || !target && ad.inventory !== true) continue;
-    const key = `${row.campaign.id}:${ad.id}`;
+    const key = `${row.campaign.id}:${adKey(ad)}`;
     const dedupe = JSON.stringify([key, ad.date, ad.segment]);
     if (seenAds.has(dedupe)) continue;
     seenAds.add(dedupe);
     if (!adIndex.has(key)) {
-      const value = { id: ad.id, title: ad.title || ad.id, status: ad.status || 'UNKNOWN',
-        current: { ...empty(), leads: null, appointments: null }, previous: { ...empty(), leads: null, appointments: null },
+      const value = { id: adKey(ad), advertisingId: ad.id, groupId: ad.groupId || null, groupName: ad.groupName || null,
+        title: ad.title || ad.id, status: ad.status || 'UNKNOWN',
+        current: empty(), previous: empty(), currentCpl: null, previousCpl: null,
+        metricsUpdatedAt: null, latestMetricDate: null,
         lastSeenAt: ad.updatedAt || null, active: !row.campaign.paused && /^(ACTIVE|ENABLED)$/i.test(ad.status || ''),
         lowestCost: false, rejected: /DISAPPROVED|REJECTED/i.test(ad.status || '') };
       adIndex.set(key, value); row.ads.push(value);
@@ -209,6 +215,12 @@ function aggregateReport({ campaigns, facts = [], leads = [], appointments = [],
     if (target && ad.inventory !== true) {
       value[target].spend += number(ad.spend);
       value.periods = { ...(value.periods || {}), [target]: true };
+      const updated = ad.metricsUpdatedAt || ad.updatedAt;
+      if (!value.latestMetricDate || ad.date > value.latestMetricDate) {
+        value.latestMetricDate = ad.date; value.metricsUpdatedAt = updated || null;
+      } else if (ad.date === value.latestMetricDate && (!updated || +new Date(updated) < +new Date(value.metricsUpdatedAt))) {
+        value.metricsUpdatedAt = updated || null;
+      }
       if (ad.providerConversions != null) value[target].providerConversions = (value[target].providerConversions || 0) + number(ad.providerConversions);
     }
     if (ad.updatedAt && new Date(ad.updatedAt) > new Date(value.lastSeenAt || 0)) {
@@ -217,16 +229,53 @@ function aggregateReport({ campaigns, facts = [], leads = [], appointments = [],
       value.active = !row.campaign.paused && /^(ACTIVE|ENABLED)$/i.test(value.status);
     }
   }
+  const matchAd = createLeadAdMatcher(campaigns, new Map(rows.map(row => [row.campaign.id, row.ads])));
+  for (const row of rows) {
+    row.adAttribution = { method: 'verified_native_ad_identity', unattributed: { current: { ...empty(), spend: null }, previous: { ...empty(), spend: null } } };
+    for (const target of ['current', 'previous']) {
+      row.adAttribution.unattributed[target].accepted = row[target].accepted;
+      for (const ad of row.ads) ad[target].accepted = row[target].accepted === null ? null : 0;
+    }
+  }
+  for (const { row, lead } of leadRows.values()) {
+    const target = periodKey(dayOf(lead.created_at));
+    if (!target) continue;
+    const adId = matchAd(lead, row.campaign.id);
+    const ad = adId ? adIndex.get(`${row.campaign.id}:${adId}`) : null;
+    if (ad) ad[target].leads++;
+    else row.adAttribution.unattributed[target].leads++;
+  }
+  for (const { row, lead, target } of booked) {
+    const adId = matchAd(lead, row.campaign.id);
+    const ad = adId ? adIndex.get(`${row.campaign.id}:${adId}`) : null;
+    if (ad) ad[target].appointments++;
+    else row.adAttribution.unattributed[target].appointments++;
+  }
+  for (const allocation of budgetAttribution?.adAllocations || []) {
+    const row = index.get(allocation.campaignId); const target = periodKey(dayOf(allocation.acceptedAt));
+    const ad = adIndex.get(`${allocation.campaignId}:${allocation.adId}`);
+    if (!row || !target || !ad || ad[target].accepted === null) continue;
+    ad[target].accepted = Math.round((ad[target].accepted * 100) + allocation.amountCents) / 100;
+    row.adAttribution.unattributed[target].accepted = Math.round(row.adAttribution.unattributed[target].accepted * 100 - allocation.amountCents) / 100;
+  }
   for (const row of rows) {
     if (!row.campaign.assigned) {
       row.current.leads = row.previous.leads = null;
       row.current.appointments = row.previous.appointments = null;
+      for (const target of ['current', 'previous']) {
+        row.adAttribution.unattributed[target].leads = row.adAttribution.unattributed[target].appointments = null;
+        for (const ad of row.ads) ad[target].leads = ad[target].appointments = null;
+      }
     }
     for (const ad of row.ads) {
       if (!ad.periods?.current) ad.current.spend = null;
       if (!ad.periods?.previous) ad.previous.spend = null;
       delete ad.periods;
+      ad.currentCpl = row.campaign.assigned && row.adAttribution.unattributed.current.leads === 0 ? cpl(ad.current) : null;
+      ad.previousCpl = row.campaign.assigned && row.adAttribution.unattributed.previous.leads === 0 ? cpl(ad.previous) : null;
     }
+    row.adAttribution.comparison = evaluateAdComparison(row, period, now);
+    for (const ad of row.ads) ad.lowestCost = ad.id === row.adAttribution.comparison.bestAdId;
     if (!row.coverage.spend) row.current.spend = null;
     if (!row.coverage.previousSpend) row.previous.spend = null;
     const comparable = row.current.leads >= 10 && row.previous.leads >= 10 && cpl(row.previous) > 0 && cpl(row.current) !== null;
@@ -254,7 +303,7 @@ function aggregateReport({ campaigns, facts = [], leads = [], appointments = [],
       appointments: included.reduce((total, row) => total + row.daily[i].appointments, 0) })),
     unattributedLeads, attribution: {
       leads: 'unique_lead_intake_id', appointments: 'linked_appointment_created_at_excluding_cancelled',
-      accepted: budgetAttribution?.method || 'pending_budget_campaign_attribution', adLeads: 'pending_ad_level_crm_attribution',
+      accepted: budgetAttribution?.method || 'pending_budget_campaign_attribution', adLeads: 'verified_native_ad_identity_with_unattributed_remainder',
     },
     budgetAttribution: budgetAttribution ? { currency: budgetAttribution.currency, supportedProviders: budgetAttribution.supportedProviders, ...budgetAttribution.coverage } : null,
   };

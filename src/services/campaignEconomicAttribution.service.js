@@ -3,12 +3,14 @@
 const { Op } = require('sequelize');
 const { leadCampaign } = require('./campaignWorkspaceReport.service');
 const { canonicalLeadAdvertisingIdentity, attachLeadAdvertisingIdentities } = require('./leadAdvertisingIdentity.service');
+const { createLeadAdMatcher } = require('./campaignAdAttribution.service');
+const { externalCampaignIdentityKey } = require('./externalCampaignAssignmentTargets.service');
 
 const id = value => /^\d+$/.test(String(value || '')) ? String(value) : null;
 const time = value => value && Number.isFinite(new Date(value).getTime()) ? new Date(value).getTime() : null;
 const patientKey = (clinic, patient) => `${clinic}:${patient}`;
 
-function budgetCampaignAttribution({ campaigns, budgets, appointments, leads, period }) {
+function budgetCampaignAttribution({ campaigns, budgets, appointments, leads, ads = [], period }) {
   const clinics = new Set(campaigns.filter(row => row.assigned).map(row => Number(row.clinicId)));
   const byLead = new Map(leads.map(lead => [id(lead.id), lead]));
   const byPatient = new Map();
@@ -19,7 +21,15 @@ function budgetCampaignAttribution({ campaigns, budgets, appointments, leads, pe
     if (!byPatient.has(key)) byPatient.set(key, []);
     byPatient.get(key).push(appointment);
   }
-  const allocations = []; const seen = new Set();
+  const adRows = new Map();
+  for (const ad of ads) {
+    const campaign = campaigns.find(campaign => externalCampaignIdentityKey(campaign) === externalCampaignIdentityKey(ad));
+    if (!campaign) continue;
+    if (!adRows.has(campaign.id)) adRows.set(campaign.id, []);
+    adRows.get(campaign.id).push(ad);
+  }
+  const matchAd = createLeadAdMatcher(campaigns, adRows);
+  const allocations = []; const adAllocations = []; const seen = new Set();
   const coverage = { attributed: 0, unlinked: 0, ambiguous: 0, invalid: 0 };
   for (const budget of budgets) {
     const budgetId = id(budget.id); const acceptedAt = time(budget.responded_at);
@@ -43,13 +53,16 @@ function budgetCampaignAttribution({ campaigns, budgets, appointments, leads, pe
     }
     // A second or unknown acquisition origin must not silently become last-touch attribution.
     if (candidates.size !== 1 || candidates.has(null)) { coverage.ambiguous++; continue; }
-    allocations.push({ campaignId: [...candidates][0], acceptedAt: budget.responded_at, amountCents: Math.round(amount * 100) });
+    const allocation = { campaignId: [...candidates][0], acceptedAt: budget.responded_at, amountCents: Math.round(amount * 100) };
+    allocations.push(allocation);
+    const adCandidates = new Set(links.map(link => matchAd(byLead.get(id(link.lead_intake_id)), allocation.campaignId)));
+    if (adCandidates.size === 1 && !adCandidates.has(null)) adAllocations.push({ ...allocation, adId: [...adCandidates][0] });
     coverage.attributed++;
   }
-  return { currency: 'EUR', supportedProviders: ['google_ads', 'meta_ads'], method: 'accepted_budget_single_campaign_via_linked_appointment', allocations, coverage };
+  return { currency: 'EUR', supportedProviders: ['google_ads', 'meta_ads'], method: 'accepted_budget_single_campaign_via_linked_appointment', allocations, adAllocations, coverage };
 }
 
-async function loadBudgetCampaignAttribution({ models, campaigns, period }) {
+async function loadBudgetCampaignAttribution({ models, campaigns, ads = [], period }) {
   const clinicIds = [...new Set(campaigns.filter(row => row.assigned).map(row => row.clinicId))];
   const budgets = clinicIds.length ? await models.EconomicBudget.findAll({ where: {
     clinic_id: { [Op.in]: clinicIds }, status: { [Op.in]: ['accepted', 'partially_accepted'] },
@@ -63,9 +76,9 @@ async function loadBudgetCampaignAttribution({ models, campaigns, period }) {
   const leadIds = [...new Set(appointments.map(row => row.lead_intake_id))];
   const leads = leadIds.length ? await models.LeadIntake.findAll({ where: { id: { [Op.in]: leadIds }, clinica_id: { [Op.in]: clinicIds } },
     attributes: ['id', 'clinica_id', 'source', 'channel', 'utm_source', 'utm_campaign', 'source_detail',
-      'google_ads_customer_id', 'google_ads_campaign_id', 'created_at'], raw: true }) : [];
+      'google_ads_customer_id', 'google_ads_campaign_id', 'external_source', 'external_id', 'created_at'], raw: true }) : [];
   await attachLeadAdvertisingIdentities({ models, leads });
-  return budgetCampaignAttribution({ campaigns, budgets, appointments, leads, period });
+  return budgetCampaignAttribution({ campaigns, budgets, appointments, leads, ads, period });
 }
 
 module.exports = { budgetCampaignAttribution, loadBudgetCampaignAttribution };

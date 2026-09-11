@@ -2034,3 +2034,77 @@ gateway `1039243/37` y preview `1054768/40` sin cambios. Auditoria SQL conserva
 44 asignaciones, 48 eventos, cero settings y cero leads Google nativos; la
 tabla nueva no existe aun. Sin migraciones aplicadas, jobs publicitarios,
 senales, cobros ni promociones. Los tres gates permanecen cerrados.
+
+## Resultados CRM Por Anuncio (2026-09-11)
+
+El informe reutiliza los leads recibidos y las citas/presupuestos existentes;
+no introduce otro receptor ni condiciona formularios a Optimiza. El nuevo
+`adAttribution` distingue resultados atribuidos y el resto de la campana:
+
+- Identidad nativa Meta verificada por Graph, o identidad Google guardada por
+  la API. Google se enriquece en lote desde el mismo comprobador que el resolvedor
+  individual: hash del ID nativo, clinica, cuenta, campana y formulario deben
+  coincidir con LeadIntake. Pruebas ausentes, invalidas o contradictorias no
+  identifican un anuncio. Solo se seleccionan IDs y JSON de atribucion; no se
+  devuelve el payload del formulario ni datos personales en el informe.
+- El identificador de fila combina grupo/anuncio cuando el inventario dispone
+  del grupo. Un ad ID presente en varios grupos sin evidencia del grupo queda
+  sin asignar a anuncio. La atribucion siempre esta limitada a una unica campana,
+  cuenta y clinica autorizada; nunca por nombre o `utm_content` libre.
+- Leads unicos por intake y fecha de entrada; citas por fecha de creacion,
+  vinculadas al lead, misma clinica, no anteriores a su origen y excluyendo
+  canceladas, reprogramadas o provisionales. Un lead historico puede originar
+  una cita del periodo sin contarse como nuevo lead.
+- Presupuestos: importe realmente aceptado en EUR, incluso aceptacion parcial,
+  por fecha de respuesta. Se mantiene la asignacion unica a campana. La nueva
+  `adAllocations` exige que todos los vinculos validos del paciente coincidan
+  tambien en anuncio; nunca reparte el presupuesto ni elige ultimo contacto.
+- `adAttribution.unattributed.current/previous` conserva los resultados de la
+  campana sin anuncio verificable. Incluye importes aceptados sin identidad de
+  anuncio, sin alterar el total economico. La UI lo muestra aparte, sin ocultarlo
+  al paginar o filtrar anuncios. Cero en una fila significa cero resultados
+  **atribuidos** a ese anuncio, no ausencia demostrada de resultados desconocidos.
+  Campanas sin asignacion mantienen los valores CRM en null.
+- `currentCpl/previousCpl` solo se calculan con inversion disponible, leads
+  positivos y ningun lead de la campana sin anuncio en ese periodo. No se
+  sustituyen por conversiones declaradas por las plataformas ni se recalculan
+  en el cliente si backend los declara pendientes.
+- `comparison` solo destaca `Menor coste por lead` con al menos dos anuncios
+  activos, diez leads en **cada** anuncio activo, moneda conocida, inversion
+  positiva, atribucion completa y sincronizacion reciente (<36 h). Comprueba
+  por separado inventario y metricas del ultimo dia completo del periodo;
+  refrescar una entidad o una metrica antigua no rejuvenece esa evidencia.
+  Empates al centimo, cobertura parcial o datos viejos no declaran ganador.
+  Es una comparacion descriptiva, no una recomendacion de pausar ni promesa.
+- Tabla ordenable/paginada a diez filas, filtro de estado y dialogo del anuncio
+  con identidad real y cinco metricas/comparacion anterior. Cerrar conserva la
+  campana y su origen; cambiar scope/campana destruye solo el dialogo propio.
+
+Limites que siguen abiertos: el seguimiento web verificado actual acredita
+campana pero no anuncio; esos leads siguen entrando y contando en la campana.
+Extender la prueba tipada de anuncio y los parametros del seguimiento es trabajo
+pendiente, no se infiere retrospectivamente de UTMs. Tampoco se ha incorporado
+una vista previa de creatividad: el dialogo muestra datos de inventario, no una
+imagen simulada. La tabla historica compartida Google conserva su indice previo
+(sin adGroupId); este cambio no reconstruye datos antiguos que hubieran
+colisionado ni sustituye la migracion/conciliacion de ese contrato.
+
+Referencia de identidad: Google documenta la pareja grupo/anuncio en
+[estructura de recursos](https://developers.google.com/google-ads/api/docs/concepts/api-structure)
+y la retirada del ad sharing en
+[su anuncio oficial](https://ads-developers.googleblog.com/2025/07/ad-sharing-functionality-will-be.html).
+Los parametros explicitos de una futura integracion web deben respetar
+[ValueTrack](https://support.google.com/google-ads/answer/6305348?hl=en), no usar
+un UTM editorial como prueba.
+
+No hay migracion nueva en esta ampliacion de lectura. La migracion de ejecuciones
+de Optimiza **ya se aplico en la fase posterior** a la evidencia historica del
+apartado precedente; tabla vacia. Este avance no habilita los tres gates, no
+promueve staging y no completa aun el objetivo global de integracion.
+
+Verificacion de este contrato: 512 tests backend, incluida atribucion de anuncios,
+presupuestos, identidad nativa, scopes y regresion del workspace. Pasan tambien
+los runners existentes de guided y de integracion marketing web/campanas.
+La comprobacion funcional por anuncio usa datos aislados, nunca inserta leads,
+citas o presupuestos de prueba en la base compartida. La bitacora frontend recoge
+build, QA autenticado y limites de las lecturas reales frente a fixtures.

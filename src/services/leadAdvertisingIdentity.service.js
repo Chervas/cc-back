@@ -20,6 +20,10 @@ async function resolveNativeGoogleLeadIdentity({ models, lead, transaction = nul
   const rows = await models.LeadAttributionAudit.findAll({ where: { lead_intake_id: lead.id },
     attributes: [[json('attribution_steps.advertising_identity'), 'identity'],
       [json('raw_payload.lead_id'), 'native_lead_id']], raw: true, transaction });
+  return nativeGoogleProof(rows, lead);
+}
+
+function nativeGoogleProof(rows, lead) {
   const matches = new Map();
   for (const row of rows) {
     const identity = googleNativeAdvertisingIdentity(row.identity, lead.clinica_id);
@@ -56,17 +60,25 @@ function canonicalLeadAdvertisingIdentity(lead) {
 }
 
 async function attachLeadAdvertisingIdentities({ models, leads, transaction = null }) {
-  const eligible = leads.filter(lead => WEB_LEAD_SOURCES.includes(lead.source));
+  const nativeGoogle = leads.filter(lead => lead.source === 'google_ads' && lead.external_source === 'google_lead_form');
+  const googleSet = new Set(nativeGoogle);
+  const eligible = leads.filter(lead => WEB_LEAD_SOURCES.includes(lead.source) || googleSet.has(lead));
   if (!eligible.length) return leads;
   const byId = new Map(eligible.map(lead => [String(lead.id), lead]));
   // Select only server-written attribution, never raw form data or patient contact fields.
   const rows = await models.LeadAttributionAudit.findAll({ where: { lead_intake_id: { [Op.in]: [...byId.keys()] } },
-    attributes: ['lead_intake_id', [json('attribution_steps.advertising_identity'), 'identity']],
+    attributes: ['lead_intake_id', [json('attribution_steps.advertising_identity'), 'identity'],
+      ...(nativeGoogle.length ? [[json('raw_payload.lead_id'), 'native_lead_id']] : [])],
     raw: true, transaction });
   const identities = new Map();
+  const googleProofs = new Map();
   for (const row of rows) {
     const lead = byId.get(String(row.lead_intake_id));
     if (!lead) continue;
+    if (googleSet.has(lead)) {
+      if (!googleProofs.has(String(lead.id))) googleProofs.set(String(lead.id), []);
+      googleProofs.get(String(lead.id)).push(row); continue;
+    }
     const web = metaWebAdvertisingIdentity(row.identity, lead.clinica_id);
     const value = web || (lead.source === 'meta_ads' ? metaAdvertisingIdentity(row.identity, lead.clinica_id) : null);
     if (!value) continue;
@@ -75,6 +87,10 @@ async function attachLeadAdvertisingIdentities({ models, leads, transaction = nu
       clinic_id: Number(lead.clinica_id), ...value });
   }
   for (const lead of eligible) {
+    if (googleSet.has(lead)) {
+      lead.advertising_ad_identity = nativeGoogleProof(googleProofs.get(String(lead.id)) || [], lead);
+      continue;
+    }
     const matches = identities.get(String(lead.id));
     lead.advertising_identity = matches?.size === 1 ? [...matches.values()][0] : null;
     lead.advertising_identity_conflict = (matches?.size || 0) > 1;

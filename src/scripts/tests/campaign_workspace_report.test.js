@@ -89,9 +89,11 @@ test('missing spend and missing budget attribution remain null, never plausible 
   const result = report(); assert.equal(result.current.spend, null); assert.equal(result.current.accepted, null);
   assert.equal(result.previous.accepted, null);
 });
-test('missing ad-level CRM identity does not become platform conversions', () => {
-  const result = report({ ads: [{ ...fact(), id: '1', title: 'Anuncio', status: 'ENABLED' }] });
-  assert.equal(result.rows[0].ads[0].current.leads, null);
+test('missing ad-level CRM identity stays in the unattributed remainder, not platform conversions', () => {
+  const result = report({ leads: [lead(1)], ads: [{ ...fact(), id: '1', title: 'Anuncio', status: 'ENABLED' }] });
+  assert.equal(result.rows[0].ads[0].current.leads, 0);
+  assert.equal(result.rows[0].adAttribution.unattributed.current.leads, 1);
+  assert.equal(result.rows[0].ads[0].currentCpl, null);
   assert.equal(result.rows[0].ads[0].lowestCost, false);
 });
 test('inventory-only ads remain visible without inventing spend or conversions', () => {
