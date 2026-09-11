@@ -15,7 +15,7 @@ const { maybeUploadCampaignGoogleConversion } = require('../../services/campaign
 const { loadGoogleSignalEvidence } = require('../../services/campaignWorkspaceGoogleSignalEvidence.service');
 const { maybeUploadLeadLifecycleConversion } = require('../../services/googleLeadLifecycleConversion.service');
 const { reconcileGoogleDataManagerDiagnostics } = require('../../services/googleDataManagerDiagnostics.service');
-const { activateWorkspaceMeasurement } = require('../../services/campaignWorkspaceActivation.service');
+const { activateWorkspace } = require('../../services/campaignWorkspaceActivation.service');
 
 mock.method(require('../../../models').sequelize, 'query', async () => assert.fail('This suite must not access the real database'));
 
@@ -80,7 +80,7 @@ function harness() {
     const campaigns = accounts.map(account => ({ id: `${account.provider}:${account.account_id}:40`, provider: account.provider,
       account_id: account.account_id, campaign_id: '40', clinicId: 1, assigned: true, destination: 'web' }));
     // The real command consumes prepared evidence inside isolated models; no customer is activated.
-    await activateWorkspaceMeasurement({ models, scope, actorId: 2, now, hasAccess: async () => true, deploymentReady: true,
+    await activateWorkspace({ models, scope, actorId: 2, now, hasAccess: async () => true, deploymentReady: true,
       input: { expected_version: state.setting.version, preparation_revision: 'a'.repeat(64), mode: 'measurement', signals: { enabled: true }, confirmed: true },
       loadPreparation: async () => ({ revision: 'a'.repeat(64), selectionConfirmed: true, receptionReady: true, signals: result.review,
         campaigns: campaigns.map(campaign => ({ campaign, ready: true, configurationScope: null })) }),

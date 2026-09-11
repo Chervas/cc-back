@@ -143,8 +143,9 @@ de la web compartida sin seleccionar/autorizar el grupo.
   para casos nativos; no reutilizarlo ciegamente ni relajar gates de conversiones.
   Una configuracion nueva con `activation=null` no demuestra que la medicion
   anterior este desactivada: hidratar y conservar los contratos existentes.
-- Optimiza: comprobacion persistente de compatibilidad Google/Meta disponible;
-  faltan mandato, recomendaciones y ejecucion acotada con jobs. El onboarding
+- Optimiza: comprobacion persistente de compatibilidad Google/Meta, mandato
+  explicito por recursos revisados y pausa de ajustes disponibles en DEV;
+  faltan recomendaciones y ejecucion acotada con jobs. El onboarding
   guided anterior no representa los nuevos permisos. Nunca anunciar ajustes
   como activos a partir de una comprobacion de compatibilidad.
 - Solicitud gestionada y aprobaciones preparadas con servicios existentes;
@@ -1812,8 +1813,9 @@ cambia recepcion de formularios o senales CRM, que conservan sus contratos.
 
 El contrato guided anterior permite `landing_publish`, `campaign_destination`
 y `conversion_goal`: no se reutiliza como si autorizara pujas/presupuestos/pausas.
-Faltan mandato explicito, recomendaciones con evidencia, ejecutor Google/Meta,
-limite global mensual, controles de frecuencia y jobs con recibos/idempotencia.
+El mandato explicito se implementa en la seccion siguiente. Faltan recomendaciones
+con evidencia, ejecutor Google/Meta, aplicacion del limite global mensual,
+controles de frecuencia y jobs con recibos/idempotencia.
 Antes de cada futura mutacion habra que releer estado y permisos; una lista de
 anuncios compatibles no autoriza pausarlos todos ni consumir el ultimo activo.
 El TTL de esta comprobacion no sustituye el refresco nocturno de los informes.
@@ -1834,3 +1836,63 @@ clinicas propietarias y grant vigente: negativa y presupuesto compatibles;
 sin anuncio individual ni objetivo de puja existente. Solo token vigente, sin
 renovarlo ni guardar la comprobacion. Search y Meta se prueban con fixtures,
 no se presentan como ejecuciones reales. Sigue pendiente el QA del ejecutor.
+
+## Autorizacion Y Pausa De Optimiza (2026-09-11)
+
+- `PUT /campaign-workspace/activation` admite `mode=optimize`, ademas de
+  Medicion. Exige seleccion guardada, recepcion preparada, revision vigente y
+  confirmacion explicita. Si se eligen senales CRM, su autorizacion y destinos
+  siguen teniendo sus propias comprobaciones. Optimiza puede usarse sin ellas.
+- Gate adicional `CAMPAIGN_WORKSPACE_OPTIMIZATION_ENABLED`, falso por defecto,
+  junto con `CAMPAIGN_WORKSPACE_ACTIVATION_ENABLED`. Ambos siguen cerrados.
+  No habilitar Optimiza hasta completar ejecutores, recomendaciones y jobs;
+  guardar un mandato en pruebas no equivale a una ejecucion publicitaria real.
+- El servidor reconstruye el mandato con pruebas Google/Meta de menos de 24 h,
+  ligadas a seleccion, clinica y grant actuales. Rechaza pruebas incompletas,
+  campos desconocidos, recursos ajenos, duplicados o version modificada.
+  Campanas sin asignar, pausadas o sin ajustes compatibles no reciben permiso.
+  Debe haber al menos una campana compatible; las pendientes requieren revision.
+- Persistencia en `activation.optimization` de `CampaignWorkspaceSettings`,
+  con actor, fecha, identidad del mandato y recursos exactos. `include_future`
+  permite importar, nunca ampliar autorizacion a campanas o recursos nuevos.
+  La API publica solo estado, fechas, limites y numero de campanas; no publica
+  grants ni recursos privados. No se anade migracion ni cache del navegador.
+- Limites del producto: pujas hasta 10% por ajuste, un ajuste por recurso cada
+  24 h y preservacion del ultimo anuncio activo. Presupuesto sin cambios por
+  defecto; si se autoriza, hasta 10% y tope mensual conjunto en EUR. El tope no
+  es por campana. Estos limites quedan en el mandato, pero su cumplimiento
+  operativo debe implementarse y probarse en los ejecutores antes de abrir gate.
+- Autorizar bloquea las filas comunes de cuentas y comprueba otros mandatos
+  activos para evitar dos workspaces autorizando la misma campana. Mantiene
+  tambien el bloqueo ante politicas guided/managed anteriores. La consulta JSON
+  se verifica en MySQL; la concurrencia de ejecucion real sigue pendiente.
+- Se conserva `connect_only` en el contrato de recepcion existente y se anade
+  el mandato independiente. El contrato guided anterior NO autoriza pujas,
+  pausas o presupuesto. La pantalla muestra Optimiza sobre su propio contrato
+  de recepcion, sin tapar configuraciones managed/guided ajenas.
+- `POST /campaign-workspace/optimization/pause` exige permiso de escritura,
+  ambito, version y `confirmed=true`. Pausa solo ajustes futuros, no anuncios,
+  recepcion ni senales autorizadas. Es idempotente con la version vigente y
+  permanece disponible aunque se cierre el gate de activacion. Un fallo de
+  auditoria revierte el cambio; evento `optimization_paused` sin mutacion externa.
+- El resolvedor interno de autorizacion revalida actor, clinicas, seleccion,
+  conexion, recursos y limites, independientemente de un borrador posterior.
+  No realiza ninguna mutacion. El futuro ejecutor debe releer el recurso,
+  comprobar limites globales y frecuencia, registrar cada intento y gestionar
+  idempotencia antes de solicitar un cambio a Google/Meta.
+- La revision UI conserva el paso al abrir/cerrar el detalle, pagina diez
+  campanas y descarta el verde si caduca la prueba. Confirmacion y pausa son
+  acciones distintas. No anade tabs ni cambia interiores del hub/objetivo.
+
+Verificacion de esta fase: 430 tests backend y 68 frontend, build DEV
+`fb7af7c01da5f18b`. Sin migraciones, nuevos cron, ejecuciones publicitarias,
+senales, imports de leads o cobros. La recepcion web/Meta previa se reutiliza.
+Chromium autenticado: 33 comprobaciones y 14 capturas a 1440/1024/390 px,
+incluyendo paginacion, caducidad, confirmacion, conflictos, pausa, recarga y
+atras del navegador con un dialogo abierto. Lecturas iniciales reales; las
+autorizaciones y pausas de exito/conflicto son fixtures HTTP, nunca datos de
+clientes. Sin errores JS ni escrituras reales. Revision visual corrigio el
+salto del icono en movil y el espacio icono/texto en los botones de este recorrido.
+Evidencias: `/home/ubuntu/qa-evidence/campaign-opt-mandate-20260911-verified`.
+El objetivo completo sigue EN CURSO: ejecutores y jobs de Optimiza en ambos
+proveedores, cobertura/refresco nocturno, metricas CRM por anuncio y ruta canonica.

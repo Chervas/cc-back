@@ -13,7 +13,7 @@ const { CRM_MILESTONE_SOURCE } = require('../../services/campaignWorkspaceSignal
 const { attachLeadAdvertisingIdentities, resolveMetaWebLeadIdentity, resolveNativeMetaLeadIdentity } = require('../../services/leadAdvertisingIdentity.service');
 const { loadMetaSignalEvidence } = require('../../services/campaignWorkspaceSignalEvidence.service');
 const { leadCampaign } = require('../../services/campaignWorkspaceReport.service');
-const { activateWorkspaceMeasurement } = require('../../services/campaignWorkspaceActivation.service');
+const { activateWorkspace } = require('../../services/campaignWorkspaceActivation.service');
 
 mock.method(require('../../../models').sequelize, 'query', async () => assert.fail('No real database access in this suite'));
 
@@ -96,7 +96,7 @@ async function harness(group = false) {
   const review = await loadSignalAuthorizationReview({ models, scope, setting: state.setting, now: state.now });
   assert.equal(review.review.ready, true);
   // Exercise the real activator with isolated models and prepared receipt evidence, never the customer gate.
-  await activateWorkspaceMeasurement({ models, scope, actorId: 2, now, deploymentReady: true, hasAccess: async () => true,
+  await activateWorkspace({ models, scope, actorId: 2, now, deploymentReady: true, hasAccess: async () => true,
     input: { expected_version: state.setting.version, preparation_revision: 'a'.repeat(64), mode: 'measurement', signals: { enabled: true }, confirmed: true },
     loadPreparation: async () => ({ revision: 'a'.repeat(64), selectionConfirmed: true, receptionReady: true, signals: review.review,
       campaigns: [{ campaign, ready: true, configurationScope: { scope_type: state.setting.scope_type, scope_id: state.setting.scope_id } }] }),

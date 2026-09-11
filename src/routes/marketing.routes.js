@@ -219,6 +219,7 @@ router.get('/campaign-workspace/google-destinations', campaignWorkspaceControlle
 router.get('/campaign-workspace/shared-account', campaignWorkspaceController.getSharedAccountReview);
 router.get('/campaign-workspace/optimization', campaignWorkspaceController.getOptimizationPreparation);
 router.post('/campaign-workspace/optimization/check', campaignWorkspaceController.checkOptimizationPreparation);
+router.post('/campaign-workspace/optimization/pause', campaignWorkspaceController.pauseOptimization);
 router.post('/campaign-workspace/shared-account/assignment', campaignWorkspaceController.assignSharedAccountCampaigns);
 router.post('/campaign-workspace/google-destinations/check', campaignWorkspaceController.refreshGoogleDestinations);
 router.post('/campaign-workspace/google-preparation/check', campaignWorkspaceController.checkGooglePreparation);

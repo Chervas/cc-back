@@ -8,7 +8,7 @@ const { resolveNativeGoogleLeadIdentity } = require('../../services/leadAdvertis
 const { checkGooglePreparation } = require('../../services/campaignWorkspaceGooglePreparation.service');
 const { buildClinicaclickManagedMapping } = require('../../services/googleAdsConversionPreparation.service');
 const { loadSignalAuthorizationReview } = require('../../services/campaignWorkspaceSignalAuthorization.service');
-const { activateWorkspaceMeasurement } = require('../../services/campaignWorkspaceActivation.service');
+const { activateWorkspace } = require('../../services/campaignWorkspaceActivation.service');
 const { CRM_MILESTONE_SOURCE } = require('../../services/campaignWorkspaceSignalPolicy.service');
 const { maybeUploadLeadLifecycleConversion } = require('../../services/googleLeadLifecycleConversion.service');
 const { maybeUploadNativeGoogleLifecycleConversion } = require('../../services/campaignWorkspaceGoogleNative.service');
@@ -92,7 +92,7 @@ function harness({ group = false } = {}) {
       upload: async value => { assert.equal(value.validateOnly, true); return {}; } });
     const review = await loadSignalAuthorizationReview({ models, scope, setting: state.setting, now: state.now });
     assert.equal(review.review.ready, true, JSON.stringify({ review: review.review, proof: state.setting.signal_preparation }));
-    await activateWorkspaceMeasurement({ models, scope, actorId: 2, now: () => state.now, hasAccess: async () => true, deploymentReady: true,
+    await activateWorkspace({ models, scope, actorId: 2, now: () => state.now, hasAccess: async () => true, deploymentReady: true,
       input: { expected_version: state.setting.version, preparation_revision: 'a'.repeat(64), confirmed: true, mode: 'measurement', signals: { enabled: true } },
       loadPreparation: async () => ({ revision: 'a'.repeat(64), selectionConfirmed: true, receptionReady: true, signals: review.review,
         campaigns: [{ campaign, ready: true, configurationScope: null }] }),

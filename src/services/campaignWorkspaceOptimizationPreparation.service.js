@@ -15,7 +15,7 @@ const fail = (code, status = 409) => { throw Object.assign(new Error(code), { co
 const query = transaction => ({ transaction, ...(transaction ? { lock: transaction.LOCK.UPDATE } : {}) });
 
 async function optimizationContext({ models, scope, reference, transaction = null, now = new Date(), loadInventory = loadWorkspaceInventory,
-  googleContext = googleDestinationContext, metaContext = metaCampaignContext, metaGrant = metaSignalPreparationContext }) {
+  googleContext = googleDestinationContext, metaContext = metaCampaignContext, metaGrant = metaSignalPreparationContext, requirePreferences = true }) {
   const owner = settingScope(scope); const options = query(transaction);
   const ownerRow = await (scope.groupId ? models.GrupoClinica : models.Clinica).findByPk(owner.scope_id, options);
   if (!ownerRow) fail('scope_not_found', 404);
@@ -24,7 +24,7 @@ async function optimizationContext({ models, scope, reference, transaction = nul
     || JSON.stringify(clinics.map(row => Number(row.id_clinica)).sort((a, b) => a - b))
       !== JSON.stringify([...scope.clinicIds].sort((a, b) => a - b))) fail('workspace_scope_changed');
   const setting = await models.CampaignWorkspaceSetting.findOne({ where: owner, ...options });
-  if (setting?.preferences?.mode !== 'optimize' || !setting.preferences.optimization) fail('workspace_optimization_preferences_required');
+  if (!setting || requirePreferences && (setting.preferences?.mode !== 'optimize' || !setting.preferences.optimization)) fail('workspace_optimization_preferences_required');
   const google = reference.provider === 'google_ads';
   const source = await (google ? googleContext : metaContext)({ models, scope, reference, transaction, now, loadInventory });
   // Reuse account authorization independently of the CRM signal preference. No signal is checked or sent here.

@@ -7,7 +7,7 @@ const { getAccessibleMarketingClinicIds, hasMarketingClinicScopeAccess } = requi
 const { loadCampaignWorkspace, loadWorkspaceInventory } = require('../services/campaignWorkspace.service');
 const { settingScope, publicSettings, saveWorkspaceAccounts } = require('../services/campaignWorkspaceSettings.service');
 const { loadWorkspacePreparation } = require('../services/campaignWorkspacePreparation.service');
-const { activateWorkspaceMeasurement } = require('../services/campaignWorkspaceActivation.service');
+const { activateWorkspace } = require('../services/campaignWorkspaceActivation.service');
 const { assignWorkspaceCampaign } = require('../services/campaignWorkspaceAssignment.service');
 const { campaignReference, metaCampaignContext, refreshMetaCampaignDestinations } = require('../services/campaignWorkspaceMetaDestination.service');
 const { loadNativeFormEvidence } = require('../services/campaignWorkspaceNativeReception.service');
@@ -19,6 +19,7 @@ const { googleCampaignReference, googleDestinationContext, refreshGoogleDestinat
 const { loadGoogleNativeEvidence } = require('../services/campaignWorkspaceGoogleReception.service');
 const { loadSharedAccountReview, assignSharedAccountCampaigns } = require('../services/campaignWorkspaceSharedAccount.service');
 const { loadOptimizationPreparation, checkOptimizationPreparation } = require('../services/campaignWorkspaceOptimizationPreparation.service');
+const { pauseWorkspaceOptimization } = require('../services/campaignWorkspaceOptimizationAuthorization.service');
 
 function createWorkspaceHandler({ models = db, resolveScope = resolveClinicScope,
   accessibleClinics = getAccessibleMarketingClinicIds, hasAccess = hasMarketingClinicScopeAccess,
@@ -47,13 +48,14 @@ exports.createWorkspaceHandler = createWorkspaceHandler;
 
 function createWorkspaceConfigurationHandlers({ models = db, resolveScope = resolveClinicScope,
   hasAccess = hasMarketingClinicScopeAccess, loadInventory = loadWorkspaceInventory, save = saveWorkspaceAccounts,
-  prepare = loadWorkspacePreparation, activate = activateWorkspaceMeasurement, assign = assignWorkspaceCampaign,
+  prepare = loadWorkspacePreparation, activate = activateWorkspace, assign = assignWorkspaceCampaign,
   metaContext = metaCampaignContext, refreshMeta = refreshMetaCampaignDestinations, nativeEvidence = loadNativeFormEvidence,
   requestMetaPage = requestPageReception, metaPageJob = getPageReceptionJob, savePreferences = saveWorkspacePreferences,
   googlePreparation = loadGooglePreparation, checkGoogle = checkGooglePreparation,
   googleDestinations = googleDestinationContext, refreshGoogle = refreshGoogleDestinations, googleReception = loadGoogleNativeEvidence,
   sharedAccount = loadSharedAccountReview, assignSharedAccount = assignSharedAccountCampaigns,
   optimization = loadOptimizationPreparation, checkOptimization = checkOptimizationPreparation,
+  pauseOptimization = pauseWorkspaceOptimization,
   metaSignals = loadMetaSignalPreparation, checkMetaSignals = checkMetaSignalPreparation } = {}) {
   async function authorize(req, res, access) {
     const actorId = Number(req.userData?.userId);
@@ -70,6 +72,15 @@ function createWorkspaceConfigurationHandlers({ models = db, resolveScope = reso
     return { scope, actorId };
   }
   return {
+    pauseOptimization: async (req, res) => {
+      const context = await authorize(req, res, 'write');
+      if (!context) return;
+      try { return res.json(await pauseOptimization({ models, ...context, hasAccess, input: req.body })); }
+      catch (error) {
+        if (error.status >= 400 && error.status < 500) return res.status(error.status).json({ success: false, error: error.code });
+        throw error;
+      }
+    },
     optimization: async (req, res) => {
       const context = await authorize(req, res, 'read');
       if (!context) return;
@@ -291,6 +302,7 @@ exports.getGoogleDestinations = asyncHandler(configurationHandlers.googleDestina
 exports.getSharedAccountReview = asyncHandler(configurationHandlers.sharedAccount);
 exports.getOptimizationPreparation = asyncHandler(configurationHandlers.optimization);
 exports.checkOptimizationPreparation = asyncHandler(configurationHandlers.checkOptimization);
+exports.pauseOptimization = asyncHandler(configurationHandlers.pauseOptimization);
 exports.assignSharedAccountCampaigns = asyncHandler(configurationHandlers.assignSharedAccount);
 exports.refreshGoogleDestinations = asyncHandler(configurationHandlers.refreshGoogle);
 exports.checkGooglePreparation = asyncHandler(configurationHandlers.checkGoogle);

@@ -7,6 +7,7 @@ const { settingScope, campaignIncluded, publicSettings } = require('./campaignWo
 const { resolveModeStateForScope } = require('./campaignMode.service');
 const { assignmentClinics } = require('./campaignWorkspaceAssignment.service');
 const { loadSignalAuthorizationReview } = require('./campaignWorkspaceSignalAuthorization.service');
+const { loadOptimizationAuthorizationReview } = require('./campaignWorkspaceOptimizationAuthorization.service');
 
 const MODE_LABELS = {
   connect_only: 'Medición de interesados (leads)',
@@ -40,7 +41,7 @@ function assessCampaignPreparation(campaign, evidence = {}) {
 
 async function loadWorkspacePreparation({ models, scope, now = new Date(), transaction = null,
   loadInventory = loadWorkspaceInventory, loadEvidence = loadWebEvidence, resolveMode = resolveModeStateForScope,
-  loadSignalReview = loadSignalAuthorizationReview }) {
+  loadSignalReview = loadSignalAuthorizationReview, loadOptimizationReview = loadOptimizationAuthorizationReview }) {
   const where = settingScope(scope);
   const setting = await models.CampaignWorkspaceSetting.findOne({ where, raw: true, transaction });
   const intakeRecord = await models.IntakeConfig.findOne({ where: { assignment_scope: where.scope_type,
@@ -56,17 +57,22 @@ async function loadWorkspacePreparation({ models, scope, now = new Date(), trans
   });
   const workspaceMode = setting?.activation?.schema_version === 2 && setting.activation.status === 'active'
     ? { measurement: 'connect_only', optimize: 'guided_improvement' }[setting.activation.mode] : null;
-  const currentMode = existingMode?.mode || workspaceMode;
+  const ownsIntakeMode = intakeRecord?.config?.campaigns?.workspace_policy?.setting_id === setting?.id
+    && intakeRecord?.config?.campaigns?.active_mode === 'connect_only';
+  const currentMode = workspaceMode && ownsIntakeMode ? workspaceMode : existingMode?.mode || workspaceMode;
   const checks = campaigns.map(campaign => ({ ...assessCampaignPreparation(campaign, evidence.get(campaign.id)),
     configurationScope: evidence.get(campaign.id)?.configurationScope || null }));
   const assigned = checks.filter(row => row.campaign.assigned);
   const ready = assigned.filter(row => row.ready);
   const signalReview = await loadSignalReview({ models, scope, setting, now, transaction });
+  const optimizationReview = await loadOptimizationReview({ models, scope, setting, campaigns, now, transaction, loadInventory: async () => inventory });
   const body = {
     configuration: publicSettings(setting, scope),
     existing: currentMode ? { mode: currentMode, label: MODE_LABELS[currentMode] } : null,
     selectionConfirmed: !!setting?.accounts?.length,
     activationAvailable: process.env.CAMPAIGN_WORKSPACE_ACTIVATION_ENABLED === 'true',
+    optimizationAvailable: process.env.CAMPAIGN_WORKSPACE_OPTIMIZATION_ENABLED === 'true',
+    optimization: optimizationReview.review,
     signals: signalReview.review,
     assignmentClinics: scope.groupId ? assignmentClinics(inventory.selectedClinics) : [],
     campaigns: checks,
@@ -74,7 +80,7 @@ async function loadWorkspacePreparation({ models, scope, now = new Date(), trans
     receptionReady: assigned.length > 0 && assigned.every(row => row.ready),
   };
   // Bind review screens to the settings and evidence they actually displayed, not browser flags.
-  const revision = crypto.createHash('sha256').update(JSON.stringify([body, intakeRecord || null, signalReview.authorization || null])).digest('hex');
+  const revision = crypto.createHash('sha256').update(JSON.stringify([body, intakeRecord || null, signalReview.authorization || null, optimizationReview.authorization || null])).digest('hex');
   return { success: true, revision, checkedAt: now.toISOString(), ...body };
 }
 

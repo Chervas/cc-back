@@ -27,6 +27,11 @@ function publicSettings(row, scope) {
   const value = row?.get ? row.get({ plain: true }) : row;
   const activation = value?.activation ? { ...value.activation, signals: value.activation.signals
     ? { enabled: value.activation.signals.enabled, events: value.activation.signals.events } : undefined } : null;
+  if (activation?.optimization) {
+    const mandate = activation.optimization;
+    activation.optimization = { status: mandate.status, authorized_at: mandate.authorized_at, paused_at: mandate.paused_at || null,
+      limits: mandate.authorization?.limits || null, campaigns: mandate.authorization?.campaigns?.length || 0 };
+  }
   return { scope: settingScope(scope), version: value?.version || 0, accounts: value?.accounts || [],
     activation, preferences: value?.preferences || null, updatedAt: value?.updated_at || null };
 }

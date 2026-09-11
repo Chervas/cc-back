@@ -10,6 +10,7 @@ const { buildCampaignModeContract, CAMPAIGN_MODES } = require('./campaignMode.se
 const { loadSignalAuthorizationReview, verifySignalDestination } = require('./campaignWorkspaceSignalAuthorization.service');
 const { resolveWorkspaceSignalRoute, loadSignalRoutingScope } = require('./campaignWorkspaceSignalRouting.service');
 const { CRM_MILESTONE_SOURCE } = require('./campaignWorkspaceSignalPolicy.service');
+const { loadOptimizationAuthorizationReview, assertNoOptimizationOverlap, createOptimizationMandate } = require('./campaignWorkspaceOptimizationAuthorization.service');
 
 const validate = new Ajv({ allErrors: true }).compile({
   type: 'object', additionalProperties: false,
@@ -17,20 +18,23 @@ const validate = new Ajv({ allErrors: true }).compile({
   properties: {
     expected_version: { type: 'integer', minimum: 1 },
     preparation_revision: { type: 'string', pattern: '^[a-f0-9]{64}$' },
-    mode: { const: 'measurement' }, confirmed: { const: true },
+    mode: { enum: ['measurement', 'optimize'] }, confirmed: { const: true },
     signals: { type: 'object', additionalProperties: false, required: ['enabled'], properties: { enabled: { type: 'boolean' } } },
   },
 });
 const fail = (code, status = 409) => { throw Object.assign(new Error(code), { code, status }); };
 
-async function activateWorkspaceMeasurement({ models, scope, actorId, input, now = () => new Date(),
+async function activateWorkspace({ models, scope, actorId, input, now = () => new Date(),
   loadPreparation = loadWorkspacePreparation, loadInventory = loadWorkspaceInventory,
   loadSignalReview = loadSignalAuthorizationReview, resolveRoute = resolveWorkspaceSignalRoute, hasAccess,
+  loadOptimizationReview = loadOptimizationAuthorizationReview, checkOptimizationOverlap = assertNoOptimizationOverlap,
+  optimizationDeploymentReady = process.env.CAMPAIGN_WORKSPACE_OPTIMIZATION_ENABLED === 'true',
   deploymentReady = process.env.CAMPAIGN_WORKSPACE_ACTIVATION_ENABLED === 'true' }) {
   if (!Number.isSafeInteger(actorId) || actorId <= 0) fail('unauthenticated', 401);
   if (!validate(input)) fail('invalid_workspace_activation', 400);
   // DEV and workers can share a database. Do not migrate a scope until every sender understands its policy.
   if (!deploymentReady) fail('workspace_activation_deployment_pending');
+  if (input.mode === 'optimize' && !optimizationDeploymentReady) fail('workspace_optimization_deployment_pending');
   const where = settingScope(scope);
   const permitted = async () => {
     if (!hasAccess || !await hasAccess({ userId: actorId, clinicIds: scope.clinicIds, access: 'write' })) fail('marketing_scope_forbidden', 403);
@@ -47,7 +51,8 @@ async function activateWorkspaceMeasurement({ models, scope, actorId, input, now
     const setting = await models.CampaignWorkspaceSetting.findOne({ where, transaction, lock: transaction.LOCK.UPDATE });
     if (!setting || Number(setting.version) !== input.expected_version) fail('workspace_version_conflict');
     if (!setting.preferences || setting.preferences.mode !== input.mode
-      || setting.preferences.signals?.enabled !== input.signals.enabled || setting.preferences.optimization) fail('workspace_preferences_mismatch');
+      || setting.preferences.signals?.enabled !== input.signals.enabled
+      || (input.mode === 'optimize' ? !setting.preferences.optimization : setting.preferences.optimization)) fail('workspace_preferences_mismatch');
     const intakeWhere = where.scope_type === 'group'
       ? { assignment_scope: 'group', group_id: where.scope_id }
       : { assignment_scope: 'clinic', clinic_id: where.scope_id };
@@ -55,7 +60,11 @@ async function activateWorkspaceMeasurement({ models, scope, actorId, input, now
     const preparation = await loadPreparation({ models, scope, transaction, now: now() });
     if (preparation.revision !== input.preparation_revision) fail('workspace_preparation_changed');
     if (!preparation.selectionConfirmed || !preparation.receptionReady) fail('workspace_reception_pending');
-    if (preparation.existing && preparation.existing.mode !== CAMPAIGN_MODES.MEASURE) fail('workspace_mode_transition_required');
+    const previousWorkspaceOptimization = setting.activation?.schema_version === 2 && setting.activation.mode === 'optimize'
+      && setting.activation.status === 'active' && (!record || record.config?.campaigns?.workspace_policy?.setting_id === setting.id
+        && record.config.campaigns.active_mode === CAMPAIGN_MODES.MEASURE);
+    if (preparation.existing && preparation.existing.mode !== CAMPAIGN_MODES.MEASURE
+      && !(previousWorkspaceOptimization && preparation.existing.mode === CAMPAIGN_MODES.IMPROVE)) fail('workspace_mode_transition_required');
     if (preparation.campaigns.some(row => row.campaign.assigned && row.configurationScope
       && (row.configurationScope.scope_type !== where.scope_type || Number(row.configurationScope.scope_id) !== where.scope_id))) {
       fail('workspace_shared_web_scope_required');
@@ -71,13 +80,21 @@ async function activateWorkspaceMeasurement({ models, scope, actorId, input, now
       inventory, setting);
     const signalReview = input.signals.enabled ? await loadSignalReview({ models, scope, setting, transaction, now: now() }) : null;
     if (input.signals.enabled && (!preparation.signals?.ready || !signalReview?.review.ready || !signalReview.authorization)) fail('workspace_signal_preparation_required');
+    const optimizationReview = input.mode === 'optimize' ? await loadOptimizationReview({ models, scope, setting, transaction, now: now(),
+      campaigns: preparation.campaigns.map(row => row.campaign), loadInventory: async () => inventory }) : null;
+    if (input.mode === 'optimize') {
+      if (!preparation.optimization?.ready || !optimizationReview?.review.ready || !optimizationReview.authorization
+        || JSON.stringify(preparation.optimization) !== JSON.stringify(optimizationReview.review)) fail('workspace_optimization_preparation_required');
+      await checkOptimizationOverlap({ models, setting, authorization: optimizationReview.authorization, transaction });
+    }
     await permitted();
     const previous = setting.activation || null;
     const activatedAt = now().toISOString();
-    const activation = { schema_version: 2, mode: 'measurement', status: 'active', activated_at: activatedAt,
+    const activation = { schema_version: 2, mode: input.mode, status: 'active', activated_at: activatedAt,
       activated_by_user_id: actorId, account_authorizations: accounts,
       signals: { enabled: input.signals.enabled, events: input.signals.enabled ? [...setting.preferences.signals.events] : [],
         ...(input.signals.enabled ? { authorization: structuredClone(signalReview.authorization) } : {}) },
+      ...(optimizationReview ? { optimization: createOptimizationMandate({ authorization: optimizationReview.authorization, actorId, now: now() }) } : {}),
       preparation_revision: input.preparation_revision };
     const config = record?.config || {};
     const nextConfig = { ...config,
@@ -117,10 +134,10 @@ async function activateWorkspaceMeasurement({ models, scope, actorId, input, now
     }
     await permitted();
     await models.CampaignWorkspaceEvent.create({ id: crypto.randomUUID(), setting_id: setting.id, version,
-      event_type: 'measurement_activated', actor_user_id: actorId, created_at: now(),
+      event_type: input.mode === 'optimize' ? 'optimization_activated' : 'measurement_activated', actor_user_id: actorId, created_at: now(),
       changes: { activation: { before: previous, after: activation } } }, { transaction });
     return { success: true, configuration: publicSettings(setting, scope) };
   });
 }
 
-module.exports = { activateWorkspaceMeasurement };
+module.exports = { activateWorkspace };

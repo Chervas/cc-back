@@ -75,6 +75,18 @@ test('a review revision changes with settings or readiness but not with polling 
   f.state.setting.version--; f.state.evidence.clear();
   assert.notEqual((await f.read()).revision, first.revision); assert.equal((await f.read()).receptionReady, false);
 });
+test('the workspace mode takes precedence only over its own reception contract', async () => {
+  const f = fixture(); f.state.setting.activation = { schema_version: 2, mode: 'optimize', status: 'active' };
+  f.state.clinicConfig = { assignment_scope: 'clinic', clinic_id: 1, config: { campaigns: {
+    active_mode: 'connect_only', workspace_policy: { setting_id: 'setting' },
+  } } };
+  assert.equal((await f.read()).existing.mode, 'guided_improvement');
+  f.state.clinicConfig.config.campaigns.workspace_policy.setting_id = 'another-setting';
+  assert.equal((await f.read()).existing.mode, 'connect_only');
+  f.state.clinicConfig.config.campaigns.workspace_policy.setting_id = 'setting';
+  f.state.clinicConfig.config.campaigns.active_mode = 'managed_service';
+  assert.equal((await f.read()).existing.mode, 'managed_service');
+});
 test('the preparation respects saved account selections, including an explicitly empty selection', async () => {
   const f = fixture(); f.state.setting.accounts = [];
   const result = await f.read(); assert.deepEqual(result.campaigns, []);

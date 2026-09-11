@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { activateWorkspaceMeasurement } = require('../../services/campaignWorkspaceActivation.service');
+const { activateWorkspace } = require('../../services/campaignWorkspaceActivation.service');
 const { normalizeCampaignConfig } = require('../../services/campaignMode.service');
 
 function fixture() {
@@ -36,7 +36,7 @@ function fixture() {
     loadPreparation: async options => { assert.equal(options.transaction, transaction); return preparation; },
     loadInventory: async () => ({ google: [{ customerId: '123' }], meta: [], campaigns: [{ provider: 'google_ads', account_id: '123', campaign_id: '7' }] }),
     now: () => new Date('2026-09-10T15:00:00Z') };
-  return { options, input, setting, record, preparation, state, calls, run: extra => activateWorkspaceMeasurement({ ...options, ...extra }) };
+  return { options, input, setting, record, preparation, state, calls, run: extra => activateWorkspace({ ...options, ...extra }) };
 }
 
 test('activation atomically binds the scope policy, canonical measurement mode and audit without enabling signals', async () => {
@@ -65,10 +65,15 @@ test('deployment compatibility is required before touching a client configuratio
   assert.deepEqual(f.calls, []);
 });
 test('an authorized account selection never substitutes for explicit activation confirmation', async () => {
-  for (const patch of [{ confirmed: false }, { mode: 'optimize' }, { mutate_budget: true }, { expected_version: 0 }]) {
+  for (const patch of [{ confirmed: false }, { mode: 'unknown' }, { mutate_budget: true }, { expected_version: 0 }]) {
     const f = fixture(); await assert.rejects(f.run({ input: { ...f.input, ...patch } }), /invalid_workspace_activation/);
     assert.deepEqual(f.calls, []);
   }
+});
+test('optimization has an independent deployment gate before touching settings', async () => {
+  const f = fixture(); f.input.mode = 'optimize';
+  await assert.rejects(f.run({ optimizationDeploymentReady: false }), /workspace_optimization_deployment_pending/);
+  assert.deepEqual(f.calls, []);
 });
 test('signals cannot be activated without current provider proofs', async () => {
   const f = fixture(); f.input.signals.enabled = true;
@@ -183,4 +188,46 @@ test('activation does not accept destinations, event lists or grant fingerprints
     const f = signalFixture(); f.input.signals = signals;
     await assert.rejects(f.run(), /invalid_workspace_activation/); assert.deepEqual(f.calls, []);
   }
+});
+
+function optimizationFixture() {
+  const f = signalFixture();
+  f.input.mode = 'optimize'; f.setting.preferences.mode = 'optimize';
+  f.setting.preferences.optimization = { actions: ['adjust_bids'], budget_changes: false, monthly_limit_cents: null, max_budget_change_pct: 10 };
+  const authorization = { schema_version: 1, clinic_ids: [1], limits: { actions: ['adjust_bids'], max_bid_change_pct: 10, monthly_limit_cents: null },
+    campaigns: [{ provider: 'google_ads', account_id: '123', campaign_id: '7', clinic_id: 1, grant_fingerprint: 'private-optimization-grant', targets: [] }] };
+  const review = { enabled: true, ready: true, campaigns: [{ campaign_key: '7', status: 'ready' }], limits: authorization.limits };
+  f.preparation.optimization = review;
+  f.options.optimizationDeploymentReady = true;
+  f.options.loadOptimizationReview = async args => { assert.ok(args.transaction); assert.equal(args.setting, f.setting); return { review, authorization }; };
+  f.options.checkOptimizationOverlap = async args => { assert.ok(args.transaction); assert.deepEqual(args.authorization, authorization); };
+  return { ...f, optimizationAuthorization: authorization };
+}
+
+test('Optimiza stores a separate scoped mandate and preserves the checked CRM signal authorization', async () => {
+  const f = optimizationFixture(); const result = await f.run();
+  assert.equal(f.setting.activation.mode, 'optimize'); assert.equal(f.setting.activation.optimization.status, 'active');
+  assert.deepEqual(f.setting.activation.optimization.authorization, f.optimizationAuthorization);
+  assert.deepEqual(f.setting.activation.signals.authorization, f.authorization);
+  assert.equal(f.record.config.campaigns.active_mode, 'connect_only');
+  assert.equal(f.record.config.campaigns.mode_contract.mutate_bids, false);
+  assert.equal(f.calls.at(-1).event_type, 'optimization_activated');
+  assert.doesNotMatch(JSON.stringify(result), /private-optimization-grant|grant_fingerprint|targets/);
+  assert.equal(result.configuration.activation.optimization.campaigns, 1);
+});
+test('Optimiza refuses expired reviews, overlapping owners and audit failures without changing current service', async () => {
+  for (const mutate of [f => { f.options.loadOptimizationReview = async () => ({ review: { ready: false }, authorization: null }); },
+    f => { f.options.checkOptimizationOverlap = async () => { throw Object.assign(new Error('workspace_optimization_conflict'), { code: 'workspace_optimization_conflict' }); }; },
+    f => { f.state.failAudit = true; }]) {
+    const f = optimizationFixture(); mutate(f); await assert.rejects(f.run());
+    assert.equal(f.setting.activation, null); assert.equal(f.setting.version, 2);
+    assert.equal(f.record.config.campaigns.workspace_policy, undefined);
+  }
+});
+test('confirming measurement removes only the new optimization mandate; it does not relabel the old guided contract', async () => {
+  const f = optimizationFixture(); await f.run(); f.input.expected_version = f.setting.version;
+  f.input.mode = 'measurement'; f.setting.preferences.mode = 'measurement'; f.setting.preferences.optimization = null;
+  f.preparation.existing = { mode: 'guided_improvement' };
+  await f.run(); assert.equal(f.setting.activation.mode, 'measurement'); assert.equal(f.setting.activation.optimization, undefined);
+  assert.deepEqual(f.setting.activation.signals.authorization, f.authorization);
 });

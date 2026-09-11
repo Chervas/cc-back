@@ -32,9 +32,15 @@ test('optimization metadata checks keep read/write and single-scope guards witho
   } });
   await allowed.run('optimization', { query: { scope: 'group:5', provider: 'google_ads', account_id: '20', campaign_id: '30' } });
   assert.equal(allowed.res.statusCode, 200); assert.equal(allowed.res.headers['Cache-Control'], 'private, no-store');
-  for (const method of ['optimization', 'checkOptimization']) {
+  for (const method of ['optimization', 'checkOptimization', 'pauseOptimization']) {
     const h = harness(); await h.run(method, { query: { scope: 'all' } }); assert.equal(h.res.statusCode, 400);
   }
+});
+test('pausing optimization requires write permission before loading a mandate', async () => {
+  const h = harness({ hasAccess: async input => input.access === 'read', pauseOptimization: () => assert.fail('no pause') });
+  await h.run('pauseOptimization'); assert.equal(h.res.statusCode, 403);
+  const unauthenticated = harness(); await unauthenticated.run('pauseOptimization', { userData: null });
+  assert.equal(unauthenticated.res.statusCode, 401);
 });
 test('shared-account routes retain scope guards and pass the session actor to the wider account check', async () => {
   const forbidden = harness({ hasAccess: async input => input.access === 'read', assignSharedAccount: () => assert.fail('no write') });
