@@ -50,6 +50,23 @@ async function loadWorkspaceInventory({ models, scope, transaction = null, accou
     ...(metaStoredIds.length ? [{ provider: 'meta_ads', customer_id: { [Op.in]: metaStoredIds } }] : []),
   ];
   const inventory = refs.length ? await models.ExternalCampaignInventory.findAll({ where: { [Op.or]: refs }, raw: true, transaction }) : [];
+  if (googleStoredIds.length) {
+    const googleInventory = await models.GoogleAdsAdInventory.findAll({ where: { customerId: { [Op.in]: googleStoredIds }, present: true },
+      attributes: ['customerId', 'campaignId', 'campaignName', 'campaignStatus', 'observedAt'], order: [['observedAt', 'DESC']], raw: true, transaction });
+    const seen = new Set();
+    // Ad inventory also observes its parent campaign. As with Meta, prefer the newest provider observation.
+    for (const row of googleInventory) {
+      const key = `${accountId(row.customerId)}:${row.campaignId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const cached = inventory.find(item => item.provider === 'google_ads' && accountId(item.customer_id) === accountId(row.customerId)
+        && item.campaign_id === row.campaignId);
+      const snapshot = { campaign_name: row.campaignName, status: row.campaignStatus, last_seen_at: row.observedAt };
+      if (cached) {
+        if (+new Date(row.observedAt) > +new Date(cached.last_seen_at || 0)) Object.assign(cached, snapshot);
+      } else inventory.push({ provider: 'google_ads', customer_id: row.customerId, campaign_id: row.campaignId, ...snapshot });
+    }
+  }
   // Meta's existing synchronizer persists entities, not ExternalCampaignInventory.
   if (metaStoredIds.length) {
     const metaInventory = await models.SocialAdsEntity.findAll({ where: { level: 'campaign', ad_account_id: { [Op.in]: metaStoredIds } },

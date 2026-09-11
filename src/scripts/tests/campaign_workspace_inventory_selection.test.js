@@ -40,6 +40,8 @@ test('a formatted owner outside scope produces an account notice, never campaign
       ownerQuery = options; return [local, outside].filter(row => options.where.customerId[Op.in].includes(row.customerId));
     } },
     ClinicMetaAsset: { findAll: () => assert.fail('a Google account review must not read Meta accounts') },
+    GoogleAdsAdInventory: { findAll: async () => [{ customerId: '1234567890', campaignId: '42', campaignName: 'Private current name',
+      campaignStatus: 'ENABLED', observedAt: '2026-09-11T02:00:00Z' }] },
     ExternalCampaignAssignment: { findAll: async () => [] },
     ExternalCampaignInventory: { findAll: async () => [{ provider: 'google_ads', customer_id: '1234567890', campaign_id: '42',
       campaign_name: 'Private campaign', destination_detection: { urls: ['https://private.example/'] } }] },
@@ -65,4 +67,32 @@ test('a Meta destination cache preserves the newer nightly entity status instead
   const result = await loadWorkspaceInventory({ models, scope: { clinicIds: [1] } });
   assert.equal(result.campaigns.length, 1); assert.equal(result.campaigns[0].paused, true);
   assert.equal(result.campaigns[0].name, 'Current name'); assert.equal(result.campaigns[0].destination, 'web');
+});
+
+test('newer Google ad observations update parent state, preserve destinations and respect future-campaign selection', async () => {
+  for (const newer of [true, false]) {
+    const models = {
+      Clinica: { findAll: async () => [{ id_clinica: 1, estado_clinica: 1 }] },
+      ClinicGoogleAdsAccount: { findAll: async () => [{ id: 1, customerId: '123', assignmentScope: 'clinic', clinicaId: 1 }] },
+      ClinicMetaAsset: { findAll: async () => [] }, ExternalCampaignAssignment: { findAll: async () => [] },
+      ExternalCampaignInventory: { findAll: async () => [{ provider: 'google_ads', customer_id: '123', campaign_id: '42',
+        campaign_name: 'Old name', status: 'PAUSED', last_seen_at: '2026-09-10T02:00:00Z',
+        destination_detection: { kind: 'web', urls: ['https://example.org/'] } }] },
+      GoogleAdsAdInventory: { findAll: async options => {
+        assert.equal(options.where.present, true); assert.ok(options.where.customerId[Op.in].includes('123'));
+        return [{ customerId: '123', campaignId: '42', campaignName: 'Current name', campaignStatus: 'ENABLED',
+          observedAt: newer ? '2026-09-11T02:00:00Z' : '2026-09-09T02:00:00Z' },
+        { customerId: '123', campaignId: '43', campaignName: 'New campaign', campaignStatus: 'ENABLED', observedAt: '2026-09-11T02:00:00Z' }];
+      } },
+    };
+    const scope = { clinicIds: [1] }; const result = await loadWorkspaceInventory({ models, scope });
+    const parent = result.campaigns.find(row => row.campaign_id === '42');
+    assert.equal(parent.name, newer ? 'Current name' : 'Old name'); assert.equal(parent.paused, !newer);
+    assert.equal(parent.destination, 'web'); assert.equal(result.campaigns.length, 2);
+    const added = result.campaigns.find(row => row.campaign_id === '43');
+    const settings = [{ scope_type: 'clinic', scope_id: 1, accounts: [account] }];
+    assert.equal(selectedByWorkspace(added, result, settings, scope), false);
+    settings[0].accounts[0] = { ...account, include_future: true };
+    assert.equal(selectedByWorkspace(added, result, settings, scope), true);
+  }
 });
