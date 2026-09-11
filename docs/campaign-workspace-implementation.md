@@ -1,9 +1,36 @@
 # Campaign workspace: implementacion en curso
 
 Estado: EN CURSO. El mock aprobado NO se considera implementado por publicar el
-contrato de lectura. No sustituir la ruta productiva hasta completar los comandos,
+contrato de lectura. La ruta canonica se integra solo en el preview DEV; no
+promover a staging/produccion ni abrir los gates hasta completar los contratos,
 las pruebas de permisos y el QA autenticado. Referencia UX canonica en front:
 `src/Documentacion/20.17-marketing-arquitectura-experiencia-objetivos.md`, apartado 19.
+
+## Navegacion Canonica DEV (2026-09-11)
+
+`/marketing/objetivos/captar-nuevos-pacientes/campanas` carga el workspace real.
+La URL temporal de integracion redirige mediante el guard existente, preservando
+vista, campana, origen, periodo, configuracion/paso y fragmento. Los accesos
+anteriores `objective=new_patients` tambien llevan al workspace, sin presentar
+el configurador previo ni exigir otra campana local.
+
+Hub y familia conservan sus tarjetas/barras; adaptan solamente cabecera,
+ancho y navegacion. Comparten la cabecera contextual con Campanas y Perfil de
+Google. El detalle se identifica por nombre y plataforma, vuelve al origen
+real y restablece el inicio al cambiar de vista/campana, no solo de fechas.
+
+No hay cambio de receptores web, tablas, jobs, asignaciones, senales o facturacion
+por esta integracion. Los gates continuan cerrados. La ruta DEV no acredita el
+cierre global: siguen abiertos, entre otros, generacion de recomendaciones,
+limite mensual global de Optimiza y cobertura/refresco de destinos.
+
+Verificacion del front: 87 pruebas y build `f0645acdebff5976`. Chromium real:
+101 comprobaciones/20 capturas de jerarquia a 1440/1024/390/1920 px en
+`/home/ubuntu/qa-evidence/campaign-canonical-navigation-final-20260911`.
+Regresion workspace: 71 comprobaciones/29 capturas en
+`/home/ubuntu/qa-evidence/campaign-canonical-workspace-20260911`, con lectura
+real y un GET aislado de caida de proveedor. Sin errores JS/workspace ni
+escrituras de negocio. No se ha reiniciado ni cambiado backend ejecutable.
 
 ## Contrato de lectura
 
