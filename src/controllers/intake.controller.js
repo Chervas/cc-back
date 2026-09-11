@@ -31,6 +31,7 @@ const { enqueueInboundFormSubmissionResume } = require('../services/automationsV
 const { buildUserData: buildMetaUserData } = require('../services/metaCapi.service');
 const { sendCampaignMetaWebEvent: sendMetaEvent, resolveMetaWebAdvertisingIdentity } = require('../services/campaignWorkspaceMetaWeb.service');
 const { extractMetaWebAttribution, WEB_LEAD_SOURCES } = require('../lib/meta-web-attribution');
+const { resolveWorkspaceWebAdIdentity } = require('../services/campaignWorkspaceWebAdAttribution.service');
 const { resolveMetaWebLeadIdentity } = require('../services/leadAdvertisingIdentity.service');
 const {
   normalizeGoogleConsent,
@@ -3528,12 +3529,21 @@ exports.ingestLead = asyncHandler(async (req, res) => {
       console.warn('Meta web attribution unavailable:', /^workspace_/.test(error.code || '') ? error.code : 'workspace_meta_attribution_unavailable');
     }
   }
+  let webAdIdentity = null;
+  if (clinicaIdParsed && !isDirectQuickChatSummary) {
+    try {
+      webAdIdentity = await resolveWorkspaceWebAdIdentity({ models: db, body, clinicId: clinicaIdParsed, recordId: cfg?.id,
+        source: normalizedSource, externalSource, metaIdentity: metaWebIdentity, eventSourceUrl: pageUrlValue || landingUrlValue });
+    } catch (error) {
+      console.warn('Web ad attribution unavailable:', /^workspace_/.test(error.code || '') ? error.code : 'workspace_web_ad_attribution_unavailable');
+    }
+  }
   const leadPayload = {
     event_id: eventId,
     clinica_id: clinicaIdParsed,
     grupo_clinica_id: grupoClinicaIdParsed,
     campana_id: campanaIdParsed,
-    channel: metaWebIdentity ? 'paid' : normalizedChannel,
+    channel: metaWebIdentity || webAdIdentity ? 'paid' : normalizedChannel,
     source: normalizedSource,
     source_detail: source_detail || null,
     clinic_match_source: clinicMatchSource,
@@ -3585,6 +3595,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   let shouldEmitLeadCreated = false;
   const leadAttributionSteps = buildWebLandingAttributionSteps(webLandingAttribution, {
     ...(metaWebIdentity ? { advertising_identity: metaWebIdentity } : {}),
+    ...(webAdIdentity ? { web_ad_identity: webAdIdentity } : {}),
     clinic_match_source: clinicMatchSource || null,
     clinic_match_value: clinicMatchValue || null,
     resolved_clinic_id: clinicaIdParsed,

@@ -2080,10 +2080,9 @@ no introduce otro receptor ni condiciona formularios a Optimiza. El nuevo
   con identidad real y cinco metricas/comparacion anterior. Cerrar conserva la
   campana y su origen; cambiar scope/campana destruye solo el dialogo propio.
 
-Limites que siguen abiertos: el seguimiento web verificado actual acredita
-campana pero no anuncio; esos leads siguen entrando y contando en la campana.
-Extender la prueba tipada de anuncio y los parametros del seguimiento es trabajo
-pendiente, no se infiere retrospectivamente de UTMs. Tampoco se ha incorporado
+La ampliacion web descrita abajo aporta identidad de anuncio solo cuando llegan
+parametros explicitos y se comprueba su pertenencia al inventario. No reconstruye
+atribucion historica ni infiere anuncios de UTMs. Tampoco se ha incorporado
 una vista previa de creatividad: el dialogo muestra datos de inventario, no una
 imagen simulada. La tabla historica compartida Google conserva su indice previo
 (sin adGroupId); este cambio no reconstruye datos antiguos que hubieran
@@ -2108,3 +2107,57 @@ los runners existentes de guided y de integracion marketing web/campanas.
 La comprobacion funcional por anuncio usa datos aislados, nunca inserta leads,
 citas o presupuestos de prueba en la base compartida. La bitacora frontend recoge
 build, QA autenticado y limites de las lecturas reales frente a fixtures.
+
+## Atribucion Opcional De Anuncios Web (2026-09-11)
+
+Se reutiliza `/api/intake/leads`, su validacion de instalacion/dominio, deduplicado
+y auditoria. La recepcion del contacto nunca depende de poder identificar anuncio.
+No se duplican receptores ni se habilitan conversiones, CAPI o cambios en anuncios.
+
+- SDK `3.4.8`: conserva parametros explicitos `cc_gads_ad_id`,
+  `cc_gads_adgroup_id`, `cc_meta_account_id`, `cc_meta_campaign_id`,
+  `cc_meta_ad_id`, `cc_meta_adset_id` junto a la atribucion existente de sesion.
+  Una llegada publicitaria nueva sustituye el contexto previo; navegar sin
+  parametros conserva la llegada inicial. El formulario generico, chat y modal
+  usan el mismo `sendLead`; el formulario nativo no genera otro lead generico.
+- El servidor exige cuenta/campana/anuncio numericos explicitos y un solo
+  proveedor. Rechaza contradicciones entre campos/URLs, macros sin resolver y
+  grupos ambiguos. Revalida clinica asignada, instalacion efectiva y dominio
+  HTTPS. Google consulta el cache de anuncios por cuenta/campana/anuncio/grupo;
+  Meta comprueba anuncio y adset, y conserva la identidad web v2 existente,
+  incluida su instalacion y fingerprint. No hace consultas HTTP a proveedores.
+- La auditoria guarda `attribution_steps.web_ad_identity`, version 1,
+  `verified_by=workspace_web_ad_inventory`, aparte de `advertising_identity`.
+  Es **pertenencia contrastada con inventario**, no prueba criptografica de clic
+  ni consentimiento para enviar conversiones. No altera el contrato v2 de CAPI.
+  La lectura por anuncio/presupuesto usa esta identidad, sin exponer contactos.
+- Plugin preparado `2.0.0-alpha.10`, no instalado en webs de clientes por este
+  trabajo. Admite seis campos nativos opcionales adicionales (limite 34) y los
+  parametros validos de la URL. Metadatos de anuncio invalidos se omiten sin
+  rechazar los datos del formulario; los demas controles siguen siendo estrictos.
+- Compatibilidad con alpha.9: el SDK consulta `OPTIONS /_clinicaclick/intake`
+  solo si hay formulario nativo same-origin. El receptor nuevo responde
+  `{"native_web_ad_attribution":1}` sin secretos ni identificadores de instalacion.
+  La consulta no cambia estado, no envia credenciales, no sigue redirecciones,
+  no tiene cache persistente y nunca retrasa el envio. Antes de respuesta positiva,
+  o con receptor antiguo/error, **no agrega los nuevos hidden fields**. Asi se
+  evita que el antiguo parser estricto rechace formularios por campos desconocidos.
+  Un envio anticipado puede quedar sin anuncio; el contacto sigue entrando.
+- No se alteran artifacts firmados ni sus ETags, y no se instala o actualiza
+  automaticamente ningun plugin. El relay JSON existente conserva los campos
+  anidados sin necesitar la nueva capacidad del formulario nativo.
+
+No se han reescrito sufijos de Google ni parametros Meta. Una campana sin estos
+identificadores seguira contando en su nivel disponible, sin rellenar datos
+historicos por nombre. El soporte de cada parametro publicitario y la preparacion
+autorizada de URLs siguen siendo un contrato distinto de recibir formularios.
+La colision historica del indice Google sin grupo y las creatividades reales
+siguen abiertas. Esta ampliacion no cierra la implementacion global del mock.
+
+Verificacion: 531 pruebas backend workspace/landings/paquete WordPress y 43 PHP
+pasan. Chromium recorre seis escenarios con el SDK completo (1366/390 px,
+formulario generico y nativo con receptor antiguo/nuevo), usando un relay local
+aislado, sin escribir leads de clientes. Tambien pasa la regresion de Consent
+Mode/Complianz. La suite ampliada frontend tiene 82/83 pruebas correctas: el
+fallo preexistente de `intake_chat_admin_contract` busca textos literales en un
+panel ya traducido; ni ese test ni el panel se modifican en esta ampliacion.

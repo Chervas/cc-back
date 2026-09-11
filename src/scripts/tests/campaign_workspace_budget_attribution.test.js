@@ -75,7 +75,7 @@ test('budget amounts are EUR even when advertising spend uses another or mixed c
 test('loader uses exact clinic-patient pairs, loads old linked leads, and never selects personal or treatment fields', async () => {
   const queries = [];
   const model = (name, rows) => ({ findAll: async options => { queries.push({ name, ...options }); return rows; } });
-  const models = { EconomicBudget: model('budget', [budget]), CitaPaciente: model('appointment', [appointment]), LeadIntake: model('lead', [lead]) };
+  const models = { EconomicBudget: model('budget', [budget]), CitaPaciente: model('appointment', [appointment]), LeadIntake: model('lead', [lead]), LeadAttributionAudit: model('audit', []) };
   const result = await loadBudgetCampaignAttribution({ models, campaigns, period });
   assert.equal(result.allocations.length, 1);
   assert.deepEqual(queries[1].where[Op.or], [{ clinica_id: 1, paciente_id: 10 }]);

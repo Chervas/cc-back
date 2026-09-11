@@ -18,7 +18,8 @@ final class CCW_Intake_Bridge
     const EVENT_QUERY_VAR = 'ccw_events';
     const EVENT_ENDPOINT_PATH = '/_clinicaclick/events';
     const MAX_BODY_BYTES = 16384;
-    const MAX_FIELDS = 28;
+    const MAX_FIELDS = 34;
+    const AD_ATTRIBUTION_FIELDS = array('cc_gads_ad_id', 'cc_gads_adgroup_id', 'cc_meta_account_id', 'cc_meta_campaign_id', 'cc_meta_ad_id', 'cc_meta_adset_id');
     const IP_WINDOW_SECONDS = 600;
     const IP_LIMIT = 8;
     const INSTALLATION_WINDOW_SECONDS = 3600;
@@ -71,6 +72,11 @@ final class CCW_Intake_Bridge
             return;
         }
 
+        if (strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? '')) === 'OPTIONS') {
+            $this->emit_json(200, self::native_capabilities());
+            return;
+        }
+
         try {
             $result = $this->process($_SERVER, (string) file_get_contents('php://input'));
             $this->emit_redirect($result['location']);
@@ -81,6 +87,11 @@ final class CCW_Intake_Bridge
         } catch (Throwable $error) {
             $this->emit_error(503);
         }
+    }
+
+    public static function native_capabilities()
+    {
+        return array('native_web_ad_attribution' => 1);
     }
 
     /**
@@ -177,6 +188,12 @@ final class CCW_Intake_Bridge
             '_cc_attr_utm_term',
             '_cc_attr_cc_gads_customer_id',
             '_cc_attr_cc_gads_campaign_id',
+            '_cc_attr_cc_gads_ad_id',
+            '_cc_attr_cc_gads_adgroup_id',
+            '_cc_attr_cc_meta_account_id',
+            '_cc_attr_cc_meta_campaign_id',
+            '_cc_attr_cc_meta_ad_id',
+            '_cc_attr_cc_meta_adset_id',
             '_cc_attr_landing_path',
         ), true);
         $fields = array();
@@ -421,6 +438,9 @@ final class CCW_Intake_Bridge
         $result = array();
         $seen = array();
         $duplicates = array();
+        foreach (self::AD_ATTRIBUTION_FIELDS as $field) {
+            $allowed[$field] = array($field, 64);
+        }
         foreach (explode('&', (string) $query) as $pair) {
             if ($pair === '' || preg_match('/%(?![0-9a-f]{2})/i', $pair)) {
                 continue;
@@ -452,6 +472,10 @@ final class CCW_Intake_Bridge
                 }
             } elseif ($canonical_key === 'google_ads_campaign_id') {
                 if (!preg_match('/^[1-9]\d{0,31}$/', $value)) {
+                    continue;
+                }
+            } elseif (in_array($canonical_key, self::AD_ATTRIBUTION_FIELDS, true)) {
+                if (!preg_match('/^[1-9]\d{0,63}$/', $value)) {
                     continue;
                 }
             } else {
@@ -499,11 +523,18 @@ final class CCW_Intake_Bridge
             'google_ads_campaign_id' => 32,
         );
         $result = array();
+        foreach (self::AD_ATTRIBUTION_FIELDS as $field) {
+            $field_map['_cc_attr_' . $field] = $field;
+            $limits[$field] = 64;
+        }
         foreach ($field_map as $browser_name => $canonical_name) {
             if (!isset($fields[$browser_name]) || $fields[$browser_name] === '') {
                 continue;
             }
             $value = trim((string) $fields[$browser_name]);
+            if (in_array($canonical_name, self::AD_ATTRIBUTION_FIELDS, true) && !preg_match('/^[1-9]\d{0,63}$/', $value)) {
+                continue;
+            }
             if (
                 $value === ''
                 || $this->text_length($value) > $limits[$canonical_name]

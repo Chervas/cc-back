@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const db = require('../../models');
+const { WEB_AD_FIELDS } = require('../lib/web-ad-attribution');
 const { resolveWebLandingAttribution } = require('./webLandingAttribution.service');
 const {
   runtimeCandidateForPublicationArtifact,
@@ -14,6 +15,7 @@ const {
 } = require('./webArtifactMetadata.service');
 
 const BROWSER_FIELDS = new Set([
+  ...WEB_AD_FIELDS.map(field => `_cc_attr_${field}`),
   'first_name', 'last_name', 'email', 'phone', 'message', 'preferred_contact',
   'privacy_consent', '_cc_company', 'web_project_id', 'web_revision_id',
   'web_page_id', 'web_form_id', 'web_artifact_input_hash',
@@ -25,6 +27,7 @@ const BROWSER_FIELDS = new Set([
   '_cc_attr_landing_path',
 ]);
 const ATTRIBUTION_FIELDS = new Set([
+  ...WEB_AD_FIELDS,
   'gclid', 'gbraid', 'wbraid', 'fbclid', 'ttclid', 'utm_source', 'utm_medium',
   'utm_campaign', 'utm_content', 'utm_term', 'google_ads_customer_id',
   'google_ads_campaign_id',
@@ -32,6 +35,7 @@ const ATTRIBUTION_FIELDS = new Set([
 const PREFERRED_CONTACT = new Set(['telefono', 'whatsapp', 'email']);
 const PAID_MEDIA = /^(?:cpc|ppc|paid|paid_search|paid_social|display|social_paid)$/i;
 const BROWSER_ATTRIBUTION_FIELDS = Object.freeze({
+  ...Object.fromEntries(WEB_AD_FIELDS.map(field => [`_cc_attr_${field}`, field])),
   _cc_attr_gclid: 'gclid',
   _cc_attr_gbraid: 'gbraid',
   _cc_attr_wbraid: 'wbraid',
@@ -46,6 +50,7 @@ const BROWSER_ATTRIBUTION_FIELDS = Object.freeze({
   _cc_attr_cc_gads_campaign_id: 'google_ads_campaign_id',
 });
 const URL_ATTRIBUTION_FIELDS = Object.freeze({
+  ...Object.fromEntries(WEB_AD_FIELDS.map(field => [field, field])),
   gclid: 'gclid',
   gbraid: 'gbraid',
   wbraid: 'wbraid',
@@ -63,6 +68,7 @@ const ATTRIBUTION_URL_KEYS = Object.freeze(Object.fromEntries(
   Object.entries(URL_ATTRIBUTION_FIELDS).map(([queryKey, canonicalKey]) => [canonicalKey, queryKey])
 ));
 const ATTRIBUTION_LIMITS = Object.freeze({
+  ...Object.fromEntries(WEB_AD_FIELDS.map(field => [field, 64])),
   gclid: 256,
   gbraid: 256,
   wbraid: 256,
@@ -138,6 +144,7 @@ function optionalConsentChoice(body, name) {
 }
 
 function canonicalAttributionValue(key, input, { reject = false } = {}) {
+  if (WEB_AD_FIELDS.includes(key)) return typeof input === 'string' && /^[1-9]\d{0,63}$/.test(input.trim()) ? input.trim() : '';
   const invalid = () => {
     if (reject) throw new WebLandingSubmissionError('web_landing_attribution_invalid', 'La atribución publicitaria no es válida.');
     return '';

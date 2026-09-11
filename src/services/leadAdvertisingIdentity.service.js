@@ -3,6 +3,7 @@
 const { Op, json } = require('sequelize');
 const crypto = require('node:crypto');
 const { metaWebAdvertisingIdentity, WEB_LEAD_SOURCES } = require('../lib/meta-web-attribution');
+const { webAdAdvertisingIdentity, WEB_AD_SOURCES } = require('../lib/web-ad-attribution');
 const id = value => typeof value === 'string' && /^[0-9]{1,64}$/.test(value) ? value : null;
 
 function googleNativeAdvertisingIdentity(value, clinicId) {
@@ -51,6 +52,8 @@ function metaAdvertisingIdentity(value, clinicId) {
 }
 
 function canonicalLeadAdvertisingIdentity(lead) {
+  const ad = webAdAdvertisingIdentity(lead.advertising_web_ad_identity, lead.clinica_id);
+  if (ad && WEB_AD_SOURCES.includes(lead.source) && !['google_lead_form', 'meta_leadgen'].includes(lead.external_source)) return ad;
   const web = metaWebAdvertisingIdentity(lead.advertising_identity, lead.clinica_id);
   if (web && WEB_LEAD_SOURCES.includes(lead.source)) return web;
   if (lead.source === 'google_ads' && id(lead.google_ads_customer_id) && id(lead.google_ads_campaign_id)) {
@@ -62,22 +65,30 @@ function canonicalLeadAdvertisingIdentity(lead) {
 async function attachLeadAdvertisingIdentities({ models, leads, transaction = null }) {
   const nativeGoogle = leads.filter(lead => lead.source === 'google_ads' && lead.external_source === 'google_lead_form');
   const googleSet = new Set(nativeGoogle);
-  const eligible = leads.filter(lead => WEB_LEAD_SOURCES.includes(lead.source) || googleSet.has(lead));
+  const eligible = leads.filter(lead => WEB_AD_SOURCES.includes(lead.source));
   if (!eligible.length) return leads;
   const byId = new Map(eligible.map(lead => [String(lead.id), lead]));
   // Select only server-written attribution, never raw form data or patient contact fields.
   const rows = await models.LeadAttributionAudit.findAll({ where: { lead_intake_id: { [Op.in]: [...byId.keys()] } },
     attributes: ['lead_intake_id', [json('attribution_steps.advertising_identity'), 'identity'],
+      [json('attribution_steps.web_ad_identity'), 'web_ad_identity'],
       ...(nativeGoogle.length ? [[json('raw_payload.lead_id'), 'native_lead_id']] : [])],
     raw: true, transaction });
   const identities = new Map();
   const googleProofs = new Map();
+  const webAdProofs = new Map();
   for (const row of rows) {
     const lead = byId.get(String(row.lead_intake_id));
     if (!lead) continue;
     if (googleSet.has(lead)) {
       if (!googleProofs.has(String(lead.id))) googleProofs.set(String(lead.id), []);
       googleProofs.get(String(lead.id)).push(row); continue;
+    }
+    if (row.web_ad_identity && lead.external_source !== 'meta_leadgen') {
+      const value = webAdAdvertisingIdentity(row.web_ad_identity, lead.clinica_id);
+      if (!webAdProofs.has(String(lead.id))) webAdProofs.set(String(lead.id), new Map());
+      // Repeated receipts can have different check times without changing their identity.
+      webAdProofs.get(String(lead.id)).set(JSON.stringify(value ? { ...value, verified_at: null } : null), value);
     }
     const web = metaWebAdvertisingIdentity(row.identity, lead.clinica_id);
     const value = web || (lead.source === 'meta_ads' ? metaAdvertisingIdentity(row.identity, lead.clinica_id) : null);
@@ -94,6 +105,13 @@ async function attachLeadAdvertisingIdentities({ models, leads, transaction = nu
     const matches = identities.get(String(lead.id));
     lead.advertising_identity = matches?.size === 1 ? [...matches.values()][0] : null;
     lead.advertising_identity_conflict = (matches?.size || 0) > 1;
+    const webMatches = webAdProofs.get(String(lead.id));
+    const ad = webMatches?.size === 1 ? [...webMatches.values()][0] : null;
+    delete lead.advertising_web_ad_identity;
+    const base = canonicalLeadAdvertisingIdentity(lead);
+    const conflict = ad && base && ['provider', 'account_id', 'campaign_id'].some(field => ad[field] !== base[field]);
+    lead.advertising_web_ad_identity = conflict ? null : ad;
+    if (conflict) lead.advertising_identity_conflict = true;
   }
   return leads;
 }

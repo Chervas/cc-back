@@ -1770,6 +1770,27 @@ $tests['global intake bridge selects the signed contract of the current page'] =
     );
 };
 
+$tests['native bridge advertises optional ad fields without exposing installation secrets'] = static function () {
+    ccw_test_assert(CCW_Intake_Bridge::native_capabilities() === array('native_web_ad_attribution' => 1), 'unexpected capability payload');
+};
+
+$tests['native bridge forwards explicit ad IDs and ignores malformed optional metadata'] = static function () {
+    $setup = ccw_test_setup_intake('web-ad-fields');
+    $captured = null;
+    $GLOBALS['ccw_test_http'][$setup['upstream']] = static function ($url, $args) use (&$captured) {
+        $captured = json_decode((string) $args['body'], true);
+        return array('code' => 201, 'body' => '{"id":323}');
+    };
+    $fields = $setup['fields'];
+    $fields['_cc_attr_cc_gads_ad_id'] = '700';
+    $fields['_cc_attr_cc_gads_adgroup_id'] = '800';
+    $fields['_cc_attr_cc_meta_ad_id'] = '{{ad.id}}';
+    ccw_test_bridge_process($setup['bridge'], $setup['server'], $fields);
+    ccw_test_assert(($captured['attribution']['cc_gads_ad_id'] ?? '') === '700', 'ad ID lost');
+    ccw_test_assert(($captured['attribution']['cc_gads_adgroup_id'] ?? '') === '800', 'group ID lost');
+    ccw_test_assert(!isset($captured['attribution']['cc_meta_ad_id']), 'unresolved macro forwarded');
+};
+
 $tests['landing bridge preserves strict first-page attribution across signed routes'] = static function () {
     $setup = ccw_test_setup_intake('cross-page');
     $captured = null;
@@ -1897,7 +1918,7 @@ $tests['landing bridge fails closed on forged browser metadata, duplicate fields
         $setup['bridge']->process($server, $raw, 1784280000);
     });
 
-    $too_many = http_build_query($setup['fields'], '', '&', PHP_QUERY_RFC3986) . str_repeat('&email=second%40example.test', 20);
+    $too_many = http_build_query($setup['fields'], '', '&', PHP_QUERY_RFC3986) . str_repeat('&email=second%40example.test', CCW_Intake_Bridge::MAX_FIELDS);
     $server['CONTENT_LENGTH'] = (string) strlen($too_many);
     ccw_test_throws('ccw_intake_too_many_fields', static function () use ($setup, $server, $too_many) {
         $setup['bridge']->process($server, $too_many, 1784280000);

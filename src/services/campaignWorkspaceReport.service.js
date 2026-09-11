@@ -231,7 +231,7 @@ function aggregateReport({ campaigns, facts = [], leads = [], appointments = [],
   }
   const matchAd = createLeadAdMatcher(campaigns, new Map(rows.map(row => [row.campaign.id, row.ads])));
   for (const row of rows) {
-    row.adAttribution = { method: 'verified_native_ad_identity', unattributed: { current: { ...empty(), spend: null }, previous: { ...empty(), spend: null } } };
+    row.adAttribution = { method: 'native_or_inventory_checked_web_ad_identity', unattributed: { current: { ...empty(), spend: null }, previous: { ...empty(), spend: null } } };
     for (const target of ['current', 'previous']) {
       row.adAttribution.unattributed[target].accepted = row[target].accepted;
       for (const ad of row.ads) ad[target].accepted = row[target].accepted === null ? null : 0;
@@ -303,7 +303,7 @@ function aggregateReport({ campaigns, facts = [], leads = [], appointments = [],
       appointments: included.reduce((total, row) => total + row.daily[i].appointments, 0) })),
     unattributedLeads, attribution: {
       leads: 'unique_lead_intake_id', appointments: 'linked_appointment_created_at_excluding_cancelled',
-      accepted: budgetAttribution?.method || 'pending_budget_campaign_attribution', adLeads: 'verified_native_ad_identity_with_unattributed_remainder',
+      accepted: budgetAttribution?.method || 'pending_budget_campaign_attribution', adLeads: 'native_or_inventory_checked_web_ad_identity_with_unattributed_remainder',
     },
     budgetAttribution: budgetAttribution ? { currency: budgetAttribution.currency, supportedProviders: budgetAttribution.supportedProviders, ...budgetAttribution.coverage } : null,
   };
