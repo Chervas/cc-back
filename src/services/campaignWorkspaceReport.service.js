@@ -4,6 +4,8 @@ const { formatDateLocal, localDateTimeToUtc } = require('../lib/availability-cal
 const { canonicalExternalCampaignIdentity, externalCampaignIdentityKey } = require('./externalCampaignAssignmentTargets.service');
 const { canonicalLeadAdvertisingIdentity } = require('./leadAdvertisingIdentity.service');
 const { nativeForms } = require('./campaignWorkspaceNativeReception.service');
+const { googleNativeForms } = require('./campaignWorkspaceGoogleReception.service');
+const { googleDestinationDetection } = require('./campaignWorkspaceGoogleDestination.service');
 
 const TIME_ZONE = 'Europe/Madrid';
 const DAY = 86400000;
@@ -66,17 +68,19 @@ function visibleCampaigns({ scope, mappings, assignments, inventory }) {
       || scope.groupId && owner.groupId === scope.groupId || scope.authorizedGroupIds?.includes(owner.groupId));
     if (!assignedClinic && !ownsGroup) continue;
     if (assignedClinic && !clinics.has(assignedClinic)) continue;
+    const detection = (identity.provider === 'google_ads' && googleDestinationDetection(item.destination_detection)) || item.destination_detection;
+    const verifiedSource = ['workspace_meta_graph', 'workspace_google_ads'].includes(detection?.source);
     result.set(key, {
       ...identity, id: key, name: item.campaign_name || identity.campaign_id,
       clinicId: assignedClinic, assigned: !!assignedClinic, accountName: item.account_name || identity.account_id,
       provider: identity.provider, status: item.status || 'UNKNOWN',
       paused: /PAUSED|REMOVED|DELETED|ARCHIVED/i.test(item.status || ''),
-      destination: item.destination_detection?.kind === 'web' ? 'web' : item.destination_detection?.kind === 'lead_form' ? 'native' : 'unknown',
-      ...(identity.provider === 'meta_ads' ? { nativeForms: nativeForms(item.destination_detection),
-        destinationCheckedAt: item.destination_detection?.source === 'workspace_meta_graph' ? item.destination_detection.checked_at : null,
-        destinationComplete: item.destination_detection?.source === 'workspace_meta_graph' && item.destination_detection.complete === true } : {}),
-      urls: (item.destination_detection?.urls || []).filter(url => {
-        try { return ['https:', 'http:'].includes(new URL(url).protocol); } catch (_) { return false; }
+      destination: ({ web: 'web', lead_form: 'native', mixed: 'mixed' })[detection?.kind] || 'unknown',
+      nativeForms: identity.provider === 'meta_ads' ? nativeForms(detection) : googleNativeForms(item.destination_detection),
+      destinationCheckedAt: verifiedSource ? detection.checked_at || null : null,
+      destinationComplete: verifiedSource && detection.complete === true,
+      urls: (Array.isArray(detection?.urls) ? detection.urls : []).filter(url => {
+        try { const parsed = new URL(url); return ['https:', 'http:'].includes(parsed.protocol) && !parsed.username && !parsed.password; } catch (_) { return false; }
       }),
       lastSeenAt: item.last_seen_at || null,
     });

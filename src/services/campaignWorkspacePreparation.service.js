@@ -20,13 +20,18 @@ function assessCampaignPreparation(campaign, evidence = {}) {
     title: 'Comprobar el destino', detail: 'Todavía no hemos confirmado dónde llegan los interesados de esta campaña.' };
   if (!campaign.assigned) return { ...base, action: 'assign', reason: 'clinic_required', title: 'Confirmar la clínica',
     detail: 'La cuenta es compartida. Confirma qué clínica debe recibir sus interesados.' };
+  if (campaign.destinationCheckedAt && (campaign.destinationComplete === false || evidence.reception?.state === 'unverified')) return { ...base,
+    detail: 'La última comprobación no cubre todos los destinos de esta campaña. Revisa los destinos y formularios detectados.' };
   if (campaign.destination === 'native') return evidence.reception?.checked && evidence.reception.ready
     ? { ...base, ready: true, action: null, reason: null, title: 'Recepción comprobada', detail: evidence.reception.detail }
     : { ...base, action: 'native', reason: 'native_reception_unverified', title: 'Comprobar el formulario de la plataforma',
-      detail: 'Conectar la cuenta publicitaria no confirma el acceso a sus formularios ni la llegada de interesados.' };
-  if (campaign.destination !== 'web') return base;
+      detail: evidence.reception?.detail || 'Conectar la cuenta publicitaria no confirma el acceso a sus formularios ni la llegada de interesados.' };
+  if (!['web', 'mixed'].includes(campaign.destination)) return base;
   if (evidence.privacy?.checked !== true || evidence.privacy.ready !== true) return { ...base, action: 'web',
     reason: 'web_preparation_required', title: 'Preparar la web', detail: evidence.privacy?.detail || 'Comprueba la instalación y el consentimiento de los destinos anunciados.' };
+  if (campaign.destination === 'mixed' && evidence.nativeReception?.ready !== true) return { ...base, action: 'native',
+    reason: 'native_reception_unverified', title: 'Comprobar el formulario de la plataforma',
+    detail: evidence.nativeReception?.detail || 'La campaña también utiliza formularios nativos. Falta comprobar su recepción.' };
   if (evidence.reception?.checked !== true || evidence.reception.ready !== true) return { ...base, action: 'web',
     reason: 'web_reception_unverified', title: 'Comprobar la recepción del formulario',
     detail: evidence.reception?.detail || 'Falta recibir un formulario desde cada destino anunciado en Interesados (leads).' };

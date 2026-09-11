@@ -15,6 +15,8 @@ const { requestPageReception, getPageReceptionJob } = require('../services/campa
 const { saveWorkspacePreferences } = require('../services/campaignWorkspacePreferences.service');
 const { loadGooglePreparation, checkGooglePreparation } = require('../services/campaignWorkspaceGooglePreparation.service');
 const { loadMetaSignalPreparation, checkMetaSignalPreparation } = require('../services/campaignWorkspaceMetaSignalPreparation.service');
+const { googleCampaignReference, googleDestinationContext, refreshGoogleDestinations } = require('../services/campaignWorkspaceGoogleDestination.service');
+const { loadGoogleNativeEvidence } = require('../services/campaignWorkspaceGoogleReception.service');
 
 function createWorkspaceHandler({ models = db, resolveScope = resolveClinicScope,
   accessibleClinics = getAccessibleMarketingClinicIds, hasAccess = hasMarketingClinicScopeAccess,
@@ -47,6 +49,7 @@ function createWorkspaceConfigurationHandlers({ models = db, resolveScope = reso
   metaContext = metaCampaignContext, refreshMeta = refreshMetaCampaignDestinations, nativeEvidence = loadNativeFormEvidence,
   requestMetaPage = requestPageReception, metaPageJob = getPageReceptionJob, savePreferences = saveWorkspacePreferences,
   googlePreparation = loadGooglePreparation, checkGoogle = checkGooglePreparation,
+  googleDestinations = googleDestinationContext, refreshGoogle = refreshGoogleDestinations, googleReception = loadGoogleNativeEvidence,
   metaSignals = loadMetaSignalPreparation, checkMetaSignals = checkMetaSignalPreparation } = {}) {
   async function authorize(req, res, access) {
     const actorId = Number(req.userData?.userId);
@@ -63,6 +66,34 @@ function createWorkspaceConfigurationHandlers({ models = db, resolveScope = reso
     return { scope, actorId };
   }
   return {
+    googleDestinations: async (req, res) => {
+      const context = await authorize(req, res, 'read');
+      if (!context) return;
+      try {
+        const reference = googleCampaignReference({ account_id: req.query.account_id, campaign_id: req.query.campaign_id });
+        const result = await googleDestinations({ models, scope: context.scope, reference, loadInventory });
+        const inventory = await loadInventory({ models, scope: context.scope });
+        const evidence = await googleReception({ models, campaigns: [result.campaign], selectedClinics: inventory.selectedClinics, scope: context.scope });
+        return res.json({ success: true, revision: result.revision, campaign: result.campaign,
+          canWrite: await hasAccess({ userId: context.actorId, clinicIds: context.scope.clinicIds, access: 'write' }),
+          check: result.detection ? { status: result.detection.status === 'checking' && Date.now() - +new Date(result.detection.started_at) >= 120000 ? 'failed' : result.detection.status,
+            error: result.detection.error || null,
+            reasons: result.detection.unknown_reasons || [] } : null,
+          forms: evidence.get(result.campaign.id)?.forms || [], reception: evidence.get(result.campaign.id)?.reception || null });
+      } catch (error) {
+        if (error.status >= 400 && error.status < 500) return res.status(error.status).json({ success: false, error: error.code });
+        throw error;
+      }
+    },
+    refreshGoogle: async (req, res) => {
+      const context = await authorize(req, res, 'write');
+      if (!context) return;
+      try { return res.json(await refreshGoogle({ models, ...context, input: req.body, hasAccess, loadInventory })); }
+      catch (error) {
+        if (error.status >= 400 && error.status < 500) return res.status(error.status).json({ success: false, error: error.code });
+        throw error;
+      }
+    },
     metaSignals: async (req, res) => {
       const context = await authorize(req, res, 'read');
       if (!context) return;
@@ -213,6 +244,8 @@ exports.requestMetaPageReception = asyncHandler(configurationHandlers.requestMet
 exports.getMetaPageReceptionJob = asyncHandler(configurationHandlers.metaPageJob);
 exports.savePreferences = asyncHandler(configurationHandlers.preferences);
 exports.getGooglePreparation = asyncHandler(configurationHandlers.googlePreparation);
+exports.getGoogleDestinations = asyncHandler(configurationHandlers.googleDestinations);
+exports.refreshGoogleDestinations = asyncHandler(configurationHandlers.refreshGoogle);
 exports.checkGooglePreparation = asyncHandler(configurationHandlers.checkGoogle);
 exports.getMetaSignalPreparation = asyncHandler(configurationHandlers.metaSignals);
 exports.checkMetaSignalPreparation = asyncHandler(configurationHandlers.checkMetaSignals);

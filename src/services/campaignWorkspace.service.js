@@ -5,10 +5,11 @@ const { accountId, mappingIdentity, reportPeriod, visibleCampaigns, aggregateRep
 const { assessConsentMeasurementReadiness, resolveWebMeasurementMarketingState } = require('./campaignMeasurementReadiness.service');
 const { buildWorkspaceHealth } = require('./campaignWorkspaceHealth.service');
 const { campaignIncluded } = require('./campaignWorkspaceSettings.service');
-const { loadFormReceiptEvidence } = require('./campaignWorkspaceReception.service');
+const { loadFormReceiptEvidence, combineReceptionEvidence } = require('./campaignWorkspaceReception.service');
 const { loadBudgetCampaignAttribution } = require('./campaignEconomicAttribution.service');
 const { attachLeadAdvertisingIdentities } = require('./leadAdvertisingIdentity.service');
 const { loadNativeFormEvidence } = require('./campaignWorkspaceNativeReception.service');
+const { loadGoogleNativeEvidence } = require('./campaignWorkspaceGoogleReception.service');
 const { loadMetaSignalEvidence } = require('./campaignWorkspaceSignalEvidence.service');
 const { loadGoogleSignalEvidence } = require('./campaignWorkspaceGoogleSignalEvidence.service');
 
@@ -165,8 +166,9 @@ async function loadWebEvidence({ models, campaigns, selectedClinics, groups, sco
     byClinic.set(Number(clinic.id_clinica), { state, readiness: assessConsentMeasurementReadiness(state.marketingState) });
   }
   const evidence = await loadNativeFormEvidence({ models, campaigns, selectedClinics, scope, now, transaction });
+  for (const [id, value] of await loadGoogleNativeEvidence({ models, campaigns, selectedClinics, scope, now, transaction })) evidence.set(id, value);
   for (const campaign of campaigns) {
-    if (!campaign.assigned || campaign.destination !== 'web') continue;
+    if (!campaign.assigned || !['web', 'mixed'].includes(campaign.destination)) continue;
     const { state, readiness } = byClinic.get(campaign.clinicId) || {};
     if (!readiness) continue;
     const destinationsCovered = campaign.urls.length > 0 && campaign.urls.every(url => {
@@ -178,13 +180,27 @@ async function loadWebEvidence({ models, campaigns, selectedClinics, groups, sco
       : readiness.renewal_required ? 'La comprobación de la web ha caducado. Es necesario renovarla.'
       : 'Falta completar la comprobación del aviso, las páginas legales o las señales de consentimiento.';
     const key = destinationsCovered ? `intake:${state.record?.id || campaign.clinicId}` : campaign.id;
+    const destinationAge = +now - +new Date(campaign.destinationCheckedAt);
+    const destinationsVerified = !campaign.destinationCheckedAt || campaign.destinationComplete === true
+      && Number.isFinite(destinationAge) && destinationAge >= 0 && destinationAge < 86400000;
+    const configured = ready && destinationsVerified && state.record?.config?.features?.form_intercept_enabled === true;
+    const receipt = receipts.get(campaign.id);
+    const webReception = !configured
+      ? { checked: true, ready: false, configured: false, state: !destinationsVerified ? 'unverified' : 'action_required',
+        detail: !destinationsVerified ? 'Falta completar la comprobación de todos los destinos anunciados.' : !ready ? detail : 'La captura de formularios está desactivada.',
+        key: !destinationsVerified ? campaign.id : key }
+      : { ...receipt, checked: true, ready: receipt?.ready === true, configured: true,
+        state: receipt?.ready ? 'verified' : 'pending_confirmation',
+        detail: receipt?.ready ? receipt.detail : 'La web está preparada. Aún no hay una recepción reciente confirmada para todos sus destinos.' };
+    const native = evidence.get(campaign.id);
     evidence.set(campaign.id, {
+      ...native,
       configurationScope: state.record ? { scope_type: state.record.assignment_scope, scope_id: Number(state.record.assignment_scope === 'group' ? state.record.group_id : state.record.clinic_id) } : null,
       privacy: { checked: true, ready, detail, key },
-      // An installed snippet is not a successful reception test. Never promote it to reception-ready here.
-      reception: !ready || state.record?.config?.features?.form_intercept_enabled !== true
-        ? { checked: true, ready: false, detail: !ready ? detail : 'La captura de formularios está desactivada.', key }
-        : receipts.get(campaign.id) || { checked: false },
+      // Setup and a received lead are separate evidence; mixed campaigns need both channels.
+      webReception,
+      ...(campaign.destination === 'mixed' ? { nativeReception: native?.reception || null } : {}),
+      reception: campaign.destination === 'mixed' ? combineReceptionEvidence([webReception, native?.reception]) : webReception,
     });
   }
   return evidence;

@@ -16,6 +16,21 @@ test('unknown checks and mere authorization never become green', () => {
   assert.ok(result.healthBlocks.every(block => block.tone === 'neutral'));
   assert.equal(result.healthBlocks.find(block => block.id === 'signals').status, 'Sin comprobar');
 });
+test('configured forms without a recent lead stay neutral and are not counted as affected campaigns', () => {
+  const result = health([row('1'), row('2')], new Map(['1', '2'].map(id => [id, { reception: {
+    checked: true, ready: false, configured: true, state: 'pending_confirmation',
+  } }])));
+  const block = result.healthBlocks.find(item => item.id === 'reception');
+  assert.equal(block.tone, 'neutral'); assert.equal(block.status, 'Pendiente de recepción');
+  assert.equal(result.affectedCount, 0); assert.equal(result.findings.length, 0);
+  assert.ok(result.rows.every(item => item.receptionReady === false));
+  assert.equal(block.checks.find(item => item.label === 'Pendientes de recibir').value, '2');
+});
+test('an expired reception check is missing coverage, not a proven outage', () => {
+  const result = health([row('1')], new Map([['1', { reception: { checked: true, ready: false, state: 'unverified' } }]]));
+  const block = result.healthBlocks.find(item => item.id === 'reception');
+  assert.equal(block.status, 'Sin comprobar'); assert.equal(block.tone, 'neutral'); assert.equal(result.findings.length, 0);
+});
 test('shared technical failure is one finding affecting two campaigns', () => {
   const check = { privacy: { checked: true, ready: false, detail: 'Expired verification', key: 'intake:5' } };
   const result = health([row('1'), row('2')], new Map([['1', check], ['2', check]]));

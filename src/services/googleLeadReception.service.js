@@ -245,5 +245,5 @@ async function runGoogleLeadSync(payload, job, dependencies = {}) {
   }
 }
 
-module.exports = { JOB_TYPE, ORIGIN, LOOKBACK_DAYS, parseGoogleLead, receptionAccount, receivingClinic,
+module.exports = { JOB_TYPE, ORIGIN, LOOKBACK_DAYS, enabled, parseGoogleLead, receptionAccount, receivingClinic,
   persistGoogleLead, enqueueGoogleLeadSyncs, runGoogleLeadSync };

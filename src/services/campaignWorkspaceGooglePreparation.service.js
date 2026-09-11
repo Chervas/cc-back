@@ -178,4 +178,4 @@ async function checkGooglePreparation({ models, scope, actorId, input, hasAccess
 }
 
 module.exports = { TTL_MS, CHECK_LEASE_MS, checkInput, googlePreparationContext, publicProof,
-  loadGooglePreparation, checkConversions, checkGooglePreparation };
+  loadGooglePreparation, checkConversions, checkGooglePreparation, checkError };

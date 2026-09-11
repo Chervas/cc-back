@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { Op } = require('sequelize');
-const { destinationKey, loadFormReceiptEvidence } = require('../../services/campaignWorkspaceReception.service');
+const { destinationKey, loadFormReceiptEvidence, combineReceptionEvidence } = require('../../services/campaignWorkspaceReception.service');
 const now = new Date('2026-09-10T10:00:00Z');
 const campaign = { id: 'g:1:2', assigned: true, clinicId: 1, destination: 'web', urls: ['https://clinic.example/landing'] };
 const event = { clinic_id: 1, 'leadIntake.clinica_id': 1, page_url: campaign.urls[0], created_at: now };
@@ -45,4 +45,13 @@ test('old and future events are not current evidence; freshness uses server rece
 test('native forms and unassigned shared campaigns never use web reception evidence', async () => {
   const result = await load([], [{ ...campaign, destination: 'native' }, { ...campaign, assigned: false }], () => assert.fail('must not query'));
   assert.equal(result.size, 0);
+});
+test('mixed campaigns retain web proof and require both reception channels, without inventing a failure for missing receipts', async () => {
+  assert.equal((await load([event], [{ ...campaign, destination: 'mixed' }])).get(campaign.id).ready, true);
+  const verified = { checked: true, ready: true, configured: true, state: 'verified' };
+  const pending = { checked: true, ready: false, configured: true, state: 'pending_confirmation' };
+  assert.equal(combineReceptionEvidence([verified, verified]).ready, true);
+  assert.equal(combineReceptionEvidence([verified, pending]).state, 'pending_confirmation');
+  assert.equal(combineReceptionEvidence([verified, undefined]).ready, false);
+  assert.equal(combineReceptionEvidence([pending, { checked: true, ready: false, state: 'action_required' }]).state, 'action_required');
 });

@@ -18,10 +18,22 @@ function harness(options = {}) {
 }
 
 test('configuration queries and commands require an authenticated session', async () => {
-  for (const method of ['get', 'put', 'preparation', 'activate', 'assign', 'metaPreparation', 'refreshMeta', 'requestMetaPage', 'metaPageJob', 'preferences', 'googlePreparation', 'checkGoogle']) {
+  for (const method of ['get', 'put', 'preparation', 'activate', 'assign', 'metaPreparation', 'refreshMeta', 'requestMetaPage', 'metaPageJob', 'preferences', 'googlePreparation', 'checkGoogle', 'googleDestinations', 'refreshGoogle']) {
     const h = harness(); await h.run(method, { userData: null });
     assert.equal(h.res.statusCode, 401); assert.equal(h.calls.length, 0);
   }
+});
+test('Google destination check enforces write scope and cached reads expose no private grant', async () => {
+  const forbidden = harness({ hasAccess: async input => input.access === 'read', refreshGoogle: () => assert.fail('forbidden check') });
+  await forbidden.run('refreshGoogle'); assert.equal(forbidden.res.statusCode, 403);
+  const cached = harness({ googleDestinations: async () => ({ campaign: { id: 'google_ads:20:30' }, revision: 'cached',
+    account: { accessToken: 'private' }, detection: { status: 'checked', access_fingerprint: 'private', complete: true } }),
+    googleReception: async () => new Map(),
+  });
+  await cached.run('googleDestinations', { query: { scope: 'group:5', account_id: '20', campaign_id: '30' } });
+  assert.equal(cached.res.statusCode, 200); assert.equal(cached.res.body.revision, 'cached');
+  assert.ok(!JSON.stringify(cached.res.body).includes('private'));
+  assert.equal(cached.res.headers['Cache-Control'], 'private, no-store');
 });
 test('Google proof writes require full-scope write access and do not accept aggregate owners', async () => {
   const forbidden = harness({ hasAccess: async input => input.access === 'read', checkGoogle: () => assert.fail('cannot check') });

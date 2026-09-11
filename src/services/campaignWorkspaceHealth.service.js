@@ -16,7 +16,7 @@ const money = (value, currency) => new Intl.NumberFormat('es-ES', {
 
 function buildWorkspaceHealth(report, evidence = new Map(), now = new Date()) {
   const findings = [];
-  const coverage = new Map(INDICATORS.map(([id]) => [id, { evaluated: new Set(), total: new Set(), checks: [] }]));
+  const coverage = new Map(INDICATORS.map(([id]) => [id, { evaluated: new Set(), total: new Set(), pending: new Set(), checks: [] }]));
   const add = (row, category, title, detail, nextStep, key, severity = 'warning') => {
     const id = `${category}:${key || row.campaign.id}`;
     const existing = findings.find(finding => finding.id === id);
@@ -62,10 +62,11 @@ function buildWorkspaceHealth(report, evidence = new Map(), now = new Date()) {
     if (!row.campaign.assigned) add(row, 'reception', 'Falta asignar la campaña a una clínica',
       'La cuenta es compartida. Sus leads y resultados no se han atribuido a ninguna sede.',
       'Confirma a qué clínica pertenece la campaña.', null, 'critical');
-    if (observed.reception?.checked) {
+    if (observed.reception?.checked && observed.reception.state !== 'unverified') {
       coverage.get('reception').evaluated.add(row.campaign.id);
       row.receptionReady = observed.reception.ready === true && row.campaign.assigned;
-      if (!observed.reception.ready) add(row, 'reception', observed.reception.title || 'Revisa la recepción de interesados',
+      if (observed.reception.state === 'pending_confirmation') coverage.get('reception').pending.add(row.campaign.id);
+      else if (!observed.reception.ready) add(row, 'reception', observed.reception.title || 'Revisa la recepción de interesados',
         observed.reception.detail, 'Completa la preparación del destino y vuelve a comprobarlo.', observed.reception.key, 'critical');
     }
     if (observed.privacy?.checked && row.campaign.destination !== 'native') {
@@ -86,20 +87,22 @@ function buildWorkspaceHealth(report, evidence = new Map(), now = new Date()) {
   }
   findings.sort((a, b) => Number(b.technical) - Number(a.technical) || Number(a.severity !== 'critical') - Number(b.severity !== 'critical'));
   const blocks = INDICATORS.map(([id, title, icon, window]) => {
-    const { evaluated, total, checks } = coverage.get(id);
+    const { evaluated, total, pending, checks } = coverage.get(id);
     const issues = findings.filter(finding => finding.category === id);
     const campaignIds = [...new Set(issues.flatMap(finding => finding.campaignIds))];
     const missing = total.size - evaluated.size;
     return {
       id, title, icon, window, findings: issues, campaignIds,
       tone: issues.length ? issues.some(issue => issue.severity === 'critical') ? 'critical' : 'warning'
-        : !total.size || missing ? 'neutral' : 'good',
+        : !total.size || missing || pending.size ? 'neutral' : 'good',
       status: issues.length ? `${campaignIds.length} ${campaignIds.length === 1 ? 'campaña afectada' : 'campañas afectadas'}`
-        : !total.size ? 'No aplica' : !evaluated.size ? 'Sin comprobar' : missing ? 'Datos parciales' : 'OK',
+        : !total.size ? 'No aplica' : !evaluated.size ? 'Sin comprobar' : missing ? 'Datos parciales' : pending.size ? 'Pendiente de recepción' : 'OK',
       summary: issues[0]?.title || (!total.size ? 'No hay campañas aplicables a este indicador.'
-        : missing ? `Faltan comprobaciones actuales de ${missing} ${missing === 1 ? 'campaña' : 'campañas'}.` : 'Sin incidencias en las campañas comprobadas.'),
+        : missing ? `Faltan comprobaciones actuales de ${missing} ${missing === 1 ? 'campaña' : 'campañas'}.`
+          : pending.size ? 'Configuración preparada, aún sin recepción reciente en todos los destinos.' : 'Sin incidencias en las campañas comprobadas.'),
       coverage: `Comprobadas: ${evaluated.size} de ${total.size} campañas`,
       checks: [{ label: 'Cobertura', value: `${evaluated.size} de ${total.size}`, tone: missing || !total.size ? 'neutral' : 'good' },
+        ...(pending.size ? [{ label: 'Pendientes de recibir', value: String(pending.size), tone: 'neutral' }] : []),
         ...(id === 'signals' && checks.length ? [
           ...[['meta_ads', 'Meta'], ['google_ads', 'Google']].filter(([provider]) => checks.some(row => row.provider === provider))
             .map(([provider, label]) => ({ label: `Recibidos por ${label}`,

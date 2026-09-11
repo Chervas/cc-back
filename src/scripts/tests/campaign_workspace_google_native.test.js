@@ -203,6 +203,8 @@ test('loss of the acceptance receipt retries only after the reservation expires 
   let failReceipt = true;
   h.state.onReserve = () => {
     const row = h.state.attempts[0]; const update = row.update;
+    // The uploader's lease uses wall time, independently of the fixed CRM event date.
+    row.attemptedAt = new Date();
     row.update = async patch => {
       if (failReceipt && patch.status === 'accepted') { failReceipt = false; throw new Error('receipt persistence failed'); }
       return update(patch);

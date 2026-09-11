@@ -1620,3 +1620,79 @@ Staging `1074087/46`, gateway `1039243/37` y preview `1054768/40` sin cambios.
 No se recompila UI: sigue `5b7db07c9dcf100e`. Auditoria SQL antes/despues:
 settings, leads Google nativos, jobs Google nativos, señales Google nativas y
 entregas Meta a cero; ambos gates cerrados. Sin migraciones ni promocion.
+
+## Destinos Google Y Recepcion Mixta (2026-09-11)
+
+La captura web existente (`intake.controller`, `FormSubmissionEvent` y
+`LeadIntake`) se reutiliza. No se introduce un segundo receptor de formularios.
+Preparacion y Salud distinguen configuracion pendiente, configuracion preparada
+sin recibo reciente y recepcion verificada. La falta de envios o una comprobacion
+caducada no constituye por si sola una incidencia critica. El gate de activacion
+sigue exigiendo evidencia: esta distincion no inventa una recepcion positiva.
+
+- `GET /campaign-workspace/google-destinations?scope=...&account_id=...&campaign_id=...`
+  lee inventario y evidencia persistida. No consulta Google ni renueva OAuth.
+- `POST /campaign-workspace/google-destinations/check` requiere escritura sobre
+  todo el scope y revision del cache. Consulta metadatos de anuncios, grupos y
+  formularios vinculados a cuenta/campana/grupo. PMax incluye URLs de los grupos
+  de recursos. No lee respuestas, credenciales webhook ni cambia publicidad.
+- Se persiste `destination_detection.workspace_google`, version 1, con TTL
+  operativo de 24 h y huella privada de la autorizacion vigente. El refresco
+  anterior de URLs observadas conserva esa clave bajo bloqueo de la fila actual:
+  no puede restaurar un snapshot previo ni borrar una comprobacion en curso.
+  El I/O del job queda fuera de la transaccion; no cambia su cron ni zona horaria.
+  Reserva `checking` antes del
+  I/O; un fallo deja `failed`, no conserva un verde anterior. Al terminar se
+  revalidan permisos, seleccion, destinatario y revision. La huella no sale a UI.
+- Los destinos dinamicos no se presentan como exhaustivos. Referencias tecnicas:
+  [AssetGroup](https://developers.google.com/google-ads/api/reference/rpc/v24/AssetGroup)
+  y [Ad](https://developers.google.com/google-ads/api/reference/rpc/v24/Ad).
+- Los recibos Google nativos se consultan por clinica/cuenta/campana/formulario,
+  con join CRM obligatorio y sin campos de contacto. Requieren seleccion y
+  autorizacion actuales; el gate del receptor deshabilitado nunca aparece listo.
+- `mixed` conserva ambos canales. No basta comprobar la web si quedan formularios
+  nativos pendientes, ni viceversa. Se mantienen separados privacidad web,
+  recepcion web y recepcion nativa. El modal vuelve al mismo paso al cerrarse y
+  abre directamente la preparacion web compartida, sin bucle entre dialogos.
+
+Limites abiertos: refresco nocturno automatico del nuevo inventario de destinos,
+cobertura adicional de URLs de extensiones/keywords y mecanismos dinamicos,
+y excepciones de propiedad compartida. En la lectura real de Arriaga (grupo 28)
+hay inventario Google persistido, pero la cuenta tambien tiene un propietario
+fuera del grupo y no hay asignaciones revisadas. `visibleCampaigns` lo excluye
+correctamente: no se relaja la frontera de acceso para poder probar el modal.
+Falta ofrecer una resolucion clara de esta excepcion desde el nuevo recorrido.
+
+Verificacion: 380 tests backend de workspace, Google y diagnostico; 32 tests frontend.
+La prueba del recibo perdido fija la reserva al reloj de envio, no a la fecha
+historica del hito CRM; el uploader no cambia. Build completo DEV
+`3024985cbb25a6c0`, publicado en el preview; solo el aviso CommonJS conocido.
+Chromium final: 28 comprobaciones, 11 capturas del dialogo en 1440/1024/390 px,
+sin errores JS ni escrituras de negocio. Evidencias en
+`/home/ubuntu/qa-evidence/campaign-google-destinations-20260911-confirmed`.
+El inventario de cuenta y la denegacion de scope son reales. Los estados del
+dialogo y la asignacion visual son fixtures HTTP aislados en Chromium, no una
+importacion real ni una recepcion real de Google. La API negativa no se cuenta
+como una conexion funcional validada de extremo a extremo.
+
+El intento anterior `campaign-google-destinations-20260911-final` conserva su
+fallo de recoleccion asincrona: el test comprobaba antes de terminar de leer la
+respuesta. Se corrigio esperando explicitamente a respuesta y cuerpo, sin
+relajar el 403 esperado. El pase final tambien comprueba que una denegacion al
+recargar elimina formularios y acciones del estado anterior.
+
+Regresion final autenticada: 71 comprobaciones/29 capturas de recorrido y 36/9
+de Salud, sin errores JS ni escrituras de negocio, en
+`/home/ubuntu/qa-evidence/campaign-destinations-regression-20260911-final` y
+`/home/ubuntu/qa-evidence/campaign-destinations-health-20260911-final`.
+Revisados manualmente dialogos movil/escritorio, preparacion web, grafica movil
+y detalle de Salud. Las notificaciones operativas no se cierran ni se ocultan.
+
+Dos reinicios exclusivamente DEV en este avance, desde contador `8548` hasta
+`8550`, PID final `1206206`. Staging `1074087/46`, gateway `1039243/37` y preview
+`1054768/40` sin cambios. Auditoria SQL antes/despues: settings, leads Google,
+jobs Google de leads/CRM, comprobaciones nuevas de destinos Google y entregas
+Meta a cero. Ambos gates cerrados; sin migraciones ni promociones.
+
+El objetivo global sigue EN CURSO, incluida la excepcion anterior, Optimiza en
+ambos proveedores, metricas CRM por anuncio y sustitucion de la ruta canonica.

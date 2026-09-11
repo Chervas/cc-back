@@ -20,6 +20,14 @@ test('OAuth alone cannot mark a native form ready, and native forms do not requi
   assert.equal(assessCampaignPreparation(native).reason, 'native_reception_unverified');
   assert.equal(assessCampaignPreparation(native, { reception: readyEvidence.reception }).ready, true);
 });
+test('mixed campaigns need native and web receipts, while incomplete discovery returns to destination review', () => {
+  const mixed = { ...campaign, destination: 'mixed' };
+  assert.equal(assessCampaignPreparation(mixed, readyEvidence).ready, false);
+  assert.equal(assessCampaignPreparation(mixed, { ...readyEvidence, nativeReception: readyEvidence.reception }).ready, true);
+  for (const evidence of [{ ...readyEvidence, reception: { checked: true, ready: false, state: 'unverified' } }, readyEvidence]) {
+    assert.equal(assessCampaignPreparation({ ...mixed, destinationComplete: false, destinationCheckedAt: '2026-09-11' }, evidence).action, 'review');
+  }
+});
 
 function fixture() {
   const account = { provider: 'google_ads', account_id: '123', include_future: true, campaign_ids: ['7'] };

@@ -19,7 +19,7 @@ function destinationKey(value) {
 }
 
 async function loadFormReceiptEvidence({ models, campaigns, now = new Date(), transaction = null }) {
-  const eligible = campaigns.filter(campaign => campaign.assigned && campaign.destination === 'web');
+  const eligible = campaigns.filter(campaign => campaign.assigned && ['web', 'mixed'].includes(campaign.destination));
   if (!eligible.length) return new Map();
   const clinicIds = [...new Set(eligible.map(campaign => campaign.clinicId))];
   // Read no form fields or patient identifiers. The required join confirms that the event reached the CRM in the same clinic.
@@ -52,4 +52,16 @@ async function loadFormReceiptEvidence({ models, campaigns, now = new Date(), tr
   }));
 }
 
-module.exports = { destinationKey, loadFormReceiptEvidence };
+function combineReceptionEvidence(parts) {
+  const ready = parts.every(part => part?.checked && part.ready);
+  const configured = parts.every(part => part?.configured || part?.ready);
+  const failure = parts.find(part => part?.checked && !part.ready && !['pending_confirmation', 'unverified'].includes(part.state));
+  return { checked: !!failure || parts.every(part => part?.checked), ready, configured,
+    state: ready ? 'verified' : failure ? 'action_required' : configured ? 'pending_confirmation' : 'unverified',
+    checkedAt: ready ? parts.map(part => part.checkedAt).filter(Boolean).sort()[0] || null : null,
+    detail: ready ? 'Recepción comprobada en la web y en los formularios de la plataforma.'
+      : failure?.detail || (configured ? 'Configuración preparada. Falta confirmar la recepción en todos los destinos.' : 'Falta comprobar la recepción en todos los destinos de la campaña.'),
+  };
+}
+
+module.exports = { destinationKey, loadFormReceiptEvidence, combineReceptionEvidence };

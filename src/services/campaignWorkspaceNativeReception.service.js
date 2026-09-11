@@ -88,7 +88,10 @@ async function loadNativeFormEvidence({ models, campaigns, selectedClinics, scop
     const fresh = campaign.destinationComplete === true && Number.isFinite(age) && age >= 0 && age < DESTINATION_WINDOW;
     const accountReady = clinic && activeAccounts.some(row => [campaign.account_id, `act_${campaign.account_id}`].includes(row.metaAssetId) && covers(row, clinic));
     const ready = !!accountReady && fresh && forms.length > 0 && forms.every(form => form.state === 'receiving');
-    return [campaign.id, { forms, reception: { checked: true, ready,
+    const configured = !!accountReady && fresh && forms.length > 0 && forms.every(form => ['prepared', 'receiving'].includes(form.state));
+    const actionRequired = !accountReady || forms.some(form => ['access_required', 'page_required', 'page_unknown', 'subscription_required'].includes(form.state));
+    return [campaign.id, { forms, reception: { checked: true, ready, configured,
+      state: ready ? 'verified' : configured ? 'pending_confirmation' : actionRequired ? 'action_required' : 'unverified',
       checkedAt: ready ? forms.map(form => form.receivedAt).sort()[0] : null,
       detail: !accountReady ? 'Falta revisar el acceso a la cuenta publicitaria de esta campaña.'
         : !fresh ? 'Falta actualizar la comprobación de los destinos de esta campaña.'

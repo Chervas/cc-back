@@ -44,6 +44,7 @@ const {
 const {
   buildGoogleDestinationDetections,
 } = require('../lib/googleAdsCampaignMeasurementDiagnosis');
+const { saveObservedGoogleDestination } = require('../services/campaignWorkspaceGoogleDestination.service');
 const notificationService = require('../services/notifications.service');
 const { enqueueSyncForAllWabas } = require('../services/whatsappTemplates.service');
 const { enqueueSyncPhonesForAllWabas } = require('../services/whatsappPhones.service');
@@ -5122,33 +5123,11 @@ try {
     });
     let updated = 0;
     for (const [campaignId, detection] of detections.entries()) {
-      const inventory = await ExternalCampaignInventory.findOne({
-        where: {
-          provider: 'google_ads',
-          customer_id: customerId,
-          campaign_id: campaignId,
-        },
+      updated += await saveObservedGoogleDestination({
+        models: { sequelize, ExternalCampaignInventory },
+        reference: { account_id: customerId, campaign_id: campaignId },
+        detection,
       });
-      if (!inventory) continue;
-      const current = inventory.destination_detection && typeof inventory.destination_detection === 'object'
-        ? inventory.destination_detection
-        : {};
-      const hasFreshObservedUrls = Array.isArray(detection.urls) && detection.urls.length > 0;
-      await inventory.update({
-        destination_detection: {
-          ...current,
-          ...detection,
-          ...(!hasFreshObservedUrls && Array.isArray(current.urls) && current.urls.length ? {
-            status: 'observed_stale',
-            urls: current.urls,
-            domains: current.domains || [],
-            primary_url: current.primary_url || current.urls[0],
-            observed_destination_count: current.observed_destination_count || current.urls.length,
-            expanded_beyond_primary: detection.url_expansion_enabled === true && current.urls.length > 1,
-          } : {}),
-        },
-      });
-      updated += 1;
     }
     return updated;
   }
