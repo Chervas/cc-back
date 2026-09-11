@@ -131,6 +131,16 @@ test('runtime rejects new campaigns, actions, changed clinics, revoked permissio
   const f = fixture(); await f.activate(); await assert.rejects(f.executeContext({ action: 'adjust_budget' }), /workspace_optimization_action_not_authorized/);
   f.state.resolve = () => { f.state.permitted = false; }; await assert.rejects(f.executeContext(), /workspace_optimization_permissions_required/);
 });
+test('worker authorization locks current memberships during transactional permission checks', async () => {
+  const f = fixture(); await f.activate(); let reads = 0;
+  f.models.UsuarioClinica = { findAll: async input => {
+    assert.equal(input.transaction, f.transaction); assert.equal(input.lock, 'UPDATE'); reads++; return [{ id_clinica: 1 }, { id_clinica: 2 }];
+  } };
+  await f.executeContext({ transaction: f.transaction, hasAccess: async input => {
+    assert.ok(input.membershipModel); return (await input.membershipModel.findAll({ attributes: ['id_clinica'] })).length === 2;
+  } });
+  assert.equal(reads, 2);
+});
 test('only one workspace can authorize advertising changes to the same campaign', async () => {
   for (const provider of ['google_ads', 'meta_ads']) {
     const f = fixture(provider); const { authorization } = await f.activate();

@@ -169,7 +169,8 @@ async function inspectMetaOptimization({ reference, accessToken, read = require(
     const strategy = group.bid_strategy || campaign.bid_strategy;
     if (['COST_CAP', 'LOWEST_COST_WITH_BID_CAP'].includes(strategy) && amount(group.bid_amount)) targets.push({ action: 'adjust_bids',
       entity: 'ad_set', id: group.id, resource: group.id, field: 'bid_amount', value: String(group.bid_amount), unit: 'minor', strategy });
-    else if (strategy === 'LOWEST_COST_WITH_MIN_ROAS' && amount(group.bid_constraints?.roas_average_floor)) targets.push({ action: 'adjust_bids',
+    else if (strategy === 'LOWEST_COST_WITH_MIN_ROAS' && amount(group.bid_constraints?.roas_average_floor)
+      && Object.keys(group.bid_constraints).every(key => key === 'roas_average_floor')) targets.push({ action: 'adjust_bids',
       entity: 'ad_set', id: group.id, resource: group.id, field: 'bid_constraints.roas_average_floor', value: String(group.bid_constraints.roas_average_floor), unit: 'roas_10000', strategy });
     else reasons.adjust_bids.push('no_existing_bid_target');
   }

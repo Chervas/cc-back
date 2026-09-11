@@ -112,8 +112,8 @@ async function loadOptimizationAuthorizationReview({ models, scope, setting, cam
   } : null };
 }
 
-async function assertNoOptimizationOverlap({ models, setting, authorization, transaction }) {
-  const accounts = [...new Map(authorization.campaigns.map(row => [`${row.provider}:${row.account_id}`, row])).values()]
+async function lockOptimizationAccounts({ models, campaigns, transaction }) {
+  const accounts = [...new Map(campaigns.map(row => [`${row.provider}:${row.account_id}`, row])).values()]
     .sort((a, b) => `${a.provider}:${a.account_id}`.localeCompare(`${b.provider}:${b.account_id}`));
   // Common existing account rows serialize authorizations from different clinic/group settings.
   for (const account of accounts) {
@@ -124,6 +124,10 @@ async function assertNoOptimizationOverlap({ models, setting, authorization, tra
     }, attributes: ['id'], order: [['id', 'ASC']], transaction, lock: transaction.LOCK.UPDATE });
     if (!owners.length) fail('workspace_optimization_permissions_required');
   }
+}
+
+async function assertNoOptimizationOverlap({ models, setting, authorization, transaction }) {
+  await lockOptimizationAccounts({ models, campaigns: authorization.campaigns, transaction });
   const others = await models.CampaignWorkspaceSetting.findAll({ where: { id: { [Op.ne]: setting.id },
     'activation.mode': 'optimize', 'activation.status': 'active', 'activation.optimization.status': 'active' },
   transaction, lock: transaction.LOCK.UPDATE });
@@ -180,7 +184,10 @@ async function resolveOptimizationAuthorization({ models, setting, scope, campai
   const owner = settingScope(scope);
   if (owner.scope_type !== setting.scope_type || owner.scope_id !== setting.scope_id
     || JSON.stringify(mandate.authorization.clinic_ids) !== JSON.stringify([...scope.clinicIds].sort((a, b) => a - b))) fail('workspace_scope_changed');
-  if (!hasAccess || !await hasAccess({ userId: mandate.authorized_by_user_id, clinicIds: scope.clinicIds, access: 'write' })) fail('workspace_optimization_permissions_required', 403);
+  const membershipModel = transaction && models.UsuarioClinica
+    ? { findAll: query => models.UsuarioClinica.findAll({ ...query, transaction, lock: transaction.LOCK.UPDATE }) } : undefined;
+  const permitted = () => hasAccess && hasAccess({ userId: mandate.authorized_by_user_id, clinicIds: scope.clinicIds, access: 'write', membershipModel });
+  if (!await permitted()) fail('workspace_optimization_permissions_required', 403);
   const authorized = mandate.authorization.campaigns.filter(row => key(row) === key(campaign));
   if (authorized.length !== 1 || !campaignIncluded(campaign, setting)) fail('workspace_optimization_campaign_not_authorized');
   const entry = authorized[0]; const limits = mandate.authorization.limits;
@@ -195,9 +202,9 @@ async function resolveOptimizationAuthorization({ models, setting, scope, campai
   if (context.setting.id !== setting.id || context.setting.version !== setting.version || context.campaign.clinicId !== entry.clinic_id
     || grantHash(context) !== entry.grant_fingerprint || Number(context.grant.connection.id) !== entry.connection_id
     || (context.grant.loginCustomerId || null) !== entry.login_customer_id) fail('workspace_optimization_connection_changed');
-  if (!await hasAccess({ userId: mandate.authorized_by_user_id, clinicIds: scope.clinicIds, access: 'write' })) fail('workspace_optimization_permissions_required', 403);
+  if (!await permitted()) fail('workspace_optimization_permissions_required', 403);
   return { mandate, limits, entry, context };
 }
 
 module.exports = { LIMITS, optimizationLimits, loadOptimizationAuthorizationReview, assertNoOptimizationOverlap,
-  createOptimizationMandate, pauseWorkspaceOptimization, resolveOptimizationAuthorization };
+  createOptimizationMandate, pauseWorkspaceOptimization, resolveOptimizationAuthorization, scopedTarget, lockOptimizationAccounts };

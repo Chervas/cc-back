@@ -177,6 +177,8 @@ const TARGETED_INTEGRATION_JOB_TYPES = Object.freeze([
   // Mutates Google conversion goals. It must share the serialized provider
   // lane and distributed lease with sync/backfill jobs.
   'guided_campaign_goal_policy_apply',
+  // Existing-account adjustments share the provider lane; their own mandate and gates remain mandatory.
+  'campaign_workspace_optimization_apply',
   // Provider destination mutations and their compensating rollback must use
   // the same distributed integration lease as Google Ads sync/mutations.
   'marketing_campaign.destination_apply.v1',

@@ -1896,3 +1896,95 @@ salto del icono en movil y el espacio icono/texto en los botones de este recorri
 Evidencias: `/home/ubuntu/qa-evidence/campaign-opt-mandate-20260911-verified`.
 El objetivo completo sigue EN CURSO: ejecutores y jobs de Optimiza en ambos
 proveedores, cobertura/refresco nocturno, metricas CRM por anuncio y ruta canonica.
+
+## Ejecutor De Ajustes: Base Aislada (2026-09-11)
+
+Estado: implementacion parcial, gates cerrados. No se habilita Optimiza ni se
+conecta aun un generador automatico de recomendaciones al ejecutor. La recepcion
+web y Meta existente permanece independiente e intacta.
+
+- `campaignWorkspaceOptimizationCommand.service` valida comandos de un solo
+  recurso autorizado. Google: pausa de anuncio, objetivo de puja existente,
+  negativa EXACT y presupuesto diario exclusivo. Meta: pausa de anuncio,
+  limite de puja/ROAS existente y presupuesto de su propietario real. No crea
+  anuncios, cambia estrategia ni escribe destinos, formularios o conversiones.
+- Diferencias de puja/presupuesto limitadas al 10%, con aritmetica decimal
+  exacta. La comprobacion previa relee la compatibilidad, propietario, estrategia
+  y valor actual; mantiene la proteccion del ultimo anuncio activo. Un mapa
+  Meta de restricciones con campos desconocidos no se sobrescribe parcialmente.
+- Las mutaciones Google usan una operacion y mascara de campos; Meta permite
+  un solo campo, con gate propio en su cliente compartido. Ambos conservan
+  control de cuota, timeout acotado y cero reintentos/redirecciones de escritura.
+  La respuesta del proveedor por si sola no declara el ajuste verificado.
+- Nuevo modelo y migracion `20260911180000-create-campaign-workspace-optimization-runs`:
+  `CampaignWorkspaceOptimizationRuns`, con comando/evidencia privados, mandato,
+  huella de plan, namespace, job, lease y recibo. Indices de idempotencia,
+  cuenta/estado, recurso/fecha y recuperacion. FK a workspace con RESTRICT y a
+  job con SET NULL: archivar jobs no borra recibos ni bloquea su retencion normal.
+  La migracion es repetible y rechaza esquemas incompatibles; su rollback exige
+  tabla vacia. **No aplicada** a la base compartida en esta fase. Tipos de las
+  claves padre comprobados mediante lectura real; no se crean registros QA.
+- Productor interno `enqueueOptimizationAdjustment`: valida evidencia agregada
+  reciente y relacionada con la accion; guarda el plan y `JobRequest` en una
+  transaccion. Payload solo con ID de ejecucion y namespace. No hay endpoint
+  para enviar operaciones arbitrarias ni recomendador conectado a este productor.
+- Handler `campaign_workspace_optimization_apply` en el ejecutor existente,
+  con el mismo carril serializado y lease de integraciones, sin cron nuevo.
+  Reserva por workspace/cuenta; vuelve a revisar el mandato y permisos,
+  incluyendo membresias bajo bloqueo. Recursos nuevos, cuentas ajenas, cambio
+  de grant/clinica y mandatos pausados se rechazan. Cooldown de 24 h por recurso,
+  tambien entre mandatos distintos. La pausa no altera recepcion ni senales.
+- Se persiste `submitted_at` ANTES de llamar al proveedor. Tras una caida o
+  respuesta incierta, el mismo job solo relee: nunca repite la mutacion. Una
+  confirmacion de commit perdida tampoco borra ese marcador. El lease limita
+  workers simultaneos y un trabajador antiguo no puede confirmar otro comando.
+- Estados: `queued`, `leased`, `submitted`, `verified`, `observed`, `skipped`,
+  `uncertain`. `observed` acredita el estado leido, no que esta ejecucion causara
+  el cambio. `uncertain` conserva el intento y bloquea otros ajustes de la
+  cuenta/workspace. Errores anteriores al envio pueden reintentarse; los recibos
+  solo guardan codigos permitidos, no mensajes/payloads privados del proveedor.
+
+Pendiente antes de abrir gates, no resuelto por estos adaptadores:
+
+1. Recomendador con datos reales, cobertura y criterios de muestras suficientes.
+2. Contabilidad del limite mensual conjunto. `adjust_budget` se bloquea con
+   `workspace_optimization_budget_accounting_required` mientras no se conecte
+   esa comprobacion. Una prueba inyectada no acredita control de presupuesto real.
+3. Reconciliador periodico y resolucion operativa de recibos inciertos, visible
+   en Salud/historial. Recuperar jobs agotados o consumidos con gate cerrado sin
+   reejecutar un comando ya reservado. No existe aun ese barrido automatico.
+4. Revalidacion de conflictos con contratos guided/managed nuevos durante la
+   vida del mandato, no solo al activarlo. Prueba real de concurrencia MySQL y
+   migracion controlada antes de cualquier ejecucion autorizada.
+5. Integracion final del flujo, cobertura/refresco nocturno y CRM por anuncio,
+   que siguen formando parte del objetivo global abierto.
+
+Referencias de transporte:
+[mutaciones REST de Google Ads](https://developers.google.com/google-ads/api/rest/common/mutate),
+[Ad del SDK oficial Meta](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/ad.py)
+y [AdSet del SDK oficial Meta](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/adset.py).
+Se conserva la version v24 del cliente Google de DEV.
+
+Verificacion de codigo: 469 tests backend y 68 frontend, sin fallos. Modelos y
+transportes aislados para todas las escrituras; se prueban perdida de commit,
+timeouts, revocacion, plan alterado, leases, concurrencia, rollback, cooldown y
+ausencia de reenvios. No hay ejecuciones Google/Meta reales ni nueva UI/build.
+Tambien pasan los dos runners de regresion guided/Web existentes.
+
+Chromium autenticado sobre el backend final: 71 comprobaciones y 29 capturas
+del recorrido a 1440/1024/390 px, sin errores JS ni escrituras de negocio.
+Salud: otras 36 comprobaciones/9 capturas, con lectura inicial real y casos de
+entrega simulados mediante fixtures HTTP. No se presentan esos casos como
+conversiones enviadas. Evidencias en
+`/home/ubuntu/qa-evidence/campaign-opt-executor-final-20260911` y
+`/home/ubuntu/qa-evidence/campaign-opt-executor-health-20260911`.
+La primera regresion tambien paso en `campaign-opt-executor-regression-20260911`.
+Se revisaron capturas de resumen, preparacion web movil y grafica responsive;
+notificaciones operativas intactas. Sigue el build `fb7af7c01da5f18b`.
+
+Dos reinicios exclusivamente DEV: `1216763/8553` a `1220635/8554` y despues
+`1221419/8555` al incorporar el carril de integraciones. Staging `1074087/46`,
+gateway `1039243/37` y preview `1054768/40` sin cambios. Auditoria SQL conserva
+44 asignaciones, 48 eventos, cero settings y cero leads Google nativos; la
+tabla nueva no existe aun. Sin migraciones aplicadas, jobs publicitarios,
+senales, cobros ni promociones. Los tres gates permanecen cerrados.

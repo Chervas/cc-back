@@ -90,6 +90,8 @@ test('Meta bid caps and minimum ROAS retain the original strategy; uncapped bidd
   assert.equal(count(await f.run(), 'adjust_bids'), 1);
   f.state.groups[0].bid_strategy = 'LOWEST_COST_WITH_MIN_ROAS'; f.state.groups[0].bid_constraints = { roas_average_floor: '15000' };
   assert.equal((await f.run()).targets.find(row => row.action === 'adjust_bids').field, 'bid_constraints.roas_average_floor');
+  f.state.groups[0].bid_constraints.future_constraint = 'preserve';
+  assert.equal(count(await f.run(), 'adjust_bids'), 0);
   f.state.groups[0].bid_strategy = 'LOWEST_COST_WITHOUT_CAP'; assert.equal(count(await f.run(), 'adjust_bids'), 0);
 });
 test('Meta protects the final ad and excludes lifetime budgets and non-auction or inactive campaigns', async () => {

@@ -148,3 +148,35 @@ test('conversion writes use the shared pause, reject redirects and redact provid
     restores.reverse().forEach(restore => restore()); metaClient._test.resetState();
   }
 });
+
+test('advertising adjustments enforce deployment gates, a single field, quota and one redirect-free attempt', async () => {
+  metaClient._test.resetState(); let calls = 0; let paused = true; const logs = [];
+  const restores = [
+    patchProperty(db.ApiUsageCounter, 'findOne', async () => paused ? { pauseUntil: new Date(Date.now() + 60000) } : null),
+    patchProperty(console, 'error', (...args) => logs.push(args)),
+    patchProperty(axios, 'post', async (url, body, options) => {
+      calls++; assert.ok(url.endsWith('/50')); assert.deepEqual(body, { bid_amount: '900' }); assert.equal(options.maxRedirects, 0);
+      throw Object.assign(new Error('private-provider-detail'), { response: { status: 503 } });
+    }),
+  ];
+  const flags = ['CAMPAIGN_WORKSPACE_ACTIVATION_ENABLED', 'CAMPAIGN_WORKSPACE_OPTIMIZATION_ENABLED', 'METASYNC_REQUEST_DELAY_MS'];
+  const previous = flags.map(name => process.env[name]);
+  try {
+    delete process.env.CAMPAIGN_WORKSPACE_ACTIVATION_ENABLED; delete process.env.CAMPAIGN_WORKSPACE_OPTIMIZATION_ENABLED;
+    const send = () => metaClient.metaUpdateAdvertisingResource('50', { bid_amount: '900' }, { accessToken: 'private-token', maxRetries: 3 });
+    assert.throws(send, /workspace_optimization_disabled/);
+    process.env.CAMPAIGN_WORKSPACE_ACTIVATION_ENABLED = 'true'; assert.throws(send, /workspace_optimization_disabled/);
+    process.env.CAMPAIGN_WORKSPACE_OPTIMIZATION_ENABLED = 'true'; process.env.METASYNC_REQUEST_DELAY_MS = '0';
+    for (const patch of [{ status: 'ACTIVE' }, { daily_budget: '-1' }, { bid_amount: '900', name: 'rename' },
+      { bid_constraints: { roas_average_floor: '10000', unknown: 'value' } }]) {
+      assert.throws(() => metaClient.metaUpdateAdvertisingResource('50', patch, { accessToken: 'private-token' }), /invalid_meta_advertising_adjustment/);
+    }
+    assert.throws(() => metaClient.metaUpdateAdvertisingResource('../50', { status: 'PAUSED' }, { accessToken: 'private-token' }), /invalid_meta_advertising_adjustment/);
+    await assert.rejects(send(), { code: 'META_RATE_LIMIT_PAUSED' }); assert.equal(calls, 0);
+    paused = false; metaClient._test.resetState(); await assert.rejects(send()); assert.equal(calls, 1);
+    assert.doesNotMatch(JSON.stringify(logs), /private-/);
+  } finally {
+    flags.forEach((name, index) => { if (previous[index] === undefined) delete process.env[name]; else process.env[name] = previous[index]; });
+    restores.reverse().forEach(restore => restore()); metaClient._test.resetState();
+  }
+});

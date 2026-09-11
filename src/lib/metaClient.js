@@ -258,7 +258,20 @@ const metaSendConversion = (datasetId, payload, options = {}) => {
   }
   return metaRequest('post', `${datasetId}/events`, { ...options, maxRetries: 0, body: payload, sensitivePayload: true });
 };
-module.exports = { metaGet, metaSubscribePage, metaSendConversion };
+const metaUpdateAdvertisingResource = (resourceId, patch, options = {}) => {
+  if (process.env.CAMPAIGN_WORKSPACE_ACTIVATION_ENABLED !== 'true' || process.env.CAMPAIGN_WORKSPACE_OPTIMIZATION_ENABLED !== 'true') {
+    throw Object.assign(new Error('workspace_optimization_disabled'), { code: 'workspace_optimization_disabled' });
+  }
+  const fields = patch && typeof patch === 'object' && !Array.isArray(patch) ? Object.keys(patch) : [];
+  const field = fields[0]; const value = patch?.[field];
+  const amount = input => typeof input === 'string' && /^[1-9][0-9]{0,15}$/.test(input) && Number.isSafeInteger(Number(input));
+  const valid = fields.length === 1 && (field === 'status' && value === 'PAUSED'
+    || ['bid_amount', 'daily_budget'].includes(field) && amount(value)
+    || field === 'bid_constraints' && value && Object.keys(value).join(',') === 'roas_average_floor' && amount(value.roas_average_floor));
+  if (!/^[1-9][0-9]{0,63}$/.test(resourceId) || !options.accessToken || !valid) throw new Error('invalid_meta_advertising_adjustment');
+  return metaRequest('post', resourceId, { ...options, body: patch, maxRetries: 0, sensitivePayload: true });
+};
+module.exports = { metaGet, metaSubscribePage, metaSendConversion, metaUpdateAdvertisingResource };
 
 // Exponer estado de uso/limit para monitorización
 module.exports.getUsageStatus = async function getUsageStatus() {
