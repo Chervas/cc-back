@@ -171,3 +171,15 @@ test('campaign-specific date coverage cannot leak to another campaign in an aggr
   const ads = await loadGoogleWorkspaceAds(f.args); assert.equal(ads.length, 3);
   assert.equal(ads.filter(ad => !ad.inventory && ad.campaign_id === '457').length, 0);
 });
+
+test('a more recent paused campaign prevents old enabled ad metadata from appearing active', async () => {
+  const f = readFixture(); const ads = await loadGoogleWorkspaceAds(f.args);
+  const { aggregateReport, reportPeriod } = require('../../services/campaignWorkspaceReport.service');
+  const { externalCampaignIdentityKey } = require('../../services/externalCampaignAssignmentTargets.service');
+  const campaign = { provider: 'google_ads', account_id: '1234567890', campaign_id: '456', paused: true, assigned: true,
+    clinicId: 1, currency: 'EUR' };
+  campaign.id = externalCampaignIdentityKey(campaign);
+  const report = aggregateReport({ campaigns: [campaign], ads, period: reportPeriod(30, observedAt), now: observedAt });
+  assert.equal(report.rows[0].ads[0].status, 'PAUSED'); assert.equal(report.rows[0].ads[0].active, false);
+  assert.equal(report.rows[0].ads[0].current.spend, null, 'inventory without metrics is still unknown');
+});

@@ -202,9 +202,10 @@ function aggregateReport({ campaigns, facts = [], leads = [], appointments = [],
     const dedupe = JSON.stringify([key, ad.date, ad.segment]);
     if (seenAds.has(dedupe)) continue;
     seenAds.add(dedupe);
+    const status = row.campaign.paused && /^(ACTIVE|ENABLED)$/i.test(ad.status || '') ? 'PAUSED' : ad.status || 'UNKNOWN';
     if (!adIndex.has(key)) {
       const value = { id: adKey(ad), advertisingId: ad.id, groupId: ad.groupId || null, groupName: ad.groupName || null,
-        title: ad.title || ad.id, status: ad.status || 'UNKNOWN',
+        title: ad.title || ad.id, status,
         current: empty(), previous: empty(), currentCpl: null, previousCpl: null,
         metricsUpdatedAt: null, latestMetricDate: null,
         lastSeenAt: ad.updatedAt || null, active: !row.campaign.paused && /^(ACTIVE|ENABLED)$/i.test(ad.status || ''),
@@ -224,7 +225,7 @@ function aggregateReport({ campaigns, facts = [], leads = [], appointments = [],
       if (ad.providerConversions != null) value[target].providerConversions = (value[target].providerConversions || 0) + number(ad.providerConversions);
     }
     if (ad.updatedAt && new Date(ad.updatedAt) > new Date(value.lastSeenAt || 0)) {
-      value.lastSeenAt = ad.updatedAt; value.status = ad.status || 'UNKNOWN';
+      value.lastSeenAt = ad.updatedAt; value.status = status;
       value.rejected = /DISAPPROVED|REJECTED/i.test(value.status);
       value.active = !row.campaign.paused && /^(ACTIVE|ENABLED)$/i.test(value.status);
     }
