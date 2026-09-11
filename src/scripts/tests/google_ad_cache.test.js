@@ -55,7 +55,8 @@ test('all pages are read using the shared client without provider mutations', as
 });
 
 test('malformed and repeated pagination fails instead of treating a partial response as complete', async () => {
-  for (const response of [null, [], { results: 'bad' }, { nextPageToken: 1 }, { nextPageToken: 'loop' }]) {
+  for (const response of [null, [], { results: 'bad' }, { error: { code: 500 } }, { partialFailureError: { code: 3 } },
+    { nextPageToken: 1 }, { nextPageToken: 'loop' }]) {
     await assert.rejects(readAdPages({ account, query: 'SELECT', request: async () => response }), /google_ad_cache_/);
   }
   assert.deepEqual(await readAdPages({ account, query: 'SELECT', request: async () => ({}) }), []);

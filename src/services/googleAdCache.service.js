@@ -78,7 +78,9 @@ async function readAdPages({ account, accessToken, loginCustomerId, query, reque
     const response = await request('POST', `customers/${customerId}/googleAds:search`, {
       accessToken, loginCustomerId, data: { query, ...(pageToken ? { pageToken } : {}) },
     });
-    if (!response || typeof response !== 'object' || Array.isArray(response) || response.results !== undefined && !Array.isArray(response.results)) fail('google_ad_cache_invalid_response');
+    if (!response || typeof response !== 'object' || Array.isArray(response) || response.error || response.errors
+      || response.partialFailureError || response.partial_failure_error
+      || response.results !== undefined && !Array.isArray(response.results)) fail('google_ad_cache_invalid_response');
     rows.push(...(response.results || []));
     pageToken = response.nextPageToken || response.next_page_token;
     if (rows.length > 200000 || pageToken && (typeof pageToken !== 'string' || tokens.has(pageToken) || tokens.size >= 500)) fail('google_ad_cache_incomplete_pages');
