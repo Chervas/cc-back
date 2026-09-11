@@ -116,6 +116,20 @@ test('server cache survives callers, deduplicates concurrent reads and expires p
   await cachedCreative('qa-creative-cache-error', async () => ({ error: 'unavailable', preview: null }), { store, now });
   assert.deepEqual(writes.at(-1), ['EX', 60]);
 });
+test('Meta quota pause has a sanitized retry time and cache avoids rechecking until it expires', async () => {
+  const f = fixture(); const until = new Date(+now + 120000);
+  f.args.read = async () => { throw Object.assign(new Error('private provider details'), { code: 'META_RATE_LIMIT_PAUSED', pauseUntil: until }); };
+  const result = await loadWorkspaceAdCreative(f.args);
+  assert.equal(result.error, 'workspace_creative_rate_limited'); assert.equal(result.retryAt, until.toISOString());
+  assert.equal(result.preview, null); assert.ok(!JSON.stringify(result).includes('private'));
+  const values = new Map(); let ttl; let reads = 0;
+  const store = { get: async key => values.get(key), set: async (key, value, unit, seconds) => { values.set(key, value); ttl = seconds; } };
+  const load = async () => { reads++; return result; };
+  await cachedCreative('qa-creative-paused', load, { store, now }); assert.equal(ttl, 120);
+  await cachedCreative('qa-creative-paused', load, { store, now: new Date(+now + 90000) }); assert.equal(reads, 1);
+  await cachedCreative('qa-creative-paused', load, { store, now: new Date(+now + 120001) }); assert.equal(reads, 2);
+  assert.equal(ttl, 60);
+});
 test('creative HTTP handler intersects aggregate scopes and rechecks access after asynchronous reads', async () => {
   let calls = 0; let observed;
   const handler = createWorkspaceHandler({ adCreative: true, models: {}, resolveScope: async () => ({ isAll: true, isValid: true, clinicIds: [1, 2] }),

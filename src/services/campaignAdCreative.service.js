@@ -123,7 +123,8 @@ async function cachedCreative(key, load, { store = cacheClient(), now = new Date
       } catch { /* Rebuild invalid cache entries without exposing their contents. */ }
     }
     const value = await load();
-    const ttl = value.error ? 60 : TTL;
+    const retryDelay = value.retryAt && Math.ceil((+new Date(value.retryAt) - +now) / 1000);
+    const ttl = value.error ? (retryDelay > 0 ? Math.min(TTL, retryDelay) : 60) : TTL;
     await store.set(key, JSON.stringify({ version: 1, expires: +now + ttl * 1000, value }), 'EX', ttl);
     return value;
   })();
@@ -156,6 +157,11 @@ async function loadWorkspaceAdCreative({ models, scope, input, now = new Date(),
         return { preview: normalizeCreative('meta_ads', ad.creative, now), error: null };
       } catch (error) {
         const code = Number(error.response?.data?.error?.code);
+        if (['META_RATE_LIMIT_PAUSED', 'META_RATE_LIMITED'].includes(error.code)) {
+          const until = error.pauseUntil && +new Date(error.pauseUntil);
+          return { preview: null, error: 'workspace_creative_rate_limited',
+            retryAt: Number.isFinite(until) && until > +now ? new Date(until).toISOString() : null };
+        }
         return { preview: null, error: error.code === 'workspace_ad_identity_mismatch' ? error.code
           : [10, 190, 200].includes(code) ? 'workspace_meta_permissions_required' : 'workspace_creative_unavailable' };
       }

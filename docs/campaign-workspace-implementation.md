@@ -2189,22 +2189,47 @@ La carga ocurre al abrir el anuncio, separada de los KPI y la salud.
   normales, enlaces con noopener/noreferrer y textos escapados, no innerHTML.
 - Cache Redis con namespace de entorno y clave derivada de referencia, ambito,
   asignaciones, conexion y revision del anuncio. Persiste entre recargas y
-  procesos API, TTL 24h; errores se conservan 60s. Se valida autorizacion antes
+  procesos API, TTL 24h; errores se conservan 60s, salvo una pausa de cuota, que
+  se conserva hasta su `retryAt` (maximo 24h). Se valida autorizacion antes
   de leerlo, incluso en hit. No se almacena token ni datos de pacientes. Las
   llamadas simultaneas al mismo recurso en el proceso comparten la promesa.
   Si Redis falla, la creatividad queda no disponible, sin provocar un aluvion
   de llamadas Graph ni impedir consultar resultados.
 - Este cache de contenido se renueva bajo demanda al caducar: no sustituye el
   job nocturno del informe ni dispara un recorrido de todas las creatividades
-  al entrar en Resumen. Google sigue usando su sincronizacion existente.
+  al entrar en Resumen. Google lee su tabla de sincronizacion existente; la
+  cobertura nocturna por anuncio sigue pendiente, como se detalla abajo.
+- La pausa compartida de Meta (`META_RATE_LIMIT_PAUSED`/`META_RATE_LIMITED`)
+  tiene estado propio y fecha de reintento. La UI no pide reconectar; mantiene
+  los resultados y bloquea el reintento hasta esa fecha. El temporizador solo
+  habilita el boton, no hace polling ni peticiones automaticas al proveedor.
 
 Referencias de campos: SDK oficial Meta para
 [Ad](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/ad.py)
 y [AdCreative](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/adcreative.py).
 No se usa la antigua aproximacion de creatividad por adset del detalle de estrategia.
 
-Verificacion del contrato: 507 tests workspace, incluidos doce nuevos de acceso,
+Verificacion del contrato: 508 tests workspace, incluidos trece nuevos de acceso,
 pertenencia, normalizacion, cache y revocacion durante lectura. Cache Redis real
 verificada entre dos procesos con claves de QA aisladas y borradas al terminar.
-80 tests frontend, incluidos carga/cancelacion/variantes/errores del componente.
+La prueba frontend tambien cubre pausa, reintento manual y cancelacion del
+temporizador al cambiar de contexto o cerrar el dialogo.
 No hay migraciones ni cambios en anuncios, conversiones, senales o cobros.
+
+### Cobertura Pendiente Detectada En QA
+
+Lectura de DEV del 2026-09-11: 143 filas en `GoogleAdsAdInsightsDaily`, ultima
+fecha de metricas 2026-03-16 y actualizacion 2026-03-23. El inventario de campanas
+si tiene filas recientes, pero no prueba sincronizacion de sus anuncios.
+`_syncGoogleAdsAccount` del job compartido consulta `ad_group` y `campaign`;
+la escritura de `GoogleAdsAdInsightsDaily` solo esta en el analisis bajo demanda
+de `campaignOnboarding.controller`. Por eso no hay anuncios Google en el informe
+actual de 7/30 dias. No trasladar filas antiguas al periodo actual ni rellenar
+ceros para ocultar el fallo. Falta integrar refresco nocturno por anuncio,
+separar inventario de rendimiento diario y resolver el indice historico que
+omite `adGroupId` antes de ampliar los escritores.
+
+Meta estaba en pausa compartida hasta 2026-09-11 08:45:38 Europe/Madrid durante
+la prueba. Se respeta el limite; una captura con el estado de pausa no acredita
+que haya cargado una imagen real. Los estados de contenido y variantes se
+validan ademas con respuestas aisladas de QA, sin modificar datos de clientes.
