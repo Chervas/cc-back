@@ -9,7 +9,7 @@
   ],
   "totals": {
     "files": 60,
-    "declarations": 869,
+    "declarations": 870,
     "preparedDisabled": 3
   },
   "items": [
@@ -4878,36 +4878,42 @@
     },
     {
       "path": "src/routes/system-monitoring.routes.js",
-      "sha256": "471e29e52ea0bf25f6be0754720a10f8e5c20aea17ca5350fc7da89064ca6a40",
+      "sha256": "d646f44bde2b529ed9ba7f34f3dc5cdffff4889764c7996bbbc53a0c1310693a",
       "routes": [
         {
           "method": "GET",
-          "localTemplate": "/notifications/overview",
+          "localTemplate": "/audit/health",
           "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/notifications/overview",
+          "line": 12,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "PATCH",
           "localTemplate": "/notifications/settings",
-          "line": 12,
-          "platformAudit": "pending_semantic_review"
-        },
-        {
-          "method": "POST",
-          "localTemplate": "/notifications/whatsapp-template/prepare",
           "line": 13,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "POST",
-          "localTemplate": "/notifications/test",
+          "localTemplate": "/notifications/whatsapp-template/prepare",
           "line": 14,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "POST",
-          "localTemplate": "/notifications/check",
+          "localTemplate": "/notifications/test",
           "line": 15,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/notifications/check",
+          "line": 16,
           "platformAudit": "pending_semantic_review"
         }
       ]

@@ -2,8 +2,8 @@
 
 Estado 12/09/2026: código y QA aislada, **sin activar ni desplegar**. Solo
 `POST /api/auth/sign-in`, `/sign-in-with-token` y `/unlock-session` preparan
-captura semántica. No existe todavía worker instalado, bootstrap de identidad
-AWS, visor autorizado ni cobertura completa. No activar el gate hasta acabar
+captura semántica. Worker y bootstrap writer preparados; no hay instalación ni identidad AWS
+asignada. Visor autorizado, lector operativo y cobertura completa pendientes. No activar el gate hasta acabar
 esos componentes y aprobar el lote operativo. No se ha creado una tabla real.
 
 ## Contrato y límites
@@ -55,7 +55,8 @@ o reutilizar la correlación para otro resultado falla. Leases SQL de 120 s,
 `FOR UPDATE SKIP LOCKED`, ACK condicionado al dueño vigente y digest.
 Backoff desde 2 s hasta 1 h, sin descartar eventos al agotar intentos.
 `drain` limita cada ejecución a 100 eventos como máximo; todavía no se ha
-conectado a un cron/job/cliente con identidad AWS efectiva.
+conectado a una identidad AWS efectiva. El worker por lotes descrito debajo ya tiene
+registro de cron/JobRequest, desactivado.
 
 El writer solo invoca PutObject con propietario esperado, If-None-Match,
 checksum SHA-256 y SSE-KMS exacto; no usa multipart ni Bucket Keys. Solo
@@ -90,8 +91,9 @@ esos accesos. Política **propuesta, pendiente de aprobación antes de activar**
 
 Los umbrales son controles de admisión, no una cuota transaccional exacta de
 disco. Health ofrece backlog/edad, conciliaciones e intentos sin resultado.
-Faltan alarma durable, receptor operativo, política de recuperación y worker;
-no confundir métricas disponibles con alertas ya conectadas.
+Alarma durable de panel y worker preparados en el bloque siguiente, sin
+activación. El vigilante externo del host y la respuesta operativa siguen
+pendientes; no se ha enviado ningún aviso real.
 `down` rechaza borrar evidencia. No hay purga automática, siquiera de entregados:
 DPD debe definir seis meses, originales/versiones/índices/copias, holds y borrado.
 La cola local contiene metadatos sensibles y requiere acceso/backup/cifrado
@@ -100,7 +102,7 @@ aprobados; un hash local no protege frente a control total de la aplicación.
 ## Cobertura y siguientes lotes
 
 Inventario `docs/security/platform-audit-route-inventory.json`: heurístico de
-60 archivos/869 declaraciones literales, 3 preparadas y apagadas. Plantillas
+60 archivos/870 declaraciones literales, 3 preparadas y apagadas. Plantillas
 locales; comentarios, rutas dinámicas/condicionales, sockets/jobs/scripts
 requieren revisión adicional. No es porcentaje de cobertura operativa.
 
@@ -115,7 +117,7 @@ requieren revisión adicional. No es porcentaje de cobertura operativa.
 | Jobs/integraciones/configuración/aprobaciones | Intento/aceptación/finalización; auditorías de dominio actuales no sustituyen entrega global |
 | Visor/exportador de auditoría | Lector paginado con autorización específica y auditoría de su acceso; pendiente |
 
-Antes del corte: completar worker/alarma/visor, identidad runtime writer y
+Antes del corte: completar lector/visor, vigilante externo, identidad runtime writer y
 reader distinta, TLS/canal de despliegue, verificación SSO mínima y prueba
 ficticia autorizada en AWS; acordar política de fallos/retención, estimar coste
 con volumen y métricas. Dos objetos por intento con resultado, más reintentos,
@@ -131,7 +133,8 @@ operativo acordado y un evento de cambio; no silenciarla automáticamente.
 
 ## QA reproducible sin servicios externos
 
-Paquete: Node 24 `npm test` con red bloqueada, cinco casos de esquema/S3.
+Paquete: Node 24 `npm test` con red bloqueada, diez casos de esquema/S3,
+lotes, bootstrap con SDK inyectado y CLI real con guard de red.
 Backend: Node 18 con preload `security_offline_runtime.cjs`, seis casos de
 autenticación (incluye HTTP con router/middleware reales en puerto propio),
 11 regresiones HTTP de `getAssetStats` y 28 del sistema de correo.
@@ -142,3 +145,89 @@ clínicas, cuentas ni proveedores reales. El S3 del ensayo es un doble en
 memoria; no certifica una entrega o retención AWS real.
 
 Evidencia saneada: `/home/ubuntu/qa-evidence/security-migration-20260912/platform-audit-offline-qa.json`.
+
+## Worker y monitor preparados (quinto bloque, sin despliegue)
+
+`src/services/platformAudit.delivery.js` consume hasta 50 registros en un lote,
+con selección limitada a 15 s; lanza un proceso Node 24 fijo con solo bytes y
+digest por stdin. Nunca envía modelos, credenciales de BD, JWT o campos del
+JobRequest. El payload de ejecución no puede elegir modo lector, endpoints,
+bucket, claves ni límites. Sin registros no consulta AWS.
+
+`writer-main.js` valida todo el lote y cuenta/región antes de crear clientes.
+Solo IMDSv2 de `169.254.169.254`; config y credentials files apuntan a `/dev/null`,
+endpoints HTTPS STS/S3 fijos en París y sin redirección de región. Verifica el
+rol de origen configurado, después asume **solo** el writer de la entrega por
+900 s y verifica su identidad antes de PutObject. No admite usuarios IAM,
+root, roles SSO reservados ni usar directamente el writer como origen.
+`PLATFORM_AUDIT_WRITER_SOURCE_ROLE_ARN` debe ser el ARN aprobado del rol del
+host real; cuenta de ese host y trust todavía sin verificar. No inventar que
+el instance role del broker está asignado al host de la BD/worker.
+
+Cuatro puts simultáneos como máximo, sin retry de clientes STS/S3 (IMDS puede
+reintentar una vez); red con conexión
+2 s/petición 5 s, señal de aborto 60 s y proceso hijo propio limitado a 75 s.
+El padre elimina solo su hijo agotado. Leases por evento de 120 s y un lease
+global de 270 s en `PlatformAuditDeliveryStates` impiden barridos concurrentes
+en runtimes que comparten BD; un proceso viejo no puede sobrescribir el estado.
+Si los límites de tiempo se superan, se conserva incertidumbre y se recupera
+por lease/reintento. La validación completa de la respuesta evita aceptar ACK
+parciales de un lote alterado; registros con 412 quedan para el lector separado.
+No hay fallback a credenciales del backend ni privilegios reader en este job.
+
+La migración adicional `20260912213000` crea únicamente estado de entrega,
+lease, contadores y episodio de alarma. Solo aplicada a MySQL ficticio; `down`
+conserva la evidencia. El monitor guarda sus transiciones y notificaciones
+atómicamente en los modelos existentes de `Notifications`, solo para usuarios
+canónicos de administración técnica 1/44 existentes. No email, WhatsApp ni
+configuración del servidor de correo; tampoco encola un dispatch de proveedor.
+Un fallo revierte todo el lote de avisos y permite reintentar. No se hace push
+socket: los avisos aparecen en la siguiente lectura habitual del panel.
+
+| Job | Horario Europe/Madrid | Gate apagado por defecto |
+|---|---|---|
+| `platform_audit_delivery` | Cada minuto | `PLATFORM_AUDIT_DELIVERY_ENABLED` |
+| `platform_audit_monitor` | Cada 5 minutos | `PLATFORM_AUDIT_MONITOR_ENABLED` |
+
+Ambos pertenecen al scheduler durable existente, respetan leader/pausas y no
+ocupan el carril de integraciones publicitarias. Un intento de job por ciclo;
+los reintentos por evento los gobierna la cola. `PLATFORM_AUDIT_NODE_BINARY`
+debe identificar el Node 24 autorizado/instalado en el host del worker.
+
+Alarma crítica por 10.000 pendientes, antigüedad >=1 h, fallo de identidad o
+integridad, o heartbeat >5 minutos/ausente. Aviso por 1.000 pendientes, edad
+>=5 minutos, resultado desconocido antiguo, conciliación o fallo de entrega.
+Recuperación única al salir del episodio. Los dos jobs pueden caer juntos:
+el panel y el endpoint no sustituyen un watchdog externo. Ninguna alarma real
+ni cambio de pausas se ha ejecutado. El umbral de admisión de auth sigue el
+contrato anterior; avisos y heartbeat no modifican permisos de sesión.
+
+`GET /api/system-monitoring/audit/health`: JWT + administrador técnico global,
+`private, no-store`. Solo contadores cerrados/fechas UTC/estado, sin leer AWS,
+publicar jobs o devolver eventos/actores/ARNs. Todos los gates ausentes devuelve
+`disabled` sin BD. Falta tabla: 503 `audit_migration_required`; fallo cerrado
+503 `audit_monitor_unavailable`. Este endpoint de salud no es el visor de
+actividad y todavía no emite su propio evento de consulta.
+
+La capacidad nominal es hasta 50 intentos de PutObject por minuto (72.000 al
+día si cada ciclo se llena), incluidos reintentos; dos eventos por login con
+resultado. No es una cuota IAM ni de facturación: SDK/operador/otros escritores
+pueden generar costes adicionales. Antes de activar, dimensionar volumen,
+S3/KMS, retención y copias con el Budget incremental reportado de 60 USD; la
+prueba con 55 eventos no acredita capacidad ni coste de producción.
+
+QA adicional: 5 casos de servicio de entrega/monitor y 10 de regresión de costes, 1 caso HTTP de salud,
+regresión de 42 definiciones/executores del scheduler y 9 comprobaciones MySQL
+de lease global, lote 50+6, ACK perdido, dedupe concurrente, rollback de avisos,
+conciliación/recuperación y heartbeat. S3 sigue siendo un doble, no verificación
+AWS. Evidencia privada `platform-audit-delivery-offline-qa.json` y publicación
+`platform-audit-delivery-publication.json` en el directorio de QA ya indicado.
+
+El mismo cierre de archivos AWS e IMDS fijo se aplica al proceso hijo del
+colector de costes existente, probado con ejecución inyectada; no cambia su
+filtro, cron, permisos ni estado de activación.
+
+Un ciclo vacío o esperando backoff conserva el error anterior: no declara
+recuperación sin un nuevo envío confirmado. `writer.lastConfirmedAt` distingue
+la última entrega con recibo del simple heartbeat del proceso; este último
+no acredita permisos AWS ni que la instalación esté aceptada.

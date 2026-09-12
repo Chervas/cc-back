@@ -382,6 +382,8 @@ class MetaSyncJobs {
     
     // Descripciones por job (usadas por el monitor/UX)
     this.jobDescriptions = {
+      platformAuditDelivery: 'Entrega eventos de auditoría pendientes y conserva las confirmaciones externas verificadas.',
+      platformAuditMonitor: 'Comprueba la entrega de auditoría y guarda avisos para los administradores técnicos.',
       metricsSync: 'Sincroniza orgánico (Facebook/Instagram): seguidores, posts y agregados diarios por asset.',
       adsSync: 'Sincroniza Ads (Marketing API) con ventana reciente: entidades, insights diarios y actions.',
       adsSyncMidday: 'Refrescado parcial de Ads al mediodía para capturar datos en curso (48 h).',
@@ -426,6 +428,8 @@ class MetaSyncJobs {
     // Configuración desde variables de entorno
     this.config = {
       schedules: {
+        platformAuditDelivery: '* * * * *',
+        platformAuditMonitor: '*/5 * * * *',
         awsInfrastructureCosts: '40 3 * * *',
         metricsSync: process.env.JOBS_METRICS_SCHEDULE || '0 2 * * *',
         tokenValidation: process.env.JOBS_TOKEN_VALIDATION_SCHEDULE || '0 */6 * * *',
@@ -4350,6 +4354,14 @@ try {
 
   async executeAwsInfrastructureCosts() {
     return require('../services/awsInfrastructureCosts.service').runDaily();
+  }
+
+  async executePlatformAuditDelivery() {
+    return require('../services/platformAudit.delivery').run();
+  }
+
+  async executePlatformAuditMonitor() {
+    return require('../services/platformAudit.monitor').run();
   }
 
   

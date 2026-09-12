@@ -4,7 +4,7 @@ const ACCOUNT = '137819318729';
 const BUCKET = 'clinicaclick-integrations-prod-foun-auditlogbucket-3fmfqc6v8ktu';
 const KEY_ARN = 'arn:aws:kms:eu-west-3:137819318729:key/9be75437-51b7-4462-80e1-36ac6c6f6e8a';
 // Factories accept already isolated clients. No default credentials, SDK bootstrap, reader escalation or generic bucket input.
-function createWriter(client) {
+function createWriter(client, { signal } = {}) {
   const { PutObjectCommand } = require('@aws-sdk/client-s3');
   return {
     async write(row) {
@@ -13,7 +13,7 @@ function createWriter(client) {
       try {
         result = await client.send(new PutObjectCommand({ Bucket: BUCKET, ExpectedBucketOwner: ACCOUNT, Key: key,
           Body: row.body, ContentType: 'application/json', IfNoneMatch: '*', ServerSideEncryption: 'aws:kms',
-          SSEKMSKeyId: KEY_ARN, BucketKeyEnabled: false, ChecksumSHA256: checksum }));
+          SSEKMSKeyId: KEY_ARN, BucketKeyEnabled: false, ChecksumSHA256: checksum }), { abortSignal: signal });
       } catch (error) {
         fail(error?.$metadata?.httpStatusCode === 412 || error?.name === 'PreconditionFailed'
           ? 'audit_reconciliation_required' : 'audit_unavailable');

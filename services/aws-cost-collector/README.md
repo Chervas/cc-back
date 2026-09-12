@@ -144,3 +144,8 @@ Referencias oficiales consultadas 12/09/2026:
 AWS recomienda caché y describe facturación por página en sus
 [buenas prácticas](https://docs.aws.amazon.com/cost-management/latest/userguide/ce-api-best-practices.html);
 tarifa en [Cost Explorer Pricing](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/pricing/).
+
+Endurecimiento del lanzador (12/09/2026): el hijo recibe `AWS_CONFIG_FILE`
+y `AWS_SHARED_CREDENTIALS_FILE=/dev/null`, además de IMDSv2 con endpoint fijo
+`http://169.254.169.254`. Así el SDK no toma configuración compartida del usuario
+del SO para redirigir IMDS. No cambia el filtro, cron ni activación del colector.

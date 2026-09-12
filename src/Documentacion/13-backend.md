@@ -116,7 +116,8 @@ como peer (no cliente deducido de XFF), scope plataforma. Política de autorizac
 y actor delegado aún no disponibles, representados como null.
 Migración `20260912210000` solo ensayada en MySQL aislado. Leases CAS, reintentos,
 recibos/digest y conciliador S3 separados; `app/platform/v1` dentro de `app/*`.
-Sin bootstrap AWS/worker instalado, tabla compartida, visor ni despliegue.
+Bootstrap/worker del bloque siguiente aún sin instalar ni identidad asignada;
+sin tabla compartida, visor ni despliegue.
 
 Inventario heurístico: 869 declaraciones en 60 archivos, solo tres preparadas,
 ninguna captura operativa acreditada. Registro/reset/logout/revocación,
@@ -124,6 +125,45 @@ permisos, lecturas clínicas/exportaciones/jobs y auditoría del visor pendiente
 Logout frontend sigue siendo local; JTI no implica revocación servidor.
 Contrato, fallo/retención pendientes, QA y lotes:
 `services/platform-audit/README.md` y `docs/security/platform-audit-route-inventory.json`.
+
+## 2026-09-12 - Entrega y monitor de auditoría preparados, sin activar
+
+`platform_audit_delivery` y `platform_audit_monitor` se registran en el catálogo
+JobRequest cada minuto/cada cinco minutos Europe/Madrid, con gates separados
+apagados. Respetan leader y pausas, con máximo un intento por ciclo y reintentos
+por evento. No usan el carril ni consumidores de publicidad.
+
+El worker reclama hasta 50 eventos y usa un proceso Node 24 fijo, con protocolo
+cerrado por stdin y sin heredar secretos/config AWS del backend. Solo IMDSv2,
+archivos AWS `/dev/null` y endpoints HTTPS STS/S3 de París; verifica el rol
+origen configurado y el writer asumido antes de escribir. Cuatro puts simultáneos,
+proceso limitado a 75 s; leases por evento 120 s y global 270 s con CAS.
+No acepta modo reader/endpoints/credenciales desde JobRequest. Sin eventos,
+ninguna consulta AWS. ACK dudoso o 412 conserva conciliación pendiente.
+
+Migración aditiva `20260912213000` para `PlatformAuditDeliveryStates`, únicamente
+ensayada en MySQL ficticio. Monitor conserva episodio y avisos de panel
+atómicamente para los administradores técnicos canónicos existentes. Dedupe y
+recuperación, sin email/WhatsApp ni dispatch externo. No se ha enviado un aviso
+real. Falta watchdog externo: caída conjunta de servidor/scheduler no queda
+cubierta por el propio monitor.
+
+`GET /api/system-monitoring/audit/health`: JWT + administrador técnico global
+(1/44), `Cache-Control: private, no-store`. Solo métricas/fechas/estado saneados,
+sin eventos, actores, ARNs ni lecturas AWS. Gates ausentes: `status=disabled`
+sin BD; habilitado: `status=available`, `level`, `code`, `health`, `writer`,
+`monitorCheckedAt`, UTC/Madrid. `writer.lastConfirmedAt` requiere un recibo;
+un ciclo vacío conserva el error anterior y no implica recuperación. Tabla ausente 503 `audit_migration_required`,
+fallo 503 `audit_monitor_unavailable`, no autorizado 401/403.
+No es el visor de auditoría ni captura todavía su propia lectura de salud.
+
+Variables nuevas: `PLATFORM_AUDIT_DELIVERY_ENABLED`, `PLATFORM_AUDIT_MONITOR_ENABLED`,
+`PLATFORM_AUDIT_NODE_BINARY` y `PLATFORM_AUDIT_WRITER_SOURCE_ROLE_ARN`. El último
+requiere un rol del host real aprobado y verificado; no reutilizar SSO ni
+presumir que el instance role del broker está en el host del backend.
+El colector de costes existente también recibe archivos AWS `/dev/null` e
+IMDS fijo; no cambia filtros, cron ni activación. Lector/visor, instrumentación
+restante, DPD, asignación IAM/SSO y despliegue siguen pendientes. Contrato y lote: `services/platform-audit/README.md`.
 
 ## 2026-08-04 - Audiencias de reseñas desde listado importado
 

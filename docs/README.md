@@ -20,7 +20,8 @@ BD: [diagnóstico real de metadata, TLS preparado y restauración ficticia](./se
 No activar cifrado/rotación ni cambiar la BD compartida fuera de su lote aprobado.
 
 Auditoría: [autenticación durable preparada, cobertura y límites](../services/platform-audit/README.md).
-Captura apagada; worker, visor, AWS y demás dominios pendientes.
+Captura, writer por lotes y monitor de panel preparados/apagados; instalación,
+lector/visor, AWS y demás dominios pendientes.
 
 ## Cierre funcional Marketing Web W1-W5 (2026-07-19)
 

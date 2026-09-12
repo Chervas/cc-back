@@ -7,6 +7,16 @@
  * reintentos y la recuperación tras reinicio pertenecen al scheduler durable.
  */
 const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
+  platformAuditDelivery: Object.freeze({
+    type: 'platform_audit_delivery', priority: 'normal', executorMethod: 'executePlatformAuditDelivery',
+    enabledEnv: 'PLATFORM_AUDIT_DELIVERY_ENABLED', timezone: 'Europe/Madrid',
+    usesIntegrationLease: false, reportedFailureRetryable: false, maxAttempts: 1,
+  }),
+  platformAuditMonitor: Object.freeze({
+    type: 'platform_audit_monitor', priority: 'normal', executorMethod: 'executePlatformAuditMonitor',
+    enabledEnv: 'PLATFORM_AUDIT_MONITOR_ENABLED', timezone: 'Europe/Madrid',
+    usesIntegrationLease: false, reportedFailureRetryable: false, maxAttempts: 1,
+  }),
   awsInfrastructureCosts: Object.freeze({
     type: 'aws_infrastructure_costs_refresh', priority: 'low', executorMethod: 'executeAwsInfrastructureCosts',
     enabledEnv: 'AWS_INFRA_COSTS_ENABLED', timezone: 'Europe/Madrid',

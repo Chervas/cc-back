@@ -22,8 +22,12 @@ test('child process receives no app environment, uses fixed script and closed st
   assert.equal(result.amount, '0.2'); assert.equal(invocation.binary, process.execPath);
   assert.equal(invocation.args.length, 1); assert(invocation.args[0].endsWith('/services/aws-cost-collector/src/main.js'));
   assert.equal(invocation.options.shell, undefined);
-  assert.deepEqual(Object.keys(invocation.options.env).sort(), ['AWS_EC2_METADATA_V1_DISABLED', 'PATH', 'TZ']);
+  assert.deepEqual(Object.keys(invocation.options.env).sort(), ['AWS_CONFIG_FILE', 'AWS_EC2_METADATA_SERVICE_ENDPOINT',
+    'AWS_EC2_METADATA_V1_DISABLED', 'AWS_SHARED_CREDENTIALS_FILE', 'PATH', 'TZ']);
   assert.equal(invocation.options.env.AWS_EC2_METADATA_V1_DISABLED, 'true');
+  assert.equal(invocation.options.env.AWS_CONFIG_FILE, '/dev/null');
+  assert.equal(invocation.options.env.AWS_SHARED_CREDENTIALS_FILE, '/dev/null');
+  assert.equal(invocation.options.env.AWS_EC2_METADATA_SERVICE_ENDPOINT, 'http://169.254.169.254');
   assert.deepEqual(Object.keys(invocation.input).sort(), ['accountId', 'environment', 'month', 'roleArn']);
   assert.equal(JSON.stringify(invocation).includes('SECRET_SENTINEL'), false);
 });

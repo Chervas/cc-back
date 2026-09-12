@@ -155,3 +155,29 @@ ficticio: 8 comprobaciones, cierre limpio, sin conexiones externas. SDK del
 paquete nuevo auditado: cero vulnerabilidades reportadas. Evidencia privada
 `/home/ubuntu/qa-evidence/security-migration-20260912/platform-audit-offline-qa.json`.
 Sin despliegue, migraciones compartidas, secretos, proveedores ni PM2.
+
+## Quinto bloque: worker de entrega y monitor de panel preparados
+
+Dos jobs nuevos apagados en el catálogo durable, cada minuto/cinco minutos
+Madrid. Proceso Node 24 solo writer, IMDSv2/STS con identidades comprobadas en
+código antes de S3, endpoints fijos y entorno/archivos AWS aislados. Lotes de
+50, paralelismo 4, sin credenciales en payload/logs/resultado. Lease global
+270 s y por evento 120 s; ACK dudoso permanece sin confirmar.
+
+Estado y alertas de panel durables, dedupe/recuperación y transacción de todos
+los destinatarios técnicos. No dispatch email/WhatsApp. Endpoint privado de
+salud por JWT/admin técnico, solo contadores/fechas, sin consultas AWS ni
+acceso a eventos. No es el visor, ni su propia consulta está auditada todavía.
+Watchdog externo pendiente; se declara incluso en la respuesta.
+
+QA: 10 pruebas paquete, 5 entrega/monitor y 10 regresiones costes, 1 HTTP salud, 6 auth y 11 hotfix;
+suite de orquestación de 42 definiciones/executores, 9 comprobaciones MySQL
+ficticias y SDK npm audit 0. Ambas migraciones de auditoría solo ensayadas en
+instancias temporales. Inventario actual: 870 declaraciones/60 archivos,
+solo 3 capturas semánticas preparadas; ninguna cobertura operativa acreditada.
+
+Evidencia `platform-audit-delivery-offline-qa.json` y publicación verificada
+`platform-audit-delivery-publication.json` bajo el directorio privado de QA.
+Siguen pendientes instalación, identidad/trust AWS asignados, lector operativo,
+visor, cobertura clínica/permisos/auth restante y DPD. No se activa ninguna
+captura ni se despliega con este push.

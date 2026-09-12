@@ -37,8 +37,8 @@ sin activar; restauración física cifrada solo con datos y claves ficticios.
 Credencial incrustada retirada del código legacy; rotación real pendiente.
 
 Auditoría: [primer bloque de autenticación durable](../services/platform-audit/README.md),
-con tres rutas preparadas/apagadas y matriz explícita de pendientes. Sin worker
-instalado, visor, captura real ni migración compartida. Requiere completar el
+con tres rutas preparadas/apagadas y matriz explícita de pendientes. Writer y monitor de panel ya preparados, sin worker
+instalado, lector/visor, captura real ni migración compartida. Requiere completar el
 lote antes de pedir activación; seis meses de retención no están acreditados.
 
 ## 1. Entrada Y Limites

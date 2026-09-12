@@ -31,7 +31,7 @@ function testCatalogCoversEveryCronAndExecutor() {
   const catalogNames = definitions.map(([name]) => name).sort();
   const types = definitions.map(([, definition]) => definition.type);
 
-  assert.equal(definitions.length, 40, 'the canonical scheduler must retain existing jobs and the gated AWS cost collector');
+  assert.equal(definitions.length, 42, 'the canonical scheduler retains existing jobs and gated AWS cost/audit jobs');
   assert.deepEqual(catalogNames, configuredNames);
   assert.equal(new Set(types).size, types.length, 'scheduled job types must be unique');
   for (const jobName of [
@@ -1418,9 +1418,36 @@ async function testAwsCostsGateAndHandler() {
   }
 }
 
+async function testPlatformAuditJobsRespectGates() {
+  const originalEnqueue = jobRequestsService.enqueueUniqueJobRequest;
+  try {
+    for (const [name, type, env, module, method, cron] of [
+      ['platformAuditDelivery', 'platform_audit_delivery', 'PLATFORM_AUDIT_DELIVERY_ENABLED', '../../services/platformAudit.delivery', 'executePlatformAuditDelivery', '* * * * *'],
+      ['platformAuditMonitor', 'platform_audit_monitor', 'PLATFORM_AUDIT_MONITOR_ENABLED', '../../services/platformAudit.monitor', 'executePlatformAuditMonitor', '*/5 * * * *'],
+    ]) {
+      const previous = process.env[env]; const service = require(module); const originalRun = service.run; let queued = 0; let invoked = 0;
+      try {
+        jobRequestsService.enqueueUniqueJobRequest = async input => {
+          queued++; assert.equal(input.type, type); assert.equal(input.maxAttempts, 1); return { created: true, job: { id: 9010 } };
+        };
+        process.env[env] = 'false';
+        assert.equal((await metaSyncJobs.enqueueScheduledJob(name)).queued, false); assert.equal(queued, 0);
+        assert.equal((await service.run()).skipped, true);
+        process.env[env] = 'true'; assert.equal((await metaSyncJobs.enqueueScheduledJob(name)).queued, true);
+        service.run = async () => { invoked++; return { status: 'failed', error: 'audit_unavailable' }; };
+        const result = await jobExecutor.JOB_HANDLERS[type]({ mode: 'reader', arbitraryEndpoint: 'https://forbidden.invalid' });
+        assert.equal(result.retryable, false); assert.equal(invoked, 1);
+        assert.equal(metaSyncJobs.config.schedules[name], cron); assert.equal(SCHEDULED_JOB_DEFINITIONS[name].timezone, 'Europe/Madrid');
+        assert.equal(BACKGROUND_INTEGRATION_JOB_TYPES.includes(type), false);
+      } finally { service.run = originalRun; if (previous === undefined) delete process.env[env]; else process.env[env] = previous; }
+    }
+  } finally { jobRequestsService.enqueueUniqueJobRequest = originalEnqueue; }
+}
+
 async function run() {
   testCatalogCoversEveryCronAndExecutor();
   await testAwsCostsGateAndHandler();
+  await testPlatformAuditJobsRespectGates();
   await testDestinationRefreshGateAndHandlers();
   await testOptimizationEvaluationGateAndHandlers();
   await testTargetedHandlersKeepTheirExactMappings();

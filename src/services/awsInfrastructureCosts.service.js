@@ -93,7 +93,9 @@ function invokeCollector(config, month) {
     const child = execFile(binary, [path.resolve(__dirname, '../../services/aws-cost-collector/src/main.js')], {
       timeout: 90000, maxBuffer: 2 * 1024 * 1024, encoding: 'utf8',
       // Explicitly exclude all app keys, SSO sessions, NODE_OPTIONS, proxy/TLS overrides and DB credentials.
-      env: { PATH: '/usr/bin:/bin', TZ: 'UTC', AWS_EC2_METADATA_V1_DISABLED: 'true' },
+      env: { PATH: '/usr/bin:/bin', TZ: 'UTC', AWS_EC2_METADATA_V1_DISABLED: 'true',
+        AWS_EC2_METADATA_SERVICE_ENDPOINT: 'http://169.254.169.254',
+        AWS_CONFIG_FILE: '/dev/null', AWS_SHARED_CREDENTIALS_FILE: '/dev/null' },
     }, (_error, stdout) => {
       try {
         const result = JSON.parse(stdout);

@@ -4,5 +4,10 @@
   "private": true,
   "engines": { "node": ">=24 <25" },
   "scripts": { "test": "node --require ./test/offline-guard.cjs --test test/*.test.js" },
-  "dependencies": { "@aws-sdk/client-s3": "3.1131.0" }
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1131.0",
+    "@aws-sdk/client-sts": "3.1131.0",
+    "@aws-sdk/credential-providers": "3.1131.0",
+    "@smithy/node-http-handler": "4.12.1"
+  }
 }
