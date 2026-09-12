@@ -39,4 +39,5 @@ test('cache read uses persisted snapshot; errors and stale timestamps remain vis
   assert.equal(viewCache(record, { now: new Date('2026-09-03') }).status, 'stale');
   assert.equal(viewCache({ ...record, error: 'cost_aws_unavailable' }, { now: new Date('2026-09-01') }).status, 'stale');
   assert.equal(viewCache(null).snapshot, null);
+  assert.equal(viewCache({ snapshot: { status: 'pending', amount: null, collectedAt: '2026-09-01' }, error: 'cost_data_pending' }).status, 'pending');
 });

@@ -1,0 +1,14 @@
+{
+  "name": "@clinicaclick/aws-cost-collector",
+  "version": "0.1.0",
+  "private": true,
+  "engines": { "node": ">=24 <25" },
+  "files": ["src", "README.md"],
+  "scripts": { "test": "node --require ./test/offline-guard.cjs --test test/*.test.js" },
+  "dependencies": {
+    "@aws-sdk/client-cost-explorer": "3.1131.0",
+    "@aws-sdk/client-budgets": "3.1131.0",
+    "@aws-sdk/client-sts": "3.1131.0",
+    "@aws-sdk/credential-providers": "3.1131.0"
+  }
+}

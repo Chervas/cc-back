@@ -7,6 +7,11 @@
  * reintentos y la recuperación tras reinicio pertenecen al scheduler durable.
  */
 const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
+  awsInfrastructureCosts: Object.freeze({
+    type: 'aws_infrastructure_costs_refresh', priority: 'low', executorMethod: 'executeAwsInfrastructureCosts',
+    enabledEnv: 'AWS_INFRA_COSTS_ENABLED', timezone: 'Europe/Madrid',
+    usesIntegrationLease: false, reportedFailureRetryable: false,
+  }),
   metricsSync: Object.freeze({ type: 'meta_metrics_daily', priority: 'normal', executorMethod: 'executeMetricsSync' }),
   tokenValidation: Object.freeze({ type: 'meta_token_validation', priority: 'normal', executorMethod: 'executeTokenValidation' }),
   dataCleanup: Object.freeze({ type: 'system_data_cleanup', priority: 'low', executorMethod: 'executeDataCleanup' }),

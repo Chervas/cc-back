@@ -60,8 +60,8 @@ resultado incierto, outbox SQLite con leases/reintentos, adaptadores SDK de
 Secrets Manager y S3 probados con dobles. Solo operación ficticia ejecutable.
 `src/lib/integrationsBrokerClient.js`: transporte para Node 18 del backend,
 sin bootstrap/modelos/credenciales AWS; sin conexión a consumidores legacy.
-`src/costs.js` del paquete: núcleo de paginación/filtros/importes/snapshots;
-persistencia de costes en app, job Madrid y UI aún pendientes.
+El núcleo de costes inicialmente incluido en el broker se ha trasladado al
+paquete separado `services/aws-cost-collector`; ver el segundo bloque debajo.
 
 El inventario y las cohortes están en `consumer-inventory.json` y
 `consumer-cohorts.md`. SSO continúa pendiente: cero verificaciones AWS propias.
@@ -79,3 +79,31 @@ SHA-256 `0d14de2cb70b183e35e88f4561a48e190fc164c8bcb0628021e727f48770b8c5`.
 `npm audit --omit=dev` del paquete nuevo: cero vulnerabilidades reportadas.
 Evidencia saneada fuera de rutas públicas:
 `/home/ubuntu/qa-evidence/security-migration-20260912/initial-offline-qa.json`.
+
+## Segundo bloque: costes integrados, sin activar
+
+Colector Node 24 separado, rol fijo/IMDS/STS, validación de tags, uso paginado
+y forecast/Budget; caché persistente nueva, leases CAS, errores cerrados,
+endpoint protegido por JWT/admin técnico y cron durable `03:40 Europe/Madrid`
+apagado por defecto. UI Costes AWS con mes actual/anterior, estados y moneda,
+presupuesto vigente diferenciado del histórico y de gasto/estimación de IA.
+Contrato, permisos pendientes, coste y rollback en
+`services/aws-cost-collector/README.md`.
+
+QA: 12 casos del paquete de costes, 8 servicio, 2 HTTP del endpoint y los
+11 HTTP del hotfix. Suite existente de orquestación pasa con preload que
+bloquea red y carga de .env. MySQL 8.0.42: 6 comprobaciones de migración,
+concurrencia, persistencia, lease vencido, rollback y reaplicación, con
+datadir/socket temporal y cierre 0. Build Angular development
+`a27e86a5f068637e`; aviso CommonJS existente de socket.io-parser/debug.
+Chromium: seis capturas reales del componente con datos ficticios, desktop
+1440 y móvil 390, navegación/tabla desplazables y sin overflow de página,
+mes anterior, error/recuperación, escape de HTML y ninguna llamada externa.
+Sin sesión de aplicación real; ACL probada con JWT ficticios por HTTP.
+
+Migración `20260912180000` aplicada solo a MySQL ficticio. Gate de costes
+no configurado en PM2. No se ha creado la tabla compartida, instalado Node
+en hosts utilizados ni desplegado la UI. SSO/IAM/tags/CE/Budget siguen
+reportados o pendientes. El resto de consumidores, auditoría de plataforma
+y diagnóstico/corte de BD continúan en las siguientes fases.
+Evidencia: `/home/ubuntu/qa-evidence/security-migration-20260912/costs-offline-qa.json`.

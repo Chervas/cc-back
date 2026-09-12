@@ -426,6 +426,7 @@ class MetaSyncJobs {
     // Configuración desde variables de entorno
     this.config = {
       schedules: {
+        awsInfrastructureCosts: '40 3 * * *',
         metricsSync: process.env.JOBS_METRICS_SCHEDULE || '0 2 * * *',
         tokenValidation: process.env.JOBS_TOKEN_VALIDATION_SCHEDULE || '0 */6 * * *',
         dataCleanup: process.env.JOBS_CLEANUP_SCHEDULE || '0 3 * * 0',
@@ -4345,6 +4346,10 @@ try {
 
   async executeSystemNotificationCheck(payload = {}) {
     return systemNotificationsService.runActiveChecks({ force: payload.force === true });
+  }
+
+  async executeAwsInfrastructureCosts() {
+    return require('../services/awsInfrastructureCosts.service').runDaily();
   }
 
   

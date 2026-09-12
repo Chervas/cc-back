@@ -19,19 +19,54 @@ ficticio y no acredita salud de ningún proveedor.
 
 `src/lib/integrationsBrokerClient.js` proporciona el transporte HTTPS firmado
 para el backend Node 18. No importa modelos, AWS ni `.env`, no reintenta y no
-se ha conectado todavía a los consumidores legacy. No hay nuevo endpoint de
-la API pública, despliegue, cohorte migrada ni cambio de credenciales reales.
+se ha conectado todavía a los consumidores legacy. El broker no incorpora
+un endpoint de recuperación de secretos en la API pública. No hay despliegue,
+cohorte migrada ni cambio de credenciales reales.
 
 La reserva de comando/outbox es transaccional; bloqueo, nonce, cuota y resultados
 inciertos sobreviven a reinicios. Entrega S3 con checksum/versión confirmados,
 sin lectura/borrado por writer; un ACK perdido requiere conciliación. El núcleo
-de costes separa gasto reportado, moneda, estimación, datos pendientes/atrasados
-y cobertura por tags. Job, caché en aplicación y UI quedan pendientes.
+de costes se ha trasladado al paquete separado descrito debajo.
 
 Contrato detallado: `services/integrations-broker/README.md`.
 Matriz AWS, QA y alcance: `docs/security/implementation-status.md`.
 El runbook de seguridad mantiene las aprobaciones por lote para despliegue,
 secretos reales, IAM/red/retención y migraciones de la BD compartida.
+
+## 2026-09-12 - Costes AWS: caché y monitorización, pendientes de activar
+
+`GET /api/metasync/jobs/usage/aws-infrastructure/costs?month=YYYY-MM` lee
+exclusivamente `AwsInfrastructureCostCaches`. Requiere JWT y administrador
+técnico global (IDs canónicos 1/44), con `Cache-Control: private, no-store`.
+Mes opcional, limitado al actual/anterior UTC; inválido 400, no autorizado
+401/403. Sin tabla devuelve pendiente y `cost_migration_required`; no
+migra ni consulta AWS durante la petición.
+
+Respuesta: `version`, `month`, `availableMonths`, `status`
+(`pending/available/stale`), `snapshot`, `lastAttemptAt`, `error` cerrado,
+`collectionEnabled`, `refreshSchedule` y `reportedBudget` (60 USD reportados,
+sin verificar). Snapshot: importes string y moneda, periodo UTC con fin
+exclusivo, estimación de AWS, filas diarias, servicios agregados en backend,
+previsión restante separada y Budget con `referenceMonth`, `scopeMatches` y
+`metricMatches`. Sin ARN, credenciales, payload clínico ni errores SDK.
+El Budget vigente no se considera histórico al elegir el mes anterior.
+
+`awsInfrastructureCosts` / `aws_infrastructure_costs_refresh` entra en el
+catálogo durable existente a las `03:40 Europe/Madrid`, respetando leader y
+pausas. `AWS_INFRA_COSTS_ENABLED` es false por defecto. Node 18 inicia un
+colector Node 24 separado mediante `AWS_INFRA_COSTS_NODE_BINARY` absoluto,
+sin heredar secretos ni .env. Solo IMDS/STS al rol fijo de costes; consulta
+etiquetas, uso, forecast y Budget. No acceso a Secrets/KMS ni proveedores.
+
+Migración aditiva `20260912180000-create-aws-infrastructure-cost-caches.js`:
+JSON, fechas/error y lease UUID de 180 s con CAS. Probada exclusivamente en
+MySQL temporal. Fallo conserva último dato; sin dato completo pendiente,
+si el válido supera 36 h o falla la recogida queda atrasado. Ajustes añade
+`tab=aws` sin polling del colector ni suma con costes de IA.
+
+Contrato y lote pendiente de IAM/coste/migración/despliegue:
+`services/aws-cost-collector/README.md`. El código está probado offline;
+no acredita permisos efectivos, tags, factura AWS ni despliegue utilizado.
 
 ## 2026-08-04 - Audiencias de reseñas desde listado importado
 

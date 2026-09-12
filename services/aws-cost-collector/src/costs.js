@@ -42,7 +42,7 @@ async function collectCosts({ getCostAndUsage, accountId, environment, from, to,
     if (!Array.isArray(response.ResultsByTime)) throw Error('cost_response_invalid');
     for (const day of response.ResultsByTime) {
       const start = dateKey(day.TimePeriod?.Start); const end = dateKey(day.TimePeriod?.End);
-      if (start < from || end > to || end <= start || !Array.isArray(day.Groups) || typeof day.Estimated !== 'boolean') throw Error('cost_response_invalid');
+      if (start < from || end > to || Date.parse(end) - Date.parse(start) !== 86400000 || !Array.isArray(day.Groups) || typeof day.Estimated !== 'boolean') throw Error('cost_response_invalid');
       days.set(start, Boolean(days.get(start)) || day.Estimated);
       for (const group of day.Groups) {
         const [service, tag] = group.Keys || [];
@@ -77,8 +77,10 @@ async function collectCosts({ getCostAndUsage, accountId, environment, from, to,
 }
 function viewCache(record, { now = new Date(), staleAfterMs = 36 * 60 * 60 * 1000 } = {}) {
   if (!record?.snapshot) return { status: 'pending', snapshot: null, lastAttemptAt: record?.lastAttemptAt || null, error: record?.error || null };
+  if (record.snapshot.status === 'pending') return { status: 'pending', snapshot: record.snapshot,
+    lastAttemptAt: record.lastAttemptAt || null, error: record.error || null };
   const age = now.getTime() - Date.parse(record.snapshot.collectedAt);
-  return { status: record.error || !Number.isFinite(age) || age > staleAfterMs ? 'stale' : record.snapshot.status,
+  return { status: record.error || !Number.isFinite(age) || age < 0 || age > staleAfterMs ? 'stale' : record.snapshot.status,
     snapshot: record.snapshot, lastAttemptAt: record.lastAttemptAt || null, error: record.error || null };
 }
 module.exports = { collectCosts, filterFor, amountToUnits, unitsToAmount, viewCache };

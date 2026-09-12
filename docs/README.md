@@ -13,6 +13,9 @@ Infraestructura comunicada por el aprovisionador, no migracion ejecutada.
 Mantener el hotfix de `getAssetStats`, Meta bloqueado y el trabajo concurrente
 de campanas; no promover todo DEV ni aplicar todas las migraciones pendientes.
 
+Costes: [colector, caché, API, QA y lote pendiente de activación](../services/aws-cost-collector/README.md).
+Estado y evidencias: [matriz de implementación](./security/implementation-status.md).
+
 ## Cierre funcional Marketing Web W1-W5 (2026-07-19)
 
 La referencia vigente del candidato es backend `7bd254e` (staging

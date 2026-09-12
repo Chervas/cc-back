@@ -31,7 +31,7 @@ function testCatalogCoversEveryCronAndExecutor() {
   const catalogNames = definitions.map(([name]) => name).sort();
   const types = definitions.map(([, definition]) => definition.type);
 
-  assert.equal(definitions.length, 39, 'the canonical scheduler must retain email, web, report cache and campaign periodic jobs');
+  assert.equal(definitions.length, 40, 'the canonical scheduler must retain existing jobs and the gated AWS cost collector');
   assert.deepEqual(catalogNames, configuredNames);
   assert.equal(new Set(types).size, types.length, 'scheduled job types must be unique');
   for (const jobName of [
@@ -1393,8 +1393,34 @@ async function testNormalSettlementUsesCompareAndSetAndResolvesConflicts() {
   }
 }
 
+async function testAwsCostsGateAndHandler() {
+  const service = require('../../services/awsInfrastructureCosts.service');
+  const previousFlag = process.env.AWS_INFRA_COSTS_ENABLED;
+  const previousEnqueue = jobRequestsService.enqueueUniqueJobRequest;
+  const previousRun = service.runDaily;
+  const definition = SCHEDULED_JOB_DEFINITIONS.awsInfrastructureCosts;
+  let queued = 0; let invoked = 0;
+  try {
+    jobRequestsService.enqueueUniqueJobRequest = async input => {
+      queued++; assert.equal(input.type, 'aws_infrastructure_costs_refresh'); return { created: true, job: { id: 9001 } };
+    };
+    service.runDaily = async () => { invoked++; return { status: 'completed', skipped: true }; };
+    process.env.AWS_INFRA_COSTS_ENABLED = 'false';
+    assert.equal((await metaSyncJobs.enqueueScheduledJob('awsInfrastructureCosts')).queued, false); assert.equal(queued, 0);
+    process.env.AWS_INFRA_COSTS_ENABLED = 'true';
+    assert.equal((await metaSyncJobs.enqueueScheduledJob('awsInfrastructureCosts')).queued, true); assert.equal(queued, 1);
+    await metaSyncJobs.executeAwsInfrastructureCosts(); assert.equal(invoked, 1);
+    assert.equal(metaSyncJobs.config.schedules.awsInfrastructureCosts, '40 3 * * *');
+    assert.equal(definition.timezone, 'Europe/Madrid'); assert.equal(definition.reportedFailureRetryable, false);
+  } finally {
+    jobRequestsService.enqueueUniqueJobRequest = previousEnqueue; service.runDaily = previousRun;
+    if (previousFlag === undefined) delete process.env.AWS_INFRA_COSTS_ENABLED; else process.env.AWS_INFRA_COSTS_ENABLED = previousFlag;
+  }
+}
+
 async function run() {
   testCatalogCoversEveryCronAndExecutor();
+  await testAwsCostsGateAndHandler();
   await testDestinationRefreshGateAndHandlers();
   await testOptimizationEvaluationGateAndHandlers();
   await testTargetedHandlersKeepTheirExactMappings();

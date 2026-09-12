@@ -22,8 +22,11 @@ directorio. El manifiesto final todavía declara varios IDs no capturados.
 
 Existe el paquete `services/integrations-broker` y el transporte backend
 `src/lib/integrationsBrokerClient.js`, probados offline. Solo hay proveedor
-ficticio ejecutable. El núcleo de costes está probado; job, persistencia en la
-aplicación y UI siguen pendientes. Ninguna cohorte real ni auditoría completa
+ficticio ejecutable. Colector de costes separado, caché, job diario con gate
+apagado y UI implementados con QA ficticia; su
+[contrato y lote de activación](../services/aws-cost-collector/README.md)
+mantienen pendientes verificación AWS, migración compartida y despliegue.
+Ninguna cohorte real ni auditoría completa
 de plataforma, cifrado de BD o despliegue se consideran terminados.
 
 ## 1. Entrada Y Limites

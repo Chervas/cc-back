@@ -83,12 +83,11 @@ No hay API de lectura/exportación de secretos ni renovación/revocación real.
 
 ## Costes
 
-`src/costs.js` implementa el núcleo puro del colector: filtros de cuenta,
-application/component/environment, DAILY, UnblendedCost, paginación acotada,
-importes decimales exactos y créditos, moneda y cobertura explícitas.
-Sin tags verificados no consulta. Ausencia de datos no equivale a cero.
-El lector de snapshot distingue `pending/available/stale`; faltan persistencia
-en la aplicación, job diario Madrid, conexión AWS de costes y UI de Ajustes.
+El núcleo puro se ha trasladado al paquete hermano
+[`services/aws-cost-collector`](../aws-cost-collector/README.md), con SDK de
+costes separado de Secrets/S3. Incluye caché persistente en la aplicación,
+job diario Madrid deshabilitado por defecto, endpoint de administración y UI
+de Ajustes. Probado offline; AWS, migración real y despliegue siguen pendientes.
 
 [GetCostAndUsage](https://docs.aws.amazon.com/aws-cost-management/latest/APIReference/API_GetCostAndUsage.html)
 define filtros, paginación y fin de periodo exclusivo.
@@ -107,7 +106,7 @@ Ejecutar con Node 24. QA niega todas las conexiones externas y solo permite el
 puerto loopback efímero declarado para TLS; no carga el entorno de producción.
 Prueba concurrencia, bloqueo/reinicio, timeout incierto, firma/replay, scope,
 proyección sin secretos, outbox/leases, ACK/reintento, metadata de Secrets,
-costes y copia/restauración **del SQLite ficticio del broker**.
+copia/restauración **del SQLite ficticio del broker**. Costes tiene su propia suite.
 Esa restauración no acredita cifrado ni recuperación de la BD clínica.
 
 Antes de desplegar: aprobar destino/versión Node, propietario y permisos del
