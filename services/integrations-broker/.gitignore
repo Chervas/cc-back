@@ -1,0 +1,7 @@
+node_modules/
+runtime/
+*.sqlite*
+*.db*
+*.pem
+*.key
+config.local.json

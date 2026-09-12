@@ -8,6 +8,31 @@ cobros, saldo, bonos, plantillas y documentos fiscales se documenta en
 [14-economia-paciente](./14-economia-paciente.md). VeriFactu permanece como
 simulacion visible y no comunica con AEAT.
 
+## 2026-09-12 - Broker de integraciones: contrato inicial sin despliegue
+
+`services/integrations-broker` es un paquete aislado Node 24 con SQLite privado,
+TLS, identidad Ed25519 de servicio y grants exactos de clínica/conexión/activo.
+`POST /v1/execute` admite un catálogo cerrado; actualmente solo
+`fictitious.connection.check.v1`. No acepta JWT de usuario como identidad,
+URLs/GAQL arbitrarios ni recuperación de tokens. El único resultado actual es
+ficticio y no acredita salud de ningún proveedor.
+
+`src/lib/integrationsBrokerClient.js` proporciona el transporte HTTPS firmado
+para el backend Node 18. No importa modelos, AWS ni `.env`, no reintenta y no
+se ha conectado todavía a los consumidores legacy. No hay nuevo endpoint de
+la API pública, despliegue, cohorte migrada ni cambio de credenciales reales.
+
+La reserva de comando/outbox es transaccional; bloqueo, nonce, cuota y resultados
+inciertos sobreviven a reinicios. Entrega S3 con checksum/versión confirmados,
+sin lectura/borrado por writer; un ACK perdido requiere conciliación. El núcleo
+de costes separa gasto reportado, moneda, estimación, datos pendientes/atrasados
+y cobertura por tags. Job, caché en aplicación y UI quedan pendientes.
+
+Contrato detallado: `services/integrations-broker/README.md`.
+Matriz AWS, QA y alcance: `docs/security/implementation-status.md`.
+El runbook de seguridad mantiene las aprobaciones por lote para despliegue,
+secretos reales, IAM/red/retención y migraciones de la BD compartida.
+
 ## 2026-08-04 - Audiencias de reseñas desde listado importado
 
 - `GET /api/marketing/review-requests/summary` y la creación de campañas de

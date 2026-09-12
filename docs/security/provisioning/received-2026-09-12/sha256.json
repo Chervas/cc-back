@@ -1,0 +1,17 @@
+[
+  {
+    "file": "propuesta-aprobacion.md",
+    "sha256": "7ef78989829ffdc97a3207873c93376320e5a8c09b3df36470b64b1f5554ad56",
+    "evidence": "user-supplied; not independently verified in AWS"
+  },
+  {
+    "file": "clinicaclick-integrations-infra.yaml",
+    "sha256": "0363b158c9b9675d4b9511f7109c216ca08546429ef6dbf843a2e0db82160c03",
+    "evidence": "user-supplied; not independently verified in AWS"
+  },
+  {
+    "file": "manifest.final.json",
+    "sha256": "74516c33141d40bd975ebca25d9ead57b7dc2632857e110b2268b3c0412f40c4",
+    "evidence": "user-supplied; not independently verified in AWS"
+  }
+]

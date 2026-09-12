@@ -1,0 +1,2406 @@
+{
+  "version": 1,
+  "sourceHead": "5478ac10c8c145b030c71401c44fbb730eb69dcb",
+  "method": "Static symbols and source hashes only. No credentials, runtime or DB inspected.",
+  "limitations": [
+    "Candidates include indirect consumers and false positives.",
+    "No claim of complete runtime, external OPS, CI or other-server coverage.",
+    "Dynamic provider routes and dependencies require manual review."
+  ],
+  "counts": {
+    "files": 74,
+    "consumerCandidates": 32,
+    "qaFiles": 42
+  },
+  "rows": [
+    {
+      "file": "scripts/i18n/sync-catalan-catalog.mjs",
+      "sha256": "ac0616d86794aedef66d1d3b4cc2adb4e1eefbf6388f13eb04bf3de85c3e0a7b",
+      "kind": "consumer_candidate",
+      "families": [
+        "conversion",
+        "whatsapp"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "google",
+          "symbol": "googleapis.com",
+          "line": 19
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/accounting_chromium_qa.js",
+      "sha256": "0da2f880a418b2a42ce2bebea4f2559534f329515940af719addef8996592f62",
+      "kind": "test_or_fixture",
+      "families": [
+        "conversion"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 225
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/accounting_visual_qa.js",
+      "sha256": "d8d00038126c2652058ddfeb9e661b9e9df17936286f8b5d63bca3e46322b39d",
+      "kind": "test_or_fixture",
+      "families": [],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 281
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/agenda_move_chromium_qa.js",
+      "sha256": "14803daa974262a8f7fcb9dd10bff406b4776cdb2e76c7b7b4d0109d5f2fff6a",
+      "kind": "test_or_fixture",
+      "families": [],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 210
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/agenda_responsive_chromium_qa.js",
+      "sha256": "9bbc8a2dde80fad5813ad5c86542e29bcc53bae2c1a5189a4d980cd97178d313",
+      "kind": "test_or_fixture",
+      "families": [],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 290
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/agenda_zoom_chromium_qa.js",
+      "sha256": "59a6ca613574e64b0a96a71412a3643b353d318ab5876dd7511be9aa4088b9cd",
+      "kind": "test_or_fixture",
+      "families": [],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 264
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/ai_node_visual_qa.js",
+      "sha256": "2a46b4b7990f5be9f33e8a5d1dd9a5fa63ea3baac3d31dd34fdbf1cb9646b367",
+      "kind": "test_or_fixture",
+      "families": [],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 165
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/ai_runtime_monitoring_chromium_qa.js",
+      "sha256": "790112dc01339eea11761fc3feb389787a8d26351d8e0f18161f73cfeb4bcebb",
+      "kind": "test_or_fixture",
+      "families": [],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 243
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/appointment_activity_chromium_qa.js",
+      "sha256": "c5ba529e4aca4c7cb8f06f37d5a0eb33b1ddb6ae379babc9be606be6d62daf7c",
+      "kind": "test_or_fixture",
+      "families": [],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 62
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 63
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 63
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/appointment_data_confirmation_ai_visual_qa.js",
+      "sha256": "ed096adda635c0e353598be4ca0d9583c0f24e40f768108654c5880a0bd956a0",
+      "kind": "test_or_fixture",
+      "families": [],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 164
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/automation_attention_scope_chromium_qa.js",
+      "sha256": "aa902b28c85fc554352a31be8ed29f2ca6b167647a430ef1368db84c9595afd6",
+      "kind": "test_or_fixture",
+      "families": [
+        "whatsapp"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 229
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/automation_graph_visual_qa.js",
+      "sha256": "05256a86ad1694a96ade18d33deb6fd1c993e6a7697b290c2cfac6b12c50eae6",
+      "kind": "test_or_fixture",
+      "families": [
+        "social_publication"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 276
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/automation_visibility_and_agenda_focus_qa.js",
+      "sha256": "fe9520a70cca4246b8f76549f21b02d19e826528a6faa5d0cc00d404114994d2",
+      "kind": "test_or_fixture",
+      "families": [],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 290
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/bs_capilar_intent_editor_visual_qa.js",
+      "sha256": "b51f934c46637fca3a9fcfb1e56e52cc4c38eb15fd7b818a9078d523d1026b14",
+      "kind": "test_or_fixture",
+      "families": [
+        "conversion"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 93
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/bs_medical_operational_chromium_qa.js",
+      "sha256": "7e0ff1f9f43a397353c37fe11415e33129c84d7962baaf8f0f143124f98ea9f8",
+      "kind": "test_or_fixture",
+      "families": [
+        "conversion",
+        "social_publication"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 59
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 60
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 60
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 60
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 61
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/campaign_google_destinations_visual_qa.js",
+      "sha256": "580f609f2ee620efa4d4a74f5647fef9d0262e09240fb137a11821f2048983c0",
+      "kind": "test_or_fixture",
+      "families": [
+        "advertising"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 123
+        },
+        {
+          "group": "credential_field",
+          "symbol": "refreshToken",
+          "line": 123
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/campaign_meta_failure_visual_qa.js",
+      "sha256": "ef3989af96d43394e5852a751f3a80fe5291c7e3ef5dfc5dd6ad78c3139a0b49",
+      "kind": "test_or_fixture",
+      "families": [
+        "oauth",
+        "conversion",
+        "advertising"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 117
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/campaign_meta_preparation_visual_qa.js",
+      "sha256": "4c3cdd470c4b00b0681491b4f0649eb9115063060f1ec0945c00db8923803a37",
+      "kind": "test_or_fixture",
+      "families": [
+        "advertising"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "meta",
+          "symbol": "pageAccessToken",
+          "line": 103
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 103
+        },
+        {
+          "group": "credential_field",
+          "symbol": "pageAccessToken",
+          "line": 103
+        },
+        {
+          "group": "credential_field",
+          "symbol": "access_token",
+          "line": 103
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/campaign_meta_signals_visual_qa.js",
+      "sha256": "13353abdcfc00dc4ca62ea54c65da6f23dee786ae635daa0bcfaf1dd48fc4107",
+      "kind": "test_or_fixture",
+      "families": [
+        "advertising"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 112
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/campaign_optimization_visual_qa.js",
+      "sha256": "38e72da0533f5fd59600ff22abd7e2c2e807926ca8fb944304f9503abdfcf87d",
+      "kind": "test_or_fixture",
+      "families": [
+        "advertising"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 143
+        },
+        {
+          "group": "credential_field",
+          "symbol": "refreshToken",
+          "line": 143
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/campaign_prototype.test.js",
+      "sha256": "dcd3d1ea3b8cc436e20db75e2aad1a673bae4c861f3b7b02a22a2941db982d3f",
+      "kind": "test_or_fixture",
+      "families": [
+        "oauth",
+        "advertising"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 119
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/campaign_shared_account_visual_qa.js",
+      "sha256": "bbb0caa71cc11c68d3e83f628d417398345b91296dca4e489486eb5ccacc214b",
+      "kind": "test_or_fixture",
+      "families": [
+        "advertising"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 99
+        },
+        {
+          "group": "credential_field",
+          "symbol": "refreshToken",
+          "line": 99
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/clinic_access_guidance_chromium_qa.js",
+      "sha256": "f1217fd80e73554854c5daa1483f50990bc24377effd41da0d6531a610500df0",
+      "kind": "test_or_fixture",
+      "families": [
+        "social_publication",
+        "advertising",
+        "whatsapp"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 480
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 1007
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/clinical_accounting_goal_chromium_qa.js",
+      "sha256": "be5e2635c8612b198a18f989eab34965a96f00a433fa8fda7b493ebcc71aaa25",
+      "kind": "test_or_fixture",
+      "families": [
+        "conversion"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 49
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 50
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 50
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/day_before_confirmation_v10_visual_qa.js",
+      "sha256": "9273b3c49b7ef8da66bb12e7173cabc536574a5fe85a7d670addcd7b466fa193",
+      "kind": "test_or_fixture",
+      "families": [],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 166
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/field_check_visual_qa.js",
+      "sha256": "57bc89e4e146fc38d1010281c1131abd5226d82708fbbd4d77e34d1dd3d8a4b1",
+      "kind": "test_or_fixture",
+      "families": [],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 227
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/google_profile_automation_heatmap_chromium_qa.js",
+      "sha256": "1aa83b9eb7d03cc30321e49c248e1bef39b7d739506ebbdba93071386a556e1c",
+      "kind": "test_or_fixture",
+      "families": [
+        "social_publication"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 58
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 59
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 59
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/google_profile_special_hours_chromium_qa.js",
+      "sha256": "837d3d19ed8922b9eabf1038d4f93ad9f6dfb5a5f1db762edc99bd0b3f7a5afd",
+      "kind": "test_or_fixture",
+      "families": [],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 169
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/inbound_appointment_intent_chromium_qa.js",
+      "sha256": "d55141238d91490754000fe9c5378e1b591bb4dd78aa44771905b8143c3747f1",
+      "kind": "test_or_fixture",
+      "families": [
+        "conversion",
+        "whatsapp"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 452
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 659
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 1076
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 1083
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/marketing_mi_clinica_chromium_qa.js",
+      "sha256": "249e269dcf5cb8642538a9b943ed3d416daef53f6c7c0bcec7b3bc0502e39d6b",
+      "kind": "test_or_fixture",
+      "families": [],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 188
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/marketing_objectives_chromium_qa.js",
+      "sha256": "2a7a1c60943c4e6320eba62addbb7fed88944a34330911d3ebe45a8bc5b93e54",
+      "kind": "test_or_fixture",
+      "families": [
+        "conversion",
+        "advertising"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 234
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/meta_connection_intent_contract.test.js",
+      "sha256": "9954e82b3c9a25e309e134a1b3ef1fc665e048fc4af17c7b50e350c5bb4f80d2",
+      "kind": "test_or_fixture",
+      "families": [
+        "oauth",
+        "whatsapp"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "meta",
+          "symbol": "MetaConnection",
+          "line": 61
+        },
+        {
+          "group": "meta",
+          "symbol": "MetaConnection",
+          "line": 84
+        },
+        {
+          "group": "meta",
+          "symbol": "MetaConnection",
+          "line": 86
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/notification_presentation_preferences_visual_qa.js",
+      "sha256": "0928d787b02f1615baf2482693c45af980a192e546579801d66d588efc76075e",
+      "kind": "test_or_fixture",
+      "families": [],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 174
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/operational_alert_visual_qa.js",
+      "sha256": "3011d5a729df9fc0a00efedccb1f7ba69f60bd025cd32a02f96bf8d81ada87dd",
+      "kind": "test_or_fixture",
+      "families": [
+        "conversion"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 104
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/patient_contact_search_cdp_qa.js",
+      "sha256": "f931c1074fad77b54a541255e7ad1e9a8000f0b15b65ee5481ffecb64ef2c914",
+      "kind": "test_or_fixture",
+      "families": [
+        "whatsapp"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 458
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/patient_contact_search_chromium_qa.js",
+      "sha256": "5001ac1fc85e23f04ce668df6933f0f490c0c43f4a310e3231577873dd4522c0",
+      "kind": "test_or_fixture",
+      "families": [
+        "whatsapp"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 88
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 89
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 89
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/patient_direction_chromium_qa.js",
+      "sha256": "19e019198d4ed878a2505a302f616c0c4ae2a8fc258f7a68a8b2b69c58132b8c",
+      "kind": "test_or_fixture",
+      "families": [
+        "oauth",
+        "reception",
+        "whatsapp"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 236
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 261
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/patient_economics_chromium_qa.js",
+      "sha256": "55fd478a3968bb8cf55696d1759eb9e74fba02efefc8ab3790e866adc87eb131",
+      "kind": "test_or_fixture",
+      "families": [
+        "whatsapp"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 187
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/patient_follow_ups_full_page_chromium_qa.js",
+      "sha256": "fc1b8782f65da396454cb8469f8ed75d40599e7e16f0c4c4b236e51849caeaed",
+      "kind": "test_or_fixture",
+      "families": [
+        "social_publication"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 257
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 344
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/quickchat_agenda_goal_chromium_qa.js",
+      "sha256": "b69aad717ebe597ae1e8171f28c667d5b1fba19679b35c85d32c9741a1deaa9a",
+      "kind": "test_or_fixture",
+      "families": [],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 133
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/review_template_selector_chromium_qa.js",
+      "sha256": "dcd098a5ae794e5ae07b0dcbb585e94dc26eba643272bcdd1d6e2fecc0eaa1fe",
+      "kind": "test_or_fixture",
+      "families": [
+        "advertising",
+        "whatsapp"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 154
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/whatsapp_compliance_chromium_qa.js",
+      "sha256": "abf961650b4094f49eb9b5ec8cb741cd503cc40f6e07ed9c59caddb8ef9dde04",
+      "kind": "test_or_fixture",
+      "families": [
+        "webhook",
+        "advertising",
+        "whatsapp"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 218
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 370
+        }
+      ]
+    },
+    {
+      "file": "scripts/tests/whatsapp_health_review_chromium_qa.js",
+      "sha256": "fa02d538b16dd937ca34c2d67f27cf29e099980beecc1f8d1752df0debac29c7",
+      "kind": "test_or_fixture",
+      "families": [
+        "whatsapp"
+      ],
+      "status": "qa_only",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 165
+        }
+      ]
+    },
+    {
+      "file": "src/app/app.component.ts",
+      "sha256": "12c0a28f19270d3c077c76ffd0f59592334378438c2609a6cc795dc2a6930cae",
+      "kind": "consumer_candidate",
+      "families": [],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 60
+        }
+      ]
+    },
+    {
+      "file": "src/app/app.config.ts",
+      "sha256": "e89ffed4106950157df669a6180782b1f7be03af9d4138f234ede888b9e9cabb",
+      "kind": "consumer_candidate",
+      "families": [],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 76
+        }
+      ]
+    },
+    {
+      "file": "src/app/core/auth/auth.service.ts",
+      "sha256": "e2cd3df0555d4952c9b14321eca9d242905ce311adc4c71c1b279d20cdf545ef",
+      "kind": "consumer_candidate",
+      "families": [
+        "oauth"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 64
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 65
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 68
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 69
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 94
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 144
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 214
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 243
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 248
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 248
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 255
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 289
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 315
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 417
+        }
+      ]
+    },
+    {
+      "file": "src/app/core/auth/interceptors/auth.interceptor.ts",
+      "sha256": "376d6a4e0a3eb1167cb31e246457910f148252898f7b903fbda5b0bd7680dcb8",
+      "kind": "consumer_candidate",
+      "families": [
+        "oauth"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 42
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 42
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 45
+        }
+      ]
+    },
+    {
+      "file": "src/app/core/auth/interceptors/role.interceptor.ts",
+      "sha256": "d1b2cf400a60324dbe783b0d33878a1b8e94d08b2a869555ad75f452a82d3c0b",
+      "kind": "consumer_candidate",
+      "families": [
+        "oauth",
+        "whatsapp"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "meta",
+          "symbol": "graph.facebook.com",
+          "line": 113
+        },
+        {
+          "group": "google",
+          "symbol": "googleapis.com",
+          "line": 117
+        },
+        {
+          "group": "google",
+          "symbol": "googleapis.com",
+          "line": 118
+        }
+      ]
+    },
+    {
+      "file": "src/app/core/auth/session-activity.service.ts",
+      "sha256": "a5b1784cba0fdeffa26f947cf408cd56e9bae02766e02aca766f36f3b1812a03",
+      "kind": "consumer_candidate",
+      "families": [],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 83
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 106
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 106
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 107
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 123
+        }
+      ]
+    },
+    {
+      "file": "src/app/core/services/meta.service.ts",
+      "sha256": "9d28b497a67207e5e072b3e18a288048def69ba65c59c3f290b23cf3b5731e8b",
+      "kind": "consumer_candidate",
+      "families": [
+        "webhook",
+        "whatsapp"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 222
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 391
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 402
+        }
+      ]
+    },
+    {
+      "file": "src/app/core/services/role.service.ts",
+      "sha256": "9cee56fa443c2412d3b8ba86aa2d6c9571d4ee378d589921f17912dbb9781b62",
+      "kind": "consumer_candidate",
+      "families": [],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 314
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 502
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 685
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 700
+        }
+      ]
+    },
+    {
+      "file": "src/app/layout/common/notifications/notifications.component.ts",
+      "sha256": "e7f6f643237b1b69062c8f8e1760062df1cb93be0416603f2b532a03693c808c",
+      "kind": "consumer_candidate",
+      "families": [
+        "whatsapp"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 272
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 273
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 273
+        }
+      ]
+    },
+    {
+      "file": "src/app/layout/common/quick-chat/quick-chat.component.ts",
+      "sha256": "1b62f5a30afd77991edbf97ef60958d1dd352a91da1b660aa2f69dc04f441b1f",
+      "kind": "consumer_candidate",
+      "families": [
+        "webhook",
+        "advertising",
+        "whatsapp"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 95
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 905
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 906
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 906
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4014
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4016
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4021
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4024
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4092
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4092
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4108
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4108
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4124
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4124
+        }
+      ]
+    },
+    {
+      "file": "src/app/layout/common/quick-chat/quick-chat.service.ts",
+      "sha256": "c23ae802917166fac50a38c3b3798ac6a321ea555aba505cf73478f9f7ecb5b4",
+      "kind": "consumer_candidate",
+      "families": [
+        "advertising",
+        "whatsapp"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 1901
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 1551
+        }
+      ]
+    },
+    {
+      "file": "src/app/mock-api/common/auth/api.ts",
+      "sha256": "ea557b8bcaf024698705742998311a817d42ba0eb810a81b31ebf270b189aa05",
+      "kind": "consumer_candidate",
+      "families": [],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 74
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 95
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 95
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 98
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 104
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 147
+        }
+      ]
+    },
+    {
+      "file": "src/app/modules/admin/apps/clinicas/details/clinic-whatsapp-connect-dialog.component.ts",
+      "sha256": "c9303382c5df7a3f5bb337f36eefbb02fefe2775701300f4c5720bd2f6eb5fd1",
+      "kind": "consumer_candidate",
+      "families": [
+        "whatsapp"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 16
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 56
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 57
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 62
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 111
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 111
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 144
+        }
+      ]
+    },
+    {
+      "file": "src/app/modules/admin/apps/clinicas/details/details.component.ts",
+      "sha256": "79b171fd0ae3b4ff7219706955599774c2fd79ad1d040035fa7499e8aa26c214",
+      "kind": "consumer_candidate",
+      "families": [
+        "oauth",
+        "conversion",
+        "advertising",
+        "google_profile_analytics",
+        "whatsapp"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "meta",
+          "symbol": "MetaConnection",
+          "line": 149
+        },
+        {
+          "group": "meta",
+          "symbol": "MetaConnection",
+          "line": 1721
+        },
+        {
+          "group": "meta",
+          "symbol": "MetaConnection",
+          "line": 1728
+        },
+        {
+          "group": "meta",
+          "symbol": "MetaConnection",
+          "line": 1735
+        },
+        {
+          "group": "meta",
+          "symbol": "MetaConnection",
+          "line": 1830
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 2543
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 2588
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 2650
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 2654
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 2661
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 2668
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 2673
+        }
+      ]
+    },
+    {
+      "file": "src/app/modules/admin/apps/clinicas/list/list.component.ts",
+      "sha256": "d63dfbf521436cbbeaaa5c2e540d0a3112fe8aa494970e986eedb7cd298b8735",
+      "kind": "consumer_candidate",
+      "families": [
+        "advertising",
+        "google_profile_analytics",
+        "whatsapp"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 85
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 1688
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 1725
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 1744
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 1782
+        }
+      ]
+    },
+    {
+      "file": "src/app/modules/admin/apps/marketing/automation-v2/automation-flow-v2.service.ts",
+      "sha256": "ab22ef1882295109fb47727a228d2e8821a14ef08b94b6e5f80043c151447090",
+      "kind": "consumer_candidate",
+      "families": [
+        "social_publication",
+        "whatsapp"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 517
+        }
+      ]
+    },
+    {
+      "file": "src/app/modules/admin/apps/marketing/campaign-operations/managed-campaign-executions.component.spec.ts",
+      "sha256": "00304c96680017b934e84059f623d1d07523421d9faeec9dce6493a660cfea75",
+      "kind": "consumer_candidate",
+      "families": [
+        "social_publication",
+        "advertising"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "access_token",
+          "line": 342
+        }
+      ]
+    },
+    {
+      "file": "src/app/modules/admin/apps/marketing/campanas/campanas.component.ts",
+      "sha256": "3505a180a490c9247b7e9db526da3d7f478fc9a3055b66795bc574631b475ff1",
+      "kind": "consumer_candidate",
+      "families": [
+        "conversion",
+        "social_publication",
+        "advertising",
+        "whatsapp"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 3201
+        }
+      ]
+    },
+    {
+      "file": "src/app/modules/admin/apps/marketing/marketing.component.ts",
+      "sha256": "63a14ce95d26028d49333018a32273f59add3d4c2da4a3fe60d54e270f3dd9b6",
+      "kind": "consumer_candidate",
+      "families": [
+        "advertising",
+        "google_profile_analytics",
+        "whatsapp"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 447
+        }
+      ]
+    },
+    {
+      "file": "src/app/modules/admin/pages/settings/connected-accounts/connected-accounts.component.ts",
+      "sha256": "7abf90acc7725d572601f13981bcccf36a89c14699637a47af8cff5c0579f731",
+      "kind": "consumer_candidate",
+      "families": [
+        "oauth",
+        "webhook",
+        "conversion",
+        "advertising",
+        "google_profile_analytics",
+        "whatsapp"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "meta",
+          "symbol": "MetaConnection",
+          "line": 519
+        },
+        {
+          "group": "meta",
+          "symbol": "MetaConnection",
+          "line": 528
+        },
+        {
+          "group": "meta",
+          "symbol": "MetaConnection",
+          "line": 796
+        },
+        {
+          "group": "google",
+          "symbol": "GoogleConnection",
+          "line": 520
+        },
+        {
+          "group": "google",
+          "symbol": "GoogleConnection",
+          "line": 2538
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 93
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 385
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 450
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 450
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 1552
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 1779
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 1779
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 1804
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 1814
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 1832
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 1937
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 2024
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 2026
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 2236
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 2238
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3308
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3309
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3708
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3734
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3734
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3765
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3766
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3767
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3769
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3777
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3778
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3804
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3807
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3813
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3820
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3823
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3829
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3839
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3843
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3846
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3850
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3854
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3857
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3862
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3867
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3868
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3873
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3888
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3888
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3891
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3896
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3901
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3911
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3926
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3935
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3945
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3953
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3953
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3964
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3969
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3983
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3988
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 3994
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4008
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4034
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4040
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4053
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4056
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4056
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4081
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4082
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4082
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4087
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4095
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4100
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4319
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4320
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4323
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4329
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4334
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4351
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4356
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4396
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4555
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4596
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4597
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4597
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4601
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4601
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4601
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 4656
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 5017
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 5032
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 5062
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 5109
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 5110
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 5117
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 5136
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 5147
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 5166
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 5193
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 5199
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 5211
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 5212
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 5223
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 5224
+        }
+      ]
+    },
+    {
+      "file": "src/app/modules/admin/pages/settings/connected-accounts/whatsapp-display-name-dialog.component.ts",
+      "sha256": "09e3010fe66bf03eefac3018f4478e95cc0565d513a97eb9616d4b2b70b72c03",
+      "kind": "consumer_candidate",
+      "families": [
+        "whatsapp"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 12
+        }
+      ]
+    },
+    {
+      "file": "src/app/modules/admin/pages/settings/connected-accounts/whatsapp-pin-dialog.component.ts",
+      "sha256": "bc0a922dd9755a6fba7d9766cc591a09cc0445644261695c305411d9785acbbf",
+      "kind": "consumer_candidate",
+      "families": [
+        "whatsapp"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 12
+        }
+      ]
+    },
+    {
+      "file": "src/app/modules/admin/pages/settings/connected-accounts/whatsapp-preverified-wizard.component.ts",
+      "sha256": "00003c9c5aac5ab2e3c31840ded99d3f116fe87b85f25fa9b1bc4af059449add",
+      "kind": "consumer_candidate",
+      "families": [
+        "whatsapp"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 27
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 203
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 431
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 450
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 450
+        }
+      ]
+    },
+    {
+      "file": "src/app/modules/admin/pages/settings/connected-accounts/whatsapp-profile-dialog.component.ts",
+      "sha256": "0cb575fa7de5dcbeb0ba644aea73ca275eb2cdce10ed87fe2db3cb14bbb8b6dc",
+      "kind": "consumer_candidate",
+      "families": [
+        "whatsapp"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 13
+        }
+      ]
+    },
+    {
+      "file": "src/app/modules/admin/pages/settings/jobs-monitoring/jobs-monitoring.service.ts",
+      "sha256": "6d0a99af92d2eeefb7fe05cbabf8021981352aad8cd56d4a66bcd0dc94a31160",
+      "kind": "consumer_candidate",
+      "families": [
+        "webhook",
+        "advertising",
+        "whatsapp"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 1258
+        }
+      ]
+    },
+    {
+      "file": "src/app/modules/admin/pages/settings/settings.component.ts",
+      "sha256": "f766e50adf6cf6f8101a3a677d3daafdb0ed8a1ccc92cdd1fae31f91a58f3b7f",
+      "kind": "consumer_candidate",
+      "families": [
+        "oauth"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 149
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 149
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 170
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 172
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 178
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 178
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 211
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 251
+        }
+      ]
+    },
+    {
+      "file": "src/app/modules/admin/pages/settings/shared/asset-mapping.component.ts",
+      "sha256": "8e364304cc1c214de1c3b37d603197bc49926f3680794bd6e58b3b6bce1a0188",
+      "kind": "consumer_candidate",
+      "families": [
+        "oauth",
+        "advertising"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "meta",
+          "symbol": "pageAccessToken",
+          "line": 46
+        },
+        {
+          "group": "meta",
+          "symbol": "pageAccessToken",
+          "line": 128
+        },
+        {
+          "group": "meta",
+          "symbol": "graph.facebook.com",
+          "line": 211
+        },
+        {
+          "group": "meta",
+          "symbol": "graph.facebook.com",
+          "line": 214
+        },
+        {
+          "group": "meta",
+          "symbol": "MetaConnection",
+          "line": 299
+        },
+        {
+          "group": "meta",
+          "symbol": "MetaConnection",
+          "line": 479
+        },
+        {
+          "group": "meta",
+          "symbol": "MetaConnection",
+          "line": 486
+        },
+        {
+          "group": "meta",
+          "symbol": "MetaConnection",
+          "line": 487
+        },
+        {
+          "group": "meta",
+          "symbol": "MetaConnection",
+          "line": 491
+        },
+        {
+          "group": "meta",
+          "symbol": "MetaConnection",
+          "line": 502
+        },
+        {
+          "group": "meta",
+          "symbol": "MetaConnection",
+          "line": 510
+        },
+        {
+          "group": "meta",
+          "symbol": "MetaConnection",
+          "line": 513
+        },
+        {
+          "group": "meta",
+          "symbol": "MetaConnection",
+          "line": 632
+        },
+        {
+          "group": "meta",
+          "symbol": "pageAccessToken",
+          "line": 826
+        },
+        {
+          "group": "meta",
+          "symbol": "pageAccessToken",
+          "line": 826
+        },
+        {
+          "group": "meta",
+          "symbol": "pageAccessToken",
+          "line": 1163
+        },
+        {
+          "group": "meta",
+          "symbol": "pageAccessToken",
+          "line": 1163
+        },
+        {
+          "group": "credential_field",
+          "symbol": "pageAccessToken",
+          "line": 46
+        },
+        {
+          "group": "credential_field",
+          "symbol": "pageAccessToken",
+          "line": 128
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 749
+        },
+        {
+          "group": "credential_field",
+          "symbol": "pageAccessToken",
+          "line": 826
+        },
+        {
+          "group": "credential_field",
+          "symbol": "pageAccessToken",
+          "line": 826
+        },
+        {
+          "group": "credential_field",
+          "symbol": "pageAccessToken",
+          "line": 1163
+        },
+        {
+          "group": "credential_field",
+          "symbol": "pageAccessToken",
+          "line": 1163
+        }
+      ]
+    },
+    {
+      "file": "src/app/modules/admin/pages/settings/shared/google-asset-mapping.component.ts",
+      "sha256": "b051c7831999fa8e5e11072d4dad97a32dd0ff92b76e0c03d9a0e43b95cebdcc",
+      "kind": "consumer_candidate",
+      "families": [
+        "oauth",
+        "advertising",
+        "google_profile_analytics"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 706
+        }
+      ]
+    },
+    {
+      "file": "src/app/modules/admin/pages/settings/shared/whatsapp-assign-dialog.component.ts",
+      "sha256": "fb874b4f0b9991c1dc6025b1102954c4f84fddda3a8fe6206d1e9c0a7a72bdf7",
+      "kind": "consumer_candidate",
+      "families": [
+        "whatsapp"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 15
+        }
+      ]
+    },
+    {
+      "file": "src/app/shared/whatsapp-routing-settings/whatsapp-routing-settings.component.ts",
+      "sha256": "f465454f1095105f0eb471577962871073ac0b040bdb5edb641be9180ba2961c",
+      "kind": "consumer_candidate",
+      "families": [
+        "advertising",
+        "whatsapp"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 20
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 321
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 334
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 394
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 407
+        },
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 436
+        }
+      ]
+    },
+    {
+      "file": "src/environments/environment.ts",
+      "sha256": "43a3e094fde4b4ba0025a4a81295a35dd30c20fef8e952f899b8d71ef40cf4c9",
+      "kind": "consumer_candidate",
+      "families": [
+        "advertising",
+        "whatsapp"
+      ],
+      "status": "pending_manual_classification_and_cohort",
+      "references": [
+        {
+          "group": "whatsapp",
+          "symbol": "phoneNumberId",
+          "line": 13
+        },
+        {
+          "group": "credential_field",
+          "symbol": "accessToken",
+          "line": 15
+        }
+      ]
+    }
+  ]
+}

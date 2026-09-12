@@ -12,6 +12,20 @@ Los recuentos de commits pendientes del apartado 5 son la foto previa al corte
 completo a DEV autorizado despues por el usuario el 12/09. Recalcularlos al
 retomar; esa autorizacion puntual no permite publicar nuevo trabajo ajeno.
 
+## Estado de implementación inicial (12/09/2026)
+
+Recibidos propuesta, plantilla y manifiesto final en
+`docs/security/provisioning/received-2026-09-12`, con hashes; son evidencia
+reportada, no verificación AWS. Matriz actual y diferencias de IAM/red/Budget
+en `docs/security/implementation-status.md`. Inventario y cohortes en ese
+directorio. El manifiesto final todavía declara varios IDs no capturados.
+
+Existe el paquete `services/integrations-broker` y el transporte backend
+`src/lib/integrationsBrokerClient.js`, probados offline. Solo hay proveedor
+ficticio ejecutable. El núcleo de costes está probado; job, persistencia en la
+aplicación y UI siguen pendientes. Ninguna cohorte real ni auditoría completa
+de plataforma, cifrado de BD o despliegue se consideran terminados.
+
 ## 1. Entrada Y Limites
 
 Leer `00-handoff-operativo`, `19-estado-actual`, `39`, `25-operacion-worktrees-entornos`, `30-despliegues-y-entornos` y `31-roadmap-arquitectura-entornos-gateway` en `front-dev/src/Documentacion`. Completar con `02`, `03`, `04`, `05`, `07`, `11`, `14.1`, `20.13` y `32` segun la fase. `25-desarrollo-paralelo` es un alias historico, no otro workflow.

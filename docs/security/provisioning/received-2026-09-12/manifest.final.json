@@ -1,0 +1,185 @@
+{
+  "manifest_version": "final-2026-09-12",
+  "status": "aws_foundation_provisioned_and_smoke_tested",
+  "account_id": "137819318729",
+  "region": "eu-west-3",
+  "stack": {
+    "name": "clinicaclick-integrations-prod-foundation",
+    "base_creation_status": "CREATE_COMPLETE",
+    "observed_final_cloudformation_status": "UPDATE_ROLLBACK_COMPLETE",
+    "status_explanation": "The base stack was created successfully. A later update to add the missing ACTUAL 100% AWS Budget notification through CloudFormation rolled back because AWS Budgets reported a budget with the same name but a different internalId. The requested ACTUAL 100% notification was added directly with the AWS Budgets API and verified.",
+    "cloudformation_drift_note": "The local template now includes the ACTUAL 100% Budget notification, but the live CloudFormation stack template/resource state may not include that exact notification because it was added out of band after rollback."
+  },
+  "operator_identity_used_for_provisioning": {
+    "type": "iam_identity_center_sso_temporary_credentials",
+    "sts_arn": "arn:aws:sts::137819318729:assumed-role/AWSReservedSSO_codex-clinicaclick-prov-temp_9e033df24a055d21/carlos@clinicaclick.com",
+    "stable_principal_arn": "arn:aws:iam::137819318729:role/aws-reserved/sso.amazonaws.com/eu-west-3/AWSReservedSSO_codex-clinicaclick-prov-temp_9e033df24a055d21",
+    "root_used_for_final_provisioning": false,
+    "long_lived_access_keys_created": false
+  },
+  "artifacts": {
+    "proposal_report": "/Users/modmarketing/Documents/New project/clinicaclick-aws-provisioning-2026-09-12/propuesta-aprobacion.md",
+    "cloudformation_template": "/Users/modmarketing/Documents/New project/clinicaclick-aws-provisioning-2026-09-12/clinicaclick-integrations-infra.yaml",
+    "final_manifest": "/Users/modmarketing/Documents/New project/clinicaclick-aws-provisioning-2026-09-12/manifest.final.json",
+    "historical_manifest": "/Users/modmarketing/Documents/New project/clinicaclick-aws-provisioning-2026-09-12/manifest.initial.json"
+  },
+  "execution_and_access_roles": {
+    "ec2_instance_role": {
+      "arn": "arn:aws:iam::137819318729:role/clinicaclick-integrations-prod-ec2-role",
+      "trust": "ec2.amazonaws.com",
+      "managed_policy": "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+      "inline_permissions": [
+        "secretsmanager:DescribeSecret and secretsmanager:GetSecretValue only for /clinicaclick/integrations/prod/*",
+        "kms:Decrypt, kms:DescribeKey and kms:GenerateDataKey only on the integrations secrets and payload KMS keys",
+        "logs:CreateLogStream, logs:PutLogEvents and logs:DescribeLogStreams only for /clinicaclick/integrations/prod/app streams"
+      ]
+    },
+    "deployment_role": {
+      "arn": "arn:aws:iam::137819318729:role/clinicaclick-integrations-prod-deployment-role",
+      "trust": "arn:aws:iam::137819318729:role/aws-reserved/sso.amazonaws.com/eu-west-3/AWSReservedSSO_codex-clinicaclick-prov-temp_9e033df24a055d21",
+      "inline_permissions": [
+        "CloudFormation read/change-set/update actions only on clinicaclick-integrations-prod-foundation",
+        "read-only inventory for EC2, IAM, KMS, CloudWatch Logs, Secrets Manager metadata and SSM instance status"
+      ],
+      "note": "Trusted only to the temporary provisioning SSO role; do not use this as the habitual implementation access without approval."
+    },
+    "cost_reader_role": {
+      "arn": "arn:aws:iam::137819318729:role/clinicaclick-integrations-prod-cost-reader-role",
+      "trust": "arn:aws:iam::137819318729:role/aws-reserved/sso.amazonaws.com/eu-west-3/AWSReservedSSO_codex-clinicaclick-prov-temp_9e033df24a055d21",
+      "inline_permissions": [
+        "ce:GetCostAndUsage",
+        "ce:GetCostForecast",
+        "ce:GetDimensionValues",
+        "ce:GetTags",
+        "ce:GetUsageForecast",
+        "ce:ListCostCategoryDefinitions",
+        "budgets:ViewBudget"
+      ],
+      "note": "Created for cost readback, but Cost Explorer availability and cost-allocation tag activation were not reverified after browser session expiry."
+    },
+    "audit_writer_role": {
+      "arn": "arn:aws:iam::137819318729:role/clinicaclick-audit-prod-writer-role",
+      "trust": "arn:aws:iam::137819318729:role/aws-reserved/sso.amazonaws.com/eu-west-3/AWSReservedSSO_codex-clinicaclick-prov-temp_9e033df24a055d21",
+      "permissions": "s3:PutObject under the audit bucket app/* prefix, s3:GetBucketLocation, and encrypt/data-key use of the audit KMS key only",
+      "delete_test": "s3:DeleteObject simulated as implicitDeny"
+    },
+    "audit_reader_role": {
+      "arn": "arn:aws:iam::137819318729:role/clinicaclick-audit-prod-reader-role",
+      "trust": "arn:aws:iam::137819318729:role/aws-reserved/sso.amazonaws.com/eu-west-3/AWSReservedSSO_codex-clinicaclick-prov-temp_9e033df24a055d21",
+      "permissions": "read/list only under audit bucket app/* plus decrypt/describe for the audit KMS key"
+    },
+    "audit_retention_admin_role": {
+      "arn": "arn:aws:iam::137819318729:role/clinicaclick-audit-prod-retention-admin-role",
+      "trust": "arn:aws:iam::137819318729:role/aws-reserved/sso.amazonaws.com/eu-west-3/AWSReservedSSO_codex-clinicaclick-prov-temp_9e033df24a055d21",
+      "permissions": "manage audit bucket lifecycle, encryption, public access block and bucket policy; describe/get policy for audit KMS only; no object deletion and no KMS disable/delete"
+    }
+  },
+  "kms": {
+    "integrations_secrets": {
+      "alias": "alias/clinicaclick/integrations/prod/secrets",
+      "key_arn_observed_from_secret_metadata": "arn:aws:kms:eu-west-3:137819318729:key/15864f4f-2db5-485b-a49f-303c57eedc59",
+      "rotation": "not enabled in template"
+    },
+    "integrations_payload": {
+      "alias": "alias/clinicaclick/integrations/prod/payload",
+      "key_arn": "not captured after session expiry; retrieve from CloudFormation output PayloadKmsKeyArn or kms list-aliases before use",
+      "rotation": "not enabled in template"
+    },
+    "audit_logs": {
+      "alias": "alias/clinicaclick/audit/prod/logs",
+      "key_arn": "arn:aws:kms:eu-west-3:137819318729:key/9be75437-51b7-4462-80e1-36ac6c6f6e8a",
+      "state": "Enabled",
+      "key_manager": "CUSTOMER",
+      "rotation": "not enabled"
+    }
+  },
+  "network_and_instance": {
+    "instance_id": "i-0cf40cfe823f160fa",
+    "instance_type": "t3.small",
+    "ami": "Amazon Linux 2023 latest from /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 at creation time",
+    "ebs": "20 GiB gp3 encrypted root volume, DeleteOnTermination=true",
+    "metadata_options": "IMDSv2 required, endpoint enabled, hop limit 1, instance metadata tags disabled",
+    "cpu_credits": "standard",
+    "monitoring": "detailed monitoring disabled",
+    "fixed_egress_public_ip": "13.39.100.55",
+    "security_group": "no inbound rules; egress TCP/443 to 0.0.0.0/0",
+    "vpc": "dedicated VPC 10.74.0.0/24; actual VpcId not captured after session expiry",
+    "subnet": "single public subnet 10.74.0.0/28 with MapPublicIpOnLaunch=false; actual SubnetId not captured after session expiry",
+    "ssm_access": "AmazonSSMManagedInstanceCore on instance role; no SSH key pair configured by template"
+  },
+  "storage_audit_and_cloudtrail": {
+    "audit_bucket": {
+      "name": "clinicaclick-integrations-prod-foun-auditlogbucket-3fmfqc6v8ktu",
+      "public_access_block": "BlockPublicAcls=true, IgnorePublicAcls=true, BlockPublicPolicy=true, RestrictPublicBuckets=true",
+      "versioning": "Enabled",
+      "default_encryption": "aws:kms with audit KMS key",
+      "bucket_key_enabled": true,
+      "object_ownership": "BucketOwnerEnforced",
+      "lifecycle_effective": [
+        "retain-current-audit-objects enabled; ExpirationInDays/NoncurrentDays=183 in template, NoncurrentDays=183 verified",
+        "abort-incomplete-multipart-uploads enabled after 7 days"
+      ],
+      "object_lock": "not enabled"
+    },
+    "cloudtrail": {
+      "trail_arn": "arn:aws:cloudtrail:eu-west-3:137819318729:trail/clinicaclick-integrations-prod-regional-trail",
+      "bucket": "clinicaclick-integrations-prod-fo-cloudtrailbucket-hpys0qkunpro",
+      "scope": "regional, not multi-region",
+      "include_global_service_events": false,
+      "management_events": "read and write management events",
+      "log_file_validation": true,
+      "logging_status": "IsLogging=true, delivery errors null when checked",
+      "bucket_encryption": "SSE-S3/AES256",
+      "bucket_lifecycle": "expire CloudTrail logs after 365 days"
+    }
+  },
+  "budget_and_notifications": {
+    "monthly_budget_usd": 60,
+    "budget_name": "clinicaclick-integrations-prod-monthly-budget",
+    "sns_topic": "arn:aws:sns:eu-west-3:137819318729:clinicaclick-integrations-prod-alerts",
+    "sns_subscription_confirmed": "arn:aws:sns:eu-west-3:137819318729:clinicaclick-integrations-prod-alerts:dca7e56a-a724-4c1c-a0fa-ff8d772e63e4",
+    "effective_budget_notifications_verified": [
+      "ACTUAL > 80%",
+      "ACTUAL > 100%",
+      "FORECASTED > 100%"
+    ],
+    "cloudformation_difference": "The local template includes all three notifications. The live stack's CloudFormation-managed Budget resource may only represent the pre-rollback state; ACTUAL > 100% was added out of band via Budgets API."
+  },
+  "cost_explorer_and_tags": {
+    "resource_tags_in_template": [
+      "application=clinicaclick",
+      "component=integrations or audit",
+      "environment=prod",
+      "cost-center=clinicaclick"
+    ],
+    "budget_cost_filter_in_template": "TagKeyValue=user:application$clinicaclick",
+    "cost_reader_role_created": true,
+    "cost_explorer_api_verified_after_rollback": false,
+    "cost_allocation_tag_activation_verified": false,
+    "missing": "After the browser session expired, Cost Explorer readiness and activation of cost allocation tags could not be verified without reauthentication. Confirm in Billing/Cost Management before relying on tag-filtered budgets and reports."
+  },
+  "fictitious_smoke_tests": {
+    "audit_writer_put_object": "passed using only non-clinical fictitious JSON under app/smoke-test/",
+    "audit_reader_head_object": "passed",
+    "writer_delete_simulation": "s3:DeleteObject implicitDeny",
+    "secret_value_read": false
+  },
+  "implementation_codex_temporary_read_access": {
+    "recommended_model": "IAM Identity Center SSO with a separate temporary permission set, not the admin provisioning permission set",
+    "requires_approval_before_change": true,
+    "proposed_permission_set_name": "codex-clinicaclick-impl-readonly-temp",
+    "proposed_session_duration": "PT1H",
+    "proposed_scope": "read infrastructure metadata and cost signals only; no SecretsManager GetSecretValue, no SSM StartSession, no SSM SendCommand, no writes, no deletes",
+    "proposed_assignment_target": "Implementation Codex workforce user or group in IAM Identity Center for account 137819318729",
+    "approval_text": "Autorizo crear el permission set SSO temporal codex-clinicaclick-impl-readonly-temp y asignarlo al usuario/grupo del Codex de implementacion en la cuenta 137819318729, con la politica minima de lectura descrita en propuesta-aprobacion.md. No autorizo access keys permanentes, permisos admin, lectura de valores de secretos, SSM StartSession/SendCommand ni cambios de infraestructura."
+  },
+  "explicitly_not_done": [
+    "no Meta access",
+    "no Google Cloud access",
+    "no ClinicaClick server access",
+    "no database access or encryption change",
+    "no production secrets, tokens, cookies or passwords read",
+    "no application deployment or migration"
+  ],
+  "required_closing_statement": "Infraestructura de auditoria preparada; registro de actividad de ClinicaClick y revision del cifrado de su BD pendientes del Codex responsable de la aplicacion"
+}

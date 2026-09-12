@@ -1,0 +1,1003 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "ClinicaClick integrations host foundation: one EC2 instance, KMS, Secrets Manager, SSM, audit logs, alarms, and budget. No application code or real secrets."
+
+Parameters:
+  Application:
+    Type: String
+    Default: "clinicaclick"
+    AllowedPattern: "^[a-z0-9-]+$"
+  Component:
+    Type: String
+    Default: "integrations"
+    AllowedPattern: "^[a-z0-9-]+$"
+  Environment:
+    Type: String
+    Default: "prod"
+    AllowedValues:
+      - "dev"
+      - "staging"
+      - "prod"
+  CostCenter:
+    Type: String
+    Default: "clinicaclick"
+    AllowedPattern: "^[a-zA-Z0-9_.:/=+@-]+$"
+  OperatorPrincipalArn:
+    Type: String
+    Description: "IAM role/user ARN allowed to assume the future deployment and cost-reader roles. Use an IAM role ARN, not an STS assumed-role session ARN."
+    AllowedPattern: "^arn:(aws|aws-us-gov|aws-cn):iam::[0-9]{12}:(role|user)/.+$"
+  NotificationEmail:
+    Type: String
+    Description: "Approved email recipient for CloudWatch and AWS Budget alerts."
+    AllowedPattern: "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+  MonthlyBudgetUsd:
+    Type: Number
+    Default: 45
+    MinValue: 1
+    Description: "Alert threshold in USD. AWS Budgets alerts are not hard spending limits."
+  InstanceType:
+    Type: String
+    Default: "t3.small"
+    AllowedValues:
+      - "t3.small"
+      - "t3a.small"
+  LatestAmiId:
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
+  VpcCidr:
+    Type: String
+    Default: "10.74.0.0/24"
+  PublicSubnetCidr:
+    Type: String
+    Default: "10.74.0.0/28"
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues:
+      - 14
+      - 30
+      - 60
+      - 90
+      - 180
+      - 365
+  AuditRetentionDays:
+    Type: Number
+    Default: 183
+    AllowedValues:
+      - 183
+      - 186
+      - 365
+      - 730
+    Description: "Audit log lifecycle retention. 183 days is an operational placeholder for 6 calendar months and must be confirmed with the DPD before production reliance."
+  KmsKeyDeletionWindowDays:
+    Type: Number
+    Default: 30
+    MinValue: 7
+    MaxValue: 30
+
+Resources:
+  Vpc:
+    Type: "AWS::EC2::VPC"
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${Application}-${Component}-${Environment}-vpc"
+        - Key: "application"
+          Value: !Ref Application
+        - Key: "component"
+          Value: !Ref Component
+        - Key: "environment"
+          Value: !Ref Environment
+        - Key: "cost-center"
+          Value: !Ref CostCenter
+
+  InternetGateway:
+    Type: "AWS::EC2::InternetGateway"
+    Properties:
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${Application}-${Component}-${Environment}-igw"
+        - Key: "application"
+          Value: !Ref Application
+        - Key: "component"
+          Value: !Ref Component
+        - Key: "environment"
+          Value: !Ref Environment
+        - Key: "cost-center"
+          Value: !Ref CostCenter
+
+  VpcGatewayAttachment:
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnetCidr
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${Application}-${Component}-${Environment}-public-a"
+        - Key: "application"
+          Value: !Ref Application
+        - Key: "component"
+          Value: !Ref Component
+        - Key: "environment"
+          Value: !Ref Environment
+        - Key: "cost-center"
+          Value: !Ref CostCenter
+
+  PublicRouteTable:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${Application}-${Component}-${Environment}-public-rt"
+        - Key: "application"
+          Value: !Ref Application
+        - Key: "component"
+          Value: !Ref Component
+        - Key: "environment"
+          Value: !Ref Environment
+        - Key: "cost-center"
+          Value: !Ref CostCenter
+
+  DefaultIpv4Route:
+    Type: "AWS::EC2::Route"
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  InstanceSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "No inbound access. Outbound HTTPS only for SSM and future API calls."
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - IpProtocol: "tcp"
+          FromPort: 443
+          ToPort: 443
+          CidrIp: "0.0.0.0/0"
+          Description: "HTTPS egress for SSM, AWS APIs, package mirrors, and future integrations."
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${Application}-${Component}-${Environment}-sg"
+        - Key: "application"
+          Value: !Ref Application
+        - Key: "component"
+          Value: !Ref Component
+        - Key: "environment"
+          Value: !Ref Environment
+        - Key: "cost-center"
+          Value: !Ref CostCenter
+
+  InstanceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${Application}-${Component}-${Environment}-ec2-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "ec2.amazonaws.com"
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      Tags:
+        - Key: "application"
+          Value: !Ref Application
+        - Key: "component"
+          Value: !Ref Component
+        - Key: "environment"
+          Value: !Ref Environment
+        - Key: "cost-center"
+          Value: !Ref CostCenter
+
+  InstancePolicy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: !Sub "${Application}-${Component}-${Environment}-runtime-minimal"
+      Roles:
+        - !Ref InstanceRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "ReadOwnSecretPrefixOnly"
+            Effect: "Allow"
+            Action:
+              - "secretsmanager:DescribeSecret"
+              - "secretsmanager:GetSecretValue"
+            Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:/${Application}/${Component}/${Environment}/*"
+          - Sid: "UseDesignatedKmsKeysOnly"
+            Effect: "Allow"
+            Action:
+              - "kms:Decrypt"
+              - "kms:DescribeKey"
+              - "kms:GenerateDataKey"
+            Resource:
+              - !GetAtt SecretsKmsKey.Arn
+              - !GetAtt PayloadKmsKey.Arn
+          - Sid: "WriteRuntimeLogsOnly"
+            Effect: "Allow"
+            Action:
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+              - "logs:DescribeLogStreams"
+            Resource: !Sub "${ApplicationLogGroup.Arn}:*"
+
+  InstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      InstanceProfileName: !Sub "${Application}-${Component}-${Environment}-instance-profile"
+      Roles:
+        - !Ref InstanceRole
+
+  DeploymentRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${Application}-${Component}-${Environment}-deployment-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              AWS: !Ref OperatorPrincipalArn
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: !Sub "${Application}-${Component}-${Environment}-deployment-limited"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: "ManageThisCloudFormationStack"
+                Effect: "Allow"
+                Action:
+                  - "cloudformation:Describe*"
+                  - "cloudformation:Get*"
+                  - "cloudformation:List*"
+                  - "cloudformation:CreateChangeSet"
+                  - "cloudformation:ExecuteChangeSet"
+                  - "cloudformation:DeleteChangeSet"
+                  - "cloudformation:UpdateStack"
+                Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*"
+              - Sid: "ReadOnlyInventory"
+                Effect: "Allow"
+                Action:
+                  - "ec2:Describe*"
+                  - "iam:Get*"
+                  - "iam:List*"
+                  - "kms:Describe*"
+                  - "kms:List*"
+                  - "logs:Describe*"
+                  - "secretsmanager:DescribeSecret"
+                  - "ssm:DescribeInstanceInformation"
+                  - "ssm:GetConnectionStatus"
+                Resource: "*"
+      Tags:
+        - Key: "application"
+          Value: !Ref Application
+        - Key: "component"
+          Value: !Ref Component
+        - Key: "environment"
+          Value: !Ref Environment
+        - Key: "cost-center"
+          Value: !Ref CostCenter
+
+  CostReaderRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${Application}-${Component}-${Environment}-cost-reader-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              AWS: !Ref OperatorPrincipalArn
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: !Sub "${Application}-${Component}-${Environment}-cost-readonly"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: "CostExplorerReadonly"
+                Effect: "Allow"
+                Action:
+                  - "ce:GetCostAndUsage"
+                  - "ce:GetCostForecast"
+                  - "ce:GetDimensionValues"
+                  - "ce:GetTags"
+                  - "ce:GetUsageForecast"
+                  - "ce:ListCostCategoryDefinitions"
+                  - "budgets:ViewBudget"
+                Resource: "*"
+      Tags:
+        - Key: "application"
+          Value: !Ref Application
+        - Key: "component"
+          Value: !Ref Component
+        - Key: "environment"
+          Value: !Ref Environment
+        - Key: "cost-center"
+          Value: !Ref CostCenter
+
+  SecretsKmsKey:
+    Type: "AWS::KMS::Key"
+    Properties:
+      Description: !Sub "${Application}/${Component}/${Environment} KMS key for AWS Secrets Manager."
+      Enabled: true
+      EnableKeyRotation: false
+      PendingWindowInDays: !Ref KmsKeyDeletionWindowDays
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "EnableIamPoliciesForAccount"
+            Effect: "Allow"
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+      Tags:
+        - Key: "application"
+          Value: !Ref Application
+        - Key: "component"
+          Value: !Ref Component
+        - Key: "environment"
+          Value: !Ref Environment
+        - Key: "cost-center"
+          Value: !Ref CostCenter
+
+  SecretsKmsAlias:
+    Type: "AWS::KMS::Alias"
+    Properties:
+      AliasName: !Sub "alias/${Application}/${Component}/${Environment}/secrets"
+      TargetKeyId: !Ref SecretsKmsKey
+
+  PayloadKmsKey:
+    Type: "AWS::KMS::Key"
+    Properties:
+      Description: !Sub "${Application}/${Component}/${Environment} KMS key reserved for future application payload encryption."
+      Enabled: true
+      EnableKeyRotation: false
+      PendingWindowInDays: !Ref KmsKeyDeletionWindowDays
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "EnableIamPoliciesForAccount"
+            Effect: "Allow"
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+      Tags:
+        - Key: "application"
+          Value: !Ref Application
+        - Key: "component"
+          Value: !Ref Component
+        - Key: "environment"
+          Value: !Ref Environment
+        - Key: "cost-center"
+          Value: !Ref CostCenter
+
+  PayloadKmsAlias:
+    Type: "AWS::KMS::Alias"
+    Properties:
+      AliasName: !Sub "alias/${Application}/${Component}/${Environment}/payload"
+      TargetKeyId: !Ref PayloadKmsKey
+
+  AuditKmsKey:
+    Type: "AWS::KMS::Key"
+    Properties:
+      Description: !Sub "${Application}/${Component}/${Environment} KMS key for application audit logs stored in S3."
+      Enabled: true
+      EnableKeyRotation: false
+      PendingWindowInDays: !Ref KmsKeyDeletionWindowDays
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "EnableIamPoliciesForAccount"
+            Effect: "Allow"
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+      Tags:
+        - Key: "application"
+          Value: !Ref Application
+        - Key: "component"
+          Value: "audit"
+        - Key: "environment"
+          Value: !Ref Environment
+        - Key: "cost-center"
+          Value: !Ref CostCenter
+
+  AuditKmsAlias:
+    Type: "AWS::KMS::Alias"
+    Properties:
+      AliasName: !Sub "alias/${Application}/audit/${Environment}/logs"
+      TargetKeyId: !Ref AuditKmsKey
+
+  FictitiousSmokeTestSecret:
+    Type: "AWS::SecretsManager::Secret"
+    Properties:
+      Name: !Sub "/${Application}/${Component}/${Environment}/fictitious-smoke-test"
+      Description: "Fictitious smoke-test secret only. Contains no ClinicaClick, Meta, Google, AWS, patient, or production credential."
+      KmsKeyId: !Ref SecretsKmsKey
+      GenerateSecretString:
+        SecretStringTemplate: "{\"purpose\":\"fictitious-smoke-test\"}"
+        GenerateStringKey: "value"
+        PasswordLength: 32
+        ExcludePunctuation: true
+      Tags:
+        - Key: "application"
+          Value: !Ref Application
+        - Key: "component"
+          Value: !Ref Component
+        - Key: "environment"
+          Value: !Ref Environment
+        - Key: "cost-center"
+          Value: !Ref CostCenter
+
+  ApplicationLogGroup:
+    Type: "AWS::Logs::LogGroup"
+    Properties:
+      LogGroupName: !Sub "/${Application}/${Component}/${Environment}/app"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: "application"
+          Value: !Ref Application
+        - Key: "component"
+          Value: !Ref Component
+        - Key: "environment"
+          Value: !Ref Environment
+        - Key: "cost-center"
+          Value: !Ref CostCenter
+
+  CloudTrailBucket:
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: "AES256"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: "expire-cloudtrail-logs"
+            Status: "Enabled"
+            ExpirationInDays: 365
+      Tags:
+        - Key: "application"
+          Value: !Ref Application
+        - Key: "component"
+          Value: !Ref Component
+        - Key: "environment"
+          Value: !Ref Environment
+        - Key: "cost-center"
+          Value: !Ref CostCenter
+
+  AuditLogBucket:
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      VersioningConfiguration:
+        Status: "Enabled"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: "aws:kms"
+              KMSMasterKeyID: !GetAtt AuditKmsKey.Arn
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: "BucketOwnerEnforced"
+      LifecycleConfiguration:
+        Rules:
+          - Id: "retain-current-audit-objects"
+            Status: "Enabled"
+            ExpirationInDays: !Ref AuditRetentionDays
+            NoncurrentVersionExpiration:
+              NoncurrentDays: !Ref AuditRetentionDays
+          - Id: "abort-incomplete-multipart-uploads"
+            Status: "Enabled"
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${Application}-audit-${Environment}-logs"
+        - Key: "application"
+          Value: !Ref Application
+        - Key: "component"
+          Value: "audit"
+        - Key: "environment"
+          Value: !Ref Environment
+        - Key: "cost-center"
+          Value: !Ref CostCenter
+
+  AuditLogBucketPolicy:
+    Type: "AWS::S3::BucketPolicy"
+    Properties:
+      Bucket: !Ref AuditLogBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "DenyInsecureTransport"
+            Effect: "Deny"
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt AuditLogBucket.Arn
+              - !Sub "${AuditLogBucket.Arn}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": false
+          - Sid: "DenyUnencryptedObjectUploads"
+            Effect: "Deny"
+            Principal: "*"
+            Action: "s3:PutObject"
+            Resource: !Sub "${AuditLogBucket.Arn}/*"
+            Condition:
+              StringNotEquals:
+                "s3:x-amz-server-side-encryption": "aws:kms"
+          - Sid: "DenyWrongAuditKmsKey"
+            Effect: "Deny"
+            Principal: "*"
+            Action: "s3:PutObject"
+            Resource: !Sub "${AuditLogBucket.Arn}/*"
+            Condition:
+              StringNotEqualsIfExists:
+                "s3:x-amz-server-side-encryption-aws-kms-key-id": !GetAtt AuditKmsKey.Arn
+
+  AuditWriterRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${Application}-audit-${Environment}-writer-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              AWS: !Ref OperatorPrincipalArn
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: !Sub "${Application}-audit-${Environment}-write-only"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: "WriteAuditObjectsOnly"
+                Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                Resource: !Sub "${AuditLogBucket.Arn}/app/*"
+              - Sid: "ReadBucketLocation"
+                Effect: "Allow"
+                Action:
+                  - "s3:GetBucketLocation"
+                Resource: !GetAtt AuditLogBucket.Arn
+              - Sid: "UseAuditKmsForEncryptOnly"
+                Effect: "Allow"
+                Action:
+                  - "kms:DescribeKey"
+                  - "kms:Encrypt"
+                  - "kms:GenerateDataKey"
+                Resource: !GetAtt AuditKmsKey.Arn
+      Tags:
+        - Key: "application"
+          Value: !Ref Application
+        - Key: "component"
+          Value: "audit"
+        - Key: "environment"
+          Value: !Ref Environment
+        - Key: "cost-center"
+          Value: !Ref CostCenter
+
+  AuditReaderRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${Application}-audit-${Environment}-reader-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              AWS: !Ref OperatorPrincipalArn
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: !Sub "${Application}-audit-${Environment}-read-only"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: "ReadAuditObjects"
+                Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                  - "s3:GetObjectVersion"
+                Resource: !Sub "${AuditLogBucket.Arn}/app/*"
+              - Sid: "ListAuditBucket"
+                Effect: "Allow"
+                Action:
+                  - "s3:GetBucketLocation"
+                  - "s3:ListBucket"
+                  - "s3:ListBucketVersions"
+                Resource: !GetAtt AuditLogBucket.Arn
+                Condition:
+                  StringLike:
+                    "s3:prefix":
+                      - "app/*"
+                      - ""
+              - Sid: "DecryptAuditKms"
+                Effect: "Allow"
+                Action:
+                  - "kms:Decrypt"
+                  - "kms:DescribeKey"
+                Resource: !GetAtt AuditKmsKey.Arn
+      Tags:
+        - Key: "application"
+          Value: !Ref Application
+        - Key: "component"
+          Value: "audit"
+        - Key: "environment"
+          Value: !Ref Environment
+        - Key: "cost-center"
+          Value: !Ref CostCenter
+
+  AuditRetentionAdminRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${Application}-audit-${Environment}-retention-admin-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              AWS: !Ref OperatorPrincipalArn
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: !Sub "${Application}-audit-${Environment}-retention-admin"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: "ManageAuditBucketRetentionSettings"
+                Effect: "Allow"
+                Action:
+                  - "s3:GetBucketVersioning"
+                  - "s3:GetLifecycleConfiguration"
+                  - "s3:PutLifecycleConfiguration"
+                  - "s3:GetBucketPublicAccessBlock"
+                  - "s3:PutBucketPublicAccessBlock"
+                  - "s3:GetEncryptionConfiguration"
+                  - "s3:PutEncryptionConfiguration"
+                  - "s3:GetBucketPolicy"
+                  - "s3:PutBucketPolicy"
+                Resource: !GetAtt AuditLogBucket.Arn
+              - Sid: "DescribeAuditKmsOnly"
+                Effect: "Allow"
+                Action:
+                  - "kms:DescribeKey"
+                  - "kms:GetKeyPolicy"
+                  - "kms:GetKeyRotationStatus"
+                Resource: !GetAtt AuditKmsKey.Arn
+      Tags:
+        - Key: "application"
+          Value: !Ref Application
+        - Key: "component"
+          Value: "audit"
+        - Key: "environment"
+          Value: !Ref Environment
+        - Key: "cost-center"
+          Value: !Ref CostCenter
+
+  CloudTrailBucketPolicy:
+    Type: "AWS::S3::BucketPolicy"
+    Properties:
+      Bucket: !Ref CloudTrailBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "AWSCloudTrailAclCheck"
+            Effect: "Allow"
+            Principal:
+              Service: "cloudtrail.amazonaws.com"
+            Action: "s3:GetBucketAcl"
+            Resource: !GetAtt CloudTrailBucket.Arn
+          - Sid: "AWSCloudTrailWrite"
+            Effect: "Allow"
+            Principal:
+              Service: "cloudtrail.amazonaws.com"
+            Action: "s3:PutObject"
+            Resource: !Sub "${CloudTrailBucket.Arn}/AWSLogs/${AWS::AccountId}/*"
+            Condition:
+              StringEquals:
+                "s3:x-amz-acl": "bucket-owner-full-control"
+
+  RegionalTrail:
+    Type: "AWS::CloudTrail::Trail"
+    DependsOn: CloudTrailBucketPolicy
+    Properties:
+      TrailName: !Sub "${Application}-${Component}-${Environment}-regional-trail"
+      S3BucketName: !Ref CloudTrailBucket
+      IncludeGlobalServiceEvents: false
+      IsLogging: true
+      IsMultiRegionTrail: false
+      EnableLogFileValidation: true
+      EventSelectors:
+        - IncludeManagementEvents: true
+          ReadWriteType: "All"
+      Tags:
+        - Key: "application"
+          Value: !Ref Application
+        - Key: "component"
+          Value: !Ref Component
+        - Key: "environment"
+          Value: !Ref Environment
+        - Key: "cost-center"
+          Value: !Ref CostCenter
+
+  Instance:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref InstanceSecurityGroup
+      Monitoring: false
+      CreditSpecification:
+        CPUCredits: "standard"
+      MetadataOptions:
+        HttpEndpoint: "enabled"
+        HttpPutResponseHopLimit: 1
+        HttpTokens: "required"
+        InstanceMetadataTags: "disabled"
+      BlockDeviceMappings:
+        - DeviceName: "/dev/xvda"
+          Ebs:
+            VolumeSize: 20
+            VolumeType: "gp3"
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${Application}-${Component}-${Environment}-broker-host"
+        - Key: "application"
+          Value: !Ref Application
+        - Key: "component"
+          Value: !Ref Component
+        - Key: "environment"
+          Value: !Ref Environment
+        - Key: "cost-center"
+          Value: !Ref CostCenter
+
+  EgressElasticIp:
+    Type: "AWS::EC2::EIP"
+    Properties:
+      Domain: "vpc"
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${Application}-${Component}-${Environment}-egress-eip"
+        - Key: "application"
+          Value: !Ref Application
+        - Key: "component"
+          Value: !Ref Component
+        - Key: "environment"
+          Value: !Ref Environment
+        - Key: "cost-center"
+          Value: !Ref CostCenter
+
+  EipAssociation:
+    Type: "AWS::EC2::EIPAssociation"
+    Properties:
+      InstanceId: !Ref Instance
+      EIP: !Ref EgressElasticIp
+
+  AlertsTopic:
+    Type: "AWS::SNS::Topic"
+    Properties:
+      TopicName: !Sub "${Application}-${Component}-${Environment}-alerts"
+      Tags:
+        - Key: "application"
+          Value: !Ref Application
+        - Key: "component"
+          Value: !Ref Component
+        - Key: "environment"
+          Value: !Ref Environment
+        - Key: "cost-center"
+          Value: !Ref CostCenter
+
+  AlertsSubscription:
+    Type: "AWS::SNS::Subscription"
+    Properties:
+      TopicArn: !Ref AlertsTopic
+      Protocol: "email"
+      Endpoint: !Ref NotificationEmail
+
+  InstanceStatusAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      AlarmName: !Sub "${Application}-${Component}-${Environment}-instance-status-failed"
+      AlarmDescription: "EC2 instance status check failed."
+      Namespace: "AWS/EC2"
+      MetricName: "StatusCheckFailed"
+      Dimensions:
+        - Name: "InstanceId"
+          Value: !Ref Instance
+      Statistic: "Maximum"
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: "GreaterThanOrEqualToThreshold"
+      TreatMissingData: "notBreaching"
+      AlarmActions:
+        - !Ref AlertsTopic
+
+  InstanceSystemRecoveryAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      AlarmName: !Sub "${Application}-${Component}-${Environment}-system-recovery"
+      AlarmDescription: "Recover the instance if the underlying host/system status check fails."
+      Namespace: "AWS/EC2"
+      MetricName: "StatusCheckFailed_System"
+      Dimensions:
+        - Name: "InstanceId"
+          Value: !Ref Instance
+      Statistic: "Maximum"
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: "GreaterThanOrEqualToThreshold"
+      TreatMissingData: "notBreaching"
+      AlarmActions:
+        - !Sub "arn:${AWS::Partition}:automate:${AWS::Region}:ec2:recover"
+        - !Ref AlertsTopic
+
+  CpuCreditBalanceAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      AlarmName: !Sub "${Application}-${Component}-${Environment}-cpu-credit-low"
+      AlarmDescription: "T3 CPU credits are low. Instance is configured with standard credits to avoid unlimited-mode surprise charges."
+      Namespace: "AWS/EC2"
+      MetricName: "CPUCreditBalance"
+      Dimensions:
+        - Name: "InstanceId"
+          Value: !Ref Instance
+      Statistic: "Average"
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 12
+      ComparisonOperator: "LessThanThreshold"
+      TreatMissingData: "notBreaching"
+      AlarmActions:
+        - !Ref AlertsTopic
+
+  MonthlyBudget:
+    Type: "AWS::Budgets::Budget"
+    Properties:
+      Budget:
+        BudgetName: !Sub "${Application}-${Component}-${Environment}-monthly-budget"
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetUsd
+          Unit: "USD"
+        TimeUnit: "MONTHLY"
+        BudgetType: "COST"
+        CostFilters:
+          TagKeyValue:
+            - !Sub "user:application$${Application}"
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: "ACTUAL"
+            ComparisonOperator: "GREATER_THAN"
+            Threshold: 80
+            ThresholdType: "PERCENTAGE"
+          Subscribers:
+            - SubscriptionType: "EMAIL"
+              Address: !Ref NotificationEmail
+        - Notification:
+            NotificationType: "ACTUAL"
+            ComparisonOperator: "GREATER_THAN"
+            Threshold: 100
+            ThresholdType: "PERCENTAGE"
+          Subscribers:
+            - SubscriptionType: "EMAIL"
+              Address: !Ref NotificationEmail
+        - Notification:
+            NotificationType: "FORECASTED"
+            ComparisonOperator: "GREATER_THAN"
+            Threshold: 100
+            ThresholdType: "PERCENTAGE"
+          Subscribers:
+            - SubscriptionType: "EMAIL"
+              Address: !Ref NotificationEmail
+
+Outputs:
+  AccountId:
+    Value: !Ref "AWS::AccountId"
+  Region:
+    Value: !Ref "AWS::Region"
+  StackName:
+    Value: !Ref "AWS::StackName"
+  InstanceId:
+    Value: !Ref Instance
+  InstancePrivateIp:
+    Value: !GetAtt Instance.PrivateIp
+  FixedEgressPublicIp:
+    Value: !Ref EgressElasticIp
+  VpcId:
+    Value: !Ref Vpc
+  SubnetId:
+    Value: !Ref PublicSubnet
+  SecurityGroupId:
+    Value: !Ref InstanceSecurityGroup
+  InstanceRoleArn:
+    Value: !GetAtt InstanceRole.Arn
+  InstanceProfileArn:
+    Value: !GetAtt InstanceProfile.Arn
+  DeploymentRoleArn:
+    Value: !GetAtt DeploymentRole.Arn
+  CostReaderRoleArn:
+    Value: !GetAtt CostReaderRole.Arn
+  SecretsKmsKeyArn:
+    Value: !GetAtt SecretsKmsKey.Arn
+  SecretsKmsAlias:
+    Value: !Ref SecretsKmsAlias
+  PayloadKmsKeyArn:
+    Value: !GetAtt PayloadKmsKey.Arn
+  PayloadKmsAlias:
+    Value: !Ref PayloadKmsAlias
+  AuditKmsKeyArn:
+    Value: !GetAtt AuditKmsKey.Arn
+  AuditKmsAlias:
+    Value: !Ref AuditKmsAlias
+  AuditLogBucketName:
+    Value: !Ref AuditLogBucket
+  AuditLogBucketArn:
+    Value: !GetAtt AuditLogBucket.Arn
+  AuditRetentionDays:
+    Value: !Ref AuditRetentionDays
+  AuditWriterRoleArn:
+    Value: !GetAtt AuditWriterRole.Arn
+  AuditReaderRoleArn:
+    Value: !GetAtt AuditReaderRole.Arn
+  AuditRetentionAdminRoleArn:
+    Value: !GetAtt AuditRetentionAdminRole.Arn
+  SecretPrefix:
+    Value: !Sub "/${Application}/${Component}/${Environment}/"
+  FictitiousSmokeTestSecretArn:
+    Value: !Ref FictitiousSmokeTestSecret
+  ApplicationLogGroupName:
+    Value: !Ref ApplicationLogGroup
+  CloudTrailBucketName:
+    Value: !Ref CloudTrailBucket
+  RegionalTrailArn:
+    Value: !GetAtt RegionalTrail.Arn
+  AlertsTopicArn:
+    Value: !Ref AlertsTopic
