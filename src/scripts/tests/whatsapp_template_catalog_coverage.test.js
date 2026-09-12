@@ -116,6 +116,23 @@ test('acepta versiones técnicas diferentes cuando cada WABA tiene el contrato v
   assert.deepEqual(coverage.unapproved_clinics, []);
 });
 
+test('una reclasificación de Meta conserva la cobertura si el contenido no cambia', () => {
+  const coverage = buildWhatsappTemplateCatalogCoverage({
+    catalog: catalog({ category: 'UTILITY' }),
+    clinics: [clinic(10, 1)],
+    assets: [groupAsset(1, 1, 'waba-a')],
+    familyRows: [
+      remoteTemplate(8, 'waba-a', `${BASE_NAME}_v8`, 'APPROVED', CURRENT_BODY, {
+        category: 'MARKETING',
+      }),
+    ],
+  });
+
+  assert.equal(coverage.approved_by_coverage, true);
+  assert.equal(coverage.approved_count, 1);
+  assert.deepEqual(coverage.unapproved_clinics, []);
+});
+
 test('un APPROVED de la familia con cuerpo antiguo no acredita el contrato actual', () => {
   const coverage = buildWhatsappTemplateCatalogCoverage({
     catalog: catalog(),

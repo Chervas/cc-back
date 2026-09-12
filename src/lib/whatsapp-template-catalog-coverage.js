@@ -53,12 +53,9 @@ function hasCurrentCatalogContract(catalog, instance) {
   if (!catalog || !instance) return false;
   const technicalFamilyName = cleanString(catalog.family_key) || cleanString(catalog.name);
   if (extractTechnicalTemplateVersion(technicalFamilyName, instance.name) === null) return false;
-  if (
-    cleanString(catalog.category).toUpperCase()
-    !== cleanString(instance.category).toUpperCase()
-  ) {
-    return false;
-  }
+  // The provider owns the effective category and may reclassify an otherwise
+  // unchanged template. Coverage tracks the patient-facing components so a
+  // category change alone does not make the WABA look perpetually outdated.
   return haveSameTemplateComponents(
     normalizeCatalogComponents(catalog),
     instance.components

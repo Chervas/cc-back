@@ -46,8 +46,10 @@ function isTestDisplayNumber(displayPhoneNumber) {
 
 function hasSameTemplateCatalogContract(catalog, instance) {
   if (!catalog || !instance) return false;
-  return String(catalog.category || '').trim().toUpperCase() === String(instance.category || '').trim().toUpperCase()
-    && haveSameTemplateComponents(catalog.components, instance.components);
+  // Meta may reclassify a submitted template (for example UTILITY -> MARKETING).
+  // Recreating identical components cannot change that provider decision and
+  // would open an unbounded technical-version loop on every phone sync.
+  return haveSameTemplateComponents(catalog.components, instance.components);
 }
 
 function normalizeWhatsappBusinessProfile(payload) {
@@ -879,4 +881,7 @@ module.exports = {
   syncPhonesForWaba,
   enqueueSyncPhonesJob,
   enqueueSyncPhonesForAllWabas,
+  _test: {
+    hasSameTemplateCatalogContract,
+  },
 };

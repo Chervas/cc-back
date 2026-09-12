@@ -22,6 +22,7 @@ const {
 } = require('../../services/flowEngineV2.service');
 const rollout = require('../../services/whatsappLanguageRollout.service')._test;
 const whatsappTemplates = require('../../services/whatsappTemplates.service')._test;
+const whatsappPhones = require('../../services/whatsappPhones.service')._test;
 const translationSeed = require('../../../migrations/20260720094500-seed-whatsapp-template-catalog-translations')._test;
 const db = require('../../../models');
 const { queues } = require('../../services/queue.service');
@@ -216,6 +217,37 @@ test('una caída tras la respuesta de Meta se recupera por nombre+idioma sin cre
     response: { data: { error: { code: 100, error_subcode: 2388024, message: 'Template already exists' } } },
   }), true);
   assert.equal(whatsappTemplates.buildMetaTemplateCheckpointPendingError(new Error('duplicate')).retryable, true);
+});
+
+test('una categoría reclasificada por Meta no crea otra versión con el mismo contenido', () => {
+  const template = {
+    name: 'recordatorio',
+    category: 'UTILITY',
+    components: [{ type: 'BODY', text: 'Hola {{1}}' }],
+  };
+  const remote = {
+    id: 502,
+    name: 'recordatorio_v335',
+    language: 'es',
+    status: 'APPROVED',
+    meta_template_id: 'meta-502',
+    waba_id: 'waba-1',
+    category: 'MARKETING',
+    components: template.components,
+  };
+
+  const recovered = whatsappTemplates.findSameContractRemoteTemplate({
+    familyRows: [remote],
+    wabaId: 'waba-1',
+    template,
+  });
+
+  assert.equal(recovered?.meta_template_id, 'meta-502');
+  assert.equal(whatsappPhones.hasSameTemplateCatalogContract(template, remote), true);
+  assert.equal(whatsappPhones.hasSameTemplateCatalogContract(template, {
+    ...remote,
+    components: [{ type: 'BODY', text: 'Contenido distinto' }],
+  }), false);
 });
 
 test('la receta canónica no inventa intención cuando no hay una señal suficiente', () => {
