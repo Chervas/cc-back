@@ -64,6 +64,9 @@ function assertContract(output, name) {
 async function run() {
   const defaultQuestion = '¿Nos confirmas tu asistencia a la cita de mañana?';
   const cases = [
+    { name: 'standalone yes', text: 'Si', expected: ['confirmar_cita'], needsResponse: false },
+    { name: 'affirmative typo', text: 'Si loes', expected: ['confirmar_cita'], needsResponse: false },
+    { name: 'future attendance statement', text: 'Sí podré ir', expected: ['confirmar_cita'], needsResponse: false },
     { name: 'plain confirmation', text: 'Sí, confirmo.', expected: ['confirmar_cita'], needsResponse: false },
     { name: 'contextual ok', text: 'ok', expected: ['confirmar_cita'], needsResponse: false },
     { name: 'positive emoji', text: '👍🏽', expected: ['confirmar_cita'], needsResponse: false },
@@ -106,7 +109,13 @@ async function run() {
     assertContract(output, scenario.name);
     assert(scenario.expected.includes(output.intencion_principal), `${scenario.name}: ${output.intencion_principal}`);
     if (scenario.secondary) assert.equal(output.intencion_secundaria, scenario.secondary, `${scenario.name}: secondary intent`);
-    if (scenario.possibleUrgency !== undefined) assert.equal(output.posible_urgencia, scenario.possibleUrgency, `${scenario.name}: urgency`);
+    if (scenario.possibleUrgency !== undefined) {
+      assert.equal(
+        output.posible_urgencia,
+        scenario.possibleUrgency,
+        `${scenario.name}: urgency (${JSON.stringify(output)})`,
+      );
+    }
     if (scenario.needsResponse !== undefined) assert.equal(output.necesita_respuesta, scenario.needsResponse, `${scenario.name}: response needed`);
     results.push({
       name: scenario.name,

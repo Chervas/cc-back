@@ -71,6 +71,8 @@ assert.match(
 assert.match(prompt, /valores de respuesta exactos: confirmar, cancelar/);
 assert.match(prompt, /confianza_intencion como número entre 0 y 1/);
 assert.match(prompt, /no representa la probabilidad de true/);
+assert.match(prompt, /no puede atribuir al paciente una pregunta, peticion, comentario o hecho que no aparezca en el lote actual/);
+assert.match(prompt, /requiere_respuesta=true o necesita_respuesta=true[\s\S]*contenido real del lote/);
 
 assert.equal(CLASSIFY_INTENT_PRESET_CONFIG.output_fields.length, 5);
 assert.equal(
@@ -85,11 +87,14 @@ assert.equal(
   CLASSIFY_INTENT_PRESET_CONFIG.output_fields.every((field) => field.include_confidence === true),
   true,
 );
-assert.match(CLASSIFY_INTENT_PRESET_CONFIG.instruction, /todavia no puede confirmar/);
+assert.match(CLASSIFY_INTENT_PRESET_CONFIG.instruction, /todavía no puede confirmar/);
 assert.match(CLASSIFY_INTENT_PRESET_CONFIG.instruction, /solicitar_cambio_cita solo cuando/);
-assert.match(CLASSIFY_INTENT_PRESET_CONFIG.instruction, /reaccion positiva/);
+assert.match(CLASSIFY_INTENT_PRESET_CONFIG.instruction, /reacción positiva/);
+assert.match(CLASSIFY_INTENT_PRESET_CONFIG.instruction, /"sí podré ir" es una afirmación declarativa y no una pregunta/i);
+assert.match(CLASSIFY_INTENT_PRESET_CONFIG.instruction, /Debes poder señalar esa evidencia; no inventes una necesidad de respuesta/);
+assert.match(CLASSIFY_INTENT_PRESET_CONFIG.instruction, /Evalúa posible_urgencia de forma independiente a la intención principal/);
 
-assert.equal(CONFIRM_APPOINTMENT_PRESET_CONFIG.preset_contract_version, 2);
+assert.equal(CONFIRM_APPOINTMENT_PRESET_CONFIG.preset_contract_version, 3);
 assert.deepEqual(
   CONFIRM_APPOINTMENT_PRESET_CONFIG.output_fields.map((field) => field.name),
   ['confirma_asistencia', 'requiere_respuesta', 'motivo'],
@@ -104,15 +109,16 @@ assert.deepEqual(
   ['patient_message_batch', 'appointment', 'trigger'],
 );
 assert.doesNotMatch(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /Usa conversation_today/);
+assert.doesNotMatch(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /tengo que llevar algo/i);
 assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /No uses mensajes anteriores/);
-assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /una pregunta o petición posterior nunca borra una confirmación explícita anterior/);
+assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /una pregunta o petición real posterior no borra una confirmación explícita anterior/);
 assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /confirma_asistencia=true y requiere_respuesta=true/);
-assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /"gracias", "ok gracias", "recibido" o una reacción positiva aislada no/);
 assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /requiere_respuesta=false/);
 assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /response_message_type=reaction/);
-assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /una reacción positiva aislada no/);
+assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /"sí podré ir" es una afirmación declarativa y no una pregunta/i);
+assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /No inventes ni recuperes una pregunta o petición/);
 assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /seguro de ese false/);
-assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /Si dudas de que no haga falta contestar/);
+assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /no conviertas esa duda en una necesidad de respuesta inexistente/);
 assert.equal(RESPONSE_NEED_CONFIDENCE_THRESHOLD, 0.75);
 
 assert.deepEqual(
