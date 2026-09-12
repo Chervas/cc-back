@@ -16,4 +16,5 @@ module.exports = (sequelize, D) => sequelize.define('PlatformAuditEvent', {
   delivered_at: { type: D.DATE(3), allowNull: true },
 }, { tableName: 'PlatformAuditEvents', timestamps: false,
   indexes: [{ name: 'uq_platform_audit_stage', unique: true, fields: ['correlation_id', 'stage'] },
-    { name: 'idx_platform_audit_delivery', fields: ['state', 'next_attempt_at', 'lease_until'] }] });
+    { name: 'idx_platform_audit_delivery', fields: ['state', 'next_attempt_at', 'lease_until'] },
+    { name: 'idx_platform_audit_view', fields: ['state', 'occurred_at', 'event_id'] }] });

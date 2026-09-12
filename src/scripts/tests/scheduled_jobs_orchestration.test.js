@@ -31,7 +31,7 @@ function testCatalogCoversEveryCronAndExecutor() {
   const catalogNames = definitions.map(([name]) => name).sort();
   const types = definitions.map(([, definition]) => definition.type);
 
-  assert.equal(definitions.length, 43, 'the canonical scheduler retains existing jobs and gated AWS cost/audit/session jobs');
+  assert.equal(definitions.length, 44, 'the canonical scheduler retains existing jobs and gated AWS cost/audit/session jobs');
   assert.deepEqual(catalogNames, configuredNames);
   assert.equal(new Set(types).size, types.length, 'scheduled job types must be unique');
   for (const jobName of [
@@ -1424,6 +1424,7 @@ async function testPlatformAuditJobsRespectGates() {
     for (const [name, type, env, module, method, cron] of [
       ['platformAuditDelivery', 'platform_audit_delivery', 'PLATFORM_AUDIT_DELIVERY_ENABLED', '../../services/platformAudit.delivery', 'executePlatformAuditDelivery', '* * * * *'],
       ['platformAuditMonitor', 'platform_audit_monitor', 'PLATFORM_AUDIT_MONITOR_ENABLED', '../../services/platformAudit.monitor', 'executePlatformAuditMonitor', '*/5 * * * *'],
+      ['platformAuditReconciliation', 'platform_audit_reconciliation', 'PLATFORM_AUDIT_RECONCILIATION_ENABLED', '../../services/platformAudit.reconciliation', 'executePlatformAuditReconciliation', '*/5 * * * *'],
     ]) {
       const previous = process.env[env]; const service = require(module); const originalRun = service.run; let queued = 0; let invoked = 0;
       try {

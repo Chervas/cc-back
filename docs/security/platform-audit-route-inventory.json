@@ -9,9 +9,10 @@
   ],
   "totals": {
     "files": 60,
-    "declarations": 873,
+    "declarations": 874,
     "preparedDisabled": 3,
-    "sessionSuccessPreparedDisabled": 4
+    "sessionSuccessPreparedDisabled": 4,
+    "auditViewPreparedDisabled": 1
   },
   "items": [
     {
@@ -4897,7 +4898,7 @@
     },
     {
       "path": "src/routes/system-monitoring.routes.js",
-      "sha256": "d646f44bde2b529ed9ba7f34f3dc5cdffff4889764c7996bbbc53a0c1310693a",
+      "sha256": "ef8372d18a4cf0786c7c638f4686c6f011716814049aa4caba8b35c3c270b0e3",
       "routes": [
         {
           "method": "GET",
@@ -4907,32 +4908,38 @@
         },
         {
           "method": "GET",
-          "localTemplate": "/notifications/overview",
+          "localTemplate": "/audit/events",
           "line": 12,
+          "platformAudit": "audit_view_semantic_prepared_disabled"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/notifications/overview",
+          "line": 13,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "PATCH",
           "localTemplate": "/notifications/settings",
-          "line": 13,
-          "platformAudit": "pending_semantic_review"
-        },
-        {
-          "method": "POST",
-          "localTemplate": "/notifications/whatsapp-template/prepare",
           "line": 14,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "POST",
-          "localTemplate": "/notifications/test",
+          "localTemplate": "/notifications/whatsapp-template/prepare",
           "line": 15,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "POST",
-          "localTemplate": "/notifications/check",
+          "localTemplate": "/notifications/test",
           "line": 16,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/notifications/check",
+          "line": 17,
           "platformAudit": "pending_semantic_review"
         }
       ]

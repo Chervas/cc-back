@@ -1,5 +1,21 @@
 # Auditoría de plataforma: primer bloque de autenticación
 
+## Lector/visor y eventos v3 (12/09/2026, sin activar)
+
+El contrato vigente de este bloque está en
+[lectura y conciliación](../../docs/security/audit-reader-view-migration.md).
+`reader-main.js` prepara HTTPS Node 24, IMDSv2/STS, validación de cuenta/roles,
+GET de versiones y journal local. Firma Ed25519 distinta por permiso: visor
+con cuerpos verificados y conciliador con recibos solamente. El codec admite
+`audit.records.read` cerrado bajo `app/platform/v3/`; conserva los bytes v1/v2.
+La UI usa el índice entregado local y exige comprobar cada versión S3, sin
+alternativa local ante fallos. Esto no demuestra que el índice esté completo.
+
+No hay lector instalado ni identidad AWS asignada. Verificar topología,
+trusts y permiso KMS de GetObject antes del corte; aprobar retención/respaldo
+del journal. Las referencias inferiores a lector/visor pendientes describen
+el estado operativo: código preparado no equivale a servicio disponible.
+
 ## Eventos de sesión v2 (12/09/2026, sin activar)
 
 El codec/writer acepta además eventos cerrados de emisión, renovación,

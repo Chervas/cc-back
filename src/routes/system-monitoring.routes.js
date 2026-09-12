@@ -9,6 +9,7 @@ const router = express.Router();
 router.use(authMiddleware);
 
 router.get('/audit/health', require('../controllers/platformAudit.controller').health);
+router.get('/audit/events', require('../controllers/platformAudit.controller').events);
 router.get('/notifications/overview', controller.notificationsOverview);
 router.patch('/notifications/settings', controller.updateNotificationSettings);
 router.post('/notifications/whatsapp-template/prepare', controller.prepareWhatsappTemplate);

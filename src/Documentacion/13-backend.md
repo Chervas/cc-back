@@ -1,5 +1,34 @@
 > **Módulo:** Arquitectura del Backend
 
+## 2026-09-12 — Visor de auditoría preparado, sin activar
+
+`GET /api/system-monitoring/audit/events` requiere JWT y, con el gate activo,
+admin técnico global (1/44) con sesión persistente. Query cerrada `from/to`
+(UTC, máximo 31 días), `action`, `userId` (actor o sujeto) y `cursor` ligado a
+sesión/criterios, con vencimiento de 10 minutos. Página de 25, snapshot y
+continuación por fecha/UUID. 400 consulta inválida, 403 ACL/sesión, 503 fallo;
+401 del middleware para JWT inválido/revocado. Respuesta `private, no-store`.
+
+Disponible devuelve `status:available`, `criteria`, `snapshot`, `nextCursor`,
+`coverage:confirmed_platform_index_only` y `events` proyectados sin IP/cuerpos/
+recibos. Cada versión S3 debe verificarse antes de mostrar la página completa.
+Intento/resultado v3 durable antes de responder; denegaciones sin criterios
+crudos. Gate apagado: técnicos reciben `status:disabled`, lista vacía/cursor
+null, sin consultar BD/lector ni cargar claves. No expresa ausencia de eventos.
+
+Reader HTTPS Node 24 separado: Ed25519 con claves/permisos distintos para visor
+(cuerpo verificado) y conciliador (solo recibos), identidad IMDSv2/STS distinta
+del writer y journal SQLite local. API sin credenciales AWS. Topología/IAM/TLS,
+retención, respaldo del journal y despliegue siguen pendientes; no se ha usado
+AWS. La verificación por versión no acredita exhaustividad del índice local,
+inmutabilidad ni cobertura completa. No se incluyen eventos del broker.
+
+Migración de índice `20260912230000` solo ficticia. Gates
+`PLATFORM_AUDIT_VIEW_ENABLED` y `PLATFORM_AUDIT_RECONCILIATION_ENABLED` apagados;
+job conciliador cada 5 minutos Madrid. Contrato, variables, QA y lote pendiente:
+`back-dev/docs/security/audit-reader-view-migration.md`. Backend/codec v3/reader
+antes del frontend; conservar outbox, sesiones, journal y hotfix en rollback.
+
 ## 2026-09-12 — Sesiones persistentes preparadas, sin activar
 
 El backend incorpora `AuthSessions` y `AUTH_SESSION_MODE=legacy|enforce` (legacy

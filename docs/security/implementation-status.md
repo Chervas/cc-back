@@ -1,5 +1,21 @@
 # Seguridad: implementación y evidencias
 
+## Actualización: lector, visor y conciliación preparados (12/09/2026)
+
+[Contrato de lectura](audit-reader-view-migration.md): reader TLS separado,
+identidad origen distinta del writer, dos firmas/permisos, journal local y
+consulta técnica por versiones S3. Outbox v3 audita consultas y denegaciones;
+job de conciliación solo obtiene recibos. Preparado/apagado; ningún GET AWS,
+rol asignado, instancia añadida, despliegue ni migración compartida ejecutados.
+
+Diferencia adicional verificada **en la plantilla**, no en AWS: reader tiene
+Decrypt/DescribeKey pero no GenerateDataKey; la referencia oficial GetObject
+pide este último para SSE-KMS. Ver fuente y revisión acotada pendiente en el
+contrato. No se han ampliado permisos. Hosting/aislamiento efectivo, SSO,
+retención y respaldo externo del journal requieren resolución antes del corte.
+Inventario estático actualizado: 60 archivos, 874 declaraciones, 3 accesos,
+4 éxitos de sesión y 1 consulta preparados/apagados; no cobertura runtime.
+
 ## Actualización: sesiones persistentes preparadas (12/09/2026)
 
 Se añade el control común de sesiones y su auditoría v2, sin activar el modo

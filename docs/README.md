@@ -1,5 +1,12 @@
 # Runbooks operativos del backend
 
+## Lector y visor de auditoría (preparados, 12/09/2026)
+
+[Contrato, QA y lote de lectura/conciliación](security/audit-reader-view-migration.md).
+Consulta por versiones S3, auditoría v3 de consultas y conciliador de recibos.
+Gates apagados; identidad/TLS/retención/BD compartida/despliegue pendientes.
+El journal propio es local y el índice no demuestra cobertura exhaustiva.
+
 ## Sesiones persistentes (preparadas, 12/09/2026)
 
 Ver [contrato y migración de sesiones](security/access-session-migration.md).

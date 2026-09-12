@@ -1,5 +1,17 @@
 # Runbook: Migracion Segura De Integraciones Y Auditoria
 
+## Séptimo bloque preparado: lector, visor y conciliación (12/09/2026)
+
+[Contrato y lote pendiente](security/audit-reader-view-migration.md): consulta
+restringida con sesión persistente, verificación externa por VersionId, eventos
+v3 de lectura y conciliación de ACK perdido que solo devuelve recibos. Gates
+apagados; índice `20260912230000` únicamente en MySQL ficticio. Reader Node 24
+con origen IAM distinto del writer; topología y confianza reales sin asignar.
+Revisar permiso KMS de GetObject señalado en el contrato antes de habilitarlo.
+No desplegar ni añadir roles/recursos/red/retención por este avance. Conserva
+outbox/journal/sesiones al volver atrás; la consulta no prueba totalidad del
+índice ni inmutabilidad. Publicar código no ejecuta el lote aprobado pendiente.
+
 ## Sexto bloque preparado: sesiones persistentes (12/09/2026)
 
 [Contrato, QA y lote de sesiones](security/access-session-migration.md): emisión

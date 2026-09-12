@@ -384,6 +384,7 @@ class MetaSyncJobs {
     this.jobDescriptions = {
       platformAuditDelivery: 'Entrega eventos de auditoría pendientes y conserva las confirmaciones externas verificadas.',
       authSessionExpiry: 'Registra las expiraciones observadas de sesiones persistentes; no elimina evidencias.',
+      platformAuditReconciliation: 'Comprueba entregas de auditoría dudosas mediante el lector separado.',
       platformAuditMonitor: 'Comprueba la entrega de auditoría y guarda avisos para los administradores técnicos.',
       metricsSync: 'Sincroniza orgánico (Facebook/Instagram): seguidores, posts y agregados diarios por asset.',
       adsSync: 'Sincroniza Ads (Marketing API) con ventana reciente: entidades, insights diarios y actions.',
@@ -431,6 +432,7 @@ class MetaSyncJobs {
       schedules: {
         platformAuditDelivery: '* * * * *',
         authSessionExpiry: '*/5 * * * *',
+        platformAuditReconciliation: '*/5 * * * *',
         platformAuditMonitor: '*/5 * * * *',
         awsInfrastructureCosts: '40 3 * * *',
         metricsSync: process.env.JOBS_METRICS_SCHEDULE || '0 2 * * *',
@@ -4365,6 +4367,10 @@ try {
   async executeAuthSessionExpiry() {
     if (process.env.AUTH_SESSION_EXPIRY_ENABLED !== 'true') return { disabled: true };
     return require('../services/accessSession.service').expire();
+  }
+
+  async executePlatformAuditReconciliation() {
+    return require('../services/platformAudit.reconciliation').run();
   }
 
   async executePlatformAuditMonitor() {
