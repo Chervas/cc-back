@@ -74,9 +74,6 @@ const publicMediaRoutes = require('./routes/publicMedia.routes');
 const jobScheduler = require('./services/jobScheduler.service');
 const intakeController = require('./controllers/intake.controller');
 const { setIO, onBusEvent } = require('./services/socket.service');
-const { isGlobalAdmin } = require('./lib/role-helpers');
-const { buildQuickChatContextFromMemberships } = require('./lib/quickchat-helpers');
-const { canUserAccessFeature } = require('./lib/access-policy');
 require('./workers/queue.workers');
 
 const RUNTIME_ROLE = String(process.env.RUNTIME_ROLE || '').trim().toLowerCase();
@@ -447,97 +444,7 @@ if (RESUME_AUTOMATIONS_FROM_SOCKET_BUS) {
 }
 require('./lib/socket-session-guard').installSocketSessionGuard(io);
 
-io.on('connection', async (socket) => {
-    const userId = socket.userData?.userId;
-    console.log('Socket.io conectado', socket.id, 'user', userId);
-
-    if (!userId) {
-        return;
-    }
-
-    const userIsGlobalAdmin = isGlobalAdmin(userId);
-
-    // Unir al room del usuario
-    socket.join(`user:${userId}`);
-
-    // Cargar clínicas permitidas para el usuario
-    const memberships = await db.UsuarioClinica.findAll({
-        where: { id_usuario: userId },
-        attributes: ['id_clinica', 'rol_clinica', 'subrol_clinica'],
-        raw: true
-    });
-    const allClinicIds = userIsGlobalAdmin
-        ? (await db.Clinica.findAll({ attributes: ['id_clinica'], raw: true })).map((row) => row.id_clinica)
-        : [];
-    const quickChatContext = buildQuickChatContextFromMemberships(memberships, {
-        isGlobalAdmin: userIsGlobalAdmin,
-        allClinicIds,
-    });
-    // Los rooms de clínica transportan eventos con contenido de conversaciones.
-    // Un perfil que solo pueda leer chats internos no debe entrar en ellos: el
-    // mismo room también recibe mensajes de pacientes y leads. Esos perfiles
-    // conservan REST/polling para su ámbito no sensible.
-    const realtimeClinicDecisions = await Promise.all(quickChatContext.clinicIds.map(async (clinicId) => {
-        const [readPatients, readLeads, patientSensitive, leadSensitive] = await Promise.all([
-            canUserAccessFeature({ actorId: userId, featureKey: 'quickchat.read_patients', clinicId }),
-            canUserAccessFeature({ actorId: userId, featureKey: 'quickchat.read_leads', clinicId }),
-            canUserAccessFeature({ actorId: userId, featureKey: 'patients.sensitive.view', clinicId }),
-            canUserAccessFeature({ actorId: userId, featureKey: 'leads.sensitive.view', clinicId }),
-        ]);
-        return {
-            clinicId,
-            allowed: (readPatients && patientSensitive) || (readLeads && leadSensitive),
-        };
-    }));
-    const allowedClinicIds = realtimeClinicDecisions
-        .filter((decision) => decision.allowed)
-        .map((decision) => decision.clinicId);
-    const canUseAllClinics = quickChatContext.canUseAllClinics;
-
-    if (!socket.connected) return;
-    socket.data.allowedClinicIds = allowedClinicIds;
-    socket.data.canUseAllClinics = canUseAllClinics;
-
-    // Suscripción inicial: solo "todas" si el perfil lo permite.
-    const initialRooms = canUseAllClinics ? [...allowedClinicIds] : [];
-    initialRooms.forEach((clinicId) => socket.join(`clinic:${clinicId}`));
-    socket.data.clinicRooms = initialRooms;
-    if (process.env.CHAT_DEBUG === 'true') {
-        console.log('[CHAT] initial rooms', socket.id, {
-            allowedClinicIds,
-            canUseAllClinics,
-            joined: socket.data.clinicRooms,
-        });
-    }
-
-    // Suscripción dinámica desde frontend
-    socket.on('subscribe', (requested = []) => {
-        const requestedIds = Array.isArray(requested)
-            ? requested.map((id) => Number(id)).filter((id) => Number.isFinite(id))
-            : [];
-
-        const requestedAllowed = Array.from(new Set(requestedIds))
-            .filter((id) => allowedClinicIds.includes(id));
-        const targetIds =
-            requestedAllowed.length > 0
-                ? requestedAllowed
-                : (canUseAllClinics ? allowedClinicIds : []);
-
-        const previous = socket.data.clinicRooms || [];
-        previous.forEach((id) => socket.leave(`clinic:${id}`));
-        targetIds.forEach((id) => socket.join(`clinic:${id}`));
-        socket.data.clinicRooms = [...targetIds];
-        if (process.env.CHAT_DEBUG === 'true') {
-            console.log('[CHAT] subscribe', socket.id, {
-                requested,
-                requestedAllowed,
-                targetIds,
-                allowedClinicIds,
-                canUseAllClinics,
-            });
-        }
-    });
-});
+require('./lib/socket-realtime-guard').installRealtimeAccess(io);
 // Sincronizar modelos con la base de datos
 db.sequelize.authenticate() // <-- Usar db.sequelize
     .then(() => console.log('Conexión a la base de datos establecida correctamente.'))

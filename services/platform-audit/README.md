@@ -1,5 +1,14 @@
 # Auditoría de plataforma: primer bloque de autenticación
 
+## Cohorte adicional preparada: tiempo real v5
+
+El codec y reader admiten `app/platform/v5/`: `realtime.subscribe` y
+`realtime.read`, esquema cerrado actor/sesión/recurso/ámbito/clínicas.
+`packet_prepared` acredita preparación, no recepción. Captura del API apagada;
+reader/writer compatibles antes de activarla. Contrato de límites, coste y
+corte: `../../docs/security/realtime-access-migration.md`. Sin AWS ejecutado,
+roles ni retención cambiados por este código.
+
 ## Políticas de acceso v4 (12/09/2026, sin activar)
 
 El codec/reader admite cuatro acciones `permission.*` en `app/platform/v4/`;

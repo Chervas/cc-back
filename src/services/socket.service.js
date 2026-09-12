@@ -33,15 +33,7 @@ function emitLocal(event, payload, rooms = []) {
         return;
     }
 
-    const roomList = normalizeRooms(rooms);
-    if (!roomList.length) {
-        ioInstance.emit(event, payload);
-        return;
-    }
-
-    roomList.forEach((room) => {
-        ioInstance.to(room).emit(event, payload);
-    });
+    require('../lib/socket-realtime-guard').deliverRealtime(ioInstance, event, payload, normalizeRooms(rooms));
 }
 
 function getPublisher() {

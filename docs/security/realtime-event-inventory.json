@@ -1,0 +1,454 @@
+{
+  "capturedAt": "2026-09-12",
+  "kind": "static_literal_inventory_not_runtime_coverage",
+  "events": [
+    "appointment:created",
+    "appointment:deleted",
+    "appointment:updated",
+    "conversation:read",
+    "conversation:updated",
+    "flow_execution:cancelled",
+    "flow_execution:completed",
+    "flow_execution:created",
+    "flow_execution:dead_letter",
+    "flow_execution:engine_start",
+    "flow_execution:failed",
+    "flow_execution:log",
+    "flow_execution:resumed",
+    "flow_execution:updated",
+    "lead:call_initiated",
+    "lead:call_outcome",
+    "lead:created",
+    "message:created",
+    "message:updated",
+    "notification:created",
+    "notification:updated"
+  ],
+  "occurrences": [
+    {
+      "file": "src/app.js",
+      "line": 387,
+      "event": "message:created"
+    },
+    {
+      "file": "src/controllers/automationsV2.controller.js",
+      "line": 6761,
+      "event": "flow_execution:created"
+    },
+    {
+      "file": "src/controllers/automationsV2.controller.js",
+      "line": 6762,
+      "event": "flow_execution:created"
+    },
+    {
+      "file": "src/controllers/citas.controller.js",
+      "line": 2340,
+      "event": "appointment:created"
+    },
+    {
+      "file": "src/controllers/citas.controller.js",
+      "line": 2620,
+      "event": "appointment:updated"
+    },
+    {
+      "file": "src/controllers/citas.controller.js",
+      "line": 2796,
+      "event": "appointment:updated"
+    },
+    {
+      "file": "src/controllers/citas.controller.js",
+      "line": 2912,
+      "event": "appointment:updated"
+    },
+    {
+      "file": "src/controllers/citas.controller.js",
+      "line": 2966,
+      "event": "appointment:deleted"
+    },
+    {
+      "file": "src/controllers/citas.controller.js",
+      "line": 3157,
+      "event": "appointment:updated"
+    },
+    {
+      "file": "src/controllers/conversation.controller.js",
+      "line": 1988,
+      "event": "conversation:read"
+    },
+    {
+      "file": "src/controllers/conversation.controller.js",
+      "line": 2027,
+      "event": "conversation:updated"
+    },
+    {
+      "file": "src/controllers/conversation.controller.js",
+      "line": 2298,
+      "event": "message:created"
+    },
+    {
+      "file": "src/controllers/conversation.controller.js",
+      "line": 2299,
+      "event": "message:updated"
+    },
+    {
+      "file": "src/controllers/conversation.controller.js",
+      "line": 2348,
+      "event": "message:created"
+    },
+    {
+      "file": "src/controllers/conversation.controller.js",
+      "line": 2353,
+      "event": "message:created"
+    },
+    {
+      "file": "src/controllers/conversation.controller.js",
+      "line": 2402,
+      "event": "message:updated"
+    },
+    {
+      "file": "src/controllers/conversation.controller.js",
+      "line": 2451,
+      "event": "conversation:updated"
+    },
+    {
+      "file": "src/controllers/conversation.controller.js",
+      "line": 2565,
+      "event": "message:updated"
+    },
+    {
+      "file": "src/controllers/conversation.controller.js",
+      "line": 2566,
+      "event": "message:updated"
+    },
+    {
+      "file": "src/controllers/conversation.controller.js",
+      "line": 2637,
+      "event": "message:created"
+    },
+    {
+      "file": "src/controllers/intake.controller.js",
+      "line": 3709,
+      "event": "lead:created"
+    },
+    {
+      "file": "src/controllers/intake.controller.js",
+      "line": 3820,
+      "event": "lead:created"
+    },
+    {
+      "file": "src/controllers/intake.controller.js",
+      "line": 6458,
+      "event": "lead:call_initiated"
+    },
+    {
+      "file": "src/controllers/intake.controller.js",
+      "line": 7524,
+      "event": "lead:call_outcome"
+    },
+    {
+      "file": "src/controllers/intake.controller.js",
+      "line": 7721,
+      "event": "lead:call_outcome"
+    },
+    {
+      "file": "src/lib/socket-payload.js",
+      "line": 42,
+      "event": "flow_execution:log"
+    },
+    {
+      "file": "src/services/appointmentAutomationV2Runtime.service.js",
+      "line": 1274,
+      "event": "flow_execution:created"
+    },
+    {
+      "file": "src/services/appointmentAutomationV2Runtime.service.js",
+      "line": 1275,
+      "event": "flow_execution:created"
+    },
+    {
+      "file": "src/services/automationInboundMessage.service.js",
+      "line": 788,
+      "event": "flow_execution:created"
+    },
+    {
+      "file": "src/services/automationInboundMessage.service.js",
+      "line": 789,
+      "event": "flow_execution:created"
+    },
+    {
+      "file": "src/services/conversationAutomationState.service.js",
+      "line": 105,
+      "event": "conversation:updated"
+    },
+    {
+      "file": "src/services/conversationPendingReply.service.js",
+      "line": 242,
+      "event": "conversation:updated"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 574,
+      "event": "message:created"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 578,
+      "event": "message:created"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 902,
+      "event": "flow_execution:updated"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 914,
+      "event": "appointment:updated"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 963,
+      "event": "flow_execution:log"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 966,
+      "event": "flow_execution:log"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 969,
+      "event": "flow_execution:updated"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 2483,
+      "event": "appointment:updated"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 2670,
+      "event": "message:created"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 4366,
+      "event": "message:updated"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 4367,
+      "event": "message:updated"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 4484,
+      "event": "message:updated"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 4485,
+      "event": "message:updated"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 4546,
+      "event": "message:updated"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 4547,
+      "event": "message:updated"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 7134,
+      "event": "flow_execution:resumed"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 7202,
+      "event": "flow_execution:resumed"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 7224,
+      "event": "flow_execution:resumed"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 7233,
+      "event": "flow_execution:resumed"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 7562,
+      "event": "flow_execution:engine_start"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 7569,
+      "event": "flow_execution:updated"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 7640,
+      "event": "flow_execution:updated"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 7678,
+      "event": "flow_execution:completed"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 7690,
+      "event": "flow_execution:updated"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 7706,
+      "event": "flow_execution:cancelled"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 7757,
+      "event": "flow_execution:updated"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 7796,
+      "event": "flow_execution:completed"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 7809,
+      "event": "flow_execution:updated"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 7861,
+      "event": "flow_execution:updated"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 7873,
+      "event": "flow_execution:updated"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 7880,
+      "event": "flow_execution:failed"
+    },
+    {
+      "file": "src/services/flowEngineV2.service.js",
+      "line": 7892,
+      "event": "flow_execution:dead_letter"
+    },
+    {
+      "file": "src/services/intakeQuickChatOutbox.service.js",
+      "line": 247,
+      "event": "message:created"
+    },
+    {
+      "file": "src/services/intakeQuickChatOutbox.service.js",
+      "line": 247,
+      "event": "message:updated"
+    },
+    {
+      "file": "src/services/marketingBulkSends.service.js",
+      "line": 132,
+      "event": "message:created"
+    },
+    {
+      "file": "src/services/marketingBulkSends.service.js",
+      "line": 134,
+      "event": "message:created"
+    },
+    {
+      "file": "src/services/marketingBulkSends.service.js",
+      "line": 153,
+      "event": "message:updated"
+    },
+    {
+      "file": "src/services/marketingBulkSends.service.js",
+      "line": 155,
+      "event": "message:updated"
+    },
+    {
+      "file": "src/services/marketingOptOut.service.js",
+      "line": 77,
+      "event": "message:created"
+    },
+    {
+      "file": "src/services/marketingOptOut.service.js",
+      "line": 79,
+      "event": "message:created"
+    },
+    {
+      "file": "src/services/notificationsRealtime.service.js",
+      "line": 7,
+      "event": "notification:created"
+    },
+    {
+      "file": "src/services/notificationsRealtime.service.js",
+      "line": 11,
+      "event": "notification:updated"
+    },
+    {
+      "file": "src/services/socketAccess.service.js",
+      "line": 55,
+      "event": "appointment:deleted"
+    },
+    {
+      "file": "src/workers/queue.workers.js",
+      "line": 624,
+      "event": "message:created"
+    },
+    {
+      "file": "src/workers/queue.workers.js",
+      "line": 627,
+      "event": "message:created"
+    },
+    {
+      "file": "src/workers/queue.workers.js",
+      "line": 651,
+      "event": "message:updated"
+    },
+    {
+      "file": "src/workers/queue.workers.js",
+      "line": 654,
+      "event": "message:updated"
+    },
+    {
+      "file": "src/workers/queue.workers.js",
+      "line": 960,
+      "event": "message:updated"
+    },
+    {
+      "file": "src/workers/queue.workers.js",
+      "line": 962,
+      "event": "message:updated"
+    },
+    {
+      "file": "src/workers/queue.workers.js",
+      "line": 1078,
+      "event": "message:updated"
+    },
+    {
+      "file": "src/workers/queue.workers.js",
+      "line": 1264,
+      "event": "conversation:updated"
+    },
+    {
+      "file": "src/workers/queue.workers.js",
+      "line": 1914,
+      "event": "message:created"
+    },
+    {
+      "file": "src/workers/queue.workers.js",
+      "line": 1917,
+      "event": "message:created"
+    }
+  ]
+}

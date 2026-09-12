@@ -1,5 +1,13 @@
 # Sesiones persistentes: preparación del corte
 
+## Seguimiento 12/09/2026: acceso en tiempo real preparado
+
+La nueva [cohorte de sockets](realtime-access-migration.md) prepara verificación
+por paquete y captura v5. Las limitaciones de sockets citadas más abajo son el
+estado histórico de este lote; la cobertura nueva tampoco implica despliegue
+ni auditoría completa de REST/membresías. Actualizar writer/reader a v5 antes de
+habilitar su captura; mantener las puertas de aprobación de ambos contratos.
+
 12/09/2026. Implementado y probado con usuarios ficticios; **no desplegado ni
 activado**. La BD compartida y PM2 no se han modificado. Los JWT de usuario
 siguen siendo independientes de la identidad Ed25519 del broker.

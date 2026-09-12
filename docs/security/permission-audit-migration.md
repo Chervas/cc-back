@@ -1,5 +1,13 @@
 # Auditoría de políticas de acceso y límites de grupo
 
+## Seguimiento 12/09/2026: acceso en tiempo real preparado
+
+La nueva [cohorte de sockets](realtime-access-migration.md) prepara verificación
+por paquete y captura v5. Las limitaciones de sockets citadas más abajo son el
+estado histórico de este lote; la cobertura nueva tampoco implica despliegue
+ni auditoría completa de REST/membresías. Actualizar writer/reader a v5 antes de
+habilitar su captura; mantener las puertas de aprobación de ambos contratos.
+
 12/09/2026. Octavo bloque preparado con QA ficticia. **Sin desplegar, activar
 captura, modificar permisos reales ni ejecutar migraciones compartidas.**
 Sigue abierto el alcance completo del prompt y del runbook de seguridad.

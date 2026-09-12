@@ -1,5 +1,30 @@
 > **Módulo:** Arquitectura del Backend
 
+## 2026-09-12 — Acceso en tiempo real y auditoría v5 preparados
+
+`socket-realtime-guard` reemplaza la autorización de salas calculada una vez:
+suscripciones consultan membresías/directores vigentes; cada paquete resuelve
+su recurso en BD y verifica permisos de su categoría, incluso en salas de
+usuario o broadcast. Grupos exigen todas sus clínicas. `subscribe` admite hasta
+100 IDs enteros positivos y ACK opcional `{status:ready|invalid|denied,clinicIds}`;
+una selección denegada queda vacía, sin fallback a todas. Sesiones se verifican
+antes de la operación y antes de emitir; generaciones descartan trabajos viejos.
+
+`PLATFORM_AUDIT_REALTIME_ENABLED` apagado conserva el control de acceso;
+true prepara eventos v5 `realtime.subscribe`/`realtime.read`, intento/resultado
+durables sin contenido ni JWT. `packet_prepared` no confirma recepción. El visor conserva
+milisegundos UTC en snapshot/cursor para no perder eventos del mismo segundo.
+Proyección cerrada de 21 eventos; elimina metadata abierta/errores/snapshots,
+preserva el sobre interno Redis. QuickChat reconcilia por REST el chat activo
+con debounce y cancelación; visor añade filtros y recurso/clínicas de v5.
+
+Sin migración nueva, activación ni despliegue. Requiere sesiones/outbox
+previos y writer/reader v5; medir capacidad y coste antes de aprobar el corte.
+No certifica toda la autorización REST ni toda la auditoría de plataforma.
+Contrato: `back-dev/docs/security/realtime-access-migration.md` e inventario
+`realtime-event-inventory.json`. Conservar guard, hotfix, pausas y datos de
+auditoría al volver atrás. No ejecutar el corte por publicar código.
+
 ## 2026-09-12 — Políticas de acceso: límites de grupo y auditoría preparada
 
 Las cuatro rutas `/api/access-policies` preparan auditoría v4 con

@@ -1,5 +1,13 @@
 # Lector, visor y conciliación de auditoría
 
+## Seguimiento 12/09/2026: acceso en tiempo real preparado
+
+La nueva [cohorte de sockets](realtime-access-migration.md) prepara verificación
+por paquete y captura v5. Las limitaciones de sockets citadas más abajo son el
+estado histórico de este lote; la cobertura nueva tampoco implica despliegue
+ni auditoría completa de REST/membresías. Actualizar writer/reader a v5 antes de
+habilitar su captura; mantener las puertas de aprobación de ambos contratos.
+
 ## Ampliación v4 preparada (12/09/2026)
 
 El octavo bloque admite eventos de políticas de acceso bajo `app/platform/v4/`

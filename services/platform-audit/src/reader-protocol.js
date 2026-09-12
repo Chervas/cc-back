@@ -8,7 +8,7 @@ const safe = error => CODES.has(error?.code) ? error.code : 'audit_reader_unavai
 function exact(v, keys) { if (!v || Object.getPrototypeOf(v) !== Object.prototype || Object.keys(v).length !== keys.length || keys.some(k => !Object.hasOwn(v, k))) fail(); }
 function refFor(v, mode) {
   exact(v, ['key', 'digest', 'versionId']);
-  const match = typeof v.key === 'string' && /^app\/platform\/v([1234])\/(20\d\d-\d\d-\d\d)\/([a-f0-9-]{36})-([a-f0-9]{64})\.json$/.exec(v.key);
+  const match = typeof v.key === 'string' && /^app\/platform\/v([12345])\/(20\d\d-\d\d-\d\d)\/([a-f0-9-]{36})-([a-f0-9]{64})\.json$/.exec(v.key);
   if (!match || !UUID.test(match[3]) || v.digest !== match[4] || !Number.isFinite(Date.parse(match[2] + 'T00:00:00Z'))
     || new Date(match[2] + 'T00:00:00Z').toISOString().slice(0, 10) !== match[2]) fail();
   if (mode === 'reconcile' ? v.versionId !== null : typeof v.versionId !== 'string' || !/^[A-Za-z0-9_.+/=-]{1,1024}$/.test(v.versionId) || v.versionId === 'null') fail();

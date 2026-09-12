@@ -6,8 +6,11 @@ const { criteriaFor, cursorCodec } = require('../../services/platform-audit/src/
 function fail(code, status) { throw Object.assign(Error(code), { code, status }); }
 function createView({ model, audit, reader, codec, now = () => new Date() }) {
   async function page(criteria, state) {
-    const replacements = { from: new Date(criteria.from + 'T00:00:00Z'), to: new Date(Date.parse(criteria.to) + 86400000),
-      snapshot: new Date(state.snapshot), action: criteria.action, userId: criteria.userId, lastAt: state.lastAt && new Date(state.lastAt), lastId: state.lastId };
+    // Untyped Date replacements in Sequelize/MySQL discard milliseconds. Keep the
+    // validated UTC DATETIME(3) precision for snapshots and keyset boundaries.
+    const sqlStamp = value => new Date(value).toISOString().replace('T', ' ').replace('Z', '');
+    const replacements = { from: sqlStamp(criteria.from + 'T00:00:00Z'), to: sqlStamp(Date.parse(criteria.to) + 86400000),
+      snapshot: sqlStamp(state.snapshot), action: criteria.action, userId: criteria.userId, lastAt: state.lastAt && sqlStamp(state.lastAt), lastId: state.lastId };
     const rows = await model.sequelize.query('SELECT /*+ MAX_EXECUTION_TIME(1500) */ event_id, occurred_at, body, digest, receipt '
       + 'FROM PlatformAuditEvents WHERE state=\'delivered\' AND delivered_at <= :snapshot AND occurred_at >= :from AND occurred_at < :to '
       + (criteria.action ? "AND JSON_UNQUOTE(JSON_EXTRACT(body,'$.action'))=:action " : '')
@@ -70,6 +73,7 @@ function createView({ model, audit, reader, codec, now = () => new Date() }) {
           permission: v.version === 4 ? { featureKey: v.featureKey, roleCode: v.roleCode, previousEffect: v.previousEffect,
             requestedEffect: v.requestedEffect, authorizationBasis: v.authorizationBasis, scopeClinicCount: v.scopeClinicCount,
             authorizationPolicyVersion: v.authorizationPolicyVersion } : null,
+          realtime: v.version === 5 ? { socketEvent: v.socketEvent, resourceType: v.resource.type, resourceId: v.resource.id, clinicIds: v.clinicIds } : null,
           verification: 's3_version_verified' })) };
     },
   };

@@ -16,7 +16,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   models.PlatformAuditEvent = require('../../../models/platformauditevent')(sql, DataTypes);
   const repo = require('../../services/platformAudit.repository').createRepository(models.PlatformAuditEvent);
   const { createView } = require('../../services/platformAudit.view');
-  const objects = new Map(); let writes = 0; let gets = 0; let at = new Date('2026-09-12T12:00:00.000Z'); const now = () => at;
+  const objects = new Map(); let writes = 0; let gets = 0; let at = new Date('2026-09-12T12:00:00.900Z'); const now = () => at;
   const writer = createWriter({ send: async command => {
     assert.equal(command.constructor.name, 'PutObjectCommand'); const version = 'fixture-' + (++writes);
     const object = { Body: command.input.Body, ContentLength: Buffer.byteLength(command.input.Body), ContentType: 'application/json',
@@ -35,7 +35,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const sessionRef = randomUUID(); const criteria = { from: '2026-09-12', to: '2026-09-12' };
   const codec = cursorCodec(randomBytes(32)); const view = createView({ model: models.PlatformAuditEvent, audit: repo, reader, codec, now });
   for (let i = 0; i < 52; i++) {
-    const e = fixture({ occurredAt: new Date(at.getTime() - (1000 + i * 1000)).toISOString(), actor: { type: 'user', id: i % 2 ? '123' : '456' } });
+    const e = fixture({ occurredAt: new Date(at.getTime() - (1000 + i * 5)).toISOString(), actor: { type: 'user', id: i % 2 ? '123' : '456' } });
     await repo.append(e); const row = await repo.claim(at); await repo.acknowledge(row, await writer.write(row), at);
   }
   const first = await view.read({ actorId: 1, sessionRef, query: criteria }); assert.equal(first.events.length, 25); assert(first.nextCursor);
@@ -53,7 +53,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const second = await view.read({ actorId: 1, sessionRef, query: { ...criteria, cursor: first.nextCursor } }); assert.equal(second.events.length, 25);
   const third = await view.read({ actorId: 1, sessionRef, query: { ...criteria, cursor: second.nextCursor } }); assert.equal(third.events.length, 2); assert.equal(third.nextCursor, null);
   const ids = [...first.events, ...second.events, ...third.events].map(v => v.eventId); assert.equal(new Set(ids).size, 52); assert(!ids.includes(late.event.eventId));
-  report.checks.push('keyset pages 25/25/2 do not duplicate events; delivery after the cursor snapshot remains excluded');
+  report.checks.push('millisecond snapshots and 52 events in one second paginate 25/25/2 without loss or duplicates; later delivery stays excluded');
   const filtered = await view.read({ actorId: 44, sessionRef, query: { ...criteria, userId: '456', action: 'auth.sign_in' } });
   assert(filtered.events.every(v => v.actorId === '456')); assert.equal(filtered.events.length, 25);
   const beforeDenied = gets;

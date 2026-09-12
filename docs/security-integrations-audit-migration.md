@@ -1,5 +1,16 @@
 # Runbook: Migracion Segura De Integraciones Y Auditoria
 
+## Noveno bloque: acceso en tiempo real preparado (12/09/2026)
+
+[Contrato y corte](security/realtime-access-migration.md): permisos del recurso
+reevaluados para cada destinatario, suscripciones actuales, proyección cerrada
+y captura v5 apagada. Sesión/permisos se repiten tras persistir auditoría y
+antes de enviar. Bus interno y pausas conservados. QA ficticia, sin despliegue,
+AWS ni migración compartida. Writer/reader v5 antes de activar captura;
+medir carga SQL y volumen por pestaña. El registro prueba preparación, no
+recepción del paquete. REST, escritores de membresía y cohortes reales siguen
+pendientes. Las notas anteriores sobre sockets describen el bloque anterior.
+
 ## Octavo bloque preparado: políticas de acceso (12/09/2026)
 
 [Contrato y lote](security/permission-audit-migration.md): corrige lectura de
