@@ -360,6 +360,12 @@ function hasSameMetaFacingContent(template, instance) {
   );
 }
 
+function hasSameProviderAcceptedContent(template, instance) {
+  if (!template || !instance) return false;
+  return stringifyComparableTemplateComponents(template.components)
+    === stringifyComparableTemplateComponents(instance.components);
+}
+
 function hasSameMetaFacingContract(template, instance) {
   if (!template || !instance) return false;
   return (
@@ -569,7 +575,7 @@ function findSameContractRemoteTemplate({ familyRows, wabaId, template }) {
         String(row?.waba_id || '') === safeWabaId &&
         hasRemoteIdentity &&
         ![WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING, WHATSAPP_TEMPLATE_STATUS.DISCONNECTED].includes(status) &&
-        hasSameMetaFacingContent(template, row)
+        hasSameProviderAcceptedContent(template, row)
       );
     })
     .sort((left, right) => {
@@ -1272,7 +1278,7 @@ function isApprovedCurrentCatalogSibling(row, catalog, sourceId = null) {
     && cleanString(row.meta_template_id)
     && normalizeWhatsappLocale(row.language, { fallback: 'es' }) === normalizeWhatsappLocale(getCatalogTemplateLanguage(catalog), { fallback: 'es' })
     && isTechnicalTemplateFamilyName(getCatalogTechnicalFamilyName(catalog), row.name)
-    && hasSameMetaFacingContent(catalog, row)
+    && hasSameProviderAcceptedContent(catalog, row)
   );
 }
 
@@ -1815,7 +1821,7 @@ async function runStalePendingTemplateResubmission(payload = {}) {
   }
 
   const catalog = await WhatsappTemplateCatalog.findByPk(source.catalog_template_id);
-  if (!catalog || !catalog.is_active || !hasSameMetaFacingContent(catalog, source)) {
+  if (!catalog || !catalog.is_active || !hasSameProviderAcceptedContent(catalog, source)) {
     const cancellation = await cancelPlannedReplacement({
       source,
       replacementTemplateId: plannedReplacementTemplateId,
@@ -1866,7 +1872,7 @@ async function runStalePendingTemplateResubmission(payload = {}) {
     cleanString(item?.status).toUpperCase() === WHATSAPP_TEMPLATE_STATUS.APPROVED
     && normalizeWhatsappLocale(item?.language, { fallback: 'es' }) === normalizeWhatsappLocale(getCatalogTemplateLanguage(catalog), { fallback: 'es' })
     && isTechnicalTemplateFamilyName(getCatalogTechnicalFamilyName(catalog), item?.name)
-    && hasSameMetaFacingContent(catalog, item)
+    && hasSameProviderAcceptedContent(catalog, item)
     && cleanString(item?.id) !== cleanString(remoteReplacement?.id)
   ));
   if (remoteApprovedSibling) {
@@ -1892,7 +1898,7 @@ async function runStalePendingTemplateResubmission(payload = {}) {
     };
   }
   let preparedTemplate = null;
-  if (remoteReplacement && !hasSameMetaFacingContent(catalog, remoteReplacement)) {
+  if (remoteReplacement && !hasSameProviderAcceptedContent(catalog, remoteReplacement)) {
     const error = new Error('stale_pending_replacement_name_contract_conflict');
     await recordAutoResubmitError(source.id, error);
     throw error;
@@ -1954,7 +1960,7 @@ async function runStalePendingTemplateResubmission(payload = {}) {
     cleanString(item?.status).toUpperCase() === WHATSAPP_TEMPLATE_STATUS.APPROVED
     && normalizeWhatsappLocale(item?.language, { fallback: 'es' }) === normalizeWhatsappLocale(getCatalogTemplateLanguage(catalog), { fallback: 'es' })
     && isTechnicalTemplateFamilyName(getCatalogTechnicalFamilyName(catalog), item?.name)
-    && hasSameMetaFacingContent(catalog, item)
+    && hasSameProviderAcceptedContent(catalog, item)
     && cleanString(item?.id) !== cleanString(remoteReplacement.id)
   ));
   if (lateApprovedSibling) {

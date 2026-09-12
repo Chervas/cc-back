@@ -1893,8 +1893,11 @@ function buildDeterministicClassifyIntentOutput(context = {}) {
   const reschedule = !negatedReschedule && (directReschedule || scheduleConflict);
   const negatedConfirmation = /\b(?:no (?:puedo|quiero|voy a|he podido )?(?:confirmar|confirmo|confirmado|confirmada)|no (?:asistire|acudire|ire|voy a ir)|todavia no (?:confirmo|puedo confirmar))\b/.test(text);
   const explicitConfirmation = !negatedConfirmation
-    && /\b(confirmado|confirmo|confirmada|si asistire|voy a ir|alli estare|ahi estare|estare alli|estare ahi)\b/.test(text);
-  const shortAcknowledgementPattern = /^(si|ok|okay|vale|gracias|muchas gracias|entendido|correcto|de acuerdo|perfecto)$/;
+    && (
+      /\b(confirmado|confirmo|confirmada|si asistire|voy a ir|alli estare|ahi estare|estare alli|estare ahi)\b/.test(text)
+      || /^(?:si )?(?:podre ir|puedo ir|ire|asistire|acudire)(?: hoy| manana)?$/.test(text)
+    );
+  const shortAcknowledgementPattern = /^(si|si lo es|si loes|ok|okay|vale|gracias|muchas gracias|entendido|correcto|de acuerdo|perfecto)$/;
   const shortAcknowledgement = shortAcknowledgementPattern.test(text);
   const responseLines = (
     Array.isArray(responseContext.response_lines)
@@ -1987,6 +1990,55 @@ function buildDeterministicClassifyIntentOutput(context = {}) {
     _ai_model: 'classify_intent_clear_signal',
     _ai_analysis_mode: 'rule',
   }, context);
+}
+
+function buildDeterministicStructuredConfirmAppointmentOutput(context = {}) {
+  const confirmation = buildDeterministicClassifyIntentOutput(context);
+  if (
+    confirmation?.intencion_principal !== 'confirmar_cita'
+    || confirmation?.intencion_secundaria
+    || confirmation?.necesita_respuesta
+    || !confirmation?.accion_inequivoca
+  ) {
+    return null;
+  }
+
+  return {
+    confirma_asistencia: true,
+    confianza_confirma_asistencia: Math.max(0.99, Number(confirmation.confianza) || 0),
+    requiere_respuesta: false,
+    confianza_requiere_respuesta: 0.99,
+    motivo: confirmation.motivo,
+    confianza_motivo: 0.99,
+    _ai_provider: 'deterministic_rule',
+    _ai_model: 'confirm_appointment_clear_affirmation',
+    _ai_analysis_mode: 'rule',
+  };
+}
+
+function enforceClearConfirmationInvariant(output = {}, context = {}) {
+  const confirmation = buildDeterministicClassifyIntentOutput(context);
+  if (
+    confirmation?.intencion_principal !== 'confirmar_cita'
+    || confirmation?.intencion_secundaria
+    || confirmation?.necesita_respuesta
+    || !confirmation?.accion_inequivoca
+  ) {
+    return output;
+  }
+
+  return {
+    ...output,
+    intencion_principal: 'confirmar_cita',
+    intencion_secundaria: '',
+    confianza: Math.max(0.99, Number(confirmation.confianza) || 0),
+    confianza_intencion_principal: Math.max(0.99, Number(confirmation.confianza) || 0),
+    accion_inequivoca: true,
+    posible_urgencia: false,
+    necesita_respuesta: false,
+    motivo: confirmation.motivo,
+    _ai_guardrail: 'clear_confirmation',
+  };
 }
 
 async function persistClassifyIntentState(execution, targets, output) {
@@ -6796,8 +6848,9 @@ async function processNode(node, context, runtime = {}) {
           _ai_model: result.model || null,
         }))
         : presetKey === 'confirm_appointment'
-          && !usesStructuredConfirmAppointmentContract(config)
-        ? buildDeterministicConfirmAppointmentOutput(aiContext)
+        ? (usesStructuredConfirmAppointmentContract(config)
+            ? buildDeterministicStructuredConfirmAppointmentOutput(aiContext)
+            : buildDeterministicConfirmAppointmentOutput(aiContext))
         : null;
       if (deterministicPresetOutput) {
         const presetNormalizedOutput = presetKey === 'classify_intent'
@@ -6885,6 +6938,7 @@ async function processNode(node, context, runtime = {}) {
 
       if (presetKey === 'classify_intent') {
         aiOutput = normalizeClassifyIntentOutput(aiOutput, aiContext);
+        aiOutput = enforceClearConfirmationInvariant(aiOutput, aiContext);
       }
       aiOutput = normalizeConfiguredAiOutput(aiOutput, normalizedOutputFields);
       if (presetKey === 'classify_intent') {
@@ -7941,6 +7995,7 @@ module.exports = {
   scoreWhatsappTemplateCandidate,
   selectBestWhatsappTemplateCandidate,
   buildDeterministicConfirmAppointmentOutput,
+  buildDeterministicStructuredConfirmAppointmentOutput,
   buildDeterministicClassifyIntentOutput,
   buildScopedClassifyIntentConversation,
   hasAppliedAppointmentIntent,

@@ -298,6 +298,41 @@ async function testCanonicalIntentRunsThroughTheRealAiNode() {
   assert.equal(calls, 2);
 }
 
+async function testClearConfirmationGuardRejectsInventedQuestions() {
+  const aiNode = buildMessageReceivedTemplateNodes()
+    .find((node) => node.type === 'condition/ai_analysis');
+  let calls = 0;
+  const originalAnalyzeStructured = aiOrchestrator.analyzeStructured;
+  aiOrchestrator.analyzeStructured = async () => {
+    calls += 1;
+    return {
+      intencion_principal: 'otra',
+      intencion_secundaria: '',
+      confianza_intencion_principal: 0.91,
+      accion_inequivoca: false,
+      posible_urgencia: false,
+      necesita_respuesta: true,
+      motivo: 'El paciente formula una pregunta adicional.',
+      _ai_provider: 'bedrock_test',
+    };
+  };
+  try {
+    const result = await flowEngine._processNode(
+      aiNode,
+      contextWithConversation('Sí podré ir'),
+      { simulation: false },
+    );
+    assert.equal(result.output.intencion_principal, 'confirmar_cita');
+    assert.equal(result.output.intencion_secundaria, '');
+    assert.equal(result.output.accion_inequivoca, true);
+    assert.equal(result.output.necesita_respuesta, false);
+    assert.equal(result.output._ai_guardrail, 'clear_confirmation');
+  } finally {
+    aiOrchestrator.analyzeStructured = originalAnalyzeStructured;
+  }
+  assert.equal(calls, 1);
+}
+
 function testAiRoutingKeepsPresetSemantics() {
   const node = { outputs: { on_success: 'N-success', on_fail: 'N-fail' } };
   assert.equal(
@@ -345,22 +380,30 @@ async function testBinaryConfirmationPresetIsExecutable() {
   };
   const originalAnalyzeStructured = aiOrchestrator.analyzeStructured;
   try {
-    aiOrchestrator.analyzeStructured = async () => ({
-      confirma_asistencia: true,
-      confianza_confirma_asistencia: 0.97,
-      requiere_respuesta: false,
-      confianza_requiere_respuesta: 0.96,
-      motivo: 'Confirmación expresa.',
-      confianza_motivo: 0.95,
-    });
-    const confirmed = await flowEngine._processNode(
-      node,
-      contextWithConversation('Sí, confirmo.'),
-      { simulation: false },
-    );
-    assert.equal(confirmed.next_node_id, 'N-success');
-    assert.equal(confirmed.output.confirma_asistencia, true);
-    assert.equal(confirmed.output.requiere_respuesta, false);
+    let providerCalls = 0;
+    aiOrchestrator.analyzeStructured = async () => {
+      providerCalls += 1;
+      return {
+        confirma_asistencia: true,
+        confianza_confirma_asistencia: 0.97,
+        requiere_respuesta: true,
+        confianza_requiere_respuesta: 0.96,
+        motivo: 'El paciente también pregunta si tiene que llevar algo.',
+        confianza_motivo: 0.95,
+      };
+    };
+    for (const response of ['Sí', 'Si loes', 'Sí podré ir']) {
+      const confirmed = await flowEngine._processNode(
+        node,
+        contextWithConversation(response),
+        { simulation: false },
+      );
+      assert.equal(confirmed.next_node_id, 'N-success');
+      assert.equal(confirmed.output.confirma_asistencia, true);
+      assert.equal(confirmed.output.requiere_respuesta, false);
+      assert.equal(confirmed.output._ai_provider, 'deterministic_rule');
+    }
+    assert.equal(providerCalls, 0);
 
     aiOrchestrator.analyzeStructured = async () => ({
       confirma_asistencia: false,
@@ -1507,6 +1550,7 @@ async function run() {
   testBufferedAcknowledgementUsesTheListenedPromptOnly();
   await testAiFallbackNeverReceivesHistoricalPatientMessages();
   await testCanonicalIntentRunsThroughTheRealAiNode();
+  await testClearConfirmationGuardRejectsInventedQuestions();
   testAiRoutingKeepsPresetSemantics();
   await testBinaryConfirmationPresetIsExecutable();
   await testOnlyObsoleteAppointmentPresetIsRejectedOnPublish();
