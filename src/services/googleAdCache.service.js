@@ -1,12 +1,15 @@
 'use strict';
 
 const { Op } = require('sequelize');
+const { googleAdDeliveryObservation } = require('./googleAdDelivery.service');
 
 const ID = /^[1-9]\d{0,63}$/;
 const RESOURCE_FIELDS = ['customer.id', 'campaign.id', 'campaign.name', 'campaign.status', 'ad_group.id', 'ad_group.name',
   'ad_group.status', 'ad_group_ad.status', 'ad_group_ad.ad.id', 'ad_group_ad.ad.name', 'ad_group_ad.ad.type'];
 const CREATIVE_FIELDS = ['ad_group_ad.ad.final_urls', 'ad_group_ad.ad.final_mobile_urls',
   'ad_group_ad.ad.responsive_search_ad.headlines', 'ad_group_ad.ad.responsive_search_ad.descriptions'];
+const DELIVERY_FIELDS = ['ad_group_ad.primary_status', 'ad_group_ad.primary_status_reasons',
+  'ad_group_ad.policy_summary.approval_status', 'ad_group_ad.policy_summary.review_status'];
 const METRIC_FIELDS = ['segments.date', 'segments.ad_network_type', 'segments.device',
   'metrics.impressions', 'metrics.clicks', 'metrics.cost_micros', 'metrics.conversions'];
 
@@ -61,7 +64,7 @@ function metric(value, integer = false) {
 
 function buildAdQuery({ campaignId = null, start, end, inventory = false }) {
   if (campaignId !== null) identifier(campaignId);
-  const fields = [...RESOURCE_FIELDS, ...(inventory ? CREATIVE_FIELDS : METRIC_FIELDS)];
+  const fields = [...RESOURCE_FIELDS, ...(inventory ? [...CREATIVE_FIELDS, ...DELIVERY_FIELDS] : METRIC_FIELDS)];
   const conditions = ["ad_group_ad.status IN ('ENABLED', 'PAUSED', 'REMOVED')"];
   if (campaignId) conditions.push(`campaign.id = ${campaignId}`);
   if (!inventory) {
@@ -90,16 +93,19 @@ async function readAdPages({ account, accessToken, loginCustomerId, query, reque
 }
 
 // HTTP completes before the transaction. A row lock and observation timestamps fence overlapping refreshes.
-async function persistAdSnapshot({ models, account, inventoryRows, metricRows, start, end, campaignId = null, observedAt }) {
+async function persistAdSnapshot({ models, account, inventoryRows, metricRows, start, end, campaignId = null, observedAt, beforeReplace, afterReplace }) {
   const days = daysBetween(start, end);
   identifier(account.id);
+  if (!['clinic', 'group'].includes(account.assignmentScope)) fail('google_ad_cache_invalid_scope');
+  identifier(account.assignmentScope === 'group' ? account.grupoClinicaId : account.clinicaId);
   if (!Number.isFinite(+new Date(observedAt))) fail('google_ad_cache_invalid_observation');
   const identity = { clinicGoogleAdsAccountId: account.id, customerId: identifier(String(account.customerId).replace(/-/g, '')) };
   if (campaignId !== null) campaignId = identifier(campaignId);
   const scope = { ...identity, ...(campaignId ? { campaignId } : {}) };
   const seen = new Set();
   const inventory = inventoryRows.map(row => {
-    const value = { ...normalizeAd(row, account, campaignId), present: true, observedAt };
+    const value = { ...normalizeAd(row, account, campaignId), present: true, observedAt,
+      deliveryObservation: googleAdDeliveryObservation(row.adGroupAd || row.ad_group_ad || {}, observedAt) };
     const key = `${value.campaignId}:${value.adGroupId}:${value.adId}`;
     if (seen.has(key)) fail('google_ad_cache_duplicate_inventory');
     seen.add(key); return value;
@@ -116,7 +122,7 @@ async function persistAdSnapshot({ models, account, inventoryRows, metricRows, s
     const key = JSON.stringify([ad.campaignId, ad.adGroupId, ad.adId, date, network, device]);
     if (metricKeys.has(key)) fail('google_ad_cache_duplicate_metrics');
     metricKeys.add(key);
-    const { adGroupStatus, present, observedAt: ignored, ...fields } = cached;
+    const { adGroupStatus, present, deliveryObservation, observedAt: ignored, ...fields } = cached;
     const impressions = metric(values.impressions, true); const clicks = metric(values.clicks, true);
     return { ...fields, date, network, device, impressions, clicks,
       costMicros: metric(values.costMicros ?? values.cost_micros, true), conversions: metric(values.conversions), ctr: impressions ? clicks / impressions : 0,
@@ -125,35 +131,58 @@ async function persistAdSnapshot({ models, account, inventoryRows, metricRows, s
   return models.sequelize.transaction(async transaction => {
     const current = await models.ClinicGoogleAdsAccount.findByPk(account.id, { transaction, lock: transaction.LOCK.UPDATE });
     if (!current?.isActive || String(current.customerId).replace(/-/g, '') !== identity.customerId
-      || current.googleConnectionId !== account.googleConnectionId) fail('google_ad_cache_account_changed');
+      || current.googleConnectionId !== account.googleConnectionId
+      || ['assignmentScope', 'clinicaId', 'grupoClinicaId'].some(field => (current[field] ?? null) !== (account[field] ?? null))) fail('google_ad_cache_account_changed');
+    const findGrants = where => models.GoogleConnectionAssignment.findAll({ where,
+      attributes: ['googleConnectionId', 'status'], raw: true, transaction, lock: transaction.LOCK.UPDATE });
+    let grants = await findGrants({ assignmentScope: current.assignmentScope,
+      ...(current.assignmentScope === 'group' ? { grupoClinicaId: current.grupoClinicaId } : { clinicaId: current.clinicaId }) });
+    // A direct revoked/disconnected grant blocks inheritance; absence may inherit the same group's grant.
+    if (!grants.length && current.assignmentScope === 'clinic' && current.grupoClinicaId) {
+      grants = await findGrants({ assignmentScope: 'group', grupoClinicaId: current.grupoClinicaId });
+    }
+    if (grants.length !== 1 || grants[0].googleConnectionId !== current.googleConnectionId || grants[0].status !== 'active') fail('google_ad_cache_grant_changed');
     const coverage = await models.GoogleAdsAdSyncDay.findAll({ where: { ...identity,
       ...(campaignId ? { campaignId: { [Op.in]: ['', campaignId] } } : {}) }, raw: true, transaction });
-    const latestInventory = await models.GoogleAdsAdInventory.findOne({ where: scope, order: [['observedAt', 'DESC']], raw: true, transaction });
+    const latestInventory = await models.GoogleAdsAdInventory.findOne({ where: scope, attributes: ['observedAt'], order: [['observedAt', 'DESC']], raw: true, transaction });
     if ([...coverage, latestInventory].filter(Boolean).some(row => +new Date(row.observedAt) > +new Date(observedAt))) {
       return { skipped: true, reason: 'newer_snapshot', inventoryRows: 0, metricRows: 0 };
     }
+    const aliases = [identity.customerId, `${identity.customerId.slice(0, 3)}-${identity.customerId.slice(3, 6)}-${identity.customerId.slice(6)}`];
     const assignments = await models.ExternalCampaignAssignment.findAll({ where: { provider: 'google_ads',
-      customer_id: identity.customerId, ...(campaignId ? { campaign_id: campaignId } : {}) }, raw: true, transaction });
+      customer_id: { [Op.in]: aliases }, ...(campaignId ? { campaign_id: campaignId } : {}) }, raw: true, transaction, lock: transaction.LOCK.UPDATE });
+    const clinics = await models.Clinica.findAll({ where: current.assignmentScope === 'group'
+      ? { grupoClinicaId: current.grupoClinicaId } : { id_clinica: current.clinicaId },
+    attributes: ['id_clinica', 'grupoClinicaId'], raw: true, transaction, lock: transaction.LOCK.UPDATE });
+    const allowed = new Set(clinics.map(clinic => clinic.id_clinica));
+    if (!allowed.size || current.assignmentScope === 'clinic' && current.grupoClinicaId
+      && clinics.some(clinic => clinic.grupoClinicaId !== current.grupoClinicaId)
+      || assignments.some(assignment => assignment.status === 'active' && !allowed.has(assignment.clinica_id))) fail('google_ad_cache_assignment_outside_scope');
     for (const row of metrics) {
       const decisions = assignments.filter(item => item.campaign_id === row.campaignId);
       row.clinicaId = decisions.length ? (decisions.length === 1 && decisions[0].status === 'active' ? decisions[0].clinica_id : null)
         : current.assignmentScope === 'clinic' ? current.clinicaId : null;
       row.grupoClinicaId = current.grupoClinicaId || null;
     }
+    const metricWhere = { ...scope, date: { [Op.in]: days } };
+    if (beforeReplace) await beforeReplace({ transaction, inventoryWhere: { ...scope },
+      metricWhere: { ...scope, date: { [Op.in]: [...days] } },
+      coverageWhere: { ...identity, campaignId: campaignId || '', date: { [Op.in]: [...days] } } });
     await models.GoogleAdsAdInventory.update({ present: false, observedAt }, { where: scope, transaction, silent: true });
     if (inventory.length) await models.GoogleAdsAdInventory.bulkCreate(inventory, { transaction,
       updateOnDuplicate: ['campaignName', 'campaignStatus', 'adGroupName', 'adGroupStatus', 'adName', 'adType', 'adStatus',
-        'finalUrl', 'displayUrl', 'headlines', 'descriptions', 'present', 'observedAt', 'updated_at'] });
-    await models.GoogleAdsAdInsightsDaily.destroy({ where: { ...scope, date: { [Op.in]: days } }, transaction });
+        'deliveryObservation', 'finalUrl', 'displayUrl', 'headlines', 'descriptions', 'present', 'observedAt', 'updated_at'] });
+    await models.GoogleAdsAdInsightsDaily.destroy({ where: metricWhere, transaction });
     if (metrics.length) await models.GoogleAdsAdInsightsDaily.bulkCreate(metrics, { transaction });
     await models.GoogleAdsAdSyncDay.bulkCreate(days.map(date => ({ ...identity, campaignId: campaignId || '', date, observedAt })),
       { transaction, updateOnDuplicate: ['observedAt', 'updated_at'] });
+    if (afterReplace) await afterReplace({ transaction });
     return { skipped: false, inventoryRows: inventory.length, metricRows: metrics.length, days: days.length };
   });
 }
 
 async function syncGoogleAdCache({ models, account, accessToken, loginCustomerId, start, end, campaignId = null,
-  chunkDays = 7, ensureHistory = false, now = () => new Date(), request = require('../lib/googleAdsClient').googleAdsRequest }) {
+  chunkDays = 7, ensureHistory = false, now = () => new Date(), beforeReplace, request = require('../lib/googleAdsClient').googleAdsRequest }) {
   let days = daysBetween(start, end);
   if (ensureHistory && !campaignId) {
     const historyStart = new Date(+new Date(dateOnly(end)) - 59 * 86400000).toISOString().slice(0, 10);
@@ -174,7 +203,7 @@ async function syncGoogleAdCache({ models, account, accessToken, loginCustomerId
     metricRows.push(...await read(buildAdQuery({ campaignId, start: days[offset], end: days[Math.min(offset + chunkDays - 1, days.length - 1)] })));
     if (metricRows.length > 200000) fail('google_ad_cache_incomplete_pages');
   }
-  return persistAdSnapshot({ models, account, inventoryRows, metricRows, start, end, campaignId, observedAt });
+  return persistAdSnapshot({ models, account, inventoryRows, metricRows, start, end, campaignId, observedAt, beforeReplace });
 }
 
 module.exports = { buildAdQuery, readAdPages, normalizeAd, daysBetween, persistAdSnapshot, syncGoogleAdCache };

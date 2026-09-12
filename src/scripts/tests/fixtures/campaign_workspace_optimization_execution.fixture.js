@@ -4,16 +4,19 @@ const crypto = require('node:crypto');
 const { Op } = require('sequelize');
 const { optimizationChange } = require('../../../services/campaignWorkspaceOptimizationCommand.service');
 const { enqueueOptimizationAdjustment, runOptimizationAdjustmentJob } = require('../../../services/campaignWorkspaceOptimizationExecution.service');
+const { currentProof } = require('./campaign_workspace_current_proof.fixture');
 
 const error = code => Object.assign(new Error(code), { code });
 function matches(row, where) {
   return Reflect.ownKeys(where).every(key => {
     if (key === Op.or) return where[key].some(part => matches(row, part));
     const value = where[key];
-    if (!value || typeof value !== 'object' || value instanceof Date) return row[key] === value;
-    return Reflect.ownKeys(value).every(op => op === Op.ne ? row[key] !== value[op]
-      : op === Op.in ? value[op].includes(row[key]) : op === Op.gt ? row[key] != null && +new Date(row[key]) > +new Date(value[op])
-        : op === Op.lte ? row[key] != null && +new Date(row[key]) <= +new Date(value[op]) : false);
+    const actual = typeof key === 'string' ? key.split('.').reduce((current, name) => current?.[name], row) : row[key];
+    if (!value || typeof value !== 'object' || value instanceof Date) return actual === value;
+    return Reflect.ownKeys(value).every(op => op === Op.ne ? actual !== value[op]
+      : op === Op.in ? value[op].includes(actual) : op === Op.gt ? actual != null && +new Date(actual) > +new Date(value[op])
+        : op === Op.gte ? actual != null && +new Date(actual) >= +new Date(value[op])
+          : op === Op.lte ? actual != null && +new Date(actual) <= +new Date(value[op]) : false);
   });
 }
 
@@ -22,15 +25,18 @@ function fixture(provider = 'google_ads', action = 'adjust_bids') {
   const target = action === 'adjust_budget'
     ? { action, entity: google ? 'campaign_budget' : 'ad_set', id: '50', resource: google ? 'customers/20/campaignBudgets/50' : '50', field: google ? 'amount_micros' : 'daily_budget', unit: google ? 'micros' : 'minor' }
     : { action, entity: google ? 'ad_group' : 'ad_set', id: '50', resource: google ? 'customers/20/adGroups/50' : '50',
-      field: google ? 'cpc_bid_micros' : 'bid_amount', unit: google ? 'micros' : 'minor', strategy: google ? 'MANUAL_CPC' : 'COST_CAP' };
-  const change = optimizationChange({ reference, target, before: '1000', after: '900' });
+      field: google ? 'cpc_bid_micros' : 'bid_amount', unit: google ? 'micros' : 'minor', strategy: google ? 'MANUAL_CPC' : 'LOWEST_COST_WITH_BID_CAP' };
+  const change = optimizationChange({ reference, target, before: '1000', after: '950' });
   const setting = { id: crypto.randomUUID(), scope_type: 'clinic', scope_id: 1, activation: { optimization: {
     id: crypto.randomUUID(), status: 'active', authorization: { clinic_ids: [1] } } } };
-  const evidence = { schema_version: 1, rule: action === 'adjust_budget' ? 'budget_efficiency' : 'bid_efficiency',
-    observed_at: '2026-09-11T12:00:00Z', window_start: '2026-09-01', window_end: '2026-09-10',
-    metrics: { clicks: 120, leads: 2, cost_cents: 10000, baseline_clicks: 120, baseline_leads: 10, baseline_cost_cents: 10000 } };
   const state = { runs: new Map(), jobs: new Map(), remote: change.before, now: new Date('2026-09-11T12:00:00Z'),
     calls: { read: 0, mutate: 0, inspect: 0, authorize: 0 }, permitted: true, failEnqueue: false, lostCommit: false };
+  const source = { entry: { clinic_id: 1, targets: [target] }, limits: { cooldown_hours: 24, monthly_limit_cents: 100000 },
+    context: { reference, campaign: { ...reference, id: 'campaign', clinicId: 1, assigned: true },
+      grant: { connection: { id: 1, accessToken: 'fixture-only' }, grantFingerprint: 'a'.repeat(64), loginCustomerId: null } } };
+  const proof = (command = change, cycle) => currentProof({ setting, scope: { groupId: null, clinicIds: [1] },
+    source, change: command, now: state.now, cycle });
+  const evidence = proof();
   const wrap = source => {
     if (!source) return null;
     const row = { ...structuredClone(source), get: () => structuredClone(source), update: async patch => {
@@ -66,8 +72,7 @@ function fixture(provider = 'google_ads', action = 'adjust_bids') {
       state.calls.authorize++;
       if (!state.permitted) throw error('workspace_optimization_permissions_required');
       if (!(readOnly ? ['active', 'paused'] : ['active']).includes(current.activation.optimization.status)) throw error('workspace_optimization_authorization_required');
-      return { entry: { clinic_id: 1, targets: [target] }, limits: { cooldown_hours: 24, monthly_limit_cents: 100000 },
-        context: { reference: campaign, grant: { connection: { id: 1, accessToken: 'fixture-only' }, loginCustomerId: null } } };
+      return structuredClone(source);
     },
     ensureToken: async () => ({ accessToken: 'fixture-only' }),
     enqueue: async request => {
@@ -77,8 +82,10 @@ function fixture(provider = 'google_ads', action = 'adjust_bids') {
     read: async () => { state.calls.read++; return state.remote; },
     inspect: async () => { state.calls.inspect++; },
     mutate: async () => { state.calls.mutate++; state.remote = change.after; return { acknowledged: true }; },
+    receptionDependencies: { loadInventory: async () => ({ selectedClinics: [1], groups: [] }),
+      loadReception: async () => new Map([['campaign', { reception: { checked: true, ready: true, state: 'verified' } }]]) },
   };
-  return { state, setting, change, evidence, deps,
+  return { state, setting, change, evidence, deps, source, proof,
     enqueue: patch => enqueueOptimizationAdjustment({ settingId: setting.id, mandateId: setting.activation.optimization.id, change, evidence, ...patch }, deps),
     run: async (id = 1, payloadPatch = {}) => {
       const job = state.jobs.get(id); job.status = 'running';

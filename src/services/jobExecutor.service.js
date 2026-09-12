@@ -548,6 +548,12 @@ const JOB_HANDLERS = {
   campaign_workspace_optimization_check: async (payload = {}, jobRequest = null) => (
     require('./campaignWorkspaceOptimizationExecution.service').runOptimizationAdjustmentJob(payload, jobRequest, { readOnly: true })
   ),
+  campaign_workspace_optimization_evaluate: async (payload = {}, jobRequest = null) => (
+    require('./campaignWorkspaceOptimizationEvaluation.service').runOptimizationEvaluation(payload, jobRequest)
+  ),
+  campaign_workspace_destination_check: async (payload = {}, jobRequest = null) => (
+    require('./campaignWorkspaceDestinationRefresh.service').runDestinationRefresh(payload, jobRequest)
+  ),
   business_profile_review_match: async (payload = {}) => googleReviewMatchService.runBusinessProfileReviewMatchJob(payload),
   whatsapp_coexistence_sync_contacts: async (payload = {}) => whatsappCoexistenceService.runContactsSyncJob(payload),
   whatsapp_coexistence_sync_history: async (payload = {}) => whatsappCoexistenceService.runHistorySyncJob(payload),

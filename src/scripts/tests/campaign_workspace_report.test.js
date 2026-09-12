@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { reportPeriod, visibleCampaigns, leadCampaign, aggregateReport } = require('../../services/campaignWorkspaceReport.service');
+const { reportPeriod, visibleCampaigns, leadCampaign, aggregateReport, freshObservation, withFreshGoogleCampaignStates } = require('../../services/campaignWorkspaceReport.service');
 const { externalCampaignIdentityKey } = require('../../services/externalCampaignAssignmentTargets.service');
 
 const now = new Date('2026-09-10T10:00:00Z');
@@ -16,6 +16,28 @@ const lead = (id, more = {}) => ({ id, clinica_id: 1, source: 'google_ads', chan
   google_ads_customer_id: '1234567890', google_ads_campaign_id: '100', created_at: '2026-09-08T10:00:00Z', ...more });
 const fact = (more = {}) => ({ ...identity, date: '2026-09-09', spend: 10, segment: ['1', 'SEARCH', 'MOBILE'], providerConversions: 999, updatedAt: now, ...more });
 const report = (more = {}) => aggregateReport({ campaigns: visible().map(c => ({ ...c, currency: 'EUR' })), period, now, ...more });
+
+test('newer Google metric observations correct stale campaign status without granting reception or changing identity', () => {
+  const original = { ...campaign(), status: 'PAUSED', paused: true, lastSeenAt: '2026-08-12T03:20:00Z', destinationComplete: false };
+  const metric = { customerId: original.account_id, campaignId: original.campaign_id, campaignStatus: 'ENABLED', updated_at: now };
+  const [updated] = withFreshGoogleCampaignStates([original], [metric], now);
+  assert.equal(updated.status, 'ENABLED'); assert.equal(updated.paused, false);
+  assert.equal(updated.id, original.id); assert.equal(updated.clinicId, original.clinicId);
+  assert.equal(updated.destinationComplete, false); assert.equal(original.status, 'PAUSED');
+});
+
+test('old, future, foreign, conflicting or incomplete metric states never become a verified active campaign', () => {
+  const original = { ...campaign(), status: 'PAUSED', paused: true, lastSeenAt: '2026-09-09T10:00:00Z' };
+  const metric = { customerId: original.account_id, campaignId: original.campaign_id, campaignStatus: 'ENABLED', updated_at: now };
+  for (const patch of [{ updated_at: '2026-09-08T00:00:00Z' }, { updated_at: new Date(+now + 1) }, { updated_at: null },
+    { updated_at: original.lastSeenAt }, { customerId: '9999999999' }, { campaignId: '999' }, { campaignStatus: undefined }]) {
+    assert.equal(withFreshGoogleCampaignStates([original], [{ ...metric, ...patch }], now)[0], original);
+  }
+  const [conflict] = withFreshGoogleCampaignStates([original], [metric, { ...metric, campaignStatus: 'PAUSED' }], now);
+  assert.equal(conflict.status, 'UNKNOWN');
+  const meta = { ...original, provider: 'meta_ads' };
+  assert.equal(withFreshGoogleCampaignStates([meta], [metric], now)[0], meta);
+});
 
 test('period uses complete Madrid days with an equal previous window', () => {
   assert.equal(period.start, '2026-09-03'); assert.equal(period.end, '2026-09-09');
@@ -33,6 +55,19 @@ test('period crosses DST by calendar day, not a fixed UTC midnight', () => {
 });
 test('exclusive account includes a new campaign without a second local campaign', () => {
   assert.equal(campaign().assigned, true); assert.equal(campaign().clinicId, 1);
+});
+test('Meta destination failure is projected without internal lease identifiers and cannot retain a complete proof', () => {
+  const base = { provider: 'meta_ads', customer_id: '20', campaign_id: '30', campaign_name: 'First visit',
+    destination_detection: { version: 1, source: 'workspace_meta_graph', kind: 'web', complete: true,
+      checked_at: now.toISOString(), urls: ['https://clinic.example/'], check_status: 'failed',
+      check_error: 'workspace_meta_permissions_required', check_id: 'private-run' } };
+  const options = { mappings: [{ provider: 'meta_ads', accountId: '20', clinicId: 1, groupId: null }], inventory: [base] };
+  const [value] = visible(options);
+  assert.equal(value.destinationComplete, false); assert.equal(value.destination, 'web');
+  assert.deepEqual(value.destinationCheck, { status: 'failed', error: 'workspace_meta_permissions_required' });
+  assert.doesNotMatch(JSON.stringify(value), /private-run/);
+  base.destination_detection.check_error = 'private-error';
+  assert.equal(visible(options)[0].destinationCheck.error, 'workspace_meta_unavailable');
 });
 test('shared account without a reviewed assignment cannot leak into a clinic', () => {
   assert.deepEqual(visible({ mappings: [owner, { ...owner, clinicId: 2 }] }), []);
@@ -66,6 +101,30 @@ test('same campaign id in two accounts does not merge attribution', () => {
   assert.equal(leadCampaign(lead(1, { google_ads_customer_id: null, utm_campaign: '100' }), [campaign(), second]), null);
 });
 test('scope rejects a lead belonging to another clinic', () => assert.equal(leadCampaign(lead(1, { clinica_id: 2 }), visible()), null));
+test('paid web contacts with saved Google campaign IDs count without requiring UTMs or a second campaign', () => {
+  for (const source of ['web', 'call_click']) {
+    const contact = lead(1, { source, utm_source: null, utm_campaign: null });
+    assert.equal(leadCampaign(contact, visible()), campaign().id);
+    assert.equal(leadCampaign({ ...contact, google_ads_customer_id: '123-456-7890' }, visible()), campaign().id);
+    const result = report({ leads: [contact, contact], appointments: [{ id_cita: 1, clinica_id: 1,
+      lead_intake_id: 1, created_at: '2026-09-08T11:00:00Z', estado: 'pendiente' }] });
+    assert.equal(result.current.leads, 1); assert.equal(result.current.appointments, 1);
+    assert.equal(result.current.spend, null);
+    assert.equal(result.rows[0].adAttribution.unattributed.current.leads, 1);
+    assert.equal(require('../../services/leadAdvertisingIdentity.service').canonicalLeadAdvertisingIdentity(contact), null);
+  }
+});
+test('saved web campaign IDs do not override clinic ownership, paid status, conflicts or malformed identity', () => {
+  const contact = lead(1, { source: 'web', utm_source: 'google', utm_campaign: 'Primera visita' });
+  for (const patch of [{ clinica_id: 2 }, { google_ads_customer_id: '9999999999' }, { google_ads_campaign_id: '101' },
+    { google_ads_customer_id: '123a4567890' }, { google_ads_customer_id: '1234567890abc' },
+    { google_ads_campaign_id: '100 OR 1=1' }, { google_ads_campaign_id: null }, { google_ads_customer_id: null },
+    { channel: 'organic' }, { channel: 'unknown' }, { channel: null }, { advertising_identity_conflict: true }]) {
+    assert.equal(leadCampaign({ ...contact, ...patch }, visible()), null, JSON.stringify(patch));
+  }
+  const shared = { ...campaign(), clinicId: null, assigned: false };
+  assert.equal(leadCampaign(contact, [shared]), null);
+});
 test('spend deduplicates account snapshots but retains actual device segments', () => {
   const result = report({ facts: [fact(), fact(), fact({ segment: ['1', 'SEARCH', 'DESKTOP'], spend: 20 })] });
   assert.equal(result.current.spend, 30);
@@ -115,6 +174,39 @@ test('stale performance cannot be green despite enough leads', () => {
   const leads = Array.from({ length: 20 }, (_, i) => lead(i, { created_at: i < 10 ? '2026-09-01T10:00:00Z' : '2026-09-09T10:00:00Z' }));
   const result = report({ leads, facts: [fact({ updatedAt: '2026-08-01' }), fact({ date: '2026-09-01', updatedAt: '2026-08-01' })] });
   assert.equal(result.rows[0].performance, 'insufficient');
+});
+test('metric freshness is finite, not future-dated, and expires at 36 hours', () => {
+  for (const value of [null, '', 'invalid', new Date(+now + 1), new Date(+now - 36 * 3600000)]) assert.equal(freshObservation(value, now), false);
+  for (const value of [now, new Date(+now - 36 * 3600000 + 1)]) assert.equal(freshObservation(value, now), true);
+});
+test('backfilling an old metric date cannot refresh the latest campaign day', () => {
+  const leads = Array.from({ length: 20 }, (_, i) => lead(i, { created_at: i < 10 ? '2026-09-01T10:00:00Z' : '2026-09-09T10:00:00Z' }));
+  const facts = [fact({ updatedAt: '2026-09-08T00:00:00Z' }), fact({ date: '2026-09-01', updatedAt: now })];
+  for (const order of [facts, [...facts].reverse()]) {
+    const result = report({ leads, facts: order }).rows[0];
+    assert.equal(result.coverage.latestMetricDate, period.end);
+    assert.equal(result.coverage.updatedAt, '2026-09-08T00:00:00Z');
+    assert.equal(result.performance, 'insufficient'); assert.equal(result.current.spend, 10);
+  }
+});
+test('latest-day segments keep the oldest observation, and missing or future dates cannot be hidden', () => {
+  const stale = '2026-09-08T00:00:00Z';
+  for (const updatedAt of [stale, null, 'invalid', new Date(+now + 1)]) {
+    const facts = [fact(), fact({ segment: ['1', 'SEARCH', 'DESKTOP'], updatedAt })];
+    for (const order of [facts, [...facts].reverse()]) {
+      const row = report({ facts: order }).rows[0];
+      assert.equal(row.coverage.updatedAt, updatedAt === stale ? stale : null);
+      assert.equal(freshObservation(row.coverage.updatedAt, now), false); assert.equal(row.current.spend, 20);
+    }
+  }
+});
+test('a valid newer metric day supersedes missing observations of older dates', () => {
+  const facts = [fact({ date: '2026-09-08', updatedAt: null }), fact()];
+  for (const order of [facts, [...facts].reverse()]) {
+    const row = report({ facts: order }).rows[0];
+    assert.equal(row.coverage.updatedAt, now); assert.equal(row.coverage.latestMetricDate, period.end);
+    assert.equal(freshObservation(row.coverage.updatedAt, now), true);
+  }
 });
 test('different or unknown currencies never produce a misleading combined investment', () => {
   const second = { ...campaign(), currency: 'USD', id: externalCampaignIdentityKey({ ...identity, campaign_id: '101' }), campaign_id: '101' };

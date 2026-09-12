@@ -22,6 +22,24 @@ function createLeadAdMatcher(campaigns, adsByCampaign) {
   };
 }
 
+function evaluateAdSpendCoverage(row, period, campaignDaily, adDaily) {
+  return Object.fromEntries(['current', 'previous'].map(target => {
+    const campaignSpend = Number.isFinite(row[target].spend) ? row[target].spend : null;
+    const available = row.ads.filter(ad => Number.isFinite(ad[target].spend));
+    const adSpend = available.length ? available.reduce((sum, ad) => sum + ad[target].spend, 0) : null;
+    const completeDays = row.ads.length ? row.ads.reduce((days, ad) => Math.min(days, ad.metricDays?.[target] || 0), period.days) : 0;
+    const campaignDays = row.coverage?.metricDays?.[target] || 0;
+    const difference = campaignSpend === null || adSpend === null ? null : adSpend - campaignSpend;
+    const totalsMatch = difference === null ? null : Math.abs(difference) <= period.days * 0.01 + 1e-9;
+    const mismatchedDays = [...campaignDaily[target]].filter(([date, spend]) => adDaily[target].has(date)
+      && Math.abs(Math.round(spend * 100) - Math.round(adDaily[target].get(date) * 100)) > 1).length;
+    const status = difference === null ? 'unavailable'
+      : available.length !== row.ads.length || completeDays !== period.days || campaignDays !== period.days ? 'incomplete'
+        : !totalsMatch || mismatchedDays ? 'mismatch' : 'matched';
+    return [target, { status, campaignSpend, adSpend, difference, totalsMatch, mismatchedDays, completeDays, campaignDays, expectedDays: period.days }];
+  }));
+}
+
 function evaluateAdComparison(row, period, now = new Date()) {
   const result = { status: 'insufficient', minimumLeads: 10, bestAdId: null };
   if (!row.campaign.assigned) return { ...result, status: 'unassigned' };
@@ -29,6 +47,7 @@ function evaluateAdComparison(row, period, now = new Date()) {
   const active = row.ads.filter(ad => ad.active);
   if (!row.campaign.currency) return { ...result, status: 'unknown_currency' };
   if (active.length < 2) return { ...result, status: 'no_comparison' };
+  if (row.adSpendCoverage?.current?.status !== 'matched') return { ...result, status: 'incomplete_metrics' };
   const fresh = value => value && Number.isFinite(+new Date(value)) && +new Date(value) <= +now && +now - +new Date(value) < 36 * 3600000;
   if (active.some(ad => !fresh(ad.lastSeenAt) || !fresh(ad.metricsUpdatedAt) || ad.latestMetricDate !== period.end)) return { ...result, status: 'stale' };
   if (active.some(ad => !(ad.current.leads >= result.minimumLeads) || !(ad.current.spend > 0) || !Number.isFinite(ad.currentCpl))) return result;
@@ -37,4 +56,4 @@ function evaluateAdComparison(row, period, now = new Date()) {
   return { ...result, status: 'ready', bestAdId: ordered[0].id };
 }
 
-module.exports = { adKey, createLeadAdMatcher, evaluateAdComparison };
+module.exports = { adKey, createLeadAdMatcher, evaluateAdComparison, evaluateAdSpendCoverage };

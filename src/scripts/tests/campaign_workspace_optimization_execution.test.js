@@ -20,7 +20,7 @@ test('closed rollout gates touch neither storage nor a provider', async () => {
   assert.equal((await runOptimizationAdjustmentJob({}, {}, deps)).result.skipped, true);
 });
 test('evidence is fresh, calendar-valid, complete and bound to the action', () => {
-  const f = fixture(); assert.deepEqual(evidenceSnapshot(f.evidence, f.state.now, 'adjust_bids'), f.evidence);
+  const f = fixture(); assert.deepEqual(evidenceSnapshot(f.evidence, f.state.now, 'adjust_bids', f.change), f.evidence);
   for (const patch of [{ window_start: '2026-99-99' }, { window_start: '2026-02-30' }, { window_end: '2026-09-30' },
     { observed_at: '2026-09-09' }, { metrics: { clicks: 100 } }, { rule: 'budget_efficiency' }, { patient: 'private' }]) {
     assert.throws(() => evidenceSnapshot({ ...f.evidence, ...patch }, f.state.now, 'adjust_bids'));
@@ -102,13 +102,13 @@ test('expired leases cannot submit and stale workers cannot overwrite newer rece
 test('plan replacement during preflight cannot submit a different immutable command', async () => {
   const f = fixture(); await f.enqueue();
   f.deps.inspect = async () => {
-    const change = optimizationChange({ ...f.change, after: '950' }); f.row().change = change;
+    const change = optimizationChange({ ...f.change, after: '900' }); f.row().change = change;
     f.row().plan_key = digest([f.row().mandate_id, change.fingerprint, f.row().evidence]);
   };
   const result = await f.run(); assert.equal(result.result.reason, 'workspace_optimization_plan_changed'); assert.equal(f.state.calls.mutate, 0);
 });
 test('account serialization prevents two simultaneous jobs from preflighting the same live account', async () => {
-  const f = fixture(); await f.enqueue(); await f.enqueue({ evidence: { ...f.evidence, observed_at: '2026-09-11T11:59:00Z' } });
+  const f = fixture(); await f.enqueue(); await f.enqueue({ evidence: f.proof(f.change, 'second-cycle') });
   let release; const blocked = new Promise(resolve => { release = resolve; });
   let entered; const started = new Promise(resolve => { entered = resolve; });
   f.deps.inspect = async () => { entered(); await blocked; };
@@ -116,14 +116,13 @@ test('account serialization prevents two simultaneous jobs from preflighting the
   try { const second = await f.run(2); assert.equal(second.error_message, 'workspace_optimization_account_busy'); assert.equal(second.retryable, true); }
   finally { release(); }
   assert.equal((await first).result.state, 'verified'); assert.equal(f.state.calls.mutate, 1);
-  assert.equal((await f.run(2)).error_message, 'workspace_optimization_cooldown'); assert.equal(f.row(2).status, 'skipped');
+  assert.equal((await f.run(2)).error_message, 'workspace_optimization_bid_observation_required'); assert.equal(f.row(2).status, 'skipped');
 });
 test('unresolved submitted operations block other resources and budgets require global accounting', async () => {
   const f = fixture(); await f.enqueue(); f.row().status = 'uncertain'; f.row().submitted_at = new Date(+f.state.now - 3600000);
   const change = optimizationChange({ ...f.change, target: { ...f.change.target, id: '51', resource: 'customers/20/adGroups/51' } });
-  const authorize = f.deps.authorize;
-  f.deps.authorize = async (...args) => { const context = await authorize(...args); context.entry.targets.push(change.target); return context; };
-  await f.enqueue({ change });
+  f.source.entry.targets.push(change.target);
+  await f.enqueue({ change, evidence: f.proof(change, 'another-resource-cycle') });
   assert.equal((await f.run(2)).error_message, 'workspace_optimization_account_busy');
   for (const provider of ['google_ads', 'meta_ads']) {
     const g = fixture(provider, 'adjust_budget'); await g.enqueue();
@@ -132,8 +131,8 @@ test('unresolved submitted operations block other resources and budgets require 
 });
 test('a new mandate cannot bypass the resource cooldown after a verified adjustment', async () => {
   const f = fixture(); await f.enqueue(); await f.run();
-  f.setting.activation.optimization.id = crypto.randomUUID(); await f.enqueue();
-  assert.equal((await f.run(2)).error_message, 'workspace_optimization_cooldown'); assert.equal(f.state.calls.mutate, 1);
+  f.setting.activation.optimization.id = crypto.randomUUID(); await f.enqueue({ evidence: f.proof() });
+  assert.equal((await f.run(2)).error_message, 'workspace_optimization_bid_observation_required'); assert.equal(f.state.calls.mutate, 1);
 });
 test('losing a receipt write after HTTP cannot turn a submitted operation into a fresh command', async () => {
   const f = fixture(); await f.enqueue(); let failed = false;
@@ -150,7 +149,7 @@ test('a changed journal command cannot be declared verified after provider I/O',
   const f = fixture(); await f.enqueue(); const mutate = f.deps.mutate;
   f.deps.mutate = async (...args) => {
     const result = await mutate(...args);
-    const change = optimizationChange({ ...f.change, after: '950' }); f.row().change = change;
+    const change = optimizationChange({ ...f.change, after: '900' }); f.row().change = change;
     f.row().plan_key = digest([f.row().mandate_id, change.fingerprint, f.row().evidence]); return result;
   };
   const result = await f.run(); assert.equal(result.result.state, 'uncertain');

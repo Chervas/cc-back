@@ -31,7 +31,7 @@ function testCatalogCoversEveryCronAndExecutor() {
   const catalogNames = definitions.map(([name]) => name).sort();
   const types = definitions.map(([, definition]) => definition.type);
 
-  assert.equal(definitions.length, 36, 'the canonical scheduler must retain email, web, report cache and campaign periodic jobs');
+  assert.equal(definitions.length, 39, 'the canonical scheduler must retain email, web, report cache and campaign periodic jobs');
   assert.deepEqual(catalogNames, configuredNames);
   assert.equal(new Set(types).size, types.length, 'scheduled job types must be unique');
   for (const jobName of [
@@ -105,6 +105,21 @@ function testCatalogCoversEveryCronAndExecutor() {
   assert.equal(BACKGROUND_INTEGRATION_JOB_TYPES.includes('campaign_google_leads_sync'), true,
     'the actual Google request must use the serialized provider lane');
   assert.equal(typeof jobExecutor.JOB_HANDLERS.campaign_google_leads_sync, 'function');
+  assert.equal(metaSyncJobs.config.schedules.campaignWorkspaceDestinationRefresh,
+    process.env.JOBS_CAMPAIGN_WORKSPACE_DESTINATIONS_SCHEDULE || '15 3 * * *');
+  assert.equal(SCHEDULED_JOB_DEFINITIONS.campaignWorkspaceDestinationRefresh.enabledEnv, 'CAMPAIGN_WORKSPACE_DESTINATION_REFRESH_ENABLED');
+  assert.equal(SCHEDULED_JOB_DEFINITIONS.campaignWorkspaceDestinationRefresh.timezone, undefined);
+  assert.equal(SCHEDULED_JOB_DEFINITIONS.campaignWorkspaceDestinationRefresh.attachJobRequestId, true);
+  assert.equal(BACKGROUND_INTEGRATION_JOB_TYPES.includes('campaign_workspace_destinations_refresh'), false);
+  assert.equal(BACKGROUND_INTEGRATION_JOB_TYPES.includes('campaign_workspace_destination_check'), true);
+  assert.equal(typeof jobExecutor.JOB_HANDLERS.campaign_workspace_destination_check, 'function');
+  assert.equal(metaSyncJobs.config.schedules.campaignWorkspaceOptimizationEvaluation,
+    process.env.JOBS_CAMPAIGN_WORKSPACE_OPTIMIZATION_EVALUATION_SCHEDULE || '45 3 * * *');
+  assert.equal(SCHEDULED_JOB_DEFINITIONS.campaignWorkspaceOptimizationEvaluation.enabledEnv, 'CAMPAIGN_WORKSPACE_OPTIMIZATION_ENABLED');
+  assert.equal(SCHEDULED_JOB_DEFINITIONS.campaignWorkspaceOptimizationEvaluation.timezone, undefined);
+  assert.equal(SCHEDULED_JOB_DEFINITIONS.campaignWorkspaceOptimizationEvaluation.attachJobRequestId, true);
+  assert.equal(BACKGROUND_INTEGRATION_JOB_TYPES.includes('campaign_workspace_optimization_evaluations'), false);
+  assert.equal(BACKGROUND_INTEGRATION_JOB_TYPES.includes('campaign_workspace_optimization_evaluate'), true);
   assert.equal(
     SCHEDULED_JOB_DEFINITIONS.marketingReportsCacheRefresh.type,
     'marketing_reports_cache_refresh',
@@ -330,6 +345,83 @@ async function testPublicationHealthMonitorUsesDurableScheduledHandler() {
     assert.equal(result.result.unhealthy, 1);
   } finally {
     webPublicationHealthMonitorService.runWebPublicationHealthMonitor = original;
+  }
+}
+
+async function testDestinationRefreshGateAndHandlers() {
+  const service = require('../../services/campaignWorkspaceDestinationRefresh.service');
+  const previousGate = process.env.CAMPAIGN_WORKSPACE_DESTINATION_REFRESH_ENABLED;
+  const originals = { enqueue: jobRequestsService.enqueueUniqueJobRequest,
+    dispatch: service.enqueueDestinationRefreshes, check: service.runDestinationRefresh };
+  const calls = [];
+  const jobs = new MetaSyncJobs();
+  jobRequestsService.enqueueUniqueJobRequest = async options => {
+    calls.push(options); return { created: true, job: { id: 902, payload: options.payload } };
+  };
+  try {
+    delete process.env.CAMPAIGN_WORKSPACE_DESTINATION_REFRESH_ENABLED;
+    assert.equal((await jobs.enqueueScheduledJob('campaignWorkspaceDestinationRefresh')).status, 'disabled');
+    assert.equal((await jobs.executeCampaignWorkspaceDestinationRefresh()).disabled, true);
+    assert.equal(calls.length, 0);
+    process.env.CAMPAIGN_WORKSPACE_DESTINATION_REFRESH_ENABLED = 'true';
+    await jobs.enqueueScheduledJob('campaignWorkspaceDestinationRefresh');
+    assert.equal(calls[0].type, service.DISPATCH_TYPE);
+    service.enqueueDestinationRefreshes = async (payload, dependencies) => {
+      assert.deepEqual(payload, { after_setting_id: 'cursor' }); assert.equal(dependencies.jobRequestId, 902);
+      return { status: 'completed', queued: 3 };
+    };
+    assert.equal((await jobExecutor.JOB_HANDLERS[service.DISPATCH_TYPE]({ after_setting_id: 'cursor' }, { id: 902 })).queued, 3);
+    const request = { id: 903, type: service.JOB_TYPE, origin: service.ORIGIN };
+    service.runDestinationRefresh = async (payload, job) => {
+      assert.deepEqual(payload, { setting_id: 'scope' }); assert.equal(job, request);
+      return { status: 'completed', checked: 1 };
+    };
+    assert.equal((await jobExecutor.JOB_HANDLERS[service.JOB_TYPE]({ setting_id: 'scope' }, request)).checked, 1);
+    assert.equal(jobExecutor._shouldUseExecutionTimeout(service.JOB_TYPE), false);
+  } finally {
+    jobRequestsService.enqueueUniqueJobRequest = originals.enqueue;
+    service.enqueueDestinationRefreshes = originals.dispatch;
+    service.runDestinationRefresh = originals.check;
+    if (previousGate === undefined) delete process.env.CAMPAIGN_WORKSPACE_DESTINATION_REFRESH_ENABLED;
+    else process.env.CAMPAIGN_WORKSPACE_DESTINATION_REFRESH_ENABLED = previousGate;
+  }
+}
+
+async function testOptimizationEvaluationGateAndHandlers() {
+  const service = require('../../services/campaignWorkspaceOptimizationEvaluation.service');
+  const previous = process.env.CAMPAIGN_WORKSPACE_OPTIMIZATION_ENABLED;
+  const originals = { enqueue: jobRequestsService.enqueueUniqueJobRequest,
+    dispatch: service.enqueueOptimizationEvaluations, evaluate: service.runOptimizationEvaluation };
+  const calls = []; const jobs = new MetaSyncJobs();
+  jobRequestsService.enqueueUniqueJobRequest = async options => {
+    calls.push(options); return { created: true, job: { id: 904, payload: options.payload } };
+  };
+  try {
+    delete process.env.CAMPAIGN_WORKSPACE_OPTIMIZATION_ENABLED;
+    assert.equal((await jobs.enqueueScheduledJob('campaignWorkspaceOptimizationEvaluation')).status, 'disabled');
+    assert.equal((await jobs.executeCampaignWorkspaceOptimizationEvaluation()).disabled, true);
+    assert.equal(calls.length, 0);
+    process.env.CAMPAIGN_WORKSPACE_OPTIMIZATION_ENABLED = 'true';
+    await jobs.enqueueScheduledJob('campaignWorkspaceOptimizationEvaluation');
+    assert.equal(calls[0].type, service.DISPATCH_TYPE);
+    service.enqueueOptimizationEvaluations = async (payload, dependencies) => {
+      assert.deepEqual(payload, { cycle_at: 'cycle' }); assert.equal(dependencies.jobRequestId, 904);
+      return { status: 'completed', queued: 2 };
+    };
+    assert.equal((await jobExecutor.JOB_HANDLERS[service.DISPATCH_TYPE]({ cycle_at: 'cycle' }, { id: 904 })).queued, 2);
+    const request = { id: 905, type: service.JOB_TYPE, origin: service.ORIGIN };
+    service.runOptimizationEvaluation = async (payload, job) => {
+      assert.deepEqual(payload, { setting_id: 'scope' }); assert.equal(job, request);
+      return { status: 'completed', result: { queued: 1 } };
+    };
+    assert.equal((await jobExecutor.JOB_HANDLERS[service.JOB_TYPE]({ setting_id: 'scope' }, request)).result.queued, 1);
+    assert.equal(jobExecutor._shouldUseExecutionTimeout(service.JOB_TYPE), false);
+  } finally {
+    jobRequestsService.enqueueUniqueJobRequest = originals.enqueue;
+    service.enqueueOptimizationEvaluations = originals.dispatch;
+    service.runOptimizationEvaluation = originals.evaluate;
+    if (previous === undefined) delete process.env.CAMPAIGN_WORKSPACE_OPTIMIZATION_ENABLED;
+    else process.env.CAMPAIGN_WORKSPACE_OPTIMIZATION_ENABLED = previous;
   }
 }
 
@@ -1303,6 +1395,8 @@ async function testNormalSettlementUsesCompareAndSetAndResolvesConflicts() {
 
 async function run() {
   testCatalogCoversEveryCronAndExecutor();
+  await testDestinationRefreshGateAndHandlers();
+  await testOptimizationEvaluationGateAndHandlers();
   await testTargetedHandlersKeepTheirExactMappings();
   await testPublicationHealthMonitorUsesDurableScheduledHandler();
   await testQueuedStatusAndSchedulerIndexContract();

@@ -1,7 +1,7 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { accountId, accountAliases, ownsCampaignAccount, mappingIdentity, reportPeriod, visibleCampaigns, aggregateReport } = require('./campaignWorkspaceReport.service');
+const { accountId, accountAliases, ownsCampaignAccount, mappingIdentity, reportPeriod, visibleCampaigns, aggregateReport, withFreshGoogleCampaignStates } = require('./campaignWorkspaceReport.service');
 const { assessConsentMeasurementReadiness, resolveWebMeasurementMarketingState } = require('./campaignMeasurementReadiness.service');
 const { buildWorkspaceHealth } = require('./campaignWorkspaceHealth.service');
 const { campaignIncluded } = require('./campaignWorkspaceSettings.service');
@@ -125,7 +125,7 @@ async function loadCampaignWorkspace({ models, scope, days, now = new Date() }) 
     { scope_type: 'clinic', scope_id: { [Op.in]: scope.clinicIds } },
     ...(groups.length ? [{ scope_type: 'group', scope_id: { [Op.in]: groups } }] : []),
   ] }, raw: true });
-  const campaigns = availableCampaigns.filter(campaign => selectedByWorkspace(campaign, inventory, settings, scope));
+  let campaigns = availableCampaigns.filter(campaign => selectedByWorkspace(campaign, inventory, settings, scope));
   const googleCampaigns = campaigns.filter(c => c.provider === 'google_ads');
   const metaCampaigns = campaigns.filter(c => c.provider === 'meta_ads');
   const dateWhere = { [Op.between]: [period.previousStart, period.end] };
@@ -134,8 +134,9 @@ async function loadCampaignWorkspace({ models, scope, days, now = new Date() }) 
   const facts = [];
   if (googleWhere.length) {
     const rows = await models.GoogleAdsInsightsDaily.findAll({ where: { [Op.or]: googleWhere, date: dateWhere },
-      attributes: ['customerId', 'campaignId', 'date', 'adGroupId', 'network', 'device', 'costMicros', 'conversions', 'updated_at'],
+      attributes: ['customerId', 'campaignId', 'campaignStatus', 'date', 'adGroupId', 'network', 'device', 'costMicros', 'conversions', 'updated_at'],
       order: [['updated_at', 'DESC']], raw: true });
+    campaigns = withFreshGoogleCampaignStates(campaigns, rows, now);
     for (const row of rows) facts.push({ provider: 'google_ads', account_id: row.customerId, campaign_id: row.campaignId,
       date: row.date, segment: [row.adGroupId || '', row.network || '', row.device || ''], spend: Number(row.costMicros) / 1e6,
       providerConversions: Number(row.conversions), updatedAt: row.updated_at });
@@ -169,6 +170,9 @@ async function loadCampaignWorkspace({ models, scope, days, now = new Date() }) 
   const optimization = await require('./campaignWorkspaceOptimizationHistory.service').loadOptimizationIncidentEvidence({ models, campaigns });
   for (const [campaignId, pending] of optimization) evidence.set(campaignId, { ...evidence.get(campaignId), optimization: pending });
   const report = buildWorkspaceHealth(metrics, evidence, now);
+  const recommendations = require('./campaignWorkspaceRecommendations.service').buildAdCostRecommendations({ report, facts, ads, leads, evidence, now });
+  report.recommendations = recommendations;
+  for (const block of report.healthBlocks) block.recommendations = recommendations.filter(item => item.category === block.id);
   return { success: true, version: 1, scope: { clinicIds: scope.clinicIds, groupId: scope.groupId || null },
     generatedAt: now.toISOString(), report,
     accounts: inventory.accounts,
@@ -207,8 +211,8 @@ async function loadWebEvidence({ models, campaigns, selectedClinics, groups, sco
       : 'Falta completar la comprobación del aviso, las páginas legales o las señales de consentimiento.';
     const key = destinationsCovered ? `intake:${state.record?.id || campaign.clinicId}` : campaign.id;
     const destinationAge = +now - +new Date(campaign.destinationCheckedAt);
-    const destinationsVerified = !campaign.destinationCheckedAt || campaign.destinationComplete === true
-      && Number.isFinite(destinationAge) && destinationAge >= 0 && destinationAge < 86400000;
+    const destinationsVerified = !campaign.destinationCheck?.status && (!campaign.destinationCheckedAt || campaign.destinationComplete === true
+      && Number.isFinite(destinationAge) && destinationAge >= 0 && destinationAge < 86400000);
     const configured = ready && destinationsVerified && state.record?.config?.features?.form_intercept_enabled === true;
     const receipt = receipts.get(campaign.id);
     const webReception = !configured

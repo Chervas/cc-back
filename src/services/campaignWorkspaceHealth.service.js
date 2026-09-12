@@ -1,6 +1,6 @@
 'use strict';
 
-const { cpl } = require('./campaignWorkspaceReport.service');
+const { cpl, freshObservation } = require('./campaignWorkspaceReport.service');
 
 const INDICATORS = [
   ['no-leads', 'Campañas sin nuevos leads', 'user-group', 'Dos últimos días completos'],
@@ -13,6 +13,10 @@ const INDICATORS = [
 const money = (value, currency) => new Intl.NumberFormat('es-ES', {
   ...(currency ? { style: 'currency', currency } : {}), maximumFractionDigits: 2,
 }).format(value);
+const inactiveAdStates = new Set(['PAUSED', 'ADSET_PAUSED', 'CAMPAIGN_PAUSED', 'ARCHIVED', 'DELETED', 'REMOVED',
+  'PENDING_REVIEW', 'IN_PROCESS', 'WITH_ISSUES', 'PENDING_BILLING_INFO', 'PREAPPROVED', 'PENDING', 'NOT_ELIGIBLE']);
+const deliveryState = ad => ad.rejected ? 'rejected' : /^(ACTIVE|ENABLED)$/i.test(ad.status || '') ? 'active'
+  : ad.status === 'LIMITED' ? 'limited' : inactiveAdStates.has(ad.status) ? 'inactive' : null;
 
 function buildWorkspaceHealth(report, evidence = new Map(), now = new Date()) {
   const findings = [];
@@ -32,12 +36,21 @@ function buildWorkspaceHealth(report, evidence = new Map(), now = new Date()) {
     });
   };
   for (const row of report.rows) {
-    const observed = evidence.get(row.campaign.id) || {};
+    const observed = { ...(evidence.get(row.campaign.id) || {}) };
+    // Historical receipts cannot override a newer failed or unfinished provider check, including web-only campaigns.
+    if (row.campaign.provider === 'meta_ads' && row.campaign.destinationCheck?.status) {
+      const denied = row.campaign.destinationCheck.error === 'workspace_meta_permissions_required';
+      observed.reception = { checked: true, ready: false, configured: false,
+        state: denied ? 'action_required' : 'unverified', title: 'Revisa el acceso a Meta',
+        detail: 'Meta ha rechazado el acceso. Los resultados guardados se conservan, pero la recepción necesita una nueva comprobación.',
+        key: denied ? `meta-account:${row.campaign.account_id}` : row.campaign.id };
+      row.receptionReady = false;
+    }
     for (const pending of observed.optimization || []) add(row, pending.action === 'pause_underperforming_ads' ? 'delivery' : 'cost',
       'Hay un ajuste sin confirmar', `${pending.actionLabel}. Todavía no se ha confirmado el resultado en la plataforma.`,
       'Revisa el historial del ajuste. No se repetirá el envío; otros ajustes esperan esta revisión.', `optimization:${pending.id}`, 'warning',
       { technical: true, optimizationRunId: pending.id, source: 'Registro de ajustes de Optimiza', window: 'Última comprobación del ajuste' });
-    const fresh = row.coverage.updatedAt && new Date(now) - new Date(row.coverage.updatedAt) < 36 * 3600000
+    const fresh = freshObservation(row.coverage.updatedAt, now)
       && row.coverage.latestMetricDate === report.period.end;
     const eligible = !row.campaign.paused && row.campaign.assigned;
     for (const [id] of INDICATORS) {
@@ -51,18 +64,29 @@ function buildWorkspaceHealth(report, evidence = new Map(), now = new Date()) {
         'Hay inversión sin nuevos leads', `${money(row.coverage.recentSpend, row.campaign.currency)} invertidos y ningún nuevo interesado atribuido en los dos últimos días completos.`,
         'Comprueba el formulario y la entrega de los anuncios. La ausencia de leads no demuestra por sí sola un fallo técnico.');
     }
-    if (eligible && ['stable', 'attention'].includes(row.performance)) {
+    if (eligible && fresh && ['stable', 'attention'].includes(row.performance)) {
       coverage.get('cost').evaluated.add(row.campaign.id);
       if (row.performance === 'attention') add(row, 'cost', 'Ha subido el coste por lead',
         `${money(cpl(row.current), row.campaign.currency)} por interesado frente a ${money(cpl(row.previous), row.campaign.currency)} en el periodo anterior.`,
         'Compara los anuncios y los destinos antes de ajustar la campaña. No se modifica nada automáticamente.');
     }
-    const freshAds = row.ads.filter(ad => ad.lastSeenAt && new Date(now) - new Date(ad.lastSeenAt) < 36 * 3600000);
-    if (eligible && row.ads.length && freshAds.length === row.ads.length) {
-      coverage.get('delivery').evaluated.add(row.campaign.id);
+    const freshAds = row.ads.filter(ad => freshObservation(ad.lastSeenAt, now));
+    if (eligible && /^(ACTIVE|ENABLED)$/i.test(row.campaign.status || '')) {
+      const complete = row.ads.length && freshAds.length === row.ads.length && freshAds.every(ad => deliveryState(ad));
+      if (complete) coverage.get('delivery').evaluated.add(row.campaign.id);
+      // A fresh rejection remains an incident even when the rest of the inventory is not yet verified.
       const rejected = freshAds.filter(ad => ad.rejected);
-      if (rejected.length) add(row, 'delivery', `${rejected.length} anuncios rechazados`, rejected.map(ad => ad.title).join(', '),
+      if (rejected.length) add(row, 'delivery', `${rejected.length} ${rejected.length === 1 ? 'anuncio rechazado' : 'anuncios rechazados'}`, rejected.map(ad => ad.title).join(', '),
         'Consulta el motivo en la plataforma y corrige el anuncio o solicita una revisión.', null, 'critical');
+      else if (complete && !freshAds.some(ad => ['active', 'limited'].includes(deliveryState(ad)))) add(row, 'delivery',
+        'Los anuncios sincronizados no están activos',
+        `La campaña figura activa, pero ${freshAds.length === 1 ? 'su anuncio no está activo' : `sus ${freshAds.length} anuncios no están activos`} en la última sincronización.`,
+        'Revisa los estados de los anuncios y sus grupos. Pueden estar en pausa, en revisión o pendientes de resolver una incidencia.');
+      const limited = freshAds.filter(ad => deliveryState(ad) === 'limited');
+      if (limited.length) add(row, 'delivery', 'Hay anuncios con publicación limitada',
+        limited.map(ad => ad.title).join(', '),
+        'Google permite publicar estos anuncios con limitaciones. Consulta los motivos antes de modificar su contenido.',
+        `limited:${row.campaign.id}`);
     }
     if (!row.campaign.assigned) add(row, 'reception', 'Falta asignar la campaña a una clínica',
       'La cuenta es compartida. Sus leads y resultados no se han atribuido a ninguna sede.',
@@ -101,9 +125,10 @@ function buildWorkspaceHealth(report, evidence = new Map(), now = new Date()) {
       tone: issues.length ? issues.some(issue => issue.severity === 'critical') ? 'critical' : 'warning'
         : !total.size || missing || pending.size ? 'neutral' : 'good',
       status: issues.length ? `${campaignIds.length} ${campaignIds.length === 1 ? 'campaña afectada' : 'campañas afectadas'}`
-        : !total.size ? 'No aplica' : !evaluated.size ? 'Sin comprobar' : missing ? 'Datos parciales' : pending.size ? 'Pendiente de recepción' : 'OK',
+        : !total.size ? 'No aplica' : !evaluated.size ? id === 'cost' ? 'Sin comparativa' : 'Sin comprobar' : missing ? 'Datos parciales' : pending.size ? 'Pendiente de recepción' : 'OK',
       summary: issues[0]?.title || (!total.size ? 'No hay campañas aplicables a este indicador.'
-        : missing ? `Faltan comprobaciones actuales de ${missing} ${missing === 1 ? 'campaña' : 'campañas'}.`
+        : missing ? id === 'cost' ? 'Faltan datos suficientes para comparar con el periodo anterior.'
+          : `Faltan comprobaciones actuales de ${missing} ${missing === 1 ? 'campaña' : 'campañas'}.`
           : pending.size ? 'Configuración preparada, aún sin recepción reciente en todos los destinos.' : 'Sin incidencias en las campañas comprobadas.'),
       coverage: `Comprobadas: ${evaluated.size} de ${total.size} campañas`,
       checks: [{ label: 'Cobertura', value: `${evaluated.size} de ${total.size}`, tone: missing || !total.size ? 'neutral' : 'good' },

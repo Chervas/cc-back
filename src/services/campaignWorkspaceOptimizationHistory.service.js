@@ -13,6 +13,36 @@ const PAGE_SIZE = 10;
 const STATUSES = { queued: 'Pendiente', leased: 'Comprobando', submitted: 'Resultado pendiente', verified: 'Confirmado por la plataforma',
   observed: 'Estado comprobado', skipped: 'No aplicado', uncertain: 'Necesita revisión', resolved: 'Revisión cerrada manualmente' };
 const ACTIONS = { pause_underperforming_ads: 'Pausa de anuncio', adjust_bids: 'Ajuste de puja', negative_keywords: 'Búsqueda excluida', adjust_budget: 'Ajuste de presupuesto' };
+const SKIPPED_REASONS = {
+  workspace_optimization_target_changed: 'No se aplicó: cambiaron el objetivo, sus conversiones, el presupuesto o la recomendación de Google durante la comprobación.',
+  workspace_optimization_target_goals_required: 'No se aplicó: falta comprobar las conversiones que utiliza el objetivo de la campaña.',
+  workspace_optimization_target_group_override: 'No se aplicó: algunos grupos tienen objetivos propios. Necesitan una revisión independiente.',
+  workspace_optimization_target_budget_unsupported: 'No se aplicó: el objetivo utiliza un presupuesto compartido o no compatible.',
+  workspace_optimization_target_incomplete: 'No se aplicó: no se pudo completar la comprobación del objetivo y la recomendación de Google.',
+  workspace_optimization_target_timeout: 'No se aplicó: la comprobación del objetivo y sus conversiones no terminó a tiempo.',
+  workspace_optimization_current_policy_required: 'No se aplicó: esta propuesta antigua necesita una nueva evaluación con los datos y las comprobaciones actuales.',
+  workspace_optimization_search_relevance_required: 'No se excluyó la búsqueda: falta comprobar que no sea relevante. No tener conversiones no basta para excluirla.',
+  workspace_optimization_budget_observation_required: 'No se aplicó: esta campaña tuvo otro ajuste en los últimos 14 días. Esperamos antes de volver a cambiar su presupuesto.',
+  workspace_optimization_bid_observation_required: 'No se aplicó: esta campaña tuvo otro ajuste en los últimos 14 días. Esperamos antes de volver a cambiar sus pujas.',
+  workspace_optimization_evidence_invalid: 'No se aplicó: los datos de rendimiento caducaron o ya no permiten comprobar el ajuste.',
+  workspace_optimization_baseline_changed: 'No se aplicó: el anuncio usado como referencia ya no está activo en el mismo grupo.',
+  workspace_optimization_reception_unverified: 'No se aplicó: no se ha podido verificar que los interesados estén llegando. Revisa la recepción.',
+  workspace_optimization_scope_changed: 'No se aplicó: la configuración, la selección de campañas o sus permisos cambiaron durante la comprobación.',
+  workspace_optimization_permissions_required: 'No se aplicó: la plataforma rechazó el acceso. Revisa la conexión antes de volver a comprobarla.',
+  workspace_optimization_budget_limit_exceeded: 'No se aplicó: el gasto mensual previsto superaría el límite conjunto elegido. Revisa los presupuestos y el gasto de las campañas incluidas.',
+  workspace_optimization_budget_currency: 'No se aplicó: alguna cuenta utiliza una moneda distinta del euro. Es necesario revisar su presupuesto por separado.',
+  workspace_optimization_budget_timezone: 'No se aplicó: alguna cuenta utiliza otro calendario horario. No se han mezclado sus importes mensuales.',
+  workspace_optimization_budget_unsupported: 'No se aplicó: hay un presupuesto compartido o de duración total que necesita una revisión específica.',
+  workspace_optimization_budget_stale: 'No se aplicó: la comprobación del gasto había caducado. Se necesitan datos actuales antes de ajustar el presupuesto.',
+  workspace_optimization_budget_timeout: 'No se aplicó: no se pudo completar a tiempo la comprobación del gasto conjunto.',
+  workspace_optimization_budget_incomplete: 'No se aplicó: faltan datos para comprobar el gasto y los presupuestos de todas las campañas incluidas.',
+  workspace_optimization_budget_accounting_required: 'No se aplicó: falta comprobar el límite mensual y el gasto conjunto.',
+  workspace_optimization_budget_scope_incomplete: 'No se aplicó: falta confirmar la clínica o la selección de alguna campaña para comprobar el gasto conjunto.',
+  workspace_optimization_budget_scope_changed: 'No se aplicó: la selección de campañas o sus permisos cambiaron durante la comprobación.',
+  workspace_optimization_budget_resource_changed: 'No se aplicó: el presupuesto de la plataforma ya no coincide con el ajuste revisado.',
+  workspace_optimization_budget_shared_resource: 'No se aplicó: varias campañas comparten un presupuesto que necesita revisión.',
+  workspace_optimization_budget_ledger_invalid: 'No se aplicó: el historial del gasto necesita una revisión técnica. No se ha considerado como gasto cero.',
+};
 const fail = (code, status = 409) => { throw Object.assign(new Error(code), { code, status }); };
 const query = transaction => ({ transaction, ...(transaction ? { lock: transaction.LOCK.UPDATE } : {}) });
 const revision = row => digest([row.id, row.status, row.plan_key, row.clinic_id, row.job_request_id, row.lease_token, row.updated_at, row.resolution]);
@@ -42,13 +72,16 @@ function publicRun(row, campaign, { canWrite = false, owner = null, job = null, 
   const canResolve = row.status === 'uncertain' && !!row.submitted_at && !leaseActive && !ACTIVE_JOBS.includes(job?.status)
     && canWrite && owner?.id === row.setting_id;
   return { id: row.id, revision: revision(row), campaignId: campaign.id, campaignName: campaign.name, provider: row.provider,
-    action: change.target.action, actionLabel: ACTIONS[change.target.action], before: changeLabel(change, change.before, campaign.currency), after: changeLabel(change, change.after, campaign.currency),
+    action: change.target.action, actionLabel: row.evidence?.schema_version === 5
+      ? change.target.unit === 'ratio' ? 'Objetivo de rentabilidad publicitaria' : 'Objetivo de coste por conversión'
+      : ACTIONS[change.target.action], before: changeLabel(change, change.before, campaign.currency), after: changeLabel(change, change.after, campaign.currency),
     status: row.status, statusLabel: STATUSES[row.status], createdAt: date(row.created_at), checkedAt: date(row.updated_at),
     nextCheckAt: date(row.next_check_at), canResolve, resolvedAt: date(row.resolution?.resolved_at),
     detail: row.status === 'uncertain' ? 'No se ha confirmado el resultado. Otros ajustes quedan detenidos hasta revisarlo; este cambio no se volverá a enviar.'
       : row.status === 'observed' ? 'Se comprobó el estado actual. Esto no demuestra que el cambio lo realizara ClinicaClick.'
         : row.status === 'resolved' ? 'Una persona confirmó su revisión en la plataforma. No se aplicaron cambios al cerrar la revisión.'
-          : row.status === 'skipped' ? 'No se envió el ajuste porque sus condiciones dejaron de cumplirse.' : null };
+          : row.status === 'skipped' ? (Object.hasOwn(SKIPPED_REASONS, row.outcome?.reason || '') ? SKIPPED_REASONS[row.outcome.reason]
+            : 'No se envió el ajuste porque sus condiciones dejaron de cumplirse.') : null };
 }
 
 async function loadOptimizationHistory({ models, scope, actorId, input = {}, hasAccess, loadInventory = loadWorkspaceInventory, now = new Date(), namespace = currentNamespace() }) {

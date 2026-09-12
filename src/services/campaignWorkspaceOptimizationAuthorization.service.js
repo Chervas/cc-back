@@ -5,7 +5,7 @@ const { Op } = require('sequelize');
 const { settingScope, publicSettings, campaignIncluded } = require('./campaignWorkspaceSettings.service');
 const { accountAliases } = require('./campaignWorkspaceReport.service');
 const { optimizationContext, publicOptimizationProof } = require('./campaignWorkspaceOptimizationPreparation.service');
-const { ACTIONS, digest, optimizationReference } = require('./campaignWorkspaceOptimizationCapabilities.service');
+const { ACTIONS, digest, optimizationReference, optimizationAvailability } = require('./campaignWorkspaceOptimizationCapabilities.service');
 const { resolveModeStateForScope, CAMPAIGN_MODES } = require('./campaignMode.service');
 
 const LIMITS = Object.freeze({ max_bid_change_pct: 10, max_budget_change_pct: 10, cooldown_hours: 24,
@@ -66,7 +66,7 @@ function authorizationTargets(context, requested) {
       || row.targets !== inspection.targets.filter(target => target.action === row.action).length)
     || inspection.fingerprint !== digest([inspection.reference, inspection.currency, inspection.targets, inspection.actions])
     || inspection.targets.some(target => !scopedTarget(target, context.reference))) fail('workspace_optimization_incomplete');
-  const targets = inspection.targets.filter(target => requested.includes(target.action));
+  const targets = optimizationAvailability(inspection).targets.filter(target => requested.includes(target.action));
   const identities = targets.map(target => JSON.stringify([target.action, target.entity, target.id, target.group_id || null, target.field]));
   if (new Set(identities).size !== identities.length) fail('workspace_optimization_incomplete');
   // Keep the exact reviewed resources; import_future never grants rights over new advertising resources.
@@ -237,6 +237,11 @@ async function resolveOptimizationAuthorization({ models, setting, scope, campai
   if (context.setting.id !== setting.id || context.setting.version !== setting.version || context.campaign.clinicId !== entry.clinic_id
     || grantHash(context) !== entry.grant_fingerprint || Number(context.grant.connection.id) !== entry.connection_id
     || (context.grant.loginCustomerId || null) !== entry.login_customer_id) fail('workspace_optimization_connection_changed');
+  if (scope.groupId) {
+    const local = await models.CampaignWorkspaceSetting.findOne({ where: { scope_type: 'clinic', scope_id: entry.clinic_id },
+      attributes: ['accounts'], raw: true, transaction, ...(transaction ? { lock: transaction.LOCK.UPDATE } : {}) });
+    if (!campaignIncluded(campaign, local)) fail('workspace_optimization_campaign_not_authorized');
+  }
   if (!readOnly) await checkOwnership({ models, setting, scope, campaign, transaction });
   if (!await permitted()) fail('workspace_optimization_permissions_required', 403);
   return { mandate, limits, entry, context };

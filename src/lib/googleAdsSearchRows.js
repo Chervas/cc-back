@@ -18,7 +18,8 @@ async function googleAdsSearchRows({ customerId, accessToken, loginCustomerId, q
       timeoutMs: Math.min(10000, remaining), data: { query, ...(pageToken ? { pageToken } : {}) },
     });
     if (now() >= deadline) fail();
-    if (!response || typeof response !== 'object' || Array.isArray(response) || response.error
+    if (!response || typeof response !== 'object' || Array.isArray(response) || response.error || response.errors
+      || response.partialFailureError || response.partial_failure_error
       || response.results !== undefined && !Array.isArray(response.results)) fail();
     rows.push(...(response.results || []));
     const next = response.nextPageToken ?? response.next_page_token;

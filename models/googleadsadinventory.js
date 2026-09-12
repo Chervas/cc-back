@@ -14,6 +14,7 @@ module.exports = (sequelize, DataTypes) => sequelize.define('GoogleAdsAdInventor
   adName: DataTypes.STRING(256),
   adType: DataTypes.STRING(64),
   adStatus: DataTypes.STRING(32),
+  deliveryObservation: DataTypes.JSON,
   finalUrl: DataTypes.STRING(1024),
   displayUrl: DataTypes.STRING(512),
   headlines: DataTypes.JSON,

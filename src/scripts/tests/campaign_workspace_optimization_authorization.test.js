@@ -6,6 +6,7 @@ const { digest, ACTIONS } = require('../../services/campaignWorkspaceOptimizatio
 const { LIMITS, loadOptimizationAuthorizationReview, createOptimizationMandate, resolveOptimizationAuthorization,
   assertNoOptimizationOverlap, pauseWorkspaceOptimization } = require('../../services/campaignWorkspaceOptimizationAuthorization.service');
 const { publicSettings } = require('../../services/campaignWorkspaceSettings.service');
+const { publicOptimizationProof } = require('../../services/campaignWorkspaceOptimizationPreparation.service');
 
 function fixture(provider = 'google_ads') {
   const now = new Date('2026-09-11T12:00:00Z');
@@ -22,7 +23,7 @@ function fixture(provider = 'google_ads') {
     { action: 'adjust_bids', entity: 'ad_group', id: '50', resource: 'customers/20/adGroups/50', field: 'cpc_bid_micros', value: '500000', unit: 'micros', strategy: 'MANUAL_CPC' },
   ] : [
     { action: 'pause_underperforming_ads', entity: 'ad', id: '60', group_id: '50', resource: '60', field: 'status', value: 'ACTIVE' },
-    { action: 'adjust_bids', entity: 'ad_set', id: '50', resource: '50', field: 'bid_amount', value: '100', unit: 'minor', strategy: 'COST_CAP' },
+    { action: 'adjust_bids', entity: 'ad_set', id: '50', resource: '50', field: 'bid_amount', value: '100', unit: 'minor', strategy: 'LOWEST_COST_WITH_BID_CAP' },
   ];
   const inspection = { schema_version: 1, reference, currency: 'EUR', targets,
     actions: ACTIONS.map(action => ({ action, targets: targets.filter(target => target.action === action).length, reasons: [] })) };
@@ -79,6 +80,68 @@ test('Google and Meta review the exact resources under a separate mandate withou
 test('disabled optimization performs no context reads', async () => {
   const f = fixture(); f.setting.preferences.mode = 'measurement'; const result = await f.review();
   assert.equal(result.review.enabled, false); assert.equal(f.state.contexts, 0);
+});
+
+function refreshInspection(f) {
+  f.inspection.actions = ACTIONS.map(action => ({ action, targets: f.inspection.targets.filter(target => target.action === action).length, reasons: [] }));
+  f.inspection.fingerprint = digest([f.inspection.reference, f.inspection.currency, f.inspection.targets, f.inspection.actions]);
+}
+
+test('Google exclusions cannot be presented as executable or create a mandate without a relevance policy', async () => {
+  const f = fixture(); f.setting.preferences.optimization.actions = ['negative_keywords'];
+  f.inspection.targets.push({ action: 'negative_keywords', entity: 'campaign', id: '30', resource: 'customers/20/campaigns/30', field: 'keyword', match_type: 'EXACT' });
+  refreshInspection(f); const original = structuredClone(f.context.latest);
+  const proof = publicOptimizationProof(f.context, new Date('2026-09-11T12:00:00Z'));
+  assert.equal(proof.compatible, false);
+  assert.deepEqual(proof.actions.find(row => row.action === 'negative_keywords'), {
+    action: 'negative_keywords', targets: 0, reasons: ['search_relevance_required'], requested: true,
+  });
+  const result = await f.review(); assert.equal(result.review.ready, false); assert.equal(result.authorization, null);
+  assert.deepEqual(f.context.latest, original); assert.equal(f.state.events.length, 0);
+});
+
+test('Meta target cost and ROAS are unavailable until their own decision policy exists', async () => {
+  for (const strategy of ['COST_CAP', 'LOWEST_COST_WITH_MIN_ROAS']) {
+    const f = fixture('meta_ads'); f.setting.preferences.optimization.actions = ['adjust_bids'];
+    const target = f.inspection.targets[1]; target.strategy = strategy;
+    if (strategy === 'LOWEST_COST_WITH_MIN_ROAS') { target.field = 'bid_constraints.roas_average_floor'; target.unit = 'roas_10000'; }
+    refreshInspection(f); const original = structuredClone(f.context.latest);
+    const result = await f.review(); assert.equal(result.review.ready, false); assert.equal(result.authorization, null);
+    assert.equal(result.review.campaigns[0].actions[0].targets, 0);
+    assert.deepEqual(result.review.campaigns[0].actions[0].reasons, ['bid_policy_not_available']);
+    assert.deepEqual(f.context.latest, original);
+  }
+});
+
+test('mixed Meta strategies authorize only implemented targets and retain the explanation for the rest', async () => {
+  const f = fixture('meta_ads'); f.inspection.targets.push({ ...f.inspection.targets[1], id: '51', resource: '51', strategy: 'COST_CAP' });
+  refreshInspection(f); const result = await f.review();
+  assert.equal(result.review.ready, true); assert.equal(result.authorization.campaigns[0].targets.length, 2);
+  assert.ok(result.authorization.campaigns[0].targets.every(target => target.strategy !== 'COST_CAP'));
+  const action = result.review.campaigns[0].actions.find(row => row.action === 'adjust_bids');
+  assert.equal(action.targets, 1); assert.deepEqual(action.reasons, ['bid_policy_not_available']);
+});
+
+test('an invalid stored inspection is not a green preparation result', () => {
+  for (const mutate of [f => { f.inspection.fingerprint = 'bad'; }, f => { f.inspection.actions[1].targets = 99; },
+    f => { f.inspection.targets = null; }]) {
+    const f = fixture(); mutate(f);
+    const proof = publicOptimizationProof(f.context, new Date('2026-09-11T12:00:00Z'));
+    assert.equal(proof.compatible, false); assert.equal(proof.status, 'stale');
+  }
+});
+test('a group mandate respects clinic exclusions on apply and read-only recovery, with the clinic selection locked', async () => {
+  const f = fixture(); await f.activate();
+  const queries = []; let local = null;
+  f.models.CampaignWorkspaceSetting.findOne = async query => { queries.push(query); return local; };
+  await f.executeContext({ transaction: f.transaction });
+  assert.deepEqual(queries[0].where, { scope_type: 'clinic', scope_id: 1 });
+  assert.equal(queries[0].lock, 'UPDATE'); assert.equal(queries[0].transaction, f.transaction);
+  local = { accounts: [] };
+  for (const readOnly of [false, true]) await assert.rejects(f.executeContext({ readOnly }), /workspace_optimization_campaign_not_authorized/);
+  local = { accounts: [{ provider: 'google_ads', account_id: '20', include_future: false, campaign_ids: ['31'] }] };
+  await assert.rejects(f.executeContext(), /workspace_optimization_campaign_not_authorized/);
+  local.accounts[0].campaign_ids = ['30']; await f.executeContext();
 });
 test('paused and unassigned campaigns are not authorized even with automatic import selected', async () => {
   const f = fixture(); const result = await f.review({ campaigns: [f.campaign,

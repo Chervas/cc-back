@@ -38,6 +38,7 @@ test('all forms need a real receipt linked to the same clinic, account, campaign
 });
 test('expired, revoked, wrong-group or missing page/account authorization cannot appear ready', async () => {
   for (const mutate of [h => { h.state.assignments = []; }, h => { h.state.connections[0].expiresAt = '2020-01-01'; },
+    h => { h.state.connections[0].expiresAt = null; }, h => { h.state.connections[0].expiresAt = 'invalid'; },
     h => { h.state.pages[0].grupoClinicaId = 99; }, h => { h.state.pages = []; }, h => { h.state.accounts = []; }]) {
     const h = harness(); mutate(h); assert.equal((await h.read()).get(h.state.campaign.id).reception.ready, false);
   }
@@ -69,6 +70,15 @@ test('an explicit form permission failure supersedes an older successful receipt
   const h = harness(); h.state.campaign.nativeForms[0].metadataAccessible = false;
   const result = (await h.read()).get(h.state.campaign.id);
   assert.equal(result.reception.ready, false); assert.equal(result.forms[0].state, 'access_required');
+});
+test('a newer failed or unfinished destination check supersedes previous receipts and page proofs', async () => {
+  for (const check of [{ status: 'failed', error: 'workspace_meta_permissions_required' }, { status: 'checking', error: null }]) {
+    const h = harness(); h.state.campaign.destinationCheck = check;
+    const result = (await h.read()).get(h.state.campaign.id);
+    assert.equal(result.reception.ready, false); assert.equal(result.reception.configured, false);
+    assert.ok(result.forms.every(form => form.receivedAt && form.state !== 'receiving' && !form.subscription && !form.canCheckPage));
+    if (check.error) assert.ok(result.forms.every(form => form.state === 'access_required'));
+  }
 });
 test('native checks never query form evidence for unassigned or non-native campaigns', async () => {
   const h = harness(); h.state.campaign.assigned = false;

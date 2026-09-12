@@ -13,7 +13,8 @@ function googleFixture() {
     advertisingChannelType: 'SEARCH', biddingStrategyType: 'MANUAL_CPC' }, campaignBudget: { resourceName: 'customers/1234567890/campaignBudgets/40',
     amountMicros: '20000000', period: 'DAILY', referenceCount: '1', explicitlyShared: false } },
     groups: [{ ...identity, adGroup: { id: '50', status: 'ENABLED', cpcBidMicros: '1500000' } }],
-    ads: [1, 2].map(id => ({ ...identity, adGroup: { id: '50', status: 'ENABLED' }, adGroupAd: { ad: { id: String(id) }, status: 'ENABLED' } })) };
+    ads: [1, 2].map(id => ({ ...identity, adGroup: { id: '50', status: 'ENABLED' }, adGroupAd: { ad: { id: String(id) }, status: 'ENABLED',
+      primaryStatus: 'ELIGIBLE', policySummary: { approvalStatus: 'APPROVED' } } })) };
   const run = patch => inspectGoogleOptimization({ reference: googleReference, now, accessToken: 'private', read: async input => {
     state.calls.push(input); assert.match(input.query, /campaign.id = 10/); assert.match(input.query, /LIMIT 2001$/);
     assert.doesNotMatch(input.query, /mutate|conversion_action|user_list|lead_form_submission/);
@@ -68,6 +69,19 @@ test('Google cannot pause the last active ad or mutate a portfolio strategy/shar
   const result = await f.run(); assert.deepEqual(result.actions.map(row => row.targets), [0, 0, 1, 0]);
   f.state.root.campaignBudget.explicitlyShared = false; delete f.state.root.campaignBudget.referenceCount;
   assert.equal(count(await f.run(), 'adjust_budget'), 0);
+});
+test('Google pause compatibility requires two unrestricted approved ads, not just two enabled ads', async () => {
+  for (const patch of [{ primaryStatus: 'NOT_ELIGIBLE' }, { primaryStatus: 'PENDING' }, { primaryStatus: 'LIMITED' },
+    { primaryStatus: undefined }, { policySummary: { approvalStatus: 'DISAPPROVED' } },
+    { policySummary: { approvalStatus: 'APPROVED_LIMITED' } }, { policySummary: { approvalStatus: 'AREA_OF_INTEREST_ONLY' } },
+    { policySummary: {} }]) {
+    const f = googleFixture(); Object.assign(f.state.ads[1].adGroupAd, patch);
+    const result = await f.run(); assert.equal(count(result, 'pause_underperforming_ads'), 0, JSON.stringify(patch));
+    assert.ok(result.actions[0].reasons.includes('no_alternative_active_ad'));
+  }
+  const f = googleFixture(); assert.equal(count(await f.run(), 'pause_underperforming_ads'), 2);
+  const query = f.state.calls.find(call => call.query.includes('FROM ad_group_ad')).query;
+  assert.match(query, /ad_group_ad.primary_status/); assert.match(query, /ad_group_ad.policy_summary.approval_status/);
 });
 test('Google pauses, experiments, unsupported channels and malformed/foreign identities never produce broad compatibility', async () => {
   for (const patch of [{ status: 'PAUSED' }, { experimentType: 'EXPERIMENT' }, { advertisingChannelType: 'SMART' }]) {

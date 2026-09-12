@@ -131,8 +131,34 @@ test('observed state is not falsely labelled as an adjustment confirmed by the p
   const f = fixture(); f.row.status = 'observed';
   assert.match(publicRun(f.row, f.campaign).detail, /no demuestra/);
 });
+test('skipped budget adjustments explain their cause without exposing accounting or provider errors', () => {
+  const f = fixture(); f.row.status = 'skipped';
+  for (const [reason, text] of [['limit_exceeded', /gasto mensual previsto/], ['currency', /moneda/], ['timezone', /calendario horario/],
+    ['unsupported', /compartido/], ['stale', /caducado/], ['timeout', /a tiempo/], ['incomplete', /faltan datos/],
+    ['ledger_invalid', /revisión técnica/], ['scope_changed', /permisos cambiaron/]]) {
+    f.row.outcome = { reason: 'workspace_optimization_budget_' + reason, budget_accounting: { private: 'not-public' }, providerError: 'access-token' };
+    const result = publicRun(f.row, f.campaign);
+    assert.match(result.detail, text); assert.doesNotMatch(JSON.stringify(result), /budget_accounting|not-public|access-token/);
+  }
+  for (const reason of ['toString', '__proto__', 'an arbitrary provider error with secrets']) {
+    f.row.outcome = { reason }; assert.equal(publicRun(f.row, f.campaign).detail, 'No se envió el ajuste porque sus condiciones dejaron de cumplirse.');
+  }
+  f.row.status = 'uncertain'; f.row.outcome = { reason: 'workspace_optimization_budget_limit_exceeded' };
+  assert.match(publicRun(f.row, f.campaign).detail, /No se ha confirmado/);
+});
 test('known euro amounts are readable without rounding away micro bids or inventing currency', () => {
   const f = fixture(); f.campaign.currency = 'EUR';
   assert.match(publicRun(f.row, f.campaign).before, /0,001.*€/);
   f.campaign.currency = null; assert.match(publicRun(f.row, f.campaign).before, /moneda de la cuenta/);
+});
+
+test('skipped pauses explain evidence, baseline and reception failures without exposing raw proof', () => {
+  const f = fixture(); f.row.status = 'skipped';
+  for (const [reason, expected] of [['evidence_invalid', /caducaron/], ['baseline_changed', /referencia/],
+    ['reception_unverified', /recepción/], ['scope_changed', /configuración/], ['permissions_required', /rechazó el acceso/],
+    ['bid_observation_required', /14 días/], ['budget_observation_required', /14 días/]]) {
+    f.row.outcome = { reason: 'workspace_optimization_' + reason, providerError: 'secret-detail' };
+    const result = publicRun(f.row, f.campaign);
+    assert.match(result.detail, expected); assert.doesNotMatch(JSON.stringify(result), /not-public|secret-detail|evidence/);
+  }
 });

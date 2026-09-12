@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const { Sequelize, DataTypes } = require('sequelize');
 const migration = require('../../../migrations/20260911190000-create-google-ad-inventory-cache');
+const deliveryMigration = require('../../../migrations/20260912010000-add-google-ad-delivery-observation');
 const { persistAdSnapshot } = require('../../services/googleAdCache.service');
 
 async function main() {
@@ -28,10 +29,17 @@ async function main() {
     models.ExternalCampaignAssignment = sql.define('ExternalCampaignAssignment', {
       provider: DataTypes.STRING(32), customer_id: DataTypes.STRING(32), campaign_id: DataTypes.STRING(64), status: DataTypes.STRING(32), clinica_id: DataTypes.INTEGER,
     }, { timestamps: false });
+    models.GoogleConnectionAssignment = require('../../../models/googleconnectionassignment')(sql, DataTypes);
+    models.Clinica = sql.define('Clinica', { id_clinica: { type: DataTypes.INTEGER, primaryKey: true }, grupoClinicaId: DataTypes.INTEGER },
+      { tableName: 'Clinicas', timestamps: false });
     await models.ClinicGoogleAdsAccount.sync(); await models.ExternalCampaignAssignment.sync();
+    await models.GoogleConnectionAssignment.sync(); await models.Clinica.sync();
+    await models.GoogleConnectionAssignment.create({ scopeKey: 'clinic:1', assignmentScope: 'clinic', clinicaId: 1, googleConnectionId: 2, status: 'active' });
+    await models.Clinica.create({ id_clinica: 1 });
     await sql.query('CREATE TABLE GruposClinicas (id_grupo INT PRIMARY KEY) ENGINE=InnoDB');
     await require('../../../migrations/20260323121000-create-google-ads-ad-insights-daily').up(qi, Sequelize);
     await migration.up(qi, Sequelize); await migration.up(qi, Sequelize);
+    await deliveryMigration.up(qi, Sequelize);
     for (const file of ['googleadsadinventory', 'googleadsadsyncday', 'googleadsadinsightsdaily']) {
       const model = require(`../../../models/${file}`)(sql, DataTypes); models[model.name] = model;
     }
@@ -86,7 +94,7 @@ async function main() {
       campaignId: '456', adGroupId: null, adId: '701', date: '2026-09-08', network: '', device: '' });
     assert.equal(await models.GoogleAdsAdInsightsDaily.count(), 3);
     await models.GoogleAdsAdInsightsDaily.destroy({ where: { adGroupId: '801' } });
-    await migration.down(qi); await migration.up(qi, Sequelize);
+    await migration.down(qi); await migration.up(qi, Sequelize); await deliveryMigration.up(qi, Sequelize);
     assert.equal(await models.GoogleAdsAdInsightsDaily.count(), 2, 'safe rollback preserves historical metric records');
     console.log(JSON.stringify({ success: true, database, checks: ['migration-idempotence', 'group-identity', 'millisecond-freshness',
       'rollback-collision', 'transaction-rollback', 'campaign-isolation', 'complete-empty-window', 'concurrent-refresh', 'old-writer-compatibility', 'migration-roundtrip'] }));

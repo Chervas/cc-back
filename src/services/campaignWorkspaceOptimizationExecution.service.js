@@ -18,7 +18,13 @@ const RECOVERY_DELAYS = [15, 30, 60, 240, 720, 1440];
 const RETRYABLE = ['workspace_optimization_busy', 'workspace_optimization_account_busy', 'workspace_optimization_unavailable'];
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value);
 const fail = code => { throw Object.assign(new Error(code), { code }); };
-const reason = error => /^workspace_optimization_[a-z_]{1,80}$/.test(error?.code || '') ? error.code : 'workspace_optimization_unavailable';
+function reason(error) {
+  if (/^workspace_optimization_[a-z_]{1,80}$/.test(error?.code || '')) return error.code;
+  if (['NO_SCOPED_CONNECTION', 'INSUFFICIENT_SCOPE', 'NO_TOKEN', 'TOKEN_EXPIRED', 'REFRESH_FAILED'].includes(error?.code)
+    || [10, 190, 200].includes(Number(error?.response?.data?.error?.code)) || [401, 403].includes(error?.response?.status)) return 'workspace_optimization_permissions_required';
+  if ([4, 17, 613].includes(Number(error?.response?.data?.error?.code)) || error?.response?.status === 429) return 'workspace_optimization_rate_limited';
+  return 'workspace_optimization_unavailable';
+}
 const plain = row => row?.get ? row.get({ plain: true }) : structuredClone(row);
 const now = deps => (deps.now || (() => new Date()))();
 const namespace = deps => deps.namespace || require('./jobRequests.service').getCurrentRuntimeNamespace();
@@ -28,25 +34,30 @@ const resourceKey = change => digest([change.reference.provider, change.referenc
 const nextCheck = (attempts, instant) => Number.isSafeInteger(attempts) && attempts >= 0 && attempts < RECOVERY_DELAYS.length
   ? new Date(+instant + RECOVERY_DELAYS[attempts] * 60000) : null;
 
-function evidenceSnapshot(evidence, instant, action) {
-  const allowed = ['schema_version', 'rule', 'observed_at', 'window_start', 'window_end', 'metrics'];
-  const metrics = ['clicks', 'leads', 'cost_cents', 'baseline_clicks', 'baseline_leads', 'baseline_cost_cents'];
-  const rules = { ad_underperformance: 'pause_underperforming_ads', bid_efficiency: 'adjust_bids',
-    search_without_results: 'negative_keywords', budget_efficiency: 'adjust_budget' };
-  const day = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)
-    && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
-  if (!evidence || Object.keys(evidence).some(key => !allowed.includes(key)) || evidence.schema_version !== 1
-    || !Object.hasOwn(rules, evidence.rule) || action && rules[evidence.rule] !== action
-    || !day(evidence.window_start) || !day(evidence.window_end)
-    || !Number.isFinite(Date.parse(evidence.observed_at)) || +new Date(evidence.observed_at) > +instant
-    || +new Date(evidence.observed_at) < +instant - 86400000 || +new Date(evidence.window_end) > +instant
-    || +new Date(evidence.window_end) - +new Date(evidence.window_start) < 6 * 86400000
-    || +new Date(evidence.window_end) - +new Date(evidence.window_start) > 90 * 86400000
-    || !evidence.metrics || Array.isArray(evidence.metrics)
-    || metrics.slice(0, evidence.rule === 'search_without_results' ? 3 : 6).some(key => !Object.hasOwn(evidence.metrics, key))
-    || evidence.rule === 'search_without_results' && evidence.metrics.leads !== 0
-    || Object.entries(evidence.metrics).some(([name, value]) => !metrics.includes(name) || !Number.isSafeInteger(value) || value < 0)) fail('workspace_optimization_evidence_invalid');
-  return structuredClone(evidence);
+function evidenceSnapshot(evidence, instant, action, change = null) {
+  // No rule currently proves search relevance. Zero provider conversions is not zero CRM leads.
+  if (action === 'negative_keywords' || evidence?.rule === 'search_without_results') fail('workspace_optimization_search_relevance_required');
+  if (evidence?.schema_version === 5) {
+    if (action !== 'adjust_bids') fail('workspace_optimization_evidence_invalid');
+    return require('./campaignWorkspaceTargetBidPolicy.service').validateTargetBidEvidence(evidence, instant, change);
+  }
+  if (evidence?.schema_version === 4) {
+    if (action !== 'adjust_budget') fail('workspace_optimization_evidence_invalid');
+    return require('./campaignWorkspaceBudgetPolicy.service').validateBudgetEvidence(evidence, instant, change);
+  }
+  if (evidence?.schema_version === 3) {
+    if (action !== 'adjust_bids') fail('workspace_optimization_evidence_invalid');
+    return require('./campaignWorkspaceBidPolicy.service').validateBidEvidence(evidence, instant, change);
+  }
+  if (evidence?.schema_version === 2) {
+    if (action && action !== 'pause_underperforming_ads') fail('workspace_optimization_evidence_invalid');
+    return require('./campaignWorkspaceAdPausePolicy.service').validateAdPauseEvidence(evidence, instant, change);
+  }
+  // Old receipts remain readable, but aggregate-only v1 metrics cannot authorize a first submission.
+  if (evidence?.schema_version === 1 && ['adjust_bids', 'adjust_budget'].includes(action)) {
+    fail('workspace_optimization_current_policy_required');
+  }
+  fail('workspace_optimization_evidence_invalid');
 }
 
 function validateRun(run) {
@@ -77,13 +88,22 @@ async function authorize(run, deps, transaction = null) {
   const targets = source.entry.targets.filter(target => Object.keys(target).length === Object.keys(change.target).length
     && Object.entries(change.target).every(([key, value]) => target[key] === value));
   if (targets.length !== 1) fail('workspace_optimization_target_not_authorized');
+  if ([2, 3, 4, 5].includes(run.evidence.schema_version) && !run.submitted_at && !deps.readOnly) {
+    evidenceSnapshot(run.evidence, now(deps), change.target.action, change);
+    if (run.evidence.setting_id !== run.setting_id || run.evidence.mandate_id !== run.mandate_id
+      || run.evidence.clinic_id !== source.entry.clinic_id
+      || run.evidence.source_fingerprint !== require('./campaignWorkspaceOptimizationEvidence.service').sourceStamp(setting, scope, source)) {
+      fail('workspace_optimization_scope_changed');
+    }
+  }
   return { ...source, setting, scope };
 }
 
 // Internal producer only. Jobs carry an immutable run ID, not arbitrary provider operations.
 async function enqueueOptimizationAdjustment({ settingId, mandateId, change, evidence }, deps = {}) {
   if (!enabled(deps.env || process.env)) return { queued: false, reason: 'workspace_optimization_disabled' };
-  const models = model(deps); const command = verifyChange(change); const proof = evidenceSnapshot(evidence, now(deps), command.target.action);
+  const command = verifyChange(change); const proof = evidenceSnapshot(evidence, now(deps), command.target.action, command);
+  const models = model(deps);
   const row = { id: crypto.randomUUID(), runtime_namespace: namespace(deps), setting_id: settingId, mandate_id: mandateId,
     plan_key: digest([mandateId, command.fingerprint, proof]), provider: command.reference.provider, account_id: command.reference.account_id,
     campaign_id: command.reference.campaign_id, resource_key: resourceKey(command), change: command, evidence: proof,
@@ -93,8 +113,16 @@ async function enqueueOptimizationAdjustment({ settingId, mandateId, change, evi
     const source = await authorize(row, deps, transaction);
     if (!Number.isSafeInteger(source.entry.clinic_id) || source.entry.clinic_id <= 0) fail('workspace_optimization_scope_changed');
     row.clinic_id = source.entry.clinic_id;
-    const existing = await models.CampaignWorkspaceOptimizationRun.findOne({ where: { setting_id: settingId, plan_key: row.plan_key }, ...query(transaction) });
+    const existing = await models.CampaignWorkspaceOptimizationRun.findOne({ where: { setting_id: settingId,
+      ...([3, 4, 5].includes(proof.schema_version) ? { [Op.or]: [{ plan_key: row.plan_key }, { mandate_id: mandateId,
+        provider: row.provider, account_id: row.account_id, campaign_id: row.campaign_id,
+        'evidence.evaluation_key': proof.evaluation_key, 'change.target.action': command.target.action }] }
+        : proof.schema_version === 2 ? { [Op.or]: [{ plan_key: row.plan_key }, { mandate_id: mandateId,
+        provider: row.provider, account_id: row.account_id, campaign_id: row.campaign_id,
+        'evidence.evaluation_key': proof.evaluation_key, 'evidence.group_id': proof.group_id }] } : { plan_key: row.plan_key }),
+    }, ...query(transaction) });
     if (existing) {
+      validateRun(existing);
       const job = existing.job_request_id ? await models.JobRequest.findByPk(existing.job_request_id, query(transaction)) : null;
       return { queued: ACTIVE_JOBS.includes(job?.status), created: false, runId: existing.id, jobId: existing.job_request_id,
         recoveryPending: !TERMINAL.includes(existing.status) && !!existing.next_check_at };
@@ -132,8 +160,21 @@ async function reserve(payload, job, deps) {
       status: { [Op.in]: ['leased', 'submitted', 'uncertain'] }, [Op.or]: [{ setting_id: run.setting_id }, { provider: run.provider, account_id: run.account_id }] }, ...query(transaction) });
     if (pending.length && !deps.readOnly) fail('workspace_optimization_account_busy');
     if (!run.submitted_at) {
-      evidenceSnapshot(run.evidence, now(deps), run.change.target.action);
-      const recent = await models.CampaignWorkspaceOptimizationRun.findOne({ where: { id: { [Op.ne]: run.id }, resource_key: run.resource_key,
+      evidenceSnapshot(run.evidence, now(deps), run.change.target.action, run.change);
+      if ([3, 4, 5].includes(run.evidence.schema_version)) {
+        const budget = run.evidence.schema_version === 4;
+        const policy = budget ? require('./campaignWorkspaceBudgetPolicy.service').POLICY
+          : run.evidence.schema_version === 5 ? require('./campaignWorkspaceTargetBidPolicy.service').POLICY : require('./campaignWorkspaceBidPolicy.service').POLICY;
+        const recentCampaignChange = await models.CampaignWorkspaceOptimizationRun.findOne({ where: { id: { [Op.ne]: run.id },
+          provider: run.provider, account_id: run.account_id, campaign_id: run.campaign_id,
+          submitted_at: { [Op.gt]: new Date(+now(deps) - policy.cooldown_hours * 3600000) },
+        }, ...query(transaction) });
+        if (recentCampaignChange) fail(budget ? 'workspace_optimization_budget_observation_required' : 'workspace_optimization_bid_observation_required');
+      }
+      const recent = await models.CampaignWorkspaceOptimizationRun.findOne({ where: { id: { [Op.ne]: run.id },
+        ...(run.evidence.schema_version === 2 ? { [Op.or]: [{ resource_key: run.resource_key }, { provider: run.provider,
+          account_id: run.account_id, campaign_id: run.campaign_id, 'change.target.action': 'pause_underperforming_ads',
+          'change.target.group_id': run.change.target.group_id }] } : { resource_key: run.resource_key }),
         submitted_at: { [Op.gt]: new Date(+now(deps) - authorization.limits.cooldown_hours * 3600000) } }, ...query(transaction) });
       if (recent) fail('workspace_optimization_cooldown');
     }
@@ -154,7 +195,9 @@ async function finish(run, token, state, outcome, deps) {
       state = 'uncertain';
       outcome = { ...outcome, submission_reserved: true };
     }
-    await row.update({ status: state, outcome, lease_token: null, lease_until: null,
+    // Budget reservations remain part of the durable receipt, including an uncertain provider outcome.
+    const savedOutcome = row.outcome?.budget_accounting ? { ...outcome, budget_accounting: row.outcome.budget_accounting } : outcome;
+    await row.update({ status: state, outcome: savedOutcome, lease_token: null, lease_until: null,
       completed_at: TERMINAL.includes(state) ? now(deps) : null,
       next_check_at: TERMINAL.includes(state) ? null : nextCheck(row.recovery_attempts, now(deps)) }, { transaction });
     return { status: 'completed', result: { run_id: row.id, state, ...outcome } };
@@ -168,15 +211,25 @@ async function credentialsFor(authorization, deps) {
   return { accessToken: token.accessToken, loginCustomerId: context.grant.loginCustomerId };
 }
 
-async function markSubmitted(run, token, deps) {
+async function markSubmitted(run, token, deps, accounting = null) {
   const models = model(deps);
   return models.sequelize.transaction(async transaction => {
     if (!enabled(deps.env || process.env)) fail('workspace_optimization_disabled');
-    await authorize(run, deps, transaction);
+    const authorization = await authorize(run, deps, transaction);
     const fresh = await models.CampaignWorkspaceOptimizationRun.findByPk(run.id, query(transaction));
     if (!fresh || fresh.lease_token !== token || fresh.status !== 'leased' || fresh.submitted_at || +new Date(fresh.lease_until) <= +now(deps)) fail('workspace_optimization_lease_changed');
     samePlan(fresh, run);
-    await fresh.update({ status: 'submitted', submitted_at: now(deps), lease_until: new Date(+now(deps) + LEASE_MS) }, { transaction });
+    const budget = run.change.target.action === 'adjust_budget'
+      ? await require('./campaignWorkspaceBudgetAccounting.service').reserveBudgetAccounting({ models, run: fresh, authorization, accounting, transaction },
+        { now: () => now(deps), ...deps.budgetDependencies }) : null;
+    if ([2, 3, 4, 5].includes(fresh.evidence.schema_version)) await require('./campaignWorkspaceOptimizationEvidence.service').assertOptimizationReception({
+      models, scope: authorization.scope, campaign: authorization.context.campaign, now: now(deps), transaction,
+    }, deps.receptionDependencies);
+    if (!enabled(deps.env || process.env)) fail('workspace_optimization_disabled');
+    if (+new Date(fresh.lease_until) <= +now(deps)) fail('workspace_optimization_lease_changed');
+    evidenceSnapshot(fresh.evidence, now(deps), fresh.change.target.action, fresh.change);
+    await fresh.update({ status: 'submitted', submitted_at: now(deps), lease_until: new Date(+now(deps) + LEASE_MS),
+      ...(budget ? { outcome: { ...fresh.outcome, budget_accounting: budget } } : {}) }, { transaction });
   });
 }
 
@@ -210,14 +263,22 @@ async function runOptimizationAdjustmentJob(payload, job, deps = {}) {
     // A submitted marker survives a crash before/after HTTP. Never replay that write.
     if (submitted) return await finish(run, token, 'uncertain', { reason: 'workspace_optimization_manual_review_required', provider_mutation: false }, deps);
     if (deps.readOnly) fail('workspace_optimization_job_mismatch');
-    await (deps.inspect || inspectOptimizationChange)(run.change, credentials, deps.providerDependencies);
-    if (run.change.target.action === 'adjust_budget') {
-      // The global monthly envelope must be collected by the budget accounting service, not inferred per campaign.
-      if (!deps.verifyBudget || await deps.verifyBudget({ run, authorization, credentials }) !== true) fail('workspace_optimization_budget_accounting_required');
-    }
+    const inspection = await (deps.inspect || inspectOptimizationChange)(run.change, credentials, deps.providerDependencies);
+    require('./campaignWorkspaceAdPausePolicy.service').assertPauseBaseline(inspection, run.evidence, run.change);
+    if (run.evidence.schema_version === 5) await require('./campaignWorkspaceTargetBidPolicy.service').assertTargetBidBaseline({
+      evidence: run.evidence, change: run.change, credentials, now: () => now(deps), clock: deps.targetDependencies?.clock,
+      read: options => require('../lib/googleAdsSearchRows').googleAdsSearchRows({ ...options, request: async (...args) => {
+        await authorize(run, deps);
+        const result = await (deps.targetDependencies?.googleRequest || require('../lib/googleAdsClient').googleAdsRequest)(...args);
+        await authorize(run, deps); return result;
+      } }),
+    });
+    const accounting = run.change.target.action === 'adjust_budget'
+      ? await require('./campaignWorkspaceBudgetAccounting.service').collectBudgetAccounting({ models: model(deps), run, authorization },
+        { now: () => now(deps), ...deps.budgetDependencies, revalidate: () => authorize(run, deps) }) : null;
     const current = await authorize(run, deps);
     if (current.context.grant.connection.id !== authorization.context.grant.connection.id) fail('workspace_optimization_connection_changed');
-    await markSubmitted(run, token, deps); submitted = true;
+    await markSubmitted(run, token, deps, accounting); submitted = true;
     let receipt; let failure;
     try { receipt = await (deps.mutate || mutateOptimizationChange)(run.change, credentials, { ...deps.providerDependencies, env: deps.env || process.env }); }
     catch (error) { failure = error; }
@@ -270,13 +331,14 @@ async function recoverOptimizationRun(runId, deps = {}) {
     try {
       if (run.recovery_attempts >= RECOVERY_DELAYS.length || job?.status === 'cancelled' && !run.submitted_at) fail('workspace_optimization_recovery_exhausted');
       await authorize(run, { ...deps, readOnly: !!run.submitted_at }, transaction);
-      if (!run.submitted_at) evidenceSnapshot(run.evidence, now(deps), run.change.target.action);
+      if (!run.submitted_at) evidenceSnapshot(run.evidence, now(deps), run.change.target.action, run.change);
     } catch (error) { denied = reason(error); }
     const attempts = run.recovery_attempts + 1;
     if (denied) {
       const retry = RETRYABLE.includes(denied) && attempts < RECOVERY_DELAYS.length;
       await run.update({ status: run.submitted_at ? 'uncertain' : retry ? 'queued' : 'skipped',
-        outcome: { reason: denied, provider_mutation: false, submission_reserved: !!run.submitted_at },
+        outcome: { reason: denied, provider_mutation: false, submission_reserved: !!run.submitted_at,
+          ...(run.outcome?.budget_accounting ? { budget_accounting: run.outcome.budget_accounting } : {}) },
         lease_token: null, lease_until: null, recovery_attempts: attempts,
         next_check_at: retry ? nextCheck(attempts, now(deps)) : null,
         completed_at: !run.submitted_at && !retry ? now(deps) : null }, { transaction });

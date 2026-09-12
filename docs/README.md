@@ -2,6 +2,17 @@
 
 Este índice separa la arquitectura general de los procedimientos que deben usarse para operar o verificar Marketing. La fuente canónica de arquitectura es `src/Documentacion/13-backend.md`; su copia en el repositorio frontend es un espejo completo para conservar enlaces internos y debe sincronizarse después de cada cambio.
 
+## Seguridad: AWS, Integraciones Y Auditoria (2026-09-12)
+
+[Runbook de migracion](./security-integrations-audit-migration.md): fases,
+consumidores, pruebas, push selectivo, despliegue y rollback. Complementa el
+contrato frontend `src/Documentacion/39-seguridad-integraciones-cifrado-auditoria.md`.
+El [prompt de ejecucion](./security-integrations-migration-codex-prompt.md)
+queda versionado para la tarea delegada; no requiere copiar incidentes privados.
+Infraestructura comunicada por el aprovisionador, no migracion ejecutada.
+Mantener el hotfix de `getAssetStats`, Meta bloqueado y el trabajo concurrente
+de campanas; no promover todo DEV ni aplicar todas las migraciones pendientes.
+
 ## Cierre funcional Marketing Web W1-W5 (2026-07-19)
 
 La referencia vigente del candidato es backend `7bd254e` (staging

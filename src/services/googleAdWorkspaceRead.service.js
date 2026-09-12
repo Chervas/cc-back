@@ -1,13 +1,24 @@
 'use strict';
 
 const { Op } = require('sequelize');
+const { googleAdDeliveryStatus } = require('./googleAdDelivery.service');
 const key = row => JSON.stringify([row.customerId, row.campaignId, row.adGroupId, row.adId]);
 const dayKey = (row, date = row.date) => JSON.stringify([key(row), date]);
 
 async function loadGoogleWorkspaceAds({ models, googleWhere, dateWhere }) {
-  const inventory = await models.GoogleAdsAdInventory.findAll({ where: { [Op.or]: googleWhere },
+  const inventoryQuery = { where: { [Op.or]: googleWhere },
     attributes: ['clinicGoogleAdsAccountId', 'customerId', 'campaignId', 'campaignStatus', 'adGroupId', 'adGroupName', 'adGroupStatus',
-      'adId', 'adName', 'headlines', 'adStatus', 'present', 'observedAt'], order: [['observedAt', 'DESC']], raw: true });
+      'adId', 'adName', 'headlines', 'adStatus', 'deliveryObservation', 'present', 'observedAt'], order: [['observedAt', 'DESC']], raw: true };
+  let inventory;
+  try { inventory = await models.GoogleAdsAdInventory.findAll(inventoryQuery); }
+  catch (error) {
+    const sqlError = error.original || error.parent || error;
+    if (sqlError.code !== 'ER_BAD_FIELD_ERROR'
+      || !/^Unknown column '(?:GoogleAdsAdInventory\.)?deliveryObservation' in 'field list'$/.test(sqlError.sqlMessage || '')) throw error;
+    // A staged schema upgrade must not hide saved metrics or imply approval from ENABLED alone.
+    inventory = await models.GoogleAdsAdInventory.findAll({ ...inventoryQuery,
+      attributes: inventoryQuery.attributes.filter(field => field !== 'deliveryObservation') });
+  }
   const rows = await models.GoogleAdsAdInsightsDaily.findAll({ where: { [Op.or]: googleWhere, date: dateWhere },
     attributes: ['clinicGoogleAdsAccountId', 'customerId', 'campaignId', 'adGroupId', 'adGroupName', 'adId', 'adName',
       'adStatus', 'date', 'network', 'device', 'costMicros', 'conversions', 'observedAt', 'updated_at'], order: [['observedAt', 'DESC'], ['updated_at', 'DESC']], raw: true });
@@ -26,9 +37,7 @@ async function loadGoogleWorkspaceAds({ models, googleWhere, dateWhere }) {
   }
   function identity(row) {
     const item = byId.get(key(row)) || row;
-    const statuses = [item.campaignStatus, item.adGroupStatus, item.adStatus];
-    const status = item.present === false ? 'UNKNOWN' : statuses.includes('REMOVED') ? 'REMOVED'
-      : statuses.includes('PAUSED') ? 'PAUSED' : item.adStatus;
+    const status = googleAdDeliveryStatus(item);
     return { provider: 'google_ads', account_id: row.customerId, campaign_id: row.campaignId, id: row.adId,
       groupId: row.adGroupId, groupName: item.adGroupName, title: item.adName || (Array.isArray(item.headlines) ? item.headlines[0] : null), status,
       updatedAt: item.observedAt || row.updated_at };

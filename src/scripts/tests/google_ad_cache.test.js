@@ -18,6 +18,8 @@ function fixture() {
   const models = {
     sequelize: { transaction: async fn => { calls.push('transaction'); return fn(tx); } },
     ClinicGoogleAdsAccount: { findByPk: async (_id, opts) => { assert.equal(opts.lock, 'UPDATE'); return account; } },
+    GoogleConnectionAssignment: { findAll: async opts => { assert.equal(opts.transaction, tx); assert.equal(opts.lock, 'UPDATE'); return [{ googleConnectionId: 2, status: 'active' }]; } },
+    Clinica: { findAll: async opts => { assert.equal(opts.transaction, tx); assert.equal(opts.lock, 'UPDATE'); return [{ id_clinica: 1, grupoClinicaId: null }]; } },
     ExternalCampaignAssignment: { findAll: async () => [] },
     GoogleAdsAdSyncDay: { findAll: async () => [], bulkCreate: async (rows, opts) => { assert.equal(opts.transaction, tx); calls.push(['coverage', rows]); } },
     GoogleAdsAdInventory: { findOne: async () => null, update: async () => calls.push('inventoryMissing'), bulkCreate: async rows => calls.push(['inventory', rows]) },
@@ -121,12 +123,103 @@ test('campaign refresh does not clear other campaigns, reviewed archive override
 });
 
 test('revoked mappings and newer observations fence stale refreshes', async () => {
-  for (const change of [{ isActive: false }, { customerId: '999' }, { googleConnectionId: 99 }]) {
+  for (const change of [{ isActive: false }, { customerId: '999' }, { googleConnectionId: 99 },
+    { assignmentScope: 'group' }, { clinicaId: 2 }, { grupoClinicaId: 9 }]) {
     const f = fixture(); f.models.ClinicGoogleAdsAccount.findByPk = async () => ({ ...account, ...change });
     await assert.rejects(persistAdSnapshot(f.args), /account_changed/); assert.deepEqual(f.calls, ['transaction']);
   }
   const f = fixture(); f.models.GoogleAdsAdSyncDay.findAll = async () => [{ observedAt: '2026-09-11T02:00:01Z' }];
   assert.equal((await persistAdSnapshot(f.args)).reason, 'newer_snapshot'); assert.deepEqual(f.calls, ['transaction']);
+});
+
+test('missing, revoked, ambiguous and replaced grants cannot change inventory, metrics or coverage', async () => {
+  for (const grants of [[], [{ googleConnectionId: 2, status: 'revoked' }], [{ googleConnectionId: 2, status: 'disconnected' }],
+    [{ googleConnectionId: 2, status: 'reauthorization_required' }], [{ googleConnectionId: 3, status: 'active' }],
+    [{ googleConnectionId: 2, status: 'active' }, { googleConnectionId: 2, status: 'active' }]]) {
+    const f = fixture(); f.models.GoogleConnectionAssignment.findAll = async () => grants;
+    await assert.rejects(persistAdSnapshot(f.args), /grant_changed/);
+    assert.deepEqual(f.calls, ['transaction']);
+  }
+});
+
+test('clinic inheritance needs an absent direct grant and unchanged group membership', async () => {
+  const f = fixture(); f.args.account = { ...account, grupoClinicaId: 5 };
+  f.models.ClinicGoogleAdsAccount.findByPk = async () => f.args.account;
+  f.models.Clinica.findAll = async () => [{ id_clinica: 1, grupoClinicaId: 5 }];
+  const queries = [];
+  f.models.GoogleConnectionAssignment.findAll = async options => {
+    queries.push(options.where); return options.where.assignmentScope === 'group' ? [{ googleConnectionId: 2, status: 'active' }] : [];
+  };
+  await persistAdSnapshot(f.args); assert.equal(queries.length, 2); assert.equal(queries[1].grupoClinicaId, 5);
+  f.calls.length = 0; queries.length = 0;
+  f.models.GoogleConnectionAssignment.findAll = async options => {
+    queries.push(options.where); return [{ googleConnectionId: 2, status: options.where.assignmentScope === 'clinic' ? 'revoked' : 'active' }];
+  };
+  await assert.rejects(persistAdSnapshot(f.args), /grant_changed/); assert.equal(queries.length, 1); assert.deepEqual(f.calls, ['transaction']);
+  f.models.GoogleConnectionAssignment.findAll = async () => [{ googleConnectionId: 2, status: 'active' }];
+  f.models.Clinica.findAll = async () => [{ id_clinica: 1, grupoClinicaId: 9 }];
+  await assert.rejects(persistAdSnapshot(f.args), /assignment_outside_scope/); assert.deepEqual(f.calls, ['transaction', 'transaction']);
+});
+
+test('out-of-scope clinic assignments cannot be persisted and reviewed archives still take precedence', async () => {
+  for (const clinics of [[], [{ id_clinica: 1, grupoClinicaId: null }]]) {
+    const f = fixture(); f.models.Clinica.findAll = async () => clinics;
+    f.models.ExternalCampaignAssignment.findAll = async options => {
+      assert.equal(options.lock, 'UPDATE'); assert.deepEqual(options.where.customer_id[Op.in], ['1234567890', '123-456-7890']);
+      return [{ campaign_id: '456', status: 'active', clinica_id: 2 }];
+    };
+    await assert.rejects(persistAdSnapshot(f.args), /assignment_outside_scope/); assert.deepEqual(f.calls, ['transaction']);
+  }
+});
+
+test('a scoped backup hook runs under the lock before any change and a failure aborts the refresh', async () => {
+  const f = fixture(); f.args.campaignId = '456';
+  const backup = async ({ transaction, inventoryWhere, metricWhere, coverageWhere }) => {
+    assert.equal(transaction.LOCK.UPDATE, 'UPDATE'); assert.deepEqual(f.calls, ['transaction']);
+    for (const where of [inventoryWhere, metricWhere, coverageWhere]) {
+      assert.equal(where.clinicGoogleAdsAccountId, 1); assert.equal(where.customerId, '1234567890'); assert.equal(where.campaignId, '456');
+    }
+    assert.deepEqual(metricWhere.date[Op.in], ['2026-09-09', '2026-09-10']);
+    assert.deepEqual(coverageWhere.date[Op.in], ['2026-09-09', '2026-09-10']);
+    throw Error('backup_failed');
+  };
+  await assert.rejects(persistAdSnapshot({ ...f.args, beforeReplace: backup }), /backup_failed/);
+  assert.deepEqual(f.calls, ['transaction']);
+});
+
+test('group accounts retain reviewed clinic attribution and do not apply the representative clinic to every ad', async () => {
+  const f = fixture(); f.args.account = { ...account, assignmentScope: 'group', grupoClinicaId: 5 };
+  f.models.ClinicGoogleAdsAccount.findByPk = async () => f.args.account;
+  f.models.GoogleConnectionAssignment.findAll = async options => {
+    assert.deepEqual(options.where, { assignmentScope: 'group', grupoClinicaId: 5 });
+    return [{ googleConnectionId: 2, status: 'active' }];
+  };
+  f.models.Clinica.findAll = async options => {
+    assert.deepEqual(options.where, { grupoClinicaId: 5 }); return [{ id_clinica: 1, grupoClinicaId: 5 }, { id_clinica: 2, grupoClinicaId: 5 }];
+  };
+  f.models.ExternalCampaignAssignment.findAll = async () => [{ campaign_id: '456', status: 'active', clinica_id: 2 }];
+  await persistAdSnapshot(f.args);
+  assert.equal(f.calls.find(row => row[0] === 'metrics')[1][0].clinicaId, 2);
+});
+
+test('backup query customization cannot change the writer account or date window', async () => {
+  const f = fixture();
+  await persistAdSnapshot({ ...f.args, beforeReplace: async ({ inventoryWhere, metricWhere, coverageWhere }) => {
+    inventoryWhere.customerId = '9999999999'; metricWhere.customerId = '9999999999';
+    metricWhere.date[Op.in].push('2020-01-01'); coverageWhere.date[Op.in].push('2020-01-02');
+  } });
+  const deletion = f.calls.find(row => row[0] === 'delete')[1].where;
+  assert.equal(deletion.customerId, '1234567890'); assert.deepEqual(deletion.date[Op.in], ['2026-09-09', '2026-09-10']);
+  assert.equal(f.calls.find(row => row[0] === 'coverage')[1].length, 2);
+  assert.equal(f.calls.find(row => row[0] === 'metrics')[1][0].customerId, '1234567890');
+});
+
+test('an explicitly authorized clinic mapping does not need to inherit its group', async () => {
+  const f = fixture(); let grantQueries = 0;
+  f.models.GoogleConnectionAssignment.findAll = async () => { grantQueries++; return [{ googleConnectionId: 2, status: 'active' }]; };
+  f.models.Clinica.findAll = async () => [{ id_clinica: 1, grupoClinicaId: 5 }];
+  await persistAdSnapshot(f.args); assert.equal(grantQueries, 1);
+  assert.equal(f.calls.find(row => row[0] === 'metrics')[1][0].clinicaId, 1);
 });
 
 function readFixture() {
@@ -173,7 +266,10 @@ test('campaign-specific date coverage cannot leak to another campaign in an aggr
 });
 
 test('a more recent paused campaign prevents old enabled ad metadata from appearing active', async () => {
-  const f = readFixture(); const ads = await loadGoogleWorkspaceAds(f.args);
+  const f = readFixture();
+  f.inventory[0].deliveryObservation = { schemaVersion: 1, observedAt: observedAt.toISOString(),
+    primaryStatus: 'ELIGIBLE', approvalStatus: 'APPROVED', reviewStatus: 'REVIEWED', primaryStatusReasons: [] };
+  const ads = await loadGoogleWorkspaceAds(f.args);
   const { aggregateReport, reportPeriod } = require('../../services/campaignWorkspaceReport.service');
   const { externalCampaignIdentityKey } = require('../../services/externalCampaignAssignmentTargets.service');
   const campaign = { provider: 'google_ads', account_id: '1234567890', campaign_id: '456', paused: true, assigned: true,

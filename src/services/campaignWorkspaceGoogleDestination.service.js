@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const { settingScope } = require('./campaignWorkspaceSettings.service');
 const { receptionAccount, receivingClinic } = require('./googleLeadReception.service');
 const { googleAdsSearchRows } = require('../lib/googleAdsSearchRows');
+const { googleUrlExpansionOptedOut } = require('../lib/googleAdsCampaignMeasurementDiagnosis');
 const { ensureGoogleConnectionAccessToken, GOOGLE_ADS_SCOPE } = require('./googleAdsScopedRuntime.service');
 
 const SOURCE = 'workspace_google_ads';
@@ -98,7 +99,7 @@ async function inspectGoogleDestinations({ reference, accessToken, loginCustomer
     if (!Array.isArray(rows) || rows.length > 2000 || rows.some(row => String(row.customer?.id) !== accountId)) fail('workspace_google_destination_incomplete');
     return rows;
   };
-  const campaignRows = await search(`SELECT customer.id, campaign.id, campaign.advertising_channel_type, campaign.url_expansion_opt_out
+  const campaignRows = await search(`SELECT customer.id, campaign.id, campaign.advertising_channel_type, campaign.asset_automation_settings
     FROM campaign WHERE campaign.id = ${campaignId} AND campaign.status != 'REMOVED'`);
   if (campaignRows.length !== 1 || String(campaignRows[0].campaign?.id) !== campaignId) fail('workspace_google_campaign_unavailable');
   const campaign = campaignRows[0].campaign;
@@ -161,7 +162,7 @@ async function inspectGoogleDestinations({ reference, accessToken, loginCustomer
     if (!id(String(row.assetGroup.id))) fail('workspace_google_destination_identity_mismatch');
     readUrls(row.assetGroup.finalUrls); readUrls(row.assetGroup.finalMobileUrls);
   }
-  if (campaign.advertisingChannelType === 'PERFORMANCE_MAX' && campaign.urlExpansionOptOut !== true) reasons.add('dynamic_web_destinations');
+  if (campaign.advertisingChannelType === 'PERFORMANCE_MAX' && !googleUrlExpansionOptedOut(campaign)) reasons.add('dynamic_web_destinations');
   if (!ads.length && !assetGroups.length) reasons.add('no_ads');
   if (!forms.size && !urls.size) reasons.add('no_destinations');
   return { version: 1, source: SOURCE, status: 'checked', checked_at: now.toISOString(), account_id: accountId,

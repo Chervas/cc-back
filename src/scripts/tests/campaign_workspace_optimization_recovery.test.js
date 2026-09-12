@@ -11,7 +11,8 @@ test('recovery is disabled without either gate and never reads a provider from t
   assert.deepEqual(f.state.calls, { read: 0, mutate: 0, inspect: 0, authorize: 0 });
 });
 test('an unsubmitted job consumed with a closed gate is recovered only with fresh authorization and evidence', async () => {
-  const f = fixture(); await f.enqueue(); f.state.jobs.get(1).status = 'completed'; due(f);
+  const f = fixture(); await f.enqueue(); f.state.jobs.get(1).status = 'completed';
+  f.state.now = new Date(+f.state.now + 60000); f.row().next_check_at = new Date(+f.state.now - 1);
   const result = await recoverOptimizationRuns(f.deps); assert.equal(result.report.apply_queued, 1);
   assert.equal(f.state.jobs.get(2).type, JOB_TYPE); assert.equal(f.state.calls.mutate, 0);
   assert.equal((await f.run(2)).result.state, 'verified'); assert.equal(f.state.calls.mutate, 1);
@@ -60,7 +61,8 @@ test('recovery attempts are bounded, preserve uncertainty and never repeat the c
   assert.equal((await recoverOptimizationRuns(f.deps)).report.scanned, 0); assert.equal(f.state.calls.mutate, 1);
 });
 test('a missing terminal job can be recovered but an enqueue failure rolls back the binding and attempt counter', async () => {
-  const f = fixture(); await f.enqueue(); f.row().job_request_id = null; f.state.jobs.get(1).status = 'completed'; due(f);
+  const f = fixture(); await f.enqueue(); f.row().job_request_id = null; f.state.jobs.get(1).status = 'completed';
+  f.state.now = new Date(+f.state.now + 60000); f.row().next_check_at = new Date(+f.state.now - 1);
   f.state.failEnqueue = true; assert.equal((await recoverOptimizationRuns(f.deps)).report.failed, 1);
   assert.equal(f.row().job_request_id, null); assert.equal(f.row().recovery_attempts, 0);
   f.state.failEnqueue = false; assert.equal((await recoverOptimizationRuns(f.deps)).report.apply_queued, 1);

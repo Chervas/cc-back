@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const { googleAdsSearchRows } = require('../lib/googleAdsSearchRows');
 const { graphList } = require('./campaignWorkspaceMetaDestination.service');
+const { googleAdHasUnrestrictedDelivery } = require('./googleAdDelivery.service');
 
 const ACTIONS = ['pause_underperforming_ads', 'adjust_bids', 'negative_keywords', 'adjust_budget'];
 const TTL_MS = 24 * 3600000;
@@ -10,7 +11,10 @@ const fail = code => { throw Object.assign(new Error(code), { code, status: 409 
 const id = value => typeof value === 'string' && /^[1-9][0-9]{0,63}$/.test(value);
 const positive = value => value != null && value !== '' && Number.isFinite(Number(value)) && Number(value) > 0;
 const amount = value => /^\d+$/.test(String(value)) && Number.isSafeInteger(Number(value)) && Number(value) > 0;
-const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+// MySQL JSON storage reorders object keys. Hash content canonically, keeping array order meaningful.
+const digest = value => crypto.createHash('sha256').update(JSON.stringify(value, (_key, item) =>
+  item && typeof item === 'object' && !Array.isArray(item)
+    ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item)).digest('hex');
 
 function optimizationReference(input, write = false) {
   const keys = ['provider', 'account_id', 'campaign_id', ...(write ? ['expected_version'] : [])];
@@ -20,6 +24,24 @@ function optimizationReference(input, write = false) {
     throw Object.assign(new Error('invalid_workspace_optimization'), { code: 'invalid_workspace_optimization', status: 400 });
   }
   return { provider: input.provider, account_id: input.account_id, campaign_id: input.campaign_id };
+}
+
+// Provider mutability alone is not an implemented automatic decision policy.
+function optimizationAvailability(inspection) {
+  if (inspection?.schema_version !== 1 || !Array.isArray(inspection.targets) || !Array.isArray(inspection.actions)
+    || inspection.actions.length !== ACTIONS.length || new Set(inspection.actions.map(row => row?.action)).size !== ACTIONS.length
+    || inspection.targets.some(target => !target || !ACTIONS.includes(target.action))
+    || inspection.actions.some(row => !row || !ACTIONS.includes(row.action) || !Number.isSafeInteger(row.targets) || row.targets < 0
+      || row.targets !== inspection.targets.filter(target => target.action === row.action).length
+      || !Array.isArray(row.reasons) || row.reasons.some(reason => typeof reason !== 'string' || !/^[a-z_]{1,80}$/.test(reason)))
+    || inspection.fingerprint !== digest([inspection.reference, inspection.currency, inspection.targets, inspection.actions])) fail('workspace_optimization_incomplete');
+  const unavailable = target => target.action === 'negative_keywords' ? 'search_relevance_required'
+    : target.action === 'adjust_bids' && inspection.reference?.provider === 'meta_ads' && target.strategy !== 'LOWEST_COST_WITH_BID_CAP'
+      ? 'bid_policy_not_available' : null;
+  const targets = inspection.targets.filter(target => !unavailable(target));
+  const actions = inspection.actions.map(row => ({ action: row.action, targets: targets.filter(target => target.action === row.action).length,
+    reasons: [...new Set([...row.reasons, ...inspection.targets.filter(target => target.action === row.action).map(unavailable).filter(Boolean)])].sort() }));
+  return { targets, actions };
 }
 
 function result(reference, currency, targets, reasons, now) {
@@ -85,7 +107,8 @@ async function inspectGoogleOptimization({ reference, accessToken, loginCustomer
     groupIds.add(String(row.adGroup.id));
   }
   const ads = campaign.advertisingChannelType === 'SEARCH' ? await search(`SELECT customer.id, campaign.id,
-    ad_group.id, ad_group.status, ad_group_ad.ad.id, ad_group_ad.status FROM ad_group_ad
+    ad_group.id, ad_group.status, ad_group_ad.ad.id, ad_group_ad.status,
+    ad_group_ad.primary_status, ad_group_ad.policy_summary.approval_status FROM ad_group_ad
     WHERE campaign.id = ${campaignId} AND ad_group_ad.status != 'REMOVED' AND ad_group.status != 'REMOVED'`) : [];
   const adKeys = new Set();
   for (const row of ads) {
@@ -93,7 +116,8 @@ async function inspectGoogleOptimization({ reference, accessToken, loginCustomer
     if (!id(String(row.adGroupAd?.ad?.id)) || !groupIds.has(String(row.adGroup?.id)) || adKeys.has(key)) fail('workspace_optimization_incomplete');
     adKeys.add(key);
   }
-  pausableAds(ads.filter(row => row.adGroupAd.status === 'ENABLED' && row.adGroup.status === 'ENABLED')
+  pausableAds(ads.filter(row => googleAdHasUnrestrictedDelivery({ campaignStatus: campaign.status,
+    adGroupStatus: row.adGroup.status, groupAd: row.adGroupAd }))
     .map(row => ({ id: String(row.adGroupAd.ad.id), groupId: String(row.adGroup.id), status: row.adGroupAd.status })), targets,
   ad => `customers/${account}/adGroupAds/${ad.groupId}~${ad.id}`);
   if (!targets.length) reasons.pause_underperforming_ads.push(campaign.advertisingChannelType === 'PERFORMANCE_MAX' ? 'asset_groups_not_individual_ads' : 'no_alternative_active_ad');
@@ -187,4 +211,4 @@ async function inspectMetaOptimization({ reference, accessToken, read = require(
   return result(reference, owner.currency, targets, reasons, now);
 }
 
-module.exports = { ACTIONS, TTL_MS, digest, optimizationReference, inspectGoogleOptimization, inspectMetaOptimization };
+module.exports = { ACTIONS, TTL_MS, digest, optimizationReference, optimizationAvailability, inspectGoogleOptimization, inspectMetaOptimization };

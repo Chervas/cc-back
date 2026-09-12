@@ -7,7 +7,7 @@ const { googleDestinationContext } = require('./campaignWorkspaceGoogleDestinati
 const { metaCampaignContext } = require('./campaignWorkspaceMetaDestination.service');
 const { metaSignalPreparationContext } = require('./campaignWorkspaceMetaSignalPreparation.service');
 const { ensureGoogleConnectionAccessToken, GOOGLE_ADS_SCOPE } = require('./googleAdsScopedRuntime.service');
-const { TTL_MS, digest, optimizationReference, inspectGoogleOptimization, inspectMetaOptimization } = require('./campaignWorkspaceOptimizationCapabilities.service');
+const { TTL_MS, digest, optimizationReference, optimizationAvailability, inspectGoogleOptimization, inspectMetaOptimization } = require('./campaignWorkspaceOptimizationCapabilities.service');
 
 const EVENT_TYPE = 'optimization_check';
 const LEASE_MS = 120000;
@@ -53,8 +53,12 @@ function publicOptimizationProof(context, now = new Date()) {
   const requested = [...context.setting.preferences.optimization.actions,
     ...(context.setting.preferences.optimization.budget_changes ? ['adjust_budget'] : [])];
   if (!Array.isArray(proof.inspection?.actions) || proof.inspection.schema_version !== 1
-    || JSON.stringify(proof.inspection.reference) !== JSON.stringify(context.reference)) return { ...base, status: 'stale' };
-  const actions = proof.inspection.actions.map(({ action, targets, reasons }) => ({ action, targets, reasons, requested: requested.includes(action) }));
+    || !proof.inspection.reference
+    || digest(proof.inspection.reference) !== digest(context.reference)) return { ...base, status: 'stale' };
+  let available;
+  try { available = optimizationAvailability(proof.inspection); }
+  catch { return { ...base, status: 'stale' }; }
+  const actions = available.actions.map(({ action, targets, reasons }) => ({ action, targets, reasons, requested: requested.includes(action) }));
   return { ...base, status: 'checked', checked_at: proof.checked_at, expires_at: proof.expires_at,
     compatible: actions.some(action => action.requested && action.targets > 0), currency: proof.inspection.currency, actions };
 }

@@ -56,9 +56,13 @@ test('verified Google leads, historical appointments and both periods retain the
   const leads = await attach([googleLead(), googleLead(2, { created_at: '2026-09-01T10:00:00Z' }),
     googleLead(3, { created_at: '2026-01-01T10:00:00Z' })], [audit(), audit(2), audit(3)]);
   const appointment = { id_cita: 1, lead_intake_id: 3, clinica_id: 1, created_at: '2026-09-08T11:00:00Z', estado: 'pendiente' };
+  const completeAds = Array.from({ length: period.days * 2 }, (_, i) => {
+    const date = new Date(+new Date(period.previousStart) + i * 86400000).toISOString().slice(0, 10);
+    return ad({ date, spend: date === period.end ? 50 : date === period.previousEnd ? 30 : 0 });
+  });
   const result = report({ leads: [...leads, leads[0]], appointments: [appointment, appointment,
     { ...appointment, id_cita: 2, estado: 'cancelada' }, { ...appointment, id_cita: 3, clinica_id: 2 }],
-  ads: [ad(), ad(), ad({ date: period.previousEnd, spend: 30 })] }).rows[0];
+  facts: completeAds, ads: [...completeAds, completeAds.at(-1)] }).rows[0];
   assert.equal(result.ads[0].id, '800~700');
   assert.equal(result.ads[0].current.leads, 1); assert.equal(result.ads[0].previous.leads, 1);
   assert.equal(result.ads[0].current.appointments, 1); assert.equal(result.ads[0].current.spend, 50);
@@ -122,7 +126,8 @@ test('accepted budgets allocate once to an unambiguous ad or stay in the campaig
   }
 });
 
-const comparable = () => ({ campaign, adAttribution: { unattributed: { current: { leads: 0 } } }, ads: [1, 2].map(i => ({
+const comparable = () => ({ campaign, adSpendCoverage: { current: { status: 'matched' } },
+  adAttribution: { unattributed: { current: { leads: 0 } } }, ads: [1, 2].map(i => ({
   id: String(i), active: true, lastSeenAt: now, metricsUpdatedAt: now, latestMetricDate: period.end,
   current: { leads: 10, spend: i * 50 }, currentCpl: i * 5,
 })) });
@@ -147,4 +152,44 @@ test('fresh inventory or a refreshed old metric cannot hide stale latest-day met
     const row = report({ ads }).rows[0];
     assert.equal(row.ads[0].metricsUpdatedAt, '2026-09-01'); assert.equal(row.ads[0].lastSeenAt, now);
   }
+});
+
+test('ad spend reconciles every day and every ad with the campaign before computing CPL', async () => {
+  const leads = await attach(Array.from({ length: 20 }, (_, i) => googleLead(i + 1)),
+    Array.from({ length: 20 }, (_, i) => audit(i + 1, { ...proof, ad_id: i < 10 ? '700' : '701' })));
+  const dates = Array.from({ length: period.days }, (_, i) => new Date(+new Date(period.start) + i * 86400000).toISOString().slice(0, 10));
+  const facts = dates.map(date => ({ ...ref, date, spend: date === period.end ? 150 : 0, updatedAt: now }));
+  const ads = dates.flatMap(date => [ad({ date, spend: date === period.end ? 50 : 0 }),
+    ad({ id: '701', date, spend: date === period.end ? 100 : 0 })]);
+  const complete = report({ leads, facts, ads }).rows[0];
+  assert.equal(complete.adSpendCoverage.current.status, 'matched');
+  assert.equal(complete.adSpendCoverage.current.completeDays, period.days);
+  assert.equal(complete.adAttribution.comparison.bestAdId, '800~700');
+  assert.deepEqual(complete.ads.map(ad => ad.currentCpl), [5, 10]);
+  for (const data of [
+    { facts, ads: ads.filter(ad => ad.date !== dates[2]) },
+    { facts: facts.filter(fact => fact.date !== dates[2]), ads },
+    { facts, ads: ads.filter(ad => ad.id === '700') },
+    { facts, ads: ads.map(ad => ({ ...ad, spend: ad.spend * 0.8 })) },
+    { facts: facts.map((fact, i) => ({ ...fact, spend: fact.spend + (i === 0 ? 20 : i === facts.length - 1 ? -20 : 0) })), ads },
+    { facts: [], ads },
+  ]) {
+    const row = report({ leads, ...data }).rows[0];
+    assert.notEqual(row.adSpendCoverage.current.status, 'matched');
+    assert.ok(row.ads.every(ad => ad.currentCpl === null && !ad.lowestCost));
+    assert.equal(row.current.leads, 20);
+  }
+});
+
+test('spend reconciliation includes paused ads and distinguishes zero from unavailable data', () => {
+  const dates = Array.from({ length: period.days }, (_, i) => new Date(+new Date(period.start) + i * 86400000).toISOString().slice(0, 10));
+  const facts = dates.map(date => ({ ...ref, date, spend: date === period.end ? 150 : 0, updatedAt: now }));
+  const ads = dates.flatMap(date => [ad({ date, spend: date === period.end ? 100 : 0 }),
+    ad({ id: '701', status: 'PAUSED', date, spend: date === period.end ? 50 : 0 })]);
+  assert.equal(report({ facts, ads }).rows[0].adSpendCoverage.current.status, 'matched');
+  assert.equal(report({ facts, ads: [] }).rows[0].adSpendCoverage.current.status, 'unavailable');
+  const zero = report({ facts: facts.map(row => ({ ...row, spend: 0 })), ads: ads.map(row => ({ ...row, spend: 0 })) }).rows[0];
+  assert.equal(zero.adSpendCoverage.current.status, 'matched');
+  assert.equal(zero.adSpendCoverage.current.adSpend, 0);
+  assert.equal(zero.adSpendCoverage.previous.status, 'unavailable');
 });

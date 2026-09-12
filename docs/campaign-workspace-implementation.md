@@ -6,6 +6,1610 @@ promover a staging/produccion ni abrir los gates hasta completar los contratos,
 las pruebas de permisos y el QA autenticado. Referencia UX canonica en front:
 `src/Documentacion/20.17-marketing-arquitectura-experiencia-objetivos.md`, apartado 19.
 
+## Cache Por Anuncio Aplicada Con Autorizacion (2026-09-12)
+
+El usuario autoriza expresamente la migracion compartida y el refresco exclusivo
+de Dental - Parallel Campaign `1851215478`. Este apartado sustituye los pendientes
+de autorizacion/migracion/cache de los cortes historicos siguientes, no autoriza
+jobs, asignaciones, senales, publicidad, OAuth ni Meta.
+
+- 04:25:08-09 UTC / 06:25:08-09 CEST: ejecutor local
+  `/home/ubuntu/scripts/cc-propdental-ad-schema-authorized.js` aplica SOLO
+  `20260912010000-add-google-ad-delivery-observation.js` y su entrada SequelizeMeta.
+  JSON nullable verificado; no carga app/indice de modelos ni otras migraciones.
+  Respaldo previo del esquema y 19 filas de inventario, 670 metricas, 59 dias
+  de cobertura de la cuenta/ventana. MySQL DDL tiene commit implicito; no se
+  presenta como transaccion reversible automatica.
+- 04:25:29-35 UTC / 06:25:29-35 CEST: ejecutor de cache preparado, cinco consultas
+  Google Search v24 HTTP200 con token existente, sin renovarlo. Mapping11/grupo5,
+  14/07-11/09: 19 anuncios, 688 filas de metricas, 60 dias completos. Conciliacion
+  Search de 247 combinaciones campana/dia, 2.892.595.420 micros en ambos lados.
+  PMax no se interpreta como inventario ad_group_ad ni se rellena con ceros.
+  Respaldo propio y lectura de verificacion antes del commit, resultado
+  `committed_and_verified`. Sin cambios de campanas, pujas, presupuesto o leads.
+- Evidencia privada: `/home/ubuntu/qa-evidence/propdental-ad-schema-2026-09-12T04-25-08-301Z-89Wr6L/`
+  y `/home/ubuntu/qa-evidence/propdental-ad-cache-apply-2026-09-12T04-25-29-461Z-YUzxh5/`.
+  before.json/result.json, SHA256 registrados; directorios0700 y respaldos0600.
+  No restaurar/repetir sin comprobar nuevas observaciones y nueva autorizacion.
+- API y Chromium delegado Carlos, clinica/grupo, 1440/1024/390: 105 comprobaciones,
+  16 capturas, sin errores JS/desbordes. Hospitalet Search concilia 99,076192 EUR
+  actual y 180,020892 anterior, 30/30 dias en ambos. Aviso antiguo desaparece;
+  anuncios 78,44 y 20,63 EUR, un lead sin anuncio identificado: sin CPL por
+  anuncio ni ganador inventados. Capturas de anuncios escritorio/movil revisadas.
+  `/home/ubuntu/qa-evidence/campaign-authenticated-2026-09-12T04-26-42-543Z/result.json`.
+  Nuevo modo QA `--require-refreshed-ad-coverage`; se conserva el modo previo
+  para verificar casos incompletos. Sesion aislada cerrada al terminar.
+- No build/reinicio/promocion: preview e81492ec0b86bc51 y lectores DEV existentes.
+  Nueve flags false revalidados 04:27:48 UTC. DEV1335829/8577, staging1074087/46,
+  gateway1039243/37, preview1054768/40 sin cambios. El nuevo escritor se ejecuto
+  standalone; su despliegue normal y ciclo nocturno siguen pendientes.
+
+Seguridad, solo revision solicitada: el fallo historico getAssetStats sigue
+presente en fuente DEV/staging y vuelve a reproducirse con centinelas ficticios,
+sin DB/proveedores. No demuestra explotacion ni origen del incidente. No se
+cambia codigo de seguridad, almacenamiento, tokens o permisos en este corte.
+
+## Presupuestos: Contraste Propdental Y Aceptacion Real Aislada (2026-09-12)
+
+Revision READ ONLY de las seis clinicas activas comunicadas por el usuario
+(19,35,36,56,58,59), cuenta `1851215478`, 03:46:11 UTC / 05:46:11 CEST.
+En `EconomicBudgets` hay un presupuesto `presented` en Sants y uno `rejected`
+en Nou Barris; ninguno `accepted/partially_accepted`, tampoco sin fecha.
+Ventanas del informe: actual 13/08-11/09, anterior 14/07-12/08, Europe/Madrid.
+No se consultan precios, pacientes, contactos, lineas o importes bancarios.
+El API real delegado de Carlos devuelve 200 para grupo5/Hospitalet y cero
+aceptados en campanas asignadas; las no asignadas conservan null. Los totales
+del grupo incluyen otras sedes/cuentas: no extrapolar las seis clinicas a todo
+el grupo. Evidencia privada:
+`/home/ubuntu/qa-evidence/propdental-workspace-2026-09-12T03-46-11-551Z/result.json`.
+Modo reutilizable `cc-propdental-workspace-readonly.js --authorized-carlos-propdental-readonly --budget-trace`.
+
+No existia una aceptacion positiva real para contrastar. Se anade
+`src/scripts/tests/campaign_budget_trace_mysql.integration.js`: usa el servicio
+productivo `patientEconomics.transitionBudget`, los modelos economicos y el
+lector/informe reales sobre MySQL temporal. Aceptacion total 623,45 EUR,
+parcial 123,45 EUR; el KPI usa `accepted_amount` del snapshot aceptado, no
+consulta el catalogo ni equivale a cobros. Citas repetidas con un lead anterior
+al periodo cuentan cada presupuesto una vez. Verifica comparativa, rechazo,
+borrador, sustitucion y rollback del importe/estado si falla la auditoria.
+Las fechas de comparativa se controlan solo en el fixture, no hay backdating
+en la app. No modifica el contrato de atribucion: IDs legacy web suficientes
+para contar contactos no son prueba economica por si solos; sin identidad
+verificada la aceptacion queda ambigua. El informe solo expone agregados.
+
+56 contratos enfocados y ocho comprobaciones MySQL 8.0.42 correctos; instancia
+PID1341124 terminada con codigo0, sin conexiones ajenas. Logs
+`/tmp/propdental-budget-trace-{contracts,mysql}-20260912.log` y evidencia
+`/tmp/cc-campaign-opt-mysql-eQMDre/result.json`. La prueba positiva es aislada,
+no una aceptacion de un paciente de Propdental ni una prueba de firma/cobro/envio.
+Sin cambios en codigo productivo, interfaz, schema o datos compartidos; sin
+OAuth, Meta, proveedores, reinicios/build/publicacion. La migracion/refresco de
+anuncios siguen esperando autorizacion. No se repite Chromium: QA 106/16 previo.
+
+## Ejecutor Acotado De Cache Por Anuncio (2026-09-12)
+
+`src/scripts/repair_propdental_ad_cache.js` esta preparado y probado, NO ejecutado
+contra servicios/DB reales. La autorizacion solicitada para migracion y cache
+compartida sigue pendiente. Un flag de CLI o una continuacion del objetivo no
+sustituyen esa autorizacion. Solo despues de obtenerla y aplicar por separado
+la migracion aditiva aprobada, desde `back-dev`:
+
+```bash
+node src/scripts/repair_propdental_ad_cache.js --authorized-account-1851215478-ad-cache-write
+```
+
+- Fija customer `1851215478`, mapping 11, grupo 5, moneda EUR y calendario
+  Europe/Madrid. Rechaza PROPDENTAL normal, cambios de identidad, esquema sin
+  JSON nullable, permisos revocados, jobs Google pendientes/en curso y gates
+  incidentales abiertos. No carga el indice de modelos, app, workers o cron.
+- Solo permite las consultas Search v24 predefinidas para esa cuenta. Captura
+  inventario completo y 60 dias cerrados; concilia diariamente el gasto Search
+  con campanas antes de escribir. PMax no se compara como `ad_group_ad`.
+  Limita peticiones/paginacion, no sigue redirects ni renueva tokens. Errores,
+  respuestas parciales, token caducado o captura de mas de cinco minutos detienen
+  el proceso sin fabricar ceros o sustituir datos incompletos.
+- `before.json` contiene las filas previas de las tres tablas afectadas, solo
+  cuenta/ventana; inventario completo de esa cuenta. Directorio 0700, fichero
+  exclusivo 0600, fsync y SHA-256 verificado antes de escribir. Incluye contenido
+  de anuncios/URLs: es respaldo privado, no adjuntarlo a tickets o prompts.
+- El nuevo hook interno `afterReplace` verifica inventario/aprobacion, cada
+  metrica y cobertura dentro de la transaccion, antes del commit; tambien vuelve
+  a comprobar gates/permisos. Una discordancia revierte las tres tablas. Respeta
+  la precision DECIMAL(18,6) de conversiones; importes en micros son exactos.
+  No cambia atribucion revisada, otras cuentas, fechas ajenas, leads o publicidad.
+- `result.json` registra respaldo, verificacion y estado de escritura. Un fallo
+  de confirmacion puede quedar `transaction_attempted_unconfirmed`: contrastar
+  DB/evidencia antes de reintentar. No existe restauracion automatica; una
+  restauracion aprobada debe acotarse al respaldo y rechazar observaciones nuevas.
+  No modifica schema, lastSyncedAt, permisos, OAuth, Meta, senales, pujas o presupuesto.
+
+Verificacion offline: 1.073 tests del runner canonico de Marketing Campanas,
+60 tests enfocados, ocho comprobaciones MySQL del ejecutor y once de regresion
+de aprobacion/cache. Los conjuntos Node se solapan: no sumar como tests unicos.
+MySQL 8.0.42 temporal, sin TCP/proveedores ni sockets ajenos, ambas instancias
+terminadas con codigo 0. Primera integracion detecto `0` vs `false` en una
+asercion del test raw; se normalizo el booleano, no se cambio la escritura.
+Logs `/tmp/propdental-ad-repair-{marketing,focused-final,mysql-final,delivery-regression}-20260912.log`;
+evidencias `/tmp/cc-campaign-opt-mysql-qE8Mz5/result.json` y
+`/tmp/cc-campaign-opt-mysql-Tr0Y9v/result.json`.
+
+Estado operativo comprobado 03:39:15 UTC / 05:39:15 CEST: DEV PID 1335829,
+contador 8577, nueve flags false; staging/gateway/preview sin reinicios. Este
+corte solo cambia fuente/pruebas/documentacion, sin consultas a la DB compartida
+o proveedores, migracion, refresh real, build o publicacion. El nuevo hook no
+esta cargado en DEV; QA Chromium 106/16 y preview e81492ec0b86bc51 son anteriores.
+
+## Permisos Y Respaldo Del Refresco Por Anuncio (2026-09-12)
+
+Preparacion del refresco pendiente de `1851215478`, solo codigo y pruebas
+aisladas. NO aplica la migracion ni reemplaza su cache en la DB compartida:
+ambas operaciones siguen esperando autorizacion explicita. No se reinicia DEV
+en este corte; el runtime mantiene el codigo publicado a las 03:07 UTC.
+
+`googleAdCache.service::persistAdSnapshot` revalida bajo bloqueo la cuenta,
+conexion, alcance y clinica/grupo capturados antes de descargar. Exige un unico
+permiso vigente; solo hereda del grupo cuando no existe permiso directo de
+clinica. Un permiso directo revocado/desconectado no permite esa herencia.
+Comprueba pertenencia y asignaciones activas, incluyendo customer con guiones;
+rechaza destinos ajenos y conserva decisiones archivadas/ambiguas sin atribuir
+por defecto. Un permiso directo de clinica no exige un grupo denormalizado.
+Son garantias de persistencia, no una auditoria de todos los lectores legacy.
+
+El callback interno opcional `beforeReplace` recibe transaccion y filtros
+exactos de inventario, metricas y cobertura, despues de las validaciones y
+antes de escribir. Permite respaldar el conjunto que se va a reemplazar. Un
+fallo del respaldo aborta sin cambiar filas ni frescura; los filtros entregados
+son copias y no pueden ampliar accidentalmente la escritura. No activa backups
+automaticos ni un nuevo job. El runner posterior esta descrito arriba;
+su ejecucion sobre la DB compartida sigue pendiente.
+
+Verificado: 906 tests backend offline y 11 comprobaciones MySQL 8.0.42 aislado,
+incluidos permiso revocado durante el refresco, reasignacion de cuenta,
+asignacion fuera de alcance y fallo de respaldo. Instancia temporal terminada
+con codigo 0, sin conexiones rechazadas. Logs:
+`/tmp/google-ad-scope-back-final-20260912.log`,
+`/tmp/google-ad-scope-mysql-final-20260912.log` y
+`/tmp/cc-campaign-opt-mysql-Z2L9iq/result.json`.
+El harness legacy separado `google_ad_cache_mysql.integration.js` adapta sus
+fixtures al contrato, pero no se ejecuta en este corte.
+
+Comprobacion de runtime 03:23:38 UTC / 05:23:38 CEST: DEV PID 1335829,
+contador 8577, nueve flags false tambien en hijos; staging/gateway/preview
+sin reinicios. Sin peticiones a proveedores, DB compartida, OAuth, Meta,
+senales o cambios publicitarios. La evidencia Chromium 106/16 del apartado
+siguiente es anterior: no hubo cambios de interfaz ni nuevo QA visual aqui.
+
+## Conciliacion Del Desglose Por Anuncio (2026-09-12)
+
+Lectura autorizada exclusiva de `1851215478`, cinco Search v24 HTTP 200,
+02:55:11-02:55:15 UTC / 04:55 CEST. Las consultas del escritor de anuncios
+devuelven 19 identidades y 688 filas segmentadas para 14/07-11/09. Las siete
+campanas Search con gasto en esa ventana concilian exactamente anuncios y
+campana en ambos periodos de 30 dias. Hospitalet: 78,443794 + 20,632398 =
+99,076192 EUR en 13/08-11/09; los dos anuncios constan APPROVED/REVIEWED/ELIGIBLE
+en esta observacion. No se usa esa lectura puntual como estado cacheado actual.
+PMax no se representa como anuncios `ad_group_ad`; no inferir gasto cero de esa
+ausencia. Evidencia restringida, sin URLs/creatividades ni credenciales:
+`/home/ubuntu/qa-evidence/propdental-google-readonly-2026-09-12T02-55-11-169Z/result.json`.
+
+El informe ahora entrega `adSpendCoverage` para cada periodo: dias completos de
+campana y de cada anuncio, importes y conciliacion diaria. Incluye anuncios
+pausados/historicos, deduplica segmentos y distingue cero de ausencia. Conserva
+la tolerancia existente de un centimo por dia; diferencias compensadas entre
+dias no se validan solo porque el total coincida. El CPL por anuncio requiere
+periodo conciliado y leads identificados, y `Menor coste` tambien exige esa
+cobertura ademas de muestra y frescura. No altera los importes ni la atribucion.
+
+La UI consume ese resultado, sin sumar de nuevo la tabla filtrada. Si los
+importes difieren, la nota existente muestra ambas cifras; sin datos suficientes
+explica la actualizacion pendiente. No agrega bloques, pestanas o navegacion.
+La cache real por anuncio sigue siendo la anterior: esta fase NO la reemplaza,
+no aplica la migracion pendiente, no renueva tokens ni realiza ajustes.
+
+QA real posterior: Hospitalet tiene 29/30 dias por anuncio frente a 30/30 de
+campana. Cache actual 79,492099 EUR, diferencia -19,584093 EUR; periodo anterior
+30/30 y 180,020892 EUR conciliados. Un lead permanece sin anuncio identificado.
+La consulta directa confirma que el proveedor si tiene el gasto faltante, pero
+no lo sustituye en el informe hasta una escritura acotada y respaldada.
+899 tests backend y 128 frontend correctos. Un test de recomendaciones detecto
+la tolerancia diaria existente y se conservo, sin debilitar su comprobacion.
+Build final `e81492ec0b86bc51`, publicado solo en preview DEV. QA delegado de
+Carlos: 106 comprobaciones/16 capturas en 1440/1024/390 px, cifras exactas del
+aviso, filtros, resumen, Salud, detalle y regresos. Sin desbordes ni errores JS;
+capturas escritorio/movil inspeccionadas, sesion cerrada y nueve flags false.
+`/home/ubuntu/qa-evidence/campaign-authenticated-2026-09-12T03-08-04-828Z/result.json`.
+DEV reiniciado `2026-09-12T03:07:35.930Z` / 05:07:35 CEST, PID 1335829,
+contador 8577; staging/gateway sin cambios. Ninguna migracion/cola activada.
+
+## Refresco Google Integrado En Los Jobs Existentes (2026-09-12)
+
+El codigo DEV de `google_ads_recent` y `google_ads_backfill` ya utiliza el
+colector conciliado de la reparacion de Propdental. No se crea otro cron ni
+se cambia su zona Europe/Madrid. Esto NO acredita una ejecucion nocturna real:
+DEV conserva los nueve flags false y staging no se ha actualizado.
+
+- Una lectura por customer, aunque tenga varias asignaciones del mismo grupo.
+  Los filtros customer/clinica/grupo eligen cuentas, no copias de su cache;
+  conserva el propietario de grupo existente y rechaza propietarios ambiguos.
+- Ventana nocturna por defecto de al menos 60 dias cerrados, para cubrir dos
+  periodos de 30 dias. Calendario de la cuenta, incluyendo cambio de hora;
+  una ventana explicita acotada sigue siendo posible. Backfill en snapshots
+  consecutivos de como maximo 60 dias, sin transaccion global de todo el job.
+- Consultas completas v24 en metricas, inventario, destinos y anuncios. Un error
+  no activa el antiguo fallback que omitía el coste. Una cuenta realmente vacia
+  solo queda completa tras terminar todas las consultas, nunca tras un error.
+- La escritura programada conserva decisiones revisadas y archivadas antes de
+  aplicar el modo/delimitador automatico ya configurado en el grupo. Revalida
+  permisos y clinicas dentro de la transaccion; incidencias de atribucion
+  acotadas a proveedor/customer/entidad. No crea asignaciones manuales nuevas.
+  El runner puntual de reparacion mantiene esta atribucion automatica apagada.
+- `lastSyncedAt` solo cambia tras completar todas las fases y comprobar que
+  la cuenta no se haya reasignado. Un fallo de destinos deja terminar la cache
+  independiente de anuncios, pero no acredita sincronizacion completa. El
+  resultado conserva el progreso confirmado de cada fase terminada.
+- Un lote mixto devuelve `completed_with_errors`; su `SyncLog` queda `failed`
+  porque ese enum no admite parcial. Cero cuentas completadas con errores es
+  `failed`. La espera por cuota conserva el mecanismo durable existente.
+
+No se ejecutan estos jobs contra la DB compartida durante este corte. Antes de
+reactivarlos: coordinar el runtime escritor, API soportada, migracion de
+aprobacion de anuncios y exclusividad frente a escritores legacy; luego validar
+un refresco acotado de `1851215478`. No reactivar Meta ni abrir gates publicitarios
+como parte de esa operacion. Contrato operativo en `11-sistema-jobs.md`.
+
+Verificado: 897 tests backend offline; 12 comprobaciones MySQL 8.0.42 aislado,
+incluidas atribucion programada, rollback de incidencias, concurrencia y
+revocacion. Scheduler, archivo de asignaciones y fase A tambien correctos.
+Logs `/tmp/google-nightly-workspace-closure-suite-20260912.log` y
+`/tmp/cc-campaign-opt-mysql-h86tDA/result.json` (instancia terminada, codigo 0).
+DEV cargado `2026-09-12T02:50:32.226Z` / 04:50:32 CEST, PID 1333068,
+contador 8576; nueve flags false en PM2 y procesos hijos. No reinicia staging,
+gateway o preview. Lectura API posterior de grupo/Hospitalet: HTTP 200 y mismas
+filas/cifras que antes, sin peticiones al proveedor, migraciones o ajustes.
+`/home/ubuntu/qa-evidence/propdental-workspace-2026-09-12T02-50-50-694Z/result.json`.
+Sin cambios de interfaz en este corte; no se repite ni se atribuye como nueva
+la evidencia Chromium 103/16 del apartado siguiente.
+
+## Metricas Reales De Propdental (2026-09-12)
+
+Supersede la ausencia de inversion de la primera lectura de hoy, exclusivamente
+para Dental - Parallel Campaign `1851215478`. No se consulta PROPDENTAL normal
+`5992356722` ni Meta. El grupo conserva las otras cuentas y sedes existentes;
+su total puede seguir pendiente si incluye plataformas/cuentas sin metricas.
+
+`googleCampaignMetricsCache.service` captura por SELECT v24 dias completos,
+con paginacion y conciliacion de segmentos campana/grupo. Conserva el detalle
+Search y usa agregado de campana para PMax sin duplicar ambas granularidades.
+Solo rellena dias cero tras una lectura completa; rechaza errores parciales,
+identidades cambiantes, sumas incongruentes y snapshots caducados. La escritura
+valida de nuevo permiso, propietarios y asignaciones bajo bloqueo, protege de
+una captura anterior y reemplaza cuenta/ventana en una unica transaccion.
+El helper de paginacion compartido tambien rechaza respuestas de error parcial.
+
+Reparacion operativa acotada en DB compartida: 3.985 filas, 27 campanas, del
+14/07 al 11/09/2026. Diez lecturas Google HTTP 200, sin renovar credenciales.
+Observacion `2026-09-12T02:01:01Z` / 04:01:01 CEST. Copia restringida previa de
+1.044 filas; importe almacenado conciliado: 5.614,84236 EUR en 60 dias.
+Solo cambia `GoogleAdsInsightsDaily`: no inventario, permisos, asignaciones,
+leads, senales, presupuestos, anuncios ni flags/jobs. Evidencia y SHA-256:
+`/home/ubuntu/qa-evidence/propdental-metrics-cache-apply-2026-09-12T02-01-00-158Z/result.json`.
+`before.json` es el respaldo; `snapshot.json` conserva la captura aplicada.
+No restaurar sin comprobar que no existan observaciones posteriores; nunca
+reemplazar otras cuentas o fechas al revertir esta reparacion.
+
+Contraste API local 13/08-11/09: 2.000,30354 EUR y 40 leads atribuidos en las
+campanas visibles de esta cuenta. Hospitalet Search `21313059516`: 99,076192 EUR,
+un lead; PMax `21319497065`: 107,17859 EUR, sin leads atribuidos. El lector usa
+el estado de campana Google mas reciente de la cache cuando supera el del
+inventario y esta vigente (36 h); empates contradictorios quedan UNKNOWN.
+No confunde ese estado con aprobacion del anuncio ni recepcion verificada.
+Salud detecta 26,55 EUR sin nuevos leads atribuidos en los dos ultimos dias
+completos de Search; no acredita por si solo un fallo tecnico.
+
+El desglose por anuncio sigue con otra fecha de observacion: los 79,49 EUR
+guardados de Search no se presentan como reconciliacion de sus 99,08 EUR
+actuales. No hay ganador verificado ni identidad de anuncio para su unico lead.
+La UI avisa del desglose pendiente sin alterar los datos o la navegacion.
+
+Esta reparacion NO restablece el cron. El runtime nocturno staging mantiene
+v21 y fallbacks hasta v15; los jobs examinados terminaban con cero procesados
+y errores 404. DEV usa v24. [v21 finalizo el 05/08/2026](https://ads-developers.googleblog.com/2026/06/google-ads-api-v21-sunset-reminder.html).
+Pendientes promocion coordinada, version soportada y migracion de observacion
+de aprobacion antes de habilitar el escritor de anuncios. No se cambia staging.
+El nuevo bloqueo serializa este escritor, no promete exclusion frente a todos
+los escritores legacy; el runner exige ausencia de jobs Google en ejecucion.
+
+Verificacion: 879 tests backend offline; nueve comprobaciones en MySQL 8.0.42
+aislado (rollback, concurrencia, permisos, snapshot anterior, compatibilidad).
+Instancia temporal terminada, resultado `/tmp/cc-campaign-opt-mysql-y6QONS/result.json`.
+DEV reiniciado `2026-09-12T02:10:49.383Z` / 04:10:49 CEST, PID 1328656,
+contador 8575; los nueve flags de contencion siguen false. Staging/gateway
+no reiniciados. Ninguna migracion, publicacion, CAPI o cambio publicitario.
+
+Preview `42091d2965eae001` y 127 tests frontend correctos. QA real con sesion
+delegada temporal autorizada de Carlos: 103 comprobaciones, 16 capturas en
+1440/1024/390 px; clinica/grupo, buscador, detalle Search, importes exactos,
+estado PMax, regreso al listado, Salud por bloques y cobertura por anuncio.
+Separacion de cifras y avisos revisada visualmente en escritorio/movil;
+sin errores JS ni desbordes. Sesion cerrada y nueve flags false al terminar.
+`/home/ubuntu/qa-evidence/campaign-authenticated-2026-09-12T02-19-40-539Z/result.json`.
+No se cargan creatividades externas ni se prueban OAuth, formularios o ajustes.
+
+## Leads Web Existentes Y Cobertura Inicial Del Informe (2026-09-12)
+
+Este apartado conserva la primera observacion de hoy; el refresco de metricas
+y los importes vigentes estan documentados en el apartado anterior.
+
+El informe acepta los IDs Google ya guardados en contactos pagados con origen
+`web` o `call_click`, aunque no tengan UTM. Exige cuenta y campana validas,
+coincidencia unica, asignacion explicita y misma clinica; una identidad canonica
+conflictiva o IDs explicitos invalidos no se sustituyen por coincidencias UTM.
+No duplica leads ni los convierte en identidades verificadas por anuncio.
+No relaja atribucion economica, senales o evidencia de Optimiza.
+
+Lectura READ ONLY de Dental - Parallel Campaign: 25 filas de inventario y
+19 asignaciones existentes. Entre 13/08 y 09/09 Madrid hay 38 leads web pagados
+con esos IDs, 32 en la misma clinica que la campana y seis en otra sede. Hay
+cuatro recibos de formularios historicos vinculados a esta cuenta. La recepcion
+ya existia; esto corrige su recuento, no implementa ni prueba un nuevo envio.
+Los registros cruzados no se borran ni reasignan automaticamente.
+
+No hay filas de `GoogleAdsInsightsDaily` de esta cuenta desde 13/08 en la cache
+consultada. Hay metricas guardadas por anuncio en otro contrato; no acreditan
+por si solas el agregado completo por campana (en especial PMax).
+El informe no rellena la inversion con las lecturas puntuales del diagnostico
+ni con ceros. La UI explica la falta de inversion por plataforma y muestra el
+resumen de Salud neutral si quedan comprobaciones aplicables pendientes; las
+incidencias tienen prioridad. Los seis bloques y la navegacion se conservan.
+
+Despues del fix, API local real para 13/08-11/09 (30 dias) atribuye 40 leads
+a las campanas de la cuenta dentro del grupo, uno en Hospitalet. No comparar
+ese total directamente con las 27 conversiones Lead de Google en 28 dias:
+difieren ventana, fecha de atribucion y deduplicacion. El grupo administrativo
+incluye nueve clinicas y mas cuentas; no se reduce automaticamente a las seis
+sedes indicadas. Los 55 uploads con estado local `succeeded` y diez omitidos por
+consentimiento (13/08-11/09) no acreditan 55 eventos procesados por Google.
+
+Evidencia restringida del contraste posterior:
+`/home/ubuntu/qa-evidence/propdental-workspace-2026-09-12T01-34-36-950Z/result.json`.
+Runner `/home/ubuntu/scripts/cc-propdental-workspace-readonly.js`, opt-in
+`--authorized-carlos-propdental-readonly`. Sin app/ORM para SQL, ni tokens de
+proveedores. API local con sesion delegada temporal, sin guardar sus valores.
+865 tests backend offline correctos; dos regresiones reproducidas antes.
+DEV cargado `2026-09-12T01:25:41.518Z` / 03:25:41 CEST, PID 1324302,
+contador 8574; nueve flags false en PM2 y procesos hijos. Staging/gateway sin
+reiniciar. Sin migracion compartida, OAuth, envios o ajustes publicitarios.
+El refresco acotado de Google y conciliacion por anuncio siguen pendientes.
+
+Preview DEV `4e902356b7d04b54`, 126 tests frontend correctos. QA delegado de
+Carlos: 90 comprobaciones y 14 capturas en 1440/1024/390 px, clinica y grupo,
+buscador, detalle de Hospitalet Search `21313059516` en la cuenta autorizada,
+dos anuncios guardados, remanente de un lead sin anuncio identificado y retorno
+al listado. Salud/nota de inversion sin desbordes y sin errores JS. Resultado:
+`/home/ubuntu/qa-evidence/campaign-authenticated-2026-09-12T01-39-34-127Z/result.json`.
+No valida creatividades externas, frescura de anuncios, recepción nueva o
+ejecucion publicitaria. El grupo conserva caches de otras cuentas, incluida Meta;
+leerlas localmente no reactiva permisos. Contexto cerrado y nueve flags false.
+
+## Lectura Real Google Y Compatibilidad De Destinos (2026-09-12)
+
+El titular autoriza consultar exclusivamente Dental - Parallel Campaign
+`1851215478`. Cuenta verificada, 13 campanas activas de las seis sedes indicadas;
+Rubi/Eixample pausadas. PROPDENTAL `5992356722` excluida. No se asignan campanas,
+se aplican ajustes ni se consulta Meta. Acceso de lectura NO valida ejecucion.
+
+La prueba directa encontro `campaign.url_expansion_opt_out` retirado de la API.
+Corregidos `inspectGoogleDestinations` y `_syncGoogleAdsPublishingState` para
+leer `campaign.asset_automation_settings`; el campo nuevo devuelve HTTP 200
+en v24. Helper comun en `googleAdsCampaignMeasurementDiagnosis`: solo OPTED_OUT
+de FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION prueba expansion desactivada;
+datos ausentes, malformados o contradictorios conservan cobertura incompleta.
+Se mantiene lectura de snapshots antiguos. No cambia el esquema ni el mandato.
+Referencia: [cambio oficial v22](https://developers.google.com/google-ads/api/diff-tool/v22/versus-v21/diffs/resources/campaign).
+
+Google ya registra acciones ClinicaClick en Todas las conversiones, secundarias
+y sin inclusion en el unico objetivo personalizado observado. Falta conciliar
+recepcion/atribucion CRM y decidir la etapa de puja; no sumarlas como pacientes
+unicos ni activar todas como primarias. Francia usa un segundo dominio cuya
+cobertura no acredita el plugin de propdental.es. Hay limitaciones de recursos
+PMax y volumen insuficiente para pausar automaticamente anuncios Search.
+Diagnostico restringido:
+`/home/ubuntu/qa-evidence/propdental-google-readonly-2026-09-12T00-58-44-836Z/analysis.md`.
+
+863 tests offline correctos, tres fallos de regresion reproducidos antes;
+46 tests enfocados y sintaxis/diff correctos. DEV reiniciado a
+`2026-09-12T01:11:17.108Z` (03:11:17 CEST), PID `1322955`, contador `8573`.
+Nueve flags permanecen false en PM2 y procesos hijos; error.log sin crecer,
+API/proxy anonimos 401, SPA 200. Staging/gateway/preview no reiniciados.
+Sin migraciones, OAuth, tokens nuevos, envios ni mutaciones de proveedores.
+La migracion compartida, recepcion end-to-end y ejecucion siguen pendientes;
+plan gestionado aplazado por el titular. Frontend sin cambios en este corte.
+
+## Revision Visible De Cuentas Compartidas (2026-09-12)
+
+Frontend publicado en DEV: `3993e4dd5c9a629b`. La vista sin campanas y con cuentas
+compartidas muestra directamente la pregunta de pertenencia y sus acciones por
+proveedor. Con campanas visibles se conserva como ajuste plegable. No se deduce
+un contador de pendientes ni se amplian permisos del informe.
+
+Se reutilizan `loadSharedAccountReview` y la confirmacion existente: ninguna
+mutacion nueva de backend, OAuth o cambio de pertenencia automatico. La lista
+incluye el nombre de la clinica destino; la vista de grupo pide elegirla.
+Salud sin campanas incluidas no se presenta como cero incidencias comprobadas.
+
+Diagnostico READ ONLY: Arriaga clinica 1, grupo de dos sedes, mapeos activos a
+nivel de grupo, 9 campanas Google en `ExternalCampaignInventories`, 10 Meta en
+`SocialAdsEntities` y ninguna asignacion revisada para esas cuentas. La cuenta
+Google tiene ademas propiedad fuera del grupo, como documenta la revision
+anterior: seleccionar el grupo no elimina esa guarda. Meta se muestra en el
+grupo completo, sin duplicar campanas ni atribuir leads/importe a una sede.
+La revocacion del token no elimina este inventario; tampoco garantiza su frescura.
+
+QA real delegado con el runner de abajo: 123 comprobaciones y 22 capturas,
+1440/1024/390 px. Lee ambas revisiones guardadas, llega a confirmacion y cancela;
+cambia a grupo por el selector, abre campana/anuncios, vuelve a Campanas o Salud
+segun el origen y entra/sale de configuracion. No guarda ni reasigna campanas.
+Sin errores JS ni overflow. Resultado restringido:
+`/home/ubuntu/qa-evidence/campaign-authenticated-2026-09-12T00-41-30-055Z/result.json`.
+No valida importes reales (KPI sin datos verificables), creatividades externas,
+recepcion nativa, OAuth ni ejecucion publicitaria. Nueve flags siguen cerrados.
+123 tests frontend y 48 backend de informe, seleccion y cuentas compartidas OK.
+
+## Acceso Real Delegado Para QA (2026-09-12)
+
+Con autorizacion expresa del titular, el QA usa `carlos@clinicaclick.com`
+verificado mediante SELECT de identidad/estado, sin leer password ni tokens
+de proveedores. Sesion DEV delegada de 20 minutos segun el contrato JWT actual,
+con marcador `qa_delegated` y contexto Chromium separado, cerrado al terminar.
+No es una prueba de login con contrasena ni genera `ultimo_login` por ese flujo.
+La sesion del navegador de VS Code no se comparte con el CDP disponible.
+
+Runner local `/home/ubuntu/scripts/cc-campaign-readonly-session-qa.js`, opt-in
+`--authorized-carlos-readonly`: comprueba los nueve flags cerrados, limita GET a
+lecturas revisadas, bloquea OAuth, renovacion de sesion, escrituras, socket.io,
+SDK Meta y creatividades externas. No persiste JWT ni respuestas completas.
+Las lecturas de arranque de notificaciones y conversaciones son necesarias para
+el resolver de la app; no abre chats, marca leidos ni recoge su contenido como evidencia.
+
+Pasada real en Arriaga: 23 comprobaciones, seis capturas a 1440/390 px, Resumen,
+Campanas y Salud, cinco KPI y seis bloques; sin alertas del workspace, errores JS
+ni overflow horizontal. API workspace/configuracion/preparacion HTTP 200.
+**El ambito devuelve cero campanas y KPI sin datos**: no acredita detalle de
+campana, importes, atribucion ni integraciones reales. Grupos, badge de leads,
+WhatsApp y administracion quedaron fuera de la lista de lecturas permitidas.
+Evidencia restringida en `/home/ubuntu/qa-evidence/campaign-authenticated-2026-09-12T00-16-32-441Z/result.json`.
+No reinicios, cambios de contrasena, OAuth, proveedores, migraciones ni envios.
+
+## Pausa Google: Aprobacion Del Anuncio Alternativo (2026-09-12)
+
+La compatibilidad de pausa y el colector de rendimiento ya no consideran
+suficiente `ENABLED`. Exigen campana/grupo/anuncio habilitados, `primary_status`
+igual a `ELIGIBLE` y `policy_summary.approval_status` igual a `APPROVED`.
+Es una condicion necesaria, no una garantia de impresiones futuras. Los anuncios
+limitados pueden servir y siguen activos en el informe, pero no se usan como
+alternativa sin restricciones para autorizar una pausa automatica. Su gasto
+historico se conserva; las consultas de metricas no cambian.
+
+El ejecutor usa esa misma inspeccion antes del marcador durable de envio. Si
+cambia la aprobacion del objetivo o del anuncio de referencia, descarta la
+propuesta sin enviar; otro anuncio aprobado no sustituye la referencia del
+calculo. Esto protege tambien propuestas pendientes de versiones anteriores.
+No cambia esquema, permisos ni gates. La migracion de inventario documentada
+abajo sigue pendiente, independiente de estas consultas directas de inspeccion.
+
+Seis regresiones nuevas, incluida revalidacion real del preflight con transportes
+ficticios. Suite: 858 tests correctos (840 workspace + 18 cache Google), sockets
+externos bloqueados, `/tmp/campaign-google-pause-suite-20260912.log`.
+Ocho comprobaciones de sintaxis y `git diff --check` correctos. No cambia el
+frontend: siguen como evidencia previa sus 120 tests y Chromium 254/79.
+DEV reiniciado a `2026-09-11T23:45:55.590Z` (12/09 01:45:55 CEST), PID
+`1318258`, contador `8572`, nueve flags `false`. API/proxy anonimos 401,
+SPA 200; error.log sin crecer. No OAuth, tokens, llamadas publicitarias reales,
+migraciones compartidas ni reinicios de staging/gateway. QA autenticado pendiente.
+
+## Publicacion Google: Estado Y Aprobacion (2026-09-12)
+
+`ad_group_ad.status=ENABLED` es configuracion, no prueba de aprobacion. El
+inventario pide ahora `primary_status`, `primary_status_reasons` y los estados
+de aprobacion/revision de `policy_summary`, solo en la consulta de inventario;
+las consultas de metricas no cambian. El estado original `adStatus` se conserva.
+
+Contrato contrastado con el [recurso AdGroupAd v24](https://github.com/googleapis/googleapis/blob/master/google/ads/googleads/v24/resources/ad_group_ad.proto),
+[estado primario](https://github.com/googleapis/googleapis/blob/master/google/ads/googleads/v24/enums/ad_group_ad_primary_status.proto),
+[aprobacion](https://github.com/googleapis/googleapis/blob/master/google/ads/googleads/v24/enums/policy_approval_status.proto)
+y [revision](https://github.com/googleapis/googleapis/blob/master/google/ads/googleads/v24/enums/policy_review_status.proto).
+Solo documentacion publica; no se consulto una cuenta publicitaria.
+
+- Migracion aditiva `20260912010000-add-google-ad-delivery-observation.js`:
+  `GoogleAdsAdInventory.deliveryObservation`, JSON nullable. Guarda version,
+  fecha y enums, no respuestas completas ni secretos. No se rellena el historico
+  inventando aprobacion. Se valida junto a la escritura transaccional existente.
+- El lector compara la fecha del JSON con `observedAt`: un escritor antiguo no
+  puede refrescar evidencia de politica que no ha consultado. Con esquema anterior
+  reintenta sin esa columna SOLO ante el error exacto de columna ausente. El resto
+  de errores DB se propaga. Sin evidencia, el estado queda por comprobar.
+- Rechazo: critico; pendiente/no apto: no activo; limitado: puede publicar con
+  limitaciones, aviso independiente. Puede haber rechazo y limitacion en una
+  campana y ambos permanecen en el bloque de publicacion. Un rechazo no se infiere
+  de una revision en curso ni de una apelacion; manda la aprobacion/estado primario.
+- El filtro de anuncios separa activos, no activos y por comprobar. Los limitados
+  siguen entre los activos con etiqueta propia; desconocidos no se presentan como
+  una parada acreditada. Se conserva la navegacion y los seis bloques aprobados.
+
+**Migracion NO aplicada a la DB compartida.** No restaurar el job de inventario
+Google con el nuevo escritor hasta aplicar esa migracion con autorizacion y
+coordinar sus runtimes. DEV conserva jobs/gates cerrados; el lector compatible
+puede desplegarse antes sin consultar al proveedor. No iniciar una sincronizacion
+para rellenar el dato durante el bloqueo de credenciales. Las pruebas usan el
+contrato real en una base temporal propia, nunca datos de clinicas.
+
+Prueba MySQL: siete escenarios de esquema anterior, migracion idempotente,
+persistencia JSON/precision temporal, informe y Salud, escritor anterior,
+rollback transaccional y rollback de esquema sin borrar metricas. La primera
+ejecucion detecto `present=1` en lecturas SQL raw; normalizado explicitamente,
+sin aceptar strings arbitrarios. Repeticion correcta y apagado limpio del
+mysqld temporal: `/tmp/cc-campaign-opt-mysql-rvLh7p/result.json`.
+Logs, build, publicacion y capturas finales de este corte en la bitacora front.
+No acredita recepcion, llamadas Google reales ni QA con una sesion del usuario.
+
+Suite final: 834 tests workspace + 18 cache Google, 120 frontend y 19 aserciones
+de presentacion correctos. Preview `21d89d479dbf9d30`, pasada final Chromium
+254 comprobaciones/79 capturas, incluido scroll del dialogo movil hasta la
+segunda incidencia. DEV API cargada a `2026-09-11T23:31:35.537Z`,
+01:31:35 CEST; PID `1316881`, contador `8571`, nueve overrides `false`.
+El lector compatible esta desplegado; migracion y escritor Google no activados.
+Staging/gateway sin reiniciar; API/proxy anonimos 401, sin nuevo error.log.
+
+## Salud: Estados De Publicacion (2026-09-12)
+
+Corregido `campaignWorkspaceHealth.service`: antes un inventario reciente sin
+rechazos podia aparecer OK aunque todos los anuncios estuvieran en pausa o
+tuvieran estado desconocido. Ademas, un anuncio desactualizado ocultaba el
+rechazo reciente de otro anuncio de la misma campana.
+
+- Una campana que figura ACTIVE/ENABLED, con todos sus anuncios sincronizados
+  recientes y en estados conocidos no activos, genera un aviso en el bloque
+  existente `delivery`. No se reactivan anuncios ni se modifica su presupuesto.
+- Un anuncio activo con alternativas pausadas no genera ese aviso. Campanas
+  pausadas o cuyo estado es desconocido no se presentan como activas.
+- UNKNOWN, estados no reconocidos y fechas antiguas/invalidas no son OK. Un
+  rechazo reciente si permanece visible aunque la cobertura restante sea parcial.
+- Se conservan los seis bloques, las incidencias por campana, su agregacion y
+  la cobertura explicita. El aviso describe lo sincronizado, no prueba cobertura
+  completa del proveedor ni entrega actual. Revisar una alerta lleva al detalle
+  de esa campana y vuelve a Salud; no ejecuta una accion publicitaria.
+- Front traduce `PENDING_BILLING_INFO` como `Revisar facturacion` y corrige el
+  singular en los recuentos de incidencias y campanas afectadas.
+
+Estados Meta contrastados con el [SDK oficial, Ad.EffectiveStatus](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/ad.py).
+No se consultaron cuentas ni tokens. La revision de COST_CAP/minimo ROAS no
+implementa una politica nueva: sus campos modificables y las recomendaciones
+del SDK no bastan para trasladarles una regla basada solo en leads CRM.
+
+Cinco regresiones fallaban antes; los 22 tests de Salud pasan despues, incluidos
+siete casos nuevos. Suite workspace: 824/824; frontend: 119/119 y 16 aserciones
+de presentacion. Logs `/tmp/campaign-health-delivery-{before,after,suite,front}-20260912.log`.
+QA Chromium aislado: 216 comprobaciones/68 capturas a 1440/1024/390 px,
+sesion/APIs ficticias, sin backend/proveedores reales. Frontend publicado solo
+en preview DEV, build `5c7cd3ef90520c26`. Evidencias y rollback en bitacora.
+
+Backend DEV reiniciado con autorizacion a `2026-09-11T22:59:36.845Z`, 12/09 a las
+00:59:36 CEST, PID `1313029`, contador PM2 `8570`. Conserva en `false` los nueve
+overrides del apartado siguiente; staging, gateway y preview sin reiniciar.
+API/proxy rechazan consultas anonimas con 401; error.log sin nuevas lineas.
+No OAuth, renovacion/sustitucion de tokens, consultas de negocio DB, migraciones
+ni activacion de jobs. QA autenticado real y contratos pendientes siguen abiertos.
+
+## Reinicio DEV Autorizado (2026-09-12, 00:25 Europe/Madrid)
+
+El usuario autorizo reiniciar DEV sin restablecer el acceso de Meta. Reiniciado
+solo `pm2-back-dev` a las `2026-09-11T22:25:23.522Z` (00:25:23 CEST), PID
+`1310023`, reinicios PM2 `8569`. Staging, gateway y preview conservan sus procesos.
+La API cargo el codigo local actual; esto no constituye una promocion a staging
+ni una validacion autenticada de todas sus funcionalidades.
+
+Overrides verificados tanto en PM2 como en el entorno del proceso, todos `false`:
+`JOBS_WORKER_ENABLED`, `JOBS_CRON_LEADER`, `SYSTEM_NOTIFICATIONS_CRON_LEADER`,
+`AUTOMATIONS_V2_RESUME_FROM_SOCKET_BUS`, `CAMPAIGN_WORKSPACE_ACTIVATION_ENABLED`,
+`CAMPAIGN_WORKSPACE_OPTIMIZATION_ENABLED`, `CAMPAIGN_GOOGLE_LEAD_SYNC_ENABLED`,
+`CAMPAIGN_WORKSPACE_DESTINATION_REFRESH_ENABLED` y
+`CAMPAIGN_WORKSPACE_META_DESTINATION_REFRESH_ENABLED`.
+
+`JOBS_WORKER_ENABLED=false` evita que el scheduler DEV recupere y ejecute
+JobRequests pendientes al arrancar. No desactiva los workers BullMQ de WhatsApp
+ni los emisores de otros procesos. La pausa afecta tambien a jobs DEV ajenos a
+campanas. No restaurarlos automaticamente durante esta validacion.
+Son overrides del runtime PM2: `.env` no se modifico y mantiene
+`JOBS_WORKER_ENABLED=true`. No asumir que sobrevivan a una recreacion del proceso
+o a restaurar un dump antiguo; mantener explicitamente estos valores al reiniciar.
+
+No se inicio OAuth, renovo/sustituyo un token ni se consulto Meta. El intercambio
+Meta revisado requiere callback OAuth; no forma parte del arranque. Los nuevos
+logs confirman escucha en 3004, conexion DB y scheduler/cron desactivados, sin
+nuevas lineas en error.log. Esto no acredita contencion global del incidente.
+68 archivos JS pasan `node --check`. GET anonimo del workspace devuelve 401
+en 3004 y proxy 4203; la ruta SPA devuelve 200. No se repitio la suite completa,
+no se hicieron consultas de negocio a la DB compartida ni migraciones.
+
+## Contrato HTTP Aislado (2026-09-12)
+
+`src/scripts/tests/campaign_workspace_http.test.js` recorre las 25 rutas
+registradas del workspace: carga el router, middleware JWT y exportaciones del
+controlador reales, con usuarios, membresias y servicios de datos ficticios.
+Las claves JWT se generan solo para su servidor efimero de test; no se usan
+credenciales, sesiones, DB ni endpoints del runtime DEV.
+
+Ocho tests, 224 peticiones HTTP: ausencia/expiracion/firma incorrecta, falta de
+pertenencia completa, acceso de consulta frente a gestion, actor/ambito resueltos
+en servidor, agregados de lectura, cabeceras private/no-store y errores 400/403/
+404/409 sin convertirlos en guardados correctos. La activacion usa su validador
+y funcion reales con deployment cerrado: incluso un escritor autorizado obtiene
+409 sin iniciar una transaccion. Las lecturas de negocio y de creatividades se
+sustituyen por fixtures; esto NO verifica recepcion ni acceso a proveedores.
+
+El preload de aislamiento mantiene bloqueados sockets normales, fetch y colas.
+Su unica excepcion explicita permite al cliente de test conectar con un servidor
+HTTP propio, ya escuchando en loopback; no permite elegir un host/puerto externo.
+Hay regresion especifica de esa restriccion y cierre del servidor al terminar.
+
+Suite `campaign_workspace*.test.js`: 817/817 correctos, ejecutada con el preload
+de aislamiento. Logs `/tmp/campaign-workspace-http-suite-20260912.log` y
+`/tmp/campaign-workspace-http-final-20260912.log`. No se repitieron MySQL ni las
+capturas anteriores. Chromium disponible sigue mostrando cuatro pestanas de
+app en `/sign-in` a las 22:43 UTC del 11/09; su QA con sesion real sigue pendiente.
+Sin cambios de codigo productivo, reinicios adicionales ni apertura de gates.
+
+## Lista De Cierre Vigente (2026-09-12)
+
+Esta lista distingue implementacion, publicacion y validacion. Los apartados
+historicos de pendientes mas abajo NO son una lista de trabajo vigente.
+El objetivo completo sigue abierto; plan gestionado queda fuera por decision
+expresa del usuario, a la espera de mock y validacion independientes.
+
+| Requisito | Evidencia actual | Falta para el cierre |
+|---|---|---|
+| Navegacion, resumen, campanas/anuncios y Salud | Preview `e81492ec0b86bc51`; QA Propdental real delegado 105 comprobaciones/16 capturas tras reparar cache, con clinica, grupo, importes, cobertura diaria y regresos; QA Arriaga anterior 123/22 | Atribucion por anuncio pendiente de evidencia; creatividades externas fuera del QA |
+| Incorporacion sin segunda campana local y excepciones de grupo | `campaignWorkspaceSettings`, `Report` y `SharedAccount`; seleccion futura/pertenencia/conflictos; revision real Google/Meta y confirmacion cancelada | Decision del propietario sobre que campanas son de cada sede; ninguna asignacion real realizada |
+| Recepcion web, nativa y Medicion de interesados | Servicios `Preparation`, `NativeReception`, `GoogleReception`, `SignalAuthorization`; historico Propdental confirma formularios y recuento de 40 leads en 30 dias | Conciliacion CRM/proveedor, cobertura Francia y recepcion end-to-end autorizada; no enviar senales en este QA |
+| Cinco KPI, presupuestos y comparativa | Inversion/CPL Hospitalet contrastados; EconomicBudgets real de seis sedes sin aceptaciones, API coincide. Aceptacion productiva a SQL/informe positivos probados en MySQL temporal, parcial, fechas, duplicados y rollback | No hay muestra positiva real en Propdental; atribucion por anuncio/identidad economica de leads legacy sigue pendiente de evidencia, nunca estimar desde tratamientos |
+| Cache e inventario | Reparacion autorizada de 3.985 filas de campanas y, despues, migracion aditiva +19 anuncios/688 metricas/60 dias; respaldos y verificacion antes del commit. Hospitalet concilia ambos periodos. Jobs DEV integrados en fuente, no reactivados | Promocion coordinada/version soportada y escritor actual para restablecer cron. No hay ciclo nocturno real validado |
+| Optimiza implementado | Pausa, CPC/BID_CAP, presupuesto y recomendaciones CPA/ROAS Google cargados en DEV; runner canonico Marketing 1.073 tests, enfocados 60 (solapan); MySQL actual ocho de reparacion y once de cache/aprobacion, mas pruebas historicas | Datos reales Propdental no autorizan una pausa automatica: falta volumen/atribucion y Search usa Smart Bidding; gates cerrados, ejecucion y staging pendientes |
+| Exclusiones y objetivos avanzados Meta | Lector de terminos e inspeccion existen; disponibilidad excluye politicas sin motor | Relevancia comercial y politica COST_CAP/minimo ROAS aun no implementadas |
+
+La auditoria de relevancia inspecciono `CampaignWorkspaceSetting`, `Campaign`,
+`Tratamiento`, `CampaignDestinationBinding`, `campaignWorkspacePreferences` y
+`campaignWorkspaceSearchTerms`. El catalogo de tratamientos y un binding de una
+landing no definen por si solos que consultas debe excluir cada campana externa.
+Las preferencias no guardan ese criterio y el evaluador no despacha negativas.
+Hace falta resolverlo sin reintroducir la segunda campana local obligatoria ni
+asumir que ausencia de un servicio en el catalogo significa que no se ofrece.
+No se sustituye esa tarea por una lista generica o por cero conversiones.
+
+Preflight historico anterior al reinicio, 18:52 UTC / 20:52 Europe/Madrid: DEV `b63c7b0`, front
+`5ba564f1`, cambios locales conservados. Backend DEV online desde 07:41 UTC,
+sin watch; worker activo y cron leader desactivado. Staging sigue siendo cron
+leader. Los cinco flags nuevos de activacion, optimizacion, Google lead sync y
+refresco de destinos general/Meta estan ausentes del entorno de arranque
+observado; esto NO demuestra la contencion de otros emisores legacy.
+No se reinicio ningun proceso ni se consulto la DB compartida.
+
+Preview: chunk SHA `f9ee3fb53c0dbedcf943ad8ad3214e39a5124e804fc00e97e65118671e826e4f`,
+HTTP 200/no-cache, identico a dist. GET anonimo del workspace devolvio 401 en
+3004 y 4203; prueba proteccion anonima, no permisos ni datos autenticados.
+Las cuatro pestanas de app compartidas siguen en `/sign-in`. No hay prueba
+autenticada nueva ni se recuperaron tokens/contrasenas.
+
+Siguiente validacion: contrastar KPI con datos actuales y validar recepcion/ejecucion
+en un entorno expresamente autorizado. La causa del cero de Arriaga y el recorrido
+real de lectura ya estan comprobados; no asignar campanas a una sede para fabricar
+datos de prueba. El login del usuario en su propio localhost no autentica el CDP;
+se utiliza la sesion delegada autorizada arriba. `GET /campaign-workspace/ad-creative` de Meta puede llamar Graph
+si falla su cache (`campaignAdCreative.service`): no abrir ese preview ni los
+botones de comprobacion/OAuth durante el recorrido limitado. Probar formularios,
+senales, publicidad o proveedores requiere autorizacion separada. No promocionar
+staging, abrir gates ni presentar este preflight como implementacion terminada.
+
+## Compatibilidad Y Politicas Disponibles (2026-09-11)
+
+La mutabilidad tecnica de un recurso no acredita un motor de decision.
+`optimizationAvailability` conserva la inspeccion original y su huella, pero
+filtra la preparacion publica y los recursos que entran en una nueva autorizacion:
+negativas requieren relevancia comercial (`search_relevance_required`); las
+pujas Meta que no sean BID_CAP quedan en `bid_policy_not_available`. No crea
+esas politicas ni cambia recibos anteriores, recuperacion o permisos.
+
+Una seleccion exclusivamente pendiente no produce mandato. Si existen recursos
+compatibles y pendientes, solo autoriza los compatibles, conservando los motivos
+del resto. Una inspeccion incompleta o inconsistente no se presenta como valida.
+La revision cliente distingue disponible, sin comprobar y sin ajustes disponibles;
+el detalle de una campana sin ajustes tambien se puede consultar.
+
+Verificacion local: 810 tests TAP backend, 119 frontend y 79 comprobaciones MySQL
+temporal. Incluye persistencia JSON, ausencia de jobs/escrituras al revisar y
+conservacion de la inspeccion original. Cuatro regresiones fallaban antes del
+cambio. Logs `/tmp/campaign-policy-availability-{suite,front,mysql-final}-20260911.log`
+y `/tmp/cc-campaign-opt-mysql-61VNMP/result.json`. Sin DB compartida, proveedores,
+reinicio API/workers o apertura de gates. Publicacion/QA frontend en bitacora.
+Esta comprobacion no sustituye la validacion completa del contrato REST ni de
+los demas requisitos de cada politica. Plan gestionado sigue fuera del alcance,
+pendiente de mock y validacion expresa.
+
+## Objetivos CPA/ROAS De Google (2026-09-11)
+
+Implementacion **local y gated**, no validacion con el proveedor ni permiso para
+activar ajustes. El evaluador existente despacha `adjust_bids` hacia la politica
+`google_target_recommendation` cuando el mandato contiene un objetivo propio de
+campana: TARGET_CPA, TARGET_ROAS, MAXIMIZE_CONVERSIONS con CPA o
+MAXIMIZE_CONVERSION_VALUE con ROAS. Solo Search/PMax activos BASE, EUR/Madrid,
+sin estrategia compartida, overrides activos de grupo o presupuesto compartido.
+
+- Lector paginado `campaignWorkspaceGoogleTargetSnapshot.service.js`: consulta
+  configuracion heredada/personalizada, objetivos biddable y acciones primarias
+  efectivas; una accion secundaria dentro de un custom goal tambien puede pujar.
+  El custom complementa los objetivos estandar. Identidad por cuenta, relacion
+  con campana y categoria/origen, sin adivinar enums en resource names. Solo
+  conversiones comerciales identificables, no visitas u otros objetivos ambiguos.
+  No selecciona nombres, contactos, eventos individuales ni datos clinicos.
+- El propietario de conversiones debe ser explicito; si es otro conversion
+  customer no se cambia la cuenta publicitaria consultada ni la credencial.
+  Si los metadatos no son accesibles desde ese ambito, se omite el ajuste.
+  Las propiedades ausentes conservan defaults del protocolo, sin inventar EUR
+  en una configuracion de valor que no declare moneda.
+- Solo una recomendacion vigente RAISE_TARGET_CPA o LOWER_TARGET_ROAS para esa
+  campana, cuyo target medio en micros coincide con el actual. No portfolio ni
+  ad group. Multiplicador exacto y variacion maxima 10%; una recomendacion mayor
+  no se recorta. Solo redondeo sub-micro hacia el valor original. No interpreta
+  el coste por lead CRM como CPA/ROAS, ni promete que mejore el rendimiento.
+- Coleccion v3 y evidencia ejecutable v5: huellas, permisos/mandato entre paginas,
+  recepcion verificada, 45 s/2.000 filas por consulta, vigencia 15 min y espera
+  SQL de 14 dias tras otro ajuste del workspace en esa campana. El mismo job
+  nocturno, sin cron nuevo. Revalida configuracion, objetivos, recomendacion y
+  presupuesto antes de enviar. Si cambian, descarta. No hay atomicidad entre
+  lectura y escritura remotas: persiste la limitacion ante cambios externos.
+- No usa `applyRecommendation`: modifica exclusivamente el campo CPA/ROAS ya
+  autorizado. No crea conversiones ni cambia estrategia, presupuesto o anuncios.
+  Recibo durable previo, dedupe por ciclo y recuperacion sin repetir escrituras
+  inciertas. El historial distingue objetivo de conversion de coste por lead.
+- La ayuda existente `(?)` diferencia esta politica de la reduccion 5% para CPC/
+  BID_CAP. COST_CAP y minimo ROAS de Meta siguen pendientes, igual que el criterio
+  de relevancia de negativas. Plan gestionado fuera del alcance actual.
+
+Fuentes de contrato: [TargetAdjustmentInfo](https://developers.google.com/google-ads/api/reference/rpc/v24/Recommendation.TargetAdjustmentInfo),
+[objetivos de conversion](https://developers.google.com/google-ads/api/docs/conversions/goals/overview),
+[objetivos de campana](https://developers.google.com/google-ads/api/docs/conversions/goals/campaign-goals)
+y [campos de conversion](https://developers.google.com/google-ads/api/fields/v24/conversion_action).
+La validacion es de configuracion, no una auditoria de calidad/consentimiento de
+cada conversion recibida. Antes de activar requiere QA autorizado del contrato
+REST (incluidos target medio y conversiones entre cuentas), permisos y despliegue
+coordinado. Sin llamadas reales Meta/Google, OAuth ni DB compartida en esta fase.
+
+Verificacion backend: 806 tests TAP (22 del recorrido CPA/ROAS) y 76 comprobaciones
+MySQL temporal, nueve conexiones y cero sockets ajenos; apagado 0. Cobertura de
+las cuatro estrategias, JSON persistido, permisos revocados entre lecturas,
+objetivos cambiantes, propuesta caducada, duplicados, recuperacion concurrente
+y respuesta incierta sin reenvio. Logs `/tmp/campaign-target-bid-{suite-final,mysql-final}-20260911.log`
+y `/tmp/cc-campaign-opt-mysql-0vzacf/result.json`. Evidencia visual/publicacion
+frontend, limites y rollback en la bitacora operativa del front.
+
+## Retirada Del Contrato De Ejecucion Antiguo (2026-09-11)
+
+Cambio backend **solo local**, sin reinicio ni apertura de gates. Las metricas
+agregadas v1 de `bid_efficiency`/`budget_efficiency` ya no autorizan una primera
+escritura. Productor, worker y recuperador exigen las evidencias actuales v3/v4;
+el worker descarta los trabajos antiguos antes de acceder a credenciales o
+proveedores. Motivo: `workspace_optimization_current_policy_required`, con
+explicacion breve en el historial. No se re-firman, actualizan ni borran pruebas
+anteriores. Esta decision sustituye las menciones historicas de v1 ejecutable.
+
+Los recibos ya enviados siguen siendo consultables mediante recuperacion solo
+lectura, incluso con Optimiza pausado. Ver el valor deseado no atribuye el cambio
+a ClinicaClick; una respuesta incierta nunca permite reenviarlo. Las reglas
+actuales de pausa v2, puja v3 y presupuesto v4, sus limites y permisos no cambian.
+
+Verificacion: 12 regresiones fallan antes del fix; 784 tests TAP backend y 117
+front pasan despues. MySQL temporal: 66 comprobaciones, cuatro conexiones,
+cero sockets ajenos y apagado 0. Incluye propuestas antiguas persistidas,
+recuperacion concurrente, recibos inmutables, cambios actuales una sola vez y
+contabilidad conjunta. Fixtures antiguas migradas a pruebas actuales: 28 dias,
+huella de contexto, reduccion 5%, espera de 14 dias; no excepciones para tests
+en el ejecutor. No DB compartida, llamadas Meta/Google, OAuth o publicidad real.
+
+Evidencias: `/tmp/campaign-legacy-policy-{before,focused,suite-final,mysql-final,front}-20260911.log`,
+`/tmp/cc-campaign-opt-mysql-XwGPlv/result.json`. Sin cambios de layout/build ni
+nuevo QA visual: preview 4203 sigue en `efa760469cb76076`. Plan gestionado sigue
+aplazado. Pendientes: estrategias avanzadas con evidencia del objetivo de
+conversion, relevancia de negativas, publicacion backend coordinada y recorrido
+autenticado. La revision inicial de recomendaciones Google no constituye un
+motor implementado ni autorizacion de cambios.
+
+## Carga Independiente Y Recuperacion De Propuestas (2026-09-11)
+
+Frontend publicado **solo en preview DEV 4203**, build `efa760469cb76076`.
+Resultados, configuracion y preparacion se resuelven independientemente: los KPI
+y Salud no esperan lecturas de preparacion lentas o fallidas. Cambiar clinica,
+rol o periodo cancela las lecturas previas; cambiar de subtab no las repite.
+Una respuesta inicial de preparacion no puede pisar otra posterior al guardado.
+El estado de carga y la revision de version siguen impidiendo activar a medias.
+
+`campaignManagedWorkspace=false` deja fuera la nueva entrada gestionada y sus
+consultas cliente, hasta validar su mock. No modifica hubs ni permisos/admin
+legacy. El dialogo y su codigo quedan conservados, sin habilitarlo por URL o
+localStorage. Su suite visual es opt-in y requiere un build separado habilitado;
+el QA por defecto exige ausencia de entrada, consultas cliente y mutaciones.
+
+Backend **solo local**: `recoverOptimizationRun` pasa el cambio persistido al
+validador de evidencia. Antes se descartaban propuestas de puja v3/presupuesto
+v4 aun estando vigentes, porque faltaba ese argumento. Reproducido con cuatro
+tests fallidos antes del fix. La recuperacion conserva JSON/huella y encola una
+sola continuacion, tambien con dos recuperadores SQL concurrentes. No renueva
+evidencia caducada ni reenvia cambios ya enviados. Si caduca durante la espera,
+se descarta y una evaluacion posterior debera aportar evidencia nueva.
+
+Verificacion: 768 TAP backend, 117 front, 50 comprobaciones MySQL temporal
+(cuatro conexiones; cero sockets ajenos; apagado 0). Chromium: 148 checks y
+46 capturas a 1440/1024/390 px, incluyendo respuestas de preparacion retenidas,
+revocacion Meta, retorno desde anuncio y seis bloques de Salud. APIs y sesion
+sinteticas; no autenticacion real. Cuatro pestanas de 4203 comprobadas en
+`/sign-in`, sin token; no se han extraido ni renovado credenciales.
+
+Publicacion: runtime/main/chunk del workspace verificados por SHA-256 contra
+dist, HTTP 200 y `Cache-Control: no-cache`; ruta canonica responde SPA 200.
+Rollback exclusivamente frontend:
+`/home/ubuntu/scripts/cc-front-preview-sync.sh /home/ubuntu/qa-evidence/front-preview-before-campaign-loading-20260911-FSEUkb/build`.
+Sin reiniciar APIs/workers, migrar DB compartida, OAuth, publicidad, senales,
+cobros, commits/push ni staging. Siguen pendientes estrategias avanzadas de
+Optimiza, relevancia de negativas, publicacion backend coordinada y QA autenticado.
+
+Evidencias: `/tmp/campaign-policy-recovery-{before,focused,workspace,mysql}-20260911.log`,
+`/tmp/cc-campaign-opt-mysql-AovgiA/result.json`,
+`/tmp/campaign-independent-loading-{tests,build}-20260911.log`,
+`/home/ubuntu/qa-evidence/campaign-independent-loading-final-20260911/`.
+
+## Alcance Actual: Plan Gestionado Aplazado (2026-09-11)
+
+Decision posterior del usuario: el plan gestionado requiere un mock y validacion
+especifica antes de continuar su implementacion. **No forma parte del cierre
+actual de Campanas** ni debe bloquear conexion, Medicion de interesados, Optimiza,
+resultados y Salud. No interpretar el objetivo inicial como aprobacion vigente
+de ese flujo. Se conserva el trabajo local, sin publicarlo ni activar solicitudes,
+aprobaciones, publicidad o cobros de clientes.
+
+La ultima verificacion local del dialogo cubre aislamiento de borradores por
+clinica, importes servidos por backend, respuesta incierta sin reintento automatico
+y revision explicita del contenido. Son pruebas tecnicas, no aceptacion UX.
+107 tests front y build `b7024957f1dc09d5`; Chromium 191 comprobaciones/58 capturas
+incluyendo regresion a 1440/1024/390 px, con sesion/APIs sinteticas. Ninguna API de
+negocio real ni proveedor. La inspeccion visual detecta que, tras hacer scroll,
+el aviso de error puede quedar fuera de la zona visible: registrar para el futuro
+mock, no considerar cerrado el dialogo porque los checks de overflow pasen.
+
+Backend sin cambios funcionales en esta verificacion. Preview 4203/API sin
+actualizar; Chromium compartido sin sesion autenticada. Evidencia en
+`/home/ubuntu/qa-evidence/campaign-managed-lifecycle-20260911/qa-result.json`.
+La publicacion DEV futura debe separar esta parte no validada del alcance actual.
+
+## Lectura De Busquedas Y Proteccion De Exclusiones (2026-09-11)
+
+Avance local, **sin desplegar ni activar**. `campaignWorkspaceSearchTerms.service.js`
+completa la lectura interna de Google Search/PMax, no el motor de negativas.
+Reutiliza `googleAdsSearchRows`: paginacion completa, 45 s y maximo 2.000 terminos/
+56.000 filas. Solo campanas activas BASE, EUR/Madrid; 28 dias completos,
+excluidos los dos ultimos cerrados.
+
+- Search usa `search_term_view`, identidad campana/grupo y estado de targeting.
+  PMax usa `campaign_search_term_view` sin inventar grupo ni campo `status`.
+  No selecciona un segmento de targeting PMax: devuelve `UNAVAILABLE`, nunca
+  lo interpreta como una busqueda no incluida o no excluida.
+- Valida cuenta, campana, recurso codificado, fechas, duplicados, enumeraciones,
+  importes exactos y conversiones fraccionarias. No redondea una fraccion a
+  cero; rechaza underflow. Revalida permisos/mandato entre paginas, recepcion
+  al terminar y plazo tambien tras agregar. Rechazo de acceso terminal.
+- `reported_terms_only`: completar paginas no acredita todas las consultas.
+  Reconcilia clics/gasto diario con campana (tolerancia de un centimo en coste)
+  y explicita la parte no representada, sin atribuir toda la diferencia a
+  privacidad. PMax puede incluir otros inventarios. Dias ausentes de un termino
+  nunca se reconstruyen como cero. `google_ads_attributed_not_crm` distingue
+  conversiones del proveedor de leads CRM. Colector separado v2 con `search_terms`,
+  sin `attribution`, consultas de contactos/LeadIntake ni union por texto.
+- Filtro sintactico retira URLs/emails/telefonos evidentes, controles y textos
+  excesivos. Conserva recuentos y huella, no texto ni recurso base64 retirados.
+  **No es anonimizacion**: lenguaje natural puede contener datos sensibles y
+  una huella de texto es contrastable por diccionario. Snapshot interno en
+  memoria: sin nuevo endpoint, persistencia, payload de job, envio a IA o
+  inclusion en Salud. Verificador revalida identidad/forma/periodo/cobertura
+  incluso con huella recalculada. No es firma del proveedor ni prueba de relevancia.
+
+**Contrato antiguo corregido:** `search_without_results` v1 aceptaba `leads=0`
+sin probar atribucion por termino o irrelevancia. Productor/primera ejecucion
+rechazan ahora con `workspace_optimization_search_relevance_required`; recuperacion
+omite trabajos antiguos no enviados y el historial explica el motivo. Evidencia
+historica intacta, sin re-firmar. Recibos con `submitted_at` conservan solo
+observacion/recuperacion de lectura, nunca repetir una exclusion incierta.
+Este cierre afecta al workspace, no audita otras herramientas legacy.
+
+El evaluador de las 03:45 **no despacha `negative_keywords`**. Faltan contexto
+comercial aprobado, prueba de relevancia, politica, productor y revalidacion
+especificos. No sustituirlos por regex de empleo/cursos, confianza de IA o cero
+conversiones. Revisar inclusiones/exclusiones actuales antes de futuras negativas
+EXACT. No presentar esta automatizacion como operativa al abrir gates. Siguen
+pendientes el objetivo completo, otras estrategias y despliegue DEV/QA autorizado.
+
+Referencias primarias: campos de
+[Search](https://developers.google.com/google-ads/api/fields/v24/search_term_view)
+y [PMax](https://developers.google.com/google-ads/api/fields/v24/campaign_search_term_view).
+Google documenta omisiones de consultas de poco volumen en el
+[informe de terminos](https://support.google.com/google-ads/answer/2472708?hl=en).
+No validan una politica de exclusion.
+
+Verificacion: **758 tests TAP backend** (23 de lectura/verificacion, 5 de seguridad
+de negativas), **44 comprobaciones MySQL temporal**: dos conexiones, cero sockets
+ajenos, apagado 0. SQL verifica rechazo antes de insertar, omision de trabajo
+historico y recuperacion de lectura sin alterar JSON. Proveedores sinteticos.
+Sin DB/migraciones compartidas, OAuth, reinicios, anuncios/senales/cobros, push
+o staging. Sin cambios de layout ni nuevas capturas; QA visual anterior conserva
+su alcance sintetico. Preview 4203/API y build local `9c3f17bda321a4a0` sin actualizar.
+
+Evidencias:
+- `/tmp/campaign-search-terms-focused-20260911.log`
+- `/tmp/campaign-search-terms-workspace-20260911.log`
+- `/tmp/campaign-search-terms-mysql-20260911.log`
+- `/tmp/cc-campaign-opt-mysql-97Paog/result.json`
+
+## Decisiones De Presupuesto Diario (2026-09-11)
+
+Ampliacion local, **no desplegada ni activada**. El evaluador de las 03:45 Madrid
+ya conecta la accion `adjust_budget` con el colector de rendimiento, una regla
+versionada y el productor/ejecutor existentes. No se ejecuta al consultar Salud.
+
+- `budget_efficiency` v1 usa dos ventanas consecutivas de 14 dias completos
+  (excluye los dos ultimos cerrados), con al menos 20 leads CRM y 100 clics
+  EN CADA ventana, gasto positivo, recepcion verificada y atribucion observada
+  completa. EUR/Madrid y todas las filas diarias; los huecos Meta no son cero.
+- Propone bajar hasta un 5 % si CPL sube al menos 50 %, o subir hasta un 5 %
+  si CPL baja al menos 25 % y el gasto medio reciente alcanza el 90 % del
+  presupuesto diario ACTUAL. Redondea hacia el importe anterior, sin cambios
+  a cero, estrategia o propietario del presupuesto. Si no hay muestra o
+  diferencia suficiente, no propone. Los porcentajes son una politica operativa
+  pendiente de validacion, no una garantia estadistica de rendimiento.
+- Google Search: presupuesto diario exclusivo de campana. Meta Auction:
+  presupuesto diario de campana O conjunto; agrega solo los anuncios de ese
+  propietario. No toma prestada la muestra de otros conjuntos. Compartidos,
+  duracion total, otras monedas/zonas y PMax no tienen esta regla habilitable.
+- Una propuesta por campana/ciclo, reducciones antes que subidas y despues
+  mayor gasto reciente. Antes de reservar, exige 14 dias sin ningun ajuste
+  enviado por el workspace a esa campana, tambien otro recurso/mandato.
+- Evidencia compacta v4, 28 recuentos diarios sin contactos ni IDs de leads,
+  direccion/antes/despues y huellas de origen, mandato y recurso. TTL 15 min,
+  recogida menor de 60 s, dedupe transaccional y revalidacion antes del envio.
+  Un error de permisos es terminal, sin credenciales alternativas ni OAuth.
+- **La propuesta no reserva dinero ni acredita el limite.** El ejecutor obtiene
+  el gasto actual de TODAS las campanas incluidas y exige su contabilidad
+  conjunta existente antes de escribir. Tanto subidas como bajadas se omiten
+  si la prevision resultante supera el limite elegido. Una bajada insuficiente
+  requiere revision, no permite saltarse el limite ni autoriza una pausa total.
+  El recibo contable persiste antes del transporte, incluso si este queda incierto.
+- UI: misma ayuda `(?)` de presupuesto en seleccion y revision, ahora con las
+  condiciones de ambas direcciones. Historial explica la espera. Sin nuevas
+  pestañas, bloques ni cambios en los hubs aprobados.
+
+Limites: gasto/recepcion actuales no prueban disponibilidad historica o cohortes
+de clics; la utilizacion se compara con el presupuesto actual, no con un historial
+de presupuestos externos. Una espera de 14 dias solo observa nuestros ajustes
+persistidos. El limite es una prevision, no un tope de cobro. Google explica que
+editar el presupuesto afecta al gasto y a sus limites; esa documentacion no
+valida nuestros umbrales. [Efectos de cambiar presupuestos en Google Ads](https://support.google.com/google-ads/answer/10487143?hl=en).
+Los propietarios diarios Meta corresponden a los campos de
+[Campaign](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/campaign.py)
+y [AdSet](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/adset.py).
+
+El contrato generico v1 de presupuesto sigue existiendo; la nueva produccion
+automatica usa v4. Auditar pendientes v1 antes de abrir gates, sin re-firmarlos
+ni reproducirlos. El objetivo completo sigue activo: negativas, otras estrategias/
+tipos de campana, validacion de reglas y despliegue DEV/QA final autorizado.
+No hay permisos Meta recuperados, actividad publicitaria, senales o cobros reales.
+
+Verificacion: **730 tests TAP backend**, **41 comprobaciones MySQL temporal**
+(dos conexiones, cero sockets ajenos, apagado 0), **96 tests front**, build
+`9c3f17bda321a4a0`. Aviso CommonJS existente de `socket.io-parser`/`debug`.
+Las pruebas nuevas recorren colector, politica, productor y ejecutor reales;
+proveedores/recepcion son sinteticos. SQL comprueba evidencia v4, subidas/bajadas,
+dedupe concurrente, recibo contable y rechazo por limite/espera entre ajustes.
+Se corrigio un nombre de campo en la fixture del propietario Meta antes del
+pase final; no era una llamada o una modificacion de datos reales.
+Chromium: **128 comprobaciones y 40 capturas** a 1440/1024/390 px. Ayuda completa
+con raton/teclado, flujo de configuracion y regreso desde campana/Salud sin
+regresiones; capturas inspeccionadas. Sesion y APIs sinteticas; cero acceso a
+backend/proveedores, recursos externos bloqueados. No acredita OAuth ni login
+real. Servidores de prueba cerrados. Preview 4203/API sin actualizar, sin DB o
+migraciones compartidas, reinicios, commits/push ni promociones a staging.
+
+Evidencias:
+- `/tmp/campaign-budget-policy-workspace-20260911.log`
+- `/tmp/campaign-budget-policy-mysql-20260911.log`, `/tmp/cc-campaign-opt-mysql-YetSv2/result.json`
+- `/tmp/campaign-budget-policy-front-tests-20260911.log`, `/tmp/campaign-budget-policy-front-build-20260911.log`
+- `/tmp/campaign-budget-policy-visual-20260911.log`
+- `/home/ubuntu/qa-evidence/campaign-budget-policy-20260911/qa-result.json`
+
+## Evaluacion De Limites De Puja (2026-09-11)
+
+Ampliacion local, **no desplegada ni activada**, del evaluador descrito debajo.
+El mismo job nocturno de las 03:45 Madrid despacha ahora una evaluacion por
+accion autorizada. No hay un segundo cron ni un permiso implicito por conectar.
+
+- El colector existente revalida la accion solicitada entre lecturas y obtiene
+  controles de puja actuales con los inspectores Google/Meta existentes. No
+  inventa objetivos a partir del CPL ni reutiliza autorizaciones guided/managed
+  de conversiones como permiso para modificar pujas.
+- Regla `bid_efficiency` v1: Google Search `MANUAL_CPC` sobre la puja por defecto
+  del grupo y Meta Auction `LOWEST_COST_WITH_BID_CAP` sobre `bid_amount`.
+  Compara el mismo grupo/conjunto en dos ventanas consecutivas de 14 dias,
+  cada una con al menos 20 leads, 100 clics y gasto positivo. Si el CPL sube
+  un 50 % o mas, propone reducir el limite actual un 5 %, redondeando hacia
+  el valor anterior. No lo aumenta, no lo lleva a cero ni cambia la estrategia.
+- Requiere EUR/Madrid, identidad CRM observada completa, recepcion verificada
+  y todas las filas diarias de los anuncios del grupo. Una ausencia Meta es
+  desconocida. Una propuesta por campana/ciclo, priorizando gasto reciente.
+- La espera de 14 dias se comprueba bajo bloqueo SQL antes de reservar el
+  envio: cualquier ajuste previo ENVIADO por este workspace en esa campana,
+  incluso otro recurso/mandato, bloquea una nueva puja. No demuestra ausencia
+  de modificaciones externas no registradas. Conserva el cooldown de recurso.
+- Evidencia compacta `schema_version: 3`, 28 recuentos diarios sin IDs/contactos
+  de leads, valor previo/nuevo y huellas de recurso, origen, configuracion y
+  ciclo. Caduca en 15 min; recogida menor de 60 s. Productor/ejecutor revalidan
+  regla, estrategia, valor actual, recepcion y mandato. Dedupe de ciclo/campana
+  transaccional y recuperacion sin repetir escrituras inciertas.
+- Payload del hijo version 2 incorpora `action`, solo IDs y ciclo; v1 sigue
+  siendo exclusivamente una pausa. Se valida la accion antes de credenciales.
+  Error de permisos terminal; no se renueva Meta ni se busca otro token.
+- La UI mantiene seleccion/revision y explica el alcance con el mismo `(?)`.
+  La espera aparece con un motivo legible en el historial, no un error crudo.
+
+**Limites pendientes:** la regla no cubre target CPA, Meta COST_CAP, ROAS ni
+Performance Max. Un lead CRM no equivale necesariamente a la conversion de la
+estrategia; faltan evidencia y reglas especificas para esos objetivos. La puja
+por defecto de un grupo Google tampoco modifica overrides de sus keywords.
+Los umbrales son heuristicas operativas a validar antes de abrir gates, no un
+experimento causal: altas CRM no son cohortes de clics y recepcion actual no
+acredita disponibilidad historica. No se promete mejora de rendimiento.
+
+El ejecutor conserva el contrato generico antiguo de pujas con evidencia v1;
+la nueva produccion automatica usa v3. **Auditar trabajos/planes v1 pendientes
+antes de activar**, sin re-firmarlos, migrarlos o reproducirlos automaticamente.
+No afirmar que todos los comandos historicos tienen la nueva regla de evidencia.
+Presupuesto tiene ahora la regla del apartado anterior; siguen negativas, las otras estrategias,
+despliegue DEV coordinado y QA final con acceso autorizado del recorrido completo.
+
+Referencias oficiales consultadas para distinguir limite de puja y objetivo de
+conversion, no como validacion de estos umbrales:
+[estrategias Google Ads](https://developers.google.com/google-ads/api/docs/campaigns/bidding/strategy-types),
+[campos y estrategias de AdSet del SDK Meta](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/adset.py).
+
+Verificacion local: **704 tests TAP backend** (workspace y scheduler), **33
+comprobaciones MySQL temporal**, **95 tests front**, build DEV
+`72bd2a2173bf9a08`. Aviso CommonJS existente de `socket.io-parser`/`debug`.
+SQL con dos conexiones sobre instancia propia, cero sockets ajenos y apagado 0;
+incluye evidencia v3, dedupe concurrente y espera entre ajustes de campana.
+Chromium: **123 comprobaciones y 40 capturas** a 1440/1024/390 px, ayuda con
+raton/teclado sin alterar autorizacion, navegacion contextual y seis bloques de
+Salud conservados. Capturas de movil/escritorio inspeccionadas, sin recortes.
+Sesion/APIs sinteticas, ninguna peticion a backend/proveedores; fuentes/SDK/sockets
+externos abortados. No acredita OAuth, autenticacion ni ejecucion externa reales.
+Servidor estatico temporal cerrado; preview 4203/API sin actualizar, sin reinicios,
+DB/migraciones compartidas, anuncios, senales, cobros, commits/push o staging.
+
+Evidencias de esta ampliacion:
+- `/tmp/campaign-bid-workspace-20260911.log`
+- `/tmp/campaign-bid-mysql-20260911.log`, `/tmp/cc-campaign-opt-mysql-9sgE2c/result.json`
+- `/tmp/campaign-bid-front-tests-20260911.log`, `/tmp/campaign-bid-front-build-20260911.log`
+- `/tmp/campaign-bid-visual-20260911.log`
+- `/home/ubuntu/qa-evidence/campaign-bid-policy-20260911/qa-result.json`
+
+## Evaluacion Nocturna Y Pausas Autorizadas (2026-09-11)
+
+Implementacion local, **no desplegada ni activada**. El colector del apartado
+siguiente ya tiene un consumidor productivo: el evaluador interno obtiene datos
+actuales, aplica una regla versionada y entrega propuestas al productor durable
+existente. Consultar Salud no ejecuta ese recorrido ni autoriza cambios.
+
+- Job raiz `campaign_workspace_optimization_evaluations`, cron `45 3 * * *`
+  (03:45 `Europe/Madrid`, incluidos cambios de horario). Override
+  `JOBS_CAMPAIGN_WORKSPACE_OPTIMIZATION_EVALUATION_SCHEDULE`; hereda
+  `JOBS_TIMEZONE`. No sustituye el evaluador legacy `campaign_optimization_evaluation`.
+  Catalogo, descripcion del job, metodo del scheduler y ejecutor estan enlazados.
+- Requiere los DOS gates existentes de activacion y Optimiza. No basta con
+  conectar cuentas. Solo mandatos activos, accion de pausa elegida y recursos
+  exactos revisados/autorizados. Campanas o anuncios nuevos no heredan permiso
+  para modificarlos aunque se importen automaticamente para el informe.
+- Despacha 50 configuraciones por pagina con continuacion durable. Cada hijo
+  `campaign_workspace_optimization_evaluate` lleva solo IDs, referencia y ciclo;
+  usa la cola de integraciones serializada. Conserva la fecha del job raiz al
+  reintentar. No guarda credenciales, metricas ni leads en su payload o resultado.
+- Regla `ad_underperformance`, version 1: dos periodos consecutivos de 14 dias,
+  al menos 10 leads y 100 clics por anuncio EN CADA periodo, coste por lead al
+  menos doble frente a otro anuncio activo del MISMO grupo/conjunto en AMBOS.
+  EUR, calendario Madrid, atribucion observada completa y recepcion verificada.
+  Una propuesta por grupo; maximo una pausa por grupo cada 24 h. No se pausa
+  el ultimo anuncio activo. Meta sin alguna fila diaria no produce una pausa.
+- Los umbrales son una politica operativa conservadora para validar antes de
+  activar, no significacion estadistica ni promesa de mejora. Se comparan altas
+  CRM, no cohortes por clic; ni la conciliacion ni recepcion actual demuestran
+  disponibilidad historica completa. Los dos dias de margen no garantizan gasto
+  o leads definitivos. Insuficiencia significa no actuar, no marcar una mejora.
+- Evidencia compacta `schema_version: 2`: 28 pares de recuentos diarios,
+  identificadores publicitarios, version y huellas de origen/configuracion.
+  Caduca a los 15 minutos; el productor exige recogida menor de 60 s. Valida
+  fechas, importes exactos y regla otra vez antes del envio. No incluye IDs ni
+  contactos de leads. Nunca usar una comparativa de Salud como comando.
+- Dedupe por ciclo/grupo bajo bloqueo SQL, independiente de la nueva hora de
+  recogida. El ejecutor vuelve a comprobar el anuncio de referencia activo,
+  mandato/permisos y recepcion antes de reservar el envio. Se conserva la
+  semantica existente: marcador durable antes de HTTP, sin repetir una escritura
+  con resultado incierto. Un cambio concurrente bloquea o exige revision.
+- Error de permisos terminal, sin renovar Meta ni intentar otra credencial.
+  Otro ciclo de esa cuenta/configuracion requiere una comprobacion explicita
+  exitosa, vigente y posterior al fallo registrado; despues se revalida el grant.
+- Una pausa antigua con evidencia v1 NO se puede enviar por primera vez. Los
+  recibos ya enviados conservan recuperacion de solo lectura y nunca se repiten.
+  No hay migracion/re-firma automatica: auditar pendientes antes de abrir gates.
+- UI: misma ayuda `(?)` en seleccion y autorizacion; no cambia el checkbox al
+  abrirla. El historial explica datos caducados, referencia cambiada o recepcion
+  sin verificar mediante textos permitidos, no errores crudos del proveedor.
+
+**Pendiente del objetivo completo:** las estrategias de puja no cubiertas en el
+apartados anteriores y negativas; completar su evidencia/criterios por accion, despliegue
+DEV coordinado y QA final con acceso autorizado. La infraestructura de ejecucion
+y contabilidad no equivale a tener esas decisiones automaticas implementadas.
+Ningun avance de este apartado activa anuncios, cobros, OAuth o senales reales.
+
+Verificacion final de este corte: **683 tests workspace y orquestacion del
+scheduler** (684 en el resumen TAP), **29 comprobaciones MySQL**, **94 tests
+front**, build DEV `b5e7868f29bee34d`. Solo aviso CommonJS ya existente de
+`socket.io-parser`/`debug`. MySQL temporal propio, dos conexiones, cero sockets
+ajenos y apagado correcto; migration/modelos SQL reales, transport/recepcion
+sinteticos. La prueba SQL inicial detecto dos errores de fixture (identidad de
+campana y orden canonico tras renombrar anuncio), corregidos antes del pase final.
+
+Chromium: **105 comprobaciones y 35 capturas** a 1440/1024/390 px; ayuda completa
+con raton/teclado sin alterar autorizacion, navegacion Salud/campana/regreso,
+comparativas y rechazo Meta simulado. Capturas inspeccionadas. Sesion y APIs
+sinteticas; cero peticiones a backend/proveedores. El runner bloquea tambien
+las cargas externas de fuentes/SDK Meta y sockets; no prueba una conexion real.
+Servidor estatico temporal sin proxy, cerrado al terminar. Preview 4203 y API
+permanecen sin actualizar; sin reinicios, DB de clientes, migraciones compartidas,
+OAuth, commits/push, staging, cobros o senales.
+
+Evidencias:
+- `/tmp/campaign-pause-workspace-final-20260911.log`
+- `/tmp/campaign-pause-mysql-20260911.log`, `/tmp/cc-campaign-opt-mysql-6JfCCI/result.json`
+- `/tmp/campaign-pause-front-tests-20260911.log`, `/tmp/campaign-pause-front-build-20260911.log`
+- `/tmp/campaign-pause-visual-final-20260911.log`
+- `/home/ubuntu/qa-evidence/campaign-pause-policy-final-20260911/qa-result.json`
+
+## Evidencia De Rendimiento Para Optimiza (2026-09-11)
+
+Implementacion **local, no desplegada**. El nuevo colector interno
+`collectOptimizationEvidence` reutiliza el mandato real, permisos, recepcion y
+atribucion del CRM. No tiene endpoint publico: lo invoca ahora el evaluador
+nocturno descrito arriba. El colector en si no crea comandos, jobs, mutaciones
+publicitarias ni senales.
+La recomendacion consultable del apartado siguiente sigue usando solo la DB.
+
+- Dos gates existentes, activacion y Optimiza, cerrados: se comprueban antes de
+  cargar modelos/credenciales y durante la recogida. Revalida mandato, actor,
+  clinica, seleccion, titularidad operativa y grant antes/despues de CADA llamada,
+  incluidas paginas Google dentro de una misma consulta. Un rechazo no provoca
+  un intento con otra conexion o credencial. No se han renovado tokens reales.
+- Se corrigio el autorizador compartido: un mandato de grupo respeta tambien
+  la exclusion posterior de una campana en la configuracion de su clinica.
+  Lee/bloquea esa seleccion al preparar o ejecutar y en recuperacion de solo
+  lectura. MySQL confirma que excluir durante preflight impide el envio.
+- `campaignWorkspacePerformanceSnapshot.service` obtiene inventario y gasto/
+  clics diarios por campana y anuncio mediante los lectores existentes. Google
+  Search BASE y Meta Auction activas, EUR y `Europe/Madrid`; otros tipos quedan
+  fuera de esta evidencia para pausa, no de los informes generales.
+- Ventana interna: 28 dias completos, omitiendo los dos ultimos dias cerrados
+  para dejar margen de llegada. El 11/09 consulta 12/08 a 08/09, ambos incluidos.
+  No modifica el filtro 7/30 de la UI. No es garantia de que todos los leads o
+  costes sean definitivos. Plazos de 45 s en proveedor y 60 s en la coleccion;
+  reloj hacia atras, cruce de dia o resultado tardio invalidan la recogida.
+- Exige identidad exacta y paginacion terminada; limita 2.000 anuncios, 56.000
+  filas diarias y 10.000 leads de UNA clinica. Duplicados, truncamiento, importe
+  invalido o discrepancia entre totales no producen una evidencia utilizable.
+  Conciliacion diaria de clics exacta y gasto con tolerancia total de un centimo;
+  los micros se conservan como enteros decimales, sin redondear cada segmento.
+- Google reconstruye ceros solo tras una consulta segmentada completa, segun
+  su contrato de omision. Meta conserva ausencias como desconocidas. No se siguen
+  URLs de paginacion con credenciales: solo cursores en el endpoint original.
+- El CRM usa su identidad canonica por anuncio, no nombres ni UTMs aproximadas.
+  Se proyectan unicamente campos de atribucion, sin contactos. La salida contiene
+  recuentos diarios, no IDs de leads ni payloads. `attribution.complete` significa
+  que los leads observados potencialmente atribuibles estan identificados, no
+  que se hayan recibido todos los formularios posibles. Si hay huecos es `false`.
+  La recepcion se exige comprobada antes y despues de leer las metricas.
+
+Las reglas de pausa y limites de puja y sus productores estan conectados como
+se detalla arriba; **pendientes** otras estrategias y acciones. `collected: true`
+NO equivale a recomendar una pausa ni a autorizarla. La fecha CRM es la de alta,
+no una cohorte por clic; recepcion actual no demuestra disponibilidad historica.
+Ni una comparativa ni este colector por separado cierran Optimiza. El objetivo
+completo sigue activo, incluidos el
+despliegue DEV coordinado y QA final autorizado; no ampliar el alcance de gates
+ni publicar cambios para cerrar artificialmente esa verificacion.
+
+Verificacion del corte anterior del colector: **654 tests workspace**, incluidos 43 nuevos en esa fase, y
+**23 comprobaciones MySQL** en instancia temporal propia, dos conexiones,
+cero sockets ajenos y apagado correcto. Los transports, identidades y modelos
+de los tests son sinteticos; se ejecutan los lectores, validador de mandato,
+atribuidor y transacciones reales. No se ha consultado DB de clientes ni Meta/
+Google. La prueba inicial encontro una colision de nombres en la fixture Meta
+(campana remota/workspace), corregida antes de la regresion final.
+
+Logs `/tmp/campaign-performance-evidence-regression-final-20260911.log` y
+`/tmp/campaign-performance-evidence-mysql-20260911.log`; evidencia SQL privada
+`/tmp/cc-campaign-opt-mysql-LPYfCJ/result.json`. Sin cambios visuales ni build/
+Chromium nuevo: se conserva la verificacion anterior, no se atribuye a este
+cambio backend. Preview 4203 y API sin actualizar; sin reinicios, migraciones
+compartidas, commits, push, staging, cobros o senales.
+
+Referencias primarias consultadas para el contrato de lectura:
+[Google, metricas cero](https://developers.google.com/google-ads/api/docs/reporting/zero-metrics),
+[SDK oficial Meta, insights de campana](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/campaign.py),
+[SDK oficial Meta, campos de insights](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/adsinsights.py).
+La consulta documental no verifica permisos ni disponibilidad de una cuenta real.
+
+## Propuestas Consultables Por Anuncio (2026-09-11)
+
+`campaignWorkspaceRecommendations.service` se integra en el GET existente del
+workspace, despues del informe y Salud. **Solo lectura local**: no consulta
+proveedores, encola ajustes ni prepara un comando ejecutable. No requiere
+Optimiza para consultar la comparativa. Sin nuevos endpoints, tablas o jobs.
+
+- Regla diagnostica versionada `ad_cost_review`: al menos diez leads del CRM en
+  cada anuncio activo y una diferencia observada de coste por lead de al menos
+  el 50 %. Compara el de mayor y menor coste dentro del MISMO grupo de anuncios
+  o conjunto Meta. Una propuesta por grupo, con identidad completa de campana,
+  cuenta, proveedor y clinica; no mezcla grupos ni propone un ganador causal.
+- Usa el periodo completo seleccionado (7/30 dias de Madrid), EUR, recepcion
+  actualmente comprobada, inventario/metricas recientes y atribucion por anuncio
+  del informe. Leads pagados sin campana conocida suprimen propuestas en su
+  clinica, no en clinicas ajenas. Campanas pausadas/no asignadas, permiso Meta
+  rechazado persistido, muestra pequena y moneda desconocida quedan fuera.
+- Cada dia requiere filas de campana y de todos los anuncios activos. Las
+  observaciones deben ser posteriores al cierre de ese dia y no futuras. El
+  gasto diario de todos los anuncios debe cuadrar con el de la campana, con
+  tolerancia de un centimo por redondeo. No deduce cero por ausencia de filas;
+  los ceros Google solo entran por el lector de respuestas completas existente.
+  Deduplica los mismos segmentos que el informe. Una fecha de inventario no
+  reemplaza una fecha de metricas explicitamente desconocida.
+- Incidencias tecnicas, publicacion o ausencia reciente de leads tienen
+  prioridad y suprimen la propuesta en esa campana. La propuesta no aumenta
+  `findings`, `affectedCount` ni cambia el tono/OK de los indicadores.
+- DTO `report.recommendations` y `healthBlocks[].recommendations`: textos,
+  anuncio de mayor/menor coste, leads, inversion, CPL, periodo, regla y origen;
+  `automatic: false`, `action: review_ads`. Sin tokens, datos de contactos,
+  mandatos, payloads publicitarios ni enlaces a mutaciones.
+- UI: contador discreto dentro de Coste por lead; comparativa desplegable en
+  su dialogo y en el detalle de campana. Diez propuestas por pagina. Mismas seis
+  tarjetas de Salud, sin otro menu. El regreso conserva Salud como origen y
+  la comparativa muestra fechas `DD/Mes/YYYY`. Cambio de ambito/periodo cierra
+  dialogos y reinicia la paginacion; no muestra propuestas de la campana previa.
+
+**Alcance exacto:** son diagnosticos observacionales sobre filas sincronizadas
+y leads registrados en el periodo, no una prueba A/B ni cohortes por fecha del
+clic. Diez leads y 50 % son criterios de visualizacion versionados, no umbrales
+de significacion estadistica ni autorizacion suficiente para pausar un anuncio.
+Conciliar dos caches no demuestra integridad de toda la respuesta del proveedor,
+ausencia historica de fallos de recepcion ni gasto final. Por eso esta propuesta
+NO alimenta `enqueueOptimizationAdjustment`. La pausa usa el colector y la regla
+independientes descritos arriba; siguen pendientes pujas/keywords/presupuesto,
+con evidencia adecuada para cada accion, limites y mandato real. No se declara
+Optimiza terminado por esta UI.
+
+Codigo/build locales, gates cerrados, tokens Meta sin reconectar. No desplegado
+en API ni preview 4203 y sin promocion a staging. El hub y el interior del
+objetivo Captar nuevos pacientes no cambian.
+
+Verificacion: **611 tests backend, 93 frontend**, build DEV `e076225b16093967`
+(`--configuration development --source-map=false`, heap 6144 MB, dos workers).
+Aviso existente CommonJS de `socket.io-parser`/`debug`, sin error de compilacion.
+QA Chromium: **87 comprobaciones y 30 capturas** a 1440/1024/390 px, incluidas
+lectura de ambos anuncios en el dialogo movil, navegacion Salud/campana/regreso,
+dos proveedores agregados, revocacion Meta y regresion del borrador de presupuesto.
+Evidencia `/home/ubuntu/qa-evidence/campaign-recommendations-health-final-20260911/`.
+Sesion y APIs aisladas: los casos de recomendaciones se generan con los servicios
+reales de informe/Salud/reglas a partir de registros sinteticos, no un backend
+vivo ni autenticacion real. Cero peticiones a API de negocio/proveedor, un rechazo
+Meta simulado, sin errores JS. No demuestra permisos vigentes ni operacion real.
+
+Logs `/tmp/campaign-recommendations-workspace-tests-final.log`,
+`/tmp/campaign-recommendations-front-tests-final.log`,
+`/tmp/campaign-recommendations-build-final.log` y
+`/tmp/campaign-recommendations-health-visual-final.log`.
+Runner front `scripts/tests/campaign_meta_failure_visual_qa.js` con
+`CC_QA_RECOMMENDATION_BACKEND=/home/ubuntu/wt/back-dev` ejecuta el generador
+sintetico en otro proceso sin bootstrap de modelos productivos y con sockets/fetch
+bloqueados. Su servidor es solo estatico, sin proxy, y se cierra al terminar.
+El primer intento de generacion cargo metadatos de modelos y no produjo JSON
+limpio; se corrigio el aislamiento antes de la prueba final. No hubo conexion
+a DB/proveedores. Otra fixture inicial colocaba todos los leads del mes al
+principio y genero correctamente avisos de ausencia reciente: se corrigio la
+distribucion de prueba y se cubrio la prioridad de esas incidencias con un test.
+
+## Vigencia De Resultados Y Salud (2026-09-11)
+
+Correccion local, sin consultas a proveedores ni cambios de interfaz. La fecha
+de actualizacion usada para evaluar rendimiento corresponde ahora al ultimo dia
+de metricas, no a la fila mas recientemente actualizada de cualquier fecha.
+Un backfill antiguo no rejuvenece un dia reciente que siga desactualizado.
+Entre segmentos del ultimo dia se conserva la observacion mas antigua; si falta
+una fecha o es invalida/futura, la cobertura no se acredita como vigente.
+
+Salud aplica la misma comprobacion a coste, ausencia de leads y estado de anuncios.
+Caduca a las 36 h exactas; un agregado parcialmente comprobado queda neutral,
+no OK. Se conservan importes, leads y estados historicos: no se convierten datos
+incompletos en cero ni se atribuye una averia solo por faltar comprobacion.
+No implica cobertura completa de cada dia/segmento ni recepcion demostrada de
+todos los leads; ese contrato aun debe exigirse al recomendador.
+
+Verificacion final acumulada: **593 tests workspace**, incluidos seis nuevos
+casos de fechas/segmentos/agregados, y orquestacion del scheduler correctos.
+Logs `/tmp/campaign-workspace-final-regression-20260911.log` y
+`/tmp/campaign-scheduler-final-regression-20260911.log`.
+DB/Redis/proveedores bloqueados en esta regresion; las 21 comprobaciones de
+MySQL propio del apartado siguiente tambien finalizaron correctamente.
+Sin build nuevo ni QA visual adicional: la correccion usa los estados neutrales
+ya existentes. No se ha desplegado en preview/API; objetivo aun abierto.
+
+## Concurrencia MySQL Y Persistencia JSON De Optimiza (2026-09-11)
+
+Verificado en una instancia MySQL 8.0.42 **temporal y aislada**, no en la DB
+compartida DEV/staging. No se han reiniciado APIs/workers, desplegado codigo ni
+abierto gates. Meta sigue bloqueado; ningun transporte real Google/Meta se usa.
+
+- La primera prueba detecto que MySQL reordena claves de columnas JSON: una
+  evidencia intacta invalidaba `plan_key` despues de guardarla. Se normalizan
+  recursivamente las claves al calcular huellas de compatibilidad, comandos,
+  evidencia y recibos de presupuesto. Orden de arrays, tipos y valores siguen
+  siendo significativos; no se elimina la comprobacion de integridad.
+- `verifyChange` permite leer comandos historicos con la huella anterior,
+  reconstruyendo su forma conocida. No recalcula ni acepta automaticamente un
+  `plan_key` antiguo. Antes de abrir ejecucion hay que inventariar los registros
+  pendientes/enviados y pruebas de compatibilidad de la version anterior.
+  No se han consultado ni modificado esos datos de clientes en esta fase.
+  Una prueba antigua puede requerir nueva comprobacion; un envio incierto exige
+  revision tecnica, nunca borrar el recibo, repetir la mutacion o volver a firmar
+  evidencia historica para desbloquearla.
+- Runner opt-in `campaign_optimization_mysql.integration.js`: migracion real
+  idempotente y rollback protegido, modelos productivos de setting/evento/job/run,
+  transacciones, bloqueos, autorizacion, productor, ejecucion y recuperacion reales.
+  Inventario/grants son fixtures SQL; las llamadas de proveedor son sinteticas.
+  Las perdidas de confirmacion se inyectan alrededor de commits SQL reales, no
+  constituyen un ensayo de fallo de red contra Google o Meta.
+- 21 comprobaciones: productores/trabajadores duplicados, cuentas compartidas,
+  cuentas independientes, pausa y membresia revocada durante comprobacion,
+  reserva mensual entre cuentas, lectura de un recibo en el siguiente dia,
+  rollback atomico del job, lease vencido, recuperacion concurrente y perdida
+  de confirmacion antes/despues de un commit. Ninguna segunda escritura tras un
+  envio incierto; no se usa un mutex de JavaScript en lugar de bloqueos MySQL.
+- Fixture con directorio privado, `--no-defaults`, `--skip-networking`, X Plugin
+  deshabilitado y unico socket permitido dentro de ese directorio. Verifica el
+  datadir antes de crear la DB sintetica. Bloquea sockets ajenos y fetch; no carga
+  el bootstrap de modelos productivo, Redis ni configuracion DB del despliegue.
+  Cierra conexiones con plazo y detiene solo el hijo que crea, tambien al fallar.
+  Conserva datos/log/resultado privados para inspeccion; no copia datos clinicos.
+
+```sh
+CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/campaign_optimization_mysql.integration.js
+node --require ./src/scripts/tests/fixtures/campaign_offline_runtime.cjs --test src/scripts/tests/campaign_workspace_*.test.js
+```
+
+Verificacion final: **587 tests workspace y 21 comprobaciones MySQL**, correctos.
+La repeticion final uso dos conexiones SQL distintas, cero intentos de sockets
+ajenos y cierre normal del mysqld propio; la repeticion anterior uso seis.
+Logs `/tmp/campaign-optimization-mysql-regression.log` y
+`/tmp/campaign-optimization-mysql-final.log`; informe final privado
+`/tmp/cc-campaign-opt-mysql-qsYwK5/result.json`. La primera reproduccion fallida
+se conserva en `/tmp/campaign-optimization-mysql.log`.
+
+Esta verificacion resuelve la prueba aislada de concurrencia, no la operacion
+publicitaria real. Siguen pendientes el recomendador con cobertura y muestras
+suficientes, la conciliacion operativa de presupuesto y despliegue/QA final
+autorizado. No hay cambios visuales en esta fase; se conserva la evidencia
+Chromium del apartado siguiente. El objetivo completo continua abierto.
+
+## Prevision Mensual Conjunta De Optimiza (2026-09-11)
+
+Implementacion local DEV, **sin habilitar gates, ejecutar proveedores ni desplegar**.
+Sustituye el hook de prueba `verifyBudget` por lectura y reserva reales en el
+ejecutor. No representa un limite de facturacion garantizado ni cierra Optimiza.
+
+- `campaignWorkspaceBudgetSnapshot.service` lee configuracion y gasto del mes
+  de cada campana seleccionada: Google GAQL y Meta Graph con transports limitados.
+  Exige EUR y calendario `Europe/Madrid`, identidad completa y respuesta completa.
+  Rechaza moneda/zona distinta, presupuestos Google compartidos y Meta de duracion
+  total. En Meta cuenta presupuesto de campana O de conjuntos, nunca ambos.
+  Una campana pausada conserva gasto publicado, sin compromiso futuro activo.
+- `campaignWorkspaceBudgetAccounting.service` incluye todas las campanas de la
+  seleccion, no solo las autorizadas para ajustes; respeta exclusiones de clinica
+  sobre grupo. Revalida seleccion, propietarios y grants de todas las cuentas.
+  Snapshot y coleccion caducan a los 60 s o al cambiar de dia/mes, tambien si se
+  espera por bloqueos de DB. Consultas externas siempre fuera de transaccion.
+- Proyeccion en centimos exactos: gasto publicado del mes + suma de presupuestos
+  diarios por los dias naturales restantes (incluido hoy) + reserva de la mayor
+  cuantia diaria observada hoy si se reduce. Es deliberadamente conservadora y
+  puede contar otra vez parte del dia ya gastado. Si supera el limite se omite
+  el ajuste, incluso una reduccion que no bastase para quedar dentro: revision
+  manual, no promesa de correccion automatica del exceso.
+- El recibo `outcome.budget_accounting` se guarda en la misma transaccion que
+  `submitted_at`, antes de la mutacion. Incluye version, mes/dia, limite, gasto,
+  recursos, proyeccion y huellas de evidencias; no tokens, URLs ni contactos.
+  Usa `CampaignWorkspaceOptimizationRuns` existente: sin migracion nueva.
+  Finalizacion y recuperacion conservan el recibo, incluso si falla el commit,
+  se revocan permisos o queda resultado incierto. Nunca se repite la escritura.
+- Los recibos del mismo workspace/mes se consultan sin restringirse al mandato
+  o namespace actual. Gasto ya observado no disminuye por una respuesta tardia.
+  Quitar una cuenta no libera su ultimo compromiso hasta poder inspeccionarlo
+  de nuevo o cambiar de mes. Una lectura completa de una campana pausada puede
+  liberar recursos futuros, no borrar gasto. Falta/corrupcion de un recibo de
+  presupuesto enviado bloquea el siguiente ajuste: no se sustituye por cero.
+- El historial muestra la causa concreta del ajuste omitido, mediante textos
+  permitidos; nunca devuelve el ledger ni errores crudos del proveedor.
+  Preferencias y revision llaman al campo `Limite previsto` y comparten ayuda
+  `(?)`: no es un tope de cobro de Google o Meta.
+
+**Limites de cobertura que siguen abiertos antes de habilitar presupuesto:**
+la seleccion parte del inventario local; una campana externa nueva no aparece
+hasta sincronizarse. Una respuesta reciente no garantiza que el proveedor haya
+publicado todo el gasto, ni cubre modificaciones ajenas. El presupuesto diario
+no es una cota dura de gasto diario. Ver [efecto de los cambios de presupuesto
+en Google Ads](https://support.google.com/google-ads/answer/10487143?hl=en).
+No se aplica esa regla de Google a Meta ni se inventa un factor comun. Un futuro
+tope contractual duro requiere otro control explicito, cobertura de inventario
+y conciliacion, no renombrar esta prevision ni abrir los gates existentes.
+
+Verificacion offline: 583 tests workspace y orquestacion del scheduler correctos,
+sin acceso a DB/Redis compartidos ni proveedores. Incluye ambos adaptadores con
+transportes sinteticos y ejecutor/reserva/recuperacion real con modelos de prueba.
+Logs `/tmp/campaign-budget-workspace-tests-final.log` y
+`/tmp/campaign-budget-scheduler-tests.log`. No acredita concurrencia MySQL real,
+permisos actuales de Meta, cron desplegado ni efectos publicitarios en vivo.
+La prueba aislada de concurrencia se completo posteriormente, como documenta
+el apartado anterior. Quedan recomendador y QA operativo final; el objetivo
+completo sigue abierto.
+
+Frontend: build local `da00eb84ab6e9f0a`, 92 tests y 51 comprobaciones Chromium
+con 19 capturas. APIs/sesion sinteticas, sin llamadas a backend/proveedores.
+Evidencia `/home/ubuntu/qa-evidence/campaign-budget-polished-20260911/`.
+Se verificaron ayuda por raton/teclado, ancho movil, borrador sin activacion,
+regresion de Meta revocado y navegacion. No se sincroniza preview 4203 ni se
+reinician API/workers. Aviso previo de bundle 4,58 MB sobre umbral 3 MB, sin
+error de compilacion.
+
+## Refresco Nocturno De Destinos (2026-09-11)
+
+Implementado y probado en codigo DEV, **sin desplegar ni habilitar** durante el
+bloqueo de Meta. No se han cambiado `.env`, cron del host, DB, OAuth, permisos,
+anuncios, conversiones, suscripciones de paginas, contactos ni cobros.
+
+- Catalogo: `campaignWorkspaceDestinationRefresh`, tipo durable
+  `campaign_workspace_destinations_refresh`, horario por defecto `15 3 * * *`.
+  Usa `JOBS_TIMEZONE`, por defecto `Europe/Madrid`, incluido cambio de hora;
+  override de horario `JOBS_CAMPAIGN_WORKSPACE_DESTINATIONS_SCHEDULE`. No se
+  instala un cron del sistema ni se modifica el horario de los jobs anteriores.
+- Gate maestro `CAMPAIGN_WORKSPACE_DESTINATION_REFRESH_ENABLED=true`; Meta
+  exige ademas `CAMPAIGN_WORKSPACE_META_DESTINATION_REFRESH_ENABLED=true`.
+  Ambos cerrados por defecto. Activar solo el maestro permite Google, no Meta.
+  La activacion requiere revision operativa posterior al incidente. Estos gates
+  solo gobiernan este refresco nuevo, no revocan credenciales ni detienen los
+  sincronizadores historicos u otras herramientas.
+- El dispatcher pagina configuraciones por ID, 50 por tramo, y encola una
+  cadena por cuenta/workspace. Cada `campaign_workspace_destination_check`
+  comprueba una campana y guarda una continuacion durable. Comparte el carril
+  y lease de integraciones con los sincronizadores: no monopoliza la cola con
+  todas las campanas de una cuenta ni limita el resultado a las diez de la UI.
+- Payloads: version, ID de configuracion, proveedor, cuenta, inicio del ciclo
+  y cursor. Sin tokens, URLs, nombres ni contactos. El inicio se toma de la
+  creacion persistida del job raiz, por lo que un reintento no crea otro ciclo.
+  Deduplicacion de tareas activas y comprobaciones ya guardadas durante el ciclo;
+  los ciclos de mas de 24 h caducan, no se ejecutan indefinidamente.
+- Usa inventario sincronizado, asignacion inequivoca y seleccion efectiva.
+  `include_future` incorpora las nuevas campanas cuando aparecen en ese
+  inventario; no descubre otras cuentas ni asigna sedes a partir de un nombre.
+  Las exclusiones de una clinica prevalecen sobre la seleccion del grupo.
+  Campanas archivadas se omiten; las sin asignacion se contabilizan pendientes.
+- Revalida clinicas activas, miembros del grupo, cuenta/grants, seleccion,
+  revision y permisos actuales del ultimo editor de la configuracion, antes de
+  consultar y antes de guardar. Si ese usuario ya no esta activo o no puede
+  configurar todas las sedes, el refresco falla cerrado; no busca otro admin.
+  Un responsable vigente debe actualizar efectivamente la seleccion para
+  reautorizarlo; guardar sin cambios conserva el editor anterior. No hay boton
+  independiente de reautorizacion automatica en esta fase.
+- Reutiliza los detectores completos Google/Meta, sus limites de paginacion,
+  plazos y reservas transaccionales. Guarda solo metadatos de destinos y
+  formularios. No descarga respuestas, se suscribe a paginas ni cambia medicion.
+  Conserva separada la observacion de URLs de `landing_page_view` y la prueba
+  de destinos Google. Un destino desconocido/incompleto no acredita recepcion.
+- Un fallo invalida la prueba conforme al contrato de cada detector. Permisos
+  rechazados detienen la cadena de esa cuenta sin reintento automatico. Un fallo
+  de permisos ya persistido exige comprobacion explicita desde la configuracion.
+  Errores temporales usan el backoff del scheduler, maximo tres intentos; tras
+  agotarlos no se declara actualizada el resto de la cuenta. No se prueban tokens
+  alternativos. Esto no es un cortacircuitos global para otros sincronizadores.
+- `JobRequests` conserva resultados por tarea: comprobadas, cache reutilizada,
+  asignaciones pendientes, continuacion y codigo de error saneado. No se atribuye
+  exito del ciclo entero al dispatcher: encolar no equivale a comprobar.
+  El informe sigue leyendo DB y aplicando vigencia de 24 h, sin consultas de
+  proveedor por navegar/recargar. La creatividad bajo demanda y el mapa local
+  conservan sus contratos independientes.
+
+Verificacion: **550 tests workspace** y `scheduled_jobs_orchestration.test.js`
+correctos, incluidos recorridos de 37 campanas por proveedor, 103 configuraciones
+paginadas, rechazo de credenciales, cambios de permisos/seleccion durante I/O,
+continuacion tras error de cola y ambos detectores reales con transportes falsos.
+Preload reproducible `src/scripts/tests/fixtures/campaign_offline_runtime.cjs`:
+bloquea sockets/fetch y sustituye solo las colas del proceso de pruebas. No utiliza
+Redis/DB compartidos ni proveedores. Un primer intento del test historico de
+scheduler intento inicializar Redis y fue bloqueado; se repitio aislado con exito.
+
+Comandos desde backend:
+
+```sh
+node --require ./src/scripts/tests/fixtures/campaign_offline_runtime.cjs --test src/scripts/tests/campaign_workspace_*.test.js
+node --require ./src/scripts/tests/fixtures/campaign_offline_runtime.cjs src/scripts/tests/scheduled_jobs_orchestration.test.js
+```
+
+Evidencias: `/tmp/campaign-destination-workspace-tests-final.log` y
+`/tmp/campaign-destination-scheduler-offline-tests.log`. Esta fase no cambia
+interfaz ni requiere migracion. Falta la prueba operativa del nuevo cron/cola y
+proveedores con habilitacion autorizada; no acredita frescura real en produccion.
+Siguen abiertos recomendador, contabilidad del limite mensual de Optimiza y
+validacion completa del objetivo. Las secciones historicas inferiores que
+mencionan el refresco pendiente quedan actualizadas por este apartado.
+
+## Comprobaciones Meta Fallidas (2026-09-11)
+
+El desarrollo se retoma con los permisos Meta bloqueados por el usuario. Este
+cambio no reconecta OAuth, no renueva tokens y no habilita jobs, senales, cobros
+o ajustes. No confundir esta proteccion del workspace con una solucion del
+incidente o una revocacion comprobada de todas las credenciales.
+
+- La comprobacion de destinos invalida la prueba anterior ANTES de consultar
+  Meta, bajo bloqueo del propietario y del inventario. Conserva URLs, nombres,
+  formularios y fecha de la observacion historica, pero no conserva un OK vigente.
+- Una reserva de dos minutos evita comprobaciones simultaneas. Tras una caida
+  se puede iniciar otra; la respuesta tardia de la primera no puede sobrescribirla.
+  Se vuelven a verificar scope, seleccion, cuenta, token y revision al terminar.
+- Los fallos persisten solo codigos permitidos. Un 190/401 durante la lectura de
+  formularios detiene la comprobacion, sin continuar con otros formularios ni
+  buscar otra credencial. No se consulta contenido de formularios ni se publican
+  anuncios. Caducidad desconocida o invalida no demuestra acceso operativo.
+- El DTO devuelve `destinationCheck: { status, error }`, nunca el ID de reserva
+  ni mensajes/payloads del proveedor. Salud distingue acceso rechazado de una
+  comprobacion incompleta o un fallo temporal; estos ultimos quedan sin comprobar,
+  no se presentan como una caida demostrada. Recibos historicos no prevalecen
+  sobre una comprobacion posterior fallida; los resultados del CRM se conservan.
+- El dialogo elimina su estado correcto anterior al fallar y recarga el padre
+  al cerrar. Al reabrir muestra el fallo persistido sin consultar Meta. La accion
+  Revisar conexion es explicita; no inicia OAuth automaticamente.
+
+Verificacion local: 517 tests `campaign_workspace_*.test.js`, 92 tests front
+`campaign_*.test.js`, con conexiones de red prohibidas en las suites. Build
+Angular DEV `86092d2f404477e4` (heap 6144 MB, dos workers, sin source maps). El
+primer build con heap por defecto agoto memoria; no se cambio angular.json.
+QA Chromium: 27 comprobaciones y 9 capturas a 1440/1024/390 px, con app compilada,
+contexto nuevo y todas las APIs/sesion sinteticas, servidor estatico sin proxy
+y bloqueo previo de SDK/proveedores. Evidencia en
+`/home/ubuntu/qa-evidence/campaign-meta-revoked-final-20260911/`.
+No es una prueba de autenticacion real, permisos Meta vivos ni concurrencia MySQL.
+
+Estado de despliegue de este cambio: codigo DEV y build local verificados, sin
+sincronizar aun el preview 4203. No se ha reiniciado el backend ni sus workers durante esta fase; se evita disparar
+trabajos contra proveedores durante el bloqueo. El runtime anterior no incorpora
+esta nueva persistencia hasta una recarga controlada. Sin migraciones, cambios
+de configuracion de clientes ni promocion a staging. Siguen pendientes el
+despliegue y QA operativo del refresco de destinos descrito arriba, el recomendador y la
+contabilidad del limite mensual de Optimiza.
+
 ## Navegacion Canonica DEV (2026-09-11)
 
 `/marketing/objetivos/captar-nuevos-pacientes/campanas` carga el workspace real.
@@ -361,7 +1965,9 @@ de la web compartida sin seleccionar/autorizar el grupo.
   el calculo economico leen mediante `leadAdvertisingIdentity.service.js`.
   Los registros Meta antiguos sin esa prueba no se atribuyen por nombres/UTM.
   El servidor devuelve cobertura agregada, nunca datos de pacientes ni lineas
-  de tratamientos. El nivel anuncio sigue pendiente de conectar al informe.
+  de tratamientos. El nivel anuncio usa el mismo enlace economico con identidad
+  de anuncio unica y verificada; lo no atribuible a anuncio conserva el total
+  de campana, sin reparto estimado.
 - Contratos: 10 casos nuevos mas 21 del informe OK; frontend comprueba moneda
   independiente, comparacion real y explicacion cuando falta atribucion.
 - Verificacion integrada final de este avance: Campanas 268 pruebas OK;
@@ -1976,12 +3582,14 @@ web y Meta existente permanece independiente e intacta.
 Pendiente antes de abrir gates, no resuelto por estos adaptadores:
 
 1. Recomendador con datos reales, cobertura y criterios de muestras suficientes.
-2. Contabilidad del limite mensual conjunto. `adjust_budget` se bloquea con
-   `workspace_optimization_budget_accounting_required` mientras no se conecte
-   esa comprobacion. Una prueba inyectada no acredita control de presupuesto real.
-3. Prueba real de concurrencia MySQL antes de cualquier ejecucion autorizada.
-   Los tests de recuperacion/bloqueos usan modelos transaccionales aislados;
-   la comprobacion del esquema/consulta en MySQL no sustituye esa prueba.
+2. Prevision mensual conjunta: el hook inicial fue sustituido por lectura y
+   reserva reales, descritas en `Prevision Mensual Conjunta De Optimiza` al inicio
+   de este documento. No esta desplegada ni garantiza un tope de facturacion.
+   Siguen abiertas la cobertura de inventario y conciliacion operativa; una
+   prueba inyectada no acredita gasto real ni justifica abrir los gates.
+3. Concurrencia MySQL aislada verificada posteriormente con 21 comprobaciones,
+   descritas al inicio del documento. No equivale a QA de proveedor ni autoriza
+   abrir gates; revisar la compatibilidad de registros previos antes de desplegar.
 4. Integracion final del flujo, cobertura/refresco nocturno y CRM por anuncio,
    que siguen formando parte del objetivo global abierto.
 

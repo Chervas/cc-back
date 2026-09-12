@@ -38,7 +38,7 @@ async function loadNativeFormEvidence({ models, campaigns, selectedClinics, scop
     attributes: ['id', 'expiresAt'], raw: true, transaction }) : [];
   const authorized = page => assignments.some(row => row.scopeKey === scopeKey(page)
     && Number(row.metaConnectionId) === Number(page.metaConnectionId)) && connections.some(row => Number(row.id) === Number(page.metaConnectionId)
-      && (!row.expiresAt || +new Date(row.expiresAt) > +now));
+      && Number.isFinite(+new Date(row.expiresAt)) && +new Date(row.expiresAt) > +now);
   const activePages = pages.filter(authorized);
   const activeAccounts = accounts.filter(authorized);
   const since = new Date(+now - RECEIPT_WINDOW);
@@ -70,22 +70,24 @@ async function loadNativeFormEvidence({ models, campaigns, selectedClinics, scop
   }
   return new Map(eligible.map(campaign => {
     const clinic = selectedClinics.find(row => Number(row.id_clinica) === campaign.clinicId);
+    const checkPending = !!campaign.destinationCheck?.status;
+    const accessRequired = campaign.destinationCheck?.error === 'workspace_meta_permissions_required';
     const forms = campaign.nativeForms.map(form => {
       const matches = clinic ? activePages.filter(row => row.metaAssetId === form.pageId && covers(row, clinic)) : [];
       const ownerKey = scope?.groupId ? `group:${scope.groupId}` : `clinic:${campaign.clinicId}`;
       const preferred = matches.filter(row => scopeKey(row) === ownerKey);
       const candidates = preferred.length ? preferred : matches;
       const page = candidates.length === 1 ? candidates[0] : null;
-      const proof = page && pageProof(page, now);
+      const proof = !checkPending && page && pageProof(page, now);
       const received = receipts.get([campaign.clinicId, campaign.account_id, campaign.campaign_id, form.pageId, form.id].join(':'));
       return { ...form, pageName: page?.metaAssetName || null, connected: !!page, receivedAt: received ? new Date(received).toISOString() : null,
-        pageScope: page ? scopeKey(page) : null, canCheckPage: !!page?.pageAccessToken, subscription: proof,
-        state: !form.metadataAccessible || proof?.state === 'access_required' ? 'access_required'
+        pageScope: page ? scopeKey(page) : null, canCheckPage: !checkPending && !!page?.pageAccessToken, subscription: proof || null,
+        state: accessRequired || !form.metadataAccessible || proof?.state === 'access_required' ? 'access_required'
           : !form.pageId ? 'page_unknown' : !page ? 'page_required' : proof?.state === 'subscription_required' ? 'subscription_required'
-          : received ? 'receiving' : proof?.state === 'verified' ? 'prepared' : 'waiting' };
+          : checkPending ? 'waiting' : received ? 'receiving' : proof?.state === 'verified' ? 'prepared' : 'waiting' };
     });
     const age = +now - +new Date(campaign.destinationCheckedAt);
-    const fresh = campaign.destinationComplete === true && Number.isFinite(age) && age >= 0 && age < DESTINATION_WINDOW;
+    const fresh = !checkPending && campaign.destinationComplete === true && Number.isFinite(age) && age >= 0 && age < DESTINATION_WINDOW;
     const accountReady = clinic && activeAccounts.some(row => [campaign.account_id, `act_${campaign.account_id}`].includes(row.metaAssetId) && covers(row, clinic));
     const ready = !!accountReady && fresh && forms.length > 0 && forms.every(form => form.state === 'receiving');
     const configured = !!accountReady && fresh && forms.length > 0 && forms.every(form => ['prepared', 'receiving'].includes(form.state));
@@ -93,7 +95,8 @@ async function loadNativeFormEvidence({ models, campaigns, selectedClinics, scop
     return [campaign.id, { forms, reception: { checked: true, ready, configured,
       state: ready ? 'verified' : configured ? 'pending_confirmation' : actionRequired ? 'action_required' : 'unverified',
       checkedAt: ready ? forms.map(form => form.receivedAt).sort()[0] : null,
-      detail: !accountReady ? 'Falta revisar el acceso a la cuenta publicitaria de esta campaña.'
+      detail: accessRequired ? 'Meta ha rechazado el acceso. Revisa la conexión antes de volver a comprobar la recepción.'
+        : !accountReady ? 'Falta revisar el acceso a la cuenta publicitaria de esta campaña.'
         : !fresh ? 'Falta actualizar la comprobación de los destinos de esta campaña.'
         : forms.some(form => form.state === 'access_required') ? 'Meta no ha permitido comprobar todos los formularios. Revisa los permisos de la conexión.'
         : forms.some(form => !form.connected) ? 'Hay formularios cuya página no está conectada para recibir interesados.'

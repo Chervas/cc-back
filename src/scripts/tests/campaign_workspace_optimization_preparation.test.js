@@ -3,6 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { loadOptimizationPreparation, checkOptimizationPreparation } = require('../../services/campaignWorkspaceOptimizationPreparation.service');
+const { ACTIONS, digest } = require('../../services/campaignWorkspaceOptimizationCapabilities.service');
 
 function fixture(provider = 'google_ads') {
   const transaction = { LOCK: { UPDATE: 'UPDATE' } };
@@ -39,9 +40,13 @@ function fixture(provider = 'google_ads') {
   const inspect = async input => {
     state.reads++; assert.deepEqual(input.reference, reference);
     if (state.inspect) await state.inspect();
-    return { schema_version: 1, reference, currency: 'EUR', actions: [
-      { action: 'adjust_bids', targets: 1, reasons: [] }, { action: 'adjust_budget', targets: 1, reasons: [] }],
-    fingerprint: 'private-fingerprint', targets: [{ resource: 'private-resource', field: 'bid_amount', value: '3000' }] };
+    const target = provider === 'google_ads'
+      ? { action: 'adjust_bids', entity: 'ad_group', id: '50', resource: 'customers/20/adGroups/50', field: 'cpc_bid_micros', unit: 'micros', strategy: 'MANUAL_CPC', value: '300000' }
+      : { action: 'adjust_bids', entity: 'ad_set', id: '50', resource: '50', field: 'bid_amount', unit: 'minor', strategy: 'LOWEST_COST_WITH_BID_CAP', value: '30' };
+    const inspection = { schema_version: 1, reference, currency: 'EUR', targets: [target],
+      actions: ACTIONS.map(action => ({ action, targets: Number(action === 'adjust_bids'), reasons: [] })) };
+    inspection.fingerprint = digest([reference, inspection.currency, inspection.targets, inspection.actions]);
+    return inspection;
   };
   const options = { models, scope: { groupId: 10, clinicIds: [1, 2] }, actorId: 7,
     hasAccess: async input => { state.permissionChecks.push(input); return state.permitted; },

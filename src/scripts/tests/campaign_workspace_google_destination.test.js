@@ -28,6 +28,8 @@ test('Google configuration discovery includes web and native paths without readi
   assert.equal(result.kind, 'mixed'); assert.equal(result.complete, true);
   assert.deepEqual(result.forms.map(value => value.form_id), ['50']); assert.deepEqual(result.urls, ['https://clinic.example/visit']);
   assert.ok(h.calls.every(call => call.query.startsWith('SELECT') && /LIMIT 2001$/.test(call.query) && call.timeoutMs <= 50000));
+  assert.match(h.calls[0].query, /campaign\.asset_automation_settings/);
+  assert.ok(h.calls.every(call => !call.query.includes('campaign.url_expansion_opt_out')));
   assert.ok(!JSON.stringify(h.calls.map(call => call.query)).match(/submission|webhook|delivery_method|phone|email/));
   assert.ok(!JSON.stringify(result).includes('private'));
 });
@@ -47,8 +49,16 @@ test('PMax includes asset group desktop and mobile URLs and does not claim exhau
     finalUrls: ['https://clinic.example/visit'], finalMobileUrls: ['https://clinic.example/mobile'] } })];
   let result = await h.run(); assert.equal(result.complete, false); assert.ok(result.unknown_reasons.includes('dynamic_web_destinations'));
   assert.equal(result.urls.length, 2);
-  h.data.campaign[0].campaign.urlExpansionOptOut = true;
+  h.data.campaign[0].campaign.assetAutomationSettings = [{
+    assetAutomationType: 'FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION', assetAutomationStatus: 'OPTED_OUT',
+  }];
   result = await h.run(); assert.equal(result.complete, true);
+  for (const settings of [[], [{ assetAutomationType: 'TEXT_ASSET_AUTOMATION', assetAutomationStatus: 'OPTED_OUT' }],
+    [{ assetAutomationType: 'FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION', assetAutomationStatus: 'OPTED_IN' }],
+    [{ assetAutomationType: 'FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION', assetAutomationStatus: 'UNKNOWN' }]]) {
+    h.data.campaign[0].campaign.assetAutomationSettings = settings;
+    assert.equal((await h.run()).complete, false);
+  }
 });
 test('foreign identities, partial responses and malformed form metadata fail the whole check', async () => {
   for (const mutate of [h => { h.data.campaign_asset[0].customer.id = '99'; },
@@ -117,4 +127,24 @@ test('provider failures replace old green metadata with a sanitized failed check
   await h.run(); const detection = h.state.cached.destination_detection.workspace_google;
   assert.equal(detection.status, 'failed'); assert.equal(detection.complete, false); assert.equal(detection.forms.length, 0);
   assert.ok(!JSON.stringify(detection).includes('private'));
+});
+
+test('nightly Google worker uses the real scoped detector and preserves the existing observed URL cache', async () => {
+  const { JOB_TYPE, ORIGIN, runDestinationRefresh } = require('../../services/campaignWorkspaceDestinationRefresh.service');
+  const h = runtime();
+  Object.assign(h.state.setting, { id: '11111111-1111-4111-8111-111111111111', version: 1, updated_by_user_id: 7 });
+  h.dependencies.models.Usuario = { findByPk: async () => ({ id_usuario: 7, estado_cuenta: 'activo' }) };
+  const dependencies = { ...h.dependencies, env: { CAMPAIGN_WORKSPACE_DESTINATION_REFRESH_ENABLED: 'true' },
+    refreshGoogle: args => refreshGoogleDestinations({ ...args, read: h.dependencies.read, ensureToken: h.dependencies.ensureToken }),
+    enqueue: async () => { throw new Error('only_one_campaign'); } };
+  const input = { schema_version: 1, setting_id: h.state.setting.id, provider: 'google_ads', account_id: '20', cycle_at: now.toISOString() };
+  const job = { type: JOB_TYPE, origin: ORIGIN, requested_by: null };
+  const result = await runDestinationRefresh(input, job, dependencies);
+  assert.equal(result.status, 'completed', JSON.stringify(result)); assert.equal(result.checked, 1);
+  const detection = h.state.cached.destination_detection;
+  assert.equal(detection.workspace_google.complete, true); assert.equal(detection.legacy_urls, true);
+  assert.equal(detection.workspace_google.kind, 'mixed');
+  const reads = h.calls.length;
+  assert.equal((await runDestinationRefresh(input, job, dependencies)).cached, 1);
+  assert.equal(h.calls.length, reads);
 });

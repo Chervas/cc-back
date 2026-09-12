@@ -7,24 +7,29 @@ const {
   buildGoogleDestinationDetections,
   diagnoseGoogleCampaignMeasurement,
   normalizeDestinationUrl,
+  googleUrlExpansionOptedOut,
 } = require('../../lib/googleAdsCampaignMeasurementDiagnosis');
 
 function main() {
   const backendRoot = path.resolve(__dirname, '../../..');
   const modelSource = fs.readFileSync(path.join(backendRoot, 'models/googleadsinsightsdaily.js'), 'utf8');
   const syncSource = fs.readFileSync(path.join(backendRoot, 'src/jobs/sync.jobs.js'), 'utf8');
+  const cacheSource = fs.readFileSync(path.join(backendRoot, 'src/services/googleCampaignMetricsCache.service.js'), 'utf8');
   const reportSource = fs.readFileSync(path.join(backendRoot, 'src/controllers/marketingReports.controller.js'), 'utf8');
   const migrationSource = fs.readFileSync(
     path.join(backendRoot, 'migrations/20260717134000-add-google-ads-all-conversions.js'),
     'utf8'
   );
   assert.match(modelSource, /allConversions/);
-  assert.match(syncSource, /metrics\.all_conversions/);
-  assert.match(syncSource, /allConversions: Number/);
+  assert.match(cacheSource, /'all_conversions', 'all_conversions_value'/);
+  assert.match(syncSource, /googleCampaignMetricsCache\.collectGoogleCampaignMetrics/);
+  assert.match(syncSource, /googleCampaignMetricsCache\.persistGoogleCampaignMetrics/);
   assert.match(reportSource, /providerAllConversions: row\.allConversions/);
   assert.match(reportSource, /otherClinicCrmLeads/);
   assert.match(reportSource, /crmLeads,/);
-  assert.match(syncSource, /options\.customerIds/);
+  assert.match(syncSource, /selectGoogleAdsSyncAccounts\(accounts, options\)/);
+  assert.match(syncSource, /campaign\.asset_automation_settings/);
+  assert.doesNotMatch(syncSource, /campaign\.url_expansion_opt_out/);
   assert.match(migrationSource, /GoogleAdsInsightsDaily/);
 
   assert.equal(
@@ -39,7 +44,9 @@ function main() {
         id: '21319497065',
         name: 'PROPDENTAL Pmax Local HOSPITALET',
         advertisingChannelType: 'PERFORMANCE_MAX',
-        urlExpansionOptOut: false,
+        assetAutomationSettings: [{
+          assetAutomationType: 'FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION', assetAutomationStatus: 'OPTED_IN',
+        }],
         finalUrlSuffix: 'sem&cc_gads_customer_id=1851215478&cc_gads_campaign_id={campaignid}',
       },
     }],
@@ -67,6 +74,21 @@ function main() {
   assert.equal(pmax.url_expansion_enabled, true);
   assert.equal(pmax.expanded_beyond_primary, true);
   assert.equal(pmax.clinicaclick_attribution_suffix, true);
+
+  const expansion = status => ({ assetAutomationType: 'FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION', assetAutomationStatus: status });
+  assert.equal(googleUrlExpansionOptedOut({ assetAutomationSettings: [expansion('OPTED_OUT')] }), true);
+  assert.equal(googleUrlExpansionOptedOut({ asset_automation_settings: [{
+    asset_automation_type: 'FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION', asset_automation_status: 'OPTED_OUT',
+  }] }), true);
+  assert.equal(googleUrlExpansionOptedOut({ urlExpansionOptOut: true }), true);
+  for (const settings of [null, [], {}, [expansion('UNKNOWN')], [expansion('OPTED_IN')],
+    [expansion('OPTED_OUT'), expansion('OPTED_IN')], [{ assetAutomationType: 'TEXT_ASSET_AUTOMATION', assetAutomationStatus: 'OPTED_OUT' }]]) {
+    assert.equal(googleUrlExpansionOptedOut({ assetAutomationSettings: settings, urlExpansionOptOut: true }), false);
+  }
+  const disabled = buildGoogleDestinationDetections({ campaignRows: [{ campaign: {
+    id: '91', advertisingChannelType: 'PERFORMANCE_MAX', assetAutomationSettings: [expansion('OPTED_OUT')],
+  } }] }).get('91');
+  assert.equal(disabled.url_expansion_enabled, false);
 
   const covered = diagnoseGoogleCampaignMeasurement({
     spend: 46.61,

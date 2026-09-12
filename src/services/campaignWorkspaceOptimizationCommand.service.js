@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const { optimizationReference, digest, inspectGoogleOptimization, inspectMetaOptimization } = require('./campaignWorkspaceOptimizationCapabilities.service');
 const { scopedTarget, LIMITS } = require('./campaignWorkspaceOptimizationAuthorization.service');
 const { googleAdsSearchRows } = require('../lib/googleAdsSearchRows');
@@ -40,8 +41,11 @@ function optimizationChange({ reference: input, target: source, before, after })
 function verifyChange(change) {
   if (!change || Object.keys(change).some(key => !['schema_version', 'reference', 'target', 'before', 'after', 'fingerprint'].includes(key))) fail('workspace_optimization_change_invalid');
   const canonical = optimizationChange(change);
-  if (change.schema_version !== 1 || canonical.fingerprint !== change.fingerprint) fail('workspace_optimization_change_invalid');
-  return canonical;
+  const { fingerprint, ...body } = canonical;
+  const legacy = crypto.createHash('sha256').update(JSON.stringify(body)).digest('hex');
+  if (change.schema_version !== 1 || fingerprint !== change.fingerprint && legacy !== change.fingerprint) fail('workspace_optimization_change_invalid');
+  // Historical receipts remain inspectable. This does not re-sign or revive their old execution plan keys.
+  return { ...canonical, fingerprint: change.fingerprint };
 }
 
 function providerMutation(change) {
