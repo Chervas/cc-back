@@ -1,0 +1,74 @@
+'use strict';
+const assert = require('node:assert/strict'); const { randomUUID } = require('node:crypto');
+const { Readable } = require('node:stream'); const { DataTypes } = require('sequelize');
+const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
+const { fixture } = require('../../../services/platform-audit/test/fixture.cjs');
+const { keyFor } = require('../../../services/platform-audit/src/event');
+const { createWriter, createReconciler, KEY_ARN } = require('../../../services/platform-audit/src/s3');
+withIsolatedCampaignMysql(async ({ sql, models, report }) => {
+  const { createRepository, drain } = require('../../services/platformAudit.repository');
+  const { createService } = require('../../services/platformAudit.service');
+  const migration = require('../../../migrations/20260912210000-create-platform-audit-events');
+  const qi = sql.getQueryInterface(); await migration.up(qi, DataTypes);
+  const model = require('../../../models/platformauditevent')(sql, DataTypes); models.PlatformAuditEvent = model;
+  let repo = createRepository(model); let now = new Date('2026-09-12T12:00:00Z');
+  const event = fixture(); await repo.append(event); await repo.append(event); assert.equal(await model.count(), 1);
+  await assert.rejects(repo.append({ ...event, actor: { type: 'user', id: '124' } }), /audit_event_conflict/);
+  await assert.rejects(repo.append({ ...event, eventId: randomUUID() }), /audit_event_conflict/);
+  report.checks.push('durable canonical idempotency and one immutable outcome per correlation');
+  const claims = await Promise.all(Array.from({ length: 6 }, () => repo.claim(now)));
+  assert.equal(claims.filter(Boolean).length, 1); const first = claims.find(Boolean);
+  report.checks.push('six concurrent workers acquire exactly one SQL lease');
+  now = new Date(now.getTime() + 121000); repo = createRepository(model); const second = await repo.claim(now);
+  assert(second); const receipt = { key: keyFor(second), digest: second.digest, versionId: 'fictitious-version-1' };
+  assert.equal(await repo.acknowledge(first, receipt, now), false);
+  assert.equal(await repo.acknowledge(second, receipt, now), true);
+  assert.equal(await repo.claim(now), null);
+  assert.equal((await model.findByPk(event.eventId)).receipt.versionId, receipt.versionId);
+  report.checks.push('fresh repository recovers expired lease and rejects late worker ACK');
+  const rolledBack = fixture();
+  await qi.createTable('FictitiousSecurityMutation', { id: { type: DataTypes.INTEGER, primaryKey: true } });
+  await assert.rejects(sql.transaction(async transaction => {
+    await qi.bulkInsert('FictitiousSecurityMutation', [{ id: 1 }], { transaction });
+    await repo.append(rolledBack, { transaction }); throw Error('fictitious rollback');
+  }), /fictitious rollback/);
+  assert.equal(await model.findByPk(rolledBack.eventId), null);
+  assert.equal((await sql.query('SELECT COUNT(*) AS count FROM FictitiousSecurityMutation'))[0][0].count, 0);
+  report.checks.push('domain mutation and event can share a transaction and roll back together');
+  const objects = new Map(); let loseAck = true; const operations = [];
+  const writer = createWriter({ send: async command => {
+    operations.push(command.constructor.name); const input = command.input;
+    if (objects.has(input.Key)) throw { name: 'PreconditionFailed' };
+    const value = { body: input.Body, ChecksumSHA256: input.ChecksumSHA256, VersionId: randomUUID(),
+      ServerSideEncryption: 'aws:kms', SSEKMSKeyId: KEY_ARN };
+    objects.set(input.Key, value); if (loseAck) { loseAck = false; throw Error('fictitious lost ACK'); }
+    return value;
+  } });
+  const service = createService({ repository: repo, config: () => ({ enabled: true, policy: 'auth-durable-v1' }), now: () => now });
+  const attempt = await service.begin({ socket: { remoteAddress: '127.0.0.1' } }, 'auth.sign_in');
+  await attempt.complete({ outcome: 'success', reason: 'credentials_verified', userId: 123, sessionRef: randomUUID() });
+  let result = await drain(repo, writer, { now: () => now });
+  assert.equal(result.delivered, 1); assert.equal(result.failed, 1); assert.equal(result.pending, 1);
+  now = new Date(now.getTime() + 60000);
+  result = await drain(createRepository(model), writer, { now: () => now });
+  assert.equal(result.reconcile, 1); assert.equal(result.delivered, 0); assert.equal(objects.size, 2);
+  assert(operations.every(value => value === 'PutObjectCommand'));
+  report.checks.push('lost external ACK survives a new repository; conditional duplicate stays unconfirmed without reader escalation');
+  const reader = createReconciler({ send: async command => {
+    assert.equal(command.constructor.name, 'GetObjectCommand'); const object = objects.get(command.input.Key); assert(object);
+    return { ...object, ContentLength: Buffer.byteLength(object.body), Body: Readable.from([object.body]) };
+  } });
+  now = new Date(now.getTime() + 60000);
+  result = await drain(createRepository(model), reader, { now: () => now, mode: 'reconcile' });
+  assert.equal(result.delivered, 1); assert.equal(result.pending, 0); assert.equal(result.reconcile, 0);
+  assert.equal(result.unresolvedAttempts, 0);
+  report.checks.push('independent reader verifies bytes/checksum/version and persists external receipt in MySQL');
+  await service.begin({ socket: {} }, 'auth.unlock');
+  now = new Date(now.getTime() + 3601000);
+  const health = await repo.health(now); assert.equal(health.unresolvedAttempts, 1); assert(health.oldestUnresolvedAgeSeconds >= 3600);
+  await assert.rejects(service.begin({ socket: {} }, 'auth.unlock'), /audit_unavailable/);
+  report.checks.push('crash without completion remains unknown and aged delivery backlog blocks only enabled auth cohort');
+  await assert.rejects(migration.down(qi), /preserve_evidence/);
+  assert.equal(await model.count(), 4);
+  report.checks.push('migration rollback refuses to drop retained audit evidence');
+}).catch(() => { process.exitCode = 1; });

@@ -36,6 +36,11 @@ Volumen/tablespaces/backups siguen sin acreditarse. TLS de clientes preparado
 sin activar; restauración física cifrada solo con datos y claves ficticios.
 Credencial incrustada retirada del código legacy; rotación real pendiente.
 
+Auditoría: [primer bloque de autenticación durable](../services/platform-audit/README.md),
+con tres rutas preparadas/apagadas y matriz explícita de pendientes. Sin worker
+instalado, visor, captura real ni migración compartida. Requiere completar el
+lote antes de pedir activación; seis meses de retención no están acreditados.
+
 ## 1. Entrada Y Limites
 
 Leer `00-handoff-operativo`, `19-estado-actual`, `39`, `25-operacion-worktrees-entornos`, `30-despliegues-y-entornos` y `31-roadmap-arquitectura-entornos-gateway` en `front-dev/src/Documentacion`. Completar con `02`, `03`, `04`, `05`, `07`, `11`, `14.1`, `20.13` y `32` segun la fase. `25-desarrollo-paralelo` es un alias historico, no otro workflow.

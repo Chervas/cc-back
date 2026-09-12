@@ -1,0 +1,5586 @@
+{
+  "version": 1,
+  "source": "static_heuristic_not_runtime_coverage",
+  "limits": [
+    "Local router templates, not complete mounted URLs",
+    "Comments/conditional mounts may affect results",
+    "Dynamic routes, alternate router variables, socket events, jobs and scripts need separate review",
+    "Existing domain audit tables are not proof of platform audit delivery"
+  ],
+  "totals": {
+    "files": 60,
+    "declarations": 869,
+    "preparedDisabled": 3
+  },
+  "items": [
+    {
+      "path": "src/routes/access-policy.routes.js",
+      "sha256": "514058a95b4f0e54685efd667d8d5fe23d50d6e515afc6396c27bd507304c626",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/catalog",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/overrides",
+          "line": 10,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/assignments",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/overrides",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/accounting.routes.js",
+      "sha256": "f5921710766ddd6266de6081ca756f0cc586519160b2e32551f6e16d80aa64b3",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/workspace",
+          "line": 10,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/cash/workspace",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/firm",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/firm/credentials",
+          "line": 13,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/portal/scope",
+          "line": 14,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/portal/workspace",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/portal/export.csv",
+          "line": 16,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/portal/export.zip",
+          "line": 17,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/ingestion",
+          "line": 18,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/ingestion",
+          "line": 19,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/ingestion/:jobId/process",
+          "line": 20,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/ingestion/:jobId/accept",
+          "line": 21,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/ingestion/:jobId/source",
+          "line": 22,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/sepa",
+          "line": 23,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/sepa/mandates",
+          "line": 24,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/sepa/mandates/:mandateId",
+          "line": 25,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/sepa/remittances",
+          "line": 26,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/sepa/remittances/:remittanceId",
+          "line": 27,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/sepa/remittances/:remittanceId.xml",
+          "line": 28,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/documents/:documentId",
+          "line": 29,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/export.csv",
+          "line": 30,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/export.zip",
+          "line": 31,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/expenses",
+          "line": 32,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/expenses/:expenseId",
+          "line": 33,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/expenses/:expenseId/attachment",
+          "line": 34,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/cash/open",
+          "line": 35,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/cash/movements",
+          "line": 36,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/cash/closures",
+          "line": 37,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/payroll",
+          "line": 38,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/payroll/:payrollId",
+          "line": 39,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/payroll/:payrollId/document",
+          "line": 40,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/payroll-documents/:documentId/document",
+          "line": 41,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/adcache.routes.js",
+      "sha256": "51d3e6c7adf7f8be7f023544f21156dfc5bdfdd04949f380c1bed66b596dd209",
+      "routes": []
+    },
+    {
+      "path": "src/routes/adminCampaignPlaybooks.routes.js",
+      "sha256": "5e09d8dae51857c4884780b988bb94fb2909da1f36536c6d4568fe20a0f90df7",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 10,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/bulk-send-settings",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/bulk-send-settings",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id",
+          "line": 13,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/",
+          "line": 14,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/:id",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/:id",
+          "line": 16,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/adminManagedCampaigns.routes.js",
+      "sha256": "06e98c8299c6186e49c322fce852e6673605114a8ffd9bdd7c879ab065b6559b",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/access",
+          "line": 16,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/operators",
+          "line": 18,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/dashboard",
+          "line": 19,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/matching/options",
+          "line": 20,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/matching/proposals",
+          "line": 21,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/matching/confirm",
+          "line": 22,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/matching/archive",
+          "line": 23,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/matching/issues",
+          "line": 24,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/matching/assignments/:id/target",
+          "line": 25,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/matching/assignments/:id/target",
+          "line": 26,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/matching/assignments/:id/audits",
+          "line": 27,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/inventory",
+          "line": 28,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/inventory",
+          "line": 29,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/bank-transactions",
+          "line": 30,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/bank-transactions",
+          "line": 31,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/reconciliation/proposals",
+          "line": 32,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/reconciliation/confirm",
+          "line": 33,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 34,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/",
+          "line": 35,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id/coordination",
+          "line": 36,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/coordination-audits",
+          "line": 37,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/publishing-plan",
+          "line": 38,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/publishing-dry-run",
+          "line": 39,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/publishing-audits",
+          "line": 40,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/publishing-executions",
+          "line": 41,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/publishing-executions",
+          "line": 42,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/publishing-executions/:executionId/activate",
+          "line": 43,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/publishing-executions/:executionId/rollback",
+          "line": 44,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/goal-policy/preview",
+          "line": 45,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/goal-policy/apply",
+          "line": 46,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id",
+          "line": 47,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id",
+          "line": 48,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/status",
+          "line": 49,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/activate-management",
+          "line": 50,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/topups",
+          "line": 51,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/spend",
+          "line": 52,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/adminWebRuntimeReconciliations.routes.js",
+      "sha256": "acd7a09e1b3a7137d6b48242ffc222e824d5be2d230b4ba995c0a791790ca52b",
+      "routes": [
+        {
+          "method": "POST",
+          "localTemplate": "/:reconciliationId/recover",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/auth.middleware.js",
+      "sha256": "ac7446082d4a3791bc3e3b5e23be9a2813b9b7bda143399a8a979eec912673bb",
+      "routes": []
+    },
+    {
+      "path": "src/routes/auth.routes.js",
+      "sha256": "bffa1f27827c1330801caf8d4d0e0d5c86302b381b324d6f3d2d01024b6f7b85",
+      "routes": [
+        {
+          "method": "POST",
+          "localTemplate": "/forgot-password",
+          "line": 5,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/reset-password",
+          "line": 6,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/sign-in",
+          "line": 7,
+          "platformAudit": "auth_semantic_prepared_disabled"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/sign-in-with-token",
+          "line": 8,
+          "platformAudit": "auth_semantic_prepared_disabled"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/sign-up",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/unlock-session",
+          "line": 10,
+          "platformAudit": "auth_semantic_prepared_disabled"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/claim-invite",
+          "line": 14,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/automationCatalog.routes.js",
+      "sha256": "8e074247c55b229ae7d84d6d97e7aa0218a5b05845ac5b456000b19e148de9e0",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id",
+          "line": 10,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/duplicate",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/propagate",
+          "line": 13,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/:id",
+          "line": 14,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/:id",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/:id/toggle",
+          "line": 16,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id/toggle",
+          "line": 17,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/automations.routes.js",
+      "sha256": "0e2e09849212a4c92a2bad4cb7b31b60e6453369cf7965c13cba9187dd65e184",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/catalog",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/catalog",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/catalog/:id",
+          "line": 13,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/catalog/:id",
+          "line": 14,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/catalog/:id/toggle",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/v2/meta",
+          "line": 18,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/v2/node-types",
+          "line": 19,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/v2/search-entities",
+          "line": 20,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/v2/assignees",
+          "line": 21,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/v2/forms/recent",
+          "line": 22,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/v2/validate",
+          "line": 23,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/v2/templates",
+          "line": 24,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/v2/templates",
+          "line": 25,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/v2/templates/:template_ref",
+          "line": 26,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/v2/templates/:template_ref",
+          "line": 27,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/v2/templates/:template_ref/versions",
+          "line": 28,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/v2/templates/:template_ref/versions/:version",
+          "line": 29,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/v2/templates/:template_ref/versions/:version",
+          "line": 30,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/v2/templates/:template_ref/versions/:version/publish",
+          "line": 31,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/v2/templates/:template_ref/versions/:version/execute",
+          "line": 32,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/v2/executions",
+          "line": 33,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/v2/executions/:id",
+          "line": 34,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/v2/executions/:id/logs",
+          "line": 35,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/v2/executions/:id/resume",
+          "line": 36,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/v2/messages/:message_id/status",
+          "line": 37,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/activate",
+          "line": 40,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/campaign-request.routes.js",
+      "sha256": "3d79b37d61a88d64ca6358351054b2185253a2714eab30ddbfd71da053d41d6c",
+      "routes": [
+        {
+          "method": "POST",
+          "localTemplate": "/",
+          "line": 8,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/campaign.routes.js",
+      "sha256": "b5dceff9e59ac21621a493ac458fc6b9f933b01249fab5d16064be63f0941756",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 8,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id",
+          "line": 10,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/campana.routes.js",
+      "sha256": "4e5b11a996616d294e87a9a005e244107460733c7d793d4399e9530bdc8b18e0",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 6,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id",
+          "line": 7,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/",
+          "line": 8,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/:id",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/:id",
+          "line": 10,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/by-clinica/:clinicaId",
+          "line": 13,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/sync-facebook",
+          "line": 14,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/stats/summary",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/citas.routes.js",
+      "sha256": "7de456b66a84cddac71c8c7c29363b15693cdfa4671180544dd9a842b0d6ce6e",
+      "routes": [
+        {
+          "method": "POST",
+          "localTemplate": "/",
+          "line": 8,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/next",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/manual-attribution-preview",
+          "line": 10,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinical-reports/patient/:patientId",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/calendar",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/clinical-report",
+          "line": 13,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/:id/clinical-report",
+          "line": 14,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/clinical-report/finalize",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id/estado",
+          "line": 16,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id/cambio-solicitado/resolver",
+          "line": 17,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id/nota",
+          "line": 18,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id/reagendar",
+          "line": 19,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/:id",
+          "line": 20,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id",
+          "line": 21,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 22,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/clinica.routes.js",
+      "sha256": "dc48ff6ac2cee5a5c12f68e26109e29aee3b19add408be7e0b558dd091a23569",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 8,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/search",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/horarios",
+          "line": 14,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/:id/horarios",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id",
+          "line": 18,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/",
+          "line": 21,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id",
+          "line": 24,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/:id",
+          "line": 27,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/addServicio",
+          "line": 30,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id_clinica/servicios",
+          "line": 34,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/clinicaservicio.route.js",
+      "sha256": "5c7237aef394dbe00eb06fb6803fd7f48a919a2fca8e7966b8f388cf09854337",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/is-month-closed",
+          "line": 6,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/month-summary",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/products",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id",
+          "line": 18,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/",
+          "line": 21,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id",
+          "line": 24,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/:id",
+          "line": 27,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/close-month",
+          "line": 30,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/consentimientos.routes.js",
+      "sha256": "f6f195ad2e320969c0ed75440dbdf63d60aff5cfe8cf4fca28184a0ea36afcb8",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/public/:token",
+          "line": 8,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/public/:token/sign",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/tablet/login",
+          "line": 10,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/tablet/session",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/tablet/packages",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/tablet/packages/:id/session",
+          "line": 13,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/tablet/budget-signatures/:id/session",
+          "line": 14,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/admin/templates",
+          "line": 18,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/admin/templates",
+          "line": 19,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/admin/templates/:id",
+          "line": 20,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/admin/templates/:id/propagate",
+          "line": 21,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinic/templates",
+          "line": 23,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/clinic/templates",
+          "line": 24,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/clinic/templates/:id",
+          "line": 25,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/clinic/:clinicId/sync-admin",
+          "line": 26,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinic/:clinicId/tablet-kiosk",
+          "line": 27,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/clinic/:clinicId/tablet-kiosk",
+          "line": 28,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/clinic/:clinicId/tablet-kiosk/reset",
+          "line": 29,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/clinic/:clinicId/tablet-kiosk/:kioskId/reset",
+          "line": 30,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/treatments/:id/requirements",
+          "line": 32,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/treatments/:id/requirements",
+          "line": 33,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/patients/:id/documents",
+          "line": 35,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/patients/:id/external-attestations",
+          "line": 36,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/patients/:id/external-attestations",
+          "line": 37,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/patients/:id/treatments-without-consent",
+          "line": 38,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/patients/:id/audit",
+          "line": 39,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinic/pending-documents",
+          "line": 40,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/professional/pending",
+          "line": 41,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/external-attestations/:id/revoke",
+          "line": 42,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/appointments/:id/summary",
+          "line": 43,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/appointments/:id/package",
+          "line": 44,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/packages/:id/send-mock",
+          "line": 45,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/packages/:id/tablet-session",
+          "line": 46,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/documents/:id",
+          "line": 47,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/documents/:id/render",
+          "line": 48,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/documents/:id/pdf",
+          "line": 49,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/documents/:id/sign",
+          "line": 50,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/documents/:id/sign-professional",
+          "line": 51,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/documents/:id/revoke",
+          "line": 52,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/conversation.routes.js",
+      "sha256": "31f5adfcb1056e90dca1bc54ff53aba5c232ee241e20a845e495b42b0a87fe62",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/conversations",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/conversations/permissions",
+          "line": 10,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/conversations/by-patient/:patientId",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/conversations/by-lead/:leadId",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/conversations/start-patient-contact",
+          "line": 13,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/conversations/messages/:messageId/media",
+          "line": 14,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/conversations/messages/:messageId/send-now",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/conversations/:id/messages",
+          "line": 16,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/conversations/:id/messages",
+          "line": 17,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/conversations/:id/read",
+          "line": 18,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/conversations/:id/automation-attention/resolve",
+          "line": 19,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/chat/internal",
+          "line": 22,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/dependencias.routes.js",
+      "sha256": "f5fdba0a8ec86a9cfd28079fb026bc057f3a8267f257dc678ac09996134fb3c7",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/tratamiento/:id_tratamiento",
+          "line": 6,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/",
+          "line": 7,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id",
+          "line": 8,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/:id",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/disponibilidad.routes.js",
+      "sha256": "16a9b8c5c7202a4d5ff8f1a6aad52c1e37bf76dab479c6abce0d9f98498cad1f",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/treatment-slots",
+          "line": 7,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/booking-capabilities",
+          "line": 8,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/check",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/grid",
+          "line": 10,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/slots",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/summary",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/doctores.routes.js",
+      "sha256": "a262799306d7b823a01859083667fb1eb2e634c17ddd1f06f90851493a8779ee",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 254,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:doctorClinicaId/horarios",
+          "line": 255,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/:doctorClinicaId/horarios",
+          "line": 256,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:doctorId/bloqueos",
+          "line": 257,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/me/bloqueos",
+          "line": 258,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:doctorId/bloqueos",
+          "line": 259,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/bloqueos/:id",
+          "line": 260,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/disponibilidad",
+          "line": 261,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/bloqueos/:id",
+          "line": 262,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/me/bloqueos/:id",
+          "line": 263,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/me/schedule",
+          "line": 265,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:doctorId/schedule",
+          "line": 266,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/me/clinicas/:clinicaId/horarios",
+          "line": 267,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/:doctorId/clinicas/:clinicaId/horarios",
+          "line": 268,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/email.routes.js",
+      "sha256": "4641a8e5a21f23d33724e4e23d02887f3bf517da94ed0707f771dce27988ac78",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/events/provider/health",
+          "line": 8,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/events/provider",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/admin/overview",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/admin/messages",
+          "line": 13,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/admin/events",
+          "line": 14,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/admin/suppressions",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/admin/test-message",
+          "line": 16,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/especialidades.routes.js",
+      "sha256": "a05fbda48c92fd903ca82b70261edaa529f374cda6a3092df4e43d25a438093c",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/area-contracts",
+          "line": 8,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/area-contracts/:code",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/area-contracts/:code",
+          "line": 10,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/sistema",
+          "line": 13,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/sistema",
+          "line": 14,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/sistema/:id",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/sistema/:id",
+          "line": 16,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:id/en-uso",
+          "line": 19,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId",
+          "line": 20,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica",
+          "line": 21,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/clinica",
+          "line": 22,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/clinica/:id",
+          "line": 23,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/clinica/:id",
+          "line": 24,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/clinica/sistema",
+          "line": 27,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/clinica/sistema/:clinicaId/:especialidadId",
+          "line": 28,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/usuario/:id_usuario",
+          "line": 31,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/usuario",
+          "line": 32,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/usuario/:id",
+          "line": 33,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/facebook.routes.js",
+      "sha256": "874cf8fc88e1099c2d8955225814e8d8f70ae9f077b86143392c44790fbb0bd3",
+      "routes": [
+        {
+          "method": "POST",
+          "localTemplate": "/verify-token",
+          "line": 8,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/ad-accounts",
+          "line": 33,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/campaigns",
+          "line": 60,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/googleads.routes.js",
+      "sha256": "c0b3d6306b40a46c05d0c4752daf92fba63c4daf685f0beb30b1ce07ff188a30",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/overview",
+          "line": 10,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/timeseries",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/campaigns",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/health",
+          "line": 13,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/gruposclinicas.routes.js",
+      "sha256": "34935005ac3536ba28fff508fc71def5b70d2dfddb1dd952fee5eda080e05661",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 8,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id",
+          "line": 10,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/ads-config",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/:id",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/historialdeservicios.route.js",
+      "sha256": "134859a7a0ace1eebe6eb12e2cb65e4c066ad1cd9a001be254c69e5218d95470",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/products",
+          "line": 5,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id",
+          "line": 16,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/",
+          "line": 21,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id",
+          "line": 26,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/:id",
+          "line": 31,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/products",
+          "line": 36,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/instalaciones.routes.js",
+      "sha256": "9e7a01ba1a4834aaebd7215207c2573f0032707480f3bb6f6f2a01f15b45cdaa",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 7,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/disponibilidad",
+          "line": 8,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id",
+          "line": 10,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/:id",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/:id",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/horarios",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/:id/horarios",
+          "line": 16,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/bloqueos",
+          "line": 19,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/bloqueos",
+          "line": 20,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/bloqueos/:id",
+          "line": 21,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/intake.routes.js",
+      "sha256": "63cd3e1e4ba76203dcca529739bb9e697116c22008376a8d0a570a16a92cd4e6",
+      "routes": [
+        {
+          "method": "POST",
+          "localTemplate": "/leads",
+          "line": 8,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/landing-leads",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/leads/webhook",
+          "line": 13,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/leads/webhook",
+          "line": 14,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/config",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/events",
+          "line": 16,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/whatsapp-origin",
+          "line": 17,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/config/admin",
+          "line": 21,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/verify-snippet",
+          "line": 22,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/config/:clinicId/secret",
+          "line": 23,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/config/group/:groupId/secret",
+          "line": 24,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/leads/search",
+          "line": 25,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/leads",
+          "line": 26,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/leads/stats",
+          "line": 27,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/leads/import/preview",
+          "line": 28,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/leads/import/execute",
+          "line": 29,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/leads/auto-reply/status",
+          "line": 30,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/leads/auto-reply/pending",
+          "line": 31,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/leads/auto-reply/pending/send",
+          "line": 32,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/leads/auto-reply/pending/:jobId",
+          "line": 33,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/leads/auto-reply",
+          "line": 34,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/leads/:id",
+          "line": 35,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/leads/:id/activity",
+          "line": 36,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/leads/:id/candidate-appointments",
+          "line": 37,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/leads/:id",
+          "line": 38,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/leads/:id/resolve-notice",
+          "line": 39,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/leads/:id/contacto",
+          "line": 40,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/leads/:id/call-outcome",
+          "line": 41,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/leads/:id",
+          "line": 42,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/config/:clinicId",
+          "line": 43,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/jobrequests.routes.js",
+      "sha256": "ef2de7b7a58c9a3a42f74eac7632adafc2a99cc290bdd09bfb23028fe089eed2",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/summary",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/",
+          "line": 13,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/cancel",
+          "line": 14,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/retry",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/trigger",
+          "line": 16,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/worker/status",
+          "line": 17,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/local.routes.js",
+      "sha256": "fb8da0f53c8f82969c97fe4206a10c50da31a611dbcca682303b21e9e8ef1fa1",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/status",
+          "line": 103,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/dashboard",
+          "line": 127,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/overview",
+          "line": 135,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/timeseries",
+          "line": 147,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/seasonality",
+          "line": 160,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/reviews",
+          "line": 171,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/clinica/:clinicaId/reviews/:reviewId/reply",
+          "line": 179,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/clinica/:clinicaId/reviews/:reviewId/reply",
+          "line": 195,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/posts",
+          "line": 210,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/content",
+          "line": 218,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/review-insights",
+          "line": 226,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/clinica/:clinicaId/import-hours",
+          "line": 234,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/import-hours/status",
+          "line": 246,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/clinica/:clinicaId/photos",
+          "line": 254,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/clinica/:clinicaId/import-logo",
+          "line": 269,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/clinica/:clinicaId/special-hours",
+          "line": 284,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/special-hours/automations",
+          "line": 299,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/clinica/:clinicaId/special-hours/automations",
+          "line": 310,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/clinica/:clinicaId/special-hours/automations/:publicId",
+          "line": 331,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/marketing.routes.js",
+      "sha256": "23509a28cdfc26133f25a9f0aab4b9b9f3b3ae0945b1a72a4c1bedd9d48d1408",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/web-installations/:installationId/desired-state",
+          "line": 32,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/web-installations/:installationId/reports",
+          "line": 42,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-installations/:installationId/artifacts/:artifactHash/manifest",
+          "line": 61,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-installations/:installationId/artifacts/:artifactHash/envelope",
+          "line": 66,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-installations/:installationId/artifacts/:artifactHash/files/:pathToken",
+          "line": 71,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-projects",
+          "line": 92,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/web-projects",
+          "line": 93,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-projects/:projectId",
+          "line": 94,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/web-projects/:projectId",
+          "line": 95,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-projects/:projectId/draft",
+          "line": 96,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/web-projects/:projectId/draft",
+          "line": 97,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-projects/:projectId/revisions",
+          "line": 98,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-projects/:projectId/content-drift",
+          "line": 99,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/web-projects/:projectId/revisions",
+          "line": 100,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/web-projects/:projectId/templates",
+          "line": 101,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/web-revisions/:revisionId/submit",
+          "line": 102,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/web-revisions/:revisionId/approve",
+          "line": 103,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/web-revisions/:revisionId/compile",
+          "line": 104,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-artifacts/:artifactId",
+          "line": 105,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-projects/:projectId/artifacts",
+          "line": 106,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-projects/:projectId/publications",
+          "line": 107,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/web-publications",
+          "line": 108,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-publications/verification-key",
+          "line": 109,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-publications/:publicationId",
+          "line": 110,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-publications/:publicationId/deployments",
+          "line": 111,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/web-publications/:publicationId/publish",
+          "line": 112,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/web-publications/:publicationId/rollback",
+          "line": 113,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/web-publications/:publicationId/retire",
+          "line": 114,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-domains",
+          "line": 115,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/web-domains",
+          "line": 116,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/web-domains/:domainId/verify",
+          "line": 117,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/web-domains/:domainId/rotate-verification",
+          "line": 118,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-installations",
+          "line": 119,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/web-installations",
+          "line": 120,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/web-installations/:installationId/plugin-package",
+          "line": 121,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/web-installations/:installationId/rotate-token",
+          "line": 122,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/web-installations/:installationId/revoke",
+          "line": 123,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-templates",
+          "line": 124,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/web-templates/:templateId",
+          "line": 125,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/web-templates/:templateId",
+          "line": 126,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-content",
+          "line": 127,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/web-content",
+          "line": 128,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-content/generations/configuration",
+          "line": 129,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/web-content/generations",
+          "line": 130,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-content/generations/:generationId",
+          "line": 131,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/web-content/generations/:generationId/accept",
+          "line": 132,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-content/:contentId",
+          "line": 137,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/web-content/:contentId",
+          "line": 138,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-content/:contentId/versions",
+          "line": 139,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/web-media",
+          "line": 140,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/web-media",
+          "line": 141,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/web-media/:mediaId",
+          "line": 142,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/reports/overview",
+          "line": 145,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/reports/competition",
+          "line": 146,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/reports/competition/suggestions",
+          "line": 147,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/reports/competition/local-heatmap/searches",
+          "line": 148,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/reports/competition/local-heatmap/searches",
+          "line": 149,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/reports/competition/local-heatmap/searches/:searchId",
+          "line": 150,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/reports/competition/local-heatmap",
+          "line": 151,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/reports/competition/competitors",
+          "line": 152,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/reports/competition/competitors/:competitorId",
+          "line": 153,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/reports/competition/competitors/:competitorId",
+          "line": 154,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/reports/competition/refresh",
+          "line": 155,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/reports/competition/ai-visibility",
+          "line": 156,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/reports/competition/ai-visibility",
+          "line": 157,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/reports/competition/ai-visibility/:runId",
+          "line": 158,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/objectives/status",
+          "line": 162,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/reactivation/suggestions",
+          "line": 165,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/reactivation/lists",
+          "line": 166,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/reactivation/lists",
+          "line": 167,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/reactivation/lists/:id",
+          "line": 168,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/reactivation/lists/:id",
+          "line": 169,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/reactivation/lists/:id/items",
+          "line": 170,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/reactivation/lists/:id/items/:itemId",
+          "line": 171,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/reactivation/lists/:id/events",
+          "line": 172,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/reactivation/lists/:id/rebuild",
+          "line": 173,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/reactivation/lists/:id/prepare",
+          "line": 174,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/reactivation/lists/:id/schedule",
+          "line": 175,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/reactivation/lists/:id",
+          "line": 176,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/review-requests/summary",
+          "line": 179,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/review-requests/automation-status",
+          "line": 180,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/review-requests/automation",
+          "line": 181,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/bulk-sends/campaigns",
+          "line": 182,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/bulk-sends/campaigns",
+          "line": 183,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/bulk-sends/campaigns/:id",
+          "line": 184,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/bulk-sends/campaigns/:id/recipients",
+          "line": 185,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/bulk-sends/campaigns/:id/recipients/:itemId",
+          "line": 186,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/bulk-sends/campaigns/:id/dispatch",
+          "line": 187,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/bulk-sends/campaigns/:id",
+          "line": 188,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/bulk-sends/campaigns/:id/prepare",
+          "line": 189,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/bulk-sends/campaigns/:id/send",
+          "line": 190,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/bulk-sends/campaigns/:id/cancel",
+          "line": 191,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/bulk-sends/campaigns/:id/resume",
+          "line": 192,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/bulk-sends/campaigns/:id/test-send",
+          "line": 193,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/bulk-sends/campaigns/:id",
+          "line": 194,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/chat-flow-templates",
+          "line": 197,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/chat-flow-templates/:id",
+          "line": 198,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/chat-flow-templates",
+          "line": 199,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/chat-flow-templates/:id",
+          "line": 200,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/chat-flow-templates/:id",
+          "line": 201,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/chat-flow-templates/:id/propagate",
+          "line": 202,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/chat-flow-templates/:id/duplicate",
+          "line": 203,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/campaign-onboarding/bootstrap",
+          "line": 206,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/campaign-workspace",
+          "line": 207,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/campaign-workspace/ad-creative",
+          "line": 208,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/campaign-workspace/configuration",
+          "line": 209,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/campaign-workspace/configuration",
+          "line": 210,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/campaign-workspace/preparation",
+          "line": 211,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/campaign-workspace/activation",
+          "line": 212,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/campaign-workspace/assignment",
+          "line": 213,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/campaign-workspace/meta-preparation",
+          "line": 214,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/campaign-workspace/meta-preparation/check",
+          "line": 215,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/campaign-workspace/meta-preparation/page",
+          "line": 216,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/campaign-workspace/preferences",
+          "line": 217,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/campaign-workspace/google-preparation",
+          "line": 218,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/campaign-workspace/google-destinations",
+          "line": 219,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/campaign-workspace/shared-account",
+          "line": 220,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/campaign-workspace/optimization",
+          "line": 221,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/campaign-workspace/optimization/check",
+          "line": 222,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/campaign-workspace/optimization/pause",
+          "line": 223,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/campaign-workspace/optimization/history",
+          "line": 224,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/campaign-workspace/optimization/history/:runId/resolve",
+          "line": 225,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/campaign-workspace/shared-account/assignment",
+          "line": 226,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/campaign-workspace/google-destinations/check",
+          "line": 227,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/campaign-workspace/google-preparation/check",
+          "line": 228,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/campaign-workspace/meta-signals",
+          "line": 229,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/campaign-workspace/meta-signals/check",
+          "line": 230,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/campaign-workspace/meta-preparation/jobs/:jobId",
+          "line": 231,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/campaign-onboarding/meta-pixels",
+          "line": 232,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/campaign-onboarding/external-campaigns",
+          "line": 233,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/strategies/catalog",
+          "line": 234,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/strategies/recommend-automation",
+          "line": 235,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/campaign-onboarding/start",
+          "line": 236,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/campaign-onboarding/:onboardingId/status",
+          "line": 237,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/strategies",
+          "line": 238,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/strategies",
+          "line": 239,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/strategies/:id",
+          "line": 240,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/strategies/:id",
+          "line": 241,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/strategies/:id/analysis/campaign",
+          "line": 242,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/strategies/:id/status",
+          "line": 243,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/strategies/:id/recent-leads",
+          "line": 244,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/strategies/:id/metrics",
+          "line": 245,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/strategies/:id/destination-bindings",
+          "line": 246,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/destination-bindings/:bindingId",
+          "line": 247,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/destination-bindings/:bindingId/apply",
+          "line": 248,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/destination-bindings/:bindingId/rollback",
+          "line": 249,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/campaign-optimization/status",
+          "line": 253,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/managed-campaigns",
+          "line": 256,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/managed-campaigns/request",
+          "line": 257,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/managed-campaigns/quote",
+          "line": 258,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/managed-campaigns/:id",
+          "line": 259,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/managed-campaigns/:id/approve",
+          "line": 260,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/managed-campaigns/:id/request-changes",
+          "line": 261,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/google-ads/conversion-actions",
+          "line": 264,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/google-ads/conversion-actions/ensure",
+          "line": 265,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/google-ads/conversions/data-manager/validate",
+          "line": 266,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/google-ads/conversions/enhanced/activation-gate",
+          "line": 267,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/marketingTracking.routes.js",
+      "sha256": "062f14db5a9a785261f1e6bbbed7b172df487f263dcbd6a3a86e32a614b90d23",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/r/:token",
+          "line": 8,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/meta.routes.js",
+      "sha256": "d2490a563aa43618feeb99326fafee6785e4af5794b34f9182d7b7cd679a9efe",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/statuses",
+          "line": 8,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/metasync.routes.js",
+      "sha256": "d0aeb9e15d0dc3842979308c1d52ec201613acc24c839f8d11c1c27433947296",
+      "routes": [
+        {
+          "method": "POST",
+          "localTemplate": "/clinica/:clinicaId/sync",
+          "line": 27,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/asset/:assetId/sync",
+          "line": 28,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/logs",
+          "line": 29,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/stats",
+          "line": 30,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/tokens/validate",
+          "line": 33,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/tokens/validate/:connectionId",
+          "line": 34,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/tokens/stats",
+          "line": 35,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/metrics/:clinicaId",
+          "line": 38,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/stats",
+          "line": 39,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/asset/:assetId/stats",
+          "line": 40,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/posts",
+          "line": 41,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/organic-vs-paid",
+          "line": 42,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/views-organic-vs-paid",
+          "line": 43,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/ads/paid-views-breakdown",
+          "line": 45,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/ads/paid-reach-breakdown",
+          "line": 46,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/ads/action-types",
+          "line": 48,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/ads/health",
+          "line": 50,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/ads/issues",
+          "line": 52,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/ads/issues/resolve",
+          "line": 53,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/post/:postId",
+          "line": 54,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/top-posts",
+          "line": 55,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/dashboard",
+          "line": 56,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/diagnostic/user-connection",
+          "line": 59,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/diagnostic/asset/:assetId",
+          "line": 60,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/diagnostic/permissions",
+          "line": 61,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/diagnostic/sample-data/:assetId",
+          "line": 62,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/diagnostic/asset-details/:assetId",
+          "line": 63,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/jobs/initialize",
+          "line": 70,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/jobs/status",
+          "line": 71,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/jobs/start",
+          "line": 72,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/jobs/stop",
+          "line": 73,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/jobs/restart",
+          "line": 74,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/jobs/run/:jobName",
+          "line": 75,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/jobs/web/backfill",
+          "line": 76,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/jobs/analytics/backfill",
+          "line": 77,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/jobs/logs",
+          "line": 78,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/jobs/statistics",
+          "line": 79,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/jobs/configuration",
+          "line": 80,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/jobs/next-executions",
+          "line": 81,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/jobs/usage/meta",
+          "line": 83,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/jobs/usage/google-ads",
+          "line": 84,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/jobs/usage/ai-visibility",
+          "line": 85,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/jobs/usage/overview",
+          "line": 86,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/jobs/usage/ai-runtime",
+          "line": 87,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/jobs/usage/ai-runtime/costs",
+          "line": 88,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/jobs/usage/aws-infrastructure/costs",
+          "line": 89,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/jobs/usage/google-ads/resume",
+          "line": 90,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/jobs/sync-logs/:id/tail",
+          "line": 91,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/metrics/:clinicaId",
+          "line": 92,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/metasync.service.js",
+      "sha256": "a6930effac962f34e6e5b8d7b35996db0b05b93631a1b1a57d87c50ca0d1eea0",
+      "routes": []
+    },
+    {
+      "path": "src/routes/notifications.routes.js",
+      "sha256": "f69a8148b88d826a0be02f215cb80bf76d9448f20e6b4f7e8c8bbe5f91781668",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/",
+          "line": 13,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/all",
+          "line": 14,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/mark-all-as-read",
+          "line": 16,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/preferences/meta",
+          "line": 18,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/preferences/presentation",
+          "line": 19,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/preferences/presentation",
+          "line": 20,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/preferences",
+          "line": 21,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/preferences",
+          "line": 22,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/oauth.routes.js",
+      "sha256": "6adc1c8e289b3a66dc366ae71efbec93b4b93a4982a6ae68b724c17a6deeeba9",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/google/effective-mappings",
+          "line": 1168,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/meta/connect",
+          "line": 1191,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/meta/callback",
+          "line": 1239,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/google/connect",
+          "line": 1412,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/google/callback",
+          "line": 1452,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/google/connection-status",
+          "line": 1534,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/google/assets",
+          "line": 1590,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/google/analytics/connection-status",
+          "line": 1626,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/google/analytics/properties",
+          "line": 1678,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/google/analytics/map-properties",
+          "line": 1732,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/google/local/locations",
+          "line": 1879,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/google/local/map-locations",
+          "line": 1948,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/google/local/mappings",
+          "line": 2247,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/google/ads/connection-status",
+          "line": 2348,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/google/ads/accounts",
+          "line": 2407,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/google/ads/request-link",
+          "line": 2612,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/google/ads/accept-link",
+          "line": 2681,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/google/ads/map-accounts",
+          "line": 2759,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/google/ads/mappings",
+          "line": 2981,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/google/ads/mappings/:mappingId",
+          "line": 3038,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/google/analytics/mappings",
+          "line": 3080,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/google/analytics/mappings/:mappingId",
+          "line": 3112,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/google/map-assets",
+          "line": 3154,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/google/mappings",
+          "line": 3299,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/google/mappings/:mappingId",
+          "line": 3336,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/google/disconnect",
+          "line": 3377,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/meta/connection-status",
+          "line": 3463,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/meta/assets",
+          "line": 3603,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/meta/map-assets",
+          "line": 3695,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/test",
+          "line": 3911,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/meta/mappings",
+          "line": 3930,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/meta/mappings/:mappingId",
+          "line": 4058,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/meta/disconnect",
+          "line": 4147,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/meta/mappings/:clinicaId",
+          "line": 4269,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/paciente.routes.js",
+      "sha256": "0d8d45480a284de20f11c44960909c84447526c17f8db75e3103d645d2b55f9b",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/search",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/contact-targets",
+          "line": 13,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/check-duplicates",
+          "line": 14,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/consents",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/consentimientos",
+          "line": 16,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/activity",
+          "line": 17,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/clinical-attachments",
+          "line": 18,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/clinical-attachments",
+          "line": 19,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/clinical-attachments/:attachmentId",
+          "line": 20,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/nutrition-workspace",
+          "line": 21,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/nutrition-measurements",
+          "line": 22,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/nutrition-measurements/:measurementId/photos",
+          "line": 23,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/nutrition-measurements/:measurementId/photos",
+          "line": 24,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/nutrition-measurements/:measurementId/photos/:photoId",
+          "line": 25,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/nutrition-measurements/:measurementId/report/snapshot",
+          "line": 26,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/nutrition-measurements/:measurementId/report/finalize",
+          "line": 27,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/nutrition-measurements/:measurementId/report/render",
+          "line": 28,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/nutrition-measurements/:measurementId/report/pdf",
+          "line": 29,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id",
+          "line": 30,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/",
+          "line": 31,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id",
+          "line": 32,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/transferir-contacto",
+          "line": 33,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/vincular-clinica",
+          "line": 34,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/:id",
+          "line": 35,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/paneles.routes.js",
+      "sha256": "ae1cf7a29fd287074293f68d224d7a7abb1dd2ec02d67bd5282d8eedcb579d0c",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/main",
+          "line": 85,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/dashboard/:idClinica",
+          "line": 107,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/usuario-info",
+          "line": 238,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/notificaciones-tareas",
+          "line": 264,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/metricas/:tipo",
+          "line": 316,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/refresh",
+          "line": 441,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/series/seguidores",
+          "line": 469,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/vinculaciones",
+          "line": 549,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/patientDirection.routes.js",
+      "sha256": "173a0583e0d818120e0412a2d1cdfc1c23ad0fb42b45f0fe56c639a853bf7bbb",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/profiles/me",
+          "line": 10,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/profiles/:userId",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/profiles/:userId",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/settings",
+          "line": 13,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/settings/:clinicId",
+          "line": 14,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/settings/:clinicId/enable",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/settings/:clinicId/disable",
+          "line": 16,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/dashboard",
+          "line": 17,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/conversations/:conversationId/assignment",
+          "line": 18,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/assignments/:assignmentId/take",
+          "line": 19,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/assignments/:assignmentId/retry-handoff",
+          "line": 20,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/assignments/:assignmentId/assign-clinic",
+          "line": 21,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/patientEconomics.routes.js",
+      "sha256": "15fc662c7a3196fdc89c488de9ecea876f2bede3718f955e2cd37e7137fc26a9",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/public/budget-signatures/:token",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/public/budget-signatures/:token/sign",
+          "line": 10,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/patients/:patientId/workspace",
+          "line": 14,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/catalog",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/patients/:patientId/budgets",
+          "line": 16,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/budgets/:budgetId",
+          "line": 17,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/budgets/:budgetId/revise",
+          "line": 18,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/budgets/:budgetId/transition",
+          "line": 19,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/budgets/:budgetId/signature-requests",
+          "line": 20,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/budgets/:budgetId/payments",
+          "line": 21,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/patients/:patientId/wallet-deposits",
+          "line": 22,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/patients/:patientId/fiscal-documents",
+          "line": 23,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/payments/:paymentId/void",
+          "line": 24,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/budgets/:budgetId/wallet-allocations",
+          "line": 25,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/budgets/:budgetId/fiscal-documents",
+          "line": 26,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/budgets/:budgetId/pdf",
+          "line": 27,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/fiscal-documents/:documentId",
+          "line": 28,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/fiscal-documents/:documentId/pdf",
+          "line": 29,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/patients/:patientId/vouchers",
+          "line": 30,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/patients/:patientId/voucher-sales",
+          "line": 31,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/vouchers/:voucherId/consume",
+          "line": 32,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/vouchers/:voucherId/appointment-resources",
+          "line": 33,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/vouchers/:voucherId/appointment-plan",
+          "line": 34,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/vouchers/:voucherId/appointments",
+          "line": 35,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/templates",
+          "line": 36,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/templates",
+          "line": 37,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/templates/:templateId",
+          "line": 38,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/patientFollowUps.routes.js",
+      "sha256": "b0008f097324e8355d86ca386c7c73cc4e17c515de8f64ab538e5b67365af7ce",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 8,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/from-appointment/:appointmentId",
+          "line": 10,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/appointment-candidates",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id",
+          "line": 13,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/personal.routes.js",
+      "sha256": "99fc39d9342c2973f48a9b6cab06f307efb4fe13715912ccaac6a13e8adc7acf",
+      "routes": [
+        {
+          "method": "POST",
+          "localTemplate": "/reclamar",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/presence/today",
+          "line": 18,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/presence/events",
+          "line": 19,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/buscar",
+          "line": 23,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/invitar",
+          "line": 24,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/invitaciones",
+          "line": 25,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/invitacion/responder",
+          "line": 26,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/search",
+          "line": 29,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/invite",
+          "line": 30,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/fusionar",
+          "line": 31,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/me/invitaciones",
+          "line": 32,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/me/invitaciones/:clinicaId/aceptar",
+          "line": 33,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/me/invitaciones/:clinicaId/rechazar",
+          "line": 34,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/me/clinicas/:clinicaId",
+          "line": 35,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/invitaciones/:clinicaId/cancelar",
+          "line": 36,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/:id/clinicas/:clinicaId",
+          "line": 37,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/me/schedule",
+          "line": 40,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/schedule",
+          "line": 41,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/me/clinicas/:clinicaId/horarios",
+          "line": 45,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/me/clinicas/:clinicaId/horarios/impact-preview",
+          "line": 46,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/me/clinicas/:clinicaId/horarios",
+          "line": 47,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/me/clinicas/:clinicaId/horarios",
+          "line": 48,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/me/clinicas/:clinicaId/horarios/:horarioId",
+          "line": 49,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/me/clinicas/:clinicaId/horarios/:horarioId",
+          "line": 50,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/me/clinicas/:clinicaId/horarios/:horarioId/excepciones",
+          "line": 51,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/me/clinicas/:clinicaId/horarios/:horarioId/excepciones",
+          "line": 52,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/me/clinicas/:clinicaId/horarios/:horarioId/excepciones/:exceptionId",
+          "line": 53,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/me/clinicas/:clinicaId/horarios/:horarioId/excepciones/:exceptionId",
+          "line": 54,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/me/horarios/move",
+          "line": 55,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/me/horarios/copy",
+          "line": 56,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/me/clinicas/:clinicaId/disponibilidad-config",
+          "line": 57,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/clinicas/:clinicaId/horarios",
+          "line": 58,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/clinicas/:clinicaId/horarios/impact-preview",
+          "line": 59,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/:id/clinicas/:clinicaId/horarios",
+          "line": 60,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/clinicas/:clinicaId/horarios",
+          "line": 61,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id/clinicas/:clinicaId/horarios/:horarioId",
+          "line": 62,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/:id/clinicas/:clinicaId/horarios/:horarioId",
+          "line": 63,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/clinicas/:clinicaId/horarios/:horarioId/excepciones",
+          "line": 64,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/clinicas/:clinicaId/horarios/:horarioId/excepciones",
+          "line": 65,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id/clinicas/:clinicaId/horarios/:horarioId/excepciones/:exceptionId",
+          "line": 66,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/:id/clinicas/:clinicaId/horarios/:horarioId/excepciones/:exceptionId",
+          "line": 67,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/horarios/move",
+          "line": 68,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/horarios/copy",
+          "line": 69,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id/clinicas/:clinicaId/disponibilidad-config",
+          "line": 70,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/horarios",
+          "line": 73,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/:id/horarios",
+          "line": 74,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/me/bloqueos/permissions",
+          "line": 77,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/bloqueos/permissions",
+          "line": 78,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/me/bloqueos",
+          "line": 79,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/me/bloqueos",
+          "line": 80,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/me/bloqueos/:bloqueoId",
+          "line": 81,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/me/bloqueos/:bloqueoId",
+          "line": 82,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/me/bloqueos/:bloqueoId/excepciones",
+          "line": 83,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/me/bloqueos/:bloqueoId/excepciones",
+          "line": 84,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/me/bloqueos/:bloqueoId/excepciones/:exceptionId",
+          "line": 85,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/me/bloqueos/:bloqueoId/excepciones/:exceptionId",
+          "line": 86,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/bloqueos",
+          "line": 87,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/bloqueos",
+          "line": 88,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id/bloqueos/:bloqueoId",
+          "line": 89,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/:id/bloqueos/:bloqueoId",
+          "line": 90,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/bloqueos/:bloqueoId/excepciones",
+          "line": 91,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/bloqueos/:bloqueoId/excepciones",
+          "line": 92,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id/bloqueos/:bloqueoId/excepciones/:exceptionId",
+          "line": 93,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/:id/bloqueos/:bloqueoId/excepciones/:exceptionId",
+          "line": 94,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id",
+          "line": 97,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id",
+          "line": 100,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/publicMedia.routes.js",
+      "sha256": "0bf57687ec3c38fa8c8f5083df3cb8cf823a2f9f1b720d5c0e5172bb1a557049",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/status",
+          "line": 23,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/upload",
+          "line": 24,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/sendQueues.routes.js",
+      "sha256": "f407d7b77d7bb5c58da651a5386cbef8ad5b5cc98722a0a5620d26f222375549",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:queueId/pause",
+          "line": 10,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:queueId/resume",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/servicio.routes.js",
+      "sha256": "3ce5acba89804ca71da092aa213ff016c96345d2b89c391f04d5b20c37d8468c",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/products",
+          "line": 6,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id",
+          "line": 18,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/:id",
+          "line": 21,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/system-monitoring.routes.js",
+      "sha256": "471e29e52ea0bf25f6be0754720a10f8e5c20aea17ca5350fc7da89064ca6a40",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/notifications/overview",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/notifications/settings",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/notifications/whatsapp-template/prepare",
+          "line": 13,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/notifications/test",
+          "line": 14,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/notifications/check",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/templates.routes.js",
+      "sha256": "1f32595ae1501964237e1cd649f117f82e7c58ea6ce8cfd36dc41c9d0240b704",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/templates",
+          "line": 8,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/templates",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/templates/:id",
+          "line": 10,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/message-log",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/tratamientos.routes.js",
+      "sha256": "f73d23565060cc925bc264e1cba2b053cadaa4301663de28895a2be058e781a4",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id",
+          "line": 10,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id",
+          "line": 12,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/:id",
+          "line": 13,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/ocultar",
+          "line": 14,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/restaurar",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/personalizar",
+          "line": 16,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/automation-template",
+          "line": 17,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/:id/automation-template",
+          "line": 18,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/treatmentDocumentation.routes.js",
+      "sha256": "37085978b0b0358bd3fd05849a7d0cd3e2978253aedd23d75073d0dedaaf2293",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/coverage",
+          "line": 19,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/for-appointment/:id",
+          "line": 20,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/treatments",
+          "line": 26,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/protocols",
+          "line": 27,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/protocols/:id",
+          "line": 28,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/protocols",
+          "line": 29,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/protocols/:id",
+          "line": 30,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/treatmentPrograms.routes.js",
+      "sha256": "b09e434d91256ce636fd2fcf3b88d3e9126039e1a5d45a12db79d1c13a2caf51",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/options",
+          "line": 6,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/preview",
+          "line": 7,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 8,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/",
+          "line": 9,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id",
+          "line": 10,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/user.routes.js",
+      "sha256": "1be03cd3f93861653216fa3690bd3d4b6079034b572d34af3b456cb4c9ab8306",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/",
+          "line": 101,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/",
+          "line": 104,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/search",
+          "line": 106,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id",
+          "line": 108,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PATCH",
+          "localTemplate": "/:id",
+          "line": 110,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/:id",
+          "line": 113,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id/clinicas",
+          "line": 115,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/:id/clinicas",
+          "line": 118,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/userclinicas.routes.js",
+      "sha256": "37661627617b20abe1606643bc256dbac3827e212d5f93d97ba277e70d94df9e",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/list",
+          "line": 78,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/:id",
+          "line": 402,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/web.routes.js",
+      "sha256": "f9306596c7267083a539a24c853f9c3a824a2abf7c05c2c717f3d4e72ffa2be2",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/status",
+          "line": 186,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/seo/summary",
+          "line": 232,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/analytics/overview",
+          "line": 287,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/analytics/timeseries",
+          "line": 349,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/analytics/dimensions/:dimension",
+          "line": 396,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/sc/queries",
+          "line": 452,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/sc/pages",
+          "line": 538,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/psi/latest",
+          "line": 583,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/psi/snapshot",
+          "line": 608,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/clinica/:clinicaId/psi/refresh",
+          "line": 621,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/seo/timeseries",
+          "line": 700,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/seo/health",
+          "line": 734,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/clinica/:clinicaId/coverage/timeseries",
+          "line": 819,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/webLandingEventBridge.handlers.js",
+      "sha256": "1b6b07ddd4542fc8d28bce70056884beba9e3facf29348582446db87be9ee69e",
+      "routes": []
+    },
+    {
+      "path": "src/routes/webLandingIntake.handlers.js",
+      "sha256": "e5fc2d0787361aa07f90a005097c25e77d83cb85d7572eeb1a5e88496e833dc9",
+      "routes": []
+    },
+    {
+      "path": "src/routes/whatsapp-embedded.routes.js",
+      "sha256": "4af411f412be7b9cd356f8809766ca82ff36cb22fb76ad1529690c1419407296",
+      "routes": [
+        {
+          "method": "POST",
+          "localTemplate": "/embedded-signup/callback",
+          "line": 425,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/whatsapp-webhook.routes.js",
+      "sha256": "cc24ad5573742ff7ac02aab0014efcbd49a7dd883a6896cfeec2702dcf3a9111",
+      "routes": [
+        {
+          "method": "GET",
+          "localTemplate": "/whatsapp/webhook",
+          "line": 367,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/whatsapp/webhook",
+          "line": 385,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    },
+    {
+      "path": "src/routes/whatsapp.routes.js",
+      "sha256": "0429fa03064fcdfd93879e438b2350ad6f556e8b9c11b47d1146c57d0b7b18b6",
+      "routes": [
+        {
+          "method": "POST",
+          "localTemplate": "/messages",
+          "line": 10,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/templates",
+          "line": 13,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/templates/sync",
+          "line": 14,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/templates/custom",
+          "line": 15,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/templates/create-from-catalog",
+          "line": 16,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/templates/:id",
+          "line": 17,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/template-catalog",
+          "line": 20,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/template-catalog/language-rollout",
+          "line": 21,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/template-catalog/language-rollout",
+          "line": 22,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/template-catalog",
+          "line": 23,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/template-catalog/:id",
+          "line": 24,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/template-catalog/:id",
+          "line": 25,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/template-catalog/:id/duplicate",
+          "line": 26,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/template-catalog/:id/translations",
+          "line": 27,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/template-catalog/:id/toggle",
+          "line": 28,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/template-catalog/:id/disciplines",
+          "line": 29,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/template-catalog/:id/propagate",
+          "line": 30,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/status",
+          "line": 33,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/accounts",
+          "line": 36,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/templates/summary",
+          "line": 39,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/phones",
+          "line": 42,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/compliance/status",
+          "line": 45,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/compliance/incidents",
+          "line": 46,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/compliance/request-review",
+          "line": 47,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/compliance/admin/overview",
+          "line": 48,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/compliance/admin/queues/:listId/resolve",
+          "line": 49,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/compliance/admin/incidents/:id",
+          "line": 50,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/compliance/admin/refresh",
+          "line": 51,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "GET",
+          "localTemplate": "/compliance/admin/accounts/:assetId/health-history",
+          "line": 52,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/compliance/admin/accounts/:assetId/check",
+          "line": 53,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/compliance/admin/accounts/:assetId/manual-review",
+          "line": 54,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/compliance/incidents/:id/prepare-appeal",
+          "line": 55,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/compliance/incidents/:id/mark-submitted",
+          "line": 56,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/phones/:phoneNumberId/assign",
+          "line": 59,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/phones/:phoneNumberId/routing",
+          "line": 62,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "PUT",
+          "localTemplate": "/phones/:phoneNumberId/clinic-routing",
+          "line": 63,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/phones/scope/clinic-routing",
+          "line": 64,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/phones/:phoneNumberId/unassign",
+          "line": 67,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/phones/:phoneNumberId/register",
+          "line": 70,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/phones/:phoneNumberId/display-name",
+          "line": 73,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/phones/:phoneNumberId/profile",
+          "line": 76,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/phones/:phoneNumberId/refresh",
+          "line": 79,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/phones/:phoneNumberId/coexistence/sync-initial",
+          "line": 82,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "DELETE",
+          "localTemplate": "/phones/:phoneNumberId",
+          "line": 85,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/preverified/start",
+          "line": 88,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/preverified/verify",
+          "line": 89,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/preverified/profile",
+          "line": 90,
+          "platformAudit": "pending_semantic_review"
+        }
+      ]
+    }
+  ]
+}

@@ -95,6 +95,36 @@ datos clínicos ni tiempos del volumen real. Contrato, permisos faltantes,
 coste/ventanas pendientes y rollback:
 `docs/security/database-encryption-remediation.md`.
 
+## 2026-09-12 - Auditoría de autenticación preparada, sin activar
+
+Tres POST existentes de `/api/auth`: `sign-in`, `sign-in-with-token` y
+`unlock-session` preparan intento y resultado semánticos en `PlatformAuditEvents`.
+Gate `PLATFORM_AUDIT_AUTH_ENABLED` apagado por defecto; true exige política
+`PLATFORM_AUDIT_AUTH_POLICY=auth-durable-v1`, cuya activación aún debe aprobarse.
+Sin cola/admisión/resultado durable devuelven 503 sin token. Solo esos accesos;
+no se aplica una política global a la atención clínica.
+
+JWT nuevos añaden `jti` UUID sin modificar TTL; no se invalida el token anterior.
+La respuesta `user` de estos tres métodos excluye `password_usuario`, y los
+errores internos dejan de incluir detalles de BD. Resultado exitoso significa
+credenciales verificadas/token preparado, no recepción confirmada en cliente.
+`ultimo_login` legacy y resultado aún no comparten transacción.
+
+Contrato cerrado sin email/JWT/formularios/datos clínicos. Actor de BD tras
+verificación, correlación generada en servidor, UTC, IP del socket identificada
+como peer (no cliente deducido de XFF), scope plataforma. Política de autorización
+y actor delegado aún no disponibles, representados como null.
+Migración `20260912210000` solo ensayada en MySQL aislado. Leases CAS, reintentos,
+recibos/digest y conciliador S3 separados; `app/platform/v1` dentro de `app/*`.
+Sin bootstrap AWS/worker instalado, tabla compartida, visor ni despliegue.
+
+Inventario heurístico: 869 declaraciones en 60 archivos, solo tres preparadas,
+ninguna captura operativa acreditada. Registro/reset/logout/revocación,
+permisos, lecturas clínicas/exportaciones/jobs y auditoría del visor pendientes.
+Logout frontend sigue siendo local; JTI no implica revocación servidor.
+Contrato, fallo/retención pendientes, QA y lotes:
+`services/platform-audit/README.md` y `docs/security/platform-audit-route-inventory.json`.
+
 ## 2026-08-04 - Audiencias de reseñas desde listado importado
 
 - `GET /api/marketing/review-requests/summary` y la creación de campañas de

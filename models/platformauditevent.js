@@ -1,0 +1,19 @@
+'use strict';
+module.exports = (sequelize, D) => sequelize.define('PlatformAuditEvent', {
+  event_id: { type: D.UUID, primaryKey: true },
+  correlation_id: { type: D.UUID, allowNull: false },
+  stage: { type: D.STRING(16), allowNull: false },
+  occurred_at: { type: D.DATE(3), allowNull: false },
+  body: { type: D.TEXT, allowNull: false },
+  digest: { type: D.STRING(64), allowNull: false },
+  state: { type: D.STRING(16), allowNull: false, defaultValue: 'pending' },
+  attempts: { type: D.INTEGER.UNSIGNED, allowNull: false, defaultValue: 0 },
+  next_attempt_at: { type: D.DATE(3), allowNull: false },
+  lease_token: { type: D.UUID, allowNull: true },
+  lease_until: { type: D.DATE(3), allowNull: true },
+  last_error: { type: D.STRING(48), allowNull: true },
+  receipt: { type: D.JSON, allowNull: true },
+  delivered_at: { type: D.DATE(3), allowNull: true },
+}, { tableName: 'PlatformAuditEvents', timestamps: false,
+  indexes: [{ name: 'uq_platform_audit_stage', unique: true, fields: ['correlation_id', 'stage'] },
+    { name: 'idx_platform_audit_delivery', fields: ['state', 'next_attempt_at', 'lease_until'] }] });

@@ -137,3 +137,21 @@ Inventario SQL estático en `database-client-inventory.json`. Evidencia
 privada: `/home/ubuntu/qa-evidence/security-migration-20260912/database-offline-qa.json`
 y `database-local-metadata-20260912.json`. Corte de BD, TLS real, claves,
 SSO, auditoría completa y consumidores de proveedores siguen pendientes.
+
+## Cuarto bloque: auditoría semántica inicial, apagada
+
+Tres accesos de autenticación preparan evento de intento/resultado y actor
+verificado, JTI no secreto y DTO sin hash de contraseña. Cola MySQL aditiva,
+lease/idempotencia/recibo/health, writer S3 condicional y conciliador separado,
+probados solo con ficticios. No se ha creado la tabla compartida ni asignado
+identidad AWS. Faltan bootstrap/worker/alarma, visor, auth restante,
+permisos y actividad clínica. Matriz completa, fallos/retención y lotes en
+`../../services/platform-audit/README.md`.
+
+Inventario heurístico: 60 archivos, 869 declaraciones de ruta, 3 preparadas y
+apagadas; no acredita cobertura runtime. QA: 5 casos contrato/S3, 6 auth
+(incluye HTTP real sobre servidor propio), 11 hotfix y 28 correo. MySQL
+ficticio: 8 comprobaciones, cierre limpio, sin conexiones externas. SDK del
+paquete nuevo auditado: cero vulnerabilidades reportadas. Evidencia privada
+`/home/ubuntu/qa-evidence/security-migration-20260912/platform-audit-offline-qa.json`.
+Sin despliegue, migraciones compartidas, secretos, proveedores ni PM2.
