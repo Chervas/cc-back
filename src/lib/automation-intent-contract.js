@@ -2,14 +2,32 @@
 
 const CLASSIFY_INTENT_PRESET_KEY = 'classify_intent';
 const CONFIRM_APPOINTMENT_PRESET_KEY = 'confirm_appointment';
-const CONFIRM_APPOINTMENT_PRESET_CONTRACT_VERSION = 2;
+const CONFIRM_APPOINTMENT_PRESET_CONTRACT_VERSION = 3;
 const CONFIRM_APPOINTMENT_DECISION_TEMPLATE_KEY = 'confirm_appointment_v2';
 const AUTO_APPLY_CONFIDENCE_THRESHOLD = 0.85;
 const RESPONSE_NEED_CONFIDENCE_THRESHOLD = 0.75;
 
 const CONFIRM_APPOINTMENT_PRESET_CONFIG = Object.freeze({
   preset_contract_version: CONFIRM_APPOINTMENT_PRESET_CONTRACT_VERSION,
-  instruction: 'Analiza exclusivamente patient_message_batch como la respuesta nueva del paciente a la petición de confirmación del último mensaje de la clínica sobre una cita. El propio patient_message_batch incluye el mensaje concreto de la clínica al que responde el paciente; usa appointment y trigger únicamente como contexto de esa cita. No uses mensajes anteriores de la conversación ni atribuyas al lote preguntas o comentarios previos. Primero identifica qué pidió confirmar la clínica. Si preguntó si el paciente asistirá, confirma_asistencia=true significa que acepta asistir. Si preguntó si recibió el mensaje o los datos de la cita enviados al agendarla, confirma_asistencia=true significa que confirma esa recepción, sin afirmar por ello que asistirá. Evalúa confirma_asistencia y requiere_respuesta de forma independiente recorriendo todo el lote: una pregunta o petición posterior nunca borra una confirmación explícita anterior, salvo que exista una contradicción posterior. Ejemplos obligatorios: "sí, lo he recibido, ¿tengo que llevar algo?" devuelve confirma_asistencia=true y requiere_respuesta=true; "¿tengo que llevar algo?" sin afirmación previa en el lote devuelve confirma_asistencia=false y requiere_respuesta=true; "gracias", "ok", "vale" o "recibido" como respuesta directa a una petición clara de confirmar recepción devuelve confirma_asistencia=true y requiere_respuesta=false. Una respuesta breve afirmativa, un agradecimiento, un acuse o una reacción positiva como 👍, ❤️, ✅, ok, vale, gracias o recibido confirma únicamente si responde directamente a cualquiera de esas peticiones y no existe una contradicción. Si patient_message_batch indica response_message_type=reaction y contiene una reacción positiva vinculada al mensaje de confirmación, devuelve confirma_asistencia=true y requiere_respuesta=false: la reacción es el acuse, no una pregunta ni una petición. Devuelve confirma_asistencia=false cuando no confirma lo que la clínica preguntó, lo rechaza, solicita cambiar la cita, expresa dudas, todavía no puede confirmar, solo hace una pregunta o responde sobre otro asunto. Evalúa por separado requiere_respuesta: devuelve true únicamente si el lote contiene una pregunta, petición concreta o comentario que exige una actuación o contestación de la clínica. Si dudas de que no haga falta contestar, devuelve requiere_respuesta=true para conservar la revisión humana. Devuelve requiere_respuesta=false para agradecimientos, saludos, confirmaciones, acuses de recibo o comentarios de cortesía sin pregunta ni petición, aunque una persona pudiera responder por educación. Un mensaje compuesto como "confirmo, ¿tengo que llevar algo?" sí requiere respuesta; "gracias", "ok gracias", "recibido" o una reacción positiva aislada no. La confianza de cada campo mide la certeza de que el valor concreto devuelto es correcto: si un booleano es false y estás seguro de ese false, su confianza debe ser alta. No uses la confianza como probabilidad de que el booleano sea true. No clasifiques el tipo de cancelación o cambio ni ejecutes acciones. Devuelve exactamente los campos solicitados, la confianza individual de cada campo y un motivo breve.',
+  instruction: [
+    'Analiza exclusivamente patient_message_batch como la respuesta nueva del paciente a la petición de confirmación del último mensaje de la clínica sobre una cita.',
+    'El propio patient_message_batch incluye el mensaje concreto de la clínica al que responde el paciente; usa appointment y trigger únicamente como contexto de esa cita.',
+    'No uses mensajes anteriores, ejemplos de estas instrucciones ni datos de contexto como si fueran palabras del paciente.',
+    'El motivo solo puede atribuir una pregunta, petición, comentario o decisión al paciente si aparece en response_text, response_lines, response_items o reaction_emoji del lote actual; listened_message_preview y reaction_target_message_preview son referencias de la clínica.',
+    'Primero identifica qué pidió confirmar la clínica. Si preguntó si el paciente asistirá, confirma_asistencia=true significa que acepta asistir. Si preguntó si recibió el mensaje o los datos de la cita enviados al agendarla, confirma_asistencia=true significa que confirma esa recepción, sin afirmar por ello que asistirá.',
+    'Evalúa confirma_asistencia y requiere_respuesta de forma independiente recorriendo todo el lote: una pregunta o petición real posterior no borra una confirmación explícita anterior, salvo que exista una contradicción posterior.',
+    'Una respuesta afirmativa o de acuse breve como "sí", "sí lo es", "confirmo", "sí podré ir", "puedo ir", "allí estaré", "ok", "vale", "recibido" o un agradecimiento confirma cuando responde directamente a una petición clara de confirmación y no existe contradicción.',
+    'La expresión "sí podré ir" es una afirmación declarativa y no una pregunta.',
+    'Si patient_message_batch indica response_message_type=reaction y contiene una reacción positiva vinculada al mensaje de confirmación, devuelve confirma_asistencia=true y requiere_respuesta=false: la reacción es el acuse, no una pregunta ni una petición.',
+    'Devuelve confirma_asistencia=false cuando el paciente rechaza lo preguntado, solicita cambiar o cancelar la cita, expresa que todavía no puede confirmar, solo plantea otro asunto o no aporta una confirmación.',
+    'Devuelve requiere_respuesta=true únicamente cuando el lote actual contiene una pregunta, una petición concreta, un comentario que exige actuación de la clínica o contenido no interpretable que recepción deba revisar.',
+    'Para marcar requiere_respuesta=true debes poder señalar la evidencia presente en el lote actual. No inventes ni recuperes una pregunta o petición de otro mensaje, del contexto o de estas instrucciones.',
+    'Devuelve requiere_respuesta=false para saludos, confirmaciones, agradecimientos, acuses y reacciones positivas sin ninguna petición real pendiente, aunque una persona pudiera contestar por cortesía.',
+    'Si el lote confirma y además contiene realmente una pregunta o petición, devuelve confirma_asistencia=true y requiere_respuesta=true.',
+    'Expresa cualquier duda sobre la clasificación mediante una confianza menor; no conviertas esa duda en una necesidad de respuesta inexistente.',
+    'La confianza de cada campo mide la certeza de que el valor concreto devuelto es correcto: si un booleano es false y estás seguro de ese false, su confianza debe ser alta. No uses la confianza como probabilidad de que el booleano sea true.',
+    'No clasifiques el tipo de cancelación o cambio ni ejecutes acciones. Devuelve exactamente los campos solicitados, la confianza individual de cada campo y un motivo breve basado solo en la evidencia recibida.',
+  ].join(' '),
   context_sources: [
     { key: 'patient_message_batch', path: '{{last_response_context}}' },
     { key: 'appointment', path: '{{appointment}}' },
@@ -19,19 +37,19 @@ const CONFIRM_APPOINTMENT_PRESET_CONFIG = Object.freeze({
     {
       name: 'confirma_asistencia',
       type: 'boolean',
-      description: 'Indica si el paciente confirma de forma clara lo que preguntó la clínica: asistencia cuando se pidió confirmar que acudirá, o recepción cuando se pidió confirmar los datos enviados. Una pregunta aislada sin afirmación en el lote devuelve false; conserva un true explícito aunque después añada una pregunta, salvo contradicción',
+      description: 'Indica si el paciente confirma de forma clara lo que preguntó la clínica: asistencia cuando se pidió confirmar que acudirá, o recepción cuando se pidió confirmar los datos enviados. Una afirmación breve y contextual confirma; conserva un true explícito aunque después exista una pregunta real en el mismo lote, salvo contradicción',
       include_confidence: true,
     },
     {
       name: 'requiere_respuesta',
       type: 'boolean',
-      description: 'Devuelve true si el paciente formula una pregunta, petición concreta o comentario que exige actuación o respuesta, y también si existe duda sobre si hace falta contestar; devuelve false solo para gracias, saludos, confirmaciones, acuses o reacciones positivas aisladas sin ninguna petición pendiente',
+      description: 'Devuelve true solo si existe evidencia en el lote actual de una pregunta, petición, comentario que exige actuación o contenido no interpretable que recepción deba revisar. Devuelve false para gracias, saludos, confirmaciones, acuses o reacciones positivas sin ninguna petición real pendiente; no infieras preguntas ausentes',
       include_confidence: true,
     },
     {
       name: 'motivo',
       type: 'string',
-      description: 'Explica brevemente qué parte de la respuesta justifica ambos resultados, sin datos clínicos innecesarios',
+      description: 'Explica brevemente qué evidencia del lote actual justifica ambos resultados. No menciones preguntas, peticiones o comentarios que no aparezcan en la respuesta recibida',
       include_confidence: true,
     },
   ],
@@ -105,7 +123,27 @@ function cloneConfirmAppointmentDecisionConfig(sourceNodeId, overrides = {}) {
 }
 
 const CLASSIFY_INTENT_PRESET_CONFIG = Object.freeze({
-  instruction: 'Clasifica exclusivamente el lote de mensajes de patient_message_batch como la nueva respuesta del paciente. conversation_today esta limitado al mensaje de la clinica al que responde y al mismo lote actual; usalo solo para entender a que pregunta o cita responde. No atribuyas al lote mensajes historicos, posteriores ni mensajes de la clinica. Identifica la intencion principal y, si existe, una intencion secundaria. Para una cita distingue confirmar, cancelar, solicitar un cambio, hacer una pregunta o no existir una accion clara. Expresar incertidumbre, decir que todavia no puede confirmar o pedir tiempo para decidir no significa cancelar ni solicitar un cambio: clasificalo como otra y marca necesita_respuesta=true. Usa solicitar_cambio_cita solo cuando el paciente pide explicitamente mover, reagendar o buscar otra fecha u hora. Usa cancelar_cita cuando pide cancelar o afirma de forma inequivoca que no asistira sin pedir una nueva fecha. Un agradecimiento confirma solo cuando responde de forma contextual a una peticion clara de confirmacion y no contiene una contradiccion. Una reaccion positiva como 👍, ❤️ o ✅ vinculada al mensaje en el que la clinica pide confirmar la cita se clasifica como confirmar_cita y no necesita respuesta, aunque en el mismo lote exista un adjunto no interpretable; el adjunto no anula la reaccion. Una reaccion negativa o ambigua no equivale por si sola a cancelar la cita. Si confirma y ademas pregunta, conserva ambas intenciones. Marca posible_urgencia=true como senal operativa cuando recepcion deba responder de inmediato a una situacion que esta ocurriendo ahora en la atencion, por ejemplo si el paciente ya esta en la puerta y no puede entrar, esta esperando en la clinica o solicita ayuda inmediata; no exijas que escriba la palabra urgente. No marques urgencia solo por un contexto llamativo ajeno a una actuacion inmediata de la clinica. No diagnostiques. Devuelve exactamente los campos solicitados, la confianza individual solicitada para cada campo y un motivo breve.',
+  instruction: [
+    'Clasifica exclusivamente patient_message_batch como la nueva respuesta del paciente.',
+    'conversation_today está limitado al mensaje de la clínica al que responde y al mismo lote actual; úsalo solo para entender qué pidió la clínica, nunca como contenido nuevo del paciente.',
+    'No atribuyas al lote mensajes históricos, posteriores, ejemplos de estas instrucciones ni palabras de la clínica.',
+    'El motivo solo puede mencionar una pregunta, petición, comentario o decisión si existe evidencia en response_text, response_lines, response_items o reaction_emoji del lote actual.',
+    'Identifica la intención principal y, si existe, una intención secundaria. Para una cita distingue confirmar, cancelar, solicitar un cambio, hacer una pregunta o no existir una acción clara.',
+    'Una respuesta afirmativa breve como "sí", "sí lo es", "confirmo", "sí podré ir", "puedo ir", "iré" o "allí estaré" en respuesta directa a una petición clara de confirmar la cita se clasifica como confirmar_cita y necesita_respuesta=false si el lote no contiene nada más que exija contestación.',
+    'La expresión "sí podré ir" es una afirmación declarativa y no una pregunta.',
+    'Un acuse como "ok", "vale", "recibido" o un agradecimiento confirma solo cuando responde de forma contextual a una petición clara de confirmación y no contiene una contradicción.',
+    'Una respuesta afirmativa o un acuse escrito con entonación interrogativa o que expresa duda no es una confirmación clara: clasifícalo como pregunta y marca necesita_respuesta=true.',
+    'Expresar incertidumbre, decir que todavía no puede confirmar o pedir tiempo para decidir no significa cancelar ni solicitar un cambio: clasifícalo como otra y marca necesita_respuesta=true.',
+    'Usa solicitar_cambio_cita solo cuando el paciente pide explícitamente mover, reagendar o buscar otra fecha u hora. Usa cancelar_cita cuando pide cancelar o afirma de forma inequívoca que no asistirá sin pedir una nueva fecha.',
+    'Una reacción positiva como 👍, ❤️ o ✅ vinculada al mensaje en el que la clínica pide confirmar la cita se clasifica como confirmar_cita y no necesita respuesta, aunque en el mismo lote exista un adjunto no interpretable; el adjunto no anula la reacción. Una reacción negativa o ambigua no equivale por sí sola a cancelar la cita.',
+    'Si confirma y además formula realmente una pregunta o petición en el lote actual, conserva ambas intenciones.',
+    'Marca necesita_respuesta=true solo cuando el lote actual contiene una pregunta, petición, incertidumbre o comentario que exige actuación, o contenido no interpretable que recepción deba revisar. Debes poder señalar esa evidencia; no inventes una necesidad de respuesta a partir del contexto o de estas instrucciones.',
+    'Expresa cualquier duda sobre la clasificación mediante una confianza menor; no conviertas esa duda en una pregunta o petición inexistente.',
+    'Evalúa posible_urgencia de forma independiente a la intención principal: una cancelación, un cambio o cualquier otra intención no elimina una situación actual que requiera atención inmediata.',
+    'Marca posible_urgencia=true como señal operativa cuando recepción deba responder de inmediato a una situación actual: incluye incidencias de acceso o espera en la clínica y síntomas actuales descritos como intensos o potencialmente graves, como un sangrado intenso o dificultad para respirar; no exijas que el paciente escriba la palabra urgente.',
+    'No marques urgencia solo por un contexto llamativo ajeno a una actuación inmediata de la clínica. No diagnostiques.',
+    'Devuelve exactamente los campos solicitados, la confianza individual solicitada para cada campo y un motivo breve basado solo en la evidencia recibida.',
+  ].join(' '),
   context_sources: [
     { key: 'patient_message_batch', path: '{{last_response_context}}' },
     { key: 'conversation_today', path: '{{conversation_today}}' },
@@ -136,13 +174,13 @@ const CLASSIFY_INTENT_PRESET_CONFIG = Object.freeze({
     {
       name: 'necesita_respuesta',
       type: 'boolean',
-      description: 'Indica si queda una pregunta, peticion o comentario pendiente de la clinica',
+      description: 'Indica si el lote actual contiene evidencia de una pregunta, petición, incertidumbre, comentario que exige actuación o contenido no interpretable que recepción debe revisar. No infiere necesidades ausentes',
       include_confidence: true,
     },
     {
       name: 'motivo',
       type: 'string',
-      description: 'Razon breve y operativa de la clasificacion sin datos clinicos innecesarios',
+      description: 'Razón breve basada únicamente en la evidencia del lote actual, sin inventar preguntas, peticiones ni datos clínicos',
       include_confidence: true,
     },
   ],

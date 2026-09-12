@@ -51,7 +51,15 @@ function buildContext({ text, clinicText, reactionEmoji = null }) {
 async function run() {
   const clinicText = 'Hemos agendado tu cita para el 11/09/2026 a las 20:00. ¿Me confirmas que recibes este mensaje?';
   const cases = [
+    { text: 'Si', confirms: true, needsReply: false },
+    { text: 'Si loes', confirms: true, needsReply: false },
     { text: 'Sí, lo he recibido.', confirms: true, needsReply: false },
+    {
+      text: 'Sí podré ir',
+      clinicText: '¿Nos confirmas tu asistencia a la cita de mañana?',
+      confirms: true,
+      needsReply: false,
+    },
     { text: 'Sí lo he recibido, ¿tengo que llevar mi propio orinal?', confirms: true, needsReply: true },
     { text: 'No lo he recibido, ¿puedes enviármelo otra vez?', confirms: false, needsReply: true },
     { text: '¿Tengo que llevar algo?', confirms: false, needsReply: true },
@@ -69,7 +77,11 @@ async function run() {
   for (const scenario of cases) {
     const result = await flowEngine._processNode(
       node,
-      buildContext({ text: scenario.text, clinicText, reactionEmoji: scenario.reactionEmoji }),
+      buildContext({
+        text: scenario.text,
+        clinicText: scenario.clinicText || clinicText,
+        reactionEmoji: scenario.reactionEmoji,
+      }),
       { simulation: false },
     );
     assert.equal(result.kind, 'success', `${scenario.text}: execution`);
