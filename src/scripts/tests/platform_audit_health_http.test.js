@@ -16,7 +16,11 @@ test('health endpoint rejects anonymous and clinical admin claims before DB and 
     return { pending: 5, reconcile: 0, oldestAgeSeconds: 10, unresolvedAttempts: 0, oldestUnresolvedAgeSeconds: 0, jwt: 'SENTINEL_SECRET' }; } },
   state: { read: async () => ({ last_completed_at: new Date(), actorId: 'SENTINEL_SECRET' }) }, config: () => ({ deliveryEnabled: true }) });
   const controller = load('controllers/platformAudit.controller.js', { '../services/platformAudit.monitor': monitor });
-  const auth = load('routes/auth.middleware.js', {}, { process: { env: { JWT_SECRET: secret } } });
+  const auth = load('routes/auth.middleware.js', { '../services/accessSession.service': {
+    ...require('../../services/accessSession.service'),
+    ...require('../../services/accessSession.service').createService({ models: () => assert.fail('legacy auth must not load models'),
+      config: () => ({ mode: 'legacy', ttl: 43200, secret }) }),
+  } });
   const unrelated = new Proxy({}, { get: () => () => assert.fail('unrelated monitoring handler') });
   const router = load('routes/system-monitoring.routes.js', { './auth.middleware': auth,
     '../controllers/platformAudit.controller': controller, '../controllers/systemMonitoring.controller': unrelated });

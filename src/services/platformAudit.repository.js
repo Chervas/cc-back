@@ -47,13 +47,13 @@ function createRepository(model) {
       { where: owned(row, now) });
       return changed === 1;
     },
-    async health(now = new Date(), { includeUnresolved = true } = {}) {
+    async health(now = new Date(), { includeUnresolved = true, transaction } = {}) {
       const where = { state: { [Op.ne]: 'delivered' } };
-      const [pending, oldest, reconcile, unresolved] = await Promise.all([model.count({ where }), model.min('occurred_at', { where }),
-        model.count({ where: { state: 'reconcile' } }), includeUnresolved ? sql.query(
+      const [pending, oldest, reconcile, unresolved] = await Promise.all([model.count({ where, transaction }), model.min('occurred_at', { where, transaction }),
+        model.count({ where: { state: 'reconcile' }, transaction }), includeUnresolved ? sql.query(
           'SELECT COUNT(*) AS count, MIN(a.occurred_at) AS oldest FROM PlatformAuditEvents a '
           + 'LEFT JOIN PlatformAuditEvents b ON b.correlation_id = a.correlation_id AND b.stage = \'completed\' '
-          + 'WHERE a.stage = \'attempted\' AND b.event_id IS NULL', { type: sql.constructor.QueryTypes.SELECT, logging: false }) : null]);
+          + 'WHERE a.stage = \'attempted\' AND b.event_id IS NULL', { type: sql.constructor.QueryTypes.SELECT, logging: false, transaction }) : null]);
       const age = value => value ? Math.max(0, Math.floor((now - new Date(value)) / 1000)) : 0;
       return { pending, reconcile, oldestAgeSeconds: age(oldest), unresolvedAttempts: unresolved ? Number(unresolved[0].count) : null,
         oldestUnresolvedAgeSeconds: unresolved ? age(unresolved[0].oldest) : null };

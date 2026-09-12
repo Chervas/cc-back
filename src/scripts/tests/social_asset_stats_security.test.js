@@ -74,7 +74,11 @@ async function fixture(t, options = {}) {
     '../services/notifications.service': {},
   }, { console: { error: (...args) => calls.logs.push(args) } });
   const secret = randomBytes(32);
-  const auth = load('routes/auth.middleware.js', {}, { process: { env: { JWT_SECRET: secret } } });
+  const auth = load('routes/auth.middleware.js', { '../services/accessSession.service': {
+    ...require('../../services/accessSession.service'),
+    ...require('../../services/accessSession.service').createService({ models: () => assert.fail('legacy auth must not load models'),
+      config: () => ({ mode: 'legacy', ttl: 43200, secret }) }),
+  } });
   const unrelated = new Proxy({}, { get: () => () => assert.fail('Unrelated controller called') });
   const router = load('routes/metasync.routes.js', {
     './auth.middleware': auth,

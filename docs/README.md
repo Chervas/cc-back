@@ -1,5 +1,12 @@
 # Runbooks operativos del backend
 
+## Sesiones persistentes (preparadas, 12/09/2026)
+
+Ver [contrato y migración de sesiones](security/access-session-migration.md).
+Incluye API de logout/me, auditoría transaccional, REST/sockets, QA ficticia y
+orden del corte. No hay migración compartida ni activación por publicar código.
+
+
 Este índice separa la arquitectura general de los procedimientos que deben usarse para operar o verificar Marketing. La fuente canónica de arquitectura es `src/Documentacion/13-backend.md`; su copia en el repositorio frontend es un espejo completo para conservar enlaces internos y debe sincronizarse después de cada cambio.
 
 ## Seguridad: AWS, Integraciones Y Auditoria (2026-09-12)

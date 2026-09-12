@@ -11,6 +11,7 @@ function exact(value, keys) {
     || Object.keys(value).length !== keys.length || keys.some(key => !Object.hasOwn(value, key))) fail();
 }
 function event(value) {
+  if (value?.version === 2) return require('./session-event').sessionEvent(value);
   exact(value, ['version', 'eventId', 'occurredAt', 'correlationId', 'action', 'stage', 'outcome', 'reason',
     'actor', 'effectiveActor', 'sessionRef', 'scope', 'resource', 'capturePolicy', 'authorizationPolicyVersion', 'origin']);
   exact(value.actor, ['type', 'id']); exact(value.scope, ['type', 'id']); exact(value.resource, ['type', 'id']);
@@ -56,7 +57,7 @@ function unpack(row) {
 }
 function keyFor(row) {
   const value = unpack(row);
-  return `app/platform/v1/${value.event.occurredAt.slice(0, 10)}/${value.event.eventId}-${value.digest}.json`;
+  return `app/platform/v${value.event.version}/${value.event.occurredAt.slice(0, 10)}/${value.event.eventId}-${value.digest}.json`;
 }
 function receiptFor(row, value) {
   exact(value, ['key', 'digest', 'versionId']);

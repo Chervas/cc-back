@@ -5036,86 +5036,45 @@ exports.responderInvitacion = async (req, res) => {
  * Body: { invite_token: string, email_usuario: string, password: string, nombre?: string, apellidos?: string }
  */
 exports.reclamarCuenta = async (req, res) => {
+    const sessions = require('../services/accessSession.service');
+    const reject = (status, message) => { throw Object.assign(new Error(message), { claimStatus: status }); };
     try {
-        const { invite_token, email_usuario, password, nombre, apellidos } = req.body;
-
-        if (!invite_token || typeof invite_token !== 'string') {
-            return res.status(400).json({ message: 'invite_token es obligatorio' });
-        }
-        if (!email_usuario || typeof email_usuario !== 'string') {
-            return res.status(400).json({ message: 'email_usuario es obligatorio' });
-        }
-        if (!password || typeof password !== 'string' || password.length < 6) {
-            return res.status(400).json({ message: 'password debe tener al menos 6 caracteres' });
-        }
-
-        // Buscar el pivot con ese token
-        const pivot = await UsuarioClinica.findOne({
-            where: { invite_token: invite_token.trim() },
-        });
-
-        if (!pivot) {
-            return res.status(404).json({ message: 'Token de invitación inválido o expirado' });
-        }
-
-        // Buscar el usuario asociado
-        const user = await Usuario.findByPk(pivot.id_usuario);
-        if (!user) {
-            return res.status(404).json({ message: 'Usuario no encontrado' });
-        }
-
-        // Verificar que es provisional
-        if (!user.es_provisional) {
-            return res.status(409).json({ message: 'Esta cuenta ya fue reclamada' });
-        }
-
-        // Verificar email único
+        const { invite_token, email_usuario, password, nombre, apellidos } = req.body || {};
+        if (!invite_token || typeof invite_token !== 'string') reject(400, 'invite_token es obligatorio');
+        if (!email_usuario || typeof email_usuario !== 'string') reject(400, 'email_usuario es obligatorio');
+        if (!password || typeof password !== 'string' || password.length < 6) reject(400, 'password debe tener al menos 6 caracteres');
+        const cfg = sessions.settings();
+        const initial = await UsuarioClinica.findOne({ where: { invite_token: invite_token.trim() } });
+        if (!initial) reject(404, 'Token de invitación inválido o expirado');
         const emailNormalized = email_usuario.trim().toLowerCase();
-        const existingByEmail = await Usuario.findOne({
-            where: {
-                email_usuario: emailNormalized,
-                id_usuario: { [Op.ne]: user.id_usuario },
-            },
-        });
-        if (existingByEmail) {
-            return res.status(409).json({ message: 'Ya existe otro usuario con ese email' });
-        }
-
-        // Actualizar usuario
+        if (require('../lib/blocked-auth-emails').isBlockedAuthEmail(emailNormalized)) reject(400, 'Email no disponible');
         const hashedPassword = await bcrypt.hash(password, 8);
-        user.email_usuario = emailNormalized;
-        user.password_usuario = hashedPassword;
-        user.es_provisional = false;
-        if (nombre) user.nombre = nombre.trim();
-        if (apellidos) user.apellidos = apellidos.trim();
-        await user.save();
-
-        // Marcar invitación como aceptada
-        pivot.estado_invitacion = 'aceptada';
-        pivot.responded_at = new Date();
-        pivot.invite_token = null;
-        await pivot.save();
-
-        // Generar JWT para login inmediato
-        const jwt = require('jsonwebtoken');
-        const secret = process.env.JWT_SECRET;
-        const token = jwt.sign(
-            { userId: user.id_usuario, email: user.email_usuario },
-            secret,
-            { expiresIn: '24h' },
-        );
-
-        const userJson = user.toJSON();
-        delete userJson.password_usuario;
-
-        return res.json({
-            message: 'Cuenta reclamada exitosamente',
-            user: userJson,
-            token,
-        });
+        const claim = async (transaction) => {
+            const options = transaction ? { transaction, lock: transaction.LOCK.UPDATE } : {};
+            const user = await Usuario.findByPk(initial.id_usuario, options);
+            if (!user) reject(404, 'Usuario no encontrado');
+            const pivot = await UsuarioClinica.findOne({ where: { invite_token: invite_token.trim(), id_usuario: user.id_usuario }, ...options });
+            if (!pivot) reject(404, 'Token de invitación inválido o expirado');
+            if (!user.es_provisional) reject(409, 'Esta cuenta ya fue reclamada');
+            const existing = await Usuario.findOne({ where: { email_usuario: emailNormalized, id_usuario: { [Op.ne]: user.id_usuario } }, transaction });
+            if (existing) reject(409, 'Ya existe otro usuario con ese email');
+            user.email_usuario = emailNormalized;
+            user.password_usuario = hashedPassword;
+            user.es_provisional = false;
+            if (typeof nombre === 'string') user.nombre = nombre.trim();
+            if (typeof apellidos === 'string') user.apellidos = apellidos.trim();
+            await user.save({ transaction });
+            pivot.estado_invitacion = 'aceptada';
+            pivot.responded_at = new Date();
+            pivot.invite_token = null;
+            await pivot.save({ transaction });
+            const issued = await sessions.issue(user, { transaction, reason: 'invite_claimed', ttl: 86400 });
+            return { message: 'Cuenta reclamada exitosamente', user: sessions.projectUser(user), token: issued.token, expiresIn: issued.expiresIn };
+        };
+        const result = cfg.mode === 'enforce' ? await Usuario.sequelize.transaction(claim) : await claim();
+        return res.json(result);
     } catch (error) {
-        console.error('[personal.reclamarCuenta] Error:', error);
-        return res.status(500).json({ message: 'Error al reclamar cuenta', error: error.message });
+        return res.status(error.claimStatus || 503).json({ message: error.claimStatus ? error.message : 'Error al reclamar cuenta' });
     }
 };
 

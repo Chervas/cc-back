@@ -8,6 +8,9 @@ router.post('/sign-in', authController.signIn);
 router.post('/sign-in-with-token', authController.signInWithToken);
 router.post('/sign-up', authController.signUp);
 router.post('/unlock-session', authController.unlockSession);
+router.get('/me', require('./auth.middleware'), authController.me);
+router.post('/sign-out', authController.signOut);
+router.post('/revoke-sessions', authController.revokeSessions);
 
 // ── Onboarding: reclamar cuenta provisional (público, sin JWT) ──
 const personalController = require('../controllers/personal.controller');

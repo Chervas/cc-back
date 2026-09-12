@@ -1,17 +1,13 @@
-const jwt = require('jsonwebtoken');
-const secret = process.env.JWT_SECRET; // ✅ Usar variable de entorno
-const { isBlockedAuthEmail } = require('../lib/blocked-auth-emails');
+const sessions = require('../services/accessSession.service');
 
-module.exports = (req, res, next) => {
+module.exports = async (req, res, next) => {
     try {
-        const token = req.headers.authorization.split(' ')[1]; // Bearer TOKEN
-        const decodedToken = jwt.verify(token, secret); // ✅ Usar process.env.JWT_SECRET
-        if (isBlockedAuthEmail(decodedToken.email)) {
-            return res.status(401).json({ message: "Auth failed!" });
-        }
+        const decodedToken = await sessions.verify(sessions.bearer(req.headers.authorization));
         req.userData = { email: decodedToken.email, userId: decodedToken.userId };
+        req.authSession = { id: decodedToken.sessionVersion ? decodedToken.jti : null, expiresAt: decodedToken.exp };
         next();
     } catch (error) {
-        res.status(401).json({ message: "Auth failed!" });
+        const invalid = ['JsonWebTokenError', 'TokenExpiredError', 'NotBeforeError'].includes(error.name);
+        res.status(invalid ? 401 : 503).json({ message: invalid ? 'Auth failed!' : 'Authentication temporarily unavailable.' });
     }
 };

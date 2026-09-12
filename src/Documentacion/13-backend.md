@@ -1,4 +1,36 @@
 > **Módulo:** Arquitectura del Backend
+
+## 2026-09-12 — Sesiones persistentes preparadas, sin activar
+
+El backend incorpora `AuthSessions` y `AUTH_SESSION_MODE=legacy|enforce` (legacy
+por defecto). REST, renovación, clínicas y sockets usan el mismo verificador;
+los JWT persistentes se contrastan siempre con BD, también al volver a legacy.
+Emisión/renovación/revocación y evento v2 se confirman en una transacción. El
+JTI se mantiene al renovar, con expiración absoluta de 24 horas y máximo 100
+sesiones vigentes por usuario, pendientes de aprobar en el corte.
+
+`GET /api/auth/me` devuelve usuario real proyectado y `{managed,expiresAt}`.
+`POST /api/auth/sign-out` revoca la sesión Bearer propia;
+`POST /api/auth/revoke-sessions` revoca las sesiones vigentes del propio actor.
+Nunca seleccionan otro usuario del body/query. Respuesta
+`{status:'revoked',revoked:true}`; legacy devuelve
+`{status:'local_only',revoked:false}`. 401 para token inválido/caducado y 503
+para indisponibilidad, sin detalles internos. `private, no-store`.
+
+El front comprueba `/me`, elimina el fallback de usuario ficticio, comienza el
+logout aunque el llamador no se suscriba y distingue revocación confirmada,
+solo local y no confirmada. Backend debe desplegarse antes que ese frontend.
+Sockets verifican también mensajes/expiración y consultan cada 5 s; deadline
+1,5 s, sin garantía de corte instantáneo de tráfico ya autorizado. Cambios de
+permisos de clínica necesitan una cohorte adicional.
+
+Migración `20260912220000-create-auth-sessions` y job `auth_session_expiry`
+(`AUTH_SESSION_EXPIRY_ENABLED`, cada 5 minutos Madrid) **sin activar**. El job
+registra expiración observada, no borra filas. Requiere outbox existente y writer
+compatible con `app/platform/v2/`. Retención/SSO/AWS/despliegue/BD real siguen
+pendientes. Ver `back-dev/docs/security/access-session-migration.md` para el
+contrato, inventario, QA, límites, orden del corte y rollback conservador.
+
 > **Última actualización:** 2026-09-03
 > **Relacionado con:** `cc-front/src/Documentacion/20.1-motor-flujos-v2.md` | documento operativo `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`
 > **Fuente canónica:** este archivo del repositorio backend. `cc-front/src/Documentacion/13-backend.md` es un espejo completo para conservar los enlaces internos del manual frontend; cualquier cambio se hace aquí primero y después se sincroniza el espejo.

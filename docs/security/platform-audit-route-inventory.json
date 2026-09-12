@@ -9,8 +9,9 @@
   ],
   "totals": {
     "files": 60,
-    "declarations": 870,
-    "preparedDisabled": 3
+    "declarations": 873,
+    "preparedDisabled": 3,
+    "sessionSuccessPreparedDisabled": 4
   },
   "items": [
     {
@@ -530,12 +531,12 @@
     },
     {
       "path": "src/routes/auth.middleware.js",
-      "sha256": "ac7446082d4a3791bc3e3b5e23be9a2813b9b7bda143399a8a979eec912673bb",
+      "sha256": "ba087a8fb16fe9964317dd6d63d94f8f3cd0edb781d2c610a61afd32a3e8180c",
       "routes": []
     },
     {
       "path": "src/routes/auth.routes.js",
-      "sha256": "bffa1f27827c1330801caf8d4d0e0d5c86302b381b324d6f3d2d01024b6f7b85",
+      "sha256": "beb062ffe586c7d2d1b1c8f7b44d7b0cbc78bd7133ba35ba277bf0f2929d6942",
       "routes": [
         {
           "method": "POST",
@@ -565,7 +566,7 @@
           "method": "POST",
           "localTemplate": "/sign-up",
           "line": 9,
-          "platformAudit": "pending_semantic_review"
+          "platformAudit": "session_success_prepared_disabled"
         },
         {
           "method": "POST",
@@ -574,10 +575,28 @@
           "platformAudit": "auth_semantic_prepared_disabled"
         },
         {
+          "method": "GET",
+          "localTemplate": "/me",
+          "line": 11,
+          "platformAudit": "pending_semantic_review"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/sign-out",
+          "line": 12,
+          "platformAudit": "session_success_prepared_disabled"
+        },
+        {
+          "method": "POST",
+          "localTemplate": "/revoke-sessions",
+          "line": 13,
+          "platformAudit": "session_success_prepared_disabled"
+        },
+        {
           "method": "POST",
           "localTemplate": "/claim-invite",
-          "line": 14,
-          "platformAudit": "pending_semantic_review"
+          "line": 17,
+          "platformAudit": "session_success_prepared_disabled"
         }
       ]
     },
@@ -5160,18 +5179,18 @@
     },
     {
       "path": "src/routes/userclinicas.routes.js",
-      "sha256": "37661627617b20abe1606643bc256dbac3827e212d5f93d97ba277e70d94df9e",
+      "sha256": "5447cf65dd69a7e7c6f4b9dfbdbb01c779b0cc94864fe556b9db9dd1d423c985",
       "routes": [
         {
           "method": "GET",
           "localTemplate": "/list",
-          "line": 78,
+          "line": 65,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "GET",
           "localTemplate": "/:id",
-          "line": 402,
+          "line": 389,
           "platformAudit": "pending_semantic_review"
         }
       ]

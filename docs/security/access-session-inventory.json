@@ -1,0 +1,122 @@
+{
+  "version": 1,
+  "source": "static_reference_inventory_not_runtime_coverage",
+  "items": [
+    {
+      "path": "src/controllers/auth.controllers.js",
+      "sha256": "3a0b411731175beda8498a4d575035d4db7fca86ad836b513a446176bc72aaef",
+      "signals": [
+        "jwt_or_managed_session_reference",
+        "credential_field_review"
+      ]
+    },
+    {
+      "path": "src/controllers/personal.controller.js",
+      "sha256": "059f01b77b9c133eb228df9e345c6fa71497f8f632e405e960f8cccc309a3d17",
+      "signals": [
+        "jwt_or_managed_session_reference",
+        "credential_field_review"
+      ]
+    },
+    {
+      "path": "src/controllers/user.controller.js",
+      "sha256": "3428ec7eb7b99788380f2c1f738c65b492a5d689b68765e818a64a23ac26280e",
+      "signals": [
+        "credential_field_review"
+      ]
+    },
+    {
+      "path": "src/jobs/sync.jobs.js",
+      "sha256": "024c3e955996e724248ec6a425fd8e639e29a0de06793ac6201304f68027b239",
+      "signals": [
+        "jwt_or_managed_session_reference"
+      ]
+    },
+    {
+      "path": "src/lib/socket-session-guard.js",
+      "sha256": "481f91b847f71b9e4fe95965373704d8558ead9106bacabb4c2a4c70e883e52a",
+      "signals": [
+        "jwt_or_managed_session_reference"
+      ]
+    },
+    {
+      "path": "src/routes/auth.middleware.js",
+      "sha256": "ba087a8fb16fe9964317dd6d63d94f8f3cd0edb781d2c610a61afd32a3e8180c",
+      "signals": [
+        "jwt_or_managed_session_reference"
+      ]
+    },
+    {
+      "path": "src/routes/userclinicas.routes.js",
+      "sha256": "5447cf65dd69a7e7c6f4b9dfbdbb01c779b0cc94864fe556b9db9dd1d423c985",
+      "signals": [
+        "jwt_or_managed_session_reference"
+      ]
+    },
+    {
+      "path": "src/services/accessSession.service.js",
+      "sha256": "b69336ef11ae21167d08d5a1ae89f19149fe1e23f56fb7456d1f2cb396a317e6",
+      "signals": [
+        "jwt_or_managed_session_reference",
+        "credential_field_review"
+      ]
+    },
+    {
+      "path": "src/services/accountingFirms.service.js",
+      "sha256": "d1df80f7687d6d8519ba76325447c07f8b4f73a8f740a2120083ad76b341ad93",
+      "signals": [
+        "credential_field_review"
+      ]
+    },
+    {
+      "path": "src/services/consentimientos.service.js",
+      "sha256": "88df6891a2c4708f19c33fe8cd54620ac09c6fd584f1d76b9a509344b64b39cb",
+      "signals": [
+        "jwt_or_managed_session_reference"
+      ]
+    },
+    {
+      "path": "src/services/googleAdsTransparencyOfficial.service.js",
+      "sha256": "0163f6e9ad9c4941717bd66941337972226ee361cf87c972c7eacfd04c97ea13",
+      "signals": [
+        "jwt_or_managed_session_reference"
+      ]
+    },
+    {
+      "path": "src/services/passwordReset.service.js",
+      "sha256": "0e81c7bd4bd165f99b9d9a9c79c6f27b4bc8ad14dc78b74e34d06e8ec8db4430",
+      "signals": [
+        "credential_field_review"
+      ]
+    },
+    {
+      "path": "src/services/patientEconomics.service.js",
+      "sha256": "2b2132103813223c6d0e0202c253d0794e711f812e4e1a3c8db8fdff2b0509b4",
+      "signals": [
+        "jwt_or_managed_session_reference"
+      ]
+    }
+  ],
+  "manualReview": {
+    "userAccessVerifiers": [
+      "src/routes/auth.middleware.js",
+      "src/controllers/auth.controllers.js",
+      "src/routes/userclinicas.routes.js",
+      "src/lib/socket-session-guard.js"
+    ],
+    "userAccessIssuers": [
+      "src/controllers/auth.controllers.js",
+      "src/controllers/personal.controller.js"
+    ],
+    "purposeSpecificTokensNotUserSessions": [
+      "src/services/consentimientos.service.js",
+      "src/services/patientEconomics.service.js",
+      "src/services/googleAdsTransparencyOfficial.service.js"
+    ],
+    "remaining": [
+      "Actual dev/staging/gateway and external copies not deployed or verified",
+      "Credential mutations immediately fail the current binding check, but their own lifecycle and permission audits remain pending",
+      "Clinic permissions are still loaded at socket connection; this session cohort does not audit/reconstruct grant changes"
+    ]
+  }
+}

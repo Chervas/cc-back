@@ -31,7 +31,11 @@ async function fixture(t) {
     '../../models': {}, '../services/awsInfrastructureCosts.service': service,
   });
   const secret = randomBytes(32);
-  const auth = load('routes/auth.middleware.js', {}, { process: { env: { JWT_SECRET: secret } } });
+  const auth = load('routes/auth.middleware.js', { '../services/accessSession.service': {
+    ...require('../../services/accessSession.service'),
+    ...require('../../services/accessSession.service').createService({ models: () => assert.fail('legacy auth must not load models'),
+      config: () => ({ mode: 'legacy', ttl: 43200, secret }) }),
+  } });
   const router = load('routes/metasync.routes.js', { './auth.middleware': auth,
     '../controllers/metasync.jobs.controller': jobs, '../controllers/socialstats.controller': unrelated,
     '../controllers/metasync.controller': unrelated, '../controllers/metasync.diagnostic': unrelated });

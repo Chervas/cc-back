@@ -1,5 +1,15 @@
 # Seguridad: implementación y evidencias
 
+## Actualización: sesiones persistentes preparadas (12/09/2026)
+
+Se añade el control común de sesiones y su auditoría v2, sin activar el modo
+enforce, sin aplicar AuthSessions en BD compartida ni desplegar runtimes/front.
+Contrato y lote concreto en [access-session-migration.md](access-session-migration.md).
+El inventario JWT separado incluye tokens clínicos públicos que requieren su
+propio corte. Ningún consumidor real de proveedor se ha migrado por este bloque.
+Los pendientes AWS de la matriz inferior conservan su estado reportado.
+
+
 Estado inicial: 12/09/2026. Implementación en curso; ninguna cohorte migrada,
 ningún despliegue, secreto real movido ni llamada a proveedor autorizada.
 

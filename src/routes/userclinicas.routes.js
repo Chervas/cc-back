@@ -1,6 +1,6 @@
 // src/routes/userclinicas.routes.js
 const express = require('express');
-const jwt = require('jsonwebtoken');
+const sessions = require('../services/accessSession.service');
 const { Op } = require('sequelize');
 const {
     Clinica,
@@ -43,22 +43,9 @@ const serializeUserSummary = (usuario) => {
 /**
  * Función auxiliar para obtener el userId del token JWT
  */
-const getUserIdFromToken = (req) => {
-    try {
-        const authHeader = req.headers.authorization;
-        if (authHeader && authHeader.startsWith('Bearer ')) {
-            const token = authHeader.substring(7); // Remover 'Bearer ' del inicio
-            if (token) {
-                // ✅ CLAVE CORRECTA: Usar el mismo secreto que se usa en auth.controllers.js
-                const decoded = jwt.verify(token, process.env.JWT_SECRET);
-                console.log('🔍 Token JWT decodificado para clínicas:', decoded);
-                return decoded.userId; // El campo correcto según auth.controllers.js
-            }
-        }
-    } catch (error) {
-        console.error('❌ Error decodificando JWT:', error);
-    }
-    return null;
+const getUserIdFromToken = async (req) => {
+    if (req.userData?.userId) return req.userData.userId;
+    return (await sessions.verify(sessions.bearer(req.headers.authorization))).userId;
 };
 
 /**
@@ -75,12 +62,12 @@ const isAdmin = (userId) => {
  * - Si es NORMAL: devuelve solo las clínicas asignadas
  * ✅ INCLUYE CAMPO 'roles' para el selector del menú superior
  */
-router.get('/list', async (req, res) => {
+router.get('/list', require('./auth.middleware'), async (req, res) => {
     try {
         console.log('🏥 Obteniendo clínicas del usuario...');
 
         // Obtener userId del token JWT
-        const userId = getUserIdFromToken(req);
+        const userId = await getUserIdFromToken(req);
         if (!userId) {
             console.log('❌ No se pudo obtener userId del token JWT');
             return res.status(401).json({
@@ -399,10 +386,10 @@ router.get('/list', async (req, res) => {
  * GET /api/userclinicas/:id
  * Obtiene una clínica específica si el usuario tiene acceso
  */
-router.get('/:id', async (req, res) => {
+router.get('/:id', require('./auth.middleware'), async (req, res) => {
     try {
         const { id } = req.params;
-        const userId = getUserIdFromToken(req);
+        const userId = await getUserIdFromToken(req);
 
         if (!userId) {
             return res.status(401).json({

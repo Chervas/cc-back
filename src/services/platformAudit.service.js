@@ -23,14 +23,14 @@ function createService({ repository, config = () => ({}), now = () => new Date()
       try { await repository.append(base); } catch { fail('audit_unavailable'); }
       const completedId = randomUUID(); let completed = null;
       return {
-        async complete({ outcome, reason, userId = null, sessionRef = null }) {
+        async complete({ outcome, reason, userId = null, sessionRef = null }, { transaction } = {}) {
           const value = pack({ ...base, eventId: completedId, occurredAt: completed?.event.occurredAt || now().toISOString(),
             stage: 'completed', outcome, reason, sessionRef,
             actor: userId === null ? { type: 'anonymous', id: null } : { type: 'user', id: String(userId) } });
           if (completed && completed.digest !== value.digest) fail('audit_event_conflict');
           // Preserve the same event/digest after an ambiguous local commit; retries may not invent another outcome.
           completed = value;
-          try { await repository.append(value.event); } catch { fail('audit_unavailable'); }
+          try { await repository.append(value.event, { transaction }); } catch { fail('audit_unavailable'); }
         },
       };
     },

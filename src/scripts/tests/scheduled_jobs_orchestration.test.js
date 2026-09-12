@@ -31,7 +31,7 @@ function testCatalogCoversEveryCronAndExecutor() {
   const catalogNames = definitions.map(([name]) => name).sort();
   const types = definitions.map(([, definition]) => definition.type);
 
-  assert.equal(definitions.length, 42, 'the canonical scheduler retains existing jobs and gated AWS cost/audit jobs');
+  assert.equal(definitions.length, 43, 'the canonical scheduler retains existing jobs and gated AWS cost/audit/session jobs');
   assert.deepEqual(catalogNames, configuredNames);
   assert.equal(new Set(types).size, types.length, 'scheduled job types must be unique');
   for (const jobName of [
@@ -1444,8 +1444,25 @@ async function testPlatformAuditJobsRespectGates() {
   } finally { jobRequestsService.enqueueUniqueJobRequest = originalEnqueue; }
 }
 
+async function testAuthSessionExpiryGate() {
+  const sessions = require('../../services/accessSession.service');
+  const before = sessions.expire; const previousFlag = process.env.AUTH_SESSION_EXPIRY_ENABLED;
+  let calls = 0;
+  try {
+    sessions.expire = async () => { calls++; return { expired: 2 }; };
+    process.env.AUTH_SESSION_EXPIRY_ENABLED = 'false';
+    assert.equal((await metaSyncJobs.executeAuthSessionExpiry()).disabled, true); assert.equal(calls, 0);
+    assert.equal((await metaSyncJobs.enqueueScheduledJob('authSessionExpiry')).queued, false);
+    process.env.AUTH_SESSION_EXPIRY_ENABLED = 'true';
+    await jobExecutor.JOB_HANDLERS.auth_session_expiry({ arbitraryUserId: 1 }); assert.equal(calls, 1);
+    assert.equal(metaSyncJobs.config.schedules.authSessionExpiry, '*/5 * * * *');
+    assert.equal(SCHEDULED_JOB_DEFINITIONS.authSessionExpiry.timezone, 'Europe/Madrid');
+  } finally { sessions.expire = before; if (previousFlag === undefined) delete process.env.AUTH_SESSION_EXPIRY_ENABLED; else process.env.AUTH_SESSION_EXPIRY_ENABLED = previousFlag; }
+}
+
 async function run() {
   testCatalogCoversEveryCronAndExecutor();
+  await testAuthSessionExpiryGate();
   await testAwsCostsGateAndHandler();
   await testPlatformAuditJobsRespectGates();
   await testDestinationRefreshGateAndHandlers();

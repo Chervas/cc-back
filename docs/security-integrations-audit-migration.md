@@ -1,5 +1,16 @@
 # Runbook: Migracion Segura De Integraciones Y Auditoria
 
+## Sexto bloque preparado: sesiones persistentes (12/09/2026)
+
+[Contrato, QA y lote de sesiones](security/access-session-migration.md): emisión
+atómica con outbox, revocación propia, validación común REST/sockets y front sin
+identidad ficticia. No activado ni desplegado. Migración AuthSessions separada,
+modo enforce y duraciones/límites requieren el corte aprobado en todos los
+runtimes. Preparar backend/writer v2 antes del frontend y preservar middleware
+seguro/revocaciones al volver atrás. Las restantes fases y puertas de este
+runbook continúan pendientes; el push no ejecuta el corte.
+
+
 Fecha: 2026-09-12. **Procedimiento pendiente de ejecucion**, no acta de migracion terminada.
 
 Contrato e inventario AWS canonicamente documentados en el repositorio frontend:

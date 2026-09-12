@@ -1,5 +1,15 @@
 # Auditoría de plataforma: primer bloque de autenticación
 
+## Eventos de sesión v2 (12/09/2026, sin activar)
+
+El codec/writer acepta además eventos cerrados de emisión, renovación,
+revocación y expiración observada bajo `app/platform/v2/`. El formato/bytes v1
+se conservan. La transición y su evento comparten transacción SQL. Desplegar
+este soporte antes de activar sesiones persistentes; no acredita entrega AWS
+real ni retención. Contrato en `docs/security/access-session-migration.md` del
+repositorio backend. Visor/reader y auditoría completa siguen pendientes.
+
+
 Estado 12/09/2026: código y QA aislada, **sin activar ni desplegar**. Solo
 `POST /api/auth/sign-in`, `/sign-in-with-token` y `/unlock-session` preparan
 captura semántica. Worker y bootstrap writer preparados; no hay instalación ni identidad AWS

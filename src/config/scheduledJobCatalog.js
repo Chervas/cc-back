@@ -7,6 +7,11 @@
  * reintentos y la recuperación tras reinicio pertenecen al scheduler durable.
  */
 const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
+  authSessionExpiry: Object.freeze({
+    type: 'auth_session_expiry', priority: 'normal', executorMethod: 'executeAuthSessionExpiry',
+    enabledEnv: 'AUTH_SESSION_EXPIRY_ENABLED', timezone: 'Europe/Madrid',
+    usesIntegrationLease: false, reportedFailureRetryable: false, maxAttempts: 1,
+  }),
   platformAuditDelivery: Object.freeze({
     type: 'platform_audit_delivery', priority: 'normal', executorMethod: 'executePlatformAuditDelivery',
     enabledEnv: 'PLATFORM_AUDIT_DELIVERY_ENABLED', timezone: 'Europe/Madrid',
