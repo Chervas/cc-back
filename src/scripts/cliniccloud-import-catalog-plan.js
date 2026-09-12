@@ -9,7 +9,7 @@ const { buildCatalogPlan } = require('../lib/cliniccloud-import/catalog');
 
 async function readLocalCatalog() {
   require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), quiet: true });
-  const connection = await require('mysql2/promise').createConnection({ host: process.env.DB_HOST, port: Number(process.env.DB_PORT || 3306), user: process.env.DB_USERNAME, password: process.env.DB_PASSWORD, database: process.env.DB_NAME, dateStrings: true, multipleStatements: false });
+  const connection = await require('mysql2/promise').createConnection({ host: process.env.DB_HOST, port: Number(process.env.DB_PORT || 3306), user: process.env.DB_USERNAME, password: process.env.DB_PASSWORD, database: process.env.DB_NAME, dateStrings: true, multipleStatements: false, ...require('../lib/databaseTlsConfig').buildDatabaseTlsOptions(process.env) });
   try {
     await connection.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
     await connection.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');

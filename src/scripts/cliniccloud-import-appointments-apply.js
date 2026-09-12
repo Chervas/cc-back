@@ -57,7 +57,7 @@ async function acquireExecutorLocks(connection, packageHash, canonicalJournalPat
 async function connect() {
   require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), quiet: true });
   return require('mysql2/promise').createConnection({ host: process.env.DB_HOST, port: Number(process.env.DB_PORT || 3306), user: process.env.DB_USERNAME, password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME, timezone: 'Z', dateStrings: true, multipleStatements: false });
+    database: process.env.DB_NAME, timezone: 'Z', dateStrings: true, multipleStatements: false, ...require('../lib/databaseTlsConfig').buildDatabaseTlsOptions(process.env) });
 }
 async function run(args) {
   const options = parseArgs(args, ['--mode', '--plan', '--local-snapshot', '--private-output', '--package', '--approval', '--backup-manifest', '--private-journal', '--max-operations']);

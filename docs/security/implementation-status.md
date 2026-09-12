@@ -29,7 +29,7 @@ efectivo en AWS. `manifest.final.json` aún declara identificadores no capturado
 | Budget | 60 USD, avisos 80%/100% real y 100% forecast | Filtro solo application; default de plantilla 45 USD (valor desplegado reportado 60) | Confirmar parámetros, filtro incremental y conciliación del aviso fuera de CF; sin recrear |
 | Costes | Cost-reader creado | Trust solo SSO aprovisionador; tags application/component/environment/cost-center en recursos compatibles | Activación CE/tags y cobertura de gastos no etiquetados; sin tratar ausencia como cero |
 | SSO | Propuesto impl-readonly-temp 1 h | No se ha asignado acceso a esta sesión | Usuario/aprovisionador aprueba y habilita relevo mínimo; no reutilizar AdministratorAccess |
-| BD | Sin diagnóstico ni cambio | Ninguna consulta ejecutada en esta tarea | Metadata, TLS, backups, plan/restauración ficticia; corte real separado |
+| BD | Cifrado global no acreditado | Diez consultas reales de metadata, seis verificadas y cuatro denegadas; redo/undo/binlog nativos OFF, TLS no exigido | Tablespaces, componente de claves, sesiones/réplicas, volumen y backups; DBA/operador temporal. TLS/corte/rotación con aprobación |
 
 Revisar además la política propuesta de lectura antes de solicitar su aprobación:
 para inspeccionar controles hacen falta las acciones IAM correctas (por ejemplo
@@ -107,3 +107,33 @@ en hosts utilizados ni desplegado la UI. SSO/IAM/tags/CE/Budget siguen
 reportados o pendientes. El resto de consumidores, auditoría de plataforma
 y diagnóstico/corte de BD continúan en las siguientes fases.
 Evidencia: `/home/ubuntu/qa-evidence/security-migration-20260912/costs-offline-qa.json`.
+
+## Tercer bloque: BD diagnosticada parcialmente y corte preparado
+
+`security-database-metadata.js` recoge exclusivamente metadata, con proyección
+cerrada y errores categorizados. Ejecutado por UNIX con la identidad ya
+configurada, sin modelos ni filas clínicas. MySQL 8.0.42 local, datadir
+`/var/lib/mysql/`; cuatro denegaciones conservadas, sin recurrir a otro
+usuario ni elevar privilegios. El volumen ext4 puede estar cifrado por el
+proveedor: el estado de su cifrado/backups no queda probado por la inspección.
+Resultados y lotes en `database-encryption-remediation.md`.
+
+`databaseTlsConfig.js` prepara CA/nombre verificados y TLS >=1.2 para la
+config canónica, conexiones secundarias y scripts inventariados. Sin activar
+`DB_TLS_REQUIRED`, sin PM2 ni consultas de los scripts de mantenimiento.
+Credencial incrustada retirada de `src/config/db.js`, que ahora exige config
+canónica sin fallback de identidad; rotación y exposición en historia/copias
+siguen pendientes. No se probó la credencial encontrada.
+
+QA: nueve casos unitarios; cuatro comprobaciones de metadata sobre MySQL
+temporal; ocho comprobaciones de cifrado/TLS/backup/restauración con dos
+tablas sintéticas. CA/nombre ajenos y TCP sin TLS rechazados; backup cifrado
+dañado/identidad GPG ajena denegados; MySQL sin keyring correcto falla;
+restauración con claves conserva datos/relación/unicidad/cifrado. Tres
+procesos propios terminaron (0/1 esperado/0), ninguno forzado. No prueba
+RPO/RTO clínico ni recuperación con KMS o backups reales.
+
+Inventario SQL estático en `database-client-inventory.json`. Evidencia
+privada: `/home/ubuntu/qa-evidence/security-migration-20260912/database-offline-qa.json`
+y `database-local-metadata-20260912.json`. Corte de BD, TLS real, claves,
+SSO, auditoría completa y consumidores de proveedores siguen pendientes.

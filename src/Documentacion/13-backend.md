@@ -68,6 +68,33 @@ Contrato y lote pendiente de IAM/coste/migración/despliegue:
 `services/aws-cost-collector/README.md`. El código está probado offline;
 no acredita permisos efectivos, tags, factura AWS ni despliegue utilizado.
 
+## 2026-09-12 - BD: TLS preparado, metadata y restauración ficticia
+
+`DB_TLS_REQUIRED=true` exige CA absoluta `DB_TLS_CA_FILE` y configura
+`mysql2` con validación de cadena y nombre, mínimo TLS 1.2. Si falla la
+CA/configuración/TLS no se intenta transporte alternativo. Flag ausente
+mantiene la configuración previa para el corte coordinado; no se ha activado
+en ningún runtime. Cubre Sequelize común/secundario, pool legacy y conexiones
+directas de los scripts localizados, sin ejecutar sus operaciones.
+
+`src/config/db.js` deja de contener una credencial incrustada y utiliza la
+configuración común; campos ausentes impiden crear el pool. No se ha usado
+esa credencial ni rotado el usuario real; historia y copias quedan pendientes
+de una rotación coordinada. Inventario estático y límites documentados.
+
+`security-database-metadata.js` solo hace consultas fijas de metadata por
+UNIX, sin modelos ni filas clínicas. La ejecución real confirmó flags de
+cifrado nativo redo/undo/binlog apagados y TLS no exigido; tablespaces,
+componente de claves, réplicas y sesiones ajenas resultaron denegados.
+No se sortean esas denegaciones ni se infiere cifrado EBS desde ext4.
+
+QA de restauración física con MySQL propio, GPG/keyring ficticios y TLS
+verificado. Sin claves correctas o con backup dañado falla; con ellas
+conserva las tablas/relaciones/unicidad/cifrado. No acredita recuperación de
+datos clínicos ni tiempos del volumen real. Contrato, permisos faltantes,
+coste/ventanas pendientes y rollback:
+`docs/security/database-encryption-remediation.md`.
+
 ## 2026-08-04 - Audiencias de reseñas desde listado importado
 
 - `GET /api/marketing/review-requests/summary` y la creación de campañas de

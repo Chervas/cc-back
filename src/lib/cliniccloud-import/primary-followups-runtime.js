@@ -10,7 +10,8 @@ const fail = code => { throw new Error(code); };
 function settings() {
   require('dotenv').config({ path: path.resolve(__dirname, '../../../.env'), quiet: true });
   if (!process.env.DB_HOST || !process.env.DB_NAME || !process.env.DB_USERNAME) fail('DATABASE_CONFIGURATION_MISSING');
-  return { host: process.env.DB_HOST, port: Number(process.env.DB_PORT || 3306), user: process.env.DB_USERNAME, password: process.env.DB_PASSWORD, database: process.env.DB_NAME, dateStrings: true, timezone: 'Z', multipleStatements: false };
+  return { host: process.env.DB_HOST, port: Number(process.env.DB_PORT || 3306), user: process.env.DB_USERNAME, password: process.env.DB_PASSWORD, database: process.env.DB_NAME, dateStrings: true, timezone: 'Z', multipleStatements: false,
+    ...require('../databaseTlsConfig').buildDatabaseTlsOptions(process.env) };
 }
 async function connect() { return require('mysql2/promise').createConnection(settings()); }
 
@@ -37,7 +38,8 @@ function createIsolatedModels() {
   // Express, jobs, notifications or model-global initialization hooks.
   const config = settings();
   const Sequelize = require('sequelize');
-  const sequelize = new Sequelize(config.database, config.user, config.password, { dialect: 'mysql', host: config.host, port: config.port, timezone: '+00:00', logging: false, pool: { max: 2, min: 0, idle: 1000 } });
+  const sequelize = new Sequelize(config.database, config.user, config.password, { dialect: 'mysql', host: config.host, port: config.port, timezone: '+00:00', logging: false, pool: { max: 2, min: 0, idle: 1000 },
+    dialectOptions: config.ssl ? { ssl: config.ssl } : {} });
   const db = { sequelize, Sequelize };
   for (const name of ['paciente', 'pacienteclinica', 'patientcustomfield', 'patientfollowup', 'patientfollowuprevision', 'usuario', 'clinica', 'citapaciente', 'tratamiento']) {
     const model = require(path.resolve(__dirname, '../../../models', `${name}.js`))(sequelize, Sequelize.DataTypes);

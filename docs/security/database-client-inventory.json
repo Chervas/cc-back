@@ -1,0 +1,482 @@
+{
+  "version": 1,
+  "source": "static_heuristic_requires_manual_callsite_review",
+  "items": [
+    {
+      "path": "models/index.js",
+      "classification": "runtime_candidate",
+      "tlsHelperReferenced": false,
+      "hits": [
+        {
+          "line": 14,
+          "symbols": [
+            "sequelize_constructor"
+          ]
+        },
+        {
+          "line": 16,
+          "symbols": [
+            "sequelize_constructor"
+          ]
+        }
+      ],
+      "sha256": "efd386b3d2d201b73bd146e10f8f2d56369120689a23a590559e047fc39f7999"
+    },
+    {
+      "path": "scripts/consolidate-propdental-sant-marti.js",
+      "classification": "uses_shared_models",
+      "tlsHelperReferenced": false,
+      "hits": [
+        {
+          "line": 148,
+          "symbols": [
+            "direct_db_env"
+          ]
+        }
+      ],
+      "sha256": "1e41b84baa8b6f0040bf23630a5b39ee132c217b545fb697e6b5e05bc011e9ae"
+    },
+    {
+      "path": "src/config/config.js",
+      "classification": "runtime_candidate",
+      "tlsHelperReferenced": true,
+      "hits": [
+        {
+          "line": 6,
+          "symbols": [
+            "direct_db_env"
+          ]
+        },
+        {
+          "line": 7,
+          "symbols": [
+            "direct_db_env"
+          ]
+        },
+        {
+          "line": 8,
+          "symbols": [
+            "direct_db_env"
+          ]
+        },
+        {
+          "line": 9,
+          "symbols": [
+            "direct_db_env"
+          ]
+        }
+      ],
+      "sha256": "d847cac33f89eb920d6cd3246124c3c6f6dfff18e3104daf633e3383383647d0"
+    },
+    {
+      "path": "src/config/database.js",
+      "classification": "runtime_candidate",
+      "tlsHelperReferenced": true,
+      "hits": [
+        {
+          "line": 7,
+          "symbols": [
+            "sequelize_constructor"
+          ]
+        }
+      ],
+      "sha256": "499cadb826267f64fdc288225dfb8ded72c214e2c892bc71032653777b755cb2"
+    },
+    {
+      "path": "src/config/db.js",
+      "classification": "runtime_candidate",
+      "tlsHelperReferenced": true,
+      "hits": [
+        {
+          "line": 10,
+          "symbols": [
+            "mysql_connection"
+          ]
+        }
+      ],
+      "sha256": "40108b02c331133bf420821f85c3a8fe647c22308643f9524bafee77589a203d"
+    },
+    {
+      "path": "src/lib/cliniccloud-import/primary-followups-runtime.js",
+      "classification": "runtime_candidate",
+      "tlsHelperReferenced": true,
+      "hits": [
+        {
+          "line": 12,
+          "symbols": [
+            "direct_db_env"
+          ]
+        },
+        {
+          "line": 13,
+          "symbols": [
+            "direct_db_env"
+          ]
+        },
+        {
+          "line": 16,
+          "symbols": [
+            "mysql_connection"
+          ]
+        },
+        {
+          "line": 41,
+          "symbols": [
+            "sequelize_constructor"
+          ]
+        }
+      ],
+      "sha256": "e2bab2ecd58857ae66814e6ddfaae5bf1d7a58471a02311584e1ad0b83d46616"
+    },
+    {
+      "path": "src/scripts/cliniccloud-import-appointments-apply.js",
+      "classification": "script",
+      "tlsHelperReferenced": true,
+      "hits": [
+        {
+          "line": 59,
+          "symbols": [
+            "mysql_connection",
+            "direct_db_env"
+          ]
+        },
+        {
+          "line": 60,
+          "symbols": [
+            "direct_db_env"
+          ]
+        }
+      ],
+      "sha256": "aaad61b8c2c3976c17ecf5a62b8d6df233acbb6985ffec4b04eb6418a0022bd1"
+    },
+    {
+      "path": "src/scripts/cliniccloud-import-catalog-plan.js",
+      "classification": "script",
+      "tlsHelperReferenced": true,
+      "hits": [
+        {
+          "line": 12,
+          "symbols": [
+            "mysql_connection",
+            "direct_db_env"
+          ]
+        }
+      ],
+      "sha256": "addf13b0d484ce0c98cdda177b2d0eff7b276f762027110fa16ef163b938951a"
+    },
+    {
+      "path": "src/scripts/cliniccloud-import-contacts-apply.js",
+      "classification": "script",
+      "tlsHelperReferenced": true,
+      "hits": [
+        {
+          "line": 91,
+          "symbols": [
+            "mysql_connection",
+            "direct_db_env"
+          ]
+        }
+      ],
+      "sha256": "602cc47713c70cd7aa45998a903ce4f926f80ec1a6b9454e0ed3cde22a935f4a"
+    },
+    {
+      "path": "src/scripts/cliniccloud-import-new-patients-apply.js",
+      "classification": "script",
+      "tlsHelperReferenced": true,
+      "hits": [
+        {
+          "line": 55,
+          "symbols": [
+            "mysql_connection",
+            "direct_db_env"
+          ]
+        },
+        {
+          "line": 56,
+          "symbols": [
+            "direct_db_env"
+          ]
+        }
+      ],
+      "sha256": "06bb59c14ecf335a3076ce526da2764e5e5559e29bb88ef21d1ca79cb33c9d40"
+    },
+    {
+      "path": "src/scripts/cliniccloud-import-primary-plan.js",
+      "classification": "script",
+      "tlsHelperReferenced": true,
+      "hits": [
+        {
+          "line": 10,
+          "symbols": [
+            "mysql_connection",
+            "direct_db_env"
+          ]
+        }
+      ],
+      "sha256": "bf7f5aac3456fcec3c40742791bae44b5983e4aca2d8120b0cc56f21025806d9"
+    },
+    {
+      "path": "src/scripts/cliniccloud-import-protocol-draft.js",
+      "classification": "script",
+      "tlsHelperReferenced": true,
+      "hits": [
+        {
+          "line": 16,
+          "symbols": [
+            "sequelize_constructor",
+            "direct_db_env"
+          ]
+        },
+        {
+          "line": 17,
+          "symbols": [
+            "direct_db_env"
+          ]
+        },
+        {
+          "line": 39,
+          "symbols": [
+            "mysql_connection",
+            "direct_db_env"
+          ]
+        },
+        {
+          "line": 40,
+          "symbols": [
+            "direct_db_env"
+          ]
+        },
+        {
+          "line": 41,
+          "symbols": [
+            "direct_db_env"
+          ]
+        }
+      ],
+      "sha256": "ffc783fa4ed15a5d1e302b665c86109e267cd0e7a0476c9b6af469d66adbc22b"
+    },
+    {
+      "path": "src/scripts/cliniccloud-import-snapshot.js",
+      "classification": "script",
+      "tlsHelperReferenced": true,
+      "hits": [
+        {
+          "line": 44,
+          "symbols": [
+            "mysql_connection",
+            "direct_db_env"
+          ]
+        }
+      ],
+      "sha256": "0ec3e16d6f9dc4e9ad407b48282f4e9477fc1471e0bb2eb9cd919d7ca9e71fc4"
+    },
+    {
+      "path": "src/scripts/repair_propdental_ad_cache.js",
+      "classification": "script",
+      "tlsHelperReferenced": true,
+      "hits": [
+        {
+          "line": 208,
+          "symbols": [
+            "sequelize_constructor"
+          ]
+        }
+      ],
+      "sha256": "e01bae45c0d75272da083634f57b74c294f402bbb02ab52b2ce23187147cfae2"
+    },
+    {
+      "path": "src/scripts/security-database-metadata.js",
+      "classification": "script",
+      "tlsHelperReferenced": false,
+      "hits": [
+        {
+          "line": 25,
+          "symbols": [
+            "mysql_connection"
+          ]
+        }
+      ],
+      "sha256": "e98a11253a4103d4d84ddebf8c7f072a21f48613837e846ac69c271056548fae"
+    },
+    {
+      "path": "src/scripts/tests/campaign_lead_advertising_identity.test.js",
+      "classification": "qa",
+      "tlsHelperReferenced": false,
+      "hits": [
+        {
+          "line": 31,
+          "symbols": [
+            "sequelize_constructor"
+          ]
+        }
+      ],
+      "sha256": "e0e54fbb0da2aac826f4bc252fbfabe3463083be08731b2a68b061b400c0500a"
+    },
+    {
+      "path": "src/scripts/tests/crm_signal_atomic_mysql_qa.js",
+      "classification": "qa",
+      "tlsHelperReferenced": false,
+      "hits": [
+        {
+          "line": 17,
+          "symbols": [
+            "sequelize_constructor"
+          ]
+        }
+      ],
+      "sha256": "16c90273d318fc80a6aac1b4e06c9c9d54dd2a2432c8449288e0e32de7935229"
+    },
+    {
+      "path": "src/scripts/tests/database_encrypted_restore.integration.js",
+      "classification": "qa",
+      "tlsHelperReferenced": true,
+      "hits": [
+        {
+          "line": 41,
+          "symbols": [
+            "mysql_connection"
+          ]
+        }
+      ],
+      "sha256": "33351fed4fa6e7130234bd18c8e37bb2b1e7ece080dac07ff09d2d8af5699c29"
+    },
+    {
+      "path": "src/scripts/tests/fixtures/isolated_campaign_mysql.fixture.js",
+      "classification": "qa",
+      "tlsHelperReferenced": true,
+      "hits": [
+        {
+          "line": 48,
+          "symbols": [
+            "sequelize_constructor"
+          ]
+        },
+        {
+          "line": 59,
+          "symbols": [
+            "sequelize_constructor"
+          ]
+        }
+      ],
+      "sha256": "d96d87a5f403335eba4581354577f712fcf47c287d786855f0cf0551af8f34dc"
+    },
+    {
+      "path": "src/scripts/tests/google_ad_cache_mysql.integration.js",
+      "classification": "qa",
+      "tlsHelperReferenced": true,
+      "hits": [
+        {
+          "line": 18,
+          "symbols": [
+            "sequelize_constructor"
+          ]
+        },
+        {
+          "line": 22,
+          "symbols": [
+            "sequelize_constructor"
+          ]
+        }
+      ],
+      "sha256": "4269ae8f7b7bfbcf9ab34bb2256b0a15e232fd76accb9604c8e4ea9b72b85fee"
+    },
+    {
+      "path": "src/scripts/tests/intake_config_runtime_hooks.test.js",
+      "classification": "qa",
+      "tlsHelperReferenced": false,
+      "hits": [
+        {
+          "line": 42,
+          "symbols": [
+            "sequelize_constructor"
+          ]
+        }
+      ],
+      "sha256": "690fb1b9cf05353e2778c094e1d94f8fd5d9155d815efd02cc2b1126eeaa9fe8"
+    },
+    {
+      "path": "src/scripts/tests/social_asset_stats_security.test.js",
+      "classification": "qa",
+      "tlsHelperReferenced": false,
+      "hits": [
+        {
+          "line": 31,
+          "symbols": [
+            "sequelize_constructor"
+          ]
+        }
+      ],
+      "sha256": "2cff32f4e80c626e63c42cb9e28b91c2ac3306dc7dad557eaad692667700a691"
+    },
+    {
+      "path": "src/scripts/tests/web_artifact_model_contract.test.js",
+      "classification": "qa",
+      "tlsHelperReferenced": false,
+      "hits": [
+        {
+          "line": 7,
+          "symbols": [
+            "sequelize_constructor"
+          ]
+        }
+      ],
+      "sha256": "84bf4af50ad977b5cb0026dbae8e1e92120fb8a3d22efe5f901f63b6cad79cd3"
+    },
+    {
+      "path": "src/scripts/tests/web_content_media_models_contract.test.js",
+      "classification": "qa",
+      "tlsHelperReferenced": false,
+      "hits": [
+        {
+          "line": 7,
+          "symbols": [
+            "sequelize_constructor"
+          ]
+        }
+      ],
+      "sha256": "d938f1ab52e2d61deeed9936abba919fd81de7999d1f45a878cb799b9fa264ae"
+    },
+    {
+      "path": "src/scripts/tests/web_content_media_mysql.integration.test.js",
+      "classification": "qa",
+      "tlsHelperReferenced": false,
+      "hits": [
+        {
+          "line": 12,
+          "symbols": [
+            "sequelize_constructor"
+          ]
+        }
+      ],
+      "sha256": "2e90f59c0b4d3599d01b1395d5cce710f8bcdf56179b43d52d4f612e5d393fe6"
+    },
+    {
+      "path": "src/scripts/tests/web_models_contract.test.js",
+      "classification": "qa",
+      "tlsHelperReferenced": false,
+      "hits": [
+        {
+          "line": 17,
+          "symbols": [
+            "sequelize_constructor"
+          ]
+        }
+      ],
+      "sha256": "fbf3bb6901a94a64208e6c09c643fa02a72ddb854dbae1dd95a5cecc72a1c74f"
+    },
+    {
+      "path": "src/services/socket.service.js",
+      "classification": "namespace_only_not_db_client",
+      "tlsHelperReferenced": false,
+      "hits": [
+        {
+          "line": 13,
+          "symbols": [
+            "direct_db_env"
+          ]
+        }
+      ],
+      "sha256": "6598c720ba2fe7d6c936cf17a828e544380f5c13432ba0f6fa5fc159020ec7c9"
+    }
+  ]
+}

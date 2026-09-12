@@ -16,6 +16,7 @@ function createIsolatedModels() {
   const sequelize = new Sequelize(process.env.DB_NAME, process.env.DB_USERNAME, process.env.DB_PASSWORD, {
     dialect: 'mysql', host: process.env.DB_HOST, port: Number(process.env.DB_PORT || 3306),
     timezone: '+00:00', logging: false, pool: { max: 2, min: 0, idle: 1000 },
+    dialectOptions: require('../lib/databaseTlsConfig').buildDatabaseTlsOptions(process.env),
   });
   const db = { sequelize, Sequelize };
   for (const name of ['clinica', 'tratamiento', 'treatmentprotocol', 'treatmentprotocolrevision']) {
@@ -37,7 +38,7 @@ function requirePrivatePlan(filename) {
 async function readBefore() {
   const connection = await require('mysql2/promise').createConnection({ host: process.env.DB_HOST,
     port: Number(process.env.DB_PORT || 3306), user: process.env.DB_USERNAME, password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME, dateStrings: true, timezone: 'Z', multipleStatements: false });
+    database: process.env.DB_NAME, dateStrings: true, timezone: 'Z', multipleStatements: false, ...require('../lib/databaseTlsConfig').buildDatabaseTlsOptions(process.env) });
   try {
     await connection.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
     await connection.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');

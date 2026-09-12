@@ -206,7 +206,7 @@ async function main(args) {
   let sql;
   try {
     sql = new Sequelize(env.DB_NAME, env.DB_USERNAME, env.DB_PASSWORD, { host: env.DB_HOST, dialect: 'mysql', logging: false,
-      timezone: '+00:00', pool: { min: 0, max: 2 }, retry: { max: 0 } });
+      timezone: '+00:00', pool: { min: 0, max: 2 }, retry: { max: 0 }, dialectOptions: require('../lib/databaseTlsConfig').buildDatabaseTlsOptions(env) });
     const models = { sequelize: sql };
     for (const file of ['clinicgoogleadsaccount', 'googleconnectionassignment', 'externalcampaignassignment',
       'googleadsadinventory', 'googleadsadinsightsdaily', 'googleadsadsyncday']) {

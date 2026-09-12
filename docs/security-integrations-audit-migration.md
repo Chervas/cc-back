@@ -29,6 +29,13 @@ mantienen pendientes verificación AWS, migración compartida y despliegue.
 Ninguna cohorte real ni auditoría completa
 de plataforma, cifrado de BD o despliegue se consideran terminados.
 
+BD: [diagnóstico y remediación preparada](./security/database-encryption-remediation.md).
+Diez consultas reales de metadata por UNIX, sin filas clínicas: redo/undo/binlog
+nativos apagados, transporte seguro no exigido y cuatro consultas denegadas.
+Volumen/tablespaces/backups siguen sin acreditarse. TLS de clientes preparado
+sin activar; restauración física cifrada solo con datos y claves ficticios.
+Credencial incrustada retirada del código legacy; rotación real pendiente.
+
 ## 1. Entrada Y Limites
 
 Leer `00-handoff-operativo`, `19-estado-actual`, `39`, `25-operacion-worktrees-entornos`, `30-despliegues-y-entornos` y `31-roadmap-arquitectura-entornos-gateway` en `front-dev/src/Documentacion`. Completar con `02`, `03`, `04`, `05`, `07`, `11`, `14.1`, `20.13` y `32` segun la fase. `25-desarrollo-paralelo` es un alias historico, no otro workflow.

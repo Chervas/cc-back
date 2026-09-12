@@ -16,6 +16,9 @@ de campanas; no promover todo DEV ni aplicar todas las migraciones pendientes.
 Costes: [colector, caché, API, QA y lote pendiente de activación](../services/aws-cost-collector/README.md).
 Estado y evidencias: [matriz de implementación](./security/implementation-status.md).
 
+BD: [diagnóstico real de metadata, TLS preparado y restauración ficticia](./security/database-encryption-remediation.md).
+No activar cifrado/rotación ni cambiar la BD compartida fuera de su lote aprobado.
+
 ## Cierre funcional Marketing Web W1-W5 (2026-07-19)
 
 La referencia vigente del candidato es backend `7bd254e` (staging
