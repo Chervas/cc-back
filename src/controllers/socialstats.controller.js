@@ -4,6 +4,8 @@ const {
     SocialPosts, 
     SocialPostStatsDaily, 
     ClinicMetaAsset,
+    Clinica,
+    GroupAssetClinicAssignment,
     SocialAdsInsightsDaily,
     SocialAdsActionsDaily,
     SocialAdsAdsetDailyAgg,
@@ -18,6 +20,25 @@ const {
     buildAssetScopeWhere
 } = require('../lib/clinicScope');
 const notificationService = require('../services/notifications.service');
+const { hasMarketingClinicScopeAccess } = require('../lib/marketingScopeAccess');
+const { affectedClinicIdsForAsset } = require('../lib/sharedMarketingAssetMutationAccess');
+
+const ASSET_STATS_PUBLIC_FIELDS = Object.freeze([
+    'id', 'clinicaId', 'grupoClinicaId', 'assignmentScope', 'assetType',
+    'metaAssetId', 'metaAssetName', 'isActive'
+]);
+const ASSET_STATS_DAILY_FIELDS = Object.freeze([
+    'id', 'clinica_id', 'asset_id', 'asset_type', 'date', 'impressions', 'reach',
+    'engagement', 'clicks', 'reach_total', 'views', 'likes', 'reactions', 'posts_count',
+    'reach_instagram', 'reach_facebook', 'impressions_instagram', 'impressions_facebook',
+    'views_facebook', 'spend_instagram', 'spend_facebook', 'followers', 'followers_day',
+    'profile_visits', 'created_at', 'updated_at'
+]);
+function publicStatsFields(record, fields) {
+    const plain = typeof record?.get === 'function' ? record.get({ plain: true }) : record;
+    return Object.fromEntries(fields.filter(field => Object.hasOwn(plain || {}, field))
+        .map(field => [field, plain[field]]));
+}
 
 // Obtiene métricas de una clínica
 exports.getClinicaStats = async (req, res) => {
@@ -328,22 +349,50 @@ exports.getClinicaStats = async (req, res) => {
 
 // Obtiene métricas de un activo específico
 exports.getAssetStats = async (req, res) => {
+    res.set('Cache-Control', 'private, no-store');
     try {
         const { assetId } = req.params;
         const { startDate, endDate, period = 'day' } = req.query;
-        
-        // Validar parámetros
-        if (!assetId) {
-            return res.status(400).json({ message: 'ID de activo no proporcionado' });
+        const userId = req.userData?.userId;
+        if (!/^[1-9]\d*$/.test(String(userId || '')) || !Number.isSafeInteger(Number(userId))) {
+            return res.status(401).json({ message: 'Auth failed!' });
         }
-        
-        // Verificar que el activo existe
-        const asset = await ClinicMetaAsset.findByPk(assetId);
-        
+        if (!/^[1-9]\d*$/.test(String(assetId || '')) || !Number.isSafeInteger(Number(assetId))
+            || !['day', 'week', 'month'].includes(period)) {
+            return res.status(400).json({ message: 'Identificador o periodo invalido' });
+        }
+        for (const date of [startDate, endDate]) {
+            if (date !== undefined && (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)
+                || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date)) {
+                return res.status(400).json({ message: 'Fecha invalida' });
+            }
+        }
+
+        // Never fetch provider credentials, even for an administrator.
+        const asset = await ClinicMetaAsset.findByPk(Number(assetId), {
+            attributes: [...ASSET_STATS_PUBLIC_FIELDS], raw: true
+        });
         if (!asset) {
             return res.status(404).json({ message: 'Activo no encontrado' });
         }
-        
+        if (!['clinic', 'group'].includes(asset.assignmentScope)
+            || asset.assignmentScope === 'group' && (!Number.isSafeInteger(Number(asset.grupoClinicaId))
+                || Number(asset.grupoClinicaId) <= 0)) {
+            return res.status(403).json({ message: 'Sin permisos para consultar este activo' });
+        }
+        // This endpoint aggregates the entire asset, not the clinic selected in the browser.
+        const clinicIds = await affectedClinicIdsForAsset({
+            assetType: `meta.${asset.assetType}`, assetId: asset.id, ownerClinicId: asset.clinicaId,
+            assignmentModel: GroupAssetClinicAssignment,
+            findImplicitGroupId: async () => asset.assignmentScope === 'group' ? asset.grupoClinicaId : null,
+            findGroupClinicIds: async groupId => (await Clinica.findAll({
+                where: { grupoClinicaId: groupId }, attributes: ['id_clinica'], raw: true
+            })).map(clinic => clinic.id_clinica)
+        });
+        if (!clinicIds.length || !await hasMarketingClinicScopeAccess({ userId, clinicIds, access: 'read' })) {
+            return res.status(403).json({ message: 'Sin permisos para consultar este activo' });
+        }
+
         // Convertir fechas a objetos Date y a cadenas YYYY-MM-DD (evita desfases de TZ con DATEONLY)
         const start = startDate ? new Date(startDate) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
         const end = endDate ? new Date(endDate) : new Date();
@@ -355,10 +404,14 @@ exports.getAssetStats = async (req, res) => {
         };
         const startStr = startDate || fmt(start);
         const endStr = endDate || fmt(end);
+        if (startStr > endStr) {
+            return res.status(400).json({ message: 'Rango de fechas invalido' });
+        }
         
         // Construir condiciones de búsqueda
         const where = {
-            asset_id: assetId,
+            asset_id: Number(assetId),
+            clinica_id: { [Op.in]: clinicIds },
             date: { [Op.between]: [startStr, endStr] }
         };
         
@@ -368,6 +421,7 @@ exports.getAssetStats = async (req, res) => {
         if (period === 'day') {
             // Métricas diarias (sin agregación)
             stats = await SocialStatsDaily.findAll({
+                attributes: [...ASSET_STATS_DAILY_FIELDS],
                 where,
                 order: [['date', 'ASC']]
             });
@@ -397,17 +451,19 @@ exports.getAssetStats = async (req, res) => {
         }
         
         return res.status(200).json({
-            asset,
+            asset: publicStatsFields(asset, ASSET_STATS_PUBLIC_FIELDS),
             period,
             startDate: start,
             endDate: end,
-            stats
+            stats: stats.map(row => publicStatsFields(row, period === 'day' ? ASSET_STATS_DAILY_FIELDS
+                : [period, 'start_date', 'end_date', 'impressions', 'reach', 'engagement', 'clicks',
+                    'followers', 'followers_day', 'profile_visits']))
         });
     } catch (error) {
-        console.error('❌ Error al obtener métricas de activo:', error);
+        console.error('Error al obtener metricas de activo', { code: 'asset_stats_read_failed' });
         return res.status(500).json({
-            message: 'Error al obtener métricas de activo',
-            error: error.message
+            message: 'Error al obtener metricas de activo',
+            error: 'asset_stats_read_failed'
         });
     }
 };
