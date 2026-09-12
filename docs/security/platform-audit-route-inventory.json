@@ -12,7 +12,8 @@
     "declarations": 874,
     "preparedDisabled": 3,
     "sessionSuccessPreparedDisabled": 4,
-    "auditViewPreparedDisabled": 1
+    "auditViewPreparedDisabled": 1,
+    "permissionsPreparedDisabled": 4
   },
   "items": [
     {
@@ -23,25 +24,25 @@
           "method": "GET",
           "localTemplate": "/catalog",
           "line": 9,
-          "platformAudit": "pending_semantic_review"
+          "platformAudit": "permissions_semantic_prepared_disabled"
         },
         {
           "method": "GET",
           "localTemplate": "/overrides",
           "line": 10,
-          "platformAudit": "pending_semantic_review"
+          "platformAudit": "permissions_semantic_prepared_disabled"
         },
         {
           "method": "GET",
           "localTemplate": "/assignments",
           "line": 11,
-          "platformAudit": "pending_semantic_review"
+          "platformAudit": "permissions_semantic_prepared_disabled"
         },
         {
           "method": "PUT",
           "localTemplate": "/overrides",
           "line": 12,
-          "platformAudit": "pending_semantic_review"
+          "platformAudit": "permissions_semantic_prepared_disabled"
         }
       ]
     },

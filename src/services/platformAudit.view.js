@@ -67,6 +67,9 @@ function createView({ model, audit, reader, codec, now = () => new Date() }) {
         coverage: 'confirmed_platform_index_only', events: verified.map(v => ({ eventId: v.eventId, occurredAt: v.occurredAt,
           action: v.action, stage: v.stage, outcome: v.outcome, reason: v.reason, actorType: v.actor.type, actorId: v.actor.id,
           subjectUserId: v.subjectUserId || null, sessionRef: v.sessionRef, scopeType: v.scope.type, scopeId: v.scope.id,
+          permission: v.version === 4 ? { featureKey: v.featureKey, roleCode: v.roleCode, previousEffect: v.previousEffect,
+            requestedEffect: v.requestedEffect, authorizationBasis: v.authorizationBasis, scopeClinicCount: v.scopeClinicCount,
+            authorizationPolicyVersion: v.authorizationPolicyVersion } : null,
           verification: 's3_version_verified' })) };
     },
   };

@@ -1,5 +1,14 @@
 # Lector, visor y conciliación de auditoría
 
+## Ampliación v4 preparada (12/09/2026)
+
+El octavo bloque admite eventos de políticas de acceso bajo `app/platform/v4/`
+y cuatro filtros `permission.*`, con proyección `permission` y ámbito real
+clínica/grupo en el visor. El contrato de abajo describe el séptimo bloque;
+[la ampliación de permisos](permission-audit-migration.md) conserva sus controles
+de VersionId, índice parcial, roles, journal y gates apagados. Sin reader AWS
+instalado, nuevos permisos efectivos ni cambios de retención.
+
 12/09/2026. Séptimo bloque implementado y probado con datos ficticios. **Sin
 desplegar, activar, consultar AWS ni migrar la BD compartida.** La entrega AWS
 sigue siendo reportada. Complementa el runbook general, las sesiones

@@ -1,7 +1,8 @@
 'use strict';
 const { createHmac, timingSafeEqual } = require('node:crypto');
 const { exact, fail } = require('./reader-protocol'); const { UUID } = require('./event');
-const ACTIONS = ['auth.sign_in', 'auth.token_sign_in', 'auth.unlock', 'session.issued', 'session.renewed', 'session.revoked', 'session.expired', 'audit.records.read'];
+const ACTIONS = ['auth.sign_in', 'auth.token_sign_in', 'auth.unlock', 'session.issued', 'session.renewed', 'session.revoked', 'session.expired', 'audit.records.read',
+  ...require('./access-policy-contract').PERMISSION_ACTIONS];
 function criteriaFor(v) {
   exact(v, ['from', 'to', 'action', 'userId']);
   const date = value => typeof value === 'string' && /^20\d\d-\d\d-\d\d$/.test(value) && Number.isFinite(Date.parse(value + 'T00:00:00Z'))

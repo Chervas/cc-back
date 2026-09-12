@@ -1,5 +1,15 @@
 # Auditoría de plataforma: primer bloque de autenticación
 
+## Políticas de acceso v4 (12/09/2026, sin activar)
+
+El codec/reader admite cuatro acciones `permission.*` en `app/platform/v4/`;
+la API prepara intentos/resultados cerrados y confirma cambio/outbox juntos.
+Vocabulario puro de capacidades/roles compartido con el evaluador, sin alterar
+defaults. No se registran nombres/contactos/cuerpos de asignaciones. Visor
+muestra ámbito y transición o efecto solicitado. Soporte v4 debe desplegarse
+antes de generar eventos; nada se ha instalado ni activado en este bloque.
+[Contrato y límites](../../docs/security/permission-audit-migration.md).
+
 ## Lector/visor y eventos v3 (12/09/2026, sin activar)
 
 El contrato vigente de este bloque está en

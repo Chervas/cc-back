@@ -10,63 +10,9 @@ const {
 } = require('../../models');
 const { isGlobalAdmin } = require('./role-helpers');
 
-const ALLOWED_FEATURE_KEYS = new Set([
-  'marketing',
-  'clinic.settings.view',
-  'clinic.settings.edit',
-  'team.view',
-  'team.manage',
-  'team.schedule.self.manage',
-  'billing.reports.view',
-  'billing.documents.manage',
-  'accounting.expenses.manage',
-  'accounting.cash.manage',
-  'accounting.payroll.view',
-  'accounting.payroll.manage',
-  'accounting.export',
-  'accounting.ocr.manage',
-  'accounting.sepa.manage',
-  'accounting.firm.manage',
-  'patients.view',
-  'patients.sensitive.view',
-  'patients.edit',
-  'leads.sensitive.view',
-  'leads.manage',
-  'marketing.web.view',
-  'marketing.web.edit',
-  'marketing.web.advanced_edit',
-  'marketing.web.review',
-  'marketing.web.publish',
-  'marketing.web.domains.manage',
-  'marketing.web.templates.manage',
-  'appointments.view',
-  'appointments.manage',
-  'consents.view',
-  'consents.manage',
-  'quickchat.read_patients',
-  'quickchat.read_team',
-  'quickchat.read_leads',
-  'nutrition.workspace.view',
-  'nutrition.measurements.create',
-  'nutrition.reports.finalize',
-  'clinical.reports.view',
-  'clinical.reports.manage',
-  'patient_direction.view',
-  'patient_direction.manage',
-  'patient_direction.assign_role',
-]);
-
-const ALLOWED_ROLE_CODES = new Set([
-  'propietario',
-  'agencia',
-  'doctor',
-  'assistant',
-  'reception',
-  'admin_staff',
-  'accountant',
-  'patient_director',
-  'unknown',
-]);
+const { FEATURE_KEYS, ROLE_CODES } = require('../../services/platform-audit/src/access-policy-contract');
+const ALLOWED_FEATURE_KEYS = new Set(FEATURE_KEYS);
+const ALLOWED_ROLE_CODES = new Set(ROLE_CODES);
 
 const DEFAULT_FEATURES = {
   'patient_direction.view': {

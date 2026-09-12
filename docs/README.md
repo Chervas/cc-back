@@ -1,5 +1,12 @@
 # Runbooks operativos del backend
 
+## Políticas de acceso y auditoría (preparadas, 12/09/2026)
+
+[Contrato de esta cohorte](security/permission-audit-migration.md): cuatro rutas,
+propiedad completa del grupo, cambios y auditoría atómicos, editor con
+confirmación del backend y snapshot del catálogo. Gate apagado; no desplegado.
+No completa cambios de membresía, asignaciones ni permisos de sockets.
+
 ## Lector y visor de auditoría (preparados, 12/09/2026)
 
 [Contrato, QA y lote de lectura/conciliación](security/audit-reader-view-migration.md).

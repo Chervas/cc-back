@@ -1,5 +1,16 @@
 # Runbook: Migracion Segura De Integraciones Y Auditoria
 
+## Octavo bloque preparado: políticas de acceso (12/09/2026)
+
+[Contrato y lote](security/permission-audit-migration.md): corrige lectura de
+asignaciones/escritura con acceso parcial al grupo, prepara auditoría v4 en
+cuatro endpoints y confirma PUT/outbox en una transacción. Editor espera el
+permiso del backend para el ámbito actual. Los controles de ámbito permanecen
+con captura apagada; no revertir al controlador vulnerable al hacer rollback.
+Sin migración nueva ni cambios de permisos reales. Writer/reader v4 y backend
+antes del frontend/gate; conservar datos/snapshots y puertas de aprobación.
+Membresías, otras asignaciones y propagación a sockets siguen pendientes.
+
 ## Séptimo bloque preparado: lector, visor y conciliación (12/09/2026)
 
 [Contrato y lote pendiente](security/audit-reader-view-migration.md): consulta

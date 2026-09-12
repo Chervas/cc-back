@@ -1,5 +1,19 @@
 # Seguridad: implementación y evidencias
 
+## Actualización: políticas de acceso preparadas (12/09/2026)
+
+Cuatro endpoints incorporan captura v4 apagada, PUT/outbox atómicos y una
+corrección del acceso parcial a grupos. El editor exige `can_manage_scope`
+para su ámbito actual y descarta respuestas antiguas. Snapshot versionado de
+43 capacidades/nueve roles, defaults conservados. Probado solo con datos
+ficticios; sin despliegue, escritura real de permisos ni migración compartida.
+[Contrato, inventario y lote pendiente](permission-audit-migration.md).
+
+Inventario estático: 60 archivos/874 declaraciones; añade cuatro rutas de
+políticas preparadas, no cobertura operativa. No completa membresías,
+asignaciones de Director/gestoría, SQL/OPS ni refresco de permisos en sockets.
+AWS/SSO/retención y las cohortes reales mantienen su estado pendiente.
+
 ## Actualización: lector, visor y conciliación preparados (12/09/2026)
 
 [Contrato de lectura](audit-reader-view-migration.md): reader TLS separado,

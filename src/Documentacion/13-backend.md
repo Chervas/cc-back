@@ -1,5 +1,41 @@
 > **Módulo:** Arquitectura del Backend
 
+## 2026-09-12 — Políticas de acceso: límites de grupo y auditoría preparada
+
+Las cuatro rutas `/api/access-policies` preparan auditoría v4 con
+`PLATFORM_AUDIT_PERMISSIONS_ENABLED` apagado por defecto: lecturas de catálogo,
+overrides y asignaciones, y cambio de override. Intento previo y respuesta
+retenida hasta registrar resultado; PUT confirma override y evento juntos en
+transacción SERIALIZABLE. Actor/sesión/ámbito, capacidad/rol, antes/solicitado,
+resultado y versión del catálogo; sin nombres, contactos ni body/query crudo.
+
+Corrección de ámbito independiente del gate: listar asignaciones del grupo
+exige staff vigente en todas sus clínicas; editar permisos del grupo exige
+propiedad vigente de todas o admin técnico. Clínica/grupo inexistente no se
+crea indirectamente por un override. Invitación pendiente/cancelada/rechazada
+no autoriza. Consultar configuración heredada del grupo continúa permitido
+para calcular los permisos de la clínica propia; no expone asignaciones ajenas.
+
+GET `/assignments` añade `can_manage_scope` y `clinic_ids`. El editor solo
+habilita cambios tras recibir `can_manage_scope:true` para el ámbito actual;
+una respuesta antigua o de otro ámbito no repone usuarios ni permisos. Sin
+ese campo permanece en lectura, por lo que debe publicarse backend antes que
+front. La autorización recibida puede caducar: PUT siempre la vuelve a comprobar.
+Campos inválidos/ámbitos incompletos: 400; denegación: 403; configuración,
+captura o fallo sin confirmar: 503 (errores de dominio cerrados pueden ser 500).
+Respuestas privadas/no-store, sin SQL ni errores internos serializados.
+
+Writer/reader/visor amplían soporte a `app/platform/v4/` y a cuatro acciones
+`permission.*`. El DTO de auditoría incluye `permission` con capacidad/rol,
+efectos, base/versión de autorización y conteo del ámbito. La UI distingue
+transición confirmada de efecto solicitado. No prueba cobertura total del
+índice ni de todos los permisos de plataforma.
+
+Sin migración nueva ni cambios reales de roles. Requiere outbox y soporte v4
+antes de activar el gate. Las otras altas/asignaciones, SQL/OPS, cachés y rooms
+de sockets siguen en sus cohortes pendientes. Contrato, QA, snapshot de catálogo,
+retención/coste/corte y rollback: `back-dev/docs/security/permission-audit-migration.md`.
+
 ## 2026-09-12 — Visor de auditoría preparado, sin activar
 
 `GET /api/system-monitoring/audit/events` requiere JWT y, con el gate activo,

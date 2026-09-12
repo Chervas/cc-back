@@ -16,7 +16,9 @@ for (const file of files) {
     routes.push({ method: match[1].toUpperCase(), localTemplate: match[3], line: source.slice(0, match.index).split('\n').length,
       platformAudit: prepared ? 'auth_semantic_prepared_disabled' : file === 'src/routes/auth.routes.js' && sessionSuccess.has(match[3])
         ? 'session_success_prepared_disabled' : file === 'src/routes/system-monitoring.routes.js' && match[1] === 'get' && match[3] === '/audit/events'
-          ? 'audit_view_semantic_prepared_disabled' : 'pending_semantic_review' });
+          ? 'audit_view_semantic_prepared_disabled' : file === 'src/routes/access-policy.routes.js'
+            && (match[1] === 'get' && ['/catalog', '/overrides', '/assignments'].includes(match[3]) || match[1] === 'put' && match[3] === '/overrides')
+              ? 'permissions_semantic_prepared_disabled' : 'pending_semantic_review' });
   }
   items.push({ path: file, sha256: createHash('sha256').update(source).digest('hex'), routes });
 }
@@ -28,4 +30,5 @@ process.stdout.write(JSON.stringify({ version: 1, source: 'static_heuristic_not_
   totals: { files: items.length, declarations: routes.length,
     preparedDisabled: routes.filter(route => route.platformAudit === 'auth_semantic_prepared_disabled').length,
     sessionSuccessPreparedDisabled: routes.filter(route => route.platformAudit === 'session_success_prepared_disabled').length,
-    auditViewPreparedDisabled: routes.filter(route => route.platformAudit === 'audit_view_semantic_prepared_disabled').length }, items }, null, 2) + '\n');
+    auditViewPreparedDisabled: routes.filter(route => route.platformAudit === 'audit_view_semantic_prepared_disabled').length,
+    permissionsPreparedDisabled: routes.filter(route => route.platformAudit === 'permissions_semantic_prepared_disabled').length }, items }, null, 2) + '\n');

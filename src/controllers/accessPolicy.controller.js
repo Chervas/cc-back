@@ -8,6 +8,7 @@ const {
   Usuario,
   PatientDirectionProfile,
   PatientDirectionSetting,
+  GrupoClinica,
 } = require('../../models');
 const { ADMIN_USER_IDS, STAFF_ROLES } = require('../lib/role-helpers');
 const {
@@ -24,8 +25,9 @@ const ALLOWED_EFFECTS = new Set(['allow', 'deny']);
 const isAdmin = (userId) => ADMIN_USER_IDS.includes(Number(userId));
 
 const parseIntOrNull = (value) => {
+  if (!['number', 'string'].includes(typeof value) || !/^[1-9]\d{0,9}$/.test(String(value))) return null;
   const n = Number(value);
-  return Number.isFinite(n) ? n : null;
+  return Number.isSafeInteger(n) && n <= 2147483647 ? n : null;
 };
 
 const normalizeScopeType = (value) => String(value || '').trim().toLowerCase();
@@ -40,11 +42,13 @@ async function getScopeAccess(actorId) {
     const clinicIds = clinics.map((c) => Number(c.id_clinica)).filter(Number.isFinite);
     const groupIds = clinics
       .map((c) => Number(c.grupoClinicaId))
-      .filter(Number.isFinite);
+      .filter(id => Number.isInteger(id) && id > 0);
 
     return {
       readClinicIds: clinicIds,
       readGroupIds: [...new Set(groupIds)],
+      assignmentGroupIds: [...new Set(groupIds)],
+      groupClinicCounts: Object.fromEntries([...new Set(groupIds)].map(id => [id, clinics.filter(c => Number(c.grupoClinicaId) === id).length])),
       ownerClinicIds: clinicIds,
       ownerGroupIds: [...new Set(groupIds)],
     };
@@ -54,6 +58,7 @@ async function getScopeAccess(actorId) {
     where: {
       id_usuario: actorId,
       rol_clinica: { [Op.in]: STAFF_ROLES },
+      [Op.or]: [{ estado_invitacion: 'aceptada' }, { estado_invitacion: null }],
     },
     attributes: ['id_clinica', 'rol_clinica'],
     raw: true,
@@ -70,7 +75,7 @@ async function getScopeAccess(actorId) {
   const groupByClinicId = new Map(
     clinicRows
       .map((c) => [Number(c.id_clinica), Number(c.grupoClinicaId)])
-      .filter(([, groupId]) => Number.isFinite(groupId)),
+      .filter(([, groupId]) => Number.isInteger(groupId) && groupId > 0),
   );
 
   const readClinicIds = [];
@@ -88,48 +93,80 @@ async function getScopeAccess(actorId) {
       if (isOwner) ownerClinicIds.push(clinicId);
     }
 
-    if (Number.isFinite(groupId)) {
+    if (Number.isInteger(groupId) && groupId > 0) {
       readGroupIds.push(groupId);
       if (isOwner) ownerGroupIds.push(groupId);
     }
   }
 
+  const allGroupClinics = readGroupIds.length ? await Clinica.findAll({
+    where: { grupoClinicaId: { [Op.in]: [...new Set(readGroupIds)] } },
+    attributes: ['id_clinica', 'grupoClinicaId'], raw: true,
+  }) : [];
+  const fullGroup = (groupId, ids) => {
+    const clinics = allGroupClinics.filter(row => Number(row.grupoClinicaId) === groupId);
+    return clinics.length > 0 && clinics.every(row => ids.includes(Number(row.id_clinica)));
+  };
   return {
     readClinicIds: [...new Set(readClinicIds)],
+    // Group overrides are inherited by the actor's own clinics and contain no assignments.
     readGroupIds: [...new Set(readGroupIds)],
+    assignmentGroupIds: [...new Set(readGroupIds)].filter(id => fullGroup(id, readClinicIds)),
+    groupClinicCounts: Object.fromEntries([...new Set(readGroupIds)].map(id => [id, allGroupClinics.filter(c => Number(c.grupoClinicaId) === id).length])),
     ownerClinicIds: [...new Set(ownerClinicIds)],
-    ownerGroupIds: [...new Set(ownerGroupIds)],
+    ownerGroupIds: [...new Set(ownerGroupIds)].filter(id => fullGroup(id, ownerClinicIds)),
   };
 }
 
-function isScopeReadable(scopeAccess, scopeType, scopeId) {
+function isScopeReadable(scopeAccess, scopeType, scopeId, assignments = false) {
   if (scopeType === 'clinic') return scopeAccess.readClinicIds.includes(scopeId);
-  if (scopeType === 'group') return scopeAccess.readGroupIds.includes(scopeId);
+  if (scopeType === 'group') return (assignments ? scopeAccess.assignmentGroupIds : scopeAccess.readGroupIds).includes(scopeId);
   return false;
 }
 
-function isScopeWritable(actorId, scopeAccess, scopeType, scopeId) {
-  if (isAdmin(actorId)) return true;
-  if (scopeType === 'clinic') return scopeAccess.ownerClinicIds.includes(scopeId);
-  if (scopeType === 'group') return scopeAccess.ownerGroupIds.includes(scopeId);
-  return false;
+async function lockWritableScope(actorId, scopeType, scopeId, context) {
+  const transaction = context.transaction;
+  const options = { transaction, lock: transaction.LOCK.UPDATE, raw: true };
+  let clinics;
+  if (scopeType === 'group') {
+    if (!await GrupoClinica.findByPk(scopeId, { ...options, attributes: ['id_grupo'] })) return false;
+    clinics = await Clinica.findAll({ ...options, where: { grupoClinicaId: scopeId }, attributes: ['id_clinica'], order: [['id_clinica', 'ASC']] });
+  } else {
+    // This locator is not an authorization read. Revalidate after locking group then clinic.
+    const initial = await Clinica.findByPk(scopeId, { transaction: null, raw: true, attributes: ['id_clinica', 'grupoClinicaId'] });
+    if (!initial) return false;
+    if (initial.grupoClinicaId != null && !await GrupoClinica.findByPk(initial.grupoClinicaId, { ...options, attributes: ['id_grupo'] })) return false;
+    const clinic = await Clinica.findByPk(scopeId, { ...options, attributes: ['id_clinica', 'grupoClinicaId'] });
+    if (!clinic || clinic.grupoClinicaId !== initial.grupoClinicaId) return false;
+    clinics = [clinic];
+  }
+  if (isAdmin(actorId)) { context.authorize('global_admin', clinics.length); return true; }
+  if (!clinics.length) return false;
+  const owners = await UsuarioClinica.findAll({ ...options, attributes: ['id_clinica'], where: {
+    id_usuario: actorId, id_clinica: { [Op.in]: clinics.map(c => c.id_clinica) }, rol_clinica: 'propietario',
+    [Op.or]: [{ estado_invitacion: 'aceptada' }, { estado_invitacion: null }],
+  } });
+  const ids = new Set(owners.map(row => Number(row.id_clinica)));
+  if (!clinics.every(c => ids.has(Number(c.id_clinica)))) return false;
+  context.authorize('scope_owner', clinics.length); return true;
 }
 
-exports.getCatalog = async (req, res) => {
+const handlers = {};
+handlers.getCatalog = async (req, res, context) => {
   try {
     const actorId = Number(req.userData?.userId);
     if (!Number.isFinite(actorId)) {
       return res.status(401).json({ message: 'Auth failed!' });
     }
 
+    context.authorize('authenticated', 0);
     return res.json(getAccessPolicyCatalog());
   } catch (error) {
-    console.error('[accessPolicy.getCatalog] Error:', error);
-    return res.status(500).json({ message: 'Error retrieving access policy catalog', error: error.message });
+    return res.status(500).json({ message: 'Error retrieving access policy catalog' });
   }
 };
 
-exports.getOverrides = async (req, res) => {
+handlers.getOverrides = async (req, res, context) => {
   try {
     const actorId = Number(req.userData?.userId);
     if (!Number.isFinite(actorId)) {
@@ -145,6 +182,8 @@ exports.getOverrides = async (req, res) => {
     }
 
     const scopeAccess = await getScopeAccess(actorId);
+    context.authorize(isAdmin(actorId) ? 'global_admin' : 'scope_staff', scopeType === 'clinic' ? 1
+      : scopeType === 'group' ? scopeAccess.groupClinicCounts[scopeId] || 0 : scopeAccess.readClinicIds.length);
     const where = requestedFeatureKey
       ? { feature_key: requestedFeatureKey }
       : { feature_key: { [Op.in]: Array.from(ALLOWED_FEATURE_KEYS) } };
@@ -191,8 +230,7 @@ exports.getOverrides = async (req, res) => {
       })),
     });
   } catch (error) {
-    console.error('[accessPolicy.getOverrides] Error:', error);
-    return res.status(500).json({ message: 'Error retrieving access policy overrides', error: error.message });
+    return res.status(500).json({ message: 'Error retrieving access policy overrides' });
   }
 };
 
@@ -213,7 +251,7 @@ async function getClinicRowsForScope(scopeType, scopeId) {
   });
 }
 
-exports.getAssignments = async (req, res) => {
+handlers.getAssignments = async (req, res, context) => {
   try {
     const actorId = Number(req.userData?.userId);
     if (!Number.isFinite(actorId)) {
@@ -231,14 +269,16 @@ exports.getAssignments = async (req, res) => {
     }
 
     const scopeAccess = await getScopeAccess(actorId);
-    if (!isScopeReadable(scopeAccess, scopeType, scopeId)) {
+    if (!isScopeReadable(scopeAccess, scopeType, scopeId, true)) {
       return res.status(403).json({ message: 'Forbidden' });
     }
 
     const clinics = await getClinicRowsForScope(scopeType, scopeId);
     const clinicIds = clinics.map((clinic) => Number(clinic.id_clinica)).filter(Number.isFinite);
+    if (!isAdmin(actorId) && clinicIds.some(id => !scopeAccess.readClinicIds.includes(id))) return res.status(403).json({ message: 'Forbidden' });
+    context.authorize(isAdmin(actorId) ? 'global_admin' : 'scope_staff', clinicIds.length);
     if (!clinicIds.length) {
-      return res.json({ scope_type: scopeType, scope_id: scopeId, roles: [], total: 0 });
+      return res.json({ scope_type: scopeType, scope_id: scopeId, can_manage_scope: false, clinic_ids: [], roles: [], total: 0 });
     }
 
     const [memberships, patientDirectionSettings] = await Promise.all([
@@ -381,16 +421,16 @@ exports.getAssignments = async (req, res) => {
       scope_type: scopeType,
       scope_id: scopeId,
       clinic_ids: clinicIds,
+      can_manage_scope: isAdmin(actorId) || (scopeType === 'clinic' ? scopeAccess.ownerClinicIds : scopeAccess.ownerGroupIds).includes(scopeId),
       total: memberships.length + directorAssignments.length,
       roles,
     });
   } catch (error) {
-    console.error('[accessPolicy.getAssignments] Error:', error);
-    return res.status(500).json({ message: 'Error retrieving access policy assignments', error: error.message });
+    return res.status(500).json({ message: 'Error retrieving access policy assignments' });
   }
 };
 
-exports.upsertOverride = async (req, res) => {
+handlers.upsertOverride = async (req, res, context) => {
   try {
     const actorId = Number(req.userData?.userId);
     if (!Number.isFinite(actorId)) {
@@ -424,8 +464,7 @@ exports.upsertOverride = async (req, res) => {
       effect = state;
     }
 
-    const scopeAccess = await getScopeAccess(actorId);
-    if (!isScopeWritable(actorId, scopeAccess, scopeType, scopeId)) {
+    if (!await lockWritableScope(actorId, scopeType, scopeId, context)) {
       return res.status(403).json({ message: 'Forbidden' });
     }
 
@@ -435,9 +474,12 @@ exports.upsertOverride = async (req, res) => {
       feature_key: featureKey,
       role_code: roleCode,
     };
+    const transaction = context.transaction;
+    const existing = await AccessPolicyOverride.findOne({ where: keyWhere, transaction, lock: transaction.LOCK.UPDATE });
+    context.previousEffect = existing?.effect || 'inherit';
 
     if (!effect) {
-      await AccessPolicyOverride.destroy({ where: keyWhere });
+      await AccessPolicyOverride.destroy({ where: keyWhere, transaction });
       return res.json({
         removed: true,
         item: {
@@ -450,19 +492,11 @@ exports.upsertOverride = async (req, res) => {
       });
     }
 
-    const [row, created] = await AccessPolicyOverride.findOrCreate({
-      where: keyWhere,
-      defaults: {
-        ...keyWhere,
-        effect,
-        updated_by: actorId,
-      },
-    });
-
-    if (!created) {
+    const row = existing || await AccessPolicyOverride.create({ ...keyWhere, effect, updated_by: actorId }, { transaction });
+    if (existing) {
       row.effect = effect;
       row.updated_by = actorId;
-      await row.save();
+      await row.save({ transaction });
     }
 
     return res.json({
@@ -473,11 +507,21 @@ exports.upsertOverride = async (req, res) => {
         feature_key: row.feature_key,
         role_code: row.role_code,
         effect: row.effect,
-        updated_at: row.updated_at,
+        updated_at: row.updated_at || row.updatedAt,
       },
     });
   } catch (error) {
-    console.error('[accessPolicy.upsertOverride] Error:', error);
-    return res.status(500).json({ message: 'Error updating access policy override', error: error.message });
+    return res.status(500).json({ message: 'Error updating access policy override' });
   }
 };
+
+for (const [name, action] of Object.entries({ getCatalog: 'permission.catalog.read', getOverrides: 'permission.overrides.read',
+  getAssignments: 'permission.assignments.read', upsertOverride: 'permission.override.change' })) {
+  exports[name] = async (req, res) => {
+    res.set?.('Cache-Control', 'private, no-store');
+    try {
+      const response = await require('../services/platformAudit.permissions').run(action, req, handlers[name]);
+      return res.status(response.status).json(response.body);
+    } catch { return res.status(503).json({ message: 'Permission operation unavailable', error: 'permission_audit_unavailable' }); }
+  };
+}

@@ -1,0 +1,874 @@
+{
+  "authorizationPolicyVersion": "d7599ba1e6fa20eb47f7695593fb8e429d0d6c1c5413fe0fc5256c434224e9ef",
+  "catalog": {
+    "version": 1,
+    "roles": [
+      {
+        "code": "propietario",
+        "label": "Propietario",
+        "description": "Dirección completa de la clínica."
+      },
+      {
+        "code": "agencia",
+        "label": "Agencia",
+        "description": "Gestión externa centrada en captación y seguimiento."
+      },
+      {
+        "code": "doctor",
+        "label": "Doctor",
+        "description": "Trabajo clínico con pacientes y agenda."
+      },
+      {
+        "code": "assistant",
+        "label": "Auxiliar",
+        "description": "Operativa diaria de consulta y mediciones."
+      },
+      {
+        "code": "reception",
+        "label": "Recepción",
+        "description": "Recepción, ventas y coordinación de citas."
+      },
+      {
+        "code": "admin_staff",
+        "label": "Administración",
+        "description": "Administración interna de la clínica."
+      },
+      {
+        "code": "patient_director",
+        "label": "Director de pacientes",
+        "description": "Captación, seguimiento y coordinación de primeras citas en las clínicas asignadas."
+      },
+      {
+        "code": "accountant",
+        "label": "Gestoría",
+        "description": "Acceso externo restringido a documentos y exportaciones contables."
+      },
+      {
+        "code": "unknown",
+        "label": "Sin subrol",
+        "description": "Asignaciones sin subrol clínico normalizado."
+      }
+    ],
+    "features": [
+      {
+        "key": "patients.view",
+        "group": "clinical_operations",
+        "kind": "view",
+        "label": "Ver pacientes",
+        "enforcement_status": "route",
+        "sensitive": false
+      },
+      {
+        "key": "patients.edit",
+        "group": "clinical_operations",
+        "kind": "action",
+        "label": "Editar pacientes",
+        "enforcement_status": "backend",
+        "sensitive": false
+      },
+      {
+        "key": "patients.sensitive.view",
+        "group": "clinical_operations",
+        "kind": "read",
+        "label": "Ver datos identificativos y clínicos de pacientes",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "leads.sensitive.view",
+        "group": "marketing_conversations",
+        "kind": "read",
+        "label": "Ver datos identificativos de leads",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "leads.manage",
+        "group": "marketing_conversations",
+        "kind": "action",
+        "label": "Gestionar leads",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "marketing.web.view",
+        "group": "marketing_web",
+        "kind": "view",
+        "label": "Ver landings y webs",
+        "enforcement_status": "backend",
+        "sensitive": false
+      },
+      {
+        "key": "marketing.web.edit",
+        "group": "marketing_web",
+        "kind": "action",
+        "label": "Editar landings, webs y contenidos",
+        "enforcement_status": "backend",
+        "sensitive": false
+      },
+      {
+        "key": "marketing.web.advanced_edit",
+        "group": "marketing_web",
+        "kind": "action",
+        "label": "Usar el editor web avanzado",
+        "enforcement_status": "prepared",
+        "sensitive": false
+      },
+      {
+        "key": "marketing.web.review",
+        "group": "marketing_web",
+        "kind": "action",
+        "label": "Revisar landings, webs y contenidos",
+        "enforcement_status": "backend",
+        "sensitive": false
+      },
+      {
+        "key": "marketing.web.publish",
+        "group": "marketing_web",
+        "kind": "action",
+        "label": "Publicar y restaurar landings y webs",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "marketing.web.domains.manage",
+        "group": "marketing_web",
+        "kind": "action",
+        "label": "Gestionar dominios web",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "marketing.web.templates.manage",
+        "group": "marketing_web",
+        "kind": "action",
+        "label": "Gestionar plantillas web",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "appointments.view",
+        "group": "clinical_operations",
+        "kind": "view",
+        "label": "Ver agenda",
+        "enforcement_status": "route",
+        "sensitive": false
+      },
+      {
+        "key": "appointments.manage",
+        "group": "clinical_operations",
+        "kind": "action",
+        "label": "Gestionar agenda",
+        "enforcement_status": "backend",
+        "sensitive": false
+      },
+      {
+        "key": "consents.view",
+        "group": "clinical_operations",
+        "kind": "view",
+        "label": "Ver consentimientos",
+        "enforcement_status": "route",
+        "sensitive": true
+      },
+      {
+        "key": "consents.manage",
+        "group": "clinical_operations",
+        "kind": "action",
+        "label": "Gestionar consentimientos",
+        "enforcement_status": "partial",
+        "sensitive": false
+      },
+      {
+        "key": "clinic.settings.view",
+        "group": "administration",
+        "kind": "view",
+        "label": "Ver configuración de clínica",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "clinic.settings.edit",
+        "group": "administration",
+        "kind": "action",
+        "label": "Editar configuración de clínica",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "team.view",
+        "group": "administration",
+        "kind": "view",
+        "label": "Ver personal y horarios",
+        "enforcement_status": "route",
+        "sensitive": false
+      },
+      {
+        "key": "team.manage",
+        "group": "administration",
+        "kind": "action",
+        "label": "Gestionar personal y horarios",
+        "enforcement_status": "partial",
+        "sensitive": true
+      },
+      {
+        "key": "team.schedule.self.manage",
+        "group": "administration",
+        "kind": "action",
+        "label": "Gestionar el horario y las ausencias propias",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "billing.reports.view",
+        "group": "administration",
+        "kind": "view",
+        "label": "Ver informes de facturación",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "billing.documents.manage",
+        "group": "administration",
+        "kind": "action",
+        "label": "Crear y emitir facturas y recibos",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "accounting.expenses.manage",
+        "group": "administration",
+        "kind": "action",
+        "label": "Gestionar facturas recibidas y gastos",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "accounting.cash.manage",
+        "group": "administration",
+        "kind": "action",
+        "label": "Abrir, operar y cerrar caja",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "accounting.payroll.view",
+        "group": "administration",
+        "kind": "view",
+        "label": "Ver costes y documentos de nóminas",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "accounting.payroll.manage",
+        "group": "administration",
+        "kind": "action",
+        "label": "Registrar costes y documentos de nóminas",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "accounting.export",
+        "group": "administration",
+        "kind": "action",
+        "label": "Exportar información para gestoría",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "accounting.ocr.manage",
+        "group": "administration",
+        "kind": "action",
+        "label": "Leer y revisar facturas recibidas con IA",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "accounting.sepa.manage",
+        "group": "administration",
+        "kind": "action",
+        "label": "Gestionar domiciliaciones y remesas",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "accounting.firm.manage",
+        "group": "administration",
+        "kind": "action",
+        "label": "Gestionar el acceso de la gestoría",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "clinical.reports.view",
+        "group": "clinical_operations",
+        "kind": "view",
+        "label": "Ver informes clínicos de cita",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "clinical.reports.manage",
+        "group": "clinical_operations",
+        "kind": "action",
+        "label": "Redactar y cerrar informes clínicos de cita",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "nutrition.workspace.view",
+        "group": "clinical_areas",
+        "kind": "view",
+        "label": "Ver ficha de Nutrición",
+        "enforcement_status": "backend",
+        "sensitive": false
+      },
+      {
+        "key": "nutrition.measurements.create",
+        "group": "clinical_areas",
+        "kind": "action",
+        "label": "Registrar mediciones de Nutrición",
+        "enforcement_status": "backend",
+        "sensitive": false
+      },
+      {
+        "key": "nutrition.reports.finalize",
+        "group": "clinical_areas",
+        "kind": "action",
+        "label": "Cerrar informes de Nutrición",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "marketing",
+        "group": "marketing_conversations",
+        "kind": "view",
+        "label": "Ver Marketing",
+        "enforcement_status": "route",
+        "sensitive": false
+      },
+      {
+        "key": "quickchat.read_patients",
+        "group": "marketing_conversations",
+        "kind": "read",
+        "label": "QuickChat pacientes",
+        "enforcement_status": "backend",
+        "sensitive": false
+      },
+      {
+        "key": "quickchat.read_leads",
+        "group": "marketing_conversations",
+        "kind": "read",
+        "label": "QuickChat leads",
+        "enforcement_status": "backend",
+        "sensitive": false
+      },
+      {
+        "key": "quickchat.read_team",
+        "group": "marketing_conversations",
+        "kind": "read",
+        "label": "QuickChat equipo",
+        "enforcement_status": "backend",
+        "sensitive": false
+      },
+      {
+        "key": "patient_direction.view",
+        "group": "marketing_conversations",
+        "kind": "view",
+        "label": "Ver operativa del Director de pacientes",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "patient_direction.manage",
+        "group": "marketing_conversations",
+        "kind": "action",
+        "label": "Configurar el servicio Director de pacientes",
+        "enforcement_status": "backend",
+        "sensitive": true
+      },
+      {
+        "key": "patient_direction.assign_role",
+        "group": "administration",
+        "kind": "action",
+        "label": "Asignar el rol Director de pacientes",
+        "enforcement_status": "backend",
+        "sensitive": true
+      }
+    ],
+    "defaults": {
+      "patient_direction.view": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": false,
+        "assistant": false,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "patient_director": true,
+        "unknown": false
+      },
+      "patient_direction.manage": {
+        "propietario": false,
+        "agencia": false,
+        "doctor": false,
+        "assistant": false,
+        "reception": false,
+        "admin_staff": false,
+        "accountant": false,
+        "patient_director": false,
+        "unknown": false
+      },
+      "patient_direction.assign_role": {
+        "propietario": false,
+        "agencia": true,
+        "doctor": false,
+        "assistant": false,
+        "reception": false,
+        "admin_staff": false,
+        "accountant": false,
+        "patient_director": false,
+        "unknown": false
+      },
+      "marketing": {
+        "propietario": true,
+        "agencia": true,
+        "doctor": false,
+        "assistant": true,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": true,
+        "patient_director": true
+      },
+      "clinic.settings.view": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": true,
+        "assistant": true,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": true,
+        "patient_director": true
+      },
+      "clinic.settings.edit": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": false,
+        "assistant": false,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "team.view": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": true,
+        "assistant": true,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": true
+      },
+      "team.manage": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": false,
+        "assistant": false,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": true
+      },
+      "team.schedule.self.manage": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": true,
+        "assistant": true,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "billing.reports.view": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": false,
+        "assistant": false,
+        "reception": false,
+        "admin_staff": true,
+        "accountant": true,
+        "unknown": false,
+        "patient_director": false
+      },
+      "billing.documents.manage": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": false,
+        "assistant": false,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "accounting.expenses.manage": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": false,
+        "assistant": false,
+        "reception": false,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "accounting.cash.manage": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": false,
+        "assistant": true,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "accounting.payroll.view": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": false,
+        "assistant": false,
+        "reception": false,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "accounting.payroll.manage": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": false,
+        "assistant": false,
+        "reception": false,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "accounting.export": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": false,
+        "assistant": false,
+        "reception": false,
+        "admin_staff": true,
+        "accountant": true,
+        "unknown": false,
+        "patient_director": false
+      },
+      "accounting.ocr.manage": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": false,
+        "assistant": false,
+        "reception": false,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "accounting.sepa.manage": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": false,
+        "assistant": false,
+        "reception": false,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "accounting.firm.manage": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": false,
+        "assistant": false,
+        "reception": false,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "patients.view": {
+        "propietario": true,
+        "agencia": true,
+        "doctor": true,
+        "assistant": true,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": true,
+        "patient_director": true
+      },
+      "patients.sensitive.view": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": true,
+        "assistant": true,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": true
+      },
+      "patients.edit": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": true,
+        "assistant": true,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": true
+      },
+      "leads.sensitive.view": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": false,
+        "assistant": true,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": true
+      },
+      "leads.manage": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": false,
+        "assistant": true,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": true
+      },
+      "marketing.web.view": {
+        "propietario": true,
+        "agencia": true,
+        "doctor": false,
+        "assistant": true,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "marketing.web.edit": {
+        "propietario": true,
+        "agencia": true,
+        "doctor": false,
+        "assistant": false,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "marketing.web.advanced_edit": {
+        "propietario": true,
+        "agencia": true,
+        "doctor": false,
+        "assistant": false,
+        "reception": false,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "marketing.web.review": {
+        "propietario": true,
+        "agencia": true,
+        "doctor": false,
+        "assistant": false,
+        "reception": false,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "marketing.web.publish": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": false,
+        "assistant": false,
+        "reception": false,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "marketing.web.domains.manage": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": false,
+        "assistant": false,
+        "reception": false,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "marketing.web.templates.manage": {
+        "propietario": false,
+        "agencia": false,
+        "doctor": false,
+        "assistant": false,
+        "reception": false,
+        "admin_staff": false,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "appointments.view": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": true,
+        "assistant": true,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": true,
+        "patient_director": true
+      },
+      "appointments.manage": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": true,
+        "assistant": true,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": true
+      },
+      "consents.view": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": true,
+        "assistant": true,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "consents.manage": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": true,
+        "assistant": true,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "quickchat.read_patients": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": true,
+        "assistant": true,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": true
+      },
+      "quickchat.read_team": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": true,
+        "assistant": true,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "quickchat.read_leads": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": false,
+        "assistant": true,
+        "reception": true,
+        "admin_staff": true,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": true
+      },
+      "nutrition.workspace.view": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": true,
+        "assistant": true,
+        "reception": false,
+        "admin_staff": false,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "nutrition.measurements.create": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": true,
+        "assistant": true,
+        "reception": false,
+        "admin_staff": false,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "nutrition.reports.finalize": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": true,
+        "assistant": false,
+        "reception": false,
+        "admin_staff": false,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "clinical.reports.view": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": true,
+        "assistant": true,
+        "reception": false,
+        "admin_staff": false,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      },
+      "clinical.reports.manage": {
+        "propietario": true,
+        "agencia": false,
+        "doctor": true,
+        "assistant": true,
+        "reception": false,
+        "admin_staff": false,
+        "accountant": false,
+        "unknown": false,
+        "patient_director": false
+      }
+    }
+  }
+}
