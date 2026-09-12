@@ -370,6 +370,7 @@ async function assertResponseMatrix(template, contextOptions, waitModes, expecte
       'simulation_fixture',
       `${template.public_id}:${options.pathName}:${scenario.key}: explicit AI fixture`,
     );
+    options.aiNodeCoverage?.add(`${template.public_id}:${aiEvents[0].node.id}`);
 
     const communications = responseEvents(run, ['action/send_whatsapp', 'action/reply_message']);
     const suppressed = communications.filter(
@@ -379,11 +380,15 @@ async function assertResponseMatrix(template, contextOptions, waitModes, expecte
       (event) => event.result.output?.status === 'simulated',
     );
     if (scenario.expectSuppression) {
-      assert.equal(suppressed.length, 1, `${template.public_id}:${options.pathName}:${scenario.key}: suppression`);
       assert.equal(
         simulated.length,
         0,
         `${template.public_id}:${options.pathName}:${scenario.key}: generic acknowledgement must not be sent`,
+      );
+      assert.equal(
+        communications.length,
+        suppressed.length,
+        `${template.public_id}:${options.pathName}:${scenario.key}: any reached communication must be suppressed`,
       );
     }
     if (scenario.expectAcknowledgement) {
@@ -548,9 +553,15 @@ async function testEveryPublishedCanonicalAiNodeRunsRealPatientRegressions() {
       ? template.nodes
       : JSON.parse(template.nodes || '[]');
     assert.equal(
-      nodes.some((node) => ['confirm_appointment', 'appointment_unconfirmed_reply'].includes(node?.config?.preset_key)),
+      nodes.some((node) => (
+        node?.config?.preset_key === 'appointment_unconfirmed_reply'
+        || (
+          node?.config?.preset_key === 'confirm_appointment'
+          && Number(node?.config?.preset_contract_version || 0) < 2
+        )
+      )),
       false,
-      `latest published template ${template.public_id} still uses a legacy appointment preset`
+      `latest published template ${template.public_id} still uses an obsolete appointment AI contract`
     );
     const templateCanonicalNodes = nodes.filter(
       (node) => node?.type === 'condition/ai_analysis' && node?.config?.preset_key === 'classify_intent'
@@ -724,7 +735,13 @@ async function testEveryPublishedAppointmentWorkflowPath() {
     const nodes = execution.templateVersion?.nodes || [];
     return nodes.some((node) => (
       node?.type === 'condition/ai_analysis'
-      && ['confirm_appointment', 'appointment_unconfirmed_reply'].includes(node?.config?.preset_key)
+      && (
+        node?.config?.preset_key === 'appointment_unconfirmed_reply'
+        || (
+          node?.config?.preset_key === 'confirm_appointment'
+          && Number(node?.config?.preset_contract_version || 0) < 2
+        )
+      )
     ));
   });
   assert.equal(retiredOpen.length, 0, 'open executions must not depend on retired appointment presets');
@@ -740,6 +757,7 @@ async function testEveryPublishedAppointmentWorkflowPath() {
   let responseScenarioCount = 0;
   let noResponsePathCount = 0;
   let bookingTimezoneBoundaryCount = 0;
+  const coveredCanonicalAiNodes = new Set();
   const unsupported = [];
 
   for (const template of latest.values()) {
@@ -793,6 +811,7 @@ async function testEveryPublishedAppointmentWorkflowPath() {
             pathName: `${window}:first_request`,
             clinicText,
             baselineStatus: 'info_enviada',
+            aiNodeCoverage: coveredCanonicalAiNodes,
           },
         );
         responsePathCount += 1;
@@ -805,6 +824,7 @@ async function testEveryPublishedAppointmentWorkflowPath() {
             pathName: `${window}:follow_up`,
             clinicText,
             baselineStatus: 'info_enviada',
+            aiNodeCoverage: coveredCanonicalAiNodes,
           },
         );
         responsePathCount += 1;
@@ -835,6 +855,7 @@ async function testEveryPublishedAppointmentWorkflowPath() {
           pathName: 'day_before:first_reminder',
           clinicText: '¿Me confirmas tu asistencia mañana?',
           baselineStatus: 'recordatorio_enviado',
+          aiNodeCoverage: coveredCanonicalAiNodes,
         },
       );
       responsePathCount += 1;
@@ -847,6 +868,7 @@ async function testEveryPublishedAppointmentWorkflowPath() {
           pathName: 'day_before:second_reminder',
           clinicText: '¿Me confirmas tu asistencia mañana?',
           baselineStatus: 'recordatorio_enviado',
+          aiNodeCoverage: coveredCanonicalAiNodes,
         },
       );
       responsePathCount += 1;
@@ -863,7 +885,7 @@ async function testEveryPublishedAppointmentWorkflowPath() {
       continue;
     }
 
-    if (name === 'Recordatorio mismo día a las 8 ¿Sabes llegar?') {
+    if (name.startsWith('Recordatorio mismo día a las 8 ¿Sabes llegar?')) {
       const hasContextualAccessAcknowledgement = nodes.some((node) => (
         node?.type === 'action/reply_message'
         && String(node?.config?.message_text || '').includes('hasta ahora')
@@ -893,6 +915,7 @@ async function testEveryPublishedAppointmentWorkflowPath() {
           shortAcknowledgementAcknowledgement: hasContextualAccessAcknowledgement,
           shortAcknowledgementNotification: false,
           expectMixedSuppression: !hasContextualAccessAcknowledgement,
+          aiNodeCoverage: coveredCanonicalAiNodes,
         },
       );
       responsePathCount += 1;
@@ -924,6 +947,7 @@ async function testEveryPublishedAppointmentWorkflowPath() {
           pathName: 'night_notice:response',
           clinicText: 'Necesitamos tu confirmación para mantener la cita de mañana. ¿Nos confirmas?',
           baselineStatus: 'recordatorio_enviado',
+          aiNodeCoverage: coveredCanonicalAiNodes,
         },
       );
       responsePathCount += 1;
@@ -957,6 +981,7 @@ async function testEveryPublishedAppointmentWorkflowPath() {
           responseAlreadyReceived: true,
           expectMixedSuppression: false,
           allowReviewReply: true,
+          aiNodeCoverage: coveredCanonicalAiNodes,
         },
       );
       responsePathCount += 1;
@@ -967,14 +992,18 @@ async function testEveryPublishedAppointmentWorkflowPath() {
   }
 
   assert.deepEqual(unsupported, [], `uncovered canonical workflow families: ${JSON.stringify(unsupported)}`);
-  const canonicalAiNodeCount = Array.from(latest.values()).reduce((total, template) => {
+  const expectedCanonicalAiNodes = Array.from(latest.values()).flatMap((template) => {
     const nodes = Array.isArray(template.nodes) ? template.nodes : JSON.parse(template.nodes || '[]');
-    return total + nodes.filter((node) => (
+    return nodes.filter((node) => (
       node?.type === 'condition/ai_analysis'
       && node?.config?.preset_key === 'classify_intent'
-    )).length;
-  }, 0);
-  assert.equal(responsePathCount, canonicalAiNodeCount, 'every canonical AI path must have a workflow contract');
+    )).map((node) => `${template.public_id}:${node.id}`);
+  });
+  assert.deepEqual(
+    Array.from(coveredCanonicalAiNodes).sort(),
+    expectedCanonicalAiNodes.sort(),
+    'every canonical AI node must be reached by a workflow contract',
+  );
   assert.equal(
     responseScenarioCount,
     responsePathCount * RESPONSE_MATRIX_SCENARIO_COUNT,
