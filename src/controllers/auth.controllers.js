@@ -21,7 +21,7 @@ function buildAccessToken(user) {
 }
 
 function buildAuthResponse(user) {
-    const plainUser = user?.get ? user.get({ plain: true }) : { ...user };
+    const plainUser = user?.get ? { ...user.get({ plain: true }) } : { ...user };
     plainUser.isAdmin = isGlobalAdmin(plainUser.id_usuario);
     delete plainUser.password_usuario;
     return {
