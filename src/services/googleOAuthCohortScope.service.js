@@ -142,9 +142,7 @@ async function authorize({ models, binding, requestScopeKey, actorId, sessionRef
   if (!fresh || C.digest(fresh) !== C.digest(binding)) C.fail();
   const requested = await authorizeConnection({ models, connectionId: binding.google_connection_id, subject: binding.google_user_id,
     requestScopeKey, actorId, sessionRef, expiresAt, transaction, sessions });
-  if (await models.ClinicGoogleAdsAccount.findOne({ ...options, attributes: ['id'],
-    where: { googleConnectionId: id(binding.google_connection_id), isActive: true } })) C.fail('google_oauth_consumers_pending');
-  let selected;
+  let selected = await require('./googleAdsOAuthScope.service').consumers(models, binding, options);
   for (const kind of Object.keys(SPECS)) {
     const result = await consumers(models, kind, binding, options); if (result) selected = result;
   }

@@ -2,7 +2,7 @@
 const test = require('node:test'); const assert = require('node:assert/strict'); const { randomBytes, randomUUID } = require('node:crypto');
 const { setup } = require('./google-oauth-broker-fixture.cjs'); const { validateConfig } = require('../src/google-main');
 const { operationsFor, bindingFor } = require('../src/google-oauth-contract');
-for (const provider of ['google_search_console', 'google_analytics']) {
+for (const provider of ['google_search_console', 'google_analytics', 'google_ads']) {
   test(provider + ' policy admits only its typed OAuth grants with a third independent principal and key', t => {
     const f = setup(t, provider); const config = { cohort: f.cohort, enabled: true, policy: f.policy, listenAddress: '127.0.0.1', port: 10443,
       stateFile: f.filename, tlsCertFile: f.dir + '/tls.crt', tlsKeyFile: f.dir + '/tls.key', cursorKeyFile: f.dir + '/cursor.key' };
@@ -11,7 +11,7 @@ for (const provider of ['google_search_console', 'google_analytics']) {
       c => { c.policy.principals[0].enabled = false; c.policy.principals[1].publicKey = c.policy.principals[0].publicKey; },
       c => { c.policy.grants[1].principalId = 'revoke:qa'; }, c => { c.policy.grants[1].principalId = 'api:test'; },
       c => { c.policy.connections[0].oauth.subject = 'foreign-subject'; },
-      c => { c.policy.connections[0].oauth.scopes.push('https://www.googleapis.com/auth/adwords'); },
+      c => { c.policy.connections[0].oauth.scopes.push(provider === 'google_ads' ? 'https://www.googleapis.com/auth/datamanager' : 'https://www.googleapis.com/auth/adwords'); },
       c => { c.policy.connections[0].oauth.scopes.push('https://www.googleapis.com/auth/business.manage'); },
       c => { c.policy.connections[0].oauth.scopes.push(provider === 'google_analytics' ? 'https://www.googleapis.com/auth/webmasters.readonly' : 'https://www.googleapis.com/auth/analytics.readonly'); },
       c => { c.policy.grants[1].operations = Object.values(operationsFor('google_business_profile')); },
@@ -20,7 +20,7 @@ for (const provider of ['google_search_console', 'google_analytics']) {
     }
     const readerOnly = structuredClone(config); readerOnly.policy.grants = [readerOnly.policy.grants[0]];
     delete readerOnly.policy.connections[0].oauth; validateConfig(readerOnly);
-    const foreign = structuredClone(config); foreign.policy.grants[1].assetRef = provider === 'google_analytics' ? 'ga4:999' : 'sc:' + 'f'.repeat(64);
+    const foreign = structuredClone(config); foreign.policy.grants[1].assetRef = provider === 'google_analytics' ? 'ga4:999' : provider === 'google_ads' ? 'ads:1111111111' : 'sc:' + 'f'.repeat(64);
     assert.throws(() => validateConfig(foreign), { code: 'scope_denied' });
     assert.equal(f.state.calls.length, 0);
   });

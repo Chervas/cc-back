@@ -10,6 +10,10 @@ const COHORTS = {
     create: require('../src/google-business-profile').createGoogleBusinessProfileOperations },
   google_search_console: { contract: require('../src/google-search-console-contract'), cohort: 'google-search-console-read-v1',
     create: require('../src/google-search-console').createSearchConsoleOperations },
+  google_ads: { contract: require('../src/google-ads-contract'), cohort: 'google-ads-read-v1',
+    create: ({ http, cursor, oauth }) => ({ ...require('../src/google-ads').createGoogleAdsOperations({ http, cursor,
+      withDeveloperSecret: async (_binding, use) => { const token = Buffer.from('FICTITIOUS_DEVELOPER'); try { return await use(token); } finally { token.fill(0); } } }).operations,
+      ...require('../src/google-oauth-contract').controlsFor('google_ads', oauth) }) },
   google_analytics: { contract: require('../src/google-analytics-contract'), cohort: 'google-analytics-read-v1',
     create: require('../src/google-analytics').createAnalyticsOperations },
 };
@@ -21,11 +25,12 @@ function setup(t, provider = 'google_business_profile') {
     policy.principals.push({ ...policy.principals[0], id, keyId, publicKey: key.publicKey.export({ type: 'spki', format: 'pem' }) });
   }
   const assetRef = provider === 'google_search_console' ? sm.binding.searchConsoleSites[0].assetRef : provider === 'google_analytics'
-    ? sm.binding.analyticsProperties[0].assetRef : 'gbp:123:456';
+    ? sm.binding.analyticsProperties[0].assetRef : provider === 'google_ads' ? 'ads:1234567890' : 'gbp:123:456';
   const readOperation = provider === 'google_business_profile' ? 'google.business_profile.details.read.v1'
-    : spec.contract.OPERATIONS.find(op => op.endsWith('.discovery.read.v1'));
+    : provider === 'google_ads' ? 'google.ads.account.read.v1' : spec.contract.OPERATIONS.find(op => op.endsWith('.discovery.read.v1'));
   const readResult = provider === 'google_business_profile' ? { name: 'locations/456', title: 'FICTITIOUS_TITLE' }
     : provider === 'google_search_console' ? { siteUrl: sm.binding.searchConsoleSites[0].siteUrl, permissionLevel: 'siteOwner' }
+    : provider === 'google_ads' ? { results: [{ customer: { id: '1234567890', manager: false, currencyCode: 'EUR', timeZone: 'Europe/Madrid' } }], nextPageToken: null }
     : { name: 'properties/123', account: 'accounts/456', parent: 'accounts/456', displayName: 'Fictitious property', propertyType: 'PROPERTY_TYPE_ORDINARY' };
   const grant = { tenantRef: 'clinic:123', connectionRef: 'connection:test', assetRef };
   policy.grants = [{ ...grant, principalId: 'api:test', operations: [readOperation] },

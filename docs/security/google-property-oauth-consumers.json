@@ -1,22 +1,33 @@
 {
-  "version": 2,
+  "version": 3,
   "reviewedAt": "2026-09-13",
-  "sourceHead": "53a3b212815b3b1cd636cbd1260f65fe50b845a9",
+  "sourceHead": "e0c1b16b33a849f256c7386e0818efe375bca4d2",
   "includesWorkingChanges": true,
   "runtimeMigrated": 0,
   "newMigrations": [
-    "20260913070000-scope-google-oauth-by-service.js"
+    "20260913100000-add-ads-google-oauth-cohort.js"
   ],
   "ops": "deferred_by_user",
   "awsInstance": "shutdown_announced_unverified",
-  "method": "Source review, isolated MySQL, offline backend/audit tests and Chromium with fictitious HTTP; prior unchanged broker HTTPS evidence retained.",
+  "method": "Current source snapshot plus reviewed OAuth Ads changes; owned MySQL and full offline Node suites, actual broker TLS with fake AWS/provider, isolated Chromium. Previous QA remains historical.",
   "qa": {
-    "backend": 133,
-    "audit": 41,
-    "frontend": 6,
-    "mysql": 92,
-    "ui": "isolated_build_and_24_chromium_captures",
-    "broker": "previous_phase_123_not_repeated_no_engine_changes"
+    "backendTests": 352,
+    "brokerTests": 160,
+    "platformAuditTests": 47,
+    "frontendTests": 6,
+    "mysqlChecks": 19,
+    "mysqlOwnedInstances": 1,
+    "shutdownCodes": [
+      0
+    ],
+    "ui": "development_build_and_18_isolated_chromium_captures",
+    "runtime": "no_real_account_or_provider_validation",
+    "evidence": [
+      "ads-oauth-qa.json",
+      "ads-oauth-full-node.json",
+      "ads-oauth-final-mysql.log",
+      "ads-oauth-ui/result.json"
+    ]
   },
   "pending": [
     "General onboarding/remapping, real bindings/grants and operational integration remain pending",
@@ -26,8 +37,8 @@
   "rows": [
     {
       "file": "services/integrations-broker/src/google-oauth-contract.js",
-      "sha256": "021d688ce131fdcee5c97e997b442b3d125626bc3a6635219b29d7804ccb6b39",
-      "status": "prepared_offline",
+      "sha256": "e71a23742149917a233d55cb6252ada04f6dfae0bf64b4fdb3e16b34b120bb33",
+      "status": "prepared_ads_typed_oauth_operations_identity_and_scopes",
       "note": "Typed operation prefixes, exact requested scopes and subject binding"
     },
     {
@@ -44,8 +55,8 @@
     },
     {
       "file": "services/integrations-broker/src/google-main.js",
-      "sha256": "618c72d57a7bced0423bcfe12950ab0c8fd389c30e6b64df872051bccfaffc67",
-      "status": "prepared_offline",
+      "sha256": "7c8607302e3ce61f04029893db3ddd28dd365558bf29a440bb5a13e4f5bea666",
+      "status": "prepared_ads_oauth_runtime_with_separate_principal_and_key",
       "note": "Per-cohort OAuth runtime and third-principal/key admission"
     },
     {
@@ -74,32 +85,32 @@
     },
     {
       "file": "src/services/googleOAuthBroker.service.js",
-      "sha256": "39a85987f42d9aa943585ac84274605bf09f5a16ab302b3db87659529fd94dae",
-      "status": "prepared_offline",
+      "sha256": "837436cb2814e6259e0dab4b8f05959d65a204f37181d4990ac145851196f920",
+      "status": "prepared_four_service_clients_status_callback_worker_and_legacy_exclusion",
       "note": "Typed clients, service-specific SQL requests and worker, v10 audit and metadata status"
     },
     {
       "file": "src/services/googleOAuthCohortScope.service.js",
-      "sha256": "1af612c9c2f6f3d1b0bae75cf8f0fa2e24a23985406c86c3e18545a50921c924",
-      "status": "prepared_offline",
+      "sha256": "db278dcd2a67cf28e0f63d30483b468c6bc119ec0e15156a898ecd743d5da965",
+      "status": "prepared_four_service_authorization_with_managed_ads_coexistence",
       "note": "Managed session, original scope, full consumer/primary/shared inventory and revalidation"
     },
     {
       "file": "src/services/googleOAuthCohort.contract.js",
-      "sha256": "b15429940fc82c96e86e70877d379931e73c35473b38a3031a2ddd19af9ec6da",
-      "status": "prepared_offline",
+      "sha256": "2bea66d93b925d1ddcea345dc6ab212045a33468976118ab7a31f3fe7ddd9ba7",
+      "status": "prepared_ads_as_fourth_closed_oauth_service",
       "note": "Closed service policies with historical digest compatibility"
     },
     {
       "file": "src/routes/oauth.routes.js",
-      "sha256": "11e68b940bca18b37035834382110291dbcff203e98c0a5c75213e8d26325886",
+      "sha256": "b12730d5ea099e6601e52d13e68795dcf2d78e9ed387a5a7eede7c4beb2baf03",
       "status": "prepared_offline",
       "note": "Explicit HTTP service selection and safe status errors"
     },
     {
       "file": "services/platform-audit/src/integration-oauth-event.js",
-      "sha256": "a57f1b623d99795d50371140e424c1ef0027d91f63b40a502cd83e29006713f9",
-      "status": "prepared_offline",
+      "sha256": "80103bc6e229e952664a6d2d1073b20191d2e77e9e7cc0eb12133db37f81e1ed",
+      "status": "prepared_ads_provider_in_v10_closed_audit",
       "note": "v10 service capture and fixed-size clinic-set commitment"
     },
     {
@@ -107,6 +118,40 @@
       "sha256": "b702afe94bc5b1f36bb8c11777f1d7fad2c568ffdc3f7d5ec0c73ee1a93848d0",
       "status": "prepared_offline",
       "note": "Expand identity and reference uniqueness by service; preserve existing requests"
+    },
+    {
+      "file": "src/services/googleAdsOAuthScope.service.js",
+      "status": "prepared_ads_all_consumer_authorization_and_post_callback_revalidation",
+      "sha256": "3b752da4566d1fb634b52b9fac9d252f385f60df6b74b4ce5fea61d9884da814"
+    },
+    {
+      "file": "models/googleoauthbrokerbinding.js",
+      "status": "prepared_four_service_binding_model",
+      "sha256": "3650943a37143ca6c0dfcb8861e165afe3afed422e8d1d4154603122dbb7a884"
+    },
+    {
+      "file": "models/googleoauthbrokerrequest.js",
+      "status": "prepared_four_service_request_model",
+      "sha256": "a4c9dbc33674a9b5b6c62f014261e5ff8eece785f9ae6128a8eba057a50fe496"
+    },
+    {
+      "file": "migrations/20260913100000-add-ads-google-oauth-cohort.js",
+      "status": "prepared_ddl_tested_only_on_owned_mysql",
+      "sha256": "7be428f8dcac4dd5cdd4d94dabcea17c13581d3bd3373e6e28416486c94d43de"
     }
+  ],
+  "previousQa": {
+    "backend": 133,
+    "audit": 41,
+    "frontend": 6,
+    "mysql": 92,
+    "ui": "isolated_build_and_24_chromium_captures",
+    "broker": "previous_phase_123_not_repeated_no_engine_changes"
+  },
+  "services": [
+    "business_profile",
+    "search_console",
+    "analytics",
+    "ads"
   ]
 }

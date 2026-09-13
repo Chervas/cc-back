@@ -6,6 +6,7 @@ const PROVIDERS = Object.freeze({
   google_business_profile: { prefix: PREFIX, scope: 'https://www.googleapis.com/auth/business.manage' },
   google_search_console: { prefix: 'google.search_console.oauth.', scope: 'https://www.googleapis.com/auth/webmasters.readonly' },
   google_analytics: { prefix: 'google.analytics.oauth.', scope: 'https://www.googleapis.com/auth/analytics.readonly' },
+  google_ads: { prefix: 'google.ads.oauth.', scope: 'https://www.googleapis.com/auth/adwords' },
 });
 function operationsFor(provider) {
   if (!Object.hasOwn(PROVIDERS, provider)) fail('invalid_request');

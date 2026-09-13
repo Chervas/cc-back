@@ -1,5 +1,13 @@
 # Auditoría de plataforma: primer bloque de autenticación
 
+## 13/09/2026 — OAuth Ads en el codec v10
+
+integration.oauth.authorize/activate admite provider=google_ads y assetRef Ads
+estricto. Mantiene formato v10, clinicCount/clinicSetDigest, correlación y actor
+original; versiones históricas conservadas. Writer y reader deben actualizarse
+antes de emitir Ads v10. 47 tests del servicio correctos y proyección verificada
+en MySQL propio; entrega S3 real pendiente. [Contrato](../../docs/security/google-ads-oauth-migration.md).
+
 ## 13/09/2026 — Desconexión Ads v11 preparada
 
 Codec, reader-protocol y visor admiten v11 integration.asset.disconnect: usuario

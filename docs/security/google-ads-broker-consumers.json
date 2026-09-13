@@ -1,36 +1,30 @@
 {
-  "version": 4,
+  "version": 5,
   "reviewedAt": "2026-09-13",
-  "sourceHead": "2112a26b21d02b34c5e525fb0e1080eb151c08b5",
+  "sourceHead": "e0c1b16b33a849f256c7386e0818efe375bca4d2",
   "includesWorkingChanges": true,
   "runtimeMigrated": 0,
   "newMigrations": [
-    "20260913090000-create-google-ads-broker-revocations.js"
+    "20260913100000-add-ads-google-oauth-cohort.js"
   ],
   "ops": "deferred_by_user",
   "qa": {
     "backendTests": 352,
+    "brokerTests": 160,
     "platformAuditTests": 47,
-    "mysqlChecks": 116,
-    "mysqlOwnedInstances": 9,
+    "frontendTests": 6,
+    "mysqlChecks": 19,
+    "mysqlOwnedInstances": 1,
     "shutdownCodes": [
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
       0
     ],
-    "broker": "unchanged_engine_previous_145_tests",
-    "ui": "contract_preserved_documentation_only",
+    "ui": "development_build_and_18_isolated_chromium_captures",
     "runtime": "no_real_account_or_provider_validation",
     "evidence": [
-      "ads-revocation-full-node.json",
-      "ads-revocation-audit.json",
-      "ads-revocation-full-mysql.json"
+      "ads-oauth-qa.json",
+      "ads-oauth-full-node.json",
+      "ads-oauth-final-mysql.log",
+      "ads-oauth-ui/result.json"
     ]
   },
   "operations": [
@@ -42,10 +36,15 @@
     "google.ads.landing_pages.read.v1",
     "google.ads.ads.read.v1",
     "google.ads.ad_metrics.read.v1",
-    "google.ads.asset.revoke.v1"
+    "google.ads.asset.revoke.v1",
+    "google.ads.oauth.begin.v1",
+    "google.ads.oauth.finish.v1",
+    "google.ads.oauth.activate.v1",
+    "google.ads.oauth.status.v1",
+    "google.ads.oauth.abort.v1"
   ],
   "pending": [
-    "Ads OAuth lifecycle, account registration/remapping workflow and approved real cut",
+    "Account registration/remapping, real bindings/grants and approved real Ads lifecycle cut",
     "Remaining Ads consumers, conversions, reception and writes",
     "Full platform audit, AWS costs/retention/IAM/Budget and database encryption/cut"
   ],
@@ -67,8 +66,8 @@
     },
     {
       "file": "services/integrations-broker/src/google-main.js",
-      "sha256": "8eaf2d34bc12a657331f0cab0080c2521a848457b0a5318470a35623b3a2822c",
-      "status": "prepared_broker_engine_offline"
+      "sha256": "7c8607302e3ce61f04029893db3ddd28dd365558bf29a440bb5a13e4f5bea666",
+      "status": "prepared_ads_oauth_runtime_with_separate_principal_and_key"
     },
     {
       "file": "services/integrations-broker/src/google-http.js",
@@ -127,8 +126,8 @@
     },
     {
       "file": "src/services/googleOAuthBroker.service.js",
-      "sha256": "588fccdad3ec5bde09980385919165c68022d4826cb9a74bbcc24bd694f6598e",
-      "status": "prepared_ads_legacy_oauth_exclusion"
+      "sha256": "837436cb2814e6259e0dab4b8f05959d65a204f37181d4990ac145851196f920",
+      "status": "prepared_four_service_clients_status_callback_worker_and_legacy_exclusion"
     },
     {
       "file": "src/services/oauthScopedDisconnect.service.js",
@@ -194,10 +193,83 @@
       "file": "src/config/scheduledJobCatalog.js",
       "status": "prepared_ads_control_job_not_activated",
       "sha256": "8aacf12c7c426554d98b761a66ae77b6216a6c5a41c4806b017b4656ce39ae23"
+    },
+    {
+      "file": "src/services/googleAdsOAuthScope.service.js",
+      "status": "prepared_ads_all_consumer_authorization_and_post_callback_revalidation",
+      "sha256": "3b752da4566d1fb634b52b9fac9d252f385f60df6b74b4ce5fea61d9884da814"
+    },
+    {
+      "file": "src/services/googleOAuthCohortScope.service.js",
+      "status": "prepared_four_service_authorization_with_managed_ads_coexistence",
+      "sha256": "db278dcd2a67cf28e0f63d30483b468c6bc119ec0e15156a898ecd743d5da965"
+    },
+    {
+      "file": "src/services/googleOAuthCohort.contract.js",
+      "status": "prepared_ads_as_fourth_closed_oauth_service",
+      "sha256": "2bea66d93b925d1ddcea345dc6ab212045a33468976118ab7a31f3fe7ddd9ba7"
+    },
+    {
+      "file": "services/integrations-broker/src/google-oauth-contract.js",
+      "status": "prepared_ads_typed_oauth_operations_identity_and_scopes",
+      "sha256": "e71a23742149917a233d55cb6252ada04f6dfae0bf64b4fdb3e16b34b120bb33"
+    },
+    {
+      "file": "services/platform-audit/src/integration-oauth-event.js",
+      "status": "prepared_ads_provider_in_v10_closed_audit",
+      "sha256": "80103bc6e229e952664a6d2d1073b20191d2e77e9e7cc0eb12133db37f81e1ed"
+    },
+    {
+      "file": "models/googleoauthbrokerbinding.js",
+      "status": "prepared_four_service_binding_model",
+      "sha256": "3650943a37143ca6c0dfcb8861e165afe3afed422e8d1d4154603122dbb7a884"
+    },
+    {
+      "file": "models/googleoauthbrokerrequest.js",
+      "status": "prepared_four_service_request_model",
+      "sha256": "a4c9dbc33674a9b5b6c62f014261e5ff8eece785f9ae6128a8eba057a50fe496"
+    },
+    {
+      "file": "migrations/20260913100000-add-ads-google-oauth-cohort.js",
+      "status": "prepared_ddl_tested_only_on_owned_mysql",
+      "sha256": "7be428f8dcac4dd5cdd4d94dabcea17c13581d3bd3373e6e28416486c94d43de"
     }
   ],
   "requiredAdsMigrations": [
     "20260913080000-add-google-ads-broker-bindings.js",
-    "20260913090000-create-google-ads-broker-revocations.js"
+    "20260913090000-create-google-ads-broker-revocations.js",
+    "20260913100000-add-ads-google-oauth-cohort.js"
+  ],
+  "previousQa": {
+    "backendTests": 352,
+    "platformAuditTests": 47,
+    "mysqlChecks": 116,
+    "mysqlOwnedInstances": 9,
+    "shutdownCodes": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "broker": "unchanged_engine_previous_145_tests",
+    "ui": "contract_preserved_documentation_only",
+    "runtime": "no_real_account_or_provider_validation",
+    "evidence": [
+      "ads-revocation-full-node.json",
+      "ads-revocation-audit.json",
+      "ads-revocation-full-mysql.json"
+    ]
+  },
+  "method": "Current source snapshot plus reviewed OAuth Ads changes; owned MySQL and full offline Node suites, actual broker TLS with fake AWS/provider, isolated Chromium. Previous QA remains historical.",
+  "services": [
+    "business_profile",
+    "search_console",
+    "analytics",
+    "ads"
   ]
 }

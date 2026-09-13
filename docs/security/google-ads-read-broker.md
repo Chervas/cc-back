@@ -190,8 +190,8 @@ Registro independiente, comprobación SQL NULL de tokens, autorización de grupo
 compartidos, cierre legacy e inyección en sync/backfill se prepararon en
 [el bloque backend](google-ads-backend-migration.md). La cola de
 confirmación y auditoría están preparadas en
-[la baja Ads](google-ads-revocation-migration.md). OAuth y el corte real siguen
-pendientes.
+[la baja Ads](google-ads-revocation-migration.md). [OAuth Ads](google-ads-oauth-migration.md)
+queda preparado en broker/API/Ajustes; el corte real sigue pendiente.
 Ads usa assignmentScope/grupoClinicaId y asignaciones explícitas; GrupoClinica no
 tiene una columna de cuenta Ads primaria. Los primarios SC/GA/GBP se comprueban
 en sus recorridos correspondientes.

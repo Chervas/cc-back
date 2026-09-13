@@ -10,9 +10,10 @@ function oauthSecretsFixture(provider = PROVIDER) {
     oauth: { subject: '123456789', redirectUri: 'https://auth.example.invalid/oauth/google/callback', scopes: ['openid','email','profile',SCOPE] } };
   if (provider !== PROVIDER) {
     binding.googleSubject = binding.oauth.subject;
-    const contract = require(provider === 'google_search_console' ? '../src/google-search-console-contract' : '../src/google-analytics-contract');
-    binding.oauth.scopes[3] = contract.SCOPES.find(s => s.endsWith('.readonly'));
+    const contract = require(provider === 'google_search_console' ? '../src/google-search-console-contract' : provider === 'google_ads' ? '../src/google-ads-contract' : '../src/google-analytics-contract');
+    binding.oauth.scopes[3] = provider === 'google_ads' ? contract.SCOPES[0] : contract.SCOPES.find(s => s.endsWith('.readonly'));
     if (provider === 'google_search_console') { const site = contract.site('sc-domain:example.invalid'); binding.searchConsoleSites = [{ siteUrl: site.siteUrl, assetRef: site.assetRef }]; }
+    else if (provider === 'google_ads') { binding.googleAdsAccounts = [{ customerId: '1234567890', loginCustomerId: '9876543210', assetRef: 'ads:1234567890' }]; binding.developerSecretArn = secretArn.replace('fictitious-google', 'fictitious-developer'); }
     else binding.analyticsProperties = [{ propertyName: 'properties/123', assetRef: 'ga4:123' }];
   }
   const app = { version: 1, provider: 'google-oauth-client', clientId: 'fictitious.apps.googleusercontent.com', clientSecret: 'FICTITIOUS_CLIENT_SECRET' };

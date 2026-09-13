@@ -126,7 +126,8 @@ full-node/full-mysql y acta de publicación conservan los resultados por suite. 
 incluye codec v11, lector firmado, versión S3 concreta y regresión de v1..v10.
 La UI conserva su contrato de metadata; esta fase no modifica componentes.
 
-OAuth Ads, alta/remapeo, consumidores restantes, escrituras/conversiones,
+[OAuth Ads](google-ads-oauth-migration.md) queda preparado en el bloque posterior.
+Alta/remapeo, consumidores restantes, escrituras/conversiones,
 auditoría completa, costes verificados y cifrado/restauración/corte BD siguen
 pendientes. No activar la cohorte Ads hasta completar su ciclo de vida y
 aprobar el corte real. OPS continúa aplazado por el usuario.

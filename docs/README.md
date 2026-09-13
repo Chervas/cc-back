@@ -1,5 +1,23 @@
 # Runbooks operativos del backend
 
+## 13/09/2026 — OAuth Ads preparado en broker, API y Ajustes
+
+Google Ads se incorpora como cuarto servicio (google_service=ads), con identidad
+fijada, PKCE/staging/activación y principal OAuth independiente. Comprueba todos
+los grupos, aliases y clínicas de la credencial antes y después del callback;
+revocaciones, pérdida de permisos o cambios de consumidores impiden activarla.
+Credenciales actualizadas no acreditan acceso ni eliminan bloqueos anteriores.
+
+DDL 20260913100000 amplía los dos ENUM OAuth; conserva las otras tres cohortes
+y rechaza down si queda cualquier binding o solicitud Ads. No aplicada a la BD
+compartida. Auditoría v10 admite Ads; catálogo de jobs sigue en 48, sin activar.
+QA: 565 tests Node, 19 checks en un MySQL propio con cierre 0, build Angular y
+18 capturas Chromium desktop/móvil con datos ficticios. Sin llamadas reales.
+
+Alta/remapeo, otros consumidores, auditoría completa, costes/controles AWS,
+cifrado BD y cortes reales siguen pendientes. OPS aplazado; ninguna conexión
+real migrada. [Contrato y evidencia](security/google-ads-oauth-migration.md).
+
 ## 13/09/2026 — Baja Ads durable y auditoría v11
 
 Desconexión Ads preparada en la transacción de mappings/assignment: registra

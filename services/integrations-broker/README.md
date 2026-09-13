@@ -1,5 +1,14 @@
 # Broker de integraciones
 
+## 13/09/2026 — OAuth Google Ads preparado
+
+La cohorte Ads admite cinco operaciones google.ads.oauth.*.v1 con principal/clave
+OAuth independientes, scopes fijados, PKCE, secreto v3, CAS y conciliación durable.
+Conserva las ocho lecturas y revocación por activo; renovar invalida lecturas en
+vuelo sin borrar bloqueos. API, permisos de grupos/compartidos y Ajustes preparados.
+160 tests del broker correctos, incluidos TLS runtime y proveedores ficticios.
+Sin configuración instalada, AWS ni conexión real. [Contrato, DDL y corte pendiente](../../docs/security/google-ads-oauth-migration.md).
+
 ## 13/09/2026 — Lecturas de sincronización Ads y colectores tipados
 
 El broker incorpora cuatro lecturas más: estados de publicación, destinos,

@@ -6,6 +6,7 @@ const COHORTS = Object.freeze({
   business_profile: { provider: 'google_business_profile', asset: /^gbp:[1-9]\d{0,29}:[1-9]\d{0,29}$/, gate: 'GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED' },
   search_console: { provider: 'google_search_console', asset: /^sc:[a-f0-9]{64}$/, gate: 'GOOGLE_SEARCH_CONSOLE_BROKER_ENABLED' },
   analytics: { provider: 'google_analytics', asset: /^ga4:[1-9]\d{0,19}$/, gate: 'GOOGLE_ANALYTICS_BROKER_ENABLED' },
+  ads: { provider: 'google_ads', asset: /^ads:(?!0000000000$)\d{10}$/, gate: 'GOOGLE_ADS_BROKER_ENABLED' },
 });
 const LEGACY_POLICY = 'google-oauth-pinned-v1'; const POLICY = 'google-oauth-cohorts-v1';
 const BASE_FIELDS = ['google_user_id', 'google_connection_id', 'connection_ref', 'asset_ref', 'clinica_id', 'scope_key', 'policy_version'];

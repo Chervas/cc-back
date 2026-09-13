@@ -11,7 +11,8 @@ const REASONS = {
   'integration.oauth.activate': { attempted: ['activation_requested'], completed: ['activation_confirmed'] },
 };
 const PROVIDERS = { business_profile: ['google_business_profile', /^gbp:[1-9]\d{0,29}:[1-9]\d{0,29}$/],
-  search_console: ['google_search_console', /^sc:[a-f0-9]{64}$/], analytics: ['google_analytics', /^ga4:[1-9]\d{0,19}$/] };
+  search_console: ['google_search_console', /^sc:[a-f0-9]{64}$/], analytics: ['google_analytics', /^ga4:[1-9]\d{0,19}$/],
+  ads: ['google_ads', /^ads:(?!0000000000$)\d{10}$/] };
 function exact(v, keys) {
   if (!v || Object.getPrototypeOf(v) !== Object.prototype || Object.keys(v).length !== keys.length || keys.some(k => !Object.hasOwn(v, k))) fail();
 }

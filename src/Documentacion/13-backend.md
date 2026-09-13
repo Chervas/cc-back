@@ -1,5 +1,37 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Google Ads como cuarto servicio OAuth
+
+GET /oauth/google/connect y /oauth/google/connection-status admiten google_service=ads,
+además de business_profile/search_console/analytics. El índice broker_services
+admite hasta cuatro servicios configurados; conserva connected:false. Selección
+inválida/sin binding falla con los errores existentes sin entrar en legacy.
+
+Ads fija identidad, referencia de credencial, activo de control y gestor. Comprueba
+registros/aliases, miembros reales de grupos, herencia/overrides y asignaciones
+compartidas. Requiere sesión y write sobre todo el conjunto antes/después de las
+llamadas. Un cambio de consumidores o revocación durante OAuth impide activar.
+Ads gestionado puede coexistir con las otras verticales; usos activos sin registro
+independiente siguen bloqueando OAuth. Renovar no elimina bloqueos ni prueba acceso.
+
+Broker: cinco operaciones google.ads.oauth.{begin,finish,activate,status,abort}.v1,
+principal/clave distintos de lectura/revocación, PKCE/staging v3/activación con CAS
+y conciliación durable. API y SQL conservan solo metadata. Auditoría v10 añade
+provider=google_ads y activo Ads; mantiene clinicCount/clinicSetDigest y formatos
+históricos. Writer/reader actualizados antes de captura. Worker y catálogo 48 intactos.
+
+DDL 20260913100000 amplía ambos ENUM cohort; preflight y conservación de datos de
+las otras tres verticales. Down rechaza cualquier binding o solicitud Ads. DDL
+compartida, configuración, secretos y despliegue pendientes de lote aprobado.
+Cliente: GOOGLE_ADS_BROKER_ORIGIN/AUDIENCE/CA_FILE y GOOGLE_ADS_BROKER_OAUTH_KEY_ID/
+KEY_FILE. Gates OAuth y Ads existentes. Ajustes muestra estado y reautorización
+por servicio, cancela respuestas de otra clínica y explica los permisos requeridos.
+
+QA aislada: 565 tests Node, 19 checks SQL propios con cierre 0, build Angular y
+18 capturas Chromium desktop/móvil. Cero proveedor/AWS/BD compartida. Contrato
+detallado en backend docs/security/google-ads-oauth-migration.md. OPS aplazado;
+alta/remapeo, consumidores restantes y corte real siguen pendientes.
+
 ## 13/09/2026 — Desconexión Ads durable y confirmación por broker
 
 DELETE /oauth/google/disconnect captura Ads en la misma transacción que las

@@ -50,10 +50,11 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     ['PlatformAuditEvent', 'platformauditevent'], ['AuthSession', 'authsession']]) models[name] = require('../../../models/' + file)(sql, D);
   table('GoogleConnectionAssignment', 'GoogleConnectionAssignments', { id: { type: D.INTEGER, primaryKey: true, autoIncrement: true },
     googleConnectionId: D.INTEGER, scopeKey: D.STRING, assignmentScope: D.STRING, clinicaId: D.INTEGER, grupoClinicaId: D.INTEGER, status: D.STRING });
-  for (const name of ['ClinicWebAsset', 'ClinicAnalyticsProperty', 'ClinicGoogleAdsAccount']) {
+  for (const name of ['ClinicWebAsset', 'ClinicAnalyticsProperty']) {
     await table(name, name === 'ClinicAnalyticsProperty' ? 'ClinicAnalyticsProperties' : name + 's',
       { id: { type: D.INTEGER, primaryKey: true }, clinicaId: D.INTEGER, googleConnectionId: D.INTEGER, isActive: D.BOOLEAN, siteUrl: D.STRING(512), propertyName: D.STRING(128) }).sync();
   }
+  models.ClinicGoogleAdsAccount = require('../../../models/clinicgoogleadsaccount')(sql, D); await models.ClinicGoogleAdsAccount.sync();
   table('ClinicBusinessLocation', 'ClinicBusinessLocations', { id: { type: D.INTEGER, primaryKey: true }, clinica_id: D.INTEGER,
     google_connection_id: D.INTEGER, location_id: D.STRING, broker_read_connection_ref: D.STRING, broker_read_asset_ref: D.STRING, is_active: D.BOOLEAN });
   table('BusinessProfileBrokerBinding', 'BusinessProfileBrokerBindings', { external_location_id: { type: D.STRING, primaryKey: true },
@@ -131,7 +132,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const remote = new Map(); const commands = []; let beforeFinish; let lostActivate = false;
   const client = { execute: async command => {
     const [_, vertical, __, action] = command.operation.split('.');
-    const cohort = vertical === 'business_profile' ? 'business_profile' : vertical === 'search_console' ? 'search_console' : vertical === 'analytics' ? 'analytics' : null;
+    const cohort = vertical === 'business_profile' ? 'business_profile' : vertical === 'search_console' ? 'search_console' : vertical === 'analytics' ? 'analytics' : vertical === 'ads' ? 'ads' : null;
     assert(cohort); const selected = bindings[cohort]; commands.push(command);
     assert.equal(command.connectionRef, selected.connection_ref); assert.equal(command.assetRef, selected.asset_ref); assert.equal(command.tenantRef, 'clinic:71');
     const flowId = command.payload.flowId || command.requestId;
@@ -164,7 +165,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   assert.equal(index.mode, 'broker_services');
   assert.deepEqual((await service.status({ ...input('analytics'), binding: index })).services.sort(), ['analytics', 'business_profile', 'search_console']);
   await assert.rejects(service.begin({ ...input('analytics'), binding: index }), { code: 'google_oauth_service_required' });
-  for (const selector of ['ads', '', ['analytics'], null]) await assert.rejects(service.bindingFor(81, selector), { code: 'google_oauth_service_invalid' });
+  for (const selector of ['unknown', '', ['analytics'], null]) await assert.rejects(service.bindingFor(81, selector), { code: 'google_oauth_service_invalid' });
   await assert.rejects(service.bindingFor(null, 'analytics'), { code: 'google_oauth_service_unconfigured' });
   for (const kind of Object.keys(bindings)) assert.equal((await service.bindingFor(81, kind)).cohort, kind);
   report.checks.push('Service selection is explicit, metadata index verifies managed scope/session, unsupported or unconfigured selectors never enter legacy');
@@ -266,4 +267,78 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   assert.equal(Number(credentials[0].n), 0);
   assert.equal(commands.filter(command => command.operation.endsWith('.finish.v1') && command.payload.flowId === pending.row.flow_id).length, 1);
   report.checks.push('API/SQL/audit keep provider codes and credentials out; no token restored and each callback code exchanged once through its service only');
+
+  const adsMigration = require('../../../migrations/20260913100000-add-ads-google-oauth-cohort');
+  const priorBindings = JSON.stringify(await B.findAll({ order: [['cohort', 'ASC']], raw: true }));
+  const priorRequests = JSON.stringify(await R.findAll({ order: [['flow_id', 'ASC']], raw: true }));
+  await adsMigration.up(qi); await adsMigration.down(qi); await adsMigration.up(qi);
+  assert.equal(JSON.stringify(await B.findAll({ order: [['cohort', 'ASC']], raw: true })), priorBindings);
+  assert.equal(JSON.stringify(await R.findAll({ order: [['flow_id', 'ASC']], raw: true })), priorRequests);
+  report.checks.push('Ads ENUM expansion and empty-Ads rollback preserve all existing service bindings and request history byte for byte');
+  const adsMapping = { id: 601, customerId: '1234567890', googleConnectionId: 81, assignmentScope: 'group',
+    grupoClinicaId: 9, clinicaId: 999, loginCustomerId: '9876543210', isActive: true,
+    broker_read_connection_ref: 'connection:qa:ads', broker_read_asset_ref: 'ads:1234567890' };
+  const adsRecord = { customer_id: '1234567890', mapping_id: 601, google_connection_id: 81, google_user_id: 'fictitious-subject',
+    connection_ref: 'connection:qa:ads', asset_ref: 'ads:1234567890', scope_key: 'group:9', tenant_clinic_id: 71, login_customer_id: '9876543210', state: 'active' };
+  await models.ClinicGoogleAdsAccount.create(adsMapping); await models.GoogleAdsBrokerBinding.create(adsRecord);
+  await models.ClinicGoogleAdsAccount.create({ ...adsMapping, id: 602, customerId: '123-456-7890', assignmentScope: 'clinic', clinicaId: 72 });
+  await models.GoogleAdsBrokerBinding.create({ ...adsRecord, mapping_id: 602, scope_key: 'clinic:72' });
+  await models.ClinicGoogleAdsAccount.create({ ...adsMapping, id: 603, customerId: '1111111111', grupoClinicaId: 10, broker_read_asset_ref: 'ads:1111111111' });
+  await models.GoogleAdsBrokerBinding.create({ ...adsRecord, mapping_id: 603, customer_id: '1111111111', asset_ref: 'ads:1111111111', scope_key: 'group:10', tenant_clinic_id: 73 });
+  bindings.ads = (await B.create({ ...Object.fromEntries(C.BASE_FIELDS.map(k => [k, bindings.analytics[k]])),
+    cohort: 'ads', connection_ref: 'connection:qa:ads', asset_ref: 'ads:1234567890', policy_version: C.POLICY, scope_key: 'connection:81' })).get({ plain: true });
+  bindings.search_console = replacement;
+  await assert.rejects(adsMigration.down(qi), /Preserve Ads OAuth history/);
+  const all = await service.bindingFor(81); assert.equal(all.bindings.length, 4);
+  assert.deepEqual((await service.status({ ...input('ads'), binding: all })).services.sort(), ['ads','analytics','business_profile','search_console']);
+  assert.equal((await service.bindingFor(81, 'ads')).cohort, 'ads');
+  await models.UsuarioClinica.update({ rol_clinica: 'lector' }, { where: { id_usuario: 501, id_clinica: 73 } });
+  await assert.rejects(start('ads'), { code: 'google_oauth_scope_forbidden' });
+  await models.UsuarioClinica.update({ rol_clinica: 'propietario' }, { where: { id_usuario: 501, id_clinica: 73 } });
+  const adsFlow = await start('ads'); assert.deepEqual(adsFlow.row.clinic_ids, [71,72,73]);
+  await callback(adsFlow); lostActivate = true; await service.run(); at = new Date(at.getTime() + 10000); await service.run();
+  assert.equal((await R.findByPk(adsFlow.row.flow_id)).state, 'active');
+  assert.equal((await service.status(input('ads'))).activation_confirmed, true);
+  const adsEvents = (await A.findAll({ where: { correlation_id: [adsFlow.row.flow_id, adsFlow.row.activation_id] }, raw: true })).map(r => require('../../../services/platform-audit/src/event').unpack(r).event);
+  assert.equal(adsEvents.length, 4); assert(adsEvents.every(e => e.version === 10 && e.provider === 'google_ads' && e.clinicCount === 3 && e.subjectUserId === '501'));
+  report.checks.push('Four services coexist; Ads renewal covers real group members and aliases across groups, requires all write permissions and confirms one durable activation after a lost ACK');
+  const adsOverride = await models.GoogleConnectionAssignment.create({ googleConnectionId: 81, scopeKey: 'clinic:72', assignmentScope: 'clinic', clinicaId: 72, grupoClinicaId: 9, status: 'disconnected' });
+  await assert.rejects(start('ads'), { code: 'google_oauth_scope_conflict' }); await adsOverride.destroy();
+  const unregistered = await models.ClinicGoogleAdsAccount.create({ ...adsMapping, id: 604, customerId: '2222222222', broker_read_connection_ref: null, broker_read_asset_ref: null });
+  await assert.rejects(start('ads'), { code: 'google_oauth_consumers_pending' });
+  await assert.rejects(start('search_console'), { code: 'google_oauth_consumers_pending' }); await unregistered.destroy();
+  await models.GoogleAdsBrokerBinding.update({ login_customer_id: '3333333333' }, { where: { mapping_id: 602 } });
+  await assert.rejects(start('ads'), { code: 'google_oauth_scope_conflict' });
+  await models.GoogleAdsBrokerBinding.update({ login_customer_id: '9876543210' }, { where: { mapping_id: 602 } });
+  report.checks.push('Disconnected overrides, unmanaged Ads consumers and changed pinned managers reject OAuth without touching credentials');
+  const changingAds = await start('ads');
+  await models.Clinica.create({ id_clinica: 74, grupoClinicaId: 10 });
+  await models.UsuarioClinica.create({ id_usuario: 501, id_clinica: 74, rol_clinica: 'propietario', estado_invitacion: 'aceptada' });
+  assert.equal((await callback(changingAds)).authorization_status, 'abort_pending'); await service.run();
+  assert.equal((await R.findByPk(changingAds.row.flow_id)).state, 'aborted');
+  await models.Clinica.destroy({ where: { id_clinica: 74 } }); await models.UsuarioClinica.destroy({ where: { id_clinica: 74 } });
+  const permissionAds = await start('ads');
+  beforeFinish = async () => models.UsuarioClinica.update({ rol_clinica: 'lector' }, { where: { id_usuario: 501, id_clinica: 73 } });
+  assert.equal((await callback(permissionAds)).authorization_status, 'abort_pending'); beforeFinish = null; await service.run();
+  await models.UsuarioClinica.update({ rol_clinica: 'propietario' }, { where: { id_usuario: 501, id_clinica: 73 } });
+  report.checks.push('New group consumers cancel an already started Ads flow even with permission; losing another group permission during callback also prevents activation');
+  const revokingAds = await start('ads'); const adsRevocation = require('../../services/googleAdsRevocation.contract');
+  const tombstone = { ...adsRecord, scope_key: 'group:9', clinic_ids: '[71,72]', mapping_ids: '[601,602]',
+    request_id: randomUUID(), actor_user_id: 501, requested_at: now(), next_attempt_at: now(), state: 'pending' };
+  tombstone.tuple_hash = adsRevocation.tupleHash(tombstone);
+  beforeFinish = () => models.GoogleAdsBrokerRevocation.create(tombstone);
+  assert.equal((await callback(revokingAds)).authorization_status, 'abort_pending'); beforeFinish = null; await service.run();
+  await assert.rejects(start('ads'), { code: 'google_oauth_scope_conflict' });
+  const unaffected = await start('search_console'); await callback(unaffected); await service.run();
+  assert.equal((await R.findByPk(unaffected.row.flow_id)).state, 'active'); assert.equal(await models.GoogleAdsBrokerRevocation.count(), 1);
+  assert.equal(commands.filter(c => c.operation === 'google.ads.oauth.finish.v1' && c.payload.flowId === revokingAds.row.flow_id).length, 1);
+  assert.equal(commands.filter(c => c.operation === 'google.ads.oauth.activate.v1' && c.payload.flowId === revokingAds.row.flow_id).length, 0);
+  const [afterAds] = await sql.query('SELECT COUNT(*) AS n FROM GoogleConnections WHERE accessToken IS NOT NULL OR refreshToken IS NOT NULL');
+  assert.equal(Number(afterAds[0].n), 0); assert(!JSON.stringify(await A.findAll({ raw: true })).includes('FICTITIOUS_CODE'));
+  report.checks.push('A durable Ads revocation during OAuth finish prevents activation and survives renewal of another service; SQL credentials remain NULL and the code is exchanged only once');
+  const currentAdsBinding = await B.findOne({ where: C.keyFor(bindings.ads), raw: true });
+  await B.destroy({ where: C.keyFor(bindings.ads) });
+  await assert.rejects(adsMigration.down(qi), /Preserve Ads OAuth history/);
+  await B.create(currentAdsBinding);
+  report.checks.push('Ads request history alone prevents removing the cohort from either ENUM after its original OAuth binding is deleted');
 }).catch(error => { console.error(error.code || error.message); console.error(error.stack?.split('\n').slice(0, 4).join('\n')); process.exitCode = 1; });

@@ -141,7 +141,8 @@ Evidencia privada: `ads-bindings-full-node.log/json`,
 se conservan aparte. No se repitieron tests del motor del broker o UI, cuyos
 fuentes no cambian en esta fase. Sin build de UI ni llamadas AWS/proveedor real.
 
-La evidencia de revocación posterior está en su contrato. Pendientes: OAuth Ads; otros consumidores, escrituras, recepción,
+La evidencia de revocación posterior está en su contrato. [OAuth Ads](google-ads-oauth-migration.md)
+queda preparado en broker/API/Ajustes; corte real pendiente. Faltan otros consumidores, escrituras, recepción,
 conversiones y optimización; auditoría completa, retención/IAM, costes verificados,
 Budget/CloudFormation y cifrado/restauración/corte real de BD. El objetivo completo
 permanece abierto y OPS aplazado. Push es publicación de fuentes, no despliegue.

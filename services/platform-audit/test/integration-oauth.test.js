@@ -36,7 +36,7 @@ test('reader verifies the exact OAuth audit version and rejects a substituted ve
 });
 test('OAuth v10 captures the selected service, initiating scope and complete authorized clinic set', () => {
   for (const [cohort, provider, asset_ref] of [['business_profile', 'google_business_profile', 'gbp:123:456'],
-    ['search_console', 'google_search_console', 'sc:' + 'a'.repeat(64)], ['analytics', 'google_analytics', 'ga4:123']]) {
+    ['search_console', 'google_search_console', 'sc:' + 'a'.repeat(64)], ['analytics', 'google_analytics', 'ga4:123'], ['ads', 'google_ads', 'ads:1234567890']]) {
     const selected = { ...row, cohort, policy_version: 'google-oauth-cohorts-v1', scope_key: 'connection:81', request_scope_key: 'clinic:71', clinic_ids: [71, 72, 73], asset_ref };
     for (const [action, stage, reason, worker] of [[ACTIONS[0], 'attempted', 'authorization_requested', false],
       [ACTIONS[0], 'completed', 'authorization_cancelled', true], [ACTIONS[1], 'completed', 'activation_confirmed', true]]) {
@@ -46,7 +46,7 @@ test('OAuth v10 captures the selected service, initiating scope and complete aut
       assert.equal(value.clinicSetDigest, require('node:crypto').createHash('sha256').update(JSON.stringify(['71', '72', '73'])).digest('hex'));
       assert.match(keyFor(p), /^app\/platform\/v10\//); refFor({ key: keyFor(p), digest: p.digest, versionId: 'fictitious-v10' }, 'confirmed');
       for (const changes of [{ clinicIds: [] }, { clinicCount: 0 }, { clinicCount: 1001 }, { clinicSetDigest: 'invalid' },
-        { provider: 'google_ads' }, { capturePolicy: 'google-oauth-pinned-v1' }, { token: 'FICTITIOUS_SECRET' }]) assert.throws(() => pack({ ...value, ...changes }));
+        { provider: 'google_unknown' }, { capturePolicy: 'google-oauth-pinned-v1' }, { token: 'FICTITIOUS_SECRET' }]) assert.throws(() => pack({ ...value, ...changes }));
     }
     for (const clinic_ids of [[], [72], [71, 71], [72, 71]]) assert.throws(() => fromFlow({ ...selected, clinic_ids }, ACTIONS[0], 'attempted', 'authorization_requested', new Date()));
     const large = fromFlow({ ...selected, clinic_ids: Array.from({ length: 1000 }, (_, i) => i + 1) }, ACTIONS[0], 'attempted', 'authorization_requested', new Date());

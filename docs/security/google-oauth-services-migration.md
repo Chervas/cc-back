@@ -2,7 +2,8 @@
 
 Preparada el 13/09/2026 sobre backend 53a3b212 y frontend 7410ada6. Este bloque
 conecta el [motor OAuth ya preparado](google-property-oauth-broker.md) con la API
-y Ajustes para Business Profile, Search Console y Analytics. Código y pruebas
+y Ajustes para Business Profile, Search Console y Analytics. La ampliación
+[OAuth Ads](google-ads-oauth-migration.md) añade ahora el cuarto servicio. Código y pruebas
 aisladas: **cero conexiones migradas/reautorizadas en runtime**. Sin AWS, proveedor
 real, BD compartida, despliegue ni cambio de pausas. OPS aplazado; apagado EC2
 anunciado por el usuario, sin verificar.
@@ -11,7 +12,7 @@ anunciado por el usuario, sin verificar.
 
 GoogleOAuthBrokerBindings admite una fila por (google_user_id, cohort), con
 unicidad de (google_connection_id, cohort) y (connection_ref, cohort). Servicios
-cerrados: business_profile, search_console, analytics. Cada fila conserva el
+cerrados: business_profile, search_console, analytics y ads. Cada fila conserva el
 subject Google, conexión SQL, referencia de credencial, activo de control y su
 clínica. No hay alta libre, descubrimiento de identidades ni copia de tokens.
 
@@ -29,9 +30,10 @@ SQL de credenciales NULL; nunca selecciona su contenido. Revalida la asignación
 actual con herencia de grupo y respeta un override disconnected/revoked. No
 permite iniciar desde un ámbito sin uso activo del servicio seleccionado.
 
-Inspecciona registros y mappings de las tres verticales. Un consumidor activo
-sin registro independiente, una identidad/referencia incoherente, un mapping ID
-reutilizado o Google Ads activo impiden la autorización. Los otros servicios
+Inspecciona registros y mappings de las cuatro verticales. Un consumidor activo
+sin registro independiente, una identidad/referencia incoherente o un mapping ID
+reutilizado impiden la autorización. Google Ads gestionado puede coexistir; sus
+consumidores sin registrar siguen bloqueando el flujo. Los otros servicios
 gestionados pueden coexistir. El activo de control necesita mapping activo y
 no revocado. Credenciales nuevas conservan todos los bloqueos del broker y SQL;
 una revocación de otra vertical no se borra para autorizar la seleccionada.
@@ -53,7 +55,7 @@ No se llama al proveedor dentro de una transacción SQL.
 ## API y estado
 
 GET /oauth/google/connect y /oauth/google/connection-status aceptan google_service
-con uno de los tres valores anteriores. Arrays, valores desconocidos o selección
+con uno de los cuatro valores anteriores. Arrays, valores desconocidos o selección
 sin binding fallan con error fijo, sin entrar en OAuth legacy. Se conservan los
 parámetros de ámbito explícito y las comprobaciones de permisos existentes.
 
@@ -134,6 +136,11 @@ por ese presupuesto temporal.
 | GBP | INTEGRATIONS_BROKER_ORIGIN/AUDIENCE/CA_FILE y GOOGLE_OAUTH_BROKER_KEY_ID/KEY_FILE históricos |
 | SC | GOOGLE_SEARCH_CONSOLE_BROKER_ORIGIN/AUDIENCE/CA_FILE y GOOGLE_SEARCH_CONSOLE_BROKER_OAUTH_KEY_ID/KEY_FILE |
 | GA | GOOGLE_ANALYTICS_BROKER_ORIGIN/AUDIENCE/CA_FILE y GOOGLE_ANALYTICS_BROKER_OAUTH_KEY_ID/KEY_FILE |
+| Ads | GOOGLE_ADS_BROKER_ORIGIN/AUDIENCE/CA_FILE y GOOGLE_ADS_BROKER_OAUTH_KEY_ID/KEY_FILE |
+
+Ads requiere además la DDL 20260913100000, sus registros 080000/090000 y el
+writer/reader v10 actualizado. El contrato Ads contiene su QA posterior; los
+recuentos de validación originales de este documento son históricos.
 
 No fallback entre clientes. Claves/CA son archivos privados canónicos, regulares,
 hasta 64 KiB. El broker exige principal/clave OAuth independientes de lectura y

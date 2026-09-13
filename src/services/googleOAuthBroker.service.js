@@ -95,8 +95,8 @@ function createGoogleOAuthBroker({ models, client, sessions, audit = createRepos
       if (!C.positive(String(connectionId))) {
         if (selectedService !== undefined) fail('google_oauth_service_unconfigured', 409); return null;
       }
-      const rows = await bindings.findAll({ where: { google_connection_id: Number(connectionId) }, raw: true, limit: 4, order: [['cohort', 'ASC']] });
-      if (rows.length > 3 || new Set(rows.map(row => C.cohortOf(C.validate(row)))).size !== rows.length
+      const rows = await bindings.findAll({ where: { google_connection_id: Number(connectionId) }, raw: true, limit: 5, order: [['cohort', 'ASC']] });
+      if (rows.length > 4 || new Set(rows.map(row => C.cohortOf(C.validate(row)))).size !== rows.length
         || new Set(rows.map(row => row.google_user_id)).size > 1) fail('google_oauth_scope_conflict', 409);
       if (selectedService !== undefined) {
         const row = rows.find(binding => C.cohortOf(binding) === selectedService);
@@ -194,7 +194,7 @@ function createGoogleOAuthBroker({ models, client, sessions, audit = createRepos
     async status({ binding, scopeKey, actorId, sessionRef, sessionExpiresAt }) {
       C.requestedScope(scopeKey);
       if (binding?.mode === 'broker_services') return transact(async transaction => {
-        const rows = await bindings.findAll({ ...locked(transaction), where: { google_connection_id: binding.google_connection_id }, raw: true, limit: 4, order: [['cohort', 'ASC']] });
+        const rows = await bindings.findAll({ ...locked(transaction), where: { google_connection_id: binding.google_connection_id }, raw: true, limit: 5, order: [['cohort', 'ASC']] });
         if (rows.length !== binding.bindings.length || JSON.stringify(rows.map(C.digest)) !== JSON.stringify(binding.bindings.map(C.digest))) fail('google_oauth_scope_conflict', 409);
         await require('./googleOAuthCohortScope.service').authorizeConnection({ models, connectionId: binding.google_connection_id,
           subject: rows[0].google_user_id, requestScopeKey: scopeKey, actorId, sessionRef, expiresAt: new Date(sessionExpiresAt * 1000), transaction, sessions });

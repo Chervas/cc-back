@@ -63,7 +63,7 @@ function validateConfig(config) {
   if (config.cohort === 'google-ads-read-v1') {
     if (!config.policy.connections.length || config.policy.connections.some(c => c.provider !== adsContract.PROVIDER || !c.secretArn || !c.clientSecretArn
       || !c.developerSecretArn || !require('./google-oauth-secrets').subject(c.googleSubject) || !c.googleAdsAccounts?.length
-      || c.oauth || c.analyticsProperties || c.searchConsoleSites)) fail('invalid_request');
+      || c.analyticsProperties || c.searchConsoleSites)) fail('invalid_request');
     for (const connection of config.policy.connections) {
       const ids = new Set();
       for (const row of connection.googleAdsAccounts) {
@@ -73,10 +73,12 @@ function validateConfig(config) {
     }
     for (const grant of config.policy.grants) {
       if (!/^clinic:[1-9]\d{0,9}$/.test(grant.tenantRef)
-        || grant.operations.some(op => !adsContract.OPERATIONS.includes(op) && op !== adsContract.REVOKE_OPERATION)) fail('invalid_request');
+        || grant.operations.some(op => !adsContract.OPERATIONS.includes(op) && op !== adsContract.REVOKE_OPERATION
+          && !Object.values(oauthContract.operationsFor(adsContract.PROVIDER)).includes(op))) fail('invalid_request');
       adsContract.resource(config.policy.connections.find(c => c.connectionRef === grant.connectionRef), grant.assetRef);
     }
     validatePropertyControlSeparation(config.policy, adsContract);
+    validateOAuthSeparation(config.policy, adsContract);
     return config;
   }
   if (config.policy.connections.some(c => c.googleAdsAccounts || c.developerSecretArn)) fail('invalid_request');
@@ -188,7 +190,8 @@ async function main(filename, { awsFactory = connectAws, http = createGoogleHttp
       secrets: createGoogleOAuthSecrets({ client: aws.secrets, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY }),
       onActivated: ref => { secrets.invalidate(ref); for (const controller of broker.active.get(ref) || []) controller.abort(); } });
     broker = new Broker({ store, policy: config.policy, secrets,
-      operations: ads ? adsEngine.operations : searchConsole ? createSearchConsoleOperations({ http, cursor, oauth }) : analytics ? createAnalyticsOperations({ http, cursor, oauth }) : createGoogleBusinessProfileOperations({ http, cursor, oauth }), timeoutMs: 25000 });
+      operations: ads ? { ...adsEngine.operations, ...oauthContract.controlsFor(adsContract.PROVIDER, oauth) }
+        : searchConsole ? createSearchConsoleOperations({ http, cursor, oauth }) : analytics ? createAnalyticsOperations({ http, cursor, oauth }) : createGoogleBusinessProfileOperations({ http, cursor, oauth }), timeoutMs: 25000 });
     let inFlight = 0;
     server = createServer({ async execute(...args) {
       if (inFlight >= 8) fail('rate_limited'); inFlight++;
