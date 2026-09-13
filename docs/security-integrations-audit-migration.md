@@ -1,5 +1,19 @@
 # Runbook: Migracion Segura De Integraciones Y Auditoria
 
+## 13/09/2026 — Transporte de canje WhatsApp y pertenencia del número
+
+Preparado helper privado con app/URI fijadas, GET Meta sin variantes/reintentos,
+token prestado solo al callback del broker, metadata cerrada, límites y borrado
+de buffers. Comprobación WABA/número por edge fijo, nunca siguiendo paging.next.
+294 tests broker pasan; 46 afectados se repiten tras el último refuerzo. Sin
+nueva DDL, UI, AWS/Meta real, configuración o despliegue. El canje HTTPS lleva
+código/app secret en query: excluirlo de logs/APM/errores y respuestas públicas.
+
+No es una operación autenticada instalada: conectar estado durable/MFA, registro
+previo al canje, candidata/versiones en Secrets Manager y conciliación antes de
+rutas/consumidores. Independencia remota de grants todavía por acreditar.
+[Contrato, fuentes y rollback](security/whatsapp-oauth-transport.md).
+
 ## 13/09/2026 — Estado durable de alta WhatsApp
 
 Preparado componente interno que exige sesión con correo MFA y ámbito completo,

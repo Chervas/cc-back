@@ -1,5 +1,22 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Transporte privado de canje WhatsApp
+
+`whatsapp-oauth-http` fija app/redirect y endpoint TLS de canje, con límites,
+sin reintentos/URI alternativas. Solo el callback interno recibe el token;
+la salida admite solo metadata y rechaza credenciales/campos adicionales. El
+consumidor debe obtener esa metadata del inspector/verificador del proveedor.
+`whatsapp-phone-verifier` comprueba que el número pertenezca al WABA consultado,
+con cursor acotado y endpoint fijo; nunca sigue paging.next ni devuelve perfiles.
+
+294 tests broker pasan, 31 nuevos; tras refuerzo final se repiten 46 afectados.
+Sin cambios de API/DTO público, DDL, UI o despliegue. La cuarentena se conserva:
+faltan operación autenticada, estado/candidata durables y unión con gateway/UI.
+El helper no aporta idempotencia por sí solo ni guarda credenciales en AWS.
+GET de canje incluye código/app secret en query HTTPS directa a Meta, excluida
+de logs/APM/respuestas. Contrato y fuentes:
+`back-dev/docs/security/whatsapp-oauth-transport.md`.
+
 ## 13/09/2026 — Estado interno de autorización WhatsApp
 
 `whatsappAuthorizationState.service` prepara issue/claim/status/cancel y

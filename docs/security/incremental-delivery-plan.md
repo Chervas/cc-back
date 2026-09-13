@@ -28,6 +28,13 @@ incidente. Las pruebas locales no autorizan llamadas reales ni una apertura.
 
 ## Motor WhatsApp: siguiente integración
 
+Añadido transporte privado de canje con app/URI fijas y prueba de pertenencia
+WABA/número por endpoint y cursor acotados. 294 pruebas broker pasan, 31 nuevas;
+46 afectadas repetidas tras el último refuerzo. Aún sin operación de alta,
+persistencia de candidata, rutas o configuración instaladas. Próximo bloque:
+unir estado MFA, lifecycle durable en broker y Secrets Manager; después conectar
+gateway/UI. [Transporte y límites](whatsapp-oauth-transport.md).
+
 Nuevo avance: estado de autorización durable ligado a sesión con correo MFA y
 conjunto exacto de clínicas, con reclamación única, cancelación y auditoría v15.
 Probado en MySQL ficticio; todavía sin rutas ni canje. Nueva DDL 20260913150000

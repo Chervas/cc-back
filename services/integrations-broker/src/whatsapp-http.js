@@ -4,14 +4,16 @@ const { tokenText } = require('./whatsapp-secrets'); const { GRAPH_VERSION } = r
 function createWhatsappHttp({ request = https.request, timeoutMs = 8000 } = {}) {
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10000) fail('invalid_request');
   return async input => {
-    if (!input || Object.keys(input).some(key => !['action', 'id', 'token', 'proof', 'candidate', 'json', 'signal'].includes(key))) fail('invalid_request');
-    const { action, id, token, proof, candidate, json, signal } = input;
-    if (!['send', 'template', 'inspect'].includes(action) || typeof id !== 'string' || !/^[1-9][0-9]{0,29}$/.test(id)
+    if (!input || Object.keys(input).some(key => !['action', 'id', 'token', 'proof', 'candidate', 'json', 'signal', 'after'].includes(key))) fail('invalid_request');
+    const { action, id, token, proof, candidate, json, signal, after } = input;
+    if (!['send', 'template', 'inspect', 'phones'].includes(action) || typeof id !== 'string' || !/^[1-9][0-9]{0,29}$/.test(id)
       || !Buffer.isBuffer(token) || !tokenText(token.toString('utf8'))
       || action !== 'inspect' && (typeof proof !== 'string' || !/^[a-f0-9]{64}$/.test(proof) || candidate !== undefined)
       || action === 'inspect' && (proof !== undefined || json !== undefined || !Buffer.isBuffer(candidate) || !tokenText(candidate.toString('utf8'))
         || !new RegExp('^' + id + '\\|[a-f0-9]{32}$').test(token.toString('utf8')))
-      || action === 'template' && json !== undefined || action === 'send' && (json?.messaging_product !== 'whatsapp' || !['text', 'template'].includes(json.type))) fail('invalid_request');
+      || ['template', 'phones'].includes(action) && json !== undefined
+      || after !== undefined && (action !== 'phones' || typeof after !== 'string' || !/^[A-Za-z0-9_+=/-]{1,2048}$/.test(after))
+      || action === 'send' && (json?.messaging_product !== 'whatsapp' || !['text', 'template'].includes(json.type))) fail('invalid_request');
     const body = action === 'send' ? Buffer.from(JSON.stringify(json)) : null;
     if (body?.length > 32768) fail('invalid_request');
     if (signal?.aborted) fail('provider_timeout');
@@ -20,6 +22,7 @@ function createWhatsappHttp({ request = https.request, timeoutMs = 8000 } = {}) 
     // to callers. Other operations keep their token solely in the bearer header.
     const query = new URLSearchParams(action === 'inspect' ? { input_token: candidate.toString('utf8') } : { appsecret_proof: proof });
     if (action === 'template') query.set('fields', 'id,name,language,status,components');
+    if (action === 'phones') { query.set('fields', 'id'); query.set('limit', '100'); if (after !== undefined) query.set('after', after); }
     return new Promise((resolve, reject) => {
       let req; let timer; let settled = false;
       const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); error ? reject(error) : resolve(value); };
@@ -27,7 +30,7 @@ function createWhatsappHttp({ request = https.request, timeoutMs = 8000 } = {}) 
       timer = setTimeout(abort, timeoutMs); timer.unref?.();
       try {
         req = request({ protocol: 'https:', hostname: 'graph.facebook.com', port: 443,
-          method: action === 'send' ? 'POST' : 'GET', path: `/${GRAPH_VERSION}/${action === 'inspect' ? 'debug_token' : id}${action === 'send' ? '/messages' : ''}?${query}`,
+          method: action === 'send' ? 'POST' : 'GET', path: `/${GRAPH_VERSION}/${action === 'inspect' ? 'debug_token' : id}${action === 'send' ? '/messages' : action === 'phones' ? '/phone_numbers' : ''}?${query}`,
           agent: false, rejectUnauthorized: true, minVersion: 'TLSv1.2', headers: { authorization: 'Bearer ' + token.toString('utf8'),
             accept: 'application/json', 'accept-encoding': 'identity', ...(body ? { 'content-type': 'application/json', 'content-length': body.length } : {}) } }, res => {
           const contentType = String(res.headers['content-type'] || '').split(';')[0].trim().toLowerCase();

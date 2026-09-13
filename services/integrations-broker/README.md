@@ -1,5 +1,13 @@
 # Broker de integraciones
 
+## 13/09/2026 — Transporte privado del alta WhatsApp
+
+Canje con aplicación/URI fijadas, token prestado solo dentro del broker y
+resultado de metadata; prueba de pertenencia WABA/número con edge/cursor fijos.
+294 pruebas broker pasan, 31 nuevas; 46 afectadas repetidas tras refuerzo final.
+Sin operación de alta registrada, Secrets Manager candidato o rutas integradas.
+No se ha abierto Meta. [Contrato y próximos pasos](../../docs/security/whatsapp-oauth-transport.md).
+
 ## 13/09/2026 — Inspección de credenciales WhatsApp
 
 Antes de usar un secreto, el runtime verifica respuesta Meta de identidad,

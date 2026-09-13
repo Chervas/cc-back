@@ -4,6 +4,12 @@
 incidente ni verificado estas protecciones en los procesos que sirven tráfico.
 El código de contención mantiene WhatsApp cerrado a escrituras y Meta sin salida.
 
+Preparados [transporte de canje y prueba de pertenencia](whatsapp-oauth-transport.md),
+con configuración fijada, token prestado dentro del broker, metadata cerrada y
+verificación WABA/número paginada. 294 pruebas broker, proveedores ficticios.
+Falta unirlo al estado durable/MFA, almacenamiento de candidata y operación
+autenticada del broker; no se ha abierto ninguna ruta ni ejecutado un canje real.
+
 Avance local posterior: [estado de alta](whatsapp-authorization-state.md) durable,
 con sesión MFA vigente, conjunto de clínicas fijado, reclamación única y auditoría
 transaccional. 3 tests de contrato, 55 de auditoría y 12 comprobaciones MySQL

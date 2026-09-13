@@ -81,3 +81,14 @@ test('inspection transport errors do not expose candidate, app secret or diagnos
     for (const value of [SEND_TOKEN, APP_SECRET, '/debug_token?input_token=']) assert(!output.includes(value)); return true;
   });
 });
+test('Phone membership transport pins the WABA edge, ID-only fields and bounded cursor', async () => {
+  const f = wire({ response: { data: [{ id: '401' }] } }); const http = createWhatsappHttp({ request: f.request });
+  const request = input({ action: 'phones', id: '301', json: undefined, after: 'opaque_cursor=' });
+  await http(request);
+  const url = new URL('https://graph.facebook.com' + f.calls[0].options.path);
+  assert.equal(url.pathname, '/v24.0/301/phone_numbers'); assert.equal(url.searchParams.get('fields'), 'id');
+  assert.equal(url.searchParams.get('limit'), '100'); assert.equal(url.searchParams.get('after'), 'opaque_cursor=');
+  assert(!url.href.includes(SEND_TOKEN)); assert.equal(f.calls[0].options.headers.authorization, 'Bearer ' + SEND_TOKEN);
+  for (const changes of [{ action: 'template' }, { action: 'inspect' }, { after: 'https://example.invalid/' }, { json: {} }]) await assert.rejects(http({ ...request, ...changes }), { code: 'invalid_request' });
+  assert.equal(f.calls.length, 1);
+});

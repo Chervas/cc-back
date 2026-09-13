@@ -1,5 +1,13 @@
 # Seguridad: implementación y evidencias
 
+## 13/09/2026 — Transporte del alta WhatsApp preparado
+
+Canje con app/URI fijadas y prueba WABA/número, únicamente dentro del broker;
+294 tests ficticios pasan y 46 afectados repetidos tras el refuerzo final.
+Sin rutas, operación de alta, candidata en Secrets Manager ni configuración
+instaladas. Siguiente unión: estado MFA, canje durable, almacenamiento/conciliación
+y gateway/UI. Sin nueva DDL o despliegue. [Contrato](whatsapp-oauth-transport.md).
+
 ## 13/09/2026 — Estado de alta WhatsApp con MFA y consumo único
 
 Componente interno de autorización durable, ámbito fijado, reclamación única,
