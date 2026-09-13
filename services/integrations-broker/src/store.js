@@ -21,6 +21,12 @@ class BrokerStore {
         revision INTEGER NOT NULL, expires_at INTEGER, reason TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS asset_revocations (tenant TEXT NOT NULL, connection TEXT NOT NULL, asset TEXT NOT NULL,
         request_id TEXT NOT NULL, revoked_at INTEGER NOT NULL, PRIMARY KEY(tenant,connection,asset));
+      CREATE TABLE IF NOT EXISTS google_ads_enrollments (asset TEXT PRIMARY KEY, id TEXT NOT NULL UNIQUE,
+        principal TEXT NOT NULL, tenant TEXT NOT NULL, connection TEXT NOT NULL, scope TEXT NOT NULL,
+        customer TEXT NOT NULL UNIQUE, manager TEXT, clinic_count INTEGER NOT NULL, clinic_digest TEXT NOT NULL,
+        config_digest TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('prepared','active')),
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS google_ads_enrollment_scope ON google_ads_enrollments(connection,scope);
       CREATE TABLE IF NOT EXISTS google_oauth_flows (id TEXT PRIMARY KEY, principal TEXT NOT NULL, tenant TEXT NOT NULL,
         connection TEXT NOT NULL, asset TEXT NOT NULL, state_hash TEXT NOT NULL UNIQUE, config_digest TEXT NOT NULL,
         created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, state TEXT NOT NULL,
@@ -107,8 +113,9 @@ class BrokerStore {
       return null;
     });
   }
-  complete(principal, id, result, event, { persistResult = true } = {}) {
+  complete(principal, id, result, event, { persistResult = true, mutate } = {}) {
     this.transaction(() => {
+      mutate?.();
       this.appendAudit(event);
       this.db.prepare("UPDATE commands SET state='completed',result=? WHERE principal=? AND id=? AND state='started'").run(persistResult ? JSON.stringify(result) : null, principal, id);
     });

@@ -16,6 +16,8 @@ const { createGoogleOAuthSecrets } = require('./google-oauth-secrets');
 const adsContract = require('./google-ads-contract');
 const { createGoogleAdsOperations } = require('./google-ads');
 const { createGoogleAdsDeveloperSecret } = require('./google-ads-developer-secret');
+const enrollmentContract = require('./google-ads-enrollment-contract');
+const { createGoogleAdsEnrollment } = require('./google-ads-enrollment');
 const ACCOUNT = '137819318729'; const REGION = 'eu-west-3';
 const SOURCE = `arn:aws:sts::${ACCOUNT}:assumed-role/clinicaclick-integrations-prod-ec2-role/i-0cf40cfe823f160fa`;
 const WRITER_ROLE = `arn:aws:iam::${ACCOUNT}:role/clinicaclick-audit-prod-writer-role`;
@@ -62,11 +64,11 @@ function validateConfig(config) {
   validatePolicy(config.policy);
   if (config.cohort === 'google-ads-read-v1') {
     if (!config.policy.connections.length || config.policy.connections.some(c => c.provider !== adsContract.PROVIDER || !c.secretArn || !c.clientSecretArn
-      || !c.developerSecretArn || !require('./google-oauth-secrets').subject(c.googleSubject) || !c.googleAdsAccounts?.length
+      || !c.developerSecretArn || !require('./google-oauth-secrets').subject(c.googleSubject) || !(c.googleAdsAccounts?.length || c.googleAdsEnrollmentScopes?.length)
       || c.analyticsProperties || c.searchConsoleSites)) fail('invalid_request');
     for (const connection of config.policy.connections) {
       const ids = new Set();
-      for (const row of connection.googleAdsAccounts) {
+      for (const row of connection.googleAdsAccounts || []) {
         adsContract.resource(connection, row.assetRef);
         if (ids.has(row.assetRef)) fail('invalid_request'); ids.add(row.assetRef);
       }
@@ -74,14 +76,21 @@ function validateConfig(config) {
     for (const grant of config.policy.grants) {
       if (!/^clinic:[1-9]\d{0,9}$/.test(grant.tenantRef)
         || grant.operations.some(op => !adsContract.OPERATIONS.includes(op) && op !== adsContract.REVOKE_OPERATION
-          && !Object.values(oauthContract.operationsFor(adsContract.PROVIDER)).includes(op))) fail('invalid_request');
-      adsContract.resource(config.policy.connections.find(c => c.connectionRef === grant.connectionRef), grant.assetRef);
+          && !Object.values(oauthContract.operationsFor(adsContract.PROVIDER)).includes(op)
+          && !Object.values(enrollmentContract.OPERATIONS).includes(op))) fail('invalid_request');
+      const binding = config.policy.connections.find(c => c.connectionRef === grant.connectionRef);
+      if (grant.assetRef.startsWith('ads-enroll:')) enrollmentContract.scopeFor(binding, grant.assetRef, grant.tenantRef);
+      else {
+        if (grant.operations.some(op => Object.values(enrollmentContract.OPERATIONS).includes(op))) fail('invalid_request');
+        adsContract.resource(binding, grant.assetRef);
+      }
     }
     validatePropertyControlSeparation(config.policy, adsContract);
     validateOAuthSeparation(config.policy, adsContract);
+    enrollmentContract.validatePolicy(config.policy);
     return config;
   }
-  if (config.policy.connections.some(c => c.googleAdsAccounts || c.developerSecretArn)) fail('invalid_request');
+  if (config.policy.connections.some(c => c.googleAdsAccounts || c.googleAdsEnrollmentScopes || c.developerSecretArn)) fail('invalid_request');
   if (config.cohort === 'google-search-console-read-v1') {
     if (!config.policy.connections.length || config.policy.connections.some(c => c.provider !== scContract.PROVIDER || !c.secretArn || !c.clientSecretArn
       || !require('./google-oauth-secrets').subject(c.googleSubject) || !c.searchConsoleSites?.length || c.analyticsProperties)) fail('invalid_request');
@@ -170,7 +179,7 @@ async function main(filename, { awsFactory = connectAws, http = createGoogleHttp
   const config = validateConfig(JSON.parse(privateFile(filename)));
   const cert = privateFile(config.tlsCertFile, 65536); const key = privateFile(config.tlsKeyFile, 65536);
   const cursorKey = privateFile(config.cursorKeyFile, 32); const cursor = cursorCodec(cursorKey);
-  const store = new BrokerStore(config.stateFile); let aws; let secrets; let oauth; let adsEngine; let server; let timer; let draining;
+  const store = new BrokerStore(config.stateFile); let aws; let secrets; let oauth; let adsEngine; let adsEnrollment; let server; let timer; let draining;
   try {
     aws = await awsFactory();
     const searchConsole = config.cohort === 'google-search-console-read-v1';
@@ -179,18 +188,21 @@ async function main(filename, { awsFactory = connectAws, http = createGoogleHttp
     secrets = createGoogleSecretStore({ client: aws.secrets, http, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY,
       provider: searchConsole ? scContract.PROVIDER : analytics ? gaContract.PROVIDER : ads ? adsContract.PROVIDER : PROVIDER });
     if (ads) {
-      adsEngine = createGoogleAdsOperations({ http, cursor,
-        withDeveloperSecret: createGoogleAdsDeveloperSecret({ client: aws.secrets, accountId: ACCOUNT,
-          prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY }) });
+      const withDeveloperSecret = createGoogleAdsDeveloperSecret({ client: aws.secrets, accountId: ACCOUNT,
+        prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY });
+      adsEngine = createGoogleAdsOperations({ http, cursor, withDeveloperSecret });
+      if (config.policy.connections.some(c => c.googleAdsEnrollmentScopes?.length)) {
+        adsEnrollment = createGoogleAdsEnrollment({ store, http, cursor, withDeveloperSecret });
+      }
       const invalidate = secrets.invalidate;
-      secrets.invalidate = ref => { invalidate(ref); adsEngine.invalidate(ref); };
+      secrets.invalidate = ref => { invalidate(ref); adsEngine.invalidate(ref); adsEnrollment?.invalidate(ref); };
     }
     let broker;
     if (config.policy.connections.some(c => c.oauth)) oauth = createGoogleOAuth({ store, policy: config.policy, http,
       secrets: createGoogleOAuthSecrets({ client: aws.secrets, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY }),
       onActivated: ref => { secrets.invalidate(ref); for (const controller of broker.active.get(ref) || []) controller.abort(); } });
-    broker = new Broker({ store, policy: config.policy, secrets,
-      operations: ads ? { ...adsEngine.operations, ...oauthContract.controlsFor(adsContract.PROVIDER, oauth) }
+    broker = new Broker({ store, policy: config.policy, secrets, adsEnrollment,
+      operations: ads ? { ...adsEngine.operations, ...adsEnrollment?.operations, ...oauthContract.controlsFor(adsContract.PROVIDER, oauth) }
         : searchConsole ? createSearchConsoleOperations({ http, cursor, oauth }) : analytics ? createAnalyticsOperations({ http, cursor, oauth }) : createGoogleBusinessProfileOperations({ http, cursor, oauth }), timeoutMs: 25000 });
     let inFlight = 0;
     server = createServer({ async execute(...args) {
@@ -205,13 +217,13 @@ async function main(filename, { awsFactory = connectAws, http = createGoogleHttp
     tick(); timer = setInterval(tick, 1000); timer.unref();
     let closing;
     const close = () => closing ||= (async () => {
-      clearInterval(timer); oauth?.close(); adsEngine?.close(); secrets.close();
+      clearInterval(timer); oauth?.close(); adsEngine?.close(); adsEnrollment?.close(); secrets.close();
       for (const controllers of broker.active.values()) for (const controller of controllers) controller.abort();
       await new Promise(resolve => { server.close(resolve); server.closeIdleConnections?.(); });
       await draining; aws.close(); cursorKey.fill(0); store.close();
     })();
     return { server, store, broker, close };
-  } catch (error) { clearInterval(timer); server?.close(); oauth?.close(); adsEngine?.close(); secrets?.close(); aws?.close(); cursorKey.fill(0); store.close(); throw error; }
+  } catch (error) { clearInterval(timer); server?.close(); oauth?.close(); adsEngine?.close(); adsEnrollment?.close(); secrets?.close(); aws?.close(); cursorKey.fill(0); store.close(); throw error; }
 }
 if (require.main === module) main(process.argv[2]).then(runtime => {
   const stop = () => runtime.close().catch(() => { process.exitCode = 1; });

@@ -14,9 +14,9 @@ function canonical(value) {
   return JSON.stringify(value);
 }
 class Broker {
-  constructor({ store, policy, secrets, operations = OPERATIONS, now = () => Date.now(), timeoutMs = 10000 }) {
+  constructor({ store, policy, secrets, operations = OPERATIONS, adsEnrollment, now = () => Date.now(), timeoutMs = 10000 }) {
     this.store = store; this.policy = structuredClone(validatePolicy(policy)); this.secrets = secrets;
-    this.operations = operations; this.now = now; this.timeoutMs = Math.min(30000, Math.max(1, timeoutMs));
+    this.operations = operations; this.adsEnrollment = adsEnrollment; this.now = now; this.timeoutMs = Math.min(30000, Math.max(1, timeoutMs));
     this.active = new Map(); this.activeAssets = new Map();
     for (const item of policy.connections) {
       // Main program forbids real active cohorts until their adapter and approval exist.
@@ -33,13 +33,15 @@ class Broker {
     this.store.acceptNonce(principal.id, request.nonce, now, Math.min(600, Math.max(1, principal.maxPerMinute || 60)));
     let operation; let binding;
     try {
-      authorize(principal, request, this.policy);
+      const resolved = this.adsEnrollment?.resolve(request, principal, this.policy) || this.policy;
+      authorize(principal, request, resolved);
       operation = this.operations[request.operation];
       if (!operation || !Object.hasOwn(this.operations, request.operation)) fail('operation_denied');
-      binding = this.policy.connections.find(item => item.connectionRef === request.connectionRef);
+      binding = resolved.connections.find(item => item.connectionRef === request.connectionRef);
       if (!binding || binding.provider !== operation.provider) fail('scope_denied');
       operation.validate(request.payload);
-      if (!['revoke_asset','google_oauth'].includes(operation.control)) {
+      this.adsEnrollment?.assert(request, principal, this.policy);
+      if (!['revoke_asset','google_oauth','google_ads_enrollment_status'].includes(operation.control)) {
         this.store.connection(request.connectionRef, now);
         this.store.assertAssetActive(request);
       }
@@ -75,7 +77,8 @@ class Broker {
     const cached = this.store.reserve(principal.id, request.requestId, digest,
       eventFor(request, principal, this.policy, 'integration.requested', 'accepted', 'authorized', now), this.policy.maxBacklog, now);
     if (cached) return { ...cached, replayed: true };
-    const revision = this.store.connection(request.connectionRef, now).revision;
+    const metadataOnly = operation.control === 'google_ads_enrollment_status' && operation.secretless === true;
+    const revision = metadataOnly ? null : this.store.connection(request.connectionRef, now).revision;
     const controller = new AbortController();
     const active = this.active.get(request.connectionRef) || new Set(); active.add(controller); this.active.set(request.connectionRef, active);
     const activeAsset = this.activeAssets.get(assetKey) || new Set(); activeAsset.add(controller); this.activeAssets.set(assetKey, activeAsset);
@@ -87,27 +90,50 @@ class Broker {
       }
     };
     try {
-      const work = this.secrets.withSecret(binding, async secret => {
+      const execute = async secret => {
         if (controller.signal.aborted) fail('provider_timeout');
-        if (this.store.connection(request.connectionRef, this.now()).revision !== revision) fail('connection_blocked');
-        this.store.assertAssetActive(request);
+        if (!metadataOnly) {
+          if (this.store.connection(request.connectionRef, this.now()).revision !== revision) fail('connection_blocked');
+          this.store.assertAssetActive(request);
+        }
+        this.adsEnrollment?.assert(request, principal, this.policy);
         const rawResult = await operation.execute({ payload: request.payload, binding, assetRef: request.assetRef,
-          tenantRef: request.tenantRef, principalId: principal.id, policyVersion: this.policy.version, secret, signal: controller.signal });
+          tenantRef: request.tenantRef, principalId: principal.id, policyVersion: this.policy.version, policy: this.policy, secret, signal: controller.signal });
         if (controller.signal.aborted) fail('provider_timeout');
         // Recheck after awaits, including blocks written by a separate local operator process.
-        if (this.store.connection(request.connectionRef, this.now()).revision !== revision) fail('connection_blocked');
-        this.store.assertAssetActive(request);
+        if (!metadataOnly) {
+          if (this.store.connection(request.connectionRef, this.now()).revision !== revision) fail('connection_blocked');
+          this.store.assertAssetActive(request);
+        }
+        this.adsEnrollment?.assert(request, principal, this.policy);
         const data = operation.project(rawResult);
-        if (JSON.stringify(data).includes(secret.toString('utf8'))) fail('provider_failed');
+        if (secret && JSON.stringify(data).includes(secret.toString('utf8'))) fail('provider_failed');
         return data;
-      }, { signal: controller.signal, onRevoked, requiredScopes: operation.requiredScopes });
+      };
+      const work = metadataOnly ? execute(null) : this.secrets.withSecret(binding, execute,
+        { signal: controller.signal, onRevoked, requiredScopes: operation.requiredScopes });
       const data = await Promise.race([work, new Promise((_, reject) => {
         timer = setTimeout(() => { controller.abort(); reject(new BrokerError('provider_timeout')); }, this.timeoutMs);
       })]);
+      if (controller.signal.aborted) fail('provider_timeout');
+      if (!metadataOnly) {
+        if (this.store.connection(request.connectionRef, this.now()).revision !== revision) fail('connection_blocked');
+        this.store.assertAssetActive(request);
+      }
+      this.adsEnrollment?.assert(request, principal, this.policy);
       const result = { requestId: request.requestId, data, replayed: false };
       this.store.complete(principal.id, request.requestId, result,
         eventFor(request, principal, this.policy, 'integration.completed', 'success', 'completed', this.now()),
-        { persistResult: operation.persistResult !== false });
+        { persistResult: operation.persistResult !== false, mutate: () => {
+          // The final check shares the SQLite write lock with any enrollment,
+          // receipt and audit changes, including revocations by another process.
+          if (!metadataOnly) {
+            if (this.store.connection(request.connectionRef, this.now()).revision !== revision) fail('connection_blocked');
+            this.store.assertAssetActive(request);
+          }
+          this.adsEnrollment?.assert(request, principal, this.policy);
+          operation.commit?.({ request, principal, policy: this.policy, result });
+        } });
       return result;
     } catch (error) {
       const code = error instanceof BrokerError ? error.code : 'provider_failed';

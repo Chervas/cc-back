@@ -1,5 +1,28 @@
 # Seguridad: implementación y evidencias
 
+## 13/09/2026 — Alta de cuentas Ads: motor del broker preparado
+
+El broker incorpora discover/prepare/activate/status sobre un ámbito explícito
+independiente de las cuentas existentes. Preparación durable sin lecturas de
+campañas; activación y recibo/auditoría atómicos. Consulta MCC fija, claves de
+alta/lectura/baja/OAuth separadas, límites, historial de revocación y revalidación
+bajo el lock de SQLite. Una baja prevalece sobre recibos anteriores y peticiones
+en vuelo; retirar una cuenta no retira el ámbito de alta.
+
+QA: 178 tests del broker, incluidos 15 nuevos, todos correctos; HTTPS local,
+SQLite privados, reinicio, auditoría y proveedores/SDK ficticios. No se ha cargado
+la BD clínica. Tabla e índice nuevos solo en el store SQLite del broker; no hay
+nueva migración compartida, variables, jobs ni cambios de interfaz. Configuración
+real intacta, OPS aplazado y cero cuentas reales incorporadas o despliegues.
+
+Falta conectar este motor con la API/Ajustes: ámbito e intención persistentes,
+permisos sobre el conjunto original y usos compartidos/primarios, conciliación de
+activación y auditoría humana. El alta general y la primera identidad Google aún
+no están completas. Siguen pendientes cambios de propietario, otros consumidores,
+auditoría completa, costes/controles AWS y cifrado/corte BD.
+
+[Contrato, límites y siguiente integración](google-ads-enrollment-migration.md).
+
 ## 13/09/2026 — Selección y baja de asignaciones Ads gestionadas
 
 Guardado gestionado preparado: selección original revalidada bajo lock, estado

@@ -23,6 +23,8 @@ const validate = new Ajv({ strict: true }).compile(object({
     googleAdsAccounts: { type: 'array', minItems: 1, maxItems: 1000,
       items: object({ assetRef: ref, customerId: { type: 'string', pattern: '^[0-9]{10}$' },
         loginCustomerId: { type: ['string', 'null'], pattern: '^[0-9]{10}$' } }) },
+    googleAdsEnrollmentScopes: { type: 'array', minItems: 1, maxItems: 100,
+      items: require('./google-ads-enrollment-contract').scopeSchema },
     oauth: require('./google-oauth-contract').bindingSchema }, ['connectionRef', 'provider', 'initialState']) },
   grants: { type: 'array', maxItems: 100000, items: object({ principalId: ref, tenantRef: ref, connectionRef: ref, assetRef: ref, operations: strings }) },
 }));
