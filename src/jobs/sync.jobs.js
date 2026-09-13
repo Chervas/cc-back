@@ -385,6 +385,7 @@ class MetaSyncJobs {
     this.jobDescriptions = {
       platformAuditDelivery: 'Entrega eventos de auditoría pendientes y conserva las confirmaciones externas verificadas.',
       businessProfileRevocations: 'Confirma revocaciones de accesos a fichas Google ya solicitadas; no consulta al proveedor ni envía mensajes.',
+      googleOAuthReconciliation: 'Concilia reautorizaciones Google solicitadas y confirma su activación mediante el broker.',
       authSessionExpiry: 'Registra las expiraciones observadas de sesiones persistentes; no elimina evidencias.',
       platformAuditReconciliation: 'Comprueba entregas de auditoría dudosas mediante el lector separado.',
       platformAuditMonitor: 'Comprueba la entrega de auditoría y guarda avisos para los administradores técnicos.',
@@ -434,6 +435,7 @@ class MetaSyncJobs {
       schedules: {
         platformAuditDelivery: '* * * * *',
         businessProfileRevocations: '* * * * *',
+        googleOAuthReconciliation: '* * * * *',
         authSessionExpiry: '*/5 * * * *',
         platformAuditReconciliation: '*/5 * * * *',
         platformAuditMonitor: '*/5 * * * *',
@@ -4380,6 +4382,9 @@ try {
   }
   async executeBusinessProfileRevocations() {
     return require('../services/businessProfileRevocation.service').run();
+  }
+  async executeGoogleOAuthReconciliation() {
+    return require('../services/googleOAuthBroker.service').run();
   }
 
   async executeAuthSessionExpiry() {

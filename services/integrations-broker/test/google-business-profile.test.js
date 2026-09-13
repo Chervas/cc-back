@@ -167,6 +167,13 @@ test('Google HTTPS transport pins method, hosts, TLS and caps responses, timeout
   const read = { hostname: 'mybusiness.googleapis.com', path: '/v4/accounts/123/locations/456/reviews', token: Buffer.from(ACCESS) };
   await transport()(read); assert.equal(requests[0].method, 'GET'); assert.equal(requests[0].rejectUnauthorized, true); assert.equal(requests[0].minVersion, 'TLSv1.2'); assert.equal(requests[0].port, 443);
   for (const hostname of ['169.254.169.254', 'googleapis.com', 'mybusiness.googleapis.com.evil.invalid']) await assert.rejects(transport()({ ...read, hostname }), { code: 'invalid_request' });
+  const identity = { hostname: 'www.googleapis.com', path: '/oauth2/v2/userinfo', token: Buffer.from(ACCESS) };
+  await transport({ value: { id: 'fictitious-subject' } })(identity);
+  assert.equal(requests.at(-1).method, 'GET');
+  for (const path of ['/oauth2/v2/userinfo?access_token=ignored', '/v1/arbitrary', '/oauth2/v2/userinfo/']) {
+    await assert.rejects(transport()({ ...identity, path }), { code: 'invalid_request' });
+  }
+  await assert.rejects(transport({ value: { id: 'x'.repeat(32769) } })(identity), { code: 'provider_failed' });
   await assert.rejects(transport({ status: 302, redirect: true })(read), { code: 'provider_failed' });
   await assert.rejects(transport({ oversized: true })(read), { code: 'provider_failed' });
   await assert.rejects(transport({ status: 401, value: { error: ACCESS } })(read), { code: 'provider_unauthorized' });

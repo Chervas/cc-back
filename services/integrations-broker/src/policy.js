@@ -13,7 +13,8 @@ const validate = new Ajv({ strict: true }).compile(object({
   connections: { type: 'array', maxItems: 10000, items: object({ connectionRef: ref, provider: ref,
     initialState: { enum: ['active', 'blocked', 'revoked', 'expired'] },
     expiresAt: { type: ['integer', 'null'], minimum: 0 }, secretArn: { type: 'string', maxLength: 2048 },
-    clientSecretArn: { type: 'string', maxLength: 2048 } }, ['connectionRef', 'provider', 'initialState']) },
+    clientSecretArn: { type: 'string', maxLength: 2048 },
+    oauth: require('./google-oauth-contract').bindingSchema }, ['connectionRef', 'provider', 'initialState']) },
   grants: { type: 'array', maxItems: 100000, items: object({ principalId: ref, tenantRef: ref, connectionRef: ref, assetRef: ref, operations: strings }) },
 }));
 function validatePolicy(policy) {

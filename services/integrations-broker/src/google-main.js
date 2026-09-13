@@ -8,6 +8,8 @@ const { createServer } = require('./server'); const { createGoogleHttp } = requi
 const { createGoogleSecretStore } = require('./google-secrets');
 const { createGoogleBusinessProfileOperations } = require('./google-business-profile');
 const { cursorCodec } = require('./provider-cursor'); const { drainAudit, createS3AuditSink } = require('./audit');
+const oauthContract = require('./google-oauth-contract'); const { createGoogleOAuth } = require('./google-oauth');
+const { createGoogleOAuthSecrets } = require('./google-oauth-secrets');
 const ACCOUNT = '137819318729'; const REGION = 'eu-west-3';
 const SOURCE = `arn:aws:sts::${ACCOUNT}:assumed-role/clinicaclick-integrations-prod-ec2-role/i-0cf40cfe823f160fa`;
 const WRITER_ROLE = `arn:aws:iam::${ACCOUNT}:role/clinicaclick-audit-prod-writer-role`;
@@ -27,7 +29,8 @@ function validateConfig(config) {
     || typeof config.stateFile !== 'string' || !path.isAbsolute(config.stateFile)) fail('invalid_request');
   validatePolicy(config.policy);
   if (!config.policy.connections.length || config.policy.connections.some(c => c.provider !== PROVIDER || !c.secretArn || !c.clientSecretArn)
-    || config.policy.grants.some(g => !/^clinic:[1-9]\d{0,9}$/.test(g.tenantRef) || g.operations.some(op => !OPERATIONS.includes(op) && op !== REVOKE_OPERATION))) fail('invalid_request');
+    || config.policy.grants.some(g => !/^clinic:[1-9]\d{0,9}$/.test(g.tenantRef) || g.operations.some(op => !OPERATIONS.includes(op) && op !== REVOKE_OPERATION
+      && !Object.values(oauthContract.OPERATIONS).includes(op)))) fail('invalid_request');
   const readers = new Set(config.policy.grants.filter(g => g.operations.some(op => OPERATIONS.includes(op))).map(g => g.principalId));
   if (config.policy.grants.some(g => g.operations.includes(REVOKE_OPERATION) && readers.has(g.principalId))) fail('invalid_request');
   const keyFor = id => {
@@ -36,6 +39,12 @@ function validateConfig(config) {
   };
   const readerKeys = new Set([...readers].map(keyFor));
   if (config.policy.grants.some(g => g.operations.includes(REVOKE_OPERATION) && readerKeys.has(keyFor(g.principalId)))) fail('invalid_request');
+  const priorControls = new Set([...readers, ...config.policy.grants.filter(g => g.operations.includes(REVOKE_OPERATION)).map(g => g.principalId)]);
+  const priorKeys = new Set([...priorControls].map(keyFor));
+  for (const grant of config.policy.grants.filter(g => g.operations.some(op => Object.values(oauthContract.OPERATIONS).includes(op)))) {
+    if (priorControls.has(grant.principalId) || priorKeys.has(keyFor(grant.principalId))) fail('invalid_request');
+    oauthContract.bindingFor(config.policy.connections.find(c => c.connectionRef === grant.connectionRef));
+  }
   for (const grant of config.policy.grants) asset(grant.assetRef);
   return config;
 }
@@ -70,11 +79,15 @@ async function main(filename, { awsFactory = connectAws, http = createGoogleHttp
   const config = validateConfig(JSON.parse(privateFile(filename)));
   const cert = privateFile(config.tlsCertFile, 65536); const key = privateFile(config.tlsKeyFile, 65536);
   const cursorKey = privateFile(config.cursorKeyFile, 32); const cursor = cursorCodec(cursorKey);
-  const store = new BrokerStore(config.stateFile); let aws; let secrets; let server; let timer; let draining;
+  const store = new BrokerStore(config.stateFile); let aws; let secrets; let oauth; let server; let timer; let draining;
   try {
     aws = await awsFactory();
     secrets = createGoogleSecretStore({ client: aws.secrets, http, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY });
-    const broker = new Broker({ store, policy: config.policy, secrets, operations: createGoogleBusinessProfileOperations({ http, cursor }), timeoutMs: 25000 });
+    let broker;
+    oauth = createGoogleOAuth({ store, policy: config.policy, http,
+      secrets: createGoogleOAuthSecrets({ client: aws.secrets, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY }),
+      onActivated: ref => { secrets.invalidate(ref); for (const controller of broker.active.get(ref) || []) controller.abort(); } });
+    broker = new Broker({ store, policy: config.policy, secrets, operations: createGoogleBusinessProfileOperations({ http, cursor, oauth }), timeoutMs: 25000 });
     let inFlight = 0;
     server = createServer({ async execute(...args) {
       if (inFlight >= 8) fail('rate_limited'); inFlight++;
@@ -88,13 +101,13 @@ async function main(filename, { awsFactory = connectAws, http = createGoogleHttp
     tick(); timer = setInterval(tick, 1000); timer.unref();
     let closing;
     const close = () => closing ||= (async () => {
-      clearInterval(timer); secrets.close();
+      clearInterval(timer); oauth.close(); secrets.close();
       for (const controllers of broker.active.values()) for (const controller of controllers) controller.abort();
       await new Promise(resolve => { server.close(resolve); server.closeIdleConnections?.(); });
       await draining; aws.close(); cursorKey.fill(0); store.close();
     })();
     return { server, store, broker, close };
-  } catch (error) { clearInterval(timer); server?.close(); secrets?.close(); aws?.close(); cursorKey.fill(0); store.close(); throw error; }
+  } catch (error) { clearInterval(timer); server?.close(); oauth?.close(); secrets?.close(); aws?.close(); cursorKey.fill(0); store.close(); throw error; }
 }
 if (require.main === module) main(process.argv[2]).then(runtime => {
   const stop = () => runtime.close().catch(() => { process.exitCode = 1; });

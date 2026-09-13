@@ -21,6 +21,11 @@ class BrokerStore {
         revision INTEGER NOT NULL, expires_at INTEGER, reason TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS asset_revocations (tenant TEXT NOT NULL, connection TEXT NOT NULL, asset TEXT NOT NULL,
         request_id TEXT NOT NULL, revoked_at INTEGER NOT NULL, PRIMARY KEY(tenant,connection,asset));
+      CREATE TABLE IF NOT EXISTS google_oauth_flows (id TEXT PRIMARY KEY, principal TEXT NOT NULL, tenant TEXT NOT NULL,
+        connection TEXT NOT NULL, asset TEXT NOT NULL, state_hash TEXT NOT NULL UNIQUE, config_digest TEXT NOT NULL,
+        created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, state TEXT NOT NULL,
+        baseline_version TEXT NOT NULL, app_version TEXT NOT NULL, code_digest TEXT, secret_digest TEXT, activation_at INTEGER);
+      CREATE INDEX IF NOT EXISTS google_oauth_connection_state ON google_oauth_flows(connection,state);
       CREATE TABLE IF NOT EXISTS nonces (principal TEXT NOT NULL, nonce TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(principal,nonce));
       CREATE TABLE IF NOT EXISTS rate_windows (principal TEXT NOT NULL, window INTEGER NOT NULL, count INTEGER NOT NULL, PRIMARY KEY(principal,window));
       CREATE TABLE IF NOT EXISTS commands (principal TEXT NOT NULL, id TEXT NOT NULL, digest TEXT NOT NULL,
@@ -41,6 +46,7 @@ class BrokerStore {
     this.db.prepare('INSERT OR IGNORE INTO connections VALUES (?,?,1,?,?)').run(ref, state, expiresAt, 'initial_policy');
   }
   connection(ref, now = Date.now()) {
+    if (this.db.prepare("SELECT 1 FROM google_oauth_flows WHERE connection=? AND state='activating' LIMIT 1").get(ref)) fail('connection_blocked');
     const row = this.db.prepare('SELECT * FROM connections WHERE ref=?').get(ref);
     if (!row || row.state !== 'active' || row.expires_at !== null && row.expires_at <= now) fail('connection_blocked');
     return row;

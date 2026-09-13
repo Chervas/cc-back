@@ -7,6 +7,8 @@ const STATUS = Object.freeze({
   provider_disabled: 503, provider_failed: 502, provider_timeout: 504,
   provider_unauthorized: 502, credential_revoked: 423,
   secret_unavailable: 503, audit_unavailable: 503, internal_error: 500,
+  secret_version_changed: 409, oauth_state_invalid: 409, oauth_identity_mismatch: 409,
+  oauth_credentials_incomplete: 409, oauth_flow_busy: 409, oauth_flow_interrupted: 409,
 });
 class BrokerError extends Error {
   constructor(code) { super(code); this.code = Object.hasOwn(STATUS, code) ? code : 'internal_error'; }

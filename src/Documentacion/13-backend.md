@@ -1,5 +1,42 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Reautorización Google fijada al broker, preparada
+
+`GET /oauth/google/connect` conserva su URL y devuelve
+`{success:true, mode:"broker", authUrl}` para una conexión registrada. Resuelve
+solo ID y exige sesión gestionada vigente, gestión de todo el ámbito y
+consumidores compatibles. Se reautoriza la identidad existente; no se crea otra
+cuenta ni assignment. Un scope heredado debe gestionarse desde el ámbito exacto
+del vínculo. El primer marcador OAuth cierra globalmente connect/callback legacy
+no reconocidos: impacto y drenaje pendientes de aprobación.
+
+`GET /oauth/google/callback` consume el estado gestionado mediante hash y claim
+SQL, remite el código una sola vez y redirige a Ajustes del origen permitido con
+`google_authorization=pending|confirmed|cancelled`. No refleja state/código ni
+errores del proveedor. `Cache-Control: no-store` y `Referrer-Policy: no-referrer`.
+Intercambio/PKCE y tokens permanecen en el broker; la cola guarda referencias.
+Un timeout se concilia por estado/versión, sin reenvío del código.
+
+`GET /oauth/google/connection-status` para la cohorte exige gestión y sesión,
+solo devuelve `mode:"broker"`, `authorization_status`, `activation_confirmed`,
+`pending`, `enabled`, `googleUserId`, `confirmed_at`, `connected:false` y
+`reason:"broker_authorization_metadata"`. Estados: `none`, `begin_pending`,
+`awaiting`, `processing`, `activation_pending`, `abort_pending`, `active`,
+`aborted`. Activar una versión no comprueba acceso al proveedor ni elimina
+revocaciones; la UI muestra esa diferencia y actualización manual sin polling.
+
+Worker `google_oauth_broker_reconciliation`, cada minuto Europe/Madrid, gates
+`GOOGLE_OAUTH_BROKER_ENABLED` / `GOOGLE_OAUTH_BROKER_WORKER_ENABLED` apagados y
+lecturas GBP habilitadas como prerrequisito. Requiere tercera clave/grants OAuth,
+writer/reader de auditoría v8, sesiones enforce y migración `20260913020000`
+previa al código incluso con gates apagados. Errores cerrados principales:
+`google_oauth_legacy_closed`, `google_oauth_scope_conflict`,
+`google_oauth_scope_forbidden`, `google_oauth_consumers_pending`,
+`google_oauth_flow_busy`, `google_oauth_disabled`, `google_oauth_unavailable`.
+Sin despliegue, migración compartida, OAuth real, llamadas AWS ni cambios OPS.
+Contrato y lote: `docs/security/google-oauth-broker-migration.md` (backend).
+
+
 ## 2026-09-13 — Desconexión durable de fichas Google preparada
 
 `DELETE /oauth/google/disconnect?clinic_id=…` o `group_id=…` conserva permiso de

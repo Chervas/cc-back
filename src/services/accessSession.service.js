@@ -77,6 +77,25 @@ function createService({ models, audit, config = settings, now = () => new Date(
     const user = row && { ...row, id_usuario: row.user_id };
     checkRow(v, user, row, cfg); return v;
   }
+  // OAuth callbacks carry a one-use state, not a JWT. Its durable request must
+  // retain the managed session reference and the original authorization expiry.
+  async function verifyReference({ userId, sessionRef, expiresAt }, { transaction } = {}) {
+    const cfg = config();
+    if (cfg.mode !== 'enforce' || !Number.isSafeInteger(userId) || userId <= 0
+      || typeof sessionRef !== 'string' || !UUID.test(sessionRef)
+      || !(expiresAt instanceof Date) || !Number.isFinite(expiresAt.getTime())
+      || expiresAt.getTime() <= now().getTime()) fail();
+    // Match issuance/logout lock order: user before session.
+    if (transaction) await db().Usuario.findByPk(userId, { attributes: ['id_usuario'], transaction, lock: transaction.LOCK.UPDATE });
+    const [rows] = await db().sequelize.query('SELECT s.*, u.password_usuario, u.email_usuario, u.estado_cuenta, u.es_provisional '
+      + 'FROM AuthSessions s JOIN Usuarios u ON u.id_usuario=s.user_id WHERE s.session_id=:id AND s.user_id=:userId LIMIT 1'
+      + (transaction ? ' FOR UPDATE' : ''),
+    { replacements: { id: sessionRef, userId }, logging: false, transaction });
+    const row = rows[0];
+    checkRow({ userId, exp: expiresAt.getTime() / 1000, iat: row?.issued_at?.getTime() / 1000 },
+      row && { ...row, id_usuario: row.user_id }, row, cfg);
+    return { userId, sessionRef };
+  }
   // Call within a transaction that already locks the freshly authenticated user. All issuers share this method.
   async function issue(user, { transaction, parentToken, reason = 'credentials_verified', ttl, sessionRef = randomUUID() } = {}) {
     const cfg = config(); const seconds = ttl || cfg.ttl;
@@ -154,7 +173,7 @@ function createService({ models, audit, config = settings, now = () => new Date(
     }
     return { expired: count };
   }
-  return { verify, issue, authenticated, revoke, expire };
+  return { verify, verifyReference, issue, authenticated, revoke, expire };
 }
 const singleton = createService({ models: () => require('../../models') });
 module.exports = { ...singleton, createService, settings, bearer, decode, projectUser };

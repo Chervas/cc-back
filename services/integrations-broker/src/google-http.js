@@ -7,7 +7,8 @@ const HOSTS = new Set(['mybusiness.googleapis.com', 'businessprofileperformance.
 function createGoogleHttp({ request = https.request, timeoutMs = 8000 } = {}) {
   return async function googleHttp({ hostname, path, token, form, signal }) {
     const oauth = hostname === 'oauth2.googleapis.com' && path === '/token';
-    if (!(oauth || HOSTS.has(hostname)) || typeof path !== 'string' || !/^\/v[14]\//.test(path) && !oauth
+    const userinfo = hostname === 'www.googleapis.com' && path === '/oauth2/v2/userinfo';
+    if (!(oauth || userinfo || HOSTS.has(hostname)) || typeof path !== 'string' || !/^\/v[14]\//.test(path) && !oauth && !userinfo
       || path.length > 16384 || /[\r\n#]/.test(path) || signal?.aborted) fail('invalid_request');
     if (oauth ? !form || typeof form !== 'string' || form.length > 32768 || token !== undefined
       : !Buffer.isBuffer(token) || !token.length || token.length > 16384 || /[\r\n]/.test(token.toString('utf8')) || form !== undefined) fail('invalid_request');
@@ -19,7 +20,7 @@ function createGoogleHttp({ request = https.request, timeoutMs = 8000 } = {}) {
         agent: false, rejectUnauthorized: true, minVersion: 'TLSv1.2',
         headers: { accept: 'application/json', 'accept-encoding': 'identity',
           ...(oauth ? { 'content-type': 'application/x-www-form-urlencoded', 'content-length': Buffer.byteLength(form) } : { authorization: `Bearer ${token.toString('utf8')}` }) } }, res => {
-        const chunks = []; let size = 0; const limit = oauth ? 32768 : 2097152;
+        const chunks = []; let size = 0; const limit = oauth || userinfo ? 32768 : 2097152;
         if (res.statusCode >= 300 && res.statusCode < 400 || res.headers['content-encoding'] && res.headers['content-encoding'] !== 'identity'
           || !/^application\/json(?:\s*;.*)?$/i.test(res.headers['content-type'] || '')) {
           res.destroy(); finish(new BrokerError('provider_failed')); return;

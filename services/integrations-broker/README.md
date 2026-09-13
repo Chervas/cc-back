@@ -1,5 +1,18 @@
 # Broker de integraciones
 
+## Google OAuth fijado: preparación, sin activar
+
+El runtime Google admite cinco controles cerrados de reautorización de una
+identidad/secreto/activo revisados, con un tercer principal distinto de lectores
+y revocadores. No basta con desplegar el binario: requiere política `oauth`,
+grants exactos y permisos AWS adicionales aún no verificados ni autorizados.
+La API usa cola SQL y sesión gestionada; nunca obtiene tokens. No hay alta de
+cuentas nuevas, recurso AWS nuevo ni reactivación de bloqueos. Ledger SQLite
+conserva estados `staging/activating` y lápidas; no hacer rollback a un broker
+que ignore la barrera de activación. Pruebas ficticias con TLS/SDK dobles.
+[Contrato, esquema v3, IAM, costes, recuperación y corte](../../docs/security/google-oauth-broker-migration.md).
+
+
 ## 13/09/2026 — Revocación durable por activo preparada
 
 Operación `google.business_profile.asset.revoke.v1`, payload `{}`, principal y

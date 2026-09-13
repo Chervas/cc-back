@@ -90,6 +90,10 @@ async function routeFixture(t, options = {}) {
   const router = loadDiscoverySource('routes/oauth.routes.js', {
     express, sequelize, '../../models': models, './auth.middleware': auth,
     '../services/accessSession.service': sessionService,
+    // This fixture models an installation with no OAuth cohort binding.
+    '../services/googleOAuthBroker.service': require('../../services/googleOAuthBroker.service').createGoogleOAuthBroker({
+      models: { GoogleOAuthBrokerBinding: { findOne: async () => null } }, audit: {}, enabled: () => false,
+    }),
     '../services/businessProfileDiscovery.service': { ...f.service, ERROR_CODES, CONFLICT_CODES },
     '../services/scopeConnectionResolver.service': resolver,
     '../lib/oauthMarketingScopeAccess': require('../../lib/oauthMarketingScopeAccess'),

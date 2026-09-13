@@ -73,7 +73,11 @@ function createGoogleSecretStore({ client, http, accountId, prefix, kmsKeyArn, n
       const connection = await read(binding.secretArn, signal); const app = await read(binding.clientSecretArn, signal);
       if (signal?.aborted) fail('connection_blocked');
       const c = connection.value; const a = app.value;
-      if (!exact(c, 'version,provider,connectionRef,refreshToken,scopes') || c.version !== 2 || c.provider !== PROVIDER
+      const v2 = c.version === 2 && exact(c, 'version,provider,connectionRef,refreshToken,scopes');
+      const v3 = c.version === 3 && exact(c, 'version,provider,connectionRef,googleUserId,clientId,refreshToken,scopes')
+        && require('./google-oauth-secrets').subject(c.googleUserId) && c.clientId === a.clientId
+        && (!binding.oauth || c.googleUserId === binding.oauth.subject);
+      if (!(v2 || v3) || c.provider !== PROVIDER
         || c.connectionRef !== binding.connectionRef || !text(c.refreshToken) || !Array.isArray(c.scopes)
         || c.scopes.length > 100 || !c.scopes.every(v => typeof v === 'string' && v.length < 256) || !c.scopes.includes(SCOPE)
         || !exact(a, 'version,provider,clientId,clientSecret') || a.version !== 1 || a.provider !== 'google-oauth-client'

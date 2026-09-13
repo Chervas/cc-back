@@ -1,5 +1,28 @@
 # Seguridad: implementación y evidencias
 
+## Decimocuarto bloque: reautorización Google preparada (13/09/2026)
+
+La reautorización de una identidad Google previamente vinculada intercambia y
+versiona credenciales dentro del broker. La API conserva referencias y una cola
+SQL: sesión/ámbito revalidados, state de un uso, activación posterior al commit,
+conciliación de respuestas perdidas y auditoría v8 del usuario/worker. Ajustes
+distingue pendiente/cancelada/confirmada, con actualización manual. Se conservan
+bloqueos anteriores y no se reutiliza un refresh que consta revocado.
+
+QA ficticia: 139 tests, 11 comprobaciones MySQL propias con cierre 0, contrato del
+catálogo de 46 jobs, Angular exit 0 y 20 capturas Chromium desktop/móvil.
+Migración `20260913020000` solo ensayada; previa al código incluso con gates
+apagados. El primer vínculo cierra OAuth legacy globalmente: corte/drenaje,
+traslado de secretos, consumidores, sesiones, grants y permisos AWS pendientes.
+Se admite una assignment exacta por conexión; alta de identidades nuevas y
+cohortes restantes siguen pendientes. No hay despliegue ni validación real.
+
+OPS aplazado; apagado EC2 anunciado, sin verificar. No se han cambiado AWS,
+pausas, BD compartida ni proveedores. Auditoría completa, retención DPD,
+permisos/Budget CloudFormation, Cost Explorer y cifrado/corte BD siguen pendientes.
+[Contrato, pruebas, costes y lote pendiente](google-oauth-broker-migration.md).
+
+
 ## Decimotercer bloque: desconexión durable de activos GBP (13/09/2026)
 
 Desconectar Google por ámbito registra intención/usuario/auditoría v7 junto al

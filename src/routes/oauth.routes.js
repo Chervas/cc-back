@@ -72,6 +72,7 @@ const {
     assertSharedMarketingAssetMutationAccess
 } = require('../lib/sharedMarketingAssetMutationAccess');
 const { normalizeOAuthReturnTo } = require('../lib/oauthRedirect');
+const googleOAuthBroker = require('../services/googleOAuthBroker.service');
 const { evaluateMetaConnectionHealth } = require('../lib/oauthConnectionHealth');
 const {
     persistGoogleConnection,
@@ -490,6 +491,7 @@ async function ensureGoogleAccessToken(conn, { allowExpired = false } = {}) {
     if (!conn) {
         throw googleTokenError('NO_CONNECTION', 'No existe conexión Google para este usuario');
     }
+    await googleOAuthBroker.assertLegacyConnection(conn);
     if (!conn.accessToken) {
         throw googleTokenError('NO_TOKEN', 'No existe access token de Google almacenado');
     }
@@ -1428,8 +1430,15 @@ router.get('/meta/callback', async (req, res) => {
  */
 router.get('/google/connect', async (req, res) => {
     try {
+        res.set('Cache-Control', 'no-store');
         const userId = getUserIdFromToken(req);
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+        const resolved = await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: false, metadataOnly: true });
+        const binding = await googleOAuthBroker.bindingFor(resolved.connection?.id);
+        if (binding) return res.json(await googleOAuthBroker.begin({ binding, scopeKey: resolved.scope?.scopeKey,
+            actorId: userId, sessionRef: req.authSession?.id, sessionExpiresAt: req.authSession?.expiresAt,
+            returnTo: new URL(normalizeFrontendReturnTo(req.query?.return_to || null)).origin }));
+        await googleOAuthBroker.assertLegacyAllowed();
         if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
             return res.status(503).json({ success: false, error: 'google_oauth_not_configured' });
         }
@@ -1457,8 +1466,8 @@ router.get('/google/connect', async (req, res) => {
         const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
         return res.json({ success: true, authUrl });
     } catch (e) {
-        console.error('❌ Error generando authUrl de Google:', e.message);
-        return res.status(500).json({ success: false, error: 'No se pudo generar authUrl' });
+        const code = googleOAuthBroker.safe(e);
+        return res.status([400, 401, 403, 409].includes(e?.httpStatus) ? e.httpStatus : 503).json({ success: false, error: code });
     }
 });
 
@@ -1468,14 +1477,19 @@ router.get('/google/connect', async (req, res) => {
  */
 router.get('/google/callback', async (req, res) => {
     let frontendOrigin = FRONTEND_URL;
+    res.set('Cache-Control', 'no-store');
+    res.set('Referrer-Policy', 'no-referrer');
     try {
         const { code, state, error } = req.query;
+        const managed = await googleOAuthBroker.callback({ state, code, denied: Boolean(error) });
+        if (managed) return res.redirect(buildFrontendSettingsRedirect(normalizeFrontendReturnTo(managed.returnTo),
+            `?google_authorization=${managed.activation_confirmed ? 'confirmed' : managed.pending ? 'pending' : 'cancelled'}`));
+        await googleOAuthBroker.assertLegacyAllowed();
         const oauthState = await consumeOAuthState('google', state);
         frontendOrigin = normalizeFrontendReturnTo(oauthState.returnTo);
         await authorizeStoredOAuthState(oauthState);
         if (error) {
-            console.error('❌ Error en callback Google:', error);
-            return res.redirect(buildFrontendSettingsRedirect(frontendOrigin, `?error=${encodeURIComponent(String(error))}`));
+            return res.redirect(buildFrontendSettingsRedirect(frontendOrigin, '?error=google_authorization_cancelled'));
         }
         if (!code) {
             return res.redirect(buildFrontendSettingsRedirect(frontendOrigin, `?error=${encodeURIComponent('Código no proporcionado')}`));
@@ -1494,6 +1508,7 @@ router.get('/google/callback', async (req, res) => {
         }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
 
         const accessToken = tokenResp.data?.access_token;
+        await googleOAuthBroker.assertLegacyAllowed();
         const refreshToken = tokenResp.data?.refresh_token || null; // puede ser null si ya concedido
         const expiresIn = tokenResp.data?.expires_in || 3600;
         if (!accessToken) throw new Error('No access_token en respuesta de token');
@@ -1512,6 +1527,7 @@ router.get('/google/callback', async (req, res) => {
         if (!userId) {
             console.warn('⚠️ state vacío en callback Google');
         }
+        await googleOAuthBroker.assertLegacyAllowed();
         const storedConnection = await persistGoogleConnection({
             userId,
             googleUserId,
@@ -1539,7 +1555,6 @@ router.get('/google/callback', async (req, res) => {
         // 4) Redirigir al frontend
         return res.redirect(buildFrontendSettingsRedirect(frontendOrigin, `?connected=google&googleUserId=${googleUserId}`));
     } catch (err) {
-        console.error('❌ Error en /oauth/google/callback:', err.response?.data || err.message);
         return res.redirect(buildFrontendSettingsRedirect(frontendOrigin, `?error=${encodeURIComponent('Error en autenticación de Google')}`));
     }
 });
@@ -1550,7 +1565,15 @@ router.get('/google/callback', async (req, res) => {
  */
 router.get('/google/connection-status', async (req, res) => {
     try {
+        res.set('Cache-Control', 'no-store');
         const scopedRequest = hasRequestedScope(req);
+        const metadata = await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: !scopedRequest, metadataOnly: true });
+        const binding = await googleOAuthBroker.bindingFor(metadata.connection?.id);
+        if (binding) {
+            await authorizeExplicitConnectionScope(req, 'write');
+            return res.json(await googleOAuthBroker.status({ binding, scopeKey: metadata.scope?.scopeKey,
+                actorId: getUserIdFromToken(req), sessionRef: req.authSession?.id, sessionExpiresAt: req.authSession?.expiresAt }));
+        }
         const { userId, connection: conn, assignment, scope, source } = await resolveGoogleRequestConnection(req, {
             allowLegacyUserFallback: !scopedRequest
         });

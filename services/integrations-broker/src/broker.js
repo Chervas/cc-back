@@ -39,7 +39,7 @@ class Broker {
       binding = this.policy.connections.find(item => item.connectionRef === request.connectionRef);
       if (!binding || binding.provider !== operation.provider) fail('scope_denied');
       operation.validate(request.payload);
-      if (operation.control !== 'revoke_asset') {
+      if (!['revoke_asset','google_oauth'].includes(operation.control)) {
         this.store.connection(request.connectionRef, now);
         this.store.assertAssetActive(request);
       }
@@ -55,6 +55,15 @@ class Broker {
     const digest = createHash('sha256').update(canonical({ operation: request.operation, tenantRef: request.tenantRef,
       connectionRef: request.connectionRef, assetRef: request.assetRef, payload: request.payload })).digest('hex');
     const assetKey = JSON.stringify([request.tenantRef, request.connectionRef, request.assetRef]);
+    if (operation.control === 'google_oauth') {
+      try { return await operation.execute({ request, principal, binding }); }
+      catch (error) {
+        if (this.store.backlog().pending >= this.policy.maxBacklog) fail('audit_unavailable');
+        this.store.appendAudit(eventFor(request, principal, this.policy, 'integration.failed', 'unknown',
+          error instanceof BrokerError ? error.code : 'internal_error', this.now()));
+        throw error;
+      }
+    }
     if (operation.control === 'revoke_asset') {
       const result = this.store.revokeAsset(principal.id, request, digest,
         eventFor(request, principal, this.policy, 'integration.requested', 'accepted', 'authorized', now),

@@ -15,7 +15,7 @@ module.exports = (sequelize, DataTypes) => {
     googleUserId: { type: DataTypes.STRING(128), allowNull: false, field: 'googleUserId' },
     userEmail: { type: DataTypes.STRING(256), allowNull: true, field: 'userEmail' },
     userName: { type: DataTypes.STRING(256), allowNull: true, field: 'userName' },
-    accessToken: { type: DataTypes.TEXT, allowNull: false, field: 'accessToken' },
+    accessToken: { type: DataTypes.TEXT, allowNull: true, field: 'accessToken' },
     refreshToken: { type: DataTypes.TEXT, allowNull: true, field: 'refreshToken' },
     scopes: { type: DataTypes.TEXT, allowNull: true, field: 'scopes' },
     expiresAt: { type: DataTypes.DATE, allowNull: true, field: 'expiresAt' }

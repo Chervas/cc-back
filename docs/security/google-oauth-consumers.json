@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-13",
+  "sourceHead": "805f1b25da92fead0864e1bca3afb7b051cba994",
+  "includesWorkingChanges": true,
+  "runtimeMigrated": 0,
+  "scope": "Pinned reauthorization of a preallocated Google connection; no creation of identities/secrets/assignments.",
+  "method": "Manual source classification and SHA256; no credentials, shared database, AWS/provider calls or external OPS inventory.",
+  "operations": [
+    "google.business_profile.oauth.begin.v1",
+    "google.business_profile.oauth.finish.v1",
+    "google.business_profile.oauth.activate.v1",
+    "google.business_profile.oauth.status.v1",
+    "google.business_profile.oauth.abort.v1"
+  ],
+  "migration": "20260913020000",
+  "deployment": "not_performed",
+  "ops": "deferred_by_user",
+  "awsInstance": "shutdown_announced_unverified",
+  "pending": [
+    "New Google identities and multi-assignment onboarding",
+    "Other Google verticals and provider cohorts",
+    "Pre-admission OAuth denial audit and full platform coverage",
+    "Actual IAM, KMS, source isolation, gateway logging and real cut",
+    "Retention, Cost Explorer/tags, Budget/CloudFormation and database encryption"
+  ],
+  "rows": [
+    {
+      "file": "src/routes/oauth.routes.js",
+      "sha256": "e4a79cdc987655903c503297d07a0d63af117b99bc441caf0f62fd37db5e6b0a",
+      "status": "prepared_offline",
+      "note": "Managed connect/callback/status and legacy guards; no new-account onboarding or full Google consumer migration."
+    },
+    {
+      "file": "src/services/googleOAuthBroker.service.js",
+      "sha256": "49817dc08a543f3288df4182c956b83190cbac19d4b9592e0897bd61e0839c1a",
+      "status": "prepared_offline",
+      "note": "Durable start/callback/activation/cancellation with exact references; signed OAuth transport."
+    },
+    {
+      "file": "src/services/googleOAuthBrokerScope.service.js",
+      "sha256": "65f43055bb5958c08da936616bb13582eb6cdded10765bea82dc9c7dc466f17d",
+      "status": "prepared_offline",
+      "note": "Full scope/session/assignment/consumer checks without selecting provider token values."
+    },
+    {
+      "file": "src/services/accessSession.service.js",
+      "sha256": "e55a42588017ff5942e6fa43f5f0635ac170f3e053e2591369e5e79f665b51bb",
+      "status": "prepared_offline",
+      "note": "Managed session-reference verification for one-use callbacks."
+    },
+    {
+      "file": "src/config/scheduledJobCatalog.js",
+      "sha256": "4475f82ee17d83cefe55f5ec34de6c18e65ac87b607320690d5c30e85bee792a",
+      "status": "prepared_offline",
+      "note": "New gated reconciliation job; existing jobs preserved."
+    },
+    {
+      "file": "src/jobs/sync.jobs.js",
+      "sha256": "14f18ce0f4d9d5efcd46e6e275370083078089aa721450dff9715d5d2cabd698",
+      "status": "prepared_offline",
+      "note": "Gated reconciliation executor. No runtime cron changes."
+    },
+    {
+      "file": "services/integrations-broker/src/google-oauth.js",
+      "sha256": "4f01fb6e1d06ed5d866bc4dbd27b0db29be647af48cda2dc7136063e1afd3663",
+      "status": "prepared_offline",
+      "note": "Pinned identity, PKCE, one exchange, staged version, durable activation fence and reconciliation."
+    },
+    {
+      "file": "services/integrations-broker/src/google-oauth-secrets.js",
+      "sha256": "8e747fc8d35eba862bf758b68d93a82b7d167a4270df2be05d6eaae86dff54f6",
+      "status": "prepared_offline",
+      "note": "Exact preallocated secret, candidate version and compare-and-set activation; no secret creation."
+    },
+    {
+      "file": "services/integrations-broker/src/google-secrets.js",
+      "sha256": "0943f4517af112792267b33ede12ba5b6befa56fa75d9b0842223ef01a12c59c",
+      "status": "prepared_offline",
+      "note": "Existing refresh consumer accepts validated v3 binding and preserves revocation."
+    },
+    {
+      "file": "services/integrations-broker/src/google-main.js",
+      "sha256": "fc3669d8f77ab1e2b108d86acf949fbdc666ef51ee34d8d3c5932ad18f7e4f52",
+      "status": "prepared_offline",
+      "note": "Distinct OAuth signing principal and runtime capability; real IAM permissions unverified."
+    },
+    {
+      "file": "services/platform-audit/src/integration-oauth-event.js",
+      "sha256": "435fd064099313a7a460348474a948cc18e21a16a6d8a49ca13332729f2ef58c",
+      "status": "prepared_offline",
+      "note": "Closed v8 accepted authorization and activation lifecycle; pre-admission denials remain pending."
+    },
+    {
+      "file": "src/services/oauthConnectionPersistence.service.js",
+      "sha256": "5719e12d966372f3c582a93dc0330ad7391596d529b34ccadd5bf526893ba63b",
+      "status": "legacy_pending",
+      "note": "Legacy path still used only before the first global OAuth marker; no standalone migration tool or full onboarding."
+    }
+  ]
+}

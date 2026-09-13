@@ -79,6 +79,8 @@ function createView({ model, audit, reader, codec, now = () => new Date() }) {
             batchIndex: v.batchIndex, batchCount: v.batchCount, resultSetDigest: v.resultSetDigest } : null,
           integrationDisconnect: v.version === 7 ? { correlationId: v.correlationId, provider: v.provider,
             connectionRef: v.connectionRef, assetRef: v.assetRef } : null,
+          integrationOAuth: v.version === 8 ? { correlationId: v.correlationId, provider: v.provider,
+            connectionRef: v.connectionRef, assetRef: v.assetRef } : null,
           verification: 's3_version_verified' })) };
     },
   };
