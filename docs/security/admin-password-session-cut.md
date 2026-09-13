@@ -1,8 +1,10 @@
-# Administradores: rotación realizada y cierre de sesiones preparado
+# Administradores: rotación y cierre de sesiones desplegados
 
-Estado del 13/09/2026: la rotación solicitada está aplicada; el corte de código
-que invalida los JWT antiguos todavía no está desplegado. El MFA por correo
-también sigue pendiente de activación pública. WhatsApp permanece fuera de este corte.
+Estado del 13/09/2026 22:17:45 UTC: la rotación solicitada y el corte de código
+que invalida los JWT administrativos antiguos están aplicados. La recuperación
+frontend está publicada. El MFA por correo sigue pendiente de activación pública.
+WhatsApp permanece fuera de este corte. Versiones, evidencia y relevo:
+[acta del despliegue aprobado](admin-session-deployment-20260913.md).
 
 ## Operación real autorizada
 
@@ -20,11 +22,12 @@ Solo contiene IDs, fecha, resultado y contadores. El script se niega a repetir
 una operación con ese recibo, incluso ante COMMIT dudoso. No ejecutarlo de nuevo.
 La contraseña nueva de recuperación que elija el titular no debe recopilarse.
 
-**El código público anterior no vincula el JWT al hash de contraseña. Por eso
-la rotación por sí sola no cierra las sesiones antiguas.** El recibo lo declara
-expresamente y no se presenta la cuenta como contenida por completo.
+**El código público anterior no vinculaba el JWT al hash de contraseña. Por eso
+la rotación por sí sola no cerraba las sesiones antiguas.** El corte aprobado ya
+instalado añade esa comprobación. El recibo de rotación conserva su estado
+histórico; no se presenta la contención completa ni el MFA como terminados.
 
-## Corte pequeño de código listo para revisión
+## Corte pequeño de código instalado
 
 `adminCredentialSession` añade a los JWT legacy de administración global un
 HMAC, con dominio separado, de ID/hash de contraseña/email y una versión de
@@ -66,7 +69,11 @@ respuesta correcta, borra la sesión local y reemplaza la URL por `/sign-in`.
 El token de un solo uso sigue validándose en el backend. Los errores permanecen
 en el formulario. No incorpora el frontend completo de DEV ni activa MFA.
 
-## Lote operativo que requiere aprobación
+## Lote operativo aprobado y ejecutado
+
+El siguiente procedimiento fue autorizado expresamente y ejecutado; los SHAs
+instalados y resultados están en el acta enlazada arriba. No constituye una
+autorización reutilizable para otro corte de MFA o integraciones.
 
 1. Comprobar de nuevo HEAD/diff y guardar copias privadas solo de los siete
    archivos sustituidos; registrar también hashes de configuración y overrides
@@ -132,7 +139,7 @@ correctos. La causa exacta de la primera pantalla observada por el usuario no
 quedó demostrada; su segundo intento funcionó sin despliegue. La ruta estaba
 dentro de `NoAuthGuard`, lo que sí podía desviar una recuperación con sesión
 guardada. El complemento descrito arriba elimina esa dependencia y cumple su
-petición de volver al login tras el cambio. Sigue pendiente de publicación.
+petición de volver al login tras el cambio. Quedó publicado en este corte.
 
 Nginx observado: `crm.clinicaclick.com/api/` apunta a staging 3001;
 `app.clinicaclick.com/api/` y autenticación externa a gateway 3000.
@@ -145,9 +152,9 @@ DEV es la fuente versionada de esta entrega. El helper administrativo y su
 integración en `accessSession.service`, la recuperación y las pruebas se
 publican en los respectivos `origin/dev`. Los parches legacy públicos son una
 adaptación a sus bases anteriores, documentada en ese mismo commit; no una
-corrección que exista únicamente en staging. Cuando se apruebe su instalación,
-el corte público deberá quedar también registrado en commits de sus ramas,
-preservando el hotfix local y anotando los SHAs realmente desplegados.
+corrección que exista únicamente en staging. El corte público quedó también
+registrado en commits de staging y de la rama explícita del gateway,
+preservando el hotfix y anotando los SHAs realmente desplegados en el acta.
 
 Antes de cada promoción que afecte a autenticación:
 

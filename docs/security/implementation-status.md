@@ -1,5 +1,24 @@
 # Seguridad: implementación y evidencias
 
+## 14/09/2026 — Primer corte de acceso desplegado; relevo a importación
+
+Con autorización del usuario, el 13/09 a las 22:16–22:17 UTC (14/09 a las
+00:16–00:17 Europe/Madrid) se desplegó el cierre de JWT administrativos antiguos
+y la recuperación que vuelve al login. Back staging `3607ea09`, gateway
+`acd1fd74` sobre su rama explícita `security/admin-session-gateway-20260913`,
+front staging `49a9c3dd`. Código DEV: back `1fa5357f`, front `075faf5a`.
+El hotfix de estadísticas conserva su SHA y está versionado en los cortes públicos.
+
+DEV y gateway mantienen worker/cron pausados; staging conserva sus flags.
+Dieciocho comprobaciones de rechazo HTTP/HTTPS/WebSocket correctas; build servido
+por CRM verificado por hash. Sin DDL ni cambios de configuración o proveedores.
+**MFA por correo y reconexión WhatsApp siguen pendientes.** No se autoriza al
+siguiente Codex a promover toda DEV, ejecutar las DDL de seguridad ni activar
+credenciales operativas por continuar la importación. Las correcciones de
+seguridad están en DEV y deben conservarse al resolver promociones.
+
+Acta, rollback y relevo: [despliegue administrativo](admin-session-deployment-20260913.md).
+
 ## 13/09/2026 — Contraseñas administrativas rotadas; sesiones y MFA pendientes de despliegue
 
 Por instrucción expresa se rotaron, en una transacción, las contraseñas de los
