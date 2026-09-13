@@ -1,7 +1,7 @@
 {
-  "version": 1,
+  "version": 2,
   "reviewedAt": "2026-09-13",
-  "sourceHead": "292c0b74beaddf8c4978f7da00ca52a790ee8324",
+  "sourceHead": "c9e91ae9aff6889415e2f8c6e4fe247b87c2c083",
   "includesWorkingChanges": true,
   "runtimeMigrated": 0,
   "operationPrefix": "google.business_profile.",
@@ -11,13 +11,17 @@
     "posts.read.v1",
     "media.read.v1",
     "details.read.v1",
-    "verification.read.v1"
+    "verification.read.v1",
+    "discovery.read.v1"
   ],
   "method": "Manual code classification, static references and source hashes; no runtime credentials, provider calls or external OPS inventory.",
   "limitations": [
     "Other Google verticals and all other provider cohorts remain pending.",
     "Original broad inventory remains a dated baseline.",
-    "Runtime deployment, exact owners/grants and approvals are still required."
+    "Runtime deployment, exact owners/grants and approvals are still required.",
+    "First registry record closes legacy discovery and normal mapping globally; approve that impact before the canary.",
+    "OPS work deferred by user; its runtime has not been paused or migrated by this task.",
+    "User announced EC2 shutdown; effective AWS state remains unverified."
   ],
   "rows": [
     {
@@ -86,7 +90,7 @@
     },
     {
       "file": "src/services/businessProfileBroker.service.js",
-      "sha256": "929d3154dd373e0a9f13f6b0d4d84e625d013985b03757054a6fc1525b5375a1",
+      "sha256": "5d63ffff6ce2017a524be95075ecbbbd328b182daa1d16e19ab0428f4beaeced",
       "status": "prepared_offline",
       "note": "No provider token loader for managed locations; independent registry checked even when flag is disabled.",
       "references": [
@@ -94,8 +98,8 @@
           "symbol": "createBusinessProfileBroker",
           "lines": [
             30,
-            82,
-            87
+            83,
+            88
           ]
         },
         {
@@ -104,7 +108,7 @@
             33,
             46,
             62,
-            69
+            70
           ]
         },
         {
@@ -112,42 +116,42 @@
           "lines": [
             30,
             34,
-            83
+            84
           ]
         }
       ]
     },
     {
       "file": "src/routes/oauth.routes.js",
-      "sha256": "6adc1c8e289b3a66dc366ae71efbec93b4b93a4982a6ae68b724c17a6deeeba9",
-      "status": "pending",
-      "note": "Discovery, mapping, reassignment/disconnect and OAuth remain legacy; coordinate or pause for approved canary.",
+      "sha256": "a4adf5206a2eea4cd3a2f3b1da681243813b1ca8ec362708a06584789b299e1c",
+      "status": "partially_prepared_offline",
+      "note": "GET local/locations uses registered grants and metadata-only connection resolution. Normal remapping globally stops after first registry record. OAuth lifecycle and other routes remain pending.",
       "references": [
         {
           "symbol": "GOOGLE_BUSINESS_ACCOUNT_API",
           "lines": [
-            301,
-            696
+            303,
+            701
           ]
         },
         {
           "symbol": "GOOGLE_BUSINESS_INFORMATION_API",
           "lines": [
-            300,
-            715
+            302,
+            721
           ]
         },
         {
           "symbol": "ClinicBusinessLocation",
           "lines": [
             17,
-            1982,
-            2108,
-            2156,
-            2204,
-            2271,
-            2303,
-            3440
+            2042,
+            2171,
+            2219,
+            2267,
+            2335,
+            2367,
+            3504
           ]
         }
       ]
@@ -179,8 +183,8 @@
     {
       "file": "src/scripts/push_ops_google_business_profile.js",
       "sha256": "cc646b214f21a031e9ae4e718bd9528258867b568d8c3f46709605131aa16c57",
-      "status": "pending_external_ops",
-      "note": "Reads accounts/locations/details/reviews/posts with legacy OAuth and sends data to external OPS; not invoked or migrated.",
+      "status": "deferred_by_user",
+      "note": "User deferred OPS work. Script still uses legacy credentials and external OPS; neither invoked, changed nor operationally paused in this block. Cutover needs an effective pause or future adaptation.",
       "references": [
         {
           "symbol": "async function googleGet",
@@ -237,6 +241,70 @@
           ]
         }
       ]
+    },
+    {
+      "file": "src/services/businessProfileDiscovery.service.js",
+      "status": "prepared_offline",
+      "note": "Registry-backed scoped inventory, session/scope revalidation callback, bounded admission/deadline and no legacy fallback after first record. No model bootstrap on import.",
+      "references": [
+        {
+          "symbol": "createBusinessProfileDiscovery",
+          "lines": [
+            18,
+            86,
+            102
+          ]
+        },
+        {
+          "symbol": "assertLegacyAllowed",
+          "lines": [
+            25,
+            29
+          ]
+        },
+        {
+          "symbol": "listBindings",
+          "lines": [
+            18,
+            41,
+            66,
+            88
+          ]
+        }
+      ],
+      "sha256": "7f9292803aa817b6d120eef59caf8e4878838e56fa8df1f726c5e951a630b94a"
+    },
+    {
+      "file": "src/services/scopeConnectionResolver.service.js",
+      "status": "partially_prepared_offline",
+      "note": "Internal metadataOnly option selects GoogleConnection.id through assignment, mapping and user resolution. Other callers retain existing behavior.",
+      "references": [
+        {
+          "symbol": "metadataOnly",
+          "lines": [
+            392,
+            394
+          ]
+        },
+        {
+          "symbol": "findGoogleAssignment",
+          "lines": [
+            196,
+            399,
+            412
+          ]
+        },
+        {
+          "symbol": "findSingleUserConnection",
+          "lines": [
+            113,
+            369,
+            438,
+            464
+          ]
+        }
+      ],
+      "sha256": "1d774d8c9eb38383edbf4013598fa3f88cde63b73320fd298afcd07635822b68"
     }
   ]
 }

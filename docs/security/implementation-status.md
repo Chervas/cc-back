@@ -1,5 +1,17 @@
 # Seguridad: implementación y evidencias
 
+## Undécimo bloque: listado GBP por grants (13/09/2026)
+
+[Contrato de API, límites y corte](google-business-profile-discovery-migration.md): séptima lectura cerrada,
+resolver de conexión sin columnas de tokens y listado solo de fichas registradas.
+Revalida sesión/scope/mappings, devuelve DTO completo o error y cierra el
+remapeo y descubrimiento legacy globalmente tras el primer registro. Este
+impacto debe aceptarse en el canary; no hay nueva migración. QA offline:
+61 tests y diez checks MySQL propios, sin UI cambiada ni despliegue.
+OPS queda aplazado por indicación del usuario, sin modificar sus procesos.
+El usuario anuncia apagado de la instancia AWS; estado efectivo no consultado.
+Continúan las demás cohortes, OAuth completo, auditoría/retención y corte BD.
+
 ## Décimo bloque: lecturas de Perfil de Empresa (13/09/2026)
 
 [Contrato y lote](google-business-profile-read-migration.md): seis operaciones,
@@ -84,6 +96,7 @@ efectivo en AWS. `manifest.final.json` aún declara identificadores no capturado
 | Área | Reportado | Verificado localmente | Pendiente / responsable |
 |---|---|---|---|
 | Cuenta/región/stack | 137819318729, eu-west-3, UPDATE_ROLLBACK_COMPLETE | Coherencia de los artefactos | Identidad, eventos, outputs y template vivo; operador SSO + seguridad |
+| Estado operativo EC2 | Usuario anuncia apagado el 13/09/2026 | No se ha consultado ni ejecutado desde esta tarea | Verificar estado con sesión asignada y acordar reanudación/despliegue antes de un corte real |
 | EC2/red | t3.small AL2023, 20 GiB cifrados, IMDSv2, EIP fija | Plantilla sin ingress ni UserData de instalación | IDs/AMI/parches, TLS y canal de acceso del consumidor; cambio de red con aprobación |
 | Runtime | Instance role lee prefijo Secrets y dos KMS | No concede asumir writer ni cost-reader; no escribe secretos | Trusts operativos y permisos efectivos; lote IAM separado |
 | Despliegue | Rol dedicado | Permisos CF/inventario; sin SendCommand/StartSession ni canal de artefactos | Definir instalación aprobada sin entregar administración al backend |

@@ -2,11 +2,15 @@
 
 ## 13/09/2026: lecturas GBP preparadas, sin activar
 
-`google-main.js` incorpora un arranque explícito con seis operaciones cerradas
+`google-main.js` incorpora un arranque explícito con siete operaciones cerradas
 de Perfil de Empresa, Secrets Manager/renovación, IMDSv2/STS y writer separado
 por rol. Dos jobs backend usan referencias para ubicaciones gestionadas; una
 tabla independiente impide fallback al borrar/recrear el mapping. Sin AWS,
 OAuth real ni despliegue. [Contrato, pruebas y lote pendiente](../../docs/security/google-business-profile-read-migration.md).
+La séptima operación, `discovery.read.v1`, obtiene solo cuenta/ficha exactas
+del grant para el listado OAuth, con proyección cerrada y dos GET fijos.
+[Contrato del listado y su cierre global de legacy](../../docs/security/google-business-profile-discovery-migration.md).
+OPS aplazado; apagado EC2 anunciado por el usuario y aún no verificado.
 `npm start` mantiene su entrada ficticia. Las secciones siguientes describen
 el núcleo común; la configuración Google se especifica en el contrato enlazado.
 
@@ -38,7 +42,7 @@ capacidad de invocar los grants asignados: esta separación no elimina ese riesg
 
 Catálogo actual: `fictitious.connection.check.v1`, payload `{}`, devuelve
 `{fixture:true,status:"available"}`. No acredita salud de Meta, Google ni WhatsApp.
-El catálogo de seis lecturas Google solo se registra en `google-main.js`.
+El catálogo de siete lecturas Google solo se registra en `google-main.js`.
 Su migración operativa y el resto de consumidores permanecen pendientes.
 
 `src/lib/integrationsBrokerClient.js` del backend implementa el transporte HTTPS

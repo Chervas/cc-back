@@ -15,6 +15,8 @@ const ClinicAnalyticsProperty = db.ClinicAnalyticsProperty;
 const Clinica = db.Clinica;
 const ClinicMetaAsset = db.ClinicMetaAsset; // <-- Accede al modelo ClinicMetaAsset
 const ClinicBusinessLocation = db.ClinicBusinessLocation;
+const businessProfileDiscovery = require('../services/businessProfileDiscovery.service');
+const accessSessions = require('../services/accessSession.service');
 const ClinicGoogleAdsAccount = db.ClinicGoogleAdsAccount;
 const GroupAssetClinicAssignment = db.GroupAssetClinicAssignment;
 const SocialStatsDaily = db.SocialStatsDaily;
@@ -452,13 +454,15 @@ function buildScopeResponse(scope, assignment) {
 
 async function resolveGoogleRequestConnection(req, {
     allowLegacyUserFallback = true,
-    scopeInput = null
+    scopeInput = null,
+    metadataOnly = false
 } = {}) {
     const userId = getUserIdFromToken(req);
     const resolved = await resolveGoogleConnectionForScope({
         userId,
         ...(scopeInput || getScopeInputFromRequest(req)),
-        allowLegacyUserFallback
+        allowLegacyUserFallback,
+        metadataOnly
     });
     return { userId, ...resolved };
 }
@@ -693,6 +697,7 @@ async function fetchAllGoogleBusinessAccounts(accessToken) {
     const accounts = [];
     let nextPageToken = null;
     do {
+        await businessProfileDiscovery.assertLegacyAllowed();
         const resp = await axios.get(`${GOOGLE_BUSINESS_ACCOUNT_API}/accounts`, {
             params: { pageSize: 100, pageToken: nextPageToken || undefined },
             headers: { Authorization: `Bearer ${accessToken}` }
@@ -712,6 +717,7 @@ async function fetchAllGoogleBusinessLocations(accessToken, accountName) {
         readMask: GOOGLE_BUSINESS_LOCATION_READ_MASK
     };
     do {
+        await businessProfileDiscovery.assertLegacyAllowed();
         const resp = await axios.get(`${GOOGLE_BUSINESS_INFORMATION_API}/${accountName}/locations`, {
             params: { ...paramsBase, pageToken: nextPageToken || undefined },
             headers: { Authorization: `Bearer ${accessToken}` }
@@ -724,6 +730,7 @@ async function fetchAllGoogleBusinessLocations(accessToken, accountName) {
 }
 
 async function fetchAccessibleGoogleBusinessLocations(connection) {
+    await businessProfileDiscovery.assertLegacyAllowed();
     const { accessToken } = await ensureGoogleAccessToken(connection);
     const accounts = await fetchAllGoogleBusinessAccounts(accessToken);
     const locations = [];
@@ -1084,6 +1091,14 @@ function sendKnownOAuthMappingError(res, error) {
         error: error?.code || 'asset_mapping_failed',
         message: error?.message || 'No se pudo completar el mapeo.'
     });
+    return true;
+}
+
+function sendBusinessProfileDiscoveryError(res, error) {
+    const code = error?.code;
+    if (!businessProfileDiscovery.ERROR_CODES.has(code)) return false;
+    const status = businessProfileDiscovery.CONFLICT_CODES.has(code) ? 409 : 503;
+    res.status(status).json({ success: false, error: code });
     return true;
 }
 
@@ -1877,16 +1892,50 @@ router.post('/google/analytics/map-properties', async (req, res) => {
  * GOOGLE — Listar ubicaciones de Google Business Profile accesibles
  */
 router.get('/google/local/locations', async (req, res) => {
+    res.set('Cache-Control', 'private, no-store');
     try {
-        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
-            allowLegacyUserFallback: true
+        const { userId, connection: metadata } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true,
+            metadataOnly: true
         });
         if (!userId) {
             return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
         }
-        if (!conn) {
+        if (!metadata) {
             return res.status(404).json({ success: false, error: 'No hay conexión Google' });
         }
+
+        const clinicIds = req.marketingConnectionScopeAuthorization?.clinicIds;
+        const revalidate = async () => {
+            await accessSessions.verify(accessSessions.bearer(req.headers.authorization));
+            const scope = await authorizeExplicitConnectionScope(req, 'write');
+            const latest = await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: true, metadataOnly: true });
+            if (!scope.requested || scope.clinicIds.length !== clinicIds?.length
+                || scope.clinicIds.some(id => !clinicIds.includes(id))
+                || Number(latest.connection?.id) !== Number(metadata.id)) {
+                throw Object.assign(new Error('broker_binding_invalid'), { code: 'broker_binding_invalid' });
+            }
+        };
+        const granted = await businessProfileDiscovery.list({ clinicIds, connectionId: Number(metadata.id), revalidate });
+        if (granted !== null) {
+            const grouped = new Map();
+            for (const { account, location } of granted) {
+                if (!grouped.has(account.name)) grouped.set(account.name, {
+                    accountName: account.name,
+                    accountDisplayName: account.accountName || account.name,
+                    accountNumber: account.accountNumber || null,
+                    locations: []
+                });
+                grouped.get(account.name).locations.push(normalizeBusinessLocation(location, account));
+            }
+            return res.json({ success: true, accounts: [...grouped.values()], inventory_mode: 'broker_grants' });
+        }
+
+        // Only the legacy branch obtains credential columns. A cut must drain
+        // old requests; a registry change observed here stops their dispatch.
+        await businessProfileDiscovery.assertLegacyAllowed();
+        const conn = await GoogleConnection.findByPk(metadata.id);
+        await businessProfileDiscovery.assertLegacyAllowed();
 
         let accessToken;
         try {
@@ -1915,6 +1964,7 @@ router.get('/google/local/locations', async (req, res) => {
                         locations: simplified
                     });
                 } catch (accountErr) {
+                    if (businessProfileDiscovery.ERROR_CODES.has(accountErr?.code)) throw accountErr;
                     const status = accountErr.response?.status;
                     if (status === 403) {
                         throw accountErr;
@@ -1927,16 +1977,26 @@ router.get('/google/local/locations', async (req, res) => {
                 }
             }
 
+            await businessProfileDiscovery.assertLegacyAllowed();
+            await revalidate();
             return res.json({ success: true, accounts: response });
         } catch (apiErr) {
+            if (['JsonWebTokenError', 'TokenExpiredError', 'NotBeforeError'].includes(apiErr.name)) throw apiErr;
             const status = apiErr.response?.status;
             if (status === 403) {
                 return res.status(403).json({ success: false, error: 'insufficient_scope' });
             }
+            if (sendBusinessProfileDiscoveryError(res, apiErr)) return;
+            if (sendKnownOAuthMappingError(res, apiErr)) return;
             console.error('❌ Error listando ubicaciones de Google Business Profile:', apiErr.response?.data || apiErr.message);
             return res.status(500).json({ success: false, error: 'Error obteniendo ubicaciones' });
         }
     } catch (err) {
+        if (['JsonWebTokenError', 'TokenExpiredError', 'NotBeforeError'].includes(err.name)) {
+            return res.status(401).json({ success: false, error: 'unauthenticated' });
+        }
+        if (sendBusinessProfileDiscoveryError(res, err)) return;
+        if (sendKnownOAuthMappingError(res, err)) return;
         console.error('❌ Error interno en /oauth/google/local/locations:', err.message);
         return res.status(500).json({ success: false, error: 'Error interno' });
     }
@@ -2064,6 +2124,9 @@ router.post('/google/local/map-locations', async (req, res) => {
             });
         }
 
+        // Grant creation/reassignment needs a separate cutover operation. Do not
+        // let this legacy writer discover assets or mutate migrated mappings.
+        await businessProfileDiscovery.assertLegacyAllowed();
         const { connection: conn, destinationClinicIds } = await resolveAuthorizedDestinationGoogleConnection({
             userId,
             mappings,
@@ -2228,6 +2291,7 @@ router.post('/google/local/map-locations', async (req, res) => {
 
         return res.json({ success: true, mapped: createdOrUpdated.length, locations: createdOrUpdated });
     } catch (err) {
+        if (sendBusinessProfileDiscoveryError(res, err)) return;
         console.error('❌ Error en /oauth/google/local/map-locations:', err.response?.data || err.message);
         const status = Number(err.httpStatus || err.status || 500);
         if ([400, 403, 404, 409].includes(status)) {

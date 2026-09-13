@@ -1,5 +1,17 @@
 # Runbooks operativos del backend
 
+## Undécimo bloque: listado GBP por grants (13/09/2026)
+
+[Contrato de API, límites y corte](security/google-business-profile-discovery-migration.md): séptima lectura cerrada,
+resolver de conexión sin columnas de tokens y listado solo de fichas registradas.
+Revalida sesión/scope/mappings, devuelve DTO completo o error y cierra el
+remapeo y descubrimiento legacy globalmente tras el primer registro. Este
+impacto debe aceptarse en el canary; no hay nueva migración. QA offline:
+61 tests y diez checks MySQL propios, sin UI cambiada ni despliegue.
+OPS queda aplazado por indicación del usuario, sin modificar sus procesos.
+El usuario anuncia apagado de la instancia AWS; estado efectivo no consultado.
+Continúan las demás cohortes, OAuth completo, auditoría/retención y corte BD.
+
 ## Lecturas de Perfil de Empresa preparadas (13/09/2026)
 
 [Operaciones, referencias, OAuth interno, QA y corte pendiente](security/google-business-profile-read-migration.md).

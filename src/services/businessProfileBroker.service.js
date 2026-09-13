@@ -2,7 +2,7 @@
 const fs = require('node:fs'); const path = require('node:path');
 const { createIntegrationsBrokerClient } = require('../lib/integrationsBrokerClient');
 const PREFIX = 'google.business_profile.';
-const OPERATIONS = new Set(['metrics', 'reviews', 'posts', 'media', 'details', 'verification']);
+const OPERATIONS = new Set(['metrics', 'reviews', 'posts', 'media', 'details', 'verification', 'discovery']);
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 function privateFile(filename) {
   try {
@@ -53,7 +53,7 @@ function createBusinessProfileBroker({ client, loadLocation, loadManagedBinding,
       if (!legacyCache.has(key)) legacyCache.set(key, (await loadLegacyToken(location.google_connection_id)).accessToken);
       return legacyCache.get(key);
     },
-    async read(location, context, family, payload) {
+    async read(location, context, family, payload, options) {
       if (!enabled()) fail('broker_cohort_disabled');
       const captured = context && typeof context === 'object' && contexts.get(context);
       if (!captured || !OPERATIONS.has(family) || captured.id !== Number(location.id)) fail('broker_binding_invalid');
@@ -62,7 +62,8 @@ function createBusinessProfileBroker({ client, loadLocation, loadManagedBinding,
       const scope = await recordedBinding(current);
       if (Number(current.google_connection_id) !== captured.googleConnectionId
         || Object.keys(scope).some(k => scope[k] !== captured[k])) fail('broker_binding_invalid');
-      const result = await client.execute({ ...scope, operation: PREFIX + family + '.read.v1', payload });
+      const transportOptions = options?.beforeExecute ? await options.beforeExecute() : options;
+      const result = await client.execute({ ...scope, operation: PREFIX + family + '.read.v1', payload }, transportOptions);
       if (!enabled()) fail('broker_cohort_disabled');
       const latest = await loadLocation(captured.id);
       if (!latest || !latest.is_active || !marked(latest) || Number(latest.google_connection_id) !== captured.googleConnectionId) fail('broker_binding_invalid');
@@ -73,11 +74,11 @@ function createBusinessProfileBroker({ client, loadLocation, loadManagedBinding,
   };
 }
 let cachedClient;
-const client = { execute(command) {
+const client = { execute(command, options) {
   cachedClient ||= createIntegrationsBrokerClient({ origin: process.env.INTEGRATIONS_BROKER_ORIGIN,
     audience: process.env.INTEGRATIONS_BROKER_AUDIENCE, keyId: process.env.GOOGLE_BUSINESS_PROFILE_BROKER_KEY_ID,
     ca: privateFile(process.env.INTEGRATIONS_BROKER_CA_FILE), privateKey: privateFile(process.env.GOOGLE_BUSINESS_PROFILE_BROKER_KEY_FILE), timeoutMs: 30000 });
-  return cachedClient.execute(command);
+  return cachedClient.execute(command, options);
 } };
 const service = createBusinessProfileBroker({ client,
   loadManagedBinding: id => require('../../models').BusinessProfileBrokerBinding.findByPk(id, { raw: true }),

@@ -2,6 +2,7 @@
 const assert = require('node:assert/strict'); const { randomBytes } = require('node:crypto');
 const { DataTypes: D } = require('sequelize'); const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
 const { loadBusinessProfileJobs } = require('./fixtures/business_profile_jobs.fixture');
+const { loadDiscoverySource } = require('./fixtures/business_profile_discovery.fixture');
 withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const qi = sql.getQueryInterface();
   for (const [name, key] of [['Clinicas', 'id_clinica'], ['GoogleConnections', 'id'], ['ClinicMetaAssets', 'id']]) {
@@ -35,6 +36,9 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const operations = createGoogleBusinessProfileOperations({ cursor: cursorCodec(randomBytes(32)), http: async request => {
     providerCalls++; assert.equal(request.token.toString(), 'FICTITIOUS_ACCESS_SENTINEL');
     const path = new URL('https://' + request.hostname + request.path);
+    if (path.hostname === 'mybusinessaccountmanagement.googleapis.com') {
+      assert.equal(path.pathname, '/v1/accounts/123'); return { name: 'accounts/123', accountName: 'FICTITIOUS_ACCOUNT', accountNumber: '001' };
+    }
     if (path.pathname.includes('fetchMultiDailyMetrics')) return { multiDailyMetricTimeSeries: [{ dailyMetricTimeSeries: [{ dailyMetric: 'CALL_CLICKS', timeSeries: { datedValues: [
       { date: { year: 2026, month: 9, day: 1 }, value: '0' }, { date: { year: 2026, month: 9, day: 2 } }] } }] }] };
     if (path.pathname.endsWith('/reviews')) {
@@ -71,6 +75,49 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   assert.equal(location.raw_payload.accountName, 'accounts/123'); assert.equal(location.raw_payload.arbitrarySecret, undefined);
   assert.equal(location.raw_payload.clinicaclick_media_items.length, 1); assert.equal(location.broker_read_connection_ref, 'connection:test');
   report.checks.push('Actual full job uses all six broker operations, opaque pagination, existing caches and internal matching contract without tokens');
+  const discovery = loadDiscoverySource('services/businessProfileDiscovery.service.js', {
+    sequelize: require('sequelize'), '../../models': models, './businessProfileBroker.service': service,
+  }, { env: { GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED: 'true' } });
+  const discoveryRequest = { clinicIds: [71], connectionId: 81, revalidate: async () => {} };
+  const inventory = await discovery.list(discoveryRequest);
+  assert.equal(inventory[0].account.accountNumber, '001'); assert.equal(inventory[0].location.name, 'locations/456');
+  await assert.rejects(discovery.assertLegacyAllowed(), { code: 'broker_legacy_discovery_blocked' });
+  await assert.rejects(discovery.list({ ...discoveryRequest, clinicIds: [72] }), { code: 'broker_discovery_scope_unconfigured' });
+  const pendingDiscovery = discovery.list({ ...discoveryRequest, revalidate: async () => {
+    if (providerCalls > 9) await location.update({ is_active: false });
+  } });
+  await assert.rejects(pendingDiscovery); await location.update({ is_active: true });
+  report.checks.push('Discovery default SQL queries return only exact registered scope, reject empty grants and discard concurrently deactivated mappings');
+
+  // Actual resolver and Google model, with a credential sentinel in a wholly
+  // fictional table. Every metadata resolution SELECT must exclude its columns.
+  for (const [name, type] of Object.entries({ userId: D.INTEGER, googleUserId: D.STRING(128), userName: D.STRING(256), userEmail: D.STRING(256),
+    accessToken: D.TEXT, refreshToken: D.TEXT, scopes: D.TEXT, expiresAt: D.DATE, created_at: D.DATE, updated_at: D.DATE })) {
+    await qi.addColumn('GoogleConnections', name, { type, allowNull: true });
+  }
+  await sql.query("UPDATE GoogleConnections SET userId = 701, googleUserId = 'fictitious-subject', accessToken = 'FICTITIOUS_SQL_CREDENTIAL', refreshToken = 'FICTITIOUS_SQL_REFRESH'");
+  models.GoogleConnection = require('../../../models/googleconnection')(sql, D);
+  await qi.addColumn('Clinicas', 'grupoClinicaId', { type: D.INTEGER });
+  models.Clinica = sql.define('DiscoveryClinic', { id_clinica: { type: D.INTEGER, primaryKey: true }, grupoClinicaId: D.INTEGER }, { tableName: 'Clinicas', timestamps: false });
+  models.GoogleConnectionAssignment = sql.define('DiscoveryAssignment', { scopeKey: { type: D.STRING(128), primaryKey: true }, status: D.STRING(32), googleConnectionId: D.INTEGER }, { tableName: 'DiscoveryAssignments', timestamps: false });
+  models.GoogleConnectionAssignment.belongsTo(models.GoogleConnection, { foreignKey: 'googleConnectionId', as: 'googleConnection' });
+  await models.GoogleConnectionAssignment.sync();
+  const emptyMappings = sql.define('DiscoveryEmptyMappings', { clinicaId: D.INTEGER, grupoClinicaId: D.INTEGER, assignmentScope: D.STRING(32), isActive: D.BOOLEAN, googleConnectionId: D.INTEGER }, { timestamps: false });
+  await emptyMappings.sync();
+  models.ClinicGoogleAdsAccount = models.ClinicWebAsset = models.ClinicAnalyticsProperty = emptyMappings;
+  const resolver = loadDiscoverySource('services/scopeConnectionResolver.service.js', { '../../models': models, sequelize: require('sequelize') });
+  await models.GoogleConnectionAssignment.create({ scopeKey: 'clinic:71', status: 'active', googleConnectionId: 81 });
+  const statements = []; const originalLogging = sql.options.logging; sql.options.logging = statement => statements.push(statement);
+  try {
+    for (const path of ['assignment', 'mapping', 'user']) {
+      if (path === 'mapping') await models.GoogleConnectionAssignment.destroy({ where: {} });
+      const resolved = await resolver.resolveGoogleConnectionForScope({ userId: 701, clinicIdRaw: path === 'user' ? null : 71, metadataOnly: true });
+      assert.equal(resolved.connection.id, 81); assert.deepEqual(Object.keys(resolved.connection.get()), ['id']);
+    }
+  } finally { sql.options.logging = originalLogging; }
+  const selects = statements.filter(statement => /SELECT/.test(statement)); assert(selects.length > 3);
+  for (const statement of selects) assert(!/accessToken|refreshToken|FICTITIOUS_SQL/.test(statement));
+  report.checks.push('Actual assignment, mapped and user fallback resolver SELECTs load GoogleConnection.id only; fictional credential columns remain unread');
   const metrics = await models.BusinessProfileDailyMetric.findAll({ order: [['date', 'ASC']], raw: true });
   assert.equal(metrics.length, 2); assert.equal(metrics[0].value, 0); assert.equal(metrics[1].value, 13);
   assert.equal(await models.BusinessProfileReview.count({ where: { review_name: 'stale-review' } }), 0);
@@ -101,12 +148,14 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const recreated = await models.ClinicBusinessLocation.create({ id: 53, clinica_id: 71, google_connection_id: 81, location_id: 'locations/999' });
   await assert.rejects(service.prepare(recreated, jobs._ensureGoogleAccessToken, new Map()), { code: 'broker_binding_invalid' });
   assert.equal(tokenReads, 0); await recreated.destroy();
+  await assert.rejects(discovery.assertLegacyAllowed(), { code: 'broker_legacy_discovery_blocked' });
   report.checks.push('Independent registry survives mapping deletion and blocks a recreated legacy row before any token load');
   await location.update({ broker_read_connection_ref: null, broker_read_asset_ref: null });
   await assert.rejects(migration.down(qi), /Managed GBP bindings/);
   // Explicit rollback of exclusively fictitious registry records with all work drained.
   await models.BusinessProfileBrokerBinding.destroy({ where: {} });
   await migration.down(qi); await migration.up(qi); await location.reload();
+  await discovery.assertLegacyAllowed(); assert.equal(await discovery.list(discoveryRequest), null);
   assert.equal(location.broker_read_connection_ref, null); assert.equal(location.location_name, 'FICTITIOUS_LOCATION');
   assert.equal(await models.BusinessProfileDailyMetric.count(), 2);
   report.checks.push('Fictitious drained rollback and reapply preserve domain rows and leave markers inactive');

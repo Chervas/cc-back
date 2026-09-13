@@ -37,6 +37,7 @@ test('backend absolute deadline bounds a TLS response that keeps sending bytes',
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); const port = server.address().port; allowPort(port);
   t.after(async () => { await new Promise(resolve => server.close(resolve)); removePort(port); });
   const client = createIntegrationsBrokerClient({ origin: `https://127.0.0.1:${port}`, audience: f.policy.audience,
-    keyId: 'qa-key', privateKey: f.keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), ca: fs.readFileSync(cert), timeoutMs: 50 });
-  await assert.rejects(client.execute(f.command()), { code: 'broker_timeout' });
+    keyId: 'qa-key', privateKey: f.keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), ca: fs.readFileSync(cert), timeoutMs: 1000 });
+  for (const timeoutMs of [0, -1, 30001, Infinity, '50']) await assert.rejects(client.execute(f.command(), { timeoutMs }), { code: 'invalid_request' });
+  await assert.rejects(client.execute(f.command(), { timeoutMs: 50 }), { code: 'broker_timeout' });
 });

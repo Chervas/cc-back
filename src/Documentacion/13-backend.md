@@ -1,5 +1,34 @@
 > **Módulo:** Arquitectura del Backend
 
+## 2026-09-13 — Listado GBP por grants, preparado sin despliegue
+
+`GET /oauth/google/local/locations` resuelve solo `GoogleConnection.id` antes
+de seleccionar la fuente. Con el registro `BusinessProfileBrokerBindings`
+vacío conserva legacy; tras el primer registro, toda la instalación usa solo
+fichas registradas de las clínicas autorizadas y la conexión resuelta. El
+listado exige el permiso de gestión existente y revalida sesión, permisos,
+conexión y mappings durante la espera. Respuesta completa o error, sin fallback.
+Conserva `accounts[]`/DTO y añade `inventory_mode: broker_grants`, no-store.
+
+Nueva operación `google.business_profile.discovery.read.v1`, payload `{}`:
+GET de cuenta y ficha exactas del grant `gbp:account:location`; proyección
+cerrada, sin enumeración global del proveedor ni contenido guardado en SQLite.
+Requiere permiso explícito distinto de las seis lecturas de jobs. Hasta 20
+fichas, cuatro solicitudes por proceso y presupuesto de 30 s para despachos;
+SQL conserva su plaza hasta terminar. Error 409 por scope sin grants, exceso,
+refs incompatibles o remapeo legacy; 503 por gate/broker/registro no disponible;
+401/403 si caduca sesión o se pierde permiso. Sin mensajes del proveedor.
+
+El primer registro también bloquea globalmente el POST normal
+`/oauth/google/local/map-locations` con `broker_legacy_discovery_blocked`;
+el alias `mapping_purpose=reviews` conserva su contrato sobre fichas existentes.
+Este impacto exige aprobación en el canary. Alta/reasignación/desconexión siguen
+pendientes. Migración `20260913000000` previa incluso con gate apagado; sin
+nueva migración. OPS queda aplazado por el usuario, sin pausa runtime ejecutada;
+AWS tiene un apagado anunciado, no verificado. No hay despliegue, credenciales
+reales usadas ni captura semántica del actor humano nueva. Contrato y QA:
+`back-dev/docs/security/google-business-profile-discovery-migration.md`.
+
 ## 2026-09-13 — Lecturas de Perfil de Empresa por broker, preparadas
 
 `businessProfileBroker.service` conecta los jobs de sincronización completa y

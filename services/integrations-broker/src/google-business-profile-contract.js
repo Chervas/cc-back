@@ -5,7 +5,7 @@ const METRICS = Object.freeze(['BUSINESS_IMPRESSIONS_DESKTOP_MAPS', 'BUSINESS_IM
   'BUSINESS_IMPRESSIONS_MOBILE_MAPS', 'BUSINESS_IMPRESSIONS_MOBILE_SEARCH', 'BUSINESS_DIRECTION_REQUESTS',
   'CALL_CLICKS', 'WEBSITE_CLICKS', 'BUSINESS_CONVERSATIONS', 'BUSINESS_BOOKINGS']);
 const READ_MASK = 'name,title,storeCode,phoneNumbers,categories,storefrontAddress,latlng,websiteUri,metadata,openInfo,regularHours,specialHours,moreHours,serviceArea,serviceItems,labels';
-const OPERATIONS = Object.freeze(['metrics.read.v1', 'reviews.read.v1', 'posts.read.v1', 'media.read.v1', 'details.read.v1', 'verification.read.v1'].map(v => PREFIX + v));
+const OPERATIONS = Object.freeze(['metrics.read.v1', 'reviews.read.v1', 'posts.read.v1', 'media.read.v1', 'details.read.v1', 'verification.read.v1', 'discovery.read.v1'].map(v => PREFIX + v));
 const date = v => typeof v === 'string' && /^20\d\d-\d\d-\d\d$/.test(v) && Number.isFinite(Date.parse(v)) && new Date(v).toISOString().slice(0, 10) === v;
 const empty = schema({}); const paged = schema({ pageToken: { type: ['string', 'null'], maxLength: 4096 } });
 const ranged = schema({ startDate: { type: 'string' }, endDate: { type: 'string' } });
@@ -33,6 +33,7 @@ const media = { name: S, mediaFormat: S, googleUrl: S, thumbnailUrl: S, sourceUr
   locationAssociation: { category: S }, dimensions: { widthPixels: N, heightPixels: N }, insights: { viewCount: S },
   attribution: { profileName: S, profilePhotoUrl: S, takedownUrl: S } };
 const SHAPES = {
+  discovery: { account: { name: S, accountName: S, accountNumber: S } },
   reviews: { reviews: [{ name: S, reviewId: S, reviewer: { displayName: S, profilePhotoUrl: S, isAnonymous: B },
     starRating: S, comment: S, createTime: S, updateTime: S, reviewState: S, reviewReply: { comment: S, updateTime: S } }], averageRating: N, totalReviewCount: N },
   posts: { localPosts: [{ name: S, languageCode: S, summary: S, topicType: S, state: S, visibilityState: S, createTime: S, updateTime: S,
@@ -53,6 +54,7 @@ const SHAPES = {
   metrics: { multiDailyMetricTimeSeries: [{ dailyMetricTimeSeries: [{ dailyMetric: S, dailySubEntityType: { dayOfWeek: S, timeOfDay: time },
     timeSeries: { datedValues: [{ date: googleDate, value: S }] } }] }] },
 };
+SHAPES.discovery.location = SHAPES.details;
 function select(value, shape) {
   if (value === null) return null;
   if (typeof shape === 'string') {
@@ -80,6 +82,7 @@ function project(operation, raw, resource, payload = {}) {
   }
   if (value.totalReviewCount !== undefined && (!Number.isSafeInteger(value.totalReviewCount) || value.totalReviewCount < 0)) fail('provider_failed');
   if (family === 'details' && value.name !== resource.location) fail('scope_denied');
+  if (family === 'discovery' && (value.account?.name !== `accounts/${resource.accountId}` || value.location?.name !== resource.location)) fail('scope_denied');
   if (family === 'metrics') for (const group of value.multiDailyMetricTimeSeries || []) for (const series of group.dailyMetricTimeSeries || []) {
     if (!METRICS.includes(series.dailyMetric)) fail('provider_failed');
     for (const point of series.timeSeries?.datedValues || []) {

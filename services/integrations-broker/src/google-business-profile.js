@@ -6,6 +6,15 @@ function createGoogleBusinessProfileOperations({ http, cursor }) {
     async execute(context) {
       const { payload, secret, signal } = context; const resource = contract.asset(context.assetRef);
       const family = operation.slice(contract.PREFIX.length).split('.')[0]; const scope = { ...context, operation };
+      if (family === 'discovery') {
+        // Both resources come from the exact signed grant. No provider-wide enumeration.
+        const account = await http({ hostname: 'mybusinessaccountmanagement.googleapis.com', path: `/v1/accounts/${resource.accountId}`, token: secret, signal });
+        if (account?.name !== `accounts/${resource.accountId}`) fail('scope_denied');
+        if (signal?.aborted) fail('provider_timeout');
+        const query = new URLSearchParams({ readMask: contract.READ_MASK });
+        const location = await http({ hostname: 'mybusinessbusinessinformation.googleapis.com', path: `/v1/${resource.location}?${query}`, token: secret, signal });
+        return contract.project(operation, { account, location }, resource, payload);
+      }
       let hostname = 'mybusiness.googleapis.com'; let path; const params = new URLSearchParams();
       if (family === 'metrics') {
         hostname = 'businessprofileperformance.googleapis.com'; path = `/v1/${resource.location}:fetchMultiDailyMetricsTimeSeries`;

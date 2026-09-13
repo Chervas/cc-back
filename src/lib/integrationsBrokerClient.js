@@ -16,7 +16,9 @@ function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, c
       || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(audience) || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30000) throw Error();
   } catch { throw error('broker_configuration_invalid'); }
   return {
-    execute(command) {
+    execute(command, options = {}) {
+      const budget = options.timeoutMs === undefined ? timeoutMs : options.timeoutMs;
+      if (!Number.isInteger(budget) || budget < 1 || budget > 30000) return Promise.reject(error('invalid_request'));
       const requestId = command.requestId || randomUUID();
       const body = Buffer.from(JSON.stringify({ ...command, requestId, version: 1, audience, issuedAt: Date.now(), nonce: randomUUID() }));
       if (body.length > 32768) return Promise.reject(error('invalid_request'));
@@ -40,7 +42,7 @@ function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, c
             } catch { finish(error('broker_response_invalid')); }
           });
         });
-        timer = setTimeout(() => { finish(error('broker_timeout')); req.destroy(); }, Math.min(30000, Math.max(1, timeoutMs)));
+        timer = setTimeout(() => { finish(error('broker_timeout')); req.destroy(); }, Math.min(timeoutMs, budget));
         req.on('error', () => finish(error('broker_unavailable')));
         req.end(body);
       });

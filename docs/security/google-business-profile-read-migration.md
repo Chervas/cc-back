@@ -1,5 +1,11 @@
 # Perfil de Empresa: cohorte de lecturas del broker
 
+Ampliación posterior del 13/09: [listado por grants](google-business-profile-discovery-migration.md)
+añade una séptima lectura y cierra descubrimiento/remapeo legacy globalmente
+tras el primer registro. OPS aplazado por el usuario; apagado EC2 anunciado,
+sin estado efectivo verificado. Las seis lecturas de jobs de este documento
+conservan sus contratos. Ninguna cohorte real desplegada.
+
 Estado: **preparada y probada con ficticios; sin desplegar ni migrar ubicaciones
 reales**, 13/09/2026. Este documento complementa el runbook principal; no autoriza
 AWS, OAuth real, cambios de red/IAM ni migraciones sobre la BD compartida.
@@ -174,8 +180,11 @@ alteran; 183 días no se convierten en «seis meses» por esta implementación.
    Resolver monitor de backlog/disco y conciliación del journal del broker.
 4. Seleccionar clínicas, cuentas, ubicaciones y conexiones; inventariar sus
    lectores alternativos. `oauth.routes.js` descubre cuentas/fichas con tokens
-   legacy; `push_ops_google_business_profile.js` renueva, consulta detalles,
-   reseñas/posts y escribe en OPS. No están migrados ni autorizados a ejecutarse.
+   legacy mientras no haya registros; con el primer registro el nuevo listado
+   usa solo grants y bloquea globalmente remapeo/discovery legacy (ver ampliación).
+   `push_ops_google_business_profile.js` renueva, consulta detalles,
+   reseñas/posts y escribe en OPS. OPS queda aplazado por el usuario, sin migrar
+   ni cambiar su runtime; no está autorizado ejecutarlo desde esta tarea.
    Pausarlos para ese ámbito o migrarlos antes de declarar una única fuente.
    El registro independiente impide que borrar/recrear el mapping reactive los
    dos jobs legacy. El alta/reasignación/desconexión OAuth aún necesita su

@@ -77,6 +77,34 @@ test('schema, foreign asset and operations are rejected before obtaining any cre
     f.command('metrics', { startDate: '2026-02-30', endDate: '2026-03-01' }), f.command('metrics', { startDate: '2024-01-01', endDate: '2026-09-01' }), f.command('reply')]) await assert.rejects(f.execute(command));
   assert.equal(reads, 0);
 });
+test('discovery obtains only the granted account/location with closed fields and durable metadata audit', async t => {
+  const requests = [];
+  const f = gbp(t, { http: async request => {
+    requests.push(request);
+    if (request.hostname === 'mybusinessaccountmanagement.googleapis.com') {
+      assert.equal(request.path, '/v1/accounts/123');
+      return { name: 'accounts/123', accountName: 'FICTITIOUS_ACCOUNT', accountNumber: '001', organizationInfo: { phoneNumber: 'OMIT_ORGANIZATION' }, accessToken: ACCESS };
+    }
+    assert.equal(request.hostname, 'mybusinessbusinessinformation.googleapis.com');
+    assert.equal(new URL('https://example.invalid' + request.path).searchParams.get('readMask'), contract.READ_MASK);
+    return { name: 'locations/456', title: 'FICTITIOUS_DISCOVERY', arbitrarySecret: REFRESH };
+  } });
+  const command = f.command('discovery'); const result = await f.execute(command);
+  assert.equal(result.data.account.accountNumber, '001'); assert.equal(result.data.location.title, 'FICTITIOUS_DISCOVERY');
+  assert(!JSON.stringify(result).includes('SENTINEL')); assert(!JSON.stringify(result).includes('OMIT_ORGANIZATION'));
+  await assert.rejects(f.execute(command), { code: 'outcome_unknown' }); assert.equal(requests.length, 2);
+  const saved = JSON.stringify(f.store.db.prepare('SELECT * FROM commands').all()) + JSON.stringify(f.store.db.prepare('SELECT * FROM audit_outbox').all());
+  assert(!saved.includes('FICTITIOUS_ACCOUNT')); assert(!saved.includes('FICTITIOUS_DISCOVERY')); assert.equal(f.store.backlog().pending, 2);
+});
+test('discovery rejects foreign grants/payloads before secrets and a foreign account before a location request', async t => {
+  let calls = 0; const f = gbp(t, { http: async () => { calls++; return { name: 'accounts/999' }; } });
+  for (const patch of [{ assetRef: 'gbp:999:456' }, { tenantRef: 'clinic:999' }, { payload: { pageToken: null } }, { payload: { location: 'locations/999' } }]) {
+    await assert.rejects(f.execute({ ...f.command('discovery'), ...patch }));
+  }
+  assert.equal(calls, 0);
+  await assert.rejects(f.execute(f.command('discovery')), { code: 'scope_denied' }); assert.equal(calls, 1);
+  assert.throws(() => contract.project(contract.PREFIX + 'discovery.read.v1', { account: { name: 'accounts/123' }, location: { name: 'locations/999' } }, contract.asset('gbp:123:456')), { code: 'scope_denied' });
+});
 test('opaque pagination is scoped to principal, tenant, connection, asset, operation, policy and expiry', async t => {
   let calls = 0; const rawPage = 'FICTITIOUS_PROVIDER_PAGE_SECRET';
   const f = gbp(t, { http: async request => { calls++; if (calls === 2) assert.equal(new URL('https://example.invalid' + request.path).searchParams.get('pageToken'), rawPage); return { reviews: [], nextPageToken: calls === 1 ? rawPage : undefined }; } });

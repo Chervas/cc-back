@@ -2,7 +2,7 @@
 const https = require('node:https');
 const { BrokerError, fail } = require('./errors');
 const HOSTS = new Set(['mybusiness.googleapis.com', 'businessprofileperformance.googleapis.com',
-  'mybusinessbusinessinformation.googleapis.com', 'mybusinessverifications.googleapis.com']);
+  'mybusinessbusinessinformation.googleapis.com', 'mybusinessverifications.googleapis.com', 'mybusinessaccountmanagement.googleapis.com']);
 // This transport is private to reviewed operations. It never accepts consumer headers or URLs.
 function createGoogleHttp({ request = https.request, timeoutMs = 8000 } = {}) {
   return async function googleHttp({ hostname, path, token, form, signal }) {
