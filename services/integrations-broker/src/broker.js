@@ -41,7 +41,7 @@ class Broker {
       if (!binding || binding.provider !== operation.provider) fail('scope_denied');
       operation.validate(request.payload);
       this.adsEnrollment?.assert(request, principal, this.policy);
-      if (!['revoke_asset','google_oauth','google_ads_enrollment_status'].includes(operation.control)) {
+      if (!['revoke_asset','google_oauth','google_ads_enrollment_status','google_ads_enrollment_revoke'].includes(operation.control)) {
         this.store.connection(request.connectionRef, now);
         this.store.assertAssetActive(request);
       }
@@ -77,7 +77,7 @@ class Broker {
     const cached = this.store.reserve(principal.id, request.requestId, digest,
       eventFor(request, principal, this.policy, 'integration.requested', 'accepted', 'authorized', now), this.policy.maxBacklog, now);
     if (cached) return { ...cached, replayed: true };
-    const metadataOnly = operation.control === 'google_ads_enrollment_status' && operation.secretless === true;
+    const metadataOnly = ['google_ads_enrollment_status','google_ads_enrollment_revoke'].includes(operation.control) && operation.secretless === true;
     const revision = metadataOnly ? null : this.store.connection(request.connectionRef, now).revision;
     const controller = new AbortController();
     const active = this.active.get(request.connectionRef) || new Set(); active.add(controller); this.active.set(request.connectionRef, active);

@@ -113,6 +113,9 @@ function createGoogleOAuthBroker({ models, client, sessions, audit = createRepos
       if (await models.GooglePropertyBrokerRevocation.findOne({ attributes: ['google_user_id'], raw: true })) fail('google_oauth_legacy_closed', 409);
       if (await models.GoogleAdsBrokerBinding.findOne({ attributes: ['google_user_id'], raw: true })) fail('google_oauth_legacy_closed', 409);
       if (await models.GoogleAdsBrokerRevocation.findOne({ attributes: ['google_user_id'], raw: true })) fail('google_oauth_legacy_closed', 409);
+      for (const model of [models.GoogleAdsEnrollmentScope, models.GoogleAdsEnrollmentRequest]) {
+        if (await model.findOne({ attributes: ['google_user_id'], raw: true })) fail('google_oauth_legacy_closed', 409);
+      }
     },
     async assertLegacyConnection(connection) {
       if (await bindings.findOne({ attributes: ['google_user_id'], where: { [Op.or]: [
@@ -133,6 +136,11 @@ function createGoogleOAuthBroker({ models, client, sessions, audit = createRepos
       if (await models.GoogleAdsBrokerRevocation.findOne({ attributes: ['google_user_id'], where: { [Op.or]: [
         { google_connection_id: Number(connection?.id) || 0 }, { google_user_id: String(connection?.googleUserId || '') },
       ] }, raw: true })) fail('google_oauth_legacy_closed', 409);
+      for (const model of [models.GoogleAdsEnrollmentScope, models.GoogleAdsEnrollmentRequest]) {
+        if (await model.findOne({ attributes: ['google_user_id'], where: { [Op.or]: [
+          { google_connection_id: Number(connection?.id) || 0 }, { google_user_id: String(connection?.googleUserId || '') },
+        ] }, raw: true })) fail('google_oauth_legacy_closed', 409);
+      }
     },
     async begin({ binding, scopeKey, actorId, sessionRef, sessionExpiresAt, returnTo }) {
       if (binding?.mode === 'broker_services') fail('google_oauth_service_required', 409);

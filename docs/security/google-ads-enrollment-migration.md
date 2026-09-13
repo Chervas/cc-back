@@ -21,8 +21,8 @@ Una conexión Ads puede declarar `googleAdsEnrollmentScopes` además de
 | `readOperations` | Subconjunto cerrado de lecturas Ads; discovery es obligatoria |
 | `maxAssets` | Límite de registros durables, entre 1 y 1000, incluidos los retirados |
 
-El grant de alta tiene principal y clave distintos de lectura, revocación y
-OAuth. La separación compara las claves públicas reales, incluso si cambian sus
+Hay un único principal de alta por ámbito. Su grant y clave son distintos de
+lectura, revocación y OAuth. La separación compara las claves públicas reales, incluso si cambian sus
 IDs. Se pueden conceder los controles OAuth existentes sobre el ámbito sintético
 con su principal independiente; el adaptador OAuth de la aplicación aún necesita
 incorporar este ámbito. Nunca se acepta desde el consumidor un grant, una clave,
@@ -43,6 +43,7 @@ Todas usan el protocolo firmado `POST /v1/execute`, con el ámbito sintético co
 | `google.ads.enrollment.prepare.v1` | `enrollmentId`, `customerId`, `clinicCount`, `clinicSetDigest` | Recibo de preparación |
 | `google.ads.enrollment.activate.v1` | Los mismos cuatro campos originales | Recibo de activación |
 | `google.ads.enrollment.status.v1` | `enrollmentId` | Estado actual y `accessBlocked` |
+| `google.ads.enrollment.revoke.v1` | Los cuatro campos originales de prepare | Recibo `revoked`, `accessBlocked:true`; solo principal de control |
 
 `enrollmentId` es UUID v4; `customerId` es canónico; el conjunto original de
 clínicas tiene entre 1 y 1000 miembros y un hash SHA-256. El ámbito de clínica
@@ -85,7 +86,7 @@ secretos, ámbito, MCC, gestor y derechos delegados. Cambiar esos elementos cier
 las lecturas anteriores; cambiar una clave pública conservando la identidad del
 principal o una versión de política ajena no cambia la propiedad.
 
-Cualquier revocación histórica del cliente impide un alta, incluso bajo otro
+Cualquier revocación histórica de un activo verificado impide un alta, incluso bajo otro
 tenant/conexión. Los registros activos y preparados también impiden otra alta del
 mismo cliente. El límite por conexión suma cuentas estáticas y registros durables
 y no supera 1000. No se borra historia para recuperar capacidad.
@@ -99,8 +100,18 @@ de devolver el recibo histórico. Si quedó un resultado desconocido, consultar 
 estado con un UUID de comando nuevo permite conciliar el mismo `enrollmentId`.
 
 `status` consulta metadata sin secretos/proveedor, también con conexión o ámbito
-bloqueados. La baja usa `google.ads.asset.revoke.v1` sobre la cuenta preparada o
-activa y conserva el tombstone existente. No revoca OAuth en Google.
+bloqueados. `google.ads.asset.revoke.v1` sigue disponible sobre la cuenta preparada
+o activa. `google.ads.enrollment.revoke.v1` cancela la intención sobre el ámbito
+sintético, incluso antes de preparar, con grant del principal de control.
+
+La tabla SQLite `google_ads_enrollment_cancellations` conserva UUID, propietario,
+tenant/conexión/ámbito, cliente y compromiso de clínicas, sin FK. Una cancelación
+sin preparación verificada se limita a tenant/conexión/cliente: impide la
+preparación tardía propia, pero no reserva ni revoca el cliente para otra clínica.
+Si ya existe la preparación, conserva además el tombstone habitual del activo.
+Se rechazan cuentas estáticas, intenciones ajenas y cambios del payload original.
+Cancelación, recibo y auditoría técnica comparten la transacción. Status/reintentos
+funcionan después de reiniciar y sin secretos. No revoca OAuth en Google.
 
 ## Límites, costes y auditoría
 
@@ -125,17 +136,18 @@ no se declara cubierta por estos eventos de servicio.
 
 ## Integración que sigue pendiente
 
-1. Registrar en la aplicación el ámbito aprobado, con identidad Google conocida;
-   no derivarlo de una cuenta que se pueda retirar ni aceptarlo del navegador.
-2. Añadir intención durable de alta y exclusión global de credenciales antiguas
-   aunque desaparezcan bindings, mappings o asignaciones originales.
-3. Autorizar el conjunto original de clínicas y todos sus usos/primarios antes y
-   después de cada espera; preparar bindings/mappings inactivos bajo transacción.
-4. Incorporar conciliación de preparación/activación y pérdida de ACK sin dar
-   lecturas ni sustituir cuentas anteriores antes de una confirmación válida.
-5. Conectar selección, estado y reautorización en API/Ajustes, auditoría humana y
-   pruebas HTTP/MySQL/UI aisladas. Sigue pendiente la primera identidad Google
-   sin conexión gestionada y el traslado de propietario.
+El [fundamento de aplicación](google-ads-enrollment-application.md) ya incorpora
+DDL/modelos de ámbito e intención, contexto original de permisos, cliente tipado
+y guardas globales de credenciales. La migración 20260913120000 de ese bloque es
+obligatoria antes del código de aplicación aun con el gate apagado; todas las
+migraciones compartidas continúan pendientes.
+
+Siguen pendientes escritor/conciliador, bindings y mappings inactivos bajo
+transacción, integración con bajas, API/Ajustes, auditoría humana y confirmación
+de la selección sin sustituir cuentas anteriores prematuramente. También la
+primera identidad Google, OAuth sobre ámbito independiente y cambios de
+propietario. El [plan por etapas](incremental-delivery-plan.md) prioriza ahora Meta
+y doble factor; se conserva este motor sin declarar completo el alta general.
 
 OPS sigue aplazado. La instalación, configuración de ámbitos/principales,
 migraciones compartidas, secretos reales y corte de cohortes requieren su

@@ -6,6 +6,7 @@ const oauth = require('./google-oauth-contract');
 const { fail } = require('./errors');
 const PREFIX = 'google.ads.enrollment.';
 const OPERATIONS = Object.freeze(Object.fromEntries(['discover', 'prepare', 'activate', 'status'].map(name => [name, PREFIX + name + '.v1'])));
+const REVOKE_OPERATION = PREFIX + 'revoke.v1';
 const object = properties => ({ type: 'object', additionalProperties: false, properties, required: Object.keys(properties) });
 const customer = { type: 'string', pattern: '^[0-9]{10}$' };
 const id = { type: 'string', pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' };
@@ -21,7 +22,7 @@ const identity = { enrollmentId: id, customerId: customer, clinicCount: { type: 
   clinicSetDigest: { type: 'string', pattern: '^[a-f0-9]{64}$' } };
 const validators = {
   discover: schema({ pageToken: { type: ['string', 'null'], maxLength: 4096 } }),
-  prepare: schema(identity), activate: schema(identity), status: schema({ enrollmentId: id }),
+  prepare: schema(identity), activate: schema(identity), revoke: schema(identity), status: schema({ enrollmentId: id }),
 };
 function scopeFor(binding, assetRef, tenantRef) {
   const scope = binding?.googleAdsEnrollmentScopes?.find(s => s.assetRef === assetRef && s.tenantRef === tenantRef);
@@ -37,12 +38,17 @@ function digestFor(binding, scope) {
     scope.rootCustomerId, scope.loginCustomerId, scope.readPrincipalId, scope.controlPrincipalId,
     [...scope.readOperations].sort(), scope.maxAssets])).digest('hex');
 }
+function ownerFor(policy, binding, scope) {
+  const owners = new Set(policy.grants.filter(g => g.connectionRef === binding.connectionRef && g.assetRef === scope.assetRef
+    && g.tenantRef === scope.tenantRef && g.operations.some(op => Object.values(OPERATIONS).includes(op))).map(g => g.principalId));
+  if (owners.size !== 1) fail('invalid_request'); return [...owners][0];
+}
 function validatePolicy(policy) {
   const roles = { read: new Set(), control: new Set(), oauth: new Set(), enrollment: new Set() };
   const oauthOps = Object.values(oauth.operationsFor(ads.PROVIDER));
   for (const grant of policy.grants) {
     if (grant.operations.some(op => ads.OPERATIONS.includes(op))) roles.read.add(grant.principalId);
-    if (grant.operations.includes(ads.REVOKE_OPERATION)) roles.control.add(grant.principalId);
+    if (grant.operations.some(op => [ads.REVOKE_OPERATION, REVOKE_OPERATION].includes(op))) roles.control.add(grant.principalId);
     if (grant.operations.some(op => oauthOps.includes(op))) roles.oauth.add(grant.principalId);
     if (grant.operations.some(op => Object.values(OPERATIONS).includes(op))) roles.enrollment.add(grant.principalId);
   }
@@ -53,11 +59,11 @@ function validatePolicy(policy) {
       if (seen.has(scope.assetRef) || !scope.readOperations.includes('google.ads.discovery.read.v1')) fail('invalid_request');
       seen.add(scope.assetRef); roles.read.add(scope.readPrincipalId); roles.control.add(scope.controlPrincipalId);
       const grants = policy.grants.filter(g => g.connectionRef === binding.connectionRef && g.assetRef === scope.assetRef);
-      if (!grants.some(g => g.operations.some(op => Object.values(OPERATIONS).includes(op)))) fail('invalid_request');
+      ownerFor(policy, binding, scope);
       for (const grant of grants) {
         if (grant.tenantRef !== scope.tenantRef || grant.operations.some(op => !Object.values(OPERATIONS).includes(op)
-          && !oauthOps.includes(op) && op !== ads.REVOKE_OPERATION)
-          || grant.operations.includes(ads.REVOKE_OPERATION) && grant.principalId !== scope.controlPrincipalId) fail('invalid_request');
+          && !oauthOps.includes(op) && ![ads.REVOKE_OPERATION, REVOKE_OPERATION].includes(op))
+          || grant.operations.some(op => [ads.REVOKE_OPERATION, REVOKE_OPERATION].includes(op)) && grant.principalId !== scope.controlPrincipalId) fail('invalid_request');
       }
     }
   }
@@ -95,4 +101,4 @@ function project(raw, selected = null) {
     return page.results[0].customer;
   }).filter(c => !['CLOSED', 'CANCELED'].includes(c.status));
 }
-module.exports = { PREFIX, OPERATIONS, scopeSchema, validators, scopeFor, digestFor, validatePolicy, query, project };
+module.exports = { PREFIX, OPERATIONS, REVOKE_OPERATION, scopeSchema, validators, scopeFor, digestFor, ownerFor, validatePolicy, query, project };

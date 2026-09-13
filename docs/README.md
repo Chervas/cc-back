@@ -1,5 +1,25 @@
 # Runbooks operativos del backend
 
+## 13/09/2026 — Fundamento de altas Ads y prioridad Meta/doble factor
+
+Preparados ámbito/solicitudes independientes, autorización del conjunto original
+y cliente interno de altas Ads. La barrera de credenciales Google consulta ambos
+registros por ID/sujeto, incluso si desaparecen las asignaciones. Cancelación en
+el broker antes de preparar, durable y sin secretos; una cuenta no verificada
+no queda reservada ni revocada para otra clínica.
+
+DDL `20260913120000` obligatoria antes del código **aunque el gate esté apagado**;
+pendiente en BD compartida. QA: 574 tests Node (391 backend, 183 broker), 141 checks
+en nueve MySQL propios, cierre 0 en todos. Sin cambios de UI, runtime ni OPS.
+Faltan escritor, conciliador, conexión con bajas/API/Ajustes y auditoría humana.
+
+Por indicación del usuario, se cierra este fundamento ya probado y se prioriza
+una primera etapa de protecciones Meta y doble factor. El alta general Ads se
+aplaza; ni esta entrega ni las pruebas ficticias acreditan esa etapa terminada.
+
+[Contrato, dependencias y límites](security/google-ads-enrollment-application.md).
+[Objetivo de la primera etapa y entregas](security/incremental-delivery-plan.md).
+
 ## 13/09/2026 — Alta de cuentas Ads: motor del broker preparado
 
 El broker incorpora discover/prepare/activate/status sobre un ámbito explícito

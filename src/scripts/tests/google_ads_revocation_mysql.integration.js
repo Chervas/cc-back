@@ -2,6 +2,7 @@
 const assert = require('node:assert/strict'); const { randomUUID } = require('node:crypto'); const { DataTypes: D } = require('sequelize');
 const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
 withIsolatedCampaignMysql(async ({ sql, models, report }) => {
+  await require('./fixtures/google_ads_enrollment_mysql.fixture').installGoogleAdsEnrollmentTables({ sql, models });
   const qi = sql.getQueryInterface();
   await qi.createTable('Usuarios', { id_usuario: { type: D.INTEGER, primaryKey: true } });
   models.GoogleConnection = require('../../../models/googleconnection')(sql, D); await models.GoogleConnection.sync();

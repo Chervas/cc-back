@@ -2,6 +2,7 @@
 const assert = require('node:assert/strict'); const { DataTypes: D, literal } = require('sequelize');
 const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
 withIsolatedCampaignMysql(async ({ sql, models, report }) => {
+  await require('./fixtures/google_ads_enrollment_mysql.fixture').installGoogleAdsEnrollmentTables({ sql, models });
   models.GoogleAdsBrokerBinding = require('../../../models/googleadsbrokerbinding')(sql, D);
   await models.GoogleAdsBrokerBinding.sync();
   models.GoogleAdsBrokerRevocation = require('../../../models/googleadsbrokerrevocation')(sql, D);
@@ -82,7 +83,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   report.checks.push('Non-NULL SQL credentials exclude admission without selecting their values');
   await connection(82); await assert.rejects(service.prepare(mapping), { code: 'broker_binding_invalid' });
   const { createGoogleLegacyCredentials } = require('../../services/googleLegacyCredentials.service');
-  const legacy = createGoogleLegacyCredentials({ connectionModel: G, adsModel: models.GoogleAdsBrokerBinding, adsRevocationModel: models.GoogleAdsBrokerRevocation, bindingModel: models.GoogleOAuthBrokerBinding, searchConsoleModel: B,
+  const legacy = createGoogleLegacyCredentials({ enrollmentScopeModel: models.GoogleAdsEnrollmentScope, enrollmentRequestModel: models.GoogleAdsEnrollmentRequest, connectionModel: G, adsModel: models.GoogleAdsBrokerBinding, adsRevocationModel: models.GoogleAdsBrokerRevocation, bindingModel: models.GoogleOAuthBrokerBinding, searchConsoleModel: B,
     analyticsModel: models.AnalyticsBrokerBinding, propertyRevocationModel: models.GooglePropertyBrokerRevocation });
   for (const id of [81, 82]) await assert.rejects(legacy.load(id), { code: 'google_oauth_legacy_closed' });
   const oauth = require('../../services/googleOAuthBroker.service').createGoogleOAuthBroker({ models, sessions: {}, client: {}, audit: {}, enabled: () => false });

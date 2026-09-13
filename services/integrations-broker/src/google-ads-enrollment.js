@@ -9,13 +9,15 @@ function createGoogleAdsEnrollment({ store, http, cursor, withDeveloperSecret, n
   const get = (sql, ...args) => store.db.prepare(sql).get(...args);
   const revoked = asset => !!get('SELECT 1 FROM asset_revocations WHERE asset=? LIMIT 1', asset);
   const drop = id => { const p = pages.get(id); if (p) { bytes -= p.bytes; pages.delete(id); } };
-  const isOperation = operation => Object.values(contract.OPERATIONS).includes(operation);
+  const isOperation = operation => Object.values(contract.OPERATIONS).includes(operation) || operation === contract.REVOKE_OPERATION;
   function scope(request, policy) {
     const binding = policy.connections.find(c => c.connectionRef === request.connectionRef);
     return { binding, scope: contract.scopeFor(binding, request.assetRef, request.tenantRef) };
   }
   function owned(request, principal) {
-    const row = get('SELECT * FROM google_ads_enrollments WHERE id=?', request.payload.enrollmentId);
+    const cancellation = get('SELECT * FROM google_ads_enrollment_cancellations WHERE id=?', request.payload.enrollmentId);
+    const row = cancellation ? { ...cancellation, asset: 'ads:' + cancellation.customer, state: 'revoked' }
+      : get('SELECT * FROM google_ads_enrollments WHERE id=?', request.payload.enrollmentId);
     if (row && (row.principal !== principal.id || row.tenant !== request.tenantRef
       || row.connection !== request.connectionRef || row.scope !== request.assetRef)) fail('scope_denied');
     return row;
@@ -25,6 +27,7 @@ function createGoogleAdsEnrollment({ store, http, cursor, withDeveloperSecret, n
     if (!ads.customer(p.customerId) || p.customerId === s.rootCustomerId
       || s.assetRef.startsWith('ads-enroll:clinic:') && p.clinicCount !== 1) fail('invalid_request');
     const asset = 'ads:' + p.customerId;
+    if (get('SELECT 1 FROM google_ads_enrollment_cancellations WHERE tenant=? AND connection=? AND customer=?', request.tenantRef, request.connectionRef, p.customerId)) fail('asset_revoked');
     if (revoked(asset)) fail('asset_revoked');
     if (policy.connections.some(c => c.googleAdsAccounts?.some(a => a.customerId === p.customerId))) fail('scope_denied');
     const row = owned(request, principal); const byAsset = get('SELECT id FROM google_ads_enrollments WHERE asset=?', asset);
@@ -37,8 +40,25 @@ function createGoogleAdsEnrollment({ store, http, cursor, withDeveloperSecret, n
         + (binding.googleAdsAccounts?.length || 0) >= 1000)) fail('rate_limited');
     return { row, binding, scope: s };
   }
+  function assertRevoke(request, principal, policy) {
+    const { binding, scope: s } = scope(request, policy); const p = request.payload;
+    if (principal.id !== s.controlPrincipalId) fail('scope_denied');
+    if (!ads.customer(p.customerId) || p.customerId === s.rootCustomerId
+      || s.assetRef.startsWith('ads-enroll:clinic:') && p.clinicCount !== 1) fail('invalid_request');
+    if (policy.connections.some(c => c.googleAdsAccounts?.some(a => a.customerId === p.customerId))) fail('scope_denied');
+    const owner = contract.ownerFor(policy, binding, s);
+    const row = owned(request, { id: owner });
+    const cancelled = get('SELECT id FROM google_ads_enrollment_cancellations WHERE tenant=? AND connection=? AND customer=?', request.tenantRef, request.connectionRef, p.customerId);
+    if (cancelled && cancelled.id !== p.enrollmentId) fail('scope_denied');
+    const byAsset = get('SELECT id FROM google_ads_enrollments WHERE asset=?', 'ads:' + p.customerId);
+    if (byAsset && byAsset.id !== p.enrollmentId) fail('scope_denied');
+    if (row && (row.customer !== p.customerId || row.clinic_count !== p.clinicCount || row.clinic_digest !== p.clinicSetDigest)) fail('idempotency_conflict');
+    return { row, binding, scope: s, owner };
+  }
   function resolve(request, principal, policy) {
     if (isOperation(request.operation) || !request.assetRef.startsWith('ads:')) return policy;
+    if (request.operation !== ads.REVOKE_OPERATION && get('SELECT 1 FROM google_ads_enrollment_cancellations WHERE tenant=? AND connection=? AND customer=?',
+      request.tenantRef, request.connectionRef, request.assetRef.slice(4))) fail('asset_revoked');
     const row = get('SELECT * FROM google_ads_enrollments WHERE asset=?', request.assetRef);
     if (!row) return policy;
     if (row.tenant !== request.tenantRef || row.connection !== request.connectionRef) fail('scope_denied');
@@ -68,6 +88,7 @@ function createGoogleAdsEnrollment({ store, http, cursor, withDeveloperSecret, n
     if (request.operation === contract.OPERATIONS.status) {
       if (!owned(request, principal)) fail('scope_denied'); return;
     }
+    if (request.operation === contract.REVOKE_OPERATION) { assertRevoke(request, principal, policy); return; }
     store.assertAssetActive(request);
     if (request.operation !== contract.OPERATIONS.discover) assertCandidate(request, principal, policy);
   }
@@ -85,14 +106,15 @@ function createGoogleAdsEnrollment({ store, http, cursor, withDeveloperSecret, n
       || JSON.stringify(result).includes(developerToken.toString('utf8'))) fail('provider_failed');
     return result;
   }
-  const operations = Object.fromEntries(Object.entries(contract.OPERATIONS).map(([name, operation]) => [operation, Object.freeze({
-    provider: ads.PROVIDER, control: name === 'status' ? 'google_ads_enrollment_status' : undefined,
-    secretless: name === 'status', persistResult: ['prepare', 'activate'].includes(name), requiredScopes: ads.SCOPES,
+  const operations = Object.fromEntries([...Object.entries(contract.OPERATIONS), ['revoke', contract.REVOKE_OPERATION]].map(([name, operation]) => [operation, Object.freeze({
+    provider: ads.PROVIDER, control: name === 'status' ? 'google_ads_enrollment_status' : name === 'revoke' ? 'google_ads_enrollment_revoke' : undefined,
+    secretless: ['status','revoke'].includes(name), persistResult: ['prepare', 'activate', 'revoke'].includes(name), requiredScopes: ads.SCOPES,
     validate: contract.validators[name],
     async execute(context) {
       const { binding, assetRef, tenantRef, payload, policy, principalId } = context;
       const request = { connectionRef: binding.connectionRef, assetRef, tenantRef, payload, operation };
       const principal = { id: principalId }; const s = contract.scopeFor(binding, assetRef, tenantRef);
+      if (name === 'revoke') { assertRevoke(request, principal, policy); return { ...receipt(request, 'revoked'), accessBlocked: true }; }
       if (name === 'status') {
         const row = owned(request, principal); if (!row) fail('scope_denied');
         let accessBlocked = true;
@@ -127,6 +149,7 @@ function createGoogleAdsEnrollment({ store, http, cursor, withDeveloperSecret, n
           pages.set(entry.id, entry); bytes += size;
         }
         const rows = entry.rows.slice(offset, offset + 250).filter(c => !revoked('ads:' + c.id)
+          && !get('SELECT 1 FROM google_ads_enrollment_cancellations WHERE tenant=? AND connection=? AND customer=?', tenantRef, binding.connectionRef, c.id)
           && !policy.connections.some(b => b.googleAdsAccounts?.some(a => a.customerId === c.id))
           && !get('SELECT 1 FROM google_ads_enrollments WHERE customer=?', c.id));
         const end = Math.min(offset + 250, entry.rows.length);
@@ -136,13 +159,26 @@ function createGoogleAdsEnrollment({ store, http, cursor, withDeveloperSecret, n
     project(data) {
       if (!data || Buffer.byteLength(JSON.stringify(data)) > 786432) fail('provider_failed'); return structuredClone(data);
     },
-    ...(['prepare', 'activate'].includes(name) ? { commit({ request, principal, policy, result }) {
+    ...(['prepare', 'activate', 'revoke'].includes(name) ? { commit({ request, principal, policy, result }) {
       // Called synchronously inside the command-completion/audit transaction.
       assert(request, principal, policy);
       if (store.backlog().pending >= policy.maxBacklog) fail('audit_unavailable');
-      const { row, binding, scope: s } = assertCandidate(request, principal, policy); const p = request.payload;
+      const { row, binding, scope: s, owner } = name === 'revoke' ? assertRevoke(request, principal, policy) : assertCandidate(request, principal, policy);
+      const p = request.payload;
+      if (name === 'revoke') {
+        // Before access has been verified, cancellation belongs only to this
+        // tenant/connection. It cannot reserve or revoke an unknown customer's
+        // future registration in another clinic. An existing enrollment already
+        // proves ownership and receives the usual durable asset revocation too.
+        store.db.prepare('INSERT OR IGNORE INTO google_ads_enrollment_cancellations VALUES (?,?,?,?,?,?,?,?,?)')
+          .run(p.enrollmentId, owner, request.tenantRef, request.connectionRef, request.assetRef, p.customerId, p.clinicCount, p.clinicSetDigest, now());
+        const registered = get('SELECT * FROM google_ads_enrollments WHERE id=?', p.enrollmentId);
+        if (registered) store.db.prepare('INSERT OR IGNORE INTO asset_revocations VALUES (?,?,?,?,?)')
+          .run(request.tenantRef, request.connectionRef, 'ads:' + p.customerId, request.requestId, now());
+        return;
+      }
       if (!row) store.db.prepare('INSERT INTO google_ads_enrollments VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-        .run('ads:' + p.customerId, p.enrollmentId, principal.id, request.tenantRef, request.connectionRef, request.assetRef,
+        .run('ads:' + p.customerId, p.enrollmentId, owner || principal.id, request.tenantRef, request.connectionRef, request.assetRef,
           p.customerId, s.loginCustomerId || s.rootCustomerId, p.clinicCount, p.clinicSetDigest, contract.digestFor(binding, s), 'prepared', now(), now());
       if (name === 'activate') store.db.prepare("UPDATE google_ads_enrollments SET state='active',updated_at=? WHERE id=? AND state='prepared'")
         .run(now(), p.enrollmentId);

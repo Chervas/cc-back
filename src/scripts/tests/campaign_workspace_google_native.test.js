@@ -285,7 +285,7 @@ test('native Google enqueue locks source scope in CRM transaction and reads cred
     const original = model[method];
     model[method] = async (...args) => {
       const query = method === 'findByPk' ? args[1] : args[0];
-      if ((name === 'GoogleConnection' || /BrokerBinding$|BrokerRevocation$/.test(name)) && query?.transaction === undefined) {
+      if ((name === 'GoogleConnection' || /BrokerBinding$|BrokerRevocation$|EnrollmentScope$|EnrollmentRequest$/.test(name)) && query?.transaction === undefined) {
         assert.ok(query.attributes?.length); currentReads++;
       } else { assert.equal(query?.transaction, transaction, method); reads++; }
       return original(...args);

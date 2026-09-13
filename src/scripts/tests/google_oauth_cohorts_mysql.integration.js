@@ -4,6 +4,7 @@ const { randomUUID, createHash } = require('node:crypto');
 const { DataTypes: D } = require('sequelize');
 const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
 withIsolatedCampaignMysql(async ({ sql, models, report }) => {
+  await require('./fixtures/google_ads_enrollment_mysql.fixture').installGoogleAdsEnrollmentTables({ sql, models });
   models.GoogleAdsBrokerBinding = require('../../../models/googleadsbrokerbinding')(sql, D);
   await models.GoogleAdsBrokerBinding.sync();
   models.GoogleAdsBrokerRevocation = require('../../../models/googleadsbrokerrevocation')(sql, D);

@@ -1,5 +1,30 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Fundamento de altas Ads y cancelación interna
+
+La API pública mantiene sus rutas y las asignaciones de cuentas ya registradas.
+Todavía no invoca el nuevo cliente de alta ni expone un alta general. Preparados
+`GoogleAdsEnrollmentScopes`/`GoogleAdsEnrollmentRequests`, contexto original de
+clínicas/permisos y cliente interno discover/prepare/activate/status/revoke. Faltan
+escritor, conciliador, conexión con bajas/API/Ajustes y auditoría humana del alta.
+
+El broker añade `google.ads.enrollment.revoke.v1` por `POST /v1/execute`, con grant
+explícito del principal de control sobre el ámbito `ads-enroll:*`. Payload exacto:
+`enrollmentId`, `customerId`, `clinicCount`, `clinicSetDigest`. Respuesta: recibo de
+la intención original, estado `revoked` y `accessBlocked:true`. Puede cancelar
+antes de preparar, sin secretos/proveedor, y conserva el bloqueo tras reiniciar.
+Una cancelación sin preparación verificada se limita a tenant/conexión/cliente;
+no reserva ni revoca el cliente para otra clínica. Un registro ya preparado
+conserva además su revocación de activo. Hay un solo principal de alta por ámbito,
+distinto de lectura, control y OAuth.
+
+DDL `20260913120000` obligatoria antes del código incluso con altas deshabilitadas:
+las guardas globales Google consultan los dos registros sin seleccionar tokens.
+Sin tablas, fallan cerradas. Migración compartida, configuración y corte real
+pendientes; ninguna ruta o job de alta se activa con esta entrega.
+Contrato: `docs/security/google-ads-enrollment-application.md`.
+Entregas y dependencias: `docs/security/incremental-delivery-plan.md`.
+
 ## 13/09/2026 — Asignaciones Google Ads gestionadas
 
 POST `/oauth/google/ads/map-accounts` admite selecciones previamente registradas,

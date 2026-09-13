@@ -77,11 +77,11 @@ function validateConfig(config) {
       if (!/^clinic:[1-9]\d{0,9}$/.test(grant.tenantRef)
         || grant.operations.some(op => !adsContract.OPERATIONS.includes(op) && op !== adsContract.REVOKE_OPERATION
           && !Object.values(oauthContract.operationsFor(adsContract.PROVIDER)).includes(op)
-          && !Object.values(enrollmentContract.OPERATIONS).includes(op))) fail('invalid_request');
+          && !Object.values(enrollmentContract.OPERATIONS).includes(op) && op !== enrollmentContract.REVOKE_OPERATION)) fail('invalid_request');
       const binding = config.policy.connections.find(c => c.connectionRef === grant.connectionRef);
       if (grant.assetRef.startsWith('ads-enroll:')) enrollmentContract.scopeFor(binding, grant.assetRef, grant.tenantRef);
       else {
-        if (grant.operations.some(op => Object.values(enrollmentContract.OPERATIONS).includes(op))) fail('invalid_request');
+        if (grant.operations.some(op => Object.values(enrollmentContract.OPERATIONS).includes(op) || op === enrollmentContract.REVOKE_OPERATION)) fail('invalid_request');
         adsContract.resource(binding, grant.assetRef);
       }
     }

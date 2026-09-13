@@ -21,7 +21,7 @@ function enrollmentFixture(t) {
     readOperations: [...ads.OPERATIONS], maxAssets: 20 }];
   f.policy.grants.push({ principalId: 'enroll:test', tenantRef: 'clinic:123', connectionRef: f.binding.connectionRef,
     assetRef: SCOPE, operations: Object.values(contract.OPERATIONS) });
-  f.policy.grants.push({ ...f.policy.grants.at(-1), principalId: 'control:test', operations: [ads.REVOKE_OPERATION] });
+  f.policy.grants.push({ ...f.policy.grants.at(-1), principalId: 'control:test', operations: [ads.REVOKE_OPERATION, contract.REVOKE_OPERATION] });
   const config = { cohort: 'google-ads-read-v1', enabled: true, listenAddress: '127.0.0.1', port: 3443,
     policy: f.policy, stateFile: '/tmp/fictitious/state.sqlite', cursorKeyFile: '/tmp/fictitious/cursor', tlsCertFile: '/tmp/fictitious/cert', tlsKeyFile: '/tmp/fictitious/key' };
   validateConfig(config);
@@ -215,6 +215,62 @@ test('concurrent owners cannot both prepare the same customer and a second proce
   };
   await assert.rejects(f.execute('prepare', p), { code: 'connection_blocked' });
   assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM google_ads_enrollments').get().n, 1);
+});
+test('enrollment control can revoke before prepare without secrets; the original owner can reconcile after restart', async t => {
+  const f = enrollmentFixture(t); const p = f.intent(); const requestId = randomUUID();
+  const result = await f.execute(contract.REVOKE_OPERATION, p, { requestId }, f.broker, 'control');
+  assert.equal(result.data.state, 'revoked'); assert.equal(result.data.accessBlocked, true);
+  assert.equal(f.state.sdk.length, 0); assert.equal(f.state.calls.length, 0);
+  assert.equal((await f.execute(contract.REVOKE_OPERATION, p, { requestId }, f.broker, 'control')).replayed, true);
+  await assert.rejects(f.execute('prepare', p), { code: 'asset_revoked' });
+  const second = new BrokerStore(f.filename); t.after(() => second.close()); const restarted = f.make(second);
+  const status = await f.execute('status', { enrollmentId: p.enrollmentId }, {}, restarted.broker);
+  assert.equal(status.data.state, 'revoked'); assert.equal(f.state.sdk.length, 0);
+});
+test('enrollment revocation races with preparation and activation without allowing late grants', async t => {
+  const f = enrollmentFixture(t); const p = f.intent();
+  f.state.onRead = () => f.execute(contract.REVOKE_OPERATION, p, {}, f.broker, 'control');
+  await assert.rejects(f.execute('prepare', p), { code: 'asset_revoked' });
+  assert.equal((await f.execute('status', { enrollmentId: p.enrollmentId })).data.state, 'revoked');
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM google_ads_enrollments').get().n, 0);
+  const q = { ...f.intent(), customerId: '3333333333' }; f.state.response = { results: [candidate(q.customerId)] };
+  f.state.onRead = null; await f.execute('prepare', q);
+  f.state.onRead = () => f.execute(contract.REVOKE_OPERATION, q, {}, f.broker, 'control');
+  await assert.rejects(f.execute('activate', q), { code: 'asset_revoked' });
+});
+test('enrollment revocation respects ownership, scope and intent metadata and survives connection/scope blocks', async t => {
+  const f = enrollmentFixture(t); const p = f.intent(); await f.execute('prepare', p);
+  const before = f.state.sdk.length;
+  await assert.rejects(f.execute(contract.REVOKE_OPERATION, p), { code: 'scope_denied' });
+  await assert.rejects(f.execute(contract.REVOKE_OPERATION, { ...p, customerId: CUSTOMER }, {}, f.broker, 'control'), { code: 'scope_denied' });
+  await assert.rejects(f.execute(contract.REVOKE_OPERATION, { ...p, clinicSetDigest: 'b'.repeat(64) }, {}, f.broker, 'control'), { code: 'idempotency_conflict' });
+  await assert.rejects(f.execute(contract.REVOKE_OPERATION, f.intent(), {}, f.broker, 'control'), { code: 'scope_denied' });
+  await assert.rejects(f.execute(contract.REVOKE_OPERATION, p, { tenantRef: 'clinic:999' }, f.broker, 'control'), { code: 'scope_denied' });
+  await f.revoke(SCOPE); f.store.db.prepare("UPDATE connections SET state='blocked',revision=revision+1").run();
+  assert.equal((await f.execute(contract.REVOKE_OPERATION, p, {}, f.broker, 'control')).data.state, 'revoked');
+  assert.equal(f.state.sdk.length, before);
+});
+test('enrollment revocation and its audit receipt roll back together on audit failure', async t => {
+  const f = enrollmentFixture(t); const append = f.store.appendAudit.bind(f.store); const p = f.intent();
+  f.store.appendAudit = event => { if (event.action === 'integration.completed') throw Error('FICTITIOUS_AUDIT_FAILURE'); return append(event); };
+  await assert.rejects(f.execute(contract.REVOKE_OPERATION, p, {}, f.broker, 'control'), { code: 'provider_failed' });
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM google_ads_enrollments').get().n, 0);
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM asset_revocations').get().n, 0);
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM google_ads_enrollment_cancellations').get().n, 0);
+  f.store.appendAudit = append;
+});
+test('cancelling an unverified candidate does not reserve or revoke that customer for another authorized clinic', async t => {
+  const f = enrollmentFixture(t); const p = f.intent(); await f.execute(contract.REVOKE_OPERATION, p, {}, f.broker, 'control');
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM google_ads_enrollments').get().n, 0);
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM asset_revocations').get().n, 0);
+  assert.equal((await f.execute('discover', { pageToken: null })).data.accounts.length, 0);
+  const policy = structuredClone(f.policy); const s = { ...policy.connections[0].googleAdsEnrollmentScopes[0], assetRef: 'ads-enroll:clinic:999', tenantRef: 'clinic:999' };
+  policy.connections[0].googleAdsEnrollmentScopes.push(s);
+  for (const grant of policy.grants.filter(g => g.assetRef === SCOPE)) policy.grants.push({ ...grant, assetRef: s.assetRef, tenantRef: s.tenantRef });
+  validateConfig({ ...f.config, policy }); const other = f.make(f.store, policy);
+  const q = { ...f.intent(), clinicCount: 1 };
+  assert.equal((await f.execute('prepare', q, { assetRef: s.assetRef, tenantRef: s.tenantRef }, other.broker)).data.state, 'prepared');
+  await assert.rejects(f.execute('prepare', f.intent()), { code: 'asset_revoked' });
 });
 test('scope removal and delegated operation restrictions deny dynamic access; unrelated policy versions preserve ownership', async t => {
   const f = enrollmentFixture(t); const policy = structuredClone(f.policy);

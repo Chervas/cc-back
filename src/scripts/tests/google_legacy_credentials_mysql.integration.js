@@ -2,6 +2,7 @@
 const assert = require('node:assert/strict'); const { DataTypes: D } = require('sequelize');
 const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
 withIsolatedCampaignMysql(async ({ sql, models, report }) => {
+  await require('./fixtures/google_ads_enrollment_mysql.fixture').installGoogleAdsEnrollmentTables({ sql, models });
   models.GoogleAdsBrokerBinding = require('../../../models/googleadsbrokerbinding')(sql, D);
   await models.GoogleAdsBrokerBinding.sync();
   models.GoogleAdsBrokerRevocation = require('../../../models/googleadsbrokerrevocation')(sql, D);
@@ -24,7 +25,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   models.GooglePropertyBrokerRevocation = require('../../../models/googlepropertybrokerrevocation')(sql, D);
   const G = models.GoogleConnection; const B = models.GoogleOAuthBrokerBinding;
   const { createGoogleLegacyCredentials } = require('../../services/googleLegacyCredentials.service');
-  const create = () => createGoogleLegacyCredentials({ connectionModel: G, adsModel: models.GoogleAdsBrokerBinding, adsRevocationModel: models.GoogleAdsBrokerRevocation, bindingModel: B, searchConsoleModel: models.SearchConsoleBrokerBinding,
+  const create = () => createGoogleLegacyCredentials({ enrollmentScopeModel: models.GoogleAdsEnrollmentScope, enrollmentRequestModel: models.GoogleAdsEnrollmentRequest, connectionModel: G, adsModel: models.GoogleAdsBrokerBinding, adsRevocationModel: models.GoogleAdsBrokerRevocation, bindingModel: B, searchConsoleModel: models.SearchConsoleBrokerBinding,
     analyticsModel: models.AnalyticsBrokerBinding, propertyRevocationModel: models.GooglePropertyBrokerRevocation });
   const service = create(); let fullReads = 0;
   G.addHook('beforeFind', 'count_credentials', options => { if (options.attributes?.includes('accessToken')) fullReads++; });

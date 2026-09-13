@@ -1,34 +1,39 @@
 {
-  "version": 7,
+  "version": 8,
   "reviewedAt": "2026-09-13",
-  "sourceHead": "af8df7c85b957285db7f536e00aa6f2cff3cd24a",
+  "sourceHead": "0afe6dace2d7f2a768823cf13c9c8fc17a2f3dbf",
   "includesWorkingChanges": true,
   "runtimeMigrated": 0,
   "newMigrations": [
-    "20260913110000-stage-google-ads-broker-mappings.js"
+    "20260913120000-create-google-ads-enrollment.js"
   ],
   "ops": "deferred_by_user",
   "qa": {
-    "backendTests": 382,
-    "auditTests": 50,
-    "frontendTests": 12,
-    "totalNode": 444,
-    "mysqlChecks": 27,
-    "mysqlOwnedInstances": 1,
+    "backendTests": 391,
+    "brokerTests": 183,
+    "totalNode": 574,
+    "mysqlChecks": 141,
+    "mysqlOwnedInstances": 9,
     "shutdownCodes": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
       0
     ],
-    "frontendBuild": "passed_6GiB_heap",
-    "uiScreenshots": 8,
     "evidence": [
-      "ads-mapping-final-node.json",
-      "ads-mapping-full-audit.log",
-      "ads-mapping-front-tests.log",
-      "ads-mapping-fifth-mysql.log",
-      "ads-mapping-front-build.log",
-      "ads-mapping-chromium.log"
+      "ads-enrollment-app-backend-second.json",
+      "ads-enrollment-app-backend-second.log",
+      "ads-enrollment-app-full-broker.json",
+      "ads-enrollment-app-full-broker.log",
+      "ads-enrollment-app-mysql-regression.json"
     ],
-    "runtime": "no_real_account_or_provider_validation"
+    "ui": "No UI source changes; no new frontend build or browser run",
+    "runtime": "All providers, credentials and data fictitious; private MySQL/SQLite and localhost HTTPS only"
   },
   "operations": [
     "google.ads.account.read.v1",
@@ -45,12 +50,19 @@
     "google.ads.oauth.activate.v1",
     "google.ads.oauth.status.v1",
     "google.ads.oauth.abort.v1",
-    "google.ads.discovery.read.v1"
+    "google.ads.discovery.read.v1",
+    "google.ads.enrollment.discover.v1",
+    "google.ads.enrollment.prepare.v1",
+    "google.ads.enrollment.activate.v1",
+    "google.ads.enrollment.status.v1",
+    "google.ads.enrollment.revoke.v1"
   ],
   "pending": [
-    "General onboarding of unprepared accounts and ownership/grant changes; real bindings/grants and approved Ads cut",
-    "Remaining Ads consumers, conversions, reception and writes",
-    "Full platform audit, AWS costs/retention/IAM/Budget and database encryption/cut"
+    "New-account enrollment writer, reconciliation, disconnect integration, human audit, API and Ajustes; first Google identity and OAuth scope integration; ownership/grant changes",
+    "Real bindings/grants, all shared DDL and approved Ads cut; zero runtime migrations",
+    "Remaining Ads consumers, conversions, reception and writes; no real publication/conversion tests authorized",
+    "First-stage priority changed by user to Meta protections and ClinicaClick MFA; general Ads onboarding deferred after tested foundation checkpoint",
+    "Full platform audit, AWS costs/retention/IAM/Budget and database encryption/cut remain in the overall goal"
   ],
   "rows": [
     {
@@ -70,7 +82,7 @@
     },
     {
       "file": "services/integrations-broker/src/google-main.js",
-      "sha256": "7c8607302e3ce61f04029893db3ddd28dd365558bf29a440bb5a13e4f5bea666",
+      "sha256": "4e2344dbd6ca888c8ef465b77389922b567396344425fc67481020bdcd09f5a7",
       "status": "prepared_ads_oauth_runtime_with_separate_principal_and_key"
     },
     {
@@ -85,12 +97,12 @@
     },
     {
       "file": "services/integrations-broker/src/policy.js",
-      "sha256": "7056dc293c46d3459e4f60b5c40a22f5cc5786d46a447b63cfa6987bf3a3052b",
+      "sha256": "84383adb8d8ee077002a32a14f9030e648754ff581f12bf4c467b2eb3e7a24ec",
       "status": "prepared_broker_engine_offline"
     },
     {
       "file": "services/integrations-broker/src/broker.js",
-      "sha256": "751634de86bd41657e17e2bd634d4a632c77a9354d9d794507c0d9d204685bb3",
+      "sha256": "d55f875ac4c0a80c07c409cc91455ca00d0455a0706f410dce6945ae69c14332",
       "status": "prepared_broker_engine_offline"
     },
     {
@@ -125,13 +137,13 @@
     },
     {
       "file": "src/services/googleLegacyCredentials.service.js",
-      "sha256": "d8b96d89d4cddc1420c2c71e8893ae4d88c23e63be75726713de69a7eae1dd88",
-      "status": "prepared_durable_ads_credential_exclusion"
+      "sha256": "c791bb1d26f2ad11a9959b6fb7ac8b7d84d9d8d300a4fbcd1c12394ffc32bfd0",
+      "status": "global_eight_registry_exclusion_before_credential_select_update"
     },
     {
       "file": "src/services/googleOAuthBroker.service.js",
-      "sha256": "837436cb2814e6259e0dab4b8f05959d65a204f37181d4990ac145851196f920",
-      "status": "prepared_four_service_clients_status_callback_worker_and_legacy_exclusion"
+      "sha256": "0bf2568d602bba7af6ff2d9a0cca23cbc465715a2724fe14e6e182a142cb23ef",
+      "status": "global_eight_registry_oauth_exclusion"
     },
     {
       "file": "src/services/oauthScopedDisconnect.service.js",
@@ -267,35 +279,78 @@
       "file": "src/services/platformAudit.repository.js",
       "status": "prepared_distinct_mapping_parts_in_one_correlation",
       "sha256": "ebca8716f0811bf7ce1050a20a8ea0026dd87c2e33fc88e4646155e17fda65d5"
+    },
+    {
+      "file": "services/integrations-broker/src/google-ads-enrollment-contract.js",
+      "sha256": "e18d5961c6dba424e88f06693d7a0068992d84b0bc6832eb0662cfe071f63d11",
+      "status": "prepared_broker_enrollment_contract_offline"
+    },
+    {
+      "file": "services/integrations-broker/src/google-ads-enrollment.js",
+      "sha256": "77796da8c490afea7b4becfb5da37cf363f70c146a2af0bc044530cf39891005",
+      "status": "prepared_broker_enrollment_and_early_cancellation_offline"
+    },
+    {
+      "file": "migrations/20260913120000-create-google-ads-enrollment.js",
+      "sha256": "d6f45168727272f70664836fac37b8493a805b29bbd9878e60d14729d3dcaf59",
+      "status": "required_before_code_pending_shared_database"
+    },
+    {
+      "file": "models/googleadsenrollmentscope.js",
+      "sha256": "1019c41e9e4db3b2d31abaebace05cbdfce4e862a12999d5e1b8ce72f2af8a87",
+      "status": "prepared_independent_scope_registry"
+    },
+    {
+      "file": "models/googleadsenrollmentrequest.js",
+      "sha256": "3a79119cb5a945328b6491a70e93c01723901fb8d9ec202f262ddeaa37275d0c",
+      "status": "prepared_independent_intent_registry_writer_pending"
+    },
+    {
+      "file": "src/services/googleAdsEnrollment.contract.js",
+      "sha256": "77a13c634d20362371bc3a22068db2960fdc5762d1480f57a469b32d880f7691",
+      "status": "prepared_enrollment_contract_application_flow_pending"
+    },
+    {
+      "file": "src/services/googleAdsEnrollmentScope.service.js",
+      "sha256": "d6a512ca7b46be212d0c25b6ab1a021c7757eb1d98bc776e44e014e95441b1d0",
+      "status": "prepared_scope_boundary_authorizer_injection_pending"
+    },
+    {
+      "file": "src/services/googleAdsEnrollmentClient.service.js",
+      "sha256": "86f67a1865de5b6c752ebe18daca03e564bade00bc0431dd5a8380d58396a9d7",
+      "status": "prepared_typed_client_no_public_route_or_worker"
     }
   ],
   "requiredAdsMigrations": [
     "20260913080000-add-google-ads-broker-bindings.js",
     "20260913090000-create-google-ads-broker-revocations.js",
     "20260913100000-add-ads-google-oauth-cohort.js",
-    "20260913110000-stage-google-ads-broker-mappings.js"
+    "20260913110000-stage-google-ads-broker-mappings.js",
+    "20260913120000-create-google-ads-enrollment.js"
   ],
   "previousQa": {
-    "backendTests": 367,
-    "brokerTests": 163,
-    "frontendModelTests": 8,
-    "mysqlChecks": 15,
+    "backendTests": 382,
+    "auditTests": 50,
+    "frontendTests": 12,
+    "totalNode": 444,
+    "mysqlChecks": 27,
     "mysqlOwnedInstances": 1,
     "shutdownCodes": [
       0
     ],
-    "ui": "no_component_or_style_changes",
-    "tls": "actual_Ads_runtime_discovery_and_fake_audit_delivery",
-    "runtime": "no_real_account_or_provider_validation",
+    "frontendBuild": "passed_6GiB_heap",
+    "uiScreenshots": 8,
     "evidence": [
-      "ads-discovery-final-node.json",
-      "ads-discovery-full-broker.log",
-      "ads-discovery-final-tls.log",
-      "ads-discovery-first-mysql.log",
-      "ads-discovery-frontend-model.log"
-    ]
+      "ads-mapping-final-node.json",
+      "ads-mapping-full-audit.log",
+      "ads-mapping-front-tests.log",
+      "ads-mapping-fifth-mysql.log",
+      "ads-mapping-front-build.log",
+      "ads-mapping-chromium.log"
+    ],
+    "runtime": "no_real_account_or_provider_validation"
   },
-  "method": "Current source snapshot plus registered Ads discovery/API changes; isolated HTTP/TLS, owned MySQL and offline regression. Previous validation remains historical.",
+  "method": "Source snapshot including broker enrollment, typed app boundary, durable registries and unconditional legacy exclusion; 574 offline Node tests plus 141 checks on nine owned MySQL instances. No UI source change, real provider validation or deployment. Previous QA is historical.",
   "services": [
     "business_profile",
     "search_console",

@@ -27,6 +27,10 @@ class BrokerStore {
         config_digest TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('prepared','active')),
         created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS google_ads_enrollment_scope ON google_ads_enrollments(connection,scope);
+      CREATE TABLE IF NOT EXISTS google_ads_enrollment_cancellations (id TEXT PRIMARY KEY,
+        principal TEXT NOT NULL, tenant TEXT NOT NULL, connection TEXT NOT NULL, scope TEXT NOT NULL,
+        customer TEXT NOT NULL, clinic_count INTEGER NOT NULL, clinic_digest TEXT NOT NULL, created_at INTEGER NOT NULL,
+        UNIQUE(tenant,connection,customer));
       CREATE TABLE IF NOT EXISTS google_oauth_flows (id TEXT PRIMARY KEY, principal TEXT NOT NULL, tenant TEXT NOT NULL,
         connection TEXT NOT NULL, asset TEXT NOT NULL, state_hash TEXT NOT NULL UNIQUE, config_digest TEXT NOT NULL,
         created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, state TEXT NOT NULL,
