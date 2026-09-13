@@ -1,5 +1,31 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Refuerzo de WhatsApp previo a reconexión
+
+OPS es un consumidor externo de datos, sin dependencia inversa de ClinicaClick.
+Prioridad vigente: WhatsApp y login por correo; cuentas publicitarias después.
+Este corte mantiene la contención; **no habilita la reconexión**.
+
+| Ruta | Contrato de seguridad |
+| --- | --- |
+| `POST /api/whatsapp/webhook` | Firma SHA-256 obligatoria sobre bytes originales. Secreto/rawBody ausentes: 503. Firma incorrecta: 401. Ámbito desconocido, ambiguo, bloqueado o referencia web ajena: 403. JSON y lotes no soportados: 400; tamaño >1 MiB: 413; tipo/compresión no admitidos: 415. Respuesta de error fija y sin logs del payload. |
+| `GET /api/whatsapp/webhook` | Challenge numérico acotado, texto plano y no-store; verify token válido no sustituye la firma de POST. |
+| `GET /api/whatsapp/status`, `/phones` | ACL de clínica/grupo; un propietario de clínica no recibe acceso global. IDs estrictos; errores fijos. `/phones` excluye columnas de tokens y muestra estado persistido sin sync/registro/colas/escrituras al leer. |
+| Escrituras bajo `/api/whatsapp` | Sesión obligatoria y 503 `meta_security_quarantine` antes del handler, incluidas asignaciones, catálogo, mensajes, registro y borrado. |
+
+Recepción: WABA y número exactos, sin fallback por nombres/números parciales ni
+`clinic_id` de query/body. Se consulta `MetaScopeBlocks` y el vínculo registrado
+del director de pacientes antes de efectos. No se aceptan varias entries/changes,
+más de un mensaje/eco o historiales con distintos contactos bajo un solo job.
+Referencias `cc_ref` recibidas deben resolver dentro del ámbito registrado.
+Estos límites deben resolverse al preparar las cohortes reales afectadas.
+
+No hay nueva DDL; se exige la dependencia `20260913140000` y el esquema existente
+de director de pacientes. Pruebas aisladas: 38 correctas, 18 nuevas. Sin cambios
+UI, despliegue ni proveedores reales. Broker WABA, deduplicación/revalidación en
+workers y corte MFA siguen pendientes antes de reabrir. Detalle y condiciones:
+`back-dev/docs/security/whatsapp-reconnection-readiness.md`.
+
 ## 13/09/2026 — Primera etapa: código por correo y contención Meta
 
 Contrato preparado, todavía sin activar. Especificación y lote OPS:

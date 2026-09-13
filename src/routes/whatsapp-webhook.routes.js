@@ -1,6 +1,7 @@
 'use strict';
 const express = require('express');
-const crypto = require('crypto');
+const webhookAuthentication = require('../lib/whatsappWebhookAuthentication');
+const metaScopeBlock = require('../services/metaScopeBlock.service');
 const router = express.Router();
 const patientDirectionService = require('../services/patientDirection.service');
 const { resolveWhatsappChannelRole } = require('../lib/whatsapp-channel-role');
@@ -9,7 +10,8 @@ const { queues } = require('../services/queue.service');
 const { Op } = require('sequelize');
 
 const { ClinicMetaAsset, Clinica, Paciente, Conversation, Message, LeadIntake, WhatsAppWebOrigin } = db;
-const APP_SECRET = process.env.FACEBOOK_APP_SECRET || process.env.APP_SECRET;
+const positiveId = value => /^[1-9][0-9]{0,9}$/.test(String(value)) && Number(value) <= 2147483647 ? Number(value) : null;
+function scopeDenied() { throw Object.assign(Error('whatsapp_webhook_scope_denied'), { status: 403 }); }
 
 function buildPhoneCandidates(raw) {
   if (!raw) return [];
@@ -114,55 +116,35 @@ function pickPreferredWhatsappWebhookAsset(assets = []) {
 async function findWhatsappAssetForWebhook(body) {
   const value = extractWhatsappWebhookValue(body);
   const phoneId = value?.metadata?.phone_number_id || null;
-  if (phoneId) {
-    const assets = await ClinicMetaAsset.findAll({
-      where: { phoneNumberId: phoneId, isActive: true },
-      raw: true,
-    });
-    const asset = pickPreferredWhatsappWebhookAsset(assets);
-    if (asset) return asset;
-    console.warn('Webhook WA sin mapeo de phoneNumberId', phoneId);
-  }
-
   const wabaId = extractWhatsappWebhookWabaId(body);
-  if (wabaId) {
-    const assets = await ClinicMetaAsset.findAll({
-      where: {
-        assetType: { [Op.in]: ['whatsapp_phone_number', 'whatsapp_business_account'] },
-        wabaId,
-        isActive: true,
-      },
-      raw: true,
-    });
-    const asset = pickPreferredWhatsappWebhookAsset(assets);
-    if (asset) return asset;
-  }
+  const assets = await ClinicMetaAsset.findAll({
+    where: { isActive: true, wabaId, assetType: phoneId ? 'whatsapp_phone_number' : 'whatsapp_business_account',
+      ...(phoneId ? { phoneNumberId: phoneId } : {}) },
+    attributes: ['id', 'assignmentScope', 'clinicaId', 'grupoClinicaId', 'assetType', 'phoneNumberId', 'wabaId', 'additionalData', 'updatedAt', 'createdAt'],
+    raw: true,
+  });
+  // Never fall back from an unknown phone to another phone in the WABA, or
+  // infer identity by searching display names / arbitrary metadata.
+  const scopes = new Set(assets.map(asset => JSON.stringify([asset.assignmentScope, asset.clinicaId, asset.grupoClinicaId])));
+  if (scopes.size !== 1) scopeDenied();
+  return pickPreferredWhatsappWebhookAsset(assets);
+}
 
-  const phoneNumber = value?.phone_number || value?.metadata?.display_phone_number || null;
-  const phoneDigits = phoneNumber ? String(phoneNumber).replace(/\D/g, '') : '';
-  if (phoneDigits) {
-    const assets = await ClinicMetaAsset.findAll({
-      where: {
-        assetType: 'whatsapp_phone_number',
-        isActive: true,
-      },
-      raw: true,
-    });
-    const localDigits = phoneDigits.length > 9 ? phoneDigits.slice(-9) : phoneDigits;
-    const matches = assets.filter((asset) => {
-      const haystack = JSON.stringify({
-        metaAssetName: asset.metaAssetName,
-        phoneNumberId: asset.phoneNumberId,
-        wabaId: asset.wabaId,
-        additionalData: asset.additionalData,
-      }).replace(/\D/g, '');
-      return haystack.includes(phoneDigits) || (localDigits && haystack.includes(localDigits));
-    });
-    const match = pickPreferredWhatsappWebhookAsset(matches);
-    if (match) return match;
+async function permittedClinicIds(asset) {
+  const ids = new Set();
+  if (asset.assignmentScope === 'clinic' && positiveId(asset.clinicaId)) ids.add(positiveId(asset.clinicaId));
+  if (asset.assignmentScope === 'group' && positiveId(asset.grupoClinicaId)) {
+    const clinics = await Clinica.findAll({ where: { grupoClinicaId: asset.grupoClinicaId }, attributes: ['id_clinica'], raw: true });
+    for (const clinic of clinics) { if (!positiveId(clinic.id_clinica)) scopeDenied(); ids.add(positiveId(clinic.id_clinica)); }
   }
-
-  return null;
+  // A shared patient-director phone has explicit per-clinic settings.
+  const settings = await db.PatientDirectionSetting.findAll({ where: { director_phone_asset_id: asset.id }, attributes: ['clinic_id'], raw: true });
+  for (const setting of settings) { if (!positiveId(setting.clinic_id)) scopeDenied(); ids.add(positiveId(setting.clinic_id)); }
+  if (!ids.size) scopeDenied();
+  for (const clinicId of ids) {
+    if (await metaScopeBlock.blocked({ assignmentScope: 'clinic', clinicId })) scopeDenied();
+  }
+  return ids;
 }
 
 function messageWhatsappAssetId(message) {
@@ -351,46 +333,23 @@ async function resolveClinicAndContact({ clinicId, groupId, from, assetId = null
   return { clinicId: null, patientId: null, leadId: null };
 }
 
-function verifySignature(req, res, buf) {
-  if (!APP_SECRET) return true;
-  const signature = req.headers['x-hub-signature-256'];
-  if (!signature) return false;
-  const elements = signature.split('=');
-  const signatureHash = elements[1];
-  const expectedHash = crypto
-    .createHmac('sha256', APP_SECRET)
-    .update(buf)
-    .digest('hex');
-  return signatureHash === expectedHash;
-}
-
 router.get('/whatsapp/webhook', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-
-  const verifyTokens = [
-    process.env.WHATSAPP_VERIFY_TOKEN,
-    process.env.META_WEBHOOK_VERIFY_TOKEN,
-    process.env.META_VERIFY_TOKEN,
-  ].filter(Boolean);
-
-  if (mode === 'subscribe' && token && verifyTokens.includes(token)) {
-    return res.status(200).send(challenge);
-  }
-
+  res.set('Cache-Control', 'no-store');
+  const challenge = webhookAuthentication.subscription(req);
+  if (challenge !== null) return res.status(200).type('text/plain').send(challenge);
   return res.sendStatus(403);
 });
 
 router.post('/whatsapp/webhook', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
   try {
-    if (!verifySignature(req, res, req.rawBody || Buffer.from(JSON.stringify(req.body || {})))) {
-      return res.sendStatus(401);
-    }
+    req.body = webhookAuthentication.authenticate(req);
+    const webhookAsset = await findWhatsappAssetForWebhook(req.body);
+    const clinicIds = await permittedClinicIds(webhookAsset);
 
     // Tracking: si el usuario viene desde el widget web, el mensaje incluye un token [cc_ref:...]
     // que permite asignar el inbound a la sede correcta incluso si el número de WhatsApp es compartido por grupo.
-    const webOriginRef = extractWebOriginRefFromWebhookBody(req.body);
+    let webOriginRef = extractWebOriginRefFromWebhookBody(req.body);
     let webOrigin = null;
     if (webOriginRef && WhatsAppWebOrigin) {
       try {
@@ -407,9 +366,14 @@ router.post('/whatsapp/webhook', async (req, res) => {
       }
     }
 
-    let clinicId = req.query.clinic_id || req.body?.clinic_id;
-    let groupId = null;
-    let webhookAsset = null;
+    // The downstream worker also reads cc_ref. Reject an unresolved/foreign
+    // reference instead of letting that worker recover an unchecked scope.
+    if (webOriginRef && (!webOrigin || !clinicIds.has(positiveId(webOrigin.clinic_id))
+      || webOrigin.group_id && Number(webOrigin.group_id) !== Number(webhookAsset.grupoClinicaId))) scopeDenied();
+    // URL parameters and extra payload fields cannot choose a clinic. The
+    // signed provider identity must resolve to a registered active asset.
+    let clinicId = webhookAsset.assignmentScope === 'clinic' ? positiveId(webhookAsset.clinicaId) : null;
+    let groupId = webhookAsset.assignmentScope === 'group' ? positiveId(webhookAsset.grupoClinicaId) : null;
     let patientDirectionAssignmentId = null;
     let patientDirectionFormerAssignment = false;
 
@@ -417,20 +381,6 @@ router.post('/whatsapp/webhook', async (req, res) => {
     if (webOrigin) {
       if (webOrigin.clinic_id) clinicId = webOrigin.clinic_id;
       if (webOrigin.group_id) groupId = webOrigin.group_id;
-    }
-
-    if (!webOrigin) {
-      webhookAsset = await findWhatsappAssetForWebhook(req.body);
-      if (webhookAsset) {
-        clinicId = clinicId || webhookAsset.clinicaId;
-        groupId = webhookAsset.grupoClinicaId;
-      }
-    }
-
-    // El token web decide la sede, pero el activo receptor sigue siendo necesario
-    // para conservar el canal físico por el que entró el mensaje.
-    if (!webhookAsset) {
-      webhookAsset = await findWhatsappAssetForWebhook(req.body);
     }
 
     const from = extractPrimaryWhatsappContactFromWebhookBody(req.body);
@@ -448,6 +398,7 @@ router.post('/whatsapp/webhook', async (req, res) => {
         return res.sendStatus(200);
       }
       if (destination?.clinicId) {
+        if (!clinicIds.has(positiveId(destination.clinicId))) scopeDenied();
         clinicId = destination.clinicId;
         patientDirectionAssignmentId = destination.assignmentId || null;
         patientDirectionFormerAssignment = destination.source === 'former_assignment';
@@ -466,9 +417,9 @@ router.post('/whatsapp/webhook', async (req, res) => {
     }
 
     if (!clinicId) {
-      console.warn('Webhook WA sin clinic_id, descartando payload');
-      return res.sendStatus(200);
+      scopeDenied();
     }
+    if (!clinicIds.has(positiveId(clinicId))) scopeDenied();
     const resolvedContact =
       req.resolvedContact ||
       (await resolveClinicAndContact({ clinicId, groupId, from }));
@@ -486,8 +437,10 @@ router.post('/whatsapp/webhook', async (req, res) => {
     });
     return res.sendStatus(200);
   } catch (err) {
-    console.error('Error en webhook WhatsApp', err);
-    return res.sendStatus(500);
+    // Provider bodies, SQL details, phone numbers and configuration never go
+    // into an error response or application log from this public endpoint.
+    const status = [400, 401, 403, 413, 415, 503].includes(err.status) ? err.status : 503;
+    return res.status(status).json({ error: status === 503 ? 'whatsapp_webhook_unavailable' : 'whatsapp_webhook_rejected' });
   }
 });
 

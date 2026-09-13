@@ -5,7 +5,26 @@ sin bloquear el desarrollo de otras áreas. Mantiene completo el encargo de
 integraciones, auditoría, costes y cifrado. Terminar una entrega de código no
 acredita su instalación ni la migración de cuentas reales.
 
-## Objetivo vigente de la primera etapa
+## Prioridad vigente: reconexión de WhatsApp y acceso de ClinicaClick
+
+Aclaración expresa del usuario: **OPS es un consumidor externo de datos para
+paneles; ClinicaClick no depende de él**. Puede permanecer apagado. Las referencias
+históricas a «OPS aplazado» no significan que haya que esperar a ese producto
+para desplegar o validar las protecciones de ClinicaClick.
+
+Orden de trabajo: **WhatsApp API y login con código por correo primero; cuentas
+publicitarias después**. Las lecturas de contadores Facebook/Instagram quedan
+pospuestas. Se conserva su borrador local fuera del corte publicado.
+
+El criterio actual es comprobar las condiciones de reconexión de WhatsApp, no
+solo terminar código de contención. Estado y obstáculos concretos:
+[whatsapp-reconnection-readiness.md](whatsapp-reconnection-readiness.md).
+Aún no hay visto bueno de reconexión: faltan aislamiento del token WABA,
+consumidores y validación del entorno real, incluida exigencia efectiva del
+código por correo. No se promete que cambiar tokens elimine el vector del
+incidente. Las pruebas locales no autorizan llamadas reales ni una apertura.
+
+## Entrega anterior: primera etapa de contención y acceso
 
 Actualizado por indicación expresa del usuario: **cerrar una primera entrega de
 protecciones centrada en Meta y doble factor de acceso a ClinicaClick**, con
@@ -35,7 +54,7 @@ Criterios de cierre de esta primera etapa:
 El doble factor protege el acceso a ClinicaClick; no invalida tokens Meta ya
 copiados ni demuestra el vector exacto del incidente. Se mantiene el bloqueo
 reportado y no se reactivan proveedores. El corte con datos reales permanece
-fuera de la entrega local hasta la aprobación específica de OPS.
+fuera de la entrega local hasta aprobar el lote concreto de activación de ClinicaClick.
 
 ## Entrega preparada de la primera etapa
 
@@ -111,11 +130,13 @@ migraciones anteriores. No ejecutar todas las migraciones pendientes.
   publicado y desplegado; incluye commits, migraciones concretas, rollback y
   pendientes. No sumar recuentos históricos como si fueran una sola ejecución.
 
-## OPS y decisiones del usuario
+## Producto OPS y activación de ClinicaClick
 
-OPS permanece aplazado por indicación del usuario. AWS, configuración de procesos,
-pausas, secretos reales y BD compartida no se modifican al cerrar estos commits.
-El apagado de EC2 fue anunciado y no está verificado en esta tarea.
+El producto OPS permanece fuera del foco y puede estar apagado. No es un
+requisito ni el responsable de aprobar la activación de ClinicaClick. Los cortes
+sobre servicios usados, secretos reales o BD compartida siguen requiriendo el
+lote concreto acordado con su propietario. Estos commits no ejecutan ese corte.
+No se deduce que el apagado de OPS implique el del broker de integraciones.
 
 Antes de cada activación se presentará un lote concreto y revisable: recursos,
 principales/permisos, consumidores, commits, DDL exacta, respaldo, coste, ventana,

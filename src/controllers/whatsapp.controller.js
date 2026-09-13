@@ -71,15 +71,12 @@ const {
   WhatsappTemplateCatalogDiscipline,
 } = db;
 
-const ROLE_AGGREGATE = ['propietario', 'admin'];
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1,44').split(',').map((v) => parseInt(v.trim(), 10)).filter((n) => !Number.isNaN(n));
 const META_API_VERSION = process.env.META_API_VERSION || 'v22.0';
 const META_GRAPH_TOKEN = process.env.META_GRAPH_TOKEN || process.env.META_SYSTEM_USER_TOKEN || null;
 const META_BUSINESS_ID = process.env.META_BUSINESS_ID || process.env.META_BM_ID || null;
 const PREVERIFIED_ENABLED = String(process.env.WHATSAPP_PREVERIFIED_ENABLED || 'false').toLowerCase() === 'true';
-const PHONE_SYNC_THROTTLE_MS = 60 * 60 * 1000;
 const BUSINESS_VERIFICATION_CACHE_TTL_MS = 60 * 60 * 1000;
-const phoneSyncThrottle = new Map();
 const businessVerificationCache = new Map();
 
 function isWhatsappGlobalAdmin(userId) {
@@ -121,10 +118,10 @@ async function getUserClinics(userId) {
     attributes: ['id_clinica', 'rol_clinica'],
     raw: true,
   });
-  const clinicIds = memberships.map((m) => m.id_clinica);
-  const roles = memberships.map((m) => m.rol_clinica);
-  const isAggregateAllowed = roles.some((r) => ROLE_AGGREGATE.includes(r));
-  return { clinicIds, isAggregateAllowed };
+  const clinicIds = await getAccessibleMarketingClinicIds({ userId,
+    clinicIds: memberships.map((m) => m.id_clinica), access: 'read', globalAdminCheck: isWhatsappGlobalAdmin });
+  // A clinic owner/admin is not a platform administrator.
+  return { clinicIds, isAggregateAllowed: false };
 }
 
 function assertAdmin(req, res) {
@@ -1076,9 +1073,10 @@ async function attemptPhoneRegistration({ asset, pin, useAutoPin = false }) {
 exports.getStatus = async (req, res) => {
   try {
     const clinicId = Number(req.query.clinic_id);
-    if (!clinicId) {
+    if (!/^[1-9][0-9]{0,9}$/.test(String(req.query.clinic_id)) || clinicId > 2147483647) {
       return res.status(400).json({ error: 'clinic_id requerido' });
     }
+    await assertWhatsappTemplateClinicAccess({ clinicId, userId: req.userData?.userId });
 
     const asset = await resolveScopedWhatsappAssetForClinic({
       clinicId,
@@ -1101,7 +1099,7 @@ exports.getStatus = async (req, res) => {
       business_username: asset.additionalData?.businessUsername || null,
     });
   } catch (err) {
-    console.error('Error getStatus', err);
+    if (err?.statusCode === 403) return res.status(403).json({ error: 'whatsapp_clinic_scope_forbidden' });
     return res.status(500).json({ error: 'Error obteniendo estado de WhatsApp' });
   }
 };
@@ -1819,6 +1817,12 @@ exports.listPhones = async (req, res) => {
     const userGroupIds = await getUserGroupIds({ clinicIds, isAggregateAllowed });
     const clinicIdFilter = req.query.clinic_id ? Number(req.query.clinic_id) : null;
     const groupIdFilter = req.query.group_id ? Number(req.query.group_id) : null;
+    for (const key of ['clinic_id', 'group_id', 'routing_scope_clinic_id']) {
+      if (req.query[key] !== undefined && (!/^[1-9][0-9]{0,9}$/.test(String(req.query[key])) || Number(req.query[key]) > 2147483647)) {
+        return res.status(400).json({ error: 'whatsapp_scope_invalid' });
+      }
+    }
+    if (clinicIdFilter && groupIdFilter) return res.status(400).json({ error: 'whatsapp_scope_invalid' });
     const effectiveOnly = ['1', 'true', 'yes'].includes(
       String(req.query.effective_only || '').trim().toLowerCase()
     );
@@ -1829,11 +1833,9 @@ exports.listPhones = async (req, res) => {
         userId,
       });
     }
-    if (groupIdFilter && !isAggregateAllowed) {
-      return res.status(403).json({ error: 'group_scope_not_allowed' });
-    }
     let groupIdFromClinic = null;
     if (clinicIdFilter) {
+      await assertWhatsappTemplateClinicAccess({ clinicId: clinicIdFilter, userId });
       const clinic = await Clinica.findOne({ where: { id_clinica: clinicIdFilter }, attributes: ['grupoClinicaId'], raw: true });
       groupIdFromClinic = clinic?.grupoClinicaId || null;
     }
@@ -1850,6 +1852,8 @@ exports.listPhones = async (req, res) => {
         raw: true,
       });
       const groupClinicIds = groupClinics.map((c) => c.id_clinica).filter(Boolean);
+      if (!groupClinicIds.length || !await hasMarketingClinicScopeAccess({ userId, clinicIds: groupClinicIds,
+        access: 'read', globalAdminCheck: isWhatsappGlobalAdmin })) return res.status(403).json({ error: 'group_scope_not_allowed' });
       where[Op.or] = [
         { clinicaId: { [Op.in]: groupClinicIds.length ? groupClinicIds : [-1] } },
         { assignmentScope: 'group', grupoClinicaId: groupIdFilter },
@@ -1869,6 +1873,7 @@ exports.listPhones = async (req, res) => {
 
     let phones = await ClinicMetaAsset.findAll({
       where,
+      attributes: { exclude: ['waAccessToken', 'pageAccessToken'] },
       include: [
         { 
           model: Clinica, 
@@ -1920,57 +1925,8 @@ exports.listPhones = async (req, res) => {
       }
     }
 
-    // Resolver estado de verificación de empresas (si hay token disponible)
-    const businessIds = new Set();
-    for (const p of phones) {
-      const storedBusinessStatus = p.additionalData?.whatsappBusinessHealth?.business_verification_status
-        || p.additionalData?.businessVerificationStatus
-        || null;
-      if (storedBusinessStatus) continue;
-      if (p.additionalData?.businessId) businessIds.add(p.additionalData.businessId);
-      const mapped = p.wabaId ? wabaBusinessMap.get(p.wabaId) : null;
-      if (mapped) businessIds.add(mapped);
-    }
-    const businessStatusMap = new Map();
-    if (META_GRAPH_TOKEN && businessIds.size) {
-      for (const businessId of businessIds.values()) {
-        const status = await fetchBusinessVerificationStatus({ businessId });
-        if (status) {
-          businessStatusMap.set(businessId, status);
-        }
-      }
-    }
-
-    // La lectura del panel solo recupera una sync horaria perdida. El instante
-    // persistido evita duplicar llamadas tras reinicios o entre procesos.
-    const now = Date.now();
-    const wabaTokens = new Map();
-    const wabaLastCheckedAt = new Map();
-    for (const p of phones) {
-      if (p.wabaId && p.waAccessToken && !wabaTokens.has(p.wabaId)) {
-        wabaTokens.set(p.wabaId, p.waAccessToken);
-      }
-      const checkedAt = new Date(
-        p.additionalData?.whatsappPhoneSync?.status_checked_at || 0
-      ).getTime();
-      if (p.wabaId && Number.isFinite(checkedAt)) {
-        wabaLastCheckedAt.set(
-          p.wabaId,
-          Math.max(wabaLastCheckedAt.get(p.wabaId) || 0, checkedAt)
-        );
-      }
-    }
-    for (const [wabaId, accessToken] of wabaTokens.entries()) {
-      const lastTriggered = phoneSyncThrottle.get(wabaId) || 0;
-      const lastChecked = wabaLastCheckedAt.get(wabaId) || 0;
-      if (now - Math.max(lastTriggered, lastChecked) < PHONE_SYNC_THROTTLE_MS) {
-        continue;
-      }
-      phoneSyncThrottle.set(wabaId, now);
-      enqueueSyncPhonesJob({ wabaId, accessToken, mode: 'health', ensureTemplates: false }).catch((err) => {
-        console.warn('[whatsapp] No se pudo encolar sync de phones', err?.message || err);
-      });
-    }
+    // Historical view during containment: never read credentials into jobs or
+    // trigger Graph refreshes merely by opening the list.
 
     const routingBindings = routingScopeClinicId
       ? await whatsappChannelBindingsService.listClinicBindings(routingScopeClinicId)
@@ -1985,32 +1941,9 @@ exports.listPhones = async (req, res) => {
       const grupoDirecto = p.grupoClinica || {};
       const grupoClinica = clinica.grupoClinica || {};
       const grupo = grupoDirecto.id_grupo ? grupoDirecto : grupoClinica;
-      let registration = p.additionalData?.registration || null;
+      const registration = p.additionalData?.registration || null;
       const additionalData = p.additionalData || {};
       const payment = whatsappPaymentStatusService.derivePaymentSnapshot(additionalData);
-      const isCoexistenceAsset =
-        additionalData.whatsappConnectionMode === 'coexistence' ||
-        additionalData.connectionMode === 'coexistence' ||
-        additionalData.isOnBizApp === true ||
-        additionalData.coexistence?.enabled === true ||
-        registration?.skipRegisterReason === 'whatsapp_business_app_coexistence';
-
-      // Normaliza el estado si el numero ya aparece como CONNECTED en Meta
-      if (
-        registration?.status !== 'registered' &&
-        p.phoneNumberId &&
-        p.waAccessToken
-      ) {
-        const liveStatus = await fetchPhoneStatus({
-          phoneNumberId: p.phoneNumberId,
-          accessToken: p.waAccessToken,
-        });
-        if (liveStatus?.status === 'CONNECTED') {
-          registration = buildRegisteredSnapshot(liveStatus, registration, isCoexistenceAsset);
-          await updateRegistrationOnAsset(p, registration);
-        }
-      }
-
       const usage = await whatsappService.getOutboundUsageForPhone({
         clinicConfig: {
           assignmentScope: p.assignmentScope,
@@ -2035,14 +1968,7 @@ exports.listPhones = async (req, res) => {
       const businessVerificationStatus =
         additionalData.whatsappBusinessHealth?.business_verification_status ||
         p.additionalData?.businessVerificationStatus ||
-        (managerBusinessId ? businessStatusMap.get(managerBusinessId) : null) ||
         null;
-
-      if (businessVerificationStatus && additionalData.businessVerificationStatus !== businessVerificationStatus) {
-        additionalData.businessVerificationStatus = businessVerificationStatus;
-        p.additionalData = additionalData;
-        await p.save();
-      }
 
       payload.push({
         id: p.id,
@@ -2131,10 +2057,8 @@ exports.listPhones = async (req, res) => {
 
     return res.json({ phones: payload, preverified_enabled: PREVERIFIED_ENABLED });
   } catch (err) {
-    console.error('Error listPhones', err);
-    return res.status(err?.status || 500).json({
-      error: err?.message || 'Error obteniendo números WhatsApp',
-    });
+    if (err?.statusCode === 403) return res.status(403).json({ error: 'whatsapp_clinic_scope_forbidden' });
+    return res.status(503).json({ error: 'whatsapp_phones_unavailable' });
   }
 };
 

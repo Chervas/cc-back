@@ -2,6 +2,14 @@ const express = require('express');
 const router = express.Router();
 const authMiddleware = require('./auth.middleware');
 const whatsappController = require('../controllers/whatsapp.controller');
+const metaQuarantine = require('../lib/metaQuarantineHttp');
+
+// Containment includes local assignments/queues, not only Graph HTTP. Keep
+// writes closed until each WhatsApp consumer has its reviewed broker path.
+router.use((req, res, next) => {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  return authMiddleware(req, res, () => metaQuarantine.middleware(req, res));
+});
 
 /**
  * POST /api/whatsapp/messages

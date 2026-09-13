@@ -1,5 +1,22 @@
 # Runbook: Migracion Segura De Integraciones Y Auditoria
 
+## 13/09/2026 — WhatsApp primero; OPS no es dependencia
+
+Aclaración del usuario: OPS solo consume datos para paneles y puede estar
+apagado. La activación de ClinicaClick no depende de él. Prioridad: API WhatsApp
+y login con código por correo; cuentas publicitarias después.
+
+Refuerzo preparado: webhook con firma obligatoria y ámbito derivado del activo,
+ACL de estado/listados, lecturas sin token ni sync automática y escrituras
+WhatsApp cerradas antes de sus handlers. 38 pruebas aisladas pasan (18 nuevas).
+No se ha desplegado. La revocación/retirada de tokens y parada de envíos son
+reportadas por el usuario; no se usan credenciales para comprobarlas.
+
+**Reconexión aún no validada**: broker y consumidores WhatsApp, control de
+plantillas, cierre de workers y corte efectivo del MFA pendientes. Informe y
+criterios concretos en `back-dev/docs/security/whatsapp-reconnection-readiness.md`.
+Las referencias históricas a «OPS aplazado» no imponen esperar al producto OPS.
+
 ## 13/09/2026 — Primera etapa preparada: Meta y códigos por correo
 
 Entrega de contención Meta y acceso con código por correo elegido por el usuario.

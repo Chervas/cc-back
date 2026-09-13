@@ -1,7 +1,8 @@
 # Primera etapa: contención Meta y acceso con código por correo
 
 Fecha: 13/09/2026. Entrega de código y QA aislada; **no activada en servicios**.
-El usuario eligió expresamente códigos por correo. OPS sigue aplazado.
+El usuario eligió expresamente códigos por correo. El producto OPS queda fuera del foco;
+no es una dependencia de ClinicaClick ni de esta activación.
 El objetivo completo de integraciones, auditoría, costes y cifrado sigue abierto.
 
 ## Resultado y límites
@@ -162,7 +163,9 @@ retención/recuperación de estos datos se debe conciliar con el DPD.
    revisado. El corte de recuperación solo se da por verificado tras el canary.
 
 Responsable de aprobar ventana, buzón de prueba, secretos/configuración y corte:
-propietario/OPS. No se pide esa aprobación ahora porque OPS está aplazado.
+propietario de ClinicaClick. El apagado del producto OPS no impide preparar este
+lote. La reconexión de WhatsApp tiene además los pendientes concretos descritos
+en [whatsapp-reconnection-readiness.md](whatsapp-reconnection-readiness.md).
 Coste: no se crean recursos AWS. El incremento esperado son correos de acceso/
 reenvío y almacenamiento/entrega de auditoría; falta medir volumen y coste real
 tras canary. El Budget reportado y su conciliación CloudFormation, Cost Explorer,
