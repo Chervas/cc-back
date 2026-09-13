@@ -35,7 +35,7 @@ function binding(row) {
     || !positive(row.tenant_clinic_id) || !ref(row.connection_ref) || row.asset_ref !== 'ads:' + row.customer_id
     || !/^(clinic|group):[1-9]\d{0,9}$/.test(row.scope_key || '') || !positive(row.scope_key.split(':')[1])
     || typeof row.google_user_id !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(row.google_user_id) || row.google_user_id === 'unknown'
-    || row.login_customer_id !== null && !contract.customer(row.login_customer_id) || !['active', 'blocked'].includes(row.state)) fail();
+    || row.login_customer_id !== null && !contract.customer(row.login_customer_id) || !['active', 'blocked', 'staged'].includes(row.state)) fail();
   return Object.fromEntries(BINDING_FIELDS.map(key => [key, ['mapping_id', 'google_connection_id', 'tenant_clinic_id'].includes(key) ? Number(row[key]) : row[key]]));
 }
 const bounded = rows => { if (!Array.isArray(rows) || rows.length > 1000) fail(); return rows; };
@@ -44,7 +44,9 @@ const sortedIds = rows => {
   return [...new Set(rows.map(Number))].sort((a, b) => a - b);
 };
 function createGoogleAdsBrokerScope({ loadMapping, loadBindings, loadMappings, loadConnection, loadClinics, loadShared, loadGrants, loadRevocations,
+  discoveryOnly = false,
   enabled = () => process.env.GOOGLE_ADS_BROKER_ENABLED === 'true' }) {
+  if (typeof discoveryOnly !== 'boolean') fail();
   const contexts = new WeakMap();
   async function inspect(hint, expected, transaction) {
     const requested = identity(hint);
@@ -54,19 +56,21 @@ function createGoogleAdsBrokerScope({ loadMapping, loadBindings, loadMappings, l
     const history = bounded(await loadRevocations(requested.customerId, transaction)).map(revocations.validate);
     if (history.some(row => row.customer_id !== requested.customerId)) fail();
     if (!records.length && history.length) fail('asset_revoked');
-    if (!current || ![true, 1].includes(current.isActive) || digest(identity(current)) !== digest(requested)) fail();
-    if (!records.length && !marked(current) && !expected) return null;
+    if (!current || ![true, false, 0, 1].includes(current.isActive) || digest(identity(current)) !== digest(requested)) fail();
+    if (!records.length && !marked(current) && !expected && !discoveryOnly && [true, 1].includes(current.isActive)) return null;
     if (records.some(row => row.customer_id !== requested.customerId)) fail();
     const matches = records.filter(row => row.mapping_id === requested.id);
     if (matches.length !== 1) fail(); const selected = matches[0];
-    if (selected.state !== 'active' || history.some(row => Number(row.tenant_clinic_id) === selected.tenant_clinic_id
+    if (selected.state === 'blocked' || history.some(row => Number(row.tenant_clinic_id) === selected.tenant_clinic_id
       && row.connection_ref === selected.connection_ref && row.asset_ref === selected.asset_ref)) fail('asset_revoked');
+    if (selected.state === 'staged' && !discoveryOnly || [true, 1].includes(current.isActive) !== (selected.state === 'active')) fail();
     if (selected.scope_key !== requested.scopeKey || current.broker_read_connection_ref !== selected.connection_ref
       || current.broker_read_asset_ref !== selected.asset_ref) fail();
     const mappings = bounded(await loadMappings(requested.customerId, transaction));
     if (mappings.some(row => !positive(row?.id) || customer(row.customerId) !== requested.customerId
       || ![true, false, 0, 1].includes(row.isActive))) fail();
-    const active = mappings.filter(row => [true, 1].includes(row.isActive));
+    const active = mappings.filter(row => [true, 1].includes(row.isActive)
+      || discoveryOnly && records.some(record => record.mapping_id === Number(row.id) && record.state === 'staged'));
     if (!active.length || new Set(mappings.map(row => Number(row.id))).size !== mappings.length) fail();
     if (active.filter(row => Number(row.id) === requested.id).length !== 1) fail();
     if (digest(identity(active.find(row => Number(row.id) === requested.id))) !== digest(requested)) fail();
@@ -82,12 +86,23 @@ function createGoogleAdsBrokerScope({ loadMapping, loadBindings, loadMappings, l
         || record.login_customer_id !== requested.loginCustomerId) fail();
       if (record.scope_key.startsWith('group:') ? record.scope_key !== requested.scopeKey
         : !allowed.has(Number(record.scope_key.split(':')[1]))) fail('scope_denied');
+      // Preparation is an explicit, inactive row, never an absent/deleted row.
+      // Ordinary readers validate it too, without treating it as usable data.
+      if (record.state === 'staged') {
+        const prepared = mappings.find(row => Number(row.id) === record.mapping_id);
+        if (!prepared || ![false, 0].includes(prepared.isActive)) fail();
+        const owner = identity(prepared);
+        if (owner.scopeKey !== record.scope_key || owner.googleConnectionId !== record.google_connection_id
+          || owner.loginCustomerId !== record.login_customer_id || prepared.broker_read_connection_ref !== record.connection_ref
+          || prepared.broker_read_asset_ref !== record.asset_ref) fail();
+      }
     }
     const usedBindings = [];
     for (const row of active) {
       const owner = identity(row); const candidates = records.filter(item => item.mapping_id === owner.id);
       if (candidates.length !== 1) fail(); const record = candidates[0];
-      if (record.state !== 'active') fail('asset_revoked');
+      if (record.state !== 'active' && !(discoveryOnly && record.state === 'staged')) fail('asset_revoked');
+      if ([true, 1].includes(row.isActive) !== (record.state === 'active')) fail();
       if (owner.customerId !== requested.customerId || owner.googleConnectionId !== requested.googleConnectionId
         || owner.loginCustomerId !== requested.loginCustomerId || record.google_connection_id !== owner.googleConnectionId
         || record.scope_key !== owner.scopeKey || record.login_customer_id !== owner.loginCustomerId
@@ -124,8 +139,10 @@ function createGoogleAdsBrokerScope({ loadMapping, loadBindings, loadMappings, l
     if (!connection || Number(connection.id) !== requested.googleConnectionId || connection.googleUserId !== selected.google_user_id
       || Number(connection.credentials_external) !== 1) fail();
     const capture = { ...requested, connectionRef: selected.connection_ref, assetRef: selected.asset_ref,
+      discoveryOnly,
       tenantRef: `clinic:${selected.tenant_clinic_id}`, googleSubject: selected.google_user_id, clinicIds: allowedIds,
       bindingsHash: digest(usedBindings.sort((a, b) => a.mapping_id - b.mapping_id)),
+      registryHash: digest(records.slice().sort((a, b) => a.mapping_id - b.mapping_id)),
       mappingsHash: digest(active.map(identity).sort((a, b) => a.id - b.id)),
       sharedHash: digest(shared.map(row => [Number(row.assetId), Number(row.clinicaId)]).sort()),
       grantsHash: digest(grants.map(row => [row.id, row.assignmentScope, row.clinicaId, row.grupoClinicaId, row.googleConnectionId, row.status]).sort()) };
@@ -141,9 +158,9 @@ function createGoogleAdsBrokerScope({ loadMapping, loadBindings, loadMappings, l
     const saved = context && typeof context === 'object' && contexts.get(context); if (!saved) fail();
     return inspect(saved.hint, saved.captured, transaction);
   });
-  return { assertContext, prepare: guarded(async mapping => {
+  return { assertContext, prepare: guarded(async (mapping, { transaction } = {}) => {
     const hint = Object.fromEntries(MAPPING_FIELDS.map(key => [key, mapping?.[key] ?? null]));
-    const captured = await inspect(hint); if (!captured) return null;
+    const captured = await inspect(hint, undefined, transaction); if (!captured) return null;
     const context = Object.freeze({}); contexts.set(context, { hint, captured }); return context;
   }) };
 }

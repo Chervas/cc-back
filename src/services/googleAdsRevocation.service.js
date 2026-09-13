@@ -15,6 +15,7 @@ const same = (a, b, fields = IDENTITY_FIELDS) => fields.every(k => String(a[k]) 
 const conflict = () => { throw Object.assign(Error('La cuenta Ads también se utiliza fuera del ámbito de desconexión.'),
   { code: 'scope_disconnect_shared_asset_conflict', httpStatus: 409 }); };
 async function enqueue({ models, transaction, connectionId, scope, clinicIds, actorId, sessionRef = null, mappings = [],
+  customerIds,
   enabled = process.env.GOOGLE_ADS_REVOCATION_ENABLED, now = new Date() }) {
   if (!transaction || !positive(String(connectionId))) fail();
   const allowedIds = ids(clinicIds, true); const allowed = new Set(allowedIds);
@@ -22,7 +23,12 @@ async function enqueue({ models, transaction, connectionId, scope, clinicIds, ac
   const lock = { transaction, lock: transaction.LOCK.UPDATE, limit: 1001, raw: true, logging: false };
   bounded(mappings);
   const requestedCustomers = [...new Set(mappings.flatMap(row => { try { return [customer(row.customerId)]; } catch { return []; } }))];
-  const where = { [Op.or]: [{ google_connection_id: Number(connectionId) },
+  // Account replacement revokes only its explicitly removed customers. The
+  // normal connection disconnect retains its original all-customer search.
+  if (customerIds !== undefined && (!Array.isArray(customerIds) || !customerIds.length || customerIds.length > 200
+    || customerIds.some(id => customer(id) !== id) || new Set(customerIds).size !== customerIds.length
+    || requestedCustomers.some(id => !customerIds.includes(id)))) fail();
+  const where = customerIds !== undefined ? { customer_id: { [Op.in]: customerIds } } : { [Op.or]: [{ google_connection_id: Number(connectionId) },
     ...(requestedCustomers.length ? [{ customer_id: { [Op.in]: requestedCustomers } }] : [])] };
   let records = bounded(await models.GoogleAdsBrokerBinding.findAll({ ...lock, where, attributes: BINDING_FIELDS,
     order: [['customer_id', 'ASC'], ['mapping_id', 'ASC']] })).map(binding);

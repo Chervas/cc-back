@@ -27,6 +27,7 @@ async function consumers(models, oauthBinding, options) {
     if (record.google_connection_id !== id(oauthBinding.google_connection_id) || record.google_user_id !== oauthBinding.google_user_id
       || selected && record.connection_ref !== oauthBinding.connection_ref) C.fail();
     const mapping = rows.find(row => id(row.id) === record.mapping_id);
+    if (record.state === 'staged' && (!mapping || active(mapping))) C.fail();
     if (mapping) {
       const owner = identity(mapping);
       if (owner.customerId !== record.customer_id || owner.googleConnectionId !== record.google_connection_id
@@ -36,9 +37,12 @@ async function consumers(models, oauthBinding, options) {
     const revoked = history.filter(row => Number(row.tenant_clinic_id) === record.tenant_clinic_id
       && row.connection_ref === record.connection_ref && row.asset_ref === record.asset_ref);
     if (revoked.some(row => Number(row.google_connection_id) !== record.google_connection_id || row.google_user_id !== record.google_user_id)) C.fail();
-    if (record.state === 'active' && !revoked.length) {
-      available.push(record); if (mapping && active(mapping)) usedMappings.add(record.mapping_id);
-      if (mapping && active(mapping) && record.asset_ref === oauthBinding.asset_ref && record.tenant_clinic_id === id(oauthBinding.clinica_id)) controls.push(record);
+    if (['active', 'staged'].includes(record.state) && !revoked.length) {
+      // Prepared discovery also consumes this credential. Include its full
+      // ownership and sharing in renewal, without activating the mapping.
+      const used = mapping && (active(mapping) || record.state === 'staged');
+      available.push(record); if (used) usedMappings.add(record.mapping_id);
+      if (used && record.asset_ref === oauthBinding.asset_ref && record.tenant_clinic_id === id(oauthBinding.clinica_id)) controls.push(record);
     }
   }
   for (const row of rows.filter(active)) {

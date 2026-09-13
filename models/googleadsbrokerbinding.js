@@ -9,5 +9,5 @@ module.exports = (sequelize, D) => sequelize.define('GoogleAdsBrokerBinding', {
   scope_key: { type: D.STRING(64), allowNull: false },
   tenant_clinic_id: { type: D.INTEGER, allowNull: false },
   login_customer_id: { type: D.CHAR(10), allowNull: true },
-  state: { type: D.ENUM('active', 'blocked'), allowNull: false, defaultValue: 'blocked' },
+  state: { type: D.ENUM('active', 'blocked', 'staged'), allowNull: false, defaultValue: 'blocked' },
 }, { tableName: 'GoogleAdsBrokerBindings', timestamps: false });

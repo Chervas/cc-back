@@ -5,14 +5,22 @@ const { createGoogleAdsBrokerReader, safe } = require('./googleAdsBrokerReader.s
 const { createIntegrationsBrokerClient } = require('../lib/integrationsBrokerClient');
 const fail = code => { throw Object.assign(Error(code), { code }); };
 function createGoogleAdsBroker(options) {
-  const scope = createGoogleAdsBrokerScope(options);
+  const scope = createGoogleAdsBrokerScope({ ...options, discoveryOnly: false });
+  const discoveryScope = createGoogleAdsBrokerScope({ ...options, discoveryOnly: true });
   const reader = createGoogleAdsBrokerReader({ client: options.client, assertContext: scope.assertContext, ...(options.now ? { now: options.now } : {}) });
-  const assert = async (account, context, options) => {
+  const discoveryReader = createGoogleAdsBrokerReader({ client: options.client, assertContext: discoveryScope.assertContext, ...(options.now ? { now: options.now } : {}) });
+  const check = scope => async (account, context, options) => {
     const captured = await scope.assertContext(context, options); const requested = identity(account);
     if (Object.keys(requested).some(key => requested[key] !== captured[key])) fail('broker_binding_invalid');
     return captured;
   };
-  return { prepare: scope.prepare, assert,
+  const assert = check(scope); const assertDiscovery = check(discoveryScope);
+  return { prepare: scope.prepare, assert, prepareDiscovery: discoveryScope.prepare, assertDiscovery,
+    async readDiscovery(account, context, budget) {
+      await assertDiscovery(account, context);
+      const rows = await discoveryReader.read(context, 'discovery', {}, budget);
+      await assertDiscovery(account, context); return rows;
+    },
     async read(account, context, family, payload, budget) {
       await assert(account, context);
       const rows = await reader.read(context, family, payload, budget);

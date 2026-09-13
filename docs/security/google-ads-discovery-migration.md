@@ -1,5 +1,12 @@
 # Google Ads: inventario registrado y estado por broker
 
+## Contrato posterior: selección y baja gestionadas
+
+[El bloque de mappings](google-ads-mapping-migration.md) incorpora preparación
+staged, selección con auditoría v12, consulta por metadata y baja individual
+que conserva el historial. Las notas históricas inferiores describen el bloque
+anterior. Alta general/grants y corte real siguen pendientes; OPS aplazado.
+
 Preparado el 13/09/2026 sobre backend 59064134484b y frontend 598a3ff87486.
 OPS aplazado. Código y pruebas ficticias; ninguna cuenta real migrada,
 credencial trasladada, configuración instalada o modificación de la BD compartida.

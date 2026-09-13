@@ -1,5 +1,30 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Asignaciones Google Ads gestionadas
+
+POST `/oauth/google/ads/map-accounts` admite selecciones previamente registradas,
+con sesión gestionada y ámbito explícito/write. Cada mapping contiene solamente
+`clinicaId` y `customerId`; `replace_existing` es booleano opcional. Gate nuevo
+`GOOGLE_ADS_MAPPING_ENABLED`, apagado por defecto. La metadata procede del resumen
+tipado; no se aceptan referencias privadas ni datos MCC del cliente. Activa una
+preparación staged/inactiva y captura auditoría v12 en la misma transacción.
+La sustitución revoca solo las cuentas retiradas y conserva sus bloqueos/aliases.
+Un grupo conserva un único propietario aunque se seleccionen varias clínicas;
+una cuenta heredada no se modifica desde un ámbito de clínica.
+
+GET `/oauth/google/ads/mappings` conserva `mappings[].ads[]`, usa solo metadata,
+sesión gestionada y ámbito explícito/read, y admite visualización heredada.
+DELETE `/oauth/google/ads/mappings/:mappingId` requiere ámbito explícito/write,
+conserva los registros e invoca captura durable de la cuenta y todos sus aliases.
+No necesita acceso al proveedor; los conflictos fuera del ámbito revierten todo.
+Las tres rutas aplican no-store y errores cerrados 400/401/403/409/503.
+
+Auditoría v12 `integration.asset.map` registra estado/propiedad anteriores,
+representación clínica, actor/sesión y compromiso del conjunto afectado; el visor
+expone `integrationMapping`. Mantiene v11 para las bajas. DDL 20260913110000
+pendiente en BD compartida; flags, jobs y OPS intactos. No hay alta automática de
+grants/bindings: incorporación general, otras integraciones y corte real pendientes.
+
 ## 13/09/2026 — Inventario registrado y estado Google Ads
 
 GET /oauth/google/ads/accounts, con o sin view=selection, admite modo gestionado

@@ -18,6 +18,7 @@ const ClinicBusinessLocation = db.ClinicBusinessLocation;
 const businessProfileDiscovery = require('../services/businessProfileDiscovery.service');
 const googlePropertyDiscovery = require('../services/googlePropertyDiscovery.service');
 const googleAdsDiscovery = require('../services/googleAdsDiscovery.service');
+const googleAdsMapping = require('../services/googleAdsMapping.service');
 const googlePropertyInventoryScope = require('../services/googlePropertyInventoryScope.service');
 const googleLegacyCredentials = require('../services/googleLegacyCredentials.service');
 const accessSessions = require('../services/accessSession.service');
@@ -590,7 +591,37 @@ async function googlePropertyInventory(req, kind) {
     return { managed: null, resolved, connection, request: send => scopedRequest(connection, () => send(accessToken)) };
 }
 
-async function googleAdsInventory(req) {
+async function googleAdsMappingScope(req, access) {
+    const fail = code => { throw Object.assign(Error(code), { code }); };
+    let authorization;
+    try { authorization = await authorizeExplicitConnectionScope(req, access); } catch { fail('google_discovery_scope_forbidden'); }
+    if (!authorization.requested) fail('google_discovery_scope_forbidden');
+    let claims;
+    try { claims = await accessSessions.verify(accessSessions.bearer(req.headers.authorization)); } catch { fail('google_discovery_session_required'); }
+    if (claims.sessionVersion !== 1 || !claims.jti) fail('google_discovery_session_required');
+    const resolved = await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: true, metadataOnly: true });
+    if (!resolved.connection || !resolved.scope?.scopeKey) fail('broker_binding_invalid');
+    const clinicIds = authorization.clinicIds.slice();
+    const revalidate = async () => {
+        let fresh;
+        try { fresh = await accessSessions.verify(accessSessions.bearer(req.headers.authorization)); } catch { fail('google_discovery_session_required'); }
+        if (fresh.userId !== claims.userId || fresh.jti !== claims.jti || fresh.sessionVersion !== 1) fail('google_discovery_session_required');
+        let latest;
+        try { latest = await authorizeExplicitConnectionScope(req, access); } catch { fail('google_discovery_scope_forbidden'); }
+        const connection = await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: true, metadataOnly: true });
+        if (!latest.requested || latest.clinicIds.length !== clinicIds.length || latest.clinicIds.some(id => !clinicIds.includes(id))
+            || connection.scope?.scopeKey !== resolved.scope.scopeKey || Number(connection.connection?.id) !== Number(resolved.connection.id)) fail('broker_binding_invalid');
+    };
+    return { clinicIds, scopeKey: resolved.scope.scopeKey, connectionId: Number(resolved.connection.id), actorId: claims.userId,
+        sessionRef: claims.jti, revalidate, authorize: async ({ transaction }) => {
+            try { await accessSessions.verifyReference({ userId: claims.userId, sessionRef: claims.jti, expiresAt: new Date(claims.exp * 1000) }, { transaction }); }
+            catch { fail('google_discovery_session_required'); }
+            return hasMarketingClinicScopeAccess({ userId: claims.userId, clinicIds, access: 'write',
+                membershipModel: { findAll: options => db.UsuarioClinica.findAll({ ...options, transaction, lock: transaction.LOCK.UPDATE, logging: false }) } });
+        } };
+}
+
+async function googleAdsInventory(req, { capture = false } = {}) {
     const deadline = Date.now() + 60000;
     const resolved = await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: true, metadataOnly: true });
     if (!resolved.connection) throw Object.assign(Error('google_discovery_no_connection'), { code: 'google_discovery_no_connection' });
@@ -613,7 +644,7 @@ async function googleAdsInventory(req) {
             throw Object.assign(Error('broker_binding_invalid'), { code: 'broker_binding_invalid' });
         }
     };
-    const managed = await googleAdsDiscovery.list({ clinicIds, connectionId: Number(resolved.connection.id), scopeKey: resolved.scope?.scopeKey, revalidate });
+    const managed = await googleAdsDiscovery[capture ? 'capture' : 'list']({ clinicIds, connectionId: Number(resolved.connection.id), scopeKey: resolved.scope?.scopeKey, revalidate });
     if (managed !== null) return { managed, resolved };
     const check = async () => {
         await revalidate(false); await googleAdsDiscovery.assertLegacyAllowed();
@@ -2918,6 +2949,42 @@ router.post('/google/ads/accept-link', async (req, res) => {
  * GOOGLE — Guardar mapeo de cuentas Ads ↔ clínicas
  */
 router.post('/google/ads/map-accounts', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    let managed = false;
+    try { await googleAdsDiscovery.assertLegacyAllowed(); }
+    catch (error) {
+        if (error?.code === 'google_oauth_legacy_closed') managed = true;
+        else return res.status(503).json({ success: false, error: 'broker_registry_unavailable' });
+    }
+    if (managed) {
+        try {
+            googleAdsMapping.assertEnabled();
+            googleAdsMapping.input(req.body?.mappings);
+            const authorization = await authorizeExplicitConnectionScope(req, 'write');
+            if (!authorization.requested) throw Object.assign(Error('google_discovery_scope_forbidden'), { code: 'google_discovery_scope_forbidden' });
+            req.marketingConnectionScopeAuthorization = authorization;
+            const claims = await accessSessions.verify(accessSessions.bearer(req.headers.authorization));
+            if (claims.sessionVersion !== 1 || !claims.jti) throw Object.assign(Error('google_discovery_session_required'), { code: 'google_discovery_session_required' });
+            const inventory = await googleAdsInventory(req, { capture: true });
+            if (!inventory.managed) throw Object.assign(Error('broker_binding_invalid'), { code: 'broker_binding_invalid' });
+            const result = await googleAdsMapping.save({ selection: inventory.managed.selection, mappings: req.body.mappings,
+                replaceExisting: req.body.replace_existing ?? false, actorId: claims.userId, sessionRef: claims.jti,
+                authorize: async ({ transaction, actorId, sessionRef, clinicIds }) => {
+                    try { await accessSessions.verifyReference({ userId: actorId, sessionRef, expiresAt: new Date(claims.exp * 1000) }, { transaction }); }
+                    catch { throw Object.assign(Error('google_discovery_session_required'), { code: 'google_discovery_session_required' }); }
+                    return hasMarketingClinicScopeAccess({ userId: actorId, clinicIds, access: 'write',
+                        membershipModel: { findAll: options => db.UsuarioClinica.findAll({ ...options, transaction,
+                            lock: transaction.LOCK.UPDATE, logging: false }) } });
+                } });
+            try {
+                const { job } = await jobRequestsService.enqueueUniqueJobRequest({ type: 'google_ads_recent',
+                    payload: withRequestedRuntimeNamespace(req, { clinicIds: authorization.clinicIds }), priority: 'critical',
+                    origin: 'google:map-accounts', requestedBy: claims.userId });
+                jobScheduler.triggerImmediate(job.id).catch(() => console.error('google_ads_mapping_sync_queue_unavailable'));
+            } catch { console.error('google_ads_mapping_sync_queue_unavailable'); }
+            return res.json(result);
+        } catch (error) { return res.status(googleAdsMapping.status(error)).json({ success: false, error: googleAdsMapping.safe(error) }); }
+    }
     try {
         const userId = getUserIdFromToken(req);
         if (!userId) {
@@ -3140,6 +3207,17 @@ router.post('/google/ads/map-accounts', async (req, res) => {
  * GOOGLE — Obtener mapeos Ads actuales
  */
 router.get('/google/ads/mappings', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    let managed = false;
+    try { await googleAdsDiscovery.assertLegacyAllowed(); }
+    catch (error) {
+        if (error?.code === 'google_oauth_legacy_closed') managed = true;
+        else return res.status(503).json({ success: false, error: 'broker_registry_unavailable' });
+    }
+    if (managed) {
+        try { return res.json(await googleAdsMapping.list(await googleAdsMappingScope(req, 'read'))); }
+        catch (error) { return res.status(googleAdsMapping.status(error)).json({ success: false, error: googleAdsMapping.safe(error) }); }
+    }
     try {
         const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
             allowLegacyUserFallback: true
@@ -3197,6 +3275,17 @@ router.get('/google/ads/mappings', async (req, res) => {
 });
 
 router.delete('/google/ads/mappings/:mappingId', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    let managed = false;
+    try { await googleAdsDiscovery.assertLegacyAllowed(); }
+    catch (error) {
+        if (error?.code === 'google_oauth_legacy_closed') managed = true;
+        else return res.status(503).json({ success: false, error: 'broker_registry_unavailable' });
+    }
+    if (managed) {
+        try { return res.json(await googleAdsMapping.remove({ ...await googleAdsMappingScope(req, 'write'), mappingId: req.params.mappingId })); }
+        catch (error) { return res.status(googleAdsMapping.status(error)).json({ success: false, error: googleAdsMapping.safe(error) }); }
+    }
     const mappingId = Number.parseInt(req.params.mappingId, 10);
     if (!Number.isInteger(mappingId)) {
         return res.status(400).json({ success: false, error: 'mappingId inválido' });

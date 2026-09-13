@@ -1,5 +1,11 @@
 # Runbooks operativos del backend
 
+## 13/09/2026 — Asignaciones Ads gestionadas
+
+[Selección, consulta, baja, auditoría y preparación staged](security/google-ads-mapping-migration.md).
+Guardado y bajas probados con ficticios; no hay alta general de grants, corte de
+cuentas reales o despliegue. OPS aplazado.
+
 ## 13/09/2026 — Inventario y estado Ads por broker
 
 Listado y estado Ads preparados sin tokens SQL para cuentas registradas.

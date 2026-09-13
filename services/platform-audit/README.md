@@ -1,5 +1,14 @@
 # Auditoría de plataforma: primer bloque de autenticación
 
+## 13/09/2026 — Asignaciones Ads v12
+
+Codec y lector S3 admiten integration.asset.map v12, con estado y propiedad
+anteriores, actor/sesión y compromiso de clínicas afectadas. El outbox usa el ID
+del mapping como result_part para varios cambios en una misma correlación.
+Visor restringido actualizado; 50 tests offline, versión S3 exacta y 8 capturas
+Chromium ficticias. Writer/reader v12 antes de emitir; entrega real pendiente.
+[Contrato, atomicidad y límites](../../docs/security/google-ads-mapping-migration.md).
+
 ## 13/09/2026 — OAuth Ads en el codec v10
 
 integration.oauth.authorize/activate admite provider=google_ads y assetRef Ads

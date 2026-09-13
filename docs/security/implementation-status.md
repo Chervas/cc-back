@@ -1,5 +1,25 @@
 # Seguridad: implementación y evidencias
 
+## 13/09/2026 — Selección y baja de asignaciones Ads gestionadas
+
+Guardado gestionado preparado: selección original revalidada bajo lock, estado
+staged explícito, activación y auditoría v12 atómicas. Sustituir cuentas conserva
+las seleccionadas y revoca solo las retiradas. Consulta de mappings heredados y
+baja individual usan metadata; la baja conserva filas e historial y no llama a
+Google. Sesión gestionada, permisos sobre el ámbito completo y errores cerrados.
+
+DDL 20260913110000 añade staged sin cambiar el defecto blocked y rechaza down
+con preparaciones. Gate nuevo GOOGLE_ADS_MAPPING_ENABLED apagado por defecto;
+catálogo 48 jobs, pausas y configuración real intactos. Ajustes envía solo IDs y
+su visor muestra activación/propiedad anterior y clínicas afectadas. QA: 444 tests
+Node (382 backend, 50 auditoría, 12 frontend), 27 checks en un MySQL propio con
+cierre 0, build Angular y 8 capturas Chromium desktop/móvil; todo ficticio.
+
+Alta general de cuentas sin preparación, cambios de propietario/grants, otros
+consumidores, auditoría completa, costes/controles AWS y cifrado/corte BD siguen
+pendientes. OPS aplazado; cero cuentas reales migradas o despliegues.
+[Contrato, límites y lote pendiente](google-ads-mapping-migration.md).
+
 ## 13/09/2026 — Inventario y estado Ads por broker
 
 Listado y estado Ads preparados sin tokens SQL para cuentas registradas.

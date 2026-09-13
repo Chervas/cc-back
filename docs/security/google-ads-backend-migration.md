@@ -1,5 +1,12 @@
 # Google Ads: registro durable y sincronización por broker
 
+## Contrato posterior: selección y baja gestionadas
+
+[El bloque de mappings](google-ads-mapping-migration.md) incorpora preparación
+staged, selección con auditoría v12, consulta por metadata y baja individual
+que conserva el historial. Las notas históricas inferiores describen el bloque
+anterior. Alta general/grants y corte real siguen pendientes; OPS aplazado.
+
 Preparado el 13/09/2026 sobre backend `3801764d7cc2f22f9d71e44fe5e6477d347f9412`
 y frontend `ff0306ff1b24d56e8e18aadc0a2a34244765700e`. OPS sigue aplazado. Este
 contrato describe código y pruebas aisladas: cero cuentas migradas, ninguna

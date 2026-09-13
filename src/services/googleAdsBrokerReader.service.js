@@ -24,10 +24,11 @@ function createGoogleAdsBrokerReader({ client, assertContext, now = Date.now }) 
       contract.validate(operation, { ...basePayload, ...(['account', 'discovery'].includes(family) ? {} : { pageToken: null }) });
       const deadline = now() + timeoutMs;
       const captured = await assertContext(context);
+      if (captured?.discoveryOnly === true && family !== 'discovery') fail('operation_denied');
       if (!captured || !reference(captured.connectionRef) || !/^clinic:[1-9]\d{0,9}$/.test(captured.tenantRef)
         || !contract.customer(captured.customerId) || captured.assetRef !== 'ads:' + captured.customerId) fail('broker_binding_invalid');
       const identity = { connectionRef: captured.connectionRef, tenantRef: captured.tenantRef,
-        customerId: captured.customerId, assetRef: captured.assetRef };
+        customerId: captured.customerId, assetRef: captured.assetRef, discoveryOnly: captured.discoveryOnly };
       const verify = async () => {
         const fresh = await assertContext(context);
         if (!fresh || Object.keys(identity).some(key => fresh[key] !== identity[key])) fail('broker_binding_invalid');

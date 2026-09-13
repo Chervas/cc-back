@@ -3,7 +3,7 @@ const { createHmac, timingSafeEqual } = require('node:crypto');
 const { exact, fail } = require('./reader-protocol'); const { UUID } = require('./event');
 const ACTIONS = ['auth.sign_in', 'auth.token_sign_in', 'auth.unlock', 'session.issued', 'session.renewed', 'session.revoked', 'session.expired', 'audit.records.read',
   ...require('./access-policy-contract').PERMISSION_ACTIONS, ...require('./realtime-contract').REALTIME_ACTIONS,
-  ...require('./patient-read-contract').PATIENT_READ_ACTIONS, 'integration.asset.disconnect',
+  ...require('./patient-read-contract').PATIENT_READ_ACTIONS, 'integration.asset.disconnect', 'integration.asset.map',
   'integration.oauth.authorize', 'integration.oauth.activate'];
 function criteriaFor(v) {
   exact(v, ['from', 'to', 'action', 'userId']);
