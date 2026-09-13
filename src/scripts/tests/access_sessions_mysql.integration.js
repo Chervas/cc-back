@@ -64,13 +64,17 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await assert.rejects(sessions.verify(legacy), /auth_invalid/);
   env.AUTH_SESSION_MODE = 'legacy'; assert.equal((await sessions.revoke(legacy)).status, 'local_only');
   const noDB = api.createService({ models: () => assert.fail('legacy must not access models'), config: () => api.settings(env), now });
-  await noDB.verify(legacy); env.AUTH_SESSION_MODE = 'enforce';
+  await assert.rejects(noDB.verify(legacy), /auth_invalid/); // Administrator JWTs issued before the credential guard are closed even in legacy mode.
+  const ordinaryLegacy = jwt.sign({ userId: 123, email: 'ordinary@example.invalid' }, env.JWT_SECRET, { expiresIn: 3600 });
+  await noDB.verify(ordinaryLegacy);
+  const boundAdmin = await sessions.issue(await fresh()); await sessions.verify(boundAdmin.token);
+  env.AUTH_SESSION_MODE = 'enforce';
   const phantom = jwt.sign({ ...jwt.decode(first.token), jti: require('node:crypto').randomUUID() }, env.JWT_SECRET);
   await assert.rejects(sessions.verify(phantom), /auth_invalid/);
   for (const change of [{ aud: 'another-product' }, { userId: String(user.id_usuario) }, { sessionVersion: 2 }]) {
     await assert.rejects(sessions.verify(jwt.sign({ ...jwt.decode(first.token), ...change }, env.JWT_SECRET)), /auth_invalid/);
   }
-  report.checks.push('legacy compatibility is explicit and model-free; enforcement rejects legacy, phantom IDs and incompatible claims');
+  report.checks.push('ordinary legacy users remain model-free; old administrator JWTs are denied, new administrator JWTs check current SQL credentials, and enforcement rejects all legacy/phantom/incompatible claims');
   const expiring = await login(); const exp = jwt.decode(expiring.token).exp;
   at = new Date((exp + 1) * 1000); await assert.rejects(sessions.verify(expiring.token), /jwt expired/);
   const expiryResults = await Promise.all([sessions.expire(), service().expire()]);

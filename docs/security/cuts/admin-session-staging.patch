@@ -1,0 +1,432 @@
+diff --git a/src/app.js b/src/app.js
+index d94c26b..e6f8eb7 100644
+--- a/src/app.js
++++ b/src/app.js
+@@ -11,7 +11,6 @@ const express = require('express');
+ const crypto = require('node:crypto');
+ const http = require('http');
+ const { Server } = require('socket.io');
+-const jwt = require('jsonwebtoken');
+ const cookieParser = require('cookie-parser');
+ // Importar rutas existentes
+ const userRoutes = require('./routes/user.routes');
+@@ -446,20 +445,10 @@ if (RESUME_AUTOMATIONS_FROM_SOCKET_BUS) {
+ } else {
+     console.log('[automations-v2] Reanudacion por socket-bus deshabilitada; el gateway coordina inbound');
+ }
+-io.use((socket, next) => {
+-    const token =
+-        socket.handshake.auth?.token ||
+-        socket.handshake.headers?.authorization?.split(' ')[1];
+-    if (!token) {
+-        return next(new Error('auth_required'));
+-    }
+-    try {
+-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+-        socket.userData = { userId: decoded.userId, email: decoded.email };
+-        return next();
+-    } catch (err) {
+-        return next(new Error('auth_invalid'));
+-    }
++const adminCredentials = require('./lib/adminCredentialSession');
++require('./lib/socket-session-guard').installSocketSessionGuard(io, {
++    verify: token => adminCredentials.verifyToken(token, process.env.JWT_SECRET),
++    bearer: adminCredentials.bearer,
+ });
+ 
+ io.on('connection', async (socket) => {
+@@ -509,6 +498,7 @@ io.on('connection', async (socket) => {
+         .map((decision) => decision.clinicId);
+     const canUseAllClinics = quickChatContext.canUseAllClinics;
+ 
++    if (!socket.connected) return;
+     socket.data.allowedClinicIds = allowedClinicIds;
+     socket.data.canUseAllClinics = canUseAllClinics;
+ 
+diff --git a/src/controllers/auth.controllers.js b/src/controllers/auth.controllers.js
+index c50865f..2ac443f 100644
+--- a/src/controllers/auth.controllers.js
++++ b/src/controllers/auth.controllers.js
+@@ -1,5 +1,6 @@
+ require('dotenv').config();
+ const jwt = require('jsonwebtoken');
++const adminCredentials = require('../lib/adminCredentialSession');
+ const bcrypt = require('bcryptjs');
+ const secret = process.env.JWT_SECRET; 
+ const { Usuario } = require('../../models'); 
+@@ -13,7 +14,7 @@ const ACCESS_TOKEN_TTL = `${ACCESS_TOKEN_TTL_SECONDS}s`;
+ function buildAccessToken(user) {
+     const userId = Number(user.id_usuario);
+     return jwt.sign(
+-        { userId, email: user.email_usuario, isAdmin: isGlobalAdmin(userId) },
++        { userId, email: user.email_usuario, isAdmin: isGlobalAdmin(userId), ...adminCredentials.claims(user, secret) },
+         secret,
+         { expiresIn: ACCESS_TOKEN_TTL }
+     );
+@@ -22,8 +23,9 @@ function buildAccessToken(user) {
+ function buildAuthResponse(user) {
+     const plainUser = user?.get ? user.get({ plain: true }) : { ...user };
+     plainUser.isAdmin = isGlobalAdmin(plainUser.id_usuario);
++    delete plainUser.password_usuario;
+     return {
+-        token: buildAccessToken(plainUser),
++        token: buildAccessToken(user),
+         expiresIn: ACCESS_TOKEN_TTL_SECONDS,
+         user: plainUser,
+     };
+@@ -111,7 +113,7 @@ exports.signInWithToken = async (req, res) => {
+         const accessToken = req.body.accessToken;
+         if(!accessToken) return res.status(400).json({ error: 'Access token is required' });
+ 
+-        const decodedToken = jwt.verify(accessToken, secret);
++        const decodedToken = await adminCredentials.verifyToken(accessToken, secret);
+         if (isBlockedAuthEmail(decodedToken.email)) {
+             return res.status(401).json({ error: 'Invalid token' });
+         }
+@@ -122,6 +124,7 @@ exports.signInWithToken = async (req, res) => {
+             return res.status(401).json({ error: 'User not found.' });
+         }
+     
++        adminCredentials.assertMatches(decodedToken, user, secret);
+         user.ultimo_login = new Date();
+         await user.save({ fields: ['ultimo_login'] });
+ 
+diff --git a/src/controllers/personal.controller.js b/src/controllers/personal.controller.js
+index b9c840d..dfb33db 100644
+--- a/src/controllers/personal.controller.js
++++ b/src/controllers/personal.controller.js
+@@ -5100,7 +5100,7 @@ exports.reclamarCuenta = async (req, res) => {
+         const jwt = require('jsonwebtoken');
+         const secret = process.env.JWT_SECRET;
+         const token = jwt.sign(
+-            { userId: user.id_usuario, email: user.email_usuario },
++            { userId: user.id_usuario, email: user.email_usuario, ...require('../lib/adminCredentialSession').claims(user, secret) },
+             secret,
+             { expiresIn: '24h' },
+         );
+diff --git a/src/controllers/socialstats.controller.js b/src/controllers/socialstats.controller.js
+index 2e6ee2a..c0872c7 100644
+--- a/src/controllers/socialstats.controller.js
++++ b/src/controllers/socialstats.controller.js
+@@ -4,6 +4,8 @@ const {
+     SocialPosts, 
+     SocialPostStatsDaily, 
+     ClinicMetaAsset,
++    Clinica,
++    GroupAssetClinicAssignment,
+     SocialAdsInsightsDaily,
+     SocialAdsActionsDaily,
+     SocialAdsAdsetDailyAgg,
+@@ -18,6 +20,25 @@ const {
+     buildAssetScopeWhere
+ } = require('../lib/clinicScope');
+ const notificationService = require('../services/notifications.service');
++const { hasMarketingClinicScopeAccess } = require('../lib/marketingScopeAccess');
++const { affectedClinicIdsForAsset } = require('../lib/sharedMarketingAssetMutationAccess');
++
++const ASSET_STATS_PUBLIC_FIELDS = Object.freeze([
++    'id', 'clinicaId', 'grupoClinicaId', 'assignmentScope', 'assetType',
++    'metaAssetId', 'metaAssetName', 'isActive'
++]);
++const ASSET_STATS_DAILY_FIELDS = Object.freeze([
++    'id', 'clinica_id', 'asset_id', 'asset_type', 'date', 'impressions', 'reach',
++    'engagement', 'clicks', 'reach_total', 'views', 'likes', 'reactions', 'posts_count',
++    'reach_instagram', 'reach_facebook', 'impressions_instagram', 'impressions_facebook',
++    'views_facebook', 'spend_instagram', 'spend_facebook', 'followers', 'followers_day',
++    'profile_visits', 'created_at', 'updated_at'
++]);
++function publicStatsFields(record, fields) {
++    const plain = typeof record?.get === 'function' ? record.get({ plain: true }) : record;
++    return Object.fromEntries(fields.filter(field => Object.hasOwn(plain || {}, field))
++        .map(field => [field, plain[field]]));
++}
+ 
+ // Obtiene métricas de una clínica
+ exports.getClinicaStats = async (req, res) => {
+@@ -328,22 +349,50 @@ exports.getClinicaStats = async (req, res) => {
+ 
+ // Obtiene métricas de un activo específico
+ exports.getAssetStats = async (req, res) => {
++    res.set('Cache-Control', 'private, no-store');
+     try {
+         const { assetId } = req.params;
+         const { startDate, endDate, period = 'day' } = req.query;
+-        
+-        // Validar parámetros
+-        if (!assetId) {
+-            return res.status(400).json({ message: 'ID de activo no proporcionado' });
++        const userId = req.userData?.userId;
++        if (!/^[1-9]\d*$/.test(String(userId || '')) || !Number.isSafeInteger(Number(userId))) {
++            return res.status(401).json({ message: 'Auth failed!' });
+         }
+-        
+-        // Verificar que el activo existe
+-        const asset = await ClinicMetaAsset.findByPk(assetId);
+-        
++        if (!/^[1-9]\d*$/.test(String(assetId || '')) || !Number.isSafeInteger(Number(assetId))
++            || !['day', 'week', 'month'].includes(period)) {
++            return res.status(400).json({ message: 'Identificador o periodo invalido' });
++        }
++        for (const date of [startDate, endDate]) {
++            if (date !== undefined && (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)
++                || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date)) {
++                return res.status(400).json({ message: 'Fecha invalida' });
++            }
++        }
++
++        // Never fetch provider credentials, even for an administrator.
++        const asset = await ClinicMetaAsset.findByPk(Number(assetId), {
++            attributes: [...ASSET_STATS_PUBLIC_FIELDS], raw: true
++        });
+         if (!asset) {
+             return res.status(404).json({ message: 'Activo no encontrado' });
+         }
+-        
++        if (!['clinic', 'group'].includes(asset.assignmentScope)
++            || asset.assignmentScope === 'group' && (!Number.isSafeInteger(Number(asset.grupoClinicaId))
++                || Number(asset.grupoClinicaId) <= 0)) {
++            return res.status(403).json({ message: 'Sin permisos para consultar este activo' });
++        }
++        // This endpoint aggregates the entire asset, not the clinic selected in the browser.
++        const clinicIds = await affectedClinicIdsForAsset({
++            assetType: `meta.${asset.assetType}`, assetId: asset.id, ownerClinicId: asset.clinicaId,
++            assignmentModel: GroupAssetClinicAssignment,
++            findImplicitGroupId: async () => asset.assignmentScope === 'group' ? asset.grupoClinicaId : null,
++            findGroupClinicIds: async groupId => (await Clinica.findAll({
++                where: { grupoClinicaId: groupId }, attributes: ['id_clinica'], raw: true
++            })).map(clinic => clinic.id_clinica)
++        });
++        if (!clinicIds.length || !await hasMarketingClinicScopeAccess({ userId, clinicIds, access: 'read' })) {
++            return res.status(403).json({ message: 'Sin permisos para consultar este activo' });
++        }
++
+         // Convertir fechas a objetos Date y a cadenas YYYY-MM-DD (evita desfases de TZ con DATEONLY)
+         const start = startDate ? new Date(startDate) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+         const end = endDate ? new Date(endDate) : new Date();
+@@ -355,10 +404,14 @@ exports.getAssetStats = async (req, res) => {
+         };
+         const startStr = startDate || fmt(start);
+         const endStr = endDate || fmt(end);
++        if (startStr > endStr) {
++            return res.status(400).json({ message: 'Rango de fechas invalido' });
++        }
+         
+         // Construir condiciones de búsqueda
+         const where = {
+-            asset_id: assetId,
++            asset_id: Number(assetId),
++            clinica_id: { [Op.in]: clinicIds },
+             date: { [Op.between]: [startStr, endStr] }
+         };
+         
+@@ -368,6 +421,7 @@ exports.getAssetStats = async (req, res) => {
+         if (period === 'day') {
+             // Métricas diarias (sin agregación)
+             stats = await SocialStatsDaily.findAll({
++                attributes: [...ASSET_STATS_DAILY_FIELDS],
+                 where,
+                 order: [['date', 'ASC']]
+             });
+@@ -397,17 +451,19 @@ exports.getAssetStats = async (req, res) => {
+         }
+         
+         return res.status(200).json({
+-            asset,
++            asset: publicStatsFields(asset, ASSET_STATS_PUBLIC_FIELDS),
+             period,
+             startDate: start,
+             endDate: end,
+-            stats
++            stats: stats.map(row => publicStatsFields(row, period === 'day' ? ASSET_STATS_DAILY_FIELDS
++                : [period, 'start_date', 'end_date', 'impressions', 'reach', 'engagement', 'clicks',
++                    'followers', 'followers_day', 'profile_visits']))
+         });
+     } catch (error) {
+-        console.error('❌ Error al obtener métricas de activo:', error);
++        console.error('Error al obtener metricas de activo', { code: 'asset_stats_read_failed' });
+         return res.status(500).json({
+-            message: 'Error al obtener métricas de activo',
+-            error: error.message
++            message: 'Error al obtener metricas de activo',
++            error: 'asset_stats_read_failed'
+         });
+     }
+ };
+diff --git a/src/lib/adminCredentialSession.js b/src/lib/adminCredentialSession.js
+new file mode 100644
+index 0000000..cfe444a
+--- /dev/null
++++ b/src/lib/adminCredentialSession.js
+@@ -0,0 +1,49 @@
++'use strict';
++// Transitional protection for global administrators while public runtimes still
++// use legacy JWTs. No new table/key, provider request, or password is exposed.
++const { createHmac, timingSafeEqual } = require('node:crypto');
++const { isGlobalAdmin } = require('./role-helpers');
++const { isBlockedAuthEmail } = require('./blocked-auth-emails');
++const jwt = require('jsonwebtoken');
++function reject() { throw Object.assign(Error('auth_invalid'), { code: 'auth_invalid', status: 401, name: 'JsonWebTokenError' }); }
++function binding(user, secret) {
++  if (typeof secret !== 'string' || !secret || !user || typeof user.password_usuario !== 'string'
++    || !user.password_usuario || user.estado_cuenta !== 'activo' || user.es_provisional
++    || typeof user.email_usuario !== 'string' || isBlockedAuthEmail(user.email_usuario)) reject();
++  return createHmac('sha256', secret).update('clinicaclick-global-admin-credential-v1\0')
++    .update(JSON.stringify([Number(user.id_usuario), user.password_usuario, user.email_usuario])).digest('hex');
++}
++function claims(user, secret) {
++  return isGlobalAdmin(user?.id_usuario) ? { adminCredentialVersion: 1, adminCredentialBinding: binding(user, secret) } : {};
++}
++function assertMatches(decoded, user, secret) {
++  if (!isGlobalAdmin(decoded?.userId)) return;
++  if (!Number.isSafeInteger(decoded.userId) || Number(user?.id_usuario) !== decoded.userId
++    || decoded.adminCredentialVersion !== 1 || typeof decoded.adminCredentialBinding !== 'string'
++    || !/^[a-f0-9]{64}$/.test(decoded.adminCredentialBinding)) reject();
++  if (decoded.email !== user.email_usuario || !timingSafeEqual(Buffer.from(binding(user, secret), 'hex'),
++    Buffer.from(decoded.adminCredentialBinding, 'hex'))) reject();
++}
++async function verify(decoded, secret, { findUser } = {}) {
++  if (!isGlobalAdmin(decoded?.userId)) return decoded;
++  // Reject tokens issued before this cut before reading any account.
++  if (!Number.isSafeInteger(decoded.userId) || decoded.adminCredentialVersion !== 1
++    || typeof decoded.adminCredentialBinding !== 'string' || !/^[a-f0-9]{64}$/.test(decoded.adminCredentialBinding)) reject();
++  const find = findUser || (id => require('../../models').Usuario.findByPk(id, {
++    attributes: ['id_usuario','password_usuario','email_usuario','estado_cuenta','es_provisional'], logging: false,
++  }));
++  const user = await find(decoded.userId);
++  assertMatches(decoded, user, secret); return decoded;
++}
++function bearer(header) {
++  if (typeof header !== 'string' || !/^Bearer [A-Za-z0-9_.-]{1,8192}$/i.test(header)) reject();
++  return header.slice(7);
++}
++async function verifyToken(token, secret, options) {
++  if (typeof token !== 'string' || token.length > 8192) reject();
++  const decoded = jwt.verify(token, secret, { algorithms: ['HS256'] });
++  if (!decoded || !Number.isSafeInteger(decoded.userId) || decoded.userId <= 0 || !Number.isInteger(decoded.exp)
++    || isBlockedAuthEmail(decoded.email)) reject();
++  return verify(decoded, secret, options);
++}
++module.exports = { claims, assertMatches, verify, verifyToken, bearer };
+diff --git a/src/lib/socket-session-guard.js b/src/lib/socket-session-guard.js
+new file mode 100644
+index 0000000..f09a539
+--- /dev/null
++++ b/src/lib/socket-session-guard.js
+@@ -0,0 +1,41 @@
++'use strict';
++const verifiers = new WeakMap();
++async function verifySocketSession(socket) {
++  const verify = verifiers.get(socket);
++  if (!verify || !socket.connected) throw Error('auth_invalid');
++  return verify();
++}
++// Every app runtime must deploy this guard before AUTH_SESSION_MODE=enforce.
++function installSocketSessionGuard(io, sessions = require('../services/accessSession.service'), { intervalMs = 5000, timeoutMs = 1500 } = {}) {
++  const pending = new WeakMap();
++  async function verify(token) {
++    let timer;
++    try { return await Promise.race([sessions.verify(token), new Promise((_, reject) => {
++      timer = setTimeout(() => reject(Error('auth_unavailable')), timeoutMs);
++    })]); } finally { clearTimeout(timer); }
++  }
++  io.use(async (socket, next) => {
++    try {
++      const token = socket.handshake.auth?.token || sessions.bearer(socket.handshake.headers?.authorization);
++      const v = await verify(token);
++      socket.userData = { userId: v.userId, email: v.email };
++      pending.set(socket, { token, exp: v.exp }); next();
++    } catch { next(Error('auth_invalid')); }
++  });
++  io.on('connection', socket => {
++    const initial = pending.get(socket); pending.delete(socket);
++    if (!initial) { socket.disconnect(true); return; }
++    let checking;
++    const check = () => checking ||= verify(initial.token).then(value => {
++      if (!socket.connected) throw Error('auth_disconnected');
++      return value;
++    }).catch(() => { socket.disconnect(true); throw Error('auth_invalid'); }).finally(() => { checking = null; });
++    verifiers.set(socket, check);
++    // Incoming packet checks alone would leave outbound room traffic alive after logout.
++    const poll = setInterval(() => { check().catch(() => {}); }, intervalMs); poll.unref?.();
++    const expiry = setTimeout(() => socket.disconnect(true), Math.max(0, Math.min(2147483647, initial.exp * 1000 - Date.now()))); expiry.unref?.();
++    socket.use((_packet, next) => { check().then(() => next(), () => next(Error('auth_invalid'))); });
++    socket.once('disconnect', () => { verifiers.delete(socket); clearInterval(poll); clearTimeout(expiry); });
++  });
++}
++module.exports = { installSocketSessionGuard, verifySocketSession };
+diff --git a/src/routes/auth.middleware.js b/src/routes/auth.middleware.js
+index 4f84633..be04abe 100644
+--- a/src/routes/auth.middleware.js
++++ b/src/routes/auth.middleware.js
+@@ -1,11 +1,11 @@
+-const jwt = require('jsonwebtoken');
++const adminCredentials = require('../lib/adminCredentialSession');
+ const secret = process.env.JWT_SECRET; // ✅ Usar variable de entorno
+ const { isBlockedAuthEmail } = require('../lib/blocked-auth-emails');
+ 
+-module.exports = (req, res, next) => {
++module.exports = async (req, res, next) => {
+     try {
+-        const token = req.headers.authorization.split(' ')[1]; // Bearer TOKEN
+-        const decodedToken = jwt.verify(token, secret); // ✅ Usar process.env.JWT_SECRET
++        const token = adminCredentials.bearer(req.headers.authorization);
++        const decodedToken = await adminCredentials.verifyToken(token, secret);
+         if (isBlockedAuthEmail(decodedToken.email)) {
+             return res.status(401).json({ message: "Auth failed!" });
+         }
+diff --git a/src/routes/userclinicas.routes.js b/src/routes/userclinicas.routes.js
+index 097dd31..146a150 100644
+--- a/src/routes/userclinicas.routes.js
++++ b/src/routes/userclinicas.routes.js
+@@ -1,6 +1,6 @@
+ // src/routes/userclinicas.routes.js
+ const express = require('express');
+-const jwt = require('jsonwebtoken');
++const adminCredentials = require('../lib/adminCredentialSession');
+ const { Op } = require('sequelize');
+ const {
+     Clinica,
+@@ -43,22 +43,10 @@ const serializeUserSummary = (usuario) => {
+ /**
+  * Función auxiliar para obtener el userId del token JWT
+  */
+-const getUserIdFromToken = (req) => {
++const getUserIdFromToken = async (req) => {
+     try {
+-        const authHeader = req.headers.authorization;
+-        if (authHeader && authHeader.startsWith('Bearer ')) {
+-            const token = authHeader.substring(7); // Remover 'Bearer ' del inicio
+-            if (token) {
+-                // ✅ CLAVE CORRECTA: Usar el mismo secreto que se usa en auth.controllers.js
+-                const decoded = jwt.verify(token, process.env.JWT_SECRET);
+-                console.log('🔍 Token JWT decodificado para clínicas:', decoded);
+-                return decoded.userId; // El campo correcto según auth.controllers.js
+-            }
+-        }
+-    } catch (error) {
+-        console.error('❌ Error decodificando JWT:', error);
+-    }
+-    return null;
++        return (await adminCredentials.verifyToken(adminCredentials.bearer(req.headers.authorization), process.env.JWT_SECRET)).userId;
++    } catch { return null; }
+ };
+ 
+ /**
+@@ -80,7 +68,7 @@ router.get('/list', async (req, res) => {
+         console.log('🏥 Obteniendo clínicas del usuario...');
+ 
+         // Obtener userId del token JWT
+-        const userId = getUserIdFromToken(req);
++        const userId = await getUserIdFromToken(req);
+         if (!userId) {
+             console.log('❌ No se pudo obtener userId del token JWT');
+             return res.status(401).json({
+@@ -402,7 +390,7 @@ router.get('/list', async (req, res) => {
+ router.get('/:id', async (req, res) => {
+     try {
+         const { id } = req.params;
+-        const userId = getUserIdFromToken(req);
++        const userId = await getUserIdFromToken(req);
+ 
+         if (!userId) {
+             return res.status(401).json({

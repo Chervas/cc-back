@@ -20,7 +20,12 @@ inválida falla cerrada. Enforce exige `PLATFORM_AUDIT_AUTH_ENABLED=true` y
 `PLATFORM_AUDIT_AUTH_POLICY=auth-durable-v1`; una cola de 10000 eventos o una
 antigüedad de una hora impide nueva emisión/renovación. Revocar sigue disponible
 con su propia escritura durable, sin depender de que se vacíe la cola.
-En legacy no se consulta BD para validar un JWT antiguo;
+En legacy, los usuarios sin administración global conservan la validación sin BD.
+Los administradores globales exigen ahora `adminCredentialVersion=1` y un HMAC
+de sus credenciales actuales; los JWT anteriores a ese corte se rechazan y los
+nuevos consultan el usuario en cada validación. Véase
+[el corte de cierre de sesiones administrativas](admin-password-session-cut.md).
+Para todos los usuarios
 se conserva HS256 y se exige actor numérico positivo y expiración. Se rechazan
 tokens con propósito/issuer/audiencia de otro producto. En enforce se rechazan
 todos los JWT antiguos, incluidos los que ya tienen JTI pero carecen de

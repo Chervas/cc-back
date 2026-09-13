@@ -5,6 +5,7 @@ const { randomUUID, createHmac, timingSafeEqual } = require('node:crypto');
 const { Op } = require('sequelize');
 const { isBlockedAuthEmail } = require('../lib/blocked-auth-emails');
 const { isGlobalAdmin } = require('../lib/role-helpers');
+const adminCredentials = require('../lib/adminCredentialSession');
 const { UUID } = require('../../services/platform-audit/src/event');
 const ISSUER = 'clinicaclick'; const AUDIENCE = 'clinicaclick-platform';
 function fail(code = 'auth_invalid', status = 401) { throw Object.assign(Error(code), { code, status, name: status === 401 ? 'JsonWebTokenError' : 'Error' }); }
@@ -78,7 +79,9 @@ function createService({ models, audit, config = settings, now = () => new Date(
   }
   async function verify(token) {
     const cfg = config(); const v = decode(token, cfg, now());
-    if (!v.sessionVersion) return v; // Migration disabled: no models or DB access for legacy JWTs.
+    if (!v.sessionVersion) return adminCredentials.verify(v, cfg.secret, { findUser: id => db().Usuario.findByPk(id, {
+      attributes: ['id_usuario','password_usuario','email_usuario','estado_cuenta','es_provisional'], logging: false,
+    }) }); // Global admins remain credential-bound before the full migration.
     // A single SELECT keeps the credential and session check on the same committed database snapshot.
     const [rows] = await db().sequelize.query('SELECT s.*, u.password_usuario, u.email_usuario, u.estado_cuenta, u.es_provisional '
       + 'FROM AuthSessions s JOIN Usuarios u ON u.id_usuario=s.user_id WHERE s.session_id=:id AND s.user_id=:userId LIMIT 1',
@@ -111,10 +114,13 @@ function createService({ models, audit, config = settings, now = () => new Date(
   async function issue(user, { transaction, parentToken, reason = 'credentials_verified', ttl, sessionRef = randomUUID(), emailChallengeId } = {}) {
     const cfg = config(); const seconds = ttl || cfg.ttl;
     if (cfg.mode === 'legacy' && !parentToken) return { token: jwt.sign({ userId: Number(user.id_usuario), email: user.email_usuario,
-      isAdmin: isGlobalAdmin(user.id_usuario) }, cfg.secret, { expiresIn: seconds, jwtid: sessionRef }), expiresIn: seconds, sessionRef };
+      isAdmin: isGlobalAdmin(user.id_usuario), ...adminCredentials.claims(user, cfg.secret) }, cfg.secret, { expiresIn: seconds, jwtid: sessionRef }), expiresIn: seconds, sessionRef };
     const parent = parentToken ? decode(parentToken, cfg, now()) : null;
     if (parent && parent.userId !== Number(user.id_usuario)) fail();
-    if (!parent?.sessionVersion && cfg.mode === 'legacy') return issue(user, { ttl: seconds, sessionRef });
+    if (!parent?.sessionVersion && cfg.mode === 'legacy') {
+      if (parent) adminCredentials.assertMatches(parent, user, cfg.secret);
+      return issue(user, { ttl: seconds, sessionRef });
+    }
     if (!transaction || !activeUser(user)) fail('auth_session_unavailable', 503);
     const health = await repo().health(now(), { includeUnresolved: false, transaction });
     if (health.pending >= 10000 || health.oldestAgeSeconds >= 3600) fail('auth_session_unavailable', 503);

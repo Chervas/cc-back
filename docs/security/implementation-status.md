@@ -1,5 +1,23 @@
 # Seguridad: implementación y evidencias
 
+## 13/09/2026 — Contraseñas administrativas rotadas; sesiones y MFA pendientes de despliegue
+
+Por instrucción expresa se rotaron, en una transacción, las contraseñas de los
+dos administradores globales; claves aleatorias no conservadas. No había enlaces
+de recuperación pendientes. **Los JWT antiguos del código público siguen siendo
+válidos hasta instalar el corte de sesiones**. Preparados y probados candidatos
+acotados para staging/gateway y el verificador DEV, sin DDL ni promoción de publicidad.
+El usuario confirmó recepción del correo de CRM; el enlace quedó consumido a
+las 21:46:18 UTC. Se canceló únicamente el primer correo obsoleto de DEV y su
+job, conservando historial y pausas. Preparado y probado el complemento frontend
+que permite recuperar con sesión guardada y vuelve al login tras restablecer:
+tres archivos sobre la base pública, todavía sin publicar.
+
+MFA completo sigue sin activar: cuatro tablas faltantes, lista de correo limitada,
+entrega externa de auditoría y aislamiento DEV/público por resolver. El código y
+los candidatos se verifican con datos ficticios; Meta/WhatsApp no se reactivan.
+Contrato, parches, interrupción, rollback y evidencia: [corte administrativo](admin-password-session-cut.md).
+
 ## 13/09/2026 — Interfaz WhatsApp separada de la conexión general Meta
 
 Ajustes abre el alta específica de WhatsApp sin MetaConnection general previa.
