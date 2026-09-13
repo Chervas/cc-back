@@ -14,8 +14,9 @@ function containsSecret(value, secrets) {
 function createGoogleSecretStore({ client, http, accountId, prefix, kmsKeyArn, now = () => Date.now(), maxEntries = 64, provider = PROVIDER }) {
   const sc = require('./google-search-console-contract');
   const ga = require('./google-analytics-contract');
-  if (![PROVIDER, sc.PROVIDER, ga.PROVIDER].includes(provider)) fail('invalid_request');
-  const scopes = provider === sc.PROVIDER ? sc.SCOPES : provider === ga.PROVIDER ? ga.SCOPES : [SCOPE];
+  const ads = require('./google-ads-contract');
+  if (![PROVIDER, sc.PROVIDER, ga.PROVIDER, ads.PROVIDER].includes(provider)) fail('invalid_request');
+  const scopes = provider === sc.PROVIDER ? sc.SCOPES : provider === ga.PROVIDER ? ga.SCOPES : provider === ads.PROVIDER ? ads.SCOPES : [SCOPE];
   const { DescribeSecretCommand, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
   if (!/^\d{12}$/.test(accountId) || !/^\/clinicaclick\/integrations\/(dev|staging|prod)\/$/.test(prefix)
     || !new RegExp(`^arn:aws:kms:eu-west-3:${accountId}:key/[a-f0-9-]+$`).test(kmsKeyArn)

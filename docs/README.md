@@ -1,5 +1,17 @@
 # Runbooks operativos del backend
 
+## 13/09/2026 — Motor de lecturas Google Ads preparado en el broker
+
+Cuatro lecturas Ads tipadas fijan cuenta/gestor, GAQL y campos; OAuth y developer
+token permanecen en el broker. Paginación acotada en memoria y control de baja
+con principal/clave separados. QA: 138 tests del broker, incluidos 15 nuevos Ads,
+HTTPS local, 10.001 filas ficticias y bloqueo tras reinicio. Sin DDL, UI,
+configuración instalada, AWS/proveedores reales o despliegue. Cero cuentas Ads
+migradas: registro/adaptador backend, OAuth Ads, otros consumidores y corte real
+siguen pendientes. OPS aplazado; IAM/retención/costes/Budget/BD pendientes.
+
+[Contrato, QA y dependencias](security/google-ads-read-broker.md).
+
 ## 13/09/2026 — Cierre de credenciales antiguas en consumidores Google Ads
 
 La carga/renovación Ads preparada consulta los marcadores durables de Google

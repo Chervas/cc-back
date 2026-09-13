@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-13",
+  "sourceHead": "503b6080f7efd0408b7e9679c29d84c116280408",
+  "includesWorkingChanges": true,
+  "runtimeMigrated": 0,
+  "newMigrations": [],
+  "ops": "deferred_by_user",
+  "qa": {
+    "brokerTests": 138,
+    "newAdsTests": 15,
+    "database": "no_new_ddl",
+    "ui": "no_ui_changes"
+  },
+  "operations": [
+    "google.ads.account.read.v1",
+    "google.ads.campaigns.read.v1",
+    "google.ads.campaign_metrics.read.v1",
+    "google.ads.adgroup_metrics.read.v1",
+    "google.ads.asset.revoke.v1"
+  ],
+  "pending": [
+    "SQL account registry and durable Ads legacy exclusion",
+    "Typed consumer wiring and complete Ads account/group/shared/primary authorization",
+    "All remaining Ads operations and consumers, OAuth lifecycle and approved real migration",
+    "Full platform audit, AWS costs/retention/IAM/Budget and database encryption/cut"
+  ],
+  "rows": [
+    {
+      "file": "services/integrations-broker/src/google-ads-contract.js",
+      "sha256": "dc0a02e3f2326548c2feaf2ea7809377e861c82136819160f8d2d86e8a90dfe2",
+      "status": "prepared_broker_engine_offline"
+    },
+    {
+      "file": "services/integrations-broker/src/google-ads.js",
+      "sha256": "ad92b8b1360ec76288ebc0fb2dd646c5f11be90701a1b909afdd40fa6f0c5e4e",
+      "status": "prepared_broker_engine_offline"
+    },
+    {
+      "file": "services/integrations-broker/src/google-ads-developer-secret.js",
+      "sha256": "f3166d0ca8294204cb06cd30d0548dde66e9acf56b1e519525abbe329b260fe2",
+      "status": "prepared_broker_engine_offline"
+    },
+    {
+      "file": "services/integrations-broker/src/google-main.js",
+      "sha256": "8eaf2d34bc12a657331f0cab0080c2521a848457b0a5318470a35623b3a2822c",
+      "status": "prepared_broker_engine_offline"
+    },
+    {
+      "file": "services/integrations-broker/src/google-http.js",
+      "sha256": "becd7d3ce4152fe1006824410729784ba6755b750b22f6157e18a5be6b053743",
+      "status": "prepared_broker_engine_offline"
+    },
+    {
+      "file": "services/integrations-broker/src/google-secrets.js",
+      "sha256": "654c8fe564934f2dc75d4ff07839c947cd97784ec2fab8b18c535196e2beb54a",
+      "status": "prepared_broker_engine_offline"
+    },
+    {
+      "file": "services/integrations-broker/src/policy.js",
+      "sha256": "7056dc293c46d3459e4f60b5c40a22f5cc5786d46a447b63cfa6987bf3a3052b",
+      "status": "prepared_broker_engine_offline"
+    },
+    {
+      "file": "services/integrations-broker/src/broker.js",
+      "sha256": "751634de86bd41657e17e2bd634d4a632c77a9354d9d794507c0d9d204685bb3",
+      "status": "prepared_broker_engine_offline"
+    }
+  ]
+}

@@ -5,7 +5,7 @@ const HOSTS = new Set(['mybusiness.googleapis.com', 'businessprofileperformance.
   'mybusinessbusinessinformation.googleapis.com', 'mybusinessverifications.googleapis.com', 'mybusinessaccountmanagement.googleapis.com']);
 // This transport is private to reviewed operations. It never accepts consumer headers or URLs.
 function createGoogleHttp({ request = https.request, timeoutMs = 8000 } = {}) {
-  return async function googleHttp({ hostname, path, token, form, json, signal }) {
+  return async function googleHttp({ hostname, path, token, form, json, signal, developerToken, loginCustomerId }) {
     const oauth = hostname === 'oauth2.googleapis.com' && path === '/token';
     const userinfo = hostname === 'www.googleapis.com' && path === '/oauth2/v2/userinfo';
     const searchConsole = hostname === 'searchconsole.googleapis.com' && path === '/v1/urlInspection/index:inspect'
@@ -13,7 +13,11 @@ function createGoogleHttp({ request = https.request, timeoutMs = 8000 } = {}) {
     const analytics = hostname === 'analyticsdata.googleapis.com' && /^\/v1beta\/properties\/[1-9]\d{0,19}:runReport$/.test(path);
     const discovery = hostname === 'analyticsadmin.googleapis.com' && /^\/v1beta\/properties\/[1-9]\d{0,19}$/.test(path)
       || hostname === 'www.googleapis.com' && /^\/webmasters\/v3\/sites\/[^/?#]+$/.test(path);
-    const jsonRead = searchConsole || analytics;
+    const ads = hostname === 'googleads.googleapis.com' && /^\/v24\/customers\/[0-9]{10}\/googleAds:search$/.test(path);
+    const jsonRead = searchConsole || analytics || ads;
+    if (ads ? !Buffer.isBuffer(developerToken) || !/^[A-Za-z0-9_-]{16,256}$/.test(developerToken.toString('utf8'))
+      || loginCustomerId !== null && (typeof loginCustomerId !== 'string' || !/^[0-9]{10}$/.test(loginCustomerId))
+      : developerToken !== undefined || loginCustomerId !== undefined) fail('invalid_request');
     if (!(oauth || userinfo || jsonRead || discovery || HOSTS.has(hostname)) || typeof path !== 'string' || !/^\/v[14]\//.test(path) && !oauth && !userinfo && !jsonRead && !discovery
       || path.length > 16384 || /[\r\n#]/.test(path) || signal?.aborted) fail('invalid_request');
     if (oauth ? !form || typeof form !== 'string' || form.length > 32768 || token !== undefined
@@ -29,8 +33,9 @@ function createGoogleHttp({ request = https.request, timeoutMs = 8000 } = {}) {
         agent: false, rejectUnauthorized: true, minVersion: 'TLSv1.2',
         headers: { accept: 'application/json', 'accept-encoding': 'identity',
           ...(oauth ? { 'content-type': 'application/x-www-form-urlencoded', 'content-length': Buffer.byteLength(form) } : { authorization: `Bearer ${token.toString('utf8')}` }),
-          ...(jsonRead ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } : {}) } }, res => {
-        const chunks = []; let size = 0; const limit = oauth || userinfo ? 32768 : 2097152;
+          ...(jsonRead ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } : {}),
+          ...(ads ? { 'developer-token': developerToken.toString('utf8'), ...(loginCustomerId ? { 'login-customer-id': loginCustomerId } : {}) } : {}) } }, res => {
+        const chunks = []; let size = 0; const limit = oauth || userinfo ? 32768 : ads ? 16 * 1024 * 1024 : 2097152;
         if (res.statusCode >= 300 && res.statusCode < 400 || res.headers['content-encoding'] && res.headers['content-encoding'] !== 'identity'
           || !/^application\/json(?:\s*;.*)?$/i.test(res.headers['content-type'] || '')) {
           res.destroy(); finish(new BrokerError('provider_failed')); return;

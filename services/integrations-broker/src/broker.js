@@ -69,6 +69,7 @@ class Broker {
         eventFor(request, principal, this.policy, 'integration.requested', 'accepted', 'authorized', now),
         eventFor(request, principal, this.policy, 'asset.revoked', 'success', 'scope_disconnected', now), this.policy.maxBacklog, now);
       for (const controller of this.activeAssets.get(assetKey) || []) controller.abort();
+      operation.onRevoked?.(request);
       return result;
     }
     const cached = this.store.reserve(principal.id, request.requestId, digest,

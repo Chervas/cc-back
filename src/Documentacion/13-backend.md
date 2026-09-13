@@ -1,5 +1,21 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Motor de lecturas Google Ads preparado en el broker
+
+Contrato interno preparado para `google-ads-read-v1`: operaciones
+`google.ads.account.read.v1` (payload vacío), `google.ads.campaigns.read.v1`
+(pageToken null/string), `google.ads.campaign_metrics.read.v1` y
+`google.ads.adgroup_metrics.read.v1` (startDate, endDate, pageToken). Cada respuesta
+contiene results/nextPageToken. La política fija customerId/loginCustomerId y el
+grant de clínica; el consumidor no aporta GAQL, cabeceras o credenciales.
+`google.ads.asset.revoke.v1` exige clave/principal distintos y payload vacío.
+
+Los cursores caducan y dependen de la caché volátil; una continuación inválida no
+permite confirmar un snapshot parcial. El backend general todavía no usa estas
+operaciones: registro, adaptación de consumidores y corte real pendientes.
+No se han añadido rutas públicas ni instalado configuración. Contrato y límites:
+`docs/security/google-ads-read-broker.md`.
+
 ## 13/09/2026 — Cierre de credenciales antiguas en consumidores Google Ads
 
 Los consumidores Ads adaptados rechazan identidades marcadas antes de leer tokens
