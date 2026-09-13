@@ -44,7 +44,7 @@ index a4ae240..4d709bd 100644
      socket.data.canUseAllClinics = canUseAllClinics;
  
 diff --git a/src/controllers/auth.controllers.js b/src/controllers/auth.controllers.js
-index c50865f..2ac443f 100644
+index c50865f..0b07969 100644
 --- a/src/controllers/auth.controllers.js
 +++ b/src/controllers/auth.controllers.js
 @@ -1,5 +1,6 @@
@@ -54,7 +54,7 @@ index c50865f..2ac443f 100644
  const bcrypt = require('bcryptjs');
  const secret = process.env.JWT_SECRET; 
  const { Usuario } = require('../../models'); 
-@@ -13,7 +14,7 @@ const ACCESS_TOKEN_TTL = `${ACCESS_TOKEN_TTL_SECONDS}s`;
+@@ -13,17 +14,18 @@ const ACCESS_TOKEN_TTL = `${ACCESS_TOKEN_TTL_SECONDS}s`;
  function buildAccessToken(user) {
      const userId = Number(user.id_usuario);
      return jwt.sign(
@@ -63,9 +63,11 @@ index c50865f..2ac443f 100644
          secret,
          { expiresIn: ACCESS_TOKEN_TTL }
      );
-@@ -22,8 +23,9 @@ function buildAccessToken(user) {
+ }
+ 
  function buildAuthResponse(user) {
-     const plainUser = user?.get ? user.get({ plain: true }) : { ...user };
+-    const plainUser = user?.get ? user.get({ plain: true }) : { ...user };
++    const plainUser = user?.get ? { ...user.get({ plain: true }) } : { ...user };
      plainUser.isAdmin = isGlobalAdmin(plainUser.id_usuario);
 +    delete plainUser.password_usuario;
      return {

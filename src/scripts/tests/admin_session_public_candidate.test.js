@@ -10,9 +10,19 @@ const fromCandidate = createRequire(path.join(root, 'package.json'));
 const cache = (file, exports) => { const id = fromCandidate.resolve(file); require.cache[id] = { id, filename: id, loaded: true, exports }; };
 const users = new Map(); let dbUnavailable = false; let raceReset = false; let resetRequests = 0;
 const secret = process.env.JWT_SECRET;
-const makeUser = id => ({ id_usuario: id, nombre: 'Fictitious', email_usuario: 'user-' + id + '@example.invalid',
-  password_usuario: bcrypt.hashSync('FICTITIOUS_PASSWORD', 4), estado_cuenta: 'activo', es_provisional: false,
-  async save() {}, get() { return { ...this }; } });
+// Sequelize get({ plain: true }) can alias dataValues. Use the actual model
+// instance without a database connection so response redaction cannot silently
+// destroy the password value needed to bind the newly issued access token.
+const { Sequelize, DataTypes } = require('sequelize');
+const fixtureSql = new Sequelize('fictional', 'fictional', 'fictional', { dialect: 'mysql', host: '127.0.0.1', logging: false });
+const FixtureUser = fromCandidate('./models/usuario')(fixtureSql, DataTypes);
+const makeUser = id => {
+  const user = FixtureUser.build({ id_usuario: id, nombre: 'Fictitious', email_usuario: 'user-' + id + '@example.invalid',
+    password_usuario: bcrypt.hashSync('FICTITIOUS_PASSWORD', 4), estado_cuenta: 'activo', es_provisional: false });
+  user.save = async () => user;
+  assert.equal(user.get({ plain: true }), user.dataValues);
+  return user;
+};
 cache('./models', { Usuario: {
   async findByPk(id) { if (dbUnavailable) throw Error('FICTITIOUS_DB_UNAVAILABLE'); return users.get(Number(id)); },
   async findOne({ where }) {
@@ -50,6 +60,7 @@ test('review candidate rejects old admin HTTP/refresh/socket tokens, keeps recov
       assert.equal((await request('/refresh', { accessToken: old })).status, 401);
       const login = await request('/sign-in', { email: users.get(id).email_usuario, password: 'FICTITIOUS_PASSWORD' });
       assert.equal(login.status, 200); assert.equal(login.body.user.password_usuario, undefined);
+      assert.equal(typeof users.get(id).password_usuario, 'string');
       assert.equal((await request('/protected', null, login.body.token)).status, 200);
       assert.equal((await request('/refresh', { accessToken: login.body.token })).status, 200);
       const unlock = await request('/unlock', { email: users.get(id).email_usuario, password: 'FICTITIOUS_PASSWORD' });
