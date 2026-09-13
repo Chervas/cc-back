@@ -1,5 +1,22 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Ventana aislada del alta WhatsApp
+
+GET `/api/whatsapp/onboarding/window` sirve HTML estático sin credenciales ni
+contexto de usuario. Mismo gate de gateway/MFA, sin query; no-store/no-referrer/
+nosniff y CSP con nonce, frame-ancestors limitado a app/crm HTTPS. No requiere
+Bearer para descargar la página vacía; los cuatro POST siguen autenticados.
+
+Intercambio padre/iframe por origen exacto, WindowProxy, nonce y UUID. Configuración
+de begin, código SDK de un uso y selección de IDs; sin OAuth general ni tokens
+en navegador/BD clínica. Los IDs Meta son pistas que el broker verifica de
+forma independiente. No se afirma correlación con la ventana interna de Meta.
+
+El estado admite JWT renovado de la misma sesión verificada sin ampliar el
+plazo original. No cambia la DDL ni el DTO POST. Interfaz preparada con
+proveedores ficticios; App/config/SDK, activación y entorno real pendientes.
+Contrato: `back-dev/docs/security/whatsapp-onboarding-ui.md`.
+
 ## 13/09/2026 — API gateway del alta WhatsApp con MFA
 
 Base `/api/whatsapp/onboarding`: POST `/begin` (`requestId,scope`),

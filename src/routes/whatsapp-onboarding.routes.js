@@ -8,7 +8,15 @@ const ORIGINS = new Set(['https://app.clinicaclick.com', 'https://crm.clinicacli
 function createRouter({ service = gateway, authenticate = auth, guard = assertGateway } = {}) {
   const router = express.Router({ strict: true });
   router.use((req, res, next) => {
-    res.set('Cache-Control', 'no-store'); res.set('Referrer-Policy', 'no-referrer'); res.set('X-Content-Type-Options', 'nosniff');
+    res.set('Cache-Control', 'no-store'); res.set('Referrer-Policy', 'no-referrer'); res.set('X-Content-Type-Options', 'nosniff'); next();
+  });
+  // Static sandbox frame: no actor, account metadata or token in this response.
+  // The authenticated parent supplies one attempt through a bound handshake.
+  router.get('/window', (req, res, next) => {
+    try { guard(); if (req.originalUrl.includes('?')) S.fail(); require('../lib/whatsappOnboardingWindow').render(res); }
+    catch (error) { next(error); }
+  });
+  router.use((req, res, next) => {
     try {
       guard();
       if (!ORIGINS.has(req.get('origin')) || req.get('x-whatsapp-onboarding') !== '1') S.fail('whatsapp_authorization_forbidden', 403);

@@ -19,7 +19,8 @@ function context(row) {
 }
 function validateRow(row, input, key) {
   if (!row || row.user_id !== input.userId || row.session_ref !== input.sessionRef
-    || row.session_expires_at?.getTime() !== input.sessionExpiresAt * 1000) C.fail('whatsapp_authorization_forbidden', 403);
+    || !Number.isFinite(row.session_expires_at?.getTime())
+    || row.session_expires_at.getTime() > input.sessionExpiresAt * 1000) C.fail('whatsapp_authorization_forbidden', 403);
   if (!['clinic', 'group'].includes(row.scope_type) || !C.id(row.scope_id)
     || !Array.isArray(row.original_clinic_ids) || !row.original_clinic_ids.length || row.original_clinic_ids.length > 1000
     || row.original_clinic_ids.some((id, i, all) => !C.id(id) || i > 0 && id <= all[i - 1])

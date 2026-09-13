@@ -10,12 +10,14 @@ Ads/leads/páginas sigue siendo requisito de cierre; este registro no la acredit
 `src/services/whatsappAuthorizationState.service.js` ofrece `issue`, `claim`,
 `assertClaimActive`, `status` y `cancel`. Todos reciben exactamente `requestId`
 (UUID4), `userId` (entero), `sessionRef` (UUID4) y `sessionExpiresAt` (epoch segundos
-del JWT original). `issue` añade `scope:{type:'clinic'|'group',id:entero}`;
+del JWT verificado que presenta el middleware). `issue` añade `scope:{type:'clinic'|'group',id:entero}`;
 `claim` añade `state` base64url de 43 caracteres y `code` ASCII sin espacios,
 máximo 4096 caracteres. Actor y sesión proceden exclusivamente del middleware
 verificado al conectar las futuras rutas, nunca del cuerpo del navegador.
-La misma sesión con un JWT renovado debe conservar la referencia/expiración
-original del intento; no ampliar su plazo ni aceptar campos de actor del cliente.
+Un JWT renovado de la misma sesión puede tener expiración posterior; el servidor
+la verifica contra la sesión durable y conserva la referencia/expiración original
+del intento. Rechaza un JWT anterior, otra sesión o una expiración fuera de los
+límites durables. Nunca amplía el plazo ni acepta campos de actor del cliente.
 
 La sesión debe seguir activa, vinculada a contraseña/correo actuales y con prueba
 durable `password_email`. El nuevo parámetro interno `verifyReference(...,

@@ -2,8 +2,8 @@
 
 13/09/2026. Código preparado y probado con datos/proveedores ficticios. Añade
 rutas específicas a gateway y une el estado MySQL con el broker firmado. Sin
-configuración instalada ni despliegue. **La interfaz/Embedded Signup y la
-validación real de Meta siguen pendientes; no autoriza reconectar.**
+configuración instalada ni despliegue. **La [interfaz específica](whatsapp-onboarding-ui.md) está preparada en el corte
+posterior. La validación real de Meta sigue pendiente; no autoriza reconectar.**
 
 ## Recorrido implementado
 
@@ -41,7 +41,7 @@ sigue vigente. Ninguna de estas operaciones reactiva consumidores de negocio.
 
 ## Rutas públicas preparadas
 
-Base: **gateway** `/api/whatsapp/onboarding`. Solo POST JSON, sin query string,
+Base: **gateway** `/api/whatsapp/onboarding`. Operaciones POST JSON, sin query string,
 con Bearer de sesión gestionada y cabecera `X-Whatsapp-Onboarding: 1`.
 Origin debe ser exactamente app, crm o autenticacion de clinicaclick.com sobre
 HTTPS. No se admite localhost, Origin ausente/null, cookies como autenticación,
@@ -157,18 +157,21 @@ fuera de fixtures. **36 pruebas Node pasan** (35 regresión y una TLS), más
 **15 grupos de comprobaciones en MySQL propio**, cuyo proceso cerró con código 0.
 Tras endurecer el tipo de connectionRef se repiten los ocho tests afectados
 (siete de cliente y uno TLS), todos correctos.
-Evidencia privada `whatsapp-gateway-*.log`. No hay UI nueva:
-la validación de navegador corresponde a la siguiente integración de interfaz.
+Evidencia privada `whatsapp-gateway-*.log`. Este fue el corte anterior a la
+[interfaz y su QA de navegador](whatsapp-onboarding-ui.md).
 
 Sin DDL clínica nueva; 20260913150000 y dependencias de sesión/MFA/bloqueos/auditoría
 siguen pendientes en BD compartida. Sin gasto AWS/Meta real. Las llamadas de
 recuperación añaden las lecturas del broker ya descritas; Ajustes/Cost Explorer,
 Budget/CloudFormation, retención y cifrado BD mantienen su estado pendiente.
 
-Siguiente entrega: interfaz/recorrido Meta exclusivo de WhatsApp sin la conexión
-general previa, correlación Embedded Signup, configuración real, activación
+Interfaz/recorrido Meta exclusivo preparados en el corte posterior, sin conexión
+general previa. Pendientes de validación real Embedded Signup/configuración, activación
 aprobada y consumidores/colas de staging. OPS puede seguir apagado; DEV fuera.
 Antes del despliegue se concretarán versiones, DDL, procesos, respaldo, ventana
 y rollback. Para revertir, cerrar nuevas altas conservando estado, cancelaciones,
 candidatas y bloqueos. No restaurar códigos consumidos, OAuth general o tokens
 revocados. Esta publicación no modifica la interrupción operativa existente.
+
+La página GET /window y la renovación de JWT de la misma sesión se describen
+en [el contrato de interfaz](whatsapp-onboarding-ui.md); no modifican los DTO POST.

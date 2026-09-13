@@ -1,5 +1,25 @@
 # Seguridad: implementación y evidencias
 
+## 13/09/2026 — Interfaz WhatsApp separada de la conexión general Meta
+
+Ajustes abre el alta específica de WhatsApp sin MetaConnection general previa.
+El SDK se ejecuta en un iframe nuevo de gateway, con origen/WindowProxy/nonce/UUID
+comprobados y DTO estricto. Se retiran callback legacy y registro automático del
+recorrido de alta. Recuperación por UUID tras cierre o respuesta perdida;
+autorización guardada siempre pendiente de activación. DEV no inicia el flujo.
+
+JWT renovado de la misma sesión MFA conserva estado y plazo originales. Sin
+DDL nueva, configuración instalada, proveedor real ni despliegue. Quedan por
+validar App/config/SDK y grants Meta separados de Ads/leads, aislamiento efectivo,
+activación y consumidores/colas públicos. La modalidad y canales secundarios/
+sin asignación requieren completar su contrato. Reconexión todavía no validada.
+
+QA aislada correcta: 40 pruebas Node backend, 12 frontend, 16 grupos de
+comprobaciones en MySQL propio con cierre 0, build Angular y Chromium desktop/
+móvil con 18 capturas y cero llamadas externas. Meta/AWS/SDK son ficticios.
+
+[Contrato, QA y rollback](whatsapp-onboarding-ui.md).
+
 ## 13/09/2026 — Gateway del alta WhatsApp conectado en código
 
 Rutas específicas y cliente tipado unen sesión MFA/ámbito MySQL al broker.

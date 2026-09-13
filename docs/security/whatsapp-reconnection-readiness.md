@@ -11,8 +11,8 @@ Bloqueos independientes del ámbito y recibos sobreviven a reinicios. Siempre
 devuelve `connected:false`; no activa canales. AWS/Meta ficticios en QA.
 El [puente gateway/MFA](whatsapp-onboarding-gateway.md) ya une estos componentes
 en código, con rutas específicas deshabilitadas por defecto. 36 pruebas Node y
-15 grupos MySQL propios pasan. Falta interfaz/Embedded Signup y configuración
-real: ningún runtime nuevo se ha instalado ni se ha ejecutado un canje real.
+15 grupos MySQL propios pasan. La [interfaz específica](whatsapp-onboarding-ui.md) está preparada en el corte
+posterior; faltan validación SDK/configuración real y activación: ningún runtime nuevo se ha instalado ni se ha ejecutado un canje real.
 
 Avance local posterior: [estado de alta](whatsapp-authorization-state.md) durable,
 con sesión MFA vigente, conjunto de clínicas fijado, reclamación única y auditoría

@@ -25,7 +25,7 @@ async function fixture(t) {
         'content-type': 'application/json', 'content-length': Buffer.byteLength(data), ...headers } }, res => {
       const chunks = []; res.on('data', chunk => chunks.push(chunk)); res.on('end', () => {
         const text = Buffer.concat(chunks).toString(); assert(!text.includes('FICTITIOUS_INTERNAL_SECRET'));
-        resolve({ status: res.statusCode, body: JSON.parse(text), headers: res.headers });
+        resolve({ status: res.statusCode, body: res.headers['content-type']?.startsWith('text/html') ? text : JSON.parse(text), headers: res.headers });
       });
     }); req.on('error', reject); req.end(data);
   });
@@ -39,6 +39,18 @@ test('Dedicated routes forward verified middleware identity and keep all bodies 
     assert.deepEqual(f.state.calls.at(-1).input, { requestId, ...extra, userId: 501, sessionRef: f.sessionRef, sessionExpiresAt: 1900000000 });
   }
   assert.equal(f.state.generalParser, 0);
+});
+test('Static signup frame is gated, contains no account data, restricts embedding and never authenticates by cookie', async t => {
+  const f = await fixture(t);
+  const frame = await f.request('window', '', { authorization: '', origin: '', 'x-whatsapp-onboarding': '', cookie: 'token=FICTITIOUS_JWT' }, 'GET');
+  assert.equal(frame.status, 200); assert.equal(f.state.auth, 0); assert.equal(f.state.calls.length, 0);
+  assert.match(frame.headers['content-security-policy'], /frame-ancestors https:\/\/app.clinicaclick.com https:\/\/crm.clinicaclick.com/);
+  assert(!frame.headers['content-security-policy'].includes('unsafe-inline')); assert(!frame.body.includes('FICTITIOUS_JWT'));
+  assert.match(frame.body, /nonce="[A-Za-z0-9+/=]+"/); assert.equal(frame.headers['cache-control'], 'no-store');
+  assert.notEqual((await f.request('window', '', {}, 'GET')).headers['content-security-policy'], frame.headers['content-security-policy']);
+  assert.equal((await f.request('window?code=FICTITIOUS_CODE', '', {}, 'GET')).status, 400);
+  f.state.enabled = false; const denied = await f.request('window', '', {}, 'GET');
+  assert.equal(denied.status, 503); assert.equal(denied.headers['cache-control'], 'no-store'); assert.equal(f.state.auth, 0);
 });
 test('No caller identity override, cookies, foreign Origin, missing custom header or runtime hint can authorize an operation', async t => {
   const f = await fixture(t); const body = { requestId: randomUUID() };
