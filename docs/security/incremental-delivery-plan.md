@@ -5,6 +5,26 @@ sin bloquear el desarrollo de otras áreas. Mantiene completo el encargo de
 integraciones, auditoría, costes y cifrado. Terminar una entrega de código no
 acredita su instalación ni la migración de cuentas reales.
 
+## Estado operativo para retomar
+
+El primer corte de acceso está desplegado y publicado: cierre de JWT
+administrativos antiguos y recuperación que vuelve al login. Ver
+[acta, versiones y relevo](admin-session-deployment-20260913.md).
+El MFA por correo no está activo y WhatsApp no se ha reconectado. Las siguientes
+secciones conservan también antecedentes de implementación; el corte vigente
+prevalece sobre sus estados históricos.
+
+| Próxima entrega | Cierre exigido |
+| --- | --- |
+| Acceso desplegado | Prueba manual del usuario; mantener correcciones y QA al promover DEV. |
+| MFA público | Candidato de acceso con sus cinco DDL exactas, correo/clave y entrega de auditoría; aprobación propia. |
+| WhatsApp | Credenciales/permisos independientes, aislamiento DEV, recepción durable y único consumidor staging; validación real autorizada. |
+| Ads y otros servicios | Cohortes y capacidades separadas; ninguna activación implícita por conectar WhatsApp. |
+| Auditoría, costes y BD | Completar controles efectivos, decisiones de retención y cortes que correspondan. |
+
+Guía de ejecución vigente: [runbook](../security-integrations-audit-migration.md).
+Guía de producto: frontend `39-seguridad-integraciones-cifrado-auditoria.md`.
+
 ## Prioridad vigente: reconexión de WhatsApp y acceso de ClinicaClick
 
 Aclaración expresa del usuario: **OPS es un consumidor externo de datos para
@@ -16,7 +36,7 @@ Orden de trabajo: **WhatsApp API y login con código por correo primero; cuentas
 publicitarias después**. Las lecturas de contadores Facebook/Instagram quedan
 pospuestas. El destino operativo confirmado es staging/gateway; DEV queda
 fuera. La separación de procesos, colas, usuarios del sistema y grants SQL se
-valora en el documento de reconexión antes de preparar el corte. Se conserva su borrador local fuera del corte publicado.
+valora en el documento de reconexión antes de preparar su corte operativo.
 
 El criterio actual es comprobar las condiciones de reconexión de WhatsApp, no
 solo terminar código de contención. Estado y obstáculos concretos:

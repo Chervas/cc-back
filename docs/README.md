@@ -1,5 +1,19 @@
 # Runbooks operativos del backend
 
+## Guías vigentes de seguridad
+
+- [Runbook de migración](security-integrations-audit-migration.md): elección del
+  corte, dependencias, QA, publicación, despliegue y rollback.
+- [Acta del acceso público](security/admin-session-deployment-20260913.md):
+  versiones verificadas, corrección ORM, pausas y relevo a importación.
+- [Plan por entregas](security/incremental-delivery-plan.md) y
+  [condiciones de WhatsApp](security/whatsapp-reconnection-readiness.md).
+- [Historial de avances](security/integrations-migration-history.md): contexto
+  cronológico; no sustituye las instrucciones vigentes.
+
+Contrato de producto y autenticación: documentos frontend 39 y 04. El historial
+ya no precede al procedimiento del runbook ni a esas guías.
+
 ## 14/09/2026 — Primer corte de acceso desplegado; relevo a importación
 
 Con autorización del usuario, el 13/09 a las 22:16–22:17 UTC (14/09 a las

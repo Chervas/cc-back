@@ -1,8 +1,11 @@
 # WhatsApp y acceso: condiciones de reconexión
 
-13/09/2026. **Reconexión todavía no validada.** No se ha demostrado el vector del
-incidente ni verificado estas protecciones en los procesos que sirven tráfico.
-El código de contención mantiene WhatsApp cerrado a escrituras y Meta sin salida.
+Revisado tras el corte del 13/09/2026 22:25 UTC. **Reconexión todavía no validada.**
+El cierre de sesiones administrativas y la recuperación ya están desplegados y
+comprobados: [acta de acceso](admin-session-deployment-20260913.md). El MFA y las
+protecciones del nuevo recorrido de integraciones siguen pendientes de corte
+real. No se ha demostrado el vector del incidente. El propietario revocó las
+credenciales y detuvo envíos; el corte de acceso no autoriza reactivarlos.
 
 Preparado [broker del alta WhatsApp](whatsapp-onboarding-broker.md): operaciones
 privadas firmadas, registro previo al canje, comprobación de identidad/WABA/número,
@@ -64,11 +67,12 @@ La distribución es adecuada, pero aún no constituye una frontera de seguridad:
    sin generar otro envío automáticamente. La firma antirreplay del transporte
    no sustituye esta deduplicación de negocio.
 
-Se han observado HEADs distintos en staging (`ac1b1dd`) y gateway (`4cf8e23`);
-no se infiere de ellos la versión efectiva cargada en memoria. Antes del corte
-se conciliará un candidato compatible en ambos. No se ha cambiado ningún proceso.
-La política de MFA del entorno real sigue sin acreditarse: ausencia de una
-variable en `/proc` no demuestra su valor después de cargar la configuración.
+La observación original encontró bases distintas en staging (`ac1b1dd`) y gateway
+(`4cf8e23`). El corte de acceso posterior conserva esa separación: versiones
+actuales `3cf085a3` y `b3b3a8f8`, respectivamente. Los reinicios, configuración y
+canaries están en el acta; no trasladaron recepción ni activaron MFA. Para el
+siguiente corte se conciliará otra vez código, configuración y propietarios de
+cola; una variable ausente en `/proc` no acredita por sí sola el modo efectivo.
 
 ### Lote que se concretará antes de pedir activación
 
