@@ -23,7 +23,8 @@ function row(values) {
 function modelsForWebRow(webRow, consumerClinicIds = []) {
   const emptyModel = { findAll: async () => [] };
   return {
-    Clinica: emptyModel,
+    Clinica: emptyModel, GrupoClinica: emptyModel,
+    SearchConsoleBrokerBinding: emptyModel, AnalyticsBrokerBinding: emptyModel, GooglePropertyBrokerRevocation: emptyModel,
     GoogleConnectionAssignment: emptyModel,
     BusinessProfileBrokerBinding: emptyModel,
     BusinessProfileBrokerRevocation: emptyModel,
@@ -34,7 +35,8 @@ function modelsForWebRow(webRow, consumerClinicIds = []) {
     ClinicGoogleAdsAccount: emptyModel,
     GroupAssetClinicAssignment: {
       findAll: async ({ where }) => {
-        assert.deepEqual(where, { assetType: 'google.search_console', assetId: 10 });
+        assert.equal(where.assetType, 'google.search_console');
+        assert(where.assetId === 10 || where.assetId[require('sequelize').Op.in]?.includes(10));
         return consumerClinicIds.map((clinicaId) => ({ clinicaId }));
       },
     },

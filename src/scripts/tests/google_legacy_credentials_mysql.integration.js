@@ -15,10 +15,12 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await qi.createTable('ClinicAnalyticsProperties', { id: { type: D.INTEGER, primaryKey: true } });
   await require('../../../migrations/20260913040000-add-analytics-broker-read-binding').up(qi, D);
   models.AnalyticsBrokerBinding = require('../../../models/analyticsbrokerbinding')(sql, D);
+  await require('../../../migrations/20260913060000-create-google-property-broker-revocations').up(qi, D);
+  models.GooglePropertyBrokerRevocation = require('../../../models/googlepropertybrokerrevocation')(sql, D);
   const G = models.GoogleConnection; const B = models.GoogleOAuthBrokerBinding;
   const { createGoogleLegacyCredentials } = require('../../services/googleLegacyCredentials.service');
   const create = () => createGoogleLegacyCredentials({ connectionModel: G, bindingModel: B, searchConsoleModel: models.SearchConsoleBrokerBinding,
-    analyticsModel: models.AnalyticsBrokerBinding });
+    analyticsModel: models.AnalyticsBrokerBinding, propertyRevocationModel: models.GooglePropertyBrokerRevocation });
   const service = create(); let fullReads = 0;
   G.addHook('beforeFind', 'count_credentials', options => { if (options.attributes?.includes('accessToken')) fullReads++; });
   const row = (id, subject = 'fictitious-subject-' + id) => G.create({ id, googleUserId: subject,

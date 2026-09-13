@@ -12,6 +12,7 @@ function analyticsFixture() {
   const create = () => ({ ...createAnalyticsBroker({ enabled: () => state.enabled, now: () => state.at,
     loadMapping: async id => { state.metadataReads++; await state.beforeMappingRead?.(); if (state.sqlFailure) throw Error('FICTITIOUS_SQL_DETAIL'); return id === 91 ? state.mapping : null; },
     loadBindings: async property => { state.metadataReads++; return property === 'properties/123' ? [...(state.record ? [state.record] : []), ...(state.otherBindings || [])] : []; },
+    loadRevocations: async () => state.revocations || [],
     loadConnection: async () => { state.metadataReads++; return state.connection; },
     client: { execute: async command => {
       state.calls.push(command); await state.afterCall?.();

@@ -2,17 +2,18 @@
 const fs = require('node:fs'); const path = require('node:path'); const { Op, literal } = require('sequelize');
 const contract = require('../../services/integrations-broker/src/google-analytics-contract');
 const discovery = require('../../services/integrations-broker/src/google-property-discovery-contract');
+const { inspectRevocations } = require('./googlePropertyRevocation.contract');
 const { createIntegrationsBrokerClient } = require('../lib/integrationsBrokerClient');
 const CODES = new Set(['broker_binding_invalid', 'broker_cohort_disabled', 'broker_response_invalid', 'broker_configuration_invalid',
   'google_discovery_session_required', 'google_discovery_scope_forbidden', 'broker_discovery_timeout', 'broker_discovery_limit',
   'broker_timeout', 'broker_unavailable', 'connection_blocked', 'asset_revoked', 'scope_denied', 'operation_denied', 'invalid_request',
   'secret_unavailable', 'credential_revoked', 'provider_failed', 'provider_timeout', 'provider_unauthorized', 'rate_limited',
-  'google_oauth_legacy_closed', 'google_connection_missing', 'google_connection_changed', 'google_credentials_unavailable']);
+  'google_oauth_legacy_closed', 'google_connection_missing', 'google_connection_changed', 'google_credentials_unavailable', 'google_property_revocation_unavailable']);
 const safe = error => CODES.has(error?.code) ? error.code : 'analytics_read_failed';
 const fail = (code = 'broker_binding_invalid') => { throw Object.assign(Error(code), { code }); };
 const positive = value => /^[1-9]\d{0,9}$/.test(String(value)) && Number(value) <= 2147483647;
 const marked = row => row.broker_read_connection_ref != null || row.broker_read_asset_ref != null;
-function createAnalyticsBroker({ client, loadMapping, loadBindings, loadConnection,
+function createAnalyticsBroker({ client, loadMapping, loadBindings, loadConnection, loadRevocations,
   enabled = () => process.env.GOOGLE_ANALYTICS_BROKER_ENABLED === 'true', now = () => Date.now() }) {
   const contexts = new WeakMap();
   async function inspect(mapping, expected) {
@@ -22,9 +23,11 @@ function createAnalyticsBroker({ client, loadMapping, loadBindings, loadConnecti
     if (!Array.isArray(records) || records.length > 1000 || records.some(row => row.property_name !== resource.propertyName || !positive(row.mapping_id))) fail();
     const matches = records.filter(row => Number(row.mapping_id) === Number(mapping.id));
     if (matches.length > 1) fail(); const record = matches[0];
+    const revokedProperty = inspectRevocations('analytics', resource.assetRef, mapping.clinicaId,
+      current?.broker_read_connection_ref, await loadRevocations(resource.assetRef));
     if (!current || Number(current.id) !== Number(mapping.id) || !current.isActive || current.propertyName !== resource.propertyName
       || Number(current.clinicaId) !== Number(mapping.clinicaId) || Number(current.googleConnectionId) !== Number(mapping.googleConnectionId)) fail();
-    if (!records.length && !marked(current) && !expected) return null;
+    if (!records.length && !revokedProperty && !marked(current) && !expected) return null;
     if (!record || !marked(current) || record.state !== 'active' || record.property_name !== resource.propertyName
       || record.asset_ref !== resource.assetRef || current.broker_read_asset_ref !== resource.assetRef
       || typeof record.connection_ref !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(record.connection_ref)
@@ -34,6 +37,7 @@ function createAnalyticsBroker({ client, loadMapping, loadBindings, loadConnecti
     const connection = await loadConnection(Number(current.googleConnectionId), record.google_user_id);
     if (!connection || Number(connection.id) !== Number(current.googleConnectionId) || connection.googleUserId !== record.google_user_id
       || Number(connection.credentials_external) !== 1) fail();
+    inspectRevocations('analytics', resource.assetRef, current.clinicaId, record.connection_ref, await loadRevocations(resource.assetRef));
     const captured = { id: Number(current.id), clinicaId: Number(current.clinicaId), googleConnectionId: Number(current.googleConnectionId),
       propertyName: resource.propertyName, googleSubject: record.google_user_id, connectionRef: record.connection_ref,
       assetRef: resource.assetRef, tenantRef: `clinic:${Number(current.clinicaId)}` };
@@ -108,6 +112,7 @@ function createAnalyticsRepository(getModels) {
     loadMapping: id => getModels().ClinicAnalyticsProperty.findByPk(id, { attributes: ['id', 'clinicaId', 'googleConnectionId', 'propertyName', 'isActive',
       'broker_read_connection_ref', 'broker_read_asset_ref'], raw: true, logging: false }),
     loadBindings: propertyName => getModels().AnalyticsBrokerBinding.findAll({ where: { property_name: propertyName }, limit: 1001, raw: true, logging: false }),
+    loadRevocations: assetRef => getModels().GooglePropertyBrokerRevocation.findAll({ where: { kind: 'analytics', asset_ref: assetRef }, limit: 1001, raw: true, logging: false }),
     loadConnection: async (id, subject) => {
       const rows = await getModels().GoogleConnection.findAll({ attributes: ['id', 'googleUserId', [literal('(accessToken IS NULL AND refreshToken IS NULL)'), 'credentials_external']],
         where: { [Op.or]: [{ id }, { googleUserId: subject }] }, limit: 2, raw: true, logging: false });

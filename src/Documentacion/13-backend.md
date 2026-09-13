@@ -1,5 +1,56 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Baja durable SC/GA conectada a la API
+
+DELETE /oauth/google/disconnect con ámbito incorpora SC/GA a la captura durable
+existente de GBP. Intenciones, auditoría attempted, bindings bloqueados, mappings
+inactivos y assignment disconnected se confirman juntos. 202 revocation_pending
+con pending_assets después del commit; 200 si no queda confirmación pendiente.
+
+En grupos se preservan overrides activos/reauthorization_required. Compartidos
+y primarios de grupo SC/GA se comprueban contra las clínicas efectivamente dadas
+de baja, incluso si el primario pertenece a otro grupo. Afectar a una clínica
+fuera de ese conjunto: 409 scope_disconnect_shared_asset_conflict y rollback
+completo. Falta de binding para un mapping gestionado sin tombstone original,
+identidad inválida, límites o captura/auditoría no disponibles: 503
+google_property_revocation_unavailable. Actor/sesión/permiso/conexión se revalidan.
+
+GooglePropertyBrokerRevocations conserva bloqueos por kind/clínica/conexión/activo,
+sin FK ni cascadas. Varios mappings de la misma tupla deduplican intención.
+Borrar/recrear mappings, bindings o conexión no habilita fallback legacy: la
+tabla participa en los guards por ID/subject y en SELECT/UPDATE condicionados.
+Lectores rechazan la tupla revocada y respuestas que observan una baja concurrente.
+No deshace GET ya enviado ni revoca tokens OAuth en Google. DELETE sin ámbito
+proyecta metadata y rechaza también referencias OAuth/SC/GA/revocaciones durables.
+
+GET /oauth/google/disconnection-status agrega GBP + SC/GA con el mismo DTO:
+status pending/confirmed/none, pending_assets, confirmed_assets. SC/GA cuenta
+tuplas, no mappings; no acredita revocación OAuth ni entrega S3. Ámbito explícito
+write y sesión/ámbito revalidados después de ambas consultas. Error cerrado
+503 google_revocation_unavailable, sin recuentos parciales. Éxito GET/DELETE:
+private, no-store. 401 por sesión inválida y 403 por pérdida de permiso/ámbito.
+
+Worker googlePropertyRevocations, tipo google_property_broker_revocations:
+cada minuto Europe/Madrid, lease 120 s, hasta 20 comandos/30 s cooperativos,
+HTTP <=10 s/restante y retry exponencial hasta una hora. Conserva UUID original
+ante ACK perdido; ACK y evento completed se confirman por CAS en una transacción.
+No obtiene secretos ni llama a Google; usa los controles firmados SC/GA existentes.
+
+Auditoría v9 integration.asset.disconnect: attempted del usuario, completed del
+job google_property_revocation_worker y subjectUserId original. El visor existente
+proyecta integrationDisconnect con provider google_search_console/google_analytics,
+correlationId, connectionRef y assetRef tras verificar versión S3. Sin URL/nombre,
+métricas ni contenido clínico. No cambia UI ni completa la auditoría de rechazos.
+
+DDL 20260913060000 y dependencias deben preceder al código aun apagado; down
+rechaza cualquier fila. Nuevos flags GOOGLE_PROPERTY_REVOCATION_ENABLED y
+GOOGLE_PROPERTY_REVOCATION_WORKER_ENABLED, apagados por defecto. Cada vertical
+usa su ORIGIN/AUDIENCE/CA_FILE y nuevos CONTROL_KEY_ID/CONTROL_KEY_FILE, separados
+de lectores. Writer/reader v9 antes de emitir. No despliegue, migración compartida,
+claves/grants instalados ni cambios de pausas. OAuth/altas/remapeo/UI generales
+SC/GA y la migración global siguen pendientes.
+Contrato backend: docs/security/google-property-disconnect-migration.md.
+
 ## 13/09/2026 — Controles de revocación SC/GA preparados en el broker
 
 Operaciones internas nuevas en el transporte firmado del broker:

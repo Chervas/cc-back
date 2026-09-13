@@ -1,5 +1,13 @@
 # Auditoría de plataforma: primer bloque de autenticación
 
+## 13/09/2026 — Desconexión SC/GA v9 preparada
+
+Codec y reader-protocol aceptan v9 integration.asset.disconnect con usuario
+iniciador, job de confirmación y referencias cerradas de propiedad. Verificación
+de S3 por versión y proyección en el visor restringido. Writer/reader v9 antes de
+habilitar captura; SQL confirmado no acredita entrega S3. Sin AWS/despliegue real.
+[Contrato y pruebas](../../docs/security/google-property-disconnect-migration.md).
+
 ## Cohorte adicional preparada: desconexión GBP v7
 
 `integration.asset.disconnect` bajo `app/platform/v7/`: intento del usuario,

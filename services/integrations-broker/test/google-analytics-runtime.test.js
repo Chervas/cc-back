@@ -54,6 +54,7 @@ test('actual GA TLS runtime and backend adapter preserve scoped revocation and c
   const consumer = createAnalyticsBroker({ client, enabled: () => true, loadMapping: async () => mapping,
     loadBindings: async () => [{ property_name: resource.propertyName, mapping_id: 91, clinica_id: 123, google_connection_id: 81,
       google_user_id: 'fictitious-subject', connection_ref: 'connection:test', asset_ref: resource.assetRef, state: 'active' }],
+    loadRevocations: async () => [],
     loadConnection: async () => ({ id: 81, googleUserId: 'fictitious-subject', credentials_external: 1 }) });
   const context = await consumer.prepare(mapping); const range = { startDate: '2026-09-01', endDate: '2026-09-02' };
   const data = await consumer.read(mapping, context, 'city', range); assert.equal(data.rows.length, 501); assert.equal(data.rowCount, 501);

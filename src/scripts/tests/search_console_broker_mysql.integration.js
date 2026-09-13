@@ -19,6 +19,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await qi.createTable('ClinicAnalyticsProperties', { id: { type: D.INTEGER, primaryKey: true } });
   await require('../../../migrations/20260913040000-add-analytics-broker-read-binding').up(qi, D);
   models.AnalyticsBrokerBinding = require('../../../models/analyticsbrokerbinding')(sql, D);
+  await require('../../../migrations/20260913060000-create-google-property-broker-revocations').up(qi, D);
+  models.GooglePropertyBrokerRevocation = require('../../../models/googlepropertybrokerrevocation')(sql, D);
   const { site } = require('../../../services/integrations-broker/src/google-search-console-contract');
   const resource = site('sc-domain:example.invalid'); const subject = 'fictitious-subject';
   const connection = (id, googleUserId = subject) => G.create({ id, googleUserId, accessToken: null, refreshToken: null });
@@ -76,7 +78,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await connection(82); await assert.rejects(service.prepare(mapping), { code: 'broker_binding_invalid' });
   const { createGoogleLegacyCredentials } = require('../../services/googleLegacyCredentials.service');
   const legacy = createGoogleLegacyCredentials({ connectionModel: G, bindingModel: models.GoogleOAuthBrokerBinding, searchConsoleModel: B,
-    analyticsModel: models.AnalyticsBrokerBinding });
+    analyticsModel: models.AnalyticsBrokerBinding, propertyRevocationModel: models.GooglePropertyBrokerRevocation });
   for (const id of [81, 82]) await assert.rejects(legacy.load(id), { code: 'google_oauth_legacy_closed' });
   const oauth = require('../../services/googleOAuthBroker.service').createGoogleOAuthBroker({ models, sessions: {}, client: {}, audit: {}, enabled: () => false });
   await assert.rejects(oauth.assertLegacyAllowed(), { code: 'google_oauth_legacy_closed' });

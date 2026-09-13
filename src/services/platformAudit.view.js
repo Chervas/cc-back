@@ -77,7 +77,7 @@ function createView({ model, audit, reader, codec, now = () => new Date() }) {
           patientRead: v.version === 6 ? { correlationId: v.correlationId, clinicIds: v.clinicIds, patientIds: v.patientIds,
             patientCount: v.patientCount, resultCount: v.resultCount, includesSensitive: v.includesSensitive,
             batchIndex: v.batchIndex, batchCount: v.batchCount, resultSetDigest: v.resultSetDigest } : null,
-          integrationDisconnect: v.version === 7 ? { correlationId: v.correlationId, provider: v.provider,
+          integrationDisconnect: [7, 9].includes(v.version) ? { correlationId: v.correlationId, provider: v.provider,
             connectionRef: v.connectionRef, assetRef: v.assetRef } : null,
           integrationOAuth: v.version === 8 ? { correlationId: v.correlationId, provider: v.provider,
             connectionRef: v.connectionRef, assetRef: v.assetRef } : null,

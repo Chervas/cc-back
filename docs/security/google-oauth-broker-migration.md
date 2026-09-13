@@ -1,5 +1,14 @@
 # Google: reautorización de conexiones fijadas al broker
 
+## 13/09/2026 — Baja durable SC/GA conectada a la API
+
+La [baja SC/GA](google-property-disconnect-migration.md) prepara ahora API,
+cola/worker, bloqueos locales y auditoría humana v9. Incluye compartidos/primarios,
+overrides y cierre legacy por revocación independiente de mappings/bindings.
+DDL 20260913060000 y dependencias antes del código aun apagado. Sigue pendiente
+el ciclo OAuth/altas/remapeo/UI general y el despliegue real. Las menciones a
+cola/API SC/GA pendientes más abajo describen el bloque histórico anterior.
+
 ## Ampliación vigente: registro GA independiente (13/09/2026)
 
 La primera fila AnalyticsBrokerBindings cierra connect/callback legacy global

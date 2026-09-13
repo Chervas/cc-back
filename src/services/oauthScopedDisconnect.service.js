@@ -46,6 +46,7 @@ async function inheritedClinicIds({
     attributes: ['clinicaId'],
     raw: true,
     transaction,
+    ...(provider === 'google' ? { lock: transaction.LOCK.UPDATE } : {}),
   });
   const overridden = new Set(overrides.map((row) => Number(row.clinicaId)));
   return clinicIds.filter((clinicId) => !overridden.has(clinicId));
@@ -195,7 +196,11 @@ async function deactivateGoogleMappingsForScope({
     ownerClinicIdOf: (row) => row.clinicaId,
   });
 
-  const brokerRevocationsPending = await require('./businessProfileRevocation.service').enqueue({
+  const propertyPending = await require('./googlePropertyRevocation.service').enqueue({
+    models, transaction, connectionId, clinicIds: ordinaryClinicIds, actorId, sessionRef,
+    mappings: { search_console: web, analytics },
+  });
+  const brokerRevocationsPending = propertyPending + await require('./businessProfileRevocation.service').enqueue({
     models, transaction, connectionId, clinicIds: ordinaryClinicIds, actorId, sessionRef,
   });
   return {

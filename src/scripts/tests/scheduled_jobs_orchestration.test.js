@@ -32,7 +32,7 @@ function testCatalogCoversEveryCronAndExecutor() {
   const catalogNames = definitions.map(([name]) => name).sort();
   const types = definitions.map(([, definition]) => definition.type);
 
-  assert.equal(definitions.length, 46, 'the canonical scheduler retains existing jobs and gated AWS cost/audit/session/revocation/OAuth jobs');
+  assert.equal(definitions.length, 47, 'the canonical scheduler retains existing jobs and gated AWS cost/audit/session/revocation/OAuth jobs');
   assert.deepEqual(catalogNames, configuredNames);
   assert.equal(new Set(types).size, types.length, 'scheduled job types must be unique');
   for (const jobName of [
@@ -1425,6 +1425,7 @@ async function testPlatformAuditJobsRespectGates() {
     for (const [name, type, env, module, method, cron] of [
       ['googleOAuthReconciliation', 'google_oauth_broker_reconciliation', 'GOOGLE_OAUTH_BROKER_WORKER_ENABLED', '../../services/googleOAuthBroker.service', 'executeGoogleOAuthReconciliation', '* * * * *'],
       ['businessProfileRevocations', 'business_profile_broker_revocations', 'GOOGLE_BUSINESS_PROFILE_REVOCATION_WORKER_ENABLED', '../../services/businessProfileRevocation.service', 'executeBusinessProfileRevocations', '* * * * *'],
+      ['googlePropertyRevocations', 'google_property_broker_revocations', 'GOOGLE_PROPERTY_REVOCATION_WORKER_ENABLED', '../../services/googlePropertyRevocation.service', 'executeGooglePropertyRevocations', '* * * * *'],
       ['platformAuditDelivery', 'platform_audit_delivery', 'PLATFORM_AUDIT_DELIVERY_ENABLED', '../../services/platformAudit.delivery', 'executePlatformAuditDelivery', '* * * * *'],
       ['platformAuditMonitor', 'platform_audit_monitor', 'PLATFORM_AUDIT_MONITOR_ENABLED', '../../services/platformAudit.monitor', 'executePlatformAuditMonitor', '*/5 * * * *'],
       ['platformAuditReconciliation', 'platform_audit_reconciliation', 'PLATFORM_AUDIT_RECONCILIATION_ENABLED', '../../services/platformAudit.reconciliation', 'executePlatformAuditReconciliation', '*/5 * * * *'],

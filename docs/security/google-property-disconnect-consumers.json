@@ -1,0 +1,130 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-13",
+  "sourceHead": "6d19de1df494bc0d2a751fef2699004911de4166",
+  "includesWorkingChanges": true,
+  "runtimeMigrated": 0,
+  "newMigrations": [
+    {
+      "name": "20260913060000-create-google-property-broker-revocations.js",
+      "isolatedQa": "passed",
+      "sharedDb": "not_applied"
+    }
+  ],
+  "ops": "deferred_by_user",
+  "awsInstance": "shutdown_announced_unverified",
+  "method": "Source review; offline Node, owned temporary MySQL, local signed HTTPS and fictitious AWS/provider dependencies only.",
+  "qa": {
+    "backendTests": 132,
+    "brokerTests": 93,
+    "platformAuditTests": 40,
+    "mysqlChecks": 79,
+    "ownedMysqlInstances": 6,
+    "contracts": 4,
+    "scheduledJobs": 47,
+    "uiChanged": false
+  },
+  "pending": [
+    "SC/GA onboarding, remapping, OAuth, general status and whole lifecycle UI",
+    "Approved real cohort transport/configuration, schema, writer/reader, credentials and deployment cut",
+    "Other consumers, complete platform audit, AWS IAM/retention/Cost Explorer/Budget/CloudFormation and DB encryption/restoration/cut"
+  ],
+  "rows": [
+    {
+      "file": "migrations/20260913060000-create-google-property-broker-revocations.js",
+      "sha256": "c9639364a46ceb1ebd3b4302d5e7c71bca0cda00027dbc01bf62fa7c2a80f402",
+      "status": "prepared_offline",
+      "note": "Additive durable tombstone schema, required before code even with flags off; down empty only"
+    },
+    {
+      "file": "models/googlepropertybrokerrevocation.js",
+      "sha256": "4b84a092f5fd264d1dab56e10be53e839c384d0907ebada8d9ff6dc54d9a8c9e",
+      "status": "prepared_offline",
+      "note": "Independent SQL boundary and delivery queue without FK or credentials"
+    },
+    {
+      "file": "src/services/googlePropertyRevocation.contract.js",
+      "sha256": "2d2d9923d2cda7d531c3f897587eaa22902e79866c6c6af9d096c365d55c2bac",
+      "status": "prepared_offline",
+      "note": "Canonical tuple identity and local read guards"
+    },
+    {
+      "file": "src/services/googlePropertyRevocation.service.js",
+      "sha256": "3a6ef6526c5e2599cdf7c83acfa4bb18656c86f6f0d737714818f9fed5f5a93a",
+      "status": "prepared_offline",
+      "note": "Bounded atomic capture, shared/primary checks, per-cohort clients, leased replay worker and status"
+    },
+    {
+      "file": "src/services/oauthScopedDisconnect.service.js",
+      "sha256": "66194aa3527ce962705790d11a3213bd2bc570d919c061ca6ce59512fa176c6f",
+      "status": "prepared_offline",
+      "note": "One transaction for property/GBP intent, mapping and assignment changes; preserves clinic overrides"
+    },
+    {
+      "file": "src/routes/oauth.routes.js",
+      "sha256": "fa49db3a0e21d198cfd891e56463e1e300de20d1e237b54b20b1249cd92b2f4f",
+      "status": "prepared_offline",
+      "note": "Scoped DELETE and combined GET status; unscoped metadata guard"
+    },
+    {
+      "file": "src/services/searchConsoleBroker.service.js",
+      "sha256": "4e8e6e76861b6157a06b70b53836d516c7c746145351f4617cd1c9b1fcb61932",
+      "status": "prepared_offline",
+      "note": "Local SC tombstone checks before legacy and around reads"
+    },
+    {
+      "file": "src/services/analyticsBroker.service.js",
+      "sha256": "411ea4fd8c0f06dba23d947396315e5673589de558f22237f4ec324f00d8f353",
+      "status": "prepared_offline",
+      "note": "Local GA tombstone checks before legacy and around reads"
+    },
+    {
+      "file": "src/services/googleLegacyCredentials.service.js",
+      "sha256": "8ab7fae5386eddcbdbf5d06aafcb71439287a17df90bc543de070c2661e52c7e",
+      "status": "prepared_offline",
+      "note": "ID/subject and atomic SQL credential exclusion for independent revocations"
+    },
+    {
+      "file": "src/services/googleOAuthBroker.service.js",
+      "sha256": "ff7b1e0acd64b69f17eaf6c7bf14c0d2d57022b1a49346c2af7c718fc98a3870",
+      "status": "prepared_offline",
+      "note": "Legacy global/per-connection closure by independent revocation"
+    },
+    {
+      "file": "src/config/scheduledJobCatalog.js",
+      "sha256": "d88684f93979f4dcd2ab8099c2b04a34230c7e658b710fda9098eab78562c14c",
+      "status": "prepared_offline",
+      "note": "47 job catalog with disabled property revocation entry"
+    },
+    {
+      "file": "src/jobs/sync.jobs.js",
+      "sha256": "9393ce0d07c4c6af779ddf4e4ae31649d8a8f731a33b7dc62632c1905f6efe95",
+      "status": "prepared_offline",
+      "note": "Gated minute schedule and lazy executor; no runtime flags changed"
+    },
+    {
+      "file": "services/platform-audit/src/google-property-disconnect-event.js",
+      "sha256": "83d89791ba96ce2f939f5aa252f6934186a5346fdd58140b38f9172a386de282",
+      "status": "prepared_offline",
+      "note": "Closed v9 initiating-user/completing-job event"
+    },
+    {
+      "file": "services/platform-audit/src/event.js",
+      "sha256": "15ec45ca99d28583d3d7b7b62622359722d55c507f4f1cc12e8c979124a38514",
+      "status": "prepared_offline",
+      "note": "v9 dispatch"
+    },
+    {
+      "file": "services/platform-audit/src/reader-protocol.js",
+      "sha256": "5d6607b0811fcfef0c8ea748c27d8bb79ec253bc80090f1ae4006de8fac28f09",
+      "status": "prepared_offline",
+      "note": "Exact v9 path/version admission"
+    },
+    {
+      "file": "src/services/platformAudit.view.js",
+      "sha256": "5516dcad9be15eb823994897b3d5374349686897c1e0039568f77b8d37dbd940",
+      "status": "prepared_offline",
+      "note": "Verified v9 integrationDisconnect projection for existing restricted UI"
+    }
+  ]
+}

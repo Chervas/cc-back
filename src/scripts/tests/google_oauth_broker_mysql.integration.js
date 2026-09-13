@@ -40,6 +40,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   models.SearchConsoleBrokerBinding = require('../../../models/searchconsolebrokerbinding')(sql, D);
   await require('../../../migrations/20260913040000-add-analytics-broker-read-binding').up(qi, D);
   models.AnalyticsBrokerBinding = require('../../../models/analyticsbrokerbinding')(sql, D);
+  await require('../../../migrations/20260913060000-create-google-property-broker-revocations').up(qi, D);
+  models.GooglePropertyBrokerRevocation = require('../../../models/googlepropertybrokerrevocation')(sql, D);
   const B = models.GoogleOAuthBrokerBinding; const R = models.GoogleOAuthBrokerRequest; const A = models.PlatformAuditEvent;
   const user = await models.Usuario.create({ id_usuario: 501, password_usuario: 'FICTITIOUS_PASSWORD_HASH',
     email_usuario: 'oauth@example.invalid', estado_cuenta: 'activo', es_provisional: false });

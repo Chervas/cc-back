@@ -1,5 +1,15 @@
 # Lector, visor y conciliación de auditoría
 
+## 13/09/2026 — Baja durable SC/GA conectada a la API
+
+La [desconexión SC/GA](google-property-disconnect-migration.md) añade v9 a la
+captura/entrega/lector: integration.asset.disconnect con usuario inicial y job
+de confirmación, correlación y referencias cerradas. El visor restringido usa
+integrationDisconnect existente y valida la versión S3 concreta. Writer/reader
+compatibles antes de habilitar captura. No nueva UI ni QA visual; proyección y
+lector probados con datos ficticios. No demuestra entrega real ni auditoría
+completa de la plataforma.
+
 ## Seguimiento 12/09/2026: acceso en tiempo real preparado
 
 La nueva [cohorte de sockets](realtime-access-migration.md) prepara verificación

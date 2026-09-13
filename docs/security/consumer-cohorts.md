@@ -1,5 +1,26 @@
 # Inventario de consumidores y plan de corte
 
+## 13/09/2026 — Baja durable SC/GA conectada a la API
+
+Preparada la baja SC/GA desde API con intención SQL, bloqueo local y auditoría
+v9 atómicos junto a los mappings/assignment. Comprueba compartidos y primarios,
+preserva overrides y revierte todo si afecta fuera del ámbito. Worker con
+lease/CAS y replay confirma el broker; el estado agrega GBP/SC/GA. Los marcadores
+sobreviven a borrados/recreaciones y cierran legacy por ID/subject.
+
+QA ficticia: 265 tests Node (132 backend, 93 broker, 40 auditoría), 79 checks
+MySQL en seis bases propias con shutdown 0 y cuatro contratos, incluido scheduler
+47 jobs. Hotfix getAssetStats conservado. Nueva DDL 20260913060000 y dependencias
+antes del código incluso apagado; writer/reader v9 antes de emitir. Ninguna
+migración compartida, despliegue, clave/grant instalado ni cambio de pausas/UI.
+
+OPS aplazado y apagado EC2 anunciado sin verificar. Sin AWS/proveedores reales.
+Altas/remapeo, OAuth/estado/UI generales SC/GA, otras cohortes, auditoría completa,
+retención/IAM/Budget/Cost Explorer y cifrado/restauración/corte BD siguen pendientes.
+Este bloque actualiza el estado de los apartados históricos siguientes.
+
+[Contrato, QA y requisitos del corte](google-property-disconnect-migration.md).
+
 ## 13/09/2026 — Controles de revocación SC/GA preparados en el broker
 
 El broker admite bloqueo durable de Search Console y GA4 por clínica/conexión/

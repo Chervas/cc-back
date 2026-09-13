@@ -2,11 +2,12 @@
 const fs = require('node:fs'); const path = require('node:path'); const { Op, literal } = require('sequelize');
 const contract = require('../../services/integrations-broker/src/google-search-console-contract');
 const discovery = require('../../services/integrations-broker/src/google-property-discovery-contract');
+const { inspectRevocations } = require('./googlePropertyRevocation.contract');
 const { createIntegrationsBrokerClient } = require('../lib/integrationsBrokerClient');
 const fail = (code = 'broker_binding_invalid') => { throw Object.assign(Error(code), { code }); };
 const positive = value => /^[1-9]\d{0,9}$/.test(String(value)) && Number(value) <= 2147483647;
 const marked = row => row.broker_read_connection_ref != null || row.broker_read_asset_ref != null;
-function createSearchConsoleBroker({ client, loadMapping, loadBindings, loadConnection,
+function createSearchConsoleBroker({ client, loadMapping, loadBindings, loadConnection, loadRevocations,
   enabled = () => process.env.GOOGLE_SEARCH_CONSOLE_BROKER_ENABLED === 'true', now = () => Date.now() }) {
   const contexts = new WeakMap();
   async function inspect(mapping, expected) {
@@ -17,9 +18,11 @@ function createSearchConsoleBroker({ client, loadMapping, loadBindings, loadConn
     if (!Array.isArray(records) || records.length > 1000 || records.some(row => row.site_hash !== resource.siteHash || !positive(row.mapping_id))) fail();
     const matches = records.filter(row => Number(row.mapping_id) === Number(mapping.id));
     if (matches.length > 1) fail(); const record = matches[0];
+    const revokedProperty = inspectRevocations('search_console', resource.assetRef, mapping.clinicaId,
+      current?.broker_read_connection_ref, await loadRevocations(resource.assetRef));
     if (!current || Number(current.id) !== Number(mapping.id) || !current.isActive || current.siteUrl !== mapping.siteUrl || Number(current.clinicaId) !== Number(mapping.clinicaId)
       || Number(current.googleConnectionId) !== Number(mapping.googleConnectionId)) fail();
-    if (!records.length && !marked(current) && !expected) return null;
+    if (!records.length && !revokedProperty && !marked(current) && !expected) return null;
     if (!record || !marked(current) || record.state !== 'active' || record.site_hash !== resource.siteHash || record.site_url !== resource.siteUrl
       || record.asset_ref !== resource.assetRef || current.broker_read_asset_ref !== resource.assetRef
       || typeof record.connection_ref !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(record.connection_ref) || current.broker_read_connection_ref !== record.connection_ref
@@ -29,6 +32,7 @@ function createSearchConsoleBroker({ client, loadMapping, loadBindings, loadConn
     const connection = await loadConnection(Number(current.googleConnectionId), record.google_user_id);
     if (!connection || Number(connection.id) !== Number(current.googleConnectionId) || connection.googleUserId !== record.google_user_id
       || Number(connection.credentials_external) !== 1) fail();
+    inspectRevocations('search_console', resource.assetRef, current.clinicaId, record.connection_ref, await loadRevocations(resource.assetRef));
     const captured = { id: Number(current.id), clinicaId: Number(current.clinicaId), googleConnectionId: Number(current.googleConnectionId),
       siteUrl: resource.siteUrl, googleSubject: record.google_user_id, connectionRef: record.connection_ref,
       assetRef: resource.assetRef, tenantRef: `clinic:${Number(current.clinicaId)}` };
@@ -103,6 +107,7 @@ function createSearchConsoleRepository(getModels) {
     loadMapping: id => getModels().ClinicWebAsset.findByPk(id, { attributes: ['id', 'clinicaId', 'googleConnectionId', 'siteUrl', 'isActive',
       'broker_read_connection_ref', 'broker_read_asset_ref'], raw: true, logging: false }),
     loadBindings: hash => getModels().SearchConsoleBrokerBinding.findAll({ where: { site_hash: hash }, limit: 1001, raw: true, logging: false }),
+    loadRevocations: assetRef => getModels().GooglePropertyBrokerRevocation.findAll({ where: { kind: 'search_console', asset_ref: assetRef }, limit: 1001, raw: true, logging: false }),
     loadConnection: async (id, subject) => {
       const rows = await getModels().GoogleConnection.findAll({ attributes: ['id', 'googleUserId', [literal('(accessToken IS NULL AND refreshToken IS NULL)'), 'credentials_external']],
         where: { [Op.or]: [{ id }, { googleUserId: subject }] }, limit: 2, raw: true, logging: false });

@@ -3504,7 +3504,12 @@ router.delete('/google/mappings/:mappingId', async (req, res) => {
 router.get('/google/disconnection-status', async (req, res) => {
     try {
         const clinicIds = [...req.marketingConnectionScopeAuthorization.clinicIds].map(Number).sort((a, b) => a - b);
-        const result = await require('../services/businessProfileRevocation.service').status(clinicIds);
+        const gbp = await require('../services/businessProfileRevocation.service').status(clinicIds);
+        const properties = await require('../services/googlePropertyRevocation.service').status(clinicIds);
+        const pending = gbp.pending_assets + properties.pending_assets;
+        const confirmed = gbp.confirmed_assets + properties.confirmed_assets;
+        if (![pending, confirmed].every(n => Number.isSafeInteger(n) && n >= 0)) throw new Error('invalid_revocation_counts');
+        const result = { status: pending ? 'pending' : confirmed ? 'confirmed' : 'none', pending_assets: pending, confirmed_assets: confirmed };
         const verified = await accessSessions.verify(accessSessions.bearer(req.headers.authorization));
         if (String(verified.userId) !== String(getUserIdFromToken(req))) throw Object.assign(new Error('auth_failed'), { httpStatus: 401 });
         const current = await authorizeExplicitConnectionScope(req, 'write');
@@ -3515,7 +3520,7 @@ router.get('/google/disconnection-status', async (req, res) => {
     } catch (error) {
         const invalidSession = ['JsonWebTokenError', 'TokenExpiredError', 'NotBeforeError'].includes(error?.name) || error?.httpStatus === 401;
         const denied = error?.httpStatus === 403;
-        return res.status(invalidSession ? 401 : denied ? 403 : 503).json({ success: false, error: invalidSession ? 'auth_failed' : denied ? 'scope_denied' : 'gbp_revocation_unavailable' });
+        return res.status(invalidSession ? 401 : denied ? 403 : 503).json({ success: false, error: invalidSession ? 'auth_failed' : denied ? 'scope_denied' : 'google_revocation_unavailable' });
     }
 });
 
@@ -3588,7 +3593,7 @@ router.delete('/google/disconnect', async (req, res) => {
             return res.json({ success: true, message: scope.assignmentScope === 'group' ? 'Conexión Google desconectada para todo el grupo' : 'Conexión Google desconectada para esta clínica' });
         }
 
-        const { connection: conn, ambiguous } = await findSingleUserConnection(GoogleConnection, userId);
+        const { connection: conn, ambiguous } = await findSingleUserConnection(GoogleConnection, userId, ['id', 'googleUserId']);
         if (ambiguous) {
             const error = new Error('Hay varias conexiones Google; indica la clínica o el grupo que quieres desconectar.');
             error.code = 'connection_scope_required';
@@ -3608,8 +3613,12 @@ router.delete('/google/disconnect', async (req, res) => {
             ClinicBusinessLocation.count({ where: { google_connection_id: conn.id } }),
             ClinicGoogleAdsAccount.count({ where: { googleConnectionId: conn.id } })
         ]);
-        const managedReferences = await db.BusinessProfileBrokerBinding.count({ where: { google_connection_id: conn.id } })
+        let managedReferences = await db.BusinessProfileBrokerBinding.count({ where: { google_connection_id: conn.id } })
             + await db.BusinessProfileBrokerRevocation.count({ where: { google_connection_id: conn.id } });
+        for (const registry of [db.GoogleOAuthBrokerBinding, db.SearchConsoleBrokerBinding, db.AnalyticsBrokerBinding, db.GooglePropertyBrokerRevocation]) {
+            managedReferences += await registry.count({ where: { [Op.or]: [{ google_connection_id: conn.id },
+                ...(typeof conn.googleUserId === 'string' ? [{ google_user_id: conn.googleUserId }] : [])] }, logging: false });
+        }
         if (activeAssignments + webMappings + analyticsMappings + localMappings + adsMappings + managedReferences > 0) {
             const conflict = new Error('La conexión sigue en uso por uno o más scopes o mappings. Desconéctalos de forma individual.');
             conflict.code = 'connection_in_use';
@@ -3621,6 +3630,7 @@ router.delete('/google/disconnect', async (req, res) => {
         return res.json({ success: true, message: 'Conexión Google desconectada' });
     } catch (e) {
         if (e?.code === 'gbp_revocation_unavailable') return res.status(503).json({ success: false, error: 'gbp_revocation_unavailable' });
+        if (e?.code === 'google_property_revocation_unavailable') return res.status(503).json({ success: false, error: 'google_property_revocation_unavailable' });
         if (['JsonWebTokenError', 'TokenExpiredError', 'NotBeforeError'].includes(e?.name) || e?.httpStatus === 401) {
             return res.status(401).json({ success: false, error: 'auth_failed' });
         }

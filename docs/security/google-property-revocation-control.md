@@ -1,5 +1,14 @@
 # Control de revocación de propiedades Search Console y GA4
 
+## 13/09/2026 — Baja durable SC/GA conectada a la API
+
+La [baja SC/GA](google-property-disconnect-migration.md) prepara ahora API,
+cola/worker, bloqueos locales y auditoría humana v9. Incluye compartidos/primarios,
+overrides y cierre legacy por revocación independiente de mappings/bindings.
+DDL 20260913060000 y dependencias antes del código aun apagado. Sigue pendiente
+el ciclo OAuth/altas/remapeo/UI general y el despliegue real. Las menciones a
+cola/API SC/GA pendientes más abajo describen el bloque histórico anterior.
+
 Preparado el 13/09/2026 sobre backend `78728e72` y frontend `9fd67667`.
 Consumidores migrados en runtime: **cero**. Código y pruebas aisladas;
 sin despliegue, AWS, proveedor real, cambios de pausas ni migración compartida.

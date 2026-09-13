@@ -5,14 +5,19 @@ const { loadDiscoverySource } = require('./fixtures/business_profile_discovery.f
 const { connectionForTestServer } = require('./fixtures/campaign_offline_runtime.cjs');
 async function fixture(t, options = {}) {
   const state = { allowed: true, clinics: [71,72], pending: 1, writes: 0, attempts: 0, commits: 0, rolledBack: 0,
-    checks: 0, reads: 0, resolves: 0, managed: 1, destroyed: 0, ...options }; const logs = [];
-  const conn = { id: 81, destroy: async () => state.destroyed++ };
+    checks: 0, reads: 0, propertyReads: 0, propertyPending: 0, propertyConfirmed: 0, propertyManaged: 0,
+    resolves: 0, managed: 1, destroyed: 0, ...options }; const logs = [];
+  const conn = { id: 81, googleUserId: 'fictitious-subject', destroy: async () => state.destroyed++ };
   const empty = { count: async () => 0, findAll: async () => [] };
   const models = { Clinica: { findByPk: async () => ({ grupoClinicaId: 9 }), findAll: async () => state.clinics.map(id_clinica => ({ id_clinica })) },
     GoogleConnection: empty, GoogleConnectionAssignment: { count: async () => 0,
       findOne: async () => ({ status: 'active', googleConnectionId: state.changedAssignment ? 82 : 81 }),
       upsert: async (value, { transaction }) => { assert.equal(value.status, 'disconnected'); transaction.writes++; await state.onUpsert?.(); } },
     ClinicWebAsset: empty, ClinicAnalyticsProperty: empty, ClinicGoogleAdsAccount: empty, ClinicBusinessLocation: empty,
+    GoogleOAuthBrokerBinding: empty, SearchConsoleBrokerBinding: empty, AnalyticsBrokerBinding: empty,
+    GooglePropertyBrokerRevocation: { count: async ({ where }) => {
+      assert.deepEqual(JSON.parse(JSON.stringify(where[sequelize.Op.or])), [{ google_connection_id: 81 }, { google_user_id: 'fictitious-subject' }]); return state.propertyManaged;
+    } },
     BusinessProfileBrokerBinding: { count: async () => state.managed }, BusinessProfileBrokerRevocation: empty,
     sequelize: { transaction: async fn => { const tx = { LOCK: { UPDATE: 'UPDATE' }, writes: 0, attempts: 0 };
       try { await fn(tx); state.writes += tx.writes; state.attempts += tx.attempts; state.commits++; }
@@ -27,10 +32,17 @@ async function fixture(t, options = {}) {
     '../services/accessSession.service': session,
     '../services/scopeConnectionResolver.service': { ...resolver, resolveGoogleConnectionForScope: async opts => {
       assert.equal(opts.metadataOnly, true); state.resolves++; return { connection: conn, assignment: { googleConnectionId: 81 } };
-    }, findSingleUserConnection: async () => ({ connection: conn, ambiguous: false }) },
+    }, findSingleUserConnection: async (model, userId, attributes) => {
+      assert.equal(Number(userId), 701); assert.deepEqual(Array.from(attributes), ['id', 'googleUserId']); return { connection: conn, ambiguous: false };
+    } },
     '../lib/oauthMarketingScopeAccess': require('../../lib/oauthMarketingScopeAccess'),
     '../lib/marketingScopeAccess': { hasMarketingClinicScopeAccess: async ({ userId, clinicIds, access }) => {
       assert.equal(access, 'write'); return userId === 701 && state.allowed && clinicIds.every(id => state.clinics.includes(id));
+    } },
+    '../services/googlePropertyRevocation.service': { status: async ids => {
+      state.propertyReads++; assert(ids.every(id => [71, 72].includes(id))); await state.onPropertyStatus?.();
+      if (state.propertyStatusFailure) throw Error('FICTITIOUS_SECRET');
+      return { pending_assets: state.propertyPending, confirmed_assets: state.propertyConfirmed };
     } },
     '../services/businessProfileRevocation.service': { status: async ids => { state.reads++; assert(ids.every(id => state.clinics.includes(id)));
       await state.onStatus?.(); if (state.statusFailure) throw Error('FICTITIOUS_SECRET');
@@ -38,7 +50,8 @@ async function fixture(t, options = {}) {
     } },
     '../services/oauthScopedDisconnect.service': { deactivateGoogleMappingsForScope: async args => {
       assert.equal(args.actorId, 701); assert.equal(args.connectionId, 81); args.transaction.attempts++;
-      if (state.enqueueFailure) throw Object.assign(Error('FICTITIOUS_SECRET'), { code: 'gbp_revocation_unavailable' });
+      if (state.enqueueFailure === 'scope_disconnect_shared_asset_conflict') throw Object.assign(Error('La propiedad se utiliza fuera del ámbito.'), { code: state.enqueueFailure, httpStatus: 409 });
+      if (state.enqueueFailure) throw Object.assign(Error('FICTITIOUS_SECRET'), { code: typeof state.enqueueFailure === 'string' ? state.enqueueFailure : 'gbp_revocation_unavailable' });
       return { brokerRevocationsPending: state.pending };
     } },
   }, { logs });
@@ -89,4 +102,27 @@ test('status loses stale metadata on post-read revocation, scope loss, membershi
 });
 test('unscoped deletion refuses connections with any surviving managed reference', async t => {
   const f = await fixture(t); assert.equal((await f.request({ query: '' })).status, 409); assert.equal(f.state.destroyed, 0);
+});
+test('property metadata is aggregated with GBP and a property-only tombstone prevents unscoped deletion', async t => {
+  const f = await fixture(t, { managed: 0, propertyManaged: 1, propertyPending: 2, propertyConfirmed: 3 });
+  assert.deepEqual((await f.request({ status: true })).body, { status: 'pending', pending_assets: 3, confirmed_assets: 3 });
+  f.state.pending = 0; f.state.propertyPending = 0;
+  assert.deepEqual((await f.request({ status: true })).body, { status: 'confirmed', pending_assets: 0, confirmed_assets: 4 });
+  assert.equal((await f.request({ query: '' })).status, 409); assert.equal(f.state.destroyed, 0);
+});
+test('SC/GA capture errors and shared conflicts roll back the HTTP transaction with closed errors', async t => {
+  for (const [error, status] of [['google_property_revocation_unavailable', 503], ['scope_disconnect_shared_asset_conflict', 409]]) {
+    const f = await fixture(t, { enqueueFailure: error }); const result = await f.request();
+    assert.equal(result.status, status); assert.equal(result.body.error, error);
+    assert.equal(f.state.writes + f.state.attempts + f.state.commits, 0); assert.equal(f.state.rolledBack, 1);
+  }
+});
+test('post-property status checks discard data on session or scope loss and fail closed on invalid counts', async t => {
+  for (const [change, code] of [[state => { state.revoked = true; }, 401], [state => { state.allowed = false; }, 403],
+    [state => { state.clinics = [71]; }, 403], [state => { state.propertyStatusFailure = true; }, 503],
+    [state => { state.propertyPending = Number.MAX_SAFE_INTEGER; }, 503]]) {
+    const f = await fixture(t); f.state.onPropertyStatus = () => change(f.state);
+    const result = await f.request({ status: true, query: '?group_id=9' }); assert.equal(result.status, code);
+    assert.equal(result.body.pending_assets, undefined); if (code === 503) assert.equal(result.body.error, 'google_revocation_unavailable');
+  }
 });

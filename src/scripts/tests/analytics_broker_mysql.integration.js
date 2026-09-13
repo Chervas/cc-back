@@ -18,6 +18,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     ['SearchConsoleBrokerBinding', 'searchconsolebrokerbinding'], ['GoogleOAuthBrokerBinding', 'googleoauthbrokerbinding']]) models[name] = require('../../../models/' + file)(sql, D);
   report.checks.push('Actual GA migration applies, rolls back while empty and reapplies on owned MySQL');
   const G = models.GoogleConnection; const M = models.ClinicAnalyticsProperty; const B = models.AnalyticsBrokerBinding;
+  await require('../../../migrations/20260913060000-create-google-property-broker-revocations').up(qi, D);
+  models.GooglePropertyBrokerRevocation = require('../../../models/googlepropertybrokerrevocation')(sql, D);
   const subject = 'fictitious-ga-subject'; const connection = (id, googleUserId = subject) => G.create({ id, googleUserId, accessToken: null, refreshToken: null });
   await connection(81);
   const mapping = (await M.create({ id: 91, clinicaId: 71, googleConnectionId: 81, propertyName: 'properties/123',
@@ -75,7 +77,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   report.checks.push('The same GA property supports separately registered clinic mappings without inheriting or sharing their blocked state');
   await connection(82); await assert.rejects(service.prepare(mapping), { code: 'broker_binding_invalid' });
   const legacy = require('../../services/googleLegacyCredentials.service').createGoogleLegacyCredentials({ connectionModel: G,
-    bindingModel: models.GoogleOAuthBrokerBinding, searchConsoleModel: models.SearchConsoleBrokerBinding, analyticsModel: B });
+    bindingModel: models.GoogleOAuthBrokerBinding, searchConsoleModel: models.SearchConsoleBrokerBinding, analyticsModel: B, propertyRevocationModel: models.GooglePropertyBrokerRevocation });
   for (const id of [81, 82]) await assert.rejects(legacy.load(id), { code: 'google_oauth_legacy_closed' });
   const oauth = require('../../services/googleOAuthBroker.service').createGoogleOAuthBroker({ models, sessions: {}, client: {}, audit: {}, enabled: () => false });
   await assert.rejects(oauth.assertLegacyAllowed(), { code: 'google_oauth_legacy_closed' });

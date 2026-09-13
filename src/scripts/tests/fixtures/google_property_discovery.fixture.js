@@ -19,6 +19,7 @@ function propertyFixture(kind = 'analytics') {
     response: kind === 'analytics' ? { ...propertyData } : { siteUrl: SITE.siteUrl, permissionLevel: 'siteOwner' }, allowed: true, session: true, logs: [] };
   const loadMapping = async id => { await state.beforeMapping?.(); return state.mappings.find(row => row.id === id); };
   const deps = { enabled: () => state.enabled, now: () => state.at, loadMapping, loadBindings: async () => state.records,
+    loadRevocations: async () => state.revocations || [],
     loadConnection: async () => state.connection,
     client: { execute: async (command, budget) => { assert(budget.timeoutMs > 0 && budget.timeoutMs <= 30000); state.calls.push(command);
       await state.afterCall?.(); return { data: structuredClone(state.response) }; } } };
