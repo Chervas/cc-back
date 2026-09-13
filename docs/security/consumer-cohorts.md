@@ -1,5 +1,21 @@
 # Inventario de consumidores y plan de corte
 
+## 13/09/2026 — Controles de revocación SC/GA preparados en el broker
+
+El broker admite bloqueo durable de Search Console y GA4 por clínica/conexión/
+propiedad, con grants y claves de control separados de lectura. Persiste bloqueo,
+auditoría v2 y resultado juntos; replay tras reinicio y descarte de respuestas
+posteriores a la revocación. No consulta secretos ni llama a Google para bloquear.
+
+QA aislada: 202 tests Node (93 broker, 109 backend), incluido HTTPS local firmado,
+reinicios, SQLite y hotfix getAssetStats. Sin nueva DDL ni QA MySQL/UI en este
+bloque. DELETE Google, cola/worker, estado y auditoría humana SC/GA aún pendientes:
+la desconexión durable conectada a la API sigue cubriendo GBP. Todas las
+migraciones compartidas y despliegues siguen pendientes. OPS aplazado; sin AWS,
+proveedores reales, cambios de pausas ni verificación del apagado EC2.
+
+[Contrato y próximos pasos](google-property-revocation-control.md).
+
 ## 13/09/2026 — Propiedades Google con varios mappings y acceso compartido
 
 SC conserva varios vínculos legítimos por propiedad mediante registro compuesto

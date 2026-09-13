@@ -1,11 +1,11 @@
 'use strict';
 const test = require('node:test'); const assert = require('node:assert/strict'); const fs = require('node:fs'); const path = require('node:path');
-const net = require('node:net'); const { randomBytes } = require('node:crypto'); const { execFileSync } = require('node:child_process');
+const net = require('node:net'); const { randomBytes, generateKeyPairSync } = require('node:crypto'); const { execFileSync } = require('node:child_process');
 const { fixture } = require('./helpers'); const { analyticsReport } = require('./analytics-helpers'); const { allowPort, removePort } = require('./offline-guard.cjs');
 const runtime = require('../src/google-main'); const contract = require('../src/google-analytics-contract'); const { eventFor, drainAudit } = require('../src/audit');
 const { createIntegrationsBrokerClient } = require('../../../src/lib/integrationsBrokerClient');
 const { createAnalyticsBroker } = require('../../../src/services/analyticsBroker.service');
-test('actual GA TLS runtime, signed client and adapter exchange metrics only and retain a block across restart', async t => {
+test('actual GA TLS runtime and backend adapter preserve scoped revocation and connection blocks after restart', async t => {
   const f = fixture(t); const cert = path.join(f.dir, 'tls.crt'); const key = path.join(f.dir, 'tls.key'); const cursorKey = path.join(f.dir, 'cursor.key');
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert,
     '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1'], { stdio: 'ignore' });
@@ -16,6 +16,9 @@ test('actual GA TLS runtime, signed client and adapter exchange metrics only and
   f.policy.connections[0] = { ...f.policy.connections[0], provider: contract.PROVIDER, secretArn, clientSecretArn: appArn,
     googleSubject: 'fictitious-subject', analyticsProperties: [resource] };
   f.policy.grants[0] = { ...f.policy.grants[0], assetRef: resource.assetRef, operations: contract.OPERATIONS };
+  const controlKey = generateKeyPairSync('ed25519');
+  f.policy.principals.push({ ...f.policy.principals[0], id: 'control:test', keyId: 'qa-control', publicKey: controlKey.publicKey.export({ type: 'spki', format: 'pem' }) });
+  f.policy.grants.push({ ...f.policy.grants[0], principalId: 'control:test', operations: [contract.REVOKE_OPERATION] });
   const probe = net.createServer(); await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve)); const port = probe.address().port; await new Promise(resolve => probe.close(resolve));
   const config = { cohort: 'google-analytics-read-v1', enabled: true, policy: f.policy, listenAddress: '127.0.0.1', port,
     stateFile: path.join(f.dir, 'ga.sqlite'), tlsCertFile: cert, tlsKeyFile: key, cursorKeyFile: cursorKey };
@@ -60,14 +63,28 @@ test('actual GA TLS runtime, signed client and adapter exchange metrics only and
   const properties = await consumer.read(mapping, context, 'discovery', {}, { beforeExecute: async () => ({ timeoutMs: 1000 }) });
   assert.equal(properties.data.name, 'properties/123'); assert.equal(properties.data.secret, undefined);
   assert.equal(metadataCalls, 12); assert.equal(reads, 3); assert.equal(refreshes, 1);
+  const control = createIntegrationsBrokerClient({ origin: `https://127.0.0.1:${port}`, audience: f.policy.audience, keyId: 'qa-control',
+    privateKey: controlKey.privateKey.export({ type: 'pkcs8', format: 'pem' }), ca: fs.readFileSync(cert) });
+  const revocation = f.command({ operation: contract.REVOKE_OPERATION, assetRef: resource.assetRef });
+  await assert.rejects(client.execute(revocation), { code: 'scope_denied' });
+  assert.deepEqual((await control.execute(revocation)).data, { revoked: true });
+  assert.equal((await control.execute(revocation)).replayed, true);
+  await assert.rejects(consumer.read(mapping, context, 'discovery', {}), { code: 'asset_revoked' });
+  assert.equal(metadataCalls, 12); assert.equal(refreshes, 1); assert.equal(reads, 3);
   await drainAudit(app.store, sink); assert.equal(app.store.backlog().pending, 0);
   assert(events.some(e => e.version === 2 && e.operation === 'google.analytics.city.read.v1' && e.resourceRef === 'ga4:123'));
+  assert.equal(events.filter(e => e.action === 'asset.revoked' && e.operation === contract.REVOKE_OPERATION && e.actorId === 'control:test').length, 1);
   const durable = JSON.stringify(events) + JSON.stringify(app.store.db.prepare('SELECT * FROM commands').all());
   for (const token of [ACCESS, 'FICTITIOUS_REFRESH', 'FICTITIOUS_CLIENT', 'FICTITIOUS_DIMENSION_', 'FICTITIOUS_PROPERTY_LABEL']) assert(!durable.includes(token));
+  await app.close(); app = null; app = await runtime.main(filename, dependencies);
+  assert.equal((await control.execute(revocation)).replayed, true);
+  await assert.rejects(consumer.read(mapping, context, 'city', range), { code: 'asset_revoked' });
+  await assert.rejects(consumer.read(mapping, context, 'discovery', {}), { code: 'asset_revoked' });
+  assert.equal(metadataCalls, 12); assert.equal(reads, 3);
   app.broker.block('connection:test', eventFor({ ...f.command(), assetRef: resource.assetRef, operation: contract.OPERATIONS[0] }, f.policy.principals[0], f.policy,
     'connection.blocked', 'success', 'operator_block'));
   await app.close(); app = null; app = await runtime.main(filename, dependencies);
   await assert.rejects(consumer.read(mapping, context, 'city', range), { code: 'connection_blocked' });
   await assert.rejects(consumer.read(mapping, context, 'discovery', {}), { code: 'connection_blocked' });
-  assert.equal(reads, 3); assert.equal(refreshes, 1); await app.close(); app = null; assert.equal(closes, 2);
+  assert.equal(reads, 3); assert.equal(refreshes, 1); await app.close(); app = null; assert.equal(closes, 3);
 });

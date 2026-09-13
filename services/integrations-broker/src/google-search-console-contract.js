@@ -3,6 +3,7 @@ const { createHash } = require('node:crypto');
 const { schema } = require('./contracts'); const { fail } = require('./errors');
 const discovery = require('./google-property-discovery-contract');
 const PROVIDER = 'google_search_console'; const PREFIX = 'google.search_console.';
+const REVOKE_OPERATION = PREFIX + 'asset.revoke.v1';
 const SCOPES = Object.freeze(['https://www.googleapis.com/auth/webmasters.readonly', 'https://www.googleapis.com/auth/webmasters']);
 const OPERATIONS = Object.freeze(['timeseries', 'queries', 'pages', 'inspection', 'discovery'].map(v => PREFIX + v + '.read.v1'));
 const PAGE_SIZE = 500; const MAX_ROWS = 25000;
@@ -70,4 +71,4 @@ function project(family, raw, payload) {
   if (Buffer.byteLength(JSON.stringify(result)) > 786432) fail('provider_failed');
   return result;
 }
-module.exports = { PROVIDER, PREFIX, SCOPES, OPERATIONS, PAGE_SIZE, MAX_ROWS, date, site, resource, validate, project };
+module.exports = { PROVIDER, PREFIX, SCOPES, OPERATIONS, REVOKE_OPERATION, PAGE_SIZE, MAX_ROWS, date, site, resource, validate, project };

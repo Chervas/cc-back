@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-13",
+  "sourceHead": "78728e7257ef89886c8c3a2953d2942552922b72",
+  "includesWorkingChanges": true,
+  "runtimeMigrated": 0,
+  "newMigrations": [],
+  "ops": "deferred_by_user",
+  "awsInstance": "shutdown_announced_unverified",
+  "method": "Source review and isolated Node/SQLite/signed HTTPS with fictitious AWS/provider dependencies. No real runtime, AWS or provider verification.",
+  "pending": [
+    "SC/GA durable SQL disconnect intent, scoped shared/primary authorization, worker, confirmation and human audit",
+    "SC/GA onboarding, remapping, OAuth, general status and whole lifecycle UI",
+    "Combined cohort runtime/transport and approved real deployment, migration and source/IAM isolation",
+    "Other provider consumers, complete platform audit, DPD retention, Cost Explorer/Budget/CloudFormation and database encryption/restoration/cut"
+  ],
+  "rows": [
+    {
+      "file": "services/integrations-broker/src/google-main.js",
+      "sha256": "daf04bfa139e6a3ce97217b2bd2180f5e89997bcce0c4bf36290881eac090734",
+      "consumers": [
+        "SC/GA runtime policy admission"
+      ],
+      "status": "prepared_offline",
+      "note": "Explicit control grants, fixed properties and distinct reader/control principals and public keys; no live configuration change."
+    },
+    {
+      "file": "services/integrations-broker/src/google-search-console-contract.js",
+      "sha256": "17bbe7b256574b790d20c1cbd7db08462fac1fc8457c94d38141a7de22a26a7b",
+      "consumers": [
+        "SC control operation name"
+      ],
+      "status": "prepared_offline",
+      "note": "Separate REVOKE_OPERATION export; five read OPERATIONS unchanged."
+    },
+    {
+      "file": "services/integrations-broker/src/google-analytics-contract.js",
+      "sha256": "0e948ea4f7d66d5edcec2c390fc018abca5a37ff00c385630a18d24d54607161",
+      "consumers": [
+        "GA control operation name"
+      ],
+      "status": "prepared_offline",
+      "note": "Separate REVOKE_OPERATION export; ten read OPERATIONS unchanged."
+    },
+    {
+      "file": "services/integrations-broker/src/google-search-console.js",
+      "sha256": "48157af8337a70a25fe7608b79dbb33b133dfa4c37ed6740d5020fe74e2ee3dd",
+      "consumers": [
+        "SC operation registry"
+      ],
+      "status": "prepared_offline",
+      "note": "Empty payload; existing broker revoke_asset control; no secrets/provider dispatch."
+    },
+    {
+      "file": "services/integrations-broker/src/google-analytics.js",
+      "sha256": "70023f5bc91ade9360b64e138e017937a9457a03a9720717dd65c06ef31a733d",
+      "consumers": [
+        "GA operation registry"
+      ],
+      "status": "prepared_offline",
+      "note": "Empty payload; existing broker revoke_asset control; no secrets/provider dispatch."
+    },
+    {
+      "file": "services/integrations-broker/src/broker.js",
+      "sha256": "bb29274c5f152b1d387dba40e4daf765bb38b204a8428397bfbc5bfb5b7d836c",
+      "consumers": [
+        "Per-tuple access guard and revocation dispatch"
+      ],
+      "status": "unchanged_dependency",
+      "note": "Aborts local reads and checks SQLite around awaits; service audit only."
+    },
+    {
+      "file": "services/integrations-broker/src/store.js",
+      "sha256": "74869b3324b75738226b2ccd658139c25302924c7526d3310936ee03ac5a35d3",
+      "consumers": [
+        "Durable revocation and replay"
+      ],
+      "status": "unchanged_dependency",
+      "note": "Existing SQLite schema; atomic two-event write, tombstone and command result."
+    },
+    {
+      "file": "src/services/searchConsoleBroker.service.js",
+      "sha256": "db75187dba16c6714331d8b2a14f09fe2591c1da24ab040f3025d950cda189b7",
+      "consumers": [
+        "SC backend read adapter"
+      ],
+      "status": "unchanged_consumer",
+      "note": "Actual TLS test checks asset_revoked after restart; durable SQL disconnect intent still pending."
+    },
+    {
+      "file": "src/services/analyticsBroker.service.js",
+      "sha256": "b7f0e01d382fcac464c71834ae47c40af576023efc7c3f76c3aeacedb213e3ec",
+      "consumers": [
+        "GA backend read adapter"
+      ],
+      "status": "unchanged_consumer",
+      "note": "Actual TLS test checks asset_revoked after restart; durable SQL disconnect intent still pending."
+    },
+    {
+      "file": "src/services/oauthScopedDisconnect.service.js",
+      "sha256": "77b6a192244873a5c205c85c4dbcb66c5dbbeb56f84a7e4d525660044ee9d880",
+      "consumers": [
+        "Scoped Google disconnect"
+      ],
+      "status": "pending",
+      "note": "Currently enqueues only GBP controls; no SC/GA queue, worker or human completion audit yet."
+    },
+    {
+      "file": "src/routes/oauth.routes.js",
+      "sha256": "0d8647ab90fe778de04109c3d746418e3a1e35c7158ec477327227e4427f19f1",
+      "consumers": [
+        "Google disconnect and status API"
+      ],
+      "status": "pending",
+      "note": "No change to current coverage; does not send SC/GA revoke operations."
+    }
+  ]
+}

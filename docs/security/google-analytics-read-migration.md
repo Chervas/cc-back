@@ -1,5 +1,14 @@
 # GA4: lecturas por broker preparadas
 
+## 13/09/2026 — Controles de revocación SC/GA preparados en el broker
+
+Añadido control cerrado de bloqueo por tupla clínica/conexión/propiedad,
+con principal y clave distintos de lectura. Conserva grants de otras tuplas,
+aunque compartan credencial. No distingue mappings SQL con la misma tupla.
+Auditoría v2 y bloqueo sobreviven a reinicios. La API/cola/worker de desconexión
+SC/GA, sus bloqueos SQL y auditoría humana todavía deben integrarse. No despliegue,
+operación real ni migración compartida. [Contrato](google-property-revocation-control.md).
+
 ## Ampliación vigente de mappings y compartidos (13/09/2026)
 
 El [bloque compartido](google-shared-property-migration.md) incorpora PK SC

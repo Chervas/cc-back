@@ -3,6 +3,7 @@ const { schema } = require('./contracts'); const { fail } = require('./errors');
 const { date } = require('./google-search-console-contract');
 const discovery = require('./google-property-discovery-contract');
 const PROVIDER = 'google_analytics'; const PREFIX = 'google.analytics.';
+const REVOKE_OPERATION = PREFIX + 'asset.revoke.v1';
 const SCOPES = Object.freeze(['https://www.googleapis.com/auth/analytics.readonly', 'https://www.googleapis.com/auth/analytics']);
 const FAMILIES = Object.freeze({ daily: null, channel: 'sessionDefaultChannelGroup', source_medium: 'sessionSourceMedium',
   device: 'deviceCategory', country: 'country', city: 'city', language: 'language', gender: 'userGender', age: 'userAgeBracket' });
@@ -84,4 +85,4 @@ function project(family, raw, payload) {
     rows: projected, rowCount: count, metadata };
   if (Buffer.byteLength(JSON.stringify(result)) > 786432) fail('provider_failed'); return result;
 }
-module.exports = { PROVIDER, PREFIX, SCOPES, FAMILIES, METRICS, OPERATIONS, PAGE_SIZE, MAX_ROWS, property, resource, validate, dimensions, project };
+module.exports = { PROVIDER, PREFIX, SCOPES, FAMILIES, METRICS, OPERATIONS, REVOKE_OPERATION, PAGE_SIZE, MAX_ROWS, property, resource, validate, dimensions, project };

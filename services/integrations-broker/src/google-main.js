@@ -25,6 +25,17 @@ function privateFile(filename, limit = 1048576) {
   if (!stat.isFile() || stat.mode & 0o077 || stat.size > limit) fail('invalid_request');
   return fs.readFileSync(filename);
 }
+function validatePropertyControlSeparation(policy, contract) {
+  const readers = new Set(policy.grants.filter(g => g.operations.some(op => contract.OPERATIONS.includes(op))).map(g => g.principalId));
+  const keyFor = id => {
+    try { return createPublicKey(policy.principals.find(p => p.id === id).publicKey).export({ type: 'spki', format: 'der' }).toString('base64'); }
+    catch { fail('invalid_request'); }
+  };
+  const readerKeys = new Set([...readers].map(keyFor));
+  for (const grant of policy.grants.filter(g => g.operations.includes(contract.REVOKE_OPERATION))) {
+    if (readers.has(grant.principalId) || readerKeys.has(keyFor(grant.principalId))) fail('invalid_request');
+  }
+}
 function validateConfig(config) {
   if (!config || Object.keys(config).sort().join(',') !== 'cohort,cursorKeyFile,enabled,listenAddress,policy,port,stateFile,tlsCertFile,tlsKeyFile'
     || config.enabled !== true || !['google-business-profile-read-v1', 'google-search-console-read-v1', 'google-analytics-read-v1'].includes(config.cohort)
@@ -41,9 +52,10 @@ function validateConfig(config) {
       }
     }
     for (const grant of config.policy.grants) {
-      if (!/^clinic:[1-9]\d{0,9}$/.test(grant.tenantRef) || grant.operations.some(op => !scContract.OPERATIONS.includes(op))) fail('invalid_request');
+      if (!/^clinic:[1-9]\d{0,9}$/.test(grant.tenantRef) || grant.operations.some(op => !scContract.OPERATIONS.includes(op) && op !== scContract.REVOKE_OPERATION)) fail('invalid_request');
       scContract.resource(config.policy.connections.find(c => c.connectionRef === grant.connectionRef), grant.assetRef);
     }
+    validatePropertyControlSeparation(config.policy, scContract);
     return config;
   }
   if (config.cohort === 'google-analytics-read-v1') {
@@ -56,9 +68,10 @@ function validateConfig(config) {
       }
     }
     for (const grant of config.policy.grants) {
-      if (!/^clinic:[1-9]\d{0,9}$/.test(grant.tenantRef) || grant.operations.some(op => !gaContract.OPERATIONS.includes(op))) fail('invalid_request');
+      if (!/^clinic:[1-9]\d{0,9}$/.test(grant.tenantRef) || grant.operations.some(op => !gaContract.OPERATIONS.includes(op) && op !== gaContract.REVOKE_OPERATION)) fail('invalid_request');
       gaContract.resource(config.policy.connections.find(c => c.connectionRef === grant.connectionRef), grant.assetRef);
     }
+    validatePropertyControlSeparation(config.policy, gaContract);
     return config;
   }
   if (!config.policy.connections.length || config.policy.connections.some(c => c.provider !== PROVIDER || !c.secretArn || !c.clientSecretArn)

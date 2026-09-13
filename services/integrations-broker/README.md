@@ -1,5 +1,16 @@
 # Broker de integraciones
 
+## 13/09/2026 — Controles de revocación SC/GA preparados en el broker
+
+google.search_console.asset.revoke.v1 y google.analytics.asset.revoke.v1 aceptan
+payload vacío y grant exacto; reutilizan control revoke_asset, SQLite y auditoría
+v2. REVOKE_OPERATION queda fuera de OPERATIONS de lectura. El arranque exige
+principal y clave distintos de todos los lectores. Sin consultas de secretos ni
+llamadas de proveedor por el control. Bloqueos/replay persisten tras reinicio;
+los lectores conservan checks después de awaits. La API/cola de desconexión
+SC/GA todavía debe conectarse; no activar el flujo parcial.
+[Contrato, pruebas y pendientes](../../docs/security/google-property-revocation-control.md).
+
 ## Consumidores SC/GA compartidos preparados
 
 SC usa ahora registros SQL compuestos por site_hash/mapping_id y conserva cada

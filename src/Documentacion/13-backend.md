@@ -1,5 +1,38 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Controles de revocación SC/GA preparados en el broker
+
+Operaciones internas nuevas en el transporte firmado del broker:
+
+| Operación | Tupla autorizada | Contrato |
+|---|---|---|
+| google.search_console.asset.revoke.v1 | clinic:id + conexión + sc:SHA256(siteUrl) | payload {}; data {revoked:true} |
+| google.analytics.asset.revoke.v1 | clinic:id + conexión + ga4:propertyId | payload {}; data {revoked:true} |
+
+El arranque exige grants explícitos, propiedad incluida en esa conexión y
+principal/clave Ed25519 separados de todos los lectores. Las listas OPERATIONS
+siguen siendo solo de lectura; REVOKE_OPERATION se exporta aparte. No añade
+acceso de control a las configuraciones existentes automáticamente.
+
+Bloqueo, dos eventos v2 y resultado del comando se persisten juntos en SQLite.
+El mismo UUID/digest devuelve replayed=true sin duplicar eventos; otra tupla
+con ese UUID produce idempotency_conflict. Un fallo de auditoría revierte la
+transacción. No obtiene secretos ni llama a Google; no revoca el token OAuth.
+
+El bloqueo afecta a clínica/conexión/propiedad y sobrevive a reinicio. Mappings
+SQL distintos con esa misma tupla comparten bloqueo: mapping_id no forma parte
+del protocolo. Otras tuplas siguen activas. Se comprueba antes del despacho y
+tras awaits, también con otra conexión SQLite; el aborto local puede devolver
+provider_timeout y las lecturas siguientes asset_revoked. connection_blocked
+conserva prioridad. Control permitido aun con conexión bloqueada o caducada.
+
+DELETE /oauth/google/disconnect y GET /oauth/google/disconnection-status no
+amplían aún su cobertura: el encolado/worker, confirmación y auditoría humana
+SC/GA siguen pendientes, incluidos compartidos/primarios. No hay nueva ruta UI,
+DDL, flag o job. No despliegue ni migración en la BD compartida. No activar una
+cohorte SC/GA por disponer únicamente de este control interno.
+Contrato backend: docs/security/google-property-revocation-control.md.
+
 ## 13/09/2026 — Propiedades Google con varios mappings y acceso compartido
 
 Los listados SC/GA registrados incluyen mappings propios del ámbito y mappings

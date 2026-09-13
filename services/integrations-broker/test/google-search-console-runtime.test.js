@@ -1,11 +1,11 @@
 'use strict';
 const test = require('node:test'); const assert = require('node:assert/strict'); const fs = require('node:fs'); const path = require('node:path');
-const net = require('node:net'); const { randomBytes } = require('node:crypto'); const { execFileSync } = require('node:child_process');
+const net = require('node:net'); const { randomBytes, generateKeyPairSync } = require('node:crypto'); const { execFileSync } = require('node:child_process');
 const { fixture } = require('./helpers'); const { allowPort, removePort } = require('./offline-guard.cjs');
 const runtime = require('../src/google-main'); const contract = require('../src/google-search-console-contract'); const { drainAudit, eventFor } = require('../src/audit');
 const { createIntegrationsBrokerClient } = require('../../../src/lib/integrationsBrokerClient');
 const { createSearchConsoleBroker } = require('../../../src/services/searchConsoleBroker.service');
-test('actual SC TLS runtime and backend adapter exchange only metrics, refresh inside broker and preserve the block after restart', async t => {
+test('actual SC TLS runtime and backend adapter preserve scoped revocation and connection blocks after restart', async t => {
   const f = fixture(t); const cert = path.join(f.dir, 'tls.crt'); const key = path.join(f.dir, 'tls.key'); const cursorKey = path.join(f.dir, 'cursor.key');
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert,
     '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1'], { stdio: 'ignore' });
@@ -15,6 +15,9 @@ test('actual SC TLS runtime and backend adapter exchange only metrics, refresh i
   f.policy.connections[0] = { ...f.policy.connections[0], provider: contract.PROVIDER, secretArn, clientSecretArn: appArn,
     googleSubject: 'fictitious-subject', searchConsoleSites: [{ siteUrl: site.siteUrl, assetRef: site.assetRef }] };
   f.policy.grants[0] = { ...f.policy.grants[0], assetRef: site.assetRef, operations: contract.OPERATIONS };
+  const controlKey = generateKeyPairSync('ed25519');
+  f.policy.principals.push({ ...f.policy.principals[0], id: 'control:test', keyId: 'qa-control', publicKey: controlKey.publicKey.export({ type: 'spki', format: 'pem' }) });
+  f.policy.grants.push({ ...f.policy.grants[0], principalId: 'control:test', operations: [contract.REVOKE_OPERATION] });
   const probe = net.createServer(); await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve)); const port = probe.address().port; await new Promise(resolve => probe.close(resolve));
   const config = { cohort: 'google-search-console-read-v1', enabled: true, policy: f.policy, listenAddress: '127.0.0.1', port,
     stateFile: path.join(f.dir, 'sc.sqlite'), tlsCertFile: cert, tlsKeyFile: key, cursorKeyFile: cursorKey };
@@ -59,15 +62,29 @@ test('actual SC TLS runtime and backend adapter exchange only metrics, refresh i
     payload: { startDate: '2026-09-01', endDate: '2026-09-02' } }), { code: 'scope_denied' }); assert.equal(descriptions, before);
   const discovered = await consumer.read(mapping, context, 'discovery', {}, { beforeExecute: async () => ({ timeoutMs: 1000 }) });
   assert.deepEqual(discovered.data, { siteUrl: site.siteUrl, permissionLevel: 'siteOwner' }); assert.equal(reads, 3); assert.equal(descriptions, 6);
+  const control = createIntegrationsBrokerClient({ origin: `https://127.0.0.1:${port}`, audience: f.policy.audience, keyId: 'qa-control',
+    privateKey: controlKey.privateKey.export({ type: 'pkcs8', format: 'pem' }), ca: fs.readFileSync(cert) });
+  const revocation = f.command({ operation: contract.REVOKE_OPERATION, assetRef: site.assetRef });
+  await assert.rejects(client.execute(revocation), { code: 'scope_denied' });
+  assert.deepEqual((await control.execute(revocation)).data, { revoked: true });
+  assert.equal((await control.execute(revocation)).replayed, true);
+  await assert.rejects(consumer.read(mapping, context, 'discovery', {}), { code: 'asset_revoked' });
+  assert.equal(descriptions, 6); assert.equal(refreshes, 1); assert.equal(reads, 3);
   await drainAudit(app.store, sink); assert.equal(app.store.backlog().pending, 0);
   assert(delivered.some(e => e.version === 2 && e.operation === contract.OPERATIONS[1] && e.resourceRef === site.assetRef));
+  assert.equal(delivered.filter(e => e.action === 'asset.revoked' && e.operation === contract.REVOKE_OPERATION && e.actorId === 'control:test').length, 1);
   const durable = JSON.stringify(delivered) + JSON.stringify(app.store.db.prepare('SELECT * FROM commands').all());
   for (const sentinel of [ACCESS, 'FICTITIOUS_REFRESH', 'FICTITIOUS_CLIENT_SECRET', 'FICTITIOUS_QUERY_', 'https://example.invalid/page']) assert(!durable.includes(sentinel));
+  await app.close(); app = null; app = await runtime.main(filename, dependencies);
+  assert.equal((await control.execute(revocation)).replayed, true);
+  await assert.rejects(consumer.read(mapping, context, 'queries', { startDate: '2026-09-01', endDate: '2026-09-02' }), { code: 'asset_revoked' });
+  await assert.rejects(consumer.read(mapping, context, 'discovery', {}), { code: 'asset_revoked' });
+  assert.equal(descriptions, 6); assert.equal(reads, 3);
   app.broker.block('connection:test', eventFor({ ...f.command(), assetRef: site.assetRef, operation: contract.OPERATIONS[0] }, f.policy.principals[0], f.policy,
     'connection.blocked', 'success', 'operator_block'));
-  await app.close(); app = null; assert.equal(closed, 1);
+  await app.close(); app = null; assert.equal(closed, 2);
   app = await runtime.main(filename, dependencies);
   await assert.rejects(consumer.read(mapping, context, 'queries', { startDate: '2026-09-01', endDate: '2026-09-02' }), { code: 'connection_blocked' });
   await assert.rejects(consumer.read(mapping, context, 'discovery', {}), { code: 'connection_blocked' });
-  assert.equal(reads, 3); assert.equal(refreshes, 1); await app.close(); app = null; assert.equal(closed, 2);
+  assert.equal(reads, 3); assert.equal(refreshes, 1); await app.close(); app = null; assert.equal(closed, 3);
 });
