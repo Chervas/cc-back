@@ -36,6 +36,21 @@ class BrokerStore {
         created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, state TEXT NOT NULL,
         baseline_version TEXT NOT NULL, app_version TEXT NOT NULL, code_digest TEXT, secret_digest TEXT, activation_at INTEGER);
       CREATE INDEX IF NOT EXISTS google_oauth_connection_state ON google_oauth_flows(connection,state);
+      CREATE TABLE IF NOT EXISTS whatsapp_onboarding_flows (id TEXT PRIMARY KEY, principal TEXT NOT NULL,
+        tenant TEXT NOT NULL, connection TEXT NOT NULL, asset TEXT NOT NULL, state_hash TEXT NOT NULL UNIQUE,
+        config_digest TEXT NOT NULL, scope_digest TEXT NOT NULL, clinic_digest TEXT NOT NULL, clinic_count INTEGER NOT NULL,
+        created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('awaiting','exchanging','staging','staged','interrupted','aborted')),
+        code_digest TEXT UNIQUE, waba_id TEXT, phone_id TEXT, secret_digest TEXT, credential_metadata TEXT);
+      CREATE INDEX IF NOT EXISTS whatsapp_onboarding_scope ON whatsapp_onboarding_flows(connection,state,created_at);
+      CREATE TABLE IF NOT EXISTS whatsapp_onboarding_wabas (waba_id TEXT PRIMARY KEY,
+        connection TEXT NOT NULL, tenant TEXT NOT NULL, asset TEXT NOT NULL, scope_digest TEXT NOT NULL,
+        clinic_digest TEXT NOT NULL, first_flow TEXT NOT NULL, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS whatsapp_onboarding_scope_blocks (scope_key TEXT PRIMARY KEY,
+        first_connection TEXT NOT NULL, request_id TEXT NOT NULL, revoked_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS whatsapp_onboarding_assets (waba_id TEXT NOT NULL, phone_id TEXT PRIMARY KEY,
+        connection TEXT NOT NULL, tenant TEXT NOT NULL, asset TEXT NOT NULL, scope_digest TEXT NOT NULL,
+        clinic_digest TEXT NOT NULL, first_flow TEXT NOT NULL, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS nonces (principal TEXT NOT NULL, nonce TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(principal,nonce));
       CREATE TABLE IF NOT EXISTS rate_windows (principal TEXT NOT NULL, window INTEGER NOT NULL, count INTEGER NOT NULL, PRIMARY KEY(principal,window));
       CREATE TABLE IF NOT EXISTS commands (principal TEXT NOT NULL, id TEXT NOT NULL, digest TEXT NOT NULL,
@@ -65,7 +80,7 @@ class BrokerStore {
     if (this.db.prepare('SELECT 1 FROM asset_revocations WHERE tenant=? AND connection=? AND asset=?')
       .get(request.tenantRef, request.connectionRef, request.assetRef)) fail('asset_revoked');
   }
-  revokeAsset(principal, request, digest, requested, completed, maxBacklog, now) {
+  revokeAsset(principal, request, digest, requested, completed, maxBacklog, now, mutate) {
     return this.transaction(() => {
       const existing = this.db.prepare('SELECT * FROM commands WHERE principal=? AND id=?').get(principal, request.requestId);
       if (existing) {
@@ -78,6 +93,7 @@ class BrokerStore {
       this.appendAudit(requested);
       this.db.prepare('INSERT OR IGNORE INTO asset_revocations VALUES (?,?,?,?,?)')
         .run(request.tenantRef, request.connectionRef, request.assetRef, request.requestId, now);
+      mutate?.();
       this.appendAudit(completed);
       this.db.prepare("INSERT INTO commands VALUES (?,?,?,'completed',?,?)")
         .run(principal, request.requestId, digest, JSON.stringify(result), now);

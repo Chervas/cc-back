@@ -1,5 +1,13 @@
 # Runbooks operativos del backend
 
+## 13/09/2026 — Alta WhatsApp: candidata y recuperación preparadas
+
+[Contrato del broker de alta](security/whatsapp-onboarding-broker.md): operaciones
+privadas firmadas, registro antes del canje, Secrets Manager por versión/hash y
+bloqueo durable del ámbito. No activa conexiones. Rutas/UI, configuración Meta,
+aislamiento y corte del MFA público siguen pendientes. Sin nueva DDL clínica
+ni instalación; no se modifica la cuarentena ni se usan credenciales reales.
+
 ## 13/09/2026 — WhatsApp primero; OPS no es dependencia
 
 Aclaración del usuario: OPS solo consume datos para paneles y puede estar

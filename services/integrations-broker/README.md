@@ -1,5 +1,15 @@
 # Broker de integraciones
 
+## 13/09/2026 — Alta WhatsApp durable en el broker
+
+Cohorte privada `whatsapp-onboarding-v1`: begin/finish/status/abort firmados,
+canje único, candidata en Secrets Manager y conciliación por versión/hash.
+Baja de control con bloqueos de grupo/clínicas independientes y auditoría atómica.
+No exige MetaConnection general; rechaza grants de Ads/leads. No activa el canal.
+Runtime preparado, sin instalación ni gateway/UI conectados. Configuración y
+permisos reales Meta/AWS pendientes; cuarentena conservada.
+[Contrato, recuperación y lote pendiente](../../docs/security/whatsapp-onboarding-broker.md).
+
 ## 13/09/2026 — Transporte privado del alta WhatsApp
 
 Canje con aplicación/URI fijadas, token prestado solo dentro del broker y

@@ -1,8 +1,9 @@
 # Transporte privado de canje y prueba de pertenencia WhatsApp
 
 13/09/2026. Implementación interna del broker, probada con proveedor ficticio.
-No está registrada como operación pública ni conectada a gateway, rutas OAuth,
-Secrets Manager o consumidores. No permite todavía completar un alta real.
+Integrada posteriormente en el [broker durable del alta](whatsapp-onboarding-broker.md)
+con operaciones privadas firmadas y candidata Secrets Manager. Sigue sin
+gateway, rutas OAuth o consumidores conectados; no completa un alta real.
 
 ## Canje con configuración fijada
 
@@ -17,7 +18,8 @@ El protocolo de canje lleva código y app secret en la query HTTPS directa a
 Meta. No registrar URL, parámetros, errores crudos, cabeceras ni trazas APM de
 esa salida. Tampoco devolver esa URL al navegador/API. El transporte no añade
 instrumentación de logs. Al integrarlo, la clave debe leerse desde Secrets Manager
-dentro del broker, sin usar el `.env` de la API general; esa unión sigue pendiente.
+dentro del broker, sin usar el `.env` de la API general; esa unión está preparada
+en el runtime de alta, pendiente de instalación/configuración real.
 
 `withExchangedToken({code,appSecret,signal?}, callback)` toma buffers y los copia
 antes del primer await. Solo el callback interno recibe el token canjeado y
@@ -58,15 +60,16 @@ corresponde al registro de alta y al conjunto de clínicas ya autorizado.
 
 ## Integración que sigue pendiente
 
-Conectar el [estado durable con MFA](whatsapp-authorization-state.md) a una
-operación autenticada del broker que registre el intento **antes** del canje,
-fije aplicación/configuración/URI y WABA/número, preserve cancelación y bloquee
+Conectar el [estado durable con MFA](whatsapp-authorization-state.md) a las
+operaciones del broker de alta, que ya registran el intento **antes** del canje,
+fijan aplicación/configuración/URI y WABA/número, preservan cancelación y bloquean
 repetición tras respuesta perdida o reinicio. El helper de transporte no aporta
 idempotencia durable por sí solo; no invocarlo desde rutas independientes.
 
-La credencial candidata debe permanecer en Secrets Manager, con estado de
+El broker de alta guarda la candidata en Secrets Manager, con estado de
 preparación, versión e identidad/ámbito verificados y conciliación tras fallo.
-La identidad Meta nueva se verificará/registrará sin exigir MetaConnection general.
+Verifica la identidad Meta nueva sin exigir MetaConnection general; gateway/UI
+todavía mantienen el flujo anterior en cuarentena.
 Una credencial de alta con varios permisos WhatsApp no se puede copiar en los
 dos roles operativos de envío/gestión del motor y presentarlos como separados.
 La compatibilidad de ese aprovisionamiento con Meta sigue por acreditar.

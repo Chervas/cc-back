@@ -28,18 +28,18 @@ incidente. Las pruebas locales no autorizan llamadas reales ni una apertura.
 
 ## Motor WhatsApp: siguiente integración
 
-Añadido transporte privado de canje con app/URI fijas y prueba de pertenencia
-WABA/número por endpoint y cursor acotados. 294 pruebas broker pasan, 31 nuevas;
-46 afectadas repetidas tras el último refuerzo. Aún sin operación de alta,
-persistencia de candidata, rutas o configuración instaladas. Próximo bloque:
-unir estado MFA, lifecycle durable en broker y Secrets Manager; después conectar
-gateway/UI. [Transporte y límites](whatsapp-oauth-transport.md).
+Preparado ciclo durable del alta en el broker: operaciones firmadas, reclamación
+única del canje, candidata Secrets Manager y conciliación por versión/hash.
+Bloqueos independientes del grupo/clínicas originales y auditoría atómica.
+No activa cuentas; runtime sin instalar. Próximo bloque: unir gateway/MFA y UI,
+comprobar configuración Meta exclusiva WhatsApp, permisos efectivos, activación
+y consumidores públicos. [Contrato y límites](whatsapp-onboarding-broker.md).
 
 Nuevo avance: estado de autorización durable ligado a sesión con correo MFA y
 conjunto exacto de clínicas, con reclamación única, cancelación y auditoría v15.
 Probado en MySQL ficticio; todavía sin rutas ni canje. Nueva DDL 20260913150000
-pendiente de corte aprobado. La siguiente pieza sigue siendo el canje en broker
-y su registro seguro, junto con sustituir el requisito de MetaConnection general.
+pendiente de corte aprobado. La siguiente pieza conecta ese estado al registro
+del broker y sustituye el requisito de MetaConnection general en gateway/UI.
 La independencia WhatsApp/Ads/leads debe verificarse en los grants de Meta.
 [Contrato del estado](whatsapp-authorization-state.md).
 

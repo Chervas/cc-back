@@ -1,5 +1,25 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Contrato privado del alta WhatsApp
+
+Cohorte `whatsapp-onboarding-v1`, servidor TLS privado `/v1/execute`:
+`meta.whatsapp.onboarding.begin.v1`, `finish.v1`, `status.v1`, `abort.v1`.
+Principal gateway de alta con firma propia; control solo consulta/cancela y
+ejecuta `meta.whatsapp.onboarding.scope.revoke.v1` con clave distinta.
+App/config/URI, versiones y ámbito se fijan en política privada. El registro
+no necesita MetaConnection general ni acepta grants de Ads/leads.
+
+UUID de begin identifica el flujo; finish fija estado/código/WABA/número.
+Código reclamado antes de AWS/Meta, sin repetición tras incertidumbre/reinicio.
+Solo candidata por versión/hash en Secrets Manager; `staged` es un recibo
+histórico, `connected:false` siempre. Cancelación y bloqueo del grupo/clínicas
+originales persisten independientemente; auditoría técnica atómica con cambios.
+
+No cambia API/DTO público ni conecta rutas, UI o consumidores. No hay nueva DDL
+clínica: las de sesión/MFA/estado/bloqueos siguen pendientes en BD compartida.
+Faltan puente gateway con MFA, independencia real Meta y activación aprobada.
+Contrato, QA, costes y rollback: `back-dev/docs/security/whatsapp-onboarding-broker.md`.
+
 ## 13/09/2026 — Transporte privado de canje WhatsApp
 
 `whatsapp-oauth-http` fija app/redirect y endpoint TLS de canje, con límites,

@@ -1,5 +1,20 @@
 # Runbook: Migracion Segura De Integraciones Y Auditoria
 
+## 13/09/2026 — Alta WhatsApp durable y candidata en Secrets Manager
+
+El runtime privado registra el canje antes de Meta, comprueba identidad/scopes/
+WABA/número y guarda una versión candidata. Respuesta perdida: conciliación de
+versión/hash sin repetir código ni Put. Baja de control conserva bloqueos del
+grupo y clínicas originales, con recibo/auditoría en la misma transacción.
+`staged` no significa conectado. No se abre la cuarentena ni se instala el runtime.
+
+Slot placeholder previamente aprobado, app secret y versiones fijados; no crea
+secretos ni promueve AWSCURRENT. Sin DDL clínica nueva. Falta puente gateway/MFA,
+UI sin MetaConnection general, separación real de grants y corte de consumidores.
+Verificar IAM exacto, capacidad de versiones, aislamiento de procesos/SQL/Redis,
+ventana y rollback antes de operar. Las DDL anteriores siguen pendientes en
+BD compartida. [Contrato y validación](security/whatsapp-onboarding-broker.md).
+
 ## 13/09/2026 — Transporte de canje WhatsApp y pertenencia del número
 
 Preparado helper privado con app/URI fijadas, GET Meta sin variantes/reintentos,

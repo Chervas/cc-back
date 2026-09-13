@@ -42,7 +42,7 @@ class Broker {
       operation.validate(request.payload);
       operation.authorize?.({ request, binding, principal });
       this.adsEnrollment?.assert(request, principal, this.policy);
-      if (!['revoke_asset','google_oauth','google_ads_enrollment_status','google_ads_enrollment_revoke'].includes(operation.control)) {
+      if (!['revoke_asset','google_oauth','whatsapp_onboarding','google_ads_enrollment_status','google_ads_enrollment_revoke'].includes(operation.control)) {
         this.store.connection(request.connectionRef, now);
         this.store.assertAssetActive(request);
       }
@@ -58,7 +58,7 @@ class Broker {
     const digest = createHash('sha256').update(canonical({ operation: request.operation, tenantRef: request.tenantRef,
       connectionRef: request.connectionRef, assetRef: request.assetRef, payload: request.payload })).digest('hex');
     const assetKey = JSON.stringify([request.tenantRef, request.connectionRef, request.assetRef]);
-    if (operation.control === 'google_oauth') {
+    if (['google_oauth', 'whatsapp_onboarding'].includes(operation.control)) {
       try { return await operation.execute({ request, principal, binding }); }
       catch (error) {
         if (this.store.backlog().pending >= this.policy.maxBacklog) fail('audit_unavailable');
@@ -70,7 +70,8 @@ class Broker {
     if (operation.control === 'revoke_asset') {
       const result = this.store.revokeAsset(principal.id, request, digest,
         eventFor(request, principal, this.policy, 'integration.requested', 'accepted', 'authorized', now),
-        eventFor(request, principal, this.policy, 'asset.revoked', 'success', 'scope_disconnected', now), this.policy.maxBacklog, now);
+        eventFor(request, principal, this.policy, 'asset.revoked', 'success', 'scope_disconnected', now), this.policy.maxBacklog, now,
+        () => operation.commitRevocation?.({ request, binding, now }));
       for (const controller of this.activeAssets.get(assetKey) || []) controller.abort();
       operation.onRevoked?.(request);
       return result;

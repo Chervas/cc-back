@@ -1,5 +1,16 @@
 # Seguridad: implementación y evidencias
 
+## 13/09/2026 — Broker del alta WhatsApp preparado
+
+Operaciones privadas firmadas y estado durable: canje reclamado una vez,
+candidata Secrets Manager sin activación, recuperación por versión/hash y
+bloqueos originales conservados. QA ficticia; runtime sin instalar y sin
+conexión gateway/UI. No hay DDL clínica nueva ni proveedores reales usados.
+Regresión broker: 331 pruebas pasan, 37 nuevas, sin fallos ni omisiones;
+hotfix intacto.
+La independencia de permisos Meta y el recorrido público aún no están
+acreditados. [Contrato y siguiente corte](whatsapp-onboarding-broker.md).
+
 ## 13/09/2026 — Transporte del alta WhatsApp preparado
 
 Canje con app/URI fijadas y prueba WABA/número, únicamente dentro del broker;
