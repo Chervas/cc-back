@@ -5,6 +5,10 @@ y frontend `ff0306ff1b24d56e8e18aadc0a2a34244765700e`. OPS sigue aplazado. Este
 contrato describe código y pruebas aisladas: cero cuentas migradas, ninguna
 migración compartida, configuración instalada, proveedor real o despliegue.
 
+El [inventario registrado y estado por broker](google-ads-discovery-migration.md)
+se preparan en el bloque posterior, con permisos de API y revalidación de las
+cuentas. Alta/remapeo y el corte real siguen pendientes.
+
 ## Registro y dependencia de esquema
 
 `20260913080000-add-google-ads-broker-bindings.js` añade dos referencias opcionales

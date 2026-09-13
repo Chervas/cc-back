@@ -18,7 +18,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   }
   models.Clinica = sql.define('Clinica', { id_clinica: { type: D.INTEGER, primaryKey: true }, grupoClinicaId: D.INTEGER }, { tableName: 'Clinicas', timestamps: false });
   models.GroupAssetClinicAssignment = sql.define('GroupAssetClinicAssignment', { id: { type: D.INTEGER, primaryKey: true, autoIncrement: true },
-    assetType: D.STRING(64), assetId: D.INTEGER, clinicaId: D.INTEGER }, { tableName: 'GroupAssetClinicAssignments', timestamps: false });
+    assetType: D.STRING(64), assetId: D.INTEGER, clinicaId: D.INTEGER, grupoClinicaId: D.INTEGER }, { tableName: 'GroupAssetClinicAssignments', timestamps: false });
   await models.Clinica.sync(); await models.GroupAssetClinicAssignment.sync();
   await models.Clinica.bulkCreate([{ id_clinica: 59, grupoClinicaId: 5 }, { id_clinica: 71, grupoClinicaId: 5 }, { id_clinica: 99, grupoClinicaId: 6 }]);
   const f = require('./fixtures/google_ads_broker_scope.fixture').scopeFixture();
@@ -76,6 +76,47 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await assert.rejects(callback.assertLegacyAllowed(), { code: 'google_oauth_legacy_closed' });
   await assert.rejects(callback.assertLegacyConnection({ id: 2, googleUserId: f.binding.google_user_id }), { code: 'google_oauth_legacy_closed' });
   report.checks.push('Legacy OAuth entry and callback gates consult the Ads registry independently of feature flags');
+  const { createGoogleAdsDiscovery, createGoogleAdsDiscoveryRepository } = require('../../services/googleAdsDiscovery.service');
+  const { createGoogleAdsBroker } = require('../../services/googleAdsBroker.service');
+  let afterDiscovery; let discoveryCalls = 0;
+  const discoveryBroker = createGoogleAdsBroker({ ...createGoogleAdsScopeRepository(() => models), enabled: () => true,
+    client: { execute: async command => { discoveryCalls++; await afterDiscovery?.();
+      assert.equal(command.operation, 'google.ads.discovery.read.v1'); assert.equal(command.tenantRef, 'clinic:59');
+      return { requestId: command.requestId, data: { results: [{ customer: { id: '1234567890', manager: false,
+        descriptiveName: 'Fictitious SQL account', currencyCode: 'EUR', timeZone: 'Europe/Madrid', status: 'ENABLED' } }], nextPageToken: null } };
+    } } });
+  const discovery = createGoogleAdsDiscovery({ broker: discoveryBroker, ...createGoogleAdsDiscoveryRepository(() => models), enabled: () => true,
+    hasManaged: async () => { try { await callback.assertLegacyAllowed(); return false; } catch (e) { if (e.code === 'google_oauth_legacy_closed') return true; throw e; } } });
+  const discoveryInput = { clinicIds: [59, 71], scopeKey: 'group:5', connectionId: 2, revalidate: async () => {} };
+  const tokenReadsBeforeDiscovery = tokenReads;
+  assert.equal((await discovery.list(discoveryInput)).accounts[0].customerId, '1234567890');
+  assert.equal((await discovery.list({ ...discoveryInput, clinicIds: [71], scopeKey: 'clinic:71' })).accounts.length, 1);
+  assert.equal(discoveryCalls, 2); assert.equal(tokenReads, tokenReadsBeforeDiscovery);
+  report.checks.push('Registered Ads inventory uses real SQL metadata for group and inherited clinic, actual reader and owner tenant without credential hydration');
+  await M.create({ ...f.mapping, id: 12, assignmentScope: 'clinic', clinicaId: 71, customerId: '123-456-7890' });
+  await B.create({ ...f.binding, mapping_id: 12, scope_key: 'clinic:71' });
+  const localShare = await models.GroupAssetClinicAssignment.create({ assetType: 'google.ads_account', assetId: 11, clinicaId: 71, grupoClinicaId: 5 });
+  const beforeAliases = discoveryCalls;
+  assert.equal((await discovery.list({ ...discoveryInput, clinicIds: [71], scopeKey: 'clinic:71' })).accounts.length, 1);
+  assert.equal(discoveryCalls, beforeAliases + 1);
+  report.checks.push('Group authority wins over a clinic alias for the same canonical account, with one broker read and bounded explicit sharing');
+  afterDiscovery = () => models.GroupAssetClinicAssignment.create({ assetType: 'google.ads_account', assetId: 11, clinicaId: 99, grupoClinicaId: 6 });
+  await assert.rejects(discovery.list(discoveryInput), { code: 'scope_denied' }); afterDiscovery = null;
+  await models.GroupAssetClinicAssignment.destroy({ where: { clinicaId: 99 } });
+  report.checks.push('A foreign shared consumer committed during Ads discovery invalidates the response before any account is returned');
+  const RC = require('../../services/googleAdsRevocation.contract');
+  const revoked = { ...f.binding, scope_key: 'group:5', clinic_ids: '[59,71]', mapping_ids: '[11,12]',
+    request_id: require('node:crypto').randomUUID(), actor_user_id: 501, requested_at: new Date(), next_attempt_at: new Date(), state: 'pending' };
+  revoked.tuple_hash = RC.tupleHash(revoked);
+  afterDiscovery = () => models.GoogleAdsBrokerRevocation.create(revoked);
+  await assert.rejects(discovery.list(discoveryInput), { code: 'asset_revoked' }); afterDiscovery = null;
+  const afterRevocationCalls = discoveryCalls;
+  await assert.rejects(discovery.list(discoveryInput), { code: 'asset_revoked' }); assert.equal(discoveryCalls, afterRevocationCalls);
+  assert.equal(tokenReads, tokenReadsBeforeDiscovery);
+  report.checks.push('Durable Ads revocation during discovery survives the next request and stops provider dispatch without fallback or credential reads');
+  // Restore only this disposable fixture before continuing the original deletion/race checks.
+  await models.GoogleAdsBrokerRevocation.destroy({ where: { tuple_hash: revoked.tuple_hash } });
+  await localShare.destroy(); await B.destroy({ where: { mapping_id: 12 } }); await M.destroy({ where: { id: 12 } });
   await M.destroy({ where: { id: 11 } });
   await assert.rejects(create().prepare(f.mapping));
   assert.equal(await B.count(), 1);

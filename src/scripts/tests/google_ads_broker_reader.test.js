@@ -74,9 +74,9 @@ test('all read families use the same complete-page validator and downstream erro
   for (const family of contract.FAMILIES) {
     const input = family === 'account' ? {} : family.endsWith('_metrics') || family === 'landing_pages' ? { ...payload } : {};
     if (['ads', 'ad_metrics'].includes(family)) input.campaignId = null;
-    f.state.response = { results: family === 'account'
-      ? [{ customer: { id: account.customerId, manager: false, currencyCode: 'EUR', timeZone: 'Europe/Madrid' } }] : [], nextPageToken: null };
-    assert.equal((await f.read(family, input)).length, family === 'account' ? 1 : 0);
+    f.state.response = { results: ['account', 'discovery'].includes(family)
+      ? [{ customer: { id: account.customerId, manager: false, currencyCode: 'EUR', timeZone: 'Europe/Madrid', ...(family === 'discovery' ? { descriptiveName: 'Fictitious account', status: 'ENABLED' } : {}) } }] : [], nextPageToken: null };
+    assert.equal((await f.read(family, input)).length, ['account', 'discovery'].includes(family) ? 1 : 0);
   }
   f.state.onCall = () => { throw Error('FICTITIOUS_SECRET_NOT_FOR_LOGS'); };
   await assert.rejects(f.read(), error => { assert.equal(error.code, 'google_ads_broker_read_failed'); assert.doesNotMatch(error.message, /FICTITIOUS_SECRET/); return true; });

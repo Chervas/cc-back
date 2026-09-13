@@ -23,6 +23,7 @@ cuenta y operación; no tenant de grupo ni operación genérica de búsqueda.
 
 | Operación | Payload exacto | Resultado permitido |
 |---|---|---|
+| `google.ads.discovery.read.v1` | `{}` | Resumen de cuenta: ID, nombre, manager, moneda, zona y estado; exactamente una fila |
 | `google.ads.account.read.v1` | `{}` | ID, manager=false, moneda y zona horaria |
 | `google.ads.campaigns.read.v1` | `{pageToken: null/string}` | Campañas y estados, máximo 5.000 |
 | `google.ads.campaign_metrics.read.v1` | `{startDate, endDate, pageToken}` | Métricas por campaña, fecha, red y dispositivo |
@@ -39,7 +40,9 @@ anuncios mantiene 15 días y 200.000 filas. Los límites de bytes pueden rechaza
 una consulta antes de alcanzar su máximo de filas. `campaignId` es null o una
 cadena de 1–20 dígitos, positiva sin ceros iniciales; no amplía el grant de cuenta.
 `pageToken` siempre es null o string y todos los campos de cada payload son
-obligatorios. El broker construye ocho plantillas GAQL cerradas.
+obligatorios. El broker construye nueve plantillas GAQL cerradas.
+La ampliación [de inventario y estado](google-ads-discovery-migration.md) conecta
+discovery con API/sesión/permisos; account mantiene su proyección anterior.
 El consumidor no envía query, URL, método, cabeceras, cuenta, gestor, campos,
 versión de API ni tokens. No se exponen operaciones de escritura o conversión.
 La revocación requiere principal y clave diferentes de todos los lectores;

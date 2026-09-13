@@ -4,7 +4,8 @@ const contract = require('../../services/integrations-broker/src/google-ads-cont
 const SAFE = new Set(['broker_binding_invalid', 'broker_cohort_disabled', 'broker_response_invalid', 'broker_configuration_invalid',
   'broker_timeout', 'broker_unavailable', 'connection_blocked', 'asset_revoked', 'scope_denied', 'operation_denied',
   'invalid_request', 'secret_unavailable', 'credential_revoked', 'provider_failed', 'provider_timeout',
-  'provider_unauthorized', 'rate_limited', 'audit_unavailable']);
+  'provider_unauthorized', 'rate_limited', 'audit_unavailable', 'google_discovery_scope_forbidden',
+  'google_discovery_session_required', 'broker_discovery_timeout']);
 const safe = error => SAFE.has(error?.code) ? error.code : 'google_ads_broker_read_failed';
 const fail = code => { throw Object.assign(Error(code), { code }); };
 const reference = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(value);
@@ -13,13 +14,14 @@ const reference = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_
 // every call. No caller-supplied tenant/account object grants access by itself.
 function createGoogleAdsBrokerReader({ client, assertContext, now = Date.now }) {
   if (typeof client?.execute !== 'function' || typeof assertContext !== 'function') fail('broker_configuration_invalid');
-  return { async read(context, family, input, { timeoutMs = 90000 } = {}) {
+  return { async read(context, family, input, { timeoutMs = 90000, beforeExecute } = {}) {
     try {
       if (!contract.FAMILIES.includes(family) || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 450000
+        || beforeExecute !== undefined && typeof beforeExecute !== 'function'
         || !input || typeof input !== 'object' || Array.isArray(input) || Object.hasOwn(input, 'pageToken')) fail('invalid_request');
       const operation = contract.PREFIX + family + '.read.v1';
       const basePayload = structuredClone(input);
-      contract.validate(operation, { ...basePayload, ...(family === 'account' ? {} : { pageToken: null }) });
+      contract.validate(operation, { ...basePayload, ...(['account', 'discovery'].includes(family) ? {} : { pageToken: null }) });
       const deadline = now() + timeoutMs;
       const captured = await assertContext(context);
       if (!captured || !reference(captured.connectionRef) || !/^clinic:[1-9]\d{0,9}$/.test(captured.tenantRef)
@@ -36,19 +38,21 @@ function createGoogleAdsBrokerReader({ client, assertContext, now = Date.now }) 
       // Byte-adaptive broker slices may be smaller than 250 rows. Enforce the
       // row limit independently and cap total calls; never silently truncate.
       for (let page = 0; page < 2000; page++) {
-        await verify();
-        const payload = { ...basePayload, ...(family === 'account' ? {} : { pageToken }) };
+        await verify(); await beforeExecute?.();
+        if (now() >= deadline) fail('broker_timeout');
+        const payload = { ...basePayload, ...(['account', 'discovery'].includes(family) ? {} : { pageToken }) };
         const requestId = randomUUID();
         const response = await client.execute({ requestId, operation, connectionRef: identity.connectionRef,
           tenantRef: identity.tenantRef, assetRef: identity.assetRef, payload }, { timeoutMs: Math.min(30000, deadline - now()) });
-        await verify();
+        await verify(); await beforeExecute?.();
+        if (now() >= deadline) fail('broker_timeout');
         const data = response?.data;
         if (response?.requestId !== requestId || !data || Object.keys(data).sort().join(',') !== 'nextPageToken,results'
           || !Array.isArray(data.results) || data.results.length > contract.PAGE_SIZE
           || Buffer.byteLength(JSON.stringify(data)) > 786432) fail('broker_response_invalid');
         const next = data.nextPageToken;
         if (next !== null && (typeof next !== 'string' || !/^[\x21-\x7e]{1,4096}$/.test(next)
-          || !data.results.length || family === 'account' || tokens.has(next))) fail('broker_response_invalid');
+          || !data.results.length || ['account', 'discovery'].includes(family) || tokens.has(next))) fail('broker_response_invalid');
         let projected;
         try { projected = contract.projectPage(family, { results: data.results }, payload, identity).results; }
         catch { fail('broker_response_invalid'); }
@@ -67,7 +71,7 @@ function createGoogleAdsBrokerReader({ client, assertContext, now = Date.now }) 
           }
           seen.add(key); rows.push(row);
         }
-        if (next === null) { await verify(); return rows; }
+        if (next === null) { await verify(); await beforeExecute?.(); if (now() >= deadline) fail('broker_timeout'); return rows; }
         if (rows.length === contract.rowLimit(family)) fail('broker_response_invalid');
         tokens.add(next); pageToken = next;
       }

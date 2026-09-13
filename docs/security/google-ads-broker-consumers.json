@@ -1,30 +1,29 @@
 {
-  "version": 5,
+  "version": 6,
   "reviewedAt": "2026-09-13",
-  "sourceHead": "e0c1b16b33a849f256c7386e0818efe375bca4d2",
+  "sourceHead": "59064134484b7f920a5ffacfccd050e3af88a4a0",
   "includesWorkingChanges": true,
   "runtimeMigrated": 0,
-  "newMigrations": [
-    "20260913100000-add-ads-google-oauth-cohort.js"
-  ],
+  "newMigrations": [],
   "ops": "deferred_by_user",
   "qa": {
-    "backendTests": 352,
-    "brokerTests": 160,
-    "platformAuditTests": 47,
-    "frontendTests": 6,
-    "mysqlChecks": 19,
+    "backendTests": 367,
+    "brokerTests": 163,
+    "frontendModelTests": 8,
+    "mysqlChecks": 15,
     "mysqlOwnedInstances": 1,
     "shutdownCodes": [
       0
     ],
-    "ui": "development_build_and_18_isolated_chromium_captures",
+    "ui": "no_component_or_style_changes",
+    "tls": "actual_Ads_runtime_discovery_and_fake_audit_delivery",
     "runtime": "no_real_account_or_provider_validation",
     "evidence": [
-      "ads-oauth-qa.json",
-      "ads-oauth-full-node.json",
-      "ads-oauth-final-mysql.log",
-      "ads-oauth-ui/result.json"
+      "ads-discovery-final-node.json",
+      "ads-discovery-full-broker.log",
+      "ads-discovery-final-tls.log",
+      "ads-discovery-first-mysql.log",
+      "ads-discovery-frontend-model.log"
     ]
   },
   "operations": [
@@ -41,7 +40,8 @@
     "google.ads.oauth.finish.v1",
     "google.ads.oauth.activate.v1",
     "google.ads.oauth.status.v1",
-    "google.ads.oauth.abort.v1"
+    "google.ads.oauth.abort.v1",
+    "google.ads.discovery.read.v1"
   ],
   "pending": [
     "Account registration/remapping, real bindings/grants and approved real Ads lifecycle cut",
@@ -51,7 +51,7 @@
   "rows": [
     {
       "file": "services/integrations-broker/src/google-ads-contract.js",
-      "sha256": "f37541f42aabe9936591df692a6cc6dc87982e63a38cf20748d24cb00e45ea0a",
+      "sha256": "6bfdcaa204be016d4e58f4f659cac8cf46938bf919dbd992fae274c70f1c8542",
       "status": "prepared_broker_engine_offline"
     },
     {
@@ -91,8 +91,8 @@
     },
     {
       "file": "src/services/googleAdsBrokerReader.service.js",
-      "sha256": "a555af2fb3f473e064e08433bdfd8b1d656ee1c14a33e68e946b3debc5ddfdbe",
-      "status": "prepared_typed_read_consumer_wired_in_sync_backfill_not_activated"
+      "sha256": "a4595dd4fdd80745240b216b503d2d66bfdae8faa727adc8d33b0ae6bf0c72da",
+      "status": "prepared_nine_typed_reads_with_request_authorization_callback"
     },
     {
       "file": "src/services/googleCampaignMetricsCache.service.js",
@@ -186,8 +186,8 @@
     },
     {
       "file": "src/routes/oauth.routes.js",
-      "status": "prepared_ads_atomic_disconnect_and_aggregated_status",
-      "sha256": "b12730d5ea099e6601e52d13e68795dcf2d78e9ed387a5a7eede7c4beb2baf03"
+      "status": "prepared_ads_inventory_status_and_guarded_legacy_transport",
+      "sha256": "166999ee10238774f4915263591a5adfce1d212ec7392c57bf4ed2884fdf1ab3"
     },
     {
       "file": "src/config/scheduledJobCatalog.js",
@@ -233,6 +233,11 @@
       "file": "migrations/20260913100000-add-ads-google-oauth-cohort.js",
       "status": "prepared_ddl_tested_only_on_owned_mysql",
       "sha256": "7be428f8dcac4dd5cdd4d94dabcea17c13581d3bd3373e6e28416486c94d43de"
+    },
+    {
+      "file": "src/services/googleAdsDiscovery.service.js",
+      "status": "prepared_registered_inventory_with_original_context_revalidation",
+      "sha256": "1f7e8838d7fc6f5e871717bd8a1e831934c31bbd4d7ee85c5fedf31b0a6e1de4"
     }
   ],
   "requiredAdsMigrations": [
@@ -242,30 +247,24 @@
   ],
   "previousQa": {
     "backendTests": 352,
+    "brokerTests": 160,
     "platformAuditTests": 47,
-    "mysqlChecks": 116,
-    "mysqlOwnedInstances": 9,
+    "frontendTests": 6,
+    "mysqlChecks": 19,
+    "mysqlOwnedInstances": 1,
     "shutdownCodes": [
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
       0
     ],
-    "broker": "unchanged_engine_previous_145_tests",
-    "ui": "contract_preserved_documentation_only",
+    "ui": "development_build_and_18_isolated_chromium_captures",
     "runtime": "no_real_account_or_provider_validation",
     "evidence": [
-      "ads-revocation-full-node.json",
-      "ads-revocation-audit.json",
-      "ads-revocation-full-mysql.json"
+      "ads-oauth-qa.json",
+      "ads-oauth-full-node.json",
+      "ads-oauth-final-mysql.log",
+      "ads-oauth-ui/result.json"
     ]
   },
-  "method": "Current source snapshot plus reviewed OAuth Ads changes; owned MySQL and full offline Node suites, actual broker TLS with fake AWS/provider, isolated Chromium. Previous QA remains historical.",
+  "method": "Current source snapshot plus registered Ads discovery/API changes; isolated HTTP/TLS, owned MySQL and offline regression. Previous validation remains historical.",
   "services": [
     "business_profile",
     "search_console",

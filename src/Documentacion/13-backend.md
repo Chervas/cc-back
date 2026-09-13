@@ -1,5 +1,40 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Inventario registrado y estado Google Ads
+
+GET /oauth/google/ads/accounts, con o sin view=selection, admite modo gestionado
+{success:true,accounts,unavailableAccountCount,inventory_mode:broker_grants}.
+Campos por cuenta: customerId, formattedCustomerId, descriptiveName, currencyCode,
+timeZone, accountStatus, isManager, loginCustomerId. CANCELED/CLOSED legibles se
+cuentan sin ofrecerse. No entrega identidades privadas ni estados MCC no verificados.
+
+GET /oauth/google/ads/connection-status requiere ahora ámbito explícito y write,
+igual que accounts. Devuelve connected:true/hasAccessibleAccounts/scope/source,
+inventory_mode:broker_grants y verification:registered_accounts_read tras leer
+las cuentas registradas. No equivale a salud OAuth global o permiso de escritura.
+Sin conexión: status connected:false/reason:no_connection; listado 404.
+
+Ambas rutas consultan metadata primero y exigen sesión gestionada para el broker.
+Revalidan usuario, permisos, conexión, grupos y conjunto antes/después; conservan
+el contexto original de cada cuenta hasta finalizar. Alias de clínica usa la
+autoridad del registro de grupo y tenant original. Revocación, mapping perdido,
+cambio de permiso o scope invalidan toda la respuesta sin fallback. Límites:
+20 cuentas distintas, 1.000 filas por colección, cuatro inventarios simultáneos,
+60 segundos cooperativos y 1 MiB de resultado. Cache-Control: private, no-store.
+
+Nueva operación google.ads.discovery.read.v1, payload vacío, grant explícito y
+GAQL cerrado de resumen de una sola cuenta. No registra ni remapea activos.
+Legacy anterior al corte usa carga/refresh condicionados y revalidación de cada
+petición; conserva reasons insufficient_scope/token_expired/config_missing/token_error.
+El selector conserva CUSTOMER_NOT_ENABLED mediante código fijo saneado, sin mensaje
+original. Cualquier otro fallo impide devolver resultados parciales.
+
+No añade DDL, variables o jobs; dependencias de registros/revocaciones Ads y OAuth
+vigentes antes del código. Grant discovery/configuración y corte real pendientes.
+538 tests Node y 15 checks MySQL propios correctos, con HTTP/TLS ficticios. Contrato
+completo: backend docs/security/google-ads-discovery-migration.md. OPS aplazado;
+alta/remapeo, resto de consumidores y objetivo global permanecen abiertos.
+
 ## 13/09/2026 — Google Ads como cuarto servicio OAuth
 
 GET /oauth/google/connect y /oauth/google/connection-status admiten google_service=ads,

@@ -42,12 +42,15 @@ test('actual Ads HTTPS runtime serves typed pages, audits and retains disconnect
   const readTyped = (family, input, budget) => reader.read(context, family, input, budget);
   f.state.response = request => {
     const query = request.json.query;
-    if (/FROM customer /.test(query)) return { results: [{ customer: { id: CUSTOMER, currencyCode: 'EUR', timeZone: 'Europe/Madrid' } }] };
+    if (/FROM customer /.test(query)) return { results: [{ customer: { id: CUSTOMER, currencyCode: 'EUR', timeZone: 'Europe/Madrid', descriptiveName: 'FICTITIOUS_ACCOUNT', status: 'ENABLED' } }] };
     if (/FROM landing_page_view /.test(query)) return { results: [syncRow('landing_pages')] };
     if (/FROM ad_group_ad /.test(query)) return { results: [syncRow(/segments.date/.test(query) ? 'ad_metrics' : 'ads')] };
     if (/campaign.asset_automation_settings/.test(query)) return { results: [syncRow('publishing_campaigns')] };
     return { results: [row(1, /segments.date/.test(query), /FROM ad_group /.test(query))] };
   };
+  const inventory = await readTyped('discovery', {});
+  assert.equal(inventory[0].customer.descriptiveName, 'FICTITIOUS_ACCOUNT');
+  assert.equal(inventory[0].customer.status, 'ENABLED');
   const account = { id: 11, customerId: CUSTOMER, googleConnectionId: 2, assignmentScope: 'clinic',
     clinicaId: 59, grupoClinicaId: null, isActive: true, loginCustomerId: '9876543210' };
   const now = () => new Date('2026-09-03T02:00:00Z');
@@ -82,9 +85,10 @@ test('actual Ads HTTPS runtime serves typed pages, audits and retains disconnect
   assert.deepEqual((await control.execute(revoke)).data, { revoked: true });
   await assert.rejects(client.execute(f.command('campaigns', { pageToken: first.data.nextPageToken })), { code: 'asset_revoked' });
   await drainAudit(app.store, sink); assert.equal(app.store.backlog().pending, 0);
+  assert.ok(delivered.some(event => event.operation === 'google.ads.discovery.read.v1'));
   assert.ok(delivered.some(event => event.operation === contract.REVOKE_OPERATION && event.action === 'asset.revoked'));
   const saved = JSON.stringify(delivered) + JSON.stringify(app.store.db.prepare('SELECT * FROM commands').all());
-  for (const secret of [ACCESS, DEVELOPER, 'FICTITIOUS_REFRESH', 'FICTITIOUS_CLIENT_SECRET', 'FICTITIOUS_CAMPAIGN']) assert.ok(!saved.includes(secret));
+  for (const secret of [ACCESS, DEVELOPER, 'FICTITIOUS_REFRESH', 'FICTITIOUS_CLIENT_SECRET', 'FICTITIOUS_CAMPAIGN', 'FICTITIOUS_ACCOUNT']) assert.ok(!saved.includes(secret));
   await app.close(); app = null; app = await runtime.main(file, deps);
   assert.equal((await control.execute(revoke)).replayed, true);
   await assert.rejects(client.execute(f.command('campaigns')), { code: 'asset_revoked' });

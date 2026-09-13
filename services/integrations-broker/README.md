@@ -1,5 +1,14 @@
 # Broker de integraciones
 
+## 13/09/2026 — Resumen de cuentas Ads registradas
+
+Novena lectura google.ads.discovery.read.v1, payload vacío y grant explícito por
+cuenta/tenant/conexión. Resumen cerrado de cuenta, nombre, manager, moneda, zona
+y estado; exactamente una fila, sin página siguiente ni jerarquía libre.
+Auditoría técnica v2 conserva solo metadata de operación. 163 tests del broker
+correctos; TLS Ads repetido con discovery y comprobación de entrega ficticia.
+[API, permisos, costes y corte pendiente](../../docs/security/google-ads-discovery-migration.md).
+
 ## 13/09/2026 — OAuth Google Ads preparado
 
 La cohorte Ads admite cinco operaciones google.ads.oauth.*.v1 con principal/clave

@@ -1,5 +1,24 @@
 # Runbooks operativos del backend
 
+## 13/09/2026 — Inventario y estado Ads por broker
+
+Listado y estado Ads preparados sin tokens SQL para cuentas registradas.
+Nueva google.ads.discovery.read.v1: resumen de una cuenta/gestor fijados, campos
+cerrados y sin búsqueda libre. Comprueba aliases, grupos, revocaciones y permisos
+antes/después; una cuenta de grupo conserva su tenant original. Hasta 20 cuentas,
+cuatro inventarios simultáneos y 60 segundos cooperativos, sin resultados parciales.
+
+Ambas rutas requieren ámbito explícito/write y sesión gestionada en modo broker.
+El estado acredita solo registered_accounts_read. Legacy conserva los motivos del
+selector con carga/refresh condicionados y cierre ante nuevas marcas gestionadas.
+Sin nueva DDL, variables o jobs; catálogo 48. Gates/configuración reales intactos.
+QA: 538 tests Node (367 backend, 163 broker, 8 modelo frontend) y 15 checks en
+un MySQL propio con cierre 0; incluye TLS y HTTP reales con servicios ficticios.
+
+Alta/remapeo y otros consumidores siguen pendientes. También auditoría completa,
+costes/controles AWS y cifrado/corte BD; OPS aplazado, cero cuentas reales migradas.
+[Contrato y evidencia](security/google-ads-discovery-migration.md).
+
 ## 13/09/2026 — OAuth Ads preparado en broker, API y Ajustes
 
 Google Ads se incorpora como cuarto servicio (google_service=ads), con identidad

@@ -17,6 +17,7 @@ const ClinicMetaAsset = db.ClinicMetaAsset; // <-- Accede al modelo ClinicMetaAs
 const ClinicBusinessLocation = db.ClinicBusinessLocation;
 const businessProfileDiscovery = require('../services/businessProfileDiscovery.service');
 const googlePropertyDiscovery = require('../services/googlePropertyDiscovery.service');
+const googleAdsDiscovery = require('../services/googleAdsDiscovery.service');
 const googlePropertyInventoryScope = require('../services/googlePropertyInventoryScope.service');
 const googleLegacyCredentials = require('../services/googleLegacyCredentials.service');
 const accessSessions = require('../services/accessSession.service');
@@ -589,6 +590,98 @@ async function googlePropertyInventory(req, kind) {
     return { managed: null, resolved, connection, request: send => scopedRequest(connection, () => send(accessToken)) };
 }
 
+async function googleAdsInventory(req) {
+    const deadline = Date.now() + 60000;
+    const resolved = await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: true, metadataOnly: true });
+    if (!resolved.connection) throw Object.assign(Error('google_discovery_no_connection'), { code: 'google_discovery_no_connection' });
+    const clinicIds = req.marketingConnectionScopeAuthorization?.clinicIds?.slice();
+    const actor = getUserIdFromToken(req);
+    const revalidate = async managed => {
+        let claims;
+        try { claims = await accessSessions.verify(accessSessions.bearer(req.headers.authorization)); } catch { claims = null; }
+        if (!claims || Number(claims.userId) !== Number(actor) || managed && (claims.sessionVersion !== 1 || !claims.jti)) {
+            throw Object.assign(Error('google_discovery_session_required'), { code: 'google_discovery_session_required' });
+        }
+        let authorized;
+        try { authorized = await authorizeExplicitConnectionScope(req, 'write'); } catch {
+            throw Object.assign(Error('google_discovery_scope_forbidden'), { code: 'google_discovery_scope_forbidden' });
+        }
+        const latest = await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: true, metadataOnly: true });
+        if (!authorized.requested || authorized.clinicIds.length !== clinicIds?.length
+            || authorized.clinicIds.some(id => !clinicIds.includes(id)) || latest.scope?.scopeKey !== resolved.scope?.scopeKey
+            || Number(latest.connection?.id) !== Number(resolved.connection.id)) {
+            throw Object.assign(Error('broker_binding_invalid'), { code: 'broker_binding_invalid' });
+        }
+    };
+    const managed = await googleAdsDiscovery.list({ clinicIds, connectionId: Number(resolved.connection.id), scopeKey: resolved.scope?.scopeKey, revalidate });
+    if (managed !== null) return { managed, resolved };
+    const check = async () => {
+        await revalidate(false); await googleAdsDiscovery.assertLegacyAllowed();
+        if (Date.now() >= deadline) throw Object.assign(Error('broker_discovery_timeout'), { code: 'broker_discovery_timeout' });
+    };
+    await check();
+    const connection = await googleLegacyCredentials.load(resolved.connection.id, { includeScopes: true });
+    await check();
+    if (!hasScopeText(connection.scopes || '', GOOGLE_ADS_SCOPE)) throw Object.assign(Error('google_ads_legacy_insufficient_scope'), { code: 'google_ads_legacy_insufficient_scope' });
+    const scopedRequest = async (current, send) => {
+        await check();
+        const result = await googleLegacyCredentials.request(current, send);
+        await check(); return result;
+    };
+    let accessToken;
+    try {
+        ({ accessToken } = await ensureGoogleAccessToken(connection, { credentials: { ...googleLegacyCredentials, request: scopedRequest } }));
+        ensureGoogleAdsConfig();
+    } catch (error) {
+        await check(); // A new managed marker takes precedence over a legacy token error.
+        const reason = ['TOKEN_EXPIRED', 'TOKEN_EXPIRY_UNKNOWN', 'REFRESH_FAILED'].includes(error?.code) ? 'token_expired'
+            : error?.code === 'ADS_CONFIG_MISSING' ? 'config_missing' : 'token_error';
+        throw Object.assign(Error('google_ads_legacy_' + reason), { code: 'google_ads_legacy_' + reason });
+    }
+    await check();
+    let failure; let requests = 0;
+    const request = async (method, path, options = {}) => {
+        if (failure) throw failure;
+        let closedAccount = false;
+        try {
+            await check();
+            if (++requests > 100) throw Object.assign(Error('broker_discovery_limit'), { code: 'broker_discovery_limit' });
+            return await scopedRequest(connection, async () => {
+                try { return await googleAdsRequest(method, path, { ...options, singleAttempt: true,
+                    timeoutMs: Math.max(1, Math.min(8000, deadline - Date.now(), options.timeoutMs || 8000)) }); }
+                catch (error) {
+                    const details = error.response?.data?.error?.details;
+                    const codes = Array.isArray(details) ? details.flatMap(detail => (Array.isArray(detail.errors) ? detail.errors : [])
+                        .flatMap(item => Object.values(item.errorCode || {}))) : [];
+                    closedAccount = req.query.view === 'selection' && error.response?.status === 403 && codes.length > 0
+                        && codes.every(code => code === 'CUSTOMER_NOT_ENABLED');
+                    throw error;
+                }
+            });
+        } catch (error) {
+            // Preserve the picker’s documented unavailable-account case using
+            // only a fixed code, after rechecking the failed request’s authority.
+            if (closedAccount) {
+                await googleLegacyCredentials.assert(connection); await check();
+                throw Object.assign(Error('provider_unauthorized'), { response: { status: 403,
+                    data: { error: { details: [{ errors: [{ errorCode: { authorizationError: 'CUSTOMER_NOT_ENABLED' } }] }] } } } });
+            }
+            failure = Object.assign(Error(googleAdsDiscovery.safe(error)), { code: googleAdsDiscovery.safe(error) }); throw failure;
+        }
+    };
+    return { managed: null, resolved, connection, accessToken, request,
+        check: async () => { if (failure) throw failure; await check(); } };
+}
+
+function sendGoogleAdsDiscoveryError(res, error, connectionStatus = false) {
+    const reasons = { google_ads_legacy_insufficient_scope: 'insufficient_scope', google_ads_legacy_token_expired: 'token_expired',
+        google_ads_legacy_config_missing: 'config_missing', google_ads_legacy_token_error: 'token_error' };
+    const reason = Object.hasOwn(reasons, error?.code) ? reasons[error.code] : null;
+    if (reason) return connectionStatus ? res.json({ connected: false, reason })
+        : res.status(reason === 'insufficient_scope' ? 403 : 400).json({ success: false, error: reason });
+    return sendGooglePropertyDiscoveryError(res, error, connectionStatus);
+}
+
 function googleAnalyticsInventoryAccounts(properties) {
     const accounts = new Map();
     for (const property of properties) {
@@ -633,13 +726,13 @@ async function ensureGoogleAdsAccess(conn) {
     return tokenInfo;
 }
 
-async function listAccessibleAdsCustomers(accessToken) {
-    const resp = await googleAdsRequest('GET', 'customers:listAccessibleCustomers', { accessToken });
+async function listAccessibleAdsCustomers(accessToken, request = googleAdsRequest) {
+    const resp = await request('GET', 'customers:listAccessibleCustomers', { accessToken });
     const resourceNames = resp?.resourceNames || [];
     return resourceNames.map((name) => normalizeCustomerId(name.split('/').pop()));
 }
 
-async function fetchAdsCustomerSummary(accessToken, customerId, { loginCustomerId } = {}) {
+async function fetchAdsCustomerSummary(accessToken, customerId, { loginCustomerId, request = googleAdsRequest } = {}) {
     if (!customerId) {
         return null;
     }
@@ -661,7 +754,7 @@ async function fetchAdsCustomerSummary(accessToken, customerId, { loginCustomerI
     if (loginCustomerId) {
         requestOptions.loginCustomerId = normalizeCustomerId(loginCustomerId);
     }
-    const result = await googleAdsRequest('POST', `customers/${cleanId}/googleAds:search`, requestOptions);
+    const result = await request('POST', `customers/${cleanId}/googleAds:search`, requestOptions);
     const row = Array.isArray(result?.results) ? result.results[0] : null;
     if (!row?.customer) {
         return { customerId: cleanId };
@@ -676,7 +769,7 @@ async function fetchAdsCustomerSummary(accessToken, customerId, { loginCustomerI
     };
 }
 
-async function fetchAdsCustomerClients(accessToken, managerCustomerId) {
+async function fetchAdsCustomerClients(accessToken, managerCustomerId, request = googleAdsRequest) {
     const manager = normalizeCustomerId(managerCustomerId);
     if (!manager) {
         return [];
@@ -699,7 +792,7 @@ async function fetchAdsCustomerClients(accessToken, managerCustomerId) {
     const clients = [];
     let pageToken = null;
     do {
-        const resp = await googleAdsRequest('POST', `customers/${manager}/googleAds:search`, {
+        const resp = await request('POST', `customers/${manager}/googleAds:search`, {
             accessToken,
             loginCustomerId: manager,
             data: { query, pageToken }
@@ -732,7 +825,7 @@ async function fetchAdsCustomerClients(accessToken, managerCustomerId) {
     return clients;
 }
 
-async function fetchManagerLinkForCustomer(accessToken, customerId, managerId, { loginCustomerId } = {}) {
+async function fetchManagerLinkForCustomer(accessToken, customerId, managerId, { loginCustomerId, request = googleAdsRequest } = {}) {
     const manager = normalizeCustomerId(managerId);
     if (!manager) {
         return null;
@@ -751,7 +844,7 @@ async function fetchManagerLinkForCustomer(accessToken, customerId, managerId, {
     if (loginCustomerId) {
         requestOptions.loginCustomerId = normalizeCustomerId(loginCustomerId);
     }
-    const result = await googleAdsRequest('POST', `customers/${customerId}/googleAds:search`, requestOptions);
+    const result = await request('POST', `customers/${customerId}/googleAds:search`, requestOptions);
     const row = Array.isArray(result?.results) ? result.results[0] : null;
     if (!row?.customerManagerLink) {
         return null;
@@ -1178,6 +1271,7 @@ const PROVIDER_INVENTORY_PATHS = new Set([
     '/google/analytics/connection-status',
     '/google/local/locations',
     '/google/ads/accounts',
+    '/google/ads/connection-status',
     '/meta/assets'
 ]);
 const EXPLICIT_SCOPE_REQUIRED_PATHS = new Set([
@@ -2478,94 +2572,35 @@ router.get('/google/local/mappings', async (req, res) => {
  * GOOGLE — Estado de conexión Google Ads
  */
 router.get('/google/ads/connection-status', async (req, res) => {
+    res.set('Cache-Control', 'private, no-store');
     try {
-        const { userId, connection: conn, assignment, scope, source } = await resolveGoogleRequestConnection(req, {
-            allowLegacyUserFallback: true
-        });
-        if (!userId) {
-            return res.status(401).json({ connected: false, reason: 'unauthenticated' });
-        }
-        if (!conn) {
-            return res.json({ connected: false, reason: 'no_connection' });
-        }
-
-        if (!hasScopeText(conn.scopes || '', GOOGLE_ADS_SCOPE)) {
-            return res.json({ connected: false, reason: 'insufficient_scope' });
-        }
-
-        let accessToken;
-        try {
-            ({ accessToken } = await ensureGoogleAdsAccess(conn));
-        } catch (tokenErr) {
-            if (tokenErr.code === 'INSUFFICIENT_SCOPE') {
-                return res.json({ connected: false, reason: 'insufficient_scope' });
-            }
-            if (['TOKEN_EXPIRED', 'TOKEN_EXPIRY_UNKNOWN', 'REFRESH_FAILED'].includes(tokenErr.code)) {
-                return res.json({ connected: false, reason: 'token_expired' });
-            }
-            if (tokenErr.code === 'ADS_CONFIG_MISSING') {
-                return res.json({ connected: false, reason: 'config_missing' });
-            }
-            console.error('❌ Error obteniendo token Google Ads:', tokenErr.message);
-            return res.json({ connected: false, reason: 'token_error' });
-        }
-
-        let customers = [];
-        try {
-            customers = await listAccessibleAdsCustomers(accessToken);
-        } catch (adsErr) {
-            console.error('❌ Error consultando cuentas Ads accesibles:', adsErr.details || adsErr.message);
-            return res.json({ connected: false, reason: 'api_error' });
-        }
-
-        return res.json({
-            connected: true,
-            hasAccessibleAccounts: customers.length > 0,
-            scope: buildScopeResponse(scope, assignment),
-            source
-        });
-    } catch (err) {
-        if (err.code === 'ADS_CONFIG_MISSING') {
-            return res.json({ connected: false, reason: 'config_missing' });
-        }
-        console.error('❌ Error en /oauth/google/ads/connection-status:', err.details || err.message);
-        return res.status(500).json({ connected: false, reason: 'internal_error' });
-    }
+        const inventory = await googleAdsInventory(req);
+        const { assignment, scope, source } = inventory.resolved;
+        if (inventory.managed !== null) return res.json({ connected: true,
+            hasAccessibleAccounts: inventory.managed.accounts.length > 0, scope: buildScopeResponse(scope, assignment), source,
+            inventory_mode: 'broker_grants', verification: 'registered_accounts_read' });
+        const customers = await listAccessibleAdsCustomers(inventory.accessToken, inventory.request); await inventory.check();
+        return res.json({ connected: true, hasAccessibleAccounts: customers.length > 0, scope: buildScopeResponse(scope, assignment), source });
+    } catch (error) { return sendGoogleAdsDiscoveryError(res, error, true); }
 });
 
 /**
  * GOOGLE — Listar cuentas Google Ads accesibles
  */
 router.get('/google/ads/accounts', async (req, res) => {
+    res.set('Cache-Control', 'private, no-store');
     try {
-        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
-            allowLegacyUserFallback: true
-        });
-        if (!userId) {
-            return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
-        }
-        if (!conn) {
-            return res.status(404).json({ success: false, error: 'No hay conexión Google' });
-        }
-
-        if (!hasScopeText(conn.scopes || '', GOOGLE_ADS_SCOPE)) {
-            return res.status(403).json({ success: false, error: 'insufficient_scope' });
-        }
-
-        let accessToken;
-        try {
-            ({ accessToken } = await ensureGoogleAdsAccess(conn));
-        } catch (tokenErr) {
-            const reason = tokenErr.code === 'INSUFFICIENT_SCOPE' ? 'insufficient_scope' : tokenErr.code === 'TOKEN_EXPIRED' ? 'token_expired' : tokenErr.code === 'ADS_CONFIG_MISSING' ? 'config_missing' : 'token_error';
-            return res.status(400).json({ success: false, error: reason });
-        }
+        const inventory = await googleAdsInventory(req);
+        if (inventory.managed !== null) return res.json({ success: true, ...inventory.managed, inventory_mode: 'broker_grants' });
+        const { userId } = inventory.resolved;
+        const { connection: conn, accessToken, request } = inventory;
 
         if (req.query.view === 'selection') {
-            const selection = await discoverGoogleAdsAccountSelection({ accessToken });
-            return res.json({ success: true, ...selection });
+            const selection = await discoverGoogleAdsAccountSelection({ accessToken, request });
+            await inventory.check(); return res.json({ success: true, ...selection });
         }
 
-        const baseCustomers = await listAccessibleAdsCustomers(accessToken);
+        const baseCustomers = await listAccessibleAdsCustomers(accessToken, request);
         const uniqueCustomers = new Set();
         const queue = [];
         const parentByCustomer = new Map();
@@ -2593,7 +2628,7 @@ router.get('/google/ads/accounts', async (req, res) => {
             let summary = summaries.get(currentId);
             if (!summary) {
                 try {
-                    summary = await fetchAdsCustomerSummary(accessToken, currentId, { loginCustomerId: parentId });
+                    summary = await fetchAdsCustomerSummary(accessToken, currentId, { loginCustomerId: parentId, request });
                     if (summary) {
                         summaries.set(currentId, summary);
                     }
@@ -2609,7 +2644,7 @@ router.get('/google/ads/accounts', async (req, res) => {
 
             processedManagers.add(currentId);
             try {
-                const clients = await fetchAdsCustomerClients(accessToken, currentId);
+                const clients = await fetchAdsCustomerClients(accessToken, currentId, request);
                 for (const client of clients) {
                     if (!client?.customerId) {
                         continue;
@@ -2679,12 +2714,12 @@ router.get('/google/ads/accounts', async (req, res) => {
             try {
                 let summary = summaries.get(cleanId);
                 if (!summary) {
-                    summary = await fetchAdsCustomerSummary(accessToken, cleanId, { loginCustomerId: parentId });
+                    summary = await fetchAdsCustomerSummary(accessToken, cleanId, { loginCustomerId: parentId, request });
                     if (summary) {
                         summaries.set(cleanId, summary);
                     }
                 }
-                const link = await fetchManagerLinkForCustomer(accessToken, cleanId, getGoogleManagerId(), { loginCustomerId: parentId });
+                const link = await fetchManagerLinkForCustomer(accessToken, cleanId, getGoogleManagerId(), { loginCustomerId: parentId, request });
                 const parentSummary = parentId ? summaries.get(parentId) : null;
                 response.descriptiveName = summary?.descriptiveName || null;
                 response.currencyCode = summary?.currencyCode || null;
@@ -2727,15 +2762,9 @@ router.get('/google/ads/accounts', async (req, res) => {
             accounts.push(response);
         }
 
+        await inventory.check();
         return res.json({ success: true, managerId: formatCustomerId(getGoogleManagerId()), accounts });
-    } catch (err) {
-        if (err.code === 'ADS_CONFIG_MISSING') {
-            return res.status(500).json({ success: false, error: 'config_missing' });
-        }
-        console.error('❌ Error en /oauth/google/ads/accounts:', err.message, err.discoveryCodes || []);
-        return res.status(req.query.view === 'selection' ? 502 : 500).json({ success: false,
-            error: req.query.view === 'selection' ? 'google_ads_discovery_incomplete' : 'internal_error' });
-    }
+    } catch (error) { return sendGoogleAdsDiscoveryError(res, error); }
 });
 
 /**
