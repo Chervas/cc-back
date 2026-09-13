@@ -24,7 +24,7 @@ async function fixture(t) {
     bearer: header => { if (!header) throw Object.assign(Error(), { name: 'JsonWebTokenError' }); return header; }, verify: async () => ({ userId: 501 }),
   } });
   const router = loadDiscoverySource('routes/web.routes.js', { express, axios, sequelize: require('sequelize'), '../../models': models,
-    './auth.middleware': auth, '../services/googleLegacyCredentials.service': f.credentials,
+    './auth.middleware': auth, '../services/googleLegacyCredentials.service': f.credentials, '../services/searchConsoleBroker.service': { prepare: async () => null },
     '../lib/marketingScopeAccess': { hasMarketingClinicScopeAccess: async input => f.state.allowed && input.clinicIds.every(id => id === 71) },
     '../services/effectiveMarketingAssets.service': { resolveEffectiveMarketingAssetInventory: async () => {
       f.state.inventory++; return { google: { available_assets: { search_console: [{ mapping_id: 91, connection_id: 81, clinic_id: 71, site_url: 'https://fictitious.invalid/' }] } } };

@@ -1,5 +1,16 @@
 # Inventario de consumidores y plan de corte
 
+## Lecturas SC preparadas (13/09/2026)
+
+[Contrato](google-search-console-read-migration.md) y delta
+`google-search-console-consumers.json`: cuatro operaciones cerradas SC, rutas
+status/pages/inspección y webSync/backfills conectados al adaptador en código.
+Registro independiente por propiedad/mapping/identidad, tokens SQL NULL y
+revalidación alrededor de cada página. Amplía cierres legacy/global OAuth.
+GA, OAuth/discovery SC completos, otras cohortes y cobertura de auditoría
+pendientes. El nuevo esquema 20260913030000 es previo al código aun con gates
+apagados. Ningún consumidor migrado en runtime; OPS continúa aplazado.
+
 ## Ampliación SC/GA: bloqueo legacy preparado (13/09/2026)
 
 [Contrato](google-web-credentials-boundary.md) e inventario delta
@@ -26,7 +37,7 @@ el resultado no demuestra una fuga por sí solo.
 | Meta Ads/objetivos | campaignWorkspaceMeta*, metaWorkspaceSignal*, campana, effectiveMarketingAssets | conexión/grant, cuenta/página/pixel por clínica/grupo | Pendiente; separar lecturas de todas las mutaciones y publicidad |
 | Google Ads/inventario | googleAdsClient, googleAdsScopedRuntime, googleAdCache, googleCampaignMetricsCache, campaignWorkspaceGoogle* | grant exacto del mapping y developer token | Pendiente; métricas/lecturas primero tras aprobar consultas concretas |
 | Conversiones/recepción | googleDataManager*, googleAdsConversion*, metaCapi, metaLeadReception, metaWorkspaceSignalDelivery, intake, googleLeadReception | grant, activo, consentimiento y comandos durables | Pendiente; idempotencia/receipts y cero doble envío al cortar |
-| Perfil Google/Search Console/GA4 | businessProfileLocal, businessProfileLocationMapping, web.routes, sync.jobs, marketingReports | conexión y scope Google por vertical | Seis lecturas/dos jobs y listado por grants GBP preparados offline; primer registro cierra descubrimiento/remapeo legacy global. OAuth completo, OPS aplazado, escrituras, Search Console y GA4 pendientes. Ver contratos de cohorte |
+| Perfil Google/Search Console/GA4 | businessProfileLocal, businessProfileLocationMapping, web.routes, sync.jobs, marketingReports | conexión y scope Google por vertical | Siete lecturas GBP y cuatro SC con adaptadores preparadas offline. Cierres globales de legacy y registro independiente. OAuth/discovery SC completos, GA4 broker, escrituras y demás cohortes pendientes; OPS aplazado. Ver contratos de cohorte |
 | WhatsApp/recepción clínica | whatsapp.service, whatsappPhones, whatsappTemplates, whatsappAccount*, whatsappDeliveryGovernance, flowEngineV2, patientDirection, queue.workers | waAccessToken, teléfono/WABA efectivo, roles de canal | Pendiente; DEV/staging/gateway compatibles antes de retirar columnas |
 | OAuth/ciclo de vida | oauth.routes, whatsapp-embedded.routes, oauthConnectionPersistence, oauthScopedDisconnect, oauthConnectionHealth | app secrets, códigos, grants, tokens y bloqueos | Desconexión scoped y reautorización Google de identidad fijada preparadas offline. Alta nueva y ciclo completo del resto pendientes; nunca reactivar Meta |
 | Webhooks | whatsapp-webhook.routes, app.js, intakePublicAuthentication | firma sobre bytes originales, replay, entrega durable | Pendiente; recepción continua y deduplicada, fixtures firmadas |

@@ -1,5 +1,46 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Lecturas Search Console por broker preparadas
+
+`GET /web/clinica/:clinicaId/sc/pages` conserva items, partial y
+authorization_errors; las propiedades registradas usan referencias firmadas,
+sin cargar tokens Google. Divide limit/offset hasta 25.000 en páginas de 500
+y revalida mapping/identidad antes y después de cada llamada. Fallar todos los
+mappings conserva 409 web_mapping_authorization_unavailable; los motivos
+incluyen broker_cohort_disabled, broker_binding_invalid y broker_response_invalid.
+Los errores restantes se presentan con el motivo fijo de credenciales no
+disponibles; no se refleja el cuerpo del proveedor.
+
+`GET /web/clinica/:clinicaId/status` no llama al broker/proveedor para una
+propiedad gestionada. googleConnected=false; googleConnectionStatus añade
+managed_sites y metadata_only, excluye esas propiedades de unavailable_sites
+y usa search_console_broker_metadata. Es metadata, no acreditación de acceso
+Google. Una sesión gestionada rechazada devuelve 401, sin datos en caché.
+
+`POST /web/clinica/:clinicaId/psi/refresh` obtiene solo la inspección de raíz
+mediante broker; PSI/API key y sondas técnicas siguen independientes. Conserva
+snapshot/indexed_ok, con null si falla inspección. Error PSI fijo
+web_psi_refresh_failed (429); errores internos nunca reflejan tokens.
+
+Las lecturas gestionadas exigen sesión vigente sessionVersion=1/jti/mismo actor,
+permiso actual de la clínica solicitada e inventario efectivo. El mapping
+compartido conserva clínica/conexión original del grant. Pérdida de sesión o
+permiso devuelve 401 search_console_session_required o 403
+search_console_scope_forbidden, descartando la respuesta completa. La revisión
+se repite antes del agregado y después de persistir el snapshot PSI.
+
+Jobs SC/backfills usan cuatro familias cerradas; queries limita cada intervalo
+a 25.000 filas y añade rowLimits al informe al alcanzar el techo. Datos de un
+intervalo fallido no se devuelven parcialmente; filas anteriores persistidas
+permanecen. Sin cursor Google público ni nuevos endpoints/UI.
+
+El primer registro SearchConsoleBrokerBindings también cierra connect/callback
+Google legacy globalmente y cargas/UPDATE de tokens por ID o subject, con gates
+apagados. SC OAuth/discovery completos y GA broker pendientes; reautorización
+GBP sigue rechazando SC/GA/Ads activos. Nuevo esquema 20260913030000 y dependencias
+obligatorio antes del código. QA ficticia, sin migración real ni despliegue.
+Contrato backend: docs/security/google-search-console-read-migration.md.
+
 ## 13/09/2026 — Cierre de credenciales legacy para Search Console y GA4
 
 `GET /web/clinica/:clinicaId/status` devuelve `googleConnected:false` para

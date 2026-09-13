@@ -8,9 +8,12 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await models.GoogleConnection.sync();
   await require('../../../migrations/20260913020000-create-google-oauth-broker-flows').up(qi, D);
   models.GoogleOAuthBrokerBinding = require('../../../models/googleoauthbrokerbinding')(sql, D);
+  await qi.createTable('ClinicWebAssets', { id: { type: D.INTEGER, primaryKey: true } });
+  await require('../../../migrations/20260913030000-add-search-console-broker-read-binding').up(qi, D);
+  models.SearchConsoleBrokerBinding = require('../../../models/searchconsolebrokerbinding')(sql, D);
   const G = models.GoogleConnection; const B = models.GoogleOAuthBrokerBinding;
   const { createGoogleLegacyCredentials } = require('../../services/googleLegacyCredentials.service');
-  const create = () => createGoogleLegacyCredentials({ connectionModel: G, bindingModel: B });
+  const create = () => createGoogleLegacyCredentials({ connectionModel: G, bindingModel: B, searchConsoleModel: models.SearchConsoleBrokerBinding });
   const service = create(); let fullReads = 0;
   G.addHook('beforeFind', 'count_credentials', options => { if (options.attributes?.includes('accessToken')) fullReads++; });
   const row = (id, subject = 'fictitious-subject-' + id) => G.create({ id, googleUserId: subject,

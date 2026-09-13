@@ -1,5 +1,28 @@
 # Runbooks operativos del backend
 
+## 13/09/2026 — Lecturas Search Console por broker preparadas
+
+Cuatro lecturas cerradas de Search Console, referencias por propiedad/identidad,
+renovación confinada al broker y adaptadores de rutas web/sync/backfills.
+Registro independiente impide fallback y también cierra OAuth/credenciales
+legacy por ID o subject. HTTP revalida sesión gestionada, permiso e inventario
+antes/después de leer; status distingue metadata de disponibilidad real.
+
+QA ficticia: 126 tests Node, 31 checks MySQL en tres bases propias con cierre 0
+y tres contratos (scheduler 46 jobs, caducidad GBP, multigrant). Migración nueva
+`20260913030000` y dependencias, **antes del código aun con gates apagados**;
+solo ensayada localmente. Cero conexiones migradas, sin despliegue ni cambios
+UI. Amplía el bloqueo SC/GA del bloque anterior; GA y OAuth/discovery SC completos
+siguen pendientes.
+
+OPS aplazado; apagado EC2 anunciado, no verificado. Sin AWS, proveedores reales,
+BD compartida ni cambios de pausas. Persisten cohortes restantes, auditoría
+completa/retención, IAM, conciliación Budget/CloudFormation, Cost Explorer/tags
+y cifrado/restauración/corte BD. Paginación de 500 filas, hasta 50 llamadas por
+intervalo: coste/latencia reales pendientes de medir, sin gasto inventado.
+
+[Contrato, límites, costes y lote pendiente](security/google-search-console-read-migration.md).
+
 ## 13/09/2026 — Cierre de credenciales legacy para Search Console y GA4
 
 Preparada una frontera SQL por ID e identidad Google: un registro OAuth del

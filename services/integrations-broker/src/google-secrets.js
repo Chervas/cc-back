@@ -11,7 +11,10 @@ function containsSecret(value, secrets) {
 }
 // Refresh is confined to this broker. No OAuth authorization flow, secret writes,
 // provider revocation endpoint, environment credentials or clinical database.
-function createGoogleSecretStore({ client, http, accountId, prefix, kmsKeyArn, now = () => Date.now(), maxEntries = 64 }) {
+function createGoogleSecretStore({ client, http, accountId, prefix, kmsKeyArn, now = () => Date.now(), maxEntries = 64, provider = PROVIDER }) {
+  const sc = require('./google-search-console-contract');
+  if (![PROVIDER, sc.PROVIDER].includes(provider)) fail('invalid_request');
+  const scopes = provider === sc.PROVIDER ? sc.SCOPES : [SCOPE];
   const { DescribeSecretCommand, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
   if (!/^\d{12}$/.test(accountId) || !/^\/clinicaclick\/integrations\/(dev|staging|prod)\/$/.test(prefix)
     || !new RegExp(`^arn:aws:kms:eu-west-3:${accountId}:key/[a-f0-9-]+$`).test(kmsKeyArn)
@@ -48,7 +51,7 @@ function createGoogleSecretStore({ client, http, accountId, prefix, kmsKeyArn, n
         const result = await http({ hostname: 'oauth2.googleapis.com', path: '/token', form, signal: flight.controller.signal });
         if (!text(result.access_token) || result.token_type?.toLowerCase() !== 'bearer'
           || !Number.isSafeInteger(result.expires_in) || result.expires_in < 120 || result.expires_in > 86400
-          || result.scope !== undefined && (typeof result.scope !== 'string' || !result.scope.split(' ').includes(SCOPE))) fail('secret_unavailable');
+          || result.scope !== undefined && (typeof result.scope !== 'string' || !scopes.some(scope => result.scope.split(' ').includes(scope)))) fail('secret_unavailable');
         if (flight.controller.signal.aborted || flights.get(ref) !== flight) fail('connection_blocked');
         token = Buffer.from(result.access_token);
         if (entries.size >= maxEntries && !entries.has(ref)) invalidate(entries.keys().next().value);
@@ -68,18 +71,19 @@ function createGoogleSecretStore({ client, http, accountId, prefix, kmsKeyArn, n
     invalidate,
     close() { for (const ref of new Set([...entries.keys(), ...flights.keys()])) invalidate(ref); },
     async withSecret(binding, work, { signal, onRevoked } = {}) {
-      if (binding.provider !== PROVIDER || signal?.aborted) fail('secret_unavailable');
+      if (binding.provider !== provider || signal?.aborted) fail('secret_unavailable');
       // Metadata/version is rechecked even while an access token is cached.
       const connection = await read(binding.secretArn, signal); const app = await read(binding.clientSecretArn, signal);
       if (signal?.aborted) fail('connection_blocked');
       const c = connection.value; const a = app.value;
-      const v2 = c.version === 2 && exact(c, 'version,provider,connectionRef,refreshToken,scopes');
+      const v2 = provider === PROVIDER && c.version === 2 && exact(c, 'version,provider,connectionRef,refreshToken,scopes');
       const v3 = c.version === 3 && exact(c, 'version,provider,connectionRef,googleUserId,clientId,refreshToken,scopes')
         && require('./google-oauth-secrets').subject(c.googleUserId) && c.clientId === a.clientId
-        && (!binding.oauth || c.googleUserId === binding.oauth.subject);
-      if (!(v2 || v3) || c.provider !== PROVIDER
+        && (!binding.oauth || c.googleUserId === binding.oauth.subject)
+        && (provider !== sc.PROVIDER || c.googleUserId === binding.googleSubject);
+      if (!(v2 || v3) || c.provider !== provider
         || c.connectionRef !== binding.connectionRef || !text(c.refreshToken) || !Array.isArray(c.scopes)
-        || c.scopes.length > 100 || !c.scopes.every(v => typeof v === 'string' && v.length < 256) || !c.scopes.includes(SCOPE)
+        || c.scopes.length > 100 || !c.scopes.every(v => typeof v === 'string' && v.length < 256) || !scopes.some(scope => c.scopes.includes(scope))
         || !exact(a, 'version,provider,clientId,clientSecret') || a.version !== 1 || a.provider !== 'google-oauth-client'
         || !text(a.clientId) || !text(a.clientSecret)) fail('secret_unavailable');
       const fingerprint = JSON.stringify([binding.secretArn, connection.version, binding.clientSecretArn, app.version]);

@@ -66,6 +66,7 @@ const webPublicationHealthMonitorService = require('../services/webPublicationHe
 const googleReviewMatchService = require('../services/googleReviewMatch.service');
 const businessProfileBroker = require('../services/businessProfileBroker.service');
 const googleLegacyCredentials = require('../services/googleLegacyCredentials.service');
+const searchConsoleBroker = require('../services/searchConsoleBroker.service');
 const jobRequestsService = require('../services/jobRequests.service');
 const systemNotificationsService = require('../services/systemNotifications.service');
 const {
@@ -1448,7 +1449,8 @@ class MetaSyncJobs {
         sites: assets.length,
         clinics: byClinic.size,
         processed: 0,
-        errors: []
+        errors: [],
+        rowLimits: []
       };
       const end = new Date(); end.setHours(0,0,0,0);
       const start = new Date(end); start.setDate(start.getDate() - (this.config.web.recentDays-1));
@@ -1456,6 +1458,8 @@ class MetaSyncJobs {
       const fmt = (d)=>d.toISOString().slice(0,10);
       const tokenByConnectionId = new Map();
       const accessTokenForMapping = async (asset) => {
+        const brokerContext = await searchConsoleBroker.prepare(asset);
+        if (brokerContext) return { brokerContext };
         const connectionId = Number(asset?.googleConnectionId);
         if (!Number.isInteger(connectionId) || connectionId <= 0) {
           throw new Error(`Mapping Search Console ${asset?.id || 'unknown'} sin googleConnectionId válido`);
@@ -1497,8 +1501,7 @@ class MetaSyncJobs {
           // Timeseries por siteUrl (guardar por clínica+site+fecha)
           for (const { asset: a, credentials } of authorizedMappings) {
             try {
-              const url = `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(a.siteUrl)}/searchAnalytics/query`;
-              const resp = await googleLegacyCredentials.request(credentials.connection, () => syncHttp.post(url, { startDate: fmt(start), endDate: fmt(end), dimensions: ['date'], rowLimit: 25000 }, { headers: { Authorization: `Bearer ${credentials.accessToken}` } }));
+              const resp = await this._readSearchConsole(a, credentials, 'timeseries', { startDate: fmt(start), endDate: fmt(end) });
               clinicSucceeded = true;
               const rows = resp.data?.rows || [];
               for (const r of rows) {
@@ -1545,10 +1548,10 @@ class MetaSyncJobs {
           const useChunks = daysWindow > 62;
           for (const { asset: a, credentials } of authorizedMappings) {
             try {
-              const urlQ = `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(a.siteUrl)}/searchAnalytics/query`;
               const ranges = useChunks ? Array.from(monthChunks(start, end)) : [{ s: fmt(start), e: fmt(end) }];
               for (const rg of ranges) {
-                const respQ = await googleLegacyCredentials.request(credentials.connection, () => syncHttp.post(urlQ, { startDate: rg.s, endDate: rg.e, dimensions: ['date','query','page'], rowLimit: 25000 }, { headers: { Authorization: `Bearer ${credentials.accessToken}` } }));
+                const respQ = await this._readSearchConsole(a, credentials, 'queries', { startDate: rg.s, endDate: rg.e });
+                if (respQ.data?.rowLimitReached) report.rowLimits.push({ clinicaId, siteUrl: a.siteUrl, start: rg.s, end: rg.e, limit: 25000 });
                 clinicSucceeded = true;
                 const rowsQ = respQ.data?.rows || [];
                 for (const r of rowsQ) {
@@ -1670,11 +1673,8 @@ class MetaSyncJobs {
                 // Index status (1 URL via URL Inspection API)
                 let indexed_ok = null;
                 try {
-                  const siteProperty = psiAsset.siteUrl;
-                  const inspectUrl = siteUrl;
                   const credentials = await accessTokenForMapping(psiAsset);
-                  const inspectEndpoint = 'https://searchconsole.googleapis.com/v1/urlInspection/index:inspect';
-                  const respI = await googleLegacyCredentials.request(credentials.connection, () => syncHttp.post(inspectEndpoint, { inspectionUrl: inspectUrl, siteUrl: siteProperty }, { headers: { Authorization: `Bearer ${credentials.accessToken}` } }));
+                  const respI = await this._readSearchConsole(psiAsset, credentials, 'inspection', {});
                   const verdict = respI.data?.inspectionResult?.indexStatusResult?.verdict || '';
                   const coverageState = respI.data?.inspectionResult?.indexStatusResult?.coverageState || '';
                   indexed_ok = (String(verdict).toUpperCase() === 'PASS') || /indexed/i.test(String(coverageState));
@@ -3154,6 +3154,25 @@ class MetaSyncJobs {
     }
     const numeric = Number(value);
     return Number.isFinite(numeric) ? numeric : 0;
+  }
+
+  async _readSearchConsole(asset, credentials, family, payload) {
+    // Check the independent registry even for a token prepared earlier in this job.
+    const fresh = await searchConsoleBroker.prepare(asset);
+    if (!!fresh !== !!credentials.brokerContext) throw Object.assign(new Error('broker_binding_invalid'), { code: 'broker_binding_invalid' });
+    if (credentials.brokerContext) return searchConsoleBroker.read(asset, credentials.brokerContext, family, payload);
+    return googleLegacyCredentials.request(credentials.connection, () => {
+      if (family === 'inspection') {
+        const siteUrl = asset.siteUrl;
+        const inspectionUrl = siteUrl.startsWith('http') ? siteUrl : 'https://' + siteUrl.replace('sc-domain:', '');
+        return syncHttp.post('https://searchconsole.googleapis.com/v1/urlInspection/index:inspect', { siteUrl, inspectionUrl },
+          { headers: { Authorization: `Bearer ${credentials.accessToken}` } });
+      }
+      if (!['timeseries', 'queries'].includes(family)) throw new Error('search_console_operation_invalid');
+      const url = `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(asset.siteUrl)}/searchAnalytics/query`;
+      return syncHttp.post(url, { ...payload, dimensions: family === 'timeseries' ? ['date'] : ['date', 'query', 'page'], rowLimit: 25000 },
+        { headers: { Authorization: `Bearer ${credentials.accessToken}` } });
+    });
   }
 
   async _ensureGoogleAccessToken(connectionId) {

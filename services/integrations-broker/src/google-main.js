@@ -7,6 +7,8 @@ const { BrokerStore } = require('./store'); const { Broker } = require('./broker
 const { createServer } = require('./server'); const { createGoogleHttp } = require('./google-http');
 const { createGoogleSecretStore } = require('./google-secrets');
 const { createGoogleBusinessProfileOperations } = require('./google-business-profile');
+const scContract = require('./google-search-console-contract');
+const { createSearchConsoleOperations } = require('./google-search-console');
 const { cursorCodec } = require('./provider-cursor'); const { drainAudit, createS3AuditSink } = require('./audit');
 const oauthContract = require('./google-oauth-contract'); const { createGoogleOAuth } = require('./google-oauth');
 const { createGoogleOAuthSecrets } = require('./google-oauth-secrets');
@@ -24,11 +26,27 @@ function privateFile(filename, limit = 1048576) {
 }
 function validateConfig(config) {
   if (!config || Object.keys(config).sort().join(',') !== 'cohort,cursorKeyFile,enabled,listenAddress,policy,port,stateFile,tlsCertFile,tlsKeyFile'
-    || config.enabled !== true || config.cohort !== 'google-business-profile-read-v1'
+    || config.enabled !== true || !['google-business-profile-read-v1', 'google-search-console-read-v1'].includes(config.cohort)
     || !net.isIP(config.listenAddress) || !Number.isInteger(config.port) || config.port < 1024 || config.port > 65535
     || typeof config.stateFile !== 'string' || !path.isAbsolute(config.stateFile)) fail('invalid_request');
   validatePolicy(config.policy);
+  if (config.cohort === 'google-search-console-read-v1') {
+    if (!config.policy.connections.length || config.policy.connections.some(c => c.provider !== scContract.PROVIDER || !c.secretArn || !c.clientSecretArn
+      || !require('./google-oauth-secrets').subject(c.googleSubject) || !c.searchConsoleSites?.length || c.oauth)) fail('invalid_request');
+    for (const connection of config.policy.connections) {
+      const ids = new Set();
+      for (const row of connection.searchConsoleSites) {
+        if (scContract.site(row.siteUrl).assetRef !== row.assetRef || ids.has(row.assetRef)) fail('invalid_request'); ids.add(row.assetRef);
+      }
+    }
+    for (const grant of config.policy.grants) {
+      if (!/^clinic:[1-9]\d{0,9}$/.test(grant.tenantRef) || grant.operations.some(op => !scContract.OPERATIONS.includes(op))) fail('invalid_request');
+      scContract.resource(config.policy.connections.find(c => c.connectionRef === grant.connectionRef), grant.assetRef);
+    }
+    return config;
+  }
   if (!config.policy.connections.length || config.policy.connections.some(c => c.provider !== PROVIDER || !c.secretArn || !c.clientSecretArn)
+    || config.policy.connections.some(c => c.searchConsoleSites || c.googleSubject)
     || config.policy.grants.some(g => !/^clinic:[1-9]\d{0,9}$/.test(g.tenantRef) || g.operations.some(op => !OPERATIONS.includes(op) && op !== REVOKE_OPERATION
       && !Object.values(oauthContract.OPERATIONS).includes(op)))) fail('invalid_request');
   const readers = new Set(config.policy.grants.filter(g => g.operations.some(op => OPERATIONS.includes(op))).map(g => g.principalId));
@@ -82,12 +100,15 @@ async function main(filename, { awsFactory = connectAws, http = createGoogleHttp
   const store = new BrokerStore(config.stateFile); let aws; let secrets; let oauth; let server; let timer; let draining;
   try {
     aws = await awsFactory();
-    secrets = createGoogleSecretStore({ client: aws.secrets, http, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY });
+    const searchConsole = config.cohort === 'google-search-console-read-v1';
+    secrets = createGoogleSecretStore({ client: aws.secrets, http, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY,
+      provider: searchConsole ? scContract.PROVIDER : PROVIDER });
     let broker;
-    oauth = createGoogleOAuth({ store, policy: config.policy, http,
+    if (!searchConsole) oauth = createGoogleOAuth({ store, policy: config.policy, http,
       secrets: createGoogleOAuthSecrets({ client: aws.secrets, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY }),
       onActivated: ref => { secrets.invalidate(ref); for (const controller of broker.active.get(ref) || []) controller.abort(); } });
-    broker = new Broker({ store, policy: config.policy, secrets, operations: createGoogleBusinessProfileOperations({ http, cursor, oauth }), timeoutMs: 25000 });
+    broker = new Broker({ store, policy: config.policy, secrets,
+      operations: searchConsole ? createSearchConsoleOperations({ http, cursor }) : createGoogleBusinessProfileOperations({ http, cursor, oauth }), timeoutMs: 25000 });
     let inFlight = 0;
     server = createServer({ async execute(...args) {
       if (inFlight >= 8) fail('rate_limited'); inFlight++;
@@ -101,7 +122,7 @@ async function main(filename, { awsFactory = connectAws, http = createGoogleHttp
     tick(); timer = setInterval(tick, 1000); timer.unref();
     let closing;
     const close = () => closing ||= (async () => {
-      clearInterval(timer); oauth.close(); secrets.close();
+      clearInterval(timer); oauth?.close(); secrets.close();
       for (const controllers of broker.active.values()) for (const controller of controllers) controller.abort();
       await new Promise(resolve => { server.close(resolve); server.closeIdleConnections?.(); });
       await draining; aws.close(); cursorKey.fill(0); store.close();

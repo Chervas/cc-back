@@ -2,7 +2,7 @@
 const fs = require('node:fs'); const vm = require('node:vm');
 // Loads actual job source with an explicit dependency boundary. Importing a
 // legacy service, model index, cron, Redis or provider bootstrap is impossible.
-function loadBusinessProfileJobs({ models, broker, legacyHttp, matching, credentials, logs = [], env = {} }) {
+function loadBusinessProfileJobs({ models, broker, legacyHttp, matching, credentials, searchConsole, logs = [], env = {} }) {
   const filename = require.resolve('../../../jobs/sync.jobs');
   const fail = () => { throw Error('UNEXPECTED_DEPENDENCY_IN_GBP_QA'); };
   const dependencies = {
@@ -10,6 +10,7 @@ function loadBusinessProfileJobs({ models, broker, legacyHttp, matching, credent
     'node-cron': { schedule: fail }, axios: { create: () => legacyHttp, post: fail },
     '../services/businessProfileBroker.service': broker,
     '../services/googleLegacyCredentials.service': credentials || new Proxy({}, { get: () => fail }),
+    '../services/searchConsoleBroker.service': searchConsole || new Proxy({}, { get: () => fail }),
     '../services/googleReviewMatch.service': { enqueueBusinessProfileReviewMatch: matching || fail },
   };
   const module = { exports: {} };

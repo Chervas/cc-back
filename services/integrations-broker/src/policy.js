@@ -14,6 +14,9 @@ const validate = new Ajv({ strict: true }).compile(object({
     initialState: { enum: ['active', 'blocked', 'revoked', 'expired'] },
     expiresAt: { type: ['integer', 'null'], minimum: 0 }, secretArn: { type: 'string', maxLength: 2048 },
     clientSecretArn: { type: 'string', maxLength: 2048 },
+    googleSubject: { type: 'string', pattern: '^[A-Za-z0-9._-]{1,128}$' },
+    searchConsoleSites: { type: 'array', minItems: 1, maxItems: 1000,
+      items: object({ assetRef: ref, siteUrl: { type: 'string', maxLength: 512 } }) },
     oauth: require('./google-oauth-contract').bindingSchema }, ['connectionRef', 'provider', 'initialState']) },
   grants: { type: 'array', maxItems: 100000, items: object({ principalId: ref, tenantRef: ref, connectionRef: ref, assetRef: ref, operations: strings }) },
 }));

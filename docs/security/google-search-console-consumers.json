@@ -1,0 +1,108 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-13",
+  "sourceHead": "3655c04b2162301ea45dc21ac4365a6372358a8b",
+  "includesWorkingChanges": true,
+  "runtimeMigrated": 0,
+  "method": "Manual in-repository classification, fixed SC endpoint search and SHA256. No runtime/secret/database/AWS/provider or external OPS inventory.",
+  "newMigrations": [
+    "20260913030000"
+  ],
+  "requiredPriorMigration": "20260913020000 and its dependencies",
+  "schemaRequiredBeforeCodeEvenWhenDisabled": true,
+  "ops": "deferred_by_user",
+  "awsInstance": "shutdown_announced_unverified",
+  "pending": [
+    "SC discovery and complete OAuth/onboarding/disconnect lifecycle",
+    "GA broker, Ads, other Google/provider cohorts and legacy loaders",
+    "Complete actor/scope/cache/denial audit",
+    "Real cut, deployment, IAM/source isolation, cost/quota verification",
+    "Retention, Budget/CloudFormation, Cost Explorer/tags, database encryption/restoration"
+  ],
+  "rows": [
+    {
+      "file": "src/services/searchConsoleBroker.service.js",
+      "sha256": "6330128b1ab1a9616225d940b1e2366140152180cd9cf59a3c14f4a204524a76",
+      "status": "prepared_offline",
+      "note": "Opaque metadata-only adapter, fresh binding/identity checks, bounded pagination and no credential recovery."
+    },
+    {
+      "file": "services/integrations-broker/src/google-search-console.js",
+      "sha256": "57ebc06ec22ad03230b013ea9f5249036adbf828be85799545896f1871f05301",
+      "status": "prepared_offline",
+      "note": "Four fixed SC read operations; query cursor and projection. No authorization/discovery/mutations."
+    },
+    {
+      "file": "services/integrations-broker/src/google-main.js",
+      "sha256": "6ef15482319738ee11efc8e7af341c454818ed343aeaf9c997d0fff817b5d891",
+      "status": "prepared_offline",
+      "note": "Separate SC cohort configuration; no installation or AWS identity verification."
+    },
+    {
+      "file": "src/routes/web.routes.js",
+      "sha256": "3b3dc9925ba58266eb7c4437bad2169313b82e7ce676df5c88632bd98339e79e",
+      "status": "prepared_offline",
+      "note": "Metadata status, pages and URL Inspection through broker with managed sessions and current shared inventory; PSI/technical probes remain legacy."
+    },
+    {
+      "file": "src/jobs/sync.jobs.js",
+      "sha256": "203f89e9456f0b7137a8e87594b2a9833f06c1b6d3eddddb709b790eb10a5892",
+      "status": "prepared_offline",
+      "note": "SC timeseries/queries/inspection and general/targeted web backfills; GA remains guarded legacy; other loaders pending."
+    },
+    {
+      "file": "src/services/googleLegacyCredentials.service.js",
+      "sha256": "0aec45d0d8f8f97845b2ffe2c32273276cad9741df9183b96fbf2d5a17cdad49",
+      "status": "prepared_offline",
+      "note": "OAuth and SC registry exclusions by ID/subject in metadata and conditional token SELECT/UPDATE."
+    },
+    {
+      "file": "src/services/googleOAuthBroker.service.js",
+      "sha256": "cc7c6a4ca3ea8d9661c4f41d47391721647c275e3dda5a410805cc3611c01ee8",
+      "status": "prepared_offline",
+      "note": "SC registry closes global legacy connect/unmatched callbacks and ID/subject guard. No SC authorization implementation."
+    },
+    {
+      "file": "src/services/effectiveMarketingAssets.service.js",
+      "sha256": "64456f1f091b3fbee70c0dbdfc0f737d88933c9ed834b42dc79e254e20afd306",
+      "status": "unchanged_metadata_inventory",
+      "note": "Web inventory selects mappings only; other consumers in this service remain pending."
+    },
+    {
+      "file": "src/routes/oauth.routes.js",
+      "sha256": "e4a79cdc987655903c503297d07a0d63af117b99bc441caf0f62fd37db5e6b0a",
+      "status": "legacy_hydration_pending",
+      "note": "SC/GA discovery resolver may hydrate legacy credentials before guards; dedicated broker discovery and lifecycle still pending."
+    },
+    {
+      "file": "src/services/scopeConnectionResolver.service.js",
+      "sha256": "1d774d8c9eb38383edbf4013598fa3f88cde63b73320fd298afcd07635822b68",
+      "status": "legacy_hydration_pending",
+      "note": "Only metadataOnly consumers suppress token columns. Not changed globally."
+    },
+    {
+      "file": "src/services/googleOAuthBrokerScope.service.js",
+      "sha256": "65f43055bb5958c08da936616bb13582eb6cdded10765bea82dc9c7dc466f17d",
+      "status": "unchanged_admission_guard",
+      "note": "Pinned GBP reauthorization still rejects active SC/GA/Ads; no consumer admission relaxed."
+    },
+    {
+      "file": "src/services/oauthScopedDisconnect.service.js",
+      "sha256": "77b6a192244873a5c205c85c4dbcb66c5dbbeb56f84a7e4d525660044ee9d880",
+      "status": "unchanged_lifecycle_pending",
+      "note": "SC-specific managed lifecycle and disconnect confirmation are outside this read cohort."
+    },
+    {
+      "file": "src/controllers/marketingReports.controller.js",
+      "sha256": "bcf67ecbf05b5844647f9e773a6cade219a3896b2df727ad886fe6b603bb1b05",
+      "status": "unchanged_cached_reports",
+      "note": "Reporting caches and complete user access auditing remain separate."
+    },
+    {
+      "file": "src/scripts/push_ops_search_console.js",
+      "sha256": "4324e20c61e67a702252f7de3931d8b9cfebb5a2d2567937cd7ff418374d0521",
+      "status": "deferred_by_user",
+      "note": "OPS explicitly deferred; no edits, execution or pause changes."
+    }
+  ]
+}

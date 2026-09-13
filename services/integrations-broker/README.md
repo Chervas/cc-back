@@ -1,5 +1,21 @@
 # Broker de integraciones
 
+## Search Console: cuatro lecturas preparadas, sin activar
+
+`google-main.js` admite una configuración distinta con cohort
+`google-search-console-read-v1`, proveedor `google_search_console`, subject y
+propiedades exactas. Solo timeseries/queries/pages/inspection; secreto v3 fijado
+a subject/client ID/scopes. Refresh dentro del broker, sin alta/reautorización,
+mutaciones o proxy. Cursor queries opaco, páginas de 500, techo 25.000 por
+intervalo y resultados no persistidos. Reutiliza auditoría v2 y bloqueo durable.
+
+API/rutas/jobs usan referencias y el registro SQL independiente; gates apagados,
+esquema `20260913030000` previo al código aun deshabilitado. Claves/audiences/
+estado de procesos separados requieren revisión en el corte. 65 tests broker
+y 61 backend, 31 checks SQL propios y tres contratos. No AWS ni despliegue;
+OPS aplazado, apagado EC2 anunciado sin verificar. `npm start` sigue ficticio.
+[Contrato, configuración, coste y lote pendiente](../../docs/security/google-search-console-read-migration.md).
+
 ## Google OAuth fijado: preparación, sin activar
 
 El runtime Google admite cinco controles cerrados de reautorización de una
@@ -64,7 +80,8 @@ capacidad de invocar los grants asignados: esta separación no elimina ese riesg
 
 Catálogo actual: `fictitious.connection.check.v1`, payload `{}`, devuelve
 `{fixture:true,status:"available"}`. No acredita salud de Meta, Google ni WhatsApp.
-El catálogo de siete lecturas Google solo se registra en `google-main.js`.
+Los catálogos Google se registran solo en `google-main.js`, según su cohorte:
+siete lecturas GBP (más controles aprobados por política) o cuatro lecturas SC.
 Su migración operativa y el resto de consumidores permanecen pendientes.
 
 `src/lib/integrationsBrokerClient.js` del backend implementa el transporte HTTPS

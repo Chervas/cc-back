@@ -1,5 +1,16 @@
 # Search Console y GA4: cierre de credenciales legacy
 
+## Ampliación vigente: lecturas SC (13/09/2026)
+
+El [bloque de lecturas SC](google-search-console-read-migration.md) añade
+SearchConsoleBrokerBindings a todas las exclusiones por ID/subject y al
+SELECT/UPDATE condicional. El esquema nuevo `20260913030000`, junto al OAuth
+previo, debe existir antes del código incluso con gates apagados. Una
+comprobación legacy completa pasa a tres consultas, carga a siete y petición
+a seis. SC tiene ahora cuatro lecturas preparadas por broker; GA mantiene el
+bloqueo legacy. Las secciones siguientes describen el corte anterior y su QA,
+no acreditan despliegue ni sustituyen los requisitos de la ampliación.
+
 Preparado el 13/09/2026 sobre backend `54a9f151` y frontend `82233de0`.
 Implementación y QA locales; ninguna conexión real migrada ni despliegue.
 OPS aplazado por el usuario. Apagado EC2 anunciado, sin comprobar su estado.

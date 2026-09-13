@@ -34,6 +34,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     clinica_id: D.INTEGER, google_connection_id: D.INTEGER, connection_ref: D.STRING, asset_ref: D.STRING });
   table('BusinessProfileBrokerRevocation', 'BusinessProfileBrokerRevocations', { external_location_id: { type: D.STRING, primaryKey: true } });
   for (const name of ['GoogleConnectionAssignment', 'ClinicBusinessLocation', 'BusinessProfileBrokerBinding', 'BusinessProfileBrokerRevocation']) await models[name].sync();
+  await require('../../../migrations/20260913030000-add-search-console-broker-read-binding').up(qi, D);
+  models.SearchConsoleBrokerBinding = require('../../../models/searchconsolebrokerbinding')(sql, D);
   const B = models.GoogleOAuthBrokerBinding; const R = models.GoogleOAuthBrokerRequest; const A = models.PlatformAuditEvent;
   const user = await models.Usuario.create({ id_usuario: 501, password_usuario: 'FICTITIOUS_PASSWORD_HASH',
     email_usuario: 'oauth@example.invalid', estado_cuenta: 'activo', es_provisional: false });

@@ -1,5 +1,15 @@
 # Google: reautorización de conexiones fijadas al broker
 
+## Ampliación vigente: registro SC independiente (13/09/2026)
+
+El primer SearchConsoleBrokerBindings también cierra globalmente connect y
+callbacks legacy no reconocidos, aun con gates apagados. Los guards de conexión
+consultan este registro por ID o subject; esquema `20260913030000` previo al
+código junto a dependencias anteriores. No cambia la admisión GBP: SC/GA/Ads
+activos siguen rechazados y alta/reautorización SC completas siguen pendientes.
+Las [cuatro lecturas SC](google-search-console-read-migration.md) no autorizan
+retomar OAuth real ni migrar una identidad con consumidores incompatibles.
+
 ## Ampliación local de loaders SC/GA (13/09/2026)
 
 [La frontera de credenciales legacy](google-web-credentials-boundary.md) aplica
