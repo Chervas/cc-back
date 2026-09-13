@@ -14,31 +14,62 @@ vm.runInNewContext(fs.readFileSync(require.resolve('../../lib/googleAdsSearchRow
   require: () => ({ normalizeCustomerId: value => String(value).replace(/-/g, '') }),
 });
 const baseAccount = { id: 11, customerId: '1234567890', googleConnectionId: 2, assignmentScope: 'group',
-  grupoClinicaId: 5, clinicaId: 59, isActive: true, loginCustomerId: '9876543210', timeZone: 'Europe/Madrid' };
+  grupoClinicaId: 5, clinicaId: 59, isActive: true, loginCustomerId: '9876543210', timeZone: 'Europe/Madrid',
+  googleConnection: { id: 2, googleUserId: 'fictitious-subject' } };
 const window = { startDate: '2026-09-09', endDate: '2026-09-10' };
 
 function fixture() {
-  const state = { accounts: [{ ...baseAccount }], collections: [], saves: [], ads: [], requests: [], logs: [], synced: [], tokenReads: 0, inventory: [] };
-  const models = { ClinicGoogleAdsAccount: { findAll: async () => state.accounts,
+  const state = { accounts: [{ ...baseAccount }], collections: [], saves: [], ads: [], requests: [], logs: [], synced: [], tokenReads: 0, inventory: [],
+    typed: [], fences: [], destinations: [], brokerContext: null, blocked: false };
+  const transaction = { LOCK: { UPDATE: 'UPDATE' } };
+  const models = { sequelize: { transaction: async fn => fn(transaction) }, ClinicGoogleAdsAccount: { findAll: async () => state.accounts,
     update: async (patch, options) => { state.synced.push({ patch, options }); return [1]; } },
   SyncLog: { create: async () => ({ id: 8, update: async patch => state.logs.push(patch) }) },
   ExternalCampaignInventory: { upsert: async value => state.inventory.push(value) } };
   const metrics = { API_VERSION: 'v24', collectGoogleCampaignMetrics: async options => {
-    state.collections.push(options); if (state.collectionError) throw state.collectionError; return { account: options.account, start: options.start, end: options.end };
-  }, persistGoogleCampaignMetrics: async options => { state.saves.push(options); if (state.saveError) throw state.saveError; return { rows: 4 }; } };
+    state.collections.push(options); if (state.collectionError) throw state.collectionError;
+    if (options.readTyped) for (const family of ['account', 'campaigns', 'campaign_metrics', 'adgroup_metrics']) {
+      await options.readTyped(family, family.endsWith('_metrics') ? { startDate: options.start, endDate: options.end } : {});
+    }
+    return { account: options.account, start: options.start, end: options.end };
+  }, persistGoogleCampaignMetrics: async options => {
+    await options.beforeReplace?.({ transaction }); state.saves.push(options); if (state.saveError) throw state.saveError; return { rows: 4 };
+  } };
   const ads = { daysBetween, syncGoogleAdCache: async options => {
     state.ads.push(options); if (state.adError) throw state.adError;
-    await options.request('POST', `customers/${options.account.customerId}/googleAds:search`, { data: { query: 'SELECT campaign.id FROM campaign' } });
+    if (options.readTyped) {
+      await options.readTyped('ads', { campaignId: null });
+      await options.readTyped('ad_metrics', { campaignId: null, startDate: options.start, endDate: options.end });
+      await options.beforeReplace?.({ transaction });
+    } else await options.request('POST', `customers/${options.account.customerId}/googleAds:search`, { data: { query: 'SELECT campaign.id FROM campaign' } });
     return { metricRows: 3, inventoryRows: 2, days: 2 };
   } };
   const client = { ensureGoogleAdsConfig: () => ({ managerId: baseAccount.loginCustomerId }),
     normalizeCustomerId: value => String(value || '').replace(/-/g, ''), formatCustomerId: String,
     getGoogleAdsUsageStatus: async () => ({ pauseUntil: null }),
     googleAdsRequest: async (method, path, options) => { state.requests.push({ method, path, options }); return state.response || {}; } };
+  const legacy = { assert: async () => { assert.equal(state.brokerContext, null, 'Managed jobs must never use legacy credentials'); },
+    request: async (_identity, send) => { await legacy.assert(); return send(); } };
+  const broker = { prepare: async () => { if (state.prepareError) throw state.prepareError; return state.brokerContext; },
+    assert: async (_account, context, options) => {
+      assert.equal(context, state.brokerContext); if (state.blocked) throw Object.assign(Error('asset_revoked'), { code: 'asset_revoked' });
+      if (options?.transaction) { assert.equal(options.transaction, transaction); state.fences.push(options.transaction); }
+    },
+    read: async (account, context, family, payload) => {
+      await broker.assert(account, context); state.typed.push({ family, payload }); await state.onTyped?.(family);
+      await broker.assert(account, context);
+      return family === 'publishing_campaigns' ? [{ campaign: { id: '456', status: 'ENABLED', advertisingChannelType: 'SEARCH' } }] : [];
+    } };
   const modules = { sequelize: { Op }, axios: { create: () => ({}) }, '../../models': models,
     '../lib/googleAdsSyncHelpers': helpers, '../lib/googleAdsClient': client,
     '../lib/googleAdsSearchRows': searchOutput.exports,
     '../services/googleAdCache.service': ads, '../services/googleCampaignMetricsCache.service': metrics,
+    '../services/googleAdsBroker.service': broker, '../services/googleLegacyCredentials.service': legacy,
+    '../services/googleAdsLegacyConnection.service': { guardGoogleAdsLegacyRequest: (identity, send) => require('../../services/googleAdsLegacyConnection.service').guardGoogleAdsLegacyRequest(identity, send, legacy) },
+    '../lib/googleAdsCampaignMeasurementDiagnosis': { buildGoogleDestinationDetections: () => new Map([['456', { status: 'observed' }]]) },
+    '../services/campaignWorkspaceGoogleDestination.service': { saveObservedGoogleDestination: async options => {
+      await options.beforeWrite?.({ transaction }); state.destinations.push(options); return 1;
+    } },
     '../services/notifications.service': { dispatchEvent: async () => {} } };
   const module = { exports: {} };
   vm.runInNewContext(syncSource, { module, exports: module.exports, Date, Map, Set, URL, URLSearchParams,
@@ -49,8 +80,31 @@ function fixture() {
   job._getGoogleAccessToken = async () => { state.tokenReads++; return 'synthetic'; };
   const publishing = job._syncGoogleAdsPublishingState.bind(job);
   job._syncGoogleAdsPublishingState = async () => ({ rows: 2 });
-  return { state, models, metrics, ads, job, publishing };
+  return { state, models, metrics, ads, job, publishing, broker };
 }
+
+test('managed recent and backfill jobs use all eight typed read families and lock authorization before every cache/completion write', async () => {
+  for (const method of ['executeGoogleAdsSync', 'executeGoogleAdsBackfill']) {
+    const f = fixture(); f.state.brokerContext = Object.freeze({}); f.job._syncGoogleAdsPublishingState = f.publishing;
+    const result = await f.job[method](window);
+    assert.equal(result.status, 'completed'); assert.equal(result.processed, 1); assert.equal(f.state.tokenReads, 0);
+    assert.equal(f.state.requests.length, 0);
+    assert.deepEqual(f.state.typed.map(row => row.family), ['account', 'campaigns', 'campaign_metrics', 'adgroup_metrics', 'publishing_campaigns', 'landing_pages', 'ads', 'ad_metrics']);
+    assert.equal(f.state.fences.length, 6); assert.equal(f.state.destinations.length, 1);
+    assert.equal(f.state.synced.filter(row => row.patch.lastSyncedAt).length, 1);
+    assert.ok(f.state.synced.every(row => row.options.transaction));
+  }
+});
+test('a managed scope failure or late revocation never falls back to tokens or marks the account complete', async () => {
+  for (const phase of ['prepare', 'read']) {
+    const f = fixture(); f.state.brokerContext = Object.freeze({});
+    if (phase === 'prepare') f.state.prepareError = Object.assign(Error('scope_denied'), { code: 'scope_denied' });
+    else f.state.onTyped = () => { f.state.blocked = true; };
+    const result = await f.job.executeGoogleAdsSync(window);
+    assert.equal(result.status, 'failed'); assert.equal(f.state.tokenReads, 0); assert.equal(f.state.requests.length, 0);
+    assert.equal(f.state.saves.length, 0); assert.equal(f.state.synced.length, 0);
+  }
+});
 
 test('recent and backfill jobs use the reconciled writer once per shared customer', async () => {
   for (const method of ['executeGoogleAdsSync', 'executeGoogleAdsBackfill']) {

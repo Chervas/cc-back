@@ -4,6 +4,8 @@ const { randomUUID, createHash } = require('node:crypto');
 const { DataTypes: D } = require('sequelize');
 const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
 withIsolatedCampaignMysql(async ({ sql, models, report }) => {
+  models.GoogleAdsBrokerBinding = require('../../../models/googleadsbrokerbinding')(sql, D);
+  await models.GoogleAdsBrokerBinding.sync();
   const qi = sql.getQueryInterface();
   function table(name, tableName, fields) {
     models[name] = sql.define(name, fields, { tableName, timestamps: false }); return models[name];

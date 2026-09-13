@@ -1,5 +1,25 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Registro durable y consumidores de lecturas Ads
+
+Sync y backfill preparan la cuenta antes de obtener credenciales y usan las ocho
+lecturas tipadas para cuentas gestionadas. Revalidan identidad, pertenencia al
+grupo, asignaciones compartidas y grants, incluyendo la transacción de cada
+escritura y lastSyncedAt. Una fase fallida no confirma sincronización completa.
+GoogleAdsBrokerBindings sobrevive a borrados y cierra loaders, SELECT/UPDATE de
+tokens y OAuth legacy por ID/subject, independientemente del gate.
+
+Nueva DDL 20260913080000 antes del código incluso con gates apagados. No aplicada
+a la BD compartida. Variables GOOGLE_ADS_BROKER_ENABLED/ORIGIN/AUDIENCE/KEY_ID/
+KEY_FILE/CA_FILE sin instalar. No hay alta, remapeo o OAuth Ads nuevos.
+
+La cola de baja Ads aún falta: DELETE /oauth/google/disconnect con scope Ads
+gestionado devuelve 503, error google_ads_broker_disconnect_pending, antes de
+modificar mappings/assignment o capturar bajas parciales de otras verticales.
+El DELETE sin scope conserva connection_in_use para registros Ads por ID/subject.
+Cero cuentas migradas o activadas; no desplegar esta cohorte hasta completar
+baja/OAuth y aprobar el corte. Contrato: docs/security/google-ads-backend-migration.md.
+
 ## 13/09/2026 — Lecturas de sincronización Ads y colectores tipados
 
 El broker amplía el contrato interno con `google.ads.publishing_campaigns.read.v1`

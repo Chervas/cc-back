@@ -35,10 +35,11 @@ function safeUrl(value) {
   } catch { return null; }
 }
 
-async function saveObservedGoogleDestination({ models, reference, detection }) {
+async function saveObservedGoogleDestination({ models, reference, detection, beforeWrite }) {
   const { account_id: customerId, campaign_id: campaignId } = googleCampaignReference(reference);
   // Both the nightly writer and the interactive check lock the current row before merging JSON.
   return models.sequelize.transaction(async transaction => {
+    if (beforeWrite) await beforeWrite({ transaction });
     const inventory = await models.ExternalCampaignInventory.findOne({ where: { provider: 'google_ads',
       customer_id: customerId, campaign_id: campaignId }, transaction, lock: transaction.LOCK.UPDATE });
     if (!inventory) return 0;

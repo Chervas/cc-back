@@ -2,8 +2,8 @@
 const assert = require('node:assert/strict'); const { Op } = require('sequelize');
 const { createGoogleLegacyCredentials, safe } = require('../../../services/googleLegacyCredentials.service');
 function credentialsFixture() {
-  const state = { markers: [], scMarkers: [], gaMarkers: [], propertyMarkers: [], rows: new Map(), loads: 0, updates: 0, tokenReads: 0, provider: [], logs: [], failMetadata: false };
-  const blocked = row => [...state.markers, ...state.scMarkers, ...state.gaMarkers, ...state.propertyMarkers].some(b => Number(b.google_connection_id) === row?.id || b.google_user_id === row?.googleUserId);
+  const state = { markers: [], scMarkers: [], gaMarkers: [], propertyMarkers: [], adsMarkers: [], rows: new Map(), loads: 0, updates: 0, tokenReads: 0, provider: [], logs: [], failMetadata: false };
+  const blocked = row => [...state.markers, ...state.scMarkers, ...state.gaMarkers, ...state.propertyMarkers, ...state.adsMarkers].some(b => Number(b.google_connection_id) === row?.id || b.google_user_id === row?.googleUserId);
   function add(id = 81, googleUserId = 'fictitious-subject') {
     const row = { id, googleUserId, expiresAt: new Date('2099-01-01') };
     for (const key of ['accessToken', 'refreshToken']) Object.defineProperty(row, key, { configurable: true,
@@ -38,10 +38,12 @@ function credentialsFixture() {
     .some(clause => Object.entries(clause).every(([k, v]) => row[k] === v))) || null };
   const propertyRevocationModel = { findOne: async options => state.propertyMarkers.find(row => (options.where[Op.or] || [options.where])
     .some(clause => Object.entries(clause).every(([k, v]) => row[k] === v))) || null };
-  const create = () => ({ ...createGoogleLegacyCredentials({ connectionModel, bindingModel, searchConsoleModel, analyticsModel, propertyRevocationModel }), safe });
+  const adsModel = { findOne: async options => state.adsMarkers.find(row => (options.where[Op.or] || [options.where])
+    .some(clause => Object.entries(clause).every(([k, v]) => row[k] === v))) || null };
+  const create = () => ({ ...createGoogleLegacyCredentials({ connectionModel, bindingModel, searchConsoleModel, analyticsModel, propertyRevocationModel, adsModel }), safe });
   add();
   const models = { GoogleConnection: connectionModel, GoogleOAuthBrokerBinding: bindingModel,
-    SearchConsoleBrokerBinding: searchConsoleModel, AnalyticsBrokerBinding: analyticsModel, GooglePropertyBrokerRevocation: propertyRevocationModel };
+    SearchConsoleBrokerBinding: searchConsoleModel, AnalyticsBrokerBinding: analyticsModel, GooglePropertyBrokerRevocation: propertyRevocationModel, GoogleAdsBrokerBinding: adsModel };
   return { state, add, create, models, credentials: create(), mark: (id = 81, subject = 'fictitious-subject') => state.markers.push({ google_connection_id: id, google_user_id: subject }) };
 }
 module.exports = { credentialsFixture };

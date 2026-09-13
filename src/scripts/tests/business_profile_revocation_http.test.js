@@ -14,7 +14,7 @@ async function fixture(t, options = {}) {
       findOne: async () => ({ status: 'active', googleConnectionId: state.changedAssignment ? 82 : 81 }),
       upsert: async (value, { transaction }) => { assert.equal(value.status, 'disconnected'); transaction.writes++; await state.onUpsert?.(); } },
     ClinicWebAsset: empty, ClinicAnalyticsProperty: empty, ClinicGoogleAdsAccount: empty, ClinicBusinessLocation: empty,
-    GoogleOAuthBrokerBinding: empty, SearchConsoleBrokerBinding: empty, AnalyticsBrokerBinding: empty,
+    GoogleOAuthBrokerBinding: empty, SearchConsoleBrokerBinding: empty, AnalyticsBrokerBinding: empty, GoogleAdsBrokerBinding: empty,
     GooglePropertyBrokerRevocation: { count: async ({ where }) => {
       assert.deepEqual(JSON.parse(JSON.stringify(where[sequelize.Op.or])), [{ google_connection_id: 81 }, { google_user_id: 'fictitious-subject' }]); return state.propertyManaged;
     } },

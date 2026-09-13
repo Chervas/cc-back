@@ -95,7 +95,7 @@ async function routeFixture(t, options = {}) {
     // This fixture models an installation with no OAuth cohort binding.
     '../services/googleOAuthBroker.service': require('../../services/googleOAuthBroker.service').createGoogleOAuthBroker({
       models: { GoogleOAuthBrokerBinding: { findOne: async () => null }, SearchConsoleBrokerBinding: models.SearchConsoleBrokerBinding,
-        AnalyticsBrokerBinding: models.AnalyticsBrokerBinding, GooglePropertyBrokerRevocation: { findOne: async () => null } }, audit: {}, enabled: () => false,
+        GoogleAdsBrokerBinding: { findOne: async () => null }, AnalyticsBrokerBinding: models.AnalyticsBrokerBinding, GooglePropertyBrokerRevocation: { findOne: async () => null } }, audit: {}, enabled: () => false,
     }),
     '../services/businessProfileDiscovery.service': { ...f.service, ERROR_CODES, CONFLICT_CODES },
     '../services/scopeConnectionResolver.service': resolver,

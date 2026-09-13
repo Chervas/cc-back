@@ -3,6 +3,8 @@ const assert = require('node:assert/strict'); const { DataTypes: D } = require('
 const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
 const { analyticsReport } = require('../../../services/integrations-broker/test/analytics-helpers');
 withIsolatedCampaignMysql(async ({ sql, models, report }) => {
+  models.GoogleAdsBrokerBinding = require('../../../models/googleadsbrokerbinding')(sql, D);
+  await models.GoogleAdsBrokerBinding.sync();
   const qi = sql.getQueryInterface(); await qi.createTable('Usuarios', { id_usuario: { type: D.INTEGER, primaryKey: true } });
   models.GoogleConnection = require('../../../models/googleconnection')(sql, D); await models.GoogleConnection.sync();
   await require('../../../migrations/20260913020000-create-google-oauth-broker-flows').up(qi, D);
@@ -77,7 +79,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await service.read(mapping, context, 'daily', range); assert.equal(calls.at(-1).tenantRef, 'clinic:71');
   report.checks.push('The same GA property supports separately registered clinic mappings without inheriting or sharing their blocked state');
   await connection(82); await assert.rejects(service.prepare(mapping), { code: 'broker_binding_invalid' });
-  const legacy = require('../../services/googleLegacyCredentials.service').createGoogleLegacyCredentials({ connectionModel: G,
+  const legacy = require('../../services/googleLegacyCredentials.service').createGoogleLegacyCredentials({ connectionModel: G, adsModel: models.GoogleAdsBrokerBinding,
     bindingModel: models.GoogleOAuthBrokerBinding, searchConsoleModel: models.SearchConsoleBrokerBinding, analyticsModel: B, propertyRevocationModel: models.GooglePropertyBrokerRevocation });
   for (const id of [81, 82]) await assert.rejects(legacy.load(id), { code: 'google_oauth_legacy_closed' });
   const oauth = require('../../services/googleOAuthBroker.service').createGoogleOAuthBroker({ models, sessions: {}, client: {}, audit: {}, enabled: () => false });

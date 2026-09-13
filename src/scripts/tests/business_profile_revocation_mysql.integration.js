@@ -18,7 +18,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const R = models.BusinessProfileBrokerRevocation; const A = models.PlatformAuditEvent; const B = models.BusinessProfileBrokerBinding; const L = models.ClinicBusinessLocation;
   const empty = { findAll: async () => [] };
   models.ClinicWebAsset = models.ClinicAnalyticsProperty = models.ClinicGoogleAdsAccount = empty;
-  models.SearchConsoleBrokerBinding = models.AnalyticsBrokerBinding = models.GooglePropertyBrokerRevocation = models.GrupoClinica = empty;
+  models.SearchConsoleBrokerBinding = models.AnalyticsBrokerBinding = models.GooglePropertyBrokerRevocation = models.GrupoClinica = models.GoogleAdsBrokerBinding = empty;
   models.GoogleConnectionAssignment = empty; models.GroupAssetClinicAssignment = empty;
   models.Clinica = { findAll: async () => [{ id_clinica: 71 }, { id_clinica: 72 }] };
   const service = require('../../services/businessProfileRevocation.service');

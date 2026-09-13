@@ -64,10 +64,10 @@ async function finishGoogleAdsSync(syncLog, report) {
   return result;
 }
 
-async function updateGoogleAdsSyncMetadata(model, account, patch) {
+async function updateGoogleAdsSyncMetadata(model, account, patch, { transaction } = {}) {
   const fields = ['id', 'customerId', 'googleConnectionId', 'assignmentScope', 'clinicaId', 'grupoClinicaId'];
   const where = Object.fromEntries(fields.map(key => [key, account[key] ?? null]));
-  const [count] = await model.update(patch, { where: { ...where, isActive: true } });
+  const [count] = await model.update(patch, { where: { ...where, isActive: true }, ...(transaction ? { transaction } : {}) });
   if (count !== 1) throw new Error('google_ads_account_changed');
 }
 

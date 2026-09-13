@@ -193,9 +193,12 @@ async function deactivateGoogleMappingsForScope({
     ...sharedArgs,
     rows: ads,
     assetType: 'google.ads_account',
-    ownerClinicIdOf: (row) => row.clinicaId,
+    ownerClinicIdOf: (row) => row.assignmentScope === 'group' ? null : row.clinicaId,
   });
 
+  await require('./googleAdsBrokerScope.service').assertDisconnectReady({
+    models, transaction, connectionId, scope, clinicIds: ordinaryClinicIds, mappings: ads,
+  });
   const propertyPending = await require('./googlePropertyRevocation.service').enqueue({
     models, transaction, connectionId, clinicIds: ordinaryClinicIds, actorId, sessionRef,
     mappings: { search_console: web, analytics },

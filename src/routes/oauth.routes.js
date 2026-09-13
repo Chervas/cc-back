@@ -3620,7 +3620,7 @@ router.delete('/google/disconnect', async (req, res) => {
         ]);
         let managedReferences = await db.BusinessProfileBrokerBinding.count({ where: { google_connection_id: conn.id } })
             + await db.BusinessProfileBrokerRevocation.count({ where: { google_connection_id: conn.id } });
-        for (const registry of [db.GoogleOAuthBrokerBinding, db.SearchConsoleBrokerBinding, db.AnalyticsBrokerBinding, db.GooglePropertyBrokerRevocation]) {
+        for (const registry of [db.GoogleOAuthBrokerBinding, db.SearchConsoleBrokerBinding, db.AnalyticsBrokerBinding, db.GooglePropertyBrokerRevocation, db.GoogleAdsBrokerBinding]) {
             managedReferences += await registry.count({ where: { [Op.or]: [{ google_connection_id: conn.id },
                 ...(typeof conn.googleUserId === 'string' ? [{ google_user_id: conn.googleUserId }] : [])] }, logging: false });
         }
@@ -3636,6 +3636,7 @@ router.delete('/google/disconnect', async (req, res) => {
     } catch (e) {
         if (e?.code === 'gbp_revocation_unavailable') return res.status(503).json({ success: false, error: 'gbp_revocation_unavailable' });
         if (e?.code === 'google_property_revocation_unavailable') return res.status(503).json({ success: false, error: 'google_property_revocation_unavailable' });
+        if (e?.code === 'google_ads_broker_disconnect_pending') return res.status(503).json({ success: false, error: 'google_ads_broker_disconnect_pending' });
         if (['JsonWebTokenError', 'TokenExpiredError', 'NotBeforeError'].includes(e?.name) || e?.httpStatus === 401) {
             return res.status(401).json({ success: false, error: 'auth_failed' });
         }

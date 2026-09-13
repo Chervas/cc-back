@@ -44,3 +44,10 @@ test('a deleted inventory row is not recreated by the observed URL enrichment', 
     ExternalCampaignInventory: { findOne: async () => null } };
   assert.equal(await saveObservedGoogleDestination({ models, reference: { account_id: '20', campaign_id: '30' }, detection: {} }), 0);
 });
+test('the broker permission fence runs in the destination transaction and rejects before touching inventory', async () => {
+  const transaction = { LOCK: { UPDATE: 'UPDATE' } }; let reads = 0;
+  const models = { sequelize: { transaction: async fn => fn(transaction) }, ExternalCampaignInventory: { findOne: async () => { reads++; return null; } } };
+  await assert.rejects(saveObservedGoogleDestination({ models, reference: { account_id: '20', campaign_id: '30' }, detection: {},
+    beforeWrite: async options => { assert.equal(options.transaction, transaction); throw Object.assign(Error('asset_revoked'), { code: 'asset_revoked' }); } }), { code: 'asset_revoked' });
+  assert.equal(reads, 0);
+});

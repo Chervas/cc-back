@@ -2,6 +2,8 @@
 const assert = require('node:assert/strict'); const { DataTypes: D } = require('sequelize');
 const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
 withIsolatedCampaignMysql(async ({ sql, models, report }) => {
+  models.GoogleAdsBrokerBinding = require('../../../models/googleadsbrokerbinding')(sql, D);
+  await models.GoogleAdsBrokerBinding.sync();
   const qi = sql.getQueryInterface();
   await qi.createTable('Usuarios', { id_usuario: { type: D.INTEGER, primaryKey: true } });
   models.GoogleConnection = require('../../../models/googleconnection')(sql, D);
@@ -20,7 +22,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   models.GooglePropertyBrokerRevocation = require('../../../models/googlepropertybrokerrevocation')(sql, D);
   const G = models.GoogleConnection; const B = models.GoogleOAuthBrokerBinding;
   const { createGoogleLegacyCredentials } = require('../../services/googleLegacyCredentials.service');
-  const create = () => createGoogleLegacyCredentials({ connectionModel: G, bindingModel: B, searchConsoleModel: models.SearchConsoleBrokerBinding,
+  const create = () => createGoogleLegacyCredentials({ connectionModel: G, adsModel: models.GoogleAdsBrokerBinding, bindingModel: B, searchConsoleModel: models.SearchConsoleBrokerBinding,
     analyticsModel: models.AnalyticsBrokerBinding, propertyRevocationModel: models.GooglePropertyBrokerRevocation });
   const service = create(); let fullReads = 0;
   G.addHook('beforeFind', 'count_credentials', options => { if (options.attributes?.includes('accessToken')) fullReads++; });

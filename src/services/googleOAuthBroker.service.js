@@ -111,6 +111,7 @@ function createGoogleOAuthBroker({ models, client, sessions, audit = createRepos
       if (await models.SearchConsoleBrokerBinding.findOne({ attributes: ['google_user_id'], raw: true })) fail('google_oauth_legacy_closed', 409);
       if (await models.AnalyticsBrokerBinding.findOne({ attributes: ['google_user_id'], raw: true })) fail('google_oauth_legacy_closed', 409);
       if (await models.GooglePropertyBrokerRevocation.findOne({ attributes: ['google_user_id'], raw: true })) fail('google_oauth_legacy_closed', 409);
+      if (await models.GoogleAdsBrokerBinding.findOne({ attributes: ['google_user_id'], raw: true })) fail('google_oauth_legacy_closed', 409);
     },
     async assertLegacyConnection(connection) {
       if (await bindings.findOne({ attributes: ['google_user_id'], where: { [Op.or]: [
@@ -123,6 +124,9 @@ function createGoogleOAuthBroker({ models, client, sessions, audit = createRepos
         { google_connection_id: Number(connection?.id) || 0 }, { google_user_id: String(connection?.googleUserId || '') },
       ] }, raw: true })) fail('google_oauth_legacy_closed', 409);
       if (await models.GooglePropertyBrokerRevocation.findOne({ attributes: ['google_user_id'], where: { [Op.or]: [
+        { google_connection_id: Number(connection?.id) || 0 }, { google_user_id: String(connection?.googleUserId || '') },
+      ] }, raw: true })) fail('google_oauth_legacy_closed', 409);
+      if (await models.GoogleAdsBrokerBinding.findOne({ attributes: ['google_user_id'], where: { [Op.or]: [
         { google_connection_id: Number(connection?.id) || 0 }, { google_user_id: String(connection?.googleUserId || '') },
       ] }, raw: true })) fail('google_oauth_legacy_closed', 409);
     },

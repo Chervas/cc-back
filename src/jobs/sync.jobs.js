@@ -54,6 +54,7 @@ const googleAdCache = require('../services/googleAdCache.service');
 const googleCampaignMetricsCache = require('../services/googleCampaignMetricsCache.service');
 const { googleAdsSearchRows } = require('../lib/googleAdsSearchRows');
 const { guardGoogleAdsLegacyRequest } = require('../services/googleAdsLegacyConnection.service');
+const googleAdsBroker = require('../services/googleAdsBroker.service');
 const notificationService = require('../services/notifications.service');
 const { enqueueSyncForAllWabas } = require('../services/whatsappTemplates.service');
 const { enqueueSyncPhonesForAllWabas } = require('../services/whatsappPhones.service');
@@ -4576,9 +4577,11 @@ try {
           report.windowDays = window.days;
           report.dateRange = { start, end };
           (report.windows ||= []).push({ customerId: normalizeCustomerId(account.customerId), ...window });
-          const token = await this._getGoogleAccessToken(account.googleConnection);
+          const brokerContext = await googleAdsBroker.prepare(account);
+          const token = brokerContext ? undefined : await this._getGoogleAccessToken(account.googleConnection);
 
           const stats = await this._syncGoogleAdsAccount(account, {
+            brokerContext,
             start,
             end,
             chunkDays: options.chunkDays || this.config.googleAds.chunkDays,
@@ -4594,7 +4597,12 @@ try {
             report.notes.push(`Cuenta ${formatCustomerId(account.customerId)} sin inventario o métricas persistidas; lastSyncedAt no se actualiza.`);
             continue;
           }
-          await updateGoogleAdsSyncMetadata(ClinicGoogleAdsAccount, account, { lastSyncedAt: new Date() });
+          if (brokerContext) {
+            await sequelize.transaction(async transaction => {
+              await googleAdsBroker.assert(account, brokerContext, { transaction });
+              await updateGoogleAdsSyncMetadata(ClinicGoogleAdsAccount, account, { lastSyncedAt: new Date() }, { transaction });
+            });
+          } else await updateGoogleAdsSyncMetadata(ClinicGoogleAdsAccount, account, { lastSyncedAt: new Date() });
           report.processed += 1;
           report.rows += stats.rows || 0;
 
@@ -4701,9 +4709,11 @@ try {
           report.windowDays = window.days;
           report.dateRange = { start, end };
           (report.windows ||= []).push({ customerId: normalizeCustomerId(account.customerId), ...window });
-          const token = await this._getGoogleAccessToken(account.googleConnection);
+          const brokerContext = await googleAdsBroker.prepare(account);
+          const token = brokerContext ? undefined : await this._getGoogleAccessToken(account.googleConnection);
 
           const stats = await this._syncGoogleAdsAccount(account, {
+            brokerContext,
             start,
             end,
             chunkDays: options.chunkDays || this.config.googleAds.chunkDays,
@@ -4719,7 +4729,12 @@ try {
             report.notes.push(`Cuenta ${formatCustomerId(account.customerId)} sin inventario o métricas persistidas; lastSyncedAt no se actualiza.`);
             continue;
           }
-          await updateGoogleAdsSyncMetadata(ClinicGoogleAdsAccount, account, { lastSyncedAt: new Date() });
+          if (brokerContext) {
+            await sequelize.transaction(async transaction => {
+              await googleAdsBroker.assert(account, brokerContext, { transaction });
+              await updateGoogleAdsSyncMetadata(ClinicGoogleAdsAccount, account, { lastSyncedAt: new Date() }, { transaction });
+            });
+          } else await updateGoogleAdsSyncMetadata(ClinicGoogleAdsAccount, account, { lastSyncedAt: new Date() });
           report.processed += 1;
           report.rows += stats.rows || 0;
 
@@ -4761,12 +4776,15 @@ try {
     return token.accessToken;
   }
 
-  async _syncGoogleAdsAccount(account, { start, end, chunkDays = 7, accessToken, report }) {
-    const request = guardGoogleAdsLegacyRequest(account.googleConnection, googleAdsRequest);
-    await googleLegacyCredentials.assert(account.googleConnection);
-    const managerId = ensureGoogleAdsConfig().managerId;
-    const effectiveLoginCustomerId = normalizeCustomerId(account.loginCustomerId || account.managerCustomerId || managerId);
-    if (!effectiveLoginCustomerId) throw new Error('google_ads_missing_login_customer');
+  async _syncGoogleAdsAccount(account, { start, end, chunkDays = 7, accessToken, report, brokerContext }) {
+    const request = brokerContext ? undefined : guardGoogleAdsLegacyRequest(account.googleConnection, googleAdsRequest);
+    const assertRead = transaction => brokerContext ? googleAdsBroker.assert(account, brokerContext, { transaction })
+      : googleLegacyCredentials.assert(account.googleConnection);
+    const readTyped = brokerContext ? (family, payload, budget) => googleAdsBroker.read(account, brokerContext, family, payload, budget) : undefined;
+    await assertRead();
+    const effectiveLoginCustomerId = brokerContext ? null
+      : normalizeCustomerId(account.loginCustomerId || account.managerCustomerId || ensureGoogleAdsConfig().managerId);
+    if (!brokerContext && !effectiveLoginCustomerId) throw new Error('google_ads_missing_login_customer');
     const models = require('../../models');
     const days = googleAdCache.daysBetween(start, end);
     let persistedMetricsRows = 0; let persistedInventoryRows = 0;
@@ -4777,25 +4795,28 @@ try {
         const slice = days.slice(offset, offset + 60);
         const snapshot = await googleCampaignMetricsCache.collectGoogleCampaignMetrics({
           account, accessToken, loginCustomerId: effectiveLoginCustomerId, start: slice[0], end: slice.at(-1),
+          readTyped,
           read: options => googleAdsSearchRows({ ...options, request }),
         });
-        await googleLegacyCredentials.assert(account.googleConnection);
+        await assertRead();
         const saved = await googleCampaignMetricsCache.persistGoogleCampaignMetrics({
           models, account, snapshot, useGroupAttribution: true,
+          ...(brokerContext ? { beforeReplace: ({ transaction }) => assertRead(transaction) } : {}),
         });
         persistedMetricsRows += saved.rows;
       }
       const publishing = await this._syncGoogleAdsPublishingState(account, {
-        accessToken, effectiveLoginCustomerId, report, request,
+        accessToken, effectiveLoginCustomerId, report, request, readTyped, assertRead,
       });
       persistedInventoryRows = publishing.rows;
       adCache = await googleAdCache.syncGoogleAdCache({ models, account, accessToken,
         loginCustomerId: effectiveLoginCustomerId, start, end, chunkDays, ensureHistory: true,
+        readTyped, ...(brokerContext ? { beforeReplace: ({ transaction }) => assertRead(transaction) } : {}),
         request: (method, route, options) => request(method, route, {
           ...options, apiVersion: googleCampaignMetricsCache.API_VERSION,
         }),
       });
-      await googleLegacyCredentials.assert(account.googleConnection);
+      await assertRead();
       if (publishing.destinationError) throw publishing.destinationError;
       report?.notes?.push?.(`Google Ads anuncios: ${adCache.inventoryRows} inventariados, ${adCache.metricRows} filas diarias, ${adCache.days || 0} fechas completas${adCache.skipped ? ' (otra captura mas reciente)' : ''}.`);
       return { complete: true, rows: persistedMetricsRows + adCache.metricRows,
@@ -4809,7 +4830,8 @@ try {
   }
 
   async _syncGoogleAdsPublishingState(account, { accessToken, effectiveLoginCustomerId, report,
-    request = guardGoogleAdsLegacyRequest(account.googleConnection, googleAdsRequest) }) {
+    request, readTyped, assertRead = () => googleLegacyCredentials.assert(account.googleConnection) }) {
+    if (!readTyped) request ||= guardGoogleAdsLegacyRequest(account.googleConnection, googleAdsRequest);
     const customerId = normalizeCustomerId(account.customerId);
     const query = [
       'SELECT',
@@ -4828,40 +4850,46 @@ try {
 
     let selectedIssue = null;
     let persistedInventoryRows = 0;
-    const campaignRows = await googleAdsSearchRows({ customerId, accessToken,
+    const campaignRows = readTyped ? await readTyped('publishing_campaigns', {}) : await googleAdsSearchRows({ customerId, accessToken,
       loginCustomerId: effectiveLoginCustomerId, apiVersion: googleCampaignMetricsCache.API_VERSION,
       query: `${query} LIMIT 5001`, request });
     if (campaignRows.length > 5000 || campaignRows.some(row => !/^[1-9]\d*$/.test(String(row?.campaign?.id || '')))) {
       throw new Error('google_ads_inventory_incomplete');
     }
-    for (const row of campaignRows) {
-      const campaign = row?.campaign || {};
-      if (ExternalCampaignInventory && campaign.id) {
-        await ExternalCampaignInventory.upsert({
-          provider: 'google_ads',
-          customer_id: customerId,
-          account_name: account.descriptiveName || null,
-          campaign_id: String(campaign.id),
-          campaign_name: campaign.name || null,
-          status: campaign.status || null,
-          channel_type: campaign.advertisingChannelType || campaign.advertising_channel_type || null,
-          source: 'provider_sync',
-          last_seen_at: new Date()
-        });
-        persistedInventoryRows += 1;
+    const persistInventory = async transaction => {
+      if (readTyped) await assertRead(transaction);
+      let rows = 0;
+      for (const row of campaignRows) {
+        const campaign = row?.campaign || {};
+        if (ExternalCampaignInventory && campaign.id) {
+          await ExternalCampaignInventory.upsert({
+            provider: 'google_ads',
+            customer_id: customerId,
+            account_name: account.descriptiveName || null,
+            campaign_id: String(campaign.id),
+            campaign_name: campaign.name || null,
+            status: campaign.status || null,
+            channel_type: campaign.advertisingChannelType || campaign.advertising_channel_type || null,
+            source: 'provider_sync',
+            last_seen_at: new Date()
+          }, { transaction });
+          rows += 1;
+        }
+        const issue = evaluateGooglePublishingIssue(campaign);
+        if (!issue) {
+          continue;
+        }
+        if (!selectedIssue || issue.priority > selectedIssue.priority) {
+          selectedIssue = {
+            ...issue,
+            campaignId: campaign.id ? String(campaign.id) : null,
+            campaignName: campaign.name || null
+          };
+        }
       }
-      const issue = evaluateGooglePublishingIssue(campaign);
-      if (!issue) {
-        continue;
-      }
-      if (!selectedIssue || issue.priority > selectedIssue.priority) {
-        selectedIssue = {
-          ...issue,
-          campaignId: campaign.id ? String(campaign.id) : null,
-          campaignName: campaign.name || null
-        };
-      }
-    }
+      return rows;
+    };
+    persistedInventoryRows = readTyped ? await sequelize.transaction(persistInventory) : await persistInventory();
 
     let destinationError = null;
     try {
@@ -4870,6 +4898,7 @@ try {
         effectiveLoginCustomerId,
         campaignRows,
         request,
+        readTyped, assertRead,
       });
     } catch (error) {
       // Finish the independent ad cache, but do not label the whole account complete.
@@ -4879,15 +4908,19 @@ try {
       );
     }
 
-    await googleLegacyCredentials.assert(account.googleConnection);
-    await updateGoogleAdsSyncMetadata(ClinicGoogleAdsAccount, account, {
-      publishingStatus: selectedIssue?.status || null,
-      publishingReason: selectedIssue?.reason || null,
-      publishingReasons: selectedIssue?.reasons ? JSON.stringify(selectedIssue.reasons) : null,
-      publishingCampaignId: selectedIssue?.campaignId || null,
-      publishingCampaignName: selectedIssue?.campaignName || null,
-      publishingSyncedAt: new Date()
-    });
+    await assertRead();
+    const persistPublishing = async transaction => {
+      if (readTyped) await assertRead(transaction);
+      await updateGoogleAdsSyncMetadata(ClinicGoogleAdsAccount, account, {
+        publishingStatus: selectedIssue?.status || null,
+        publishingReason: selectedIssue?.reason || null,
+        publishingReasons: selectedIssue?.reasons ? JSON.stringify(selectedIssue.reasons) : null,
+        publishingCampaignId: selectedIssue?.campaignId || null,
+        publishingCampaignName: selectedIssue?.campaignName || null,
+        publishingSyncedAt: new Date()
+      }, { transaction });
+    };
+    if (readTyped) await sequelize.transaction(persistPublishing); else await persistPublishing();
 
     if (selectedIssue && report && Array.isArray(report.notes)) {
       report.notes.push(`Google Ads publishing issue ${account.customerId}: ${selectedIssue.status}`);
@@ -4900,9 +4933,10 @@ try {
     accessToken,
     effectiveLoginCustomerId,
     campaignRows = [],
-    request = guardGoogleAdsLegacyRequest(account.googleConnection, googleAdsRequest),
+    request, readTyped, assertRead,
   }) {
     if (!ExternalCampaignInventory || !campaignRows.length) return 0;
+    if (!readTyped) request ||= guardGoogleAdsLegacyRequest(account.googleConnection, googleAdsRequest);
     const customerId = normalizeCustomerId(account.customerId);
     const end = new Date();
     const start = new Date(end.getTime() - (29 * MS_PER_DAY));
@@ -4916,7 +4950,8 @@ try {
       `WHERE segments.date BETWEEN '${start.toISOString().slice(0, 10)}' AND '${end.toISOString().slice(0, 10)}'`,
     ].join('\n');
 
-    const landingRows = await googleAdsSearchRows({ customerId, accessToken,
+    const landingRows = readTyped ? await readTyped('landing_pages', { startDate: start.toISOString().slice(0, 10), endDate: end.toISOString().slice(0, 10) })
+      : await googleAdsSearchRows({ customerId, accessToken,
       loginCustomerId: effectiveLoginCustomerId, apiVersion: googleCampaignMetricsCache.API_VERSION,
       query, request });
 
@@ -4931,6 +4966,7 @@ try {
         models: { sequelize, ExternalCampaignInventory },
         reference: { account_id: customerId, campaign_id: campaignId },
         detection,
+        ...(readTyped ? { beforeWrite: ({ transaction }) => assertRead(transaction) } : {}),
       });
     }
     return updated;

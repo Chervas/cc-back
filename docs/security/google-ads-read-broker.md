@@ -8,8 +8,9 @@ conversiones, mensajes, traslado de secretos ni despliegue real.
 
 Ampliado sobre backend `04ebc703e21cde0690b7ef303883f4ae43402e96` y frontend
 `1f587169db254a52af35d10d905e6025e52fca2f`: ocho lecturas, lector completo backend
-y entrada tipada de los colectores. La autorización SQL y la inyección en los
-jobs siguen pendientes; la QA de contexto opaco usa un autorizador ficticio.
+y entrada tipada de los colectores. El registro SQL y la inyección en jobs se
+prepararon después en [la integración backend](google-ads-backend-migration.md).
+La QA HTTPS de este motor usa un autorizador ficticio; la QA SQL se documenta allí.
 
 ## Contrato cerrado
 
@@ -105,8 +106,9 @@ latencia y comportamiento con cuentas reales grandes en un canary aprobado.
 `src/services/googleAdsBrokerReader.service.js` exige un cliente y un
 `assertContext` que resuelva una autorización opaca creada por el servidor. Una
 estructura recibida del usuario con tenant/cuenta no es una autorización. El
-autorizador SQL real sigue pendiente; el servicio aún no se exporta por una ruta
-pública ni se instala en el scheduler.
+autorizador SQL ya está preparado en googleAdsBrokerScope.service.js y se inyecta
+en sync/backfill mediante googleAdsBroker.service.js. No se exporta como una ruta
+pública; su configuración, DDL y activación real siguen pendientes.
 
 El lector no acepta cursores externos. Comprueba el contexto antes/después de
 cada petición y antes de devolver el resultado completo, requestId, forma de
@@ -130,9 +132,10 @@ No se cambia el contrato de persistencia ni se aplica DDL.
 
 La QA por HTTPS local conecta el cliente firmado real, lector, broker y ambos
 colectores, con proveedor/Secrets Manager/autorización y repositorios de escritura
-ficticios. No carga el índice de modelos clínicos. Todavía falta inyectar este
-recorrido en sync/backfill y conectar publicación/destinos con sus escritores;
-solo el éxito de todas esas fases podrá actualizar lastSyncedAt.
+ficticios. No carga el índice de modelos clínicos. La integración backend posterior inyecta este
+recorrido en sync/backfill y conecta publicación/destinos con sus escritores;
+solo el éxito de todas esas fases permite actualizar lastSyncedAt, con permisos
+revalidados dentro de las transacciones. Continúa pendiente el corte real.
 
 ## Bloqueo y auditoría
 
@@ -183,10 +186,11 @@ conservan sus pendientes. No se añade infraestructura ni presupuesto.
 
 ## Siguiente integración y puerta de activación
 
-Falta conectar el backend: registro independiente de cuentas/mappings, metadata
-de identidad y tokens SQL NULL, autorización clínica/grupo y todos los usos
-compartidos, marcador durable de cierre legacy Ads, inyección del lector en
-sync/backfill y persistencia de publicación/destinos, OAuth Ads y desconexión API.
+Registro independiente, comprobación SQL NULL de tokens, autorización de grupo y
+compartidos, cierre legacy e inyección en sync/backfill se prepararon en
+[el bloque backend](google-ads-backend-migration.md). OAuth Ads y la cola de
+confirmación de desconexiones siguen pendientes; una baja gestionada se rechaza
+antes de cambios parciales mientras falta esa dependencia.
 Ads usa assignmentScope/grupoClinicaId y asignaciones explícitas; GrupoClinica no
 tiene una columna de cuenta Ads primaria. Los primarios SC/GA/GBP se comprueban
 en sus recorridos correspondientes.

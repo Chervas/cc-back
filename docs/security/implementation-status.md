@@ -1,5 +1,20 @@
 # Seguridad: implementación y evidencias
 
+## 13/09/2026 — Registro durable y consumidores de lecturas Ads
+
+Sync/backfill conectados en código a las ocho lecturas Ads, con contexto opaco,
+permisos de grupos/compartidos y revalidación SQL dentro de las escrituras.
+Registro independiente por customer/mapping y exclusión legacy por ID/subject.
+QA: 344 tests Node y 106 checks en ocho MySQL propios, todos con cierre 0;
+hotfix conservado. DDL 20260913080000 obligatoria antes del código aun apagado,
+pendiente en BD compartida. Sin AWS/proveedor real, despliegue, claves o flags.
+
+Baja Ads y OAuth pendientes: desconexión gestionada rechazada con 503 antes de
+cambios parciales. Cero cuentas migradas. OPS aplazado; continúan otras cohortes,
+auditoría completa, IAM/retención/costes/Budget y cifrado/corte BD.
+
+[Contrato y dependencias](google-ads-backend-migration.md).
+
 ## 13/09/2026 — Lecturas de sincronización Ads y colectores tipados
 
 El broker incorpora cuatro lecturas más: estados de publicación, destinos,

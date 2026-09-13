@@ -1,20 +1,34 @@
 {
-  "version": 2,
+  "version": 3,
   "reviewedAt": "2026-09-13",
-  "sourceHead": "04ebc703e21cde0690b7ef303883f4ae43402e96",
+  "sourceHead": "3801764d7cc2f22f9d71e44fe5e6477d347f9412",
   "includesWorkingChanges": true,
   "runtimeMigrated": 0,
-  "newMigrations": [],
+  "newMigrations": [
+    "20260913080000-add-google-ads-broker-bindings.js"
+  ],
   "ops": "deferred_by_user",
   "qa": {
-    "brokerTests": 145,
-    "adsBrokerTests": 22,
-    "backendTests": 48,
-    "totalTests": 193,
-    "database": "no_new_ddl_or_mysql_run",
-    "ui": "no_ui_changes",
-    "authorization": "fake_context_only_real_registry_pending",
-    "evidence": "ads-consumers-regression.json"
+    "backendTests": 344,
+    "mysqlChecks": 106,
+    "mysqlOwnedInstances": 8,
+    "shutdownCodes": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "broker": "unchanged_engine_previous_145_tests",
+    "ui": "documentation_only",
+    "runtime": "no_real_account_or_provider_validation",
+    "evidence": [
+      "ads-bindings-full-node.json",
+      "ads-bindings-full-mysql.json"
+    ]
   },
   "operations": [
     "google.ads.account.read.v1",
@@ -28,10 +42,9 @@
     "google.ads.asset.revoke.v1"
   ],
   "pending": [
-    "SQL account registry, metadata identity and durable Ads legacy exclusion",
-    "Complete account/clinic/group/shared authorization and durable API disconnection",
-    "Inject typed reader into sync/backfill and connect publishing/destination persistence without partial completion",
-    "Remaining Ads operations and consumers, OAuth lifecycle and approved real migration",
+    "Ads durable control outbox, human audit and broker acknowledgement; managed disconnect currently rejects before changes",
+    "Ads OAuth lifecycle, account registration/remapping workflow and approved real cut",
+    "Remaining Ads consumers, conversions, reception and writes",
     "Full platform audit, AWS costs/retention/IAM/Budget and database encryption/cut"
   ],
   "rows": [
@@ -78,17 +91,57 @@
     {
       "file": "src/services/googleAdsBrokerReader.service.js",
       "sha256": "a555af2fb3f473e064e08433bdfd8b1d656ee1c14a33e68e946b3debc5ddfdbe",
-      "status": "prepared_typed_reader_not_injected_in_jobs"
+      "status": "prepared_typed_read_consumer_wired_in_sync_backfill_not_activated"
     },
     {
       "file": "src/services/googleCampaignMetricsCache.service.js",
       "sha256": "42eab3996e70fe231af36f264dc8776d13316f9ed8cc0042d5aeeefe8df26fe5",
-      "status": "prepared_typed_reader_not_injected_in_jobs"
+      "status": "prepared_typed_read_consumer_wired_in_sync_backfill_not_activated"
     },
     {
       "file": "src/services/googleAdCache.service.js",
       "sha256": "556cf78e3a939838faca2c6e53ba452c744be8c3e9823d65e38e23b0779f22b2",
-      "status": "prepared_typed_reader_not_injected_in_jobs"
+      "status": "prepared_typed_read_consumer_wired_in_sync_backfill_not_activated"
+    },
+    {
+      "file": "src/services/googleAdsBrokerScope.service.js",
+      "sha256": "c27cfa2519bb7cda4040b13476331bc9489009c4fe5d79811806bc4778e68b06",
+      "status": "prepared_scope_and_persistence_fences"
+    },
+    {
+      "file": "src/services/googleAdsBroker.service.js",
+      "sha256": "4c6e836f36dbf5db92a13bee8e5e42d41ad2e4b7b629a567801cfe51b389881b",
+      "status": "prepared_signed_client_and_scope_assembly"
+    },
+    {
+      "file": "src/jobs/sync.jobs.js",
+      "sha256": "34b5ae60f365fc4509eec47c6e8ae47c9d017b079184f2500b5378a25a2b13a5",
+      "status": "prepared_ads_read_cohort_with_legacy_exclusion"
+    },
+    {
+      "file": "src/services/googleLegacyCredentials.service.js",
+      "sha256": "d2364b96c8ff17a9b80349d236b126ba8aa1c05a5062e22cb246c9c4cc9a56f9",
+      "status": "prepared_durable_ads_credential_exclusion"
+    },
+    {
+      "file": "src/services/googleOAuthBroker.service.js",
+      "sha256": "35445c746a51e420dd79bdc9094a171fbeeb03f6c4e6911bf5f9c44ccbc0f8b6",
+      "status": "prepared_ads_legacy_oauth_exclusion"
+    },
+    {
+      "file": "src/services/oauthScopedDisconnect.service.js",
+      "sha256": "b0a1b357c23fffc6f8fd2e3db7eb25f92b7b871512309b18b05ea5a297d3e50d",
+      "status": "prepared_managed_ads_disconnect_fail_closed_pending_control_queue"
+    },
+    {
+      "file": "models/googleadsbrokerbinding.js",
+      "sha256": "348fdd32b4f5f6a3f74d0191baec094e8b2a0881f16c2313e128ec86e8d98957",
+      "status": "prepared_independent_registry_schema"
+    },
+    {
+      "file": "migrations/20260913080000-add-google-ads-broker-bindings.js",
+      "sha256": "fa03dbfba3b41e0ab154013d647598695fa2a78b2d380e16e6dc99de895e3787",
+      "status": "prepared_ddl_tested_only_on_owned_mysql"
     }
   ]
 }
