@@ -1,6 +1,6 @@
 # Administradores: rotación y cierre de sesiones desplegados
 
-Estado del 13/09/2026 22:17:45 UTC: la rotación solicitada y el corte de código
+Estado final del 13/09/2026 22:25:03 UTC: la rotación solicitada y el corte de código
 que invalida los JWT administrativos antiguos están aplicados. La recuperación
 frontend está publicada. El MFA por correo sigue pendiente de activación pública.
 WhatsApp permanece fuera de este corte. Versiones, evidencia y relevo:

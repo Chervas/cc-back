@@ -4,10 +4,13 @@
 
 Con autorización del usuario, el 13/09 a las 22:16–22:17 UTC (14/09 a las
 00:16–00:17 Europe/Madrid) se desplegó el cierre de JWT administrativos antiguos
-y la recuperación que vuelve al login. Back staging `3607ea09`, gateway
-`acd1fd74` sobre su rama explícita `security/admin-session-gateway-20260913`,
+y la recuperación que vuelve al login. Back staging `3cf085a3`, gateway
+`b3b3a8f8` sobre su rama explícita `security/admin-session-gateway-20260913`,
 front staging `49a9c3dd`. Código DEV: back `1fa5357f`, front `075faf5a`.
 El hotfix de estadísticas conserva su SHA y está versionado en los cortes públicos.
+Validación final a las 22:25 UTC tras corregir la copia del usuario Sequelize
+al ocultar la contraseña en la respuesta. Regresión con instancia real del modelo
+y SQL ficticio; el ajuste y sus parches están en DEV `16463284`.
 
 DEV y gateway mantienen worker/cron pausados; staging conserva sus flags.
 Dieciocho comprobaciones de rechazo HTTP/HTTPS/WebSocket correctas; build servido

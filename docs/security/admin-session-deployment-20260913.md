@@ -2,7 +2,8 @@
 
 El usuario aprobó el primer corte de sesiones administrativas y recuperación,
 su publicación y el relevo posterior a otro Codex. Se ejecutó el 13/09/2026 entre
-22:16:30 y 22:17:45 UTC: 14/09/2026 entre 00:16:30 y 00:17:45 Europe/Madrid.
+22:16:30 y 22:25:03 UTC: 14/09/2026 entre 00:16:30 y 00:25:03 Europe/Madrid,
+incluida la corrección final de la respuesta de login descrita más abajo.
 **MFA por correo y reconexión WhatsApp siguen pendientes; no están activados.**
 
 ## Versiones del código instalado
@@ -10,8 +11,8 @@ su publicación y el relevo posterior a otro Codex. Se ejecutó el 13/09/2026 en
 | Destino | Rama / referencia | Commit de código |
 | --- | --- | --- |
 | Backend DEV | `dev` | `1fa5357fb925049672b47295cd2da061379bf4ff` |
-| Backend staging | `staging` | `3607ea09e6c67500bb1afb10df5f47aff8555c00` |
-| Gateway | `security/admin-session-gateway-20260913` | `acd1fd741159edb86871612b473df3aaf6c91816` |
+| Backend staging | `staging` | `3cf085a35aeda489f40173f23f4607710474ad2e` |
+| Gateway | `security/admin-session-gateway-20260913` | `b3b3a8f8883beeb9bc24f83f2b814e954c095ca2` |
 | Frontend DEV, fuente | `dev` | `075faf5a4bcc1a736801e7face8e2d171f585788` |
 | Frontend staging, publicado | `staging` | `49a9c3dd3743f94e39e84af4cf83815dfacf75d2` |
 
@@ -40,7 +41,7 @@ tres archivos funcionales del frontend se incorporaron al público.
 - La recuperación se puede abrir aunque el navegador conserve una sesión.
   Tras confirmar el cambio se limpia esa sesión y se reemplaza la URL por
   `/sign-in`. Un error de recuperación permanece en el formulario.
-- Reinicios, uno por proceso: DEV respondió a los 4,077 segundos, staging a los
+- Primeros reinicios: DEV respondió a los 4,077 segundos, staging a los
   4,071 y gateway a los 4,898. Son tiempos hasta observar HTTP 401 con una petición
   sin autenticación, no una medición continua de todas las peticiones afectadas.
 - Se conservaron los hashes de `.env` y del entorno de overrides PM2 y los flags
@@ -50,8 +51,9 @@ tres archivos funcionales del frontend se incorporaron al público.
   sin la prueba nueva. Tres comprobaciones HTTPS los rechazaron en CRM,
   autenticación y app; tres conexiones WebSocket se rechazaron. Los JWT sintéticos
   no se guardaron ni imprimieron. No se usaron sesiones antiguas del incidente.
-- Los tres procesos permanecieron online, con un solo reinicio adicional cada
-  uno. Antes del corte había cero JobRequests en ejecución y 18 pendientes.
+- Los tres procesos permanecieron online: un reinicio adicional en DEV y dos
+  en staging/gateway, incluida la corrección final. Antes y después del primer
+  corte había cero JobRequests en ejecución y 18 pendientes.
 - QA previo: 51 pruebas backend, 11 frontend, HTTP/Socket.IO sobre candidatos,
   MySQL aislados de sesión/rotación, build de producción y cuatro capturas
   Chromium de recuperación escritorio/móvil con API ficticia.
@@ -65,6 +67,27 @@ directorios, reteniendo 109 assets antiguos con hash para las pestañas abiertas
 No hubo recarga de Nginx, DDL, cambio de configuración, envío de correo desde
 herramientas ni habilitación de integraciones. Los workers ya autorizados de
 staging conservaron su operación normal; el canary no ejecutó jobs de negocio.
+
+## Corrección final de la respuesta de login
+
+La revisión final detectó que `user.get({ plain: true })` puede devolver los
+propios `dataValues` de Sequelize. Eliminar ahí `password_usuario` antes de
+firmar el JWT borraba también la credencial que necesitaba el emisor. La prueba
+inicial usaba una copia ficticia y no reflejaba ese comportamiento del ORM.
+
+Se reprodujo el HTTP 500 con una instancia del modelo real, sin conexión SQL,
+y se corrigió clonando los valores antes de eliminar el campo en la respuesta.
+El login, desbloqueo, renovación y control de sesiones pasaron en ambos
+candidatos con esa fixture. Ajuste y parches versionados en DEV `16463284`;
+el código DEV ordinario usa una proyección explícita y no tenía ese defecto.
+
+La corrección pública quedó en `3cf085a3` y `b3b3a8f8`. Segundo reinicio de
+staging a las 22:24:56 UTC, disponible a las 22:24:59 (3,371 s); gateway a las
+22:24:59, disponible a las 22:25:03 (3,915 s). Se repitieron las doce negativas
+HTTP locales y la comparación de configuración, todas correctas. Durante la
+ventana inicial del corte los logins administrativos correctos podían responder
+500; no se verificó un intento real del usuario en esa ventana. Las sesiones
+antiguas continuaron rechazándose. La prueba manual sigue pendiente del usuario.
 
 ## Continuidad para el siguiente Codex
 
