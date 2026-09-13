@@ -2,30 +2,27 @@
 
 > Guía de ejecución vigente, revisada el 13/09/2026 a las 22:25 UTC.
 > Arquitectura y contrato de producto: frontend `39-seguridad-integraciones-cifrado-auditoria.md`.
-> La cronología anterior se conserva en [historial de avances](security/integrations-migration-history.md).
+> **Fuente de verdad:** ejecución de candidatos, QA, publicación y rollback; estado y prioridades en el manual central.
+> **Relacionado con:** [00-README](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/00-README.md), [índice técnico](README.md#seguridad).
 
 ## Punto de partida operativo
 
-El corte aprobado de acceso está desplegado: staging `3cf085a3`, gateway
-`b3b3a8f8` y frontend staging `49a9c3dd`. Sus correcciones y pruebas están también
-en DEV. El gateway usa `security/admin-session-gateway-20260913` para conservar
-su base anterior. Hay un acta con el ajuste de serialización Sequelize,
-reinicios, pruebas, respaldos y rollback: [despliegue administrativo](security/admin-session-deployment-20260913.md).
-
-**MFA por correo y reconexión WhatsApp no están activos.** Los ensayos del broker,
-auditoría y migraciones son ficticios mientras no exista una verificación real
-expresamente identificada. La BD compartida no recibió DDL de este corte. Las
-pausas DEV/gateway y configuración de staging se conservaron; el aislamiento de
-UID/identidad SQL/claves DEV/público sigue pendiente.
+Consultar [19: estado de seguridad](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones)
+y [99: último corte público](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-corte-de-acceso-publico-2026-09-13).
+El [acta técnica](security/admin-session-deployment-20260913.md) contiene
+versiones, rama de gateway, pruebas, respaldos y rollback. Comprobar esos
+datos antes del corte: publicar código no cambia el runtime ni sus pausas.
 
 ## Elegir el siguiente corte
+
+El orden se mantiene en [16: prioridades](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/16-roadmap.md#seguridad-de-acceso-e-integraciones). Esta tabla localiza procedimientos.
 
 | Trabajo | Guía y condición de salida |
 | --- | --- |
 | Mantener el acceso ya desplegado | [Contrato y conservación en promociones](security/admin-password-session-cut.md), [acta](security/admin-session-deployment-20260913.md). Login manual pendiente del usuario. |
 | Activar MFA por correo | Cinco DDL exactas del candidato en [dependencias MFA](security/admin-password-session-cut.md#preparación-del-mfa-completo-y-pendientes-reales); configuración/alcance de correo, clave y entrega de auditoría aprobados. No usar el lote histórico completo Meta/Google por defecto. |
 | Preparar/reconectar WhatsApp | [Recorrido gateway](security/whatsapp-onboarding-gateway.md), [condiciones de reconexión](security/whatsapp-reconnection-readiness.md). Aislar credenciales, validar proveedor/activos y recepción → cola → staging; permiso explícito antes de activar. |
-| Retención, Budget, costes y cifrado | Inventario AWS y contrato 39, [matriz de implementación](security/implementation-status.md), fases C–E inferiores. No recrear recursos ni declarar controles reportados como verificados. |
+| Retención, Budget, costes y cifrado | Inventario AWS y contrato 39, [matriz de aceptación AWS](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/39-seguridad-integraciones-cifrado-auditoria.md#matriz-de-aceptacion-aws), fases C–E inferiores. No recrear recursos ni declarar controles reportados como verificados. |
 | Continuar otra tarea de producto | [Relevo para importación](security/admin-session-deployment-20260913.md#continuidad-para-el-siguiente-codex). Código en DEV, QA de su dominio, sin promover o activar esta migración por arrastre. |
 
 ## Lista de ejecución por entrega
@@ -54,8 +51,8 @@ UID/identidad SQL/claves DEV/público sigue pendiente.
 - **Contrato de producto:** frontend 39, 04 y documentos del dominio afectado.
 - **API:** `src/Documentacion/13-backend.md`, seguido del espejo frontend.
 - **Estado verificable de un corte:** acta con SHAs, flags, DDL y evidencia.
-- **Historial:** [avances](security/integrations-migration-history.md),
-  [implementación](security/implementation-status.md) y bitácora frontend 99.
+- **Estado y prioridades:** [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones) y [16](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/16-roadmap.md#seguridad-de-acceso-e-integraciones).
+- **Historial:** [98](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/98-estado-historico.md#seguridad-integraciones-2026-09) y [99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md).
 
 Si estas fuentes divergen, comprobar código/runtime y corregirlas antes del
 corte. Los estados históricos no prevalecen sobre una comprobación actual.

@@ -1,3 +1,16 @@
+# 13 - Backend
+
+> **Tipo:** contrato técnico de API y arquitectura backend.
+> **Fuente de verdad:** este archivo en `cc-back`; el archivo homónimo de `cc-front` es su espejo completo.
+> **Última revisión de conciliación documental:** 2026-09-14; no certifica un nuevo despliegue.
+> **Relacionado con:** [menú central](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/00-README.md), [mantenimiento](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/CONTRIBUTING.md).
+
+Las secciones de seguridad describen contratos preparados y sus condiciones de
+corte. La única madurez vigente está en [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones),
+las prioridades en [16](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/16-roadmap.md#seguridad-de-acceso-e-integraciones)
+y las entregas en [99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md).
+Las formulaciones anteriores al espejo conciliado se conservan en [98](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/98-estado-historico.md#seguridad-integraciones-2026-09).
+
 > **Módulo:** Arquitectura del Backend
 
 ## 13/09/2026 — Ventana aislada del alta WhatsApp
@@ -215,6 +228,8 @@ el doble paso ni despliega en staging/gateway/workers. Los consumidores Meta
 inventariados quedan sin salida al instalar el corte; retirarla requiere otro
 corte del broker, sin sustituir tokens desde Ajustes. Costes mantiene su contrato
 previo; no se ha verificado gasto AWS nuevo.
+
+<a id="13092026--alta-de-cuentas-ads-motor-del-broker-preparado"></a>
 
 ## 13/09/2026 — Fundamento de altas Ads y cancelación interna
 
@@ -1071,7 +1086,7 @@ contrato, inventario, QA, límites, orden del corte y rollback conservador.
 
 Economia del paciente: el contrato persistido de presupuestos, versiones,
 cobros, saldo, bonos, plantillas y documentos fiscales se documenta en
-[14-economia-paciente](./14-economia-paciente.md). VeriFactu permanece como
+[14-economia-paciente](https://github.com/Chervas/cc-back/blob/dev/src/Documentacion/14-economia-paciente.md). VeriFactu permanece como
 simulacion visible y no comunica con AEAT.
 
 ## 2026-09-12 - Broker de integraciones: contrato inicial sin despliegue
@@ -1454,7 +1469,7 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
 
 - `whatsappAccountHealth.service.js` compone una señal canónica por
   `ClinicMetaAsset` a partir de estado del número, registro, cumplimiento,
-  `account_update`, calidad y errores de proveedor. `BANNED`, suspensión,
+  `account_update`, `account_review_update`, calidad y errores de proveedor. `BANNED`, suspensión,
   desconexión, activo inactivo, restricción explícita y `131031` prevalecen
   sobre `registered`/`GREEN` y producen `can_send=false`.
 - El snapshot vive en `additionalData.whatsappHealth`. La migración
@@ -1478,16 +1493,36 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
   hora. Las recuperaciones bajo demanda desde el listado son ligeras y se
   omiten si existe una lectura persistida en los últimos 60 minutos. El snapshot WABA
   conserva revisión de cuenta, verificación empresarial y salud agregada
-  saneadas. La observación se marca `stale` tras
+  saneadas. El mismo ciclo audita que la app tenga `account_update`,
+  `account_review_update` y `messages`, y que figure en
+  `/{WABA_ID}/subscribed_apps`; guarda solo el resultado saneado en
+  `additionalData.whatsappWebhookSubscription`. La observación se marca `stale` tras
   `WHATSAPP_HEALTH_STALE_MINUTES=90` sin bloquear por sí sola; una lectura Meta
   reciente avanza también el reloj de la proyección para evitar estados y fechas
   contradictorios.
-- `GET /api/whatsapp/admin/compliance` y el diagnóstico incorporan `health` e
+- `GET /api/whatsapp/compliance/admin/overview` y el diagnóstico incorporan `health` e
   `health_history`, revisión WABA, verificación empresarial y estado del nombre
-  mostrado como conceptos separados; Cuentas conectadas y QuickChat reciben
-  `health`. QuickChat presenta el bloqueo del activo efectivo aunque coexistencia
-  todavía figure activa. Las transiciones encolan `whatsapp.account_health_blocked` o
-  `whatsapp.account_health_recovered` mediante notificaciones durables.
+  mostrado como conceptos separados, además de la cobertura del webhook;
+  Cuentas conectadas y QuickChat reciben `health`. QuickChat presenta el bloqueo
+  del activo efectivo aunque coexistencia todavía figure activa y enlaza al
+  activo concreto del monitor. El endpoint admin
+  `POST /api/whatsapp/compliance/admin/accounts/:assetId/manual-review` crea un
+  expediente técnico interno y prepara un borrador saneado, sin contactar con
+  Meta. Las transiciones encolan salud bloqueada/recuperada, pérdida/recuperación
+  de suscripción y verificación empresarial rechazada mediante notificaciones
+  durables.
+- `GET /api/whatsapp/compliance/admin/accounts/:assetId/health-history` es
+  administrativo y de solo lectura. Devuelve eventos ordenados por
+  `observed_at,id`, cursor estable, máximo 100 filas por página y un resumen de
+  todo el historial. `block_count` aumenta únicamente al entrar desde un estado
+  no bloqueante en `blocked`/`disconnected`; señales repetidas dentro del mismo
+  episodio no falsean la reincidencia. `recovery_count` exige una transición
+  desde estado bloqueante a estado operativo. El DTO no contiene destinatarios
+  ni contenido de mensajes.
+- El worker público procesa por separado `account_update` y
+  `account_review_update`. El segundo persiste `APPROVED`/`REJECTED`, conserva
+  `rejection_reason` si Meta lo facilita y resuelve únicamente incidentes de
+  revisión cuando llega una aprobación; no levanta otros bloqueos WABA.
 - Desde `back-dev` se aplicó la migración sobre el esquema actualmente compartido
   con staging y se conciliaron 13 activos: 11 `healthy` y 2
   `blocked`. Una única lectura de estado, sin envío, confirmó `BANNED` para el
@@ -1654,8 +1689,15 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
   `PATCH /settings`, `POST /whatsapp-template/prepare`, `POST /test` y
   `POST /check`.
 - `JobExecutor` registra `system_notification_dispatch`; el payload durable
-  contiene solo `system_notification_delivery_id`. El handler entrega por panel
-  interno, email outbox (`ops.system_alert`) o WhatsApp Cloud API.
+  contiene solo `system_notification_delivery_id` mas el namespace tecnico
+  comun. El handler entrega por panel interno, email outbox (`ops.system_alert`)
+  o WhatsApp Cloud API.
+- `systemNotifications.service.js` no hereda el namespace del gateway para el
+  despacho. Resuelve `SYSTEM_NOTIFICATIONS_JOB_RUNTIME_NAMESPACE`, despues
+  `AUTOMATIONS_V2_FALLBACK_RUNTIME_NAMESPACE` y, en la topologia actual, usa
+  `staging` como ultimo fallback del gateway. En API usa el namespace actual.
+  Esto corrige las entregas panel/email que podian quedar `queued` para siempre
+  bajo `__runtime_namespace=gateway`, donde no existe worker de negocio.
 - La plantilla WhatsApp de sistema es `clinicaclick_admin_alerta_sistema`,
   uso `system_admin_alert`, y queda excluida de QuickChat, playbooks y
   selectores habituales. Solo aparece en contexto `system_monitoring` para
@@ -1723,7 +1765,11 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
 - Rutas admin: `GET /api/email/admin/overview`, `/messages`, `/events`,
   `/suppressions` y `POST /api/email/admin/test-message`.
 - Ruta de eventos: `POST /api/email/events/provider`, protegida por
-  `EMAIL_EVENT_WEBHOOK_TOKEN`.
+  `EMAIL_EVENT_WEBHOOK_TOKEN`. Acepta evento completo de EventBridge SES,
+  wrapper SNS legacy o payload minimo transformado; deduplica por evento,
+  concilia por `provider_message_id` y guarda solo resumen saneado.
+  Entrada publica dev preparada en `pm2-gateway`:
+  `https://autenticacion.clinicaclick.com/api/email/events/provider`.
 - `JobExecutor` registra `email_send`; el payload durable contiene solo
   `email_message_id`. El handler relee `EmailMessage`, descifra el destinatario,
   renderiza plantilla y llama al proveedor fuera de la peticion HTTP.
@@ -2562,7 +2608,7 @@ Release funcional staging: backend `9b82958`, promovido desde dev `ac994a0`; fro
 > DEV registra **35 tareas periódicas**, **14 integraciones
 > dirigidas/background**, **48 tipos background** y **69 handlers**; staging
 > conserva 33 tareas y 47 tipos hasta una promoción aprobada. El inventario DEV incluye
-> `email_send`, `marketing_web_publication_health_monitor` y
+> `email_send`, `marketing_reports_cache_refresh`, `marketing_web_publication_health_monitor` y
 > `web_intake_runtime_reconcile`; todos siguen materializados en
 > `JobRequest`, sin cron de negocio lateral.
 
@@ -3353,11 +3399,13 @@ En esta máquina `dev` y `staging` comparten base de datos. El riesgo real no es
 
 - `runtimeNamespace`
 - `runtimeInfo.summaryLabel`
-- `systemChecks.groqApiKey`
+- `systemChecks.bedrockTextModel`
+- `systemChecks.bedrockFallbackModel`
+- `systemChecks.groqAudioModel`
 - `systemChecks.runtimeNamespace`
 
 La UI de `Ajustes > Monitoreo del sistema` debe usar estos checks como semáforo visible, no solo los logs de servidor.
-El check de `GROQ_API_KEY` describe siempre el proceso activo en ese instante; si cambia `.env`, hay que reiniciar el backend para que el estado reflejado sea real.
+Los checks de IA describen el proceso activo y reutilizan durante cuatro horas la comprobación real de proveedor. Si cambia `.env`, hay que reiniciar el backend para que el estado reflejado sea real.
 
 `GET /api/job-requests` filtra en backend. Si no llega `status`, aplica el
 `view`: `queue` limita a `pending,running,waiting`, `history` limita a
@@ -3901,6 +3949,8 @@ fallo. Los flujos nuevos deben añadir `control/end` cuando convenga hacerlo
 visible en el diagrama. Los fallos técnicos usan `on_fail`; nunca deben
 convertirse en una baja o cuarentena.
 
+<a id="11-envios-masivos-por-listas"></a>
+
 ### 1.2. Envios masivos por listas
 
 Rutas bajo `/api/marketing/bulk-sends`:
@@ -3942,6 +3992,8 @@ Reglas:
 - Para QA manual se permite revocar una baja dejando `MarketingContactOptOut.status=revoked`; si la revocacion referencia el mismo `inbound_message_id`, la reconciliacion posterior no reactiva esa baja antigua.
 - `criteria.link_tracking.enabled=true` solo transforma variables cuyo valor final sea URL `http/https`. URLs fijas dentro de una plantilla aprobada no se reescriben sin nueva aprobación de Meta.
 - Meta Cloud API no documenta un webhook por destinatario para reporte de spam. El backend expone `spam_reports_supported=false`; la calidad se calcula con bajas, lecturas y calidad/limites WABA cuando estén disponibles.
+
+<a id="12-automatizaciones-basadas-en-listas"></a>
 
 ### 1.3. Automatizaciones basadas en listas
 
@@ -5942,6 +5994,24 @@ Si una cita parece no haber disparado `appointment_created`, el orden correcto d
 3. revisar `AutomationFlowTemplatesV2.nodes` de la versión ejecutada, no solo la versión que el editor tenga abierta;
 4. revisar la plantilla real en `WhatsappTemplates`, no el nombre lógico del nodo.
 
+Caso operativo del `2026-08-17`: las ejecuciones de cita que no declaraban el
+campo opcional `domain` podían fallar antes de llamar a Meta con
+`Cannot read properties of null (reading 'toLowerCase')`. El origen estaba en
+la resolución del propósito del remitente introducida con Director de pacientes;
+el runtime debe normalizar ese valor con `toLowerSafe(...)`. La ausencia de
+`domain` significa propósito de cita, lead o automatización general según el
+contexto, no un error de configuración.
+
+Regla de recuperación: no reejecutar automáticamente una ejecución fallida de
+cita. Antes hay que cruzarla con `CitasPacientes` y excluir siempre citas cuyo
+`inicio <= now` o cuyo estado sea `completada`, `no_asistio` o `cancelada`.
+`reprogramada` exige un tratamiento distinto: nunca se recupera el antiguo
+`appointment_created`, porque anunciaría la hora anterior; solo se puede
+recuperar la ejecución `appointment_rescheduled` exacta de la fecha futura
+vigente, después de comprobar que no existe otro mensaje posterior en estado
+`sent`, `delivered` o `read`. Corregir el runtime habilita los disparos futuros,
+pero no autoriza a enviar confirmaciones o recordatorios retroactivos.
+
 Para `appointment_rescheduled`, la automatización debe disparar cada movimiento real de la cita. La idempotencia no puede ser solo `trigger:cita:template`, porque una misma cita puede reprogramarse varias veces. Desde `2026-04-15`, el runtime añade un `window_identifier` con `updated_at`, `inicio`, `fin`, `doctor_id` e `instalacion_id` para que cada reprogramación real cree una ejecución nueva, manteniendo deduplicación solo para reintentos exactos del mismo movimiento.
 
 Caso real validado el `2026-03-27`:
@@ -5992,14 +6062,14 @@ Tras el saneado del 2026-03-28, los flujos activos de cita quedan con esta semá
 2. `condition/ai_analysis` usaba el preset histórico `confirm_appointment`
    - `on_success` significa `decision = confirmado`
    - `on_fail` significa cualquier otro caso (`no_confirmado`, `dudas` o fallo técnico)
-   - esta regla aplica tanto a respuestas de Groq como a reglas deterministas previas; una negativa textual detectada por regla (`_ai_provider = deterministic_rule`) no puede seguir `on_success`
+   - esta regla aplica tanto a respuestas de Bedrock como a reglas deterministas previas; una negativa textual detectada por regla (`_ai_provider = deterministic_rule`) no puede seguir `on_success`
    - no se usa ya un `field_check` intermedio en estos flujos porque complicaba el grafo sin aportar nada al usuario
    - adicionalmente, ciertas reacciones positivas de WhatsApp (`👍`, `✅`, `👌`, `🙌`) se resuelven de forma determinista como `confirmado` antes de pasar por LLM
    - adicionalmente, negativas claras de texto como `no puedo`, `no me viene bien`, `me va mal`, `otro día`, `reprogramar/cancelar` o erratas evidentes como `me va ma ese día` se resuelven de forma determinista como `no_confirmado` antes de pasar por LLM
 
-3. Falta de Groq en local o staging
+3. Falta de Bedrock en local o staging
    - el flujo falla de forma explícita en el nodo `condition/ai_analysis`
-   - el error esperado es `groq_api_key_not_configured`
+   - el error identifica si falta activación, credenciales o permisos Bedrock
    - esto debe tratarse como problema de entorno, no como decisión funcional del flujo
 
 4. Monitor de ejecuciones
@@ -7073,6 +7143,8 @@ En los chats de scope grupo, la sede elegida viaja en `chat_state.data.location`
 La acción `send_quickchat_summary` se reconoce exclusivamente por `source_detail=chatbot_quickchat`. Tanto si crea lead como si reutiliza un `LeadIntake` deduplicado, conserva audit actual + outbox y solo el handler crea o revincula su conversación canónica y guarda un único `Message` interno de tipo `event`, idempotente y oculto al paciente. Este camino retorna antes de FormSubmission, Meta CAPI y Google Ads y no contiene ninguna salida WhatsApp. Si el fast path queda esperando responde `202 queued`; los reintentos actualizan/consolidan el mismo resumen en lugar de duplicar mensajes.
 
 `save_lead` encola también el resumen interno cuando recibe el estado final del chatbot, incluso si deduplica contra un lead anterior. En ese dedupe específico responde con el outcome del outbox (`200 saved`, `202 queued/unknown_durable` o `500` terminal) **antes** de Meta CAPI/Data Manager para no contar dos veces la misma conversión; cualquier otro dedupe conserva el `409` general. La acción pública posterior `send_quickchat_summary` pasa por el mismo mecanismo durable como reintento idempotente, no como una materialización alternativa. Esta separación evita el fallo observado en `LeadIntake #7184`: el navegador agotó el margen de navegación, Nginx registró `499`, el lead sobrevivió porque ya estaba creado y la segunda solicitud nunca llegó a ejecutarse. En un lead nuevo, la respuesta de `save_lead` permanece después del tracking best-effort; lo que deja de depender de esa respuesta es la aparición del lead en QuickChat.
+
+<a id="resultado-de-cita-visible-y-clasificación-sin-atajos-2026-09-03"></a>
 
 ### Clasificación de intención sin atajo y resultado visible (2026-09-03)
 
@@ -9203,6 +9275,159 @@ localizados y un único canary autorizado leído. No se deben fabricar mensajes
 ni citas para repetir esa validación; cualquier nuevo canary exige destinatario
 QA explícitamente autorizado y conserva idempotencia por ejecución/nodo.
 
+## Respuesta automática a nuevos leads (2026-07-21)
+
+`Marketing > Leads` configura por clínica la automatización de sistema
+`Contestar a los leads automáticamente`. La base global
+`lead_auto_reply_system` es catálogo y permanece inactiva; cada configuración
+publica una copia `lead_auto_reply_system__clinic_<id>`, inicialmente pausada.
+Una propagación posterior del catálogo conserva configuración y activación
+locales. El cliente no edita el grafo: solo plantilla, origen, plazo, horario y
+switch de activación.
+
+Endpoints protegidos:
+
+- `GET /api/intake/leads/auto-reply/status?clinic_id=<id>`;
+- `PATCH /api/intake/leads/auto-reply` para guardar configuración o cambiar
+  `active`;
+- `GET /api/intake/leads/auto-reply/pending?clinic_id=<id>` para contar el lote
+  elegible sin materializar envíos;
+- `POST /api/intake/leads/auto-reply/pending/send` para crear el lote durable;
+- `GET /api/intake/leads/auto-reply/pending/:jobId` para consultar progreso y
+  resultado dentro del scope de la clínica.
+
+Todos estos endpoints exigen `leads.manage` sobre la clínica concreta. Ese
+permiso ya valida una pertenencia activa a `UsuarioClinica`; por tanto no se
+añade el gate genérico de escritura de Marketing, que excluiría indebidamente
+a los subroles `Administrativos` y `Recepción / Comercial ventas`. El alcance
+queda limitado a leads y no habilita escrituras sobre otras áreas de Marketing.
+
+Activar exige plantilla WABA operativa `APPROVED`. Si se elige horario de
+clínica, también exige al menos un tramo activo en `ClinicaHorarios`; el error
+canónico es `clinic_hours_not_configured` y la UI enlaza a Personal y horarios.
+La configuración sí puede guardarse mientras Meta aprueba la plantilla, pero
+queda pausada.
+
+El selector solo admite plantillas marcadas para primera visita/respuesta de
+lead y cuyas variables puedan resolverse con datos del lead y de la clínica.
+Las creadas desde el diálogo reciben `template_usage=lead_auto_reply`. El
+backend vuelve a validar ambos contratos y rechaza con
+`whatsapp_template_not_for_lead_auto_reply` o
+`whatsapp_template_variables_unsupported` plantillas de otro flujo o que
+dependan, por ejemplo, de hora o tratamiento de una cita todavía inexistente.
+
+El activador existente `trigger/lead_nuevo` se dispara desde la creación
+durable en intake/Meta Lead Ads y desde `CallInitiated`; nunca desde sockets.
+Cada lead crea como máximo una `FlowExecutionV2` por versión del flujo mediante clave idempotente y
+un `JobRequest automations_v2_execute`. El grafo reutiliza nodos V2:
+
+- `delay/fixed`: una hora para llamadas en modo inmediato;
+- `delay/wait_until` con `mode=clinic_schedule`: ahora, siguiente apertura o
+  09:00 local del día siguiente según configuración;
+- `condition/field_check` con `mode=lead_contact_state`: recarga estado,
+  `LeadContactAttempts` y mensajes salientes antes de enviar;
+- `action/send_whatsapp`: materializa `Messages`, usa destinatario lead y
+  registra el contacto automático una sola vez.
+
+La condición cancela el envío si el lead ya está `citado`, `acudio_cita`,
+`convertido` o `descartado`, si la llamada terminó en `citado`/`informacion`, o
+si existe contacto efectivo/manual o un mensaje saliente desde QuickChat/móvil.
+La búsqueda del mensaje saliente usa `clinic_id` y todos los candidatos
+normalizados del teléfono; no aplica límite temporal, por lo que un contacto
+saliente anterior al alta actual también impide una respuesta automática.
+`no_contactado`, `no_contesta` y `sin_respuesta` no cuentan como contacto
+efectivo: el WhatsApp debe enviarse. No hay nodo IA ni análisis periódico; la
+decisión se toma una sola vez al terminar la espera.
+
+Al activar, el cliente puede incluir los leads compatibles que ya estaban
+pendientes. El request HTTP no recorre ni envía el lote: crea un
+`JobRequest.type=lead_auto_reply_backfill` con ids y scope sin PII, y el worker
+relee cada lead y repite todos los gates justo antes de encolar su ejecución V2.
+El job persiste progreso por bloques, admite reintento/idempotencia con scope
+`backfill` y sigue ejecutándose aunque se cierre el diálogo.
+
+## Reprogramación por origen y agrupación de respuestas (2026-07-21)
+
+`PATCH /api/citas/:id/reagendar` acepta `reschedule_reason=patient_request` o
+`clinic_schedule` y lo persiste en `CitasPacientes`. Si el cliente no envía el
+campo se conserva compatibilidad con `clinic_schedule`. El runtime incorpora el
+motivo en `trigger.data` y `appointment`, y filtra tanto plantillas vinculadas
+como fallbacks globales por `trigger_config.reschedule_reasons`.
+
+La automatización global `appointment_rescheduled_patient_request_system` solo
+acepta `patient_request`. Envía la familia
+`clinicaclick_cita_reprogramada_peticion_paciente`, con variantes `es`, `ca` y
+`en`, y mantiene el flujo histórico fuera de ese caso. La migración
+`20260721183000-add-lead-and-patient-reschedule-templates.js` añade el campo,
+catálogo localizado, flujo y la segunda plantilla para lead con llamada previa.
+La propagación a Meta no forma parte de la transacción de migración y debe
+encolarse/validarse de manera operativa.
+
+En `wait_for_response`, `response_buffer_seconds` sigue siendo configurable por
+nodo. Cuando se omite, el runtime y el editor usan 180 segundos. El buffer
+acumula mensajes consecutivos, reprograma una única reanudación y entrega al
+analizador `response_text`/`response_lines`; no ejecuta análisis hasta que vence
+la ventana de agregación.
+
+## Zona horaria canónica en panel y comunicaciones de cita (2026-07-22)
+
+`CitasPacientes.inicio`/`fin` permanecen como instantes UTC. El agregado
+`GET /api/paneles/main` ya no usa la zona del servidor: obtiene la zona efectiva
+de cada clínica desde `Clinica.configuracion`, con fallback `Europe/Madrid`, y
+construye por clínica el intervalo UTC correspondiente al día local solicitado.
+Los scopes con varias clínicas agrupan rangos equivalentes para no multiplicar
+consultas. Etiqueta, fecha y `agendaQuery.fecha` se calculan con la misma zona.
+
+`Clinicas` no dispone de una columna específica ni de una configuración visible
+para el usuario. El único override persistible previsto es una zona IANA válida
+en `configuracion.timezone|timeZone|tz`; no se infiere por dirección, navegador
+o zona del proceso. El inventario de dev y staging del 2026-07-22 contiene 26
+clínicas activas, 0 overrides explícitos y 0 clínicas fuera de Madrid: todas
+resuelven al fallback `Europe/Madrid`, que incluye CET/CEST.
+
+El agregado y el frontend deben usar la misma zona y cancelar respuestas de
+un scope anterior. El ejemplo clínico y la evidencia de la corrección original
+se conservan en el [archivo histórico del espejo](https://github.com/Chervas/cc-front/blob/e591a691a48865db7f85e46506d4bb79e45061dd/src/Documentacion/13-backend.md).
+
+Los conversores compartidos por citas, disponibilidad, Personal, horarios de
+clínica y Automation V2 normalizan la salida ICU `24:00` a `00:00` conservando
+la fecha. Esto evita adelantar 24 horas el inicio local de un día. Las pruebas
+cubren medianoche, verano/invierno y el día DST de 23 horas.
+
+Automation V2 recalcula `cita.fecha` y `cita.hora` después de enriquecer la
+clínica. En auditorías de mensajes se compara `Messages.metadata.template_params`
+con `FlowExecutionsV2.context.appointment.inicio`, no con la fila actual de
+`CitasPacientes`, que puede haber cambiado por una reprogramación. La auditoría
+de cierre revisó 559 mensajes con hora vinculados a cita y obtuvo 0
+discrepancias contra su snapshot local.
+
+## Aceptación y entrega de WhatsApp en automatizaciones (2026-07-22)
+
+Una respuesta correcta de Graph con `wamid` confirma que Meta aceptó el request,
+no que el teléfono haya recibido el mensaje. La entrega es asíncrona y el dato
+canónico posterior es el webhook reflejado en `Messages.status`, `wa_status` y
+los metadatos de error. El código `131026` (`Message undeliverable`) no identifica
+por sí solo una causa más concreta y no autoriza un reintento manual.
+
+El nodo `action/send_whatsapp` considera completado el envío cuando Graph acepta
+el request. Por ello una ejecución puede avanzar a `wait_for_response`, lanzar
+su fallback y actualizar la cita a `info_enviada` antes de que llegue un webhook
+de fallo. El webhook actualiza el mensaje, pero no revierte retrospectivamente
+la ejecución ni el estado asistencial. En una incidencia se deben contrastar:
+
+1. `Messages` del envío inicial y de cualquier fallback, incluidos `wamid`,
+   estado final y error;
+2. `FlowExecutionsV2.context`, `current_node_id` y ejecución activa;
+3. `JobRequests` pendientes de espera y recordatorio;
+4. la cita vigente, cuya hora puede haberse corregido después del snapshot.
+
+Si se corrige manualmente una cita cuyo flujo mantiene datos erróneos, se
+cancela esa ejecución y su wait sin fabricar mensajes. Los triggers futuros se
+resincronizan desde el runtime propietario de la cola: para CRM, desde
+`back-staging`, de modo que `payload.__runtime_namespace` sea `staging`. Ejecutar
+esa operación desde `back-dev` crea jobs del namespace equivocado aunque ambas
+copias apunten a la misma base de datos.
+
 ## 2026-07-21 - Leads: WhatsApp manual y descarte por información
 
 Este corte ajusta el contrato operativo de Leads/QuickChat:
@@ -9334,6 +9559,8 @@ por defecto `GROQ_MODEL_FAST`) enviando solo el texto del inbound, sin nombre ni
 telefono. Solo se acepta si devuelve `rating` entero `1..5` con confianza >=
 `REVIEW_RATING_AI_MIN_CONFIDENCE` (0.78 por defecto). El evento conserva
 `inference_source`, `inference_confidence` y `inference_model`.
+
+<a id="busqueda-y-trazabilidad-de-contacto-con-pacientes-2026-07-31"></a>
 
 ## 2026-07-31 - Busqueda de pacientes y apertura auditada de WhatsApp
 
@@ -9717,6 +9944,8 @@ acuse las indicaciones de acceso recorre `branch_ack` y responde
 `suppress_if_human_replied=true` para no duplicar una intervención de
 recepción.
 
+<a id="qa-ampliada-del-piloto-2026-09-04"></a>
+
 ### QA ampliada del piloto e incertidumbre (2026-09-04)
 
 - La v10 `id=1472` continúa inactiva y la v9 `id=1324` continúa activa.
@@ -9762,6 +9991,8 @@ grafo final tiene 27 nodos; cualquier error de análisis, cambio de estado o
 respuesta sin destino `on_fail` deja la ejecución `failed` y trazable en
 monitorización.
 
+<a id="cierre-de-revisión-sin-cambiar-una-cita-confirmada-2026-09-04"></a>
+
 ### Cierre explícito de una revisión sin mutar la cita (2026-09-04)
 
 `PATCH /conversations/:id/automation-attention/resolve` resuelve para todos los
@@ -9797,6 +10028,10 @@ Las respuestas humanas de QuickChat y los ecos `smb_message_echoes` completan
 además cualquier revisión de un flujo puramente conversacional. Si existe una
 cita, se conserva la regla más restrictiva: escribir al paciente no sustituye
 la actualización necesaria en agenda.
+
+<a id="cierre-tras-aplicar-una-acción-de-cita-2026-09-04"></a>
+
+<a id="referencia-operativa-borrador-día-anterior-v10-2026-09-05"></a>
 
 ### Estado final después de `action/change_status` (2026-09-04)
 
