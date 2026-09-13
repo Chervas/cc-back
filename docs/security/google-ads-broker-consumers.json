@@ -1,18 +1,20 @@
 {
-  "version": 3,
+  "version": 4,
   "reviewedAt": "2026-09-13",
-  "sourceHead": "3801764d7cc2f22f9d71e44fe5e6477d347f9412",
+  "sourceHead": "2112a26b21d02b34c5e525fb0e1080eb151c08b5",
   "includesWorkingChanges": true,
   "runtimeMigrated": 0,
   "newMigrations": [
-    "20260913080000-add-google-ads-broker-bindings.js"
+    "20260913090000-create-google-ads-broker-revocations.js"
   ],
   "ops": "deferred_by_user",
   "qa": {
-    "backendTests": 344,
-    "mysqlChecks": 106,
-    "mysqlOwnedInstances": 8,
+    "backendTests": 352,
+    "platformAuditTests": 47,
+    "mysqlChecks": 116,
+    "mysqlOwnedInstances": 9,
     "shutdownCodes": [
+      0,
       0,
       0,
       0,
@@ -23,11 +25,12 @@
       0
     ],
     "broker": "unchanged_engine_previous_145_tests",
-    "ui": "documentation_only",
+    "ui": "contract_preserved_documentation_only",
     "runtime": "no_real_account_or_provider_validation",
     "evidence": [
-      "ads-bindings-full-node.json",
-      "ads-bindings-full-mysql.json"
+      "ads-revocation-full-node.json",
+      "ads-revocation-audit.json",
+      "ads-revocation-full-mysql.json"
     ]
   },
   "operations": [
@@ -42,7 +45,6 @@
     "google.ads.asset.revoke.v1"
   ],
   "pending": [
-    "Ads durable control outbox, human audit and broker acknowledgement; managed disconnect currently rejects before changes",
     "Ads OAuth lifecycle, account registration/remapping workflow and approved real cut",
     "Remaining Ads consumers, conversions, reception and writes",
     "Full platform audit, AWS costs/retention/IAM/Budget and database encryption/cut"
@@ -105,8 +107,8 @@
     },
     {
       "file": "src/services/googleAdsBrokerScope.service.js",
-      "sha256": "c27cfa2519bb7cda4040b13476331bc9489009c4fe5d79811806bc4778e68b06",
-      "status": "prepared_scope_and_persistence_fences"
+      "sha256": "3a1015b4ffab374a92d071a39cee2c2a01039765c122ad8018e638050f73090e",
+      "status": "prepared_durable_history_checks_before_reads_and_writes"
     },
     {
       "file": "src/services/googleAdsBroker.service.js",
@@ -115,23 +117,23 @@
     },
     {
       "file": "src/jobs/sync.jobs.js",
-      "sha256": "34b5ae60f365fc4509eec47c6e8ae47c9d017b079184f2500b5378a25a2b13a5",
+      "sha256": "fd5c8c4f8c44f6f474774466c10f83571465ebddca5d6db62d84bf6b8ccadc02",
       "status": "prepared_ads_read_cohort_with_legacy_exclusion"
     },
     {
       "file": "src/services/googleLegacyCredentials.service.js",
-      "sha256": "d2364b96c8ff17a9b80349d236b126ba8aa1c05a5062e22cb246c9c4cc9a56f9",
+      "sha256": "d8b96d89d4cddc1420c2c71e8893ae4d88c23e63be75726713de69a7eae1dd88",
       "status": "prepared_durable_ads_credential_exclusion"
     },
     {
       "file": "src/services/googleOAuthBroker.service.js",
-      "sha256": "35445c746a51e420dd79bdc9094a171fbeeb03f6c4e6911bf5f9c44ccbc0f8b6",
+      "sha256": "588fccdad3ec5bde09980385919165c68022d4826cb9a74bbcc24bd694f6598e",
       "status": "prepared_ads_legacy_oauth_exclusion"
     },
     {
       "file": "src/services/oauthScopedDisconnect.service.js",
-      "sha256": "b0a1b357c23fffc6f8fd2e3db7eb25f92b7b871512309b18b05ea5a297d3e50d",
-      "status": "prepared_managed_ads_disconnect_fail_closed_pending_control_queue"
+      "sha256": "def4045eb07f10c28d613176104536ed36df1ee5c18dc28fc0587a91bb4ad293",
+      "status": "prepared_atomic_ads_revocation_capture_with_other_google_cohorts"
     },
     {
       "file": "models/googleadsbrokerbinding.js",
@@ -142,6 +144,60 @@
       "file": "migrations/20260913080000-add-google-ads-broker-bindings.js",
       "sha256": "fa03dbfba3b41e0ab154013d647598695fa2a78b2d380e16e6dc99de895e3787",
       "status": "prepared_ddl_tested_only_on_owned_mysql"
+    },
+    {
+      "file": "src/services/googleAdsRevocation.service.js",
+      "status": "prepared_capture_control_worker_and_scoped_status",
+      "sha256": "58318616dd997d4c362cd281017de864e4f389e9a2faf972f993106db6f77b3d"
+    },
+    {
+      "file": "src/services/googleAdsRevocation.contract.js",
+      "status": "prepared_durable_tuple_and_affected_scope_contract",
+      "sha256": "4fa56aeeefee45687257c251817e1ed95ed24c2bfd0e40959fd49413be9388cd"
+    },
+    {
+      "file": "models/googleadsbrokerrevocation.js",
+      "status": "prepared_independent_revocation_history",
+      "sha256": "c9f8f921890b47f098ff563d063ba4bdd81e187c1b02cccc0bb1756e91e2e865"
+    },
+    {
+      "file": "migrations/20260913090000-create-google-ads-broker-revocations.js",
+      "status": "prepared_ddl_tested_only_on_owned_mysql",
+      "sha256": "f42a15411c33d0ee154c013b8d34da03b68a287f394ef532996b39d6f25c14ea"
+    },
+    {
+      "file": "services/platform-audit/src/google-ads-disconnect-event.js",
+      "status": "prepared_human_and_job_v11_audit",
+      "sha256": "a58b6ce5dcd9b4996d2828aafb2f781a6b43d472ee90a4c5609b222abdc67554"
+    },
+    {
+      "file": "services/platform-audit/src/event.js",
+      "status": "prepared_v11_codec_preserving_previous_versions",
+      "sha256": "5544b388ab2634c7565e513c22e4f05eae9ed6fbecac886b29018b1916004ba5"
+    },
+    {
+      "file": "services/platform-audit/src/reader-protocol.js",
+      "status": "prepared_v11_versioned_s3_read_protocol",
+      "sha256": "b61f20ce1d3cec368b61a75e92ad7ef9f5c3f810fe4707808e735ac101c68fa1"
+    },
+    {
+      "file": "src/services/platformAudit.view.js",
+      "status": "prepared_restricted_v11_audit_projection",
+      "sha256": "2198b67209de5b41d00f6b2dbcec102e9c361ddc46bcde1e9b18b347a1708975"
+    },
+    {
+      "file": "src/routes/oauth.routes.js",
+      "status": "prepared_ads_atomic_disconnect_and_aggregated_status",
+      "sha256": "b12730d5ea099e6601e52d13e68795dcf2d78e9ed387a5a7eede7c4beb2baf03"
+    },
+    {
+      "file": "src/config/scheduledJobCatalog.js",
+      "status": "prepared_ads_control_job_not_activated",
+      "sha256": "8aacf12c7c426554d98b761a66ae77b6216a6c5a41c4806b017b4656ce39ae23"
     }
+  ],
+  "requiredAdsMigrations": [
+    "20260913080000-add-google-ads-broker-bindings.js",
+    "20260913090000-create-google-ads-broker-revocations.js"
   ]
 }

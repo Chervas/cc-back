@@ -11,7 +11,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await migration.up(qi); await migration.down(qi); await migration.up(qi);
   report.checks.push('Actual Ads schema applies, rolls back only empty and reapplies on an owned MySQL instance');
   models.ClinicGoogleAdsAccount = require('../../../models/clinicgoogleadsaccount')(sql, D);
-  for (const [name, file] of [['GoogleAdsBrokerBinding', 'googleadsbrokerbinding'], ['GoogleOAuthBrokerBinding', 'googleoauthbrokerbinding'],
+  for (const [name, file] of [['GoogleAdsBrokerBinding', 'googleadsbrokerbinding'], ['GoogleAdsBrokerRevocation', 'googleadsbrokerrevocation'], ['GoogleOAuthBrokerBinding', 'googleoauthbrokerbinding'],
     ['SearchConsoleBrokerBinding', 'searchconsolebrokerbinding'], ['AnalyticsBrokerBinding', 'analyticsbrokerbinding'],
     ['GooglePropertyBrokerRevocation', 'googlepropertybrokerrevocation'], ['GoogleConnectionAssignment', 'googleconnectionassignment']]) {
     models[name] = require('../../../models/' + file)(sql, D); await models[name].sync();

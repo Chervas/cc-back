@@ -1,5 +1,30 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Desconexión Ads durable y confirmación por broker
+
+DELETE /oauth/google/disconnect captura Ads en la misma transacción que las
+bajas SC/GA/GBP y el assignment: intención durable, bindings bloqueados y evento
+humano v11. Revisa aliases, grupos, overrides y mapping IDs históricos. Un uso
+fuera del ámbito devuelve 409/scope_disconnect_shared_asset_conflict sin cambios.
+Fallo de captura: 503/google_ads_revocation_unavailable; sustituye el rechazo
+provisional google_ads_broker_disconnect_pending. Repetición conserva UUID/actor.
+
+GET /oauth/google/disconnection-status agrega Ads con el formato existente;
+un tuple solo cuenta si todas sus clínicas capturadas están autorizadas.
+Revalida sesión/permisos tras la consulta. DELETE sin scope conserva
+connection_in_use ante historial Ads por ID/subject. El historial cierra también
+lecturas y credenciales antiguas al borrar bindings/mappings/conexiones.
+
+DDL 20260913090000 antes del código aun apagado. Writer/reader v11 antes de
+captura. Job googleAdsRevocations preparado, tipo google_ads_broker_revocations,
+cadencia cada minuto, sin activar. Variables GOOGLE_ADS_REVOCATION_ENABLED,
+GOOGLE_ADS_REVOCATION_WORKER_ENABLED, GOOGLE_ADS_BROKER_CONTROL_KEY_ID y
+GOOGLE_ADS_BROKER_CONTROL_KEY_FILE sin instalar. ACK exacto del UUID confirma
+la baja y su auditoría en SQL; no revoca OAuth ni modifica Google Ads.
+
+Cero cuentas activadas o migraciones compartidas. OAuth Ads y corte real siguen
+pendientes; OPS aplazado. Contrato: docs/security/google-ads-revocation-migration.md.
+
 ## 13/09/2026 — Registro durable y consumidores de lecturas Ads
 
 Sync y backfill preparan la cuenta antes de obtener credenciales y usan las ocho

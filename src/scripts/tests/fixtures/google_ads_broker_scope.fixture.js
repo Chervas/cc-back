@@ -7,12 +7,13 @@ function scopeFixture() {
   const binding = { customer_id: mapping.customerId, mapping_id: 11, google_connection_id: 2, google_user_id: 'fictitious-subject',
     connection_ref: mapping.broker_read_connection_ref, asset_ref: mapping.broker_read_asset_ref, scope_key: 'group:5',
     tenant_clinic_id: 59, login_customer_id: mapping.loginCustomerId, state: 'active' };
-  const state = { mappings: [mapping], bindings: [binding], enabled: true, calls: [],
+  const state = { mappings: [mapping], bindings: [binding], revocations: [], enabled: true, calls: [],
     clinics: [{ id_clinica: 59, grupoClinicaId: 5 }, { id_clinica: 71, grupoClinicaId: 5 }], shared: [],
     grants: [{ id: 100, assignmentScope: 'group', grupoClinicaId: 5, clinicaId: null, googleConnectionId: 2, status: 'active' }],
     connection: { id: 2, googleUserId: 'fictitious-subject', credentials_external: 1 } };
   const read = (kind, fn) => async (...args) => { state.calls.push({ kind, args }); await state.onRead?.(kind); return structuredClone(fn(...args)); };
   const options = { enabled: () => state.enabled,
+    loadRevocations: read('revocations', id => state.revocations.filter(row => row.customer_id === id)),
     loadMapping: read('mapping', id => state.mappings.find(row => row.id === id)),
     loadBindings: read('bindings', (id, mappingId) => state.bindings.filter(row => row.customer_id === id || row.mapping_id === mappingId)),
     loadMappings: read('mappings', id => state.mappings.filter(row => row.customerId.replace(/-/g, '') === id)),

@@ -1,5 +1,22 @@
 # Runbook: Migracion Segura De Integraciones Y Auditoria
 
+## 13/09/2026 — Baja Ads durable y auditoría v11
+
+Desconexión Ads preparada en la transacción de mappings/assignment: registra
+intención, bloquea bindings y captura auditoría humana; fallos de otras
+integraciones revierten todo. Revisa grupos, overrides, aliases e historial
+borrado; usos fuera del ámbito devuelven 409 sin cambios parciales. Worker
+independiente confirma con el mismo UUID y conserva el bloqueo si pierde el ACK.
+
+DDL 20260913090000 previa al código aun con gates apagados. Auditoría v11,
+status agregado por ámbito y exclusión legacy por ID/subject incluso sin bindings.
+QA: 352 tests backend + 47 de auditoría; 116 checks en nueve MySQL propios,
+todos con cierre 0. Catálogo preparado de 48 jobs; ninguno activado. Hotfix intacto.
+
+Cero cuentas migradas, AWS/proveedores reales, DDL compartido o despliegue.
+OAuth Ads, otros consumidores, auditoría completa, costes y cifrado/corte BD
+siguen pendientes; OPS aplazado. Contrato: `docs/security/google-ads-revocation-migration.md`.
+
 ## 13/09/2026 — Registro durable y consumidores de lecturas Ads
 
 Sync/backfill conectados en código a las ocho lecturas Ads, con contexto opaco,

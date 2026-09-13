@@ -17,7 +17,7 @@ function installGoogleAdsLegacyModels(models) {
     const row = await original(options.where.id, options);
     return row && row.googleUserId === options.where.googleUserId ? row : null;
   };
-  for (const name of ['GoogleOAuthBrokerBinding', 'SearchConsoleBrokerBinding', 'AnalyticsBrokerBinding', 'GooglePropertyBrokerRevocation', 'GoogleAdsBrokerBinding']) {
+  for (const name of ['GoogleOAuthBrokerBinding', 'SearchConsoleBrokerBinding', 'AnalyticsBrokerBinding', 'GooglePropertyBrokerRevocation', 'GoogleAdsBrokerBinding', 'GoogleAdsBrokerRevocation']) {
     models[name] = { findOne: async options => {
       assert.deepEqual(options.attributes, ['google_user_id']);
       assert.equal(options.transaction, undefined); return null;

@@ -18,7 +18,7 @@ function attempts(count = 1) {
   return Array.from({ length: count }, (_, i) => ({ googleConnectionId: 81, status: 'accepted', providerRequestId: 'FICTITIOUS_' + i,
     update: async function (values) { Object.assign(this, values); } }));
 }
-for (const registry of ['markers', 'scMarkers', 'gaMarkers', 'propertyMarkers', 'adsMarkers']) {
+for (const registry of ['markers', 'scMarkers', 'gaMarkers', 'propertyMarkers', 'adsMarkers', 'adsRevocations']) {
   test(`Ads rejects ${registry} before loading any credential, including duplicate subjects`, async () => {
     const f = fixture(); f.add(82);
     f.state[registry].push({ google_connection_id: 81, google_user_id: 'fictitious-subject' });

@@ -92,20 +92,17 @@ Los snapshots de fases anteriores pueden permanecer si una fase posterior falla,
 como en el contrato previo; el reporte conserva el progreso y no declara la
 cuenta completamente actualizada. Esto es distinto de la atomicidad de una baja.
 
-## Desconexión pendiente y OAuth
+## Desconexión preparada y OAuth pendiente
 
-Todavía falta la cola de control Ads, su auditoría humana y la confirmación del
-broker. Mientras tanto, `DELETE /oauth/google/disconnect` con un scope gestionado
-por Ads devuelve **503 / google_ads_broker_disconnect_pending** antes de cambiar
-mappings, assignment o añadir intenciones de baja de las demás verticales.
-También lo hace cuando solo queda el registro independiente o falta su tabla.
-No se presenta una desconexión SQL parcial como una revocación del broker.
-El DELETE sin scope cuenta el registro Ads por ID/subject y mantiene connection_in_use.
+El bloque [de revocación Ads](google-ads-revocation-migration.md) sustituye el
+rechazo provisional por historial independiente, outbox y auditoría v11 en la
+transacción de baja. Comprueba grupos, aliases y asignaciones históricas; un
+conflicto fuera del ámbito revierte todo. El worker confirma el mismo UUID con
+su clave de control. DDL 090000 obligatoria antes del código aun apagado.
 
-Los entry/callback legacy OAuth consultan Ads; registrar una identidad impide su
-reauthorización antigua. El OAuth Ads tipado aún no está implementado. No activar
-cuentas hasta completar baja y ciclo OAuth/corte aprobado, aunque las lecturas y
-sus consumidores ya estén conectados en el código.
+El historial sobrevive a bindings/mappings/conexiones y cierra también la vía
+legacy por ID/subject. Status agrega solo tuples cuyas clínicas están autorizadas.
+OAuth Ads tipado y corte real aún pendientes; no activar cuentas hasta completarlos.
 
 ## Configuración preparada y costes
 
@@ -122,7 +119,7 @@ con cuentas reales. Las seis llamadas nominales SM por petición de broker y
 su auditoría permanecen; esta fase no añade infraestructura ni valida facturación.
 Cost Explorer/tags/Budget, gasto real en Ajustes y permisos siguen pendientes.
 
-## Evidencia y límites de la validación
+## Evidencia de la fase de lecturas y límites de la validación
 
 344 tests Node correctos: 332 de regresión/lectores/jobs y 12 en procesos con
 los contratos de desconexión/revocación. Incluyen el hotfix, catálogo de 47 jobs,
@@ -144,7 +141,7 @@ Evidencia privada: `ads-bindings-full-node.log/json`,
 se conservan aparte. No se repitieron tests del motor del broker o UI, cuyos
 fuentes no cambian en esta fase. Sin build de UI ni llamadas AWS/proveedor real.
 
-Pendientes: baja y OAuth Ads; otros consumidores, escrituras, recepción,
+La evidencia de revocación posterior está en su contrato. Pendientes: OAuth Ads; otros consumidores, escrituras, recepción,
 conversiones y optimización; auditoría completa, retención/IAM, costes verificados,
 Budget/CloudFormation y cifrado/restauración/corte real de BD. El objetivo completo
 permanece abierto y OPS aplazado. Push es publicación de fuentes, no despliegue.

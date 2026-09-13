@@ -3511,8 +3511,9 @@ router.get('/google/disconnection-status', async (req, res) => {
         const clinicIds = [...req.marketingConnectionScopeAuthorization.clinicIds].map(Number).sort((a, b) => a - b);
         const gbp = await require('../services/businessProfileRevocation.service').status(clinicIds);
         const properties = await require('../services/googlePropertyRevocation.service').status(clinicIds);
-        const pending = gbp.pending_assets + properties.pending_assets;
-        const confirmed = gbp.confirmed_assets + properties.confirmed_assets;
+        const ads = await require('../services/googleAdsRevocation.service').status(clinicIds);
+        const pending = gbp.pending_assets + properties.pending_assets + ads.pending_assets;
+        const confirmed = gbp.confirmed_assets + properties.confirmed_assets + ads.confirmed_assets;
         if (![pending, confirmed].every(n => Number.isSafeInteger(n) && n >= 0)) throw new Error('invalid_revocation_counts');
         const result = { status: pending ? 'pending' : confirmed ? 'confirmed' : 'none', pending_assets: pending, confirmed_assets: confirmed };
         const verified = await accessSessions.verify(accessSessions.bearer(req.headers.authorization));
@@ -3620,7 +3621,7 @@ router.delete('/google/disconnect', async (req, res) => {
         ]);
         let managedReferences = await db.BusinessProfileBrokerBinding.count({ where: { google_connection_id: conn.id } })
             + await db.BusinessProfileBrokerRevocation.count({ where: { google_connection_id: conn.id } });
-        for (const registry of [db.GoogleOAuthBrokerBinding, db.SearchConsoleBrokerBinding, db.AnalyticsBrokerBinding, db.GooglePropertyBrokerRevocation, db.GoogleAdsBrokerBinding]) {
+        for (const registry of [db.GoogleOAuthBrokerBinding, db.SearchConsoleBrokerBinding, db.AnalyticsBrokerBinding, db.GooglePropertyBrokerRevocation, db.GoogleAdsBrokerBinding, db.GoogleAdsBrokerRevocation]) {
             managedReferences += await registry.count({ where: { [Op.or]: [{ google_connection_id: conn.id },
                 ...(typeof conn.googleUserId === 'string' ? [{ google_user_id: conn.googleUserId }] : [])] }, logging: false });
         }
@@ -3636,7 +3637,7 @@ router.delete('/google/disconnect', async (req, res) => {
     } catch (e) {
         if (e?.code === 'gbp_revocation_unavailable') return res.status(503).json({ success: false, error: 'gbp_revocation_unavailable' });
         if (e?.code === 'google_property_revocation_unavailable') return res.status(503).json({ success: false, error: 'google_property_revocation_unavailable' });
-        if (e?.code === 'google_ads_broker_disconnect_pending') return res.status(503).json({ success: false, error: 'google_ads_broker_disconnect_pending' });
+        if (e?.code === 'google_ads_revocation_unavailable') return res.status(503).json({ success: false, error: 'google_ads_revocation_unavailable' });
         if (['JsonWebTokenError', 'TokenExpiredError', 'NotBeforeError'].includes(e?.name) || e?.httpStatus === 401) {
             return res.status(401).json({ success: false, error: 'auth_failed' });
         }

@@ -2,6 +2,7 @@
 const { createHash } = require('node:crypto');
 const { Op, literal } = require('sequelize');
 const contract = require('../../services/integrations-broker/src/google-ads-contract');
+const revocations = require('./googleAdsRevocation.contract');
 const positive = value => ['number', 'string'].includes(typeof value) && /^[1-9]\d{0,9}$/.test(String(value)) && Number(value) <= 2147483647;
 const fail = (code = 'broker_binding_invalid') => { throw Object.assign(Error(code), { code }); };
 const ref = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(value);
@@ -42,7 +43,7 @@ const sortedIds = rows => {
   if (rows.some(id => !positive(id))) fail();
   return [...new Set(rows.map(Number))].sort((a, b) => a - b);
 };
-function createGoogleAdsBrokerScope({ loadMapping, loadBindings, loadMappings, loadConnection, loadClinics, loadShared, loadGrants,
+function createGoogleAdsBrokerScope({ loadMapping, loadBindings, loadMappings, loadConnection, loadClinics, loadShared, loadGrants, loadRevocations,
   enabled = () => process.env.GOOGLE_ADS_BROKER_ENABLED === 'true' }) {
   const contexts = new WeakMap();
   async function inspect(hint, expected, transaction) {
@@ -50,12 +51,16 @@ function createGoogleAdsBrokerScope({ loadMapping, loadBindings, loadMappings, l
     const current = await loadMapping(requested.id, transaction);
     // Read the independent registry even if the mapping has disappeared.
     const records = bounded(await loadBindings(requested.customerId, requested.id, transaction)).map(binding);
+    const history = bounded(await loadRevocations(requested.customerId, transaction)).map(revocations.validate);
+    if (history.some(row => row.customer_id !== requested.customerId)) fail();
+    if (!records.length && history.length) fail('asset_revoked');
     if (!current || ![true, 1].includes(current.isActive) || digest(identity(current)) !== digest(requested)) fail();
     if (!records.length && !marked(current) && !expected) return null;
     if (records.some(row => row.customer_id !== requested.customerId)) fail();
     const matches = records.filter(row => row.mapping_id === requested.id);
     if (matches.length !== 1) fail(); const selected = matches[0];
-    if (selected.state !== 'active') fail('asset_revoked');
+    if (selected.state !== 'active' || history.some(row => Number(row.tenant_clinic_id) === selected.tenant_clinic_id
+      && row.connection_ref === selected.connection_ref && row.asset_ref === selected.asset_ref)) fail('asset_revoked');
     if (selected.scope_key !== requested.scopeKey || current.broker_read_connection_ref !== selected.connection_ref
       || current.broker_read_asset_ref !== selected.asset_ref) fail();
     const mappings = bounded(await loadMappings(requested.customerId, transaction));
@@ -146,6 +151,8 @@ function createGoogleAdsScopeRepository(getModels) {
   const options = { raw: true, logging: false, limit: 1001 };
   const locked = transaction => transaction ? { transaction, lock: transaction.LOCK.UPDATE } : {};
   return {
+    loadRevocations: (id, transaction) => getModels().GoogleAdsBrokerRevocation.findAll({ ...options, ...locked(transaction),
+      attributes: [...revocations.FIELDS, 'state', 'request_id', 'actor_user_id', 'requested_at'], order: [['tuple_hash', 'ASC']], where: { customer_id: id } }),
     loadMapping: (id, transaction) => getModels().ClinicGoogleAdsAccount.findByPk(id, { attributes: MAPPING_FIELDS, raw: true, logging: false, ...locked(transaction) }),
     loadBindings: (id, mappingId, transaction) => getModels().GoogleAdsBrokerBinding.findAll({ ...options, ...locked(transaction), attributes: BINDING_FIELDS, order: [['customer_id', 'ASC'], ['mapping_id', 'ASC']],
       where: { [Op.or]: [{ customer_id: id }, { mapping_id: mappingId }] } }),
@@ -167,19 +174,4 @@ function createGoogleAdsScopeRepository(getModels) {
     },
   };
 }
-// Until the Ads control outbox is connected, a managed scope cannot be reported
-// disconnected by changing only SQL mappings. This guard runs in the caller's
-// transaction before any platform audit intent or mapping/assignment mutation.
-async function assertDisconnectReady({ models, transaction, connectionId, scope, clinicIds, mappings }) {
-  const unavailable = () => { throw Object.assign(Error('google_ads_broker_disconnect_pending'), { code: 'google_ads_broker_disconnect_pending', httpStatus: 503 }); };
-  try {
-    if (!transaction || !positive(connectionId) || !Array.isArray(clinicIds) || clinicIds.some(id => !positive(id))) unavailable();
-    if (mappings.some(marked)) unavailable();
-    const keys = new Set(clinicIds.map(id => `clinic:${Number(id)}`));
-    if (positive(scope.groupId)) keys.add(`group:${Number(scope.groupId)}`);
-    const records = bounded(await models.GoogleAdsBrokerBinding.findAll({ where: { google_connection_id: Number(connectionId) },
-      attributes: BINDING_FIELDS, transaction, lock: transaction.LOCK.UPDATE, limit: 1001, raw: true, logging: false })).map(binding);
-    if (records.some(row => keys.has(row.scope_key) || clinicIds.map(Number).includes(row.tenant_clinic_id))) unavailable();
-  } catch { unavailable(); }
-}
-module.exports = { createGoogleAdsBrokerScope, createGoogleAdsScopeRepository, assertDisconnectReady, MAPPING_FIELDS, BINDING_FIELDS, customer, scopeOf, identity, binding, positive };
+module.exports = { createGoogleAdsBrokerScope, createGoogleAdsScopeRepository, MAPPING_FIELDS, BINDING_FIELDS, customer, scopeOf, identity, binding, positive };

@@ -20,6 +20,7 @@ function event(value) {
   if (value?.version === 8) return require('./integration-oauth-event').integrationOAuthEvent(value);
   if (value?.version === 9) return require('./google-property-disconnect-event').googlePropertyDisconnectEvent(value);
   if (value?.version === 10) return require('./integration-oauth-event').integrationOAuthEvent(value);
+  if (value?.version === 11) return require('./google-ads-disconnect-event').googleAdsDisconnectEvent(value);
   exact(value, ['version', 'eventId', 'occurredAt', 'correlationId', 'action', 'stage', 'outcome', 'reason',
     'actor', 'effectiveActor', 'sessionRef', 'scope', 'resource', 'capturePolicy', 'authorizationPolicyVersion', 'origin']);
   exact(value.actor, ['type', 'id']); exact(value.scope, ['type', 'id']); exact(value.resource, ['type', 'id']);

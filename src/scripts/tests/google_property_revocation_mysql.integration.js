@@ -4,6 +4,8 @@ const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysq
 withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   models.GoogleAdsBrokerBinding = require('../../../models/googleadsbrokerbinding')(sql, D);
   await models.GoogleAdsBrokerBinding.sync();
+  models.GoogleAdsBrokerRevocation = require('../../../models/googleadsbrokerrevocation')(sql, D);
+  await models.GoogleAdsBrokerRevocation.sync();
   const qi = sql.getQueryInterface();
   await qi.createTable('Usuarios', { id_usuario: { type: D.INTEGER, primaryKey: true } });
   models.GoogleConnection = require('../../../models/googleconnection')(sql, D); await models.GoogleConnection.sync();
@@ -164,7 +166,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
       [spec.mappingResourceField]: own[kind][spec.mappingResourceField] });
     await assert.rejects(readers[kind].prepare(recreated.get({ plain: true })), { code: 'broker_binding_invalid' });
   }
-  const legacy = () => require('../../services/googleLegacyCredentials.service').createGoogleLegacyCredentials({ connectionModel: G, adsModel: models.GoogleAdsBrokerBinding,
+  const legacy = () => require('../../services/googleLegacyCredentials.service').createGoogleLegacyCredentials({ connectionModel: G, adsModel: models.GoogleAdsBrokerBinding, adsRevocationModel: models.GoogleAdsBrokerRevocation,
     bindingModel: models.GoogleOAuthBrokerBinding, searchConsoleModel: models.SearchConsoleBrokerBinding, analyticsModel: models.AnalyticsBrokerBinding, propertyRevocationModel: R });
   const oauth = require('../../services/googleOAuthBroker.service').createGoogleOAuthBroker({ models, audit: {}, enabled: () => false });
   await G.create({ id: 82, googleUserId: 'fictitious-subject', accessToken: 'FICTITIOUS_ACCESS', refreshToken: 'FICTITIOUS_REFRESH' });

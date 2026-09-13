@@ -24,7 +24,7 @@ function modelsForWebRow(webRow, consumerClinicIds = []) {
   const emptyModel = { findAll: async () => [] };
   return {
     Clinica: emptyModel, GrupoClinica: emptyModel,
-    SearchConsoleBrokerBinding: emptyModel, AnalyticsBrokerBinding: emptyModel, GooglePropertyBrokerRevocation: emptyModel, GoogleAdsBrokerBinding: emptyModel,
+    SearchConsoleBrokerBinding: emptyModel, AnalyticsBrokerBinding: emptyModel, GooglePropertyBrokerRevocation: emptyModel, GoogleAdsBrokerBinding: emptyModel, GoogleAdsBrokerRevocation: emptyModel,
     GoogleConnectionAssignment: emptyModel,
     BusinessProfileBrokerBinding: emptyModel,
     BusinessProfileBrokerRevocation: emptyModel,
@@ -118,10 +118,10 @@ async function run() {
       if (missing) throw Error('FICTITIOUS_DATABASE_DETAILS'); return [record];
     } };
     await assert.rejects(deactivateGoogleMappingsForScope({ scope: { assignmentScope: 'clinic', clinicId: 55, groupId: 5 }, connectionId: 8,
-      transaction: { LOCK: { UPDATE: 'UPDATE' } }, models }), { code: 'google_ads_broker_disconnect_pending', httpStatus: 503 });
+      transaction: { LOCK: { UPDATE: 'UPDATE' } }, models }), { code: 'google_ads_revocation_unavailable', httpStatus: 503 });
     assert.equal(mapping.isActive, true);
   }
-  const ads = row({ id: 11, assignmentScope: 'group', grupoClinicaId: 5, clinicaId: 999, googleConnectionId: 8, isActive: true });
+  const ads = row({ id: 11, customerId: '1234567890', assignmentScope: 'group', grupoClinicaId: 5, clinicaId: 999, googleConnectionId: 8, isActive: true });
   const models = modelsForWebRow(null);
   models.ClinicGoogleAdsAccount = { findAll: async () => [ads] };
   models.Clinica = { findAll: async () => [{ id_clinica: 55 }, { id_clinica: 56 }] };

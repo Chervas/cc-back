@@ -5,7 +5,7 @@ const { loadDiscoverySource } = require('./fixtures/business_profile_discovery.f
 const { connectionForTestServer } = require('./fixtures/campaign_offline_runtime.cjs');
 async function fixture(t, options = {}) {
   const state = { allowed: true, clinics: [71,72], pending: 1, writes: 0, attempts: 0, commits: 0, rolledBack: 0,
-    checks: 0, reads: 0, propertyReads: 0, propertyPending: 0, propertyConfirmed: 0, propertyManaged: 0,
+    checks: 0, reads: 0, propertyReads: 0, propertyPending: 0, propertyConfirmed: 0, propertyManaged: 0, adsManaged: 0, adsPending: 0, adsConfirmed: 0,
     resolves: 0, managed: 1, destroyed: 0, ...options }; const logs = [];
   const conn = { id: 81, googleUserId: 'fictitious-subject', destroy: async () => state.destroyed++ };
   const empty = { count: async () => 0, findAll: async () => [] };
@@ -14,7 +14,7 @@ async function fixture(t, options = {}) {
       findOne: async () => ({ status: 'active', googleConnectionId: state.changedAssignment ? 82 : 81 }),
       upsert: async (value, { transaction }) => { assert.equal(value.status, 'disconnected'); transaction.writes++; await state.onUpsert?.(); } },
     ClinicWebAsset: empty, ClinicAnalyticsProperty: empty, ClinicGoogleAdsAccount: empty, ClinicBusinessLocation: empty,
-    GoogleOAuthBrokerBinding: empty, SearchConsoleBrokerBinding: empty, AnalyticsBrokerBinding: empty, GoogleAdsBrokerBinding: empty,
+    GoogleOAuthBrokerBinding: empty, SearchConsoleBrokerBinding: empty, AnalyticsBrokerBinding: empty, GoogleAdsBrokerBinding: empty, GoogleAdsBrokerRevocation: { count: async () => state.adsManaged },
     GooglePropertyBrokerRevocation: { count: async ({ where }) => {
       assert.deepEqual(JSON.parse(JSON.stringify(where[sequelize.Op.or])), [{ google_connection_id: 81 }, { google_user_id: 'fictitious-subject' }]); return state.propertyManaged;
     } },
@@ -38,6 +38,11 @@ async function fixture(t, options = {}) {
     '../lib/oauthMarketingScopeAccess': require('../../lib/oauthMarketingScopeAccess'),
     '../lib/marketingScopeAccess': { hasMarketingClinicScopeAccess: async ({ userId, clinicIds, access }) => {
       assert.equal(access, 'write'); return userId === 701 && state.allowed && clinicIds.every(id => state.clinics.includes(id));
+    } },
+    '../services/googleAdsRevocation.service': { status: async ids => {
+      assert(ids.every(id => [71, 72].includes(id))); await state.onAdsStatus?.();
+      if (state.adsStatusFailure) throw Error('FICTITIOUS_PRIVATE_ERROR');
+      return { pending_assets: state.adsPending, confirmed_assets: state.adsConfirmed };
     } },
     '../services/googlePropertyRevocation.service': { status: async ids => {
       state.propertyReads++; assert(ids.every(id => [71, 72].includes(id))); await state.onPropertyStatus?.();
@@ -111,7 +116,7 @@ test('property metadata is aggregated with GBP and a property-only tombstone pre
   assert.equal((await f.request({ query: '' })).status, 409); assert.equal(f.state.destroyed, 0);
 });
 test('SC/GA capture errors and shared conflicts roll back the HTTP transaction with closed errors', async t => {
-  for (const [error, status] of [['google_property_revocation_unavailable', 503], ['scope_disconnect_shared_asset_conflict', 409]]) {
+  for (const [error, status] of [['google_ads_revocation_unavailable', 503], ['google_property_revocation_unavailable', 503], ['scope_disconnect_shared_asset_conflict', 409]]) {
     const f = await fixture(t, { enqueueFailure: error }); const result = await f.request();
     assert.equal(result.status, status); assert.equal(result.body.error, error);
     assert.equal(f.state.writes + f.state.attempts + f.state.commits, 0); assert.equal(f.state.rolledBack, 1);
@@ -124,5 +129,16 @@ test('post-property status checks discard data on session or scope loss and fail
     const f = await fixture(t); f.state.onPropertyStatus = () => change(f.state);
     const result = await f.request({ status: true, query: '?group_id=9' }); assert.equal(result.status, code);
     assert.equal(result.body.pending_assets, undefined); if (code === 503) assert.equal(result.body.error, 'google_revocation_unavailable');
+  }
+});
+
+test('Ads history joins status totals, closes unscoped deletion and cannot leak metadata after scope/session loss', async t => {
+  const f = await fixture(t, { managed: 0, adsManaged: 1, adsPending: 2, adsConfirmed: 3 });
+  assert.deepEqual((await f.request({ status: true, query: '?group_id=9' })).body, { status: 'pending', pending_assets: 3, confirmed_assets: 3 });
+  assert.equal((await f.request({ query: '' })).status, 409); assert.equal(f.state.destroyed, 0);
+  for (const [change, code] of [[s => { s.revoked = true; }, 401], [s => { s.allowed = false; }, 403],
+    [s => { s.clinics = [71]; }, 403], [s => { s.adsStatusFailure = true; }, 503], [s => { s.adsPending = Number.MAX_SAFE_INTEGER; }, 503]]) {
+    const f = await fixture(t); f.state.onAdsStatus = () => change(f.state);
+    const result = await f.request({ status: true, query: '?group_id=9' }); assert.equal(result.status, code); assert.equal(result.body.pending_assets, undefined);
   }
 });

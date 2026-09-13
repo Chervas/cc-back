@@ -188,9 +188,10 @@ conservan sus pendientes. No se añade infraestructura ni presupuesto.
 
 Registro independiente, comprobación SQL NULL de tokens, autorización de grupo y
 compartidos, cierre legacy e inyección en sync/backfill se prepararon en
-[el bloque backend](google-ads-backend-migration.md). OAuth Ads y la cola de
-confirmación de desconexiones siguen pendientes; una baja gestionada se rechaza
-antes de cambios parciales mientras falta esa dependencia.
+[el bloque backend](google-ads-backend-migration.md). La cola de
+confirmación y auditoría están preparadas en
+[la baja Ads](google-ads-revocation-migration.md). OAuth y el corte real siguen
+pendientes.
 Ads usa assignmentScope/grupoClinicaId y asignaciones explícitas; GrupoClinica no
 tiene una columna de cuenta Ads primaria. Los primarios SC/GA/GBP se comprueban
 en sus recorridos correspondientes.

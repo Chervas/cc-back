@@ -1,5 +1,14 @@
 # Auditoría de plataforma: primer bloque de autenticación
 
+## 13/09/2026 — Desconexión Ads v11 preparada
+
+Codec, reader-protocol y visor admiten v11 integration.asset.disconnect: usuario
+solicitante, job de confirmación, scope clínica/grupo y compromiso del conjunto
+afectado. Verificación de versión S3 concreta, sin tokens/filas de anuncios.
+47 tests offline del servicio; writer/reader v11 antes de habilitar captura.
+SQL confirmado no prueba entrega S3. Sin AWS/despliegue real.
+[Contrato](../../docs/security/google-ads-revocation-migration.md).
+
 ## 13/09/2026 — Desconexión SC/GA v9 preparada
 
 Codec y reader-protocol aceptan v9 integration.asset.disconnect con usuario

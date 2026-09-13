@@ -96,9 +96,9 @@ test('authorization changes during a read discard broker results and stop subseq
 test('repository uses bounded metadata projections and a SQL NULL predicate without hydrating credentials or old transactions', async () => {
   const calls = []; const fake = name => ({ findAll: async options => { calls.push({ name, options }); return []; },
     findByPk: async (_id, options) => { calls.push({ name, options }); return null; } });
-  const models = Object.fromEntries(['ClinicGoogleAdsAccount', 'GoogleAdsBrokerBinding', 'Clinica', 'GroupAssetClinicAssignment', 'GoogleConnectionAssignment', 'GoogleConnection'].map(name => [name, fake(name)]));
+  const models = Object.fromEntries(['ClinicGoogleAdsAccount', 'GoogleAdsBrokerBinding', 'Clinica', 'GroupAssetClinicAssignment', 'GoogleConnectionAssignment', 'GoogleConnection', 'GoogleAdsBrokerRevocation'].map(name => [name, fake(name)]));
   const repository = createGoogleAdsScopeRepository(() => models);
-  await repository.loadMapping(11); await repository.loadBindings('1234567890', 11); await repository.loadMappings('1234567890');
+  await repository.loadMapping(11); await repository.loadRevocations('1234567890'); await repository.loadBindings('1234567890', 11); await repository.loadMappings('1234567890');
   await repository.loadClinics({ scopeKey: 'group:5', groupId: 5 }); await repository.loadShared([11]);
   await repository.loadGrants({ scopeKey: 'group:5', groupId: 5 }, [59, 71]); await repository.loadConnection(2, 'fictitious-subject');
   for (const { name, options } of calls) {

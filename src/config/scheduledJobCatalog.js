@@ -7,6 +7,11 @@
  * reintentos y la recuperación tras reinicio pertenecen al scheduler durable.
  */
 const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
+  googleAdsRevocations: Object.freeze({
+    type: 'google_ads_broker_revocations', priority: 'high', executorMethod: 'executeGoogleAdsRevocations',
+    enabledEnv: 'GOOGLE_ADS_REVOCATION_WORKER_ENABLED', timezone: 'Europe/Madrid',
+    usesIntegrationLease: false, reportedFailureRetryable: false, maxAttempts: 1,
+  }),
   googlePropertyRevocations: Object.freeze({
     type: 'google_property_broker_revocations', priority: 'high', executorMethod: 'executeGooglePropertyRevocations',
     enabledEnv: 'GOOGLE_PROPERTY_REVOCATION_WORKER_ENABLED', timezone: 'Europe/Madrid',
