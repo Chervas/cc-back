@@ -1,5 +1,13 @@
 # Broker de integraciones
 
+## 13/09/2026 — Inspección de credenciales WhatsApp
+
+Antes de usar un secreto, el runtime verifica respuesta Meta de identidad,
+scopes exactos, único WABA y expiraciones. Sin fallback ni uso de diagnóstico
+aportado por navegador. 263 pruebas broker pasan, 80 WhatsApp, con ficticios.
+Campos/granularidad y cuota reales por verificar; no se abre Meta ni se implementa
+todavía el alta. [Contrato y límites](../../docs/security/whatsapp-broker-messaging.md).
+
 ## 13/09/2026 — Motor WhatsApp y cliente staging
 
 Preparada cohorte `whatsapp-messaging-v1`: texto y plantillas textuales registradas,

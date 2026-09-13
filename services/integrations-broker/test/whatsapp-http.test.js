@@ -1,6 +1,6 @@
 'use strict';
 const test = require('node:test'); const assert = require('node:assert/strict'); const { EventEmitter } = require('node:events'); const { PassThrough } = require('node:stream');
-const { createWhatsappHttp } = require('../src/whatsapp-http'); const { SEND_TOKEN } = require('./whatsapp-fixture.cjs');
+const { createWhatsappHttp } = require('../src/whatsapp-http'); const { SEND_TOKEN, APP_SECRET } = require('./whatsapp-fixture.cjs');
 const input = overrides => ({ action: 'send', id: '401', token: Buffer.from(SEND_TOKEN), proof: 'a'.repeat(64),
   json: { messaging_product: 'whatsapp', type: 'text', to: '34000000123', text: { body: 'QA' } }, ...overrides });
 function wire({ status = 200, headers = {}, response = {}, error, hold = false } = {}) {
@@ -61,4 +61,23 @@ test('deadline destroys the in-flight request without retry', async () => {
   try { await assert.rejects(createWhatsappHttp({ request: f.request, timeoutMs: 5 })(input()), { code: 'provider_timeout' }); }
   finally { clearTimeout(keepAlive); }
   assert.equal(f.calls.length, 1); assert.equal(f.destroyed(), 1);
+});
+test('internal token inspection fixes the Meta debug endpoint and application authentication', async () => {
+  const f = wire({ response: { data: { is_valid: false } } });
+  const request = { action: 'inspect', id: '101', token: Buffer.from('101|' + APP_SECRET), candidate: Buffer.from(SEND_TOKEN) };
+  await createWhatsappHttp({ request: f.request })(request);
+  const { options, body } = f.calls[0]; const url = new URL('https://graph.facebook.com' + options.path);
+  assert.equal(options.method, 'GET'); assert.equal(options.hostname, 'graph.facebook.com'); assert.equal(options.rejectUnauthorized, true);
+  assert.equal(url.pathname, '/v24.0/debug_token'); assert.deepEqual([...url.searchParams.keys()], ['input_token']);
+  assert.equal(url.searchParams.get('input_token'), SEND_TOKEN); assert.equal(options.headers.authorization, 'Bearer 101|' + APP_SECRET); assert.equal(body, undefined);
+  for (const change of [{ id: '999' }, { candidate: 'not-buffer' }, { json: {} }, { proof: 'a'.repeat(64) }, { token: Buffer.from(SEND_TOKEN) }])
+    await assert.rejects(createWhatsappHttp({ request: f.request })({ ...request, ...change }), { code: 'invalid_request' });
+  assert.equal(f.calls.length, 1);
+});
+test('inspection transport errors do not expose candidate, app secret or diagnostic URL', async () => {
+  const f = wire({ error: '/debug_token?input_token=' + SEND_TOKEN + ' ' + APP_SECRET });
+  await assert.rejects(createWhatsappHttp({ request: f.request })({ action: 'inspect', id: '101', token: Buffer.from('101|' + APP_SECRET), candidate: Buffer.from(SEND_TOKEN) }), e => {
+    assert.equal(e.code, 'provider_failed'); const output = e.stack + JSON.stringify(e);
+    for (const value of [SEND_TOKEN, APP_SECRET, '/debug_token?input_token=']) assert(!output.includes(value)); return true;
+  });
 });

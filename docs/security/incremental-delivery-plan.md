@@ -28,6 +28,12 @@ incidente. Las pruebas locales no autorizan llamadas reales ni una apertura.
 
 ## Motor WhatsApp: siguiente integración
 
+Avance posterior al primer motor: inspección de credenciales antes de uso,
+comparando respuesta Meta con identidad, scopes y WABA fijados. 263 tests broker,
+80 WhatsApp, todos ficticios. Granularidad/campos y cuota diagnóstica real por
+verificar; sin alta Meta, consumidores ni configuración activados. Continúan
+estado/código de un uso, canje en broker y registro como siguiente trabajo.
+
 Requisito confirmado por el usuario: cubrir **también la conexión previa de
 Meta y Embedded Signup**. El flujo actual exige MetaConnection general y pide
 permisos adicionales de páginas/publicidad/leads. Se sustituirá por autorización

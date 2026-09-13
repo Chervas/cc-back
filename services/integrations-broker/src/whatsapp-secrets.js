@@ -4,9 +4,9 @@ const { BrokerError, fail } = require('./errors'); const C = require('./whatsapp
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).sort().join(',') === keys.split(',').sort().join(',');
 const tokenText = value => typeof value === 'string' && /^[A-Za-z0-9_.|\-]{16,16384}$/.test(value);
-function createWhatsappSecrets({ client, accountId, prefix, kmsKeyArn, now = () => Date.now() }) {
+function createWhatsappSecrets({ client, accountId, prefix, kmsKeyArn, inspectCredential, now = () => Date.now() }) {
   const { DescribeSecretCommand, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
-  if (!/^\d{12}$/.test(accountId) || !/^\/clinicaclick\/integrations\/(dev|staging|prod)\/$/.test(prefix)
+  if (typeof inspectCredential !== 'function' || !/^\d{12}$/.test(accountId) || !/^\/clinicaclick\/integrations\/(dev|staging|prod)\/$/.test(prefix)
     || !new RegExp(`^arn:aws:kms:eu-west-3:${accountId}:key/[a-f0-9-]+$`).test(kmsKeyArn)) fail('invalid_request');
   const base = `arn:aws:secretsmanager:eu-west-3:${accountId}:secret:${prefix}`;
   const generations = new Map(); const active = new Map(); const proofs = new WeakMap(); let closed = false;
@@ -30,10 +30,11 @@ function createWhatsappSecrets({ client, accountId, prefix, kmsKeyArn, now = () 
     for (const token of active.get(ref) || []) { token.fill(0); proofs.delete(token); }
   }
   async function withToken(binding, kind, work, { signal } = {}) {
-    let token; let appSecret; const ref = binding.connectionRef; const generation = generations.get(ref) || 0;
+    let token; let appSecret; let applicationToken; let remote; const ref = binding.connectionRef; const generation = generations.get(ref) || 0;
     const check = () => {
       if (closed || signal?.aborted || generation !== (generations.get(ref) || 0)) fail('connection_blocked');
       if (!Number.isSafeInteger(binding.expiresAt) || binding.expiresAt <= now()) fail('connection_blocked');
+      if (remote && [remote.expiresAt, remote.dataAccessExpiresAt].some(expiry => expiry !== null && expiry <= now())) fail('credential_revoked');
     };
     try {
       check(); const meta = C.bindingFor(binding);
@@ -53,9 +54,15 @@ function createWhatsappSecrets({ client, accountId, prefix, kmsKeyArn, now = () 
         || !exact(app, 'version,provider,appId,appSecret') || app.version !== 1 || app.provider !== 'meta-app' || app.appId !== meta.appId
         || typeof app.appSecret !== 'string' || !/^[a-f0-9]{32}$/.test(app.appSecret)) fail('secret_unavailable');
       token = Buffer.from(value.accessToken); appSecret = Buffer.from(app.appSecret);
-      const proof = createHmac('sha256', appSecret).update(token).digest('hex'); appSecret.fill(0);
+      const proof = createHmac('sha256', appSecret).update(token).digest('hex');
+      applicationToken = Buffer.concat([Buffer.from(meta.appId + '|'), appSecret]); appSecret.fill(0);
       proofs.set(token, { ref, kind, proof });
       const tokens = active.get(ref) || new Set(); tokens.add(token); active.set(ref, tokens);
+      try {
+        remote = await inspectCredential({ candidate: token, applicationToken, signal,
+          expected: { appId: meta.appId, subjectId: value.subjectId, wabaId: meta.wabaId, scopes: [scope] } });
+      } finally { applicationToken.fill(0); }
+      check();
       const result = await work(token); check();
       if (value.expiresAt !== null && value.expiresAt <= now()) fail('credential_revoked');
       const serialized = JSON.stringify(result);
@@ -66,7 +73,7 @@ function createWhatsappSecrets({ client, accountId, prefix, kmsKeyArn, now = () 
       return result;
     } catch (error) { throw error instanceof BrokerError ? error : new BrokerError('secret_unavailable'); }
     finally {
-      token?.fill(0); appSecret?.fill(0); if (token) proofs.delete(token);
+      token?.fill(0); appSecret?.fill(0); applicationToken?.fill(0); if (token) proofs.delete(token);
       const tokens = active.get(ref); tokens?.delete(token); if (!tokens?.size) active.delete(ref);
     }
   }

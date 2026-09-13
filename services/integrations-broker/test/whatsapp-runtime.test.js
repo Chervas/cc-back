@@ -1,6 +1,6 @@
 'use strict';
 const test = require('node:test'); const assert = require('node:assert/strict'); const fs = require('node:fs'); const path = require('node:path'); const net = require('node:net');
-const { execFileSync } = require('node:child_process'); const { fixture } = require('./whatsapp-fixture.cjs'); const { allowPort, removePort } = require('./offline-guard.cjs');
+const { execFileSync } = require('node:child_process'); const { fixture, tokenMetadata } = require('./whatsapp-fixture.cjs'); const { allowPort, removePort } = require('./offline-guard.cjs');
 const runtime = require('../src/whatsapp-main'); const C = require('../src/whatsapp-contract'); const { drainAudit } = require('../src/audit');
 const { createIntegrationsBrokerClient } = require('../../../src/lib/integrationsBrokerClient');
 const { createWhatsappBrokerClient } = require('../../../src/lib/whatsappBrokerClient');
@@ -31,6 +31,7 @@ test('actual TLS consumer to WhatsApp broker uses fake AWS/Meta, durable receipt
   let sends = 0; let closed = 0; const events = [];
   const sink = { async write(row) { events.push(JSON.parse(row.event)); return { versionId: 'qa-version', digest: row.digest }; } };
   let app = await runtime.main(filename, { awsFactory: async () => ({ secrets: f.aws, sink, close() { closed++; } }), http: async req => {
+    if (req.action === 'inspect') return tokenMetadata();
     assert.equal(req.action, 'send'); sends++; return { messaging_product: 'whatsapp', messages: [{ id: 'wamid.FICTITIOUS_TLS' }] };
   } });
   allowPort(config.port); t.after(async () => { if (app) await app.close(); removePort(config.port); });

@@ -5,6 +5,7 @@ const { privateFile, connectAws, ACCOUNT, SECRET_KEY } = require('./google-main'
 const { BrokerStore } = require('./store'); const { Broker } = require('./broker'); const { createServer } = require('./server');
 const { drainAudit } = require('./audit'); const { createWhatsappSecrets } = require('./whatsapp-secrets');
 const { createWhatsappHttp } = require('./whatsapp-http'); const { createWhatsappOperations } = require('./whatsapp-operations');
+const { createWhatsappCredentialInspector } = require('./whatsapp-credential-inspector');
 function validateConfig(config) {
   if (!config || Object.keys(config).sort().join(',') !== 'cohort,enabled,listenAddress,policy,port,stateFile,tlsCertFile,tlsKeyFile'
     || config.enabled !== true || config.cohort !== C.COHORT || !net.isIP(config.listenAddress)
@@ -57,7 +58,8 @@ async function main(filename, { awsFactory = connectAws, http = createWhatsappHt
   const store = new BrokerStore(config.stateFile); let aws; let secrets; let broker; let server; let timer; let draining;
   try {
     aws = await awsFactory();
-    secrets = createWhatsappSecrets({ client: aws.secrets, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY });
+    secrets = createWhatsappSecrets({ client: aws.secrets, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY,
+      inspectCredential: createWhatsappCredentialInspector({ http }) });
     broker = new Broker({ store, policy: config.policy, secrets, operations: createWhatsappOperations({ http, secrets }), timeoutMs: 25000 });
     let inFlight = 0;
     server = createServer({ async execute(...args) {

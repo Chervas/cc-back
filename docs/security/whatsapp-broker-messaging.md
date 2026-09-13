@@ -61,12 +61,49 @@ Sobres JSON v1 exactos de los secretos:
 - Caducidades en epoch **milisegundos**. El token puede tener `expiresAt:null`;
   la autorización local de la conexión siempre exige vencimiento.
 
-IDs/scopes del sobre son afirmaciones registradas, **no verificación de permisos
-efectivos en Meta**. El token de consulta conserva permiso remoto de gestión,
+Los IDs/scopes del sobre son afirmaciones registradas. Ahora se contrastan con
+`debug_token` dentro del broker antes de cada uso de la credencial; esa lógica
+está probada con ficticios, **no verificada todavía en Meta real**. El token de consulta conserva permiso remoto de gestión,
 aunque el adaptador solo exponga GET; no se presenta como permiso remoto de
 solo lectura. Antes de migrar, verificar sujetos/asignaciones, WABA/números y
 ausencia de acceso a activos o permisos publicitarios/páginas no aprobados.
 No copiar un token global en distintos secretos para simular separación.
+
+### Inspección de permisos e identidad del proveedor
+
+`whatsapp-credential-inspector.js` comprueba App ID, sujeto exacto, tipo USER o
+SYSTEM_USER, validez, expiración del token y del acceso a datos, scopes exactos y
+granularidad. Cada permiso WhatsApp esperado debe declarar **solo el WABA fijado**;
+faltan datos, otro WABA, varios targets, permisos adicionales o identidad distinta
+impiden llegar al POST. El motor operativo exige exclusivamente messaging o
+management según el rol del secreto, sin mezclar ambos. El verificador puede
+reutilizarse en el alta con una whitelist WhatsApp explícita y public_profile;
+eso no cambia los requisitos del motor operativo ni implementa Embedded Signup.
+
+No se acepta un JSON diagnóstico enviado por el navegador ni se deduce validez
+del sobre almacenado. La inspección se ejecuta al cargar cada secreto; repetir
+un recibo completado no carga tokens. Si la respuesta indica invalidación, el
+bloqueo de conexión se persiste y no se vuelve a sondear con nuevas peticiones.
+Si falla la inspección, no se usa una validación antigua como fallback.
+
+Meta documenta `GET /debug_token?input_token=...`: esa query sensible solo viaja
+por TLS directamente a Meta; app access token en Authorization. No es una URL
+del navegador ni una respuesta de API. El transporte nativo no la registra,
+y elimina errores crudos, headers y cuerpos del proveedor. Prohibido activar
+trazas/APM/proxies que registren esa URL o sus cabeceras completas. Las buffers
+del candidato/app se borran al terminar, con el límite de strings/GC ya indicado.
+
+Referencia primaria: [Debug Token en Embedded Signup de Meta](https://www.postman.com/meta/whatsapp-business-platform/documentation/du6gzjv/embedded-signup?entity=request-13382743-32e8d1af-a608-4bf1-bf4b-c8fc5e6551a4).
+El ejemplo documenta granularidad management; **no demuestra que todos los tipos
+de token devuelvan todos los campos exigidos por este motor**. Esa compatibilidad,
+especialmente messaging/SYSTEM_USER, debe verificarse antes del canary. Ausencia
+de evidencia implica rechazo; no declarar una configuración real compatible con
+fixtures inventados. Si Meta no aporta ese dato, habrá que implementar otra
+comprobación documentada de asignaciones; no eliminar el control para reabrir.
+
+La introspección no impide por sí sola usar externamente una credencial robada ni
+es atómica con cambios de permisos posteriores. Sigue siendo necesaria la
+separación real de grants/tokens/apps y la retirada de accesos comprometidos.
 
 Secrets Manager: cuenta, región eu-west-3, prefijo prod y KMS fijados; Describe
 sin eliminación programada, VersionId fijado y AWSCURRENT comprobados en Describe
@@ -76,8 +113,9 @@ conexión de forma durable. Buffers del callback se borran al terminar/invalidat
 los strings internos SDK/JSON dependen del recolector de JavaScript, sin promesa
 de borrado de todas las copias en memoria.
 
-HTTPS fijo a graph.facebook.com, Graph `v24.0`, TLS verificado, Bearer en cabecera
-y HMAC `appsecret_proof`. Sin redirecciones, compresión, respuestas no JSON,
+HTTPS fijo a graph.facebook.com, Graph `v24.0`, TLS verificado. Envío/consulta de
+plantilla: Bearer en cabecera y HMAC `appsecret_proof`; inspección con el protocolo
+anterior. Sin redirecciones, compresión, respuestas no JSON,
 respuestas de más de 128 KiB ni reintentos HTTP. Calcular la prueba no acredita
 que Meta la exija frente a un token robado: verificar configuración de la app.
 La versión conserva compatibilidad del código existente; no se afirma que sea
@@ -137,6 +175,10 @@ validar JSON no acredita permisos remotos.
 Sin caché: texto = 2 GetSecretValue + 4 DescribeSecret; plantilla = 4 GetSecretValue
 y 8 DescribeSecret, además de consulta/envío Meta. Máximo 8 peticiones en vuelo,
 plazo total 25 s y transporte Meta 8 s por llamada. Capacidad pendiente de ensayo.
+La inspección añade una llamada Graph por secreto usado: texto tiene una
+inspección + envío; plantilla dos inspecciones + consulta de plantilla + envío.
+Comparten el plazo total de 25 s. Cuotas del endpoint diagnóstico y carga real
+deben medirse antes de activar; no confundir límites de mensajería con su cuota.
 No hay medición ni estimación monetaria real nueva. Costes Ajustes, CE/etiquetas,
 Budget frente a CloudFormation y retención conservan los pendientes del runbook.
 
@@ -177,6 +219,13 @@ pins/secretos/permisos, plantilla alterada, bloqueo externo durante consulta,
 duplicado concurrente, reinicio, respuesta perdida/timeout, auditoría/backlog,
 DEV/gateway y regresión de contención/MFA. Evidencia privada
 `whatsapp-broker-*.log`, `/home/ubuntu/qa-evidence/security-migration-20260912`.
+
+Regresión posterior de inspección: **263 pruebas broker correctas, 80 WhatsApp**,
+incluidas 31 nuevas de identidad/scopes/targets/expiración/transporte y rechazo
+previo a envío. TLS local usa el inspector real con HTTP Meta ficticio. Evidencia
+`whatsapp-inspector-tests.log` y `whatsapp-inspector-regression.log` en el mismo
+directorio privado. No se vuelve a contar la ejecución backend anterior como
+prueba nueva de este cambio; no hay modificaciones de consumidores, DDL o UI.
 
 Sin nueva DDL clínica ni UI. Pendientes: alta Meta/Embedded Signup segura,
 registro de bindings/aprobaciones,

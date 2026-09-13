@@ -1,5 +1,20 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Inspección de credenciales antes de uso en WhatsApp
+
+El broker contrasta la respuesta de Meta con App ID, sujeto, scopes exactos,
+único WABA registrado y expiraciones. Respuesta insuficiente o alcance adicional
+impiden el envío. Token inválido produce bloqueo durable; no hay fallback al
+sobre almacenado ni API pública de diagnóstico. DTO y rutas públicas no cambian.
+
+Código probado: 263 tests broker, 80 WhatsApp, proveedores ficticios. Acreditar
+campos/granularidad y cuota reales antes de canary; el token no se ha usado en
+Meta real. El endpoint interno documentado por Meta lleva input_token en query
+HTTPS: no devolver ni registrar URL/cabeceras/errores crudos. Sin nueva DDL, UI,
+configuración o despliegue. Alta Meta/Embedded Signup, bindings, consumidores y
+aislamiento efectivo siguen pendientes. Detalle en
+`back-dev/docs/security/whatsapp-broker-messaging.md`.
+
 ## 13/09/2026 — Broker WhatsApp: motor y cliente staging probados
 
 Cohorte privada `whatsapp-messaging-v1`, sin rutas públicas nuevas ni apertura

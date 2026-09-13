@@ -1,5 +1,21 @@
 # Runbook: Migracion Segura De Integraciones Y Auditoria
 
+## 13/09/2026 — Inspección obligatoria de credenciales WhatsApp
+
+El motor contrasta `debug_token` del proveedor antes de cada uso con App ID,
+sujeto, scopes exactos, único WABA previsto y expiraciones. Falta de evidencia
+o alcance adicional impiden POST; token inválido bloquea duraderamente la conexión.
+263 pruebas broker pasan (80 WhatsApp), exclusivamente con Meta/AWS ficticios.
+Sin DDL/UI/configuración/despliegue ni tokens reales; alta Meta aún pendiente.
+
+Antes del lote real: verificar que la modalidad/token reporta granularidad y
+campos exigidos, medir cuota/latencia de diagnóstico además de la de mensajes,
+y comprobar que no hay trazas/APM de URL/cabeceras sensibles. Meta exige
+`input_token` en la query HTTPS de su endpoint diagnóstico; no se expone esa URL
+a API/frontend ni se registra en el transporte. Sin fallback ante fallo, sin
+suprimir comprobaciones para conseguir un canary verde. Contrato y límites:
+[WhatsApp broker](security/whatsapp-broker-messaging.md).
+
 ## 13/09/2026 — Motor WhatsApp probado; integración pública pendiente
 
 Preparados runtime privado `whatsapp-main.js` y cliente staging: texto/plantilla

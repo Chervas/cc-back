@@ -82,6 +82,12 @@ forense para preparar estas protecciones.
 
 ## Hechos y estado
 
+Inspección añadida al motor: respuesta `debug_token` requerida antes de usar un
+secreto, con identidad, scopes, targets y expiraciones concordantes. 263 pruebas
+broker (80 WhatsApp), ficticias. La respuesta/campos reales y cuota del endpoint
+diagnóstico todavía no están acreditados; una respuesta insuficiente se rechaza.
+La introspección no sustituye la separación de permisos en Meta ni cierra el alta.
+
 Avance posterior: [motor y cliente de envío](whatsapp-broker-messaging.md)
 probados con secretos/proveedor ficticios, recibo durable y plantilla fijada.
 232 tests broker + 59 backend; no conectados aún a consumidores ni registro real.

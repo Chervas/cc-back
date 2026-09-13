@@ -4,7 +4,13 @@ const { generateKeyPairSync, randomUUID } = require('node:crypto');
 const { BrokerStore } = require('../src/store'); const { Broker } = require('../src/broker'); const { signRequest } = require('../src/auth');
 const { createWhatsappSecrets } = require('../src/whatsapp-secrets'); const { createWhatsappOperations } = require('../src/whatsapp-operations');
 const { ACCOUNT, SECRET_KEY } = require('../src/google-main'); const C = require('../src/whatsapp-contract');
+const { createWhatsappCredentialInspector } = require('../src/whatsapp-credential-inspector');
 const SEND_TOKEN = 'FICTITIOUS_WHATSAPP_SEND_TOKEN'; const READ_TOKEN = 'FICTITIOUS_WHATSAPP_READER_TOKEN'; const APP_SECRET = '0123456789abcdef'.repeat(2);
+function tokenMetadata(read = false) {
+  const scope = read ? 'whatsapp_business_management' : 'whatsapp_business_messaging';
+  return { data: { app_id: '101', user_id: read ? '202' : '201', type: 'SYSTEM_USER', is_valid: true, expires_at: 0, data_access_expires_at: 0,
+    scopes: [scope], granular_scopes: [{ scope, target_ids: ['301'] }] } };
+}
 function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-whatsapp-qa-')); fs.chmodSync(dir, 0o700);
   const keys = generateKeyPairSync('ed25519'); const controlKeys = generateKeyPairSync('ed25519');
@@ -39,7 +45,9 @@ function fixture(t) {
     }
     return modify(value, command, options);
   } };
-  const secrets = createWhatsappSecrets({ client: aws, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY });
+  const inspections = []; let inspectResponse = req => tokenMetadata(req.candidate.toString() === READ_TOKEN);
+  const secrets = createWhatsappSecrets({ client: aws, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY,
+    inspectCredential: createWhatsappCredentialInspector({ http: async req => { inspections.push(req); return inspectResponse(req); } }) });
   const filename = path.join(dir, 'state.sqlite'); const store = new BrokerStore(filename);
   const command = (overrides = {}) => ({ requestId: randomUUID(), ...grant, operation: C.TEXT,
     payload: { to: '34000000123', body: 'FICTITIOUS_MESSAGE_BODY', previewUrl: false }, ...overrides });
@@ -50,6 +58,6 @@ function fixture(t) {
     tlsCertFile: path.join(dir, 'tls.crt'), tlsKeyFile: path.join(dir, 'tls.key'), policy };
   t.after(() => { secrets.close(); try { store.close(); } catch {} fs.rmSync(dir, { recursive: true, force: true }); });
   return { dir, filename, store, keys, controlKeys, binding, policy, config, rawTemplate, values, pins, calls, aws, secrets,
-    command, sign, execute, makeBroker, modify: fn => { modify = fn; } };
+    command, sign, execute, makeBroker, inspections, inspectResponse: fn => { inspectResponse = fn; }, modify: fn => { modify = fn; } };
 }
-module.exports = { fixture, SEND_TOKEN, READ_TOKEN, APP_SECRET };
+module.exports = { fixture, SEND_TOKEN, READ_TOKEN, APP_SECRET, tokenMetadata };
