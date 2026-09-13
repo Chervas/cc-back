@@ -48,6 +48,9 @@ function extractMetaError(error) {
 
 function classifyRetryableWhatsappFailure(error) {
   const details = extractMetaError(error);
+  if (error?.delivery_unknown === true) {
+    return { retryable: false, reason: 'delivery_unknown', delivery_unknown: true, ...details };
+  }
   if (
     (details.network_code && AMBIGUOUS_DELIVERY_NETWORK_ERROR_CODES.has(details.network_code))
     || (

@@ -15,6 +15,8 @@ const validate = new Ajv({ strict: true }).compile(object({
     expiresAt: { type: ['integer', 'null'], minimum: 0 }, secretArn: { type: 'string', maxLength: 2048 },
     clientSecretArn: { type: 'string', maxLength: 2048 },
     developerSecretArn: { type: 'string', maxLength: 2048 },
+    templateReaderSecretArn: { type: 'string', maxLength: 2048 },
+    whatsapp: require('./whatsapp-contract').bindingSchema,
     googleSubject: { type: 'string', pattern: '^[A-Za-z0-9._-]{1,128}$' },
     searchConsoleSites: { type: 'array', minItems: 1, maxItems: 1000,
       items: object({ assetRef: ref, siteUrl: { type: 'string', maxLength: 512 } }) },
@@ -37,6 +39,10 @@ function validatePolicy(policy) {
   catch { fail('invalid_request'); }
   for (const grant of policy.grants) {
     if (!policy.principals.some(row => row.id === grant.principalId) || !policy.connections.some(row => row.connectionRef === grant.connectionRef)) fail('invalid_request');
+  }
+  for (const binding of policy.connections) {
+    if ((binding.whatsapp || binding.templateReaderSecretArn) && binding.provider !== 'meta_whatsapp') fail('invalid_request');
+    if (binding.provider === 'meta_whatsapp') require('./whatsapp-contract').bindingFor(binding);
   }
   return policy;
 }

@@ -1,5 +1,18 @@
 # Broker de integraciones
 
+## 13/09/2026 — Motor WhatsApp y cliente staging
+
+Preparada cohorte `whatsapp-messaging-v1`: texto y plantillas textuales registradas,
+secretos de envío/consulta separados y fijados, bloqueo local y recibo durable.
+Una respuesta perdida no autoriza repetir el POST. Runtime independiente
+`src/whatsapp-main.js`; no instalar configuración ni iniciar acceso real con este
+corte. El cliente excluye DEV/gateway, pero faltan barreras efectivas del entorno.
+
+QA: 232 broker + 59 backend, con AWS/Meta ficticios. Sin nueva DDL ni UI.
+No conectado aún a registro, `whatsapp.service.js`, workers o recepción pública;
+cuarentena conservada, cero credenciales migradas/despliegues. OPS puede estar off.
+[Contrato, límites, coste y siguiente corte](../../docs/security/whatsapp-broker-messaging.md).
+
 ## 13/09/2026 — Fundamento de altas Ads y prioridad Meta/doble factor
 
 Preparados ámbito/solicitudes independientes, autorización del conjunto original

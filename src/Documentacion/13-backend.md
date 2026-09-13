@@ -1,5 +1,43 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Broker WhatsApp: motor y cliente staging probados
+
+Cohorte privada `whatsapp-messaging-v1`, sin rutas públicas nuevas ni apertura
+de Meta. HTTPS/Ed25519 `POST /v1/execute` admite texto, plantilla textual registrada
+y revocación local de ámbito. Principal `staging:whatsapp` para envíos y
+`control:whatsapp` para bloqueo, con claves/grants distintos; DEV/gateway sin envío.
+
+`meta.whatsapp.text.send.v1`: `{to,body,previewUrl}`.
+`meta.whatsapp.template.send.v1`: `{to,templateKey,parameters}`.
+Ambas devuelven `{messageId}` opaco, no destinatario/contenido ni credenciales.
+`meta.whatsapp.phone.revoke.v1`: `{}` → `{revoked:true}`; no revoca en Meta.
+
+Cliente interno `whatsappBrokerClient.send({messageId,clinicId,assetId,operation,payload})`
+resuelve binding exacto sin tokens y deriva una intención estable del Message.
+Mismo ID/contenido devuelve recibo; contenido distinto produce conflicto.
+Respuesta perdida/reinicio conserva estado desconocido, sin nuevo POST.
+El cliente devuelve `whatsapp_delivery_unknown`, `delivery_unknown:true`,
+`retryable:false` ante fallo después de iniciar transporte. Esa marca prevalece
+sobre reglas de reintento HTTP/red. No crear otro Message para repetir.
+
+Plantillas fijadas por ID/nombre/idioma/digest y verificadas antes del POST;
+consulta y envío usan secretos distintos y versiones fijadas. Solo BODY textual
+y HEADER/FOOTER textuales estáticos; medios, botones y gestión quedan fuera.
+No hay garantía atómica frente a cambios de plantilla entre lectura y envío.
+
+QA: 232 broker + 59 backend, ficticios, TLS/SQLite privados y sin BD clínica.
+Sin DDL nueva, UI, configuración instalada, AWS/Meta real ni despliegue.
+Pendientes registro/consumidores y recorrido gateway → cola → staging → broker,
+aislamiento efectivo y activación MFA. El cliente aún no está inyectado en
+`whatsapp.service.js`; no se declara migrado ningún número real.
+Contrato, permisos, costes y rollback:
+`back-dev/docs/security/whatsapp-broker-messaging.md`.
+
+El alta previa Meta/Embedded Signup también es requisito del cierre: sustituir
+OAuth general por autorización específica WhatsApp con correo MFA, estado/código
+de un uso, ámbito validado y canje en broker. Aún sin implementación ni nuevas
+rutas públicas de alta; configuración/permisos y coexistencia por verificar.
+
 ## 13/09/2026 — Refuerzo de WhatsApp previo a reconexión
 
 OPS es un consumidor externo de datos, sin dependencia inversa de ClinicaClick.

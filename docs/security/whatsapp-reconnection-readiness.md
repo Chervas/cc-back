@@ -54,6 +54,14 @@ variable en `/proc` no demuestra su valor después de cargar la configuración.
 
 ### Lote que se concretará antes de pedir activación
 
+La conexión previa de Meta forma parte obligatoria del lote. El código actual
+redirige WhatsApp al OAuth general con permisos de páginas/publicidad/leads y
+el callback Embedded Signup exige MetaConnection previa. Se sustituirá esa
+dependencia por alta específica de WhatsApp: MFA por correo, estado/código de
+un uso, ámbito e identidad verificados y canje en broker. Tokens fuera de API,
+frontend y BD compartida; gestión/alta separadas del permiso operativo de envío.
+Configuración Embedded Signup/coexistencia por verificar; alta todavía pendiente.
+
 | Componente | Cambio y validación requeridos |
 | --- | --- |
 | Proveedor inicial | Solo WhatsApp, WABA/números y plantillas expresamente inventariados; Ads, páginas y otros permisos fuera. No usar tokens revocados. |
@@ -65,7 +73,8 @@ variable en `/proc` no demuestra su valor después de cargar la configuración.
 | Interrupción | Ventana acotada para frenar productores/consumidores afectados, resolver trabajos en curso y cambiar el propietario de recepción. La duración se medirá con ensayo; aún no se promete una cifra ni entrega para esta noche. |
 | Regreso/rollback | Pausar envíos ante duda; conservar recepción durable, bloqueos, historial y exigencia del correo. Revertir consumidores únicamente a una versión revisada, con un solo dueño de cola. No restaurar tokens antiguos, envíos inciertos ni el webhook sin firma. |
 
-El lote no está listo para ejecutar: faltan el adaptador WABA, los consumidores,
+El lote no está listo para ejecutar: motor WABA y cliente tipado probados
+aisladamente, pero faltan su conexión al registro y los consumidores,
 las barreras de acceso del entorno y el ensayo completo gateway → cola → staging
 → broker, incluidos errores y reinicios. La atribución Meta puede continuar en
 paralelo; no se presenta como requisito esperar indefinidamente una respuesta
@@ -73,12 +82,17 @@ forense para preparar estas protecciones.
 
 ## Hechos y estado
 
+Avance posterior: [motor y cliente de envío](whatsapp-broker-messaging.md)
+probados con secretos/proveedor ficticios, recibo durable y plantilla fijada.
+232 tests broker + 59 backend; no conectados aún a consumidores ni registro real.
+No confundir este motor con la migración terminada del recorrido WhatsApp.
+
 | Control | Evidencia de código | Pendiente antes de reabrir |
 | --- | --- | --- |
 | Login por correo | Primera entrega backend `a393740`, front `622fa35a`; código de un uso, caducidad, límites y sesiones con prueba de correo. | DDL/configuración y `enforce` en todos los emisores/verificadores de ClinicaClick, rechazo de sesiones antiguas y entrega de correo real probados. Publicado no significa activo. |
 | Recepción WhatsApp | Este corte cierra aceptación sin secreto, exige firma sobre bytes originales y elimina selección de clínica desde URL/campo adicional. | Verificar secreto de la app correcta, proxy/parser y eventos reales de la cohorte, después de aprobar el canary. |
 | Ámbitos | Este corte vincula WABA/teléfono exactos a mappings activos, bloqueos independientes y clínicas registradas; restringe listados y estado. | Conciliar mappings reales y comprobar aislamiento en todos los consumidores/colas, también en el momento de procesar. |
-| Token WABA | Revocación, retirada de tokens almacenados y parada de envíos reportadas por el usuario, sin comprobación activa. El alta y la salida siguen cerradas. | Broker WhatsApp y migración de consumidores todavía pendientes: el esquema/escritores heredados permiten guardar `waAccessToken` y `getClinicConfig` lo entrega a la API general si vuelve a existir. Esto no contradice la retirada de valores reales reportada por el usuario. No insertar un token nuevo en ese recorrido como prueba. |
+| Token WABA | Revocación, retirada de tokens almacenados y parada de envíos reportadas por el usuario, sin comprobación activa. Motor aislado y cliente staging probados con ficticios; alta y salida públicas cerradas. | Registro y migración de consumidores todavía pendientes: el esquema/escritores heredados permiten guardar `waAccessToken` y `getClinicConfig` lo entrega a la API general si vuelve a existir. Esto no contradice la retirada de valores reales reportada por el usuario. No insertar un token nuevo en ese recorrido como prueba. |
 | Cuenta/app Meta | No hay acceso ni revisión real en este corte. La atribución visual de actividad a ClinicaClick no demuestra origen. | Determinar evidencia del incidente; revisar administradores, socios, usuarios de sistema, apps y sesiones desde un dispositivo de confianza. Resolver accesos comprometidos y credenciales afectadas antes de emitir nuevas. El código de correo de ClinicaClick no controla sesiones ni tokens de Meta. |
 | Publicidad | Conserva cuarentena y hotfix. | Segunda prioridad, lote separado; no habilitar `ads_management` ni consumidores Ads al reabrir una cohorte WhatsApp. |
 

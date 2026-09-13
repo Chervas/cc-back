@@ -1,5 +1,29 @@
 # Runbook: Migracion Segura De Integraciones Y Auditoria
 
+## 13/09/2026 — Motor WhatsApp probado; integración pública pendiente
+
+Preparados runtime privado `whatsapp-main.js` y cliente staging: texto/plantilla
+textual registrada, secretos separados con versiones fijadas, comprobación de
+bloqueo tras awaits y recibo durable sin repetir POST ante incertidumbre.
+Regresión: 232 broker + 59 backend correctos, TLS/SQLite propios y AWS/Meta
+ficticios. Sin nueva DDL clínica, UI, configuración instalada o despliegue.
+
+No se ha conectado a registro, `whatsapp.service.js`, workers ni recepción real.
+El lote incluye reemplazar el requisito de conexión Meta general por alta
+específica WhatsApp/Embedded Signup, con MFA, estado/código de un uso, permiso
+de ámbito y canje en broker. Su configuración/permisos, incluida coexistencia,
+deben verificarse; no asumir que el token de alta cumple el contrato de envío.
+Siguiente corte: bindings/aprobaciones, salida y recepción durable gateway → cola
+→ staging, revalidación/deduplicación y conciliación de resultados desconocidos.
+Después, acreditar separación de identidades/claves/IAM/SQL/Redis y correo MFA,
+presentar versiones/DDL/backlog/ventana/canary/rollback concretos antes de activar.
+
+Conservar estado SQLite/recibos/bloqueos/auditoría y cuarentena. No recuperar
+tokens de BD, cambiar IDs Message para repetir, reutilizar credenciales revocadas
+ni reactivar DEV. El guard de entorno no constituye aislamiento frente al mismo
+UID. Medios/botones/flujos y gestión de plantillas quedan fuera del motor inicial.
+[Contrato, coste técnico y límites](security/whatsapp-broker-messaging.md).
+
 ## 13/09/2026 — WhatsApp primero; OPS no es dependencia
 
 Destino confirmado: **ClinicaClick público en staging/gateway; DEV fuera**.

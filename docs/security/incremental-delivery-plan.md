@@ -26,6 +26,26 @@ consumidores y validación del entorno real, incluida exigencia efectiva del
 código por correo. No se promete que cambiar tokens elimine el vector del
 incidente. Las pruebas locales no autorizan llamadas reales ni una apertura.
 
+## Motor WhatsApp: siguiente integración
+
+Requisito confirmado por el usuario: cubrir **también la conexión previa de
+Meta y Embedded Signup**. El flujo actual exige MetaConnection general y pide
+permisos adicionales de páginas/publicidad/leads. Se sustituirá por autorización
+Meta específica para WhatsApp, con correo MFA, estado/código de un uso, ámbito
+validado y canje en broker. Registro público solo de referencias, sin token en
+API/frontend/BD compartida. No se considera cerrada la reconexión con el motor
+de envío solo; configuración/permisos reales y coexistencia siguen por validar.
+La independencia se exige también en los grants/tokens de Meta, no solo en UI;
+configuraciones de acceso frente a app dedicada quedan pendientes de evaluación.
+
+Avance WhatsApp posterior: motor aislado y cliente staging probados, con texto,
+plantillas textuales autorizadas, versiones de secretos fijadas y recibo durable
+sin reenvío ante incertidumbre. 232 tests broker + 59 backend. Sin nueva DDL ni UI,
+proveedores reales o despliegue. Siguiente paso: registro de bindings/aprobaciones,
+consumidores y recepción durable gateway → cola → staging, preservando pausas.
+Después, aislamiento real y lote MFA/canary. No hay visto bueno de reconexión.
+[Contrato del corte](whatsapp-broker-messaging.md).
+
 ## Entrega anterior: primera etapa de contención y acceso
 
 Actualizado por indicación expresa del usuario: **cerrar una primera entrega de

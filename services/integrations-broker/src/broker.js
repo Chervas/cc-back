@@ -40,6 +40,7 @@ class Broker {
       binding = resolved.connections.find(item => item.connectionRef === request.connectionRef);
       if (!binding || binding.provider !== operation.provider) fail('scope_denied');
       operation.validate(request.payload);
+      operation.authorize?.({ request, binding, principal });
       this.adsEnrollment?.assert(request, principal, this.policy);
       if (!['revoke_asset','google_oauth','google_ads_enrollment_status','google_ads_enrollment_revoke'].includes(operation.control)) {
         this.store.connection(request.connectionRef, now);
@@ -90,15 +91,18 @@ class Broker {
       }
     };
     try {
-      const execute = async secret => {
+      const assertActive = () => {
         if (controller.signal.aborted) fail('provider_timeout');
         if (!metadataOnly) {
           if (this.store.connection(request.connectionRef, this.now()).revision !== revision) fail('connection_blocked');
           this.store.assertAssetActive(request);
         }
         this.adsEnrollment?.assert(request, principal, this.policy);
+      };
+      const execute = async secret => {
+        assertActive();
         const rawResult = await operation.execute({ payload: request.payload, binding, assetRef: request.assetRef,
-          tenantRef: request.tenantRef, principalId: principal.id, policyVersion: this.policy.version, policy: this.policy, secret, signal: controller.signal });
+          tenantRef: request.tenantRef, principalId: principal.id, policyVersion: this.policy.version, policy: this.policy, secret, signal: controller.signal, assertActive });
         if (controller.signal.aborted) fail('provider_timeout');
         // Recheck after awaits, including blocks written by a separate local operator process.
         if (!metadataOnly) {
