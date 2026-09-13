@@ -4,6 +4,13 @@
 incidente ni verificado estas protecciones en los procesos que sirven tráfico.
 El código de contención mantiene WhatsApp cerrado a escrituras y Meta sin salida.
 
+Avance local posterior: [estado de alta](whatsapp-authorization-state.md) durable,
+con sesión MFA vigente, conjunto de clínicas fijado, reclamación única y auditoría
+transaccional. 3 tests de contrato, 55 de auditoría y 12 comprobaciones MySQL
+propio correctos. DDL 20260913150000 pendiente. No está conectado a rutas ni canje;
+la independencia de grants/tokens WhatsApp frente a Ads/leads sigue por validar
+en Meta. Por sí solo no modifica la situación de reconexión.
+
 El usuario aclara que OPS solo consume datos de ClinicaClick para paneles. Puede
 seguir apagado: no es dependencia de ClinicaClick. Se priorizan WhatsApp API y
 login con códigos por correo; cuentas publicitarias después. No se espera a

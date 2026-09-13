@@ -1,5 +1,19 @@
 # Runbook: Migracion Segura De Integraciones Y Auditoria
 
+## 13/09/2026 — Estado durable de alta WhatsApp
+
+Preparado componente interno que exige sesión con correo MFA y ámbito completo,
+fija clínicas/grupos y reclama cada intento una vez, con cancelación y auditoría
+v15 en la misma transacción. No conecta rutas ni canje Meta. La separación real
+de grants WhatsApp frente a Ads/leads continúa siendo requisito de cierre.
+
+3 tests de contrato, 55 de auditoría y 12 comprobaciones MySQL propio correctos;
+mysqld ficticio cerrado con código 0. DDL 20260913150000 y dependencias de sesiones,
+MFA, bloqueos y auditoría antes de instalar el nuevo modelo; writer/reader v15
+antes de captura. Pendiente en BD compartida. Estado, errores, variables,
+interrupción y rollback en [contrato de alta](security/whatsapp-authorization-state.md).
+Sin UI, configuración instalada, proveedor real, despliegue o apertura Meta.
+
 ## 13/09/2026 — Inspección obligatoria de credenciales WhatsApp
 
 El motor contrasta `debug_token` del proveedor antes de cada uso con App ID,

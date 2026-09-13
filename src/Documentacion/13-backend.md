@@ -1,5 +1,25 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Estado interno de autorización WhatsApp
+
+`whatsappAuthorizationState.service` prepara issue/claim/status/cancel y
+revalidación para un futuro canje en broker: sesión con prueba de correo vigente,
+ámbito completo fijado, 10 minutos como máximo, reclamación única, límites por
+usuario y auditoría v15 transaccional. Estado/código en claro no persisten;
+consumido/cancelado no se reutiliza tras reiniciar. Bloqueos Meta se respetan.
+
+Sin endpoint nuevo ni cambio del DTO público; la conexión actual sigue en
+cuarentena. `accessSession.verifyReference` añade la opción interna
+`requireEmail:true` sin cambiar sus consumidores anteriores. El visor admite
+filtro `integration.whatsapp.authorization_state`; evento v15 solo captura
+transiciones locales confirmadas, sin acreditar canje ni conexión en Meta.
+
+DDL 20260913150000 pendiente antes del nuevo modelo; dependencias de sesiones/MFA,
+MetaScopeBlocks/auditoría y writer/reader v15 antes de activar. 3 tests de contrato,
+55 de auditoría y 12 comprobaciones MySQL ficticio correctos. Sin UI/despliegue
+o claves instaladas. Contrato completo y rollback:
+`back-dev/docs/security/whatsapp-authorization-state.md`.
+
 ## 13/09/2026 — Inspección de credenciales antes de uso en WhatsApp
 
 El broker contrasta la respuesta de Meta con App ID, sujeto, scopes exactos,

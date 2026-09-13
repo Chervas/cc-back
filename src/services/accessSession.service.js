@@ -89,7 +89,7 @@ function createService({ models, audit, config = settings, now = () => new Date(
   }
   // OAuth callbacks carry a one-use state, not a JWT. Its durable request must
   // retain the managed session reference and the original authorization expiry.
-  async function verifyReference({ userId, sessionRef, expiresAt }, { transaction } = {}) {
+  async function verifyReference({ userId, sessionRef, expiresAt }, { transaction, requireEmail = false } = {}) {
     const cfg = config();
     if (cfg.mode !== 'enforce' || !Number.isSafeInteger(userId) || userId <= 0
       || typeof sessionRef !== 'string' || !UUID.test(sessionRef)
@@ -104,7 +104,7 @@ function createService({ models, audit, config = settings, now = () => new Date(
     const row = rows[0];
     checkRow({ userId, exp: expiresAt.getTime() / 1000, iat: row?.issued_at?.getTime() / 1000,
       ...(row?.authentication_method === 'password_email' ? { amr: ['pwd', 'email'], emailVerifiedAt: row.email_verified_at?.getTime() / 1000 } : {}) },
-      row && { ...row, id_usuario: row.user_id }, row, cfg);
+      row && { ...row, id_usuario: row.user_id }, row, requireEmail ? { ...cfg, emailMfaMode: 'enforce' } : cfg);
     return { userId, sessionRef };
   }
   // Call within a transaction that already locks the freshly authenticated user. All issuers share this method.

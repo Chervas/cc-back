@@ -28,6 +28,14 @@ incidente. Las pruebas locales no autorizan llamadas reales ni una apertura.
 
 ## Motor WhatsApp: siguiente integración
 
+Nuevo avance: estado de autorización durable ligado a sesión con correo MFA y
+conjunto exacto de clínicas, con reclamación única, cancelación y auditoría v15.
+Probado en MySQL ficticio; todavía sin rutas ni canje. Nueva DDL 20260913150000
+pendiente de corte aprobado. La siguiente pieza sigue siendo el canje en broker
+y su registro seguro, junto con sustituir el requisito de MetaConnection general.
+La independencia WhatsApp/Ads/leads debe verificarse en los grants de Meta.
+[Contrato del estado](whatsapp-authorization-state.md).
+
 Avance posterior al primer motor: inspección de credenciales antes de uso,
 comparando respuesta Meta con identidad, scopes y WABA fijados. 263 tests broker,
 80 WhatsApp, todos ficticios. Granularidad/campos y cuota diagnóstica real por

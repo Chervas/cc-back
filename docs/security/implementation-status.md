@@ -1,5 +1,14 @@
 # Seguridad: implementación y evidencias
 
+## 13/09/2026 — Estado de alta WhatsApp con MFA y consumo único
+
+Componente interno de autorización durable, ámbito fijado, reclamación única,
+cancelación y auditoría v15. 82 pruebas Node y 36 grupos de comprobaciones en
+tres MySQL propios correctos, cierre 0. DDL 20260913150000 pendiente de aprobación
+y aplicación compartida, igual que su instalación/configuración. Sin rutas,
+canje, UI, apertura Meta o consumidores activados. Separación de grants WhatsApp
+frente a Ads/leads sigue por acreditar. [Contrato](whatsapp-authorization-state.md).
+
 ## 13/09/2026 — Fundamento de altas Ads y prioridad Meta/doble factor
 
 Preparados ámbito/solicitudes independientes, autorización del conjunto original
