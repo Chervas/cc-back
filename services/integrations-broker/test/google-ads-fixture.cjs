@@ -13,6 +13,22 @@ function row(index = 1, metrics = false, group = false) {
     ...(metrics ? { segments: { date: '2026-09-01', device: 'MOBILE', adNetworkType: 'SEARCH' }, metrics: { impressions: '2', clicks: '1', costMicros: '42', conversions: 0.5 } } : {}),
     ...(group ? { adGroup: { id: String(index + 100), name: 'FICTITIOUS_GROUP' } } : {}) };
 }
+function syncRow(family, index = 1) {
+  const value = row(index, family === 'ad_metrics', ['ads', 'ad_metrics'].includes(family));
+  if (family === 'publishing_campaigns') Object.assign(value.campaign, { advertisingChannelType: 'PERFORMANCE_MAX',
+    finalUrlSuffix: 'utm_source=google', assetAutomationSettings: [{ assetAutomationType: 'FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION', assetAutomationStatus: 'OPTED_OUT' }] });
+  if (family === 'landing_pages') {
+    value.landingPageView = { unexpandedFinalUrl: 'https://fictitious.example/landing' }; value.metrics = { clicks: '3' };
+  }
+  if (['ads', 'ad_metrics'].includes(family)) {
+    value.adGroup.status = 'ENABLED';
+    value.adGroupAd = { status: 'ENABLED', primaryStatus: 'ELIGIBLE', primaryStatusReasons: [],
+      policySummary: { approvalStatus: 'APPROVED', reviewStatus: 'REVIEWED' }, ad: { id: String(index + 1000),
+        name: 'FICTITIOUS_AD', type: 'RESPONSIVE_SEARCH_AD', finalUrls: ['https://fictitious.example/landing'],
+        responsiveSearchAd: { headlines: [{ text: 'Fictitious headline' }], descriptions: [{ text: 'Fictitious description' }] } } };
+  }
+  return value;
+}
 function adsFixture(t, options = {}) {
   const f = fixture(t); let at = Date.now();
   const arn = suffix => `arn:aws:secretsmanager:eu-west-3:${runtime.ACCOUNT}:secret:/clinicaclick/integrations/prod/fictitious-ads-${suffix}-abcdef`;
@@ -66,4 +82,4 @@ function adsFixture(t, options = {}) {
   return { ...f, binding, state, sdk, http, secrets, engine, broker, execute, revoke, command, make, control,
     advance: ms => { at += ms; } };
 }
-module.exports = { adsFixture, row, CUSTOMER, MANAGER, ASSET, ACCESS, DEVELOPER };
+module.exports = { adsFixture, row, syncRow, CUSTOMER, MANAGER, ASSET, ACCESS, DEVELOPER };

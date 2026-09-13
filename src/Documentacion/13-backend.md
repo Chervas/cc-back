@@ -1,5 +1,26 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Lecturas de sincronización Ads y colectores tipados
+
+El broker amplía el contrato interno con `google.ads.publishing_campaigns.read.v1`
+(pageToken), `google.ads.landing_pages.read.v1` (startDate, endDate, pageToken),
+`google.ads.ads.read.v1` (campaignId null/string, pageToken) y
+`google.ads.ad_metrics.read.v1` (campaignId null/string, startDate, endDate,
+pageToken). Todos los campos indicados son obligatorios; se rechazan extras.
+La política conserva cuenta/gestor y los grants por operación. Las URL observadas
+se devuelven como datos y no se visitan. No hay operaciones publicitarias de escritura.
+
+`createGoogleAdsBrokerReader` exige un autorizador de contexto opaco, revalida antes
+y después de cada llamada y entrega la consulta completa o un error fijo. Comprueba
+requestId, cuenta, dimensiones, recursos estables, duplicados entre páginas, cursores,
+tiempo y tamaños. Los colectores de métricas y anuncios aceptan `readTyped`; sus
+fallos no pasan al lector legacy. Esta dependencia todavía no está instalada en
+sync/backfill: registro SQL, autorización de usos compartidos, cierre durable y
+baja Ads siguen pendientes. Cero cuentas migradas; ninguna ruta pública nueva.
+
+Contrato y límites: `docs/security/google-ads-read-broker.md`. QA exclusivamente
+ficticia; el push no despliega ni habilita una cohorte.
+
 ## 13/09/2026 — Motor de lecturas Google Ads preparado en el broker
 
 Contrato interno preparado para `google-ads-read-v1`: operaciones

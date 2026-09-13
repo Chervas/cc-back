@@ -37,6 +37,28 @@ test('inventory query has no segments or metrics, includes paused/removed ads, a
   for (const [start, end] of [['2026-02-30', '2026-03-01'], ['2026-01-01', '2025-12-31'], ['2020-01-01', '2026-01-01']]) assert.throws(() => daysBetween(start, end));
 });
 
+test('typed ad reads preserve creative/metric persistence and split long chunks into broker windows without legacy requests', async () => {
+  const f = fixture(); const calls = [];
+  const result = await syncGoogleAdCache({ ...f.args, start: '2026-08-11', chunkDays: 31, now: () => observedAt,
+    request: () => { throw Error('legacy_must_not_run'); }, readTyped: async (family, input) => {
+      calls.push({ family, input }); return family === 'ads' || input.endDate === '2026-09-10' ? [providerRow()] : [];
+    } });
+  assert.equal(result.inventoryRows, 1); assert.equal(result.metricRows, 1); assert.equal(result.days, 31);
+  assert.deepEqual(calls, [{ family: 'ads', input: { campaignId: null } },
+    { family: 'ad_metrics', input: { campaignId: null, startDate: '2026-08-11', endDate: '2026-08-25' } },
+    { family: 'ad_metrics', input: { campaignId: null, startDate: '2026-08-26', endDate: '2026-09-09' } },
+    { family: 'ad_metrics', input: { campaignId: null, startDate: '2026-09-10', endDate: '2026-09-10' } }]);
+  assert.equal(f.calls.find(item => Array.isArray(item) && item[0] === 'inventory')[1][0].headlines[0], 'Primera visita');
+});
+
+test('a typed reader failure cannot replace the existing ad cache or call the legacy client', async () => {
+  const f = fixture();
+  await assert.rejects(syncGoogleAdCache({ ...f.args, request: () => { throw Error('legacy_must_not_run'); },
+    readTyped: async family => { if (family === 'ads') return [providerRow()]; throw Object.assign(Error('blocked'), { code: 'asset_revoked' }); } }), { code: 'asset_revoked' });
+  assert.deepEqual(f.calls, []);
+  await assert.rejects(syncGoogleAdCache({ ...f.args, readTyped: null }), /invalid_reader/);
+});
+
 test('normalization preserves exact group/ad identity and real creative content', () => {
   const value = normalizeAd(providerRow(), account);
   assert.equal(value.customerId, '1234567890'); assert.equal(value.adGroupId, '800'); assert.equal(value.adId, '700');

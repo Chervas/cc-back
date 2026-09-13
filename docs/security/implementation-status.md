@@ -1,5 +1,20 @@
 # Seguridad: implementación y evidencias
 
+## 13/09/2026 — Lecturas de sincronización Ads y colectores tipados
+
+El broker incorpora cuatro lecturas más: estados de publicación, destinos,
+inventario de anuncios y métricas diarias. Los colectores aceptan llamadas tipadas;
+el lector descarta respuestas incompletas, cambios de recursos y revocaciones
+concurrentes. QA: 193 tests (145 broker y 48 backend), HTTPS local, ambos
+colectores y 100.001 anuncios ficticios paginados sin pérdida de filas. Sin DDL, UI, AWS/proveedor real, configuración instalada o despliegue.
+
+Registro persistente, autorización clínica/grupo/compartidos y baja Ads todavía
+pendientes; sync/backfill aún no inyecta el lector. Cero cuentas migradas.
+OPS aplazado; continúan los pendientes de otras cohortes, auditoría completa,
+IAM/retención/costes/Budget y cifrado/corte BD.
+
+[Contrato y dependencias](google-ads-read-broker.md).
+
 ## 13/09/2026 — Motor de lecturas Google Ads preparado en el broker
 
 Cuatro lecturas Ads tipadas fijan cuenta/gestor, GAQL y campos; OAuth y developer

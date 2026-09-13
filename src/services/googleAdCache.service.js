@@ -182,7 +182,8 @@ async function persistAdSnapshot({ models, account, inventoryRows, metricRows, s
 }
 
 async function syncGoogleAdCache({ models, account, accessToken, loginCustomerId, start, end, campaignId = null,
-  chunkDays = 7, ensureHistory = false, now = () => new Date(), beforeReplace, request = require('../lib/googleAdsClient').googleAdsRequest }) {
+  chunkDays = 7, ensureHistory = false, now = () => new Date(), beforeReplace, readTyped, request }) {
+  if (readTyped !== undefined && typeof readTyped !== 'function') fail('google_ad_cache_invalid_reader');
   let days = daysBetween(start, end);
   if (ensureHistory && !campaignId) {
     const historyStart = new Date(+new Date(dateOnly(end)) - 59 * 86400000).toISOString().slice(0, 10);
@@ -196,11 +197,20 @@ async function syncGoogleAdCache({ models, account, accessToken, loginCustomerId
   }
   const observedAt = now();
   if (!Number.isInteger(chunkDays) || chunkDays < 1 || chunkDays > 31) fail('google_ad_cache_invalid_chunk');
-  const read = query => readAdPages({ account, accessToken, loginCustomerId, request, query });
-  const inventoryRows = await read(buildAdQuery({ campaignId, inventory: true }));
+  if (campaignId !== null) campaignId = identifier(campaignId);
+  const read = query => readAdPages({ account, accessToken, loginCustomerId,
+    request: request || require('../lib/googleAdsClient').googleAdsRequest, query });
+  const inventoryRows = readTyped ? await readTyped('ads', { campaignId }) : await read(buildAdQuery({ campaignId, inventory: true }));
+  if (!Array.isArray(inventoryRows) || inventoryRows.length > 200000) fail('google_ad_cache_incomplete_pages');
   const metricRows = [];
-  for (let offset = 0; offset < days.length; offset += chunkDays) {
-    metricRows.push(...await read(buildAdQuery({ campaignId, start: days[offset], end: days[Math.min(offset + chunkDays - 1, days.length - 1)] })));
+  const size = readTyped ? Math.min(chunkDays, 15) : chunkDays;
+  for (let offset = 0; offset < days.length; offset += size) {
+    const window = { start: days[offset], end: days[Math.min(offset + size - 1, days.length - 1)] };
+    const batch = readTyped ? await readTyped('ad_metrics', { campaignId, startDate: window.start, endDate: window.end })
+      : await read(buildAdQuery({ campaignId, ...window }));
+    if (!Array.isArray(batch) || batch.length > 200000 - metricRows.length) fail('google_ad_cache_incomplete_pages');
+    // Avoid argument-stack limits for legitimate large snapshots.
+    for (const row of batch) metricRows.push(row);
     if (metricRows.length > 200000) fail('google_ad_cache_incomplete_pages');
   }
   return persistAdSnapshot({ models, account, inventoryRows, metricRows, start, end, campaignId, observedAt, beforeReplace });

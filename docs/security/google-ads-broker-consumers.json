@@ -1,39 +1,48 @@
 {
-  "version": 1,
+  "version": 2,
   "reviewedAt": "2026-09-13",
-  "sourceHead": "503b6080f7efd0408b7e9679c29d84c116280408",
+  "sourceHead": "04ebc703e21cde0690b7ef303883f4ae43402e96",
   "includesWorkingChanges": true,
   "runtimeMigrated": 0,
   "newMigrations": [],
   "ops": "deferred_by_user",
   "qa": {
-    "brokerTests": 138,
-    "newAdsTests": 15,
-    "database": "no_new_ddl",
-    "ui": "no_ui_changes"
+    "brokerTests": 145,
+    "adsBrokerTests": 22,
+    "backendTests": 48,
+    "totalTests": 193,
+    "database": "no_new_ddl_or_mysql_run",
+    "ui": "no_ui_changes",
+    "authorization": "fake_context_only_real_registry_pending",
+    "evidence": "ads-consumers-regression.json"
   },
   "operations": [
     "google.ads.account.read.v1",
     "google.ads.campaigns.read.v1",
     "google.ads.campaign_metrics.read.v1",
     "google.ads.adgroup_metrics.read.v1",
+    "google.ads.publishing_campaigns.read.v1",
+    "google.ads.landing_pages.read.v1",
+    "google.ads.ads.read.v1",
+    "google.ads.ad_metrics.read.v1",
     "google.ads.asset.revoke.v1"
   ],
   "pending": [
-    "SQL account registry and durable Ads legacy exclusion",
-    "Typed consumer wiring and complete Ads account/group/shared/primary authorization",
-    "All remaining Ads operations and consumers, OAuth lifecycle and approved real migration",
+    "SQL account registry, metadata identity and durable Ads legacy exclusion",
+    "Complete account/clinic/group/shared authorization and durable API disconnection",
+    "Inject typed reader into sync/backfill and connect publishing/destination persistence without partial completion",
+    "Remaining Ads operations and consumers, OAuth lifecycle and approved real migration",
     "Full platform audit, AWS costs/retention/IAM/Budget and database encryption/cut"
   ],
   "rows": [
     {
       "file": "services/integrations-broker/src/google-ads-contract.js",
-      "sha256": "dc0a02e3f2326548c2feaf2ea7809377e861c82136819160f8d2d86e8a90dfe2",
+      "sha256": "f37541f42aabe9936591df692a6cc6dc87982e63a38cf20748d24cb00e45ea0a",
       "status": "prepared_broker_engine_offline"
     },
     {
       "file": "services/integrations-broker/src/google-ads.js",
-      "sha256": "ad92b8b1360ec76288ebc0fb2dd646c5f11be90701a1b909afdd40fa6f0c5e4e",
+      "sha256": "166732b89deee59ea8da6b0cd8154063d7a3567ab6ca9f10d70a625a739a47d1",
       "status": "prepared_broker_engine_offline"
     },
     {
@@ -65,6 +74,21 @@
       "file": "services/integrations-broker/src/broker.js",
       "sha256": "751634de86bd41657e17e2bd634d4a632c77a9354d9d794507c0d9d204685bb3",
       "status": "prepared_broker_engine_offline"
+    },
+    {
+      "file": "src/services/googleAdsBrokerReader.service.js",
+      "sha256": "a555af2fb3f473e064e08433bdfd8b1d656ee1c14a33e68e946b3debc5ddfdbe",
+      "status": "prepared_typed_reader_not_injected_in_jobs"
+    },
+    {
+      "file": "src/services/googleCampaignMetricsCache.service.js",
+      "sha256": "42eab3996e70fe231af36f264dc8776d13316f9ed8cc0042d5aeeefe8df26fe5",
+      "status": "prepared_typed_reader_not_injected_in_jobs"
+    },
+    {
+      "file": "src/services/googleAdCache.service.js",
+      "sha256": "556cf78e3a939838faca2c6e53ba452c744be8c3e9823d65e38e23b0779f22b2",
+      "status": "prepared_typed_reader_not_injected_in_jobs"
     }
   ]
 }

@@ -59,6 +59,22 @@ test('complete collection reconciles Search groups, retains PMax totals and expl
   assert.match(snapshot.fingerprint, /^[a-f0-9]{64}$/);
 });
 
+test('typed broker collection preserves the complete reconciled snapshot without credentials or a GAQL fallback', async () => {
+  const f = source(); const expected = await collectGoogleCampaignMetrics(f.args); const calls = [];
+  const byFamily = { account: f.data.metadata, campaigns: f.data.inventory, campaign_metrics: f.data.campaigns, adgroup_metrics: f.data.groups };
+  const actual = await collectGoogleCampaignMetrics({ ...f.args, accessToken: undefined, loginCustomerId: undefined,
+    read: () => { throw Error('legacy_must_not_run'); }, readTyped: async (family, input, budget) => {
+      calls.push({ family, input }); assert.ok(budget.timeoutMs > 0); return structuredClone(byFamily[family]);
+    } });
+  assert.deepEqual(actual, expected);
+  assert.deepEqual(calls, [{ family: 'account', input: {} }, { family: 'campaigns', input: {} },
+    { family: 'campaign_metrics', input: { startDate: '2026-09-09', endDate: '2026-09-10' } },
+    { family: 'adgroup_metrics', input: { startDate: '2026-09-09', endDate: '2026-09-10' } }]);
+  await assert.rejects(collectGoogleCampaignMetrics({ ...f.args, readTyped: async () => { throw Object.assign(Error('blocked'), { code: 'asset_revoked' }); },
+    read: () => { throw Error('legacy_must_not_run'); } }), { code: 'asset_revoked' });
+  await assert.rejects(collectGoogleCampaignMetrics({ ...f.args, readTyped: null }), /invalid_reader/);
+});
+
 test('all conversions and their values survive the scheduled metrics path without being confused with primary conversions', async () => {
   const f = source();
   for (const row of [f.data.campaigns[0], f.data.groups[0]]) {

@@ -6,7 +6,7 @@ const runtime = require('../src/google-main');
 const payload = () => ({ startDate: '2026-09-01', endDate: '2026-09-02', pageToken: null });
 test('Ads exposes four fixed read operations and pins customer/manager without projecting secrets or unknown fields', async t => {
   const f = adsFixture(t);
-  for (const family of contract.FAMILIES) {
+  for (const family of ['account', 'campaigns', 'campaign_metrics', 'adgroup_metrics']) {
     f.state.response = { ignored: ACCESS, results: family === 'account'
       ? [{ customer: { id: CUSTOMER, currencyCode: 'EUR', timeZone: 'Europe/Madrid', ignored: DEVELOPER } }]
       : [{ ...row(1, family.endsWith('_metrics'), family === 'adgroup_metrics'), ignored: ACCESS }] };

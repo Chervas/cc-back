@@ -98,28 +98,30 @@ function reconcile(campaignRows, groupRows) {
 }
 
 async function collectGoogleCampaignMetrics({ account, accessToken, loginCustomerId, start, end,
-  now = () => new Date(), clock = Date.now, read = require('../lib/googleAdsSearchRows').googleAdsSearchRows }) {
+  now = () => new Date(), clock = Date.now, readTyped, read }) {
+  if (readTyped !== undefined && typeof readTyped !== 'function') fail('invalid_reader');
   const identity = owner(account); const days = daysBetween(start, end);
   if (days.length > 62) fail('invalid_window');
   const observedAt = new Date(Math.floor(+now() / 1000) * 1000).toISOString();
   const deadline = clock() + TIMEOUT_MS;
-  const search = async (query, limit) => {
+  const search = async (family, payload, query, limit) => {
     const remaining = deadline - clock();
     if (remaining <= 0) fail('timeout');
-    const rows = await read({ customerId: identity.customerId, accessToken, loginCustomerId, apiVersion: API_VERSION,
-      query: `${query} LIMIT ${limit + 1}`, maxPages: 12, timeoutMs: remaining });
+    const rows = readTyped ? await readTyped(family, payload, { timeoutMs: remaining })
+      : await (read || require('../lib/googleAdsSearchRows').googleAdsSearchRows)({ customerId: identity.customerId, accessToken, loginCustomerId, apiVersion: API_VERSION,
+        query: `${query} LIMIT ${limit + 1}`, maxPages: 12, timeoutMs: remaining });
     if (clock() >= deadline) fail('timeout');
     if (!Array.isArray(rows) || rows.length > limit) fail('incomplete');
     return rows;
   };
-  const metadata = await search('SELECT customer.id, customer.manager, customer.currency_code, customer.time_zone FROM customer', 1);
+  const metadata = await search('account', {}, 'SELECT customer.id, customer.manager, customer.currency_code, customer.time_zone FROM customer', 1);
   const customer = metadata[0]?.customer;
   if (metadata.length !== 1 || customer?.id !== identity.customerId || customer.manager !== false
     || !/^[A-Z]{3}$/.test(customer.currencyCode || '') || !customer.timeZone) fail('invalid_account');
   let today;
   try { today = formatDateLocal(now(), customer.timeZone); } catch { fail('invalid_timezone'); }
   if (days.at(-1) >= today) fail('open_day');
-  const inventoryRows = await search(`SELECT ${RESOURCE_FIELDS.join(', ')} FROM campaign
+  const inventoryRows = await search('campaigns', {}, `SELECT ${RESOURCE_FIELDS.join(', ')} FROM campaign
     WHERE campaign.status IN ('ENABLED', 'PAUSED', 'REMOVED')`, 5000);
   const inventory = new Map();
   for (const row of inventoryRows) {
@@ -130,10 +132,11 @@ async function collectGoogleCampaignMetrics({ account, accessToken, loginCustome
   const rows = [];
   for (let offset = 0; offset < days.length; offset += 15) {
     const dates = days.slice(offset, offset + 15);
+    const payload = { startDate: dates[0], endDate: dates.at(-1) };
     const fields = [...RESOURCE_FIELDS, 'segments.date', 'segments.ad_network_type', 'segments.device', ...METRICS.map(key => `metrics.${key}`)];
     const where = `WHERE segments.date BETWEEN '${dates[0]}' AND '${dates.at(-1)}' AND campaign.status IN ('ENABLED', 'PAUSED', 'REMOVED')`;
-    const campaignRows = normalizeMetrics(await search(`SELECT ${fields.join(', ')} FROM campaign ${where}`, MAX_ROWS), inventory, identity.customerId, dates, false);
-    const groupRows = normalizeMetrics(await search(`SELECT ${[...fields, 'ad_group.id', 'ad_group.name'].join(', ')} FROM ad_group ${where}
+    const campaignRows = normalizeMetrics(await search('campaign_metrics', payload, `SELECT ${fields.join(', ')} FROM campaign ${where}`, MAX_ROWS), inventory, identity.customerId, dates, false);
+    const groupRows = normalizeMetrics(await search('adgroup_metrics', payload, `SELECT ${[...fields, 'ad_group.id', 'ad_group.name'].join(', ')} FROM ad_group ${where}
       AND ad_group.status IN ('ENABLED', 'PAUSED', 'REMOVED')`, MAX_ROWS), inventory, identity.customerId, dates, true);
     rows.push(...reconcile(campaignRows, groupRows));
     if (rows.length > MAX_ROWS) fail('incomplete');

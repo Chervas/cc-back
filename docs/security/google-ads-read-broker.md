@@ -6,6 +6,11 @@ ficticia; **ninguna cuenta Ads está migrada ni activada en runtime**. El cierre
 legacy de la fase anterior se conserva. Esta entrega no autoriza OAuth, Ads,
 conversiones, mensajes, traslado de secretos ni despliegue real.
 
+Ampliado sobre backend `04ebc703e21cde0690b7ef303883f4ae43402e96` y frontend
+`1f587169db254a52af35d10d905e6025e52fca2f`: ocho lecturas, lector completo backend
+y entrada tipada de los colectores. La autorización SQL y la inyección en los
+jobs siguen pendientes; la QA de contexto opaco usa un autorizador ficticio.
+
 ## Contrato cerrado
 
 El runtime Google reconoce la cohorte `google-ads-read-v1`, proveedor `google_ads`.
@@ -21,10 +26,19 @@ cuenta y operación; no tenant de grupo ni operación genérica de búsqueda.
 | `google.ads.campaigns.read.v1` | `{pageToken: null/string}` | Campañas y estados, máximo 5.000 |
 | `google.ads.campaign_metrics.read.v1` | `{startDate, endDate, pageToken}` | Métricas por campaña, fecha, red y dispositivo |
 | `google.ads.adgroup_metrics.read.v1` | `{startDate, endDate, pageToken}` | Las mismas dimensiones más grupo de anuncios |
+| `google.ads.publishing_campaigns.read.v1` | `{pageToken}` | Campañas ENABLED/PAUSED, canal, estados, sufijo y ajustes de automatización; máximo 5.000 |
+| `google.ads.landing_pages.read.v1` | `{startDate, endDate, pageToken}` | Campaña, URL final observada y clics; máximo 100.000 |
+| `google.ads.ads.read.v1` | `{campaignId, pageToken}` | Identidad/estado de campaña, grupo y anuncio; URLs, titulares, descripciones RSA y estado de revisión; máximo 200.000 |
+| `google.ads.ad_metrics.read.v1` | `{campaignId, startDate, endDate, pageToken}` | Identidades y métricas diarias de anuncio por fecha/red/dispositivo; máximo 200.000 |
 | `google.ads.asset.revoke.v1` | `{}` | `{revoked: true}` con UUID/replay durable |
 
 Fechas canónicas, ventana máxima inclusiva de 15 días y 100.000 filas por
-consulta de métricas. El broker construye cuatro plantillas GAQL estáticas.
+consulta de métricas de campaña/grupo. Destinos admite hasta 30 días inclusivos;
+anuncios mantiene 15 días y 200.000 filas. Los límites de bytes pueden rechazar
+una consulta antes de alcanzar su máximo de filas. `campaignId` es null o una
+cadena de 1–20 dígitos, positiva sin ceros iniciales; no amplía el grant de cuenta.
+`pageToken` siempre es null o string y todos los campos de cada payload son
+obligatorios. El broker construye ocho plantillas GAQL cerradas.
 El consumidor no envía query, URL, método, cabeceras, cuenta, gestor, campos,
 versión de API ni tokens. No se exponen operaciones de escritura o conversión.
 La revocación requiere principal y clave diferentes de todos los lectores;
@@ -34,7 +48,17 @@ La proyección comprueba cuenta, IDs, fechas, métricas finitas/precisión segur
 filas duplicadas en cada página, longitud y estructura. Conserva ceros protobuf
 omitidos y excluye campos desconocidos. No entrega respuestas del proveedor
 directamente. El consumidor completo deberá detectar también duplicados o cambios
-entre páginas y conciliar las métricas antes de persistir el snapshot.
+entre páginas y conciliar las métricas antes de persistir el snapshot; el lector
+y los colectores tipados descritos abajo ya preparan esas comprobaciones.
+
+Las nuevas selecciones siguen los recursos oficiales de
+[destinos](https://developers.google.com/google-ads/api/fields/v24/landing_page_view),
+[anuncios y revisión](https://developers.google.com/google-ads/api/fields/v24/ad_group_ad)
+y [automatización de campaña](https://developers.google.com/google-ads/api/reference/rpc/v24/Campaign.AssetAutomationSetting).
+Las URL se tratan únicamente como datos de observación: HTTP/HTTPS, sin usuario
+o contraseña, máximo 4.096 bytes; no se visitan. Listas acotadas a 20 URLs, 15
+titulares y cuatro descripciones RSA, 50 motivos/ajustes y textos de hasta 1.024
+bytes. La proyección de métricas de anuncios excluye las creatividades.
 
 ## Transporte, secretos y paginación
 
@@ -76,6 +100,40 @@ repetidos, exceso de filas y tamaños. El adaptador backend deberá abandonar un
 snapshot incompleto y comenzar otro intento acotado. Falta medir memoria,
 latencia y comportamiento con cuentas reales grandes en un canary aprobado.
 
+## Lector y colectores del backend
+
+`src/services/googleAdsBrokerReader.service.js` exige un cliente y un
+`assertContext` que resuelva una autorización opaca creada por el servidor. Una
+estructura recibida del usuario con tenant/cuenta no es una autorización. El
+autorizador SQL real sigue pendiente; el servicio aún no se exporta por una ruta
+pública ni se instala en el scheduler.
+
+El lector no acepta cursores externos. Comprueba el contexto antes/después de
+cada petición y antes de devolver el resultado completo, requestId, forma de
+respuesta, cuenta, duplicados entre páginas y estabilidad de metadatos de campaña,
+grupo y anuncio. Ventana temporal total por consulta de 90 segundos por defecto
+(máximo 450 segundos), hasta 2.000 peticiones, 64 MiB de JSON de filas proyectadas,
+límites de filas anteriores y máximo 30 segundos por llamada. Este presupuesto
+de bytes tampoco representa RSS: las claves de deduplicación, huellas de recursos,
+arrays y copias JavaScript tienen sobrecoste. Errores/cursor inválido/revocación
+descartan lo acumulado; no se entrega un resultado parcial ni se reinicia la
+paginación a mitad de consulta.
+
+`googleCampaignMetricsCache.collectGoogleCampaignMetrics` admite
+`readTyped(family, payload, budget)` para las cuatro lecturas originales. Mantiene
+su conciliación Search/PMax, cobertura de ceros, fingerprint y plazo de 90 segundos.
+`googleAdCache.syncGoogleAdCache` admite esa entrada para inventario y métricas;
+divide los chunks configurados en ventanas de hasta 15 días, conserva creatividades,
+estados, atribución y cobertura. Un fallo del lector tipado no invoca legacy. Los
+imports de lectores legacy son diferidos y no se ejecutan en la rama tipada.
+No se cambia el contrato de persistencia ni se aplica DDL.
+
+La QA por HTTPS local conecta el cliente firmado real, lector, broker y ambos
+colectores, con proveedor/Secrets Manager/autorización y repositorios de escritura
+ficticios. No carga el índice de modelos clínicos. Todavía falta inyectar este
+recorrido en sync/backfill y conectar publicación/destinos con sus escritores;
+solo el éxito de todas esas fases podrá actualizar lastSyncedAt.
+
 ## Bloqueo y auditoría
 
 La revocación persiste en SQLite y reintenta el mismo UUID. Antes de secretos y
@@ -93,12 +151,15 @@ auditoría completa de la plataforma siguen pendientes.
 
 ## Pruebas y costes
 
-138 tests del broker correctos, incluidos 15 nuevos de Ads, con Node 24 y red
+145 tests del broker correctos (22 de Ads), con Node 24 y red
 bloqueada salvo los servidores HTTPS locales propiedad de las pruebas. Cubren
-cuatro lecturas, payloads hostiles, ámbito, 10.001 filas completas con dos
+ocho lecturas, payloads hostiles, ámbito, 10.001 filas completas con dos
 consultas ficticias, caché/evicción/caducidad, rotación de token, páginas repetidas,
 sentinels, límites de tamaño, transporte, KMS/ARN y runtime HTTPS real con
-desconexión persistente tras reiniciar. Las otras cohortes siguen pasando.
+desconexión persistente tras reiniciar. La ampliación prueba 100.001 anuncios en
+11 páginas Google ficticias, porciones autenticadas y secuencia completa de IDs.
+Las otras cohortes siguen pasando. Además, 48 tests Node backend comprueban lector,
+paridad de snapshots y regresión de los dos colectores; total 193 correctos.
 Sin nueva DDL, MySQL, UI/build, procesos de aplicación, AWS ni proveedor real.
 
 Evidencia privada `ads-broker-*` bajo
@@ -106,6 +167,10 @@ Evidencia privada `ads-broker-*` bajo
 `ads-broker-final-regression.log` y su JSON acreditan la ejecución final.
 El primer fallo era el nombre de tabla usado por el test de ausencia de datos;
 se conservó ese log y se comprobó después `audit_outbox` real.
+La ejecución final ampliada es `ads-consumers-regression.log/json`. El espejo de
+API tiene prueba final `ads-consumers-api-final-proof.json`; el primer verificador
+eliminaba también un salto de línea y dio un falso negativo, conservado en su
+artefacto inicial. Los cuerpos API previos son idénticos byte a byte.
 
 Por petición del consumidor hay nominalmente seis llamadas Secrets Manager
 (Describe/Get para conexión, cliente y developer token), aun si la página se
@@ -118,10 +183,13 @@ conservan sus pendientes. No se añade infraestructura ni presupuesto.
 
 ## Siguiente integración y puerta de activación
 
-Falta adaptar el backend: registro independiente de cuentas/mappings, metadata
-de identidad y tokens SQL NULL, autorización clínica/grupo/compartidos/primarios,
-marcador durable de cierre legacy Ads, consumidor tipado del colector de métricas,
-lecturas de inventario/destinos/anuncios restantes, OAuth Ads y desconexión API.
+Falta conectar el backend: registro independiente de cuentas/mappings, metadata
+de identidad y tokens SQL NULL, autorización clínica/grupo y todos los usos
+compartidos, marcador durable de cierre legacy Ads, inyección del lector en
+sync/backfill y persistencia de publicación/destinos, OAuth Ads y desconexión API.
+Ads usa assignmentScope/grupoClinicaId y asignaciones explícitas; GrupoClinica no
+tiene una columna de cuenta Ads primaria. Los primarios SC/GA/GBP se comprueban
+en sus recorridos correspondientes.
 También faltan recepción, conversiones, optimización y resto del inventario Ads.
 No convertir el cliente HTTP genérico en un proxy al broker.
 

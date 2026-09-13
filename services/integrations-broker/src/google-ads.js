@@ -36,14 +36,14 @@ function createGoogleAdsOperations({ http, cursor, withDeveloperSecret, now = Da
           if (entry && !entry.nextPageToken) fail('invalid_request');
           const next = entry?.nextPageToken || null;
           const previous = entry?.seenTokens || [];
-          if (next && previous.includes(next) || previous.length >= 12) fail('provider_failed');
+          if (next && previous.includes(next) || previous.length >= Math.ceil(contract.rowLimit(name) / contract.PROVIDER_PAGE_SIZE) + 1) fail('provider_failed');
           const raw = await http({ hostname: 'googleads.googleapis.com', path: `/${contract.API_VERSION}/customers/${account.customerId}/googleAds:search`,
             token: secret, developerToken, loginCustomerId: account.loginCustomerId, signal,
             json: { query, ...(next ? { pageToken: next } : {}) } });
           if (signal?.aborted) fail('connection_blocked');
           const page = contract.projectPage(name, raw, payload, account);
           const count = (entry?.count || 0) + page.results.length;
-          const maximum = name === 'account' ? 1 : name === 'campaigns' ? 5000 : contract.MAX_ROWS;
+          const maximum = contract.rowLimit(name);
           if (count > maximum || count === maximum && page.nextPageToken
             || page.nextPageToken && [...previous, next].includes(page.nextPageToken)) fail('provider_failed');
           const size = Buffer.byteLength(JSON.stringify(page.results));
