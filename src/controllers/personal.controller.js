@@ -5100,7 +5100,7 @@ exports.reclamarCuenta = async (req, res) => {
         const jwt = require('jsonwebtoken');
         const secret = process.env.JWT_SECRET;
         const token = jwt.sign(
-            { userId: user.id_usuario, email: user.email_usuario },
+            { userId: user.id_usuario, email: user.email_usuario, ...require('../lib/adminCredentialSession').claims(user, secret) },
             secret,
             { expiresIn: '24h' },
         );

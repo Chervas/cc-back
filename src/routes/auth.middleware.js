@@ -1,11 +1,11 @@
-const jwt = require('jsonwebtoken');
+const adminCredentials = require('../lib/adminCredentialSession');
 const secret = process.env.JWT_SECRET; // ✅ Usar variable de entorno
 const { isBlockedAuthEmail } = require('../lib/blocked-auth-emails');
 
-module.exports = (req, res, next) => {
+module.exports = async (req, res, next) => {
     try {
-        const token = req.headers.authorization.split(' ')[1]; // Bearer TOKEN
-        const decodedToken = jwt.verify(token, secret); // ✅ Usar process.env.JWT_SECRET
+        const token = adminCredentials.bearer(req.headers.authorization);
+        const decodedToken = await adminCredentials.verifyToken(token, secret);
         if (isBlockedAuthEmail(decodedToken.email)) {
             return res.status(401).json({ message: "Auth failed!" });
         }

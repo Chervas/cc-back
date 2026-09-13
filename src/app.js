@@ -11,7 +11,6 @@ const express = require('express');
 const crypto = require('node:crypto');
 const http = require('http');
 const { Server } = require('socket.io');
-const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
 // Importar rutas existentes
 const userRoutes = require('./routes/user.routes');
@@ -446,20 +445,10 @@ if (RESUME_AUTOMATIONS_FROM_SOCKET_BUS) {
 } else {
     console.log('[automations-v2] Reanudacion por socket-bus deshabilitada; el gateway coordina inbound');
 }
-io.use((socket, next) => {
-    const token =
-        socket.handshake.auth?.token ||
-        socket.handshake.headers?.authorization?.split(' ')[1];
-    if (!token) {
-        return next(new Error('auth_required'));
-    }
-    try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        socket.userData = { userId: decoded.userId, email: decoded.email };
-        return next();
-    } catch (err) {
-        return next(new Error('auth_invalid'));
-    }
+const adminCredentials = require('./lib/adminCredentialSession');
+require('./lib/socket-session-guard').installSocketSessionGuard(io, {
+    verify: token => adminCredentials.verifyToken(token, process.env.JWT_SECRET),
+    bearer: adminCredentials.bearer,
 });
 
 io.on('connection', async (socket) => {
@@ -509,6 +498,7 @@ io.on('connection', async (socket) => {
         .map((decision) => decision.clinicId);
     const canUseAllClinics = quickChatContext.canUseAllClinics;
 
+    if (!socket.connected) return;
     socket.data.allowedClinicIds = allowedClinicIds;
     socket.data.canUseAllClinics = canUseAllClinics;
 

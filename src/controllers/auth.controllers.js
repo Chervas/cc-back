@@ -1,5 +1,6 @@
 require('dotenv').config();
 const jwt = require('jsonwebtoken');
+const adminCredentials = require('../lib/adminCredentialSession');
 const bcrypt = require('bcryptjs');
 const secret = process.env.JWT_SECRET; 
 const { Usuario } = require('../../models'); 
@@ -13,7 +14,7 @@ const ACCESS_TOKEN_TTL = `${ACCESS_TOKEN_TTL_SECONDS}s`;
 function buildAccessToken(user) {
     const userId = Number(user.id_usuario);
     return jwt.sign(
-        { userId, email: user.email_usuario, isAdmin: isGlobalAdmin(userId) },
+        { userId, email: user.email_usuario, isAdmin: isGlobalAdmin(userId), ...adminCredentials.claims(user, secret) },
         secret,
         { expiresIn: ACCESS_TOKEN_TTL }
     );
@@ -22,8 +23,9 @@ function buildAccessToken(user) {
 function buildAuthResponse(user) {
     const plainUser = user?.get ? user.get({ plain: true }) : { ...user };
     plainUser.isAdmin = isGlobalAdmin(plainUser.id_usuario);
+    delete plainUser.password_usuario;
     return {
-        token: buildAccessToken(plainUser),
+        token: buildAccessToken(user),
         expiresIn: ACCESS_TOKEN_TTL_SECONDS,
         user: plainUser,
     };
@@ -111,7 +113,7 @@ exports.signInWithToken = async (req, res) => {
         const accessToken = req.body.accessToken;
         if(!accessToken) return res.status(400).json({ error: 'Access token is required' });
 
-        const decodedToken = jwt.verify(accessToken, secret);
+        const decodedToken = await adminCredentials.verifyToken(accessToken, secret);
         if (isBlockedAuthEmail(decodedToken.email)) {
             return res.status(401).json({ error: 'Invalid token' });
         }
@@ -122,6 +124,7 @@ exports.signInWithToken = async (req, res) => {
             return res.status(401).json({ error: 'User not found.' });
         }
     
+        adminCredentials.assertMatches(decodedToken, user, secret);
         user.ultimo_login = new Date();
         await user.save({ fields: ['ultimo_login'] });
 
