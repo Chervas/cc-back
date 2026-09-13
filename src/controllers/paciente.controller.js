@@ -19,6 +19,7 @@ const {
 } = require('../../models');
 const { Op, literal, QueryTypes } = require('sequelize');
 const crypto = require('crypto');
+const patientReadAudit = require('../services/platformAudit.patientReads');
 const { normalizePhoneDigits } = require('../lib/phone');
 const { normalizeHumanName } = require('../lib/name');
 const {
@@ -177,6 +178,22 @@ async function allClinicsAccessibleToActor(req, featureKey) {
     throw error;
   }
   return getAccessibleClinicIdsForFeature({ actorId, featureKey });
+}
+
+function auditPatientResponse(req, { clinicIds = [], patients = [], resultCount = 0, includesSensitive = false, checks = [], requireAllMemberships = false }) {
+  patientReadAudit.track(req, () => ({ clinicIds, patientIds: patientReadAudit.patientIds(patients), resultCount, includesSensitive }), async () => {
+    for (const check of checks) {
+      if (check.clinicIds.length) await accessibleClinicIds(req, check.featureKey, check.clinicIds, { requireAll: true });
+    }
+    const ids = patientReadAudit.patientIds(patients, { excludeRedactedRelations: true }).map(Number);
+    if (!ids.length) return;
+    const current = await Paciente.findAll({ where: { id_paciente: { [Op.in]: ids } }, attributes: ['id_paciente', 'clinica_id'],
+      include: [{ model: PacienteClinica, as: 'clinicasVinculadas', required: false, attributes: ['clinica_id'] }] });
+    if (current.length !== ids.length || current.some(row => {
+      const linked = patientClinicIds(row);
+      return !linked.some(id => clinicIds.includes(id)) || requireAllMemberships && linked.some(id => !clinicIds.includes(id));
+    })) throw Object.assign(new Error('access_policy_forbidden'), { status: 403 });
+  });
 }
 
 async function canViewSensitivePatientData(req, clinicIds) {
@@ -788,10 +805,13 @@ const buildPacienteDuplicadoPayloadForRequest = async (req, args) => {
   }
 
   const scopedPatient = restrictPacientePayloadToClinics(paciente, allowedClinicIds);
+  const scopedClinicName = base.sameClinic ? null : resolvePacienteClinicLabel(scopedPatient, clinicaId);
   return {
     ...base,
+    message: base.sameClinic ? base.message
+      : `Ya existe un paciente con este ${resolveDuplicateContactLabel({ normPhone, normEmail })} en ${scopedClinicName || 'otra clínica del grupo'}`,
     paciente: scopedPatient,
-    clinicaNombre: base.sameClinic ? null : resolvePacienteClinicLabel(scopedPatient, clinicaId),
+    clinicaNombre: scopedClinicName,
     vinculos: collectPacienteClinics(scopedPatient),
     privacy_redacted: false,
   };
@@ -836,6 +856,7 @@ exports.getAllPacientes = async (req, res) => {
       ? await accessibleClinicIds(req, 'patients.view', requestedClinicIds, { requireAll: true })
       : await allClinicsAccessibleToActor(req, 'patients.view');
     if (!readableClinicIds.length) {
+      auditPatientResponse(req, {});
       return res.json(isPaginated ? { items: [], total: 0, limit, offset, has_more: false } : []);
     }
 
@@ -909,6 +930,8 @@ exports.getAllPacientes = async (req, res) => {
       restrictPacientePayloadToClinics(paciente, readableClinicIds)
     ));
     const items = mayViewSensitive ? scopedPatients : scopedPatients.map(redactEmbeddedPatient);
+    auditPatientResponse(req, { clinicIds: readableClinicIds, patients: items, resultCount: items.length, includesSensitive: mayViewSensitive && items.length > 0,
+      checks: [{ featureKey: 'patients.view', clinicIds: readableClinicIds }, ...(mayViewSensitive ? [{ featureKey: 'patients.sensitive.view', clinicIds: readableClinicIds }] : [])] });
     if (isPaginated) {
       return res.json({
         items,
@@ -922,7 +945,7 @@ exports.getAllPacientes = async (req, res) => {
   } catch (error) {
     const handled = sendAccessPolicyError(error, res);
     if (handled) return handled;
-    res.status(500).json({ message: 'Error retrieving pacientes', error: error.message });
+    res.status(500).json({ message: 'Error retrieving pacientes', error: 'patient_read_failed' });
   }
 };
 
@@ -936,6 +959,7 @@ exports.searchPacientes = async (req, res) => {
 
     // No permitir búsqueda vacía para evitar devolver todo
     if (!query && !normPhone && !normEmail) {
+      auditPatientResponse(req, {});
       return res.json([]);
     }
 
@@ -1004,6 +1028,7 @@ exports.searchPacientes = async (req, res) => {
       whereOr.push({ email: { [Op.like]: `%${normEmail}%` } });
     }
     if (!whereOr.length) {
+      auditPatientResponse(req, {});
       return res.json([]);
     }
 
@@ -1052,13 +1077,15 @@ exports.searchPacientes = async (req, res) => {
       distinct: true
     });
     await Promise.all(pacientes.map((paciente) => ensurePacientePublicId(paciente)));
+    auditPatientResponse(req, { clinicIds: clinicIdsList, patients: pacientes, resultCount: pacientes.length, includesSensitive: pacientes.length > 0,
+      checks: ['patients.view', 'patients.sensitive.view'].map(featureKey => ({ featureKey, clinicIds: clinicIdsList })) });
     res.json(pacientes.map((paciente) => (
       restrictPacientePayloadToClinics(paciente, clinicIdsList)
     )));
   } catch (error) {
     const handled = sendAccessPolicyError(error, res);
     if (handled) return handled;
-    res.status(500).json({ message: 'Error al buscar pacientes', error: error.message });
+    res.status(500).json({ message: 'Error al buscar pacientes', error: 'patient_read_failed' });
   }
 };
 
@@ -1072,6 +1099,7 @@ exports.searchPatientContactTargets = async (req, res) => {
       return res.status(400).json({ message: 'clinica_id es obligatorio' });
     }
     if (query.length < 2) {
+      auditPatientResponse(req, {});
       return res.json({ query, query_type: 'name', normalized_phone: null, items: [] });
     }
 
@@ -1084,12 +1112,16 @@ exports.searchPatientContactTargets = async (req, res) => {
       selectedClinicId: clinicaId,
       limit,
     });
-    return res.json(result);
+    const scopedResult = { ...result, items: result.items.map(item => ({ ...item, patient: restrictPacientePayloadToClinics(item.patient, readableClinicIds) })) };
+    auditPatientResponse(req, { clinicIds: readableClinicIds, patients: scopedResult.items.map(item => item.patient), resultCount: scopedResult.items.length,
+      includesSensitive: scopedResult.items.length > 0,
+      checks: [{ featureKey: 'patients.sensitive.view', clinicIds: normalizeClinicIds([clinicaId, ...readableClinicIds]) }] });
+    return res.json(scopedResult);
   } catch (error) {
     const handled = sendAccessPolicyError(error, res);
     if (handled) return handled;
-    console.error('Error searchPatientContactTargets', error);
-    return res.status(500).json({ message: 'Error al buscar contactos de paciente', error: error.message });
+    console.error('Error searchPatientContactTargets', { code: 'patient_read_failed' });
+    return res.status(500).json({ message: 'Error al buscar contactos de paciente', error: 'patient_read_failed' });
   }
 };
 
@@ -1099,6 +1131,7 @@ exports.checkDuplicates = async (req, res) => {
     const normPhone = normalizePhone(telefono);
     const normEmail = normalizeEmail(email);
     if (!normPhone && !normEmail) {
+      auditPatientResponse(req, {});
       return res.json({ exists: false });
     }
     if (!clinica_id) {
@@ -1114,6 +1147,7 @@ exports.checkDuplicates = async (req, res) => {
     });
 
     if (!pacienteExistente) {
+      auditPatientResponse(req, { clinicIds: normalizeClinicIds([clinica_id]), checks: [{ featureKey: 'patients.edit', clinicIds: normalizeClinicIds([clinica_id]) }] });
       return res.json({ exists: false });
     }
 
@@ -1123,11 +1157,16 @@ exports.checkDuplicates = async (req, res) => {
       normPhone,
       normEmail,
     });
+    const duplicateClinicIds = duplicatePayload.privacy_redacted ? normalizeClinicIds([clinica_id]) : patientClinicIds(duplicatePayload.paciente);
+    auditPatientResponse(req, { clinicIds: duplicateClinicIds, patients: duplicatePayload.paciente ? [duplicatePayload.paciente] : [], resultCount: 1,
+      includesSensitive: !duplicatePayload.privacy_redacted,
+      checks: [{ featureKey: 'patients.edit', clinicIds: normalizeClinicIds([clinica_id]) },
+        ...(!duplicatePayload.privacy_redacted ? [{ featureKey: 'patients.sensitive.view', clinicIds: duplicateClinicIds }] : [])] });
     return res.json({ exists: true, ...duplicatePayload });
   } catch (error) {
     const handled = sendAccessPolicyError(error, res);
     if (handled) return handled;
-    res.status(500).json({ message: 'Error al verificar duplicados', error: error.message });
+    res.status(500).json({ message: 'Error al verificar duplicados', error: 'patient_read_failed' });
   }
 };
 
@@ -1149,12 +1188,13 @@ exports.getConsents = async (req, res) => {
       where: { paciente_id: paciente.id_paciente },
       order: [['createdAt', 'DESC']]
     });
-
+    auditPatientResponse(req, { clinicIds: patientClinicIds(paciente), patients: [paciente], resultCount: consents.length, includesSensitive: consents.length > 0,
+      checks: [{ featureKey: 'consents.view', clinicIds: patientClinicIds(paciente) }], requireAllMemberships: true });
     return res.status(200).json(consents);
   } catch (error) {
     const handled = sendAccessPolicyError(error, res);
     if (handled) return handled;
-    return res.status(500).json({ message: 'Error obteniendo consentimientos', error: error.message });
+    return res.status(500).json({ message: 'Error obteniendo consentimientos', error: 'patient_read_failed' });
   }
 };
 
@@ -1185,7 +1225,6 @@ exports.getPacienteById = async (req, res) => {
     if (!paciente) {
       return res.status(404).json({ message: 'Paciente not found' });
     }
-    await ensurePacientePublicId(paciente);
     const readableClinicIds = await accessibleClinicIds(req, 'patients.view', patientClinicIds(paciente));
     const mayViewSensitive = await canViewSensitivePatientData(req, readableClinicIds);
     if (!mayViewSensitive) {
@@ -1194,6 +1233,7 @@ exports.getPacienteById = async (req, res) => {
         error: 'patient_detail_forbidden',
       });
     }
+    await ensurePacientePublicId(paciente);
     const payload = {
       ...restrictPacientePayloadToClinics(paciente, readableClinicIds),
       ...await getPacienteAppointmentBounds(paciente.id_paciente, readableClinicIds),
@@ -1203,11 +1243,13 @@ exports.getPacienteById = async (req, res) => {
         phone: paciente.telefono_movil,
       }),
     };
+    auditPatientResponse(req, { clinicIds: readableClinicIds, patients: [payload], resultCount: 1, includesSensitive: true,
+      checks: ['patients.view', 'patients.sensitive.view'].map(featureKey => ({ featureKey, clinicIds: readableClinicIds })) });
     res.json(payload);
   } catch (error) {
     const handled = sendAccessPolicyError(error, res);
     if (handled) return handled;
-    res.status(500).json({ message: 'Error retrieving paciente', error: error.message });
+    res.status(500).json({ message: 'Error retrieving paciente', error: 'patient_read_failed' });
   }
 };
 
@@ -1876,11 +1918,14 @@ exports.getPacienteActivity = async (req, res) => {
       }
     }
 
+    auditPatientResponse(req, { clinicIds: readableClinicIds, patients: [paciente], resultCount: items.length, includesSensitive: items.length > 0,
+      checks: [...['patients.view', 'patients.sensitive.view'].map(featureKey => ({ featureKey, clinicIds: readableClinicIds })),
+        ...(nutritionClinicIds.length ? [{ featureKey: 'nutrition.workspace.view', clinicIds: nutritionClinicIds }] : [])] });
     return res.json(items.sort((a, b) => new Date(a.fecha).getTime() - new Date(b.fecha).getTime()));
   } catch (error) {
     const handled = sendAccessPolicyError(error, res);
     if (handled) return handled;
-    return res.status(500).json({ message: 'Error retrieving paciente activity', error: error.message });
+    return res.status(500).json({ message: 'Error retrieving paciente activity', error: 'patient_read_failed' });
   }
 };
 
@@ -2244,6 +2289,11 @@ exports.deletePaciente = async (req, res) => {
     res.status(500).json({ message: 'Error deleting paciente', error: error.message });
   }
 };
+
+for (const [name, action] of Object.entries({ getAllPacientes: 'patient.list', searchPacientes: 'patient.search', searchPatientContactTargets: 'patient.contact_targets',
+  checkDuplicates: 'patient.duplicate_check', getConsents: 'patient.legacy_consents.read', getPacienteById: 'patient.detail.read', getPacienteActivity: 'patient.activity.read' })) {
+  exports[name] = patientReadAudit.wrap(action, exports[name]);
+}
 
 exports.__patientClinicScopeContract = Object.freeze({
   restrictPacientePayloadToClinics,

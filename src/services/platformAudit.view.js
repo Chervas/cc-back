@@ -74,6 +74,9 @@ function createView({ model, audit, reader, codec, now = () => new Date() }) {
             requestedEffect: v.requestedEffect, authorizationBasis: v.authorizationBasis, scopeClinicCount: v.scopeClinicCount,
             authorizationPolicyVersion: v.authorizationPolicyVersion } : null,
           realtime: v.version === 5 ? { socketEvent: v.socketEvent, resourceType: v.resource.type, resourceId: v.resource.id, clinicIds: v.clinicIds } : null,
+          patientRead: v.version === 6 ? { correlationId: v.correlationId, clinicIds: v.clinicIds, patientIds: v.patientIds,
+            patientCount: v.patientCount, resultCount: v.resultCount, includesSensitive: v.includesSensitive,
+            batchIndex: v.batchIndex, batchCount: v.batchCount, resultSetDigest: v.resultSetDigest } : null,
           verification: 's3_version_verified' })) };
     },
   };

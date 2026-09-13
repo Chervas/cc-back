@@ -15,6 +15,7 @@ function event(value) {
   if (value?.version === 3) return require('./read-event').readEvent(value);
   if (value?.version === 4) return require('./permission-event').permissionEvent(value);
   if (value?.version === 5) return require('./realtime-event').realtimeEvent(value);
+  if (value?.version === 6) return require('./patient-read-event').patientReadEvent(value);
   exact(value, ['version', 'eventId', 'occurredAt', 'correlationId', 'action', 'stage', 'outcome', 'reason',
     'actor', 'effectiveActor', 'sessionRef', 'scope', 'resource', 'capturePolicy', 'authorizationPolicyVersion', 'origin']);
   exact(value.actor, ['type', 'id']); exact(value.scope, ['type', 'id']); exact(value.resource, ['type', 'id']);

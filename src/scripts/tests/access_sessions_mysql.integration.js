@@ -11,6 +11,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const migration = require('../../../migrations/20260912220000-create-auth-sessions');
   models.Usuario = require('../../../models/usuario')(sql, DataTypes); await models.Usuario.sync();
   await require('../../../migrations/20260912210000-create-platform-audit-events').up(sql.getQueryInterface(), DataTypes);
+  await require('../../../migrations/20260913003000-add-platform-audit-result-part').up(sql.getQueryInterface());
   await migration.up(sql.getQueryInterface(), DataTypes);
   models.AuthSession = require('../../../models/authsession')(sql, DataTypes);
   models.PlatformAuditEvent = require('../../../models/platformauditevent')(sql, DataTypes);

@@ -1,5 +1,14 @@
 # Auditoría de plataforma: primer bloque de autenticación
 
+## Cohorte adicional preparada: lecturas de pacientes v6
+
+Siete acciones `patient.*`, metadatos cerrados y partes de hasta 100 IDs/4096
+bytes. Prefijo `app/platform/v6/`, reader y visor compatibles. Preparado no
+acredita recepción; un descarte posterior conserva esa distinción. API y
+outbox necesitan `20260913003000` antes del nuevo modelo, incluso con captura
+apagada. Writer/reader v6 antes de activarla; nada desplegado ni ejecutado AWS.
+[Contrato, límites y lote](../../docs/security/patient-read-audit-migration.md).
+
 ## Cohorte adicional preparada: tiempo real v5
 
 El codec y reader admiten `app/platform/v5/`: `realtime.subscribe` y

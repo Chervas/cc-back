@@ -10,6 +10,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const { createService } = require('../../services/platformAudit.service');
   const migration = require('../../../migrations/20260912210000-create-platform-audit-events');
   const qi = sql.getQueryInterface(); await migration.up(qi, DataTypes);
+  await require('../../../migrations/20260913003000-add-platform-audit-result-part').up(sql.getQueryInterface());
   const model = require('../../../models/platformauditevent')(sql, DataTypes); models.PlatformAuditEvent = model;
   let repo = createRepository(model); let now = new Date('2026-09-12T12:00:00Z');
   const event = fixture(); await repo.append(event); await repo.append(event); assert.equal(await model.count(), 1);

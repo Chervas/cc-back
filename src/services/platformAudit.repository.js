@@ -11,6 +11,7 @@ function createRepository(model) {
       const row = pack(value);
       try {
         await model.create({ event_id: row.event.eventId, correlation_id: row.event.correlationId, stage: row.event.stage,
+          result_part: row.event.version === 6 ? row.event.batchIndex : 0,
           occurred_at: new Date(row.event.occurredAt), body: row.body, digest: row.digest,
           next_attempt_at: new Date(row.event.occurredAt) }, { transaction });
       } catch (error) {

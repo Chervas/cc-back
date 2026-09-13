@@ -5,6 +5,7 @@ const cache = (path, exports) => { const id = require.resolve(path); require.cac
 withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   cache('dotenv', { config: () => ({}) });
   await require('../../../migrations/20260912210000-create-platform-audit-events').up(sql.getQueryInterface(), D);
+  await require('../../../migrations/20260913003000-add-platform-audit-result-part').up(sql.getQueryInterface());
   await require('../../../migrations/20260912230000-index-platform-audit-view').up(sql.getQueryInterface());
   await require('../../../migrations/20260211023000-create-access-policy-overrides').up(sql.getQueryInterface(), require('sequelize'));
   models.PlatformAuditEvent = require('../../../models/platformauditevent')(sql, D);

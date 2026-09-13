@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "reviewDate": "2026-09-13",
+  "basis": "manual_source_review_and_fictitious_QA_not_runtime_coverage",
+  "baseBackend": "3b1844fcee21ae6d9409b7a0713e324958afeb17",
+  "preparedDisabledActions": [
+    "patient.list",
+    "patient.search",
+    "patient.contact_targets",
+    "patient.duplicate_check",
+    "patient.legacy_consents.read",
+    "patient.detail.read",
+    "patient.activity.read"
+  ],
+  "runtimeAuditedRoutesVerified": 0,
+  "sharedMigrationApplied": false,
+  "awsOperations": 0,
+  "opsDeferred": true,
+  "files": [
+    {
+      "path": "src/controllers/paciente.controller.js",
+      "sha256": "7c0e69bd927c5f360941f81cf0380412531c4b1a8f08e59d1be5033be3b7a955"
+    },
+    {
+      "path": "src/routes/paciente.routes.js",
+      "sha256": "0d8d45480a284de20f11c44960909c84447526c17f8db75e3103d645d2b55f9b"
+    },
+    {
+      "path": "src/services/platformAudit.patientReads.js",
+      "sha256": "2f217a7f4d8abaf989a21f7219738d16e105cc60ae26ed69c439d8e6c9f7ae91"
+    },
+    {
+      "path": "src/services/platformAudit.repository.js",
+      "sha256": "c67f2ef1ab4d5b40fef7ec4cc98d114ad341f5ecf4e743706f810e5a916e232d"
+    },
+    {
+      "path": "src/services/platformAudit.view.js",
+      "sha256": "032e26a978df9d8ec03baf4a6a3fdbe98f469ce9a0edb1cac2822b8bc7a1e4df"
+    },
+    {
+      "path": "models/platformauditevent.js",
+      "sha256": "d66d51ccb9d31e903edfca83c977cb6694a44f8d6fb8b2224d195556d48a7e6e"
+    },
+    {
+      "path": "migrations/20260913003000-add-platform-audit-result-part.js",
+      "sha256": "7d0c90f2a6a75878b91cca67435a07148ba1f72e9cc7c4309420e87a4da302fe"
+    },
+    {
+      "path": "services/platform-audit/src/patient-read-contract.js",
+      "sha256": "9c4c27569959d26d59d0486b28f123e9fd2ef843a9fc53ed58c900c0cfe65fd2"
+    },
+    {
+      "path": "services/platform-audit/src/patient-read-event.js",
+      "sha256": "c8396ed2184092bc5444a5e36cffda5fea601fd93c34c166c6a4aecea9d7d9d9"
+    },
+    {
+      "path": "services/platform-audit/src/reader-protocol.js",
+      "sha256": "6237bba63931c100dcc60fd1266b7dcfd31af13760a5184063ca41ce5dd67f1d"
+    }
+  ],
+  "pending": [
+    "modern consents and tablet",
+    "clinical attachments",
+    "nutrition workspace/photos/reports/PDF",
+    "patient writes and exports",
+    "patient direction and economic APIs",
+    "other platform routes/jobs/scripts",
+    "OPS",
+    "real writer/reader/retention/session/SQL cut"
+  ]
+}

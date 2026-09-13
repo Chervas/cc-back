@@ -1,5 +1,40 @@
 > **Módulo:** Arquitectura del Backend
 
+## 2026-09-13 — Auditoría de lecturas de pacientes preparada, sin despliegue
+
+Siete GET existentes de `/api/pacientes`: `/`, `/search`, `/contact-targets`,
+`/check-duplicates`, `/:id/consents`, `/:id` y `/:id/activity` preparan captura
+con `PLATFORM_AUDIT_PATIENT_READS_ENABLED=true` (ausente/false, apagada).
+Conservan DTO y permisos; ahora todas envían `Cache-Control: private, no-store`.
+Intento antes del trabajo, resultado antes de responder y sesión/permisos/
+pertenencias comprobados antes y después de guardar. Pérdida de acceso 401/403;
+auditoría o límite no disponible 503 `patient_read_audit_unavailable`.
+Los siete errores internos de lectura usan `patient_read_failed`.
+
+Eventos v6 `patient.list/search/contact_targets/duplicate_check`,
+`patient.legacy_consents.read`, `patient.detail.read`, `patient.activity.read`:
+actor, ámbito, IDs y contadores, sin búsquedas, contactos ni cuerpos clínicos.
+Hasta 100 clínicas/10.000 pacientes únicos; cada parte contiene hasta 100 IDs
+(4096 bytes), con correlación y digest de metadatos común. Todas las partes
+se insertan en una transacción. `response_prepared` no es entrega; revocación
+posterior produce `discarded` sin devolver la ficha. El visor añade
+`patientRead: {correlationId, clinicIds, patientIds, patientCount, resultCount,
+includesSensitive, batchIndex, batchCount, resultSetDigest}` o null en codecs
+anteriores. Verifica cada versión externa; no acredita todas las partes.
+
+Contactos filtran vínculos de otras sedes; el mensaje de duplicado usa la
+clínica de la proyección autorizada. Detalle crea public_id después de ACL.
+Esas correcciones permanecen con captura apagada. La escritura lazy del ID
+sigue fuera de la transacción de auditoría; no acredita auditar escrituras.
+Consentimientos modernos, adjuntos, nutrición/PDF y otros endpoints pendientes.
+
+Migración `20260913003000` añade `result_part` y unicidad por
+correlación/etapa/parte. Requiere outbox previo y debe aplicarse antes del
+nuevo modelo ORM, incluso con gate apagado. Down rechaza cualquier evidencia
+v6; lector/writer v6 y corte de sesiones/entrega/monitor antes de activar.
+Sin migración compartida, despliegue ni AWS. OPS aplazado; apagado EC2 anunciado,
+no verificado. Contrato: `back-dev/docs/security/patient-read-audit-migration.md`.
+
 ## 2026-09-13 — Listado GBP por grants, preparado sin despliegue
 
 `GET /oauth/google/local/locations` resuelve solo `GoogleConnection.id` antes

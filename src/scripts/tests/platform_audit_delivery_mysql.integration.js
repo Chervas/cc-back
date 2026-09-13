@@ -13,7 +13,9 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const { createStateRepository, createMonitor } = require('../../services/platformAudit.monitor');
   const auditMigration = require('../../../migrations/20260912210000-create-platform-audit-events');
   const stateMigration = require('../../../migrations/20260912213000-create-platform-audit-delivery-states');
-  const qi = sql.getQueryInterface(); await auditMigration.up(qi, DataTypes); await stateMigration.up(qi, DataTypes);
+  const qi = sql.getQueryInterface(); await auditMigration.up(qi, DataTypes);
+  await require('../../../migrations/20260913003000-add-platform-audit-result-part').up(sql.getQueryInterface());
+  await stateMigration.up(qi, DataTypes);
   models.PlatformAuditEvent = require('../../../models/platformauditevent')(sql, DataTypes);
   models.PlatformAuditDeliveryState = require('../../../models/platformauditdeliverystate')(sql, DataTypes);
   models.Notification = require('../../../models/notification')(sql, DataTypes);

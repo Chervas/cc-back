@@ -5,7 +5,8 @@
     "Local router templates, not complete mounted URLs",
     "Comments/conditional mounts may affect results",
     "Dynamic routes, alternate router variables, socket events, jobs and scripts need separate review",
-    "Existing domain audit tables are not proof of platform audit delivery"
+    "Existing domain audit tables are not proof of platform audit delivery",
+    "Patient read classification requires the seven manually reviewed controller wrappers; this scanner does not prove instrumentation"
   ],
   "totals": {
     "files": 60,
@@ -13,7 +14,8 @@
     "preparedDisabled": 3,
     "sessionSuccessPreparedDisabled": 4,
     "auditViewPreparedDisabled": 1,
-    "permissionsPreparedDisabled": 4
+    "permissionsPreparedDisabled": 4,
+    "patientReadsPreparedDisabled": 7
   },
   "items": [
     {
@@ -3699,210 +3701,210 @@
     },
     {
       "path": "src/routes/oauth.routes.js",
-      "sha256": "6adc1c8e289b3a66dc366ae71efbec93b4b93a4982a6ae68b724c17a6deeeba9",
+      "sha256": "a4adf5206a2eea4cd3a2f3b1da681243813b1ca8ec362708a06584789b299e1c",
       "routes": [
         {
           "method": "GET",
           "localTemplate": "/google/effective-mappings",
-          "line": 1168,
+          "line": 1183,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "GET",
           "localTemplate": "/meta/connect",
-          "line": 1191,
+          "line": 1206,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "GET",
           "localTemplate": "/meta/callback",
-          "line": 1239,
+          "line": 1254,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "GET",
           "localTemplate": "/google/connect",
-          "line": 1412,
+          "line": 1427,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "GET",
           "localTemplate": "/google/callback",
-          "line": 1452,
+          "line": 1467,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "GET",
           "localTemplate": "/google/connection-status",
-          "line": 1534,
+          "line": 1549,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "GET",
           "localTemplate": "/google/assets",
-          "line": 1590,
+          "line": 1605,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "GET",
           "localTemplate": "/google/analytics/connection-status",
-          "line": 1626,
+          "line": 1641,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "GET",
           "localTemplate": "/google/analytics/properties",
-          "line": 1678,
+          "line": 1693,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "POST",
           "localTemplate": "/google/analytics/map-properties",
-          "line": 1732,
+          "line": 1747,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "GET",
           "localTemplate": "/google/local/locations",
-          "line": 1879,
+          "line": 1894,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "POST",
           "localTemplate": "/google/local/map-locations",
-          "line": 1948,
+          "line": 2008,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "GET",
           "localTemplate": "/google/local/mappings",
-          "line": 2247,
+          "line": 2311,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "GET",
           "localTemplate": "/google/ads/connection-status",
-          "line": 2348,
+          "line": 2412,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "GET",
           "localTemplate": "/google/ads/accounts",
-          "line": 2407,
+          "line": 2471,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "POST",
           "localTemplate": "/google/ads/request-link",
-          "line": 2612,
+          "line": 2676,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "POST",
           "localTemplate": "/google/ads/accept-link",
-          "line": 2681,
+          "line": 2745,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "POST",
           "localTemplate": "/google/ads/map-accounts",
-          "line": 2759,
+          "line": 2823,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "GET",
           "localTemplate": "/google/ads/mappings",
-          "line": 2981,
+          "line": 3045,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "DELETE",
           "localTemplate": "/google/ads/mappings/:mappingId",
-          "line": 3038,
+          "line": 3102,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "GET",
           "localTemplate": "/google/analytics/mappings",
-          "line": 3080,
+          "line": 3144,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "DELETE",
           "localTemplate": "/google/analytics/mappings/:mappingId",
-          "line": 3112,
+          "line": 3176,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "POST",
           "localTemplate": "/google/map-assets",
-          "line": 3154,
+          "line": 3218,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "GET",
           "localTemplate": "/google/mappings",
-          "line": 3299,
+          "line": 3363,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "DELETE",
           "localTemplate": "/google/mappings/:mappingId",
-          "line": 3336,
+          "line": 3400,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "DELETE",
           "localTemplate": "/google/disconnect",
-          "line": 3377,
+          "line": 3441,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "GET",
           "localTemplate": "/meta/connection-status",
-          "line": 3463,
+          "line": 3527,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "GET",
           "localTemplate": "/meta/assets",
-          "line": 3603,
+          "line": 3667,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "POST",
           "localTemplate": "/meta/map-assets",
-          "line": 3695,
+          "line": 3759,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "GET",
           "localTemplate": "/test",
-          "line": 3911,
+          "line": 3975,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "GET",
           "localTemplate": "/meta/mappings",
-          "line": 3930,
+          "line": 3994,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "DELETE",
           "localTemplate": "/meta/mappings/:mappingId",
-          "line": 4058,
+          "line": 4122,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "DELETE",
           "localTemplate": "/meta/disconnect",
-          "line": 4147,
+          "line": 4211,
           "platformAudit": "pending_semantic_review"
         },
         {
           "method": "GET",
           "localTemplate": "/meta/mappings/:clinicaId",
-          "line": 4269,
+          "line": 4333,
           "platformAudit": "pending_semantic_review"
         }
       ]
@@ -3915,31 +3917,31 @@
           "method": "GET",
           "localTemplate": "/",
           "line": 11,
-          "platformAudit": "pending_semantic_review"
+          "platformAudit": "patient_reads_semantic_prepared_disabled"
         },
         {
           "method": "GET",
           "localTemplate": "/search",
           "line": 12,
-          "platformAudit": "pending_semantic_review"
+          "platformAudit": "patient_reads_semantic_prepared_disabled"
         },
         {
           "method": "GET",
           "localTemplate": "/contact-targets",
           "line": 13,
-          "platformAudit": "pending_semantic_review"
+          "platformAudit": "patient_reads_semantic_prepared_disabled"
         },
         {
           "method": "GET",
           "localTemplate": "/check-duplicates",
           "line": 14,
-          "platformAudit": "pending_semantic_review"
+          "platformAudit": "patient_reads_semantic_prepared_disabled"
         },
         {
           "method": "GET",
           "localTemplate": "/:id/consents",
           "line": 15,
-          "platformAudit": "pending_semantic_review"
+          "platformAudit": "patient_reads_semantic_prepared_disabled"
         },
         {
           "method": "GET",
@@ -3951,7 +3953,7 @@
           "method": "GET",
           "localTemplate": "/:id/activity",
           "line": 17,
-          "platformAudit": "pending_semantic_review"
+          "platformAudit": "patient_reads_semantic_prepared_disabled"
         },
         {
           "method": "GET",
@@ -4029,7 +4031,7 @@
           "method": "GET",
           "localTemplate": "/:id",
           "line": 30,
-          "platformAudit": "pending_semantic_review"
+          "platformAudit": "patient_reads_semantic_prepared_disabled"
         },
         {
           "method": "POST",

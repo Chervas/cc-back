@@ -1,5 +1,23 @@
 # Runbook: Migracion Segura De Integraciones Y Auditoria
 
+## Duodécimo bloque: auditoría de lecturas de pacientes (13/09/2026)
+
+Siete GET de pacientes preparan captura v6 apagada: actor/sesión/ámbito,
+IDs y contadores, sin contenido clínico. Revalida permisos y pertenencias
+antes y después de persistir; las partes del resultado comparten transacción.
+El visor distingue respuesta preparada y descartada, con IDs desplegables.
+Corrige escritura de public_id antes de autorizar detalle, vínculos de
+contactos y nombre de clínica en mensajes de duplicados; errores de lectura
+cerrados. El resto de escrituras y lecturas clínicas mantiene su corte pendiente.
+
+QA ficticia: 75 tests, 58 comprobaciones MySQL propias con cierre 0, contrato
+previo de scope, Angular y ocho capturas Chromium desktop/móvil. Nueva
+migración `20260913003000` solo ensayada: previa al nuevo modelo incluso con
+gate apagado; writer/reader v6 antes de activar. Sin despliegue ni BD compartida.
+OPS sigue aplazado y EC2 con apagado anunciado, no verificado. AWS, retención,
+Budget/CloudFormation, cohortes reales y cifrado/corte BD siguen pendientes.
+[Contrato, coste, cobertura y lote](security/patient-read-audit-migration.md).
+
 ## Undécimo bloque: listado GBP por grants (13/09/2026)
 
 [Contrato de API, límites y corte](security/google-business-profile-discovery-migration.md): séptima lectura cerrada,

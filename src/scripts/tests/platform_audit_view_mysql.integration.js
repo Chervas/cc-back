@@ -12,6 +12,7 @@ const cache = (path, exports) => { const id = require.resolve(path); require.cac
 withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   cache('dotenv', { config: () => ({}) });
   await require('../../../migrations/20260912210000-create-platform-audit-events').up(sql.getQueryInterface(), DataTypes);
+  await require('../../../migrations/20260913003000-add-platform-audit-result-part').up(sql.getQueryInterface());
   const index = require('../../../migrations/20260912230000-index-platform-audit-view'); await index.up(sql.getQueryInterface());
   models.PlatformAuditEvent = require('../../../models/platformauditevent')(sql, DataTypes);
   const repo = require('../../services/platformAudit.repository').createRepository(models.PlatformAuditEvent);
