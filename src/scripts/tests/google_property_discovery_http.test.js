@@ -23,11 +23,13 @@ async function fixture(t, kind = 'analytics') {
   const resolver = loadDiscoverySource('services/scopeConnectionResolver.service.js', { '../../models': models, sequelize });
   const router = loadDiscoverySource('routes/oauth.routes.js', { express, sequelize, '../../models': models, './auth.middleware': auth,
     '../services/accessSession.service': sessions, '../services/googlePropertyDiscovery.service': f.service,
+    '../services/googlePropertyInventoryScope.service': { resolve: async () => state.effectiveMappings || [] },
     '../services/googleLegacyCredentials.service': legacy.credentials, '../services/scopeConnectionResolver.service': resolver,
     '../services/googleOAuthBroker.service': { assertLegacyConnection: async () => {}, bindingFor: async () => null },
     '../lib/oauthMarketingScopeAccess': require('../../lib/oauthMarketingScopeAccess'),
     '../lib/marketingScopeAccess': { hasMarketingClinicScopeAccess: async ({ userId, clinicIds, access }) => {
-      assert.equal(access, state.statusRequest ? 'read' : 'write'); return state.allowed && userId === 701 && clinicIds.every(id => [71, 72].includes(id)); } },
+      assert.equal(access, state.statusRequest ? 'read' : 'write'); return state.allowed && userId === 701
+        && clinicIds.every(id => state.onlyRecipient ? id === 72 : [71, 72].includes(id)); } },
     axios: { get: async url => {
       legacyCalls++; await state.afterLegacy?.();
       return { data: url.includes('accountSummaries') ? { accountSummaries: [{ name: 'accountSummaries/456', displayName: 'Fictitious legacy account',
@@ -78,6 +80,13 @@ for (const kind of ['search_console', 'analytics']) {
     f.state.afterLegacy = () => { f.state.managed = true; f.legacy.mark(); };
     const result = await f.request(); assert.equal(result.status, 409); assert.equal(result.body.error, 'google_oauth_legacy_closed');
     assert.equal(result.body.assets, undefined); assert.equal(result.body.accounts, undefined);
+  });
+  test(kind + ' actual recipient-clinic route rechecks shared assignment and does not require owner-clinic permission', async t => {
+    const f = await fixture(t, kind); f.state.onlyRecipient = true; f.state.effectiveMappings = [{ mapping_id: 91, clinic_id: 71, connection_id: 81,
+      resource: f.mapping.siteUrl || f.mapping.propertyName }];
+    const result = await f.request(undefined, '?clinic_id=72'); assert.equal(result.status, 200); assert.equal(f.state.calls[0].tenantRef, 'clinic:71');
+    f.state.afterCall = () => { f.state.effectiveMappings = []; };
+    assert.equal((await f.request(undefined, '?clinic_id=72')).status, 403); assert.equal(f.legacy.state.loads + f.legacyCalls(), 0);
   });
 }
 test('GA status verifies exact registered properties and does not claim whole account or OAuth health', async t => {

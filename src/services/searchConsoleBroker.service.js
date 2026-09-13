@@ -4,19 +4,22 @@ const contract = require('../../services/integrations-broker/src/google-search-c
 const discovery = require('../../services/integrations-broker/src/google-property-discovery-contract');
 const { createIntegrationsBrokerClient } = require('../lib/integrationsBrokerClient');
 const fail = (code = 'broker_binding_invalid') => { throw Object.assign(Error(code), { code }); };
-const positive = value => Number.isSafeInteger(Number(value)) && Number(value) > 0 && Number(value) <= 2147483647;
+const positive = value => /^[1-9]\d{0,9}$/.test(String(value)) && Number(value) <= 2147483647;
 const marked = row => row.broker_read_connection_ref != null || row.broker_read_asset_ref != null;
-function createSearchConsoleBroker({ client, loadMapping, loadBinding, loadConnection,
+function createSearchConsoleBroker({ client, loadMapping, loadBindings, loadConnection,
   enabled = () => process.env.GOOGLE_SEARCH_CONSOLE_BROKER_ENABLED === 'true', now = () => Date.now() }) {
   const contexts = new WeakMap();
   async function inspect(mapping, expected) {
     if (!mapping || !positive(mapping.id) || !positive(mapping.clinicaId) || !positive(mapping.googleConnectionId)) fail();
     const resource = contract.site(mapping.siteUrl);
     const current = await loadMapping(Number(mapping.id));
-    const record = await loadBinding(resource.siteHash);
+    const records = await loadBindings(resource.siteHash);
+    if (!Array.isArray(records) || records.length > 1000 || records.some(row => row.site_hash !== resource.siteHash || !positive(row.mapping_id))) fail();
+    const matches = records.filter(row => Number(row.mapping_id) === Number(mapping.id));
+    if (matches.length > 1) fail(); const record = matches[0];
     if (!current || Number(current.id) !== Number(mapping.id) || !current.isActive || current.siteUrl !== mapping.siteUrl || Number(current.clinicaId) !== Number(mapping.clinicaId)
       || Number(current.googleConnectionId) !== Number(mapping.googleConnectionId)) fail();
-    if (!record && !marked(current) && !expected) return null;
+    if (!records.length && !marked(current) && !expected) return null;
     if (!record || !marked(current) || record.state !== 'active' || record.site_hash !== resource.siteHash || record.site_url !== resource.siteUrl
       || record.asset_ref !== resource.assetRef || current.broker_read_asset_ref !== resource.assetRef
       || typeof record.connection_ref !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(record.connection_ref) || current.broker_read_connection_ref !== record.connection_ref
@@ -99,7 +102,7 @@ function createSearchConsoleRepository(getModels) {
   return {
     loadMapping: id => getModels().ClinicWebAsset.findByPk(id, { attributes: ['id', 'clinicaId', 'googleConnectionId', 'siteUrl', 'isActive',
       'broker_read_connection_ref', 'broker_read_asset_ref'], raw: true, logging: false }),
-    loadBinding: hash => getModels().SearchConsoleBrokerBinding.findByPk(hash, { raw: true, logging: false }),
+    loadBindings: hash => getModels().SearchConsoleBrokerBinding.findAll({ where: { site_hash: hash }, limit: 1001, raw: true, logging: false }),
     loadConnection: async (id, subject) => {
       const rows = await getModels().GoogleConnection.findAll({ attributes: ['id', 'googleUserId', [literal('(accessToken IS NULL AND refreshToken IS NULL)'), 'credentials_external']],
         where: { [Op.or]: [{ id }, { googleUserId: subject }] }, limit: 2, raw: true, logging: false });

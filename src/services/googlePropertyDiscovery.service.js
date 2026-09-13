@@ -22,23 +22,41 @@ function createGooglePropertyDiscovery({ hasManaged, listBindings, loadMapping, 
   const assertLegacyAllowed = async () => { if (await managed()) fail('google_oauth_legacy_closed'); };
   return {
     assertLegacyAllowed,
-    async list({ kind, clinicIds, connectionId, revalidate }) {
+    async list({ kind, clinicIds, connectionId, revalidate, resolveEffectiveMappings = async () => [] }) {
       if (!['search_console', 'analytics'].includes(kind) || !Array.isArray(clinicIds) || !clinicIds.length || clinicIds.length > 1000
         || clinicIds.some(id => !positive(id)) || new Set(clinicIds).size !== clinicIds.length || !positive(connectionId)
-        || typeof revalidate !== 'function') fail('broker_binding_invalid');
+        || typeof revalidate !== 'function' || typeof resolveEffectiveMappings !== 'function') fail('broker_binding_invalid');
       if (active >= 4) fail('broker_discovery_busy');
       active++;
       try {
         if (!await managed()) return null;
         const deadline = now() + 60000;
-        const check = async () => {
+        const visible = async () => {
+          const rows = await resolveEffectiveMappings();
+          if (!Array.isArray(rows) || rows.length > 1000) fail('broker_discovery_limit');
+          if (rows.some(row => !positive(row.mapping_id) || !positive(row.clinic_id) || row.connection_id !== connectionId
+            || typeof row.resource !== 'string') || new Set(rows.map(row => row.mapping_id)).size !== rows.length) fail('broker_binding_invalid');
+          return rows;
+        };
+        const check = async mapping => {
           await revalidate(true);
+          const targets = Array.isArray(mapping) ? mapping : mapping ? [mapping] : [];
+          const shared = targets.filter(row => !clinicIds.includes(Number(row.clinicaId)));
+          if (shared.length) {
+            const current = await visible();
+            if (shared.some(target => !current.some(row => row.mapping_id === Number(target.id) && row.clinic_id === Number(target.clinicaId)
+              && row.connection_id === Number(target.googleConnectionId)
+              && row.resource === (kind === 'search_console' ? target.siteUrl : target.propertyName)))) fail('google_discovery_scope_forbidden');
+          }
           if (!enabled(kind)) fail('broker_cohort_disabled');
           const remaining = deadline - now(); if (remaining <= 0) fail('broker_discovery_timeout');
           return { timeoutMs: Math.min(30000, remaining) };
         };
         await check();
-        const list = () => registry(() => listBindings(kind, clinicIds, connectionId));
+        const list = async () => {
+          const effective = await visible();
+          return registry(() => listBindings(kind, clinicIds, connectionId, effective.map(row => row.mapping_id)));
+        };
         const bindings = await list();
         if (!Array.isArray(bindings)) fail('broker_registry_unavailable');
         if (!bindings.length) fail('broker_discovery_scope_unconfigured');
@@ -47,7 +65,7 @@ function createGooglePropertyDiscovery({ hasManaged, listBindings, loadMapping, 
         const initial = signature(bindings); const ids = new Set(); const result = new Map();
         const mappings = [];
         for (const row of bindings) {
-          if (!positive(Number(row.mapping_id)) || ids.has(Number(row.mapping_id)) || !clinicIds.includes(Number(row.clinica_id))
+          if (!positive(Number(row.mapping_id)) || ids.has(Number(row.mapping_id))
             || Number(row.google_connection_id) !== connectionId || row.state !== 'active') fail('broker_binding_invalid');
           ids.add(Number(row.mapping_id));
           const mapping = await registry(() => loadMapping(kind, Number(row.mapping_id)));
@@ -55,18 +73,18 @@ function createGooglePropertyDiscovery({ hasManaged, listBindings, loadMapping, 
             || Number(mapping.googleConnectionId) !== connectionId || !mapping.isActive
             || mapping.broker_read_connection_ref !== row.connection_ref || mapping.broker_read_asset_ref !== row.asset_ref
             || (kind === 'search_console' ? mapping.siteUrl !== row.site_url : mapping.propertyName !== row.property_name)) fail('broker_binding_invalid');
-          await check(); const context = await adapters[kind].prepare(mapping);
+          await check(mapping); const context = await adapters[kind].prepare(mapping);
           if (!context) fail('broker_binding_invalid');
-          const response = await adapters[kind].read(mapping, context, 'discovery', {}, { beforeExecute: check });
-          await check();
+          const response = await adapters[kind].read(mapping, context, 'discovery', {}, { beforeExecute: () => check(mapping) });
+          await check(mapping);
           const key = kind === 'search_console' ? mapping.siteUrl : mapping.propertyName;
           if (result.has(key) && JSON.stringify(result.get(key)) !== JSON.stringify(response.data)) fail('broker_response_invalid');
           result.set(key, response.data); mappings.push(mapping);
         }
         const latest = await list(); if (!Array.isArray(latest) || signature(latest) !== initial) fail('broker_binding_invalid');
         // Recheck every mapping, including those read before a later await.
-        for (const mapping of mappings) { await check(); if (!await adapters[kind].prepare(mapping)) fail('broker_binding_invalid'); }
-        await check();
+        for (const mapping of mappings) { await check(mapping); if (!await adapters[kind].prepare(mapping)) fail('broker_binding_invalid'); }
+        await check(mappings);
         const output = [...result.values()]; if (Buffer.byteLength(JSON.stringify(output)) > 1048576) fail('broker_discovery_limit');
         return output;
       } finally { active--; }
@@ -77,7 +95,8 @@ function createDiscoveryRepository(getModels) {
   const model = kind => getModels()[kind === 'search_console' ? 'SearchConsoleBrokerBinding' : 'AnalyticsBrokerBinding'];
   const repositories = { search_console: readers.search_console.createSearchConsoleRepository(getModels), analytics: readers.analytics.createAnalyticsRepository(getModels) };
   return {
-    listBindings: (kind, clinicIds, connectionId) => model(kind).findAll({ where: { clinica_id: { [Op.in]: clinicIds }, google_connection_id: connectionId },
+    listBindings: (kind, clinicIds, connectionId, effectiveIds = []) => model(kind).findAll({ where: { google_connection_id: connectionId,
+      [Op.or]: [{ clinica_id: { [Op.in]: clinicIds } }, ...(effectiveIds.length ? [{ mapping_id: { [Op.in]: effectiveIds } }] : [])] },
       attributes: fields(kind), order: [['mapping_id', 'ASC']], limit: 21, raw: true, logging: false }),
     loadMapping: (kind, id) => repositories[kind].loadMapping(id),
   };

@@ -8,6 +8,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await require('../../../migrations/20260913020000-create-google-oauth-broker-flows').up(qi, D);
   await qi.createTable('ClinicWebAssets', { id: { type: D.INTEGER, primaryKey: true } });
   await require('../../../migrations/20260913030000-add-search-console-broker-read-binding').up(qi, D);
+  await require('../../../migrations/20260913050000-scope-search-console-bindings-by-mapping').up(qi, D);
   await qi.createTable('ClinicAnalyticsProperties', { id: { type: D.INTEGER, primaryKey: true, autoIncrement: true }, clinicaId: D.INTEGER,
     googleConnectionId: D.INTEGER, propertyName: D.STRING(128), propertyDisplayName: D.STRING(256), propertyType: D.STRING(32),
     parent: D.STRING(128), measurementId: D.STRING(128), isActive: { type: D.BOOLEAN, defaultValue: true }, created_at: D.DATE, updated_at: D.DATE });
@@ -54,6 +55,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await assert.rejects(discovery.list(inventory), { code: 'broker_binding_invalid' }); afterCall = null;
   await M.update({ isActive: true }, { where: { id: 91 } });
   report.checks.push('A real SQL deactivation during property discovery prevents the response');
+  await require('./fixtures/google_shared_property_mysql.fixture').verifySharedPropertyScope({ sql, models, report, kind: 'analytics',
+    service, mapping, connectionId: 81, setAfterCall: fn => { afterCall = fn; } });
   await G.update({ accessToken: 'FICTITIOUS_SQL_TOKEN', refreshToken: 'FICTITIOUS_SQL_REFRESH' }, { where: { id: 81 } });
   await assert.rejects(service.prepare(mapping), { code: 'broker_binding_invalid' }); assert.equal(tokenReads, 0);
   await G.update({ accessToken: null, refreshToken: null }, { where: { id: 81 } });

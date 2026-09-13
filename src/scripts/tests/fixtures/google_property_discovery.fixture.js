@@ -19,13 +19,14 @@ function propertyFixture(kind = 'analytics') {
     response: kind === 'analytics' ? { ...propertyData } : { siteUrl: SITE.siteUrl, permissionLevel: 'siteOwner' }, allowed: true, session: true, logs: [] };
   const loadMapping = async id => { await state.beforeMapping?.(); return state.mappings.find(row => row.id === id); };
   const deps = { enabled: () => state.enabled, now: () => state.at, loadMapping, loadBindings: async () => state.records,
-    loadBinding: async () => state.records[0], loadConnection: async () => state.connection,
+    loadConnection: async () => state.connection,
     client: { execute: async (command, budget) => { assert(budget.timeoutMs > 0 && budget.timeoutMs <= 30000); state.calls.push(command);
       await state.afterCall?.(); return { data: structuredClone(state.response) }; } } };
   const reader = kind === 'analytics' ? createAnalyticsBroker(deps) : createSearchConsoleBroker(deps);
   const service = createGooglePropertyDiscovery({ readers: { [kind]: reader }, now: () => state.at, enabled: () => state.enabled,
     hasManaged: async () => { if (state.registryFailure) throw Error('FICTITIOUS_SQL_SECRET'); return state.managed; },
-    listBindings: async (_kind, clinicIds, connectionId) => { await state.beforeList?.(); return state.records.filter(row => clinicIds.includes(row.clinica_id) && row.google_connection_id === connectionId); },
+    listBindings: async (_kind, clinicIds, connectionId, effectiveIds = []) => { await state.beforeList?.(); return state.records.filter(row =>
+      (clinicIds.includes(row.clinica_id) || effectiveIds.includes(row.mapping_id)) && row.google_connection_id === connectionId); },
     loadMapping: (_kind, id) => loadMapping(id),
   });
   const request = { kind, connectionId: 81, clinicIds: [71], revalidate: async managed => {

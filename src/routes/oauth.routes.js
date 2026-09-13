@@ -17,6 +17,7 @@ const ClinicMetaAsset = db.ClinicMetaAsset; // <-- Accede al modelo ClinicMetaAs
 const ClinicBusinessLocation = db.ClinicBusinessLocation;
 const businessProfileDiscovery = require('../services/businessProfileDiscovery.service');
 const googlePropertyDiscovery = require('../services/googlePropertyDiscovery.service');
+const googlePropertyInventoryScope = require('../services/googlePropertyInventoryScope.service');
 const googleLegacyCredentials = require('../services/googleLegacyCredentials.service');
 const accessSessions = require('../services/accessSession.service');
 const ClinicGoogleAdsAccount = db.ClinicGoogleAdsAccount;
@@ -571,7 +572,9 @@ async function googlePropertyInventory(req, kind) {
             throw Object.assign(Error('broker_binding_invalid'), { code: 'broker_binding_invalid' });
         }
     };
-    const managed = await googlePropertyDiscovery.list({ kind, clinicIds, connectionId: Number(resolved.connection.id), revalidate });
+    const managed = await googlePropertyDiscovery.list({ kind, clinicIds, connectionId: Number(resolved.connection.id), revalidate,
+        resolveEffectiveMappings: () => googlePropertyInventoryScope.resolve({ kind, clinicIds,
+            connectionId: Number(resolved.connection.id), scopeInput: getScopeInputFromRequest(req) }) });
     if (managed !== null) return { managed, resolved };
     await revalidate(false); await googlePropertyDiscovery.assertLegacyAllowed();
     const connection = await googleLegacyCredentials.load(resolved.connection.id);

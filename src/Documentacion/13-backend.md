@@ -1,5 +1,42 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Propiedades Google con varios mappings y acceso compartido
+
+Los listados SC/GA registrados incluyen mappings propios del ámbito y mappings
+compartidos/primarios seleccionados por el inventario efectivo vigente, siempre
+de la conexión Google resuelta. Reutilizan listScopedGoogleProperties mediante
+un adaptador con proyección SQL y candidatos acotados; no cargan IntakeConfig,
+Meta, credenciales ni otras verticales. No crean ni alteran assignments/mappings.
+
+Una clínica destinataria puede consultar un mapping origen del mismo grupo
+mediante su asignación vigente y permiso write propio; el broker conserva el
+tenant/grant de la clínica origen. No se exige permiso del usuario sobre toda
+la clínica origen. Pertenencia a otro grupo, retirada de asignación/primario o
+cambio del mapping durante la consulta impiden devolver datos. Revalida todos
+los mappings compartidos también después de la última lectura de bindings.
+Las peticiones de grupo mantienen autorización sobre todas sus clínicas.
+
+SC admite ahora varias clínicas por propiedad con PK (site_hash,mapping_id) en
+SearchConsoleBrokerBindings. Cada vínculo tiene estado/grant independiente;
+otro registro bloqueado fuera del ámbito no invalida el propio activo. Cualquier
+registro de la propiedad impide fallback de un mapping que carece de registro
+propio. No se hereda acceso al borrar/recrear otro mapping ID. Un bloqueo del
+broker conserva su ámbito y prevalece. GA mantiene su clave compuesta existente.
+
+Conserva DTO, operaciones y límites de discovery: 20 mappings, cuatro peticiones
+por proceso, 60 s cooperativos y 1 MiB. Candidatos de metadata y filas de registro
+por propiedad: hasta 1.000; superar el límite falla completo. Sesión/permiso y
+refs se revalidan antes/después. Pérdida de autorización compartida o cruce de
+grupo: 403 google_discovery_scope_forbidden; registro/plan cambiado: 409
+broker_binding_invalid; exceso: 409 broker_discovery_limit, incluido el lector GA.
+
+Nueva migración 20260913050000 y dependencias previas al código, incluso apagado;
+conserva filas y down rechaza una tabla con registros. No se ha ejecutado en BD
+compartida. Sin cambios en UI/pausas/jobs ni despliegue. Altas, remapeo, OAuth y
+estado/UI general SC/GA completos siguen pendientes. No cambia el cierre del
+estado Google genérico legacy descrito en el bloque anterior.
+Contrato backend: docs/security/google-shared-property-migration.md.
+
 ## 13/09/2026 — Listado SC/GA de propiedades registradas por broker
 
 GET /oauth/google/assets y /oauth/google/analytics/properties conservan assets/

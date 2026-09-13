@@ -2,7 +2,7 @@
 module.exports = (sequelize, D) => sequelize.define('SearchConsoleBrokerBinding', {
   site_hash: { type: D.CHAR(64), primaryKey: true, allowNull: false },
   site_url: { type: D.STRING(512), allowNull: false },
-  mapping_id: { type: D.INTEGER, allowNull: false },
+  mapping_id: { type: D.INTEGER, primaryKey: true, allowNull: false },
   connection_ref: { type: D.STRING(128), allowNull: false },
   asset_ref: { type: D.STRING(128), allowNull: false },
   clinica_id: { type: D.INTEGER, allowNull: false },

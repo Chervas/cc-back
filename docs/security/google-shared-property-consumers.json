@@ -1,0 +1,148 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-13",
+  "sourceHead": "d316506de5ee182f34368776158f1662a4451462",
+  "includesWorkingChanges": true,
+  "runtimeMigrated": 0,
+  "method": "Reviewed actual sources and isolated Node/HTTP/TLS/MySQL behavior. No runtime, shared database, AWS/provider or OPS verification.",
+  "newMigrations": [
+    "20260913050000"
+  ],
+  "requiredPriorMigrations": [
+    "GBP bindings/revocations",
+    "20260913020000",
+    "20260913030000",
+    "20260913040000",
+    "their dependencies and managed sessions"
+  ],
+  "schemaRequiredBeforeCodeEvenWhenDisabled": true,
+  "ops": "deferred_by_user",
+  "awsInstance": "shutdown_announced_unverified",
+  "pending": [
+    "New property onboarding/remapping and full SC/GA OAuth/disconnect/general status UI",
+    "Other Google/Meta/WABA consumers and remaining legacy loaders",
+    "Complete actor/denial/cache audit and real source/IAM isolation",
+    "Retention, Budget/CloudFormation, Cost Explorer/tags and database encryption/restoration/cut"
+  ],
+  "rows": [
+    {
+      "file": "migrations/20260913050000-scope-search-console-bindings-by-mapping.js",
+      "sha256": "40fe91ec374864696387be65c0295420034f3e7d63a41b12aa7904a3ed61cb1d",
+      "consumers": [
+        "SC durable mapping registry"
+      ],
+      "status": "prepared_schema",
+      "note": "Composite primary key preserves original rows and states; managed down refused. Applied only in owned MySQL."
+    },
+    {
+      "file": "models/searchconsolebrokerbinding.js",
+      "sha256": "2578533b9011a6fd91186468be58b217a63c366603ddac9e49d31523d335da87",
+      "consumers": [
+        "SC ORM identity"
+      ],
+      "status": "prepared_schema",
+      "note": "Both site_hash and mapping_id are primary keys."
+    },
+    {
+      "file": "src/services/searchConsoleBroker.service.js",
+      "sha256": "db75187dba16c6714331d8b2a14f09fe2591c1da24ab040f3025d950cda189b7",
+      "consumers": [
+        "All managed SC report/discovery consumers"
+      ],
+      "status": "prepared_offline",
+      "note": "Exact mapping selected from at most 1,000 property bindings. Any property marker prevents an unregistered mapping from legacy fallback."
+    },
+    {
+      "file": "src/services/googlePropertyDiscovery.service.js",
+      "sha256": "7c49f95d21852fb99c232e281f89cffcced0695d1f0c6a58f475ccb131c919c2",
+      "consumers": [
+        "SC/GA registered discovery"
+      ],
+      "status": "prepared_offline",
+      "note": "Own registrations plus currently effective shared/primary mappings; recipient authorization and original grant, with final full shared inventory recheck."
+    },
+    {
+      "file": "src/services/googlePropertyInventoryScope.service.js",
+      "sha256": "bf1c0b423d18c8c1db9baecdb0f64fb3a766233ca7478bbb9a907c6b3d85662c",
+      "consumers": [
+        "SC/GA shared/primary metadata"
+      ],
+      "status": "prepared_offline",
+      "note": "Existing property selector, bounded explicit projections, one vertical/connection, no intake/Meta, and current same-group source ownership."
+    },
+    {
+      "file": "src/routes/oauth.routes.js",
+      "sha256": "0d8647ab90fe778de04109c3d746418e3a1e35c7158ec477327227e4427f19f1",
+      "consumers": [
+        "SC assets",
+        "GA properties",
+        "GA connection status"
+      ],
+      "status": "prepared_offline",
+      "note": "Managed discovery supplies fresh scope inventory. No token hydration or new assignment mutation in this path."
+    },
+    {
+      "file": "src/services/analyticsBroker.service.js",
+      "sha256": "b7f0e01d382fcac464c71834ae47c40af576023efc7c3f76c3aeacedb213e3ec",
+      "consumers": [
+        "GA discovery caller guards"
+      ],
+      "status": "prepared_offline",
+      "note": "Preserves shared scope denial/limit codes across the adapter."
+    },
+    {
+      "file": "src/services/effectiveMarketingAssets.service.js",
+      "sha256": "64456f1f091b3fbee70c0dbdfc0f737d88933c9ed834b42dc79e254e20afd306",
+      "consumers": [
+        "Property selection rules"
+      ],
+      "status": "unchanged_dependency",
+      "note": "Metadata-only wrapper reuses existing Google property precedence. No product, advertising, intake or Meta changes."
+    },
+    {
+      "file": "src/services/scopeConnectionResolver.service.js",
+      "sha256": "1d774d8c9eb38383edbf4013598fa3f88cde63b73320fd298afcd07635822b68",
+      "consumers": [
+        "Scope normalization and Google metadata identity"
+      ],
+      "status": "unchanged_dependency",
+      "note": "One resolved connection retained. Other legacy callers remain pending."
+    },
+    {
+      "file": "src/jobs/sync.jobs.js",
+      "sha256": "5002a1c4b4e945a2fb2553e53ba977b77d7536c1f3c9f445e9573feca891f7da",
+      "consumers": [
+        "SC sync/backfills"
+      ],
+      "status": "unchanged_consumer",
+      "note": "Managed context prepared per mapping before the legacy connection cache; inherits composite SC registry."
+    },
+    {
+      "file": "src/routes/web.routes.js",
+      "sha256": "3b3dc9925ba58266eb7c4437bad2169313b82e7ce676df5c88632bd98339e79e",
+      "consumers": [
+        "SC report/status readers"
+      ],
+      "status": "unchanged_consumer",
+      "note": "Original physical mapping and effective authorization retained; composite SC reader reused."
+    },
+    {
+      "file": "src/services/googleLegacyCredentials.service.js",
+      "sha256": "e7501cebf7944b2eec5776bd8f489853133db424a62c49fbf5d003a186e022fb",
+      "consumers": [
+        "Google SQL token guard"
+      ],
+      "status": "unchanged_boundary",
+      "note": "Existing OAuth/SC/GA ID or subject guards remain. Composite SC rows do not reopen old credentials."
+    },
+    {
+      "file": "src/services/googleOAuthBrokerScope.service.js",
+      "sha256": "65f43055bb5958c08da936616bb13582eb6cdded10765bea82dc9c7dc466f17d",
+      "consumers": [
+        "GBP OAuth admission"
+      ],
+      "status": "unchanged_admission_guard",
+      "note": "Active SC/GA/Ads restriction preserved; no new OAuth lifecycle admission."
+    }
+  ]
+}

@@ -1,5 +1,15 @@
 # Google: listado de propiedades registradas mediante broker
 
+## Ampliación vigente de mappings y compartidos (13/09/2026)
+
+El [bloque compartido](google-shared-property-migration.md) incorpora PK SC
+(site_hash,mapping_id) con migración 20260913050000 y listado SC/GA mediante
+inventario efectivo de la destinataria. Requiere origen del mismo grupo,
+asignación/primario vigente y grant original; no copia credenciales. Sustituye
+las restricciones de mapping único SC y origen dentro del ámbito directo del
+listado anterior. Las cifras y requisitos de los cortes previos siguientes
+son históricos; este lote añade su DDL y QA, sin activar ni desplegar cohortes.
+
 Preparación local del 13/09/2026 sobre backend `9b576a86` y frontend `83e30496`.
 Runtime migrado: **cero**. No despliegue, migración compartida, AWS ni llamadas
 Google/Meta/WABA reales. OPS aplazado; apagado EC2 anunciado, sin verificar.
@@ -94,11 +104,11 @@ bloqueado dentro del ámbito solicitado impide el listado completo; un vínculo 
 otra clínica excluida no bloquea el suyo. No modifica assignments, inventario
 compartido, mappings ni reglas de publicidad.
 
-**Límite SC existente:** su registro conserva un mapping original por hash de
-propiedad. Este bloque no cambia esa clave ni incorpora clones legítimos de SC.
-El listado exige registros cuya clínica origen esté dentro del ámbito autorizado;
-no incorpora referencias compartidas de clínicas origen externas a ese ámbito.
-Esos casos requieren ampliar el registro/discovery y su contrato antes del corte.
+**Límite del corte original, sustituido por la ampliación vigente:** el listado
+inicial exigía mapping SC único y origen dentro del ámbito directo. La migración
+20260913050000 y el [adaptador compartido](google-shared-property-migration.md)
+permiten varios mappings SC y orígenes del mismo grupo mediante asignación o
+primario efectivo. Cada mapping conserva su registro y grant propios.
 
 ## Frontera legacy y alcance pendiente
 

@@ -10,6 +10,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   models.GoogleOAuthBrokerBinding = require('../../../models/googleoauthbrokerbinding')(sql, D);
   await qi.createTable('ClinicWebAssets', { id: { type: D.INTEGER, primaryKey: true } });
   await require('../../../migrations/20260913030000-add-search-console-broker-read-binding').up(qi, D);
+  await require('../../../migrations/20260913050000-scope-search-console-bindings-by-mapping').up(qi, D);
   models.SearchConsoleBrokerBinding = require('../../../models/searchconsolebrokerbinding')(sql, D);
   await qi.createTable('ClinicAnalyticsProperties', { id: { type: D.INTEGER, primaryKey: true } });
   await require('../../../migrations/20260913040000-add-analytics-broker-read-binding').up(qi, D);

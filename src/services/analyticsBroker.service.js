@@ -4,7 +4,7 @@ const contract = require('../../services/integrations-broker/src/google-analytic
 const discovery = require('../../services/integrations-broker/src/google-property-discovery-contract');
 const { createIntegrationsBrokerClient } = require('../lib/integrationsBrokerClient');
 const CODES = new Set(['broker_binding_invalid', 'broker_cohort_disabled', 'broker_response_invalid', 'broker_configuration_invalid',
-  'google_discovery_session_required', 'google_discovery_scope_forbidden', 'broker_discovery_timeout',
+  'google_discovery_session_required', 'google_discovery_scope_forbidden', 'broker_discovery_timeout', 'broker_discovery_limit',
   'broker_timeout', 'broker_unavailable', 'connection_blocked', 'asset_revoked', 'scope_denied', 'operation_denied', 'invalid_request',
   'secret_unavailable', 'credential_revoked', 'provider_failed', 'provider_timeout', 'provider_unauthorized', 'rate_limited',
   'google_oauth_legacy_closed', 'google_connection_missing', 'google_connection_changed', 'google_credentials_unavailable']);

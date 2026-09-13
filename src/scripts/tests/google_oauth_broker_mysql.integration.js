@@ -36,6 +36,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   table('BusinessProfileBrokerRevocation', 'BusinessProfileBrokerRevocations', { external_location_id: { type: D.STRING, primaryKey: true } });
   for (const name of ['GoogleConnectionAssignment', 'ClinicBusinessLocation', 'BusinessProfileBrokerBinding', 'BusinessProfileBrokerRevocation']) await models[name].sync();
   await require('../../../migrations/20260913030000-add-search-console-broker-read-binding').up(qi, D);
+  await require('../../../migrations/20260913050000-scope-search-console-bindings-by-mapping').up(qi, D);
   models.SearchConsoleBrokerBinding = require('../../../models/searchconsolebrokerbinding')(sql, D);
   await require('../../../migrations/20260913040000-add-analytics-broker-read-binding').up(qi, D);
   models.AnalyticsBrokerBinding = require('../../../models/analyticsbrokerbinding')(sql, D);

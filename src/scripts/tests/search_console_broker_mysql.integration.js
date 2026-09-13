@@ -10,6 +10,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     isActive: { type: D.BOOLEAN, defaultValue: true }, created_at: D.DATE, updated_at: D.DATE });
   const migration = require('../../../migrations/20260913030000-add-search-console-broker-read-binding');
   await migration.up(qi, D); await migration.down(qi, D); await migration.up(qi, D);
+  const composite = require('../../../migrations/20260913050000-scope-search-console-bindings-by-mapping');
+  await composite.up(qi, D); await composite.down(qi, D);
   for (const [name, file] of [['ClinicWebAsset', 'clinicwebasset'], ['SearchConsoleBrokerBinding', 'searchconsolebrokerbinding'],
     ['GoogleOAuthBrokerBinding', 'googleoauthbrokerbinding'], ['GoogleOAuthBrokerRequest', 'googleoauthbrokerrequest']]) models[name] = require('../../../models/' + file)(sql, D);
   report.checks.push('Actual additive migration applies, rolls back while empty and reapplies on isolated MySQL');
@@ -27,7 +29,10 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   report.checks.push('The paired mapping reference constraint rejects a partial marker');
   const binding = { site_hash: resource.siteHash, site_url: resource.siteUrl, mapping_id: 91, connection_ref: 'connection:sc-qa', asset_ref: resource.assetRef,
     clinica_id: 71, google_connection_id: 81, google_user_id: subject, state: 'active' };
-  await B.create(binding); await assert.rejects(migration.down(qi, D));
+  await B.create(binding); await composite.up(qi, D);
+  assert.deepEqual(await B.findOne({ where: { site_hash: resource.siteHash, mapping_id: 91 }, raw: true }), binding);
+  await assert.rejects(composite.down(qi, D)); await assert.rejects(migration.down(qi, D));
+  report.checks.push('Composite SC migration rolls back while empty, preserves populated boundary rows and refuses a managed down');
   let allowTokens = false; let fullReads = 0;
   G.addHook('beforeFind', 'credential_boundary', options => {
     if (options.attributes?.includes('accessToken') || options.attributes?.includes('refreshToken') || !options.attributes) {
@@ -54,6 +59,16 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await assert.rejects(discovery.list(inventory), { code: 'broker_binding_invalid' }); afterCall = null;
   await M.update({ isActive: true }, { where: { id: 91 } });
   report.checks.push('SC discovery drops its full response after a real concurrent mapping deactivation');
+  await require('./fixtures/google_shared_property_mysql.fixture').verifySharedPropertyScope({ sql, models, report, kind: 'search_console',
+    service, mapping, connectionId: 81, setAfterCall: fn => { afterCall = fn; } });
+  const shared = (await M.create({ ...mapping, id: 191, clinicaId: 72 })).get({ plain: true });
+  await B.create({ ...binding, mapping_id: 191, clinica_id: 72 });
+  const sharedContext = await service.prepare(shared);
+  await service.read(shared, sharedContext, 'timeseries', { startDate: '2026-09-01', endDate: '2026-09-02' });
+  assert.equal(calls.at(-1).tenantRef, 'clinic:72');
+  await B.update({ state: 'blocked' }, { where: { site_hash: resource.siteHash, mapping_id: 191 } });
+  await assert.rejects(service.prepare(shared), { code: 'broker_binding_invalid' }); await service.prepare(mapping);
+  report.checks.push('Real SC composite registry admits two clinic mappings and blocks them independently');
   await G.update({ accessToken: 'FICTITIOUS_SQL_TOKEN', refreshToken: 'FICTITIOUS_SQL_REFRESH' }, { where: { id: 81 } });
   await assert.rejects(service.prepare(mapping), { code: 'broker_binding_invalid' }); assert.equal(fullReads, 0);
   await G.update({ accessToken: null, refreshToken: null }, { where: { id: 81 } });
@@ -100,7 +115,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await assert.rejects(create().prepare(recreated), { code: 'broker_binding_invalid' }); await assert.rejects(legacy.load(81), { code: 'google_oauth_legacy_closed' });
   await G.destroy({ where: { id: 81 } }); await connection(81, 'recreated-subject'); await connection(85, subject);
   for (const id of [81, 85]) await assert.rejects(legacy.load(id), { code: 'google_oauth_legacy_closed' });
-  assert.equal(await B.count({ where: { site_hash: resource.siteHash } }), 1);
+  assert.equal(await B.count({ where: { site_hash: resource.siteHash } }), 2);
   report.checks.push('Independent property/identity markers survive mapping and connection deletion/recreation and close alternate SQL IDs');
   await qi.renameTable('SearchConsoleBrokerBindings', 'OfflineHiddenSearchConsoleBindings');
   await assert.rejects(legacy.load(85), { code: 'google_credentials_unavailable' });

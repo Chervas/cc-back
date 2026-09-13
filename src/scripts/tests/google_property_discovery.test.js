@@ -32,17 +32,37 @@ for (const kind of ['search_console', 'analytics']) {
     await assert.rejects(f.service.list(f.request), { code: 'broker_discovery_timeout' }); assert.equal(f.state.calls.length, 0);
   });
 }
-test('GA shared property keeps each clinic grant and deduplicates only the verified public property', async () => {
-  const f = propertyFixture(); f.request.clinicIds.push(72);
-  f.state.records.push({ ...f.record, mapping_id: 92, clinica_id: 72 }); f.state.mappings.push({ ...f.mapping, id: 92, clinicaId: 72 });
-  const output = await f.service.list(f.request); assert.equal(output.length, 1);
-  assert.deepEqual(f.state.calls.map(c => c.tenantRef), ['clinic:71', 'clinic:72']);
-  f.state.records[1].state = 'blocked'; await assert.rejects(f.service.list(f.request), { code: 'broker_binding_invalid' });
-  f.request.clinicIds = [71]; assert.equal((await f.service.list(f.request)).length, 1);
-});
 test('four suspended inventories retain admission slots and release them after completion', async () => {
   const f = propertyFixture(); let release; const wait = new Promise(resolve => { release = resolve; }); f.state.afterCall = () => wait;
   const pending = Array.from({ length: 4 }, () => f.service.list(f.request));
   await new Promise(resolve => setImmediate(resolve)); await assert.rejects(f.service.list(f.request), { code: 'broker_discovery_busy' });
   assert.equal(f.state.calls.length, 4); release(); await Promise.all(pending); await f.service.list(f.request);
 });
+for (const kind of ['search_console', 'analytics']) {
+  test(kind + ' independently registered mappings preserve both clinic grants for one property', async () => {
+    const f = propertyFixture(kind); f.request.clinicIds.push(72);
+    f.state.records.push({ ...f.record, mapping_id: 92, clinica_id: 72 }); f.state.mappings.push({ ...f.mapping, id: 92, clinicaId: 72 });
+    assert.equal((await f.service.list(f.request)).length, 1);
+    assert.deepEqual(f.state.calls.map(row => row.tenantRef), ['clinic:71', 'clinic:72']);
+    f.state.records[1].state = 'blocked'; await assert.rejects(f.service.list(f.request), { code: 'broker_binding_invalid' }); f.request.clinicIds = [71]; assert.equal((await f.service.list(f.request)).length, 1);
+    f.request.clinicIds = [72]; await assert.rejects(f.service.list(f.request), { code: 'broker_binding_invalid' });
+  });
+  test(kind + ' an effective shared mapping is authorized by recipient scope and retains the owner tenant', async () => {
+    const f = propertyFixture(kind); f.request.clinicIds = [72];
+    f.request.resolveEffectiveMappings = async () => f.state.sharedRemoved ? [] : Array.from({ length: f.state.oversized ? 1001 : 1 },
+      () => ({ mapping_id: 91, clinic_id: 71, connection_id: 81, resource: f.mapping.siteUrl || f.mapping.propertyName }));
+    assert.equal((await f.service.list(f.request)).length, 1); assert.equal(f.state.calls[0].tenantRef, 'clinic:71');
+    f.state.afterCall = () => { f.state.sharedRemoved = true; };
+    await assert.rejects(f.service.list(f.request), { code: 'google_discovery_scope_forbidden' });
+    assert.equal(f.state.calls.length, 2);
+    f.state.sharedRemoved = false; f.state.afterCall = () => { f.state.oversized = true; };
+    await assert.rejects(f.service.list(f.request), { code: 'broker_discovery_limit' }); assert.equal(f.state.calls.length, 3);
+  });
+  test(kind + ' final shared inventory check catches removal during the last binding recheck', async () => {
+    const f = propertyFixture(kind); f.request.clinicIds = [72];
+    f.request.resolveEffectiveMappings = async () => f.state.sharedRemoved ? [] : [{ mapping_id: 91, clinic_id: 71,
+      connection_id: 81, resource: f.mapping.siteUrl || f.mapping.propertyName }];
+    f.state.afterCall = () => { let count = 0; f.state.beforeMapping = () => { if (++count === 2) f.state.sharedRemoved = true; }; };
+    await assert.rejects(f.service.list(f.request), { code: 'google_discovery_scope_forbidden' }); assert.equal(f.state.calls.length, 1);
+  });
+}

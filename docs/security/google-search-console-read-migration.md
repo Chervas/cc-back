@@ -1,5 +1,15 @@
 # Search Console: lecturas por broker preparadas
 
+## Ampliación vigente de mappings y compartidos (13/09/2026)
+
+El [bloque compartido](google-shared-property-migration.md) incorpora PK SC
+(site_hash,mapping_id) con migración 20260913050000 y listado SC/GA mediante
+inventario efectivo de la destinataria. Requiere origen del mismo grupo,
+asignación/primario vigente y grant original; no copia credenciales. Sustituye
+las restricciones de mapping único SC y origen dentro del ámbito directo del
+listado anterior. Las cifras y requisitos de los cortes previos siguientes
+son históricos; este lote añade su DDL y QA, sin activar ni desplegar cohortes.
+
 ## Ampliación vigente de discovery (13/09/2026)
 
 El [listado de propiedades registradas](google-property-discovery-migration.md)

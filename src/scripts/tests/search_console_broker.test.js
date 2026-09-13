@@ -4,6 +4,18 @@ const test = require('node:test'); const assert = require('node:assert/strict');
 const { searchConsoleFixture } = require('./fixtures/search_console_broker.fixture');
 const { loadBusinessProfileJobs } = require('./fixtures/business_profile_jobs.fixture');
 const range = { startDate: '2026-09-01', endDate: '2026-09-02' };
+test('SC bindings are independent by mapping while any property marker closes a recreated legacy mapping', async () => {
+  const f = searchConsoleFixture();
+  f.state.otherBindings = [{ ...f.record, mapping_id: 191, clinica_id: 72, state: 'blocked' }];
+  const context = await f.service.prepare(f.mapping); await f.service.read(f.mapping, context, 'timeseries', range);
+  assert.equal(f.state.calls.length, 1);
+  f.state.record = null; f.state.mapping.broker_read_connection_ref = null; f.state.mapping.broker_read_asset_ref = null;
+  await assert.rejects(f.service.prepare(f.mapping), { code: 'broker_binding_invalid' });
+  for (const records of [[{ ...f.record }], Array.from({ length: 1001 }, () => f.record), [{ ...f.record, mapping_id: 0 }]]) {
+    const g = searchConsoleFixture(); g.state.otherBindings = records;
+    await assert.rejects(g.service.prepare(g.mapping), { code: 'broker_binding_invalid' }); assert.equal(g.state.calls.length, 0);
+  }
+});
 test('managed SC context has no tokens and binds current mapping, independent registry and external credential metadata', async () => {
   const f = searchConsoleFixture(); const context = await f.service.prepare(f.mapping); assert.deepEqual(context, {});
   const result = await f.service.read(f.mapping, context, 'timeseries', range); assert.equal(result.data.rows[0].clicks, 2);

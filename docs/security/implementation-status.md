@@ -1,5 +1,25 @@
 # Seguridad: implementación y evidencias
 
+## 13/09/2026 — Propiedades Google con varios mappings y acceso compartido
+
+SC conserva varios vínculos legítimos por propiedad mediante registro compuesto
+site_hash/mapping_id, estados independientes y cierre de recreaciones/fallback.
+Discovery SC/GA incorpora mappings compartidos/primarios vigentes del mismo
+grupo con permiso de la clínica destinataria y grant del origen. Revalida el
+inventario tras cada lectura y al terminar; no carga configuración de otros
+proveedores ni altera assignments, publicidad o UI.
+
+QA ficticia: 188 tests Node (109 backend, 79 broker), 59 checks MySQL propios
+(20 GA, 20 SC, ocho legacy, once OAuth) con cierre 0 y tres contratos, incluido
+scheduler 46 jobs. TLS local de ambas cohortes y hotfix getAssetStats conservados.
+Nueva DDL 20260913050000 y dependencias: **pendiente en BD compartida**, previa
+al código aun desactivado. Ningún despliegue, llamada AWS/proveedor o cambio de
+pausas/OPS; OPS aplazado y apagado EC2 anunciado sin verificar. Ciclo de vida/UI
+completos, otras cohortes, auditoría completa, retención/IAM/Budget/Cost Explorer
+y cifrado/restauración/corte BD siguen abiertos.
+
+[Contrato, QA y lote pendiente](google-shared-property-migration.md).
+
 ## 13/09/2026 — Listado SC/GA de propiedades registradas por broker
 
 Preparados listados SC/GA y estado GA sin tokens SQL para registros gestionados.

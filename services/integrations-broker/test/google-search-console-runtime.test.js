@@ -47,8 +47,8 @@ test('actual SC TLS runtime and backend adapter exchange only metrics, refresh i
   const mapping = { id: 91, clinicaId: 123, googleConnectionId: 81, siteUrl: site.siteUrl, isActive: true,
     broker_read_connection_ref: 'connection:test', broker_read_asset_ref: site.assetRef };
   const consumer = createSearchConsoleBroker({ client, enabled: () => true, loadMapping: async () => mapping,
-    loadBinding: async () => ({ site_hash: site.siteHash, site_url: site.siteUrl, mapping_id: 91, clinica_id: 123, google_connection_id: 81,
-      google_user_id: 'fictitious-subject', connection_ref: 'connection:test', asset_ref: site.assetRef, state: 'active' }),
+    loadBindings: async () => [{ site_hash: site.siteHash, site_url: site.siteUrl, mapping_id: 91, clinica_id: 123, google_connection_id: 81,
+      google_user_id: 'fictitious-subject', connection_ref: 'connection:test', asset_ref: site.assetRef, state: 'active' }],
     loadConnection: async () => ({ id: 81, googleUserId: 'fictitious-subject', credentials_external: 1 }) });
   const context = await consumer.prepare(mapping); assert.deepEqual(context, {});
   const data = (await consumer.read(mapping, context, 'queries', { startDate: '2026-09-01', endDate: '2026-09-02' })).data;

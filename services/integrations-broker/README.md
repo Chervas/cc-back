@@ -1,5 +1,14 @@
 # Broker de integraciones
 
+## Consumidores SC/GA compartidos preparados
+
+SC usa ahora registros SQL compuestos por site_hash/mapping_id y conserva cada
+grant de clínica. Discovery admite el inventario compartido/primario vigente
+del mismo grupo y mantiene tenant del origen. No añade operaciones al broker,
+scopes, claves o recursos. La nueva DDL 20260913050000 pertenece al lote API/BD
+aprobado; no da acceso SQL al broker ni se ejecuta sobre BD compartida.
+[Contrato, QA y pendientes](../../docs/security/google-shared-property-migration.md).
+
 ## Discovery SC/GA registrado preparado, sin activar
 
 Se añaden google.search_console.discovery.read.v1 y

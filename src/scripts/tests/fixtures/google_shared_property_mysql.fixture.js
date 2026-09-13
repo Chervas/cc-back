@@ -1,0 +1,52 @@
+'use strict';
+const assert = require('node:assert/strict'); const { DataTypes: D } = require('sequelize');
+const { loadDiscoverySource } = require('./business_profile_discovery.fixture');
+async function verifySharedPropertyScope({ sql, models, report, kind, service, mapping, connectionId, setAfterCall }) {
+  const qi = sql.getQueryInterface();
+  // Real domain models; only the group metadata columns queried by the selector
+  // are needed here, avoiding unrelated provider FK tables in this owned DB.
+  models.Clinica = require('../../../../models/clinica')(sql, D); await models.Clinica.sync();
+  models.GrupoClinica = require('../../../../models/grupoclinica')(sql, D);
+  const groupColumns = { id_grupo: { type: D.INTEGER, primaryKey: true } };
+  for (const key of ['search_console_assignment_mode', 'analytics_assignment_mode', 'business_profile_assignment_mode']) groupColumns[key] = D.STRING(32);
+  for (const key of ['search_console_primary_asset_id', 'analytics_primary_property_id', 'business_profile_primary_location_id']) groupColumns[key] = D.INTEGER;
+  await qi.createTable('GruposClinicas', groupColumns);
+  models.GroupAssetClinicAssignment = require('../../../../models/groupassetclinicassignment')(sql, D); await models.GroupAssetClinicAssignment.sync();
+  await models.Clinica.bulkCreate([{ id_clinica: 71, grupoClinicaId: 9 }, { id_clinica: 72, grupoClinicaId: 9 }, { id_clinica: 73, grupoClinicaId: 10 }]);
+  await qi.bulkInsert('GruposClinicas', [{ id_grupo: 9, search_console_assignment_mode: 'clinic', analytics_assignment_mode: 'clinic', business_profile_assignment_mode: 'clinic' }]);
+  const blocked = new Proxy({}, { get: () => () => assert.fail('Shared property selection cannot load provider credentials, intake or unrelated assets') });
+  const isolatedModels = { ...models, IntakeConfig: blocked, MetaConnection: blocked, ClinicMetaAsset: blocked, ClinicGoogleAdsAccount: blocked, ClinicBusinessLocation: blocked };
+  const selector = loadDiscoverySource('services/effectiveMarketingAssets.service.js', { '../../models': isolatedModels, sequelize: require('sequelize') });
+  const scopes = loadDiscoverySource('services/scopeConnectionResolver.service.js', { '../../models': isolatedModels, sequelize: require('sequelize') });
+  const { createGooglePropertyInventoryScope } = require('../../../services/googlePropertyInventoryScope.service');
+  const inventory = createGooglePropertyInventoryScope({ models: () => isolatedModels, normalizeScope: scopes.normalizeScope, listProperties: selector.listScopedGoogleProperties });
+  const input = { kind, scopeInput: { clinicIdRaw: 72, groupIdRaw: null, assignmentScopeRaw: 'clinic' }, clinicIds: [72], connectionId };
+  assert.deepEqual(await inventory.resolve(input), []);
+  const assignment = await models.GroupAssetClinicAssignment.create({ grupoClinicaId: 9, clinicaId: 72, assetType: 'google.' + kind, assetId: mapping.id });
+  const metadata = await inventory.resolve(input);
+  assert.deepEqual(metadata, [{ mapping_id: mapping.id, clinic_id: 71, connection_id: connectionId, resource: mapping.siteUrl || mapping.propertyName }]);
+  const { createGooglePropertyDiscovery, createDiscoveryRepository } = require('../../../services/googlePropertyDiscovery.service');
+  const discovery = createGooglePropertyDiscovery({ ...createDiscoveryRepository(() => models), readers: { [kind]: service }, enabled: () => true, hasManaged: async () => true });
+  const request = { kind, clinicIds: [72], connectionId, revalidate: async () => {}, resolveEffectiveMappings: () => inventory.resolve(input) };
+  assert.equal((await discovery.list(request)).length, 1);
+  report.checks.push(kind + ': actual selector, scoped metadata queries and broker reader admit the live shared mapping without unrelated credentials');
+  setAfterCall(() => assignment.destroy());
+  await assert.rejects(discovery.list(request), { code: 'google_discovery_scope_forbidden' }); setAfterCall(null);
+  await assert.rejects(discovery.list(request), { code: 'broker_discovery_scope_unconfigured' });
+  report.checks.push(kind + ': deleting the real SQL shared assignment during discovery withholds the full result and prevents later dispatch');
+  const mode = kind === 'search_console' ? 'search_console_assignment_mode' : 'analytics_assignment_mode';
+  const primary = kind === 'search_console' ? 'search_console_primary_asset_id' : 'analytics_primary_property_id';
+  await models.GrupoClinica.update({ [mode]: 'group', [primary]: mapping.id }, { where: { id_grupo: 9 } });
+  assert.equal((await discovery.list(request)).length, 1);
+  setAfterCall(() => models.GrupoClinica.update({ [primary]: null }, { where: { id_grupo: 9 } }));
+  await assert.rejects(discovery.list(request), { code: 'google_discovery_scope_forbidden' }); setAfterCall(null);
+  report.checks.push(kind + ': current group primary policy participates in discovery and removing it during an await closes access');
+  await models.GrupoClinica.update({ [primary]: mapping.id }, { where: { id_grupo: 9 } });
+  await models.Clinica.update({ grupoClinicaId: 10 }, { where: { id_clinica: 71 } });
+  await assert.rejects(discovery.list(request), { code: 'google_discovery_scope_forbidden' });
+  await models.Clinica.update({ grupoClinicaId: 9 }, { where: { id_clinica: 71 } });
+  report.checks.push(kind + ': a selected primary property whose owner has moved to another group cannot cross that group boundary');
+  await models.GrupoClinica.update({ [mode]: 'clinic', [primary]: null }, { where: { id_grupo: 9 } });
+  assert.deepEqual(await inventory.resolve(input), []);
+}
+module.exports = { verifySharedPropertyScope };
