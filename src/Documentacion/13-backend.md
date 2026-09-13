@@ -1,5 +1,19 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Cierre de credenciales antiguas en consumidores Google Ads
+
+Los consumidores Ads adaptados rechazan identidades marcadas antes de leer tokens
+SQL y cierran la renovación ante marcadores concurrentes. Códigos internos fijos:
+`google_oauth_legacy_closed`, `google_connection_missing`,
+`google_connection_changed`, `google_credentials_unavailable`; cada ruta conserva
+su adaptador de errores. No exponer cuerpos de errores del proveedor/SQL ni tratar
+un fallo de lectura como evidencia de salud. No hay endpoints nuevos.
+
+Sync/backfill y Diagnostics revalidan peticiones; Health revalida sus cachés sin
+renovar ni consultar Google. El broker Ads tipado, los demás consumidores y el
+corte real siguen pendientes. Sin nueva DDL; el esquema Google previo debe existir
+antes del código incluso apagado. Contrato: `docs/security/google-ads-legacy-boundary.md`.
+
 ## 13/09/2026 — Reautorización Google por servicio en API y Ajustes
 
 GET /oauth/google/connect y /oauth/google/connection-status aceptan google_service

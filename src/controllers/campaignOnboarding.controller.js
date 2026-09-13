@@ -1,4 +1,6 @@
 'use strict';
+const { loadGoogleAdsLegacyConnection } = require('../services/googleAdsLegacyConnection.service');
+const googleLegacyCredentials = require('../services/googleLegacyCredentials.service');
 
 const crypto = require('crypto');
 const axios = require('axios');
@@ -1332,12 +1334,13 @@ function asNullableNumber(rawValue) {
   return Number.isFinite(value) ? value : null;
 }
 
-async function ensureGoogleAccessToken(conn, { allowExpired = false } = {}) {
+async function ensureGoogleAccessToken(conn, { allowExpired = false, credentials = googleLegacyCredentials, http = axios } = {}) {
   if (!conn) {
     const err = new Error('No existe conexión Google para este usuario');
     err.code = 'NO_CONNECTION';
     throw err;
   }
+  await credentials.assert(conn);
   if (!conn.accessToken) {
     const err = new Error('No existe access token de Google almacenado');
     err.code = 'NO_TOKEN';
@@ -1349,10 +1352,10 @@ async function ensureGoogleAccessToken(conn, { allowExpired = false } = {}) {
   const now = Date.now();
   const refreshThreshold = now + 60_000;
 
-  const shouldRefresh = conn.refreshToken && (!expiresAt || expiresAt.getTime() <= refreshThreshold);
+  const shouldRefresh = conn.refreshToken && (!expiresAt || !Number.isFinite(expiresAt.getTime()) || expiresAt.getTime() <= refreshThreshold);
   if (shouldRefresh) {
     try {
-      const refreshResp = await axios.post(
+      const refreshResp = await credentials.request(conn, () => http.post(
         'https://oauth2.googleapis.com/token',
         new URLSearchParams({
           client_id: GOOGLE_CLIENT_ID,
@@ -1360,31 +1363,33 @@ async function ensureGoogleAccessToken(conn, { allowExpired = false } = {}) {
           grant_type: 'refresh_token',
           refresh_token: conn.refreshToken
         }).toString(),
-        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
-      );
+        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 8000, maxRedirects: 0 }
+      ));
       const nextToken = refreshResp.data?.access_token;
       const expiresIn = refreshResp.data?.expires_in || 3600;
       if (nextToken) {
         accessToken = nextToken;
         expiresAt = new Date(Date.now() + expiresIn * 1000);
-        await conn.update({ accessToken, expiresAt });
+        await credentials.saveRefresh(conn, { accessToken, expiresAt });
       }
     } catch (refreshErr) {
+      if (['google_oauth_legacy_closed', 'google_connection_missing', 'google_connection_changed', 'google_credentials_unavailable'].includes(refreshErr?.code)) throw refreshErr;
       if (!allowExpired) {
-        const err = new Error(refreshErr.response?.data?.error_description || refreshErr.message || 'No se pudo refrescar el token');
+        const err = new Error('No se pudo refrescar el token');
         err.code = 'REFRESH_FAILED';
         throw err;
       }
     }
   }
 
-  const isExpired = expiresAt ? expiresAt.getTime() <= now : false;
+  const isExpired = expiresAt ? !Number.isFinite(expiresAt.getTime()) || expiresAt.getTime() <= now : false;
   if (isExpired && !allowExpired) {
     const err = new Error('El token de Google ha expirado');
     err.code = 'TOKEN_EXPIRED';
     throw err;
   }
 
+  await credentials.assert(conn);
   return { accessToken, expiresAt, expired: isExpired };
 }
 
@@ -1528,7 +1533,8 @@ async function resolveGoogleCampaignMappingAccess({
   scope,
   customerId,
   accountModel = ClinicGoogleAdsAccount,
-  connectionModel = GoogleConnection
+  connectionModel = GoogleConnection,
+  loadConnection = id => loadGoogleAdsLegacyConnection({ ...db, GoogleConnection: connectionModel }, id)
 }) {
   const normalizedCustomerId = normalizeCustomerId(customerId);
   if (!normalizedCustomerId) {
@@ -1554,7 +1560,7 @@ async function resolveGoogleCampaignMappingAccess({
         : 'google_ads_account_mapping_missing'
     };
   }
-  const connection = await connectionModel.findByPk(connectionIds[0]);
+  const connection = await loadConnection(connectionIds[0]);
   if (!connection || Number(connection.id) !== connectionIds[0]) {
     return { account: null, connection: null, reason: 'google_ads_mapping_connection_missing' };
   }
@@ -10219,6 +10225,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
 });
 
 exports.__test = {
+  ensureGoogleAccessToken,
   ensureConversionActionsInternal,
   CAMPAIGN_MODES,
   IMPROVEMENT_AUTHORIZATION_SCOPES,

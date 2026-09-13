@@ -1,4 +1,5 @@
 'use strict';
+const { loadGoogleAdsLegacyConnection } = require('./googleAdsLegacyConnection.service');
 
 const { loadSignalRoutingScope, resolveWorkspaceSignalRoute } = require('./campaignWorkspaceSignalRouting.service');
 const { resolveWorkspaceWebSignalContext } = require('./campaignWorkspaceWebSignalContext.service');
@@ -14,7 +15,7 @@ const reason = error => /^workspace_[a-z_]+$/.test(error.code || '') ? error.cod
 
 async function resolveWorkspaceGoogleWebContext({ models, clinicId, recordId, customData = {}, eventName, crmEventSource = null,
   now = new Date(), routingScope = null, verifyRoute, webRecords = null,
-  readConnection = id => models.GoogleConnection.findByPk(id) }) {
+  readConnection = id => loadGoogleAdsLegacyConnection(models, id) }) {
   const scope = routingScope || await loadSignalRoutingScope({ models, clinicId });
   const mandates = scope.settings.filter(row => row.activation && row.activation.schema_version !== 1);
   if (!mandates.length) return null;
@@ -87,7 +88,7 @@ async function maybeUploadCampaignGoogleConversion(options = {}) {
         } catch (error) { return { applicable: true, allowed: false, reason: reason(error) }; }
       },
       resolveRuntime: async () => {
-        const connection = await models.GoogleConnection.findByPk(route.connectionId);
+        const connection = await loadGoogleAdsLegacyConnection(models, route.connectionId);
         if (!connection) fail('workspace_google_permissions_required');
         const token = await (dependencies.ensureToken || ensureGoogleConnectionAccessToken)(connection,
           { requiredScopes: [GOOGLE_ADS_SCOPE, GOOGLE_DATA_MANAGER_SCOPE] });

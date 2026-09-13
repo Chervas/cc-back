@@ -1,0 +1,98 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-13",
+  "sourceHead": "b72fe8106f76320afe7ce940dfb4aa4e366bcb1b",
+  "includesWorkingChanges": true,
+  "runtimeMigrated": 0,
+  "newMigrations": [],
+  "ops": "deferred_by_user",
+  "qa": {
+    "nodeTests": 238,
+    "isolatedMysqlChecks": 11,
+    "disconnectContract": "passed_separate_model_fixture",
+    "frontend": "no_ui_changes"
+  },
+  "limitations": [
+    "Not an exhaustive Ads consumer inventory; tracked general inventory remains applicable",
+    "Legacy identities without a marker retain SQL credentials until approved cohort migration",
+    "Typed Ads operations and registry, all per-operation adapters, other integrations and complete platform audit remain pending",
+    "IAM, DPD retention, costs/Budget, actual DB encryption/cut and deployment remain pending"
+  ],
+  "rows": [
+    {
+      "file": "src/services/googleLegacyCredentials.service.js",
+      "sha256": "4561b4b08ed43dbb041358beb4939815088a34fd5d651412430280e908e19be1",
+      "status": "prepared_legacy_guard_not_broker_migrated"
+    },
+    {
+      "file": "src/services/googleAdsLegacyConnection.service.js",
+      "sha256": "5b7dc72a7e6afaecdf391d5b4ecc65beab1d435cbe047320315488e77cb0f77a",
+      "status": "prepared_legacy_guard_not_broker_migrated"
+    },
+    {
+      "file": "src/services/googleAdsScopedRuntime.service.js",
+      "sha256": "49ecb17cffc9b2286dd8ce587d9be307cb5bb041e5151b337d9f90521eb07437",
+      "status": "prepared_legacy_guard_not_broker_migrated"
+    },
+    {
+      "file": "src/services/googleDataManagerDiagnostics.service.js",
+      "sha256": "2963fd7ed9fb8d850ce7370cd5e0bf12eb05fee3cf502330f9a48ccd0862b6f8",
+      "status": "prepared_legacy_guard_not_broker_migrated"
+    },
+    {
+      "file": "src/services/googleLeadReception.service.js",
+      "sha256": "a9f7eed1ad0924e4d3ed77418a6861c5877c4485a99d3d859c8c06e535cb9477",
+      "status": "prepared_legacy_guard_not_broker_migrated"
+    },
+    {
+      "file": "src/services/campaignWorkspaceGooglePreparation.service.js",
+      "sha256": "60d9c3812c3f6d9c10b05c604524a123cc2710b0541db5c412196c53fd5c5194",
+      "status": "prepared_legacy_guard_not_broker_migrated"
+    },
+    {
+      "file": "src/services/campaignWorkspaceGoogleConversion.service.js",
+      "sha256": "dccfa6cc2422340c01f26859737449f448f74d1bcf28d06347613a1d8d726895",
+      "status": "prepared_legacy_guard_not_broker_migrated"
+    },
+    {
+      "file": "src/services/campaignWorkspaceGoogleNative.service.js",
+      "sha256": "22791a2a0eecf1d46dafc2fb53948c12dcd224757139e2e5d7acdd0e52e72d5b",
+      "status": "prepared_legacy_guard_not_broker_migrated"
+    },
+    {
+      "file": "src/services/campaignWorkspaceGoogleSignalEvidence.service.js",
+      "sha256": "35299c03aad3703fb840291e3afe3ce5538d86d6391a4bb3103c89fabd80660b",
+      "status": "prepared_legacy_guard_not_broker_migrated"
+    },
+    {
+      "file": "src/controllers/campaignOnboarding.controller.js",
+      "sha256": "4e56f64f290d81d4a20e94805c165d9864a83170aafbdd2ee40ead87bb22bb80",
+      "status": "prepared_legacy_guard_not_broker_migrated"
+    },
+    {
+      "file": "src/jobs/sync.jobs.js",
+      "sha256": "b8426b59cea06e60c37bf468ac41305f75f3c48014ae916dbe9a459697503536",
+      "status": "prepared_legacy_guard_not_broker_migrated"
+    },
+    {
+      "file": "src/services/scopeConnectionResolver.service.js",
+      "sha256": "1d774d8c9eb38383edbf4013598fa3f88cde63b73320fd298afcd07635822b68",
+      "status": "pending_typed_broker_and_complete_credential_boundary"
+    },
+    {
+      "file": "src/services/googleAdsConversionUpload.service.js",
+      "sha256": "c927db47f17d0136807caf703b5bbe563ae5ca4aed0a74f7c2b537263f360650",
+      "status": "pending_typed_broker_and_complete_credential_boundary"
+    },
+    {
+      "file": "src/lib/googleAdsClient.js",
+      "sha256": "9f8f8c12bf972ceadac956d0d5774d660b87c1562da17038debec7a7d20b735e",
+      "status": "pending_typed_broker_and_complete_credential_boundary"
+    },
+    {
+      "file": "src/services/campaignWorkspaceOptimizationExecution.service.js",
+      "sha256": "e757e27fdbbefc934e2808a2f0aaed6297fbfbca276ddf8cc3fd1437e33671e7",
+      "status": "pending_typed_broker_and_complete_credential_boundary"
+    }
+  ]
+}

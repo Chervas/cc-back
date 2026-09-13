@@ -1,4 +1,5 @@
 'use strict';
+const { installGoogleAdsLegacyModels } = require('./fixtures/google_ads_legacy_models.fixture');
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -89,12 +90,13 @@ function runtime() {
     CampaignWorkspaceSetting: { findOne: async () => state.setting, findByPk: async () => state.setting, findAll: async () => [state.setting] },
     ClinicGoogleAdsAccount: { findAll: async () => [{ id: 1, customerId: '20', assignmentScope: 'clinic', clinicaId: 1, googleConnectionId: 7 }] },
     GoogleConnectionAssignment: { findAll: async () => state.assignments },
-    GoogleConnection: { findByPk: async () => ({ id: 7, accessToken: 'private', expiresAt: '2099-01-01', scopes: GOOGLE_ADS_SCOPE }) },
+    GoogleConnection: { findByPk: async () => ({ id: 7, googleUserId: 'fictitious-subject', accessToken: 'private', expiresAt: '2099-01-01', scopes: GOOGLE_ADS_SCOPE }) },
     ExternalCampaignAssignment: { findAll: async () => [] },
     ExternalCampaignInventory: { findAll: async () => [state.cached], update: async (value, options) => {
       assert.equal(options.transaction, transaction); state.writes.push(value); state.cached = { ...state.cached, ...value };
     } },
   };
+  installGoogleAdsLegacyModels(models);
   const dependencies = { models, scope: { clinicIds: [1] }, actorId: 7, loadInventory: async () => ({ campaigns: [campaign] }),
     hasAccess: async () => state.permitted, now: () => now, ensureToken: async () => ({ accessToken: 'private' }),
     read: async input => { state.beforeRead?.(); return h.read(input); } };

@@ -4,6 +4,7 @@ const axios = require('axios');
 const { Op } = require('sequelize');
 const db = require('../../models');
 const { normalizeCustomerId } = require('../lib/googleAdsClient');
+const googleLegacyCredentials = require('./googleLegacyCredentials.service');
 
 const GOOGLE_ADS_SCOPE = 'https://www.googleapis.com/auth/adwords';
 const GOOGLE_DATA_MANAGER_SCOPE = 'https://www.googleapis.com/auth/datamanager';
@@ -46,9 +47,13 @@ function runtimeError(code, message, httpStatus = 400) {
 
 async function ensureGoogleConnectionAccessToken(connection, {
   axiosClient = axios,
+  credentials = googleLegacyCredentials,
   requiredScopes = [GOOGLE_ADS_SCOPE]
 } = {}) {
   if (!connection) throw runtimeError('NO_SCOPED_CONNECTION', 'No existe conexión Google asignada al scope', 404);
+  // The caller may retain an old instance in memory. Check its captured
+  // identity before reading either token, including the no-refresh path.
+  await credentials.assert(connection);
   const missingScopes = missingGoogleScopes(connection.scopes, requiredScopes);
   if (missingScopes.length) {
     const error = runtimeError(
@@ -68,7 +73,7 @@ async function ensureGoogleConnectionAccessToken(connection, {
   let accessToken = connection.accessToken;
   let expiresAt = connection.expiresAt ? new Date(connection.expiresAt) : null;
   const refreshThreshold = Date.now() + 60_000;
-  const shouldRefresh = !expiresAt || expiresAt.getTime() <= refreshThreshold;
+  const shouldRefresh = !expiresAt || !Number.isFinite(expiresAt.getTime()) || expiresAt.getTime() <= refreshThreshold;
 
   if (!shouldRefresh) return { accessToken, expiresAt };
   if (!connection.refreshToken) {
@@ -82,7 +87,7 @@ async function ensureGoogleConnectionAccessToken(connection, {
   }
 
   try {
-    const response = await axiosClient.post(
+    const response = await credentials.request(connection, () => axiosClient.post(
       'https://oauth2.googleapis.com/token',
       new URLSearchParams({
         client_id: clientId,
@@ -92,21 +97,23 @@ async function ensureGoogleConnectionAccessToken(connection, {
       }).toString(),
       {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        timeout: 8000
+        timeout: 8000,
+        maxRedirects: 0
       }
-    );
+    ));
     if (!response?.data?.access_token) {
       throw runtimeError('REFRESH_FAILED', 'Google no devolvió un access token', 409);
     }
     accessToken = response.data.access_token;
     expiresAt = new Date(Date.now() + Number(response.data.expires_in || 3600) * 1000);
-    await connection.update({ accessToken, expiresAt });
+    await credentials.saveRefresh(connection, { accessToken, expiresAt });
     return { accessToken, expiresAt };
   } catch (error) {
+    if (['google_oauth_legacy_closed', 'google_connection_missing', 'google_connection_changed', 'google_credentials_unavailable'].includes(error?.code)) throw error;
     if (error.code === 'REFRESH_FAILED') throw error;
     throw runtimeError(
       'REFRESH_FAILED',
-      error.response?.data?.error_description || error.message || 'No se pudo refrescar la conexión Google asignada',
+      'No se pudo refrescar la conexión Google asignada',
       409
     );
   }
@@ -145,6 +152,7 @@ async function resolveScopedGoogleAdsRuntime({
   accountModel = db.ClinicGoogleAdsAccount,
   connectionModel = db.GoogleConnection,
   ensureAccessToken = ensureGoogleConnectionAccessToken,
+  credentials = googleLegacyCredentials.forModels({ ...db, GoogleConnection: connectionModel }),
   requiredScopes = [GOOGLE_ADS_SCOPE]
 }) {
   const cleanCustomerId = normalizeCustomerId(customerId);
@@ -183,7 +191,7 @@ async function resolveScopedGoogleAdsRuntime({
       409
     );
   }
-  const connection = await connectionModel.findByPk(connectionIds[0]);
+  const connection = await credentials.load(connectionIds[0], { includeScopes: true });
   if (!connection || Number(connection.id) !== connectionIds[0]) {
     throw runtimeError(
       'NO_SCOPED_CONNECTION',
@@ -195,7 +203,8 @@ async function resolveScopedGoogleAdsRuntime({
     parseInteger(candidate?.googleConnectionId) === connectionIds[0]
   ));
 
-  const token = await ensureAccessToken(connection, { requiredScopes });
+  const token = await ensureAccessToken(connection, { requiredScopes, credentials });
+  await credentials.assert(connection);
   return {
     accessToken: token.accessToken,
     connection,

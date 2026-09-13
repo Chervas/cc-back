@@ -7,6 +7,7 @@ const {
   retrieveRequestStatus
 } = require('./googleDataManagerConversion.service');
 const { ensureGoogleConnectionAccessToken } = require('./googleAdsScopedRuntime.service');
+const googleLegacyCredentials = require('./googleLegacyCredentials.service');
 
 function cleanString(value) {
   if (value === undefined || value === null) return null;
@@ -102,6 +103,7 @@ async function reconcileGoogleDataManagerDiagnostics({
   minAgeMinutes = 30,
   attemptModel = db.GoogleAdsConversionUploadAttempt,
   connectionModel = db.GoogleConnection,
+  credentials = googleLegacyCredentials.forModels({ ...db, GoogleConnection: connectionModel }),
   ensureAccessToken = ensureGoogleConnectionAccessToken,
   retrieveStatus = retrieveRequestStatus,
   now = new Date()
@@ -125,17 +127,17 @@ async function reconcileGoogleDataManagerDiagnostics({
     try {
       const connectionId = Number(attempt.googleConnectionId || 0) || null;
       if (!connectionId) throw Object.assign(new Error('El intento no conserva google_connection_id'), { code: 'CONNECTION_REQUIRED' });
-      let accessToken = tokenCache.get(connectionId);
-      if (!accessToken) {
-        const connection = await connectionModel.findByPk(connectionId);
-        const token = await ensureAccessToken(connection, { requiredScopes: [GOOGLE_DATA_MANAGER_SCOPE] });
-        accessToken = token.accessToken;
-        tokenCache.set(connectionId, accessToken);
+      let cached = tokenCache.get(connectionId);
+      if (!cached) {
+        const connection = await credentials.load(connectionId, { includeScopes: true });
+        const token = await ensureAccessToken(connection, { requiredScopes: [GOOGLE_DATA_MANAGER_SCOPE], credentials });
+        cached = { connection, accessToken: token.accessToken };
+        tokenCache.set(connectionId, cached);
       }
-      const payload = await retrieveStatus({
-        accessToken,
+      const payload = await credentials.request(cached.connection, () => retrieveStatus({
+        accessToken: cached.accessToken,
         requestId: attempt.providerRequestId
-      });
+      }));
       const classified = classifyDiagnostics(payload);
       const previousMetadata = attempt.responseMetadata && typeof attempt.responseMetadata === 'object'
         ? attempt.responseMetadata
@@ -159,6 +161,7 @@ async function reconcileGoogleDataManagerDiagnostics({
       });
       summary[classified.status === 'accepted' ? 'processing' : classified.status] += 1;
     } catch (error) {
+      tokenCache.delete(Number(attempt.googleConnectionId));
       summary.errors += 1;
       const previousMetadata = attempt.responseMetadata && typeof attempt.responseMetadata === 'object'
         ? attempt.responseMetadata

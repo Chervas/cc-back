@@ -1,4 +1,5 @@
 'use strict';
+const { installGoogleAdsLegacyModels } = require('./fixtures/google_ads_legacy_models.fixture');
 
 const { test, mock } = require('node:test');
 const assert = require('node:assert/strict');
@@ -69,6 +70,7 @@ function harness({ group = false } = {}) {
         update: async patch => Object.assign(result, patch) }; state.attempts.push(result); state.onReserve?.(); return result; },
     },
   };
+  installGoogleAdsLegacyModels(models);
   const campaign = { id: `google_ads:${accountId}:200`, provider: 'google_ads', account_id: accountId,
     campaign_id: '200', clinicId: 5, assigned: true, destination: 'native' };
   const googleActions = ['qualified_lead', 'schedule'].map((event, i) => ({ id: String(101 + i),
@@ -275,19 +277,21 @@ test('a queued Google job rechecks its fingerprint after worker validation and a
   }
 });
 
-test('native Google enqueue uses the CRM transaction for every source and authorization read', async () => {
+test('native Google enqueue locks source scope in CRM transaction and reads credential guards from current state', async () => {
   const h = harness({ group: true }); await h.initialize(); const queue = nativeQueue(h);
-  const transaction = { LOCK: { UPDATE: 'UPDATE' } }; let reads = 0;
-  for (const model of Object.values(h.models)) for (const method of ['findByPk', 'findAll', 'findOne']) {
+  const transaction = { LOCK: { UPDATE: 'UPDATE' } }; let reads = 0; let currentReads = 0;
+  for (const [name, model] of Object.entries(h.models)) for (const method of ['findByPk', 'findAll', 'findOne']) {
     if (typeof model[method] !== 'function') continue;
     const original = model[method];
     model[method] = async (...args) => {
       const query = method === 'findByPk' ? args[1] : args[0];
-      assert.equal(query?.transaction, transaction, method); reads++;
+      if ((name === 'GoogleConnection' || /BrokerBinding$|BrokerRevocation$/.test(name)) && query?.transaction === undefined) {
+        assert.ok(query.attributes?.length); currentReads++;
+      } else { assert.equal(query?.transaction, transaction, method); reads++; }
       return original(...args);
     };
   }
-  assert.equal((await queue.enqueue({}, { transaction })).queued, true); assert.ok(reads >= 10);
+  assert.equal((await queue.enqueue({}, { transaction })).queued, true); assert.ok(reads >= 10); assert.ok(currentReads >= 5);
   assert.equal(h.state.uploads.length, 0);
 });
 

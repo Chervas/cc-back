@@ -1,4 +1,5 @@
 'use strict';
+const { installGoogleAdsLegacyModels } = require('./fixtures/google_ads_legacy_models.fixture');
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -34,6 +35,7 @@ function harness() {
     GoogleConnectionAssignment: { findAll: async () => state.assignments.filter(row => row.status === 'active') },
     GoogleConnection: { findByPk: async () => state.connection },
   };
+  installGoogleAdsLegacyModels(models);
   const dependencies = { models, scope, actorId: 7, now: () => state.date, hasAccess: async () => state.allowed,
     ensureToken: async (_, options) => { assert.equal(options.requiredScopes.length, 2); return { accessToken: 'fake-token' }; },
     list: async () => { state.calls.push('list'); return { actions: state.actions, clinicaclick_mapping: buildClinicaclickManagedMapping(state.actions) }; },

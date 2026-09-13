@@ -40,6 +40,8 @@ function credentialsFixture() {
     .some(clause => Object.entries(clause).every(([k, v]) => row[k] === v))) || null };
   const create = () => ({ ...createGoogleLegacyCredentials({ connectionModel, bindingModel, searchConsoleModel, analyticsModel, propertyRevocationModel }), safe });
   add();
-  return { state, add, create, credentials: create(), mark: (id = 81, subject = 'fictitious-subject') => state.markers.push({ google_connection_id: id, google_user_id: subject }) };
+  const models = { GoogleConnection: connectionModel, GoogleOAuthBrokerBinding: bindingModel,
+    SearchConsoleBrokerBinding: searchConsoleModel, AnalyticsBrokerBinding: analyticsModel, GooglePropertyBrokerRevocation: propertyRevocationModel };
+  return { state, add, create, models, credentials: create(), mark: (id = 81, subject = 'fictitious-subject') => state.markers.push({ google_connection_id: id, google_user_id: subject }) };
 }
 module.exports = { credentialsFixture };

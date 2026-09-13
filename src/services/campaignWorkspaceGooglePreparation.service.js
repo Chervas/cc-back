@@ -1,4 +1,5 @@
 'use strict';
+const { loadGoogleAdsLegacyConnection } = require('./googleAdsLegacyConnection.service');
 
 const crypto = require('node:crypto');
 const { Op } = require('sequelize');
@@ -56,7 +57,7 @@ async function googlePreparationContext({ models, scope, accountId, transaction 
   const grantIds = new Set(eligible.map(row => Number(row.googleConnectionId)));
   const loginIds = new Set(eligible.map(row => String(row.loginCustomerId || row.managerCustomerId || '').replace(/\D/g, '')));
   if (grantIds.size !== 1 || loginIds.size !== 1) fail('workspace_google_connection_ambiguous');
-  const connection = await models.GoogleConnection.findByPk(eligible[0].googleConnectionId, options);
+  const connection = await loadGoogleAdsLegacyConnection(models, eligible[0].googleConnectionId, options);
   if (!connection?.accessToken || missingGoogleScopes(connection.scopes, REQUIRED_SCOPES).length) fail('workspace_google_permissions_required');
   const relevantAssignments = assignments.filter(assignment => eligible.some(row => assignment.scopeKey === key(row)
     && Number(assignment.googleConnectionId) === Number(row.googleConnectionId)));

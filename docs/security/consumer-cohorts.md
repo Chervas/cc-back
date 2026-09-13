@@ -1,5 +1,18 @@
 # Inventario de consumidores y plan de corte
 
+## 13/09/2026 — Cierre de credenciales antiguas en consumidores Google Ads
+
+La carga/renovación Ads preparada consulta los marcadores durables de Google
+antes de leer o guardar tokens. Sync/backfill revalida cada petición; Diagnostics
+y Health comprueban sus cachés. Conserva selección clínica/grupo y grants ambiguos.
+QA aislada: 238 tests Node, contrato de desconexión separado y 11 comprobaciones
+MySQL con cierre 0. Hotfix conservado. Ads aún necesita su adaptador al broker;
+los consumidores legacy sin marcador no están migrados. Sin nueva DDL, UI,
+despliegue o proveedor real. Esquema Google previo obligatorio incluso apagado.
+OPS sigue aplazado; costes/retención/IAM/Budget y corte de BD pendientes.
+
+[Contrato, evidencia y límites](google-ads-legacy-boundary.md).
+
 ## 13/09/2026 — Reautorización Google por servicio en API y Ajustes
 
 La reautorización preparada separa Business Profile, Search Console y Analytics

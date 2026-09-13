@@ -67,4 +67,27 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await assert.rejects(create().load(86), { message: 'google_credentials_unavailable', code: 'google_credentials_unavailable' });
   await qi.renameTable('OfflineHiddenOAuthBindings', 'GoogleOAuthBrokerBindings');
   report.checks.push('Missing migration fails closed with a fixed error, with no fallback to tokens');
+  const { loadGoogleAdsLegacyConnection } = require('../../services/googleAdsLegacyConnection.service');
+  await row(87); await G.update({ scopes: 'https://www.googleapis.com/auth/adwords' }, { where: { id: 87 } });
+  assert.equal((await loadGoogleAdsLegacyConnection(models, 87)).scopes, 'https://www.googleapis.com/auth/adwords');
+  const readsBeforeSubjectCheck = fullReads;
+  await assert.rejects(service.load(87, { includeScopes: true, expectedSubject: 'wrong-subject' }), { code: 'google_connection_changed' });
+  assert.equal(fullReads, readsBeforeSubjectCheck);
+  report.checks.push('Ads projection includes scopes and rejects an unexpected captured subject before credential SELECT');
+  const transaction = await sql.transaction();
+  try {
+    await G.findByPk(87, { attributes: ['id', 'googleUserId'], transaction });
+    await mark(87);
+    const beforeAdsLoad = fullReads;
+    await assert.rejects(loadGoogleAdsLegacyConnection(models, 87, { transaction }), { code: 'google_oauth_legacy_closed' });
+    assert.equal(fullReads, beforeAdsLoad);
+    report.checks.push('An old REPEATABLE READ scope transaction cannot hide a newly committed marker from Ads credential loading');
+  } finally { await transaction.rollback(); }
+  await row(88);
+  const locked = await sql.transaction();
+  try {
+    const connection = await loadGoogleAdsLegacyConnection(models, 88, { transaction: locked, lock: locked.LOCK.UPDATE });
+    assert.equal(connection.accessToken, 'FICTITIOUS_ACCESS_88');
+    report.checks.push('Ads identity row lock remains in the caller transaction while guarded credential SELECT uses current state');
+  } finally { await locked.rollback(); }
 }).catch(() => { process.exitCode = 1; });

@@ -36,6 +36,7 @@ const url = `${META_API_BASE_URL}/...`;
 const { metaGet } = require('../lib/metaClient');
 const { buildClinicMatcher } = require('../lib/clinicAttribution');
 const { googleAdsRequest, getGoogleAdsUsageStatus, resumeGoogleAdsUsage, ensureGoogleAdsConfig, normalizeCustomerId, formatCustomerId } = require('../lib/googleAdsClient');
+const { ensureGoogleConnectionAccessToken: ensureGoogleAdsConnectionAccessToken } = require('../services/googleAdsScopedRuntime.service');
 const {
   buildCampaignLevelMetricsQuery,
   prepareCampaignLevelFallbackRows,
@@ -52,6 +53,7 @@ const { saveObservedGoogleDestination } = require('../services/campaignWorkspace
 const googleAdCache = require('../services/googleAdCache.service');
 const googleCampaignMetricsCache = require('../services/googleCampaignMetricsCache.service');
 const { googleAdsSearchRows } = require('../lib/googleAdsSearchRows');
+const { guardGoogleAdsLegacyRequest } = require('../services/googleAdsLegacyConnection.service');
 const notificationService = require('../services/notifications.service');
 const { enqueueSyncForAllWabas } = require('../services/whatsappTemplates.service');
 const { enqueueSyncPhonesForAllWabas } = require('../services/whatsappPhones.service');
@@ -4538,7 +4540,7 @@ try {
           ]
         },
         include: [
-          { model: GoogleConnection, as: 'googleConnection' },
+          { model: GoogleConnection, as: 'googleConnection', attributes: ['id', 'googleUserId'] },
           { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'] }
         ]
       });
@@ -4677,7 +4679,7 @@ try {
           ]
         },
         include: [
-          { model: GoogleConnection, as: 'googleConnection' },
+          { model: GoogleConnection, as: 'googleConnection', attributes: ['id', 'googleUserId'] },
           { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'] }
         ]
       });
@@ -4754,38 +4756,14 @@ try {
     if (!conn) {
       throw new Error('No existe conexión Google asociada');
     }
-    if (!conn.accessToken) {
-      throw new Error('No existe access token Google almacenado');
-    }
-    let accessToken = conn.accessToken;
-    let expiresAt = conn.expiresAt ? new Date(conn.expiresAt) : null;
-    const now = Date.now();
-    const threshold = now + 60_000;
-
-    if (conn.refreshToken && (!expiresAt || expiresAt.getTime() <= threshold)) {
-      try {
-        const tr = await syncHttp.post('https://oauth2.googleapis.com/token', new URLSearchParams({
-          client_id: process.env.GOOGLE_CLIENT_ID,
-          client_secret: process.env.GOOGLE_CLIENT_SECRET,
-          grant_type: 'refresh_token',
-          refresh_token: conn.refreshToken
-        }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-        const newToken = tr.data?.access_token;
-        const expiresIn = tr.data?.expires_in || 3600;
-        if (newToken) {
-          accessToken = newToken;
-          expiresAt = new Date(Date.now() + expiresIn * 1000);
-          await conn.update({ accessToken, expiresAt });
-        }
-      } catch (err) {
-        console.error('❌ Error refrescando token Google Ads:', err.message);
-        throw err;
-      }
-    }
-    return accessToken;
+    const connection = await googleLegacyCredentials.load(conn.id, { includeScopes: true, expectedSubject: conn.googleUserId });
+    const token = await ensureGoogleAdsConnectionAccessToken(connection, { axiosClient: syncHttp, credentials: googleLegacyCredentials });
+    return token.accessToken;
   }
 
   async _syncGoogleAdsAccount(account, { start, end, chunkDays = 7, accessToken, report }) {
+    const request = guardGoogleAdsLegacyRequest(account.googleConnection, googleAdsRequest);
+    await googleLegacyCredentials.assert(account.googleConnection);
     const managerId = ensureGoogleAdsConfig().managerId;
     const effectiveLoginCustomerId = normalizeCustomerId(account.loginCustomerId || account.managerCustomerId || managerId);
     if (!effectiveLoginCustomerId) throw new Error('google_ads_missing_login_customer');
@@ -4799,22 +4777,25 @@ try {
         const slice = days.slice(offset, offset + 60);
         const snapshot = await googleCampaignMetricsCache.collectGoogleCampaignMetrics({
           account, accessToken, loginCustomerId: effectiveLoginCustomerId, start: slice[0], end: slice.at(-1),
+          read: options => googleAdsSearchRows({ ...options, request }),
         });
+        await googleLegacyCredentials.assert(account.googleConnection);
         const saved = await googleCampaignMetricsCache.persistGoogleCampaignMetrics({
           models, account, snapshot, useGroupAttribution: true,
         });
         persistedMetricsRows += saved.rows;
       }
       const publishing = await this._syncGoogleAdsPublishingState(account, {
-        accessToken, effectiveLoginCustomerId, report,
+        accessToken, effectiveLoginCustomerId, report, request,
       });
       persistedInventoryRows = publishing.rows;
       adCache = await googleAdCache.syncGoogleAdCache({ models, account, accessToken,
         loginCustomerId: effectiveLoginCustomerId, start, end, chunkDays, ensureHistory: true,
-        request: (method, route, options) => googleAdsRequest(method, route, {
+        request: (method, route, options) => request(method, route, {
           ...options, apiVersion: googleCampaignMetricsCache.API_VERSION,
         }),
       });
+      await googleLegacyCredentials.assert(account.googleConnection);
       if (publishing.destinationError) throw publishing.destinationError;
       report?.notes?.push?.(`Google Ads anuncios: ${adCache.inventoryRows} inventariados, ${adCache.metricRows} filas diarias, ${adCache.days || 0} fechas completas${adCache.skipped ? ' (otra captura mas reciente)' : ''}.`);
       return { complete: true, rows: persistedMetricsRows + adCache.metricRows,
@@ -4827,7 +4808,8 @@ try {
     }
   }
 
-  async _syncGoogleAdsPublishingState(account, { accessToken, effectiveLoginCustomerId, report }) {
+  async _syncGoogleAdsPublishingState(account, { accessToken, effectiveLoginCustomerId, report,
+    request = guardGoogleAdsLegacyRequest(account.googleConnection, googleAdsRequest) }) {
     const customerId = normalizeCustomerId(account.customerId);
     const query = [
       'SELECT',
@@ -4848,7 +4830,7 @@ try {
     let persistedInventoryRows = 0;
     const campaignRows = await googleAdsSearchRows({ customerId, accessToken,
       loginCustomerId: effectiveLoginCustomerId, apiVersion: googleCampaignMetricsCache.API_VERSION,
-      query: `${query} LIMIT 5001`, request: googleAdsRequest });
+      query: `${query} LIMIT 5001`, request });
     if (campaignRows.length > 5000 || campaignRows.some(row => !/^[1-9]\d*$/.test(String(row?.campaign?.id || '')))) {
       throw new Error('google_ads_inventory_incomplete');
     }
@@ -4887,6 +4869,7 @@ try {
         accessToken,
         effectiveLoginCustomerId,
         campaignRows,
+        request,
       });
     } catch (error) {
       // Finish the independent ad cache, but do not label the whole account complete.
@@ -4896,6 +4879,7 @@ try {
       );
     }
 
+    await googleLegacyCredentials.assert(account.googleConnection);
     await updateGoogleAdsSyncMetadata(ClinicGoogleAdsAccount, account, {
       publishingStatus: selectedIssue?.status || null,
       publishingReason: selectedIssue?.reason || null,
@@ -4916,6 +4900,7 @@ try {
     accessToken,
     effectiveLoginCustomerId,
     campaignRows = [],
+    request = guardGoogleAdsLegacyRequest(account.googleConnection, googleAdsRequest),
   }) {
     if (!ExternalCampaignInventory || !campaignRows.length) return 0;
     const customerId = normalizeCustomerId(account.customerId);
@@ -4933,7 +4918,7 @@ try {
 
     const landingRows = await googleAdsSearchRows({ customerId, accessToken,
       loginCustomerId: effectiveLoginCustomerId, apiVersion: googleCampaignMetricsCache.API_VERSION,
-      query, request: googleAdsRequest });
+      query, request });
 
     const detections = buildGoogleDestinationDetections({
       campaignRows,
@@ -4969,7 +4954,7 @@ try {
     let fallbackRows = 0;
     let pageToken = null;
     do {
-      const resp = await googleAdsRequest('POST', `customers/${customerId}/googleAds:search`, {
+      const resp = await guardGoogleAdsLegacyRequest(account.googleConnection, googleAdsRequest)('POST', `customers/${customerId}/googleAds:search`, {
         accessToken,
         loginCustomerId: effectiveLoginCustomerId,
         data: { query, pageToken }

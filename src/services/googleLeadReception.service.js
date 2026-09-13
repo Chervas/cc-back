@@ -1,4 +1,5 @@
 'use strict';
+const { loadGoogleAdsLegacyConnection } = require('./googleAdsLegacyConnection.service');
 
 const crypto = require('node:crypto');
 const { Op } = require('sequelize');
@@ -99,7 +100,7 @@ async function receptionAccount({ models, settingId, accountId, transaction = nu
   const eligible = authorized.filter(account => members.some(clinic => covers(account, clinic)));
   if (!eligible.length || new Set(eligible.map(row => Number(row.googleConnectionId))).size !== 1
     || new Set(eligible.map(row => row.loginCustomerId || row.managerCustomerId || null)).size !== 1) fail('google_lead_account_access_required');
-  const connection = await models.GoogleConnection.findByPk(eligible[0].googleConnectionId, options);
+  const connection = await loadGoogleAdsLegacyConnection(models, eligible[0].googleConnectionId, options);
   if (!connection?.accessToken || missingGoogleScopes(connection.scopes, [GOOGLE_ADS_SCOPE]).length
     || (!Number.isFinite(+new Date(connection.expiresAt)) || +new Date(connection.expiresAt) <= +now) && !connection.refreshToken) fail('google_lead_account_access_required');
   const loginCustomerId = eligible[0].loginCustomerId || eligible[0].managerCustomerId || null;

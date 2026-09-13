@@ -1,4 +1,5 @@
 'use strict';
+const { installGoogleAdsLegacyModels } = require('./fixtures/google_ads_legacy_models.fixture');
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -46,6 +47,7 @@ function harness() {
       return match && match.scopeKey === where.scopeKey && match.googleConnectionId === where.googleConnectionId && match.status === where.status ? match : null;
     } }, CampaignWorkspaceSetting: { findByPk: async () => state.setting },
   };
+  installGoogleAdsLegacyModels(models);
   const campaign = { id: 'google_ads:123:7', provider: 'google_ads', account_id: '123', campaign_id: '7', assigned: true, clinicId: 1 };
   const run = extra => loadGoogleSignalEvidence({ models, campaigns: [campaign], selectedClinics: state.selectedClinics, now, ...extra });
   return { state, record, row, runtime, policy, proof, models, campaign, run, now };
@@ -95,7 +97,7 @@ test('uploader, persisted diagnostics and Health share the same delivery contrac
   h.state.rows = audits;
   assert.equal((await h.run()).get(h.campaign.id).processing, 1);
   const result = await reconcileGoogleDataManagerDiagnostics({ attemptModel: auditModel,
-    connectionModel: h.models.GoogleConnection, now: h.now, ensureAccessToken: async () => ({ accessToken: 'test-only' }),
+    connectionModel: h.models.GoogleConnection, credentials: require('../../services/googleLegacyCredentials.service').forModels(h.models), now: h.now, ensureAccessToken: async () => ({ accessToken: 'test-only' }),
     retrieveStatus: async ({ requestId }) => {
       assert.equal(requestId, 'pipeline-request');
       return { requestStatusPerDestination: [{ destination: { operatingAccount: { accountId: '123' }, productDestinationId: '900' },
@@ -224,7 +226,7 @@ test('current Google action selection keeps multiple destinations separate', asy
 });
 test('database failures remain failures, not a healthy or empty response', async () => {
   const h = harness(); h.models.GoogleConnection.findByPk = async () => { throw new Error('database unavailable'); };
-  await assert.rejects(h.run(), /database unavailable/);
+  await assert.rejects(h.run(), { code: 'google_credentials_unavailable', message: 'google_credentials_unavailable' });
 });
 test('health aggregates both providers once and retains incomplete campaign coverage', async () => {
   const h = harness(); const google = (await h.run()).get(h.campaign.id);

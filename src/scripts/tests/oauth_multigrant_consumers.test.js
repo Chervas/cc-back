@@ -41,7 +41,8 @@ async function testGoogleCampaignUsesExactMappedGrant() {
     scope: CLINIC_SCOPE,
     customerId: '111-111-1111',
     accountModel,
-    connectionModel
+    connectionModel,
+    loadConnection: id => connectionModel.findByPk(id)
   });
   assert.equal(ambiguous.connection, null);
   assert.equal(ambiguous.reason, 'google_ads_account_mapping_ambiguous');
@@ -51,7 +52,8 @@ async function testGoogleCampaignUsesExactMappedGrant() {
     scope: CLINIC_SCOPE,
     customerId: '222-222-2222',
     accountModel,
-    connectionModel
+    connectionModel,
+    loadConnection: id => connectionModel.findByPk(id)
   });
   assert.equal(directOverride.account.googleConnectionId, 11);
   assert.equal(directOverride.connection.accessToken, 'google-token-11');

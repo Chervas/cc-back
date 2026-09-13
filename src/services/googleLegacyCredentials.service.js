@@ -41,9 +41,9 @@ function createGoogleLegacyCredentials({ connectionModel, bindingModel, searchCo
   };
   const service = {
     assert: guarded(async connection => { await captured(connection); }),
-    load: guarded(async connectionId => {
-      const metadata = await check(connectionId);
-      const connection = await connectionModel.findOne({ attributes: ['id', 'googleUserId', 'accessToken', 'refreshToken', 'expiresAt'],
+    load: guarded(async (connectionId, { includeScopes = false, expectedSubject } = {}) => {
+      const metadata = await check(connectionId, expectedSubject);
+      const connection = await connectionModel.findOne({ attributes: ['id', 'googleUserId', 'accessToken', 'refreshToken', 'expiresAt', ...(includeScopes === true ? ['scopes'] : [])],
         where: { id: metadata.id, googleUserId: metadata.googleUserId, [Op.and]: exclusion('GoogleConnection') }, logging: false });
       if (!connection) { await check(metadata.id, metadata.googleUserId); fail('google_connection_changed'); }
       await check(connection.id, connection.googleUserId);
@@ -69,11 +69,14 @@ function createGoogleLegacyCredentials({ connectionModel, bindingModel, searchCo
   return service;
 }
 let singleton;
-function instance() {
-  const models = require('../../models');
-  return singleton ||= createGoogleLegacyCredentials({ connectionModel: models.GoogleConnection, bindingModel: models.GoogleOAuthBrokerBinding,
+function forModels(models) {
+  return createGoogleLegacyCredentials({ connectionModel: models.GoogleConnection, bindingModel: models.GoogleOAuthBrokerBinding,
     searchConsoleModel: models.SearchConsoleBrokerBinding, analyticsModel: models.AnalyticsBrokerBinding, propertyRevocationModel: models.GooglePropertyBrokerRevocation });
 }
-module.exports = { createGoogleLegacyCredentials, safe,
+function instance() {
+  const models = require('../../models');
+  return singleton ||= forModels(models);
+}
+module.exports = { createGoogleLegacyCredentials, forModels, safe,
   ...Object.fromEntries(['assert', 'load', 'saveRefresh', 'request'].map(name => [name, (...args) => instance()[name](...args)])),
 };

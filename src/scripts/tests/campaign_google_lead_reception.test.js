@@ -1,4 +1,5 @@
 'use strict';
+const { installGoogleAdsLegacyModels } = require('./fixtures/google_ads_legacy_models.fixture');
 
 const { test, mock } = require('node:test');
 const assert = require('node:assert/strict');
@@ -54,6 +55,7 @@ function harness({ group = false } = {}) {
       try { return await fn(transaction); } catch (error) { Object.assign(state, snapshot); state.rollback++; throw error; }
     } },
   };
+  installGoogleAdsLegacyModels(models);
   const dependencies = { models, env: state.env, now: () => NOW,
     ensureToken: async connection => { if (state.onToken) state.onToken(); return { accessToken: connection.accessToken }; },
     search: async options => { state.queries.push(options); if (state.onSearch) state.onSearch();

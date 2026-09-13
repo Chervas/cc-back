@@ -1,4 +1,5 @@
 'use strict';
+const { loadGoogleAdsLegacyConnection } = require('./googleAdsLegacyConnection.service');
 
 const crypto = require('node:crypto');
 const { Op } = require('sequelize');
@@ -108,7 +109,7 @@ async function maybeUploadNativeGoogleLifecycleConversion(input, dependencies = 
       resolveWorkspaceSignalPolicy: revalidate,
       googleDeliveryContext: () => googleWorkspaceNativeDeliveryContext({ context }),
       resolveRuntime: async () => {
-        const connection = await models.GoogleConnection.findByPk(context.route.connectionId);
+        const connection = await loadGoogleAdsLegacyConnection(models, context.route.connectionId);
         if (!connection) fail('workspace_google_permissions_required');
         const token = await (dependencies.ensureToken || ensureGoogleConnectionAccessToken)(connection,
           { requiredScopes: [GOOGLE_ADS_SCOPE, GOOGLE_DATA_MANAGER_SCOPE] });
