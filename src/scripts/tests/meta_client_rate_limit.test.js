@@ -35,7 +35,7 @@ test('metaGet respeta la pausa persistida sin llamar a Graph', async () => {
   }
 });
 
-test('metaGet corta el lote en el primer rate limit y persiste cooldown', async () => {
+test('metaGet remains quarantined when the rate-limit pause is absent', async () => {
   metaClient._test.resetState();
   let graphCalls = 0;
   const counter = {
@@ -65,11 +65,11 @@ test('metaGet corta el lote en el primer rate limit y persiste cooldown', async 
   try {
     await assert.rejects(
       () => metaClient.metaGet('me', { accessToken: 'test-token' }),
-      (error) => error.metaRateLimited === true && error.pauseUntil instanceof Date
+      (error) => error.code === 'meta_security_quarantine'
     );
-    assert.equal(graphCalls, 1);
-    assert.equal(counter.usagePct, 100);
-    assert.ok(new Date(counter.pauseUntil).getTime() > Date.now());
+    assert.equal(graphCalls, 0);
+    assert.equal(counter.usagePct, 0);
+    assert.equal(counter.pauseUntil, null);
   } finally {
     if (previousDelay === undefined) delete process.env.METASYNC_REQUEST_DELAY_MS;
     else process.env.METASYNC_REQUEST_DELAY_MS = previousDelay;
@@ -78,7 +78,7 @@ test('metaGet corta el lote en el primer rate limit y persiste cooldown', async 
   }
 });
 
-test('interactive Meta checks can disable retries without bypassing the shared client', async () => {
+test('interactive Meta checks cannot bypass quarantine through retry settings', async () => {
   metaClient._test.resetState();
   let calls = 0;
   const restores = [
@@ -88,8 +88,8 @@ test('interactive Meta checks can disable retries without bypassing the shared c
   const previousDelay = process.env.METASYNC_REQUEST_DELAY_MS;
   process.env.METASYNC_REQUEST_DELAY_MS = '0';
   try {
-    await assert.rejects(metaClient.metaGet('30/ads', { accessToken: 'test-token', maxRetries: 0 }), /provider unavailable/);
-    assert.equal(calls, 1);
+    await assert.rejects(metaClient.metaGet('30/ads', { accessToken: 'test-token', maxRetries: 0 }), /meta_security_quarantine/);
+    assert.equal(calls, 0);
   } finally {
     if (previousDelay === undefined) delete process.env.METASYNC_REQUEST_DELAY_MS;
     else process.env.METASYNC_REQUEST_DELAY_MS = previousDelay;
@@ -97,7 +97,7 @@ test('interactive Meta checks can disable retries without bypassing the shared c
   }
 });
 
-test('page subscription writes respect the shared quota and never retry an ambiguous provider response', async () => {
+test('page subscription writes remain closed after the quota pause expires', async () => {
   metaClient._test.resetState(); let calls = 0; let paused = true;
   const restores = [
     patchProperty(db.ApiUsageCounter, 'findOne', async () => paused ? { pauseUntil: new Date(Date.now() + 60000) } : null),
@@ -111,8 +111,8 @@ test('page subscription writes respect the shared quota and never retry an ambig
   try {
     await assert.rejects(metaClient.metaSubscribePage('40', ['messages', 'leadgen'], { accessToken: 'private' }), { code: 'META_RATE_LIMIT_PAUSED' });
     assert.equal(calls, 0); paused = false; metaClient._test.resetState();
-    await assert.rejects(metaClient.metaSubscribePage('40', ['messages', 'leadgen'], { accessToken: 'private', maxRetries: 3 }), /ambiguous provider response/);
-    assert.equal(calls, 1);
+    await assert.rejects(metaClient.metaSubscribePage('40', ['messages', 'leadgen'], { accessToken: 'private', maxRetries: 3 }), /meta_security_quarantine/);
+    assert.equal(calls, 0);
     assert.throws(() => metaClient.metaSubscribePage('../me', ['leadgen']), /invalid_page_subscription/);
   } finally {
     if (delay === undefined) delete process.env.METASYNC_REQUEST_DELAY_MS; else process.env.METASYNC_REQUEST_DELAY_MS = delay;
@@ -120,7 +120,7 @@ test('page subscription writes respect the shared quota and never retry an ambig
   }
 });
 
-test('conversion writes use the shared pause, reject redirects and redact provider messages', async () => {
+test('conversion writes remain quarantined with no provider request or credential logging', async () => {
   metaClient._test.resetState(); let calls = 0; let paused = true; const logs = [];
   const counter = { usageDate: new Date().toISOString().slice(0, 10), requestCount: 0, usagePct: 0, pauseUntil: null, metadata: {},
     async update(patch) { Object.assign(this, patch); return this; }, async reload() { return this; } };
@@ -139,7 +139,7 @@ test('conversion writes use the shared pause, reject redirects and redact provid
     const send = () => metaClient.metaSendConversion('50', { data: [{ event_name: 'Lead' }] }, { accessToken: 'private-token', maxRetries: 3 });
     await assert.rejects(send(), { code: 'META_RATE_LIMIT_PAUSED' }); assert.equal(calls, 0);
     paused = false; metaClient._test.resetState();
-    await assert.rejects(send(), { code: 'META_RATE_LIMITED' }); assert.equal(calls, 1);
+    await assert.rejects(send(), { code: 'meta_security_quarantine' }); assert.equal(calls, 0);
     assert.doesNotMatch(JSON.stringify([logs, counter]), /private/);
     assert.throws(() => metaClient.metaSendConversion('../me', { data: [{}] }, { accessToken: 'private' }), /invalid_meta_conversion_request/);
     assert.throws(() => metaClient.metaSendConversion('50', { data: [{}, {}] }, { accessToken: 'private' }), /invalid_meta_conversion_request/);
@@ -173,7 +173,7 @@ test('advertising adjustments enforce deployment gates, a single field, quota an
     }
     assert.throws(() => metaClient.metaUpdateAdvertisingResource('../50', { status: 'PAUSED' }, { accessToken: 'private-token' }), /invalid_meta_advertising_adjustment/);
     await assert.rejects(send(), { code: 'META_RATE_LIMIT_PAUSED' }); assert.equal(calls, 0);
-    paused = false; metaClient._test.resetState(); await assert.rejects(send()); assert.equal(calls, 1);
+    paused = false; metaClient._test.resetState(); await assert.rejects(send()); assert.equal(calls, 0);
     assert.doesNotMatch(JSON.stringify(logs), /private-/);
   } finally {
     flags.forEach((name, index) => { if (previous[index] === undefined) delete process.env[name]; else process.env[name] = previous[index]; });

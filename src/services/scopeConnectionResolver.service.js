@@ -129,6 +129,7 @@ async function findSingleUserConnection(Model, userId, attributes) {
 }
 
 async function upsertMetaAssignment({ connection, scope, authorizedByUserId = null }) {
+  require('../lib/metaQuarantineHttp').assertMetaAvailable();
   if (!connection?.id || !scope?.scopeKey) return null;
   const authorizedBy = buildAuthorizedBy(connection, authorizedByUserId);
   const values = {
@@ -326,6 +327,10 @@ async function resolveMetaConnectionForScope({
   const scope = await normalizeScope({ clinicIdRaw, groupIdRaw, assignmentScopeRaw });
 
   const requestedScope = buildSharedConnectionScope(scope) || scope;
+  if (requestedScope.scopeKey && await require('./metaScopeBlock.service').blocked(requestedScope)) {
+    return { connection: null, assignment: null, scope: requestedScope, source: 'security_scope_blocked' };
+  }
+
   for (const candidateScope of buildConnectionResolutionPlan(scope)) {
     const assignment = await findMetaAssignment(candidateScope);
     if (assignment?.metaConnection) {

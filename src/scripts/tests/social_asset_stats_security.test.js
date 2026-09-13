@@ -57,6 +57,10 @@ async function fixture(t, options = {}) {
     GroupAssetClinicAssignment: { findAll: async query => {
       calls.assignments.push(query); return options.assignments || [];
     } },
+    GrupoClinica: { findAll: async query => {
+      assert.equal(query.where.facebook_primary_asset_id, 22);
+      return (options.primaryGroupIds || []).map(id_grupo => ({ id_grupo }));
+    } },
     Clinica: { findAll: async query => {
       calls.groups.push(query); return (options.groupClinics || []).map(id_clinica => ({ id_clinica }));
     } },
@@ -69,9 +73,11 @@ async function fixture(t, options = {}) {
     } },
   };
   const access = load('lib/marketingScopeAccess.js', { '../../models': models });
+  const sharing = load('lib/sharedMarketingAssetMutationAccess.js', { '../../models': models });
   const controller = load('controllers/socialstats.controller.js', {
     '../../models': models, '../lib/clinicScope': {}, '../lib/marketingScopeAccess': access,
     '../services/notifications.service': {},
+    '../lib/sharedMarketingAssetMutationAccess': sharing,
   }, { console: { error: (...args) => calls.logs.push(args) } });
   const secret = randomBytes(32);
   const auth = load('routes/auth.middleware.js', { '../services/accessSession.service': {
@@ -180,6 +186,14 @@ test('group asset checks all group members even without explicit child assignmen
   assert.equal((await f.request(701, { clinicId: '55' })).status, 403);
   assert.equal((await f.request(704)).status, 200);
   assert.equal(f.calls.groups[0].where.grupoClinicaId, 5);
+});
+
+test('a clinic-owned group primary requires every affected clinic even with no sharing rows', async t => {
+  const memberships = [55, 66].map(id_clinica => ({ id_usuario: 704, id_clinica, rol_clinica: 'agencia', estado_invitacion: 'aceptada' }));
+  memberships.push({ id_usuario: 701, id_clinica: 55, rol_clinica: 'propietario', estado_invitacion: 'aceptada' });
+  const f = await fixture(t, { primaryGroupIds: [5], groupClinics: [55, 66], memberships });
+  assert.equal((await f.request(701)).status, 403); assert.equal(f.calls.stats.length, 0);
+  assert.equal((await f.request(704)).status, 200);
 });
 
 test('pending, cancelled, rejected memberships and patient roles do not authorize access', async t => {

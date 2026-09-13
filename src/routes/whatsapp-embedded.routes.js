@@ -1,6 +1,6 @@
 'use strict';
 const express = require('express');
-const axios = require('axios');
+const axios = require('../lib/metaQuarantineHttp');
 const crypto = require('crypto');
 const db = require('../../models');
 const authMiddleware = require('./auth.middleware');
@@ -422,7 +422,7 @@ async function fetchWabaDetailsWithBusinessId({ wabaId, accessToken }) {
   return null;
 }
 
-router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
+router.post('/embedded-signup/callback', authMiddleware, axios.middleware, async (req, res) => {
   try {
     const {
       code,

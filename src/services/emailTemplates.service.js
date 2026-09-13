@@ -102,6 +102,17 @@ function renderPasswordReset(context = {}) {
   };
 }
 
+function renderEmailVerification(context = {}) {
+  const code = context.verification_code;
+  if (typeof code !== 'string' || !/^[0-9]{6}$/.test(code)) {
+    throw Object.assign(Error('email_verification_code_invalid'), { code: 'email_verification_code_invalid' });
+  }
+  const subject = assertSafeSubject('Tu código de acceso a ClinicaClick');
+  const intro = `Introduce este código para completar el acceso: ${code}. Caduca en 5 minutos y solo puede usarse una vez.`;
+  const footer = 'No compartas este código. Si no has intentado acceder, cambia tu contraseña desde ClinicaClick.';
+  return { subject, html: layout({ title: subject, intro, footer }), text: intro + '\n\n' + footer };
+}
+
 function renderOpsTest(context = {}) {
   const subject = assertSafeSubject(cleanString(context.subject) || 'Prueba técnica de email ClinicaClick');
   const body = cleanString(context.body) || 'Este correo valida la cola durable, el proveedor y la monitorización de email.';
@@ -165,6 +176,8 @@ function renderTemplate(templateKey, context = {}) {
   switch (String(templateKey || '').trim()) {
     case 'auth.password_reset':
       return renderPasswordReset(context);
+    case 'auth.email_verification':
+      return renderEmailVerification(context);
     case 'ops.email_test':
       return renderOpsTest(context);
     case 'ops.system_alert':

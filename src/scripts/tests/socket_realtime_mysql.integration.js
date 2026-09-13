@@ -32,6 +32,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const { pack, unpack, keyFor } = require('../../../services/platform-audit/src/event');
   models.PatientDirectionProfile.hasMany(models.PatientDirectionSetting, { as: 'clinicSettings', foreignKey: 'director_user_id', sourceKey: 'user_id', constraints: false });
   await require('../../../migrations/20260912220000-create-auth-sessions').up(sql.getQueryInterface(), D);
+  await require('../../../migrations/20260913130000-create-auth-email-challenges').up(sql.getQueryInterface(), D);
   models.AuthSession = require('../../../models/authsession')(sql, D);
   // Only scope metadata is needed. No production clinical rows, jobs, Redis or providers.
   models.Conversation = sql.define('Conversation', { id: { type: D.INTEGER, primaryKey: true }, clinic_id: D.INTEGER, patient_id: D.INTEGER, channel: D.STRING }, { timestamps: false });

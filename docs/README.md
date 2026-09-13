@@ -1,5 +1,31 @@
 # Runbooks operativos del backend
 
+## 13/09/2026 — Primera etapa preparada: Meta y códigos por correo
+
+Entrega de contención Meta y acceso con código por correo elegido por el usuario.
+Código/QA locales: **505 pruebas Node** (441 backend, 53 auditoría, 11 front),
+**83 comprobaciones en ocho MySQL privados**, todos cerrados con código 0;
+18 escenarios/capturas Chromium escritorio/móvil y build Angular correcto.
+Datos/proveedores ficticios: no equivalen a validación de servicios reales.
+
+MFA obligatorio para sesiones ordinarias al activar `AUTH_EMAIL_MFA_MODE=enforce`;
+sin JWT hasta validar el código, con caducidad, consumo único, límites y
+recuperación auditada. Usuarios/Personal no pueden redirigir los códigos mediante
+edición genérica. Cuarentena global Meta en los transportes inventariados,
+OAuth/embedded signup/diagnósticos cerrados, histórico bajo ACL, bloqueos Meta
+sin cascadas y comprobación de compartidos/primarios antes de cualquier baja.
+El hotfix de `socialstats.controller.js` conserva sus bytes.
+
+DDL `20260913130000` y `20260913140000` obligatorias antes del código, incluso
+con MFA off; **no ejecutadas en BD compartida**. Sin despliegue, cambios PM2,
+correo real, Meta ni AWS. OPS sigue aplazado. El alta general Ads queda para otra
+capa; el siguiente corte de integraciones debe aislar credenciales Meta antes de
+retirar la cuarentena. No declarar terminada la migración completa.
+
+Contrato, inventario, recuperación, dependencias, coste y lote de activación:
+`back-dev/docs/security/meta-email-stage1.md`. API fuente: `src/Documentacion/13-backend.md`.
+La publicación de estos archivos a DEV no activa protecciones en servicios.
+
 ## 13/09/2026 — Fundamento de altas Ads y prioridad Meta/doble factor
 
 Preparados ámbito/solicitudes independientes, autorización del conjunto original

@@ -1,4 +1,4 @@
-const axios = require('axios');
+const axios = require('../lib/metaQuarantineHttp');
 const db = require('../../models');
 const { normalizePhoneE164 } = require('../lib/phone');
 const whatsappAccountHealthService = require('./whatsappAccountHealth.service');

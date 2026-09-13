@@ -1,5 +1,5 @@
 'use strict';
-const axios = require('axios');
+const axios = require('./metaQuarantineHttp');
 
 /**
  * Lanza peticiones batch al Graph API v23.0

@@ -16,7 +16,7 @@ function settings(env = process.env) {
   if (mode === 'enforce' && (env.PLATFORM_AUDIT_AUTH_ENABLED !== 'true' || env.PLATFORM_AUDIT_AUTH_POLICY !== 'auth-durable-v1')) {
     fail('auth_configuration_invalid', 503);
   }
-  return { mode, ttl, secret: env.JWT_SECRET };
+  return { mode, ttl, secret: env.JWT_SECRET, emailMfaMode: require('./authEmailChallenge.contract').mode(env) };
 }
 function bearer(header) {
   if (typeof header !== 'string' || !/^Bearer [A-Za-z0-9_.-]{1,8192}$/i.test(header)) fail();
@@ -32,6 +32,10 @@ function decode(token, cfg, now = new Date()) {
     || typeof v.jti !== 'string' || !UUID.test(v.jti) || !Number.isInteger(v.iat) || v.iat > Math.floor(now.getTime() / 1000)
     || v.exp <= v.iat || v.exp - v.iat > 86400)) fail();
   if (!managed && (cfg.mode === 'enforce' || v.type || v.iss || v.aud)) fail();
+  if (cfg.emailMfaMode === 'enforce' || v.amr !== undefined || v.emailVerifiedAt !== undefined) {
+    if (!managed || JSON.stringify(v.amr) !== '["pwd","email"]' || !Number.isInteger(v.emailVerifiedAt)
+      || v.emailVerifiedAt <= 0 || v.emailVerifiedAt > v.iat) fail();
+  }
   return v;
 }
 function binding(user, secret) {
@@ -65,6 +69,12 @@ function createService({ models, audit, config = settings, now = () => new Date(
       || row.expires_at.getTime() <= at || row.absolute_expires_at.getTime() <= at
       || v.exp * 1000 > row.expires_at.getTime() || v.exp * 1000 > row.absolute_expires_at.getTime()
       || v.iat * 1000 < row.issued_at.getTime()) fail();
+    const email = row.authentication_method === 'password_email';
+    if (cfg.emailMfaMode === 'enforce' || email || v.amr !== undefined || v.emailVerifiedAt !== undefined) {
+      if (!email || JSON.stringify(v.amr) !== '["pwd","email"]' || !(row.email_verified_at instanceof Date)
+        || !Number.isInteger(v.emailVerifiedAt) || row.email_verified_at.getTime() !== v.emailVerifiedAt * 1000
+        || v.emailVerifiedAt * 1000 > row.issued_at.getTime() || !UUID.test(row.email_challenge_id)) fail();
+    }
   }
   async function verify(token) {
     const cfg = config(); const v = decode(token, cfg, now());
@@ -92,12 +102,13 @@ function createService({ models, audit, config = settings, now = () => new Date(
       + (transaction ? ' FOR UPDATE' : ''),
     { replacements: { id: sessionRef, userId }, logging: false, transaction });
     const row = rows[0];
-    checkRow({ userId, exp: expiresAt.getTime() / 1000, iat: row?.issued_at?.getTime() / 1000 },
+    checkRow({ userId, exp: expiresAt.getTime() / 1000, iat: row?.issued_at?.getTime() / 1000,
+      ...(row?.authentication_method === 'password_email' ? { amr: ['pwd', 'email'], emailVerifiedAt: row.email_verified_at?.getTime() / 1000 } : {}) },
       row && { ...row, id_usuario: row.user_id }, row, cfg);
     return { userId, sessionRef };
   }
   // Call within a transaction that already locks the freshly authenticated user. All issuers share this method.
-  async function issue(user, { transaction, parentToken, reason = 'credentials_verified', ttl, sessionRef = randomUUID() } = {}) {
+  async function issue(user, { transaction, parentToken, reason = 'credentials_verified', ttl, sessionRef = randomUUID(), emailChallengeId } = {}) {
     const cfg = config(); const seconds = ttl || cfg.ttl;
     if (cfg.mode === 'legacy' && !parentToken) return { token: jwt.sign({ userId: Number(user.id_usuario), email: user.email_usuario,
       isAdmin: isGlobalAdmin(user.id_usuario) }, cfg.secret, { expiresIn: seconds, jwtid: sessionRef }), expiresIn: seconds, sessionRef };
@@ -115,27 +126,42 @@ function createService({ models, audit, config = settings, now = () => new Date(
       row = await db().AuthSession.findByPk(parent.jti, { transaction, lock: transaction.LOCK.UPDATE });
       checkRow(parent, user, row, cfg);
     }
+    let proof;
+    if (!parent && (cfg.emailMfaMode === 'enforce' || emailChallengeId)) {
+      if (typeof emailChallengeId !== 'string' || !UUID.test(emailChallengeId)) fail('auth_email_required', 401);
+      proof = await db().AuthEmailChallenge.findByPk(emailChallengeId, { transaction, lock: transaction.LOCK.UPDATE });
+      if (!proof || proof.user_id !== Number(user.id_usuario) || proof.state !== 'verified' || proof.consumed_session_id
+        || !matches(user, proof, cfg.secret) || !(proof.verified_at instanceof Date)
+        || proof.verified_at.getTime() > at * 1000 || proof.expires_at.getTime() <= now().getTime()
+        || proof.absolute_expires_at.getTime() <= now().getTime()) fail('auth_email_required', 401);
+      await proof.update({ state: 'used', consumed_session_id: sessionRef }, { transaction });
+    }
     const absolute = row ? row.absolute_expires_at : new Date((at + 86400) * 1000);
     const expires = Math.min(at + seconds, absolute.getTime() / 1000);
     if (expires <= at) fail();
     if (row) await row.update({ expires_at: new Date(Math.max(expires * 1000, row.expires_at.getTime())) }, { transaction });
     else row = await db().AuthSession.create({ session_id: sessionRef, user_id: Number(user.id_usuario), issued_at: new Date(at * 1000),
-      expires_at: new Date(expires * 1000), absolute_expires_at: absolute, state: 'active', credential_binding: binding(user, cfg.secret) }, { transaction });
+      expires_at: new Date(expires * 1000), absolute_expires_at: absolute, state: 'active', credential_binding: binding(user, cfg.secret),
+      authentication_method: proof ? 'password_email' : 'password', email_verified_at: proof?.verified_at || null,
+      email_challenge_id: proof?.challenge_id || null }, { transaction });
     await record(row, parent ? 'session.renewed' : 'session.issued', parent ? 'token_verified' : reason, transaction);
     return { token: jwt.sign({ userId: Number(user.id_usuario), email: user.email_usuario, isAdmin: isGlobalAdmin(user.id_usuario),
-      sessionVersion: 1, type: 'cc_access', iat: at, exp: expires }, cfg.secret,
+      sessionVersion: 1, type: 'cc_access', iat: at, exp: expires,
+      ...(row.authentication_method === 'password_email' ? { amr: ['pwd', 'email'], emailVerifiedAt: row.email_verified_at.getTime() / 1000 } : {}) }, cfg.secret,
     { algorithm: 'HS256', issuer: ISSUER, audience: AUDIENCE, jwtid: row.session_id }), expiresIn: expires - at, sessionRef: row.session_id };
   }
-  async function authenticated(user, { parentToken, attempt } = {}) {
+  async function authenticated(user, { parentToken, attempt, transaction: callerTransaction, emailChallengeId } = {}) {
     const cfg = config(); const managedParent = parentToken && decode(parentToken, cfg, now()).sessionVersion;
     const work = async (fresh, transaction) => {
       if (transaction && (!activeUser(fresh) || binding(fresh, cfg.secret) !== binding(user, cfg.secret))) fail();
       fresh.ultimo_login = now(); await fresh.save({ fields: ['ultimo_login'], transaction });
-      const issued = await issue(fresh, { transaction, parentToken });
+      const issued = await issue(fresh, { transaction, parentToken, emailChallengeId });
       const outcome = { outcome: 'success', reason: parentToken ? 'token_verified' : 'credentials_verified', userId: fresh.id_usuario, sessionRef: issued.sessionRef };
       if (attempt) await attempt.complete(outcome, { transaction });
       return { status: 200, body: { token: issued.token, expiresIn: issued.expiresIn, user: projectUser(fresh) }, audit: outcome, auditCompleted: Boolean(attempt) };
     };
+    if (callerTransaction) return work(await db().Usuario.findByPk(user.id_usuario,
+      { transaction: callerTransaction, lock: callerTransaction.LOCK.UPDATE }), callerTransaction);
     if (cfg.mode === 'legacy' && !managedParent) return work(user);
     return db().sequelize.transaction(async transaction => work(await db().Usuario.findByPk(user.id_usuario,
       { transaction, lock: transaction.LOCK.UPDATE }), transaction));
@@ -173,7 +199,7 @@ function createService({ models, audit, config = settings, now = () => new Date(
     }
     return { expired: count };
   }
-  return { verify, verifyReference, issue, authenticated, revoke, expire };
+  return { verify, verifyReference, issue, authenticated, revoke, expire, credentialBinding: user => binding(user, config().secret) };
 }
 const singleton = createService({ models: () => require('../../models') });
-module.exports = { ...singleton, createService, settings, bearer, decode, projectUser };
+module.exports = { ...singleton, createService, settings, bearer, decode, projectUser, activeUser, binding };

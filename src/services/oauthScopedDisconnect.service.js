@@ -22,6 +22,7 @@ async function groupClinicIds(groupId, models, transaction) {
     attributes: ['id_clinica'],
     raw: true,
     transaction,
+    lock: transaction.LOCK.UPDATE,
   });
   return rows.map((row) => Number(row.id_clinica)).filter(Number.isInteger);
 }
@@ -46,7 +47,7 @@ async function inheritedClinicIds({
     attributes: ['clinicaId'],
     raw: true,
     transaction,
-    ...(provider === 'google' ? { lock: transaction.LOCK.UPDATE } : {}),
+    lock: transaction.LOCK.UPDATE,
   });
   const overridden = new Set(overrides.map((row) => Number(row.clinicaId)));
   return clinicIds.filter((clinicId) => !overridden.has(clinicId));
@@ -86,6 +87,13 @@ async function assertRowsContainedInScope({
           : null
       ),
       findGroupClinicIds: async (groupId) => groupClinicIds(groupId, models, transaction),
+      findPrimaryGroupIds: async ({ assetType: type, assetId: id }) => {
+        const field = { 'meta.facebook_page': 'facebook_primary_asset_id', 'meta.instagram_business': 'instagram_primary_asset_id' }[type];
+        if (!field) return [];
+        const groups = await models.GrupoClinica.findAll({ where: { [field]: id }, attributes: ['id_grupo'], raw: true,
+          transaction, lock: transaction.LOCK.UPDATE });
+        return groups.map(group => group.id_grupo);
+      },
     });
     const outside = affected.filter((clinicId) => !allowed.has(Number(clinicId)));
     if (outside.length) {
@@ -219,6 +227,7 @@ async function deactivateMetaMappingsForScope({
   scope,
   connectionId,
   transaction,
+  actorId,
   models = db,
 }) {
   const isClinic = scope.assignmentScope === 'clinic';
@@ -258,6 +267,7 @@ async function deactivateMetaMappingsForScope({
     assignmentModel: models.GroupAssetClinicAssignment,
     models,
   });
+  await require('./metaScopeBlock.service').preserve({ scope, connectionId, actorId, clinicIds: inheritedIds, models, transaction });
   return { meta: await deactivateRows(rows, 'isActive', transaction) };
 }
 

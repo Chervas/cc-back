@@ -1,5 +1,5 @@
 'use strict';
-const axios = require('axios');
+const axios = require('../lib/metaQuarantineHttp');
 const META_PROVIDER_HTTP_TIMEOUT_MS = Math.max(
     1000,
     Number(process.env.META_PROVIDER_HTTP_TIMEOUT_MS || process.env.SYNC_PROVIDER_HTTP_TIMEOUT_MS || 30000) || 30000
@@ -3032,12 +3032,20 @@ exports.getMetricsByClinica = async (req, res) => {
     const { startDate, endDate } = req.query;
 
     // Validar parámetros
-    if (!clinicaId) {
+    if (!/^[1-9][0-9]{0,9}$/.test(String(clinicaId)) || Number(clinicaId) > 2147483647) {
       return res.status(400).json({
         success: false,
         message: 'ID de clínica requerido'
       });
     }
+
+    if (!await require('../lib/marketingScopeAccess').hasMarketingClinicScopeAccess({
+      userId: req.userData?.userId, clinicIds: [Number(clinicaId)], access: 'read',
+    })) return res.status(403).json({ success: false, error: 'clinic_scope_forbidden' });
+
+    const validDate = value => value === undefined || typeof value === 'string' && /^20\d\d-\d\d-\d\d$/.test(value)
+      && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
+    if (!validDate(startDate) || !validDate(endDate)) return res.status(400).json({ success: false, error: 'invalid_date_range' });
 
     // Fechas por defecto (últimos 30 días)
     const defaultEndDate = new Date();
@@ -3046,6 +3054,7 @@ exports.getMetricsByClinica = async (req, res) => {
 
     const start = startDate ? new Date(startDate) : defaultStartDate;
     const end = endDate ? new Date(endDate) : defaultEndDate;
+    if (start > end || end - start > 366 * 86400000) return res.status(400).json({ success: false, error: 'invalid_date_range' });
     const fmt = (d) => {
       const y = d.getFullYear();
       const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -3071,10 +3080,15 @@ exports.getMetricsByClinica = async (req, res) => {
     });
 
     // Procesar datos por plataforma
-    const metricasPorPlataforma = this.procesarMetricasPorPlataforma(metricas);
+    const metricasPorPlataforma = procesarMetricasPorPlataforma(metricas);
 
     // Calcular totales y tendencias
-    const resumen = this.calcularResumenMetricas(metricas);
+    const resumen = Object.values(metricasPorPlataforma).reduce((total, platform) => ({
+      totalImpressions: total.totalImpressions + Number(platform.metricas.impressions || 0),
+      totalReach: total.totalReach + Number(platform.metricas.reach || 0),
+      totalProfileVisits: total.totalProfileVisits + Number(platform.metricas.profile_visits || 0),
+      totalFollowers: total.totalFollowers + Number(platform.metricas.followers || 0),
+    }), { totalImpressions: 0, totalReach: 0, totalProfileVisits: 0, totalFollowers: 0 });
 
     // Obtener assets activos de la clínica
     const assetsActivos = await ClinicMetaAsset.findAll({
@@ -3082,7 +3096,7 @@ exports.getMetricsByClinica = async (req, res) => {
         clinicaId: clinicaId,
         isActive: true
       },
-      attributes: ['id', 'metaAssetId', 'metaAssetName', 'assetType', 'pageAccessToken']
+      attributes: ['id']
     });
 
     res.json({
@@ -3101,11 +3115,10 @@ exports.getMetricsByClinica = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Error obteniendo métricas por clínica:', error);
     res.status(500).json({
       success: false,
       message: 'Error interno del servidor',
-      error: error.message
+      error: 'meta_metrics_unavailable'
     });
   }
 }

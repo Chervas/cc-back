@@ -1,7 +1,7 @@
 'use strict';
 const db = require('../../models');
 const { Op } = require('sequelize');
-const axios = require('axios');
+const axios = require('../lib/metaQuarantineHttp');
 const crypto = require('crypto');
 const whatsappService = require('../services/whatsapp.service');
 const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.service');

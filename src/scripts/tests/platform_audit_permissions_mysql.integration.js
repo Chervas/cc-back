@@ -118,6 +118,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   report.checks.push('capture disabled uses no outbox and retains scope enforcement/transactional writes; invalid configuration fails closed');
 
   await require('../../../migrations/20260912220000-create-auth-sessions').up(sql.getQueryInterface(), D);
+  await require('../../../migrations/20260913130000-create-auth-email-challenges').up(sql.getQueryInterface(), D);
   models.AuthSession = require('../../../models/authsession')(sql, D);
   const sessionsApi = require('../../services/accessSession.service');
   const sessions = sessionsApi.createService({ models, audit: repo, now, config: () => ({ mode: 'enforce', ttl: 300, secret: 'FICTITIOUS_HTTP_KEY' }) });

@@ -1,5 +1,5 @@
 // services/metasyncservice.js
-const axios = require('axios');
+const axios = require('../lib/metaQuarantineHttp');
 const db = require('../../models');
 const { Op } = require('sequelize');
 

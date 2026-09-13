@@ -39,7 +39,7 @@
  * - El caller es responsable de la autorización (Page/Ad Account tokens válidos).
  */
 'use strict';
-const axios = require('axios');
+const axios = require('./metaQuarantineHttp');
 const { ApiUsageCounter } = require('../../models');
 const { recordApiUsage } = require('../services/apiUsageTelemetry.service');
 
@@ -187,6 +187,7 @@ async function metaRequest(method, url, {
 
       return resp;
     } catch (err) {
+      if (err?.code === 'meta_security_quarantine') throw err;
       lastErr = err;
       const status = err?.response?.status;
       const eobj = err?.response?.data?.error || {};

@@ -13,6 +13,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await require('../../../migrations/20260912210000-create-platform-audit-events').up(sql.getQueryInterface(), DataTypes);
   await require('../../../migrations/20260913003000-add-platform-audit-result-part').up(sql.getQueryInterface());
   await migration.up(sql.getQueryInterface(), DataTypes);
+  await require('../../../migrations/20260913130000-create-auth-email-challenges').up(sql.getQueryInterface(), DataTypes);
   models.AuthSession = require('../../../models/authsession')(sql, DataTypes);
   models.PlatformAuditEvent = require('../../../models/platformauditevent')(sql, DataTypes);
   const repo = require('../../services/platformAudit.repository').createRepository(models.PlatformAuditEvent);

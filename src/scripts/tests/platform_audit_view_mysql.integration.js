@@ -89,6 +89,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   // Actual HTTP route and central JWT verifier with managed sessions in the owned database.
   models.Usuario = require('../../../models/usuario')(sql, DataTypes); await models.Usuario.sync();
   await require('../../../migrations/20260912220000-create-auth-sessions').up(sql.getQueryInterface(), DataTypes);
+  await require('../../../migrations/20260913130000-create-auth-email-challenges').up(sql.getQueryInterface(), DataTypes);
   models.AuthSession = require('../../../models/authsession')(sql, DataTypes);
   const user = await models.Usuario.create({ id_usuario: 1, nombre: 'Fictitious admin', email_usuario: 'fixture@example.invalid', password_usuario: bcrypt.hashSync('FICTITIOUS_PASSWORD', 4) });
   const api = require('../../services/accessSession.service'); const sessions = api.createService({ models, audit: repo, now,

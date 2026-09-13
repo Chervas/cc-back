@@ -933,6 +933,8 @@ exports.updatePersonalMember = async (req, res) => {
             return res.status(404).json({ message: 'User not found' });
         }
 
+        if (await require('../services/authCredentialMutationGuard.service').guardCredentialMutation(user, req.body, res)) return;
+
         const fieldsToUpdate = [
             'nombre',
             'apellidos',
@@ -5068,6 +5070,8 @@ exports.reclamarCuenta = async (req, res) => {
             pivot.responded_at = new Date();
             pivot.invite_token = null;
             await pivot.save({ transaction });
+            if (cfg.emailMfaMode === 'enforce') return { message: 'Cuenta reclamada. Inicia sesión para verificar tu correo.',
+                user: sessions.projectUser(user), signInRequired: true };
             const issued = await sessions.issue(user, { transaction, reason: 'invite_claimed', ttl: 86400 });
             return { message: 'Cuenta reclamada exitosamente', user: sessions.projectUser(user), token: issued.token, expiresIn: issued.expiresIn };
         };

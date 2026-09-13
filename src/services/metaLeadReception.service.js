@@ -204,7 +204,7 @@ async function persistMetaLead({ models, event, retrieved, now = new Date() }) {
 
 async function runMetaLeadReceptionJob(payload, job = null, overrides = {}) {
   const models = overrides.models || require('../../models');
-  const http = overrides.http || require('axios');
+  const http = overrides.http || require('../lib/metaQuarantineHttp');
   const notify = overrides.notify || require('./leadAutoReply.service').enqueueForLead;
   const event = { lead_id: graphId(payload.lead_id), page_id: graphId(payload.page_id),
     form_id: graphId(payload.form_id), ad_id: graphId(payload.ad_id) };

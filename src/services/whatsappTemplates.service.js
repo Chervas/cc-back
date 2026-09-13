@@ -1,6 +1,6 @@
 'use strict';
 
-const axios = require('axios');
+const axios = require('../lib/metaQuarantineHttp');
 const { Op } = require('sequelize');
 const db = require('../../models');
 const { queues } = require('./queue.service');

@@ -85,6 +85,14 @@ function normalizeTemplateContext(context) {
 
 function sealSensitiveTemplateContext(context, { publicId, recipientHash, templateKey }) {
   const sealed = normalizeTemplateContext(context);
+  if (templateKey === 'auth.email_verification') {
+    if (typeof sealed.verification_code !== 'string' || !/^[0-9]{6}$/.test(sealed.verification_code)) {
+      throw Object.assign(Error('email_verification_code_invalid'), { code: 'email_verification_code_invalid' });
+    }
+    sealed.verification_code_envelope = encryptEmailValue(sealed.verification_code,
+      templateContextEnvelopeContext({ publicId, recipientHash, field: 'verification_code' }));
+    delete sealed.verification_code;
+  }
   if (String(templateKey || '').trim() === 'auth.password_reset' && cleanString(sealed.reset_url)) {
     sealed.reset_url_envelope = encryptEmailValue(
       sealed.reset_url,
@@ -97,6 +105,15 @@ function sealSensitiveTemplateContext(context, { publicId, recipientHash, templa
 
 function unsealSensitiveTemplateContext(context, message) {
   const unsealed = normalizeTemplateContext(context);
+  if (message.template_key === 'auth.email_verification') {
+    // A plaintext fallback would expose short codes through outbox inspection.
+    if (Object.hasOwn(unsealed, 'verification_code') || !cleanString(unsealed.verification_code_envelope)) {
+      throw Object.assign(Error('email_verification_envelope_invalid'), { code: 'email_verification_envelope_invalid' });
+    }
+    unsealed.verification_code = decryptEmailValue(unsealed.verification_code_envelope,
+      templateContextEnvelopeContext({ publicId: message.public_id, recipientHash: message.recipient_hash, field: 'verification_code' }));
+  }
+  delete unsealed.verification_code_envelope;
   if (!cleanString(unsealed.reset_url) && cleanString(unsealed.reset_url_envelope)) {
     unsealed.reset_url = decryptEmailValue(
       unsealed.reset_url_envelope,
@@ -346,7 +363,13 @@ async function runEmailSendJob(payload = {}, jobRequest = null) {
 
   let providerResult = null;
   try {
-    const rendered = emailTemplates.renderTemplate(message.template_key, buildSendContext(message, recipient));
+    const sendContext = buildSendContext(message, recipient);
+    if (!await require('./authEmailDeliveryGuard.service').mayDeliver(message, recipient, sendContext)) {
+      await settleMessageIfActive(message, { status: 'cancelled', completed_at: new Date(),
+        last_error_code: 'email_verification_no_longer_valid', last_error_message: 'Email verification is no longer valid.' });
+      return { status: 'completed', result: { email_message_id: message.id, skipped: true, reason: 'email_verification_no_longer_valid' } };
+    }
+    const rendered = emailTemplates.renderTemplate(message.template_key, sendContext);
     providerResult = await emailProvider.sendEmail({
       to: recipient,
       from: message.from_email,
@@ -432,6 +455,7 @@ async function runEmailSendJob(payload = {}, jobRequest = null) {
       };
     }
     const providerError = emailProvider.classifyProviderError(error);
+    if (message.template_key === 'auth.email_verification') providerError.message = 'Email verification delivery failed.';
     const safeProviderMessage = sanitizeErrorMessage(providerError.message || providerError.code)
       || providerError.code
       || 'email_provider_error';

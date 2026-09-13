@@ -25,7 +25,7 @@ Criterios de cierre de esta primera etapa:
 3. Entregar el recorrido de doble factor de login **con códigos por correo,
    elegido expresamente por el usuario**: verificación de contraseña y correo,
    límite de intentos/reenvíos, caducidad, consumo único, recuperación protegida,
-   UI y auditoría. No está implementado por esta actualización del plan. Las
+   UI y auditoría. Implementado y probado en el corte descrito abajo. Las
    sesiones no pueden obtener acceso completo antes de completar el segundo paso
    cuando este sea exigible.
 4. Probar los recorridos completos con HTTP, persistencia e interfaz aislados;
@@ -36,6 +36,21 @@ El doble factor protege el acceso a ClinicaClick; no invalida tokens Meta ya
 copiados ni demuestra el vector exacto del incidente. Se mantiene el bloqueo
 reportado y no se reactivan proveedores. El corte con datos reales permanece
 fuera de la entrega local hasta la aprobación específica de OPS.
+
+## Entrega preparada de la primera etapa
+
+Implementados contención Meta, registro independiente de bloqueos, primarios de
+grupos, ACL de métricas y código por correo con recuperación y auditoría. Alcance
+exacto y lote de activación en [meta-email-stage1.md](meta-email-stage1.md).
+La cuarentena global de los transportes inventariados conserva Meta cerrado
+hasta otro corte del broker; las credenciales reales aún no están aisladas.
+
+QA: 505 pruebas Node (441 backend, 53 auditoría, 11 front), 83 checks en ocho
+MySQL propios con apagado 0, build Angular y 18 escenarios Chromium. La
+publicación propia de este corte se acredita en el acta `meta-email-stage1-*`.
+No hay activación, correo real ni cambios OPS. La siguiente entrega local es
+la capa 2 centrada en Meta; el alta general Ads continúa aplazada. Esta primera
+entrega no cierra ni reemplaza el objetivo completo de seguridad.
 
 ## Entregas y criterios de cierre
 
@@ -53,7 +68,7 @@ acompaña cada operación que se entrega; la preparación de BD puede avanzar de
 forma independiente. Meta/WhatsApp continúan fuera de cualquier activación: los
 tokens WABA fueron reportados como revocados por el usuario y no se han probado.
 
-## Corte local en cierre: fundamento de altas Ads
+## Checkpoint previo publicado: fundamento de altas Ads
 
 El motor del broker del corte anterior ya prepara/activa cuentas bajo un ámbito
 aprobado. Esta entrega añade cancelación incluso antes de preparar, tablas de
@@ -82,9 +97,9 @@ migraciones anteriores. No ejecutar todas las migraciones pendientes.
 
 ## Contrato para continuar con otras áreas
 
-- La API pública de esta entrega no añade rutas ni permite nuevas cuentas. Las
-  asignaciones Ads gestionadas siguen admitiendo solamente cuentas previamente
-  registradas. Consultar la fuente de API en `src/Documentacion/13-backend.md`.
+- La primera etapa añade las rutas de código por correo descritas en la fuente
+  `src/Documentacion/13-backend.md`. Las asignaciones Ads gestionadas siguen
+  admitiendo solo cuentas previamente registradas; el alta general queda pendiente.
 - Los consumidores usan DTO de negocio y estados de disponibilidad; nunca
   reciben claves, referencias de Secrets Manager ni tokens. No sustituir una
   función pendiente por credenciales antiguas o una respuesta de éxito ficticia.

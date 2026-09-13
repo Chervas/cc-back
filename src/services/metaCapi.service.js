@@ -1,5 +1,5 @@
 'use strict';
-const axios = require('axios');
+const axios = require('../lib/metaQuarantineHttp');
 const crypto = require('crypto');
 const { normalizePhoneDigits } = require('../lib/phone');
 const { resolveWorkspaceSignalPolicy } = require('./campaignWorkspaceSignalPolicy.service');

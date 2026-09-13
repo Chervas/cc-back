@@ -7,6 +7,7 @@ const { Usuario } = db;
 const { isBlockedAuthEmail } = require('../lib/blocked-auth-emails');
 const passwordResetService = require('../services/passwordReset.service');
 const systemNotificationsService = require('../services/systemNotifications.service');
+const emailChallenges = require('../services/authEmailChallenge.service');
 
 exports.forgotPassword = async (req, res) => {
     try {
@@ -75,7 +76,7 @@ function rejectedCredentials(invalidRequest = false) {
         body: { message: invalidRequest ? 'Email and password are required.' : 'Wrong email or password.' },
         audit: { outcome: 'denied', reason: invalidRequest ? 'request_invalid' : 'credentials_rejected' } };
 }
-exports.signIn = (req, res) => auditedAuth(req, res, 'auth.sign_in', async (attempt) => {
+const legacySignIn = (req, res) => auditedAuth(req, res, 'auth.sign_in', async (attempt) => {
     const email = String(req.body?.email || '').trim().toLowerCase();
     if (isBlockedAuthEmail(email)) return rejectedCredentials();
     const user = await Usuario.findOne({ where: { email_usuario: email } });
@@ -108,7 +109,7 @@ exports.signUp = async (req, res) => {
                 password_usuario: hashedPassword,
                 fecha_creacion: fecha_creacion || new Date(),
             }, { transaction });
-            const issued = await sessions.issue(newUser, { transaction, reason: 'account_created' });
+            const issued = cfg.emailMfaMode === 'enforce' ? null : await sessions.issue(newUser, { transaction, reason: 'account_created' });
             return { newUser, issued };
         };
         const { newUser, issued } = cfg.mode === 'enforce' ? await db.sequelize.transaction(createAccount) : await createAccount();
@@ -132,8 +133,7 @@ exports.signUp = async (req, res) => {
                 email_notificacion: newUser.email_notificacion,
                 fecha_creacion: newUser.fecha_creacion,
             },
-            token: issued.token,
-            expiresIn: issued.expiresIn,
+            ...(issued ? { token: issued.token, expiresIn: issued.expiresIn } : { signInRequired: true }),
         });
     } catch (error) {
         console.error('[Auth] Account creation failed.');
@@ -141,7 +141,7 @@ exports.signUp = async (req, res) => {
     }
 };
 
-exports.unlockSession = (req, res) => auditedAuth(req, res, 'auth.unlock', async (attempt) => {
+const legacyUnlockSession = (req, res) => auditedAuth(req, res, 'auth.unlock', async (attempt) => {
     const { email, password } = req.body || {};
     if (!email || !password) return rejectedCredentials(true);
     const normalizedEmail = String(email).trim().toLowerCase();
@@ -150,6 +150,46 @@ exports.unlockSession = (req, res) => auditedAuth(req, res, 'auth.unlock', async
     if (!user?.password_usuario || !await bcrypt.compare(password, user.password_usuario)) return rejectedCredentials();
     return sessions.authenticated(user, { attempt });
 });
+
+function emailError(res, error) {
+    const statuses = { auth_email_invalid: 401, auth_email_expired: 401, auth_email_locked: 429,
+        auth_email_rate_limited: 429, auth_email_unavailable: 503, auth_email_configuration_invalid: 503 };
+    const code = Object.hasOwn(statuses, error?.code) ? error.code : 'auth_email_unavailable';
+    return res.status(statuses[code]).json({ error: code,
+        message: statuses[code] === 503 ? 'Authentication temporarily unavailable.' : 'Email verification could not be completed.' });
+}
+async function passwordWithEmail(req, res, legacy) {
+    try {
+        if (emailChallenges.mode() !== 'enforce') return legacy(req, res);
+        res.set('Cache-Control', 'private, no-store');
+        const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+        const password = req.body?.password;
+        const valid = email.length > 0 && email.length <= 254 && typeof password === 'string'
+            && password.length > 0 && password.length <= 1024 && !isBlockedAuthEmail(email);
+        const user = valid ? await Usuario.findOne({ where: { email_usuario: email } }) : null;
+        if (!sessions.activeUser(user) || !await bcrypt.compare(password, user.password_usuario)) {
+            await emailChallenges.rejectedCredentials();
+            return res.status(401).json({ message: 'Wrong email or password.' });
+        }
+        return res.status(202).json(await emailChallenges.begin(user));
+    } catch (error) { return emailError(res, error); }
+}
+exports.signIn = (req, res) => passwordWithEmail(req, res, legacySignIn);
+exports.unlockSession = (req, res) => passwordWithEmail(req, res, legacyUnlockSession);
+async function emailCommand(req, res, resend) {
+    res.set('Cache-Control', 'private, no-store');
+    try {
+        const body = req.body;
+        const keys = resend ? ['challengeToken'] : ['challengeToken', 'code'];
+        if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).sort().join(',') !== keys.sort().join(',')) {
+            return res.status(400).json({ error: 'auth_email_request_invalid' });
+        }
+        const result = resend ? await emailChallenges.resend(body.challengeToken) : await emailChallenges.verify(body.challengeToken, body.code);
+        return res.status(resend ? 202 : 200).json(result);
+    } catch (error) { return emailError(res, error); }
+}
+exports.verifyEmailCode = (req, res) => emailCommand(req, res, false);
+exports.resendEmailCode = (req, res) => emailCommand(req, res, true);
 
 exports.me = async (req, res) => {
     res.set('Cache-Control', 'private, no-store');

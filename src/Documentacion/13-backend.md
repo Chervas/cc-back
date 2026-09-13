@@ -1,5 +1,46 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Primera etapa: código por correo y contención Meta
+
+Contrato preparado, todavía sin activar. Especificación y lote OPS:
+`back-dev/docs/security/meta-email-stage1.md`. `AUTH_EMAIL_MFA_MODE=enforce`
+exige correo a todas las sesiones ordinarias; por defecto `off` hasta el corte
+coordinado. Exige sesiones enforce, auditoría y clave MFA privada separada.
+
+| Método y ruta | Contrato de esta entrega |
+| --- | --- |
+| `POST /api/auth/sign-in`, `/api/auth/unlock-session` | Contraseña correcta: 202 con **solo** `mfaRequired:true`, `method:"email"`, `challengeToken`, `maskedEmail`, `expiresAt`, `resendAfter`. Sin JWT/usuario/permisos. Credenciales incorrectas: 401 genérico. |
+| `POST /api/auth/email-code/verify` | Body exacto `{challengeToken,code}`; código string de seis dígitos. 200 con `{token,expiresIn,user}` solo tras consumo y auditoría atómicos. |
+| `POST /api/auth/email-code/resend` | Body exacto `{challengeToken}`; 202 con el contrato de desafío. Invalida el código anterior; no reinicia intentos ni plazo absoluto. |
+| `POST /api/auth/sign-up`, `/api/auth/claim-invite` | Con correo exigido: cuenta con `signInRequired:true`, sin `token`/`expiresIn`; continuar a login. |
+| `PATCH /api/users/:id`, `PATCH /api/personal/:id` | Con correo exigido, los editores genéricos rechazan cambiar correo de acceso/contraseña: 409 `auth_credentials_recovery_required`, antes de guardar otros campos. |
+| `GET /api/metasync/metrics/:clinicaId` | ID estricto, permiso de lectura de clínica, fechas reales ordenadas y máximo 366 días. 403 fuera de ámbito, 400 parámetros inválidos, 500 fijo `meta_metrics_unavailable`. No selecciona tokens. |
+| OAuth Meta connect/callback/map-assets; `/api/metasync/diagnostic/*`; `/api/whatsapp/embedded-signup/callback` | 503 `meta_security_quarantine` antes del handler. Diagnósticos además requieren administrador técnico. Sin apertura mediante flags u otros tokens. |
+| `DELETE /oauth/meta/disconnect` | Valida todos los compartidos y primarios; 409 ante afectados externos. Mapping, `MetaScopeBlocks` y auditoría v14 atómicos. No afirma revocación del proveedor. |
+
+Verificación/reenvío: 400 `auth_email_request_invalid` por esquema; 401
+`auth_email_invalid`/`auth_email_expired`; 429 `auth_email_locked`/
+`auth_email_rate_limited`; 503 `auth_email_unavailable`/
+`auth_email_configuration_invalid`. Respuestas del flujo con
+`Cache-Control: private, no-store`. Código 5 min, prueba de contraseña 10 min,
+5 fallos, reenvío cada 60 s, máximo 3 envíos/desafío y 5/usuario/hora. El portador
+va en el body y memoria del front; nunca query, logs ni localStorage.
+202 acredita encolado, no recepción del correo. Recargar exige otra contraseña.
+
+Recuperar contraseña consume el enlace existente y audita en la misma transacción,
+invalida sesiones/desafíos y sigue exigiendo el código. Pérdida del buzón requiere
+recuperación asistida revisada; no hay bypass por API. MFA ordinario no convierte
+los tokens públicos de firma clínica/kiosco en sesiones.
+Auditoría: v13 `auth.email_code`/`auth.password_reset`, v14
+`integration.meta.scope_block`; filtros disponibles en el visor.
+
+DDL `20260913130000` y `20260913140000` **antes del código incluso con MFA off**;
+conservar dependencias anteriores, tablas y controles en rollback. Push no activa
+el doble paso ni despliega en staging/gateway/workers. Los consumidores Meta
+inventariados quedan sin salida al instalar el corte; retirarla requiere otro
+corte del broker, sin sustituir tokens desde Ajustes. Costes mantiene su contrato
+previo; no se ha verificado gasto AWS nuevo.
+
 ## 13/09/2026 — Fundamento de altas Ads y cancelación interna
 
 La API pública mantiene sus rutas y las asignaciones de cuentas ya registradas.

@@ -87,6 +87,7 @@ async function persistMetaConnection({
   accessToken,
   expiresAt,
 }, { MetaConnectionModel = db.MetaConnection } = {}) {
+  require('../lib/metaQuarantineHttp').assertMetaAvailable();
   const normalizedUserId = positiveInteger(userId, 'userId');
   const normalizedProviderId = providerIdentity(metaUserId, 'metaUserId');
   const where = {

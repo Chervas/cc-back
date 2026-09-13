@@ -712,6 +712,42 @@ test('password reset cifra el enlace en outbox y solo lo abre para renderizar', 
   });
 });
 
+test('email login seals the code, authenticates its envelope and cancels obsolete mail before rendering or sending', async () => {
+  await withEnv({ EMAIL_DATA_ENCRYPTION_KEY: TEST_KEY, EMAIL_PROVIDER: 'mock', EMAIL_ENABLED: 'true' }, async () => {
+    let message; let allowed = true; let sent = 0;
+    const deliveryGuard = require('../../services/authEmailDeliveryGuard.service');
+    const restores = [
+      patchProperty(db.sequelize, 'transaction', async fn => fn({ LOCK: { UPDATE: 'UPDATE' } })),
+      patchProperty(db.EmailMessage, 'findOrCreate', async ({ defaults }) => {
+        message = { id: 810, ...defaults, async update(patch) { Object.assign(this, patch); return this; } }; return [message, true];
+      }),
+      patchProperty(jobRequestsService, 'enqueueUniqueJobRequest', async () => ({ created: true, job: { id: 811 } })),
+      patchProperty(db.EmailMessage, 'findByPk', async () => message),
+      patchConditionalEmailMessageUpdate(() => message),
+      patchProperty(db.EmailSuppression, 'findOne', async () => null),
+      patchProperty(deliveryGuard, 'mayDeliver', async (_message, recipient, context) => {
+        assert.equal(recipient, 'qa@example.invalid'); assert.equal(context.verification_code, '123456'); return allowed;
+      }),
+      patchProperty(emailProvider, 'sendEmail', async payload => {
+        sent++; assert.match(payload.text, /123456/); assert.doesNotMatch(payload.subject, /123456/);
+        return { provider: 'mock', providerMessageId: 'FICTITIOUS' };
+      }),
+    ];
+    const queue = () => emailDelivery.queueEmail({ recipientEmail: 'qa@example.invalid', templateKey: 'auth.email_verification',
+      relatedType: 'auth_email_challenge', relatedId: 'FICTITIOUS', dedupeKey: 'fictitious-login:' + sent,
+      templateContext: { verification_code: '123456', auth_email_challenge_id: 'FICTITIOUS' } });
+    try {
+      await queue(); assert.equal(message.template_context.verification_code, undefined);
+      assert.doesNotMatch(JSON.stringify(message), /123456|qa@example/);
+      assert.throws(() => emailDelivery.unsealSensitiveTemplateContext(message.template_context, { ...message, public_id: 'swapped' }));
+      assert.throws(() => emailDelivery.unsealSensitiveTemplateContext({ verification_code: '123456' }, message));
+      await emailDelivery.runEmailSendJob({ email_message_id: 810 }); assert.equal(sent, 1);
+      allowed = false; await queue(); await emailDelivery.runEmailSendJob({ email_message_id: 810 });
+      assert.equal(sent, 1); assert.equal(message.status, 'cancelled');
+    } finally { restores.reverse().forEach(restore => restore()); }
+  });
+});
+
 test('recordProviderEvent concilia rebote y crea supresión sin persistir destinatario raw', async () => {
   const message = {
     id: 505,

@@ -66,27 +66,11 @@ async function testGoogleIdentityIsolationAndRefreshPreservation() {
 
 async function testMetaIdentityIsolation() {
   const model = fakeModel();
-  const common = {
-    userId: 7,
-    accessToken: 'meta-token-a',
-    expiresAt: new Date('2026-08-01T00:00:00Z'),
-  };
-  await persistMetaConnection({ ...common, metaUserId: 'meta-a' }, { MetaConnectionModel: model });
-  await persistMetaConnection({
-    ...common,
-    metaUserId: 'meta-b',
-    accessToken: 'meta-token-b',
-  }, { MetaConnectionModel: model });
-  assert.equal(model.rows.length, 2);
-
-  await persistMetaConnection({
-    ...common,
-    metaUserId: 'meta-a',
-    accessToken: 'meta-token-a-2',
-  }, { MetaConnectionModel: model });
-  assert.equal(model.rows.length, 2);
-  assert.equal(model.rows.find((row) => row.metaUserId === 'meta-a').accessToken, 'meta-token-a-2');
-  assert.equal(model.rows.find((row) => row.metaUserId === 'meta-b').accessToken, 'meta-token-b');
+  for (const metaUserId of ['meta-a', 'meta-b']) {
+    await assert.rejects(persistMetaConnection({ userId: 7, metaUserId, accessToken: 'FICTITIOUS_TOKEN' },
+      { MetaConnectionModel: model }), { code: 'meta_security_quarantine' });
+  }
+  assert.equal(model.rows.length, 0, 'Neither the original subject nor an alternative can store credentials during quarantine');
 }
 
 async function testProviderIdentityRequired() {

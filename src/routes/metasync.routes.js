@@ -56,6 +56,7 @@ router.get('/clinica/:clinicaId/top-posts', socialStatsController.getTopPosts);
 router.get('/clinica/:clinicaId/dashboard', socialStatsController.getDashboardSummary);
 
 // ===== RUTAS DE DIAGNÓSTICO =====
+router.use('/diagnostic', requireTechnicalAdmin, require('../lib/metaQuarantineHttp').middleware);
 router.get('/diagnostic/user-connection', metaDiagnosticController.testUserConnection);
 router.get('/diagnostic/asset/:assetId', metaDiagnosticController.testAssetConnection);
 router.get('/diagnostic/permissions', metaDiagnosticController.checkPermissions);
@@ -89,6 +90,6 @@ router.get('/jobs/usage/ai-runtime/costs', metaJobsController.getAiRuntimeCostBr
 router.get('/jobs/usage/aws-infrastructure/costs', metaJobsController.getAwsInfrastructureCosts);
 router.post('/jobs/usage/google-ads/resume', metaJobsController.resumeGoogleUsage);
 router.get('/jobs/sync-logs/:id/tail', metaJobsController.tailJobLog);
-router.get('/metrics/:clinicaId', metaSyncController.getMetricsByClinica);
+
 
 module.exports = router;
