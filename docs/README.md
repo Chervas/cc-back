@@ -1,5 +1,13 @@
 # Runbooks operativos del backend
 
+## 13/09/2026 — Puente gateway/MFA del alta WhatsApp
+
+[Rutas, configuración, recuperación y lote pendiente](security/whatsapp-onboarding-gateway.md):
+estado MySQL y broker firmado conectados, DTO sin tokens, canje único y
+cancelación durable. 36 pruebas Node y 15 grupos de comprobaciones MySQL propios
+pasan; cierre 0. Sin DDL nueva ni despliegue. UI/Embedded Signup, configuración
+Meta real, activación y consumidores públicos siguen pendientes.
+
 ## 13/09/2026 — Alta WhatsApp: candidata y recuperación preparadas
 
 [Contrato del broker de alta](security/whatsapp-onboarding-broker.md): operaciones

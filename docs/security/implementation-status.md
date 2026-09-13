@@ -1,5 +1,14 @@
 # Seguridad: implementación y evidencias
 
+## 13/09/2026 — Gateway del alta WhatsApp conectado en código
+
+Rutas específicas y cliente tipado unen sesión MFA/ámbito MySQL al broker.
+Comprobación antes/después, DTO público sin secretos, recuperación por UUID y
+cancelación local durable antes del abort. 36 pruebas Node y 15 grupos MySQL
+propios pasan; proceso propio cerrado con código 0. No hay nueva DDL clínica,
+configuración instalada, proveedor real o despliegue. Falta la interfaz Meta,
+validación remota y activación de consumidores. [Contrato](whatsapp-onboarding-gateway.md).
+
 ## 13/09/2026 — Broker del alta WhatsApp preparado
 
 Operaciones privadas firmadas y estado durable: canje reclamado una vez,

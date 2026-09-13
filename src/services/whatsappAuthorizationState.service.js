@@ -64,7 +64,9 @@ function createService({ models, sessions, audit, config = C.settings, now = () 
   }
   function projection(row) {
     return { requestId: row.request_id, status: ['awaiting', 'claimed'].includes(row.state) && row.expires_at <= now() ? 'expired' : row.state,
-      scope: { type: row.scope_type, id: row.scope_id }, clinicIds: [...row.original_clinic_ids], expiresAt: row.expires_at.toISOString() };
+      scope: { type: row.scope_type, id: row.scope_id }, clinicIds: [...row.original_clinic_ids], expiresAt: row.expires_at.toISOString(),
+      // Internal binding evidence for the broker bridge; public DTOs omit hashes.
+      scopeDigest: row.scope_digest, clinicSetDigest: C.digest(JSON.stringify(row.original_clinic_ids)) };
   }
   function available(row) {
     if (row.state === 'cancelled') C.fail('whatsapp_authorization_cancelled', 409);

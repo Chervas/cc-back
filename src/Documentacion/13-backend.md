@@ -1,5 +1,27 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — API gateway del alta WhatsApp con MFA
+
+Base `/api/whatsapp/onboarding`: POST `/begin` (`requestId,scope`),
+`/finish` (`requestId,state,code,wabaId,phoneId`), `/status` y `/cancel`
+(`requestId`). JSON exacto de hasta 8 KiB, sin compresión/query/rawBody.
+Bearer de sesión gestionada, Origin HTTPS app/crm/autenticacion de ClinicaClick
+y `X-Whatsapp-Onboarding: 1`. Actor/sesión proceden del middleware; MFA por correo
+y permiso sobre todas las clínicas se revalidan antes/después del broker.
+
+DTO: requestId, authorizationStatus, connected false, pending, expiresAt, scope,
+clinicCount, selected y cancellationConfirmed. Begin pendiente añade solo
+appId/configId/redirectUri/state. No hashes, versiones, sujeto Meta, código o token.
+`awaiting_activation` acredita una candidata histórica, nunca canal activo.
+Tras resultado incierto consultar el mismo UUID; cancelación local se conserva
+antes de solicitar abort. No se vuelve a canjear un código reclamado.
+
+Nuevo `WHATSAPP_ONBOARDING_BROKER_CONFIG_FILE` privado y guards gateway/MFA,
+sin instalar. Rutas deshabilitadas por defecto; sin nueva DDL ni despliegue.
+36 pruebas Node y 15 grupos MySQL propios pasan, cierre 0. UI/Embedded Signup,
+configuración/grants Meta reales y consumidores siguen pendientes.
+Contrato: `back-dev/docs/security/whatsapp-onboarding-gateway.md`.
+
 ## 13/09/2026 — Contrato privado del alta WhatsApp
 
 Cohorte `whatsapp-onboarding-v1`, servidor TLS privado `/v1/execute`:

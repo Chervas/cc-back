@@ -1,7 +1,8 @@
 # Alta WhatsApp: registro del broker y credencial candidata
 
 13/09/2026. Implementación del broker privado, con AWS/Meta ficticios en QA.
-El runtime no está instalado ni conectado al gateway o la interfaz. No hay
+El runtime no está instalado. El [puente gateway/MFA](whatsapp-onboarding-gateway.md)
+ya está conectado en código; la interfaz sigue pendiente. No hay
 credenciales reales incorporadas, migración compartida ni autorización de
 reconexión. El resultado `staged` significa candidata guardada: `connected` es
 siempre `false`. No existe operación de activación en esta cohorte.
@@ -146,8 +147,8 @@ No hay cambios de UI o DDL clínica nuevos; no corresponde QA Angular/MySQL en
 este corte. DDL anteriores de estado/sesión/MFA/bloqueos siguen pendientes en
 BD compartida. El hotfix getAssetStats se conserva.
 
-Siguiente trabajo: puente gateway con sesión MFA verificada, correlación de
-estado y candidato, configuración/UI Meta exclusiva de WhatsApp, activación
+El puente gateway ya une sesión MFA verificada y correlación de estado/candidato.
+Siguiente trabajo: configuración/UI Meta exclusiva de WhatsApp, activación
 operativa aprobada y recepción durable gateway → cola → staging. Incluye
 registro/coexistencia/suscripciones según proceda y deduplicación de workers;
 no registrar números, suscribir WABAs ni enviar como efecto de guardar candidata.

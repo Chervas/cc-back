@@ -31,15 +31,17 @@ incidente. Las pruebas locales no autorizan llamadas reales ni una apertura.
 Preparado ciclo durable del alta en el broker: operaciones firmadas, reclamación
 única del canje, candidata Secrets Manager y conciliación por versión/hash.
 Bloqueos independientes del grupo/clínicas originales y auditoría atómica.
-No activa cuentas; runtime sin instalar. Próximo bloque: unir gateway/MFA y UI,
-comprobar configuración Meta exclusiva WhatsApp, permisos efectivos, activación
-y consumidores públicos. [Contrato y límites](whatsapp-onboarding-broker.md).
+No activa cuentas; runtime sin instalar. Gateway/MFA ya están unidos en código
+con rutas específicas, cliente tipado y recuperación durable: 36 pruebas Node
+y 15 grupos MySQL propios pasan. Próximo bloque: interfaz/Embedded Signup,
+configuración Meta exclusiva WhatsApp, permisos efectivos, activación y
+consumidores públicos. [Puente y límites](whatsapp-onboarding-gateway.md).
 
 Nuevo avance: estado de autorización durable ligado a sesión con correo MFA y
 conjunto exacto de clínicas, con reclamación única, cancelación y auditoría v15.
-Probado en MySQL ficticio; todavía sin rutas ni canje. Nueva DDL 20260913150000
-pendiente de corte aprobado. La siguiente pieza conecta ese estado al registro
-del broker y sustituye el requisito de MetaConnection general en gateway/UI.
+Probado en MySQL ficticio; conectado al broker por el puente posterior. DDL
+20260913150000 pendiente de corte aprobado. La siguiente pieza sustituye el
+requisito de MetaConnection general en la interfaz y completa Embedded Signup.
 La independencia WhatsApp/Ads/leads debe verificarse en los grants de Meta.
 [Contrato del estado](whatsapp-authorization-state.md).
 

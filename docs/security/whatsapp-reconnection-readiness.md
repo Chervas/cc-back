@@ -9,13 +9,16 @@ privadas firmadas, registro previo al canje, comprobación de identidad/WABA/nú
 candidata en Secrets Manager y recuperación por versión/hash sin repetir código.
 Bloqueos independientes del ámbito y recibos sobreviven a reinicios. Siempre
 devuelve `connected:false`; no activa canales. AWS/Meta ficticios en QA.
-Falta unirlo al estado MFA y gateway/UI; ninguna ruta pública se ha abierto,
-el runtime no está instalado y no se ha ejecutado un canje real.
+El [puente gateway/MFA](whatsapp-onboarding-gateway.md) ya une estos componentes
+en código, con rutas específicas deshabilitadas por defecto. 36 pruebas Node y
+15 grupos MySQL propios pasan. Falta interfaz/Embedded Signup y configuración
+real: ningún runtime nuevo se ha instalado ni se ha ejecutado un canje real.
 
 Avance local posterior: [estado de alta](whatsapp-authorization-state.md) durable,
 con sesión MFA vigente, conjunto de clínicas fijado, reclamación única y auditoría
 transaccional. 3 tests de contrato, 55 de auditoría y 12 comprobaciones MySQL
-propio correctos. DDL 20260913150000 pendiente. No está conectado a rutas ni canje;
+propio correctos en su corte inicial. DDL 20260913150000 pendiente. El puente
+posterior conecta estado y canje dentro del broker, sin instalación real;
 la independencia de grants/tokens WhatsApp frente a Ads/leads sigue por validar
 en Meta. Por sí solo no modifica la situación de reconexión.
 

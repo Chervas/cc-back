@@ -134,10 +134,68 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await models.Usuario.destroy({ where: { id_usuario: who.userId } }); assert.equal((await R.findByPk(historyId)).state, 'cancelled');
   await assert.rejects(migration.down(qi, D), /Preserve WhatsApp authorization states/);
   report.checks.push('Deletion of original user/session cannot cascade into authorization history; nonempty down refuses to erase evidence');
+  const { brokerForGateway } = require('./fixtures/whatsapp_onboarding_gateway.fixture.cjs');
+  const gatewayFactory = require('../../services/whatsappOnboardingGateway.service').createService;
+  async function withGateway(work) {
+    const cleanup = []; const g = brokerForGateway({ after: callback => cleanup.push(callback) }); g.f.state.clock = now().getTime();
+    const api = () => gatewayFactory({ states: make(), broker: g.client, guard: () => {} });
+    try { await work(g, api); } finally { for (const callback of cleanup.reverse()) await callback(); }
+  }
+  await withGateway(async (g, api) => {
+    const user = await actor(); const input = { ...user, requestId: randomUUID() };
+    const started = await api().begin({ ...input, scope: { type: 'group', id: 9 } });
+    assert.equal(started.authorizationStatus, 'awaiting_authorization'); assert.equal(started.clinicCount, 2);
+    assert.deepEqual(Object.keys(started.authorization).sort(), ['appId','configId','redirectUri','state']);
+    const callback = { ...input, state: started.authorization.state, code: 'FICTITIOUS_GATEWAY_CODE_' + input.requestId, wabaId: '301', phoneId: '401' };
+    const winners = await Promise.allSettled([api().finish(callback), api().finish(callback)]);
+    assert(winners.some(r => r.status === 'fulfilled' && r.value.authorizationStatus === 'awaiting_activation'));
+    g.f.restart(); const completed = await api().finish(callback);
+    assert.equal(completed.authorizationStatus, 'awaiting_activation'); assert.equal(completed.connected, false);
+    assert.equal(g.f.state.codes, 1); assert.equal(g.f.state.puts, 1);
+    for (const value of [started.authorization.state, callback.code, 'FICTITIOUS_ONBOARDING_TOKEN', 'scopeDigest', 'clinicSetDigest', 'subjectId', 'versionId']) assert(!JSON.stringify(completed).includes(value));
+    await models.UsuarioClinica.update({ rol_clinica: 'paciente' }, { where: { id_usuario: user.userId, id_clinica: 72 } });
+    await assert.rejects(api().status(input), codeIs('whatsapp_authorization_forbidden'));
+    const cancelled = await api().cancel(input); assert.equal(cancelled.cancellationConfirmed, true);
+    assert.equal((await R.findByPk(input.requestId)).state, 'cancelled');
+  });
+  report.checks.push('Real MFA/session/scope MySQL state composes with signed broker and fake AWS/Meta: concurrent callbacks and restart exchange once, return metadata only, preserve cancellation after membership loss');
+  await withGateway(async (g, api) => {
+    const user = await actor(); const input = { ...user, requestId: randomUUID() };
+    const started = await api().begin({ ...input, scope: { type: 'group', id: 9 } }); g.f.state.losePut = true;
+    await assert.rejects(api().finish({ ...input, state: started.authorization.state, code: 'FICTITIOUS_GATEWAY_CODE_' + input.requestId, wabaId: '301', phoneId: '401' }), codeIs('whatsapp_onboarding_result_unknown'));
+    assert.equal((await R.findByPk(input.requestId)).state, 'claimed'); g.f.restart();
+    assert.equal((await api().status(input)).authorizationStatus, 'awaiting_activation'); assert.equal(g.f.state.codes, 1); assert.equal(g.f.state.puts, 1);
+    await api().cancel(input);
+    const second = { ...user, requestId: randomUUID() }; g.state.before = () => { throw Error('FICTITIOUS_NETWORK_SECRET'); };
+    await assert.rejects(api().begin({ ...second, scope: { type: 'group', id: 9 } }), codeIs('whatsapp_onboarding_result_unknown'));
+    assert.equal((await R.findByPk(second.requestId)).state, 'awaiting');
+    await assert.rejects(api().cancel(second), codeIs('whatsapp_onboarding_result_unknown'));
+    assert.equal((await R.findByPk(second.requestId)).state, 'cancelled');
+    g.state.before = null; assert.equal((await api().cancel(second)).cancellationConfirmed, true);
+    assert.equal(g.f.state.codes, 1);
+  });
+  report.checks.push('Lost candidate ACK reconciles from durable claimed state without repeat exchange; missing begin/abort replies preserve local cancellation and later create a broker tombstone');
+  await withGateway(async (g, api) => {
+    const user = await actor(); const input = { ...user, requestId: randomUUID() };
+    const started = await api().begin({ ...input, scope: { type: 'group', id: 9 } });
+    g.f.state.afterGraph = async (request, response) => {
+      if (request.action === 'inspect') await models.AuthSession.update({ state: 'revoked' }, { where: { session_id: user.sessionRef } });
+      return response;
+    };
+    await assert.rejects(api().finish({ ...input, state: started.authorization.state, code: 'FICTITIOUS_GATEWAY_CODE_' + input.requestId, wabaId: '301', phoneId: '401' }), codeIs('auth_invalid'));
+    assert.equal(g.f.current.store.db.prepare('SELECT state FROM whatsapp_onboarding_flows WHERE id=?').get(input.requestId).state, 'aborted');
+    assert.equal(g.f.state.codes, 1); assert.equal((await R.findByPk(input.requestId)).state, 'claimed');
+    const next = { ...await actor(), requestId: randomUUID() };
+    await api().begin({ ...next, scope: { type: 'group', id: 9 } });
+    await g.client.abort(await make().status(next));
+    assert.equal((await api().status(next)).authorizationStatus, 'cancelled');
+  });
+  report.checks.push('Logout during provider work suppresses the response and aborts the broker candidate; independent broker cancellation is shown as cancelled without activating or releasing consumed codes');
   const rows = await A.findAll({ raw: true }); const bodies = rows.map(r => r.body).join('\n');
   assert(!bodies.includes(flow.state)); assert(!bodies.includes('FICTITIOUS_OAUTH_CODE')); assert(!bodies.includes('FICTITIOUS_JWT_KEY'));
   assert(rows.every(r => JSON.parse(r.body).version === 15));
   const persisted = JSON.stringify(await R.findAll({ raw: true })); assert(!persisted.includes(flow.state)); assert(!persisted.includes('FICTITIOUS_OAUTH_CODE'));
+  assert(!persisted.includes('FICTITIOUS_GATEWAY_CODE')); assert(!persisted.includes('FICTITIOUS_ONBOARDING_TOKEN'));
   const { drain } = require('../../services/platformAudit.repository'); const { keyFor } = require('../../../services/platform-audit/src/event');
   // Keep the fixture clock ahead of the newest rows for durable ACKs.
   const delivered = await drain(repo, { write: async row => ({ key: keyFor(row), digest: row.digest, versionId: 'FICTITIOUS_V15' }) }, { now, limit: 100 });

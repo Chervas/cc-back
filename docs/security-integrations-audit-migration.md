@@ -1,5 +1,21 @@
 # Runbook: Migracion Segura De Integraciones Y Auditoria
 
+## 13/09/2026 — Gateway une MFA, estado y broker WhatsApp
+
+Preparadas rutas POST begin/finish/status/cancel en
+`/api/whatsapp/onboarding`, montadas antes del parser general: JSON 8 KiB sin
+compresión/rawBody, Bearer verificado, Origin público exacto y cabecera propia.
+Actor/sesión del middleware; hashes solo internos. El canje se reclama una vez.
+Respuestas perdidas se consultan; pérdida de sesión/permisos suprime resultado
+y solicita abort sin afirmar su confirmación si falla el transporte.
+
+QA: 36 Node (35 regresión, 1 TLS) y 15 grupos MySQL reales propios, proveedores
+ficticios, cierre 0. Sin nueva DDL compartida; las anteriores siguen pendientes.
+Nueva configuración privada `WHATSAPP_ONBOARDING_BROKER_CONFIG_FILE`, no instalada.
+UI/Embedded Signup, permisos reales Meta, activación/consumidores e aislamiento
+siguen pendientes. Guard deshabilitado por defecto, cuarentena conservada.
+[Contrato, costes y rollback](security/whatsapp-onboarding-gateway.md).
+
 ## 13/09/2026 — Alta WhatsApp durable y candidata en Secrets Manager
 
 El runtime privado registra el canje antes de Meta, comprueba identidad/scopes/

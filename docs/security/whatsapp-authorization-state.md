@@ -1,8 +1,9 @@
 # Estado durable para el alta específica de WhatsApp
 
-13/09/2026. Componente interno probado con datos ficticios; no conectado a rutas
-públicas ni a Meta. La autorización Meta independiente de Ads/leads/páginas sigue
-siendo un requisito de cierre. Este registro no acredita la separación remota.
+13/09/2026. Componente interno probado con datos ficticios. El posterior
+[puente gateway](whatsapp-onboarding-gateway.md) lo une a rutas específicas y
+al broker, sin instalación ni canje real. La autorización Meta independiente de
+Ads/leads/páginas sigue siendo requisito de cierre; este registro no la acredita.
 
 ## Contrato y límites
 
@@ -52,15 +53,19 @@ y llamada. El futuro broker deberá conservar su propio estado e idempotencia.
 
 `cancel` exige la sesión original todavía válida, pero permite cancelar aunque
 se haya perdido la membresía o bloqueado el ámbito. Es idempotente, no borra filas
-y no cancela operaciones remotas. No soporta cancelación antes de crear el intento
+y por sí solo no cancela operaciones remotas; el puente propaga abort después
+de conservarla. No soporta cancelación antes de crear el intento
 ni desde otra sesión después de logout. Los intentos abandonados caducan; se
-conserva su evidencia. `status` devuelve solo estado, ámbito, IDs de clínicas y
-expiración, tras volver a comprobar el acceso; no códigos, hashes o credenciales.
+conserva su evidencia. `status` devuelve estado, ámbito, IDs de clínicas y
+expiración, tras volver a comprobar el acceso. Las proyecciones internas añaden
+`scopeDigest` y `clinicSetDigest` para el puente; su DTO público omite ambos.
+No se devuelven códigos o credenciales.
 
 Errores de contrato 400, sesión 401, ámbito 403, conflicto/consumo/cancelación
 409, caducidad 410, límite 429 y estado/configuración/auditoría no disponibles 503.
 Los errores de infraestructura se sustituyen por códigos fijos, sin SQL ni
-respuestas crudas. Estas son funciones internas; no se han creado endpoints.
+respuestas crudas. Estas funciones siguen siendo internas; las rutas específicas
+preparadas en el puente extraen actor y sesión del middleware verificado.
 
 ## Auditoría y despliegue pendiente
 

@@ -154,6 +154,9 @@ const corsOptionsDelegate = (req, callback) => {
 };
 
 app.use(cors(corsOptionsDelegate));
+// Dedicated gateway-only onboarding must enforce its small JSON boundary
+// before the general body parser. Disabled unless its reviewed gate is set.
+app.use('/api/whatsapp/onboarding', require('./routes/whatsapp-onboarding.routes'));
 const marketingWebJsonParser = express.json({
     limit: MARKETING_WEB_JSON_LIMIT_BYTES,
     type: isJsonContentType,
