@@ -1,5 +1,19 @@
 # Seguridad: implementación y evidencias
 
+## Décimo bloque: lecturas de Perfil de Empresa (13/09/2026)
+
+[Contrato y lote](google-business-profile-read-migration.md): seis operaciones,
+dos jobs/contexto sin tokens, referencias persistentes aditivas y arranque Google
+explícito con secretos/renovación y auditoría de integraciones v2. QA ficticia:
+34 tests broker, cinco adaptador, once hotfix y ocho checks MySQL. Registro
+independiente impide fallback al borrar/recrear mappings. Sin cambios
+de UI, AWS, OAuth real, BD compartida, PM2 o despliegue. Ninguna ubicación real
+migrada; OAuth/OPS/lifecycle y otras verticales siguen pendientes para el corte.
+El nuevo incidente WABA y revocación son reportados por el usuario, quien
+autorizó reanudar; no se probaron tokens ni se acredita contención total.
+Las matrices AWS/BD inferiores mantienen sus pendientes y fuentes históricas.
+
+
 ## Noveno bloque: acceso en tiempo real preparado (12/09/2026)
 
 [Contrato y corte](realtime-access-migration.md): permisos del recurso

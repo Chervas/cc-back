@@ -1,5 +1,14 @@
 # Runbooks operativos del backend
 
+## Lecturas de Perfil de Empresa preparadas (13/09/2026)
+
+[Operaciones, referencias, OAuth interno, QA y corte pendiente](security/google-business-profile-read-migration.md).
+Dos jobs usan seis operaciones del broker para ubicaciones marcadas, sin cargar
+tokens legacy. Arranque explícito separado; no desplegado ni activado. Migración
+`20260913000000` solo probada en MySQL propio. OAuth/OPS/lifecycle y retirada de
+credenciales Google compartidas siguen pendientes antes del corte real.
+
+
 ## Noveno bloque: acceso en tiempo real preparado (12/09/2026)
 
 [Contrato y corte](security/realtime-access-migration.md): permisos del recurso

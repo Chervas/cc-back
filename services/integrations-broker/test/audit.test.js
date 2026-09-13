@@ -31,11 +31,12 @@ test('leases prevent duplicate delivery; expired claims recover after worker fai
 test('S3 sink uses fixed prefix, exact KMS and conditional checksum write; missing ACK stays pending', async t => {
   const f = fixture(t); await f.execute(f.command()); let input;
   const sink = createS3AuditSink({ bucket: 'fixture-audit-bucket', keyArn: 'arn:aws:kms:eu-west-3:123456789012:key/11111111-1111-4111-8111-111111111111',
-    client: { send: async command => { input = command.input; return { VersionId: 'fixture-version', ChecksumSHA256: input.ChecksumSHA256 }; } } });
+    client: { send: async command => { input = command.input; return { VersionId: 'fixture-version', ChecksumSHA256: input.ChecksumSHA256,
+      ServerSideEncryption: 'aws:kms', SSEKMSKeyId: input.SSEKMSKeyId }; } } });
   const result = await drainAudit(f.store, sink, { limit: 1 });
   assert.equal(result.delivered, 1);
   assert.equal(input.IfNoneMatch, '*'); assert.equal(input.ServerSideEncryption, 'aws:kms');
-  assert.match(input.Key, /^app\/v1\/\d{4}-\d{2}-\d{2}\//);
+  assert.match(input.Key, /^app\/integrations\/v2\/\d{4}-\d{2}-\d{2}\//);
   const bad = await drainAudit(f.store, { write: async () => ({ versionId: 'x', digest: 'wrong' }) });
   assert.equal(bad.pending, 1); assert.equal(bad.failed, 1);
 });
@@ -52,4 +53,13 @@ test('SQLite consistent backup restores blocked state, idempotency and undeliver
   assert.throws(() => restored.connection(command.connectionRef), { code: 'connection_blocked' });
   assert.equal(restored.backlog().pending, 3);
   assert.equal(restored.db.prepare('SELECT state FROM commands').get().state, 'completed');
+});
+test('historical v1 keeps its S3 prefix and a mismatched encryption ACK is never confirmed', async t => {
+  const f = fixture(t); const current = eventFor(f.command(), f.policy.principals[0], f.policy, 'integration.requested', 'accepted', 'authorized');
+  const { connectionRef, operation, ...legacy } = current; legacy.version = 1; f.store.appendAudit(legacy);
+  let input; const keyArn = 'arn:aws:kms:eu-west-3:123456789012:key/11111111-1111-4111-8111-111111111111';
+  const sink = createS3AuditSink({ bucket: 'fixture-audit-bucket', keyArn, client: { send: async command => {
+    input = command.input; return { VersionId: 'fictitious-version', ChecksumSHA256: input.ChecksumSHA256, ServerSideEncryption: 'AES256', SSEKMSKeyId: keyArn };
+  } } });
+  const result = await drainAudit(f.store, sink); assert.match(input.Key, /^app\/v1\//); assert.equal(result.delivered, 0); assert.equal(result.pending, 1);
 });

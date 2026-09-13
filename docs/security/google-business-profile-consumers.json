@@ -1,0 +1,242 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-13",
+  "sourceHead": "292c0b74beaddf8c4978f7da00ca52a790ee8324",
+  "includesWorkingChanges": true,
+  "runtimeMigrated": 0,
+  "operationPrefix": "google.business_profile.",
+  "operations": [
+    "metrics.read.v1",
+    "reviews.read.v1",
+    "posts.read.v1",
+    "media.read.v1",
+    "details.read.v1",
+    "verification.read.v1"
+  ],
+  "method": "Manual code classification, static references and source hashes; no runtime credentials, provider calls or external OPS inventory.",
+  "limitations": [
+    "Other Google verticals and all other provider cohorts remain pending.",
+    "Original broad inventory remains a dated baseline.",
+    "Runtime deployment, exact owners/grants and approvals are still required."
+  ],
+  "rows": [
+    {
+      "file": "src/jobs/sync.jobs.js",
+      "sha256": "c43fdbe5c1e9d2a99d61dd452a41f7eac67c9d6c856e5d7913901db40c755f44",
+      "status": "prepared_offline",
+      "note": "Full/review jobs and reused backfills select managed reads; legacy remains for locations without a registry entry.",
+      "references": [
+        {
+          "symbol": "executeBusinessProfileSync",
+          "lines": [
+            1978,
+            2235
+          ]
+        },
+        {
+          "symbol": "executeBusinessProfileReviewsSync",
+          "lines": [
+            2127
+          ]
+        },
+        {
+          "symbol": "_syncBusinessProfileMetrics",
+          "lines": [
+            2037,
+            2678
+          ]
+        },
+        {
+          "symbol": "_syncBusinessProfileReviews",
+          "lines": [
+            2038,
+            2159,
+            2736
+          ]
+        },
+        {
+          "symbol": "_syncBusinessProfilePosts",
+          "lines": [
+            2039,
+            2915
+          ]
+        },
+        {
+          "symbol": "_syncBusinessProfileMedia",
+          "lines": [
+            2042,
+            2967
+          ]
+        },
+        {
+          "symbol": "_syncBusinessProfileLocationDetails",
+          "lines": [
+            2028,
+            2993
+          ]
+        },
+        {
+          "symbol": "_syncBusinessProfileVoiceOfMerchantState",
+          "lines": [
+            2033,
+            3047
+          ]
+        }
+      ]
+    },
+    {
+      "file": "src/services/businessProfileBroker.service.js",
+      "sha256": "929d3154dd373e0a9f13f6b0d4d84e625d013985b03757054a6fc1525b5375a1",
+      "status": "prepared_offline",
+      "note": "No provider token loader for managed locations; independent registry checked even when flag is disabled.",
+      "references": [
+        {
+          "symbol": "createBusinessProfileBroker",
+          "lines": [
+            30,
+            82,
+            87
+          ]
+        },
+        {
+          "symbol": "recordedBinding",
+          "lines": [
+            33,
+            46,
+            62,
+            69
+          ]
+        },
+        {
+          "symbol": "loadManagedBinding",
+          "lines": [
+            30,
+            34,
+            83
+          ]
+        }
+      ]
+    },
+    {
+      "file": "src/routes/oauth.routes.js",
+      "sha256": "6adc1c8e289b3a66dc366ae71efbec93b4b93a4982a6ae68b724c17a6deeeba9",
+      "status": "pending",
+      "note": "Discovery, mapping, reassignment/disconnect and OAuth remain legacy; coordinate or pause for approved canary.",
+      "references": [
+        {
+          "symbol": "GOOGLE_BUSINESS_ACCOUNT_API",
+          "lines": [
+            301,
+            696
+          ]
+        },
+        {
+          "symbol": "GOOGLE_BUSINESS_INFORMATION_API",
+          "lines": [
+            300,
+            715
+          ]
+        },
+        {
+          "symbol": "ClinicBusinessLocation",
+          "lines": [
+            17,
+            1982,
+            2108,
+            2156,
+            2204,
+            2271,
+            2303,
+            3440
+          ]
+        }
+      ]
+    },
+    {
+      "file": "src/services/businessProfileLocal.service.js",
+      "sha256": "43be6217e7219f9b97bae385d6d61cb605d611d7add2aa7e6128357e8baa2797",
+      "status": "pending_writes",
+      "note": "Cached domain reads retain DTOs; review replies/photos/hours still use legacy writes and shared Google credentials.",
+      "references": [
+        {
+          "symbol": "GOOGLE_MY_BUSINESS_API",
+          "lines": [
+            27,
+            795,
+            842,
+            1355
+          ]
+        },
+        {
+          "symbol": "GOOGLE_BUSINESS_INFORMATION_API",
+          "lines": [
+            28,
+            1551
+          ]
+        }
+      ]
+    },
+    {
+      "file": "src/scripts/push_ops_google_business_profile.js",
+      "sha256": "cc646b214f21a031e9ae4e718bd9528258867b568d8c3f46709605131aa16c57",
+      "status": "pending_external_ops",
+      "note": "Reads accounts/locations/details/reviews/posts with legacy OAuth and sends data to external OPS; not invoked or migrated.",
+      "references": [
+        {
+          "symbol": "async function googleGet",
+          "lines": [
+            256
+          ]
+        },
+        {
+          "symbol": "async function listAccountLocations",
+          "lines": [
+            285
+          ]
+        },
+        {
+          "symbol": "oauth2.googleapis.com/token",
+          "lines": [
+            228
+          ]
+        }
+      ]
+    },
+    {
+      "file": "src/controllers/marketingReports.controller.js",
+      "sha256": "bcf67ecbf05b5844647f9e773a6cade219a3896b2df727ad886fe6b603bb1b05",
+      "status": "cached_consumer",
+      "note": "Uses domain caches. API host string in user-facing error text is not an HTTP read.",
+      "references": [
+        {
+          "symbol": "async function aggregateBusinessProfile",
+          "lines": [
+            2673
+          ]
+        }
+      ]
+    },
+    {
+      "file": "src/lib/businessProfileLocationMapping.js",
+      "sha256": "b637a858f506f1e78ec9044b464612b0bca6fe6e95d51d332a603a926c8ea7ae",
+      "status": "mapping_contract_preserved",
+      "note": "Mapping/coherence helpers; not a provider transport.",
+      "references": [
+        {
+          "symbol": "assertBusinessProfileConnectionCoherence",
+          "lines": [
+            151,
+            226
+          ]
+        },
+        {
+          "symbol": "mergeBusinessProfileRawPayload",
+          "lines": [
+            88,
+            227
+          ]
+        }
+      ]
+    }
+  ]
+}

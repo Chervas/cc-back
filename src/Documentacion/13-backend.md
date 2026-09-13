@@ -1,5 +1,38 @@
 > **Módulo:** Arquitectura del Backend
 
+## 2026-09-13 — Lecturas de Perfil de Empresa por broker, preparadas
+
+`businessProfileBroker.service` conecta los jobs de sincronización completa y
+de reseñas con seis operaciones `google.business_profile.*.read.v1`: métricas,
+reseñas, posts, media, detalles y verificación. Payloads cerrados; identidad
+Ed25519 de servicio y grants exactos por clínica/conexión/activo/operación.
+No añade rutas públicas ni altera el DTO de las cachés de informes.
+
+`ClinicBusinessLocations.broker_read_connection_ref/broker_read_asset_ref`
+seleccionan el recorrido gestionado; ambas null conservan legacy. Marcador
+presente exige gate `GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED=true`, contexto
+privado y broker disponible; falla sin volver a GoogleConnection. Revalida
+mapping antes/después de la llamada. `BusinessProfileBrokerBindings`, sin FK,
+conserva el bloqueo del recorrido legacy al borrar/recrear una ubicación; los
+jobs consultan ese registro antes de recuperar cualquier token. Registro y
+mapping deben coincidir. Migración `20260913000000` obligatoria
+antes de cargar el modelo en runtimes usados; solo aplicada a MySQL ficticio.
+
+Entry point explícito `services/integrations-broker/src/google-main.js`:
+Node 24, IMDSv2/STS con rol de instancia y writer fijados, Secrets Manager/KMS,
+renovación por caducidad, revocación durable, TLS y auditoría integraciones v2.
+Conserva respuestas solo durante la ejecución; SQLite guarda ID/digest/estado,
+sin contenido de reseñas. Mismo requestId finalizado devuelve outcome_unknown
+sin repetir proveedor. Los nuevos eventos añaden conexión/operación autorizadas
+bajo `app/integrations/v2`; el visor de plataforma no consulta ese prefijo.
+
+Sin despliegue ni OAuth real. Antes del corte: IAM/red/backup/coste, OAuth/OPS y
+lifecycle compatibles o pausados (registro independiente conservado),
+monitor/conciliación del broker y aprobación explícita. Google Ads, GA4/Search
+Console y escrituras GBP aún usan sus recorridos y credencial compartida.
+Contrato: `back-dev/docs/security/google-business-profile-read-migration.md`.
+
+
 ## 2026-09-12 — Acceso en tiempo real y auditoría v5 preparados
 
 `socket-realtime-guard` reemplaza la autorización de salas calculada una vez:

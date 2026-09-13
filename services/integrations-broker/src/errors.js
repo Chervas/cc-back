@@ -5,6 +5,7 @@ const STATUS = Object.freeze({
   operation_denied: 403, connection_blocked: 423, request_replayed: 409,
   idempotency_conflict: 409, outcome_unknown: 409, rate_limited: 429,
   provider_disabled: 503, provider_failed: 502, provider_timeout: 504,
+  provider_unauthorized: 502, credential_revoked: 423,
   secret_unavailable: 503, audit_unavailable: 503, internal_error: 500,
 });
 class BrokerError extends Error {

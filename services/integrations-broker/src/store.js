@@ -67,7 +67,7 @@ class BrokerStore {
       const existing = this.db.prepare('SELECT * FROM commands WHERE principal=? AND id=?').get(principal, id);
       if (existing) {
         if (existing.digest !== digest) fail('idempotency_conflict');
-        if (existing.state !== 'completed') fail('outcome_unknown');
+        if (existing.state !== 'completed' || !existing.result) fail('outcome_unknown');
         return JSON.parse(existing.result);
       }
       if (this.backlog().pending >= maxBacklog) fail('audit_unavailable');
@@ -76,10 +76,10 @@ class BrokerStore {
       return null;
     });
   }
-  complete(principal, id, result, event) {
+  complete(principal, id, result, event, { persistResult = true } = {}) {
     this.transaction(() => {
       this.appendAudit(event);
-      this.db.prepare("UPDATE commands SET state='completed',result=? WHERE principal=? AND id=? AND state='started'").run(JSON.stringify(result), principal, id);
+      this.db.prepare("UPDATE commands SET state='completed',result=? WHERE principal=? AND id=? AND state='started'").run(persistResult ? JSON.stringify(result) : null, principal, id);
     });
   }
   uncertain(principal, id, event) {

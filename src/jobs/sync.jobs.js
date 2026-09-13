@@ -64,6 +64,7 @@ const webContentGenerationService = require('../services/webContentGeneration.se
 const webDomainsService = require('../services/webDomains.service');
 const webPublicationHealthMonitorService = require('../services/webPublicationHealthMonitor.service');
 const googleReviewMatchService = require('../services/googleReviewMatch.service');
+const businessProfileBroker = require('../services/businessProfileBroker.service');
 const jobRequestsService = require('../services/jobRequests.service');
 const systemNotificationsService = require('../services/systemNotifications.service');
 const {
@@ -2019,11 +2020,8 @@ class MetaSyncJobs {
 
       for (const location of locations) {
         try {
-          let accessToken = tokenByConnection.get(Number(location.google_connection_id));
-          if (!accessToken) {
-            ({ accessToken } = await this._ensureGoogleAccessToken(location.google_connection_id));
-            tokenByConnection.set(Number(location.google_connection_id), accessToken);
-          }
+          const accessToken = await businessProfileBroker.prepare(location,
+            id => this._ensureGoogleAccessToken(id), tokenByConnection);
           const sectionErrors = [];
           let details = null;
           try {
@@ -2156,11 +2154,8 @@ class MetaSyncJobs {
 
       for (const location of locations) {
         try {
-          let accessToken = tokenByConnection.get(Number(location.google_connection_id));
-          if (!accessToken) {
-            ({ accessToken } = await this._ensureGoogleAccessToken(location.google_connection_id));
-            tokenByConnection.set(Number(location.google_connection_id), accessToken);
-          }
+          const accessToken = await businessProfileBroker.prepare(location,
+            id => this._ensureGoogleAccessToken(id), tokenByConnection);
           const reviews = await this._syncBusinessProfileReviews(location, accessToken, {
             maxPages: report.maxPages,
             enqueueOnlyNewReviews: true
@@ -2687,7 +2682,9 @@ class MetaSyncJobs {
     }
 
     const params = this._buildBusinessProfileMetricParams(start, end);
-    const response = await syncHttp.get(
+    const response = businessProfileBroker.managed(location, accessToken)
+      ? await businessProfileBroker.read(location, accessToken, 'metrics', { startDate: this._formatDate(start), endDate: this._formatDate(end) })
+      : await syncHttp.get(
       `${GOOGLE_BUSINESS_PERFORMANCE_API}/${locationName}:fetchMultiDailyMetricsTimeSeries`,
       { params, headers: { Authorization: `Bearer ${accessToken}` } }
     );
@@ -2753,7 +2750,9 @@ class MetaSyncJobs {
     let expectedReviewCount = null;
     do {
       page += 1;
-      const response = await syncHttp.get(`${GOOGLE_MY_BUSINESS_API}/${resourceBase}/reviews`, {
+      const response = businessProfileBroker.managed(location, accessToken)
+        ? await businessProfileBroker.read(location, accessToken, 'reviews', { pageToken: nextPageToken })
+        : await syncHttp.get(`${GOOGLE_MY_BUSINESS_API}/${resourceBase}/reviews`, {
         params: { pageSize: 50, pageToken: nextPageToken || undefined },
         headers: { Authorization: `Bearer ${accessToken}` }
       });
@@ -2922,7 +2921,9 @@ class MetaSyncJobs {
     let nextPageToken = null;
     let processed = 0;
     do {
-      const response = await syncHttp.get(`${GOOGLE_MY_BUSINESS_API}/${resourceBase}/localPosts`, {
+      const response = businessProfileBroker.managed(location, accessToken)
+        ? await businessProfileBroker.read(location, accessToken, 'posts', { pageToken: nextPageToken })
+        : await syncHttp.get(`${GOOGLE_MY_BUSINESS_API}/${resourceBase}/localPosts`, {
         params: { pageSize: 100, pageToken: nextPageToken || undefined },
         headers: { Authorization: `Bearer ${accessToken}` }
       });
@@ -2972,7 +2973,9 @@ class MetaSyncJobs {
     const mediaItems = [];
     let nextPageToken = null;
     do {
-      const response = await syncHttp.get(`${GOOGLE_MY_BUSINESS_API}/${resourceBase}/media`, {
+      const response = businessProfileBroker.managed(location, accessToken)
+        ? await businessProfileBroker.read(location, accessToken, 'media', { pageToken: nextPageToken })
+        : await syncHttp.get(`${GOOGLE_MY_BUSINESS_API}/${resourceBase}/media`, {
         params: { pageSize: 100, pageToken: nextPageToken || undefined },
         headers: { Authorization: `Bearer ${accessToken}` }
       });
@@ -2997,14 +3000,18 @@ class MetaSyncJobs {
       }
     }
     if (!rawPayload || typeof rawPayload !== 'object' || Array.isArray(rawPayload)) rawPayload = {};
-    const accountName = rawPayload.accountName || rawPayload.account_name || null;
+    const accountName = location.broker_read_asset_ref
+      ? `accounts/${businessProfileBroker.binding(location).assetRef.split(':')[1]}`
+      : rawPayload.accountName || rawPayload.account_name || null;
     const locationName = this._normalizeBusinessProfilePerformanceLocation(location.location_id);
     const locationId = locationName ? locationName.split('/').pop() : null;
     if (!accountName || !locationId) {
       throw new Error('Ubicación Google Business Profile sin accountName para sincronizar detalles');
     }
 
-    const response = await syncHttp.get(`${GOOGLE_BUSINESS_INFORMATION_API}/locations/${locationId}`, {
+    const response = businessProfileBroker.managed(location, accessToken)
+      ? await businessProfileBroker.read(location, accessToken, 'details', {})
+      : await syncHttp.get(`${GOOGLE_BUSINESS_INFORMATION_API}/locations/${locationId}`, {
       params: { readMask: GOOGLE_BUSINESS_LOCATION_READ_MASK },
       headers: { Authorization: `Bearer ${accessToken}` }
     });
@@ -3042,7 +3049,9 @@ class MetaSyncJobs {
     if (!locationName) {
       throw new Error('Ubicación Google Business Profile sin location_id para consultar verificación');
     }
-    const response = await syncHttp.get(
+    const response = businessProfileBroker.managed(location, accessToken)
+      ? await businessProfileBroker.read(location, accessToken, 'verification', {})
+      : await syncHttp.get(
       `${GOOGLE_BUSINESS_VERIFICATIONS_API}/${locationName}/VoiceOfMerchantState`,
       { headers: { Authorization: `Bearer ${accessToken}` } }
     );
@@ -3099,6 +3108,10 @@ class MetaSyncJobs {
   }
 
   _buildBusinessProfileV4LocationPath(location) {
+    if (location.broker_read_asset_ref) {
+      const [, accountId, locationId] = businessProfileBroker.binding(location).assetRef.split(':');
+      return `accounts/${accountId}/locations/${locationId}`;
+    }
     const rawPayload = location.raw_payload && typeof location.raw_payload === 'object'
       ? location.raw_payload
       : {};

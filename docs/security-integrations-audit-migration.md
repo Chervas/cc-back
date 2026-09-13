@@ -1,5 +1,18 @@
 # Runbook: Migracion Segura De Integraciones Y Auditoria
 
+## Décimo bloque: lecturas de Perfil de Empresa preparadas (13/09/2026)
+
+[Contrato, límites y lote pendiente](security/google-business-profile-read-migration.md):
+seis operaciones Google cerradas, contexto sin tokens en dos jobs, referencias
+aditivas por ubicación y arranque separado del broker con IMDSv2/STS/Secrets/S3.
+QA ficticia con TLS y MySQL propios; sin AWS, OAuth real, migración compartida
+ni despliegue. La revocación de tokens WhatsApp y autorización para reanudar
+son información comunicada por el usuario; no se han probado credenciales.
+Antes del corte faltan OAuth/OPS/lifecycle compatibles o pausados, IAM/red,
+conciliación/monitor del broker, backups y aprobación de los recursos/consumidores.
+No retirar tokens Google compartidos hasta completar sus demás verticales.
+
+
 ## Noveno bloque: acceso en tiempo real preparado (12/09/2026)
 
 [Contrato y corte](security/realtime-access-migration.md): permisos del recurso

@@ -5,6 +5,8 @@ module.exports = (sequelize, DataTypes) => {
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
     clinica_id: { type: DataTypes.INTEGER, allowNull: false },
     google_connection_id: { type: DataTypes.INTEGER, allowNull: false },
+    broker_read_connection_ref: { type: DataTypes.STRING(128), allowNull: true, defaultValue: null },
+    broker_read_asset_ref: { type: DataTypes.STRING(128), allowNull: true, defaultValue: null },
     location_name: { type: DataTypes.STRING(256), allowNull: true },
     location_id: { type: DataTypes.STRING(256), allowNull: false },
     store_code: { type: DataTypes.STRING(128), allowNull: true },

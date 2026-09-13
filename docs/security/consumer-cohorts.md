@@ -18,7 +18,7 @@ el resultado no demuestra una fuga por sí solo.
 | Meta Ads/objetivos | campaignWorkspaceMeta*, metaWorkspaceSignal*, campana, effectiveMarketingAssets | conexión/grant, cuenta/página/pixel por clínica/grupo | Pendiente; separar lecturas de todas las mutaciones y publicidad |
 | Google Ads/inventario | googleAdsClient, googleAdsScopedRuntime, googleAdCache, googleCampaignMetricsCache, campaignWorkspaceGoogle* | grant exacto del mapping y developer token | Pendiente; métricas/lecturas primero tras aprobar consultas concretas |
 | Conversiones/recepción | googleDataManager*, googleAdsConversion*, metaCapi, metaLeadReception, metaWorkspaceSignalDelivery, intake, googleLeadReception | grant, activo, consentimiento y comandos durables | Pendiente; idempotencia/receipts y cero doble envío al cortar |
-| Perfil Google/Search Console/GA4 | businessProfileLocal, businessProfileLocationMapping, web.routes, sync.jobs, marketingReports | conexión y scope Google por vertical | Pendiente; no crear conexiones privadas paralelas |
+| Perfil Google/Search Console/GA4 | businessProfileLocal, businessProfileLocationMapping, web.routes, sync.jobs, marketingReports | conexión y scope Google por vertical | Seis lecturas/dos jobs GBP preparadas y probadas offline; OAuth/OPS/lifecycle, escrituras, Search Console y GA4 pendientes. Ver contrato de cohorte |
 | WhatsApp/recepción clínica | whatsapp.service, whatsappPhones, whatsappTemplates, whatsappAccount*, whatsappDeliveryGovernance, flowEngineV2, patientDirection, queue.workers | waAccessToken, teléfono/WABA efectivo, roles de canal | Pendiente; DEV/staging/gateway compatibles antes de retirar columnas |
 | OAuth/ciclo de vida | oauth.routes, whatsapp-embedded.routes, oauthConnectionPersistence, oauthScopedDisconnect, oauthConnectionHealth | app secrets, códigos, grants, tokens y bloqueos | Pendiente; intercambio/almacenamiento en límite de confianza, nunca reactivar Meta |
 | Webhooks | whatsapp-webhook.routes, app.js, intakePublicAuthentication | firma sobre bytes originales, replay, entrega durable | Pendiente; recepción continua y deduplicada, fixtures firmadas |
@@ -31,7 +31,12 @@ versión de contrato, pruebas y aprobación de cohorte. El scanner no decide eso
 campos por coincidencias de texto. CI/OPS fuera del repo, instalaciones CMS y
 copias operativas precisan el inventario/acceso expresamente asignado.
 
-**Migrados: ninguno. Bloqueados por el incidente: no se cambia el estado de
-Meta. Adaptador nuevo:** transporte firmado HTTPS, todavía sin conectar a
-consumidores legacy. **Pruebas ficticias:** broker y contrato de transporte;
-no constituyen recepción real de leads ni ejecución real de Optimiza.
+**Migrados en runtime: ninguno.** Seis operaciones de lectura y sus dos jobs GBP
+están conectados en código al transporte firmado para ubicaciones marcadas;
+sin fallback de esos jobs incluso si se elimina/recrea el mapping, mediante
+registro independiente. OAuth/OPS/lifecycle requieren adaptación o pausa antes
+del corte. Inventario manual:
+`google-business-profile-consumers.json`; [contrato](google-business-profile-read-migration.md).
+Meta sigue sin reactivar; el usuario comunica revocación de tokens WhatsApp el
+13/09, no verificada con proveedores. Pruebas ficticias no constituyen recepción
+real de leads, ejecución de Optimiza ni migración operativa.

@@ -1,5 +1,15 @@
 # Broker de integraciones
 
+## 13/09/2026: lecturas GBP preparadas, sin activar
+
+`google-main.js` incorpora un arranque explícito con seis operaciones cerradas
+de Perfil de Empresa, Secrets Manager/renovación, IMDSv2/STS y writer separado
+por rol. Dos jobs backend usan referencias para ubicaciones gestionadas; una
+tabla independiente impide fallback al borrar/recrear el mapping. Sin AWS,
+OAuth real ni despliegue. [Contrato, pruebas y lote pendiente](../../docs/security/google-business-profile-read-migration.md).
+`npm start` mantiene su entrada ficticia. Las secciones siguientes describen
+el núcleo común; la configuración Google se especifica en el contrato enlazado.
+
 Paquete autocontenido con Node 24, dependencias y lockfile propios. No importa
 el bootstrap, modelos, `.env` ni credenciales de la API clínica. No hay servicio
 desplegado: `main.js` solo admite conexiones ficticias y escucha en loopback
@@ -28,12 +38,14 @@ capacidad de invocar los grants asignados: esta separación no elimina ese riesg
 
 Catálogo actual: `fictitious.connection.check.v1`, payload `{}`, devuelve
 `{fixture:true,status:"available"}`. No acredita salud de Meta, Google ni WhatsApp.
-Las operaciones reales y sus consumidores siguen pendientes de migración.
+El catálogo de seis lecturas Google solo se registra en `google-main.js`.
+Su migración operativa y el resto de consumidores permanecen pendientes.
 
 `src/lib/integrationsBrokerClient.js` del backend implementa el transporte HTTPS
 firmado, verifica el certificado, sanea errores y no contiene recuperación de
-secretos ni reintentos automáticos. Todavía no se ha conectado a consumidores
-legacy. Sus llamadas necesitan conservar el mismo requestId al conciliar.
+secretos ni reintentos automáticos. Los dos jobs GBP están conectados en código,
+con gate apagado. Sus llamadas conservan el mismo requestId al conciliar;
+GBP no persiste contenido de respuesta y devuelve outcome_unknown al repetirlo.
 
 ## Estado y auditoría
 
@@ -49,18 +61,21 @@ cancelar el transporte no deshace una escritura remota. Un comando iniciado
 sin finalización se conserva como pendiente de conciliación, sin repetición.
 
 Outbox con eventId, instante UTC, actor de servicio, scope, recurso, resultado,
-motivo categorizado, correlación y versión de política. Sin payload ni mensajes
+motivo categorizado, correlación y versión de política. La versión 2 añade
+conexión/operación autorizadas; sigue aceptando v1 histórico. Sin payload ni mensajes
 de error del proveedor. Un ID arbitrario de un scope denegado no se registra.
 No hay instrumentación todavía de accesos de usuarios a toda la plataforma.
 
-El emisor S3 usa objeto único `app/v1/fecha/eventId-sha256.json`, SSE-KMS con ARN
+El emisor S3 usa objeto único `app/integrations/v2/fecha/eventId-sha256.json`
+(histórico v1 conserva `app/v1/`), SSE-KMS con ARN
 exacto, checksum SHA-256 e `IfNoneMatch=*`. No lee ni borra objetos. Deshabilita
 Bucket Keys **en esa petición**, sin modificar la configuración del bucket;
 su efecto sobre permisos/costes se verificará con la prueba ficticia aprobada.
-Exige versión y checksum en ACK. Respuesta perdida/412 conserva entrega
+Exige versión, checksum y cifrado/KMS en ACK. Respuesta perdida/412 conserva entrega
 inconfirmada: un reader independiente tendrá que conciliarla, no se supone éxito.
 Los workers usan leases persistentes y reintentos con backoff. El arranque
-ficticio aún no programa el drenado ni crea credenciales de entrega.
+ficticio no programa drenado ni crea credenciales de entrega; el entry point
+Google programa un drain serial con writer explícito.
 
 La cola alcanza un máximo de admisión configurado; el broker falla cerrado
 antes de nuevas operaciones al agotarlo. No se borra auditoría para liberar

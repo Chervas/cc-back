@@ -14,14 +14,16 @@ const validateRequest = ajv.compile(object({
 }));
 const actionNames = ['integration.requested', 'integration.completed', 'integration.failed',
   'integration.denied', 'connection.blocked', 'audit.accessed'];
-const validateAudit = ajv.compile(object({
+const auditFields = {
   version: { const: 1 }, eventId: uuid, occurredAt: { type: 'string', pattern: '^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z$' },
   actorType: { enum: ['service', 'operator'] }, actorId: ref,
   tenantRef: ref, action: { enum: actionNames }, resourceRef: ref,
   result: { enum: ['accepted', 'success', 'denied', 'failed', 'unknown'] },
   reason: ref, correlationId: uuid, policyVersion: ref,
-}));
+};
+const validateAuditV1 = ajv.compile(object(auditFields));
+const validateAuditV2 = ajv.compile(object({ ...auditFields, version: { const: 2 }, connectionRef: ref, operation: ref }));
 function request(body) { if (!validateRequest(body)) fail('invalid_request'); return body; }
-function audit(event) { if (!validateAudit(event)) fail('invalid_request'); return event; }
+function audit(event) { if (!(event?.version === 2 ? validateAuditV2(event) : validateAuditV1(event))) fail('invalid_request'); return event; }
 function schema(properties) { const check = ajv.compile(object(properties)); return value => { if (!check(value)) fail('invalid_request'); return value; }; }
 module.exports = { request, audit, schema, ref };

@@ -57,28 +57,38 @@ class Broker {
     const revision = this.store.connection(request.connectionRef, now).revision;
     const controller = new AbortController();
     const active = this.active.get(request.connectionRef) || new Set(); active.add(controller); this.active.set(request.connectionRef, active);
-    let timer;
+    let timer; let revoked = false;
+    const onRevoked = () => {
+      if (!revoked) {
+        this.block(request.connectionRef, eventFor(request, principal, this.policy, 'connection.blocked', 'success', 'credential_revoked', this.now()), 'revoked');
+        revoked = true;
+      }
+    };
     try {
       const work = this.secrets.withSecret(binding, async secret => {
         if (controller.signal.aborted) fail('provider_timeout');
         if (this.store.connection(request.connectionRef, this.now()).revision !== revision) fail('connection_blocked');
-        const rawResult = await operation.execute({ payload: request.payload, binding, assetRef: request.assetRef, secret, signal: controller.signal });
+        const rawResult = await operation.execute({ payload: request.payload, binding, assetRef: request.assetRef,
+          tenantRef: request.tenantRef, principalId: principal.id, policyVersion: this.policy.version, secret, signal: controller.signal });
         if (controller.signal.aborted) fail('provider_timeout');
         // Recheck after awaits, including blocks written by a separate local operator process.
         if (this.store.connection(request.connectionRef, this.now()).revision !== revision) fail('connection_blocked');
         const data = operation.project(rawResult);
         if (JSON.stringify(data).includes(secret.toString('utf8'))) fail('provider_failed');
         return data;
-      });
+      }, { signal: controller.signal, onRevoked });
       const data = await Promise.race([work, new Promise((_, reject) => {
         timer = setTimeout(() => { controller.abort(); reject(new BrokerError('provider_timeout')); }, this.timeoutMs);
       })]);
       const result = { requestId: request.requestId, data, replayed: false };
       this.store.complete(principal.id, request.requestId, result,
-        eventFor(request, principal, this.policy, 'integration.completed', 'success', 'completed', this.now()));
+        eventFor(request, principal, this.policy, 'integration.completed', 'success', 'completed', this.now()),
+        { persistResult: operation.persistResult !== false });
       return result;
     } catch (error) {
       const code = error instanceof BrokerError ? error.code : 'provider_failed';
+      if (code === 'credential_revoked') onRevoked();
+      if (code === 'provider_unauthorized') this.secrets.invalidate(request.connectionRef);
       this.store.uncertain(principal.id, request.requestId,
         eventFor(request, principal, this.policy, 'integration.failed', 'unknown', code, this.now()));
       fail(code);
