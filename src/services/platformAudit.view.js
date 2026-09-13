@@ -79,8 +79,9 @@ function createView({ model, audit, reader, codec, now = () => new Date() }) {
             batchIndex: v.batchIndex, batchCount: v.batchCount, resultSetDigest: v.resultSetDigest } : null,
           integrationDisconnect: [7, 9].includes(v.version) ? { correlationId: v.correlationId, provider: v.provider,
             connectionRef: v.connectionRef, assetRef: v.assetRef } : null,
-          integrationOAuth: v.version === 8 ? { correlationId: v.correlationId, provider: v.provider,
-            connectionRef: v.connectionRef, assetRef: v.assetRef } : null,
+          integrationOAuth: [8, 10].includes(v.version) ? { correlationId: v.correlationId, provider: v.provider,
+            connectionRef: v.connectionRef, assetRef: v.assetRef,
+            ...(v.version === 10 ? { clinicCount: v.clinicCount, clinicSetDigest: v.clinicSetDigest } : {}) } : null,
           verification: 's3_version_verified' })) };
     },
   };

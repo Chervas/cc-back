@@ -12,19 +12,13 @@ ahora OAuth fijado a identidad, propiedad y política dentro del broker. Reutili
 el motor de staging/activación/conciliación existente de GBP y su tabla SQLite.
 No añade una operación genérica ni devuelve credenciales a la API general.
 
-**La API y la interfaz de reautorización SC/GA siguen pendientes.**
-googleOAuthBrokerScope.service solo acepta activos GBP y rechaza consumidores
-SC/GA activos; googleOAuthBroker.service mantiene prefijo/transporte y captura
-v8 GBP. No se ha ampliado ese contrato ni se debe activar un flujo incompleto.
-La [desconexión durable SC/GA](google-property-disconnect-migration.md), cola,
-worker y captura v9 ya preparados en el bloque anterior se conservan.
-
-Antes de conectar estas operaciones a la API deben resolverse la selección de
-cohortes/identidades por conexión, la autorización sobre todos los consumidores,
-compartidos/primarios y overrides, intenciones SQL y auditoría humana, transporte,
-callback/estado, y la interfaz completa. La PK por subject y el vínculo único por
-GoogleConnection del flujo OAuth actual no prueban soporte de varias cohortes
-para una misma identidad. No reducir esa migración a cambiar un prefijo o gate.
+La [integración SQL/API/Ajustes por servicio](google-oauth-services-migration.md)
+queda preparada en el bloque posterior: selección explícita, comprobación de
+consumidores, captura humana v10, callback/estado y UI. Mantiene la política GBP
+histórica y permite una política nueva por servicio/identidad. Requiere DDL y
+configuración del lote aprobado; cero conexiones reales migradas. La instalación
+del runtime, permisos AWS, nuevos bindings/grants y despliegue siguen pendientes.
+La [desconexión durable SC/GA](google-property-disconnect-migration.md) permanece.
 
 ## Protocolo interno cerrado
 

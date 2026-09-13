@@ -6,6 +6,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await qi.createTable('Usuarios', { id_usuario: { type: D.INTEGER, primaryKey: true } });
   models.GoogleConnection = require('../../../models/googleconnection')(sql, D); await models.GoogleConnection.sync();
   await require('../../../migrations/20260913020000-create-google-oauth-broker-flows').up(qi, D);
+  await require('../../../migrations/20260913070000-scope-google-oauth-by-service').up(qi, D);
   models.GoogleOAuthBrokerBinding = require('../../../models/googleoauthbrokerbinding')(sql, D);
   models.Clinica = require('../../../models/clinica')(sql, D); await models.Clinica.sync();
   models.GrupoClinica = require('../../../models/grupoclinica')(sql, D);

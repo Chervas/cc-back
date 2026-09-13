@@ -18,6 +18,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     googleUserId: D.STRING(128), accessToken: { type: D.TEXT, allowNull: false }, refreshToken: D.TEXT });
   const migration = require('../../../migrations/20260913020000-create-google-oauth-broker-flows');
   await migration.up(qi, D); await migration.down(qi, D); await migration.up(qi, D);
+  await require('../../../migrations/20260913070000-scope-google-oauth-by-service').up(qi, D);
   await require('../../../migrations/20260912210000-create-platform-audit-events').up(qi, D);
   await require('../../../migrations/20260913003000-add-platform-audit-result-part').up(qi, D);
   await require('../../../migrations/20260912220000-create-auth-sessions').up(qi, D);

@@ -602,6 +602,11 @@ function googleAnalyticsInventoryAccounts(properties) {
 
 function sendGooglePropertyDiscoveryError(res, error, connectionStatus = false) {
     if (connectionStatus && error?.code === 'google_discovery_no_connection') return res.json({ connected: false, reason: 'no_connection' });
+    if (connectionStatus && error?.code !== 'google_oauth_legacy_closed'
+        && (String(error?.code || '').startsWith('google_oauth_') || error?.code === 'auth_invalid')) {
+        return res.status([400, 401, 403, 409].includes(error?.httpStatus) ? error.httpStatus : 503)
+            .json({ connected: false, reason: googleOAuthBroker.safe(error) });
+    }
     const code = googlePropertyDiscovery.safe(error);
     return res.status(googlePropertyDiscovery.status(error)).json(connectionStatus
         ? { connected: false, reason: code } : { success: false, error: code });
@@ -1498,7 +1503,7 @@ router.get('/google/connect', async (req, res) => {
         const userId = getUserIdFromToken(req);
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
         const resolved = await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: false, metadataOnly: true });
-        const binding = await googleOAuthBroker.bindingFor(resolved.connection?.id);
+        const binding = await googleOAuthBroker.bindingFor(resolved.connection?.id, req.query?.google_service);
         if (binding) return res.json(await googleOAuthBroker.begin({ binding, scopeKey: resolved.scope?.scopeKey,
             actorId: userId, sessionRef: req.authSession?.id, sessionExpiresAt: req.authSession?.expiresAt,
             returnTo: new URL(normalizeFrontendReturnTo(req.query?.return_to || null)).origin }));
@@ -1632,7 +1637,7 @@ router.get('/google/connection-status', async (req, res) => {
         res.set('Cache-Control', 'no-store');
         const scopedRequest = hasRequestedScope(req);
         const metadata = await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: !scopedRequest, metadataOnly: true });
-        const binding = await googleOAuthBroker.bindingFor(metadata.connection?.id);
+        const binding = await googleOAuthBroker.bindingFor(metadata.connection?.id, req.query?.google_service);
         if (binding) {
             await authorizeExplicitConnectionScope(req, 'write');
             return res.json(await googleOAuthBroker.status({ binding, scopeKey: metadata.scope?.scopeKey,

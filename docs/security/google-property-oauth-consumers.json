@@ -1,21 +1,25 @@
 {
-  "version": 1,
+  "version": 2,
   "reviewedAt": "2026-09-13",
-  "sourceHead": "70e3ce63a81eec8fa6014e8d6e189ad522e476c0",
+  "sourceHead": "53a3b212815b3b1cd636cbd1260f65fe50b845a9",
   "includesWorkingChanges": true,
   "runtimeMigrated": 0,
-  "newMigrations": [],
+  "newMigrations": [
+    "20260913070000-scope-google-oauth-by-service.js"
+  ],
   "ops": "deferred_by_user",
   "awsInstance": "shutdown_announced_unverified",
-  "method": "Source review and offline signed HTTPS/SQLite with fictitious provider and Secrets Manager dependencies.",
+  "method": "Source review, isolated MySQL, offline backend/audit tests and Chromium with fictitious HTTP; prior unchanged broker HTTPS evidence retained.",
   "qa": {
-    "broker": 123,
-    "backend": 132,
-    "mysql": "not_repeated_no_sql_changes",
-    "ui": "not_repeated_no_ui_changes"
+    "backend": 133,
+    "audit": 41,
+    "frontend": 6,
+    "mysql": 92,
+    "ui": "isolated_build_and_24_chromium_captures",
+    "broker": "previous_phase_123_not_repeated_no_engine_changes"
   },
   "pending": [
-    "Multi-cohort SQL/API selection and complete consumer authorization, durable human audit, callback/status and UI",
+    "General onboarding/remapping, real bindings/grants and operational integration remain pending",
     "Shared identity/secret/cohort runtime integration and approved real IAM/schema/secrets/deployment cut",
     "Other consumers, full platform audit, DPD retention, AWS costs/Budget/CloudFormation and database encryption/restoration/cut"
   ],
@@ -64,15 +68,45 @@
     },
     {
       "file": "src/services/googleOAuthBrokerScope.service.js",
-      "sha256": "65f43055bb5958c08da936616bb13582eb6cdded10765bea82dc9c7dc466f17d",
-      "status": "pending_api_integration",
-      "note": "Still GBP-only: complete multi-cohort consumer authorization pending"
+      "sha256": "d1050c832fa6be54f094a227b63195b256d61950587ec84a24afba63adf37292",
+      "status": "prepared_offline",
+      "note": "Dispatches to full consumer authorization for the new policy, preserves strict historical GBP policy"
     },
     {
       "file": "src/services/googleOAuthBroker.service.js",
-      "sha256": "ff7b1e0acd64b69f17eaf6c7bf14c0d2d57022b1a49346c2af7c718fc98a3870",
-      "status": "pending_api_integration",
-      "note": "Still GBP operation prefix/client and v8 capture: API integration pending"
+      "sha256": "39a85987f42d9aa943585ac84274605bf09f5a16ab302b3db87659529fd94dae",
+      "status": "prepared_offline",
+      "note": "Typed clients, service-specific SQL requests and worker, v10 audit and metadata status"
+    },
+    {
+      "file": "src/services/googleOAuthCohortScope.service.js",
+      "sha256": "1af612c9c2f6f3d1b0bae75cf8f0fa2e24a23985406c86c3e18545a50921c924",
+      "status": "prepared_offline",
+      "note": "Managed session, original scope, full consumer/primary/shared inventory and revalidation"
+    },
+    {
+      "file": "src/services/googleOAuthCohort.contract.js",
+      "sha256": "b15429940fc82c96e86e70877d379931e73c35473b38a3031a2ddd19af9ec6da",
+      "status": "prepared_offline",
+      "note": "Closed service policies with historical digest compatibility"
+    },
+    {
+      "file": "src/routes/oauth.routes.js",
+      "sha256": "11e68b940bca18b37035834382110291dbcff203e98c0a5c75213e8d26325886",
+      "status": "prepared_offline",
+      "note": "Explicit HTTP service selection and safe status errors"
+    },
+    {
+      "file": "services/platform-audit/src/integration-oauth-event.js",
+      "sha256": "a57f1b623d99795d50371140e424c1ef0027d91f63b40a502cd83e29006713f9",
+      "status": "prepared_offline",
+      "note": "v10 service capture and fixed-size clinic-set commitment"
+    },
+    {
+      "file": "migrations/20260913070000-scope-google-oauth-by-service.js",
+      "sha256": "b702afe94bc5b1f36bb8c11777f1d7fad2c568ffdc3f7d5ec0c73ee1a93848d0",
+      "status": "prepared_offline",
+      "note": "Expand identity and reference uniqueness by service; preserve existing requests"
     }
   ]
 }

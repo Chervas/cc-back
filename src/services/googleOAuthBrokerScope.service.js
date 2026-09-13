@@ -3,6 +3,7 @@ const { createHash } = require('node:crypto');
 const { Op } = require('sequelize');
 const { isGlobalAdmin, MARKETING_WRITE_ROLES } = require('../lib/role-helpers');
 const { positive } = require('../../services/platform-audit/src/integration-disconnect-event');
+const cohortContract = require('./googleOAuthCohort.contract');
 const fail = (code = 'google_oauth_scope_conflict', httpStatus = 409) => { throw Object.assign(Error(code), { code, httpStatus }); };
 const FIELDS = ['google_user_id', 'google_connection_id', 'connection_ref', 'asset_ref', 'clinica_id', 'scope_key', 'policy_version'];
 function validate(binding) {
@@ -15,12 +16,14 @@ function validate(binding) {
   return binding;
 }
 const digest = binding => createHash('sha256').update(JSON.stringify(FIELDS.map(k => validate(binding)[k]))).digest('hex');
-async function authorize({ models, binding, actorId, sessionRef, expiresAt, expectedClinicIds, transaction, sessions }) {
+async function authorize({ models, binding, requestScopeKey, actorId, sessionRef, expiresAt, expectedClinicIds, transaction, sessions }) {
+  if (binding?.policy_version === cohortContract.POLICY) return require('./googleOAuthCohortScope.service').authorize({
+    models, binding, requestScopeKey, actorId, sessionRef, expiresAt, expectedClinicIds, transaction, sessions });
   validate(binding);
   if (!transaction || !positive(String(actorId))) fail();
   await sessions.verifyReference({ userId: Number(actorId), sessionRef, expiresAt }, { transaction });
   const options = { transaction, lock: transaction.LOCK.UPDATE, raw: true };
-  const fresh = await models.GoogleOAuthBrokerBinding.findByPk(binding.google_user_id, options);
+  const fresh = await models.GoogleOAuthBrokerBinding.findOne({ ...options, where: cohortContract.keyFor(binding) });
   if (!fresh || digest(fresh) !== digest(binding)) fail();
   // Never select token values, even to check that an approved migration removed them.
   const [connections] = await models.sequelize.query('SELECT id, googleUserId, '

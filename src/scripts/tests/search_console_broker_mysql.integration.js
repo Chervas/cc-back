@@ -5,6 +5,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const qi = sql.getQueryInterface(); await qi.createTable('Usuarios', { id_usuario: { type: D.INTEGER, primaryKey: true } });
   models.GoogleConnection = require('../../../models/googleconnection')(sql, D); await models.GoogleConnection.sync();
   await require('../../../migrations/20260913020000-create-google-oauth-broker-flows').up(qi, D);
+  await require('../../../migrations/20260913070000-scope-google-oauth-by-service').up(qi, D);
   await qi.createTable('ClinicWebAssets', { id: { type: D.INTEGER, primaryKey: true, autoIncrement: true }, clinicaId: D.INTEGER, googleConnectionId: D.INTEGER,
     siteUrl: D.STRING(512), propertyType: D.STRING(32), permissionLevel: D.STRING(64), verified: { type: D.BOOLEAN, defaultValue: true },
     isActive: { type: D.BOOLEAN, defaultValue: true }, created_at: D.DATE, updated_at: D.DATE });

@@ -1,5 +1,26 @@
 # Inventario de consumidores y plan de corte
 
+## 13/09/2026 — Reautorización Google por servicio en API y Ajustes
+
+La reautorización preparada separa Business Profile, Search Console y Analytics
+por cuenta/conexión, con sesiones gestionadas y permiso sobre todos los consumidores,
+compartidos y primarios. Conserva solicitudes GBP antiguas, bloqueos y control de
+identidad. API/worker capturan servicio y ámbito en SQL; callback y estado no
+mezclan referencias. Ajustes ofrece estados y reautorización por servicio.
+
+Auditoría v10 para la política nueva, con actor, ámbito, proveedor y compromiso
+del conjunto de clínicas; v8 histórico conservado. QA ficticia: 180 tests Node
+(133 backend, 41 auditoría, seis frontend), 92 checks MySQL en siete bases propias
+con cierre 0, build Angular y 24 capturas Chromium desktop/móvil. Cuatro contratos
+correctos, scheduler 47. Hotfix conservado. DDL 20260913070000 y dependencias antes
+del código incluso con gates apagados; writer/reader v10 antes de emitir.
+
+Cero migraciones compartidas, despliegues, configuración instalada o llamadas
+AWS/proveedores reales. OPS aplazado; apagado EC2 anunciado sin verificar. Altas/remapeo generales, otras integraciones, auditoría completa, retención/IAM/costes/
+Budget y cifrado/restauración/corte BD siguen pendientes. El push no activa flujos.
+
+[Contrato, QA y corte pendiente](google-oauth-services-migration.md).
+
 ## 13/09/2026 — Motor OAuth SC/GA preparado en el broker
 
 El broker prepara begin/finish/activate/status/abort OAuth separados para SC y

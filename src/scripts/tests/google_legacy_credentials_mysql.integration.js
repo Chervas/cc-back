@@ -7,6 +7,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   models.GoogleConnection = require('../../../models/googleconnection')(sql, D);
   await models.GoogleConnection.sync();
   await require('../../../migrations/20260913020000-create-google-oauth-broker-flows').up(qi, D);
+  await require('../../../migrations/20260913070000-scope-google-oauth-by-service').up(qi, D);
   models.GoogleOAuthBrokerBinding = require('../../../models/googleoauthbrokerbinding')(sql, D);
   await qi.createTable('ClinicWebAssets', { id: { type: D.INTEGER, primaryKey: true } });
   await require('../../../migrations/20260913030000-add-search-console-broker-read-binding').up(qi, D);

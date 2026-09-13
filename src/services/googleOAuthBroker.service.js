@@ -7,12 +7,14 @@ const { createRepository } = require('./platformAudit.repository');
 const { fromFlow, ACTIONS } = require('../../services/platform-audit/src/integration-oauth-event');
 const { UUID } = require('../../services/platform-audit/src/event');
 const scope = require('./googleOAuthBrokerScope.service');
+const C = require('./googleOAuthCohort.contract');
 const STATE = /^[A-Za-z0-9_-]{43}$/;
 const hash = value => createHash('sha256').update(value).digest('hex');
 const OPEN = ['begin_pending', 'awaiting', 'processing', 'activation_pending', 'abort_pending'];
 const TERMINAL = ['active', 'aborted'];
 const SAFE = new Set(['google_oauth_disabled', 'google_oauth_scope_conflict', 'google_oauth_scope_forbidden', 'google_oauth_consumers_pending',
   'google_oauth_flow_busy', 'google_oauth_unavailable', 'google_oauth_state_invalid', 'google_oauth_legacy_closed',
+  'google_oauth_service_invalid', 'google_oauth_service_required', 'google_oauth_service_unconfigured',
   'scope_denied', 'connection_blocked', 'asset_revoked', 'secret_unavailable', 'secret_version_changed', 'oauth_state_invalid',
   'oauth_identity_mismatch', 'oauth_credentials_incomplete', 'oauth_flow_busy', 'oauth_flow_interrupted', 'broker_timeout',
   'broker_unavailable', 'broker_response_invalid', 'audit_unavailable', 'auth_invalid']);
@@ -21,15 +23,16 @@ const fail = (code = 'google_oauth_unavailable', status = 503) => scope.fail(cod
 const stateFor = row => ({ mode: 'broker', authorization_status: row?.state || 'none',
   activation_confirmed: row?.state === 'active', pending: !!row && OPEN.includes(row.state) });
 function createGoogleOAuthBroker({ models, client, sessions, audit = createRepository(models.PlatformAuditEvent),
-  enabled = () => process.env.GOOGLE_OAUTH_BROKER_ENABLED === 'true' && process.env.GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED === 'true',
+  enabled = kind => process.env.GOOGLE_OAUTH_BROKER_ENABLED === 'true' && (!kind || process.env[C.COHORTS[kind]?.gate] === 'true'),
   workerEnabled = () => process.env.GOOGLE_OAUTH_BROKER_WORKER_ENABLED === 'true', now = () => new Date() }) {
   const bindings = models.GoogleOAuthBrokerBinding; const requests = models.GoogleOAuthBrokerRequest;
   const transact = fn => models.sequelize.transaction({ isolationLevel: 'REPEATABLE READ' }, fn);
-  const guard = () => { if (!enabled()) fail('google_oauth_disabled'); };
+  const guard = row => { if (!enabled(C.cohortOf(row))) fail('google_oauth_disabled'); };
   const plain = row => row?.get ? row.get({ plain: true }) : row;
   const locked = transaction => ({ transaction, lock: transaction.LOCK.UPDATE });
   const authorization = (row, transaction) => scope.authorize({ models, binding: row, actorId: row.actor_user_id,
-    sessionRef: row.session_ref, expiresAt: new Date(row.expires_at), expectedClinicIds: row.clinic_ids, transaction, sessions });
+    requestScopeKey: row.request_scope_key || row.scope_key, sessionRef: row.session_ref,
+    expiresAt: new Date(row.expires_at), expectedClinicIds: row.clinic_ids, transaction, sessions });
   async function append(row, action, stage, reason, transaction, worker = false) {
     const health = await audit.health(now(), { includeUnresolved: false, transaction });
     if (health.pending >= 9998 || health.oldestAgeSeconds >= 3600) fail('audit_unavailable');
@@ -38,11 +41,13 @@ function createGoogleOAuthBroker({ models, client, sessions, audit = createRepos
   function flowBinding(row) {
     // policy_version is part of the captured binding digest, not a mutable
     // policy supplied by an HTTP caller.
-    return { ...plain(row), policy_version: 'google-oauth-pinned-v1' };
+    const binding = { ...plain(row), policy_version: row.policy_version || C.LEGACY_POLICY };
+    if (C.digest(binding) !== row.binding_digest) fail('google_oauth_scope_conflict', 409);
+    return binding;
   }
   async function call(row, name, payload = {}, timeoutMs = 10000) {
     const requestId = name === 'begin' ? row.flow_id : name === 'activate' ? row.activation_id : randomUUID();
-    const result = await client.execute({ requestId, operation: `google.business_profile.oauth.${name}.v1`,
+    const result = await client.execute({ requestId, operation: C.operationsFor(flowBinding(row))[name],
       tenantRef: `clinic:${row.clinica_id}`, connectionRef: row.connection_ref, assetRef: row.asset_ref,
       payload: name === 'begin' ? payload : { flowId: row.flow_id, ...payload } }, { timeoutMs });
     if (result.requestId !== requestId || typeof result.replayed !== 'boolean' || !result.data || Array.isArray(result.data)) fail('broker_response_invalid');
@@ -73,8 +78,7 @@ function createGoogleOAuthBroker({ models, client, sessions, audit = createRepos
   }
   async function stage(row, worker = false) {
     return transact(async transaction => {
-      guard(); const fresh = flowBinding(row);
-      if (scope.digest(fresh) !== row.binding_digest) fail('google_oauth_scope_conflict', 409);
+      guard(row); const fresh = flowBinding(row);
       await authorization(fresh, transaction);
       const current = await requests.findByPk(row.flow_id, locked(transaction));
       if (!current || current.state !== 'processing') return;
@@ -86,9 +90,21 @@ function createGoogleOAuthBroker({ models, client, sessions, audit = createRepos
     });
   }
   const service = {
-    async bindingFor(connectionId) {
-      if (!Number.isSafeInteger(Number(connectionId)) || Number(connectionId) <= 0) return null;
-      return bindings.findOne({ where: { google_connection_id: Number(connectionId) }, raw: true });
+    async bindingFor(connectionId, selectedService) {
+      if (selectedService !== undefined && (typeof selectedService !== 'string' || !Object.hasOwn(C.COHORTS, selectedService))) fail('google_oauth_service_invalid', 400);
+      if (!C.positive(String(connectionId))) {
+        if (selectedService !== undefined) fail('google_oauth_service_unconfigured', 409); return null;
+      }
+      const rows = await bindings.findAll({ where: { google_connection_id: Number(connectionId) }, raw: true, limit: 4, order: [['cohort', 'ASC']] });
+      if (rows.length > 3 || new Set(rows.map(row => C.cohortOf(C.validate(row)))).size !== rows.length
+        || new Set(rows.map(row => row.google_user_id)).size > 1) fail('google_oauth_scope_conflict', 409);
+      if (selectedService !== undefined) {
+        const row = rows.find(binding => C.cohortOf(binding) === selectedService);
+        if (!row) fail('google_oauth_service_unconfigured', 409); return row;
+      }
+      if (!rows.length) return null;
+      if (rows.length === 1 && rows[0].policy_version === C.LEGACY_POLICY) return rows[0];
+      return { mode: 'broker_services', google_connection_id: Number(connectionId), bindings: rows };
     },
     async assertLegacyAllowed() {
       if (await bindings.findOne({ attributes: ['google_user_id'], raw: true })) fail('google_oauth_legacy_closed', 409);
@@ -111,25 +127,26 @@ function createGoogleOAuthBroker({ models, client, sessions, audit = createRepos
       ] }, raw: true })) fail('google_oauth_legacy_closed', 409);
     },
     async begin({ binding, scopeKey, actorId, sessionRef, sessionExpiresAt, returnTo }) {
-      guard(); scope.validate(binding);
-      if (scopeKey !== binding.scope_key || !UUID.test(sessionRef) || !Number.isSafeInteger(sessionExpiresAt)) fail('google_oauth_scope_conflict', 409);
+      if (binding?.mode === 'broker_services') fail('google_oauth_service_required', 409);
+      C.validate(binding); guard(binding); C.requestedScope(scopeKey);
+      if (binding.policy_version === C.LEGACY_POLICY && scopeKey !== binding.scope_key || !UUID.test(sessionRef) || !Number.isSafeInteger(sessionExpiresAt)) fail('google_oauth_scope_conflict', 409);
       if (!['https://app.clinicaclick.com', 'https://crm.clinicaclick.com', 'http://localhost:4200', 'http://localhost:4203'].includes(returnTo)) fail('google_oauth_state_invalid', 400);
       const state = randomBytes(32).toString('base64url');
-      const row = { ...Object.fromEntries(scope.FIELDS.map(k => [k, binding[k]])), flow_id: randomUUID(), activation_id: randomUUID(),
-        state_hash: hash(state), binding_digest: scope.digest(binding), actor_user_id: Number(actorId), session_ref: sessionRef,
+      const row = { ...Object.fromEntries(C.FIELDS.map(k => [k, binding[k]])), cohort: C.cohortOf(binding), request_scope_key: scopeKey,
+        flow_id: randomUUID(), activation_id: randomUUID(),
+        state_hash: hash(state), binding_digest: C.digest(binding), actor_user_id: Number(actorId), session_ref: sessionRef,
         return_to: returnTo, requested_at: now(), expires_at: new Date(Math.min(now().getTime() + 600000, sessionExpiresAt * 1000)),
         state: 'begin_pending', next_attempt_at: new Date(now().getTime() + 120000), lease_token: randomUUID(), lease_until: new Date(now().getTime() + 120000) };
       await transact(async transaction => {
         const authorized = await authorization(row, transaction); row.clinic_ids = authorized.clinicIds;
-        const previous = await requests.findOne({ ...locked(transaction), where: { google_connection_id: row.google_connection_id, state: { [Op.in]: OPEN } } });
+        const previous = await requests.findOne({ ...locked(transaction), where: { google_connection_id: row.google_connection_id, cohort: row.cohort, state: { [Op.in]: OPEN } } });
         if (previous) fail('google_oauth_flow_busy', 409);
-        const { policy_version, ...stored } = row;
-        await requests.create(stored, { transaction }); await append(row, ACTIONS[0], 'attempted', 'authorization_requested', transaction);
+        await requests.create(row, { transaction }); await append(row, ACTIONS[0], 'attempted', 'authorization_requested', transaction);
       });
       try {
         const result = await call(row, 'begin', { state });
         await transact(async transaction => {
-          guard(); await authorization(row, transaction);
+          guard(row); await authorization(row, transaction);
           const current = await requests.findByPk(row.flow_id, locked(transaction));
           if (current.state !== 'begin_pending' || current.lease_token !== row.lease_token) fail('google_oauth_flow_busy', 409);
           await current.update({ state: 'awaiting', next_attempt_at: row.expires_at, lease_token: null, lease_until: null }, { transaction });
@@ -143,7 +160,7 @@ function createGoogleOAuthBroker({ models, client, sessions, audit = createRepos
       if (!row) return null;
       if (row.state !== 'awaiting') return { returnTo: row.return_to, ...stateFor(row) };
       try {
-        guard();
+        guard(row);
         if (denied || typeof code !== 'string' || !/^[\x21-\x7e]{1,4096}$/.test(code)) fail('google_oauth_state_invalid', 400);
         row = await transact(async transaction => {
           await authorization(flowBinding(row), transaction);
@@ -167,22 +184,32 @@ function createGoogleOAuthBroker({ models, client, sessions, audit = createRepos
       return { returnTo: latest?.return_to || 'https://app.clinicaclick.com', ...stateFor(latest) };
     },
     async status({ binding, scopeKey, actorId, sessionRef, sessionExpiresAt }) {
-      scope.validate(binding); if (scopeKey !== binding.scope_key) fail('google_oauth_scope_conflict', 409);
+      C.requestedScope(scopeKey);
+      if (binding?.mode === 'broker_services') return transact(async transaction => {
+        const rows = await bindings.findAll({ ...locked(transaction), where: { google_connection_id: binding.google_connection_id }, raw: true, limit: 4, order: [['cohort', 'ASC']] });
+        if (rows.length !== binding.bindings.length || JSON.stringify(rows.map(C.digest)) !== JSON.stringify(binding.bindings.map(C.digest))) fail('google_oauth_scope_conflict', 409);
+        await require('./googleOAuthCohortScope.service').authorizeConnection({ models, connectionId: binding.google_connection_id,
+          subject: rows[0].google_user_id, requestScopeKey: scopeKey, actorId, sessionRef, expiresAt: new Date(sessionExpiresAt * 1000), transaction, sessions });
+        return { mode: 'broker_services', connected: false, services: rows.map(C.cohortOf) };
+      });
+      C.validate(binding); if (binding.policy_version === C.LEGACY_POLICY && scopeKey !== binding.scope_key) fail('google_oauth_scope_conflict', 409);
       return transact(async transaction => {
-        await scope.authorize({ models, binding, actorId, sessionRef, expiresAt: new Date(sessionExpiresAt * 1000), transaction, sessions });
-        const latest = await requests.findOne({ where: { google_connection_id: binding.google_connection_id },
+        const authorized = await scope.authorize({ models, binding, requestScopeKey: scopeKey, actorId, sessionRef, expiresAt: new Date(sessionExpiresAt * 1000), transaction, sessions });
+        const latest = await requests.findOne({ where: { google_connection_id: binding.google_connection_id, cohort: C.cohortOf(binding), binding_digest: C.digest(binding) },
           order: [['requested_at', 'DESC'], ['flow_id', 'DESC']], raw: true, transaction });
-        return { ...stateFor(latest), enabled: enabled(), connected: false, reason: 'broker_authorization_metadata',
-          googleUserId: binding.google_user_id, confirmed_at: binding.confirmed_at || null };
+        return { ...stateFor(latest), google_service: C.cohortOf(binding), enabled: enabled(C.cohortOf(binding)), connected: false, reason: 'broker_authorization_metadata',
+          googleUserId: binding.google_user_id, confirmed_at: authorized.binding.confirmed_at || null };
       });
     },
     async run() {
       if (!enabled() || !workerEnabled()) return { status: 'completed', skipped: true, reason: 'google_oauth_worker_disabled' };
+      const cohorts = Object.keys(C.COHORTS).filter(kind => enabled(kind));
+      if (!cohorts.length) return { status: 'completed', skipped: true, reason: 'google_oauth_worker_disabled' };
       let confirmed = 0; let failed = 0; const deadline = now().getTime() + 30000;
       for (let n = 0; n < 10 && now().getTime() < deadline; n++) {
         const row = await transact(async transaction => {
           const current = await requests.findOne({ ...locked(transaction), skipLocked: true,
-            where: { state: { [Op.in]: OPEN }, next_attempt_at: { [Op.lte]: now() },
+            where: { cohort: { [Op.in]: cohorts }, state: { [Op.in]: OPEN }, next_attempt_at: { [Op.lte]: now() },
               [Op.or]: [{ lease_until: null }, { lease_until: { [Op.lte]: now() } }] }, order: [['requested_at', 'ASC'], ['flow_id', 'ASC']] });
           if (!current) return null;
           await current.update({ lease_token: randomUUID(), lease_until: new Date(now().getTime() + 120000),
@@ -190,11 +217,11 @@ function createGoogleOAuthBroker({ models, client, sessions, audit = createRepos
         });
         if (!row) break;
         try {
-          guard(); const budget = Math.min(10000, deadline - now().getTime()); if (budget <= 0) fail('broker_timeout');
+          guard(row); const budget = Math.min(10000, deadline - now().getTime()); if (budget <= 0) fail('broker_timeout');
           if (['begin_pending', 'awaiting'].includes(row.state)) { await cancel(row, true); continue; }
           if (row.state === 'activation_pending') {
-            const binding = await bindings.findByPk(row.google_user_id, { raw: true });
-            if (!binding || scope.digest(binding) !== row.binding_digest) fail('google_oauth_scope_conflict', 409);
+            const binding = await bindings.findOne({ where: C.keyFor(row), raw: true });
+            if (!binding || C.digest(binding) !== row.binding_digest) fail('google_oauth_scope_conflict', 409);
           }
           const result = await call(row, row.state === 'activation_pending' ? 'activate' : row.state === 'abort_pending' ? 'abort' : 'status', {}, budget);
           if (row.state === 'processing') {
@@ -209,11 +236,11 @@ function createGoogleOAuthBroker({ models, client, sessions, audit = createRepos
           }
           if (result.status !== (row.state === 'activation_pending' ? 'active' : 'aborted')) fail('broker_response_invalid');
           await transact(async transaction => {
-            const binding = row.state === 'activation_pending' ? await bindings.findByPk(row.google_user_id, locked(transaction)) : null;
+            const binding = row.state === 'activation_pending' ? await bindings.findOne({ ...locked(transaction), where: C.keyFor(row) }) : null;
             const current = await requests.findByPk(row.flow_id, locked(transaction));
             if (!current || current.state !== row.state || current.lease_token !== row.lease_token || current.lease_until <= now()) fail();
             if (row.state === 'activation_pending') {
-              if (!binding || scope.digest(plain(binding)) !== row.binding_digest) fail('google_oauth_scope_conflict', 409);
+              if (!binding || C.digest(plain(binding)) !== row.binding_digest) fail('google_oauth_scope_conflict', 409);
               await binding.update({ secret_version: row.flow_id, confirmed_at: now() }, { transaction });
               await append(row, ACTIONS[1], 'completed', 'activation_confirmed', transaction, true);
             }
@@ -239,14 +266,21 @@ function privateFile(filename) {
     return fs.readFileSync(filename);
   } catch { fail(); }
 }
-let singleton; let client;
+let singleton; const clients = new Map();
 function instance() {
   return singleton ||= createGoogleOAuthBroker({ models: require('../../models'), sessions: require('./accessSession.service'), client: {
     execute(command, options) {
-      client ||= createIntegrationsBrokerClient({ origin: process.env.INTEGRATIONS_BROKER_ORIGIN, audience: process.env.INTEGRATIONS_BROKER_AUDIENCE,
-        keyId: process.env.GOOGLE_OAUTH_BROKER_KEY_ID, privateKey: privateFile(process.env.GOOGLE_OAUTH_BROKER_KEY_FILE),
-        ca: privateFile(process.env.INTEGRATIONS_BROKER_CA_FILE), timeoutMs: 30000 });
-      return client.execute(command, options);
+      const kind = Object.keys(C.COHORTS).find(kind => Object.values(require('../../services/integrations-broker/src/google-oauth-contract')
+        .operationsFor(C.COHORTS[kind].provider)).includes(command.operation));
+      if (!kind) fail();
+      if (!clients.has(kind)) {
+        const prefix = kind === 'business_profile' ? 'INTEGRATIONS_BROKER' : 'GOOGLE_' + kind.toUpperCase() + '_BROKER';
+        const keyPrefix = kind === 'business_profile' ? 'GOOGLE_OAUTH_BROKER' : prefix + '_OAUTH';
+        clients.set(kind, createIntegrationsBrokerClient({ origin: process.env[prefix + '_ORIGIN'], audience: process.env[prefix + '_AUDIENCE'],
+          keyId: process.env[keyPrefix + '_KEY_ID'], privateKey: privateFile(process.env[keyPrefix + '_KEY_FILE']),
+          ca: privateFile(process.env[prefix + '_CA_FILE']), timeoutMs: 30000 }));
+      }
+      return clients.get(kind).execute(command, options);
     },
   } });
 }

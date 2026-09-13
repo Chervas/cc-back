@@ -1,5 +1,49 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Reautorización Google por servicio en API y Ajustes
+
+GET /oauth/google/connect y /oauth/google/connection-status aceptan google_service
+cerrado a business_profile, search_console o analytics, junto al ámbito explícito.
+Selector desconocido/array: 400 google_oauth_service_invalid; sin binding: 409
+google_oauth_service_unconfigured, sin fallback legacy. Sin selector, un único
+binding histórico GBP mantiene su contrato; múltiples bindings o política nueva
+exigen selector en connect (409 google_oauth_service_required) y status devuelve
+{mode:"broker_services",connected:false,services:[...]} tras validar sesión,
+asignación y metadata. El índice no autoriza los flujos individuales.
+
+Status seleccionado exige permiso write sobre todas las clínicas afectadas;
+conserva mode:"broker", authorization_status/pending/activation_confirmed/enabled,
+connected:false y añade google_service. Solo una solicitud del mismo digest de
+binding puede confirmar estado. Una actualización no demuestra acceso al recurso
+ni elimina bloqueos. Callback determina el servicio por la solicitud persistida.
+Reautorización por servicio independiente, código intercambiado una vez y
+conciliación de ACK perdido con UUID durable.
+
+Nueva política google-oauth-cohorts-v1: binding connection:ID, solicitud con
+request_scope_key clinic:ID/group:ID y clinic_ids ordenado. Comprueba propietarios,
+compartidos/primarios, overrides y uso activo del servicio; sesión/ámbito/conjunto
+revalidados después de begin/finish antes de la intención durable de activación.
+Ads/consumidores sin registro o credenciales SQL remanentes impiden el flujo.
+Política GBP histórica y digest preservados, sin promover bindings por DDL.
+
+Auditoría v10 mantiene acciones integration.oauth.authorize/activate y el actor
+original. Incluye clinicCount y clinicSetDigest (SHA256 del JSON de IDs string,
+ordenados numéricamente), ligado al conjunto completo durable de la solicitud SQL.
+Visor integrationOAuth añade esos campos opcionales, verificando versión S3.
+No registra tokens, código, state, URL de propiedad ni contenido clínico.
+
+DDL nueva 20260913070000 y dependencias antes del código, aun desactivado. Pares
+OAUTH_KEY_ID/OAUTH_KEY_FILE nuevos bajo GOOGLE_SEARCH_CONSOLE_BROKER_ y
+GOOGLE_ANALYTICS_BROKER_; cada uno usa ORIGIN/AUDIENCE/CA_FILE de su vertical.
+GBP conserva INTEGRATIONS_BROKER_* + GOOGLE_OAUTH_BROKER_KEY_*. Gates globales OAuth
+más el gate de cada vertical; sin fallback de cliente/credencial. Writer/reader
+v10 antes de emitir. Ninguna configuración/DDL/despliegue real aplicada.
+
+QA: 180 tests Node, 92 checks MySQL propios, cuatro contratos, build Angular y
+24 capturas Chromium aisladas. OPS aplazado. Contrato backend:
+docs/security/google-oauth-services-migration.md. Auditoría completa, otras
+integraciones, verificación AWS/costes y cifrado/restauración/corte BD pendientes.
+
 ## 13/09/2026 — Motor OAuth SC/GA preparado en el broker
 
 El broker añade cinco operaciones por vertical, con prefijos
