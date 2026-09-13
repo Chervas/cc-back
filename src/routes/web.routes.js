@@ -5,7 +5,10 @@ const axios = require('axios');
 const router = express.Router();
 const authMiddleware = require('./auth.middleware');
 const db = require('../../models');
-const GoogleConnection = db.GoogleConnection;
+const googleLegacyCredentials = require('../services/googleLegacyCredentials.service');
+const WEB_AUTH_ERRORS = new Set(['web_mapping_connection_missing', 'web_mapping_token_expired',
+  'web_mapping_token_expiry_unknown', 'web_mapping_refresh_failed', 'web_mapping_token_missing']);
+const authorizationReason = error => WEB_AUTH_ERRORS.has(error?.code) ? error.code : googleLegacyCredentials.safe(error);
 const Clinica = db.Clinica;
 const WebGaDaily = db.WebGaDaily;
 const WebGaDimensionDaily = db.WebGaDimensionDaily;
@@ -54,7 +57,7 @@ router.use('/clinica/:clinicaId', async (req, res, next) => {
 });
 
 async function getGoogleAccessTokenForConnection(connectionId, {
-  connectionModel = GoogleConnection,
+  credentials = googleLegacyCredentials,
   http = axios,
   nowMs = Date.now()
 } = {}) {
@@ -64,7 +67,7 @@ async function getGoogleAccessTokenForConnection(connectionId, {
     error.code = 'web_mapping_connection_missing';
     throw error;
   }
-  const conn = await connectionModel.findByPk(normalizedConnectionId);
+  const conn = await credentials.load(connectionId);
   if (!conn || Number(conn.id) !== normalizedConnectionId) {
     const error = new Error('La conexión Google del mapping web no existe');
     error.code = 'web_mapping_connection_missing';
@@ -79,12 +82,12 @@ async function getGoogleAccessTokenForConnection(connectionId, {
       error.code = Number.isFinite(expiresAt) ? 'web_mapping_token_expired' : 'web_mapping_token_expiry_unknown';
       throw error;
     }
-    const resp = await http.post('https://oauth2.googleapis.com/token', new URLSearchParams({
+    const resp = await credentials.request(conn, () => http.post('https://oauth2.googleapis.com/token', new URLSearchParams({
       client_id: process.env.GOOGLE_CLIENT_ID,
       client_secret: process.env.GOOGLE_CLIENT_SECRET,
       grant_type: 'refresh_token',
       refresh_token: conn.refreshToken
-    }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }));
     accessToken = resp.data?.access_token || null;
     if (!accessToken) {
       const error = new Error('Google no devolvió un token para el mapping web');
@@ -92,13 +95,14 @@ async function getGoogleAccessTokenForConnection(connectionId, {
       throw error;
     }
     const expiresIn = resp.data?.expires_in || 3600;
-    await conn.update({ accessToken, expiresAt: new Date(nowMs + expiresIn * 1000) });
+    await credentials.saveRefresh(conn, { accessToken, expiresAt: new Date(nowMs + expiresIn * 1000) });
   }
   if (!accessToken) {
     const error = new Error('La conexión Google del mapping web no tiene token');
     error.code = 'web_mapping_token_missing';
     throw error;
   }
+  await credentials.assert(conn);
   return { accessToken, connection: conn };
 }
 
@@ -133,8 +137,8 @@ function selectPrimarySiteMapping(mappings) {
 }
 
 async function getAccessTokenForWebMapping(mapping, tokenCache = new Map(), dependencies = {}) {
-  const connectionId = Number.parseInt(String(mapping?.googleConnectionId || ''), 10);
-  if (!Number.isInteger(connectionId) || connectionId <= 0) {
+  const connectionId = Number(mapping?.googleConnectionId);
+  if (!/^[1-9]\d{0,9}$/.test(String(mapping?.googleConnectionId)) || !Number.isInteger(connectionId) || connectionId > 2147483647) {
     const error = new Error('Mapping web sin googleConnectionId válido');
     error.code = 'web_mapping_connection_missing';
     throw error;
@@ -146,7 +150,14 @@ async function getAccessTokenForWebMapping(mapping, tokenCache = new Map(), depe
         throw error;
       }));
   }
-  return tokenCache.get(connectionId);
+  try {
+    const result = await tokenCache.get(connectionId);
+    await (dependencies.credentials || googleLegacyCredentials).assert(result.connection);
+    return result;
+  } catch (error) {
+    tokenCache.delete(connectionId);
+    throw error;
+  }
 }
 
 function resolveDateRange(startDate, endDate, fallbackDays = 90) {
@@ -200,7 +211,7 @@ router.get('/clinica/:clinicaId/status', async (req, res) => {
         await getAccessTokenForWebMapping(asset, tokenCache);
         return { ok: true };
       } catch (error) {
-        return { ok: false, reason: error.code || 'web_mapping_authorization_failed' };
+        return { ok: false, reason: authorizationReason(error) };
       }
     }));
     const authorizationFailures = authorizationChecks.filter((item) => !item.ok);
@@ -547,15 +558,15 @@ router.get('/clinica/:clinicaId/sc/pages', async (req, res) => {
     for (const mapping of mappings) {
       const siteUrl = mapping.siteUrl;
       try {
-        const { accessToken } = await getAccessTokenForWebMapping(mapping, tokenCache);
-        const resp = await axios.post(`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`, {
+        const { accessToken, connection } = await getAccessTokenForWebMapping(mapping, tokenCache);
+        const resp = await googleLegacyCredentials.request(connection, () => axios.post(`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`, {
           startDate: start, endDate: end, dimensions: ['page'], rowLimit: Number(limit), startRow: Number(offset)
-        }, { headers: { Authorization: `Bearer ${accessToken}` } });
+        }, { headers: { Authorization: `Bearer ${accessToken}` } }));
         (resp.data?.rows||[]).forEach(r=>out.push({ page: r.keys?.[0]||'', clicks: r.clicks||0, impressions: r.impressions||0, ctr: r.ctr||0, position: r.position||0 }));
       } catch (error) {
         authorizationErrors.push({
           site_url: siteUrl,
-          reason: error.code || 'search_console_request_failed'
+          reason: authorizationReason(error)
         });
       }
     }
@@ -574,7 +585,7 @@ router.get('/clinica/:clinicaId/sc/pages', async (req, res) => {
       authorization_errors: authorizationErrors
     });
   } catch (e) {
-    console.error('❌ /web/sc/pages:', e.response?.data || e.message);
+    console.error('❌ /web/sc/pages:', googleLegacyCredentials.safe(e));
     return res.status(500).json({ success:false, error:'Error consultando páginas' });
   }
 });
@@ -654,11 +665,11 @@ router.post('/clinica/:clinicaId/psi/refresh', async (req, res) => {
       // Index status (1 URL via URL Inspection API)
       let indexed_ok = null;
       try {
-        const { accessToken } = await getAccessTokenForWebMapping(primaryMapping);
+        const { accessToken, connection } = await getAccessTokenForWebMapping(primaryMapping);
         const siteProperty = primaryMapping.siteUrl;
         const inspectUrl = siteUrl.startsWith('http') ? siteUrl : ('https://' + siteUrl.replace('sc-domain:',''));
         const inspectEndpoint = 'https://searchconsole.googleapis.com/v1/urlInspection/index:inspect';
-        const respI = await axios.post(inspectEndpoint, { inspectionUrl: inspectUrl, siteUrl: siteProperty }, { headers: { Authorization: `Bearer ${accessToken}` } });
+        const respI = await googleLegacyCredentials.request(connection, () => axios.post(inspectEndpoint, { inspectionUrl: inspectUrl, siteUrl: siteProperty }, { headers: { Authorization: `Bearer ${accessToken}` } }));
         const verdict = respI.data?.inspectionResult?.indexStatusResult?.verdict || '';
         const coverageState = respI.data?.inspectionResult?.indexStatusResult?.coverageState || '';
         indexed_ok = (String(verdict).toUpperCase() === 'PASS') || /indexed/i.test(String(coverageState));

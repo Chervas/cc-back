@@ -1,4 +1,5 @@
 'use strict';
+require('./fixtures/scheduled_jobs.fixture.cjs');
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -138,7 +139,7 @@ async function testWebMappingsUseTheirOwnConnectionTokens() {
   };
   const tokenCache = new Map();
   const dependencies = {
-    connectionModel,
+    credentials: { load: id => connectionModel.findByPk(id), assert: async () => {} },
     nowMs: new Date('2026-07-15T00:00:00.000Z').getTime()
   };
   const first = await webAccess.getAccessTokenForWebMapping(

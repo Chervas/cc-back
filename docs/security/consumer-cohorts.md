@@ -1,5 +1,13 @@
 # Inventario de consumidores y plan de corte
 
+## Ampliación SC/GA: bloqueo legacy preparado (13/09/2026)
+
+[Contrato](google-web-credentials-boundary.md) e inventario delta
+`google-web-credentials-consumers.json`: las rutas web y jobs SC/GA rechazan
+conexiones del registro OAuth sin hidratar sus tokens. Carga inicial GBP
+compartida cubierta; discovery legacy, operaciones broker SC/GA, Ads,
+conversiones, otros loaders y OPS siguen pendientes. Migrados en runtime: cero.
+
 `consumer-inventory.json` es el resultado reproducible de
 `node src/scripts/security-inventory-consumers.js`: solo símbolos, líneas y
 hashes del código. No lee valores, `.env`, DB, PM2 ni sistemas externos.

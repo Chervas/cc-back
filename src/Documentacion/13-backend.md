@@ -1,5 +1,29 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Cierre de credenciales legacy para Search Console y GA4
+
+`GET /web/clinica/:clinicaId/status` devuelve `googleConnected:false` para
+conexiones registradas en `GoogleOAuthBrokerBindings`, con razón
+`google_oauth_legacy_closed`. No renueva sus tokens.
+
+`GET /web/clinica/:clinicaId/sc/pages` conserva `partial` y
+`authorization_errors`; si todos los mappings fallan, responde 409
+`web_mapping_authorization_unavailable`. La frontera devuelve motivos cerrados:
+`google_oauth_legacy_closed`, `google_connection_missing`,
+`google_connection_changed`, `google_credentials_unavailable`, además de los
+errores de mapping/caducidad existentes. Revalida identidad antes/después de
+cada llamada y excluye una respuesta que cruce un registro concurrente.
+
+`POST /web/clinica/:clinicaId/psi/refresh` conserva su snapshot técnico: cuando
+se bloquea URL Inspection OAuth, `indexed_ok:null`. PSI sigue independiente.
+No cambian URLs, permisos por clínica ni DTO de métricas. No hay UI modificada.
+
+Jobs SC/GA y sus backfills usan la misma frontera. GA informa `failed` cuando
+no procesa ninguna propiedad. No son lecturas SC/GA por broker: conexiones sin
+marcador siguen legacy. Requiere `20260913020000` antes del código incluso
+con gates apagados. QA ficticia; sin BD compartida, despliegue, AWS o proveedor
+real. OPS aplazado. Contrato: `google-web-credentials-boundary.md`.
+
 ## 13/09/2026 — Reautorización Google fijada al broker, preparada
 
 `GET /oauth/google/connect` conserva su URL y devuelve

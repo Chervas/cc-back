@@ -1,5 +1,22 @@
 # Runbooks operativos del backend
 
+## 13/09/2026 — Cierre de credenciales legacy para Search Console y GA4
+
+Preparada una frontera SQL por ID e identidad Google: un registro OAuth del
+broker impide cargar/renovar credenciales desde las rutas web y los jobs SC/GA,
+incluso con gates apagados. Revalida cachés y respuestas; Analytics informa fallo
+si no se procesa ninguna propiedad. SC/GA aún no tienen adaptadores de lectura
+al broker: sus conexiones sin marcador siguen legacy.
+
+QA ficticia: 47 tests, ocho comprobaciones MySQL propias y tres contratos
+adicionales (scheduler de 46 jobs, caducidad GBP y multigrant). Sin nueva
+migración: requiere `20260913020000` antes del código. Sin despliegue, BD
+compartida, llamadas AWS/proveedores ni cambios de UI. OPS aplazado; apagado
+EC2 anunciado, no verificado. Cohortes reales, auditoría completa, retención,
+permisos/Budget, costes verificados y cifrado/corte BD siguen pendientes.
+
+[Contrato, alcance y lote pendiente](security/google-web-credentials-boundary.md).
+
 ## Decimocuarto bloque: reautorización Google preparada (13/09/2026)
 
 La reautorización de una identidad Google previamente vinculada intercambia y

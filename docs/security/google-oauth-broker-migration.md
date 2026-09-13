@@ -1,5 +1,12 @@
 # Google: reautorización de conexiones fijadas al broker
 
+## Ampliación local de loaders SC/GA (13/09/2026)
+
+[La frontera de credenciales legacy](google-web-credentials-boundary.md) aplica
+el registro OAuth a las rutas web y jobs SC/GA: carga/UPDATE condicionales y
+revalidación de cachés/respuestas. No habilita esos consumidores en esta
+reautorización ni cambia la política de una assignment. Sin despliegue real.
+
 Preparación local del 13/09/2026. Ninguna conexión real migrada; sin despliegue,
 OAuth real, lectura/escritura AWS ni migración de la BD compartida. OPS está
 aplazado por el usuario; el apagado EC2 fue anunciado y no se ha comprobado.

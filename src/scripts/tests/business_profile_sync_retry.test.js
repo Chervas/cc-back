@@ -1,4 +1,5 @@
 'use strict';
+require('./fixtures/scheduled_jobs.fixture.cjs');
 
 const assert = require('assert/strict');
 const { Op } = require('sequelize');
@@ -17,6 +18,14 @@ const GOOGLE_ENV = {
   GOOGLE_CLIENT_ID: 'client-id',
   GOOGLE_CLIENT_SECRET: 'client-secret',
 };
+
+// The credential boundary has dedicated SQL/HTTP/job tests. Keep this suite's
+// existing provider-expiry contract isolated from any database access.
+function ensureTestToken(connection, options = {}) {
+  return __test.ensureGoogleConnectionAccessToken(connection, { ...options, credentials: {
+    assert: async () => {}, request: async (_connection, send) => send(), saveRefresh: (row, values) => row.update(values),
+  } });
+}
 
 function buildConnection(overrides = {}) {
   const updates = [];
@@ -45,7 +54,7 @@ async function testAccessTokenRefreshContract() {
   {
     const { connection, updates } = buildConnection();
     let posts = 0;
-    const token = await __test.ensureGoogleConnectionAccessToken(connection, {
+    const token = await ensureTestToken(connection, {
       nowMs: NOW_MS,
       env: GOOGLE_ENV,
       httpClient: { post: async () => { posts += 1; } },
@@ -62,7 +71,7 @@ async function testAccessTokenRefreshContract() {
   ]) {
     const { connection, updates } = buildConnection(overrides);
     let request = null;
-    const token = await __test.ensureGoogleConnectionAccessToken(connection, {
+    const token = await ensureTestToken(connection, {
       nowMs: NOW_MS,
       env: GOOGLE_ENV,
       httpClient: {
@@ -83,7 +92,7 @@ async function testAccessTokenRefreshContract() {
   }
 
   await assert.rejects(
-    () => __test.ensureGoogleConnectionAccessToken(
+    () => ensureTestToken(
       buildConnection({ accessToken: null, refreshToken: null }).connection,
       { nowMs: NOW_MS, env: GOOGLE_ENV, httpClient: { post: async () => ({}) } }
     ),
@@ -91,7 +100,7 @@ async function testAccessTokenRefreshContract() {
   );
 
   await assert.rejects(
-    () => __test.ensureGoogleConnectionAccessToken(
+    () => ensureTestToken(
       buildConnection({ expiresAt: new Date(NOW_MS - 1000) }).connection,
       {
         nowMs: NOW_MS,
@@ -121,6 +130,8 @@ function buildLocation(id) {
 async function withBusinessProfilePersistence(locations, callback) {
   const originalFindAll = db.ClinicBusinessLocation.findAll;
   const originalCreate = db.SyncLog.create;
+  const originalBinding = db.BusinessProfileBrokerBinding.findByPk;
+  const originalRevocation = db.BusinessProfileBrokerRevocation.findByPk;
   const originalConsole = {
     error: console.error,
     log: console.log,
@@ -128,6 +139,8 @@ async function withBusinessProfilePersistence(locations, callback) {
   };
   const syncLogUpdates = [];
   db.ClinicBusinessLocation.findAll = async () => locations;
+  db.BusinessProfileBrokerBinding.findByPk = async () => null;
+  db.BusinessProfileBrokerRevocation.findByPk = async () => null;
   db.SyncLog.create = async () => ({
     id: 701,
     update: async (patch) => syncLogUpdates.push(patch),
@@ -140,6 +153,8 @@ async function withBusinessProfilePersistence(locations, callback) {
   } finally {
     db.ClinicBusinessLocation.findAll = originalFindAll;
     db.SyncLog.create = originalCreate;
+    db.BusinessProfileBrokerBinding.findByPk = originalBinding;
+    db.BusinessProfileBrokerRevocation.findByPk = originalRevocation;
     console.error = originalConsole.error;
     console.log = originalConsole.log;
     console.warn = originalConsole.warn;

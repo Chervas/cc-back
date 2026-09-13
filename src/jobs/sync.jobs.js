@@ -65,6 +65,7 @@ const webDomainsService = require('../services/webDomains.service');
 const webPublicationHealthMonitorService = require('../services/webPublicationHealthMonitor.service');
 const googleReviewMatchService = require('../services/googleReviewMatch.service');
 const businessProfileBroker = require('../services/businessProfileBroker.service');
+const googleLegacyCredentials = require('../services/googleLegacyCredentials.service');
 const jobRequestsService = require('../services/jobRequests.service');
 const systemNotificationsService = require('../services/systemNotifications.service');
 const {
@@ -224,6 +225,8 @@ const cleanGoogleAccessToken = (value) => String(value || '').trim();
 
 async function ensureGoogleConnectionAccessToken(connection, options = {}) {
   if (!connection) throw new Error('GoogleConnection no encontrada');
+  const credentials = options.credentials || googleLegacyCredentials;
+  await credentials.assert(connection);
 
   const nowMs = Number(options.nowMs ?? Date.now());
   const httpClient = options.httpClient || syncHttp;
@@ -254,11 +257,11 @@ async function ensureGoogleConnectionAccessToken(connection, options = {}) {
       grant_type: 'refresh_token',
       refresh_token: refreshToken
     });
-    const response = await httpClient.post(
+    const response = await credentials.request(connection, () => httpClient.post(
       'https://oauth2.googleapis.com/token',
       params.toString(),
       { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
-    );
+    ));
     accessToken = cleanGoogleAccessToken(response.data?.access_token);
     if (!accessToken) {
       throw new Error('Google OAuth no devolvió un access_token válido al renovar la conexión');
@@ -267,7 +270,7 @@ async function ensureGoogleConnectionAccessToken(connection, options = {}) {
     const expiresIn = Number.isFinite(parsedExpiresIn) && parsedExpiresIn > 0
       ? parsedExpiresIn
       : 3600;
-    await connection.update({
+    await credentials.saveRefresh(connection, {
       accessToken,
       expiresAt: new Date(nowMs + expiresIn * 1000)
     });
@@ -277,6 +280,7 @@ async function ensureGoogleConnectionAccessToken(connection, options = {}) {
   if (!accessToken) {
     throw new Error('La conexión de Google no dispone de un access_token válido');
   }
+  await credentials.assert(connection);
   return accessToken;
 }
 
@@ -1400,7 +1404,7 @@ class MetaSyncJobs {
   // ===== Web jobs (Search Console + PSI) =====
   async executeWebSync(options = {}) {
     const { clinicId = null, siteUrls = null, siteMappings = null } = options;
-    const { ClinicWebAsset, GoogleConnection, WebScDaily, WebScDailyAgg, WebPsiSnapshot, WebIndexCoverageDaily, WebScQueryDaily } = require('../../models');
+    const { ClinicWebAsset, WebScDaily, WebScDailyAgg, WebPsiSnapshot, WebIndexCoverageDaily, WebScQueryDaily } = require('../../models');
     const SyncLog = require('../../models').SyncLog;
     console.log('🌐 Ejecutando webSync (Search Console + PSI)…');
     const syncLog = await SyncLog.create({ job_type: 'web_sync', status: 'running', start_time: new Date(), records_processed: 0 });
@@ -1457,39 +1461,11 @@ class MetaSyncJobs {
           throw new Error(`Mapping Search Console ${asset?.id || 'unknown'} sin googleConnectionId válido`);
         }
         if (tokenByConnectionId.has(connectionId)) {
-          return tokenByConnectionId.get(connectionId);
+          const cached = await tokenByConnectionId.get(connectionId);
+          await googleLegacyCredentials.assert(cached.connection);
+          return cached;
         }
-        const tokenPromise = (async () => {
-          const connection = await GoogleConnection.findByPk(connectionId);
-          if (!connection) {
-            throw new Error(`Conexión Google ${connectionId} no encontrada`);
-          }
-          let accessToken = connection.accessToken;
-          const expiresAt = connection.expiresAt ? new Date(connection.expiresAt).getTime() : 0;
-          const needsRefresh = !expiresAt || expiresAt < Date.now() + 60000;
-          if (needsRefresh) {
-            if (!connection.refreshToken) {
-              throw new Error(`Conexión Google ${connectionId} sin expiración verificable ni refresh token`);
-            }
-            const tr = await syncHttp.post('https://oauth2.googleapis.com/token', new URLSearchParams({
-              client_id: process.env.GOOGLE_CLIENT_ID,
-              client_secret: process.env.GOOGLE_CLIENT_SECRET,
-              grant_type: 'refresh_token',
-              refresh_token: connection.refreshToken
-            }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-            accessToken = tr.data?.access_token || null;
-            if (!accessToken) {
-              throw new Error(`Google no devolvió access token para la conexión ${connectionId}`);
-            }
-            const expiresIn = tr.data?.expires_in || 3600;
-            await connection.update({
-              accessToken,
-              expiresAt: new Date(Date.now() + expiresIn * 1000)
-            });
-          }
-          if (!accessToken) throw new Error(`Conexión Google ${connectionId} sin access token`);
-          return accessToken;
-        })();
+        const tokenPromise = this._ensureGoogleAccessToken(connectionId);
         tokenByConnectionId.set(connectionId, tokenPromise);
         try {
           return await tokenPromise;
@@ -1506,23 +1482,23 @@ class MetaSyncJobs {
             try {
               authorizedMappings.push({
                 asset,
-                accessToken: await accessTokenForMapping(asset)
+                credentials: await accessTokenForMapping(asset)
               });
             } catch (error) {
               report.errors.push({
                 clinicaId,
                 siteUrl: asset.siteUrl,
                 phase: 'authorization',
-                message: error.message
+                message: googleLegacyCredentials.safe(error)
               });
             }
           }
 
           // Timeseries por siteUrl (guardar por clínica+site+fecha)
-          for (const { asset: a, accessToken } of authorizedMappings) {
+          for (const { asset: a, credentials } of authorizedMappings) {
             try {
               const url = `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(a.siteUrl)}/searchAnalytics/query`;
-              const resp = await syncHttp.post(url, { startDate: fmt(start), endDate: fmt(end), dimensions: ['date'], rowLimit: 25000 }, { headers: { Authorization: `Bearer ${accessToken}` } });
+              const resp = await googleLegacyCredentials.request(credentials.connection, () => syncHttp.post(url, { startDate: fmt(start), endDate: fmt(end), dimensions: ['date'], rowLimit: 25000 }, { headers: { Authorization: `Bearer ${credentials.accessToken}` } }));
               clinicSucceeded = true;
               const rows = resp.data?.rows || [];
               for (const r of rows) {
@@ -1544,7 +1520,7 @@ class MetaSyncJobs {
                 clinicaId,
                 siteUrl: a.siteUrl,
                 phase: 'timeseries',
-                message: error.message
+                message: googleLegacyCredentials.safe(error)
               });
             }
           }
@@ -1567,12 +1543,12 @@ class MetaSyncJobs {
           }
           const daysWindow = Math.round((end - start) / 86400000) + 1;
           const useChunks = daysWindow > 62;
-          for (const { asset: a, accessToken } of authorizedMappings) {
+          for (const { asset: a, credentials } of authorizedMappings) {
             try {
               const urlQ = `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(a.siteUrl)}/searchAnalytics/query`;
               const ranges = useChunks ? Array.from(monthChunks(start, end)) : [{ s: fmt(start), e: fmt(end) }];
               for (const rg of ranges) {
-                const respQ = await syncHttp.post(urlQ, { startDate: rg.s, endDate: rg.e, dimensions: ['date','query','page'], rowLimit: 25000 }, { headers: { Authorization: `Bearer ${accessToken}` } });
+                const respQ = await googleLegacyCredentials.request(credentials.connection, () => syncHttp.post(urlQ, { startDate: rg.s, endDate: rg.e, dimensions: ['date','query','page'], rowLimit: 25000 }, { headers: { Authorization: `Bearer ${credentials.accessToken}` } }));
                 clinicSucceeded = true;
                 const rowsQ = respQ.data?.rows || [];
                 for (const r of rowsQ) {
@@ -1620,7 +1596,7 @@ class MetaSyncJobs {
                 clinicaId,
                 siteUrl: a.siteUrl,
                 phase: 'queries',
-                message: error.message
+                message: googleLegacyCredentials.safe(error)
               });
             }
           }
@@ -1696,9 +1672,9 @@ class MetaSyncJobs {
                 try {
                   const siteProperty = psiAsset.siteUrl;
                   const inspectUrl = siteUrl;
-                  const accessToken = await accessTokenForMapping(psiAsset);
+                  const credentials = await accessTokenForMapping(psiAsset);
                   const inspectEndpoint = 'https://searchconsole.googleapis.com/v1/urlInspection/index:inspect';
-                  const respI = await syncHttp.post(inspectEndpoint, { inspectionUrl: inspectUrl, siteUrl: siteProperty }, { headers: { Authorization: `Bearer ${accessToken}` } });
+                  const respI = await googleLegacyCredentials.request(credentials.connection, () => syncHttp.post(inspectEndpoint, { inspectionUrl: inspectUrl, siteUrl: siteProperty }, { headers: { Authorization: `Bearer ${credentials.accessToken}` } }));
                   const verdict = respI.data?.inspectionResult?.indexStatusResult?.verdict || '';
                   const coverageState = respI.data?.inspectionResult?.indexStatusResult?.coverageState || '';
                   indexed_ok = (String(verdict).toUpperCase() === 'PASS') || /indexed/i.test(String(coverageState));
@@ -1717,7 +1693,7 @@ class MetaSyncJobs {
                 await WebPsiSnapshot.create(sn);
               }
             }
-          } catch (e) { console.warn('PSI error:', e.response?.data?.error?.message || e.message); }
+          } catch (e) { console.warn('PSI error:', googleLegacyCredentials.safe(e)); }
 
           // (Cobertura eliminada)
 
@@ -1726,8 +1702,8 @@ class MetaSyncJobs {
           await syncLog.update({ records_processed: processed });
           if (this.config.web.betweenClinicsSleepMs>0) await new Promise(r=>setTimeout(r,this.config.web.betweenClinicsSleepMs));
         } catch (err) {
-          console.error('❌ webSync clínica error:', clinicaId, err.message);
-          report.errors.push({ clinicaId, message: err.message });
+          console.error('❌ webSync clínica error:', clinicaId, googleLegacyCredentials.safe(err));
+          report.errors.push({ clinicaId, message: googleLegacyCredentials.safe(err) });
         }
       }
       const totalFailure = assets.length > 0 && processed === 0 && report.errors.length > 0;
@@ -1746,9 +1722,10 @@ class MetaSyncJobs {
         report
       };
     } catch (e) {
-      await syncLog.update({ status:'failed', end_time:new Date(), error_message: e.message });
-      console.error('❌ Error en webSync:', e);
-      throw e;
+      const reason = googleLegacyCredentials.safe(e);
+      await syncLog.update({ status:'failed', end_time:new Date(), error_message: reason });
+      console.error('❌ Error en webSync:', reason);
+      throw Object.assign(new Error(reason), { code: reason });
     }
   }
 
@@ -1808,27 +1785,29 @@ class MetaSyncJobs {
       let processed = 0;
       for (const property of properties) {
         try {
-          const { accessToken } = await this._ensureGoogleAccessToken(property.googleConnectionId);
-          const counts = await this._syncGaProperty(property, accessToken, startStr, endStr);
+          const credentials = await this._ensureGoogleAccessToken(property.googleConnectionId);
+          const counts = await this._syncGaProperty(property, credentials, startStr, endStr);
           report.processedProperties += 1;
           processed += counts.rows || 0;
           report.rows += counts.rows || 0;
           report.dimensionRows += counts.dimensionRows || 0;
         } catch (err) {
-          console.error('❌ analyticsSync property error:', property.id, err.message);
-          report.errors.push({ propertyId: property.id, clinicaId: property.clinicaId, message: err.message });
+          console.error('❌ analyticsSync property error:', property.id, googleLegacyCredentials.safe(err));
+          report.errors.push({ propertyId: property.id, clinicaId: property.clinicaId, message: googleLegacyCredentials.safe(err) });
         }
         if (this.config.analytics.betweenClinicsSleepMs > 0) {
           await new Promise((resolve) => setTimeout(resolve, this.config.analytics.betweenClinicsSleepMs));
         }
       }
-      await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: processed, status_report: report });
+      const status = report.processedProperties === 0 && report.errors.length > 0 ? 'failed' : 'completed';
+      await syncLog.update({ status, end_time: new Date(), records_processed: processed, status_report: report });
       console.log('✅ analyticsSync completado', report);
-      return { status: 'completed', processed, report };
+      return { status, processed, report };
     } catch (error) {
-      await syncLog.update({ status: 'failed', end_time: new Date(), error_message: error.message });
-      console.error('❌ Error en analyticsSync:', error);
-      throw error;
+      await syncLog.update({ status: 'failed', end_time: new Date(), error_message: googleLegacyCredentials.safe(error) });
+      console.error('❌ Error en analyticsSync:', googleLegacyCredentials.safe(error));
+      const reason = googleLegacyCredentials.safe(error);
+      throw Object.assign(new Error(reason), { code: reason });
     }
   }
 
@@ -1943,6 +1922,7 @@ class MetaSyncJobs {
         aggregate.report.dimensionRows += Number(report.dimensionRows || 0);
         aggregate.report.errors.push(...(Array.isArray(report.errors) ? report.errors : []));
       }
+      if (aggregate.report.processedProperties === 0 && aggregate.report.errors.length > 0) aggregate.status = 'failed';
       return aggregate;
     } finally {
       this._analyticsBackfillMode = prevMode;
@@ -3178,20 +3158,20 @@ class MetaSyncJobs {
 
   async _ensureGoogleAccessToken(connectionId) {
     if (!connectionId) { throw new Error('Sin googleConnectionId en propiedad Analytics'); }
-    const conn = await GoogleConnection.findByPk(connectionId);
+    const conn = await googleLegacyCredentials.load(connectionId);
     if (!conn) { throw new Error('GoogleConnection no encontrada'); }
     const accessToken = await ensureGoogleConnectionAccessToken(conn);
     return { accessToken, connection: conn };
   }
 
-  async _runGaReport(accessToken, propertyName, body) {
+  async _runGaReport(credentials, propertyName, body) {
     if (!propertyName) { throw new Error('Propiedad GA sin propertyName'); }
     const url = `https://analyticsdata.googleapis.com/v1beta/${propertyName}:runReport`;
-    const resp = await syncHttp.post(url, body, { headers: { Authorization: `Bearer ${accessToken}` } });
+    const resp = await googleLegacyCredentials.request(credentials.connection, () => syncHttp.post(url, body, { headers: { Authorization: `Bearer ${credentials.accessToken}` } }));
     return resp.data || {};
   }
 
-  async _syncGaProperty(property, accessToken, start, end) {
+  async _syncGaProperty(property, credentials, start, end) {
     const propertyName = property.propertyName;
     if (!propertyName) { throw new Error('Propiedad GA sin propertyName'); }
     const metrics = ['sessions', 'activeUsers', 'newUsers', 'conversions', 'totalRevenue'];
@@ -3201,7 +3181,7 @@ class MetaSyncJobs {
       metrics: metrics.map((name) => ({ name })),
       limit: 100000
     };
-    const mainReport = await this._runGaReport(accessToken, propertyName, baseRequest);
+    const mainReport = await this._runGaReport(credentials, propertyName, baseRequest);
     const rows = mainReport.rows || [];
     let inserted = 0;
     for (const row of rows) {
@@ -3245,7 +3225,7 @@ class MetaSyncJobs {
           limit: 100000,
           orderBys: [{ dimension: { dimensionName: 'date' } }]
         };
-        const resp = await this._runGaReport(accessToken, propertyName, body);
+        const resp = await this._runGaReport(credentials, propertyName, body);
         const dRows = resp.rows || [];
         for (const row of dRows) {
           const dateKey = this._normalizeGaDate(row.dimensionValues?.[0]?.value);
@@ -3271,7 +3251,9 @@ class MetaSyncJobs {
           dimensionRows += 1;
         }
       } catch (err) {
-        console.warn(`⚠️ GA dimension ${def.type} error`, err.response?.data?.error?.message || err.message);
+        const reason = googleLegacyCredentials.safe(err);
+        if (['google_oauth_legacy_closed', 'google_connection_changed', 'google_connection_missing'].includes(reason)) throw err;
+        console.warn(`⚠️ GA dimension ${def.type} error`, reason);
       }
     }
     return { rows: inserted, dimensionRows };
