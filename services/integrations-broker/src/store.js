@@ -19,6 +19,8 @@ class BrokerStore {
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS connections (ref TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('active','blocked','revoked','expired')),
         revision INTEGER NOT NULL, expires_at INTEGER, reason TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS asset_revocations (tenant TEXT NOT NULL, connection TEXT NOT NULL, asset TEXT NOT NULL,
+        request_id TEXT NOT NULL, revoked_at INTEGER NOT NULL, PRIMARY KEY(tenant,connection,asset));
       CREATE TABLE IF NOT EXISTS nonces (principal TEXT NOT NULL, nonce TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(principal,nonce));
       CREATE TABLE IF NOT EXISTS rate_windows (principal TEXT NOT NULL, window INTEGER NOT NULL, count INTEGER NOT NULL, PRIMARY KEY(principal,window));
       CREATE TABLE IF NOT EXISTS commands (principal TEXT NOT NULL, id TEXT NOT NULL, digest TEXT NOT NULL,
@@ -42,6 +44,29 @@ class BrokerStore {
     const row = this.db.prepare('SELECT * FROM connections WHERE ref=?').get(ref);
     if (!row || row.state !== 'active' || row.expires_at !== null && row.expires_at <= now) fail('connection_blocked');
     return row;
+  }
+  assertAssetActive(request) {
+    if (this.db.prepare('SELECT 1 FROM asset_revocations WHERE tenant=? AND connection=? AND asset=?')
+      .get(request.tenantRef, request.connectionRef, request.assetRef)) fail('asset_revoked');
+  }
+  revokeAsset(principal, request, digest, requested, completed, maxBacklog, now) {
+    return this.transaction(() => {
+      const existing = this.db.prepare('SELECT * FROM commands WHERE principal=? AND id=?').get(principal, request.requestId);
+      if (existing) {
+        if (existing.digest !== digest) fail('idempotency_conflict');
+        if (existing.state !== 'completed' || !existing.result) fail('outcome_unknown');
+        return { ...JSON.parse(existing.result), replayed: true };
+      }
+      if (this.backlog().pending + 2 > maxBacklog) fail('audit_unavailable');
+      const result = { requestId: request.requestId, data: { revoked: true }, replayed: false };
+      this.appendAudit(requested);
+      this.db.prepare('INSERT OR IGNORE INTO asset_revocations VALUES (?,?,?,?,?)')
+        .run(request.tenantRef, request.connectionRef, request.assetRef, request.requestId, now);
+      this.appendAudit(completed);
+      this.db.prepare("INSERT INTO commands VALUES (?,?,?,'completed',?,?)")
+        .run(principal, request.requestId, digest, JSON.stringify(result), now);
+      return result;
+    });
   }
   block(ref, event, state = 'blocked') {
     if (!['blocked', 'revoked', 'expired'].includes(state)) fail('invalid_request');

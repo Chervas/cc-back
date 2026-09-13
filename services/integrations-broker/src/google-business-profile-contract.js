@@ -1,6 +1,7 @@
 'use strict';
 const { schema } = require('./contracts'); const { fail } = require('./errors');
 const PROVIDER = 'google_business_profile'; const PREFIX = 'google.business_profile.';
+const REVOKE_OPERATION = PREFIX + 'asset.revoke.v1';
 const METRICS = Object.freeze(['BUSINESS_IMPRESSIONS_DESKTOP_MAPS', 'BUSINESS_IMPRESSIONS_DESKTOP_SEARCH',
   'BUSINESS_IMPRESSIONS_MOBILE_MAPS', 'BUSINESS_IMPRESSIONS_MOBILE_SEARCH', 'BUSINESS_DIRECTION_REQUESTS',
   'CALL_CLICKS', 'WEBSITE_CLICKS', 'BUSINESS_CONVERSATIONS', 'BUSINESS_BOOKINGS']);
@@ -96,4 +97,4 @@ function project(operation, raw, resource, payload = {}) {
   if (Buffer.byteLength(JSON.stringify(value)) > 786432) fail('provider_failed');
   return value;
 }
-module.exports = { PROVIDER, PREFIX, OPERATIONS, METRICS, READ_MASK, validate, asset, project };
+module.exports = { PROVIDER, PREFIX, OPERATIONS, REVOKE_OPERATION, METRICS, READ_MASK, validate, asset, project };

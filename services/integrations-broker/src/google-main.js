@@ -1,7 +1,8 @@
 'use strict';
 const fs = require('node:fs'); const path = require('node:path'); const net = require('node:net');
+const { createPublicKey } = require('node:crypto');
 const { fail } = require('./errors'); const { validatePolicy } = require('./policy');
-const { PROVIDER, OPERATIONS, asset } = require('./google-business-profile-contract');
+const { PROVIDER, OPERATIONS, REVOKE_OPERATION, asset } = require('./google-business-profile-contract');
 const { BrokerStore } = require('./store'); const { Broker } = require('./broker');
 const { createServer } = require('./server'); const { createGoogleHttp } = require('./google-http');
 const { createGoogleSecretStore } = require('./google-secrets');
@@ -26,7 +27,15 @@ function validateConfig(config) {
     || typeof config.stateFile !== 'string' || !path.isAbsolute(config.stateFile)) fail('invalid_request');
   validatePolicy(config.policy);
   if (!config.policy.connections.length || config.policy.connections.some(c => c.provider !== PROVIDER || !c.secretArn || !c.clientSecretArn)
-    || config.policy.grants.some(g => !/^clinic:[1-9]\d{0,9}$/.test(g.tenantRef) || g.operations.some(op => !OPERATIONS.includes(op)))) fail('invalid_request');
+    || config.policy.grants.some(g => !/^clinic:[1-9]\d{0,9}$/.test(g.tenantRef) || g.operations.some(op => !OPERATIONS.includes(op) && op !== REVOKE_OPERATION))) fail('invalid_request');
+  const readers = new Set(config.policy.grants.filter(g => g.operations.some(op => OPERATIONS.includes(op))).map(g => g.principalId));
+  if (config.policy.grants.some(g => g.operations.includes(REVOKE_OPERATION) && readers.has(g.principalId))) fail('invalid_request');
+  const keyFor = id => {
+    try { return createPublicKey(config.policy.principals.find(p => p.id === id).publicKey).export({ type: 'spki', format: 'der' }).toString('base64'); }
+    catch { fail('invalid_request'); }
+  };
+  const readerKeys = new Set([...readers].map(keyFor));
+  if (config.policy.grants.some(g => g.operations.includes(REVOKE_OPERATION) && readerKeys.has(keyFor(g.principalId)))) fail('invalid_request');
   for (const grant of config.policy.grants) asset(grant.assetRef);
   return config;
 }

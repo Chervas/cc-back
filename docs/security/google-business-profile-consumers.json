@@ -1,7 +1,7 @@
 {
-  "version": 2,
+  "version": 3,
   "reviewedAt": "2026-09-13",
-  "sourceHead": "c9e91ae9aff6889415e2f8c6e4fe247b87c2c083",
+  "sourceHead": "8501be9b9d74dd4085eb80ee3dfa20ab3ca9aaf0",
   "includesWorkingChanges": true,
   "runtimeMigrated": 0,
   "operationPrefix": "google.business_profile.",
@@ -12,7 +12,8 @@
     "media.read.v1",
     "details.read.v1",
     "verification.read.v1",
-    "discovery.read.v1"
+    "discovery.read.v1",
+    "asset.revoke.v1"
   ],
   "method": "Manual code classification, static references and source hashes; no runtime credentials, provider calls or external OPS inventory.",
   "limitations": [
@@ -21,111 +22,112 @@
     "Runtime deployment, exact owners/grants and approvals are still required.",
     "First registry record closes legacy discovery and normal mapping globally; approve that impact before the canary.",
     "OPS work deferred by user; its runtime has not been paused or migrated by this task.",
-    "User announced EC2 shutdown; effective AWS state remains unverified."
+    "User announced EC2 shutdown; effective AWS state remains unverified.",
+    "Asset revocation controls broker access only. Full OAuth/provider token invalidation remains pending; revocation queue and worker gates are off."
   ],
   "rows": [
     {
       "file": "src/jobs/sync.jobs.js",
-      "sha256": "c43fdbe5c1e9d2a99d61dd452a41f7eac67c9d6c856e5d7913901db40c755f44",
+      "sha256": "df0bcf4c7fa28a84b26fd4e4e91a127fe63c2c05c5066af87e0d65367da6c65d",
       "status": "prepared_offline",
       "note": "Full/review jobs and reused backfills select managed reads; legacy remains for locations without a registry entry.",
       "references": [
         {
           "symbol": "executeBusinessProfileSync",
           "lines": [
-            1978,
-            2235
+            1980,
+            2237
           ]
         },
         {
           "symbol": "executeBusinessProfileReviewsSync",
           "lines": [
-            2127
+            2129
           ]
         },
         {
           "symbol": "_syncBusinessProfileMetrics",
           "lines": [
-            2037,
-            2678
+            2039,
+            2680
           ]
         },
         {
           "symbol": "_syncBusinessProfileReviews",
           "lines": [
-            2038,
-            2159,
-            2736
+            2040,
+            2161,
+            2738
           ]
         },
         {
           "symbol": "_syncBusinessProfilePosts",
           "lines": [
-            2039,
-            2915
+            2041,
+            2917
           ]
         },
         {
           "symbol": "_syncBusinessProfileMedia",
           "lines": [
-            2042,
-            2967
+            2044,
+            2969
           ]
         },
         {
           "symbol": "_syncBusinessProfileLocationDetails",
           "lines": [
-            2028,
-            2993
+            2030,
+            2995
           ]
         },
         {
           "symbol": "_syncBusinessProfileVoiceOfMerchantState",
           "lines": [
-            2033,
-            3047
+            2035,
+            3049
           ]
         }
       ]
     },
     {
       "file": "src/services/businessProfileBroker.service.js",
-      "sha256": "5d63ffff6ce2017a524be95075ecbbbd328b182daa1d16e19ab0428f4beaeced",
+      "sha256": "b66cae9f2a98bb075f4d48d4e06a1e770c3ad6169fb529fb94c941d57d357ac3",
       "status": "prepared_offline",
-      "note": "No provider token loader for managed locations; independent registry checked even when flag is disabled.",
+      "note": "No provider token loader for managed locations; independent registry checked even when flag is disabled. Any independent revocation row blocks legacy preparation even after registry removal.",
       "references": [
         {
           "symbol": "createBusinessProfileBroker",
           "lines": [
             30,
-            83,
-            88
+            84,
+            90
           ]
         },
         {
           "symbol": "recordedBinding",
           "lines": [
             33,
-            46,
-            62,
-            70
+            47,
+            63,
+            71
           ]
         },
         {
           "symbol": "loadManagedBinding",
           "lines": [
             30,
-            34,
-            84
+            35,
+            86
           ]
         }
       ]
     },
     {
       "file": "src/routes/oauth.routes.js",
-      "sha256": "a4adf5206a2eea4cd3a2f3b1da681243813b1ca8ec362708a06584789b299e1c",
+      "sha256": "5f65ad6ff51fb0c2c6fe38123da81dcc1e9caf7aadd6609991885183d14a3aea",
       "status": "partially_prepared_offline",
-      "note": "GET local/locations uses registered grants and metadata-only connection resolution. Normal remapping globally stops after first registry record. OAuth lifecycle and other routes remain pending.",
+      "note": "GET local/locations uses registered grants and metadata-only connection resolution. Normal remapping globally stops after first registry record. OAuth lifecycle and other routes remain pending. Scoped disconnect now persists broker control intent and exposes metadata status; full OAuth remains pending.",
       "references": [
         {
           "symbol": "GOOGLE_BUSINESS_ACCOUNT_API",
@@ -145,13 +147,13 @@
           "symbol": "ClinicBusinessLocation",
           "lines": [
             17,
-            2042,
-            2171,
-            2219,
-            2267,
-            2335,
-            2367,
-            3504
+            2044,
+            2173,
+            2221,
+            2269,
+            2337,
+            2369,
+            3547
           ]
         }
       ]
@@ -252,7 +254,7 @@
           "lines": [
             18,
             86,
-            102
+            103
           ]
         },
         {
@@ -268,11 +270,11 @@
             18,
             41,
             66,
-            88
+            89
           ]
         }
       ],
-      "sha256": "7f9292803aa817b6d120eef59caf8e4878838e56fa8df1f726c5e951a630b94a"
+      "sha256": "97c9bcfaca2c6e41db0c261c59eae8cdb1ef0ece918de1fe353c3bcfe4e8b0af"
     },
     {
       "file": "src/services/scopeConnectionResolver.service.js",
@@ -305,6 +307,52 @@
         }
       ],
       "sha256": "1d774d8c9eb38383edbf4013598fa3f88cde63b73320fd298afcd07635822b68"
+    },
+    {
+      "file": "src/services/businessProfileRevocation.service.js",
+      "status": "prepared_offline",
+      "note": "Durable scoped queue, claims/CAS, stable control request, v7 audit and status counts; no provider tokens.",
+      "references": [
+        {
+          "symbol": "enqueue",
+          "lines": [
+            19,
+            110
+          ]
+        },
+        {
+          "symbol": "createRevocationWorker",
+          "lines": [
+            81,
+            110,
+            120
+          ]
+        },
+        {
+          "symbol": "createRevocationRepository",
+          "lines": [
+            46,
+            110,
+            120
+          ]
+        }
+      ],
+      "sha256": "8643157a3779bd784903993a48fba7935cf9d3bfb5683b4d9c7814682a65bf84"
+    },
+    {
+      "file": "src/services/oauthScopedDisconnect.service.js",
+      "status": "partially_prepared_offline",
+      "note": "Google mapping disconnect adds scoped revocation intent inside its SQL transaction after shared-consumer checks. Meta code unchanged.",
+      "references": [
+        {
+          "symbol": "deactivateGoogleMappingsForScope",
+          "lines": [
+            112,
+            257
+          ]
+        }
+      ],
+      "sha256": "77b6a192244873a5c205c85c4dbcb66c5dbbeb56f84a7e4d525660044ee9d880"
     }
   ]
 }

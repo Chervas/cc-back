@@ -1113,6 +1113,7 @@ const EXPLICIT_SCOPE_REQUIRED_PATHS = new Set([
     ...PROVIDER_INVENTORY_PATHS,
     '/google/effective-mappings',
     '/google/connect',
+    '/google/disconnection-status',
     '/meta/connect',
     '/google/ads/request-link',
     '/google/ads/accept-link'
@@ -1153,6 +1154,7 @@ router.use(async (req, res, next) => {
     }
 
     const isConnectionMutation = providerInventory
+        || normalizedPath === '/google/disconnection-status'
         || req.method !== 'GET'
         || /\/(?:connect|disconnect)$/.test(normalizedPath);
     try {
@@ -3438,6 +3440,24 @@ router.delete('/google/mappings/:mappingId', async (req, res) => {
  * GOOGLE — Desconectar cuenta (elimina conexión y mapeos)
  * DELETE /oauth/google/disconnect
  */
+router.get('/google/disconnection-status', async (req, res) => {
+    try {
+        const clinicIds = [...req.marketingConnectionScopeAuthorization.clinicIds].map(Number).sort((a, b) => a - b);
+        const result = await require('../services/businessProfileRevocation.service').status(clinicIds);
+        const verified = await accessSessions.verify(accessSessions.bearer(req.headers.authorization));
+        if (String(verified.userId) !== String(getUserIdFromToken(req))) throw Object.assign(new Error('auth_failed'), { httpStatus: 401 });
+        const current = await authorizeExplicitConnectionScope(req, 'write');
+        if (JSON.stringify([...current.clinicIds].map(Number).sort((a, b) => a - b)) !== JSON.stringify(clinicIds)) {
+            return res.status(403).json({ success: false, error: 'connection_scope_changed' });
+        }
+        return res.set('Cache-Control', 'private, no-store').json(result);
+    } catch (error) {
+        const invalidSession = ['JsonWebTokenError', 'TokenExpiredError', 'NotBeforeError'].includes(error?.name) || error?.httpStatus === 401;
+        const denied = error?.httpStatus === 403;
+        return res.status(invalidSession ? 401 : denied ? 403 : 503).json({ success: false, error: invalidSession ? 'auth_failed' : denied ? 'scope_denied' : 'gbp_revocation_unavailable' });
+    }
+});
+
 router.delete('/google/disconnect', async (req, res) => {
     try {
         const userId = getUserIdFromToken(req);
@@ -3448,7 +3468,7 @@ router.delete('/google/disconnect', async (req, res) => {
 
         if (scope.scopeKey) {
             const { connection, assignment } = await resolveGoogleRequestConnection(req, {
-                allowLegacyUserFallback: true
+                allowLegacyUserFallback: true, metadataOnly: true
             });
 
             if (!connection && !assignment) {
@@ -3456,13 +3476,32 @@ router.delete('/google/disconnect', async (req, res) => {
             }
 
             const connectionId = connection?.id || assignment?.googleConnectionId || null;
+            let brokerRevocationsPending = 0;
+            const originalClinicIds = [...(req.marketingConnectionScopeAuthorization?.clinicIds || [])].map(Number).sort((a, b) => a - b);
+            const revalidateDisconnect = async () => {
+                const verified = await accessSessions.verify(accessSessions.bearer(req.headers.authorization));
+                if (String(verified.userId) !== String(userId)) throw Object.assign(new Error('auth_failed'), { httpStatus: 401 });
+                const authorized = await authorizeExplicitConnectionScope(req, 'write');
+                if (JSON.stringify([...authorized.clinicIds].map(Number).sort((a, b) => a - b)) !== JSON.stringify(originalClinicIds)) {
+                    throw Object.assign(new Error('El ámbito de la conexión ha cambiado.'), { code: 'connection_scope_changed', httpStatus: 409 });
+                }
+            };
             if (connectionId) {
                 await db.sequelize.transaction(async (transaction) => {
-                    await deactivateGoogleMappingsForScope({
+                    await revalidateDisconnect();
+                    const currentAssignment = await GoogleConnectionAssignment.findOne({ where: { scopeKey: scope.scopeKey }, transaction, lock: transaction.LOCK.UPDATE });
+                    if (currentAssignment && ['active', 'reauthorization_required'].includes(currentAssignment.status)
+                        && Number(currentAssignment.googleConnectionId) !== Number(connectionId)) {
+                        throw Object.assign(new Error('La conexión del ámbito ha cambiado.'), { code: 'connection_scope_changed', httpStatus: 409 });
+                    }
+                    const result = await deactivateGoogleMappingsForScope({
                         scope,
                         connectionId,
-                        transaction
+                        transaction,
+                        actorId: userId,
+                        sessionRef: req.authSession?.id,
                     });
+                    brokerRevocationsPending = result.brokerRevocationsPending;
                     await GoogleConnectionAssignment.upsert({
                         scopeKey: scope.scopeKey,
                         assignmentScope: scope.assignmentScope,
@@ -3478,9 +3517,13 @@ router.delete('/google/disconnect', async (req, res) => {
                         lastErrorCode: 'DISCONNECTED_BY_USER',
                         lastErrorMessage: 'Disconnected from scope settings'
                     }, { transaction });
+                    await revalidateDisconnect();
                 });
             }
 
+            res.set('Cache-Control', 'private, no-store');
+            if (brokerRevocationsPending) return res.status(202).json({ success: true, status: 'revocation_pending',
+                pending_assets: brokerRevocationsPending, message: 'La desconexión se ha solicitado y está pendiente de confirmación.' });
             return res.json({ success: true, message: scope.assignmentScope === 'group' ? 'Conexión Google desconectada para todo el grupo' : 'Conexión Google desconectada para esta clínica' });
         }
 
@@ -3504,7 +3547,9 @@ router.delete('/google/disconnect', async (req, res) => {
             ClinicBusinessLocation.count({ where: { google_connection_id: conn.id } }),
             ClinicGoogleAdsAccount.count({ where: { googleConnectionId: conn.id } })
         ]);
-        if (activeAssignments + webMappings + analyticsMappings + localMappings + adsMappings > 0) {
+        const managedReferences = await db.BusinessProfileBrokerBinding.count({ where: { google_connection_id: conn.id } })
+            + await db.BusinessProfileBrokerRevocation.count({ where: { google_connection_id: conn.id } });
+        if (activeAssignments + webMappings + analyticsMappings + localMappings + adsMappings + managedReferences > 0) {
             const conflict = new Error('La conexión sigue en uso por uno o más scopes o mappings. Desconéctalos de forma individual.');
             conflict.code = 'connection_in_use';
             conflict.httpStatus = 409;
@@ -3514,8 +3559,12 @@ router.delete('/google/disconnect', async (req, res) => {
         await conn.destroy();
         return res.json({ success: true, message: 'Conexión Google desconectada' });
     } catch (e) {
+        if (e?.code === 'gbp_revocation_unavailable') return res.status(503).json({ success: false, error: 'gbp_revocation_unavailable' });
+        if (['JsonWebTokenError', 'TokenExpiredError', 'NotBeforeError'].includes(e?.name) || e?.httpStatus === 401) {
+            return res.status(401).json({ success: false, error: 'auth_failed' });
+        }
         if (sendKnownOAuthMappingError(res, e)) return;
-        console.error('❌ Error en /oauth/google/disconnect:', e.response?.data || e.message);
+        console.error('❌ Error en /oauth/google/disconnect:', { code: 'google_disconnect_failed' });
         return res.status(500).json({ success: false, error: 'Error al desconectar Google' });
     }
 });

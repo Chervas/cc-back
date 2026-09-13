@@ -1,5 +1,13 @@
 # Auditoría de plataforma: primer bloque de autenticación
 
+## Cohorte adicional preparada: desconexión GBP v7
+
+`integration.asset.disconnect` bajo `app/platform/v7/`: intento del usuario,
+resultado del job, sujeto iniciador, UUID durable, clínica y referencias.
+Sin contenido ni tokens. Reader/visor admiten el nuevo codec; entrega y permisos
+externos siguen pendientes. Writer/reader v7 antes de activar captura.
+[Contrato y atomicidad SQL](../../docs/security/google-business-profile-revocation-migration.md).
+
 ## Cohorte adicional preparada: lecturas de pacientes v6
 
 Siete acciones `patient.*`, metadatos cerrados y partes de hasta 100 IDs/4096

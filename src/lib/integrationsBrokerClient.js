@@ -3,7 +3,7 @@
 // No models, .env loading, AWS SDK, bootstrap or provider tokens in this consumer adapter.
 const https = require('node:https');
 const { createHash, createPrivateKey, randomUUID, sign } = require('node:crypto');
-const SAFE_CODES = new Set(['invalid_request', 'invalid_signature', 'scope_denied', 'operation_denied', 'connection_blocked',
+const SAFE_CODES = new Set(['invalid_request', 'invalid_signature', 'scope_denied', 'operation_denied', 'connection_blocked', 'asset_revoked',
   'request_replayed', 'idempotency_conflict', 'outcome_unknown', 'rate_limited', 'provider_disabled', 'provider_failed',
   'provider_timeout', 'provider_unauthorized', 'credential_revoked', 'secret_unavailable', 'audit_unavailable', 'internal_error']);
 const error = code => Object.assign(new Error(code), { code });

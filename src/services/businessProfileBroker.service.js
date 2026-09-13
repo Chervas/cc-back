@@ -27,10 +27,11 @@ function binding(location) {
     || !Number.isSafeInteger(Number(location.id)) || Number(location.id) < 1) fail('broker_binding_invalid');
   return { connectionRef: ref, assetRef: location.broker_read_asset_ref, tenantRef: `clinic:${Number(location.clinica_id)}` };
 }
-function createBusinessProfileBroker({ client, loadLocation, loadManagedBinding, enabled = () => process.env.GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED === 'true' }) {
+function createBusinessProfileBroker({ client, loadLocation, loadManagedBinding, loadRevocation = async () => null, enabled = () => process.env.GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED === 'true' }) {
   const contexts = new WeakMap();
   const managed = (location, context) => marked(location) || !!(context && typeof context === 'object' && contexts.has(context));
   async function recordedBinding(location) {
+    if (await loadRevocation(externalLocationId(location))) fail('asset_revoked');
     const record = await loadManagedBinding(externalLocationId(location));
     if (!record && !marked(location)) return null;
     if (!record || !marked(location)) fail('broker_binding_invalid');
@@ -81,6 +82,7 @@ const client = { execute(command, options) {
   return cachedClient.execute(command, options);
 } };
 const service = createBusinessProfileBroker({ client,
+  loadRevocation: id => require('../../models').BusinessProfileBrokerRevocation.findByPk(id, { attributes: ['external_location_id'], raw: true }),
   loadManagedBinding: id => require('../../models').BusinessProfileBrokerBinding.findByPk(id, { raw: true }),
   loadLocation: id => require('../../models').ClinicBusinessLocation.findByPk(id, {
   attributes: ['id', 'clinica_id', 'google_connection_id', 'location_id', 'is_active', 'broker_read_connection_ref', 'broker_read_asset_ref'], raw: true,

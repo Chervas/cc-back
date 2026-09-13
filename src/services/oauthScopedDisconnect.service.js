@@ -114,6 +114,8 @@ async function deactivateGoogleMappingsForScope({
   connectionId,
   transaction,
   models = db,
+  actorId,
+  sessionRef,
 }) {
   const isClinic = scope.assignmentScope === 'clinic';
   const allGroupClinicIds = isClinic
@@ -193,7 +195,11 @@ async function deactivateGoogleMappingsForScope({
     ownerClinicIdOf: (row) => row.clinicaId,
   });
 
+  const brokerRevocationsPending = await require('./businessProfileRevocation.service').enqueue({
+    models, transaction, connectionId, clinicIds: ordinaryClinicIds, actorId, sessionRef,
+  });
   return {
+    brokerRevocationsPending,
     web: await deactivateRows(web, 'isActive', transaction),
     analytics: await deactivateRows(analytics, 'isActive', transaction),
     local: await deactivateRows(local, 'is_active', transaction),

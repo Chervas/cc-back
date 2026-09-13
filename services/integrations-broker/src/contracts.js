@@ -13,7 +13,7 @@ const validateRequest = ajv.compile(object({
   payload: { type: 'object' },
 }));
 const actionNames = ['integration.requested', 'integration.completed', 'integration.failed',
-  'integration.denied', 'connection.blocked', 'audit.accessed'];
+  'integration.denied', 'connection.blocked', 'asset.revoked', 'audit.accessed'];
 const auditFields = {
   version: { const: 1 }, eventId: uuid, occurredAt: { type: 'string', pattern: '^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z$' },
   actorType: { enum: ['service', 'operator'] }, actorId: ref,

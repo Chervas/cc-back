@@ -12,6 +12,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await require('../../../migrations/20250915103000-create-clinicbusinesslocations').up(qi, require('sequelize'));
   const migration = require('../../../migrations/20260913000000-add-business-profile-broker-read-binding');
   await migration.up(qi);
+  await require('../../../migrations/20260913010000-create-business-profile-broker-revocations').up(qi, D);
+  models.BusinessProfileBrokerRevocation = require('../../../models/businessprofilebrokerrevocation')(sql, D);
   models.BusinessProfileBrokerBinding = require('../../../models/businessprofilebrokerbinding')(sql, D);
   models.ClinicBusinessLocation = require('../../../models/clinicbusinesslocation')(sql, D);
   models.BusinessProfileDailyMetric = require('../../../models/businessprofiledailymetric')(sql, D);

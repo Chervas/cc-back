@@ -1,7 +1,7 @@
 'use strict';
 const contract = require('./google-business-profile-contract'); const { fail } = require('./errors');
 function createGoogleBusinessProfileOperations({ http, cursor }) {
-  return Object.fromEntries(contract.OPERATIONS.map(operation => [operation, Object.freeze({
+  const reads = Object.fromEntries(contract.OPERATIONS.map(operation => [operation, Object.freeze({
     provider: contract.PROVIDER, effect: 'read', persistResult: false, validate: value => contract.validate(operation, value),
     async execute(context) {
       const { payload, secret, signal } = context; const resource = contract.asset(context.assetRef);
@@ -47,5 +47,7 @@ function createGoogleBusinessProfileOperations({ http, cursor }) {
       return structuredClone(value);
     },
   })]));
+  return { ...reads, [contract.REVOKE_OPERATION]: Object.freeze({ provider: contract.PROVIDER, control: 'revoke_asset',
+    validate: require('./contracts').schema({}) }) };
 }
 module.exports = { createGoogleBusinessProfileOperations };

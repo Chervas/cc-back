@@ -11,7 +11,7 @@ const fingerprint = rows => JSON.stringify(rows.map(row => FIELDS.map(key => row
 const CONFLICT_CODES = new Set(['broker_binding_invalid', 'broker_legacy_discovery_blocked', 'broker_discovery_scope_unconfigured', 'broker_discovery_limit']);
 const ERROR_CODES = new Set([...CONFLICT_CODES, 'broker_registry_unavailable', 'broker_cohort_disabled', 'broker_discovery_busy',
   'broker_discovery_timeout', 'broker_configuration_invalid', 'broker_unavailable', 'broker_response_invalid', 'broker_timeout',
-  'invalid_request', 'invalid_signature', 'scope_denied', 'operation_denied', 'connection_blocked', 'request_replayed',
+  'invalid_request', 'invalid_signature', 'scope_denied', 'operation_denied', 'connection_blocked', 'asset_revoked', 'request_replayed',
   'idempotency_conflict', 'outcome_unknown', 'rate_limited', 'provider_disabled', 'provider_failed', 'provider_timeout',
   'provider_unauthorized', 'credential_revoked', 'secret_unavailable', 'audit_unavailable', 'internal_error']);
 
@@ -84,7 +84,8 @@ function createBusinessProfileDiscovery({ hasManagedBindings, listBindings, load
 }
 
 const service = createBusinessProfileDiscovery({ broker,
-  hasManagedBindings: async () => !!await require('../../models').BusinessProfileBrokerBinding.findOne({ attributes: ['external_location_id'], raw: true }),
+  hasManagedBindings: async () => !!await require('../../models').BusinessProfileBrokerBinding.findOne({ attributes: ['external_location_id'], raw: true })
+    || !!await require('../../models').BusinessProfileBrokerRevocation.findOne({ attributes: ['external_location_id'], raw: true }),
   listBindings: (clinicIds, connectionId) => require('../../models').BusinessProfileBrokerBinding.findAll({
     where: { clinica_id: { [Op.in]: clinicIds }, google_connection_id: connectionId }, attributes: FIELDS,
     order: [['external_location_id', 'ASC']], limit: 21, raw: true,

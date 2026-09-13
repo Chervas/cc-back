@@ -17,7 +17,7 @@ class Broker {
   constructor({ store, policy, secrets, operations = OPERATIONS, now = () => Date.now(), timeoutMs = 10000 }) {
     this.store = store; this.policy = structuredClone(validatePolicy(policy)); this.secrets = secrets;
     this.operations = operations; this.now = now; this.timeoutMs = Math.min(30000, Math.max(1, timeoutMs));
-    this.active = new Map();
+    this.active = new Map(); this.activeAssets = new Map();
     for (const item of policy.connections) {
       // Main program forbids real active cohorts until their adapter and approval exist.
       store.seedConnection(item.connectionRef, { state: item.initialState || 'blocked', expiresAt: item.expiresAt ?? null });
@@ -39,7 +39,10 @@ class Broker {
       binding = this.policy.connections.find(item => item.connectionRef === request.connectionRef);
       if (!binding || binding.provider !== operation.provider) fail('scope_denied');
       operation.validate(request.payload);
-      this.store.connection(request.connectionRef, now);
+      if (operation.control !== 'revoke_asset') {
+        this.store.connection(request.connectionRef, now);
+        this.store.assertAssetActive(request);
+      }
     } catch (error) {
       // Authenticated denials contain only validated IDs and fixed reason codes.
       const knownGrant = this.policy.grants.find(item => item.principalId === principal.id && item.tenantRef === request.tenantRef
@@ -51,12 +54,21 @@ class Broker {
     }
     const digest = createHash('sha256').update(canonical({ operation: request.operation, tenantRef: request.tenantRef,
       connectionRef: request.connectionRef, assetRef: request.assetRef, payload: request.payload })).digest('hex');
+    const assetKey = JSON.stringify([request.tenantRef, request.connectionRef, request.assetRef]);
+    if (operation.control === 'revoke_asset') {
+      const result = this.store.revokeAsset(principal.id, request, digest,
+        eventFor(request, principal, this.policy, 'integration.requested', 'accepted', 'authorized', now),
+        eventFor(request, principal, this.policy, 'asset.revoked', 'success', 'scope_disconnected', now), this.policy.maxBacklog, now);
+      for (const controller of this.activeAssets.get(assetKey) || []) controller.abort();
+      return result;
+    }
     const cached = this.store.reserve(principal.id, request.requestId, digest,
       eventFor(request, principal, this.policy, 'integration.requested', 'accepted', 'authorized', now), this.policy.maxBacklog, now);
     if (cached) return { ...cached, replayed: true };
     const revision = this.store.connection(request.connectionRef, now).revision;
     const controller = new AbortController();
     const active = this.active.get(request.connectionRef) || new Set(); active.add(controller); this.active.set(request.connectionRef, active);
+    const activeAsset = this.activeAssets.get(assetKey) || new Set(); activeAsset.add(controller); this.activeAssets.set(assetKey, activeAsset);
     let timer; let revoked = false;
     const onRevoked = () => {
       if (!revoked) {
@@ -68,11 +80,13 @@ class Broker {
       const work = this.secrets.withSecret(binding, async secret => {
         if (controller.signal.aborted) fail('provider_timeout');
         if (this.store.connection(request.connectionRef, this.now()).revision !== revision) fail('connection_blocked');
+        this.store.assertAssetActive(request);
         const rawResult = await operation.execute({ payload: request.payload, binding, assetRef: request.assetRef,
           tenantRef: request.tenantRef, principalId: principal.id, policyVersion: this.policy.version, secret, signal: controller.signal });
         if (controller.signal.aborted) fail('provider_timeout');
         // Recheck after awaits, including blocks written by a separate local operator process.
         if (this.store.connection(request.connectionRef, this.now()).revision !== revision) fail('connection_blocked');
+        this.store.assertAssetActive(request);
         const data = operation.project(rawResult);
         if (JSON.stringify(data).includes(secret.toString('utf8'))) fail('provider_failed');
         return data;
@@ -92,7 +106,10 @@ class Broker {
       this.store.uncertain(principal.id, request.requestId,
         eventFor(request, principal, this.policy, 'integration.failed', 'unknown', code, this.now()));
       fail(code);
-    } finally { clearTimeout(timer); active.delete(controller); if (!active.size) this.active.delete(request.connectionRef); }
+    } finally {
+      clearTimeout(timer); active.delete(controller); if (!active.size) this.active.delete(request.connectionRef);
+      activeAsset.delete(controller); if (!activeAsset.size) this.activeAssets.delete(assetKey);
+    }
   }
   block(ref, event, state = 'blocked') {
     this.store.block(ref, event, state);

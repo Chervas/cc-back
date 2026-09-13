@@ -4,6 +4,7 @@ const assert = require('assert/strict');
 const fs = require('fs');
 const path = require('path');
 const { Op } = require('sequelize');
+require('./fixtures/scheduled_jobs.fixture.cjs');
 process.env.JOBS_AUTO_START = 'false';
 process.env.RUNTIME_ROLE = 'gateway';
 const db = require('../../../models');
@@ -31,7 +32,7 @@ function testCatalogCoversEveryCronAndExecutor() {
   const catalogNames = definitions.map(([name]) => name).sort();
   const types = definitions.map(([, definition]) => definition.type);
 
-  assert.equal(definitions.length, 44, 'the canonical scheduler retains existing jobs and gated AWS cost/audit/session jobs');
+  assert.equal(definitions.length, 45, 'the canonical scheduler retains existing jobs and gated AWS cost/audit/session/revocation jobs');
   assert.deepEqual(catalogNames, configuredNames);
   assert.equal(new Set(types).size, types.length, 'scheduled job types must be unique');
   for (const jobName of [
@@ -1422,6 +1423,7 @@ async function testPlatformAuditJobsRespectGates() {
   const originalEnqueue = jobRequestsService.enqueueUniqueJobRequest;
   try {
     for (const [name, type, env, module, method, cron] of [
+      ['businessProfileRevocations', 'business_profile_broker_revocations', 'GOOGLE_BUSINESS_PROFILE_REVOCATION_WORKER_ENABLED', '../../services/businessProfileRevocation.service', 'executeBusinessProfileRevocations', '* * * * *'],
       ['platformAuditDelivery', 'platform_audit_delivery', 'PLATFORM_AUDIT_DELIVERY_ENABLED', '../../services/platformAudit.delivery', 'executePlatformAuditDelivery', '* * * * *'],
       ['platformAuditMonitor', 'platform_audit_monitor', 'PLATFORM_AUDIT_MONITOR_ENABLED', '../../services/platformAudit.monitor', 'executePlatformAuditMonitor', '*/5 * * * *'],
       ['platformAuditReconciliation', 'platform_audit_reconciliation', 'PLATFORM_AUDIT_RECONCILIATION_ENABLED', '../../services/platformAudit.reconciliation', 'executePlatformAuditReconciliation', '*/5 * * * *'],

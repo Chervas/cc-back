@@ -1,10 +1,10 @@
 'use strict';
 const test = require('node:test'); const assert = require('node:assert/strict');
 const fs = require('node:fs'); const path = require('node:path'); const net = require('node:net'); const vm = require('node:vm');
-const { randomBytes } = require('node:crypto'); const { execFileSync } = require('node:child_process');
+const { randomBytes, generateKeyPairSync } = require('node:crypto'); const { execFileSync } = require('node:child_process');
 const { createRequire } = require('node:module'); const { fixture } = require('./helpers');
 const { allowPort, removePort } = require('./offline-guard.cjs');
-const runtime = require('../src/google-main'); const { OPERATIONS, PROVIDER } = require('../src/google-business-profile-contract');
+const runtime = require('../src/google-main'); const { OPERATIONS, PROVIDER, REVOKE_OPERATION } = require('../src/google-business-profile-contract');
 const { SCOPE } = require('../src/google-secrets'); const { drainAudit, eventFor } = require('../src/audit');
 const { createIntegrationsBrokerClient } = require('../../../src/lib/integrationsBrokerClient');
 const { createBusinessProfileBroker } = require('../../../src/services/businessProfileBroker.service');
@@ -17,12 +17,19 @@ test('actual TLS runtime connects a managed backend location to fixed fictitious
   const appArn = secretArn.replace('fictitious-google', 'fictitious-app');
   f.policy.connections[0] = { ...f.policy.connections[0], provider: PROVIDER, secretArn, clientSecretArn: appArn };
   f.policy.grants[0] = { ...f.policy.grants[0], assetRef: 'gbp:123:456', operations: OPERATIONS };
+  const controlKey = generateKeyPairSync('ed25519');
+  f.policy.principals.push({ ...f.policy.principals[0], id: 'control:test', keyId: 'qa-control', publicKey: controlKey.publicKey.export({ type: 'spki', format: 'pem' }) });
+  f.policy.grants.push({ ...f.policy.grants[0], principalId: 'control:test', operations: [REVOKE_OPERATION] });
   const probe = net.createServer(); await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve)); const port = probe.address().port;
   await new Promise(resolve => probe.close(resolve));
   const filename = path.join(f.dir, 'config.json');
   const config = { cohort: 'google-business-profile-read-v1', enabled: true, policy: f.policy, listenAddress: '127.0.0.1', port,
     stateFile: path.join(f.dir, 'google.sqlite'), tlsCertFile: cert, tlsKeyFile: key, cursorKeyFile: cursorKey };
   fs.writeFileSync(filename, JSON.stringify(config), { mode: 0o600 });
+  const samePrincipal = structuredClone(config); samePrincipal.policy.grants[1].principalId = samePrincipal.policy.grants[0].principalId;
+  assert.throws(() => runtime.validateConfig(samePrincipal), { code: 'invalid_request' });
+  const sameKey = structuredClone(config); sameKey.policy.principals[1].publicKey = sameKey.policy.principals[0].publicKey;
+  assert.throws(() => runtime.validateConfig(sameKey), { code: 'invalid_request' });
   const ACCESS = 'FICTITIOUS_ACCESS_SENTINEL'; let refreshes = 0; let reads = 0; let awsClosed = false; const delivered = [];
   const secrets = { async send(command) {
     const arn = command.input.SecretId; assert([secretArn, appArn].includes(arn));
@@ -48,6 +55,13 @@ test('actual TLS runtime connects a managed backend location to fixed fictitious
   assert.deepEqual((await consumer.read(location, context, 'details', {})).data, { name: 'locations/456', title: 'FICTITIOUS_BUSINESS_TITLE' });
   await consumer.read(location, context, 'details', {}); assert.equal(refreshes, 1); assert.equal(reads, 2);
   await assert.rejects(transport.execute({ ...f.command(), assetRef: 'gbp:123:999', operation: OPERATIONS[4], payload: {} }), { code: 'scope_denied' });
+  const controlTransport = createIntegrationsBrokerClient({ origin: `https://127.0.0.1:${port}`, audience: f.policy.audience, keyId: 'qa-control',
+    privateKey: controlKey.privateKey.export({ type: 'pkcs8', format: 'pem' }), ca: fs.readFileSync(cert) });
+  const revocation = { ...f.command(), assetRef: 'gbp:123:456', operation: REVOKE_OPERATION, payload: {} };
+  assert.equal((await controlTransport.execute(revocation)).data.revoked, true);
+  assert.equal((await controlTransport.execute(revocation)).replayed, true);
+  await assert.rejects(consumer.read(location, context, 'details', {}), { code: 'asset_revoked' });
+  assert.equal(refreshes, 1); assert.equal(reads, 2);
   const request = { ...f.command(), assetRef: 'gbp:123:456', operation: OPERATIONS[4] };
   app.broker.block(request.connectionRef, eventFor(request, f.policy.principals[0], f.policy, 'connection.blocked', 'success', 'operator_block'));
   await assert.rejects(consumer.read(location, context, 'details', {}), { code: 'connection_blocked' });
@@ -57,7 +71,8 @@ test('actual TLS runtime connects a managed backend location to fixed fictitious
   for (const sentinel of [ACCESS, 'FICTITIOUS_REFRESH', 'FICTITIOUS_CLIENT_SECRET', 'FICTITIOUS_BUSINESS_TITLE']) assert(!serialized.includes(sentinel));
   await app.close(); app = null; assert(awsClosed);
   const { BrokerStore } = require('../src/store'); const reopened = new BrokerStore(config.stateFile);
-  assert.throws(() => reopened.connection('connection:test'), { code: 'connection_blocked' }); reopened.close();
+  assert.throws(() => reopened.connection('connection:test'), { code: 'connection_blocked' });
+  assert.throws(() => reopened.assertAssetActive(revocation), { code: 'asset_revoked' }); reopened.close();
 });
 test('AWS bootstrap validates source and writer identities before constructing secret/provider clients', async () => {
   const filename = require.resolve('../src/google-main'); const localRequire = createRequire(filename); const code = fs.readFileSync(filename, 'utf8');

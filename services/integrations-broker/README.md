@@ -1,5 +1,14 @@
 # Broker de integraciones
 
+## 13/09/2026 — Revocación durable por activo preparada
+
+Operación `google.business_profile.asset.revoke.v1`, payload `{}`, principal y
+clave distintos de lectores, grant exacto. SQLite conserva bloqueo, auditoría
+y resultado idempotente juntos; los lectores verifican el bloqueo antes/después
+de esperar y tras reinicios. No consulta secretos ni invalida tokens en Google.
+API mantiene cola SQL y 202 pendiente. `npm start` sigue ficticio; gates apagados,
+ningún despliegue/AWS. [Contrato y corte](../../docs/security/google-business-profile-revocation-migration.md).
+
 ## 13/09/2026: lecturas GBP preparadas, sin activar
 
 `google-main.js` incorpora un arranque explícito con siete operaciones cerradas

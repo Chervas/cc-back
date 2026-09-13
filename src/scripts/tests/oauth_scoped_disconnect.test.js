@@ -1,6 +1,10 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+require('./fixtures/security_offline_runtime.cjs');
+const modelIndex = require.resolve('../../../models');
+assert.equal(require.cache[modelIndex], undefined, 'Production models must never load in this isolated test');
+require.cache[modelIndex] = { id: modelIndex, filename: modelIndex, loaded: true, exports: {} };
 const {
   deactivateGoogleMappingsForScope,
   deactivateMetaMappingsForScope,
@@ -21,6 +25,8 @@ function modelsForWebRow(webRow, consumerClinicIds = []) {
   return {
     Clinica: emptyModel,
     GoogleConnectionAssignment: emptyModel,
+    BusinessProfileBrokerBinding: emptyModel,
+    BusinessProfileBrokerRevocation: emptyModel,
     MetaConnectionAssignment: emptyModel,
     ClinicWebAsset: { findAll: async () => webRow ? [webRow] : [] },
     ClinicAnalyticsProperty: emptyModel,
@@ -44,7 +50,7 @@ async function testExactClinicDeactivatesOnlyItsUnsharedMapping() {
     models: modelsForWebRow(mapping),
   });
   assert.equal(mapping.isActive, false);
-  assert.deepEqual(result, { web: 1, analytics: 0, local: 0, ads: 0 });
+  assert.deepEqual(result, { web: 1, analytics: 0, local: 0, ads: 0, brokerRevocationsPending: 0 });
 }
 
 async function testSharedOutsideScopeBlocksAtomically() {

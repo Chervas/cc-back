@@ -1,5 +1,23 @@
 # Seguridad: implementación y evidencias
 
+## Decimotercer bloque: desconexión durable de activos GBP (13/09/2026)
+
+Desconectar Google por ámbito registra intención/usuario/auditoría v7 junto al
+cambio SQL. Devuelve 202 mientras falta confirmación del broker; un job apagado
+por defecto reintenta con el mismo UUID. Bloqueos independientes sobreviven a
+borrar/recrear mappings. Separa claves/grants de lectura y control y añade
+estado pendiente/confirmado en Ajustes y referencias en el visor de auditoría.
+Es revocación de acceso por el broker; el token OAuth Google no se revoca.
+
+QA ficticia: 114 tests, contratos de desconexión/orquestación, 17 comprobaciones
+MySQL en dos bases propias con cierre 0, Angular exit 0 y 16 capturas Chromium
+desktop/móvil. Migración `20260913010000` solo ensayada; previa al nuevo código
+incluso con gates apagados. Writer/reader v7 y grants de control antes de activar.
+Sin despliegue, BD compartida, llamadas AWS ni proveedores. OPS aplazado; apagado
+EC2 anunciado, no verificado. OAuth completo, demás cohortes, retención,
+permisos/Budget CloudFormation, Cost Explorer y cifrado/corte BD pendientes.
+[Contrato, costes, límites y lote pendiente](google-business-profile-revocation-migration.md).
+
 ## Duodécimo bloque: auditoría de lecturas de pacientes (13/09/2026)
 
 Siete GET de pacientes preparan captura v6 apagada: actor/sesión/ámbito,

@@ -1,5 +1,44 @@
 > **Módulo:** Arquitectura del Backend
 
+## 2026-09-13 — Desconexión durable de fichas Google preparada
+
+`DELETE /oauth/google/disconnect?clinic_id=…` o `group_id=…` conserva permiso de
+gestión, overrides y conflictos compartidos. Resolución scoped solo de metadata,
+sesión/permisos/clínicas revalidados antes del commit y lock de assignment.
+Mapping/assignment, intención por activo y auditoría v7 se guardan juntos.
+Devuelve 202 `{success:true,status:"revocation_pending",pending_assets:N,message}`
+si queda confirmación; sin pendientes conserva 200. Errores: sesión 401,
+permiso 403, cambio/conflicto compartido 409, captura no disponible 503,
+inesperado 500 genérico. Borrado sin scope rechaza registros/bloqueos supervivientes.
+
+Nuevo `GET /oauth/google/disconnection-status?clinic_id=…` o `group_id=…`:
+ámbito explícito y permiso de gestión sobre todas sus clínicas. SQL de metadata,
+nueva verificación de sesión/permisos/clínicas antes de responder. DTO
+`{status:"none"|"pending"|"confirmed",pending_assets,confirmed_assets}`, sin
+credenciales/contenido externo. Scope ausente 400, sesión 401, permiso/cambio
+403 y estado no disponible 503. Éxitos scoped de ambas rutas: private, no-store.
+No existe polling ni una operación HTTP para borrar/reactivar bloqueos.
+
+Worker `business_profile_broker_revocations` confirma mediante
+`google.business_profile.asset.revoke.v1` con firma/grant distintos de lectura,
+misma solicitud UUID, tupla clínica/conexión/ficha y payload vacío. Bloquea acceso
+al activo en el broker; no revoca el token OAuth en Google. Cola y bloqueos
+persisten ante reinicio y recreación de mapping. OAuth completo sigue pendiente.
+
+Evento cerrado v7 `integration.asset.disconnect`: usuario iniciador en intento,
+job en finalización y usuario como sujeto; correlación durable, scope y refs.
+Visor añade `integrationDisconnect:{correlationId,provider,connectionRef,assetRef}`
+o null para versiones anteriores. GET de estado/denegaciones aún sin captura
+semántica propia; no se declara auditoría completa ni seis meses de historial.
+
+Migración `20260913010000` antes del nuevo código incluso con gates apagados;
+requiere registro GBP y outbox/result_part previos. Captura
+`GOOGLE_BUSINESS_PROFILE_REVOCATION_ENABLED` y worker
+`GOOGLE_BUSINESS_PROFILE_REVOCATION_WORKER_ENABLED` separados, false por defecto.
+Writer/reader v7 y broker con grants de control antes de activar. QA ficticia;
+sin BD compartida, despliegue, AWS ni OPS. Contrato backend:
+`docs/security/google-business-profile-revocation-migration.md`.
+
 ## 2026-09-13 — Auditoría de lecturas de pacientes preparada, sin despliegue
 
 Siete GET existentes de `/api/pacientes`: `/`, `/search`, `/contact-targets`,

@@ -2,7 +2,7 @@
 
 const STATUS = Object.freeze({
   invalid_request: 400, invalid_signature: 401, scope_denied: 403,
-  operation_denied: 403, connection_blocked: 423, request_replayed: 409,
+  operation_denied: 403, connection_blocked: 423, asset_revoked: 423, request_replayed: 409,
   idempotency_conflict: 409, outcome_unknown: 409, rate_limited: 429,
   provider_disabled: 503, provider_failed: 502, provider_timeout: 504,
   provider_unauthorized: 502, credential_revoked: 423,
