@@ -2,16 +2,24 @@
 const assert = require('node:assert/strict'); const { SCOPE } = require('../src/google-secrets');
 const { PROVIDER } = require('../src/google-business-profile-contract');
 const { createGoogleOAuthSecrets } = require('../src/google-oauth-secrets');
-function oauthSecretsFixture() {
+function oauthSecretsFixture(provider = PROVIDER) {
   const config = { accountId: '137819318729', prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: 'arn:aws:kms:eu-west-3:137819318729:key/15864f4f-2db5-485b-a49f-303c57eedc59' };
   const secretArn = 'arn:aws:secretsmanager:eu-west-3:137819318729:secret:/clinicaclick/integrations/prod/fictitious-google-abcdef';
   const appArn = secretArn.replace('fictitious-google', 'fictitious-client');
-  const binding = { connectionRef: 'connection:test', provider: PROVIDER, secretArn, clientSecretArn: appArn,
+  const binding = { connectionRef: 'connection:test', provider, secretArn, clientSecretArn: appArn,
     oauth: { subject: '123456789', redirectUri: 'https://auth.example.invalid/oauth/google/callback', scopes: ['openid','email','profile',SCOPE] } };
+  if (provider !== PROVIDER) {
+    binding.googleSubject = binding.oauth.subject;
+    const contract = require(provider === 'google_search_console' ? '../src/google-search-console-contract' : '../src/google-analytics-contract');
+    binding.oauth.scopes[3] = contract.SCOPES.find(s => s.endsWith('.readonly'));
+    if (provider === 'google_search_console') { const site = contract.site('sc-domain:example.invalid'); binding.searchConsoleSites = [{ siteUrl: site.siteUrl, assetRef: site.assetRef }]; }
+    else binding.analyticsProperties = [{ propertyName: 'properties/123', assetRef: 'ga4:123' }];
+  }
   const app = { version: 1, provider: 'google-oauth-client', clientId: 'fictitious.apps.googleusercontent.com', clientSecret: 'FICTITIOUS_CLIENT_SECRET' };
-  const value = { version: 3, provider: PROVIDER, connectionRef: binding.connectionRef, googleUserId: binding.oauth.subject,
+  const value = { version: 3, provider, connectionRef: binding.connectionRef, googleUserId: binding.oauth.subject,
     clientId: app.clientId, refreshToken: 'FICTITIOUS_NEW_REFRESH', scopes: [...binding.oauth.scopes] };
-  const baseline = { version: 2, provider: PROVIDER, connectionRef: binding.connectionRef, refreshToken: 'FICTITIOUS_OLD_REFRESH', scopes: [SCOPE] };
+  const baseline = provider === PROVIDER ? { version: 2, provider, connectionRef: binding.connectionRef, refreshToken: 'FICTITIOUS_OLD_REFRESH', scopes: [SCOPE] }
+    : { ...value, refreshToken: 'FICTITIOUS_OLD_REFRESH', scopes: [binding.oauth.scopes[3]] };
   const records = new Map([[secretArn, new Map([['baseline', { body: JSON.stringify(baseline), stages: new Set(['AWSCURRENT']) }]])],
     [appArn, new Map([['app-current', { body: JSON.stringify(app), stages: new Set(['AWSCURRENT']) }]])]]);
   const state = { calls: [], records, kms: config.kmsKeyArn, lostStage: false, lostActivate: false };
@@ -26,12 +34,14 @@ function oauthSecretsFixture() {
       return { ARN: input.SecretId, VersionId: entry[0], VersionStages: [...entry[1].stages], SecretString: entry[1].body };
     }
     if (kind === 'PutSecretValueCommand') {
+      await state.beforeStage?.();
       const old = versions.get(input.ClientRequestToken); if (old && old.body !== input.SecretString) throw Error('FICTITIOUS_IMMUTABLE_VERSION');
       if (!old) { for (const value of versions.values()) value.stages.delete('AWSPENDING'); versions.set(input.ClientRequestToken, { body: input.SecretString, stages: new Set(input.VersionStages) }); }
       if (state.lostStage) { state.lostStage = false; throw Error('FICTITIOUS_LOST_STAGE_ACK'); }
       return { ARN: input.SecretId, VersionId: input.ClientRequestToken, VersionStages: ['AWSPENDING'] };
     }
     assert.equal(kind, 'UpdateSecretVersionStageCommand');
+    await state.beforeActivate?.();
     assert.equal(input.VersionStage, 'AWSCURRENT');
     const old = versions.get(input.RemoveFromVersionId); if (!old?.stages.has('AWSCURRENT')) throw Error('FICTITIOUS_CAS_CONFLICT');
     old.stages.delete('AWSCURRENT'); old.stages.add('AWSPREVIOUS'); versions.get(input.MoveToVersionId).stages.add('AWSCURRENT');

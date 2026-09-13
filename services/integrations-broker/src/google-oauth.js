@@ -1,10 +1,11 @@
 'use strict';
 const { randomBytes, createHash } = require('node:crypto'); const { fail, BrokerError } = require('./errors');
-const { bindingFor, OPERATIONS, normalizeScopes } = require('./google-oauth-contract'); const { token } = require('./google-oauth-secrets');
+const { bindingFor, operationsFor, normalizeScopes } = require('./google-oauth-contract'); const { token } = require('./google-oauth-secrets');
 const { eventFor } = require('./audit'); const { PROVIDER } = require('./google-business-profile-contract');
 const hash = value => createHash('sha256').update(value).digest('hex');
 const fingerprint = (binding, policy) => hash(JSON.stringify([policy.version, binding.connectionRef, binding.secretArn, binding.clientSecretArn,
-  binding.oauth.subject, binding.oauth.redirectUri, [...binding.oauth.scopes].sort()]));
+  binding.oauth.subject, binding.oauth.redirectUri, [...binding.oauth.scopes].sort(),
+  ...(binding.provider === PROVIDER ? [] : [binding.provider, binding.googleSubject])]));
 function createGoogleOAuth({ store, secrets, http, policy, now = () => Date.now(), onActivated = () => {} }) {
   const memory = new Map(); const running = new Map();
   const query = (sql, ...args) => store.db.prepare(sql).get(...args);
@@ -52,7 +53,8 @@ function createGoogleOAuth({ store, secrets, http, policy, now = () => Date.now(
     close() { for (const controller of running.values()) controller.abort(); for (const id of memory.keys()) clear(id); },
     async execute({ request, principal, binding }) {
       bindingFor(binding);
-      const name = Object.keys(OPERATIONS).find(k => OPERATIONS[k] === request.operation); if (!name) fail('operation_denied');
+      const operations = operationsFor(binding.provider);
+      const name = Object.keys(operations).find(k => operations[k] === request.operation); if (!name) fail('operation_denied');
       const id = request.payload.flowId || request.requestId;
       if (running.size >= 8 || running.has(id)) fail('oauth_flow_busy');
       const controller = new AbortController(); running.set(id, controller); const timer = setTimeout(() => controller.abort(), 25000); timer.unref?.();
@@ -156,7 +158,7 @@ function createGoogleOAuth({ store, secrets, http, policy, now = () => Date.now(
           const reusable = query('SELECT state FROM connections WHERE ref=?', binding.connectionRef)?.state !== 'revoked' && baseline.reusable;
           const refreshToken = response.refresh_token || reusable?.refreshToken;
           if (!token(refreshToken)) fail('oauth_credentials_incomplete');
-          const encoded = secrets.encode(binding,app.clientId,{ version:3,provider:PROVIDER,connectionRef:binding.connectionRef,
+          const encoded = secrets.encode(binding,app.clientId,{ version:3,provider:binding.provider,connectionRef:binding.connectionRef,
             googleUserId:identity.id,clientId:app.clientId,refreshToken,scopes });
           if (signal.aborted) fail('provider_timeout');
           store.transaction(() => {

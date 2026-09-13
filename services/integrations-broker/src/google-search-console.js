@@ -1,7 +1,7 @@
 'use strict';
 const contract = require('./google-search-console-contract'); const { fail } = require('./errors');
 const discovery = require('./google-property-discovery-contract');
-function createSearchConsoleOperations({ http, cursor }) {
+function createSearchConsoleOperations({ http, cursor, oauth }) {
   const reads = Object.fromEntries(contract.OPERATIONS.map(operation => [operation, Object.freeze({
     provider: contract.PROVIDER, effect: 'read', persistResult: false, validate: payload => contract.validate(operation, payload),
     async execute(context) {
@@ -40,7 +40,8 @@ function createSearchConsoleOperations({ http, cursor }) {
       return structuredClone(result);
     },
   })]));
-  return { ...reads, [contract.REVOKE_OPERATION]: Object.freeze({ provider: contract.PROVIDER, control: 'revoke_asset',
+  return { ...reads, ...require('./google-oauth-contract').controlsFor(contract.PROVIDER, oauth),
+    [contract.REVOKE_OPERATION]: Object.freeze({ provider: contract.PROVIDER, control: 'revoke_asset',
     validate: require('./contracts').schema({}) }) };
 }
 module.exports = { createSearchConsoleOperations };

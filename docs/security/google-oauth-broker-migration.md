@@ -1,5 +1,14 @@
 # Google: reautorización de conexiones fijadas al broker
 
+## 13/09/2026 — Motor OAuth SC/GA preparado en el broker
+
+Preparado [motor OAuth por vertical](google-property-oauth-broker.md) para SC/GA,
+con grants/claves propios, v3 fijado a identidad y reutilización condicionada del
+refresh conocido. Conserva bloqueos/reinicio y descarta lecturas de versión
+anterior. La API/SQL/UI de reautorización SC/GA todavía debe adaptarse: las
+restricciones GBP descritas más abajo siguen vigentes en la aplicación.
+Sin nueva DDL, configuración instalada, operación real ni despliegue.
+
 ## 13/09/2026 — Baja durable SC/GA conectada a la API
 
 La [baja SC/GA](google-property-disconnect-migration.md) prepara ahora API,

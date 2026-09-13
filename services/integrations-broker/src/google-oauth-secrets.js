@@ -6,14 +6,15 @@ const digest = text => createHash('sha256').update(text).digest('hex');
 const token = v => typeof v === 'string' && /^[\x21-\x7e]{1,16384}$/.test(v);
 const subject = v => typeof v === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(v) && v !== 'unknown';
 const exact = (v, keys) => v && Object.getPrototypeOf(v) === Object.prototype && Object.keys(v).sort().join(',') === keys.split(',').sort().join(',');
-function credential(value, binding, clientId) {
+function credential(value, binding, clientId, requireScopes = true) {
+  require('./google-oauth-contract').bindingFor(binding);
   if (!exact(value, 'version,provider,connectionRef,googleUserId,clientId,refreshToken,scopes')
-    || value.version !== 3 || value.provider !== PROVIDER || value.connectionRef !== binding.connectionRef
+    || value.version !== 3 || value.provider !== binding.provider || value.connectionRef !== binding.connectionRef
     || value.googleUserId !== binding.oauth.subject || value.clientId !== clientId || !token(value.refreshToken)
     || !Array.isArray(value.scopes) || value.scopes.length > 32 || new Set(value.scopes).size !== value.scopes.length
     || !value.scopes.every(s => typeof s === 'string' && s.length <= 256 && !/\s/.test(s))
-    || binding.oauth.scopes.some(s => !value.scopes.includes(s))) fail('secret_unavailable');
-  return { version: 3, provider: PROVIDER, connectionRef: binding.connectionRef, googleUserId: value.googleUserId,
+    || requireScopes && binding.oauth.scopes.some(s => !value.scopes.includes(s))) fail('secret_unavailable');
+  return { version: 3, provider: binding.provider, connectionRef: binding.connectionRef, googleUserId: value.googleUserId,
     clientId, refreshToken: value.refreshToken, scopes: [...value.scopes].sort() };
 }
 // Only preallocated, exactly bound secrets may be written. No CreateSecret,
@@ -54,11 +55,14 @@ function createGoogleOAuthSecrets({ client, accountId, prefix, kmsKeyArn }) {
       const r = await read(binding.secretArn, { VersionStage: 'AWSCURRENT' }, signal);
       // v2 is accepted solely as a baseline version, never as a fallback refresh
       // token: it does not bind the Google subject and OAuth client identity.
-      if (r.value.version === 2 && exact(r.value, 'version,provider,connectionRef,refreshToken,scopes')
+      if (binding.provider === PROVIDER && r.value.version === 2 && exact(r.value, 'version,provider,connectionRef,refreshToken,scopes')
         && r.value.provider === PROVIDER && r.value.connectionRef === binding.connectionRef && token(r.value.refreshToken)) {
         return { version: r.version, reusable: null };
       }
-      return { version: r.version, reusable: credential(r.value, binding, clientId) };
+      const known = credential(r.value, binding, clientId, false);
+      // A valid pre-cut v3 may lack the newly requested identity/read scopes.
+      // It anchors version CAS but must not supply a fallback refresh token.
+      return { version: r.version, reusable: binding.oauth.scopes.every(s => known.scopes.includes(s)) ? known : null };
     },
     encode(binding, clientId, value) {
       const body = JSON.stringify(credential(value, binding, clientId)); return { body, digest: digest(body) };

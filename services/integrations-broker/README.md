@@ -1,5 +1,26 @@
 # Broker de integraciones
 
+## 13/09/2026 — Motor OAuth SC/GA preparado en el broker
+
+El broker prepara begin/finish/activate/status/abort OAuth separados para SC y
+GA, con identidad y propiedad fijadas, permisos readonly por vertical y tercer
+principal/clave independiente. V3 previo incompleto exige nuevo refresh; staging,
+activación y conciliación sobreviven a ACK perdido/reinicio. Nuevas credenciales
+conservan bloqueos y descartan respuestas de la versión anterior.
+
+QA ficticia: 255 tests Node (123 broker, 132 backend), incluidos los flujos GBP,
+SC y GA por HTTPS local. Hotfix conservado. Sin nueva DDL/QA MySQL/UI, despliegue,
+configuración instalada, cambios de pausas ni llamadas AWS/proveedor reales.
+OPS aplazado; apagado EC2 anunciado sin verificar.
+
+API/UI de reautorización aún GBP: faltan selección por cohorte y autorización
+sobre todos sus consumidores, intenciones SQL/captura humana, callback/estado e
+interfaz SC/GA. La baja durable del bloque anterior permanece preparada. No
+activar por tener el motor interno. Otras cohortes, auditoría completa,
+retención/IAM/Cost Explorer/Budget y cifrado/restauración/corte BD siguen pendientes.
+
+[Contrato](../../docs/security/google-property-oauth-broker.md).
+
 ## 13/09/2026 — Controles de revocación SC/GA preparados en el broker
 
 google.search_console.asset.revoke.v1 y google.analytics.asset.revoke.v1 aceptan

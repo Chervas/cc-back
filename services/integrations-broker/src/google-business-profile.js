@@ -48,8 +48,7 @@ function createGoogleBusinessProfileOperations({ http, cursor, oauth }) {
     },
   })]));
   const oauthContract = require('./google-oauth-contract');
-  const controls = oauth ? Object.fromEntries(Object.entries(oauthContract.OPERATIONS).map(([name, operation]) => [operation,
-    Object.freeze({ provider: contract.PROVIDER, control: 'google_oauth', validate: oauthContract.validators[name], execute: args => oauth.execute(args) })])) : {};
+  const controls = oauthContract.controlsFor(contract.PROVIDER, oauth);
   return { ...reads, ...controls, [contract.REVOKE_OPERATION]: Object.freeze({ provider: contract.PROVIDER, control: 'revoke_asset',
     validate: require('./contracts').schema({}) }) };
 }

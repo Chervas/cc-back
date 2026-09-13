@@ -36,6 +36,21 @@ function validatePropertyControlSeparation(policy, contract) {
     if (readers.has(grant.principalId) || readerKeys.has(keyFor(grant.principalId))) fail('invalid_request');
   }
 }
+function validateOAuthSeparation(policy, contract) {
+  const operations = Object.values(oauthContract.operationsFor(contract.PROVIDER));
+  const prior = new Set(policy.grants.filter(g => g.operations.some(op => contract.OPERATIONS.includes(op)
+    || op === contract.REVOKE_OPERATION)).map(g => g.principalId));
+  const keyFor = id => {
+    try { return createPublicKey(policy.principals.find(p => p.id === id).publicKey).export({ type: 'spki', format: 'der' }).toString('base64'); }
+    catch { fail('invalid_request'); }
+  };
+  const keys = new Set([...prior].map(keyFor));
+  for (const connection of policy.connections) if (connection.oauth) oauthContract.bindingFor(connection);
+  for (const grant of policy.grants.filter(g => g.operations.some(op => operations.includes(op)))) {
+    if (prior.has(grant.principalId) || keys.has(keyFor(grant.principalId))) fail('invalid_request');
+    oauthContract.bindingFor(policy.connections.find(c => c.connectionRef === grant.connectionRef));
+  }
+}
 function validateConfig(config) {
   if (!config || Object.keys(config).sort().join(',') !== 'cohort,cursorKeyFile,enabled,listenAddress,policy,port,stateFile,tlsCertFile,tlsKeyFile'
     || config.enabled !== true || !['google-business-profile-read-v1', 'google-search-console-read-v1', 'google-analytics-read-v1'].includes(config.cohort)
@@ -44,7 +59,7 @@ function validateConfig(config) {
   validatePolicy(config.policy);
   if (config.cohort === 'google-search-console-read-v1') {
     if (!config.policy.connections.length || config.policy.connections.some(c => c.provider !== scContract.PROVIDER || !c.secretArn || !c.clientSecretArn
-      || !require('./google-oauth-secrets').subject(c.googleSubject) || !c.searchConsoleSites?.length || c.oauth || c.analyticsProperties)) fail('invalid_request');
+      || !require('./google-oauth-secrets').subject(c.googleSubject) || !c.searchConsoleSites?.length || c.analyticsProperties)) fail('invalid_request');
     for (const connection of config.policy.connections) {
       const ids = new Set();
       for (const row of connection.searchConsoleSites) {
@@ -52,15 +67,17 @@ function validateConfig(config) {
       }
     }
     for (const grant of config.policy.grants) {
-      if (!/^clinic:[1-9]\d{0,9}$/.test(grant.tenantRef) || grant.operations.some(op => !scContract.OPERATIONS.includes(op) && op !== scContract.REVOKE_OPERATION)) fail('invalid_request');
+      if (!/^clinic:[1-9]\d{0,9}$/.test(grant.tenantRef) || grant.operations.some(op => !scContract.OPERATIONS.includes(op) && op !== scContract.REVOKE_OPERATION
+        && !Object.values(oauthContract.operationsFor(scContract.PROVIDER)).includes(op))) fail('invalid_request');
       scContract.resource(config.policy.connections.find(c => c.connectionRef === grant.connectionRef), grant.assetRef);
     }
     validatePropertyControlSeparation(config.policy, scContract);
+    validateOAuthSeparation(config.policy, scContract);
     return config;
   }
   if (config.cohort === 'google-analytics-read-v1') {
     if (!config.policy.connections.length || config.policy.connections.some(c => c.provider !== gaContract.PROVIDER || !c.secretArn || !c.clientSecretArn
-      || !require('./google-oauth-secrets').subject(c.googleSubject) || !c.analyticsProperties?.length || c.oauth || c.searchConsoleSites)) fail('invalid_request');
+      || !require('./google-oauth-secrets').subject(c.googleSubject) || !c.analyticsProperties?.length || c.searchConsoleSites)) fail('invalid_request');
     for (const connection of config.policy.connections) {
       const ids = new Set();
       for (const row of connection.analyticsProperties) {
@@ -68,10 +85,12 @@ function validateConfig(config) {
       }
     }
     for (const grant of config.policy.grants) {
-      if (!/^clinic:[1-9]\d{0,9}$/.test(grant.tenantRef) || grant.operations.some(op => !gaContract.OPERATIONS.includes(op) && op !== gaContract.REVOKE_OPERATION)) fail('invalid_request');
+      if (!/^clinic:[1-9]\d{0,9}$/.test(grant.tenantRef) || grant.operations.some(op => !gaContract.OPERATIONS.includes(op) && op !== gaContract.REVOKE_OPERATION
+        && !Object.values(oauthContract.operationsFor(gaContract.PROVIDER)).includes(op))) fail('invalid_request');
       gaContract.resource(config.policy.connections.find(c => c.connectionRef === grant.connectionRef), grant.assetRef);
     }
     validatePropertyControlSeparation(config.policy, gaContract);
+    validateOAuthSeparation(config.policy, gaContract);
     return config;
   }
   if (!config.policy.connections.length || config.policy.connections.some(c => c.provider !== PROVIDER || !c.secretArn || !c.clientSecretArn)
@@ -134,11 +153,11 @@ async function main(filename, { awsFactory = connectAws, http = createGoogleHttp
     secrets = createGoogleSecretStore({ client: aws.secrets, http, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY,
       provider: searchConsole ? scContract.PROVIDER : analytics ? gaContract.PROVIDER : PROVIDER });
     let broker;
-    if (!searchConsole && !analytics) oauth = createGoogleOAuth({ store, policy: config.policy, http,
+    if (config.policy.connections.some(c => c.oauth)) oauth = createGoogleOAuth({ store, policy: config.policy, http,
       secrets: createGoogleOAuthSecrets({ client: aws.secrets, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY }),
       onActivated: ref => { secrets.invalidate(ref); for (const controller of broker.active.get(ref) || []) controller.abort(); } });
     broker = new Broker({ store, policy: config.policy, secrets,
-      operations: searchConsole ? createSearchConsoleOperations({ http, cursor }) : analytics ? createAnalyticsOperations({ http, cursor }) : createGoogleBusinessProfileOperations({ http, cursor, oauth }), timeoutMs: 25000 });
+      operations: searchConsole ? createSearchConsoleOperations({ http, cursor, oauth }) : analytics ? createAnalyticsOperations({ http, cursor, oauth }) : createGoogleBusinessProfileOperations({ http, cursor, oauth }), timeoutMs: 25000 });
     let inFlight = 0;
     server = createServer({ async execute(...args) {
       if (inFlight >= 8) fail('rate_limited'); inFlight++;

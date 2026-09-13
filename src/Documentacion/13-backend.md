@@ -1,5 +1,37 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Motor OAuth SC/GA preparado en el broker
+
+El broker añade cinco operaciones por vertical, con prefijos
+google.search_console.oauth. y google.analytics.oauth.: begin.v1, finish.v1,
+activate.v1, status.v1 y abort.v1. Nombres GBP existentes sin cambios.
+OPERATIONS de lectura no incluye OAuth. Selección cerrada operationsFor(provider).
+
+Payloads: begin {state}; finish {flowId,state,code}; resto {flowId}. Tenant,
+conexión/activo y principal deben coincidir con grant explícito de la cohorte.
+No acepta scopes, redirect, ARN ni tokens del cliente. Subject OAuth igual a
+googleSubject de la política, redirect HTTPS canónico /oauth/google/callback.
+SC/GA solicita identidad OIDC + readonly de su vertical; rechaza permisos Ads,
+GBP, escritura o la otra vertical en configuración. Tercer principal/clave
+Ed25519 distintos de lectores y revocadores, incluso lectores deshabilitados.
+
+Conserva state/PKCE, identidad verificada, secret v3 por proveedor/subject/client,
+AWSPENDING -> AWSCURRENT con digest y versión base, replay/conciliación tras
+reinicio y bloqueo de lecturas durante activación. V3 previo sin scopes ahora
+requeridos sirve como baseline sin refresh reutilizable; exige nuevo refresh.
+Nueva credencial no borra bloqueo de activo/conexión ni caducidad. Revisión/caché
+invalidan respuestas que usaron la versión anterior. No tokens a API/SQLite.
+
+Solo capability interna preparada: googleOAuthBrokerScope y API/UI de
+reautorización aún admiten GBP, sin nueva autorización SC/GA. La desconexión
+SC/GA preparada en el bloque anterior se conserva. Faltan selección por cohorte,
+autorización de todos los consumidores/compartidos, intenciones/captura humana,
+callback/estado e interfaz. No basta con cambiar prefijo/gate para activar.
+
+Sin nueva DDL, env, job, componente, grant/clave instalado ni despliegue. Runtime
+sigue por cohorte y su integración operativa/IAM/secretos necesita el lote aprobado.
+Contrato backend: docs/security/google-property-oauth-broker.md.
+
 ## 13/09/2026 — Baja durable SC/GA conectada a la API
 
 DELETE /oauth/google/disconnect con ámbito incorpora SC/GA a la captura durable

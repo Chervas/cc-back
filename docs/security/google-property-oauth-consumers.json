@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-13",
+  "sourceHead": "70e3ce63a81eec8fa6014e8d6e189ad522e476c0",
+  "includesWorkingChanges": true,
+  "runtimeMigrated": 0,
+  "newMigrations": [],
+  "ops": "deferred_by_user",
+  "awsInstance": "shutdown_announced_unverified",
+  "method": "Source review and offline signed HTTPS/SQLite with fictitious provider and Secrets Manager dependencies.",
+  "qa": {
+    "broker": 123,
+    "backend": 132,
+    "mysql": "not_repeated_no_sql_changes",
+    "ui": "not_repeated_no_ui_changes"
+  },
+  "pending": [
+    "Multi-cohort SQL/API selection and complete consumer authorization, durable human audit, callback/status and UI",
+    "Shared identity/secret/cohort runtime integration and approved real IAM/schema/secrets/deployment cut",
+    "Other consumers, full platform audit, DPD retention, AWS costs/Budget/CloudFormation and database encryption/restoration/cut"
+  ],
+  "rows": [
+    {
+      "file": "services/integrations-broker/src/google-oauth-contract.js",
+      "sha256": "021d688ce131fdcee5c97e997b442b3d125626bc3a6635219b29d7804ccb6b39",
+      "status": "prepared_offline",
+      "note": "Typed operation prefixes, exact requested scopes and subject binding"
+    },
+    {
+      "file": "services/integrations-broker/src/google-oauth-secrets.js",
+      "sha256": "1f011074779210289c8e2acdabac4e05739e393eb2ebb64eff680e359f3c167b",
+      "status": "prepared_offline",
+      "note": "Provider-bound v3 candidate; incomplete valid baseline without refresh fallback"
+    },
+    {
+      "file": "services/integrations-broker/src/google-oauth.js",
+      "sha256": "a3dd11800f1492c8e5ae48264403f5ae9e02a7bf05e2d888561eba026a0ec85c",
+      "status": "prepared_offline",
+      "note": "Typed execution/fingerprint, shared PKCE/staging/activation and durable blocks"
+    },
+    {
+      "file": "services/integrations-broker/src/google-main.js",
+      "sha256": "618c72d57a7bced0423bcfe12950ab0c8fd389c30e6b64df872051bccfaffc67",
+      "status": "prepared_offline",
+      "note": "Per-cohort OAuth runtime and third-principal/key admission"
+    },
+    {
+      "file": "services/integrations-broker/src/google-search-console.js",
+      "sha256": "98d61fb681681c75b1c8815bdddbc8f7654d174e93c428197d005008f05a66ed",
+      "status": "prepared_offline",
+      "note": "Optional typed OAuth controls alongside unchanged read operations"
+    },
+    {
+      "file": "services/integrations-broker/src/google-analytics.js",
+      "sha256": "fadc4d1fc92c23e3320519f4867a09d9a0b8878210e6927144e437b9c78160c7",
+      "status": "prepared_offline",
+      "note": "Optional typed OAuth controls alongside unchanged read operations"
+    },
+    {
+      "file": "services/integrations-broker/src/google-business-profile.js",
+      "sha256": "fc4a3d50d965cd625f1b0f18048e1071a3e95b66e84a84dc161123a12122489b",
+      "status": "prepared_offline",
+      "note": "Preserves existing GBP operation names via shared registry helper"
+    },
+    {
+      "file": "src/services/googleOAuthBrokerScope.service.js",
+      "sha256": "65f43055bb5958c08da936616bb13582eb6cdded10765bea82dc9c7dc466f17d",
+      "status": "pending_api_integration",
+      "note": "Still GBP-only: complete multi-cohort consumer authorization pending"
+    },
+    {
+      "file": "src/services/googleOAuthBroker.service.js",
+      "sha256": "ff7b1e0acd64b69f17eaf6c7bf14c0d2d57022b1a49346c2af7c718fc98a3870",
+      "status": "pending_api_integration",
+      "note": "Still GBP operation prefix/client and v8 capture: API integration pending"
+    }
+  ]
+}
