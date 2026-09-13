@@ -2,6 +2,14 @@
 
 ## 13/09/2026 — WhatsApp primero; OPS no es dependencia
 
+Destino confirmado: **ClinicaClick público en staging/gateway; DEV fuera**.
+La revisión observa el mismo UID de sistema en los tres procesos y prefijos
+Redis distintos. El consumidor actual `webhook_whatsapp` reside también en
+gateway; trasladarlo exige una cola de recepción y propietario de consumo
+explícitos. Variables/pausas no sustituyen aislamiento de claves y grants SQL.
+Valoración, procesos afectados, interrupción y rollback en el contrato de
+reconexión; todavía no es un lote autorizado ni listo para ejecutar.
+
 Aclaración del usuario: OPS solo consume datos para paneles y puede estar
 apagado. La activación de ClinicaClick no depende de él. Prioridad: API WhatsApp
 y login con código por correo; cuentas publicitarias después.

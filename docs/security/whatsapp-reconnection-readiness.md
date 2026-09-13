@@ -9,6 +9,68 @@ seguir apagado: no es dependencia de ClinicaClick. Se priorizan WhatsApp API y
 login con códigos por correo; cuentas publicitarias después. No se espera a
 terminar costes, paneles OPS ni todas las integraciones para este cierre.
 
+## Destino público y valoración de la separación
+
+Confirmación del usuario: staging es la API y ejecutor de negocio; gateway sirve
+OAuth/webhooks y entradas externas sin workers de negocio; DEV queda fuera de
+la reconexión, con pausas y pruebas aisladas. Esto no autoriza reactivar Meta.
+
+La distribución es adecuada, pero aún no constituye una frontera de seguridad:
+
+1. La observación de metadatos de procesos del 13/09/2026 a las 17:15:04 UTC
+   (19:15:04 CEST) encuentra `pm2-back-dev`, `pm2-back-staging` y `pm2-gateway`
+   bajo UID 1000. Una clave privada del mismo usuario no aísla staging de un
+   proceso DEV comprometido. El lote debe separar identidades del sistema y
+   accesos a claves/secretos; no basta cambiar variables o prefijos.
+2. En el entorno de arranque observado: DEV tiene namespace/prefijo `dev` y
+   scheduler/cron apagados; staging usa `staging` y ambos activos; gateway usa
+   `gateway` y ambos apagados. Es un snapshot de arranque, no una prueba de toda
+   la configuración cargada después desde archivos ni de workers efectivos.
+3. El código de los tres checkouts crea `webhook_whatsapp` sin pasar por la
+   exclusión de workers del gateway. Ese consumidor persiste conversaciones,
+   trata medios y coordina automatizaciones. El flujo histórico documentado
+   reside allí. Trasladarlo a staging exige un traspaso explícito de recepción;
+   apagarlo sin ese traspaso dejaría los eventos en una cola sin consumidor.
+4. Los prefijos Redis de gateway y staging son distintos. Se necesita una cola
+   pública de entrada específica y un único propietario de consumo, conservando
+   las restantes colas y pausas. Un prefijo evita cruces accidentales; no impide
+   acceso malicioso si los usuarios Redis y del sistema conservan permiso global.
+5. Compartir BD con permisos amplios de escritura permitiría a DEV alterar
+   usuarios, correo de recuperación, sesiones, trabajos o bindings operativos.
+   El lote debe acreditar grants SQL mínimos. Preferencia de seguridad: BD de
+   desarrollo separada y datos de prueba. Si se mantiene la BD compartida,
+   separar usuario/grants y cerrar escrituras operativas desde DEV es requisito;
+   no se promete compatibilidad con desarrollo que necesite escribir esos datos.
+6. Un POST a Meta con respuesta perdida puede haber sido aceptado. El broker y
+   el worker deben conservar un ID durable de intención y el resultado desconocido,
+   sin generar otro envío automáticamente. La firma antirreplay del transporte
+   no sustituye esta deduplicación de negocio.
+
+Se han observado HEADs distintos en staging (`ac1b1dd`) y gateway (`4cf8e23`);
+no se infiere de ellos la versión efectiva cargada en memoria. Antes del corte
+se conciliará un candidato compatible en ambos. No se ha cambiado ningún proceso.
+La política de MFA del entorno real sigue sin acreditarse: ausencia de una
+variable en `/proc` no demuestra su valor después de cargar la configuración.
+
+### Lote que se concretará antes de pedir activación
+
+| Componente | Cambio y validación requeridos |
+| --- | --- |
+| Proveedor inicial | Solo WhatsApp, WABA/números y plantillas expresamente inventariados; Ads, páginas y otros permisos fuera. No usar tokens revocados. |
+| `pm2-gateway` | Validación de firma/ámbito y persistencia de recepción; publicación durable en la cola pública. Sin consumo de negocio, sin emisión de mensajes ni acceso al token WABA. |
+| `pm2-back-staging` | Único consumidor de recepción y ejecutor de envíos autorizados; conserva pausas/canales existentes, sesión/MFA y permisos. |
+| Workers afectados | `webhook_whatsapp`, `outbound_whatsapp`, `whatsapp_template_create`, `whatsapp_template_sync`, `whatsapp_phone_sync`; además los JobRequests/automatizaciones que produzcan esos trabajos. La creación de plantillas permanece cerrada hasta su autorización específica. |
+| Broker | Único poseedor del token WABA; identidad distinta para cada servicio, operaciones/activos/plantillas limitados, auditoría y resultado desconocido durable. DEV sin principal operativo ni acceso de lectura a secretos. |
+| BD/Redis | DDL exacta y grants revisados; cola pública separada, propiedad del consumo y backlog anterior conciliados. No cambiar el prefijo global como atajo ni reclamar jobs DEV. |
+| Interrupción | Ventana acotada para frenar productores/consumidores afectados, resolver trabajos en curso y cambiar el propietario de recepción. La duración se medirá con ensayo; aún no se promete una cifra ni entrega para esta noche. |
+| Regreso/rollback | Pausar envíos ante duda; conservar recepción durable, bloqueos, historial y exigencia del correo. Revertir consumidores únicamente a una versión revisada, con un solo dueño de cola. No restaurar tokens antiguos, envíos inciertos ni el webhook sin firma. |
+
+El lote no está listo para ejecutar: faltan el adaptador WABA, los consumidores,
+las barreras de acceso del entorno y el ensayo completo gateway → cola → staging
+→ broker, incluidos errores y reinicios. La atribución Meta puede continuar en
+paralelo; no se presenta como requisito esperar indefinidamente una respuesta
+forense para preparar estas protecciones.
+
 ## Hechos y estado
 
 | Control | Evidencia de código | Pendiente antes de reabrir |
@@ -107,8 +169,7 @@ Este parche no añade DDL. El webhook ahora depende del registro `MetaScopeBlock
 dependencias concretas antes del despliegue; no ejecutar migraciones en masa.
 
 Para un visto bueno de reconexión faltan: terminar broker/consumidores WhatsApp,
-resolver evidencias y accesos del incidente, identificar el entorno público y
-versiones exactas, aplicar el lote MFA, verificar permisos/aislamiento del nuevo
+resolver evidencias y accesos del incidente, conciliar las versiones exactas del entorno público confirmado (staging/gateway), aplicar el lote MFA, verificar permisos/aislamiento del nuevo
 secreto y hacer un canary autorizado de recepción/envío a una cuenta de prueba.
 Se presentará un lote concreto a su propietario, independiente de OPS. No se
 han movido secretos, tocado AWS/BD compartida, cambiado pausas ni enviado mensajes.

@@ -14,7 +14,9 @@ para desplegar o validar las protecciones de ClinicaClick.
 
 Orden de trabajo: **WhatsApp API y login con código por correo primero; cuentas
 publicitarias después**. Las lecturas de contadores Facebook/Instagram quedan
-pospuestas. Se conserva su borrador local fuera del corte publicado.
+pospuestas. El destino operativo confirmado es staging/gateway; DEV queda
+fuera. La separación de procesos, colas, usuarios del sistema y grants SQL se
+valora en el documento de reconexión antes de preparar el corte. Se conserva su borrador local fuera del corte publicado.
 
 El criterio actual es comprobar las condiciones de reconexión de WhatsApp, no
 solo terminar código de contención. Estado y obstáculos concretos:
