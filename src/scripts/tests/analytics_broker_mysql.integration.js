@@ -36,17 +36,34 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const calls = []; let enabled = true; let afterCall;
   const create = () => createAnalyticsBroker({ ...createAnalyticsRepository(() => models), enabled: () => enabled,
     client: { execute: async command => { calls.push(command); await afterCall?.();
+      if (command.operation === 'google.analytics.discovery.read.v1') return { data: { name: 'properties/123', displayName: 'Fictitious SQL property',
+        account: 'accounts/456', parent: 'accounts/456', propertyType: 'PROPERTY_TYPE_ORDINARY' } };
       return { data: { ...analyticsReport('daily', { start: command.payload.startDate }), nextPageToken: null, rowLimitReached: false } }; } } });
   const service = create(); const context = await service.prepare(mapping); assert.deepEqual(context, {});
   const range = { startDate: '2026-09-01', endDate: '2026-09-02' };
   assert.equal((await service.read(mapping, context, 'daily', range)).rows[0].metricValues[0].value, '3'); assert.equal(tokenReads, 0);
   report.checks.push('Actual models and repository read only binding metadata and the SQL NULL-credential boolean');
+  const { createGooglePropertyDiscovery, createDiscoveryRepository } = require('../../services/googlePropertyDiscovery.service');
+  const discovery = createGooglePropertyDiscovery({ ...createDiscoveryRepository(() => models), readers: { analytics: service },
+    enabled: () => enabled, hasManaged: async () => !!await B.findOne({ attributes: ['mapping_id'], raw: true }) });
+  const inventory = { kind: 'analytics', clinicIds: [71], connectionId: 81, revalidate: async () => {} };
+  assert.equal((await discovery.list(inventory))[0].name, 'properties/123'); assert.equal(tokenReads, 0);
+  await assert.rejects(discovery.list({ ...inventory, clinicIds: [999] }), { code: 'broker_discovery_scope_unconfigured' });
+  report.checks.push('Actual discovery repository filters registered clinic/connection metadata without credential columns or fallback');
+  afterCall = () => M.update({ isActive: false }, { where: { id: 91 } });
+  await assert.rejects(discovery.list(inventory), { code: 'broker_binding_invalid' }); afterCall = null;
+  await M.update({ isActive: true }, { where: { id: 91 } });
+  report.checks.push('A real SQL deactivation during property discovery prevents the response');
   await G.update({ accessToken: 'FICTITIOUS_SQL_TOKEN', refreshToken: 'FICTITIOUS_SQL_REFRESH' }, { where: { id: 81 } });
   await assert.rejects(service.prepare(mapping), { code: 'broker_binding_invalid' }); assert.equal(tokenReads, 0);
   await G.update({ accessToken: null, refreshToken: null }, { where: { id: 81 } });
   report.checks.push('Non-NULL SQL credentials prevent admission without hydrating their values');
   const shared = (await M.create({ ...mapping, id: 191, clinicaId: 72 })).get({ plain: true });
   await B.create({ ...binding, mapping_id: 191, clinica_id: 72 });
+  const beforeDiscovery = calls.length;
+  assert.equal((await discovery.list({ ...inventory, clinicIds: [71, 72] })).length, 1);
+  assert.deepEqual(calls.slice(beforeDiscovery).map(row => row.tenantRef), ['clinic:71', 'clinic:72']); assert.equal(tokenReads, 0);
+  report.checks.push('Real multi-clinic GA discovery verifies both independent grants and deduplicates the public property');
   const sharedContext = await service.prepare(shared); await service.read(shared, sharedContext, 'daily', range);
   assert.equal(calls.at(-1).tenantRef, 'clinic:72');
   await B.update({ state: 'blocked' }, { where: { property_name: binding.property_name, mapping_id: 191 } });

@@ -1,6 +1,7 @@
 'use strict';
 const fs = require('node:fs'); const path = require('node:path'); const { Op, literal } = require('sequelize');
 const contract = require('../../services/integrations-broker/src/google-search-console-contract');
+const discovery = require('../../services/integrations-broker/src/google-property-discovery-contract');
 const { createIntegrationsBrokerClient } = require('../lib/integrationsBrokerClient');
 const fail = (code = 'broker_binding_invalid') => { throw Object.assign(Error(code), { code }); };
 const positive = value => Number.isSafeInteger(Number(value)) && Number(value) > 0 && Number(value) <= 2147483647;
@@ -36,11 +37,11 @@ function createSearchConsoleBroker({ client, loadMapping, loadBinding, loadConne
     const captured = context && typeof context === 'object' && contexts.get(context);
     const operation = contract.PREFIX + family + '.read.v1';
     if (!captured || captured.id !== Number(mapping.id)) fail(); contract.validate(operation, payload);
-    await inspect(mapping, captured); await beforeExecute?.();
-    const result = await client.execute({ operation, connectionRef: captured.connectionRef, assetRef: captured.assetRef, tenantRef: captured.tenantRef, payload });
+    await inspect(mapping, captured); const budget = await beforeExecute?.();
+    const result = await client.execute({ operation, connectionRef: captured.connectionRef, assetRef: captured.assetRef, tenantRef: captured.tenantRef, payload }, budget);
     await inspect(mapping, captured); await beforeExecute?.();
     if (!result || !result.data || typeof result.data !== 'object') fail('broker_response_invalid');
-    const projected = contract.project(family, result.data, payload);
+    const projected = family === 'discovery' ? discovery.projectSC(result.data, captured.siteUrl) : contract.project(family, result.data, payload);
     return { ...projected, ...(family === 'queries' ? { nextPageToken: result.data.nextPageToken, rowLimitReached: result.data.rowLimitReached } : {}) };
   }
   return {
@@ -88,11 +89,11 @@ function privateFile(filename) {
   } catch { fail('broker_configuration_invalid'); }
 }
 let cachedClient;
-const client = { execute(command) {
+const client = { execute(command, budget) {
   cachedClient ||= createIntegrationsBrokerClient({ origin: process.env.GOOGLE_SEARCH_CONSOLE_BROKER_ORIGIN,
     audience: process.env.GOOGLE_SEARCH_CONSOLE_BROKER_AUDIENCE, keyId: process.env.GOOGLE_SEARCH_CONSOLE_BROKER_KEY_ID,
     privateKey: privateFile(process.env.GOOGLE_SEARCH_CONSOLE_BROKER_KEY_FILE), ca: privateFile(process.env.GOOGLE_SEARCH_CONSOLE_BROKER_CA_FILE), timeoutMs: 30000 });
-  return cachedClient.execute(command);
+  return cachedClient.execute(command, budget);
 } };
 function createSearchConsoleRepository(getModels) {
   return {

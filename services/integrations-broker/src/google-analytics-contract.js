@@ -1,12 +1,13 @@
 'use strict';
 const { schema } = require('./contracts'); const { fail } = require('./errors');
 const { date } = require('./google-search-console-contract');
+const discovery = require('./google-property-discovery-contract');
 const PROVIDER = 'google_analytics'; const PREFIX = 'google.analytics.';
 const SCOPES = Object.freeze(['https://www.googleapis.com/auth/analytics.readonly', 'https://www.googleapis.com/auth/analytics']);
 const FAMILIES = Object.freeze({ daily: null, channel: 'sessionDefaultChannelGroup', source_medium: 'sessionSourceMedium',
   device: 'deviceCategory', country: 'country', city: 'city', language: 'language', gender: 'userGender', age: 'userAgeBracket' });
 const METRICS = Object.freeze(['sessions', 'activeUsers', 'newUsers', 'keyEvents', 'totalRevenue']);
-const OPERATIONS = Object.freeze(Object.keys(FAMILIES).map(f => PREFIX + f + '.read.v1'));
+const OPERATIONS = Object.freeze([...Object.keys(FAMILIES).map(f => PREFIX + f + '.read.v1'), discovery.GA_OPERATION]);
 const PAGE_SIZE = 500; const MAX_ROWS = 100000;
 function property(value) {
   if (typeof value !== 'string' || !/^properties\/[1-9]\d{0,19}$/.test(value)) fail('scope_denied');
@@ -19,6 +20,7 @@ function resource(binding, assetRef) {
 }
 const check = schema({ startDate: { type: 'string' }, endDate: { type: 'string' }, pageToken: { type: ['string', 'null'], maxLength: 4096 } });
 function validate(operation, payload) {
+  if (operation === discovery.GA_OPERATION) return discovery.validate(payload);
   if (!OPERATIONS.includes(operation)) fail('operation_denied'); check(payload);
   if (!date(payload.startDate) || !date(payload.endDate) || payload.endDate < payload.startDate
     || Date.parse(payload.endDate) - Date.parse(payload.startDate) > 549 * 86400000) fail('invalid_request');

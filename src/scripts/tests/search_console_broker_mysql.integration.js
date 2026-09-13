@@ -37,10 +37,23 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const { createSearchConsoleBroker, createSearchConsoleRepository } = require('../../services/searchConsoleBroker.service');
   const calls = []; let afterCall; let enabled = true;
   const create = () => createSearchConsoleBroker({ ...createSearchConsoleRepository(() => models), enabled: () => enabled,
-    client: { execute: async command => { calls.push(command); await afterCall?.(); return { data: { rows: [{ keys: [command.payload.startDate], clicks: 3, impressions: 6, ctr: 0.5, position: 1 }] } }; } } });
+    client: { execute: async command => { calls.push(command); await afterCall?.();
+      if (command.operation === 'google.search_console.discovery.read.v1') return { data: { siteUrl: resource.siteUrl, permissionLevel: 'siteOwner' } };
+      return { data: { rows: [{ keys: [command.payload.startDate], clicks: 3, impressions: 6, ctr: 0.5, position: 1 }] } }; } } });
   const service = create(); const context = await service.prepare(mapping); assert.deepEqual(context, {});
   assert.equal((await service.read(mapping, context, 'timeseries', { startDate: '2026-09-01', endDate: '2026-09-02' })).data.rows[0].clicks, 3);
   assert.equal(fullReads, 0); report.checks.push('Actual repository/model queries prepare and read an external credential binding with no token columns hydrated');
+  const { createGooglePropertyDiscovery, createDiscoveryRepository } = require('../../services/googlePropertyDiscovery.service');
+  const discovery = createGooglePropertyDiscovery({ ...createDiscoveryRepository(() => models), readers: { search_console: service },
+    enabled: () => enabled, hasManaged: async () => !!await B.findOne({ attributes: ['mapping_id'], raw: true }) });
+  const inventory = { kind: 'search_console', clinicIds: [71], connectionId: 81, revalidate: async () => {} };
+  assert.equal((await discovery.list(inventory))[0].siteUrl, resource.siteUrl); assert.equal(fullReads, 0);
+  await assert.rejects(discovery.list({ ...inventory, clinicIds: [999] }), { code: 'broker_discovery_scope_unconfigured' });
+  report.checks.push('SC discovery uses actual SQL clinic/connection filters and metadata without legacy hydration');
+  afterCall = () => M.update({ isActive: false }, { where: { id: 91 } });
+  await assert.rejects(discovery.list(inventory), { code: 'broker_binding_invalid' }); afterCall = null;
+  await M.update({ isActive: true }, { where: { id: 91 } });
+  report.checks.push('SC discovery drops its full response after a real concurrent mapping deactivation');
   await G.update({ accessToken: 'FICTITIOUS_SQL_TOKEN', refreshToken: 'FICTITIOUS_SQL_REFRESH' }, { where: { id: 81 } });
   await assert.rejects(service.prepare(mapping), { code: 'broker_binding_invalid' }); assert.equal(fullReads, 0);
   await G.update({ accessToken: null, refreshToken: null }, { where: { id: 81 } });

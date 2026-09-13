@@ -1,5 +1,15 @@
 # Search Console: lecturas por broker preparadas
 
+## Ampliación vigente de discovery (13/09/2026)
+
+El [listado de propiedades registradas](google-property-discovery-migration.md)
+añade discovery.read.v1, con GET a un recurso exacto de la política, payload
+vacío y proyección cerrada. Mantiene los informes y sus límites. GA Admin exige
+analytics.readonly; su scope analytics no basta. No añade esquema ni activa
+cohortes. Los apartados anteriores/siguientes fechados como lecturas describen
+ese corte previo: el nuevo contrato rige para discovery. Onboarding, remapeo,
+OAuth/estado UI completos, cohortes reales y sus aprobaciones siguen pendientes.
+
 ## Ampliación vigente GA4 (13/09/2026)
 
 El [bloque GA4](google-analytics-read-migration.md) incorpora su registro a los

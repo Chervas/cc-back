@@ -33,7 +33,12 @@ test('actual GA TLS runtime, signed client and adapter exchange metrics only and
   const sink = { async write(row) { events.push(JSON.parse(row.event)); return { versionId: 'fictitious-s3', digest: row.digest }; } };
   const dependencies = { awsFactory: async () => ({ secrets, sink, close: () => { closes++; } }), http: async request => {
     if (request.hostname === 'oauth2.googleapis.com') { refreshes++; return { access_token: ACCESS, token_type: 'Bearer', expires_in: 3600, scope: contract.SCOPES[0] }; }
-    reads++; assert.equal(request.hostname, 'analyticsdata.googleapis.com'); assert.equal(request.path, '/v1beta/properties/123:runReport');
+    reads++;
+    if (request.hostname === 'analyticsadmin.googleapis.com') {
+      assert.equal(request.path, '/v1beta/properties/123'); assert.equal(request.json, undefined);
+      return { name: 'properties/123', account: 'accounts/456', parent: 'accounts/456', displayName: 'FICTITIOUS_PROPERTY_LABEL', propertyType: 'PROPERTY_TYPE_ORDINARY', secret: ACCESS };
+    }
+    assert.equal(request.hostname, 'analyticsdata.googleapis.com'); assert.equal(request.path, '/v1beta/properties/123:runReport');
     assert.equal(request.token.toString(), ACCESS);
     return { ...analyticsReport('city', { offset: Number(request.json.offset), count: request.json.offset === '0' ? 500 : 1, total: 501 }), ignoredToken: ACCESS };
   } };
@@ -52,13 +57,17 @@ test('actual GA TLS runtime, signed client and adapter exchange metrics only and
   assert.equal(refreshes, 1); assert.equal(reads, 2); assert.equal(metadataCalls, 8); assert(!JSON.stringify(data).includes(ACCESS));
   await assert.rejects(client.execute({ operation: contract.OPERATIONS[0], tenantRef: 'clinic:999', connectionRef: 'connection:test', assetRef: resource.assetRef,
     payload: { ...range, pageToken: null } }), { code: 'scope_denied' }); assert.equal(metadataCalls, 8);
+  const properties = await consumer.read(mapping, context, 'discovery', {}, { beforeExecute: async () => ({ timeoutMs: 1000 }) });
+  assert.equal(properties.data.name, 'properties/123'); assert.equal(properties.data.secret, undefined);
+  assert.equal(metadataCalls, 12); assert.equal(reads, 3); assert.equal(refreshes, 1);
   await drainAudit(app.store, sink); assert.equal(app.store.backlog().pending, 0);
   assert(events.some(e => e.version === 2 && e.operation === 'google.analytics.city.read.v1' && e.resourceRef === 'ga4:123'));
   const durable = JSON.stringify(events) + JSON.stringify(app.store.db.prepare('SELECT * FROM commands').all());
-  for (const token of [ACCESS, 'FICTITIOUS_REFRESH', 'FICTITIOUS_CLIENT', 'FICTITIOUS_DIMENSION_']) assert(!durable.includes(token));
+  for (const token of [ACCESS, 'FICTITIOUS_REFRESH', 'FICTITIOUS_CLIENT', 'FICTITIOUS_DIMENSION_', 'FICTITIOUS_PROPERTY_LABEL']) assert(!durable.includes(token));
   app.broker.block('connection:test', eventFor({ ...f.command(), assetRef: resource.assetRef, operation: contract.OPERATIONS[0] }, f.policy.principals[0], f.policy,
     'connection.blocked', 'success', 'operator_block'));
   await app.close(); app = null; app = await runtime.main(filename, dependencies);
   await assert.rejects(consumer.read(mapping, context, 'city', range), { code: 'connection_blocked' });
-  assert.equal(reads, 2); assert.equal(refreshes, 1); await app.close(); app = null; assert.equal(closes, 2);
+  await assert.rejects(consumer.read(mapping, context, 'discovery', {}), { code: 'connection_blocked' });
+  assert.equal(reads, 3); assert.equal(refreshes, 1); await app.close(); app = null; assert.equal(closes, 2);
 });

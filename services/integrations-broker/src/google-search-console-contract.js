@@ -1,9 +1,10 @@
 'use strict';
 const { createHash } = require('node:crypto');
 const { schema } = require('./contracts'); const { fail } = require('./errors');
+const discovery = require('./google-property-discovery-contract');
 const PROVIDER = 'google_search_console'; const PREFIX = 'google.search_console.';
 const SCOPES = Object.freeze(['https://www.googleapis.com/auth/webmasters.readonly', 'https://www.googleapis.com/auth/webmasters']);
-const OPERATIONS = Object.freeze(['timeseries', 'queries', 'pages', 'inspection'].map(v => PREFIX + v + '.read.v1'));
+const OPERATIONS = Object.freeze(['timeseries', 'queries', 'pages', 'inspection', 'discovery'].map(v => PREFIX + v + '.read.v1'));
 const PAGE_SIZE = 500; const MAX_ROWS = 25000;
 const date = v => typeof v === 'string' && /^20\d\d-\d\d-\d\d$/.test(v) && Number.isFinite(Date.parse(v)) && new Date(v).toISOString().slice(0, 10) === v;
 function site(value) {
@@ -32,6 +33,7 @@ const validators = {
   pages: schema({ ...range, startRow: { type: 'integer', minimum: 0, maximum: MAX_ROWS - 1 }, rowLimit: { type: 'integer', minimum: 1, maximum: PAGE_SIZE } }),
 };
 function validate(operation, payload) {
+  if (operation === discovery.SC_OPERATION) return discovery.validate(payload);
   if (!OPERATIONS.includes(operation)) fail('operation_denied');
   const family = operation.slice(PREFIX.length).split('.')[0]; validators[family](payload);
   if (family !== 'inspection' && (!date(payload.startDate) || !date(payload.endDate) || payload.endDate < payload.startDate

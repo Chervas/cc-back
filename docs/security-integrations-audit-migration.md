@@ -1,5 +1,25 @@
 # Runbook: Migracion Segura De Integraciones Y Auditoria
 
+## 13/09/2026 — Listado SC/GA de propiedades registradas por broker
+
+Preparados listados SC/GA y estado GA sin tokens SQL para registros gestionados.
+Dos operaciones GET cerradas, sesión vigente y revalidación de todo el ámbito.
+GA conserva grants por clínica de una propiedad compartida; muestra identificador
+de cuenta. La API genérica de estado Google cierra legacy antes de hidratar
+credenciales. La incorporación/remapeo y ciclo OAuth/UI completos siguen pendientes;
+SC conserva su restricción de mapping original. No se activa Ajustes todavía.
+
+QA ficticia: 174 tests Node (79 broker, 95 backend), 49 comprobaciones MySQL propias
+(16 GA, 14 SC, ocho legacy, once OAuth) y tres contratos, incluido scheduler de
+46 jobs. HTTPS local firmado en ambas cohortes, bloqueo tras reinicio y hotfix
+getAssetStats conservado. Sin nueva migración: requisitos GBP/OAuth/SC/GA y
+sesiones previos al código aun con gates apagados. Cero despliegues/migraciones
+reales. OPS aplazado, apagado EC2 anunciado sin verificar; sin AWS/proveedores
+reales ni cambios de pausas. Coste/cuotas reales, auditoría completa, retención,
+IAM/Budget/Cost Explorer y cifrado/restauración/corte BD continúan pendientes.
+
+[Contrato, límites y lote pendiente](security/google-property-discovery-migration.md).
+
 ## 13/09/2026 — Lecturas GA4 por broker preparadas
 
 Nueve familias GA4 en analyticsSync y backfills usan referencias y tokens

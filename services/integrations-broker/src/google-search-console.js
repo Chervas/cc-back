@@ -1,11 +1,14 @@
 'use strict';
 const contract = require('./google-search-console-contract'); const { fail } = require('./errors');
+const discovery = require('./google-property-discovery-contract');
 function createSearchConsoleOperations({ http, cursor }) {
   return Object.fromEntries(contract.OPERATIONS.map(operation => [operation, Object.freeze({
     provider: contract.PROVIDER, effect: 'read', persistResult: false, validate: payload => contract.validate(operation, payload),
     async execute(context) {
       const { payload, secret, signal, binding, assetRef } = context;
       const resource = contract.resource(binding, assetRef); const family = operation.slice(contract.PREFIX.length).split('.')[0];
+      if (family === 'discovery') return discovery.projectSC(await http({ hostname: 'www.googleapis.com',
+        path: `/webmasters/v3/sites/${encodeURIComponent(resource.siteUrl)}`, token: secret, signal }), resource.siteUrl);
       if (family === 'inspection') {
         const raw = await http({ hostname: 'searchconsole.googleapis.com', path: '/v1/urlInspection/index:inspect', token: secret, signal,
           json: { siteUrl: resource.siteUrl, inspectionUrl: resource.inspectionUrl, languageCode: 'en-US' } });

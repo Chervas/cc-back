@@ -99,7 +99,7 @@ class Broker {
         const data = operation.project(rawResult);
         if (JSON.stringify(data).includes(secret.toString('utf8'))) fail('provider_failed');
         return data;
-      }, { signal: controller.signal, onRevoked });
+      }, { signal: controller.signal, onRevoked, requiredScopes: operation.requiredScopes });
       const data = await Promise.race([work, new Promise((_, reject) => {
         timer = setTimeout(() => { controller.abort(); reject(new BrokerError('provider_timeout')); }, this.timeoutMs);
       })]);

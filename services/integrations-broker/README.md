@@ -1,5 +1,19 @@
 # Broker de integraciones
 
+## Discovery SC/GA registrado preparado, sin activar
+
+Se añaden google.search_console.discovery.read.v1 y
+google.analytics.discovery.read.v1 a sus cohortes de lectura existentes.
+GET fijo a Sites.get o Properties.get, payload vacío y grants explícitos;
+metadata proyectada y sin persistir datasets. GA Admin exige analytics.readonly
+en secreto y scopes del access token cacheado; no admite enumerar cuentas.
+No se amplían permisos instalados ni se modifica infraestructura.
+[Contrato, límites, QA y lote pendiente](../../docs/security/google-property-discovery-migration.md).
+
+Los apartados de lecturas previas siguientes conservan las cifras de sus cortes;
+el contrato nuevo amplía discovery sin completar onboarding/OAuth/UI ni activar
+ninguna cohorte. OPS continúa aplazado; apagado EC2 no verificado.
+
 ## GA4: nueve lecturas preparadas, sin activar
 
 `google-main.js` admite google-analytics-read-v1 con subject, propiedades y grants

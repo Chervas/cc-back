@@ -1,5 +1,15 @@
 # GA4: lecturas por broker preparadas
 
+## Ampliación vigente de discovery (13/09/2026)
+
+El [listado de propiedades registradas](google-property-discovery-migration.md)
+añade discovery.read.v1, con GET a un recurso exacto de la política, payload
+vacío y proyección cerrada. Mantiene los informes y sus límites. GA Admin exige
+analytics.readonly; su scope analytics no basta. No añade esquema ni activa
+cohortes. Los apartados anteriores/siguientes fechados como lecturas describen
+ese corte previo: el nuevo contrato rige para discovery. Onboarding, remapeo,
+OAuth/estado UI completos, cohortes reales y sus aprobaciones siguen pendientes.
+
 Preparación local del 13/09/2026 sobre backend `60553a1d` y frontend `ecf7fa65`.
 Ningún consumidor migrado en runtime. Sin despliegue, migración compartida,
 secretos reales o llamadas AWS/Google. OPS aplazado por el usuario; apagado EC2

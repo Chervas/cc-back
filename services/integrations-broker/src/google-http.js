@@ -11,8 +11,10 @@ function createGoogleHttp({ request = https.request, timeoutMs = 8000 } = {}) {
     const searchConsole = hostname === 'searchconsole.googleapis.com' && path === '/v1/urlInspection/index:inspect'
       || hostname === 'www.googleapis.com' && /^\/webmasters\/v3\/sites\/[^/?#]+\/searchAnalytics\/query$/.test(path);
     const analytics = hostname === 'analyticsdata.googleapis.com' && /^\/v1beta\/properties\/[1-9]\d{0,19}:runReport$/.test(path);
+    const discovery = hostname === 'analyticsadmin.googleapis.com' && /^\/v1beta\/properties\/[1-9]\d{0,19}$/.test(path)
+      || hostname === 'www.googleapis.com' && /^\/webmasters\/v3\/sites\/[^/?#]+$/.test(path);
     const jsonRead = searchConsole || analytics;
-    if (!(oauth || userinfo || jsonRead || HOSTS.has(hostname)) || typeof path !== 'string' || !/^\/v[14]\//.test(path) && !oauth && !userinfo && !jsonRead
+    if (!(oauth || userinfo || jsonRead || discovery || HOSTS.has(hostname)) || typeof path !== 'string' || !/^\/v[14]\//.test(path) && !oauth && !userinfo && !jsonRead && !discovery
       || path.length > 16384 || /[\r\n#]/.test(path) || signal?.aborted) fail('invalid_request');
     if (oauth ? !form || typeof form !== 'string' || form.length > 32768 || token !== undefined
       : !Buffer.isBuffer(token) || !token.length || token.length > 16384 || /[\r\n]/.test(token.toString('utf8')) || form !== undefined) fail('invalid_request');

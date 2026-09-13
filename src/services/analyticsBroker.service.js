@@ -1,8 +1,10 @@
 'use strict';
 const fs = require('node:fs'); const path = require('node:path'); const { Op, literal } = require('sequelize');
 const contract = require('../../services/integrations-broker/src/google-analytics-contract');
+const discovery = require('../../services/integrations-broker/src/google-property-discovery-contract');
 const { createIntegrationsBrokerClient } = require('../lib/integrationsBrokerClient');
 const CODES = new Set(['broker_binding_invalid', 'broker_cohort_disabled', 'broker_response_invalid', 'broker_configuration_invalid',
+  'google_discovery_session_required', 'google_discovery_scope_forbidden', 'broker_discovery_timeout',
   'broker_timeout', 'broker_unavailable', 'connection_blocked', 'asset_revoked', 'scope_denied', 'operation_denied', 'invalid_request',
   'secret_unavailable', 'credential_revoked', 'provider_failed', 'provider_timeout', 'provider_unauthorized', 'rate_limited',
   'google_oauth_legacy_closed', 'google_connection_missing', 'google_connection_changed', 'google_credentials_unavailable']);
@@ -44,10 +46,18 @@ function createAnalyticsBroker({ client, loadMapping, loadBindings, loadConnecti
       const captured = await inspect(mapping); if (!captured) return null;
       const context = Object.freeze({}); contexts.set(context, captured); return context;
     }),
-    read: guarded(async (mapping, context, family, payload) => {
+    read: guarded(async (mapping, context, family, payload, { beforeExecute } = {}) => {
       const captured = context && typeof context === 'object' && contexts.get(context);
       if (!captured || captured.id !== Number(mapping?.id)) fail();
-      const operation = contract.PREFIX + family + '.read.v1'; contract.validate(operation, { ...payload, pageToken: null });
+      const operation = contract.PREFIX + family + '.read.v1';
+      if (family === 'discovery') {
+        contract.validate(operation, payload); await inspect(mapping, captured); const budget = await beforeExecute?.();
+        const response = await client.execute({ operation, connectionRef: captured.connectionRef, assetRef: captured.assetRef,
+          tenantRef: captured.tenantRef, payload }, budget);
+        await inspect(mapping, captured); await beforeExecute?.();
+        try { return { data: discovery.projectGA(response?.data, captured.propertyName) }; } catch { fail('broker_response_invalid'); }
+      }
+      contract.validate(operation, { ...payload, pageToken: null });
       if (Object.keys(payload).sort().join(',') !== 'endDate,startDate') fail('invalid_request');
       const rows = []; const seen = new Set(); const deadline = now() + 450000;
       let bytes = 0; let pageToken = null; let rowCount = null; let metadata; let metadataText;
@@ -87,11 +97,11 @@ function privateFile(filename) {
   } catch { fail('broker_configuration_invalid'); }
 }
 let cachedClient;
-const client = { execute(command) {
+const client = { execute(command, budget) {
   cachedClient ||= createIntegrationsBrokerClient({ origin: process.env.GOOGLE_ANALYTICS_BROKER_ORIGIN,
     audience: process.env.GOOGLE_ANALYTICS_BROKER_AUDIENCE, keyId: process.env.GOOGLE_ANALYTICS_BROKER_KEY_ID,
     privateKey: privateFile(process.env.GOOGLE_ANALYTICS_BROKER_KEY_FILE), ca: privateFile(process.env.GOOGLE_ANALYTICS_BROKER_CA_FILE), timeoutMs: 30000 });
-  return cachedClient.execute(command);
+  return cachedClient.execute(command, budget);
 } };
 function createAnalyticsRepository(getModels) {
   return {

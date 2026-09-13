@@ -1,13 +1,17 @@
 'use strict';
 const { createHash } = require('node:crypto');
 const contract = require('./google-analytics-contract'); const { fail } = require('./errors');
+const discovery = require('./google-property-discovery-contract');
 const fingerprint = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 function createAnalyticsOperations({ http, cursor }) {
   return Object.fromEntries(contract.OPERATIONS.map(operation => [operation, Object.freeze({
     provider: contract.PROVIDER, effect: 'read', persistResult: false, validate: payload => contract.validate(operation, payload),
+    ...(operation === discovery.GA_OPERATION ? { requiredScopes: [discovery.GA_SCOPE] } : {}),
     async execute(context) {
       const { payload, secret, signal, binding, assetRef } = context;
       const resource = contract.resource(binding, assetRef); const family = operation.slice(contract.PREFIX.length).split('.')[0];
+      if (family === 'discovery') return discovery.projectGA(await http({ hostname: 'analyticsadmin.googleapis.com',
+        path: `/v1beta/${resource.propertyName}`, token: secret, signal }), resource.propertyName);
       const scope = { ...context, operation }; let previous = null; let offset = 0;
       if (payload.pageToken !== null) {
         try { previous = JSON.parse(cursor.open(payload.pageToken, scope)); } catch { fail('invalid_request'); }

@@ -57,7 +57,8 @@ function createGoogleSecretStore({ client, http, accountId, prefix, kmsKeyArn, n
         token = Buffer.from(result.access_token);
         if (entries.size >= maxEntries && !entries.has(ref)) invalidate(entries.keys().next().value);
         entries.get(ref)?.token.fill(0);
-        const entry = { fingerprint, token, expiresAt: now() + (Math.min(result.expires_in, 3600) - 60) * 1000 };
+        const entry = { fingerprint, token, scopes: result.scope === undefined ? connection.scopes.slice() : result.scope.split(' '),
+          expiresAt: now() + (Math.min(result.expires_in, 3600) - 60) * 1000 };
         entries.set(ref, entry); return entry;
       } catch (error) {
         token?.fill(0);
@@ -71,7 +72,7 @@ function createGoogleSecretStore({ client, http, accountId, prefix, kmsKeyArn, n
   return {
     invalidate,
     close() { for (const ref of new Set([...entries.keys(), ...flights.keys()])) invalidate(ref); },
-    async withSecret(binding, work, { signal, onRevoked } = {}) {
+    async withSecret(binding, work, { signal, onRevoked, requiredScopes = [] } = {}) {
       if (binding.provider !== provider || signal?.aborted) fail('secret_unavailable');
       // Metadata/version is rechecked even while an access token is cached.
       const connection = await read(binding.secretArn, signal); const app = await read(binding.clientSecretArn, signal);
@@ -87,6 +88,7 @@ function createGoogleSecretStore({ client, http, accountId, prefix, kmsKeyArn, n
         || c.scopes.length > 100 || !c.scopes.every(v => typeof v === 'string' && v.length < 256) || !scopes.some(scope => c.scopes.includes(scope))
         || !exact(a, 'version,provider,clientId,clientSecret') || a.version !== 1 || a.provider !== 'google-oauth-client'
         || !text(a.clientId) || !text(a.clientSecret)) fail('secret_unavailable');
+      if (!requiredScopes.every(scope => c.scopes.includes(scope))) fail('secret_unavailable');
       const fingerprint = JSON.stringify([binding.secretArn, connection.version, binding.clientSecretArn, app.version]);
       let entry = entries.get(binding.connectionRef);
       if (!entry || entry.fingerprint !== fingerprint || entry.expiresAt <= now()) {
@@ -94,6 +96,7 @@ function createGoogleSecretStore({ client, http, accountId, prefix, kmsKeyArn, n
         entry = await refresh(binding, c, a, fingerprint, onRevoked);
       }
       if (signal?.aborted || entry.expiresAt <= now() || entries.get(binding.connectionRef) !== entry) fail('connection_blocked');
+      if (!requiredScopes.every(scope => entry.scopes.includes(scope))) fail('secret_unavailable');
       const token = Buffer.from(entry.token);
       try {
         const result = await work(token);

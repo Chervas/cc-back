@@ -16,6 +16,8 @@ const Clinica = db.Clinica;
 const ClinicMetaAsset = db.ClinicMetaAsset; // <-- Accede al modelo ClinicMetaAsset
 const ClinicBusinessLocation = db.ClinicBusinessLocation;
 const businessProfileDiscovery = require('../services/businessProfileDiscovery.service');
+const googlePropertyDiscovery = require('../services/googlePropertyDiscovery.service');
+const googleLegacyCredentials = require('../services/googleLegacyCredentials.service');
 const accessSessions = require('../services/accessSession.service');
 const ClinicGoogleAdsAccount = db.ClinicGoogleAdsAccount;
 const GroupAssetClinicAssignment = db.GroupAssetClinicAssignment;
@@ -487,11 +489,12 @@ function googleTokenError(code, message) {
     return err;
 }
 
-async function ensureGoogleAccessToken(conn, { allowExpired = false } = {}) {
+async function ensureGoogleAccessToken(conn, { allowExpired = false, credentials = null } = {}) {
     if (!conn) {
         throw googleTokenError('NO_CONNECTION', 'No existe conexión Google para este usuario');
     }
     await googleOAuthBroker.assertLegacyConnection(conn);
+    if (credentials) await credentials.assert(conn);
     if (!conn.accessToken) {
         throw googleTokenError('NO_TOKEN', 'No existe access token de Google almacenado');
     }
@@ -505,18 +508,20 @@ async function ensureGoogleAccessToken(conn, { allowExpired = false } = {}) {
     let refreshError = null;
     if (shouldRefresh) {
         try {
-            const tr = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
+            const refresh = () => axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
                 client_id: GOOGLE_CLIENT_ID,
                 client_secret: GOOGLE_CLIENT_SECRET,
                 grant_type: 'refresh_token',
                 refresh_token: conn.refreshToken
-            }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+            }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, ...(credentials ? { timeout: 8000 } : {}) });
+            const tr = credentials ? await credentials.request(conn, refresh) : await refresh();
             const newToken = tr.data?.access_token;
             const expiresIn = tr.data?.expires_in || 3600;
             if (newToken) {
                 accessToken = newToken;
                 expiresAt = new Date(Date.now() + expiresIn * 1000);
-                await conn.update({ accessToken, expiresAt });
+                if (credentials) await credentials.saveRefresh(conn, { accessToken, expiresAt });
+                else await conn.update({ accessToken, expiresAt });
             }
         } catch (refreshErr) {
             refreshError = refreshErr;
@@ -541,7 +546,62 @@ async function ensureGoogleAccessToken(conn, { allowExpired = false } = {}) {
         throw googleTokenError('TOKEN_EXPIRED', 'El token de Google ha expirado');
     }
 
+    if (credentials) await credentials.assert(conn);
     return { accessToken, expiresAt, expired: isExpired };
+}
+
+async function googlePropertyInventory(req, kind) {
+    const resolved = await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: true, metadataOnly: true });
+    if (!resolved.connection) throw Object.assign(Error('google_discovery_no_connection'), { code: 'google_discovery_no_connection' });
+    const clinicIds = req.marketingConnectionScopeAuthorization?.clinicIds?.slice();
+    const actor = getUserIdFromToken(req);
+    const revalidate = async managed => {
+        let claims;
+        try { claims = await accessSessions.verify(accessSessions.bearer(req.headers.authorization)); } catch { claims = null; }
+        if (!claims || Number(claims.userId) !== Number(actor) || managed && (claims.sessionVersion !== 1 || !claims.jti)) {
+            throw Object.assign(Error('google_discovery_session_required'), { code: 'google_discovery_session_required' });
+        }
+        let scope;
+        try { scope = await authorizeExplicitConnectionScope(req, 'write'); } catch {
+            throw Object.assign(Error('google_discovery_scope_forbidden'), { code: 'google_discovery_scope_forbidden' });
+        }
+        const latest = await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: true, metadataOnly: true });
+        if (!scope.requested || scope.clinicIds.length !== clinicIds?.length || scope.clinicIds.some(id => !clinicIds.includes(id))
+            || Number(latest.connection?.id) !== Number(resolved.connection.id)) {
+            throw Object.assign(Error('broker_binding_invalid'), { code: 'broker_binding_invalid' });
+        }
+    };
+    const managed = await googlePropertyDiscovery.list({ kind, clinicIds, connectionId: Number(resolved.connection.id), revalidate });
+    if (managed !== null) return { managed, resolved };
+    await revalidate(false); await googlePropertyDiscovery.assertLegacyAllowed();
+    const connection = await googleLegacyCredentials.load(resolved.connection.id);
+    await googlePropertyDiscovery.assertLegacyAllowed();
+    const scopedRequest = async (current, send) => {
+        await revalidate(false); await googlePropertyDiscovery.assertLegacyAllowed();
+        const result = await googleLegacyCredentials.request(current, send);
+        await googlePropertyDiscovery.assertLegacyAllowed(); await revalidate(false);
+        return result;
+    };
+    const { accessToken } = await ensureGoogleAccessToken(connection, { credentials: { ...googleLegacyCredentials, request: scopedRequest } });
+    return { managed: null, resolved, connection, request: send => scopedRequest(connection, () => send(accessToken)) };
+}
+
+function googleAnalyticsInventoryAccounts(properties) {
+    const accounts = new Map();
+    for (const property of properties) {
+        const key = 'accountSummaries/' + property.account.slice('accounts/'.length);
+        if (!accounts.has(key)) accounts.set(key, { accountName: key, accountDisplayName: property.account, properties: [] });
+        accounts.get(key).properties.push({ propertyName: property.name, propertyDisplayName: property.displayName,
+            propertyType: property.propertyType, parent: property.parent });
+    }
+    return [...accounts.values()];
+}
+
+function sendGooglePropertyDiscoveryError(res, error, connectionStatus = false) {
+    if (connectionStatus && error?.code === 'google_discovery_no_connection') return res.json({ connected: false, reason: 'no_connection' });
+    const code = googlePropertyDiscovery.safe(error);
+    return res.status(googlePropertyDiscovery.status(error)).json(connectionStatus
+        ? { connected: false, reason: code } : { success: false, error: code });
 }
 
 function hasScopeText(scopesText, scope) {
@@ -1107,6 +1167,7 @@ function sendBusinessProfileDiscoveryError(res, error) {
 const PROVIDER_INVENTORY_PATHS = new Set([
     '/google/assets',
     '/google/analytics/properties',
+    '/google/analytics/connection-status',
     '/google/local/locations',
     '/google/ads/accounts',
     '/meta/assets'
@@ -1574,6 +1635,7 @@ router.get('/google/connection-status', async (req, res) => {
             return res.json(await googleOAuthBroker.status({ binding, scopeKey: metadata.scope?.scopeKey,
                 actorId: getUserIdFromToken(req), sessionRef: req.authSession?.id, sessionExpiresAt: req.authSession?.expiresAt }));
         }
+        await googlePropertyDiscovery.assertLegacyAllowed();
         const { userId, connection: conn, assignment, scope, source } = await resolveGoogleRequestConnection(req, {
             allowLegacyUserFallback: !scopedRequest
         });
@@ -1618,8 +1680,7 @@ router.get('/google/connection-status', async (req, res) => {
             source
         });
     } catch (e) {
-        console.error('❌ Error en connection-status Google:', e.message);
-        return res.status(500).json({ connected: false, message: 'Error interno' });
+        return sendGooglePropertyDiscoveryError(res, e, true);
     }
 });
 
@@ -1628,35 +1689,22 @@ router.get('/google/connection-status', async (req, res) => {
  * GET /oauth/google/assets
  */
 router.get('/google/assets', async (req, res) => {
+    res.set('Cache-Control', 'private, no-store');
     try {
-        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
-            allowLegacyUserFallback: true
-        });
-        if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
-        if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
-
-        let accessToken;
-        try {
-            ({ accessToken } = await ensureGoogleAccessToken(conn));
-        } catch (tokenErr) {
-            console.error('❌ Token Google inválido al listar assets:', tokenErr.message);
-            return res.status(401).json({ success: false, error: tokenErr.code || 'TOKEN_ERROR' });
-        }
-
-        // Llamar a Search Console sites.list
-        const resp = await axios.get('https://www.googleapis.com/webmasters/v3/sites', {
-            headers: { Authorization: `Bearer ${accessToken}` }
-        });
-        const entries = resp.data?.siteEntry || [];
+        const inventory = await googlePropertyInventory(req, 'search_console');
+        const resp = inventory.managed === null ? await inventory.request(accessToken => axios.get('https://www.googleapis.com/webmasters/v3/sites', {
+            headers: { Authorization: `Bearer ${accessToken}` }, timeout: 8000, maxContentLength: 1048576
+        })) : null;
+        const entries = inventory.managed === null ? resp.data?.siteEntry || [] : inventory.managed;
+        if (!Array.isArray(entries) || entries.length > 1000) throw Error('invalid_inventory');
         const assets = entries.map((s) => ({
             siteUrl: s.siteUrl,
             permissionLevel: s.permissionLevel,
             propertyType: s.siteUrl.startsWith('sc-domain:') ? 'sc-domain' : 'url-prefix'
         }));
-        return res.json({ success: true, assets, total: assets.length });
+        return res.json({ success: true, assets, total: assets.length, ...(inventory.managed !== null ? { inventory_mode: 'broker_grants' } : {}) });
     } catch (e) {
-        console.error('❌ Error en /oauth/google/assets:', e.response?.data || e.message);
-        return res.status(500).json({ success: false, error: 'Error obteniendo propiedades' });
+        return sendGooglePropertyDiscoveryError(res, e);
     }
 });
 
@@ -1664,38 +1712,33 @@ router.get('/google/assets', async (req, res) => {
  * GOOGLE — Estado de conexión para Google Analytics
  */
 router.get('/google/analytics/connection-status', async (req, res) => {
+    res.set('Cache-Control', 'private, no-store');
     try {
-        const { userId, connection: conn, assignment, scope, source } = await resolveGoogleRequestConnection(req, {
-            allowLegacyUserFallback: true
-        });
-        if (!userId) return res.status(401).json({ connected: false, reason: 'unauthenticated' });
-        if (!conn) return res.json({ connected: false, reason: 'no_connection' });
-
-        let accessToken;
-        try {
-            ({ accessToken } = await ensureGoogleAccessToken(conn));
-        } catch (tokenErr) {
-            if (['TOKEN_EXPIRED', 'TOKEN_EXPIRY_UNKNOWN', 'REFRESH_FAILED'].includes(tokenErr.code)) {
-                return res.json({ connected: false, reason: 'token_expired' });
-            }
-            throw tokenErr;
+        const inventory = await googlePropertyInventory(req, 'analytics');
+        const { assignment, scope, source } = inventory.resolved;
+        if (inventory.managed !== null) {
+            const accounts = googleAnalyticsInventoryAccounts(inventory.managed);
+            return res.json({ connected: true, hasAccounts: accounts.length > 0, accounts: accounts.length,
+                scope: buildScopeResponse(scope, assignment), source, inventory_mode: 'broker_grants',
+                verification: 'registered_properties_read' });
         }
 
         try {
-            const resp = await axios.get('https://analyticsadmin.googleapis.com/v1beta/accountSummaries', {
+            const resp = await inventory.request(accessToken => axios.get('https://analyticsadmin.googleapis.com/v1beta/accountSummaries', {
                 params: { pageSize: 1 },
-                headers: { Authorization: `Bearer ${accessToken}` }
-            });
+                headers: { Authorization: `Bearer ${accessToken}` }, timeout: 8000, maxContentLength: 1048576
+            }));
             const summaries = resp.data?.accountSummaries || [];
             return res.json({
                 connected: true,
                 hasAccounts: summaries.length > 0,
                 accounts: summaries.length,
-                expiresAt: conn.expiresAt,
+                expiresAt: inventory.connection.expiresAt,
                 scope: buildScopeResponse(scope, assignment),
                 source
             });
         } catch (apiErr) {
+            if (apiErr?.code) throw apiErr;
             const status = apiErr.response?.status;
             if (status === 403) {
                 return res.json({ connected: false, reason: 'insufficient_scope' });
@@ -1703,12 +1746,10 @@ router.get('/google/analytics/connection-status', async (req, res) => {
             if (status === 401) {
                 return res.json({ connected: false, reason: 'token_invalid' });
             }
-            console.error('❌ Error comprobando Analytics:', apiErr.response?.data || apiErr.message);
             return res.json({ connected: false, reason: 'api_error' });
         }
     } catch (e) {
-        console.error('❌ Error en analytics/connection-status:', e.message);
-        return res.status(500).json({ connected: false, reason: 'internal_error' });
+        return sendGooglePropertyDiscoveryError(res, e, true);
     }
 });
 
@@ -1716,31 +1757,30 @@ router.get('/google/analytics/connection-status', async (req, res) => {
  * GOOGLE — Listar propiedades de Google Analytics (GA4)
  */
 router.get('/google/analytics/properties', async (req, res) => {
+    res.set('Cache-Control', 'private, no-store');
     try {
-        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
-            allowLegacyUserFallback: true
-        });
-        if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
-        if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
-
-        let accessToken;
-        try {
-            ({ accessToken } = await ensureGoogleAccessToken(conn));
-        } catch (tokenErr) {
-            console.error('❌ Token Google inválido al listar Analytics:', tokenErr.message);
-            return res.status(401).json({ success: false, error: tokenErr.code || 'TOKEN_ERROR' });
-        }
+        const inventory = await googlePropertyInventory(req, 'analytics');
+        if (inventory.managed !== null) return res.json({ success: true, accounts: googleAnalyticsInventoryAccounts(inventory.managed), inventory_mode: 'broker_grants' });
 
         const accountSummaries = [];
-        let pageToken;
+        let pageToken; let bytes = 0; const seen = new Set(); const deadline = Date.now() + 60000;
         do {
-            const resp = await axios.get('https://analyticsadmin.googleapis.com/v1beta/accountSummaries', {
-                params: { pageSize: 200, pageToken },
-                headers: { Authorization: `Bearer ${accessToken}` }
+            if (seen.size >= 20 || Date.now() >= deadline) throw Object.assign(Error('broker_discovery_limit'), { code: 'broker_discovery_limit' });
+            const resp = await inventory.request(accessToken => {
+                const remaining = deadline - Date.now();
+                if (remaining <= 0) throw Object.assign(Error('broker_discovery_timeout'), { code: 'broker_discovery_timeout' });
+                return axios.get('https://analyticsadmin.googleapis.com/v1beta/accountSummaries', {
+                    params: { pageSize: 200, pageToken },
+                    headers: { Authorization: `Bearer ${accessToken}` }, timeout: Math.min(8000, remaining), maxContentLength: 1048576
+                });
             });
             const entries = resp.data?.accountSummaries || [];
+            bytes += Buffer.byteLength(JSON.stringify(entries));
+            if (!Array.isArray(entries) || entries.length > 200 || bytes > 1048576 || Date.now() >= deadline) throw Error('invalid_inventory');
             accountSummaries.push(...entries);
             pageToken = resp.data?.nextPageToken || null;
+            if (pageToken && (typeof pageToken !== 'string' || pageToken.length > 4096 || seen.has(pageToken))) throw Error('invalid_inventory');
+            if (pageToken) seen.add(pageToken);
         } while (pageToken);
 
         const mapped = accountSummaries.map((acc) => ({
@@ -1756,12 +1796,7 @@ router.get('/google/analytics/properties', async (req, res) => {
 
         return res.json({ success: true, accounts: mapped });
     } catch (e) {
-        const status = e.response?.status;
-        if (status === 403) {
-            return res.status(403).json({ success: false, error: 'insufficient_scope' });
-        }
-        console.error('❌ Error listando propiedades de Analytics:', e.response?.data || e.message);
-        return res.status(500).json({ success: false, error: 'Error listando propiedades' });
+        return sendGooglePropertyDiscoveryError(res, e);
     }
 });
 

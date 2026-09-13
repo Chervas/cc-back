@@ -33,6 +33,10 @@ test('actual SC TLS runtime and backend adapter exchange only metrics, refresh i
   const dependencies = { awsFactory: async () => ({ secrets, sink, close: () => { closed++; } }), http: async request => {
     if (request.hostname === 'oauth2.googleapis.com') { refreshes++; return { access_token: ACCESS, token_type: 'Bearer', expires_in: 3600, scope: contract.SCOPES[0] }; }
     reads++; assert.equal(request.hostname, 'www.googleapis.com'); assert.equal(request.token.toString(), ACCESS);
+    if (!request.json) {
+      assert.equal(request.path, '/webmasters/v3/sites/https%3A%2F%2Fexample.invalid%2F');
+      return { siteUrl: site.siteUrl, permissionLevel: 'siteOwner', ignored: ACCESS };
+    }
     return { rows: Array.from({ length: request.json.startRow ? 1 : 500 }, (_, i) => ({ keys: [request.json.startDate, 'FICTITIOUS_QUERY_' + (request.json.startRow + i), 'https://example.invalid/page'],
       clicks: 2, impressions: 4, ctr: 0.5, position: 1, privateToken: ACCESS })), rawToken: ACCESS };
   } };
@@ -53,6 +57,8 @@ test('actual SC TLS runtime and backend adapter exchange only metrics, refresh i
   const before = descriptions;
   await assert.rejects(client.execute({ operation: contract.OPERATIONS[0], tenantRef: 'clinic:999', connectionRef: 'connection:test', assetRef: site.assetRef,
     payload: { startDate: '2026-09-01', endDate: '2026-09-02' } }), { code: 'scope_denied' }); assert.equal(descriptions, before);
+  const discovered = await consumer.read(mapping, context, 'discovery', {}, { beforeExecute: async () => ({ timeoutMs: 1000 }) });
+  assert.deepEqual(discovered.data, { siteUrl: site.siteUrl, permissionLevel: 'siteOwner' }); assert.equal(reads, 3); assert.equal(descriptions, 6);
   await drainAudit(app.store, sink); assert.equal(app.store.backlog().pending, 0);
   assert(delivered.some(e => e.version === 2 && e.operation === contract.OPERATIONS[1] && e.resourceRef === site.assetRef));
   const durable = JSON.stringify(delivered) + JSON.stringify(app.store.db.prepare('SELECT * FROM commands').all());
@@ -62,5 +68,6 @@ test('actual SC TLS runtime and backend adapter exchange only metrics, refresh i
   await app.close(); app = null; assert.equal(closed, 1);
   app = await runtime.main(filename, dependencies);
   await assert.rejects(consumer.read(mapping, context, 'queries', { startDate: '2026-09-01', endDate: '2026-09-02' }), { code: 'connection_blocked' });
-  assert.equal(reads, 2); assert.equal(refreshes, 1); await app.close(); app = null; assert.equal(closed, 2);
+  await assert.rejects(consumer.read(mapping, context, 'discovery', {}), { code: 'connection_blocked' });
+  assert.equal(reads, 3); assert.equal(refreshes, 1); await app.close(); app = null; assert.equal(closed, 2);
 });

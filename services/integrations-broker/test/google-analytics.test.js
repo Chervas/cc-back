@@ -7,6 +7,32 @@ const { Broker } = require('../src/broker'); const { BrokerStore } = require('..
 const { createGoogleSecretStore } = require('../src/google-secrets'); const { createGoogleHttp } = require('../src/google-http');
 const { eventFor, drainAudit } = require('../src/audit'); const runtime = require('../src/google-main');
 const range = { startDate: '2026-09-01', endDate: '2026-09-02', pageToken: null }; const ACCESS = 'FICTITIOUS_GA_ACCESS';
+const propertyMetadata = { name: 'properties/123', account: 'accounts/456', parent: 'accounts/456', displayName: 'Fictitious metadata', propertyType: 'PROPERTY_TYPE_ORDINARY' };
+test('GA discovery reads the exact registered property, projects metadata and rejects arbitrary payload or provider identities', async t => {
+  const f = gaFixture(t);
+  for (const payload of [{ name: 'properties/999' }, { url: 'https://foreign.invalid' }, { pageToken: null }])
+    await assert.rejects(f.execute('discovery', payload), { code: 'invalid_request' });
+  await assert.rejects(f.execute('discovery', {}, { assetRef: 'ga4:999' }), { code: 'scope_denied' }); assert.equal(f.state.sdk.length, 0);
+  f.state.response = () => ({ ...propertyMetadata, private: ACCESS });
+  assert.deepEqual((await f.execute('discovery', {})).data, propertyMetadata);
+  assert.equal(f.state.calls[0].hostname, 'analyticsadmin.googleapis.com'); assert.equal(f.state.calls[0].path, '/v1beta/properties/123');
+  assert.equal(f.state.calls[0].json, undefined);
+  for (const change of [{ name: 'properties/999' }, { account: 'accounts/abc' }, { parent: 'https://foreign.invalid/' },
+    { propertyType: 'PROPERTY_TYPE_UNSPECIFIED' }, { deleteTime: '2026-01-01T00:00:00Z' }, { expireTime: null },
+    { displayName: 'x'.repeat(101) }, { displayName: ['fake'] }, { displayName: ACCESS }]) {
+    f.state.response = () => ({ ...propertyMetadata, ...change }); await assert.rejects(f.execute('discovery', {}), { code: 'provider_failed' });
+  }
+  const rows = JSON.stringify(f.store.db.prepare('SELECT * FROM commands').all()); assert(!rows.includes(propertyMetadata.displayName));
+});
+test('GA discovery requires documented readonly scope both in secret and in cached refreshed access token', async t => {
+  const f = gaFixture(t); f.state.secret.scopes = [contract.SCOPES[1]];
+  await assert.rejects(f.execute('discovery', {}), { code: 'secret_unavailable' }); assert.equal(f.state.refreshes + f.state.calls.length, 0);
+  f.state.secret.scopes = contract.SCOPES.slice(); f.state.refreshScope = contract.SCOPES[1];
+  await f.execute('daily'); assert.equal(f.state.refreshes, 1);
+  f.state.response = () => propertyMetadata;
+  await assert.rejects(f.execute('discovery', {}), { code: 'secret_unavailable' }); assert.equal(f.state.calls.length, 1);
+  assert.equal(f.state.refreshes, 1);
+});
 function gaFixture(t) {
   let now = Date.now(); const f = fixture(t, { now: () => now }); const resource = contract.property('properties/123');
   const secretArn = 'arn:aws:secretsmanager:eu-west-3:137819318729:secret:/clinicaclick/integrations/prod/fictitious-ga-abcdef';
@@ -29,7 +55,7 @@ function gaFixture(t) {
     if (request.hostname === 'oauth2.googleapis.com') {
       state.refreshes++; if (state.revoked) throw new (require('../src/errors').BrokerError)('credential_revoked');
       assert.equal(new URLSearchParams(request.form).get('refresh_token'), secret.refreshToken);
-      return { access_token: ACCESS, token_type: 'Bearer', expires_in: 3600, scope: contract.SCOPES[0] };
+      return { access_token: ACCESS, token_type: 'Bearer', expires_in: 3600, scope: state.refreshScope || contract.SCOPES[0] };
     }
     state.calls.push(request); assert.equal(request.token.toString(), ACCESS); await state.before?.(request);
     if (state.response) return state.response(request);

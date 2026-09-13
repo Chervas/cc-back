@@ -7,6 +7,21 @@ const { createGoogleSecretStore } = require('../src/google-secrets'); const { cr
 const { cursorCodec } = require('../src/provider-cursor'); const { eventFor, drainAudit } = require('../src/audit'); const runtime = require('../src/google-main');
 const ACCESS = 'FICTITIOUS_SC_ACCESS'; const REFRESH = 'FICTITIOUS_SC_REFRESH'; const CLIENT = 'FICTITIOUS_SC_CLIENT';
 const SITE = contract.site('sc-domain:example.invalid'); const START = '2026-09-01'; const END = '2026-09-02';
+test('SC discovery reads only the registered site and excludes unverified or foreign provider entries', async t => {
+  const f = await scFixture(t);
+  await assert.rejects(f.execute('discovery', { siteUrl: 'sc-domain:foreign.invalid' }), { code: 'invalid_request' });
+  await assert.rejects(f.execute('discovery', {}, { tenantRef: 'clinic:999' }), { code: 'scope_denied' });
+  assert.equal(f.sdkCalls.length, 0);
+  f.state.response = () => ({ siteUrl: SITE.siteUrl, permissionLevel: 'siteOwner', token: ACCESS });
+  assert.deepEqual((await f.execute('discovery', {})).data, { siteUrl: SITE.siteUrl, permissionLevel: 'siteOwner' });
+  assert.equal(f.calls[0].hostname, 'www.googleapis.com'); assert.equal(f.calls[0].path, '/webmasters/v3/sites/sc-domain%3Aexample.invalid');
+  assert.equal(f.calls[0].json, undefined);
+  for (const result of [{ siteUrl: 'sc-domain:foreign.invalid', permissionLevel: 'siteOwner' },
+    { siteUrl: SITE.siteUrl, permissionLevel: 'siteUnverifiedUser' }, { siteUrl: SITE.siteUrl, permissionLevel: [ACCESS] }]) {
+    f.state.response = () => result; await assert.rejects(f.execute('discovery', {}), { code: 'provider_failed' });
+  }
+  const rows = JSON.stringify(f.store.db.prepare('SELECT * FROM commands').all()); assert(!rows.includes(SITE.siteUrl));
+});
 async function scFixture(t) {
   let at = Date.now(); const f = fixture(t, { now: () => at }); const calls = []; const sdkCalls = [];
   const secretArn = 'arn:aws:secretsmanager:eu-west-3:137819318729:secret:/clinicaclick/integrations/prod/fictitious-sc-abcdef';

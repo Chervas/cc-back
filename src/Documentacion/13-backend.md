@@ -1,5 +1,51 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Listado SC/GA de propiedades registradas por broker
+
+GET /oauth/google/assets y /oauth/google/analytics/properties conservan assets/
+accounts y sus campos de propiedad; añaden inventory_mode=broker_grants para
+registros gestionados. Cada petición usa únicamente referencias y metadata SQL,
+con una lectura acotada del broker por mapping autorizado. No enumera propiedades
+ajenas ni crea mappings. GA muestra accounts/N como etiqueta de cuenta y agrupa
+accountSummaries/N; no obtiene el nombre de cuenta mediante una enumeración.
+
+GET /oauth/google/analytics/connection-status exige ahora ámbito explícito y
+permiso de gestión write. En gestionado verifica las propiedades registradas y
+responde connected=true, hasAccounts/accounts de ese inventario,
+verification=registered_properties_read e inventory_mode=broker_grants; no
+incluye caducidad ni acredita todo Google/OAuth. Sin conexión conserva 200 con
+connected=false/reason=no_connection; listados sin conexión conservan 404.
+
+Los tres recorridos usan private, no-store; sesión gestionada vigente, mismo
+actor/conexión, permiso sobre todas las clínicas y conjunto de clínicas idéntico
+antes/después de leer. Pérdida de sesión: 401 google_discovery_session_required;
+permiso: 403 google_discovery_scope_forbidden. Registro ausente/incompatible,
+límite o cierre legacy: 409. Gate apagado, SQL/proveedor/timeout/saturación: 503;
+fallos desconocidos google_discovery_unavailable. No datos parciales ni cuerpos
+crudos del proveedor en respuestas/logs de estos handlers.
+
+GET /oauth/google/connection-status conserva el flujo OAuth gestionado existente;
+fuera de él, el primer registro gestionado cierra legacy antes de cargar tokens:
+409 connected=false/reason=google_oauth_legacy_closed. La UI/ciclo de vida general
+SC/GA requiere adaptación antes de activarse. No hay despliegue ni cambios UI.
+
+Hasta 20 mappings, cuatro peticiones por proceso y 60 s cooperativos; llamadas
+al broker hasta 30 s/restante. No cancela SQL pendiente. GA verifica cada grant
+de varias clínicas y deduplica la propiedad. SC conserva el mapping original
+por hash: clones y orígenes compartidos fuera del ámbito siguen pendientes.
+
+Pre-corte sin registros conserva legacy con loader y UPDATE SQL condicionados;
+revalida el cierre global/permiso también alrededor del refresh. Un marcador
+nuevo impide persistir/entregar su resultado. GA legacy limita páginas y rechaza
+cursores repetidos. No usa legacy como fallback de una cohorte registrada.
+
+Sin migración/variables nuevas: requiere registros GBP, OAuth 20260913020000,
+SC 20260913030000, GA 20260913040000 y dependencias previos al código aun apagado.
+Nuevo grant explícito google.search_console.discovery.read.v1 o
+google.analytics.discovery.read.v1; payload vacío, recurso fijo. GA Admin exige
+analytics.readonly en secreto y access token; analytics de informes no basta.
+Contrato backend: docs/security/google-property-discovery-migration.md.
+
 ## 13/09/2026 — Lecturas GA4 por broker preparadas
 
 Los jobs analyticsSync y backfills general/por propiedades usan nueve lecturas

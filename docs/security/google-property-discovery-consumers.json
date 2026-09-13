@@ -1,0 +1,158 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-13",
+  "sourceHead": "9b576a86f9cc9ff22478da28ca2240592b88b047",
+  "includesWorkingChanges": true,
+  "runtimeMigrated": 0,
+  "method": "Source review with hashes and isolated fictitious HTTP/TLS/MySQL QA; no AWS, provider, shared database, PM2 or OPS verification.",
+  "newMigrations": [],
+  "requiredPriorMigrations": [
+    "GBP binding and revocation registries",
+    "20260913020000",
+    "20260913030000",
+    "20260913040000",
+    "their dependencies and managed sessions"
+  ],
+  "schemaRequiredBeforeCodeEvenWhenDisabled": true,
+  "ops": "deferred_by_user",
+  "awsInstance": "shutdown_announced_unverified",
+  "pending": [
+    "New property onboarding, remapping, full SC/GA OAuth and disconnect",
+    "Additional SC mappings and shared source clinics outside requested scope",
+    "General connection status and complete Settings UI lifecycle",
+    "Other providers, Google Ads and remaining legacy loaders",
+    "Complete user/denial auditing and real source/IAM isolation",
+    "Retention, Budget/CloudFormation, Cost Explorer/tags, database encryption/restoration/cut"
+  ],
+  "rows": [
+    {
+      "file": "src/routes/oauth.routes.js",
+      "sha256": "64529cbdb42d0fd152a7d9ab95c339c90a77e4a56de9b0df63a0c896c072388e",
+      "consumers": [
+        "GET /oauth/google/assets",
+        "GET /oauth/google/analytics/properties",
+        "GET /oauth/google/analytics/connection-status"
+      ],
+      "status": "prepared_registered_inventory",
+      "note": "Managed paths use metadata-only resolver, exact registered broker reads and full session/scope revalidation. Legacy guarded conditional SQL only before first cut."
+    },
+    {
+      "file": "src/routes/oauth.routes.js",
+      "sha256": "64529cbdb42d0fd152a7d9ab95c339c90a77e4a56de9b0df63a0c896c072388e",
+      "consumers": [
+        "GET /oauth/google/connection-status"
+      ],
+      "status": "prepared_legacy_hydration_closure",
+      "note": "Existing OAuth managed status preserved. Otherwise global registry closes legacy before credential hydration; full SC/GA status UI pending."
+    },
+    {
+      "file": "src/routes/oauth.routes.js",
+      "sha256": "64529cbdb42d0fd152a7d9ab95c339c90a77e4a56de9b0df63a0c896c072388e",
+      "consumers": [
+        "GA/SC mapping",
+        "other OAuth/provider routes"
+      ],
+      "status": "legacy_hydration_pending",
+      "note": "Full onboarding/remapping/disconnect and remaining token loaders are not migrated by this increment."
+    },
+    {
+      "file": "src/services/googlePropertyDiscovery.service.js",
+      "sha256": "8808c0010b750ebf0a7b9f711492971410b0d8e73abcda089c3ec555a59f4024",
+      "consumers": [
+        "SC/GA registered inventory"
+      ],
+      "status": "prepared_offline",
+      "note": "Twenty original mappings, four active requests per process, cooperative 60 s. Rechecks complete scope, metadata, identity and mappings."
+    },
+    {
+      "file": "src/services/searchConsoleBroker.service.js",
+      "sha256": "8d7dd00879afae60869767dad029ea2d01eb429c70afd7def8fd8d389a8267ce",
+      "consumers": [
+        "SC discovery adapter"
+      ],
+      "status": "prepared_offline",
+      "note": "Exact original site/mapping. Existing single-hash registry retained; source clinics outside scope and additional SC mappings pending."
+    },
+    {
+      "file": "src/services/analyticsBroker.service.js",
+      "sha256": "d34d9a2b7d22f6da769a547dd788cb4ccb99f912876b6ab74338a01dab4cb66b",
+      "consumers": [
+        "GA discovery adapter"
+      ],
+      "status": "prepared_offline",
+      "note": "Exact property/mapping, per-clinic grants for shared properties and bounded broker timeout."
+    },
+    {
+      "file": "services/integrations-broker/src/google-search-console.js",
+      "sha256": "068face3c66f5b2618a88813f822a93b50bcce235fd807bd0e21198ed751f3e3",
+      "consumers": [
+        "google.search_console.discovery.read.v1"
+      ],
+      "status": "prepared_offline",
+      "note": "Fixed Sites.get by policy, empty payload, no account/site enumeration."
+    },
+    {
+      "file": "services/integrations-broker/src/google-analytics.js",
+      "sha256": "aa3f446d5ca9a6085c527c0156d816d78964c3f9a3898e5ba34518291a18ccd8",
+      "consumers": [
+        "google.analytics.discovery.read.v1"
+      ],
+      "status": "prepared_offline",
+      "note": "Fixed Properties.get, projected metadata only, no accounts or streams enumeration."
+    },
+    {
+      "file": "services/integrations-broker/src/google-property-discovery-contract.js",
+      "sha256": "9441432d26865954541a6b7ed2249d113ae66a4cc90ff91fdea5653ae49ade19",
+      "consumers": [
+        "SC/GA metadata projection"
+      ],
+      "status": "prepared_offline",
+      "note": "Exact identity and bounded fields. GA explicitly requires readonly scope in secret and cached access token."
+    },
+    {
+      "file": "services/integrations-broker/src/google-secrets.js",
+      "sha256": "9be096b9d5f8ad51b6546165b3f628606d4bc7ffbc6321d6f4ebab38bd15f38b",
+      "consumers": [
+        "Google refresh and cache scopes"
+      ],
+      "status": "prepared_offline",
+      "note": "Operation-specific scopes checked against v3 and cache. No real secret moved or OAuth activity."
+    },
+    {
+      "file": "src/services/googleLegacyCredentials.service.js",
+      "sha256": "e7501cebf7944b2eec5776bd8f489853133db424a62c49fbf5d003a186e022fb",
+      "consumers": [
+        "Legacy load/select/update boundary"
+      ],
+      "status": "unchanged_dependency",
+      "note": "Actual conditional SQL guards reused. OAuth/SC/GA registries required even with gates disabled."
+    },
+    {
+      "file": "src/services/scopeConnectionResolver.service.js",
+      "sha256": "1d774d8c9eb38383edbf4013598fa3f88cde63b73320fd298afcd07635822b68",
+      "consumers": [
+        "Google metadata resolver"
+      ],
+      "status": "unchanged_partial_boundary",
+      "note": "New discovery explicitly uses metadataOnly. Other callers may still hydrate tokens."
+    },
+    {
+      "file": "src/services/effectiveMarketingAssets.service.js",
+      "sha256": "64456f1f091b3fbee70c0dbdfc0f737d88933c9ed834b42dc79e254e20afd306",
+      "consumers": [
+        "Shared asset inventory"
+      ],
+      "status": "unchanged_dependency",
+      "note": "Assignments and original mappings preserved; no advertising product work."
+    },
+    {
+      "file": "src/services/googleOAuthBrokerScope.service.js",
+      "sha256": "65f43055bb5958c08da936616bb13582eb6cdded10765bea82dc9c7dc466f17d",
+      "consumers": [
+        "GBP OAuth admission"
+      ],
+      "status": "unchanged_admission_guard",
+      "note": "SC/GA/Ads active restriction remains; full lifecycle not admitted."
+    }
+  ]
+}
