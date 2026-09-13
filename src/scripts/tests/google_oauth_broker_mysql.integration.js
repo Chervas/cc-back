@@ -26,7 +26,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   table('GoogleConnectionAssignment', 'GoogleConnectionAssignments', { id: { type: D.INTEGER, primaryKey: true, autoIncrement: true },
     googleConnectionId: D.INTEGER, scopeKey: D.STRING, assignmentScope: D.STRING, clinicaId: D.INTEGER, grupoClinicaId: D.INTEGER, status: D.STRING });
   for (const name of ['ClinicWebAsset', 'ClinicAnalyticsProperty', 'ClinicGoogleAdsAccount']) {
-    await table(name, name + 's', { id: { type: D.INTEGER, primaryKey: true }, googleConnectionId: D.INTEGER, isActive: D.BOOLEAN }).sync();
+    await table(name, name === 'ClinicAnalyticsProperty' ? 'ClinicAnalyticsProperties' : name + 's',
+      { id: { type: D.INTEGER, primaryKey: true }, googleConnectionId: D.INTEGER, isActive: D.BOOLEAN }).sync();
   }
   table('ClinicBusinessLocation', 'ClinicBusinessLocations', { id: { type: D.INTEGER, primaryKey: true }, clinica_id: D.INTEGER,
     google_connection_id: D.INTEGER, location_id: D.STRING, broker_read_connection_ref: D.STRING, broker_read_asset_ref: D.STRING, is_active: D.BOOLEAN });
@@ -36,6 +37,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   for (const name of ['GoogleConnectionAssignment', 'ClinicBusinessLocation', 'BusinessProfileBrokerBinding', 'BusinessProfileBrokerRevocation']) await models[name].sync();
   await require('../../../migrations/20260913030000-add-search-console-broker-read-binding').up(qi, D);
   models.SearchConsoleBrokerBinding = require('../../../models/searchconsolebrokerbinding')(sql, D);
+  await require('../../../migrations/20260913040000-add-analytics-broker-read-binding').up(qi, D);
+  models.AnalyticsBrokerBinding = require('../../../models/analyticsbrokerbinding')(sql, D);
   const B = models.GoogleOAuthBrokerBinding; const R = models.GoogleOAuthBrokerRequest; const A = models.PlatformAuditEvent;
   const user = await models.Usuario.create({ id_usuario: 501, password_usuario: 'FICTITIOUS_PASSWORD_HASH',
     email_usuario: 'oauth@example.invalid', estado_cuenta: 'activo', es_provisional: false });

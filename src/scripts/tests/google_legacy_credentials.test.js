@@ -58,9 +58,10 @@ test('web and job refresh discard a response when registration occurs during exc
   }
 });
 test('job token loader excludes a managed connection before hydrating, even with every broker gate off', async () => {
-  const f = credentialsFixture(); f.mark(); const jobs = loadBusinessProfileJobs({ credentials: f.credentials, models: {}, legacyHttp: {} }).metaSyncJobs;
+  const f = credentialsFixture(); f.mark(); const jobs = loadBusinessProfileJobs({ credentials: f.credentials, models: {}, legacyHttp: {},
+    analytics: { prepare: async () => null } }).metaSyncJobs;
   await assert.rejects(jobs._ensureGoogleAccessToken(81), { code: 'google_oauth_legacy_closed' });
-  await assert.rejects(jobs._runGaReport({ connection: f.state.rows.get(81), accessToken: 'FICTITIOUS_CACHED' }, 'properties/123', {}), { code: 'google_oauth_legacy_closed' });
+  await assert.rejects(jobs._runGaReport({ connection: f.state.rows.get(81), accessToken: 'FICTITIOUS_CACHED' }, { propertyName: 'properties/123' }, {}, 'daily'), { code: 'google_oauth_legacy_closed' });
   assert.equal(f.state.loads + f.state.tokenReads, 0);
 });
 test('provider failures never reflect messages, bodies or arbitrary error codes', async () => {

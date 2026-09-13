@@ -1,5 +1,39 @@
 > **Módulo:** Arquitectura del Backend
 
+## 13/09/2026 — Lecturas GA4 por broker preparadas
+
+Los jobs analyticsSync y backfills general/por propiedades usan nueve lecturas
+cerradas del broker para mappings GA registrados. La API general conserva
+referencias; tokens/refresh quedan en el broker. No hay endpoints nuevos ni
+cambios en DTO públicos de métricas. Las cabeceras del proveedor se validan y
+keyEvents se guarda en el campo histórico conversions con su redondeo previo;
+no cambia ni ejecuta conversiones publicitarias.
+
+El reporte operativo añade dataQuality por propertyId/familia: rowCount,
+returnedRows, rowLimitReached, currencyCode, timeZone, dataLossFromOtherRow,
+subjectToThresholding, samplingMetadatas (samplesReadCount/samplingSpaceSize)
+y emptyReason vacío o provider_report_empty. No refleja mensajes arbitrarios.
+Los backfills por propiedades agregan estos datos. No supone migrar el visor
+público de calidad o modificar el histórico de cachés.
+
+Cada familia pagina en 500, hasta 100.000 filas y 550 fechas; señala si existen
+más filas. Cambiar rowCount/metadata entre páginas, duplicados, restricciones
+activas de métricas o forma inválida descarta ese agregado. Cambio de moneda o
+zona entre familias también falla la propiedad. Un fallo gestionado detiene
+familias posteriores; si ninguna propiedad completa, devuelve failed. Los
+upserts previos permanecen y un informe vacío no borra filas antiguas.
+
+Errores cerrados de binding/gate/respuesta/timeout/proveedor y frontera Google;
+SQL o fallos desconocidos: analytics_read_failed. No hay fallback. Un registro
+GA también cierra connect/callback legacy global y cargas/UPDATE de tokens por
+ID o subject aunque los gates estén apagados. Múltiples mappings legítimos de
+una propiedad requieren registros y grants propios; no heredan otro mapping.
+
+DDL 20260913040000 más OAuth/SC previas antes del código, incluso desactivado.
+GA discovery y ciclo OAuth completo siguen pendientes; no se relajó la admisión
+GBP. QA ficticia; sin despliegue ni migración real. Contrato backend:
+docs/security/google-analytics-read-migration.md.
+
 ## 13/09/2026 — Lecturas Search Console por broker preparadas
 
 `GET /web/clinica/:clinicaId/sc/pages` conserva items, partial y

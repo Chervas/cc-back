@@ -2,8 +2,8 @@
 const assert = require('node:assert/strict'); const { Op } = require('sequelize');
 const { createGoogleLegacyCredentials, safe } = require('../../../services/googleLegacyCredentials.service');
 function credentialsFixture() {
-  const state = { markers: [], scMarkers: [], rows: new Map(), loads: 0, updates: 0, tokenReads: 0, provider: [], logs: [], failMetadata: false };
-  const blocked = row => [...state.markers, ...state.scMarkers].some(b => Number(b.google_connection_id) === row?.id || b.google_user_id === row?.googleUserId);
+  const state = { markers: [], scMarkers: [], gaMarkers: [], rows: new Map(), loads: 0, updates: 0, tokenReads: 0, provider: [], logs: [], failMetadata: false };
+  const blocked = row => [...state.markers, ...state.scMarkers, ...state.gaMarkers].some(b => Number(b.google_connection_id) === row?.id || b.google_user_id === row?.googleUserId);
   function add(id = 81, googleUserId = 'fictitious-subject') {
     const row = { id, googleUserId, expiresAt: new Date('2099-01-01') };
     for (const key of ['accessToken', 'refreshToken']) Object.defineProperty(row, key, { configurable: true,
@@ -34,7 +34,9 @@ function credentialsFixture() {
     .some(clause => Object.entries(clause).every(([k, v]) => row[k] === v))) || null };
   const searchConsoleModel = { findOne: async options => state.scMarkers.find(row => (options.where[Op.or] || [options.where])
     .some(clause => Object.entries(clause).every(([k, v]) => row[k] === v))) || null };
-  const create = () => ({ ...createGoogleLegacyCredentials({ connectionModel, bindingModel, searchConsoleModel }), safe });
+  const analyticsModel = { findOne: async options => state.gaMarkers.find(row => (options.where[Op.or] || [options.where])
+    .some(clause => Object.entries(clause).every(([k, v]) => row[k] === v))) || null };
+  const create = () => ({ ...createGoogleLegacyCredentials({ connectionModel, bindingModel, searchConsoleModel, analyticsModel }), safe });
   add();
   return { state, add, create, credentials: create(), mark: (id = 81, subject = 'fictitious-subject') => state.markers.push({ google_connection_id: id, google_user_id: subject }) };
 }

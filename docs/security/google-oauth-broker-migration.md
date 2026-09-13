@@ -1,5 +1,13 @@
 # Google: reautorización de conexiones fijadas al broker
 
+## Ampliación vigente: registro GA independiente (13/09/2026)
+
+La primera fila AnalyticsBrokerBindings cierra connect/callback legacy global
+y el guard por ID/subject, aun con gates apagados. Esquema 20260913040000 previo
+al código junto a OAuth/SC. La [lectura GA4](google-analytics-read-migration.md)
+no habilita su ciclo OAuth: el scope GBP sigue rechazando SC/GA/Ads activos.
+Conservar el drenaje de todos los receptores y la aprobación del corte real.
+
 ## Ampliación vigente: registro SC independiente (13/09/2026)
 
 El primer SearchConsoleBrokerBindings también cierra globalmente connect y

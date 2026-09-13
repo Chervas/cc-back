@@ -12,12 +12,12 @@ function idOf(value) {
 // Static SQL only. Apply the exclusion in the very statement that selects or
 // updates credentials, so a marker committed after the metadata check wins.
 function exclusion(table) {
-  return literal(['GoogleOAuthBrokerBindings', 'SearchConsoleBrokerBindings'].map(registry =>
+  return literal(['GoogleOAuthBrokerBindings', 'SearchConsoleBrokerBindings', 'AnalyticsBrokerBindings'].map(registry =>
     'NOT EXISTS (SELECT 1 FROM `' + registry + '` AS `legacy_guard` WHERE '
     + '`legacy_guard`.`google_connection_id` = `' + table + '`.`id` OR '
     + '`legacy_guard`.`google_user_id` = `' + table + '`.`googleUserId`)').join(' AND '));
 }
-function createGoogleLegacyCredentials({ connectionModel, bindingModel, searchConsoleModel }) {
+function createGoogleLegacyCredentials({ connectionModel, bindingModel, searchConsoleModel, analyticsModel }) {
   const captured = connection => {
     if (typeof connection?.googleUserId !== 'string' || !connection.googleUserId) fail('google_connection_changed');
     return check(connection.id, connection.googleUserId);
@@ -26,7 +26,7 @@ function createGoogleLegacyCredentials({ connectionModel, bindingModel, searchCo
     const id = idOf(connectionId);
     const row = await connectionModel.findByPk(id, { attributes: ['id', 'googleUserId'], raw: true, logging: false });
     // An independent marker also closes a deleted/recreated connection ID.
-    for (const registry of [bindingModel, searchConsoleModel]) {
+    for (const registry of [bindingModel, searchConsoleModel, analyticsModel]) {
       if (await registry.findOne({ attributes: ['google_user_id'], where: { [Op.or]: [
         { google_connection_id: id }, ...(typeof row?.googleUserId === 'string' ? [{ google_user_id: row.googleUserId }] : []),
       ] }, raw: true, logging: false })) fail('google_oauth_legacy_closed');
@@ -72,7 +72,7 @@ let singleton;
 function instance() {
   const models = require('../../models');
   return singleton ||= createGoogleLegacyCredentials({ connectionModel: models.GoogleConnection, bindingModel: models.GoogleOAuthBrokerBinding,
-    searchConsoleModel: models.SearchConsoleBrokerBinding });
+    searchConsoleModel: models.SearchConsoleBrokerBinding, analyticsModel: models.AnalyticsBrokerBinding });
 }
 module.exports = { createGoogleLegacyCredentials, safe,
   ...Object.fromEntries(['assert', 'load', 'saveRefresh', 'request'].map(name => [name, (...args) => instance()[name](...args)])),

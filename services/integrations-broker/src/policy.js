@@ -17,6 +17,8 @@ const validate = new Ajv({ strict: true }).compile(object({
     googleSubject: { type: 'string', pattern: '^[A-Za-z0-9._-]{1,128}$' },
     searchConsoleSites: { type: 'array', minItems: 1, maxItems: 1000,
       items: object({ assetRef: ref, siteUrl: { type: 'string', maxLength: 512 } }) },
+    analyticsProperties: { type: 'array', minItems: 1, maxItems: 1000,
+      items: object({ assetRef: ref, propertyName: { type: 'string', pattern: '^properties/[1-9][0-9]{0,19}$' } }) },
     oauth: require('./google-oauth-contract').bindingSchema }, ['connectionRef', 'provider', 'initialState']) },
   grants: { type: 'array', maxItems: 100000, items: object({ principalId: ref, tenantRef: ref, connectionRef: ref, assetRef: ref, operations: strings }) },
 }));

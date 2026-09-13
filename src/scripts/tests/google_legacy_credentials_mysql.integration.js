@@ -11,9 +11,13 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await qi.createTable('ClinicWebAssets', { id: { type: D.INTEGER, primaryKey: true } });
   await require('../../../migrations/20260913030000-add-search-console-broker-read-binding').up(qi, D);
   models.SearchConsoleBrokerBinding = require('../../../models/searchconsolebrokerbinding')(sql, D);
+  await qi.createTable('ClinicAnalyticsProperties', { id: { type: D.INTEGER, primaryKey: true } });
+  await require('../../../migrations/20260913040000-add-analytics-broker-read-binding').up(qi, D);
+  models.AnalyticsBrokerBinding = require('../../../models/analyticsbrokerbinding')(sql, D);
   const G = models.GoogleConnection; const B = models.GoogleOAuthBrokerBinding;
   const { createGoogleLegacyCredentials } = require('../../services/googleLegacyCredentials.service');
-  const create = () => createGoogleLegacyCredentials({ connectionModel: G, bindingModel: B, searchConsoleModel: models.SearchConsoleBrokerBinding });
+  const create = () => createGoogleLegacyCredentials({ connectionModel: G, bindingModel: B, searchConsoleModel: models.SearchConsoleBrokerBinding,
+    analyticsModel: models.AnalyticsBrokerBinding });
   const service = create(); let fullReads = 0;
   G.addHook('beforeFind', 'count_credentials', options => { if (options.attributes?.includes('accessToken')) fullReads++; });
   const row = (id, subject = 'fictitious-subject-' + id) => G.create({ id, googleUserId: subject,

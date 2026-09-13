@@ -10,22 +10,24 @@ function createGoogleHttp({ request = https.request, timeoutMs = 8000 } = {}) {
     const userinfo = hostname === 'www.googleapis.com' && path === '/oauth2/v2/userinfo';
     const searchConsole = hostname === 'searchconsole.googleapis.com' && path === '/v1/urlInspection/index:inspect'
       || hostname === 'www.googleapis.com' && /^\/webmasters\/v3\/sites\/[^/?#]+\/searchAnalytics\/query$/.test(path);
-    if (!(oauth || userinfo || searchConsole || HOSTS.has(hostname)) || typeof path !== 'string' || !/^\/v[14]\//.test(path) && !oauth && !userinfo && !searchConsole
+    const analytics = hostname === 'analyticsdata.googleapis.com' && /^\/v1beta\/properties\/[1-9]\d{0,19}:runReport$/.test(path);
+    const jsonRead = searchConsole || analytics;
+    if (!(oauth || userinfo || jsonRead || HOSTS.has(hostname)) || typeof path !== 'string' || !/^\/v[14]\//.test(path) && !oauth && !userinfo && !jsonRead
       || path.length > 16384 || /[\r\n#]/.test(path) || signal?.aborted) fail('invalid_request');
     if (oauth ? !form || typeof form !== 'string' || form.length > 32768 || token !== undefined
       : !Buffer.isBuffer(token) || !token.length || token.length > 16384 || /[\r\n]/.test(token.toString('utf8')) || form !== undefined) fail('invalid_request');
-    if (searchConsole ? !json || Object.getPrototypeOf(json) !== Object.prototype : json !== undefined) fail('invalid_request');
-    const body = searchConsole ? JSON.stringify(json) : form;
-    if (searchConsole && Buffer.byteLength(body) > 32768) fail('invalid_request');
+    if (jsonRead ? !json || Object.getPrototypeOf(json) !== Object.prototype : json !== undefined) fail('invalid_request');
+    const body = jsonRead ? JSON.stringify(json) : form;
+    if (jsonRead && Buffer.byteLength(body) > 32768) fail('invalid_request');
     return new Promise((resolve, reject) => {
       let settled = false; let timer; let req;
       const abort = () => { finish(new BrokerError('provider_timeout')); req?.destroy(); };
       const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); error ? reject(error) : resolve(value); };
-      req = request({ protocol: 'https:', hostname, port: 443, path, method: oauth || searchConsole ? 'POST' : 'GET',
+      req = request({ protocol: 'https:', hostname, port: 443, path, method: oauth || jsonRead ? 'POST' : 'GET',
         agent: false, rejectUnauthorized: true, minVersion: 'TLSv1.2',
         headers: { accept: 'application/json', 'accept-encoding': 'identity',
           ...(oauth ? { 'content-type': 'application/x-www-form-urlencoded', 'content-length': Buffer.byteLength(form) } : { authorization: `Bearer ${token.toString('utf8')}` }),
-          ...(searchConsole ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } : {}) } }, res => {
+          ...(jsonRead ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } : {}) } }, res => {
         const chunks = []; let size = 0; const limit = oauth || userinfo ? 32768 : 2097152;
         if (res.statusCode >= 300 && res.statusCode < 400 || res.headers['content-encoding'] && res.headers['content-encoding'] !== 'identity'
           || !/^application\/json(?:\s*;.*)?$/i.test(res.headers['content-type'] || '')) {

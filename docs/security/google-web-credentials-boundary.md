@@ -1,5 +1,14 @@
 # Search Console y GA4: cierre de credenciales legacy
 
+## Ampliación vigente: lecturas GA4 (13/09/2026)
+
+El [bloque GA4](google-analytics-read-migration.md) añade AnalyticsBrokerBindings
+a metadata y SELECT/UPDATE por ID/subject. El esquema 20260913040000 y sus
+dependencias OAuth/SC es obligatorio antes del código aun con gates apagados.
+Comprobación legacy completa: cuatro consultas; carga: nueve; petición: ocho.
+SC y GA tienen adaptadores de lectura preparados, sin migración real. Las
+ampliaciones y pruebas siguientes son evidencia de sus cortes anteriores.
+
 ## Ampliación vigente: lecturas SC (13/09/2026)
 
 El [bloque de lecturas SC](google-search-console-read-migration.md) añade

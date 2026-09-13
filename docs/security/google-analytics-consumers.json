@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-13",
+  "sourceHead": "60553a1d9db2d19050216c6d332413837fe75169",
+  "includesWorkingChanges": true,
+  "runtimeMigrated": 0,
+  "method": "Manual source classification and endpoint search for analyticsdata/analyticsadmin/runReport, with SHA256. No runtime, database, secrets, AWS, provider or OPS inspection.",
+  "newMigrations": [
+    "20260913040000"
+  ],
+  "requiredPriorMigrations": [
+    "20260913020000",
+    "20260913030000",
+    "their dependencies"
+  ],
+  "schemaRequiredBeforeCodeEvenWhenDisabled": true,
+  "ops": "deferred_by_user",
+  "awsInstance": "shutdown_announced_unverified",
+  "pending": [
+    "GA/SC discovery, onboarding, full OAuth and managed disconnect",
+    "Other provider cohorts and legacy loaders, including Ads",
+    "User/cache/denial audit and public quality presentation",
+    "Real migration, deployment, source/IAM isolation and quota/cost verification",
+    "Retention, Budget/CloudFormation, Cost Explorer/tags, database encryption/restoration"
+  ],
+  "rows": [
+    {
+      "file": "src/services/analyticsBroker.service.js",
+      "sha256": "83bb4e393868b8e625d6b15422d9c26b98531c65f879a5dd9d32cf59163cd646",
+      "status": "prepared_offline",
+      "note": "Metadata-only binding adapter, 100,000-row aggregation, identity checks and fixed errors."
+    },
+    {
+      "file": "services/integrations-broker/src/google-analytics.js",
+      "sha256": "82255cb88ae677bc15c6c0bea1b7597dc3fb3b08290060d4ae1f1e847a903e3f",
+      "status": "prepared_offline",
+      "note": "Nine fixed runReport families, opaque cursor bound to row count and metadata; no free-form reports."
+    },
+    {
+      "file": "services/integrations-broker/src/google-main.js",
+      "sha256": "f9f5963594e71bacf230b3df5174797f63866a5e21e54c83d7a4539afa95e205",
+      "status": "prepared_offline",
+      "note": "GA runtime cohort with exact identity/property policy; no installation or AWS verification."
+    },
+    {
+      "file": "src/jobs/sync.jobs.js",
+      "sha256": "5002a1c4b4e945a2fb2553e53ba977b77d7536c1f3c9f445e9573feca891f7da",
+      "status": "prepared_offline",
+      "note": "Analytics sync and general/targeted backfills use GA references; preserve business DTO and surface quality in job report. Other providers/loaders remain pending."
+    },
+    {
+      "file": "src/services/googleLegacyCredentials.service.js",
+      "sha256": "e7501cebf7944b2eec5776bd8f489853133db424a62c49fbf5d003a186e022fb",
+      "status": "prepared_offline",
+      "note": "OAuth/SC/GA ID-or-subject exclusions, including conditional SQL SELECT/UPDATE."
+    },
+    {
+      "file": "src/services/googleOAuthBroker.service.js",
+      "sha256": "f55ee9b18bd2b6038a9cd306333ae519ae4e130e14eb5e3873913b762a535041",
+      "status": "prepared_offline",
+      "note": "First GA binding closes global legacy connect/unmatched callbacks; per-connection guard by ID or subject."
+    },
+    {
+      "file": "src/routes/oauth.routes.js",
+      "sha256": "e4a79cdc987655903c503297d07a0d63af117b99bc441caf0f62fd37db5e6b0a",
+      "status": "legacy_hydration_pending",
+      "note": "GA/SC discovery and mapping can hydrate a legacy connection before guards; complete lifecycle not migrated."
+    },
+    {
+      "file": "src/services/scopeConnectionResolver.service.js",
+      "sha256": "1d774d8c9eb38383edbf4013598fa3f88cde63b73320fd298afcd07635822b68",
+      "status": "legacy_hydration_pending",
+      "note": "Only metadataOnly consumers suppress token columns; no global conversion."
+    },
+    {
+      "file": "src/services/googleOAuthBrokerScope.service.js",
+      "sha256": "65f43055bb5958c08da936616bb13582eb6cdded10765bea82dc9c7dc466f17d",
+      "status": "unchanged_admission_guard",
+      "note": "GBP pinned reauthorization still rejects active GA/SC/Ads; no scope admission relaxed."
+    },
+    {
+      "file": "src/services/oauthScopedDisconnect.service.js",
+      "sha256": "77b6a192244873a5c205c85c4dbcb66c5dbbeb56f84a7e4d525660044ee9d880",
+      "status": "unchanged_lifecycle_pending",
+      "note": "GA managed disconnect and confirmation need a separate lifecycle implementation."
+    },
+    {
+      "file": "src/services/effectiveMarketingAssets.service.js",
+      "sha256": "64456f1f091b3fbee70c0dbdfc0f737d88933c9ed834b42dc79e254e20afd306",
+      "status": "unchanged_metadata_inventory",
+      "note": "Existing GA effective/shared inventory retained; this read cohort does not change assignments or advertising."
+    },
+    {
+      "file": "src/routes/web.routes.js",
+      "sha256": "3b3dc9925ba58266eb7c4437bad2169313b82e7ce676df5c88632bd98339e79e",
+      "status": "unchanged_cached_ga_reports",
+      "note": "GA metrics HTTP routes read business caches; current actor/read auditing remains pending."
+    },
+    {
+      "file": "src/controllers/marketingReports.controller.js",
+      "sha256": "bcf67ecbf05b5844647f9e773a6cade219a3896b2df727ad886fe6b603bb1b05",
+      "status": "unchanged_cached_reports",
+      "note": "Cached reporting, quality presentation and complete access audit require their own work."
+    }
+  ]
+}

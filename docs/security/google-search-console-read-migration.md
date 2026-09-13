@@ -1,5 +1,14 @@
 # Search Console: lecturas por broker preparadas
 
+## Ampliación vigente GA4 (13/09/2026)
+
+El [bloque GA4](google-analytics-read-migration.md) incorpora su registro a los
+guards OAuth/legacy compartidos: 20260913040000 y dependencias antes del código,
+aun con gates apagados. Frontera legacy: cuatro consultas por comprobación,
+nueve por carga y ocho por petición. No cambia las cuatro lecturas SC ni amplía
+su OAuth/discovery. Las cifras y requisitos siguientes describen el corte SC
+anterior; ningún consumidor real se ha migrado.
+
 Preparación local del 13/09/2026 sobre backend `3655c04b` y frontend `a754ef5c`.
 Migrados en runtime: **cero**. Sin migración compartida, despliegue ni llamadas
 AWS/proveedores reales. OPS aplazado por el usuario; apagado EC2 anunciado,

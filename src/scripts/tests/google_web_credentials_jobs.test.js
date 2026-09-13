@@ -23,6 +23,7 @@ function fixture() {
     return { data: { rows: body.dimensions.length === 1 ? [{ keys: ['2026-09-01'], clicks: 3, impressions: 10 }] : [] } };
   } };
   const { metaSyncJobs: jobs } = loadBusinessProfileJobs({ models, credentials: f.credentials, searchConsole: { prepare: async () => null }, legacyHttp: http, logs: f.state.logs,
+    analytics: { prepare: async () => null, safe: require('../../services/analyticsBroker.service').safe },
     env: { WEB_PSI_ENABLED: 'false', WEB_SYNC_RECENT_DAYS: '1', WEB_BACKFILL_DAYS: '1', ANALYTICS_BACKFILL_DAYS: '1' } });
   return { ...f, jobs, mappings, updates, persisted };
 }

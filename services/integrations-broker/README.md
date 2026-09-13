@@ -1,5 +1,20 @@
 # Broker de integraciones
 
+## GA4: nueve lecturas preparadas, sin activar
+
+`google-main.js` admite google-analytics-read-v1 con subject, propiedades y grants
+exactos. Nueve familias fijas runReport, secreto v3 google_analytics, refresh
+confinado y cursor ligado a cardinalidad/metadata. Páginas de 500, techo local
+100.000 por familia explícito; no persiste datasets en SQLite/S3. Adaptador de
+jobs revalida registro compuesto por mapping, incluidas propiedades de varias
+clínicas; metadata de calidad en el reporte operativo. No Admin API, discovery,
+OAuth de autorización o mutaciones GA. Auditoría v2 y bloqueo durable comunes.
+
+DDL 20260913040000 y dependencias antes del código aun con gates apagados.
+QA backend con Node 22.17.0 y broker con Node 24.21.0; no se modifica el runtime
+de procesos usados. No despliegue/AWS, OPS aplazado y apagado EC2 no verificado.
+[Contrato, límites, coste, QA y lote pendiente](../../docs/security/google-analytics-read-migration.md).
+
 ## Search Console: cuatro lecturas preparadas, sin activar
 
 `google-main.js` admite una configuración distinta con cohort
@@ -56,7 +71,7 @@ Paquete autocontenido con Node 24, dependencias y lockfile propios. No importa
 el bootstrap, modelos, `.env` ni credenciales de la API clínica. No hay servicio
 desplegado: `main.js` solo admite conexiones ficticias y escucha en loopback
 por defecto. Instalar Node 24 en un destino usado requiere el lote de despliegue;
-el Node 18 de la aplicación existente no se ha cambiado.
+la versión Node del destino se verificará en ese lote, sin inferirla del shell de QA.
 
 ## Contrato implementado
 
@@ -81,7 +96,7 @@ capacidad de invocar los grants asignados: esta separación no elimina ese riesg
 Catálogo actual: `fictitious.connection.check.v1`, payload `{}`, devuelve
 `{fixture:true,status:"available"}`. No acredita salud de Meta, Google ni WhatsApp.
 Los catálogos Google se registran solo en `google-main.js`, según su cohorte:
-siete lecturas GBP (más controles aprobados por política) o cuatro lecturas SC.
+siete lecturas GBP (más controles aprobados por política), cuatro SC o nueve GA4.
 Su migración operativa y el resto de consumidores permanecen pendientes.
 
 `src/lib/integrationsBrokerClient.js` del backend implementa el transporte HTTPS

@@ -67,6 +67,7 @@ const googleReviewMatchService = require('../services/googleReviewMatch.service'
 const businessProfileBroker = require('../services/businessProfileBroker.service');
 const googleLegacyCredentials = require('../services/googleLegacyCredentials.service');
 const searchConsoleBroker = require('../services/searchConsoleBroker.service');
+const analyticsBroker = require('../services/analyticsBroker.service');
 const jobRequestsService = require('../services/jobRequests.service');
 const systemNotificationsService = require('../services/systemNotifications.service');
 const {
@@ -1780,20 +1781,23 @@ class MetaSyncJobs {
         end: endStr,
         rows: 0,
         dimensionRows: 0,
+        dataQuality: [],
         errors: []
       };
       let processed = 0;
       for (const property of properties) {
         try {
-          const credentials = await this._ensureGoogleAccessToken(property.googleConnectionId);
+          const analyticsContext = await analyticsBroker.prepare(property);
+          const credentials = analyticsContext ? { analyticsContext } : await this._ensureGoogleAccessToken(property.googleConnectionId);
           const counts = await this._syncGaProperty(property, credentials, startStr, endStr);
           report.processedProperties += 1;
           processed += counts.rows || 0;
           report.rows += counts.rows || 0;
           report.dimensionRows += counts.dimensionRows || 0;
+          report.dataQuality.push(...(counts.dataQuality || []).map(value => ({ propertyId: property.id, ...value })));
         } catch (err) {
-          console.error('❌ analyticsSync property error:', property.id, googleLegacyCredentials.safe(err));
-          report.errors.push({ propertyId: property.id, clinicaId: property.clinicaId, message: googleLegacyCredentials.safe(err) });
+          console.error('❌ analyticsSync property error:', property.id, analyticsBroker.safe(err));
+          report.errors.push({ propertyId: property.id, clinicaId: property.clinicaId, message: analyticsBroker.safe(err) });
         }
         if (this.config.analytics.betweenClinicsSleepMs > 0) {
           await new Promise((resolve) => setTimeout(resolve, this.config.analytics.betweenClinicsSleepMs));
@@ -1804,9 +1808,9 @@ class MetaSyncJobs {
       console.log('✅ analyticsSync completado', report);
       return { status, processed, report };
     } catch (error) {
-      await syncLog.update({ status: 'failed', end_time: new Date(), error_message: googleLegacyCredentials.safe(error) });
-      console.error('❌ Error en analyticsSync:', googleLegacyCredentials.safe(error));
-      const reason = googleLegacyCredentials.safe(error);
+      await syncLog.update({ status: 'failed', end_time: new Date(), error_message: analyticsBroker.safe(error) });
+      console.error('❌ Error en analyticsSync:', analyticsBroker.safe(error));
+      const reason = analyticsBroker.safe(error);
       throw Object.assign(new Error(reason), { code: reason });
     }
   }
@@ -1906,7 +1910,7 @@ class MetaSyncJobs {
       const aggregate = {
         status: 'completed',
         processed: 0,
-        report: { properties: 0, processedProperties: 0, rows: 0, dimensionRows: 0, errors: [] }
+        report: { properties: 0, processedProperties: 0, rows: 0, dimensionRows: 0, dataQuality: [], errors: [] }
       };
       for (const [clinicId, mapping] of mappingsByClinic.entries()) {
         const result = await this.executeAnalyticsSync({
@@ -1920,6 +1924,7 @@ class MetaSyncJobs {
         aggregate.report.processedProperties += Number(report.processedProperties || 0);
         aggregate.report.rows += Number(report.rows || result?.processed || 0);
         aggregate.report.dimensionRows += Number(report.dimensionRows || 0);
+        aggregate.report.dataQuality.push(...(Array.isArray(report.dataQuality) ? report.dataQuality : []));
         aggregate.report.errors.push(...(Array.isArray(report.errors) ? report.errors : []));
       }
       if (aggregate.report.processedProperties === 0 && aggregate.report.errors.length > 0) aggregate.status = 'failed';
@@ -3183,7 +3188,12 @@ class MetaSyncJobs {
     return { accessToken, connection: conn };
   }
 
-  async _runGaReport(credentials, propertyName, body) {
+  async _runGaReport(credentials, property, body, family) {
+    const fresh = await analyticsBroker.prepare(property);
+    if (!!fresh !== !!credentials.analyticsContext) throw Object.assign(new Error('broker_binding_invalid'), { code: 'broker_binding_invalid' });
+    if (credentials.analyticsContext) return analyticsBroker.read(property, credentials.analyticsContext, family,
+      { startDate: body.dateRanges[0].startDate, endDate: body.dateRanges[0].endDate });
+    const propertyName = property.propertyName;
     if (!propertyName) { throw new Error('Propiedad GA sin propertyName'); }
     const url = `https://analyticsdata.googleapis.com/v1beta/${propertyName}:runReport`;
     const resp = await googleLegacyCredentials.request(credentials.connection, () => syncHttp.post(url, body, { headers: { Authorization: `Bearer ${credentials.accessToken}` } }));
@@ -3200,7 +3210,15 @@ class MetaSyncJobs {
       metrics: metrics.map((name) => ({ name })),
       limit: 100000
     };
-    const mainReport = await this._runGaReport(credentials, propertyName, baseRequest);
+    const mainReport = await this._runGaReport(credentials, property, baseRequest, 'daily');
+    const dataQuality = [];
+    const noteReport = (family, response) => {
+      if (credentials.analyticsContext && dataQuality.length && (response.metadata.currencyCode !== dataQuality[0].currencyCode
+        || response.metadata.timeZone !== dataQuality[0].timeZone)) throw Object.assign(new Error('broker_response_invalid'), { code: 'broker_response_invalid' });
+      if (credentials.analyticsContext) dataQuality.push({ family, rowCount: response.rowCount, returnedRows: response.rows.length,
+        rowLimitReached: response.rowLimitReached, ...response.metadata });
+    };
+    noteReport('daily', mainReport);
     const rows = mainReport.rows || [];
     let inserted = 0;
     for (const row of rows) {
@@ -3244,7 +3262,8 @@ class MetaSyncJobs {
           limit: 100000,
           orderBys: [{ dimension: { dimensionName: 'date' } }]
         };
-        const resp = await this._runGaReport(credentials, propertyName, body);
+        const resp = await this._runGaReport(credentials, property, body, def.type);
+        noteReport(def.type, resp);
         const dRows = resp.rows || [];
         for (const row of dRows) {
           const dateKey = this._normalizeGaDate(row.dimensionValues?.[0]?.value);
@@ -3270,12 +3289,13 @@ class MetaSyncJobs {
           dimensionRows += 1;
         }
       } catch (err) {
-        const reason = googleLegacyCredentials.safe(err);
-        if (['google_oauth_legacy_closed', 'google_connection_changed', 'google_connection_missing'].includes(reason)) throw err;
+        const reason = analyticsBroker.safe(err);
+        if (credentials.analyticsContext || reason.startsWith('broker_') || reason === 'analytics_read_failed'
+          || ['google_oauth_legacy_closed', 'google_connection_changed', 'google_connection_missing'].includes(reason)) throw err;
         console.warn(`⚠️ GA dimension ${def.type} error`, reason);
       }
     }
-    return { rows: inserted, dimensionRows };
+    return { rows: inserted, dimensionRows, dataQuality };
   }
 
   _coerceDate(value) {

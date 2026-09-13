@@ -13,8 +13,9 @@ function containsSecret(value, secrets) {
 // provider revocation endpoint, environment credentials or clinical database.
 function createGoogleSecretStore({ client, http, accountId, prefix, kmsKeyArn, now = () => Date.now(), maxEntries = 64, provider = PROVIDER }) {
   const sc = require('./google-search-console-contract');
-  if (![PROVIDER, sc.PROVIDER].includes(provider)) fail('invalid_request');
-  const scopes = provider === sc.PROVIDER ? sc.SCOPES : [SCOPE];
+  const ga = require('./google-analytics-contract');
+  if (![PROVIDER, sc.PROVIDER, ga.PROVIDER].includes(provider)) fail('invalid_request');
+  const scopes = provider === sc.PROVIDER ? sc.SCOPES : provider === ga.PROVIDER ? ga.SCOPES : [SCOPE];
   const { DescribeSecretCommand, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
   if (!/^\d{12}$/.test(accountId) || !/^\/clinicaclick\/integrations\/(dev|staging|prod)\/$/.test(prefix)
     || !new RegExp(`^arn:aws:kms:eu-west-3:${accountId}:key/[a-f0-9-]+$`).test(kmsKeyArn)
@@ -80,7 +81,7 @@ function createGoogleSecretStore({ client, http, accountId, prefix, kmsKeyArn, n
       const v3 = c.version === 3 && exact(c, 'version,provider,connectionRef,googleUserId,clientId,refreshToken,scopes')
         && require('./google-oauth-secrets').subject(c.googleUserId) && c.clientId === a.clientId
         && (!binding.oauth || c.googleUserId === binding.oauth.subject)
-        && (provider !== sc.PROVIDER || c.googleUserId === binding.googleSubject);
+        && (provider === PROVIDER || c.googleUserId === binding.googleSubject);
       if (!(v2 || v3) || c.provider !== provider
         || c.connectionRef !== binding.connectionRef || !text(c.refreshToken) || !Array.isArray(c.scopes)
         || c.scopes.length > 100 || !c.scopes.every(v => typeof v === 'string' && v.length < 256) || !scopes.some(scope => c.scopes.includes(scope))

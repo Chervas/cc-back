@@ -68,6 +68,7 @@ async function routeFixture(t, options = {}) {
   const models = {
     Clinica: { findByPk: async () => ({ grupoClinicaId: 9 }), findAll: async () => [{ id_clinica: 71 }, { id_clinica: 72 }] },
     SearchConsoleBrokerBinding: { findOne: async () => null },
+    AnalyticsBrokerBinding: { findOne: async () => null },
     GoogleConnection: { rawAttributes: { updated_at: {} },
       findByPk: async (_id, query) => { queries.push(query); if (query?.attributes) { assert.deepEqual(clone(query.attributes), ['id']); return { id: state.connectionId }; }
         state.tokenReads++; return { id: 81, accessToken: SENTINEL, expiresAt: new Date(Date.now() + 600000) }; },
@@ -93,7 +94,8 @@ async function routeFixture(t, options = {}) {
     '../services/accessSession.service': sessionService,
     // This fixture models an installation with no OAuth cohort binding.
     '../services/googleOAuthBroker.service': require('../../services/googleOAuthBroker.service').createGoogleOAuthBroker({
-      models: { GoogleOAuthBrokerBinding: { findOne: async () => null }, SearchConsoleBrokerBinding: models.SearchConsoleBrokerBinding }, audit: {}, enabled: () => false,
+      models: { GoogleOAuthBrokerBinding: { findOne: async () => null }, SearchConsoleBrokerBinding: models.SearchConsoleBrokerBinding,
+        AnalyticsBrokerBinding: models.AnalyticsBrokerBinding }, audit: {}, enabled: () => false,
     }),
     '../services/businessProfileDiscovery.service': { ...f.service, ERROR_CODES, CONFLICT_CODES },
     '../services/scopeConnectionResolver.service': resolver,

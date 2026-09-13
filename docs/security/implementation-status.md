@@ -1,5 +1,27 @@
 # Seguridad: implementación y evidencias
 
+## 13/09/2026 — Lecturas GA4 por broker preparadas
+
+Nueve familias GA4 en analyticsSync y backfills usan referencias y tokens
+confinados al broker para propiedades registradas. Registro independiente por
+propiedad/mapping conserva varios vínculos legítimos de clínicas y bloquea
+recreaciones/fallback. Amplía el cierre global OAuth/legacy por ID o subject.
+KeyEvents mantiene la columna histórica conversions; el job informa límites,
+muestreo, umbrales, moneda y zona mediante dataQuality. No envía conversiones.
+
+QA ficticia: 147 tests Node (75 broker, 72 backend), 44 checks MySQL propios
+(13 GA, 12 SC, ocho frontera legacy, once OAuth) con cierre 0 en cuatro bases,
+y tres contratos (scheduler 46 jobs, caducidad GBP, multigrant). TLS GA repetido
+tras la última revisión del adaptador. Hotfix getAssetStats conservado.
+
+Esquema nuevo 20260913040000 y dependencias previo al código **aun con gates
+apagados**. Cero migraciones reales o despliegues. OPS aplazado; apagado EC2
+anunciado sin verificar. Sin AWS, proveedores reales, cambios de pausas o UI.
+GA/SC discovery y ciclo OAuth completos, otras cohortes, auditoría de usuarios,
+retención/IAM/Budget/Cost Explorer y cifrado/restauración/corte BD pendientes.
+
+[Contrato, QA, costes y lote pendiente](google-analytics-read-migration.md).
+
 ## 13/09/2026 — Lecturas Search Console por broker preparadas
 
 Cuatro lecturas cerradas de Search Console, referencias por propiedad/identidad,
