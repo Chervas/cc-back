@@ -198,6 +198,15 @@ Las cinco migraciones del candidato son:
 - `20260913003000-add-platform-audit-result-part.js`.
 - `20260913130000-create-auth-email-challenges.js` (DDL múltiple no atómica).
 
+La opción de dispositivo de confianza requiere además
+`20260914220000-create-auth-trusted-devices.js`: crea `AuthTrustedDevices` y
+amplía `AuthSessions` con la referencia y el método `password_trusted_device`.
+Aplicar esas dos sentencias exactas antes del código; respaldar el esquema y
+mantener su diario de aplicación. No ejecutar el resto de migraciones DEV.
+Reutiliza la clave MFA privada; la cookie exige HTTPS del mismo origen y no se
+comparte entre hosts. Su contrato y revocación están en
+[04](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/04-autenticacion-jwt.md#dispositivo-de-confianza-durante-60-días).
+
 Verificar primero las migraciones existentes de correo/reset y JobRequests.
 `EMAIL_AUTHENTICATION_RECIPIENT_POLICY=registered-account` permite cubrir
 código/reset de cuentas activas fuera de la lista general, con prueba vigente en
@@ -287,7 +296,7 @@ QA se mantienen en [99](https://github.com/Chervas/cc-front/blob/dev/src/Documen
 
 El DEV habitual comparte BD con staging: no instalar allí las tablas de seguridad
 como si fuera una base desechable. El primer ensayo usa MySQL temporal con las
-cinco DDL, cuentas/claves ficticias, HTTP local y correo/auditoría de prueba. El
+DDL de acceso y confianza, cuentas/claves ficticias, HTTP local y correo/auditoría de prueba. El
 runner elimina su propio servidor al terminar; no arranca la API ni los workers
 de ClinicaClick. El contrato HTTP ejercita login, código incorrecto/caducado,
 reenvío, consumo concurrente, recuperación y revocación de sesiones.
@@ -295,6 +304,7 @@ reenvío, consumo concurrente, recuperación y revocación de sesiones.
 ```bash
 npm run test:security:auth-cut
 CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/auth_email_challenges_mysql.integration.js
+CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/auth_trusted_devices_mysql.integration.js
 CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/auth_email_delivery_mysql.integration.js
 ```
 

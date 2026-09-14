@@ -34,7 +34,7 @@ function decode(token, cfg, now = new Date()) {
     || v.exp <= v.iat || v.exp - v.iat > 86400)) fail();
   if (!managed && (cfg.mode === 'enforce' || v.type || v.iss || v.aud)) fail();
   if (cfg.emailMfaMode === 'enforce' || v.amr !== undefined || v.emailVerifiedAt !== undefined) {
-    if (!managed || JSON.stringify(v.amr) !== '["pwd","email"]' || !Number.isInteger(v.emailVerifiedAt)
+    if (!managed || !['["pwd","email"]', '["pwd","trusted_device"]'].includes(JSON.stringify(v.amr)) || !Number.isInteger(v.emailVerifiedAt)
       || v.emailVerifiedAt <= 0 || v.emailVerifiedAt > v.iat) fail();
   }
   return v;
@@ -54,8 +54,9 @@ function projectUser(user) {
   return { id_usuario: Number(user.id_usuario), nombre: user.nombre, apellidos: user.apellidos, email_usuario: user.email_usuario,
     isProfesional: user.isProfesional === true, url_avatar: user.avatar || null, isAdmin: isGlobalAdmin(user.id_usuario) };
 }
-function createService({ models, audit, config = settings, now = () => new Date() }) {
+function createService({ models, audit, trustedDevices, config = settings, now = () => new Date() }) {
   const db = () => typeof models === 'function' ? models() : models;
+  const devices = () => trustedDevices || require('./authTrustedDevice.service').createService({ models, now, credentialBinding: user => binding(user, config().secret) });
   const repo = () => audit || require('./platformAudit.repository').createRepository(db().PlatformAuditEvent);
   async function record(row, action, reason, transaction, effectiveAt) {
     const occurredAt = now().toISOString();
@@ -71,10 +72,11 @@ function createService({ models, audit, config = settings, now = () => new Date(
       || v.exp * 1000 > row.expires_at.getTime() || v.exp * 1000 > row.absolute_expires_at.getTime()
       || v.iat * 1000 < row.issued_at.getTime()) fail();
     const email = row.authentication_method === 'password_email';
-    if (cfg.emailMfaMode === 'enforce' || email || v.amr !== undefined || v.emailVerifiedAt !== undefined) {
-      if (!email || JSON.stringify(v.amr) !== '["pwd","email"]' || !(row.email_verified_at instanceof Date)
+    const trusted = row.authentication_method === 'password_trusted_device';
+    if (cfg.emailMfaMode === 'enforce' || email || trusted || v.amr !== undefined || v.emailVerifiedAt !== undefined) {
+      if ((!email && !trusted) || JSON.stringify(v.amr) !== JSON.stringify(trusted ? ['pwd', 'trusted_device'] : ['pwd', 'email']) || !(row.email_verified_at instanceof Date)
         || !Number.isInteger(v.emailVerifiedAt) || row.email_verified_at.getTime() !== v.emailVerifiedAt * 1000
-        || v.emailVerifiedAt * 1000 > row.issued_at.getTime() || !UUID.test(row.email_challenge_id)) fail();
+        || v.emailVerifiedAt * 1000 > row.issued_at.getTime() || !(trusted ? UUID.test(row.trusted_device_id) && !row.email_challenge_id : UUID.test(row.email_challenge_id))) fail();
     }
   }
   async function verify(token) {
@@ -88,7 +90,9 @@ function createService({ models, audit, config = settings, now = () => new Date(
     { replacements: { id: v.jti, userId: v.userId }, logging: false });
     const row = rows[0];
     const user = row && { ...row, id_usuario: row.user_id };
-    checkRow(v, user, row, cfg); return v;
+    checkRow(v, user, row, cfg);
+    if (row.authentication_method === 'password_trusted_device') await devices().verifySession(row, user);
+    return v;
   }
   // OAuth callbacks carry a one-use state, not a JWT. Its durable request must
   // retain the managed session reference and the original authorization expiry.
@@ -105,13 +109,15 @@ function createService({ models, audit, config = settings, now = () => new Date(
       + (transaction ? ' FOR UPDATE' : ''),
     { replacements: { id: sessionRef, userId }, logging: false, transaction });
     const row = rows[0];
+    if (requireEmail && row?.authentication_method !== 'password_email') fail();
     checkRow({ userId, exp: expiresAt.getTime() / 1000, iat: row?.issued_at?.getTime() / 1000,
-      ...(row?.authentication_method === 'password_email' ? { amr: ['pwd', 'email'], emailVerifiedAt: row.email_verified_at?.getTime() / 1000 } : {}) },
+      ...(['password_email', 'password_trusted_device'].includes(row?.authentication_method) ? { amr: row.authentication_method === 'password_email' ? ['pwd', 'email'] : ['pwd', 'trusted_device'], emailVerifiedAt: row.email_verified_at?.getTime() / 1000 } : {}) },
       row && { ...row, id_usuario: row.user_id }, row, requireEmail ? { ...cfg, emailMfaMode: 'enforce' } : cfg);
+    if (row.authentication_method === 'password_trusted_device') await devices().verifySession(row, { ...row, id_usuario: row.user_id }, { transaction });
     return { userId, sessionRef };
   }
   // Call within a transaction that already locks the freshly authenticated user. All issuers share this method.
-  async function issue(user, { transaction, parentToken, reason = 'credentials_verified', ttl, sessionRef = randomUUID(), emailChallengeId } = {}) {
+  async function issue(user, { transaction, parentToken, reason = 'credentials_verified', ttl, sessionRef = randomUUID(), emailChallengeId, trustedDeviceToken } = {}) {
     const cfg = config(); const seconds = ttl || cfg.ttl;
     if (cfg.mode === 'legacy' && !parentToken) return { token: jwt.sign({ userId: Number(user.id_usuario), email: user.email_usuario,
       isAdmin: isGlobalAdmin(user.id_usuario), ...adminCredentials.claims(user, cfg.secret) }, cfg.secret, { expiresIn: seconds, jwtid: sessionRef }), expiresIn: seconds, sessionRef };
@@ -131,9 +137,12 @@ function createService({ models, audit, config = settings, now = () => new Date(
     if (parent) {
       row = await db().AuthSession.findByPk(parent.jti, { transaction, lock: transaction.LOCK.UPDATE });
       checkRow(parent, user, row, cfg);
+      if (row.authentication_method === 'password_trusted_device') await devices().verifySession(row, user, { transaction });
     }
+    if (trustedDeviceToken && (parent || emailChallengeId || cfg.emailMfaMode !== 'enforce')) fail();
+    const trusted = trustedDeviceToken ? await devices().resolve(user, trustedDeviceToken, { transaction }) : null;
     let proof;
-    if (!parent && (cfg.emailMfaMode === 'enforce' || emailChallengeId)) {
+    if (!parent && !trusted && (cfg.emailMfaMode === 'enforce' || emailChallengeId)) {
       if (typeof emailChallengeId !== 'string' || !UUID.test(emailChallengeId)) fail('auth_email_required', 401);
       proof = await db().AuthEmailChallenge.findByPk(emailChallengeId, { transaction, lock: transaction.LOCK.UPDATE });
       if (!proof || proof.user_id !== Number(user.id_usuario) || proof.state !== 'verified' || proof.consumed_session_id
@@ -142,26 +151,27 @@ function createService({ models, audit, config = settings, now = () => new Date(
         || proof.absolute_expires_at.getTime() <= now().getTime()) fail('auth_email_required', 401);
       await proof.update({ state: 'used', consumed_session_id: sessionRef }, { transaction });
     }
-    const absolute = row ? row.absolute_expires_at : new Date((at + 86400) * 1000);
-    const expires = Math.min(at + seconds, absolute.getTime() / 1000);
+    const absolute = row ? row.absolute_expires_at : new Date(Math.min((at + 86400) * 1000, trusted ? trusted.expires_at.getTime() : Infinity));
+    const expires = Math.min(at + seconds, Math.floor(absolute.getTime() / 1000));
     if (expires <= at) fail();
     if (row) await row.update({ expires_at: new Date(Math.max(expires * 1000, row.expires_at.getTime())) }, { transaction });
     else row = await db().AuthSession.create({ session_id: sessionRef, user_id: Number(user.id_usuario), issued_at: new Date(at * 1000),
       expires_at: new Date(expires * 1000), absolute_expires_at: absolute, state: 'active', credential_binding: binding(user, cfg.secret),
-      authentication_method: proof ? 'password_email' : 'password', email_verified_at: proof?.verified_at || null,
+      authentication_method: trusted ? 'password_trusted_device' : proof ? 'password_email' : 'password',
+      trusted_device_id: trusted?.device_id || null, email_verified_at: trusted?.email_verified_at || proof?.verified_at || null,
       email_challenge_id: proof?.challenge_id || null }, { transaction });
     await record(row, parent ? 'session.renewed' : 'session.issued', parent ? 'token_verified' : reason, transaction);
     return { token: jwt.sign({ userId: Number(user.id_usuario), email: user.email_usuario, isAdmin: isGlobalAdmin(user.id_usuario),
       sessionVersion: 1, type: 'cc_access', iat: at, exp: expires,
-      ...(row.authentication_method === 'password_email' ? { amr: ['pwd', 'email'], emailVerifiedAt: row.email_verified_at.getTime() / 1000 } : {}) }, cfg.secret,
+      ...(['password_email', 'password_trusted_device'].includes(row.authentication_method) ? { amr: row.authentication_method === 'password_email' ? ['pwd', 'email'] : ['pwd', 'trusted_device'], emailVerifiedAt: row.email_verified_at.getTime() / 1000 } : {}) }, cfg.secret,
     { algorithm: 'HS256', issuer: ISSUER, audience: AUDIENCE, jwtid: row.session_id }), expiresIn: expires - at, sessionRef: row.session_id };
   }
-  async function authenticated(user, { parentToken, attempt, transaction: callerTransaction, emailChallengeId } = {}) {
+  async function authenticated(user, { parentToken, attempt, transaction: callerTransaction, emailChallengeId, trustedDeviceToken } = {}) {
     const cfg = config(); const managedParent = parentToken && decode(parentToken, cfg, now()).sessionVersion;
     const work = async (fresh, transaction) => {
       if (transaction && (!activeUser(fresh) || binding(fresh, cfg.secret) !== binding(user, cfg.secret))) fail();
       fresh.ultimo_login = now(); await fresh.save({ fields: ['ultimo_login'], transaction });
-      const issued = await issue(fresh, { transaction, parentToken, emailChallengeId });
+      const issued = await issue(fresh, { transaction, parentToken, emailChallengeId, trustedDeviceToken });
       const outcome = { outcome: 'success', reason: parentToken ? 'token_verified' : 'credentials_verified', userId: fresh.id_usuario, sessionRef: issued.sessionRef };
       if (attempt) await attempt.complete(outcome, { transaction });
       return { status: 200, body: { token: issued.token, expiresIn: issued.expiresIn, user: projectUser(fresh) }, audit: outcome, auditCompleted: Boolean(attempt) };
@@ -182,12 +192,14 @@ function createService({ models, audit, config = settings, now = () => new Date(
       // Repeated single-session logout can confirm the original revocation after a lost response.
       if (current.state === 'revoked' && !all) return { status: 'revoked', revoked: true };
       checkRow(v, user, current, cfg);
+      if (current.authentication_method === 'password_trusted_device') await devices().verifySession(current, user, { transaction });
       const rows = all ? await db().AuthSession.findAll({ where: { user_id: v.userId, state: 'active', expires_at: { [Op.gt]: now() } },
         transaction, lock: transaction.LOCK.UPDATE }) : [current];
       for (const row of rows) {
         await row.update({ state: 'revoked', ended_at: now() }, { transaction });
         await record(row, 'session.revoked', all ? 'user_revoke_all' : 'user_sign_out', transaction);
       }
+      if (all && cfg.emailMfaMode === 'enforce') await devices().revokeAll(v.userId, transaction);
       return { status: 'revoked', revoked: true };
     });
   }

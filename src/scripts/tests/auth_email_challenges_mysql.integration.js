@@ -10,6 +10,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await require('../../../migrations/20260913003000-add-platform-audit-result-part').up(qi);
   await require('../../../migrations/20260912220000-create-auth-sessions').up(qi, D);
   await migration.up(qi); await migration.down(qi); await migration.up(qi);
+  await require('../../../migrations/20260914220000-create-auth-trusted-devices').up(qi);
   models.AuthSession = require('../../../models/authsession')(sql, D);
   models.AuthEmailChallenge = require('../../../models/authemailchallenge')(sql, D);
   models.PlatformAuditEvent = require('../../../models/platformauditevent')(sql, D);

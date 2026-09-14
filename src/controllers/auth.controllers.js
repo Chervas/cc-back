@@ -8,6 +8,7 @@ const { isBlockedAuthEmail } = require('../lib/blocked-auth-emails');
 const passwordResetService = require('../services/passwordReset.service');
 const systemNotificationsService = require('../services/systemNotifications.service');
 const emailChallenges = require('../services/authEmailChallenge.service');
+const trustedDevices = require('../services/authTrustedDevice.service');
 
 exports.forgotPassword = async (req, res) => {
     try {
@@ -171,6 +172,14 @@ async function passwordWithEmail(req, res, legacy) {
             await emailChallenges.rejectedCredentials();
             return res.status(401).json({ message: 'Wrong email or password.' });
         }
+        const trusted = trustedDevices.cookie(req);
+        if (trusted) {
+            try { return res.status(200).json((await sessions.authenticated(user, { trustedDeviceToken: trusted })).body); }
+            catch (error) {
+                if (error?.code !== 'auth_trusted_device_invalid') throw error;
+                trustedDevices.clearCookie(res);
+            }
+        }
         return res.status(202).json(await emailChallenges.begin(user));
     } catch (error) { return emailError(res, error); }
 }
@@ -180,9 +189,16 @@ async function emailCommand(req, res, resend) {
     res.set('Cache-Control', 'private, no-store');
     try {
         const body = req.body;
-        const keys = resend ? ['challengeToken'] : ['challengeToken', 'code'];
-        if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).sort().join(',') !== keys.sort().join(',')) {
+        const keys = resend ? ['challengeToken'] : ['challengeToken', 'code', ...(Object.hasOwn(body || {}, 'trustDevice') ? ['trustDevice'] : [])];
+        if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).sort().join(',') !== keys.sort().join(',')
+            || (!resend && Object.hasOwn(body, 'trustDevice') && typeof body.trustDevice !== 'boolean')) {
             return res.status(400).json({ error: 'auth_email_request_invalid' });
+        }
+        if (!resend && body.trustDevice === true) {
+            if (!trustedDevices.browserRequest(req)) return res.status(400).json({ error: 'auth_email_request_invalid' });
+            const result = await emailChallenges.verifyAndTrust(body.challengeToken, body.code);
+            trustedDevices.setCookie(res, result.device);
+            return res.status(200).json(result.body);
         }
         const result = resend ? await emailChallenges.resend(body.challengeToken) : await emailChallenges.verify(body.challengeToken, body.code);
         return res.status(resend ? 202 : 200).json(result);
@@ -201,7 +217,11 @@ exports.me = async (req, res) => {
 };
 async function revoke(req, res, all) {
     res.set('Cache-Control', 'private, no-store');
-    try { return res.json(await sessions.revoke(sessions.bearer(req.headers.authorization), all)); }
+    try {
+        const result = await sessions.revoke(sessions.bearer(req.headers.authorization), all);
+        if (all && result.revoked) trustedDevices.clearCookie(res);
+        return res.json(result);
+    }
     catch (error) {
         const invalid = ['JsonWebTokenError', 'TokenExpiredError', 'NotBeforeError'].includes(error.name);
         return res.status(invalid ? 401 : 503).json({ message: invalid ? 'Auth failed!' : 'Authentication temporarily unavailable.' });
