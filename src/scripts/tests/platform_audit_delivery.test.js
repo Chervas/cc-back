@@ -63,6 +63,16 @@ test('native process boundary sends only canonical events over stdin and exclude
   assert.equal(captured.options.killSignal, 'SIGKILL'); assert(!JSON.stringify(captured).includes('SENTINEL'));
   assert.deepEqual(Object.keys(captured.input.records[0]), ['body', 'digest']);
 });
+test('HTTPS transport bypasses local IMDS and validates remote receipts; no local fallback on failure', async t => {
+  const client = require('../../services/platformAudit.writerClient'); const rows = [pack(fixture())]; let calls = 0;
+  t.mock.method(client, 'write', async input => { calls++; assert.equal(input.sourceRoleArn, sourceRoleArn); return success(rows); });
+  const settings = { sourceRoleArn, transport: 'https' };
+  const forbidden = () => assert.fail('HTTPS mode must never spawn a local AWS writer');
+  assert.equal((await invokeWriter(settings, rows, forbidden)).results.length, 1); assert.equal(calls, 1);
+  t.mock.method(client, 'write', async () => { throw Error('REMOTE_UNAVAILABLE'); });
+  await assert.rejects(invokeWriter(settings, rows, forbidden));
+  assert.throws(() => invokeWriter({ ...settings, transport: 'typo' }, rows, forbidden), /audit_configuration_invalid/);
+});
 test('health projection marks stale, backlog, unknown outcomes and reconciliation without accepting arbitrary metadata', async () => {
   const now = new Date('2026-09-12T12:00:00Z'); const state = { last_completed_at: now, last_error: null, token: 'SENTINEL_SECRET' };
   assert.equal(assess(zero(), state, now).level, 'healthy');

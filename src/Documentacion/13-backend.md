@@ -1238,8 +1238,14 @@ JobRequest cada minuto/cada cinco minutos Europe/Madrid, con gates separados
 apagados. Respetan leader y pausas, con máximo un intento por ciclo y reintentos
 por evento. No usan el carril ni consumidores de publicidad.
 
-El worker reclama hasta 50 eventos y usa un proceso Node 24 fijo, con protocolo
-cerrado por stdin y sin heredar secretos/config AWS del backend. Solo IMDSv2,
+El worker reclama hasta 50 eventos. `PLATFORM_AUDIT_WRITER_TRANSPORT=https`
+prepara la entrega al servicio externo Node 24 con firma Ed25519, nonce durable,
+TLS verificado y recibos comprobados. La aplicación no hereda la identidad AWS
+del receptor y no vuelve al writer local ante errores. El modo `local` conserva
+el protocolo cerrado por stdin para un host que disponga de la identidad adecuada;
+no sirve para instalar el writer en el Lightsail de otra cuenta. Contrato en
+[39 — Entrega autenticada](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/39-seguridad-integraciones-cifrado-auditoria.md#entrega-autenticada-de-auditoría).
+El proceso AWS no hereda secretos/config AWS del backend. Solo IMDSv2,
 archivos AWS `/dev/null` y endpoints HTTPS STS/S3 de París; verifica el rol
 origen configurado y el writer asumido antes de escribir. Cuatro puts simultáneos,
 proceso limitado a 75 s; leases por evento 120 s y global 270 s con CAS.

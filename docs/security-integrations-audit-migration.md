@@ -117,6 +117,53 @@ Verificar TLS, identidades, acceso cruzado denegado, permisos AWS efectivos, std
 
 Salida: manifiesto de version/roles/configuracion no secreta, pruebas efectivas diferenciadas de simulaciones, sin proveedor real activado.
 
+#### Writer HTTPS en la instancia de seguridad
+
+`services/platform-audit/src/writer-https-main.js` prepara el receptor de lotes;
+`reader-main.js` conserva lectura/conciliación. Ambos exigen Node 24, configuración
+privada y roles de servicio. El contrato y los límites se mantienen en
+[39](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/39-seguridad-integraciones-cifrado-auditoria.md#entrega-autenticada-de-auditoría).
+
+Antes de instalar, verificar el lote IAM y un canal de bootstrap revisado para
+`i-0cf40cfe823f160fa`. La instancia está registrada en SSM, pero el rol deployment
+actual no permite ejecutar comandos. `cc-impl-assume-temp` por sí solo tampoco
+añade ese permiso. No sustituir el rol de servicio por credenciales SSO ni abrir
+SSH/puertos generales para salvar ese bloqueo.
+
+El artefacto debe contener solo `services/platform-audit/src`, `package.json` y
+su lockfile, con hashes revisados; nunca `.env`, modelos clínicos o secretos.
+Instalar dependencias del lockfile sin scripts de instalación y ejecutar bajo un
+usuario de servicio con directorios de estado separados. Conservar versión y
+configuración anteriores para rollback; no retirar el journal ni objetos S3.
+
+Configuración del writer (campos ilustrativos; no es configuración activada):
+
+```json
+{
+  "port": 8443,
+  "listenAddress": "0.0.0.0",
+  "sourceRoleArn": "arn:aws:iam::137819318729:role/clinicaclick-integrations-prod-ec2-role",
+  "stateFile": "/var/lib/clinicaclick-audit/writer/state.sqlite",
+  "tlsKeyFile": "/etc/clinicaclick-audit/writer/tls.key",
+  "tlsCertFile": "/etc/clinicaclick-audit/writer/tls.crt",
+  "principals": [{ "keyId": "staging-writer-v1", "enabled": true, "publicKey": "PUBLIC_ED25519_KEY" }]
+}
+```
+
+El fichero de configuración, certificado y claves deben ser absolutos, sin
+symlinks y 0600; el directorio del journal, 0700. La clave TLS permanece en el
+host aislado; staging recibe el certificado público autorizado y conserva su
+propia clave de firma. Permitir en red únicamente los orígenes/puertos del corte
+revisado. Configurar el lector con su propio journal y claves separadas para
+`confirmed` y `reconcile`; no reutilizar la clave del writer.
+
+En staging, preparar `PLATFORM_AUDIT_WRITER_TRANSPORT=https`, origen HTTPS,
+CA/key-id/key-file y rol fuente. Gateway y DEV no arrancan el consumidor. Con
+el esquema aprobado, verificar un evento ficticio completo por TLS, S3 y
+conciliador; comprobar un recibo real, duplicado, timeout, firma incorrecta,
+reinicio y recuperación del outbox. Solo entonces ejecutar el corte MFA del
+[runbook de acceso](security/admin-password-session-cut.md#secuencia-del-corte-público).
+
 ### D. Migracion Aprobada Por Cohortes
 
 1. Presentar lista de conexiones/consumidores, referencias objetivo, respaldo restringido, cambios de esquema, tiempos, corte de writers y rollback. No incluir Meta bloqueado como candidato activo. No llevar tokens bajo investigacion al almacen operativo; preservar evidencia aparte si corresponde.

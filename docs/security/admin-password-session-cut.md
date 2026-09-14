@@ -213,6 +213,11 @@ La identidad IMDSv2 del host de aplicación pertenece a `468355432137` y usa
 con IMDSv2 y el contrato valida un rol fuente de la cuenta de seguridad. Con ese
 alojamiento, el writer no puede asumir la identidad esperada. Una sesión SSO
 serviría para instalar/configurar, no para entregarla como credencial de runtime.
+La sesión `cc-impl-readonly-temp` ya permitió verificar la cuenta de seguridad:
+instancia running y SSM Online, trusts solo para el SSO antiguo y sin autorización
+del instance role para asumir writer/reader. Es lectura, sin canal de instalación.
+El transporte HTTPS ya está preparado y probado con ficticios; su instalación
+se guía por el [runbook de migración](../security-integrations-audit-migration.md#writer-https-en-la-instancia-de-seguridad).
 
 Antes del corte, verificar el runtime de seguridad ya aprovisionado, su canal de
 instalación y los trusts efectivos; completar el transporte autenticado desde

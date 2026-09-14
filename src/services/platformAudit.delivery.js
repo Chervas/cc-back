@@ -5,6 +5,9 @@ const { unpack, fail } = require('../../services/platform-audit/src/event');
 function invokeWriter(config, records, execute = execFile) {
   const input = inputFor({ version: 1, sourceRoleArn: config.sourceRoleArn,
     records: records.map(row => ({ body: row.body, digest: row.digest })) });
+  if (config.transport === 'https') return require('./platformAudit.writerClient').write(input)
+    .then(value => resultFor(input, value));
+  if (config.transport && config.transport !== 'local') fail('audit_configuration_invalid');
   try { if (!path.isAbsolute(config.nodeBinary) || !fs.statSync(config.nodeBinary).isFile()) fail('audit_configuration_invalid'); }
   catch { fail('audit_configuration_invalid'); }
   return new Promise((resolve, reject) => {
@@ -75,6 +78,7 @@ module.exports = { invokeWriter, createDelivery,
       const models = require('../../models');
       singleton = createDelivery({ repository: require('./platformAudit.repository').createRepository(models.PlatformAuditEvent),
         state: require('./platformAudit.monitor').createStateRepository(models), config: () => ({ enabled: true,
+          transport: process.env.PLATFORM_AUDIT_WRITER_TRANSPORT || 'local',
           sourceRoleArn: process.env.PLATFORM_AUDIT_WRITER_SOURCE_ROLE_ARN, nodeBinary: process.env.PLATFORM_AUDIT_NODE_BINARY }) });
     }
     return singleton.run();
