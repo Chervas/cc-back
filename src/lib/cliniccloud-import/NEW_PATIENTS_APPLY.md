@@ -2,13 +2,65 @@
 
 Ejecutor independiente de `app.js`, modelos, hooks, Redis y workers. No es un
 importador general: consume únicamente las altas inequívocas de la auditoría
-privada `cliniccloud-new-patients-audit/1`, más una decisión explícita para cada
+privada `cliniccloud-new-patients-audit/1` o `/2`, más una decisión explícita para cada
 candidato. Las exclusiones **no prueban duplicidad** y nunca autorizan fusionar.
 
-El corte revisado contiene 70 candidatos iniciales, 58 retenidos y 12 diferidos:
+El corte inicial v1 contenía 70 candidatos, 58 retenidos y 12 diferidos:
 11 por ambigüedad de identidad y uno adicional por nacimiento posterior al alta.
 Otra fecha inconsistente ya pertenece a los 11 diferidos. No se reinterpretan
 fechas para hacer pasar una fila.
+
+## Auditoría de una exportación posterior (v2)
+
+La v2 es reproducible con fuentes/fechas explícitas. No ampliar a mano las
+fechas del paquete v1: sus valores predeterminados y requisito de revisión
+independiente se conservan. Ejemplo de auditoría **sin escrituras de negocio**:
+
+```sh
+node src/scripts/cliniccloud-import-new-patients-audit.js \
+  --source-dir /home/ubuntu/frontend_clinicaclick/temp \
+  --historical-dir /home/ubuntu/secure-imports/clinic-real-20260722/review/backup_data \
+  --contacts-csv BACKUP_CONTACTOS_2026-09-13.csv \
+  --appointments-csv 'BACKUP_CITAS_2026-08-01_2026-12-31 (1).csv' \
+  --contacts-as-of 2026-09-13 \
+  --coverage-start 2026-08-01 --coverage-end 2026-12-31 \
+  --private-output /home/ubuntu/secure-imports/cliniccloud-new-patients-audit-NUEVO.json \
+  --private-snapshot /home/ubuntu/secure-imports/cliniccloud-new-patients-snapshot-NUEVO.json
+```
+
+Los dos nombres CSV son basenames dentro de `--source-dir`, no rutas relativas
+que salgan de él. El manifiesto vincula los cuatro ficheros (contactos/citas
+actuales, contactos/tipos históricos) y la foto completa de identidades del
+grupo. ALTA debe caer entre inicio de cobertura y fecha de contactos; el
+intervalo de citas debe contener esta última y no superar 366 días.
+
+La clínica se recalcula de la evidencia original, no de un campo editable del
+plan: primer tratamiento con pago acreditado; en su defecto, primero
+registrado. Un empate o área decisiva desconocida se difiere. No aceptar
+tratamientos anteriores a ALTA ni evidencia decisiva fuera de cobertura. El
+literal exportado «Pagada» acredita estado fuente, **no crea un cobro**.
+
+Colisiones de ID/NUM, documento, teléfonos, correo o nombre y variantes
+conservadoras de nombre se difieren, nunca fusionan. El barrido de variantes
+detecta omisión de tokens y una edición en nombres largos; no es una garantía
+de detectar toda identidad duplicada. La preparación vuelve a comprobar las
+identidades contra la BD fresca y recompone la evidencia de clínica desde CSV.
+Máximo 70 candidatos por lote; otros seguros esperan una auditoría nueva.
+
+La revisión v2 contiene `source_audit_sha256`, `prepared_by`, decisiones
+`source_contact_id`/`disposition` (`retain` o `defer`)/`reason`,
+`review_method=deterministic_source_and_live_identity_checks` y
+`operator_evidence` (basename privado `file` y `sha256bytes`). Identificar al
+operador real: una revisión automática no se presenta como revisión humana
+ni independiente. La v1 sigue exigiendo `peer_evidence`. Generar esta evidencia
+no concede autorización de aplicación: siguen siendo necesarios alcance
+autorizado, revisión por candidato, backup y aprobación vigente por paquete.
+
+Al preparar/aplicar una v2, añadir los mismos `--contacts-csv` y
+`--appointments-csv` explícitos a los comandos siguientes, con sus artefactos
+v2 correspondientes. Un `defer` no significa «paciente duplicado», y el número
+de diferidos del paquete solo incluye decisiones de ese lote, no todas las
+filas pendientes de la auditoría general.
 
 ## Preparación solo lectura
 
@@ -108,7 +160,8 @@ no se presupone acceso a todas las clínicas del grupo.
 ## Pruebas offline
 
 ```sh
-node --test src/scripts/tests/cliniccloud_import_new_patients.test.js \
+node --test src/scripts/tests/cliniccloud_new_patients_audit.test.js \
+  src/scripts/tests/cliniccloud_import_new_patients.test.js \
   src/scripts/tests/cliniccloud_import_snapshot_baseline.test.js
 ```
 

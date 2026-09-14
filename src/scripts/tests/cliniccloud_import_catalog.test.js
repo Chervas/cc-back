@@ -38,3 +38,30 @@ test('hair surgery requires both professionals and never assumes hours per surgi
   assert.deepEqual(plan.rows[0].required_professionals, ['Dr. Loza', 'Aux. Ainhoa']);
   assert.equal(plan.rows[0].duration_info.minutes, null);
 });
+test('confirmed aliases retain one existing identity while a second clinic membership remains pending', () => {
+  const local = { installations: [], treatments: [], professionals: [{ id: 7, clinic_id: 72, name: 'Dra. Nombre', surname: '', active: true, receives_appointments: true }] };
+  const sheets = [{ name: 'Capilar · sesiones y bonos', rows: [{ source_row: 2, cells: { A: 'Capilar', B: 'Servicio sintético', C: '30 min', D: '100 €', G: '7', H: 'Dra. Apellido' } }] }];
+  const unconfirmed = buildCatalogPlan({ sheets, workbookHash: 'synthetic', local });
+  assert.equal(unconfirmed.rows[0].professional_resolution[0].canonical_user_id, null);
+  const plan = buildCatalogPlan({ sheets, workbookHash: 'synthetic', local, resourceMap: { professionals: { 'Dra. Apellido': 7 } } });
+  const resolution = plan.rows[0].professional_resolution[0];
+  assert.equal(resolution.canonical_user_id, 7); assert.equal(resolution.identity_confirmed, true);
+  assert.equal(resolution.confirmed_id, null); assert.equal(resolution.requires_membership, true);
+  assert.equal(resolution.candidates[0].id, 7); assert.equal(plan.rows[0].ready_for_booking, false);
+  assert.equal(local.professionals.length, 1);
+});
+test('duplicate operational memberships require review, not a third membership or arbitrary active row', () => {
+  const local = { installations: [{ id: 8, clinic_id: 72, name: 'Cabina 7', active: true }], treatments: [], professionals: [
+    { id: 7, clinic_id: 72, name: 'Dra. Nombre', active: false, receives_appointments: false },
+    { id: 7, clinic_id: 72, name: 'Dra. Nombre', active: true, receives_appointments: true },
+  ] };
+  const sheets = [{ name: 'Tratamientos individuales', rows: [{ source_row: 2, cells: { A: 'Facial', B: 'Servicio sintético', C: '30 min', D: '100 €', G: '7', H: 'Dra. Apellido' } }] }];
+  const resourceMap = { professionals: { 'Dra. Apellido': 7 }, cabins: { C7: 8 } };
+  const row = buildCatalogPlan({ sheets, workbookHash: 'synthetic', local, resourceMap }).rows[0];
+  assert.equal(row.professional_resolution[0].canonical_user_id, 7);
+  assert.equal(row.professional_resolution[0].confirmed_id, null);
+  assert.equal(row.professional_resolution[0].requires_membership, undefined);
+  assert.equal(row.professional_resolution[0].requires_membership_review, true);
+  assert(row.issues.includes('PROFESSIONAL_MEMBERSHIP_AMBIGUOUS'));
+  assert.equal(row.ready_for_booking, false);
+});
