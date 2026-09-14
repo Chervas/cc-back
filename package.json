@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test:security:auth-cut": "node --require ./src/scripts/tests/fixtures/security_offline_runtime.cjs --test src/scripts/tests/admin_credential_session.test.js src/scripts/tests/auth_email_contract.test.js src/scripts/tests/platform_audit_auth.test.js src/scripts/tests/platform_audit_delivery.test.js src/scripts/tests/email_system.test.js src/scripts/tests/email_login_metadata.test.js",
+    "test:security:auth-cut": "node --require ./src/scripts/tests/fixtures/security_offline_runtime.cjs --test src/scripts/tests/admin_credential_session.test.js src/scripts/tests/auth_email_contract.test.js src/scripts/tests/platform_audit_auth.test.js src/scripts/tests/platform_audit_delivery.test.js src/scripts/tests/email_system.test.js src/scripts/tests/email_login_metadata.test.js src/scripts/tests/auth_email_recipient_policy.test.js",
     "test:security:whatsapp-resume": "node --require ./src/scripts/tests/fixtures/security_offline_runtime.cjs --test src/scripts/tests/whatsapp_reconnection_safety.test.js src/scripts/tests/appointment_access_guidance_scheduler.test.js src/scripts/tests/durable_whatsapp_scheduling.test.js src/scripts/tests/whatsapp_broker_client.test.js",
     "test": "npm run test:marketing",
     "test:marketing": "npm run test:marketing-web && npm run test:marketing-campaigns",

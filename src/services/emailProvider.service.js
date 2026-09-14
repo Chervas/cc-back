@@ -139,7 +139,20 @@ async function sendEmail(message, { env = process.env } = {}) {
   }
 
   assertSesCredentials(config);
-  assertRecipientAllowed(message.to, config);
+  try {
+    assertRecipientAllowed(message.to, config);
+  } catch (error) {
+    if (error.code !== 'email_recipient_not_allowlisted') throw error;
+    let authorized;
+    try {
+      authorized = await require('./authEmailRecipientPolicy.service').maySend(message, { env });
+    } catch {
+      throw Object.assign(Error('email_authentication_policy_unavailable'), {
+        code: 'email_authentication_policy_unavailable', retryable: true,
+      });
+    }
+    if (!authorized) throw error;
+  }
   const configurationSet = cleanString(message.configurationSet) || mapStreamToConfigurationSet(message.stream, config);
   const client = buildClient(config);
   const body = {

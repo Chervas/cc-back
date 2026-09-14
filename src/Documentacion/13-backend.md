@@ -232,6 +232,13 @@ Verificación/reenvío: 400 `auth_email_request_invalid` por esquema; 401
 va en el body y memoria del front; nunca query, logs ni localStorage.
 202 acredita encolado, no recepción del correo. Recargar exige otra contraseña.
 
+Correo público: `authEmailRecipientPolicy.service.js` prepara la excepción
+`EMAIL_AUTHENTICATION_RECIPIENT_POLICY=registered-account`, apagada por defecto.
+Verifica el outbox y la prueba vigente de cuenta antes de SES; no autoriza
+contenido libre. Con MFA enforce, solo los nuevos jobs de código/reset producidos
+por gateway se dirigen al worker de staging. Contrato completo y configuración en
+[33 — Correo de autenticación](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/33-sistema-email.md#correo-de-autenticación-para-cuentas-registradas).
+
 Recuperar contraseña consume el enlace existente y audita en la misma transacción,
 invalida sesiones/desafíos y sigue exigiendo el código. Pérdida del buzón requiere
 recuperación asistida revisada; no hay bypass por API. MFA ordinario no convierte

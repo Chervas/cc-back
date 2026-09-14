@@ -223,7 +223,7 @@ async function queueEmail(input = {}, options = {}) {
 
     const { job, created } = await jobRequestsService.enqueueUniqueJobRequest({
       type: EMAIL_SEND_JOB_TYPE,
-      payload: { email_message_id: message.id },
+      payload: require('./authEmailRecipientPolicy.service').jobPayload(templateKey, message.id),
       priority: message.priority,
       origin: cleanString(input.origin) || 'email_outbox',
       requestedBy: input.requestedBy || null,

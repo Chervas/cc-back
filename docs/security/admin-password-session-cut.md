@@ -197,11 +197,63 @@ Las DDL exactas pendientes para ese candidato son:
 - `20260913130000-create-auth-email-challenges.js` (DDL múltiple no atómica).
 
 Las migraciones existentes de correo/reset y JobRequests sí figuran aplicadas.
-No se ejecutó DDL compartida. No habilitar MFA global mientras la lista de
-correo solo permite cuatro destinatarios. Falta definir y aprobar su alcance
-sin liberar correos de otras colas. Faltan también la clave MFA privada,
-entrega/conciliación externa de auditoría y su identidad/runtime autorizados:
+No se ejecutó DDL compartida. SES transaccional está operativo. El candidato
+incorpora `EMAIL_AUTHENTICATION_RECIPIENT_POLICY=registered-account` para cubrir
+código/reset de cuentas activas fuera de la lista general, con prueba vigente en
+BD y contenido cerrado; configuración apagada hasta el corte. Contrato en
+[33](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/33-sistema-email.md#correo-de-autenticación-para-cuentas-registradas).
+Faltan la clave MFA privada y la entrega/conciliación externa de auditoría:
 sin vaciado, el límite de una hora cerraría la emisión de sesiones.
+
+### Dependencia AWS que impide activar el candidato
+
+La identidad IMDSv2 del host de aplicación pertenece a `468355432137` y usa
+`AmazonLightsailInstanceRole`; la infraestructura de seguridad pertenece a
+`137819318729`. `platformAudit.delivery.js` lanza `writer-main.js` como hijo local
+con IMDSv2 y el contrato valida un rol fuente de la cuenta de seguridad. Con ese
+alojamiento, el writer no puede asumir la identidad esperada. Una sesión SSO
+serviría para instalar/configurar, no para entregarla como credencial de runtime.
+
+Antes del corte, verificar el runtime de seguridad ya aprovisionado, su canal de
+instalación y los trusts efectivos; completar el transporte autenticado desde
+staging y la conciliación de recibos. Probar escritura/lectura ficticia y vaciado
+de outbox antes de exigir MFA. No copiar claves SES, aceptar el rol general de
+Lightsail ni desactivar el límite de backlog para sortear esta dependencia.
+Evidencia y solicitud de acceso en
+[99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-correo-mfa-2026-09-14).
+
+### Secuencia del corte público
+
+1. Revalidar HEAD/manifiesto del candidato contra staging, gateway y frontend
+   publicados; conservar el hotfix Meta y los cambios ajenos ya publicados.
+   Capturar referencias de rollback, configuración privada y metadata del
+   esquema; verificar un respaldo recuperable antes de las cinco DDL indicadas.
+   Comprobar ausencia/estado exacto de tablas y `SequelizeMeta`; no ejecutar un
+   `db:migrate` general ni continuar automáticamente tras una DDL parcial.
+2. Cerrar la dependencia AWS anterior. Aplicar solo ese lote aditivo con sus
+   postchecks de columnas, índices y metadatos. Conservar las tablas en rollback.
+   DEV comparte BD, pero mantiene sus gates y consumidores apagados.
+3. Instalar el candidato y preparar clave MFA privada de 32 bytes, fichero 0600,
+   compartida únicamente por los runtimes públicos necesarios. Conciliar claves
+   del flujo, `EMAIL_PUBLIC_APP_URL=https://crm.clinicaclick.com`, sesiones,
+   auditoría y política `registered-account`. Mantener la lista general de correo,
+   marketing apagado y los workers de gateway apagados; solo staging consume.
+4. Verificar entrega/conciliación externa y su monitor antes de activar
+   `AUTH_SESSION_MODE=enforce` y `AUTH_EMAIL_MFA_MODE=enforce` en las dos API
+   públicas. El frontend debe estar publicado previamente con soporte del
+   desafío. La ventana coordinada requiere volver a iniciar sesión para los JWT
+   legacy; durante el reinicio puede haber una interrupción breve del acceso.
+5. Prueba humana en CRM: recuperación → login → código recibido → sesión;
+   comprobar además expiración/reenvío, rechazo sin código, cierre administrativo
+   conservado y un único `email_send` de staging por mensaje. Gateway también
+   expone autenticación y debe exigir la misma prueba. Mantener Meta/WhatsApp y
+   sus colas pausados; el piloto de clínica será otro corte.
+
+Si falla el postcheck, volver al código/configuración exactos previos del corte,
+conservando tablas, outbox, revocaciones y rechazo de JWT administrativos antiguos.
+Restaurar flags de MFA previos reduce la protección a la etapa anterior: registrar
+esa degradación y mantener WhatsApp cerrado. No borrar evidencia ni reponer
+contraseñas o tokens revocados. No se ha ejecutado esta secuencia en público.
 
 La configuración observada de DEV y staging comparte UID, identidad de BD,
 JWT_SECRET y clave de cifrado de correo. La comprobación compara valores en
@@ -235,6 +287,7 @@ reenvío, consumo concurrente, recuperación y revocación de sesiones.
 ```bash
 npm run test:security:auth-cut
 CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/auth_email_challenges_mysql.integration.js
+CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/auth_email_delivery_mysql.integration.js
 ```
 
 La suite de acceso precarga `security_offline_runtime.cjs`: impide cargar `.env`,
