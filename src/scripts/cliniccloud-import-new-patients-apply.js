@@ -11,29 +11,38 @@ const { privateJson, openJournal, acquireExecutorLocks } = require('./clinicclou
 const { validateBackup } = require('./cliniccloud-import-contacts-apply');
 function loadSources(options) {
   return Object.fromEntries([
-    ['contacts', options['--source-dir'], 'BACKUP_CONTACTOS_2026-09-05.csv'],
-    ['appointments', options['--source-dir'], 'BACKUP_CITAS_2026-08-01_2026-12-31.csv'],
+    ['contacts', options['--source-dir'], options['--contacts-csv'] || 'BACKUP_CONTACTOS_2026-09-05.csv'],
+    ['appointments', options['--source-dir'], options['--appointments-csv'] || 'BACKUP_CITAS_2026-08-01_2026-12-31.csv'],
     ['historic_contacts', options['--historical-dir'], 'contacto_1.csv'],
     ['historic_types', options['--historical-dir'], 'tiposervicio_1.csv'],
-  ].map(([role, directory, name]) => [role, readCsv(path.join(directory, name), role)]));
+  ].map(([role, directory, name]) => {
+    if (path.basename(name) !== name) throw Error('SOURCE_FILENAME_MUST_BE_BASENAME');
+    return [role, readCsv(path.join(directory, name), role)];
+  }));
 }
-function validateReviewEvidence(review, filename) {
-  if (!Array.isArray(review.peer_evidence) || !review.peer_evidence.length) throw new Error('PEER_REVIEW_EVIDENCE_REQUIRED');
-  for (const entry of review.peer_evidence) {
-    if (!entry.file || path.basename(entry.file) !== entry.file) throw new Error('PEER_REVIEW_EVIDENCE_PATH_INVALID');
+function validateReviewEvidence(review, filename, audit = null) {
+  const current = audit?.manifest?.version === 'cliniccloud-new-patients-audit/2';
+  // V1 retains its original peer-review requirement. V2 records the actual
+  // operator review method; it does not label an automated audit as a peer.
+  if (current && review.review_method !== 'deterministic_source_and_live_identity_checks') throw Error('IDENTITY_REVIEW_METHOD_REQUIRED');
+  const evidence = current ? review.operator_evidence : review.peer_evidence;
+  if (!Array.isArray(evidence) || !evidence.length) throw new Error(current ? 'OPERATOR_REVIEW_EVIDENCE_REQUIRED' : 'PEER_REVIEW_EVIDENCE_REQUIRED');
+  const prefix = current ? 'OPERATOR_REVIEW_EVIDENCE' : 'PEER_REVIEW_EVIDENCE';
+  for (const entry of evidence) {
+    if (!entry.file || path.basename(entry.file) !== entry.file) throw new Error(`${prefix}_PATH_INVALID`);
     const evidencePath = path.join(path.dirname(filename), entry.file);
     privateJson(evidencePath);
-    if (hash(readBytes(evidencePath)) !== entry.sha256bytes) throw new Error('PEER_REVIEW_EVIDENCE_HASH_MISMATCH');
+    if (hash(readBytes(evidencePath)) !== entry.sha256bytes) throw new Error(`${prefix}_HASH_MISMATCH`);
   }
 }
 async function run(args) {
-  const options = parseArgs(args, ['--mode', '--audit', '--review', '--global-snapshot', '--source-dir', '--historical-dir', '--private-output', '--package', '--approval', '--backup-manifest', '--private-journal']);
+  const options = parseArgs(args, ['--mode', '--audit', '--review', '--global-snapshot', '--source-dir', '--historical-dir', '--contacts-csv', '--appointments-csv', '--private-output', '--package', '--approval', '--backup-manifest', '--private-journal']);
   if (!['prepare', 'apply'].includes(options['--mode'])) throw new Error('EXPLICIT_PREPARE_OR_APPLY_REQUIRED');
   for (const key of ['--audit', '--review', '--source-dir', '--historical-dir']) if (!options[key]) throw new Error('AUDIT_REVIEW_AND_SOURCES_REQUIRED');
   if (path.resolve(__dirname, '../..') !== '/home/ubuntu/wt/back-dev' || process.cwd() !== '/home/ubuntu/wt/back-dev'
     || execFileSync('git', ['branch', '--show-current'], { encoding: 'utf8' }).trim() !== 'dev') throw new Error('DEV_WORKTREE_REQUIRED');
   const audit = privateJson(options['--audit']), review = privateJson(options['--review']), sources = loadSources(options);
-  validateReviewEvidence(review, options['--review']);
+  validateReviewEvidence(review, options['--review'], audit);
   let pkg, approval, groupId;
   if (options['--mode'] === 'prepare') {
     if (!options['--global-snapshot'] || !options['--private-output']) throw new Error('GLOBAL_SNAPSHOT_AND_PRIVATE_OUTPUT_REQUIRED');

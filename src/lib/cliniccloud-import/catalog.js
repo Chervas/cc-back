@@ -78,9 +78,18 @@ function buildCatalogPlan({ sheets, workbookHash, local = { installations: [], p
           return tokens.length && existingTokens.length && (tokens.every((t) => existingTokens.includes(t)) || existingTokens.every((t) => tokens.includes(t)));
         });
         const mappedId = resourceMap.professionals?.[label];
-        const mapped = mappedId ? local.professionals.find((p) => p.id === mappedId && p.clinic_id === row.clinic_id) : null;
-        if (mapped && !candidates.includes(mapped)) candidates.push(mapped);
-        return { label, confirmed_id: mapped?.id || null, candidates: candidates.map((p) => ({ id: p.id, clinic_id: p.clinic_id, active: Boolean(p.active), receives_appointments: Boolean(p.receives_appointments), subrole: p.subrole })), name_matches_are_not_identity_approval: true, requires_membership: mappedId && !mapped ? true : undefined };
+        // Identity and the operational clinic membership are different facts.
+        // A confirmed person missing a DoctorClinica row must not be proposed
+        // as a new user (for example Celia/Camacho in Medical and Capilar).
+        const canonical = mappedId ? local.professionals.find((p) => p.id === mappedId) : null;
+        const memberships = mappedId ? local.professionals.filter((p) => p.id === mappedId && p.clinic_id === row.clinic_id) : [];
+        const mapped = memberships.length === 1 ? memberships[0] : null;
+        if (canonical && !candidates.includes(canonical)) candidates.push(canonical);
+        for (const membership of memberships) if (!candidates.includes(membership)) candidates.push(membership);
+        return { label, canonical_user_id: canonical?.id || null, identity_confirmed: Boolean(canonical), confirmed_id: mapped?.id || null,
+          candidates: candidates.map((p) => ({ id: p.id, clinic_id: p.clinic_id, active: Boolean(p.active), receives_appointments: Boolean(p.receives_appointments), subrole: p.subrole })),
+          name_matches_are_not_identity_approval: true, requires_membership: canonical && memberships.length === 0 ? true : undefined,
+          requires_membership_review: memberships.length > 1 ? true : undefined };
       });
       row.installation_resolution = cabins.map((key) => {
         const mappedId = resourceMap.cabins?.[key];
@@ -98,6 +107,7 @@ function buildCatalogPlan({ sheets, workbookHash, local = { installations: [], p
         if (row.installation_resolution.some((r) => !r.confirmed_id)) row.issues.push('PHYSICAL_CABIN_MAP_NOT_CONFIRMED');
         if (row.installation_resolution.some((r) => r.confirmed_id && r.confirmed_clinic_id !== row.clinic_id)) row.issues.push('SHARED_CABIN_RUNTIME_MEMBERSHIP_REQUIRED');
         if (row.professional_resolution.some((r) => !r.confirmed_id)) row.issues.push('PROFESSIONAL_MEMBERSHIP_MAP_NOT_CONFIRMED');
+        if (row.professional_resolution.some((r) => r.requires_membership_review)) row.issues.push('PROFESSIONAL_MEMBERSHIP_AMBIGUOUS');
         if (row.professional_resolution.some((r) => r.confirmed_id && !r.candidates.some((p) => p.id === r.confirmed_id && p.clinic_id === row.clinic_id && p.active && p.receives_appointments))) row.issues.push('PROFESSIONAL_NOT_BOOKABLE');
         if (row.installation_resolution.some((r) => r.confirmed_id && !local.installations.find((i) => i.id === r.confirmed_id)?.active)) row.issues.push('INSTALLATION_INACTIVE');
       }
