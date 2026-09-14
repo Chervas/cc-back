@@ -1,5 +1,6 @@
 'use strict';
 const express = require('express');
+const webhookContainment = require('../lib/whatsappWebhookContainment');
 const crypto = require('crypto');
 const router = express.Router();
 const patientDirectionService = require('../services/patientDirection.service');
@@ -382,7 +383,7 @@ router.get('/whatsapp/webhook', (req, res) => {
   return res.sendStatus(403);
 });
 
-router.post('/whatsapp/webhook', async (req, res) => {
+router.post('/whatsapp/webhook', webhookContainment, async (req, res) => {
   try {
     if (!verifySignature(req, res, req.rawBody || Buffer.from(JSON.stringify(req.body || {})))) {
       return res.sendStatus(401);
