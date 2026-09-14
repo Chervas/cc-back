@@ -1,5 +1,23 @@
 > **Módulo:** Arquitectura del Backend
 
+## Actividad de firma de presupuestos
+
+`recordBudgetSignatureEvent` conserva el estado real del presupuesto como
+`from_status` y `to_status`, leído en la misma transacción. Crear, enviar, abrir
+o caducar una solicitud no equivale a presentar o aceptar el presupuesto; esas
+transiciones mantienen sus eventos propios. No usar el estado anticipado del
+snapshot como estado vigente.
+
+La migración aditiva `20260914003000-allow-budget-signature-events.js` añade los
+seis eventos `signature_request_*` al ENUM de `EconomicBudgetEvents`, manteniendo
+el orden original. Valida el esquema, es idempotente y rechaza rollback si ya
+hay evidencias de firma. No borra eventos ni activa WhatsApp. El ejecutor DEV
+`cliniccloud-dev-schema.js --apply-budget-signature-schema` crea backup privado
+nuevo y aplica exclusivamente esta DDL, no la cola de migraciones pendientes
+de seguridad. Contrato económico: [14-economia-paciente](14-economia-paciente.md);
+estado/despliegue y evidencias en el manual central 19/99.
+
+
 ## Plantillas por AWS, monitor de seguridad y tarifas IA
 
 El transporte operativo `whatsapp-authorized-v1` conserva el ámbito de clínica,
