@@ -2121,6 +2121,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         // HTTP callers cannot author a reservation snapshot, even while the new
         // booking runtime is disabled or when recording past clinical activity.
         delete baseImportMetadata.booking;
+        delete baseImportMetadata.program_session;
         const appointmentImportMetadata = {
             ...baseImportMetadata,
             ...(isHistoricalRegistration ? {
@@ -2681,6 +2682,9 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
 
     let previousStatus = cita.estado;
     cita.estado = estadoRaw;
+    if (cita.source_system === 'treatment_program' && !require('../lib/program-booking').programBookingEnabled()) {
+        return res.status(409).json({ code: 'program_booking_disabled', message: 'Esta cita requiere el entorno compatible con programas.' });
+    }
     cita.updated_by = req.userData?.userId || null;
     if (bookingCapabilities().simple) {
         cita = await mutateAppointmentBooking({ db, existingAppointmentId: citaId,
@@ -2811,6 +2815,9 @@ exports.resolveRequestedAppointmentChange = asyncHandler(async (req, res) => {
     const current = await CitaPaciente.findByPk(citaId);
     if (!current) return res.status(404).json({ message: 'Cita no encontrada' });
     if (await denyAppointmentManageAccessIfNeeded(req, res, current.clinica_id)) return;
+    if (current.source_system === 'treatment_program' && !require('../lib/program-booking').programBookingEnabled()) {
+        return res.status(409).json({ code: 'program_booking_disabled', message: 'Esta cita requiere el entorno compatible con programas.' });
+    }
     if (String(current.estado || '').toLowerCase() !== 'cambio_solicitado') {
         return res.status(409).json({
             message: 'La cita ya no tiene un cambio pendiente.',
@@ -2925,6 +2932,7 @@ exports.deleteCita = asyncHandler(async (req, res) => {
         return res.status(404).json({ message: 'Cita no encontrada' });
     }
     if (await denyAppointmentManageAccessIfNeeded(req, res, cita.clinica_id)) return;
+    if (cita.source_system === 'treatment_program') return res.status(409).json({ code: 'program_history_preserved', message: 'Las citas de un programa se cancelan; su historial no se elimina.' });
 
     if (String(cita.estado || '').trim().toLowerCase() !== 'cancelada') {
         return res.status(409).json({ message: 'Solo se pueden eliminar citas canceladas' });
@@ -2982,6 +2990,9 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
 
     let previousStatus = cita.estado;
     const rescheduleReason = String(req.body?.reschedule_reason || 'clinic_schedule').trim().toLowerCase();
+    if (cita.source_system === 'treatment_program' && !require('../lib/program-booking').programBookingEnabled()) {
+        return res.status(409).json({ code: 'program_booking_disabled', message: 'Esta cita requiere el entorno compatible con programas.' });
+    }
     if (!['patient_request', 'clinic_schedule'].includes(rescheduleReason)) {
         return res.status(400).json({
             message: 'reschedule_reason inválido',

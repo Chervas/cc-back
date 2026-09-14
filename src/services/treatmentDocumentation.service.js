@@ -76,7 +76,7 @@ function createTreatmentDocumentationService(db = require('../../models')) {
       clinicId = Number(clinicId);
       const appointment = await db.CitaPaciente.findOne({
         where: { id_cita: Number(appointmentId), clinica_id: clinicId },
-        attributes: ['id_cita', 'paciente_id', 'tratamiento_id'], raw: true,
+        attributes: ['id_cita', 'clinica_id', 'paciente_id', 'tratamiento_id', 'voucher_id', 'source_system', 'import_metadata'], raw: true,
       });
       if (!appointment) throw fail(404, 'appointment_not_found', 'Cita no encontrada en esta clínica.');
       const patient = await db.Paciente.findByPk(appointment.paciente_id, { attributes: ['id_paciente', 'clinica_id'], raw: true });
@@ -91,6 +91,13 @@ function createTreatmentDocumentationService(db = require('../../models')) {
         items: [], draft_count: 0, unavailable_count: 0, total: 0, page: 0, page_size: 5, has_more: false,
       };
       if (!appointment.tratamiento_id) return { ...base, documentation_status: 'no_treatment' };
+      let treatmentIds = [Number(appointment.tratamiento_id)];
+      if (appointment.source_system === 'treatment_program' && appointment.voucher_id) {
+        const frozen = await require('../lib/program-appointment-context').programAppointmentContext(db, appointment);
+        treatmentIds = frozen.treatment_ids;
+        const allowed = await db.Tratamiento.findAll({ where: { ...(await scope(clinicId)), id_tratamiento: { [Op.in]: treatmentIds } }, attributes: ['id_tratamiento'], raw: true });
+        if (allowed.length !== treatmentIds.length) return { ...base, documentation_status: 'treatment_unavailable' };
+      }
       const treatment = await db.Tratamiento.findOne({
         where: { ...(await scope(clinicId)), id_tratamiento: appointment.tratamiento_id },
         attributes: ['id_tratamiento', 'nombre'], raw: true,
@@ -101,7 +108,8 @@ function createTreatmentDocumentationService(db = require('../../models')) {
       const pageSize = query.page_size == null ? 5 : Number(query.page_size);
       if (!Number.isSafeInteger(page) || page < 0 || page > 10000 || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 10) throw fail(400, 'invalid_documentation_page', 'Página de documentos no válida.');
       const where = { clinic_id: clinicId, kind: { [Op.in]: ['protocol', 'aftercare'] },
-        [Op.and]: [db.Sequelize.where(db.Sequelize.fn('JSON_CONTAINS', db.Sequelize.col('treatment_ids'), JSON.stringify(Number(appointment.tratamiento_id))), 1)],
+        [Op.and]: [treatmentIds.length === 1 ? db.Sequelize.where(db.Sequelize.fn('JSON_CONTAINS', db.Sequelize.col('treatment_ids'), JSON.stringify(treatmentIds[0])), 1)
+          : { [Op.or]: treatmentIds.map(id => db.Sequelize.where(db.Sequelize.fn('JSON_CONTAINS', db.Sequelize.col('treatment_ids'), JSON.stringify(id)), 1)) }],
       };
       const [{ rows, count }, draftCount] = await Promise.all([
         db.TreatmentProtocol.findAndCountAll({ where: { ...where, status: 'approved' }, attributes: ['id', 'version'], order: [['id', 'ASC']], limit: pageSize, offset: page * pageSize, raw: true }),
@@ -117,7 +125,7 @@ function createTreatmentDocumentationService(db = require('../../models')) {
         // Do not fall back to mutable/current text or a draft when the exact approval snapshot is missing.
         if (!snapshot || Number(snapshot.id) !== Number(row.id) || Number(snapshot.clinic_id) !== clinicId
           || Number(snapshot.version) !== Number(row.version) || snapshot.status !== 'approved'
-          || !Array.isArray(snapshot.treatment_ids) || !snapshot.treatment_ids.map(Number).includes(Number(appointment.tratamiento_id))
+          || !Array.isArray(snapshot.treatment_ids) || !snapshot.treatment_ids.map(Number).some(id => treatmentIds.includes(id))
           || !['protocol', 'aftercare'].includes(snapshot.kind) || typeof snapshot.content !== 'string' || !snapshot.content.trim()
           || !snapshot.approved_by || !snapshot.approved_at) {
           unavailable++;

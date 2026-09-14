@@ -1,6 +1,7 @@
 'use strict';
 module.exports = (sequelize, DataTypes) => {
   const TreatmentProgram = sequelize.define('TreatmentProgram', {
+    cadence: { type: DataTypes.JSON, allowNull: true },
     id: { type: DataTypes.BIGINT.UNSIGNED, primaryKey: true, autoIncrement: true },
     public_id: { type: DataTypes.STRING(36), allowNull: false, unique: true },
     clinic_id: { type: DataTypes.INTEGER, allowNull: false },

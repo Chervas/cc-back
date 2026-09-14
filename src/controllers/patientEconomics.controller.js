@@ -4,6 +4,7 @@ const db = require('../../models');
 const economics = require('../services/patientEconomics.service');
 const economicDocumentPdf = require('../services/economicDocumentPdf.service');
 const voucherAppointments = require('../services/patientVoucherAppointments.service');
+const programBooking = require('../services/patientProgramBooking.service');
 const { getAccessibleClinicIdsForFeature } = require('../lib/access-policy');
 
 function positiveInteger(value) {
@@ -90,6 +91,32 @@ exports.getWorkspace = asyncHandler(async (req, res) => {
     clinicId,
   });
   res.json(workspace);
+});
+
+async function programContext(req, write = false) {
+  const clinicId = await requireVoucherFeature(req, write ? 'patients.edit' : 'patients.view');
+  await requireClinicFeature(req, 'patients.sensitive.view', clinicId);
+  await requireClinicFeature(req, write ? 'appointments.manage' : 'appointments.view', clinicId);
+  return { publicId: req.params.voucherId, clinicId, actorId: actorId(req), payload: req.body };
+}
+exports.getProgramPlan = asyncHandler(async (req, res) => res.json(await programBooking.read(await programContext(req))));
+exports.proposeProgramPlan = asyncHandler(async (req, res) => res.json(await programBooking.propose(await programContext(req))));
+exports.reserveProgramPlan = asyncHandler(async (req, res) => {
+  const context = await programContext(req, true);
+  const result = await programBooking.book(context);
+  const documentationPending = [];
+  if (!result.replayed) {
+    for (const session of result.sessions) {
+      try {
+        // Existing tablet/package lifecycle, no delivery or provider call. A
+        // document-preparation failure cannot turn a committed booking into 500.
+        await require('../services/consentimientos.service').ensurePackageForAppointment(session.appointment_id, {
+          createdBy: context.actorId, triggerSource: 'program_booking',
+        });
+      } catch (_) { documentationPending.push(session.appointment_id); }
+    }
+  }
+  res.status(201).json({ ...result, documentation_pending: documentationPending });
 });
 
 exports.listCatalog = asyncHandler(async (req, res) => {

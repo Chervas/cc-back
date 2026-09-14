@@ -53,11 +53,12 @@ async function loadScopedTreatment({ db, treatmentId, clinic, transaction = null
     const owner = await db.Clinica.findByPk(treatment.clinica_id, { attributes: ['grupoClinicaId'], transaction });
     treatmentGroupId = Number(owner?.grupoClinicaId);
   }
-  if (!treatment || (treatment.origen === 'clinica' && Number(treatment.clinica_id) !== clinicId)
+  if (!treatment || !['sistema', 'clinica', 'grupo'].includes(treatment.origen) || (treatment.origen === 'clinica' && Number(treatment.clinica_id) !== clinicId)
     || (treatment.origen === 'grupo' && (!groupId || treatmentGroupId !== groupId))) {
     throw bookingError('treatment_not_found', 'Tratamiento no encontrado.', null, 404);
   }
-  const hidden = treatment.eliminado_por_clinica;
+  let hidden = treatment.eliminado_por_clinica;
+  if (typeof hidden === 'string') { try { hidden = JSON.parse(hidden); } catch { throw bookingError('treatment_not_found', 'Tratamiento no encontrado.', null, 404); } }
   if (Array.isArray(hidden) && hidden.map(Number).includes(clinicId)) {
     throw bookingError('treatment_not_found', 'Tratamiento no encontrado.', null, 404);
   }
@@ -73,7 +74,7 @@ function assertPriorityAcknowledgement(solution, acknowledged) {
 }
 
 function bookingErrorMiddleware(error, req, res, next) {
-  if (!/^(booking_|treatment_not_|treatment_not_found)/.test(String(error?.code || ''))) return next(error);
+  if (!/^(booking_|program_|treatment_not_|treatment_not_found)/.test(String(error?.code || ''))) return next(error);
   return res.status(error.statusCode || 409).json({ code: error.code, message: error.message, details: error.details || null, can_force: false });
 }
 

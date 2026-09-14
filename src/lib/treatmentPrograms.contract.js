@@ -39,7 +39,9 @@ function normalizeValues(input, { current = null } = {}) {
     if (offset !== null && (!['number', 'string'].includes(typeof appointment.offset_days) || !Number.isSafeInteger(offset) || offset < 0 || offset > 3650)) throw domainError(400, 'program_invalid_offset', 'Los días desde la primera cita deben estar entre 0 y 3650.');
     return { key, label: boundedText(appointment.label, 'label', 120) || `Cita ${index + 1}`, treatment_ids: ids, offset_days: offset };
   });
-  return { name: boundedText(value('name', ''), 'name', 255, true), kind, status, total_price: money(value('total_price', null)), notes: boundedText(value('notes', null), 'notes', 10000), appointments: normalized };
+  const cadence = require('./program-booking').normalizeCadence(value('cadence', null));
+  if (kind === 'voucher' && cadence) throw domainError(400, 'voucher_cadence_invalid', 'Un bono no tiene pauta semanal; utiliza Programa.');
+  return { name: boundedText(value('name', ''), 'name', 255, true), kind, status, total_price: money(value('total_price', null)), notes: boundedText(value('notes', null), 'notes', 10000), cadence, appointments: normalized };
 }
 function filters(query = {}) {
   const page = query.page == null ? 1 : positiveInteger(query.page, 'page');
@@ -60,7 +62,7 @@ function treatmentDto(raw) {
   let profile = null;
   try { profile = normalizeBookingProfile(config.booking_profile); } catch { issues.push({ code: 'invalid_booking_profile', message: 'Completa el perfil de agenda del tratamiento.' }); }
   if (!profile) issues.push({ code: 'missing_booking_profile', message: 'Falta configurar cabina, duración y profesionales.' });
-  if (profile && requiresMultiResourceBooking(profile)) issues.push({ code: 'multi_resource_writer_pending', message: 'La reserva conjunta de fases o equipos todavía necesita el comando de agenda compatible.' });
+  if (profile && requiresMultiResourceBooking(profile) && !require('../services/treatmentBookingProfile.service').bookingCapabilities().multi) issues.push({ code: 'multi_resource_writer_pending', message: 'La reserva conjunta de fases o equipos necesita activar el comando de agenda compatible en todos los entornos.' });
   const duration = profile ? profile.phases.reduce((sum, phase) => sum + phase.duration_minutes, 0) : Number(value.duracion_min) > 0 ? Number(value.duracion_min) : null;
   if (!duration) issues.push({ code: 'missing_duration', message: 'El tratamiento no tiene una duración definida.' });
   return { id: Number(value.id_tratamiento), name: value.nombre, code: value.codigo || null, clinic_id: value.clinica_id ? Number(value.clinica_id) : null, catalog_status: status, duration_minutes: duration, stored_catalog_price: value.precio_base == null ? null : Number(value.precio_base), stored_price_semantics: 'existing_catalog_field_unclassified', default_sessions: Number(value.sesiones_defecto || 1), legacy_voucher_offer: Number(value.sesiones_defecto || 1) > 1, booking_profile: profile, issues, booking_ready: issues.length === 0 };
@@ -73,7 +75,7 @@ function summarize(values, treatmentsById) {
   const appointments = values.appointments.map((appointment, appointmentIndex) => {
     const appointmentIssues = [];
     if (!appointment.treatment_ids.length) appointmentIssues.push({ code: 'treatment_required', message: 'Selecciona un tratamiento para esta cita.' });
-    if (values.kind === 'program' && appointment.offset_days == null) appointmentIssues.push({ code: 'cadence_required', message: 'Indica cuándo corresponde esta cita desde el inicio del programa.' });
+    if (values.kind === 'program' && !values.cadence && appointment.offset_days == null) appointmentIssues.push({ code: 'cadence_required', message: 'Indica una pauta semanal o cuándo corresponde esta cita desde el inicio del programa.' });
     if (values.kind === 'program' && appointmentIndex === 0 && appointment.offset_days != null && appointment.offset_days !== 0) appointmentIssues.push({ code: 'first_appointment_starts_program', message: 'La primera cita debe corresponder al día 0 del programa.' });
     if (appointment.offset_days != null && appointment.offset_days < lastOffset) appointmentIssues.push({ code: 'cadence_not_ordered', message: 'Las citas deben mantener el orden del programa.' });
     if (appointment.offset_days != null) lastOffset = appointment.offset_days;
@@ -83,10 +85,16 @@ function summarize(values, treatmentsById) {
       for (const issue of treatment.issues) appointmentIssues.push({ ...issue, treatment_id: id });
       return treatment;
     });
-    if (appointment.treatment_ids.length > 1) appointmentIssues.push({ code: 'combined_appointment_writer_pending', message: 'La reserva de varios tratamientos en una cita requiere el comando de agenda conjunto.' });
+    let composed = null;
+    if (treatments.length && treatments.every(treatment => treatment.booking_profile)) {
+      try { composed = require('./program-booking').composeAppointmentProfile({ treatments }); }
+      catch (error) { appointmentIssues.push({ code: error.code || 'program_composition_invalid', message: error.message }); }
+    }
+    if (appointment.treatment_ids.length > 1 && !require('../services/treatmentBookingProfile.service').bookingCapabilities().multi) appointmentIssues.push({ code: 'combined_appointment_writer_pending', message: 'La reserva de varios tratamientos en una cita requiere activar el comando de agenda conjunto.' });
     issues.push(...appointmentIssues.map((issue) => ({ ...issue, appointment_key: appointment.key })));
     const duration = treatments.every((t) => t.duration_minutes) ? treatments.reduce((sum, t) => sum + t.duration_minutes, 0) : null;
-    return { ...appointment, treatments, duration_minutes: duration, issues: appointmentIssues };
+    return { ...appointment, treatments, duration_minutes: duration, booking_profile: composed?.profile || null,
+      phase_treatments: composed?.phase_treatments || [], issues: appointmentIssues };
   });
   if (values.kind === 'voucher') {
     const sets = appointments.map((a) => a.treatment_ids.join(','));

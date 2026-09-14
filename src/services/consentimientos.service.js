@@ -1546,10 +1546,11 @@ async function propagateAdminTemplateToClinics(catalogIdRaw, options = {}) {
     };
 }
 
-async function getTreatmentRequirements({ tratamientoId, clinicaId = null }) {
+async function getTreatmentRequirements({ tratamientoId, tratamientoIds = null, clinicaId = null }) {
     const parsedTreatmentId = toIntOrNull(tratamientoId);
-    if (!parsedTreatmentId) return [];
-    const where = { tratamiento_id: parsedTreatmentId };
+    const ids = Array.isArray(tratamientoIds) ? [...new Set(tratamientoIds.map(toIntOrNull).filter(Boolean))] : [];
+    if (!parsedTreatmentId && !ids.length) return [];
+    const where = { tratamiento_id: ids.length ? { [Op.in]: ids } : parsedTreatmentId };
     const parsedClinicId = toIntOrNull(clinicaId);
     if (parsedClinicId) {
         where[Op.or] = [{ clinica_id: parsedClinicId }, { clinica_id: null }];
@@ -1749,7 +1750,14 @@ async function resolveRequirementsForAppointment(citaLike) {
     const tratamientoId = toIntOrNull(plain?.tratamiento_id || plain?.tratamiento?.id_tratamiento);
     const clinicId = toIntOrNull(plain?.clinica_id || plain?.clinica?.id_clinica);
     if (!tratamientoId || !clinicId) return [];
-    const directRequirements = await getTreatmentRequirements({ tratamientoId, clinicaId: clinicId });
+    let tratamientoIds = [tratamientoId];
+    // Look up the canonical purchased unit, never take treatment IDs from HTTP
+    // metadata. Ordinary appointments retain their existing single-treatment path.
+    if (plain.source_system === 'treatment_program' && plain.voucher_id) {
+        const frozen = await require('../lib/program-appointment-context').programAppointmentContext(db, plain);
+        tratamientoIds = frozen.treatment_ids;
+    }
+    const directRequirements = await getTreatmentRequirements({ tratamientoIds, clinicaId: clinicId });
     return directRequirements.filter((requirement) => {
         const plainRequirement = getPlain(requirement);
         const clinicTemplate = plainRequirement.clinicTemplate;
@@ -2065,7 +2073,7 @@ async function getConsentSummaryForAppointment(citaLike) {
             paciente_id: cita.paciente_id,
             clinica_id: cita.clinica_id,
             cita_id: cita.id_cita,
-            tratamiento_id: cita.tratamiento_id,
+            tratamiento_id: { [Op.in]: [...new Set(requirements.map(row => Number(getPlain(row).tratamiento_id)).filter(Boolean))] },
             status: { [Op.notIn]: ['cancelled', 'voided', 'superseded'] },
         },
         include: [{ model: db.ConsentSignaturePackage, as: 'package', required: false }],
@@ -2073,14 +2081,14 @@ async function getConsentSummaryForAppointment(citaLike) {
 
     const existingKeys = new Set(documents.map((doc) => {
         const plain = getPlain(doc);
-        return plain.clinic_template_id ? `clinic:${plain.clinic_template_id}` : `catalog:${plain.catalog_template_id}`;
+        return `${plain.tratamiento_id}:` + (plain.clinic_template_id ? `clinic:${plain.clinic_template_id}` : `catalog:${plain.catalog_template_id}`);
     }));
     let missingRequired = 0;
     let missingOptional = 0;
     const signingPolicies = [];
     for (const requirement of requirements) {
         const plain = getPlain(requirement);
-        const key = plain.clinic_template_id ? `clinic:${plain.clinic_template_id}` : `catalog:${plain.catalog_template_id}`;
+        const key = `${plain.tratamiento_id}:` + (plain.clinic_template_id ? `clinic:${plain.clinic_template_id}` : `catalog:${plain.catalog_template_id}`);
         const resolved = await resolveRequirementTemplate(requirement);
         if (resolved?.template && resolved?.version) {
             signingPolicies.push(getSigningPolicyFromVersion(resolved.version, resolved.template));
@@ -2183,8 +2191,25 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
         profesional: plainCita.doctor,
     });
 
+    const requirementTreatmentIds = [...new Set(requirements.map(row => Number(getPlain(row).tratamiento_id)).filter(Boolean))];
+    const requirementTreatments = requirementTreatmentIds.some(id => id !== Number(plainCita.tratamiento_id)) ? await db.Tratamiento.findAll({ where: { id_tratamiento: { [Op.in]: requirementTreatmentIds } } }) : [];
+    const programContext = plainCita.source_system === 'treatment_program' && plainCita.voucher_id
+        ? await require('../lib/program-appointment-context').programAppointmentContext(db, plainCita) : null;
+    const doctorsByTreatment = new Map(programContext ? requirementTreatmentIds.map(id => [id,
+        require('../lib/program-appointment-context').programTreatmentDoctorIds(programContext, plainCita, id)]) : []);
+    const programDoctorIds = [...new Set([...doctorsByTreatment.values()].flat())];
+    const programDoctors = programDoctorIds.length ? await db.Usuario.findAll({ where: { id_usuario: { [Op.in]: programDoctorIds } }, attributes: ['id_usuario', 'nombre', 'apellidos'] }) : [];
+
     for (const requirement of requirements) {
         const plainRequirement = getPlain(requirement);
+        const requirementTreatmentId = toIntOrNull(plainRequirement.tratamiento_id) || plainCita.tratamiento_id;
+        const requirementTreatment = requirementTreatments.find(row => Number(row.id_tratamiento) === Number(requirementTreatmentId));
+        const assignedDoctors = doctorsByTreatment.get(requirementTreatmentId) || [];
+        // A multi-professional team cannot be represented by a guessed singular
+        // signer. Keep that placeholder empty instead of naming another phase's doctor.
+        const professional = programContext ? (assignedDoctors.length === 1 ? getPlain(programDoctors.find(row => row.id_usuario === assignedDoctors[0])) : null) : plainCita.doctor;
+        const documentContext = requirementTreatment || programContext ? buildTemplateContext({ paciente: plainCita.paciente, clinica: plainCita.clinica,
+            tratamiento: getPlain(requirementTreatment) || plainCita.tratamiento, cita: { ...plainCita, tratamiento_id: requirementTreatmentId }, profesional: professional }) : context;
         const resolved = await resolveRequirementTemplate(requirement);
         if (!resolved?.template || !resolved?.version) continue;
 
@@ -2207,7 +2232,7 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
             package_id: packageRow.id,
             paciente_id: plainCita.paciente_id,
             cita_id: plainCita.id_cita,
-            tratamiento_id: plainCita.tratamiento_id,
+            tratamiento_id: requirementTreatmentId,
             status: { [Op.notIn]: ['cancelled', 'voided', 'superseded'] },
         };
         if (plainRequirement.clinic_template_id) {
@@ -2219,7 +2244,7 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
         if (existing && !DOCUMENT_CLOSED_STATUSES.has(existing.status)) continue;
 
         const title = resolved.version.title || resolved.template.name;
-        const renderedHtml = renderTemplateHtml(resolved.version.body_html || buildDefaultBodyHtml(title), context);
+        const renderedHtml = renderTemplateHtml(resolved.version.body_html || buildDefaultBodyHtml(title), documentContext);
         const signingPolicy = getSigningPolicyFromVersion(resolved.version, resolved.template);
         const snapshot = {
             template_source: resolved.source,
@@ -2242,7 +2267,7 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
                 body_json: resolved.version.body_json || null,
                 variable_schema: resolved.version.variable_schema || null,
             },
-            context,
+            context: documentContext,
             patient_flags: {
                 is_minor: isMinorPatient(plainCita.paciente),
                 representatives: getRepresentativeSnapshot(plainCita.paciente),
@@ -2263,7 +2288,7 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
             paciente_id: plainCita.paciente_id,
             clinica_id: plainCita.clinica_id,
             cita_id: plainCita.id_cita,
-            tratamiento_id: plainCita.tratamiento_id,
+            tratamiento_id: requirementTreatmentId,
             clinic_template_id: resolved.source === 'clinic' ? resolved.template.id : null,
             clinic_template_version_id: resolved.source === 'clinic' ? resolved.version.id : null,
             catalog_template_id: resolved.source === 'catalog' ? resolved.template.id : null,

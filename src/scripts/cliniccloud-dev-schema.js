@@ -19,6 +19,7 @@ const ALLOWED = [
   '20260907020000-allow-system-import-protocol-actors.js',
 ];
 const BUDGET_SIGNATURE_SCHEMA = ['20260914003000-allow-budget-signature-events.js'];
+const PROGRAM_BOOKING_SCHEMA = ['20260914070000-create-patient-program-sessions.js'];
 async function digest(file) {
   const hash = crypto.createHash('sha256');
   for await (const chunk of fs.createReadStream(file)) hash.update(chunk);
@@ -26,7 +27,7 @@ async function digest(file) {
 }
 async function main() {
   const args = process.argv.slice(2);
-  if (args.length !== 1 || !['--backup', '--apply-new-schema', '--apply-budget-signature-schema'].includes(args[0])) throw new Error('Uso: cliniccloud-dev-schema.js --backup | --apply-new-schema | --apply-budget-signature-schema (siempre crea backup privado nuevo).');
+  if (args.length !== 1 || !['--backup', '--apply-new-schema', '--apply-budget-signature-schema', '--apply-program-booking-schema'].includes(args[0])) throw new Error('Uso: cliniccloud-dev-schema.js --backup | --apply-new-schema | --apply-budget-signature-schema | --apply-program-booking-schema (siempre crea backup privado nuevo).');
   const repo = path.resolve(__dirname, '../..');
   if (repo !== '/home/ubuntu/wt/back-dev' || process.cwd() !== repo) throw new Error('Este corte solo se ejecuta desde el worktree back-dev.');
   require('dotenv').config({ quiet: true });
@@ -52,7 +53,7 @@ async function main() {
     const [existing] = await db.sequelize.query('SELECT name FROM SequelizeMeta');
     const applied = new Set(existing.map(row => row.name));
     if (args[0] !== '--backup') {
-      const selected = args[0] === '--apply-budget-signature-schema' ? BUDGET_SIGNATURE_SCHEMA : ALLOWED;
+      const selected = args[0] === '--apply-budget-signature-schema' ? BUDGET_SIGNATURE_SCHEMA : args[0] === '--apply-program-booking-schema' ? PROGRAM_BOOKING_SCHEMA : ALLOWED;
       for (const name of selected) await fsp.access(path.join(repo, 'migrations', name));
       for (const name of selected) {
         const file = path.join(repo, 'migrations', name);
