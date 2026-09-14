@@ -1618,10 +1618,19 @@ async function recordBudgetSignatureEvent(request, eventType, {
   createdAt = new Date(),
 } = {}) {
   if (!request?.budget_id || !request?.budget_version) return null;
+  // Signature activity is not a budget transition. Read the actual status in
+  // this transaction; the signing snapshot deliberately says "presented" even
+  // while the first request is still being prepared for a saved draft.
+  const budget = await EconomicBudget.findByPk(request.budget_id, {
+    attributes: ['id', 'status'], transaction,
+  });
+  if (!budget) throw domainError(404, 'budget_not_found', 'Presupuesto no encontrado.');
   return EconomicBudgetEvent.create({
     budget_id: request.budget_id,
     version_number: request.budget_version,
     event_type: eventType,
+    from_status: budget.status,
+    to_status: budget.status,
     metadata: budgetSignatureEventMetadata(request, metadata),
     actor_id: actorId === undefined ? (request.created_by || null) : actorId,
     created_at: createdAt,
