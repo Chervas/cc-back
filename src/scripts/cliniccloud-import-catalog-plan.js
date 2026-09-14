@@ -6,6 +6,7 @@ const { spawnSync } = require('child_process');
 const { readBytes, parseArgs, writePrivateJson } = require('../lib/cliniccloud-import/io');
 const { hash } = require('../lib/cliniccloud-import/adapter');
 const { buildCatalogPlan } = require('../lib/cliniccloud-import/catalog');
+const { clientReplies } = require('../lib/cliniccloud-import/catalog-replies');
 
 async function readLocalCatalog() {
   require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), quiet: true });
@@ -23,7 +24,7 @@ async function readLocalCatalog() {
   } finally { await connection.end(); }
 }
 async function run(args) {
-  const options = parseArgs(args, ['--workbook', '--private-output', '--resource-map', '--read-local-catalog']);
+  const options = parseArgs(args, ['--workbook', '--private-output', '--resource-map', '--read-local-catalog', '--client-replies']);
   if (!options['--workbook'] || !options['--private-output']) throw new Error('WORKBOOK_AND_PRIVATE_OUTPUT_REQUIRED');
   const bytes = readBytes(options['--workbook']);
   const parsed = spawnSync('python3', ['-B', path.resolve(__dirname, '../lib/cliniccloud-import/xlsx_catalog.py'), options['--workbook']], { encoding: 'utf8', timeout: 30000, maxBuffer: 64 * 1024 * 1024 });
@@ -31,7 +32,14 @@ async function run(args) {
   if (options['--read-local-catalog'] && options['--read-local-catalog'] !== 'true') throw new Error('READ_LOCAL_CATALOG_MUST_BE_TRUE');
   const local = options['--read-local-catalog'] === 'true' ? await readLocalCatalog() : { installations: [], professionals: [], treatments: [] };
   const resourceMap = options['--resource-map'] ? JSON.parse(readBytes(options['--resource-map']).toString('utf8')) : {};
-  const plan = buildCatalogPlan({ sheets: JSON.parse(parsed.stdout), workbookHash: hash(bytes), local, resourceMap });
+  let replies = []; let repliesHash = null;
+  if (options['--client-replies']) {
+    const repliesBytes = readBytes(options['--client-replies']);
+    const parsedReplies = spawnSync('python3', ['-B', path.resolve(__dirname, '../lib/cliniccloud-import/xlsx_catalog.py'), options['--client-replies']], { encoding: 'utf8', timeout: 30000, maxBuffer: 64 * 1024 * 1024 });
+    if (parsedReplies.status !== 0) throw new Error('CATALOG_REPLIES_READ_FAILED');
+    repliesHash = hash(repliesBytes); replies = clientReplies(JSON.parse(parsedReplies.stdout), repliesHash);
+  }
+  const plan = buildCatalogPlan({ sheets: JSON.parse(parsed.stdout), workbookHash: hash(bytes), local, resourceMap, replies, repliesHash });
   writePrivateJson(options['--private-output'], plan);
   return { plan_sha256: plan.plan_sha256, workbook_sha256: plan.workbook_sha256, summary: plan.summary, database_written: false, price_base_written: false };
 }

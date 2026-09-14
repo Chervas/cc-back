@@ -48,4 +48,17 @@ function catalogState(treatment) {
   return { status, editable: status !== 'obsolete', booking_ready: reasons.length === 0, booking_issues: reasons };
 }
 
-module.exports = { mergeClinicalConfig, assertCatalogEditable, isObsolete, catalogState, catalogError };
+// Display only: never reinterpret an imported tax-inclusive amount as a net
+// accounting price. Fiscal resolution remains an explicit, separate task.
+function catalogPrice(treatment) {
+  const config = treatment.clinical_config || {};
+  if (config.fiscal_mapping_pending === true) {
+    const source = config.source_price || {};
+    return { amount: source.mode === 'fixed' && typeof source.gross_amount === 'number' && Number.isFinite(source.gross_amount) ? source.gross_amount : null,
+      label: 'IVA incluido · fiscalidad pendiente', semantics: 'gross_tax_included', review_required: true };
+  }
+  return { amount: treatment.precio_base == null ? null : Number(treatment.precio_base), label: 'habitual', semantics: 'existing_catalog_price', review_required: false };
+}
+function catalogDto(treatment) { const value = treatment?.toJSON ? treatment.toJSON() : treatment; return { ...value, catalog_price: catalogPrice(value) }; }
+
+module.exports = { mergeClinicalConfig, assertCatalogEditable, isObsolete, catalogState, catalogError, catalogPrice, catalogDto };

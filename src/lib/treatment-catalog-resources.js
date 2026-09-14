@@ -3,6 +3,9 @@ const { catalogError } = require('./treatment-catalog-contract');
 const { requiresMultiResourceBooking } = require('./booking-profile');
 
 async function validateCatalogResources(treatment, db, { transaction, environment = process.env } = {}) {
+  if (treatment.clinical_config?.fiscal_mapping_pending === true && !['draft', 'obsolete'].includes(treatment.clinical_config.catalog_status)) {
+    throw catalogError('El precio del archivo incluye impuestos. Completa su revisión fiscal antes de ofrecer el tratamiento; puedes conservarlo como Borrador.', 'imported_treatment_fiscal_review_pending', 422);
+  }
   const profile = treatment.clinical_config?.booking_profile;
   if (!profile) return;
   const draft = treatment.clinical_config.catalog_status === 'draft';

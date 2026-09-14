@@ -47,10 +47,10 @@ async function noTriggers(connection) {
   const [rows] = await connection.query("SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = DATABASE() AND EVENT_OBJECT_TABLE = 'Pacientes'");
   if (rows.length) fail('PATIENT_TRIGGERS_REQUIRE_REVIEW');
 }
-function verifySources(files) {
-  const known = { contacts: '/home/ubuntu/frontend_clinicaclick/temp/BACKUP_CONTACTOS_2026-09-05.csv', historic_contacts: '/home/ubuntu/secure-imports/clinic-real-20260722/review/backup_data/contacto_1.csv' };
+function verifySources(files, contactsFile, fileReader = readBytes) {
+  const known = { contacts: contactsFile || '/home/ubuntu/frontend_clinicaclick/temp/BACKUP_CONTACTOS_2026-09-05.csv', historic_contacts: '/home/ubuntu/secure-imports/clinic-real-20260722/review/backup_data/contacto_1.csv' };
   if (!Array.isArray(files) || files.length !== 2 || new Set(files.map(file => file.role)).size !== 2) fail('SOURCE_FILES_REQUIRED');
-  for (const file of files) if (!known[file.role] || hash(readBytes(known[file.role])) !== file.sha256) fail('SOURCE_FILE_CHANGED');
+  for (const file of files) if (!known[file.role] || hash(fileReader(known[file.role])) !== file.sha256) fail('SOURCE_FILE_CHANGED');
 }
 async function applyPatches(connection, payload) {
   const after = [];
@@ -71,7 +71,7 @@ async function applyPatches(connection, payload) {
   return after;
 }
 async function run(args) {
-  const options = parseArgs(args, ['--mode', '--plan', '--snapshot', '--package', '--approved-sha256', '--backup-manifest', '--private-output']);
+  const options = parseArgs(args, ['--mode', '--plan', '--snapshot', '--package', '--approved-sha256', '--backup-manifest', '--private-output', '--contacts']);
   if (!['prepare', 'apply'].includes(options['--mode']) || !options['--private-output']) fail('MODE_AND_PRIVATE_OUTPUT_REQUIRED');
   if (path.resolve(__dirname, '../..') !== '/home/ubuntu/wt/back-dev' || process.cwd() !== '/home/ubuntu/wt/back-dev' || execFileSync('git', ['branch', '--show-current'], { encoding: 'utf8' }).trim() !== 'dev') fail('DEV_WORKTREE_REQUIRED');
   let payload;
@@ -86,7 +86,7 @@ async function run(args) {
     if (Date.now() - Date.parse(payload.generated_at) > 2 * 60 * 60 * 1000 || !Number.isFinite(Date.parse(payload.generated_at))) fail('PACKAGE_EXPIRED');
     backup = await validateBackup(options['--backup-manifest']);
   }
-  verifySources(payload.source_files);
+  verifySources(payload.source_files, options['--contacts']);
   require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), quiet: true });
   const connection = await require('mysql2/promise').createConnection({ host: process.env.DB_HOST, port: Number(process.env.DB_PORT || 3306), user: process.env.DB_USERNAME, password: process.env.DB_PASSWORD, database: process.env.DB_NAME, timezone: 'Z', dateStrings: true, multipleStatements: false });
   let commitAttempted = false;
@@ -120,4 +120,4 @@ async function run(args) {
   } finally { await connection.end(); }
 }
 if (require.main === module) run(process.argv.slice(2)).then(result => process.stdout.write(`${JSON.stringify(result)}\n`)).catch(error => { process.stderr.write(`${/^[A-Z_]+$/.test(error.message) ? error.message : 'CONTACT_IMPORT_STOPPED_REVIEW_PRIVATE_JOURNAL'}\n`); process.exitCode = 1; });
-module.exports = { run, validateBackup, applyPatches };
+module.exports = { run, validateBackup, applyPatches, verifySources };

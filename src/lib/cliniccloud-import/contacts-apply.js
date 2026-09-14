@@ -12,6 +12,12 @@ function fieldsOf(row) {
 function validPatch(patch) {
   return patch && typeof patch === 'object' && !Array.isArray(patch) && Object.keys(patch).length > 0 && Object.entries(patch).every(([key, value]) => Object.hasOwn(COLUMNS, key) && typeof value === 'string' && value.trim().length > 0 && value.length <= 255 && !/[\u0000-\u001f]/.test(value) && (key !== 'birth_date' || dateOnly(value) === value));
 }
+function identityReplacementRequiresReview(patient, patch) {
+  // A stable export ID does not prove identity when several existing identity
+  // fields change together. Filling blanks is different from replacing them.
+  return ['name', 'surname', 'birth_date', 'national_id'].filter(key =>
+    patient.fields?.[key] && Object.hasOwn(patch, key) && patient.fields[key] !== patch[key]).length >= 2;
+}
 function candidates(plan, snapshot) {
   assert(plan.plan_sha256 === hash({ manifest: plan.manifest, actions: plan.actions }), 'PLAN_HASH_MISMATCH');
   assert(plan.manifest.source_account === 'cliniccloud-5880' && snapshot.source_account === 'cliniccloud-5880', 'SOURCE_SCOPE_MISMATCH');
@@ -26,6 +32,7 @@ function candidates(plan, snapshot) {
     assert(!action.requires_review && !action.reasons.length && validPatch(action.fields_patch), 'UNREVIEWED_OR_INVALID_CONTACT_PATCH');
     const patient = patients.get(Number(action.local_id));
     assert(patient && [66, 72].includes(Number(patient.clinic_id)) && patient.source_contact_ids.map(String).includes(String(action.source_contact_id)), 'PATIENT_IDENTITY_MISMATCH');
+    if (identityReplacementRequiresReview(patient, action.fields_patch)) continue;
     assert(!seen.has(patient.id), 'MULTIPLE_PATCHES_ONE_PATIENT');
     seen.add(patient.id);
     selected.push({ action_key: action.action_key, patient_id: patient.id, source_contact_id: action.source_contact_id, provenance: action.provenance, expected_fields: patient.fields, expected_clinic_id: patient.clinic_id, fields_patch: action.fields_patch });
@@ -48,6 +55,7 @@ function validateCurrent(candidate, row, links) {
   assert(hash(fieldsOf(row)) === hash(candidate.expected_fields), 'PATIENT_FIELDS_DRIFT');
   assert(sourceIds(links).includes(String(candidate.source_contact_id)), 'PATIENT_SOURCE_IDENTITY_DRIFT');
   assert(validPatch(candidate.fields_patch), 'INVALID_CONTACT_PATCH');
+  assert(!identityReplacementRequiresReview({ fields: fieldsOf(row) }, candidate.fields_patch), 'MULTIPLE_IDENTITY_REPLACEMENTS_REQUIRE_REVIEW');
 }
 function packageHash(value) { const { package_sha256, ...body } = value; return hash(body); }
 function validatePackage(value) {
@@ -61,4 +69,4 @@ function validatePackage(value) {
     validateCurrent(op, op.before, op.identity_rows);
   }
 }
-module.exports = { COLUMNS, VERSION, candidates, fieldsOf, sourceIds, validPatch, validateCurrent, packageHash, validatePackage };
+module.exports = { COLUMNS, VERSION, candidates, fieldsOf, sourceIds, validPatch, validateCurrent, packageHash, validatePackage, identityReplacementRequiresReview };

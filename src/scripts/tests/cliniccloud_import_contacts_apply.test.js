@@ -12,6 +12,21 @@ function fixture() {
   return { snapshot, plan: { manifest, actions, plan_sha256: hash({ manifest, actions }) } };
 }
 test('only exact linked nonempty safe contact patches are selected', () => { const { plan, snapshot } = fixture(); assert.equal(candidates(plan, snapshot).length, 1); });
+test('a newer contacts file is explicit and must still match the approved source hash', () => {
+  const { verifySources } = require('../cliniccloud-import-contacts-apply');
+  const files = [{ role: 'contacts', sha256: hash(Buffer.from('new')) }, { role: 'historic_contacts', sha256: hash(Buffer.from('old')) }];
+  const read = name => Buffer.from(name === '/fixture/new.csv' ? 'new' : 'old');
+  verifySources(files, '/fixture/new.csv', read);
+  assert.throws(() => verifySources(files, '/fixture/wrong.csv', read), /SOURCE_FILE_CHANGED/);
+});
+test('several replaced identity fields are deferred, but filling blank fields is allowed', () => {
+  const { identityReplacementRequiresReview } = require('../../lib/cliniccloud-import/contacts-apply');
+  assert.equal(identityReplacementRequiresReview({ fields: { name: 'Ana', surname: 'Ejemplo', birth_date: '' } }, { name: 'Bea', surname: 'Otro' }), true);
+  assert.equal(identityReplacementRequiresReview({ fields: { name: 'Ana', surname: '', birth_date: '' } }, { surname: 'Ejemplo', birth_date: '1990-01-01' }), false);
+  const { plan, snapshot } = fixture(); plan.actions[0].fields_patch = { name: 'Otro', surname: 'Distinto' };
+  plan.plan_sha256 = hash({ manifest: plan.manifest, actions: plan.actions });
+  assert.equal(candidates(plan, snapshot).length, 0);
+});
 test('WhatsApp, clinic, clinical and empty fields cannot enter the SQL allowlist', () => { for (const patch of [{ whatsapp: 'yes' }, { clinica_id: '66' }, { antecedentes: 'x' }, { name: '' }, { name: 'x\n' }, { birth_date: '2026-02-30' }]) assert.equal(validPatch(patch), false); });
 test('tampered manifest or snapshot is rejected', () => { const { plan, snapshot } = fixture(); plan.manifest.automation_policy = 'normal'; assert.throws(() => candidates(plan, snapshot), /PLAN_HASH/); });
 test('review flags and duplicate patient actions fail closed', () => { const { plan, snapshot } = fixture(); plan.actions[0].requires_review = true; plan.plan_sha256 = hash({ manifest: plan.manifest, actions: plan.actions }); assert.throws(() => candidates(plan, snapshot), /UNREVIEWED/); plan.actions[0].requires_review = false; plan.actions.push({ ...plan.actions[0] }); plan.plan_sha256 = hash({ manifest: plan.manifest, actions: plan.actions }); assert.throws(() => candidates(plan, snapshot), /MULTIPLE_PATCHES/); });
