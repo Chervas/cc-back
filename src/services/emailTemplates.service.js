@@ -60,7 +60,7 @@ function assertSafeSubject(subject) {
   return normalized;
 }
 
-function layout({ title, intro, ctaLabel, ctaUrl, footer }) {
+function layout({ title, intro, code, detail, ctaLabel, ctaUrl, footer }) {
   const safeTitle = escapeHtml(title);
   const safeIntro = escapeHtml(intro);
   const safeCta = escapeHtml(ctaLabel);
@@ -74,6 +74,8 @@ function layout({ title, intro, ctaLabel, ctaUrl, footer }) {
     '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px;background:#ffffff;border:1px solid #e6e8ef;border-radius:8px;">',
     '<tr><td style="padding:28px 28px 10px;font-size:20px;font-weight:700;">', safeTitle, '</td></tr>',
     '<tr><td style="padding:0 28px 22px;font-size:15px;line-height:1.55;color:#465064;">', safeIntro, '</td></tr>',
+    code ? '<tr><td align="center" style="padding:0 28px 24px;"><div style="background:#eff6ff;border:1px solid #dbeafe;border-radius:8px;padding:20px;font-family:monospace;font-size:34px;font-weight:700;letter-spacing:6px;color:#172554;">' + escapeHtml(code) + '</div></td></tr>' : '',
+    detail ? '<tr><td style="padding:0 28px 24px;font-size:14px;line-height:1.55;color:#465064;">' + escapeHtml(detail) + '</td></tr>' : '',
     ctaUrl ? '<tr><td style="padding:0 28px 28px;"><a href="' + safeUrl + '" style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:6px;padding:12px 18px;font-weight:700;">' + safeCta + '</a></td></tr>' : '',
     '<tr><td style="border-top:1px solid #edf0f5;padding:16px 28px;font-size:12px;line-height:1.5;color:#6b7280;">', safeFooter, '</td></tr>',
     '</table></td></tr></table></body></html>',
@@ -108,9 +110,10 @@ function renderEmailVerification(context = {}) {
     throw Object.assign(Error('email_verification_code_invalid'), { code: 'email_verification_code_invalid' });
   }
   const subject = assertSafeSubject('Tu código de acceso a ClinicaClick');
-  const intro = `Introduce este código para completar el acceso: ${code}. Caduca en 5 minutos y solo puede usarse una vez.`;
+  const intro = 'Introduce este código para completar el acceso:';
+  const detail = 'Caduca en 5 minutos y solo puede usarse una vez.';
   const footer = 'No compartas este código. Si no has intentado acceder, cambia tu contraseña desde ClinicaClick.';
-  return { subject, html: layout({ title: subject, intro, footer }), text: intro + '\n\n' + footer };
+  return { subject, html: layout({ title: subject, intro, code, detail, footer }), text: [intro, code, detail, footer].join('\n\n') };
 }
 
 function renderOpsTest(context = {}) {

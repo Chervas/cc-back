@@ -5,7 +5,7 @@ const C = require('./authEmailChallenge.contract');
 const sessionsApi = require('./accessSession.service');
 const FIELDS = ['id_usuario', 'email_usuario', 'password_usuario', 'estado_cuenta', 'es_provisional',
   'nombre', 'apellidos', 'isProfesional', 'avatar', 'ultimo_login'];
-function createService({ models, sessions, audit, queueEmail, config = C.settings, now = () => new Date() }) {
+function createService({ models, sessions, trustedDevices, audit, queueEmail, config = C.settings, now = () => new Date() }) {
   const db = () => typeof models === 'function' ? models() : models;
   const sessionService = () => sessions || sessionsApi;
   const repo = () => audit || require('./platformAudit.repository').createRepository(db().PlatformAuditEvent);
@@ -20,6 +20,7 @@ function createService({ models, sessions, audit, queueEmail, config = C.setting
     if (!current.key.equals(cfg.key)) C.fail('auth_email_unavailable', 503);
   }
   const credentialBinding = user => sessionService().credentialBinding(user);
+  const devices = () => trustedDevices || require('./authTrustedDevice.service').createService({ models, credentialBinding, config, now });
   async function record({ outcome, reason, action = 'auth.email_code', userId = null, challengeId = null, sessionRef = null, correlationId = randomUUID() }, transaction) {
     await repo().append({ version: 13, eventId: randomUUID(), correlationId, occurredAt: now().toISOString(),
       action, stage: 'completed', outcome, reason,
@@ -132,7 +133,7 @@ function createService({ models, sessions, audit, queueEmail, config = C.setting
     await record({ outcome: 'pending', reason: 'code_resent', userId: user.id_usuario, challengeId: row.challenge_id }, transaction);
     return response(row, token, user.email_usuario);
   }));
-  const verify = (token, code) => finish(() => operate(token, async ({ cfg, row, user, transaction, reject }) => {
+  const verifyWithOptions = (token, code, trustDevice = false) => finish(() => operate(token, async ({ cfg, row, user, transaction, reject }) => {
     if (row.expires_at.getTime() <= now().getTime()) return reject('code_expired', 'auth_email_expired', 401, 'expired');
     if (!C.code(code) || !C.equalHash(C.codeHash(cfg.key, row.challenge_id, code), row.code_hash)) {
       const attempts = row.attempts + 1;
@@ -143,11 +144,14 @@ function createService({ models, sessions, audit, queueEmail, config = C.setting
     await row.update({ state: 'verified', verified_at: new Date(Math.floor(now().getTime() / 1000) * 1000) }, { transaction });
     unchanged(cfg);
     const result = await sessionService().authenticated(user, { transaction, emailChallengeId: row.challenge_id });
+    const device = trustDevice ? await devices().grant(user, { sessionId: result.audit.sessionRef, transaction }) : null;
     await record({ outcome: 'success', reason: 'code_verified', userId: user.id_usuario, challengeId: row.challenge_id,
       sessionRef: result.audit.sessionRef }, transaction);
-    return result.body;
+    return { body: result.body, device };
   }));
-  return { begin, verify, resend,
+  const verify = async (token, code) => (await verifyWithOptions(token, code)).body;
+  const verifyAndTrust = (token, code) => verifyWithOptions(token, code, true);
+  return { begin, verify, verifyAndTrust, resend,
     rejectedCredentials: () => finish(async () => { enabled(); await record({ outcome: 'denied', reason: 'credentials_rejected' }); }),
     rejectedCredentialMutation: userId => finish(async () => { enabled(); await capacity();
       await record({ outcome: 'denied', reason: 'credentials_change_blocked', userId }); }),
