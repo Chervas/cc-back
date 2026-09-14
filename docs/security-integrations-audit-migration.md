@@ -130,11 +130,37 @@ actual no permite ejecutar comandos. `cc-impl-assume-temp` por sí solo tampoco
 añade ese permiso. No sustituir el rol de servicio por credenciales SSO ni abrir
 SSH/puertos generales para salvar ese bloqueo.
 
-El lote IAM ya se contrastó con AWS: SSO de implementación, trusts y política de
-asunción del rol EC2 coinciden con lo autorizado. El operador puede ejecutar el
-documento de instalación fijo mediante su acceso SSM; no hace falta conceder
-una shell genérica al Codex de aplicación. Evidencia y artefactos fechados en
+El lote IAM inicial ya se contrastó con AWS: SSO de implementación, trusts y política
+de asunción del rol EC2 coinciden con lo autorizado. El canal inicial delega la
+ejecución de documentos fijos al operador. Si se aprueba autonomía temporal, usar
+el procedimiento siguiente; no inferir nuevos permisos de la asunción del rol.
+Evidencia y artefactos fechados en
 [99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-iam-aplicado-instalador-2026-09-14).
+
+##### Autonomía temporal de instalación y diagnóstico
+
+Preparar una inline policy separada sobre el rol de deployment ya asumible, con
+caducidad absoluta en cada permiso añadido, región e instancia exactas. El lote
+incluye política anterior, hashes, petición estructurada y retirada de esa única
+política. Comparar trusts/políticas antes y después; no ampliar el rol EC2 ni
+reemplazar permisos previos. La preparación no acredita que el permiso exista.
+
+Crear y ejecutar documentos Command propios permite administrar como root la
+EC2 de destino: un prefijo de nombres no restringe el contenido del script ni
+impide acceder a archivos o a la identidad de instancia. Documentar ese poder
+efectivo en la autorización. Separar límites IAM de controles operativos:
+versión/hash, scripts sin secretos, alcance de servicios y JSON de ingreso fijo
+se revisan antes de cada ejecución. `GetCommandInvocation` requiere recurso
+global; consultar solo los CommandIds conocidos. El permiso de ingress se acota
+al SG, mientras puertos/CIDR se verifican contra el lote aprobado. Referencias
+oficiales de acciones/recursos: [SSM](https://docs.aws.amazon.com/service-authorization/latest/reference/list_ssm.html)
+y [EC2](https://docs.aws.amazon.com/service-authorization/latest/reference/list_ec2.html).
+
+La fecha de expiración impide nuevas solicitudes autorizadas por la ampliación;
+no para comandos ya iniciados ni deshace cambios. Retirar la política al terminar
+y conservar evidencias. El primer uso tras un fallo es el diagnóstico fijado,
+nunca un reintento ciego. Propuesta y estado de aplicación en
+[99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-autonomia-temporal-2026-09-14).
 
 El artefacto debe contener solo `services/platform-audit/src`, `package.json` y
 su lockfile, con hashes revisados; nunca `.env`, modelos clínicos o secretos.
