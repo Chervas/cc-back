@@ -4,6 +4,16 @@ const assert = require('node:assert/strict');
 const { mergeClinicalConfig, assertCatalogEditable, catalogState } = require('../../lib/treatment-catalog-contract');
 const profile = { version: 1, phases: [{ key: 'main', label: 'Tratamiento', duration_minutes: 30, installation_ids: [7], professionals: { mode: 'any', ids: [12], preferred_id: null } }] };
 
+test('precio bruto importado no aparece gratis ni se convierte en base fiscal', async () => {
+  const { catalogDto } = require('../../lib/treatment-catalog-contract');
+  const input = { precio_base: null, clinical_config: { catalog_status: 'draft', fiscal_mapping_pending: true, source_price: { mode: 'fixed', gross_amount: 120 } } };
+  const dto = catalogDto(input); assert.equal(dto.precio_base, null); assert.equal(dto.catalog_price.amount, 120); assert.equal(dto.catalog_price.review_required, true);
+  assert.equal(catalogDto({ precio_base: 95 }).catalog_price.amount, 95);
+  const { validateCatalogResources } = require('../../lib/treatment-catalog-resources');
+  await validateCatalogResources(input, {});
+  await assert.rejects(validateCatalogResources({ ...input, clinical_config: { ...input.clinical_config, catalog_status: 'active' } }, {}), { code: 'imported_treatment_fiscal_review_pending' });
+});
+
 test('editar un campo conserva perfil, procedencia y claves desconocidas', () => {
   const before = { booking_profile: profile, import_source: { batch: 'test' }, unknown: { stable: true } };
   const next = mergeClinicalConfig(before, { financing: { enabled: true } });

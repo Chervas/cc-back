@@ -2,7 +2,7 @@
 const asyncHandler = require('express-async-handler');
 const db = require('../../models');
 const { Op } = db.Sequelize;
-const { mergeClinicalConfig, assertCatalogEditable } = require('../lib/treatment-catalog-contract');
+const { mergeClinicalConfig, assertCatalogEditable, catalogDto } = require('../lib/treatment-catalog-contract');
 const { validateCatalogResources } = require('../lib/treatment-catalog-resources');
 const { createTreatmentAutomationScope } = require('../lib/treatment-automation-scope');
 const treatmentAutomationScope = createTreatmentAutomationScope(db);
@@ -230,7 +230,7 @@ exports.getTratamientos = asyncHandler(async (req, res) => {
         order: [['nombre', 'ASC']],
         include: [{ model: Clinica, as: 'clinica' }]
     });
-    res.json(tratamientos);
+    res.json(tratamientos.map(catalogDto));
 });
 
 // Crear tratamiento
@@ -314,7 +314,7 @@ exports.createTratamiento = asyncHandler(async (req, res) => {
         grupo_clinica_id: grupo_clinica_id || null
     });
 
-    res.status(201).json(tratamiento);
+    res.status(201).json(catalogDto(tratamiento));
 });
 
 // Actualizar tratamiento
@@ -404,7 +404,7 @@ exports.updateTratamiento = asyncHandler(async (req, res) => {
         await treatmentAutomationScope.assertReferenceScope(tratamiento);
     }
     await tratamiento.save();
-    res.json(tratamiento);
+    res.json(catalogDto(tratamiento));
 });
 
 // Ocultar tratamiento de sistema/grupo para una clínica
@@ -522,7 +522,7 @@ exports.getTratamientoById = asyncHandler(async (req, res) => {
     if (!tratamiento) {
         return res.status(404).json({ message: 'Tratamiento no encontrado' });
     }
-    res.json(tratamiento);
+    res.json(catalogDto(tratamiento));
 });
 
 exports.getTratamientoAutomationTemplate = asyncHandler(async (req, res) => {

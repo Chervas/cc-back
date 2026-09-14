@@ -1,12 +1,14 @@
 'use strict';
 
 const { norm, hash } = require('./adapter');
+const { applyClientReplies } = require('./catalog-replies');
 const CONFIG = {
   'Tratamientos individuales': ['C', 'D', 'G', 'H'],
   'Programas y mantenimientos': ['D', 'E', 'F', 'G'],
   'Capilar · sesiones y bonos': ['C', 'D', 'G', 'H'],
   'Capilar · programas': ['D', 'E', 'F', 'G'],
   'Facial · tratamientos': ['C', 'D', 'G', 'H'],
+  'Facial · programas': ['D', 'E', 'F', 'G'],
   'Cirugía plástica · tarifa': ['D', 'E', 'F', 'G'],
   'Obesidad · tarifa': ['C', 'D', 'G', 'H'],
 };
@@ -32,12 +34,16 @@ function kindOf(row) {
   if (category === 'ORTOPEDIA' || category === 'PROTESIS' || category === 'PLUMAS MOUNJARO') return 'product';
   if (category === 'HOSPITALIZACION' || category === 'HONORARIOS' || (category === 'QUIROFANO' && name.startsWith('GASTOS'))) return 'fee';
   if (/\bBONO\s+\d+/.test(name)) return 'voucher';
+  if (durationInfo(row.duration).mode === 'additional') return 'addon';
+  if (category === 'MANTENIMIENTOS' && /1 SESION/.test(name)) return 'treatment';
+  if (/^1 CITA[. ]/.test(detail)) return 'treatment';
+  if (category === 'PROGRAMAS 360' && /· SESION$/.test(name)) return 'treatment';
   if (/programas/i.test(row.sheet) || /PROGRAMA/.test(category) || /PROGRAMA|SEGUIMIENTO.*\d+ SESIONES/.test(name) || /PROGRAMA COMPLETO/.test(detail) || durationInfo(row.duration).mode === 'multiple_appointments') return 'program';
   if (durationInfo(row.duration).mode === 'additional') return 'addon';
   return 'treatment';
 }
 function staffTokens(value) { return norm(value).replace(/\b(DR|DRA|DOCTOR|DOCTORA|AUX|AUXILIAR|NUTRICION|PSICOLOGIA)\b\.?/g, '').trim().split(/\s+/).filter(Boolean); }
-function buildCatalogPlan({ sheets, workbookHash, local = { installations: [], professionals: [], treatments: [] }, resourceMap = {} }) {
+function buildCatalogPlan({ sheets, workbookHash, local = { installations: [], professionals: [], treatments: [] }, resourceMap = {}, replies = [], repliesHash = null }) {
   const rows = [];
   for (const sheet of sheets) {
     if (!CONFIG[sheet.name]) continue; // combinations and notes are not catalog rows
@@ -49,6 +55,7 @@ function buildCatalogPlan({ sheets, workbookHash, local = { installations: [], p
       category = c.A || category;
       if (!c.B || !c[price]) continue;
       const row = { sheet: sheet.name, source_row: source.source_row, category, name: c.B, detail: duration === 'D' ? c.C || '' : '', duration: c[duration] || '', price: c[price], cabin: c[cabin] || '', professional: c[professional] || '', raw_cells: c };
+      applyClientReplies(row, replies);
       row.kind = kindOf(row); row.clinic_id = sheet.name.startsWith('Capilar') ? 66 : 72;
       row.provenance = { file_sha256: workbookHash, sheet: row.sheet, source_row: row.source_row, row_sha256: hash(c) };
       row.source_catalog_key = hash([row.sheet, row.category, row.name]);
@@ -98,16 +105,20 @@ function buildCatalogPlan({ sheets, workbookHash, local = { installations: [], p
       if (row.required_professionals.some((p) => /^AUX/.test(norm(p))) && /MESOTERAPIA|DUTASTERIDE|CARBOXITERAPIA|HAIR FILLER|VITAMINAS Y AMINOACIDOS|BIOESTIMULACION CORPORAL/.test(notes)) row.issues.push('INJECTABLE_STAFF_REQUIRES_CLINICAL_VALIDATION');
       if (row.kind === 'program') row.issues.push('PROGRAM_APPOINTMENTS_AND_CADENCE_REQUIRED');
       if (row.kind === 'voucher') row.issues.push('VOUCHER_BASE_TREATMENT_LINK_REQUIRED');
+      if (row.booking_mode === 'administrative_review') row.issues.push('ADMINISTRATIVE_ACT_NOT_AUTOMATIC_BOOKING');
+      if (row.sheet === 'Facial · programas' && /PROGRAMAS? .*COMPLETO|PROGRAMAS .*ENCADENADOS|CONTROL Y REPARACION ENCADENADOS/.test(norm(row.detail))) row.issues.push('NESTED_PROGRAM_OUT_OF_INITIAL_SCOPE');
       if (row.source_price.mode === 'from') row.issues.push('INDIVIDUAL_QUOTATION_REQUIRED');
       if (row.source_price.mode === 'included') row.warnings.push('INCLUDED_IS_NOT_STANDALONE_FREE');
       if (row.source_price.mode === 'unresolved') row.issues.push('PRICE_REQUIRES_REVIEW');
-      if (row.sheet === 'Facial · tratamientos' && row.source_row >= 49 && row.source_row <= 65) row.warnings.push('SOURCE_PRICE_WAS_PROPOSED_USER_ACCEPTED_IMPORT_REVIEW');
+      if (row.sheet === 'Facial · tratamientos' && /PRP FACIAL|POLINUCLEOTIDOS|EXOSOMAS|PEELING COSMELAN|PEELING DERMAMELAN|BIOREPEEL/.test(notes)) row.warnings.push('SOURCE_PRICE_WAS_PROPOSED_USER_ACCEPTED_IMPORT_REVIEW');
       if (row.display_name.length > 255) row.issues.push('DISPLAY_NAME_TOO_LONG');
       row.existing_new_catalog_ids = local.treatments.filter((t) => t.code === row.proposed_code).map((t) => t.id);
       row.legacy_name_candidate_ids = local.treatments.filter((t) => t.clinic_id === row.clinic_id && [norm(row.name), norm(row.display_name)].includes(norm(t.name))).map((t) => t.id);
       row.safe_for_draft_import = row.display_name.length <= 255;
       row.ready_for_booking = schedulable && !row.issues.length;
-      row.proposed_clinical_config = { catalog_status: 'draft', source_catalog: row.provenance, source_price: row.source_price, import_issues: row.issues };
+      row.proposed_clinical_config = { catalog_status: 'draft', source_catalog: row.provenance, source_price: row.source_price, import_issues: row.issues,
+        ...(row.client_reply_evidence.length ? { source_client_replies: row.client_reply_evidence, client_reply_decisions: row.client_reply_decisions } : {}),
+        ...(row.quantity_duration ? { quantity_duration: row.quantity_duration } : {}), ...(row.booking_mode ? { booking_mode: row.booking_mode } : {}) };
       if (row.ready_for_booking) row.proposed_clinical_config.booking_profile = { version: 1, phases: [{ key: 'phase_1', label: '', duration_minutes: row.duration_info.minutes, installation_ids: row.installation_resolution.map((r) => r.confirmed_id), professionals: { mode: row.professional_mode, ids: row.professional_resolution.map((r) => r.confirmed_id), preferred_id: row.professional_mode === 'any' && row.professional_resolution.length === 1 ? row.professional_resolution[0].confirmed_id : null } }] };
       row.do_not_write_price_base = true;
       // Only these two columns are bono prices, never generic Sale a/Ahorro.
@@ -116,7 +127,7 @@ function buildCatalogPlan({ sheets, workbookHash, local = { installations: [], p
     }
   }
   const count = (field) => rows.reduce((out, r) => { out[r[field]] = (out[r[field]] || 0) + 1; return out; }, {});
-  const result = { version: 1, workbook_sha256: workbookHash, local_snapshot_sha256: hash(local), resource_map_sha256: hash(resourceMap), source_price_semantics: 'gross_tax_included_no_price_base_write', mode: 'catalog_dry_run_only', clinics: { medical: 72, capilar: 66 }, ignored_sheets: sheets.filter((s) => !CONFIG[s.name]).map((s) => s.name), local_resources: { installations: local.installations, professionals: local.professionals }, rows,
+  const result = { version: 1, workbook_sha256: workbookHash, replies_sha256: repliesHash, local_snapshot_sha256: hash(local), resource_map_sha256: hash(resourceMap), source_price_semantics: 'gross_tax_included_no_price_base_write', mode: 'catalog_dry_run_only', clinics: { medical: 72, capilar: 66 }, ignored_sheets: sheets.filter((s) => !CONFIG[s.name]).map((s) => s.name), local_resources: { installations: local.installations, professionals: local.professionals }, rows,
     summary: { commercial_rows: rows.length, by_kind: count('kind'), by_clinic: count('clinic_id'), safe_draft_rows: rows.filter((r) => r.safe_for_draft_import).length, ready_for_booking: rows.filter((r) => r.ready_for_booking).length, additional_voucher_offers: rows.reduce((n, r) => n + r.additional_voucher_offers.length, 0), issues: rows.flatMap((r) => r.issues).reduce((out, issue) => { out[issue] = (out[issue] || 0) + 1; return out; }, {}) } };
   return { ...result, plan_sha256: hash(result) };
 }
