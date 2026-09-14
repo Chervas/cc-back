@@ -1,10 +1,16 @@
 # WhatsApp y acceso: condiciones de reconexión
 
 Revisado tras el corte del 13/09/2026 22:25 UTC. **Reconexión todavía no validada.**
+
+La revisión de preparación del 14/09 distingue el corte de acceso ya operativo
+del recorrido WhatsApp todavía no desplegado. Para madurez actual consultar
+[19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones);
+los apartados fechados del 13/09 conservan evidencia de sus cortes de código.
+No interpretar sus pendientes históricos de MFA como el estado del login público.
 El cierre de sesiones administrativas y la recuperación ya están desplegados y
-comprobados: [acta de acceso](admin-session-deployment-20260913.md). El MFA y las
-protecciones del nuevo recorrido de integraciones siguen pendientes de corte
-real. No se ha demostrado el vector del incidente. El propietario revocó las
+comprobados: [acta de acceso](admin-session-deployment-20260913.md). El MFA se
+activó en el corte posterior de acceso; las protecciones del nuevo recorrido
+WhatsApp siguen pendientes de corte real. No se ha demostrado el vector del incidente. El propietario revocó las
 credenciales y detuvo envíos; el corte de acceso no autoriza reactivarlos.
 
 Preparado [broker del alta WhatsApp](whatsapp-onboarding-broker.md): operaciones
@@ -117,7 +123,7 @@ No confundir este motor con la migración terminada del recorrido WhatsApp.
 
 | Control | Evidencia de código | Pendiente antes de reabrir |
 | --- | --- | --- |
-| Login por correo | Primera entrega backend `a393740`, front `622fa35a`; código de un uso, caducidad, límites y sesiones con prueba de correo. | DDL/configuración y `enforce` en todos los emisores/verificadores de ClinicaClick, rechazo de sesiones antiguas y entrega de correo real probados. Publicado no significa activo. |
+| Login por correo | Sesiones y MFA `enforce` en staging/gateway desde el 14/09; login por correo confirmado por el titular. | Para el alta exigir sesión con código verificado directamente; una sesión posterior por dispositivo recordado no satisface `requireEmail:true`. Estado vigente en [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones). |
 | Recepción WhatsApp | Este corte cierra aceptación sin secreto, exige firma sobre bytes originales y elimina selección de clínica desde URL/campo adicional. | Verificar secreto de la app correcta, proxy/parser y eventos reales de la cohorte, después de aprobar el canary. |
 | Ámbitos | Este corte vincula WABA/teléfono exactos a mappings activos, bloqueos independientes y clínicas registradas; restringe listados y estado. | Conciliar mappings reales y comprobar aislamiento en todos los consumidores/colas, también en el momento de procesar. |
 | Token WABA | Revocación, retirada de tokens almacenados y parada de envíos reportadas por el usuario, sin comprobación activa. Motor aislado y cliente staging probados con ficticios; alta y salida públicas cerradas. | Registro y migración de consumidores todavía pendientes: el esquema/escritores heredados permiten guardar `waAccessToken` y `getClinicConfig` lo entrega a la API general si vuelve a existir. Esto no contradice la retirada de valores reales reportada por el usuario. No insertar un token nuevo en ese recorrido como prueba. |
@@ -211,7 +217,7 @@ Este parche no añade DDL. El webhook ahora depende del registro `MetaScopeBlock
 dependencias concretas antes del despliegue; no ejecutar migraciones en masa.
 
 Para un visto bueno de reconexión faltan: terminar broker/consumidores WhatsApp,
-resolver evidencias y accesos del incidente, conciliar las versiones exactas del entorno público confirmado (staging/gateway), aplicar el lote MFA, verificar permisos/aislamiento del nuevo
+resolver evidencias y accesos del incidente, conciliar las versiones exactas del entorno público confirmado (staging/gateway), comprobar la sesión con correo, verificar permisos/aislamiento del nuevo
 secreto y hacer un canary autorizado de recepción/envío a una cuenta de prueba.
 Se presentará un lote concreto a su propietario, independiente de OPS. No se
 han movido secretos, tocado AWS/BD compartida, cambiado pausas ni enviado mensajes.
