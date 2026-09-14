@@ -130,6 +130,12 @@ actual no permite ejecutar comandos. `cc-impl-assume-temp` por sí solo tampoco
 añade ese permiso. No sustituir el rol de servicio por credenciales SSO ni abrir
 SSH/puertos generales para salvar ese bloqueo.
 
+El lote IAM ya se contrastó con AWS: SSO de implementación, trusts y política de
+asunción del rol EC2 coinciden con lo autorizado. El operador puede ejecutar el
+documento de instalación fijo mediante su acceso SSM; no hace falta conceder
+una shell genérica al Codex de aplicación. Evidencia y artefactos fechados en
+[99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-iam-aplicado-instalador-2026-09-14).
+
 El artefacto debe contener solo `services/platform-audit/src`, `package.json` y
 su lockfile, con hashes revisados; nunca `.env`, modelos clínicos o secretos.
 Instalar dependencias del lockfile sin scripts de instalación y ejecutar bajo un
@@ -156,6 +162,51 @@ host aislado; staging recibe el certificado público autorizado y conserva su
 propia clave de firma. Permitir en red únicamente los orígenes/puertos del corte
 revisado. Configurar el lector con su propio journal y claves separadas para
 `confirmed` y `reconcile`; no reutilizar la clave del writer.
+
+#### Instalación con una única EC2 y roles por servicio
+
+La configuración anterior ilustra el writer IMDS. El lector IMDS exige otra
+identidad de origen: no pasar el mismo rol EC2 como readerSourceRoleArn y
+writerSourceRoleArn. En la instancia única se usa explícitamente
+`credentialMode=unix-scoped`, mediante `services/platform-audit/deploy/bootstrap.py`.
+
+El instalador crea `cc-audit-credentials`, `cc-audit-writer` y `cc-audit-reader`.
+Solo credentials consulta IMDSv2 y puede asumir los dos roles autorizados;
+entrega sesiones STS de 900 s por sockets Unix separados, sin archivos de claves
+AWS. Writer y reader verifican con STS su rol efectivo antes de S3. Cada socket
+es 0660, con grupo propio, y el directorio 0711. Los consumidores carecen del grupo
+ajeno. `credentialBrokerUid` se obtiene del usuario creado, y
+`brokerSourceRoleArn` identifica el rol EC2 verificado.
+
+Las unidades de writer/reader deshabilitan el proveedor IMDS y deniegan por
+systemd sus direcciones IPv4/IPv6. `ExecStartPre` exige una denegación efectiva
+de metadata y del socket ajeno antes de cada arranque; fallar esta prueba impide
+arrancar. No aceptar únicamente que la directiva figure en el fichero. Root y
+credentials pertenecen al ámbito de confianza; esto no separa hosts físicos ni
+protege frente a un compromiso de root. Contrato en
+[39](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/39-seguridad-integraciones-cifrado-auditoria.md#roles-de-auditoría-en-una-instancia).
+
+El corte inicial usa un documento SSM sin parámetros ejecutables, versión y hash
+fijados, con artefacto dentro del documento. Antes de crear usuarios o instalar,
+comprueba cuenta/instancia, AL2023/x86_64, herramientas, espacio y ausencia de
+rutas/usuarios/unidades propias previas o puertos ocupados. No sobrescribe otra
+instalación. Descarga Node aislado con SHA-256 fijado, instala dependencias del
+lockfile sin scripts como usuario sin login y deja código propiedad de root.
+
+Puertos: writer 8443 y reader 8444; SG restringido al IPv4 /32 del emisor verificado.
+Genera certificados TLS separados de 90 días y devuelve solo la parte pública
+para fijarla en el cliente. Registrar vencimientos y preparar renovación antes
+del corte; el instalador no proporciona renovación automática. La instalación
+solo prueba arranque/aislamiento y HTTPS local: después se exige la prueba real
+de escritura/lectura/conciliación con eventos ficticios.
+
+Si falla, no abrir el SG ni reintentar automáticamente: conserva los archivos y
+devuelve la fase fallida; detiene los servicios propios cuyo arranque intentó.
+Rollback de una instalación completa: revocar únicamente las reglas de ingreso
+creadas y ejecutar el documento de parada que valida instancia/hash. Detener y
+deshabilitar los tres servicios conservando usuarios, claves, código y journals.
+No reinicia la aplicación ni aplica DDL. La instancia/disco/IP existentes bastan;
+sí habrá consumo de CPU/red y operaciones STS/S3/KMS que medir en costes.
 
 En staging, preparar `PLATFORM_AUDIT_WRITER_TRANSPORT=https`, origen HTTPS,
 CA/key-id/key-file y rol fuente. Gateway y DEV no arrancan el consumidor. Con

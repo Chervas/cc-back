@@ -14,3 +14,14 @@ exports.httpsAgentForTestServer = server => {
   };
   return agent;
 };
+exports.unixAgentForTestServer = server => {
+  const http = require('node:http'); const address = server.address();
+  if (!(server instanceof http.Server) || !server.listening || typeof address !== 'string'
+    || !address.startsWith('/tmp/cc-audit-credentials-')) fail();
+  const agent = new http.Agent();
+  agent.createConnection = (options) => {
+    if (!server.listening || server.address() !== address || options.socketPath !== address) fail();
+    return original.call(new net.Socket(), { path: address });
+  };
+  return agent;
+};

@@ -81,8 +81,11 @@ con cuerpos verificados y conciliador con recibos solamente. El codec admite
 La UI usa el índice entregado local y exige comprobar cada versión S3, sin
 alternativa local ante fallos. Esto no demuestra que el índice esté completo.
 
-No hay lector instalado ni identidad AWS asignada. Verificar topología,
-trusts y permiso KMS de GetObject antes del corte; aprobar retención/respaldo
+El IAM de implementación/runtime ya se verificó; no hay lector instalado.
+La instancia única usa credenciales por servicio y sockets Unix con aislamiento
+comprobado al arrancar; el modo IMDS anterior sigue exigiendo orígenes distintos.
+Procedimiento en el [runbook de instalación](../../docs/security-integrations-audit-migration.md#instalación-con-una-única-ec2-y-roles-por-servicio).
+Verificar entrega real y permiso KMS de GetObject antes del corte; aprobar retención/respaldo
 del journal. Las referencias inferiores a lector/visor pendientes describen
 el estado operativo: código preparado no equivale a servicio disponible.
 

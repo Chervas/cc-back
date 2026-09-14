@@ -34,13 +34,17 @@ async function awsRead(input, settings) {
 }
 function main(filename) {
   if (Number(process.versions.node.split('.')[0]) !== 24) throw Error('audit_reader_node24_required');
-  const config = JSON.parse(privateFile(filename)); roles(config.readerSourceRoleArn, config.writerSourceRoleArn);
+  const config = JSON.parse(privateFile(filename));
+  if (config.credentialMode === 'unix-scoped') require('./batch').sourceRole(config.brokerSourceRoleArn);
+  else { if (config.credentialMode) throw Error('audit_reader_configuration_invalid'); roles(config.readerSourceRoleArn, config.writerSourceRoleArn); }
   if (!Number.isInteger(config.port) || config.port < 1024 || config.port > 65535) throw Error('audit_reader_configuration_invalid');
   Object.assign(process.env, { AWS_CONFIG_FILE: '/dev/null', AWS_SHARED_CREDENTIALS_FILE: '/dev/null',
     AWS_EC2_METADATA_V1_DISABLED: 'true', AWS_EC2_METADATA_SERVICE_ENDPOINT: 'http://169.254.169.254' });
+  if (config.credentialMode === 'unix-scoped') require('./scoped-credentials').runtimeClient(config, 'reader');
   const { ReaderStore } = require('./reader-store'); const { createServer } = require('./reader-server');
   const store = new ReaderStore(config.stateFile);
-  const server = createServer({ store, principals: config.principals, read: input => awsRead(input, config) }, {
+  const read = config.credentialMode === 'unix-scoped' ? input => require('./scoped-runtime').read(input, config) : input => awsRead(input, config);
+  const server = createServer({ store, principals: config.principals, read }, {
     key: privateFile(config.tlsKeyFile), cert: privateFile(config.tlsCertFile) });
   server.listen(config.port, config.listenAddress || '127.0.0.1');
   const close = () => server.close(() => { store.close(); process.exitCode = 0; });

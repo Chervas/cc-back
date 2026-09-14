@@ -1245,9 +1245,15 @@ del receptor y no vuelve al writer local ante errores. El modo `local` conserva
 el protocolo cerrado por stdin para un host que disponga de la identidad adecuada;
 no sirve para instalar el writer en el Lightsail de otra cuenta. Contrato en
 [39 — Entrega autenticada](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/39-seguridad-integraciones-cifrado-auditoria.md#entrega-autenticada-de-auditoría).
-El proceso AWS no hereda secretos/config AWS del backend. Solo IMDSv2,
-archivos AWS `/dev/null` y endpoints HTTPS STS/S3 de París; verifica el rol
-origen configurado y el writer asumido antes de escribir. Cuatro puts simultáneos,
+En la instancia única, `credentialMode=unix-scoped` separa los roles efectivos
+writer/reader mediante usuarios y sockets Unix propios. Un intermediario local
+obtiene sesiones STS; los consumidores no acceden a IMDS ni al socket ajeno y
+comprueban su identidad STS antes de S3. Esas barreras se verifican al arrancar;
+el código preparado no acredita todavía el aislamiento en AWS ni entrega real.
+El acceso AWS no hereda secretos/config del backend: archivos AWS `/dev/null`
+y endpoints HTTPS STS/S3 de París. IMDSv2 queda reservado al intermediario en
+modo Unix o al bootstrap local autorizado. Se verifican origen y rol writer
+antes de escribir. Cuatro puts simultáneos,
 proceso limitado a 75 s; leases por evento 120 s y global 270 s con CAS.
 No acepta modo reader/endpoints/credenciales desde JobRequest. Sin eventos,
 ninguna consulta AWS. ACK dudoso o 412 conserva conciliación pendiente.
