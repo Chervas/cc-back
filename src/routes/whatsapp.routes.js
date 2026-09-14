@@ -7,6 +7,9 @@ const metaQuarantine = require('../lib/metaQuarantineHttp');
 // Containment includes local assignments/queues, not only Graph HTTP. Keep
 // writes closed until each WhatsApp consumer has its reviewed broker path.
 router.use((req, res, next) => {
+  // The separate webhook route owns unauthenticated provider delivery and its
+  // retryable containment. It must not be consumed by the legacy JWT gate.
+  if (req.path.replace(/\/+$/, '').toLowerCase() === '/webhook') return next();
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
   return authMiddleware(req, res, () => metaQuarantine.middleware(req, res));
 });
