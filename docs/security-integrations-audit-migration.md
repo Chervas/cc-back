@@ -139,11 +139,11 @@ Evidencia y artefactos fechados en
 
 ##### Autonomía temporal de instalación y diagnóstico
 
-Preparar una inline policy separada sobre el rol de deployment ya asumible, con
-caducidad absoluta en cada permiso añadido, región e instancia exactas. El lote
-incluye política anterior, hashes, petición estructurada y retirada de esa única
-política. Comparar trusts/políticas antes y después; no ampliar el rol EC2 ni
-reemplazar permisos previos. La preparación no acredita que el permiso exista.
+Usar el permission set temporal autorizado y comprobar STS y la política efectiva
+antes de operar. `cc-osadmin-temp` permite administrar solo la EC2 y su SG; no
+es el rol permanente del servicio. La propuesta anterior de ampliar deployment
+no debe aplicarse además. Comparar hashes, caducidad absoluta y recursos del
+permiso recibido; no inferir capacidades por el nombre del permission set.
 
 Crear y ejecutar documentos Command propios permite administrar como root la
 EC2 de destino: un prefijo de nombres no restringe el contenido del script ni
@@ -157,10 +157,16 @@ oficiales de acciones/recursos: [SSM](https://docs.aws.amazon.com/service-author
 y [EC2](https://docs.aws.amazon.com/service-authorization/latest/reference/list_ec2.html).
 
 La fecha de expiración impide nuevas solicitudes autorizadas por la ampliación;
-no para comandos ya iniciados ni deshace cambios. Retirar la política al terminar
-y conservar evidencias. El primer uso tras un fallo es el diagnóstico fijado,
-nunca un reintento ciego. Propuesta y estado de aplicación en
-[99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-autonomia-temporal-2026-09-14).
+no para sesiones/comandos ya iniciados ni deshace cambios. Cerrar sesiones y
+retirar la asignación temporal al terminar. Si Run Command devuelve `AccessDenied`
+sin ejecutar, no confundirlo con un error del instalador. Session Manager es un
+canal alternativo solo cuando está expresamente autorizado: verificar el plugin
+oficial, ejecutar el mismo diagnóstico congelado y conservar salida saneada.
+Sin documento de preferencias creado, omitir el nombre utiliza el shell por defecto.
+Comprobar también `TerminateSession`: el prefijo efectivo de la sesión federada
+puede diferir de `${aws:userid}`. Una regla declarada no acredita cierre efectivo.
+Evidencia del acceso y reparación en
+[99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-auditoria-aws-operativa-2026-09-14).
 
 El artefacto debe contener solo `services/platform-audit/src`, `package.json` y
 su lockfile, con hashes revisados; nunca `.env`, modelos clínicos o secretos.
@@ -211,6 +217,13 @@ arrancar. No aceptar únicamente que la directiva figure en el fichero. Root y
 credentials pertenecen al ámbito de confianza; esto no separa hosts físicos ni
 protege frente a un compromiso de root. Contrato en
 [39](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/39-seguridad-integraciones-cifrado-auditoria.md#roles-de-auditoría-en-una-instancia).
+
+El filtro de paquetes de systemd puede producir `TIMEOUT`, no `EACCES`. El
+comprobador abre dos listeners locales efímeros: exige conexión a `127.0.0.1`
+y denegación a `127.0.0.2`, incluida en `IPAddressDeny`. Solo después admite
+el timeout de IMDS; rechaza endpoints cerrados y conexiones de metadata exitosas.
+Los listeners se cierran al terminar. Probar también el comprobador sin filtro:
+debe rechazar antes de tocar metadata. No retirar controles para salvar el arranque.
 
 El corte inicial usa un documento SSM sin parámetros ejecutables, versión y hash
 fijados, con artefacto dentro del documento. Antes de crear usuarios o instalar,
@@ -284,6 +297,16 @@ un timeout por sí solo no prueba una denegación de permisos. Los sockets puede
 desaparecer tras la parada del broker y su ausencia posterior no explica el fallo
 anterior. Evidencia del incidente en
 [99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-diagnostico-arranque-auditoria-2026-09-14).
+
+Para reparar el comprobador, congelar un lote nuevo y verificar antes los hashes
+de fuentes, Node y unidades, usuarios/permisos, servicios inactivos y ausencia de
+manifiesto final. Copiar a otra release conservando las dependencias ya verificadas,
+respaldar unidades y cambiar únicamente código/unidades revisados. Ante fallo,
+parar los servicios, restaurar las unidades y conservar archivos para diagnóstico.
+Tras éxito, registrar el hash nuevo y comprobar TLS, escritura/lectura/conciliación
+ficticias y recuperación tras reinicio. El documento de parada fijado al hash
+anterior deja de servir: preparar uno compatible con el nuevo manifiesto, sin
+borrar claves, journals ni objetos S3. Lote y evidencia en el corte enlazado arriba.
 
 En staging, preparar `PLATFORM_AUDIT_WRITER_TRANSPORT=https`, origen HTTPS,
 CA/key-id/key-file y rol fuente. Gateway y DEV no arrancan el consumidor. Con

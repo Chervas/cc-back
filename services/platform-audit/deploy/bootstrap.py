@@ -225,7 +225,7 @@ ExecStart={node} --max-old-space-size=96 {release}/src/credential-broker.js {CON
         other = 'reader' if kind == 'writer' else 'writer'
         main = 'writer-https-main.js' if kind == 'writer' else 'reader-main.js'
         common += f'''Environment=AWS_EC2_METADATA_DISABLED=true
-IPAddressDeny=169.254.169.254/32 fd00:ec2::254/128
+IPAddressDeny=169.254.169.254/32 fd00:ec2::254/128 127.0.0.2/32
 ReadWritePaths={STATE}/{kind}
 InaccessiblePaths={CONFIG}/credentials {CONFIG}/{other} {STATE}/{other}
 MemoryMax={'512M' if kind == 'writer' else '384M'}
