@@ -1,5 +1,6 @@
 'use strict';
 const express = require('express');
+const webhookContainment = require('../lib/whatsappWebhookContainment');
 const webhookAuthentication = require('../lib/whatsappWebhookAuthentication');
 const metaScopeBlock = require('../services/metaScopeBlock.service');
 const router = express.Router();
@@ -340,7 +341,7 @@ router.get('/whatsapp/webhook', (req, res) => {
   return res.sendStatus(403);
 });
 
-router.post('/whatsapp/webhook', async (req, res) => {
+router.post('/whatsapp/webhook', webhookContainment, async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
     req.body = webhookAuthentication.authenticate(req);

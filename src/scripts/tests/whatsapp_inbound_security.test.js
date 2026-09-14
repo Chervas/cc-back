@@ -8,6 +8,10 @@ const { Op } = require('sequelize');
 const { authenticate, MAX_BYTES } = require('../../lib/whatsappWebhookAuthentication');
 const SECRET = 'FICTITIOUS_APP_SECRET_FOR_OFFLINE_QA';
 function fake(name, exports) { const id = require.resolve(name); require.cache[id] = { id, filename: id, loaded: true, exports }; }
+// This suite exercises the candidate authentication/routing layer behind the
+// closed ingress. The actual public containment is tested separately; bypassing
+// it here does not configure or enable a runtime route.
+fake('../../lib/whatsappWebhookContainment', (_req, _res, next) => next());
 let reads, sensitiveReads, queued, assets, settings, destination, webOrigin, blocked, failSql;
 const baseAsset = () => ({ id: 10, wabaId: '111111', phoneNumberId: '222222', assignmentScope: 'clinic', clinicaId: 4,
   grupoClinicaId: null, assetType: 'whatsapp_phone_number', additionalData: {}, isActive: true });
