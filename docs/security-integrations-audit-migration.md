@@ -192,6 +192,9 @@ comprueba cuenta/instancia, AL2023/x86_64, herramientas, espacio y ausencia de
 rutas/usuarios/unidades propias previas o puertos ocupados. No sobrescribe otra
 instalación. Descarga Node aislado con SHA-256 fijado, instala dependencias del
 lockfile sin scripts como usuario sin login y deja código propiedad de root.
+La configuración npm de usuario y global usa dos ficheros vacíos, distintos y
+de solo lectura. No apuntar ambos a `/dev/null`: npm 11.19.0 rechaza cargar el
+mismo fichero con dos funciones antes de instalar dependencias.
 
 Puertos: writer 8443 y reader 8444; SG restringido al IPv4 /32 del emisor verificado.
 Genera certificados TLS separados de 90 días y devuelve solo la parte pública
@@ -207,6 +210,28 @@ creadas y ejecutar el documento de parada que valida instancia/hash. Detener y
 deshabilitar los tres servicios conservando usuarios, claves, código y journals.
 No reinicia la aplicación ni aplica DDL. La instancia/disco/IP existentes bastan;
 sí habrá consumo de CPU/red y operaciones STS/S3/KMS que medir en costes.
+
+#### Recuperación limitada de dependencias
+
+`bootstrap.py --resume-dependencies` se limita al artefacto inicial conocido y
+al estado anterior a configurar los servicios. Primero verifica cuenta/instancia,
+usuarios/grupos, directorios raíz, fuentes exactas y ausencia de configuración,
+journals, unidades y manifiesto final. Si hay diferencias, se detiene antes de
+crear nuevos directorios. No convertir esta opción en un reintento genérico.
+
+Conserva el árbol parcial original, reutiliza únicamente los usuarios verificados
+y crea árboles `-recovery1` para Node y release. Node vuelve a descargarse con
+SHA-256 fijado; su árbol y el código final quedan propiedad de root. La corrección
+de npm se ensaya con el Node/npm oficiales y un usuario sin login, instalando
+el lockfile completo en un directorio de QA. Los errores externos solo devuelven
+fase y un código permitido; no imprimir el stderr arbitrario del gestor.
+
+La recuperación requiere un documento SSM nuevo fijado por versión/hash. Mantiene
+las comprobaciones de aislamiento/HTTPS y deja ingress cerrado hasta éxito.
+El documento de parada anterior sirve tras completar la recuperación porque
+el hash del runtime se conserva; no sirve para deshacer una instalación parcial
+sin manifiesto final. Evidencias y lotes exactos en
+[99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-recuperacion-npm-2026-09-14).
 
 En staging, preparar `PLATFORM_AUDIT_WRITER_TRANSPORT=https`, origen HTTPS,
 CA/key-id/key-file y rol fuente. Gateway y DEV no arrancan el consumidor. Con

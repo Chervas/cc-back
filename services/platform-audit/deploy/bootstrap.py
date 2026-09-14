@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import pwd
+import grp
+import re
 import shutil
 import socket
 import subprocess
@@ -27,6 +29,19 @@ STATE = Path('/var/lib/clinicaclick-audit')
 USERS = {'credentials': 'cc-audit-credentials', 'writer': 'cc-audit-writer', 'reader': 'cc-audit-reader'}
 ENV = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8', 'AWS_CONFIG_FILE': '/dev/null', 'AWS_SHARED_CREDENTIALS_FILE': '/dev/null'}
 STEP = 'validate_input'
+RECOVERABLE_ARTIFACT = '69c48195d48d679fd4176c071ffef2c8a06830c24ca342fd2dc7cc13ae330eb7'
+SAFE_REASONS = set(('artifact_hash artifact_member artifact_shape host_platform host_release existing_installation existing_service_user '
+                    'existing_service host_tool disk_space host_identity unexpected_recovery_artifact unexpected_partial_directory '
+                    'configuration_already_started unexpected_partial_installation service_identity_overlap unexpected_service_user '
+                    'unexpected_service_groups unexpected_partial_source partial_source_changed public_principals public_key_type '
+                    'node_hash node_version service_health closed_endpoint explicit_apply_required').split())
+
+
+def failure_reason(error):
+    if isinstance(error, ValueError) and str(error) in SAFE_REASONS:
+        return str(error)
+    reason = getattr(error, 'safe_reason', '')
+    return reason if re.fullmatch(r'dependency_(?:timeout|command_failed|duplicate_config|E[A-Z0-9_]{1,30})', reason) else 'bootstrap_step_failed'
 
 
 def run(args, **kwargs):
@@ -50,22 +65,25 @@ def bundle_files(filename, digest):
     return files
 
 
-def preflight():
+def preflight(resume=False, files=None, digest=None):
     if os.getuid() != 0 or os.uname().machine != 'x86_64':
         raise ValueError('host_platform')
     release = Path('/etc/os-release').read_text()
     if 'ID="amzn"' not in release or 'VERSION_ID="2023"' not in release:
         raise ValueError('host_release')
-    for root in (BASE, CONFIG, STATE):
-        if root.exists() or root.is_symlink():
-            raise ValueError('existing_installation')
-    for user in USERS.values():
-        try:
-            pwd.getpwnam(user)
-        except KeyError:
-            pass
-        else:
-            raise ValueError('existing_service_user')
+    if resume:
+        recovery_preflight(files, digest)
+    else:
+        for root in (BASE, CONFIG, STATE):
+            if root.exists() or root.is_symlink():
+                raise ValueError('existing_installation')
+        for user in USERS.values():
+            try:
+                pwd.getpwnam(user)
+            except KeyError:
+                pass
+            else:
+                raise ValueError('existing_service_user')
     for name in USERS:
         if run(['systemctl', 'show', '-p', 'LoadState', '--value', 'clinicaclick-audit-' + name + '.service']).strip() != b'not-found':
             raise ValueError('existing_service')
@@ -84,6 +102,65 @@ def preflight():
     metadata = json.loads(opener.open(req, timeout=3).read())
     if metadata.get('accountId') != ACCOUNT or metadata.get('instanceId') != INSTANCE or metadata.get('region') != 'eu-west-3':
         raise ValueError('host_identity')
+
+
+def recovery_preflight(files, digest):
+    """Only the known pre-configuration dependency failure can be resumed."""
+    if digest != RECOVERABLE_ARTIFACT:
+        raise ValueError('unexpected_recovery_artifact')
+    for root, mode in [(BASE, 0o755), (CONFIG, 0o711), (STATE, 0o711)]:
+        if root.resolve() != root or not root.is_dir() or root.stat().st_uid != 0 or root.stat().st_mode & 0o777 != mode:
+            raise ValueError('unexpected_partial_directory')
+    if list(CONFIG.iterdir()) or list(STATE.iterdir()):
+        raise ValueError('configuration_already_started')
+    expected = {'node-v' + NODE_VERSION, 'release-' + digest[:12]}
+    if {p.name for p in BASE.iterdir()} != expected:
+        raise ValueError('unexpected_partial_installation')
+    owners = {kind: pwd.getpwnam(name) for kind, name in USERS.items()}
+    if len({v.pw_uid for v in owners.values()}) != 3:
+        raise ValueError('service_identity_overlap')
+    for kind, owner in owners.items():
+        if owner.pw_uid == 0 or owner.pw_gid == 0 or owner.pw_dir != '/nonexistent' or owner.pw_shell != '/sbin/nologin' or grp.getgrnam(USERS[kind]).gr_gid != owner.pw_gid:
+            raise ValueError('unexpected_service_user')
+        groups = {owner.pw_gid}
+        if kind == 'credentials':
+            groups |= {owners['writer'].pw_gid, owners['reader'].pw_gid}
+        if set(os.getgrouplist(USERS[kind], owner.pw_gid)) != groups:
+            raise ValueError('unexpected_service_groups')
+    old = BASE / ('release-' + digest[:12])
+    if old.resolve() != old or not old.is_dir() or {p.name for p in old.iterdir()} - {'src', 'package.json', 'package-lock.json', 'node_modules'}:
+        raise ValueError('unexpected_partial_source')
+    if {p.name for p in (old / 'src').iterdir()} != {Path(name).name for name in files if name.startswith('src/')}:
+        raise ValueError('unexpected_partial_source')
+    for name, content in files.items():
+        p = old / name
+        if p.resolve() != p or not p.is_file() or p.stat().st_uid != owners['credentials'].pw_uid or p.stat().st_size != len(content) or p.read_bytes() != content:
+            raise ValueError('partial_source_changed')
+    # Preserve this entire old tree, including any partial node_modules; use fresh versioned paths.
+
+
+def install_dependencies(node, node_dir, release, owner, cache):
+    cache.mkdir(); os.chown(cache, owner.pw_uid, owner.pw_gid)
+    configs = []
+    for kind in ('user', 'global'):
+        config = cache.parent / ('npm-' + kind + '.npmrc')
+        with config.open('x'):
+            pass
+        config.chmod(0o444); configs.append(config)
+    try:
+        return run(['runuser', '-u', owner.pw_name, '--', node, node_dir / 'lib/node_modules/npm/bin/npm-cli.js', 'ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund',
+                    '--userconfig=' + str(configs[0]), '--globalconfig=' + str(configs[1]), '--cache=' + str(cache), '--registry=https://registry.npmjs.org/'], cwd=release, timeout=360)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        reason = 'dependency_timeout' if isinstance(error, subprocess.TimeoutExpired) else 'dependency_command_failed'
+        raw = getattr(error, 'stderr', b'') or b''
+        if b'double-loading config' in raw:
+            reason = 'dependency_duplicate_config'
+        else:
+            found = re.search(rb'(?:npm error code|npm ERR! code) (E[A-Z0-9_]{1,30})', raw)
+            if found:
+                reason = 'dependency_' + found.group(1).decode('ascii')
+        failure = RuntimeError(reason); failure.safe_reason = reason
+        raise failure from None
 
 
 def private_write(filename, value, owner):
@@ -158,7 +235,7 @@ ExecStart={node} --max-old-space-size={'192' if kind == 'writer' else '128'} {re
     return common + '\n[Install]\nWantedBy=multi-user.target\n'
 
 
-def install(artifact, digest, principals_file):
+def install(artifact, digest, principals_file, resume=False):
     global STEP
     files = bundle_files(artifact, digest)
     principals = json.loads(Path(principals_file).read_text())
@@ -170,7 +247,7 @@ def install(artifact, digest, principals_file):
         details = run(['openssl', 'pkey', '-pubin', '-text', '-noout'], input=principal['publicKey'].encode())
         if b'ED25519' not in details:
             raise ValueError('public_key_type')
-    STEP = 'preflight'; preflight()
+    STEP = 'recovery_preflight' if resume else 'preflight'; preflight(resume, files, digest)
     os.umask(0o022)
     started = []
     with tempfile.TemporaryDirectory(prefix='clinicaclick-audit-bootstrap-') as tmp:
@@ -182,27 +259,31 @@ def install(artifact, digest, principals_file):
             shutil.copyfileobj(src, dest)
         if hashlib.sha256(archive.read_bytes()).hexdigest() != NODE_SHA:
             raise ValueError('node_hash')
-        STEP = 'create_isolated_service_users'
-        for name in USERS.values():
-            run(['useradd', '--system', '--user-group', '--no-create-home', '--home-dir', '/nonexistent', '--shell', '/sbin/nologin', name])
-        run(['usermod', '-a', '-G', USERS['writer'] + ',' + USERS['reader'], USERS['credentials']])
+        STEP = 'reuse_verified_service_users' if resume else 'create_isolated_service_users'
+        if not resume:
+            for name in USERS.values():
+                run(['useradd', '--system', '--user-group', '--no-create-home', '--home-dir', '/nonexistent', '--shell', '/sbin/nologin', name])
+            run(['usermod', '-a', '-G', USERS['writer'] + ',' + USERS['reader'], USERS['credentials']])
         owners = {kind: pwd.getpwnam(name) for kind, name in USERS.items()}
-        BASE.mkdir(mode=0o755); CONFIG.mkdir(mode=0o711); STATE.mkdir(mode=0o711)
-        node_dir = BASE / ('node-v' + NODE_VERSION); node_dir.mkdir(mode=0o755)
+        if not resume:
+            BASE.mkdir(mode=0o755); CONFIG.mkdir(mode=0o711); STATE.mkdir(mode=0o711)
+        suffix = '-recovery1' if resume else ''
+        node_dir = BASE / ('node-v' + NODE_VERSION + suffix); node_dir.mkdir(mode=0o755)
         run(['tar', '-xJf', archive, '--strip-components=1', '-C', node_dir])
+        for dest in [node_dir, *node_dir.rglob('*')]:
+            os.chown(dest, 0, 0, follow_symlinks=False)
         node = node_dir / 'bin/node'
         if run([node, '--version']).strip() != ('v' + NODE_VERSION).encode():
             raise ValueError('node_version')
-        release = BASE / ('release-' + digest[:12]); release.mkdir(mode=0o755)
+        release = BASE / ('release-' + digest[:12] + suffix); release.mkdir(mode=0o755)
         for name, content in files.items():
             dest = release / name; dest.parent.mkdir(mode=0o755, parents=True, exist_ok=True); dest.write_bytes(content); dest.chmod(0o644)
         # npm has no user config or credentials; lockfile integrity is checked and lifecycle scripts are disabled.
         for dest in [release, *release.rglob('*')]:
             os.chown(dest, owners['credentials'].pw_uid, owners['credentials'].pw_gid)
-        cache = tmp / 'npm-cache'; cache.mkdir(); tmp.chmod(0o711); os.chown(cache, owners['credentials'].pw_uid, owners['credentials'].pw_gid)
+        tmp.chmod(0o711)
         STEP = 'install_locked_dependencies'
-        run(['runuser', '-u', USERS['credentials'], '--', node, node_dir / 'lib/node_modules/npm/bin/npm-cli.js', 'ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund',
-             '--userconfig=/dev/null', '--globalconfig=/dev/null', '--cache=' + str(cache), '--registry=https://registry.npmjs.org/'], cwd=release, timeout=360)
+        install_dependencies(node, node_dir, release, owners['credentials'], tmp / 'npm-cache')
         for dest in [release, *release.rglob('*')]:
             os.chown(dest, 0, 0, follow_symlinks=False)
         STEP = 'configure_private_services'
@@ -257,15 +338,17 @@ def install(artifact, digest, principals_file):
             raise
         result = {'status': 'installed_not_connected', 'instance': INSTANCE, 'artifactSha256': digest, 'node': NODE_VERSION, 'serviceUids': {k: v.pw_uid for k, v in owners.items()},
                   'metadataAndCrossSocketDenial': 'ExecStartPre passed', 'tlsPublicCertificates': certs, 'providersActivated': False, 'realAuditDeliveryVerified': False}
+        if resume:
+            result.update(recoveredFrom='install_locked_dependencies', preservedOriginalRelease=True)
         (BASE / 'installation.json').write_text(json.dumps(result, indent=2) + '\n'); (BASE / 'installation.json').chmod(0o600)
         print(json.dumps(result))
 
 
 if __name__ == '__main__':
     try:
-        if len(sys.argv) != 5 or sys.argv[1] != '--apply':
+        if len(sys.argv) != 5 or sys.argv[1] not in ('--apply', '--resume-dependencies'):
             raise ValueError('explicit_apply_required')
-        install(sys.argv[2], sys.argv[3], sys.argv[4])
-    except Exception:
-        print('AUDIT_BOOTSTRAP_FAILED stage=' + STEP + '; preserve partial files; no automatic retry', file=sys.stderr)
+        install(sys.argv[2], sys.argv[3], sys.argv[4], resume=sys.argv[1] == '--resume-dependencies')
+    except Exception as error:
+        print('AUDIT_BOOTSTRAP_FAILED stage=' + STEP + ' reason=' + failure_reason(error) + '; preserve partial files; no automatic retry', file=sys.stderr)
         sys.exit(1)
