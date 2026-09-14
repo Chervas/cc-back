@@ -7,7 +7,8 @@ const { configuration } = require('./security-database-metadata');
 const ROOTS = Object.freeze({ dev: '/home/ubuntu/wt/back-dev', staging: '/home/ubuntu/wt/back-staging', gateway: '/home/ubuntu/wt/gateway' });
 const TABLES = Object.freeze({
   Usuarios: ['id_usuario','email_usuario','password_usuario','estado_cuenta','es_provisional','ultimo_login'],
-  AuthSessions: ['session_id','user_id','issued_at','expires_at','absolute_expires_at','credential_binding','state','ended_at','authentication_method','email_verified_at','email_challenge_id'],
+  AuthSessions: ['session_id','user_id','issued_at','expires_at','absolute_expires_at','credential_binding','state','ended_at','authentication_method','email_verified_at','email_challenge_id','trusted_device_id'],
+  AuthTrustedDevices: ['device_id','user_id','token_hash','key_binding','credential_binding','creation_session_id','email_verified_at','created_at','expires_at','revoked_at','last_used_at'],
   AuthEmailChallenges: ['challenge_id','user_id','challenge_hash','code_hash','credential_binding','email_hash','state','created_at','expires_at','absolute_expires_at','last_sent_at','attempts','sends','verified_at','consumed_session_id','email_message_id'],
   PlatformAuditEvents: ['event_id','correlation_id','stage','result_part','occurred_at','body','digest','state','receipt','lease_token','lease_until','attempts','next_attempt_at','last_error','delivered_at'],
   PlatformAuditDeliveryStates: ['state_key','lease_token','lease_until'],
@@ -17,7 +18,7 @@ const TABLES = Object.freeze({
 });
 const MIGRATIONS = Object.freeze(['20260829120000-create-email-system.js','20251020100000-create-job-requests.js',
   '20260912210000-create-platform-audit-events.js','20260912213000-create-platform-audit-delivery-states.js',
-  '20260913003000-add-platform-audit-result-part.js','20260912220000-create-auth-sessions.js','20260913130000-create-auth-email-challenges.js']);
+  '20260913003000-add-platform-audit-result-part.js','20260912220000-create-auth-sessions.js','20260913130000-create-auth-email-challenges.js','20260914220000-create-auth-trusted-devices.js']);
 function observedEnvironment(runtime) {
   if (!Object.hasOwn(ROOTS, runtime)) throw Error('email_login_metadata_invalid');
   const root = ROOTS[runtime]; const file = path.join(root, '.env');
