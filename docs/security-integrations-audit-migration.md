@@ -233,6 +233,32 @@ el hash del runtime se conserva; no sirve para deshacer una instalación parcial
 sin manifiesto final. Evidencias y lotes exactos en
 [99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-recuperacion-npm-2026-09-14).
 
+#### Diagnóstico de un fallo posterior al configurar servicios
+
+Si la recuperación supera npm y falla en `start_writer`, ya existen claves,
+configuraciones y unidades: `--resume-dependencies` debe rechazar ese estado.
+Conservar los artefactos ejecutados y no generar otra instalación a ciegas.
+La fase identifica el comando fallido, pero no demuestra si falló `ExecStartPre`,
+systemd o una dependencia. La limpieza intenta detener las unidades cuyo arranque
+se intentó; contrastar su estado antes de afirmar que están detenidas.
+
+`services/platform-audit/deploy/diagnose_startup.py` permite preparar un documento
+SSM de diagnóstico sin parámetros, fijado por versión/hash e instancia. Recoge
+solo propiedades permitidas de las tres unidades, categorías filtradas de sus
+journals, metadatos de permisos y cotejo de hashes de código/unidades/Node. La
+ventana de journal y los hashes esperados se congelan para el incidente concreto.
+Nunca devuelve logs completos ni lee contenidos de configuración, claves o BD.
+Las pruebas deben comprobar el filtrado con valores ficticios sensibles y el
+rechazo de rutas de secretos y enlaces simbólicos.
+
+`diagnostic_collected_not_repaired` significa únicamente que la recogida terminó.
+No arranca servicios ni permite abrir ingress. Si el error corresponde al control
+de aislamiento, identificar la comprobación concreta manteniendo las barreras;
+un timeout por sí solo no prueba una denegación de permisos. Los sockets pueden
+desaparecer tras la parada del broker y su ausencia posterior no explica el fallo
+anterior. Evidencia del incidente en
+[99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-diagnostico-arranque-auditoria-2026-09-14).
+
 En staging, preparar `PLATFORM_AUDIT_WRITER_TRANSPORT=https`, origen HTTPS,
 CA/key-id/key-file y rol fuente. Gateway y DEV no arrancan el consumidor. Con
 el esquema aprobado, verificar un evento ficticio completo por TLS, S3 y
