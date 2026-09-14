@@ -1,6 +1,9 @@
 # Primera etapa: contención Meta y acceso con código por correo
 
-Fecha: 13/09/2026. Entrega de código y QA aislada; **no activada en servicios**.
+> **Tipo:** runbook del corte de acceso y su relación con la contención Meta.
+> **Estado vigente:** [19, seguridad](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones).
+> **Evidencia del corte de MFA:** [99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-mfa-publico-2026-09-14).
+
 El usuario eligió expresamente códigos por correo. El producto OPS queda fuera del foco;
 no es una dependencia de ClinicaClick ni de esta activación.
 El objetivo completo de integraciones, auditoría, costes y cifrado sigue abierto.
@@ -126,7 +129,13 @@ de auditoría ya documentados. La nueva captura local no prueba entrega externa.
 No se purgan desafíos, revocaciones ni registros históricos en esta etapa. La
 retención/recuperación de estos datos se debe conciliar con el DPD.
 
-## Lote de activación preparado, todavía no autorizado ni ejecutado
+## Procedimiento de activación
+
+Para un corte limitado a login, usar el candidato específico de cinco migraciones
+de sesiones/auditoría y sus parches sobre cada base pública. Ese corte no incluye
+`MetaScopeBlocks`, migraciones Google ni reconexión de consumidores. La secuencia
+siguiente describe también dependencias de la etapa Meta completa: no ejecutarla
+íntegra por haber autorizado MFA. El acta enlazada gobierna el lote aplicado.
 
 1. Conciliar versiones y DDL reales de DEV/staging/gateway y workers: comparten
    BD. Revisar todo el rango de commits; no aplicar un despliegue de toda DEV ni

@@ -177,18 +177,20 @@ Antes de cada promoción que afecte a autenticación:
 La configuración compartida observada más abajo sigue siendo un pendiente real;
 estos controles de promoción no sustituyen el aislamiento de identidades.
 
-## Preparación del MFA completo y pendientes reales
+<a id="preparación-del-mfa-completo-y-pendientes-reales"></a>
 
-Los candidatos privados vigentes se preparan como
+## Preparación y mantenimiento del corte MFA
+
+Los candidatos privados se preparan como
 `security-email-login-{back,gateway,front}-candidate-20260914`, desde los HEAD
 públicos actuales y con su manifiesto/parches exactos. Incorporan la corrección
 DEV de `role.interceptor`: `/api/auth/me` debe llegar al backend, sin respuesta
 de usuario ficticio. La preparación anterior del día 13 queda como evidencia,
 no como base para sobrescribir un entorno que haya avanzado. No contienen `.env` y
-sus dependencias enlazadas son únicamente para QA. La inspección de metadata
-por socket local confirma que faltan las tablas `AuthSessions`,
-`AuthEmailChallenges`, `PlatformAuditEvents` y `PlatformAuditDeliveryStates`.
-Las DDL exactas pendientes para ese candidato son:
+sus dependencias enlazadas son únicamente para QA. Inspeccionar por socket local
+las tablas `AuthSessions`, `AuthEmailChallenges`, `PlatformAuditEvents` y
+`PlatformAuditDeliveryStates` antes de aplicar o reanudar las migraciones.
+Las cinco migraciones del candidato son:
 
 - `20260912210000-create-platform-audit-events.js`.
 - `20260912213000-create-platform-audit-delivery-states.js`.
@@ -196,29 +198,28 @@ Las DDL exactas pendientes para ese candidato son:
 - `20260913003000-add-platform-audit-result-part.js`.
 - `20260913130000-create-auth-email-challenges.js` (DDL múltiple no atómica).
 
-Las migraciones existentes de correo/reset y JobRequests sí figuran aplicadas.
-No se ejecutó DDL compartida. SES transaccional está operativo. El candidato
-incorpora `EMAIL_AUTHENTICATION_RECIPIENT_POLICY=registered-account` para cubrir
+Verificar primero las migraciones existentes de correo/reset y JobRequests.
+`EMAIL_AUTHENTICATION_RECIPIENT_POLICY=registered-account` permite cubrir
 código/reset de cuentas activas fuera de la lista general, con prueba vigente en
-BD y contenido cerrado; configuración apagada hasta el corte. Contrato en
+BD y contenido cerrado. Contrato en
 [33](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/33-sistema-email.md#correo-de-autenticación-para-cuentas-registradas).
-Faltan la clave MFA privada y la entrega/conciliación externa de auditoría:
-sin vaciado, el límite de una hora cerraría la emisión de sesiones.
+Exigir clave MFA privada y entrega/conciliación externa de auditoría: sin vaciado,
+el límite de una hora cerraría la emisión de sesiones. El estado aplicado y la
+aceptación humana se mantienen en [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones);
+acta en [99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-mfa-publico-2026-09-14).
 
-### Dependencia AWS que impide activar el candidato
+<a id="dependencia-aws-que-impide-activar-el-candidato"></a>
+
+### Transporte AWS requerido
 
 La identidad IMDSv2 del host de aplicación pertenece a `468355432137` y usa
 `AmazonLightsailInstanceRole`; la infraestructura de seguridad pertenece a
-`137819318729`. `platformAudit.delivery.js` lanza `writer-main.js` como hijo local
-con IMDSv2 y el contrato valida un rol fuente de la cuenta de seguridad. Con ese
-alojamiento, el writer no puede asumir la identidad esperada. Una sesión SSO
-serviría para instalar/configurar, no para entregarla como credencial de runtime.
-El lote IAM de implementación ya se aplicó por el operador y se verificó después:
-SSO y asunción de deployment/writer/reader correctos, trusts y autorización del
-instance role coincidentes. El rol deployment sigue sin canal de instalación.
-El transporte HTTPS y las credenciales por servicio en la instancia única están
-preparados y probados con ficticios. Su instalación mediante documento SSM fijo
-se guía por el [runbook de migración](../security-integrations-audit-migration.md#writer-https-en-la-instancia-de-seguridad).
+`137819318729`. El modo local de `platformAudit.delivery.js` no puede utilizar esa
+identidad como origen de auditoría. Configurar `PLATFORM_AUDIT_WRITER_TRANSPORT=https`
+con CA fijada y clave Ed25519 propia; los roles AWS permanecen en la instancia de
+seguridad. Una sesión SSO sirve para administrar, nunca como credencial permanente
+del runtime. Instalación y recuperación en el
+[runbook de migración](../security-integrations-audit-migration.md#writer-https-en-la-instancia-de-seguridad).
 
 Antes del corte, verificar el runtime de seguridad ya aprovisionado, su canal de
 instalación y los trusts efectivos; completar el transporte autenticado desde
@@ -240,7 +241,7 @@ Evidencia y solicitud de acceso en
    postchecks de columnas, índices y metadatos. Conservar las tablas en rollback.
    DEV comparte BD, pero mantiene sus gates y consumidores apagados.
 3. Instalar el candidato y preparar clave MFA privada de 32 bytes, fichero 0600,
-   compartida únicamente por los runtimes públicos necesarios. Conciliar claves
+   configurada únicamente en los runtimes públicos necesarios. Conciliar claves
    del flujo, `EMAIL_PUBLIC_APP_URL=https://crm.clinicaclick.com`, sesiones,
    auditoría y política `registered-account`. Mantener la lista general de correo,
    marketing apagado y los workers de gateway apagados; solo staging consume.
@@ -255,11 +256,12 @@ Evidencia y solicitud de acceso en
    expone autenticación y debe exigir la misma prueba. Mantener Meta/WhatsApp y
    sus colas pausados; el piloto de clínica será otro corte.
 
-Si falla el postcheck, volver al código/configuración exactos previos del corte,
-conservando tablas, outbox, revocaciones y rechazo de JWT administrativos antiguos.
-Restaurar flags de MFA previos reduce la protección a la etapa anterior: registrar
-esa degradación y mantener WhatsApp cerrado. No borrar evidencia ni reponer
-contraseñas o tokens revocados. No se ha ejecutado esta secuencia en público.
+Si falla el postcheck tras activar MFA, conservar tablas, outbox, revocaciones y
+el requisito de código. Reparar configuración o código compatible; si no puede
+funcionar, detener los procesos públicos afectados. No volver automáticamente
+al middleware anterior ni a flags off/legacy. No borrar evidencia ni reponer
+contraseñas o tokens revocados. Los respaldos permiten contrastar y recuperar
+archivos, pero no autorizan degradar la política de acceso.
 
 La configuración observada de DEV y staging comparte UID, identidad de BD,
 JWT_SECRET y clave de cifrado de correo. La comprobación compara valores en
