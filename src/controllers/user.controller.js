@@ -197,6 +197,8 @@ exports.updateUser = async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
+    if (await require('../services/authCredentialMutationGuard.service').guardCredentialMutation(user, req.body, res)) return;
+
     const fieldsToUpdate = isAdmin ? [
       'nombre', 'apellidos', 'email_usuario', 'email_factura',
       'email_notificacion', 'id_gestor', 'notas_usuario', 'telefono',

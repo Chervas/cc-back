@@ -445,11 +445,7 @@ if (RESUME_AUTOMATIONS_FROM_SOCKET_BUS) {
 } else {
     console.log('[automations-v2] Reanudacion por socket-bus deshabilitada; el gateway coordina inbound');
 }
-const adminCredentials = require('./lib/adminCredentialSession');
-require('./lib/socket-session-guard').installSocketSessionGuard(io, {
-    verify: token => adminCredentials.verifyToken(token, process.env.JWT_SECRET),
-    bearer: adminCredentials.bearer,
-});
+require('./lib/socket-session-guard').installSocketSessionGuard(io);
 
 io.on('connection', async (socket) => {
     const userId = socket.userData?.userId;

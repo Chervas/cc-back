@@ -1,35 +1,13 @@
 require('dotenv').config();
-const jwt = require('jsonwebtoken');
-const adminCredentials = require('../lib/adminCredentialSession');
+const sessions = require('../services/accessSession.service');
+const platformAudit = require('../services/platformAudit.service');
 const bcrypt = require('bcryptjs');
-const secret = process.env.JWT_SECRET; 
-const { Usuario } = require('../../models'); 
+const db = require('../../models');
+const { Usuario } = db;
 const { isBlockedAuthEmail } = require('../lib/blocked-auth-emails');
-const { isGlobalAdmin } = require('../lib/role-helpers');
 const passwordResetService = require('../services/passwordReset.service');
 const systemNotificationsService = require('../services/systemNotifications.service');
-const ACCESS_TOKEN_TTL_SECONDS = Math.max(300, Number(process.env.AUTH_ACCESS_TOKEN_TTL_SECONDS || (12 * 60 * 60)));
-const ACCESS_TOKEN_TTL = `${ACCESS_TOKEN_TTL_SECONDS}s`;
-
-function buildAccessToken(user) {
-    const userId = Number(user.id_usuario);
-    return jwt.sign(
-        { userId, email: user.email_usuario, isAdmin: isGlobalAdmin(userId), ...adminCredentials.claims(user, secret) },
-        secret,
-        { expiresIn: ACCESS_TOKEN_TTL }
-    );
-}
-
-function buildAuthResponse(user) {
-    const plainUser = user?.get ? { ...user.get({ plain: true }) } : { ...user };
-    plainUser.isAdmin = isGlobalAdmin(plainUser.id_usuario);
-    delete plainUser.password_usuario;
-    return {
-        token: buildAccessToken(user),
-        expiresIn: ACCESS_TOKEN_TTL_SECONDS,
-        user: plainUser,
-    };
-}
+const emailChallenges = require('../services/authEmailChallenge.service');
 
 exports.forgotPassword = async (req, res) => {
     try {
@@ -74,83 +52,67 @@ exports.resetPassword = async (req, res) => {
 };
 
 
-exports.signIn = async (req, res) => {
-    try {
-        const email = String(req.body?.email || '').trim().toLowerCase();
-
-        if (isBlockedAuthEmail(email)) {
-            console.warn('[Auth] Blocked login attempt for disabled demo email:', email);
-            return res.status(401).json({ message: 'Wrong email or password.' });
-        }
-
-        const user = await Usuario.findOne({ where: { email_usuario: email } });
-
-        if (!user) {
-            return res.status(401).json({ message: 'Wrong email or password.' });
-        }
-
-        if (!user.password_usuario) {
-            return res.status(401).json({ message: 'Wrong email or password.' });
-        }
-        const validPassword = await bcrypt.compare(req.body.password, user.password_usuario);
-        if (!validPassword) {
-            return res.status(401).json({ message: 'Wrong email or password.' });
-        }
-
-        // Actualizar último acceso
-        user.ultimo_login = new Date();
-        await user.save({ fields: ['ultimo_login'] });
-
-        res.status(200).json(buildAuthResponse(user));
-    } catch (error) {
-        console.error('Error en el proceso de signIn:', error);
-        res.status(500).json({ message: 'Server error' });
+// Audit success means credentials verified/token prepared; it does not claim the client received it.
+async function auditedAuth(req, res, action, work) {
+    let attempt;
+    try { attempt = await platformAudit.begin(req, action); }
+    catch { return res.status(503).json({ message: 'Authentication temporarily unavailable.' }); }
+    let result;
+    try { result = await work(attempt); }
+    catch (error) {
+        const expired = error?.name === 'TokenExpiredError';
+        const invalidToken = expired || ['JsonWebTokenError', 'NotBeforeError'].includes(error?.name);
+        result = invalidToken
+            ? { status: 401, body: { error: 'Invalid token' }, audit: { outcome: 'denied', reason: action === 'auth.token_sign_in' ? (expired ? 'token_expired' : 'token_rejected') : 'credentials_rejected' } }
+            : { status: 500, body: { message: 'Server error' }, audit: { outcome: 'error', reason: 'internal_error' } };
+        if (!invalidToken) console.error('[Auth] Authentication operation failed.');
     }
-};
-
-exports.signInWithToken = async (req, res) => {
-    try {
-        const accessToken = req.body.accessToken;
-        if(!accessToken) return res.status(400).json({ error: 'Access token is required' });
-
-        const decodedToken = await adminCredentials.verifyToken(accessToken, secret);
-        if (isBlockedAuthEmail(decodedToken.email)) {
-            return res.status(401).json({ error: 'Invalid token' });
-        }
-
-        const user = await Usuario.findOne({ where: { id_usuario: decodedToken.userId } });
-
-        if (!user) {
-            return res.status(401).json({ error: 'User not found.' });
-        }
-    
-        adminCredentials.assertMatches(decodedToken, user, secret);
-        user.ultimo_login = new Date();
-        await user.save({ fields: ['ultimo_login'] });
-
-        res.status(200).json(buildAuthResponse(user));
-    } catch (err) {
-        if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError') {
-            return res.status(401).json({ error: 'Invalid token' });
-        }
-        return res.status(500).json({ error: 'Server error', details: err.message });
-    }
-};
+    try { if (!result.auditCompleted) await attempt.complete(result.audit); }
+    catch { return res.status(503).json({ message: 'Authentication temporarily unavailable.' }); }
+    return res.status(result.status).json(result.body);
+}
+function rejectedCredentials(invalidRequest = false) {
+    return { status: invalidRequest ? 400 : 401,
+        body: { message: invalidRequest ? 'Email and password are required.' : 'Wrong email or password.' },
+        audit: { outcome: 'denied', reason: invalidRequest ? 'request_invalid' : 'credentials_rejected' } };
+}
+const legacySignIn = (req, res) => auditedAuth(req, res, 'auth.sign_in', async (attempt) => {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    if (isBlockedAuthEmail(email)) return rejectedCredentials();
+    const user = await Usuario.findOne({ where: { email_usuario: email } });
+    if (!user?.password_usuario || !await bcrypt.compare(req.body.password, user.password_usuario)) return rejectedCredentials();
+    return sessions.authenticated(user, { attempt });
+});
+exports.signInWithToken = (req, res) => auditedAuth(req, res, 'auth.token_sign_in', async (attempt) => {
+    const accessToken = req.body?.accessToken;
+    if (!accessToken) return { status: 400, body: { error: 'Access token is required' }, audit: { outcome: 'denied', reason: 'request_invalid' } };
+    const decodedToken = await sessions.verify(accessToken);
+    if (isBlockedAuthEmail(decodedToken.email)) return { status: 401, body: { error: 'Invalid token' }, audit: { outcome: 'denied', reason: 'token_rejected' } };
+    const user = await Usuario.findOne({ where: { id_usuario: decodedToken.userId } });
+    if (!user) return { status: 401, body: { error: 'User not found.' }, audit: { outcome: 'denied', reason: 'token_rejected' } };
+    return sessions.authenticated(user, { parentToken: accessToken, attempt });
+});
 
 exports.signUp = async (req, res) => {
     try {
         const { rol, nombre, apellidos, email_usuario, email_factura, email_notificacion, password, fecha_creacion } = req.body;
         const hashedPassword = await bcrypt.hash(password, 8);
-        const newUser = await Usuario.create({
-            rol: rol,
-            nombre: nombre,
-            apellidos: apellidos,
-            email_usuario: email_usuario,
-            email_factura: email_factura,
-            email_notificacion: email_notificacion,
-            password_usuario: hashedPassword,
-            fecha_creacion: fecha_creacion || new Date(),
-        });
+        const cfg = sessions.settings();
+        const createAccount = async (transaction) => {
+            const newUser = await Usuario.create({
+                rol: rol,
+                nombre: nombre,
+                apellidos: apellidos,
+                email_usuario: email_usuario,
+                email_factura: email_factura,
+                email_notificacion: email_notificacion,
+                password_usuario: hashedPassword,
+                fecha_creacion: fecha_creacion || new Date(),
+            }, { transaction });
+            const issued = cfg.emailMfaMode === 'enforce' ? null : await sessions.issue(newUser, { transaction, reason: 'account_created' });
+            return { newUser, issued };
+        };
+        const { newUser, issued } = cfg.mode === 'enforce' ? await db.sequelize.transaction(createAccount) : await createAccount();
 
         systemNotificationsService.notifyUserRegistration({
             user: newUser,
@@ -171,42 +133,79 @@ exports.signUp = async (req, res) => {
                 email_notificacion: newUser.email_notificacion,
                 fecha_creacion: newUser.fecha_creacion,
             },
-            token: buildAccessToken(newUser),
-            expiresIn: ACCESS_TOKEN_TTL_SECONDS,
+            ...(issued ? { token: issued.token, expiresIn: issued.expiresIn } : { signInRequired: true }),
         });
     } catch (error) {
-        console.error('Error en el proceso de signUp:', error);
-        res.status(500).json({ message: 'Error al crear el usuario', error: error.message });
+        console.error('[Auth] Account creation failed.');
+        res.status(500).json({ message: 'Error al crear el usuario' });
     }
 };
 
-exports.unlockSession = async (req, res) => {
+const legacyUnlockSession = (req, res) => auditedAuth(req, res, 'auth.unlock', async (attempt) => {
+    const { email, password } = req.body || {};
+    if (!email || !password) return rejectedCredentials(true);
+    const normalizedEmail = String(email).trim().toLowerCase();
+    if (isBlockedAuthEmail(normalizedEmail)) return rejectedCredentials();
+    const user = await Usuario.findOne({ where: { email_usuario: normalizedEmail } });
+    if (!user?.password_usuario || !await bcrypt.compare(password, user.password_usuario)) return rejectedCredentials();
+    return sessions.authenticated(user, { attempt });
+});
+
+function emailError(res, error) {
+    const statuses = { auth_email_invalid: 401, auth_email_expired: 401, auth_email_locked: 429,
+        auth_email_rate_limited: 429, auth_email_unavailable: 503, auth_email_configuration_invalid: 503 };
+    const code = Object.hasOwn(statuses, error?.code) ? error.code : 'auth_email_unavailable';
+    return res.status(statuses[code]).json({ error: code,
+        message: statuses[code] === 503 ? 'Authentication temporarily unavailable.' : 'Email verification could not be completed.' });
+}
+async function passwordWithEmail(req, res, legacy) {
     try {
-        const { email, password } = req.body || {};
-        if (!email || !password) {
-            return res.status(400).json({ message: 'Email and password are required.' });
-        }
-        const normalizedEmail = String(email).trim().toLowerCase();
-        if (isBlockedAuthEmail(normalizedEmail)) {
+        if (emailChallenges.mode() !== 'enforce') return legacy(req, res);
+        res.set('Cache-Control', 'private, no-store');
+        const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+        const password = req.body?.password;
+        const valid = email.length > 0 && email.length <= 254 && typeof password === 'string'
+            && password.length > 0 && password.length <= 1024 && !isBlockedAuthEmail(email);
+        const user = valid ? await Usuario.findOne({ where: { email_usuario: email } }) : null;
+        if (!sessions.activeUser(user) || !await bcrypt.compare(password, user.password_usuario)) {
+            await emailChallenges.rejectedCredentials();
             return res.status(401).json({ message: 'Wrong email or password.' });
         }
-
-        const user = await Usuario.findOne({ where: { email_usuario: normalizedEmail } });
-        if (!user || !user.password_usuario) {
-            return res.status(401).json({ message: 'Wrong email or password.' });
+        return res.status(202).json(await emailChallenges.begin(user));
+    } catch (error) { return emailError(res, error); }
+}
+exports.signIn = (req, res) => passwordWithEmail(req, res, legacySignIn);
+exports.unlockSession = (req, res) => passwordWithEmail(req, res, legacyUnlockSession);
+async function emailCommand(req, res, resend) {
+    res.set('Cache-Control', 'private, no-store');
+    try {
+        const body = req.body;
+        const keys = resend ? ['challengeToken'] : ['challengeToken', 'code'];
+        if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).sort().join(',') !== keys.sort().join(',')) {
+            return res.status(400).json({ error: 'auth_email_request_invalid' });
         }
+        const result = resend ? await emailChallenges.resend(body.challengeToken) : await emailChallenges.verify(body.challengeToken, body.code);
+        return res.status(resend ? 202 : 200).json(result);
+    } catch (error) { return emailError(res, error); }
+}
+exports.verifyEmailCode = (req, res) => emailCommand(req, res, false);
+exports.resendEmailCode = (req, res) => emailCommand(req, res, true);
 
-        const validPassword = await bcrypt.compare(password, user.password_usuario);
-        if (!validPassword) {
-            return res.status(401).json({ message: 'Wrong email or password.' });
-        }
-
-        user.ultimo_login = new Date();
-        await user.save({ fields: ['ultimo_login'] });
-
-        return res.status(200).json(buildAuthResponse(user));
-    } catch (error) {
-        console.error('Error en unlockSession:', error);
-        return res.status(500).json({ message: 'Server error', error: error.message });
-    }
+exports.me = async (req, res) => {
+    res.set('Cache-Control', 'private, no-store');
+    try {
+        const user = await Usuario.findByPk(req.userData.userId, { attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario', 'isProfesional', 'avatar'] });
+        if (!user) return res.status(401).json({ message: 'Auth failed!' });
+        return res.json({ user: sessions.projectUser(user), session: { managed: Boolean(req.authSession?.id), expiresAt: req.authSession?.expiresAt } });
+    } catch { return res.status(503).json({ message: 'Authentication temporarily unavailable.' }); }
 };
+async function revoke(req, res, all) {
+    res.set('Cache-Control', 'private, no-store');
+    try { return res.json(await sessions.revoke(sessions.bearer(req.headers.authorization), all)); }
+    catch (error) {
+        const invalid = ['JsonWebTokenError', 'TokenExpiredError', 'NotBeforeError'].includes(error.name);
+        return res.status(invalid ? 401 : 503).json({ message: invalid ? 'Auth failed!' : 'Authentication temporarily unavailable.' });
+    }
+}
+exports.signOut = (req, res) => revoke(req, res, false);
+exports.revokeSessions = (req, res) => revoke(req, res, true);

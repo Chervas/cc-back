@@ -374,6 +374,10 @@ class MetaSyncJobs {
     
     // Descripciones por job (usadas por el monitor/UX)
     this.jobDescriptions = {
+        platformAuditDelivery: 'Entrega eventos de auditoría pendientes y conserva las confirmaciones externas verificadas.',
+        platformAuditMonitor: 'Comprueba la entrega de auditoría y guarda avisos para los administradores técnicos.',
+        platformAuditReconciliation: 'Comprueba entregas de auditoría dudosas mediante el lector separado.',
+        authSessionExpiry: 'Registra las expiraciones observadas de sesiones persistentes; no elimina evidencias.',
       metricsSync: 'Sincroniza orgánico (Facebook/Instagram): seguidores, posts y agregados diarios por asset.',
       adsSync: 'Sincroniza Ads (Marketing API) con ventana reciente: entidades, insights diarios y actions.',
       adsSyncMidday: 'Refrescado parcial de Ads al mediodía para capturar datos en curso (48 h).',
@@ -414,6 +418,10 @@ class MetaSyncJobs {
     // Configuración desde variables de entorno
     this.config = {
       schedules: {
+        platformAuditDelivery: '* * * * *',
+        platformAuditMonitor: '*/5 * * * *',
+        platformAuditReconciliation: '*/5 * * * *',
+        authSessionExpiry: '*/5 * * * *',
         metricsSync: process.env.JOBS_METRICS_SCHEDULE || '0 2 * * *',
         tokenValidation: process.env.JOBS_TOKEN_VALIDATION_SCHEDULE || '0 */6 * * *',
         dataCleanup: process.env.JOBS_CLEANUP_SCHEDULE || '0 3 * * 0',
@@ -982,6 +990,23 @@ class MetaSyncJobs {
   /**
    * Job: Sincronización de métricas de Meta
    */
+  async executePlatformAuditDelivery() {
+    return require('../services/platformAudit.delivery').run();
+  }
+
+  async executePlatformAuditMonitor() {
+    return require('../services/platformAudit.monitor').run();
+  }
+
+  async executePlatformAuditReconciliation() {
+    return require('../services/platformAudit.reconciliation').run();
+  }
+
+  async executeAuthSessionExpiry() {
+    if (process.env.AUTH_SESSION_EXPIRY_ENABLED !== 'true') return { disabled: true };
+    return require('../services/accessSession.service').expire();
+  }
+
   async executeMetricsSync() {
   console.log('📊 Ejecutando sincronización de métricas...');
   

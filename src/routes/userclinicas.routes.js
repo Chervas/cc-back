@@ -1,6 +1,6 @@
 // src/routes/userclinicas.routes.js
 const express = require('express');
-const adminCredentials = require('../lib/adminCredentialSession');
+const sessions = require('../services/accessSession.service');
 const { Op } = require('sequelize');
 const {
     Clinica,
@@ -44,9 +44,8 @@ const serializeUserSummary = (usuario) => {
  * Función auxiliar para obtener el userId del token JWT
  */
 const getUserIdFromToken = async (req) => {
-    try {
-        return (await adminCredentials.verifyToken(adminCredentials.bearer(req.headers.authorization), process.env.JWT_SECRET)).userId;
-    } catch { return null; }
+    if (req.userData?.userId) return req.userData.userId;
+    return (await sessions.verify(sessions.bearer(req.headers.authorization))).userId;
 };
 
 /**
@@ -63,7 +62,7 @@ const isAdmin = (userId) => {
  * - Si es NORMAL: devuelve solo las clínicas asignadas
  * ✅ INCLUYE CAMPO 'roles' para el selector del menú superior
  */
-router.get('/list', async (req, res) => {
+router.get('/list', require('./auth.middleware'), async (req, res) => {
     try {
         console.log('🏥 Obteniendo clínicas del usuario...');
 
@@ -387,7 +386,7 @@ router.get('/list', async (req, res) => {
  * GET /api/userclinicas/:id
  * Obtiene una clínica específica si el usuario tiene acceso
  */
-router.get('/:id', async (req, res) => {
+router.get('/:id', require('./auth.middleware'), async (req, res) => {
     try {
         const { id } = req.params;
         const userId = await getUserIdFromToken(req);

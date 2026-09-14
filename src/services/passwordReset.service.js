@@ -222,6 +222,8 @@ async function consumePasswordResetToken({ token, password } = {}) {
       transaction,
     });
 
+    const emailChallenges = require('./authEmailChallenge.service');
+    if (emailChallenges.mode() === 'enforce') await emailChallenges.credentialReset(user.id_usuario, transaction);
     return { userId: user.id_usuario };
   });
 }
