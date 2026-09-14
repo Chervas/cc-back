@@ -1,6 +1,7 @@
 // backendclinicaclick/src/routes/oauth.routes.js
 const express = require('express');
 const axios = require('axios');
+const metaHttp = require('../lib/metaQuarantineHttp');
 const router = express.Router();
 const authMiddleware = require('./auth.middleware');
 const { Op } = require('sequelize');
@@ -1186,7 +1187,7 @@ router.get('/google/effective-mappings', async (req, res) => {
  * GET /oauth/meta/connect
  * Devuelve la URL de autorización para iniciar el flujo OAuth de Meta.
  */
-router.get('/meta/connect', async (req, res) => {
+router.get('/meta/connect', metaHttp.middleware, async (req, res) => {
     try {
         const userId = getUserIdFromToken(req);
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
@@ -1234,7 +1235,7 @@ router.get('/meta/connect', async (req, res) => {
  * GET /oauth/meta/callback
  * Maneja el callback de la autorización de Meta (Facebook).
  */
-router.get('/meta/callback', async (req, res) => {
+router.get('/meta/callback', metaHttp.middleware, async (req, res) => {
     const { code, state, error, error_reason, error_description } = req.query;
     let oauthState;
     let frontendOrigin = FRONTEND_URL;
@@ -3676,7 +3677,7 @@ router.get('/meta/assets', async (req, res) => {
  * Endpoint para que el frontend guarde los activos de Meta mapeados a una clínica.
  * Requiere que el usuario esté autenticado en tu app y tenga los roles adecuados.
  */
-router.post('/meta/map-assets', async (req, res) => {
+router.post('/meta/map-assets', metaHttp.middleware, async (req, res) => {
     try {
         const userId = getUserIdFromToken(req);
         if (!userId) {
