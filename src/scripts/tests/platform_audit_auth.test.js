@@ -1,4 +1,5 @@
 'use strict';
+require('./fixtures/security_offline_runtime.cjs');
 const test = require('node:test'); const assert = require('node:assert/strict');
 const jwt = require('jsonwebtoken'); const bcrypt = require('bcryptjs');
 const { memoryRepository } = require('../../../services/platform-audit/test/fixture.cjs');

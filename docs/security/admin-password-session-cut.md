@@ -179,8 +179,12 @@ estos controles de promoción no sustituyen el aislamiento de identidades.
 
 ## Preparación del MFA completo y pendientes reales
 
-Hay tres worktrees privados `security-email-login-{back,gateway,front}-candidate-20260913`,
-con el login y sus dependencias separados de publicidad. No contienen `.env` y
+Los candidatos privados vigentes se preparan como
+`security-email-login-{back,gateway,front}-candidate-20260914`, desde los HEAD
+públicos actuales y con su manifiesto/parches exactos. Incorporan la corrección
+DEV de `role.interceptor`: `/api/auth/me` debe llegar al backend, sin respuesta
+de usuario ficticio. La preparación anterior del día 13 queda como evidencia,
+no como base para sobrescribir un entorno que haya avanzado. No contienen `.env` y
 sus dependencias enlazadas son únicamente para QA. La inspección de metadata
 por socket local confirma que faltan las tablas `AuthSessions`,
 `AuthEmailChallenges`, `PlatformAuditEvents` y `PlatformAuditDeliveryStates`.
@@ -216,6 +220,31 @@ El candidato MFA tiene además MySQL propios de código/sesiones/auditoría,
 14 pruebas del writer, siete de frontend, build Angular y 18 capturas Chromium
 escritorio/móvil. Los proveedores de QA son ficticios. El envío del usuario
 descrito arriba es evidencia real independiente y no valida todavía el MFA.
-El build y las 18 capturas del candidato MFA completo son anteriores al último
-complemento de recuperación; sus hashes actualizados no equivalen a un nuevo
-build completo. El manifiesto privado distingue esa limitación.
+Los resultados fechados de la actualización del candidato, la compilación y la
+QA se mantienen en [99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-reanudacion-2026-09-14).
+
+### Prueba en DEV antes de staging
+
+El DEV habitual comparte BD con staging: no instalar allí las tablas de seguridad
+como si fuera una base desechable. El primer ensayo usa MySQL temporal con las
+cinco DDL, cuentas/claves ficticias, HTTP local y correo/auditoría de prueba. El
+runner elimina su propio servidor al terminar; no arranca la API ni los workers
+de ClinicaClick. El contrato HTTP ejercita login, código incorrecto/caducado,
+reenvío, consumo concurrente, recuperación y revocación de sesiones.
+
+```bash
+npm run test:security:auth-cut
+CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/auth_email_challenges_mysql.integration.js
+```
+
+La suite de acceso precarga `security_offline_runtime.cjs`: impide cargar `.env`,
+usa una clave JWT ficticia y bloquea sockets salvo el servidor propio de test.
+Esto también se aplica al ejecutar directamente `platform_audit_auth.test.js`.
+El frontend incluye la regresión de `/auth/me` en su comando de acceso.
+
+La prueba humana con correo real requiere un entorno QA aislado y su entrega
+de correo/auditoría configurada, o un corte explícito del esquema compartido.
+Presentar ese alcance antes de habilitarlo. No está disponible por publicar estos
+tests en DEV ni por generar capturas con transporte ficticio. Tras esa prueba se
+promueve el candidato exacto a staging/gateway, conservando pausas y el cierre
+administrativo. No copiar credenciales operativas a DEV para facilitar el ensayo.

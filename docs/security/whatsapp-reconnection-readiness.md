@@ -221,6 +221,77 @@ cuarentena. No volver al webhook que acepta firmas ausentes ni a la lectura
 global por rol de una clínica. El backlog previo no se vacía ni se reproduce
 en este corte: debe revisarse antes de arrancar workers.
 
+## Reanudación controlada de mensajes
+
+Este procedimiento prepara el corte; no habilita las rutas ni constituye una
+autorización de envío. El contrato de producto está en
+[14.1: recuperación de mensajes](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/14.1-whatsapp-integracion-meta.md#recuperación-de-mensajes-tras-una-parada).
+La observación fechada de activos, SQL y Redis se registra una sola vez en
+[99: auditoría de reanudación](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-reanudacion-2026-09-14).
+
+### Inspección previa sin efectos
+
+1. Registrar HEAD y rol de DEV, staging y gateway; comprobar flags, prefijos,
+   propietarios de cada cola y presencia de credenciales sin leerlas en salida.
+2. Consultar SQL con `START TRANSACTION READ ONLY`, agregados y `ROLLBACK`.
+   Separar mensajes, ejecuciones, citas, JobRequests y audiencias de campañas.
+   `Messages.sent_at` también se escribe en avisos fallidos: no acredita envío.
+   La aceptación del proveedor y sus estados/WAMID son evidencia diferente.
+3. Leer contadores y pausa de Redis directamente (`LLEN`, `ZCARD`, `HGET`), sin
+   importar `queue.service`, instanciar Queue/Worker, promover, limpiar o reintentar
+   trabajos. Una lista de destinatarios no es una cola de mensajes preparados.
+4. Conciliar los flujos por su `trigger_entity_type` antes de unir citas. Un flujo
+   de `lead_nuevo` sin cita enlazada no es una cita desaparecida ni una confirmación.
+   Conservar todo el historial. Repetir el inventario justo antes del corte:
+   una cita futura durante la auditoría puede haber caducado después.
+
+### Garantías actuales y barreras pendientes
+
+| Recorrido | Comportamiento contrastado en código | Condición antes del corte |
+| --- | --- | --- |
+| Recordatorio programado | `fireScheduledTrigger` vuelve a leer cita y plantilla, omite cancelación/cambio solicitado/no asistencia, aplica condiciones de confirmación y rechaza una ventana antigua. La tolerancia de disparo es 15 minutos por defecto; al resincronizar no crea recordatorios anteriores a la hora actual. | Conservar hora, namespace y clave de idempotencia. No hacer backfill global ni resincronizar citas públicas desde DEV. |
+| Aviso fallido por falta de configuración | Para avisos preflight sin aplazamiento futuro, el replay rechaza `failed` sin `enqueue_error`; no lo convierte en un nuevo envío. | No cambiar en masa estados a `pending` ni reejecutar flujos antiguos al añadir una credencial. |
+| Ya enviado o entrega incierta | Replay conserva `sent/delivered/read`; el transporte evita reintentar desconexiones ambiguas. El cliente broker DEV añade prioridad explícita de `delivery_unknown`; ese complemento aún no está en staging. | Conservar identidad y recibos; conciliar entrega incierta, nunca duplicar automáticamente. |
+| Mensaje aplazado o trabajo legacy | Quiet hours y el worker de salida no garantizan una nueva comprobación de vigencia de la cita inmediatamente antes del POST. `appointment_after` tampoco tiene el mismo límite temporal del recordatorio previo. | **Pendiente:** barrera de salida por clínica/fecha de corte y comprobación final de estado, versión y finalidad. Las pruebas del planificador no sustituyen esta barrera. |
+| Campañas y gateway | Sus pausas/trabajos son independientes del alta de una credencial. | Mantener campañas pausadas y jobs legacy fuera del lote. Gateway conserva cero workers de negocio; staging es el único dueño público autorizado. |
+
+### Lote de recuperación y piloto
+
+1. Preparar una propuesta sin efectos: clínica, intención original, cita vigente,
+   estado actual, ventana útil, idioma/plantilla aprobada y motivo de inclusión o
+   exclusión. No incluir cuerpos o destinatarios en evidencia general. Separar
+   solicitud de confirmación, recordatorio de cita confirmada y seguimiento de lead.
+2. Excluir citas pasadas/canceladas, versiones anteriores de una cita cambiada,
+   solicitudes de confirmación ya contestadas y entregas aceptadas o inciertas.
+   Los avisos todavía útiles requieren revisión del contexto y de contactos humanos
+   posteriores. Como regla del piloto, preparar a lo sumo una comunicación útil por
+   cita; no reproducir todos sus nodos/versiones fallidos.
+3. Antes de autorizar un lote real, cerrar el broker/aislamiento y la barrera final
+   de salida. Fijar clínica y activos exactos, fecha de corte, caducidad, límite de
+   cantidad/ritmo, claves de idempotencia, recepción y único consumidor. Presentar
+   mensajes afectados, posible interrupción y rollback. El alta de WhatsApp no
+   libera por sí misma ninguna cola ni autoriza otros permisos Meta.
+4. Validar primero recepción sin respuestas automáticas y un envío a un destino
+   de prueba expresamente autorizado. Después habilitar solo esa clínica para
+   comunicaciones nuevas y trabajos futuros aún válidos. El lote de recuperación
+   necesita su propia aprobación; campañas, DEV y backlog legacy siguen excluidos.
+5. Si falla el piloto, cerrar la autorización de salida y pausar la cola/cohorte
+   afectada antes de reparar. Preservar recibos y `delivery_unknown`; un POST en
+   vuelo puede haber sido aceptado aunque se pause después. No borrar mensajes,
+   reponer tokens revocados ni repetir envíos para verificar el rollback.
+
+QA reproducible sin BD compartida, Redis real ni proveedor:
+
+```bash
+npm run test:security:whatsapp-resume
+```
+
+La suite ejerce el planificador y el replay reales con filas ficticias, rechazos
+por ventana/estado, deduplicación y errores de entrega. Incluye el cliente broker
+preparado en DEV. No acredita un envío real, la recepción pública migrada ni las
+barreras marcadas como pendientes. Debe comprobarse la diferencia con el código
+público antes de atribuirle una protección probada solo en DEV.
+
 ## QA
 
 Peticiones HTTP reales contra servidores de prueba locales propios, modelos y
