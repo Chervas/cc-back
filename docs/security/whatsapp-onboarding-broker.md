@@ -1,11 +1,14 @@
 # Alta WhatsApp: registro del broker y credencial candidata
 
-13/09/2026. Implementación del broker privado, con AWS/Meta ficticios en QA.
-El runtime no está instalado. El [puente gateway/MFA](whatsapp-onboarding-gateway.md)
-ya está conectado en código; la interfaz sigue pendiente. No hay
-credenciales reales incorporadas, migración compartida ni autorización de
-reconexión. El resultado `staged` significa candidata guardada: `connected` es
-siempre `false`. No existe operación de activación en esta cohorte.
+> **Tipo:** procedimiento técnico del alta privada.
+> **Fuente de verdad:** configuración, estados y recuperación del broker; instalación en el manual central 19/99.
+> **Última revisión:** 2026-09-15 (Europe/Madrid).
+
+El [puente gateway/MFA](whatsapp-onboarding-gateway.md) y la
+[interfaz](whatsapp-onboarding-ui.md) están implementados con proveedores
+ficticios en QA. `staged` significa candidata guardada: `connected` es siempre
+`false`. No existe operación de activación en esta cohorte. Consultar instalación,
+DDL y límites reales en [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones).
 
 ## Contrato y separación
 
@@ -32,6 +35,13 @@ WABA y caducidad. El número debe aparecer en el edge fijo del WABA, con paginac
 acotada. Solo se aceptan `whatsapp_business_management` y
 `whatsapp_business_messaging`, más `public_profile` si está configurado.
 Ads, leads, páginas, Instagram y `business_management` se rechazan.
+
+Para la finalización de coexistencia que solo identifica WABA, el número puede
+ser null en la solicitud. Se resuelve únicamente si el edge completo contiene un
+número; con varios se rechaza. La selección original y la observación de
+`is_on_biz_app/platform_type` persisten separadas del número resuelto, conservando
+idempotencia después de un reinicio. Esa lectura no activa el canal ni registra
+el número. Ver el [contrato de coexistencia](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/14.3-whatsapp-coexistencia.md).
 
 Esto implementa el rechazo de permisos ajenos en código; **la independencia
 real de la aplicación/configuración Meta sigue por verificar**. Si Embedded
@@ -98,6 +108,9 @@ Describe/Get/ListSecretVersionIds/Put del slot exacto, KMS y escritura de
 auditoría. Ningún principal gateway/DEV/API obtiene permiso de lectura del token.
 El esquema de rol actual no demuestra por sí solo esa separación. La
 asignación de permisos y el placeholder reales requieren el lote de corte.
+La política IAM de Put no permite exigir VersionStage=AWSPENDING: limitar el
+ARN candidato y mantenerlo separado de los secretos operativos; no presentar
+el control de etiqueta del código como una restricción IAM.
 
 Se consulta el listado de versiones, incluidas las sin etiqueta, y se rechaza
 paginación o al menos noventa versiones. AWS limita versiones y etiquetas;
@@ -132,7 +145,7 @@ ni habilitar Ads. No hay API de desbloqueo automática.
 La auditoría técnica usa el outbox del broker y el UUID del alta como correlación:
 intención, canje solicitado, interrupción, candidata confirmada y cancelación,
 más denegaciones del broker. La correlación con usuario/sesión MFA y auditoría
-humana v15 depende del puente gateway pendiente. Retención/inmutabilidad AWS
+humana v15 la aporta el puente gateway. Retención/inmutabilidad AWS
 no quedan acreditadas por estas pruebas locales.
 
 ## Validación y próximo corte
@@ -141,11 +154,10 @@ QA con TLS real de loopback, SQLite propios, SDK/Meta ficticios y guard de red:
 reinicio, competencia entre procesos, ACK perdido, versión ausente, cancelación,
 ACL, permisos/WABA ajenos, rotación de app durante lectura, bloques durables,
 fallo transaccional de auditoría y ausencia de secretos en resultados/estado.
-Regresión completa: **331 pruebas pasan**, incluidas 37 nuevas de este bloque,
-sin fallos ni omisiones. Evidencia privada `whatsapp-onboarding-full-tests.log`.
-No hay cambios de UI o DDL clínica nuevos; no corresponde QA Angular/MySQL en
-este corte. DDL anteriores de estado/sesión/MFA/bloqueos siguen pendientes en
-BD compartida. El hotfix getAssetStats se conserva.
+Ejecutar el runner completo del broker con Node 24 y guard de red, y los tests
+gateway/cliente y MySQL propio descritos en [reconexión](whatsapp-reconnection-readiness.md#qa).
+Resultados y evidencias de cada corte viven en 99; no deducir de esta suite la
+compatibilidad real de Meta, la aplicación de DDL o el despliegue de consumidores.
 
 El puente gateway ya une sesión MFA verificada y correlación de estado/candidato.
 Siguiente trabajo: configuración/UI Meta exclusiva de WhatsApp, activación

@@ -1,314 +1,173 @@
-# WhatsApp y acceso: condiciones de reconexión
+# WhatsApp: procedimiento de reconexión controlada
 
-Revisado tras el corte del 13/09/2026 22:25 UTC. **Reconexión todavía no validada.**
-
-La revisión de preparación del 14/09 distingue el corte de acceso ya operativo
-del recorrido WhatsApp todavía no desplegado. Para madurez actual consultar
-[19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones);
-los apartados fechados del 13/09 conservan evidencia de sus cortes de código.
-No interpretar sus pendientes históricos de MFA como el estado del login público.
-El cierre de sesiones administrativas y la recuperación ya están desplegados y
-comprobados: [acta de acceso](admin-session-deployment-20260913.md). El MFA se
-activó en el corte posterior de acceso; las protecciones del nuevo recorrido
-WhatsApp siguen pendientes de corte real. No se ha demostrado el vector del incidente. El propietario revocó las
-credenciales y detuvo envíos; el corte de acceso no autoriza reactivarlos.
-
-Preparado [broker del alta WhatsApp](whatsapp-onboarding-broker.md): operaciones
-privadas firmadas, registro previo al canje, comprobación de identidad/WABA/número,
-candidata en Secrets Manager y recuperación por versión/hash sin repetir código.
-Bloqueos independientes del ámbito y recibos sobreviven a reinicios. Siempre
-devuelve `connected:false`; no activa canales. AWS/Meta ficticios en QA.
-El [puente gateway/MFA](whatsapp-onboarding-gateway.md) ya une estos componentes
-en código, con rutas específicas deshabilitadas por defecto. 36 pruebas Node y
-15 grupos MySQL propios pasan. La [interfaz específica](whatsapp-onboarding-ui.md) está preparada en el corte
-posterior; faltan validación SDK/configuración real y activación: ningún runtime nuevo se ha instalado ni se ha ejecutado un canje real.
-
-Avance local posterior: [estado de alta](whatsapp-authorization-state.md) durable,
-con sesión MFA vigente, conjunto de clínicas fijado, reclamación única y auditoría
-transaccional. 3 tests de contrato, 55 de auditoría y 12 comprobaciones MySQL
-propio correctos en su corte inicial. DDL 20260913150000 pendiente. El puente
-posterior conecta estado y canje dentro del broker, sin instalación real;
-la independencia de grants/tokens WhatsApp frente a Ads/leads sigue por validar
-en Meta. Por sí solo no modifica la situación de reconexión.
-
-El usuario aclara que OPS solo consume datos de ClinicaClick para paneles. Puede
-seguir apagado: no es dependencia de ClinicaClick. Se priorizan WhatsApp API y
-login con códigos por correo; cuentas publicitarias después. No se espera a
-terminar costes, paneles OPS ni todas las integraciones para este cierre.
+> **Tipo:** runbook.
+> **Fuente de verdad:** prechecks, preparación, prueba y rollback del piloto; estado en el manual central 19.
+> **Última revisión:** 2026-09-15 (Europe/Madrid).
+> **Relacionado con:** [14.1: contrato del canal](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/14.1-whatsapp-integracion-meta.md), [14.3: coexistencia](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/14.3-whatsapp-coexistencia.md).
 
 ## Destino público y valoración de la separación
 
-Confirmación del usuario: staging es la API y ejecutor de negocio; gateway sirve
-OAuth/webhooks y entradas externas sin workers de negocio; DEV queda fuera de
-la reconexión, con pausas y pruebas aisladas. Esto no autoriza reactivar Meta.
+Staging es el único consumidor de negocio público; gateway atiende las entradas
+externas; DEV conserva sus pausas y queda fuera de credenciales operativas. OPS
+no es dependencia. Consultar la [tabla vigente de seguridad](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones)
+antes de ejecutar. Un paso preparado no acredita instalación ni reactivación.
 
-La distribución es adecuada, pero aún no constituye una frontera de seguridad:
+Namespaces y flags de jobs no aíslan credenciales si DEV/público comparten UID,
+identidad SQL o claves. Antes de introducir una credencial real deben existir:
 
-1. La observación de metadatos de procesos del 13/09/2026 a las 17:15:04 UTC
-   (19:15:04 CEST) encuentra `pm2-back-dev`, `pm2-back-staging` y `pm2-gateway`
-   bajo UID 1000. Una clave privada del mismo usuario no aísla staging de un
-   proceso DEV comprometido. El lote debe separar identidades del sistema y
-   accesos a claves/secretos; no basta cambiar variables o prefijos.
-2. En el entorno de arranque observado: DEV tiene namespace/prefijo `dev` y
-   scheduler/cron apagados; staging usa `staging` y ambos activos; gateway usa
-   `gateway` y ambos apagados. Es un snapshot de arranque, no una prueba de toda
-   la configuración cargada después desde archivos ni de workers efectivos.
-3. El código de los tres checkouts crea `webhook_whatsapp` sin pasar por la
-   exclusión de workers del gateway. Ese consumidor persiste conversaciones,
-   trata medios y coordina automatizaciones. El flujo histórico documentado
-   reside allí. Trasladarlo a staging exige un traspaso explícito de recepción;
-   apagarlo sin ese traspaso dejaría los eventos en una cola sin consumidor.
-4. Los prefijos Redis de gateway y staging son distintos. Se necesita una cola
-   pública de entrada específica y un único propietario de consumo, conservando
-   las restantes colas y pausas. Un prefijo evita cruces accidentales; no impide
-   acceso malicioso si los usuarios Redis y del sistema conservan permiso global.
-5. Compartir BD con permisos amplios de escritura permitiría a DEV alterar
-   usuarios, correo de recuperación, sesiones, trabajos o bindings operativos.
-   El lote debe acreditar grants SQL mínimos. Preferencia de seguridad: BD de
-   desarrollo separada y datos de prueba. Si se mantiene la BD compartida,
-   separar usuario/grants y cerrar escrituras operativas desde DEV es requisito;
-   no se promete compatibilidad con desarrollo que necesite escribir esos datos.
-6. Un POST a Meta con respuesta perdida puede haber sido aceptado. El broker y
-   el worker deben conservar un ID durable de intención y el resultado desconocido,
-   sin generar otro envío automáticamente. La firma antirreplay del transporte
-   no sustituye esta deduplicación de negocio.
+- usuarios del sistema y claves de servicio separados, con denegación comprobada
+  de lectura y firma desde DEV;
+- acceso SQL separado a sesiones, MFA, autorizaciones, bloqueos y auditoría;
+  DEV no debe poder fabricar una sesión pública ni quitar sus bloqueos;
+- un único consumidor de recepción y uno de salida por cohorte, con guard de
+  runtime y permiso de operación/activo revalidado al ejecutar;
+- claves de firma, TLS, almacenamiento privado y acceso AWS propios del broker,
+  sin proxy genérico, sin exportación de tokens ni fallback a la BD antigua.
 
-La observación original encontró bases distintas en staging (`ac1b1dd`) y gateway
-(`4cf8e23`). El corte de acceso posterior conserva esa separación: versiones
-actuales `3cf085a3` y `b3b3a8f8`, respectivamente. Los reinicios, configuración y
-canaries están en el acta; no trasladaron recepción ni activaron MFA. Para el
-siguiente corte se conciliará otra vez código, configuración y propietarios de
-cola; una variable ausente en `/proc` no acredita por sí sola el modo efectivo.
+La separación de acceso SQL afecta a DEV y a las importaciones compartidas.
+Presentar su matriz exacta de grants y ensayo antes del corte; no retirar grants
+al usuario compartido sin trasladar sus consumidores. Conservar las pausas.
 
-### Lote que se concretará antes de pedir activación
+## Prechecks antes del lote
 
-La conexión previa de Meta forma parte obligatoria del lote. El código actual
-redirige WhatsApp al OAuth general con permisos de páginas/publicidad/leads y
-el callback Embedded Signup exige MetaConnection previa. Se sustituirá esa
-dependencia por alta específica de WhatsApp: MFA por correo, estado/código de
-un uso, ámbito e identidad verificados y canje en broker. Tokens fuera de API,
-frontend y BD compartida; gestión/alta separadas del permiso operativo de envío.
-Configuración Embedded Signup/coexistencia por verificar; alta todavía pendiente.
+1. Registrar HEAD/upstream y cambios locales de DEV/staging/gateway/frontend.
+   Comparar el hotfix `socialstats.controller.js`, MFA, flags, namespaces y los
+   propietarios de cada cola. No imprimir `.env`, PM2 env ni credenciales.
+2. Verificar `MetaScopeBlocks` y `WhatsappAuthorizationStates`, índices y registro
+   de sus migraciones `20260913140000` y `20260913150000`. Verificar las tablas
+   previas de sesiones/MFA/auditoría. No lanzar todas las migraciones pendientes.
+3. Inventariar WABA/número/clínica/grupo y primarios mediante metadata. Un activo
+   compartido necesita autorización sobre todas sus clínicas; otro número del
+   mismo grupo no es un reemplazo implícito. Revisar restricciones históricas sin
+   presentarlas como estado actual de Meta. No leer ni probar tokens revocados.
+4. Confirmar que no hay alta legacy abierta. POST `/api/whatsapp/webhook` debe
+   devolver 503 con `Retry-After: 60`; callbacks Meta antiguos, 503. Las mutaciones
+   WhatsApp autenticadas deben bloquearse antes del handler. El montaje del router
+   legacy debe dejar pasar `/webhook` al guard de recepción, sin exigir JWT de Meta.
+5. Antes de usar AWS, verificar STS y la identidad temporal/instancia esperada.
+   `SendCommand` aceptado por la API no acredita ejecución: comprobar el resultado
+   de la invocación. Un fallo de acceso anterior al shell no es fallo del instalador.
+   Session Manager solo se usa dentro del permiso OS admin ya autorizado.
 
-| Componente | Cambio y validación requeridos |
-| --- | --- |
-| Proveedor inicial | Solo WhatsApp, WABA/números y plantillas expresamente inventariados; Ads, páginas y otros permisos fuera. No usar tokens revocados. |
-| `pm2-gateway` | Validación de firma/ámbito y persistencia de recepción; publicación durable en la cola pública. Sin consumo de negocio, sin emisión de mensajes ni acceso al token WABA. |
-| `pm2-back-staging` | Único consumidor de recepción y ejecutor de envíos autorizados; conserva pausas/canales existentes, sesión/MFA y permisos. |
-| Workers afectados | `webhook_whatsapp`, `outbound_whatsapp`, `whatsapp_template_create`, `whatsapp_template_sync`, `whatsapp_phone_sync`; además los JobRequests/automatizaciones que produzcan esos trabajos. La creación de plantillas permanece cerrada hasta su autorización específica. |
-| Broker | Único poseedor del token WABA; identidad distinta para cada servicio, operaciones/activos/plantillas limitados, auditoría y resultado desconocido durable. DEV sin principal operativo ni acceso de lectura a secretos. |
-| BD/Redis | DDL exacta y grants revisados; cola pública separada, propiedad del consumo y backlog anterior conciliados. No cambiar el prefijo global como atajo ni reclamar jobs DEV. |
-| Interrupción | Ventana acotada para frenar productores/consumidores afectados, resolver trabajos en curso y cambiar el propietario de recepción. La duración se medirá con ensayo; aún no se promete una cifra ni entrega para esta noche. |
-| Regreso/rollback | Pausar envíos ante duda; conservar recepción durable, bloqueos, historial y exigencia del correo. Revertir consumidores únicamente a una versión revisada, con un solo dueño de cola. No restaurar tokens antiguos, envíos inciertos ni el webhook sin firma. |
+## Secretos y alta
 
-El lote no está listo para ejecutar: motor WABA y cliente tipado probados
-aisladamente, pero faltan su conexión al registro y los consumidores,
-las barreras de acceso del entorno y el ensayo completo gateway → cola → staging
-→ broker, incluidos errores y reinicios. La atribución Meta puede continuar en
-paralelo; no se presenta como requisito esperar indefinidamente una respuesta
-forense para preparar estas protecciones.
+Usar el [broker de alta](whatsapp-onboarding-broker.md), [gateway con MFA](whatsapp-onboarding-gateway.md)
+y [ventana específica](whatsapp-onboarding-ui.md). El titular inicia sesión con
+código por correo: una sesión posterior mediante dispositivo recordado no cumple
+`requireEmail:true`. No pedir contraseñas, códigos ni secretos por chat.
 
-## Hechos y estado
+Fijar App ID, Config ID, redirect URI, clínica/conjunto de clínicas y versiones de
+secretos. Revisar en Meta que el consentimiento sea exclusivo de WhatsApp, sin
+Ads/páginas/leads/Instagram; no ampliar permisos para superar un error. Valorar el
+secreto de aplicación compartido, no solo los botones de la interfaz.
 
-Inspección añadida al motor: respuesta `debug_token` requerida antes de usar un
-secreto, con identidad, scopes, targets y expiraciones concordantes. 263 pruebas
-broker (80 WhatsApp), ficticias. La respuesta/campos reales y cuota del endpoint
-diagnóstico todavía no están acreditados; una respuesta insuficiente se rechaza.
-La introspección no sustituye la separación de permisos en Meta ni cierra el alta.
+La candidata necesita un slot propio con placeholder AWSCURRENT y permiso de
+escritura acotado a su ARN. Un slot no configurado de app no debe contener un
+app secret que pase el validador. Si hay nuevos secretos o IAM, presentar JSON,
+prechecks, coste y rollback antes de aplicar. `PutSecretValue` no admite una
+restricción IAM de VersionStage: AWSPENDING lo fija el código, mientras el slot
+sigue separado del secreto operativo. No dar GetSecretValue al operador SSO.
 
-Avance posterior: [motor y cliente de envío](whatsapp-broker-messaging.md)
-probados con secretos/proveedor ficticios, recibo durable y plantilla fijada.
-232 tests broker + 59 backend; no conectados aún a consumidores ni registro real.
-No confundir este motor con la migración terminada del recorrido WhatsApp.
+`finish` puede recibir solo WABA en coexistencia. El broker acepta la resolución
+solo con un número tras paginar todo el edge, conserva la selección original y
+registra la observación del proveedor. Una candidata `staged` siempre mantiene
+`connected:false`; no registra, suscribe, sincroniza ni envía. Un canje incierto
+se consulta por UUID/versión; no se repite con un código nuevo como recuperación.
 
-| Control | Evidencia de código | Pendiente antes de reabrir |
-| --- | --- | --- |
-| Login por correo | Sesiones y MFA `enforce` en staging/gateway desde el 14/09; login por correo confirmado por el titular. | Para el alta exigir sesión con código verificado directamente; una sesión posterior por dispositivo recordado no satisface `requireEmail:true`. Estado vigente en [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones). |
-| Recepción WhatsApp | Este corte cierra aceptación sin secreto, exige firma sobre bytes originales y elimina selección de clínica desde URL/campo adicional. | Verificar secreto de la app correcta, proxy/parser y eventos reales de la cohorte, después de aprobar el canary. |
-| Ámbitos | Este corte vincula WABA/teléfono exactos a mappings activos, bloqueos independientes y clínicas registradas; restringe listados y estado. | Conciliar mappings reales y comprobar aislamiento en todos los consumidores/colas, también en el momento de procesar. |
-| Token WABA | Revocación, retirada de tokens almacenados y parada de envíos reportadas por el usuario, sin comprobación activa. Motor aislado y cliente staging probados con ficticios; alta y salida públicas cerradas. | Registro y migración de consumidores todavía pendientes: el esquema/escritores heredados permiten guardar `waAccessToken` y `getClinicConfig` lo entrega a la API general si vuelve a existir. Esto no contradice la retirada de valores reales reportada por el usuario. No insertar un token nuevo en ese recorrido como prueba. |
-| Cuenta/app Meta | No hay acceso ni revisión real en este corte. La atribución visual de actividad a ClinicaClick no demuestra origen. | Determinar evidencia del incidente; revisar administradores, socios, usuarios de sistema, apps y sesiones desde un dispositivo de confianza. Resolver accesos comprometidos y credenciales afectadas antes de emitir nuevas. El código de correo de ClinicaClick no controla sesiones ni tokens de Meta. |
-| Publicidad | Conserva cuarentena y hotfix. | Segunda prioridad, lote separado; no habilitar `ads_management` ni consumidores Ads al reabrir una cohorte WhatsApp. |
+## Recepción y reconstrucción de conversaciones
 
-## Informe del incidente recibido del propietario
+Instalar primero la recepción durable, todavía sin automatizaciones. El módulo
+`services/integrations-broker/src/whatsapp-inbox.js` y su handler HTTP están
+preparados; no son por sí solos un listener ni un consumidor público.
 
-Hechos comunicados y tratados como evidencia aportada, no como verificaciones
-independientes de esta sesión: actividad no autorizada en varios clientes el
-11/09 (campañas, anuncios, publicaciones, biografías/enlaces); una credencial
-SYSTEM_USER sin caducidad programada y con permisos de publicidad, páginas,
-Instagram, leads y WhatsApp podía enumerar 47 cuentas y 20 páginas. Su existencia
-no prueba que ejecutara las acciones. Se informan 81 pagos en 23 cuentas.
+- Verificar HMAC sobre los bytes originales y un único encabezado de firma;
+  límite 3 MiB, WABA/números explícitos, capacidad y auditoría antes del ACK.
+- Conservar el lote completo cifrado en SQLite privado (WAL/FULL). La clave de
+  datos se genera con la KMS de payload y su manifiesto cifrado se escribe con
+  fsync. El arranque descifra la misma clave; nunca reemplaza una perdida.
+- Persistir lote y outbox en una transacción. Los duplicados vuelven a comprobar
+  que el contenido cifrado sea legible. Un recibo confirma conservación, no
+  actualización de Messages o de citas.
+- Autenticar el consumidor staging y su alcance antes de prestar un lote. La
+  importación debe deduplicar WAMID/evento/contacto en su transacción y devolver
+  recibo durable antes de confirmar el lease. Lease caducado o de otro consumidor
+  no confirma. No asociar todo un historial al primer contacto.
+- Importar historia, ecos del móvil y cambios de forma pasiva. La recepción no
+  autoriza respuestas automáticas, recordatorios ni mutaciones de cita por IA.
+- Los ACK 200 del recorrido antiguo pueden corresponder a payloads descartados.
+  No hay reconstrucción desde logs sin cuerpos ni reintento garantizado de esos
+  eventos. Marcar el hueco y revisar posibles cancelaciones/cambios desde el móvil.
 
-El 12/09 a las 21:00:16–17 UTC (23:00:16–17 CEST) se crearon 55 plantillas
-WhatsApp externamente, detectadas por sincronización y bloqueadas/retiradas a
-las 21:58:19 UTC. No hay envíos fraudulentos de WhatsApp/Messenger confirmados.
-Tampoco se confirman nuevos administradores/partners maliciosos; los objetos
-«unknown» siguen sin atribuir. No se visitan los destinos sospechosos.
-
-Se reportan cambio de contraseña, retirada de asignaciones y permisos de
-publicidad/páginas, revocación posterior de WhatsApp, retirada de tokens en BD
-y parada de envíos. Se conserva la excepción de una asignación publicitaria
-bloqueada por facturación; no se presupone que mantenga permisos efectivos.
-La respuesta OAuth 190/460 de una credencial anterior no valida todas las demás.
-
-Consecuencia para el próximo lote: separar credenciales/activos WhatsApp de
-Ads/páginas y la gestión de plantillas del envío ordinario cuando lo permitan
-los permisos y tareas oficiales. Registrar y autorizar plantillas en ClinicaClick:
-la aprobación de Meta o su descubrimiento por sync no equivalen a aprobación
-local. Ningún token global con alcance multicliente se habilita como atajo.
-La correlación definitiva requiere registros Meta de actor/app/credencial/sesión,
-IP y request ID; no se acusa a un módulo ni al webhook por estos hallazgos.
-
-## Correcciones de este corte
-
-- `POST /api/whatsapp/webhook`: `FACEBOOK_APP_SECRET` o el alias existente
-  `APP_SECRET` obligatorios; falta de secreto/bytes originales = 503, nunca
-  aceptación sin firma. Un único `x-hub-signature-256`, formato SHA-256 exacto,
-  HMAC y comparación constante. El payload de negocio se obtiene de esos bytes;
-  no se reconstruye la firma con `JSON.stringify(req.body)`.
-- JSON sin compresión, máximo 1 MiB. El parser global captura los bytes antes del
-  handler; el límite de este módulo se comprueba tras el parser, no sustituye
-  los límites HTTP del proxy. GET de suscripción admite un desafío numérico
-  acotado y responde texto plano sin caché. El verify token de GET no autentica POST.
-- El worker actual recibe una clínica/contacto por job. Se rechazan múltiples
-  entries/changes, más de un mensaje/eco o historiales de distintos contactos,
-  sin encolar parcialmente. Es una limitación funcional explícita: lotes reales
-  de esos tipos requieren separación segura y pruebas antes de reabrirlos.
-- Identidad por `entry.id` (WABA) y `metadata.phone_number_id`, sin fallback a
-  otro número, nombres, últimos dígitos ni JSON libre. Si no hay teléfono, se
-  requiere el mapping WABA exacto. Ámbitos ambiguos se rechazan. La consulta de
-  recepción no selecciona `waAccessToken` ni `pageAccessToken`.
-- La clínica sale del mapping y de asignaciones registradas del director de
-  pacientes. Referencias `cc_ref` ausentes, vencidas o de otra clínica/grupo se
-  rechazan si venían en el mensaje; no se pasan al worker para que las recupere
-  sin validar. Los bloqueos de ámbito se consultan antes de buscar pacientes o
-  escribir cola. Falta de tabla/estado produce indisponibilidad, no fallback.
-- `GET /api/whatsapp/status` exige permiso de lectura de la clínica. `/phones`
-  comprueba filtros de clínica/grupo y contexto de routing. Ser propietario de
-  una clínica no otorga lectura de todas las clínicas ni sus activos. Se filtran
-  roles/membresías con el helper de permisos vigente. Los errores son fijos.
-- `/phones` excluye columnas de tokens y muestra información persistida; abrir
-  el listado no hace Graph refresh, no encola un token en Redis, no registra el
-  teléfono ni guarda metadata. No se presenta ese estado como consulta en vivo.
-- Las escrituras públicas bajo `/api/whatsapp` exigen sesión y devuelven 503
-  `meta_security_quarantine` antes del handler, incluidas asignaciones, catálogo,
-  envíos, altas, registro y borrados. Esta barrera adicional no transforma en
-  seguro un worker antiguo ni constituye un permiso para quitar la cuarentena.
-- Los errores del webhook no imprimen payload, teléfono, configuración ni SQL.
-  No se añade en este corte un registro externo durable de cada rechazo público.
-
-La firma acredita integridad/autenticidad con el secreto de app; **no impide por
-sí sola reproducir un evento firmado**. Falta cerrar deduplicación durable y
-revalidación de ámbito en workers, el manejo de todos los eventos de coexistencia
-y la migración del envío/medios/plantillas al broker. No se declara WhatsApp
-completamente protegido ni utilizable por la mera presencia de este parche.
-
-Referencia primaria del mecanismo de firma: [documentación oficial del SDK
-WhatsApp de Meta](https://whatsapp.github.io/WhatsApp-Nodejs-SDK/api-reference/webhooks/start/).
-Ese SDK está archivado; se usa como referencia del mecanismo, no como dependencia
-ni evidencia de compatibilidad actual de toda la API. La configuración real y
-los eventos de la cohorte se verificarán en el corte autorizado.
-
-## Activación y regreso al servicio
-
-El lote de MFA conserva las dependencias de [la primera entrega](meta-email-stage1.md).
-Este parche no añade DDL. El webhook ahora depende del registro `MetaScopeBlocks`
-(`20260913140000`) y del esquema existente de director de pacientes. Verificar
-dependencias concretas antes del despliegue; no ejecutar migraciones en masa.
-
-Para un visto bueno de reconexión faltan: terminar broker/consumidores WhatsApp,
-resolver evidencias y accesos del incidente, conciliar las versiones exactas del entorno público confirmado (staging/gateway), comprobar la sesión con correo, verificar permisos/aislamiento del nuevo
-secreto y hacer un canary autorizado de recepción/envío a una cuenta de prueba.
-Se presentará un lote concreto a su propietario, independiente de OPS. No se
-han movido secretos, tocado AWS/BD compartida, cambiado pausas ni enviado mensajes.
-
-Ante fallo, conservar rechazos de sesión sin correo, registro de bloqueos y
-cuarentena. No volver al webhook que acepta firmas ausentes ni a la lectura
-global por rol de una clínica. El backlog previo no se vacía ni se reproduce
-en este corte: debe revisarse antes de arrancar workers.
+Las condiciones de QR, registro e historial están en el contrato 14.3. No
+registrar/desregistrar o repetir onboarding para forzar la descarga. La bandeja
+no borra automáticamente payloads; retención, eliminación y backup deben fijarse
+antes de introducir datos clínicos, distintos de la retención de auditoría.
 
 ## Reanudación controlada de mensajes
 
-Este procedimiento prepara el corte; no habilita las rutas ni constituye una
-autorización de envío. El contrato de producto está en
-[14.1: recuperación de mensajes](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/14.1-whatsapp-integracion-meta.md#recuperación-de-mensajes-tras-una-parada).
-La observación fechada de activos, SQL y Redis se registra una sola vez en
-[99: auditoría de reanudación](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-reanudacion-2026-09-14).
-
 ### Inspección previa sin efectos
 
-1. Registrar HEAD y rol de DEV, staging y gateway; comprobar flags, prefijos,
-   propietarios de cada cola y presencia de credenciales sin leerlas en salida.
-2. Consultar SQL con `START TRANSACTION READ ONLY`, agregados y `ROLLBACK`.
-   Separar mensajes, ejecuciones, citas, JobRequests y audiencias de campañas.
-   `Messages.sent_at` también se escribe en avisos fallidos: no acredita envío.
-   La aceptación del proveedor y sus estados/WAMID son evidencia diferente.
-3. Leer contadores y pausa de Redis directamente (`LLEN`, `ZCARD`, `HGET`), sin
-   importar `queue.service`, instanciar Queue/Worker, promover, limpiar o reintentar
-   trabajos. Una lista de destinatarios no es una cola de mensajes preparados.
-4. Conciliar los flujos por su `trigger_entity_type` antes de unir citas. Un flujo
-   de `lead_nuevo` sin cita enlazada no es una cita desaparecida ni una confirmación.
-   Conservar todo el historial. Repetir el inventario justo antes del corte:
-   una cita futura durante la auditoría puede haber caducado después.
+Consultar agregados SQL con transacción READ ONLY y Redis mediante lecturas de
+contadores/pausas. No cargar `models/index`, `queue.service` ni instanciar workers
+para inspeccionar. `Messages.sent_at` también aparece en errores preflight y no
+acredita aceptación Meta. Registros BullMQ borrados no equivalen a destinatarios
+sin atender: pueden incluir completados/fallidos. No recuperar automáticamente
+los registros eliminados ni las campañas pausadas.
 
-### Garantías actuales y barreras pendientes
-
-| Recorrido | Comportamiento contrastado en código | Condición antes del corte |
-| --- | --- | --- |
-| Recordatorio programado | `fireScheduledTrigger` vuelve a leer cita y plantilla, omite cancelación/cambio solicitado/no asistencia, aplica condiciones de confirmación y rechaza una ventana antigua. La tolerancia de disparo es 15 minutos por defecto; al resincronizar no crea recordatorios anteriores a la hora actual. | Conservar hora, namespace y clave de idempotencia. No hacer backfill global ni resincronizar citas públicas desde DEV. |
-| Aviso fallido por falta de configuración | Para avisos preflight sin aplazamiento futuro, el replay rechaza `failed` sin `enqueue_error`; no lo convierte en un nuevo envío. | No cambiar en masa estados a `pending` ni reejecutar flujos antiguos al añadir una credencial. |
-| Ya enviado o entrega incierta | Replay conserva `sent/delivered/read`; el transporte evita reintentar desconexiones ambiguas. El cliente broker DEV añade prioridad explícita de `delivery_unknown`; ese complemento aún no está en staging. | Conservar identidad y recibos; conciliar entrega incierta, nunca duplicar automáticamente. |
-| Mensaje aplazado o trabajo legacy | Quiet hours y el worker de salida no garantizan una nueva comprobación de vigencia de la cita inmediatamente antes del POST. `appointment_after` tampoco tiene el mismo límite temporal del recordatorio previo. | **Pendiente:** barrera de salida por clínica/fecha de corte y comprobación final de estado, versión y finalidad. Las pruebas del planificador no sustituyen esta barrera. |
-| Campañas y gateway | Sus pausas/trabajos son independientes del alta de una credencial. | Mantener campañas pausadas y jobs legacy fuera del lote. Gateway conserva cero workers de negocio; staging es el único dueño público autorizado. |
+Unir citas a ejecuciones por su `trigger_entity_type`; un flujo de lead sin cita
+no es una confirmación perdida. Releer las fechas y estados al elaborar el lote.
+La política excepcional de fechas/08:00 y revisión vive únicamente en
+[14.1: recuperación](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/14.1-whatsapp-integracion-meta.md#recuperación-de-mensajes-tras-una-parada).
 
 ### Lote de recuperación y piloto
 
-1. Preparar una propuesta sin efectos: clínica, intención original, cita vigente,
-   estado actual, ventana útil, idioma/plantilla aprobada y motivo de inclusión o
-   exclusión. No incluir cuerpos o destinatarios en evidencia general. Separar
-   solicitud de confirmación, recordatorio de cita confirmada y seguimiento de lead.
-2. Excluir citas pasadas/canceladas, versiones anteriores de una cita cambiada,
-   solicitudes de confirmación ya contestadas y entregas aceptadas o inciertas.
-   Los avisos todavía útiles requieren revisión del contexto y de contactos humanos
-   posteriores. Como regla del piloto, preparar a lo sumo una comunicación útil por
-   cita; no reproducir todos sus nodos/versiones fallidos.
-3. Antes de autorizar un lote real, cerrar el broker/aislamiento y la barrera final
-   de salida. Fijar clínica y activos exactos, fecha de corte, caducidad, límite de
-   cantidad/ritmo, claves de idempotencia, recepción y único consumidor. Presentar
-   mensajes afectados, posible interrupción y rollback. El alta de WhatsApp no
-   libera por sí misma ninguna cola ni autoriza otros permisos Meta.
-4. Validar primero recepción sin respuestas automáticas y un envío a un destino
-   de prueba expresamente autorizado. Después habilitar solo esa clínica para
-   comunicaciones nuevas y trabajos futuros aún válidos. El lote de recuperación
-   necesita su propia aprobación; campañas, DEV y backlog legacy siguen excluidos.
-5. Si falla el piloto, cerrar la autorización de salida y pausar la cola/cohorte
-   afectada antes de reparar. Preservar recibos y `delivery_unknown`; un POST en
-   vuelo puede haber sido aceptado aunque se pause después. No borrar mensajes,
-   reponer tokens revocados ni repetir envíos para verificar el rollback.
-
-QA reproducible sin BD compartida, Redis real ni proveedor:
-
-```bash
-npm run test:security:whatsapp-resume
-```
-
-La suite ejerce el planificador y el replay reales con filas ficticias, rechazos
-por ventana/estado, deduplicación y errores de entrega. Incluye el cliente broker
-preparado en DEV. No acredita un envío real, la recepción pública migrada ni las
-barreras marcadas como pendientes. Debe comprobarse la diferencia con el código
-público antes de atribuirle una protección probada solo en DEV.
+1. Preparar vista previa por clínica/activo, finalidad, idioma/plantilla local
+   aprobada, intención original, revisión de cita y motivo de inclusión/exclusión.
+   No incluir cuerpos ni destinatarios en evidencia general.
+2. Aplicar `whatsappRecoveryPolicy` con entregas históricas y revisión entrante.
+   Es una función pura: falta conectarla a la lectura y reserva transaccional y
+   al POST final. Sus tests no acreditan la barrera en un worker desplegado.
+3. Fijar cantidades, ritmo, expiración y clave estable de idempotencia. Revalidar
+   versión/estado/consentimiento y respuestas después de cualquier espera, justo
+   antes de entregar al broker. Aceptación o resultado desconocido impiden replay.
+4. Con el titular, revisar la autorización del WABA existente y un destino de
+   prueba. Primero recepción pasiva, después un envío expresamente autorizado.
+   El consentimiento de alta no autoriza envíos ni reanuda los cinco tipos legacy:
+   `webhook_whatsapp`, `outbound_whatsapp`, `whatsapp_template_create`,
+   `whatsapp_template_sync`, `whatsapp_phone_sync`.
+5. Liberar exclusivamente el lote revisado de esa clínica. Campañas, DEV y backlog
+   siguen fuera. Si vence la ventana de recordatorio, no enviarlo tarde ni ampliar
+   su plazo automáticamente. No prometer entrega a las 08:00 sin un corte aceptado.
 
 ## QA
 
-Peticiones HTTP reales contra servidores de prueba locales propios, modelos y
-colas ficticios, red exterior bloqueada y carga del modelo clínico real prohibida.
-**38 pruebas pasan**, incluidas 18 nuevas de HTTP/WhatsApp. Se prueban firmas ausentes/alteradas/duplicadas, bytes originales, desafío GET,
-WABA/número erróneo, scope ambiguo/bloqueado, clínica inyectada, referencias de
-otra clínica y routing legítimo del director; además listados/estado/roles y
-escrituras cerradas antes de efectos secundarios. Se conservan pruebas del
-hotfix, contención, bajas y contrato MFA. Acta privada: `whatsapp-reconnection-*`
-en `/home/ubuntu/qa-evidence/security-migration-20260912`.
+```bash
+# Node 24; desde services/integrations-broker, proveedores/AWS ficticios:
+node --require ./test/offline-guard.cjs --test --test-concurrency=1 test/*.test.js
+# Desde backend; HTTP locales y política pura:
+node --test src/scripts/tests/whatsapp_legacy_containment.test.js src/scripts/tests/whatsapp_webhook_containment.test.js src/scripts/tests/whatsapp_recovery_policy.test.js
+npm run test:security:whatsapp-resume
+# MySQL propio, Node 24, sin sockets de la BD compartida:
+CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/whatsapp_authorization_state_mysql.integration.js
+```
 
-Las pruebas no atribuyen el hackeo, no prueban tokens revocados ni acreditan
-despliegue o correo real. El borrador de contadores sociales del broker se
-conserva localmente fuera de esta publicación; no es un adaptador WhatsApp.
+La prueba AWS `whatsapp-inbox-aws-canary.js --synthetic-only prepare|resume <id>`
+requiere la EC2 autorizada, Node 24, entorno AWS fijado y datos ficticios. Tiene
+coste medido KMS/S3, no es una prueba unitaria ni se lanza desde el runner general.
+Conservar archivos parciales tras fallo; no recrear claves ni reintentar sin
+revisar su fase. Dos procesos verifican descifrado tras reinicio y entrega de
+outbox; no prueban el listener, datos clínicos ni integración con las colas.
+
+## Activación y regreso al servicio
+
+Presentar lista exacta de procesos/puertos/colas, versiones, grants, ventana y
+rollback antes del corte operativo. Conservar MFA y auditoría; verificar un único
+consumidor y no abrir DEV. La atribución forense del incidente puede continuar en
+paralelo; la validación técnica pendiente no se sustituye por esa investigación.
+
+Ante fallo, cerrar salida y altas, conservar recepción durable si ya está validada,
+recibos, candidatas, bloqueos e historial. Un POST en vuelo puede haber sido
+aceptado: pausar no autoriza repetirlo. No volver al webhook que acepta y descarta,
+a tokens de BD ni al OAuth general. Mantener las tablas y no borrar evidencia.
+Los commits, resultados y rollbacks concretos se registran en el
+[histórico 99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md).

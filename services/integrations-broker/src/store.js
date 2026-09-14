@@ -43,6 +43,11 @@ class BrokerStore {
         state TEXT NOT NULL CHECK(state IN ('awaiting','exchanging','staging','staged','interrupted','aborted')),
         code_digest TEXT UNIQUE, waba_id TEXT, phone_id TEXT, secret_digest TEXT, credential_metadata TEXT);
       CREATE INDEX IF NOT EXISTS whatsapp_onboarding_scope ON whatsapp_onboarding_flows(connection,state,created_at);
+      CREATE TABLE IF NOT EXISTS whatsapp_onboarding_phone_observations (flow_id TEXT PRIMARY KEY,
+        observation TEXT NOT NULL, observed_at INTEGER NOT NULL,
+        FOREIGN KEY(flow_id) REFERENCES whatsapp_onboarding_flows(id));
+      CREATE TABLE IF NOT EXISTS whatsapp_onboarding_selections (flow_id TEXT PRIMARY KEY,
+        requested_phone_id TEXT, FOREIGN KEY(flow_id) REFERENCES whatsapp_onboarding_flows(id));
       CREATE TABLE IF NOT EXISTS whatsapp_onboarding_wabas (waba_id TEXT PRIMARY KEY,
         connection TEXT NOT NULL, tenant TEXT NOT NULL, asset TEXT NOT NULL, scope_digest TEXT NOT NULL,
         clinic_digest TEXT NOT NULL, first_flow TEXT NOT NULL, created_at INTEGER NOT NULL);

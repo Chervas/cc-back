@@ -2,7 +2,7 @@
 const { createHmac } = require('node:crypto'); const C = require('./whatsapp-onboarding-contract');
 const { BrokerError, fail } = require('./errors'); const { eventFor } = require('./audit');
 const { createWhatsappOAuthHttp } = require('./whatsapp-oauth-http');
-const { verifyWhatsappGrant } = require('./whatsapp-credential-inspector'); const { createWhatsappPhoneVerifier } = require('./whatsapp-phone-verifier');
+const { verifyWhatsappGrant } = require('./whatsapp-credential-inspector'); const { createWhatsappPhoneVerifier, inspectWhatsappPhoneState } = require('./whatsapp-phone-verifier');
 function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactory = options => createWhatsappOAuthHttp(options), now = () => Date.now() }) {
   policy = structuredClone(policy);
   const running = new Map(); let closed = false;
@@ -32,12 +32,14 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
     store.appendAudit(eventFor({ ...request, requestId: id }, principal, policy, action, result, reason, now()));
   }
   function projection(row, binding) {
+    const observedPhone = store.db.prepare('SELECT observation, observed_at FROM whatsapp_onboarding_phone_observations WHERE flow_id=?').get(row.id);
     const configChanged = row.config_digest !== C.fingerprint(binding); let blocked = configChanged;
     try { active(row); } catch { blocked = true; }
     return { flowId: row.id, status: row.state, expiresAt: row.expires_at, expired: row.expires_at <= now(),
       scopeKey: row.asset.slice('wa-enroll:'.length), scopeDigest: row.scope_digest,
       clinicCount: row.clinic_count, clinicSetDigest: row.clinic_digest, configurationChanged: configChanged,
       accessBlocked: blocked, connected: false,
+      phoneState: observedPhone ? { ...JSON.parse(observedPhone.observation), observedAt: observedPhone.observed_at } : null,
       candidate: row.state === 'staged' ? { versionId: row.id, ...JSON.parse(row.credential_metadata) } : null };
   }
   function knownAssets(row, metadata) {
@@ -125,7 +127,9 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
     }
     active(row, signal);
     if (row.state_hash !== C.hash(request.payload.state)) fail('oauth_state_invalid');
-    if (row.code_digest && (row.code_digest !== C.hash(request.payload.code) || row.waba_id !== request.payload.wabaId || row.phone_id !== request.payload.phoneId)) fail('idempotency_conflict');
+    const selectedPhone = store.db.prepare('SELECT requested_phone_id FROM whatsapp_onboarding_selections WHERE flow_id=?').get(id);
+    if (row.code_digest && (row.code_digest !== C.hash(request.payload.code) || row.waba_id !== request.payload.wabaId
+      || (selectedPhone ? selectedPhone.requested_phone_id : row.phone_id) !== request.payload.phoneId)) fail('idempotency_conflict');
     if (row.state === 'staged') return { requestId: request.requestId, data: projection(row, binding), replayed: true };
     if (row.state === 'staging') {
       const receipt = await secrets.candidate(binding, row, row.secret_digest, signal);
@@ -144,6 +148,7 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
       record(request, principal, id, 'integration.requested', 'accepted', 'whatsapp_exchange_requested');
       store.db.prepare("UPDATE whatsapp_onboarding_flows SET state='exchanging',code_digest=?,waba_id=?,phone_id=?,updated_at=? WHERE id=?")
         .run(C.hash(request.payload.code), request.payload.wabaId, request.payload.phoneId, now(), id);
+      store.db.prepare('INSERT INTO whatsapp_onboarding_selections VALUES (?,?)').run(id, request.payload.phoneId);
       row = get(id);
     });
     attempt.startedExchange = true;
@@ -165,14 +170,19 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
           if (info.expiresAt !== null && (grant.expiresAt === null || grant.expiresAt > info.expiresAt)) fail('oauth_credentials_incomplete');
           const phone = await createWhatsappPhoneVerifier({ http })({ wabaId: row.waba_id, phoneId: row.phone_id, token,
             proof: createHmac('sha256', appSecret).update(token).digest('hex'), signal: info.signal });
+          guard();
+          const phoneState = await inspectWhatsappPhoneState({ http, phoneId: phone.phoneId, token,
+            proof: createHmac('sha256', appSecret).update(token).digest('hex'), signal: info.signal });
           guard(); const metadata = C.grantMetadata({ ...grant, phoneId: phone.phoneId }, binding);
-          const encoded = secrets.encode(binding, row, metadata, token);
+          const encoded = secrets.encode(binding, { ...row, phone_id: phone.phoneId }, metadata, token);
           try {
             store.transaction(() => {
               const current = guard(); if (current.state !== 'exchanging') fail('oauth_flow_interrupted');
               reserveAsset(current, metadata);
-              store.db.prepare("UPDATE whatsapp_onboarding_flows SET state='staging',secret_digest=?,credential_metadata=?,updated_at=? WHERE id=?")
-                .run(encoded.digest, JSON.stringify(metadata), now(), id);
+              store.db.prepare('INSERT INTO whatsapp_onboarding_phone_observations VALUES (?,?,?)')
+                .run(id, JSON.stringify(phoneState), now());
+              store.db.prepare("UPDATE whatsapp_onboarding_flows SET state='staging',secret_digest=?,credential_metadata=?,phone_id=?,updated_at=? WHERE id=?")
+                .run(encoded.digest, JSON.stringify(metadata), phone.phoneId, now(), id);
             });
             await secrets.stage(binding, get(id), encoded, signal); guard();
           } finally { encoded.body.fill(0); }

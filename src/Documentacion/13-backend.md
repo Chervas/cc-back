@@ -57,16 +57,21 @@ y `X-Whatsapp-Onboarding: 1`. Actor/sesión proceden del middleware; MFA por cor
 y permiso sobre todas las clínicas se revalidan antes/después del broker.
 
 DTO: requestId, authorizationStatus, connected false, pending, expiresAt, scope,
-clinicCount, selected y cancellationConfirmed. Begin pendiente añade solo
+clinicCount, selected y cancellationConfirmed. `phoneId` admite `null` para
+resolver un WABA con un único número en el broker; cero o varios se rechazan.
+El DTO puede añadir `phoneState` nullable con `phoneId,isOnBizApp,platformType,
+coexistenceAvailable,registrationAttempted:false,observedAt`. La observación
+debe concordar con el número candidato; no acredita conexión ni envío.
+Begin pendiente añade solo
 appId/configId/redirectUri/state. No hashes, versiones, sujeto Meta, código o token.
 `awaiting_activation` acredita una candidata histórica, nunca canal activo.
 Tras resultado incierto consultar el mismo UUID; cancelación local se conserva
 antes de solicitar abort. No se vuelve a canjear un código reclamado.
 
-Nuevo `WHATSAPP_ONBOARDING_BROKER_CONFIG_FILE` privado y guards gateway/MFA,
-sin instalar. Rutas deshabilitadas por defecto; sin nueva DDL ni despliegue.
-36 pruebas Node y 15 grupos MySQL propios pasan, cierre 0. UI/Embedded Signup,
-configuración/grants Meta reales y consumidores siguen pendientes.
+`WHATSAPP_ONBOARDING_BROKER_CONFIG_FILE` es privado, con guards gateway/MFA.
+Rutas deshabilitadas por defecto. Madurez, DDL aplicada y versiones públicas se
+consultan en el manual central 19/99; este contrato no acredita su despliegue.
+Configuración/grants Meta reales, aislamiento y consumidores siguen pendientes.
 Contrato: `back-dev/docs/security/whatsapp-onboarding-gateway.md`.
 
 ## 13/09/2026 — Contrato privado del alta WhatsApp
@@ -78,15 +83,19 @@ ejecuta `meta.whatsapp.onboarding.scope.revoke.v1` con clave distinta.
 App/config/URI, versiones y ámbito se fijan en política privada. El registro
 no necesita MetaConnection general ni acepta grants de Ads/leads.
 
-UUID de begin identifica el flujo; finish fija estado/código/WABA/número.
+UUID de begin identifica el flujo; finish fija estado/código/WABA/selección de
+número. La selección nullable original se conserva separada del número resuelto,
+para que reintentos o reinicios no cambien la identidad de la solicitud. La
+observación `is_on_biz_app/platform_type` se obtiene por GET fijo y se registra
+con el intento; no dispara registro, QR, suscripción o sincronización de historial.
 Código reclamado antes de AWS/Meta, sin repetición tras incertidumbre/reinicio.
 Solo candidata por versión/hash en Secrets Manager; `staged` es un recibo
 histórico, `connected:false` siempre. Cancelación y bloqueo del grupo/clínicas
 originales persisten independientemente; auditoría técnica atómica con cambios.
 
-No cambia API/DTO público ni conecta rutas, UI o consumidores. No hay nueva DDL
-clínica: las de sesión/MFA/estado/bloqueos siguen pendientes en BD compartida.
-Faltan puente gateway con MFA, independencia real Meta y activación aprobada.
+Este contrato no conecta consumidores ni concede activación. El puente con MFA
+está implementado; independencia real en Meta y activación requieren validación.
+Consultar estado de instalación y DDL en 19/99, sin deducirlo de esta API privada.
 Contrato, QA, costes y rollback: `back-dev/docs/security/whatsapp-onboarding-broker.md`.
 
 ## 13/09/2026 — Transporte privado de canje WhatsApp
@@ -169,15 +178,15 @@ No hay garantía atómica frente a cambios de plantilla entre lectura y envío.
 QA: 232 broker + 59 backend, ficticios, TLS/SQLite privados y sin BD clínica.
 Sin DDL nueva, UI, configuración instalada, AWS/Meta real ni despliegue.
 Pendientes registro/consumidores y recorrido gateway → cola → staging → broker,
-aislamiento efectivo y activación MFA. El cliente aún no está inyectado en
+y aislamiento efectivo. La operación de MFA se consulta en 19. El cliente aún no está inyectado en
 `whatsapp.service.js`; no se declara migrado ningún número real.
 Contrato, permisos, costes y rollback:
 `back-dev/docs/security/whatsapp-broker-messaging.md`.
 
 El alta previa Meta/Embedded Signup también es requisito del cierre: sustituir
 OAuth general por autorización específica WhatsApp con correo MFA, estado/código
-de un uso, ámbito validado y canje en broker. Aún sin implementación ni nuevas
-rutas públicas de alta; configuración/permisos y coexistencia por verificar.
+de un uso, ámbito validado y canje en broker. Implementación preparada con rutas
+propias todavía sin activar; configuración/permisos y coexistencia por verificar.
 
 ## 13/09/2026 — Refuerzo de WhatsApp previo a reconexión
 
@@ -187,7 +196,7 @@ Este corte mantiene la contención; **no habilita la reconexión**.
 
 | Ruta | Contrato de seguridad |
 | --- | --- |
-| `POST /api/whatsapp/webhook` | Firma SHA-256 obligatoria sobre bytes originales. Secreto/rawBody ausentes: 503. Firma incorrecta: 401. Ámbito desconocido, ambiguo, bloqueado o referencia web ajena: 403. JSON y lotes no soportados: 400; tamaño >1 MiB: 413; tipo/compresión no admitidos: 415. Respuesta de error fija y sin logs del payload. |
+| `POST /api/whatsapp/webhook` | Contención pública: 503, Retry-After 60 y no-store antes del procesamiento de negocio. No admite bypass desde URL/cuerpo/configuración. El verificador preparado detrás del cierre no acredita recepción operativa: la sustitución requiere persistencia durable antes del ACK. |
 | `GET /api/whatsapp/webhook` | Challenge numérico acotado, texto plano y no-store; verify token válido no sustituye la firma de POST. |
 | `GET /api/whatsapp/status`, `/phones` | ACL de clínica/grupo; un propietario de clínica no recibe acceso global. IDs estrictos; errores fijos. `/phones` excluye columnas de tokens y muestra estado persistido sin sync/registro/colas/escrituras al leer. |
 | Escrituras bajo `/api/whatsapp` | Sesión obligatoria y 503 `meta_security_quarantine` antes del handler, incluidas asignaciones, catálogo, mensajes, registro y borrado. |

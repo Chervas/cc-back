@@ -8,7 +8,7 @@
 ## Punto de partida operativo
 
 Consultar [19: estado de seguridad](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones)
-y [99: último corte público](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-corte-de-acceso-publico-2026-09-13).
+y [99: cortes públicos](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md).
 El [acta técnica](security/admin-session-deployment-20260913.md) contiene
 versiones, rama de gateway, pruebas, respaldos y rollback. Comprobar esos
 datos antes del corte: publicar código no cambia el runtime ni sus pausas.
@@ -19,8 +19,8 @@ El orden se mantiene en [16: prioridades](https://github.com/Chervas/cc-front/bl
 
 | Trabajo | Guía y condición de salida |
 | --- | --- |
-| Mantener el acceso ya desplegado | [Contrato y conservación en promociones](security/admin-password-session-cut.md), [acta](security/admin-session-deployment-20260913.md). Login manual pendiente del usuario. |
-| Activar MFA por correo | Cinco DDL exactas del candidato en [dependencias MFA](security/admin-password-session-cut.md#preparación-del-mfa-completo-y-pendientes-reales); configuración/alcance de correo, clave y entrega de auditoría aprobados. No usar el lote histórico completo Meta/Google por defecto. |
+| Mantener el acceso ya desplegado | [Contrato y conservación en promociones](security/admin-password-session-cut.md), [acta inicial](security/admin-session-deployment-20260913.md). Estado del login y cortes posteriores en 19/99. |
+| Mantener MFA por correo | Verificar DDL/configuración antes de cada promoción; [dependencias](security/admin-password-session-cut.md#preparación-del-mfa-completo-y-pendientes-reales). El MFA público ya activo no requiere repetir su instalación. No usar el lote histórico completo Meta/Google por defecto. |
 | Preparar/reconectar WhatsApp | [Recorrido gateway](security/whatsapp-onboarding-gateway.md), [condiciones de reconexión](security/whatsapp-reconnection-readiness.md). Aislar credenciales, validar proveedor/activos y recepción → cola → staging; permiso explícito antes de activar. |
 | Retención, Budget, costes y cifrado | Inventario AWS y contrato 39, [matriz de aceptación AWS](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/39-seguridad-integraciones-cifrado-auditoria.md#matriz-de-aceptacion-aws), fases C–E inferiores. No recrear recursos ni declarar controles reportados como verificados. |
 | Continuar otra tarea de producto | [Relevo para importación](security/admin-session-deployment-20260913.md#continuidad-para-el-siguiente-codex). Código en DEV, QA de su dominio, sin promover o activar esta migración por arrastre. |
@@ -45,6 +45,12 @@ El orden se mantiene en [16: prioridades](https://github.com/Chervas/cc-front/bl
 6. Publicar los commits propios, comprobar SHA remoto, documentar versión
    instalada y diferencias respecto de DEV. Actualizar contrato/API/estado,
    mantener evidencias privadas y entregar un handoff que no requiera el chat.
+
+Para WhatsApp, el [runbook de reconexión](security/whatsapp-reconnection-readiness.md)
+concentra ahora los prechecks de contención, DDL, slots, aislamiento, bandeja
+cifrada y piloto. La prueba KMS/SQLite/S3 sintética no autoriza sustituir el
+webhook 503 por un ACK 200 ni abrir consumidores. No aplicar sus propuestas IAM
+pendientes como parte de un push de código.
 
 ## Fuentes del contrato y registro
 

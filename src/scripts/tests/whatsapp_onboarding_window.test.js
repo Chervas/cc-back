@@ -49,6 +49,14 @@ test('Bearer responses, conflicting selections and provider errors emit only fix
   const provider = fixture(t); provider.start(); provider.meta(JSON.stringify({ type: 'WA_EMBEDDED_SIGNUP', event: 'ERROR', error_message: 'FICTITIOUS_SECRET' }));
   assert.equal(provider.messages.at(-1).data.reason, 'provider_error'); assert(!JSON.stringify(provider.messages).includes('FICTITIOUS'));
 });
+test('documented WABA-only completion is accepted only for coexistence and leaves phone resolution to the broker', t => {
+  const complete = JSON.stringify({ type: 'WA_EMBEDDED_SIGNUP', event: 'FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING', data: { waba_id: '301' }, version: 3 });
+  const f = fixture(t); f.start({ ...f.input, mode: 'coexistence' });
+  f.meta(complete); f.code({ authResponse: { code: 'FICTITIOUS_CODE' } });
+  assert.equal(f.messages.at(-1).data.type, 'cc.wa.result'); assert.equal(f.messages.at(-1).data.phoneId, null);
+  const other = fixture(t); other.start(); other.meta(complete); other.code({ authResponse: { code: 'FICTITIOUS_CODE' } });
+  assert.equal(other.messages.length, 1);
+});
 test('Coexistence is selected explicitly and cancel never emits a partial code or account', t => {
   const f = fixture(t); f.start({ ...f.input, mode: 'coexistence' });
   assert.equal(f.options().extras.featureType, 'whatsapp_business_app_onboarding');

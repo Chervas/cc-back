@@ -12,7 +12,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await table('MetaConnectionAssignment', 'MetaConnectionAssignments', { id: { type: D.INTEGER, primaryKey: true },
     scopeKey: D.STRING, status: D.STRING, metaConnectionId: D.INTEGER, authorizedByUserId: D.INTEGER });
   for (const file of ['20260912210000-create-platform-audit-events', '20260913003000-add-platform-audit-result-part',
-    '20260912220000-create-auth-sessions', '20260913130000-create-auth-email-challenges', '20260913140000-create-meta-scope-blocks']) {
+    '20260912220000-create-auth-sessions', '20260913130000-create-auth-email-challenges',
+    '20260914220000-create-auth-trusted-devices', '20260913140000-create-meta-scope-blocks']) {
     await require('../../../migrations/' + file).up(qi, D);
   }
   const migration = require('../../../migrations/20260913150000-create-whatsapp-authorization-states');

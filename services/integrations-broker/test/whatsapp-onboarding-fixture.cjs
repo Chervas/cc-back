@@ -54,6 +54,7 @@ function fixture(t) {
     if (request.action === 'inspect') response = { data: { app_id: '101', user_id: '201', type: 'SYSTEM_USER', is_valid: true,
       expires_at: 0, data_access_expires_at: 0, scopes: [...binding.whatsappOnboarding.scopes],
       granular_scopes: binding.whatsappOnboarding.scopes.map(scope => ({ scope, target_ids: ['301'] })) } };
+    else if (request.action === 'phone_state') response = { id: request.id, is_on_biz_app: true, platform_type: 'CLOUD_API' };
     else { assert.equal(request.action, 'phones'); assert.equal(request.id, '301'); response = { data: [{ id: '401' }] }; }
     return state.afterGraph ? state.afterGraph(request, response) : response;
   };

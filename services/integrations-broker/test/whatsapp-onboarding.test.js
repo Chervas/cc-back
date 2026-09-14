@@ -2,12 +2,27 @@
 const test = require('node:test'); const assert = require('node:assert/strict'); const { randomUUID } = require('node:crypto');
 const { fixture, TOKEN, APP } = require('./whatsapp-onboarding-fixture.cjs'); const C = require('../src/whatsapp-onboarding-contract');
 const row = (f, flow) => f.current.store.db.prepare('SELECT * FROM whatsapp_onboarding_flows WHERE id=?').get(flow.flowId);
+test('WABA-only coexistence stages the unique verified phone and preserves the original selection across restart', async t => {
+  const f = fixture(t); const flow = await f.begin(); const result = await f.finish(flow, { phoneId: null });
+  assert.equal(result.data.candidate.phoneId, '401'); assert.equal(result.data.connected, false);
+  f.restart(); const resumed = await f.finish(flow, { phoneId: null });
+  assert.equal(resumed.data.candidate.phoneId, '401'); assert.equal(f.state.codes, 1); assert.equal(f.state.puts, 1);
+  await assert.rejects(f.finish(flow, { phoneId: '401' }), { code: 'idempotency_conflict' });
+});
+test('ambiguous WABA-only completion never stages a candidate or registers a number', async t => {
+  const f = fixture(t); const flow = await f.begin();
+  f.state.afterGraph = (req, response) => req.action === 'phones' ? { data: [{ id: '401' }, { id: '402' }] } : response;
+  await assert.rejects(f.finish(flow, { phoneId: null }), { code: 'scope_denied' });
+  assert.equal(f.state.puts, 0); assert(f.state.httpCalls.every(c => ['inspect','phones'].includes(c.action)));
+});
 test('Signed WhatsApp onboarding exchanges once, verifies new Meta identity and WABA/phone, stores only a candidate and metadata', async t => {
   const f = fixture(t); const flow = await f.begin(); assert.equal(flow.result.data.status, 'awaiting');
   assert.deepEqual(flow.result.data.authorization, { appId: '101', configId: '102', redirectUri: f.binding.whatsappOnboarding.redirectUri });
   const result = await f.finish(flow); assert.equal(result.data.status, 'staged'); assert.equal(result.data.connected, false);
   assert.equal(result.data.candidate.subjectId, '201'); assert.equal(result.data.candidate.versionId, flow.flowId); assert.equal(result.data.candidate.phoneId, '401');
-  assert.equal(f.state.codes, 1); assert.equal(f.state.puts, 1); assert.deepEqual(f.state.httpCalls.map(c => c.action), ['inspect', 'phones']);
+  assert.equal(f.state.codes, 1); assert.equal(f.state.puts, 1); assert.deepEqual(f.state.httpCalls.map(c => c.action), ['inspect', 'phones', 'phone_state']);
+  assert.equal(result.data.phoneState.coexistenceAvailable, true);
+  assert.equal(result.data.phoneState.registrationAttempted, false);
   assert(f.state.heldTokens.every(b => b.every(v => v === 0)));
   const versions = f.records.get(f.binding.secretArn); assert.deepEqual(versions.get(f.binding.whatsappOnboarding.slotVersionId).stages, ['AWSCURRENT']);
   assert.deepEqual(versions.get(flow.flowId).stages, ['AWSPENDING']); assert.equal(JSON.parse(versions.get(flow.flowId).body).accessToken, TOKEN);

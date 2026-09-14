@@ -1,7 +1,34 @@
 'use strict';
 const test = require('node:test'); const assert = require('node:assert/strict');
-const { createWhatsappPhoneVerifier } = require('../src/whatsapp-phone-verifier');
+const { createWhatsappPhoneVerifier, inspectWhatsappPhoneState } = require('../src/whatsapp-phone-verifier');
 const input = () => ({ wabaId: '301', phoneId: '401', token: Buffer.from('FICTITIOUS_WA_TOKEN'), proof: 'a'.repeat(64) });
+test('phone state distinguishes coexistence, API-only and unknown without registering or promising QR-free access', async () => {
+  for (const [fields, expected] of [
+    [{ is_on_biz_app: true, platform_type: 'CLOUD_API' }, true],
+    [{ is_on_biz_app: false, platform_type: 'CLOUD_API' }, false],
+    [{ is_on_biz_app: true, platform_type: 'ON_PREMISE' }, false],
+    [{}, false], [{ is_on_biz_app: 'true', platform_type: 'UNKNOWN' }, false],
+  ]) {
+    const calls = [];
+    const result = await inspectWhatsappPhoneState({ ...input(), http: async req => { calls.push(req); return { id: '401', ...fields }; } });
+    assert.equal(result.coexistenceAvailable, expected); assert.equal(result.registrationAttempted, false);
+    assert.deepEqual(calls.map(c => [c.action, c.id]), [['phone_state', '401']]);
+  }
+  await assert.rejects(inspectWhatsappPhoneState({ ...input(), http: async () => ({ id: '402' }) }), { code: 'oauth_credentials_incomplete' });
+  const controller = new AbortController();
+  await assert.rejects(inspectWhatsappPhoneState({ ...input(), signal: controller.signal,
+    http: async () => { controller.abort(); return { id: '401' }; } }), { code: 'provider_timeout' });
+});
+test('WABA-only coexistence resolves a unique phone across all pages and rejects ambiguous accounts', async () => {
+  const verify = createWhatsappPhoneVerifier({ http: async () => ({ data: [{ id: '401' }] }) });
+  assert.deepEqual(await verify({ ...input(), phoneId: null }), { wabaId: '301', phoneId: '401' });
+  let calls = 0;
+  const ambiguous = createWhatsappPhoneVerifier({ http: async () => ++calls === 1
+    ? { data: [{ id: '401' }], paging: { next: 'ignored', cursors: { after: 'more' } } }
+    : { data: [{ id: '402' }] } });
+  await assert.rejects(ambiguous({ ...input(), phoneId: null }), { code: 'scope_denied' });
+  assert.equal(calls, 2);
+});
 test('Phone verifier checks provider WABA membership and ignores arbitrary pagination URLs', async () => {
   const calls = [];
   const verify = createWhatsappPhoneVerifier({ http: async request => { calls.push(request);

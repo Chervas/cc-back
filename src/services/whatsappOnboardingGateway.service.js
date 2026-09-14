@@ -16,7 +16,7 @@ function request(raw, name) {
   if (name !== 'finish') return S.request(raw, name === 'begin' ? 'issue' : name === 'cancel' ? 'cancel' : 'status');
   S.exact(raw, ['requestId','userId','sessionRef','sessionExpiresAt','state','code','wabaId','phoneId']);
   const { wabaId, phoneId, ...rest } = raw;
-  if (!C.id(wabaId) || !C.id(phoneId)) S.fail();
+  if (!C.id(wabaId) || phoneId !== null && !C.id(phoneId)) S.fail();
   return { ...S.request(rest, 'claim'), wabaId, phoneId };
 }
 const actor = input => Object.fromEntries(['requestId','userId','sessionRef','sessionExpiresAt'].map(k => [k, input[k]]));
@@ -29,7 +29,8 @@ function project(local, remote, state) {
     pending: ['awaiting_authorization','processing','awaiting_activation'].includes(status),
     expiresAt: local.expiresAt, scope: { ...local.scope }, clinicCount: local.clinicIds.length,
     cancellationConfirmed: local.status === 'cancelled' && remote.status === 'aborted',
-    selected: status === 'awaiting_activation' ? { wabaId: remote.candidate.wabaId, phoneId: remote.candidate.phoneId } : null };
+    selected: status === 'awaiting_activation' ? { wabaId: remote.candidate.wabaId, phoneId: remote.candidate.phoneId } : null,
+    phoneState: status === 'awaiting_activation' ? remote.phoneState ?? null : null };
   if (state && status === 'awaiting_authorization') result.authorization = { ...remote.authorization, state };
   return result;
 }

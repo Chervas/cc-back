@@ -1,8 +1,12 @@
 # Interfaz de autorización exclusiva de WhatsApp
 
-13/09/2026. Corte de código local con proveedores ficticios. Sin despliegue,
-configuración Meta instalada, migración compartida ni activación de envíos.
-**No acredita una reconexión operativa segura.**
+> **Tipo:** procedimiento técnico de interfaz y QA.
+> **Fuente de verdad:** ventana, intercambio, recuperación y validación de la UI; instalación en el manual central 19/99.
+> **Última revisión:** 2026-09-15 (Europe/Madrid).
+
+Interfaz preparada con proveedores ficticios. Consultar
+[19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones)
+para distinguir código, DDL y despliegue. No acredita reconexión operativa.
 
 ## Recorrido
 
@@ -92,11 +96,17 @@ awaiting_activation se presenta como autorización guardada pendiente de
 activación; nunca como canal conectado. No se llama a registro, suscripción,
 envío o rutas legacy de fallback.
 
+En coexistencia se acepta la finalización oficial con WABA sin número: el broker
+debe resolver un único miembro. La UI muestra la observación de coexistencia
+devuelta por ese recorrido, manteniendo el estado pendiente. Campo desconocido,
+número discordante o indicador de activación incoherente invalidan el DTO.
+
 ## Validación, instalación y rollback
 
-QA aislada correcta: 40 pruebas Node backend, 12 frontend, 16 grupos de
-comprobaciones en MySQL propio con cierre 0, build Angular y Chromium desktop/
-móvil con 18 capturas y cero llamadas externas. Meta/AWS/SDK son ficticios.
+QA: contratos Node, MySQL propio, build Angular y
+`scripts/tests/whatsapp_onboarding_chromium_qa.js` en frontend. El runner admite
+`WHATSAPP_QA_OUTPUT` para evidencia privada por corte. Meta/AWS/SDK son ficticios;
+incluye WABA sin número y candidata pendiente en escritorio/móvil.
 
 Pruebas de contrato/interfaz, frame y rutas con datos ficticios; MySQL propio
 para renovación y límites de sesión. Chromium usa el componente Angular,
@@ -108,8 +118,8 @@ capturas desktop/móvil; build privado whatsapp-onboarding-front-build.
 El primer build agotó el heap por defecto de Node; pasó al repetir con los
 6144 MiB documentados y dos workers. No se cambió ningún runtime operativo.
 
-No hay variables ni DDL nuevas en este corte. Persisten las migraciones de
-MFA/sesiones/bloqueos/auditoría y 20260913150000 pendientes de corte compartido.
+No aplicar migraciones desde QA de interfaz. La presencia y compatibilidad de
+MFA/sesiones/bloqueos/auditoría y 20260913150000 se verifica en el precheck del corte.
 No hay gasto AWS/Meta por estas pruebas. Costes en Ajustes, Budget/CloudFormation,
 retención y cifrado conservan sus pendientes; OPS puede seguir apagado.
 

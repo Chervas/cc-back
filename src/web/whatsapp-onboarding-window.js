@@ -56,11 +56,15 @@
     let v; try { if (typeof event.data !== 'string' || event.data.length > 16384) return; v = JSON.parse(event.data); } catch { return; }
     if (v?.type !== 'WA_EMBEDDED_SIGNUP') return;
     if (['FINISH','FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING'].includes(v.event)) {
-      if (!id(v.data?.waba_id) || !id(v.data?.phone_number_id)) return;
-      if (selection && (selection.wabaId !== v.data.waba_id || selection.phoneId !== v.data.phone_number_id)) {
+      const phoneId = v.data?.phone_number_id ?? null;
+      const wabaOnly = input.mode === 'coexistence' && v.event === 'FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING' && phoneId === null;
+      if (!id(v.data?.waba_id) || !wabaOnly && !id(phoneId)) return;
+      if (selection && (selection.wabaId !== v.data.waba_id || selection.phoneId !== phoneId)) {
         send('cc.wa.error', { reason: 'selection_conflict' }); return;
       }
-      selection = { wabaId: v.data.waba_id, phoneId: v.data.phone_number_id }; complete();
+      // Meta documents a WABA-only completion for coexistence. The broker may
+      // resolve a unique member; it must reject multiple phones, never guess.
+      selection = { wabaId: v.data.waba_id, phoneId }; complete();
     } else if (v.event === 'CANCEL') send('cc.wa.cancel');
     else if (v.event === 'ERROR') send('cc.wa.error', { reason: 'provider_error' });
   }

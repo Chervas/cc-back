@@ -54,6 +54,11 @@ URI/cuenta de proveedor arbitraria ni selección del runtime desde el cuerpo.
 | `/status` | `requestId` |
 | `/cancel` | `requestId` |
 
+`phoneId` acepta null para el WABA sin número del flujo de coexistencia. El broker
+lo resuelve solo si existe un miembro único. La proyección pública puede añadir
+`phoneState` nullable, coherente con el candidato y sin activar el canal; los
+campos exactos se definen en el [contrato backend](../../src/Documentacion/13-backend.md#13092026--api-gateway-del-alta-whatsapp-con-mfa).
+
 Actor, sessionRef y expiración se obtienen del middleware verificado. El estado
 exige prueba de correo vigente y permiso sobre todas las clínicas. El cuerpo no
 puede sobrescribir esos campos. Las rutas se montan antes del parser general:

@@ -20,7 +20,7 @@ const validators = {
   begin: schema({ state: { type: 'string', pattern: '^[A-Za-z0-9_-]{43}$' }, expiresAt: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
     scopeDigest: hashSchema, clinicSetDigest: hashSchema }),
   finish: schema({ flowId: uuidSchema, state: { type: 'string', pattern: '^[A-Za-z0-9_-]{43}$' },
-    code: { type: 'string', pattern: '^[\\x21-\\x7e]{1,4096}$' }, wabaId: idSchema, phoneId: idSchema }),
+    code: { type: 'string', pattern: '^[\\x21-\\x7e]{1,4096}$' }, wabaId: idSchema, phoneId: { anyOf: [idSchema, { type: 'null' }] } }),
   status: schema({ flowId: uuidSchema }), abort: schema({ flowId: uuidSchema }),
 };
 const hash = value => createHash('sha256').update(value).digest('hex');

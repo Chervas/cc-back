@@ -45,7 +45,7 @@ function response(result, name, row, b, requestId, selection) {
     if (result.requestId !== requestId || typeof result.replayed !== 'boolean') throw Error();
     const d = result.data;
     S.exact(d, ['flowId', 'status', 'expiresAt', 'expired', 'scopeKey', 'scopeDigest', 'clinicCount', 'clinicSetDigest',
-      'configurationChanged', 'accessBlocked', 'connected', 'candidate', ...(name === 'begin' ? ['authorization'] : [])]);
+      'configurationChanged', 'accessBlocked', 'connected', 'candidate', ...(Object.hasOwn(d, 'phoneState') ? ['phoneState'] : []), ...(name === 'begin' ? ['authorization'] : [])]);
     if (d.flowId !== row.requestId || !['awaiting','exchanging','staging','staged','interrupted','aborted'].includes(d.status)
       || d.scopeKey !== b.scopeKey || d.clinicCount !== row.clinicIds.length || d.clinicSetDigest !== row.clinicSetDigest
       || !/^[a-f0-9]{64}$/.test(d.scopeDigest) || !Number.isSafeInteger(d.expiresAt) || d.expiresAt <= 0
@@ -67,9 +67,18 @@ function response(result, name, row, b, requestId, selection) {
         || !['USER', 'SYSTEM_USER'].includes(v.tokenType) || !Array.isArray(v.scopes)
         || JSON.stringify([...v.scopes].sort()) !== JSON.stringify([...b.scopes].sort())
         || ![v.expiresAt, v.dataAccessExpiresAt].every(t => t === null || Number.isSafeInteger(t) && t > 0)
-        || selection && (v.wabaId !== selection.wabaId || v.phoneId !== selection.phoneId)) throw Error();
+        || selection && (v.wabaId !== selection.wabaId || selection.phoneId !== null && v.phoneId !== selection.phoneId)) throw Error();
     } else if (d.candidate !== null) throw Error();
-    return structuredClone(d);
+    if (d.phoneState !== undefined && d.phoneState !== null) {
+      const p = d.phoneState;
+      S.exact(p, ['phoneId', 'isOnBizApp', 'platformType', 'coexistenceAvailable', 'registrationAttempted', 'observedAt']);
+      if (!C.id(p.phoneId) || ![true, false, null].includes(p.isOnBizApp)
+        || ![null, 'CLOUD_API', 'ON_PREMISE', 'NOT_APPLICABLE'].includes(p.platformType)
+        || p.coexistenceAvailable !== (p.isOnBizApp === true && p.platformType === 'CLOUD_API')
+        || p.registrationAttempted !== false || !Number.isSafeInteger(p.observedAt) || p.observedAt <= 0
+        || d.candidate && d.candidate.phoneId !== p.phoneId) throw Error();
+    }
+    return { ...structuredClone(d), phoneState: d.phoneState ?? null };
   } catch { fail('whatsapp_onboarding_result_unknown', true); }
 }
 function createWhatsappOnboardingBrokerClient({ client, loadBinding, guard = assertGateway }) {

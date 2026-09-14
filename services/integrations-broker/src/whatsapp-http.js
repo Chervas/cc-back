@@ -6,12 +6,12 @@ function createWhatsappHttp({ request = https.request, timeoutMs = 8000 } = {}) 
   return async input => {
     if (!input || Object.keys(input).some(key => !['action', 'id', 'token', 'proof', 'candidate', 'json', 'signal', 'after'].includes(key))) fail('invalid_request');
     const { action, id, token, proof, candidate, json, signal, after } = input;
-    if (!['send', 'template', 'inspect', 'phones'].includes(action) || typeof id !== 'string' || !/^[1-9][0-9]{0,29}$/.test(id)
+    if (!['send', 'template', 'inspect', 'phones', 'phone_state'].includes(action) || typeof id !== 'string' || !/^[1-9][0-9]{0,29}$/.test(id)
       || !Buffer.isBuffer(token) || !tokenText(token.toString('utf8'))
       || action !== 'inspect' && (typeof proof !== 'string' || !/^[a-f0-9]{64}$/.test(proof) || candidate !== undefined)
       || action === 'inspect' && (proof !== undefined || json !== undefined || !Buffer.isBuffer(candidate) || !tokenText(candidate.toString('utf8'))
         || !new RegExp('^' + id + '\\|[a-f0-9]{32}$').test(token.toString('utf8')))
-      || ['template', 'phones'].includes(action) && json !== undefined
+      || ['template', 'phones', 'phone_state'].includes(action) && json !== undefined
       || after !== undefined && (action !== 'phones' || typeof after !== 'string' || !/^[A-Za-z0-9_+=/-]{1,2048}$/.test(after))
       || action === 'send' && (json?.messaging_product !== 'whatsapp' || !['text', 'template'].includes(json.type))) fail('invalid_request');
     const body = action === 'send' ? Buffer.from(JSON.stringify(json)) : null;
@@ -23,6 +23,7 @@ function createWhatsappHttp({ request = https.request, timeoutMs = 8000 } = {}) 
     const query = new URLSearchParams(action === 'inspect' ? { input_token: candidate.toString('utf8') } : { appsecret_proof: proof });
     if (action === 'template') query.set('fields', 'id,name,language,status,components');
     if (action === 'phones') { query.set('fields', 'id'); query.set('limit', '100'); if (after !== undefined) query.set('after', after); }
+    if (action === 'phone_state') query.set('fields', 'id,is_on_biz_app,platform_type');
     return new Promise((resolve, reject) => {
       let req; let timer; let settled = false;
       const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); error ? reject(error) : resolve(value); };
