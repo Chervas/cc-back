@@ -18,7 +18,7 @@ function metadataObject(value) {
 async function lockBookingResources({ db, resourceKeys, transaction }) {
   if (!transaction) throw new Error('booking_transaction_required');
   for (const key of [...new Set(resourceKeys)].sort()) {
-    if (!/^(doctor|installation):[1-9]\d*$/.test(key)) throw new Error('booking_resource_key_invalid');
+    if (!/^(doctor|installation|patient):[1-9]\d*$/.test(key)) throw new Error('booking_resource_key_invalid');
     // Upsert obtains the same unique-key lock even when the anchor is new.
     await db.AppointmentBookingResource.upsert({ resource_key: key, resource_kind: key.split(':')[0] }, { transaction });
     await db.AppointmentBookingResource.findByPk(key, { transaction, lock: transaction.LOCK.UPDATE });
@@ -50,7 +50,7 @@ function solveLegacy(values, context) {
  */
 async function mutateAppointmentBooking({ db, appointmentValues, existingAppointmentId = null, persist,
   priorityAcknowledged = false, selections = {}, transaction = null, capabilities = bookingCapabilities(),
-  allowObsolete = false, stateOnly = false }) {
+  allowObsolete = false, stateOnly = false, trustedProgramSession = null, preparedContext = null }) {
   if (!capabilities.simple) throw bookingError('booking_profile_runtime_unavailable', 'La reserva de perfiles todavía no está activada.');
   const execute = async (tx) => {
     if (tx.options?.isolationLevel !== 'READ COMMITTED') {
@@ -60,10 +60,46 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     if (existingAppointmentId && !existing) throw bookingError('appointment_not_found', 'Cita no encontrada.', null, 404);
     const previous = existing?.toJSON ? existing.toJSON() : (existing || {});
     const values = { ...previous, ...appointmentValues };
+    // Only the server-owned session ledger can supply a combined profile. An
+    // ordinary appointment request cannot forge a purchase or change its owner.
+    const session = existing && db.PatientProgramSession && previous.voucher_id
+      ? await db.PatientProgramSession.findOne({ where: { appointment_id: existing.id_cita }, transaction: tx }) : null;
+    if (session) {
+      const voucher = await db.PatientVoucher.findByPk(session.voucher_id, { transaction: tx, lock: tx.LOCK.UPDATE });
+      if (!voucher || Number(voucher.patient_id) !== Number(previous.paciente_id) || Number(voucher.clinic_id) !== Number(previous.clinica_id)
+        || Number(voucher.id) !== Number(previous.voucher_id)) throw bookingError('program_session_identity_locked', 'La cita no corresponde a la compra del programa.');
+      await session.reload({ transaction: tx, lock: tx.LOCK.UPDATE });
+      if (Number(session.appointment_id) !== Number(existing.id_cita)) throw bookingError('program_session_replaced', 'Esta sesión ya tiene otra cita. Actualiza el plan.');
+      for (const field of ['paciente_id', 'clinica_id', 'voucher_id', 'tratamiento_id']) {
+        if (Number(previous[field]) !== Number(values[field])) throw bookingError('program_session_identity_locked', 'Conserva el paciente, programa y tratamientos de esta sesión.');
+      }
+      if (session.consumption_movement_id && values.estado !== previous.estado) throw bookingError('program_session_completed', 'La sesión ya se ha consumido. Revisa su corrección desde el historial antes de cambiarla.');
+      if (session.consumption_movement_id && (new Date(values.inicio).getTime() !== new Date(previous.inicio).getTime() || new Date(values.fin).getTime() !== new Date(previous.fin).getTime())) throw bookingError('program_session_completed', 'La fecha de una sesión consumida forma parte de su historial.');
+      if (!require('../lib/program-booking').programBookingEnabled()) throw bookingError('program_booking_disabled', 'Esta cita necesita el entorno compatible con programas.');
+      if (values.estado !== 'cancelada') {
+        const records = await db.PatientProgramSession.findAll({ where: { voucher_id: session.voucher_id }, order: [['position', 'ASC']], transaction: tx });
+        const appointments = await db.CitaPaciente.findAll({ where: { voucher_id: session.voucher_id, estado: { [db.Sequelize.Op.ne]: 'cancelada' } }, transaction: tx });
+        const series = records.map(record => {
+          const appointment = Number(record.id) === Number(session.id) ? values : appointments.find(row => Number(row.id_cita) === Number(record.appointment_id));
+          return { key: record.session_key, start_at: appointment?.inicio, end_at: appointment?.fin };
+        });
+        const clinic = await db.Clinica.findByPk(values.clinica_id, { transaction: tx });
+        const issues = require('../lib/program-booking').seriesIssues(series, metadataObject(session.snapshot).program_cadence, require('../lib/availability-calendar').resolveClinicTimezone(clinic));
+        if (issues.length) throw bookingError('program_cadence_conflict', 'El cambio no respeta el orden o la pauta del programa.', { issues });
+      }
+    } else if (existing && metadataObject(previous.import_metadata).program_session) {
+      throw bookingError('program_session_replaced', 'Esta cita pertenece al historial de una sesión que ya tiene otra reserva.');
+    }
     // Decide under the appointment row lock, not a stale controller read. An
     // active-to-active status update does not rebook or change its professionals.
     if (stateOnly && existing && previous.estado !== 'cancelada' && values.estado !== 'cancelada') {
-      return persist({ values: { ...previous, estado: values.estado, updated_by: values.updated_by }, existing, transaction: tx, solution: null });
+      const saved = await persist({ values: { ...previous, estado: values.estado, updated_by: values.updated_by }, existing, transaction: tx, solution: null });
+      if (session && values.estado === 'completada') {
+        const voucher = await db.PatientVoucher.findByPk(session.voucher_id, { transaction: tx, lock: tx.LOCK.UPDATE });
+        const result = await require('./patientProgramBooking.service').consumeProgramSession({ db, appointment: saved, voucher, transaction: tx, actorId: values.updated_by });
+        if (!result.consumed && !result.already_consumed) throw bookingError('program_session_not_consumable', 'No se puede descontar esta sesión. No se ha cambiado la asistencia.');
+      }
+      return saved;
     }
     const start = new Date(values.inicio);
     const end = new Date(values.fin);
@@ -76,6 +112,12 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     const previousMetadata = metadataObject(previous.import_metadata);
     const importMetadata = { ...previousMetadata, ...metadataObject(values.import_metadata) };
     delete importMetadata.booking; // A request cannot author a trusted booking snapshot.
+    delete importMetadata.program_session;
+    if (session) importMetadata.program_session = previousMetadata.program_session;
+    if (trustedProgramSession) {
+      if (existing || !transaction || Number(trustedProgramSession.voucher_id) !== Number(values.voucher_id)) throw new Error('program_booking_trusted_context_invalid');
+      importMetadata.program_session = { session_id: String(trustedProgramSession.id), key: trustedProgramSession.session_key };
+    }
     const previousRows = existing ? await db.AppointmentBookingOccupancy.findAll({ where: { appointment_id: existing.id_cita }, transaction: tx }) : [];
     if (previousRows.length && previousMetadata.booking) importMetadata.booking = previousMetadata.booking;
     values.import_metadata = Object.keys(importMetadata).length ? importMetadata : null;
@@ -83,7 +125,12 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     // Existing reservations keep their original booking requirements when the
     // catalog evolves. Editing clinical/history data cannot rewrite that snapshot.
     const snapshot = previousMetadata.booking?.profile;
-    if (snapshot && previousRows.length && Number(previous.tratamiento_id) === Number(values.tratamiento_id)) {
+    if (trustedProgramSession || session) {
+      const frozen = metadataObject((trustedProgramSession || session).snapshot);
+      configuredProfile = normalizeBookingProfile(frozen.booking_profile);
+      if (!configuredProfile) throw bookingError('program_profile_missing', 'Falta el perfil de la sesión comprada.');
+      if (!capabilities.multi && configuredProfile.phases.length > 1) throw bookingError('booking_profile_runtime_unavailable', 'La reserva multicabina todavía no está activada.');
+    } else if (snapshot && previousRows.length && Number(previous.tratamiento_id) === Number(values.tratamiento_id)) {
       configuredProfile = values.estado === 'cancelada' ? normalizeBookingProfile(snapshot)
         : requireOperationalProfile({ activo: true, clinical_config: { booking_profile: normalizeBookingProfile(snapshot) } }, { capabilities });
     } else {
@@ -95,12 +142,13 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     const keys = [
       ...profile.phases.flatMap((phase) => phase.professionals.ids.map((id) => `doctor:${id}`)),
       ...installationIds.map((id) => mapping.keys.get(id)), ...previousRows.map((row) => row.resource_key),
+      ...(values.paciente_id ? [`patient:${values.paciente_id}`] : []),
     ];
     await lockBookingResources({ db, resourceKeys: keys, transaction: tx });
     let solution = null;
     if (values.estado !== 'cancelada') {
-      const context = await loadBookingContext({ db, clinic, profile, start, end, transaction: tx,
-        ignoreAppointmentId: existing?.id_cita, occupancyEnabled: true, installationMapping: mapping });
+      const context = preparedContext || await loadBookingContext({ db, clinic, profile, start, end, transaction: tx,
+        ignoreAppointmentId: existing?.id_cita, occupancyEnabled: true, installationMapping: mapping, patientId: values.paciente_id });
       const existingSelections = previousMetadata.booking?.phases && configuredProfile
         ? Object.fromEntries(previousMetadata.booking.phases.map((phase) => [phase.key, {
           installation_id: phase.installation_id,
@@ -112,7 +160,8 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
           ? { [configuredProfile.phases[0].key]: { doctor_id: values.doctor_id, installation_id: values.instalacion_id } }
           : existingSelections || {});
       solution = configuredProfile ? solveBookingProfile({ profile, start, ...context, selections: chosen }) : solveLegacy(values, context);
-      if (!solution || new Date(solution.end_at).getTime() !== end.getTime()) {
+      const patientConflict = (context.patientBusy || []).some(busy => new Date(busy.start) < end && new Date(busy.end) > start);
+      if (!solution || patientConflict || new Date(solution.end_at).getTime() !== end.getTime()) {
         throw bookingError('booking_unavailable', 'El hueco ya no está disponible o no cumple el perfil del tratamiento. Actualiza las propuestas.', { can_force: false });
       }
       assertPriorityAcknowledgement(solution, priorityAcknowledged);

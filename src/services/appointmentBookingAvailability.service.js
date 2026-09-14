@@ -43,7 +43,7 @@ async function resolveInstallationKeys({ db, clinic, installationIds, transactio
 
 /** Bounded, bulk read model. No patient names, notes, foreign clinic IDs or SQL per candidate. */
 async function loadBookingContext({ db, clinic, profile, start, end, transaction = null, ignoreAppointmentId = null,
-  occupancyEnabled = false, installationMapping = null, dates = null }) {
+  occupancyEnabled = false, installationMapping = null, dates = null, patientId = null }) {
   const { Op } = db.Sequelize;
   const clinicId = Number(clinic.id_clinica);
   const timeZone = resolveClinicTimezone(clinic);
@@ -117,7 +117,11 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
       cabins.get(id).windows.push(...buildWindowsFromHorarios(installation.horarios || [], dow, date, timeZone));
     });
   }
-  return { doctors, installations: cabins, clinicWindows, installationKeys: mapping.keys, mapping, timeZone };
+  const patientBusy = patientId ? await db.CitaPaciente.findAll({ where: {
+    paciente_id: patientId, estado: { [Op.ne]: 'cancelada' }, inicio: { [Op.lt]: end }, fin: { [Op.gt]: start },
+    ...(ignoreAppointmentId ? { id_cita: { [Op.ne]: ignoreAppointmentId } } : {}),
+  }, attributes: ['inicio', 'fin'], transaction }).then(rows => rows.map(row => ({ start: row.inicio, end: row.fin }))) : [];
+  return { doctors, installations: cabins, clinicWindows, installationKeys: mapping.keys, mapping, timeZone, patientBusy };
 }
 
 async function searchTreatmentSlots({ db, clinic, treatmentId, date, days = 1, stepMinutes = 15, limit = 100,
@@ -159,7 +163,8 @@ function solutionsForCalendar({ profile, context, date, days = 1, stepMinutes = 
       if (localTime < fromLocal || (toLocal && localTime >= toLocal)) continue;
       const solution = solveBookingProfile({ profile, start: candidate, ...context, selections });
       const localEnd = solution ? formatLocal(new Date(solution.end_at), timeZone) : '';
-      if (solution && new Date(solution.end_at) <= end && (!toLocal || localEnd <= `${localDate}T${toLocal}`)) slots.push({ ...solution,
+      const patientFree = solution && !(context.patientBusy || []).some(busy => new Date(busy.start) < new Date(solution.end_at) && new Date(busy.end) > candidate);
+      if (patientFree && new Date(solution.end_at) <= end && (!toLocal || localEnd <= `${localDate}T${toLocal}`)) slots.push({ ...solution,
         doctor_id: solution.phases[0].doctor_ids[0], installation_id: solution.phases[0].installation_id,
         start_local: formatLocal(new Date(solution.start_at), timeZone), end_local: formatLocal(new Date(solution.end_at), timeZone),
         start_utc: solution.start_at, end_utc: solution.end_at });

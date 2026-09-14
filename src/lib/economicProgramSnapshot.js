@@ -8,6 +8,8 @@ const stable = (value) => Array.isArray(value) ? value.map(stable) : value && ty
   ? Object.fromEntries(Object.keys(value).sort().filter((key) => !['program_snapshot', 'entitlement_units', 'base', 'total', 'expected_version', 'source_reference'].includes(key)).map((key) => [key, stable(value[key])])) : value;
 const requestHash = (payload) => hash(stable(payload));
 const economicsEnabled = (environment = process.env) => environment.TREATMENT_PROGRAM_ECONOMICS_ENABLED === 'true';
+const { programBookingEnabled, composeAppointmentProfile, normalizeCadence } = require('./program-booking');
+const canonicalHash = require('./cliniccloud-import/adapter').hash;
 function assertIntegrationEnabled(lines = [], { enabled = economicsEnabled() } = {}) {
   if (!enabled && Array.isArray(lines) && lines.some((line) => line?.program_id || line?.program_snapshot)) {
     throw domainError(503, 'program_economics_disabled', 'La integración económica de programas está deshabilitada hasta promocionar todos los entornos compatibles. Puedes preparar la definición en Tratamientos > Programas, pero aún no incorporarla a presupuestos ni bonos.');
@@ -15,8 +17,8 @@ function assertIntegrationEnabled(lines = [], { enabled = economicsEnabled() } =
 }
 function integrationCapabilities({ programsAvailable = false, enabled = economicsEnabled() } = {}) {
   return { program_catalog: enabled && programsAvailable, program_economics_enabled: enabled,
-    program_definitions_preparation_only: true, program_batch_booking: false,
-    program_integration_reason: enabled ? 'program_booking_and_consumption_pending' : 'shared_runtime_compatibility_pending' };
+    program_definitions_preparation_only: !programBookingEnabled(), program_batch_booking: programBookingEnabled(),
+    program_integration_reason: programBookingEnabled() ? null : enabled ? 'program_booking_runtime_pending' : 'shared_runtime_compatibility_pending' };
 }
 
 function catalogItem(program) {
@@ -39,7 +41,7 @@ function snapshot(program) {
     throw domainError(422, 'budget_program_not_sellable', 'El programa debe estar activo y tener su composición completa antes de presupuestarlo.');
   }
   const value = {
-    schema_version: 1, program_id: program.id, program_version: program.version,
+    schema_version: 2, program_id: program.id, program_version: program.version, cadence: normalizeCadence(program.cadence),
     kind: program.kind, name: program.name, currency: 'EUR',
     catalog_total_price: program.total_price, price_semantics: 'gross_tax_included',
     appointments: program.appointments.map((a) => ({
@@ -48,7 +50,21 @@ function snapshot(program) {
       treatments: a.treatments.map((t) => ({ id: t.id, name: t.name, duration_minutes: t.duration_minutes, booking_profile: copy(t.booking_profile) })),
     })),
   };
-  return { ...value, sha256: hash(value) };
+  return { ...value, sha256: canonicalHash(value) };
+}
+
+function operationalSnapshot(value) {
+  const { sha256, ...unsigned } = value || {};
+  if (unsigned.schema_version !== 2 || canonicalHash(unsigned) !== sha256 || !Array.isArray(unsigned.appointments)
+    || !unsigned.appointments.length || unsigned.appointments.length > 120) throw domainError(409, 'program_snapshot_not_operational', 'Actualiza el programa del borrador antes de presentarlo.');
+  normalizeCadence(unsigned.cadence);
+  const keys = new Set();
+  return { ...value, appointments: unsigned.appointments.map(appointment => {
+    if (keys.has(appointment.key)) throw domainError(409, 'program_snapshot_not_operational', 'Las citas del programa deben tener claves únicas.');
+    keys.add(appointment.key);
+    const composed = composeAppointmentProfile(appointment);
+    return { ...appointment, booking_profile: composed.profile, phase_treatments: composed.phase_treatments, duration_minutes: composed.duration_minutes };
+  }) };
 }
 
 // Only a previous SERVER version or the scoped catalog resolver may supply a
@@ -104,7 +120,7 @@ function programPlans({ budget, lines, events = [], vouchers = [] }) {
       name: line.program_snapshot.name, kind: line.program_snapshot.kind,
       snapshot_sha256: line.program_snapshot.sha256, appointment_count: line.program_snapshot.appointments.length,
       purchase_status: included ? 'accepted' : accepted ? 'not_accepted' : 'offered',
-      can_schedule: false, capability_reason: 'program_batch_booking_pending',
+      can_schedule: included && voucher?.status === 'active' && programBookingEnabled(), capability_reason: programBookingEnabled() ? null : 'program_batch_booking_pending',
       // No synthetic reserved/completed state: no program-unit ledger exists yet.
       appointments: line.program_snapshot.appointments.map((a) => ({ ...copy(a), scheduling_status: included ? 'pending_planning' : 'not_accepted' })),
       voucher_id: voucher?.public_id || null };
@@ -120,8 +136,11 @@ function assertFiscalReady({ lines = [], status, fiscalLines = [] }) {
   }
 }
 function assertOperational(lines = []) {
-  if (lines.some((line) => line.program_id || line.program_snapshot)) throw domainError(409, 'program_preparation_only', 'Este presupuesto contiene un programa en preparación. Puedes guardar el borrador, pero no presentarlo, firmarlo ni cobrarlo hasta habilitar la planificación y el consumo de sus citas.');
+  const programs = lines.filter(line => line.program_id || line.program_snapshot);
+  if (!programs.length) return;
+  if (!programBookingEnabled()) throw domainError(409, 'program_preparation_only', 'Este presupuesto contiene un programa en preparación. Puedes guardar el borrador, pero no presentarlo, firmarlo ni cobrarlo hasta habilitar la planificación y el consumo de sus citas.');
+  programs.forEach(line => operationalSnapshot(line.program_snapshot));
 }
 
 module.exports = { catalogItem, snapshot, resolveLines, programPlans, requestHash, assertFiscalReady, assertOperational,
-  economicsEnabled, assertIntegrationEnabled, integrationCapabilities };
+  economicsEnabled, assertIntegrationEnabled, integrationCapabilities, operationalSnapshot };

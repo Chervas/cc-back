@@ -47,9 +47,11 @@ function createTreatmentProgramsService({ db, now = () => new Date(), newId = ()
   }
   function serialize(row, map) {
     const value = plain(row);
-    const normalized = { name: value.name, kind: value.kind, status: value.status, total_price: value.total_price == null ? null : Number(value.total_price), notes: value.notes || null, appointments: decode(value.appointments, []) };
+    const normalized = { name: value.name, kind: value.kind, status: value.status, total_price: value.total_price == null ? null : Number(value.total_price), notes: value.notes || null, cadence: decode(value.cadence, null), appointments: decode(value.appointments, []) };
     const resolved = summarize(normalized, map);
-    return { id: value.public_id, clinic_id: Number(value.clinic_id), ...normalized, appointments: resolved.appointments, version: Number(value.version_number), price_semantics: 'gross_tax_included', currency: 'EUR', summary: resolved.summary, can_schedule: false, purchase_enabled: false, created_at: value.created_at, updated_at: value.updated_at };
+    return { id: value.public_id, clinic_id: Number(value.clinic_id), ...normalized, appointments: resolved.appointments, version: Number(value.version_number), price_semantics: 'gross_tax_included', currency: 'EUR', summary: resolved.summary, can_schedule: false,
+      purchase_enabled: require('../lib/program-booking').programBookingEnabled() && value.status === 'active' && resolved.summary.issues.length === 0,
+      created_at: value.created_at, updated_at: value.updated_at };
   }
   async function scopedRow(id, clinicId, transaction, lock = false) {
     const row = await TreatmentProgram.findOne({ where: { public_id: boundedText(id, 'id', 36, true), clinic_id: clinicId }, transaction, ...(lock ? { lock: transaction.LOCK.UPDATE } : {}) });

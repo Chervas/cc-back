@@ -112,7 +112,7 @@ function loadService({ reserved = [], conflict = false, expiresAt = null, source
     sequelize: { transaction: async (callback) => callback(transaction) },
     PatientVoucher: { findOne: async () => ({ id: 1, public_id: 'offline', clinic_id: 72, patient_id: 1, treatment_id: 3, status: 'active', available_units: 2, expires_at: expiresAt, source_system: sourceSystem }) },
     PatientVoucherMovement: { findAll: async () => [] },
-    Tratamiento: { findByPk: async () => ({ id_tratamiento: 3, nombre: 'Offline treatment', duracion_min: 30 }) },
+    Tratamiento: { findByPk: async () => ({ id_tratamiento: 3, nombre: 'Offline treatment', duracion_min: 30, origen: 'sistema' }) },
     Clinica: { findByPk: async () => ({ configuracion: { timezone: 'Europe/Madrid' } }) },
     DoctorClinica: { findOne: async () => f.input.doctor }, DoctorHorario: {}, DoctorHorarioExcepcion: {},
     Instalacion: { findOne: async () => f.input.installation }, InstalacionHorario: {}, InstalacionBloqueo: {},

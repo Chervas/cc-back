@@ -164,7 +164,7 @@ Contabilidad transversal y portal:
 
 ## Invariantes
 
-### Programas y bonos versionados (corte dev 2026-09-07)
+### Programas y bonos versionados
 
 El catálogo de presupuestos admite `include_programs=1`, pero la integración
 económica está **cerrada por defecto** mediante
@@ -194,17 +194,20 @@ económico habitual sigue disponible y comunica `program_catalog=false`.
 Una selección nueva envía `program_id`, `program_version`, `key` estable y
 `quantity=1`. El precio corresponde al programa/bono completo, no se multiplica
 por sus citas. El backend resuelve y congela composición, nombres, duración y
-perfil en `EconomicBudgetVersion.lines[].program_snapshot` (schema 1 + SHA256),
+perfil en `EconomicBudgetVersion.lines[].program_snapshot` (schema 2 + SHA256
+canónico, independiente del orden de claves JSON de MySQL),
 sin aceptar snapshots enviados por el cliente. Una edición posterior del
 catálogo no modifica presupuestos ni firmas existentes. Un borrador conserva
 su snapshot salvo sustitución explícita de referencia/versión.
 
-Incluso tras habilitar la integración económica, el código preparado permite
-únicamente borradores con programas. Backend y UI bloquean su presentación,
-solicitud de firma y aceptación mientras reserva
-conjunta y consumo por unidad no sean operativos. Los borradores no admiten
-cobros ni saldo por las reglas económicas existentes. No se puede vender un
-programa que luego no pueda consumirse. `purchase_enabled=false` sigue vigente.
+La operación completa exige cuatro gates literales `true`: el económico y
+`TREATMENT_PROGRAM_BOOKING_ENABLED`, `BOOKING_PROFILES_ENABLED`,
+`BOOKING_MULTI_RESOURCE_ENABLED`. Si falta alguno, presentación/firma/aceptación
+de programas permanecen bloqueadas. Los snapshots preparatorios schema 1 no se
+convierten implícitamente en compras operativas: hay que actualizar la referencia
+del borrador antes de presentarlo. Los borradores no admiten cobros ni saldo.
+En el runtime general siguen cerrados; la QA real aislada solo admite clínica
+sintética 82 y no habilita operación del cliente ni mensajes.
 
 El presupuesto usa su idempotencia existente `source_reference` y una huella
 de solicitud: reintentos idénticos producen un solo presupuesto; otra persona,
@@ -213,16 +216,55 @@ la referencia. `expected_version` protege las ediciones concurrentes.
 
 `PatientVouchers` sigue siendo el único libro de unidades: una línea genera N
 citas/unidades y conserva el importe global, con `source_system=treatment_program`.
-La lógica preparatoria de aceptación activa solo las líneas aceptadas y
-**no registra ningún cobro**, pero continúa detrás del bloqueo anterior.
+La aceptación activa solo las líneas aceptadas y **no registra ningún cobro**;
+la reserva vuelve a comprobar el evento canónico de aceptación parcial.
 Retirar una línea del borrador cancela su derecho pendiente conservando la fila.
 
-El workspace devuelve `program_plans` con la composición congelada y el estado
-de aceptación. La UI ofrece `Ver citas incluidas`. **Reserva conjunta y consumo
-por unidad aún no están habilitados**: `can_schedule=false`; el planificador de
-bonos anterior rechaza estas ventas, igual que su consumo manual/por asistencia,
-hasta disponer de un ledger de citas del programa con unicidad por unidad y
-writer compatible. No hay promesa de huecos reservados ni mensajes encolados.
+El workspace devuelve `program_plans`, composición congelada, aceptación y
+`voucher_id`; la UI ofrece `Ver citas incluidas` y, cuando las capacidades lo
+permiten, `Proponer fechas`. Desde Bonos del paciente, `Planificar citas` abre
+el mismo diálogo operativo. El planificador antiguo y el descuento manual de
+bonos rechazan programas: no son una vía alternativa de reserva/consumo.
+
+`PatientProgramSessions` identifica cada unidad por `(voucher_id, session_key)`;
+conserva snapshot, cita actual y movimiento de consumo. Una sesión con varias
+fases tiene **una sola CitaPaciente** y se descuenta una sola vez al completarla,
+en la misma transacción que la asistencia y mediante `PatientVoucherMovement`.
+Cancelar libera la reserva sin consumir. Volver a reservar crea otra cita y
+conserva la cancelada como historia; no se puede restaurar la sustituida ni
+mover/deshacer una sesión consumida mediante una edición ordinaria.
+`PatientProgramBookingRequests` guarda recibos idempotentes por compra/solicitud.
+DDL aditiva: `20260914070000-create-patient-program-sessions.js`, también añade
+`TreatmentPrograms.cadence`. No eliminar estas tablas si contienen historia.
+
+Rutas autenticadas bajo `/api/economics/vouchers/:voucherId`:
+
+- `GET /program-plan`: unidades pendientes/reservadas/completadas y capacidades.
+- `POST /program-proposals`: consulta acotada, sin reservar; `from_date`,
+  `days` (1–180), hasta 30 `session_keys`; `fixed_sessions` conserva propuestas
+  al pedir día anterior/siguiente, sin convertirlas en reservas.
+- `POST /program-appointments`: `request_key`, `snapshot_sha256` y hasta 30
+  sesiones con inicio UTC, selecciones por fase y aceptación explícita del
+  profesional alternativo. Bloquea compra/recursos/paciente y revalida en una
+  transacción READ COMMITTED: todas las citas elegidas o ninguna. Repetir la
+  misma solicitud devuelve el recibo; cambiarla con la misma clave da 409.
+
+Los endpoints exigen scope de clínica, `patients.sensitive.view`, lectura o
+edición del paciente y lectura o gestión de agenda según la operación. No
+aceptan composición, clínica ni precio proporcionados por el navegador como
+autoridad. La consulta usa un contexto agregado de disponibilidad, máximo 100
+recursos distintos por lote, sin SQL por cada hora candidata.
+
+Las fases suman exactamente las duraciones de los tratamientos en su orden,
+con cabinas alternativas dentro de cada fase. La pauta semanal fija un máximo
+por semana civil y separación mínima en días locales; no garantiza llenar esa
+frecuencia. Los `offset_days` son objetivos para proponer fechas, no intervalos
+clínicos rígidos al confirmar. Cambios de catálogo no alteran una compra.
+
+Las citas nuevas conservan HOLD y las tres supresiones de notificación. Tras
+confirmar se prepara el paquete canónico de consentimientos, sin enviarlo ni
+firmarlo. Un fallo documental posterior al commit devuelve las citas y
+`documentation_pending`, nunca un falso fallo total que induzca otra reserva.
 
 El precio del catálogo nuevo es IVA incluido. La emisión fiscal de un
 presupuesto que contiene `program_snapshot` queda explícitamente bloqueada hasta
@@ -230,8 +272,10 @@ configurar el desglose aprobado; no se añade un 21% supuesto ni se cambia el
 normalizador fiscal del resto de conceptos. Se permite conservar un borrador
 fiscal sin añadir IVA al precio final.
 
-Pruebas sin DB:
-`node --test src/scripts/tests/economic_program_snapshot.test.js`.
+Pruebas sin DB: `economic_program_snapshot.test.js` y `program_booking.test.js`.
+QA SQL/HTTP sintética: `src/scripts/program-booking-dev-qa.js`; exige directorio
+DEV y opt-in `QA_PROGRAM_DEMO_WRITES=82`, valida la clínica antes de escribir,
+no carga `app.js` ni jobs. Evidencias y rollback en la bitácora central frontend.
 
 - Las mutaciones de presupuesto/cobro requieren `patients.edit`; plantillas,
   `clinic.settings.edit`.

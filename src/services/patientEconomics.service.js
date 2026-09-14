@@ -967,7 +967,7 @@ async function createBudget({ patientIdentifier, clinicId, actorId, payload }) {
   economicPrograms.assertIntegrationEnabled(payload.lines || payload.lineas || []);
   const { patient, clinic } = await loadContext(patientIdentifier, clinicId);
   const requestedStatus = cleanString(payload.status || 'draft', 30).toLowerCase();
-  if (requestedStatus !== 'draft') economicPrograms.assertOperational(payload.lines || payload.lineas || []);
+  if (requestedStatus !== 'draft' && !economicPrograms.integrationCapabilities().program_batch_booking) economicPrograms.assertOperational(payload.lines || payload.lineas || []);
   const sourceSystem = cleanString(payload.source_system, 40) || 'clinicaclick';
   if ((payload.lines || []).some((line) => line.program_id) && !cleanString(payload.source_reference, 120)) throw domainError(400, 'budget_program_request_key_required', 'Falta la clave de solicitud para guardar el programa sin duplicarlo.');
   const sourceReference = cleanString(payload.source_reference, 120) || null;
@@ -1026,6 +1026,7 @@ async function createBudget({ patientIdentifier, clinicId, actorId, payload }) {
       transaction,
       changeSummary: 'Versión inicial',
     });
+    if (requestedStatus !== 'draft') economicPrograms.assertOperational(parseJson(version.lines, []));
     await EconomicBudgetEvent.create({
       budget_id: budget.id,
       version_number: 1,
@@ -2591,7 +2592,7 @@ async function consumeVoucherForCompletedAppointment({ appointmentId, actorId })
       lock: transaction.LOCK.UPDATE,
     });
     if (!voucher) return { consumed: false, reason: 'voucher_not_found' };
-    if (voucher.source_system === 'treatment_program') return { consumed: false, reason: 'program_unit_consumption_pending' };
+    if (voucher.source_system === 'treatment_program') return require('./patientProgramBooking.service').consumeProgramSession({ db: require('../../models'), appointment, voucher, transaction, actorId });
 
     const existingMovement = await PatientVoucherMovement.findOne({
       where: {
@@ -3396,7 +3397,7 @@ function serializeEvent(event) {
   };
 }
 
-function serializeBudget(budget, version, events, payments, walletApplied = 0, signatureRequests = []) {
+function serializeBudget(budget, version, events, payments, walletApplied = 0, signatureRequests = [], programVouchers = []) {
   const paid = roundMoney(payments
     .filter((payment) => payment.status === 'confirmed')
     .reduce((sum, payment) => sum + paymentAppliedToBudget(payment), 0) + walletApplied);
@@ -3420,8 +3421,8 @@ function serializeBudget(budget, version, events, payments, walletApplied = 0, s
     created_at: budget.created_at,
     updated_at: budget.updated_at,
     current: serializedVersion,
-    program_preparation_only: serializedVersion.lines.some((line) => !!line.program_snapshot),
-    program_plans: economicPrograms.programPlans({ budget, lines: serializedVersion.lines, events }),
+    program_preparation_only: serializedVersion.lines.some((line) => !!line.program_snapshot) && !economicPrograms.integrationCapabilities().program_batch_booking,
+    program_plans: economicPrograms.programPlans({ budget, lines: serializedVersion.lines, events, vouchers: programVouchers }),
     events: events.map(serializeEvent),
     signature_requests: signatureRequests.map((request) => serializeBudgetSignatureRequest(request)),
     financial_summary: {
@@ -3478,7 +3479,8 @@ function serializeVoucher(voucher, movements) {
     expires_at: voucher.expires_at,
     source_system: voucher.source_system,
     source_reference: voucher.source_reference,
-    ...(voucher.source_system === 'treatment_program' ? { can_schedule: false, capability_reason: 'program_batch_booking_pending' } : {}),
+    ...(voucher.source_system === 'treatment_program' ? { can_schedule: voucher.status === 'active' && economicPrograms.integrationCapabilities().program_batch_booking,
+      capability_reason: economicPrograms.integrationCapabilities().program_batch_booking ? null : 'program_batch_booking_pending' } : {}),
     movements: movements.map((movement) => ({
       id: String(movement.id),
       movement_type: movement.movement_type,
@@ -3609,7 +3611,8 @@ async function getWorkspace({ patientIdentifier, clinicId }) {
           eventsByBudget.get(String(budget.id)) || [],
           paymentsByBudget.get(String(budget.id)) || [],
           walletAppliedByBudget.get(String(budget.id)) || 0,
-          signatureRequestsByBudget.get(String(budget.id)) || []
+          signatureRequestsByBudget.get(String(budget.id)) || [],
+          vouchers.filter(voucher => String(voucher.budget_id) === String(budget.id))
         )
         : null;
     })

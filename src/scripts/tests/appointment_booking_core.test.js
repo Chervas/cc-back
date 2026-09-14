@@ -151,7 +151,7 @@ test('two simultaneous writers for an empty slot serialize on anchors, then one 
   assert.equal(f.state.occupancies.length, 2);
   assert.equal(f.state.commits, 1);
   assert.equal(f.state.rollbacks, 1);
-  assert.deepEqual(f.state.locks.filter(([tx]) => tx === 1).map(([, key]) => key), ['doctor:5', 'installation:9']);
+  assert.deepEqual(f.state.locks.filter(([tx]) => tx === 1).map(([, key]) => key), ['doctor:5', 'installation:9', 'patient:1']);
 });
 
 test('occupancy failure rolls the canonical appointment back too; no partial reservation', async () => {
