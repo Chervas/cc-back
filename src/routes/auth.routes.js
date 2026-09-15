@@ -7,6 +7,7 @@ router.post('/reset-password', authController.resetPassword);
 router.post('/sign-in', authController.signIn);
 router.post('/email-code/verify', authController.verifyEmailCode);
 router.post('/email-code/resend', authController.resendEmailCode);
+router.post('/email-code/step-up', require('./auth.middleware'), authController.beginEmailStepUp);
 router.post('/sign-in-with-token', authController.signInWithToken);
 router.post('/sign-up', authController.signUp);
 router.post('/unlock-session', authController.unlockSession);
