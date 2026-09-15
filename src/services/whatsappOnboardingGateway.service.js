@@ -21,8 +21,11 @@ function request(raw, name) {
 }
 const actor = input => Object.fromEntries(['requestId','userId','sessionRef','sessionExpiresAt'].map(k => [k, input[k]]));
 function project(local, remote, state) {
-  const status = local.status === 'cancelled' || remote.status === 'aborted' ? 'cancelled' : local.status === 'expired' ? 'expired'
-    : remote.expired ? 'expired' : remote.accessBlocked || remote.configurationChanged ? 'blocked'
+  // A persisted candidate remains an authorization receipt after the short
+  // OAuth exchange window ends. It is never permission to send or re-exchange.
+  const status = local.status === 'cancelled' || remote.status === 'aborted' ? 'cancelled'
+    : remote.status === 'staged' ? remote.accessBlocked || remote.configurationChanged ? 'blocked' : 'awaiting_activation'
+      : local.status === 'expired' || remote.expired ? 'expired' : remote.accessBlocked || remote.configurationChanged ? 'blocked'
       : ({ awaiting: local.status === 'claimed' ? 'processing' : 'awaiting_authorization', exchanging: 'processing', staging: 'processing',
         staged: 'awaiting_activation', interrupted: 'interrupted', aborted: 'cancelled' })[remote.status];
   const result = { requestId: local.requestId, authorizationStatus: status, connected: false,

@@ -129,3 +129,37 @@ test('Configured gateway rejects insecure files, foreign metadata and disabled e
   }
   await assert.rejects(configuredClient({ environment: () => env }).begin(context(g)), { code: 'whatsapp_onboarding_disabled' });
 });
+
+test('Gateway presents a completed receipt after OAuth expiry and restart while explicit cancellation remains authoritative', async t => {
+  const g = brokerForGateway(t); const row = context(g); await g.client.begin(row); await g.client.finish(row, finish(row));
+  let cancelled = false; const local = () => ({ ...row, status: cancelled ? 'cancelled' : Date.parse(row.expiresAt) <= g.f.now() ? 'expired' : 'claimed' });
+  const states = { status: async () => local(), cancel: async () => { cancelled = true; return local(); } };
+  const service = require('../../services/whatsappOnboardingGateway.service').createService({ states, broker: g.client, guard: () => {} });
+  const actor = { requestId: row.requestId, userId: 501, sessionRef: randomUUID(), sessionExpiresAt: Math.floor((g.f.now() + 3600000) / 1000) };
+  g.f.state.clock = Date.parse(row.expiresAt) + 1000; g.f.restart();
+  const before = { codes: g.f.state.codes, puts: g.f.state.puts, graph: g.f.state.httpCalls.length, aws: g.f.state.awsCalls.length };
+  const result = await service.status(actor);
+  assert.equal(result.authorizationStatus, 'awaiting_activation'); assert.equal(result.expiresAt, row.expiresAt);
+  assert.deepEqual(result.selected, { wabaId: '301', phoneId: '401' }); assert.equal(result.connected, false);
+  assert.equal(result.pending, true); assert.equal(result.cancellationConfirmed, false); assert(!Object.hasOwn(result, 'authorization'));
+  assert.deepEqual({ codes: g.f.state.codes, puts: g.f.state.puts, graph: g.f.state.httpCalls.length, aws: g.f.state.awsCalls.length }, before);
+  const aborted = await service.cancel(actor);
+  assert.equal(aborted.authorizationStatus, 'cancelled'); assert.equal(aborted.cancellationConfirmed, true); assert.equal(aborted.selected, null);
+  assert.equal((await service.status(actor)).authorizationStatus, 'cancelled');
+  assert(g.f.records.get(g.f.binding.secretArn).has(row.requestId)); // Cancellation preserves evidence and stored versions.
+});
+
+test('Gateway never labels an expired completed receipt authorized when access or configuration is blocked', async t => {
+  for (const reason of ['access', 'configuration']) {
+    const g = brokerForGateway(t); const row = context(g); await g.client.begin(row); await g.client.finish(row, finish(row));
+    g.f.state.clock = Date.parse(row.expiresAt) + 1000;
+    if (reason === 'access') g.f.current.store.db.prepare("UPDATE connections SET state='blocked' WHERE ref=?").run(g.f.binding.connectionRef);
+    else g.state.after = (command, result) => { result.data.configurationChanged = true; return result; };
+    const service = require('../../services/whatsappOnboardingGateway.service').createService({
+      states: { status: async () => ({ ...row, status: 'expired' }) }, broker: g.client, guard: () => {} });
+    const result = await service.status({ requestId: row.requestId, userId: 501, sessionRef: randomUUID(), sessionExpiresAt: 1900000000 });
+    assert.equal(result.authorizationStatus, 'blocked', reason); assert.equal(result.selected, null);
+    assert.equal(result.connected, false); assert.equal(result.pending, false);
+    assert.equal(g.f.state.codes, 1); assert.equal(g.f.state.puts, 1);
+  }
+});

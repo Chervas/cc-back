@@ -174,3 +174,37 @@ test('Restart after interrupted transport reports uncertainty and never resubmit
   assert.equal(row(f, flow).state, 'exchanging'); f.restart(); assert.equal((await f.status(flow)).data.status, 'exchanging');
   await assert.rejects(f.finish(flow), { code: 'oauth_flow_interrupted' }); assert.equal(f.state.codes, 1); assert.equal(f.state.puts, 0);
 });
+
+test('A completed receipt survives OAuth expiry without another begin, exchange, credential write or automatic abort', async t => {
+  const f = fixture(t); const flow = await f.begin(); await f.finish(flow);
+  const calls = { graph: f.state.httpCalls.length, aws: f.state.awsCalls.length, codes: f.state.codes, puts: f.state.puts };
+  f.state.clock = flow.payload.expiresAt + 1000; f.restart();
+  const result = (await f.status(flow)).data;
+  assert.equal(result.status, 'staged'); assert.equal(result.expired, true); assert.equal(result.accessBlocked, false);
+  assert.equal(result.candidate.versionId, flow.flowId); assert.equal(result.candidate.phoneId, '401'); assert.equal(result.connected, false);
+  assert.equal(row(f, flow).state, 'staged');
+  await assert.rejects(f.finish(flow), { code: 'oauth_flow_interrupted' });
+  await assert.rejects(f.begin(), { code: 'oauth_flow_busy' });
+  assert.deepEqual({ graph: f.state.httpCalls.length, aws: f.state.awsCalls.length, codes: f.state.codes, puts: f.state.puts }, calls);
+  assert.equal((await f.abort(flow, f.current, true)).data.status, 'aborted');
+  assert.equal((await f.status(flow)).data.candidate, null);
+});
+
+test('Expired OAuth receipts still honor credential expiry, configuration changes, scope revocation and connection blocks', async t => {
+  for (const reason of ['credential', 'configuration', 'revocation', 'connection']) {
+    const f = fixture(t);
+    if (reason === 'credential') f.state.afterGraph = (request, response) => {
+      if (request.action === 'inspect') response.data.expires_at = Math.floor((f.now() + 660000) / 1000);
+      return response;
+    };
+    const flow = await f.begin(); await f.finish(flow); f.state.clock = flow.payload.expiresAt + 70000;
+    let instance = f.current;
+    if (reason === 'configuration') {
+      const policy = structuredClone(f.policy); policy.connections[0].whatsappOnboarding.configId = '999'; instance = f.make(undefined, policy);
+    } else if (reason === 'revocation') await f.execute(C.REVOKE, {}, {}, true);
+    else if (reason === 'connection') f.current.store.db.prepare("UPDATE connections SET state='blocked' WHERE ref=?").run(f.binding.connectionRef);
+    const result = (await f.status(flow, instance)).data;
+    assert.equal(result.status, 'staged'); assert.equal(result.expired, true); assert.equal(result.accessBlocked, true, reason);
+    assert.equal(result.connected, false); assert.equal(f.state.codes, 1); assert.equal(f.state.puts, 1);
+  }
+});

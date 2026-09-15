@@ -16,9 +16,9 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
     if (configuration && row.config_digest !== C.fingerprint(binding)) fail('idempotency_conflict');
     return row;
   }
-  function active(row, signal) {
+  function active(row, signal, { completedReceipt = false } = {}) {
     if (closed || signal?.aborted) fail('provider_timeout');
-    if (row.state === 'aborted' || row.expires_at <= now()) fail('oauth_flow_interrupted');
+    if (row.state === 'aborted' || row.expires_at <= now() && !(completedReceipt && row.state === 'staged')) fail('oauth_flow_interrupted');
     if (row.credential_metadata) {
       const metadata = JSON.parse(row.credential_metadata);
       if ([metadata.expiresAt, metadata.dataAccessExpiresAt].some(t => t !== null && t <= now())) fail('credential_revoked');
@@ -35,7 +35,10 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
   function projection(row, binding) {
     const observedPhone = store.db.prepare('SELECT observation, observed_at FROM whatsapp_onboarding_phone_observations WHERE flow_id=?').get(row.id);
     const configChanged = row.config_digest !== C.fingerprint(binding); let blocked = configChanged;
-    try { active(row); } catch { blocked = true; }
+    // A completed receipt outlives the one-use OAuth window. This read-only
+    // projection still checks credential expiry, revocation and every block;
+    // begin/finish/confirmation keep the strict authorization deadline.
+    try { active(row, undefined, { completedReceipt: row.state === 'staged' }); } catch { blocked = true; }
     return { flowId: row.id, status: row.state, expiresAt: row.expires_at, expired: row.expires_at <= now(),
       scopeKey: row.asset.slice('wa-enroll:'.length), scopeDigest: row.scope_digest,
       clinicCount: row.clinic_count, clinicSetDigest: row.clinic_digest, configurationChanged: configChanged,
