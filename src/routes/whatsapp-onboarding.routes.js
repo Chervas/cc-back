@@ -5,7 +5,7 @@ const gateway = require('../services/whatsappOnboardingGateway.service');
 const { assertGateway } = require('../lib/whatsappOnboardingBrokerClient');
 const S = require('../services/whatsappAuthorizationState.contract');
 const ORIGINS = new Set(['https://app.clinicaclick.com', 'https://crm.clinicaclick.com', 'https://autenticacion.clinicaclick.com']);
-function createRouter({ service = gateway, authenticate = auth, guard = assertGateway } = {}) {
+function createRouter({ service = gateway, listing = require('../services/whatsappAuthorizationListing.service'), authenticate = auth, guard = assertGateway } = {}) {
   const router = express.Router({ strict: true });
   router.use((req, res, next) => {
     res.set('Cache-Control', 'no-store'); res.set('Referrer-Policy', 'no-referrer'); res.set('X-Content-Type-Options', 'nosniff'); next();
@@ -20,7 +20,7 @@ function createRouter({ service = gateway, authenticate = auth, guard = assertGa
     try {
       guard();
       if (!ORIGINS.has(req.get('origin')) || req.get('x-whatsapp-onboarding') !== '1') S.fail('whatsapp_authorization_forbidden', 403);
-      if (req.method !== 'POST' || !['/begin','/finish','/status','/cancel'].includes(req.path) || req.originalUrl.includes('?')) S.fail();
+      if (req.method !== 'POST' || !['/begin','/finish','/status','/cancel','/authorizations'].includes(req.path) || req.originalUrl.includes('?')) S.fail();
       if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(req.get('content-type') || '') || req.get('content-encoding')) {
         return res.status(415).json({ error: { code: 'whatsapp_onboarding_json_required' } });
       }
@@ -30,6 +30,13 @@ function createRouter({ service = gateway, authenticate = auth, guard = assertGa
   router.use(authenticate);
   // Mounted before the application's general parser; do not retain rawBody.
   router.use(express.json({ limit: '8kb', inflate: false, strict: true, type: 'application/json' }));
+  router.post('/authorizations', async (req, res, next) => {
+    try {
+      S.exact(req.body, ['scope']);
+      const result = await listing.list({...req.body,userId:req.userData?.userId,sessionRef:req.authSession?.id,sessionExpiresAt:req.authSession?.expiresAt});
+      res.json(result);
+    } catch (error) { next(error); }
+  });
   for (const name of ['begin','finish','status','cancel']) router.post('/' + name, async (req, res, next) => {
     try {
       const keys = ['requestId', ...(name === 'begin' ? ['scope'] : name === 'finish' ? ['state','code','wabaId','phoneId'] : [])];

@@ -84,4 +84,4 @@ function createService({ states = require('./whatsappAuthorizationState.service'
   }
   return Object.freeze(Object.fromEntries(['begin','finish','status','cancel'].map(name => [name, input => run(name, input)])));
 }
-module.exports = { createService, safe, ...createService() };
+module.exports = { createService, safe, project, ...createService() };
