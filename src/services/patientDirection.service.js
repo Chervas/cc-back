@@ -3,6 +3,7 @@
 const { Op } = require('sequelize');
 const db = require('../../models');
 const whatsappService = require('./whatsapp.service');
+const { isWhatsappRoutingConfigAvailable } = require('../lib/whatsapp-channel-role');
 const { queues } = require('./queue.service');
 const { isGlobalAdmin } = require('../lib/role-helpers');
 
@@ -927,7 +928,7 @@ async function queueHandoff(assignmentOrId) {
     assignment.clinic_phone_asset_id,
     { clinicId: assignment.clinic_id }
   );
-  if (!clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
+  if (!isWhatsappRoutingConfigAvailable(clinicConfig)) {
     await assignment.update({ handoff_state: 'failed' });
     await recordEvent(assignment, 'handoff_failed', { payload: { reason: 'clinic_whatsapp_unavailable' } });
     return { queued: false, reason: 'clinic_whatsapp_unavailable' };
@@ -1348,7 +1349,7 @@ async function sendOldNumberNotice(assignmentOrId) {
       raw: true,
     }),
   ]);
-  if (!directorConfig?.phoneNumberId || !directorConfig?.accessToken || !assignment.conversation?.contact_id) {
+  if (!isWhatsappRoutingConfigAvailable(directorConfig) || !assignment.conversation?.contact_id) {
     await assignment.update({ old_number_notice_state: 'failed' });
     return { sent: false, reason: 'director_whatsapp_unavailable' };
   }

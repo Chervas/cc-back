@@ -120,7 +120,10 @@ function selectWhatsappPhoneAsset({
   if (!routing.purposes.includes(normalizedPurpose)) return primary;
 
   const health = summarizeHealth(secondary) || {};
-  const secondaryCanSend = Boolean(secondary.waAccessToken && secondary.phoneNumberId)
+  const broker = secondary.whatsappAuthorizedBinding;
+  const secondaryCanSend = Boolean(secondary.phoneNumberId && (broker
+    ? broker.sendEnabled === true && broker.assetId === secondary.id && broker.phoneId === secondary.phoneNumberId
+    : secondary.waAccessToken))
     && health.can_send !== false;
   if (!secondaryCanSend && routing.unavailableAction === 'fallback_primary') {
     return primary;
@@ -132,7 +135,17 @@ function selectWhatsappPhoneAsset({
   };
 }
 
+function isWhatsappRoutingConfigAvailable(config) {
+  if (!config || config.routingUnavailable === true || !config.phoneNumberId) return false;
+  const binding = config.authorizedBroker;
+  if (binding) return binding.sendEnabled === true && Number.isInteger(binding.clinicId) && binding.clinicId > 0
+    && binding.clinicId === Number(config.clinicId || config.clinicaId) && binding.assetId === Number(config.originId)
+    && binding.phoneId === config.phoneNumberId && binding.wabaId === config.wabaId;
+  return Boolean(config.accessToken);
+}
+
 module.exports = {
+  isWhatsappRoutingConfigAvailable,
   WHATSAPP_CHANNEL_ROLES,
   WHATSAPP_SECONDARY_PURPOSES,
   WHATSAPP_SECONDARY_UNAVAILABLE_ACTIONS,

@@ -40,7 +40,8 @@ const {
 const {
   extractWhatsappTemplateDisplayButtons,
 } = require('../lib/whatsapp-template-display');
-const { resolveWhatsappChannelRole } = require('../lib/whatsapp-channel-role');
+const { resolveWhatsappChannelRole, isWhatsappRoutingConfigAvailable } = require('../lib/whatsapp-channel-role');
+const whatsappAuthorizedBroker = require('../lib/whatsappAuthorizedBrokerClient');
 
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const FlowExecutionV2 = db.FlowExecutionV2;
@@ -2775,6 +2776,12 @@ async function resolveSpecificSenderConfig({ senderOriginId, clinicId }) {
     throw new Error('whatsapp_sender_origin_missing');
   }
 
+  if (whatsappAuthorizedBroker.bindingsForClinic(Number(clinicId)).some(binding => binding.assetId === originId)) {
+    const authorized = await whatsappService.getConfigByAssetId(originId, { clinicId });
+    if (!authorized?.authorizedBroker) throw new Error('whatsapp_sender_origin_missing_credentials');
+    return authorized;
+  }
+
   const origin = await ClinicMetaAsset.findByPk(originId, {
     attributes: [
       'id',
@@ -2836,7 +2843,7 @@ async function resolveWhatsAppSenderConfig({ config, context, clinicId }) {
       senderOriginId,
       clinicId,
     });
-    if (!specific?.accessToken || !specific?.phoneNumberId) {
+    if (!isWhatsappRoutingConfigAvailable(specific)) {
       throw new Error('whatsapp_sender_origin_missing_credentials');
     }
     return {
@@ -2890,7 +2897,7 @@ async function resolveWhatsAppSenderConfig({ config, context, clinicId }) {
   if (clinicConfig?.routingUnavailable === true) {
     throw new Error('whatsapp_routing_unavailable');
   }
-  if (!clinicConfig?.accessToken || !clinicConfig?.phoneNumberId) {
+  if (!isWhatsappRoutingConfigAvailable(clinicConfig)) {
     throw new Error('whatsapp_config_missing');
   }
 
@@ -2983,7 +2990,7 @@ async function resolveScheduledWhatsappSenderConfig({ metadata, clinicId }) {
       ? assignment.director_phone_asset_id
       : assignment.clinic_phone_asset_id;
     const patientDirectionConfig = await whatsappService.getConfigByAssetId(assetId, { clinicId });
-    if (!patientDirectionConfig?.accessToken || !patientDirectionConfig?.phoneNumberId) {
+    if (!isWhatsappRoutingConfigAvailable(patientDirectionConfig)) {
       throw new Error('patient_direction_sender_unavailable');
     }
     return assignment.status === 'active'
@@ -2993,7 +3000,7 @@ async function resolveScheduledWhatsappSenderConfig({ metadata, clinicId }) {
   const senderOriginId = toIntOrNull(metadata?.sender_origin_id);
   if (senderOriginId) {
     const specific = await resolveSpecificSenderConfig({ senderOriginId, clinicId });
-    if (!specific?.accessToken || !specific?.phoneNumberId) {
+    if (!isWhatsappRoutingConfigAvailable(specific)) {
       throw new Error('whatsapp_sender_origin_missing_credentials');
     }
     return assertSnapshotMatch(specific);
@@ -3001,6 +3008,13 @@ async function resolveScheduledWhatsappSenderConfig({ metadata, clinicId }) {
 
   const scheduledPhoneNumberId = expectedPhoneNumberId;
   if (scheduledPhoneNumberId) {
+    const authorized = whatsappAuthorizedBroker.bindingsForClinic(Number(clinicId))
+      .find(binding => binding.phoneId === scheduledPhoneNumberId);
+    if (authorized) {
+      const config = await resolveSpecificSenderConfig({ senderOriginId: authorized.assetId, clinicId });
+      if (!isWhatsappRoutingConfigAvailable(config)) throw new Error('whatsapp_config_missing');
+      return assertSnapshotMatch(config);
+    }
     const originalAsset = await ClinicMetaAsset.findOne({
       where: {
         assetType: 'whatsapp_phone_number',
@@ -3015,14 +3029,14 @@ async function resolveScheduledWhatsappSenderConfig({ metadata, clinicId }) {
       throw new Error('whatsapp_sender_snapshot_unavailable');
     }
     const specific = await resolveSpecificSenderConfig({ senderOriginId: originalAsset.id, clinicId });
-    if (!specific?.accessToken || !specific?.phoneNumberId) {
+    if (!isWhatsappRoutingConfigAvailable(specific)) {
       throw new Error('whatsapp_sender_origin_missing_credentials');
     }
     return assertSnapshotMatch(specific);
   }
 
   const clinicConfig = await whatsappService.getClinicConfig(clinicId);
-  if (!clinicConfig?.accessToken || !clinicConfig?.phoneNumberId) {
+  if (!isWhatsappRoutingConfigAvailable(clinicConfig)) {
     throw new Error('whatsapp_config_missing');
   }
   return assertSnapshotMatch(clinicConfig);
@@ -3050,6 +3064,7 @@ async function enqueueAutomationWhatsappTransport({
 
   // El snapshot y el id determinista se guardan antes de publicar el job. Asi
   // un worker rapido nunca puede ser pisado de sent a pending por el productor.
+  whatsappAuthorizedBroker.assertMessageEligible(msg);
   await msg.update({
     status: 'pending',
     metadata: {
@@ -4451,6 +4466,7 @@ async function handleSendWhatsapp(node, context, runtime) {
       templateParams,
       templateComponents,
       clinicConfig: senderData.clinic_config,
+      healthContext: { source: 'flow_engine_v2', messageId: msg.id },
     });
 
     await msg.update({
