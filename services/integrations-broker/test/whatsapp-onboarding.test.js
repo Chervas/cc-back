@@ -2,6 +2,21 @@
 const test = require('node:test'); const assert = require('node:assert/strict'); const { randomUUID } = require('node:crypto');
 const { fixture, TOKEN, APP } = require('./whatsapp-onboarding-fixture.cjs'); const C = require('../src/whatsapp-onboarding-contract');
 const row = (f, flow) => f.current.store.db.prepare('SELECT * FROM whatsapp_onboarding_flows WHERE id=?').get(flow.flowId);
+test('Minimal Embedded Signup response still requires independent app, grant and phone verification', async t => {
+  const f = fixture(t); f.state.codeResponse = { access_token: TOKEN };
+  const flow = await f.begin(); const result = await f.finish(flow);
+  assert.equal(result.data.status, 'staged'); assert.equal(result.data.connected, false);
+  assert.deepEqual(f.state.httpCalls.map(c => c.action), ['inspect', 'phones', 'phone_state']);
+  assert.equal(f.state.codes, 1); assert.equal(f.state.puts, 1);
+  await f.abort(flow); const denied = await f.begin();
+  f.state.afterGraph = (req, response) => { if (req.action === 'inspect') response.data.scopes.push('ads_management'); return response; };
+  await assert.rejects(f.finish(denied), { code: 'oauth_credentials_incomplete' });
+  assert.equal(f.state.puts, 1); assert.equal(row(f, denied).state, 'interrupted');
+  const audit = f.current.store.db.prepare('SELECT event FROM audit_outbox').all().map(r => JSON.parse(r.event));
+  assert(audit.some(e => e.correlationId === denied.flowId && e.reason === 'whatsapp_failed_grant_inspection'));
+  for (const secret of [TOKEN, APP, denied.code]) assert(!JSON.stringify(audit).includes(secret));
+  await assert.rejects(f.finish(denied), { code: 'oauth_flow_interrupted' }); assert.equal(f.state.codes, 2);
+});
 test('WABA-only coexistence stages the unique verified phone and preserves the original selection across restart', async t => {
   const f = fixture(t); const flow = await f.begin(); const result = await f.finish(flow, { phoneId: null });
   assert.equal(result.data.candidate.phoneId, '401'); assert.equal(result.data.connected, false);

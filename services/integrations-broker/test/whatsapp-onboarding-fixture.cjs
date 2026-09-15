@@ -65,7 +65,7 @@ function fixture(t) {
       state.codes++;
       queueMicrotask(async () => {
         try { await state.beforeCode?.(); const res = new PassThrough(); res.statusCode = 200; res.headers = { 'content-type': 'application/json' }; callback(res);
-          res.end(JSON.stringify({ access_token: TOKEN, token_type: 'bearer' })); } catch (e) { req.emit('error', e); }
+          res.end(JSON.stringify(state.codeResponse || { access_token: TOKEN, token_type: 'bearer' })); } catch (e) { req.emit('error', e); }
       });
     }; return req;
   } });

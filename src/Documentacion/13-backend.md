@@ -139,6 +139,10 @@ se envía como redirect manual: el SDK gestiona el retorno y el canje usa URI
 vacía. Solo el callback interno recibe el token;
 la salida admite solo metadata y rechaza credenciales/campos adicionales. El
 consumidor debe obtener esa metadata del inspector/verificador del proveedor.
+`token_type` puede faltar en la respuesta del canje; si aparece debe ser
+`bearer`. Su ausencia no sustituye la inspección de identidad, permisos exactos
+y caducidad. Una interrupción previa al guardado conserva su fase fija en la
+auditoría, sin respuesta cruda ni reutilización del código.
 `whatsapp-phone-verifier` comprueba que el número pertenezca al WABA consultado,
 con cursor acotado y endpoint fijo; nunca sigue paging.next ni devuelve perfiles.
 

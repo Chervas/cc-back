@@ -63,6 +63,7 @@ for (const [name, options] of [
   ['compression', { headers: { 'content-encoding': 'gzip' } }], ['HTML', { headers: { 'content-type': 'text/html' } }],
   ['oversize', { response: 'x'.repeat(32769) }], ['malformed JSON', { response: 'broken' }],
   ['missing token', { response: { token_type: 'bearer' } }], ['wrong token type', { response: { access_token: TOKEN, token_type: 'mac' } }],
+  ['null token type', { response: { access_token: TOKEN, token_type: null } }], ['numeric token type', { response: { access_token: TOKEN, token_type: 1 } }],
   ['invalid expiry', { response: { access_token: TOKEN, token_type: 'bearer', expires_in: -1 } }],
   ['provider payload error', { response: { error: { code: 190, message: APP + CODE } } }],
 ]) test('Exchange rejects ' + name + ' without retries or exposing provider response', async () => {
@@ -119,4 +120,12 @@ test('Exchange network deadline destroys its request; absent expires_in is not i
   const result = await transport(wire({ response: { access_token: TOKEN, token_type: 'bearer' } })).withExchangedToken(input(), (token, info) => {
     assert.equal(info.expiresAt, null); return metadata(); // Expiration is supplied by the independent inspector.
   }); assert.equal(result.expiresAt, AT + 3600000);
+});
+test('Missing token_type can reach the inspector but grants and metadata are still required and buffers erased', async () => {
+  const f = wire({ response: { access_token: TOKEN } }); let held;
+  const result = await transport(f).withExchangedToken(input(), (token, info) => {
+    held = token; assert.equal(info.expiresAt, null); return metadata();
+  });
+  assert.deepEqual(result, metadata()); assert(held.every(b => b === 0)); assert.equal(f.calls.length, 1);
+  await assert.rejects(transport(wire({ response: { access_token: TOKEN } })).withExchangedToken(input(), () => ({ ...metadata(), scopes: ['ads_management'] })), { code: 'oauth_credentials_incomplete' });
 });

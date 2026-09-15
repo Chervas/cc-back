@@ -63,7 +63,9 @@ function createWhatsappOAuthHttp({ appId, redirectUri, request = https.request, 
             try {
               raw = Buffer.concat(chunks); value = JSON.parse(raw.toString('utf8'));
               if (!value || typeof value !== 'object' || Array.isArray(value) || value.error
-                || !tokenText(value.access_token) || typeof value.token_type !== 'string' || value.token_type.toLowerCase() !== 'bearer'
+                // Embedded Signup can omit this OAuth hint. Identity, validity,
+                // exact grants and expiry still require independent inspection.
+                || !tokenText(value.access_token) || value.token_type !== undefined && (typeof value.token_type !== 'string' || value.token_type.toLowerCase() !== 'bearer')
                 || value.expires_in !== undefined && (!Number.isSafeInteger(value.expires_in) || value.expires_in < 1
                   || value.expires_in > Math.floor((Number.MAX_SAFE_INTEGER - now()) / 1000))) fail('oauth_credentials_incomplete');
               const token = Buffer.from(value.access_token); const expiresAt = value.expires_in === undefined ? null : now() + value.expires_in * 1000;

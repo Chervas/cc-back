@@ -34,6 +34,20 @@ la caducidad comunicada en `expires_in`, cuando existe. Caducidad ausente requie
 contraste con el inspector; no se traduce en duración ilimitada verificada.
 La operación completa tiene plazo de 25 s y propaga cancelación al callback.
 
+`token_type` es una pista opcional en la respuesta JSON del canje; cuando
+aparece debe ser `bearer` (sin distinguir mayúsculas). Ausencia no acredita
+tipo, validez ni permisos: siguen verificándose con `debug_token` antes de
+guardar una candidata. Valores nulos, tipos distintos o un token ausente se
+rechazan. La [guía oficial para Tech Providers](https://developers.facebook.com/documentation/business-messaging/whatsapp/embedded-signup/onboarding-customers-as-a-tech-provider/)
+describe el business token como resultado sin exigir esa pista adicional.
+
+Si se interrumpe antes de guardar una candidata, la auditoría conserva además
+un motivo fijo `whatsapp_failed_<fase>` (lectura de aplicación, canje,
+inspección de permisos, pertenencia del número o preparación de candidata).
+Las fases proceden del código, nunca de mensajes del proveedor. No se conservan
+respuestas crudas para diagnosticar; un intento interrumpido no vuelve a canjear
+su código y requiere una nueva autorización humana después de corregir el fallo.
+
 El resultado externo del helper solo admite App ID, sujeto, WABA, número, tipo
 de token, scopes WhatsApp/public_profile y expiraciones. Rechaza campos extra,
 Ads/leads/business_management, ampliación de caducidad, secretos en valores y

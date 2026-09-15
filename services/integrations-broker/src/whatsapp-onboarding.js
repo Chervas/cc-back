@@ -153,13 +153,15 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
     });
     attempt.startedExchange = true;
     const guard = () => { if (closed || signal.aborted) fail('provider_timeout'); const current = checked(request, principal, binding); active(current, signal); return current; };
-    await secrets.preflight(binding, signal); guard();
+    attempt.phase = 'secrets_preflight'; await secrets.preflight(binding, signal); guard();
+    attempt.phase = 'application_read';
     await secrets.withApplication(binding, async appSecret => {
       guard(); const code = Buffer.from(request.payload.code); let appToken;
       try {
+        attempt.phase = 'code_exchange';
         return await exchangeFactory({ appId: b.appId, redirectUri: b.redirectUri, now }).withExchangedToken({ code, appSecret, signal }, async (token, info) => {
           guard(); appToken = Buffer.concat([Buffer.from(b.appId + '|'), appSecret]);
-          let raw;
+          let raw; attempt.phase = 'grant_inspection';
           try { raw = await http({ action: 'inspect', id: b.appId, token: appToken, candidate: token, signal: info.signal }); } finally { appToken.fill(0); }
           guard();
           // New accounts have no legacy MetaConnection. Learn the subject only
@@ -168,12 +170,14 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
           if (!C.id(raw?.data?.user_id)) fail('oauth_credentials_incomplete');
           const grant = verifyWhatsappGrant(raw, { appId: b.appId, subjectId: raw.data.user_id, wabaId: row.waba_id, scopes: b.scopes }, now());
           if (info.expiresAt !== null && (grant.expiresAt === null || grant.expiresAt > info.expiresAt)) fail('oauth_credentials_incomplete');
+          attempt.phase = 'phone_membership';
           const phone = await createWhatsappPhoneVerifier({ http })({ wabaId: row.waba_id, phoneId: row.phone_id, token,
             proof: createHmac('sha256', appSecret).update(token).digest('hex'), signal: info.signal });
           guard();
+          attempt.phase = 'phone_observation';
           const phoneState = await inspectWhatsappPhoneState({ http, phoneId: phone.phoneId, token,
             proof: createHmac('sha256', appSecret).update(token).digest('hex'), signal: info.signal });
-          guard(); const metadata = C.grantMetadata({ ...grant, phoneId: phone.phoneId }, binding);
+          guard(); attempt.phase = 'candidate_encoding'; const metadata = C.grantMetadata({ ...grant, phoneId: phone.phoneId }, binding);
           const encoded = secrets.encode(binding, { ...row, phone_id: phone.phoneId }, metadata, token);
           try {
             store.transaction(() => {
@@ -184,9 +188,9 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
               store.db.prepare("UPDATE whatsapp_onboarding_flows SET state='staging',secret_digest=?,credential_metadata=?,phone_id=?,updated_at=? WHERE id=?")
                 .run(encoded.digest, JSON.stringify(metadata), phone.phoneId, now(), id);
             });
-            await secrets.stage(binding, get(id), encoded, signal); guard();
+            attempt.phase = 'candidate_storage'; await secrets.stage(binding, get(id), encoded, signal); guard();
           } finally { encoded.body.fill(0); }
-          return metadata;
+          attempt.phase = 'exchange_completion'; return metadata;
         });
       } finally { code.fill(0); appToken?.fill(0); }
     }, signal);
@@ -202,7 +206,7 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
     const id = request.payload.flowId || request.requestId; if (!C.uuid(id)) fail('invalid_request');
     if (['begin', 'finish'].includes(name) && [...running.values()].reduce((n, set) => n + set.size, 0) >= 8) fail('rate_limited');
     const controller = new AbortController(); const set = running.get(id) || new Set(); set.add(controller); running.set(id, set);
-    let timer; const attempt = { startedExchange: false };
+    let timer; const attempt = { startedExchange: false, phase: 'local_checks' };
     try {
       return await Promise.race([dispatch(request, principal, binding, name, controller.signal, attempt), new Promise((resolve, reject) => {
         timer = setTimeout(() => { controller.abort(); reject(new BrokerError('provider_timeout')); }, 25000); timer.unref?.();
@@ -211,6 +215,8 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
       if (!closed && name === 'finish' && attempt.startedExchange) {
         const row = get(id);
         if (row?.state === 'exchanging') store.transaction(() => {
+          // Fixed internal milestones only; no provider response, URL or secret.
+          record(request, principal, id, 'integration.failed', 'unknown', 'whatsapp_failed_' + attempt.phase);
           record(request, principal, id, 'integration.failed', 'unknown', 'whatsapp_exchange_unconfirmed'); change(id, 'interrupted');
         });
       }
