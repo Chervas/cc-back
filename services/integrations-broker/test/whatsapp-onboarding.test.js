@@ -66,6 +66,23 @@ test('Lost Secrets Manager ACK reconciles exact version/hash after restart witho
   f.restart(); const result = await f.status(flow); assert.equal(result.data.status, 'staged'); assert.equal(f.state.codes, 1); assert.equal(f.state.puts, 1);
   assert.equal((await f.finish(flow)).replayed, true);
 });
+test('Read-only status never reconciles an uncertain credential write and validates its exact flag', async t => {
+  const f = fixture(t); const flow = await f.begin(); f.state.losePut = true;
+  await assert.rejects(f.finish(flow), { code: 'secret_unavailable' }); f.restart();
+  const before = f.snapshot(); const aws = f.state.awsCalls.length; const graph = f.state.httpCalls.length;
+  const result = await f.execute(C.OPERATIONS.status, { flowId: flow.flowId, readOnly: true });
+  assert.equal(result.data.status, 'staging'); assert.equal(result.data.candidate, null);
+  assert.equal(f.snapshot(), before); assert.equal(f.state.awsCalls.length, aws); assert.equal(f.state.httpCalls.length, graph);
+  for (const flag of [false, 'true', 1, null]) await assert.rejects(
+    f.execute(C.OPERATIONS.status, { flowId: flow.flowId, readOnly: flag }), { code: 'invalid_request' });
+  assert.equal(row(f, flow).state, 'staging');
+  assert.equal((await f.status(flow)).data.status, 'staged'); // Explicit recovery keeps its existing behavior.
+  f.state.clock = flow.payload.expiresAt + 1000;
+  const saved = f.snapshot(); const calls = f.state.awsCalls.length;
+  const durable = (await f.execute(C.OPERATIONS.status, { flowId: flow.flowId, readOnly: true })).data;
+  assert.equal(durable.status, 'staged'); assert.equal(durable.expired, true); assert.equal(durable.accessBlocked, false);
+  assert.equal(f.snapshot(), saved); assert.equal(f.state.awsCalls.length, calls);
+});
 test('Unconfirmed missing candidate never reuses code, and cancellation before begin is a durable tombstone', async t => {
   const f = fixture(t); const flow = await f.begin(); f.state.failPut = true; await assert.rejects(f.finish(flow));
   f.restart(); await assert.rejects(f.status(flow), { code: 'secret_unavailable' }); await assert.rejects(f.finish(flow), { code: 'secret_unavailable' });

@@ -10,6 +10,16 @@ function context(g) {
     clinicSetDigest: C.hash('[71,72]'), state: randomBytes(32).toString('base64url') };
 }
 const finish = row => ({ state: row.state, code: 'FICTITIOUS_GATEWAY_CODE_' + row.requestId, wabaId: '301', phoneId: '401' });
+test('Settings client sends exact read-only status and never reconciles or exposes an incomplete credential', async t => {
+  const g = brokerForGateway(t); const row = context(g); await g.client.begin(row); g.f.state.losePut = true;
+  await assert.rejects(g.client.finish(row, finish(row))); g.f.restart();
+  const before = g.f.snapshot(); const aws = g.f.state.awsCalls.length;
+  let sent; g.state.before = command => { sent = command; };
+  const result = await g.client.statusReadOnly(row);
+  assert.equal(result.status, 'staging'); assert.equal(result.candidate, null);
+  assert.deepEqual(sent.payload, { flowId: row.requestId, readOnly: true });
+  assert.equal(g.f.snapshot(), before); assert.equal(g.f.state.awsCalls.length, aws);
+});
 test('Gateway selected-phone mode accepts verified business discovery and the existing WhatsApp events permission', async t => {
   const g = brokerForGateway(t, { customer: { selectionOnly: true }, scopes: ['public_profile','whatsapp_business_manage_events','whatsapp_business_management','whatsapp_business_messaging'] });
   const row = context(g); await g.client.begin(row); const result = await g.client.finish(row, finish(row));

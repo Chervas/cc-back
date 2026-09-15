@@ -100,7 +100,7 @@ function createWhatsappOnboardingBrokerClient({ client, loadBinding, guard = ass
     const requestId = name === 'begin' ? row.requestId : randomUUID();
     try {
       const result = await client.execute({ requestId, tenantRef: 'clinic:' + row.clinicIds[0], assetRef: 'wa-enroll:' + selected.scopeKey,
-        connectionRef: selected.connectionRef, operation: C.OPERATIONS[name], payload: body }, { timeoutMs: 30000 });
+        connectionRef: selected.connectionRef, operation: C.OPERATIONS[name], payload: body }, { timeoutMs: name === 'status' && payload.readOnly === true ? 5000 : 30000 });
       guard(); const latest = binding(await loadBinding(row.scope), row);
       if (JSON.stringify(latest) !== JSON.stringify(selected)) throw Error();
       return response(result, name, row, selected, requestId, name === 'finish' ? payload : null);
@@ -113,7 +113,8 @@ function createWhatsappOnboardingBrokerClient({ client, loadBinding, guard = ass
     }
   }
   return Object.freeze({ begin: row => call('begin', row), finish: (row, input) => call('finish', row, input),
-    status: row => call('status', row), abort: row => call('abort', row) });
+    status: row => call('status', row), statusReadOnly: row => call('status', row, { readOnly: true }),
+    abort: row => call('abort', row) });
 }
 function privateFile(filename, max) {
   if (typeof filename !== 'string' || !path.isAbsolute(filename) || fs.realpathSync(filename) !== filename) throw Error();
@@ -151,6 +152,6 @@ function configuredClient({ environment = () => process.env } = {}) {
       fail('whatsapp_onboarding_configuration_invalid');
     } finally { key?.fill(0); ca?.fill(0); }
   }
-  return Object.freeze(Object.fromEntries(['begin','finish','status','abort'].map(name => [name, (row, input) => execute(name, row, input)])));
+  return Object.freeze(Object.fromEntries(['begin','finish','status','statusReadOnly','abort'].map(name => [name, (row, input) => execute(name, row, input)])));
 }
 module.exports = { createWhatsappOnboardingBrokerClient, configuredClient, assertGateway, configuration };

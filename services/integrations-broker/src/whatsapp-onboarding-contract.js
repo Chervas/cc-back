@@ -20,12 +20,15 @@ const bindingSchema = { type: 'object', additionalProperties: false, properties:
   } },
 }, required: ['appId', 'configId', 'redirectUri', 'appVersionId', 'slotVersionId', 'scopeKey', 'clinicIds', 'scopes'] };
 const validateBinding = schema({ value: bindingSchema });
+const validateStatus = schema({ flowId: uuidSchema });
+const validateReadOnlyStatus = schema({ flowId: uuidSchema, readOnly: { const: true } });
 const validators = {
   begin: schema({ state: { type: 'string', pattern: '^[A-Za-z0-9_-]{43}$' }, expiresAt: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
     scopeDigest: hashSchema, clinicSetDigest: hashSchema }),
   finish: schema({ flowId: uuidSchema, state: { type: 'string', pattern: '^[A-Za-z0-9_-]{43}$' },
     code: { type: 'string', pattern: '^[\\x21-\\x7e]{1,4096}$' }, wabaId: idSchema, phoneId: { anyOf: [idSchema, { type: 'null' }] } }),
-  status: schema({ flowId: uuidSchema }), abort: schema({ flowId: uuidSchema }),
+  status: value => Object.hasOwn(value || {}, 'readOnly') ? validateReadOnlyStatus(value) : validateStatus(value),
+  abort: schema({ flowId: uuidSchema }),
 };
 const hash = value => createHash('sha256').update(value).digest('hex');
 const uuid = v => typeof v === 'string' && new RegExp(uuidSchema.pattern).test(v);

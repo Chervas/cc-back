@@ -134,7 +134,9 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
     let row = checked(request, principal, binding, { configuration: name !== 'status' });
     if (name === 'status') {
       const data = projection(row, binding);
-      if (row.state !== 'staging' || data.accessBlocked) return { requestId: request.requestId, data, replayed: false };
+      // Settings lists persisted receipts without reading credentials or
+      // reconciling incomplete authorization attempts as a side effect.
+      if (request.payload.readOnly === true || row.state !== 'staging' || data.accessBlocked) return { requestId: request.requestId, data, replayed: false };
       // This is a version/digest read only. A missing response or missing version
       // never causes the original authorization code to be submitted again.
       const receipt = await secrets.candidate(binding, row, row.secret_digest, signal);
