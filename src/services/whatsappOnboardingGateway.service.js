@@ -29,7 +29,7 @@ function project(local, remote, state) {
       : ({ awaiting: local.status === 'claimed' ? 'processing' : 'awaiting_authorization', exchanging: 'processing', staging: 'processing',
         staged: 'awaiting_activation', interrupted: 'interrupted', aborted: 'cancelled' })[remote.status];
   const result = { requestId: local.requestId, authorizationStatus: status, connected: false,
-    pending: ['awaiting_authorization','processing','awaiting_activation'].includes(status),
+    channelRole: S.channelRole(local.channelRole), pending: ['awaiting_authorization','processing','awaiting_activation'].includes(status),
     expiresAt: local.expiresAt, scope: { ...local.scope }, clinicCount: local.clinicIds.length,
     cancellationConfirmed: local.status === 'cancelled' && remote.status === 'aborted',
     selected: status === 'awaiting_activation' ? { wabaId: remote.candidate.wabaId, phoneId: remote.candidate.phoneId } : null,

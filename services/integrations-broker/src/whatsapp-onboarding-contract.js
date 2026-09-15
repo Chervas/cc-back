@@ -22,9 +22,12 @@ const bindingSchema = { type: 'object', additionalProperties: false, properties:
 const validateBinding = schema({ value: bindingSchema });
 const validateStatus = schema({ flowId: uuidSchema });
 const validateReadOnlyStatus = schema({ flowId: uuidSchema, readOnly: { const: true } });
+const beginFields = { state: { type: 'string', pattern: '^[A-Za-z0-9_-]{43}$' }, expiresAt: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+  scopeDigest: hashSchema, clinicSetDigest: hashSchema };
+const validateBeginV1 = schema(beginFields);
+const validateBeginRole = schema({ ...beginFields, channelRole: { enum: ['primary','secondary'] } });
 const validators = {
-  begin: schema({ state: { type: 'string', pattern: '^[A-Za-z0-9_-]{43}$' }, expiresAt: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
-    scopeDigest: hashSchema, clinicSetDigest: hashSchema }),
+  begin: value => Object.hasOwn(value || {}, 'channelRole') ? validateBeginRole(value) : validateBeginV1(value),
   finish: schema({ flowId: uuidSchema, state: { type: 'string', pattern: '^[A-Za-z0-9_-]{43}$' },
     code: { type: 'string', pattern: '^[\\x21-\\x7e]{1,4096}$' }, wabaId: idSchema, phoneId: { anyOf: [idSchema, { type: 'null' }] } }),
   status: value => Object.hasOwn(value || {}, 'readOnly') ? validateReadOnlyStatus(value) : validateStatus(value),
