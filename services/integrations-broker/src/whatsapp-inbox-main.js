@@ -9,17 +9,21 @@ const { createInboxKeyProvider } = require('./whatsapp-inbox-key');
 const { createInboxServer, validatePrincipals } = require('./whatsapp-inbox-server');
 const { validateApplication, createInboxApplicationSecret } = require('./whatsapp-inbox-secret');
 const COHORT = 'whatsapp-inbox-passive-v1';
+const scopesContract = require('./whatsapp-inbox-scopes');
 function validateConfig(c) {
-  if (!c || Object.keys(c).sort().join(',') !== 'application,auditContext,bindings,cohort,consumerEnabled,enabled,keyManifestFile,limits,listenAddress,port,principals,stateFile,tlsCaFile,tlsCertFile,tlsKeyFile'
+  const keys = 'application,auditContext,bindings,cohort,consumerEnabled,enabled,keyManifestFile,limits,listenAddress,port,principals,stateFile,tlsCaFile,tlsCertFile,tlsKeyFile'.split(',');
+  if (c && Object.hasOwn(c, 'scopes')) keys.push('scopes', 'previousScopesDigest');
+  if (!c || Object.keys(c).sort().join(',') !== keys.sort().join(',')
     || c.cohort !== COHORT || c.enabled !== true || typeof c.consumerEnabled !== 'boolean' || !net.isIP(c.listenAddress)
     || !Number.isInteger(c.port) || c.port < 1024 || c.port > 65535) fail('invalid_request');
   const paths = ['stateFile', 'keyManifestFile', 'tlsCertFile', 'tlsKeyFile', 'tlsCaFile'].map(k => c[k]);
   if (paths.some(v => typeof v !== 'string' || !path.isAbsolute(v) || path.normalize(v) !== v)
     || new Set(paths).size !== paths.length) fail('invalid_request');
   validateApplication(c.application); validatePrincipals(c.principals);
-  // This first runtime serves one explicit WABA and one clinic. A shared/group
-  // binding needs its own reviewed scope contract before expanding the cohort.
-  if (!Array.isArray(c.bindings) || c.bindings.length !== 1
+  if (Object.hasOwn(c, 'scopes')) {
+    c.scopes = scopesContract.validateScopes(c.scopes); scopesContract.validateBindings(c.bindings, c.scopes);
+    if (c.previousScopesDigest !== null && (typeof c.previousScopesDigest !== 'string' || !/^[a-f0-9]{64}$/.test(c.previousScopesDigest))) fail('invalid_request');
+  } else if (!Array.isArray(c.bindings) || c.bindings.length !== 1
     || Object.keys(c.bindings[0]).sort().join(',') !== 'phoneIds,wabaId'
     || !/^[1-9][0-9]{0,29}$/.test(c.bindings[0].wabaId)
     || !Array.isArray(c.bindings[0].phoneIds) || c.bindings[0].phoneIds.length !== 1
@@ -47,6 +51,9 @@ async function connectInboxAws() {
   } catch (error) { kms?.destroy(); aws.close(); throw error; }
 }
 function pinIdentity(store, config, cipher) {
+  if (config.scopes) return scopesContract.pinScopes(store, config, cipher, COHORT);
+  const expanded = store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='whatsapp_inbox_scope_identity'").get();
+  if (expanded && store.db.prepare('SELECT 1 FROM whatsapp_inbox_scope_identity LIMIT 1').get()) fail('scope_denied');
   const identity = JSON.stringify([COHORT, config.application.appId, cipher.keyId, config.bindings, config.auditContext.tenantRef,
     config.auditContext.connectionRef]);
   const digest = createHash('sha256').update(identity).digest('hex');
@@ -72,7 +79,7 @@ async function main(filename, { awsFactory = connectInboxAws } = {}) {
     if (fs.realpathSync(path.dirname(config.stateFile)) !== path.dirname(config.stateFile)) fail('invalid_request');
     store = new BrokerStore(config.stateFile); pinIdentity(store, config, cipher);
     const inbox = createWhatsappInbox({ store, cipher, appId: config.application.appId, bindings: config.bindings,
-      auditContext: config.auditContext, ...config.limits });
+      auditContext: config.auditContext, scopeBindings: config.scopes, ...config.limits });
     secret = createInboxApplicationSecret(aws.secrets, config.application);
     server = createInboxServer({ inbox, withApplicationSecret: work => secret.withSecret(work), principals: config.principals,
       cert, key, ca, consumerEnabled: config.consumerEnabled });

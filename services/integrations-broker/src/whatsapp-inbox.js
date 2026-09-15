@@ -64,7 +64,7 @@ function scopeOf(raw, bindings) {
 }
 
 function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now = () => Date.now(),
-  maxRows = 100000, maxBytes = 1024 * 1024 * 1024, maxAuditBacklog = 10000 }) {
+  maxRows = 100000, maxBytes = 1024 * 1024 * 1024, maxAuditBacklog = 10000, scopeBindings }) {
   if (!store?.db || !cipher || !id(appId) || !Array.isArray(bindings) || !bindings.length
     || bindings.length > 64 || new Set(bindings.map(b => b.wabaId)).size !== bindings.length
     || bindings.some(b => !id(b.wabaId) || !Array.isArray(b.phoneIds) || !b.phoneIds.length || b.phoneIds.some(p => !id(p)))
@@ -72,6 +72,21 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
     || !Number.isSafeInteger(maxAuditBacklog) || maxAuditBacklog < 1 || !auditContext
     || Object.keys(auditContext).sort().join(',') !== 'connectionRef,operation,policyVersion,resourceRef,tenantRef') fail('invalid_request');
   bindings = structuredClone(bindings); auditContext = structuredClone(auditContext);
+  if (scopeBindings !== undefined) {
+    const contract = require('./whatsapp-inbox-scopes');
+    scopeBindings = contract.validateScopes(scopeBindings); contract.validateBindings(bindings, scopeBindings);
+  }
+  const scopesFor = rowScopes => scopeBindings?.filter(s => rowScopes.includes(s.wabaId + ':' + s.phoneId) || rowScopes.includes(s.wabaId + ':account'));
+  const contextsFor = rowScopes => {
+    if (!scopeBindings) return [auditContext];
+    const result = new Map();
+    for (const s of scopesFor(rowScopes)) for (const clinicId of s.clinicIds) {
+      const context = { ...auditContext, tenantRef: 'clinic:' + clinicId, resourceRef: 'wa-phone:' + s.phoneId };
+      result.set(context.tenantRef + '/' + context.resourceRef, context);
+    }
+    if (!result.size) fail('scope_denied'); return [...result.values()];
+  };
+  const eventsFor = (receipt, reason, at, rowScopes) => contextsFor(rowScopes).map(context => audit({ ...event(receipt, reason, at), ...context }));
   const event = (receipt, reason, at) => audit({ version: 2, eventId: randomUUID(), occurredAt: new Date(at).toISOString(),
     actorType: 'service', actorId: reason === 'whatsapp_inbox_imported' ? 'staging:whatsapp-inbox' : 'gateway:whatsapp-inbox', action: 'integration.completed', result: 'success',
     reason, correlationId: receipt, ...auditContext });
@@ -106,14 +121,14 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
             return { ...receiptFor(existing), replayed: true };
           }
           const capacity = store.db.prepare('SELECT COUNT(*) AS rows, COALESCE(SUM(byte_count),0) AS bytes FROM whatsapp_inbox').get();
-          if (capacity.rows >= maxRows || capacity.bytes + raw.length > maxBytes || store.backlog().pending >= maxAuditBacklog) fail('audit_unavailable');
+          if (capacity.rows >= maxRows || capacity.bytes + raw.length > maxBytes || store.backlog().pending + contextsFor(scope.scopes).length > maxAuditBacklog) fail('audit_unavailable');
           const row = { receipt: randomUUID(), app_id: appId, digest, key_id: cipher.keyId,
             scopes: JSON.stringify(scope.scopes), kinds: JSON.stringify(scope.kinds), received_at: now(), state: 'held' };
           const sealed = cipher.seal(raw, aad(row));
           try {
             store.db.prepare("INSERT INTO whatsapp_inbox(receipt,app_id,digest,key_id,body,byte_count,scopes,kinds,received_at,state) VALUES (?,?,?,?,?,?,?,?,?,'held')")
               .run(row.receipt, appId, digest, cipher.keyId, sealed, raw.length, row.scopes, row.kinds, row.received_at);
-            store.appendAudit(event(row.receipt, 'whatsapp_inbox_stored', row.received_at));
+            for (const item of eventsFor(row.receipt, 'whatsapp_inbox_stored', row.received_at, scope.scopes)) store.appendAudit(item);
           } finally { sealed.fill(0); }
           return { ...receiptFor(row), replayed: false };
         });
@@ -140,7 +155,8 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
             store.db.prepare("UPDATE whatsapp_inbox SET state='leased',lease=?,lease_until=? WHERE receipt=?").run(lease, until, receipt);
             committed = true;
             return { receipt, lease, leaseUntil: until, raw, receivedAt: row.received_at,
-              scopes: JSON.parse(row.scopes), kinds: JSON.parse(row.kinds), automaticActionsAllowed: false };
+              scopes: JSON.parse(row.scopes), kinds: JSON.parse(row.kinds), automaticActionsAllowed: false,
+              ...(scopeBindings ? { scopeBindings: scopesFor(JSON.parse(row.scopes)) } : {}) };
           } finally { if (!committed) raw.fill(0); }
         });
       } catch (error) { throw clean(error); }
@@ -156,10 +172,10 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
             return receiptFor(row);
           }
           if (row.state !== 'leased' || row.lease_until <= now()) fail('scope_denied');
-          if (store.backlog().pending >= maxAuditBacklog) fail('audit_unavailable');
+          if (store.backlog().pending + contextsFor(JSON.parse(row.scopes)).length > maxAuditBacklog) fail('audit_unavailable');
           store.db.prepare("UPDATE whatsapp_inbox SET state='imported',imported_at=?,import_receipt=? WHERE receipt=?")
             .run(now(), importReceipt, receipt);
-          store.appendAudit(event(receipt, 'whatsapp_inbox_imported', now()));
+          for (const item of eventsFor(receipt, 'whatsapp_inbox_imported', now(), JSON.parse(row.scopes))) store.appendAudit(item);
           return { receipt, persisted: true, businessProcessed: true };
         });
       } catch (error) { throw clean(error); }

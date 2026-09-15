@@ -75,7 +75,7 @@ const SCHEMA = [
  `CREATE TABLE IF NOT EXISTS WhatsappInboxContactKeys (contact_key CHAR(64) CHARACTER SET ascii PRIMARY KEY, conversation_id INT NOT NULL,
  created_at DATETIME(3) NOT NULL) ENGINE=InnoDB`,
 ];
-async function importLease(connection, lease, scope, now = Date.now()) {
+async function importLease(connection, lease, scope, now = Date.now(), { validateScope } = {}) {
   if (!uuid(lease?.receipt) || !uuid(lease?.lease) || lease.automaticActionsAllowed !== false || !Buffer.isBuffer(lease.raw)) held();
   const batch = normalize(lease.raw,scope,now); const digest = hash(lease.raw);
   const lock = 'wa-inbox:' + hash(JSON.stringify([scope.clinicId,scope.phoneId])).slice(0,48);
@@ -84,9 +84,11 @@ async function importLease(connection, lease, scope, now = Date.now()) {
   try {
     const result = await query('SELECT GET_LOCK(?,2) AS acquired',[lock]); if (result[0]?.acquired !== 1) held(); locked = true;
     await connection.beginTransaction(); tx = true;
+    await validateScope?.(connection);
     const old = await query('SELECT * FROM WhatsappInboxImports WHERE receipt=? FOR UPDATE',[lease.receipt]);
     if (old.length) {
       if (old[0].digest !== digest || old[0].clinic_id !== scope.clinicId || old[0].phone_id !== scope.phoneId) held();
+      await validateScope?.(connection);
       await connection.commit(); tx=false; return { importReceipt:old[0].import_receipt, replayed:true };
     }
     if ((await query('SELECT id_clinica FROM Clinicas WHERE id_clinica=?',[scope.clinicId])).length !== 1) held();
@@ -131,6 +133,7 @@ async function importLease(connection, lease, scope, now = Date.now()) {
     }
     const importReceipt=randomUUID();
     await query('INSERT INTO WhatsappInboxImports VALUES(?,?,?,?,?,?,NOW(3))',[lease.receipt,digest,importReceipt,scope.clinicId,scope.phoneId,inserted]);
+    await validateScope?.(connection);
     await connection.commit();tx=false;return { importReceipt,replayed:false };
   } catch { if(tx) await connection.rollback().catch(()=>{}); held(); }
   finally { if(locked) await query('SELECT RELEASE_LOCK(?)',[lock]).catch(()=>{}); }
