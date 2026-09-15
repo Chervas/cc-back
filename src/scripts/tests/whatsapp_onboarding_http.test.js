@@ -79,6 +79,10 @@ test('Public errors contain fixed codes and explicit uncertainty without provide
   const unknown = await f.request('status', body); assert.equal(unknown.status, 503); assert.equal(unknown.body.outcomeUnknown, true);
   f.state.failure = Object.assign(Error('FICTITIOUS_INTERNAL_SECRET'), { code: 'auth_invalid' });
   assert.equal((await f.request('status', body)).status, 401);
+  f.state.failure = Object.assign(Error('FICTITIOUS_INTERNAL_SECRET'), { code: 'auth_email_verification_required', status: 401 });
+  const stepUp = await f.request('begin', { ...body, scope: { type: 'clinic', id: 71 } });
+  assert.equal(stepUp.status, 403);
+  assert.deepEqual(stepUp.body, { error: { code: 'auth_email_verification_required' }, outcomeUnknown: false });
   f.state.failure = Error('FICTITIOUS_INTERNAL_SECRET');
   assert.deepEqual((await f.request('status', body)).body, { error: { code: 'whatsapp_authorization_unavailable' }, outcomeUnknown: false });
 });

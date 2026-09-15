@@ -35,9 +35,12 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const renewed = await sessions.authenticated(first, { parentToken: remembered.body.token }); await sessions.verify(renewed.body.token);
   await row.reload(); assert.equal(row.expires_at.getTime(), original.device.expiresAt.getTime());
   await sessions.verifyReference({ userId: first.id_usuario, sessionRef: jwt.decode(remembered.body.token).jti, expiresAt: new Date(jwt.decode(remembered.body.token).exp*1000) });
-  await assert.rejects(sessions.verifyReference({ userId: first.id_usuario, sessionRef: jwt.decode(remembered.body.token).jti, expiresAt: new Date(jwt.decode(remembered.body.token).exp*1000) }, { requireEmail: true }));
+  await assert.rejects(sessions.verifyReference({ userId: first.id_usuario, sessionRef: jwt.decode(remembered.body.token).jti, expiresAt: new Date(jwt.decode(remembered.body.token).exp*1000) }, { requireEmail: true }), { code: 'auth_email_verification_required', status: 403 });
+  await sessions.verify(remembered.body.token);
+  await sessions.verifyReference({ userId: first.id_usuario, sessionRef: jwt.decode(original.body.token).jti, expiresAt: new Date(jwt.decode(original.body.token).exp*1000) }, { requireEmail: true });
   report.checks.push('Remembered login and renewal are durable and audited without another email or sliding the 60-day deadline; operations explicitly requiring fresh email proof retain that requirement');
   await sessions.revoke(remembered.body.token); await assert.rejects(sessions.verify(remembered.body.token)); await trustedLogin(first, original.device.token);
+  await assert.rejects(sessions.verifyReference({ userId: first.id_usuario, sessionRef: jwt.decode(remembered.body.token).jti, expiresAt: new Date(jwt.decode(remembered.body.token).exp*1000) }, { requireEmail: true }), { code: 'auth_invalid', status: 401 });
   report.checks.push('Ordinary logout revokes its session while retaining the explicitly remembered device');
   await assert.rejects(trustedLogin(await user(), original.device.token), { code: 'auth_trusted_device_invalid' });
   await assert.rejects(trustedLogin(first, 'Z'.repeat(43)), { code: 'auth_trusted_device_invalid' });

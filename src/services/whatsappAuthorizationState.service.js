@@ -11,7 +11,7 @@ const known = new Set(['whatsapp_authorization_invalid', 'whatsapp_authorization
   'whatsapp_authorization_forbidden', 'whatsapp_authorization_conflict', 'whatsapp_authorization_expired',
   'whatsapp_authorization_consumed', 'whatsapp_authorization_cancelled', 'whatsapp_authorization_limit',
   'whatsapp_onboarding_disabled', 'whatsapp_onboarding_configuration_invalid', 'auth_invalid',
-  'auth_configuration_invalid', 'meta_security_state_unavailable']);
+  'auth_configuration_invalid', 'auth_email_verification_required', 'meta_security_state_unavailable']);
 function context(row) {
   return C.digest(JSON.stringify(['whatsapp-onboarding-v1', row.request_id, row.user_id, row.session_ref,
     row.session_expires_at.toISOString(), row.scope_type, row.scope_id, row.original_clinic_ids,

@@ -42,3 +42,14 @@ test('Internal DB errors are sanitized and ephemeral state key is erased', async
   await assert.rejects(service.issue(input()), e => e.code === 'whatsapp_authorization_unavailable' && !e.message.includes('FICTITIOUS'));
   assert(key.every(byte => byte === 0));
 });
+test('Email step-up preserves the authenticated session and stops before scope or authorization writes', async () => {
+  const key = Buffer.alloc(32, 8); let checked = false;
+  const service = createService({ config: () => ({ key }),
+    models: { sequelize: { transaction: async (options, work) => work({}) }, Clinica: { findAll: () => assert.fail('scope read after step-up rejection') } },
+    sessions: { verifyReference: async (actor, options) => {
+      assert.equal(options.requireEmail, true); checked = true;
+      throw Object.assign(Error('FICTITIOUS_INTERNAL_SECRET'), { code: 'auth_email_verification_required', status: 403 });
+    } } });
+  await assert.rejects(service.issue(input()), { code: 'auth_email_verification_required', status: 403, message: 'auth_email_verification_required' });
+  assert(checked); assert(key.every(byte => byte === 0));
+});

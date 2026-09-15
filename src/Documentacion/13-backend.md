@@ -78,6 +78,12 @@ Bearer de sesión gestionada, Origin HTTPS app/crm/autenticacion de ClinicaClick
 y `X-Whatsapp-Onboarding: 1`. Actor/sesión proceden del middleware; MFA por correo
 y permiso sobre todas las clínicas se revalidan antes/después del broker.
 
+Una sesión válida de dispositivo de confianza no basta para este alta:
+`auth_email_verification_required` devuelve 403, conserva el login y no crea
+estado ni llama a Meta. La interfaz indica acceder con código por correo desde
+una ventana privada. La validez y revocación de la sesión/dispositivo se verifican
+antes de devolver ese requisito; una sesión inválida conserva el 401 habitual.
+
 DTO: requestId, authorizationStatus, connected false, pending, expiresAt, scope,
 clinicCount, selected y cancellationConfirmed. `phoneId` admite `null` para
 resolver un WABA con un único número en el broker; cero o varios se rechazan.
