@@ -43,6 +43,26 @@ for(const mutation of ['digest','AWSCURRENT','AWSPREVIOUS'])test('Candidate '+mu
 test('Immutable version may lose AWSPENDING label without becoming another candidate',async t=>{
   const a=await fixture(t);a.f.records.get(a.f.binding.secretArn).get(a.definition.authorizationId).stages=[];await a.execute();assert.equal(a.sends().length,1);
 });
+test('Another enrollment may expand a selection-only grant without expanding the sender',async t=>{
+  const a=await fixture(t);a.state.after=(request,result)=>{
+    if(request.action==='inspect')for(const grant of result.data.granular_scopes)grant.target_ids.push('399');
+    return result;
+  };
+  await a.execute();assert.equal(a.sends().length,1);assert.equal(a.sends()[0].id,'401');
+  assert.ok(a.state.calls.some(c=>c.action==='waba_owner'&&c.id==='399'));
+  const request=a.request();request.assetRef='wa-phone:499';request.payload.phoneId='499';
+  await assert.rejects(a.execute(request),{code:'scope_denied'});assert.equal(a.sends().length,1);
+});
+for(const mutation of ['lost_selected','foreign_new_owner'])test('Expanded grant still rejects '+mutation,async t=>{
+  const a=await fixture(t);a.state.after=(request,result)=>{
+    if(request.action==='inspect')for(const grant of result.data.granular_scopes){
+      if(mutation==='lost_selected')grant.target_ids=['399'];else grant.target_ids.push('399');
+    }
+    if(mutation==='foreign_new_owner'&&request.action==='waba_owner'&&request.id==='399')result.owner_business_info.id='999';
+    return result;
+  };
+  await assert.rejects(a.execute(),{code:'scope_denied'});assert.equal(a.sends().length,0);
+});
 for(const mutation of ['foreign_owner','subject','scope','phone','revoked'])test('Fresh Meta '+mutation+' proof prevents POST',async t=>{
   const a=await fixture(t);a.state.after=(request,result)=>{
     if(mutation==='foreign_owner'&&request.action==='waba_owner')result.owner_business_info.id='999';

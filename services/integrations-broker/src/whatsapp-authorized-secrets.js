@@ -36,10 +36,15 @@ function createWhatsappAuthorizedSecrets({ client, accountId, prefix, kmsKeyArn,
           let response; try { response = await guardedHttp({ action: 'inspect', id: metadata.appId, token: applicationToken, candidate: token, signal }); }
           finally { applicationToken.fill(0); }
           check(); const b = E.bindingFor(original);
+          // Meta can expand the same system user's granular WhatsApp grant when
+          // another number is connected. selectionOnly still pins this phone,
+          // selected WABA, subject, owner and WhatsApp-only permissions. Verify
+          // every current owner, but do not turn the historical unselected list
+          // into a permanent restriction on later authorized enrollments.
           const grant = await customer({ response, token, proof, signal, expected: { ...b.customer, appId: b.appId, scopes: b.scopes,
-            businessId: metadata.businessId, wabaIds: metadata.grantedWabaIds, selectedWabaId: metadata.wabaId } }); check();
+            businessId: metadata.businessId, ...(b.customer.selectionOnly ? {} : { wabaIds: metadata.grantedWabaIds }), selectedWabaId: metadata.wabaId } }); check();
           if (grant.subjectId !== metadata.subjectId || grant.tokenType !== metadata.tokenType || grant.businessId !== metadata.businessId
-            || JSON.stringify(grant.wabaIds) !== JSON.stringify(metadata.grantedWabaIds)) fail('scope_denied');
+            || !b.customer.selectionOnly && JSON.stringify(grant.wabaIds) !== JSON.stringify(metadata.grantedWabaIds)) fail('scope_denied');
           await phone({ wabaId: metadata.wabaId, phoneId: metadata.phoneId, token, proof, signal }); check();
           const checkGrant = () => { check(); if ([grant.expiresAt, grant.dataAccessExpiresAt].some(v => v !== null && v <= now())) fail('credential_revoked'); };
           proofs.set(token, { ref, proof, check: checkGrant }); checkGrant();
