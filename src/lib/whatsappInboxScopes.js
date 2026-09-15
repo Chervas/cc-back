@@ -29,7 +29,7 @@ function configuration(env = process.env) {
 }
 const ownership = s => JSON.stringify({wabaId:s.wabaId,phoneId:s.phoneId,clinicIds:s.clinicIds});
 async function assertScope(connection, scope, { lock = false } = {}) {
-  const query = async (sql, values=[]) => (await connection.execute(sql + (lock ? ' FOR UPDATE' : ''),values))[0];
+  const query = async (sql, values=[]) => (await connection.execute(sql + (lock ? ' FOR SHARE' : ''),values))[0];
   // Deliberately no additionalData, connection tokens or patient columns.
   const assets = await query('SELECT id,assignmentScope,clinicaId,grupoClinicaId,assetType,phoneNumberId,wabaId FROM ClinicMetaAssets WHERE id=?',[scope.assetId]);
   const asset = assets[0];

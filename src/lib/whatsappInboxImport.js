@@ -85,7 +85,7 @@ async function importLease(connection, lease, scope, now = Date.now(), { validat
     const result = await query('SELECT GET_LOCK(?,2) AS acquired',[lock]); if (result[0]?.acquired !== 1) held(); locked = true;
     await connection.beginTransaction(); tx = true;
     await validateScope?.(connection);
-    const old = await query('SELECT * FROM WhatsappInboxImports WHERE receipt=? FOR UPDATE',[lease.receipt]);
+    const old = await query('SELECT * FROM WhatsappInboxImports WHERE receipt=? FOR SHARE',[lease.receipt]);
     if (old.length) {
       if (old[0].digest !== digest || old[0].clinic_id !== scope.clinicId || old[0].phone_id !== scope.phoneId) held();
       await validateScope?.(connection);

@@ -16,6 +16,29 @@ test('multiclinic passive importer preserves parent on partial failure, retries 
   const make=(scopes=config.scopes,peer='19995550101')=>({receipt:randomUUID(),lease:randomUUID(),automaticActionsAllowed:false,scopeBindings:scopes.map(({assetId,...s})=>s),raw:Buffer.from(JSON.stringify({object:'whatsapp_business_account',entry:scopes.map((s,i)=>({id:s.wabaId,changes:[{field:'messages',value:{messaging_product:'whatsapp',metadata:{phone_number_id:s.phoneId},messages:[m('message'+i,peer)]}}]}))}))});
   const count=async table=>(await sql.query('SELECT COUNT(*) n FROM '+table))[0][0].n;
   try{
+   await sql.query("CREATE USER 'inbox_metadata_only'@'localhost' IDENTIFIED BY 'FICTITIOUS_Metadata_Only_2026!'");
+   await sql.query("GRANT SELECT (id,assignmentScope,clinicaId,grupoClinicaId,assetType,phoneNumberId,wabaId) ON campaign_optimization_qa.ClinicMetaAssets TO 'inbox_metadata_only'@'localhost'");
+   await sql.query("GRANT SELECT (id_clinica,grupoClinicaId) ON campaign_optimization_qa.Clinicas TO 'inbox_metadata_only'@'localhost'");
+   await sql.query("GRANT SELECT (clinic_id,director_phone_asset_id) ON campaign_optimization_qa.PatientDirectionSettings TO 'inbox_metadata_only'@'localhost'");
+   await sql.query("GRANT SELECT (scope_key) ON campaign_optimization_qa.MetaScopeBlocks TO 'inbox_metadata_only'@'localhost'");
+   const readOnly=await require('mysql2/promise').createConnection({socketPath:sql.options.dialectOptions.socketPath,database:'campaign_optimization_qa',user:'inbox_metadata_only',password:'FICTITIOUS_Metadata_Only_2026!'});
+   try{await readOnly.beginTransaction();await S.assertScope(readOnly,config.scopes[0],{lock:true});await readOnly.rollback();}
+   finally{await readOnly.end();}
+   await sql.query("CREATE USER 'inbox_importer_only'@'localhost' IDENTIFIED BY 'FICTITIOUS_Importer_Only_2026!'");
+   for(const table of ['Conversations','Messages'])await sql.query("GRANT SELECT,INSERT,UPDATE ON campaign_optimization_qa."+table+" TO 'inbox_importer_only'@'localhost'");
+   for(const table of ['WhatsappInboxImports','WhatsappInboxMessageKeys','WhatsappInboxContactKeys'])await sql.query("GRANT SELECT,INSERT ON campaign_optimization_qa."+table+" TO 'inbox_importer_only'@'localhost'");
+   await sql.query("GRANT SELECT (id,assignmentScope,clinicaId,grupoClinicaId,assetType,phoneNumberId,wabaId) ON campaign_optimization_qa.ClinicMetaAssets TO 'inbox_importer_only'@'localhost'");
+   await sql.query("GRANT SELECT ON campaign_optimization_qa.Clinicas TO 'inbox_importer_only'@'localhost'");
+   await sql.query("GRANT SELECT (clinic_id,director_phone_asset_id) ON campaign_optimization_qa.PatientDirectionSettings TO 'inbox_importer_only'@'localhost'");
+   await sql.query("GRANT SELECT (scope_key) ON campaign_optimization_qa.MetaScopeBlocks TO 'inbox_importer_only'@'localhost'");
+   const restricted=await require('mysql2/promise').createConnection({socketPath:sql.options.dialectOptions.socketPath,database:'campaign_optimization_qa',user:'inbox_importer_only',password:'FICTITIOUS_Importer_Only_2026!'});
+   try{
+    const packet=make(undefined,'19995550117');await S.importScopedLease(restricted,packet,config);await S.importScopedLease(restricted,packet,config);
+    assert.equal(await count('Messages'),2);assert.equal(await count('WhatsappInboxImports'),2);
+    const legacy=make([config.scopes[0]],'19995550118');const legacyBody=JSON.parse(legacy.raw);legacyBody.entry[0].changes[0].value.messages[0].id='wamid.legacy_permission';legacy.raw=Buffer.from(JSON.stringify(legacyBody));await importLease(restricted,legacy,{clinicId:71,wabaId:'101',phoneId:'201'});assert.equal(await count('Messages'),3);
+   }finally{await restricted.end();}
+   // The rest exercises failure/replay independently of the privilege check.
+   for(const table of ['WhatsappInboxImports','WhatsappInboxMessageKeys','WhatsappInboxContactKeys','Messages','Conversations'])await sql.query('DELETE FROM '+table);
    const lease=make();let calls=0;await assert.rejects(S.importScopedLease(c,lease,config,{importer:async(...args)=>{if(++calls===2)throw Error('synthetic interruption');return importLease(...args);}}),/synthetic interruption/);
    assert.equal(await count('Messages'),1);assert.equal(await count('WhatsappInboxImports'),1);
    const complete=await S.importScopedLease(c,lease,config);assert.equal(await count('Messages'),2);assert.equal(await count('WhatsappInboxImports'),2);
