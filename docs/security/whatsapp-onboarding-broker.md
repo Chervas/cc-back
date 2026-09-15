@@ -254,3 +254,20 @@ confirmación de canje mantienen el límite original. Bloqueos, cambio del
 fingerprint, reservas y expiraciones reales de la credencial siguen mandando.
 Cerrar el diálogo de éxito conserva el recibo; una cancelación expresa mantiene
 su efecto revocador. No cambiar a `AWSCURRENT` ni reusar un código OAuth.
+
+## Lectura de recibos sin conciliación
+
+`meta.whatsapp.onboarding.status.v1` admite el campo opcional `readOnly:true`.
+Conserva firma, identidad, grants exactos y comprobación del binding, pero solo
+proyecta el estado durable. En particular, no intenta conciliar una escritura
+`staging` leyendo la versión candidata en Secrets Manager. No inicia canje,
+no llama a Meta, no cancela ni activa. El status ordinario conserva su recuperación
+anterior cuando este campo no se solicita.
+
+Usar este modo mediante `statusReadOnly` para el
+[listado de autorizaciones del gateway](whatsapp-onboarding-gateway.md#consulta-de-autorizaciones-guardadas).
+Un estado sin candidata `staged` acreditada no es una autorización visible: se
+marca resultado incompleto en el listado. No convertir una lectura incierta en
+un begin/finish de recuperación automático. La firma consume el control de replay
+y la auditoría técnica habituales; «solo lectura» se refiere a los estados y
+credenciales del alta, no a omitir esos controles.

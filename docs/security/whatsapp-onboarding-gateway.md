@@ -12,8 +12,8 @@ instalado o pruebas ficticias no autorizan a abrir el gate ni a reconectar Meta.
 
 `whatsappOnboardingGateway.service` une el [estado con MFA](whatsapp-authorization-state.md)
 con el [broker del alta](whatsapp-onboarding-broker.md). El cliente tipado
-`whatsappOnboardingBrokerClient` solo expone begin/finish/status/abort. No puede
-enviar mensajes, activar candidatas, recuperar tokens o usar OAuth legacy.
+`whatsappOnboardingBrokerClient` expone begin/finish/status/abort y statusReadOnly.
+No puede enviar mensajes, activar candidatas, recuperar tokens o usar OAuth legacy.
 
 Begin registra la intención humana y el ámbito en MySQL antes de crear el flujo
 del broker. Finish reclama el código una vez y revalida sesión/permisos antes
@@ -56,14 +56,16 @@ URI/cuenta de proveedor arbitraria ni selección del runtime desde el cuerpo.
 | `/finish` | `requestId`, `state`, `code`, `wabaId`, `phoneId` |
 | `/status` | `requestId` |
 | `/cancel` | `requestId` |
+| `/authorizations` | `scope:null` o `scope:{type:'clinic'|'group',id:entero}` |
 
 `phoneId` acepta null para el WABA sin número del flujo de coexistencia. El broker
 lo resuelve solo si existe un miembro único. La proyección pública puede añadir
 `phoneState` nullable, coherente con el candidato y sin activar el canal; los
 campos exactos se definen en el [contrato backend](../../src/Documentacion/13-backend.md#13092026--api-gateway-del-alta-whatsapp-con-mfa).
 
-Actor, sessionRef y expiración se obtienen del middleware verificado. El estado
-exige prueba de correo vigente y permiso sobre todas las clínicas. El cuerpo no
+Actor, sessionRef y expiración se obtienen del middleware verificado. El alta y
+seguimiento del intento exigen prueba de correo vigente y permiso sobre todas las clínicas; el listado
+durable usa la sesión MFA actual, como se detalla abajo. El cuerpo no
 puede sobrescribir esos campos. Las rutas se montan antes del parser general:
 JSON de máximo 8 KiB, sin compresión ni copia en `req.rawBody`. Content-Type
 distinto produce 415, cuerpo excesivo 413 y JSON/contrato inválido 400.
@@ -100,6 +102,61 @@ También se reconcilia una cancelación local al consultar status si el usuario
 conserva permiso; después de perder membresía/bloquear el ámbito se usa cancel.
 Se exige la sesión MFA original válida; no se transfieren intentos a otra sesión.
 Cancel no revoca remotamente el token Meta ni libera propiedad del WABA.
+
+## Consulta de autorizaciones guardadas
+
+`whatsappAuthorizationListing.service` resuelve `/authorizations` con el contrato
+funcional de [14.3](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/14.3-whatsapp-coexistencia.md#autorizaciones-guardadas-en-ajustes).
+Devuelve `{authorizations: WhatsappOnboardingStatus[], incomplete:boolean}`.
+Solo proyecta candidatas `staged` como `awaiting_activation` o `blocked`, siempre
+con `connected:false`; no devuelve el bloque `authorization` de begin. `scope:null`
+recorre los ámbitos configurados permitidos y un scope explícito es exacto.
+
+Procedimiento de lectura y comprobación:
+
+1. Verificar la sesión actual con `verifyReference({…}, {requireEmail:false})`.
+   Esto conserva MFA obligatorio: acepta correo o dispositivo confiado válido,
+   y rechaza sesiones sin MFA, revocadas, vencidas o con dispositivo revocado.
+   No solicita correo nuevo para consultar un recibo.
+2. Resolver permisos actuales y todas las clínicas del ámbito. Un grupo requiere
+   acceso a todos sus miembros. En global, omitir ámbitos ajenos; para un scope
+   solicitado sin permiso, devolver 403. Contrastar el conjunto con el binding.
+3. Leer hasta 50 filas `claimed`, ordenadas por fecha descendente, sin filtrar por
+   autor, sesión original o plazo OAuth. Verificar MAC/contexto con los valores
+   originales y comprobar digest del ámbito, clínicas, configuración y bloqueos.
+   No reescribir el registro para el usuario que lo consulta.
+4. Llamar exclusivamente a `broker.statusReadOnly(context)`, con cinco segundos
+   por llamada. Reservar ese tiempo antes de cada petición dentro de un presupuesto
+   remoto total de doce segundos; si no cabe otra, detener y marcar incompleto.
+   Conservar por ámbito el primer recibo `staged` confirmado; un intento reciente
+   fallido no oculta por sí mismo uno anterior.
+5. Releer sesión, permisos, filas y configuración después del broker y antes de
+   responder. Si hay bloqueo, proyectar `blocked` sin selección ni phoneState.
+   No escribir estados, abortar, consultar tokens, cambiar `isActive` o iniciar jobs.
+
+Al alcanzar 50 filas, agotar el presupuesto o no poder verificar algún resultado,
+`incomplete:true` impide interpretar una lista vacía como «no vinculada». La UI
+conserva resultados verificados y muestra incertidumbre. El límite no es paginación
+ni garantiza recorrer todo el historial. La lectura consume transporte firmado y
+su auditoría técnica, pero no crea otro intento ni llama a Meta.
+
+`expiresAt` del DTO sigue describiendo el formulario original: no usarlo para
+ocultar `awaiting_activation`. Este endpoint es independiente de `/status` y
+`/cancel`, que conservan su vínculo con la sesión del intento y pueden conciliar
+transiciones. No sustituir `statusReadOnly` por `status` en un listado.
+
+QA de regresión sin proveedor, desde la raíz del backend:
+
+```bash
+node --require ./src/scripts/tests/fixtures/security_offline_runtime.cjs --test \
+  src/scripts/tests/whatsapp_authorization_listing.test.js \
+  src/scripts/tests/whatsapp_onboarding_http.test.js
+```
+
+La prueba de despliegue debe consultar un scope explícito y `scope:null` con una
+sesión MFA válida, verificar 401 sin sesión y comparar estados/flags antes y
+después. No registrar Bearer, códigos ni contenido clínico. Una respuesta correcta
+acredita visibilidad del recibo; no acredita envío ni validez actual en Meta.
 
 ## Configuración privada y activación pendiente
 
@@ -140,7 +197,8 @@ sin enlaces, clave de hasta 8 KiB y CA hasta 64 KiB; buffers propios se borran a
 salir. Las claves criptográficas importadas/cadenas JS no permiten prometer
 borrado físico completo. No hay caché de configuración ni credenciales Meta.
 
-El cliente usa TLS verificado, plazo de 30 s y no reintenta transporte. Vuelve a
+El cliente usa TLS verificado y no reintenta transporte: 30 s para operaciones
+del intento y 5 s para `statusReadOnly`. Vuelve a
 leer configuración/binding después de la respuesta y comprueba campos exactos,
 App/config/URI de begin, alcance, expiración y candidata/versión/selección. Un
 cambio o respuesta incongruente produce incertidumbre sin exponer su contenido.
@@ -151,10 +209,10 @@ para un nuevo begin explícito cuando desaparezca el bloqueo; no cancela otros
 intentos ni reinicia límites. Los errores de finish mantienen incertidumbre y
 exigen consultar el estado, incluso cuando su código sea busy o rate_limited.
 
-Pendientes antes del corte: verificar configuración Meta de WhatsApp exclusiva,
+Antes de cada corte verificar configuración Meta de WhatsApp exclusiva,
 identidades/IAM/OS/SQL/Redis, proxy/APM, correo MFA efectivo y migraciones previas.
-El UID compartido observado no aísla claves aunque los nombres de entorno difieran.
-No se ha instalado ninguno de estos archivos ni cambiado variables/servicios.
+Un UID compartido no aísla claves aunque los nombres de entorno difieran.
+La instalación y sus pruebas reales se registran en 19/99; no se deducen de este runbook.
 
 ## Auditoría, QA y siguiente entrega
 
@@ -174,17 +232,17 @@ Tras endurecer el tipo de connectionRef se repiten los ocho tests afectados
 Evidencia privada `whatsapp-gateway-*.log`. Este fue el corte anterior a la
 [interfaz y su QA de navegador](whatsapp-onboarding-ui.md).
 
-Sin DDL clínica nueva; 20260913150000 y dependencias de sesión/MFA/bloqueos/auditoría
-siguen pendientes en BD compartida. Sin gasto AWS/Meta real. Las llamadas de
+El listado no añade DDL. Para una instalación nueva comprobar 20260913150000 y
+las dependencias de sesión/MFA/bloqueos/auditoría; el resultado histórico de QA
+anterior no acredita por sí solo su aplicación al entorno elegido. Las llamadas de
 recuperación añaden las lecturas del broker ya descritas; Ajustes/Cost Explorer,
 Budget/CloudFormation, retención y cifrado BD mantienen su estado pendiente.
 
-Interfaz/recorrido Meta exclusivo preparados en el corte posterior, sin conexión
-general previa. Pendientes de validación real Embedded Signup/configuración, activación
-aprobada y consumidores/colas de staging. OPS puede seguir apagado; DEV fuera.
-Antes del despliegue se concretarán versiones, DDL, procesos, respaldo, ventana
-y rollback. Para revertir, cerrar nuevas altas conservando estado, cancelaciones,
-candidatas y bloqueos. No restaurar códigos consumidos, OAuth general o tokens
+La interfaz específica no exige conexión general previa. Consultar en 19/99 la
+validación real de Embedded Signup, activación y consumidores/colas de staging.
+OPS puede seguir apagado; DEV fuera. Antes del despliegue concretar versiones,
+DDL, procesos, respaldo, ventana y rollback. Para revertir, cerrar nuevas altas
+conservando estado, cancelaciones, candidatas y bloqueos. No restaurar códigos consumidos, OAuth general o tokens
 revocados. Esta publicación no modifica la interrupción operativa existente.
 
 La página GET /window y la renovación de JWT de la misma sesión se describen

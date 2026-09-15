@@ -4,7 +4,7 @@
 > **Fuente de verdad:** ventana, intercambio, recuperación y validación de la UI; instalación en el manual central 19/99.
 > **Última revisión:** 2026-09-15 (Europe/Madrid).
 
-Interfaz preparada con proveedores ficticios. Consultar
+Las pruebas con proveedores ficticios se distinguen de las pruebas reales. Consultar
 [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones)
 para distinguir código, DDL y despliegue. No acredita reconexión operativa.
 
@@ -31,13 +31,41 @@ y pruebas. La modalidad viaja al SDK como selección de interfaz, **todavía no
 forma parte del estado durable firmado ni acredita el modo operativo del número**.
 La futura activación debe comprobar y fijar modo/rol antes de usarlos.
 
+## Listado durable en Ajustes
+
+Al cargar Ajustes y cerrar el diálogo se consulta
+`POST /api/whatsapp/onboarding/authorizations`, con el ámbito concreto del selector
+o `scope:null` para todos los permitidos. Este listado no depende del marcador
+sessionStorage del intento ni de la sesión que realizó OAuth. El contrato de
+ámbitos, MFA y estados es el de [14.3](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/14.3-whatsapp-coexistencia.md#autorizaciones-guardadas-en-ajustes);
+el [runbook del gateway](whatsapp-onboarding-gateway.md#consulta-de-autorizaciones-guardadas)
+detalla las comprobaciones y los límites de lectura.
+
+Las candidatas se presentan separadas de los teléfonos activos, con
+«Autorizado · Envíos pausados» y el ámbito correspondiente. No aumentan el contador
+de canales conectados, no se usan como remitentes y no modifican `isActive`.
+El plazo OAuth ya vencido no oculta un recibo `awaiting_activation`. Un estado
+bloqueado se muestra sin selección de número y no se ofrece como operativo.
+
+`incomplete:true`, un fallo HTTP o un contrato inválido muestran «Estado pendiente
+de verificar»; nunca se convierten en «no vinculada». No abrir otro popup ni
+repetir OAuth para resolver un fallo de listado. La respuesta no contiene el
+bloque `authorization`, estados OAuth, códigos ni secretos.
+
+QA visual: comprobar escritorio y móvil, scope concreto/global, un recibo
+pendiente, bloqueo, lista incompleta y fallo de transporte. Cambiar de ámbito
+no debe mostrar el resultado tardío de otro. Cerrar el diálogo y recargar deben
+recuperar el mismo recibo sin abrir Meta. La publicación se verifica por el índice
+y assets servidos; actualizar la rama staging no publica esa interfaz.
+
 ## Ventana de Meta y fronteras de confianza
 
 GET /window sirve una página estática desde gateway, bajo el mismo gate del
 alta y sin datos de clínica, JWT, estado OAuth o credencial en HTML/URL. Rechaza
 query strings. Usa no-store, no-referrer, nosniff y CSP con nonce; solo app/crm
 pueden embeberla. No exige Bearer para descargar esa página pública vacía.
-Los cuatro POST conservan la autenticación y el contrato estricto anteriores.
+Los POST conservan autenticación y contrato estricto; el listado durable adicional
+usa la sesión MFA actual según el runbook del gateway.
 
 Cada intento abre un iframe nuevo con sandbox que permite scripts, mismo origen
 del gateway, formularios y ventanas de Meta; no permite navegación de la página
