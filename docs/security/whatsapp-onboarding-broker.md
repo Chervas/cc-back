@@ -63,15 +63,18 @@ completo del negocio ni la credencial. El alta no asigna un número primario.
 
 `whatsapp_business_manage_events` continúa rechazado, también con `customer`.
 La gestión de plantillas ordinarias ya pertenece a
-`whatsapp_business_management`. Para una configuración nueva de Embedded Signup,
-seleccionar solo WhatsApp Cloud API; no añadir productos de anuncios o
-Conversions API para resolver un rechazo de permisos. Fuentes:
+`whatsapp_business_management`. Un rechazo del validador no demuestra que el
+ajuste Meta existente esté mal configurado. Conservarlo y comprobar el origen
+y el alcance del permiso adicional antes de decidir sustituirlo. Una configuración
+adicional con solo WhatsApp Cloud API permite comparar el resultado si hace
+falta; no es un requisito demostrado ni autoriza cambiar el Config ID activo.
+No añadir productos de anuncios o Conversions API para resolver el rechazo. Fuentes:
 [business tokens](https://developers.facebook.com/documentation/business-messaging/whatsapp/access-tokens/),
 [propiedad WABA](https://www.postman.com/meta/whatsapp-business-platform/request/nem6vuw/waba-id),
 [productos del alta](https://developers.facebook.com/documentation/business-messaging/whatsapp/embedded-signup/version-4/).
 
 Antes del corte: instalar código compatible conservando los bindings existentes,
-aprovisionar el slot del ámbito completo, fijar el nuevo Config ID y las mismas
+aprovisionar el slot del ámbito completo, fijar el Config ID validado y las mismas
 listas en gateway/broker, y comprobar permisos y membresías. No convertir un
 slot de clínica en uno de grupo modificando solo su nombre: el placeholder,
 la política y los hashes fijan el ámbito. El inventario histórico ayuda a
