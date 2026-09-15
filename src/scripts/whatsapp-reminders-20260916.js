@@ -13,7 +13,7 @@ async function main(){
   require('../lib/whatsappBrokerClient').assertStaging(process.env);
   const now=Date.now();if(mode==='--send'&&(now<DUE||now>=DUE+900000))throw Error('reminder_window_closed');
   const db=require('../../models'),runtime=require('../services/appointmentAutomationV2Runtime.service'),broker=require('../lib/whatsappAuthorizedBrokerClient');
-  const [rows]=await db.sequelize.query('SELECT id_cita FROM CitasPacientes WHERE clinica_id IN (:clinics) AND inicio>:start AND inicio<:end ORDER BY clinica_id,inicio,id_cita',{replacements:{clinics:CLINICS,start:new Date(DUE),end:new Date(END)}});
+  const [rows]=await db.sequelize.query('SELECT id_cita FROM CitasPacientes WHERE clinica_id IN (:clinics) AND inicio > :start AND inicio < :end ORDER BY clinica_id,inicio,id_cita',{replacements:{clinics:CLINICS,start:new Date(DUE),end:new Date(END)}});
   const summary={at:new Date().toISOString(),mode,due:'2026-09-16T08:00:00+02:00',eligible:[],held:[],dispatched:[]};
   for(const row of rows){
     try{
