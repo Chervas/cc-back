@@ -154,6 +154,10 @@ const corsOptionsDelegate = (req, callback) => {
 };
 
 app.use(cors(corsOptionsDelegate));
+// Preserve signed bytes and acknowledge only durable capture.
+app.use(require('./lib/whatsappInboxGateway').gatewayMiddleware());
+// Dedicated WhatsApp authorization; disabled until the owner validates Meta.
+app.use('/api/whatsapp/onboarding', require('./routes/whatsapp-onboarding.routes'));
 const marketingWebJsonParser = express.json({
     limit: MARKETING_WEB_JSON_LIMIT_BYTES,
     type: isJsonContentType,
