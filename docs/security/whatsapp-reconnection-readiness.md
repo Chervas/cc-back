@@ -118,6 +118,22 @@ Comportamiento que debe conservarse:
   No hay reconstrucción desde logs sin cuerpos ni reintento garantizado de esos
   eventos. Marcar el hueco y revisar posibles cancelaciones/cambios desde el móvil.
 
+Para ampliar recepción, publicar primero el mapa local `WHATSAPP_INBOX_SCOPES_FILE`
+con `version:1` y entradas `{assetId,wabaId,phoneId,clinicIds}`. El receptor usa
+`scopes` y `previousScopesDigest`: exige conservar todas las asignaciones anteriores.
+No reutilizar el digest inicial tras una segunda ampliación. El consumidor
+contrasta los activos, miembros del grupo, usos de Dirección y bloqueos durables
+antes y dentro de cada transacción. Valida todos los fragmentos antes de importar;
+los recibos hijos se deduplican y el padre se confirma solo cuando todos terminan.
+
+Su usuario SQL necesita SELECT limitado sobre metadata de activos, clínicas,
+Dirección y bloqueos, además de los permisos existentes de materialización.
+Las lecturas de pertenencia y recibos usan `FOR SHARE`: `FOR UPDATE` requiere
+permisos de escritura que no corresponden a esas tablas. Probar importación,
+replay y rollback con un usuario de los mismos privilegios que el runtime.
+Un estado de entrega sin mensaje local identificado permanece retenido; tras
+importar el eco correspondiente puede resolverse en un reintento normal.
+
 Las condiciones de QR, registro e historial están en el contrato 14.3. No
 registrar/desregistrar o repetir onboarding para forzar la descarga. La bandeja
 no borra automáticamente payloads; retención, eliminación y backup deben fijarse

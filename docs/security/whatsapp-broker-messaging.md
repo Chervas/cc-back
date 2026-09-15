@@ -1,8 +1,11 @@
 # WhatsApp: motor de envío aislado y cliente staging
 
-13/09/2026. Código y QA aislada; **cero credenciales reales migradas, cero envíos,
-cero despliegues**. Cuarentena Meta y pausas conservadas. Este corte no acredita
-[las condiciones de reapertura](whatsapp-reconnection-readiness.md).
+Contrato del transporte WhatsApp. El runtime de autorización descrito primero
+conserva las pausas y exige revisión por número. Madurez y despliegues vigentes
+en [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones)
+y [99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md).
+Los apartados del motor separado posterior conservan su alcance de preparación;
+no acreditan por sí solos [las condiciones de reapertura](whatsapp-reconnection-readiness.md).
 
 ## Envío con autorización de Embedded Signup
 
@@ -43,6 +46,20 @@ incluye `connectionRef,authorizationId,clinicId,assetId,phoneId,wabaId,revision,
 `sendEnabled:false` bloquea antes de HTTP y prevalece sobre cualquier credencial
 legacy residual. Un activo inactivo solo participa si coincide exactamente con
 ese binding; no se reactivan los flags de la BD.
+
+El archivo exige `messageNotBefore` en UTC. El worker y el productor comprueban
+antes de cambiar estado que el mensaje sea saliente, pendiente/en envío y creado
+desde ese corte. Se rechazan marcadores de cuarentena, cancelación, aceptación o
+resultado incierto; el adaptador vuelve a leer Message/conversación y comprueba
+su clínica antes de HTTP. No hay excepción implícita para recuperar históricos.
+
+La revisión administrativa se ejecuta con `src/whatsapp-authorized-review.js`
+pasando la configuración AWS y connectionRef. Solo admite GET de verificación,
+teléfono, suscripciones y plantillas. Permite revisar una autorización pausada,
+conservando todos sus controles de versión, ámbito, bloqueo y caducidad. Devuelve
+metadatos y digests, sin tokens ni contenido. No usar esa vista de revisión para
+ejecutar envíos. Una suscripción del WABA no acredita por sí sola entrega o
+recepción completa; verificar también la importación de mensajes en CRM.
 
 El UUID de operación deriva de `Message.id` y se conserva al reintentar o
 reiniciar. El worker resuelve de nuevo el remitente desde la conversación y el
