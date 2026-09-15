@@ -122,7 +122,7 @@ test('raw database and configuration diagnostics do not escape binding preflight
   await assert.rejects(foreign.client.send(input()), { code: 'whatsapp_authorized_binding_invalid' }); assert.equal(foreign.calls.length, 0);
 });
 test('inequivocal remote denials stay explicit and cannot trigger automatic retries', async () => {
-  for (const code of ['invalid_signature', 'rate_limited']) {
+  for (const code of ['invalid_signature', 'rate_limited', 'whatsapp_template_not_authorized']) {
     let calls = 0; const f = fixture({ createTransport: () => ({ execute: async () => { calls++; throw Object.assign(Error('PRIVATE_REMOTE_DETAIL'), { code }); } }) });
     await assert.rejects(f.client.send(input()), e => {
       assert.equal(e.message, code); assert.equal(e.code, code); assert.equal(e.retryable, false); assert.equal(e.delivery_unknown, undefined);

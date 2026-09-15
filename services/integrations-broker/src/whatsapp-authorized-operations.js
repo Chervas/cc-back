@@ -11,7 +11,7 @@ function createWhatsappAuthorizedOperations({ http, secrets, registry }) {
         if (payload.authorizationId !== value.definition.authorizationId || payload.phoneId !== value.definition.phoneId) fail('scope_denied');
         if (message.type === 'template') {
           const pin = value.definition.templates.find(t => t.name === message.template.name && t.language === message.template.language.code);
-          if (!pin) fail('operation_denied');
+          if (!pin) fail('whatsapp_template_not_authorized');
           assertActive(); registry.assert(binding);
           const raw = await http({ action: 'template', id: pin.id, token: secret, proof: secrets.proof(secret, binding.connectionRef), signal });
           C.verifyTemplate(raw, pin, message);

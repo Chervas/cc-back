@@ -11,7 +11,7 @@ const CONFIG_FILE = ROOT + '/config.json';
 const BINDING_KEYS = ['connectionRef','authorizationId','clinicId','assetId','phoneId','wabaId','revision','sendEnabled'];
 // Only denials that cannot originate from checks after Meta's message POST.
 // Scope/connection/asset revocations can race after that POST and remain unknown.
-const NO_SEND_CODES = new Set(['invalid_signature','rate_limited']);
+const NO_SEND_CODES = new Set(['invalid_signature','rate_limited','whatsapp_template_not_authorized']);
 const PREFLIGHT_CODES = new Set(['whatsapp_broker_runtime_denied','whatsapp_authorized_configuration_invalid',
   'whatsapp_authorized_binding_invalid','whatsapp_authorized_scope_blocked','whatsapp_authorized_binding_changed']);
 const id = v => Number.isInteger(v) && v > 0 && v <= 2147483647;

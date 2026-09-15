@@ -127,3 +127,10 @@ test('Template digest includes static buttons and image format while ignoring pr
   const v=template();const digest=C.templateDigest(v);v.components[0].example.header_handle=['CHANGED_EXAMPLE'];assert.equal(C.templateDigest(v),digest);
   v.components[2].buttons[0].text='Otra acción';assert.notEqual(C.templateDigest(v),digest);
 });
+
+test('An unpinned template is explicitly rejected before any template read or send', async t => {
+  const a = await fixture(t); const message = templateMessage(); message.template.name = 'not_authorized_v1';
+  await assert.rejects(a.execute(a.request(message)), { code: 'whatsapp_template_not_authorized' });
+  assert.equal(a.sends().length, 0);
+  assert.equal(a.state.calls.filter(c => c.action === 'template').length, 0);
+});
