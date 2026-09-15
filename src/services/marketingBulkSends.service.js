@@ -2194,9 +2194,7 @@ function getWhatsappRoutingPurposeForList(list) {
 }
 
 function isWhatsappRoutingConfigAvailable(config) {
-  return config?.routingUnavailable !== true
-    && !!config?.phoneNumberId
-    && !!config?.accessToken;
+  return require('../lib/whatsapp-channel-role').isWhatsappRoutingConfigAvailable(config);
 }
 
 function normalizeCampaignListContext(value) {
@@ -2572,6 +2570,7 @@ async function sendReviewPrivateFeedbackAcknowledgement({ list, item, conversati
       previewUrl: false,
       useTemplate: false,
       clinicConfig: { ...clinicConfig, clinicId },
+      healthContext: { source: 'marketing_bulk_sends', messageId: appMessage.id },
     });
     providerMessageId = response?.messages?.[0]?.id || null;
     await appMessage.update({
@@ -2835,6 +2834,7 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
       previewUrl: isPositive,
       useTemplate: false,
       clinicConfig: { ...clinicConfig, clinicId },
+      healthContext: { source: 'marketing_bulk_sends', messageId: appMessage.id },
     });
     providerMessageId = response?.messages?.[0]?.id || null;
     await appMessage.update({
@@ -7923,6 +7923,7 @@ async function sendTest(scope, campaignId, body = {}) {
       templateParams: params,
       templateComponents,
       clinicConfig,
+      healthContext: { source: 'marketing_bulk_sends', messageId: appMessage.id },
     });
   } catch (sendErr) {
     const providerError = sendErr?.response?.data || sendErr?.message || 'whatsapp_send_failed';
@@ -8857,6 +8858,7 @@ async function sendDispatchItem({
       templateParams: params,
       templateComponents,
       clinicConfig,
+      healthContext: { source: 'marketing_bulk_sends', messageId: appMessage.id },
     });
     const immediate = await whatsappDeliveryGovernanceService.recordImmediateSendResponse({
       response,

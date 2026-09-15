@@ -3,6 +3,8 @@ const db = require('../../models');
 const { normalizePhoneE164 } = require('../lib/phone');
 const whatsappAccountHealthService = require('./whatsappAccountHealth.service');
 const whatsappChannelBindingsService = require('./whatsappChannelBindings.service');
+const whatsappAuthorizedBroker = require('../lib/whatsappAuthorizedBrokerClient');
+const { Op } = require('sequelize');
 const {
     resolveWhatsappRouting,
     selectWhatsappPhoneAsset,
@@ -43,11 +45,17 @@ class WhatsAppService {
             return null;
         }
 
+        const authorizedIds = whatsappAuthorizedBroker.bindingsForClinic(Number(clinicId)).map(binding => binding.assetId);
+        // Inactive containment rows are selectable only through an exact private
+        // authorization. Their database flags and legacy credentials stay intact.
+        const availability = authorizedIds.length
+            ? { [Op.or]: [{ isActive: true }, { id: { [Op.in]: authorizedIds } }] }
+            : { isActive: true };
         const clinicAssets = await ClinicMetaAsset.findAll({
             where: {
                 clinicaId: clinicId,
                 assignmentScope: 'clinic',
-                isActive: true,
+                ...availability,
                 assetType: 'whatsapp_phone_number',
             },
             order: [['updatedAt', 'DESC']],
@@ -63,7 +71,7 @@ class WhatsAppService {
                 where: {
                     grupoClinicaId: clinic.grupoClinicaId,
                     assignmentScope: 'group',
-                    isActive: true,
+                    ...availability,
                     assetType: 'whatsapp_phone_number',
                 },
                 order: [['updatedAt', 'DESC']],
@@ -76,9 +84,13 @@ class WhatsAppService {
             whatsappChannelBindingsService.applyClinicBindings(clinicId, groupAssets),
         ]);
 
+        const [authorizedClinicAssets, authorizedGroupAssets] = await Promise.all([
+            whatsappAuthorizedBroker.annotate(Number(clinicId), routedClinicAssets),
+            whatsappAuthorizedBroker.annotate(Number(clinicId), routedGroupAssets),
+        ]);
         return selectWhatsappPhoneAsset({
-            clinicAssets: routedClinicAssets,
-            groupAssets: routedGroupAssets,
+            clinicAssets: authorizedClinicAssets,
+            groupAssets: authorizedGroupAssets,
             purpose,
             summarizeHealth: (asset) => whatsappAccountHealthService.summarizeAssetHealth(asset),
         });
@@ -138,6 +150,8 @@ class WhatsAppService {
     async getClinicConfig(clinicId, options = {}) {
         const asset = await this.resolvePhoneAssetByClinic(clinicId, options);
 
+        if (asset?.whatsappAuthorizedBinding) return this.authorizedConfig(asset, Number(clinicId));
+
         if (asset && (asset.routing_unavailable === true || (asset.waAccessToken && asset.phoneNumberId))) {
             return {
                 originId: asset.id || null,
@@ -176,14 +190,19 @@ class WhatsAppService {
         if (!Number.isInteger(normalizedAssetId) || normalizedAssetId <= 0) {
             return null;
         }
+        const authorized = whatsappAuthorizedBroker.bindingsForClinic(Number(clinicId)).find(binding => binding.assetId === normalizedAssetId);
         const asset = await ClinicMetaAsset.findOne({
             where: {
                 id: normalizedAssetId,
                 assetType: 'whatsapp_phone_number',
-                isActive: true,
+                ...(!authorized ? { isActive: true } : {}),
             },
             raw: true,
         });
+        if (asset && authorized) {
+            const binding = await whatsappAuthorizedBroker.binding(Number(clinicId), normalizedAssetId, asset);
+            return this.authorizedConfig({ ...asset, whatsappAuthorizedBinding: binding }, Number(clinicId));
+        }
         if (!asset?.waAccessToken || !asset?.phoneNumberId) {
             return null;
         }
@@ -196,6 +215,27 @@ class WhatsAppService {
             clinicaId: asset.clinicaId || clinicId || null,
             grupoClinicaId: asset.grupoClinicaId || null,
             additionalData: asset.additionalData || {},
+            originLabel: asset.metaAssetName || asset.waVerifiedName || null,
+        };
+    }
+
+    authorizedConfig(asset, clinicId) {
+        const binding = asset.whatsappAuthorizedBinding;
+        if (!binding || binding.clinicId !== clinicId || binding.assetId !== asset.id) {
+            throw Object.assign(new Error('whatsapp_authorized_binding_invalid'), { code: 'whatsapp_authorized_binding_invalid', retryable: false });
+        }
+        return {
+            originId: asset.id,
+            phoneNumberId: binding.phoneId,
+            wabaId: binding.wabaId,
+            clinicId,
+            clinicaId: clinicId,
+            assignmentScope: asset.assignmentScope || null,
+            grupoClinicaId: asset.grupoClinicaId || null,
+            additionalData: asset.additionalData || {},
+            authorizedBroker: binding,
+            routingUnavailable: asset.routing_unavailable === true || !binding.sendEnabled,
+            routingPurpose: asset.routing_purpose || null,
             originLabel: asset.metaAssetName || asset.waVerifiedName || null,
         };
     }
@@ -258,6 +298,7 @@ class WhatsAppService {
                     templateParams,
                     templateComponents,
                     clinicConfig,
+                    healthContext,
                 });
             }
 
@@ -268,10 +309,11 @@ class WhatsAppService {
                     displayText: interactiveCtaText,
                     url: interactiveCtaUrl,
                     clinicConfig,
+                    healthContext,
                 });
             }
 
-            return await this.sendTextMessage({ to, body, previewUrl, clinicConfig });
+            return await this.sendTextMessage({ to, body, previewUrl, clinicConfig, healthContext });
         } catch (error) {
             await whatsappAccountHealthService.recordProviderFailure({
                 clinicConfig,
@@ -314,10 +356,7 @@ class WhatsAppService {
      * Envía un mensaje interactivo con botón CTA URL dentro de ventana de servicio.
      * Meta renderiza el enlace como botón y evita exponer URLs largas en el cuerpo.
      */
-    async sendCtaUrlMessage({ to, body, displayText = 'Abrir enlace', url, clinicConfig = {} }) {
-        this.setClinicCredentials(clinicConfig);
-        this.assertConfiguration();
-
+    async sendCtaUrlMessage({ to, body, displayText = 'Abrir enlace', url, clinicConfig = {}, healthContext = {} }) {
         const payload = {
             messaging_product: 'whatsapp',
             recipient_type: 'individual',
@@ -338,15 +377,7 @@ class WhatsAppService {
             },
         };
 
-        const apiUrl = `https://graph.facebook.com/${this.apiVersion}/${this.phoneNumberId}/messages`;
-        const response = await axios.post(apiUrl, payload, {
-            headers: {
-                Authorization: `Bearer ${this.accessToken}`,
-                'Content-Type': 'application/json',
-            },
-        });
-
-        return response.data;
+        return this.dispatchMessage(payload, clinicConfig, healthContext);
     }
 
     /**
@@ -356,10 +387,7 @@ class WhatsAppService {
      * @param {string} params.body
      * @param {boolean} [params.previewUrl=false]
      */
-    async sendTextMessage({ to, body, previewUrl = false, clinicConfig = {} }) {
-        this.setClinicCredentials(clinicConfig);
-        this.assertConfiguration();
-
+    async sendTextMessage({ to, body, previewUrl = false, clinicConfig = {}, healthContext = {} }) {
         const payload = {
             messaging_product: 'whatsapp',
             recipient_type: 'individual',
@@ -371,16 +399,7 @@ class WhatsAppService {
             },
         };
 
-        const url = `https://graph.facebook.com/${this.apiVersion}/${this.phoneNumberId}/messages`;
-
-        const response = await axios.post(url, payload, {
-            headers: {
-                Authorization: `Bearer ${this.accessToken}`,
-                'Content-Type': 'application/json',
-            },
-        });
-
-        return response.data;
+        return this.dispatchMessage(payload, clinicConfig, healthContext);
     }
 
     /**
@@ -430,10 +449,8 @@ class WhatsAppService {
         templateParams,
         templateComponents,
         clinicConfig = {},
+        healthContext = {},
     }) {
-        this.setClinicCredentials(clinicConfig);
-        this.assertConfiguration();
-
         const payload = {
             messaging_product: 'whatsapp',
             to,
@@ -451,8 +468,23 @@ class WhatsAppService {
             payload.template.components = components;
         }
 
-        const url = `https://graph.facebook.com/${this.apiVersion}/${this.phoneNumberId}/messages`;
+        return this.dispatchMessage(payload, clinicConfig, healthContext);
+    }
 
+    async dispatchMessage(payload, clinicConfig = {}, healthContext = {}) {
+        if (clinicConfig.authorizedBroker) {
+            const binding = clinicConfig.authorizedBroker;
+            const messageId = Number.isSafeInteger(healthContext.messageId) && healthContext.messageId > 0
+                ? String(healthContext.messageId) : healthContext.messageId;
+            if (Object.hasOwn(clinicConfig, 'accessToken') || clinicConfig.phoneNumberId !== binding.phoneId || clinicConfig.wabaId !== binding.wabaId) {
+                throw Object.assign(new Error('whatsapp_authorized_binding_invalid'), { code: 'whatsapp_authorized_binding_invalid', retryable: false });
+            }
+            return whatsappAuthorizedBroker.send({ messageId, clinicId: Number(clinicConfig.clinicId || clinicConfig.clinicaId),
+                assetId: Number(clinicConfig.originId), expectedBinding: binding, message: payload });
+        }
+        this.setClinicCredentials(clinicConfig);
+        this.assertConfiguration();
+        const url = `https://graph.facebook.com/${this.apiVersion}/${this.phoneNumberId}/messages`;
         const response = await axios.post(url, payload, {
             headers: {
                 Authorization: `Bearer ${this.accessToken}`,

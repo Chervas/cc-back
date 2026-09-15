@@ -3,6 +3,8 @@ const { QueryTypes } = require('sequelize');
 const { UnrecoverableError } = require('bullmq');
 const { createWorker } = require('../services/queue.service');
 const whatsappService = require('../services/whatsapp.service');
+const whatsappAuthorizedBroker = require('../lib/whatsappAuthorizedBrokerClient');
+const { resolveOutboundSender } = require('../lib/whatsapp-outbound-sender');
 const groqAudioService = require('../services/groqAudio.service');
 const whatsappTemplatesService = require('../services/whatsappTemplates.service');
 const whatsappPhonesService = require('../services/whatsappPhones.service');
@@ -846,12 +848,13 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
                 scope: messageMetadata.communication_scope,
             });
         }
-        const effectiveClinicConfig = resolveClinicConfigAtSend === true
-            ? await require('../services/flowEngineV2.service').resolveScheduledWhatsappSenderConfig({
-                metadata: msg.metadata || {},
-                clinicId: Number(clinicId || 0) || null,
-            })
-            : clinicConfig;
+        const effectiveClinicConfig = await resolveOutboundSender({
+            message: msg, conversationId, clinicId, clinicConfig, resolveClinicConfigAtSend,
+        }, {
+            getConversation: id => Conversation.findByPk(id, { attributes: ['id', 'clinic_id'], raw: true }),
+            bindingsForClinic: id => whatsappAuthorizedBroker.bindingsForClinic(id),
+            resolveScheduled: value => require('../services/flowEngineV2.service').resolveScheduledWhatsappSenderConfig(value),
+        });
         const whatsappChannelRole = resolveWhatsappChannelRole(effectiveClinicConfig);
         msg.metadata = {
             ...(msg.metadata || {}),

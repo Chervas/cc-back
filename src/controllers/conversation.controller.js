@@ -4,6 +4,7 @@ const db = require('../../models');
 const { queues } = require('../services/queue.service');
 const { getIO } = require('../services/socket.service');
 const whatsappService = require('../services/whatsapp.service');
+const { isWhatsappRoutingConfigAvailable } = require('../lib/whatsapp-channel-role');
 const patientDirectionService = require('../services/patientDirection.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { canUserAccessFeature } = require('../lib/access-policy');
@@ -2160,7 +2161,7 @@ exports.postMessage = async (req, res) => {
         });
       }
       clinicConfig = senderPolicy.clinicConfig;
-      if (!clinicConfig?.accessToken || !clinicConfig?.phoneNumberId) {
+      if (!isWhatsappRoutingConfigAvailable(clinicConfig)) {
         await transaction.rollback();
         return res.status(500).json({ error: 'whatsapp_config_missing' });
       }
@@ -2517,7 +2518,7 @@ exports.sendScheduledMessageNow = async (req, res) => {
     }
 
     const clinicConfig = await whatsappService.getClinicConfig(conversation.clinic_id);
-    if (!clinicConfig?.accessToken || !clinicConfig?.phoneNumberId) {
+    if (!isWhatsappRoutingConfigAvailable(clinicConfig)) {
       return res.status(500).json({ error: 'whatsapp_config_missing' });
     }
 
