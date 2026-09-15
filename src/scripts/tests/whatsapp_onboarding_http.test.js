@@ -9,7 +9,7 @@ async function fixture(t) {
     authenticate: (req, res, next) => { state.auth++;
       if (req.get('authorization') !== 'Bearer FICTITIOUS_JWT') return res.status(401).json({ error: { code: 'auth_invalid' } });
       req.userData = { userId: 501 }; req.authSession = { id: sessionRef, expiresAt: 1900000000 }; next();
-    }, service: Object.fromEntries(['begin','finish','status','cancel'].map(name => [name, async input => {
+    }, listing:{list:async input=>{state.calls.push({name:'authorizations',input});return {authorizations:[],incomplete:false};}}, service: Object.fromEntries(['begin','finish','status','cancel'].map(name => [name, async input => {
       state.calls.push({ name, input }); if (state.failure) throw state.failure;
       return { requestId: input.requestId, connected: false, authorizationStatus: 'processing' };
     }])) });
@@ -31,6 +31,17 @@ async function fixture(t) {
   });
   return { state, sessionRef, request };
 }
+test('Authorization listing accepts scoped or all-view requests using only middleware identity',async t=>{
+ const f=await fixture(t);
+ for(const scope of [null,{type:'group',id:29}]){
+  const response=await f.request('authorizations',{scope});assert.equal(response.status,200);assert.deepEqual(response.body,{authorizations:[],incomplete:false});
+  assert.deepEqual(f.state.calls.at(-1).input,{scope,userId:501,sessionRef:f.sessionRef,sessionExpiresAt:1900000000});
+ }
+ for(const extra of [{userId:1},{sessionRef:randomUUID()},{requestId:randomUUID()},{code:'FICTITIOUS'}])assert.equal((await f.request('authorizations',{scope:null,...extra})).status,400);
+ assert.equal((await f.request('authorizations',{scope:null},{},'GET')).status,400);
+ assert.equal((await f.request('authorizations',{scope:null},{origin:'https://foreign.invalid'})).status,403);
+ assert.equal(f.state.generalParser,0);
+});
 test('Dedicated routes forward verified middleware identity and keep all bodies outside the general raw parser', async t => {
   const f = await fixture(t); const requestId = randomUUID();
   for (const [name, extra] of [['begin', { scope: { type: 'group', id: 9 } }], ['finish', { state: 's'.repeat(43), code: 'FICTITIOUS_CODE', wabaId: '301', phoneId: '401' }], ['status', {}], ['cancel', {}]]) {
