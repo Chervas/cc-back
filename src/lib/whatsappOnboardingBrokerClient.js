@@ -12,12 +12,14 @@ function assertGateway(env = process.env) {
 }
 function binding(value, row) {
   try {
-    S.exact(value, ['connectionRef', 'scopeKey', 'clinicIds', 'appId', 'configId', 'redirectUri', 'scopes']);
+    S.exact(value, ['connectionRef', 'scopeKey', 'clinicIds', 'appId', 'configId', 'redirectUri', 'scopes',
+      ...(Object.hasOwn(value || {}, 'customer') ? ['customer'] : [])]);
     if (typeof value.connectionRef !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(value.connectionRef)) throw Error();
     // Reuse the broker's metadata constraints, without putting secret ARNs or
     // their versions in gateway configuration.
     C.bindingFor({ provider: C.PROVIDER, secretArn: 'candidate', clientSecretArn: 'app', whatsappOnboarding: {
       ...Object.fromEntries(['scopeKey', 'clinicIds', 'appId', 'configId', 'redirectUri', 'scopes'].map(k => [k, value[k]])),
+      ...(Object.hasOwn(value, 'customer') ? { customer: value.customer } : {}),
       appVersionId: 'a'.repeat(32), slotVersionId: 'b'.repeat(32),
     } });
     if (row && (value.scopeKey !== row.scope.type + ':' + row.scope.id || JSON.stringify(value.clinicIds) !== JSON.stringify(row.clinicIds))) throw Error();
@@ -61,13 +63,18 @@ function response(result, name, row, b, requestId, selection) {
     }
     if (name === 'abort' && !tombstone) throw Error();
     if (d.status === 'staged') {
-      S.exact(d.candidate, ['versionId', 'appId', 'subjectId', 'wabaId', 'phoneId', 'tokenType', 'scopes', 'expiresAt', 'dataAccessExpiresAt']);
+      S.exact(d.candidate, ['versionId', 'appId', 'subjectId', 'wabaId', 'phoneId', 'tokenType', 'scopes', 'expiresAt', 'dataAccessExpiresAt',
+        ...(b.customer ? ['businessId','grantedWabaIds'] : [])]);
       const v = d.candidate;
       if (v.versionId !== row.requestId || v.appId !== b.appId || ![v.subjectId, v.wabaId, v.phoneId].every(C.id)
         || !['USER', 'SYSTEM_USER'].includes(v.tokenType) || !Array.isArray(v.scopes)
         || JSON.stringify([...v.scopes].sort()) !== JSON.stringify([...b.scopes].sort())
         || ![v.expiresAt, v.dataAccessExpiresAt].every(t => t === null || Number.isSafeInteger(t) && t > 0)
         || selection && (v.wabaId !== selection.wabaId || selection.phoneId !== null && v.phoneId !== selection.phoneId)) throw Error();
+      if (b.customer && (!C.id(v.businessId) || b.customer.businessId && v.businessId !== b.customer.businessId || v.tokenType !== 'SYSTEM_USER'
+        || !Array.isArray(v.grantedWabaIds) || !v.grantedWabaIds.length || v.grantedWabaIds.length > 64
+        || !v.grantedWabaIds.includes(v.wabaId) || v.grantedWabaIds.some((id, i, all) => !C.id(id)
+          || b.customer.wabaIds && !b.customer.wabaIds.includes(id) || i > 0 && id <= all[i - 1]))) throw Error();
     } else if (d.candidate !== null) throw Error();
     if (d.phoneState !== undefined && d.phoneState !== null) {
       const p = d.phoneState;
