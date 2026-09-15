@@ -1,0 +1,8 @@
+[Unit]
+Before=clinicaclick-back-dev.service clinicaclick-dev-redis.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/clinicaclick-dev-firewall
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,27 @@
+[Unit]
+Requires=clinicaclick-dev-network.service
+After=clinicaclick-dev-network.service
+[Service]
+User=clinicaclick-dev
+Group=clinicaclick-dev
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+InaccessiblePaths=-/run/mysqld -/run/redis -/etc/clinicaclick-security-mfa-20260914
+ReadWritePaths=/var/lib/clinicaclick-dev
+UMask=0077
+LimitCORE=0
+Restart=on-failure
+RestartSec=5
+ExecStart=/usr/bin/redis-server /etc/clinicaclick-dev/redis.conf
+[Install]
+WantedBy=multi-user.target

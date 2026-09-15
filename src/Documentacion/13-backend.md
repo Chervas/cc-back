@@ -13,6 +13,28 @@ Las formulaciones anteriores al espejo conciliado se conservan en [98](https://g
 
 > **Módulo:** Arquitectura del Backend
 
+## Recepción pasiva WhatsApp y separación de DEV
+
+`whatsappInboxGateway` intercepta POST `/api/whatsapp/webhook` (con o sin barra
+final) antes de los parsers. Conserva bytes originales, exige una única firma,
+limita a 3 MiB y solo devuelve 200 tras ACK durable del receptor. Sin firma: 401;
+servicio o credencial no disponibles: 503 con `Retry-After: 60`.
+
+API interna mTLS `/v1/whatsapp/inbox`: gateway solo captura; staging usa GET
+`/pending`, POST `/lease` y `/confirm`. El importador independiente conserva
+recibos y materializa conversaciones en una transacción; no carga modelos,
+workers, automatizaciones ni llamadas al proveedor. La migración aditiva
+`20260915040000-create-whatsapp-inbox-imports.js` crea tres tablas de recibos y
+claves de deduplicación sin cascadas de borrado. Su `down` exige detenerse.
+Contrato completo en [14.1](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/14.1-whatsapp-integracion-meta.md#recuperación-de-mensajes-tras-una-parada)
+y esquema en [02](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/02-base-de-datos.md).
+
+`devRuntimeIsolation` rechaza el arranque con la antigua identidad compartida;
+los controles efectivos son UID, grants, permisos y firewall del host. BullMQ
+recibe un cliente IORedis construido desde `REDIS_URL`, evitando el fallback a
+Redis público. Publicación y rollback de DEV, receptor y consumidor en
+[31](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md#dev-con-datos-ficticios-y-proceso-aislado).
+
 ## Actividad de firma de presupuestos
 
 `recordBudgetSignatureEvent` conserva el estado real del presupuesto como
@@ -71,7 +93,7 @@ antes de solicitar abort. No se vuelve a canjear un código reclamado.
 `WHATSAPP_ONBOARDING_BROKER_CONFIG_FILE` es privado, con guards gateway/MFA.
 Rutas deshabilitadas por defecto. Madurez, DDL aplicada y versiones públicas se
 consultan en el manual central 19/99; este contrato no acredita su despliegue.
-Configuración/grants Meta reales, aislamiento y consumidores siguen pendientes.
+Configuración/grants Meta reales y prueba de proveedor se validan antes de abrir el gate; el estado del aislamiento y los consumidores se consulta en 19.
 Contrato: `back-dev/docs/security/whatsapp-onboarding-gateway.md`.
 
 ## 13/09/2026 — Contrato privado del alta WhatsApp

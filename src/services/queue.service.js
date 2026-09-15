@@ -1,12 +1,16 @@
 'use strict';
 const { Queue, Worker, QueueEvents } = require('bullmq');
+const Redis = require('ioredis');
 
 const queuePrefix = String(process.env.QUEUE_PREFIX || '').trim();
 
 const queueOptions = {
-    connection: {
-        url: process.env.REDIS_URL || 'redis://127.0.0.1:6379',
-    },
+    // Passing { url } as RedisOptions can silently fall back to port 6379.
+    // Give BullMQ an actual client constructed from the configured URL.
+    connection: new Redis(process.env.REDIS_URL || 'redis://127.0.0.1:6379', {
+        lazyConnect: true,
+        maxRetriesPerRequest: null,
+    }),
 };
 
 if (queuePrefix) {

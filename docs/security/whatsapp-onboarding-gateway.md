@@ -1,9 +1,12 @@
 # Puente de alta WhatsApp: gateway, MFA y broker
 
-13/09/2026. Código preparado y probado con datos/proveedores ficticios. Añade
-rutas específicas a gateway y une el estado MySQL con el broker firmado. Sin
-configuración instalada ni despliegue. **La [interfaz específica](whatsapp-onboarding-ui.md) está preparada en el corte
-posterior. La validación real de Meta sigue pendiente; no autoriza reconectar.**
+> **Tipo:** runbook y contrato técnico del puente de alta.
+> **Fuente de verdad:** API y prechecks del gateway; madurez en [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones).
+> **Última revisión:** 2026-09-15.
+
+Usar junto con la [interfaz específica](whatsapp-onboarding-ui.md) y el
+[procedimiento de reconexión](whatsapp-reconnection-readiness.md). Código
+instalado o pruebas ficticias no autorizan a abrir el gate ni a reconectar Meta.
 
 ## Recorrido implementado
 

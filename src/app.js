@@ -1,4 +1,5 @@
 require('dotenv').config(); // Asegúrate de que .env está en la raíz del proyecto
+const { isolatedDev: ISOLATED_DEV_RUNTIME } = require('./lib/devRuntimeIsolation').assertDevRuntimeIsolation();
 const bedrockEnabled = ['1', 'true', 'yes', 'on'].includes(String(process.env.BEDROCK_ENABLED || '').toLowerCase());
 if (!bedrockEnabled || !process.env.BEDROCK_AWS_ACCESS_KEY_ID || !process.env.BEDROCK_AWS_SECRET_ACCESS_KEY) {
     console.warn('[startup] Bedrock para texto clínico no está activo o no tiene credenciales dedicadas. Los nodos condition/ai_analysis no podrán usar el proveedor principal.');
@@ -74,7 +75,7 @@ const publicMediaRoutes = require('./routes/publicMedia.routes');
 const jobScheduler = require('./services/jobScheduler.service');
 const intakeController = require('./controllers/intake.controller');
 const { setIO, onBusEvent } = require('./services/socket.service');
-require('./workers/queue.workers');
+if (!ISOLATED_DEV_RUNTIME) require('./workers/queue.workers');
 
 const RUNTIME_ROLE = String(process.env.RUNTIME_ROLE || '').trim().toLowerCase();
 const IS_GATEWAY_RUNTIME = RUNTIME_ROLE === 'gateway';
@@ -154,6 +155,8 @@ const corsOptionsDelegate = (req, callback) => {
 };
 
 app.use(cors(corsOptionsDelegate));
+// Signed bytes reach the durable inbox before a parser can modify them.
+app.use(require('./lib/whatsappInboxGateway').gatewayMiddleware());
 // Dedicated gateway-only onboarding must enforce its small JSON boundary
 // before the general body parser. Disabled unless its reviewed gate is set.
 app.use('/api/whatsapp/onboarding', require('./routes/whatsapp-onboarding.routes'));
@@ -456,7 +459,7 @@ db.sequelize.authenticate() // <-- Usar db.sequelize
 // db.sequelize.sync({ alter: true }) // <-- Usar db.sequelize
 //     .then(() => console.log('Modelos de la base de datos sincronizados.'))
 //     .catch(err => console.error('Error al sincronizar modelos de la base de datos:', err));
-server.listen(PORT, () => {
+server.listen(PORT, process.env.API_LISTEN_ADDRESS || undefined, () => {
     console.log(`Servidor backend escuchando en el puerto ${PORT}`);
 });
 
@@ -488,7 +491,7 @@ if (shouldStartWorker) {
 
 // Inicializar jobs automáticamente en producción
 const { metaSyncJobs } = require('./jobs/sync.jobs');
-if (IS_GATEWAY_RUNTIME) {
+if (IS_GATEWAY_RUNTIME || ISOLATED_DEV_RUNTIME) {
   console.log('⏸️ Cron jobs no registrados en runtime gateway');
 } else {
   metaSyncJobs.initialize().catch((error) => {

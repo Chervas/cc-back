@@ -1,0 +1,8 @@
+[Unit]
+Before=clinicaclick-whatsapp-inbox-consumer.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/clinicaclick-wa-importer-firewall
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target

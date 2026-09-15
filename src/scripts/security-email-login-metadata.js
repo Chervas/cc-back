@@ -21,7 +21,10 @@ const MIGRATIONS = Object.freeze(['20260829120000-create-email-system.js','20251
   '20260913003000-add-platform-audit-result-part.js','20260912220000-create-auth-sessions.js','20260913130000-create-auth-email-challenges.js','20260914220000-create-auth-trusted-devices.js']);
 function observedEnvironment(runtime) {
   if (!Object.hasOwn(ROOTS, runtime)) throw Error('email_login_metadata_invalid');
-  const root = ROOTS[runtime]; const file = path.join(root, '.env');
+  const isolated = runtime === 'dev' && fs.existsSync('/etc/clinicaclick-dev/runtime.env');
+  if (isolated && process.getuid() !== 0) throw Error('email_login_metadata_isolated_dev_requires_root');
+  const root = isolated ? fs.realpathSync('/opt/clinicaclick-dev/current') : ROOTS[runtime];
+  const file = isolated ? '/etc/clinicaclick-dev/runtime.env' : path.join(root, '.env');
   const env = require('dotenv').parse(fs.readFileSync(file)); const processes = [];
   for (const pid of fs.readdirSync('/proc').filter(v => /^[1-9][0-9]*$/.test(v))) {
     try {

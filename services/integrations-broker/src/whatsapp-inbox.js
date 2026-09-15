@@ -73,7 +73,7 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
     || Object.keys(auditContext).sort().join(',') !== 'connectionRef,operation,policyVersion,resourceRef,tenantRef') fail('invalid_request');
   bindings = structuredClone(bindings); auditContext = structuredClone(auditContext);
   const event = (receipt, reason, at) => audit({ version: 2, eventId: randomUUID(), occurredAt: new Date(at).toISOString(),
-    actorType: 'service', actorId: 'gateway:whatsapp-inbox', action: 'integration.completed', result: 'success',
+    actorType: 'service', actorId: reason === 'whatsapp_inbox_imported' ? 'staging:whatsapp-inbox' : 'gateway:whatsapp-inbox', action: 'integration.completed', result: 'success',
     reason, correlationId: receipt, ...auditContext });
   event(randomUUID(), 'whatsapp_inbox_stored', now()); // Validate fixed, redacted context at construction.
   store.db.exec(`CREATE TABLE IF NOT EXISTS whatsapp_inbox (
@@ -117,6 +117,13 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
           } finally { sealed.fill(0); }
           return { ...receiptFor(row), replayed: false };
         });
+      } catch (error) { throw clean(error); }
+    },
+    pending(limit = 20) {
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) fail('invalid_request');
+      try {
+        return store.db.prepare("SELECT receipt,received_at FROM whatsapp_inbox WHERE app_id=? AND (state='held' OR (state='leased' AND lease_until<=?)) ORDER BY received_at,receipt LIMIT ?")
+          .all(appId, now(), limit).map(row => ({ receipt: row.receipt, receivedAt: row.received_at }));
       } catch (error) { throw clean(error); }
     },
     // No automatic consumer. The caller must have a separately authenticated,

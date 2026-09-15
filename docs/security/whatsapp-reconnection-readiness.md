@@ -40,8 +40,9 @@ al usuario compartido sin trasladar sus consumidores. Conservar las pausas.
    compartido necesita autorización sobre todas sus clínicas; otro número del
    mismo grupo no es un reemplazo implícito. Revisar restricciones históricas sin
    presentarlas como estado actual de Meta. No leer ni probar tokens revocados.
-4. Confirmar que no hay alta legacy abierta. POST `/api/whatsapp/webhook` debe
-   devolver 503 con `Retry-After: 60`; callbacks Meta antiguos, 503. Las mutaciones
+4. Confirmar que no hay alta legacy abierta. POST `/api/whatsapp/webhook` sin firma
+   devuelve 401; con forma de firma válida y app placeholder, 503 con
+   `Retry-After: 60`. Callbacks Meta antiguos, 503. Las mutaciones
    WhatsApp autenticadas deben bloquearse antes del handler. El montaje del router
    legacy debe dejar pasar `/webhook` al guard de recepción, sin exigir JWT de Meta.
 5. Antes de usar AWS, verificar STS y la identidad temporal/instancia esperada.
@@ -76,9 +77,28 @@ se consulta por UUID/versión; no se repite con un código nuevo como recuperaci
 
 ## Recepción y reconstrucción de conversaciones
 
-Instalar primero la recepción durable, todavía sin automatizaciones. El módulo
-`services/integrations-broker/src/whatsapp-inbox.js` y su handler HTTP están
-preparados; no son por sí solos un listener ni un consumidor público.
+El listener se ejecuta mediante `services/integrations-broker/src/whatsapp-inbox-main.js`
+y el consumidor separado mediante `src/scripts/whatsapp-inbox-consumer.js`.
+La operación, unidades, certificados y rollback se mantienen en
+[31](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md#recepción-y-alta-whatsapp-en-el-entorno-público).
+Antes de habilitar una app real:
+
+1. Comprobar servicios, versiones y certificados de gateway/receptor/importador.
+   El certificado gateway no puede leer `/pending`; el importador no captura.
+2. Verificar solo la DDL `20260915040000-create-whatsapp-inbox-imports.js` y sus
+   tres tablas; no ejecutar todas las migraciones de DEV contra staging.
+3. Probar el UID de DEV con `src/scripts/tests/dev_isolation_runtime_probe.js`
+   dentro de su unidad. Debe permitir solo su BD/Redis y rechazar recursos públicos.
+4. Comprobar el guard público por CRM/autenticacion/app y ambas variantes de URL.
+   Un 200 del router legacy o un 200 sin persistencia impide abrir el piloto.
+5. Contrastar App/config/redirect en Meta, configurar el secreto de app nuevo
+   por canal privado y fijar su versión en receptor y broker. Mantener las
+   candidatas/emisores separados. No copiar secretos al frontend o a `.env`.
+6. Abrir únicamente el alta revisada; el titular inicia el flujo desde CRM con
+   un código nuevo de correo. `awaiting_activation` es el punto de revisión,
+   no un permiso para activar envíos ni suscripciones automáticamente.
+
+Comportamiento que debe conservarse:
 
 - Verificar HMAC sobre los bytes originales y un único encabezado de firma;
   límite 3 MiB, WABA/números explícitos, capacidad y auditoría antes del ACK.
