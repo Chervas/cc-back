@@ -23,10 +23,10 @@ function createWhatsappAuthorizedRegistry({ filename, authorizations, loadEnroll
   if (new Set(entries.map(v => v.connectionRef)).size !== entries.length || new Set(entries.map(v => v.authorizationId)).size !== entries.length
     || new Set(entries.map(v => v.phoneId)).size !== entries.length) fail('invalid_request');
   const db = new DatabaseSync(filename, { readOnly: true }); db.exec('PRAGMA query_only=ON; PRAGMA busy_timeout=2000'); let closed = false;
-  function inspect(binding) {
+  function inspect(binding, review = false) {
     if (closed || binding?.provider !== C.PROVIDER) fail('scope_denied');
     const definition = entries.find(v => v.connectionRef === binding.connectionRef);
-    if (!definition || !definition.enabled || definition.expiresAt <= now()) fail('connection_blocked');
+    if (!definition || !review && !definition.enabled || definition.expiresAt <= now()) fail('connection_blocked');
     const enrollmentBinding = definition.enrollmentBinding; const b = E.bindingFor(enrollmentBinding);
     const current = loadEnrollmentBinding(enrollmentBinding.connectionRef);
     if (!current || E.fingerprint(current) !== E.fingerprint(enrollmentBinding)) fail('connection_blocked');
@@ -56,12 +56,16 @@ function createWhatsappAuthorizedRegistry({ filename, authorizations, loadEnroll
     // operational expiry and provider credential expiries remain mandatory.
     return { definition: structuredClone(definition), enrollmentBinding: structuredClone(enrollmentBinding), row: { ...row }, metadata };
   }
+  function read(binding, review = false) {
+    let began = false;
+    try { if (closed) fail('connection_blocked'); db.exec('BEGIN'); began = true; const value = inspect(binding, review); db.exec('COMMIT'); began = false; return value; }
+    catch (e) { if (began) try { db.exec('ROLLBACK'); } catch {} throw new BrokerError(e instanceof BrokerError ? e.code : 'connection_blocked'); }
+  }
   return Object.freeze({
-    assert(binding) {
-      let began = false;
-      try { if (closed) fail('connection_blocked'); db.exec('BEGIN'); began = true; const value = inspect(binding); db.exec('COMMIT'); began = false; return value; }
-      catch (e) { if (began) try { db.exec('ROLLBACK'); } catch {} throw new BrokerError(e instanceof BrokerError ? e.code : 'connection_blocked'); }
-    },
+    assert: binding => read(binding),
+    // Administrator CLI only: inspect a paused authorization without promoting
+    // it. Every expiry, credential, scope and revocation check still applies.
+    review: binding => read(binding, true),
     authorize({ request, binding, principal }) {
       const value = this.assert(binding); const b = E.bindingFor(value.enrollmentBinding);
       if (request.assetRef !== 'wa-phone:' + value.definition.phoneId || !b.clinicIds.some(id => request.tenantRef === 'clinic:' + id)
