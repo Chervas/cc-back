@@ -65,8 +65,12 @@ con el WindowProxy exacto de la ventana interna de Meta**: esos IDs son pistas
 no confiables. La identidad, grants, WABA única y pertenencia del número se
 comprueban de forma independiente en el broker antes de guardar una candidata.
 
-SDK Graph v24.0 es la versión de compatibilidad del proyecto. Se elimina
-sessionInfoVersion:3; no se declara probada la configuración real ESU v4,
+SDK Graph v24.0 es la versión de compatibilidad del proyecto. Se solicita
+`extras.sessionInfoVersion: '3'` explícitamente para recibir los datos de cierre
+también con configuraciones anteriores de Embedded Signup. La
+[documentación oficial de coexistencia](https://developers.facebook.com/documentation/business-messaging/whatsapp/embedded-signup/onboarding-business-app-users/)
+mantiene ese parámetro y el evento de finalización versión 3. La versión de
+Graph no acredita la versión del flujo Embedded Signup. No se declara probada la configuración real ESU v4,
 su redirect URI, el canje o coexistencia. La CSP real del proxy, sus posibles
 cabeceras X-Frame-Options y la compatibilidad del SDK deben verificarse en el
 canary aprobado. No abrir CSP, probar URI alternativas o ampliar scopes para
@@ -74,6 +78,12 @@ forzar el resultado. Referencia de integración del proveedor:
 [colección oficial Meta Embedded Signup](https://www.postman.com/meta/whatsapp-business-platform/documentation/du6gzjv/embedded-signup?entity=folder-9cba98a6-088f-4d7a-914e-8c3024b708aa).
 
 ## Cierre, incertidumbre y renovación de sesión
+
+El callback del SDK y el evento con los activos pueden llegar en cualquier
+orden. La ventana indica cuál falta y, tras 25 segundos con respuesta parcial,
+avisa de que Meta no devolvió todos los datos. No publica códigos parciales,
+no repite el login y sigue aceptando la segunda parte hasta el plazo original.
+Finalizar en Meta no acredita por sí solo que CRM haya guardado la candidata.
 
 SessionStorage conserva únicamente la referencia del intento, modalidad y dos
 indicadores de envío/cancelación, en una clave vinculada a usuario, sesión y

@@ -8,17 +8,25 @@
   const id = v => typeof v === 'string' && /^[1-9][0-9]{0,29}$/.test(v);
   const exact = (v, keys) => v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).sort().join(',') === keys.sort().join(',');
   const nonce = Array.from(win.crypto.getRandomValues(new Uint8Array(32)), v => v.toString(16).padStart(2, '0')).join('');
-  let parentOrigin; let input; let started = false; let done = false; let code; let selection; let timer;
+  let parentOrigin; let input; let started = false; let done = false; let code; let selection; let timer; let returnTimer;
   const text = value => { doc.getElementById('status').textContent = value; };
   const button = doc.getElementById('authorize'); const cancel = doc.getElementById('cancel');
   function send(type, extra = {}) {
-    if (!input || done) return; done = true; clearTimeout(timer); button.disabled = true; cancel.disabled = true;
+    if (!input || done) return; done = true; clearTimeout(timer); clearTimeout(returnTimer); button.disabled = true; cancel.disabled = true;
     win.parent.postMessage({ type, nonce, requestId: input.requestId, ...extra }, parentOrigin);
     code = null; selection = null; input.authorization.state = ''; win.removeEventListener('message', receive);
   }
   function complete() {
     if (!done && started && code && selection) {
       text('Autorización recibida. Comprobando la cuenta…'); send('cc.wa.result', { code, ...selection });
+    } else if (!done && started && (code || selection)) {
+      text(code ? 'Meta ha autorizado el acceso. Esperando los datos de la cuenta de WhatsApp…'
+        : 'Cuenta seleccionada. Esperando la confirmación de acceso de Meta…');
+      // The SDK callback and session event may arrive in either order. Report
+      // a missing half without forwarding partial credentials or retrying login.
+      if (!returnTimer) returnTimer = setTimeout(() => {
+        if (!done) text('Meta no ha devuelto todos los datos de la autorización. Si su ventana ya se cerró, cancela este intento y vuelve a prepararlo.');
+      }, 25000);
     }
   }
   function receive(event) {
@@ -84,7 +92,9 @@
       }, { config_id: input.authorization.configId, response_type: 'code', override_default_response_type: true,
         // FB.login creates its own return channel. The pinned launch-page URI
         // is not a manual OAuth callback and must not override that channel.
-        extras: { setup: {}, ...(input.mode === 'coexistence' ? { featureType: 'whatsapp_business_app_onboarding' } : {}) } });
+        // Explicit session logging is needed by older Embedded Signup configs;
+        // coexistence still documents the version 3 completion payload.
+        extras: { setup: {}, sessionInfoVersion: '3', ...(input.mode === 'coexistence' ? { featureType: 'whatsapp_business_app_onboarding' } : {}) } });
     } catch { send('cc.wa.error', { reason: 'authorization_incomplete' }); }
   });
   cancel.addEventListener('click', () => send('cc.wa.cancel'));

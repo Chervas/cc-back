@@ -8,7 +8,7 @@ function fixture(t) {
   const parent = { postMessage: (data, origin) => messages.push({ data: JSON.parse(JSON.stringify(data)), origin }) };
   const win = { crypto: webcrypto, parent, addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name),
     FB: { init: v => { win.init = v; }, login: (cb, v) => { callback = cb; options = v; } } };
-  const timers = new Set(); const schedule = (fn, ms) => { const timer = setTimeout(fn, ms); timers.add(timer); return timer; };
+  const timers = new Set(); const scheduled = []; const schedule = (fn, ms) => { const timer = setTimeout(fn, ms); timers.add(timer); scheduled.push({ fn, ms }); return timer; };
   t.after(() => { for (const timer of timers) clearTimeout(timer); });
   const doc = { getElementById: id => elements[id], createElement: () => ({}), head: { appendChild: value => script.push(value) } };
   vm.runInNewContext(source, { window: win, document: doc, URL, Date, Uint8Array, setTimeout: schedule, clearTimeout });
@@ -19,7 +19,7 @@ function fixture(t) {
   const start = (v = input) => { receive(v); script.at(-1).onload(); elements.authorize.click(); };
   const finishEvent = (data = { waba_id: '301', phone_number_id: '401' }) => JSON.stringify({ type: 'WA_EMBEDDED_SIGNUP', event: 'FINISH', data });
   const meta = (data = finishEvent(), origin = 'https://www.facebook.com', from = {}) => receive(data, origin, from);
-  return { messages, listeners, receive, input, win, parent, start, script, elements, meta, finishEvent, code: value => callback(value), options: () => options };
+  return { messages, listeners, receive, input, win, parent, start, script, elements, meta, finishEvent, scheduled, code: value => callback(value), options: () => options };
 }
 test('Sandbox handshake accepts only the bound parent origin, nonce and exact unexpired public configuration', t => {
   const f = fixture(t);
@@ -29,7 +29,7 @@ test('Sandbox handshake accepts only the bound parent origin, nonce and exact un
   assert.equal(f.script.length, 0); f.start(); assert.equal(f.script.length, 1);
   assert.equal(f.options().response_type, 'code'); assert.equal(f.options().config_id, '201');
   assert.equal(Object.hasOwn(f.options(), 'redirect_uri'), false);
-  assert.equal(f.options().extras.sessionInfoVersion, undefined); assert.equal(f.win.init.cookie, false);
+  assert.equal(f.options().extras.sessionInfoVersion, '3'); assert.equal(f.win.init.cookie, false);
   f.receive(f.input); assert.equal(f.script.length, 1); assert.equal(f.messages[0].origin, 'https://crm.clinicaclick.com');
 });
 test('Only this SDK callback plus validated Meta selection can produce one result; hostile origins and late events are ignored', t => {
@@ -61,6 +61,23 @@ test('documented WABA-only completion is accepted only for coexistence and leave
 test('Coexistence is selected explicitly and cancel never emits a partial code or account', t => {
   const f = fixture(t); f.start({ ...f.input, mode: 'coexistence' });
   assert.equal(f.options().extras.featureType, 'whatsapp_business_app_onboarding');
+  assert.equal(f.options().extras.sessionInfoVersion, '3');
   f.code({ authResponse: { code: 'FICTITIOUS_CODE' } }); f.elements.cancel.click();
   assert.equal(f.messages.at(-1).data.type, 'cc.wa.cancel'); assert(!JSON.stringify(f.messages).includes('FICTITIOUS_CODE'));
+});
+test('Partial Meta returns explain the missing half without submitting, retrying or leaking it; late completion remains single-use', t => {
+  for (const first of ['code', 'selection']) {
+    const f = fixture(t); f.start();
+    if (first === 'code') f.code({ authResponse: { code: 'FICTITIOUS_CODE' } }); else f.meta();
+    assert.match(f.elements.status.textContent, first === 'code' ? /Esperando los datos/ : /Esperando la confirmación/);
+    assert.equal(f.messages.length, 1);
+    const reminder = f.scheduled.find(value => value.ms === 25000); assert(reminder); reminder.fn();
+    assert.match(f.elements.status.textContent, /Meta no ha devuelto todos los datos/);
+    assert.equal(f.messages.length, 1); assert.equal(f.elements.cancel.disabled, false);
+    assert(!f.elements.status.textContent.includes('FICTITIOUS_CODE'));
+    if (first === 'code') f.meta(); else f.code({ authResponse: { code: 'FICTITIOUS_CODE' } });
+    assert.equal(f.messages.length, 2); assert.equal(f.messages.at(-1).data.type, 'cc.wa.result');
+    reminder.fn(); assert.match(f.elements.status.textContent, /Autorización recibida/);
+    f.meta(); f.code({ authResponse: { code: 'FICTITIOUS_LATE_CODE' } }); assert.equal(f.messages.length, 2);
+  }
 });

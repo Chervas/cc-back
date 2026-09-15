@@ -64,6 +64,11 @@ de begin, código SDK de un uso y selección de IDs; sin OAuth general ni tokens
 en navegador/BD clínica. Los IDs Meta son pistas que el broker verifica de
 forma independiente. No se afirma correlación con la ventana interna de Meta.
 
+El SDK solicita `extras.sessionInfoVersion: '3'` para compatibilidad con
+configuraciones anteriores. Código y selección pueden llegar en cualquier orden;
+el marco indica cuál falta y avisa tras 25 segundos de respuesta parcial, sin
+enviarla ni repetir el login. El plazo original sigue siendo el límite.
+
 El estado admite JWT renovado de la misma sesión verificada sin ampliar el
 plazo original. No cambia la DDL ni el DTO POST. Interfaz preparada con
 proveedores ficticios; App/config/SDK, activación y entorno real pendientes.
