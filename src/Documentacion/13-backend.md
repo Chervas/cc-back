@@ -76,7 +76,8 @@ Contrato: `back-dev/docs/security/whatsapp-onboarding-ui.md`.
 
 ## 13/09/2026 — API gateway del alta WhatsApp con MFA
 
-Base `/api/whatsapp/onboarding`: POST `/begin` (`requestId,scope`),
+Base `/api/whatsapp/onboarding`: POST `/begin` (`requestId,scope` y
+`channelRole:primary|secondary` opcional, principal por defecto),
 `/finish` (`requestId,state,code,wabaId,phoneId`), `/status` y `/cancel`
 (`requestId`). JSON exacto de hasta 8 KiB, sin compresión/query/rawBody.
 Bearer de sesión gestionada, Origin HTTPS app/crm/autenticacion de ClinicaClick
@@ -90,7 +91,8 @@ una ventana privada. La validez y revocación de la sesión/dispositivo se verif
 antes de devolver ese requisito; una sesión inválida conserva el 401 habitual.
 
 DTO: requestId, authorizationStatus, connected false, pending, expiresAt, scope,
-clinicCount, selected y cancellationConfirmed. `phoneId` admite `null` para
+clinicCount, selected y cancellationConfirmed; `channelRole` conserva la intención
+firmada del intento. Filas anteriores sin rol mantienen su contexto/MAC v1. `phoneId` admite `null` para
 resolver un WABA con un único número en el broker; cero o varios se rechazan.
 El DTO puede añadir `phoneState` nullable con `phoneId,isOnBizApp,platformType,
 coexistenceAvailable,registrationAttempted:false,observedAt`. La observación
@@ -100,6 +102,13 @@ appId/configId/redirectUri/state. No hashes, versiones, sujeto Meta, código o t
 `awaiting_activation` acredita una candidata histórica, nunca canal activo.
 Tras resultado incierto consultar el mismo UUID; cancelación local se conserva
 antes de solicitar abort. No se vuelve a canjear un código reclamado.
+
+`POST /authorizations` recibe `scope:null` o un ámbito concreto; devuelve
+recibos comprobados por ámbito/número y `incomplete`. Puede añadir `localPhone`
+con perfil/salud histórica mediante proyección explícita del activo exacto, sin
+leer credenciales ni activar remitentes. Su consulta admite una sesión MFA de
+dispositivo confiado; el alta sigue exigiendo correo reciente. UI y límites en
+[14.3](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/14.3-whatsapp-coexistencia.md#autorizaciones-guardadas-en-ajustes).
 
 `WHATSAPP_ONBOARDING_BROKER_CONFIG_FILE` es privado, con guards gateway/MFA.
 Rutas deshabilitadas por defecto. Madurez, DDL aplicada y versiones públicas se

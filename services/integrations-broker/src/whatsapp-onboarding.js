@@ -39,7 +39,7 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
     // projection still checks credential expiry, revocation and every block;
     // begin/finish/confirmation keep the strict authorization deadline.
     try { active(row, undefined, { completedReceipt: row.state === 'staged' }); } catch { blocked = true; }
-    return { flowId: row.id, status: row.state, expiresAt: row.expires_at, expired: row.expires_at <= now(),
+    return { flowId: row.id, ...(row.channel_role != null ? { channelRole: row.channel_role } : {}), status: row.state, expiresAt: row.expires_at, expired: row.expires_at <= now(),
       scopeKey: row.asset.slice('wa-enroll:'.length), scopeDigest: row.scope_digest,
       clinicCount: row.clinic_count, clinicSetDigest: row.clinic_digest, configurationChanged: configChanged,
       accessBlocked: blocked, connected: false,
@@ -95,7 +95,8 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
       if (old) {
         const row = checked(request, principal, binding); active(row, signal);
         if (row.state_hash !== C.hash(request.payload.state) || row.scope_digest !== request.payload.scopeDigest
-          || row.clinic_digest !== request.payload.clinicSetDigest || row.expires_at !== request.payload.expiresAt) fail('idempotency_conflict');
+          || row.clinic_digest !== request.payload.clinicSetDigest || row.expires_at !== request.payload.expiresAt
+          || (row.channel_role || 'primary') !== (request.payload.channelRole || 'primary')) fail('idempotency_conflict');
         if (row.state !== 'awaiting') fail('oauth_flow_interrupted');
         return { requestId: request.requestId, data: { ...projection(row, binding), authorization: { appId: b.appId, configId: b.configId, redirectUri: b.redirectUri } }, replayed: true };
       }
@@ -103,13 +104,13 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
       const row = { id, principal: principal.id, tenant: request.tenantRef, connection: request.connectionRef, asset: request.assetRef,
         state: 'awaiting', expires_at: request.payload.expiresAt };
       active(row, signal);
-      if (store.db.prepare("SELECT 1 FROM whatsapp_onboarding_flows WHERE connection=? AND (state IN ('exchanging','staging','staged') OR (state='awaiting' AND expires_at>?)) LIMIT 1")
+      if (store.db.prepare("SELECT 1 FROM whatsapp_onboarding_flows WHERE connection=? AND (state IN ('exchanging','staging') OR (state='awaiting' AND expires_at>?)) LIMIT 1")
         .get(row.connection, now())) fail('oauth_flow_busy');
       if (store.db.prepare('SELECT COUNT(*) AS n FROM whatsapp_onboarding_flows WHERE connection=? AND created_at>?').get(row.connection, now() - 3600000).n >= 10) fail('rate_limited');
       record(request, principal, id, 'integration.requested', 'accepted', 'whatsapp_authorization_requested');
-      store.db.prepare('INSERT INTO whatsapp_onboarding_flows(id,principal,tenant,connection,asset,state_hash,config_digest,scope_digest,clinic_digest,clinic_count,created_at,expires_at,updated_at,state) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      store.db.prepare('INSERT INTO whatsapp_onboarding_flows(id,principal,tenant,connection,asset,state_hash,config_digest,scope_digest,clinic_digest,clinic_count,created_at,expires_at,updated_at,state,channel_role) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
         .run(id, principal.id, row.tenant, row.connection, row.asset, C.hash(request.payload.state), C.fingerprint(binding), request.payload.scopeDigest,
-          request.payload.clinicSetDigest, b.clinicIds.length, now(), row.expires_at, now(), 'awaiting');
+          request.payload.clinicSetDigest, b.clinicIds.length, now(), row.expires_at, now(), 'awaiting', request.payload.channelRole || null);
       return { requestId: request.requestId, data: { ...projection(get(id), binding), authorization: { appId: b.appId, configId: b.configId, redirectUri: b.redirectUri } }, replayed: false };
     });
     if (name === 'abort') {

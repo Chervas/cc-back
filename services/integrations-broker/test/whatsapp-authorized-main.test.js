@@ -94,3 +94,21 @@ test('AWS startup failure closes the readonly registry and leaves enrollment unc
   // Removal succeeds after cleanup; reopening the original enrollment is still functional.
   assert.equal((await f.f.status({ flowId: f.definition.authorizationId })).data.status, 'staged');
 });
+
+test('Multiple phones may share exactly one immutable enrollment binding without sharing operational identity or grants', async t => {
+  const f=await fixture(t,{enabled:false}),base=config(f),a=structuredClone(base.authorizations[0]);
+  a.connectionRef='connection:authorized-second';a.authorizationId=randomUUID();a.phoneId='402';
+  base.authorizations.push(a);base.policy.connections.push({...base.policy.connections[0],connectionRef:a.connectionRef});
+  base.policy.grants.push(...base.policy.grants.map(g=>({...g,connectionRef:a.connectionRef,assetRef:'wa-phone:402'})));
+  assert.equal(runtime.validateConfig(base),base);
+  for(const change of [c=>{c.authorizations[1].phoneId='401';},c=>{c.authorizations[1].authorizationId=c.authorizations[0].authorizationId;},
+    c=>{c.authorizations[1].enrollmentBinding.whatsappOnboarding.clinicIds=[71];},
+    c=>{c.authorizations[1].enrollmentBinding.secretArn+='other';},
+    c=>{c.authorizations[1].enrollmentBinding.whatsappOnboarding.configId='999';},
+    c=>{c.authorizations[1].enrollmentBinding.connectionRef+='other';},
+    c=>{c.authorizations[1].enrollmentBinding.initialState='blocked';},
+    c=>{c.policy.grants.at(-1).tenantRef='clinic:999';}]){
+    const changed=structuredClone(base);change(changed);assert.throws(()=>runtime.validateConfig(changed));
+  }
+  assert(base.authorizations.every(v=>v.enabled===false));
+});

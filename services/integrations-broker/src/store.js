@@ -41,7 +41,8 @@ class BrokerStore {
         config_digest TEXT NOT NULL, scope_digest TEXT NOT NULL, clinic_digest TEXT NOT NULL, clinic_count INTEGER NOT NULL,
         created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('awaiting','exchanging','staging','staged','interrupted','aborted')),
-        code_digest TEXT UNIQUE, waba_id TEXT, phone_id TEXT, secret_digest TEXT, credential_metadata TEXT);
+        code_digest TEXT UNIQUE, waba_id TEXT, phone_id TEXT, secret_digest TEXT, credential_metadata TEXT,
+        channel_role TEXT CHECK(channel_role IS NULL OR channel_role IN ('primary','secondary')));
       CREATE INDEX IF NOT EXISTS whatsapp_onboarding_scope ON whatsapp_onboarding_flows(connection,state,created_at);
       CREATE TABLE IF NOT EXISTS whatsapp_onboarding_phone_observations (flow_id TEXT PRIMARY KEY,
         observation TEXT NOT NULL, observed_at INTEGER NOT NULL,
@@ -65,6 +66,12 @@ class BrokerStore {
         attempts INTEGER NOT NULL DEFAULT 0, next_attempt INTEGER NOT NULL DEFAULT 0,
         lease TEXT, lease_until INTEGER, receipt TEXT);
       CREATE INDEX IF NOT EXISTS audit_pending ON audit_outbox(delivered_at,next_attempt,lease_until);`);
+    // Additive upgrade: old flows keep NULL and their exact immutable v1 envelope.
+    this.transaction(() => {
+      if (!this.db.prepare("PRAGMA table_info(whatsapp_onboarding_flows)").all().some(column => column.name === 'channel_role')) {
+        this.db.exec("ALTER TABLE whatsapp_onboarding_flows ADD COLUMN channel_role TEXT CHECK(channel_role IS NULL OR channel_role IN ('primary','secondary'))");
+      }
+    });
   }
   transaction(work) {
     this.db.exec('BEGIN IMMEDIATE');

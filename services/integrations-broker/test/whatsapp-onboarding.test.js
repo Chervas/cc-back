@@ -201,7 +201,8 @@ test('A completed receipt survives OAuth expiry without another begin, exchange,
   assert.equal(result.candidate.versionId, flow.flowId); assert.equal(result.candidate.phoneId, '401'); assert.equal(result.connected, false);
   assert.equal(row(f, flow).state, 'staged');
   await assert.rejects(f.finish(flow), { code: 'oauth_flow_interrupted' });
-  await assert.rejects(f.begin(), { code: 'oauth_flow_busy' });
+  const next = await f.begin({ channelRole: 'secondary' });
+  assert.equal(next.result.data.status, 'awaiting'); assert.equal(row(f, flow).state, 'staged');
   assert.deepEqual({ graph: f.state.httpCalls.length, aws: f.state.awsCalls.length, codes: f.state.codes, puts: f.state.puts }, calls);
   assert.equal((await f.abort(flow, f.current, true)).data.status, 'aborted');
   assert.equal((await f.status(flow)).data.candidate, null);

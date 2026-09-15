@@ -52,7 +52,7 @@ URI/cuenta de proveedor arbitraria ni selección del runtime desde el cuerpo.
 
 | Ruta | Cuerpo JSON exacto |
 | --- | --- |
-| `/begin` | `requestId`, `scope:{type:'clinic'|'group',id:entero}` |
+| `/begin` | `requestId`, `scope:{type:'clinic'|'group',id:entero}` y opcional `channelRole:'primary'|'secondary'` |
 | `/finish` | `requestId`, `state`, `code`, `wabaId`, `phoneId` |
 | `/status` | `requestId` |
 | `/cancel` | `requestId` |
@@ -103,6 +103,27 @@ conserva permiso; después de perder membresía/bloquear el ámbito se usa cance
 Se exige la sesión MFA original válida; no se transfieren intentos a otra sesión.
 Cancel no revoca remotamente el token Meta ni libera propiedad del WABA.
 
+
+### Principal, secundario y compatibilidad de estados
+
+`begin` acepta `channelRole:primary|secondary` opcional; su ausencia significa
+principal. La migración `20260915190000-add-whatsapp-authorization-channel-role.js`
+añade una columna nullable sin backfill. Las filas anteriores con NULL conservan
+su contexto/MAC v1 exacto; las nuevas incluyen el rol en el contexto v2. No
+cambiar roles de estados existentes: se invalidaría su firma.
+
+El broker añade la misma columna nullable a SQLite. Un alta `staged` no impide
+autorizar otro número, pero `exchanging`, `staging` y `awaiting` vigente continúan
+serializados por ámbito. Cada versión candidata se fija por UUID y digest; no
+depender de la etiqueta móvil AWSPENDING para recuperar una versión anterior.
+Añadir otra candidata no cambia activos, rutas ni autorización operativa.
+
+Orden de publicación: migración aditiva, broker compatible, gateway y frontend;
+comprobar que el recibo anterior sigue legible y pausado. El rollback conserva
+las columnas y los recibos: retirar la columna con intenciones nuevas está
+prohibido por la migración. Un gateway antiguo no entiende estados nuevos con
+rol explícito; conservar el lector compatible aunque se retire la nueva interfaz.
+
 ## Consulta de autorizaciones guardadas
 
 `whatsappAuthorizationListing.service` resuelve `/authorizations` con el contrato
@@ -128,9 +149,15 @@ Procedimiento de lectura y comprobación:
 4. Llamar exclusivamente a `broker.statusReadOnly(context)`, con cinco segundos
    por llamada. Reservar ese tiempo antes de cada petición dentro de un presupuesto
    remoto total de doce segundos; si no cabe otra, detener y marcar incompleto.
-   Conservar por ámbito el primer recibo `staged` confirmado; un intento reciente
-   fallido no oculta por sí mismo uno anterior.
-5. Releer sesión, permisos, filas y configuración después del broker y antes de
+   Conservar por ámbito y número el primer recibo `staged` confirmado; un intento reciente
+   fallido no oculta por sí mismo uno anterior. Un terminal confirmado
+   `aborted`/`interrupted` sin candidata se omite; no marca incertidumbre por sí solo.
+5. Proyectar `localPhone` por coincidencia exacta de activo/teléfono/WABA/ámbito.
+   Leer columnas explícitas y hojas JSON autorizadas, nunca `additionalData`
+   completo, tokens ni `getClinicConfig`. Más de un activo coincidente es ambiguo.
+   El rol actual del binding/activo prevalece sobre la intención de reconexión.
+   Repetir la lectura y comparar metadatos antes de devolverlos.
+6. Releer sesión, permisos, filas y configuración después del broker y antes de
    responder. Si hay bloqueo, proyectar `blocked` sin selección ni phoneState.
    No escribir estados, abortar, consultar tokens, cambiar `isActive` o iniciar jobs.
 

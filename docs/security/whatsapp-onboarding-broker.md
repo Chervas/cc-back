@@ -150,6 +150,13 @@ borran por salida/error/cancelación; cadenas JS y copias internas del SDK no
 permiten prometer borrado físico completo. Cancelar no revoca remotamente un
 token ya emitido ni deshace un Put que AWS haya aceptado.
 
+Una candidata `staged` permite comenzar otra autorización conservando la anterior.
+Los flujos `awaiting` vigentes, `exchanging` y `staging` sí se excluyen entre sí.
+El rol opcional queda firmado y las candidatas usan versiones inmutables distintas
+en el mismo slot; lectores por UUID/digest aceptan versiones históricas sin
+etiqueta, sin usar AWSCURRENT/AWSPREVIOUS. Compatibilidad de columnas y rollback
+en el [runbook del gateway](whatsapp-onboarding-gateway.md#principal-secundario-y-compatibilidad-de-estados).
+
 Se permite una solicitud pendiente por conexión; diez inicios/hora y seis
 códigos/hora, ochenta/día por conexión. El runtime limita conexiones y peticiones
 simultáneas y el motor tiene un plazo de 25 s. No son cuotas verificadas de Meta.
@@ -266,8 +273,9 @@ anterior cuando este campo no se solicita.
 
 Usar este modo mediante `statusReadOnly` para el
 [listado de autorizaciones del gateway](whatsapp-onboarding-gateway.md#consulta-de-autorizaciones-guardadas).
-Un estado sin candidata `staged` acreditada no es una autorización visible: se
-marca resultado incompleto en el listado. No convertir una lectura incierta en
+Un estado sin candidata `staged` acreditada no es una autorización visible.
+Un terminal `aborted`/`interrupted` confirmado se omite; la incertidumbre de
+estados en curso o errores de lectura marca resultado incompleto. No convertir una lectura incierta en
 un begin/finish de recuperación automático. La firma consume el control de replay
 y la auditoría técnica habituales; «solo lectura» se refiere a los estados y
 credenciales del alta, no a omitir esos controles.

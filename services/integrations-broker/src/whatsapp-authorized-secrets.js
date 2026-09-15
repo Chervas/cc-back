@@ -17,8 +17,10 @@ function createWhatsappAuthorizedSecrets({ client, accountId, prefix, kmsKeyArn,
         const before = check(); const { enrollmentBinding: original, row, metadata } = before;
         await enrollment.candidate(original, row, row.secret_digest, signal); check();
         const result = await client.send(new GetSecretValueCommand({ SecretId: original.secretArn, VersionId: row.id }), { abortSignal: signal }); check();
-        if (result.ARN !== original.secretArn || result.VersionId !== row.id || !Array.isArray(result.VersionStages)
-          || result.VersionStages.some(s => ['AWSCURRENT','AWSPREVIOUS'].includes(s)) || typeof result.SecretString !== 'string'
+        // Historical exact versions may have no label after a later enrollment.
+        const stages = result.VersionStages === undefined ? [] : result.VersionStages;
+        if (result.ARN !== original.secretArn || result.VersionId !== row.id || !Array.isArray(stages)
+          || stages.some(s => ['AWSCURRENT','AWSPREVIOUS'].includes(s)) || typeof result.SecretString !== 'string'
           || Buffer.byteLength(result.SecretString) > 32768) fail('secret_unavailable');
         body = Buffer.from(result.SecretString); if (E.hash(body) !== row.secret_digest) fail('secret_unavailable');
         rawValue = JSON.parse(body.toString('utf8')); token = Buffer.from(rawValue.accessToken || ''); delete rawValue.accessToken;

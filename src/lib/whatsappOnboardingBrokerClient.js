@@ -29,17 +29,19 @@ function binding(value, row) {
 function context(value) {
   try {
     S.exact(value, ['requestId','status','scope','clinicIds','expiresAt','scopeDigest','clinicSetDigest',
+      ...(Object.hasOwn(value || {}, 'channelRole') ? ['channelRole'] : []),
       ...(Object.hasOwn(value || {}, 'state') ? ['state'] : []), ...(Object.hasOwn(value || {}, 'mayExchange') ? ['mayExchange'] : [])]);
     S.exact(value.scope, ['type','id']);
   } catch { fail('whatsapp_onboarding_binding_invalid'); }
   if (!value || !S.uuid(value.requestId) || !['awaiting', 'claimed', 'cancelled', 'expired'].includes(value.status)
+    || Object.hasOwn(value, 'channelRole') && !['primary','secondary'].includes(value.channelRole)
     || !value.scope || !['clinic', 'group'].includes(value.scope.type) || !S.id(value.scope.id)
     || !Array.isArray(value.clinicIds) || !value.clinicIds.length || value.clinicIds.length > 1000
     || value.clinicIds.some((id, i) => !S.id(id) || i > 0 && id <= value.clinicIds[i - 1])
     || !/^[a-f0-9]{64}$/.test(value.scopeDigest) || value.clinicSetDigest !== C.hash(JSON.stringify(value.clinicIds))
     || typeof value.expiresAt !== 'string' || !Number.isFinite(Date.parse(value.expiresAt))
     || new Date(value.expiresAt).toISOString() !== value.expiresAt) fail('whatsapp_onboarding_binding_invalid');
-  return structuredClone(value);
+  return { ...structuredClone(value), channelRole: S.channelRole(value.channelRole) };
 }
 function response(result, name, row, b, requestId, selection) {
   try {
@@ -47,15 +49,16 @@ function response(result, name, row, b, requestId, selection) {
     if (result.requestId !== requestId || typeof result.replayed !== 'boolean') throw Error();
     const d = result.data;
     S.exact(d, ['flowId', 'status', 'expiresAt', 'expired', 'scopeKey', 'scopeDigest', 'clinicCount', 'clinicSetDigest',
-      'configurationChanged', 'accessBlocked', 'connected', 'candidate', ...(Object.hasOwn(d, 'phoneState') ? ['phoneState'] : []), ...(name === 'begin' ? ['authorization'] : [])]);
-    if (d.flowId !== row.requestId || !['awaiting','exchanging','staging','staged','interrupted','aborted'].includes(d.status)
+      'configurationChanged', 'accessBlocked', 'connected', 'candidate', ...(Object.hasOwn(d, 'channelRole') ? ['channelRole'] : []), ...(Object.hasOwn(d, 'phoneState') ? ['phoneState'] : []), ...(name === 'begin' ? ['authorization'] : [])]);
+    if (Object.hasOwn(d, 'channelRole') && !['primary','secondary'].includes(d.channelRole)
+      || d.flowId !== row.requestId || !['awaiting','exchanging','staging','staged','interrupted','aborted'].includes(d.status)
       || d.scopeKey !== b.scopeKey || d.clinicCount !== row.clinicIds.length || d.clinicSetDigest !== row.clinicSetDigest
       || !/^[a-f0-9]{64}$/.test(d.scopeDigest) || !Number.isSafeInteger(d.expiresAt) || d.expiresAt <= 0
       || !['expired', 'configurationChanged', 'accessBlocked'].every(k => typeof d[k] === 'boolean') || d.connected !== false) throw Error();
     const tombstone = d.status === 'aborted';
     // An abort before begin has its own creation time/hash, including when the
     // local authorization has already expired. It can never authorize an exchange.
-    if (!tombstone && (d.scopeDigest !== row.scopeDigest || d.expiresAt !== Date.parse(row.expiresAt))) throw Error();
+    if (!tombstone && (S.channelRole(d.channelRole) !== row.channelRole || d.scopeDigest !== row.scopeDigest || d.expiresAt !== Date.parse(row.expiresAt))) throw Error();
     if (name === 'begin') {
       S.exact(d.authorization, ['appId', 'configId', 'redirectUri']);
       if (d.status !== 'awaiting' || d.configurationChanged || d.accessBlocked || d.expired
@@ -85,7 +88,7 @@ function response(result, name, row, b, requestId, selection) {
         || p.registrationAttempted !== false || !Number.isSafeInteger(p.observedAt) || p.observedAt <= 0
         || d.candidate && d.candidate.phoneId !== p.phoneId) throw Error();
     }
-    return { ...structuredClone(d), phoneState: d.phoneState ?? null };
+    return { ...structuredClone(d), channelRole: S.channelRole(d.channelRole), phoneState: d.phoneState ?? null };
   } catch { fail('whatsapp_onboarding_result_unknown', true); }
 }
 function createWhatsappOnboardingBrokerClient({ client, loadBinding, guard = assertGateway }) {
@@ -94,7 +97,7 @@ function createWhatsappOnboardingBrokerClient({ client, loadBinding, guard = ass
     guard(); const row = context(value); const payload = structuredClone(input); let selected;
     try { selected = binding(await loadBinding(row.scope), row); } catch { fail('whatsapp_onboarding_binding_invalid'); }
     guard();
-    const body = name === 'begin' ? { state: row.state, expiresAt: Date.parse(row.expiresAt), scopeDigest: row.scopeDigest, clinicSetDigest: row.clinicSetDigest }
+    const body = name === 'begin' ? { state: row.state, expiresAt: Date.parse(row.expiresAt), scopeDigest: row.scopeDigest, clinicSetDigest: row.clinicSetDigest, channelRole: row.channelRole }
       : { flowId: row.requestId, ...payload };
     try { C.validators[name](body); } catch { fail('whatsapp_onboarding_binding_invalid'); }
     const requestId = name === 'begin' ? row.requestId : randomUUID();

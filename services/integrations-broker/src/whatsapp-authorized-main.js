@@ -31,7 +31,7 @@ function validateConfig(config) {
   });
   for (const key of ['connectionRef','authorizationId','phoneId'])
     if (new Set(authorizations.map(a => a[key])).size !== authorizations.length) fail('invalid_request');
-  const slots = new Set(); const apps = new Set(); const enrollmentRefs = new Set(); const scopes = new Set();
+  const slots = new Map(); const apps = new Set(); const enrollmentRefs = new Map(); const scopes = new Map();
   const prefix = `arn:aws:secretsmanager:eu-west-3:${ACCOUNT}:secret:/clinicaclick/integrations/prod/`;
   for (const a of authorizations) {
     const binding = policy.connections.find(b => b.connectionRef === a.connectionRef);
@@ -41,10 +41,15 @@ function validateConfig(config) {
     if (!C.keys(enrollment, ['clientSecretArn','connectionRef','expiresAt','initialState','provider','secretArn','whatsappOnboarding'])
       || !Number.isSafeInteger(enrollment.expiresAt) || enrollment.expiresAt < a.expiresAt
       || !['active','blocked','revoked','expired'].includes(enrollment.initialState)
-      || slots.has(enrollment.secretArn) || enrollmentRefs.has(enrollment.connectionRef) || scopes.has(b.scopeKey)) fail('invalid_request');
+      || slots.has(enrollment.secretArn) && slots.get(enrollment.secretArn) !== enrollment.connectionRef
+      || scopes.has(b.scopeKey) && scopes.get(b.scopeKey) !== enrollment.connectionRef
+      || enrollmentRefs.has(enrollment.connectionRef) && enrollmentRefs.get(enrollment.connectionRef) !== JSON.stringify(enrollment)) fail('invalid_request');
     for (const arn of [enrollment.secretArn,enrollment.clientSecretArn])
       if (!arn.startsWith(prefix) || !/^[A-Za-z0-9/_+=.@-]+$/.test(arn.slice(prefix.length))) fail('invalid_request');
-    slots.add(enrollment.secretArn); apps.add(enrollment.clientSecretArn); enrollmentRefs.add(enrollment.connectionRef); scopes.add(b.scopeKey);
+    // One enrollment binding may hold multiple immutable flow versions. It may
+    // never be aliased to a different scope/slot or changed between numbers.
+    slots.set(enrollment.secretArn, enrollment.connectionRef); apps.add(enrollment.clientSecretArn);
+    enrollmentRefs.set(enrollment.connectionRef, JSON.stringify(enrollment)); scopes.set(b.scopeKey, enrollment.connectionRef);
     const grants = policy.grants.filter(g => g.connectionRef === binding.connectionRef);
     if (grants.length !== b.clinicIds.length * 2) fail('invalid_request');
     const seen = new Set();
@@ -56,7 +61,7 @@ function validateConfig(config) {
       seen.add(key);
     }
   }
-  if ([...slots].some(arn => apps.has(arn))) fail('invalid_request');
+  if ([...slots.keys()].some(arn => apps.has(arn))) fail('invalid_request');
   return config;
 }
 function enrollmentLoader(config) {

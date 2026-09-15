@@ -53,3 +53,17 @@ test('Email step-up preserves the authenticated session and stops before scope o
   await assert.rejects(service.issue(input()), { code: 'auth_email_verification_required', status: 403, message: 'auth_email_verification_required' });
   assert(checked); assert(key.every(byte => byte === 0));
 });
+
+test('Channel intent is optional primary by default, strict when supplied and cryptographically bound for new states', () => {
+  for (const channelRole of ['primary','secondary']) assert.equal(C.request({...input(),channelRole},'issue').channelRole,channelRole);
+  for (const channelRole of [null,'PRIMARY','other',false,{},['secondary']]) assert.throws(()=>C.request({...input(),channelRole},'issue'));
+  const row = {request_id:randomUUID(),user_id:501,session_ref:randomUUID(),session_expires_at:new Date('2030-01-01T01:00:00Z'),
+    scope_type:'clinic',scope_id:71,original_clinic_ids:[71],scope_digest:C.digest('fixture'),
+    created_at:new Date('2030-01-01T00:00:00Z'),expires_at:new Date('2030-01-01T00:10:00Z')};
+  const v1 = C.digest(JSON.stringify(['whatsapp-onboarding-v1',row.request_id,row.user_id,row.session_ref,row.session_expires_at.toISOString(),
+    row.scope_type,row.scope_id,row.original_clinic_ids,row.scope_digest,row.created_at.toISOString(),row.expires_at.toISOString()]));
+  assert.equal(C.contextDigest(row),v1); assert.equal(C.contextDigest({...row,channel_role:null}),v1);
+  const primary=C.contextDigest({...row,channel_role:'primary'}),secondary=C.contextDigest({...row,channel_role:'secondary'});
+  assert.notEqual(primary,v1);assert.notEqual(primary,secondary);assert.notEqual(secondary,v1);
+  assert.throws(()=>C.contextDigest({...row,channel_role:'invalid'}));
+});

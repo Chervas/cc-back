@@ -12,11 +12,7 @@ const known = new Set(['whatsapp_authorization_invalid', 'whatsapp_authorization
   'whatsapp_authorization_consumed', 'whatsapp_authorization_cancelled', 'whatsapp_authorization_limit',
   'whatsapp_onboarding_disabled', 'whatsapp_onboarding_configuration_invalid', 'auth_invalid',
   'auth_configuration_invalid', 'auth_email_verification_required', 'meta_security_state_unavailable']);
-function context(row) {
-  return C.digest(JSON.stringify(['whatsapp-onboarding-v1', row.request_id, row.user_id, row.session_ref,
-    row.session_expires_at.toISOString(), row.scope_type, row.scope_id, row.original_clinic_ids,
-    row.scope_digest, row.created_at.toISOString(), row.expires_at.toISOString()]));
-}
+const context = C.contextDigest;
 function validateRow(row, input, key) {
   if (!row || row.user_id !== input.userId || row.session_ref !== input.sessionRef
     || !Number.isFinite(row.session_expires_at?.getTime())
@@ -65,7 +61,7 @@ function createService({ models, sessions, audit, config = C.settings, now = () 
   }
   function projection(row) {
     return { requestId: row.request_id, status: ['awaiting', 'claimed'].includes(row.state) && row.expires_at <= now() ? 'expired' : row.state,
-      scope: { type: row.scope_type, id: row.scope_id }, clinicIds: [...row.original_clinic_ids], expiresAt: row.expires_at.toISOString(),
+      channelRole: C.channelRole(row.channel_role), scope: { type: row.scope_type, id: row.scope_id }, clinicIds: [...row.original_clinic_ids], expiresAt: row.expires_at.toISOString(),
       // Internal binding evidence for the broker bridge; public DTOs omit hashes.
       scopeDigest: row.scope_digest, clinicSetDigest: C.digest(JSON.stringify(row.original_clinic_ids)) };
   }
@@ -101,7 +97,7 @@ function createService({ models, sessions, audit, config = C.settings, now = () 
             C.fail('whatsapp_authorization_limit', 429);
           }
           row = { request_id: input.requestId, user_id: input.userId, session_ref: input.sessionRef,
-            session_expires_at: new Date(input.sessionExpiresAt * 1000), scope_type: scope.type, scope_id: scope.id,
+            channel_role: C.channelRole(input.channelRole), session_expires_at: new Date(input.sessionExpiresAt * 1000), scope_type: scope.type, scope_id: scope.id,
             original_clinic_ids: current.ids, scope_digest: current.digest, created_at: at, expires_at: expires, state: 'awaiting',
             code_hash: null, claimed_at: null, cancelled_at: null };
           row.context_digest = context(row); row.state_hash = C.digest(C.stateFor(cfg.key, row));
@@ -109,6 +105,7 @@ function createService({ models, sessions, audit, config = C.settings, now = () 
           return { ...projection(row), state: C.stateFor(cfg.key, row) };
         }
         validateRow(row, input, cfg.key);
+        if (operation === 'issue' && C.channelRole(input.channelRole) !== C.channelRole(row.channel_role)) C.fail('whatsapp_authorization_conflict', 409);
         if (scope.type !== row.scope_type || scope.id !== row.scope_id || current && (current.digest !== row.scope_digest
           || JSON.stringify(current.ids) !== JSON.stringify(row.original_clinic_ids))) C.fail('whatsapp_authorization_conflict', 409);
         if (operation === 'cancel') {

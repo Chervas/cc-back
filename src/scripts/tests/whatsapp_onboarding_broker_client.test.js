@@ -173,3 +173,17 @@ test('Gateway never labels an expired completed receipt authorized when access o
     assert.equal(g.f.state.codes, 1); assert.equal(g.f.state.puts, 1);
   }
 });
+
+test('Gateway binds channel intent to the signed flow and refuses changed or downgraded broker results', async t => {
+  const g = brokerForGateway(t); const row={...context(g),channelRole:'secondary'};
+  let sent; g.state.before=command=>{sent=command;};
+  assert.equal((await g.client.begin(row)).channelRole,'secondary');
+  assert.equal(sent.payload.channelRole,'secondary');
+  const finished=await g.client.finish(row,finish(row)); assert.equal(finished.channelRole,'secondary');
+  g.f.restart(); assert.equal((await g.client.statusReadOnly(row)).channelRole,'secondary');
+  for(const change of [d=>{d.channelRole='primary';},d=>{delete d.channelRole;},d=>{d.channelRole='invalid';},d=>{d.channelRole=null;}]){
+    g.state.after=(cmd,result)=>{change(result.data);return result;};
+    await assert.rejects(g.client.status(row),{code:'whatsapp_onboarding_result_unknown'});
+  }
+  assert.equal(g.f.state.codes,1);assert.equal(g.f.state.puts,1);
+});

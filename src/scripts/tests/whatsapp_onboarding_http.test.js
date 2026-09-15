@@ -97,3 +97,12 @@ test('Public errors contain fixed codes and explicit uncertainty without provide
   f.state.failure = Error('FICTITIOUS_INTERNAL_SECRET');
   assert.deepEqual((await f.request('status', body)).body, { error: { code: 'whatsapp_authorization_unavailable' }, outcomeUnknown: false });
 });
+
+test('Only begin accepts optional channel intent and forwards it without a client identity override', async t => {
+  const f=await fixture(t), requestId=randomUUID();
+  for(const channelRole of ['primary','secondary']){
+    assert.equal((await f.request('begin',{requestId,scope:{type:'clinic',id:71},channelRole})).status,200);
+    assert.equal(f.state.calls.at(-1).input.channelRole,channelRole);
+  }
+  for(const name of ['finish','status','cancel'])assert.equal((await f.request(name,{requestId,channelRole:'secondary'})).status,400);
+});

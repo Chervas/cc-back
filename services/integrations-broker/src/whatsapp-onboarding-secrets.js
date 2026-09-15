@@ -41,10 +41,11 @@ function createWhatsappOnboardingSecrets({ client, accountId, prefix, kmsKeyArn 
     const b = C.bindingFor(binding); const metadata = C.grantMetadata(value, binding);
     if (!C.uuid(flow.id) || !/^[a-f0-9]{64}$/.test(flow.scope_digest) || flow.clinic_digest !== C.clinicDigest(b)
       || !Number.isSafeInteger(flow.expires_at) || flow.expires_at <= 0 || metadata.wabaId !== flow.waba_id || metadata.phoneId !== flow.phone_id
+      || flow.channel_role != null && !['primary','secondary'].includes(flow.channel_role)
       || !Buffer.isBuffer(token) || !tokenText(token.toString('utf8'))) fail('invalid_request');
     const v = { version: 1, provider: 'meta-whatsapp-candidate', flowId: flow.id, connectionRef: binding.connectionRef,
       scopeKey: b.scopeKey, scopeDigest: flow.scope_digest, clinicSetDigest: flow.clinic_digest, authorizationExpiresAt: flow.expires_at,
-      configId: b.configId, ...metadata, accessToken: token.toString('utf8') };
+      configId: b.configId, ...(flow.channel_role != null ? { channelRole: flow.channel_role } : {}), ...metadata, accessToken: token.toString('utf8') };
     const body = Buffer.from(JSON.stringify(v)); if (body.length > 32768) { body.fill(0); fail('invalid_request'); }
     return { body, digest: C.hash(body), metadata };
   }

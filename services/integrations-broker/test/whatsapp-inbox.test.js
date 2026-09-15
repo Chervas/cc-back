@@ -103,3 +103,17 @@ test('HTTP returns 200 only after durable storage; duplicate signatures and unav
   assert.equal((await send([packet().signature, packet().signature])).status, 401);
   allowed = false; const failed = await send(); assert.equal(failed.status, 503); assert.equal(failed.retry, '60'); assert(!failed.body.includes('FICTITIOUS'));
 });
+
+test('Additive onboarding role upgrade preserves held inbox ciphertext and passive replay without business work', t => {
+  const f=fixture(t),input=packet(),first=f.inbox.accept(input);
+  f.store.db.exec('ALTER TABLE whatsapp_onboarding_flows DROP COLUMN channel_role');
+  const before=f.store.db.prepare('SELECT * FROM whatsapp_inbox WHERE receipt=?').get(first.receipt);
+  const auditBefore=f.store.backlog().pending;
+  f.restart();
+  assert(f.store.db.prepare('PRAGMA table_info(whatsapp_onboarding_flows)').all().some(v=>v.name==='channel_role'));
+  assert.deepEqual(f.store.db.prepare('SELECT * FROM whatsapp_inbox WHERE receipt=?').get(first.receipt),before);
+  const replay=f.inbox.accept(input);assert.equal(replay.receipt,first.receipt);assert.equal(replay.businessProcessed,false);
+  assert.equal(f.store.backlog().pending,auditBefore);
+  const lease=f.inbox.lease(first.receipt);assert.equal(lease.automaticActionsAllowed,false);assert(lease.raw.equals(input.raw));lease.raw.fill(0);
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM commands').get().n,0);
+});

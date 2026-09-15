@@ -18,6 +18,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   }
   const migration = require('../../../migrations/20260913150000-create-whatsapp-authorization-states');
   await migration.up(qi, D); await migration.down(qi, D); await migration.up(qi, D);
+  const roleMigration = require('../../../migrations/20260915190000-add-whatsapp-authorization-channel-role');
+  await roleMigration.up(qi, D); await roleMigration.down(qi, D); await roleMigration.up(qi, D);
   for (const [name, file] of [['PlatformAuditEvent', 'platformauditevent'], ['AuthSession', 'authsession'],
     ['MetaScopeBlock', 'metascopeblock'], ['WhatsappAuthorizationState', 'whatsappauthorizationstate']]) models[name] = require('../../../models/' + file)(sql, D);
   const R = models.WhatsappAuthorizationState; const A = models.PlatformAuditEvent;
@@ -206,6 +208,27 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     assert.equal((await api().status(next)).authorizationStatus, 'cancelled');
   });
   report.checks.push('Logout during provider work suppresses the response and aborts the broker candidate; independent broker cancellation is shown as cancelled without activating or releasing consumed codes');
+  // Separate owner/data to exercise the additive role migration and its MACs.
+  const roleWho = await actor(); const scope = { type: 'group', id: 9 };
+  const firstRole = await service.issue({ ...roleWho, requestId: randomUUID(), scope, channelRole: 'primary' });
+  const secondRole = await service.issue({ ...roleWho, requestId: randomUUID(), scope, channelRole: 'secondary' });
+  assert.equal(secondRole.channelRole, 'secondary'); assert.deepEqual(secondRole.clinicIds, [71,72]);
+  assert.equal((await make().status(inputFor(roleWho, secondRole))).channelRole, 'secondary');
+  await assert.rejects(service.issue({ ...roleWho, requestId: secondRole.requestId, scope, channelRole: 'primary' }), codeIs('whatsapp_authorization_conflict'));
+  await R.update({ channel_role: 'primary' }, { where: { request_id: secondRole.requestId } });
+  await assert.rejects(service.status(inputFor(roleWho, secondRole)), codeIs('whatsapp_authorization_unavailable'));
+  await R.update({ channel_role: null }, { where: { request_id: secondRole.requestId } });
+  await assert.rejects(service.status(inputFor(roleWho, secondRole)), codeIs('whatsapp_authorization_unavailable'));
+  await R.update({ channel_role: 'secondary' }, { where: { request_id: secondRole.requestId } });
+  await claim(roleWho, secondRole); await service.cancel(inputFor(roleWho, secondRole));
+  assert.equal((await service.status(inputFor(roleWho, firstRole))).status, 'awaiting');
+  const SC = require('../../services/whatsappAuthorizationState.contract');
+  const legacy = (await R.findByPk(firstRole.requestId, { raw:true })); legacy.channel_role = null;
+  legacy.context_digest = SC.contextDigest(legacy); legacy.state_hash = SC.digest(SC.stateFor(Buffer.alloc(32,7),legacy));
+  await R.update({ channel_role:null,context_digest:legacy.context_digest,state_hash:legacy.state_hash },{where:{request_id:firstRole.requestId}});
+  assert.equal((await make().status(inputFor(roleWho, firstRole))).channelRole,'primary');
+  await assert.rejects(roleMigration.down(qi,D),/Preserve signed WhatsApp channel intents/);
+  report.checks.push('Additive nullable role migration preserves legacy v1 MAC, new roles survive restart, role mutation/null downgrade fails closed and cancelling secondary leaves primary untouched');
   const rows = await A.findAll({ raw: true }); const bodies = rows.map(r => r.body).join('\n');
   assert(!bodies.includes(flow.state)); assert(!bodies.includes('FICTITIOUS_OAUTH_CODE')); assert(!bodies.includes('FICTITIOUS_JWT_KEY'));
   assert(rows.every(r => JSON.parse(r.body).version === 15));

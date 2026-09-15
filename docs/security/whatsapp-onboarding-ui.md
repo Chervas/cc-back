@@ -24,12 +24,13 @@ El navegador no elige otro gateway, proveedor, runtime, App ID, configuración o
 redirect URI. Estos tres últimos datos llegan del binding verificado del broker.
 La selección del modo no amplía permisos.
 
-Solo se admite el canal principal de clínica/grupo. Alta sin asignación para
-Director de pacientes y canales secundarios muestran indisponibilidad explícita;
-no se convierten silenciosamente en otro ámbito. Siguen pendientes su contrato
-y pruebas. La modalidad viaja al SDK como selección de interfaz, **todavía no
+Se admite autorizar principal o secundario de clínica/grupo. El rol viaja como
+`channelRole` y queda vinculado al estado firmado; no cambia por sí mismo la
+asignación de un activo existente. Alta sin asignación para Director de pacientes
+sigue sin soporte y muestra indisponibilidad explícita; no se convierte en otro
+ámbito. La modalidad viaja al SDK como selección de interfaz, **todavía no
 forma parte del estado durable firmado ni acredita el modo operativo del número**.
-La futura activación debe comprobar y fijar modo/rol antes de usarlos.
+La futura activación debe comprobar modo y asignación antes de usarlos.
 
 ## Listado durable en Ajustes
 
@@ -41,8 +42,11 @@ sessionStorage del intento ni de la sesión que realizó OAuth. El contrato de
 el [runbook del gateway](whatsapp-onboarding-gateway.md#consulta-de-autorizaciones-guardadas)
 detalla las comprobaciones y los límites de lectura.
 
-Las candidatas se presentan separadas de los teléfonos activos, con
-«Autorizado · Envíos pausados» y el ámbito correspondiente. No aumentan el contador
+Las candidatas con `localPhone` se integran en las fichas existentes, con
+«Autorizado · Envíos pausados», perfil y salud local fechada. Las colecciones de
+presentación son distintas de los teléfonos operativos; sin metadatos inequívocos
+se presenta el recibo sin fabricar un perfil. Se mantienen los controles previos
+y se explica la indisponibilidad de acciones legacy mientras el canal siga pausado. No aumentan el contador
 de canales conectados, no se usan como remitentes y no modifican `isActive`.
 El plazo OAuth ya vencido no oculta un recibo `awaiting_activation`. Un estado
 bloqueado se muestra sin selección de número y no se ofrece como operativo.
@@ -52,7 +56,8 @@ de verificar»; nunca se convierten en «no vinculada». No abrir otro popup ni
 repetir OAuth para resolver un fallo de listado. La respuesta no contiene el
 bloque `authorization`, estados OAuth, códigos ni secretos.
 
-QA visual: comprobar escritorio y móvil, scope concreto/global, un recibo
+QA visual: comprobar escritorio y móvil, fichas existentes, perfil, salud,
+principal/secundario, añadir otro número, acciones pausadas, scope concreto/global, un recibo
 pendiente, bloqueo, lista incompleta y fallo de transporte. Cambiar de ámbito
 no debe mostrar el resultado tardío de otro. Cerrar el diálogo y recargar deben
 recuperar el mismo recibo sin abrir Meta. La publicación se verifica por el índice

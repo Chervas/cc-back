@@ -7,8 +7,9 @@ const { STAFF_ROLES, isGlobalAdmin } = require('../lib/role-helpers');
 const scopeBlocks = require('./metaScopeBlock.service');
 const { configuredClient, configuration } = require('../lib/whatsappOnboardingBrokerClient');
 const { project, safe } = require('./whatsappOnboardingGateway.service');
+const phoneMetadata = require('./whatsappAuthorizationPhoneMetadata.service');
 const ATTRIBUTES = ['request_id','user_id','session_ref','session_expires_at','scope_type','scope_id','original_clinic_ids',
-  'scope_digest','state_hash','context_digest','state','created_at','expires_at','claimed_at'];
+  'scope_digest','state_hash','context_digest','state','created_at','expires_at','claimed_at','channel_role'];
 function input(value) {
   S.exact(value, ['scope','userId','sessionRef','sessionExpiresAt']);
   const { scope, ...actor } = value; S.request({ ...actor, requestId: randomUUID() }, 'status');
@@ -24,9 +25,7 @@ function integrity(row, key) {
     || row.expires_at <= row.created_at || row.expires_at - row.created_at > 600000 || row.expires_at > row.session_expires_at
     || row.claimed_at < row.created_at || row.claimed_at > row.expires_at || !/^[a-f0-9]{64}$/.test(row.scope_digest)) S.fail('whatsapp_authorization_unavailable',503);
   // Preserve the original actor/session in the MAC. The viewer is authorized separately.
-  const context = S.digest(JSON.stringify(['whatsapp-onboarding-v1',row.request_id,row.user_id,row.session_ref,
-    row.session_expires_at.toISOString(),row.scope_type,row.scope_id,row.original_clinic_ids,row.scope_digest,
-    row.created_at.toISOString(),row.expires_at.toISOString()]));
+  const context = S.contextDigest(row);
   if (!S.equalHash(context,row.context_digest) || !S.equalHash(S.digest(S.stateFor(key,row)),row.state_hash)) S.fail('whatsapp_authorization_unavailable',503);
   return row;
 }
@@ -84,10 +83,9 @@ function createService({ models, sessions, broker = configuredClient(), config =
         [Op.or]:[...allowed.values()].map(({scope})=>({scope_type:scope.type,scope_id:scope.id}))},
         attributes:ATTRIBUTES,order:[['created_at','DESC'],['request_id','DESC']],limit:50,raw:true });
       if (rows.length >= 50) incomplete = true;
-      const seen = new Set(); const authorizations = []; const remoteDeadline = clock()+12000;
+      const seen = new Set(); const authorizations = []; const metadataDigests = new Map(); const remoteDeadline = clock()+12000;
       for (const row of rows) {
         const scopeKey = row.scope_type + ':' + row.scope_id;
-        if (seen.has(scopeKey)) continue;
         const selected = allowed.get(scopeKey); if (!selected) { incomplete = true; continue; }
         try {
           integrity(row,cfg.key);
@@ -95,7 +93,7 @@ function createService({ models, sessions, broker = configuredClient(), config =
             || row.scope_digest !== selected.snap.digest) { incomplete = true; continue; }
           const local = {requestId:row.request_id,status:row.expires_at <= now() ? 'expired' : 'claimed',scope:selected.scope,
             clinicIds:[...row.original_clinic_ids],expiresAt:row.expires_at.toISOString(),scopeDigest:row.scope_digest,
-            clinicSetDigest:S.digest(JSON.stringify(row.original_clinic_ids))};
+            clinicSetDigest:S.digest(JSON.stringify(row.original_clinic_ids)),channelRole:S.channelRole(row.channel_role)};
           await verifyActor(actor); const before = await snapshot(selected.scope,actor);
           if (before.digest !== selected.snap.digest || JSON.stringify(loadBindings()) !== JSON.stringify(bindings)) { incomplete = true; continue; }
           // The read-only client has a 5s timeout. Reserve its entire budget so
@@ -108,10 +106,24 @@ function createService({ models, sessions, broker = configuredClient(), config =
           if (!current || current.state !== 'claimed') continue;
           integrity(current,cfg.key);
           if (JSON.stringify(current) !== JSON.stringify(row)) { incomplete = true; continue; }
+          // A confirmed terminal attempt without a candidate says nothing about
+          // other attempts, but it is not an uncertainty in this inventory.
+          if (['aborted','interrupted'].includes(remote?.status) && remote.candidate === null) continue;
           if (remote?.status !== 'staged' || !remote.candidate) { incomplete = true; continue; }
           const result = project(local,{...remote,accessBlocked:remote.accessBlocked || after.blocked});
           if (!['awaiting_activation','blocked'].includes(result.authorizationStatus)) { incomplete = true; continue; }
-          seen.add(scopeKey); authorizations.push(result);
+          const phoneKey = scopeKey + ':' + remote.candidate.phoneId;
+          if (seen.has(phoneKey)) continue;
+          // Receipt identity is verified before any local metadata query. A
+          // blocked receipt never exposes its phone, including historical data.
+          result.localPhone = null;
+          if (result.authorizationStatus === 'awaiting_activation') {
+            try {
+              const metadata = await phoneMetadata.read({models:db(),authorization:result,now:now()});
+              result.localPhone = metadata.phone; metadataDigests.set(result.requestId,metadata.digest);
+            } catch { incomplete = true; }
+          }
+          seen.add(phoneKey); authorizations.push(result);
         } catch (error) {
           // Revoked viewer sessions fail the whole request, never disclose stale results.
           if (['auth_invalid','auth_email_verification_required','auth_configuration_invalid'].includes(error?.code)) throw error;
@@ -120,6 +132,15 @@ function createService({ models, sessions, broker = configuredClient(), config =
         }
       }
       await verifyActor(actor);
+      // Complete metadata re-reads before the final ACL sweep; a later phone
+      // lookup must not leave an earlier scope with only its old permission check.
+      for (const dto of authorizations) {
+        if (!dto.localPhone) continue;
+        try {
+          const fresh = await phoneMetadata.read({models:db(),authorization:dto,now:now()});
+          if (fresh.digest !== metadataDigests.get(dto.requestId)) { dto.localPhone = null; incomplete = true; }
+        } catch { dto.localPhone = null; incomplete = true; }
+      }
       // Recheck every emitted scope after all remote work, covering revocation
       // while another scope's status was being fetched.
       const visible = [];
@@ -131,7 +152,7 @@ function createService({ models, sessions, broker = configuredClient(), config =
           if (!current || current.state !== 'claimed') continue;
           integrity(current,cfg.key);
           if (JSON.stringify(current) !== JSON.stringify(rows.find(row=>row.request_id === dto.requestId))) { incomplete = true; continue; }
-          if (latest.blocked) visible.push({...dto,authorizationStatus:'blocked',pending:false,selected:null,phoneState:null});
+          if (latest.blocked) visible.push({...dto,authorizationStatus:'blocked',pending:false,selected:null,phoneState:null,localPhone:null});
           else visible.push(dto);
         } catch (error) { if (error?.code === 'whatsapp_authorization_forbidden' && actor.scope === null) continue; throw error; }
       }
