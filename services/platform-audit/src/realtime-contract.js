@@ -1,7 +1,7 @@
 'use strict';
 // Closed browser event vocabulary. Redis automation envelopes retain their own contract.
 const SOCKET_EVENTS = Object.freeze([
-  'message:created', 'message:updated', 'conversation:updated', 'conversation:read',
+  'message:refresh', 'message:created', 'message:updated', 'conversation:updated', 'conversation:read',
   'lead:created', 'lead:call_initiated', 'lead:call_outcome',
   'appointment:created', 'appointment:updated', 'appointment:deleted',
   'flow_execution:created', 'flow_execution:engine_start', 'flow_execution:updated',
