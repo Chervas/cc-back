@@ -147,10 +147,10 @@ module.exports = {
         if (confirmedPublisher.status === 'wait') await confirmedPublisher.connect();
         if (confirmedPublisher.status !== 'ready') throw Error('realtime_bus_unavailable');
         const subscribers = await confirmedPublisher.publish(SOCKET_BUS_CHANNEL, JSON.stringify({
-            source: SOCKET_BUS_SOURCE, event, payload: body, rooms: roomList,
+            source: SOCKET_BUS_SOURCE, event: 'message:refresh', payload: body, rooms: roomList,
         }));
         if (!Number.isInteger(subscribers) || subscribers < 1) throw Error('realtime_bus_unavailable');
-        emitLocal(event, body, roomList);
+        emitLocal('message:refresh', body, roomList);
         return subscribers;
     },
     setIO(io) {
