@@ -44,13 +44,22 @@ describe el business token como resultado sin exigir esa pista adicional.
 Si se interrumpe antes de guardar una candidata, la auditoría conserva además
 un motivo fijo `whatsapp_failed_<fase>` (lectura de aplicación, canje,
 inspección de permisos, pertenencia del número o preparación de candidata).
-Si la inspección obtiene una respuesta que se rechaza, añade hasta 17 motivos
+Si la inspección obtiene una respuesta que se rechaza, añade hasta 40 motivos
 `wa_grant_<campo>_<clasificación>`: presencia/forma de permisos, alcance exacto
 del WABA, identidad y vigencia, incluida coherencia con la caducidad del canje.
-Son categorías fijas del código; no contienen identificadores, nombres,
-valores de permisos ajenos, fechas, mensajes del proveedor ni credenciales.
+Son categorías fijas del código; no contienen identificadores, nombres libres,
+fechas, mensajes del proveedor ni credenciales. Una lista cerrada de nombres
+de permisos permite distinguir `business_management`, Ads, páginas, Instagram,
+leads y otros permisos conocidos; cualquier nombre ajeno a la lista se reduce
+a `extra_other`. Distingue destinos duplicados de múltiples destinos e indica
+si el WABA seleccionado figura entre ellos, sin copiar los otros IDs.
 Se registran conjuntamente para diagnosticar discrepancias simultáneas;
 no relajan los criterios del inspector ni se exponen al navegador.
+La multiplicidad por sí sola no demuestra acceso a otros clientes: Meta describe
+los [business tokens](https://developers.facebook.com/documentation/business-messaging/whatsapp/access-tokens/#business-integration-system-user-access-tokens)
+por cliente incorporado, que puede tener varios activos. Sigue pendiente probar
+su pertenencia y definir ese alcance en el broker antes de aceptar un token
+con varios WABA. El piloto vigente conserva el requisito de un único WABA.
 Las fases proceden del código, nunca de mensajes del proveedor. No se conservan
 respuestas crudas para diagnosticar; un intento interrumpido no vuelve a canjear
 su código y requiere una nueva autorización humana después de corregir el fallo.
