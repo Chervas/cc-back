@@ -88,32 +88,48 @@ test('Partial Meta returns explain the missing half without submitting, retrying
     f.meta(); f.code({ authResponse: { code: 'FICTITIOUS_LATE_CODE' } }); assert.equal(f.messages.length, 2);
   }
 });
-test('Closing the captured Meta popup cancels without requiring an SDK callback and restores the isolated open method', t => {
+test('A closed WindowProxy alone never cancels a still-open COOP-isolated authorization', t => {
+  const f = fixture(t); f.start(); const popup = f.opened[0].popup;
+  popup.closed = true;
+  assert.equal(f.scheduled.some(value => [500, 2000].includes(value.ms)), false);
+  assert.equal(f.messages.length, 1); assert.equal(popup.closeCalls, 0);
+  f.meta(); f.code({ authResponse: { code: 'FICTITIOUS_CODE' } });
+  assert.equal(f.messages.at(-1).data.type, 'cc.wa.result');
+  assert.equal(f.win.open, f.nativeOpen);
+});
+test('A closed handle and empty SDK callback stay uncertain until an explicit Meta cancellation', t => {
   const f = fixture(t); f.start(); const popup = f.opened[0].popup;
   assert.deepEqual(f.opened[0].args, ['https://www.facebook.com/v24.0/dialog/oauth?app_id=101','fb-popup','width=600']);
-  popup.closed = true; f.tick(500); assert.equal(f.messages.length, 1); f.tick(2000);
+  popup.closed = true; f.code({});
+  assert.equal(f.messages.length, 1); assert.equal(popup.closeCalls, 0);
+  assert.match(f.elements.status.textContent, /Meta no ha confirmado/);
+  assert.equal(f.elements.cancel.disabled, false);
+  f.meta(JSON.stringify({ type: 'WA_EMBEDDED_SIGNUP', event: 'CANCEL' }));
   assert.equal(f.messages.at(-1).data.type, 'cc.wa.cancel'); assert.equal(f.win.open, f.nativeOpen);
   assert.equal(f.listeners.size, 0); assert.equal(popup.closeCalls, 1);
-  f.code({ authResponse: { code: 'FICTITIOUS_LATE_CODE' } }); f.meta(); f.tick(2000);
+  f.code({ authResponse: { code: 'FICTITIOUS_LATE_CODE' } }); f.meta();
   assert.equal(f.messages.length, 2); assert(!JSON.stringify(f.messages).includes('FICTITIOUS'));
 });
-test('An empty SDK callback also cancels when the browser provides no observable popup handle', t => {
+test('An empty SDK callback without an observable popup handle keeps an explicit cancellation available', t => {
   const f = fixture(t, { loginOpens: false }); f.win.open = undefined; f.start(); f.code({});
-  assert.equal(f.messages.length, 1); f.tick(2000); assert.equal(f.messages.at(-1).data.type, 'cc.wa.cancel');
+  assert.equal(f.messages.length, 1); assert.equal(f.elements.cancel.disabled, false);
+  f.elements.cancel.click(); assert.equal(f.messages.at(-1).data.type, 'cc.wa.cancel');
 });
-test('Successful completion wins the popup-close race in either callback order', t => {
+test('Successful completion after an uncertain callback works exactly once in either callback order', t => {
   for (const first of ['code','selection']) {
-    const f = fixture(t); f.start(); f.opened[0].popup.closed = true; f.tick(500);
+    const f = fixture(t); f.start(); f.opened[0].popup.closed = true; f.code({});
     if (first === 'code') f.code({ authResponse: { code: 'FICTITIOUS_CODE' } }); else f.meta();
-    f.tick(2000); assert.equal(f.messages.length, 1);
+    assert.equal(f.messages.length, 1);
     if (first === 'code') f.meta(); else f.code({ authResponse: { code: 'FICTITIOUS_CODE' } });
     assert.equal(f.messages.at(-1).data.type, 'cc.wa.result');
-    f.tick(25000); f.tick(500); assert.equal(f.messages.length, 2);
+    f.tick(25000); assert.equal(f.messages.length, 2);
   }
 });
-test('A closed popup with an incomplete result cancels after a bounded grace without leaking or submitting the partial code', t => {
+test('An uncertain partial response stays local and user cancellation never submits or leaks its code', t => {
   const f = fixture(t); f.start(); f.code({ authResponse: { code: 'FICTITIOUS_PARTIAL_CODE' } });
-  f.opened[0].popup.closed = true; f.tick(500); f.tick(2000); f.tick(25000);
+  f.opened[0].popup.closed = true; f.code({}); f.tick(25000);
+  assert.equal(f.messages.length, 1); assert.equal(f.elements.cancel.disabled, false);
+  f.elements.cancel.click();
   assert.equal(f.messages.at(-1).data.type, 'cc.wa.cancel'); assert(!JSON.stringify(f.messages).includes('FICTITIOUS_PARTIAL_CODE'));
   f.meta(); assert.equal(f.messages.length, 2);
 });

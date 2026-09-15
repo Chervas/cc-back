@@ -9,11 +9,11 @@
   const exact = (v, keys) => v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).sort().join(',') === keys.sort().join(',');
   const nonce = Array.from(win.crypto.getRandomValues(new Uint8Array(32)), v => v.toString(16).padStart(2, '0')).join('');
   let parentOrigin; let input; let started = false; let done = false; let code; let selection; let timer; let returnTimer;
-  let popup; let nativeOpen; let trackedOpen; let popupTimer; let closedTimer; let incompleteClosedTimer;
+  let popup; let nativeOpen; let trackedOpen;
   const text = value => { doc.getElementById('status').textContent = value; };
   const button = doc.getElementById('authorize'); const cancel = doc.getElementById('cancel');
   function cleanup() {
-    for (const value of [timer, returnTimer, popupTimer, closedTimer, incompleteClosedTimer]) clearTimeout(value);
+    for (const value of [timer, returnTimer]) clearTimeout(value);
     if (trackedOpen && win.open === trackedOpen) win.open = nativeOpen;
     // This reference is captured only in this isolated signup frame. Never
     // inspect popup documents, cookies or URLs after opening it.
@@ -23,24 +23,6 @@
   function dispose() {
     if (!done && input) send('cc.wa.cancel');
     else { done = true; cleanup(); }
-  }
-  function closed() {
-    if (done || closedTimer || incompleteClosedTimer) return;
-    // Meta closes its popup during successful completion too. Give both the
-    // SDK callback and selection event time to arrive before cancelling.
-    closedTimer = setTimeout(() => {
-      closedTimer = null;
-      if (done) return;
-      if (!code && !selection) { text('Ventana de Meta cerrada. Cancelando autorización…'); send('cc.wa.cancel'); }
-      else incompleteClosedTimer = setTimeout(() => {
-        if (!done) { text('Meta cerró la ventana sin completar la autorización. Cancelando…'); send('cc.wa.cancel'); }
-      }, 25000);
-    }, 2000);
-  }
-  function watchPopup() {
-    if (done) return;
-    try { if (popup?.closed === true) { closed(); return; } } catch {}
-    popupTimer = setTimeout(watchPopup, 500);
   }
   function trackPopup() {
     if (typeof win.open !== 'function') return;
@@ -53,7 +35,10 @@
           const uri = typeof args[0] === 'string' ? new URL(args[0]) : null;
           allowed ||= !!uri && meta.has(uri.origin) && /^\/(?:v[0-9]+\.[0-9]+\/)?dialog\/oauth\/?$/.test(uri.pathname);
         } catch {}
-        if (allowed) { popup = opened; watchPopup(); }
+        // COOP may sever this WindowProxy and report `closed` while Meta is
+        // visibly open. Retain it only for best-effort cleanup; cancellation
+        // comes from a Meta CANCEL event or the bound parent.
+        if (allowed) popup = opened;
       }
       return opened;
     };
@@ -138,7 +123,12 @@
           send('cc.wa.error', { reason: 'authorization_incomplete' }); return;
         }
         const value = response?.authResponse?.code;
-        if (value === undefined || value === null || value === '') { closed(); return; }
+        if (value === undefined || value === null || value === '') {
+          // The SDK can also return an empty result when COOP severs its popup
+          // handle. This does not prove the user cancelled or closed Meta.
+          text('Meta no ha confirmado la autorización. Si su ventana sigue abierta, termina allí. Si ya la cerraste, pulsa Cancelar para preparar un nuevo intento.');
+          return;
+        }
         if (typeof value !== 'string' || !/^[\x21-\x7e]{1,4096}$/.test(value)) { send('cc.wa.error', { reason: 'authorization_incomplete' }); return; }
         if (code && code !== value) { send('cc.wa.error', { reason: 'authorization_incomplete' }); return; }
         code = value; complete();

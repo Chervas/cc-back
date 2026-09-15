@@ -110,13 +110,25 @@ iframe se manda `cc.wa.dispose` vinculado a origen, ventana, nonce y UUID; su
 `pagehide` también cierra la ventana Meta capturada. La captura de `window.open`
 se limita al iframe aislado y conserva argumentos/retorno del SDK; nunca afecta
 al `window.open` de CRM ni lee contenido, cookies o URL de la ventana abierta.
+Cerrar la ventana capturada es best effort: el navegador puede separar su
+referencia por políticas de aislamiento.
 
-El cierre físico de Meta se comprueba mediante `Window.closed`; un callback SDK
-sin código también inicia cancelación. Se esperan dos segundos para admitir el
-cierre normal durante un resultado válido y, si ha llegado una sola parte,
-hasta 25 segundos adicionales por la parte restante. Un resultado completo
-gana esa carrera y se procesa una sola vez. Errores terminales y caducidad también
-solicitan cancelación antes de permitir otro intento.
+`Window.closed` y un callback SDK sin código no prueban un cierre físico:
+COOP puede separar el WindowProxy y ambos indicadores aparecen aunque Meta siga
+abierto. No se cancela por esas señales. El callback vacío muestra un aviso para
+terminar en Meta o pulsar Cancelar si ya se cerró; conserva el intento y admite
+un resultado completo posterior una sola vez. El evento `CANCEL` explícito de
+Meta, el botón Cancelar y el cierre de CRM sí solicitan cancelación. No prometer
+detección automática de cualquier cierre de la ventana externa.
+Referencia del navegador: [Window.open y COOP](https://developer.mozilla.org/en-US/docs/Web/API/Window/open#return_value).
+Errores terminales y caducidad también solicitan cancelación antes de permitir
+otro intento. Tras confirmarla, la UI conserva una explicación local fija del
+error; si cancelar falla, conserva el error de recuperación de ese intento.
+
+El plazo visual se limita a diez minutos y usa un deadline local en el iframe:
+un reloj de navegador ligeramente atrasado no rechaza una emisión válida por
+superar aparentemente los 600000 ms. El `expiresAt` recibido se conserva intacto;
+la expiración firmada y comprobada en servidor sigue siendo autoritativa.
 
 Una vez enviado finish, cerrar el diálogo conserva el resultado para consulta:
 no aborta automáticamente `processing` ni `awaiting_activation`. El botón
