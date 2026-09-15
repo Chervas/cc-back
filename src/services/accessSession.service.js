@@ -109,11 +109,14 @@ function createService({ models, audit, trustedDevices, config = settings, now =
       + (transaction ? ' FOR UPDATE' : ''),
     { replacements: { id: sessionRef, userId }, logging: false, transaction });
     const row = rows[0];
-    if (requireEmail && row?.authentication_method !== 'password_email') fail();
     checkRow({ userId, exp: expiresAt.getTime() / 1000, iat: row?.issued_at?.getTime() / 1000,
       ...(['password_email', 'password_trusted_device'].includes(row?.authentication_method) ? { amr: row.authentication_method === 'password_email' ? ['pwd', 'email'] : ['pwd', 'trusted_device'], emailVerifiedAt: row.email_verified_at?.getTime() / 1000 } : {}) },
       row && { ...row, id_usuario: row.user_id }, row, requireEmail ? { ...cfg, emailMfaMode: 'enforce' } : cfg);
     if (row.authentication_method === 'password_trusted_device') await devices().verifySession(row, { ...row, id_usuario: row.user_id }, { transaction });
+    // A valid remembered session needs a stronger proof for this operation;
+    // it has not expired. Check validity/revocation first, then keep this 403
+    // distinct from the 401 that invalidates the application's current login.
+    if (requireEmail && row.authentication_method !== 'password_email') fail('auth_email_verification_required', 403);
     return { userId, sessionRef };
   }
   // Call within a transaction that already locks the freshly authenticated user. All issuers share this method.
