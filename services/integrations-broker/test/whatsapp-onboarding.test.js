@@ -14,6 +14,8 @@ test('Minimal Embedded Signup response still requires independent app, grant and
   assert.equal(f.state.puts, 1); assert.equal(row(f, denied).state, 'interrupted');
   const audit = f.current.store.db.prepare('SELECT event FROM audit_outbox').all().map(r => JSON.parse(r.event));
   assert(audit.some(e => e.correlationId === denied.flowId && e.reason === 'whatsapp_failed_grant_inspection'));
+  assert(audit.some(e => e.correlationId === denied.flowId && e.reason === 'wa_grant_scope_other_present'));
+  assert(audit.some(e => e.correlationId === denied.flowId && e.reason === 'wa_grant_data_expiry_zero'));
   for (const secret of [TOKEN, APP, denied.code]) assert(!JSON.stringify(audit).includes(secret));
   await assert.rejects(f.finish(denied), { code: 'oauth_flow_interrupted' }); assert.equal(f.state.codes, 2);
 });

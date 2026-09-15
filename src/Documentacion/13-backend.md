@@ -142,7 +142,10 @@ consumidor debe obtener esa metadata del inspector/verificador del proveedor.
 `token_type` puede faltar en la respuesta del canje; si aparece debe ser
 `bearer`. Su ausencia no sustituye la inspección de identidad, permisos exactos
 y caducidad. Una interrupción previa al guardado conserva su fase fija en la
-auditoría, sin respuesta cruda ni reutilización del código.
+auditoría, sin respuesta cruda ni reutilización del código. Si se rechaza la
+inspección, registra clasificaciones fijas de presencia, forma, alcance y
+vigencia para diagnosticar discrepancias simultáneas sin copiar valores del
+proveedor ni flexibilizar los permisos aceptados.
 `whatsapp-phone-verifier` comprueba que el número pertenezca al WABA consultado,
 con cursor acotado y endpoint fijo; nunca sigue paging.next ni devuelve perfiles.
 

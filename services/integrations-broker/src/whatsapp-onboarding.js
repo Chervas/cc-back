@@ -167,6 +167,8 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
           // New accounts have no legacy MetaConnection. Learn the subject only
           // from the authenticated Meta diagnostic response, then bind it to the
           // candidate. It is observed identity, not an already approved sender.
+          attempt.grantDiagnostics = require('./whatsapp-grant-diagnostics').grantDiagnostics(raw,
+            { appId: b.appId, wabaId: row.waba_id, exchangeExpiresAt: info.expiresAt }, now());
           if (!C.id(raw?.data?.user_id)) fail('oauth_credentials_incomplete');
           const grant = verifyWhatsappGrant(raw, { appId: b.appId, subjectId: raw.data.user_id, wabaId: row.waba_id, scopes: b.scopes }, now());
           if (info.expiresAt !== null && (grant.expiresAt === null || grant.expiresAt > info.expiresAt)) fail('oauth_credentials_incomplete');
@@ -216,6 +218,9 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
         const row = get(id);
         if (row?.state === 'exchanging') store.transaction(() => {
           // Fixed internal milestones only; no provider response, URL or secret.
+          if (attempt.phase === 'grant_inspection') for (const reason of attempt.grantDiagnostics || []) {
+            record(request, principal, id, 'integration.failed', 'unknown', reason);
+          }
           record(request, principal, id, 'integration.failed', 'unknown', 'whatsapp_failed_' + attempt.phase);
           record(request, principal, id, 'integration.failed', 'unknown', 'whatsapp_exchange_unconfirmed'); change(id, 'interrupted');
         });

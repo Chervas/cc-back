@@ -44,6 +44,13 @@ describe el business token como resultado sin exigir esa pista adicional.
 Si se interrumpe antes de guardar una candidata, la auditoría conserva además
 un motivo fijo `whatsapp_failed_<fase>` (lectura de aplicación, canje,
 inspección de permisos, pertenencia del número o preparación de candidata).
+Si la inspección obtiene una respuesta que se rechaza, añade hasta 17 motivos
+`wa_grant_<campo>_<clasificación>`: presencia/forma de permisos, alcance exacto
+del WABA, identidad y vigencia, incluida coherencia con la caducidad del canje.
+Son categorías fijas del código; no contienen identificadores, nombres,
+valores de permisos ajenos, fechas, mensajes del proveedor ni credenciales.
+Se registran conjuntamente para diagnosticar discrepancias simultáneas;
+no relajan los criterios del inspector ni se exponen al navegador.
 Las fases proceden del código, nunca de mensajes del proveedor. No se conservan
 respuestas crudas para diagnosticar; un intento interrumpido no vuelve a canjear
 su código y requiere una nueva autorización humana después de corregir el fallo.
