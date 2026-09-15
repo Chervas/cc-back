@@ -207,6 +207,29 @@ async function emailCommand(req, res, resend) {
 exports.verifyEmailCode = (req, res) => emailCommand(req, res, false);
 exports.resendEmailCode = (req, res) => emailCommand(req, res, true);
 
+// A remembered browser is enough for ordinary login. Sensitive actions can
+// explicitly recheck the password and email without logging the user out or
+// changing the browser's trusted-device cookie. Reuse the normal one-use proof.
+exports.beginEmailStepUp = async (req, res) => {
+    res.set('Cache-Control', 'private, no-store');
+    try {
+        if (emailChallenges.mode() !== 'enforce') return res.status(503).json({ error: 'auth_email_unavailable' });
+        const body = req.body;
+        if (!body || typeof body !== 'object' || Array.isArray(body)
+            || Object.keys(body).join(',') !== 'password' || typeof body.password !== 'string'
+            || !body.password.length || body.password.length > 1024) {
+            return res.status(400).json({ error: 'auth_email_request_invalid' });
+        }
+        const user = await Usuario.findByPk(req.userData?.userId);
+        if (!sessions.activeUser(user) || isBlockedAuthEmail(user.email_usuario)
+            || !await bcrypt.compare(body.password, user.password_usuario)) {
+            await emailChallenges.rejectedCredentials();
+            return res.status(400).json({ error: 'auth_password_rejected' });
+        }
+        return res.status(202).json(await emailChallenges.begin(user));
+    } catch (error) { return emailError(res, error); }
+};
+
 exports.me = async (req, res) => {
     res.set('Cache-Control', 'private, no-store');
     try {
