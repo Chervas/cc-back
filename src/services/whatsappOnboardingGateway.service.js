@@ -4,7 +4,7 @@ const C = require('../../services/integrations-broker/src/whatsapp-onboarding-co
 const { configuredClient, assertGateway } = require('../lib/whatsappOnboardingBrokerClient');
 const STATUS = Object.freeze({ whatsapp_authorization_invalid: 400, whatsapp_authorization_forbidden: 403,
   whatsapp_authorization_conflict: 409, whatsapp_authorization_expired: 410, whatsapp_authorization_consumed: 409,
-  whatsapp_authorization_cancelled: 409, whatsapp_authorization_limit: 429, auth_invalid: 401,
+  whatsapp_authorization_cancelled: 409, whatsapp_authorization_limit: 429, auth_invalid: 401, auth_email_verification_required: 403,
   auth_configuration_invalid: 503, meta_security_state_unavailable: 503, whatsapp_onboarding_disabled: 503,
   whatsapp_onboarding_configuration_invalid: 503, whatsapp_authorization_unavailable: 503,
   whatsapp_onboarding_binding_invalid: 503, whatsapp_onboarding_broker_unavailable: 503, whatsapp_onboarding_result_unknown: 503 });
