@@ -99,12 +99,33 @@ resultado pendiente y permite Consultar estado; nunca reenvía finish ni crea
 otro intento automáticamente. Begin se puede recuperar explícitamente con el
 mismo UUID. Un begin rechazado por otra autorización abierta conserva ese UUID,
 explica que debe terminarse/cancelarse desde su pestaña original o caducar, y no
-arrastra el texto de cancelación del intento anterior. Cerrar conserva el
-intento y elimina estado OAuth/listeners/iframe; no
-equivale a cancelar. Cancelar conserva el mismo UUID y no afirma confirmación
-hasta que el DTO acredite ambos registros. Solo la cancelación confirmada deja
-preparar un nuevo UUID desde el diálogo. No se promete cancelación previa a la
-emisión local, recuperación desde otra sesión o limpieza de candidatas huérfanas.
+arrastra el texto de cancelación del intento anterior.
+
+### Cierre de ventanas y cancelación automática
+
+Cerrar el diálogo (botón, Escape, fondo o navegación) solicita cancelar el
+intento que todavía no ha enviado su código. Si begin estaba en curso, conserva
+el marcador de cancelación y la ejecuta al resolverse la emisión. Al retirar el
+iframe se manda `cc.wa.dispose` vinculado a origen, ventana, nonce y UUID; su
+`pagehide` también cierra la ventana Meta capturada. La captura de `window.open`
+se limita al iframe aislado y conserva argumentos/retorno del SDK; nunca afecta
+al `window.open` de CRM ni lee contenido, cookies o URL de la ventana abierta.
+
+El cierre físico de Meta se comprueba mediante `Window.closed`; un callback SDK
+sin código también inicia cancelación. Se esperan dos segundos para admitir el
+cierre normal durante un resultado válido y, si ha llegado una sola parte,
+hasta 25 segundos adicionales por la parte restante. Un resultado completo
+gana esa carrera y se procesa una sola vez. Errores terminales y caducidad también
+solicitan cancelación antes de permitir otro intento.
+
+Una vez enviado finish, cerrar el diálogo conserva el resultado para consulta:
+no aborta automáticamente `processing` ni `awaiting_activation`. El botón
+explícito Cancelar autorización sigue siendo una acción distinta. La cancelación
+mantiene el mismo UUID y solo se confirma si el DTO acredita MySQL y broker.
+En navegación se intenta un POST autenticado `keepalive`; no es garantía frente
+a falta de red o terminación forzada del navegador. El marcador pendiente se
+reconcilia al volver; el plazo de servidor sigue siendo el límite de respaldo.
+No se revocan permisos de Meta ni se activan envíos al cerrar una ventana.
 
 El estado MySQL admite un JWT renovado de la misma sesión verificada con
 expiración igual o posterior a la original. No cambia la expiración almacenada,

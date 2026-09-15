@@ -9,12 +9,60 @@
   const exact = (v, keys) => v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).sort().join(',') === keys.sort().join(',');
   const nonce = Array.from(win.crypto.getRandomValues(new Uint8Array(32)), v => v.toString(16).padStart(2, '0')).join('');
   let parentOrigin; let input; let started = false; let done = false; let code; let selection; let timer; let returnTimer;
+  let popup; let nativeOpen; let trackedOpen; let popupTimer; let closedTimer; let incompleteClosedTimer;
   const text = value => { doc.getElementById('status').textContent = value; };
   const button = doc.getElementById('authorize'); const cancel = doc.getElementById('cancel');
+  function cleanup() {
+    for (const value of [timer, returnTimer, popupTimer, closedTimer, incompleteClosedTimer]) clearTimeout(value);
+    if (trackedOpen && win.open === trackedOpen) win.open = nativeOpen;
+    // This reference is captured only in this isolated signup frame. Never
+    // inspect popup documents, cookies or URLs after opening it.
+    try { popup?.close(); } catch {}
+    popup = null; win.removeEventListener('message', receive); win.removeEventListener('pagehide', dispose);
+  }
+  function dispose() {
+    if (!done && input) send('cc.wa.cancel');
+    else { done = true; cleanup(); }
+  }
+  function closed() {
+    if (done || closedTimer || incompleteClosedTimer) return;
+    // Meta closes its popup during successful completion too. Give both the
+    // SDK callback and selection event time to arrive before cancelling.
+    closedTimer = setTimeout(() => {
+      closedTimer = null;
+      if (done) return;
+      if (!code && !selection) { text('Ventana de Meta cerrada. Cancelando autorización…'); send('cc.wa.cancel'); }
+      else incompleteClosedTimer = setTimeout(() => {
+        if (!done) { text('Meta cerró la ventana sin completar la autorización. Cancelando…'); send('cc.wa.cancel'); }
+      }, 25000);
+    }, 2000);
+  }
+  function watchPopup() {
+    if (done) return;
+    try { if (popup?.closed === true) { closed(); return; } } catch {}
+    popupTimer = setTimeout(watchPopup, 500);
+  }
+  function trackPopup() {
+    if (typeof win.open !== 'function') return;
+    nativeOpen = win.open;
+    trackedOpen = function (...args) {
+      const opened = Reflect.apply(nativeOpen, win, args);
+      if (!done && !popup && opened && opened !== win && opened !== win.parent) {
+        let allowed = args[0] === undefined || args[0] === '' || args[0] === 'about:blank';
+        try {
+          const uri = typeof args[0] === 'string' ? new URL(args[0]) : null;
+          allowed ||= !!uri && meta.has(uri.origin) && /^\/(?:v[0-9]+\.[0-9]+\/)?dialog\/oauth\/?$/.test(uri.pathname);
+        } catch {}
+        if (allowed) { popup = opened; watchPopup(); }
+      }
+      return opened;
+    };
+    win.open = trackedOpen;
+  }
   function send(type, extra = {}) {
-    if (!input || done) return; done = true; clearTimeout(timer); clearTimeout(returnTimer); button.disabled = true; cancel.disabled = true;
+    if (!input || done) return; done = true; cleanup(); button.disabled = true; cancel.disabled = true;
     win.parent.postMessage({ type, nonce, requestId: input.requestId, ...extra }, parentOrigin);
-    code = null; selection = null; input.authorization.state = ''; win.removeEventListener('message', receive);
+    code = null; selection = null; input.authorization.state = '';
   }
   function complete() {
     if (!done && started && code && selection) {
@@ -57,6 +105,9 @@
       };
       doc.head.appendChild(script); return;
     }
+    if (event.source === win.parent && event.origin === parentOrigin
+      && exact(event.data, ['type','nonce','requestId']) && event.data.type === 'cc.wa.dispose'
+      && event.data.nonce === nonce && event.data.requestId === input.requestId) { dispose(); return; }
     // Session logging IDs are untrusted selection hints, not identity proof.
     // Only the SDK callback supplies this attempt's code; the broker separately
     // verifies the code's app/grant/WABA and the selected phone's membership.
@@ -80,12 +131,14 @@
     if (!input || started || done || button.disabled) return;
     started = true; button.disabled = true; text('Completa la autorización en la ventana de Meta.');
     try {
+      trackPopup();
       win.FB.login(response => {
         if (done) return;
         if (response?.authResponse?.accessToken || response?.authResponse?.access_token) {
           send('cc.wa.error', { reason: 'authorization_incomplete' }); return;
         }
         const value = response?.authResponse?.code;
+        if (value === undefined || value === null || value === '') { closed(); return; }
         if (typeof value !== 'string' || !/^[\x21-\x7e]{1,4096}$/.test(value)) { send('cc.wa.error', { reason: 'authorization_incomplete' }); return; }
         if (code && code !== value) { send('cc.wa.error', { reason: 'authorization_incomplete' }); return; }
         code = value; complete();
@@ -100,6 +153,7 @@
   cancel.addEventListener('click', () => send('cc.wa.cancel'));
   if (win.parent === win) { text('Abre esta autorización desde Ajustes de ClinicaClick.'); return; }
   win.addEventListener('message', receive);
+  win.addEventListener('pagehide', dispose);
   // The parent starts hello after iframe load. Every reply targets its exact
   // verified origin; no configuration/state is broadcast.
 })(window, document);

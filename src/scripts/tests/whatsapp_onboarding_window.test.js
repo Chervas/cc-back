@@ -2,12 +2,17 @@
 const test = require('node:test'); const assert = require('node:assert/strict'); const vm = require('node:vm'); const fs = require('node:fs');
 const { webcrypto, randomUUID } = require('node:crypto');
 const source = fs.readFileSync(require.resolve('../../web/whatsapp-onboarding-window'), 'utf8');
-function fixture(t) {
+function fixture(t, { loginOpens = true } = {}) {
   const messages = []; const listeners = new Map(); const script = []; let callback; let options;
   const elements = Object.fromEntries(['status','authorize','cancel'].map(id => [id, { disabled: id !== 'status', textContent: '', addEventListener: (event, fn) => { elements[id][event] = fn; } }]));
   const parent = { postMessage: (data, origin) => messages.push({ data: JSON.parse(JSON.stringify(data)), origin }) };
-  const win = { crypto: webcrypto, parent, addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name),
-    FB: { init: v => { win.init = v; }, login: (cb, v) => { callback = cb; options = v; } } };
+  const opened = []; const nativeOpen = (...args) => {
+    const popup = { closed: false, closeCalls: 0, close() { this.closed = true; this.closeCalls++; } };
+    opened.push({ args, popup }); return popup;
+  };
+  const win = { crypto: webcrypto, parent, open: nativeOpen, addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name),
+    FB: { init: v => { win.init = v; }, login: (cb, v) => { callback = cb; options = v;
+      if (loginOpens) win.open('https://www.facebook.com/v24.0/dialog/oauth?app_id=101', 'fb-popup', 'width=600'); } } };
   const timers = new Set(); const scheduled = []; const schedule = (fn, ms) => { const timer = setTimeout(fn, ms); timers.add(timer); scheduled.push({ fn, ms }); return timer; };
   t.after(() => { for (const timer of timers) clearTimeout(timer); });
   const doc = { getElementById: id => elements[id], createElement: () => ({}), head: { appendChild: value => script.push(value) } };
@@ -19,7 +24,9 @@ function fixture(t) {
   const start = (v = input) => { receive(v); script.at(-1).onload(); elements.authorize.click(); };
   const finishEvent = (data = { waba_id: '301', phone_number_id: '401' }) => JSON.stringify({ type: 'WA_EMBEDDED_SIGNUP', event: 'FINISH', data });
   const meta = (data = finishEvent(), origin = 'https://www.facebook.com', from = {}) => receive(data, origin, from);
-  return { messages, listeners, receive, input, win, parent, start, script, elements, meta, finishEvent, scheduled, code: value => callback(value), options: () => options };
+  return { messages, listeners, receive, input, win, parent, start, script, elements, meta, finishEvent, scheduled, opened, nativeOpen,
+    tick: ms => { const next = scheduled.findLast(t => t.ms === ms); assert(next, 'missing timer '+ms); next.fn(); },
+    code: value => callback(value), options: () => options };
 }
 test('Sandbox handshake accepts only the bound parent origin, nonce and exact unexpired public configuration', t => {
   const f = fixture(t);
@@ -80,4 +87,52 @@ test('Partial Meta returns explain the missing half without submitting, retrying
     reminder.fn(); assert.match(f.elements.status.textContent, /Autorización recibida/);
     f.meta(); f.code({ authResponse: { code: 'FICTITIOUS_LATE_CODE' } }); assert.equal(f.messages.length, 2);
   }
+});
+test('Closing the captured Meta popup cancels without requiring an SDK callback and restores the isolated open method', t => {
+  const f = fixture(t); f.start(); const popup = f.opened[0].popup;
+  assert.deepEqual(f.opened[0].args, ['https://www.facebook.com/v24.0/dialog/oauth?app_id=101','fb-popup','width=600']);
+  popup.closed = true; f.tick(500); assert.equal(f.messages.length, 1); f.tick(2000);
+  assert.equal(f.messages.at(-1).data.type, 'cc.wa.cancel'); assert.equal(f.win.open, f.nativeOpen);
+  assert.equal(f.listeners.size, 0); assert.equal(popup.closeCalls, 1);
+  f.code({ authResponse: { code: 'FICTITIOUS_LATE_CODE' } }); f.meta(); f.tick(2000);
+  assert.equal(f.messages.length, 2); assert(!JSON.stringify(f.messages).includes('FICTITIOUS'));
+});
+test('An empty SDK callback also cancels when the browser provides no observable popup handle', t => {
+  const f = fixture(t, { loginOpens: false }); f.win.open = undefined; f.start(); f.code({});
+  assert.equal(f.messages.length, 1); f.tick(2000); assert.equal(f.messages.at(-1).data.type, 'cc.wa.cancel');
+});
+test('Successful completion wins the popup-close race in either callback order', t => {
+  for (const first of ['code','selection']) {
+    const f = fixture(t); f.start(); f.opened[0].popup.closed = true; f.tick(500);
+    if (first === 'code') f.code({ authResponse: { code: 'FICTITIOUS_CODE' } }); else f.meta();
+    f.tick(2000); assert.equal(f.messages.length, 1);
+    if (first === 'code') f.meta(); else f.code({ authResponse: { code: 'FICTITIOUS_CODE' } });
+    assert.equal(f.messages.at(-1).data.type, 'cc.wa.result');
+    f.tick(25000); f.tick(500); assert.equal(f.messages.length, 2);
+  }
+});
+test('A closed popup with an incomplete result cancels after a bounded grace without leaking or submitting the partial code', t => {
+  const f = fixture(t); f.start(); f.code({ authResponse: { code: 'FICTITIOUS_PARTIAL_CODE' } });
+  f.opened[0].popup.closed = true; f.tick(500); f.tick(2000); f.tick(25000);
+  assert.equal(f.messages.at(-1).data.type, 'cc.wa.cancel'); assert(!JSON.stringify(f.messages).includes('FICTITIOUS_PARTIAL_CODE'));
+  f.meta(); assert.equal(f.messages.length, 2);
+});
+test('Only the bound parent can dispose the frame; navigation also closes its Meta popup', t => {
+  for (const mode of ['message','pagehide']) {
+    const f = fixture(t); f.start(); const popup = f.opened[0].popup;
+    const msg = { type: 'cc.wa.dispose', nonce: f.input.nonce, requestId: f.input.requestId };
+    f.receive(msg, 'https://other.invalid'); f.receive(msg, 'https://crm.clinicaclick.com', {});
+    f.receive({ ...msg, requestId: randomUUID() }); f.receive({ ...msg, nonce: '0'.repeat(64) });
+    assert.equal(popup.closed, false);
+    if (mode === 'message') f.receive(msg); else f.listeners.get('pagehide')();
+    assert.equal(popup.closed, true); assert.equal(f.messages.at(-1).data.type, 'cc.wa.cancel');
+    assert.equal(f.win.open, f.nativeOpen); assert.equal(f.listeners.size, 0);
+  }
+});
+test('Popup tracking preserves the native return value and never closes unrelated windows', t => {
+  const f = fixture(t, { loginOpens: false }); f.start();
+  const other = f.win.open('https://other.invalid/', 'unrelated');
+  assert.equal(other, f.opened[0].popup);
+  const signup = f.win.open('https://www.facebook.com/dialog/oauth', 'fb');
+  f.elements.cancel.click(); assert.equal(signup.closed, true); assert.equal(other.closed, false);
 });
