@@ -132,9 +132,9 @@ module.exports = {
     async publishConfirmed(event, payload, rooms) {
         // Background importers have no Socket.IO instance. Publish a closed
         // browser packet and acknowledge Redis before marking their outbox.
-        const packet = require('../lib/socket-payload').packetFor(event, payload);
+        const body = require('../lib/socket-view-invalidation').invalidation(event, payload);
         const roomList = normalizeRooms(rooms);
-        if (!packet || !roomList.length || roomList.some(room => !/^clinic:[1-9]\d*$/.test(room))) {
+        if (!roomList.length || roomList.some(room => !/^clinic:[1-9]\d*$/.test(room))) {
             throw Error('realtime_packet_invalid');
         }
         if (!confirmedPublisher) {
@@ -147,10 +147,10 @@ module.exports = {
         if (confirmedPublisher.status === 'wait') await confirmedPublisher.connect();
         if (confirmedPublisher.status !== 'ready') throw Error('realtime_bus_unavailable');
         const subscribers = await confirmedPublisher.publish(SOCKET_BUS_CHANNEL, JSON.stringify({
-            source: SOCKET_BUS_SOURCE, event, payload: packet.body, rooms: roomList,
+            source: SOCKET_BUS_SOURCE, event, payload: body, rooms: roomList,
         }));
         if (!Number.isInteger(subscribers) || subscribers < 1) throw Error('realtime_bus_unavailable');
-        emitLocal(event, packet.body, roomList);
+        emitLocal(event, body, roomList);
         return subscribers;
     },
     setIO(io) {
