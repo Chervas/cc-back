@@ -5,6 +5,8 @@ let ioInstance = null;
 let publisher = null;
 let subscriber = null;
 let subscriberInitialized = false;
+let confirmedPublisher = null;
+let backgroundPublishingEnabled = false;
 const busListeners = new Set();
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
@@ -127,12 +129,41 @@ const ioProxy = {
 };
 
 module.exports = {
+    async publishConfirmed(event, payload, rooms) {
+        // Background importers have no Socket.IO instance. Publish a closed
+        // browser packet and acknowledge Redis before marking their outbox.
+        const packet = require('../lib/socket-payload').packetFor(event, payload);
+        const roomList = normalizeRooms(rooms);
+        if (!packet || !roomList.length || roomList.some(room => !/^clinic:[1-9]\d*$/.test(room))) {
+            throw Error('realtime_packet_invalid');
+        }
+        if (!confirmedPublisher) {
+            confirmedPublisher = new Redis(REDIS_URL, {
+                lazyConnect: true, enableOfflineQueue: false, maxRetriesPerRequest: 1,
+                connectTimeout: 3000, commandTimeout: 3000,
+            });
+            confirmedPublisher.on('error', () => {});
+        }
+        if (confirmedPublisher.status === 'wait') await confirmedPublisher.connect();
+        if (confirmedPublisher.status !== 'ready') throw Error('realtime_bus_unavailable');
+        const subscribers = await confirmedPublisher.publish(SOCKET_BUS_CHANNEL, JSON.stringify({
+            source: SOCKET_BUS_SOURCE, event, payload: packet.body, rooms: roomList,
+        }));
+        if (!Number.isInteger(subscribers) || subscribers < 1) throw Error('realtime_bus_unavailable');
+        emitLocal(event, packet.body, roomList);
+        return subscribers;
+    },
     setIO(io) {
         ioInstance = io;
         ensureSubscriber();
     },
     getIO() {
-        return ioInstance ? ioProxy : null;
+        return ioInstance || backgroundPublishingEnabled ? ioProxy : null;
+    },
+    enableBackgroundPublishing() {
+        // Opt-in for the authorized staging dispatcher; existing read-only
+        // scripts and other isolated processes keep their previous behavior.
+        backgroundPublishingEnabled = true;
     },
     emit(event, payload, rooms = []) {
         emitThroughBus(event, payload, rooms);

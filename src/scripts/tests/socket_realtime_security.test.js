@@ -112,3 +112,23 @@ test('socket bus uses the central browser guard while preserving internal Redis 
     if (previousBus) require.cache[busPath] = previousBus; else delete require.cache[busPath];
   }
 });
+test('standalone notifications require Redis acknowledgement and publish only closed packets', async () => {
+  let count=0, published, options;class FakeRedis extends EventEmitter {
+    constructor(_url,value){super();options=value;this.status='wait';}
+    async connect(){this.status='ready';}
+    async publish(channel,raw){published=JSON.parse(raw);return count;}
+  }
+  const redisPath=require.resolve('ioredis'),busPath=require.resolve('../../services/socket.service');
+  const previous=require.cache[redisPath],previousBus=require.cache[busPath];
+  require.cache[redisPath]={id:redisPath,filename:redisPath,loaded:true,exports:FakeRedis};delete require.cache[busPath];
+  try{
+    const bus=require('../../services/socket.service');assert.equal(bus.getIO(),null);
+    bus.enableBackgroundPublishing();assert.equal(typeof bus.getIO().to,'function');
+    const payload={id:2,conversation_id:9,metadata:{token:'SECRET'},resume_text:'MUST_NOT_RESUME'};
+    await assert.rejects(bus.publishConfirmed('message:created',payload,['clinic:71']),/bus_unavailable/);
+    count=1;assert.equal(await bus.publishConfirmed('message:created',payload,['clinic:71']),1);
+    assert.equal(published.payload.realtime_refresh,true);assert(!JSON.stringify(published).includes('SECRET'));assert(!JSON.stringify(published).includes('MUST_NOT_RESUME'));
+    assert.equal(options.enableOfflineQueue,false);assert.equal(options.maxRetriesPerRequest,1);
+    await assert.rejects(bus.publishConfirmed('message:created',payload,[]),/packet_invalid/);
+  }finally{if(previous)require.cache[redisPath]=previous;else delete require.cache[redisPath];if(previousBus)require.cache[busPath]=previousBus;else delete require.cache[busPath];}
+});
