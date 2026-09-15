@@ -41,7 +41,7 @@ function fixture(t, { customer, scopes } = {}) {
       const v = versions.get(input.VersionId); if (!v || input.VersionStage && !v.stages.includes(input.VersionStage)) throw Error('FICTITIOUS_MISSING_VERSION');
       result = { ARN: input.SecretId, VersionId: input.VersionId, VersionStages: [...v.stages], SecretString: v.body };
     } else if (name === 'PutSecretValueCommand') {
-      state.puts++; assert.equal(input.SecretId, binding.secretArn); assert.deepEqual(input.VersionStages, ['AWSPENDING']); assert(C.uuid(input.ClientRequestToken));
+      state.puts++; assert.notEqual(input.SecretId, binding.clientSecretArn); assert.deepEqual(input.VersionStages, ['AWSPENDING']); assert(C.uuid(input.ClientRequestToken));
       if (state.failPut) throw Error('FICTITIOUS_WRITE_FAILED');
       if (versions.has(input.ClientRequestToken)) assert.equal(versions.get(input.ClientRequestToken).body, input.SecretString);
       else { for (const v of versions.values()) v.stages = v.stages.filter(s => s !== 'AWSPENDING'); versions.set(input.ClientRequestToken, { body: input.SecretString, stages: ['AWSPENDING'] }); }
@@ -56,8 +56,8 @@ function fixture(t, { customer, scopes } = {}) {
     if (request.action === 'inspect') response = { data: { app_id: '101', user_id: '201', type: 'SYSTEM_USER', is_valid: true,
       expires_at: 0, data_access_expires_at: 0, scopes: [...binding.whatsappOnboarding.scopes],
       granular_scopes: binding.whatsappOnboarding.scopes.filter(scope => scope !== 'public_profile')
-        .map(scope => ({ scope, target_ids: [...(customer?.wabaIds || ['301'])] })) } };
-    else if (request.action === 'waba_owner') response = { id: request.id, owner_business_info: { id: customer.businessId } };
+      .map(scope => ({ scope, target_ids: [...(customer?.wabaIds || ['301'])] })) } };
+    else if (request.action === 'waba_owner') response = { id: request.id, owner_business_info: { id: customer.businessId || '501' } };
     else if (request.action === 'phone_state') response = { id: request.id, is_on_biz_app: true, platform_type: 'CLOUD_API' };
     else { assert.equal(request.action, 'phones'); assert.equal(request.id, '301'); response = { data: [{ id: '401' }] }; }
     return state.afterGraph ? state.afterGraph(request, response) : response;

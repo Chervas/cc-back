@@ -1,7 +1,9 @@
 'use strict';
 // Provider evidence for customer-scoped enrollment. Not a sending
-// grant: the caller must separately authorize all clinics and selected phones.
-// Both expected IDs and scopes come from trusted server policy, never the SDK.
+// grant: the caller separately authorizes the selected clinic/phone. Whole-group
+// enrollment additionally reserves every WABA; selectionOnly does not.
+// Expected scopes/optional owner pins come from server policy. The selected
+// account comes from signup and is proven against authenticated Meta evidence.
 const { BrokerError, fail } = require('./errors');
 const { tokenText } = require('./whatsapp-secrets');
 const id = v => typeof v === 'string' && /^[1-9][0-9]{0,29}$/.test(v);
@@ -16,33 +18,37 @@ function expiry(v, now) {
   return v * 1000;
 }
 function inspectCustomerGrant(response, expected, now) {
-  if (!Number.isSafeInteger(now) || now <= 0 || !expected || !id(expected.appId) || !id(expected.businessId)
-    || !id(expected.selectedWabaId) || !uniqueStrings(expected.wabaIds, 64, id)
-    || !expected.wabaIds.includes(expected.selectedWabaId)
-    || !uniqueStrings(expected.scopes, 3, s => permitted.includes(s))
+  const selectedOnly = expected?.selectionOnly === true;
+  const allowedScopes = selectedOnly ? [...permitted, 'whatsapp_business_manage_events'] : permitted;
+  if (!Number.isSafeInteger(now) || now <= 0 || !expected || !id(expected.appId)
+    || (!selectedOnly || expected.businessId !== undefined) && !id(expected.businessId)
+    || !id(expected.selectedWabaId) || expected.wabaIds === undefined && !selectedOnly
+    || expected.wabaIds !== undefined && (!uniqueStrings(expected.wabaIds, 64, id) || !expected.wabaIds.includes(expected.selectedWabaId))
+    || !uniqueStrings(expected.scopes, allowedScopes.length, s => allowedScopes.includes(s))
     || !required.every(s => expected.scopes.includes(s))) fail('invalid_request');
   const data = response?.data;
   if (!data || typeof data !== 'object' || Array.isArray(data) || response.error) fail('oauth_credentials_incomplete');
   if (data.is_valid !== true) fail('credential_revoked');
   if (data.app_id !== expected.appId || !id(data.user_id) || data.type !== 'SYSTEM_USER') fail('oauth_identity_mismatch');
-  if (!uniqueStrings(data.scopes, 3, s => expected.scopes.includes(s)) || data.scopes.length !== expected.scopes.length) fail('oauth_credentials_incomplete');
+  if (!uniqueStrings(data.scopes, allowedScopes.length, s => expected.scopes.includes(s)) || data.scopes.length !== expected.scopes.length) fail('oauth_credentials_incomplete');
   const granular = data.granular_scopes;
-  if (!Array.isArray(granular) || !granular.length || granular.length > 2
+  if (!Array.isArray(granular) || !granular.length || granular.length > (selectedOnly ? 3 : 2)
     || granular.some(g => !g || typeof g !== 'object' || Array.isArray(g))
     || new Set(granular.map(g => g.scope)).size !== granular.length) fail('oauth_credentials_incomplete');
   const wabas = new Set();
   for (const g of granular) {
     if (!expected.scopes.includes(g.scope) || g.scope === 'public_profile'
-      || !uniqueStrings(g.target_ids, 64, id) || g.target_ids.some(v => !expected.wabaIds.includes(v))) fail('scope_denied');
+      || !uniqueStrings(g.target_ids, 64, id) || expected.wabaIds && g.target_ids.some(v => !expected.wabaIds.includes(v))) fail('scope_denied');
     g.target_ids.forEach(v => wabas.add(v));
   }
+  if (wabas.size > 64) fail('scope_denied');
   for (const s of expected.scopes.filter(s => s !== 'public_profile')) {
     const g = granular.find(g => g.scope === s);
     if (!g || required.includes(s) && !g.target_ids.includes(expected.selectedWabaId)) fail('scope_denied');
   }
   return { appId: data.app_id, subjectId: data.user_id, tokenType: data.type, scopes: [...data.scopes].sort(),
     expiresAt: expiry(data.expires_at, now), dataAccessExpiresAt: expiry(data.data_access_expires_at, now),
-    businessId: expected.businessId, wabaIds: [...wabas].sort() };
+    businessId: expected.businessId || null, wabaIds: [...wabas].sort() };
 }
 function createWhatsappCustomerVerifier({ http, now = () => Date.now() }) {
   if (typeof http !== 'function' || typeof now !== 'function') fail('invalid_request');
@@ -56,10 +62,15 @@ function createWhatsappCustomerVerifier({ http, now = () => Date.now() }) {
     };
     try {
       // Bounded read-only requests, including unselected WABAs. Never enumerate
-      // a portfolio or follow an ID not explicitly present in server policy.
-      for (const wabaId of grant.wabaIds) {
+      // a portfolio. IDs must come from authenticated granular grants and, when
+      // configured, the server allowlist. Owners must match the pinned business or
+      // the owner proven by Meta for the selected account.
+      const ordered = [expected.selectedWabaId, ...grant.wabaIds.filter(v => v !== expected.selectedWabaId)];
+      for (const wabaId of ordered) {
         check(); const v = await http({ action: 'waba_owner', id: wabaId, token, proof, signal }); check();
-        if (!v || v.error || v.id !== wabaId || v.owner_business_info?.id !== grant.businessId) fail('scope_denied');
+        if (!v || v.error || v.id !== wabaId || !id(v.owner_business_info?.id)) fail('scope_denied');
+        if (grant.businessId === null) grant.businessId = v.owner_business_info.id;
+        if (v.owner_business_info.id !== grant.businessId) fail('scope_denied');
       }
       check(); return { ...grant, observedAt: at };
     } catch (e) { throw new BrokerError(e instanceof BrokerError ? e.code : 'provider_failed'); }

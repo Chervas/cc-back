@@ -71,10 +71,10 @@ function response(result, name, row, b, requestId, selection) {
         || JSON.stringify([...v.scopes].sort()) !== JSON.stringify([...b.scopes].sort())
         || ![v.expiresAt, v.dataAccessExpiresAt].every(t => t === null || Number.isSafeInteger(t) && t > 0)
         || selection && (v.wabaId !== selection.wabaId || selection.phoneId !== null && v.phoneId !== selection.phoneId)) throw Error();
-      if (b.customer && (v.businessId !== b.customer.businessId || v.tokenType !== 'SYSTEM_USER'
+      if (b.customer && (!C.id(v.businessId) || b.customer.businessId && v.businessId !== b.customer.businessId || v.tokenType !== 'SYSTEM_USER'
         || !Array.isArray(v.grantedWabaIds) || !v.grantedWabaIds.length || v.grantedWabaIds.length > 64
-        || !v.grantedWabaIds.includes(v.wabaId) || v.grantedWabaIds.some((id, i, all) => !b.customer.wabaIds.includes(id)
-          || i > 0 && id <= all[i - 1]))) throw Error();
+        || !v.grantedWabaIds.includes(v.wabaId) || v.grantedWabaIds.some((id, i, all) => !C.id(id)
+          || b.customer.wabaIds && !b.customer.wabaIds.includes(id) || i > 0 && id <= all[i - 1]))) throw Error();
     } else if (d.candidate !== null) throw Error();
     if (d.phoneState !== undefined && d.phoneState !== null) {
       const p = d.phoneState;

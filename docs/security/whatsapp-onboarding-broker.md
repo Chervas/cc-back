@@ -34,6 +34,8 @@ diagnóstico autenticado del proveedor y se contrasta con App ID, tipo, permisos
 WABA y caducidad. El número debe aparecer en el edge fijo del WABA, con paginación
 acotada. Solo se aceptan `whatsapp_business_management` y
 `whatsapp_business_messaging`, más `public_profile` si está configurado.
+El modo de selección descrito abajo permite además el permiso de eventos
+observado en el ajuste existente, sin exponer operaciones de eventos.
 Ads, leads, páginas, Instagram y `business_management` se rechazan.
 
 ### Autorización por negocio de Meta
@@ -61,14 +63,33 @@ de negocio, cuentas permitidas o clínicas invalida el intento anterior.
 La API pública sigue mostrando solo el número seleccionado, no el inventario
 completo del negocio ni la credencial. El alta no asigna un número primario.
 
-`whatsapp_business_manage_events` continúa rechazado, también con `customer`.
-La gestión de plantillas ordinarias ya pertenece a
-`whatsapp_business_management`. Un rechazo del validador no demuestra que el
-ajuste Meta existente esté mal configurado. Conservarlo y comprobar el origen
-y el alcance del permiso adicional antes de decidir sustituirlo. Una configuración
-adicional con solo WhatsApp Cloud API permite comparar el resultado si hace
-falta; no es un requisito demostrado ni autoriza cambiar el Config ID activo.
-No añadir productos de anuncios o Conversions API para resolver el rechazo. Fuentes:
+### Selección de un número conservando el ajuste existente
+
+`customer: {selectionOnly: true}` distingue la credencial del negocio de la
+asignación clínica. Permite seleccionar el número autorizado desde Meta sin
+fijar Sants ni cambiar el Config ID. Puede usarse en ámbitos de clínica o grupo;
+solo reserva el teléfono seleccionado. Dos clínicas pueden asignar teléfonos
+distintos del mismo WABA, pero no apropiarse del mismo teléfono ni ignorar una
+reserva exclusiva creada por el modo anterior. No asigna otros números ni
+primarios y no habilita envíos.
+
+El propietario se obtiene del WABA seleccionado mediante una lectura autenticada,
+no del nombre del portfolio ni del evento del navegador. Después se comprueban
+todos los destinos granulares (máximo 64): deben ser WABAs del mismo propietario.
+Los pins `businessId`/`wabaIds` siguen siendo opcionales y vinculantes si se
+configuran. No se admiten destinos desconocidos, otros negocios o inventario
+sin comprobar. La candidata conserva la evidencia de todo el grant.
+
+Solo este modo puede declarar explícitamente `whatsapp_business_manage_events`
+además de los dos permisos WhatsApp y `public_profile`. El conjunto devuelto
+por Meta debe coincidir exactamente con el configurado. El permiso de eventos
+no crea ninguna operación HTTP nueva de eventos/publicidad; sus destinos también
+se verifican. Plantillas ordinarias siguen usando `whatsapp_business_management`.
+Los modos anteriores y el motor de envío mantienen sus restricciones originales.
+
+Cada ámbito necesita su binding y slot de Secrets Manager autorizados; este modo
+no convierte un slot de clínica en un almacén compartido para todos los clientes.
+Conservar el ajuste Meta existente. Fuentes:
 [business tokens](https://developers.facebook.com/documentation/business-messaging/whatsapp/access-tokens/),
 [propiedad WABA](https://www.postman.com/meta/whatsapp-business-platform/request/nem6vuw/waba-id),
 [productos del alta](https://developers.facebook.com/documentation/business-messaging/whatsapp/embedded-signup/version-4/).

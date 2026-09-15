@@ -12,8 +12,9 @@ function metadata(v, appId) {
   if (!exact(v, ['appId', 'subjectId', 'wabaId', 'phoneId', 'tokenType', 'scopes', 'expiresAt', 'dataAccessExpiresAt',
     ...(customer ? ['businessId','grantedWabaIds'] : [])])
     || v.appId !== appId || ![v.subjectId, v.wabaId, v.phoneId].every(id) || !['USER', 'SYSTEM_USER'].includes(v.tokenType)
-    || !Array.isArray(v.scopes) || !v.scopes.length || v.scopes.length > 3 || new Set(v.scopes).size !== v.scopes.length
-    || v.scopes.some(s => !['whatsapp_business_messaging', 'whatsapp_business_management', 'public_profile'].includes(s))
+    || !Array.isArray(v.scopes) || !v.scopes.length || v.scopes.length > (customer ? 4 : 3) || new Set(v.scopes).size !== v.scopes.length
+    || v.scopes.some(s => !['whatsapp_business_messaging', 'whatsapp_business_management', 'public_profile',
+      ...(customer ? ['whatsapp_business_manage_events'] : [])].includes(s))
     || !v.scopes.some(s => s !== 'public_profile')
     || ![v.expiresAt, v.dataAccessExpiresAt].every(t => t === null || Number.isSafeInteger(t) && t > 0)) fail('oauth_credentials_incomplete');
   if (customer && (!id(v.businessId) || v.tokenType !== 'SYSTEM_USER'

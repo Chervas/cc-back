@@ -10,6 +10,16 @@ function context(g) {
     clinicSetDigest: C.hash('[71,72]'), state: randomBytes(32).toString('base64url') };
 }
 const finish = row => ({ state: row.state, code: 'FICTITIOUS_GATEWAY_CODE_' + row.requestId, wabaId: '301', phoneId: '401' });
+test('Gateway selected-phone mode accepts verified business discovery and the existing WhatsApp events permission', async t => {
+  const g = brokerForGateway(t, { customer: { selectionOnly: true }, scopes: ['public_profile','whatsapp_business_manage_events','whatsapp_business_management','whatsapp_business_messaging'] });
+  const row = context(g); await g.client.begin(row); const result = await g.client.finish(row, finish(row));
+  assert.equal(result.status, 'staged'); assert.equal(result.connected, false); assert.equal(result.candidate.businessId, '501');
+  g.f.restart(); assert.equal((await g.client.status(row)).status, 'staged');
+  for (const modify of [v => { v.businessId = null; }, v => { v.grantedWabaIds.push('bad'); }, v => { v.scopes.push('ads_management'); }]) {
+    g.state.after = (cmd,r) => { modify(r.data.candidate); return r; };
+    await assert.rejects(g.client.status(row), { code: 'whatsapp_onboarding_result_unknown' });
+  }
+});
 test('Gateway accepts only the pinned business and WABAs in a completed group authorization', async t => {
   const g = brokerForGateway(t, { customer: { businessId: '501', wabaIds: ['301','302'] } }); const row = context(g);
   await g.client.begin(row); const result = await g.client.finish(row, finish(row));
