@@ -7,6 +7,7 @@ const staging = () => ({ RUNTIME_ROLE: 'api', JOB_RUNTIME_NAMESPACE: 'staging', 
 const binding = () => ({ connectionRef: 'wa:qa:123', authorizationId: 'a1234567-1234-4234-8234-123456789abc', clinicId: 123, assetId: 456,
   phoneId: '401', wabaId: '501', revision: 1, sendEnabled: true });
 const config = () => ({ version: 1, origin: 'https://broker.example.invalid:8445', keyId: 'staging-whatsapp', audience: 'authorized-wa',
+  messageNotBefore: '2026-09-15T00:00:00Z',
   privateKeyFile: '/etc/clinicaclick-whatsapp-authorized/staging/private.pem', caFile: '/etc/clinicaclick-whatsapp-authorized/staging/ca.pem', bindings: [binding()] });
 const asset = () => ({ id: 456, assetType: 'whatsapp_phone_number', assignmentScope: 'clinic', clinicaId: 123, grupoClinicaId: null,
   phoneNumberId: '401', wabaId: '501', isActive: false });
@@ -19,6 +20,8 @@ function fixture(overrides = {}) {
     loadConfiguration: () => { counters.configuration++; return structuredClone(state.config); },
     loadAsset: async id => { counters.assets++; assert.equal(id, 456); return structuredClone(state.asset); },
     loadClinic: async id => { counters.clinics++; assert.equal(id, 123); return structuredClone(state.clinic); },
+    loadMessage: async id => ({ id, conversation_id: 71, direction: 'outbound', status: 'pending', createdAt: '2026-09-15T00:01:00Z', metadata: {} }),
+    loadConversation: async id => ({ id, clinic_id: 123 }),
     isBlocked: async id => { counters.blocks++; assert.equal(id, 123); return state.blocked; },
     createTransport: () => { counters.transports++; return { execute: async command => { calls.push(command);
       return { requestId: command.requestId, replayed: false, data: { messages: [{ id: 'wamid.SYNTHETIC_ACCEPTED', message_status: 'accepted' }] } }; } }; },
@@ -40,7 +43,7 @@ test('every paused binding fails before constructing an HTTP transport', async (
 test('durable Message identity and server metadata determine exactly one compatible Graph operation', async () => {
   const f = fixture(); const result = await f.client.send(input());
   assert.deepEqual(result, { messages: [{ id: 'wamid.SYNTHETIC_ACCEPTED', message_status: 'accepted' }] });
-  assert.equal(f.calls.length, 1); assert.equal(f.counters.blocks, 3);
+  assert.equal(f.calls.length, 1); assert.equal(f.counters.blocks, 4);
   assert.deepEqual(f.calls[0], { requestId: requestIdFor('123'), tenantRef: 'clinic:123', connectionRef: binding().connectionRef,
     assetRef: 'wa-phone:401', operation: 'meta.whatsapp.authorized.send.v1',
     payload: { authorizationId: binding().authorizationId, phoneId: '401', message: message() } });
@@ -139,4 +142,43 @@ test('accepted cached results preserve quality hold status with no extra attempt
   } }) });
   assert.deepEqual(await f.client.send(input()), { messages: [{ id: 'wamid.SYNTHETIC_ACCEPTED', message_status: 'held_for_quality_assessment' }] });
   assert.equal(calls, 1);
+});
+test('cutoff, current status and accepted/unknown/quarantined metadata block before transport', async () => {
+  const eligible = { id: '123', conversation_id: 71, direction: 'outbound', status: 'pending', createdAt: '2026-09-15T00:01:00Z', metadata: {} };
+  const changes = [{ createdAt: '2026-09-14T23:59:59Z' }, { createdAt: null }, { direction: 'inbound' },
+    ...['sent','delivered','read','failed','cancelled','canceled','quarantined','hold','unknown'].map(status => ({ status })),
+    ...[{ wamid: 'wamid.SYNTHETIC_ACCEPTED' }, { provider_acceptance_status: 'accepted' }, { provider_acceptance_at: '2026-09-15T00:01:00Z' },
+      { wa_response: { messages: [{ id: 'wamid.SYNTHETIC_ACCEPTED' }] } }, { delivery_unknown: true }, { quarantine: true },
+      { error: 'meta_security_quarantine' }, { outbound_retry: { reason: 'delivery_unknown' } }].map(metadata => ({ metadata }))];
+  for (const change of changes) {
+    const f = fixture({ loadMessage: async () => ({ ...eligible, ...change }) });
+    await assert.rejects(f.client.send(input()), { code: 'whatsapp_authorized_message_ineligible' }); assert.equal(f.calls.length, 0);
+  }
+  const boundary = fixture({ loadMessage: async () => ({ ...eligible, createdAt: '2026-09-15T00:00:00Z', status: 'sending' }) });
+  await boundary.client.send(input()); assert.equal(boundary.calls.length, 1);
+});
+test('Message and Conversation identity cannot be forged and are reread just before dispatch', async () => {
+  const eligible = { id: '123', conversation_id: 71, direction: 'outbound', status: 'pending', createdAt: '2026-09-15T00:01:00Z', metadata: {} };
+  for (const overrides of [{ loadMessage: async () => null }, { loadMessage: async () => ({ ...eligible, id: '124' }) },
+    { loadConversation: async id => ({ id, clinic_id: 999 }) }, { loadConversation: async () => ({ id: 999, clinic_id: 123 }) }]) {
+    const f = fixture(overrides); await assert.rejects(f.client.send(input()), { code: 'whatsapp_authorized_message_ineligible' }); assert.equal(f.calls.length, 0);
+  }
+  for (const status of ['cancelled', 'failed']) {
+    let reads = 0; const f = fixture({ loadMessage: async () => ({ ...eligible, status: ++reads === 1 ? 'pending' : status }) });
+    await assert.rejects(f.client.send(input()), { code: 'whatsapp_authorized_message_ineligible' }); assert.equal(reads, 2); assert.equal(f.calls.length, 0);
+  }
+});
+test('public pre-mutation guard rejects failed and old rows before a worker can replace status', () => {
+  const f = fixture(); const eligible = { direction: 'outbound', status: 'pending', createdAt: '2026-09-15T00:00:00Z', metadata: {} };
+  assert.doesNotThrow(() => f.client.assertMessageEligible(eligible));
+  assert.throws(() => f.client.assertMessageEligible({ ...eligible, status: 'failed' }), { code: 'whatsapp_authorized_message_ineligible' });
+  assert.throws(() => f.client.assertMessageEligible({ ...eligible, createdAt: '2026-09-14T00:00:00Z' }), { code: 'whatsapp_authorized_message_ineligible' });
+  f.state.config = null; assert.doesNotThrow(() => f.client.assertMessageEligible({ ...eligible, status: 'failed' }));
+});
+test('the cutover is mandatory private configuration and cannot be supplied by a send caller', async () => {
+  const value = config(); delete value.messageNotBefore;
+  assert.throws(() => validateConfiguration(value), { code: 'whatsapp_authorized_configuration_invalid' });
+  for (const cutoff of ['invalid', null, 1, '2026-09-15']) assert.throws(() => validateConfiguration({ ...config(), messageNotBefore: cutoff }));
+  const f = fixture(); await assert.rejects(f.client.send({ ...input(), messageNotBefore: '2000-01-01T00:00:00Z' }), { code: 'whatsapp_authorized_request_invalid' });
+  assert.equal(f.calls.length, 0);
 });

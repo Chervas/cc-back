@@ -3064,6 +3064,7 @@ async function enqueueAutomationWhatsappTransport({
 
   // El snapshot y el id determinista se guardan antes de publicar el job. Asi
   // un worker rapido nunca puede ser pisado de sent a pending por el productor.
+  whatsappAuthorizedBroker.assertMessageEligible(msg);
   await msg.update({
     status: 'pending',
     metadata: {

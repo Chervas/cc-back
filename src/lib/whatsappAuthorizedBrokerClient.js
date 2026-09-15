@@ -29,6 +29,25 @@ function checkedBinding(value) {
   return Object.freeze(Object.fromEntries(BINDING_KEYS.map(key => [key, value[key]])));
 }
 const sameBinding = (a, b) => BINDING_KEYS.every(key => a[key] === b[key]);
+function assertMessageEligibility(message, messageNotBefore) {
+  const cutoff = Date.parse(messageNotBefore);
+  const created = new Date(message?.createdAt || message?.created_at || '').getTime();
+  if (!Number.isFinite(cutoff) || !Number.isFinite(created) || created < cutoff
+    || !['pending','sending'].includes(message?.status) || message.direction !== 'outbound') fail('whatsapp_authorized_message_ineligible');
+  const metadata = message.metadata == null ? {} : message.metadata;
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) fail('whatsapp_authorized_message_ineligible');
+  const present = value => value !== undefined && value !== null && value !== false && value !== '';
+  const blockedKeys = ['wamid','providerMessageId','provider_message_id','provider_acceptance_status','provider_acceptance_at',
+    'post_acceptance_error','post_acceptance_error_at','delivery_unknown','outcome_unknown','quarantine','quarantined',
+    'quarantined_at','quarantine_reason','security_quarantine','containment','hold','on_hold','cancelled','canceled','cancelled_at','canceled_at',
+    'sender_health_blocked'];
+  if (blockedKeys.some(key => present(metadata[key])) || present(metadata.wa_response)
+    || [metadata.error, metadata.status, metadata.delivery_status, metadata.outbound_retry?.reason]
+      .some(value => typeof value === 'string' && /quarantin|delivery_unknown|outcome_unknown|cancel|held|hold|provider_accepted|expired/i.test(value))) {
+    fail('whatsapp_authorized_message_ineligible');
+  }
+  return true;
+}
 function privateFile(file, max) {
   try {
     if (fs.realpathSync(file) !== file) throw Error();
@@ -38,7 +57,9 @@ function privateFile(file, max) {
   } catch { fail('whatsapp_authorized_configuration_invalid'); }
 }
 function validateConfiguration(value) {
-  if (!exact(value, ['version','origin','keyId','audience','privateKeyFile','caFile','bindings']) || value.version !== 1
+  if (!exact(value, ['version','origin','keyId','audience','privateKeyFile','caFile','bindings','messageNotBefore']) || value.version !== 1
+    || typeof value.messageNotBefore !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(value.messageNotBefore)
+    || !Number.isFinite(Date.parse(value.messageNotBefore))
     || typeof value.origin !== 'string' || typeof value.keyId !== 'string' || typeof value.audience !== 'string'
     || !/^[A-Za-z0-9_.:-]{1,128}$/.test(value.keyId) || !/^[A-Za-z0-9_.:-]{1,128}$/.test(value.audience)
     || value.privateKeyFile !== ROOT + '/private.pem' || value.caFile !== ROOT + '/ca.pem'
@@ -76,6 +97,8 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
   loadAsset = assetId => models().ClinicMetaAsset.findOne({ where: { id: assetId, assetType: 'whatsapp_phone_number' },
     attributes: ['id','clinicaId','grupoClinicaId','assignmentScope','assetType','phoneNumberId','wabaId','isActive'], raw: true }),
   loadClinic = clinicId => models().Clinica.findByPk(clinicId, { attributes: ['id_clinica','grupoClinicaId'], raw: true }),
+  loadMessage = messageId => models().Message.findByPk(messageId, { attributes: ['id','conversation_id','direction','status','createdAt','metadata'], raw: true }),
+  loadConversation = conversationId => models().Conversation.findByPk(conversationId, { attributes: ['id','clinic_id'], raw: true }),
   isBlocked = clinicId => require('../services/metaScopeBlock.service').blocked({ assignmentScope: 'clinic', clinicId }),
   createTransport = configuredTransport } = {}) {
   function read() {
@@ -107,7 +130,22 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       return value;
     } catch (error) { fail(PREFLIGHT_CODES.has(error?.code) ? error.code : 'whatsapp_authorized_binding_invalid'); }
   }
+  async function eligibleIntent(intent, config) {
+    try {
+      const message = await loadMessage(intent.messageId);
+      if (!message || String(message.id) !== intent.messageId || !id(Number(message.conversation_id))) fail('whatsapp_authorized_message_ineligible');
+      const conversation = await loadConversation(message.conversation_id);
+      if (!conversation || String(conversation.id) !== String(message.conversation_id) || Number(conversation.clinic_id) !== intent.clinicId) {
+        fail('whatsapp_authorized_message_ineligible');
+      }
+      assertMessageEligibility(message, config.messageNotBefore);
+    } catch { fail('whatsapp_authorized_message_ineligible'); }
+  }
   return Object.freeze({
+    assertMessageEligible(message) {
+      const config = read();
+      if (config) assertMessageEligibility(message, config.messageNotBefore);
+    },
     bindingsForClinic(clinicId) {
       if (!id(clinicId)) return [];
       return read()?.bindings.filter(b => b.clinicId === clinicId).map(b => ({ ...b })) || [];
@@ -138,10 +176,14 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       if (!captured || !sameBinding(captured, expected)) fail('whatsapp_authorized_binding_changed');
       if (!captured.sendEnabled) fail('whatsapp_authorized_send_paused');
       const config = read(); const transport = createTransport(config);
+      await eligibleIntent(intent, config);
       // Recheck durable scope/asset and private revision immediately before the
       // only network dispatch. There is no credential or legacy fallback.
       const beforeSend = await binding(intent.clinicId, intent.assetId);
       if (!beforeSend || !sameBinding(captured, beforeSend) || JSON.stringify(read()) !== JSON.stringify(config)) fail('whatsapp_authorized_binding_changed');
+      await eligibleIntent(intent, config);
+      if (await isBlocked(intent.clinicId) !== false) fail('whatsapp_authorized_scope_blocked');
+      if (JSON.stringify(read()) !== JSON.stringify(config)) fail('whatsapp_authorized_binding_changed');
       assertStaging(environment());
       let result;
       try {
@@ -165,5 +207,5 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
     },
   });
 }
-module.exports = { CONFIG_FILE, configuration, validateConfiguration, checkedBinding, createWhatsappAuthorizedBrokerClient,
+module.exports = { CONFIG_FILE, configuration, validateConfiguration, checkedBinding, assertMessageEligibility, createWhatsappAuthorizedBrokerClient,
   ...createWhatsappAuthorizedBrokerClient() };

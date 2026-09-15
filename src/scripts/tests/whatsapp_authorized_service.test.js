@@ -12,6 +12,7 @@ function fixture() {
   const state = { assets: [{ id: 456, assetType: 'whatsapp_phone_number', assignmentScope: 'clinic', clinicaId: 123, grupoClinicaId: null,
     phoneNumberId: '401', wabaId: '501', waAccessToken: null, isActive: false, additionalData: {} }], healthBlocked: false, optOut: false,
     config: { version: 1, origin: 'https://broker.example.invalid:8445', keyId: 'staging-whatsapp', audience: 'authorized-wa',
+      messageNotBefore: '2026-09-15T00:00:00Z',
       privateKeyFile: '/etc/clinicaclick-whatsapp-authorized/staging/private.pem', caFile: '/etc/clinicaclick-whatsapp-authorized/staging/ca.pem', bindings: [binding()] } };
   const calls = { graph: [], broker: [], health: [], optOut: [], failures: [], queries: [] };
   const match = (asset, where) => Reflect.ownKeys(where).every(key => {
@@ -28,6 +29,8 @@ function fixture() {
   const broker = createWhatsappAuthorizedBrokerClient({ environment: () => ({ RUNTIME_ROLE: 'api', JOB_RUNTIME_NAMESPACE: 'staging', QUEUE_PREFIX: 'staging', JOBS_WORKER_ENABLED: 'true' }),
     loadConfiguration: () => clone(state.config), loadAsset: async id => clone(state.assets.find(a => a.id === id)),
     loadClinic: async id => id === 123 ? { ...clinic } : null, isBlocked: async () => false,
+    loadMessage: async id => ({ id, conversation_id: 71, direction: 'outbound', status: 'pending', createdAt: '2026-09-15T00:01:00Z', metadata: {} }),
+    loadConversation: async id => ({ id, clinic_id: 123 }),
     createTransport: () => ({ execute: async command => { calls.broker.push(command); return { requestId: command.requestId, replayed: false,
       data: { messages: [{ id: 'wamid.SYNTHETIC_ACCEPTED', message_status: 'accepted' }] } }; } }) });
   const modules = { '../lib/metaQuarantineHttp': { post: async (...args) => { calls.graph.push(args); throw Object.assign(Error('meta_integration_quarantined'), { code: 'META_INTEGRATION_QUARANTINED' }); } },

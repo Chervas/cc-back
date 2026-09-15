@@ -834,6 +834,7 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
         return;
     }
 
+    whatsappAuthorizedBroker.assertMessageEligible(msg);
     msg.status = 'sending';
     await msg.save();
 
