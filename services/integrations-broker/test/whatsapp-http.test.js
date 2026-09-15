@@ -3,6 +3,18 @@ const test = require('node:test'); const assert = require('node:assert/strict');
 const { createWhatsappHttp } = require('../src/whatsapp-http'); const { SEND_TOKEN, APP_SECRET } = require('./whatsapp-fixture.cjs');
 const input = overrides => ({ action: 'send', id: '401', token: Buffer.from(SEND_TOKEN), proof: 'a'.repeat(64),
   json: { messaging_product: 'whatsapp', type: 'text', to: '34000000123', text: { body: 'QA' } }, ...overrides });
+test('Customer ownership transport uses a fixed WABA GET and only owner metadata', async () => {
+  const f = wire({ response: { id: '301', owner_business_info: { id: '201' } } });
+  const http = createWhatsappHttp({ request: f.request });
+  await http(input({ action: 'waba_owner', id: '301', json: undefined }));
+  const url = new URL('https://graph.facebook.com' + f.calls[0].options.path);
+  assert.equal(url.pathname, '/v24.0/301'); assert.equal(url.searchParams.get('fields'), 'id,owner_business_info');
+  assert.equal(f.calls[0].options.method, 'GET'); assert.equal(f.calls[0].body, undefined);
+  assert(!url.href.includes(SEND_TOKEN));
+  for (const change of [{ after: 'cursor' }, { json: {} }, { fields: 'access_token' }])
+    await assert.rejects(http(input({ action: 'waba_owner', id: '301', json: undefined, ...change })), { code: 'invalid_request' });
+  assert.equal(f.calls.length, 1);
+});
 test('phone-state transport requests only documented registration metadata with GET', async () => {
   const f = wire({ response: { id: '401', is_on_biz_app: true, platform_type: 'CLOUD_API' } });
   const http = createWhatsappHttp({ request: f.request });

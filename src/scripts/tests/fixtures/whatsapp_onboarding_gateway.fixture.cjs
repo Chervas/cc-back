@@ -1,9 +1,10 @@
 'use strict';
 const { fixture } = require('../../../../services/integrations-broker/test/whatsapp-onboarding-fixture.cjs');
 const { createWhatsappOnboardingBrokerClient } = require('../../../lib/whatsappOnboardingBrokerClient');
-function brokerForGateway(t) {
-  const f = fixture(t); const b = f.binding.whatsappOnboarding;
-  const metadata = { connectionRef: f.binding.connectionRef, ...Object.fromEntries(['scopeKey','clinicIds','appId','configId','redirectUri','scopes'].map(k => [k, b[k]])) };
+function brokerForGateway(t, options) {
+  const f = fixture(t, options); const b = f.binding.whatsappOnboarding;
+  const metadata = { connectionRef: f.binding.connectionRef, ...Object.fromEntries(['scopeKey','clinicIds','appId','configId','redirectUri','scopes'].map(k => [k, b[k]])),
+    ...(b.customer ? { customer: structuredClone(b.customer) } : {}) };
   const state = { calls: [], before: null, after: null, binding: metadata };
   const transport = { async execute(command) {
     state.calls.push(command.operation); await state.before?.(command);

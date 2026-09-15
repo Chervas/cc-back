@@ -10,6 +10,29 @@ function context(g) {
     clinicSetDigest: C.hash('[71,72]'), state: randomBytes(32).toString('base64url') };
 }
 const finish = row => ({ state: row.state, code: 'FICTITIOUS_GATEWAY_CODE_' + row.requestId, wabaId: '301', phoneId: '401' });
+test('Gateway accepts only the pinned business and WABAs in a completed group authorization', async t => {
+  const g = brokerForGateway(t, { customer: { businessId: '501', wabaIds: ['301','302'] } }); const row = context(g);
+  await g.client.begin(row); const result = await g.client.finish(row, finish(row));
+  assert.equal(result.connected, false); assert.equal(result.candidate.businessId, '501');
+  assert.deepEqual(result.candidate.grantedWabaIds, ['301','302']); g.f.restart();
+  assert.equal((await g.client.status(row)).status, 'staged');
+  for (const mutate of [v => { v.businessId = '999'; }, v => { v.grantedWabaIds.push('999'); },
+    v => { v.grantedWabaIds = ['302']; }, v => { v.grantedWabaIds.reverse(); }, v => { v.tokenType = 'USER'; },
+    v => { delete v.businessId; }, v => { v.grantedWabaIds = ['301','302','302']; }]) {
+    g.state.after = (cmd, value) => { mutate(value.data.candidate); return value; };
+    await assert.rejects(g.client.status(row), { code: 'whatsapp_onboarding_result_unknown' });
+  }
+  assert.equal(g.f.state.codes, 1); assert.equal(g.f.state.puts, 1);
+});
+test('Malformed customer bindings are rejected by gateway before any request', async t => {
+  const g = brokerForGateway(t); const row = context(g);
+  for (const customer of [null, {}, { businessId: '501', wabaIds: ['302','301'] },
+    { businessId: '501', wabaIds: ['301'], arbitrary: true }]) {
+    g.state.binding = { ...g.metadata, customer };
+    await assert.rejects(g.client.begin(row), { code: 'whatsapp_onboarding_binding_invalid' });
+  }
+  assert.equal(g.state.calls.length, 0);
+});
 test('Overlapping begin reports busy; the refused UUID can start after the older attempt is cancelled', async t => {
   const g = brokerForGateway(t); const older = context(g); const next = context(g);
   await g.client.begin(older);

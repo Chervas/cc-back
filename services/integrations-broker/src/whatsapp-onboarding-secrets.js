@@ -52,7 +52,8 @@ function createWhatsappOnboardingSecrets({ client, accountId, prefix, kmsKeyArn 
     let parsed; let token;
     try {
       parsed = JSON.parse(body.toString('utf8')); token = Buffer.from(parsed.accessToken || '');
-      const metadata = Object.fromEntries(['appId', 'subjectId', 'wabaId', 'phoneId', 'tokenType', 'scopes', 'expiresAt', 'dataAccessExpiresAt'].map(k => [k, parsed[k]]));
+      const metadata = Object.fromEntries(['appId', 'subjectId', 'wabaId', 'phoneId', 'tokenType', 'scopes', 'expiresAt', 'dataAccessExpiresAt',
+        ...(C.bindingFor(binding).customer ? ['businessId','grantedWabaIds'] : [])].map(k => [k, parsed[k]]));
       const encoded = envelope(binding, flow, metadata, token);
       try { if (!body.equals(encoded.body)) fail('secret_unavailable'); return encoded.metadata; } finally { encoded.body.fill(0); }
     } finally { token?.fill(0); if (parsed && typeof parsed === 'object') delete parsed.accessToken; }

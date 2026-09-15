@@ -5,7 +5,7 @@ const { BrokerStore } = require('../src/store'); const { Broker } = require('../
 const { createWhatsappOnboarding } = require('../src/whatsapp-onboarding'); const { createWhatsappOnboardingSecrets } = require('../src/whatsapp-onboarding-secrets');
 const { createWhatsappOAuthHttp } = require('../src/whatsapp-oauth-http'); const C = require('../src/whatsapp-onboarding-contract'); const { ACCOUNT, SECRET_KEY } = require('../src/google-main');
 const TOKEN = 'FICTITIOUS_ONBOARDING_TOKEN'; const APP = '0123456789abcdef'.repeat(2);
-function fixture(t) {
+function fixture(t, { customer, scopes } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-wa-onboarding-qa-')); fs.chmodSync(dir, 0o700);
   const filename = path.join(dir, 'state.sqlite'); const gateway = generateKeyPairSync('ed25519'); const control = generateKeyPairSync('ed25519');
   const prefix = `arn:aws:secretsmanager:eu-west-3:${ACCOUNT}:secret:/clinicaclick/integrations/prod/`;
@@ -14,6 +14,8 @@ function fixture(t) {
       appId: '101', configId: '102', redirectUri: 'https://app.example.invalid/whatsapp/callback', appVersionId: 'a'.repeat(32), slotVersionId: 's'.repeat(32),
       scopeKey: 'group:9', clinicIds: [71, 72], scopes: ['whatsapp_business_management', 'whatsapp_business_messaging'],
     } };
+  if (customer !== undefined) binding.whatsappOnboarding.customer = structuredClone(customer);
+  if (scopes !== undefined) binding.whatsappOnboarding.scopes = [...scopes];
   const principal = (id, keyId, key) => ({ id, keyId, enabled: true, maxPerMinute: 60, publicKey: key.publicKey.export({ type: 'spki', format: 'pem' }) });
   const grant = { connectionRef: binding.connectionRef, tenantRef: 'clinic:71', assetRef: 'wa-enroll:group:9' };
   const policy = { audience: 'broker:wa-onboarding-qa', version: 'wa-onboarding-qa-v1', maxBacklog: 100,
@@ -53,7 +55,9 @@ function fixture(t) {
     let response;
     if (request.action === 'inspect') response = { data: { app_id: '101', user_id: '201', type: 'SYSTEM_USER', is_valid: true,
       expires_at: 0, data_access_expires_at: 0, scopes: [...binding.whatsappOnboarding.scopes],
-      granular_scopes: binding.whatsappOnboarding.scopes.map(scope => ({ scope, target_ids: ['301'] })) } };
+      granular_scopes: binding.whatsappOnboarding.scopes.filter(scope => scope !== 'public_profile')
+        .map(scope => ({ scope, target_ids: [...(customer?.wabaIds || ['301'])] })) } };
+    else if (request.action === 'waba_owner') response = { id: request.id, owner_business_info: { id: customer.businessId } };
     else if (request.action === 'phone_state') response = { id: request.id, is_on_biz_app: true, platform_type: 'CLOUD_API' };
     else { assert.equal(request.action, 'phones'); assert.equal(request.id, '301'); response = { data: [{ id: '401' }] }; }
     return state.afterGraph ? state.afterGraph(request, response) : response;

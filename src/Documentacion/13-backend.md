@@ -116,6 +116,16 @@ ejecuta `meta.whatsapp.onboarding.scope.revoke.v1` con clave distinta.
 App/config/URI, versiones y ámbito se fijan en política privada. El registro
 no necesita MetaConnection general ni acepta grants de Ads/leads.
 
+El binding privado opcional `customer` fija negocio y cuentas WhatsApp permitidas.
+Un alta de grupo puede admitir varias cuentas si todas las concedidas prueban
+el mismo propietario en Meta y el actor tiene autorización sobre el conjunto
+completo de clínicas. Se reservan todas atómicamente; negocio y lista concedida
+quedan solo en metadata privada de la candidata. El DTO público no amplía su
+inventario y el número no se convierte automáticamente en primario. Los bindings
+sin ese campo conservan el límite anterior de un único WABA. Configuración,
+validación y rollback en el
+[contrato por negocio](https://github.com/Chervas/cc-back/blob/dev/docs/security/whatsapp-onboarding-broker.md#autorización-por-negocio-de-meta).
+
 UUID de begin identifica el flujo; finish fija estado/código/WABA/selección de
 número. La selección nullable original se conserva separada del número resuelto,
 para que reintentos o reinicios no cambien la identidad de la solicitud. La

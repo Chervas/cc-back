@@ -3,6 +3,7 @@ const { createHmac } = require('node:crypto'); const C = require('./whatsapp-onb
 const { BrokerError, fail } = require('./errors'); const { eventFor } = require('./audit');
 const { createWhatsappOAuthHttp } = require('./whatsapp-oauth-http');
 const { verifyWhatsappGrant } = require('./whatsapp-credential-inspector'); const { createWhatsappPhoneVerifier, inspectWhatsappPhoneState } = require('./whatsapp-phone-verifier');
+const { inspectCustomerGrant, createWhatsappCustomerVerifier } = require('./whatsapp-customer-verifier');
 function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactory = options => createWhatsappOAuthHttp(options), now = () => Date.now() }) {
   policy = structuredClone(policy);
   const running = new Map(); let closed = false;
@@ -50,6 +51,13 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
     return { waba, phone };
   }
   function reserveAsset(row, metadata) {
+    // A customer token covers every granted WABA, not only the selected phone.
+    // Reserve all of them under the authorized group in the same transaction.
+    for (const wabaId of metadata.grantedWabaIds || []) {
+      const { waba } = knownAssets(row, { wabaId, phoneId: null });
+      if (!waba) store.db.prepare('INSERT INTO whatsapp_onboarding_wabas VALUES (?,?,?,?,?,?,?,?)')
+        .run(wabaId, row.connection, row.tenant, row.asset, row.scope_digest, row.clinic_digest, row.id, now());
+    }
     const { waba, phone } = knownAssets(row, metadata);
     if (!waba) store.db.prepare('INSERT INTO whatsapp_onboarding_wabas VALUES (?,?,?,?,?,?,?,?)')
       .run(metadata.wabaId, row.connection, row.tenant, row.asset, row.scope_digest, row.clinic_digest, row.id, now());
@@ -57,6 +65,7 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
       .run(metadata.wabaId, metadata.phoneId, row.connection, row.tenant, row.asset, row.scope_digest, row.clinic_digest, row.id, now());
   }
   function checkReserved(row, metadata) {
+    for (const wabaId of metadata.grantedWabaIds || []) if (!knownAssets(row, { wabaId, phoneId: null }).waba) fail('scope_denied');
     const { waba, phone: a } = knownAssets(row, metadata); if (!waba) fail('scope_denied');
     if (!a || a.phone_id !== metadata.phoneId || a.connection !== row.connection || a.tenant !== row.tenant || a.asset !== row.asset
       || a.scope_digest !== row.scope_digest || a.clinic_digest !== row.clinic_digest) fail('scope_denied');
@@ -141,6 +150,7 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
       if (row.state !== 'awaiting') fail('oauth_flow_busy');
       // Reject already-owned foreign assets before exchanging a code. Unknown
       // assets are reserved only after provider identity and membership proof.
+      if (b.customer && !b.customer.wabaIds.includes(request.payload.wabaId)) fail('scope_denied');
       knownAssets(row, { wabaId: request.payload.wabaId, phoneId: request.payload.phoneId });
       if (store.db.prepare('SELECT 1 FROM whatsapp_onboarding_flows WHERE code_digest=? LIMIT 1').get(C.hash(request.payload.code))) fail('idempotency_conflict');
       for (const [window, max] of [[3600000, 6], [86400000, 80]]) if (store.db.prepare('SELECT COUNT(*) AS n FROM whatsapp_onboarding_flows WHERE connection=? AND code_digest IS NOT NULL AND created_at>?')
@@ -170,7 +180,18 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
           attempt.grantDiagnostics = require('./whatsapp-grant-diagnostics').grantDiagnostics(raw,
             { appId: b.appId, wabaId: row.waba_id, exchangeExpiresAt: info.expiresAt }, now());
           if (!C.id(raw?.data?.user_id)) fail('oauth_credentials_incomplete');
-          const grant = verifyWhatsappGrant(raw, { appId: b.appId, subjectId: raw.data.user_id, wabaId: row.waba_id, scopes: b.scopes }, now());
+          let grant;
+          if (b.customer) {
+            const expected = { appId: b.appId, selectedWabaId: row.waba_id, scopes: b.scopes, ...b.customer };
+            const preview = inspectCustomerGrant(raw, expected, now());
+            // Do not read assets already reserved for another authorized scope.
+            for (const wabaId of preview.wabaIds) knownAssets(row, { wabaId, phoneId: null });
+            attempt.phase = 'customer_ownership';
+            const verified = await createWhatsappCustomerVerifier({ http, now })({ response: raw, expected, token,
+              proof: createHmac('sha256', appSecret).update(token).digest('hex'), signal: info.signal });
+            guard(); const { observedAt, wabaIds, ...identity } = verified;
+            grant = { ...identity, wabaId: row.waba_id, grantedWabaIds: wabaIds };
+          } else grant = verifyWhatsappGrant(raw, { appId: b.appId, subjectId: raw.data.user_id, wabaId: row.waba_id, scopes: b.scopes }, now());
           if (info.expiresAt !== null && (grant.expiresAt === null || grant.expiresAt > info.expiresAt)) fail('oauth_credentials_incomplete');
           attempt.phase = 'phone_membership';
           const phone = await createWhatsappPhoneVerifier({ http })({ wabaId: row.waba_id, phoneId: row.phone_id, token,

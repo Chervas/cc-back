@@ -36,6 +36,53 @@ acotada. Solo se aceptan `whatsapp_business_management` y
 `whatsapp_business_messaging`, más `public_profile` si está configurado.
 Ads, leads, páginas, Instagram y `business_management` se rechazan.
 
+### Autorización por negocio de Meta
+
+El binding opcional `customer: {businessId, wabaIds}` permite dar de alta un
+negocio con varias cuentas WhatsApp. Los IDs proceden de configuración privada
+revisada: `wabaIds` ordenados, únicos y como máximo 64. Un ámbito de clínica
+individual solo admite una cuenta; para varias se exige un ámbito de grupo con
+el conjunto completo de clínicas autorizado mediante MFA. Sin `customer` sigue
+vigente la comprobación de un único WABA, con el mismo fingerprint anterior.
+
+El número elegido debe pertenecer a una cuenta de esa lista antes de canjear
+el código. Después se exige un SYSTEM_USER de la aplicación, los permisos
+exactos y el WABA seleccionado en ambos permisos WhatsApp. Cada destino
+granular debe estar en la lista aprobada. Se consulta cada cuenta concedida,
+también las no seleccionadas, mediante GET de `id,owner_business_info`; todos
+los propietarios deben coincidir con `businessId`. No se admite una relación
+`on_behalf_of` como prueba de propiedad ni se enumeran portfolios.
+
+La candidata conserva internamente `businessId` y `grantedWabaIds`, dentro del
+envelope protegido por versión/hash. Todas las cuentas concedidas se reservan
+en la misma transacción; un conflicto sobre cualquiera revierte el conjunto
+y evita el Put. La conciliación comprueba esas reservas completas. Un cambio
+de negocio, cuentas permitidas o clínicas invalida el intento anterior.
+La API pública sigue mostrando solo el número seleccionado, no el inventario
+completo del negocio ni la credencial. El alta no asigna un número primario.
+
+`whatsapp_business_manage_events` continúa rechazado, también con `customer`.
+La gestión de plantillas ordinarias ya pertenece a
+`whatsapp_business_management`. Para una configuración nueva de Embedded Signup,
+seleccionar solo WhatsApp Cloud API; no añadir productos de anuncios o
+Conversions API para resolver un rechazo de permisos. Fuentes:
+[business tokens](https://developers.facebook.com/documentation/business-messaging/whatsapp/access-tokens/),
+[propiedad WABA](https://www.postman.com/meta/whatsapp-business-platform/request/nem6vuw/waba-id),
+[productos del alta](https://developers.facebook.com/documentation/business-messaging/whatsapp/embedded-signup/version-4/).
+
+Antes del corte: instalar código compatible conservando los bindings existentes,
+aprovisionar el slot del ámbito completo, fijar el nuevo Config ID y las mismas
+listas en gateway/broker, y comprobar permisos y membresías. No convertir un
+slot de clínica en uno de grupo modificando solo su nombre: el placeholder,
+la política y los hashes fijan el ámbito. El inventario histórico ayuda a
+preparar la lista, pero la propiedad se prueba de nuevo en Meta durante el alta.
+
+Rollback: cerrar nuevas altas del negocio y conservar versiones, SQLite y
+auditoría; no restaurar una BD anterior ni eliminar reservas. Si se vuelve al
+binario anterior, restaurar también su configuración sin bindings `customer`;
+esos intentos quedan fuera de servicio hasta recuperar código compatible.
+Este cambio de contrato no acredita instalación ni uso operativo: ver 19/99.
+
 Para la finalización de coexistencia que solo identifica WABA, el número puede
 ser null en la solicitud. Se resuelve únicamente si el edge completo contiene un
 número; con varios se rechaza. La selección original y la observación de
@@ -119,7 +166,8 @@ No hay limpieza automática ni autorización para borrar evidencia. Capacidad,
 retención de candidatas y precio real deben conciliarse antes de operar.
 
 Coste técnico: lecturas de metadatos/versiones, un Put por candidata y llamadas
-Meta de canje, diagnóstico y pertenencia. Begin y cancelación son locales;
+Meta de canje, diagnóstico y pertenencia; el alta por negocio añade una lectura
+por cuenta concedida. Begin y cancelación son locales;
 la recuperación incierta añade lecturas. Este corte no crea gasto AWS real ni
 modifica Ajustes, Cost Explorer, etiquetas o la conciliación Budget/CloudFormation.
 

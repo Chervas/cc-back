@@ -57,15 +57,19 @@ Se registran conjuntamente para diagnosticar discrepancias simultáneas;
 no relajan los criterios del inspector ni se exponen al navegador.
 La multiplicidad por sí sola no demuestra acceso a otros clientes: Meta describe
 los [business tokens](https://developers.facebook.com/documentation/business-messaging/whatsapp/access-tokens/#business-integration-system-user-access-tokens)
-por cliente incorporado, que puede tener varios activos. Sigue pendiente probar
-su pertenencia y definir ese alcance en el broker antes de aceptar un token
-con varios WABA. El piloto vigente conserva el requisito de un único WABA.
+por cliente incorporado, que puede tener varios activos. El
+[contrato por negocio](whatsapp-onboarding-broker.md#autorización-por-negocio-de-meta)
+comprueba cada propietario contra una política explícita. Sin ese binding se
+conserva el requisito de un único WABA; la instalación vigente se consulta en 19.
 Las fases proceden del código, nunca de mensajes del proveedor. No se conservan
 respuestas crudas para diagnosticar; un intento interrumpido no vuelve a canjear
 su código y requiere una nueva autorización humana después de corregir el fallo.
 
 El resultado externo del helper solo admite App ID, sujeto, WABA, número, tipo
-de token, scopes WhatsApp/public_profile y expiraciones. Rechaza campos extra,
+de token, scopes WhatsApp/public_profile y expiraciones. Para la verificación
+por negocio admite además el par `businessId`/`grantedWabaIds`, con IDs válidos,
+lista acotada, ordenada, única y que incluye el WABA seleccionado. Ambos campos
+deben aparecer juntos y el tipo debe ser SYSTEM_USER. Rechaza campos extra,
 Ads/leads/business_management, ampliación de caducidad, secretos en valores y
 errores crudos del callback. El callback debe **verificar** identidad, permisos
 y pertenencia antes de devolver esa metadata; el formato por sí solo no prueba

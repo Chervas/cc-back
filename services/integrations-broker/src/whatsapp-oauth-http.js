@@ -8,12 +8,17 @@ const { GRAPH_VERSION } = require('./whatsapp-contract');
 const id = v => typeof v === 'string' && /^[1-9][0-9]{0,29}$/.test(v);
 const exact = (v, keys) => v && Object.getPrototypeOf(v) === Object.prototype && Object.keys(v).sort().join(',') === [...keys].sort().join(',');
 function metadata(v, appId) {
-  if (!exact(v, ['appId', 'subjectId', 'wabaId', 'phoneId', 'tokenType', 'scopes', 'expiresAt', 'dataAccessExpiresAt'])
+  const customer = Object.hasOwn(v || {}, 'businessId') || Object.hasOwn(v || {}, 'grantedWabaIds');
+  if (!exact(v, ['appId', 'subjectId', 'wabaId', 'phoneId', 'tokenType', 'scopes', 'expiresAt', 'dataAccessExpiresAt',
+    ...(customer ? ['businessId','grantedWabaIds'] : [])])
     || v.appId !== appId || ![v.subjectId, v.wabaId, v.phoneId].every(id) || !['USER', 'SYSTEM_USER'].includes(v.tokenType)
     || !Array.isArray(v.scopes) || !v.scopes.length || v.scopes.length > 3 || new Set(v.scopes).size !== v.scopes.length
     || v.scopes.some(s => !['whatsapp_business_messaging', 'whatsapp_business_management', 'public_profile'].includes(s))
     || !v.scopes.some(s => s !== 'public_profile')
     || ![v.expiresAt, v.dataAccessExpiresAt].every(t => t === null || Number.isSafeInteger(t) && t > 0)) fail('oauth_credentials_incomplete');
+  if (customer && (!id(v.businessId) || v.tokenType !== 'SYSTEM_USER'
+    || !Array.isArray(v.grantedWabaIds) || !v.grantedWabaIds.length || v.grantedWabaIds.length > 64
+    || !v.grantedWabaIds.includes(v.wabaId) || v.grantedWabaIds.some((value, i, all) => !id(value) || i > 0 && value <= all[i - 1]))) fail('oauth_credentials_incomplete');
   return structuredClone(v);
 }
 function createWhatsappOAuthHttp({ appId, redirectUri, request = https.request, timeoutMs = 8000, now = () => Date.now() }) {

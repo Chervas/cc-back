@@ -27,8 +27,9 @@ test('Onboarding runtime rejects DEV/staging keys, mixed operations/scopes/slots
     await assert.rejects(runtime.main(file, { awsFactory: async () => { aws++; throw Error('FORBIDDEN_REAL_AWS'); } }), { code: 'invalid_request' }); }
   assert.equal(aws, 0);
 });
-test('Actual TLS broker exposes authenticated candidate flow only, survives restart and preserves cancellation/audit', async t => {
-  const f = fixture(t); const c = config(f);
+for (const customer of [undefined, { businessId: '501', wabaIds: ['301','302'] }])
+test('Actual TLS broker exposes authenticated candidate flow only, survives restart and preserves cancellation/audit: ' + (customer ? 'business' : 'single WABA'), async t => {
+  const f = fixture(t, { customer }); const c = config(f);
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', c.tlsKeyFile, '-out', c.tlsCertFile,
     '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1'], { stdio: 'ignore' });
   fs.chmodSync(c.tlsKeyFile, 0o600); fs.chmodSync(c.tlsCertFile, 0o600);
@@ -46,6 +47,7 @@ test('Actual TLS broker exposes authenticated candidate flow only, survives rest
   assert.equal((await caller.execute(begin)).data.status, 'awaiting');
   const finish = { requestId: randomUUID(), ...scope, operation: C.OPERATIONS.finish, payload: { flowId: id, state, code: 'FICTITIOUS_TLS_WA_CODE', wabaId: '301', phoneId: '401' } };
   const result = await caller.execute(finish); assert.equal(result.data.status, 'staged'); assert.equal(result.data.connected, false);
+  if (customer) { assert.equal(result.data.candidate.businessId, '501'); assert.deepEqual(result.data.candidate.grantedWabaIds, ['301','302']); }
   for (const value of [TOKEN, APP, state, finish.payload.code]) assert(!JSON.stringify(result).includes(value));
   await assert.rejects(caller.execute({ ...finish, requestId: randomUUID(), operation: 'meta.whatsapp.text.send.v1', payload: {} }));
   assert.equal(f.state.codes, 1); assert.equal(f.state.puts, 1); await app.close(); app = await start();

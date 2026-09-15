@@ -102,6 +102,18 @@ test('Metadata projection rejects token leakage, foreign app, extra scopes and e
     token.fill(0); return { ...metadata(), phoneId: numeric };
   }), { code: 'provider_failed' });
 });
+test('Business metadata crosses the token callback only as a bounded exact identifier envelope', async () => {
+  const valid = { ...metadata(), businessId: '501', grantedWabaIds: ['301','302'] };
+  assert.deepEqual(await transport(wire()).withExchangedToken(input(), () => valid), valid);
+  for (const change of [{ businessId: TOKEN }, { grantedWabaIds: [TOKEN] }, { grantedWabaIds: ['302'] },
+    { grantedWabaIds: ['302','301'] }, { grantedWabaIds: ['301','301'] }, { businessId: undefined },
+    { grantedWabaIds: undefined }, { tokenType: 'USER' }, { customerToken: TOKEN }]) {
+    let held;
+    await assert.rejects(transport(wire()).withExchangedToken(input(), token => { held = token; return { ...valid, ...change }; }),
+      e => e.code === 'oauth_credentials_incomplete' && !e.stack.includes(TOKEN));
+    assert(held.every(b => b === 0));
+  }
+});
 test('Abort before/during exchange and during borrowed-token callback stops waiting and erases token without retry', async () => {
   const f = wire({ hold: true }); const controller = new AbortController();
   const work = transport(f).withExchangedToken({ ...input(), signal: controller.signal }, metadata); controller.abort();
